@@ -1610,9 +1610,10 @@ namespace {
     }
 
     // acquire_slot (docs/reshade-sbs.md, GPU handoff contract): free slots
-    // first, then the oldest ready slot that is not the ring's newest
-    // unconsumed frame; a still queued write is reusable only by a direct pack
-    // over a direct pack. CPU only: the slot words are set directly.
+    // first, then the oldest completed ready slot that is not the ring's
+    // newest unconsumed frame; a still queued write is reusable only in a free
+    // slot, by a direct pack over a direct pack. CPU only: the slot words are
+    // set directly.
     static void slot_policy() {
       publisher_t publisher;
       require(publisher.init(), "mapping creation failed");
@@ -1637,12 +1638,14 @@ namespace {
       require(publisher.acquire_slot(8, true) == wire::slot_count, "the ring's newest unconsumed frame was overwritten");
       set({{{s::reading, 9}, {s::ready, 8}, {s::reading, 7}}});
       require(publisher.acquire_slot(9) == 1, "a ready frame older than the consumer's was kept");
-      // Writes 10 and 11 still queued (completed 9): only a direct pack over a
-      // direct pack may take the older one; the newest stays.
+      // Writes 10 and 11 still queued (completed 9): 10 is the frame the
+      // consumer claims next once its fence passes, so even a direct pack
+      // drops the Present rather than write over it.
       set({{{s::reading, 9}, {s::ready, 10}, {s::ready, 11}}});
       require(publisher.acquire_slot(9) == wire::slot_count, "a queued write was reused by a copy");
-      require(publisher.acquire_slot(9, true, &overwrote) == 1 && overwrote, "a direct pack could not reuse a queued direct pack");
-      set({{{s::reading, 9}, {s::ready, 10}, {s::ready, 11}}});
+      require(publisher.acquire_slot(9, true) == wire::slot_count, "a direct pack overwrote the consumer's next frame while queued");
+      require(publisher.acquire_slot(10, true, &overwrote) == 1 && overwrote, "a completed ready frame older than the newest was kept");
+      set({{{s::reading, 9}, {s::free, 12}, {s::ready, 11}}});
       com_ptr<IDXGIFactory1> retained;
       require(SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(retained.put()))), "COM fixture object unavailable");
       retained->AddRef();
@@ -1656,7 +1659,84 @@ namespace {
       set({{{s::free, 0}, {s::free, 0}, {s::free, 0}}});
       for (auto &slot : slots) store_state(slot, generation.id + 1, s::free);
       require(publisher.acquire_slot(0, true) == wire::slot_count, "another generation's slot was claimed");
-      std::puts("PASS export slot policy: free first, oldest ready, newest unconsumed kept, queued writes only for direct packs");
+      std::puts("PASS export slot policy: free first, oldest completed ready, newest unconsumed kept, queued writes only in free slots for direct packs");
+    }
+
+    // A GPU-bound game: each export's fence completes lag Presents after its
+    // Present, on the direct path. The consumer follows the host's rule
+    // (reshade_bridge.cpp poll_frame): the newest ready slot past its held
+    // frame whose fence passed, then its held slot retires (retire_delay polls
+    // later). Its held frame must keep advancing, at most every lag + 2
+    // Presents; a pack over a queued ready frame would starve it.
+    static void lagging_fence_handoff() {
+      using s = wire::slot_state;
+      for (std::uint32_t lag = 0; lag <= 3; ++lag) for (std::uint32_t retire_delay = 0; retire_delay <= 1; ++retire_delay) {
+        publisher_t publisher;
+        require(publisher.init(), "mapping creation failed");
+        publisher.generation_ = std::make_unique<generation_t>();
+        auto &generation = *publisher.generation_;
+        generation.id = 3;
+        auto &slots = publisher.shared_->slots;
+        for (auto &slot : slots) {
+          store_state(slot, generation.id, s::free);
+          slot.sequence = 0;
+        }
+        std::vector<std::uint64_t> published(1, 0); // Sequence published at each Present (0: dropped).
+        const auto fence = [&](std::uint32_t present) {
+          std::uint64_t value = 0;
+          for (std::uint32_t q = 1; q < published.size() && q + lag <= present; ++q) value = std::max(value, published[q]);
+          return value;
+        };
+        std::uint64_t sequence = 0, held_sequence = 0;
+        int held = -1, retiring = -1;
+        std::uint32_t retire_at = 0, last_claim = 0, claims = 0;
+        constexpr std::uint32_t presents = 64;
+        for (std::uint32_t present = 1; present <= presents; ++present) {
+          const auto index = publisher.acquire_slot(fence(present - 1), true);
+          published.push_back(0);
+          if (index != wire::slot_count) {
+            slots[index].sequence = published.back() = ++sequence;
+            store_state(slots[index], generation.id, s::ready);
+          }
+          const auto completed = fence(present);
+          if (retiring >= 0 && present >= retire_at) {
+            store_state(slots[retiring], generation.id, s::free);
+            retiring = -1;
+          }
+          int selected = -1;
+          std::uint64_t newest = held_sequence;
+          for (std::uint32_t i = 0; i < wire::slot_count; ++i) {
+            if (static_cast<int>(i) == held || wire::control_state(slots[i].control) != s::ready) continue;
+            if (slots[i].sequence > newest && slots[i].sequence <= completed) {
+              selected = static_cast<int>(i);
+              newest = slots[i].sequence;
+            }
+          }
+          if (selected >= 0) {
+            store_state(slots[selected], generation.id, s::reading);
+            if (held >= 0) {
+              if (retiring >= 0) store_state(slots[retiring], generation.id, s::free);
+              retiring = held;
+              retire_at = present + retire_delay;
+              if (!retire_delay) {
+                store_state(slots[retiring], generation.id, s::free);
+                retiring = -1;
+              }
+            }
+            held = selected;
+            held_sequence = newest;
+            ++claims;
+            if (last_claim)
+              require(present - last_claim <= lag + 2, ("the consumer's held frame stalled at fence lag " + std::to_string(lag)).c_str());
+            last_claim = present;
+          }
+        }
+        require(last_claim && presents - last_claim <= lag + 2 && claims >= presents / (lag + 2),
+          ("the consumer stopped receiving frames at fence lag " + std::to_string(lag)).c_str());
+        std::printf("MEASURE lagging fence lag=%u retire_delay=%u published=%llu claimed=%u\n", lag, retire_delay,
+          static_cast<unsigned long long>(sequence), claims);
+      }
+      std::puts("PASS lagging fence: the consumer's held frame keeps advancing; queued ready frames are never overwritten");
     }
 
     // The export's publication in reshade_present (present()), before the
@@ -1990,6 +2070,7 @@ int main(int argc, char **argv) {
     publisher_tests::d3d12_deferred_signal(false);
     publisher_tests::d3d12_deferred_signal(true);
     publisher_tests::slot_policy();
+    publisher_tests::lagging_fence_handoff();
     publisher_tests::present_signal(true);
     publisher_tests::present_signal(false);
     publisher_tests::idle_ring_release();

@@ -1305,7 +1305,7 @@ namespace {
         } else {
           generation_->owner_destroyed |= destroy;
           if (generation_->finished()) {
-            generation_.reset();
+            release_ring(generation_);
           } else if (destroy) {
             retire_destroyed_generation();
           }
@@ -1334,12 +1334,12 @@ namespace {
       }
       if (generation_ && generation_->native_swapchain == native_swapchain && !generation_->runtime) {
         generation_->owner_destroyed = true;
-        if (generation_->finished()) generation_.reset();
+        if (generation_->finished()) release_ring(generation_);
         else retire_destroyed_generation();
       }
       if (cached_ring_ && cached_ring_->native_swapchain == native_swapchain) {
         cached_ring_->owner_destroyed = true;
-        if (cached_ring_->finished()) cached_ring_.reset();
+        if (cached_ring_->finished()) release_ring(cached_ring_);
       }
     }
 
@@ -2040,8 +2040,12 @@ namespace {
       const bool direct = renderer && !overlay_open(runtime) && !dump;
       bool overwrote = false;
       const auto index = acquire_slot(completed, direct, &overwrote);
-      if (index == wire::slot_count) ++proof.output.dropped;
-      else if (overwrote) ++proof.output.overwritten_unconsumed;
+      if (index == wire::slot_count) {
+        // Logged here too (rate limited), so a ring that drops every Present
+        // still reports it with published frozen.
+        ++proof.output.dropped;
+        log_output(runtime, proof, GetTickCount64());
+      } else if (overwrote) ++proof.output.overwritten_unconsumed;
       if (index != wire::slot_count) {
         auto &slot = shared_->slots[index];
         // A nonce replacement races only on metadata. Do not issue new old-generation work.
@@ -2125,15 +2129,17 @@ namespace {
     }
 
     // Claims a slot for this Present's export (docs/reshade-sbs.md, GPU handoff
-    // contract): a free slot first, else the oldest ready slot, never the
-    // ring's newest unconsumed frame (a ready slot whose sequence is the
-    // highest of the ready and reading slots), which the consumer would claim
-    // next. A slot is reusable once its previous GPU write completed; a direct
-    // pack (direct) may also reuse a slot whose previous write was a direct
-    // pack still queued (no retained source or overlay), since the new pack is
-    // recorded after it on the same queue. A consumer may discard a frame
-    // without reading it, so even a free slot retains its source and overlay
-    // until that write completes. overwrote: a ready slot was claimed.
+    // contract): a free slot first, else the oldest ready slot whose write
+    // completed, never the ring's newest unconsumed frame (a ready slot whose
+    // sequence is the highest of the ready and reading slots). A slot is
+    // reusable once its previous GPU write completed. A direct pack (direct)
+    // may also reuse a free slot whose previous write was a direct pack still
+    // queued (no retained source or overlay), since the new pack is recorded
+    // after it on the same queue; a ready slot never: the consumer claims a
+    // ready frame once its fence passes, so a queued one is the frame it
+    // claims next. A consumer may discard a frame without reading it, so even
+    // a free slot retains its source and overlay until that write completes.
+    // overwrote: a ready slot was claimed.
     std::uint32_t acquire_slot(std::uint64_t completed, bool direct = false, bool *overwrote = nullptr) {
       if (overwrote) *overwrote = false;
       // A recorded copy must be fenced before admitting the next. Submitted
@@ -2152,23 +2158,23 @@ namespace {
         if (current[index] && (states[index] == wire::slot_state::ready || states[index] == wire::slot_state::reading))
           newest = std::max(newest, shared_->slots[index].sequence);
       }
-      const auto reusable = [&](std::uint32_t index) {
-        return current[index] && (completed >= shared_->slots[index].sequence ||
-          (direct && !generation_->submitted_sources[index]));
+      const auto written = [&](std::uint32_t index) {
+        return current[index] && completed >= shared_->slots[index].sequence;
       };
       for (std::uint32_t offset = 0; offset < wire::slot_count; ++offset) {
         const auto index = (next_slot_ + offset) % wire::slot_count;
-        if (states[index] == wire::slot_state::free && reusable(index) &&
+        if (states[index] == wire::slot_state::free && current[index] &&
+            (written(index) || (direct && !generation_->submitted_sources[index])) &&
             exchange_state(shared_->slots[index], id, wire::slot_state::writing, wire::slot_state::free)) return index;
       }
-      // Ready slots oldest first; a claim the consumer won meanwhile moves on.
+      // Completed ready slots oldest first; a claim the consumer won meanwhile moves on.
       std::array<std::uint32_t, wire::slot_count> order{};
       for (std::uint32_t index = 0; index < wire::slot_count; ++index) order[index] = index;
       std::sort(order.begin(), order.end(), [&](std::uint32_t a, std::uint32_t b) {
         return shared_->slots[a].sequence < shared_->slots[b].sequence;
       });
       for (const auto index : order) {
-        if (states[index] != wire::slot_state::ready || !reusable(index) || shared_->slots[index].sequence >= newest) continue;
+        if (states[index] != wire::slot_state::ready || !written(index) || shared_->slots[index].sequence >= newest) continue;
         if (exchange_state(shared_->slots[index], id, wire::slot_state::writing, wire::slot_state::ready)) {
           if (overwrote) *overwrote = true;
           return index;
@@ -2215,13 +2221,13 @@ namespace {
 
     void retire_destroyed_generation() {
       if (retired_ && retired_->finished()) {
-        retired_.reset();
+        release_ring(retired_);
       }
       if (!generation_ || !generation_->owner_destroyed) {
         return;
       }
       if (generation_->finished()) {
-        generation_.reset();
+        release_ring(generation_);
         return;
       }
       if (!retired_) {
@@ -2311,9 +2317,26 @@ namespace {
           generation_->inactive_since != std::chrono::steady_clock::time_point{} &&
           now - generation_->inactive_since >= export_ring_idle) {
         log(reshade::log::level::info, "Sunshine SBS: released the idle export ring");
-        generation_.reset();
+        release_ring(generation_);
       }
-      if (cached_ring_ && cached_ring_->finished() && now - cached_ring_since_ >= cached_ring_idle) cached_ring_.reset();
+      if (cached_ring_ && cached_ring_->finished() && now - cached_ring_since_ >= cached_ring_idle) release_ring(cached_ring_);
+    }
+
+    // Releases a ring that no pack follows. Renderers cache render-target
+    // views of the slots they pack into (renderer::pack) and drop them only
+    // at their next pack; a D3D11 view holds its texture, so they are dropped
+    // here first or the slots' VRAM would stay allocated.
+    void release_ring(std::unique_ptr<generation_t> &ring) {
+      if (!ring) return;
+      for (std::uint32_t index = 0; index < wire::slot_count; ++index) {
+        const auto texture = ring->texture(index);
+        if (!texture.handle) continue;
+        for (auto &entry : runtimes_)
+          if (entry.second.renderer) entry.second.renderer->release_export_view(texture);
+        for (auto &parked : parked_)
+          if (parked.renderer) parked.renderer->release_export_view(texture);
+      }
+      ring.reset();
     }
 
     void complete_slot(std::uint32_t index, std::uint64_t qpc) {

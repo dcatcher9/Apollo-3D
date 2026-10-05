@@ -173,6 +173,47 @@ namespace {
       ++index;
     }
     std::puts("PASS D3D11 owed conditioning: every parity frame packs the same bytes with its conditioning owed to pack(); mono frames record none");
+    {
+      // A released export ring (the exporter's release_ring) first drops the
+      // renderer's cached view of each slot: a D3D11 view holds its texture,
+      // so the slot's VRAM would otherwise stay allocated.
+      com_ptr<ID3D11Texture2D> output;
+      checked(reinterpret_cast<ID3D11Resource *>(renderer.output().handle)->QueryInterface(IID_PPV_ARGS(output.put())),
+        "D3D11 native export is not a texture");
+      D3D11_TEXTURE2D_DESC slot_desc {};
+      output->GetDesc(&slot_desc);
+      slot_desc.Usage = D3D11_USAGE_DEFAULT;
+      slot_desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+      slot_desc.CPUAccessFlags = slot_desc.MiscFlags = 0;
+      com_ptr<ID3D11Texture2D> slot;
+      checked(fixture.device->CreateTexture2D(&slot_desc, nullptr, slot.put()), "Create D3D11 export slot");
+      bool destroyed = false;
+      {
+        com_ptr<ID3DDestructionNotifier> notifier;
+        checked(slot.p->QueryInterface(IID_PPV_ARGS(notifier.put())), "D3D11 slot has no destruction notifier");
+        UINT callback = 0;
+        checked(notifier.p->RegisterDestructionCallback([](void *flag) { *static_cast<bool *>(flag) = true; }, &destroyed, &callback),
+          "Register the D3D11 slot destruction callback");
+      }
+      const api::resource target{reinterpret_cast<std::uint64_t>(slot.p)};
+      renderer.begin_present();
+      fixture.context->CopyResource(fixture.backbuffer.p, fixture.source_pattern.p);
+      sunshine_game3d::render_frame_input frame;
+      frame.color = backbuffer;
+      frame.depth = observed.depth_view;
+      frame.scene = p;
+      auto *commands = queue->get_immediate_command_list();
+      require(renderer.render(commands, frame, true) && renderer.pack(commands, target, 7), "D3D11 renderer rejected a slot pack");
+      queue->flush_immediate_command_list(); renderer.finish_present();
+      queue->wait_idle();
+      slot.reset();
+      fixture.context->Flush(); queue->wait_idle();
+      require(!destroyed, "The cached export view did not hold its D3D11 slot");
+      renderer.release_export_view(target);
+      fixture.context->Flush(); queue->wait_idle();
+      require(destroyed, "A released D3D11 export slot stayed allocated through the renderer's cached view");
+      std::puts("PASS D3D11 export slot release: dropping the renderer's cached view frees the slot texture");
+    }
     const auto original_depth = fixture.read(fixture.depth.p);
     for (const auto &test : sunshine_game3d_test::budget_cases()) {
       const auto parameters = sunshine_game3d_test::budget_parameters(test);

@@ -1751,6 +1751,18 @@ namespace sunshine_game3d {
     if (isolated) d.context11->SwapDeviceContextState(previous.p, nullptr);
     return true;
   }
+  void renderer::release_export_view(api::resource export_target) {
+    for (auto *value : {data_.get(), cached_.get()}) {
+      if (!value) continue;
+      auto &views = value->export_views;
+      for (auto it = views.begin(); it != views.end();) {
+        if (it->first == export_target) {
+          value->device->destroy_resource_view(it->second);
+          it = views.erase(it);
+        } else ++it;
+      }
+    }
+  }
   api::resource renderer::output() const { return data_ ? data_->textures[data_->packed_texture()].resource : api::resource{}; }
   bool renderer::set_pq_output(bool pq) {
     if (!data_) return !pq;

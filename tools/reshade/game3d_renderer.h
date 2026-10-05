@@ -265,6 +265,10 @@ namespace sunshine_game3d {
     // export targets are cached for one export generation only.
     bool pack(reshade::api::command_list *commands, reshade::api::resource export_target = {},
       std::uint64_t export_generation = 0);
+    // Drops the cached view of an export target. A D3D11 view holds its
+    // texture, so a released export ring drops its slots' views first. RTV
+    // descriptors are consumed when commands are recorded: no GPU wait.
+    void release_export_view(reshade::api::resource export_target);
     // Lazily allocated at the current extent and exact input format. At most
     // three formats are retained; copies never reinterpret a different format.
     // The renderer queue reads only the explicitly selected mask channel.

@@ -3258,7 +3258,9 @@ an FG toggle or expiry; `Sunshine depth readiness` names the provider's reason),
 (a generated or pending frame whose previous presentation had no depth) and `reuse_other_source`
 (its depth belongs to another source than the previous presentation's scene). These classify
 depth availability; `scene_flat` and `scene_fading` classify placement. `dropped` counts
-Presents with an attached consumer that found no reusable export slot, and
+Presents with an attached consumer that found no reusable export slot (the line is also written,
+at the same rate limit, from a dropped Present, so a ring that drops every Present still reports
+it with `published` frozen), and
 `overwritten_unconsumed` packs written over a ready slot the consumer never claimed (it took a
 newer frame, or none yet); see the [GPU handoff contract](#gpu-handoff-contract) for the slot
 policy. Runtime reload/destruction resets these counters.
@@ -4472,6 +4474,9 @@ renewed the same way on a toggle back. A ring that stopped exporting (focus loss
 as in Game mono) and has no unfinished producer work is released after 10 s idle
 (`export_ring_idle`), so leaving stereo frees its slots: about 400 MB for a 4K FP16 ring and
 200 MB for an RGB10A2 one. A later export allocates a new ring, the present-thread step above.
+Every released ring (idle, cached, or with its runtime or swapchain) first has each renderer drop
+its cached render-target views of the slots: a D3D11 view holds its texture, so the slots would
+otherwise stay allocated until the renderer's next pack.
 
 For each exported frame, the producer claims a slot, writes the final stereo image into it,
 writes the frame sequence, QPC timestamp and matching UI displacement, marks the slot ready, then
@@ -4497,21 +4502,25 @@ itself wherever the controls are transparent), so nothing is copied into the slo
 Without a consumer, a free slot or an armed dump, no eye is rendered at all. The shader declares
 `SUNSHINE_PACKED_EYES`; a dump whose embedded shader predates it replays with the former eye and
 pack passes.
-Slot render-target views are cached for one export generation. The slot rests in the shared
+Slot render-target views are cached for one export generation and dropped when their ring is
+released. The slot rests in the shared
 common state between owners, and the pass reads only the renderer's working set, which the
 renderer's completion fence already retains. Up to three submitted GPU writes may remain unfinished, bounded by
 the existing three-slot ring. A recorded slot write must receive its submission fence before the next
 is admitted; there is no global requirement to wait for the previous GPU write to complete.
-Admission (`acquire_slot`) takes a free slot first, else the oldest ready slot, and never the
-ring's newest unconsumed frame (a ready slot whose sequence is the highest of the ready and
-reading slots), which the consumer would claim next; the round-robin it replaced could overwrite
-that frame. A slot is reusable once its previous GPU write completed, judged by that slot's own
-fence sequence, including slots already marked free by a consumer that discarded them. A direct
-pack may also reuse a slot whose previous write was a direct pack still queued: it records after
-that write on the same queue, and the slot retains no source or overlay. A copy or overlay write
-waits for completion. Reading slots remain unavailable. If no slot is reusable, the add-on drops
-the publication and returns to the game without waiting. `Sunshine SBS output` counts both
-(`dropped`, and `overwritten_unconsumed` for a ready slot written over).
+Admission (`acquire_slot`) takes a free slot first, else the oldest ready slot whose write
+completed, and never the ring's newest unconsumed frame (a ready slot whose sequence is the
+highest of the ready and reading slots); the round-robin it replaced could overwrite that frame.
+A slot is reusable once its previous GPU write completed, judged by that slot's own fence
+sequence, including slots already marked free by a consumer that discarded them. A direct pack
+may also reuse a free slot whose previous write was a direct pack still queued: it records after
+that write on the same queue, and the slot retains no source or overlay. A ready slot whose write
+is still queued is never reused: the host claims a ready frame once its fence passes, so the
+oldest queued one is the frame it claims next. When the GPU runs two or more Presents behind,
+writing over it every Present would leave the host no claimable frame at all. A copy or overlay
+write waits for completion. Reading slots remain unavailable. If no slot is reusable, the add-on
+drops the publication and returns to the game without waiting. `Sunshine SBS output` counts both
+(`dropped`, and `overwritten_unconsumed` for a completed ready slot written over).
 
 Each slot retains its native source resource and a separate overlay compositor. They cannot be
 replaced while that slot's copy/composition remains in flight. Reload, deactivation and runtime
