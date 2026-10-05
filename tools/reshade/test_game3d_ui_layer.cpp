@@ -304,10 +304,13 @@ int main() {
       require(choice.index < 0, "A full busy ring overwrote an entry a render still reads");
       choice = layer::choose_ring_entry(4, {true, false, false, true}, age, 3);
       require(choice.index == 0, "A full ring ignored a completed entry");
-      // An entry whose allocation failed (age 0, no copy) is taken first and
-      // allocated again; an entry being allocated is not free.
-      choice = layer::choose_ring_entry(3, {true, true, false, false}, {7, 0, 9, 0}, -1);
-      require(choice.index == 1 && !choice.allocate, "An entry whose allocation failed was not taken first");
+      // An entry whose allocation failed (no copy, age UINT64_MAX) is taken
+      // last: a free entry with a copy wins, and it is allocated again only
+      // when it is the only free one; an entry being allocated is not free.
+      choice = layer::choose_ring_entry(3, {true, true, false, false}, {7, UINT64_MAX, 9, 0}, -1);
+      require(choice.index == 0 && !choice.allocate, "An entry whose allocation failed beat a free entry with a copy");
+      choice = layer::choose_ring_entry(3, {false, true, false, false}, {7, UINT64_MAX, 9, 0}, -1);
+      require(choice.index == 1 && !choice.allocate, "An entry whose allocation failed was not retried as the only free one");
     }
     std::puts("PASS UI layer live-copy ring: oldest free non-newest entry, growth to the capacity, skip when every entry is read");
     return 0;

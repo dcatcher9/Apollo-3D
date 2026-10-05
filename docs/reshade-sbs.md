@@ -296,7 +296,9 @@ descriptor belongs to a heap ReShade wraps, which `push_descriptors` cannot copy
 layer keeps a ring of live copies (`ui_layer::ring_capacity`, 4; three normally suffice): each
 before-clear copy goes to an entry other than the newest whose last reader, a renderer
 submission, completed (`ui_layer::bound` with the renderer's completion fence and value); with
-every entry busy the ring grows, and a full ring skips that copy and logs once. A recorded copy is
+every entry busy the ring grows, and a full ring skips that copy and logs once. An entry whose
+allocation failed is taken last, so it is allocated again only when no entry with a copy is free,
+as a growth would be, and the ring keeps rotating its existing copies meanwhile. A recorded copy is
 pending until a list carrying it executes; only then is it offered, so detection reads the last
 executed copy as the single live texture did. A carrying list reset unexecuted returns the entry
 (never offered), and a copy pending for 2 s is abandoned. Each entry keeps the queue that
@@ -335,11 +337,16 @@ re-enumerates them only when the swapchain, its size or buffer count, or its fir
 changes, or ReShade reports it created, resized or destroyed. It does any of this only while the
 layer is wanted (UI detection asked for it within the last second, or a dump is armed: one atomic
 flag, which every transparent clear also reads before it resolves its view or takes the layer's
-lock); otherwise a Present only retires copies left from an earlier demand and destroys retired
-copies once due. The layer allocates new copies outside its lock (an entry is reserved under it,
-then allocated and published under it again, or destroyed when its scope moved on meanwhile) and
-destroys retired copies outside it, so a slow D3D12 allocation never stalls the Present thread or
-another recording thread. The depth owner observes the effects
+lock); otherwise a Present only retires the live copies once the layer was not asked for in 10 s
+(a shorter lapse, such as a stall or a Game 3D toggle, reuses them instead of allocating them again
+on the game's recording thread) and destroys retired copies once due. The layer allocates new
+copies outside its lock (an entry is reserved under it, then allocated and published under it
+again, or destroyed when its scope moved on meanwhile) and destroys the presenting device's retired
+copies outside it, so a slow D3D12 allocation never stalls the Present thread or another recording
+thread. A retired copy of another device (the ring of a replaced device) is destroyed under the
+lock that device's `destroy_device` takes, so the device cannot go first. A retired copy is due
+2 s after it was retired, never earlier, even when another thread retired it after the Present
+read its clock. The depth owner observes the effects
 list, the immediate list and the queue once per Present (`observe_present`), and later copies on
 the registered immediate list skip their repeated interface checks.
 

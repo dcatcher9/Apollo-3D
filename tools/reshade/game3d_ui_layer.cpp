@@ -77,14 +77,18 @@ namespace sunshine_game3d::ui_layer {
       api::resource_view view{};
     };
 
-    // Destroys add-on objects outside the state lock (their device is alive:
-    // on_destroy_device hands over its own before the device goes).
+    void destroy(const retired &r) {
+      if (!r.device) return;
+      if (r.view.handle) r.device->destroy_resource_view(r.view);
+      if (r.copy.handle) r.device->destroy_resource(r.copy);
+    }
+    // Destroys add-on objects outside the state lock, only through a device
+    // that is alive meanwhile: the presenting, recording or destroying one.
+    // A retired copy of another device is destroyed under the lock (reap), so
+    // its on_destroy_device, which hands over the copies still listed, cannot
+    // return before it.
     void destroy(const std::vector<retired> &values) {
-      for (const auto &r : values) {
-        if (!r.device) continue;
-        if (r.view.handle) r.device->destroy_resource_view(r.view);
-        if (r.copy.handle) r.device->destroy_resource(r.copy);
-      }
+      for (const auto &r : values) destroy(r);
     }
 
     // A reader of a ring entry: a renderer's completion fence (a native
@@ -146,14 +150,19 @@ namespace sunshine_game3d::ui_layer {
     // The live copy is recorded only while UI detection asked for the layer
     // this recently (latest() is called on every Present that wants it).
     constexpr std::uint64_t demand_window_ms = 1000;
+    // Live copies are kept over a lapse in demand this short (a stall, a
+    // Game 3D or UI-source toggle), so they are reused rather than allocated
+    // again on the game's recording thread; after it they are retired.
+    constexpr std::uint64_t live_release_ms = 10000;
 
     struct state_t {
       std::mutex mutex;
       // Read without the lock by every clear and Present (wanted()).
       std::atomic<bool> armed{false};
       std::atomic<std::uint64_t> demand_ms{0};
-      // Live or retired copies exist: observe_output retires and destroys
-      // them while the layer is not wanted.
+      // Live or retired copies exist: while the layer is not wanted,
+      // observe_output retires the live ones after live_release_ms without
+      // demand and destroys retired ones once due.
       std::atomic<bool> holding{false};
       api::device *device{};
       std::uint32_t width{}, height{};
@@ -272,13 +281,17 @@ namespace sunshine_game3d::ui_layer {
       publish_watch(s);
     }
 
-    // Requires the state lock. Moves the retired copies that are due into
-    // due, for destruction after the lock.
-    void reap(state_t &s, std::uint64_t now, std::vector<retired> &due) {
+    // Requires the state lock. Retired copies that are due: the presenting
+    // device's move into due, for destruction after the lock (that device
+    // lives through its Present); another device's are destroyed here, under
+    // the lock its on_destroy_device takes. A copy retired after now (another
+    // thread stamped it while the caller waited) is not due yet.
+    void reap(state_t &s, std::uint64_t now, std::vector<retired> &due, api::device *presenting) {
       auto keep = s.graveyard.begin();
       for (auto &r : s.graveyard) {
-        if (now - r.tick >= retire_delay_ms) due.push_back(r);
-        else *keep++ = r;
+        if (now < r.tick || now - r.tick < retire_delay_ms) *keep++ = r;
+        else if (r.device == presenting) due.push_back(r);
+        else destroy(r);
       }
       s.graveyard.erase(keep, s.graveyard.end());
     }
@@ -367,7 +380,9 @@ namespace sunshine_game3d::ui_layer {
           entry.carriers = {};
         }
         free[i] = entry.free();
-        age[i] = entry.copy.handle ? entry.capture_id : 0;
+        // An entry whose allocation failed is taken last: it is allocated
+        // again only when no entry with a copy is free (the ring's growth).
+        age[i] = entry.copy.handle ? entry.capture_id : UINT64_MAX;
       }
       const auto choice = choose_ring_entry(live.entries, free, age, live.newest);
       if (choice.index < 0) {
@@ -519,15 +534,19 @@ namespace sunshine_game3d::ui_layer {
       return false; // Never skip the game's clear.
     }
 
-    // Requires no lock. The layer is not wanted: copies left from an earlier
-    // demand are retired, and retired copies destroyed once due.
-    void idle(state_t &s, std::uint64_t now) {
+    // Requires no lock. The layer is not wanted: live copies are retired once
+    // it was not asked for in live_release_ms, and retired copies destroyed
+    // once due (presenting: the presenting device).
+    void idle(state_t &s, std::uint64_t now, api::device *presenting) {
       std::vector<retired> due;
       {
         std::lock_guard<std::mutex> lock(s.mutex);
-        if (s.live.entries) retire_live(s, now);
-        reap(s, now, due);
-        s.holding.store(!s.graveyard.empty() || !s.candidates.empty(), std::memory_order_relaxed);
+        const auto demand = s.demand_ms.load(std::memory_order_relaxed);
+        if (s.live.entries && !s.armed.load(std::memory_order_relaxed) &&
+            (!demand || (now > demand && now - demand > live_release_ms)))
+          retire_live(s, now);
+        reap(s, now, due, presenting);
+        s.holding.store(s.live.entries || !s.graveyard.empty() || !s.candidates.empty(), std::memory_order_relaxed);
       }
       destroy(due);
     }
@@ -736,11 +755,11 @@ namespace sunshine_game3d::ui_layer {
   void observe_output(api::swapchain *swapchain, api::command_queue *queue) {
     auto &s = state();
     const auto now = GetTickCount64();
+    auto *device = swapchain->get_device();
     if (!wanted(s, now)) {
-      if (s.holding.load(std::memory_order_relaxed)) idle(s, now);
+      if (s.holding.load(std::memory_order_relaxed)) idle(s, now, device);
       return;
     }
-    auto *device = swapchain->get_device();
     // Native DXGI, as the exporter reads back buffers; identities only.
     // (ReShade's own back-buffer getters crashed under MinGW.) A resize may
     // recreate the buffers at the same size, so the first buffer's identity
@@ -777,8 +796,9 @@ namespace sunshine_game3d::ui_layer {
     std::vector<retired> due;
     {
       std::lock_guard<std::mutex> lock(s.mutex);
-      // Every retired copy's device is alive: on_destroy_device hands over its own.
-      reap(s, now, due);
+      // Only this device's due copies are destroyed after the lock; another
+      // device's are destroyed under it (reap).
+      reap(s, now, due, device);
       if (!s.armed.load(std::memory_order_relaxed) || !s.device || s.device == device) {
         if (s.live.entries && (s.device != device || s.width != desc.BufferDesc.Width || s.height != desc.BufferDesc.Height)) {
           retire_live(s, now);

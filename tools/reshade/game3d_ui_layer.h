@@ -45,7 +45,9 @@
 // fence of the add-on orders it. Stellar Blade's and The Witcher 3's copies
 // ran on another queue than the presenting one in their dumps (both load
 // Streamline), so refusing such copies would remove their layer protection.
-// Copies are allocated and destroyed outside the tracker's lock.
+// Copies are allocated outside the tracker's lock and destroyed outside it
+// through a device alive meanwhile (presenting, recording or being
+// destroyed); a retired copy of another device is destroyed under it.
 namespace sunshine_game3d::ui_layer {
   namespace api = reshade::api;
   inline constexpr unsigned max_candidates = 3; // game3d_debug::ui_layer_count
@@ -140,9 +142,10 @@ namespace sunshine_game3d::ui_layer {
   };
   // allocated: entries [0, count) exist; free[i]: entry i's readers
   // completed and its copy neither pending nor being allocated; age[i]: its
-  // capture id (smaller is older; 0 for an entry whose allocation failed,
-  // which is allocated again when chosen); newest: the offered entry, the
-  // last executed copy (-1: none). The oldest free entry wins.
+  // capture id (smaller is older; UINT64_MAX for an entry whose allocation
+  // failed, the least preferred: allocated again only when no entry with a
+  // copy is free); newest: the offered entry, the last executed copy (-1:
+  // none). The oldest free entry wins.
   inline ring_choice choose_ring_entry(unsigned count, const std::array<bool, ring_capacity> &free,
       const std::array<std::uint64_t, ring_capacity> &age, int newest) {
     ring_choice choice;
@@ -204,8 +207,9 @@ namespace sunshine_game3d::ui_layer {
   // (cached until the swapchain, its size or buffer count, or its first
   // buffer changes, or ReShade reports it created or resized), the presenting
   // queue and the live tracker's frame boundary, all only while the layer is
-  // wanted. Otherwise it only retires copies left from an earlier demand and
-  // destroys retired copies once due.
+  // wanted. Otherwise it only retires the live copies once the layer was not
+  // asked for in 10 s (a shorter lapse reuses them) and destroys retired
+  // copies once due.
   void observe_output(api::swapchain *swapchain, api::command_queue *queue);
   void arm();
   // Stops the census and hands over its candidates. Each copy stays valid
