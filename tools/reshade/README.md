@@ -749,12 +749,12 @@ flag an older control DLL lacking the getter can still run the GPU capture compa
 Like the native provider fixture, it loads the supplied shaders only to initialize the runtime and
 then removes every FX technique. Each present is observed through the test add-on's provider
 status and Automatic/scale queries. Current output is read from the production export ring.
-Production Dump 3D captures supply consumed depth, render constants and SBS at checkpoints. Run it with
-`SUNSHINE_GAME3D_AUTOMATIC=1`, `SUNSHINE_GAME3D_AUTOMATIC_ACTIONS_TEST=1` and
-`SUNSHINE_DEPTH3D_EFFECT=SunshineGame3D`:
+Production Dump 3D captures supply consumed depth, render constants and SBS at checkpoints. Like the
+native provider fixture, it selects its frozen `SunshineGame3D.fx` boot effect, compile gate and
+test add-on itself; the shader directory must contain that frozen effect:
 
 ```text
-reshade_ngx_depth_runtime_test.exe <ReShade64.dll> <Depth3D/Shaders> <SunshineSBSTest.addon64> <fresh-output-directory> 3840 2160
+reshade_ngx_depth_runtime_test.exe <ReShade64.dll> <frozenShaders> <SunshineSBSTest.addon64> <fresh-output-directory> 3840 2160
 ```
 
 Failed and invalid-extent evaluations must not take ownership from Generic. A valid evaluation
@@ -996,8 +996,8 @@ actions. It checks native depth pixels, shader preparation and exported HDR pixe
 as well as the control trajectory. The production package excludes these test exports.
 
 `reshade_depth_bind_switch_runtime_test` exercises preservation mode 2 with real
-D3D12 D32S8 draws through native Game 3D. Use the three environment settings above plus
-`SUNSHINE_DEPTH_BIND_SWITCH_TEST=1`; its arguments are only the runtime DLL,
+D3D12 D32S8 draws through native Game 3D. Like the NGX fixture it needs no environment settings
+and selects preservation mode 2 itself; its arguments are only the runtime DLL, frozen
 shader directory, test add-on and fresh output directory. Like the NGX fixture, it removes every
 FX technique after initialization. It reads readiness from the Automatic/scale queries on every present.
 Production Dump 3D captures supply the consumed depth, render constants and SBS. It runs 4K scRGB with

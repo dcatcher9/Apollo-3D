@@ -957,8 +957,7 @@ int main(int argc,char **argv) {
       }
     width=argc==7?unsigned(std::stoul(argv[5])):3840;height=argc==7?unsigned(std::stoul(argv[6])):2160;
     require(width>=640 && width<=3840 && height>=360 && height<=2160 && width%4==0 && height%4==0,"Invalid NGX fixture dimensions");
-    require(sunshine_camera_fixture::flag("SUNSHINE_GAME3D_AUTOMATIC") && sunshine_camera_fixture::flag("SUNSHINE_GAME3D_AUTOMATIC_ACTIONS_TEST"),
-      "NGX fixture requires Automatic and TEST ONLY actions");
+    select_native_boot();
     require(!fs::exists(fs::absolute(argv[4])),"Fresh isolated NGX runtime output is required");
     if(sunshine_camera_fixture::flag("SUNSHINE_D3D12_DEBUG_TEST")) {
       // Opt-in diagnostic only, before ReShade or any D3D12 device is created.
