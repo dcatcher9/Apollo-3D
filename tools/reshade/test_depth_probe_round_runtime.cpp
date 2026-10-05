@@ -183,6 +183,7 @@ namespace {
       require(select_manual && manual_state,"Probe fixture needs the real manual-selection adapters");
       game3d.start();
       game3d.set_strength(100);
+      rendered_sequence=game3d.await_render([&]{ step(); });
       await_current("sole-scaled-startup",*scene,12000);
       const auto calibrated=GetTickCount64()+12000;
       while (!(current(*scene) && full()) && GetTickCount64()<calibrated)

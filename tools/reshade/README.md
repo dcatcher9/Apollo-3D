@@ -969,31 +969,29 @@ frame IDs. It adds no depth readback or GPU wait and does not change selection o
 calibration. Leave it disabled outside a diagnostic session.
 
 The raw screen-plane controller has unit coverage in `reshade_raw_scene_policy_tests`.
-The historical `reshade_adaptive_raw_runtime_test` actual-ReShade fixture uses real game DSV draws,
-the integrated selector/sampler, and published scale/zero-plane/readiness uniforms. Its scenarios
-check the former reciprocal normalization of the smoothed zero through scene changes, pin/unpin
-continuity, source initialization, gaps, stereo and mono
-in both HDR depth conventions. No camera/gain uniforms or synthetic readback results are injected.
-Use a separate control add-on and fresh output directories for a matched run. When comparing
-the old ratio and fixed-reference implementations, its normalization assertion distinguishes
-those historical policies. It does not establish acceptance of the current range-based policy.
-
-Build `reshade_adaptive_raw_runtime_test` with runtime tests enabled, then run it
-with `SUNSHINE_GAME3D_AUTOMATIC=1`, `SUNSHINE_GAME3D_AUTOMATIC_ACTIONS_TEST=1` and
-`SUNSHINE_DEPTH3D_EFFECT=SunshineGame3D` in the environment:
+`reshade_adaptive_raw_runtime_test` drives real game DSV draws through the integrated
+selector/sampler and the raw-depth scale controller into native Game 3D, with no FX. Each Present
+is observed through the test add-on's last-render query; Dump 3D captures verify the consumed
+depth pixels and constants and the mono/stereo SBS. Its oracle is the owning contract's formula
+applied to the independently known draw: gain `L/Q` from the full-image maximum and the zero at the
+contrast midpoint ([raw-depth automation](../../docs/reshade-sbs.md#experimental-raw-depth-automation)).
+Its scenarios check fresh single-window initialization, same-source pin/unpin continuity, a changed
+center patch that keeps the gain and moves only the zero, held gain and zero through depth and
+presentation gaps with current-color mono, a retained exact source resuming its own history, a
+destroyed source and an explicit recalibration starting fresh, zero-strength mono and finite HDR
+stereo, in both depth conventions. No camera/gain values or synthetic readback results are injected.
+Like the bind-switch fixture it needs no environment settings:
 
 ```text
-reshade_adaptive_raw_runtime_test.exe <ReShade64.dll> <Depth3D/Shaders> <SunshineSBSTest.addon64> <fresh-output-directory> <scrgb|pq> <normal|reversed> <width> <height>
+reshade_adaptive_raw_runtime_test.exe <ReShade64.dll> <frozenShaders> <SunshineSBSTest.addon64> <fresh-output-directory> <scrgb|pq> <normal|reversed> <width> <height>
 ```
 
-Set `SUNSHINE_DEPTH_RELOAD_TEST=1` to also reload the real effect while depth is absent,
-rediscover its new resources, and require fresh readiness, calibration and HDR stereo after
-depth returns. `reshade_depth_ready_uniform_cache_tests` covers reflection reuse and change-only
-publication by the shared Generic/API readiness owner.
-
-The fixture requires the separate test add-on for the real pin/unpin/**Recenter**
-actions. It checks native depth pixels, shader preparation and exported HDR pixels
-as well as the control trajectory. The production package excludes these test exports.
+The former `SUNSHINE_DEPTH_RELOAD_TEST` case required the retired effect's scale to restart after
+an FX reload; native capture and scale deliberately survive an FX reload
+(`reshade_game3d_native_depth_runtime_test`), and the case exits as a setup failure.
+`reshade_depth_ready_uniform_cache_tests` covers reflection reuse and change-only publication by
+the shared Generic/API readiness owner. The fixture requires the separate test add-on for the
+real pin/unpin and **Recalibrate** actions. The production package excludes these test exports.
 
 `reshade_depth_bind_switch_runtime_test` exercises preservation mode 2 with real
 D3D12 D32S8 draws through native Game 3D. Like the NGX fixture it needs no environment settings

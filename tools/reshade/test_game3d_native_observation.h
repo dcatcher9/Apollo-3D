@@ -144,6 +144,17 @@ namespace {
       return result;
     }
 
+    // Presents through the caller until native Game 3D has rendered: the game
+    // stays 2D while the renderer compiles its shaders on the thread pool.
+    // Returns the last render's sequence; every later Present renders.
+    std::uint64_t await_render(const std::function<void()> &present) const {
+      const auto until = GetTickCount64() + 30000;
+      auto render = last_render();
+      while (!render.sequence && GetTickCount64() < until) { present(); render = last_render(); }
+      require(render.sequence != 0, "Native Game 3D never rendered; its shaders did not finish compiling");
+      return render.sequence;
+    }
+
     // Become the production streaming consumer. Every later native present
     // publishes its packed SBS to the shared export ring.
     void attach_export() {
