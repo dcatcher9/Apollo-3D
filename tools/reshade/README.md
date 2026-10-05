@@ -1013,14 +1013,18 @@ Add `SUNSHINE_DEPTH_GENERIC_ONLY_TEST=1` to disable both API sources, camera dia
 call tracing before initialization. The fixture verifies those settings and runs the same
 preservation and HDR checks, proving that shared capture does not depend on API discovery.
 
-`reshade_depth_probe_round_runtime_test` uses the same four arguments and
-environment settings to check bounded challenger sampling in Automatic mode.
+`reshade_depth_probe_round_runtime_test` uses the same four arguments and, like
+the bind-switch fixture, renders through native Game 3D with no FX and no environment
+settings to check bounded challenger sampling. The test add-on's last-render query
+(`SunshineGame3DTestLastRender`) reports the depth and constants each native render
+consumed; Dump 3D captures verify the consumed depth pixels.
 A real 4K source is created before six active flat peers; it must replace the
 calibrated lower-resolution source within three seconds, with its actual depth
 pixels verified. The unchanged old add-on must fail that promotion bound. The
-fixture also checks that an uncapturable candidate yields and an active manual
-pin remains authoritative. These are controlled regression bounds, not promised
-recovery times for every game. No selection, depth or camera values are injected.
+fixture also checks that an uncapturable candidate yields within its two bounded
+probe visits and an active manual pin remains authoritative. These are controlled
+regression bounds, not promised recovery times for every game. No selection, depth
+or camera values are injected. `--native-priority` runs the late-native case instead.
 
 `reshade_depth_alternating_runtime_test` uses those same four arguments and
 environment settings for an actual 4K rotating-allocation regression. Each allocation

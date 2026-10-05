@@ -16,6 +16,7 @@
 #include "game3d_ui_counters.h"
 #include "game3d_ui_selection.h"
 #include "game3d_debug_dump.h"
+#include "game3d_test_render.h"
 #include "diagnostic_log_gate.h"
 #include "streamline_camera_probe.h"
 #include "streamline_depth_capture.h"
@@ -837,6 +838,12 @@ namespace {
     std::string diagnostic_ui_source;
     std::string diagnostic_ui_capture_attempt;
     bool diagnostic_armed = false;
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+    // SunshineGame3DTestLastRender: this Present's prepared depth and the
+    // last native render's inputs.
+    sunshine_depth::frame_depth test_depth;
+    sunshine_game3d::test::last_render test_render;
+#endif
     api::effect_texture_variable texture {};
     std::string effect_name;
     api::effect_technique game_technique {}, native_technique {};
@@ -1005,6 +1012,16 @@ namespace {
       const auto found = runtimes_.find(runtime);
       return found != runtimes_.end() && found->second.addon_native;
     }
+
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+    bool test_last_render(api::effect_runtime *runtime, sunshine_game3d::test::last_render &out) {
+      std::lock_guard<std::mutex> lock(mutex_);
+      const auto found = runtimes_.find(runtime);
+      if (found == runtimes_.end()) return false;
+      out = found->second.test_render;
+      return true;
+    }
+#endif
 
     void finish_present_timing(api::effect_runtime *runtime, const std::array<LARGE_INTEGER, 5> &marks, unsigned count) {
       if (!count) return;
@@ -1210,6 +1227,13 @@ namespace {
         input.diagnostic_armed = proof.diagnostic_armed;
         input.depth_identity = depth_identity(proof);
         rendered = proof.frame.prepared && renderer->render(commands, input, true);
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+        ++proof.test_render.sequence;
+        proof.test_render.rendered = rendered;
+        proof.test_render.depth = proof.test_depth;
+        proof.test_render.parameters = p;
+        proof.test_depth = {}; // Never describe a later Present without its own preparation.
+#endif
         ui_input.complete(*renderer, rendered);
         source_alpha = ui_input.status;
         proof.frame.source_alpha = source_alpha;
@@ -1494,6 +1518,9 @@ namespace {
       proof.borrowed_depth = proof.addon_native && depth.ready ? depth.shader_resource : api::resource_view{};
       proof.diagnostic_armed = proof.addon_native && debug_dump_.requested();
       proof.diagnostic_depth = proof.diagnostic_armed ? depth : sunshine_depth::frame_depth{};
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+      proof.test_depth = depth;
+#endif
       {
         const sunshine_game3d::slow_step step("depth input observation");
         sunshine_game3d::depth_input::observe(runtime, commands, effects_rtv, depth);
@@ -2699,6 +2726,12 @@ extern "C" {
 
   __declspec(dllexport) void SunshineSbsTestSetForeground(HWND window) {
     test_foreground_window.store(window, std::memory_order_release);
+  }
+
+  // What the last native Game 3D render consumed (game3d_test_render.h).
+  __declspec(dllexport) BOOL SunshineGame3DTestLastRender(api::effect_runtime *runtime,
+      sunshine_game3d::test::last_render *out) {
+    return publisher && runtime && out && publisher->test_last_render(runtime, *out) ? TRUE : FALSE;
   }
 #else
   __declspec(dllexport) const char *NAME = "Sunshine 3D";

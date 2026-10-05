@@ -8,6 +8,7 @@
 // capture: the depth, constants and SBS consumed by one native render.
 // Nothing here injects depth, readiness, pixels or completion.
 #include "game3d_controls_model.h"
+#include "game3d_test_render.h"
 #include "../../src/game3d_debug_protocol.h"
 #include <nlohmann/json.hpp>
 
@@ -79,6 +80,7 @@ namespace {
       edit_float_ = reinterpret_cast<edit_float_t>(GetProcAddress(module, "SunshineGame3DTestEditFloat"));
       recalibrate_ = reinterpret_cast<action_t>(GetProcAddress(module, "SunshineGame3DTestRecalibrate"));
       set_foreground_ = reinterpret_cast<set_foreground_t>(GetProcAddress(module, "SunshineSbsTestSetForeground"));
+      last_render_ = reinterpret_cast<last_render_t>(GetProcAddress(module, "SunshineGame3DTestLastRender"));
       require(module && query_automatic_ && query_scale_ && edit_float_ && recalibrate_ && set_foreground_,
         "Native Game 3D fixture requires the test add-on's passive UI queries, controls and foreground observer");
       const auto effects = fixture_.runtime_directory / "effects";
@@ -132,6 +134,15 @@ namespace {
     }
 
     bool recalibrate() { return recalibrate_(observed.runtime) != FALSE; }
+
+    // What the last native render consumed: its depth identity, allocation
+    // and readiness, and its constants. Per Present, without a dump; the
+    // caller compares sequence to know a render followed its Present.
+    sunshine_game3d::test::last_render last_render() const {
+      sunshine_game3d::test::last_render result;
+      require(last_render_ && last_render_(observed.runtime, &result), "Native Game 3D last-render observation failed");
+      return result;
+    }
 
     // Become the production streaming consumer. Every later native present
     // publishes its packed SBS to the shared export ring.
@@ -261,6 +272,7 @@ namespace {
     using edit_float_t = BOOL (*)(api::effect_runtime *, unsigned, float);
     using action_t = BOOL (*)(api::effect_runtime *);
     using set_foreground_t = void (*)(HWND);
+    using last_render_t = BOOL (*)(api::effect_runtime *, sunshine_game3d::test::last_render *);
 
     static std::uint64_t load(std::uint64_t &value) {
       return std::uint64_t(InterlockedCompareExchange64(reinterpret_cast<volatile LONG64 *>(&value), 0, 0));
@@ -277,6 +289,7 @@ namespace {
     edit_float_t edit_float_{};
     action_t recalibrate_{};
     set_foreground_t set_foreground_{};
+    last_render_t last_render_{};
     unsigned fx_renders_{};
     HANDLE mapping_{}, export_mapping_{};
     game3d_debug::shared_state_t *state_{};

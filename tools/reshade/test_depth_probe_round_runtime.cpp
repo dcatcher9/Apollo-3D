@@ -1,28 +1,19 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Actual preserve2 D3D12 challenger promotion. No injected selection or depth.
+// Actual preserve2 D3D12 challenger promotion through native Game 3D with no
+// installed FX. No injected selection, depth, readiness or camera.
 #include "test_raw_runtime_fixture.h"
-#include "depth_addon.h"
+#include "test_game3d_native_observation.h"
 
 namespace {
-  using frame_query_t = BOOL (*)(api::effect_runtime *, sunshine_depth::frame_depth *);
-  frame_query_t query_frame = nullptr;
-  sunshine_depth::frame_depth captured_frame;
-  bool captured_ready = false;
-  unsigned captured_render = 0;
-  void observe_probe_depth(api::effect_runtime *runtime, api::effect_technique technique,
-      api::command_list *, api::resource_view, api::resource_view) {
-    char name[256] {}; runtime->get_technique_name(technique, name);
-    if (!named(name, technique_name)) return;
-    captured_frame = {};
-    captured_ready = query_frame && query_frame(runtime, &captured_frame) && captured_frame.ready;
-    captured_render = observed.renders;
-  }
-
   struct probe_round_fixture : raw_runtime_fixture {
     using select_t = BOOL (*)(api::effect_runtime *, std::uint64_t);
     using state_t = BOOL (*)(api::effect_runtime *, std::uint64_t *, BOOL *);
     select_t select_manual = nullptr;
     state_t manual_state = nullptr;
+    native_game3d_observer game3d{*this};
+    // What the native render of the latest Present consumed.
+    sunshine_game3d::test::last_render frame;
+    std::uint64_t rendered_sequence = 0;
     std::vector<std::unique_ptr<target_t>> flats;
     std::unique_ptr<target_t> missing;
     std::array<std::unique_ptr<target_t>,2> lower_peers;
@@ -32,9 +23,14 @@ namespace {
     std::ofstream trace;
 
     bool current(const target_t &target) const {
-      return captured_render == observed.renders && captured_ready &&
-        captured_frame.source_resource.handle == reinterpret_cast<std::uint64_t>(target.texture.p) &&
-        captured_frame.width == target.width && captured_frame.height == target.height;
+      return frame.depth.ready &&
+        frame.depth.source_resource.handle == reinterpret_cast<std::uint64_t>(target.texture.p) &&
+        frame.depth.width == target.width && frame.depth.height == target.height;
+    }
+    // The current source rendered at full Automatic strength.
+    bool full() const {
+      return frame.rendered && frame.parameters.depth_ready && frame.parameters.camera_ready &&
+        frame.parameters.strength_blend == 1.f;
     }
     void render_depth() {
       if (rotating_lower) {
@@ -60,14 +56,17 @@ namespace {
       for (const auto &flat : flats) draw(*flat);
     }
     void tick(const char *phase) {
-      step();
-      trace << phase << ',' << GetTickCount64() << ',' << observed.renders << ','
-        << captured_frame.source_id << ',' << captured_frame.source_resource.handle << ','
-        << captured_frame.frame_index << ',' << captured_ready << ',' << ready() << ','
-        << scalar("Sunshine_CameraDepthScale") << ',' << scalar("Sunshine_CameraStrengthBlend") << '\n';
+      step(); game3d.no_effects();
+      frame = game3d.last_render();
+      require(frame.sequence > rendered_sequence, "A Present had no native Game 3D render to observe");
+      rendered_sequence = frame.sequence;
+      trace << phase << ',' << GetTickCount64() << ',' << frame.sequence << ','
+        << frame.depth.source_id << ',' << frame.depth.source_resource.handle << ','
+        << frame.depth.frame_index << ',' << frame.depth.ready << ',' << frame.parameters.camera_ready << ','
+        << frame.parameters.depth_scale << ',' << frame.parameters.strength_blend << '\n';
       require(trace.good(), "Cannot record challenger-promotion trajectory");
       if (missing)
-        require(captured_frame.source_resource.handle != reinterpret_cast<std::uint64_t>(missing->texture.p),
+        require(frame.depth.source_resource.handle != reinterpret_cast<std::uint64_t>(missing->texture.p),
                 "A candidate without a legal current capture displaced useful scene depth");
     }
     void await_current(const char *phase, const target_t &target, unsigned limit_ms) {
@@ -75,25 +74,21 @@ namespace {
       do { tick(phase); } while (!current(target) && GetTickCount64() - started < limit_ms);
       std::printf("MEASURE %s promotion_ms=%llu limit_ms=%u source=%llu\n", phase,
         static_cast<unsigned long long>(GetTickCount64() - started), limit_ms,
-        static_cast<unsigned long long>(captured_frame.source_id));
+        static_cast<unsigned long long>(frame.depth.source_id));
       require(current(target) && GetTickCount64() - started <= limit_ms,
               "Qualified native challenger did not promote within its bounded visit; inspect trajectory and ReShade log");
     }
-    void verify_pattern(const target_t &target) {
-      require(current(target), "Depth pixel oracle has no current expected original source");
-      const auto binding = selected_binding();
-      auto *resource = reinterpret_cast<ID3D12Resource *>(
-        observed.runtime->get_device()->get_resource_from_view(binding).handle);
-      require(binding.handle && resource, "Depth pixel oracle lost the actual native backup");
-      const auto desc = resource->GetDesc();
-      require(desc.Width == target.width && desc.Height == target.height &&
-        (desc.Format == DXGI_FORMAT_R32_TYPELESS || desc.Format == DXGI_FORMAT_D32_FLOAT || desc.Format == DXGI_FORMAT_R32_FLOAT),
-        "Depth pixel oracle selected an unexpected native geometry or format");
-      const auto bytes = read(resource, D3D12_RESOURCE_STATE_COPY_DEST);
-      require(bytes.size() == size_t(target.width) * target.height * sizeof(float), "Unexpected depth-plane size");
+    // The production Dump 3D capture of one native render: the exact depth
+    // allocation it consumed, read through its own artifact.
+    void verify_pattern(const char *phase, const target_t &target) {
+      const auto consumed = game3d.capture(phase, false, [&] { tick(phase); });
+      require(consumed.depth_ready && consumed.source_resource == reinterpret_cast<std::uint64_t>(target.texture.p) &&
+        consumed.width == target.width && consumed.height == target.height,
+        "Depth pixel oracle has no current expected original source");
+      require(consumed.raw_depth.size() == size_t(target.width) * target.height * sizeof(float), "Unexpected depth-plane size");
       for (unsigned y=0; y<18; ++y) for (unsigned x=0; x<32; ++x) {
         const unsigned px=(2*x+1)*target.width/64, py=(2*y+1)*target.height/36;
-        float raw=0; std::memcpy(&raw, bytes.data()+(size_t(py)*target.width+px)*4, 4);
+        const float raw=consumed.depth(px, py);
         const float u=(px+.5f)/target.width, v=(py+.5f)/target.height;
         const float expected=.01f+.02f*(target.pattern==9 ? 1.f-u : u)+.015f*v;
         require(std::isfinite(raw) && std::abs(raw-expected)<2e-6f,
@@ -106,8 +101,8 @@ namespace {
       while (GetTickCount64()<until);
     }
     void check_rotating_lower_promotion() {
-      // Give the per-member250ms raw captures real recurring work before a
-      // challenger exists. They must not keep moving the independent125ms
+      // Give the per-member raw captures real recurring work before a
+      // challenger exists. They must not keep moving the independent
       // histogram-probe deadline and starving a better continuously live input.
       decoy.reset(); missing.reset(); flats.clear();
       scene=target(width/2,height/2,1,14);
@@ -117,30 +112,33 @@ namespace {
         static_cast<unsigned long long>(reinterpret_cast<std::uint64_t>(scene->texture.p)),
         static_cast<unsigned long long>(reinterpret_cast<std::uint64_t>(lower_peers[0]->texture.p)),
         static_cast<unsigned long long>(reinterpret_cast<std::uint64_t>(lower_peers[1]->texture.p)));
+      // The three members draw identical depth, so each member's own
+      // controller reaches the same positive scale and screen plane.
       const auto began=GetTickCount64(); unsigned consecutive=0;
+      float scale=0.f; std::array<float,2> zero{};
       do {
         tick("rotating-lower-calibration");
-        require(!captured_ready || current(*lower_rendered), "Rotating lower-res control admitted another present's member");
-        if (current(*lower_rendered) && ready() && scalar("Sunshine_CameraStrengthBlend")==1.f) {
-          require(scalar("Sunshine_CameraDepthScale")==8.f && zero()[1]==.125f,
-                  "Rotating lower-res control has the wrong independent raw basis");
-          ++consecutive;
+        require(!frame.depth.ready || current(*lower_rendered), "Rotating lower-res control admitted another present's member");
+        if (current(*lower_rendered) && full()) {
+          if (!consecutive) { scale=frame.parameters.depth_scale; zero=frame.parameters.convergence; }
+          require(std::isfinite(scale) && scale>0.f, "Rotating lower-res control has no positive automatic scale");
+          if (frame.parameters.depth_scale==scale && frame.parameters.convergence==zero) ++consecutive; else consecutive=0;
         } else consecutive=0;
       } while (consecutive<12 && GetTickCount64()-began<15000);
       require(consecutive>=12, "Rotating lower-res sources did not calibrate before the challenger scheduling test");
+      std::printf("MEASURE rotating-lower H=%.9g t0=%.9g\n", scale, zero[1]);
       const auto steady_until=GetTickCount64()+1200;
       do {
         tick("rotating-lower-steady");
-        require(current(*lower_rendered) && ready() && scalar("Sunshine_CameraStrengthBlend")==1.f &&
-          scalar("Sunshine_CameraDepthScale")==8.f && zero()[1]==.125f,
-          "Calibrated rotating sources lost current readiness before introduction of the native challenger");
+        require(current(*lower_rendered) && full() && frame.parameters.depth_scale==scale && frame.parameters.convergence==zero,
+          "Calibrated rotating sources lost current readiness or their scale before introduction of the native challenger");
       } while (GetTickCount64()<steady_until);
       std::puts("PASS calibrated lower-res ABC remains current and full-strength before challenger introduction");
       decoy=target(width,height,1,9);
       await_current("rotating-raw-does-not-starve-native",*decoy,4000);
-      verify_pattern(*decoy);
+      verify_pattern("rotating-raw-does-not-starve-native",*decoy);
       stable("promoted-native-survives-rotating-lower",*decoy,1200);
-      verify_pattern(*decoy);
+      verify_pattern("promoted-native-survives-rotating-lower",*decoy);
       std::puts("PASS per-member raw calibration sampling does not starve independent native-depth challenger qualification/promotion");
     }
     void check_native_priority() {
@@ -154,10 +152,10 @@ namespace {
         static_cast<unsigned long long>(reinterpret_cast<std::uint64_t>(scene->texture.p)),
         static_cast<unsigned long long>(reinterpret_cast<std::uint64_t>(decoy->texture.p)),flats.size());
       await_current("late-native-ahead-of-older-lowres-tour",*decoy,4000);
-      verify_pattern(*decoy);
+      verify_pattern("late-native-ahead-of-older-lowres-tour",*decoy);
       stable("late-native-remains-current",*decoy,1200);
-      verify_pattern(*decoy);
-      std::puts("PASS late-created useful native depth promotes ahead of12 older active low-resolution flats; actual current source and576 depth cells verified");
+      verify_pattern("late-native-remains-current",*decoy);
+      std::puts("PASS late-created useful native depth promotes ahead of 12 older active low-resolution flats; actual current source and 576 depth cells verified");
 
       // Resolution grants a measurement opportunity, never qualification. A
       // subsequent full-resolution flat must not replace the useful fallback.
@@ -166,7 +164,7 @@ namespace {
       stable("scaled-before-fullres-flat",*scene,1200);
       decoy=target(width,height,1,0);
       stable("fullres-flat-keeps-useful-scaled",*scene,2500);
-      verify_pattern(*scene);
+      verify_pattern("fullres-flat-keeps-useful-scaled",*scene);
       std::puts("PASS full-resolution flat depth cannot displace the qualified lower-resolution current source");
     }
     void run(bool native_priority=false) {
@@ -174,30 +172,28 @@ namespace {
       scene=target(width/2,height/2,1,1);
       render_tracked_depth=[&]{render_depth();};
       trace.open(runtime_directory/"probe-round-trajectory.csv");
-      trace << std::setprecision(17) << "phase,wall_ms,render,source,resource,frame,capture_ready,automatic_ready,H,blend\n";
+      trace << std::setprecision(17) << "phase,wall_ms,render,source,resource,frame,depth_ready,camera_ready,H,blend\n";
       const auto until=GetTickCount64()+45000;
       while ((!observed.runtime || !observed.renders) && GetTickCount64()<until) step();
       require(observed.runtime && observed.renders && !observed.inject, "Actual probe-round fixture did not initialize");
       check_unified_addon();
       const auto module=GetModuleHandleW(L"SunshineSBSTest.addon64");
-      query_frame=reinterpret_cast<frame_query_t>(GetProcAddress(module,"SunshineDepthTestFrame"));
       select_manual=reinterpret_cast<select_t>(GetProcAddress(module,"SunshineDepthTestSelectManual"));
       manual_state=reinterpret_cast<state_t>(GetProcAddress(module,"SunshineDepthTestManualState"));
-      require(query_frame && select_manual && manual_state,"Probe fixture needs existing passive-frame and real manual-selection adapters");
-      reshade::register_event<reshade::addon_event::reshade_render_technique>(observe_probe_depth);
-      set_int("Depth_Map_View",0); set_float("Depth_Adjustment",100); set_float("Sharpen_Power",0);
+      require(select_manual && manual_state,"Probe fixture needs the real manual-selection adapters");
+      game3d.start();
+      game3d.set_strength(100);
       await_current("sole-scaled-startup",*scene,12000);
       const auto calibrated=GetTickCount64()+12000;
-      while ((!ready() || scalar("Sunshine_CameraStrengthBlend")!=1.f) && GetTickCount64()<calibrated)
+      while (!(current(*scene) && full()) && GetTickCount64()<calibrated)
         tick("sole-scaled-calibration");
-      require(current(*scene) && ready() && scalar("Sunshine_CameraStrengthBlend")==1.f,
+      require(current(*scene) && full(),
               "Incumbent must be genuinely calibrated before testing challenger scheduling");
       stable("sole-scaled-confirmed",*scene,1200);
 
       if (native_priority) {
         check_native_priority();
         render_tracked_depth={};
-        reshade::unregister_event<reshade::addon_event::reshade_render_technique>(observe_probe_depth);
         return;
       }
 
@@ -207,9 +203,9 @@ namespace {
       decoy=target(width,height,1,9);
       for (unsigned i=0;i<6;++i) flats.push_back(target(width/2,height/2,1,0));
       await_current("native-before-flat-tour",*decoy,3000);
-      verify_pattern(*decoy);
+      verify_pattern("native-before-flat-tour",*decoy);
       stable("native-remains-selected",*decoy,1000);
-      verify_pattern(*decoy);
+      verify_pattern("native-remains-selected",*decoy);
       std::puts("PASS native source promotes without a full flat-candidate tour; actual source and depth pixels verified");
 
       // A perpetually uncopyable challenger must still relinquish the bounded
@@ -219,8 +215,14 @@ namespace {
       stable("scaled-reconfirmed",*scene,1200);
       missing=target(width,height,1,9);
       decoy=target(width,height,1,9);
-      await_current("uncaptured-candidate-yields",*decoy,6500);
-      verify_pattern(*decoy);
+      // The uncapturable peer may hold two consecutive discovery visits: the
+      // discovery hint's, then the round robin's, which orders candidates by
+      // lifetime rather than by the hint. Each visit is a queued and then an
+      // allocated capture phase of at most 2 s (sunshine_depth_probe::
+      // phase_expired) before the useful peer's own qualifying visit.
+      constexpr unsigned probe_phase_ms=2000;
+      await_current("uncaptured-candidate-yields",*decoy,2*(2*probe_phase_ms)+probe_phase_ms);
+      verify_pattern("uncaptured-candidate-yields",*decoy);
       std::puts("PASS uncaptured active candidate cannot starve a later useful source or become selected");
       missing.reset();
 
@@ -236,14 +238,13 @@ namespace {
         require(manual_state(observed.runtime,&actual,&recovering) && actual==pinned && !recovering && current(*scene),
                 "Challenger scheduling replaced an active manual depth pin");
       } while (GetTickCount64()<pin_until);
-      verify_pattern(*scene);
+      verify_pattern("manual-pin-retained",*scene);
       require(select_manual(observed.runtime,0),"Cannot return to automatic selection");
       await_current("manual-release-native-recovery",*decoy,12000);
-      verify_pattern(*decoy);
+      verify_pattern("manual-release-native-recovery",*decoy);
       std::puts("PASS active manual pin remains authoritative and explicit release restores automatic native selection");
       check_rotating_lower_promotion();
       render_tracked_depth={};
-      reshade::unregister_event<reshade::addon_event::reshade_render_technique>(observe_probe_depth);
     }
   };
 }
@@ -251,13 +252,11 @@ namespace {
 int main(int argc,char **argv) {
   std::setvbuf(stdout,nullptr,_IONBF,0);
   if(argc!=5 && (argc!=6 || std::strcmp(argv[5],"--native-priority")!=0)){
-    std::fputs("usage: depth_probe_round_runtime <official.dll> <Shaders> <test.addon64> <fresh-output> [--native-priority]\n",stderr);return 2;
+    std::fputs("usage: depth_probe_round_runtime <official.dll> <frozenShaders> <test.addon64> <fresh-output> [--native-priority]\n",stderr);return 2;
   }
   std::thread([]{Sleep(150000);std::fputs("FAIL probe-round watchdog\n",stderr);TerminateProcess(GetCurrentProcess(),124);}).detach();
   try {
-    require(sunshine_camera_fixture::flag("SUNSHINE_DEPTH_BIND_SWITCH_TEST") &&
-      sunshine_camera_fixture::flag("SUNSHINE_GAME3D_AUTOMATIC") && sunshine_camera_fixture::flag("SUNSHINE_GAME3D_AUTOMATIC_ACTIONS_TEST"),
-      "Fixture requires explicit preserve2 and Automatic test-action flags");
+    select_native_boot(true);
     width=3840; height=2160;
     require(!fs::exists(fs::absolute(argv[4])),"Fresh probe-round output required");
     probe_round_fixture f; f.runtime_directory=fs::absolute(argv[4]);
