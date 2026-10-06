@@ -45,7 +45,7 @@ The core package contains:
 | `gpu_trace.json` | Optional chronological decode of the authenticated raw GPU trace |
 | `gpu_trace_contract.json` | Optional exact trace offsets, enums, receipt ABI, and shader provenance |
 
-All `.f32` files are little-endian float32. Schema 41 accepts the canonical inactive descriptor or
+All `.f32` files are little-endian float32. Schema 44 accepts the canonical inactive descriptor or
 the one current `subtitle-slr13` package. It binds the exact current generated Depth Coordinate V2
 identity, producer and renderer closures, OCR model provenance, entrypoints, and four artifact
 roles (OCR record, locator state, Base field, atomic final field). The generated contract is the sole
@@ -60,7 +60,7 @@ owns their exact names, order and meaning. The tail is the GPU histogram result,
 recomputed by the dump writer; unavailable tail authority is canonical zero. This frame-statistics
 schema is separate from the shared `warp_map_contract` schema described below.
 
-Schema 41 authenticates one capture grid across `model_input`, `raw_depth`, and every V2 field. A
+Schema 44 authenticates one capture grid across `model_input`, `raw_depth`, and every V2 field. A
 production package uses one exact supported convex-2x high shape; halving both dimensions must
 recover an exact calibrated embedded DAV2 shape. The capture-time model provenance continues to authenticate that embedded DAV2
 identity and derived coarse calibration, while the public numeric artifacts remain high-resolution.
@@ -256,7 +256,7 @@ The maintained reader:
 7. validates canonical inactive metadata, or the exact authenticated current-subtitle-publication/
    held-reuse OCR8/SLR14 model, shader, record, state, and artifact identities;
 8. replays the ordinary V2 chain into `shadow_base_final_parallax.f32` when SLR14 is active, then
-   replays the exact content-clamped analytic rectangle budget and fade into
+   replays the exact content-clamped analytic rectangle budget and immediate full pin into
    `shadow_final_parallax.f32` (including exact nearest-content Base extension when current
    authority is empty). SM5 division is checked against the finite globally consistent one-ULP
    result set permitted for the three power-of-two divisions; this is not an epsilon comparison; and
@@ -264,7 +264,7 @@ The maintained reader:
    closure and ABI document, chronological wrap/commit structure, raw branch/OCR proof, matched
    analysis domain, and bit-for-bit decoded JSON. An unavailable trace remains valid optional state.
 
-Use `.f32` artifacts for quantitative work. Schema 41 does not package scalar/heat preview PNGs or
+Use `.f32` artifacts for quantitative work. Schema 44 does not package scalar/heat preview PNGs or
 per-field shape sidecars. The sole retained shape sidecar, `model_input_shape.json`, is calibrated
 preprocess authority rather than a preview description. On a fused capture it describes the sole
 high input; the embedded DAV2 calibration is derived from its exact half shape. Float dimensions live in
