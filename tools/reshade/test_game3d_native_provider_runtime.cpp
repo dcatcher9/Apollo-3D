@@ -23,16 +23,19 @@ namespace {
   }
 
   // The live layer as the add-on's execute handler left it, read inside
-  // ReShade's execute event of the one list armed here: ReShade invokes
-  // callbacks in registration order, so the test add-on's own handler ran
-  // and the native ExecuteCommandLists has not yet (layer queue order).
+  // ReShade's execute event of the one list armed here (list: that native
+  // list only; 0: the first executed): ReShade invokes callbacks in
+  // registration order, so the test add-on's own handler ran and the native
+  // ExecuteCommandLists has not yet (layer queue order).
   struct execute_probe_t {
     BOOL (*query)(sunshine_game3d::ui_layer::test_live_state *){};
     sunshine_game3d::ui_layer::test_live_state seen{};
+    std::uint64_t list{};
     bool armed{}, probed{};
   } execute_probe;
-  void probe_execute(api::command_queue *, api::command_list *) {
+  void probe_execute(api::command_queue *, api::command_list *commands) {
     if (!execute_probe.armed || execute_probe.probed) return;
+    if (execute_probe.list && (!commands || commands->get_native() != execute_probe.list)) return;
     execute_probe.probed = execute_probe.query && execute_probe.query(&execute_probe.seen);
   }
 }
@@ -655,8 +658,9 @@ namespace {
           straight_metadata.at("replay").at("source_alpha_auto").at("sampled_source") == sunshine_game3d::ui_detection::source_layer)
         throw std::runtime_error("The GPU admitted an offscreen layer with straight alpha: " + sampled.dump());
       // The live layer copy's queue facts on D3D12 (game3d_ui_layer.h, queue
-      // order): each copy keeps the queue that ran it; one run on the
-      // presenting queue is in queue order; one run on a second queue is held
+      // order): each copy keeps the queue that ran it and is held until the
+      // submission hook ran after its native call; one run on the presenting
+      // queue is then in queue order; one run on a second queue is held
       // for the fence signal recorded after its submission, then until the CPU
       // sees that fence reach it, and only then offered (in fence order) while
       // the copy offered before it stays offered. The presenting queue never
@@ -697,6 +701,43 @@ namespace {
           "A layer copy executed before its Present was not an in-order copy of the Present its count names");
         require(live.order == unsigned(order::queue) && !live.fence_value,
           "A layer copy on the presenting queue was ordered by a fence instead of queue order");
+        // Inside ReShade's execute event of the frame's list, before the
+        // native call, its copy on the presenting queue is held too (a Present
+        // on another thread would otherwise read it before its write reached
+        // the queue) and the copy before it stays offered; once the call
+        // returned the submission hook offers it in queue order, no fence.
+        {
+          const auto before_same = live;
+          execute_probe = {};
+          execute_probe.query = live_state;
+          execute_probe.list = game_native_command;
+          require(execute_probe.list, "The frame's native list is not known");
+          reshade::register_event<reshade::addon_event::execute_command_list>(probe_execute);
+          {
+            struct unregister_probe {
+              ~unregister_probe() {
+                execute_probe.armed = false;
+                reshade::unregister_event<reshade::addon_event::execute_command_list>(probe_execute);
+              }
+            } scope;
+            execute_probe.armed = true;
+            step(); no_effects();
+          }
+          const auto &window = execute_probe.seen;
+          require(execute_probe.probed && window.capture_id == before_same.capture_id + 1 && window.owing == 1 &&
+              !window.awaiting && window.offered_id == before_same.offered_id,
+            ("A layer copy on the presenting queue was offered before its native submission returned: probed=" +
+              std::to_string(execute_probe.probed) + " owing=" + std::to_string(window.owing) + " offered=" +
+              std::to_string(window.offered_id) + " captured=" + std::to_string(window.capture_id) + " before=" +
+              std::to_string(before_same.offered_id)).c_str());
+          live = query();
+          require(!live.owing && !live.awaiting && live.offered_id == window.capture_id && live.in_order &&
+              live.order == unsigned(order::queue) && !live.fence_value && live.presents_since_copy == 1 &&
+              live.executed_queue == live.presenting_queue,
+            ("A layer copy on the presenting queue was not offered in queue order once its native submission returned: "
+              "owing=" + std::to_string(live.owing) + " offered=" + std::to_string(live.offered_id) + " order=" +
+              std::to_string(live.order) + " presents_since_copy=" + std::to_string(live.presents_since_copy)).c_str());
+        }
         // A layer list executed on a second direct queue: the add-on's
         // submission hook signals that queue's fence after it.
         com_ptr<ID3D12CommandQueue> second;
@@ -933,12 +974,13 @@ namespace {
         live = query();
         require(live.in_order && live.order == unsigned(order::queue) && live.executed_queue == live.presenting_queue,
           "The next layer copy run on the presenting queue was not in queue order again");
-        evidence << "layer-cross-queue held_until_signal=1 held_until_fence=1 held_present_ms=" << held_present_ms <<
+        evidence << "layer-cross-queue same_queue_held_until_submitted=1 held_until_signal=1 held_until_fence=1 held_present_ms=" << held_present_ms <<
           " early_reset_kept_held=1 fence_passed=1 fg_schedule_ms=" << cycle_elapsed << " presenting_queue_waits=0\n";
         std::printf("MEASURE layer cross-queue: held_present_ms=%llu fg_schedule_ms=%llu\n",
           static_cast<unsigned long long>(held_present_ms), static_cast<unsigned long long>(cycle_elapsed));
-        std::puts("PASS D3D12 layer queue order: a copy run on the presenting queue before its Present is in queue order and "
-          "names that Present; one run on a second direct queue, kept across a bundle, is held (the previous copy stays "
+        std::puts("PASS D3D12 layer queue order: a copy run on the presenting queue before its Present is held until its "
+          "native submission returned, then in queue order and names that Present; one run on a second direct queue, kept "
+          "across a bundle, is held (the previous copy stays "
           "offered) until its fence signal is recorded after the native submission and the CPU sees that fence reach it, "
           "also across an early reset of its list; a Present meanwhile never waits for it; the frame-generation schedule "
           "that closed a cycle with a GPU wait runs at GPU speed and its copies are offered in fence order once reached; "

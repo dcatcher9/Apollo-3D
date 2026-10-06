@@ -231,31 +231,33 @@ int main() {
       require(!tracker.active(), "Reset kept an active layer");
     }
     std::puts("PASS UI layer tracking: confirmed after repeated clears, last-cleared layer active, one copy per Present, expiry");
-    // The Present count at the live copy names the Present whose frame it
-    // holds (presents_since_copy); the provider reads it after the Present's
-    // observe_output and reports it with the layer's metadata.
+    // The Present count at the live copy (frame(), recorded with the copy)
+    // names the Present whose frame it holds (presents_since); the provider
+    // reads it for the offered copy after the Present's observe_output and
+    // reports it with the layer's metadata.
     {
       layer::layer_tracker tracker;
       std::uint64_t now = 1000;
       for (unsigned i = 0; i < layer::confirm_clears; ++i, now += 16) frame(tracker, {7}, now);
-      require(tracker.active() == 7 && !tracker.presents_since_copy(), "A tracker without a copy counted Presents");
+      require(tracker.active() == 7, "A confirmed layer was not active");
       // Present k observed; the first clear of frame k+1 copies (the content
       // Present k showed), then Present k+1 is observed and its render reads 1.
       require(tracker.clear(7, now), "The active layer's first clear after a Present did not ask for its copy");
-      tracker.copied();
-      require(!tracker.presents_since_copy(), "A copy recorded in the current interval did not read 0");
+      auto copy = tracker.frame();
+      require(!tracker.presents_since(copy), "A copy recorded in the current interval did not read 0");
       tracker.present(now += 16);
-      require(tracker.presents_since_copy() == 1u, "A copy after Present k did not read 1 at render k+1");
+      require(tracker.presents_since(copy) == 1u, "A copy after Present k did not read 1 at render k+1");
       // An interval without a qualifying clear: the copy is two Presents old.
       tracker.present(now += 16);
-      require(tracker.presents_since_copy() == 2u, "An interval without a copy did not read 2");
+      require(tracker.presents_since(copy) == 2u, "An interval without a copy did not read 2");
       // The next copy restarts the count.
       require(tracker.clear(7, now), "The next interval's first clear did not ask for a copy");
-      tracker.copied();
+      copy = tracker.frame();
       tracker.present(now += 16);
-      require(tracker.presents_since_copy() == 1u, "A new copy did not restart the Present count");
+      require(tracker.presents_since(copy) == 1u, "A new copy did not restart the Present count");
+      // A copy recorded before a reset lies after the restarted count: 0.
       tracker.reset();
-      require(!tracker.presents_since_copy(), "Reset kept the Present count of a copy");
+      require(!tracker.frame() && !tracker.presents_since(copy), "Reset kept the Present count of a copy");
     }
     std::puts("PASS UI layer Present count: a copy after Present k reads 1 at render k+1, 2 after an interval without "
       "one, 0 within its own interval");
@@ -308,13 +310,19 @@ int main() {
       require(layer::fence_pending(4, 0) && layer::fence_pending(4, 3) && !layer::fence_pending(4, 4) &&
           !layer::fence_pending(4, 9) && !layer::fence_pending(4, UINT64_MAX) && !layer::fence_pending(0, 0),
         "A copy was offered before the CPU saw its fence reach its value, or held after it");
-      // An executed copy owing its signal is held only while the listener is heard.
-      require(layer::held_for_signal(true, true) && !layer::held_for_signal(true, false) && !layer::held_for_signal(false, true),
-        "A copy owing its fence signal was offered before it, or held without a listener");
+      // Every D3D12 copy executed on one queue, the presenting one included,
+      // is held for the submission hook after its native call (ReShade
+      // reports the execution before it), but only while the hook is heard;
+      // D3D11, two queues and an unknown queue are offered at once.
+      require(layer::held_for_submission(true, presenting, true) && layer::held_for_submission(true, other, true),
+        "A D3D12 copy was offered before its native submission returned");
+      require(!layer::held_for_submission(true, presenting, false) && !layer::held_for_submission(false, presenting, true) &&
+          !layer::held_for_submission(true, layer::mixed_queue, true) && !layer::held_for_submission(true, 0, true),
+        "A copy was held without a listener, on D3D11, on two queues or before it executed");
     }
     std::puts("PASS UI layer cross-queue order: only a D3D12 copy run on one other queue owes a fence signal; it is held "
       "while the CPU sees its fence below the value signalled after it (never a GPU wait) and then offered in fence order, "
-      "unordered without a value; an owing copy is held only while the listener is heard");
+      "unordered without a value; every D3D12 copy of one queue is held for the submission hook only while it is heard");
     // An older copy offered while a newer one is held names its own Present.
     {
       layer::layer_tracker tracker;
@@ -322,12 +330,11 @@ int main() {
       for (unsigned i = 0; i < layer::confirm_clears; ++i, now += 16) frame(tracker, {7}, now);
       require(tracker.clear(7, now), "The active layer did not ask for its copy");
       const auto older = tracker.frame();
-      tracker.copied();
       tracker.present(now += 16);
       require(tracker.clear(7, now), "The next interval did not ask for its copy");
-      tracker.copied();
+      const auto newer = tracker.frame();
       tracker.present(now += 16);
-      require(tracker.presents_since(older) == 2u && tracker.presents_since_copy() == 1u &&
+      require(tracker.presents_since(older) == 2u && tracker.presents_since(newer) == 1u &&
           tracker.presents_since(tracker.frame()) == 0u && tracker.presents_since(tracker.frame() + 1) == 0u,
         "A copy older than the newest did not count its own Presents");
     }
@@ -355,11 +362,27 @@ int main() {
       free = {false, false, true, false};
       choice = layer::choose_ring_entry(3, free, age, 2);
       require(choice.index == 3 && choice.allocate, "A busy ring did not grow");
-      free = {false, false, false, true};
-      choice = layer::choose_ring_entry(4, free, age, 3);
+      // A full ring: every entry but the offered one busy.
+      constexpr int last = int(layer::ring_capacity) - 1;
+      free = {};
+      free[unsigned(last)] = true;
+      choice = layer::choose_ring_entry(layer::ring_capacity, free, age, last);
       require(choice.index < 0, "A full busy ring overwrote an entry a render still reads");
-      choice = layer::choose_ring_entry(4, {true, false, false, true}, age, 3);
-      require(choice.index == 0, "A full ring ignored a completed entry");
+      free[0] = true;
+      choice = layer::choose_ring_entry(layer::ring_capacity, free, age, last);
+      require(choice.index == 0 && !choice.allocate, "A full ring ignored a completed entry");
+      // The budget of held cross-queue copies (game3d_ui_layer.h, 2L + 2):
+      // with both queues two frames behind, the offered entry (4), the one a
+      // Present is reading (3), two held copies (0, 1: pending, never free)
+      // and an earlier offered copy an unfinished Present still reads (2)
+      // leave the next copy a new entry, the ring's growth; only a ring whose
+      // every entry is busy so skips the copy.
+      require(layer::ring_capacity >= 6, "The ring cannot hold two held copies and two frames of readers");
+      free = {};
+      choice = layer::choose_ring_entry(5, free, {1, 2, 3, 4, 5}, 4, 3);
+      require(choice.index == 5 && choice.allocate, "A ring with held copies and readers did not grow for the next copy");
+      choice = layer::choose_ring_entry(6, free, {1, 2, 3, 4, 5, 6}, 4, 3);
+      require(choice.index < 0, "A ring whose entries are offered, held or read wrote over one of them");
       // An entry whose allocation failed (no copy, age UINT64_MAX) is taken
       // last: a free entry with a copy wins, and it is allocated again only
       // when it is the only free one; an entry being allocated is not free.
@@ -368,7 +391,7 @@ int main() {
       choice = layer::choose_ring_entry(3, {false, true, false, false}, {7, UINT64_MAX, 9, 0}, -1);
       require(choice.index == 1 && !choice.allocate, "An entry whose allocation failed was not retried as the only free one");
     }
-    std::puts("PASS UI layer live-copy ring: oldest free entry other than the newest and the one being read, growth to the capacity, skip when every entry is read");
+    std::puts("PASS UI layer live-copy ring: oldest free entry other than the newest and the one being read, growth to the capacity (six: two held copies and two frames of readers), skip when every entry is offered, held or read");
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "FAIL %s\n", error.what());

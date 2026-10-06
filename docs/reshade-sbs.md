@@ -166,7 +166,13 @@ list that recorded it, so its completion fence alone decides readiness. ReShade 
 results through `ID3D12Device15::ResolveQueryData` whenever the game's D3D12 runtime offers it
 (The Witcher 3 ships Agility SDK 1.619), but creates its query heaps without
 `D3D12_QUERY_HEAP_FLAG_CPU_RESOLVE`, so that read fails and every frame there was
-`dropped_unresolved`. D3D11 reads ReShade's results. The CPU entry also splits the slowest present into setup, depth, UI, render and
+`dropped_unresolved`. D3D11 reads ReShade's results. The line ends with the offscreen UI layer's
+live copies over the same 10 s (`ui_layer={copies skipped offers presents_since_copy={mean max}}`):
+copies recorded, copies skipped because every ring entry was offered, held or still read, Presents
+offered a copy, and the offered copy's Present count over those Presents (1 when every Present
+reads the copy of the frame before it; see the layer cross-queue fence under
+[Diagnostics switch and per-Present cost](#diagnostics-switch-and-per-present-cost)). All are zero
+while UI detection does not ask for the layer. The CPU entry also splits the slowest present into setup, depth, UI, render and
 export, and a rate-limited `Sunshine Game 3D hitch` warning names any present-thread step that
 takes more than 8 ms. Each step name has its own once-per-second throttle, so a nested step and the
 step around it both log. The GPU stage times exist only while the add-on's Diagnostics switch is on
@@ -318,7 +324,7 @@ is never also copied there, even when the renderer cannot bind it (it is then no
 Present), and `end_local_views` runs whenever a lease was taken. The renderer describes the leased storage
 in its own original-device descriptor (`renderer::bind_ui_snapshot`); the capture owner's own
 descriptor belongs to a heap ReShade wraps, which `push_descriptors` cannot copy. The offscreen UI
-layer keeps a ring of live copies (`ui_layer::ring_capacity`, 4; three normally suffice): each
+layer keeps a ring of live copies (`ui_layer::ring_capacity`, 6): each
 before-clear copy goes to an entry other than the newest and the one a Present is reading whose
 last reader, a renderer submission, completed (`ui_layer::bound` with the renderer's completion
 fence and value). The entry `ui_layer::latest` offers stays pinned until `bound` registers that
@@ -326,17 +332,27 @@ Present as its reader: in between it has no reader yet, and a game thread may pr
 and clear the layer again, which before the 10-05 review could record the next copy into the entry
 the presenting queue was about to read. A Present that renders nothing never binds, and the next
 offer moves the pin, so it holds at most one entry; with
-every entry busy the ring grows, and a full ring skips that copy and logs once. An entry whose
+every entry busy the ring grows, and a full ring skips that copy, logs once and counts it in the
+timing line (`ui_layer={... skipped=...}`). A clear needs the offered entry, one entry per copy
+held for its cross-queue fence (one per frame the copy's queue runs behind), one per earlier
+offered copy an unfinished Present still reads (one per frame the presenting queue runs behind) and
+the target: 2L + 2 with both queues L frames behind, so six entries hold L = 2. Four sufficed while a
+cross-queue copy was offered at its signal (the GPU wait below); with copies held until their fence
+completed, four would leave a game whose queues run two frames behind (Stellar Blade's copy queue
+with frame generation waits for presenting-queue work queued after the Present) skipping every other
+copy. The ring only grows when every entry is busy, so a game that needs three entries still
+allocates three. An entry whose
 allocation failed is taken last, so it is allocated again only when no entry with a copy is free,
 as a growth would be, and the ring keeps rotating its existing copies meanwhile. A recorded copy is
-pending until a list carrying it executes (and, when it owes the layer cross-queue fence a signal,
-until that signal is recorded and the CPU saw the fence reach it); only then is it offered, so
-detection reads the newest such copy as
+pending until a list carrying it executes (on D3D12, until the submission hook ran after the native
+call, and when it owes the layer cross-queue fence a signal, until the CPU saw the fence reach it);
+only then is it offered, so detection reads the newest such copy as
 the single live texture did. A carrying list reset unexecuted returns the entry
 (never offered), and a copy pending for 2 s is abandoned. Each entry keeps the queue that
 executed its carrying list (one executed on two queues has none). A copy that ran on the
 presenting queue alone (a D3D11 immediate or deferred-context copy always does) is in queue
-order before the Present's reads. The verdict is per copy: before WP1b one scope-wide queue watch
+order before the Present's reads once its write reached that queue: on D3D12 it is offered only
+after its native submission returned (below). The verdict is per copy: before WP1b one scope-wide queue watch
 remembered at most four carrying lists, so a fifth dropped the oldest list's queue while its copy
 was still promoted, and one foreign execution kept the whole scope from direct binding. A copy
 in queue or fence order (below) is bound directly; one no fence orders is copied. Streamline
@@ -352,30 +368,39 @@ names the first direct read of each kind once (`Sunshine UI input: reading ... d
 **Layer cross-queue fence.** On D3D12 a copy whose carrying list ran on one other queue is ordered
 by a fence of the add-on that only the CPU reads (`ui_layer::read_order`); the presenting queue
 never waits for a layer copy. ReShade reports an execution before the native
-`ExecuteCommandLists`, so the execution only marks the copy as owing a signal to that native
-list; the add-on's own submission hook (the capture owner's native observer, which already
-watches every queue's `ExecuteCommandLists`, through `native_observer::set_submission_listener`)
-then signals that queue's fence right after the native call returns, so the value follows the
-copy in that queue's order, and records the value with the ring entry. Until that value is
-recorded the entry stays pending (`ui_layer::held_for_signal`), and after it until the CPU sees
-the fence reach it (`ui_layer::fence_pending`: `GetCompletedValue`, never a wait), checked
+`ExecuteCommandLists`, so the execution only marks the copy as owed to that native list; the
+add-on's own submission hook (the capture owner's native observer, which already watches every
+queue's `ExecuteCommandLists`, through `native_observer::set_submission_listener`) runs right after
+the native call returns. Until then every D3D12 copy executed on one queue stays pending
+(`ui_layer::held_for_submission`), the presenting queue's own included: a Present on another thread
+(a frame-generation pacer, an engine's separate submission thread) between ReShade's event and the
+native call would otherwise bind the copy in queue order and submit its reads before the copy's
+write reached the queue, reading the entry's previous content or, in a new entry, an empty layer.
+The hook then offers a copy that ran on the presenting queue in queue order, without a fence, and
+for a copy that ran on another queue signals that queue's fence, so the value follows the copy in
+that queue's order, and records the value with the ring entry. That entry stays pending until the
+CPU sees the fence reach it (`ui_layer::fence_pending`: `GetCompletedValue`, never a wait), checked
 whenever a Present asks for the layer (`ui_layer::latest`) and before a clear picks a ring entry.
 A pending entry is neither offered nor rewritten, and the copy offered before it stays offered, so
-a Present never reads a copy whose write is not yet submitted or may still run (offering it at the
-execution event let a concurrent Present copy it unordered while the game's queue wrote it). The
+while the hook is heard a Present never reads a copy whose write is not yet submitted or may still
+run (offering a cross-queue copy at the execution event let a concurrent Present copy it unordered
+while the game's queue wrote it). Without the hook heard (below) a same-queue copy is offered at
+its execution event and relies on the game submitting and presenting from one thread, as before. The
 layer is a one-frame-late input by design (E2); a cross-queue copy is offered a frame or more later
-still while its queue runs behind the CPU, and the dumps' `presents_since_copy` counts the offered
-copy's own Presents. Once the fence reached the value the entry is offered unless a newer copy is
+still while its queue runs behind the CPU, and the dumps' `presents_since_copy`, `age_ms` and
+`capture_id` all describe the offered copy (`age_ms` from its own recording, not the newest
+recorded copy's, which only gates recency). Once the fence reached the value the entry is offered unless a newer copy is
 offered already, in fence order (`fence_passed`: it completed before anything the Present submits)
 and bound directly like a same-queue one. Only the copy's own queue signals its fence, in
 increasing values, and nothing signals it from the CPU, so a reached value stays reached (a removed
 device reads `UINT64_MAX`, which reaches it). A reset of the carrying list after its submission
 (legal while its work runs) keeps the entry held for its fence. A submission the hook never reports
-cannot hold a copy forever: a reset of its list before the signal offers it unordered (logged as
-not observed), a copy held for its signal for 2 s is abandoned like an unexecuted one (one whose
-signal is recorded is never abandoned, since its queue may still write it), and while the hook was
-not heard in the last second (the capture owner's observer inactive) an execution offers its copy
-at once, unordered. The fence is created on first use, one per device and queue (at most four),
+cannot hold a copy forever: a reset of its list before the hook offers it (a cross-queue copy
+unordered, logged as not observed; a same-queue copy in queue order), a copy held for the hook for
+2 s is abandoned like an unexecuted one (one whose fence signal is recorded is never abandoned,
+since its queue may still write it), and while the hook was not heard in the last second (the
+capture owner's observer inactive) an execution offers its copy at once (a cross-queue copy
+unordered). The fence is created on first use, one per device and queue (at most four),
 from the queue's own device; a record is reused only once no live copy names it and its last
 signal ran.
 

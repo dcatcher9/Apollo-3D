@@ -25,8 +25,8 @@
 // active layer is copied just before the first clear after each Present: D3D12
 // requires RENDER_TARGET for a clear, so the state is known, and the copy holds
 // the previous frame's UI: the frame the previous Present showed, which the
-// tracker's Present count names (presents_since_copy). UI detection receives
-// the newest copy as the
+// Present count since the copy names (presents_since_copy). UI detection
+// receives the newest offered copy as the
 // offscreen UI layer candidate, in a slot of its own beside any tagged
 // UIColorAndAlpha (UI framework E1, candidate bit 0x40 at t7). It decides only
 // once accepted by its own evidence (A1) and only in a frame where it is valid
@@ -40,27 +40,33 @@
 // copied as diagnostic artifacts.
 //
 // Queue order: each live copy remembers the queue that executed the list
-// carrying it. A copy that ran on the presenting queue alone is ordered by
-// queue order before the Present's reads. The presenting queue never waits
-// for a copy on the GPU: on D3D12 one that ran on one other queue is ordered
-// by a fence of the add-on that only the CPU reads. Right after the native
-// ExecuteCommandLists that carried it returns, the add-on's submission hook
-// (native_observer, observed_submission) signals that queue's fence, and the
-// copy is offered only once the CPU sees the fence reach that value
-// (GetCompletedValue, no wait: fence_pending); until then the copy offered
-// before it stays offered (the layer is a one-frame-late input by design,
-// E2). ReShade reports the execution before the native call, so such a copy
-// stays pending (never offered) until that signal is recorded, too. Stellar
-// Blade's and The Witcher 3's copies ran on another queue than the presenting
-// one in their dumps (both load Streamline), so refusing such copies would
-// remove their layer protection. A GPU wait of the presenting queue for that
-// fence (10-05) froze Stellar Blade with frame generation for a second: the
-// game's queue may be paced by, or wait for, presenting-queue work queued
-// after such a wait. A copy no fence orders (its submission unobserved, its
-// fence not created or signalled, or run on two queues) is still offered at
-// once and copied into the renderer's slot unordered, as before the fence,
-// logged once per reason. D3D11 runs every copy on its immediate context, the
-// presenting queue, so it never needs a fence.
+// carrying it. ReShade reports a D3D12 execution before the native
+// ExecuteCommandLists, so while the add-on's submission hook (native_observer,
+// observed_submission) is heard, an executed copy stays pending (never
+// offered) until that hook runs after the native call returned
+// (held_for_submission): a Present on another thread (a frame-generation
+// pacer, a separate submission thread) meanwhile keeps reading the copy
+// offered before it. A copy that ran on the presenting queue alone is then
+// offered, ordered by queue order before the Present's reads (its write was
+// submitted there first); without the hook heard it is offered at the
+// execution and relies on the game submitting and presenting from one
+// thread. The presenting queue never waits for a copy on the GPU: on D3D12
+// one that ran on one other queue is ordered by a fence of the add-on that
+// only the CPU reads. The hook signals that queue's fence after the native
+// call, and the copy is offered only once the CPU sees the fence reach that
+// value (GetCompletedValue, no wait: fence_pending); until then the copy
+// offered before it stays offered (the layer is a one-frame-late input by
+// design, E2). Stellar Blade's and The Witcher 3's copies ran on another queue
+// than the presenting one in their dumps (both load Streamline), so refusing
+// such copies would remove their layer protection. A GPU wait of the
+// presenting queue for that fence (10-05) froze Stellar Blade with frame
+// generation for a second: the game's queue may be paced by, or wait for,
+// presenting-queue work queued after such a wait. A copy no fence orders (its
+// submission unobserved, its fence not created or signalled, or run on two
+// queues) is still offered at once and copied into the renderer's slot
+// unordered, as before the fence, logged once per reason. D3D11 runs every
+// copy on its immediate context, the presenting queue, so it never needs a
+// fence.
 // Copies are allocated outside the tracker's lock and destroyed outside it
 // through a device alive meanwhile (presenting, recording or being
 // destroyed); a retired copy of another device is destroyed under it.
@@ -95,21 +101,14 @@ namespace sunshine_game3d::ui_layer {
     // A Present: choose the active layer among confirmed targets.
     void present(std::uint64_t now_ms);
     std::uint64_t active() const { return active_; }
-    // The active layer's copy was recorded now, in the current Present
-    // interval (after the last present()).
-    void copied() {
-      copy_frame_ = frame_;
-      copied_ = true;
-    }
-    // Presents observed since the last copied(): 1 when the copy was
-    // recorded after the previous Present and this Present was observed,
-    // so the copy holds the frame that previous Present showed; 2 when an
-    // interval passed without one; 0 within the copy's own interval or
-    // without a copy.
-    std::uint32_t presents_since_copy() const { return copied_ ? presents_since(copy_frame_) : 0u; }
-    // The same count for a copy recorded when frame() read frame (an older
-    // copy still offered while a newer one is held).
+    // The Present count: a copy records frame() when it is recorded.
     std::uint64_t frame() const { return frame_; }
+    // Presents observed since a copy recorded when frame() read frame: 1 when
+    // the copy was recorded after the previous Present and this Present was
+    // observed, so the copy holds the frame that previous Present showed; 2
+    // when an interval passed without a newer one offered (an older copy
+    // still offered while a newer one is held reads its own count); 0 within
+    // the copy's own interval, or for a frame after frame() (before a reset).
     std::uint32_t presents_since(std::uint64_t frame) const {
       return frame <= frame_ && frame_ - frame <= 0xffffffffu ? static_cast<std::uint32_t>(frame_ - frame) : 0u;
     }
@@ -124,8 +123,8 @@ namespace sunshine_game3d::ui_layer {
         now_ms - value.last_ms <= max_clear_gap_ms;
     }
     std::array<entry, 8> entries_{};
-    std::uint64_t order_{}, frame_{}, active_{}, copy_frame_{};
-    bool captured_since_present_{}, copied_{};
+    std::uint64_t order_{}, frame_{}, active_{};
+    bool captured_since_present_{};
   };
 
   // The queue that executed a live copy (pure). A copy recorded on the
@@ -164,15 +163,20 @@ namespace sunshine_game3d::ui_layer {
   constexpr bool owes_signal(bool d3d12, std::uint64_t executed, std::uint64_t presenting) {
     return d3d12 && executed && executed != mixed_queue && !presented_in_order(executed, presenting);
   }
-  // An executed copy that owes its fence signal is held pending (never
-  // offered, never rewritten) until the submission hook records that signal
-  // after the native call, or its list is reset first (then offered as
-  // unobserved, unordered). One owing nothing is offered at once, and so is
-  // one no listener can sign: the submission hook was not heard within
-  // listener_window_ms (the capture owner's observer inactive), so its
+  // A D3D12 copy executed on one queue is held pending (never offered, never
+  // rewritten) until the submission hook runs after its native
+  // ExecuteCommandLists returned, since ReShade reports the execution before
+  // that call: one on the presenting queue is then offered in queue order,
+  // one owing a fence signal (owes_signal) gets it recorded. A reset of its
+  // list first offers it (unobserved: unordered unless it ran on the
+  // presenting queue). A D3D11 copy, one run on two queues, and one no
+  // listener can see are offered at once: the submission hook was not heard
+  // within listener_window_ms (the capture owner's observer inactive), so its
   // submission is not observed (pure).
   inline constexpr std::uint64_t listener_window_ms = 1000;
-  constexpr bool held_for_signal(bool owes, bool listening) { return owes && listening; }
+  constexpr bool held_for_submission(bool d3d12, std::uint64_t executed, bool listening) {
+    return d3d12 && listening && executed && executed != mixed_queue;
+  }
   // A copy whose fence signal is recorded stays held (pending) while the CPU
   // sees its queue's fence below that value (completed: GetCompletedValue,
   // never a wait; a removed device reads UINT64_MAX, which reaches it). Once
@@ -183,22 +187,29 @@ namespace sunshine_game3d::ui_layer {
   static_assert(order_for(true, 0) == read_order::queue && order_for(true, 3) == read_order::queue &&
     order_for(false, 0) == read_order::unordered && order_for(false, 3) == read_order::fence_passed &&
     owes_signal(true, 6, 5) && !owes_signal(false, 6, 5) && !owes_signal(true, 5, 5) && !owes_signal(true, mixed_queue, 5) &&
-    !owes_signal(true, 0, 5) && owes_signal(true, 6, 0) && held_for_signal(true, true) && !held_for_signal(true, false) &&
-    !held_for_signal(false, true) && fence_pending(3, 2) && !fence_pending(3, 3) && !fence_pending(3, 4) &&
-    !fence_pending(3, UINT64_MAX) && !fence_pending(0, 0));
+    !owes_signal(true, 0, 5) && owes_signal(true, 6, 0) && held_for_submission(true, 5, true) &&
+    held_for_submission(true, 6, true) && !held_for_submission(true, 5, false) && !held_for_submission(false, 5, true) &&
+    !held_for_submission(true, mixed_queue, true) && !held_for_submission(true, 0, true) && fence_pending(3, 2) &&
+    !fence_pending(3, 3) && !fence_pending(3, 4) && !fence_pending(3, UINT64_MAX) && !fence_pending(0, 0));
 
-  // Live copies: a ring of add-on owned copies (ring_capacity at most; three
-  // normally suffice). A before-clear copy goes to an entry other than the
-  // offered one and the one a Present is reading (offered by latest(), its
-  // reader not yet registered by bound()) whose last reader, a renderer
-  // submission (bound()), completed
+  // Live copies: a ring of add-on owned copies (ring_capacity at most). A
+  // before-clear copy goes to an entry other than the offered one and the one
+  // a Present is reading (offered by latest(), its reader not yet registered
+  // by bound()) whose last reader, a renderer submission (bound()), completed
   // and whose own copy is not pending; with every entry busy the ring grows,
-  // and once full that copy is skipped and logged (saturated). A recorded copy
-  // is pending, never offered, until a list carrying it executes (and, when it
-  // owes a fence signal, until that signal is recorded and the CPU saw the
-  // fence reach it: held_for_signal, fence_pending); the offered entry is the
-  // newest such copy. Pure: no GPU or runtime calls.
-  inline constexpr unsigned ring_capacity = 4;
+  // and once full that copy is skipped (counted, take_stats, and logged once:
+  // saturated). A recorded copy is pending, never offered, until a list
+  // carrying it executes (on D3D12, until the submission hook ran after the
+  // native call, and when it owes a fence signal until the CPU saw the fence
+  // reach it: held_for_submission, fence_pending); the offered entry is the
+  // newest such copy. A clear therefore needs the offered entry, one entry
+  // per copy held for its fence (one per frame the copy's queue runs behind),
+  // one per earlier offered copy still read by an unfinished Present (one per
+  // frame the presenting queue runs behind) and the target: 2L + 2 with both
+  // queues L frames behind, 6 at L = 2. The ring only grows when every entry
+  // is busy, so a game that needs three entries allocates three. Pure: no GPU
+  // or runtime calls.
+  inline constexpr unsigned ring_capacity = 6;
   struct ring_choice {
     int index = -1;        // The entry to write; -1 when saturated.
     bool allocate = false; // index is a new entry.
@@ -231,7 +242,7 @@ namespace sunshine_game3d::ui_layer {
     // The fence value signalled after the copy on another queue (0: none).
     std::uint64_t fence_value{};
     std::uint64_t capture_id{}; // The offered entry's copy id; never zero when valid.
-    std::uint64_t tick{};       // GetTickCount64 when the newest copy was recorded.
+    std::uint64_t tick{};       // GetTickCount64 when the offered copy was recorded.
     std::uint32_t format{};     // Typed format of the copy.
     // Presents observed since the offered copy (layer_tracker::
     // presents_since): the copy holds the frame of the Present that many back.
@@ -240,20 +251,31 @@ namespace sunshine_game3d::ui_layer {
     std::uint64_t executed_queue{};
   };
   // The active layer's offered copy on this device (the newest executed one
-  // that owes no fence signal and whose fence, if any, the CPU saw reach it;
-  // it never waits), while its newest copy was recorded less than
-  // max_clear_gap_ms ago. The first copy offered from another queue than the
-  // presenting one with a fence, and the first without one for each reason,
-  // are logged. Each call also asks for the next copies: the layer is tracked
-  // and copied only while UI detection keeps asking.
+  // that is not held: held_for_submission, fence_pending; it never waits),
+  // while its newest recorded copy was recorded less than max_clear_gap_ms
+  // ago. capture_id, tick and presents_since_copy all describe the offered
+  // copy. The first copy offered from another queue than the presenting one
+  // with a fence, and the first without one for each reason, are logged. Each
+  // call also asks for the next copies: the layer is tracked and copied only
+  // while UI detection keeps asking.
   bool latest(api::device *device, std::uint64_t now_ms, live_capture &out);
+  // The live copies since the last call, for the periodic timing line:
+  // recorded copies, copies skipped by a saturated ring, and Presents
+  // latest() offered a copy to with that copy's presents_since_copy (sum
+  // and maximum). The counters restart with each call.
+  struct stats {
+    std::uint64_t copies{}, skipped{}, offers{}, presents_since_sum{};
+    std::uint32_t presents_since_max{};
+  };
+  stats take_stats();
   // The native observer's submission listener (native_observer::
   // set_submission_listener): after a native submission that ran a list
-  // whose live copy owes its fence signal, signals that queue's fence (created
-  // on first use, one per device and queue) and records the value with the
-  // copy, which latest() offers once the CPU sees the fence reach it.
-  // Submissions of lists owing nothing return before any lock; each call only
-  // stamps that the listener is heard.
+  // carrying a held live copy, offers a copy run on the presenting queue
+  // (queue order), and for one run on another queue signals that queue's
+  // fence (created on first use, one per device and queue) and records the
+  // value with the copy, which latest() offers once the CPU sees the fence
+  // reach it. Submissions of lists carrying no held copy return before any
+  // lock; each call only stamps that the listener is heard.
   void observed_submission(std::uint64_t queue, unsigned count,
     const sunshine_streamline::native_observer::command_identity *commands) noexcept;
 
@@ -272,9 +294,10 @@ namespace sunshine_game3d::ui_layer {
   // and offered_id the offered copy's; executed_queue the queue that ran the
   // offered copy (mixed_queue: several); in_order whether queue or fence
   // order puts that copy before the Present's reads, order how (read_order)
-  // and fence_value the value signalled after it (0: none); owing the copies
-  // held for their fence signal, and awaiting those whose signal is recorded
-  // but whose fence the CPU has not seen reach it.
+  // and fence_value the value signalled after it (0: none);
+  // presents_since_copy the offered copy's count, as latest() reports it;
+  // owing the copies held for the submission hook, and awaiting those whose
+  // fence signal is recorded but whose fence the CPU has not seen reach it.
   struct test_live_state {
     std::uint64_t capture_id{}, executed_queue{}, presenting_queue{};
     std::uint32_t presents_since_copy{}, in_order{};
