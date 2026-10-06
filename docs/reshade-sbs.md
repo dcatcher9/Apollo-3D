@@ -4707,17 +4707,23 @@ common state between owners, and the pass reads only the renderer's working set,
 renderer's completion fence already retains. Up to three submitted GPU writes may remain unfinished, bounded by
 the existing three-slot ring. A recorded slot write must receive its submission fence before the next
 is admitted; there is no global requirement to wait for the previous GPU write to complete.
-Admission (`acquire_slot`) takes a free slot first, else the oldest ready slot whose write
-completed, and never the ring's newest unconsumed frame (a ready slot whose sequence is the
-highest of the ready and reading slots); the round-robin it replaced could overwrite that frame.
-A slot is reusable once its previous GPU write completed, judged by that slot's own fence
-sequence, including slots already marked free by a consumer that discarded them. A ready slot
-whose write is still queued is never reused: the host claims a ready frame once its fence passes, so the
-oldest queued one is the frame it claims next. When the GPU runs two or more Presents behind,
-writing over it every Present would leave the host no claimable frame at all. A copy or overlay
-write waits for completion. Reading slots remain unavailable. If no slot is reusable, the add-on
-drops the publication and returns to the game without waiting. `Sunshine SBS output` counts both
-(`dropped`, and `overwritten_unconsumed` for a completed ready slot written over).
+Admission (`acquire_slot`) takes a free slot first, else the oldest ready slot that a newer
+completed frame supersedes. The host claims the newest ready frame whose fence passed, so the
+newest completed frame of the ready and reading slots is the one it claims next (or holds), and it
+is never written over, even while a newer write is still queued. Writing over it as soon as a
+newer write was queued replaced about 70 finished frames/s that the host never claimed in Stellar
+Blade at 4K with FG 4x: a host that came a few milliseconds late found nothing claimable until the
+queued write landed. A slot is reusable once its previous GPU write completed, judged by that
+slot's own fence sequence, including slots already marked free by a consumer that discarded them.
+A ready slot whose write is still queued is never reused either: when the GPU runs two or more
+Presents behind, writing over it every Present would leave the host no claimable frame at all.
+A copy or overlay write waits for completion. Reading slots remain unavailable. If no slot is
+reusable, the add-on drops the publication and returns to the game without waiting.
+`Sunshine SBS output` counts both (`dropped`, and `overwritten_unconsumed` for a completed ready
+slot written over, which a newer completed frame had superseded). `reshade_exporter_tests.exe`
+runs the real admission against a host that claims at 90 fps without any fence wake
+(`ring_throughput`): it must never write over the host's next frame, and the host must receive
+85.5 or more new frames/s at FG off, 2x and 4x Present rates.
 
 Each slot retains its native source resource and a separate overlay compositor. They cannot be
 replaced while that slot's copy/composition remains in flight. Reload, deactivation and runtime

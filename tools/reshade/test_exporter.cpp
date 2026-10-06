@@ -1609,9 +1609,9 @@ namespace {
     }
 
     // acquire_slot (docs/reshade-sbs.md, GPU handoff contract): free slots
-    // first, then the oldest completed ready slot that is not the ring's
-    // newest unconsumed frame; a still queued write is never reused. CPU
-    // only: the slot words are set directly.
+    // first, then the oldest ready slot a newer completed frame supersedes;
+    // the consumer's next frame and a still queued write are never reused.
+    // CPU only: the slot words are set directly.
     static void slot_policy() {
       publisher_t publisher;
       require(publisher.init(), "mapping creation failed");
@@ -1641,7 +1641,10 @@ namespace {
       // rather than written over it.
       set({{{s::reading, 9}, {s::ready, 10}, {s::ready, 11}}});
       require(publisher.acquire_slot(9) == wire::slot_count, "a queued write was reused");
-      require(publisher.acquire_slot(10, &overwrote) == 1 && overwrote, "a completed ready frame older than the newest was kept");
+      // 10 completed, 11 still queued: 10 is now the consumer's next frame. A
+      // consumer that comes before 11 completes must still find it.
+      require(publisher.acquire_slot(10) == wire::slot_count, "the consumer's next frame was written over");
+      require(publisher.acquire_slot(11, &overwrote) == 1 && overwrote, "a completed ready frame a newer completed one supersedes was kept");
       // A free slot whose write is still queued is never reused either.
       set({{{s::reading, 9}, {s::free, 12}, {s::ready, 11}}});
       require(publisher.acquire_slot(9) == wire::slot_count, "a free slot's queued write was reused");
@@ -1649,7 +1652,7 @@ namespace {
       set({{{s::free, 0}, {s::free, 0}, {s::free, 0}}});
       for (auto &slot : slots) store_state(slot, generation.id + 1, s::free);
       require(publisher.acquire_slot(0) == wire::slot_count, "another generation's slot was claimed");
-      std::puts("PASS export slot policy: free first, oldest completed ready, newest unconsumed kept, no queued write reused");
+      std::puts("PASS export slot policy: free first, oldest superseded ready, the consumer's next frame kept, no queued write reused");
     }
 
     // A GPU-bound game: each export's fence completes lag Presents after its
@@ -1727,6 +1730,98 @@ namespace {
           static_cast<unsigned long long>(sequence), claims);
       }
       std::puts("PASS lagging fence: the consumer's held frame keeps advancing; queued ready frames are never overwritten");
+    }
+
+    // Live Stellar Blade 4K evidence: at FG 4x the add-on published ~120
+    // frames/s, yet the host claimed only ~50/s and ~70/s of the published
+    // frames were written over after their fence passed, unclaimed. Here the
+    // real acquire_slot serves a game presenting like the live one (FG off
+    // ~115/s, FG 2x ~145/s, FG 4x ~220/s, each fence completing 5-15 ms after
+    // its Present) and a host following its rules (reshade_bridge.cpp,
+    // video.cpp) without any fence wake: once its conversion and encode
+    // (8.4-10.4 ms) finished and its 90 fps presentation is due, it claims the
+    // newest ready frame past its held one whose fence passed, re-checking
+    // every millisecond, and the replaced slot returns at the claim. The
+    // producer must never write over the frame that host claims next, and the
+    // host must then receive min(Present rate, 90) new frames per second.
+    static void ring_throughput() {
+      using s = wire::slot_state;
+      struct mode_t { const char *name; int generated; double low, high; };
+      for (const mode_t mode : {mode_t{"FG off", 1, 7.5, 10.0}, mode_t{"FG 2x", 2, 12.5, 15.0}, mode_t{"FG 4x", 4, 16.0, 20.5}}) {
+        std::uint32_t jitter = 12345;
+        const auto between_us = [&](double low_ms, double high_ms) {
+          jitter = jitter * 1664525u + 1013904223u;
+          return static_cast<std::int64_t>((low_ms + (high_ms - low_ms) * (static_cast<double>(jitter >> 8) / 16777216.0)) * 1000.0);
+        };
+        constexpr std::int64_t duration = 4'000'000, step = 10, stream = 11'111, threshold = stream / 4, recheck = 1'000;
+        std::vector<std::int64_t> presents;
+        for (std::int64_t real = 0; real < duration;) {
+          const auto length = between_us(mode.low, mode.high);
+          for (int i = 0; i < mode.generated; ++i) presents.push_back(real + length * i / mode.generated);
+          real += length;
+        }
+        publisher_t publisher;
+        require(publisher.init(), "mapping creation failed");
+        publisher.generation_ = std::make_unique<generation_t>();
+        const auto id = publisher.generation_->id = 3;
+        auto &slots = publisher.shared_->slots;
+        for (auto &slot : slots) {
+          store_state(slot, id, s::free);
+          slot.sequence = 0;
+        }
+        std::vector<std::int64_t> present_of(1, 0), completion_of(1, 0);
+        std::uint64_t completed = 0, held_sequence = 0, published = 0, dropped = 0, overwritten = 0, claimed = 0, encodes = 0;
+        int held = -1;
+        std::int64_t busy_until = 0, target = 0, next_check = 0, total_age = 0;
+        std::size_t next_present = 0;
+        for (std::int64_t now = 0; now < duration; now += step) {
+          while (completed + 1 < completion_of.size() && completion_of[completed + 1] <= now) ++completed;
+          for (; next_present < presents.size() && presents[next_present] <= now; ++next_present) {
+            int next_claim = -1;
+            for (std::uint32_t i = 0; i < wire::slot_count; ++i) {
+              if (wire::control_state(slots[i].control) == s::ready && slots[i].sequence > held_sequence && slots[i].sequence <= completed &&
+                  (next_claim < 0 || slots[i].sequence > slots[next_claim].sequence)) next_claim = static_cast<int>(i);
+            }
+            bool overwrote = false;
+            const auto index = publisher.acquire_slot(completed, &overwrote);
+            if (index == wire::slot_count) {
+              ++dropped;
+              continue;
+            }
+            require(static_cast<int>(index) != next_claim, (std::string("the frame the host claims next was written over at ") + mode.name).c_str());
+            overwritten += overwrote;
+            slots[index].sequence = ++published;
+            store_state(slots[index], id, s::ready);
+            present_of.push_back(presents[next_present]);
+            completion_of.push_back(std::max(completion_of.back(), presents[next_present] + between_us(5.0, 15.0)));
+          }
+          if (now < busy_until || now < next_check) continue;
+          int selected = -1;
+          for (std::uint32_t i = 0; i < wire::slot_count; ++i) {
+            if (static_cast<int>(i) != held && wire::control_state(slots[i].control) == s::ready && slots[i].sequence > held_sequence &&
+                slots[i].sequence <= completed && (selected < 0 || slots[i].sequence > slots[selected].sequence)) selected = static_cast<int>(i);
+          }
+          if (selected < 0) {
+            next_check = now + recheck;
+            continue;
+          }
+          store_state(slots[selected], id, s::reading);
+          if (held >= 0) store_state(slots[held], id, s::free);
+          held = selected;
+          held_sequence = slots[selected].sequence;
+          total_age += now - present_of[held_sequence];
+          ++claimed;
+          target = (now - target < threshold ? target : now) + stream;
+          busy_until = now + 8'400 + 1'000 * static_cast<std::int64_t>(encodes++ % 3);
+          next_check = std::max(busy_until, target - threshold);
+        }
+        const double seconds = duration / 1e6;
+        std::printf("MEASURE export ring %s: presents=%.0f/s published=%.0f/s dropped=%.0f/s overwritten=%.0f/s new=%.1f/s mean_claim_age=%.1f ms\n",
+          mode.name, presents.size() / seconds, published / seconds, dropped / seconds, overwritten / seconds, claimed / seconds,
+          claimed ? total_age / 1000.0 / claimed : 0.0);
+        require(claimed / seconds >= 85.5, (std::string("the host received fewer than 85.5 new frames/s at ") + mode.name).c_str());
+      }
+      std::puts("PASS export ring: the host's next frame is never written over and it receives the stream rate at FG off, 2x and 4x");
     }
 
     // The export's publication in reshade_present (present()), before the
@@ -2061,6 +2156,7 @@ int main(int argc, char **argv) {
     publisher_tests::d3d12_deferred_signal(true);
     publisher_tests::slot_policy();
     publisher_tests::lagging_fence_handoff();
+    publisher_tests::ring_throughput();
     publisher_tests::present_signal(true);
     publisher_tests::present_signal(false);
     publisher_tests::idle_ring_release();

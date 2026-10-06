@@ -2161,15 +2161,17 @@ namespace {
     }
 
     // Claims a slot for this Present's export (docs/reshade-sbs.md, GPU handoff
-    // contract): a free slot first, else the oldest ready slot whose write
-    // completed, never the ring's newest unconsumed frame (a ready slot whose
-    // sequence is the highest of the ready and reading slots). A slot is
-    // reusable once its previous GPU write completed: a ready slot whose write
-    // is still queued is never reused, since the consumer claims a ready frame
-    // once its fence passes, so a queued one is the frame it claims next. A
-    // consumer may discard a frame without reading it, so a free slot also
-    // waits for its write to complete (every free slot of the current
-    // generation has: reset, or freed by a consumer after its fence passed).
+    // contract): a free slot first, else the oldest ready slot that a newer
+    // completed frame supersedes. The consumer claims the newest ready frame
+    // whose fence passed, so the newest completed frame of the ready and
+    // reading slots is the one it claims next (or holds) and is never written
+    // over, even while a newer write is still queued: a consumer that comes
+    // late still finds it, instead of nothing until the queued write lands. A
+    // slot is reusable once its previous GPU write completed: a ready slot
+    // whose write is still queued is never reused either. A consumer may
+    // discard a frame without reading it, so a free slot also waits for its
+    // write to complete (every free slot of the current generation has:
+    // reset, or freed by a consumer after its fence passed).
     // overwrote: a ready slot was claimed.
     std::uint32_t acquire_slot(std::uint64_t completed, bool *overwrote = nullptr) {
       if (overwrote) *overwrote = false;
@@ -2180,14 +2182,15 @@ namespace {
       const auto id = generation_->id;
       std::array<wire::slot_state, wire::slot_count> states{};
       std::array<bool, wire::slot_count> current{};
-      std::uint64_t newest = 0;
+      std::uint64_t newest_completed = 0;
       for (std::uint32_t index = 0; index < wire::slot_count; ++index) {
         const auto control = static_cast<std::uint64_t>(InterlockedCompareExchange64(
           reinterpret_cast<volatile LONG64 *>(&shared_->slots[index].control), 0, 0));
         current[index] = wire::control_generation(control) == id;
         states[index] = wire::control_state(control);
-        if (current[index] && (states[index] == wire::slot_state::ready || states[index] == wire::slot_state::reading))
-          newest = std::max(newest, shared_->slots[index].sequence);
+        if (current[index] && (states[index] == wire::slot_state::ready || states[index] == wire::slot_state::reading) &&
+            shared_->slots[index].sequence <= completed)
+          newest_completed = std::max(newest_completed, shared_->slots[index].sequence);
       }
       const auto written = [&](std::uint32_t index) {
         return current[index] && completed >= shared_->slots[index].sequence;
@@ -2204,7 +2207,7 @@ namespace {
         return shared_->slots[a].sequence < shared_->slots[b].sequence;
       });
       for (const auto index : order) {
-        if (states[index] != wire::slot_state::ready || !written(index) || shared_->slots[index].sequence >= newest) continue;
+        if (states[index] != wire::slot_state::ready || !written(index) || shared_->slots[index].sequence >= newest_completed) continue;
         if (exchange_state(shared_->slots[index], id, wire::slot_state::writing, wire::slot_state::ready)) {
           if (overwrote) *overwrote = true;
           return index;
