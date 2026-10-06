@@ -293,11 +293,11 @@ namespace sunshine_game3d::ui_temporal {
     // The inputs the last adopting real frame offered (adopt): they key the
     // status (status_key) and the accepted-missing reference.
     std::uint32_t bits{}, accepted{};
-    // T1 (M6): whether a real decision exists in this chain, its scope, and
-    // whether the next detection starts a new chain (per_frame_hold_reset).
+    // T1 (M6): whether a real decision exists in this chain, and its scope.
+    // Without one in scope (no decision, or a scope change) the next
+    // detection starts a new chain (per_frame_hold_reset).
     bool have_decision{};
     alpha_auto_source decision_scope;
-    bool reset_pending = true;
     // Consecutive generated Presents that applied the detected mask.
     std::uint32_t holds{};
     // The latest completed status sample, the inputs it was taken for and its
@@ -333,7 +333,7 @@ namespace sunshine_game3d::ui_temporal {
         return result;
       }
       result.detect = true;
-      if (!have_decision || reset_pending || !same_scope) result.per_frame |= ui_detection::per_frame_hold_reset;
+      if (!same_scope) result.per_frame |= ui_detection::per_frame_hold_reset;
       else if (bits & accepted & ui_selection::candidate_bits & ~offered)
         result.per_frame |= ui_detection::per_frame_accepted_missing;
       result.adopt = !(result.per_frame & ui_detection::per_frame_accepted_missing);
@@ -371,12 +371,10 @@ namespace sunshine_game3d::ui_temporal {
       have_decision = true;
       decision_scope = scope;
       holds = 0;
-      reset_pending = false;
     }
     // A generated Present without a mask ends the chain.
     void unavailable() {
       have_decision = false;
-      reset_pending = true;
       holds = 0;
     }
     // A render without detection keeps no real decision (T1). The

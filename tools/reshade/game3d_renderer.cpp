@@ -244,7 +244,6 @@ namespace sunshine_game3d {
     scene_guard::state guard;
     // The pending sample ran the evidence passes (measure: actionable).
     bool detection_pending_actionable{};
-    bool hold_cleared{};
     // The constants of the last detection run, and the run this render's mask
     // came from (fresh, or held on a generated Present).
     ui_detection_snapshot detection_run, consumed_detection;
@@ -314,7 +313,6 @@ namespace sunshine_game3d {
       memo_valid = field_memo_valid = false;
       temporal = {};
       guard = {};
-      hold_cleared = false;
       detection_pending = detection_awaiting_signal = detection_pending_actionable = false;
       detection_fence = detection_last_submit = 0;
       counters_pending = false;
@@ -1040,16 +1038,12 @@ namespace sunshine_game3d {
         cmd->barrier(counter_texture.resource, api::resource_usage::unordered_access, api::resource_usage::shader_resource);
         counters_cleared = true;
       }
-      // The T1 hold store starts at none; every chain's first detection also
-      // pushes per_frame_hold_reset.
+      // The T1 hold store needs no initial clear: every chain's first
+      // detection (no decision in scope, a new renderer or a resume included)
+      // pushes per_frame_hold_reset, so the reduce ignores the store's old
+      // contents and overwrites all of it; later detections of the chain read
+      // what the chain wrote.
       auto &hold_texture = textures[detection_hold];
-      if (!hold_cleared) {
-        const uint32_t zero[4]{};
-        cmd->barrier(hold_texture.resource, api::resource_usage::shader_resource, api::resource_usage::unordered_access);
-        cmd->clear_unordered_access_view_uint(hold_texture.uav, zero);
-        cmd->barrier(hold_texture.resource, api::resource_usage::unordered_access, api::resource_usage::shader_resource);
-        hold_cleared = true;
-      }
       // The reduce (reduce true) also binds the hold store at u5; no other
       // detection pass reads it.
       const auto dispatch_stage = [&](pass stage, texture_id target, unsigned output, unsigned x, unsigned y,

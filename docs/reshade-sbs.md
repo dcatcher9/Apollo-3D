@@ -1636,7 +1636,9 @@ cell sums have their own texture, because a pass cannot read the texture it writ
 the readback and its parse for the current revision, and makes automatic detection unavailable for
 a shader whose markers differ from it. The T1 hold store (`SunshineUIHoldStore`, three `R32_UINT` texels at
 `u5`, `SUNSHINE_UI_HOLD_*`) is bound for the reduce only, never beside the resolved-plane store
-that shares the register; the renderer zero-clears it once (state none). The offline replay binds
+that shares the register. It needs no initial clear: every chain's first detection pushes
+`0x200000`, so the reduce ignores the store and writes it whole, and later detections of the chain
+read what it wrote. The offline replay binds
 nothing there, so its reduce reads state none and never reuses a decision.
 
 **UI counters.** Each `Sunshine UI protection` line describes the latest 100 ms status sample;

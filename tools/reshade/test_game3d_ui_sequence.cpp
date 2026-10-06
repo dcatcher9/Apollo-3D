@@ -3013,7 +3013,7 @@ namespace {
       auto inactive = p;
       inactive.available = false;
       const auto &off = step(inactive);
-      require(!off.active && !s.temporal.have_decision && s.temporal.reset_pending && held(), "An inactive frame kept a T1 decision, or cleared the held verdict");
+      require(!off.active && !s.temporal.have_decision && held(), "An inactive frame kept a T1 decision, or cleared the held verdict");
       require(step(p).source == 8u, "The frame after an inactive one was not flat under the held verdict");
     }
     {
