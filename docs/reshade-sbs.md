@@ -252,8 +252,10 @@ default), the add-on records none of its diagnostic-only per-frame work: per-pas
 and their resolves (the timing line keeps its CPU fields and hitch lines stay), and the Streamline
 V1 Reflex / V2 PCL presentation brackets, which only the probe's presentation trace reads (the PCL
 marker hooks are installed only while it is on; see
-[Upscaler call-route diagnostic](#upscaler-call-route-diagnostic)). The A2 per-pixel
-statistics (A2 revocation and the one-way judgment read them) and the exact UI counters always run. Decisions, masks, candidate binding and exported pixels
+[Upscaler call-route diagnostic](#upscaler-call-route-diagnostic)). The A2 one-way
+statistics (A2 revocation and the one-way judgment read them) run with the switch on or off, on
+status samples only (per-frame bit `0x4000`, at most one every 100 ms); the exact UI counters
+always run. Decisions, masks, candidate binding and exported pixels
 are the same with the switch on or off. The capture owner's queue watch, the layer's carrier
 events and its submission listener stay registered either way, since direct binding reads them,
 the layer's live-copy ring offers a copy only once a list carrying it executed, and its
@@ -4842,13 +4844,14 @@ verify bit-preserving FP16 handoff and color changes across resource generations
 GPU tests check SDR white in PQ/scRGB, tone mapping for SDR output and per-eye chroma filtering.
 
 Controlled D3D11 and D3D12 applications also exercise the official ReShade 6.8 runtime, exporter
-and production Sunshine receiver together in SDR, scRGB and PQ. They verify shared and private
-texture pixels, source timestamps, effect/reload/focus invalidation, recovery and receiver
+and production Sunshine receiver together in SDR, scRGB and PQ. They verify the claimed
+shared-slot pixels, source timestamps, effect/reload/focus invalidation, recovery and receiver
 restart. Their separate test add-on supplies foreground observations for a hidden fixture window;
 the shipping add-on keeps the real Windows foreground check. Additional runs use a distinct
 receiver process and exercise the real process-handle duplication, texture/fence import and
-private GPU copy. All six SDR/scRGB/PQ and D3D11/D3D12 cases passed, including restart into a
-new receiver process. This establishes sharing under the same user/session/integrity level;
+direct read of the claimed shared slot, including slot hold and retirement. All six
+SDR/scRGB/PQ and D3D11/D3D12 cases passed again on 2026-10-05 with the direct-read receiver,
+including restart into a new receiver process. This establishes sharing under the same user/session/integrity level;
 the installed game's interaction with the elevated host still requires live validation.
 See the [add-on test instructions](../tools/reshade/README.md#diagnostics-and-validation).
 

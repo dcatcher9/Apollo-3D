@@ -495,7 +495,7 @@ invariants from the last counter line (the holds check from every counter line),
 - `UI counters`: the add-on's own accounting (Auto frames are detection frames, generated Presents
   that held a real frame's decision or had none, and frames without detection).
 - `UI protection`: inferred alpha beside an accepted declared UI channel, and the frames in which a
-  valid exact pair contradicted a deciding accepted alpha one way (`contradicted`; inferred alpha per frame, since selection revision 10 any accepted alpha, declared included, per sample), which
+  valid exact pair contradicted a deciding accepted alpha one way (`contradicted`; inferred alpha per frame, since selection revision 10 an accepted UIAlpha, UI color tag, Backbuffer or current alpha (never the one-frame-late layer copy), per sample), which
   fail only with a sampled run of three such contradictions within 2 s that no revocation followed:
   A2 never revokes shorter ones, and the counter cannot tell them apart. Counter lines logged
   before S2a keep the older rule: accepted full coverage of a visible scene (`trusted_full`) that no
@@ -541,8 +541,9 @@ image's evidence (`sampled_pre_ui_scene`), the informative claims and the H1 wor
 `sampled_hudless_scene` and `scene_hold`; UI lines since fix 1 add the layer's pixels against the
 presented frame (`sampled_pre_ui_pixels`), and lines without them read as before;
 [UI protection](../../docs/reshade-sbs.md#setup) defines them. Lines of removed features still parse
-and add no check of their own: the first-run shadow's session line (its `shadow_hidden_ms` still
-feeds the hidden-scene warning above), rule H2's still screens (`still` groups, `decided.11`, `Sunshine
+and add no check of their own: the first-run shadow's session line, which is ignored (the `shadow`
+and `shadow_hidden_ms` fields of UI lines written before selection revision 9 still feed the
+hidden-scene warning above), rule H2's still screens (`still` groups, `decided.11`, `Sunshine
 UI still screen` lines), the S3 identity shadow (`Sunshine UI identity`, `Sunshine FG interposers`),
 and the dark pre-UI statistics; since selection revision 9 the add-on logs their remaining fields
 (`shadow`, `shadow_hidden_ms`, `presented_lit`, `presented_lit_differs`, `full_alpha_d`) as 0.
@@ -1183,7 +1184,9 @@ dynamic calibration ABI to isolate transport from stereo geometry. With the sepa
 receiver proxy it checks real shared textures/fences, source timestamps, overlay pixels, reload,
 focus loss/recovery and receiver restart. It also poisons the calibration inputs and requires the
 publisher to rewrite them on the next prepared frame; readiness, which the shared cache writes only
-when it changes, is not poisoned and must read as published unready. This complements the
+when it changes, is not poisoned and must read unready; because an unpublished uniform also
+defaults to false, this only rejects stale readiness, and `reshade_native_selection_runtime_test`
+(including its effect-reload case) is the check that readiness is actually published. This complements the
 production shader and automatic-selection fixtures; controlled paint does not test depth warping.
 
 Look in the game's `ReShade.log` for `Sunshine SBS:` messages:
@@ -1268,7 +1271,7 @@ runtime test with `scrgb` and `pq`, using separate output directories. These con
 their windows hidden and supply foreground observations for only their own window. They drive
 natural game `Present` calls through the official D3D11 or D3D12 proxy. The real receiver performs
 nonce negotiation, process checks, handle duplication, shared-fence checks, slot ownership and
-private GPU copies; the fixture does not modify the receiver's slot state. Pixels, declared
+direct reads of the claimed shared slot; the fixture does not modify the receiver's slot state. Pixels, declared
 transfer, retained timestamps, effect/overlay/reload/focus invalidation, recovery and receiver
 restart are checked. Producer and receiver run in one process on independent native devices;
 these tests do not establish access across a live game's process or host-service boundary.
@@ -1294,13 +1297,15 @@ Use the D3D12 presentation executable for that backend, and repeat with `scrgb` 
 The proxy starts its own hidden helper with a restricted set of inherited IPC handles and
 verifies its distinct process identity. The helper selects the same GPU and alone runs the
 unchanged production receiver, including the real cross-process `OpenProcess`, `DuplicateHandle`,
-texture/fence import and private GPU copy. The test then reads back that private copy and sends
-its pixels to the parent for inspection; this CPU path exists only in the fixture. Production
-texture transport remains entirely on the GPU. Receiver restart starts a new helper process.
+texture/fence import and direct shared-slot read. While the receiver holds the claimed slot
+`reading`, the test copies that slot to a staging texture and sends its pixels to the parent for
+inspection; this CPU path exists only in the fixture. Production texture transport remains
+entirely on the GPU. Receiver restart starts a new helper process.
 The logs record both PIDs and helper exit status. These checks cover separate processes under
 the same user/session/integrity level, not a live installed game or the elevated host-service
-boundary. All six D3D11/D3D12 SDR/scRGB/PQ cases passed locally, including receiver restart in a
-new process and clean shutdown of all twelve helper instances.
+boundary. All six D3D11/D3D12 SDR/scRGB/PQ cases passed locally again on 2026-10-05 with the
+direct-read receiver, including receiver restart in a new process and clean shutdown of all
+twelve helper instances.
 
 `SUNSHINE_SBS_RUNTIME_TESTS` defaults to **OFF**. Its `SunshineSBSTest.addon64` is for these isolated
 fixtures only. The shipping `SunshineSBS.addon64` retains the real Windows foreground check and

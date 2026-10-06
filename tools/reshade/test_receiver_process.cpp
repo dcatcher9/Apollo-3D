@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // TEST ONLY: the helper alone loads the unchanged production receiver. CPU pixels
-// returned by this facade are inspection instrumentation after its private GPU copy.
+// returned by this facade are inspection instrumentation read from the shared slot it holds.
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include "test_receiver_process.h"
@@ -207,7 +207,7 @@ namespace {
       D3D11_TEXTURE2D_DESC description {};
       frame.texture->GetDesc(&description);
       const unsigned pixel_size = bytes_per_pixel(description.Format);
-      require(description.Width == 2 * unsigned(box.source.right - box.source.left) && description.Height == unsigned(box.source.bottom - box.source.top) && description.MipLevels == 1 && description.ArraySize == 1 && description.SampleDesc.Count == 1, "Child private texture dimensions differ from fixture source");
+      require(description.Width == 2 * unsigned(box.source.right - box.source.left) && description.Height == unsigned(box.source.bottom - box.source.top) && description.MipLevels == 1 && description.ArraySize == 1 && description.SampleDesc.Count == 1, "Child shared-slot texture dimensions differ from fixture source");
       D3D11_TEXTURE2D_DESC existing {};
       if (staging.value) {
         staging->GetDesc(&existing);
