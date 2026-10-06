@@ -847,6 +847,10 @@ TEST_F(ReShadeBridgeGpu, WakesWhenTheExportFenceCompletesAndRetiresWithoutAnothe
   EXPECT_TRUE(bridge->frame_held());
   EXPECT_FALSE(bridge->frame_pending());
   WaitForSingleObject(woken.value, 0);  // Drop a wake for the frame just polled, if any.
+  // Polling found the first frame: no wake was armed to report it.
+  const auto polled = bridge->take_wake_counts();
+  EXPECT_EQ(polled.claims, 1u);
+  EXPECT_EQ(polled.claims_before_wake, 1u);
 
   // A ready slot whose GPU work has not completed neither wakes nor reads as pending.
   publish(2, false);
@@ -859,6 +863,11 @@ TEST_F(ReShadeBridgeGpu, WakesWhenTheExportFenceCompletesAndRetiresWithoutAnothe
   ASSERT_TRUE(second);
   EXPECT_EQ(second->sequence, 2u);
   EXPECT_FALSE(bridge->frame_pending());
+  // Its wake reported the second frame before the claim.
+  const auto woken_claim = bridge->take_wake_counts();
+  EXPECT_EQ(woken_claim.claims, 1u);
+  EXPECT_GE(woken_claim.wakes, 1u);
+  EXPECT_EQ(woken_claim.claims_before_wake, 0u);
 
   // The replaced slot returns once its reads complete, without waiting for another poll.
   EXPECT_EQ(protocol::control_state(state->slots[first_slot].control), protocol::slot_state::reading);

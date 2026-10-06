@@ -4761,7 +4761,9 @@ presentation target minus the variation threshold) it re-checks the export every
 (`export_recheck_interval`) until a newer frame has completed. In Stellar Blade at 4K the host
 claimed only 49-64 new frames/s of a 90 fps stream while the add-on wrote over up to 79 finished
 frames/s that it never claimed, which only a late or missing wake explains. A re-check that finds
-nothing newer encodes nothing. While an export is live the loop neither polls nor repeats frames
+nothing newer encodes nothing. With `diagnostics = enabled` the host logs every 20 s
+`Game 3D export: N new frames claimed and W fence wakes in 20 s; K claims found their frame
+complete before its wake`; K close to N means the wake arrives late or not at all. While an export is live the loop neither polls nor repeats frames
 at stream cadence: new exports, cursor changes and the minimum-FPS keepalive (which re-checks the
 connection) produce frames, and a due stream-gamma white-level query runs in the next of them
 rather than forcing a repeat. A replaced slot whose reads were still pending at its claim is

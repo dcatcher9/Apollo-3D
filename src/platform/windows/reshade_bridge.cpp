@@ -246,6 +246,10 @@ namespace platf::reshade_bridge {
       held_reads_ended_ = true;
     }
 
+    receiver_t::wake_counts_t take_wake_counts() {
+      return {std::exchange(claims_, 0), wakes_.exchange(0, std::memory_order_relaxed), std::exchange(claims_before_wake_, 0)};
+    }
+
   private:
     // Foreground ownership, the shared mapping and a live producer process: the prerequisites of
     // both a consumer connection and a status observation.
@@ -422,6 +426,10 @@ namespace platf::reshade_bridge {
       held_reads_ended_ = false;
       held_slot_ = selected;
       held_sequence_ = sequence;
+      ++claims_;
+      if (woken_completed_.load(std::memory_order_relaxed) < sequence) {
+        ++claims_before_wake_;
+      }
       const auto transfer = metadata_.color_transfer == wire::transfer::scrgb ? transfer_e::scrgb :
                             metadata_.color_transfer == wire::transfer::pq    ? transfer_e::pq :
                                                                                 transfer_e::srgb;
@@ -574,6 +582,7 @@ namespace platf::reshade_bridge {
       // Releasing a replaced fence may signal registrations it still held; start clean.
       ResetEvent(wake_event_.get());
       wake_fence_ = ready_fence_;
+      woken_completed_.store(0, std::memory_order_relaxed);
       if (!rearm_locked()) {
         wake_fence_.Reset();
         wake_armed_.store(false, std::memory_order_release);
@@ -609,6 +618,10 @@ namespace platf::reshade_bridge {
       auto *self = static_cast<impl_t *>(context);
       {
         std::lock_guard lock(self->wake_lock_);
+        if (self->wake_fence_) {
+          self->woken_completed_.store(self->wake_fence_->GetCompletedValue(), std::memory_order_relaxed);
+          self->wakes_.fetch_add(1, std::memory_order_relaxed);
+        }
         if (self->wake_fence_ && !self->rearm_locked()) {
           // The owner falls back to polling at stream cadence and re-arms on its next frame.
           self->wake_fence_.Reset();
@@ -716,6 +729,9 @@ namespace platf::reshade_bridge {
     std::atomic<bool> wake_armed_ {false};
     std::mutex wake_lock_;
     ComPtr<ID3D11Fence> wake_fence_;
+    // Diagnostics (take_wake_counts): the fence value the latest wake saw, wakes and claims.
+    std::atomic<std::uint64_t> woken_completed_ {0}, wakes_ {0};
+    std::uint64_t claims_ = 0, claims_before_wake_ = 0;
   };
 
   receiver_t::receiver_t(ID3D11Device *device, ID3D11DeviceContext *context, observer_t observe):
@@ -757,5 +773,9 @@ namespace platf::reshade_bridge {
 
   void receiver_t::reads_recorded() {
     impl_->reads_recorded();
+  }
+
+  receiver_t::wake_counts_t receiver_t::take_wake_counts() {
+    return impl_->take_wake_counts();
   }
 }  // namespace platf::reshade_bridge

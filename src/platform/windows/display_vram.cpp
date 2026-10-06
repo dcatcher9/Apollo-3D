@@ -518,7 +518,27 @@ namespace platf::dxgi {
       // returns; hand that slot back now instead of at the next conversion.
       if (reshade_receiver) {
         reshade_receiver->retire();
+        if (diagnostics_enabled && ::video::is_packed_mode(sbs_mode)) {
+          log_export_wakes();
+        }
       }
+    }
+
+    // Whether the export's completion wake reaches the encode loop: every 20 s while diagnostics
+    // are enabled, the frames claimed and the claims that found their frame complete first.
+    void log_export_wakes() {
+      constexpr auto interval = std::chrono::seconds(20);
+      const auto now = std::chrono::steady_clock::now();
+      if (now < next_export_wake_log) {
+        return;
+      }
+      const auto counts = reshade_receiver->take_wake_counts();
+      if (next_export_wake_log != std::chrono::steady_clock::time_point {} && counts.claims) {
+        BOOST_LOG(info) << "Game 3D export: " << counts.claims << " new frames claimed and " << counts.wakes
+                        << " fence wakes in " << interval.count() << " s; " << counts.claims_before_wake
+                        << " claims found their frame complete before its wake (late or missing wake).";
+      }
+      next_export_wake_log = now + interval;
     }
 
     // Tells capture whether this encoder currently reads its desktop pixels.
@@ -6204,6 +6224,7 @@ namespace platf::dxgi {
     std::function<void()> external_frame_wake;  ///< See set_external_frame_wake().
     std::uint64_t capture_pixels_token = 0;  ///< This encoder's display->external_pixels_owner value.
     bool conversion_kept_input_ = false;  ///< See platf::encode_device_t::conversion_kept_input().
+    std::chrono::steady_clock::time_point next_export_wake_log {};  ///< See log_export_wakes().
     std::unique_ptr<sbs_cursor::compositor_t> external_cursor;
     float external_cursor_white_multiplier = 203.0f / 80.0f;
     bool external_cursor_logged = false;
