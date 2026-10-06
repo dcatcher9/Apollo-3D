@@ -21,8 +21,9 @@ it selects the source and does not select another renderer. Image controls live 
 and save automatically in ReShade.ini. The old ray-search renderer, its quality settings and the experimental warp
 selector have been removed. Sources larger than 3840 in either dimension show an explicit warning
 and remain 2D; there is no hidden legacy renderer fallback.
-Automatic UI discovery considers authenticated UI opacity, tag 23 alpha, tag 53 backbuffer
-alpha, current color alpha unless FG is known enabled, then paired tag 2 HUD-less color difference.
+Automatic UI discovery considers authenticated UI opacity, tag 23 alpha, the game's offscreen UI
+layer, tag 53 backbuffer alpha, current color alpha unless FG is known enabled, then paired tag 2
+HUD-less color difference.
 It validates candidates on the GPU every frame and requires no review or approval. Raw Streamline
 tags are first translated through the hooked interposer's version-specific
 [buffer contract](../../docs/reshade-sbs.md#streamline-buffer-type-contract): UIAlpha is tag 68 in
@@ -275,7 +276,7 @@ absolute levels, target/applied/required UV, central image area, UI coverage, co
 both area thresholds, capped conflict, accepted source identities and age.
 Current policy coverage/conflict counts refer to the central rectangle and affect placement only.
 Separate GPU source-validation passes evaluate alpha and paired HUD-less candidates each frame.
-Their bounded 16-byte asynchronous diagnostic readback cannot authorize protection; selection
+Their bounded asynchronous diagnostic readback (the decision texels) cannot authorize protection; selection
 and mask generation remain on the GPU with no full-frame CPU readback or startup deadline.
 No new probe artifact is required. `--ui-front-fraction 0..0.75` supplies an explicit offline
 fraction and preserves historical 75% renders despite the lower live ceiling;
@@ -389,7 +390,9 @@ does not require a matrix.
 The linked contract describes the reference convention and
 the limits of comparing unknown raw encodings with projection depth.
 Successful evaluation and actual submission establish API source ownership independently of
-snapshot readiness. The linked contract owns the capture-ordering requirements and limitations;
+snapshot readiness; an explicit release, or one second without any evaluation of that source (a
+game that switches DLSS to TAA), returns the queue to Generic selection. The linked contract owns
+the capture-ordering requirements and limitations;
 D3D11 retains its existing Generic preservation backend. AMD support is deferred. Set
 `[SUNSHINE_DEPTH] StreamlineDepthSource=0` in `ReShade.ini` and restart to disable this path.
 
@@ -451,12 +454,14 @@ fresh depth and gaps outside the settle time after FG switches and runtime reset
 that showed the colour frame with depth; capture coverage by the list lifecycle; whether the
 camera projection or only the raw controller places the scene (the latter while a valid camera
 exists is a warning); UI acceptance changes and Forget; inferred alpha
-deciding beside an accepted UIAlpha or UI color tag; an accepted inferred alpha that a valid exact
-HUD-less pair contradicted one way three times within 2 s without a revocation (in logs before S2a,
-an accepted source covering the whole frame while an exact pair shows the scene; shorter
+deciding beside an accepted UIAlpha or UI color tag; an accepted alpha (inferred, and since
+selection revision 10 UIAlpha or the UI color tag captured in the pair's tag batch) that a valid
+exact HUD-less pair contradicted one way three times within 2 s without a revocation (in logs
+before S2a, an accepted source covering the whole frame while an exact pair shows the scene; shorter
 contradictions, which A2 never revokes, are noted); and accepted sources that disagree as often,
 with the revocation that resolved them named by its kind (by the selection and A2 revocation rules of
-[UI protection](../../docs/reshade-sbs.md#setup)); selective UI channels rejected for invalid pixels;
+[UI protection](../../docs/reshade-sbs.md#setup)); selective UI channels rejected for invalid pixels
+on more than 1% of the frame (V1) while no mask protected it (`UI channel admission`);
 `UI protection gaps`, the streamed time
 outside settle times in which Auto rendered frames without a UI mask (no UI source offered, or no
 usable mask while no UI channel was offered clean and empty, which means no UI on screen), so HUD
@@ -476,14 +481,16 @@ logs since fix 1, `Pre-UI proof` for each layer proof key (`pre_ui:<format>:<spa
 earned, lapsed or forgotten ([hidden-scene evidence](../../docs/reshade-sbs.md#setup) defines it);
 observation losses by cause; capture statuses outside the settle time after an export start, FG
 switch or reset (those inside it are INFO); unusual export pauses; present-thread hitches; Game 3D
-CPU and GPU cost over every timing window (Present-weighted means and the maximum); and, from the
+CPU and GPU cost over every timing window (means weighted by each window's Presents or GPU frames,
+and the largest maximum); and, from the
 host log, the Game 3D link, size fit and encoder stalls. A log whose game process ended right
 after ReShade tore its runtimes down (Unreal games often end before ReShade logs its exit) counts
 as a normal exit.
 
 Logs that contain `Sunshine UI counters` lines carry the add-on's exact per-frame
 [UI counters](../../docs/reshade-sbs.md#setup). For these logs the report decides the UI
-invariants from the last counter line, not from the 100 ms samples. It reports these checks:
+invariants from the last counter line (the holds check from every counter line), not from the
+100 ms samples. It reports these checks:
 
 - `UI counters`: the add-on's own accounting (Auto frames are detection frames, generated Presents
   that held a real frame's decision or had none, and frames without detection).
@@ -515,12 +522,14 @@ invariants from the last counter line, not from the 100 ms samples. It reports t
   (inexact) pair, validated by its own pixels (V2); expected wherever a game offers no same-batch
   pair.
 - `UI holds without a decision`: per counter window (from one counter line that advanced to the
-  next), a warning when at least half of the Auto frames were held without a real-frame decision to
-  show (T1), and a failure when at least 90% were for 10 s or longer: UI detection effectively never
+  next; windows less than 1 s apart merge), a warning when at least half of the Auto frames were
+  held without a real-frame decision to show (T1) for 2 s or longer, each window listed with its FG
+  state, and a failure when at least 90% were for 10 s or longer: UI detection effectively never
   ran (Hogwarts Legacy 10-05 at 4x frame generation, before the HUD-less pairing fix).
 - `UI holds`, `UI no mask` and `UI trust events`: exact totals. Holds are the generated Presents
-  that showed a real frame's decision or had none, and the real frames that reused the previous
-  real frame's decision once (T1); frames without a mask also list the sampled reasons with the
+  that showed a real frame's decision or had none, and the real frames that reused the held
+  decision (T1: once, or across a HUD-less snapshot's re-offers); frames without a mask also list
+  the sampled reasons with the
   candidate each refused; trust events include one-way and declared-coverage revocations and
   Forget.
 
@@ -532,13 +541,14 @@ image's evidence (`sampled_pre_ui_scene`), the informative claims and the H1 wor
 `sampled_hudless_scene` and `scene_hold`; UI lines since fix 1 add the layer's pixels against the
 presented frame (`sampled_pre_ui_pixels`), and lines without them read as before;
 [UI protection](../../docs/reshade-sbs.md#setup) defines them. Lines of removed features still parse
-and add no check: the first-run shadow, rule H2's still screens (`still` groups, `decided.11`, `Sunshine
+and add no check of their own: the first-run shadow's session line (its `shadow_hidden_ms` still
+feeds the hidden-scene warning above), rule H2's still screens (`still` groups, `decided.11`, `Sunshine
 UI still screen` lines), the S3 identity shadow (`Sunshine UI identity`, `Sunshine FG interposers`),
 and the dark pre-UI statistics; since selection revision 9 the add-on logs their remaining fields
 (`shadow`, `shadow_hidden_ms`, `presented_lit`, `presented_lit_differs`, `full_alpha_d`) as 0.
 Each `UI protection gaps` window lists its pieces with each line's own FG state; a line whose
-status sample was still pending, or an unrendered line, continues a run as `searching` after the
-last sample's reason.
+status sample was still pending (`checking` or `searching`), or an unrendered line, continues a run,
+labelled with that state after the last sample's reason.
 
 The depth and flat checks decide from the periodic `Sunshine SBS output` counters, then name
 the add-on's own evidence for each window. A depth gap lists each `Sunshine depth readiness`
@@ -590,9 +600,10 @@ replay `xfail` reason names the same rule IDs.
 ## Additional diagnostics
 
 `[SUNSHINE_GAME3D] Diagnostics=1` (the **Diagnostics** row under Troubleshooting) turns on the
-add-on's diagnostic-only per-frame work: per-pass GPU timing
+add-on's diagnostic-only per-frame work: per-pass GPU timing and the Streamline presentation
+brackets with their PCL marker hooks
 (see [Diagnostics switch](../../docs/reshade-sbs.md#diagnostics-switch-and-per-present-cost)). It
-is off by default and changes no decision or exported pixel.
+is off by default and changes no decision, candidate binding or exported pixel.
 
 The separate [Streamline camera probe](../../docs/reshade-sbs.md#streamline-camera-metadata-experiment)
 is disabled by default. `StreamlineCameraProbe=1` enables detailed diagnostics after restart;
@@ -804,9 +815,12 @@ independent `SunshineDepth3D.fx` remain reference sources: their annotated textu
 only after the owning technique executes, with native Game 3D disabled. Only the independent
 reference requires its separate current-frame percentile calibration update.
 The exporter verifies the normal runtime resolution, actual texture dimensions/format and
-current game swapchain color space. With the overlay closed, it copies the texture without
-resampling or color conversion. For HDR10/PQ input, the renderer decodes PQ and transforms Rec.2020 primaries to
-linear Rec.709; native scRGB input keeps that representation. scRGB uses 1.0 = 80 cd/m².
+current game swapchain color space. Native Game 3D packs both eyes straight into the claimed slot;
+a reference FX texture is copied there without resampling or color conversion. An HDR10/PQ
+swapchain exports PQ code values (protocol 3) to a consumer that accepts them, and a native scRGB
+swapchain does so for a consumer that encodes HDR10 PQ; otherwise HDR exports linear Rec.709 scRGB
+(1.0 = 80 cd/m²), PQ input decoded and its Rec.2020 primaries transformed first
+([Color and HDR](../../docs/reshade-sbs.md#color-and-hdr)).
 
 For reference FX only, the required `sunshine_sbs_source_color_space` annotation records the shader's compiled
 `BUFFER_COLOR_SPACE`. It must match the game swapchain exactly: SDR, scRGB or HDR10/PQ.
@@ -826,13 +840,14 @@ The active renderer must execute in each presented frame. Disable, failed source
 focus loss invalidate metadata immediately; reference FX reload also invalidates its export. A game that stops presenting may retain its
 last valid image; the exporter does not assign a false new timestamp to that retained image.
 
-The Direct3D 11 path uses `SHARED | SHARED_NTHANDLE` textures and native shared fences. It copies
-on ReShade's immediate context, finishes any overlay composition, then signals the fence and
-flushes submission without waiting for it.
-The Direct3D 12 path appends copy barriers to ReShade's immediate command list and restores both
-resource states. It signals its native queue fence only in the matching `finish_present` callback,
-after ReShade submits that list. It never forces a ReShade command-list flush, which could wait for
-an allocator and reset the game's draw state. A different swapchain or queue cannot publish the copy.
+The Direct3D 11 path uses `SHARED | SHARED_NTHANDLE` textures and native shared fences. Both APIs
+publish in ReShade's `reshade_present` callback, after the pack and any overlay composition and
+before the game's Present: the slot is marked ready, then the fence is signalled. D3D11 signals on
+ReShade's immediate context and flushes submission without waiting for it. D3D12 records into
+ReShade's immediate command list, restores the resource states it changed, submits that list and
+signals its native queue fence on the presenting queue. ReShade 6.8 fires `finish_present` only
+after the real Present returns, so it fences only a D3D12 export whose `reshade_present` did not
+run. A different swapchain or queue cannot publish the export.
 
 While settings are open, a public ImGui draw callback adds an FP16 target to ReShade's native
 overlay pass. ReShade still draws its actual controls, textures, tooltips and cursor and handles
@@ -843,7 +858,10 @@ negative values and highlights above SDR white. D3D11 composition restores the a
 state it touches; D3D12 uses ReShade's own immediate command list. Composition shares the
 existing slot and fence lifetime; there is no additional queue wait or CPU image readback.
 
-Only one producer copy may be outstanding. Busy slots or an incomplete fence drop the next export.
+Up to three slot writes may be outstanding, one per ring slot. A Present that finds no reusable
+slot (a free one, else the oldest ready one whose write completed, never the newest unconsumed
+frame) drops its export without waiting and counts it as `dropped` (see the
+[handoff contract](../../docs/reshade-sbs.md#gpu-handoff-contract)).
 Source and destination resources stay alive across a pending copy. If runtime destruction prevents
 submission confirmation, one retired generation is retained so a successor runtime can proceed.
 The allocation cap is one retired ring plus one active ring; another unconfirmed destruction stops
@@ -1062,8 +1080,7 @@ missing/unsupported depth. Run one frozen executable against both control and tr
 these checks deliberately exercise the capture/selection/calibration boundaries.
 
 Shared native-depth, uniform and HDR mono observations of the depth fixtures live in
-`test_raw_runtime_fixture.h`. The shared shader/transport and independent physical-camera
-fixtures retain their own contracts.
+`test_raw_runtime_fixture.h`. The shared shader/transport fixtures retain their own contracts.
 
 For full-pipeline rendering checks, use the D3D11/D3D12 fixtures described under
 [Full-pipeline shader tests](#full-pipeline-shader-tests). Set
@@ -1133,7 +1150,11 @@ use `1` for the dedicated dynamic-calibration/readiness specialization check. Op
 height arguments enable 4K source testing. D3D11 additionally accepts a final source-bit-depth
 argument: `srgb 0 640 360 10` exercises SDR10, whose texture has no native sRGB view.
 Append `--statistics` to the automatic-selection fixture to verify calibration with content-based
-Auto-select disabled and a buffer chosen by draw statistics, without a manual override.
+Auto-select disabled and a buffer chosen by draw statistics, without a manual override. That
+fixture writes `[SUNSHINE_GAME3D] Enabled=0` itself, as reference effects require, and also
+reloads the effect while it keeps drawing the same depth: the rebuilt `Sunshine_DepthReady` must
+read ready, then unready on a color-only Present, then calibrate again, which checks that the
+shared change-only readiness cache republishes into a reloaded effect.
 The [owning validation section](../../docs/reshade-sbs.md#validation-and-remaining-device-check)
 describes the geometry, color, source-precision, AA and acquisition assertions. CTest includes
 the pure calibration policy alongside the existing selector and publisher lifecycle tests.
@@ -1160,8 +1181,9 @@ not a dependency of the shipping shader or installer.
 below. It uses a controlled paint effect with the independent effect's filename, technique and
 dynamic calibration ABI to isolate transport from stereo geometry. With the separate-process
 receiver proxy it checks real shared textures/fences, source timestamps, overlay pixels, reload,
-focus loss/recovery and receiver restart. It also poisons every calibration input and requires
-the publisher to replace the complete set on the next published frame. This complements the
+focus loss/recovery and receiver restart. It also poisons the calibration inputs and requires the
+publisher to rewrite them on the next prepared frame; readiness, which the shared cache writes only
+when it changes, is not poisoned and must read as published unready. This complements the
 production shader and automatic-selection fixtures; controlled paint does not test depth warping.
 
 Look in the game's `ReShade.log` for `Sunshine SBS:` messages:
