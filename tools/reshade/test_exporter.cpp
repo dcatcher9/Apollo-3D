@@ -1610,9 +1610,8 @@ namespace {
 
     // acquire_slot (docs/reshade-sbs.md, GPU handoff contract): free slots
     // first, then the oldest completed ready slot that is not the ring's
-    // newest unconsumed frame; a still queued write is reusable only in a free
-    // slot, by a direct pack over a direct pack. CPU only: the slot words are
-    // set directly.
+    // newest unconsumed frame; a still queued write is never reused. CPU
+    // only: the slot words are set directly.
     static void slot_policy() {
       publisher_t publisher;
       require(publisher.init(), "mapping creation failed");
@@ -1629,36 +1628,28 @@ namespace {
       using s = wire::slot_state;
       bool overwrote = true;
       set({{{s::ready, 5}, {s::free, 4}, {s::reading, 6}}});
-      require(publisher.acquire_slot(6, false, &overwrote) == 1 && !overwrote, "a ready slot was taken over a free one");
+      require(publisher.acquire_slot(6, &overwrote) == 1 && !overwrote, "a ready slot was taken over a free one");
       set({{{s::ready, 7}, {s::ready, 8}, {s::reading, 6}}});
-      require(publisher.acquire_slot(8, false, &overwrote) == 0 && overwrote, "the oldest ready slot was not reused");
+      require(publisher.acquire_slot(8, &overwrote) == 0 && overwrote, "the oldest ready slot was not reused");
       require(wire::control_state(slots[1].control) == s::ready, "the newest unconsumed frame was claimed");
       set({{{s::reading, 6}, {s::ready, 8}, {s::reading, 7}}});
-      require(publisher.acquire_slot(8, true) == wire::slot_count, "the ring's newest unconsumed frame was overwritten");
+      require(publisher.acquire_slot(8) == wire::slot_count, "the ring's newest unconsumed frame was overwritten");
       set({{{s::reading, 9}, {s::ready, 8}, {s::reading, 7}}});
       require(publisher.acquire_slot(9) == 1, "a ready frame older than the consumer's was kept");
       // Writes 10 and 11 still queued (completed 9): 10 is the frame the
-      // consumer claims next once its fence passes, so even a direct pack
-      // drops the Present rather than write over it.
+      // consumer claims next once its fence passes, so the Present is dropped
+      // rather than written over it.
       set({{{s::reading, 9}, {s::ready, 10}, {s::ready, 11}}});
-      require(publisher.acquire_slot(9) == wire::slot_count, "a queued write was reused by a copy");
-      require(publisher.acquire_slot(9, true) == wire::slot_count, "a direct pack overwrote the consumer's next frame while queued");
-      require(publisher.acquire_slot(10, true, &overwrote) == 1 && overwrote, "a completed ready frame older than the newest was kept");
+      require(publisher.acquire_slot(9) == wire::slot_count, "a queued write was reused");
+      require(publisher.acquire_slot(10, &overwrote) == 1 && overwrote, "a completed ready frame older than the newest was kept");
+      // A free slot whose write is still queued is never reused either.
       set({{{s::reading, 9}, {s::free, 12}, {s::ready, 11}}});
-      com_ptr<IDXGIFactory1> retained;
-      require(SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(retained.put()))), "COM fixture object unavailable");
-      retained->AddRef();
-      *generation.submitted_sources[1].put() = retained.get();
-      require(publisher.acquire_slot(9, true) == wire::slot_count, "a queued copy or overlay write was reused while its source is retained");
-      generation.submitted_sources[1].reset();
-      set({{{s::reading, 9}, {s::free, 12}, {s::ready, 11}}});
-      require(publisher.acquire_slot(9) == wire::slot_count && publisher.acquire_slot(9, true) == 1,
-        "a discarded free slot's queued write was misjudged");
+      require(publisher.acquire_slot(9) == wire::slot_count, "a free slot's queued write was reused");
       // Another generation's words are never claimed.
       set({{{s::free, 0}, {s::free, 0}, {s::free, 0}}});
       for (auto &slot : slots) store_state(slot, generation.id + 1, s::free);
-      require(publisher.acquire_slot(0, true) == wire::slot_count, "another generation's slot was claimed");
-      std::puts("PASS export slot policy: free first, oldest completed ready, newest unconsumed kept, queued writes only in free slots for direct packs");
+      require(publisher.acquire_slot(0) == wire::slot_count, "another generation's slot was claimed");
+      std::puts("PASS export slot policy: free first, oldest completed ready, newest unconsumed kept, no queued write reused");
     }
 
     // A GPU-bound game: each export's fence completes lag Presents after its
@@ -1691,7 +1682,7 @@ namespace {
         std::uint32_t retire_at = 0, last_claim = 0, claims = 0;
         constexpr std::uint32_t presents = 64;
         for (std::uint32_t present = 1; present <= presents; ++present) {
-          const auto index = publisher.acquire_slot(fence(present - 1), true);
+          const auto index = publisher.acquire_slot(fence(present - 1));
           published.push_back(0);
           if (index != wire::slot_count) {
             slots[index].sequence = published.back() = ++sequence;

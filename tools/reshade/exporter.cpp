@@ -2071,7 +2071,7 @@ namespace {
       const bool dump = addon_render && proof.diagnostic_armed && debug_dump_.requested();
       const bool direct = renderer && !overlay_open(runtime) && !dump;
       bool overwrote = false;
-      const auto index = acquire_slot(completed, direct, &overwrote);
+      const auto index = acquire_slot(completed, &overwrote);
       if (index == wire::slot_count) {
         // Logged here too (rate limited), so a ring that drops every Present
         // still reports it with published frozen.
@@ -2164,15 +2164,14 @@ namespace {
     // contract): a free slot first, else the oldest ready slot whose write
     // completed, never the ring's newest unconsumed frame (a ready slot whose
     // sequence is the highest of the ready and reading slots). A slot is
-    // reusable once its previous GPU write completed. A direct pack (direct)
-    // may also reuse a free slot whose previous write was a direct pack still
-    // queued (no retained source or overlay), since the new pack is recorded
-    // after it on the same queue; a ready slot never: the consumer claims a
-    // ready frame once its fence passes, so a queued one is the frame it
-    // claims next. A consumer may discard a frame without reading it, so even
-    // a free slot retains its source and overlay until that write completes.
+    // reusable once its previous GPU write completed: a ready slot whose write
+    // is still queued is never reused, since the consumer claims a ready frame
+    // once its fence passes, so a queued one is the frame it claims next. A
+    // consumer may discard a frame without reading it, so a free slot also
+    // waits for its write to complete (every free slot of the current
+    // generation has: reset, or freed by a consumer after its fence passed).
     // overwrote: a ready slot was claimed.
-    std::uint32_t acquire_slot(std::uint64_t completed, bool direct = false, bool *overwrote = nullptr) {
+    std::uint32_t acquire_slot(std::uint64_t completed, bool *overwrote = nullptr) {
       if (overwrote) *overwrote = false;
       // A recorded copy must be fenced before admitting the next. Submitted
       // work is bounded by the existing ring, not a global one-copy gate.
@@ -2195,8 +2194,7 @@ namespace {
       };
       for (std::uint32_t offset = 0; offset < wire::slot_count; ++offset) {
         const auto index = (next_slot_ + offset) % wire::slot_count;
-        if (states[index] == wire::slot_state::free && current[index] &&
-            (written(index) || (direct && !generation_->submitted_sources[index])) &&
+        if (states[index] == wire::slot_state::free && written(index) &&
             exchange_state(shared_->slots[index], id, wire::slot_state::writing, wire::slot_state::free)) return index;
       }
       // Completed ready slots oldest first; a claim the consumer won meanwhile moves on.

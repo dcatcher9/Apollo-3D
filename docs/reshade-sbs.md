@@ -4711,10 +4711,8 @@ Admission (`acquire_slot`) takes a free slot first, else the oldest ready slot w
 completed, and never the ring's newest unconsumed frame (a ready slot whose sequence is the
 highest of the ready and reading slots); the round-robin it replaced could overwrite that frame.
 A slot is reusable once its previous GPU write completed, judged by that slot's own fence
-sequence, including slots already marked free by a consumer that discarded them. A direct pack
-may also reuse a free slot whose previous write was a direct pack still queued: it records after
-that write on the same queue, and the slot retains no source or overlay. A ready slot whose write
-is still queued is never reused: the host claims a ready frame once its fence passes, so the
+sequence, including slots already marked free by a consumer that discarded them. A ready slot
+whose write is still queued is never reused: the host claims a ready frame once its fence passes, so the
 oldest queued one is the frame it claims next. When the GPU runs two or more Presents behind,
 writing over it every Present would leave the host no claimable frame at all. A copy or overlay
 write waits for completion. Reading slots remain unavailable. If no slot is reusable, the add-on
