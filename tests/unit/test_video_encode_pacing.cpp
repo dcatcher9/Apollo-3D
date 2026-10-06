@@ -1,6 +1,10 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <array>
 #include <chrono>
+#include <cstdint>
+#include <cstdio>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -321,6 +325,300 @@ namespace {
       total += wait;
     }
     EXPECT_LT(total / static_cast<int>(waits.size()), stream / 2);
+  }
+
+  // Live Game 3D evidence (Stellar Blade 4K HDR, 90 fps stream): the add-on published 65-127
+  // frames/s into its three-slot export ring, yet the encode loop claimed only 49-64 new frames/s
+  // while the add-on dropped 22-110 Presents/s for want of a slot and replaced 2-79 finished
+  // frames/s that the host never claimed. Each frame's fence completes one GPU lag (5-15 ms) after
+  // its Present, and the completion wake that should end the loop's wait came late or not at all,
+  // so the loop noticed finished frames only on ~90 Hz desktop metadata captures or its keepalive.
+  // This model runs the loop's own wait and schedule helpers against the export ring's rules
+  // (docs/reshade-sbs.md, GPU handoff contract) with that arrival pattern.
+  enum class game_frames_e {
+    fg_off,  ///< ~115 fps.
+    fg_2x,  ///< ~72 real fps, ~145 Presents/s.
+    fg_4x,  ///< ~55 real fps, ~220 Presents/s.
+  };
+
+  enum class fence_wake_e {
+    prompt,
+    late,  ///< 0-11 ms after the completion.
+    lost,
+  };
+
+  // Fixed pseudo-random jitter: the same sequence with every standard library.
+  struct sim_jitter_t {
+    std::uint32_t state = 12345;
+
+    std::chrono::nanoseconds between(double low_ms, double high_ms) {
+      state = state * 1664525u + 1013904223u;
+      const double unit = static_cast<double>(state >> 8) / 16777216.0;
+      return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::duration<double, std::milli>(low_ms + (high_ms - low_ms) * unit));
+    }
+  };
+
+  // Generated Presents are spaced evenly within each real frame.
+  std::vector<std::chrono::nanoseconds> game_presents(game_frames_e mode, std::chrono::nanoseconds duration, sim_jitter_t &jitter) {
+    std::vector<std::chrono::nanoseconds> presents;
+    std::chrono::nanoseconds real {};
+    while (real < duration) {
+      if (mode == game_frames_e::fg_off) {
+        real += jitter.between(7.5, 10.0);
+        presents.push_back(real);
+        continue;
+      }
+      const int generated = mode == game_frames_e::fg_2x ? 2 : 4;
+      const auto length = mode == game_frames_e::fg_2x ? jitter.between(12.5, 15.0) : jitter.between(16.0, 20.5);
+      for (int i = 0; i < generated; ++i) {
+        presents.push_back(real + length * i / generated);
+      }
+      real += length;
+    }
+    return presents;
+  }
+
+  struct export_ring_result_t {
+    double presents = 0, published = 0, dropped = 0, overwritten = 0, new_frames = 0;  ///< Per second.
+    int repeats = 0;
+    std::chrono::nanoseconds max_gap {};  ///< Between new frames.
+    std::chrono::nanoseconds mean_age {};  ///< From a claimed frame's Present to its claim.
+  };
+
+  // The export ring and encode_run() while an independent provider's export is live, stepped every
+  // 10 us. Producer, per Present: a free slot whose write completed, else the oldest ready slot
+  // whose write completed and that a newer completed frame supersedes, else the Present drops.
+  // Host: claims the newest ready frame past its held one whose fence passed and returns the
+  // replaced slot (its reads completed during the previous encode). Its wait composes
+  // remaining_wait(), provider_keepalive_wait() and export_recheck_wait() as encode_run() does; a
+  // fence wake or desktop capture ends it early, and one that arrives while the loop is busy ends
+  // the next wait at once (event_t). After the wait a pending frame converts once due, a due
+  // keepalive repeats the input, and anything else encodes nothing.
+  export_ring_result_t simulate_export_ring(game_frames_e mode, fence_wake_e wake, std::chrono::nanoseconds duration = 4s) {
+    constexpr auto stream = 11111111ns;  // 90 fps
+    constexpr auto threshold = stream / 4;
+    constexpr auto keepalive = 55555555ns;  // The 18 fps minimum of a 90 fps stream.
+    constexpr auto step = 10us;
+    constexpr int slots = 3;
+
+    enum class slot_e {
+      free,
+      ready,
+      reading,
+    };
+
+    struct slot_t {
+      slot_e state = slot_e::free;
+      std::size_t sequence = 0;  ///< 1-based publication index; also its fence value.
+    };
+
+    sim_jitter_t jitter;
+    const auto presents = game_presents(mode, duration, jitter);
+    std::vector<std::chrono::nanoseconds> captures;
+    for (auto capture = jitter.between(0.0, 11.1); capture < duration; capture += jitter.between(10.1, 12.1)) {
+      captures.push_back(capture);
+    }
+    std::array<slot_t, slots> ring {};
+    std::vector<std::chrono::nanoseconds> present_of {0ns}, completion_of {0ns}, wakes;
+    std::size_t next_present = 0, next_capture = 0, completed = 0, held = 0;
+    int held_slot = -1, next_slot = 0, published = 0, dropped = 0, overwritten = 0, new_frames = 0, encodes = 0;
+    export_ring_result_t result;
+    std::chrono::nanoseconds total_age {};
+    std::optional<std::chrono::nanoseconds> last_new;
+
+    source_owner source;
+    source.observe(std::make_shared<captured_source>(1, at(0ns)));
+    source.converted();
+    auto target = at(0ns);
+    std::chrono::nanoseconds last_encode {}, busy_until {}, wait_until {};
+    bool busy = false, woken = false;
+    const auto start_wait = [&](std::chrono::nanoseconds now) {
+      const auto poll_target = target - threshold;
+      bool pending = false;
+      for (const auto &slot : ring) {
+        pending = pending || (slot.state == slot_e::ready && slot.sequence > held && slot.sequence <= completed);
+      }
+      const auto pending_wait = source.remaining_wait(at(now), poll_target, pending);
+      const auto bound = std::min(
+        video::detail::provider_keepalive_wait(at(now), at(last_encode), keepalive),
+        video::detail::export_recheck_wait(at(now), poll_target)
+      );
+      wait_until = now + (pending_wait ? std::min(*pending_wait, bound) : bound);
+    };
+    start_wait(0ns);
+
+    for (std::chrono::nanoseconds now {}; now < duration; now += step) {
+      // Producer.
+      for (; next_present < presents.size() && presents[next_present] <= now; ++next_present) {
+        std::size_t newest_completed = 0;
+        for (const auto &slot : ring) {
+          if (slot.state != slot_e::free && slot.sequence <= completed) {
+            newest_completed = std::max(newest_completed, slot.sequence);
+          }
+        }
+        int index = -1;
+        for (int offset = 0; offset < slots && index < 0; ++offset) {
+          const int i = (next_slot + offset) % slots;
+          if (ring[i].state == slot_e::free && ring[i].sequence <= completed) {
+            index = i;
+          }
+        }
+        for (int i = 0; i < slots && index < 0; ++i) {
+          if (ring[i].state == slot_e::ready && ring[i].sequence < newest_completed) {
+            index = i;
+            for (int other = 0; other < slots; ++other) {
+              if (ring[other].state == slot_e::ready && ring[other].sequence < ring[index].sequence) {
+                index = other;
+              }
+            }
+            ++overwritten;
+          }
+        }
+        if (index < 0) {
+          ++dropped;
+          continue;
+        }
+        ring[index] = {slot_e::ready, static_cast<std::size_t>(++published)};
+        next_slot = (index + 1) % slots;
+        present_of.push_back(presents[next_present]);
+        completion_of.push_back(std::max(completion_of.back(), presents[next_present] + jitter.between(5.0, 15.0)));
+        if (wake != fence_wake_e::lost) {
+          wakes.push_back(completion_of.back() + (wake == fence_wake_e::late ? jitter.between(0.0, 11.1) : 0ns));
+        }
+      }
+      // Fence and wakes.
+      while (completed + 1 < completion_of.size() && completion_of[completed + 1] <= now) {
+        ++completed;
+      }
+      for (; next_capture < captures.size() && captures[next_capture] <= now; ++next_capture) {
+        woken = true;
+      }
+      for (auto wake_at = wakes.begin(); wake_at != wakes.end();) {
+        if (*wake_at <= now) {
+          woken = true;
+          wake_at = wakes.erase(wake_at);
+        } else {
+          ++wake_at;
+        }
+      }
+      // Encode loop.
+      if (busy) {
+        if (now < busy_until) {
+          continue;
+        }
+        busy = false;
+        start_wait(now);
+      }
+      if (!woken && now < wait_until) {
+        continue;
+      }
+      woken = false;
+      const auto poll_target = target - threshold;
+      int selected = -1;
+      for (int i = 0; i < slots; ++i) {
+        if (ring[i].state == slot_e::ready && ring[i].sequence > held && ring[i].sequence <= completed && (selected < 0 || ring[i].sequence > ring[selected].sequence)) {
+          selected = i;
+        }
+      }
+      const bool keepalive_due = now >= last_encode + keepalive;
+      if ((selected >= 0 || keepalive_due) && source.due(at(now), poll_target, false, true)) {
+        target = video::detail::select_encode_frame_schedule(at(now), target, stream, threshold).next_encode_target;
+        if (selected >= 0) {
+          if (held_slot >= 0) {
+            ring[held_slot].state = slot_e::free;
+          }
+          ring[selected].state = slot_e::reading;
+          held_slot = selected;
+          held = ring[selected].sequence;
+          total_age += now - present_of[held];
+          if (last_new) {
+            result.max_gap = std::max(result.max_gap, now - *last_new);
+          }
+          last_new = now;
+          ++new_frames;
+        } else {
+          ++result.repeats;
+        }
+        busy = true;
+        busy_until = now + 8400us + 1ms * (encodes++ % 3);  // Conversion and NVENC: 8.4-10.4 ms.
+        last_encode = busy_until;
+        continue;
+      }
+      start_wait(now);
+    }
+    const double seconds = std::chrono::duration<double>(duration).count();
+    result.presents = static_cast<double>(presents.size()) / seconds;
+    result.published = published / seconds;
+    result.dropped = dropped / seconds;
+    result.overwritten = overwritten / seconds;
+    result.new_frames = new_frames / seconds;
+    result.mean_age = new_frames ? total_age / new_frames : 0ns;
+    return result;
+  }
+
+  TEST(RemoteEncodeProviderPacingTest, LiveExportDeliversNewFramesAtStreamRateWithoutItsFenceWake) {
+    constexpr const char *modes[] {"FG off", "FG 2x", "FG 4x"};
+    constexpr const char *wakes[] {"prompt", "late", "lost"};
+    for (const auto mode : {game_frames_e::fg_off, game_frames_e::fg_2x, game_frames_e::fg_4x}) {
+      for (const auto wake : {fence_wake_e::prompt, fence_wake_e::late, fence_wake_e::lost}) {
+        const auto result = simulate_export_ring(mode, wake);
+        std::printf(
+          "[ MEASURE  ] %s, %s fence wake: presents %.0f/s published %.0f/s dropped %.0f/s overwritten %.0f/s new %.1f/s repeats %d, mean claim age %.1f ms, max gap %.1f ms\n",
+          modes[static_cast<int>(mode)],
+          wakes[static_cast<int>(wake)],
+          result.presents,
+          result.published,
+          result.dropped,
+          result.overwritten,
+          result.new_frames,
+          result.repeats,
+          std::chrono::duration<double, std::milli>(result.mean_age).count(),
+          std::chrono::duration<double, std::milli>(result.max_gap).count()
+        );
+        // Every mode presents faster than the stream, so min(Present rate, 90) is 90.
+        EXPECT_GE(result.new_frames, 85.5);
+        EXPECT_LE(result.new_frames, 90.5);
+        EXPECT_EQ(result.repeats, 0);  // A re-check that finds nothing encodes nothing.
+        EXPECT_LT(result.max_gap, 25ms);  // At most one skipped stream frame.
+      }
+    }
+  }
+
+  TEST(RemoteEncodeProviderPacingTest, HeldExportBelowStreamRateIsClaimedWithinOneRecheck) {
+    // A 40 fps game, no fence wake and no desktop capture: only the loop's own re-checks can find
+    // each finished frame, at most one re-check interval after its completion.
+    constexpr auto stream = 11111111ns;
+    constexpr auto threshold = stream / 4;
+    constexpr auto game = 25ms;
+    EXPECT_EQ(video::detail::export_recheck_wait(at(10ms), at(4ms)), video::detail::export_recheck_interval);
+    EXPECT_EQ(video::detail::export_recheck_wait(at(10ms), at(15ms)), 5ms);  // Not before the target.
+    source_owner source;
+    source.observe(std::make_shared<captured_source>(1, at(0ns)));
+    source.converted();
+    std::chrono::nanoseconds now {}, last_encode {};
+    auto target = at(0ns);
+    int claimed = 0, waits = 0;
+    while (claimed < 20) {
+      const auto poll_target = target - threshold;
+      const int completed = static_cast<int>(now / game);
+      const auto pending_wait = source.remaining_wait(at(now), poll_target, completed > claimed);
+      const auto bound = std::min(
+        video::detail::provider_keepalive_wait(at(now), at(last_encode), 55555555ns),
+        video::detail::export_recheck_wait(at(now), poll_target)
+      );
+      now += pending_wait ? std::min(*pending_wait, bound) : bound;
+      ++waits;
+      const int newest = static_cast<int>(now / game);
+      if (newest > claimed && source.due(at(now), poll_target, false, true)) {
+        EXPECT_LE(now - newest * game, video::detail::export_recheck_interval);
+        target = video::detail::select_encode_frame_schedule(at(now), target, stream, threshold).next_encode_target;
+        claimed = newest;
+        now += 9400us;
+        last_encode = now;
+      }
+    }
+    // One wait to the poll target, then about one per millisecond until the 25 ms frame is done.
+    EXPECT_LE(waits, 20 * 18);
   }
 
   TEST(RemoteEncodePendingSourceTest, FinalEarlySourceSurvivesUntilItsPresentationDeadline) {

@@ -133,6 +133,8 @@ namespace platf::reshade_bridge {
     std::optional<frame_t> poll(RECT source, int width, int height) {
       auto frame = poll_frame(source, width, height);
       if (frame) {
+        // The caller may read the returned frame again: reads_recorded() must follow.
+        held_reads_ended_ = false;
         arm_wake();
       }
       return frame;
@@ -230,6 +232,22 @@ namespace platf::reshade_bridge {
 
     void retire() {
       retire_slots();
+    }
+
+    // Ends the held slot's event query after every read recorded so far, so the claim that
+    // replaces it can prove those reads complete without issuing (and waiting for) a new one.
+    void reads_recorded() {
+      if (held_slot_ < 0 || !retire_queries_[held_slot_]) {
+        return;
+      }
+      context_->End(retire_queries_[held_slot_].Get());
+      // Submits the conversion just recorded; the encoder would submit it next anyway.
+      context_->Flush();
+      held_reads_ended_ = true;
+    }
+
+    receiver_t::wake_counts_t take_wake_counts() {
+      return {std::exchange(claims_, 0), wakes_.exchange(0, std::memory_order_relaxed), std::exchange(claims_before_wake_, 0)};
     }
 
   private:
@@ -387,16 +405,31 @@ namespace platf::reshade_bridge {
       }
       // Conversion reads the shared slot directly; it stays `reading` while it is the newest
       // frame, so repeat conversions keep their exact pixels. Every earlier read of the
-      // previously held slot is already recorded on this context, so an event query issued
-      // now covers all of them. The slot returns to the producer only once that completes.
+      // previously held slot is already recorded on this context, so an event query ended
+      // after them covers all of them. The slot returns to the producer only once that query
+      // completes: right here when reads_recorded() ended it and it already completed (the
+      // reads normally finished during the previous encode), otherwise from retire_slots().
       if (held_slot_ >= 0) {
-        context_->End(retire_queries_[held_slot_].Get());
-        retiring_[held_slot_] = {true, held_sequence_, metadata_.generation, 0};
-        // Flush submits bounded work; neither producer nor consumer waits for the GPU.
-        context_->Flush();
+        auto &held_slot = shared_->slots[held_slot_];
+        if (held_reads_ended_ && context_->GetData(retire_queries_[held_slot_].Get(), nullptr, 0, D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK &&
+            read64(held_slot.sequence) == held_sequence_) {
+          claim(held_slot, metadata_.generation, wire::slot_state::reading, wire::slot_state::free);
+        } else {
+          if (!held_reads_ended_) {
+            context_->End(retire_queries_[held_slot_].Get());
+          }
+          retiring_[held_slot_] = {true, held_sequence_, metadata_.generation, 0};
+          // Flush submits bounded work; neither producer nor consumer waits for the GPU.
+          context_->Flush();
+        }
       }
+      held_reads_ended_ = false;
       held_slot_ = selected;
       held_sequence_ = sequence;
+      ++claims_;
+      if (woken_completed_.load(std::memory_order_relaxed) < sequence) {
+        ++claims_before_wake_;
+      }
       const auto transfer = metadata_.color_transfer == wire::transfer::scrgb ? transfer_e::scrgb :
                             metadata_.color_transfer == wire::transfer::pq    ? transfer_e::pq :
                                                                                 transfer_e::srgb;
@@ -549,6 +582,7 @@ namespace platf::reshade_bridge {
       // Releasing a replaced fence may signal registrations it still held; start clean.
       ResetEvent(wake_event_.get());
       wake_fence_ = ready_fence_;
+      woken_completed_.store(0, std::memory_order_relaxed);
       if (!rearm_locked()) {
         wake_fence_.Reset();
         wake_armed_.store(false, std::memory_order_release);
@@ -584,6 +618,10 @@ namespace platf::reshade_bridge {
       auto *self = static_cast<impl_t *>(context);
       {
         std::lock_guard lock(self->wake_lock_);
+        if (self->wake_fence_) {
+          self->woken_completed_.store(self->wake_fence_->GetCompletedValue(), std::memory_order_relaxed);
+          self->wakes_.fetch_add(1, std::memory_order_relaxed);
+        }
         if (self->wake_fence_ && !self->rearm_locked()) {
           // The owner falls back to polling at stream cadence and re-arms on its next frame.
           self->wake_fence_.Reset();
@@ -603,6 +641,7 @@ namespace platf::reshade_bridge {
       // new resources; the D3D runtime retains submitted resource references through completion.
       held_slot_ = -1;
       held_sequence_ = 0;
+      held_reads_ended_ = false;
       retiring_ = {};
       for (auto &retire_query : retire_queries_) {
         retire_query.Reset();
@@ -675,6 +714,8 @@ namespace platf::reshade_bridge {
     // The slot behind cached_ (or the last frame before cached_ was dropped), still `reading`.
     int held_slot_ = -1;
     std::uint64_t held_sequence_ = 0;
+    // The held slot's query was ended after every read since poll() last returned its frame.
+    bool held_reads_ended_ = false;
     std::chrono::steady_clock::time_point next_attach_ {};
     std::uint64_t reported_generation_ = 0;
     int reported_width_ = 0, reported_height_ = 0;
@@ -688,6 +729,9 @@ namespace platf::reshade_bridge {
     std::atomic<bool> wake_armed_ {false};
     std::mutex wake_lock_;
     ComPtr<ID3D11Fence> wake_fence_;
+    // Diagnostics (take_wake_counts): the fence value the latest wake saw, wakes and claims.
+    std::atomic<std::uint64_t> woken_completed_ {0}, wakes_ {0};
+    std::uint64_t claims_ = 0, claims_before_wake_ = 0;
   };
 
   receiver_t::receiver_t(ID3D11Device *device, ID3D11DeviceContext *context, observer_t observe):
@@ -725,5 +769,13 @@ namespace platf::reshade_bridge {
 
   void receiver_t::retire() {
     impl_->retire();
+  }
+
+  void receiver_t::reads_recorded() {
+    impl_->reads_recorded();
+  }
+
+  receiver_t::wake_counts_t receiver_t::take_wake_counts() {
+    return impl_->take_wake_counts();
   }
 }  // namespace platf::reshade_bridge

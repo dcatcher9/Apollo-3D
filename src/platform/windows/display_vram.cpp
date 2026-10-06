@@ -508,12 +508,37 @@ namespace platf::dxgi {
       return conversion_kept_input_;
     }
 
+    // The streaming loop converts a held live export, whose next frame it re-checks for.
+    bool external_frame_held() const {
+      return reshade_receiver && ::video::is_packed_mode(sbs_mode) && external_frame_wake && reshade_receiver->frame_held();
+    }
+
     void encoder_consumed_input() {
       // The conversion's reads of a replaced export slot are normally complete once its encode
       // returns; hand that slot back now instead of at the next conversion.
       if (reshade_receiver) {
         reshade_receiver->retire();
+        if (diagnostics_enabled && ::video::is_packed_mode(sbs_mode)) {
+          log_export_wakes();
+        }
       }
+    }
+
+    // Whether the export's completion wake reaches the encode loop: every 20 s while diagnostics
+    // are enabled, the frames claimed and the claims that found their frame complete first.
+    void log_export_wakes() {
+      constexpr auto interval = std::chrono::seconds(20);
+      const auto now = std::chrono::steady_clock::now();
+      if (now < next_export_wake_log) {
+        return;
+      }
+      const auto counts = reshade_receiver->take_wake_counts();
+      if (next_export_wake_log != std::chrono::steady_clock::time_point {} && counts.claims) {
+        BOOST_LOG(info) << "Game 3D export: " << counts.claims << " new frames claimed and " << counts.wakes
+                        << " fence wakes in " << interval.count() << " s; " << counts.claims_before_wake
+                        << " claims found their frame complete before its wake (late or missing wake).";
+      }
+      next_export_wake_log = now + interval;
     }
 
     // Tells capture whether this encoder currently reads its desktop pixels.
@@ -555,19 +580,24 @@ namespace platf::dxgi {
     }
 
     bool needs_conversion_poll() const {
-      if (stream_gamma_conversion_pending || (stream_gamma_mode_ != ::video::stream_gamma_mode_e::windows_default && std::chrono::steady_clock::now() >= stream_gamma_white_query_at)) {
+      if (stream_gamma_conversion_pending) {
         return true;
       }
+      const bool white_query_due = stream_gamma_mode_ != ::video::stream_gamma_mode_e::windows_default && std::chrono::steady_clock::now() >= stream_gamma_white_query_at;
       // ReShade publishes independently of desktop presents. Local AR polls it at its own cadence.
       // A streaming encoder converts a live export when its ready fence wakes it (or at stream
       // cadence while that wake is not armed), and otherwise only for a changed connection:
       // without a live export, captures and the minimum-FPS keepalive refresh the flat fallback,
-      // never a repeat of a static desktop at stream cadence.
+      // never a repeat of a static desktop at stream cadence. Each of those conversions also runs a
+      // due white-level query, so the query never forces a repeat of its own.
       if (reshade_receiver && ::video::is_packed_mode(sbs_mode)) {
         if (!external_frame_wake || game_dumper.needs_conversion_poll()) {
           return true;
         }
         return (reshade_receiver->frame_held() && !reshade_receiver->frame_wake_active()) || reshade_receiver->frame_pending();
+      }
+      if (white_query_due) {
+        return true;
       }
       if (::video::is_game_mode(sbs_mode)) {
         // Game mono encodes the desktop and only reports whether an export is available. The
@@ -678,6 +708,13 @@ namespace platf::dxgi {
           }
         }
         publish_game_source_status(game_source);
+        // Every read of the export is recorded on this context before convert() returns, on every
+        // path; the claim that replaces the frame can then return its slot without waiting.
+        auto export_reads_recorded = util::fail_guard([&]() {
+          if (external) {
+            reshade_receiver->reads_recorded();
+          }
+        });
 
         // A streaming encoder that converts a live packed export never reads the desktop.
         const bool export_owns_output = external && ::video::is_packed_mode(sbs_mode);
@@ -6189,6 +6226,7 @@ namespace platf::dxgi {
     std::function<void()> external_frame_wake;  ///< See set_external_frame_wake().
     std::uint64_t capture_pixels_token = 0;  ///< This encoder's display->external_pixels_owner value.
     bool conversion_kept_input_ = false;  ///< See platf::encode_device_t::conversion_kept_input().
+    std::chrono::steady_clock::time_point next_export_wake_log {};  ///< See log_export_wakes().
     std::unique_ptr<sbs_cursor::compositor_t> external_cursor;
     float external_cursor_white_multiplier = 203.0f / 80.0f;
     bool external_cursor_logged = false;
@@ -7764,6 +7802,10 @@ namespace platf::dxgi {
 
     void set_external_frame_wake(std::function<void()> wake) override {
       base.set_external_frame_wake(std::move(wake));
+    }
+
+    bool external_frame_held() const override {
+      return base.external_frame_held();
     }
 
     void encoder_consumed_input() override {

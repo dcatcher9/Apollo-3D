@@ -4707,17 +4707,23 @@ common state between owners, and the pass reads only the renderer's working set,
 renderer's completion fence already retains. Up to three submitted GPU writes may remain unfinished, bounded by
 the existing three-slot ring. A recorded slot write must receive its submission fence before the next
 is admitted; there is no global requirement to wait for the previous GPU write to complete.
-Admission (`acquire_slot`) takes a free slot first, else the oldest ready slot whose write
-completed, and never the ring's newest unconsumed frame (a ready slot whose sequence is the
-highest of the ready and reading slots); the round-robin it replaced could overwrite that frame.
-A slot is reusable once its previous GPU write completed, judged by that slot's own fence
-sequence, including slots already marked free by a consumer that discarded them. A ready slot
-whose write is still queued is never reused: the host claims a ready frame once its fence passes, so the
-oldest queued one is the frame it claims next. When the GPU runs two or more Presents behind,
-writing over it every Present would leave the host no claimable frame at all. A copy or overlay
-write waits for completion. Reading slots remain unavailable. If no slot is reusable, the add-on
-drops the publication and returns to the game without waiting. `Sunshine SBS output` counts both
-(`dropped`, and `overwritten_unconsumed` for a completed ready slot written over).
+Admission (`acquire_slot`) takes a free slot first, else the oldest ready slot that a newer
+completed frame supersedes. The host claims the newest ready frame whose fence passed, so the
+newest completed frame of the ready and reading slots is the one it claims next (or holds), and it
+is never written over, even while a newer write is still queued. Writing over it as soon as a
+newer write was queued replaced about 70 finished frames/s that the host never claimed in Stellar
+Blade at 4K with FG 4x: a host that came a few milliseconds late found nothing claimable until the
+queued write landed. A slot is reusable once its previous GPU write completed, judged by that
+slot's own fence sequence, including slots already marked free by a consumer that discarded them.
+A ready slot whose write is still queued is never reused either: when the GPU runs two or more
+Presents behind, writing over it every Present would leave the host no claimable frame at all.
+A copy or overlay write waits for completion. Reading slots remain unavailable. If no slot is
+reusable, the add-on drops the publication and returns to the game without waiting.
+`Sunshine SBS output` counts both (`dropped`, and `overwritten_unconsumed` for a completed ready
+slot written over, which a newer completed frame had superseded). `reshade_exporter_tests.exe`
+runs the real admission against a host that claims at 90 fps without any fence wake
+(`ring_throughput`): it must never write over the host's next frame, and the host must receive
+85.5 or more new frames/s at FG off, 2x and 4x Present rates.
 
 Each slot retains its native source resource and a separate overlay compositor. They cannot be
 replaced while that slot's copy/composition remains in flight. Reload, deactivation and runtime
@@ -4730,25 +4736,41 @@ exact copied pixels and source lifetimes.
 Sunshine claims the newest completed slot and converts straight from it through a shader view
 created per slot when the generation opens; there is no private copy. The newest frame's slot stays
 `reading` while it is the newest, so repeat conversions and stream-gamma reconversion keep reading
-it. When a newer frame is claimed, an event query is ended for the previously held slot after all
-of its reads (Y, UV, Local AR, resample and the cursor patch), followed by the one flush per new
-frame the copy path also issued, and that slot returns to free only once the query completes,
-after the generation, nonce and sequence checks. It never blocks: queries are read without a flush,
-and one still pending after two polls is checked once with a flushing read (a lone event query was
-observed never completing otherwise). A generation change or detach abandons held and retiring
-slots rather than releasing them early. The receiver's hold leaves the producer two slots, and the
-producer already reclaims its own unconsumed ready slots. There is no cross-process GPU wait and
-no texture overwrite while either side uses the slot. A new consumer requests fresh resources
-rather than reusing the abandoned generation.
+it. Every conversion that reads it then ends that slot's event query after all of its reads (Y,
+UV, Local AR, resample and the cursor patch) and flushes (`receiver_t::reads_recorded`). When a
+newer frame is claimed and that query has completed, the normal case because the previous encode
+finished those reads, the replaced slot returns to free at the claim itself, after the generation,
+nonce and sequence checks. Otherwise (its reads are still running, or a poll returned the frame
+again after its query was ended) a query covering every read stays pending, and the slot returns
+to free only once it completes. It never blocks: queries are read without a flush, and one still
+pending after two polls is checked once with a flushing read (a lone event query was observed
+never completing otherwise). A generation change or detach abandons held and retiring slots rather
+than releasing them early. While the host encodes a frame it therefore holds only that frame's slot
+and leaves the producer two. Before, the replaced slot stayed `reading` until that encode returned,
+so for about 9 of every 11 ms at 90 fps the producer had one slot. There is no cross-process GPU
+wait and no texture overwrite while either side uses the slot. A new consumer requests fresh
+resources rather than reusing the abandoned generation.
 
 Sunshine converts a live export when its fence completes, not at its next poll. The receiver
 arms the generation's ready fence (`SetEventOnCompletion` for the next value) on a thread-pool
 wait that wakes the encode loop; a woken frame converts once it is within the variation threshold
 of its target, so the stream cadence still caps the encode rate. Every slot is gated on being
-ready for the current generation with a sequence at most the fence's completed value. While an
-export is live the loop neither polls nor repeats frames at stream cadence: new exports, cursor
-changes and the minimum-FPS keepalive (which re-checks the connection) produce frames. A replaced
-slot is retired right after its encode, so the producer gets it back a frame sooner. Game mono
+ready for the current generation with a sequence at most the fence's completed value. While a
+frame is held the loop does not rely on that wake alone: from the next frame's poll target (its
+presentation target minus the variation threshold) it re-checks the export every millisecond
+(`export_recheck_interval`) until a newer frame has completed. In Stellar Blade at 4K the host
+claimed only 49-64 new frames/s of a 90 fps stream while the add-on wrote over up to 79 finished
+frames/s that it never claimed, which only a late or missing wake explains. A re-check that finds
+nothing newer encodes nothing. With `diagnostics = enabled` the host logs every 20 s
+`Game 3D export: N new frames claimed and W fence wakes in 20 s; K claims found their frame
+complete before its wake`; K close to N means the wake arrives late or not at all. While an export is live the loop neither polls nor repeats frames
+at stream cadence: new exports, cursor changes and the minimum-FPS keepalive (which re-checks the
+connection) produce frames, and a due stream-gamma white-level query runs in the next of them
+rather than forcing a repeat. A replaced slot whose reads were still pending at its claim is
+retired right after the next encode. `RemoteEncodeProviderPacingTest.LiveExportDeliversNewFramesAtStreamRateWithoutItsFenceWake`
+runs this loop's wait and schedule helpers against the ring's rules with the live FG off, 2x and
+4x arrival patterns and prompt, late or lost wakes; the host must receive 85.5 or more new
+frames/s with no repeat. Game mono
 observes the producer's published source without attaching (a status-only READY): the game then
 creates no ring and packs no stereo.
 

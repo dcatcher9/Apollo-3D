@@ -160,6 +160,29 @@ namespace video::detail {
     );
   }
 
+  /** Longest wait between re-checks for the next frame of a held live export once one may be due.
+   *
+   * The export's completion wake should end the encode loop's wait as each frame finishes. Live,
+   * finished frames still waited for a desktop capture or the keepalive (Stellar Blade at 4K: 49-64
+   * new frames/s of a 90 fps stream while the add-on replaced up to 79 finished frames/s that were
+   * never claimed), which only a late or missing wake explains. The re-check does not depend on
+   * it. A re-check that finds no newer frame encodes nothing.
+   */
+  inline constexpr std::chrono::milliseconds export_recheck_interval {1};
+
+  /** Wait bound while a live export is held: no newer frame converts before the poll target, and
+   * from there on the export is re-checked every export_recheck_interval until one completes.
+   */
+  [[nodiscard]] inline std::chrono::nanoseconds export_recheck_wait(
+    std::chrono::steady_clock::time_point now,
+    std::chrono::steady_clock::time_point poll_target
+  ) noexcept {
+    return std::max(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(poll_target - now),
+      std::chrono::nanoseconds {export_recheck_interval}
+    );
+  }
+
   /** Wait for a new capture without hiding pending conversion behind the idle heartbeat.
    *
    * The caller still converts/encodes on its normal owner. A pending conversion gets one

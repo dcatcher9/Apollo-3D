@@ -96,6 +96,21 @@ namespace platf::reshade_bridge {
     // does the same; calling this once the encoder consumed a conversion frees them a frame sooner.
     void retire();
 
+    // Every read of the frame poll() last returned is now recorded on this receiver's context (call
+    // it once a conversion is recorded). The claim that replaces that frame then returns its slot
+    // to the producer at once when those reads have completed, rather than one conversion later.
+    void reads_recorded();
+
+    // Diagnostics since the last call: newer frames claimed, fence wakes, and claims whose frame
+    // had completed before any wake reported it (found by a re-check, capture or keepalive).
+    struct wake_counts_t {
+      std::uint64_t claims = 0;
+      std::uint64_t wakes = 0;
+      std::uint64_t claims_before_wake = 0;
+    };
+
+    wake_counts_t take_wake_counts();
+
   private:
     class impl_t;
     std::unique_ptr<impl_t> impl_;
