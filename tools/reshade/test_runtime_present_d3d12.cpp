@@ -982,9 +982,9 @@ uniform int DepthDirection < hidden = true; >;
       // Readiness (bufready_depth) has one change-only owner shared by Generic
       // and API depth, invalidated on every effect reload
       // (depth_ready_uniform_cache.h, reshade_depth_ready_uniform_cache): it is
-      // published when it changes, not rewritten each Present, so it is read
-      // as published rather than poisoned. The calibration set is rewritten
-      // with every prepared Present and is poisoned below.
+      // written when it changes, not rewritten each Present, so it is not
+      // poisoned. The calibration set is rewritten with every prepared Present
+      // and is poisoned below.
       observation.runtime->set_uniform_value_bool(calibrated, true);
       const float poison = 123.f, invalid_rect[] {-1.f, -1.f, -1.f, -1.f};
       observation.runtime->set_uniform_value_float(anchor, &poison, 1);
@@ -995,7 +995,11 @@ uniform int DepthDirection < hidden = true; >;
 
       // No depth buffer is rendered by this transport fixture. A fresh real
       // publisher callback must overwrite every poisoned value before
-      // publication, and readiness must be published unready.
+      // publication, and readiness must read unready. Without depth, false is
+      // also the uninitialized uniform's default, so this only rejects stale
+      // readiness: it cannot tell a published false from a missing one.
+      // reshade_native_selection_runtime_test verifies that readiness is
+      // published and republished into a reloaded reference effect.
       bool actual_ready = true, actual_calibrated = true;
       float actual_anchor = poison, actual_gain = poison, actual_rect[4] {};
       int actual_direction = -1;
