@@ -1863,6 +1863,58 @@ namespace {
     require(all_generated > 100 && session.counters()[ui_counter::held_generated] == committed_generated && !session.counters()[ui_counter::held_none], "held.generated did not count the generated Presents");
   }
 
+  void generated_presents_reoffering_real_inputs_hold() {
+    // T1 by snapshot identity: under frame generation the capture owner keeps
+    // offering each kind's newest ready snapshot while it is recent, and the
+    // layer its newest copy, so a generated Present re-offers its real
+    // frame's Backbuffer, layer and UIAlpha instead of offering nothing
+    // (Expedition 33, Stellar Blade and The Witcher 3 at 2x-4x). The provider
+    // holds a Present whose snapshot identities equal those of the last
+    // Present that detected (ui_mask::same_snapshot_inputs): it never
+    // detects, and shows the real frame's decision, held.generated once per
+    // generated Present. A real frame's new tickets detect afresh.
+    alpha_auto_policy session;
+    accept_backbuffer(session);
+    sequence s(session, backbuffer_frame);
+    present p;
+    p.offered = candidate::backbuffer;
+    ui_mask::snapshot_inputs detected{};
+    std::uint64_t now = 10000, ticket = 100, layer = (std::uint64_t(1) << 62) | 7;
+    std::size_t generated_presents = 0, real_presents = 0;
+    for (const std::uint32_t generated : {1u, 2u, 3u, 1u}) {
+      for (unsigned frame = 0; frame != 40; ++frame) {
+        const ui_mask::snapshot_inputs offered{++ticket, 0, ++ticket, 0, ++layer};
+        for (std::uint32_t i = 0; i <= generated; ++i) {
+          p.now_ms = now;
+          now += 8;
+          p.hold_previous = ui_mask::same_snapshot_inputs(offered, detected, true, false);
+          const auto &r = s.step(p);
+          if (!p.hold_previous) {
+            detected = offered;
+          }
+          if (!i) {
+            ++real_presents;
+            require(!p.hold_previous && r.detected && r.source == 3 && !s.temporal.holds, "A real frame's new snapshots did not detect afresh");
+          } else {
+            ++generated_presents;
+            require(p.hold_previous && r.held && !r.detected && r.hold.kind == hold_kind::generated && r.source == 3 && s.temporal.holds == i, "A generated Present that re-offered its real frame's snapshots did not hold");
+          }
+        }
+      }
+    }
+    // Current colour or an inexact HUD-less image is the Present's own: it
+    // never holds, nor does the same set without frame generation.
+    const ui_mask::snapshot_inputs again{ticket, 0, ticket, 0, layer};
+    require(!ui_mask::same_snapshot_inputs(again, detected, true, true) && !ui_mask::same_snapshot_inputs(again, detected, false, false), "Own inputs or a Present without frame generation held");
+    require(!s.discards && invariants.generated_detections == 0, "A generated Present detected or discarded a sample");
+    check_counters(s, "re-offered snapshots hold");
+    std::size_t committed_generated = 0;
+    for (std::size_t i = 0; i != s.committed_frames; ++i) {
+      committed_generated += s.frames[i].held ? 1 : 0;
+    }
+    require(real_presents == 160 && generated_presents == 280 && session.counters()[ui_counter::held_generated] == committed_generated && !session.counters()[ui_counter::held_none], "held.generated did not count the generated Presents that re-offered snapshots");
+  }
+
   // What a frame-generation stream did to the Presents the game actually
   // generated and to its real ones: generated Presents that held, that Present
   // counting read as real (beyond the reported count) and that then reused
@@ -4492,6 +4544,7 @@ int main(int argc, char **argv) {
     {"A1/S1/H1 Hogwarts exact HUD-less", hudless_pair_is_accepted_by_one_exact_sample},
     {"S2 manual On", manual_on_is_a_session_override},
     {"T1 frame generation holds", generated_presents_hold_per_multiplier},
+    {"T1 generated Presents re-offering their real frame's snapshots hold", generated_presents_reoffering_real_inputs_hold},
     {"T1/E2 frame generation multiplier drift", generated_presents_under_multiplier_drift},
     {"T1 no bound and 6x", generated_presents_hold_without_a_bound},
     {"T1 grace of real frames without their own decision", real_frames_without_their_own_decision},

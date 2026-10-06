@@ -137,6 +137,34 @@ namespace sunshine_game3d::ui_mask {
     !generated_without_input(14, 10, true, 3) && generated_without_input(11, 10, true, 0) &&
     !generated_without_input(12, 10, true, 0) && !generated_without_input(11, 10, false, 3) &&
     !generated_without_input(11, 0, true, 3) && !generated_without_input(10, 10, true, 3));
+  // T1 by snapshot identity. The capture owner offers each kind's newest ready
+  // snapshot on every Present while it is recent, and the layer its newest
+  // copy, so under frame generation a generated Present re-offers the real
+  // frame's inputs instead of offering none. A Present that offers exactly the
+  // snapshot identities the last detecting Present offered (the UIAlpha, UI
+  // color and Backbuffer tickets, an exact HUD-less pair's ticket and the
+  // layer copy's id, at least one of them) shows that real frame, and holds
+  // its decision as Present counting does. Current colour and an inexact
+  // HUD-less image (own_input) are the Present's own and never match. Without
+  // frame generation every Present is real.
+  inline constexpr std::size_t snapshot_input_slots = 5;
+  using snapshot_inputs = std::array<std::uint64_t, snapshot_input_slots>;
+  constexpr bool same_snapshot_inputs(const snapshot_inputs &offered, const snapshot_inputs &detected, bool fg_active,
+      bool own_input) {
+    if (!fg_active || own_input) return false;
+    bool any = false;
+    for (std::size_t i = 0; i != offered.size(); ++i) {
+      if (offered[i] != detected[i]) return false;
+      any = any || offered[i] != 0;
+    }
+    return any;
+  }
+  static_assert(same_snapshot_inputs({0, 0, 7, 0, 9}, {0, 0, 7, 0, 9}, true, false) &&
+    !same_snapshot_inputs({0, 0, 7, 0, 9}, {0, 0, 7, 0, 9}, false, false) &&
+    !same_snapshot_inputs({0, 0, 7, 0, 9}, {0, 0, 7, 0, 9}, true, true) &&
+    !same_snapshot_inputs({0, 0, 8, 0, 9}, {0, 0, 7, 0, 9}, true, false) &&
+    !same_snapshot_inputs({0, 0, 7, 0, 0}, {0, 0, 7, 0, 9}, true, false) &&
+    !same_snapshot_inputs({}, {}, true, false));
   // Two captures belong to one tag batch (one game frame) when both were made
   // in the same Present interval. Each source keeps its own Present counter, so
   // compare Presents since each tag rather than the raw counter values.

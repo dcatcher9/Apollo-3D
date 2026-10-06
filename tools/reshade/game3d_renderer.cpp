@@ -124,6 +124,14 @@ namespace sunshine_game3d {
     bool memo_valid = false;
     api::resource_view memo_depth{};
     uint64_t memo_identity{};
+    // The final field of that conditioning (the horizontal and UI pin
+    // passes), kept with the vertical memo while the b1 words, the mask view
+    // and the detected mask's epoch repeat: a held generated Present, whose
+    // mask no detection rewrote, records neither pass. mask_epoch advances
+    // whenever detect_ui dispatches the mask pass.
+    bool field_memo_valid = false;
+    std::array<uint32_t, 4> field_memo_words{};
+    uint64_t field_memo_view{}, field_memo_epoch{}, mask_epoch{};
     render_parameters memo_parameters;
     renderer::conditioning_counters conditioning_counts;
     // pending: this presentation recorded work awaiting finish_present.
@@ -303,7 +311,7 @@ namespace sunshine_game3d {
       conditioning_owed = pack_owed = false;
       profile_open = false;
       direct_views = {};
-      memo_valid = false;
+      memo_valid = field_memo_valid = false;
       temporal = {};
       guard = {};
       hold_cleared = false;
@@ -680,13 +688,14 @@ namespace sunshine_game3d {
         const uint32_t group_lines = std::max(limiter_lines, 1u);
         if (reuse) ++conditioning_counts.memo;
         else {
-          memo_valid = false;
+          memo_valid = field_memo_valid = false;
           dispatch(cmd, candidate, (width + 7) / 8, (height + 7) / 8, p, {api::resource_view{}, c.depth}, {raw});
         }
         mark(cmd, mark_candidate);
         if (!reuse) {
           dispatch(cmd, live_vertical ? vertical_live : vertical, (width + group_lines - 1) / group_lines, 1, p,
             {api::resource_view{}, {}, {}, t[raw].srv}, {vertical_majorant, vertical_field});
+        const auto ui_words = ui_parameter_words(c.apply_ui, c.plane, c.channel);
           memo_valid = c.depth_identity != 0;
           memo_depth = c.depth;
           memo_identity = c.depth_identity;
@@ -705,14 +714,28 @@ namespace sunshine_game3d {
         // shaders pin inside the horizontal pass unless a probe needs it apart.
         const std::array<api::resource_view, 15> field_inputs{c.ui_alpha, {}, {}, {}, t[vertical_field].srv,
           {}, {}, {}, {}, nearest_ui_rendered ? t[ui_plane_resolved].srv : api::resource_view{}};
-        const bool pin_apart = limiter_lines || c.probe;
-        if (pin_apart) source_alpha_ui = false;
-        dispatch(cmd, horizontal, (height + group_lines - 1) / group_lines, 1, p, field_inputs, {field});
-        source_alpha_ui = c.apply_ui;
-        if (c.probe) submit_adaptive_probe(cmd, c.ui_alpha, p);
-        const uint32_t pin_groups = std::max(pin_lines, 1u);
-        if (pin_apart && c.apply_ui)
-          dispatch(cmd, ui_apply, (height + pin_groups - 1) / pin_groups, 1, p, field_inputs, {field});
+        // An exact repeat of the vertical field, b1 and an unchanged applied
+        // mask keeps the final field too: both passes read nothing else, and
+        // nothing else writes it (a probe reads it in between, and a dump or
+        // the nearest-UI plane needs this render's passes).
+        const bool keep_field = reuse && field_memo_valid && !c.probe && !nearest_ui_rendered &&
+          ui_words == field_memo_words && (!c.apply_ui || (c.ui_alpha.handle == t[detected_mask].srv.handle &&
+            c.ui_alpha.handle == field_memo_view && mask_epoch == field_memo_epoch));
+        if (keep_field) ++conditioning_counts.field_memo;
+        else {
+          const bool pin_apart = limiter_lines || c.probe;
+          if (pin_apart) source_alpha_ui = false;
+          dispatch(cmd, horizontal, (height + group_lines - 1) / group_lines, 1, p, field_inputs, {field});
+          source_alpha_ui = c.apply_ui;
+          if (c.probe) submit_adaptive_probe(cmd, c.ui_alpha, p);
+          const uint32_t pin_groups = std::max(pin_lines, 1u);
+          if (pin_apart && c.apply_ui)
+            dispatch(cmd, ui_apply, (height + pin_groups - 1) / pin_groups, 1, p, field_inputs, {field});
+        }
+        field_memo_valid = memo_valid && !c.armed && !c.probe && !nearest_ui_rendered;
+        field_memo_words = ui_words;
+        field_memo_view = c.ui_alpha.handle;
+        field_memo_epoch = mask_epoch;
       }
       mark(cmd, mark_conditioning);
     }
@@ -1059,6 +1082,7 @@ namespace sunshine_game3d {
         cmd->barrier(t.resource, api::resource_usage::unordered_access, api::resource_usage::shader_resource);
         if (count) cmd->barrier(counter_texture.resource, api::resource_usage::unordered_access, api::resource_usage::shader_resource);
         if (reduce) cmd->barrier(hold_texture.resource, api::resource_usage::unordered_access, api::resource_usage::shader_resource);
+      ++mask_epoch;
       };
       // Each statistics tile in its parts (group z), which the reduce adds.
       if (bits) dispatch_stage(detection_tiles, detection_statistics, 6, 16, 16, false, false,
@@ -1682,7 +1706,7 @@ namespace sunshine_game3d {
     // freshly derived mask; explicit manual/replay inputs retain their meaning.
     d.update_alpha_auto(ui_eligible && ui_mode_supported && (!needs_detection || d.detection_active || explicit_fallback) &&
       (!automatic || !automatic->retained || alpha_source.handle), automatic);
-    const bool probe_ui = d.prepare_adaptive_frame(p, adaptive);
+    const bool probe_ui = d.prepare_adaptive_frame(p, adaptive) && input.adaptive_probe;
     d.consumed_ui_source = d.source_alpha_ui && alpha_source.handle ? d.resource_of(alpha_source) : api::resource{};
     // The conditioning inputs, resolved now (C2). The views stay valid for
     // this Present: the source copy and the detected mask until the next

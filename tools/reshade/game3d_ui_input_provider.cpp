@@ -63,6 +63,11 @@ namespace sunshine_game3d::ui_input {
       // frame generation, and one directly after the render that offered it
       // is a re-offer for the T1 grace (ui_detection::per_frame_reoffer).
       offered_snapshot hudless_offered;
+      // T1 by snapshot identity (ui_mask::same_snapshot_inputs): the inputs
+      // the last render that detected offered, in this epoch and viewport.
+      ui_mask::snapshot_inputs detected_inputs{};
+      std::uint64_t detected_epoch{};
+      std::uint32_t detected_viewport{};
       bool suspended{};
     };
     std::mutex source_mutex;
@@ -249,6 +254,7 @@ namespace sunshine_game3d::ui_input {
     ui_qualification::status before;
     std::uint64_t instance{}, frame_sequence{}, input_present{};
     offered_snapshot hudless_before;
+    ui_mask::snapshot_inputs detected_before{}, offered_inputs{};
     {
       std::lock_guard<std::mutex> lock(source_mutex);
       const auto found = sources.find(runtime);
@@ -257,6 +263,7 @@ namespace sunshine_game3d::ui_input {
         base = entry.base; before = entry.selection.snapshot();
         instance = entry.instance; frame_sequence = ++found->second.frame_sequence;
         if (entry.input_epoch == base.epoch && entry.input_viewport == base.viewport) input_present = entry.input_present;
+        if (entry.detected_epoch == base.epoch && entry.detected_viewport == base.viewport) detected_before = entry.detected_inputs;
         hudless_before = entry.hudless_offered;
       }
     }
@@ -396,7 +403,11 @@ namespace sunshine_game3d::ui_input {
         result.detection.hudless = view;
         hudless_offer = {selected.ticket.id, selected.origin.source.epoch, frame_sequence, selected.origin.source.viewport};
         hudless_reoffered_now = offered_before && !batch && hudless_before.present + 1 == frame_sequence;
-      } else result.detection.masks[slot] = view;
+        offered_inputs[slot] = batch ? selected.ticket.id : 0;
+      } else {
+        result.detection.masks[slot] = view;
+        offered_inputs[slot] = selected.ticket.id;
+      }
       signatures.set(slot_kinds[slot], typed_format(selected.texture.format));
       result.status.retained_alpha_ready = true;
       available = true;
@@ -457,6 +468,7 @@ namespace sunshine_game3d::ui_input {
         {"read_order", ui_layer::name(ordered ? layer.order : ui_layer::read_order::unordered)},
         {"fence_value", layer.fence_value}});
       if (view.handle) {
+        offered_inputs[4] = layer_capture | layer.capture_id;
         result.detection.layer = view;
         result.detection.layer_flags = ui_layer::detection_flags(static_cast<api::format>(layer.format));
         signatures.set(ui_selection::kind::ui_layer, typed_format(layer.format));
@@ -489,6 +501,20 @@ namespace sunshine_game3d::ui_input {
         {"available_for_detection", true}, {"association", "current_color_allocation"}, {"format", base.output_format}});
       result.detection.current_color = true; available = true;
       signatures.set(ui_selection::kind::current, typed_format(base.output_format));
+    }
+    // T1 by snapshot identity: under frame generation a generated Present
+    // re-offers its real frame's snapshots (the capture owner offers the
+    // newest ready one while it is recent), so one that offers exactly the
+    // inputs the last detecting Present offered shows that real frame and
+    // holds its decision, with no tiles, reduce, mask or sample pass. It never
+    // advances Present counting's input_present.
+    const bool same_inputs = capturing && available && !result.detection.hold_previous &&
+      ui_mask::same_snapshot_inputs(offered_inputs, detected_before, fg_active,
+        result.detection.current_color || (result.detection.hudless.handle && !result.detection.hudless_exact));
+    if (same_inputs) {
+      if (diagnostic) candidates.push_back({{"source", "none"}, {"held_for_generated_present", true},
+        {"association", "same_snapshot_identities_as_last_detection"}});
+      result.detection.hold_previous = true;
     }
     // A manual choice observes its selected capture's own provenance.
     const auto observe_origin = [&](const ui_mask::selection &selected, bool dedicated_mask) {
@@ -556,7 +582,7 @@ namespace sunshine_game3d::ui_input {
           outcomes = std::exchange(entry.hudless_outcomes, {});
           log_gate = true;
         }
-        if (tag_offered) {
+        if (tag_offered && !same_inputs) {
           entry.input_present = frame_sequence; entry.input_epoch = base.epoch; entry.input_viewport = base.viewport;
         }
         const bool matches = entry.instance == instance && !entry.suspended && entry.base == base &&
@@ -568,6 +594,10 @@ namespace sunshine_game3d::ui_input {
         } else { entry.selection.unavailable(); entry.last_observe_tick = 0; }
         result.status.qualification = entry.selection.snapshot();
         if (!matches || !result.status.qualification.available) available = false;
+        // A detecting render's inputs, which a re-offer must equal to hold.
+        if (available && !result.detection.hold_previous) {
+          entry.detected_inputs = offered_inputs; entry.detected_epoch = base.epoch; entry.detected_viewport = base.viewport;
+        }
       } else available = false;
     }
     if (!available) {

@@ -93,8 +93,13 @@ namespace {
     sunshine_game3d::renderer renderer, control_renderer;
     std::uint64_t mask_capture = 0;
     bool has_control{};
-    // Whether a UI-detection render's depth is this frame's (render_frame_input::depth_current).
+    // Whether a UI-detection render's depth is this frame's (render_frame_input::depth_current),
+    // and its depth identity (render_frame_input::depth_identity; zero: none, no memo).
     bool depth_current = true;
+    std::uint64_t depth_identity = 0;
+    // An automatic input of render() is a dedicated mask (a declared tag)
+    // rather than captured colour alpha.
+    bool dedicated_input = false;
     std::vector<unsigned char> original;
     // The acceptance key (A1) of a fixture candidate: its typed DXGI format,
     // the source color's by default, in the fixture's color space.
@@ -270,7 +275,7 @@ namespace {
         sunshine_game3d::render_frame_input frame;
         frame.color = {reinterpret_cast<std::uint64_t>(backbuffer.Get())};
         frame.depth = {reinterpret_cast<std::uint64_t>(depth_view.Get())};
-        frame.scene = p; frame.ui = *ui_override; frame.depth_current = depth_current;
+        frame.scene = p; frame.ui = *ui_override; frame.depth_current = depth_current; frame.depth_identity = depth_identity;
         require(active.render(queue->get_immediate_command_list(), frame), "production UI detection render failed");
       } else {
         require(sunshine_game3d::test::render_frame(active, queue->get_immediate_command_list(), {reinterpret_cast<std::uint64_t>(backbuffer.Get())},
@@ -1912,12 +1917,24 @@ namespace {
     // count of the last Present that offered a tag) never detects (T1): it
     // shows the last real decision, without a multiplier cap.
     inputs.hudless = {}; inputs.hold_previous = true;
-    run(true, "generated present holds the real frame's HUD-less mask");
+    {
+      const auto before = gpu.renderer.conditioning_activity();
+      run(true, "generated present holds the real frame's HUD-less mask");
+      const auto after = gpu.renderer.conditioning_activity();
+      require(after.memo - before.memo == 1 && after.field_memo - before.field_memo == 1,
+        "A held generated Present recorded the horizontal or UI pin pass again");
+    }
     {
       // A held mask reports the detection run that made it (its pushed flags:
       // at most per_frame_sample, when that run was a status sample).
       const auto held = gpu.renderer.consumed_detection();
       require(held.state == ui_detection_snapshot::run_state::held && held.held_presents == 1 &&
+    // With one depth identity the held Presents repeat the real frame's
+    // conditioning exactly: the memo keeps its vertical field and, with the
+    // same UI words and the mask no detection rewrote, its final field, so no
+    // horizontal or UI pin pass is recorded and the packed bytes are the same.
+    gpu.depth_identity = 0x51ed;
+    run(true, "the real frame before the generated Presents, with a depth identity");
           held.candidates == (2u | 8u | 16u) && !(held.flags & ~ui_detection::per_frame_sample) && held.stored_flags == 0u,
         "A held HUD-less mask lost the detection constants that made it");
     }
@@ -1931,6 +1948,7 @@ namespace {
     require(gpu.renderer.consumed_detection().state == ui_detection_snapshot::run_state::inactive,
       "A generated present without a decision to show reported a held mask");
     --source.epoch;
+    gpu.depth_identity = 0;
     run(false, "a generated present after the chain ended has no mask", false);
     inputs.hold_previous = false; inputs.hudless = correct;
     run(true, "the next real frame detects again");

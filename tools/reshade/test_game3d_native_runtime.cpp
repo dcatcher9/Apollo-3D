@@ -1794,8 +1794,9 @@ namespace {
       // conditioning with the pack and packs the same bytes: with the
       // Diagnostics switch on (timestamps); off, with the depth identity the
       // first owed pack recorded (the memo keeps its candidate and vertical
-      // field); and armed for Dump 3D. A mono frame records no conditioning
-      // unless armed.
+      // field, and with the same UI words its final field: no horizontal or
+      // UI pin pass); and armed for Dump 3D. A mono frame records no
+      // conditioning unless armed.
       const bool mono = !test.parameters.depth_ready || !test.parameters.camera_ready || test.parameters.depth_view == 2 ||
         !(test.parameters.strength > 0.f) || !(test.parameters.strength_blend > 0.f);
       const std::uint64_t identity = 0x5eed0000u + std::uint64_t(&test - tests.data());
@@ -1821,7 +1822,8 @@ namespace {
         const auto after = renderer.conditioning_activity();
         const bool records = armed || !mono;
         require(after.recorded - before.recorded == (records ? 1u : 0u) && after.mono - before.mono == (records ? 0u : 1u) &&
-            after.memo - before.memo == (variant == 1 && records ? 1u : 0u),
+            after.memo - before.memo == (variant == 1 && records ? 1u : 0u) &&
+            after.field_memo - before.field_memo == (variant == 1 && records ? 1u : 0u),
           "An owed pack of " + test.name + " recorded the wrong conditioning");
         if (armed && majorant_resource.handle)
           require(fixture.read(reinterpret_cast<ID3D12Resource *>(majorant_resource.handle)) == full_majorant,
