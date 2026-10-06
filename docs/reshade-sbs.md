@@ -162,7 +162,8 @@ that did not count are split into `dropped_fence_pending` (the slot was reused b
 completion fence passed), `dropped_unresolved` (the fence passed but the results were not
 readable) and `incomplete` (render or conditioning marks missing). `layer_fence_waits` counts the
 GPU waits the presenting queue queued in the window for an offscreen UI layer copy run on another
-queue; with the Diagnostics switch on their time is in `inputs` (see the layer cross-queue fence
+queue (a re-offered copy that reuses an outstanding wait queues none and counts none); with the
+Diagnostics switch on their time is in `inputs` (see the layer cross-queue fence
 under [Diagnostics switch and per-Present cost](#diagnostics-switch-and-per-present-cost)). Where the device can copy query
 results (D3D12), the renderer resolves each timestamp into its own readback buffer on the command
 list that recorded it, so its completion fence alone decides readiness. ReShade 6.8 reads D3D12
@@ -362,7 +363,12 @@ use, one per device and queue (at most four), from the queue's own device. Befor
 reads or copies the entry, the presenting queue waits for that value on the GPU
 (`ui_layer::order_read`, `command_queue::wait`; never a CPU wait), unless the fence already passed
 it (`fence_passed`, also what a removed device's `UINT64_MAX` reads); a fenced copy is bound
-directly like a same-queue one. The wait goes onto the queue at once, ahead of ReShade's
+directly like a same-queue one. A copy re-offered on later Presents (every Present of a real frame
+under frame generation) reuses the presenting queue's wait that is still outstanding on the same
+fence for at least its value: that wait already orders every later read on the queue, so no
+marker signal, wait, watchdog record or count is added (until the 10-05 review each generated
+Present queued another, and at 4x the eight watchdog records could run out and leave a read
+unordered). The wait goes onto the queue at once, ahead of ReShade's
 immediate list; with the Diagnostics switch on that list is flushed first, so the renderer's begin
 timestamp precedes the wait and the timing line's `inputs` and `total` GPU stages include it, and
 the timing line's `layer_fence_waits` counts the waits queued in its window (measured: a 1.1 s

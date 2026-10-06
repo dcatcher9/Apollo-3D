@@ -1113,6 +1113,17 @@ namespace sunshine_game3d::ui_layer {
           "Sunshine UI layer: a layer copy's queue was revoked before its wait; it is copied into the renderer unordered (logged once)");
       return false;
     }
+    const int marker_index = marker_slot(s, presenting);
+    if (marker_index < 0) return false;
+    // A wait this presenting queue already queued on this fence for at least
+    // this value, and has not passed yet, orders every later read on the
+    // queue: a copy re-offered on the Presents of one real frame (frame
+    // generation) reuses it, with no signal, wait, record or watchdog.
+    for (auto &w : s.outstanding_waits)
+      if (w.fence == fence_index && w.fence_generation == f->generation && w.marker == marker_index &&
+          w.marker_generation == s.markers[unsigned(marker_index)].generation && w.value >= capture.wait_value &&
+          outstanding(s, w))
+        return true;
     // A record for the watchdog: the waits not yet passed are bounded.
     wait_record *record = nullptr;
     for (auto &w : s.outstanding_waits)
@@ -1124,8 +1135,6 @@ namespace sunshine_game3d::ui_layer {
           "the renderer unordered (logged once)");
       return false;
     }
-    const int marker_index = marker_slot(s, presenting);
-    if (marker_index < 0) return false;
     // The watchdog first: a wait it cannot bound is never queued.
     if (!arm_watchdog(s)) {
       if (first(s, log_watchdog_failed))
