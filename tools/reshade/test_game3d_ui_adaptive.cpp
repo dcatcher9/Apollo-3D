@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <limits>
 #include <stdexcept>
+#include <string>
 
 namespace adaptive = sunshine_game3d::ui_adaptive;
 namespace {
@@ -210,6 +211,40 @@ namespace {
     require(rise.current().applied_uv == 0, "Clock regression resumed motion");
   }
 
+  // A frame pinned at weight 1 on at least 99% of the central region (H1's
+  // flat frame, a full change set, an opaque menu) shows no scene for the UI
+  // to conflict with: however much of the hidden scene's depth lies in front
+  // of every level, it is no placement evidence and the applied position
+  // holds, neither ramping forward nor retreating. Just below 99% it is
+  // evidence again.
+  adaptive::sample covered_center(std::uint64_t tick, std::uint64_t per_mille) {
+    auto value = sample(tick); // 512 x 512: 144 central tiles of 1024 pixels.
+    const std::uint64_t covered = 147456 * per_mille / 1000;
+    unsigned index{};
+    for (unsigned y = 2; y < 14; ++y) for (unsigned x = 2; x < 14; ++x, ++index) {
+      auto &cell = value.tiles[y * 16 + x];
+      cell.covered = std::uint32_t(covered / 144 + (index < covered % 144));
+      cell.bad.fill(cell.covered);
+    }
+    return value;
+  }
+  void full_frame_holds_placement() {
+    adaptive::policy policy; settle(policy, 2);
+    const auto before = policy.current();
+    for (std::uint64_t tick = 1350; tick <= 3350; tick += 100) {
+      const auto full = covered_center(tick, (tick / 100) % 2 ? 1000 : 995);
+      policy.prepare(full.provenance);
+      require(!policy.observe(full, tick) && std::string(policy.current().status) == "full_frame",
+        "A full-frame sample was taken as placement evidence");
+    }
+    require(policy.current().target_uv == before.target_uv && policy.current().applied_uv == before.applied_uv &&
+        near(before.applied_uv, adaptive::level_uv(2, .01f)), "A full-frame decision moved the UI placement");
+    const auto partial = covered_center(3450, 989);
+    policy.prepare(partial.provenance);
+    require(policy.observe(partial, 3450) && policy.current().covered_pixels < 147456 * 99 / 100 &&
+        policy.current().required_index == adaptive::max_target_index, "Coverage below 99% was not placement evidence");
+  }
+
   void retained_mask_and_scope() {
     adaptive::policy policy; auto value = required(1000, 2); value.provenance.mask_sequence = 20; feed(policy, value);
     auto live = source(1100); live.mask_sequence = 20; policy.prepare(live); value.provenance = live;
@@ -277,12 +312,22 @@ namespace {
 
   void central_partition_edges_and_malformed_data() {
     for (const auto extent : std::array<std::array<unsigned, 2>, 5>{{{1, 1}, {2, 2}, {3, 5}, {17, 19}, {8192, 8192}}}) {
+      // Every edge tile and every other central tile covered: the central
+      // coverage stays below the full-frame bound, so the sample is evidence.
       adaptive::policy policy; auto value = sample(1000, extent[0], extent[1]);
-      for (auto &cell : value.tiles) { cell.covered = cell.pixels; cell.bad[0] = cell.pixels; }
+      std::uint64_t central_covered = 0;
+      unsigned central = 0;
+      for (unsigned y = 0; y != 16; ++y) for (unsigned x = 0; x != 16; ++x) {
+        auto &cell = value.tiles[y * 16 + x];
+        const bool inside = adaptive::central_tile(x, y);
+        cell.covered = !inside || central++ % 2 == 0 ? cell.pixels : 0;
+        cell.bad[0] = cell.covered;
+        if (inside) central_covered += cell.covered;
+      }
       feed(policy, value);
       const std::uint64_t expected = (7 * extent[0] / 8 - extent[0] / 8) * (7 * extent[1] / 8 - extent[1] / 8);
-      require(policy.current().center_pixels == expected && policy.current().covered_pixels == expected &&
-          policy.current().conflict_counts[0] == expected, "Central pixel partition changed");
+      require(policy.current().center_pixels == expected && policy.current().covered_pixels == central_covered &&
+          policy.current().conflict_counts[0] == central_covered, "Central pixel partition changed");
 
     }
     adaptive::policy policy; auto value = sample(1000);
@@ -312,7 +357,8 @@ int main() {
     area_rule_catches_diffuse_overlap_without_regions(); exact_area_boundaries_and_both_release_tests();
     caps_and_float_emission(); cap_change_holds_actual_uv(); missing_duplicate_gap_and_clock(); retained_mask_and_scope();
     generic_rotation_and_logical_changes();
-    central_partition_edges_and_malformed_data();
-    std::puts("PASS: eleven area-or-ratio absolute-level adaptive UI policy groups"); return 0;
+    central_partition_edges_and_malformed_data(); full_frame_holds_placement();
+    std::puts("PASS: twelve area-or-ratio absolute-level adaptive UI policy groups, a full-frame decision holding placement");
+    return 0;
   } catch (const std::exception &error) { std::fprintf(stderr, "FAIL: %s\n", error.what()); return 1; }
 }

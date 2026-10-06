@@ -2018,6 +2018,11 @@ that confirmation. After reaching its current target, retreat requires a shallow
 with conflicts strictly below both 15% of covered UI and 1.5% of central image pixels for
 1500 ms of fresh observations. Equality at either release threshold blocks retreat. The nearest candidate needed during that dwell becomes the retreat target, so a
 briefly clearer observation cannot pull it too far back. Empty coverage permits return to zero.
+Coverage at weight 1 of at least 99% of the central region (a full-frame decision: H1's source 8,
+a full change set, an opaque menu) is not placement evidence: no scene is visible for the UI to
+conflict with, and under H1 the depth does not describe the image. Such a sample is rejected as
+`full_frame` and holds the applied position, so a menu over a hidden scene neither ramps forward
+toward that scene's near geometry nor forces a retreat when gameplay resumes.
 Applied movement is limited to 0.03 UV per second forward and 0.005 UV per second backward.
 Targets and movement use absolute UV. A changed scene bound immediately enforces its current
 half-bound cap, invalidates old-cap observations and disarms movement until fresh evidence
