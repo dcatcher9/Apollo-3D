@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -20,6 +21,20 @@
 #include "utility.h"
 
 namespace safe {
+  /**
+   * @brief Whether a timed wait's delay asks only for a check.
+   *
+   * Timed pops and views must not reach the condition variable for such a delay. With this
+   * toolchain (winpthreads; libstdc++ without a clock-based condition-variable wait) a timed wait
+   * re-waits until GetTickCount64 passes its deadline, so a wait that nothing notifies ends only at
+   * the next 15.625 ms scheduler tick, even for a zero timeout and whatever the timer resolution.
+   * The encode loop polls its control queues with zero timeouts on every iteration.
+   */
+  template<class Rep, class Period>
+  constexpr bool no_wait(std::chrono::duration<Rep, Period> delay) noexcept {
+    return delay <= std::chrono::duration<Rep, Period>::zero();
+  }
+
   template<class T>
   class event_t {
   public:
@@ -101,13 +116,15 @@ namespace safe {
     }
 
     // pop and view should not be used interchangeably
+    // A zero or negative delay only checks; see no_wait().
     template<typename Rep, typename Period>
     status_t pop(std::chrono::duration<Rep, Period> delay) {
       std::unique_lock ul {_lock};
 
-      const bool success = _cv.wait_for(ul, delay, [this] {
+      const auto ready = [this] {
         return (bool) _status || !_continue || _woken;
-      });
+      };
+      const bool success = no_wait(delay) ? ready() : _cv.wait_for(ul, delay, ready);
       _woken = false;
       if (!success || !_continue || !_status) {
         return util::false_v<status_t>;
@@ -161,10 +178,10 @@ namespace safe {
     status_t view(std::chrono::duration<Rep, Period> delay) {
       std::unique_lock ul {_lock};
 
-      if (!_cv.wait_for(ul, delay, [this] {
-            return (bool) _status || !_continue;
-          }) ||
-          !_continue) {
+      const auto ready = [this] {
+        return (bool) _status || !_continue;
+      };
+      if (!(no_wait(delay) ? ready() : _cv.wait_for(ul, delay, ready)) || !_continue) {
         return util::false_v<status_t>;
       }
 
@@ -362,14 +379,15 @@ namespace safe {
       return _continue && !_queue.empty();
     }
 
+    // A zero or negative delay only checks; see no_wait().
     template<class Rep, class Period>
     status_t pop(std::chrono::duration<Rep, Period> delay) {
       std::unique_lock ul {_lock};
 
-      if (!_cv.wait_for(ul, delay, [this] {
-            return !_queue.empty() || !_continue;
-          }) ||
-          !_continue) {
+      const auto ready = [this] {
+        return !_queue.empty() || !_continue;
+      };
+      if (!(no_wait(delay) ? ready() : _cv.wait_for(ul, delay, ready)) || !_continue) {
         return util::false_v<status_t>;
       }
 

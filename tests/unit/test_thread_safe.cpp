@@ -120,6 +120,64 @@ TEST(ThreadSafeEventTest, DiscardedWakeLeavesAFullWaitAndKeepsStoredValues) {
   EXPECT_EQ(*value, 4);
 }
 
+// With this toolchain (winpthreads, no clock-based condition-variable wait) a timed wait that
+// nothing notifies ends only at the next Windows scheduler tick (15.625 ms), even for a zero
+// timeout, whatever the timer resolution. The encode loop polls its control queues with zero
+// timeouts every iteration; each such poll on an empty queue held it until the tick, locking the
+// loop to 64 iterations/s. A zero (or negative) timeout must check and return.
+TEST(ThreadSafeEventTest, ZeroTimeoutPopAndViewOfAnEmptyEventDoNotWait) {
+  safe::event_t<int> event;
+  const auto started = std::chrono::steady_clock::now();
+  for (int poll = 0; poll < 10; ++poll) {
+    EXPECT_FALSE(event.pop(0ms));
+    EXPECT_FALSE(event.view(0ms));
+    EXPECT_FALSE(event.pop(-1ms));
+  }
+  EXPECT_LT(std::chrono::steady_clock::now() - started, 15ms);
+}
+
+TEST(ThreadSafeEventTest, ZeroTimeoutPopKeepsTheTimedPopContract) {
+  safe::event_t<int> event;
+  event.raise(5);
+  auto value = event.pop(0ms);
+  ASSERT_TRUE(value);
+  EXPECT_EQ(*value, 5);
+  EXPECT_FALSE(event.pop(0ms));
+
+  // A zero-timeout pop consumes a pending wake like any timed pop, so the next wait is a full one.
+  event.wake();
+  EXPECT_FALSE(event.pop(0ms));
+  const auto after_wake = std::chrono::steady_clock::now();
+  EXPECT_FALSE(event.pop(20ms));
+  EXPECT_GE(std::chrono::steady_clock::now() - after_wake, 15ms);
+
+  // view() leaves the value in place; a stopped event returns nothing.
+  event.raise(6);
+  ASSERT_TRUE(event.view(0ms));
+  EXPECT_EQ(*event.view(0ms), 6);
+  EXPECT_TRUE(event.peek());
+  event.stop();
+  EXPECT_FALSE(event.pop(0ms));
+  EXPECT_FALSE(event.view(0ms));
+}
+
+TEST(ThreadSafeQueueTest, ZeroTimeoutPopOfAnEmptyQueueDoesNotWait) {
+  safe::queue_t<int> queue;
+  const auto started = std::chrono::steady_clock::now();
+  for (int poll = 0; poll < 20; ++poll) {
+    EXPECT_FALSE(queue.pop(0ms));
+  }
+  EXPECT_LT(std::chrono::steady_clock::now() - started, 15ms);
+
+  queue.raise(1);
+  queue.raise(2);
+  auto first = queue.pop(0ms);
+  ASSERT_TRUE(first);
+  EXPECT_EQ(*first, 1);
+  queue.stop();
+  EXPECT_FALSE(queue.pop(0ms));
+}
+
 TEST(ThreadSafeEventTest, TimedViewWakesWhenStopped) {
   safe::event_t<int> event;
   std::thread stopper {[&event] {
