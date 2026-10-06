@@ -121,6 +121,13 @@ namespace sunshine_game3d {
     // and vertical field from the last recorded conditioning; zero (unknown)
     // always records them.
     std::uint64_t depth_identity = 0;
+    // Something reads this Present's export or diagnostics (a consumer is
+    // attached, or Dump 3D is armed): only then does an adaptive-probe frame
+    // record its conditioning at once for the probe. Without it no probe is
+    // submitted, the conditioning stays owed like any other, and placement
+    // keeps its scope and held position, so the first frame with a reader
+    // probes at once.
+    bool adaptive_probe = true;
   };
 
   // Current positive display bound after strength and blend. Scene admission
@@ -384,9 +391,11 @@ namespace sunshine_game3d {
     // Recorded conditioning since configure: recorded in full, skipped for a
     // pack that shows the source mono, and recorded with the depth candidate
     // and vertical field kept from the last one (an exact repeat of its
-    // depth view, nonzero depth identity and parameters).
+    // depth view, nonzero depth identity and parameters), of which those that
+    // also kept the final field (field_memo: no horizontal or UI pin pass;
+    // the same UI words and an unchanged applied mask).
     struct conditioning_counters {
-      std::uint64_t recorded = 0, mono = 0, memo = 0;
+      std::uint64_t recorded = 0, mono = 0, memo = 0, field_memo = 0;
     };
     conditioning_counters conditioning_activity() const;
   private:

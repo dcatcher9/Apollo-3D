@@ -1225,6 +1225,10 @@ namespace {
           ui_input.for_render(scene.ui_plane, ui_observation), !proof.frame.reused_depth};
         // A Dump 3D packs this Present with its full conditioning.
         input.diagnostic_armed = proof.diagnostic_armed;
+        // Without a consumer (or an armed dump) nothing reads the adaptive
+        // probe's conditioning: render() keeps running for the depth pool (E4
+        // was rejected), but submits no probe.
+        input.adaptive_probe = read_nonce(*shared_) != 0 || proof.diagnostic_armed;
         input.depth_identity = depth_identity(proof);
         rendered = proof.frame.prepared && renderer->render(commands, input, true);
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON

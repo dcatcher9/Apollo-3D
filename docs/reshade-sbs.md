@@ -272,7 +272,11 @@ CPU decision. The depth conditioning that only the pack, a dump or the adaptive 
 candidate, vertical, nearest-UI tiles and reduce, horizontal, UI pinning) is owed with the pack,
 and `pack()` records it first (into an export slot, `output()` or a Dump 3D, inside the pack's
 isolated D3D11 state). A render records it at once for an adaptive-probe frame, an older two-pass
-replay shader or an immediate pack; a Present whose pack is never recorded records none, and the
+replay shader or an immediate pack; a probe frame records it only while a consumer is attached or
+Dump 3D is armed (`render_frame_input::adaptive_probe`): without one nothing reads that
+conditioning, so no probe is submitted (until the 10-05 review a monitor-only session spent about
+0.6-0.9 ms of 4K conditioning ten times a second on it) and placement holds until a consumer
+attaches, which probes at once; a Present whose pack is never recorded records none, and the
 next render or `begin_present` drops what it owed. An owed pack that shows the source mono (no
 depth or camera, zero strength or blend, the depth preview, or a source larger than 3840) records
 none unless Dump 3D is armed (`render_frame_input::diagnostic_armed`); the shader declares
@@ -281,7 +285,13 @@ none unless Dump 3D is armed (`render_frame_input::diagnostic_armed`); the shade
 for that value: the exporter derives it from the API capture's epoch, source, sequence and
 viewport, and Generic depth gives 0. An exact repeat of {view, nonzero identity, the 80 `b0`
 bytes} (a generated Present reusing its real frame's depth) keeps the last depth candidate and
-vertical field. Packed and dumped outputs are byte-identical to always conditioning. An owed pack
+vertical field. When that repeat also has the same UI words (`b1`: UI on, plane mode and depth or
+fraction, channel) and, with UI applied, the same detected mask, which no detection rewrote since
+(a held generated Present), it also keeps the final field: neither the horizontal nor the UI pin
+pass is recorded (`conditioning_activity().field_memo`). A probe frame, an armed dump and the
+nearest-UI plane always record both. Until the 10-05 review every held generated Present
+re-recorded them on unchanged inputs (about 0.25-0.4 ms at 3840x2160). Packed and dumped outputs
+are byte-identical to always conditioning. An owed pack
 without an armed dump runs the live vertical pass (`SunshineHostVerticalLiveCS`, declared by
 `SUNSHINE_VERTICAL_LIVE_ENTRY`): the same field without the final majorant write-back, which only
 Dump 3D reads, so the majorant texture keeps its intermediate values. `render()` (replay,
@@ -949,11 +959,19 @@ and a real frame without a decision of its own reuses the previous real frame's 
 after that there is no mask. There is no multiplier constant and no time bound. Present counting
 tells real from generated Presents: under FG, a Present that offers no input within the reported
 generated count (one while it is unknown) of the last Present that offered a Streamline UI tag is
-generated (`ui_mask::generated_without_input`). A Present that offers any input of its own is real,
-a HUD-less image (offered on every Present it pairs) or the offscreen UI layer copy included.
-Expedition 33 with FG on tags its Backbuffer on real Presents only and pairs no HUD-less image, so
-its generated Presents offer nothing; the count classifies them at 2x, 3x and 4x. A Present carries
-no real-frame id. Until 10-05 the HUD-less tag's present generation was one, and the HUD-less
+generated (`ui_mask::generated_without_input`). The capture owner, however, offers each kind's
+newest ready snapshot on every Present while it is recent (250 ms), and the offscreen UI layer its
+newest copy, so a generated Present normally re-offers its real frame's inputs instead of offering
+nothing: Expedition 33's Backbuffer, The Witcher 3's UIAlpha and Stellar Blade's layer and tags at
+2x-4x. Under FG a Present that offers exactly the snapshot identities the last detecting Present
+offered (the UIAlpha, UI color and Backbuffer tickets, an exact HUD-less pair's ticket and the
+layer copy's id, at least one) is therefore generated too (`ui_mask::same_snapshot_inputs`) and
+does not advance Present counting; current colour and an inexact HUD-less image are a Present's
+own and never match. Any other Present that offers an input of its own is real, a HUD-less image
+(offered on every Present it pairs) or a new layer copy included. Until the 10-05 review only
+Present counting held, which fires only once snapshots expire, so every re-offering generated
+Present reran the full detection (tiles, reduce, mask and samples) on its real frame's inputs.
+A Present carries no real-frame id. Until 10-05 the HUD-less tag's present generation was one, and the HUD-less
 pairing classified Presents as generated, which held every Present of Hogwarts Legacy's 4x frame
 generation (above). `tools/reshade/game3d_ui_temporal.h` owns the arbiter and the call order that
 the renderer and the sequence replay follow:
@@ -1647,7 +1665,7 @@ S3's five identity verdict words after word 30 (31-35, a 36-word texture from a 
 | `auto_frames` | Renders that requested GPU detection: Auto, or an explicit HUD-less difference input outside manual Off. |
 | `detection_frames` | Frames on which the detection passes ran: every real Present that detected, including a frame without candidates that ran for the T1 grace. |
 | `held.generated` | Generated Presents that applied the decision of the real frame they show (T1); they run no detection. |
-| `held.none` | Generated Presents (offering nothing within the reported generated count of the last Present that offered a UI tag) without such a decision in their identity scope: no mask, and the chain ends. A Present that offers a HUD-less image, a re-offered snapshot included, is real and never counts here: it detects, and when mispaired it reuses the held decision (`reused`). Counter lines before the 10-05 pairing change also count Presents the old HUD-less pairing held as generated. |
+| `held.none` | Generated Presents (offering nothing within the reported generated count of the last Present that offered a UI tag, or under FG re-offering exactly the snapshots of the last detecting Present) without such a decision in their identity scope: no mask, and the chain ends. A Present that offers a HUD-less image, a re-offered snapshot included, is real and never counts here: it detects, and when mispaired it reuses the held decision (`reused`). Counter lines before the 10-05 pairing change also count Presents the old HUD-less pairing held as generated. |
 | `reused` | Detection frames without a decision of their own that applied the held decision and mask (decision texel 9 bit 16): the T1 grace once after a real decision, and since selection revision 10 every HUD-less re-offer (`0x8000`) while a decision is held. |
 | `inactive.no_candidates`, `inactive.size`, `inactive.unprepared` | Requested renders without detection: no usable candidate, a frame larger than 3840, or detection resources that could not be prepared. |
 | `decided.N` | Detection frames by applied source 0-10, a reused decision included. 7, 9 and 11 (H2's still screen, logged by counter lines of fix 2 to selection revision 8) are retired and not logged; their GPU words stay zero. |
@@ -1886,7 +1904,9 @@ alpha that is opaque everywhere (never flat, no claim), and frame generation who
 cadence differs from the multiplier the provider reports (lagging, leading, or changed in the middle
 of a real frame). Frame generation streams identify generated Presents the production way: a game
 tags its UI inputs on real frames only, a HUD-less image is offered on every Present as an inexact
-pair, and a Present that offers nothing within the reported count of the last tag is generated.
+pair, and a Present that offers nothing within the reported count of the last tag is generated; a
+stream whose generated Presents re-offer their real frame's snapshot identities holds them by
+identity.
 Recorded streams from the labelled dumps cover Stellar Blade's SDR menu visits
 from FG-off gameplay and with FG suspended after FG-on gameplay that proves the layer by its pixels
 (H1 (d)), the same menu booted into before any gameplay (unproven in a first session, never flat), and an
@@ -1923,7 +1943,10 @@ only beside a HUD-less image re-offered on all of them at 3x and 4x, both orders
 real UIAlpha on every generated Present; with FG off a re-offer pairs with its own retained frame
 and decides, and once it is too old to pair the accepted pair is missing, so the grace applies once;
 and no re-offer bit is pushed beside a tag or an exact pair. The A2 group also checks that a
-declared tag pushed unaligned with the exact pair is never judged. That makes 34 groups. With S3
+declared tag pushed unaligned with the exact pair is never judged. The 10-05 review adds `T1
+generated Presents re-offering their real frame's snapshots hold`: at 2x-4x generated Presents
+re-offer the real frame's Backbuffer, UIAlpha and layer identities and hold by identity. That makes
+35 groups. With S3
 removed (selection revision 9), its two T1/E2 lines are known limits of Present counting rather
 than outcomes a stage will change: under a frame-generation multiplier reported lower than the
 presented one, or changed in the middle of a real frame and reported late, the generated Presents
@@ -2412,7 +2435,7 @@ acceptance and selection, hidden-scene guard, hold, pin weight. Diagnostics only
 | H1 Hidden scene (M5) | With valid depth, a held hidden D verdict (two hidden samples enter, renewals extend, a visible sample releases) and an informative full claim (from an accepted source, a layer proven cleared transparent this frame, an exact full change-set, or a pre-UI scene image on which D reads visible while D on the presented frame reads hidden: the declared HUD-less image, or an offscreen layer without coverage whose signature the ledger holds proven, A1), the frame is flat whatever M4 selected (a winner already flat is relabelled 8 too). A visible verdict refutes that signature's full claim until it shows below 99% opaque. Invalid D acts on nothing; only a scope change clears D state. |
 | H2 Still screen (M5, removed) | Fix 2's flattening of still SDR screens without a UI source, removed in selection revision 9 (**Still screens without a UI source (H2, fix 2): removed**); the ID is not reused. |
 | P1 Pin weight (M7) | `saturate(8 * c)` of the selected coverage at any coverage (binary for change-sets); 1 everywhere when H1 says flat. |
-| T1 Hold (M6) | A Present without its own fresh decision uses the last real decision; a real frame without one reuses the previous real frame's decision once, then has no mask, except that a mispaired re-offer of the previous render's HUD-less snapshot without a UI tag keeps the held decision for as long as that snapshot is re-offered. No multiplier constant and no time bound; real frames are identified by Present counting (S3's real-frame identity was removed): a Present that offers nothing within the reported generated count of the last UI tag is generated, and one that offers any input is real. |
+| T1 Hold (M6) | A Present without its own fresh decision uses the last real decision; a real frame without one reuses the previous real frame's decision once, then has no mask, except that a mispaired re-offer of the previous render's HUD-less snapshot without a UI tag keeps the held decision for as long as that snapshot is re-offered. No multiplier constant and no time bound; real frames are identified by Present counting (S3's real-frame identity was removed): a Present that offers nothing within the reported generated count of the last UI tag is generated, and so, under FG, is one that re-offers exactly the snapshot identities of the last detecting Present (no current colour or inexact HUD-less image); one that offers any other input is real. |
 | F1 Fail safe and diagnostics (M8) | No qualifying source gives no mask with a named reason and refused candidate, the panel warning and exact counters. Status freshness is keyed on the scope and the winning accepted candidate. Diagnostics feed nothing back. |
 
 Scope (runtime, device, epoch, viewport, size, colour mode and encoding, but not the FG multiplier)
@@ -2449,9 +2472,7 @@ accepted inferred source with no declared or exact judge needs more than Forget 
 lapse (until S4 this includes a wrongly accepted layer, which the one-way test does not judge);
 whether a wrong declared alpha that once read selective needs a judge where no exact pair is
 offered (since selection revision 10 an exact pair of its tag batch judges it one way, as every
-alpha but the layer copy); whether the premultiplied bound also applies to declared UI color tags; whether live
-generated Presents without a HUD-less pairing re-offer the last tag snapshot (Expedition 33 at 3x
-or 4x, counted from the last tag); and whether a generated Present over untagged UI should
+alpha but the layer copy); whether the premultiplied bound also applies to declared UI color tags; and whether a generated Present over untagged UI should
 use the masks of both real frames it interpolates (it needs a moving-HUD FG dump).
 
 **S3 snapshot ticket: removed.** S3 gave every UI candidate snapshot an immutable ticket with
