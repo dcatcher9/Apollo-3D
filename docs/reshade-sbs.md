@@ -314,8 +314,13 @@ Present), and `end_local_views` runs whenever a lease was taken. The renderer de
 in its own original-device descriptor (`renderer::bind_ui_snapshot`); the capture owner's own
 descriptor belongs to a heap ReShade wraps, which `push_descriptors` cannot copy. The offscreen UI
 layer keeps a ring of live copies (`ui_layer::ring_capacity`, 4; three normally suffice): each
-before-clear copy goes to an entry other than the newest whose last reader, a renderer
-submission, completed (`ui_layer::bound` with the renderer's completion fence and value); with
+before-clear copy goes to an entry other than the newest and the one a Present is reading whose
+last reader, a renderer submission, completed (`ui_layer::bound` with the renderer's completion
+fence and value). The entry `ui_layer::latest` offers stays pinned until `bound` registers that
+Present as its reader: in between it has no reader yet, and a game thread may promote a newer copy
+and clear the layer again, which before the 10-05 review could record the next copy into the entry
+the presenting queue was about to read. A Present that renders nothing never binds, and the next
+offer moves the pin, so it holds at most one entry; with
 every entry busy the ring grows, and a full ring skips that copy and logs once. An entry whose
 allocation failed is taken last, so it is allocated again only when no entry with a copy is free,
 as a growth would be, and the ring keeps rotating its existing copies meanwhile. A recorded copy is

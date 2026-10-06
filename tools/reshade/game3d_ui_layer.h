@@ -224,7 +224,9 @@ namespace sunshine_game3d::ui_layer {
 
   // Live copies: a ring of add-on owned copies (ring_capacity at most; three
   // normally suffice). A before-clear copy goes to an entry other than the
-  // offered one whose last reader, a renderer submission (bound()), completed
+  // offered one and the one a Present is reading (offered by latest(), its
+  // reader not yet registered by bound()) whose last reader, a renderer
+  // submission (bound()), completed
   // and whose own copy is not pending; with every entry busy the ring grows,
   // and once full that copy is skipped and logged (saturated). A recorded copy
   // is pending, never offered, until a list carrying it executes (and, when it
@@ -240,12 +242,14 @@ namespace sunshine_game3d::ui_layer {
   // capture id (smaller is older; UINT64_MAX for an entry whose allocation
   // failed, the least preferred: allocated again only when no entry with a
   // copy is free); newest: the offered entry, the last executed copy (-1:
-  // none). The oldest free entry wins.
+  // none); reading: the entry a Present was offered and has not yet bound
+  // (-1: none). The oldest free entry other than those two wins.
   inline ring_choice choose_ring_entry(unsigned count, const std::array<bool, ring_capacity> &free,
-      const std::array<std::uint64_t, ring_capacity> &age, int newest) {
+      const std::array<std::uint64_t, ring_capacity> &age, int newest, int reading = -1) {
     ring_choice choice;
     for (unsigned i = 0; i != count && i != ring_capacity; ++i)
-      if (int(i) != newest && free[i] && (choice.index < 0 || age[i] < age[unsigned(choice.index)])) choice.index = int(i);
+      if (int(i) != newest && int(i) != reading && free[i] && (choice.index < 0 || age[i] < age[unsigned(choice.index)]))
+        choice.index = int(i);
     if (choice.index < 0 && count < ring_capacity) choice = {int(count), true};
     return choice;
   }

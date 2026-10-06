@@ -151,10 +151,15 @@ namespace sunshine_game3d::ui_layer {
       // (-1: none). A recorded copy is promoted only when a list carrying it
       // executes, and one owing a signal only once that signal is recorded.
       int newest = -1;
+      // The entry latest() last offered, pinned until bound() registers the
+      // reading Present (-1: none): between them it has no reader yet, and a
+      // copy promoted meanwhile may no longer be the newest. A Present that
+      // renders nothing never calls bound(); the next latest() moves the pin.
+      int reading = -1;
       std::uint32_t width{}, height{};
       api::format format{};
-      // The newest recorded copy's id and tick (latest() reports them as the
-      // single live copy did).
+      // The newest recorded copy's id (from state_t::next_capture_id) and
+      // tick (latest() reports them as the single live copy did).
       std::uint64_t capture_id{}, tick{};
       bool saturated_logged{};
       const ring_entry *latest() const { return newest >= 0 ? &ring[unsigned(newest)] : nullptr; }
@@ -242,6 +247,11 @@ namespace sunshine_game3d::ui_layer {
       std::vector<candidate> candidates;
       std::vector<retired> graveyard;
       live_state live;
+      // The last live copy id handed out. Strictly increasing for the life of
+      // the process, across ring scopes: a renderer caches its slot copy by
+      // this id, so an id restarting after a retire could name a copy seconds
+      // old as already copied.
+      std::uint64_t next_capture_id{};
       // Advance whenever the live ring is retired, or the census armed, taken
       // or dropped: an allocation made outside the lock for an earlier scope
       // is destroyed instead of published.
@@ -756,7 +766,7 @@ namespace sunshine_game3d::ui_layer {
       auto &entry = live.ring[index];
       commands->barrier(entry.copy, api::resource_usage::shader_resource, api::resource_usage::copy_dest);
       record_copy(commands, resource, entry.copy);
-      entry.capture_id = ++live.capture_id;
+      entry.capture_id = live.capture_id = ++s.next_capture_id;
       entry.tick = live.tick = GetTickCount64();
       entry.queue = 0;
       entry.owed = 0;
@@ -794,7 +804,7 @@ namespace sunshine_game3d::ui_layer {
         // A new copy shape is a new scope.
         for (unsigned i = 0; i != live.entries; ++i) retire_entry(s, device, live.ring[i], now);
         live.entries = 0;
-        live.newest = -1;
+        live.newest = live.reading = -1;
         ++s.live_scope;
         publish_watch(s);
       }
@@ -818,7 +828,7 @@ namespace sunshine_game3d::ui_layer {
         age[i] = entry.copy.handle ? entry.capture_id : UINT64_MAX;
       }
       if (abandoned) publish_watch(s);
-      const auto choice = choose_ring_entry(live.entries, free, age, live.newest);
+      const auto choice = choose_ring_entry(live.entries, free, age, live.newest, live.reading);
       if (choice.index < 0) {
         // Every entry is still read by an unfinished renderer submission:
         // this frame's copy is skipped and the newest copy stays offered.
@@ -1020,7 +1030,7 @@ namespace sunshine_game3d::ui_layer {
     auto &s = state();
     s.demand_ms.store(now_ms, std::memory_order_relaxed);
     std::lock_guard<std::mutex> lock(s.mutex);
-    const auto &live = s.live;
+    auto &live = s.live;
     const auto *entry = live.latest();
     // The executed copy is offered while the newest recorded one is recent,
     // as the single live texture was (its tick is the newest recorded copy's;
@@ -1028,6 +1038,8 @@ namespace sunshine_game3d::ui_layer {
     // list executes again and owes a new signal is held until that signal.
     if (!device || device != s.device || !entry || entry->pending || !entry->copy.handle || !entry->capture_id ||
         !live.tracker.active() || now_ms < live.tick || now_ms - live.tick > max_clear_gap_ms) return false;
+    // Pinned until bound() registers this Present as its reader.
+    live.reading = live.newest;
     out.copy = entry->copy; out.view = entry->view; out.capture_id = entry->capture_id; out.tick = live.tick;
     out.format = static_cast<std::uint32_t>(live.format); out.presents_since_copy = live.tracker.presents_since_copy();
     out.executed_queue = entry->queue;
@@ -1211,6 +1223,7 @@ namespace sunshine_game3d::ui_layer {
       for (auto &r : entry.readers) if (same(r)) slot = &r;
       if (slot) {
         slot->value = std::max(slot->value, value);
+        if (s.live.reading == int(i)) s.live.reading = -1;
         return;
       }
       // A new renderer: replace a reader that completed, else the first.
@@ -1220,6 +1233,7 @@ namespace sunshine_game3d::ui_layer {
       if (d3d12) (slot->fence12 = reinterpret_cast<ID3D12Fence *>(fence.handle))->AddRef();
       else (slot->fence11 = reinterpret_cast<ID3D11Fence *>(fence.handle))->AddRef();
       slot->value = value;
+      if (s.live.reading == int(i)) s.live.reading = -1;
       return;
     }
   }

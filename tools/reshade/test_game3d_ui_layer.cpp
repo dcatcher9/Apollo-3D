@@ -373,6 +373,13 @@ int main() {
       require(choice.index == 1 && !choice.allocate, "The ring did not reuse its oldest free entry");
       choice = layer::choose_ring_entry(3, free, age, 1);
       require(choice.index == 0 && !choice.allocate, "The ring reused the newest copy");
+      // The entry a Present was offered (latest()) and has not yet bound is
+      // pinned even when a newer copy was promoted meanwhile and it is the
+      // oldest free one.
+      choice = layer::choose_ring_entry(3, free, age, 2, 1);
+      require(choice.index == 0 && !choice.allocate, "The ring reused the entry a Present is reading");
+      choice = layer::choose_ring_entry(3, {false, true, false, false}, age, 2, 1);
+      require(choice.index == 3 && choice.allocate, "A ring whose only free entry is being read did not grow");
       free = {false, false, true, false};
       choice = layer::choose_ring_entry(3, free, age, 2);
       require(choice.index == 3 && choice.allocate, "A busy ring did not grow");
@@ -389,7 +396,7 @@ int main() {
       choice = layer::choose_ring_entry(3, {false, true, false, false}, {7, UINT64_MAX, 9, 0}, -1);
       require(choice.index == 1 && !choice.allocate, "An entry whose allocation failed was not retried as the only free one");
     }
-    std::puts("PASS UI layer live-copy ring: oldest free non-newest entry, growth to the capacity, skip when every entry is read");
+    std::puts("PASS UI layer live-copy ring: oldest free entry other than the newest and the one being read, growth to the capacity, skip when every entry is read");
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "FAIL %s\n", error.what());
