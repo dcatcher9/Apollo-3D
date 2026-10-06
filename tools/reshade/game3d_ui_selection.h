@@ -166,9 +166,11 @@ namespace sunshine_game3d::ui_selection {
   }
   // A2, the one-way lit-pixel disagreement: at least a tenth of a judged
   // source's strong pixels (alpha of at least 1/2) lie where the exact
-  // HUD-less image is lit and unchanged. Dims and tints over dark or changed
-  // pixels never meet it, nor does real UI, which changes the pixels it
-  // covers; an opaque final image read as UI alpha does.
+  // HUD-less image is lit and unchanged against both the pair's colour and
+  // the presented frame. Dims and tints over dark or changed pixels never
+  // meet it, nor does real UI, which changes the pixels it covers (UI
+  // composited after the tagged Backbuffer changes the presented frame); an
+  // opaque final image read as UI alpha does.
   constexpr bool one_way_contradicted(std::uint32_t strong, std::uint32_t contradicted) {
     return strong && std::uint64_t(contradicted) * 10u >= strong;
   }
@@ -197,7 +199,8 @@ namespace sunshine_game3d::ui_selection {
     std::uint32_t changed{}, unchanged{}, nonfinite{}, lit{}, matching_tiles{};
     // A2, in judged_kinds order: pixels with alpha of at least 1/2, and those
     // of them where an offered exact pair's HUD-less image is lit and
-    // unchanged. The tiles pass counts them on sample frames with an exact
+    // unchanged against both the pair's colour and the presented colour.
+    // The tiles pass counts them on sample frames with an exact
     // pair only (per_frame_sample); they are zero otherwise.
     std::array<std::uint32_t, 4> strong{}, contradicted{};
     // Texel 11 (revision 4): the offscreen UI layer against the presented

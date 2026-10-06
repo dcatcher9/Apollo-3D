@@ -78,7 +78,7 @@ namespace {
 
   // Candidate kinds by artifact name and their bits in candidate layout 2:
   // t11 UI alpha (R), t12 UI color tag (A), t13 Backbuffer (A), current color
-  // alpha (t0 A), t14 HUD-less, and an offscreen UI layer from the census
+  // alpha (the presented colour's, t6 A), t14 HUD-less, and an offscreen UI layer from the census
   // (ui_layer_candidate_N) at t7 with the renderer's layer flags. Layout 1
   // shaders (no SUNSHINE_UI_CANDIDATE_LAYOUT marker) take the layer in the UI
   // color slot (t12, bit 0x2) and trusted slot indices in b2 word 2.
@@ -361,11 +361,12 @@ namespace {
       if (found == artifacts.end()) throw std::runtime_error(dump.filename().string() + " has no " + kind);
       return loaded.emplace(kind, upload(gpu, dump / found->second.at("file").get<std::string>(), found->second)).first->second;
     };
-    // The color HUD-less is compared with, whose alpha is the current-color
-    // candidate: the tagged Backbuffer of a batch pair, else the presented color.
+    // The color HUD-less is compared with (t0): the tagged Backbuffer of a
+    // batch pair, else the presented color.
     const auto paired = label.value("paired", std::string("source_color"));
     const auto &paired_color = load(paired);
-    // The presented color, whatever HUD-less is paired with.
+    // The presented color (t6), whatever HUD-less is paired with; its alpha
+    // is the current-color candidate.
     const auto &presented = load("source_color");
     // The game's frame size; source_width/height is the host output, which
     // differs when the host scales the eyes.

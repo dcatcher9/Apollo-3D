@@ -66,7 +66,8 @@ namespace sunshine_game3d {
     // tag 2, Backbuffer 3 or current 4; before selection revision 10 inferred
     // alpha only) that the same frame's valid exact pair contradicts in the
     // one-way test (A2): at least a tenth of its pixels with alpha of at least
-    // 1/2 lie where the HUD-less image is lit and unchanged. The acceptance
+    // 1/2 lie where the HUD-less image is lit and unchanged against both the
+    // pair's colour and the presented frame. The acceptance
     // ledger revokes it from such samples. Since selection revision 10 the
     // one-way counts exist on sample frames only, so this counts samples.
     inline constexpr std::size_t contradicted = 17;

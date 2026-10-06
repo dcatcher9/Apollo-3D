@@ -977,13 +977,14 @@ namespace sunshine_game3d {
         const alpha_auto_source &observation, api::resource_view paired_color, api::resource_view depth,
         uint32_t bits, uint32_t accepted, uint32_t flags, uint32_t per_frame) {
       std::array<api::resource_view, 15> views{};
-      // A HUD-less image is compared with the color of the frame it belongs to:
-      // its batch's tagged Backbuffer or a retained Present. Detection then also
-      // reads that color's alpha for the present-alpha candidate; eye rendering
-      // stays current.
+      // A HUD-less image is compared with the color of the frame it belongs to
+      // (t0): its batch's tagged Backbuffer or a retained Present; eye
+      // rendering stays current.
       views[0] = paired_color.handle ? paired_color : textures[source].srv;
-      // The presented color (t6): the tiles pass compares the offscreen UI
-      // layer with it (H1 d), the evidence passes measure it.
+      // The presented color (t6): its alpha is the current-alpha candidate
+      // (tiles and mask passes), the one-way test reads it beside the pair
+      // (A2), the tiles pass compares the offscreen UI layer with it (H1 d)
+      // and the evidence passes measure it.
       views[6] = textures[source].srv;
       // Candidate layout 2: the offscreen UI layer in its own slot (t7).
       views[7] = input.layer;

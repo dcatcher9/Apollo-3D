@@ -676,13 +676,20 @@ reads, per-frame bit `0x4000`), in the passes' second phase, since no other fram
 - **One-way lit-pixel disagreement.** An exact pair contradicts a judged alpha when at least a
   tenth of its strong pixels (finite alpha of at least 1/2) lie where the HUD-less image is lit
   (above eight times the difference threshold, as in the full-frame rule below) and unchanged
-  (within half the threshold). The GPU counts both per tile (statistics rows 80-111, below). Real
-  UI changes the final image under it, and a dim or tint either changes the pixels it covers or
-  covers dark ones, so neither meets the test: Expedition 33's pause tint and The Witcher 3's
-  sign-wheel backdrop stay accepted, and so does a correct UIAlpha or UI color tag. An opaque final
-  image read as UI alpha marks the unchanged scene and meets it. The test is one way: alpha missing where the pair changed
-  contradicts nothing. It needs a basis: a source without strong pixels in the sample is not judged
-  by it.
+  (within half the threshold) against both the pair's tagged Backbuffer and the presented frame:
+  the scene shown without UI on screen. One rule for every judged kind. The GPU counts both per
+  tile (statistics rows 80-111, below). Real UI changes the final image under it, and a dim or tint
+  either changes the pixels it covers or covers dark ones, so neither meets the test: Expedition
+  33's pause tint and The Witcher 3's sign-wheel backdrop stay accepted, and so does a correct
+  UIAlpha or UI color tag. UI drawn after the tagged Backbuffer (a game that tags its Backbuffer, or
+  its final colour as HUDLessColor, before compositing the UI, or late subtitles and a cursor)
+  changes the presented frame, so it never contradicts its own tag; until the 10-05 review only the
+  tagged Backbuffer was compared, and such a pair (an empty change set) contradicted every correct
+  UIAlpha or UI color tag and revoked a restored one within about 0.2 s. An opaque final image read
+  as UI alpha marks the scene unchanged in both images and still meets it; under frame generation
+  the presented frame may be another frame, which only makes a contradiction rarer. The test is
+  one way: alpha missing where the pair changed contradicts nothing. It needs a basis: a source
+  without strong pixels in the sample is not judged by it.
 - **Declared-versus-inferred coverage disagreement.** An accepted declared alpha contradicts an
   inferred one whose covered pixels differ from those of each accepted, valid declared alpha in the
   sample by at least 10% of the frame. Resident Evil Requiem's UI color covers 0.2% during play
@@ -1453,7 +1460,10 @@ defines, and the `reshade_game3d_ui_layer` unit test fails when the two disagree
 below leave the supported range. `SUNSHINE_UI_CANDIDATE_LAYOUT` 2 (S1, E1) gives every candidate
 its own slot and bit in `Sunshine_UICandidates` (`b2` word 0, offered) and
 `Sunshine_UIAcceptedCandidates` (`b2` word 2, accepted): `0x1` UIAlpha (`t11`), `0x2` the UI color
-tag (`t12`), `0x4` Backbuffer (`t13`), `0x8` current color (`t0`), `0x10` HUD-less (`t14`), `0x20`
+tag (`t12`), `0x4` Backbuffer (`t13`), `0x8` current color (the presented colour's alpha, `t6`;
+`t0`'s alpha until the 10-05 review, which read a retained or tagged frame beside a HUD-less pair),
+`0x10` HUD-less (`t14`, compared with its paired colour at `t0`, which the tiles pass reads only
+with an offered HUD-less image, so the difference and lit words are zero without one), `0x20`
 an exact pair (not a candidate) and `0x40` the offscreen UI layer (`t7`). The frame's decision is
 `decide()` in `tools/reshade/game3d_ui_selection.h`, which the reduce ports line for line;
 `SUNSHINE_UI_SELECTION_REVISION` names the revision of that port (2 since S2a: the T1 grace with the
@@ -1543,10 +1553,10 @@ texture, 272 bytes:
 | 6 | Pre-UI scene image `n` | `asuint(D)` | `valid \| ran << 1` | The image: 0 none, 1 HUD-less, 2 the offscreen UI layer |
 | 7 | Covered pixels of the offscreen UI layer (within the premultiplied bound since selection revision 10) | Its invalid pixels: out of range, plus those beyond the premultiplied bound when these lie on more than 1% of the frame and on more than 5% of it or more than its opaque ones (before selection revision 10 every pixel beyond the bound) | Its pixels at least 254/255 (within the bound) | Offered candidate bits that passed V1 or V2 |
 | 8 | Reserved zero (the layer's strong pixels before selection revision 10, always 0 for the late copy) | Strong pixels (finite alpha of at least 1/2) of Backbuffer alpha | Of current alpha | The refused candidate's bit (0 when the frame decided) |
-| 9 | Reserved zero (the layer's contradicted pixels before selection revision 10) | Strong pixels of Backbuffer alpha where an offered exact pair's HUD-less image is lit and unchanged | The same of current alpha | Bits 0-7: the own decision's `ui_no_mask` index, 0xFF when it decided a source; bit 16: the T1 grace reused the previous decision |
+| 9 | Reserved zero (the layer's contradicted pixels before selection revision 10) | Strong pixels of Backbuffer alpha where an offered exact pair's HUD-less image is lit and unchanged against both the pair's colour and the presented colour | The same of current alpha | Bits 0-7: the own decision's `ui_no_mask` index, 0xFF when it decided a source; bit 16: the T1 grace reused the previous decision |
 | 10 | Pixels of Backbuffer alpha at least 254/255 | Of current alpha | The informative full claims before refutation (candidate bits, `0x80` the pre-UI scene image) | The h1 word: bits 0-7 the S1 winner's source, `0x100` H1 applied |
 | 11 | Pixels where the offscreen UI layer's RGB equals the presented colour (words 44-47; since fix 1) | Lit layer pixels | Reserved zero (lit presented pixels in selection revisions 4 to 8) | Reserved zero (lit presented pixels that differ from the layer in selection revisions 4 to 8) |
-| 16 | Strong pixels of UIAlpha (words 64-67; since selection revision 10; zero when pushed unaligned, `0x1000`) | Of the UI color tag (zero when pushed unaligned, `0x2000`) | Strong pixels of UIAlpha where an offered exact pair's HUD-less image is lit and unchanged | The same of the UI color tag |
+| 16 | Strong pixels of UIAlpha (words 64-67; since selection revision 10; zero when pushed unaligned, `0x1000`) | Of the UI color tag (zero when pushed unaligned, `0x2000`) | Strong pixels of UIAlpha where an offered exact pair's HUD-less image is lit and unchanged against both the pair's colour and the presented colour | The same of the UI color tag |
 
 Texel 12 (words 48-51) is reserved: selection revisions 5 to 8 wrote H2's still and compared cells
 there and, from a shader with `SUNSHINE_UI_IDENTITY`, S3's identity verdicts and deltas, both
@@ -1759,7 +1769,7 @@ and the resulting mask (empty, partial HUD, or flat) with that label:
 
 It also pushes the exact 80-byte `b0` from `replay.parameter_hex`, as every renderer compute pass
 receives it, and binds the raw depth artifact at `t1` and the presented color at `t6` (`t0` stays
-the color HUD-less is paired with) for the scene-evidence passes, which it runs after the decision
+the color HUD-less is paired with; current alpha reads `t6`) for the scene-evidence passes, which it runs after the decision
 as on a sample frame and which read the pre-UI scene image from `t14` or the layer slot `t7`; they
 write only decision texels 5 and 6. Its `b2` has the renderer's six words (32 bytes): word 4 is
 `ui_selection::comparable` of the layer artifact's encoding and the presented one, so texel 11
@@ -2373,11 +2383,11 @@ acceptance and selection, hidden-scene guard, hold, pin weight. Diagnostics only
 | Rule | Requires |
 | --- | --- |
 | E1 Proof and identity (M1) | A candidate exists only as a snapshot with proven state, boundary, real-frame identity, encoding (typed format and swapchain colour space) and signature; otherwise there is no candidate and a recorded reason. Each cleared target or declared resource is its own signature in its own slot. Over budget, a spare slot rotates across unseen signatures and records a budget refusal. |
-| E2 Exactness (M1) | Only same-batch Streamline tags, with the same-batch Backbuffer tag as the final-image reference, with frame generation on or off. Present counting only proposes a pair (a snapshot's first offer with the Present after the tag; under frame generation a late first offer and every later offer of it with its own Present, without it with the retained Present after the tag): it is inexact, validated by V2's pixel test alone, never full-frame UI and never a judge. Frame tokens and FG interposers do not make a pair exact (S3's frame identity was removed). The one-frame-late layer copy is inexact opacity evidence: it may draw, but never judges or pairs. |
+| E2 Exactness (M1) | Only same-batch Streamline tags, with the same-batch Backbuffer tag as the final-image reference, with frame generation on or off; the one-way test also requires the presented frame to show the HUD-less scene unchanged, so UI composited after the tagged Backbuffer never contradicts its tag. Present counting only proposes a pair (a snapshot's first offer with the Present after the tag; under frame generation a late first offer and every later offer of it with its own Present, without it with the retained Present after the tag): it is inexact, validated by V2's pixel test alone, never full-frame UI and never a judge. Frame tokens and FG interposers do not make a pair exact (S3's frame identity was removed). The one-frame-late layer copy is inexact opacity evidence: it may draw, but never judges or pairs. |
 | V1 Opacity validity (M2) | Finite, in-range alpha with at most 1% invalid pixels, at any bit depth; a cleared layer must also pass the premultiplied bound: its pixels beyond it are uncovered, and invalidate the layer when they lie on more than 1% of the frame unless they lie on at most 5% of it and its opaque pixels outnumber them. Presented and Backbuffer alpha are checked for range only. The tolerance does not depend on trust. |
 | V2 Change-set validity (M2) | A difference is evidence only with the threshold from the two snapshots' own encodings, and only a valid change set is: the changed set passes the tile test above when partial, changes no pixel of a lit HUD-less image in clean tiles (empty, since revision 8, which an accepted pair decides as an empty mask of its own), or, from an exact pair whose HUD-less image is lit, is nearly the whole frame. The middle band (a pair mispaired with interpolated or another frame's colour) and noisy pairs are invalid. |
 | A1 Earning (M3) | Acceptance is keyed by game and source signature (with the swapchain colour space), not by FG mode. A declared source (UI alpha or color tag, or a HUD-less pair, exact or not, by its partial change set) is accepted by its first valid selective sample; an inferred source needs the steady selective run above, consecutive and bounded (a selective sample more than 2 s after the run's last one restarts it). A source that is never selective is never accepted. A sample does not count while a declared alpha is offered but invalid. Holds and manual inputs never earn. An offered layer without coverage earns its signature's pre-UI proof (ledger key `pre_ui:<format>:<space>`) like an inferred source: three samples over 2 s in which it equals the presented frame at eight times their pair threshold on at least 90% of pixels and is lit on at least half; a mismatch neither withdraws it nor restarts the run, and no judge revokes it. |
-| A2 Revocation (M3) | Three contradictions within 2 s by valid same-sample evidence of stronger provenance (an accepted declared alpha or an exact change-set), whatever the drawing rank: one-way disagreement on lit pixels, or declared-versus-inferred coverage disagreement. Agreeing samples do not reset the count. Every accepted alpha is judged by exact one-way contradictions, declared ones included (selection revision 10) when captured in the exact pair's tag batch; the declared alphas' coverage judges inferred alpha only; the one-frame-late layer copy is not same-sample evidence (E2), so neither judge reads it. Forget also revokes. Ambiguous or invalid samples never revoke. |
+| A2 Revocation (M3) | Three contradictions within 2 s by valid same-sample evidence of stronger provenance (an accepted declared alpha or an exact change-set), whatever the drawing rank: one-way disagreement on lit pixels unchanged against both the paired Backbuffer and the presented frame, or declared-versus-inferred coverage disagreement. Agreeing samples do not reset the count. Every accepted alpha is judged by exact one-way contradictions, declared ones included (selection revision 10) when captured in the exact pair's tag batch; the declared alphas' coverage judges inferred alpha only; the one-frame-late layer copy is not same-sample evidence (E2), so neither judge reads it. Forget also revokes. Ambiguous or invalid samples never revoke. |
 | A3 Persistence (M3) | Restored acceptance is provisional and lapses unless earned again within 60 s of testable time: for every kind the clock counts only the gaps, capped at 250 ms, between consecutive samples that could earn or refute the source (offered, valid and not full: alpha below 90% of the frame, a partial or empty change set), so other samples, absence, manual periods and gaps without samples never count beyond one capped gap (a full menu can neither earn nor refute it, so Stellar Blade's presented alpha no longer lapses during long menu visits or FG-on play, nor a HUD-less pair through mispaired samples). A restored pre-UI proof's clock counts the same way on its testable samples (its layer offered without coverage while the presented frame's evidence is valid and visible), so it lapses after 60 s of testable time without a match. Legacy per-kind entries are discarded; Forget clears the game's entries, pre-UI proofs included. |
 | S1 Selection (M4) | Among accepted, valid candidates the first in draw order wins: opacity before change-set, then declared before inferred. An unaccepted or invalid candidate never blocks another, except that an offered, accepted declared alpha blocks inferred alpha (when it is invalid, T1 applies). Nothing qualifies: no mask, with the reason of the highest-ranked refused candidate. |
 | S2 Manual (M3) | Off offers nothing; the filter restricts offers; On accepts the filtered valid candidates for this session only, without persisting, earning or revoking. |

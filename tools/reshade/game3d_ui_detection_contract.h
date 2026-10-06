@@ -282,7 +282,8 @@ namespace sunshine_game3d::ui_detection {
   // (selection revision 10; the layer, Backbuffer and current alpha before
   // it): rows 80-95 their strong pixels, alpha of at least 1/2, and rows
   // 96-111 the strong pixels where an exact pair's HUD-less image is lit and
-  // unchanged, counted on sample frames with an exact pair only), then, with
+  // unchanged against both the pair's colour and the presented colour,
+  // counted on sample frames with an exact pair only), then, with
   // scene evidence, from scene_partial_row the sums of each 16x16-cell
   // compare group, one row per 16 cell rows (rows 112-120), and from
   // selection revision 4 (decision texels pre_ui_decision_texels) rows
@@ -361,7 +362,8 @@ namespace sunshine_game3d::ui_detection {
     // Texels 8 and 9 (selection revision 2): the one-way judgment counts (A2)
     // of Backbuffer and current alpha in .y and .z (strong: alpha of at
     // least 1/2; contradicted: strong where an offered exact pair's HUD-less
-    // image is lit and unchanged; counted on sample frames only since
+    // image is lit and unchanged against both the pair's colour and the
+    // presented colour; counted on sample frames only since
     // selection revision 10), the refused candidate bit of the own decision
     // (F1, zero when it decided), and the frame reason word
     // (frame_reason_decided, frame_reason_reused). Words 32 and 36 held the

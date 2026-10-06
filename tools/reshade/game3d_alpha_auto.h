@@ -109,8 +109,9 @@ namespace sunshine_game3d {
       // A2, decision texels 16, 8 and 9 (selection revision 10), in
       // ui_selection::judged_kinds order (UIAlpha, UI color tag, Backbuffer,
       // current): pixels with alpha of at least 1/2, and those of them where
-      // an offered exact pair's HUD-less image is lit and unchanged, counted
-      // on sample frames with an exact pair. The one-frame-late layer copy is
+      // an offered exact pair's HUD-less image is lit and unchanged against
+      // both the pair's colour and the presented frame, counted on sample
+      // frames with an exact pair. The one-frame-late layer copy is
       // never judged (E2).
       std::array<std::uint32_t, 4> strong{}, contradicted{};
       // F1: the frame's own decision's refused candidate bit (zero when it
@@ -271,9 +272,11 @@ namespace sunshine_game3d {
     // current; ui_selection::judged_kinds) is judged by a V2-valid exact
     // change set (ui_selection::exact_judge; acceptance not required), which
     // contradicts it when at least a tenth of its pixels with alpha of at
-    // least 1/2 lie where the HUD-less image is lit and unchanged (the
-    // one-way test; real UI, dims and tints over dark or changed pixels never
-    // meet it, an opaque final image read as UI does), and an inferred one
+    // least 1/2 lie where the HUD-less image is lit and unchanged against
+    // both the pair's colour and the presented frame (the one-way test; real
+    // UI, also UI composited after the tagged Backbuffer, and dims and tints
+    // over dark or changed pixels never meet it, an opaque final image read
+    // as UI does), and an inferred one
     // (Backbuffer, current) also by every offered, accepted, V1-valid
     // declared alpha, which contradict it when its coverage differs from each
     // of theirs by at least a tenth of the frame. The one-way judge needs a
