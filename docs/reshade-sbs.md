@@ -1132,8 +1132,8 @@ layer's claim (b) uses V1 validity (at most 1% invalid pixels), where the old la
 none. Claims (a)-(c) act unless their signature is refuted (below); claim (d) acts only while the
 guard's held samples read the pre-UI image visible, and for the layer only while it is proven.
 
-**H1.** When the CPU holds a hidden verdict (per-frame bit `0x400000`), the consumed depth is this
-frame's (`0x40000` not pushed) and some claim acts, the frame is full-frame UI over a hidden scene:
+**H1.** When the CPU holds a hidden verdict (per-frame bit `0x400000`) and some claim acts, the
+frame is full-frame UI over a hidden scene:
 source 8, covered pixels all, and the mask pass writes 1.0, as for source 6. It applies whatever S1
 selected, an accepted partial winner included: an accepted HUD tag deciding 0.25% while a full menu
 covers the scene gives way to the flat frame for as long as the hold lasts. An opaque-full winner
@@ -1145,8 +1145,12 @@ FG on, trusted backbuffer, hold`). Since selection revision 10 a winner already 
 either way, so only its label and counters change (`decided.8` and `full_d` instead of `decided.6`
 or the alpha source and `full_alpha`), and H1 needs no winner test (replay case `E33 settings FG on,
 exact full-frame pair under a hold, relabelled 8 by H1`, which decided 6 before). A render without
-depth has no parallax and is flat anyway, so H1 does not test for depth; reused or generated depth
-(`0x40000`) disables it. The A2 and T1 counts, the hold store and the counters follow
+depth has no parallax and is flat anyway, so H1 does not test for depth. Reused or generated depth
+(`0x40000`) keeps H1 active: the held verdict comes only from samples with current depth and lasts
+at most 500 ms, reused depth comes from the same source, and flat is the fail-safe direction. Until
+the 10-05 review reused depth disabled H1, so under frame generation every generated Present that
+re-offered the real frame's inputs fell back to its own S1 decision (often none) and a full menu
+over a hidden scene alternated flat and warped at the Present rate. The A2 and T1 counts, the hold store and the counters follow
 the final decision, so an overridden winner counts as decided 8 and never as contradicted. The
 acceptance ledger reads the candidates' own counts, so H1 neither earns nor revokes acceptance, and
 the status names a detected UI source while it decides 8. A claim that acts while H1 does not apply
@@ -1262,8 +1266,9 @@ Only an identity change clears the guard: another epoch or viewport (a recreated
 device, or another viewport). An observation revision, an inactive frame, an acceptance change and
 Forget clear nothing; a sample of another revision is still discarded unread. The layer's pre-UI
 proof is ledger state, so an identity change never clears it; Forget does. After a depth
-observation loss a held verdict lasts up to 500 ms; it is inert while the depth is reused, and a new
-current depth within that window inherits it, since the screen is still the same menu. The renderer
+observation loss a held verdict lasts up to 500 ms; it keeps acting while the depth is reused,
+which never renews or releases it, and a new current depth within that window inherits it, since
+the screen is still the same menu. The renderer
 calls the guard in a fixed order: `enter_scope(epoch, viewport)` on every detecting frame,
 `per_frame` (the held bits and refuted candidates) ORed into the pushed flags and `measure` before
 detection, and at poll `observe` on the completed sample, with the signatures it was submitted
@@ -1272,9 +1277,11 @@ pushes none.
 
 The evidence passes only measure: cell sums into their own 256 x 144 texture, a 16 x 16-cell
 comparison per group into nine statistics rows, and their sum into decision texels 5 and 6. They
-run after detection on sample frames only (the 100 ms readback cadence), and only while the latest
-sample had a claim that could act (a claim not refuted, or claim (d)), a verdict is held or a
-proven layer is the offer's pre-UI image (H1 (d)); otherwise nothing is dispatched. Everything they
+run after detection on sample frames only (the 100 ms readback cadence), only over depth that is
+this frame's (no `0x40000`: reused depth is no evidence, so the sample stays not actionable), and
+only while the latest sample had a claim that could act (a claim not refuted, or claim (d)), a
+verdict is held or a proven layer is the offer's pre-UI image (H1 (d)); otherwise nothing is
+dispatched. Everything they
 measure is therefore actionable. Until selection revision 9 they also ran, never actionably, for
 the first-run shadow, as a diagnostic after an accepted whole-frame decision (for the
 `full_alpha_d` UI counters) and, in selection revisions 5 to 8, for fix 2's still-screen rule H2;
@@ -1495,7 +1502,7 @@ through an `*_SRGB` view is not comparable with a UNORM presented frame, so it i
 | `0x8000` | per-frame | Since selection revision 10 (T1): the offered inexact HUD-less snapshot is the one the previous render offered, and no UIAlpha, UI color or Backbuffer tag comes with it. Without a decision of its own the frame leaves the hold store as it is and applies the stored decision while one is held. |
 | `0x10000` | per-frame | Reserved and never reused; before S2b the layer route's hidden-scene hold (source 8). The shader defines nothing for it. |
 | `0x20000` | per-frame | Reserved and never reused; no render pushes it and the shader defines nothing for it. |
-| `0x40000` | per-frame | The consumed depth is not this frame's (reused, or behind a generated Present). |
+| `0x40000` | per-frame | The consumed depth is not this frame's (reused, or behind a generated Present). It only counts (`full.depth_not_current`) and makes the hidden-scene evidence invalid; the renderer then dispatches no evidence passes. H1 still acts on a held verdict. |
 | `0x80000` | per-frame | Reserved and never reused; before S2b the HUD-less route's hidden-scene hold (source 9). The shader defines nothing for it. |
 | `0x100000` | per-frame | An accepted candidate that the last adopting real frame offered is missing (T1). |
 | `0x200000` | per-frame | No previous real decision in this chain: the T1 grace cannot reuse one. |
@@ -1623,7 +1630,7 @@ S3's five identity verdict words after word 30 (31-35, a 36-word texture from a 
 | `reused` | Detection frames without a decision of their own that applied the held decision and mask (decision texel 9 bit 16): the T1 grace once after a real decision, and since selection revision 10 every HUD-less re-offer (`0x8000`) while a decision is held. |
 | `inactive.no_candidates`, `inactive.size`, `inactive.unprepared` | Requested renders without detection: no usable candidate, a frame larger than 3840, or detection resources that could not be prepared. |
 | `decided.N` | Detection frames by applied source 0-10, a reused decision included. 7, 9 and 11 (H2's still screen, logged by counter lines of fix 2 to selection revision 8) are retired and not logged; their GPU words stay zero. |
-| `none.R` | Frames whose own decision was source 0 and that applied no mask, each by the first reason that applies: `gate_no_hold` (an informative full claim acted but H1 did not apply: no held hidden verdict, or depth that is not this frame's; the name is kept for log compatibility), `presented_blocked` (an offered, accepted UIAlpha or UI color tag, invalid itself, kept an accepted, valid inferred alpha out), `trusted_invalid` (an offered, accepted alpha had more than 1% invalid pixels), `layer_aside` (the offered layer was V1-invalid, such as a layer without alpha), `unaccepted` (an offered, unaccepted candidate was valid and selective: its acceptance is still being earned), `difference_failed` (a HUD-less image was offered, including an inexact one that changed nearly everywhere without the pre-UI hold), `ambiguous` (an unaccepted valid alpha empty or nearly full), `no_candidate` (no alpha offered), then `other`. |
+| `none.R` | Frames whose own decision was source 0 and that applied no mask, each by the first reason that applies: `gate_no_hold` (an informative full claim acted but H1 did not apply: no held hidden verdict; the name is kept for log compatibility), `presented_blocked` (an offered, accepted UIAlpha or UI color tag, invalid itself, kept an accepted, valid inferred alpha out), `trusted_invalid` (an offered, accepted alpha had more than 1% invalid pixels), `layer_aside` (the offered layer was V1-invalid, such as a layer without alpha), `unaccepted` (an offered, unaccepted candidate was valid and selective: its acceptance is still being earned), `difference_failed` (a HUD-less image was offered, including an inexact one that changed nearly everywhere without the pre-UI hold), `ambiguous` (an unaccepted valid alpha empty or nearly full), `no_candidate` (no alpha offered), then `other`. |
 | `full.6`, `full.8` | Repeat `decided.6` and `.8`. Counter lines before S2b also have `full.9`. |
 | `full.depth_not_current` | Detection frames pushed with `0x40000`, whatever they decided. |
 | `full_d.hidden`, `.ambiguous`, `.visible`, `.invalid` | Committed samples that decided H1 (source 8), by the hidden-scene verdict measured on that same sample. `invalid` includes evidence that was not measured. These count samples, not frames. Counter lines before S2b count sources 6, 8 and 9 here. |

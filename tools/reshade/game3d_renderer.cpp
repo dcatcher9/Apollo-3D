@@ -1073,14 +1073,17 @@ namespace sunshine_game3d {
       // CPU and writes decision texels 5 and 6 after the decision and mask;
       // without an acting-capable claim in the latest sample or a held
       // verdict nothing runs (scene_guard::state::measure; a proven layer that
-      // is the offer's pre-UI image always measures). The cells pass reads
+      // is the offer's pre-UI image always measures), and neither does it over
+      // depth that is not this frame's, which is no evidence (the sample stays
+      // not actionable, as the evidence sum would read it invalid). The cells pass reads
       // the pre-UI scene image the b2 constants name: the HUD-less image
       // (t14) when offered, else the offscreen UI layer's colour (t7), both
       // still bound from the detection passes above, beside the presented
       // color (t6).
       const bool proven_image = scene_layer_proven && ui_selection::pre_ui_image_of(bits) == ui_detection::pre_ui_image::layer;
       detection_pending_actionable = false;
-      if (scene_evidence_supported() && guard.measure(observation.now_ms, proven_image)) {
+      if (scene_evidence_supported() && !(per_frame & ui_detection::per_frame_depth_not_current) &&
+          guard.measure(observation.now_ms, proven_image)) {
         namespace scene = ui_detection::scene;
         detection_pending_actionable = true;
         views[1] = depth;

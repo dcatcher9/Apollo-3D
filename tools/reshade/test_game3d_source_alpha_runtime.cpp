@@ -2669,12 +2669,13 @@ namespace {
     }
     require(held_frames == 5, "A hold did not last exactly hold_ms after its last valid sample: " + std::to_string(held_frames));
     never_flat(logo_color, 3, "flat depth without edge cells");
-    // (d) Depth that is not this frame's gives no evidence and disables H1.
+    // (d) Depth that is not this frame's measures no evidence, so it never
+    // enters a hold (a held verdict would still act on it).
     gpu.depth_view = silhouette;
     gpu.depth_current = false;
     const auto stale = never_flat(logo_color, 4, "reused depth");
-    require(stale.sample.evidence.scene.ran && !stale.sample.evidence.scene.valid &&
-        stale.sample.evidence.scene.n >= ui_detection::scene::min_edges, "Reused depth gave valid hidden-scene evidence");
+    require(!stale.sample.evidence.scene.ran && !stale.sample.evidence.scene.valid,
+      "Reused depth measured hidden-scene evidence");
     gpu.depth_current = true;
     require(frames_to_flat(logo_color, 4, "current depth again") == 3, "Current depth did not re-enter after two hidden samples");
     // (e) Only an identity change (epoch or viewport) clears the guard. An

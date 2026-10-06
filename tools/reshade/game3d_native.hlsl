@@ -711,8 +711,9 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     const uint refuted = (Sunshine_UIDetectionFlags >> SUNSHINE_UI_PER_FRAME_REFUTED_SHIFT) & candidate_bits;
     const uint acting = (claims & candidate_bits & ~refuted) |
         ((Sunshine_UIDetectionFlags & SUNSHINE_UI_PER_FRAME_PRE_UI_VISIBLE) ? (claims & SUNSHINE_UI_CLAIM_PRE_UI) : 0u);
-    const bool h1 = acting && (Sunshine_UIDetectionFlags & SUNSHINE_UI_PER_FRAME_SCENE_HIDDEN) &&
-        !(Sunshine_UIDetectionFlags & SUNSHINE_UI_PER_FRAME_DEPTH_NOT_CURRENT);
+    // The held verdict is measured only on samples with current depth, so
+    // reused depth (a generated Present, a late capture) keeps it.
+    const bool h1 = acting && (Sunshine_UIDetectionFlags & SUNSHINE_UI_PER_FRAME_SCENE_HIDDEN);
     if (h1) { source = 8u; covered = pixels; }
     const uint unaccepted = offered & ~accepted;
     // F1: without a source, the first reason that applies and the candidate

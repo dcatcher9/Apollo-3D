@@ -1487,8 +1487,9 @@ int main() {
       d = selection::decide(c, 0x04, 0x04, hidden);
       require(flat(d) && d.s1_source == 3u && d.claims == candidate::backbuffer,
         "H1: an accepted winner with transparent pixels was not shown flat");
-      // (b) An unaccepted, valid, opaque-full layer; refuted, or over reused
-      // depth, it does not act.
+      // (b) An unaccepted, valid, opaque-full layer; refuted, it does not
+      // act. Reused depth keeps the held verdict acting: the guard measured
+      // it on samples with current depth.
       c = {};
       c.pixels = 1000;
       c.covered = {0, 0, 1000, 0, 1000};
@@ -1499,8 +1500,10 @@ int main() {
       require(!d.source && d.claims == candidate::layer && d.none_reason != sunshine_game3d::ui_no_mask::gate_no_hold,
         "H1: a refuted layer claim acted");
       d = selection::decide(c, 0x48, 0x00, hidden | detection::per_frame_depth_not_current);
+      require(flat(d) && d.h1 && d.claims == candidate::layer, "H1: reused depth under a held verdict did not flatten");
+      d = selection::decide(c, 0x48, 0x00, detection::per_frame_depth_not_current);
       require(!d.source && d.none_reason == sunshine_game3d::ui_no_mask::gate_no_hold && d.refused == candidate::layer,
-        "H1: depth that is not this frame's must not apply H1");
+        "H1: reused depth without a held verdict applied H1");
       // An unaccepted opaque UIAlpha or UI color tag is never informative.
       c = {};
       c.pixels = 1000;

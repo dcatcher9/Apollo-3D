@@ -25,7 +25,7 @@ namespace sunshine_game3d {
   // Why a detection frame decided no mask (source 0). Exactly one reason per
   // such frame, the first that applies in this order (ui_selection::decide):
   // an informative full claim acted but H1 did not apply, because the CPU
-  // holds no hidden verdict or the depth is not this frame's (gate_no_hold,
+  // holds no hidden verdict (gate_no_hold,
   // the name kept for log compatibility); an offered, accepted declared alpha blocked an accepted,
   // valid inferred alpha (presented_blocked: every such declared alpha was
   // V1-invalid, since a valid one decides); an offered, accepted alpha was

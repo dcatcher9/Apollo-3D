@@ -874,8 +874,9 @@ namespace {
       if (!sample) {
         return;
       }
+      // Depth that is not this frame's measures no evidence.
       const bool proven_image = r.layer_proven && ui_selection::pre_ui_image_of(bits) == ui_detection::pre_ui_image::layer;
-      const bool evidence = guard.measure(now, proven_image);
+      const bool evidence = !(per_frame & ui_detection::per_frame_depth_not_current) && guard.measure(now, proven_image);
       pending_actionable = evidence;
       // The reduce zeroes texels 5 and 6; only the evidence passes write them.
       if (!evidence) {
@@ -1682,8 +1683,8 @@ namespace {
           require(i >= entry || (f.decision.none_reason == ui_no_mask::gate_no_hold && f.decision.refused == candidate::hudless), "The title before the hold did not name its acting claim");
         } else if (f.now_ms >= 13000) {
           // The label follows the frame's own pushed bits: 8 exactly where
-          // the held hidden verdict acts with this frame's depth, else 6.
-          const bool hidden = (f.gpu.per_frame & ui_detection::per_frame_scene_hidden) && !(f.gpu.per_frame & ui_detection::per_frame_depth_not_current);
+          // the held hidden verdict acts, reused depth included, else 6.
+          const bool hidden = (f.gpu.per_frame & ui_detection::per_frame_scene_hidden) != 0u;
           relabelled += hidden ? 1 : 0;
           require(f.flat() && f.decision.s1_source == 6 && f.source == (hidden ? 8u : 6u) && f.decision.h1 == hidden, "The accepted pair did not decide the title flat, or H1 did not relabel it exactly under the held verdict");
         }
@@ -1693,6 +1694,50 @@ namespace {
       const auto c = session.counters();
       require(c[ui_counter::scene_entered] == 2 && c[ui_counter::scene_released] == 1 && !c[ui_counter::scene_refuted] && c[ui_counter::full_d_hidden] > 0 && !c[ui_counter::full_d_visible], "The title's H1 hold was not counted entered twice and released once");
       check_counters(s, "Hogwarts title");
+    }
+    {
+      // H1 under frame generation with reused depth: each generated Present
+      // re-offers the real frame's exact pair, so it detects, and consumes
+      // the real frame's depth (per_frame_depth_not_current). Its samples
+      // measure no evidence; the hold that the real frames' samples enter
+      // acts on every Present, so none of the held window falls back to its
+      // own S1 decision (none: the pair is not accepted).
+      alpha_auto_policy session;
+      sequence s(session, recorded_frames({recorded::hl_title, recorded::hl_title_held, recorded::hl_title_accepted}));
+      bool real = true;
+      for (std::uint64_t now = 10000; now < 12000; now += 8, real = !real) {
+        auto q = p;
+        q.now_ms = now;
+        q.depth_current = real;
+        s.step(q);
+      }
+      std::size_t entry = s.frames.size(), reused = 0;
+      for (std::size_t i = 0; i != s.frames.size() && entry == s.frames.size(); ++i) {
+        if (s.frames[i].gpu.per_frame & ui_detection::per_frame_scene_hidden) {
+          entry = i;
+        }
+      }
+      require(entry < s.frames.size(), "The title under FG never entered the hidden-scene hold");
+      for (std::size_t i = entry; i != s.frames.size(); ++i) {
+        const auto &f = s.frames[i];
+        reused += (f.gpu.per_frame & ui_detection::per_frame_depth_not_current) ? 1 : 0;
+        require((f.gpu.per_frame & ui_detection::per_frame_scene_hidden) && f.flat() && f.source == 8 && f.decision.h1, "A Present of the held window, reused depth included, was not flat as 8");
+      }
+      require(reused * 3 > (s.frames.size() - entry), "The held window had too few Presents over reused depth");
+      std::size_t unmeasured = 0;
+      for (const auto &f : s.frames) {
+        if (!f.submitted || !(f.gpu.per_frame & ui_detection::per_frame_depth_not_current)) {
+          continue;
+        }
+        for (const auto &sample : s.samples) {
+          if (sample.sample_tick_ms == f.now_ms) {
+            require(!measured(sample), "A sample over reused depth measured hidden-scene evidence");
+            ++unmeasured;
+          }
+        }
+      }
+      require(unmeasured > 0, "No sample was taken over reused depth");
+      check_counters(s, "Hogwarts title FG reused depth");
     }
   }
 
