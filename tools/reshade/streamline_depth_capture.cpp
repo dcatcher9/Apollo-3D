@@ -2217,9 +2217,11 @@ namespace sunshine_streamline::depth_capture {
       return found->id;
     }
   }
+#ifdef SUNSHINE_STREAMLINE_PROBE_TEST
   std::uint64_t record(std::uint64_t command, const input &value, record_diagnostic *diagnostic) {
     return record_impl(command, value, diagnostic, false);
   }
+#endif
   static diagnostic_ticket record_auxiliary_texture(std::uint64_t command, const input &value,
       record_diagnostic *diagnostic, bool reusable_storage,
       texture_state_policy state_policy = texture_state_policy::source_contract) {
@@ -2695,6 +2697,7 @@ namespace sunshine_streamline::depth_capture {
     }
     return result(matching_id ? consumer_status::ownership_mismatch : consumer_status::slot_missing);
   }
+#ifdef SUNSHINE_STREAMLINE_PROBE_TEST
   bool mark_consumer(std::uint64_t command, const packet &value, consumer_diagnostic *diagnostic) {
     if (!value.pixel_ready) {
       if (diagnostic) { *diagnostic = {}; diagnostic->result = consumer_status::capture_not_ready; }
@@ -2702,6 +2705,7 @@ namespace sunshine_streamline::depth_capture {
     }
     return consume_owned(command, value, 0, 0, diagnostic);
   }
+#endif
   bool copy_current(std::uint64_t command, const packet &value, std::uint64_t destination,
       std::uint32_t destination_state, consumer_diagnostic *diagnostic, bool immediate) {
     if (!destination || !value.pixel_ready) {

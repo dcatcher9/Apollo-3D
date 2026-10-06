@@ -237,9 +237,12 @@ namespace sunshine_streamline::depth_capture {
   void begin_evaluation(std::uint64_t epoch, std::uint64_t sequence, std::uint32_t viewport,
     sunshine_scene_depth::provider_kind provider = sunshine_scene_depth::provider_kind::streamline,
     std::uint64_t source_id = 0, std::uint64_t superseded_source_id = UINT64_MAX);
-  // Observe before the original DLSS evaluation on its actual command list and
-  // record an independent copy. Every nonzero ticket must always finish.
+#ifdef SUNSHINE_STREAMLINE_PROBE_TEST
+  // Test only: observe before the original DLSS evaluation on its actual
+  // command list and record an independent copy, without nominating it.
+  // Every nonzero ticket must always finish.
   std::uint64_t record(std::uint64_t command, const input &value, record_diagnostic *diagnostic = nullptr);
+#endif
   // Source adapters supply identity/metadata and always snapshot at the API
   // call, even for a registered ReShade DSV. Matching its resource identity
   // cannot authenticate a generic before-clear copy's contents. Missing state
@@ -420,18 +423,19 @@ namespace sunshine_streamline::depth_capture {
   // Diagnostics describe this exact acquisition and its first terminal failure,
   // including a rejected latest slot when no output packet can be returned.
   // A true result selects valid current source metadata, independent of pixel
-  // readiness. Inspect pixel_ready for native snapshots; shared preservation
-  // resolves its current copy separately. Diagnostics retain the pixel status.
+  // readiness. Inspect pixel_ready. Diagnostics retain the pixel status.
   bool acquire(std::uint64_t queue, std::uint64_t present, packet &out, capture_diagnostic *diagnostic = nullptr,
     selection_policy policy = {});
   // Rendering consumes this explicit decision. The overload above is a
-  // compatibility adapter and computes the same decision without returning it.
+  // convenience overload for tests and callers that do not need the
+  // decision; it computes the same decision without returning it.
   bool acquire(std::uint64_t queue, std::uint64_t present, packet &out, acquisition_decision &decision,
     capture_diagnostic *diagnostic = nullptr, selection_policy policy = {});
   // Commit only after the selected snapshot was successfully copied for this
   // effects pass. Nomination/acquisition alone must not consume a frame.
   void complete_frame(const packet &value, std::uint64_t present);
-  // Register BEFORE recording any reads into this exact command list. Failure
+#ifdef SUNSHINE_STREAMLINE_PROBE_TEST
+  // Test only. Register BEFORE recording any reads into this exact command list. Failure
   // means the caller must not issue a read. The native post-Execute hook retires
   // the registered recording with a queue fence.
   // It is invalid to reuse the packet in another command list without marking
@@ -441,6 +445,7 @@ namespace sunshine_streamline::depth_capture {
   // Optional diagnostics describe this exact call, not the shared status last
   // written by another producer/consumer thread. They do not alter admission.
   bool mark_consumer(std::uint64_t command, const packet &value, consumer_diagnostic *diagnostic = nullptr);
+#endif
   status last_status();
   const char *name(status value);
   const char *name(capture_failure value);
