@@ -2355,7 +2355,14 @@ generation `ReShade SBS: game eyes WxH are scaled to the stream's W'xH' eyes`. E
 samples only its own source half, so linear filtering never mixes the eyes, and the exact-texel
 chroma conversion always reads an output-sized raster. Running the game at the stream resolution
 avoids that extra pass and its softening. Eyes with a different aspect ratio would distort
-disparity, so the host keeps the stream in 2D and logs a warning naming both sizes.
+disparity, so the host keeps the stream in 2D and logs a warning naming both sizes. The host
+decides that from the producer's published source, with or without a consumer, before it
+requests a ring: it writes no consumer nonce for such eyes, and withdraws its own nonce from a
+live generation that stops fitting (the producer then deactivates with `no_consumer` and frees
+its idle ring), so the game neither allocates the shared ring nor packs stereo for a stream that
+stays 2D. A fitting size requests a fresh ring under a new nonce. Until the 10-05 review the
+nonce was written first, and an aspect-mismatched stream kept the game packing and fencing
+every Present into a ring nobody read.
 
 Normal installation omits `-ShaderDirectory` and uses the GPU renderer embedded in the add-on.
 For comparison testing only, the exporter also accepts annotated SuperDepth3D and independent
@@ -4764,10 +4771,14 @@ publisher identity and availability changes, not every frame sequence. The clien
 status for its confirmed generation and source geometry, with ordered revisions. Old converter
 status cannot authorize stereo in a replacement session or after a source-size change. The
 receiver runs on the existing D3D owner. In mode `2` it observes the producer's status without
-attaching, refreshed on captures and keepalives, so the game builds no export ring. In mode `3` it
-polls at stream cadence until the live export's ready-fence wake is armed (Local AR always polls),
-then converts only on that wake or a changed connection, reading the slot directly with no
-private copy and no CPU wait for the producer's fence ([GPU handoff contract](#gpu-handoff-contract)).
+attaching, refreshed on captures and keepalives, so the game builds no export ring. In mode `3`,
+until a mapped producer publishes a generation, it is refreshed on captures and keepalives and
+polled only when the mapping's metadata, nonce or producer changed (a static screen is then
+encoded at the minimum-FPS keepalive, not at stream cadence; until the 10-05 review every stream
+deadline converted and encoded the flat fallback); a live export whose ready-fence wake is not
+armed is polled at stream cadence, and Local AR always polls. A live export converts only on that
+wake or a changed connection, reading the slot directly with no private copy and no CPU wait for
+the producer's fence ([GPU handoff contract](#gpu-handoff-contract)).
 
 ## Color and HDR
 

@@ -558,12 +558,16 @@ namespace platf::dxgi {
       if (stream_gamma_conversion_pending || (stream_gamma_mode_ != ::video::stream_gamma_mode_e::windows_default && std::chrono::steady_clock::now() >= stream_gamma_white_query_at)) {
         return true;
       }
-      // ReShade publishes independently of desktop presents. While a live export's ready fence
-      // wakes the streaming encoder, convert only for its new frames (or a changed connection);
-      // until then, and for Local AR, poll it at stream cadence even while DDup/WGC retains a
-      // static desktop frame.
+      // ReShade publishes independently of desktop presents. Local AR polls it at its own cadence.
+      // A streaming encoder converts a live export when its ready fence wakes it (or at stream
+      // cadence while that wake is not armed), and otherwise only for a changed connection:
+      // without a live export, captures and the minimum-FPS keepalive refresh the flat fallback,
+      // never a repeat of a static desktop at stream cadence.
       if (reshade_receiver && ::video::is_packed_mode(sbs_mode)) {
-        return game_dumper.needs_conversion_poll() || !reshade_receiver->frame_wake_active() || reshade_receiver->frame_pending();
+        if (!external_frame_wake || game_dumper.needs_conversion_poll()) {
+          return true;
+        }
+        return (reshade_receiver->frame_held() && !reshade_receiver->frame_wake_active()) || reshade_receiver->frame_pending();
       }
       if (::video::is_game_mode(sbs_mode)) {
         // Game mono encodes the desktop and only reports whether an export is available. The
