@@ -347,10 +347,11 @@ namespace platf::reshade_bridge {
       }
       if (!nonce_) {
         nonce_ = new_nonce();
-        // Capabilities first, then their nonce, then the request itself (full barriers). A
-        // producer trusts the bits only for the nonce they name, so it never applies them
-        // to another consumer's request.
+        // Capabilities and protocol first, then their nonce, then the request itself (full
+        // barriers). A producer trusts them only for the nonce they name, so it never applies
+        // them to another consumer's request, and answers only a consumer of its own protocol.
         InterlockedExchange(reinterpret_cast<volatile LONG *>(&shared_->consumer_capabilities), static_cast<LONG>(capabilities_));
+        InterlockedExchange(reinterpret_cast<volatile LONG *>(&shared_->consumer_protocol), static_cast<LONG>(wire::version));
         InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&shared_->capability_nonce), static_cast<LONG64>(nonce_));
         InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&shared_->consumer_nonce), static_cast<LONG64>(nonce_));
         return std::nullopt;
@@ -513,7 +514,7 @@ namespace platf::reshade_bridge {
     }
 
     bool identity_matches(const wire::metadata_t &metadata) const {
-      return metadata.signature == wire::magic && wire::supported_version(metadata.protocol_version) &&
+      return metadata.signature == wire::magic && metadata.protocol_version == wire::version &&
              metadata.metadata_bytes == sizeof(wire::metadata_t) && metadata.producer_pid == pid_ &&
              metadata.producer_creation_time == process_creation_ && metadata.window == window_;
     }
@@ -528,16 +529,32 @@ namespace platf::reshade_bridge {
       if (!mapping_.get()) {
         return false;
       }
-      shared_ = static_cast<wire::shared_state_t *>(MapViewOfFile(mapping_.get(), FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, sizeof(wire::shared_state_t)));
-      if (!shared_) {
+      // The whole section: an add-on of another protocol created its own size. Every protocol
+      // begins with the same header, read before anything else (wire::same_protocol).
+      auto *view = static_cast<wire::shared_state_t *>(MapViewOfFile(mapping_.get(), FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, 0));
+      if (!view) {
         return false;
       }
-      if (shared_->shared_bytes != sizeof(wire::shared_state_t)) {
-        UnmapViewOfFile(shared_);
-        shared_ = nullptr;
-        return false;
+      MEMORY_BASIC_INFORMATION region {};
+      const auto shared_bytes = static_cast<std::uint32_t>(read32(view->shared_bytes));
+      const auto signature = read64(view->metadata.signature);
+      const auto protocol = static_cast<std::uint32_t>(read32(view->metadata.protocol_version));
+      if (VirtualQuery(view, &region, sizeof(region)) == sizeof(region) && region.RegionSize >= sizeof(wire::shared_state_t) && wire::same_protocol(shared_bytes, signature, protocol, static_cast<std::uint32_t>(read32(view->metadata.metadata_bytes)))) {
+        shared_ = view;
+        return true;
       }
-      return true;
+      UnmapViewOfFile(view);
+      // A mapping still being initialised (zero) is retried quietly. Any published header of
+      // another protocol is refused by name, once per producer: its layout is never read.
+      if (shared_bytes != 0 && signature == wire::magic && (refused_pid_ != pid_ || refused_creation_ != process_creation_)) {
+        refused_pid_ = pid_;
+        refused_creation_ = process_creation_;
+        BOOST_LOG(warning) << "ReShade SBS: the Game 3D add-on in process " << pid_ << " speaks export protocol " << protocol
+                           << " (" << shared_bytes << "-byte mapping); this host speaks protocol " << wire::version << " ("
+                           << sizeof(wire::shared_state_t) << " bytes, " << wire::slot_count
+                           << " export slots). Install the add-on of this Sunshine 3D release and restart the game; the stream stays 2D.";
+      }
+      return false;
     }
 
     bool open_resources(const wire::metadata_t &metadata) {
@@ -865,6 +882,9 @@ namespace platf::reshade_bridge {
     std::mutex retire_lock_;
     std::array<retiring_t, wire::slot_count> retiring_ {};
     std::chrono::steady_clock::time_point next_attach_ {};
+    // The last producer refused for another export protocol (attach), named once.
+    DWORD refused_pid_ = 0;
+    std::uint64_t refused_creation_ = 0;
     std::uint64_t reported_generation_ = 0;
     int reported_width_ = 0, reported_height_ = 0;
     // Metadata sequence of the last poll that read the metadata; a change means it was replaced.

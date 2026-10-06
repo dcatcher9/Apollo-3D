@@ -4624,36 +4624,49 @@ authored eyes. Native sharing support is required; there is no CPU readback tran
 ## GPU handoff contract
 
 `src/reshade_bridge_protocol.h` is the versioned ABI shared by the add-on and Windows receiver.
-The per-process `Local\\Sunshine3D.ReShade.SBS.<PID>` mapping contains metadata and three slots.
-Streaming protocol 2 adds `cursor_plane_flags` and `ui_parallax_uv` in eight bytes of each slot's
-former padding, preserving the 64-byte slot, 120-byte metadata and 384-byte shared-state layouts.
-The signed scalar is one eye's displacement in source-eye UV, with finite values in `[-0.04,0.04]`.
-Only zero flags or `cursor_plane_present` are valid; zero flags require a zero scalar. The current
-host accepts protocol 1 as well, ignores its unspecified padding and uses zero cursor displacement.
-An older protocol-1 host rejects protocol-2 exports, so this feature requires a paired host/add-on
-update; it does not change the separate streamed Game provider negotiation version.
+The per-process `Local\\Sunshine3D.ReShade.SBS.<PID>` mapping contains metadata and four slots:
+export protocol 4, a 448-byte shared state with 128-byte metadata (four texture handles) and
+64-byte slots from offset 192. Each slot carries `cursor_plane_flags` and `ui_parallax_uv` with
+the same ownership as its texture: the signed scalar is one eye's displacement in source-eye UV,
+with finite values in `[-0.04,0.04]`; only zero flags or `cursor_plane_present` are valid, and
+zero flags require a zero scalar. The streamed Game provider negotiation has its own version.
 
-**PQ wire transfer (protocol 3).** Producers publish protocol 2 by default. Protocol 3 is protocol
-2 plus `transfer::pq` (3): Rec.2020 primaries and SMPTE ST 2084 code values, 1.0 = 10000 cd/m2,
-valid only as R10G10B10A2_UNORM (DXGI 24) and only at protocol 3; protocol 3 slots carry the
-cursor plane like protocol 2, and protocol 3 also accepts sRGB and scRGB metadata. A consumer
-advertises what it accepts in protocol 2's padding: it writes `consumer_capabilities` (offset 144;
-`consumer_accepts_pq` = 1), then `capability_nonce` (offset 136) = its nonce, then
-`consumer_nonce`. `consumer_stream_pq` = 2 means the consumer encodes HDR10 PQ: a producer may
-pack any HDR source, scRGB included, as R10G10B10A2 PQ at protocol 3. Sunshine sets it only for a
-streaming encoder whose output is HDR, never for Local AR. A consumer whose capabilities change
-requests the connection again under a new nonce; producers that predate the bit ignore it. A
-producer honours the bits only when `capability_nonce` equals the nonce it
-answers (`answered_capabilities`), so an older consumer, which never writes them, and a replaced
-one read as no capabilities. An HDR10 swapchain exports PQ to a consumer that accepts it, and a
+**One protocol, refused by name otherwise.** Protocols 1-3 had three slots (a 384-byte shared
+state with 120-byte metadata; 1 without the cursor plane, 3 for the PQ transfer). Every protocol
+starts with the same header: `shared_bytes` at offset 4, then the metadata's `signature`,
+`protocol_version` and `metadata_bytes` at offsets 16, 24 and 28 (`same_protocol`). The add-on
+and the host are installed together and each accepts exactly protocol 4. The receiver maps the
+whole section and reads that header before anything else; a mapping still being initialised
+(zero) is retried quietly, and any other published header is refused, never read or written, with
+`ReShade SBS: the Game 3D add-on in process P speaks export protocol N (B-byte mapping); this host
+speaks protocol 4 (448 bytes, 4 export slots). Install the add-on of this Sunshine 3D release and
+restart the game; the stream stays 2D.`, once per receiver and producer process. A consumer
+declares its protocol with its capabilities (`consumer_protocol`, offset 156, below), and the
+producer answers only a request that declared protocol 4: another is refused with `Sunshine SBS:
+refusing a host that speaks export protocol N; this add-on speaks protocol 4 (4 export slots)...`
+once per request and gets no ring, and a request that declared nothing gets none either
+(`export inactive (consumer_undeclared)`). Hosts of protocols 1-3 already refused a mapping whose
+`shared_bytes` differs from their 384 bytes, so they never write into a protocol 4 mapping.
+
+**PQ wire transfer.** `transfer::pq` (3) is Rec.2020 primaries and SMPTE ST 2084 code values,
+1.0 = 10000 cd/m2, valid only as R10G10B10A2_UNORM (DXGI 24); its slots carry the cursor plane
+like every other transfer. A consumer advertises what it accepts and the protocol it speaks: it
+writes `consumer_capabilities` (offset 152; `consumer_accepts_pq` = 1) and `consumer_protocol`
+(offset 156), then `capability_nonce` (offset 144) = its nonce, then `consumer_nonce`.
+`consumer_stream_pq` = 2 means the consumer encodes HDR10 PQ: a producer may pack any HDR source,
+scRGB included, as R10G10B10A2 PQ. Sunshine sets it only for a streaming encoder whose output is
+HDR, never for Local AR. A consumer whose capabilities change requests the connection again under
+a new nonce. A producer honours the declaration only when `capability_nonce` equals the nonce it
+answers (`answered_capabilities`, `answered_protocol`), so a replaced consumer's declaration never
+applies to another request. An HDR10 swapchain exports PQ to a consumer that accepts it, and a
 native scRGB swapchain exports PQ to a consumer that encodes HDR10 PQ (`exports_pq`; the bit
-implies acceptance). Any other consumer gets FP16 scRGB at protocol 2, and a consumer replaced
-between a Present's render and its export gets the next Present's export. For an HDR stream the
-host would itself encode an FP16 scRGB export with `scRGBTo2100PQ`, so packing it in the game is
-the same encoding at half the shared bytes per frame. An SDR stream and Local AR keep FP16 scRGB
-from a native scRGB swapchain: wide-gamut and over-10000-nit values clip differently in PQ (a
-negative Rec.2020 clip) than in the SDR tone map (a Rec.709 clip). SDR stays sRGB. A changed
-transfer is a new export ring. The generation line names `PQ HDR10, protocol 3`.
+implies acceptance). Any other consumer gets FP16 scRGB, and a consumer replaced between a
+Present's render and its export gets the next Present's export. For an HDR stream the host would
+itself encode an FP16 scRGB export with `scRGBTo2100PQ`, so packing it in the game is the same
+encoding at half the shared bytes per frame. An SDR stream and Local AR keep FP16 scRGB from a
+native scRGB swapchain: wide-gamut and over-10000-nit values clip differently in PQ (a negative
+Rec.2020 clip) than in the SDR tone map (a Rec.709 clip). SDR stays sRGB. A changed transfer is a
+new export ring. The generation line names `PQ HDR10, protocol 4`.
 The mapping uses Windows' default access control. Sunshine verifies the process creation time
 before duplicating its NT texture and fence handles; resources are never looked up by a global
 texture name.
@@ -4677,8 +4690,9 @@ restarts while the game keeps exporting still gets a fresh ring, as does any siz
 change. The finished ring of the previous transfer or extent stays cached (one entry, 60 s) and is
 renewed the same way on a toggle back. A ring that stopped exporting (focus loss, or no consumer,
 as in Game mono) and has no unfinished producer work is released after 10 s idle
-(`export_ring_idle`), so leaving stereo frees its slots: about 400 MB for a 4K FP16 ring and
-200 MB for an RGB10A2 one. A later export allocates a new ring, the present-thread step above.
+(`export_ring_idle`), so leaving stereo frees its slots: about 530 MB for a 4K FP16 ring and
+265 MB for an RGB10A2 one (four 7680x2160 slots of 133 or 66 MB). A later export allocates a new
+ring, the present-thread step above.
 Every released ring (idle, cached, or with its runtime or swapchain) first has each renderer drop
 its cached render-target views of the slots: a D3D11 view holds its texture, so the slots would
 otherwise stay allocated until the renderer's next pack.
@@ -4710,8 +4724,8 @@ pack passes.
 Slot render-target views are cached for one export generation and dropped when their ring is
 released. The slot rests in the shared
 common state between owners, and the pass reads only the renderer's working set, which the
-renderer's completion fence already retains. Up to three submitted GPU writes may remain unfinished, bounded by
-the existing three-slot ring. A recorded slot write must receive its submission fence before the next
+renderer's completion fence already retains. Up to four submitted GPU writes may remain unfinished, bounded by
+the four-slot ring. A recorded slot write must receive its submission fence before the next
 is admitted; there is no global requirement to wait for the previous GPU write to complete.
 Admission (`acquire_slot`) takes a free slot first, else the oldest ready slot that a newer
 completed frame supersedes. The host claims the newest ready frame whose fence passed, so the
@@ -4727,16 +4741,33 @@ A copy or overlay write waits for completion. Reading slots remain unavailable. 
 reusable, the add-on drops the publication and returns to the game without waiting.
 `Sunshine SBS output` counts both (`dropped`, and `overwritten_unconsumed` for a completed ready
 slot written over, which a newer completed frame had superseded). `reshade_exporter_tests.exe`
-runs the real admission against a host that claims at 90 fps without any fence wake
-(`ring_throughput`): it must never write over the host's next frame, and the host must receive
-85.5 or more new frames/s at FG off, 2x and 4x Present rates.
+runs the real admission against a host that claims at 90 fps (`ring_throughput`): a busy host
+without any fence wake whose replaced slot returns at the claim, and the live host, woken at each
+completion, with two pictures in flight completing 5.5-22 ms after submission and a replaced slot
+returned only once its reads completed. It must never write over the host's next frame, and with
+four slots the host must receive 85.5 or more new frames/s at FG off, 2x and 4x Present rates.
+
+**Why four slots.** On 10-06 (15:39:44-15:40:00) Stellar Blade at 4K ran FG 4x GPU-bound: 24 NGX
+evaluations/s and about 95 Presents/s. The host claimed nearly every published frame
+(`overwritten_unconsumed` about 0), yet the add-on dropped 27-35 Presents/s and the stream had
+57-65 new frames/s: of three slots one was held, one replaced and still being read, and the last
+carried the host's next frame or a write still queued on the busy GPU. The live host against that
+pattern with each fence completing 15-35 ms after its Present reproduces it with three slots
+(published 61/s, dropped 33/s, overwritten 3/s, 58.0 new frames/s) and delivers 83 published, 11
+dropped and 70.8 new frames/s with four. Fences at 5-15 ms drop 3/s with three slots and none
+with four (88.8 and 89.5 new frames/s). In the same model a fifth slot would reach 77 new
+frames/s and a sixth no more: queued writes complete in clumps, and the host takes the newest of a
+clump. `RemoteEncodeProviderPacingTest.AFourthExportSlotTakesThePresentsAGpuBoundGameDroppedWithThree`
+runs the host's own encode loop on the same pattern (three slots: 34 dropped, 56.2 new frames/s;
+four: 12 and 71.8). The fourth slot costs 66 MB at 7680x2160 RGB10A2 (sRGB or PQ) and 133 MB in
+FP16 scRGB, for the whole time a ring exists.
 
 Each slot retains its native source resource and a separate overlay compositor. They cannot be
 replaced while that slot's copy/composition remains in flight. Reload, deactivation and runtime
 destruction withdraw publication but retain source, destination, overlay and fence lifetimes
 through GPU retirement; an unfinished callback does not make recorded work safe to destroy.
 The opt-in `reshade_exporter_tests.exe --async-ring` regression delays GPU completion across
-three publications, checks fourth-frame backpressure and ownership transitions, and verifies
+one publication per slot, checks backpressure on the next and ownership transitions, and verifies
 exact copied pixels and source lifetimes.
 
 Sunshine claims the newest completed slot and converts straight from it through a shader view
@@ -4752,11 +4783,13 @@ doing; the loop's polls and submissions check the same only as a fallback for a 
 be armed. With two pictures in flight a claim can come before the previous conversion's GPU work
 (queued behind the game's) completed, and the loop then sleeps to its next poll target: returning
 the slot only at the loop's next check left the producer one slot for part of each such interval
-(`AReplacedSlotReturnsAsItsReadsCompleteWithPicturesInFlight`: 85.5 and 86.5 against 88.8 and 89.5
-new frames/s with FG 2x and 4x and the live FG-on encode times). Nothing blocks. A generation change
+(`AReplacedSlotReturnsAsItsReadsCompleteWithPicturesInFlight`: on the three-slot ring 85.5 and 86.5
+against 88.8 and 89.5 new frames/s with FG 2x and 4x and the live FG-on encode times; with four
+slots both reach the stream rate and the read-fence wait drops 4 and 48 Presents/s against 18 and
+68). Nothing blocks. A generation change
 or detach abandons held and retiring slots rather than releasing them early, and cancels the wait. While the host encodes a frame it therefore holds only that frame's slot
-and leaves the producer two. Before, the replaced slot stayed `reading` until that encode returned,
-so for about 9 of every 11 ms at 90 fps the producer had one slot. There is no cross-process GPU
+and leaves the producer three. Before, the replaced slot stayed `reading` until that encode returned,
+so for about 9 of every 11 ms at 90 fps the producer of the three-slot ring had one slot. There is no cross-process GPU
 wait and no texture overwrite while either side uses the slot. A new consumer requests fresh
 resources rather than reusing the abandoned generation.
 
@@ -4840,9 +4873,11 @@ still keeps new encoders waiting for its teardown. A picture's 250 ms budget sta
 it does, after the previous one completed. The loop claims at its poll target and then waits for
 the oldest picture when both are in flight: waiting first would claim a newer frame but rebase the
 schedule after every slow picture (`ClaimingAtThePollTargetKeepsTheCadenceWhenEveryPictureIsInFlight`:
-82.5 against 87.5-88.2 new frames/s and gaps of 34-35 ms with a 14-45 ms tail every eighth picture).
+82.5 against 87.5-88.2 new frames/s and gaps of 34-35 ms with a 14-45 ms tail every eighth picture
+on the three-slot ring; with four slots 83.0-83.8 against 88.8-89.0 and gaps of 34 against 23 ms,
+where waiting first would also claim frames 1.3-1.7 ms fresher: smoothness first).
 `PicturesInFlightTakeEveryStreamFrameAtFrameGenerationEncodeTimes` runs the loop model with the
-live FG-on encode times (5.5-22 ms per picture): 68 new frames/s one picture at a time, 89 with two
+live FG-on encode times (5.5-22 ms per picture): 69 new frames/s one picture at a time, 90 with two
 in flight, Present to packet within 0.5 ms.
 
 While a streaming encoder converts a live packed export it holds the display's capture-pixel
@@ -4906,8 +4941,8 @@ The native add-on declares and validates the actual game swapchain color space:
 | Game backbuffer color | Shared stereo texture | Transfer supplied to Sunshine |
 | --- | --- | --- |
 | SDR sRGB | RGB10A2 | Encoded sRGB |
-| Native HDR scRGB | RGB10A2 to a consumer that encodes HDR10 PQ (`consumer_stream_pq`, protocol 3), else RGBA16F | PQ code values (Rec.2020, ST 2084, encoded as the host's `scRGBTo2100PQ` of the scRGB eye), else linear Rec.709/scRGB, 1.0 = 80 nits |
-| Native HDR10/PQ, Rec.2020 | RGB10A2 to a consumer that accepts the PQ transfer (protocol 3), else RGBA16F | PQ code values (Rec.2020, ST 2084, encoded as the host's `scRGBTo2100PQ` of the scRGB eye), else PQ decoded to linear Rec.709/scRGB, 1.0 = 80 nits |
+| Native HDR scRGB | RGB10A2 to a consumer that encodes HDR10 PQ (`consumer_stream_pq`), else RGBA16F | PQ code values (Rec.2020, ST 2084, encoded as the host's `scRGBTo2100PQ` of the scRGB eye), else linear Rec.709/scRGB, 1.0 = 80 nits |
+| Native HDR10/PQ, Rec.2020 | RGB10A2 to a consumer that accepts the PQ transfer, else RGBA16F | PQ code values (Rec.2020, ST 2084, encoded as the host's `scRGBTo2100PQ` of the scRGB eye), else PQ decoded to linear Rec.709/scRGB, 1.0 = 80 nits |
 
 The HDR export preserves values above 1.0 and negative scRGB components. It applies no tone map
 to the shared texture. The normal game window retains its original color encoding. A float or

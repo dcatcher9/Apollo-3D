@@ -163,6 +163,9 @@ namespace {
       require(export_mapping_ != nullptr, "Native fixture cannot open the production exporter mapping");
       export_state_ = static_cast<reshade_bridge::shared_state_t *>(MapViewOfFile(export_mapping_, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(reshade_bridge::shared_state_t)));
       require(export_state_ != nullptr, "Native fixture cannot map the production exporter state");
+      // A consumer of this protocol without capabilities: its declaration, then its request.
+      InterlockedExchange(reinterpret_cast<volatile LONG *>(&export_state_->consumer_protocol), static_cast<LONG>(reshade_bridge::version));
+      InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&export_state_->capability_nonce), 0x4e41544956455850LL);
       InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&export_state_->consumer_nonce), 0x4e41544956455850LL);
     }
 

@@ -632,9 +632,10 @@ UI's applied plane, using the same frame's exported per-eye displacement. Cached
 retain their matching scalar; the host does not recalculate scene depth or the adaptive target.
 While ReShade's overlay is open, the system cursor returns to screen depth to match its controls.
 Disabled or unavailable UI protection and depth diagnostic views also use zero cursor displacement.
-Game-rendered cursors remain part of the exported image. Install the matching protocol-2 host and
-add-on together: the current host accepts protocol-1 exports with zero cursor displacement, while
-an old host rejects protocol-2 exports. WGC does not supply the separate cursor metadata.
+Game-rendered cursors remain part of the exported image. Install the host and add-on of the same
+release together: both speak export protocol 4 and each refuses, by name in its log, a peer of
+another protocol ([handoff contract](../../docs/reshade-sbs.md#gpu-handoff-contract)). WGC does not
+supply the separate cursor metadata.
 If another add-on cancels that transition, the observed state may differ from the visible overlay;
 toggle the overlay again after resolving that add-on conflict. Native Game 3D does not depend on
 ReShade FX compilation or the Home tab's effect toggle. The explicit reference renderer retains
@@ -818,7 +819,7 @@ reference requires its separate current-frame percentile calibration update.
 The exporter verifies the normal runtime resolution, actual texture dimensions/format and
 current game swapchain color space. Native Game 3D packs both eyes straight into the claimed slot;
 a reference FX texture is copied there without resampling or color conversion. An HDR10/PQ
-swapchain exports PQ code values (protocol 3) to a consumer that accepts them, and a native scRGB
+swapchain exports PQ code values to a consumer that accepts them, and a native scRGB
 swapchain does so for a consumer that encodes HDR10 PQ; otherwise HDR exports linear Rec.709 scRGB
 (1.0 = 80 cd/m²), PQ input decoded and its Rec.2020 primaries transformed first
 ([Color and HDR](../../docs/reshade-sbs.md#color-and-hdr)).
@@ -859,7 +860,7 @@ negative values and highlights above SDR white. D3D11 composition restores the a
 state it touches; D3D12 uses ReShade's own immediate command list. Composition shares the
 existing slot and fence lifetime; there is no additional queue wait or CPU image readback.
 
-Up to three slot writes may be outstanding, one per ring slot. A Present that finds no reusable
+Up to four slot writes may be outstanding, one per ring slot. A Present that finds no reusable
 slot (a free one, else the oldest ready one whose write completed, never the newest unconsumed
 frame) drops its export without waiting and counts it as `dropped` (see the
 [handoff contract](../../docs/reshade-sbs.md#gpu-handoff-contract)).

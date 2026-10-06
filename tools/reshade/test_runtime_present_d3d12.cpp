@@ -478,6 +478,9 @@ uniform int DepthDirection < hidden = true; >;
         receiver_state = receiver_create(receiver.p, receiver_context.p, window, GetCurrentProcessId(), &source_rect);
         require(receiver_state != nullptr, "Could not initialize production receiver");
       } else {
+        // A consumer of this protocol without capabilities: its declaration, then its request.
+        InterlockedExchange(reinterpret_cast<volatile LONG *>(&shared->consumer_protocol), static_cast<LONG>(wire::version));
+        InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&shared->capability_nonce), 0x12345678);
         InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&shared->consumer_nonce), 0x12345678);
       }
       require(!IsWindowVisible(window), "Fixture unexpectedly became visible");
@@ -544,7 +547,7 @@ uniform int DepthDirection < hidden = true; >;
         require(metadata.color_transfer == (expected_color == 1 ? wire::transfer::srgb : pq ? wire::transfer::pq : wire::transfer::scrgb),
           "Exporter declared wrong transfer");
         require(metadata.dxgi_format == (expected_color == 1 || pq ? 24u : 10u), "Exporter declared wrong resource format");
-        require(metadata.protocol_version == (pq ? wire::pq_version : wire::version), "Exporter declared the wrong protocol");
+        require(metadata.protocol_version == wire::version, "Exporter declared the wrong protocol");
         if (receiver_state) {
           if (metadata.accepted_consumer_nonce != read64(shared->consumer_nonce)) {
             // Reattachment just requested a new producer ring. It needs another Present.

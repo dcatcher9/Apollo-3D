@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 #include <src/platform/windows/capture_timing.h>
+#include <src/reshade_bridge_protocol.h>
 #include <src/video.h>
 #include <src/video_encode_pacing.h>
 
@@ -344,6 +345,9 @@ namespace {
     fg_2x,  ///< ~72 real fps, ~145 Presents/s.
     fg_4x,  ///< ~55 real fps, ~220 Presents/s.
     slow,  ///< ~40 fps, below the stream rate.
+    /** FG 4x GPU-bound (Stellar Blade 10-06 15:39:44-15:40:00): ~24 real fps, ~95 Presents/s, each
+     *  pack's fence completing 15-35 ms after its Present on the busy queue. */
+    fg_4x_gpu_bound,
   };
 
   // GetTickCount64's period. winpthreads (no clock-based condition-variable wait in this libstdc++)
@@ -397,7 +401,9 @@ namespace {
         continue;
       }
       const int generated = mode == game_frames_e::fg_2x ? 2 : 4;
-      const auto length = mode == game_frames_e::fg_2x ? jitter.between(12.5, 15.0) : jitter.between(16.0, 20.5);
+      const auto length = mode == game_frames_e::fg_2x ? jitter.between(12.5, 15.0) :
+                          mode == game_frames_e::fg_4x ? jitter.between(16.0, 20.5) :
+                                                         jitter.between(38.0, 46.0);
       for (int i = 0; i < generated; ++i) {
         presents.push_back(real + length * i / generated);
       }
@@ -457,13 +463,13 @@ namespace {
   // loop is busy ends the next image wait at once (event_t). After the wait a pending frame
   // converts once due, a due keepalive repeats the input, and anything else encodes nothing.
   // Waits take as long as they really do with this toolchain: a condition-variable wait that
-  // nothing notifies ends at a Windows scheduler tick (windows_tick).
-  export_ring_result_t simulate_export_ring(game_frames_e mode, fence_wake_e wake, loop_rules_e rules, std::chrono::nanoseconds duration = 4s, std::optional<encoder_model_t> encoder = std::nullopt) {
+  // nothing notifies ends at a Windows scheduler tick (windows_tick). The ring has `slots` slots:
+  // the protocol's, or three for the ring before protocol 4.
+  export_ring_result_t simulate_export_ring(game_frames_e mode, fence_wake_e wake, loop_rules_e rules, std::chrono::nanoseconds duration = 4s, std::optional<encoder_model_t> encoder = std::nullopt, int slots = static_cast<int>(::reshade_bridge::slot_count)) {
     constexpr auto stream = 11111111ns;  // 90 fps
     constexpr auto threshold = stream / 4;
     constexpr auto keepalive = 55555555ns;  // The 18 fps minimum of a 90 fps stream.
     constexpr auto step = 10us;
-    constexpr int slots = 3;
 
     enum class slot_e {
       free,
@@ -485,7 +491,7 @@ namespace {
     for (auto capture = jitter.between(0.0, 11.1); capture < duration; capture += jitter.between(10.1, 12.1)) {
       captures.push_back(capture);
     }
-    std::array<slot_t, slots> ring {};
+    std::vector<slot_t> ring(static_cast<std::size_t>(slots));
     std::vector<std::chrono::nanoseconds> present_of {0ns}, completion_of {0ns}, wakes;
     std::size_t next_present = 0, next_capture = 0, completed = 0, held = 0;
     int held_slot = -1, next_slot = 0, published = 0, dropped = 0, overwritten = 0, new_frames = 0, encodes = 0;
@@ -595,7 +601,8 @@ namespace {
         ring[index] = {slot_e::ready, static_cast<std::size_t>(++published)};
         next_slot = (index + 1) % slots;
         present_of.push_back(presents[next_present]);
-        completion_of.push_back(std::max(completion_of.back(), presents[next_present] + jitter.between(5.0, 15.0)));
+        const auto pack = mode == game_frames_e::fg_4x_gpu_bound ? jitter.between(15.0, 35.0) : jitter.between(5.0, 15.0);
+        completion_of.push_back(std::max(completion_of.back(), presents[next_present] + pack));
         if (wake != fence_wake_e::lost) {
           wakes.push_back(completion_of.back() + (wake == fence_wake_e::late ? jitter.between(0.0, 11.1) : 0ns));
         }
@@ -743,7 +750,7 @@ namespace {
   }
 
   void print_export_ring(const char *label, game_frames_e mode, fence_wake_e wake, const export_ring_result_t &result) {
-    constexpr const char *modes[] {"FG off", "FG 2x", "FG 4x", "40 fps"};
+    constexpr const char *modes[] {"FG off", "FG 2x", "FG 4x", "40 fps", "FG 4x GPU-bound"};
     constexpr const char *wakes[] {"prompt", "late", "lost"};
     std::printf(
       "[ MEASURE  ] %s, %s, %s fence wake: presents %.0f/s published %.0f/s dropped %.0f/s overwritten %.0f/s new %.1f/s repeats %d, "
@@ -813,7 +820,7 @@ namespace {
   }
 
   void print_encoder_model(const char *label, game_frames_e mode, const export_ring_result_t &result) {
-    constexpr const char *modes[] {"FG off", "FG 2x", "FG 4x", "40 fps"};
+    constexpr const char *modes[] {"FG off", "FG 2x", "FG 4x", "40 fps", "FG 4x GPU-bound"};
     const auto ms = [](std::chrono::nanoseconds value) {
       return std::chrono::duration<double, std::milli>(value).count();
     };
@@ -890,20 +897,48 @@ namespace {
     // behind the game's) completed, so the slot it replaces is still being read. 5798c45f returned
     // such a slot only at the encode thread's next check (a submission or the next conversion), and
     // none runs during an exact hold: the producer meanwhile had one slot. The receiver's read-fence
-    // wait returns it as the GPU completes those reads.
+    // wait returns it as the GPU completes those reads. That decision was made on the three-slot
+    // ring, where it also bought new frames; with the protocol's four the stream rate is reached
+    // either way and the read-fence wait still drops fewer Presents.
     for (const auto mode : {game_frames_e::fg_2x, game_frames_e::fg_4x}) {
-      encoder_model_t checks {2, 5.5, 22.0};
-      checks.retire = encoder_model_t::retire_e::encode_thread;
-      const auto at_checks = simulate_export_ring(mode, fence_wake_e::prompt, loop_rules_e::production, 4s, checks);
-      const auto at_completion = simulate_export_ring(mode, fence_wake_e::prompt, loop_rules_e::production, 4s, encoder_model_t {2, 5.5, 22.0});
-      print_encoder_model("two in flight, slot returned at the encode thread's next check", mode, at_checks);
-      print_encoder_model("two in flight, slot returned as its reads complete", mode, at_completion);
-      EXPECT_GE(at_completion.new_frames, 87.5);
-      EXPECT_GE(at_completion.new_frames, at_checks.new_frames + 1.5);
-      EXPECT_EQ(at_completion.repeats, 0);
-      EXPECT_LT(at_completion.max_gap, 2 * 11111111ns);
-      EXPECT_LT(at_completion.dropped, at_checks.dropped);
+      for (const int slots : {3, static_cast<int>(::reshade_bridge::slot_count)}) {
+        encoder_model_t checks {2, 5.5, 22.0};
+        checks.retire = encoder_model_t::retire_e::encode_thread;
+        const auto at_checks = simulate_export_ring(mode, fence_wake_e::prompt, loop_rules_e::production, 4s, checks, slots);
+        const auto at_completion = simulate_export_ring(mode, fence_wake_e::prompt, loop_rules_e::production, 4s, encoder_model_t {2, 5.5, 22.0}, slots);
+        std::printf("[ MEASURE  ] %d export slots:\n", slots);
+        print_encoder_model("  two in flight, slot returned at the encode thread's next check", mode, at_checks);
+        print_encoder_model("  two in flight, slot returned as its reads complete", mode, at_completion);
+        EXPECT_GE(at_completion.new_frames, 87.5);
+        if (slots == 3) {
+          EXPECT_GE(at_completion.new_frames, at_checks.new_frames + 1.5);
+        }
+        EXPECT_EQ(at_completion.repeats, 0);
+        EXPECT_LT(at_completion.max_gap, 2 * 11111111ns);
+        EXPECT_LT(at_completion.dropped, at_checks.dropped);
+      }
     }
+  }
+
+  TEST(RemoteEncodeProviderPacingTest, AFourthExportSlotTakesThePresentsAGpuBoundGameDroppedWithThree) {
+    // Live 10-06 15:39:44-15:40:00 (Stellar Blade 4K, FG 4x GPU-bound at ~24 real fps): the host
+    // claimed nearly every published frame (overwritten_unconsumed ~0), yet the game dropped 27-35 of
+    // its ~95 Presents/s and the stream had 57-65 new frames/s. Of three slots one was held, one
+    // replaced and still being read, and the last carried the host's next frame or a write still
+    // queued on the busy GPU. The production loop with two pictures in flight and the live FG-on
+    // encode times reproduces that with three slots; the protocol's fourth must take most of them.
+    const encoder_model_t live {2, 5.5, 22.0};
+    const auto three = simulate_export_ring(game_frames_e::fg_4x_gpu_bound, fence_wake_e::prompt, loop_rules_e::production, 4s, live, 3);
+    const auto four = simulate_export_ring(game_frames_e::fg_4x_gpu_bound, fence_wake_e::prompt, loop_rules_e::production, 4s, live);
+    print_export_ring("three export slots", game_frames_e::fg_4x_gpu_bound, fence_wake_e::prompt, three);
+    print_export_ring("four export slots", game_frames_e::fg_4x_gpu_bound, fence_wake_e::prompt, four);
+    EXPECT_GE(three.dropped, 25.0);
+    EXPECT_LE(three.dropped, 40.0);
+    EXPECT_GE(three.new_frames, 52.0);
+    EXPECT_LE(three.new_frames, 68.0);
+    EXPECT_LE(four.dropped, three.dropped / 2);
+    EXPECT_GE(four.new_frames, three.new_frames + 10.0);
+    EXPECT_EQ(four.repeats, 0);
   }
 
   TEST(RemoteEncodeProviderPacingTest, ClaimingAtThePollTargetKeepsTheCadenceWhenEveryPictureIsInFlight) {
@@ -912,24 +947,29 @@ namespace {
     // oldest picture, so a frame completed during that wait goes to the next claim. Waiting for the
     // slot first would claim that newer frame, but the claim would then come after its target: the
     // schedule rebases to it (select_encode_frame_schedule()), which skips stream frames after every
-    // slow picture for a few tenths of a millisecond of Present to packet.
+    // slow picture for a few tenths of a millisecond of Present to packet on the three-slot ring.
+    // With four slots more of the newer frames are published, and waiting first would gain 1.3-1.7
+    // ms of Present to packet, still at the cost of those skipped stream frames: smoothness first.
     // Live (10-06, FG on) completion waits averaged 6.4-12.2 ms with maxima of 92-691 ms: here
     // 5.5-14 ms, and every eighth picture 14-45 ms (12.2 ms on average).
     encoder_model_t production {2, 5.5, 14.0};
     production.tail_every = 8;
     production.tail_high_ms = 45.0;
     for (const auto mode : {game_frames_e::fg_2x, game_frames_e::fg_4x}) {
-      auto slot_first = production;
-      slot_first.wait_before_claim = true;
-      const auto at_target = simulate_export_ring(mode, fence_wake_e::prompt, loop_rules_e::production, 4s, production);
-      const auto after_slot = simulate_export_ring(mode, fence_wake_e::prompt, loop_rules_e::production, 4s, slot_first);
-      print_encoder_model("two in flight, claimed at the poll target, then waited for a slot", mode, at_target);
-      print_encoder_model("two in flight, waited for a slot, then claimed", mode, after_slot);
-      EXPECT_GE(at_target.new_frames, 87.0);
-      EXPECT_GE(at_target.new_frames, after_slot.new_frames + 3.0);
-      EXPECT_EQ(at_target.repeats, 0);
-      EXPECT_LT(at_target.max_gap, after_slot.max_gap);
-      EXPECT_LE(at_target.mean_present_to_packet, after_slot.mean_present_to_packet + 500us);
+      for (const int slots : {3, static_cast<int>(::reshade_bridge::slot_count)}) {
+        auto slot_first = production;
+        slot_first.wait_before_claim = true;
+        const auto at_target = simulate_export_ring(mode, fence_wake_e::prompt, loop_rules_e::production, 4s, production, slots);
+        const auto after_slot = simulate_export_ring(mode, fence_wake_e::prompt, loop_rules_e::production, 4s, slot_first, slots);
+        std::printf("[ MEASURE  ] %d export slots:\n", slots);
+        print_encoder_model("  two in flight, claimed at the poll target, then waited for a slot", mode, at_target);
+        print_encoder_model("  two in flight, waited for a slot, then claimed", mode, after_slot);
+        EXPECT_GE(at_target.new_frames, 87.0);
+        EXPECT_GE(at_target.new_frames, after_slot.new_frames + 3.0);
+        EXPECT_EQ(at_target.repeats, 0);
+        EXPECT_LT(at_target.max_gap, after_slot.max_gap);
+        EXPECT_LE(at_target.mean_present_to_packet, after_slot.mean_present_to_packet + std::chrono::microseconds {slots == 3 ? 500 : 2000});
+      }
     }
   }
 

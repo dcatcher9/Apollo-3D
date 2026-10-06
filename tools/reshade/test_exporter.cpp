@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <deque>
 #include <future>
 #include <stdexcept>
 #include <thread>
@@ -1517,25 +1518,29 @@ namespace {
       require(decode_export_color("scrgb", 2, source.color), "native scRGB contract rejected");
       publisher_t::set_source(metadata, source);
       require(metadata.color_transfer == wire::transfer::scrgb && metadata.dxgi_format == 10, "explicit scRGB metadata lost its transfer");
-      require(metadata.protocol_version == wire::version, "an FP16 export left protocol 2");
-      // The 10-bit PQ export (docs/reshade-sbs.md, PQ wire transfer): protocol 3, R10G10B10A2 only.
+      require(metadata.protocol_version == wire::version, "an FP16 export left protocol 4");
+      // The 10-bit PQ export (docs/reshade-sbs.md, PQ wire transfer): the same protocol, R10G10B10A2 only.
       require(decode_export_color("pq", 3, source.color), "PQ export declaration rejected");
       source.format = DXGI_FORMAT_R10G10B10A2_UNORM;
       publisher_t::set_source(metadata, source);
       require(metadata.color_transfer == wire::transfer::pq && metadata.dxgi_format == 24 &&
-          metadata.protocol_version == wire::pq_version, "a PQ export is not protocol 3 R10G10B10A2 PQ");
+          metadata.protocol_version == wire::version, "a PQ export is not protocol 4 R10G10B10A2 PQ");
       require(wire::supported_format(metadata.dxgi_format, metadata.color_transfer) &&
           !wire::supported_format(10, wire::transfer::pq), "the PQ transfer accepted FP16");
-      // Capabilities count only for the nonce they answer; an older consumer
-      // writes none, so it keeps the FP16 export.
+      // Capabilities and the declared protocol count only for the nonce they
+      // answer; a replaced consumer's declaration grants nothing.
       auto &shared = *publisher.shared_;
       shared.consumer_capabilities = wire::consumer_accepts_pq;
+      shared.consumer_protocol = wire::version;
       shared.capability_nonce = 41;
       require(read_capabilities(shared, 41) == wire::consumer_accepts_pq, "the answered consumer's PQ capability was lost");
+      require(read_consumer_protocol(shared, 41) == wire::version, "the answered consumer's protocol was lost");
       require(!read_capabilities(shared, 42) && !read_capabilities(shared, 0), "a stale capability nonce granted PQ");
+      require(!read_consumer_protocol(shared, 42) && !read_consumer_protocol(shared, 0), "a stale capability nonce declared a protocol");
       shared.capability_nonce = 0;
-      require(!read_capabilities(shared, 41), "an older consumer granted PQ");
+      require(!read_capabilities(shared, 41) && !read_consumer_protocol(shared, 41), "an undeclared consumer granted PQ or a protocol");
       shared.consumer_capabilities = 0;
+      shared.consumer_protocol = 0;
       // The export transfer per source and capabilities: an HDR10 source
       // packs PQ for a consumer that accepts it, native scRGB only for one
       // that encodes HDR10 PQ (consumer_stream_pq, which implies acceptance).
@@ -1548,6 +1553,31 @@ namespace {
           exports_pq(cs::scrgb, both) && !exports_pq(cs::scrgb, 0),
         "a native scRGB source packed PQ without an HDR10 stream, or FP16 for one");
       require(!exports_pq(cs::srgb, both) && !exports_pq(cs::unknown, both), "an SDR source packed PQ");
+    }
+
+    // Only a host that declared this export protocol is answered
+    // (consumer_speaks_protocol): another release's is refused by name, once
+    // per request, and gets no ring; neither does an undeclared request.
+    static void consumer_protocol_refusal() {
+      publisher_t publisher;
+      require(publisher.init(), "mapping creation failed");
+      activate(publisher);
+      auto &shared = *publisher.shared_;
+      const auto request = [&](std::uint64_t nonce, std::uint32_t protocol) {
+        shared.consumer_protocol = protocol;
+        shared.capability_nonce = nonce;
+        shared.consumer_nonce = nonce;
+      };
+      request(7, wire::version - 1);
+      require(!publisher.consumer_speaks_protocol(owner(), 7) && publisher.refused_nonce_ == 7, "a host of protocol 3 was answered or not named");
+      require(!publisher.shared_->metadata.generation, "a refused host kept the published generation");
+      require(!publisher.consumer_speaks_protocol(owner(), 7) && publisher.refused_nonce_ == 7, "a refused host was answered on its next Present");
+      request(8, 0);
+      require(!publisher.consumer_speaks_protocol(owner(), 8) && publisher.refused_nonce_ == 7, "an undeclared request was answered or named");
+      request(9, wire::version);
+      require(publisher.consumer_speaks_protocol(owner(), 9), "a host of this protocol was refused");
+      require(!publisher.consumer_speaks_protocol(owner(), 10), "another request's declaration was answered");
+      std::puts("PASS export protocol: only a host declaring protocol 4 is answered; another is refused by name, once per request");
     }
 
     static void bounded_retirement() {
@@ -1627,32 +1657,45 @@ namespace {
       };
       using s = wire::slot_state;
       bool overwrote = true;
-      set({{{s::ready, 5}, {s::free, 4}, {s::reading, 6}}});
+      // The fourth word of most rows is the slot the consumer replaced, still
+      // `reading` until its conversion's reads complete.
+      set({{{s::ready, 5}, {s::free, 4}, {s::reading, 6}, {s::reading, 3}}});
       require(publisher.acquire_slot(6, &overwrote) == 1 && !overwrote, "a ready slot was taken over a free one");
-      set({{{s::ready, 7}, {s::ready, 8}, {s::reading, 6}}});
+      set({{{s::ready, 7}, {s::ready, 8}, {s::reading, 6}, {s::reading, 5}}});
       require(publisher.acquire_slot(8, &overwrote) == 0 && overwrote, "the oldest ready slot was not reused");
       require(wire::control_state(slots[1].control) == s::ready, "the newest unconsumed frame was claimed");
-      set({{{s::reading, 6}, {s::ready, 8}, {s::reading, 7}}});
+      set({{{s::reading, 6}, {s::ready, 8}, {s::reading, 7}, {s::reading, 5}}});
       require(publisher.acquire_slot(8) == wire::slot_count, "the ring's newest unconsumed frame was overwritten");
-      set({{{s::reading, 9}, {s::ready, 8}, {s::reading, 7}}});
+      set({{{s::reading, 9}, {s::ready, 8}, {s::reading, 7}, {s::reading, 6}}});
       require(publisher.acquire_slot(9) == 1, "a ready frame older than the consumer's was kept");
       // Writes 10 and 11 still queued (completed 9): 10 is the frame the
       // consumer claims next once its fence passes, so the Present is dropped
       // rather than written over it.
-      set({{{s::reading, 9}, {s::ready, 10}, {s::ready, 11}}});
+      set({{{s::reading, 9}, {s::ready, 10}, {s::ready, 11}, {s::reading, 8}}});
       require(publisher.acquire_slot(9) == wire::slot_count, "a queued write was reused");
       // 10 completed, 11 still queued: 10 is now the consumer's next frame. A
       // consumer that comes before 11 completes must still find it.
       require(publisher.acquire_slot(10) == wire::slot_count, "the consumer's next frame was written over");
       require(publisher.acquire_slot(11, &overwrote) == 1 && overwrote, "a completed ready frame a newer completed one supersedes was kept");
       // A free slot whose write is still queued is never reused either.
-      set({{{s::reading, 9}, {s::free, 12}, {s::ready, 11}}});
+      set({{{s::reading, 9}, {s::free, 12}, {s::ready, 11}, {s::reading, 8}}});
       require(publisher.acquire_slot(9) == wire::slot_count, "a free slot's queued write was reused");
+      // The live FG-on ring (Stellar Blade 10-06): the consumer holds 6, the
+      // slot it replaced (5) is still being read, and 7, its next frame, is
+      // ready. Three slots had none left for this Present; the fourth takes it.
+      set({{{s::reading, 5}, {s::reading, 6}, {s::ready, 7}, {s::free, 4}}});
+      require(publisher.acquire_slot(7, &overwrote) == 3 && !overwrote, "the fourth slot did not take the Present three slots dropped");
+      // ...and while that write (8) is still queued, the next Present waits for
+      // the replaced slot's reads rather than writing over 7 or 8.
+      set({{{s::reading, 5}, {s::reading, 6}, {s::ready, 7}, {s::ready, 8}}});
+      require(publisher.acquire_slot(7) == wire::slot_count, "the consumer's next frame or a queued write was reused");
+      set({{{s::free, 5}, {s::reading, 6}, {s::ready, 7}, {s::ready, 8}}});
+      require(publisher.acquire_slot(7, &overwrote) == 0 && !overwrote, "a returned slot was not reused");
       // Another generation's words are never claimed.
-      set({{{s::free, 0}, {s::free, 0}, {s::free, 0}}});
+      set({{{s::free, 0}, {s::free, 0}, {s::free, 0}, {s::free, 0}}});
       for (auto &slot : slots) store_state(slot, generation.id + 1, s::free);
       require(publisher.acquire_slot(0) == wire::slot_count, "another generation's slot was claimed");
-      std::puts("PASS export slot policy: free first, oldest superseded ready, the consumer's next frame kept, no queued write reused");
+      std::puts("PASS export slot policy: free first, oldest superseded ready, the consumer's next frame kept, no queued write reused, a fourth slot beside held, retiring and next frames");
     }
 
     // A GPU-bound game: each export's fence completes lag Presents after its
@@ -1732,96 +1775,184 @@ namespace {
       std::puts("PASS lagging fence: the consumer's held frame keeps advancing; queued ready frames are never overwritten");
     }
 
+    struct ring_result_t {
+      double presents = 0, published = 0, dropped = 0, overwritten = 0, new_frames = 0, mean_age_ms = 0;
+    };
+
+    // The real acquire_slot serving a game's Presents (`presents`, us), each
+    // pack's fence completing `pack_us` after its Present, in order, and a
+    // host following its rules (reshade_bridge.cpp poll_frame, video.cpp): at
+    // its 90 fps poll target, or as soon after it as one completes, it claims
+    // the newest ready frame past its held one whose fence passed. Busy host
+    // (live false): conversion and encode block it for 8.4-10.4 ms, it
+    // re-checks every millisecond without a fence wake, and the replaced slot
+    // returns at the claim. Live host (10-06, after the host fixes): a fence
+    // wake claims at once; conversion and submission take 0.4 ms with two
+    // pictures in flight, each completing 5.5-22 ms after its submission (the
+    // live FG-on spread) and reading its slot until 5 ms before that; a
+    // replaced slot returns only once its last conversion's reads completed
+    // (the receiver's read-fence wait). Only `usable` slots export: the others
+    // belong to another generation, which acquire_slot never takes, so three
+    // is the ring before protocol 4. The producer must never write over the
+    // frame that host claims next.
+    static ring_result_t simulate_ring(const char *label, const std::vector<std::int64_t> &presents,
+        const std::vector<std::int64_t> &pack_us, bool live, std::uint32_t usable) {
+      using s = wire::slot_state;
+      constexpr std::int64_t duration = 4'000'000, step = 10, stream = 11'111, threshold = stream / 4, recheck = 1'000;
+      constexpr std::int64_t cpu = 400, engine = 5'000;
+      publisher_t publisher;
+      require(publisher.init(), "mapping creation failed");
+      publisher.generation_ = std::make_unique<generation_t>();
+      const auto id = publisher.generation_->id = 3;
+      auto &slots = publisher.shared_->slots;
+      for (std::uint32_t i = 0; i < wire::slot_count; ++i) {
+        store_state(slots[i], i < usable ? id : id + 1, s::free);
+        slots[i].sequence = 0;
+      }
+      const auto newest_ready = [&](int skip, std::uint64_t past, std::uint64_t completed) {
+        int found = -1;
+        for (std::uint32_t i = 0; i < wire::slot_count; ++i) {
+          if (static_cast<int>(i) != skip && slots[i].control == wire::slot_control(id, s::ready) && slots[i].sequence > past &&
+              slots[i].sequence <= completed && (found < 0 || slots[i].sequence > slots[found].sequence)) found = static_cast<int>(i);
+        }
+        return found;
+      };
+      std::uint32_t jitter = 54321; // The host's own sequence: the game's arrivals stay identical.
+      const auto encode_us = [&] {
+        jitter = jitter * 1664525u + 1013904223u;
+        return static_cast<std::int64_t>((5.5 + 16.5 * (static_cast<double>(jitter >> 8) / 16777216.0)) * 1000.0);
+      };
+      struct retiring_t { int slot; std::uint64_t sequence; std::int64_t reads_done; };
+      std::vector<retiring_t> retiring;
+      std::deque<std::int64_t> in_flight; // Picture completions, oldest first.
+      std::vector<std::int64_t> present_of(1, 0), completion_of(1, 0);
+      std::uint64_t completed = 0, held_sequence = 0, published = 0, dropped = 0, overwritten = 0, claimed = 0, encodes = 0;
+      int held = -1;
+      std::int64_t busy_until = 0, target = 0, next_check = 0, total_age = 0, held_reads_done = 0, last_completion = 0;
+      std::size_t next_present = 0;
+      for (std::int64_t now = 0; now < duration; now += step) {
+        retiring.erase(std::remove_if(retiring.begin(), retiring.end(), [&](const retiring_t &replaced) {
+          if (replaced.reads_done > now) return false;
+          if (slots[replaced.slot].control == wire::slot_control(id, s::reading) && slots[replaced.slot].sequence == replaced.sequence)
+            store_state(slots[replaced.slot], id, s::free);
+          return true;
+        }), retiring.end());
+        while (completed + 1 < completion_of.size() && completion_of[completed + 1] <= now) ++completed;
+        for (; next_present < presents.size() && presents[next_present] <= now; ++next_present) {
+          const auto next_claim = newest_ready(-1, held_sequence, completed);
+          bool overwrote = false;
+          const auto index = publisher.acquire_slot(completed, &overwrote);
+          if (index == wire::slot_count) {
+            ++dropped;
+            continue;
+          }
+          require(index < usable && static_cast<int>(index) != next_claim,
+            (std::string("the frame the host claims next, or another generation's slot, was written over at ") + label).c_str());
+          overwritten += overwrote;
+          slots[index].sequence = ++published;
+          store_state(slots[index], id, s::ready);
+          present_of.push_back(presents[next_present]);
+          completion_of.push_back(std::max(completion_of.back(), presents[next_present] + pack_us[next_present]));
+        }
+        if (now < busy_until || now < next_check) continue;
+        const auto selected = newest_ready(held, held_sequence, completed);
+        if (selected < 0) {
+          next_check = live ? now : now + recheck; // The live host's fence wake comes at the completion.
+          continue;
+        }
+        store_state(slots[selected], id, s::reading);
+        if (held >= 0) {
+          if (!live || held_reads_done <= now) store_state(slots[held], id, s::free);
+          else retiring.push_back({held, held_sequence, held_reads_done});
+        }
+        held = selected;
+        held_sequence = slots[selected].sequence;
+        total_age += now - present_of[held_sequence];
+        ++claimed;
+        target = (now - target < threshold ? target : now) + stream;
+        if (live) {
+          while (!in_flight.empty() && in_flight.front() <= now) in_flight.pop_front();
+          auto submitted = now + cpu;
+          if (in_flight.size() >= 2) {
+            // Claimed and converted at the target, then waits for the oldest picture.
+            submitted = std::max(submitted, in_flight.front());
+            in_flight.pop_front();
+          }
+          const auto latency = encode_us();
+          last_completion = std::max(submitted + latency, last_completion + engine);
+          in_flight.push_back(last_completion);
+          held_reads_done = submitted + std::max<std::int64_t>(latency - engine, 0);
+          busy_until = submitted;
+        } else {
+          busy_until = now + 8'400 + 1'000 * static_cast<std::int64_t>(encodes++ % 3);
+        }
+        next_check = std::max(busy_until, target - threshold);
+      }
+      const double seconds = duration / 1e6;
+      const ring_result_t result{presents.size() / seconds, published / seconds, dropped / seconds, overwritten / seconds,
+        claimed / seconds, claimed ? total_age / 1000.0 / claimed : 0.0};
+      std::printf("MEASURE export ring %s, %s host, %u slots: presents=%.0f/s published=%.0f/s dropped=%.0f/s overwritten=%.0f/s new=%.1f/s mean_claim_age=%.1f ms\n",
+        label, live ? "live" : "busy", usable, result.presents, result.published, result.dropped, result.overwritten, result.new_frames,
+        result.mean_age_ms);
+      return result;
+    }
+
     // Live Stellar Blade 4K evidence: at FG 4x the add-on published ~120
     // frames/s, yet the host claimed only ~50/s and ~70/s of the published
-    // frames were written over after their fence passed, unclaimed. Here the
-    // real acquire_slot serves a game presenting like the live one (FG off
-    // ~115/s, FG 2x ~145/s, FG 4x ~220/s, each fence completing 5-15 ms after
-    // its Present) and a host following its rules (reshade_bridge.cpp,
-    // video.cpp) without any fence wake: once its conversion and encode
-    // (8.4-10.4 ms) finished and its 90 fps presentation is due, it claims the
-    // newest ready frame past its held one whose fence passed, re-checking
-    // every millisecond, and the replaced slot returns at the claim. The
-    // producer must never write over the frame that host claims next, and the
-    // host must then receive min(Present rate, 90) new frames per second.
+    // frames were written over after their fence passed, unclaimed. The real
+    // acquire_slot serves a game presenting like the live one (FG off ~115/s,
+    // FG 2x ~145/s, FG 4x ~220/s, each fence completing 5-15 ms after its
+    // Present) and a busy host without any fence wake, then the live host
+    // (simulate_ring): it must never write over the frame that host claims
+    // next, and with four slots the host must receive min(Present rate, 90)
+    // new frames per second. Then, on 10-06 15:39:44-15:40:00 after the host
+    // fixes, the game ran FG 4x GPU-bound (24 NGX evaluations/s, ~95
+    // Presents/s): the host claimed nearly every published frame
+    // (overwritten_unconsumed ~0), yet the game dropped 27-35 Presents/s and
+    // the stream had 57-65 new frames/s. Of three slots one was held, one
+    // replaced and still being read, and the last held a write still queued on
+    // the busy GPU or the host's next frame. With each fence completing 15-35
+    // ms after its Present the three-slot model reproduces those numbers; the
+    // fourth slot must take most of those Presents. The same Presents with
+    // fences at 5-15 ms are the GPU-bound game's lighter scenes.
     static void ring_throughput() {
-      using s = wire::slot_state;
-      struct mode_t { const char *name; int generated; double low, high; };
-      for (const mode_t mode : {mode_t{"FG off", 1, 7.5, 10.0}, mode_t{"FG 2x", 2, 12.5, 15.0}, mode_t{"FG 4x", 4, 16.0, 20.5}}) {
+      struct mode_t {
+        const char *name;
+        int generated;
+        double low, high, pack_low, pack_high;
+        bool live, reproduces_live;
+      };
+      for (const mode_t mode : {mode_t{"FG off", 1, 7.5, 10.0, 5.0, 15.0, false, false},
+             mode_t{"FG 2x", 2, 12.5, 15.0, 5.0, 15.0, false, false}, mode_t{"FG 4x", 4, 16.0, 20.5, 5.0, 15.0, false, false},
+             mode_t{"FG off", 1, 7.5, 10.0, 5.0, 15.0, true, false}, mode_t{"FG 2x", 2, 12.5, 15.0, 5.0, 15.0, true, false},
+             mode_t{"FG 4x", 4, 16.0, 20.5, 5.0, 15.0, true, false},
+             mode_t{"FG 4x GPU-bound, fences 5-15 ms", 4, 38.0, 46.0, 5.0, 15.0, true, false},
+             mode_t{"FG 4x GPU-bound, fences 15-35 ms (live 10-06)", 4, 38.0, 46.0, 15.0, 35.0, true, true}}) {
         std::uint32_t jitter = 12345;
         const auto between_us = [&](double low_ms, double high_ms) {
           jitter = jitter * 1664525u + 1013904223u;
           return static_cast<std::int64_t>((low_ms + (high_ms - low_ms) * (static_cast<double>(jitter >> 8) / 16777216.0)) * 1000.0);
         };
-        constexpr std::int64_t duration = 4'000'000, step = 10, stream = 11'111, threshold = stream / 4, recheck = 1'000;
-        std::vector<std::int64_t> presents;
-        for (std::int64_t real = 0; real < duration;) {
+        std::vector<std::int64_t> presents, pack_us;
+        for (std::int64_t real = 0; real < 4'000'000;) {
           const auto length = between_us(mode.low, mode.high);
           for (int i = 0; i < mode.generated; ++i) presents.push_back(real + length * i / mode.generated);
           real += length;
         }
-        publisher_t publisher;
-        require(publisher.init(), "mapping creation failed");
-        publisher.generation_ = std::make_unique<generation_t>();
-        const auto id = publisher.generation_->id = 3;
-        auto &slots = publisher.shared_->slots;
-        for (auto &slot : slots) {
-          store_state(slot, id, s::free);
-          slot.sequence = 0;
+        for (std::size_t i = 0; i < presents.size(); ++i) pack_us.push_back(between_us(mode.pack_low, mode.pack_high));
+        const auto three = simulate_ring(mode.name, presents, pack_us, mode.live, 3);
+        const auto four = simulate_ring(mode.name, presents, pack_us, mode.live, wire::slot_count);
+        const std::string at = std::string(" at ") + mode.name;
+        require(four.dropped <= three.dropped && four.new_frames >= three.new_frames - 0.5, ("a fourth slot delivered fewer frames" + at).c_str());
+        if (!mode.reproduces_live) {
+          require(four.new_frames >= 85.5, ("the host received fewer than 85.5 new frames/s" + at).c_str());
+          continue;
         }
-        std::vector<std::int64_t> present_of(1, 0), completion_of(1, 0);
-        std::uint64_t completed = 0, held_sequence = 0, published = 0, dropped = 0, overwritten = 0, claimed = 0, encodes = 0;
-        int held = -1;
-        std::int64_t busy_until = 0, target = 0, next_check = 0, total_age = 0;
-        std::size_t next_present = 0;
-        for (std::int64_t now = 0; now < duration; now += step) {
-          while (completed + 1 < completion_of.size() && completion_of[completed + 1] <= now) ++completed;
-          for (; next_present < presents.size() && presents[next_present] <= now; ++next_present) {
-            int next_claim = -1;
-            for (std::uint32_t i = 0; i < wire::slot_count; ++i) {
-              if (wire::control_state(slots[i].control) == s::ready && slots[i].sequence > held_sequence && slots[i].sequence <= completed &&
-                  (next_claim < 0 || slots[i].sequence > slots[next_claim].sequence)) next_claim = static_cast<int>(i);
-            }
-            bool overwrote = false;
-            const auto index = publisher.acquire_slot(completed, &overwrote);
-            if (index == wire::slot_count) {
-              ++dropped;
-              continue;
-            }
-            require(static_cast<int>(index) != next_claim, (std::string("the frame the host claims next was written over at ") + mode.name).c_str());
-            overwritten += overwrote;
-            slots[index].sequence = ++published;
-            store_state(slots[index], id, s::ready);
-            present_of.push_back(presents[next_present]);
-            completion_of.push_back(std::max(completion_of.back(), presents[next_present] + between_us(5.0, 15.0)));
-          }
-          if (now < busy_until || now < next_check) continue;
-          int selected = -1;
-          for (std::uint32_t i = 0; i < wire::slot_count; ++i) {
-            if (static_cast<int>(i) != held && wire::control_state(slots[i].control) == s::ready && slots[i].sequence > held_sequence &&
-                slots[i].sequence <= completed && (selected < 0 || slots[i].sequence > slots[selected].sequence)) selected = static_cast<int>(i);
-          }
-          if (selected < 0) {
-            next_check = now + recheck;
-            continue;
-          }
-          store_state(slots[selected], id, s::reading);
-          if (held >= 0) store_state(slots[held], id, s::free);
-          held = selected;
-          held_sequence = slots[selected].sequence;
-          total_age += now - present_of[held_sequence];
-          ++claimed;
-          target = (now - target < threshold ? target : now) + stream;
-          busy_until = now + 8'400 + 1'000 * static_cast<std::int64_t>(encodes++ % 3);
-          next_check = std::max(busy_until, target - threshold);
-        }
-        const double seconds = duration / 1e6;
-        std::printf("MEASURE export ring %s: presents=%.0f/s published=%.0f/s dropped=%.0f/s overwritten=%.0f/s new=%.1f/s mean_claim_age=%.1f ms\n",
-          mode.name, presents.size() / seconds, published / seconds, dropped / seconds, overwritten / seconds, claimed / seconds,
-          claimed ? total_age / 1000.0 / claimed : 0.0);
-        require(claimed / seconds >= 85.5, (std::string("the host received fewer than 85.5 new frames/s at ") + mode.name).c_str());
+        require(three.dropped >= 25.0 && three.dropped <= 40.0 && three.new_frames >= 52.0 && three.new_frames <= 68.0 && three.overwritten <= 6.0,
+          ("the three-slot model no longer reproduces the live drops" + at).c_str());
+        require(four.dropped <= three.dropped / 2 && four.new_frames >= three.new_frames + 10.0, ("the fourth slot did not take the dropped Presents" + at).c_str());
       }
-      std::puts("PASS export ring: the host's next frame is never written over and it receives the stream rate at FG off, 2x and 4x");
+      std::puts("PASS export ring: the host's next frame is never written over; four slots receive the stream rate at FG off, 2x and 4x, busy or live, and take most Presents three slots dropped GPU-bound");
     }
 
     // The export's publication in reshade_present (present()), before the
@@ -1983,7 +2114,7 @@ namespace {
       };
 
       gpu.hold();
-      // No CPU or GPU completion wait between these three independent copies.
+      // No CPU or GPU completion wait between these independent copies, one per slot.
       // The old one-copy admission gate fails on the second acquisition.
       for (unsigned index = 0; index != wire::slot_count; ++index) {
         require(generation.completed() == 0, "GPU gate released before asynchronous admission was tested");
@@ -1993,10 +2124,10 @@ namespace {
         timestamps[index] = publisher.shared_->slots[index].qpc;
       }
       require(generation.last_submitted == wire::slot_count && generation.completed() == 0 && !generation.finished(),
-        "Async regression did not leave all three production copies in flight");
+        "Async regression did not leave every production copy in flight");
       const auto admission_start = GetTickCount64();
       require(publisher.acquire_slot(generation.completed()) == wire::slot_count,
-        "A fourth in-flight copy exceeded the bounded three-slot ring");
+        "One more in-flight copy exceeded the bounded ring");
       // A receiver may discard an unfinished publication without reading it.
       // Free is a host ownership state, not evidence of producer completion.
       store_state(publisher.shared_->slots[0], 1, wire::slot_state::free);
@@ -2026,9 +2157,9 @@ namespace {
         "Completed producer work overwrote a receiver-owned slot");
       store_state(publisher.shared_->slots[0], 1, wire::slot_state::free);
       require(publisher.acquire_slot(generation.completed()) == 0, "Released completed slot did not resume exports");
-      record(3, 0);
-      wait_completed(4);
-      gpu.check_pixels(3);
+      record(wire::slot_count, 0);
+      wait_completed(wire::slot_count + 1);
+      gpu.check_pixels(wire::slot_count);
       for (unsigned index = 1; index != wire::slot_count; ++index)
         require(wire::control_state(publisher.shared_->slots[index].control) == wire::slot_state::reading &&
           publisher.shared_->slots[index].sequence == index + 1 && publisher.shared_->slots[index].qpc == timestamps[index],
@@ -2037,7 +2168,7 @@ namespace {
       store_state(publisher.shared_->slots[2], 1, wire::slot_state::ready);
       require(publisher.acquire_slot(generation.completed()) == 2, "Completed unclaimed ready slot could not be reused");
       store_state(publisher.shared_->slots[2], 1, wire::slot_state::ready); // No copy was recorded by this final ownership check.
-      std::puts("PASS native D3D12 async ring: 3 gated copies, fourth backpressure, independent source pixels, free/ready/reading ownership, delayed recovery");
+      std::printf("PASS native D3D12 async ring: %u gated copies, backpressure on one more, independent source pixels, free/ready/reading ownership, delayed recovery\n", wire::slot_count);
     }
 
     static void native_sharing(bool d3d12, DXGI_FORMAT format) {
@@ -2151,6 +2282,7 @@ int main(int argc, char **argv) {
     publisher_tests::native_reload_clears_fx_handles();
     publisher_tests::runtime_reset_keeps_toggle_rings();
     publisher_tests::color_contract();
+    publisher_tests::consumer_protocol_refusal();
     publisher_tests::bounded_retirement();
     publisher_tests::d3d12_deferred_signal(false);
     publisher_tests::d3d12_deferred_signal(true);

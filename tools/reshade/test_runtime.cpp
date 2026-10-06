@@ -358,6 +358,9 @@ technique SuperDepth3D {
         std::puts("CONTROLLED TEST OBSERVATIONS: hidden game window, test-only exporter, unchanged production receiver; Windows foreground is not changed");
         return;
       }
+      // A consumer of this protocol without capabilities: its declaration, then its request.
+      InterlockedExchange(reinterpret_cast<volatile LONG *>(&shared->consumer_protocol), static_cast<LONG>(wire::version));
+      InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&shared->capability_nonce), 0x12345678);
       InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&shared->consumer_nonce), 0x12345678);
       // A hidden parent STARTUPINFO can override the first ShowWindow call. Activate only
       // this fixture window, after runtime initialization has finished.
@@ -415,7 +418,7 @@ technique SuperDepth3D {
         require(metadata.color_transfer == (expected_color == 1 ? wire::transfer::srgb : pq ? wire::transfer::pq : wire::transfer::scrgb),
           "Exporter declared wrong transfer");
         require(metadata.dxgi_format == (expected_color == 1 || pq ? 24u : 10u), "Exporter declared wrong resource format");
-        require(metadata.protocol_version == (pq ? wire::pq_version : wire::version), "Exporter declared the wrong protocol");
+        require(metadata.protocol_version == wire::version, "Exporter declared the wrong protocol");
         if (receiver_state) {
           if (metadata.accepted_consumer_nonce != read64(shared->consumer_nonce)) {
             // A new consumer needs another Present to receive its replacement ring.

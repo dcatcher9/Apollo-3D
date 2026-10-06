@@ -9,12 +9,12 @@
 // layout, not a C++ object ABI: use Interlocked operations for ownership/control fields.
 namespace reshade_bridge {
   inline constexpr std::uint64_t magic = 0x3153425353485353ULL;
-  // Producers publish `version` by default. `pq_version` is protocol 2 plus the 10-bit PQ
-  // transfer; a producer uses it only for a consumer that advertised consumer_accepts_pq.
-  inline constexpr std::uint32_t version = 2;
-  inline constexpr std::uint32_t screen_plane_version = 1;
-  inline constexpr std::uint32_t pq_version = 3;
-  inline constexpr std::uint32_t slot_count = 3;
+  // Protocol 4: four export slots (a 448-byte shared state with 128-byte metadata) and every
+  // transfer, PQ included. Protocols 1-3 had three slots (384 and 120 bytes). Producer and
+  // consumer accept exactly this version and layout and refuse any other by name: the add-on and
+  // the host are installed together, and neither may read the other's layout of another release.
+  inline constexpr std::uint32_t version = 4;
+  inline constexpr std::uint32_t slot_count = 4;
   inline constexpr wchar_t mapping_prefix[] = L"Local\\Sunshine3D.ReShade.SBS.";
   inline constexpr std::uint32_t max_source_width = 8192;
   inline constexpr std::uint32_t max_source_height = 8192;
@@ -25,13 +25,8 @@ namespace reshade_bridge {
   inline constexpr std::uint32_t cursor_plane_present = 1u;
   // Consumer capability bits, valid only for the consumer nonce they were written with.
   inline constexpr std::uint32_t consumer_accepts_pq = 1u;
-  // The consumer encodes HDR10 PQ: pack any HDR source, scRGB included, as R10G10B10A2 PQ at
-  // pq_version. A producer that predates this bit ignores it and keeps its own choice.
+  // The consumer encodes HDR10 PQ: pack any HDR source, scRGB included, as R10G10B10A2 PQ.
   inline constexpr std::uint32_t consumer_stream_pq = 2u;
-
-  [[nodiscard]] constexpr bool supported_version(std::uint32_t candidate) {
-    return candidate == screen_plane_version || candidate == version || candidate == pq_version;
-  }
 
   [[nodiscard]] constexpr bool valid_ui_parallax(float value) {
     // Ordered comparisons also reject NaN and either infinity.
@@ -63,7 +58,7 @@ namespace reshade_bridge {
     srgb = 1,
     scrgb = 2,  // Linear Rec.709 primaries; 1.0 = 80 cd/m2.
     // Rec.2020 primaries with SMPTE ST 2084 code values; code 1.0 = 10000 cd/m2.
-    // Valid only as R10G10B10A2_UNORM at protocol pq_version.
+    // Valid only as R10G10B10A2_UNORM, and only for a consumer that accepts it.
     pq = 3,
   };
 
@@ -97,19 +92,15 @@ namespace reshade_bridge {
     std::uint64_t control = 0;
     std::uint64_t sequence = 0;
     std::uint64_t qpc = 0;
-    // Protocol 2 consumes eight bytes of protocol 1's slot padding. These fields have
-    // exactly the same writing/ready/reading ownership as the texture and sequence.
-    // Protocol 1's padding is unspecified and must never be interpreted as metadata.
+    // The cursor plane of this exact texture, with the same writing/ready/reading ownership as
+    // the texture and sequence.
     std::uint32_t cursor_plane_flags = 0;
     float ui_parallax_uv = 0.0f;
   };
 
   [[nodiscard]] constexpr bool read_ui_parallax(std::uint32_t protocol_version, const slot_t &slot, float &value) {
     value = 0.0f;
-    if (protocol_version == screen_plane_version) {
-      return true;
-    }
-    if ((protocol_version != version && protocol_version != pq_version) || (slot.cursor_plane_flags != 0u && slot.cursor_plane_flags != cursor_plane_present) || !valid_ui_parallax(slot.ui_parallax_uv) || (slot.cursor_plane_flags == 0u && slot.ui_parallax_uv != 0.0f)) {
+    if (protocol_version != version || (slot.cursor_plane_flags != 0u && slot.cursor_plane_flags != cursor_plane_present) || !valid_ui_parallax(slot.ui_parallax_uv) || (slot.cursor_plane_flags == 0u && slot.ui_parallax_uv != 0.0f)) {
       return false;
     }
     if (slot.cursor_plane_flags == cursor_plane_present) {
@@ -129,18 +120,33 @@ namespace reshade_bridge {
     // A detaching receiver resets its own nonce to zero; zero means no receiver.
     std::uint64_t consumer_nonce = 0;
     metadata_t metadata;
-    // Protocol 3 consumer capabilities, in protocol 2's padding. A consumer writes
-    // consumer_capabilities, then capability_nonce = its nonce, then consumer_nonce. A producer
-    // honours the bits only when capability_nonce equals the nonce it answers, so an older
-    // consumer (which never writes them) and a replaced consumer both read as no capabilities.
+    // A consumer's declaration: it writes consumer_capabilities and consumer_protocol, then
+    // capability_nonce = its nonce, then consumer_nonce (each a full barrier). A producer honours
+    // them only when capability_nonce equals the nonce it answers, so a replaced consumer's
+    // declaration never applies to another consumer's request.
     std::uint64_t capability_nonce = 0;
     std::uint32_t consumer_capabilities = 0;
+    // The protocol the consumer speaks. A producer answers only a consumer that declared its
+    // own `version`, and names any other.
+    std::uint32_t consumer_protocol = 0;
     slot_t slots[slot_count];
   };
 
   // The capabilities a producer may use while answering `answered_nonce`.
   [[nodiscard]] constexpr std::uint32_t answered_capabilities(std::uint64_t answered_nonce, std::uint64_t capability_nonce, std::uint32_t capabilities) {
     return answered_nonce != 0 && capability_nonce == answered_nonce ? capabilities : 0u;
+  }
+
+  // The protocol the consumer of `answered_nonce` declared, zero when none was declared for it.
+  [[nodiscard]] constexpr std::uint32_t answered_protocol(std::uint64_t answered_nonce, std::uint64_t capability_nonce, std::uint32_t protocol) {
+    return answered_nonce != 0 && capability_nonce == answered_nonce ? protocol : 0u;
+  }
+
+  // Every protocol, 1 to 4, begins with the same header: shared_bytes, then the metadata's
+  // signature, protocol_version and metadata_bytes. A consumer reads it before anything else and
+  // refuses any other layout or version by name.
+  [[nodiscard]] constexpr bool same_protocol(std::uint32_t shared_bytes, std::uint64_t signature, std::uint32_t protocol, std::uint32_t metadata_bytes) {
+    return shared_bytes == sizeof(shared_state_t) && signature == magic && protocol == version && metadata_bytes == sizeof(metadata_t);
   }
 
   [[nodiscard]] constexpr bool supported_format(std::uint32_t format, transfer color) {
@@ -154,7 +160,7 @@ namespace reshade_bridge {
   // raster, format and transfer. Without a consumer the producer publishes exactly this, with
   // generation, nonce and handles zero, and allocates no ring (a status-only observer).
   [[nodiscard]] constexpr bool valid_source_metadata(const metadata_t &m) {
-    return m.signature == magic && supported_version(m.protocol_version) && m.metadata_bytes == sizeof(metadata_t) && m.producer_pid != 0 && m.producer_creation_time != 0 && m.window != 0 && m.generation <= max_generation && m.source_width != 0 && m.source_width <= max_source_width && m.source_height != 0 && m.source_height <= max_source_height && m.packed_width == m.source_width * 2 && m.packed_width <= max_packed_width && m.packed_height == m.source_height && m.packed_width % 4 == 0 && m.packed_height % 2 == 0 && m.image_layout == layout::full_sbs_left_first && supported_format(m.dxgi_format, m.color_transfer) && (m.color_transfer != transfer::pq || m.protocol_version == pq_version);
+    return m.signature == magic && m.protocol_version == version && m.metadata_bytes == sizeof(metadata_t) && m.producer_pid != 0 && m.producer_creation_time != 0 && m.window != 0 && m.generation <= max_generation && m.source_width != 0 && m.source_width <= max_source_width && m.source_height != 0 && m.source_height <= max_source_height && m.packed_width == m.source_width * 2 && m.packed_width <= max_packed_width && m.packed_height == m.source_height && m.packed_width % 4 == 0 && m.packed_height % 2 == 0 && m.image_layout == layout::full_sbs_left_first && supported_format(m.dxgi_format, m.color_transfer);
   }
 
   [[nodiscard]] constexpr bool valid_metadata(const metadata_t &m) {
@@ -187,13 +193,17 @@ namespace reshade_bridge {
   }
 
   static_assert(std::is_standard_layout_v<shared_state_t> && std::is_trivially_copyable_v<shared_state_t>);
-  static_assert(sizeof(metadata_t) == 120);
+  // The header every protocol shares (same_protocol) never moves.
+  static_assert(offsetof(shared_state_t, shared_bytes) == 4 && offsetof(shared_state_t, metadata) == 16);
+  static_assert(offsetof(metadata_t, signature) == 0 && offsetof(metadata_t, protocol_version) == 8 && offsetof(metadata_t, metadata_bytes) == 12);
+  static_assert(sizeof(metadata_t) == 128);
   static_assert(sizeof(slot_t) == 64);
-  static_assert(sizeof(shared_state_t) == 384);
+  static_assert(sizeof(shared_state_t) == 448);
   static_assert(offsetof(slot_t, cursor_plane_flags) == 24);
   static_assert(offsetof(slot_t, ui_parallax_uv) == 28);
   static_assert(offsetof(shared_state_t, consumer_nonce) % 8 == 0);
-  static_assert(offsetof(shared_state_t, capability_nonce) == 136);
-  static_assert(offsetof(shared_state_t, consumer_capabilities) == 144);
+  static_assert(offsetof(shared_state_t, capability_nonce) == 144);
+  static_assert(offsetof(shared_state_t, consumer_capabilities) == 152);
+  static_assert(offsetof(shared_state_t, consumer_protocol) == 156);
   static_assert(offsetof(shared_state_t, slots) == 192);
 }  // namespace reshade_bridge

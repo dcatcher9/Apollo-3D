@@ -361,8 +361,7 @@ namespace {
     ));
   }
 
-  // The capabilities of the consumer answering nonce (protocol 3), zero for
-  // an older consumer that never writes them or a replaced one
+  // The capabilities of the consumer answering nonce, zero for a replaced one
   // (wire::answered_capabilities).
   std::uint32_t read_capabilities(wire::shared_state_t &shared, std::uint64_t nonce) {
     const auto answered = static_cast<std::uint64_t>(InterlockedCompareExchange64(
@@ -370,6 +369,16 @@ namespace {
     const auto bits = static_cast<std::uint32_t>(InterlockedCompareExchange(
       reinterpret_cast<volatile LONG *>(&shared.consumer_capabilities), 0, 0));
     return wire::answered_capabilities(nonce, answered, bits);
+  }
+
+  // The protocol the consumer answering nonce declared, zero for a replaced
+  // one or one that declared none (wire::answered_protocol).
+  std::uint32_t read_consumer_protocol(wire::shared_state_t &shared, std::uint64_t nonce) {
+    const auto answered = static_cast<std::uint64_t>(InterlockedCompareExchange64(
+      reinterpret_cast<volatile LONG64 *>(&shared.capability_nonce), 0, 0));
+    const auto protocol = static_cast<std::uint32_t>(InterlockedCompareExchange(
+      reinterpret_cast<volatile LONG *>(&shared.consumer_protocol), 0, 0));
+    return wire::answered_protocol(nonce, answered, protocol);
   }
 
   // The export transfer of an HDR swapchain for the answered consumer's
@@ -1986,6 +1995,9 @@ namespace {
         }
         return;
       }
+      if (!consumer_speaks_protocol(runtime, nonce)) {
+        return;
+      }
       // A PQ export only for a consumer that takes it (C3, exports_pq): one
       // replaced since this Present's render gets the next Present's export.
       if (source.color.output == wire::transfer::pq && !exports_pq(source.color.input, read_capabilities(*shared_, nonce))) {
@@ -2138,6 +2150,24 @@ namespace {
     }
 
   private:
+    // Only a consumer that declared this export protocol is answered
+    // (docs/reshade-sbs.md, GPU handoff contract): a host of another release
+    // is refused by name, once per request, and gets no ring. Zero is a
+    // request that declared nothing, or one being replaced (its successor's
+    // declaration was read).
+    bool consumer_speaks_protocol(api::effect_runtime *runtime, std::uint64_t nonce) {
+      const auto protocol = read_consumer_protocol(*shared_, nonce);
+      if (protocol == wire::version) return true;
+      if (protocol && refused_nonce_ != nonce) {
+        refused_nonce_ = nonce;
+        char message[256];
+        std::snprintf(message, sizeof(message), "Sunshine SBS: refusing a host that speaks export protocol %u; this add-on speaks protocol %u (%u export slots). Install the Sunshine 3D host and add-on of the same release; no stereo export to this host.", protocol, wire::version, wire::slot_count);
+        log(reshade::log::level::warning, message);
+      }
+      deactivate(runtime, protocol ? "consumer_protocol" : "consumer_undeclared");
+      return false;
+    }
+
     void capture_diagnostic(api::effect_runtime *runtime, runtime_t &proof, api::command_list *commands,
         std::uint64_t generation, std::uint64_t sequence) {
       if (!proof.renderer) return;
@@ -2347,7 +2377,7 @@ namespace {
 
     // A ring that stopped exporting (deactivated: focus loss, no consumer)
     // and has no unfinished work is released after export_ring_idle, so a
-    // stereo-to-mono switch frees its 2W x H slots (200-400 MB at 4K); a
+    // stereo-to-mono switch frees its four 2W x H slots (265-530 MB at 4K); a
     // later export allocates a new ring. The cached ring of the other colour
     // transfer keeps its own cached_ring_idle.
     void release_idle_rings() {
@@ -2423,8 +2453,7 @@ namespace {
       metadata.packed_height = source.height;
       metadata.dxgi_format = static_cast<std::uint32_t>(source.format);
       metadata.color_transfer = source.color.output;
-      // Protocol 3 only for the PQ transfer (C3); everything else stays at 2.
-      metadata.protocol_version = source.color.output == wire::transfer::pq ? wire::pq_version : wire::version;
+      metadata.protocol_version = wire::version;
     }
 
     static void discover(api::effect_runtime *runtime, runtime_t &proof, const char *effect = "SuperDepth3D.fx") {
@@ -2546,6 +2575,8 @@ namespace {
     bool retirement_limit_logged_ = false;
     std::uint64_t next_generation_ = 0;
     std::uint32_t next_slot_ = 0;
+    // The last request refused for another export protocol, named once.
+    std::uint64_t refused_nonce_ = 0;
     std::chrono::steady_clock::time_point retry_at_ {};
   };
 

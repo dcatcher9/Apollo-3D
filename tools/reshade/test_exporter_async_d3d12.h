@@ -96,7 +96,7 @@ namespace exporter_async_fixture {
     com_ptr<ID3D12Device> device;
     com_ptr<ID3D12CommandQueue> queue;
     com_ptr<ID3D12Fence> gate, drained;
-    std::array<queued_copy, 4> copies;
+    std::array<queued_copy, reshade_bridge::slot_count + 1> copies; // One per export slot and the resumed copy.
     bool waiting{};
 
     gpu_t() {

@@ -26,10 +26,10 @@ namespace {
     metadata.packed_width = 3840;
     metadata.packed_height = 1080;
     metadata.dxgi_format = 28;
-    metadata.texture_handles[0] = 1;
-    metadata.texture_handles[1] = 2;
-    metadata.texture_handles[2] = 3;
-    metadata.ready_fence_handle = 4;
+    for (std::uint32_t i = 0; i < ::reshade_bridge::slot_count; ++i) {
+      metadata.texture_handles[i] = i + 1;
+    }
+    metadata.ready_fence_handle = ::reshade_bridge::slot_count + 1;
     return metadata;
   }
 }  // namespace
@@ -38,12 +38,15 @@ TEST(ReShadeBridgeProtocol, RequiresVersionedIdentityAndCompleteSynchronizationH
   using namespace ::reshade_bridge;
   const auto valid = valid_bridge_metadata();
   ASSERT_TRUE(valid_metadata(valid));
-  for (const auto mutate : std::array<void (*)(metadata_t &), 12> {
+  for (const auto mutate : std::array<void (*)(metadata_t &), 14> {
          [](metadata_t &m) {
            m.signature ^= 1;
          },
          [](metadata_t &m) {
-           m.protocol_version = pq_version + 1;
+           m.protocol_version = version + 1;
+         },
+         [](metadata_t &m) {
+           m.protocol_version = version - 1;  // Protocol 3: three slots.
          },
          [](metadata_t &m) {
            --m.metadata_bytes;
@@ -73,6 +76,9 @@ TEST(ReShadeBridgeProtocol, RequiresVersionedIdentityAndCompleteSynchronizationH
            m.texture_handles[1] = 0;
          },
          [](metadata_t &m) {
+           m.texture_handles[slot_count - 1] = 0;  // The fourth slot is as required as the others.
+         },
+         [](metadata_t &m) {
            m.image_layout = static_cast<layout>(2);
          },
        }) {
@@ -89,7 +95,9 @@ TEST(ReShadeBridgeProtocol, SourceDescriptionNeedsNoConsumerRingButTheSameSource
   source.generation = 0;
   source.accepted_consumer_nonce = 0;
   source.ready_fence_handle = 0;
-  source.texture_handles[0] = source.texture_handles[1] = source.texture_handles[2] = 0;
+  for (auto &handle : source.texture_handles) {
+    handle = 0;
+  }
   EXPECT_TRUE(valid_source_metadata(source));
   EXPECT_FALSE(valid_metadata(source));
   EXPECT_TRUE(valid_source_metadata(valid_bridge_metadata()));
@@ -113,11 +121,11 @@ TEST(ReShadeBridgeProtocol, SourceDescriptionNeedsNoConsumerRingButTheSameSource
            m.color_transfer = transfer::scrgb;
          },
          [](metadata_t &m) {
-           m.dxgi_format = 24;
+           m.dxgi_format = 10;  // PQ is 10-bit only.
            m.color_transfer = transfer::pq;
          },
          [](metadata_t &m) {
-           m.protocol_version = pq_version + 1;
+           m.protocol_version = version - 1;
          },
        }) {
     auto candidate = source;
@@ -148,47 +156,49 @@ TEST(ReShadeBridgeProtocol, RejectsHalfSbsOversizedAndColorIncoherentMetadata) {
   EXPECT_FALSE(valid_metadata(metadata));
   metadata.color_transfer = static_cast<transfer>(4);
   metadata.dxgi_format = 24;
-  metadata.protocol_version = pq_version;
   EXPECT_FALSE(valid_metadata(metadata));
 }
 
-TEST(ReShadeBridgeProtocol, PqTransferRequiresTenBitStorageAndProtocolThree) {
+TEST(ReShadeBridgeProtocol, PqTransferRequiresTenBitStorageAtThisProtocol) {
   using namespace ::reshade_bridge;
   auto metadata = valid_bridge_metadata();
   metadata.color_transfer = transfer::pq;
   metadata.dxgi_format = 24;  // R10G10B10A2_UNORM
-  metadata.protocol_version = pq_version;
   EXPECT_TRUE(valid_metadata(metadata));
-  // Older consumers know protocol 2 only; a PQ declaration there is malformed.
-  for (const auto protocol : {screen_plane_version, version}) {
+  // Protocols 1-3 laid out three slots; no transfer of theirs is read.
+  for (const auto protocol : {1u, 2u, 3u, version + 1}) {
     metadata.protocol_version = protocol;
     EXPECT_FALSE(valid_metadata(metadata)) << protocol;
   }
-  metadata.protocol_version = pq_version;
+  metadata.protocol_version = version;
   for (const auto format : {10u, 28u, 87u, 0u}) {
     metadata.dxgi_format = format;
     EXPECT_FALSE(valid_metadata(metadata)) << format;
   }
-  // Protocol 3 carries the other transfers unchanged.
+  // The same protocol carries the other transfers.
   metadata = valid_bridge_metadata();
-  metadata.protocol_version = pq_version;
   EXPECT_TRUE(valid_metadata(metadata));
   metadata.color_transfer = transfer::scrgb;
   metadata.dxgi_format = 10;
   EXPECT_TRUE(valid_metadata(metadata));
   metadata.dxgi_format = 24;
   EXPECT_FALSE(valid_metadata(metadata));
-  EXPECT_TRUE(supported_version(pq_version));
-  EXPECT_FALSE(supported_version(pq_version + 1));
 }
 
 TEST(ReShadeBridgeProtocol, CapabilitiesBindToTheNonceTheyWereWrittenWith) {
   using namespace ::reshade_bridge;
-  EXPECT_EQ(offsetof(shared_state_t, capability_nonce), 136u);
-  EXPECT_EQ(offsetof(shared_state_t, consumer_capabilities), 144u);
+  EXPECT_EQ(offsetof(shared_state_t, capability_nonce), 144u);
+  EXPECT_EQ(offsetof(shared_state_t, consumer_capabilities), 152u);
+  EXPECT_EQ(offsetof(shared_state_t, consumer_protocol), 156u);
   EXPECT_EQ(offsetof(shared_state_t, slots), 192u);
-  EXPECT_EQ(sizeof(shared_state_t), 384u);
+  EXPECT_EQ(sizeof(shared_state_t), 448u);
   EXPECT_EQ(answered_capabilities(7, 7, consumer_accepts_pq), consumer_accepts_pq);
+  // The declared protocol binds to its nonce the same way: a producer answers only a consumer that
+  // declared its own version for the request it answers.
+  EXPECT_EQ(answered_protocol(7, 7, version), version);
+  EXPECT_EQ(answered_protocol(7, 7, version - 1), version - 1);
+  EXPECT_EQ(answered_protocol(8, 7, version), 0u);
+  EXPECT_EQ(answered_protocol(0, 0, version), 0u);
   // The HDR10-stream bit is its own wire bit, bound to the nonce like PQ acceptance.
   EXPECT_EQ(consumer_stream_pq, 2u);
   EXPECT_EQ(answered_capabilities(7, 7, consumer_accepts_pq | consumer_stream_pq), 3u);
@@ -213,23 +223,39 @@ TEST(ReShadeBridgeProtocol, ScalesSameAspectEyesAndRejectsDistortingOutputs) {
   EXPECT_EQ(fit_output(metadata, 3840, 0), output_fit::aspect_mismatch);
 }
 
-TEST(ReShadeBridgeProtocol, PreservesLegacyLayoutAndTreatsLegacyPaddingAsScreenPlane) {
+TEST(ReShadeBridgeProtocol, FourSlotLayoutKeepsTheSharedHeaderAndRefusesThreeSlotProtocols) {
   using namespace ::reshade_bridge;
-  EXPECT_EQ(sizeof(metadata_t), 120u);
+  EXPECT_EQ(version, 4u);
+  EXPECT_EQ(slot_count, 4u);
+  EXPECT_EQ(sizeof(metadata_t), 128u);
   EXPECT_EQ(sizeof(slot_t), 64u);
-  EXPECT_EQ(sizeof(shared_state_t), 384u);
+  EXPECT_EQ(sizeof(shared_state_t), 448u);
   EXPECT_EQ(offsetof(shared_state_t, slots), 192u);
-  auto metadata = valid_bridge_metadata();
-  metadata.protocol_version = screen_plane_version;
-  ASSERT_TRUE(valid_metadata(metadata));
-  ASSERT_EQ(fit_output(metadata, 3840, 1080), output_fit::exact);
+  // Every protocol's header sits where protocols 1-3 had it, so either side reads another
+  // release's version before anything else.
+  EXPECT_EQ(offsetof(shared_state_t, shared_bytes), 4u);
+  EXPECT_EQ(offsetof(shared_state_t, metadata) + offsetof(metadata_t, signature), 16u);
+  EXPECT_EQ(offsetof(shared_state_t, metadata) + offsetof(metadata_t, protocol_version), 24u);
+  EXPECT_EQ(offsetof(shared_state_t, metadata) + offsetof(metadata_t, metadata_bytes), 28u);
+  EXPECT_TRUE(same_protocol(448, magic, version, 128));
+  EXPECT_FALSE(same_protocol(384, magic, 2, 120));  // A protocol 2 add-on.
+  EXPECT_FALSE(same_protocol(384, magic, 3, 120));  // A protocol 3 (PQ) add-on.
+  EXPECT_FALSE(same_protocol(448, magic, version + 1, 128));  // A later protocol of this size.
+  EXPECT_FALSE(same_protocol(448, magic, version, 120));
+  EXPECT_FALSE(same_protocol(448, 0, version, 128));
+  EXPECT_FALSE(same_protocol(0, 0, 0, 0));  // A mapping still being initialised.
 
-  slot_t legacy;
-  legacy.cursor_plane_flags = UINT32_MAX;
-  legacy.ui_parallax_uv = std::numeric_limits<float>::quiet_NaN();
-  float value = 1.0f;
-  ASSERT_TRUE(read_ui_parallax(metadata.protocol_version, legacy, value));
-  EXPECT_EQ(value, 0.0f);
+  auto metadata = valid_bridge_metadata();
+  slot_t slot;
+  slot.cursor_plane_flags = cursor_plane_present;
+  slot.ui_parallax_uv = 0.005f;
+  for (const auto earlier : {1u, 2u, 3u}) {
+    metadata.protocol_version = earlier;
+    EXPECT_FALSE(valid_metadata(metadata)) << earlier;
+    float value = 1.0f;
+    EXPECT_FALSE(read_ui_parallax(earlier, slot, value)) << earlier;
+    EXPECT_EQ(value, 0.0f);
+  }
 }
 
 TEST(ReShadeBridgeProtocol, CarriesResolvedSignedEyeUvWithoutRescalingOrClamping) {
@@ -266,10 +292,10 @@ TEST(ReShadeBridgeProtocol, RejectsMalformedPlaneExtensionsAndUnknownVersions) {
   }
   slot.cursor_plane_flags = cursor_plane_present;
   slot.ui_parallax_uv = 0.005f;
-  float pq_value = 0.0f;
-  EXPECT_TRUE(read_ui_parallax(pq_version, slot, pq_value));
-  EXPECT_EQ(pq_value, 0.005f);
-  for (const auto invalid_version : {0u, pq_version + 1u, UINT32_MAX}) {
+  float current = 0.0f;
+  EXPECT_TRUE(read_ui_parallax(version, slot, current));
+  EXPECT_EQ(current, 0.005f);
+  for (const auto invalid_version : {0u, version - 1u, version + 1u, UINT32_MAX}) {
     float value = 1.0f;
     EXPECT_FALSE(read_ui_parallax(invalid_version, slot, value));
     EXPECT_EQ(value, 0.0f);
@@ -279,6 +305,7 @@ TEST(ReShadeBridgeProtocol, RejectsMalformedPlaneExtensionsAndUnknownVersions) {
 #ifdef _WIN32
 
   #include "src/platform/windows/reshade_bridge.h"
+  #include "tests/tests_log_checker.h"
 
   #include <d3d11_4.h>
   #include <d3d12.h>
@@ -607,20 +634,22 @@ namespace {
 }  // namespace
 
 TEST_F(ReShadeBridgeGpu, AdvertisesPqBeforeItsNonceAndImportsAPqGeneration) {
-  // SetUp's first poll wrote the request: capabilities, their nonce, then consumer_nonce.
+  // SetUp's first poll wrote the request: capabilities and protocol, their nonce, then consumer_nonce.
   EXPECT_EQ(state->consumer_capabilities, protocol::consumer_accepts_pq);
+  EXPECT_EQ(state->consumer_protocol, protocol::version);
   EXPECT_EQ(state->capability_nonce, state->consumer_nonce);
   EXPECT_EQ(protocol::answered_capabilities(state->consumer_nonce, state->capability_nonce, state->consumer_capabilities), protocol::consumer_accepts_pq);
+  EXPECT_EQ(protocol::answered_protocol(state->consumer_nonce, state->capability_nonce, state->consumer_protocol), protocol::version);
 
-  // A PQ declaration at protocol 2 is malformed and never presented.
-  ASSERT_TRUE(new_generation(DXGI_FORMAT_R10G10B10A2_UNORM, protocol::transfer::pq));
+  // A generation declaring protocol 3, PQ's three-slot protocol, is never presented.
+  ASSERT_TRUE(new_generation(DXGI_FORMAT_R10G10B10A2_UNORM, protocol::transfer::pq, source_width, height, protocol::version - 1));
   const auto codes = pixels(0xC00003FF, 0xFFF00000);
   publish_pixels(1, codes.data(), packed_width * sizeof(std::uint32_t));
   for (int i = 0; i < 20; ++i) {
     EXPECT_FALSE(poll());
   }
 
-  ASSERT_TRUE(new_generation(DXGI_FORMAT_R10G10B10A2_UNORM, protocol::transfer::pq, source_width, height, protocol::pq_version));
+  ASSERT_TRUE(new_generation(DXGI_FORMAT_R10G10B10A2_UNORM, protocol::transfer::pq));
   publish_pixels(1, codes.data(), packed_width * sizeof(std::uint32_t));
   const auto frame = await_frame();
   ASSERT_TRUE(frame);
@@ -651,7 +680,7 @@ TEST_F(ReShadeBridgeGpu, AdvertisesAnHdr10StreamOnlyUnderTheNonceItRequests) {
   EXPECT_EQ(protocol::answered_capabilities(first_nonce, state->capability_nonce, state->consumer_capabilities), 0u);
 
   // A producer answering the new nonce with PQ (an scRGB game packed for the HDR10 stream) presents.
-  ASSERT_TRUE(new_generation(DXGI_FORMAT_R10G10B10A2_UNORM, protocol::transfer::pq, source_width, height, protocol::pq_version));
+  ASSERT_TRUE(new_generation(DXGI_FORMAT_R10G10B10A2_UNORM, protocol::transfer::pq));
   const auto codes = pixels(0xC00003FF, 0xFFF00000);
   publish_pixels(1, codes.data(), packed_width * sizeof(std::uint32_t));
   const auto frame = await_frame();
@@ -1108,24 +1137,104 @@ TEST_F(ReShadeBridgeGpu, KeepsCursorPlaneWithItsFrameAcrossPendingInvalidAndRepl
   EXPECT_EQ(replacement->ui_parallax_uv, 0.0f);
 }
 
-TEST_F(ReShadeBridgeGpu, ImportsLegacyPublisherWithUnspecifiedSlotPaddingAtScreenPlane) {
-  auto metadata = state->metadata;
-  metadata.protocol_version = protocol::screen_plane_version;
-  write_metadata(metadata);
-  publish(1, true, std::numeric_limits<float>::quiet_NaN(), UINT32_MAX);
-  const auto legacy = await_frame();
-  ASSERT_TRUE(legacy);
-  EXPECT_EQ(legacy->sequence, 1u);
-  EXPECT_EQ(legacy->ui_parallax_uv, 0.0f);
-  ASSERT_TRUE(await_consumed());
-  expect_pixels(legacy->texture);
+TEST_F(ReShadeBridgeGpu, ConvertsFromEveryOneOfTheFourSlots) {
+  // The live FG-on ring needs all four at once: the held frame, the replaced one still being read,
+  // the next frame and a queued write. Each slot's own texture carries its own frame.
+  const auto generation = state->metadata.generation;
+  for (std::uint32_t k = 0; k < protocol::slot_count; ++k) {
+    const auto index = protocol::slot_count - 1 - k;  // The fourth slot first.
+    const std::uint32_t left = 0xFF000000u | (0x40u * (k + 1)), right = 0xFF000000u | ((0x40u * (k + 1)) << 8);
+    const auto source = pixels(left, right);
+    auto &slot = state->slots[index];
+    ASSERT_EQ(slot.control, protocol::slot_control(generation, protocol::slot_state::free));
+    producer_context->UpdateSubresource(rings.back()->textures[index].Get(), 0, nullptr, source.data(), packed_width * sizeof(std::uint32_t), 0);
+    slot.sequence = k + 1;
+    slot.cursor_plane_flags = protocol::cursor_plane_present;
+    signal_ready(k + 1);
+    MemoryBarrier();
+    InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&slot.control), static_cast<LONG64>(protocol::slot_control(generation, protocol::slot_state::ready)));
+    const auto frame = await_frame_after(k);
+    ASSERT_TRUE(frame) << index;
+    EXPECT_EQ(frame->sequence, k + 1);
+    EXPECT_EQ(protocol::control_state(slot.control), protocol::slot_state::reading);
+    expect_pixels(frame->texture, DXGI_FORMAT_R8G8B8A8_UNORM, left, right);
+  }
+}
 
-  ASSERT_TRUE(new_generation());
-  publish(1, true, 0.009f);
-  const auto current = await_frame();
-  ASSERT_TRUE(current);
-  EXPECT_NE(current->resource_generation, legacy->resource_generation);
-  EXPECT_EQ(current->ui_parallax_uv, 0.009f);
+TEST_F(ReShadeBridgeGpu, RefusesAnAddOnOfAnotherProtocolByNameWithoutWritingItsMapping) {
+  // Replace the fixture's producer mapping with one an add-on of another release created.
+  bridge.reset();
+  UnmapViewOfFile(state);
+  CloseHandle(mapping);
+  state = nullptr;
+  const auto name = std::wstring(protocol::mapping_prefix) + std::to_wstring(GetCurrentProcessId());
+  const auto earlier = [&](std::uint32_t bytes, std::uint32_t protocol_version, std::uint32_t metadata_bytes) {
+    if (state) {
+      UnmapViewOfFile(state);
+      CloseHandle(mapping);
+    }
+    mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, bytes, name.c_str());
+    ASSERT_NE(mapping, nullptr);
+    auto *view = static_cast<std::uint8_t *>(MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, bytes));
+    ASSERT_NE(view, nullptr);
+    state = reinterpret_cast<protocol::shared_state_t *>(view);
+    // The header every protocol shares; the rest is that release's layout, never read.
+    std::memset(view, 0x5A, bytes);
+    const std::uint32_t sequence = 2;
+    const std::uint64_t nonce = 0;
+    const auto signature = protocol::magic;
+    const auto pid = static_cast<std::uint32_t>(GetCurrentProcessId());
+    std::memcpy(view + 0, &sequence, 4);
+    std::memcpy(view + 4, &bytes, 4);
+    std::memcpy(view + 8, &nonce, 8);
+    std::memcpy(view + 16, &signature, 8);
+    std::memcpy(view + 24, &protocol_version, 4);
+    std::memcpy(view + 28, &metadata_bytes, 4);
+    std::memcpy(view + 32, &pid, 4);
+  };
+  for (const auto &[bytes, protocol_version, metadata_bytes] : {
+         std::array<std::uint32_t, 3> {384, 2, 120},  // Protocol 2: three slots, SDR and scRGB.
+         std::array<std::uint32_t, 3> {384, 3, 120},  // Protocol 3: three slots, PQ.
+         std::array<std::uint32_t, 3> {448, protocol::version + 1, 128},  // A later protocol of this size.
+       }) {
+    earlier(bytes, protocol_version, metadata_bytes);
+    const std::vector<std::uint8_t> before(reinterpret_cast<std::uint8_t *>(state), reinterpret_cast<std::uint8_t *>(state) + bytes);
+    bridge = make_receiver();
+    for (int i = 0; i < 5; ++i) {
+      EXPECT_FALSE(poll()) << protocol_version;
+      EXPECT_FALSE(bridge->status(source_rect, packed_width, height)) << protocol_version;
+    }
+    bridge.reset();
+    // No nonce, capability or slot word was written into another release's layout.
+    EXPECT_EQ(std::memcmp(before.data(), state, bytes), 0) << protocol_version;
+    // Each refusal names both protocols and what to install.
+    EXPECT_TRUE(log_checker::line_contains("test_sunshine.log", "ReShade SBS: the Game 3D add-on in process " + std::to_string(GetCurrentProcessId()) + " speaks export protocol " + std::to_string(protocol_version) + " (" + std::to_string(bytes) + "-byte mapping); this host speaks protocol 4 (448 bytes, 4 export slots). Install the add-on of this Sunshine 3D release"))
+      << protocol_version;
+  }
+
+  // A mapping still being initialised (zero) is retried quietly and attaches once it is published.
+  UnmapViewOfFile(state);
+  CloseHandle(mapping);
+  mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, sizeof(protocol::shared_state_t), name.c_str());
+  ASSERT_NE(mapping, nullptr);
+  state = static_cast<protocol::shared_state_t *>(MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(protocol::shared_state_t)));
+  ASSERT_NE(state, nullptr);
+  bridge = make_receiver();
+  EXPECT_FALSE(poll());
+  EXPECT_EQ(state->consumer_nonce, 0u);
+  *state = protocol::shared_state_t {};
+  protocol::metadata_t identity;
+  identity.producer_pid = GetCurrentProcessId();
+  identity.producer_creation_time = creation_time;
+  identity.window = observed.window;
+  write_metadata(identity);
+  const auto deadline = bridge_clock_t::now() + std::chrono::seconds(2);
+  while (state->consumer_nonce == 0 && bridge_clock_t::now() < deadline) {
+    poll();
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  EXPECT_NE(state->consumer_nonce, 0u);
+  EXPECT_EQ(state->consumer_protocol, protocol::version);
 }
 
 TEST_F(ReShadeBridgeGpu, PublisherIdentityStaysStableAcrossFramesAndTracksResourceReplacement) {
