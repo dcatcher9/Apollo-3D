@@ -710,18 +710,24 @@ Acceptance remembered from an earlier session protects from the first frame but 
 samples, it lapses and is forgotten, so a wrong remembered claim cannot outlive every session. A
 sample is testable for a source when it could earn or refute it: the source is offered, valid (V1,
 or V2 for a HUD-less pair) and not full (alpha below 90% of the frame; a partial or empty change
-set). Every other sample that offers the source pauses its clock until its next testable one, for
-every kind: alpha that fails V1, a HUD-less pair whose change set is not V2-valid (the middle band
-of a pair mispaired with interpolated colour, or an inexact pair changed everywhere) and a full
-sample. It therefore never lapses during an invalid run, such as Resident Evil Requiem's
-rejected-tag frames, and resumes after it with the time it had already run; such offers never
-extend it, so a source that is testable now and then still lapses after 60 s of testable samples in
-total unless it earns acceptance. A full menu can neither earn nor refute a source (only a
-selective sample earns), so counting it lapsed Stellar Blade's presented alpha during long SDR menu
-visits, which left the menus unprotected until gameplay with frame generation off earned it again;
-a full change set pauses a HUD-less pair's clock the same way. Until 10-05 a remembered inferred
-source kept a plain clock through its invalid samples, and a HUD-less pair's clock ran through full
-change sets.
+set). The clock counts only the time between consecutive testable samples of the source, each gap
+capped at 250 ms (`alpha_trust_reconfirm_gap_ms`, two and a half sample intervals), and nothing
+else touches it. Samples that are not testable for every kind (alpha that fails V1, a HUD-less pair
+whose change set is not V2-valid, such as the middle band of a pair mispaired with interpolated
+colour or an inexact pair changed everywhere, and a full sample), samples that do not offer the
+source or offer another signature of its kind (frame generation that stops offering current alpha,
+an HDR toggle), a manual mode and a time without samples (a loading screen, alt-tab) therefore
+never count beyond one capped gap. A source never lapses during an invalid run, such as Resident
+Evil Requiem's rejected-tag frames, nor while it is not offered, and an interleaved invalid sample
+never restarts its clock, so a source that is testable now and then still lapses after 60 s of
+testable time in total unless it earns acceptance. A full menu can neither earn nor refute a
+source (only a selective sample earns), so counting it lapsed Stellar Blade's presented alpha during
+long SDR menu visits, which left the menus unprotected until gameplay with frame generation off
+earned it again; a full change set is not testable for a HUD-less pair the same way. Until 10-05 a
+remembered inferred source kept a plain clock through its invalid samples, and a HUD-less pair's
+clock ran through full change sets; until the 10-05 review the clock was wall time from a testable
+sample to the next sample that offered the source, so a source absent for a minute (Stellar Blade
+SDR with frame generation on, an HDR toggle) lapsed at its first offer back.
 
 An accepted alpha candidate that is valid in the frame decides by itself (S1). While an accepted
 UIAlpha or UI color tag is offered, inferred alpha never decides (the declared-alpha block): when the
@@ -1191,9 +1197,9 @@ acceptance change leave it; a different layer format or colour space is another 
 in `TrustedUISources` with the accepted sources, restored provisionally at start and confirmed by
 three matching samples over 2 s; it lapses after 60 s (`alpha_trust_reconfirm_ms`) of testable
 time without them. Testable samples offer the layer without coverage while the presented frame's
-evidence is valid and reads visible; every other sample (a menu, invalid evidence, no layer,
-or another signature) pauses that clock, so a menu opened at
-start keeps the restored key. Forget
+evidence is valid and reads visible, and the clock counts the capped gaps between them as above;
+every other sample (a menu, invalid evidence, no layer, or another signature) never counts beyond
+one capped gap, so a menu opened at start keeps the restored key. Forget
 clears it. Manual modes neither earn nor lapse it but honour it. The renderer asks the ledger
 (`alpha_auto_policy::pre_ui_proven` of the offered layer's signature) on every frame, after the
 poll on a detecting frame so that a sample that just earned the proof counts at once, pushes
@@ -2360,7 +2366,7 @@ acceptance and selection, hidden-scene guard, hold, pin weight. Diagnostics only
 | V2 Change-set validity (M2) | A difference is evidence only with the threshold from the two snapshots' own encodings, and only a valid change set is: the changed set passes the tile test above when partial, changes no pixel of a lit HUD-less image in clean tiles (empty, since revision 8, which an accepted pair decides as an empty mask of its own), or, from an exact pair whose HUD-less image is lit, is nearly the whole frame. The middle band (a pair mispaired with interpolated or another frame's colour) and noisy pairs are invalid. |
 | A1 Earning (M3) | Acceptance is keyed by game and source signature (with the swapchain colour space), not by FG mode. A declared source (UI alpha or color tag, or a HUD-less pair, exact or not, by its partial change set) is accepted by its first valid selective sample; an inferred source needs the steady selective run above, consecutive and bounded (a selective sample more than 2 s after the run's last one restarts it). A source that is never selective is never accepted. A sample does not count while a declared alpha is offered but invalid. Holds and manual inputs never earn. An offered layer without coverage earns its signature's pre-UI proof (ledger key `pre_ui:<format>:<space>`) like an inferred source: three samples over 2 s in which it equals the presented frame at eight times their pair threshold on at least 90% of pixels and is lit on at least half; a mismatch neither withdraws it nor restarts the run, and no judge revokes it. |
 | A2 Revocation (M3) | Three contradictions within 2 s by valid same-sample evidence of stronger provenance (an accepted declared alpha or an exact change-set), whatever the drawing rank: one-way disagreement on lit pixels, or declared-versus-inferred coverage disagreement. Agreeing samples do not reset the count. Every accepted alpha is judged by exact one-way contradictions, declared ones included (selection revision 10) when captured in the exact pair's tag batch; the declared alphas' coverage judges inferred alpha only; the one-frame-late layer copy is not same-sample evidence (E2), so neither judge reads it. Forget also revokes. Ambiguous or invalid samples never revoke. |
-| A3 Persistence (M3) | Restored acceptance is provisional and lapses unless earned again in time; for every kind the clock runs only on samples that could earn or refute the source (offered, valid and not full: alpha below 90% of the frame, a partial or empty change set) and pauses on every other offer (a full menu can neither earn nor refute it, so Stellar Blade's presented alpha no longer lapses during long menu visits, nor a HUD-less pair through mispaired samples). A restored pre-UI proof's clock runs only on testable samples (its layer offered without coverage while the presented frame's evidence is valid and visible), so it lapses after 60 s of testable time without a match. Legacy per-kind entries are discarded; Forget clears the game's entries, pre-UI proofs included. |
+| A3 Persistence (M3) | Restored acceptance is provisional and lapses unless earned again within 60 s of testable time: for every kind the clock counts only the gaps, capped at 250 ms, between consecutive samples that could earn or refute the source (offered, valid and not full: alpha below 90% of the frame, a partial or empty change set), so other samples, absence, manual periods and gaps without samples never count beyond one capped gap (a full menu can neither earn nor refute it, so Stellar Blade's presented alpha no longer lapses during long menu visits or FG-on play, nor a HUD-less pair through mispaired samples). A restored pre-UI proof's clock counts the same way on its testable samples (its layer offered without coverage while the presented frame's evidence is valid and visible), so it lapses after 60 s of testable time without a match. Legacy per-kind entries are discarded; Forget clears the game's entries, pre-UI proofs included. |
 | S1 Selection (M4) | Among accepted, valid candidates the first in draw order wins: opacity before change-set, then declared before inferred. An unaccepted or invalid candidate never blocks another, except that an offered, accepted declared alpha blocks inferred alpha (when it is invalid, T1 applies). Nothing qualifies: no mask, with the reason of the highest-ranked refused candidate. |
 | S2 Manual (M3) | Off offers nothing; the filter restricts offers; On accepts the filtered valid candidates for this session only, without persisting, earning or revoking. |
 | H1 Hidden scene (M5) | With valid depth, a held hidden D verdict (two hidden samples enter, renewals extend, a visible sample releases) and an informative full claim (from an accepted source, a layer proven cleared transparent this frame, an exact full change-set, or a pre-UI scene image on which D reads visible while D on the presented frame reads hidden: the declared HUD-less image, or an offscreen layer without coverage whose signature the ledger holds proven, A1), the frame is flat whatever M4 selected (a winner already flat is relabelled 8 too). A visible verdict refutes that signature's full claim until it shows below 99% opaque. Invalid D acts on nothing; only a scope change clears D state. |

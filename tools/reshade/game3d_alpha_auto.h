@@ -28,8 +28,12 @@ namespace sunshine_game3d {
   inline constexpr std::uint64_t alpha_trust_span_ms = 2000;
   // Acceptance remembered from an earlier session protects from the first
   // frame but lapses unless this session earns it again within this long of
-  // the source first being offered.
+  // testable time (A3): the time between consecutive samples that could earn
+  // or refute it, each gap counted up to alpha_trust_reconfirm_gap_ms (two
+  // and a half sample intervals; samples are at most ten a second), so time
+  // while the source is not testable never counts beyond one capped gap.
   inline constexpr std::uint64_t alpha_trust_reconfirm_ms = 60000;
+  inline constexpr std::uint64_t alpha_trust_reconfirm_gap_ms = 250;
   // At most this many remembered acceptance entries are restored.
   inline constexpr std::size_t max_stored_ui_sources = 32;
 
@@ -281,13 +285,14 @@ namespace sunshine_game3d {
     // 2 s"); agreeing and unjudged samples change nothing, and invalid or
     // ambiguous samples never revoke. A contradicted sample earns nothing
     // and restarts the earning run (unless void). A3: restored entries lapse
-    // unless earned again within alpha_trust_reconfirm_ms of being first
-    // offered valid. That clock runs only on samples that could earn or
-    // refute the source: offered, valid (V1, or V2 for a HUD-less pair) and
-    // not full (below 90% coverage, or a partial or empty change set). Every
-    // other sample of an offered source pauses it, from its first such offer
-    // to its next testable one, so it never lapses during an invalid run or
-    // a long full-screen menu, and such offers never extend it.
+    // unless earned again within alpha_trust_reconfirm_ms of testable time.
+    // A testable sample could earn or refute the source: offered, valid (V1,
+    // or V2 for a HUD-less pair) and not full (below 90% coverage, or a
+    // partial or empty change set). The clock counts only the time between
+    // consecutive testable samples of the entry, each gap capped at
+    // alpha_trust_reconfirm_gap_ms, so an invalid run, a long full-screen
+    // menu, samples of another signature or kind, a manual period or a time
+    // without samples never count beyond one capped gap.
     // H1 (d), fix 1: an offered layer without coverage (layer_covered zero)
     // earns its signature's pre-UI proof (key ui_selection::pre_ui_key) like
     // an inferred source: alpha_trust_samples samples spanning
@@ -295,9 +300,9 @@ namespace sunshine_game3d {
     // (ui_selection::pre_ui_match), not necessarily consecutive. A mismatch
     // never withdraws it and never restarts the run (UI over the scene is a
     // mismatch); no A2 judge reads it and a void sample still counts. A
-    // restored proof's reconfirm clock runs only on testable samples (the
-    // layer offered without coverage while the presented frame's evidence is
-    // valid and visible) and pauses on every other sample, so it lapses after
+    // restored proof's reconfirm clock counts the same capped time between
+    // testable samples (the layer offered without coverage while the
+    // presented frame's evidence is valid and visible), so it lapses after
     // alpha_trust_reconfirm_ms of testable time without a match.
     void observe(const alpha_auto_decision::detection_evidence &evidence, std::uint32_t pixels, std::uint64_t tick_ms,
         const candidate_signatures &signatures) {
@@ -351,7 +356,7 @@ namespace sunshine_game3d {
         auto &entry = at(*parsed);
         if (entry.accepted) continue;
         entry.accepted = entry.provisional = true;
-        entry.reconfirm_from = entry.reconfirm_elapsed = 0;
+        entry.last_testable = entry.testable_ms = 0;
         ++result.restored;
         ++counters_[ui_counter::trust_restored];
       }
@@ -454,10 +459,9 @@ namespace sunshine_game3d {
     struct entry {
       ui_selection::signature signature;
       bool accepted{}, provisional{};
-      // A3, while provisional: the start of the running reconfirm clock (zero
-      // while it is paused or before the source is first offered valid) and
-      // the time it ran before its last pause.
-      std::uint64_t reconfirm_from{}, reconfirm_elapsed{};
+      // A3, while provisional: the tick of the latest testable sample (zero
+      // before the first) and the testable time counted so far.
+      std::uint64_t last_testable{}, testable_ms{};
       evidence_run earned;
       contradictions doubt;
     };
@@ -498,23 +502,24 @@ namespace sunshine_game3d {
     }
     void revoke(entry &e, std::size_t event) {
       e.accepted = e.provisional = false;
-      e.reconfirm_from = e.reconfirm_elapsed = 0;
+      e.last_testable = e.testable_ms = 0;
       e.doubt = {};
       ++counters_[event];
     }
-    // A3: a provisional entry's source offered valid runs its reconfirm
-    // clock; a declared one offered but invalid pauses it.
-    static void reconfirm_offered(entry &e, std::uint64_t tick_ms) {
-      if (e.provisional && !e.reconfirm_from) e.reconfirm_from = tick_ms;
+    // A3: a testable sample of a provisional entry counts the time since the
+    // entry's previous testable sample, capped at alpha_trust_reconfirm_gap_ms.
+    // Nothing else touches the clock, so time without testable samples never
+    // counts beyond one capped gap.
+    static void reconfirm_tested(entry &e, std::uint64_t tick_ms) {
+      if (!e.provisional) return;
+      if (e.last_testable && tick_ms > e.last_testable)
+        e.testable_ms += std::min(tick_ms - e.last_testable, alpha_trust_reconfirm_gap_ms);
+      e.last_testable = tick_ms;
     }
-    static void reconfirm_paused(entry &e, std::uint64_t tick_ms) {
-      if (!e.provisional || !e.reconfirm_from) return;
-      if (tick_ms >= e.reconfirm_from) e.reconfirm_elapsed += tick_ms - e.reconfirm_from;
-      e.reconfirm_from = 0;
-    }
-    void lapse_if_due(entry &e, std::uint64_t tick_ms) {
-      if (e.provisional && e.reconfirm_from && tick_ms >= e.reconfirm_from &&
-          e.reconfirm_elapsed + (tick_ms - e.reconfirm_from) >= alpha_trust_reconfirm_ms) {
+    // Revokes a provisional entry whose testable time reached
+    // alpha_trust_reconfirm_ms, after the sample had its chance to earn.
+    void lapse_if_due(entry &e) {
+      if (e.provisional && e.testable_ms >= alpha_trust_reconfirm_ms) {
         e.earned = {};
         revoke(e, ui_counter::trust_lapsed);
       }
@@ -539,19 +544,13 @@ namespace sunshine_game3d {
           declared[declared_count++] = alpha_counts_of(evidence, k).covered;
       for (const auto k : ui_selection::draw_order) {
         if (!ui_selection::alpha_kind(k) || !(offered & ui_selection::bit(k))) continue;
-        if (invalid & ui_selection::bit(k)) {
-          // A3: a restored alpha offered but invalid can neither earn nor be
-          // refuted, so it does not lapse; its clock pauses until the next
-          // valid offer.
-          if (auto *e = find(signatures.of(k))) reconfirm_paused(*e, tick_ms);
-          continue;
-        }
+        // A3: an alpha offered but invalid can neither earn nor be refuted,
+        // so it is not testable and its reconfirm clock does not count.
+        if (invalid & ui_selection::bit(k)) continue;
         auto &e = at(signatures.of(k));
         const auto covered = alpha_counts_of(evidence, k).covered;
-        // A3: a sample opaque almost everywhere (a full menu) can neither
-        // earn nor refute the source, so its reconfirm clock pauses there.
-        if (ui_selection::full(covered, pixels)) reconfirm_paused(e, tick_ms);
-        else reconfirm_offered(e, tick_ms);
+        // A3: neither can a sample opaque almost everywhere (a full menu).
+        if (!ui_selection::full(covered, pixels)) reconfirm_tested(e, tick_ms);
         // A2: every judged kind (all alpha but the one-frame-late layer copy,
         // E2) meets the one-way test, with strong pixels to test; inferred
         // alpha also the declared alphas' coverage.
@@ -571,7 +570,7 @@ namespace sunshine_game3d {
             if (!void_sample) e.earned = {};
             if (e.accepted && e.doubt.add(tick_ms))
               revoke(e, by_exact ? ui_counter::trust_revoked_exact : ui_counter::trust_revoked_declared);
-            lapse_if_due(e, tick_ms);
+            lapse_if_due(e);
             continue;
           }
         }
@@ -582,30 +581,24 @@ namespace sunshine_game3d {
         } else if (ui_selection::full(covered, pixels)) {
           if (!void_sample) e.earned = {};
         }
-        lapse_if_due(e, tick_ms);
+        lapse_if_due(e);
       }
-      // H1 (d): the offered layer's pre-UI proof; every other proof's
-      // reconfirm clock pauses.
-      std::optional<ui_selection::signature> tested;
+      // H1 (d): the offered layer's pre-UI proof, testable while the
+      // presented frame's evidence is valid and visible.
       if ((offered & candidate::layer) && !evidence.layer_covered) {
-        tested = ui_selection::pre_ui_key(signatures.of(kind::ui_layer));
-        auto &e = at(*tested);
-        const bool testable = evidence.scene.valid && evidence.scene.verdict == ui_detection::scene_verdict::visible;
-        if (testable) reconfirm_offered(e, tick_ms);
-        else reconfirm_paused(e, tick_ms);
+        auto &e = at(ui_selection::pre_ui_key(signatures.of(kind::ui_layer)));
+        if (evidence.scene.valid && evidence.scene.verdict == ui_detection::scene_verdict::visible) reconfirm_tested(e, tick_ms);
         if (ui_selection::pre_ui_match(evidence.pre_ui_match, evidence.pre_ui_image_lit, pixels) && e.earned.add(tick_ms))
           accept(e);
-        lapse_if_due(e, tick_ms);
+        lapse_if_due(e);
       }
-      for (auto &e : entries_)
-        if (e.signature.source_kind == kind::pre_ui && (!tested || e.signature != *tested)) reconfirm_paused(e, tick_ms);
       // A HUD-less change set is declared: it earns from its first V2-valid
       // partial change set, exact or not, since V2's tile test is the proof of
       // its pixels (a game may tag only HUDLessColor, whose pairs are then all
       // counted and inexact: Hogwarts Legacy 10-05). Only an exact pair judges
-      // (A2). A3: its clock runs only on samples that could earn or refute it,
-      // offered V2-valid and not full (a partial or empty change set), as an
-      // alpha's does: a full menu or a mispaired (V2-invalid) sample pauses it.
+      // (A2). A3: its testable samples are those that could earn or refute
+      // it, offered V2-valid and not full (a partial or empty change set), as
+      // an alpha's are; a full menu or a mispaired (V2-invalid) sample is not.
       if (offered & candidate::hudless) {
         auto &e = at(signatures.of(kind::hudless));
         // The GPU's V2 verdict (valid bits): a valid set is partial (some
@@ -613,10 +606,9 @@ namespace sunshine_game3d {
         // pair, full (98%), so a valid selective one is the partial change
         // set (ui_selection::change_set_selective).
         const bool valid = (evidence.valid_bits & candidate::hudless) != 0u;
-        if (valid && !ui_selection::full(evidence.hudless_changed, pixels)) reconfirm_offered(e, tick_ms);
-        else reconfirm_paused(e, tick_ms);
+        if (valid && !ui_selection::full(evidence.hudless_changed, pixels)) reconfirm_tested(e, tick_ms);
         if (!void_sample && valid && ui_selection::selective(evidence.hudless_changed, pixels)) accept(e);
-        lapse_if_due(e, tick_ms);
+        lapse_if_due(e);
       }
     }
 

@@ -1431,8 +1431,9 @@ namespace {
   void invalid_declared_source_never_lapses_and_forget_clears() {
     {
       // A3: a restored declared tag offered but invalid (more than 1%
-      // invalid pixels, V1) re-arms its reconfirm clock, so it never lapses
-      // during an invalid run however long; it confirms at its first valid
+      // invalid pixels, V1) is not testable and its reconfirm clock does not
+      // count, so it never lapses during an invalid run however long; it
+      // confirms at its first valid
       // selective sample afterwards. Meanwhile it decides nothing: no
       // decision of its own, and the T1 grace reuses only a decision of its
       // own, which no frame of the run had.
@@ -3598,13 +3599,14 @@ namespace {
   }
 
   // The tick of the sample at which a restored pre-UI proof lapses (A3, fix
-  // 1), zero when none does: its reconfirm clock runs from a testable sample
-  // (the layer offered without coverage while the presented frame's evidence
-  // is valid and visible) to the next sample that is not, and the proof
-  // lapses at the testable sample by which the clock has run
-  // alpha_trust_reconfirm_ms. The stream must not re-earn it.
+  // 1), zero when none does: its reconfirm clock counts the gaps between
+  // consecutive testable samples (the layer offered without coverage while
+  // the presented frame's evidence is valid and visible), each capped at
+  // alpha_trust_reconfirm_gap_ms, and the proof lapses at the testable sample
+  // by which it has counted alpha_trust_reconfirm_ms. The stream must not
+  // re-earn it.
   std::uint64_t pre_ui_lapse_tick(const sequence &s, std::uint64_t from) {
-    std::uint64_t elapsed = 0, running = 0;
+    std::uint64_t counted = 0, last = 0;
     for (const auto &sample : s.samples) {
       if (sample.sample_tick_ms < from) {
         continue;
@@ -3612,12 +3614,13 @@ namespace {
       const auto &e = sample.evidence;
       const bool testable = (e.candidates & candidate::layer) && !e.layer_covered && measured(sample) && e.scene.valid && e.scene.verdict == scene_verdict::visible;
       if (!testable) {
-        elapsed += running ? sample.sample_tick_ms - running : 0;
-        running = 0;
         continue;
       }
-      running = running ? running : sample.sample_tick_ms;
-      if (elapsed + (sample.sample_tick_ms - running) >= alpha_trust_reconfirm_ms) {
+      if (last && sample.sample_tick_ms > last) {
+        counted += std::min(sample.sample_tick_ms - last, alpha_trust_reconfirm_gap_ms);
+      }
+      last = sample.sample_tick_ms;
+      if (counted >= alpha_trust_reconfirm_ms) {
         return sample.sample_tick_ms;
       }
     }
