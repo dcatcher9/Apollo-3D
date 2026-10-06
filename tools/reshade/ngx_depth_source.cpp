@@ -73,7 +73,8 @@ namespace sunshine_ngx {
       calibration_observation observation;
     };
     // Diagnostics must not introduce exclusive feature-lock ownership: capture
-    // completion uses a shared try-lock and would mistake contention for loss.
+    // completion blocks on a shared acquisition (after_evaluate) on the
+    // game's evaluating thread, which only bounded POD sections may delay.
     SRWLOCK calibration_lock = SRWLOCK_INIT;
     std::array<calibration_slot, max_features> calibration_slots;
     struct capture_rejection {
@@ -587,7 +588,12 @@ namespace sunshine_ngx {
         value.capture_suppressed_by_depth_owner);
     if (!value.observed) return;
     bool current = false;
-    if (value.epoch == active_epoch.load(std::memory_order_acquire) && TryAcquireSRWLockShared(&feature_lock)) {
+    // Blocking: a try-lock would fail under another thread's evaluation
+    // commit (or a queued exclusive waiter) and finish a good capture as
+    // failed, revoking the completed-snapshot fallback. Every exclusive
+    // section is bounded POD work, and before_evaluate already blocks on one.
+    if (value.epoch == active_epoch.load(std::memory_order_acquire)) {
+      AcquireSRWLockShared(&feature_lock);
       for (const auto &entry : features) {
         if (entry.handle && entry.generation == value.source_id && entry.parameters.epoch == value.epoch) {
           current = true;
