@@ -41,32 +41,26 @@
 //
 // Queue order: each live copy remembers the queue that executed the list
 // carrying it. A copy that ran on the presenting queue alone is ordered by
-// queue order before the Present's reads. On D3D12 one that ran on one other
-// queue is ordered by a fence of the add-on: right after the native
+// queue order before the Present's reads. The presenting queue never waits
+// for a copy on the GPU: on D3D12 one that ran on one other queue is ordered
+// by a fence of the add-on that only the CPU reads. Right after the native
 // ExecuteCommandLists that carried it returns, the add-on's submission hook
 // (native_observer, observed_submission) signals that queue's fence, and the
-// presenting queue waits for that value (a GPU wait, never a CPU one) before
-// the renderer reads the copy, unless the fence already passed it
-// (order_read). ReShade reports the execution before the native call, so
-// such a copy stays pending (never offered) until that signal is recorded: a
-// Present in between reads the previous copy, never one whose write is not
-// yet submitted. Stellar Blade's and The Witcher 3's copies ran on another
-// queue than the presenting one in their dumps (both load Streamline), so
-// refusing such copies would remove their layer protection. The game's queue
-// may legally wait for presenting-queue work queued after that wait, which
-// would close a cycle no GPU wait can leave. The presenting queue therefore
-// signals a marker fence of its own just before and just after each such
-// wait, so a watchdog knows whether it is blocked there; one blocked for
-// rescue_after_ms while the copy's fence made no progress is released by
-// signalling the fence from the CPU, and that queue's copies are read
-// unordered from then on. The game queue's own signals still queued can move
-// a released fence back below a later wait, so the watchdog keeps releasing
-// such a wait until the presenting queue passed every wait it queued. A copy
-// no fence orders (its submission unobserved, its fence not created or
-// signalled, run on two queues, or its queue revoked) is still offered and
-// copied into the renderer's slot unordered, as before the fence, logged once
-// per reason. D3D11 runs every copy on its immediate context, the presenting
-// queue, so it never needs a fence.
+// copy is offered only once the CPU sees the fence reach that value
+// (GetCompletedValue, no wait: fence_pending); until then the copy offered
+// before it stays offered (the layer is a one-frame-late input by design,
+// E2). ReShade reports the execution before the native call, so such a copy
+// stays pending (never offered) until that signal is recorded, too. Stellar
+// Blade's and The Witcher 3's copies ran on another queue than the presenting
+// one in their dumps (both load Streamline), so refusing such copies would
+// remove their layer protection. A GPU wait of the presenting queue for that
+// fence (10-05) froze Stellar Blade with frame generation for a second: the
+// game's queue may be paced by, or wait for, presenting-queue work queued
+// after such a wait. A copy no fence orders (its submission unobserved, its
+// fence not created or signalled, or run on two queues) is still offered at
+// once and copied into the renderer's slot unordered, as before the fence,
+// logged once per reason. D3D11 runs every copy on its immediate context, the
+// presenting queue, so it never needs a fence.
 // Copies are allocated outside the tracker's lock and destroyed outside it
 // through a device alive meanwhile (presenting, recording or being
 // destroyed); a retired copy of another device is destroyed under it.
@@ -112,8 +106,12 @@ namespace sunshine_game3d::ui_layer {
     // so the copy holds the frame that previous Present showed; 2 when an
     // interval passed without one; 0 within the copy's own interval or
     // without a copy.
-    std::uint32_t presents_since_copy() const {
-      return copied_ && frame_ - copy_frame_ <= 0xffffffffu ? static_cast<std::uint32_t>(frame_ - copy_frame_) : 0u;
+    std::uint32_t presents_since_copy() const { return copied_ ? presents_since(copy_frame_) : 0u; }
+    // The same count for a copy recorded when frame() read frame (an older
+    // copy still offered while a newer one is held).
+    std::uint64_t frame() const { return frame_; }
+    std::uint32_t presents_since(std::uint64_t frame) const {
+      return frame <= frame_ && frame_ - frame <= 0xffffffffu ? static_cast<std::uint32_t>(frame_ - frame) : 0u;
     }
     void reset() { *this = {}; }
   private:
@@ -150,16 +148,14 @@ namespace sunshine_game3d::ui_layer {
     !presented_in_order(6, 5) && !presented_in_order(mixed_queue, 5) && !presented_in_order(0, 0) &&
     !presented_in_order(5, 0));
 
-  // How the presenting queue's reads of a live copy are ordered after it
-  // (pure). queue: it ran on the presenting queue alone. fence_passed: it ran
-  // on another queue and that queue's fence already passed the value
-  // signalled after it (a removed device reads UINT64_MAX, which passes).
-  // fence_wait: the presenting queue waits for that value first. unordered:
-  // no value was signalled after it, or its queue's ordering was revoked.
-  enum class read_order : std::uint32_t { queue, fence_passed, fence_wait, unordered };
-  constexpr read_order order_for(bool same_queue, std::uint64_t signalled, std::uint64_t completed, bool revoked) {
-    return same_queue ? read_order::queue : !signalled || revoked ? read_order::unordered :
-      completed >= signalled ? read_order::fence_passed : read_order::fence_wait;
+  // How the presenting queue's reads of an offered live copy are ordered
+  // after it (pure). queue: it ran on the presenting queue alone.
+  // fence_passed: it ran on another queue and the CPU saw that queue's fence
+  // reach the value signalled after it before offering it (fence_pending).
+  // unordered: no value was signalled after it.
+  enum class read_order : std::uint32_t { queue, fence_passed, unordered };
+  constexpr read_order order_for(bool same_queue, std::uint64_t signalled) {
+    return same_queue ? read_order::queue : signalled ? read_order::fence_passed : read_order::unordered;
   }
   const char *name(read_order value);
   // A copy run on another queue owes a fence signal after its submission
@@ -177,50 +173,19 @@ namespace sunshine_game3d::ui_layer {
   // submission is not observed (pure).
   inline constexpr std::uint64_t listener_window_ms = 1000;
   constexpr bool held_for_signal(bool owes, bool listening) { return owes && listening; }
-  // The watchdog (pure). The presenting queue signals its marker to reached
-  // just before its wait for value on a queue fence and to reached + 1 just
-  // after it, so marker == reached means it is at the wait and marker >
-  // reached that it passed it (a removed device reads UINT64_MAX: passed). It
-  // is stalled once it is at the wait, the fence has not reached value, and
-  // the fence made no progress since progress_ms (stamped when it was first
-  // seen at the wait) for rescue_after_ms. The watchdog looks every
-  // watchdog_period_ms while a wait is not passed.
-  inline constexpr std::uint64_t rescue_after_ms = 1000;
-  inline constexpr std::uint64_t watchdog_period_ms = 100;
-  constexpr bool stalled(std::uint64_t completed, std::uint64_t waited, std::uint64_t progress_ms, std::uint64_t now_ms) {
-    return completed < waited && now_ms >= progress_ms && now_ms - progress_ms >= rescue_after_ms;
+  // A copy whose fence signal is recorded stays held (pending) while the CPU
+  // sees its queue's fence below that value (completed: GetCompletedValue,
+  // never a wait; a removed device reads UINT64_MAX, which reaches it). Once
+  // it reached it, the copy is offered unless a newer copy is (pure).
+  constexpr bool fence_pending(std::uint64_t signalled, std::uint64_t completed) {
+    return signalled && completed < signalled;
   }
-  // What the watchdog does about one wait. done: the presenting queue passed
-  // it. waiting: it has not reached it (whatever the fence's age: the game's
-  // queue may wait for earlier presenting-queue work, which is no cycle), or
-  // the fence reached its value, or it is blocked for less than
-  // rescue_after_ms. rescue: blocked and stalled; the fence is released from
-  // the CPU and its queue revoked. release: blocked at a revoked fence that
-  // the game queue's own earlier signal moved back below the wait; released
-  // again at once.
-  enum class watch_action : std::uint32_t { done, waiting, rescue, release };
-  constexpr watch_action watch(std::uint64_t marker, std::uint64_t reached, std::uint64_t completed, std::uint64_t value,
-      bool revoked, std::uint64_t progress_ms, std::uint64_t now_ms) {
-    return marker > reached ? watch_action::done :
-      marker < reached || completed >= value ? watch_action::waiting :
-      revoked ? watch_action::release :
-      stalled(completed, value, progress_ms, now_ms) ? watch_action::rescue : watch_action::waiting;
-  }
-  static_assert(order_for(true, 0, 0, true) == read_order::queue && order_for(false, 0, 0, false) == read_order::unordered &&
-    order_for(false, 3, 3, false) == read_order::fence_passed && order_for(false, 3, 2, false) == read_order::fence_wait &&
-    order_for(false, 3, 2, true) == read_order::unordered && order_for(false, 3, UINT64_MAX, false) == read_order::fence_passed &&
+  static_assert(order_for(true, 0) == read_order::queue && order_for(true, 3) == read_order::queue &&
+    order_for(false, 0) == read_order::unordered && order_for(false, 3) == read_order::fence_passed &&
     owes_signal(true, 6, 5) && !owes_signal(false, 6, 5) && !owes_signal(true, 5, 5) && !owes_signal(true, mixed_queue, 5) &&
-    !owes_signal(true, 0, 5) && owes_signal(true, 6, 0) && !stalled(5, 5, 0, 5000) && !stalled(4, 5, 1000, 1999) &&
-    stalled(4, 5, 1000, 2000) && !stalled(4, 5, 3000, 2000) && held_for_signal(true, true) && !held_for_signal(true, false) &&
-    !held_for_signal(false, true));
-  // Not reached is never a stall, whatever the fence's age; passed (or a
-  // removed device) is done; a revoked fence below a reached wait is
-  // released again at once.
-  static_assert(watch(6, 7, 0, 9, false, 0, 100000) == watch_action::waiting &&
-    watch(6, 7, 0, 9, true, 0, 100000) == watch_action::waiting && watch(8, 7, 0, 9, false, 0, 100000) == watch_action::done &&
-    watch(UINT64_MAX, 7, 0, 9, false, 0, 100000) == watch_action::done && watch(7, 7, 9, 9, false, 0, 100000) == watch_action::waiting &&
-    watch(7, 7, 8, 9, false, 1000, 1999) == watch_action::waiting && watch(7, 7, 8, 9, false, 1000, 2000) == watch_action::rescue &&
-    watch(7, 7, 8, 9, true, 1000, 1000) == watch_action::release && watch(7, 7, 9, 9, true, 0, 100000) == watch_action::waiting);
+    !owes_signal(true, 0, 5) && owes_signal(true, 6, 0) && held_for_signal(true, true) && !held_for_signal(true, false) &&
+    !held_for_signal(false, true) && fence_pending(3, 2) && !fence_pending(3, 3) && !fence_pending(3, 4) &&
+    !fence_pending(3, UINT64_MAX) && !fence_pending(0, 0));
 
   // Live copies: a ring of add-on owned copies (ring_capacity at most; three
   // normally suffice). A before-clear copy goes to an entry other than the
@@ -230,8 +195,9 @@ namespace sunshine_game3d::ui_layer {
   // and whose own copy is not pending; with every entry busy the ring grows,
   // and once full that copy is skipped and logged (saturated). A recorded copy
   // is pending, never offered, until a list carrying it executes (and, when it
-  // owes a fence signal, until that signal is recorded: held_for_signal); the
-  // offered entry is the newest such copy. Pure: no GPU or runtime calls.
+  // owes a fence signal, until that signal is recorded and the CPU saw the
+  // fence reach it: held_for_signal, fence_pending); the offered entry is the
+  // newest such copy. Pure: no GPU or runtime calls.
   inline constexpr unsigned ring_capacity = 4;
   struct ring_choice {
     int index = -1;        // The entry to write; -1 when saturated.
@@ -258,52 +224,36 @@ namespace sunshine_game3d::ui_layer {
     api::resource copy{};       // Add-on owned, shader_resource state between uses.
     // The copy's shader view, for direct binding; direct when it exists and
     // queue or fence order puts the copy before this Present's reads
-    // (in_order: order is not unordered, once order_read agrees).
+    // (in_order: order is not unordered).
     api::resource_view view{};
     bool in_order{}, direct{};
     read_order order{read_order::unordered};
-    // fence_wait: the presenting queue waits for wait_value on wait_fence
-    // (order_read) before any read.
-    api::fence wait_fence{};
-    std::uint64_t wait_value{};
     // The fence value signalled after the copy on another queue (0: none).
     std::uint64_t fence_value{};
     std::uint64_t capture_id{}; // The offered entry's copy id; never zero when valid.
     std::uint64_t tick{};       // GetTickCount64 when the newest copy was recorded.
     std::uint32_t format{};     // Typed format of the copy.
-    // Presents observed since the copy (layer_tracker::presents_since_copy):
-    // the copy holds the frame of the Present that many back.
+    // Presents observed since the offered copy (layer_tracker::
+    // presents_since): the copy holds the frame of the Present that many back.
     std::uint32_t presents_since_copy{};
     // The native queue that executed the copy (mixed_queue: more than one).
     std::uint64_t executed_queue{};
   };
   // The active layer's offered copy on this device (the newest executed one
-  // that owes no fence signal), while its newest copy was recorded less than
+  // that owes no fence signal and whose fence, if any, the CPU saw reach it;
+  // it never waits), while its newest copy was recorded less than
   // max_clear_gap_ms ago. The first copy offered from another queue than the
   // presenting one with a fence, and the first without one for each reason,
   // are logged. Each call also asks for the next copies: the layer is tracked
   // and copied only while UI detection keeps asking.
   bool latest(api::device *device, std::uint64_t now_ms, live_capture &out);
-  // Orders this Present's reads of a live copy on the presenting queue, before
-  // any is recorded: for fence_wait it queues the GPU wait (queue->wait)
-  // between two signals of the presenting queue's marker fence (created on
-  // first use, one per device and presenting queue) and arms the watchdog.
-  // False when the read is unordered (no fence orders it, its queue was
-  // revoked meanwhile, or the marker, the watchdog or the wait could not be
-  // had, logged once): the copy is then copied into the renderer's slot, not
-  // bound directly, as before the fence. The caller flushes ReShade's
-  // immediate list first when it wants recorded GPU timestamps to include the
-  // wait (the Diagnostics switch); the wait itself never flushes it.
-  bool order_read(api::command_queue *queue, const live_capture &capture);
-  // GPU waits order_read queued since the last call (the timing line's
-  // layer_fence_waits).
-  std::uint64_t take_wait_count();
   // The native observer's submission listener (native_observer::
   // set_submission_listener): after a native submission that ran a list
   // whose live copy owes its fence signal, signals that queue's fence (created
-  // on first use, one per device and queue), records the value with the copy
-  // and offers it. Submissions of lists owing nothing return before any lock;
-  // each call only stamps that the listener is heard.
+  // on first use, one per device and queue) and records the value with the
+  // copy, which latest() offers once the CPU sees the fence reach it.
+  // Submissions of lists owing nothing return before any lock; each call only
+  // stamps that the listener is heard.
   void observed_submission(std::uint64_t queue, unsigned count,
     const sunshine_streamline::native_observer::command_identity *commands) noexcept;
 
@@ -316,23 +266,20 @@ namespace sunshine_game3d::ui_layer {
     const char *status = "observed";
   };
 
-  // Test add-on only (SunshineUILayerTestLive): the live copy's queue facts.
-  // capture_id is the newest recorded copy's and offered_id the offered
-  // copy's; executed_queue the queue that ran the offered copy (mixed_queue:
-  // several); in_order whether queue or fence order puts that copy before the
-  // Present's reads, order how (read_order) and fence_value the value
-  // signalled after it (0: none); revoked whether its queue's ordering was
-  // revoked; owing the copies held pending for their fence signal. waits,
-  // rescues and releases count the process's queued GPU waits, watchdog
-  // rescues and its later releases of a revoked fence moved back below a
-  // wait.
+  // Test add-on only (SunshineUILayerTestLive): the live copy's queue facts,
+  // as the last latest() or layer clear left them (the query itself never
+  // offers a held copy). capture_id is the newest recorded copy's
+  // and offered_id the offered copy's; executed_queue the queue that ran the
+  // offered copy (mixed_queue: several); in_order whether queue or fence
+  // order puts that copy before the Present's reads, order how (read_order)
+  // and fence_value the value signalled after it (0: none); owing the copies
+  // held for their fence signal, and awaiting those whose signal is recorded
+  // but whose fence the CPU has not seen reach it.
   struct test_live_state {
     std::uint64_t capture_id{}, executed_queue{}, presenting_queue{};
     std::uint32_t presents_since_copy{}, in_order{};
-    std::uint64_t fence_value{}, waits{}, rescues{};
-    std::uint32_t order{}, revoked{};
-    std::uint64_t offered_id{}, releases{};
-    std::uint32_t owing{};
+    std::uint64_t fence_value{}, offered_id{};
+    std::uint32_t order{}, owing{}, awaiting{};
   };
 
   // A renderer submission read the live copy capture_id (a direct binding or
@@ -341,12 +288,6 @@ namespace sunshine_game3d::ui_layer {
   void bound(api::device *device, std::uint64_t capture_id, api::fence fence, std::uint64_t value);
 
   void register_events();
-  // Also releases every outstanding cross-queue wait from the CPU, revokes its
-  // queue and stops the watchdog, then keeps releasing waits that a game
-  // queue's own earlier signal moves back below, until the presenting queue
-  // passed every wait the add-on queued (at most unload_drain_ms), so no wait
-  // of the add-on outlives it.
-  inline constexpr std::uint64_t unload_drain_ms = 250;
   void unregister_events();
   // Every Present of the foreground swapchain only: output size, back buffers
   // (cached until the swapchain, its size or buffer count, or its first

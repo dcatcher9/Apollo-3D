@@ -160,11 +160,7 @@ shaders. Both are zero on frames nothing consumed. `gpu_profile` says whether th
 queries started (`no_timestamp_frequency` and `no_query_heap` name a failed start), and frames
 that did not count are split into `dropped_fence_pending` (the slot was reused before the frame's
 completion fence passed), `dropped_unresolved` (the fence passed but the results were not
-readable) and `incomplete` (render or conditioning marks missing). `layer_fence_waits` counts the
-GPU waits the presenting queue queued in the window for an offscreen UI layer copy run on another
-queue (a re-offered copy that reuses an outstanding wait queues none and counts none); with the
-Diagnostics switch on their time is in `inputs` (see the layer cross-queue fence
-under [Diagnostics switch and per-Present cost](#diagnostics-switch-and-per-present-cost)). Where the device can copy query
+readable) and `incomplete` (render or conditioning marks missing). Where the device can copy query
 results (D3D12), the renderer resolves each timestamp into its own readback buffer on the command
 list that recorded it, so its completion fence alone decides readiness. ReShade 6.8 reads D3D12
 results through `ID3D12Device15::ResolveQueryData` whenever the game's D3D12 runtime offers it
@@ -260,9 +256,7 @@ always run. Decisions, masks, candidate binding and exported pixels
 are the same with the switch on or off. The capture owner's queue watch, the layer's carrier
 events and its submission listener stay registered either way, since direct binding reads them,
 the layer's live-copy ring offers a copy only once a list carrying it executed, and its
-cross-queue fence is signalled after that submission. With the switch on, a Present that waits for
-a cross-queue layer copy first submits ReShade's immediate list (one extra submission on such
-frames) so its GPU timing includes the wait. The switch's own cost was not measured separately: Verify
+cross-queue fence is signalled after that submission. The switch's own cost was not measured separately: Verify
 found no renderer-level GPU difference with it on or off. Before selection revision 9 the switch
 also gated S3's frame-identity shadow (its clocks, stamps, proposals and log lines) and H2's own
 evidence passes, both removed, and with it on candidates were copied rather than bound directly.
@@ -336,7 +330,8 @@ every entry busy the ring grows, and a full ring skips that copy and logs once. 
 allocation failed is taken last, so it is allocated again only when no entry with a copy is free,
 as a growth would be, and the ring keeps rotating its existing copies meanwhile. A recorded copy is
 pending until a list carrying it executes (and, when it owes the layer cross-queue fence a signal,
-until that signal is recorded); only then is it offered, so detection reads the newest such copy as
+until that signal is recorded and the CPU saw the fence reach it); only then is it offered, so
+detection reads the newest such copy as
 the single live texture did. A carrying list reset unexecuted returns the entry
 (never offered), and a copy pending for 2 s is abandoned. Each entry keeps the queue that
 executed its carrying list (one executed on two queues has none). A copy that ran on the
@@ -355,77 +350,62 @@ The pixels detection reads are the same either way. The log
 names the first direct read of each kind once (`Sunshine UI input: reading ... directly (no copy)`).
 
 **Layer cross-queue fence.** On D3D12 a copy whose carrying list ran on one other queue is ordered
-by a fence of the add-on (`ui_layer::read_order`). ReShade reports an execution before the native
+by a fence of the add-on that only the CPU reads (`ui_layer::read_order`); the presenting queue
+never waits for a layer copy. ReShade reports an execution before the native
 `ExecuteCommandLists`, so the execution only marks the copy as owing a signal to that native
 list; the add-on's own submission hook (the capture owner's native observer, which already
 watches every queue's `ExecuteCommandLists`, through `native_observer::set_submission_listener`)
 then signals that queue's fence right after the native call returns, so the value follows the
 copy in that queue's order, and records the value with the ring entry. Until that value is
-recorded the entry stays pending (`ui_layer::held_for_signal`): it is neither offered nor
-rewritten, and a Present on another thread in that window keeps reading the previous copy, never
-one whose write is not yet submitted (offering it at the execution event let a concurrent Present
-copy it unordered while the game's queue wrote it). The recorded signal offers the entry unless a
-newer copy is offered already. A submission the hook never reports cannot hold a copy forever: a
-reset of its list offers it unordered (logged as not observed), a copy held for 2 s is abandoned
-like an unexecuted one, and while the hook was not heard in the last second (the capture owner's
-observer inactive) an execution offers its copy at once, unordered. The fence is created on first
-use, one per device and queue (at most four), from the queue's own device. Before the renderer
-reads or copies the entry, the presenting queue waits for that value on the GPU
-(`ui_layer::order_read`, `command_queue::wait`; never a CPU wait), unless the fence already passed
-it (`fence_passed`, also what a removed device's `UINT64_MAX` reads); a fenced copy is bound
-directly like a same-queue one. A copy re-offered on later Presents (every Present of a real frame
-under frame generation) reuses the presenting queue's wait that is still outstanding on the same
-fence for at least its value: that wait already orders every later read on the queue, so no
-marker signal, wait, watchdog record or count is added (until the 10-05 review each generated
-Present queued another, and at 4x the eight watchdog records could run out and leave a read
-unordered). The wait goes onto the queue at once, ahead of ReShade's
-immediate list; with the Diagnostics switch on that list is flushed first, so the renderer's begin
-timestamp precedes the wait and the timing line's `inputs` and `total` GPU stages include it, and
-the timing line's `layer_fence_waits` counts the waits queued in its window (measured: a 1.1 s
-cyclic wait showed as `inputs` max 1194 ms with `layer_fence_waits=4` in the provider fixture).
+recorded the entry stays pending (`ui_layer::held_for_signal`), and after it until the CPU sees
+the fence reach it (`ui_layer::fence_pending`: `GetCompletedValue`, never a wait), checked
+whenever a Present asks for the layer (`ui_layer::latest`) and before a clear picks a ring entry.
+A pending entry is neither offered nor rewritten, and the copy offered before it stays offered, so
+a Present never reads a copy whose write is not yet submitted or may still run (offering it at the
+execution event let a concurrent Present copy it unordered while the game's queue wrote it). The
+layer is a one-frame-late input by design (E2); a cross-queue copy is offered a frame or more later
+still while its queue runs behind the CPU, and the dumps' `presents_since_copy` counts the offered
+copy's own Presents. Once the fence reached the value the entry is offered unless a newer copy is
+offered already, in fence order (`fence_passed`: it completed before anything the Present submits)
+and bound directly like a same-queue one. Only the copy's own queue signals its fence, in
+increasing values, and nothing signals it from the CPU, so a reached value stays reached (a removed
+device reads `UINT64_MAX`, which reaches it). A reset of the carrying list after its submission
+(legal while its work runs) keeps the entry held for its fence. A submission the hook never reports
+cannot hold a copy forever: a reset of its list before the signal offers it unordered (logged as
+not observed), a copy held for its signal for 2 s is abandoned like an unexecuted one (one whose
+signal is recorded is never abandoned, since its queue may still write it), and while the hook was
+not heard in the last second (the capture owner's observer inactive) an execution offers its copy
+at once, unordered. The fence is created on first use, one per device and queue (at most four),
+from the queue's own device; a record is reused only once no live copy names it and its last
+signal ran.
 
-It is the only GPU dependency the add-on adds from the presenting queue onto a game queue, and it
-is bounded: the game's queue may legally wait for presenting-queue work queued after the add-on's
-wait (a wait before its signal is legal D3D12), which would close a cycle no GPU wait can leave.
-The presenting queue therefore signals a marker fence of its own (one per device and presenting
-queue, created on first use) just before each wait and again just after it, so a watchdog (a
-thread-pool timer armed only while a wait is not passed, looking every 100 ms) knows whether that
-queue is blocked at the wait (`ui_layer::watch`). A wait the presenting queue has not reached is
-never a stall, however long the fence made no progress: the game's queue may wait for
-presenting-queue work queued before the add-on's wait, such as a loading hitch, which is no cycle,
-and before the marker the watchdog revoked such a queue for the device's life. A wait the
-presenting queue has been blocked at for `ui_layer::rescue_after_ms` (1 s) while the fence made no
-progress is released by signalling the fence from the CPU; that queue is revoked for the device's
-life (no new signal or wait; its copies are read unordered from then on) and it logs once
-(`Sunshine UI layer: the presenting queue was blocked at its wait for a layer copy on queue ...`).
-The game queue's own signals still queued behind the cycle can move a released fence back below a
-later wait (D3D12 fences follow the last signal). Where the scheduler evaluates a wait only when
-the queue reaches it, that wait would close the cycle again; the watchdog therefore keeps watching
-every wait until the presenting queue passed it and releases a revoked fence again at once when
-the presenting queue is blocked below it (logged once). On the development machine (NVIDIA,
-hardware scheduling on) a queued wait is satisfied by the release itself even when the queue's own
-lower signal moves the fence back afterwards (measured with a standalone probe; a wait queued after
-such a move does block), so there the provider fixture's two cyclic waits both complete after the
-one release. Device destruction releases outstanding waits the same way; teardown also revokes,
-then keeps releasing moved-back fences until the presenting queue passed every wait, for at most
-`ui_layer::unload_drain_ms` (250 ms), so no wait outlives the add-on or its fence.
-A wait holds the presenting queue only until the copy's own submission ran; a game that presents
-the frame that carries the copy already orders its Present after it, so the wait costs nothing
-there, while a copy from work the game submitted for a later frame makes the Present wait for
-that work (watch frame pacing with frame generation through `layer_fence_waits` and the `inputs`
-stage with the Diagnostics switch on). Where no fence orders a copy (its submission
-not observed, the fence not created or not signalled, a copy run on two queues, a revoked queue, or
-the marker, a free wait record (eight), the watchdog or the wait not had), the copy is still offered
-and copied into the renderer's
+From 10-05 to 10-06 (5b83f8a5, fcb47ad0, 19fa56a6) the presenting queue instead waited on the GPU
+for that value before reading the copy, bracketed by marker signals of its own, with a 1 s CPU
+watchdog that released a stalled wait from the CPU and revoked the queue. Live in Stellar Blade
+with frame generation on (10-06 13:45:44) the presenting queue was blocked at that wait for 1078 ms
+with no fence progress and the game froze for a second: the copy's queue may be paced by, or wait
+for, presenting-queue work queued after the Present, so any GPU wait of the game's queue for
+evidence can close a cycle. The wait, its reuse for re-offered copies, the marker fences, the
+watchdog, the queue revocation, the teardown drain and the timing line's `layer_fence_waits` were
+removed. The D3D12 provider fixture (`reshade_game3d_native_provider_runtime_test` with the
+frame-generation interposer) reproduces that schedule, each frame's copy run on a second queue
+behind a signal the presenting queue queues after its Present and the next frame waiting for the
+previous copy: two frames now complete in 16 ms, where the wait closed them into a cycle that only
+the 1 s rescue left. A Present while the second queue is gated for up to 1 s reads the previous
+copy without waiting (the whole Present step measured 0 ms at the tick counter's resolution), and
+the gated copy is offered in fence order once its fence reached it.
+
+Where no fence orders a copy (its submission not observed, the fence not created or not signalled,
+or a copy run on two queues), the copy is still offered at once and copied into the renderer's
 slot unordered, as before the fence; each reason logs once (`Sunshine UI layer: the live layer copy
 executed on queue ..., not on the presenting queue ..., and no fence orders it (...)`), and the
-first fenced copy logs `... the presenting queue's reads wait for the fence value signalled after
-it`. Dumps record the layer's `read_order` (`queue`, `fence_passed`, `fence_wait` or `unordered`)
-and `fence_value` beside `executed_queue` and `presenting_queue_order` (queue order only). Refusing
-cross-queue copies was considered and rejected: the Stellar Blade (SDR, FG off) and The Witcher 3
-(FG on) dumps of 10-04 both record their layer copies as run on another queue than the presenting
-one, so a refusal would remove their layer protection; before this fence such a copy was read with
-no ordering at all (a torn or next-frame mask, both queues touching the texture).
+first fenced copy logs `... such a copy is offered once the CPU sees the fence value signalled after
+it reached, never waited for`. Dumps record the layer's `read_order` (`queue`, `fence_passed` or
+`unordered`) and `fence_value` beside `executed_queue` and `presenting_queue_order` (queue order
+only). Refusing cross-queue copies was considered and rejected: the Stellar Blade (SDR, FG off) and
+The Witcher 3 (FG on) dumps of 10-04 both record their layer copies as run on another queue than
+the presenting one, so a refusal would remove their layer protection; before this fence such a copy
+was read with no ordering at all (a torn or next-frame mask, both queues touching the texture).
 
 **Colour toggles and the overlay.** The renderer keeps the working set of the previous colour
 transfer or extent (one cached entry) and makes it current again on a toggle back, without a wait
@@ -3195,8 +3175,9 @@ immutable copy is still in flight, source metadata remains selected but its pixe
 until its private producer fence completes. The add-on never inserts a foreign-queue Wait for a
 depth capture: the producer can already depend on future consumer work, so a reverse wait could
 deadlock the game. Flushing an immediate command list cannot prove that the application's queue
-graph is acyclic. (The offscreen UI layer's copy is the one exception, a wait its watchdog
-releases from the CPU when that cycle occurs; see the layer cross-queue fence under
+graph is acyclic. (The offscreen UI layer's cross-queue copy follows the same rule since 10-06: it
+is offered only once the CPU sees its own fence completed, after a GPU wait for it froze a game; see
+the layer cross-queue fence under
 [Diagnostics switch and per-Present cost](#diagnostics-switch-and-per-present-cost).)
 A failed ordering check declines the copy before any read is recorded. There is no CPU depth-fence
 wait or pending-copy flush. Device removal is not completion, and actual GPU

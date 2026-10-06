@@ -1049,7 +1049,7 @@ namespace {
         if (proof.renderer) proof.renderer->take_gpu_timing(gpu);
         using stage = sunshine_game3d::gpu_timing;
         std::snprintf(message, sizeof(message),
-          "Sunshine Game 3D timing: presents=%llu cpu_ms={mean=%.3f max=%.3f} cpu_worst_ms={setup=%.3f depth=%.3f ui=%.3f render=%.3f export=%.3f} gpu_frames=%u gpu_ms mean/max={total=%.3f/%.3f inputs=%.3f/%.3f source=%.3f/%.3f detection=%.3f/%.3f linearize=%.3f/%.3f candidate=%.3f/%.3f vertical=%.3f/%.3f horizontal=%.3f/%.3f eyes=%.3f/%.3f pack=%.3f/%.3f} gpu_profile=%s dropped_fence_pending=%u dropped_unresolved=%u incomplete=%u layer_fence_waits=%llu",
+          "Sunshine Game 3D timing: presents=%llu cpu_ms={mean=%.3f max=%.3f} cpu_worst_ms={setup=%.3f depth=%.3f ui=%.3f render=%.3f export=%.3f} gpu_frames=%u gpu_ms mean/max={total=%.3f/%.3f inputs=%.3f/%.3f source=%.3f/%.3f detection=%.3f/%.3f linearize=%.3f/%.3f candidate=%.3f/%.3f vertical=%.3f/%.3f horizontal=%.3f/%.3f eyes=%.3f/%.3f pack=%.3f/%.3f} gpu_profile=%s dropped_fence_pending=%u dropped_unresolved=%u incomplete=%u",
           static_cast<unsigned long long>(timing.presents), timing.cpu_sum_ms / double(timing.presents), timing.cpu_max_ms,
           timing.worst[0], timing.worst[1], timing.worst[2], timing.worst[3], timing.worst[4], gpu.frames,
           gpu.mean_ms[stage::total], gpu.max_ms[stage::total], gpu.mean_ms[stage::inputs], gpu.max_ms[stage::inputs],
@@ -1057,8 +1057,7 @@ namespace {
           gpu.mean_ms[stage::linearize], gpu.max_ms[stage::linearize], gpu.mean_ms[stage::candidate], gpu.max_ms[stage::candidate],
           gpu.mean_ms[stage::vertical], gpu.max_ms[stage::vertical], gpu.mean_ms[stage::horizontal], gpu.max_ms[stage::horizontal],
           gpu.mean_ms[stage::eyes], gpu.max_ms[stage::eyes], gpu.mean_ms[stage::pack], gpu.max_ms[stage::pack],
-          sunshine_game3d::name(gpu.state), gpu.dropped_fence_pending, gpu.dropped_unresolved, gpu.incomplete,
-          static_cast<unsigned long long>(sunshine_game3d::ui_layer::take_wait_count()));
+          sunshine_game3d::name(gpu.state), gpu.dropped_fence_pending, gpu.dropped_unresolved, gpu.incomplete);
         timing = {};
         timing.next_log = now + 10000;
       }
