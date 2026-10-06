@@ -260,7 +260,7 @@ PARALLAX_V2_PRODUCER_GROUP = ClosureGroup(
         HOST_SBS_SUBTITLE_LOCATOR_RESOLVE,
         HOST_SBS_SUBTITLE_CONDITION,
     ),
-    source_closure_sha256="0055fbdfe68e6f34de0f7ebee9bb749207fc93d6e5855008a332232bf2f982e6",
+    source_closure_sha256="25eda2f214c67a3a2eb1fb75428c8d2ee4405c0bdaae720ea1b0994d409e7964",
 )
 
 PARALLAX_V2_COORDINATE_DIAGNOSTIC_GROUP = ClosureGroup(
@@ -271,7 +271,7 @@ PARALLAX_V2_COORDINATE_DIAGNOSTIC_GROUP = ClosureGroup(
     specs=(
         DEPTH_COORDINATE_V2_COORDINATE_DIAGNOSTIC,
     ),
-    source_closure_sha256="e215e245c5974d8f00a8a5ab655325b0c4a554cd31787f7e09c741df0f635e29",
+    source_closure_sha256="0e99c0896f4fe9a5699adddecae0a0be11c7b9b2d2db6a5de05d38d7cec02784",
 )
 
 NEAR_IDENTICAL_DETECTOR_GROUP = ClosureGroup(

@@ -924,19 +924,19 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             }
 
         self.assertFalse(dump_contract._subtitle_qualified_ocr_core(
-            core(edge - 1, edge + 115), content, roi_bottom))
+            core(edge - 1, edge + 115), content, roi_bottom, field_width=770, field_height=434))
         self.assertTrue(dump_contract._subtitle_qualified_ocr_core(
-            core(edge, edge + 116), content, roi_bottom))
+            core(edge, edge + 116), content, roi_bottom, field_width=770, field_height=434))
         self.assertFalse(dump_contract._subtitle_qualified_ocr_core(
             core(content[2] - edge - 115, content[2] - edge + 1),
-            content, roi_bottom))
+            content, roi_bottom, field_width=770, field_height=434))
         self.assertTrue(dump_contract._subtitle_qualified_ocr_core(
             core(content[2] - edge - 116, content[2] - edge),
-            content, roi_bottom))
+            content, roi_bottom, field_width=770, field_height=434))
         self.assertTrue(dump_contract._subtitle_qualified_ocr_core(
-            core(edge - 1, edge + 115, bottom - 1), content, roi_bottom))
+            core(edge - 1, edge + 115, bottom - 1), content, roi_bottom, field_width=770, field_height=434))
         self.assertTrue(dump_contract._subtitle_qualified_ocr_core(
-            core(0, 700, roi_bottom, "ribbon"), content, roi_bottom))
+            core(0, 700, roi_bottom, "ribbon"), content, roi_bottom, field_width=770, field_height=434))
 
         # Clearance is relative to the authenticated content rectangle, not tensor x=0.
         offset_content = (111, 0, 659, 434)
@@ -946,11 +946,94 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         self.assertFalse(dump_contract._subtitle_qualified_ocr_core(
             core(offset_content[0] + offset_edge - 1,
                  offset_content[0] + offset_edge + 115),
-            offset_content, roi_bottom))
+            offset_content, roi_bottom, field_width=770, field_height=434))
         self.assertTrue(dump_contract._subtitle_qualified_ocr_core(
             core(offset_content[2] - offset_edge - 116,
                  offset_content[2] - offset_edge),
-            offset_content, roi_bottom))
+            offset_content, roi_bottom, field_width=770, field_height=434))
+
+    def test_subtitle_selection_matches_native_convex2x_frame18(self):
+        # Native schema86 witness: only the caption cover was selected. The 81-cell road
+        # core must not join the 104-cell road core on this twice-density locator field.
+        words = [0] * dump_contract.SUBTITLE_OCR_RECORD_WORD_COUNT
+        words[:16] = [3, 944915279, 1, 4, 4, 18, 0, 0, 0,
+                      2560, 1440, 1540, 868, 650, 860, 0]
+        cores = [
+            [301, 710, 405, 743, 1059751278, 0, 1, 0],
+            [609, 707, 690, 737, 1061382055, 0, 1, 0],
+            [1268, 674, 1292, 698, 1055119483, 0, 1, 0],
+            [649, 790, 896, 811, 1065024539, 0, 1, 0],
+        ]
+        covers = [
+            [283, 692, 422, 761, 1059751278, 0, 1, 0],
+            [593, 691, 706, 753, 1061382055, 0, 1, 0],
+            [1260, 666, 1300, 706, 1055119483, 0, 1, 0],
+            [636, 777, 908, 823, 1065024539, 0, 1, 0],
+        ]
+        for offset, boxes in (
+                (dump_contract.SUBTITLE_OCR_RAW_BOX_WORD_OFFSET, cores),
+                (dump_contract.SUBTITLE_OCR_FINAL_BOX_WORD_OFFSET, covers)):
+            for index, box in enumerate(boxes):
+                words[offset + index * 8:offset + (index + 1) * 8] = box
+        ocr = dump_contract.validate_subtitle_ocr_record(
+            self._pack_uint32_words(words), matched_frame_id=18, analysis_generation=0,
+            source_width=2560, source_height=1440, field_width=1540, field_height=868,
+            roi_top=650, roi_bottom=860)
+        selected = dump_contract._subtitle_selected_ocr_indices(
+            ocr["raw_boxes"], (0, 0, 1540, 868), 860,
+            field_width=1540, field_height=868)
+        self.assertEqual(selected, [3])
+        self.assertEqual([
+            tuple(ocr["final_boxes"][index][key]
+                  for key in ("left", "top", "right", "bottom"))
+            for index in selected], [(636, 777, 908, 823)])
+
+    def test_subtitle_core_minima_follow_full_field_density(self):
+        def qualifies(width, height, field_width, field_height, content=None):
+            core = {"left": 200, "top": 300, "right": 200 + width,
+                    "bottom": 300 + height, "kind": "text"}
+            return dump_contract._subtitle_qualified_ocr_core(
+                core, content or (0, 0, field_width, field_height), field_height - 4,
+                field_width=field_width, field_height=field_height)
+
+        self.assertTrue(qualifies(48, 6, 770, 434))
+        self.assertFalse(qualifies(47, 6, 770, 434))
+        self.assertFalse(qualifies(48, 5, 770, 434))
+        self.assertTrue(qualifies(81, 30, 770, 434))
+        self.assertFalse(qualifies(81, 30, 1540, 868))
+        self.assertTrue(qualifies(96, 12, 1540, 868))
+        self.assertFalse(qualifies(95, 12, 1540, 868))
+        self.assertFalse(qualifies(96, 11, 1540, 868))
+        # The padded content extent is not a calibrated field shape. The authenticated
+        # full field still has scale two, so passing content dimensions would reject all.
+        self.assertTrue(qualifies(96, 12, 1540, 868, (111, 0, 1429, 868)))
+
+    def test_subtitle_scaled_corner_band_uses_roi_bottom_and_content_clearance(self):
+        content = (111, 0, 1429, 868)
+        roi_bottom = 860
+        edge = (content[2] - content[0]) // coordinate.SUBTITLE_OCR.locator_corner_edge_divisor
+
+        def qualifies(clearance, bottom, kind="text"):
+            left = content[0] + clearance
+            core = {"left": left, "top": bottom - 12,
+                    "right": left + 120, "bottom": bottom, "kind": kind}
+            return dump_contract._subtitle_qualified_ocr_core(
+                core, content, roi_bottom, field_width=1540, field_height=868)
+
+        # At 828, bottom + 32 reaches ROI bottom 860 but not content bottom 868.
+        self.assertFalse(qualifies(edge - 1, 828))
+        self.assertTrue(qualifies(edge - 1, 827))
+        self.assertTrue(qualifies(edge, 828))
+        self.assertTrue(qualifies(edge - 1, 828, "ribbon"))
+
+    def test_subtitle_core_rejects_unauthenticated_nonfused_field_shape(self):
+        core = {"left": 200, "top": 300, "right": 320,
+                "bottom": 312, "kind": "text"}
+        content = (0, 0, 1538, 868)
+        self.assertFalse(dump_contract._subtitle_qualified_ocr_core(
+            core, content, 860, field_width=1538, field_height=868))
+        self.assertEqual(dump_contract._subtitle_selected_ocr_indices(
+            [core], content, 860, field_width=1538, field_height=868), [])
 
     @staticmethod
     def _valid_ocr_record_words():

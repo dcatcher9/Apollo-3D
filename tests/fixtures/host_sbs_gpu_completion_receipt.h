@@ -58,13 +58,17 @@ namespace host_sbs_gpu_completion_receipt_fixture {
     };
     const auto grid_x = (expected.width + 15u) / 16u;
     const auto grid_y = (expected.height + 15u) / 16u;
+    const auto limiter_columns = expected.width / v2::limiter_group_lines +
+                                 (expected.width % v2::limiter_group_lines != 0u);
+    const auto limiter_rows = expected.height / v2::limiter_group_lines +
+                              (expected.height % v2::limiter_group_lines != 0u);
     const bool infer = branch == graph::branch_e::infer;
     if (expected.submission_class == receipt::submission_class_e::gpu_undecided) {
       dispatch(16u, infer ? static_cast<std::uint32_t>(std::min<std::uint64_t>(64u, (static_cast<std::uint64_t>(expected.width) * expected.height + 255u) / 256u)) : 0u);
       dispatch(20u, infer ? 1u : 0u);
       dispatch(24u, infer ? grid_x : 0u, infer ? grid_y : 1u);
-      dispatch(32u, infer ? expected.width : 0u);
-      dispatch(36u, infer ? expected.height : 0u);
+      dispatch(32u, infer ? limiter_columns : 0u);
+      dispatch(36u, infer ? limiter_rows : 0u);
       dispatch(40u, infer ? 0u : grid_x, infer ? 1u : grid_y);
     }
     const auto authentication = trace::authenticate_receipt(

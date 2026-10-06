@@ -449,6 +449,8 @@ void main(uint3 id : SV_DispatchThreadID) {
     ComPtr<ID3D11Buffer> histogram_buffer;
     ComPtr<ID3D11ShaderResourceView> histogram_srv;
     ComPtr<ID3D11UnorderedAccessView> histogram_uav;
+    ComPtr<ID3D11Buffer> normalization_histogram_buffer;
+    ComPtr<ID3D11UnorderedAccessView> normalization_histogram_uav;
     ComPtr<ID3D11ShaderResourceView> partial_srv;
     ComPtr<ID3D11UnorderedAccessView> partial_uav;
     ComPtr<ID3D11Buffer> frame_buffer;
@@ -955,8 +957,12 @@ void main(uint3 id : SV_DispatchThreadID) {
             partial_buffer, partial_srv, partial_uav
           ) ||
           (constants.joint_plane_mode == 3u && !create_structured_buffer(
-            device.Get(), sizeof(std::uint32_t) * 4u, reduce_groups * 64u, nullptr, true,
+            device.Get(), sizeof(std::uint32_t) * 4u, reduce_groups * 128u, nullptr, true,
             histogram_buffer, histogram_srv, histogram_uav
+          )) ||
+          (constants.joint_plane_mode == 3u && !create_structured_buffer(
+            device.Get(), sizeof(std::uint32_t), 256u, nullptr, true,
+            normalization_histogram_buffer, unused_srv, normalization_histogram_uav
           )) ||
           !create_structured_buffer(
             device.Get(), sizeof(float) * 4u,
@@ -1176,6 +1182,7 @@ void main(uint3 id : SV_DispatchThreadID) {
         .frame_stats = frame_srv.Get(),
         .histogram_output = histogram_uav.Get(),
         .histogram = histogram_srv.Get(),
+        .normalization_histogram_output = normalization_histogram_uav.Get(),
       };
       if (!v2_gpu::record_moments_frame(context.Get(), moments_frame_command)) {
         error = "shared V2 GPU executor rejected replay moments/frame operands";

@@ -1,8 +1,11 @@
 // Resolve GPU histogram into the mode-3 quantile tail. P05 uses the lower crossing-bin
 // edge and P95 the upper edge, clipped to the true range. These are FP32 256-bin bounds,
 // not exact interpolated percentiles. All original Welford statistics remain untouched.
+// The same resolve overwrites the independent normalization histogram. Its existing P02/P98
+// EMA consumer and reset stay unchanged; only the duplicate full-depth traversal is removed.
 StructuredBuffer<uint4> HistogramPartials : register(t0);
 RWStructuredBuffer<float4> FrameStats : register(u0);
+RWStructuredBuffer<uint> NormalizationHistogram : register(u1);
 
 #include "include/depth_constants.hlsl"
 #include "include/depth_coordinate_v2_contract.generated.hlsl"
@@ -12,9 +15,13 @@ groupshared uint histogram[256];
 [numthreads(256, 1, 1)]
 void main(uint3 tid : SV_GroupThreadID) {
     uint count = 0u;
-    [loop] for (uint group = 0u; group < max(reduce_threads / 256u, 1u); ++group)
-        count += HistogramPartials[group * 64u + tid.x / 4u][tid.x % 4u];
+    uint normalization_count = 0u;
+    [loop] for (uint group = 0u; group < max(reduce_threads / 256u, 1u); ++group) {
+        count += HistogramPartials[group * 128u + tid.x / 4u][tid.x % 4u];
+        normalization_count += HistogramPartials[group * 128u + 64u + tid.x / 4u][tid.x % 4u];
+    }
     histogram[tid.x] = count;
+    NormalizationHistogram[tid.x] = normalization_count;
     GroupMemoryBarrierWithGroupSync();
     if (tid.x != 0u) return;
     float4 frame0 = FrameStats[V2_FRAME_STATS_VECTOR_MEAN];

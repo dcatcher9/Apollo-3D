@@ -38,7 +38,7 @@ float V2BoundDisplayParallax(float value) {
 
 // All controller payloads remain integers, including mixed float words, until UAV publication.
 // This avoids losing small uint tokens through floating-point temporaries on native GPUs.
-struct V2GainState {
+struct V2AdaptiveCameraState {
     uint4 clock;
     uint4 target;
     uint4 seed_times;
@@ -71,46 +71,46 @@ uint V2CameraIntegrityBase(float4 active, float4 control, uint mode) {
     return mode != 0u ? (checksum ^ mode) * 16777619u : checksum;
 }
 
-uint V2CameraIntegrityWithGain(float4 active, float4 control, uint4 mapping, V2GainState gain) {
+uint V2CameraIntegrityWithAdaptiveState(float4 active, float4 control, uint4 mapping, V2AdaptiveCameraState camera_state) {
     uint checksum = V2CameraIntegrityBase(active, control, V2_STATE_JOINT_PLANE_MODE_BITS(mapping));
     if (V2_STATE_JOINT_PLANE_MODE_BITS(mapping) == 3u) {
         [unroll] for (uint component = 0u; component < 4u; ++component)
-            checksum = (checksum ^ gain.clock[component]) * 16777619u;
+            checksum = (checksum ^ camera_state.clock[component]) * 16777619u;
         [unroll] for (uint component = 0u; component < 4u; ++component)
-            checksum = (checksum ^ gain.target[component]) * 16777619u;
+            checksum = (checksum ^ camera_state.target[component]) * 16777619u;
         [unroll] for (uint component = 0u; component < 4u; ++component)
-            checksum = (checksum ^ gain.seed_times[component]) * 16777619u;
+            checksum = (checksum ^ camera_state.seed_times[component]) * 16777619u;
         [unroll] for (uint component = 0u; component < 4u; ++component)
-            checksum = (checksum ^ gain.seed_values[component]) * 16777619u;
+            checksum = (checksum ^ camera_state.seed_values[component]) * 16777619u;
     }
     return checksum;
 }
 
-bool V2GainTailValid(uint mode, V2GainState gain) {
+bool V2AdaptiveCameraTailValid(uint mode, V2AdaptiveCameraState camera_state) {
     if (mode == 0u)
-        return all(gain.clock == 0u) && all(gain.target == 0u) &&
-            all(gain.seed_times == 0u) && all(gain.seed_values == 0u);
-    float4 target = asfloat(gain.target);
-    float2 seed = asfloat(gain.seed_values.xy);
-    if (mode != 3u || gain.clock.z > 1u || gain.clock.w > 1u ||
-        any(gain.seed_values.zw != 0u) ||
-        (gain.clock.z != 0u && all(gain.clock.xy == 0u)) ||
+        return all(camera_state.clock == 0u) && all(camera_state.target == 0u) &&
+            all(camera_state.seed_times == 0u) && all(camera_state.seed_values == 0u);
+    float4 target = asfloat(camera_state.target);
+    float2 seed = asfloat(camera_state.seed_values.xy);
+    if (mode != 3u || camera_state.clock.z > 1u || camera_state.clock.w > 1u ||
+        any(camera_state.seed_values.zw != 0u) ||
+        (camera_state.clock.z != 0u && all(camera_state.clock.xy == 0u)) ||
         !V2Finite(target.x) || !V2Finite(target.y) || !V2Finite(target.z) ||
         !V2Finite(target.w) || !V2Finite(seed.x) || !V2Finite(seed.y) ||
         target.w < 0.0f || target.w > v2_direct_container_limit) return false;
     bool no_target = all(target.xyz == 0.0f);
     bool valid_target = target.y > 0.0f && target.z > 0.0f &&
         abs(target.y * target.z - 1.0f) <= 2.0e-6f;
-    if ((!no_target && !valid_target) || (gain.clock.z != 0u && !valid_target)) return false;
+    if ((!no_target && !valid_target) || (camera_state.clock.z != 0u && !valid_target)) return false;
     if ((!no_target && target.z < v2_raw_coordinate_scale) ||
         (seed.x != 0.0f && seed.x < v2_raw_coordinate_scale)) return false;
-    if (gain.clock.w == 0u)
-        return gain.clock.z == 0u && all(gain.seed_times == 0u) && all(seed == 0.0f);
-    if (all(gain.seed_times.xy == 0u) ||
-        !V2ClockAtLeast(gain.seed_times.zw, gain.seed_times.xy) ||
-        !V2ClockAtLeast(gain.clock.xy, gain.seed_times.zw) ||
+    if (camera_state.clock.w == 0u)
+        return camera_state.clock.z == 0u && all(camera_state.seed_times == 0u) && all(seed == 0.0f);
+    if (all(camera_state.seed_times.xy == 0u) ||
+        !V2ClockAtLeast(camera_state.seed_times.zw, camera_state.seed_times.xy) ||
+        !V2ClockAtLeast(camera_state.clock.xy, camera_state.seed_times.zw) ||
         seed.x <= 0.0f || target.w <= 0.0f) return false;
-    return all(gain.seed_times.zw == gain.seed_times.xy);
+    return all(camera_state.seed_times.zw == camera_state.seed_times.xy);
 }
 
 // Authenticate both scene-camera coordinates. The inverse scale and revision are included
@@ -190,12 +190,12 @@ bool V2CameraStateValid(float4 active, float4 control, float4 mapping_state) {
         V2CameraCenterIntegrityValid(active, control, mapping_state);
 }
 
-bool V2CameraStateWithGainValid(float4 active, float4 control, uint4 mapping, V2GainState gain) {
+bool V2CameraStateWithAdaptiveStateValid(float4 active, float4 control, uint4 mapping, V2AdaptiveCameraState camera_state) {
     return V2CameraParametersValid(active, control, asfloat(mapping)) &&
-        V2GainTailValid(V2_STATE_JOINT_PLANE_MODE_BITS(mapping), gain) &&
-        mapping.x == V2CameraIntegrityWithGain(active, control, mapping, gain) &&
-        (mapping.z == 0u || (gain.clock.w == 1u &&
-          (V2_STATE_FRAME_VALID(control) == 0.0f || gain.clock.z == 1u)));
+        V2AdaptiveCameraTailValid(V2_STATE_JOINT_PLANE_MODE_BITS(mapping), camera_state) &&
+        mapping.x == V2CameraIntegrityWithAdaptiveState(active, control, mapping, camera_state) &&
+        (mapping.z == 0u || (camera_state.clock.w == 1u &&
+          (V2_STATE_FRAME_VALID(control) == 0.0f || camera_state.clock.z == 1u)));
 }
 
 bool V2EmptyCameraParametersValid(
@@ -221,11 +221,11 @@ bool V2EmptyCameraStateValid(float4 active, float4 control, float4 mapping_state
         V2CameraCenterIntegrityValid(active, control, mapping_state);
 }
 
-bool V2EmptyCameraStateWithGainValid(float4 active, float4 control, uint4 mapping, V2GainState gain) {
+bool V2EmptyCameraStateWithAdaptiveStateValid(float4 active, float4 control, uint4 mapping, V2AdaptiveCameraState camera_state) {
     return V2EmptyCameraParametersValid(active, control, asfloat(mapping)) &&
-        V2GainTailValid(mapping.z, gain) &&
-        (mapping.z == 0u || gain.clock.w == 0u) &&
-        mapping.x == V2CameraIntegrityWithGain(active, control, mapping, gain);
+        V2AdaptiveCameraTailValid(mapping.z, camera_state) &&
+        (mapping.z == 0u || camera_state.clock.w == 0u) &&
+        mapping.x == V2CameraIntegrityWithAdaptiveState(active, control, mapping, camera_state);
 }
 
 // D3D shader model 5 has exp/log but not expm1/log1p. Preserve precision at both C1 joins with

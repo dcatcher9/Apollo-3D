@@ -1,16 +1,145 @@
 import hashlib
+import io
 import json
 import struct
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import run_adaptive_replay as replay
+
+
+class AdaptiveReplayPreflightTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.build = self.root / "build"
+        self.build.mkdir()
+        self.exe = self.build / "sunshine.exe"
+        self.exe.write_bytes(b"preflight-test-executable")
+        self.conf = self.root / "mode3.conf"
+        self.conf.write_text("sbs_3d_joint_plane_experiment = enabled\n", encoding="utf-8")
+        self.frames = self.root / "frames"
+        self.frames.mkdir()
+        self.timeline = self.root / "observation_timeline.sbsotl"
+        replay.write_observation_timeline(self.timeline, [567890, 601223, 634556])
+        self.model = "depth_anything_v2_fp16"
+        self.environment = {"PATH": "production-runtime", "TEST_PREFLIGHT": "preserved"}
+        self.subprocess = self.enterContext(mock.patch.object(replay.subprocess, "run"))
+        self.env = self.enterContext(mock.patch.object(
+            replay.run_eval, "production_subprocess_env", return_value=self.environment))
+        self.engines = self.enterContext(mock.patch.object(
+            replay.run_eval, "check_engines", return_value=[]))
+        self.subprocess.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+
+    def run_preflight(self):
+        replay.run_engine_preflight(
+            self.exe, self.conf, self.build, self.frames, self.timeline, self.model)
+
+    def test_uses_exact_one_timestamp_prefix_and_same_runtime_without_frame_copies(self):
+        original_timeline = self.timeline.read_bytes()
+        observed_paths = []
+
+        def native(command, **kwargs):
+            timeline = Path(command[command.index("--observation-timeline") + 1])
+            out = Path(command[command.index("--out") + 1])
+            observed_paths.append(timeline.parent)
+            self.assertEqual(command, [
+                str(self.exe), str(self.conf.resolve()), "--sbs-bench", "--frames",
+                str(self.frames), "--out", str(out), "--limit", "1",
+                "--observation-timeline", str(timeline),
+            ])
+            self.assertEqual(replay.read_observation_timeline(timeline), [567890])
+            self.assertEqual(timeline.parent.parent, self.frames.parent)
+            self.assertEqual(set(path.name for path in timeline.parent.iterdir()),
+                             {"out", "observation_timeline.sbsotl"})
+            self.assertEqual(kwargs, {
+                "cwd": self.build, "capture_output": True, "text": True,
+                "timeout": 900, "env": self.environment,
+            })
+            self.assertEqual(self.conf.read_text(encoding="utf-8"),
+                             "sbs_3d_joint_plane_experiment = enabled\n")
+            self.engines.assert_not_called()
+            return mock.Mock(returncode=0, stdout="ready", stderr="")
+
+        self.subprocess.side_effect = native
+        self.run_preflight()
+        self.subprocess.assert_called_once()
+        self.env.assert_called_once_with()
+        self.engines.assert_called_once_with(str(self.build), self.model)
+        self.assertEqual(self.timeline.read_bytes(), original_timeline)
+        self.assertFalse(observed_paths[0].exists())
+
+    def test_native_failure_does_not_authenticate_engines(self):
+        self.subprocess.return_value = mock.Mock(
+            returncode=7, stdout="native output\n", stderr="mode3 rejected context")
+        with self.assertRaisesRegex(replay.EvidenceError, "exit 7.*") as caught:
+            self.run_preflight()
+        self.assertIn("mode3 rejected context", str(caught.exception))
+        self.engines.assert_not_called()
+        self.assertEqual(list(self.root.glob("sbs-engine-preflight-*")), [])
+
+    def test_timeout_does_not_authenticate_engines(self):
+        self.subprocess.side_effect = replay.subprocess.TimeoutExpired("native", 900)
+        with self.assertRaisesRegex(replay.EvidenceError, "preflight timed out"):
+            self.run_preflight()
+        self.engines.assert_not_called()
+        self.assertEqual(list(self.root.glob("sbs-engine-preflight-*")), [])
+
+    def test_exact_engine_authentication_failure_is_not_waived(self):
+        self.engines.return_value = ["wrong ONNX identity", "missing runtime manifest"]
+        with self.assertRaisesRegex(replay.EvidenceError, "valid exact-engine manifest") as caught:
+            self.run_preflight()
+        self.assertIn("wrong ONNX identity; missing runtime manifest", str(caught.exception))
+        self.engines.assert_called_once_with(str(self.build), self.model)
+
+    def test_invalid_timeline_fails_before_native_submission(self):
+        self.timeline.write_bytes(struct.pack(
+            "<8sIIQQ", replay.OBSERVATION_TIMELINE_MAGIC,
+            replay.OBSERVATION_TIMELINE_SCHEMA, replay.OBSERVATION_TIMELINE_HEADER_BYTES,
+            1, 0))
+        with self.assertRaisesRegex(replay.EvidenceError, "timestamps are zero"):
+            self.run_preflight()
+        self.subprocess.assert_not_called()
+        self.env.assert_not_called()
+        self.engines.assert_not_called()
+
+    def test_main_passes_selected_timeline_to_local_preflight_before_measured_legs(self):
+        for index in (1, 2):
+            Image.new("RGB", (2, 2), color=(index, 2, 3)).save(
+                self.frames / f"frame_{index:06d}.png")
+        output = self.root / "replay"
+        with mock.patch.object(replay.run_eval, "require_current_build"), \
+                mock.patch.object(replay.run_eval, "expected_depth_model", return_value=self.model), \
+                mock.patch.object(replay.run_eval, "run_engine_preflight") as generic, \
+                mock.patch.object(replay, "run_harness") as harness, \
+                mock.patch.object(replay, "run_engine_preflight", side_effect=
+                                  replay.EvidenceError("preflight sentinel")) as preflight, \
+                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as errors:
+            result = replay.main([
+                str(self.frames), "--build-dir", str(self.build), "--conf", str(self.conf),
+                "--prepared-fps", "30/1", "--max-frames", "2", "--out", str(output),
+            ])
+        self.assertEqual(result, 2)
+        self.assertIn("preflight sentinel", errors.getvalue())
+        preflight.assert_called_once()
+        exe, conf, build, frames, timeline, model = preflight.call_args.args
+        self.assertEqual((exe, conf, build, model),
+                         (self.exe.resolve(), self.conf.resolve(), self.build.resolve(), self.model))
+        self.assertEqual(frames.parent.parent, output)
+        self.assertEqual(timeline.parent, frames.parent)
+        self.assertEqual(replay.read_observation_timeline(timeline), [1, 33334])
+        generic.assert_not_called()
+        harness.assert_not_called()
+        self.subprocess.assert_not_called()
 
 
 class AdaptiveReplayContractTests(unittest.TestCase):
@@ -315,7 +444,7 @@ class AdaptiveReplayContractTests(unittest.TestCase):
                 base + replay.TRACE_RECORD_CONDITION_BEGIN + replay.TRACE_CONDITION_WORDS
             ] = row_condition
             words[base + replay.TRACE_RECORD_OBSERVATION_TIMESTAMP] = timestamp & 0xFFFFFFFF
-            words[base + replay.TRACE_RECORD_OBSERVATION_TIMESTAMP + 1] = timestamp >> 32
+            words[base + replay.TRACE_RECORD_OBSERVATION_TIMESTAMP_HIGH] = timestamp >> 32
             previous_locator = row_locator
             previous_condition = row_condition
             row_subtitles.append(authentic_subtitle)
@@ -667,6 +796,108 @@ class AdaptiveReplayContractTests(unittest.TestCase):
             metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
             with self.assertRaisesRegex(replay.EvidenceError, "unexpected trace identity"):
                 replay._validate_contract_and_trace(control, treatment, 2)
+
+    def test_decodes_current_native_layout_and_complete_nonzero_adaptive_tail(self):
+        self.assertEqual((
+            replay.TRACE_RING_SCHEMA, replay.TRACE_RECORD_WORDS, replay.TRACE_LOCATOR_WORDS,
+            replay.TRACE_RECORD_LOCATOR_BEGIN, replay.TRACE_RECORD_CONDITION_BEGIN,
+            replay.TRACE_RECORD_OBSERVATION_TIMESTAMP,
+            replay.TRACE_RECORD_OBSERVATION_TIMESTAMP_HIGH, replay.TRACE_RECORD_RESERVED_BEGIN,
+        ), (4, 192, 96, 88, 184, 190, 191, 192))
+        with tempfile.TemporaryDirectory() as directory:
+            control, treatment = self.make_pair(Path(directory))
+            trace = treatment / replay.TRACE_FILENAME
+            words = list(struct.unpack(f"<{trace.stat().st_size // 4}I", trace.read_bytes()))
+            tail = list(range(0x40000000, 0x40000010))
+            for slot in (0, 1):
+                base = 16 + slot * 192
+                words[base + 88 + 80:base + 88 + 96] = tail
+            trace.write_bytes(struct.pack(f"<{len(words)}I", *words))
+            _, records = replay._validate_contract_and_trace(control, treatment, 2)
+            for record in records:
+                self.assertEqual(len(record["locator"]), 96)
+                self.assertEqual(record["locator"][80:96], tuple(tail))
+                self.assertEqual(record["condition"], tuple(range(101, 107)))
+            self.assertEqual([row["observation_timestamp_us"] for row in records], [1, 16668])
+
+    def test_rejects_changed_first_or_last_adaptive_tail_word_on_reuse(self):
+        for tail_word in (80, 95):
+            with self.subTest(word=tail_word), tempfile.TemporaryDirectory() as directory:
+                control, treatment = self.make_pair(Path(directory))
+                self.mutate_trace_word(treatment, 2, 88 + tail_word, 0x40000000)
+                with self.assertRaisesRegex(replay.EvidenceError, "bit-exactly hold SLR96"):
+                    replay._validate_contract_and_trace(control, treatment, 2)
+
+    def test_decodes_shifted_timestamp_low_and_high_words_and_rejects_mutations(self):
+        timestamps = [(1 << 32) + 1, (1 << 32) + 33334]
+        with tempfile.TemporaryDirectory() as directory:
+            control, treatment = self.make_pair(Path(directory), timestamps=timestamps)
+            _, records = replay._validate_contract_and_trace(control, treatment, 2)
+            self.assertEqual([row["observation_timestamp_us"] for row in records], timestamps)
+            trace = treatment / replay.TRACE_FILENAME
+            original = trace.read_bytes()
+            for timestamp_word in (190, 191):
+                with self.subTest(word=timestamp_word):
+                    trace.write_bytes(original)
+                    self.mutate_trace_word(treatment, 2, timestamp_word, 0)
+                    with self.assertRaisesRegex(replay.EvidenceError, "media timeline"):
+                        replay._validate_contract_and_trace(control, treatment, 2)
+
+    def test_rejects_obsolete_layout_even_when_binary_and_metadata_agree(self):
+        for schema, record_words in ((3, 192), (4, 176), (3, 176)):
+            with self.subTest(schema=schema, words=record_words), \
+                    tempfile.TemporaryDirectory() as directory:
+                _, treatment = self.make_pair(Path(directory))
+                trace = treatment / replay.TRACE_FILENAME
+                native = list(struct.unpack(f"<{trace.stat().st_size // 4}I", trace.read_bytes()))
+                words = native[:16] + [0] * (300 * record_words)
+                words[0], words[3] = schema, record_words
+                for slot in (0, 1):
+                    row = native[16 + slot * 192:16 + (slot + 1) * 192]
+                    if record_words == 176:
+                        row = row[:168] + row[184:190] + row[190:192]
+                    row[0] = schema
+                    words[16 + slot * record_words:16 + (slot + 1) * record_words] = row
+                trace.write_bytes(struct.pack(f"<{len(words)}I", *words))
+                metadata = replay.load_json(treatment / replay.METADATA_FILENAME)
+                metadata["ring"].update(schema=schema, record_words=record_words)
+                with self.assertRaisesRegex(replay.EvidenceError, "unexpected trace identity"):
+                    replay.decode_trace(trace, metadata, 2)
+
+    def test_current_layout_still_rejects_header_record_and_size_mutations(self):
+        mutations = (
+            ("tag", 1, 0, "tag"),
+            ("capacity", 2, 299, "capacity"),
+            ("committed_count", 7, 1, "committed_count"),
+            ("reserved_header", 8, 1, None),
+            ("record_schema", 16, 3, None),
+            ("torn_commit", 17, 0, None),
+            ("reserved_record", 16 + 23, 1, None),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            _, treatment = self.make_pair(Path(directory))
+            trace = treatment / replay.TRACE_FILENAME
+            original = trace.read_bytes()
+            metadata = replay.load_json(treatment / replay.METADATA_FILENAME)
+            for name, word, value, metadata_key in mutations:
+                with self.subTest(mutation=name):
+                    words = list(struct.unpack(f"<{len(original) // 4}I", original))
+                    words[word] = value
+                    trace.write_bytes(struct.pack(f"<{len(words)}I", *words))
+                    changed_metadata = {**metadata, "ring": dict(metadata["ring"])}
+                    if metadata_key:
+                        changed_metadata["ring"][metadata_key] = value
+                    with self.assertRaises(replay.EvidenceError):
+                        replay.decode_trace(trace, changed_metadata, 2)
+            for name, payload in (("truncated", original[:-4]), ("extra_word", original + b"\0" * 4)):
+                with self.subTest(mutation=name):
+                    trace.write_bytes(payload)
+                    with self.assertRaisesRegex(replay.EvidenceError, "GPU trace byte size"):
+                        replay.decode_trace(trace, metadata, 2)
+            trace.write_bytes(original)
+            changed_metadata = {**metadata, "ring": {**metadata["ring"], "schema": 3}}
+            with self.assertRaisesRegex(replay.EvidenceError, "trace header disagrees with metadata"):
+                replay.decode_trace(trace, changed_metadata, 2)
 
     def test_stages_numeric_subset_once_with_canonical_ids(self):
         with tempfile.TemporaryDirectory() as directory:

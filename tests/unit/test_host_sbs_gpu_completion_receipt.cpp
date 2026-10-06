@@ -3,12 +3,87 @@
 #include <tests/fixtures/host_sbs_gpu_completion_receipt.h>
 
 #include <limits>
+#include <string>
 
 namespace {
   namespace fixture = host_sbs_gpu_completion_receipt_fixture;
   namespace receipt = models::host_sbs_gpu_completion_receipt;
   namespace graph = cuda_conditional_graph;
   namespace v2 = models::depth_coordinate_v2;
+
+  struct grouped_limiter_shape_t {
+    std::uint32_t width;
+    std::uint32_t height;
+    std::uint32_t columns;
+    std::uint32_t rows;
+  };
+  constexpr std::array grouped_limiter_shapes {
+    grouped_limiter_shape_t {770u, 434u, 97u, 55u},
+    grouped_limiter_shape_t {1540u, 868u, 193u, 109u},
+  };
+
+  TEST(HostSbsGpuCompletionReceipt, ConditionalInferAuthenticatesNativeGroupedLimiterCounts) {
+    for (const auto &shape : grouped_limiter_shapes) {
+      SCOPED_TRACE(std::to_string(shape.width) + 'x' + std::to_string(shape.height));
+      auto expected = fixture::expected();
+      expected.width = shape.width;
+      expected.height = shape.height;
+      const auto words = fixture::snapshot(expected, graph::branch_e::infer);
+      EXPECT_EQ(words[32u], shape.columns);
+      EXPECT_EQ(words[36u], shape.rows);
+      const auto decoded = receipt::decode(words, expected);
+      ASSERT_TRUE(decoded);
+      EXPECT_EQ(decoded->depth, receipt::depth_disposition_e::infer);
+      EXPECT_TRUE(decoded->depth_cache_authorized());
+      EXPECT_TRUE(decoded->subtitle_is_current());
+    }
+  }
+
+  TEST(HostSbsGpuCompletionReceipt, ConditionalInferRejectsLegacyAndOffByOneLimiterCounts) {
+    for (const auto &shape : grouped_limiter_shapes) {
+      SCOPED_TRACE(std::to_string(shape.width) + 'x' + std::to_string(shape.height));
+      auto expected = fixture::expected();
+      expected.width = shape.width;
+      expected.height = shape.height;
+      const auto good = fixture::snapshot(expected, graph::branch_e::infer);
+      ASSERT_TRUE(receipt::decode(good, expected));
+      for (const auto bad_columns : {shape.width, shape.columns - 1u, shape.columns + 1u, 0u}) {
+        auto words = good;
+        words[32u] = bad_columns;
+        EXPECT_FALSE(receipt::decode(words, expected)) << "columns=" << bad_columns;
+      }
+      for (const auto bad_rows : {shape.height, shape.rows - 1u, shape.rows + 1u, 0u}) {
+        auto words = good;
+        words[36u] = bad_rows;
+        EXPECT_FALSE(receipt::decode(words, expected)) << "rows=" << bad_rows;
+      }
+    }
+  }
+
+  TEST(HostSbsGpuCompletionReceipt, ConditionalReuseStillRequiresZeroLimiterCounts) {
+    for (const auto &shape : grouped_limiter_shapes) {
+      SCOPED_TRACE(std::to_string(shape.width) + 'x' + std::to_string(shape.height));
+      auto expected = fixture::expected();
+      expected.width = shape.width;
+      expected.height = shape.height;
+      const auto good = fixture::snapshot(expected, graph::branch_e::reuse);
+      EXPECT_EQ(good[32u], 0u);
+      EXPECT_EQ(good[36u], 0u);
+      const auto decoded = receipt::decode(good, expected);
+      ASSERT_TRUE(decoded);
+      EXPECT_EQ(decoded->depth, receipt::depth_disposition_e::reuse);
+      for (const auto bad_columns : {1u, shape.columns, shape.width}) {
+        auto words = good;
+        words[32u] = bad_columns;
+        EXPECT_FALSE(receipt::decode(words, expected)) << "columns=" << bad_columns;
+      }
+      for (const auto bad_rows : {1u, shape.rows, shape.height}) {
+        auto words = good;
+        words[36u] = bad_rows;
+        EXPECT_FALSE(receipt::decode(words, expected)) << "rows=" << bad_rows;
+      }
+    }
+  }
 
   TEST(HostSbsGpuCompletionReceipt, ReuseKeepsOneDepthAndSubtitleOwner) {
     const auto expected = fixture::expected();

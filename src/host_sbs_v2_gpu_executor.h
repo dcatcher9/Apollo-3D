@@ -69,6 +69,8 @@ namespace models::host_sbs_v2_gpu {
     ID3D11ShaderResourceView *frame_stats = nullptr;
     ID3D11UnorderedAccessView *histogram_output = nullptr;
     ID3D11ShaderResourceView *histogram = nullptr;
+    /** Mode-3 scan also overwrites the independent P02/P98 population; absent in mode 0. */
+    ID3D11UnorderedAccessView *normalization_histogram_output = nullptr;
   };
 
   struct state_command_t {

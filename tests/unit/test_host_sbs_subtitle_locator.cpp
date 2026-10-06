@@ -3808,6 +3808,81 @@ namespace {
     EXPECT_EQ(fixture.state()[a + 15u], 0u);
   }
 
+  TEST(HostSbsSubtitleSlr13GpuTest, JointPlaneProbeVisitsAwkwardCoverWidthsAndPartialRows) {
+    // Strides span several rows below 256 cells and carry within a row above it. None of these
+    // rectangles has an area divisible by the group size, so the final partial visits matter.
+    for (const std::uint32_t width : {93u, 255u, 257u, 513u}) {
+      SCOPED_TRACE(width);
+      slr13_warp_fixture_t fixture;
+      std::string error;
+      ASSERT_TRUE(fixture.initialize(error)) << error;
+      fixture.set_joint_plane_mode(true);
+      fixture.set_base(5.0f / 1920.0f);
+      const line_box_t line {31u, 360u, 31u + width, 371u};
+      constexpr auto a = v2::subtitle_locator_adaptive_offset;
+      ASSERT_TRUE(fixture.observe_at(70u, {line}, 1u));
+      EXPECT_TRUE(fixture.output_is_exact_base());
+      ASSERT_TRUE(fixture.observe_at(71u, {line}, 100001u));
+      ASSERT_EQ(fixture.state()[20u], 1u);
+      EXPECT_EQ(fixture.state()[a + 13u], width * 11u);
+      EXPECT_EQ(fixture.state()[a + 14u], 0u);
+      EXPECT_EQ(fixture.state()[a + 15u], 0u);
+      ASSERT_TRUE(fixture.observe_at(72u, {line}, 200001u));
+      EXPECT_EQ(fixture.state()[a + 2u], 2u);
+      const auto applied = fixture.state()[a + 3u];
+
+      fixture.set_base_at(line.left, line.top, std::numeric_limits<float>::quiet_NaN());
+      fixture.set_base_at(line.right - 1u, line.bottom - 1u,
+        std::numeric_limits<float>::infinity());
+      fixture.set_base_at(line.left + width / 2u, line.top + 5u, 0.041f);
+      ASSERT_TRUE(fixture.observe_at(73u, {line}, 300001u));
+      EXPECT_EQ(fixture.state()[a + 13u], width * 11u);
+      EXPECT_EQ(fixture.state()[a + 14u], 3u);
+      EXPECT_EQ(fixture.state()[a + 15u], 3u);
+      EXPECT_EQ(fixture.state()[a + 3u], applied);
+      EXPECT_EQ(fixture.condition_params()[2u], 0u);
+      EXPECT_TRUE(fixture.output_is_exact_base());
+    }
+  }
+
+  TEST(HostSbsSubtitleSlr13GpuTest, JointPlaneProbeDeduplicatesOverlappingCurrentCovers) {
+    slr13_warp_fixture_t fixture;
+    std::string error;
+    ASSERT_TRUE(fixture.initialize(error)) << error;
+    fixture.set_joint_plane_mode(true);
+    fixture.set_base(0.0395f);
+    const ocr_box_t first {
+      {180u, 360u, 410u, 370u}, {170u, 356u, 427u, 374u}, 0u, 1u, 0u
+    };
+    const ocr_box_t second {
+      {180u, 374u, 410u, 384u}, {175u, 368u, 432u, 388u}, 0u, 1u, 0u
+    };
+    // The tight cores are distinct lines. Their coarse covers overlap in 252*6 cells, which
+    // belong to the UI mask once regardless of the OCR input order or the probing lane.
+    constexpr std::uint32_t covered = 257u * 18u + 257u * 20u - 252u * 6u;
+    constexpr auto a = v2::subtitle_locator_adaptive_offset;
+    ASSERT_TRUE(fixture.observe_at(80u, {first, second}, 1u));
+    ASSERT_TRUE(fixture.observe_at(81u, {second, first}, 100001u));
+    ASSERT_EQ(fixture.state()[20u], 2u);
+    EXPECT_EQ(fixture.state()[a + 13u], covered);
+    EXPECT_EQ(fixture.state()[a + 14u], covered);
+    EXPECT_EQ(fixture.state()[a + 15u], 0u);
+    EXPECT_NE(fixture.state()[a + 1u] & 4u, 0u);
+    ASSERT_TRUE(fixture.observe_at(82u, {first, second}, 200001u));
+    const auto applied = fixture.state()[a + 3u];
+
+    fixture.set_base_at(170u, 356u, std::numeric_limits<float>::quiet_NaN());
+    fixture.set_base_at(431u, 387u, std::numeric_limits<float>::infinity());
+    fixture.set_base_at(180u, 370u, 0.041f); // In both covers: still one invalid sample.
+    ASSERT_TRUE(fixture.observe_at(83u, {second, first}, 300001u));
+    EXPECT_EQ(fixture.state()[a + 13u], covered);
+    EXPECT_EQ(fixture.state()[a + 14u], covered);
+    EXPECT_EQ(fixture.state()[a + 15u], 3u);
+    EXPECT_EQ(fixture.state()[a + 3u], applied);
+    EXPECT_EQ(fixture.condition_params()[2u], 0u);
+    EXPECT_TRUE(fixture.output_is_exact_base());
+  }
+
   TEST(HostSbsSubtitleSlr13GpuTest, JointPlaneRejectsFadeTargetModeAndPaddingTampering) {
     slr13_warp_fixture_t fixture;
     std::string error;
@@ -4082,8 +4157,10 @@ namespace {
           std::abs(value - fixture.output_at(x - 1u, y)));
         if (y != 0u) maximum_vertical_step = std::max(maximum_vertical_step,
           std::abs(value - fixture.output_at(x, y - 1u)));
-        if (y < 100u) EXPECT_EQ(std::bit_cast<std::uint32_t>(value),
-          std::bit_cast<std::uint32_t>(fixture.base()[static_cast<std::size_t>(y) * field_width + x]));
+        if (y < 100u) {
+          EXPECT_EQ(std::bit_cast<std::uint32_t>(value),
+            std::bit_cast<std::uint32_t>(fixture.base()[static_cast<std::size_t>(y) * field_width + x]));
+        }
       }
     }
     EXPECT_LE(maximum_horizontal_step, 0.5f / field_width + 2.0e-7f);

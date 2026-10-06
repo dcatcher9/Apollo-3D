@@ -2084,6 +2084,416 @@ TEST(DepthCoordinateV2GpuTest, SixCoordinatePassReplayLatchesRecoversAndRelatche
   )) << error;
 }
 
+// Frozen pre-fusion shaders are test-only D3D11 oracles. They deliberately retain both original
+// dispatches and arithmetic so a future production edit cannot silently rewrite its own oracle.
+TEST(DepthCoordinateV2GpuTest, SharedRawScanPreservesIndependentHistogramAuthorities) {
+  namespace fs = std::filesystem;
+  namespace v2 = models::depth_coordinate_v2;
+  namespace gpu = models::host_sbs_v2_gpu;
+  warp_device_t warp;
+  ASSERT_TRUE(warp.initialize());
+  const fs::path shader_root = fs::path(SUNSHINE_SOURCE_DIR) /
+    "src_assets/windows/assets/shaders/directx";
+  const std::string reference_histogram = R"HIST_REF(
+// Mode-3 robust raw-depth histogram. Every reduction group overwrites its 256 bins;
+// no clear, global atomic accumulator, CPU readback or reuse dispatch is required.
+// Unlike the private cut-normalization histogram, all finite signed eligible values count.
+StructuredBuffer<float> InputBuffer : register(t0);
+Texture2D<uint> TensorExclusion : register(t1);
+StructuredBuffer<float4> FrameStats : register(t2);
+RWStructuredBuffer<uint4> HistogramPartials : register(u0);
+
+#include "include/depth_constants.hlsl"
+#include "include/depth_coordinate_v2_contract.generated.hlsl"
+
+groupshared uint histogram[256];
+
+[numthreads(256, 1, 1)]
+void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID,
+          uint3 gid : SV_GroupID) {
+    histogram[tid.x] = 0u;
+    GroupMemoryBarrierWithGroupSync();
+    float4 frame0 = FrameStats[V2_FRAME_STATS_VECTOR_MEAN];
+    float4 frame1 = FrameStats[V2_FRAME_STATS_VECTOR_VALID_COUNT];
+    float minimum = V2_FRAME_STATS_MINIMUM(frame0);
+    float range = V2_FRAME_STATS_MAXIMUM(frame0) - minimum;
+    bool valid = v2_joint_plane_mode == 3u && V2_FRAME_STATS_VALID(frame1) == 1.0f &&
+        !isnan(range) && !isinf(range) && range >= 0.0f;
+    float inverse_range = range > 0.0f ? 256.0f / range : 0.0f;
+    valid = valid && !isnan(inverse_range) && !isinf(inverse_range);
+    uint position_y = dtid.x / target_w;
+    uint position_x = dtid.x - position_y * target_w;
+    uint stride_y = reduce_threads / target_w;
+    uint stride_x = reduce_threads - stride_y * target_w;
+    [loop] for (uint index = dtid.x; index < target_w * target_h; index += reduce_threads) {
+        if (valid && TensorExclusion[uint2(position_x, position_y)] == 0u) {
+            float value = InputBuffer[index];
+            if (!isnan(value) && !isinf(value)) {
+                uint bin = range > 0.0f ?
+                    min((uint)max((value - minimum) * inverse_range, 0.0f), 255u) : 0u;
+                InterlockedAdd(histogram[bin], 1u);
+            }
+        }
+        position_x += stride_x;
+        position_y += stride_y;
+        if (position_x >= target_w) {
+            position_x -= target_w;
+            position_y++;
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    // One lane owns one whole uint4 record; concurrent component writes cannot race.
+    if (tid.x < 64u) {
+        uint bin = tid.x * 4u;
+        HistogramPartials[gid.x * 64u + tid.x] = uint4(
+            histogram[bin], histogram[bin + 1u], histogram[bin + 2u], histogram[bin + 3u]);
+    }
+}
+)HIST_REF";
+  const std::string reference_quantiles = R"QUANT_REF(
+// Resolve GPU histogram into the mode-3 quantile tail. P05 uses the lower crossing-bin
+// edge and P95 the upper edge, clipped to the true range. These are FP32 256-bin bounds,
+// not exact interpolated percentiles. All original Welford statistics remain untouched.
+StructuredBuffer<uint4> HistogramPartials : register(t0);
+RWStructuredBuffer<float4> FrameStats : register(u0);
+
+#include "include/depth_constants.hlsl"
+#include "include/depth_coordinate_v2_contract.generated.hlsl"
+
+groupshared uint histogram[256];
+
+[numthreads(256, 1, 1)]
+void main(uint3 tid : SV_GroupThreadID) {
+    uint count = 0u;
+    [loop] for (uint group = 0u; group < max(reduce_threads / 256u, 1u); ++group)
+        count += HistogramPartials[group * 64u + tid.x / 4u][tid.x % 4u];
+    histogram[tid.x] = count;
+    GroupMemoryBarrierWithGroupSync();
+    if (tid.x != 0u) return;
+    float4 frame0 = FrameStats[V2_FRAME_STATS_VECTOR_MEAN];
+    float4 frame1 = FrameStats[V2_FRAME_STATS_VECTOR_VALID_COUNT];
+    float minimum = V2_FRAME_STATS_MINIMUM(frame0);
+    float maximum = V2_FRAME_STATS_MAXIMUM(frame0);
+    float range = maximum - minimum;
+    float bin_width = range / v2_host_percentile_bin_count;
+    uint total = 0u;
+    bool low_found = false, high_found = false;
+    float low = 0.0f, high = 0.0f;
+    [loop] for (uint bin = 0u; bin < 256u; ++bin) {
+        total += histogram[bin];
+        if (!low_found && (float)total >=
+            v2_host_percentile_low * V2_FRAME_STATS_VALID_COUNT(frame1)) {
+            low = clamp(minimum + float(bin) * bin_width, minimum, maximum);
+            low_found = true;
+        }
+        if (!high_found && (float)total >=
+            v2_host_percentile_high * V2_FRAME_STATS_VALID_COUNT(frame1)) {
+            high = clamp(minimum + float(bin + 1u) * bin_width, minimum, maximum);
+            high_found = true;
+        }
+    }
+    bool valid = v2_joint_plane_mode == 3u && V2_FRAME_STATS_VALID(frame1) == 1.0f &&
+        !isnan(bin_width) && !isinf(bin_width) && bin_width >= 0.0f &&
+        total > 0u && (float)total == V2_FRAME_STATS_VALID_COUNT(frame1) &&
+        low_found && high_found && low <= high;
+    float4 tail = 0.0f;
+    if (valid) {
+        V2_FRAME_STATS_PERCENTILE_LOW(tail) = low;
+        V2_FRAME_STATS_PERCENTILE_HIGH(tail) = high;
+        V2_FRAME_STATS_PERCENTILE_VALID(tail) = 1.0f;
+        V2_FRAME_STATS_PERCENTILE_BIN_WIDTH(tail) = bin_width;
+    }
+    FrameStats[V2_FRAME_STATS_VECTOR_PERCENTILE_LOW] = tail;
+}
+)QUANT_REF";
+  const auto compile = [&](const std::string_view filename,
+                           const std::string_view reference = {}) {
+    ComPtr<ID3DBlob> bytecode;
+    ComPtr<ID3DBlob> diagnostics;
+    const auto path = shader_root / filename;
+    const auto status = reference.empty() ?
+      D3DCompileFromFile(path.c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        "main", "cs_5_0", D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3,
+        0u, &bytecode, &diagnostics) :
+      D3DCompile(reference.data(), reference.size(), path.string().c_str(), nullptr,
+        D3D_COMPILE_STANDARD_FILE_INCLUDE, "main", "cs_5_0",
+        D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3,
+        0u, &bytecode, &diagnostics);
+    EXPECT_TRUE(SUCCEEDED(status)) << filename << ": " <<
+      (diagnostics ? static_cast<const char *>(diagnostics->GetBufferPointer()) : "");
+    ComPtr<ID3D11ComputeShader> shader;
+    if (bytecode) {
+      EXPECT_TRUE(SUCCEEDED(warp.device->CreateComputeShader(
+        bytecode->GetBufferPointer(), bytecode->GetBufferSize(), nullptr, &shader)));
+    }
+    return shader;
+  };
+  const auto moments = compile("depth_coordinate_v2_moments_cs.hlsl");
+  const auto frame_resolve = compile("depth_coordinate_v2_frame_resolve_cs.hlsl");
+  const auto histogram = compile("depth_coordinate_v2_histogram_cs.hlsl");
+  const auto quantiles = compile("depth_coordinate_v2_quantiles_cs.hlsl");
+  const auto old_histogram = compile("depth_coordinate_v2_histogram_cs.hlsl", reference_histogram);
+  const auto old_quantiles = compile("depth_coordinate_v2_quantiles_cs.hlsl", reference_quantiles);
+  // Mode 0's production normalization histogram is unchanged by scan fusion.
+  const auto normalization_histogram = compile("depth_hist_cs.hlsl");
+  ASSERT_TRUE(moments && frame_resolve && histogram && quantiles && old_histogram &&
+    old_quantiles && normalization_histogram);
+
+  struct buffer_t {
+    ComPtr<ID3D11Buffer> buffer;
+    ComPtr<ID3D11ShaderResourceView> srv;
+    ComPtr<ID3D11UnorderedAccessView> uav;
+  };
+  const auto structured = [&](const UINT stride, const UINT count) {
+    buffer_t result;
+    D3D11_BUFFER_DESC desc {};
+    desc.ByteWidth = stride * count;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+    desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+    desc.StructureByteStride = stride;
+    if (SUCCEEDED(warp.device->CreateBuffer(&desc, nullptr, &result.buffer))) {
+      EXPECT_TRUE(SUCCEEDED(warp.device->CreateShaderResourceView(
+        result.buffer.Get(), nullptr, &result.srv)));
+      EXPECT_TRUE(SUCCEEDED(warp.device->CreateUnorderedAccessView(
+        result.buffer.Get(), nullptr, &result.uav)));
+    }
+    return result;
+  };
+  const auto read_words = [&](ID3D11Buffer *source) {
+    std::vector<std::uint32_t> result;
+    D3D11_BUFFER_DESC desc {};
+    source->GetDesc(&desc);
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.BindFlags = 0u;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    desc.MiscFlags = 0u;
+    desc.StructureByteStride = 0u;
+    ComPtr<ID3D11Buffer> staging;
+    if (FAILED(warp.device->CreateBuffer(&desc, nullptr, &staging))) {
+      return result;
+    }
+    warp.context->CopyResource(staging.Get(), source);
+    D3D11_MAPPED_SUBRESOURCE mapped {};
+    if (FAILED(warp.context->Map(staging.Get(), 0u, D3D11_MAP_READ, 0u, &mapped))) {
+      return result;
+    }
+    const auto *words = static_cast<const std::uint32_t *>(mapped.pData);
+    result.assign(words, words + desc.ByteWidth / sizeof(std::uint32_t));
+    warp.context->Unmap(staging.Get(), 0u);
+    return result;
+  };
+  const auto constants_buffer = [&](const void *data, const UINT bytes) {
+    ComPtr<ID3D11Buffer> result;
+    D3D11_BUFFER_DESC desc {};
+    desc.ByteWidth = bytes;
+    desc.Usage = D3D11_USAGE_IMMUTABLE;
+    desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    D3D11_SUBRESOURCE_DATA initial {data, 0u, 0u};
+    EXPECT_TRUE(SUCCEEDED(warp.device->CreateBuffer(&desc, &initial, &result)));
+    return result;
+  };
+  const auto unbind = [&] {
+    ID3D11ShaderResourceView *inputs[3] = {};
+    ID3D11UnorderedAccessView *outputs[2] = {};
+    warp.context->CSSetShaderResources(0u, 3u, inputs);
+    warp.context->CSSetUnorderedAccessViews(0u, 2u, outputs, nullptr);
+  };
+
+  // The first grid has more lanes than texels; the second crosses rows on a grid-stride visit.
+  for (const auto dimensions : {std::array<UINT, 3> {37u, 19u, 5u},
+                               std::array<UINT, 3> {67u, 31u, 3u}}) {
+    const UINT width = dimensions[0], height = dimensions[1], groups = dimensions[2];
+    const UINT count = width * height;
+    std::array<std::uint32_t, 16> common_words {};
+    common_words[0] = width;
+    common_words[1] = height;
+    common_words[5] = groups * 256u;
+    common_words[11] = width;
+    common_words[12] = height;
+    auto common_constants = constants_buffer(common_words.data(), sizeof(common_words));
+    v2::constants_t v2_words {};
+    v2_words.joint_plane_mode = 3u;
+    auto v2_constants = constants_buffer(&v2_words, sizeof(v2_words));
+    ASSERT_TRUE(common_constants && v2_constants);
+    auto raw = structured(sizeof(float), count);
+    auto partials = structured(sizeof(std::uint32_t) * 4u, groups * 3u);
+    auto shared_bins = structured(sizeof(std::uint32_t) * 4u, groups * 128u);
+    auto reference_bins = structured(sizeof(std::uint32_t) * 4u, groups * 64u);
+    auto shared_frame = structured(sizeof(float) * 4u,
+      static_cast<UINT>(v2::frame_stats_vector_count));
+    auto reference_frame = structured(sizeof(float) * 4u,
+      static_cast<UINT>(v2::frame_stats_vector_count));
+    auto shared_normalization = structured(sizeof(std::uint32_t), 256u);
+    auto reference_normalization = structured(sizeof(std::uint32_t), 256u);
+    ASSERT_TRUE(raw.srv && partials.uav && shared_bins.uav && reference_bins.uav &&
+      shared_frame.uav && reference_frame.uav && shared_normalization.uav &&
+      reference_normalization.uav);
+    buffer_t minmax;
+    D3D11_BUFFER_DESC minmax_desc {};
+    minmax_desc.ByteWidth = sizeof(std::uint32_t) * 4u;
+    minmax_desc.Usage = D3D11_USAGE_DEFAULT;
+    minmax_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+    minmax_desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+    ASSERT_TRUE(SUCCEEDED(warp.device->CreateBuffer(&minmax_desc, nullptr, &minmax.buffer)));
+    D3D11_UNORDERED_ACCESS_VIEW_DESC minmax_view {};
+    minmax_view.Format = DXGI_FORMAT_R32_TYPELESS;
+    minmax_view.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+    minmax_view.Buffer.NumElements = 4u;
+    minmax_view.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
+    ASSERT_TRUE(SUCCEEDED(warp.device->CreateUnorderedAccessView(
+      minmax.buffer.Get(), &minmax_view, &minmax.uav)));
+    D3D11_TEXTURE2D_DESC exclusion_desc {};
+    exclusion_desc.Width = width;
+    exclusion_desc.Height = height;
+    exclusion_desc.MipLevels = 1u;
+    exclusion_desc.ArraySize = 1u;
+    exclusion_desc.Format = DXGI_FORMAT_R32_UINT;
+    exclusion_desc.SampleDesc.Count = 1u;
+    exclusion_desc.Usage = D3D11_USAGE_DEFAULT;
+    exclusion_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    ComPtr<ID3D11Texture2D> exclusion;
+    ComPtr<ID3D11ShaderResourceView> exclusion_srv;
+    ASSERT_TRUE(SUCCEEDED(warp.device->CreateTexture2D(&exclusion_desc, nullptr, &exclusion)));
+    ASSERT_TRUE(SUCCEEDED(warp.device->CreateShaderResourceView(
+      exclusion.Get(), nullptr, &exclusion_srv)));
+    gpu::moments_frame_command_t command {
+      .constants = {.depth = common_constants.Get(), .coordinate_v2 = v2_constants.Get()},
+      .moments_shader = moments.Get(),
+      .frame_resolve_shader = frame_resolve.Get(),
+      .raw_depth = raw.srv.Get(),
+      .tensor_exclusion = exclusion_srv.Get(),
+      .partials_output = partials.uav.Get(),
+      .partials = partials.srv.Get(),
+      .frame_stats_output = shared_frame.uav.Get(),
+      .minmax_raw_output = minmax.uav.Get(),
+      .moments_dispatch = gpu::dispatch_command_t::direct(groups, 1u, 1u),
+      .frame_resolve_dispatch = gpu::dispatch_command_t::direct(1u, 1u, 1u),
+      .robust_quantiles = true,
+      .histogram_shader = histogram.Get(),
+      .quantile_shader = quantiles.Get(),
+      .frame_stats = shared_frame.srv.Get(),
+      .histogram_output = shared_bins.uav.Get(),
+      .histogram = shared_bins.srv.Get(),
+      .normalization_histogram_output = shared_normalization.uav.Get(),
+    };
+    const auto missing_normalization = [&] {
+      auto missing = command;
+      missing.normalization_histogram_output = nullptr;
+      return gpu::record_moments_frame(warp.context.Get(), missing);
+    };
+    EXPECT_FALSE(missing_normalization());
+    for (const std::string_view sample : {"positive_crossings", "finite_negative",
+      "mixed_signed_zero", "negative_zero_only", "collapsed", "tiny_span", "subnormal",
+      "large_atoms_outliers", "nan", "positive_infinity", "negative_infinity",
+      "all_nan", "all_excluded", "roi_exclusion", "overflowing_moments"}) {
+      SCOPED_TRACE(std::string(sample) + " " + std::to_string(width) + "x" + std::to_string(height));
+      std::vector<float> values(count);
+      std::vector<std::uint32_t> exclusions(count, 0u);
+      for (UINT index = 0u; index < count; ++index) {
+        values[index] = 1.0f + float(index % 257u) / 32.0f;
+        if (sample == "finite_negative") values[index] -= 6.0f;
+        if (sample == "mixed_signed_zero") values[index] = index % 2u ? -0.0f : 0.0f;
+        if (sample == "negative_zero_only") values[index] = -0.0f;
+        if (sample == "collapsed") values[index] = 3.0f;
+        if (sample == "tiny_span") values[index] = float(index % 17u) * 1.0e-15f;
+        if (sample == "subnormal") values[index] = float(index % 17u) * 1.0e-39f;
+        if (sample == "large_atoms_outliers") {
+          values[index] = index % 100u == 0u ? 1000.0f : (index % 3u ? 1.0f : 7.0f);
+        }
+        if (sample == "all_nan") values[index] = std::numeric_limits<float>::quiet_NaN();
+        if (sample == "all_excluded") exclusions[index] = 1u;
+        if (sample == "roi_exclusion") {
+          const UINT x = index % width, y = index / width;
+          if (x < 3u || y < 2u || x >= width - 4u || y >= height - 3u) {
+            exclusions[index] = 1u;
+            values[index] = std::numeric_limits<float>::quiet_NaN();
+          }
+        }
+        if (sample == "overflowing_moments") {
+          values[index] = index % 2u ? 1.0e30f : 2.0e30f;
+        }
+      }
+      if (sample == "nan") values[count / 2u] = std::numeric_limits<float>::quiet_NaN();
+      if (sample == "positive_infinity") values[count / 2u] = std::numeric_limits<float>::infinity();
+      if (sample == "negative_infinity") values[count / 2u] = -std::numeric_limits<float>::infinity();
+      warp.context->UpdateSubresource(raw.buffer.Get(), 0u, nullptr, values.data(), 0u, 0u);
+      warp.context->UpdateSubresource(exclusion.Get(), 0u, nullptr, exclusions.data(),
+        width * sizeof(std::uint32_t), 0u);
+      constexpr std::array<UINT, 4> poison {0xcdcdcdcdu, 0xcdcdcdcdu, 0xcdcdcdcdu, 0xcdcdcdcdu};
+      constexpr std::array<UINT, 4> zero {};
+      warp.context->ClearUnorderedAccessViewUint(shared_bins.uav.Get(), poison.data());
+      warp.context->ClearUnorderedAccessViewUint(shared_normalization.uav.Get(), poison.data());
+      warp.context->ClearUnorderedAccessViewUint(reference_bins.uav.Get(), poison.data());
+      warp.context->ClearUnorderedAccessViewUint(reference_normalization.uav.Get(), zero.data());
+      ASSERT_TRUE(gpu::record_moments_frame(warp.context.Get(), command));
+      warp.context->CopyResource(reference_frame.buffer.Get(), shared_frame.buffer.Get());
+
+      ID3D11ShaderResourceView *histogram_inputs[] = {
+        raw.srv.Get(), exclusion_srv.Get(), reference_frame.srv.Get(),
+      };
+      warp.context->CSSetShader(old_histogram.Get(), nullptr, 0u);
+      warp.context->CSSetShaderResources(0u, 3u, histogram_inputs);
+      warp.context->CSSetUnorderedAccessViews(0u, 1u, reference_bins.uav.GetAddressOf(), nullptr);
+      warp.context->Dispatch(groups, 1u, 1u);
+      unbind();
+      warp.context->CSSetShader(old_quantiles.Get(), nullptr, 0u);
+      warp.context->CSSetShaderResources(0u, 1u, reference_bins.srv.GetAddressOf());
+      warp.context->CSSetUnorderedAccessViews(0u, 1u, reference_frame.uav.GetAddressOf(), nullptr);
+      warp.context->Dispatch(1u, 1u, 1u);
+      unbind();
+      ID3D11UnorderedAccessView *normalization_outputs[] = {
+        reference_normalization.uav.Get(), minmax.uav.Get(),
+      };
+      warp.context->CSSetShader(normalization_histogram.Get(), nullptr, 0u);
+      warp.context->CSSetShaderResources(0u, 2u, histogram_inputs);
+      warp.context->CSSetUnorderedAccessViews(0u, 2u, normalization_outputs, nullptr);
+      warp.context->Dispatch(groups, 1u, 1u);
+      unbind();
+
+      const auto actual_frame = read_words(shared_frame.buffer.Get());
+      const auto expected_frame = read_words(reference_frame.buffer.Get());
+      ASSERT_EQ(actual_frame.size(), v2::frame_stats_vector_count * 4u);
+      EXPECT_EQ(actual_frame, expected_frame) << "FP32 moments and quantile tail changed";
+      const auto actual_histogram = read_words(shared_bins.buffer.Get());
+      const auto expected_histogram = read_words(reference_bins.buffer.Get());
+      ASSERT_EQ(actual_histogram.size(), groups * 512u);
+      ASSERT_EQ(expected_histogram.size(), groups * 256u);
+      for (UINT group = 0u; group < groups; ++group) {
+        for (UINT bin = 0u; bin < 256u; ++bin) {
+          ASSERT_EQ(actual_histogram[group * 512u + bin],
+            expected_histogram[group * 256u + bin]) << group << ":" << bin;
+        }
+      }
+      const auto actual_normalization = read_words(shared_normalization.buffer.Get());
+      const auto expected_normalization = read_words(reference_normalization.buffer.Get());
+      ASSERT_EQ(actual_normalization.size(), 256u);
+      EXPECT_EQ(actual_normalization, expected_normalization) << "P02/P98 population changed";
+    }
+
+    // Zero-group indirect work is the real reuse gate. No moments, quantile or histogram word moves.
+    const auto held_frame = read_words(shared_frame.buffer.Get());
+    const auto held_histogram = read_words(shared_bins.buffer.Get());
+    const auto held_normalization = read_words(shared_normalization.buffer.Get());
+    constexpr std::array<UINT, 6> no_infer {0u, 1u, 1u, 0u, 1u, 1u};
+    D3D11_BUFFER_DESC indirect_desc {};
+    indirect_desc.ByteWidth = sizeof(no_infer);
+    // Match the production indirect-argument allocation; immutable, unbound buffers
+    // are rejected by the D3D11 runtime before the zero-group dispatch can execute.
+    indirect_desc.Usage = D3D11_USAGE_DEFAULT;
+    indirect_desc.MiscFlags = D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS;
+    D3D11_SUBRESOURCE_DATA indirect_data {no_infer.data(), 0u, 0u};
+    ComPtr<ID3D11Buffer> indirect;
+    ASSERT_TRUE(SUCCEEDED(warp.device->CreateBuffer(&indirect_desc, &indirect_data, &indirect)));
+    command.moments_dispatch = gpu::dispatch_command_t::indirect(indirect.Get(), 0u);
+    command.frame_resolve_dispatch = gpu::dispatch_command_t::indirect(indirect.Get(), 12u);
+    ASSERT_TRUE(gpu::record_moments_frame(warp.context.Get(), command));
+    EXPECT_EQ(read_words(shared_frame.buffer.Get()), held_frame);
+    EXPECT_EQ(read_words(shared_bins.buffer.Get()), held_histogram);
+    EXPECT_EQ(read_words(shared_normalization.buffer.Get()), held_normalization);
+  }
+}
+
 TEST(DepthCoordinateV2GpuTest, ContinuousHostPlaneTracksAcrossCutsAndHoldsUnusableInput) {
   namespace fs = std::filesystem;
   namespace v2 = models::depth_coordinate_v2;
@@ -2261,7 +2671,7 @@ TEST(DepthCoordinateV2GpuTest, JointPlaneModeTamperingRecoversAndUnknownModesAre
     EXPECT_EQ(row["calibration_revision"], 1u);
     EXPECT_NEAR(row["center"].get<float>(), 1.0f, 2.0e-5f);
   }
-  for (const nlohmann::ordered_json mode : {
+  for (const nlohmann::ordered_json &mode : {
          nlohmann::ordered_json(1u), nlohmann::ordered_json(2u),
          nlohmann::ordered_json(4u), nlohmann::ordered_json(-1),
          nlohmann::ordered_json(1.5), nlohmann::ordered_json(true),

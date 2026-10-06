@@ -210,12 +210,16 @@ namespace models::host_sbs_gpu_completion_receipt {
       const bool infer = authenticated.depth == depth_disposition_e::infer;
       const auto elements = static_cast<std::uint64_t>(expected.width) * expected.height;
       const auto reduce_groups = static_cast<std::uint32_t>(std::min<std::uint64_t>(64u, (elements + 255u) / 256u));
+      const auto limiter_columns = expected.width / v2::limiter_group_lines +
+                                   (expected.width % v2::limiter_group_lines != 0u);
+      const auto limiter_rows = expected.height / v2::limiter_group_lines +
+                                (expected.height % v2::limiter_group_lines != 0u);
       // These are the existing finalizer's depth verdicts, stronger than the CUDA branch tag.
       if (!dispatch_matches(16u, infer ? reduce_groups : 0u) ||
           !dispatch_matches(20u, infer ? 1u : 0u) ||
           !dispatch_matches(24u, infer ? grid_x : 0u, infer ? grid_y : 1u) ||
-          !dispatch_matches(32u, infer ? expected.width : 0u) ||
-          !dispatch_matches(36u, infer ? expected.height : 0u) ||
+          !dispatch_matches(32u, infer ? limiter_columns : 0u) ||
+          !dispatch_matches(36u, infer ? limiter_rows : 0u) ||
           !dispatch_matches(40u, infer ? 0u : grid_x, infer ? 1u : grid_y)) {
         return std::nullopt;
       }

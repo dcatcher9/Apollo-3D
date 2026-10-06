@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdlib>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -33,6 +34,7 @@ struct CUgraphNode_st {
   std::vector<CUgraphNode> dependencies;
   std::vector<CUgraphNode> dependents;
   CUDA_MEMCPY3D memcpy {};
+  CUevent event = nullptr;
 };
 
 namespace {
@@ -328,7 +330,7 @@ namespace {
     std::array<CUgraph_st, 2u> bodies;
     CUgraph_st embedded_infer;
     std::array<CUgraph, 2u> body_handles {};
-    std::array<CUgraphNode_st, 8u> wrapper_nodes;
+    std::array<CUgraphNode_st, 16u> wrapper_nodes;
     std::array<CUgraphNode_st, 8u> embedded_nodes;
     std::size_t wrapper_node_count = 0u;
     std::array<CUdeviceptr, 2u> allocated_mirrors {};
@@ -339,6 +341,16 @@ namespace {
     bool graph_destroyed = false;
     bool executable_destroyed = false;
     bool module_unloaded = false;
+    std::size_t event_create_calls = 0u;
+    std::size_t event_node_calls = 0u;
+    std::size_t event_elapsed_calls = 0u;
+    std::size_t fail_event_create_call = 0u;
+    std::size_t fail_event_node_call = 0u;
+    std::size_t fail_event_destroy_call = 0u;
+    std::size_t event_destroy_calls = 0u;
+    bool event_destroyed_before_graph = false;
+    std::vector<CUevent> created_events;
+    std::vector<CUevent> destroyed_events;
   };
 
   transactional_graph_fake_t *transactional_graph_fake = nullptr;
@@ -474,6 +486,7 @@ namespace {
     node->dependencies.clear();
     node->dependents.clear();
     node->memcpy = {};
+    node->event = nullptr;
     return node;
   }
 
@@ -621,6 +634,66 @@ namespace {
     return CUDA_SUCCESS;
   }
 
+  CUresult __stdcall transaction_event_create(CUevent *event, unsigned int flags) {
+    if (!transactional_graph_fake || !event || flags != CU_EVENT_DEFAULT) {
+      return CUDA_ERROR_INVALID_HANDLE;
+    }
+    auto &state = *transactional_graph_fake;
+    if (++state.event_create_calls == state.fail_event_create_call) {
+      return CUDA_ERROR_INVALID_HANDLE;
+    }
+    *event = reinterpret_cast<CUevent>(0x5000u + state.event_create_calls * 0x100u);
+    state.created_events.push_back(*event);
+    return CUDA_SUCCESS;
+  }
+
+  CUresult __stdcall transaction_event_destroy(CUevent event) {
+    if (!transactional_graph_fake || !event) {
+      return CUDA_ERROR_INVALID_HANDLE;
+    }
+    auto &state = *transactional_graph_fake;
+    if (++state.event_destroy_calls == state.fail_event_destroy_call) {
+      return CUDA_ERROR_INVALID_HANDLE;
+    }
+    state.event_destroyed_before_graph |= !state.graph_destroyed;
+    state.destroyed_events.push_back(event);
+    return CUDA_SUCCESS;
+  }
+
+  CUresult __stdcall transaction_event_elapsed(float *ms, CUevent start, CUevent stop) {
+    if (!transactional_graph_fake || !ms || !start || !stop) {
+      return CUDA_ERROR_INVALID_HANDLE;
+    }
+    ++transactional_graph_fake->event_elapsed_calls;
+    *ms = 0.5f;
+    return CUDA_SUCCESS;
+  }
+
+  CUresult __stdcall transaction_graph_add_event_record_node(
+    CUgraphNode *node, CUgraph graph, const CUgraphNode *dependencies,
+    const std::size_t dependency_count, CUevent event
+  ) {
+    if (!transactional_graph_fake || !node || !event ||
+        graph != &transactional_graph_fake->wrapper) {
+      return CUDA_ERROR_INVALID_HANDLE;
+    }
+    auto &state = *transactional_graph_fake;
+    if (++state.event_node_calls == state.fail_event_node_call) {
+      return CUDA_ERROR_INVALID_HANDLE;
+    }
+    CUgraphNode created = next_transaction_node(CU_GRAPH_NODE_TYPE_EVENT_RECORD);
+    if (!created) {
+      return CUDA_ERROR_INVALID_HANDLE;
+    }
+    created->event = event;
+    if (dependencies && dependency_count != 0u) {
+      created->dependencies.assign(dependencies, dependencies + dependency_count);
+    }
+    graph->nodes.push_back(created);
+    *node = created;
+    return CUDA_SUCCESS;
+  }
+
   cuda_driver_api transactional_graph_api(transactional_graph_fake_t &state) {
     transactional_graph_fake = &state;
     cuda_driver_api cuda = fake_scalar_prefix_api();
@@ -641,6 +714,13 @@ namespace {
     cuda.cuGraphAddChildGraphNode = transaction_graph_add_child_node;
     cuda.cuGraphMemcpyNodeSetParams = transaction_memcpy_node_set_params;
     return cuda;
+  }
+
+  void enable_transaction_timing_api(cuda_driver_api &cuda) {
+    cuda.cuEventCreate = transaction_event_create;
+    cuda.cuEventDestroy = transaction_event_destroy;
+    cuda.cuEventElapsedTime = transaction_event_elapsed;
+    cuda.cuGraphAddEventRecordNode = transaction_graph_add_event_record_node;
   }
 
   struct scalar_prefix_graph_t {
@@ -677,7 +757,8 @@ namespace {
     initialize_result_e initialize(
       const bool with_reuse_child = false,
       const bool with_scalar_prefix = false,
-      const bool with_optional_child = false
+      const bool with_optional_child = false,
+      const bool with_branch_timing = false
     ) {
       cuda_ = &cuda_driver_api::get();
       if (!cuda_->is_valid() || !cuda_->has_conditional_graph_support() ||
@@ -686,6 +767,9 @@ namespace {
           !cuda_->cuModuleLoadDataEx || !cuda_->cuModuleGetFunction ||
           !cuda_->cuModuleUnload || !cuda_->cuMemcpyHtoD ||
           !cuda_->cuMemcpyDtoH || !cuda_->cuGraphLaunch) {
+        return initialize_result_e::unavailable;
+      }
+      if (with_branch_timing && !cuda_->has_graph_branch_timing_support()) {
         return initialize_result_e::unavailable;
       }
       if (cuda_->cuInit(0u) != CUDA_SUCCESS ||
@@ -846,6 +930,7 @@ namespace {
           .reuse_child = reuse_child_,
           .decision_record = records_,
           .request_record = records_ + sizeof(decision_record_t),
+          .record_branch_timing = with_branch_timing,
         }
       );
       if (!bridge_.adopt_from_empty(std::move(bridge_candidate))) {
@@ -861,6 +946,10 @@ namespace {
         return initialize_result_e::failed;
       }
       return initialize_result_e::ready;
+    }
+
+    bool branch_timing(bool current_root_complete, branch_completion_timing_t &timing) const {
+      return bridge_.read_branch_completion_timing(timing, current_root_complete) == CUDA_SUCCESS;
     }
 
     bool run(
@@ -1364,6 +1453,192 @@ TEST(CudaConditionalGraphContract, BuilderFailuresExposeNoExecutable) {
   )));
   EXPECT_EQ(result.failure(), build_failure_e::driver_api_unavailable)
     << "A 32-byte record whose final byte is exactly the address maximum does not wrap";
+}
+
+
+TEST(CudaConditionalGraphContract, BranchTimingIsOptionalAndDisabledAllocatesNothing) {
+  for (const bool requested : {false, true}) {
+    transactional_graph_fake_t state;
+    cuda_driver_api cuda = transactional_graph_api(state);
+    enable_transaction_timing_api(cuda);
+    if (requested) {
+      cuda.cuGraphAddEventRecordNode = nullptr;
+    }
+    EXPECT_TRUE(cuda.has_conditional_graph_support());
+    CUgraphNode_st kernel {.type = CU_GRAPH_NODE_TYPE_KERNEL};
+    CUgraph_st child {{&kernel}};
+    auto graph = executable_t::build(cuda, {
+      .context = reinterpret_cast<CUcontext>(1u),
+      .infer_child = &child,
+      .decision_record = 0x1000u,
+      .request_record = 0x1100u,
+      .record_branch_timing = requested,
+    });
+    ASSERT_TRUE(graph.ready());
+    EXPECT_FALSE(graph.has_branch_completion_timing());
+    EXPECT_EQ(state.event_create_calls, 0u);
+    EXPECT_EQ(state.event_node_calls, 0u);
+    branch_completion_timing_t timing;
+    EXPECT_EQ(graph.read_branch_completion_timing(timing, true), CUDA_ERROR_NOT_SUPPORTED);
+    EXPECT_EQ(state.event_elapsed_calls, 0u);
+    ASSERT_TRUE(graph.reset());
+  }
+}
+
+TEST(CudaConditionalGraphContract, BranchEventNodesStayInParentAndPreserveSiblingDependencies) {
+  transactional_graph_fake_t state;
+  cuda_driver_api cuda = transactional_graph_api(state);
+  enable_transaction_timing_api(cuda);
+  CUgraphNode_st kernel {.type = CU_GRAPH_NODE_TYPE_KERNEL};
+  CUgraph_st child {{&kernel}};
+  auto graph = executable_t::build(cuda, {
+    .context = reinterpret_cast<CUcontext>(1u),
+    .infer_child = &child,
+    .optional_infer_child = &child,
+    .decision_record = 0x1000u,
+    .request_record = 0x1100u,
+    .record_branch_timing = true,
+  });
+  ASSERT_TRUE(graph.ready());
+  EXPECT_TRUE(graph.has_branch_completion_timing());
+  ASSERT_EQ(state.created_events.size(), 3u);
+  std::vector<CUgraphNode> events;
+  std::vector<CUgraphNode> conditionals;
+  for (const auto node : state.wrapper.nodes) {
+    if (node->type == CU_GRAPH_NODE_TYPE_EVENT_RECORD) {
+      events.push_back(node);
+    } else if (node->type == CU_GRAPH_NODE_TYPE_CONDITIONAL) {
+      conditionals.push_back(node);
+    }
+  }
+  ASSERT_EQ(events.size(), 3u);
+  ASSERT_EQ(conditionals.size(), 2u);
+  ASSERT_EQ(events[0]->dependencies.size(), 1u);
+  EXPECT_EQ(events[0]->dependencies[0]->type, CU_GRAPH_NODE_TYPE_KERNEL);
+  for (std::size_t i = 0u; i < conditionals.size(); ++i) {
+    EXPECT_EQ(conditionals[i]->dependencies, (std::vector<CUgraphNode> {events[0]}));
+    EXPECT_EQ(events[i + 1u]->dependencies, (std::vector<CUgraphNode> {conditionals[i]}));
+  }
+  for (const auto &body : state.bodies) {
+    for (const auto node : body.nodes) {
+      EXPECT_NE(node->type, CU_GRAPH_NODE_TYPE_EVENT_RECORD);
+      EXPECT_NE(node->type, CU_GRAPH_NODE_TYPE_WAIT_EVENT);
+    }
+  }
+  branch_completion_timing_t timing;
+  EXPECT_EQ(graph.read_branch_completion_timing(timing, false), CUDA_ERROR_NOT_READY);
+  EXPECT_EQ(state.event_elapsed_calls, 0u) << "Prior-launch event records are not current-root proof";
+  ASSERT_EQ(graph.read_branch_completion_timing(timing, true), CUDA_SUCCESS);
+  EXPECT_EQ(state.event_elapsed_calls, 2u);
+  EXPECT_TRUE(timing.has_optional);
+  EXPECT_GE(timing.depth_ms, 0.0f);
+  EXPECT_GE(timing.optional_ms, 0.0f);
+  ASSERT_TRUE(graph.reset());
+  EXPECT_EQ(state.destroyed_events, state.created_events);
+  EXPECT_FALSE(state.event_destroyed_before_graph);
+}
+
+TEST(CudaConditionalGraphContract, TimingRequiresExactRootAndCannotOverwritePendingLaunch) {
+  branch_timing_pending_t pending;
+  EXPECT_FALSE(pending.arm(0u, 11u));
+  ASSERT_TRUE(pending.arm(101u, 11u));
+  EXPECT_FALSE(pending.arm(102u, 12u));
+  EXPECT_FALSE(pending.consume(101u, false));
+  EXPECT_FALSE(pending.consume(100u, true));
+  EXPECT_EQ(pending.token, 101u);
+  EXPECT_EQ(pending.consume(101u, true), std::optional<std::uint64_t> {11u});
+  EXPECT_FALSE(pending.consume(101u, true));
+  ASSERT_TRUE(pending.arm(102u, 12u));
+  pending.clear();
+  EXPECT_FALSE(pending.consume(102u, true));
+}
+
+TEST(CudaConditionalGraphContract, TimingPartialFailuresReleaseOnlySafeGraphOperands) {
+  for (const bool create_failure : {false, true}) {
+    for (std::size_t failure = 1u; failure <= 3u; ++failure) {
+      transactional_graph_fake_t state;
+      cuda_driver_api cuda = transactional_graph_api(state);
+      enable_transaction_timing_api(cuda);
+      if (create_failure) {
+        state.fail_event_create_call = failure;
+      } else {
+        state.fail_event_node_call = failure;
+      }
+      CUgraphNode_st kernel {.type = CU_GRAPH_NODE_TYPE_KERNEL};
+      CUgraph_st child {{&kernel}};
+      auto graph = executable_t::build(cuda, {
+        .context = reinterpret_cast<CUcontext>(1u),
+        .infer_child = &child,
+        .optional_infer_child = &child,
+        .decision_record = 0x1000u,
+        .request_record = 0x1100u,
+        .record_branch_timing = true,
+      });
+      EXPECT_FALSE(graph.ready());
+      EXPECT_TRUE(graph.empty());
+      EXPECT_EQ(graph.failure(), create_failure ? build_failure_e::diagnostic_event_create_failed :
+                                                 build_failure_e::diagnostic_event_node_add_failed);
+      EXPECT_EQ(state.destroyed_events, state.created_events);
+      EXPECT_FALSE(state.event_destroyed_before_graph);
+    }
+  }
+}
+
+TEST(CudaConditionalGraphContract, TimingEventsFollowMoveAndMonotonicQuiescentTeardown) {
+  transactional_graph_fake_t state;
+  cuda_driver_api cuda = transactional_graph_api(state);
+  enable_transaction_timing_api(cuda);
+  CUgraphNode_st kernel {.type = CU_GRAPH_NODE_TYPE_KERNEL};
+  CUgraph_st child {{&kernel}};
+  auto original = executable_t::build(cuda, {
+    .context = reinterpret_cast<CUcontext>(1u),
+    .infer_child = &child,
+    .optional_infer_child = &child,
+    .decision_record = 0x1000u,
+    .request_record = 0x1100u,
+    .record_branch_timing = true,
+  });
+  ASSERT_TRUE(original.ready());
+  executable_t moved(std::move(original));
+  EXPECT_TRUE(original.empty());
+  EXPECT_TRUE(moved.has_branch_completion_timing());
+  state.fail_graph_destroy = true;
+  EXPECT_FALSE(moved.reset());
+  EXPECT_TRUE(state.destroyed_events.empty());
+  EXPECT_FALSE(moved.empty());
+  state.fail_graph_destroy = false;
+  state.fail_event_destroy_call = 2u;
+  EXPECT_FALSE(moved.reset());
+  ASSERT_EQ(state.destroyed_events.size(), 1u);
+  EXPECT_FALSE(state.module_unloaded);
+  EXPECT_FALSE(moved.empty());
+  state.fail_event_destroy_call = 0u;
+  EXPECT_TRUE(moved.reset());
+  EXPECT_EQ(state.destroyed_events, state.created_events);
+  EXPECT_FALSE(state.event_destroyed_before_graph);
+}
+
+TEST(CudaConditionalGraphContract, UnsafeAbandonRetainsGraphTimingEvents) {
+  transactional_graph_fake_t state;
+  cuda_driver_api cuda = transactional_graph_api(state);
+  enable_transaction_timing_api(cuda);
+  CUgraphNode_st kernel {.type = CU_GRAPH_NODE_TYPE_KERNEL};
+  CUgraph_st child {{&kernel}};
+  {
+    auto graph = executable_t::build(cuda, {
+      .context = reinterpret_cast<CUcontext>(1u),
+      .infer_child = &child,
+      .decision_record = 0x1000u,
+      .request_record = 0x1100u,
+      .record_branch_timing = true,
+    });
+    ASSERT_TRUE(graph.ready());
+    graph.abandon_unsafe();
+    EXPECT_TRUE(graph.empty());
+  }
+  EXPECT_TRUE(state.destroyed_events.empty());
+  EXPECT_FALSE(state.graph_destroyed);
+  EXPECT_FALSE(state.executable_destroyed);
 }
 
 TEST(CudaConditionalGraphContract, CapabilityIncludesScalarPrefixInspectionApis) {
@@ -1898,6 +2173,42 @@ TEST(CudaConditionalGraphHardware, OptionalSiblingRequiresAuthenticatedProposalA
     false,
     false
   )) << "Retired work value 4 must fail request authentication and keep OCR dormant";
+}
+
+
+TEST(CudaConditionalGraphHardware, ParentBranchTimingCoversInferReuseAndSuppressedOptionalWork) {
+  constexpr std::uint64_t token = 0x3132333435363738ull;
+  conditional_hardware_fixture_t fixture;
+  const auto initialized = fixture.initialize(false, false, true, true);
+  if (initialized == conditional_hardware_fixture_t::initialize_result_e::unavailable) {
+    GTEST_SKIP() << "Conditional graph branch timing is unavailable on this driver/device";
+  }
+  ASSERT_EQ(initialized, conditional_hardware_fixture_t::initialize_result_e::ready)
+    << "failure=" << static_cast<int>(fixture.bridge_failure())
+    << " cuda=" << static_cast<int>(fixture.bridge_cuda_result());
+  for (const auto work : {work_flag_e::optional_ocr, work_flag_e::subtitle_observation,
+                         work_flag_e::none}) {
+    for (const auto branch : {branch_e::infer, branch_e::reuse}) {
+      const bool optional_executes = optional_ocr_executes(work_flags_value(work), branch);
+      const auto request = make_request(token, work);
+      ASSERT_TRUE(fixture.run_optional(
+        make_proposal(branch, token), request,
+        branch == branch_e::infer ? conditional_hardware_fixture_t::infer_marker : 0u,
+        optional_executes ? conditional_hardware_fixture_t::optional_infer_marker : 0u,
+        branch, true, optional_executes
+      ));
+      // The fixture synchronized this exact current root before asserting its marker/receipt.
+      branch_completion_timing_t timing;
+      EXPECT_FALSE(fixture.branch_timing(false, timing));
+      ASSERT_TRUE(fixture.branch_timing(true, timing));
+      EXPECT_TRUE(timing.has_optional);
+      EXPECT_TRUE(std::isfinite(timing.depth_ms));
+      EXPECT_TRUE(std::isfinite(timing.optional_ms));
+      EXPECT_GE(timing.depth_ms, 0.0f);
+      EXPECT_GE(timing.optional_ms, 0.0f);
+    }
+  }
+  EXPECT_TRUE(fixture.reset_restores_null_context());
 }
 
 TEST(CudaConditionalGraphHardware, MirrorsFixedDav2ScalarPrefixOnEveryLaunch) {

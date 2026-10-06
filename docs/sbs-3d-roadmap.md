@@ -26,16 +26,19 @@ detection is not part of Game provider discovery. The geometry and ROI behavior 
 Sunshine's V2 provider.
 
 Host V2 uses an authenticated DAV2 Small backbone with frozen ZipDepth convex-2x reconstruction,
-one high-resolution model input/output and one high-resolution downstream grid. It retains one
-scene-latched raw center, literal configured pop, a frame-local parallax container, bounded
+one high-resolution model input/output and one high-resolution downstream grid. Default mode 0 retains
+a scene-latched raw center and fixed divisor. Opt-in mode 3 continuously observes a Host-relative
+zero and scale, maps depth linearly, and protects current subtitle covers at an adaptive UI plane.
+Both retain literal configured pop, a bounded parallax field, bounded
 vertical and horizontal cliff conditioning, and a unique contractive
 inverse. Invalid or unauthenticated geometry renders flat; there is no older geometry fallback.
 
 On Desktop Duplication, a fresh exact matched-frame rectangle may replace full-frame analysis with
-one same-format crop. The unique largest fully contained `<video>` in the foreground Chrome or Edge
+one source rectangle. The unique largest fully contained `<video>` in the foreground Chrome or Edge
 document has priority; otherwise the foreground top-level root client may authorize the crop. The
-rectangle is copied exactly and fitted without cropping or stretching into a centered integer
-content rectangle in the current authenticated tensor. Edge-replicated synthetic padding is
+rectangle is addressed directly inside the complete matched capture and fitted without cropping
+or stretching into a centered integer content rectangle in the current authenticated tensor.
+Edge-replicated synthetic padding is
 excluded from analysis. A selected client that exactly covers the capture
 canonicalizes to ordinary full-frame V2 with no crop or domain reset. Null/shell/desktop/self,
 hidden/minimized/cloaked/excluded-style windows, missing content timestamps, invalid or stale
@@ -54,8 +57,9 @@ owned by [Host SBS scene cuts](host-sbs-scene-cuts.md).
 
 ## What is intentionally absent
 
-- No endpoint normalization, min/max range EMA, subject stretch/recenter, adaptive pop, or
-  configurable zero-plane translation.
+- No geometry endpoint normalization into `[0,1]`, subject stretch/recenter, adaptive pop gain, or
+  configurable zero-plane translation. Private normalized depth/range EMA remains cut/history
+  evidence, separate from the opt-in geometry zero/scale controller.
 - No damage-driven ROI selection, image-tracked ROI, background-window/tab ROI, or second-inference
   ROI. The foreground window-region route replaces that frame's full analysis with at most one
   causally attributed crop. DDup damage can only retain an independently authorized exact route;
@@ -65,9 +69,11 @@ owned by [Host SBS scene cuts](host-sbs-scene-cuts.md).
 - No forward-owner render, multi-root visibility selector, post-warp blur, or synthetic hidden-pixel
   fill.
 - No CPU depth fallback or best-effort use of an unauthenticated model/shape.
-- No age-based replacement of a valid scene camera between confirmed cuts.
+- No timer-forced refresh of a valid near-identical depth/subtitle tuple. Geometry and UI adaptation
+  consume genuine observations; authenticated reuse can freeze unfinished adaptation indefinitely.
 
-These are architectural boundaries, not dormant feature flags.
+The extra model, routing and renderer exclusions are architectural boundaries. The opt-in geometry
+policy and its default-promotion requirements are owned by [Host SBS](host-sbs.md#opt-in-joint-plane-live-experiment).
 
 ## Known limitations
 
@@ -105,10 +111,10 @@ The helper reports strict windowed evidence as `ok` and relaxed full-client evid
 the full-source domain only after exact capture mapping.
 
 The route has no compositor-visible-region oracle. The current subtitle treatment therefore uses
-OCR8 bounded boxes and compact SLR13 owner/pending/current-authority rectangles at the authenticated
+OCR8 bounded boxes and compact SLR14 owner/pending/current-authority rectangles at the authenticated
 active field shape. It does not retain the retired row-history or general overlay-detector pipelines.
 Unsupported identities and shapes preserve ordinary V2 exactly. Dump and replay accept only the
-current SLR13/OCR8 schema. The host does not reconstruct hidden video.
+current SLR14/OCR8 schema. The host does not reconstruct hidden video.
 
 Damage reuse is deliberately DDup-only and fail-open. Dirty and move metadata is semantic only as a
 proof that the exact current ROI pixels did not change: damage outside the crop may save inference,
@@ -133,7 +139,7 @@ poll or wait. Only after final D3D publication may a nonblocking receipt report 
 to the CPU. Depth and subtitle use one joint observation policy. Current-ready OCR (`1`) or current
 ineligible abstention (`2`) publishes only on valid infer; native USER32 suppression (`0`) advances
 neither OCR nor locator state. Every reuse preserves depth/cut/camera/V2 Base and the complete
-OCR8/SLR13/conditioned-final tuple. No mode relabels
+OCR8/SLR14/conditioned-final tuple. No mode relabels
 retained boxes as a new OCR observation, and there is no adaptive OCR-band, localized subtitle or
 SLR-state veto.
 
@@ -198,8 +204,11 @@ weak-GPU contention still require measurement under the shared qualification wor
 transport contract is owned by [Host SBS](host-sbs.md#gpu-owned-near-identical-transaction).
 
 For latency, keep DAV2 and OCR as siblings of the same CUDA root; do not add another stream or graph.
-First add diagnostic-only timestamps for both branches. If profiling shows OCR slack, the first
-candidate is its buffer-only probability-cell reduction and OCR8 candidate resolve moved into an OCR
+Diagnostic-only parent event nodes now measure both sibling conditional completions from one common
+post-setter start. They include scheduling and skipped bodies, are consumed only after exact current
+root completion, and do not establish isolated model time or OCR slack. Their semantics are owned
+by [Host SBS performance observations](host-sbs.md#performance-observations). If profiling shows OCR
+slack, the first candidate is its buffer-only probability-cell reduction and OCR8 candidate resolve moved into an OCR
 child tail after TensorRT. Keep shared RGB-to-NCHW and similarity work before the root, and keep
 SLR/conditioning/warp after the join. Port OCR crop preprocessing only if its measured benefit
 exceeds the source-texture interop cost. This is expected to offer only a modest critical-path saving,
@@ -262,11 +271,20 @@ Before changing V2 geometry:
 5. Confirm the result in Galaxy XR at the intended pop strength before changing the production
    contract or baselines.
 
-The immediate priority is to qualify the single-high fused baseline across paired dumps and Galaxy
-XR, including its high-grid temporal/cut/reuse behavior and small-source bilinear-upscale exception.
-After acceptance, optimize the frozen ZipDepth branch first with selective FP16 and algebraically
-equivalent grouped-1x1 Conv/GEMM rewrites. CUDA Tile/CompileIQ is justified only if those graph-level
-changes leave measured latency above budget. Geometry work remains a precision-first reduction of
+The immediate priority is to qualify the single-high fused baseline and opt-in adaptive geometry
+across paired dumps and Galaxy XR, including high-grid temporal/cut/reuse behavior and the
+small-source bilinear-upscale exception. Mode 3 now shares its raw histogram traversal with private
+cut normalization while preserving both populations and quantile policies; current-cover UI probes
+also retain their exact visits through cached group scratch and add/carry coordinates. These are
+work reductions requiring paired output and timing evidence, not a new distortion or gain policy.
+
+The frozen ZipDepth branch already uses guarded FP16 feature/mask weights with FP32 public I/O and
+convex reconstruction, projection-before-resize, and exact block-diagonal dense replacements for
+grouped pointwise convolutions. The accepted graph, measured evidence and rejected alternatives are
+owned by [the production fused-model document](host-sbs-prod-zipdepth-convex2x.md#model-only-optimization-result).
+Further model/kernel rewrites require fresh evidence of a remaining latency bottleneck; the earlier
+attention-GEMM and generic precision experiments are not unfinished production work. Geometry work
+remains a precision-first reduction of
 ambiguous small-object crown distortion: a candidate must improve glass-rim and small-near-object
 witnesses without reintroducing the hair/shoulder discontinuity or hand-boundary halo.
 

@@ -5,6 +5,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
+#include <utility>
 #include <string_view>
 
 namespace cuda_conditional_graph {
@@ -314,6 +316,46 @@ namespace cuda_conditional_graph {
     CUgraph reuse_child = nullptr;  // Optional IF/ELSE false body; null means skip on reuse.
     CUdeviceptr decision_record = 0u;  // Both records must be 16-byte aligned.
     CUdeviceptr request_record = 0u;
+    // Three parent-only event nodes measure sibling completion from one shared post-setter start.
+    // Missing optional timing APIs leave this unavailable; disabled creates no timing objects.
+    bool record_branch_timing = false;
+  };
+
+  struct branch_completion_timing_t {
+    float depth_ms = 0.0f;
+    float optional_ms = 0.0f;
+    bool has_optional = false;
+  };
+
+  // Estimator-thread diagnostic ownership. A graph event alone can expose its preceding launch
+  // until the current node records it, so only exact current-root completion consumes a sample.
+  struct branch_timing_pending_t {
+    std::uint64_t token = 0u;
+    std::uint64_t collector_generation = 0u;
+
+    [[nodiscard]] bool arm(std::uint64_t current_token, std::uint64_t generation) noexcept {
+      if (current_token == 0u || token != 0u) {
+        return false;
+      }
+      token = current_token;
+      collector_generation = generation;
+      return true;
+    }
+
+    [[nodiscard]] std::optional<std::uint64_t> consume(
+      std::uint64_t completed_token, bool current_root_complete
+    ) noexcept {
+      if (!current_root_complete || token == 0u || completed_token != token) {
+        return std::nullopt;
+      }
+      token = 0u;
+      return std::exchange(collector_generation, 0u);
+    }
+
+    void clear() noexcept {
+      token = 0u;
+      collector_generation = 0u;
+    }
   };
 
   enum class build_failure_e {
@@ -350,6 +392,8 @@ namespace cuda_conditional_graph {
     reuse_child_add_failed,
     instantiate_failed,
     context_restore_failed,
+    diagnostic_event_create_failed,
+    diagnostic_event_node_add_failed,
   };
 
   /** Owns the PTX module, wrapper graph, and instantiated conditional executable.
@@ -416,6 +460,18 @@ namespace cuda_conditional_graph {
       return audit_result_;
     }
 
+    [[nodiscard]] bool has_branch_completion_timing() const noexcept {
+      return ready() && branch_events_[0] && branch_events_[1];
+    }
+
+    /** Read only after the caller proves this exact current root complete. These are elapsed
+     * sibling conditional completion times, including scheduling and skipped bodies, not isolated
+     * TensorRT kernel durations. No query, allocation, synchronization or decision readback occurs.
+     */
+    [[nodiscard]] CUresult read_branch_completion_timing(
+      branch_completion_timing_t &timing, bool current_root_complete
+    ) const noexcept;
+
     /** Releases every CUDA object owned by the wrapper.
      *
      * Returns false when the owning context could not be made current/restored or a wrapper object
@@ -437,7 +493,9 @@ namespace cuda_conditional_graph {
     [[nodiscard]] bool empty() const noexcept {
       return module_ == nullptr && graph_ == nullptr && executable_ == nullptr &&
              scalar_mirrors_[0] == 0u && scalar_mirrors_[1] == 0u &&
-             scalar_mirrors_[2] == 0u && scalar_mirrors_[3] == 0u;
+             scalar_mirrors_[2] == 0u && scalar_mirrors_[3] == 0u &&
+             branch_events_[0] == nullptr && branch_events_[1] == nullptr &&
+             branch_events_[2] == nullptr;
     }
 
   private:
@@ -449,6 +507,8 @@ namespace cuda_conditional_graph {
     CUmodule module_ = nullptr;
     CUgraph graph_ = nullptr;
     CUgraphExec executable_ = nullptr;
+    // Common start, depth completion, optional completion. The parent graph borrows these events.
+    std::array<CUevent, 3u> branch_events_ {};
     // The fixed DAV2 and optional fixed OCR TensorRT graphs each own at most the two captured
     // pageable scalar-prefix copies validated by build(). Their device mirrors live outside the
     // conditional body and are refreshed before its setter node on every root launch.

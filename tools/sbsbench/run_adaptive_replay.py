@@ -23,6 +23,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -41,11 +42,13 @@ import host_sbs_shader_manifest  # noqa: E402
 CONTROL_HARNESS_SCHEMA = 29
 CONDITIONAL_HARNESS_SCHEMA = 28
 CONDITIONAL_METADATA_SCHEMA = 3
-TRACE_HEADER_WORDS = 16
-TRACE_RING_SCHEMA = 3
-TRACE_RING_TAG = 0x48525447
-TRACE_RECORD_TAG = 0x31525447
-TRACE_RECORD_WORDS = 176
+TRACE_HEADER_WORDS = depth_coordinate_v2_dump_contract.GPU_TRACE_HEADER_WORD_COUNT
+TRACE_HEADER_RESERVED_BEGIN = depth_coordinate_v2_dump_contract.GPU_TRACE_HEADER_OFFSETS[
+    "reserved_begin"]
+TRACE_RING_SCHEMA = depth_coordinate_v2_dump_contract.GPU_TRACE_RING_SCHEMA
+TRACE_RING_TAG = depth_coordinate_v2_dump_contract.GPU_TRACE_RING_TAG
+TRACE_RECORD_TAG = depth_coordinate_v2_dump_contract.GPU_TRACE_RECORD_TAG
+TRACE_RECORD_WORDS = depth_coordinate_v2_dump_contract.GPU_TRACE_RECORD_WORD_COUNT
 TRACE_RECORD_FRAME = 4
 TRACE_RECORD_SUBMISSION = 12
 TRACE_RECORD_DEPTH = 13
@@ -60,14 +63,22 @@ TRACE_RECORD_SOURCE_HEIGHT = 19
 TRACE_RECORD_FIELD_WIDTH = 20
 TRACE_RECORD_FIELD_HEIGHT = 21
 TRACE_RECORD_TRANSACTION_WORDS = 22
-TRACE_RECORD_RESERVED0 = 23
-TRACE_RECORD_TRANSACTION_BEGIN = 24
-TRACE_TRANSACTION_WORDS = 64
-TRACE_LOCATOR_WORDS = 80
-TRACE_CONDITION_WORDS = 6
-TRACE_RECORD_LOCATOR_BEGIN = TRACE_RECORD_TRANSACTION_BEGIN + TRACE_TRANSACTION_WORDS
-TRACE_RECORD_CONDITION_BEGIN = TRACE_RECORD_LOCATOR_BEGIN + TRACE_LOCATOR_WORDS
-TRACE_RECORD_OBSERVATION_TIMESTAMP = TRACE_RECORD_CONDITION_BEGIN + TRACE_CONDITION_WORDS
+TRACE_RECORD_RESERVED0 = depth_coordinate_v2_dump_contract.GPU_TRACE_RECORD_OFFSETS["reserved0"]
+TRACE_RECORD_TRANSACTION_BEGIN = depth_coordinate_v2_dump_contract.GPU_TRACE_RECORD_OFFSETS[
+    "transaction_begin"]
+TRACE_TRANSACTION_WORDS = depth_coordinate_v2_dump_contract.GPU_TRACE_TRANSACTION_WORD_COUNT
+TRACE_LOCATOR_WORDS = depth_coordinate_v2_dump_contract.GPU_TRACE_LOCATOR_WORD_COUNT
+TRACE_CONDITION_WORDS = depth_coordinate_v2_dump_contract.GPU_TRACE_CONDITION_WORD_COUNT
+TRACE_RECORD_LOCATOR_BEGIN = depth_coordinate_v2_dump_contract.GPU_TRACE_RECORD_OFFSETS[
+    "subtitle_locator_begin"]
+TRACE_RECORD_CONDITION_BEGIN = depth_coordinate_v2_dump_contract.GPU_TRACE_RECORD_OFFSETS[
+    "subtitle_condition_begin"]
+TRACE_RECORD_OBSERVATION_TIMESTAMP = depth_coordinate_v2_dump_contract.GPU_TRACE_RECORD_OFFSETS[
+    "observation_timestamp_low"]
+TRACE_RECORD_OBSERVATION_TIMESTAMP_HIGH = depth_coordinate_v2_dump_contract.GPU_TRACE_RECORD_OFFSETS[
+    "observation_timestamp_high"]
+TRACE_RECORD_RESERVED_BEGIN = depth_coordinate_v2_dump_contract.GPU_TRACE_RECORD_OFFSETS[
+    "reserved_begin"]
 TRACE_SUBMISSION_FORCE = 1
 TRACE_SUBMISSION_GPU_UNDECIDED = 2
 TRACE_DEPTH_REUSE = 1
@@ -95,7 +106,7 @@ WORK_VALUES = {
 }
 OPTIONAL_OCR_RECEIPT_MAGIC = 0x52434F4F
 PARALLAX_CONTAINER = np.float32(0.04)
-MAX_TRACE_FRAMES = 300
+MAX_TRACE_FRAMES = depth_coordinate_v2_dump_contract.GPU_TRACE_CAPACITY
 UINT64_MAX = (1 << 64) - 1
 ADAPTIVE_REQUEST_POLICY_SCHEMA = 6
 FRAME_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp"}
@@ -418,6 +429,39 @@ def decode_video_once(video: Path, frames_dir: Path, ffmpeg: Path, max_frames: i
     return source_frames(frames_dir, max_frames)
 
 
+def run_engine_preflight(exe: Path, conf: Path, build_dir: Path, frames_dir: Path,
+                         observation_timeline: Path, model: str) -> None:
+    """Resolve the exact engine with the selected first frame's timed context."""
+    first_timestamp = read_observation_timeline(observation_timeline)[0]
+    with tempfile.TemporaryDirectory(
+            prefix="sbs-engine-preflight-", dir=frames_dir.parent) as temporary:
+        preflight_root = Path(temporary)
+        preflight_timeline = preflight_root / "observation_timeline.sbsotl"
+        write_observation_timeline(preflight_timeline, [first_timestamp])
+        out_dir = preflight_root / "out"
+        out_dir.mkdir()
+        command = [
+            str(exe), str(conf.resolve()), "--sbs-bench", "--frames", str(frames_dir),
+            "--out", str(out_dir), "--limit", "1",
+            "--observation-timeline", str(preflight_timeline),
+        ]
+        try:
+            result = subprocess.run(
+                command, cwd=build_dir, capture_output=True, text=True, timeout=900,
+                env=run_eval.production_subprocess_env())
+        except subprocess.TimeoutExpired as exc:
+            raise EvidenceError("untimed TensorRT engine preflight timed out") from exc
+        if result.returncode != 0:
+            raise EvidenceError(
+                f"untimed TensorRT engine preflight failed (exit {result.returncode}):\n" +
+                (result.stdout + result.stderr)[-2000:])
+    issues = run_eval.check_engines(str(build_dir), model)
+    if issues:
+        raise EvidenceError(
+            "runtime did not publish a valid exact-engine manifest after preflight: " +
+            "; ".join(issues))
+
+
 def run_harness(exe: Path, conf: Path, build_dir: Path, frames_dir: Path,
                 observation_timeline: Path, out_dir: Path, frame_count: int,
                 conditional: bool, timeout: int) -> None:
@@ -499,7 +543,7 @@ def decode_trace(path: Path, metadata: dict, expected_frames: int) -> list[dict]
             f"committed={committed}")
     if len(words) != TRACE_HEADER_WORDS + capacity * record_words:
         raise EvidenceError("GPU trace byte size disagrees with capacity/record size")
-    if any(words[8:TRACE_HEADER_WORDS]):
+    if any(words[TRACE_HEADER_RESERVED_BEGIN:TRACE_HEADER_WORDS]):
         raise EvidenceError("GPU trace header reserved words are nonzero")
 
     records = []
@@ -515,6 +559,7 @@ def decode_trace(path: Path, metadata: dict, expected_frames: int) -> list[dict]
                 sequence != first_sequence + offset or
                 row[TRACE_RECORD_TRANSACTION_WORDS] != TRACE_TRANSACTION_WORDS or
                 row[TRACE_RECORD_RESERVED0] != 0 or
+                any(row[TRACE_RECORD_RESERVED_BEGIN:TRACE_RECORD_WORDS]) or
                 row[TRACE_RECORD_FLAGS] & ~TRACE_KNOWN_FLAGS or
                 row[TRACE_RECORD_EXPECTED_WORK] not in WORK_VALUES):
             raise EvidenceError(f"torn/out-of-order GPU trace record in slot {slot}")
@@ -548,7 +593,7 @@ def decode_trace(path: Path, metadata: dict, expected_frames: int) -> list[dict]
                 TRACE_RECORD_CONDITION_BEGIN + TRACE_CONDITION_WORDS]),
             "observation_timestamp_us": _join_u64(
                 row[TRACE_RECORD_OBSERVATION_TIMESTAMP],
-                row[TRACE_RECORD_OBSERVATION_TIMESTAMP + 1]),
+                row[TRACE_RECORD_OBSERVATION_TIMESTAMP_HIGH]),
         })
     if [record["frame_id"] for record in records] != list(range(1, expected_frames + 1)):
         raise EvidenceError("GPU trace frame identities are not the exact ordered corpus")
@@ -624,7 +669,9 @@ def _validate_subtitle_record(record: dict, previous: dict | None) -> None:
         if (previous is None or
                 (record["locator"], record["condition"]) !=
                 (previous["locator"], previous["condition"])):
-            raise EvidenceError("ordinary reuse did not bit-exactly hold SLR80 + condition6")
+            raise EvidenceError(
+                f"ordinary reuse did not bit-exactly hold SLR{TRACE_LOCATOR_WORDS} + "
+                f"condition{TRACE_CONDITION_WORDS}")
         if locator_frame == 0 or locator_frame >= frame_id:
             raise EvidenceError("held subtitle tuple does not retain an older frame identity")
     elif expected_subtitle in (TRACE_SUBTITLE_OPTIONAL_OCR, TRACE_SUBTITLE_ABSTENTION):
@@ -1457,8 +1504,8 @@ def main(argv: list[str] | None = None) -> int:
                 json.dumps(before, indent=2), encoding="utf-8")
             if runtime_identity is None:
                 print("untimed exact-engine preflight...", flush=True)
-                run_eval.run_engine_preflight(
-                    str(exe), str(conf), str(build_dir), str(frames_dir), expected_model)
+                run_engine_preflight(
+                    exe, conf, build_dir, frames_dir, observation_timeline, expected_model)
                 runtime_identity = adaptive_runtime_identity_snapshot(
                     exe, build_dir, expected_model)
                 payload["runtime"]["runtime_identity"] = runtime_identity

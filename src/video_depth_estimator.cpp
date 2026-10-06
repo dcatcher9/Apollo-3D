@@ -2392,6 +2392,7 @@ namespace models {
     };
 
     perf_evt_ring perf_depth_conditional;  // GPU arbitration plus either infer or reuse
+    cuda_conditional_graph::branch_timing_pending_t pending_branch_timing;
     std::shared_ptr<host_sbs_telemetry::collector> telemetry_performance;
 
     // D3D11 timing for the work around TensorRT. CUDA events above deliberately measure only
@@ -2829,6 +2830,33 @@ namespace models {
       r.busy[slot] = false;
     }
 
+    void resolve_completed_branch_timing() {
+      // Both callers already proved this exact pending root complete. Branch events alone are
+      // insufficient: until graph execution reaches them they may still name the earlier launch.
+      const auto generation = pending_branch_timing.consume(
+        pending_wrapper_transaction_token, true
+      );
+      if (!generation || *generation != sbs_perf::generation()) {
+        return;
+      }
+      cuda_conditional_graph::branch_completion_timing_t timing;
+      const auto result = depth_conditional_graph.read_branch_completion_timing(timing, true);
+      if (result != CUDA_SUCCESS) {
+        (void) observe_joined_cuda_failure(
+          "diagnostic sibling branch completion elapsed query", result, false
+        );
+        return;
+      }
+      sbs_perf::add_sample_ms_if_current(
+        "depth_conditional_depth_branch_gpu", timing.depth_ms, *generation
+      );
+      if (timing.has_optional) {
+        sbs_perf::add_sample_ms_if_current(
+          "depth_conditional_ocr_branch_gpu", timing.optional_ms, *generation
+        );
+      }
+    }
+
     void perf_drain(perf_evt_ring &r) {
       auto &cuda = cuda_driver_api::get();
       for (int i = 0; i < perf_evt_ring::N; i++) {
@@ -2941,6 +2969,7 @@ namespace models {
     }
 
     [[nodiscard]] bool reset_depth_conditional_graph() noexcept {
+      pending_branch_timing.clear();
       const bool reset_ok = depth_conditional_graph.reset();
       const bool wrapper_released = depth_conditional_graph.empty();
       if (!reset_ok) {
@@ -3581,6 +3610,7 @@ namespace models {
     // asynchronous bootstrap/root work was submitted may be deferred and quarantines every
     // context that participated.
     void mark_terminal_failure(const bool poison_execution_context = false) {
+      pending_branch_timing.clear();
       invalidate_publication();
       clear_pending_inference_event_state();
       execution_context_poisoned =
@@ -3776,6 +3806,7 @@ namespace models {
           .reuse_child = nullptr,
           .decision_record = decision_record,
           .request_record = request_record,
+          .record_branch_timing = diagnostics_enabled,
         }
       );
       if (!candidate.ready()) {
@@ -6473,7 +6504,7 @@ namespace models {
                           );
       if (joint_plane_mode == 3u) {
         resources_ok = resources_ok && create_float4_buffer(
-          static_cast<std::size_t>(reduce_groups) * 64u,
+          static_cast<std::size_t>(reduce_groups) * 128u,
           nullptr,
           depth_coordinate_v2_histogram_buf,
           depth_coordinate_v2_histogram_srv,
@@ -6651,6 +6682,7 @@ namespace models {
         .frame_stats = depth_coordinate_v2_frame_stats_srv.Get(),
         .histogram_output = depth_coordinate_v2_histogram_uav.Get(),
         .histogram = depth_coordinate_v2_histogram_srv.Get(),
+        .normalization_histogram_output = hist_uav.Get(),
       };
       const bool recorded = host_sbs_v2_gpu::record_moments_frame(
         context.Get(),
@@ -7494,6 +7526,7 @@ namespace models {
         return make_result();
       }
       if (diagnostics_enabled) {
+        resolve_completed_branch_timing();
         perf_drain(perf_depth_conditional);
         if (is_terminal()) {
           return make_result();
@@ -8002,9 +8035,9 @@ namespace models {
         };
         ID3D11ShaderResourceView *null_reduction_srvs[2] = {nullptr, nullptr};
 
-        // Pass A2 (percentile mode): 256-bin histogram over the raw range, so pass B
-        // can replace the outlier-sensitive min/max with robust percentile bounds.
-        if (depth_hist_cs && hist_uav) {
+        // Mode 3's preceding shared scan already overwrote this exact independent histogram.
+        // Mode 0 retains its existing scan, buffers and arithmetic without additional work.
+        if (joint_plane_mode == 0u && depth_hist_cs && hist_uav) {
           context->CSSetShader(depth_hist_cs.Get(), nullptr, 0);
           context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
           context->CSSetShaderResources(0, 2, reduction_srvs);
@@ -8388,6 +8421,15 @@ namespace models {
             return make_result();
           case pending_execution_readiness_e::ready:
             break;
+        }
+      }
+
+      // The fresh admission query or exact retained preflight proved the preceding full stream
+      // complete. Retire its timing before any signature change, wrapper reset or new launch.
+      if (diagnostics_enabled) {
+        resolve_completed_branch_timing();
+        if (is_terminal()) {
+          return {};
         }
       }
 
@@ -9477,10 +9519,20 @@ namespace models {
               joined_stream_work_ever_submitted = true;
               joined_stream_ocr_ever_submitted_or_armed =
                 joined_stream_ocr_ever_submitted_or_armed || launch_ocr_may_participate;
+              const auto branch_timing_generation = diagnostics_enabled ?
+                                                      sbs_perf::generation() : 0u;
               const CUresult launched = cuda.cuGraphLaunch(
                 depth_conditional_graph.get(), cu_stream
               );
               enqueued = launched == CUDA_SUCCESS;
+              if (enqueued && diagnostics_enabled &&
+                  depth_conditional_graph.has_branch_completion_timing()) {
+                if (!pending_branch_timing.arm(accepted_transaction_token, branch_timing_generation)) {
+                  // Never overwrite an unresolved launch's event identity. Geometry authority is
+                  // unchanged; this sample is unavailable rather than attributed to another frame.
+                  pending_branch_timing.clear();
+                }
+              }
               if (!enqueued) {
                 fail_gpu_conditional_bridge_once(
                   "conditional graph launch failed",

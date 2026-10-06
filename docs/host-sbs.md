@@ -65,7 +65,7 @@ diagnostics that explain how the final field was produced.
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
 schema 86/tag `0x063B91AB`, canonical SHA-256
-`9e86dbdbf11d83b19bcb4b5524d1485403a3c6a47f1d6bbe2b0bd078967e0a10`. It binds the
+`3373d1c19e3e845d47fb0c97c4b8b4a818a7115fb829e57cb3b9c5789bcb56b3`. It binds the
 complete policy below, including all subtitle field/ROI semantics. The generated named closure
 groups are the shared C++, Python, JSON, and documentation authority for every ordered shader set
 and source pin. The optional `parallax_v2_p010_y` group remains fail-open to the canonical
@@ -76,8 +76,8 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | Closure group | Ordered roots | Source-closure SHA-256 |
 | --- | ---: | --- |
 | `preprocess` | 1 | `943f3295e6cdb490d0833d981b153a5cda9a5153696eb5c9ca0042e474d8d744` |
-| `parallax_v2_producer` | 20 | `0055fbdfe68e6f34de0f7ebee9bb749207fc93d6e5855008a332232bf2f982e6` |
-| `parallax_v2_coordinate_diagnostic` | 1 | `e215e245c5974d8f00a8a5ab655325b0c4a554cd31787f7e09c741df0f635e29` |
+| `parallax_v2_producer` | 20 | `25eda2f214c67a3a2eb1fb75428c8d2ee4405c0bdaae720ea1b0994d409e7964` |
+| `parallax_v2_coordinate_diagnostic` | 1 | `0e99c0896f4fe9a5699adddecae0a0be11c7b9b2d2db6a5de05d38d7cec02784` |
 | `near_identical_detector` | 4 | `721e0a9d0ebc2cd6120acb97d41d07a6017909736a26309ee5e0bf13b4c6b7d7` |
 | `gpu_trace` | 1 | `76eca37a1c103a5e525a907ff70c0a68cd43a2e88104e51b5528d2204e159829` |
 | `parallax_v2_live_renderer` | 2 | `e4308603ee41db242fa95cffdc0987b41312891bd6c6914ba90bf2fae0be3d6f` |
@@ -131,6 +131,15 @@ equal the valid real-content population. Empty, nonfinite, collapsed, malformed 
 statistics render the current frame flat while an established camera holds; unavailable percentile
 authority is canonical zero and cannot be replaced with extrema.
 
+Mode 3 shares the raw-depth/exclusion traversal with the private cut-normalization histogram.
+The two populations remain independent: geometry uses the signed finite FrameStats range and
+P05/P95 bounds above; normalization retains its nonnegative validity, unsigned float-bit extrema
+(including signed zero), P02/P98 policy, and its existing floored-range bin arithmetic. Each group
+overwrites both sets of partial bins. The existing quantile resolve publishes the geometry tail
+and overwrites the normalization histogram before the unchanged range EMA consumes it. Mode 0
+retains its original normalization histogram pass. Sharing the scan does not merge statistical
+authority, change the scene detector, or normalize geometry into `[0,1]`.
+
 The continuously observed targets are `zero_target = mean(raw)` and
 `D_target = max((P95-P05)/2, raw_coordinate_scale)`, where the authenticated model's
 `raw_coordinate_scale` is currently `2.25`. The inverse-scale target is `k_target = 1/D_target`.
@@ -150,6 +159,10 @@ without spending the missing interval. A confirmed cut remains authenticated det
 metadata and does not reset or disarm the mode 3 geometry controller. A true input-domain reset
 clears all 28 state words. Authenticated reuse freezes the complete depth/OCR/UI/final tuple and
 controller state, so a static input can pause unfinished adaptation.
+
+The shader names this zero/scale/clock payload `V2AdaptiveCameraState`. Its four integer vectors
+and historical state-tail wire names retain their existing layout and checksum order. Requested
+pop gain remains stream configuration; there is no quality-responsive gain controller.
 
 Gain, depth mapping and the display guard remain separate. The coordinate is
 `u=(raw-zero)*k`, and mode 3 maps it directly:
@@ -183,6 +196,12 @@ more than 20% of covered cells or 2% of content cells; release requires strictly
 while dwell uses actual source time. An authenticated capped-conflict flag records that even the
 top candidate cannot satisfy the configured clearance; the controller cannot promise clearance
 when the scene consumes the same forward guard.
+
+Within the resolve group, a publication barrier precedes a shared-memory snapshot of those current
+covers, and a group barrier precedes the probe. This scratch is neither retained cover authority
+nor a new observation. Each lane keeps its original `lane + 256*k` row-major cell visits through
+add/carry coordinates, including partial rows; overlap deduplication and conflict budgets are
+unchanged.
 
 Current covers receive the plane's exact float bits immediately, with zero within-cover depth
 range and full fade strength. This removes birth mixing and the production half-source-pixel
@@ -220,8 +239,11 @@ Fixed-shape shader bytecode is cached across restarts under the executable's tru
 directory at `shader-cache/host-sbs-v1`. Each artifact filename is keyed by the authenticated source
 closure, ordered entrypoint/target, and compile flags. Runtime reflection validates the cached stage
 and Shader Model 5.0 bytecode before use; missing, stale, truncated, or invalid artifacts are
-compiled from the immutable source snapshot and replaced atomically. This is only a startup
-optimization and cannot weaken source-closure authentication or required shader-creation fail-flat
+compiled from the immutable source snapshot and replaced atomically. Cache configuration occurs
+before command dispatch as well as live worker startup, so benchmark and conversion commands use
+the same executable-owned cache boundary. Command modes still return before background live-model
+preparation and own their TensorRT lifecycle. This startup optimization cannot weaken
+source-closure authentication or required shader-creation fail-flat
 behavior. One fused near-identical preprocess root is the mandatory calibrated preprocess and the
 sole runtime RGB-to-NCHW producer. Its prewarm, device creation, mode buffers, previous-input view,
 and tile output are required; failure leaves Host SBS flat instead of selecting a second producer or
@@ -1327,6 +1349,24 @@ copy plus owner publication up to `parallax_limits_start`; that added bandwidth 
 timer and is not a new counter or schema boundary. The cadence diagnostics report
 `roi_direct_inputs/dump_copies`; the first counts admitted direct ROI inputs, while the second can
 increase only for an explicit Dump 3D diagnostic reconstruction after live timing has closed.
+
+In mode 3, `depth_parallax_stats_gpu` also includes both independent histogram populations and their
+shared resolve. The later normalization-only histogram dispatch is absent. Compare the complete
+`depth_postprocess_gpu` interval across the scan change, rather than treating the wider stats
+interval as new work. Mode 0 retains its prior timing scope.
+
+With diagnostics enabled and optional CUDA event-node support available, the parent conditional
+graph records one common start after its setter and one completion after each sibling IF node.
+`depth_conditional_depth_branch_gpu` and `depth_conditional_ocr_branch_gpu` measure elapsed time
+from that start to the respective conditional completion, including scheduling and skipped bodies;
+they are not isolated TensorRT durations. The OCR timer exists only when the optional sibling is
+present. Samples are consumed only after the exact current root completes, once per matching token
+and performance-collector generation, without a decision readback or additional wait. Disabled or
+unavailable timing produces no sample. These intervals overlap each other and the joined
+`depth_conditional_transaction` interval, so they must not be summed. They are additional diagnostic
+stage records, not new Host Stats wire fields or evidence that an OCR tail rewrite will improve
+final SBS readiness.
+
 Throughput diagnostics report admission attempts per second over the same elapsed window as
 enqueues and completions. Attempts can include retained-source retries, so they are neither
 capture FPS nor actual model invocation rate. They also split CPU-known force-infer roots from GPU-undecided roots and report

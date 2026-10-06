@@ -211,6 +211,7 @@ typedef CUresult(__stdcall* PFN_cuEventQuery)(CUevent hEvent);
 typedef CUresult(__stdcall* PFN_cuEventSynchronize)(CUevent hEvent);
 typedef CUresult(__stdcall* PFN_cuEventElapsedTime)(float* pMilliseconds, CUevent hStart, CUevent hEnd);
 typedef CUresult(__stdcall* PFN_cuEventDestroy)(CUevent hEvent);
+typedef CUresult(__stdcall* PFN_cuGraphAddEventRecordNode)(CUgraphNode* phGraphNode, CUgraph hGraph, const CUgraphNode* dependencies, size_t numDependencies, CUevent event);
 typedef CUresult(__stdcall* PFN_cuGraphicsMapResources)(unsigned int count, CUgraphicsResource* resources, CUstream hStream);
 typedef CUresult(__stdcall* PFN_cuGraphicsUnmapResources)(unsigned int count, CUgraphicsResource* resources, CUstream hStream);
 typedef CUresult(__stdcall* PFN_cuGraphicsResourceGetMappedPointer)(CUdeviceptr* pDevPtr, size_t* pSize, CUgraphicsResource resource);
@@ -280,6 +281,7 @@ struct cuda_driver_api {
     PFN_cuEventSynchronize cuEventSynchronize = nullptr;
     PFN_cuEventElapsedTime cuEventElapsedTime = nullptr;
     PFN_cuEventDestroy cuEventDestroy = nullptr;
+    PFN_cuGraphAddEventRecordNode cuGraphAddEventRecordNode = nullptr;
 
     bool is_valid() const {
         // This is the minimum contract used by video_depth_estimator, not merely proof that
@@ -323,6 +325,11 @@ struct cuda_driver_api {
                cuGraphMemcpyNodeGetParams &&
                (cuGraphNodeGetDependencies_v2 || cuGraphNodeGetDependencies) &&
                (cuGraphNodeGetDependentNodes_v2 || cuGraphNodeGetDependentNodes);
+    }
+
+    // Optional diagnostics, deliberately excluded from conditional execution capability.
+    bool has_graph_branch_timing_support() const {
+        return cuEventCreate && cuEventDestroy && cuEventElapsedTime && cuGraphAddEventRecordNode;
     }
 
     CUresult graph_add_node(CUgraphNode* node, CUgraph graph, const CUgraphNode* dependencies, size_t dependency_count, CUgraphNodeParams* params) const {
@@ -417,6 +424,7 @@ struct cuda_driver_api {
                 api.cuEventQuery = (PFN_cuEventQuery)GetProcAddress(api.hMod, "cuEventQuery");
                 api.cuEventSynchronize = (PFN_cuEventSynchronize)GetProcAddress(api.hMod, "cuEventSynchronize");
                 api.cuEventElapsedTime = (PFN_cuEventElapsedTime)GetProcAddress(api.hMod, "cuEventElapsedTime");
+                api.cuGraphAddEventRecordNode = (PFN_cuGraphAddEventRecordNode)GetProcAddress(api.hMod, "cuGraphAddEventRecordNode");
                 api.cuEventDestroy = (PFN_cuEventDestroy)GetProcAddress(api.hMod, "cuEventDestroy_v2");
                 if (!api.cuEventDestroy) api.cuEventDestroy = (PFN_cuEventDestroy)GetProcAddress(api.hMod, "cuEventDestroy");
             }

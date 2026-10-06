@@ -707,40 +707,46 @@ def _subtitle_same_baseline_segments(
 
 def _subtitle_qualified_ocr_core(
         rectangle: Dict[str, Any], tensor_content: tuple[int, int, int, int],
-        roi_bottom: int) -> bool:
-    """Mirror SLR13's generic core geometry gate after OCR8 validation."""
+        roi_bottom: int, *, field_width: int, field_height: int) -> bool:
+    """Mirror native core qualification in the authenticated locator field grid."""
 
     width = rectangle["right"] - rectangle["left"]
     height = rectangle["bottom"] - rectangle["top"]
     policy = coordinate_contract.SUBTITLE_OCR
-    field_width = tensor_content[2] - tensor_content[0]
-    if (width < policy.locator_min_width_cells or
-            height < policy.locator_min_height_cells or
+    content_width = tensor_content[2] - tensor_content[0]
+    field_cell_scale = coordinate_contract.subtitle_locator_field_cell_scale(
+        field_width, field_height)
+    if (field_cell_scale == 0 or
+            width < policy.locator_min_width_cells * field_cell_scale or
+            height < policy.locator_min_height_cells * field_cell_scale or
             width * policy.locator_min_aspect_denominator <
             policy.locator_min_aspect_numerator * height):
         return False
     if rectangle["kind"] == "ribbon":
         return True
-    corner_edge_threshold = field_width // policy.locator_corner_edge_divisor
+    corner_edge_threshold = content_width // policy.locator_corner_edge_divisor
     edge_clearance = min(
         rectangle["left"] - tensor_content[0],
         tensor_content[2] - rectangle["right"])
     if (edge_clearance < corner_edge_threshold and
-            rectangle["bottom"] + policy.locator_corner_bottom_rows >= roi_bottom):
+            rectangle["bottom"] +
+            policy.locator_corner_bottom_rows * field_cell_scale >= roi_bottom):
         return False
     return (width * policy.locator_max_width_denominator <=
-            field_width * policy.locator_max_width_numerator)
+            content_width * policy.locator_max_width_numerator)
 
 
 def _subtitle_selected_ocr_indices(
         raw_boxes: list[Dict[str, Any]], tensor_content: tuple[int, int, int, int],
-        roi_bottom: int) -> list[int]:
+        roi_bottom: int, *, field_width: int, field_height: int) -> list[int]:
     """Replay frozen SLR13 component closure/selection on same-frame OCR8 cores."""
 
-    field_width = tensor_content[2] - tensor_content[0]
+    content_width = tensor_content[2] - tensor_content[0]
     qualified = [
         index for index, rectangle in enumerate(raw_boxes)
-        if _subtitle_qualified_ocr_core(rectangle, tensor_content, roi_bottom)
+        if _subtitle_qualified_ocr_core(
+            rectangle, tensor_content, roi_bottom,
+            field_width=field_width, field_height=field_height)
     ]
     ordinary = [index for index in qualified if raw_boxes[index]["kind"] == "text"]
     ribbon = [index for index in qualified if raw_boxes[index]["kind"] == "ribbon"]
@@ -757,7 +763,7 @@ def _subtitle_selected_ocr_indices(
             for right in tuple(unseen):
                 if (_subtitle_coherent_lines(raw_boxes[left], raw_boxes[right]) or
                         _subtitle_same_baseline_segments(
-                            raw_boxes[left], raw_boxes[right], field_width)):
+                            raw_boxes[left], raw_boxes[right], content_width)):
                     reached.add(right)
                     frontier.append(right)
                     unseen.remove(right)
@@ -772,7 +778,7 @@ def _subtitle_selected_ocr_indices(
         bbox, area = _subtitle_rectangle_aggregate(rectangles)
         policy = coordinate_contract.SUBTITLE_OCR
         if ((bbox[2] - bbox[0]) * policy.locator_max_width_denominator >
-                field_width * policy.locator_max_width_numerator):
+                content_width * policy.locator_max_width_numerator):
             continue
         # Selection maximizes summed core area. Ties prefer lower bottom, then lower top, then
         # smaller left exactly as BuildCurrentStack's deterministic comparison does.
@@ -3877,7 +3883,8 @@ def _verify_subtitle_conditioning_artifacts(
         if not ocr["authoritative"] and locator["current_count"] != 0:
             raise ValueError("an abstaining OCR8 record cannot authorize SLR13 current rectangles")
         selected_indices = _subtitle_selected_ocr_indices(
-            ocr["raw_boxes"], content, roi_bottom)
+            ocr["raw_boxes"], content, roi_bottom,
+            field_width=field_width, field_height=field_height)
         selected_final_rectangles = [
             (ocr["final_boxes"][index]["left"],
              ocr["final_boxes"][index]["top"],

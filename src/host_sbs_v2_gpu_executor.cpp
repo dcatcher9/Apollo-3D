@@ -117,7 +117,8 @@ namespace models::host_sbs_v2_gpu {
     }
     if (command.robust_quantiles &&
         (!command.histogram_shader || !command.quantile_shader || !command.frame_stats ||
-         !command.histogram_output || !command.histogram)) {
+         !command.histogram_output || !command.histogram ||
+         !command.normalization_histogram_output)) {
       return false;
     }
 
@@ -151,17 +152,23 @@ namespace models::host_sbs_v2_gpu {
         command.raw_depth, command.tensor_exclusion, command.frame_stats,
       };
       context->CSSetShaderResources(0u, 3u, histogram_inputs);
-      context->CSSetUnorderedAccessViews(0u, 1u, &command.histogram_output, nullptr);
+      ID3D11UnorderedAccessView *histogram_outputs[2] = {
+        command.histogram_output, command.minmax_raw_output,
+      };
+      context->CSSetUnorderedAccessViews(0u, 2u, histogram_outputs, nullptr);
       (void) record_dispatch(context, command.moments_dispatch);
       ID3D11ShaderResourceView *null_histogram_inputs[3] = {};
       context->CSSetShaderResources(0u, 3u, null_histogram_inputs);
-      context->CSSetUnorderedAccessViews(0u, 1u, null_outputs, nullptr);
+      context->CSSetUnorderedAccessViews(0u, 2u, null_outputs, nullptr);
       context->CSSetShader(command.quantile_shader, nullptr, 0u);
       context->CSSetShaderResources(0u, 1u, &command.histogram);
-      context->CSSetUnorderedAccessViews(0u, 1u, &command.frame_stats_output, nullptr);
+      ID3D11UnorderedAccessView *quantile_outputs[2] = {
+        command.frame_stats_output, command.normalization_histogram_output,
+      };
+      context->CSSetUnorderedAccessViews(0u, 2u, quantile_outputs, nullptr);
       (void) record_dispatch(context, command.frame_resolve_dispatch);
       context->CSSetShaderResources(0u, 1u, null_inputs);
-      context->CSSetUnorderedAccessViews(0u, 1u, null_outputs, nullptr);
+      context->CSSetUnorderedAccessViews(0u, 2u, null_outputs, nullptr);
     }
     return true;
   }

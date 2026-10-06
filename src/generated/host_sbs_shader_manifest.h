@@ -80,13 +80,13 @@ namespace models::host_sbs_shader_cache {
     host_sbs_subtitle_condition,
   };
   inline constexpr std::string_view parallax_v2_producer_source_closure_sha256 =
-    "0055fbdfe68e6f34de0f7ebee9bb749207fc93d6e5855008a332232bf2f982e6";
+    "25eda2f214c67a3a2eb1fb75428c8d2ee4405c0bdaae720ea1b0994d409e7964";
 
   inline constexpr std::array parallax_v2_coordinate_diagnostic_specs {
     depth_coordinate_v2_coordinate_diagnostic,
   };
   inline constexpr std::string_view parallax_v2_coordinate_diagnostic_source_closure_sha256 =
-    "e215e245c5974d8f00a8a5ab655325b0c4a554cd31787f7e09c741df0f635e29";
+    "0e99c0896f4fe9a5699adddecae0a0be11c7b9b2d2db6a5de05d38d7cec02784";
 
   inline constexpr std::array near_identical_detector_specs {
     host_sbs_near_identical_resolve,

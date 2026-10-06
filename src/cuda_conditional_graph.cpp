@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <limits>
 #include <utility>
 #include <vector>
@@ -560,6 +561,9 @@ namespace cuda_conditional_graph {
     module_ = std::exchange(other.module_, nullptr);
     graph_ = std::exchange(other.graph_, nullptr);
     executable_ = std::exchange(other.executable_, nullptr);
+    for (std::size_t i = 0u; i < branch_events_.size(); ++i) {
+      branch_events_[i] = std::exchange(other.branch_events_[i], nullptr);
+    }
     scalar_mirrors_[0] = std::exchange(other.scalar_mirrors_[0], 0u);
     scalar_mirrors_[1] = std::exchange(other.scalar_mirrors_[1], 0u);
     scalar_mirrors_[2] = std::exchange(other.scalar_mirrors_[2], 0u);
@@ -587,6 +591,16 @@ namespace cuda_conditional_graph {
         return false;
       }
       graph_ = nullptr;
+    }
+    // The graph/executable must release their event references first. Destruction remains
+    // monotonic: a CUDA failure retains every later operand for the caller's quiescent retry.
+    for (CUevent &event : branch_events_) {
+      if (event) {
+        if (!cuda_->cuEventDestroy || cuda_->cuEventDestroy(event) != CUDA_SUCCESS) {
+          return false;
+        }
+        event = nullptr;
+      }
     }
     if (module_) {
       if (!cuda_->cuModuleUnload ||
@@ -634,12 +648,49 @@ namespace cuda_conditional_graph {
     module_ = nullptr;
     graph_ = nullptr;
     executable_ = nullptr;
+    branch_events_ = {};
     for (CUdeviceptr &mirror : scalar_mirrors_) {
       mirror = 0u;
     }
     failure_ = build_failure_e::invalid_descriptor;
     cuda_result_ = CUDA_SUCCESS;
     audit_result_ = {};
+  }
+
+  CUresult executable_t::read_branch_completion_timing(
+    branch_completion_timing_t &timing, const bool current_root_complete
+  ) const noexcept {
+    timing = {};
+    if (!current_root_complete) {
+      return CUDA_ERROR_NOT_READY;
+    }
+    if (!has_branch_completion_timing() || !cuda_ || !cuda_->cuEventElapsedTime) {
+      return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    auto result = cuda_->cuEventElapsedTime(
+      &timing.depth_ms, branch_events_[0], branch_events_[1]
+    );
+    if (result != CUDA_SUCCESS) {
+      timing = {};
+      return result;
+    }
+    timing.has_optional = branch_events_[2] != nullptr;
+    if (timing.has_optional) {
+      result = cuda_->cuEventElapsedTime(
+        &timing.optional_ms, branch_events_[0], branch_events_[2]
+      );
+      if (result != CUDA_SUCCESS) {
+        timing = {};
+        return result;
+      }
+    }
+    if (!std::isfinite(timing.depth_ms) || timing.depth_ms < 0.0f ||
+        (timing.has_optional &&
+         (!std::isfinite(timing.optional_ms) || timing.optional_ms < 0.0f))) {
+      timing = {};
+      return CUDA_ERROR_INVALID_HANDLE;
+    }
+    return CUDA_SUCCESS;
   }
 
   executable_t executable_t::build(
@@ -892,6 +943,33 @@ namespace cuda_conditional_graph {
       return finish(false);
     }
 
+    CUgraphNode branch_start_node = setter_node;
+    const bool record_timing = desc.record_branch_timing &&
+                               cuda.has_graph_branch_timing_support();
+    if (record_timing) {
+      const std::size_t event_count = desc.optional_infer_child ? 3u : 2u;
+      for (std::size_t i = 0u; i < event_count; ++i) {
+        output.cuda_result_ = cuda.cuEventCreate(&output.branch_events_[i], CU_EVENT_DEFAULT);
+        if (output.cuda_result_ != CUDA_SUCCESS || !output.branch_events_[i]) {
+          output.failure_ = build_failure_e::diagnostic_event_create_failed;
+          if (output.cuda_result_ == CUDA_SUCCESS) {
+            output.cuda_result_ = CUDA_ERROR_INVALID_HANDLE;
+          }
+          return finish(false);
+        }
+      }
+      output.cuda_result_ = cuda.cuGraphAddEventRecordNode(
+        &branch_start_node, output.graph_, &setter_node, 1u, output.branch_events_[0]
+      );
+      if (output.cuda_result_ != CUDA_SUCCESS || !branch_start_node) {
+        output.failure_ = build_failure_e::diagnostic_event_node_add_failed;
+        if (output.cuda_result_ == CUDA_SUCCESS) {
+          output.cuda_result_ = CUDA_ERROR_INVALID_HANDLE;
+        }
+        return finish(false);
+      }
+    }
+
     CUgraphNodeParams conditional_params {};
     conditional_params.type = CU_GRAPH_NODE_TYPE_CONDITIONAL;
     conditional_params.params.conditional.handle = handle;
@@ -900,7 +978,7 @@ namespace cuda_conditional_graph {
     conditional_params.params.conditional.ctx = desc.context;
     CUgraphNode conditional_node = nullptr;
     output.cuda_result_ = cuda.graph_add_node(
-      &conditional_node, output.graph_, &setter_node, 1u, &conditional_params
+      &conditional_node, output.graph_, &branch_start_node, 1u, &conditional_params
     );
     if (output.cuda_result_ != CUDA_SUCCESS) {
       output.failure_ = build_failure_e::conditional_node_add_failed;
@@ -924,7 +1002,7 @@ namespace cuda_conditional_graph {
     output.cuda_result_ = cuda.graph_add_node(
       &optional_conditional_node,
       output.graph_,
-      &setter_node,
+      &branch_start_node,
       1u,
       &optional_conditional_params
     );
@@ -1014,6 +1092,24 @@ namespace cuda_conditional_graph {
       if (output.cuda_result_ != CUDA_SUCCESS) {
         output.failure_ = build_failure_e::reuse_child_add_failed;
         return finish(false);
+      }
+    }
+
+    if (record_timing) {
+      const std::array<CUgraphNode, 2u> branches {conditional_node, optional_conditional_node};
+      const std::size_t branch_count = desc.optional_infer_child ? 2u : 1u;
+      for (std::size_t i = 0u; i < branch_count; ++i) {
+        CUgraphNode completion_node = nullptr;
+        output.cuda_result_ = cuda.cuGraphAddEventRecordNode(
+          &completion_node, output.graph_, &branches[i], 1u, output.branch_events_[i + 1u]
+        );
+        if (output.cuda_result_ != CUDA_SUCCESS || !completion_node) {
+          output.failure_ = build_failure_e::diagnostic_event_node_add_failed;
+          if (output.cuda_result_ == CUDA_SUCCESS) {
+            output.cuda_result_ = CUDA_ERROR_INVALID_HANDLE;
+          }
+          return finish(false);
+        }
       }
     }
 

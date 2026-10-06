@@ -176,12 +176,15 @@ namespace {
           !compile("depth_coordinate_v2_histogram_cs.hlsl", histogram_shader) ||
           !compile("depth_coordinate_v2_quantiles_cs.hlsl", quantile_shader)) return result;
       const std::array<std::uint32_t, 12u> partial_words {};
-      const std::array<std::uint32_t, 256u> histogram_words {};
-      gain_buffer_t partials, histogram;
+      const std::array<std::uint32_t, 512u> histogram_words {};
+      const std::array<std::uint32_t, 256u> normalization_histogram_words {};
+      gain_buffer_t partials, histogram, normalization_histogram;
       if (!buffer(partial_words.data(), sizeof(partial_words), 16u,
             D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, partials) ||
           !buffer(histogram_words.data(), sizeof(histogram_words), 16u,
-            D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, histogram)) return result;
+            D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, histogram) ||
+          !buffer(normalization_histogram_words.data(), sizeof(normalization_histogram_words), 4u,
+            D3D11_BIND_UNORDERED_ACCESS, normalization_histogram)) return result;
       D3D11_BUFFER_DESC normalization_desc {};
       normalization_desc.ByteWidth = 16u;
       normalization_desc.Usage = D3D11_USAGE_DEFAULT;
@@ -224,6 +227,7 @@ namespace {
         .frame_stats = stats.srv.Get(),
         .histogram_output = histogram.uav.Get(),
         .histogram = histogram.srv.Get(),
+        .normalization_histogram_output = normalization_histogram.uav.Get(),
       };
       if (!executor::record_moments_frame(context.Get(), command)) {
         ADD_FAILURE() << "shared executor rejected native quantile test";

@@ -84,6 +84,8 @@ groupshared uint AdaptiveDomainValid;
 static const uint ADAPTIVE_HOST_MAX_SOURCE_WIDTH = 5120u;
 static const uint ADAPTIVE_COUNT_WORDS = 56u;
 groupshared uint AdaptiveCounts[ADAPTIVE_COUNT_WORDS];
+groupshared uint AdaptiveCurrentCount;
+groupshared uint4 AdaptiveCurrentCovers[MAX_LINES];
 
 static const uint CONDITION_PARAM_SCHEMA_WORD = 0u;
 static const uint CONDITION_PARAM_TAG_WORD = 1u;
@@ -118,10 +120,6 @@ uint AdaptiveMaximumIndex() {
 
 uint AdaptiveRead(bool previous, uint word) {
     return previous ? PreviousState[ADAPTIVE + word] : ConditionStateSnapshot[ADAPTIVE + word];
-}
-
-bool SourceTimeAfter(uint2 a, uint2 b) {
-    return a.y > b.y || (a.y == b.y && a.x > b.x);
 }
 
 bool AdaptiveTailValid(bool previous) {
@@ -165,8 +163,8 @@ bool AdaptiveTailValid(bool previous) {
         (((flags & ADAPTIVE_CLOCK) != 0u) == any(clock != 0u)) &&
         (((flags & ADAPTIVE_APPROACH) != 0u) == any(approach != 0u)) &&
         (((flags & ADAPTIVE_RETREAT) != 0u) == any(retreat != 0u)) &&
-        ((flags & ADAPTIVE_APPROACH) == 0u || !SourceTimeAfter(approach, clock)) &&
-        ((flags & ADAPTIVE_RETREAT) == 0u || !SourceTimeAfter(retreat, clock)) &&
+        ((flags & ADAPTIVE_APPROACH) == 0u || !V2ClockAfter(approach, clock)) &&
+        ((flags & ADAPTIVE_RETREAT) == 0u || !V2ClockAfter(retreat, clock)) &&
         covered <= content_area && AdaptiveRead(previous, 14u) <= covered &&
         (v2_joint_plane_mode != 3u ||
          (((flags & ADAPTIVE_CAPPED) != 0u) ==
@@ -1888,13 +1886,9 @@ bool AdaptiveBudgetPass(uint bad, uint covered, uint content, bool release) {
         bad * 5u <= covered && bad * 50u <= content;
 }
 
-uint2 SourceTimeDifference(uint2 newer, uint2 older) {
-    return uint2(newer.x - older.x, newer.y - older.y - (newer.x < older.x ? 1u : 0u));
-}
-
 bool SourceTimeElapsed(uint2 now, uint2 start, uint minimum_us) {
-    if (SourceTimeAfter(start, now)) return false;
-    uint2 elapsed = SourceTimeDifference(now, start);
+    if (V2ClockAfter(start, now)) return false;
+    uint2 elapsed = V2ClockSubtract(now, start);
     return elapsed.y != 0u || elapsed.x >= minimum_us;
 }
 
@@ -1982,7 +1976,7 @@ void AdaptiveAdvance() {
     uint2 last = uint2(tail[4u], tail[5u]);
     bool have_clock = (flags & ADAPTIVE_CLOCK) != 0u;
     if (AdaptiveCounts[1u] != 0u || all(now == 0u) ||
-        (have_clock && !SourceTimeAfter(now, last))) {
+        (have_clock && !V2ClockAfter(now, last))) {
         // No frame count/FPS clock is substituted. Keep the last accepted source time and plane.
         AdaptiveDisarm(flags, tail);
         tail[1u] = flags;
@@ -2038,7 +2032,7 @@ void AdaptiveAdvance() {
     }
     float target = AdaptiveCandidate(goal, limit);
     if (have_clock) {
-        uint2 elapsed = SourceTimeDifference(now, last);
+        uint2 elapsed = V2ClockSubtract(now, last);
         // Game's live rate integration is capped to 250ms; this does not discard dwell evidence
         // or expire a legitimate slower inference cadence. Both rates are one-eye source U/sec.
         float seconds = elapsed.y != 0u ? 0.25f : min((float)elapsed.x * 1.0e-6f, 0.25f);
@@ -2087,25 +2081,35 @@ void AdaptiveProbe(uint lane) {
     uint maximum_index = AdaptiveMaximumIndex();
     uint pending_bucket = 0xffffffffu;
     uint pending_count = 0u;
-    uint current_count = LocatorState[20u];
+    uint current_count = AdaptiveCurrentCount;
     [loop]
     for (uint slot = 0u; slot < current_count; ++slot) {
-        uint offset = V2_SUBTITLE_LOCATOR_CURRENT_OFFSET + slot * 4u;
-        uint4 rectangle = uint4(LocatorState[offset], LocatorState[offset + 1u],
-                               LocatorState[offset + 2u], LocatorState[offset + 3u]);
+        uint4 rectangle = AdaptiveCurrentCovers[slot];
         uint width = rectangle.z - rectangle.x;
         uint area = width * (rectangle.w - rectangle.y);
+        // Keep each lane's original cell, cell+256, ... row-major visits. Derive the initial
+        // coordinate and stride once; add/carry avoids dynamic division for every covered cell.
+        uint position_y = lane / width;
+        uint position_x = lane - position_y * width;
+        uint stride_y = 256u / width;
+        uint stride_x = 256u - stride_y * width;
         [loop]
         for (uint cell = lane; cell < area; cell += 256u) {
-            uint2 position = uint2(rectangle.x + cell % width, rectangle.y + cell / width);
+            uint2 position = rectangle.xy + uint2(position_x, position_y);
+            position_x += stride_x;
+            position_y += stride_y;
+            if (position_x >= width) {
+                position_x -= width;
+                ++position_y;
+            }
             bool already_counted = false;
             [unroll]
             for (uint earlier = 0u; earlier < MAX_LINES; ++earlier) {
                 if (earlier < slot) {
-                    uint prior = V2_SUBTITLE_LOCATOR_CURRENT_OFFSET + earlier * 4u;
+                    uint4 prior = AdaptiveCurrentCovers[earlier];
                     already_counted = already_counted ||
-                        (position.x >= LocatorState[prior] && position.y >= LocatorState[prior + 1u] &&
-                         position.x < LocatorState[prior + 2u] && position.y < LocatorState[prior + 3u]);
+                        (position.x >= prior.x && position.y >= prior.y &&
+                         position.x < prior.z && position.y < prior.w);
                 }
             }
             if (already_counted) continue;
@@ -2141,6 +2145,15 @@ void resolve_main(uint3 dispatch_id : SV_DispatchThreadID, uint lane : SV_GroupI
     AllMemoryBarrierWithGroupSync();
     if (JointPlaneEnabled()) {
         if (lane < ADAPTIVE_COUNT_WORDS) AdaptiveCounts[lane] = 0u;
+        // Snapshot the just-published authenticated current covers once per group. Reuse and
+        // redispatch retain their existing observation gates; this scratch grants no authority.
+        if (lane == 0u) AdaptiveCurrentCount = LocatorState[20u];
+        if (lane < MAX_LINES) {
+            uint offset = V2_SUBTITLE_LOCATOR_CURRENT_OFFSET + lane * 4u;
+            AdaptiveCurrentCovers[lane] = uint4(
+                LocatorState[offset], LocatorState[offset + 1u],
+                LocatorState[offset + 2u], LocatorState[offset + 3u]);
+        }
         GroupMemoryBarrierWithGroupSync();
         if (AdaptiveDomainValid != 0u && AdaptiveOcrValid != 0u &&
             (AdaptiveDistinct != 0u || AdaptiveReset != 0u)) AdaptiveProbe(lane);
