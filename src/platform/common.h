@@ -501,6 +501,15 @@ namespace platf {
       (void) wake;
     }
 
+    /** True while conversion shows a frame of a live independent external source whose next frame
+     * may finish at any moment. The encode loop then re-checks needs_conversion_poll() at short
+     * intervals once a new frame may be due, so a late or lost wake cannot leave a finished frame
+     * waiting. Others are never held.
+     */
+    virtual bool external_frame_held() const {
+      return false;
+    }
+
     /** The encoder finished consuming the most recent conversion; release its inputs early. */
     virtual void encoder_consumed_input() {}
 

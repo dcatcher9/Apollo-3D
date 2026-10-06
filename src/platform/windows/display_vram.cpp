@@ -508,6 +508,11 @@ namespace platf::dxgi {
       return conversion_kept_input_;
     }
 
+    // The streaming loop converts a held live export, whose next frame it re-checks for.
+    bool external_frame_held() const {
+      return reshade_receiver && ::video::is_packed_mode(sbs_mode) && external_frame_wake && reshade_receiver->frame_held();
+    }
+
     void encoder_consumed_input() {
       // The conversion's reads of a replaced export slot are normally complete once its encode
       // returns; hand that slot back now instead of at the next conversion.
@@ -555,19 +560,24 @@ namespace platf::dxgi {
     }
 
     bool needs_conversion_poll() const {
-      if (stream_gamma_conversion_pending || (stream_gamma_mode_ != ::video::stream_gamma_mode_e::windows_default && std::chrono::steady_clock::now() >= stream_gamma_white_query_at)) {
+      if (stream_gamma_conversion_pending) {
         return true;
       }
+      const bool white_query_due = stream_gamma_mode_ != ::video::stream_gamma_mode_e::windows_default && std::chrono::steady_clock::now() >= stream_gamma_white_query_at;
       // ReShade publishes independently of desktop presents. Local AR polls it at its own cadence.
       // A streaming encoder converts a live export when its ready fence wakes it (or at stream
       // cadence while that wake is not armed), and otherwise only for a changed connection:
       // without a live export, captures and the minimum-FPS keepalive refresh the flat fallback,
-      // never a repeat of a static desktop at stream cadence.
+      // never a repeat of a static desktop at stream cadence. Each of those conversions also runs a
+      // due white-level query, so the query never forces a repeat of its own.
       if (reshade_receiver && ::video::is_packed_mode(sbs_mode)) {
         if (!external_frame_wake || game_dumper.needs_conversion_poll()) {
           return true;
         }
         return (reshade_receiver->frame_held() && !reshade_receiver->frame_wake_active()) || reshade_receiver->frame_pending();
+      }
+      if (white_query_due) {
+        return true;
       }
       if (::video::is_game_mode(sbs_mode)) {
         // Game mono encodes the desktop and only reports whether an export is available. The
@@ -7769,6 +7779,10 @@ namespace platf::dxgi {
 
     void set_external_frame_wake(std::function<void()> wake) override {
       base.set_external_frame_wake(std::move(wake));
+    }
+
+    bool external_frame_held() const override {
+      return base.external_frame_held();
     }
 
     void encoder_consumed_input() override {

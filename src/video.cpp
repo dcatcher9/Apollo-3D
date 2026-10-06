@@ -422,6 +422,10 @@ namespace video {
       return device && device->conversion_kept_input();
     }
 
+    bool external_frame_held() const {
+      return device && device->external_frame_held();
+    }
+
     bool set_stream_gamma(stream_gamma_mode_e mode) {
       return device && device->set_stream_gamma(mode);
     }
@@ -1443,8 +1447,12 @@ namespace video {
         const auto wait_started = std::chrono::steady_clock::now();
         auto pending_source_wait = source.remaining_wait(wait_started, provider_poll_target, independent_provider && conversion_poll_pending);
         if (independent_provider && last_img) {
-          const auto keepalive_wait = detail::provider_keepalive_wait(wait_started, last_encode_at, keepalive_interval);
-          pending_source_wait = pending_source_wait ? std::min(*pending_source_wait, keepalive_wait) : keepalive_wait;
+          auto provider_wait = detail::provider_keepalive_wait(wait_started, last_encode_at, keepalive_interval);
+          if (session->external_frame_held()) {
+            // Do not rely on the export's completion wake alone to notice its next frame.
+            provider_wait = std::min(provider_wait, detail::export_recheck_wait(wait_started, provider_poll_target));
+          }
+          pending_source_wait = pending_source_wait ? std::min(*pending_source_wait, provider_wait) : provider_wait;
         }
         // Nothing is encoded before capture delivers a frame while the startup input is held, so
         // only the hold's deadline bounds this wait: a due poll or keepalive must not spin it.

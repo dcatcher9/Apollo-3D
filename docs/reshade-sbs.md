@@ -4755,10 +4755,20 @@ Sunshine converts a live export when its fence completes, not at its next poll. 
 arms the generation's ready fence (`SetEventOnCompletion` for the next value) on a thread-pool
 wait that wakes the encode loop; a woken frame converts once it is within the variation threshold
 of its target, so the stream cadence still caps the encode rate. Every slot is gated on being
-ready for the current generation with a sequence at most the fence's completed value. While an
-export is live the loop neither polls nor repeats frames at stream cadence: new exports, cursor
-changes and the minimum-FPS keepalive (which re-checks the connection) produce frames. A replaced
-slot is retired right after its encode, so the producer gets it back a frame sooner. Game mono
+ready for the current generation with a sequence at most the fence's completed value. While a
+frame is held the loop does not rely on that wake alone: from the next frame's poll target (its
+presentation target minus the variation threshold) it re-checks the export every millisecond
+(`export_recheck_interval`) until a newer frame has completed. In Stellar Blade at 4K the host
+claimed only 49-64 new frames/s of a 90 fps stream while the add-on wrote over up to 79 finished
+frames/s that it never claimed, which only a late or missing wake explains. A re-check that finds
+nothing newer encodes nothing. While an export is live the loop neither polls nor repeats frames
+at stream cadence: new exports, cursor changes and the minimum-FPS keepalive (which re-checks the
+connection) produce frames, and a due stream-gamma white-level query runs in the next of them
+rather than forcing a repeat. A replaced slot whose reads were still pending at its claim is
+retired right after the next encode. `RemoteEncodeProviderPacingTest.LiveExportDeliversNewFramesAtStreamRateWithoutItsFenceWake`
+runs this loop's wait and schedule helpers against the ring's rules with the live FG off, 2x and
+4x arrival patterns and prompt, late or lost wakes; the host must receive 85.5 or more new
+frames/s with no repeat. Game mono
 observes the producer's published source without attaching (a status-only READY): the game then
 creates no ring and packs no stereo.
 
