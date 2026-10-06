@@ -354,49 +354,65 @@ namespace platf::reshade_bridge {
         cached_.reset();
         return std::nullopt;
       }
-      const auto completed = ready_fence_->GetCompletedValue();
-      if (completed == UINT64_MAX) {
-        reset_resources();
-        return std::nullopt;
-      }
       int selected = -1;
-      std::uint64_t newest = cached_ ? cached_->sequence : 0;
-      for (std::uint32_t i = 0; i < wire::slot_count; ++i) {
-        auto &slot = shared_->slots[i];
-        if (static_cast<int>(i) == held_slot_) {
-          continue;
+      std::uint64_t sequence = 0;
+      std::uint64_t qpc = 0;
+      float ui_parallax_uv = 0.0f;
+      bool cursor_plane_valid = false;
+      // A lost claim, or a slot the producer reused between the fence read and the claim,
+      // means the producer moved on to a newer completed frame (it reuses a ready slot only
+      // then): rescan for that frame instead of converting the held one again. Each failed
+      // attempt needs a newer publication, so the ring size bounds the retries.
+      for (std::uint32_t attempt = 0; attempt < wire::slot_count && selected < 0; ++attempt) {
+        const auto completed = ready_fence_->GetCompletedValue();
+        if (completed == UINT64_MAX) {
+          reset_resources();
+          return std::nullopt;
         }
-        if (read64(slot.control) == wire::slot_control(metadata_.generation, wire::slot_state::ready)) {
-          const auto sequence = read64(slot.sequence);
-          if (sequence > newest && sequence <= completed) {
-            selected = static_cast<int>(i);
-            newest = sequence;
+        int candidate = -1;
+        std::uint64_t newest = cached_ ? cached_->sequence : 0;
+        for (std::uint32_t i = 0; i < wire::slot_count; ++i) {
+          auto &slot = shared_->slots[i];
+          if (static_cast<int>(i) == held_slot_) {
+            continue;
+          }
+          if (read64(slot.control) == wire::slot_control(metadata_.generation, wire::slot_state::ready)) {
+            const auto slot_sequence = read64(slot.sequence);
+            if (slot_sequence > newest && slot_sequence <= completed) {
+              candidate = static_cast<int>(i);
+              newest = slot_sequence;
+            }
           }
         }
+        if (candidate < 0) {
+          return cached_;
+        }
+        auto &slot = shared_->slots[candidate];
+        if (!claim(slot, metadata_.generation, wire::slot_state::ready, wire::slot_state::reading)) {
+          continue;
+        }
+        const auto candidate_sequence = read64(slot.sequence);
+        qpc = read64(slot.qpc);
+        cursor_plane_valid = wire::read_ui_parallax(metadata_.protocol_version, slot, ui_parallax_uv);
+        // Capture all slot fields before validating their generation. Replacement resets
+        // the mapped slots, so reading a field after this check could mix generations.
+        wire::metadata_t current;
+        if (!snapshot(*shared_, current) || current.generation != metadata_.generation || current.accepted_consumer_nonce != nonce_ || read64(shared_->consumer_nonce) != nonce_) {
+          cached_.reset();
+          // Retiring generations own their old state; a new nonce creates fresh resources.
+          return std::nullopt;
+        }
+        if (candidate_sequence == 0 || candidate_sequence > ready_fence_->GetCompletedValue() || (cached_ && candidate_sequence <= cached_->sequence)) {
+          claim(slot, metadata_.generation, wire::slot_state::reading, wire::slot_state::ready);
+          continue;
+        }
+        selected = candidate;
+        sequence = candidate_sequence;
       }
       if (selected < 0) {
         return cached_;
       }
       auto &slot = shared_->slots[selected];
-      if (!claim(slot, metadata_.generation, wire::slot_state::ready, wire::slot_state::reading)) {
-        return cached_;
-      }
-      const auto sequence = read64(slot.sequence);
-      const auto qpc = read64(slot.qpc);
-      float ui_parallax_uv = 0.0f;
-      const bool cursor_plane_valid = wire::read_ui_parallax(metadata_.protocol_version, slot, ui_parallax_uv);
-      // Capture all slot fields before validating their generation. Replacement resets
-      // the mapped slots, so reading a field after this check could mix generations.
-      wire::metadata_t current;
-      if (!snapshot(*shared_, current) || current.generation != metadata_.generation || current.accepted_consumer_nonce != nonce_ || read64(shared_->consumer_nonce) != nonce_) {
-        cached_.reset();
-        // Retiring generations own their old state; a new nonce creates fresh resources.
-        return std::nullopt;
-      }
-      if (sequence == 0 || sequence > ready_fence_->GetCompletedValue() || (cached_ && sequence <= cached_->sequence)) {
-        claim(slot, metadata_.generation, wire::slot_state::reading, wire::slot_state::ready);
-        return cached_;
-      }
       if (!cursor_plane_valid) {
         // Retain the previous texture and its plane together. A malformed new frame must
         // neither move its cursor nor keep an unusable slot at the head of the ready ring.
