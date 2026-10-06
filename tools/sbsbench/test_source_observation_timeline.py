@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import run_eval
@@ -98,6 +99,29 @@ class SourceObservationTimelineTests(unittest.TestCase):
                       ["--observation-timeline", "a", "--observation-timeline", "b"]):
             with self.subTest(extra=extra), self.assertRaises(ValueError):
                 run_eval.observation_timeline_override(extra)
+
+    def test_missing_explicit_clock_is_a_setup_failure_before_launch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "missing.timeline"
+            command = [sys.executable, "-B", str(Path(run_eval.__file__)),
+                       "--comparison-only", "--clips", "flat_page",
+                       "--extra", "--observation-timeline", str(path)]
+            result = subprocess.run(command, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("invalid source observation timeline", result.stderr)
+            self.assertIn(repr(str(path)), result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+
+    def test_unreadable_explicit_clock_retains_the_path_diagnostic(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "unreadable.timeline"
+            error = PermissionError(13, "Permission denied", str(path))
+            with mock.patch.object(run_eval, "read_observation_timeline", side_effect=error):
+                with self.assertRaisesRegex(
+                        ValueError, "invalid source observation timeline") as caught:
+                    run_eval.observation_timeline_override(["--observation-timeline", str(path)])
+            self.assertIs(caught.exception.__cause__, error)
+            self.assertIn(repr(str(path)), str(caught.exception))
 
     def test_same_pixels_with_different_clocks_fail_every_comparison_context(self):
         import compare_runs

@@ -113,6 +113,13 @@ namespace host_sbs_gpu_completion_receipt_fixture {
     state[v2::frame_valid] = std::bit_cast<std::uint32_t>(1.0f);
     state[v2::renderer_authorization_bits] = v2::contract_tag;
     host_sbs_test::seal_adaptive_camera(state);
+    // A receipt retains the actual geometry owner's source clock. Renderer-only fixtures use
+    // clock 1, which cannot stand in for the current infer or an older retained observation here.
+    const auto geometry_timestamp = std::max(std::uint64_t {1u},
+      infer ? expected.observation_timestamp_us : expected.observation_timestamp_us - 1000u);
+    state[v2::gain_last_observation_low] = static_cast<std::uint32_t>(geometry_timestamp);
+    state[v2::gain_last_observation_high] = static_cast<std::uint32_t>(geometry_timestamp >> 32u);
+    state[v2::camera_center_integrity_bits] = v2::camera_center_integrity_for_state_words(state);
     std::copy(state.begin(), state.end(), words.begin() + receipt::parallax_state_begin);
     words[receipt::depth_frame_state_begin + 1u] = std::bit_cast<std::uint32_t>(1.0f);
     words[receipt::depth_frame_state_begin + 2u] = std::bit_cast<std::uint32_t>(1.0f);

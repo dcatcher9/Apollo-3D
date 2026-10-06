@@ -2764,7 +2764,7 @@ def observation_timeline_override(extra):
     path = Path(extra[index + 1]).resolve()
     try:
         read_observation_timeline(path)
-    except TimelineError as exc:
+    except (OSError, TimelineError) as exc:
         raise ValueError(f"invalid source observation timeline: {exc}") from exc
     return path, list(extra[:index]) + list(extra[index + 2:])
 

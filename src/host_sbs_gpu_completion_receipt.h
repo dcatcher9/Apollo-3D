@@ -298,7 +298,17 @@ namespace models::host_sbs_gpu_completion_receipt {
         return std::nullopt;
       }
       const auto condition = words.data() + subtitle_condition_begin;
-      if (locator[20u] == 0u) {
+      const auto geometry_timestamp = trace::join_u64(
+        state[v2::gain_last_observation_low], state[v2::gain_last_observation_high]);
+      const auto subtitle_timestamp = current_subtitle ?
+        expected.observation_timestamp_us : result.depth_owner_timestamp_us;
+      // OCR ownership survives an unavailable geometry observation, but its conditioning must
+      // abstain. Use the mandatory state/locator tuple: the optional cut diagnostic payload
+      // cannot grant or revoke publication authority. Reuse retains the original source clock.
+      const bool subtitle_geometry_ready = std::bit_cast<float>(state[v2::frame_valid]) == 1.0f &&
+        subtitle_timestamp != 0u &&
+        geometry_timestamp == subtitle_timestamp && state[v2::confirmed_cut_count] == locator[26u];
+      if (locator[20u] == 0u || !subtitle_geometry_ready) {
         if (!std::all_of(condition, condition + subtitle_condition_word_count, [](auto word) { return word == 0u; })) {
           return std::nullopt;
         }
@@ -307,12 +317,11 @@ namespace models::host_sbs_gpu_completion_receipt {
         const auto fade = locator[provisional ? v2::subtitle_locator_provisional_fade_word : 24u];
         const auto target = locator[provisional ? v2::subtitle_locator_provisional_target_word : 18u];
         const auto kinds = (locator[v2::subtitle_locator_kind_word] >> v2::subtitle_locator_current_kind_shift) & v2::subtitle_locator_kind_mask;
-        // Same compact publication relation as the existing Dump decoder. Geometry validation
-        // and provisional selection stay in their existing GPU producers, never in this receipt.
+        // The active condition must select the exact retained or provisional locator target.
         if (condition[0u] != v2::subtitle_condition_param_schema || condition[1u] != v2::subtitle_condition_param_tag ||
             condition[2u] != locator[20u] || condition[3u] != kinds ||
             condition[4u] != fade || condition[5u] != target ||
-            (fade != 1u && fade != 2u) || !std::isfinite(std::bit_cast<float>(target))) {
+            fade != 2u || !std::isfinite(std::bit_cast<float>(target))) {
           return std::nullopt;
         }
       }

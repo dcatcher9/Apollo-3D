@@ -22,6 +22,44 @@ namespace {
     grouped_limiter_shape_t {1540u, 868u, 193u, 109u},
   };
 
+  void publish_retained_coverage(receipt::snapshot_words_t &words) {
+    std::array<std::uint32_t, receipt::parallax_state_word_count> geometry_before;
+    std::array<std::uint32_t, receipt::subtitle_condition_word_count> condition_before;
+    std::copy_n(words.begin() + receipt::parallax_state_begin, geometry_before.size(), geometry_before.begin());
+    std::copy_n(words.begin() + receipt::subtitle_condition_begin, condition_before.size(), condition_before.begin());
+    const auto locator = receipt::subtitle_locator_begin;
+    // Completion snapshots copy only the compact header, followed immediately by condition and
+    // geometry slices. Full SLR rectangle blocks and its adaptive tail are absent from this ABI.
+    static_assert(receipt::subtitle_locator_word_count == 32u);
+    words[locator + 2u] = 1u | 4u;
+    words[locator + 3u] = 1u;
+    words[locator + 4u] = 1u;
+    words[locator + 18u] = std::bit_cast<std::uint32_t>(0.01f);
+    words[locator + 19u] = 1u;
+    words[locator + 20u] = 1u;
+    words[locator + 24u] = 2u;
+    constexpr std::array<std::uint32_t, 4u> cover {180u, 360u, 590u, 370u};
+    std::copy(cover.begin(), cover.end(), words.begin() + locator + 5u);
+    words[locator + 9u] = (cover[2u] - cover[0u]) * (cover[3u] - cover[1u]);
+    EXPECT_TRUE(std::equal(geometry_before.begin(), geometry_before.end(), words.begin() + receipt::parallax_state_begin));
+    EXPECT_TRUE(std::equal(condition_before.begin(), condition_before.end(), words.begin() + receipt::subtitle_condition_begin));
+  }
+
+  void publish_active_condition(receipt::snapshot_words_t &words) {
+    const auto locator = receipt::subtitle_locator_begin;
+    const auto condition = receipt::subtitle_condition_begin;
+    words[condition] = v2::subtitle_condition_param_schema;
+    words[condition + 1u] = v2::subtitle_condition_param_tag;
+    words[condition + 2u] = words[locator + 20u];
+    words[condition + 4u] = 2u;
+    words[condition + 5u] = words[locator + 18u];
+  }
+
+  void publish_zero_condition(receipt::snapshot_words_t &words) {
+    std::fill_n(words.begin() + receipt::subtitle_condition_begin,
+      receipt::subtitle_condition_word_count, 0u);
+  }
+
   TEST(HostSbsGpuCompletionReceipt, ConditionalInferAuthenticatesNativeGroupedLimiterCounts) {
     for (const auto &shape : grouped_limiter_shapes) {
       SCOPED_TRACE(std::to_string(shape.width) + 'x' + std::to_string(shape.height));
@@ -135,6 +173,112 @@ namespace {
     EXPECT_FALSE(decoded->depth_cache_authorized());
     EXPECT_EQ(decoded->depth_owner_frame_id, 0u);
     EXPECT_TRUE(decoded->subtitle_is_current());
+  }
+
+  TEST(HostSbsGpuCompletionReceipt, CollapsedGeometryRetainsCurrentCoverageWithZeroConditioning) {
+    const auto expected = fixture::expected(graph::work_flag_e::optional_ocr);
+    auto words = fixture::snapshot(expected, graph::branch_e::infer);
+    auto state = v2::state_initial_words;
+    std::copy_n(words.begin() + receipt::parallax_state_begin, state.size(), state.begin());
+    // Match an established camera after a collapsed current depth observation: its plane holds,
+    // frame authorization and timing are disarmed, and no comparison-history owner is published.
+    state[v2::frame_valid] = std::bit_cast<std::uint32_t>(0.0f);
+    state[v2::renderer_authorization_bits] = 0u;
+    state[v2::gain_last_observation_low] = static_cast<std::uint32_t>(expected.observation_timestamp_us);
+    state[v2::gain_last_observation_high] = static_cast<std::uint32_t>(expected.observation_timestamp_us >> 32u);
+    state[v2::gain_clock_armed] = 0u;
+    state[v2::gain_target_zero] = 0u;
+    state[v2::gain_target_inverse_scale] = 0u;
+    state[v2::gain_target_nearest] = 0u;
+    state[v2::camera_center_integrity_bits] = v2::camera_center_integrity_for_state_words(state);
+    ASSERT_TRUE(v2::parallax_state_words_are_authenticated(state, expected.raw_coordinate_scale, expected.joint_plane_mode));
+    std::copy(state.begin(), state.end(), words.begin() + receipt::parallax_state_begin);
+    words[receipt::history_owner_begin] = 0u;
+    words[receipt::depth_frame_state_begin + 3u] = std::bit_cast<std::uint32_t>(0.0f);
+    ASSERT_TRUE(receipt::decode(words, expected));  // Invalid geometry itself is a valid receipt.
+
+    publish_retained_coverage(words);  // OCR ownership continues independently of depth validity.
+    const auto decoded = receipt::decode(words, expected);
+    EXPECT_TRUE(decoded);  // The shader copies exact Base and deliberately publishes zero6.
+    if (decoded) {
+      EXPECT_FALSE(decoded->geometry_valid);
+      EXPECT_FALSE(decoded->depth_cache_authorized());
+      EXPECT_TRUE(decoded->subtitle_is_current());
+    }
+
+    // An unavailable geometry publication must never authenticate a forged active conditioner.
+    publish_active_condition(words);
+    EXPECT_FALSE(receipt::decode(words, expected));
+  }
+
+  TEST(HostSbsGpuCompletionReceipt, CurrentAndHeldCoverageRequireTheGeometryOwnerClock) {
+    const auto expected = fixture::expected();
+    for (const auto branch : {graph::branch_e::infer, graph::branch_e::reuse}) {
+      SCOPED_TRACE(branch == graph::branch_e::infer ? "current infer" : "held reuse");
+      auto words = fixture::snapshot(expected, branch);
+      publish_retained_coverage(words);
+      publish_active_condition(words);
+      const auto active = receipt::decode(words, expected);
+      ASSERT_TRUE(active);
+      EXPECT_TRUE(active->depth_cache_authorized());
+      EXPECT_EQ(active->subtitle_is_current(), branch == graph::branch_e::infer);
+      const auto geometry_time = models::host_sbs_gpu_trace::join_u64(
+        words[receipt::parallax_state_begin + v2::gain_last_observation_low],
+        words[receipt::parallax_state_begin + v2::gain_last_observation_high]);
+      EXPECT_EQ(geometry_time, active->depth_owner_timestamp_us);
+
+      // A complete valid seal for an older observation still lacks current conditioning authority.
+      auto state = v2::state_initial_words;
+      std::copy_n(words.begin() + receipt::parallax_state_begin, state.size(), state.begin());
+      state[v2::gain_last_observation_low] = static_cast<std::uint32_t>(geometry_time - 1u);
+      state[v2::gain_last_observation_high] = static_cast<std::uint32_t>((geometry_time - 1u) >> 32u);
+      state[v2::camera_center_integrity_bits] = v2::camera_center_integrity_for_state_words(state);
+      ASSERT_TRUE(v2::parallax_state_words_are_authenticated(state, expected.raw_coordinate_scale, expected.joint_plane_mode));
+      std::copy(state.begin(), state.end(), words.begin() + receipt::parallax_state_begin);
+      EXPECT_FALSE(receipt::decode(words, expected));
+      publish_zero_condition(words);
+      EXPECT_TRUE(receipt::decode(words, expected));
+    }
+  }
+
+  TEST(HostSbsGpuCompletionReceipt, CurrentAndHeldCoverageRequireTheGeometryCutEpoch) {
+    const auto expected = fixture::expected();
+    for (const auto branch : {graph::branch_e::infer, graph::branch_e::reuse}) {
+      SCOPED_TRACE(branch == graph::branch_e::infer ? "current infer" : "held reuse");
+      auto words = fixture::snapshot(expected, branch);
+      publish_retained_coverage(words);
+      publish_active_condition(words);
+      ASSERT_TRUE(receipt::decode(words, expected));
+      // Mandatory geometry and locator words own this relation. Diagnostic CutBridge bytes
+      // deliberately remain unchanged, so they cannot supply or revoke functional authority.
+      words[receipt::parallax_state_begin + v2::confirmed_cut_count] = 1u;
+      EXPECT_FALSE(receipt::decode(words, expected));
+      publish_zero_condition(words);
+      EXPECT_TRUE(receipt::decode(words, expected));
+      words[receipt::subtitle_locator_begin + 26u] = 1u;
+      publish_active_condition(words);
+      EXPECT_TRUE(receipt::decode(words, expected));
+    }
+  }
+
+  TEST(HostSbsGpuCompletionReceipt, CurrentActiveCoverageUsesV2ValidityWithoutCutNormalizationAuthority) {
+    const auto expected = fixture::expected(graph::work_flag_e::optional_ocr);
+    auto words = fixture::snapshot(expected, graph::branch_e::infer);
+    // Signed finite raw depth can initialize V2 while the independent nonnegative cut/history
+    // population is unavailable. That bars comparison reuse, but does not bar the UI conditioner.
+    words[receipt::history_owner_begin] = 0u;
+    words[receipt::depth_frame_state_begin + 3u] = std::bit_cast<std::uint32_t>(0.0f);
+    ASSERT_EQ(words[receipt::parallax_state_begin + v2::frame_valid], std::bit_cast<std::uint32_t>(1.0f));
+    publish_retained_coverage(words);
+    publish_active_condition(words);
+    const auto decoded = receipt::decode(words, expected);
+    ASSERT_TRUE(decoded);
+    EXPECT_FALSE(decoded->geometry_valid);
+    EXPECT_FALSE(decoded->depth_owner_valid);
+    EXPECT_FALSE(decoded->depth_cache_authorized());
+    EXPECT_TRUE(decoded->subtitle_is_current());
+    publish_zero_condition(words);
+    EXPECT_FALSE(receipt::decode(words, expected));
   }
 
   TEST(HostSbsGpuCompletionReceipt, BothBranchesKeepDepthAndSubtitleOwnershipTogether) {
@@ -284,6 +428,11 @@ namespace {
     words[condition + 4u] = 2u;
     words[condition + 5u] = words[locator + 18u];
     ASSERT_TRUE(receipt::decode(words, expected));
+    words[locator + 24u] = 1u;
+    words[condition + 4u] = 1u;
+    EXPECT_FALSE(receipt::decode(words, expected));  // Held coverage also requires immediate full pin.
+    words[locator + 24u] = 2u;
+    words[condition + 4u] = 2u;
     words[condition + 5u] ^= 1u;
     EXPECT_FALSE(receipt::decode(words, expected));
 
@@ -292,6 +441,9 @@ namespace {
     words[locator + v2::subtitle_locator_provisional_fade_word] = 1u;
     words[condition + 4u] = 1u;
     words[condition + 5u] = words[locator + v2::subtitle_locator_provisional_target_word];
+    EXPECT_FALSE(receipt::decode(words, expected));
+    words[locator + v2::subtitle_locator_provisional_fade_word] = 2u;
+    words[condition + 4u] = 2u;
     EXPECT_TRUE(receipt::decode(words, expected));
   }
 
