@@ -730,6 +730,93 @@ TEST_F(ReShadeBridgeGpu, ConvertsFromTheHeldSlotAndReturnsItOnlyAfterItsReadsCom
   ASSERT_TRUE(await_slot(second_slot, protocol::slot_state::free));
 }
 
+// While the host encodes one frame it must not also keep the frame before it: the producer then
+// had one slot for every Present of that encode. A conversion marks its reads recorded; once they
+// completed, the claim that replaces its frame returns that slot at once.
+TEST_F(ReShadeBridgeGpu, ClaimReturnsTheReplacedSlotOnceItsRecordedReadsCompleted) {
+  ComPtr<ID3D11Texture2D> scratch;
+  {
+    D3D11_TEXTURE2D_DESC desc {};
+    rings.back()->textures[0]->GetDesc(&desc);
+    desc.MiscFlags = 0;
+    ASSERT_EQ(consumer->CreateTexture2D(&desc, nullptr, &scratch), S_OK);
+  }
+  const auto await_consumer_idle = [this]() {
+    const D3D11_QUERY_DESC desc {D3D11_QUERY_EVENT, 0};
+    ComPtr<ID3D11Query> idle;
+    ASSERT_EQ(consumer->CreateQuery(&desc, &idle), S_OK);
+    consumer_context->End(idle.Get());
+    const auto deadline = bridge_clock_t::now() + std::chrono::seconds(2);
+    while (consumer_context->GetData(idle.Get(), nullptr, 0, 0) == S_FALSE && bridge_clock_t::now() < deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_EQ(consumer_context->GetData(idle.Get(), nullptr, 0, 0), S_OK);
+  };
+  const auto slot_state = [this](int index) {
+    return protocol::control_state(state->slots[index].control);
+  };
+  // One conversion's poll once the producer fence passed `sequence`: it claims that frame.
+  const auto claim = [this](std::uint64_t sequence) {
+    const auto deadline = bridge_clock_t::now() + std::chrono::seconds(2);
+    while (rings.back()->ready_fence->GetCompletedValue() < sequence && bridge_clock_t::now() < deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const auto frame = poll();
+    EXPECT_TRUE(frame && frame->sequence == sequence);
+    return frame;
+  };
+
+  publish(1);
+  const auto first = await_frame();
+  ASSERT_TRUE(first);
+  const int first_slot = last_slot;
+  consumer_context->CopyResource(scratch.Get(), first->texture);  // The conversion's read.
+  bridge->reads_recorded();
+  await_consumer_idle();
+  publish(2);
+  const auto second = claim(2);
+  ASSERT_TRUE(second);
+  const int second_slot = last_slot;
+  // Returned by the claim itself: no later poll or retire() ran.
+  EXPECT_EQ(slot_state(first_slot), protocol::slot_state::free);
+  EXPECT_EQ(slot_state(second_slot), protocol::slot_state::reading);
+
+  // Recorded reads that have not completed at the claim keep the slot until they do.
+  hold_consumer_reads(100);
+  consumer_context->CopyResource(scratch.Get(), second->texture);
+  bridge->reads_recorded();
+  publish(3);
+  const auto third = claim(3);
+  ASSERT_TRUE(third);
+  const int third_slot = last_slot;
+  for (int i = 0; i < 20; ++i) {
+    bridge->retire();
+    ASSERT_TRUE(poll());
+    EXPECT_EQ(slot_state(second_slot), protocol::slot_state::reading);
+  }
+  signal_ready(100);
+  copy_gate_active = false;
+  ASSERT_TRUE(await_slot(second_slot, protocol::slot_state::free));
+
+  // A frame polled again after its reads were marked may be read again; those reads count too.
+  bridge->reads_recorded();
+  await_consumer_idle();
+  ASSERT_TRUE(poll());
+  hold_consumer_reads(200);
+  consumer_context->CopyResource(scratch.Get(), third->texture);
+  publish(4, false);  // The gate's value 100 already covers sequence 4.
+  ASSERT_TRUE(claim(4));
+  EXPECT_EQ(slot_state(third_slot), protocol::slot_state::reading);
+  for (int i = 0; i < 20; ++i) {
+    bridge->retire();
+    ASSERT_TRUE(poll());
+    EXPECT_EQ(slot_state(third_slot), protocol::slot_state::reading);
+  }
+  signal_ready(200);
+  copy_gate_active = false;
+  ASSERT_TRUE(await_slot(third_slot, protocol::slot_state::free));
+}
+
 TEST_F(ReShadeBridgeGpu, WakesWhenTheExportFenceCompletesAndRetiresWithoutAnotherPoll) {
   struct event_t {
     HANDLE value = CreateEventW(nullptr, FALSE, FALSE, nullptr);

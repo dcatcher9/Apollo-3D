@@ -133,6 +133,8 @@ namespace platf::reshade_bridge {
     std::optional<frame_t> poll(RECT source, int width, int height) {
       auto frame = poll_frame(source, width, height);
       if (frame) {
+        // The caller may read the returned frame again: reads_recorded() must follow.
+        held_reads_ended_ = false;
         arm_wake();
       }
       return frame;
@@ -230,6 +232,18 @@ namespace platf::reshade_bridge {
 
     void retire() {
       retire_slots();
+    }
+
+    // Ends the held slot's event query after every read recorded so far, so the claim that
+    // replaces it can prove those reads complete without issuing (and waiting for) a new one.
+    void reads_recorded() {
+      if (held_slot_ < 0 || !retire_queries_[held_slot_]) {
+        return;
+      }
+      context_->End(retire_queries_[held_slot_].Get());
+      // Submits the conversion just recorded; the encoder would submit it next anyway.
+      context_->Flush();
+      held_reads_ended_ = true;
     }
 
   private:
@@ -387,14 +401,25 @@ namespace platf::reshade_bridge {
       }
       // Conversion reads the shared slot directly; it stays `reading` while it is the newest
       // frame, so repeat conversions keep their exact pixels. Every earlier read of the
-      // previously held slot is already recorded on this context, so an event query issued
-      // now covers all of them. The slot returns to the producer only once that completes.
+      // previously held slot is already recorded on this context, so an event query ended
+      // after them covers all of them. The slot returns to the producer only once that query
+      // completes: right here when reads_recorded() ended it and it already completed (the
+      // reads normally finished during the previous encode), otherwise from retire_slots().
       if (held_slot_ >= 0) {
-        context_->End(retire_queries_[held_slot_].Get());
-        retiring_[held_slot_] = {true, held_sequence_, metadata_.generation, 0};
-        // Flush submits bounded work; neither producer nor consumer waits for the GPU.
-        context_->Flush();
+        auto &held_slot = shared_->slots[held_slot_];
+        if (held_reads_ended_ && context_->GetData(retire_queries_[held_slot_].Get(), nullptr, 0, D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK &&
+            read64(held_slot.sequence) == held_sequence_) {
+          claim(held_slot, metadata_.generation, wire::slot_state::reading, wire::slot_state::free);
+        } else {
+          if (!held_reads_ended_) {
+            context_->End(retire_queries_[held_slot_].Get());
+          }
+          retiring_[held_slot_] = {true, held_sequence_, metadata_.generation, 0};
+          // Flush submits bounded work; neither producer nor consumer waits for the GPU.
+          context_->Flush();
+        }
       }
+      held_reads_ended_ = false;
       held_slot_ = selected;
       held_sequence_ = sequence;
       const auto transfer = metadata_.color_transfer == wire::transfer::scrgb ? transfer_e::scrgb :
@@ -603,6 +628,7 @@ namespace platf::reshade_bridge {
       // new resources; the D3D runtime retains submitted resource references through completion.
       held_slot_ = -1;
       held_sequence_ = 0;
+      held_reads_ended_ = false;
       retiring_ = {};
       for (auto &retire_query : retire_queries_) {
         retire_query.Reset();
@@ -675,6 +701,8 @@ namespace platf::reshade_bridge {
     // The slot behind cached_ (or the last frame before cached_ was dropped), still `reading`.
     int held_slot_ = -1;
     std::uint64_t held_sequence_ = 0;
+    // The held slot's query was ended after every read since poll() last returned its frame.
+    bool held_reads_ended_ = false;
     std::chrono::steady_clock::time_point next_attach_ {};
     std::uint64_t reported_generation_ = 0;
     int reported_width_ = 0, reported_height_ = 0;
@@ -725,5 +753,9 @@ namespace platf::reshade_bridge {
 
   void receiver_t::retire() {
     impl_->retire();
+  }
+
+  void receiver_t::reads_recorded() {
+    impl_->reads_recorded();
   }
 }  // namespace platf::reshade_bridge

@@ -678,6 +678,13 @@ namespace platf::dxgi {
           }
         }
         publish_game_source_status(game_source);
+        // Every read of the export is recorded on this context before convert() returns, on every
+        // path; the claim that replaces the frame can then return its slot without waiting.
+        auto export_reads_recorded = util::fail_guard([&]() {
+          if (external) {
+            reshade_receiver->reads_recorded();
+          }
+        });
 
         // A streaming encoder that converts a live packed export never reads the desktop.
         const bool export_owns_output = external && ::video::is_packed_mode(sbs_mode);

@@ -4736,16 +4736,20 @@ exact copied pixels and source lifetimes.
 Sunshine claims the newest completed slot and converts straight from it through a shader view
 created per slot when the generation opens; there is no private copy. The newest frame's slot stays
 `reading` while it is the newest, so repeat conversions and stream-gamma reconversion keep reading
-it. When a newer frame is claimed, an event query is ended for the previously held slot after all
-of its reads (Y, UV, Local AR, resample and the cursor patch), followed by the one flush per new
-frame the copy path also issued, and that slot returns to free only once the query completes,
-after the generation, nonce and sequence checks. It never blocks: queries are read without a flush,
-and one still pending after two polls is checked once with a flushing read (a lone event query was
-observed never completing otherwise). A generation change or detach abandons held and retiring
-slots rather than releasing them early. The receiver's hold leaves the producer two slots, and the
-producer already reclaims its own unconsumed ready slots. There is no cross-process GPU wait and
-no texture overwrite while either side uses the slot. A new consumer requests fresh resources
-rather than reusing the abandoned generation.
+it. Every conversion that reads it then ends that slot's event query after all of its reads (Y,
+UV, Local AR, resample and the cursor patch) and flushes (`receiver_t::reads_recorded`). When a
+newer frame is claimed and that query has completed, the normal case because the previous encode
+finished those reads, the replaced slot returns to free at the claim itself, after the generation,
+nonce and sequence checks. Otherwise (its reads are still running, or a poll returned the frame
+again after its query was ended) a query covering every read stays pending, and the slot returns
+to free only once it completes. It never blocks: queries are read without a flush, and one still
+pending after two polls is checked once with a flushing read (a lone event query was observed
+never completing otherwise). A generation change or detach abandons held and retiring slots rather
+than releasing them early. While the host encodes a frame it therefore holds only that frame's slot
+and leaves the producer two. Before, the replaced slot stayed `reading` until that encode returned,
+so for about 9 of every 11 ms at 90 fps the producer had one slot. There is no cross-process GPU
+wait and no texture overwrite while either side uses the slot. A new consumer requests fresh
+resources rather than reusing the abandoned generation.
 
 Sunshine converts a live export when its fence completes, not at its next poll. The receiver
 arms the generation's ready fence (`SetEventOnCompletion` for the next value) on a thread-pool
