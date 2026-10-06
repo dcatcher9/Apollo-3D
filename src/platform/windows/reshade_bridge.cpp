@@ -228,7 +228,8 @@ namespace platf::reshade_bridge {
       if (!shared_) {
         return false;
       }
-      if (static_cast<std::uint32_t>(read32(shared_->metadata_sequence)) != observed_metadata_sequence_ || read64(shared_->consumer_nonce) != nonce_ || WaitForSingleObject(process_.get(), 0) != WAIT_TIMEOUT) {
+      // A request whose declaration another receiver replaced is sent again by the next poll.
+      if (static_cast<std::uint32_t>(read32(shared_->metadata_sequence)) != observed_metadata_sequence_ || read64(shared_->consumer_nonce) != nonce_ || (nonce_ && read64(shared_->capability_nonce) != nonce_) || WaitForSingleObject(process_.get(), 0) != WAIT_TIMEOUT) {
         return true;
       }
       // No acknowledged generation is open: its publication is the next change.
@@ -345,7 +346,20 @@ namespace platf::reshade_bridge {
           return std::nullopt;
         }
       }
-      if (!nonce_) {
+      const auto requested = nonce_ ? read64(shared_->consumer_nonce) : 0;
+      if (nonce_ && requested != 0 && requested != nonce_) {
+        // A replacement converter owns the connection now. Do not fight it by writing again.
+        cached_.reset();
+        return std::nullopt;
+      }
+      // A request is sent again, under a new nonce, when the connection has no receiver (the
+      // converter that replaced this one detached) or when another receiver's declaration
+      // replaced this one's before the producer answered it (two requests interleaved): the
+      // producer answers only the nonce its declaration names, so this request never would be.
+      if (!nonce_ || requested == 0 || (metadata.accepted_consumer_nonce != nonce_ && read64(shared_->capability_nonce) != nonce_)) {
+        if (nonce_) {
+          reset_resources();
+        }
         nonce_ = new_nonce();
         // Capabilities and protocol first, then their nonce, then the request itself (full
         // barriers). A producer trusts them only for the nonce they name, so it never applies
@@ -354,11 +368,6 @@ namespace platf::reshade_bridge {
         InterlockedExchange(reinterpret_cast<volatile LONG *>(&shared_->consumer_protocol), static_cast<LONG>(wire::version));
         InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&shared_->capability_nonce), static_cast<LONG64>(nonce_));
         InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&shared_->consumer_nonce), static_cast<LONG64>(nonce_));
-        return std::nullopt;
-      }
-      if (read64(shared_->consumer_nonce) != nonce_) {
-        // A replacement converter owns the connection now. Do not fight it by writing again.
-        cached_.reset();
         return std::nullopt;
       }
       if (metadata.accepted_consumer_nonce != nonce_ || !wire::valid_metadata(metadata) || metadata.adapter_luid != adapter_luid_) {

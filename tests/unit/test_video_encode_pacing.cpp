@@ -773,9 +773,10 @@ namespace {
 
   TEST(RemoteEncodeProviderPacingTest, TickBoundWaitsReproduceTheLiveSixtyFrameCap) {
     // The head rules against the live arrival patterns: the model must land where the live host
-    // did (56-62 new frames/s), which is what makes the production result below evidence.
+    // did (56-62 new frames/s), which is what makes the production result below evidence. Those
+    // runs used the three-slot ring of export protocols 1-3, so the calibration runs on three.
     for (const auto mode : {game_frames_e::fg_off, game_frames_e::fg_2x, game_frames_e::fg_4x}) {
-      const auto result = simulate_export_ring(mode, fence_wake_e::prompt, loop_rules_e::head);
+      const auto result = simulate_export_ring(mode, fence_wake_e::prompt, loop_rules_e::head, 4s, std::nullopt, 3);
       print_export_ring("head", mode, fence_wake_e::prompt, result);
       EXPECT_GE(result.new_frames, 54.0);
       EXPECT_LE(result.new_frames, 64.0);  // At most one iteration per 15.625 ms tick.
@@ -850,7 +851,7 @@ namespace {
     struct encode_times_t {
       const char *label;
       double low_ms, high_ms;
-      double serial_low, serial_high;  ///< New frames/s one picture at a time.
+      double serial_low, serial_high;  ///< New frames/s one picture at a time, three slots.
     };
 
     for (const auto &times : {
@@ -859,13 +860,17 @@ namespace {
          }) {
       for (const auto mode : {game_frames_e::fg_2x, game_frames_e::fg_4x}) {
         SCOPED_TRACE(times.label);
+        // The one-picture band was fitted to live runs on the three-slot ring of export protocols
+        // 1-3, so it is checked there; the comparisons below run both models on this protocol's ring.
+        const auto live_ring = simulate_export_ring(mode, fence_wake_e::prompt, loop_rules_e::production, 4s, encoder_model_t {1, times.low_ms, times.high_ms}, 3);
         const auto serial = simulate_export_ring(mode, fence_wake_e::prompt, loop_rules_e::production, 4s, encoder_model_t {1, times.low_ms, times.high_ms});
         const auto pipelined = simulate_export_ring(mode, fence_wake_e::prompt, loop_rules_e::production, 4s, encoder_model_t {2, times.low_ms, times.high_ms});
         std::printf("[ MEASURE  ] encodes of %s:\n", times.label);
+        print_encoder_model("  one picture at a time, three slots", mode, live_ring);
         print_encoder_model("  one picture at a time", mode, serial);
         print_encoder_model("  two pictures in flight", mode, pipelined);
-        EXPECT_GE(serial.new_frames, times.serial_low);
-        EXPECT_LE(serial.new_frames, times.serial_high);
+        EXPECT_GE(live_ring.new_frames, times.serial_low);
+        EXPECT_LE(live_ring.new_frames, times.serial_high);
         EXPECT_GE(pipelined.new_frames, 87.5);  // Every stream frame, as with FG off.
         EXPECT_LE(pipelined.new_frames, 90.5);
         EXPECT_EQ(pipelined.repeats, 0);

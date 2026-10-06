@@ -633,9 +633,10 @@ retain their matching scalar; the host does not recalculate scene depth or the a
 While ReShade's overlay is open, the system cursor returns to screen depth to match its controls.
 Disabled or unavailable UI protection and depth diagnostic views also use zero cursor displacement.
 Game-rendered cursors remain part of the exported image. Install the host and add-on of the same
-release together: both speak export protocol 4 and each refuses, by name in its log, a peer of
-another protocol ([handoff contract](../../docs/reshade-sbs.md#gpu-handoff-contract)). WGC does not
-supply the separate cursor metadata.
+release together: both speak export protocol 4. This host names an add-on of another protocol in
+sunshine.log. Hosts of protocols 1-3 silently ignore this add-on's mapping, so the stream stays 2D
+with no log line on either side ([handoff contract](../../docs/reshade-sbs.md#gpu-handoff-contract)).
+WGC does not supply the separate cursor metadata.
 If another add-on cancels that transition, the observed state may differ from the visible overlay;
 toggle the overlay again after resolving that add-on conflict. Native Game 3D does not depend on
 ReShade FX compilation or the Home tab's effect toggle. The explicit reference renderer retains
@@ -1192,7 +1193,9 @@ production shader and automatic-selection fixtures; controlled paint does not te
 
 Look in the game's `ReShade.log` for `Sunshine SBS:` messages:
 
-- `exporter ready` means the mapping exists and the add-on is waiting for the technique/consumer.
+- `exporter ready (export protocol 4, 4 export slots)` means the mapping exists and the add-on is
+  waiting for the technique/consumer. If no generation follows while streaming, check that the host
+  is of the same release: hosts of protocols 1-3 ignore this mapping without a log line.
 - `no compatible export annotations` means the current shader definition or color annotations are absent.
 - `generation ..., ... full SBS, DXGI ..., D3D...` means resources were created for a consumer.
 - `export inactive (reason)` means focus, technique execution or source proof stopped qualifying;

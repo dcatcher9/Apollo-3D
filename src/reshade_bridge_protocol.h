@@ -123,7 +123,8 @@ namespace reshade_bridge {
     // A consumer's declaration: it writes consumer_capabilities and consumer_protocol, then
     // capability_nonce = its nonce, then consumer_nonce (each a full barrier). A producer honours
     // them only when capability_nonce equals the nonce it answers, so a replaced consumer's
-    // declaration never applies to another consumer's request.
+    // declaration never applies to another consumer's request. When two requests interleave,
+    // the consumer that consumer_nonce names sends its whole request again under a new nonce.
     std::uint64_t capability_nonce = 0;
     std::uint32_t consumer_capabilities = 0;
     // The protocol the consumer speaks. A producer answers only a consumer that declared its

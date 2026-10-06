@@ -988,7 +988,11 @@ namespace {
       publish(identity_);
       if (!debug_dump_.initialize(identity_.producer_pid, identity_.producer_creation_time))
         log(reshade::log::level::warning, "Sunshine Game 3D: optional diagnostic mailbox unavailable");
-      log(reshade::log::level::info, "Sunshine SBS: exporter ready; waiting for native Game 3D or a reference stereo effect and consumer");
+      // The protocol is named so a pairing with an older host, which ignores this mapping
+      // without a log line, can be told apart from a host that is not streaming.
+      char ready[192];
+      std::snprintf(ready, sizeof(ready), "Sunshine SBS: exporter ready (export protocol %u, %u export slots); waiting for native Game 3D or a reference stereo effect and consumer", wire::version, wire::slot_count);
+      log(reshade::log::level::info, ready);
       return true;
     }
 

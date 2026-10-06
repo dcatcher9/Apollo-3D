@@ -4646,7 +4646,10 @@ producer answers only a request that declared protocol 4: another is refused wit
 refusing a host that speaks export protocol N; this add-on speaks protocol 4 (4 export slots)...`
 once per request and gets no ring, and a request that declared nothing gets none either
 (`export inactive (consumer_undeclared)`). Hosts of protocols 1-3 already refused a mapping whose
-`shared_bytes` differs from their 384 bytes, so they never write into a protocol 4 mapping.
+`shared_bytes` differs from their 384 bytes, so they never write into a protocol 4 mapping, and
+neither side logs that pairing: the add-on's `exporter ready (export protocol 4, 4 export slots)`
+line is then followed by no generation. The add-on's named refusal guards a later host that
+declares another protocol.
 
 **PQ wire transfer.** `transfer::pq` (3) is Rec.2020 primaries and SMPTE ST 2084 code values,
 1.0 = 10000 cd/m2, valid only as R10G10B10A2_UNORM (DXGI 24); its slots carry the cursor plane
@@ -4658,7 +4661,11 @@ scRGB included, as R10G10B10A2 PQ. Sunshine sets it only for a streaming encoder
 HDR, never for Local AR. A consumer whose capabilities change requests the connection again under
 a new nonce. A producer honours the declaration only when `capability_nonce` equals the nonce it
 answers (`answered_capabilities`, `answered_protocol`), so a replaced consumer's declaration never
-applies to another request. An HDR10 swapchain exports PQ to a consumer that accepts it, and a
+applies to another request. Two receivers' requests can interleave so that `consumer_nonce` names
+one and `capability_nonce` the other; the receiver that `consumer_nonce` names then finds its
+request unanswered with another's declaration and sends the whole request again under a new nonce
+(the other backs off, as a replaced receiver does). A replaced receiver that finds the connection
+without any receiver (`consumer_nonce` zero, its replacement detached) requests again too. An HDR10 swapchain exports PQ to a consumer that accepts it, and a
 native scRGB swapchain exports PQ to a consumer that encodes HDR10 PQ (`exports_pq`; the bit
 implies acceptance). Any other consumer gets FP16 scRGB, and a consumer replaced between a
 Present's render and its export gets the next Present's export. For an HDR stream the host would
@@ -4691,8 +4698,10 @@ change. The finished ring of the previous transfer or extent stays cached (one e
 renewed the same way on a toggle back. A ring that stopped exporting (focus loss, or no consumer,
 as in Game mono) and has no unfinished producer work is released after 10 s idle
 (`export_ring_idle`), so leaving stereo frees its slots: about 530 MB for a 4K FP16 ring and
-265 MB for an RGB10A2 one (four 7680x2160 slots of 133 or 66 MB). A later export allocates a new
-ring, the present-thread step above.
+265 MB for an RGB10A2 one (four 7680x2160 slots of 133 or 66 MB), plus up to four 66 MB FP16
+overlay layers if the overlay composed into that ring. The cached ring of the other transfer holds
+the same until its 60 s expiry, so a transfer or size toggle briefly holds two four-slot rings. A
+later export allocates a new ring, the present-thread step above.
 Every released ring (idle, cached, or with its runtime or swapchain) first has each renderer drop
 its cached render-target views of the slots: a D3D11 view holds its texture, so the slots would
 otherwise stay allocated until the renderer's next pack.
@@ -4760,7 +4769,10 @@ frames/s and a sixth no more: queued writes complete in clumps, and the host tak
 clump. `RemoteEncodeProviderPacingTest.AFourthExportSlotTakesThePresentsAGpuBoundGameDroppedWithThree`
 runs the host's own encode loop on the same pattern (three slots: 34 dropped, 56.2 new frames/s;
 four: 12 and 71.8). The fourth slot costs 66 MB at 7680x2160 RGB10A2 (sRGB or PQ) and 133 MB in
-FP16 scRGB, for the whole time a ring exists.
+FP16 scRGB, for the whole time a ring exists. Once the ReShade overlay has composed into a slot,
+that slot also keeps its own back-buffer-sized R16G16B16A16_FLOAT overlay layer (about 66 MB at
+3840x2160) until the ring is released, so with the overlay used the fourth slot costs another
+66 MB.
 
 Each slot retains its native source resource and a separate overlay compositor. They cannot be
 replaced while that slot's copy/composition remains in flight. Reload, deactivation and runtime
@@ -4836,7 +4848,8 @@ stream-gamma white-level query runs in the next of them rather than forcing a re
 `RemoteEncodeProviderPacingTest.TickBoundWaitsReproduceTheLiveSixtyFrameCap` runs this loop's
 wait and schedule helpers against the ring's rules with the live FG off, 2x and 4x arrival
 patterns and waits as long as they really are, and reproduces the live 56-62 new frames/s with
-the old rules. `LiveExportDeliversNewFramesAtStreamRate` requires 87.5 or more new frames/s with
+the old rules on the three-slot ring of protocols 1-3 those runs used (the calibration runs keep
+three slots; the production expectations run on four). `LiveExportDeliversNewFramesAtStreamRate` requires 87.5 or more new frames/s with
 no repeat and no skipped stream frame with prompt wakes, and 80 or more with late or lost wakes
 (nothing re-checks for them: a frame that completed during the previous encode is found by the
 next iteration, others by the next desktop capture). `SlowerGameIsClaimedWhenItsFenceWakes`
@@ -4877,8 +4890,9 @@ schedule after every slow picture (`ClaimingAtThePollTargetKeepsTheCadenceWhenEv
 on the three-slot ring; with four slots 83.0-83.8 against 88.8-89.0 and gaps of 34 against 23 ms,
 where waiting first would also claim frames 1.3-1.7 ms fresher: smoothness first).
 `PicturesInFlightTakeEveryStreamFrameAtFrameGenerationEncodeTimes` runs the loop model with the
-live FG-on encode times (5.5-22 ms per picture): 69 new frames/s one picture at a time, 90 with two
-in flight, Present to packet within 0.5 ms.
+live FG-on encode times (5.5-22 ms per picture): 68 new frames/s one picture at a time on the
+three-slot ring the live 55-71/s came from (its calibration band) and 69 on four, 90 with two in
+flight, Present to packet within 0.5 ms of one picture at a time on the same ring.
 
 While a streaming encoder converts a live packed export it holds the display's capture-pixel
 claim, and Desktop Duplication and WGC forward only timestamps and cursor metadata. When the

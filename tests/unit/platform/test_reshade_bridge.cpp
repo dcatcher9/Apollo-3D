@@ -1464,6 +1464,63 @@ TEST_F(ReShadeBridgeGpu, ConsumerRestartRequiresNewNonceAndResourceGeneration) {
   EXPECT_EQ(state->consumer_nonce, replacement_nonce);
 }
 
+TEST_F(ReShadeBridgeGpu, RequestsAgainWhenItsDeclarationOrItsReplacementIsGone) {
+  // Two receivers' requests interleaved: this receiver's consumer_nonce landed last and the other's
+  // capability_nonce after this one's, so the producer finds no declaration for this request.
+  bridge = make_receiver();
+  EXPECT_FALSE(poll());
+  const auto overwritten = state->consumer_nonce;
+  ASSERT_NE(overwritten, 0u);
+  ASSERT_EQ(state->capability_nonce, overwritten);
+  constexpr std::uint64_t other_nonce = 0x4f54484552ULL;
+  InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&state->capability_nonce), static_cast<LONG64>(other_nonce));
+  EXPECT_EQ(protocol::answered_protocol(state->consumer_nonce, state->capability_nonce, state->consumer_protocol), 0u);
+  EXPECT_TRUE(bridge->frame_pending());
+  // The next poll sends the whole request again, under a new nonce the producer can answer.
+  EXPECT_FALSE(poll());
+  const auto renewed = state->consumer_nonce;
+  ASSERT_NE(renewed, 0u);
+  EXPECT_NE(renewed, overwritten);
+  EXPECT_EQ(state->capability_nonce, renewed);
+  EXPECT_EQ(protocol::answered_protocol(renewed, state->capability_nonce, state->consumer_protocol), protocol::version);
+  EXPECT_EQ(protocol::answered_capabilities(renewed, state->capability_nonce, state->consumer_capabilities), protocol::consumer_accepts_pq);
+  ASSERT_TRUE(new_generation());
+  publish(1);
+  ASSERT_TRUE(await_frame());
+
+  // An answered request is never sent again: a declaration written now belongs to another
+  // receiver's request in progress, which takes the connection with its consumer_nonce.
+  InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&state->capability_nonce), static_cast<LONG64>(other_nonce));
+  publish(2);
+  ASSERT_TRUE(await_frame_after(1));
+  EXPECT_EQ(state->consumer_nonce, renewed);
+
+  // A replaced receiver stays silent while its replacement owns the connection, and requests
+  // again once the connection has no receiver (the replacement detached).
+  constexpr std::uint64_t replacement_nonce = 0x5245504c41434521ULL;
+  InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&state->capability_nonce), static_cast<LONG64>(replacement_nonce));
+  InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&state->consumer_nonce), static_cast<LONG64>(replacement_nonce));
+  for (int i = 0; i < 3; ++i) {
+    EXPECT_FALSE(poll());
+  }
+  EXPECT_EQ(state->consumer_nonce, replacement_nonce);
+  EXPECT_EQ(state->capability_nonce, replacement_nonce);
+  InterlockedCompareExchange64(reinterpret_cast<volatile LONG64 *>(&state->consumer_nonce), 0, static_cast<LONG64>(replacement_nonce));
+  EXPECT_TRUE(bridge->frame_pending());
+  EXPECT_FALSE(poll());
+  const auto returned = state->consumer_nonce;
+  ASSERT_NE(returned, 0u);
+  EXPECT_NE(returned, renewed);
+  EXPECT_NE(returned, replacement_nonce);
+  EXPECT_EQ(state->capability_nonce, returned);
+  EXPECT_FALSE(bridge->frame_held());
+  ASSERT_TRUE(new_generation());
+  publish(1);
+  const auto frame = await_frame();
+  ASSERT_TRUE(frame);
+  expect_pixels(frame->texture);
+}
+
 TEST_F(ReShadeBridgeGpu, RejectsUnacknowledgedNonceAndMetadataBeingReplaced) {
   auto metadata = state->metadata;
   metadata.accepted_consumer_nonce ^= 0x10;
