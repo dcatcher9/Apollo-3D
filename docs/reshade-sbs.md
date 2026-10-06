@@ -4755,24 +4755,43 @@ Sunshine converts a live export when its fence completes, not at its next poll. 
 arms the generation's ready fence (`SetEventOnCompletion` for the next value) on a thread-pool
 wait that wakes the encode loop; a woken frame converts once it is within the variation threshold
 of its target, so the stream cadence still caps the encode rate. Every slot is gated on being
-ready for the current generation with a sequence at most the fence's completed value. While a
-frame is held the loop does not rely on that wake alone: from the next frame's poll target (its
-presentation target minus the variation threshold) it re-checks the export every millisecond
-(`export_recheck_interval`) until a newer frame has completed. In Stellar Blade at 4K the host
-claimed only 49-64 new frames/s of a 90 fps stream while the add-on wrote over up to 79 finished
-frames/s that it never claimed, which only a late or missing wake explains. A re-check that finds
-nothing newer encodes nothing. With `diagnostics = enabled` the host logs every 20 s
-`Game 3D export: N new frames claimed and W fence wakes in 20 s; K claims found their frame
-complete before its wake`; K close to N means the wake arrives late or not at all. While an export is live the loop neither polls nor repeats frames
-at stream cadence: new exports, cursor changes and the minimum-FPS keepalive (which re-checks the
-connection) produce frames, and a due stream-gamma white-level query runs in the next of them
-rather than forcing a repeat. A replaced slot whose reads were still pending at its claim is
-retired right after the next encode. `RemoteEncodeProviderPacingTest.LiveExportDeliversNewFramesAtStreamRateWithoutItsFenceWake`
-runs this loop's wait and schedule helpers against the ring's rules with the live FG off, 2x and
-4x arrival patterns and prompt, late or lost wakes; the host must receive 85.5 or more new
-frames/s with no repeat. Game mono
-observes the producer's published source without attaching (a status-only READY): the game then
-creates no ring and packs no stereo.
+ready for the current generation with a sequence at most the fence's completed value. A frame
+that has completed before its poll target (its presentation target minus the variation
+threshold) is held exactly to that target on a high-resolution timer (`provider_hold`); the loop
+then takes the newest completed frame without waiting. A hold lasts at most one frame interval,
+so an IDR or other control request waits at most that long. Every other wait ends at a fence
+wake, a desktop capture, a control request or the keepalive. Waits on the image event cannot end
+at a target: with this toolchain (winpthreads; libstdc++ without a clock-based condition-variable
+wait) a timed wait that nothing notifies ends only at the next 15.625 ms Windows scheduler tick,
+even for a zero timeout and whatever the timer resolution. Until 10-06 every loop iteration also
+began with a zero-timeout pop of the empty stream-gamma queue, so the loop ran at most once per
+tick: in Stellar Blade at 4K the host claimed 56-62 new frames/s of a 90 fps stream while its fence
+wakes arrived on time and the add-on replaced 25-109 finished frames/s that it never claimed.
+Zero-timeout pops now only check (`safe::no_wait`), which also removes that cap from the desktop
+and Host SBS loops. The one-millisecond re-check of a held export (`export_recheck_interval`),
+added for a late or missing wake that the live counters then refuted, is gone. With
+`diagnostics = enabled` the host logs every 20 s `Game 3D export: N new frames claimed and W fence
+wakes in 20 s; K claims found their frame complete before its wake (late or missing wake); fence
+wake to claim avg A ms, max M ms over C claims`; K close to N means the wake arrives late or not
+at all. The encode loop logs its own account at the same interval, `Video encode loop: I
+iterations in 20.0 s; N new and R repeat encodes; holding ... in H exact holds (requested ...,
+overshoot avg/max); waiting ... in W image waits (requested ...; T ran to their bound, overshoot
+avg/max); converting ...; encoding ... (NVENC submit ..., completion wait ...); loop work ...`.
+Image waits that run to their bound with an overshoot near 15.6 ms are tick-bound waits. While an
+export is live the loop neither polls nor repeats frames at stream cadence: new exports, cursor
+changes and the minimum-FPS keepalive (which re-checks the connection) produce frames, and a due
+stream-gamma white-level query runs in the next of them rather than forcing a repeat. A replaced
+slot whose reads were still pending at its claim is retired right after the next encode.
+`RemoteEncodeProviderPacingTest.TickBoundWaitsReproduceTheLiveSixtyFrameCap` runs this loop's
+wait and schedule helpers against the ring's rules with the live FG off, 2x and 4x arrival
+patterns and waits as long as they really are, and reproduces the live 56-62 new frames/s with
+the old rules. `LiveExportDeliversNewFramesAtStreamRate` requires 87.5 or more new frames/s with
+no repeat and no skipped stream frame with prompt wakes, and 80 or more with late or lost wakes
+(nothing re-checks for them: a frame that completed during the previous encode is found by the
+next iteration, others by the next desktop capture). `SlowerGameIsClaimedWhenItsFenceWakes`
+claims every frame of a 40 fps game within 1 ms of its fence completion. Game mono observes the
+producer's published source without attaching (a status-only READY): the game then creates no
+ring and packs no stereo.
 
 While a streaming encoder converts a live packed export it holds the display's capture-pixel
 claim, and Desktop Duplication and WGC forward only timestamps and cursor metadata. When the

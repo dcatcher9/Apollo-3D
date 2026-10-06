@@ -136,6 +136,17 @@ namespace nvenc {
      */
     bool invalidate_ref_frames(uint64_t first_frame, uint64_t last_frame);
 
+    /** Diagnostics: CPU time the last encode_frame() spent submitting its picture and waiting for
+     *  its completion. Zero while diagnostics are disabled and for a step the frame did not reach. */
+    struct frame_timing_t {
+      std::chrono::nanoseconds submit {};
+      std::chrono::nanoseconds completion_wait {};
+    };
+
+    [[nodiscard]] frame_timing_t last_frame_timing() const noexcept {
+      return last_frame_timing_;
+    }
+
   protected:
     /**
      * @brief Required. Used for loading NvEnc library and setting `nvenc` variable with `NvEncodeAPICreateInstance()`.
@@ -269,6 +280,7 @@ namespace nvenc {
     };
 
     std::optional<stage_diagnostics_t> stage_diagnostics;
+    frame_timing_t last_frame_timing_;
 
     struct {
       uint64_t last_encoded_frame_index = 0;

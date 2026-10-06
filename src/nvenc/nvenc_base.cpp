@@ -950,8 +950,11 @@ namespace nvenc {
     if (async_event_handle) {
       mark_input_producer_end();
     }
+    last_frame_timing_ = {};
+    std::chrono::steady_clock::time_point stage_started;
     if (stage_diagnostics) {
-      stage_diagnostics->submit.first_point_now();
+      stage_started = std::chrono::steady_clock::now();
+      stage_diagnostics->submit.first_point(stage_started);
     }
     const auto submit_status = nvenc->nvEncEncodePicture(encoder, &pic_params);
     if (submit_status == NV_ENC_SUCCESS || submit_status == NV_ENC_ERR_NEED_MORE_INPUT) {
@@ -959,7 +962,9 @@ namespace nvenc {
       input_phase = input_phase_t::submitted;
     }
     if (stage_diagnostics) {
-      stage_diagnostics->submit.second_point_now_and_log();
+      const auto stage_ended = std::chrono::steady_clock::now();
+      stage_diagnostics->submit.second_point_and_log(stage_ended);
+      last_frame_timing_.submit = stage_ended - stage_started;
     }
     if (nvenc_failed(submit_status)) {
       BOOST_LOG(error) << "NvEnc: NvEncEncodePicture() failed: " << last_nvenc_error_string;
@@ -972,14 +977,17 @@ namespace nvenc {
 
     if (async_event_handle) {
       if (stage_diagnostics) {
-        stage_diagnostics->completion_wait.first_point_now();
+        stage_started = std::chrono::steady_clock::now();
+        stage_diagnostics->completion_wait.first_point(stage_started);
       }
       const bool ready = wait_for_frame_completion(frame_index);
       if (ready) {
         input_phase = input_phase_t::completion_seen;
       }
       if (stage_diagnostics) {
-        stage_diagnostics->completion_wait.second_point_now_and_log();
+        const auto stage_ended = std::chrono::steady_clock::now();
+        stage_diagnostics->completion_wait.second_point_and_log(stage_ended);
+        last_frame_timing_.completion_wait = stage_ended - stage_started;
       }
       if (!ready) {
         return {};

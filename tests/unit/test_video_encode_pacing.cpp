@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 #include <src/platform/windows/capture_timing.h>
 #include <src/video.h>
@@ -327,25 +328,51 @@ namespace {
     EXPECT_LT(total / static_cast<int>(waits.size()), stream / 2);
   }
 
-  // Live Game 3D evidence (Stellar Blade 4K HDR, 90 fps stream): the add-on published 65-127
-  // frames/s into its three-slot export ring, yet the encode loop claimed only 49-64 new frames/s
-  // while the add-on dropped 22-110 Presents/s for want of a slot and replaced 2-79 finished
-  // frames/s that the host never claimed. Each frame's fence completes one GPU lag (5-15 ms) after
-  // its Present, and the completion wake that should end the loop's wait came late or not at all,
-  // so the loop noticed finished frames only on ~90 Hz desktop metadata captures or its keepalive.
-  // This model runs the loop's own wait and schedule helpers against the export ring's rules
-  // (docs/reshade-sbs.md, GPU handoff contract) with that arrival pattern.
+  // Live Game 3D evidence (Stellar Blade 4K HDR, 90 fps stream, 10-06): the add-on published
+  // 77-171 frames/s into its three-slot export ring, yet the encode loop claimed only 56-62 new
+  // frames/s while the add-on replaced 25-109 finished frames/s that the host never claimed. The
+  // export's fence wakes arrived on time (90-130/s, and almost no claim found its frame before its
+  // wake). The loop itself was held to the Windows scheduler tick: every iteration started with a
+  // zero-timeout pop of an empty control queue, and on this toolchain such a condition-variable wait
+  // ends only at the next 15.625 ms tick (safe::no_wait()), as does any timed image wait that
+  // nothing notifies. This model runs the loop's own wait and schedule helpers against the export
+  // ring's rules (docs/reshade-sbs.md, GPU handoff contract) with that arrival pattern and with
+  // waits that take as long as they really do.
   enum class game_frames_e {
     fg_off,  ///< ~115 fps.
     fg_2x,  ///< ~72 real fps, ~145 Presents/s.
     fg_4x,  ///< ~55 real fps, ~220 Presents/s.
+    slow,  ///< ~40 fps, below the stream rate.
   };
+
+  // GetTickCount64's period. winpthreads (no clock-based condition-variable wait in this libstdc++)
+  // re-waits until that count passes a timed wait's deadline, so even a zero timeout ends only at
+  // the next tick; timeBeginPeriod and NtSetTimerResolution do not change it.
+  constexpr auto windows_tick = 15625us;
+  // A high-resolution waitable timer ends a 1 ms sleep after 1.4-1.55 ms on average.
+  constexpr auto hold_timer_overshoot = 500us;
 
   enum class fence_wake_e {
     prompt,
     late,  ///< 0-11 ms after the completion.
     lost,
   };
+
+  // Which encode loop runs.
+  enum class loop_rules_e {
+    /** Until 10-06: each iteration began with stream_gamma_requests->pop(0ms), a wait to the next
+     *  tick; a pending frame waited on the image event for its poll target, and a held export was
+     *  re-checked every millisecond from there (export_recheck_wait), both tick-bound. */
+    head,
+    /** Zero-timeout pops only check; a pending frame is held exactly to its poll target
+     *  (provider_hold()); every other wait ends at a wake, capture or its keepalive bound. */
+    production,
+  };
+
+  // The removed re-check bound of a held export (58449a17), for the head rules only.
+  std::chrono::nanoseconds head_export_recheck_wait(std::chrono::nanoseconds now, std::chrono::nanoseconds poll_target) {
+    return std::max(poll_target - now, std::chrono::nanoseconds {1ms});
+  }
 
   // Fixed pseudo-random jitter: the same sequence with every standard library.
   struct sim_jitter_t {
@@ -363,8 +390,8 @@ namespace {
     std::vector<std::chrono::nanoseconds> presents;
     std::chrono::nanoseconds real {};
     while (real < duration) {
-      if (mode == game_frames_e::fg_off) {
-        real += jitter.between(7.5, 10.0);
+      if (mode == game_frames_e::fg_off || mode == game_frames_e::slow) {
+        real += mode == game_frames_e::slow ? jitter.between(23.0, 27.0) : jitter.between(7.5, 10.0);
         presents.push_back(real);
         continue;
       }
@@ -383,6 +410,7 @@ namespace {
     int repeats = 0;
     std::chrono::nanoseconds max_gap {};  ///< Between new frames.
     std::chrono::nanoseconds mean_age {};  ///< From a claimed frame's Present to its claim.
+    std::chrono::nanoseconds mean_claim_delay {}, max_claim_delay {};  ///< From its fence completion.
   };
 
   // The export ring and encode_run() while an independent provider's export is live, stepped every
@@ -390,11 +418,13 @@ namespace {
   // whose write completed and that a newer completed frame supersedes, else the Present drops.
   // Host: claims the newest ready frame past its held one whose fence passed and returns the
   // replaced slot (its reads completed during the previous encode). Its wait composes
-  // remaining_wait(), provider_keepalive_wait() and export_recheck_wait() as encode_run() does; a
-  // fence wake or desktop capture ends it early, and one that arrives while the loop is busy ends
-  // the next wait at once (event_t). After the wait a pending frame converts once due, a due
-  // keepalive repeats the input, and anything else encodes nothing.
-  export_ring_result_t simulate_export_ring(game_frames_e mode, fence_wake_e wake, std::chrono::nanoseconds duration = 4s) {
+  // remaining_wait(), provider_keepalive_wait() and, by `rules`, provider_hold() as encode_run()
+  // does; a fence wake or desktop capture ends an image wait early, and one that arrives while the
+  // loop is busy ends the next image wait at once (event_t). After the wait a pending frame
+  // converts once due, a due keepalive repeats the input, and anything else encodes nothing.
+  // Waits take as long as they really do with this toolchain: a condition-variable wait that
+  // nothing notifies ends at a Windows scheduler tick (windows_tick).
+  export_ring_result_t simulate_export_ring(game_frames_e mode, fence_wake_e wake, loop_rules_e rules, std::chrono::nanoseconds duration = 4s) {
     constexpr auto stream = 11111111ns;  // 90 fps
     constexpr auto threshold = stream / 4;
     constexpr auto keepalive = 55555555ns;  // The 18 fps minimum of a 90 fps stream.
@@ -423,29 +453,47 @@ namespace {
     std::size_t next_present = 0, next_capture = 0, completed = 0, held = 0;
     int held_slot = -1, next_slot = 0, published = 0, dropped = 0, overwritten = 0, new_frames = 0, encodes = 0;
     export_ring_result_t result;
-    std::chrono::nanoseconds total_age {};
+    std::chrono::nanoseconds total_age {}, total_claim_delay {};
     std::optional<std::chrono::nanoseconds> last_new;
 
     source_owner source;
     source.observe(std::make_shared<captured_source>(1, at(0ns)));
     source.converted();
     auto target = at(0ns);
-    std::chrono::nanoseconds last_encode {}, busy_until {}, wait_until {};
-    bool busy = false, woken = false;
-    const auto start_wait = [&](std::chrono::nanoseconds now) {
-      const auto poll_target = target - threshold;
-      bool pending = false;
-      for (const auto &slot : ring) {
-        pending = pending || (slot.state == slot_e::ready && slot.sequence > held && slot.sequence <= completed);
-      }
-      const auto pending_wait = source.remaining_wait(at(now), poll_target, pending);
-      const auto bound = std::min(
-        video::detail::provider_keepalive_wait(at(now), at(last_encode), keepalive),
-        video::detail::export_recheck_wait(at(now), poll_target)
-      );
-      wait_until = now + (pending_wait ? std::min(*pending_wait, bound) : bound);
+    std::chrono::nanoseconds last_encode {}, blocked_until {}, wait_until {};
+    // The loop's phase once blocked_until passed (an encode, a hold, or a wait no wake can end):
+    // an iteration starting, its wait being planned, the wait on the image event, or a hold ended.
+    enum class loop_e {
+      start,
+      planning,
+      waiting,
+      held,
+    } loop = loop_e::start;
+    bool woken = false;
+    // A condition-variable wait that nothing notifies ends at the first Windows scheduler tick at or
+    // after its deadline, counted from the tick before it started (winpthreads without a
+    // clock-based wait), whatever the timer resolution.
+    constexpr auto tick_phase = 3100us;  // Any phase relative to the game.
+    const auto last_tick = [&](std::chrono::nanoseconds t) {
+      constexpr auto offset = windows_tick - tick_phase;
+      return ((t + offset) / windows_tick) * windows_tick - offset;
     };
-    start_wait(0ns);
+    const auto tick_wait_end = [&](std::chrono::nanoseconds start, std::chrono::nanoseconds wait) {
+      const auto deadline = last_tick(start) + std::chrono::ceil<std::chrono::milliseconds>(std::max(wait, 0ns));
+      auto end = last_tick(start) + windows_tick;
+      while (end < deadline) {
+        end += windows_tick;
+      }
+      return end;
+    };
+    const auto frame_pending = [&]() {
+      for (const auto &slot : ring) {
+        if (slot.state == slot_e::ready && slot.sequence > held && slot.sequence <= completed) {
+          return true;
+        }
+      }
+      return false;
+    };
 
     for (std::chrono::nanoseconds now {}; now < duration; now += step) {
       // Producer.
@@ -502,17 +550,41 @@ namespace {
         }
       }
       // Encode loop.
-      if (busy) {
-        if (now < busy_until) {
+      if (now < blocked_until) {
+        continue;
+      }
+      if (loop == loop_e::start) {
+        loop = loop_e::planning;
+        if (rules == loop_rules_e::head) {
+          // stream_gamma_requests->pop(0ms) on its empty queue: a wait that nothing notifies.
+          blocked_until = tick_wait_end(now, 0ns);
           continue;
         }
-        busy = false;
-        start_wait(now);
       }
-      if (!woken && now < wait_until) {
+      if (loop == loop_e::planning) {
+        const auto poll_target = target - threshold;
+        const auto pending_wait = source.remaining_wait(at(now), poll_target, frame_pending());
+        const auto keepalive_wait = video::detail::provider_keepalive_wait(at(now), at(last_encode), keepalive);
+        if (rules == loop_rules_e::head) {
+          const auto bound = std::min(keepalive_wait, head_export_recheck_wait(now, poll_target.time_since_epoch()));
+          wait_until = tick_wait_end(now, pending_wait ? std::min(*pending_wait, bound) : bound);
+          loop = loop_e::waiting;
+        } else if (const auto hold = video::detail::provider_hold(pending_wait, keepalive_wait, stream)) {
+          // No wake ends the hold; the zero-timeout image pop after it consumes any that came.
+          blocked_until = now + *hold + hold_timer_overshoot;
+          loop = loop_e::held;
+          continue;
+        } else {
+          const auto wait = pending_wait ? std::min(*pending_wait, keepalive_wait) : keepalive_wait;
+          wait_until = wait > 0ns ? tick_wait_end(now, wait) : now;
+          loop = loop_e::waiting;
+        }
+      }
+      if (loop == loop_e::waiting && !woken && now < wait_until) {
         continue;
       }
       woken = false;
+      loop = loop_e::start;
       const auto poll_target = target - threshold;
       int selected = -1;
       for (int i = 0; i < slots; ++i) {
@@ -531,6 +603,8 @@ namespace {
           held_slot = selected;
           held = ring[selected].sequence;
           total_age += now - present_of[held];
+          total_claim_delay += now - completion_of[held];
+          result.max_claim_delay = std::max(result.max_claim_delay, now - completion_of[held]);
           if (last_new) {
             result.max_gap = std::max(result.max_gap, now - *last_new);
           }
@@ -539,12 +613,9 @@ namespace {
         } else {
           ++result.repeats;
         }
-        busy = true;
-        busy_until = now + 8400us + 1ms * (encodes++ % 3);  // Conversion and NVENC: 8.4-10.4 ms.
-        last_encode = busy_until;
-        continue;
+        blocked_until = now + 8400us + 1ms * (encodes++ % 3);  // Conversion and NVENC: 8.4-10.4 ms.
+        last_encode = blocked_until;
       }
-      start_wait(now);
     }
     const double seconds = std::chrono::duration<double>(duration).count();
     result.presents = static_cast<double>(presents.size()) / seconds;
@@ -553,72 +624,109 @@ namespace {
     result.overwritten = overwritten / seconds;
     result.new_frames = new_frames / seconds;
     result.mean_age = new_frames ? total_age / new_frames : 0ns;
+    result.mean_claim_delay = new_frames ? total_claim_delay / new_frames : 0ns;
     return result;
   }
 
-  TEST(RemoteEncodeProviderPacingTest, LiveExportDeliversNewFramesAtStreamRateWithoutItsFenceWake) {
-    constexpr const char *modes[] {"FG off", "FG 2x", "FG 4x"};
+  void print_export_ring(const char *label, game_frames_e mode, fence_wake_e wake, const export_ring_result_t &result) {
+    constexpr const char *modes[] {"FG off", "FG 2x", "FG 4x", "40 fps"};
     constexpr const char *wakes[] {"prompt", "late", "lost"};
+    std::printf(
+      "[ MEASURE  ] %s, %s, %s fence wake: presents %.0f/s published %.0f/s dropped %.0f/s overwritten %.0f/s new %.1f/s repeats %d, "
+      "mean claim age %.1f ms, completion to claim mean %.2f max %.2f ms, max gap %.1f ms\n",
+      label,
+      modes[static_cast<int>(mode)],
+      wakes[static_cast<int>(wake)],
+      result.presents,
+      result.published,
+      result.dropped,
+      result.overwritten,
+      result.new_frames,
+      result.repeats,
+      std::chrono::duration<double, std::milli>(result.mean_age).count(),
+      std::chrono::duration<double, std::milli>(result.mean_claim_delay).count(),
+      std::chrono::duration<double, std::milli>(result.max_claim_delay).count(),
+      std::chrono::duration<double, std::milli>(result.max_gap).count()
+    );
+  }
+
+  TEST(RemoteEncodeProviderPacingTest, TickBoundWaitsReproduceTheLiveSixtyFrameCap) {
+    // The head rules against the live arrival patterns: the model must land where the live host
+    // did (56-62 new frames/s), which is what makes the production result below evidence.
+    for (const auto mode : {game_frames_e::fg_off, game_frames_e::fg_2x, game_frames_e::fg_4x}) {
+      const auto result = simulate_export_ring(mode, fence_wake_e::prompt, loop_rules_e::head);
+      print_export_ring("head", mode, fence_wake_e::prompt, result);
+      EXPECT_GE(result.new_frames, 54.0);
+      EXPECT_LE(result.new_frames, 64.0);  // At most one iteration per 15.625 ms tick.
+      EXPECT_GE(result.max_gap, 2 * windows_tick);
+    }
+  }
+
+  TEST(RemoteEncodeProviderPacingTest, LiveExportDeliversNewFramesAtStreamRate) {
     for (const auto mode : {game_frames_e::fg_off, game_frames_e::fg_2x, game_frames_e::fg_4x}) {
       for (const auto wake : {fence_wake_e::prompt, fence_wake_e::late, fence_wake_e::lost}) {
-        const auto result = simulate_export_ring(mode, wake);
-        std::printf(
-          "[ MEASURE  ] %s, %s fence wake: presents %.0f/s published %.0f/s dropped %.0f/s overwritten %.0f/s new %.1f/s repeats %d, mean claim age %.1f ms, max gap %.1f ms\n",
-          modes[static_cast<int>(mode)],
-          wakes[static_cast<int>(wake)],
-          result.presents,
-          result.published,
-          result.dropped,
-          result.overwritten,
-          result.new_frames,
-          result.repeats,
-          std::chrono::duration<double, std::milli>(result.mean_age).count(),
-          std::chrono::duration<double, std::milli>(result.max_gap).count()
-        );
-        // Every mode presents faster than the stream, so min(Present rate, 90) is 90.
-        EXPECT_GE(result.new_frames, 85.5);
+        const auto result = simulate_export_ring(mode, wake, loop_rules_e::production);
+        print_export_ring("production", mode, wake, result);
         EXPECT_LE(result.new_frames, 90.5);
-        EXPECT_EQ(result.repeats, 0);  // A re-check that finds nothing encodes nothing.
-        EXPECT_LT(result.max_gap, 25ms);  // At most one skipped stream frame.
+        EXPECT_EQ(result.repeats, 0);
+        if (wake == fence_wake_e::prompt) {
+          // Every mode presents faster than the stream, so min(Present rate, 90) is 90. The live
+          // wakes were prompt (10-06: almost no claim found its frame before its wake).
+          EXPECT_GE(result.new_frames, 87.5);
+          EXPECT_LT(result.max_gap, 2 * 11111111ns);  // Never a skipped stream frame.
+        } else {
+          // Nothing re-checks for a missing wake: a frame that completed during the previous
+          // encode is still found by the next iteration's poll, and the others by the next
+          // ~90 Hz desktop capture, so the stream degrades by at most a frame now and then.
+          EXPECT_GE(result.new_frames, 80.0);
+          EXPECT_LT(result.max_gap, 3 * 11111111ns);
+        }
       }
     }
   }
 
-  TEST(RemoteEncodeProviderPacingTest, HeldExportBelowStreamRateIsClaimedWithinOneRecheck) {
-    // A 40 fps game, no fence wake and no desktop capture: only the loop's own re-checks can find
-    // each finished frame, at most one re-check interval after its completion.
-    constexpr auto stream = 11111111ns;
-    constexpr auto threshold = stream / 4;
-    constexpr auto game = 25ms;
-    EXPECT_EQ(video::detail::export_recheck_wait(at(10ms), at(4ms)), video::detail::export_recheck_interval);
-    EXPECT_EQ(video::detail::export_recheck_wait(at(10ms), at(15ms)), 5ms);  // Not before the target.
-    source_owner source;
-    source.observe(std::make_shared<captured_source>(1, at(0ns)));
-    source.converted();
-    std::chrono::nanoseconds now {}, last_encode {};
-    auto target = at(0ns);
-    int claimed = 0, waits = 0;
-    while (claimed < 20) {
-      const auto poll_target = target - threshold;
-      const int completed = static_cast<int>(now / game);
-      const auto pending_wait = source.remaining_wait(at(now), poll_target, completed > claimed);
-      const auto bound = std::min(
-        video::detail::provider_keepalive_wait(at(now), at(last_encode), 55555555ns),
-        video::detail::export_recheck_wait(at(now), poll_target)
-      );
-      now += pending_wait ? std::min(*pending_wait, bound) : bound;
-      ++waits;
-      const int newest = static_cast<int>(now / game);
-      if (newest > claimed && source.due(at(now), poll_target, false, true)) {
-        EXPECT_LE(now - newest * game, video::detail::export_recheck_interval);
-        target = video::detail::select_encode_frame_schedule(at(now), target, stream, threshold).next_encode_target;
-        claimed = newest;
-        now += 9400us;
-        last_encode = now;
-      }
-    }
-    // One wait to the poll target, then about one per millisecond until the 25 ms frame is done.
-    EXPECT_LE(waits, 20 * 18);
+  TEST(RemoteEncodeProviderPacingTest, SlowerGameIsClaimedWhenItsFenceWakes) {
+    // Below the stream rate every frame is new and is claimed as its wake arrives: no poll, tick
+    // or re-check stands between a finished frame and its conversion.
+    const auto result = simulate_export_ring(game_frames_e::slow, fence_wake_e::prompt, loop_rules_e::production);
+    print_export_ring("production", game_frames_e::slow, fence_wake_e::prompt, result);
+    EXPECT_GE(result.new_frames, result.presents - 1.0);
+    EXPECT_EQ(result.repeats, 0);
+    EXPECT_LT(result.max_claim_delay, 1ms);
+    const auto head = simulate_export_ring(game_frames_e::slow, fence_wake_e::prompt, loop_rules_e::head);
+    print_export_ring("head", game_frames_e::slow, fence_wake_e::prompt, head);
+    EXPECT_GT(head.mean_claim_delay, 4ms);  // Each claim waited for the control poll's tick.
+  }
+
+  TEST(RemoteEncodeProviderPacingTest, ProviderHoldSleepsExactlyToAPendingFramesPollTarget) {
+    constexpr std::chrono::nanoseconds stream {11111111ns};
+    constexpr std::chrono::nanoseconds keepalive {55555555ns};
+    EXPECT_FALSE(video::detail::provider_hold(std::nullopt, keepalive, stream));  // Nothing pending.
+    EXPECT_FALSE(video::detail::provider_hold(0ns, keepalive, stream));  // Due: convert now.
+    EXPECT_FALSE(video::detail::provider_hold(30ms, 20ms, stream));  // The keepalive comes first.
+    // Whole 100 ns timer units, rounded up: the timer must not end before the target.
+    EXPECT_EQ(video::detail::provider_hold(1234567ns, keepalive, stream), 1234600ns);
+    EXPECT_EQ(video::detail::provider_hold(30ms, keepalive, stream), 11111200ns);  // At most a frame.
+  }
+
+  TEST(RemoteEncodeLoopStatsTest, AccountsHoldsWaitsAndEncodesForOneWindow) {
+    video::detail::encode_loop_stats_t stats;
+    stats.iteration();
+    stats.iteration();
+    stats.held(1500us, 2000us);
+    stats.waited(55ms, 3ms);  // Woken by the fence: no overshoot.
+    stats.waited(1ms, 15600us);  // Ran past its bound to the scheduler tick.
+    stats.converted(170us);
+    stats.encoded(true, 9600us, 300us, 9100us);
+    stats.encoded(false, 5ms, 200us, 4600us);
+    const auto line = stats.report(1s);
+    EXPECT_NE(line.find("2 iterations in 1.0 s; 1 new and 1 repeat encodes"), std::string::npos) << line;
+    EXPECT_NE(line.find("holding 2.0 ms in 1 exact holds (requested 1.5 ms, overshoot avg 0.50 max 0.50 ms)"), std::string::npos) << line;
+    EXPECT_NE(line.find("waiting 18.6 ms in 2 image waits (requested 56.0 ms; 1 ran to their bound, overshoot avg 14.60 max 14.60 ms)"), std::string::npos) << line;
+    EXPECT_NE(line.find("converting 0.2 ms in 1 conversions; encoding 14.6 ms (NVENC submit 0.5 ms, completion wait 13.7 ms)"), std::string::npos) << line;
+    EXPECT_NE(line.find("loop work 964.6 ms"), std::string::npos) << line;
+    stats.reset();
+    EXPECT_EQ(stats.iterations(), 0u);
   }
 
   TEST(RemoteEncodePendingSourceTest, FinalEarlySourceSurvivesUntilItsPresentationDeadline) {

@@ -10,6 +10,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
+#include <format>
 #include <future>
 #include <limits>
 #include <memory>
@@ -534,9 +535,18 @@ namespace platf::dxgi {
       }
       const auto counts = reshade_receiver->take_wake_counts();
       if (next_export_wake_log != std::chrono::steady_clock::time_point {} && counts.claims) {
+        const auto ms = [](std::chrono::nanoseconds value) {
+          return std::chrono::duration<double, std::milli>(value).count();
+        };
         BOOST_LOG(info) << "Game 3D export: " << counts.claims << " new frames claimed and " << counts.wakes
                         << " fence wakes in " << interval.count() << " s; " << counts.claims_before_wake
-                        << " claims found their frame complete before its wake (late or missing wake).";
+                        << " claims found their frame complete before its wake (late or missing wake); "
+                        << std::format(
+                             "fence wake to claim avg {:.2f} ms, max {:.2f} ms over {} claims.",
+                             counts.claims_after_wake ? ms(counts.wake_to_claim_total) / static_cast<double>(counts.claims_after_wake) : 0.0,
+                             ms(counts.wake_to_claim_max),
+                             counts.claims_after_wake
+                           );
       }
       next_export_wake_log = now + interval;
     }

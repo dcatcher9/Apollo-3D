@@ -101,12 +101,16 @@ namespace platf::reshade_bridge {
     // to the producer at once when those reads have completed, rather than one conversion later.
     void reads_recorded();
 
-    // Diagnostics since the last call: newer frames claimed, fence wakes, and claims whose frame
-    // had completed before any wake reported it (found by a re-check, capture or keepalive).
+    // Diagnostics since the last call: newer frames claimed, fence wakes, claims whose frame had
+    // completed before any wake reported it (found by a capture, keepalive or another frame's poll),
+    // and for the others the delay from the first wake that reported their frame to the claim.
     struct wake_counts_t {
       std::uint64_t claims = 0;
       std::uint64_t wakes = 0;
       std::uint64_t claims_before_wake = 0;
+      std::uint64_t claims_after_wake = 0;
+      std::chrono::nanoseconds wake_to_claim_total {};
+      std::chrono::nanoseconds wake_to_claim_max {};
     };
 
     wake_counts_t take_wake_counts();

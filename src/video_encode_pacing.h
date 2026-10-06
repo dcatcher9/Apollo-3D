@@ -5,7 +5,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <optional>
+#include <ratio>
 #include <type_traits>
 #include <utility>
 
@@ -160,30 +162,36 @@ namespace video::detail {
     );
   }
 
-  /** Longest wait between re-checks for the next frame of a held live export once one may be due.
+  /** Exact sleep before an independent provider converts its pending frame.
    *
-   * The export's completion wake should end the encode loop's wait as each frame finishes. Live,
-   * finished frames still waited for a desktop capture or the keepalive (Stellar Blade at 4K: 49-64
-   * new frames/s of a 90 fps stream while the add-on replaced up to 79 finished frames/s that were
-   * never claimed), which only a late or missing wake explains. The re-check does not depend on
-   * it. A re-check that finds no newer frame encodes nothing.
+   * A pending frame (a completed export, a capture, or another reason to poll the provider) that
+   * is not yet due converts at its poll target, so `pending_wait` is the time left until then. A
+   * wait on the image event cannot end there: with this toolchain a condition-variable wait that
+   * nothing notifies ends only at the next Windows scheduler tick (15.625 ms; see safe::no_wait()).
+   * The Game 3D loop then claimed about 60 new frames/s of a 90 fps stream while the game offered
+   * more. The loop instead sleeps this long on a high-resolution timer and then takes, without
+   * waiting, whatever arrived meanwhile: a capture that arrives before the target is early too and
+   * would convert at the same target, and a newer export frame replaces the pending one. Nothing is
+   * held when the frame is already due or the keepalive comes first. One hold is at most a frame
+   * interval, so a control request waits at most that long.
    */
-  inline constexpr std::chrono::milliseconds export_recheck_interval {1};
-
-  /** Wait bound while a live export is held: no newer frame converts before the poll target, and
-   * from there on the export is re-checked every export_recheck_interval until one completes.
-   */
-  [[nodiscard]] inline std::chrono::nanoseconds export_recheck_wait(
-    std::chrono::steady_clock::time_point now,
-    std::chrono::steady_clock::time_point poll_target
+  [[nodiscard]] inline std::optional<std::chrono::nanoseconds> provider_hold(
+    std::optional<std::chrono::nanoseconds> pending_wait,
+    std::chrono::nanoseconds keepalive_wait,
+    std::chrono::nanoseconds frame_interval
   ) noexcept {
-    return std::max(
-      std::chrono::duration_cast<std::chrono::nanoseconds>(poll_target - now),
-      std::chrono::nanoseconds {export_recheck_interval}
+    if (!pending_wait || *pending_wait <= std::chrono::nanoseconds::zero() || *pending_wait > keepalive_wait) {
+      return std::nullopt;
+    }
+    // Whole 100 ns timer units, rounded up so the timer never ends before the target.
+    using timer_unit_t = std::chrono::duration<std::int64_t, std::ratio<1, 10'000'000>>;
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::ceil<timer_unit_t>(std::min(*pending_wait, frame_interval))
     );
   }
 
-  /** Wait for a new capture without hiding pending conversion behind the idle heartbeat.
+  /** The bound of the encode loop's image wait, without hiding pending conversion behind the idle
+   * heartbeat.
    *
    * The caller still converts/encodes on its normal owner. A pending conversion gets one
    * cadence-sized wait, not a zero-timeout spin or a faster stream of repeated encoded frames.
@@ -191,9 +199,8 @@ namespace video::detail {
    * valid only when the caller can immediately retire that pending source on the encode owner.
    * Before the first real capture, there is no retained source to service on a timeout.
    */
-  template<class ImageEvent, class Rep, class Period>
-  auto wait_for_encode_image(
-    ImageEvent &images,
+  template<class Rep, class Period>
+  auto encode_image_wait(
     std::chrono::duration<Rep, Period> idle_interval,
     std::chrono::nanoseconds frame_interval,
     bool has_retained_source,
@@ -214,6 +221,20 @@ namespace video::detail {
         wait = std::min(wait, wait_duration_t {std::max(*pending_source_wait, 0ns)});
       }
     }
-    return images.pop(wait);
+    return wait;
+  }
+
+  /** Wait for a new capture for at most encode_image_wait(). */
+  template<class ImageEvent, class Rep, class Period>
+  auto wait_for_encode_image(
+    ImageEvent &images,
+    std::chrono::duration<Rep, Period> idle_interval,
+    std::chrono::nanoseconds frame_interval,
+    bool has_retained_source,
+    bool depth_pipeline_ready,
+    bool conversion_poll_pending,
+    std::optional<std::chrono::nanoseconds> pending_source_wait = std::nullopt
+  ) {
+    return images.pop(encode_image_wait(idle_interval, frame_interval, has_retained_source, depth_pipeline_ready, conversion_poll_pending, pending_source_wait));
   }
 }  // namespace video::detail

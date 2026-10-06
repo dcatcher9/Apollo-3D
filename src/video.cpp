@@ -486,6 +486,10 @@ namespace video {
       return result;
     }
 
+    nvenc::nvenc_base::frame_timing_t last_frame_timing() const {
+      return device && device->nvenc ? device->nvenc->last_frame_timing() : nvenc::nvenc_base::frame_timing_t {};
+    }
+
     std::vector<std::uint8_t> acquire_frame_buffer() {
       return frame_buffer_pool->acquire();
     }
@@ -1239,6 +1243,19 @@ namespace video {
     if (encode_diagnostics) {
       encode_diagnostics->performance = config.sbs_telemetry_performance;
     }
+    // Where this loop's time goes (holds, waits, conversion, encode), one line every 20 s.
+    auto loop_stats = detail::make_diagnostic_state<detail::encode_loop_stats_t>(config::sunshine.diagnostics_enabled);
+    auto loop_stats_since = std::chrono::steady_clock::now();
+    // An independent provider's pending frame converts at its poll target. Image waits that nothing
+    // notifies end only at a scheduler tick, so it sleeps to the target on this timer instead
+    // (detail::provider_hold); without the timer it falls back to the image wait.
+    std::unique_ptr<platf::high_precision_timer> hold_timer;
+    if (independent_provider) {
+      hold_timer = platf::create_high_precision_timer();
+      if (hold_timer && !static_cast<bool>(*hold_timer)) {
+        hold_timer.reset();
+      }
+    }
     const auto convert_frame = [&](platf::img_t &img, std::optional<std::chrono::steady_clock::time_point> target = std::nullopt) {
       if (encode_diagnostics) {
         encode_diagnostics->begin_conversion(img);
@@ -1247,6 +1264,9 @@ namespace video {
       processing_started = std::chrono::steady_clock::now();
       const auto started = processing_started;
       const int result = target ? session->convert_with_encode_target(img, *target) : session->convert(img);
+      if (loop_stats) {
+        loop_stats->converted(std::chrono::steady_clock::now() - *started);
+      }
       if (encode_diagnostics) {
         const auto measured_at = detail::diagnostic_clock_t::now();
         log_diagnostic_elapsed(encode_diagnostics->conversion_call, started, measured_at);
@@ -1372,6 +1392,14 @@ namespace video {
     };
 
     while (true) {
+      if (loop_stats) {
+        if (const auto now = std::chrono::steady_clock::now(); now - loop_stats_since >= 20s) {
+          BOOST_LOG(info) << loop_stats->report(now - loop_stats_since);
+          loop_stats->reset();
+          loop_stats_since = now;
+        }
+        loop_stats->iteration();
+      }
       if (lifecycle_change_requested()) {
         break;
       }
@@ -1444,15 +1472,26 @@ namespace video {
       const bool hold_startup_input = startup_input_hold.active(std::chrono::steady_clock::now());
       if (!recovery_frame_requested || images->peek() || hold_startup_input) {
         const bool conversion_poll_pending = last_img && (pending_gamma || session->needs_conversion_poll());
+        const bool depth_pipeline_ready = depth_pipeline_ready_event && depth_pipeline_ready_event->peek();
         const auto wait_started = std::chrono::steady_clock::now();
         auto pending_source_wait = source.remaining_wait(wait_started, provider_poll_target, independent_provider && conversion_poll_pending);
         if (independent_provider && last_img) {
-          auto provider_wait = detail::provider_keepalive_wait(wait_started, last_encode_at, keepalive_interval);
-          if (session->external_frame_held()) {
-            // Do not rely on the export's completion wake alone to notice its next frame.
-            provider_wait = std::min(provider_wait, detail::export_recheck_wait(wait_started, provider_poll_target));
+          // The export's fence wake, captures and control requests end this wait; a pending frame
+          // that is not yet due is held exactly to its poll target instead.
+          const auto keepalive_wait = detail::provider_keepalive_wait(wait_started, last_encode_at, keepalive_interval);
+          const auto hold = hold_timer && !hold_startup_input && !recovery_frame_requested && !depth_pipeline_ready ?
+                              detail::provider_hold(pending_source_wait, keepalive_wait, encode_frame_threshold) :
+                              std::nullopt;
+          if (hold) {
+            hold_timer->sleep_for(*hold);
+            if (loop_stats) {
+              loop_stats->held(*hold, std::chrono::steady_clock::now() - wait_started);
+            }
+            // Then take whatever arrived meanwhile without waiting.
+            pending_source_wait = std::chrono::nanoseconds::zero();
+          } else {
+            pending_source_wait = pending_source_wait ? std::min(*pending_source_wait, keepalive_wait) : keepalive_wait;
           }
-          pending_source_wait = pending_source_wait ? std::min(*pending_source_wait, provider_wait) : provider_wait;
         }
         // Nothing is encoded before capture delivers a frame while the startup input is held, so
         // only the hold's deadline bounds this wait: a due poll or keepalive must not spin it.
@@ -1461,7 +1500,13 @@ namespace video {
           idle_wait = startup_input_hold.wait(wait_started, idle_wait);
         }
         bool captured = false;
-        if (auto img = detail::wait_for_encode_image(*images, idle_wait, encode_frame_threshold, last_img && !hold_startup_input, depth_pipeline_ready_event && depth_pipeline_ready_event->peek(), conversion_poll_pending, pending_source_wait)) {
+        const auto image_wait = detail::encode_image_wait(idle_wait, encode_frame_threshold, last_img && !hold_startup_input, depth_pipeline_ready, conversion_poll_pending, pending_source_wait);
+        const auto image_wait_started = std::chrono::steady_clock::now();
+        auto img = images->pop(image_wait);
+        if (loop_stats && !safe::no_wait(image_wait)) {
+          loop_stats->waited(std::chrono::duration_cast<std::chrono::nanoseconds>(image_wait), std::chrono::steady_clock::now() - image_wait_started);
+        }
+        if (img) {
           // Metadata for pixels an external provider owns, with an unchanged cursor, only
           // replaces the retained source; the provider's own wake or the keepalive converts it.
           const bool new_content = img->conversion_needed;
@@ -1656,6 +1701,7 @@ namespace video {
         break;
       }
 
+      const auto encode_started = std::chrono::steady_clock::now();
       const auto publish_result = encode(
         frame_nr++,
         *session,
@@ -1668,6 +1714,10 @@ namespace video {
         processing_started,
         first_encoder_output
       );
+      if (loop_stats) {
+        const auto timing = session->last_frame_timing();
+        loop_stats->encoded(converted_frame, std::chrono::steady_clock::now() - encode_started, timing.submit, timing.completion_wait);
+      }
       if (publish_result.failed) {
         BOOST_LOG(error) << "Could not encode video packet"sv;
         break;

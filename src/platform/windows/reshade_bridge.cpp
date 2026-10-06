@@ -4,12 +4,15 @@
 #include "src/logging.h"
 #include "src/reshade_bridge_protocol.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <d3d11_4.h>
 #include <dxgi1_2.h>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <utility>
 #include <wrl/client.h>
@@ -247,7 +250,14 @@ namespace platf::reshade_bridge {
     }
 
     receiver_t::wake_counts_t take_wake_counts() {
-      return {std::exchange(claims_, 0), wakes_.exchange(0, std::memory_order_relaxed), std::exchange(claims_before_wake_, 0)};
+      return {
+        std::exchange(claims_, 0),
+        wakes_.exchange(0, std::memory_order_relaxed),
+        std::exchange(claims_before_wake_, 0),
+        std::exchange(claims_after_wake_, 0),
+        std::exchange(wake_to_claim_total_, {}),
+        std::exchange(wake_to_claim_max_, {}),
+      };
     }
 
   private:
@@ -445,6 +455,8 @@ namespace platf::reshade_bridge {
       ++claims_;
       if (woken_completed_.load(std::memory_order_relaxed) < sequence) {
         ++claims_before_wake_;
+      } else {
+        record_claim_after_wake(sequence);
       }
       const auto transfer = metadata_.color_transfer == wire::transfer::scrgb ? transfer_e::scrgb :
                             metadata_.color_transfer == wire::transfer::pq    ? transfer_e::pq :
@@ -599,6 +611,7 @@ namespace platf::reshade_bridge {
       ResetEvent(wake_event_.get());
       wake_fence_ = ready_fence_;
       woken_completed_.store(0, std::memory_order_relaxed);
+      wake_history_ = {};
       if (!rearm_locked()) {
         wake_fence_.Reset();
         wake_armed_.store(false, std::memory_order_release);
@@ -619,6 +632,36 @@ namespace platf::reshade_bridge {
       return true;
     }
 
+    // Caller holds wake_lock_. Remembers when each newly completed fence value was first woken for.
+    void record_wake_locked(std::uint64_t completed) {
+      auto &latest = wake_history_[(wake_history_next_ + wake_history_.size() - 1) % wake_history_.size()];
+      if (completed == UINT64_MAX || completed <= latest.completed) {
+        return;
+      }
+      wake_history_[wake_history_next_] = {completed, std::chrono::steady_clock::now()};
+      wake_history_next_ = (wake_history_next_ + 1) % wake_history_.size();
+    }
+
+    // Diagnostics: the delay from the first wake that reported `sequence` complete to its claim.
+    void record_claim_after_wake(std::uint64_t sequence) {
+      std::optional<std::chrono::steady_clock::time_point> woken_at;
+      {
+        std::lock_guard lock(wake_lock_);
+        for (const auto &wake : wake_history_) {
+          if (wake.completed >= sequence && (!woken_at || wake.at < *woken_at)) {
+            woken_at = wake.at;
+          }
+        }
+      }
+      if (!woken_at) {
+        return;
+      }
+      const auto delay = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - *woken_at);
+      ++claims_after_wake_;
+      wake_to_claim_total_ += delay;
+      wake_to_claim_max_ = std::max(wake_to_claim_max_, delay);
+    }
+
     void disarm_wake() {
       wake_generation_ = 0;
       if (!wait_) {
@@ -635,8 +678,10 @@ namespace platf::reshade_bridge {
       {
         std::lock_guard lock(self->wake_lock_);
         if (self->wake_fence_) {
-          self->woken_completed_.store(self->wake_fence_->GetCompletedValue(), std::memory_order_relaxed);
+          const auto completed = self->wake_fence_->GetCompletedValue();
+          self->woken_completed_.store(completed, std::memory_order_relaxed);
           self->wakes_.fetch_add(1, std::memory_order_relaxed);
+          self->record_wake_locked(completed);
         }
         if (self->wake_fence_ && !self->rearm_locked()) {
           // The owner falls back to polling at stream cadence and re-arms on its next frame.
@@ -747,7 +792,17 @@ namespace platf::reshade_bridge {
     ComPtr<ID3D11Fence> wake_fence_;
     // Diagnostics (take_wake_counts): the fence value the latest wake saw, wakes and claims.
     std::atomic<std::uint64_t> woken_completed_ {0}, wakes_ {0};
-    std::uint64_t claims_ = 0, claims_before_wake_ = 0;
+    std::uint64_t claims_ = 0, claims_before_wake_ = 0, claims_after_wake_ = 0;
+    std::chrono::nanoseconds wake_to_claim_total_ {}, wake_to_claim_max_ {};
+
+    // The latest newly completed fence values and when a wake first reported each (wake_lock_).
+    struct wake_record_t {
+      std::uint64_t completed = 0;
+      std::chrono::steady_clock::time_point at {};
+    };
+
+    std::array<wake_record_t, 4> wake_history_ {};
+    std::size_t wake_history_next_ = 0;
   };
 
   receiver_t::receiver_t(ID3D11Device *device, ID3D11DeviceContext *context, observer_t observe):
