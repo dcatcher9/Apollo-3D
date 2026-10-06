@@ -22,8 +22,15 @@ namespace {
   content_fn associate_content{};
   using discard_counts_fn = BOOL (*)(sunshine_streamline::native_discard::counters *);
   discard_counts_fn discard_counts{};
+  using preserved_fn = BOOL (*)(api::effect_runtime *, sunshine_streamline::content::copy_snapshot *, std::uint64_t *, std::uint64_t *);
+  preserved_fn read_preserved{};
   sunshine_streamline::content::use_snapshot content_use{};
   sunshine_streamline::content::association content_association{};
+  // The actual before-clear copy in the game's recording, behind the published
+  // backup, and its association with the evaluation's observed use.
+  sunshine_streamline::content::copy_snapshot preserved_copy{};
+  sunshine_streamline::content::association preserved_association{};
+  bool preserved_ready{};
   void (*lose_lifecycle)(){};
   std::uint64_t reset_native{};
   command_evidence::recording_marker evaluation_marker{};
@@ -39,11 +46,18 @@ namespace {
     captured_frame = {};
     frame_association = {};
     content_association = {};
+    preserved_copy = {};
+    preserved_association = {};
+    preserved_ready = false;
     if (!read_frame || !associate_markers || !read_frame(runtime, &captured_frame)) return;
     frame_ready = associate_markers(&evaluation_marker, &captured_frame.capture_marker,
       captured_frame.command_queue, &frame_association) != FALSE;
-    if (associate_content) associate_content(&content_use, &captured_frame.depth_copy,
+    if (!associate_content) return;
+    associate_content(&content_use, &captured_frame.depth_copy,
       captured_frame.resource.handle, captured_frame.backup_id, &content_association);
+    std::uint64_t preserved_texture{}, preserved_lifetime{};
+    preserved_ready = read_preserved && read_preserved(runtime, &preserved_copy, &preserved_texture, &preserved_lifetime);
+    if (preserved_ready) associate_content(&content_use, &preserved_copy, preserved_texture, preserved_lifetime, &preserved_association);
   }
   command_evidence::recording_marker capture(std::uint64_t native) {
     command_evidence::recording_marker out;
@@ -74,7 +88,9 @@ namespace {
       const auto install_discard = reinterpret_cast<BOOL (*)()>(GetProcAddress(module, "SunshineDiscardTestInstallPending"));
       discard_counts = reinterpret_cast<discard_counts_fn>(GetProcAddress(module, "SunshineDiscardTestCounts"));
       lose_lifecycle = reinterpret_cast<void (*)()>(GetProcAddress(module, "SunshineCommandTestLoseLifecycle"));
-      require(capture_marker && associate_markers && read_frame && lose_lifecycle && capture_content_use && associate_content && enable_content && install_discard && discard_counts,
+      read_preserved = reinterpret_cast<preserved_fn>(GetProcAddress(module, "SunshineDepthTestPreservedCopy"));
+      require(capture_marker && associate_markers && read_frame && lose_lifecycle && capture_content_use && associate_content && enable_content && install_discard && discard_counts &&
+          read_preserved,
         "Test-only observation adapters are missing");
       enable_content(TRUE);
       require(install_discard(), "Deferred native DiscardResource hook installation failed");
@@ -157,19 +173,31 @@ namespace {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
         while (checked_frames != 4 && std::chrono::steady_clock::now() < deadline) {
           step();
-          if (!frame_ready || !frame_association.associated() || (scenario < 4 && !content_use.valid())) continue;
-          // The capture owner publishes the shader-visible backup from its
-          // before-clear snapshot on the runtime's own immediate list, whose
-          // reset/close events ReShade never reports: that forward has no
-          // recording, so no ordering of the game's draws, clears and
-          // evaluation may promote it to observed content correspondence. The
-          // same-recording ordering rules are unit-tested by the content ledger
-          // (reshade_streamline_depth_content).
-          if (captured_frame.depth_copy.state != sunshine_streamline::content::status::unknown_recording ||
+          if (!frame_ready || !frame_association.associated() || (scenario < 4 && !content_use.valid()) ||
+              !preserved_ready || !preserved_copy.valid()) continue;
+          // The actual before-clear copy into the capture owner's texture is in
+          // the game's recording, the frame's capture marker. Its association
+          // with the evaluation's use follows the live draw/clear ordering and
+          // native DiscardResource revocation.
+          require(sunshine_streamline::content::same_recording(preserved_copy.recording, captured_frame.capture_marker) &&
+              preserved_copy.recording.event == captured_frame.capture_marker.event,
+            "The frame's capture marker is not the actual preserved copy's recording");
+          require(!preserved_association.coverage_complete && !preserved_association.final_color_registered,
+            "Observed depth mutations were promoted into complete native coverage");
+          const bool expected_match = scenario == 0 || scenario == 3;
+          // The capture owner publishes the shader-visible backup from that
+          // copy on the runtime's own immediate list, whose reset/close events
+          // ReShade never reports: the forward has no recording, so it never
+          // inherits the preserved copy's content correspondence.
+          if (preserved_association.matched() != expected_match ||
+              captured_frame.depth_copy.state != sunshine_streamline::content::status::unknown_recording ||
               content_association.matched())
-            std::fprintf(stderr, "Content case %s: copy=%s association=%s\n", labels[scenario],
+            std::fprintf(stderr, "Content case %s: preserved=%s copy=%s association=%s\n", labels[scenario],
+              sunshine_streamline::content::name(preserved_association.state),
               sunshine_streamline::content::name(captured_frame.depth_copy.state),
               sunshine_streamline::content::name(content_association.state));
+          require(preserved_association.matched() == expected_match,
+            "Actual source content/preserved-copy association disagrees with draw/clear ordering or native discard");
           require(captured_frame.depth_copy.state == sunshine_streamline::content::status::unknown_recording,
             "The runtime-list publication of the selected backup claimed a command recording");
           require(!content_association.matched() && !content_association.coverage_complete &&
@@ -177,12 +205,14 @@ namespace {
             "An unrecorded backup publication was promoted into observed content correspondence");
           ++checked_frames;
         }
-        if (checked_frames != 4) std::fprintf(stderr, "Content timeout %s: use=%s copy=%s association=%s\n", labels[scenario],
-          sunshine_streamline::content::name(content_use.state), sunshine_streamline::content::name(captured_frame.depth_copy.state),
+        if (checked_frames != 4) std::fprintf(stderr, "Content timeout %s: use=%s preserved=%s/%s copy=%s association=%s\n", labels[scenario],
+          sunshine_streamline::content::name(content_use.state), preserved_ready ? "read" : "unavailable",
+          sunshine_streamline::content::name(preserved_copy.state), sunshine_streamline::content::name(captured_frame.depth_copy.state),
           sunshine_streamline::content::name(content_association.state));
         require(checked_frames == 4, "Content observations failed to become available");
-        std::printf("PASS actual DSV content ordering: %s; the evaluation's use is observed, the runtime-list backup publication is never promoted\n",
-          labels[scenario]);
+        std::printf("PASS actual DSV content ordering: %s; preserved copy %s the evaluation's source content, "
+          "the runtime-list backup publication is never promoted\n",
+          labels[scenario], scenario == 0 || scenario == 3 ? "matches" : "does not match");
       }
       scene->before_final_clear = {};
       render_tracked_depth = {};
