@@ -124,6 +124,7 @@ namespace sunshine_game3d {
     bool memo_valid = false;
     api::resource_view memo_depth{};
     uint64_t memo_identity{};
+    render_parameters memo_parameters;
     // The final field of that conditioning (the horizontal and UI pin
     // passes), kept with the vertical memo while the b1 words, the mask view
     // and the detected mask's epoch repeat: a held generated Present, whose
@@ -132,7 +133,6 @@ namespace sunshine_game3d {
     bool field_memo_valid = false;
     std::array<uint32_t, 4> field_memo_words{};
     uint64_t field_memo_view{}, field_memo_epoch{}, mask_epoch{};
-    render_parameters memo_parameters;
     renderer::conditioning_counters conditioning_counts;
     // pending: this presentation recorded work awaiting finish_present.
     // unsignaled: an earlier presentation's work awaits the next signal.
@@ -695,13 +695,13 @@ namespace sunshine_game3d {
         if (!reuse) {
           dispatch(cmd, live_vertical ? vertical_live : vertical, (width + group_lines - 1) / group_lines, 1, p,
             {api::resource_view{}, {}, {}, t[raw].srv}, {vertical_majorant, vertical_field});
-        const auto ui_words = ui_parameter_words(c.apply_ui, c.plane, c.channel);
           memo_valid = c.depth_identity != 0;
           memo_depth = c.depth;
           memo_identity = c.depth_identity;
           memo_parameters = c.p;
         }
         mark(cmd, mark_vertical);
+        const auto ui_words = ui_parameter_words(c.apply_ui, c.plane, c.channel);
         if (c.apply_ui && c.plane.mode == ui_plane_mode::depth_midpoint_nearest_ui) {
           dispatch(cmd, ui_tiles, (width + 15) / 16, (height + 15) / 16, p, {c.ui_alpha, c.depth}, {ui_plane_tiles});
           dispatch(cmd, ui_reduce, 1, 1, p,
@@ -1082,7 +1082,6 @@ namespace sunshine_game3d {
         cmd->barrier(t.resource, api::resource_usage::unordered_access, api::resource_usage::shader_resource);
         if (count) cmd->barrier(counter_texture.resource, api::resource_usage::unordered_access, api::resource_usage::shader_resource);
         if (reduce) cmd->barrier(hold_texture.resource, api::resource_usage::unordered_access, api::resource_usage::shader_resource);
-      ++mask_epoch;
       };
       // Each statistics tile in its parts (group z), which the reduce adds.
       if (bits) dispatch_stage(detection_tiles, detection_statistics, 6, 16, 16, false, false,
@@ -1093,6 +1092,7 @@ namespace sunshine_game3d {
       // A reused decision (texel 9 bit 16) leaves detected_mask as the
       // previous real frame made it.
       dispatch_stage(detection_mask, detected_mask, 0, (width+7)/8, (height+7)/8);
+      ++mask_epoch;
       if (!sample) return;
       // A sample frame. Hidden-scene evidence only measures this frame for the
       // CPU and writes decision texels 5 and 6 after the decision and mask;

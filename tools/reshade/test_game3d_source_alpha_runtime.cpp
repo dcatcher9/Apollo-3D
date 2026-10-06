@@ -97,9 +97,6 @@ namespace {
     // and its depth identity (render_frame_input::depth_identity; zero: none, no memo).
     bool depth_current = true;
     std::uint64_t depth_identity = 0;
-    // An automatic input of render() is a dedicated mask (a declared tag)
-    // rather than captured colour alpha.
-    bool dedicated_input = false;
     std::vector<unsigned char> original;
     // The acceptance key (A1) of a fixture candidate: its typed DXGI format,
     // the source color's by default, in the fixture's color space.
@@ -1916,6 +1913,12 @@ namespace {
     // A generated Present (it offers nothing within the reported generated
     // count of the last Present that offered a tag) never detects (T1): it
     // shows the last real decision, without a multiplier cap.
+    // With one depth identity the held Presents repeat the real frame's
+    // conditioning exactly: the memo keeps its vertical field and, with the
+    // same UI words and the mask no detection rewrote, its final field, so no
+    // horizontal or UI pin pass is recorded and the packed bytes are the same.
+    gpu.depth_identity = 0x51ed;
+    run(true, "the real frame before the generated Presents, with a depth identity");
     inputs.hudless = {}; inputs.hold_previous = true;
     {
       const auto before = gpu.renderer.conditioning_activity();
@@ -1929,18 +1932,13 @@ namespace {
       // at most per_frame_sample, when that run was a status sample).
       const auto held = gpu.renderer.consumed_detection();
       require(held.state == ui_detection_snapshot::run_state::held && held.held_presents == 1 &&
-    // With one depth identity the held Presents repeat the real frame's
-    // conditioning exactly: the memo keeps its vertical field and, with the
-    // same UI words and the mask no detection rewrote, its final field, so no
-    // horizontal or UI pin pass is recorded and the packed bytes are the same.
-    gpu.depth_identity = 0x51ed;
-    run(true, "the real frame before the generated Presents, with a depth identity");
           held.candidates == (2u | 8u | 16u) && !(held.flags & ~ui_detection::per_frame_sample) && held.stored_flags == 0u,
         "A held HUD-less mask lost the detection constants that made it");
     }
     run(true, "second generated present still holds");
     run(true, "third generated present still holds");
     run(true, "a fourth generated present still holds: no multiplier cap");
+    gpu.depth_identity = 0;
     // A generated Present in another identity scope (a recreated swapchain)
     // has no decision to show: no mask, and the chain ends (fail safe).
     ++source.epoch;
@@ -1948,7 +1946,6 @@ namespace {
     require(gpu.renderer.consumed_detection().state == ui_detection_snapshot::run_state::inactive,
       "A generated present without a decision to show reported a held mask");
     --source.epoch;
-    gpu.depth_identity = 0;
     run(false, "a generated present after the chain ended has no mask", false);
     inputs.hold_previous = false; inputs.hudless = correct;
     run(true, "the next real frame detects again");
