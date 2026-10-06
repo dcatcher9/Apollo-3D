@@ -745,13 +745,19 @@ TEST_F(ReShadeBridgeGpu, WakesWhenTheExportFenceCompletesAndRetiresWithoutAnothe
     SetEvent(event);
   });
   EXPECT_FALSE(bridge->frame_wake_active());
-  EXPECT_TRUE(bridge->frame_pending());  // Not live yet: the owner keeps polling.
+  // Not live yet: the generation published since the last poll is a change worth a conversion.
+  EXPECT_TRUE(bridge->frame_pending());
+  EXPECT_FALSE(poll());
+  EXPECT_FALSE(bridge->frame_held());
+  // Nothing changed since: the owner does not poll at stream cadence (captures and keepalives do).
+  EXPECT_FALSE(bridge->frame_pending());
 
   publish(1);
   const auto first = await_frame();
   ASSERT_TRUE(first);
   const int first_slot = last_slot;
   EXPECT_TRUE(bridge->frame_wake_active());
+  EXPECT_TRUE(bridge->frame_held());
   EXPECT_FALSE(bridge->frame_pending());
   WaitForSingleObject(woken.value, 0);  // Drop a wake for the frame just polled, if any.
 
@@ -855,6 +861,43 @@ TEST_F(ReShadeBridgeGpu, StatusObservesTheForegroundSourceWithoutAttaching) {
   write_metadata(identity);
   EXPECT_FALSE(bridge->status(source_rect, packed_width, height));
   EXPECT_EQ(state->consumer_nonce, 0u);
+}
+
+TEST_F(ReShadeBridgeGpu, RequestsNoRingForEyesOfAnotherAspect) {
+  // A fresh receiver against a producer that describes only its source (generation zero): a stream
+  // of another aspect writes no nonce, so the producer allocates no ring and packs nothing.
+  bridge = make_receiver();
+  state->consumer_nonce = 0;
+  state->capability_nonce = 0;
+  state->consumer_capabilities = 0;
+  auto source = state->metadata;
+  source.generation = 0;
+  source.accepted_consumer_nonce = 0;
+  source.ready_fence_handle = 0;
+  for (auto &handle : source.texture_handles) {
+    handle = 0;
+  }
+  write_metadata(source);
+  for (int i = 0; i < 3; ++i) {
+    EXPECT_FALSE(bridge->poll(source_rect, packed_width, height * 2));
+    EXPECT_FALSE(bridge->frame_pending());
+  }
+  EXPECT_EQ(state->consumer_nonce, 0u);
+  EXPECT_EQ(state->capability_nonce, 0u);
+  // The same aspect requests a ring as before.
+  EXPECT_FALSE(poll());
+  const auto requested = state->consumer_nonce;
+  EXPECT_NE(requested, 0u);
+  // A live generation that stops fitting is withdrawn once; fitting again asks under a new nonce.
+  ASSERT_TRUE(new_generation());
+  publish(1);
+  ASSERT_TRUE(await_frame());
+  EXPECT_FALSE(bridge->poll(source_rect, packed_width, height * 2));
+  EXPECT_EQ(state->consumer_nonce, 0u);
+  EXPECT_FALSE(bridge->frame_held());
+  EXPECT_FALSE(poll());
+  EXPECT_NE(state->consumer_nonce, 0u);
+  EXPECT_NE(state->consumer_nonce, requested);
 }
 
 TEST_F(ReShadeBridgeGpu, KeepsCursorPlaneWithItsFrameAcrossPendingInvalidAndReplacedExports) {
@@ -996,9 +1039,19 @@ TEST_F(ReShadeBridgeGpu, KeepsExactGameEyesAcrossFullscreenDisplayScalingAndGene
   }
   publish_pixels(1, authored_pixels.data(), authored_width * sizeof(std::uint32_t));
 
-  // Eyes with a different aspect ratio would distort disparity when scaled; they stay unavailable.
+  // Eyes with a different aspect ratio would distort disparity when scaled; they stay unavailable,
+  // and the receiver withdraws its request so the producer stops packing stereo for it.
   EXPECT_FALSE(bridge->poll(capture, authored_width, render_height * 2));
+  EXPECT_EQ(state->consumer_nonce, 0u);
   EXPECT_FALSE(bridge->poll(capture, render_width, render_height));
+  EXPECT_EQ(state->consumer_nonce, 0u);
+  // A fitting request asks again under a fresh nonce, which a new generation answers.
+  EXPECT_FALSE(bridge->poll(capture, authored_width, render_height));
+  ASSERT_NE(state->consumer_nonce, 0u);
+  ASSERT_TRUE(new_generation(DXGI_FORMAT_R8G8B8A8_UNORM, protocol::transfer::srgb, render_width, render_height));
+  const auto fitting_generation = state->metadata.generation;
+  ASSERT_NE(fitting_generation, initial_generation);
+  publish_pixels(1, authored_pixels.data(), authored_width * sizeof(std::uint32_t));
 
   const auto await_frame_for = [&](int width, int height) {
     const auto deadline = bridge_clock_t::now() + std::chrono::seconds(2);
@@ -1055,7 +1108,7 @@ TEST_F(ReShadeBridgeGpu, KeepsExactGameEyesAcrossFullscreenDisplayScalingAndGene
   observed.client_screen_rect = {capture.left, capture.top, capture.right, capture.bottom};
   const auto wide_fullscreen = await_game_frame();
   ASSERT_TRUE(wide_fullscreen);
-  EXPECT_EQ(wide_fullscreen->resource_generation, initial_generation);
+  EXPECT_EQ(wide_fullscreen->resource_generation, fitting_generation);
   expect_native_eyes(wide_fullscreen->texture);
 
   // A matching export does not authorize a partial-desktop or unfocused publisher.
@@ -1073,7 +1126,7 @@ TEST_F(ReShadeBridgeGpu, KeepsExactGameEyesAcrossFullscreenDisplayScalingAndGene
   publish_pixels(1, authored_pixels.data(), authored_width * sizeof(std::uint32_t));
   const auto recovered = await_game_frame();
   ASSERT_TRUE(recovered);
-  EXPECT_NE(recovered->resource_generation, initial_generation);
+  EXPECT_NE(recovered->resource_generation, fitting_generation);
   EXPECT_EQ(recovered->producer_process_id, GetCurrentProcessId());
   expect_native_eyes(recovered->texture);
   observed.status = platf::foreground_window::status_e::no_foreground;

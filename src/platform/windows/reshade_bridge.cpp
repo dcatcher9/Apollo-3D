@@ -194,22 +194,33 @@ namespace platf::reshade_bridge {
       return wait_ && wake_ && cached_ && wake_generation_ != 0 && wake_generation_ == metadata_.generation && wake_armed_.load(std::memory_order_acquire);
     }
 
+    bool frame_held() const {
+      return cached_.has_value();
+    }
+
     bool frame_pending() const {
-      if (!shared_ || !ready_fence_ || !cached_) {
-        return true;
+      // Unattached, nothing here can change: captures and keepalives call poll(), and connect()
+      // attaches from there on its own schedule.
+      if (!shared_) {
+        return false;
       }
       if (static_cast<std::uint32_t>(read32(shared_->metadata_sequence)) != observed_metadata_sequence_ || read64(shared_->consumer_nonce) != nonce_ || WaitForSingleObject(process_.get(), 0) != WAIT_TIMEOUT) {
         return true;
+      }
+      // No acknowledged generation is open: its publication is the next change.
+      if (!ready_fence_) {
+        return false;
       }
       const auto completed = ready_fence_->GetCompletedValue();
       if (completed == UINT64_MAX) {
         return true;
       }
+      const auto newest = cached_ ? cached_->sequence : 0;
       for (std::uint32_t i = 0; i < wire::slot_count; ++i) {
         auto &slot = shared_->slots[i];
         if (static_cast<int>(i) != held_slot_ && read64(slot.control) == wire::slot_control(metadata_.generation, wire::slot_state::ready)) {
           const auto sequence = read64(slot.sequence);
-          if (sequence > cached_->sequence && sequence <= completed) {
+          if (sequence > newest && sequence <= completed) {
             return true;
           }
         }
@@ -271,6 +282,21 @@ namespace platf::reshade_bridge {
         cached_.reset();
         return std::nullopt;
       }
+      // Fullscreen may scale the game's raster to a different desktop extent. Window coverage
+      // proves ownership above. Eyes authored at another size but the same aspect are scaled
+      // by the consumer's linear sampling; a different aspect stays unavailable. Whenever the
+      // snapshot describes a source, with a consumer or not, that is decided before any ring is
+      // requested: no nonce is written for it, and a live connection that stops fitting is
+      // withdrawn, so the producer neither allocates a ring nor packs stereo for a stream that
+      // stays in 2D.
+      if (wire::valid_source_metadata(metadata) && metadata.adapter_luid == adapter_luid_) {
+        const auto fit = wire::fit_output(metadata, static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height));
+        report_fit(metadata, fit, width, height);
+        if (fit == wire::output_fit::aspect_mismatch) {
+          withdraw();
+          return std::nullopt;
+        }
+      }
       if (!nonce_) {
         nonce_ = new_nonce();
         // Capabilities first, then their nonce, then the request itself (full barriers). A
@@ -286,16 +312,7 @@ namespace platf::reshade_bridge {
         cached_.reset();
         return std::nullopt;
       }
-      // Fullscreen may scale the game's raster to a different desktop extent. Window coverage
-      // proves ownership above. Eyes authored at another size but the same aspect are scaled
-      // by the consumer's linear sampling; a different aspect stays unavailable.
       if (metadata.accepted_consumer_nonce != nonce_ || !wire::valid_metadata(metadata) || metadata.adapter_luid != adapter_luid_) {
-        cached_.reset();
-        return std::nullopt;
-      }
-      const auto fit = wire::fit_output(metadata, static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height));
-      report_fit(metadata, fit, width, height);
-      if (fit == wire::output_fit::aspect_mismatch) {
         cached_.reset();
         return std::nullopt;
       }
@@ -600,6 +617,17 @@ namespace platf::reshade_bridge {
       metadata_ = {};
     }
 
+    // Withdraws this receiver's request but keeps the mapping: its ring resources go, and its nonce
+    // is cleared only while still current (a replacement converter's stays). The next poll that
+    // fits writes a fresh nonce.
+    void withdraw() {
+      reset_resources();
+      if (shared_ && nonce_) {
+        InterlockedCompareExchange64(reinterpret_cast<volatile LONG64 *>(&shared_->consumer_nonce), 0, static_cast<LONG64>(nonce_));
+      }
+      nonce_ = 0;
+    }
+
     void detach() {
       reset_resources();
       if (shared_) {
@@ -685,6 +713,10 @@ namespace platf::reshade_bridge {
 
   bool receiver_t::frame_wake_active() const {
     return impl_->frame_wake_active();
+  }
+
+  bool receiver_t::frame_held() const {
+    return impl_->frame_held();
   }
 
   bool receiver_t::frame_pending() const {

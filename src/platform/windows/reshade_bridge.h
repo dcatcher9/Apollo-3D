@@ -83,8 +83,13 @@ namespace platf::reshade_bridge {
     // may then rely on the wake and frame_pending() instead of polling at stream cadence.
     [[nodiscard]] bool frame_wake_active() const;
 
+    // True while poll() holds a frame of a live export.
+    [[nodiscard]] bool frame_held() const;
+
     // Nonblocking, on the owner's thread: whether poll() could now return a newer frame or a changed
-    // connection (metadata replaced, consumer replaced, producer exited or device lost).
+    // connection (metadata replaced, consumer replaced, producer exited or device lost). False while
+    // nothing is attached, and while attached without an open generation until its metadata
+    // changes: polling then cannot change anything until captures or keepalives call poll().
     [[nodiscard]] bool frame_pending() const;
 
     // Returns replaced slots whose reads have completed to the producer, without waiting. poll()

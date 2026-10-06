@@ -172,6 +172,13 @@ namespace sunshine_game3d::ui_adaptive {
       std::uint64_t center_pixels{}, covered{}, invalid{};
       if (!valid_counts(value, totals, center_pixels, covered, invalid)) return reject("malformed_counts");
       if (invalid) return reject("invalid_coverage");
+      // A frame pinned at weight 1 on at least 99% of its central region (a
+      // full-frame decision: H1's source 8, a full change set, an opaque
+      // menu) shows no scene for the UI to conflict with, and under H1 the
+      // depth is declared not to describe the image: no placement evidence.
+      // The applied position holds, neither ramping toward the hidden scene's
+      // depth nor retreating.
+      if (center_pixels && covered * 100 >= center_pixels * 99) return reject("full_frame");
       if (have_accepted_ && (origin.tick_ms - output_.accepted_tick > max_age_ms ||
           now < accepted_at_ || now - accepted_at_ > max_age_ms)) clear_evidence();
 

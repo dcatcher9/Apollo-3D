@@ -162,7 +162,8 @@ that did not count are split into `dropped_fence_pending` (the slot was reused b
 completion fence passed), `dropped_unresolved` (the fence passed but the results were not
 readable) and `incomplete` (render or conditioning marks missing). `layer_fence_waits` counts the
 GPU waits the presenting queue queued in the window for an offscreen UI layer copy run on another
-queue; with the Diagnostics switch on their time is in `inputs` (see the layer cross-queue fence
+queue (a re-offered copy that reuses an outstanding wait queues none and counts none); with the
+Diagnostics switch on their time is in `inputs` (see the layer cross-queue fence
 under [Diagnostics switch and per-Present cost](#diagnostics-switch-and-per-present-cost)). Where the device can copy query
 results (D3D12), the renderer resolves each timestamp into its own readback buffer on the command
 list that recorded it, so its completion fence alone decides readiness. ReShade 6.8 reads D3D12
@@ -362,7 +363,12 @@ use, one per device and queue (at most four), from the queue's own device. Befor
 reads or copies the entry, the presenting queue waits for that value on the GPU
 (`ui_layer::order_read`, `command_queue::wait`; never a CPU wait), unless the fence already passed
 it (`fence_passed`, also what a removed device's `UINT64_MAX` reads); a fenced copy is bound
-directly like a same-queue one. The wait goes onto the queue at once, ahead of ReShade's
+directly like a same-queue one. A copy re-offered on later Presents (every Present of a real frame
+under frame generation) reuses the presenting queue's wait that is still outstanding on the same
+fence for at least its value: that wait already orders every later read on the queue, so no
+marker signal, wait, watchdog record or count is added (until the 10-05 review each generated
+Present queued another, and at 4x the eight watchdog records could run out and leave a read
+unordered). The wait goes onto the queue at once, ahead of ReShade's
 immediate list; with the Diagnostics switch on that list is flushed first, so the renderer's begin
 timestamp precedes the wait and the timing line's `inputs` and `total` GPU stages include it, and
 the timing line's `layer_fence_waits` counts the waits queued in its window (measured: a 1.1 s
@@ -2018,6 +2024,11 @@ that confirmation. After reaching its current target, retreat requires a shallow
 with conflicts strictly below both 15% of covered UI and 1.5% of central image pixels for
 1500 ms of fresh observations. Equality at either release threshold blocks retreat. The nearest candidate needed during that dwell becomes the retreat target, so a
 briefly clearer observation cannot pull it too far back. Empty coverage permits return to zero.
+Coverage at weight 1 of at least 99% of the central region (a full-frame decision: H1's source 8,
+a full change set, an opaque menu) is not placement evidence: no scene is visible for the UI to
+conflict with, and under H1 the depth does not describe the image. Such a sample is rejected as
+`full_frame` and holds the applied position, so a menu over a hidden scene neither ramps forward
+toward that scene's near geometry nor forces a retreat when gameplay resumes.
 Applied movement is limited to 0.03 UV per second forward and 0.005 UV per second backward.
 Targets and movement use absolute UV. A changed scene bound immediately enforces its current
 half-bound cap, invalidates old-cap observations and disarms movement until fresh evidence
@@ -2344,7 +2355,14 @@ generation `ReShade SBS: game eyes WxH are scaled to the stream's W'xH' eyes`. E
 samples only its own source half, so linear filtering never mixes the eyes, and the exact-texel
 chroma conversion always reads an output-sized raster. Running the game at the stream resolution
 avoids that extra pass and its softening. Eyes with a different aspect ratio would distort
-disparity, so the host keeps the stream in 2D and logs a warning naming both sizes.
+disparity, so the host keeps the stream in 2D and logs a warning naming both sizes. The host
+decides that from the producer's published source, with or without a consumer, before it
+requests a ring: it writes no consumer nonce for such eyes, and withdraws its own nonce from a
+live generation that stops fitting (the producer then deactivates with `no_consumer` and frees
+its idle ring), so the game neither allocates the shared ring nor packs stereo for a stream that
+stays 2D. A fitting size requests a fresh ring under a new nonce. Until the 10-05 review the
+nonce was written first, and an aspect-mismatched stream kept the game packing and fencing
+every Present into a ring nobody read.
 
 Normal installation omits `-ShaderDirectory` and uses the GPU renderer embedded in the add-on.
 For comparison testing only, the exporter also accepts annotated SuperDepth3D and independent
@@ -4753,10 +4771,14 @@ publisher identity and availability changes, not every frame sequence. The clien
 status for its confirmed generation and source geometry, with ordered revisions. Old converter
 status cannot authorize stereo in a replacement session or after a source-size change. The
 receiver runs on the existing D3D owner. In mode `2` it observes the producer's status without
-attaching, refreshed on captures and keepalives, so the game builds no export ring. In mode `3` it
-polls at stream cadence until the live export's ready-fence wake is armed (Local AR always polls),
-then converts only on that wake or a changed connection, reading the slot directly with no
-private copy and no CPU wait for the producer's fence ([GPU handoff contract](#gpu-handoff-contract)).
+attaching, refreshed on captures and keepalives, so the game builds no export ring. In mode `3`,
+until a mapped producer publishes a generation, it is refreshed on captures and keepalives and
+polled only when the mapping's metadata, nonce or producer changed (a static screen is then
+encoded at the minimum-FPS keepalive, not at stream cadence; until the 10-05 review every stream
+deadline converted and encoded the flat fallback); a live export whose ready-fence wake is not
+armed is polled at stream cadence, and Local AR always polls. A live export converts only on that
+wake or a changed connection, reading the slot directly with no private copy and no CPU wait for
+the producer's fence ([GPU handoff contract](#gpu-handoff-contract)).
 
 ## Color and HDR
 
