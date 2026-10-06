@@ -1263,8 +1263,6 @@ int main() {
     for (const char *legacy : {"4", "16", "0x1f", "", "ui_color:87", "ui_color:-1:srgb", "ui_color:87:srgb:x", "layer:10:pq",
            "ui_color:87:sdr"})
       require(!signature::parse(legacy), std::string("A legacy or malformed key parsed: ") + legacy);
-    require(std::hash<signature>{}(tag) != std::hash<signature>{}(signature{selection::kind::ui_color, 87, 3}),
-      "Signatures of different color spaces must hash apart");
     std::puts("PASS UI acceptance key (A1): kind, DXGI format and color space round-trip; legacy entries never parse");
 
     // Intended behaviour of the predicate itself (independent of the GPU).

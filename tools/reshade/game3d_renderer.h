@@ -276,11 +276,10 @@ namespace sunshine_game3d {
     // texture, so a released export ring drops its slots' views first. RTV
     // descriptors are consumed when commands are recorded: no GPU wait.
     void release_export_view(reshade::api::resource export_target);
-    // Lazily allocated at the current extent and exact input format. At most
-    // three formats are retained; copies never reinterpret a different format.
-    // The renderer queue reads only the explicitly selected mask channel.
-    reshade::api::resource ui_source(reshade::api::format format = reshade::api::format::unknown);
-    reshade::api::resource_view ui_source_view() const;
+    // A candidate slot's private copy, lazily allocated at the current extent
+    // and the input's typed format (a format change reallocates it once the
+    // renderer is idle); copies never reinterpret a different format. The
+    // renderer queue reads only the explicitly selected mask channel.
     reshade::api::resource ui_candidate(unsigned slot, reshade::api::format format);
     reshade::api::resource_view ui_candidate_view(unsigned slot) const;
     // Direct binding (docs/reshade-sbs.md, direct candidate binding): a
@@ -303,7 +302,11 @@ namespace sunshine_game3d {
     // far is free once the fence reaches it.
     reshade::api::fence completion_fence() const;
     std::uint64_t completion_value() const;
-    // The copy callback takes the destination texture and records the copy.
+    // The copy callback takes the destination texture (resting in the
+    // shader-resource state) and records the copy. The caller must first admit
+    // a current capture: repeated presentations of that immutable capture
+    // reuse the private texture in renderer queue order, and a failed
+    // replacement never leaves the old identity marked as copied.
     template<class Copy>
     reshade::api::resource_view prepare_ui_candidate(unsigned slot, std::uint64_t capture_id, Copy &&copy,
         reshade::api::format format) {
@@ -316,22 +319,6 @@ namespace sunshine_game3d {
         ui_candidate_captures_[slot] = capture_id;
       }
       return ui_candidate_view(slot);
-    }
-    // The caller must first admit a current capture. Repeated presentations of
-    // that immutable capture reuse our private texture in renderer queue order.
-    // A failed replacement never leaves the old identity marked as uploaded.
-    template<class Copy>
-    reshade::api::resource_view prepare_ui_source(std::uint64_t capture_id, Copy &&copy,
-        reshade::api::format format = reshade::api::format::unknown) {
-      if (!capture_id) return {};
-      const auto destination = ui_source(format);
-      if (!destination.handle) return {};
-      if (ui_source_capture_ != capture_id) {
-        ui_source_capture_ = 0;
-        if (!std::forward<Copy>(copy)(destination)) return {};
-        ui_source_capture_ = capture_id;
-      }
-      return ui_source_view();
     }
     reshade::api::resource output() const;
     // The export transfer (docs/reshade-sbs.md, PQ wire transfer): true packs
@@ -406,7 +393,6 @@ namespace sunshine_game3d {
     std::unique_ptr<impl> cached_;
     std::uint64_t cached_since_ = 0;
     static constexpr std::uint64_t cached_idle_ms = 60000;
-    std::uint64_t ui_source_capture_ = 0;
     std::array<std::uint64_t, 5> ui_candidate_captures_{};
     bool preparing_ = false;
     bool resume_pending_ = false;

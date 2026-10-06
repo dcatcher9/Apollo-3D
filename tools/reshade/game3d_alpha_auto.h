@@ -43,7 +43,6 @@ namespace sunshine_game3d {
     std::uint32_t viewport{};
     bool retained{};
     alpha_auto_policy *session{}; // Caller-owned game session; never owned by a renderer.
-    bool dedicated_mask{}; // Declared source type, not evidence of usable UI semantics.
   };
 
   enum class alpha_auto_state { waiting_for_source, collecting, automatic_on, automatic_off, manual_on, manual_off, dedicated_ui };
@@ -64,7 +63,7 @@ namespace sunshine_game3d {
     bool enabled{};
     alpha_auto_state state = alpha_auto_state::waiting_for_source;
     std::uint32_t covered{}, pixels{};
-    std::uint64_t sample_sequence{}, sample_tick_ms{}, accepted_samples{};
+    std::uint64_t sample_sequence{}, sample_tick_ms{};
     // Latest completed diagnostic: 1 UI R, 2 UI color tag A, 3 backbuffer A, 4
     // current A, 5 HUD-less difference, 6 full-frame UI (HUD-less differs
     // almost everywhere), 8 full-frame UI over a hidden scene (H1), 10 the

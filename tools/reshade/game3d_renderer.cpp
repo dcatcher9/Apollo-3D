@@ -52,8 +52,7 @@ namespace sunshine_game3d {
     api::resource_view null_srv{}, null_uav{};
     struct texture { api::resource resource{}; api::resource_view srv{}, uav{}, rtv{}; };
     enum texture_id { source, empty_depth, linear, raw, vertical_majorant, vertical_field, field,
-      ui_plane_tiles, ui_plane_resolved, left, right, packed, ui_source, ui_source_second, ui_source_third,
-      ui_conflict_statistics, detection_statistics, detection_decision, detected_mask, scene_cell_sums, ui_counter_words,
+      ui_plane_tiles, ui_plane_resolved, left, right, packed, ui_conflict_statistics, detection_statistics, detection_decision, detected_mask, scene_cell_sums, ui_counter_words,
       detection_hold, retained_color,
       retained_color_last = retained_color + ui_detection_inputs::max_retained_presents - 1, packed_pq, texture_count };
     std::array<texture, texture_count> textures{};
@@ -145,9 +144,6 @@ namespace sunshine_game3d {
     ui_plane_parameters consumed_plane;
     bool source_alpha_ui = false;
     api::resource consumed_ui_source{};
-    std::array<api::format, 3> ui_source_formats{};
-    std::array<bool, 3> ui_source_failed{};
-    unsigned ui_source_active{};
     // Candidate slots: 0 UIAlpha, 1 UI color tag, 2 Backbuffer, 3 HUD-less, 4
     // the offscreen UI layer (UI framework E1: the tag and the layer never
     // share a slot).
@@ -1429,7 +1425,6 @@ namespace sunshine_game3d {
       if (resume_pending_ && !data_->failed) {
         if (data_->pending || data_->unsignaled) return false;
         resume_pending_ = false;
-        ui_source_capture_ = 0;
         ui_candidate_captures_.fill(0);
         data_->resume();
       }
@@ -1442,7 +1437,6 @@ namespace sunshine_game3d {
       std::swap(data_, cached_);
       cached_since_ = now;
       resume_pending_ = false;
-      ui_source_capture_ = 0;
       ui_candidate_captures_.fill(0);
       if (data_) data_->resume();
       sunshine_log::message(reshade::log::level::info, "Sunshine Game 3D: reusing the cached add-on GPU renderer of this colour transfer");
@@ -1458,7 +1452,6 @@ namespace sunshine_game3d {
         return false;
       }
     }
-    ui_source_capture_ = 0;
     ui_candidate_captures_.fill(0);
     // The outgoing renderer (idle) stays cached for a toggle back, replacing
     // an older cached one only once that is idle too.
@@ -1486,7 +1479,6 @@ namespace sunshine_game3d {
     const auto &plane = ui.plane;
     auto observation = ui.automatic ? *ui.automatic : alpha_auto_source{};
     observation.retained = ui.kind == ui_input_kind::captured_color_alpha || ui.kind == ui_input_kind::dedicated_mask;
-    observation.dedicated_mask = ui.kind == ui_input_kind::dedicated_mask;
     const auto *automatic = ui.automatic ? &observation : nullptr;
     const auto *adaptive = ui.adaptive;
     const auto channel = source_alpha_ui ? ui.channel : ui_mask_channel::alpha;
@@ -1852,44 +1844,6 @@ namespace sunshine_game3d {
     d.direct_views[slot] = {view, resource};
     return view;
   }
-  api::resource renderer::ui_source(api::format format) {
-    if (!data_ || data_->failed) return {};
-    auto &d = *data_;
-    if (format == api::format::unknown) format = d.source_format;
-    unsigned selected = 3;
-    for (unsigned i = 0; i != 3; ++i)
-      if (d.ui_source_formats[i] == format) { selected = i; break; }
-    if (selected == 3) {
-      for (unsigned i = 0; i != 3; ++i)
-        if (d.ui_source_formats[i] == api::format::unknown) { selected = i; break; }
-      if (selected == 3) {
-        if (!d.idle()) return {}; // Bounded storage; never destroy an in-flight view.
-        selected = d.ui_source_active;
-        auto &old = d.textures[static_cast<impl::texture_id>(impl::ui_source + selected)];
-        if (old.srv.handle) d.device->destroy_resource_view(old.srv);
-        if (old.resource.handle) d.device->destroy_resource(old.resource);
-        old = {};
-      }
-      d.ui_source_formats[selected] = format;
-      d.ui_source_failed[selected] = false;
-      ui_source_capture_ = 0;
-    }
-    if (d.ui_source_active != selected) ui_source_capture_ = 0;
-    d.ui_source_active = selected;
-    if (d.ui_source_failed[selected]) return {};
-    const auto id = static_cast<impl::texture_id>(impl::ui_source + selected);
-    auto &texture = d.textures[id];
-    if (!texture.resource.handle && !d.texture_create(id, d.width, d.height, format,
-        api::resource_usage::copy_dest | api::resource_usage::copy_source)) {
-      d.ui_source_failed[selected] = true;
-      return {};
-    }
-    return texture.resource;
-  }
-  api::resource_view renderer::ui_source_view() const {
-    return data_ && !data_->ui_source_failed[data_->ui_source_active] ?
-      data_->textures[static_cast<impl::texture_id>(impl::ui_source + data_->ui_source_active)].srv : api::resource_view{};
-  }
   api::resource renderer::ui_candidate(unsigned slot, api::format format) {
     if (!data_ || slot >= data_->ui_candidates.size()) return {};
     auto &d = *data_;
@@ -2021,7 +1975,6 @@ namespace sunshine_game3d {
     data_->frame_state = false;
   }
   void renderer::reset_after_runtime_drain() {
-    ui_source_capture_ = 0;
     ui_candidate_captures_.fill(0);
     resume_pending_ = false;
     data_.reset();
@@ -2029,7 +1982,6 @@ namespace sunshine_game3d {
   }
   api::device *renderer::device() const { return data_ ? data_->device : cached_ ? cached_->device : nullptr; }
   void renderer::park_after_runtime_drain() {
-    ui_source_capture_ = 0;
     ui_candidate_captures_.fill(0);
     preparing_ = false;
     // The swapchain's back buffers are released or recreated by the reset:

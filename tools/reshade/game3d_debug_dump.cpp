@@ -252,7 +252,7 @@ namespace sunshine_game3d {
         f.source_alpha_decision.automatic ? name(f.source_alpha_decision.coverage.state) : "disabled";
       if (f.source_alpha_decision.automatic) {
         const auto &coverage = f.source_alpha_decision.coverage;
-        result["source_alpha_auto"] = {{"state", name(coverage.state)}, {"enabled", coverage.enabled}, {"accepted_samples", coverage.accepted_samples},
+        result["source_alpha_auto"] = {{"state", name(coverage.state)}, {"enabled", coverage.enabled},
           {"covered_pixels", coverage.covered}, {"total_pixels", coverage.pixels},
           {"sample_sequence", coverage.sample_sequence}, {"sample_tick_ms", coverage.sample_tick_ms},
           {"sampled_source", coverage.source_kind},

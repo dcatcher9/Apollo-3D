@@ -260,7 +260,7 @@ namespace {
       band.render = [&](const std::vector<float> *alpha) {
         api::resource_view view{};
         if (alpha) {
-          view = renderer.prepare_ui_source(++capture, [&](api::resource texture) {
+          view = renderer.prepare_ui_candidate(0, ++capture, [&](api::resource texture) {
             fixture.context->UpdateSubresource(reinterpret_cast<ID3D11Resource *>(texture.handle), 0, nullptr, alpha->data(),
               width * sizeof(float), 0);
             return true;

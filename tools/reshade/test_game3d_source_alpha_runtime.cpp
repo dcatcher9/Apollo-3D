@@ -97,7 +97,16 @@ namespace {
     // and its depth identity (render_frame_input::depth_identity; zero: none, no memo).
     bool depth_current = true;
     std::uint64_t depth_identity = 0;
+    // An automatic input of render() is a dedicated mask (a declared tag)
+    // rather than captured colour alpha.
+    bool dedicated_input = false;
     std::vector<unsigned char> original;
+    // The source colour's format: that of the retained mask in renderer slot 0.
+    api::format mask_format() const {
+      D3D11_TEXTURE2D_DESC desc{};
+      source->GetDesc(&desc);
+      return static_cast<api::format>(desc.Format);
+    }
     // The acceptance key (A1) of a fixture candidate: its typed DXGI format,
     // the source color's by default, in the fixture's color space.
     std::string key(sunshine_game3d::ui_selection::kind kind, DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN) const {
@@ -244,12 +253,12 @@ namespace {
           pixels[i * bpp] = pixels[i * bpp + 1] = 0; pixels[i * bpp + 2] = 255;
         }
       }
-      const auto view = renderer.prepare_ui_source(++mask_capture, [&](api::resource texture) {
+      const auto view = renderer.prepare_ui_candidate(0, ++mask_capture, [&](api::resource texture) {
         context->UpdateSubresource(reinterpret_cast<ID3D11Resource *>(texture.handle), 0, nullptr, pixels.data(), width * bpp, 0);
         return true;
-      });
+      }, mask_format());
       require(view.handle, "renderer-owned retained UI texture unavailable");
-      require(read(renderer.ui_source()).bytes == pixels, "retained real-frame alpha upload changed native RGBA");
+      require(read(renderer.ui_candidate(0, mask_format())).bytes == pixels, "retained real-frame alpha upload changed native RGBA");
       return view;
     }
     result render(bool protect, int sign, bool flat = false, bool control = false, bool frame_generation_active = false,
@@ -278,7 +287,8 @@ namespace {
         require(sunshine_game3d::test::render_frame(active, queue->get_immediate_command_list(), {reinterpret_cast<std::uint64_t>(backbuffer.Get())},
           {reinterpret_cast<std::uint64_t>(depth_view.Get())}, p,
           alpha_source.handle ? protect : sunshine_game3d::source_alpha_ui_for_present(protect, frame_generation_active),
-          alpha_source, plane, automatic, adaptive), "production render failed");
+          alpha_source, plane, automatic, adaptive, sunshine_game3d::ui_mask_channel::alpha, dedicated_input),
+          "production render failed");
       }
       require(adaptive || sunshine_game3d::ui_parameter_words(protect, active.consumed_ui_plane()) ==
           sunshine_game3d::ui_parameter_words(protect, plane), "renderer changed consumed UI-plane bits");
@@ -1566,17 +1576,17 @@ namespace {
           if (state == 2) for (unsigned y = 0; y < gpu.height / 3; ++y)
             for (unsigned x = gpu.width * 2 / 3; x < gpu.width; ++x) presented_alpha[size_t(y) * gpu.width + x] = .5f;
           gpu.pattern(presented_alpha, true, phase);
-          const auto reused = gpu.renderer.prepare_ui_source(gpu.mask_capture, [](api::resource) {
+          const auto reused = gpu.renderer.prepare_ui_candidate(0, gpu.mask_capture, [](api::resource) {
             require(false, "generated presentation copied an already retained real-input mask");
             return false;
-          });
+          }, gpu.mask_format());
           require(reused.handle == retained.handle, "generated presentation lost the retained mask view");
           const bool capture = !dumped && state == 1;
           const auto actual = gpu.render(true, sign, false, false, true, reused, capture ? dump_directory : fs::path{});
           dumped |= capture;
           require(actual.field.bytes == reference.field.bytes && actual.output.bytes == reference.output.bytes,
             "FG output alpha overrode retained real alpha, or retained RGB replaced the current picture");
-          require(gpu.renderer.diagnostics().ui_source.handle == gpu.renderer.ui_source().handle,
+          require(gpu.renderer.diagnostics().ui_source.handle == gpu.renderer.ui_candidate(0, gpu.mask_format()).handle,
             "renderer did not identify the exact consumed external UI mask");
           report << "retained-FG-alpha sign=" << sign << " RGB_phase=" << phase << " presented_alpha_state=" << state
             << " exact_nonFG_field=1 exact_current_RGB_output=1 retained_RGB_poisoned=1" << std::endl;
@@ -1664,7 +1674,7 @@ namespace {
     // UI color a declared one (A1).
     const ui_selection::kind kinds[]{ui_selection::kind::current, ui_selection::kind::backbuffer, ui_selection::kind::ui_color};
     for (unsigned kind = 0; kind != 3; ++kind) {
-      source.retained = kind != 0; source.dedicated_mask = kind == 2;
+      source.retained = kind != 0; gpu.dedicated_input = kind == 2;
       ++source.epoch;
       const auto signature = *ui_selection::signature::parse(gpu.key(kinds[kind]));
       const auto retained = [&](unsigned mask) { return kind ? gpu.retain_mask(masks[mask]) : api::resource_view{}; };
@@ -1726,7 +1736,7 @@ namespace {
       const unsigned malformed_rows = std::max(3u, gpu.height / 100 + 1);
       require(malformed_rows * 100u > gpu.height && malformed_rows < gpu.height / 4,
         "The V1 fixture cannot place more than 1% malformed rows above its UI");
-      source.retained = source.dedicated_mask = false;
+      source.retained = gpu.dedicated_input = false;
       bool first = true;
       for (const float invalid : {std::numeric_limits<float>::quiet_NaN(),
           std::numeric_limits<float>::infinity(), -1.f, 2.f}) {
@@ -1742,7 +1752,7 @@ namespace {
     }
     // A usable retained candidate wins over unusable presented alpha, while
     // its unrelated historical RGB must never enter the current picture.
-    source.retained = source.dedicated_mask = true;
+    source.retained = gpu.dedicated_input = true;
     const auto selective = gpu.retain_mask(masks[1]);
     gpu.pattern(masks[0], true);
     source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
@@ -1755,7 +1765,7 @@ namespace {
     policy.set_automatic();
     require(exact(gpu.render(true, 1, false, false, true, selective, {}, {}, nullptr, &source), on[1]),
       "Returning to Auto required review or lost an available selective mask");
-    source.retained = source.dedicated_mask = false;
+    source.retained = gpu.dedicated_input = false;
     gpu.renderer.reset_after_runtime_drain();
     require(gpu.renderer.configure(observed_runtime, {reinterpret_cast<std::uint64_t>(gpu.backbuffer.Get())},
       static_cast<api::color_space>(gpu.color)), "recreate renderer for automatic source");
@@ -3223,7 +3233,7 @@ namespace {
     std::puts("PASS normalized UI input: explicit current alpha, captured-view availability, no implicit fallback and exact pixels");
   }
   void verify_mask_upload_recovery(fixture &gpu) {
-    const auto previous = gpu.read(gpu.renderer.ui_source());
+    const auto previous = gpu.read(gpu.renderer.ui_candidate(0, gpu.mask_format()));
     unsigned uploads = 0;
     const auto upload = [&](api::resource texture) {
       ++uploads;
@@ -3231,21 +3241,21 @@ namespace {
         previous.bytes.data(), previous.width * pixel_bytes(previous.format), 0);
       return true;
     };
-    require(!gpu.renderer.prepare_ui_source(0, upload).handle && !uploads,
+    require(!gpu.renderer.prepare_ui_candidate(0, 0, upload, gpu.mask_format()).handle && !uploads,
       "missing capture identity admitted an upload");
-    require(!gpu.renderer.prepare_ui_source(gpu.mask_capture + 1, [](api::resource) { return false; }).handle,
+    require(!gpu.renderer.prepare_ui_candidate(0, gpu.mask_capture + 1, [](api::resource) { return false; }, gpu.mask_format()).handle,
       "failed mask upload returned a usable view");
-    require(gpu.renderer.prepare_ui_source(gpu.mask_capture, upload).handle && uploads == 1,
+    require(gpu.renderer.prepare_ui_candidate(0, gpu.mask_capture, upload, gpu.mask_format()).handle && uploads == 1,
       "failed replacement retained the previous upload identity");
-    require(gpu.renderer.prepare_ui_source(gpu.mask_capture, upload).handle && uploads == 1,
+    require(gpu.renderer.prepare_ui_candidate(0, gpu.mask_capture, upload, gpu.mask_format()).handle && uploads == 1,
       "successful retry was copied again");
     observed_runtime->get_command_queue()->wait_idle();
     gpu.renderer.reset_after_runtime_drain();
     require(gpu.renderer.configure(observed_runtime, {reinterpret_cast<std::uint64_t>(gpu.backbuffer.Get())},
       static_cast<api::color_space>(gpu.color)), "recreate renderer for mask lifetime test");
-    require(gpu.renderer.prepare_ui_source(gpu.mask_capture, upload).handle && uploads == 2,
+    require(gpu.renderer.prepare_ui_candidate(0, gpu.mask_capture, upload, gpu.mask_format()).handle && uploads == 2,
       "renderer recreation reused an upload into a destroyed texture");
-    require(gpu.read(gpu.renderer.ui_source()).bytes == previous.bytes,
+    require(gpu.read(gpu.renderer.ui_candidate(0, gpu.mask_format())).bytes == previous.bytes,
       "recreated renderer did not restore the exact retained mask");
     std::puts("PASS retained UI upload identity: no repeat copy; failures and renderer replacement reupload");
   }

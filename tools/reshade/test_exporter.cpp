@@ -1149,7 +1149,6 @@ namespace {
         render_input.automatic == &input.observation && render_input.automatic->session == &session,
         "Generic real-input alpha lost its shared automatic policy or acquired dedicated semantics");
       input.kind = ui_input_kind::dedicated_mask;
-      input.observation.dedicated_mask = true;
       input.channel = ui_mask_channel::red;
       render_input = input.for_render(plane, scene);
       require(render_input.available() && render_input.kind == ui_input_kind::dedicated_mask &&
@@ -1172,7 +1171,7 @@ namespace {
       input.status = ui_input::resolve(policy, settings, observed);
       input.kind = ui_input_kind::current_color_alpha;
       input.view = {};
-      input.observation.retained = input.observation.dedicated_mask = false;
+      input.observation.retained = false;
       input.channel = ui_mask_channel::alpha;
       require(input.for_render(plane, scene).available() && !input.status.fg_active(),
         "Confirmed FG Off did not restore eligible current-color alpha");
@@ -1190,7 +1189,7 @@ namespace {
       input.status.fg = {true, true, false, 1, 11, 7, 41};
       input.kind = ui_input_kind::dedicated_mask;
       input.view = {123};
-      input.observation.retained = input.observation.dedicated_mask = true;
+      input.observation.retained = true;
       input.observation.now_ms = 1200; input.observation.tick_ms = 1100;
       input.observation.epoch = 7; input.observation.revision = 3;
       input.observation.viewport = 11; input.observation.sequence = 101;

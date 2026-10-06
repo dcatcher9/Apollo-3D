@@ -5,12 +5,14 @@
 namespace sunshine_game3d::test {
   // Keep the established fixture parameter matrices separate from the
   // production input API. Captured input absence never means current alpha.
+  // dedicated: an automatic input is a dedicated mask (a declared UI tag)
+  // rather than captured colour alpha.
   inline bool render_frame(renderer &target, reshade::api::command_list *commands,
       reshade::api::resource color, reshade::api::resource_view depth,
       const render_parameters &scene, bool enabled = false,
       reshade::api::resource_view mask = {}, const ui_plane_parameters &plane = {},
       const alpha_auto_source *automatic = nullptr, const ui_adaptive::source *adaptive = nullptr,
-      ui_mask_channel channel = ui_mask_channel::alpha) {
+      ui_mask_channel channel = ui_mask_channel::alpha, bool dedicated = false) {
     render_frame_input frame;
     frame.color = color;
     frame.depth = depth;
@@ -21,7 +23,7 @@ namespace sunshine_game3d::test {
     frame.ui.adaptive = adaptive;
     frame.ui.channel = channel;
     if (enabled) {
-      if (automatic && automatic->dedicated_mask)
+      if (automatic && dedicated)
         frame.ui.kind = ui_input_kind::dedicated_mask;
       else if (mask.handle || (automatic && automatic->retained))
         frame.ui.kind = ui_input_kind::captured_color_alpha;

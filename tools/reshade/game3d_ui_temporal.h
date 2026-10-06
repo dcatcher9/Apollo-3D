@@ -139,7 +139,6 @@ namespace sunshine_game3d::ui_temporal {
     sample.covered = words[word::covered]; sample.pixels = words[word::pixels];
     sample.sample_sequence = sequence;
     sample.sample_tick_ms = tick_ms;
-    sample.accepted_samples = sequence;
     auto &evidence = sample.evidence;
     evidence.matching_tiles = words[word::matching_tiles];
     evidence.candidates = words[word::candidates]; evidence.hudless_changed = words[word::hudless_changed];

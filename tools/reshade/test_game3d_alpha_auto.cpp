@@ -1414,7 +1414,7 @@ namespace {
     const auto &e = sample.evidence;
     require(sample.source_kind == 10 && sample.enabled && sample.state == alpha_auto_state::automatic_on &&
         sample.covered == 995 && sample.pixels == 1000 && sample.sample_tick_ms == 1500 && sample.sample_sequence == 9 &&
-        sample.accepted_samples == 9 && e.matching_tiles == 7 && e.candidates == 0x7a && e.hudless_changed == 9 &&
+        e.matching_tiles == 7 && e.candidates == 0x7a && e.hudless_changed == 9 &&
         e.hudless_unchanged == 900 && e.hudless_invalid == 1 && e.hudless_lit == 800 && e.accepted == 0x42 &&
         e.alpha_covered[3] == 13 && e.alpha_invalid[0] == 20 && e.alpha_opaque[1] == 31 && e.layer_covered == 995 &&
         e.layer_invalid == 2 && e.layer_opaque == 990 && e.valid_bits == 0x4a,

@@ -19,10 +19,8 @@
 #include "game3d_ui_detection_contract.h"
 
 #include <array>
-#include <charconv>
 #include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -661,9 +659,3 @@ namespace sunshine_game3d::ui_selection {
     pre_ui_key({kind::ui_layer, 87u, 1u}).format == 87u && pre_ui_key({kind::ui_layer, 87u, 3u}).color_space == 3u);
 }
 
-template<> struct std::hash<sunshine_game3d::ui_selection::signature> {
-  std::size_t operator()(const sunshine_game3d::ui_selection::signature &s) const noexcept {
-    return std::hash<std::uint64_t>{}(std::uint64_t(s.source_kind) << 56 | std::uint64_t(s.color_space & 0xffu) << 48 |
-      std::uint64_t(s.format));
-  }
-};

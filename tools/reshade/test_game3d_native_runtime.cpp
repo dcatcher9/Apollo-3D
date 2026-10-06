@@ -716,7 +716,7 @@ namespace {
     // Present an opaque frame while selecting a retained selective input. Only
     // that selected alpha may enter the probe; its RGB never enters the eyes.
     pattern(false); write_native_source(fixture, backbuffer);
-    selected_alpha = renderer.prepare_ui_source(100, [&](api::resource destination) {
+    selected_alpha = renderer.prepare_ui_candidate(0, 100, [&](api::resource destination) {
       auto *cmd = queue->get_immediate_command_list();
       cmd->barrier(source, api::resource_usage::present, api::resource_usage::copy_source);
       cmd->barrier(destination, api::resource_usage::shader_resource, api::resource_usage::copy_dest);
@@ -724,7 +724,7 @@ namespace {
       cmd->barrier(destination, api::resource_usage::copy_dest, api::resource_usage::shader_resource);
       cmd->barrier(source, api::resource_usage::copy_source, api::resource_usage::present);
       return true;
-    });
+    }, static_cast<api::format>(fixture.source_format));
     require(selected_alpha.handle, "Adaptive retained-mask fixture failed to preserve alpha");
     queue->flush_immediate_command_list(); queue->wait_idle();
     pattern(true); input.eligible = true; input.mask_sequence = 100;
@@ -1169,12 +1169,14 @@ namespace {
     const ui_plane_parameters plane{ui_plane_mode::display_fraction, .25f};
     fixture.upload_depth(std::vector<float>(size_t(width) * height, .9f));
     struct pixels { std::vector<std::uint8_t> field, color; };
+    // An automatic typed input is a dedicated mask (a declared tag).
+    bool dedicated = false;
     const auto render = [&](bool enabled, api::resource_view mask, ui_mask_channel channel,
                             const alpha_auto_source *automatic = nullptr, bool capture = false,
                             const char *dump_name = "dump-typed-ui-red") {
       write_native_source(fixture, backbuffer);
       require(sunshine_game3d::test::render_frame(renderer, queue->get_immediate_command_list(), source, fixture.depth_view, parameters,
-        enabled, mask, plane, automatic, nullptr, channel), "Typed D3D12 UI render failed");
+        enabled, mask, plane, automatic, nullptr, channel, dedicated), "Typed D3D12 UI render failed");
       if (capture) dump.begin(observed.runtime, renderer, parameters, fixture.depth_view, false,
         static_cast<api::color_space>(fixture.color));
       queue->flush_immediate_command_list(); renderer.finish_present();
@@ -1292,7 +1294,7 @@ namespace {
         transition(commands, mask.p, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
         return true;
       };
-      const auto selected = renderer.prepare_ui_source(10000 + case_index, copy, static_cast<api::format>(format));
+      const auto selected = renderer.prepare_ui_candidate(0, 10000 + case_index, copy, static_cast<api::format>(format));
       require(selected.handle, "Typed UI private texture unavailable");
       const auto channel = color_mask ? ui_mask_channel::alpha : ui_mask_channel::red;
       equal(render(true, selected, channel), reference_on, "Typed UI field/SBS differs from equivalent color-alpha coverage");
@@ -1326,16 +1328,16 @@ namespace {
         }
         require(found_mask, "Typed UI dump omitted the immutable mask texture");
         require(fixture.read(mask.p) == mask_bytes &&
-            fixture.read(reinterpret_cast<ID3D12Resource *>(renderer.ui_source(static_cast<api::format>(format)).handle)) == mask_bytes,
+            fixture.read(reinterpret_cast<ID3D12Resource *>(renderer.ui_candidate(0, static_cast<api::format>(format)).handle)) == mask_bytes,
           "Diagnostic snapshot lifecycle changed the source or renderer-owned mask bytes");
       }
-      require(renderer.prepare_ui_source(10000 + case_index, copy, static_cast<api::format>(format)).handle == selected.handle && copies == 1,
+      require(renderer.prepare_ui_candidate(0, 10000 + case_index, copy, static_cast<api::format>(format)).handle == selected.handle && copies == 1,
         "Repeated immutable UI capture performed another copy or changed its allocation");
       alpha_auto_policy session;
       alpha_auto_source observation;
       observation.now_ms = observation.tick_ms = 400000 + case_index * 1000;
       observation.sequence = 1; observation.epoch = 300 + case_index; observation.revision = 1;
-      observation.retained = observation.dedicated_mask = true; observation.session = &session;
+      observation.retained = dedicated = true; observation.session = &session;
       // Before acceptance nothing decides (S1). Accepted by the key an earlier
       // session earned (A1), the typed source decides its own coverage, a full
       // one as a flat frame (P1).
@@ -1360,11 +1362,11 @@ namespace {
             (value > 0.f) == covered_at(x, y), "Automatic typed mask has incorrect selected-channel support");
       }
       if (color_mask) {
-        observation.dedicated_mask = false;
+        dedicated = false;
         equal(render(true, selected, channel, &observation), reference_on,
           "Automatic captured color alpha incorrectly depended on its dedicated tag");
       }
-      observation.dedicated_mask = true;
+      dedicated = true;
       session.set_manual(true);
       equal(render(true, selected, channel, &observation), reference_on,
         "Manual On failed to admit an available typed UI source");
@@ -1428,7 +1430,7 @@ namespace {
         fixture.commands->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
         transition(fixture.commands.p, mask.p, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
         fixture.submit();
-        view = renderer.prepare_ui_source(++capture, [&](api::resource destination) {
+        view = renderer.prepare_ui_candidate(0, ++capture, [&](api::resource destination) {
           auto *target = reinterpret_cast<ID3D12Resource *>(destination.handle);
           auto *commands = reinterpret_cast<ID3D12GraphicsCommandList *>(queue->get_immediate_command_list()->get_native());
           transition(commands, mask.p, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);

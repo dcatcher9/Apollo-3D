@@ -517,10 +517,10 @@ namespace sunshine_game3d::ui_input {
       result.detection.hold_previous = true;
     }
     // A manual choice observes its selected capture's own provenance.
-    const auto observe_origin = [&](const ui_mask::selection &selected, bool dedicated_mask) {
+    const auto observe_origin = [&](const ui_mask::selection &selected) {
       const auto &source = selected.origin.source;
       auto origin = input;
-      origin.retained = true; origin.dedicated_mask = dedicated_mask;
+      origin.retained = true;
       origin.epoch = source.epoch; origin.revision = source.observation_revision;
       origin.viewport = source.viewport; origin.sequence = source.sequence; origin.tick_ms = source.tick;
       result.explicit_origin = origin;
@@ -539,7 +539,7 @@ namespace sunshine_game3d::ui_input {
         result.status.input = kind == ui_mask::source_kind::alpha ? source_alpha_input::sl_ui_alpha :
           kind == ui_mask::source_kind::color_and_alpha ? source_alpha_input::sl_ui_color_alpha : source_alpha_input::sl_backbuffer_alpha;
         result.source_metadata = pick.metadata;
-        observe_origin(pick.selected, result.kind == ui_input_kind::dedicated_mask);
+        observe_origin(pick.selected);
         chosen = true;
       }
       if (!chosen && current_allowed) {
@@ -552,7 +552,7 @@ namespace sunshine_game3d::ui_input {
         result.kind = ui_input_kind::hudless_difference;
         result.status.input = source_alpha_input::sl_hudless_difference;
         result.source_metadata = pick.metadata;
-        observe_origin(pick.selected, false);
+        observe_origin(pick.selected);
         chosen = true;
       }
       if (!chosen) result.status.input = source_alpha_input::none;
