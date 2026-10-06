@@ -250,6 +250,9 @@ namespace platf::reshade_bridge {
     }
 
     receiver_t::wake_counts_t take_wake_counts() {
+      // Only diagnostics take the counts, and their first call starts the window. Until then
+      // neither the claim nor the fence callback times wakes, so no claim takes wake_lock_.
+      wake_timing_.store(true, std::memory_order_relaxed);
       return {
         std::exchange(claims_, 0),
         wakes_.exchange(0, std::memory_order_relaxed),
@@ -455,7 +458,7 @@ namespace platf::reshade_bridge {
       ++claims_;
       if (woken_completed_.load(std::memory_order_relaxed) < sequence) {
         ++claims_before_wake_;
-      } else {
+      } else if (wake_timing_.load(std::memory_order_relaxed)) {
         record_claim_after_wake(sequence);
       }
       const auto transfer = metadata_.color_transfer == wire::transfer::scrgb ? transfer_e::scrgb :
@@ -681,7 +684,9 @@ namespace platf::reshade_bridge {
           const auto completed = self->wake_fence_->GetCompletedValue();
           self->woken_completed_.store(completed, std::memory_order_relaxed);
           self->wakes_.fetch_add(1, std::memory_order_relaxed);
-          self->record_wake_locked(completed);
+          if (self->wake_timing_.load(std::memory_order_relaxed)) {
+            self->record_wake_locked(completed);
+          }
         }
         if (self->wake_fence_ && !self->rearm_locked()) {
           // The owner falls back to polling at stream cadence and re-arms on its next frame.
@@ -794,6 +799,8 @@ namespace platf::reshade_bridge {
     std::atomic<std::uint64_t> woken_completed_ {0}, wakes_ {0};
     std::uint64_t claims_ = 0, claims_before_wake_ = 0, claims_after_wake_ = 0;
     std::chrono::nanoseconds wake_to_claim_total_ {}, wake_to_claim_max_ {};
+    // Wake-to-claim timing, set once take_wake_counts() is first called.
+    std::atomic<bool> wake_timing_ {false};
 
     // The latest newly completed fence values and when a wake first reported each (wake_lock_).
     struct wake_record_t {

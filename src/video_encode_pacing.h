@@ -173,7 +173,9 @@ namespace video::detail {
    * waiting, whatever arrived meanwhile: a capture that arrives before the target is early too and
    * would convert at the same target, and a newer export frame replaces the pending one. Nothing is
    * held when the frame is already due or the keepalive comes first. One hold is at most a frame
-   * interval, so a control request waits at most that long.
+   * interval and a control wake does not end it: a control request that arrives during a hold waits
+   * at most the rest of it. The loop then re-checks for an IDR or reference invalidation, which
+   * makes the pending frame the recovery frame instead of following it.
    */
   [[nodiscard]] inline std::optional<std::chrono::nanoseconds> provider_hold(
     std::optional<std::chrono::nanoseconds> pending_wait,

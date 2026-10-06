@@ -101,7 +101,9 @@ namespace video::detail {
       converting_ += elapsed;
     }
 
-    /** One encode() call, with its NVENC picture submission and completion wait. */
+    /** One encode() call, with its NVENC picture submission and completion wait. `new_content` is
+     *  the encoded content's identity (diagnostic_content_tracker_t), not whether a conversion ran:
+     *  a keepalive that re-renders an unchanged export encodes repeated content. */
     void encoded(bool new_content, duration_t call, duration_t submit, duration_t completion_wait) noexcept {
       ++(new_content ? new_encodes_ : repeat_encodes_);
       encoding_ += call;
@@ -122,7 +124,7 @@ namespace video::detail {
       };
       const auto busy = hold_actual_ + wait_actual_ + converting_ + encoding_;
       return std::format(
-        "Video encode loop: {} iterations in {:.1f} s; {} new and {} repeat encodes; holding {:.1f} ms in {} exact holds "
+        "Video encode loop: {} iterations in {:.1f} s; {} new-content and {} repeated-content encodes; holding {:.1f} ms in {} exact holds "
         "(requested {:.1f} ms, overshoot avg {:.2f} max {:.2f} ms); waiting {:.1f} ms in {} image waits (requested {:.1f} ms; "
         "{} ran to their bound, overshoot avg {:.2f} max {:.2f} ms); converting {:.1f} ms in {} conversions; encoding {:.1f} ms "
         "(NVENC submit {:.1f} ms, completion wait {:.1f} ms); loop work {:.1f} ms.",

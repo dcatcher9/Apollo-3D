@@ -7674,6 +7674,43 @@ TEST(EncodeWakeLifecycleSourceTests, KeptInputIsNotConvertedContentAndLossRecove
   );
 }
 
+TEST(EncodeWakeLifecycleSourceTests, ARecoveryRequestDuringAProviderHoldMakesTheHeldFrameTheRecoveryFrame) {
+  const auto scope = encode_run_source_scope();
+  ASSERT_FALSE(scope.empty());
+  // Recovery requests are read at the top of the loop, before any hold.
+  const auto idr_read = scope.find("if (idr_events->peek()) {");
+  const auto hold = scope.find("hold_timer->sleep_for(*hold);");
+  ASSERT_NE(idr_read, std::string::npos);
+  ASSERT_NE(hold, std::string::npos);
+  EXPECT_LT(idr_read, hold);
+  // A control wake cannot end the hold. One that arrived meanwhile restarts the iteration before
+  // the zero-timeout pop consumes it and the held frame is encoded as an ordinary P-frame.
+  const auto recheck = scope.find("if (idr_events->peek() || invalidate_ref_frames_events->peek()) {", hold);
+  const auto restart = scope.find("continue;", recheck);
+  const auto take = scope.find("pending_source_wait = std::chrono::nanoseconds::zero();", hold);
+  const auto pop = scope.find("auto img = images->pop(image_wait);", hold);
+  ASSERT_NE(recheck, std::string::npos);
+  ASSERT_NE(restart, std::string::npos);
+  ASSERT_NE(take, std::string::npos);
+  ASSERT_NE(pop, std::string::npos);
+  EXPECT_LT(recheck, take);
+  EXPECT_LT(restart, take) << "The re-check must restart the iteration itself.";
+  EXPECT_LT(take, pop);
+}
+
+TEST(EncodeWakeLifecycleSourceTests, LoopStatsCountEncodesByContentIdentity) {
+  const auto scope = encode_run_source_scope();
+  ASSERT_FALSE(scope.empty());
+  // A keepalive that re-renders an unchanged export converts, but its encode repeats content.
+  const auto classify = scope.find("loop_content.observe(content_timestamp, !converted_frame) == detail::diagnostic_content_e::new_content");
+  const auto encode = scope.find("const auto publish_result = encode(", classify);
+  const auto record = scope.find("loop_stats->encoded(new_loop_content,", encode);
+  ASSERT_NE(classify, std::string::npos);
+  ASSERT_NE(encode, std::string::npos);
+  ASSERT_NE(record, std::string::npos);
+  EXPECT_EQ(scope.find("loop_stats->encoded(converted_frame"), std::string::npos);
+}
+
 TEST(EncodeWakeLifecycleSourceTests, KeptInputGammaConversionAdvancesTheProviderSchedule) {
   const auto scope = encode_run_source_scope();
   ASSERT_FALSE(scope.empty());

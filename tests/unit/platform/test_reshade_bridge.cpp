@@ -847,10 +847,6 @@ TEST_F(ReShadeBridgeGpu, WakesWhenTheExportFenceCompletesAndRetiresWithoutAnothe
   EXPECT_TRUE(bridge->frame_held());
   EXPECT_FALSE(bridge->frame_pending());
   WaitForSingleObject(woken.value, 0);  // Drop a wake for the frame just polled, if any.
-  // Polling found the first frame: no wake was armed to report it.
-  const auto polled = bridge->take_wake_counts();
-  EXPECT_EQ(polled.claims, 1u);
-  EXPECT_EQ(polled.claims_before_wake, 1u);
 
   // A ready slot whose GPU work has not completed neither wakes nor reads as pending.
   publish(2, false);
@@ -863,11 +859,14 @@ TEST_F(ReShadeBridgeGpu, WakesWhenTheExportFenceCompletesAndRetiresWithoutAnothe
   ASSERT_TRUE(second);
   EXPECT_EQ(second->sequence, 2u);
   EXPECT_FALSE(bridge->frame_pending());
-  // Its wake reported the second frame before the claim.
-  const auto woken_claim = bridge->take_wake_counts();
-  EXPECT_EQ(woken_claim.claims, 1u);
-  EXPECT_GE(woken_claim.wakes, 1u);
-  EXPECT_EQ(woken_claim.claims_before_wake, 0u);
+  // Polling found the first frame (no wake was armed to report it); a wake reported the second
+  // before its claim. Nothing has taken the counts yet, so that claim was not timed.
+  const auto untimed = bridge->take_wake_counts();
+  EXPECT_EQ(untimed.claims, 2u);
+  EXPECT_GE(untimed.wakes, 1u);
+  EXPECT_EQ(untimed.claims_before_wake, 1u);
+  EXPECT_EQ(untimed.claims_after_wake, 0u);
+  EXPECT_EQ(untimed.wake_to_claim_max, std::chrono::nanoseconds::zero());
 
   // The replaced slot returns once its reads complete, without waiting for another poll.
   EXPECT_EQ(protocol::control_state(state->slots[first_slot].control), protocol::slot_state::reading);
@@ -886,6 +885,12 @@ TEST_F(ReShadeBridgeGpu, WakesWhenTheExportFenceCompletesAndRetiresWithoutAnothe
   ASSERT_TRUE(third);
   EXPECT_EQ(third->sequence, 3u);
   EXPECT_FALSE(bridge->frame_pending());
+  // Taking the counts started the timing: this claim is timed from its wake.
+  const auto timed = bridge->take_wake_counts();
+  EXPECT_EQ(timed.claims, 1u);
+  EXPECT_GE(timed.wakes, 1u);
+  EXPECT_EQ(timed.claims_before_wake, 0u);
+  EXPECT_EQ(timed.claims_after_wake, 1u);
 
   // A metadata replacement is a pending change even without a fence advance.
   InterlockedIncrement(reinterpret_cast<volatile LONG *>(&state->metadata_sequence));

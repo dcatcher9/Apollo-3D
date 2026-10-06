@@ -103,7 +103,8 @@ namespace platf::reshade_bridge {
 
     // Diagnostics since the last call: newer frames claimed, fence wakes, claims whose frame had
     // completed before any wake reported it (found by a capture, keepalive or another frame's poll),
-    // and for the others the delay from the first wake that reported their frame to the claim.
+    // and for the others the delay from the first wake that reported their frame to the claim. That
+    // delay is timed only after the first call, so a receiver without diagnostics never times it.
     struct wake_counts_t {
       std::uint64_t claims = 0;
       std::uint64_t wakes = 0;

@@ -1246,6 +1246,7 @@ namespace video {
     // Where this loop's time goes (holds, waits, conversion, encode), one line every 20 s.
     auto loop_stats = detail::make_diagnostic_state<detail::encode_loop_stats_t>(config::sunshine.diagnostics_enabled);
     auto loop_stats_since = std::chrono::steady_clock::now();
+    detail::diagnostic_content_tracker_t loop_content;
     // An independent provider's pending frame converts at its poll target. Image waits that nothing
     // notifies end only at a scheduler tick, so it sleeps to the target on this timer instead
     // (detail::provider_hold); without the timer it falls back to the image wait.
@@ -1487,6 +1488,12 @@ namespace video {
             if (loop_stats) {
               loop_stats->held(*hold, std::chrono::steady_clock::now() - wait_started);
             }
+            // The hold does not end at a control wake. An IDR or reference invalidation that
+            // arrived meanwhile is read at the top of the loop and makes the pending frame the
+            // recovery frame, instead of encoding it as a P-frame the client cannot use first.
+            if (idr_events->peek() || invalidate_ref_frames_events->peek()) {
+              continue;
+            }
             // Then take whatever arrived meanwhile without waiting.
             pending_source_wait = std::chrono::nanoseconds::zero();
           } else {
@@ -1701,6 +1708,10 @@ namespace video {
         break;
       }
 
+      const auto content_timestamp = session->rendered_content_timestamp();
+      // New content is told by its identity, as for the packets: a keepalive or poll that
+      // re-renders an unchanged export converts again but encodes a repeat.
+      const bool new_loop_content = loop_stats && loop_content.observe(content_timestamp, !converted_frame) == detail::diagnostic_content_e::new_content;
       const auto encode_started = std::chrono::steady_clock::now();
       const auto publish_result = encode(
         frame_nr++,
@@ -1708,7 +1719,7 @@ namespace video {
         packets,
         channel_data,
         frame_timestamp,
-        session->rendered_content_timestamp(),
+        content_timestamp,
         encode_diagnostics ? &*encode_diagnostics : nullptr,
         converted_frame,
         processing_started,
@@ -1716,7 +1727,7 @@ namespace video {
       );
       if (loop_stats) {
         const auto timing = session->last_frame_timing();
-        loop_stats->encoded(converted_frame, std::chrono::steady_clock::now() - encode_started, timing.submit, timing.completion_wait);
+        loop_stats->encoded(new_loop_content, std::chrono::steady_clock::now() - encode_started, timing.submit, timing.completion_wait);
       }
       if (publish_result.failed) {
         BOOST_LOG(error) << "Could not encode video packet"sv;

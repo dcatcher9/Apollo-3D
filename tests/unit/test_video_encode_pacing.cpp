@@ -720,13 +720,32 @@ namespace {
     stats.encoded(true, 9600us, 300us, 9100us);
     stats.encoded(false, 5ms, 200us, 4600us);
     const auto line = stats.report(1s);
-    EXPECT_NE(line.find("2 iterations in 1.0 s; 1 new and 1 repeat encodes"), std::string::npos) << line;
+    EXPECT_NE(line.find("2 iterations in 1.0 s; 1 new-content and 1 repeated-content encodes"), std::string::npos) << line;
     EXPECT_NE(line.find("holding 2.0 ms in 1 exact holds (requested 1.5 ms, overshoot avg 0.50 max 0.50 ms)"), std::string::npos) << line;
     EXPECT_NE(line.find("waiting 18.6 ms in 2 image waits (requested 56.0 ms; 1 ran to their bound, overshoot avg 14.60 max 14.60 ms)"), std::string::npos) << line;
     EXPECT_NE(line.find("converting 0.2 ms in 1 conversions; encoding 14.6 ms (NVENC submit 0.5 ms, completion wait 13.7 ms)"), std::string::npos) << line;
     EXPECT_NE(line.find("loop work 964.6 ms"), std::string::npos) << line;
     stats.reset();
     EXPECT_EQ(stats.iterations(), 0u);
+  }
+
+  TEST(RemoteEncodeLoopStatsTest, AReconvertedUnchangedExportIsARepeatedContentEncode) {
+    // As encode_run() classifies them, like the packets: by the encoded content's identity. A
+    // keepalive or poll that re-renders the cached export converts again but repeats its content.
+    video::detail::diagnostic_content_tracker_t content;
+    video::detail::encode_loop_stats_t stats;
+    const auto encode = [&](video::detail::diagnostic_timestamp_t content_timestamp, bool converted_frame) {
+      const bool new_content = content.observe(content_timestamp, !converted_frame) == video::detail::diagnostic_content_e::new_content;
+      stats.encoded(new_content, 9ms, 300us, 8ms);
+    };
+    const auto export_frame = std::chrono::steady_clock::time_point {} + 1s;
+    encode(export_frame, true);  // A new export frame.
+    encode(export_frame, true);  // The minimum-FPS keepalive re-renders it.
+    encode(export_frame, false);  // A kept input.
+    encode(std::nullopt, true);  // No content identity: not counted as new.
+    encode(export_frame + 11ms, true);  // The next export frame.
+    const auto line = stats.report(1s);
+    EXPECT_NE(line.find("2 new-content and 3 repeated-content encodes"), std::string::npos) << line;
   }
 
   TEST(RemoteEncodePendingSourceTest, FinalEarlySourceSurvivesUntilItsPresentationDeadline) {

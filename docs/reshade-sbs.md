@@ -4758,8 +4758,13 @@ of its target, so the stream cadence still caps the encode rate. Every slot is g
 ready for the current generation with a sequence at most the fence's completed value. A frame
 that has completed before its poll target (its presentation target minus the variation
 threshold) is held exactly to that target on a high-resolution timer (`provider_hold`); the loop
-then takes the newest completed frame without waiting. A hold lasts at most one frame interval,
-so an IDR or other control request waits at most that long. Every other wait ends at a fence
+then takes the newest completed frame without waiting. A hold lasts at most one frame interval
+and a control wake does not end it, so a control request that arrives during a hold waits at most
+the rest of it. The loop then re-checks for an IDR or reference invalidation: one that arrived
+restarts the iteration, and the newest completed frame is encoded at once as the recovery frame
+rather than first as a P-frame the client cannot use. Shutdown, reinit and video-mode changes are
+re-checked before the conversion, and a stream-gamma request applies from the next one. Every
+other wait ends at a fence
 wake, a desktop capture, a control request or the keepalive. Waits on the image event cannot end
 at a target: with this toolchain (winpthreads; libstdc++ without a clock-based condition-variable
 wait) a timed wait that nothing notifies ends only at the next 15.625 ms Windows scheduler tick,
@@ -4773,11 +4778,15 @@ added for a late or missing wake that the live counters then refuted, is gone. W
 `diagnostics = enabled` the host logs every 20 s `Game 3D export: N new frames claimed and W fence
 wakes in 20 s; K claims found their frame complete before its wake (late or missing wake); fence
 wake to claim avg A ms, max M ms over C claims`; K close to N means the wake arrives late or not
-at all. The encode loop logs its own account at the same interval, `Video encode loop: I
-iterations in 20.0 s; N new and R repeat encodes; holding ... in H exact holds (requested ...,
-overshoot avg/max); waiting ... in W image waits (requested ...; T ran to their bound, overshoot
-avg/max); converting ...; encoding ... (NVENC submit ..., completion wait ...); loop work ...`.
-Image waits that run to their bound with an overshoot near 15.6 ms are tick-bound waits. While an
+at all. Only these diagnostics time wakes: the receiver records wake times and the wake-to-claim
+delay only after the first such report starts its window, so without diagnostics a claim never
+takes the fence callback's lock. The encode loop logs its own account at the same interval,
+`Video encode loop: I iterations in 20.0 s; N new-content and R repeated-content encodes; holding
+... in H exact holds (requested ..., overshoot avg/max); waiting ... in W image waits (requested
+...; T ran to their bound, overshoot avg/max); converting ...; encoding ... (NVENC submit ...,
+completion wait ...); loop work ...`. Encodes are told apart by the encoded content's identity,
+as the packets' content-age loggers do, so a keepalive that re-renders an unchanged export counts
+as repeated content although it converted. Image waits that run to their bound with an overshoot near 15.6 ms are tick-bound waits. While an
 export is live the loop neither polls nor repeats frames at stream cadence: new exports, cursor
 changes and the minimum-FPS keepalive (which re-checks the connection) produce frames, and a due
 stream-gamma white-level query runs in the next of them rather than forcing a repeat. A replaced
