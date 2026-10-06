@@ -21,8 +21,9 @@ it selects the source and does not select another renderer. Image controls live 
 and save automatically in ReShade.ini. The old ray-search renderer, its quality settings and the experimental warp
 selector have been removed. Sources larger than 3840 in either dimension show an explicit warning
 and remain 2D; there is no hidden legacy renderer fallback.
-Automatic UI discovery considers authenticated UI opacity, tag 23 alpha, tag 53 backbuffer
-alpha, current color alpha unless FG is known enabled, then paired tag 2 HUD-less color difference.
+Automatic UI discovery considers authenticated UI opacity, tag 23 alpha, the game's offscreen UI
+layer, tag 53 backbuffer alpha, current color alpha unless FG is known enabled, then paired tag 2
+HUD-less color difference.
 It validates candidates on the GPU every frame and requires no review or approval. Raw Streamline
 tags are first translated through the hooked interposer's version-specific
 [buffer contract](../../docs/reshade-sbs.md#streamline-buffer-type-contract): UIAlpha is tag 68 in
@@ -275,7 +276,7 @@ absolute levels, target/applied/required UV, central image area, UI coverage, co
 both area thresholds, capped conflict, accepted source identities and age.
 Current policy coverage/conflict counts refer to the central rectangle and affect placement only.
 Separate GPU source-validation passes evaluate alpha and paired HUD-less candidates each frame.
-Their bounded 16-byte asynchronous diagnostic readback cannot authorize protection; selection
+Their bounded asynchronous diagnostic readback (the decision texels) cannot authorize protection; selection
 and mask generation remain on the GPU with no full-frame CPU readback or startup deadline.
 No new probe artifact is required. `--ui-front-fraction 0..0.75` supplies an explicit offline
 fraction and preserves historical 75% renders despite the lower live ceiling;
@@ -389,7 +390,9 @@ does not require a matrix.
 The linked contract describes the reference convention and
 the limits of comparing unknown raw encodings with projection depth.
 Successful evaluation and actual submission establish API source ownership independently of
-snapshot readiness. The linked contract owns the capture-ordering requirements and limitations;
+snapshot readiness; an explicit release, or one second without any evaluation of that source (a
+game that switches DLSS to TAA), returns the queue to Generic selection. The linked contract owns
+the capture-ordering requirements and limitations;
 D3D11 retains its existing Generic preservation backend. AMD support is deferred. Set
 `[SUNSHINE_DEPTH] StreamlineDepthSource=0` in `ReShade.ini` and restart to disable this path.
 
@@ -451,12 +454,14 @@ fresh depth and gaps outside the settle time after FG switches and runtime reset
 that showed the colour frame with depth; capture coverage by the list lifecycle; whether the
 camera projection or only the raw controller places the scene (the latter while a valid camera
 exists is a warning); UI acceptance changes and Forget; inferred alpha
-deciding beside an accepted UIAlpha or UI color tag; an accepted inferred alpha that a valid exact
-HUD-less pair contradicted one way three times within 2 s without a revocation (in logs before S2a,
-an accepted source covering the whole frame while an exact pair shows the scene; shorter
+deciding beside an accepted UIAlpha or UI color tag; an accepted alpha (inferred, and since
+selection revision 10 UIAlpha or the UI color tag captured in the pair's tag batch) that a valid
+exact HUD-less pair contradicted one way three times within 2 s without a revocation (in logs
+before S2a, an accepted source covering the whole frame while an exact pair shows the scene; shorter
 contradictions, which A2 never revokes, are noted); and accepted sources that disagree as often,
 with the revocation that resolved them named by its kind (by the selection and A2 revocation rules of
-[UI protection](../../docs/reshade-sbs.md#setup)); selective UI channels rejected for invalid pixels;
+[UI protection](../../docs/reshade-sbs.md#setup)); selective UI channels rejected for invalid pixels
+on more than 1% of the frame (V1) while no mask protected it (`UI channel admission`);
 `UI protection gaps`, the streamed time
 outside settle times in which Auto rendered frames without a UI mask (no UI source offered, or no
 usable mask while no UI channel was offered clean and empty, which means no UI on screen), so HUD
@@ -476,19 +481,21 @@ logs since fix 1, `Pre-UI proof` for each layer proof key (`pre_ui:<format>:<spa
 earned, lapsed or forgotten ([hidden-scene evidence](../../docs/reshade-sbs.md#setup) defines it);
 observation losses by cause; capture statuses outside the settle time after an export start, FG
 switch or reset (those inside it are INFO); unusual export pauses; present-thread hitches; Game 3D
-CPU and GPU cost over every timing window (Present-weighted means and the maximum); and, from the
+CPU and GPU cost over every timing window (means weighted by each window's Presents or GPU frames,
+and the largest maximum); and, from the
 host log, the Game 3D link, size fit and encoder stalls. A log whose game process ended right
 after ReShade tore its runtimes down (Unreal games often end before ReShade logs its exit) counts
 as a normal exit.
 
 Logs that contain `Sunshine UI counters` lines carry the add-on's exact per-frame
 [UI counters](../../docs/reshade-sbs.md#setup). For these logs the report decides the UI
-invariants from the last counter line, not from the 100 ms samples. It reports these checks:
+invariants from the last counter line (the holds check from every counter line), not from the
+100 ms samples. It reports these checks:
 
 - `UI counters`: the add-on's own accounting (Auto frames are detection frames, generated Presents
   that held a real frame's decision or had none, and frames without detection).
 - `UI protection`: inferred alpha beside an accepted declared UI channel, and the frames in which a
-  valid exact pair contradicted a deciding accepted alpha one way (`contradicted`; inferred alpha per frame, since selection revision 10 any accepted alpha, declared included, per sample), which
+  valid exact pair contradicted a deciding accepted alpha one way (`contradicted`; inferred alpha per frame, since selection revision 10 an accepted UIAlpha, UI color tag, Backbuffer or current alpha (never the one-frame-late layer copy), per sample), which
   fail only with a sampled run of three such contradictions within 2 s that no revocation followed:
   A2 never revokes shorter ones, and the counter cannot tell them apart. Counter lines logged
   before S2a keep the older rule: accepted full coverage of a visible scene (`trusted_full`) that no
@@ -515,12 +522,14 @@ invariants from the last counter line, not from the 100 ms samples. It reports t
   (inexact) pair, validated by its own pixels (V2); expected wherever a game offers no same-batch
   pair.
 - `UI holds without a decision`: per counter window (from one counter line that advanced to the
-  next), a warning when at least half of the Auto frames were held without a real-frame decision to
-  show (T1), and a failure when at least 90% were for 10 s or longer: UI detection effectively never
+  next; windows less than 1 s apart merge), a warning when at least half of the Auto frames were
+  held without a real-frame decision to show (T1) for 2 s or longer, each window listed with its FG
+  state, and a failure when at least 90% were for 10 s or longer: UI detection effectively never
   ran (Hogwarts Legacy 10-05 at 4x frame generation, before the HUD-less pairing fix).
 - `UI holds`, `UI no mask` and `UI trust events`: exact totals. Holds are the generated Presents
-  that showed a real frame's decision or had none, and the real frames that reused the previous
-  real frame's decision once (T1); frames without a mask also list the sampled reasons with the
+  that showed a real frame's decision or had none, and the real frames that reused the held
+  decision (T1: once, or across a HUD-less snapshot's re-offers); frames without a mask also list
+  the sampled reasons with the
   candidate each refused; trust events include one-way and declared-coverage revocations and
   Forget.
 
@@ -532,13 +541,15 @@ image's evidence (`sampled_pre_ui_scene`), the informative claims and the H1 wor
 `sampled_hudless_scene` and `scene_hold`; UI lines since fix 1 add the layer's pixels against the
 presented frame (`sampled_pre_ui_pixels`), and lines without them read as before;
 [UI protection](../../docs/reshade-sbs.md#setup) defines them. Lines of removed features still parse
-and add no check: the first-run shadow, rule H2's still screens (`still` groups, `decided.11`, `Sunshine
+and add no check of their own: the first-run shadow's session line, which is ignored (the `shadow`
+and `shadow_hidden_ms` fields of UI lines written before selection revision 9 still feed the
+hidden-scene warning above), rule H2's still screens (`still` groups, `decided.11`, `Sunshine
 UI still screen` lines), the S3 identity shadow (`Sunshine UI identity`, `Sunshine FG interposers`),
 and the dark pre-UI statistics; since selection revision 9 the add-on logs their remaining fields
 (`shadow`, `shadow_hidden_ms`, `presented_lit`, `presented_lit_differs`, `full_alpha_d`) as 0.
 Each `UI protection gaps` window lists its pieces with each line's own FG state; a line whose
-status sample was still pending, or an unrendered line, continues a run as `searching` after the
-last sample's reason.
+status sample was still pending (`checking` or `searching`), or an unrendered line, continues a run,
+labelled with that state after the last sample's reason.
 
 The depth and flat checks decide from the periodic `Sunshine SBS output` counters, then name
 the add-on's own evidence for each window. A depth gap lists each `Sunshine depth readiness`
@@ -590,9 +601,10 @@ replay `xfail` reason names the same rule IDs.
 ## Additional diagnostics
 
 `[SUNSHINE_GAME3D] Diagnostics=1` (the **Diagnostics** row under Troubleshooting) turns on the
-add-on's diagnostic-only per-frame work: per-pass GPU timing
+add-on's diagnostic-only per-frame work: per-pass GPU timing and the Streamline presentation
+brackets with their PCL marker hooks
 (see [Diagnostics switch](../../docs/reshade-sbs.md#diagnostics-switch-and-per-present-cost)). It
-is off by default and changes no decision or exported pixel.
+is off by default and changes no decision, candidate binding or exported pixel.
 
 The separate [Streamline camera probe](../../docs/reshade-sbs.md#streamline-camera-metadata-experiment)
 is disabled by default. `StreamlineCameraProbe=1` enables detailed diagnostics after restart;
@@ -693,29 +705,34 @@ checking that this unrelated repeated failure cannot erase the independent UI in
 fixture's foreground override applies only to dump ownership; it does not change desktop focus.
 See the [canonical capture diagnostics](../../docs/reshade-sbs.md) for the gate and request fields.
 Run these functional cases serially when they share resources or output directories; their timing
-is not performance evidence. The NGX and preservation-mode-2 runtime fixtures below use the same
-zero-FX native lifecycle. The other effect-based fixtures documented below remain in the repository,
-but their shader-uniform and shared-preservation expectations are historical and do not replace
-these native capture gates.
+is not performance evidence. The NGX, direct Streamline, preservation-mode-2, probe-round,
+rotating-allocation and adaptive raw-depth runtime fixtures below use the same zero-FX native
+lifecycle. They select their frozen `SunshineGame3D.fx` boot effect and the test add-on themselves,
+so they need no environment settings. The command-association, native-selection and
+native-present fixtures exercise the reference effects with native Game 3D off.
 
 The optional `reshade_streamline_direct_runtime_test` is a component integration fixture.
 Its metadata seam bypasses SDK discovery; the real SDK-entry NGX/Streamline cases below remain
-necessary to validate that entry path. Its historical rendering assertions use the former
-current-zero ratio and independently derived inverse-depth values; those assertions are not
-acceptance evidence for the current gain policy.
+necessary to validate that entry path. Like the NGX fixture it renders through native Game 3D
+with no FX and needs no environment settings; each Present's consumed depth and constants come
+from the test add-on's last-render query and Dump 3D captures verify the depth pixels and
+projection a native render consumed. Its gain and zero oracle is the owning contract applied to
+the inverse distance of the known draw: gain `L/Q` from the nearest depth and the zero at the
+contrast midpoint.
 
 This fixture exercises independent capture and
 projection-based rendering. It writes real R32_FLOAT UAV textures that never enter the generic
 depth-stencil inventory, preserves them through native command submission, and checks their
-spatial depth pattern against the shader input. It also checks rotating resources, manual
-pin/release, the former coupled screen-plane/normalization changes, explicit recentering, proportional strength,
-failed evaluation recovery, and zero-strength HDR color. It uses the same arguments/environment
-below, with `reshade_streamline_direct_runtime_test.exe` and a fresh output directory. Its test-only
+spatial depth pattern against the consumed depth. It also checks rotating resources, manual
+pin/release, a changed center that moves only the zero, explicit recentering, proportional strength,
+failed, missing and refused evaluations (the newest completed copy held within its age bound, then
+current-color mono; one second of silence releases the association), and zero-strength HDR color.
+It uses the same arguments as the NGX fixture below, with
+`reshade_streamline_direct_runtime_test.exe` and a fresh output directory. Its test-only
 seam supplies middleware metadata, never shader readiness, copied pixels or GPU completion.
 `SUNSHINE_STREAMLINE_MATRIX_CHANGE_TEST=1` checks changed near/far projection metadata:
-the shader must use current reconstruction coefficients. Its old zero-tracking assertions belong
-to the coupled ratio policy. It also checks rotation, gaps, FOV invariance
-and actual HDR pixels.
+the render must use current reconstruction coefficients while the gain and zero follow the
+new decoded depth. It also checks rotation, gaps, FOV invariance and actual HDR pixels.
 Like the modes below, it is exclusive. A source nomination ticket is not a pixel-readiness
 assertion: negative capture cases verify held API ownership and current-color mono separately.
 Set `SUNSHINE_STREAMLINE_COLD_V1_TEST=1` for V1-only rotation without successful V2 warmup.
@@ -725,8 +742,8 @@ malformed, conflicting or split-transition rejection. These modes are mutually e
 use the same real GPU capture and shader path.
 `SUNSHINE_STREAMLINE_PACKED_V1_TEST=1` is a third exclusive mode for the packed
 `R32G8X24_TYPELESS` depth/stencil format observed in Dead Space. It checks rotating sources,
-prior-recording provider state, plane-aware depth readback, unchanged source stencil, actual
-shader preparation, mono fallback and recovery.
+prior-recording provider state, plane-aware depth readback, unchanged source stencil, the
+consumed depth and projection, mono fallback and recovery.
 `SUNSHINE_STREAMLINE_COMMAND_CAPACITY_TEST=1` is another exclusive mode. It retains
 160 real native-only command lists on the observed vtable, then destroys and recreates them
 while checking packed-depth rotation, shader output and recovery. These lists bypass ReShade's
@@ -735,7 +752,7 @@ device wrapper, so their cleanup must follow native COM lifetime rather than ReS
 ordinary packed-depth rendering, it submits the real producer recording before completing the
 evaluation. Successful completion must still reach the shader; failed completion and replaying
 the unchanged producer must remain mono. It checks both rotating sources, preserved source
-stencil and actual prepared-depth pixels, then verifies recovery with a new recording.
+stencil and consumed depth pixels, then verifies recovery with a new recording.
 `SUNSHINE_STREAMLINE_LARGE_BATCH_TEST=1` is another exclusive mode. It submits 97 real native
 command lists together with the depth producer at the start, middle and end; a separate idle-only
 96-list batch must not invalidate captured depth. A 257-barrier call puts the source transition
@@ -749,12 +766,12 @@ flag an older control DLL lacking the getter can still run the GPU capture compa
 Like the native provider fixture, it loads the supplied shaders only to initialize the runtime and
 then removes every FX technique. Each present is observed through the test add-on's provider
 status and Automatic/scale queries. Current output is read from the production export ring.
-Production Dump 3D captures supply consumed depth, render constants and SBS at checkpoints. Run it with
-`SUNSHINE_GAME3D_AUTOMATIC=1`, `SUNSHINE_GAME3D_AUTOMATIC_ACTIONS_TEST=1` and
-`SUNSHINE_DEPTH3D_EFFECT=SunshineGame3D`:
+Production Dump 3D captures supply consumed depth, render constants and SBS at checkpoints. Like the
+native provider fixture, it selects its frozen `SunshineGame3D.fx` boot effect, compile gate and
+test add-on itself; the shader directory must contain that frozen effect:
 
 ```text
-reshade_ngx_depth_runtime_test.exe <ReShade64.dll> <Depth3D/Shaders> <SunshineSBSTest.addon64> <fresh-output-directory> 3840 2160
+reshade_ngx_depth_runtime_test.exe <ReShade64.dll> <frozenShaders> <SunshineSBSTest.addon64> <fresh-output-directory> 3840 2160
 ```
 
 Failed and invalid-extent evaluations must not take ownership from Generic. A valid evaluation
@@ -799,9 +816,12 @@ independent `SunshineDepth3D.fx` remain reference sources: their annotated textu
 only after the owning technique executes, with native Game 3D disabled. Only the independent
 reference requires its separate current-frame percentile calibration update.
 The exporter verifies the normal runtime resolution, actual texture dimensions/format and
-current game swapchain color space. With the overlay closed, it copies the texture without
-resampling or color conversion. For HDR10/PQ input, the renderer decodes PQ and transforms Rec.2020 primaries to
-linear Rec.709; native scRGB input keeps that representation. scRGB uses 1.0 = 80 cd/m².
+current game swapchain color space. Native Game 3D packs both eyes straight into the claimed slot;
+a reference FX texture is copied there without resampling or color conversion. An HDR10/PQ
+swapchain exports PQ code values (protocol 3) to a consumer that accepts them, and a native scRGB
+swapchain does so for a consumer that encodes HDR10 PQ; otherwise HDR exports linear Rec.709 scRGB
+(1.0 = 80 cd/m²), PQ input decoded and its Rec.2020 primaries transformed first
+([Color and HDR](../../docs/reshade-sbs.md#color-and-hdr)).
 
 For reference FX only, the required `sunshine_sbs_source_color_space` annotation records the shader's compiled
 `BUFFER_COLOR_SPACE`. It must match the game swapchain exactly: SDR, scRGB or HDR10/PQ.
@@ -821,13 +841,14 @@ The active renderer must execute in each presented frame. Disable, failed source
 focus loss invalidate metadata immediately; reference FX reload also invalidates its export. A game that stops presenting may retain its
 last valid image; the exporter does not assign a false new timestamp to that retained image.
 
-The Direct3D 11 path uses `SHARED | SHARED_NTHANDLE` textures and native shared fences. It copies
-on ReShade's immediate context, finishes any overlay composition, then signals the fence and
-flushes submission without waiting for it.
-The Direct3D 12 path appends copy barriers to ReShade's immediate command list and restores both
-resource states. It signals its native queue fence only in the matching `finish_present` callback,
-after ReShade submits that list. It never forces a ReShade command-list flush, which could wait for
-an allocator and reset the game's draw state. A different swapchain or queue cannot publish the copy.
+The Direct3D 11 path uses `SHARED | SHARED_NTHANDLE` textures and native shared fences. Both APIs
+publish in ReShade's `reshade_present` callback, after the pack and any overlay composition and
+before the game's Present: the slot is marked ready, then the fence is signalled. D3D11 signals on
+ReShade's immediate context and flushes submission without waiting for it. D3D12 records into
+ReShade's immediate command list, restores the resource states it changed, submits that list and
+signals its native queue fence on the presenting queue. ReShade 6.8 fires `finish_present` only
+after the real Present returns, so it fences only a D3D12 export whose `reshade_present` did not
+run. A different swapchain or queue cannot publish the export.
 
 While settings are open, a public ImGui draw callback adds an FP16 target to ReShade's native
 overlay pass. ReShade still draws its actual controls, textures, tooltips and cursor and handles
@@ -838,7 +859,10 @@ negative values and highlights above SDR white. D3D11 composition restores the a
 state it touches; D3D12 uses ReShade's own immediate command list. Composition shares the
 existing slot and fence lifetime; there is no additional queue wait or CPU image readback.
 
-Only one producer copy may be outstanding. Busy slots or an incomplete fence drop the next export.
+Up to three slot writes may be outstanding, one per ring slot. A Present that finds no reusable
+slot (a free one, else the oldest ready one whose write completed, never the newest unconsumed
+frame) drops its export without waiting and counts it as `dropped` (see the
+[handoff contract](../../docs/reshade-sbs.md#gpu-handoff-contract)).
 Source and destination resources stay alive across a pending copy. If runtime destruction prevents
 submission confirmation, one retired generation is retained so a successor runtime can proceed.
 The allocation cap is one retired ring plus one active ring; another unconfirmed destruction stops
@@ -969,35 +993,33 @@ frame IDs. It adds no depth readback or GPU wait and does not change selection o
 calibration. Leave it disabled outside a diagnostic session.
 
 The raw screen-plane controller has unit coverage in `reshade_raw_scene_policy_tests`.
-The historical `reshade_adaptive_raw_runtime_test` actual-ReShade fixture uses real game DSV draws,
-the integrated selector/sampler, and published scale/zero-plane/readiness uniforms. Its scenarios
-check the former reciprocal normalization of the smoothed zero through scene changes, pin/unpin
-continuity, source initialization, gaps, stereo and mono
-in both HDR depth conventions. No camera/gain uniforms or synthetic readback results are injected.
-Use a separate control add-on and fresh output directories for a matched run. When comparing
-the old ratio and fixed-reference implementations, its normalization assertion distinguishes
-those historical policies. It does not establish acceptance of the current range-based policy.
-
-Build `reshade_adaptive_raw_runtime_test` with runtime tests enabled, then run it
-with `SUNSHINE_GAME3D_AUTOMATIC=1`, `SUNSHINE_GAME3D_AUTOMATIC_ACTIONS_TEST=1` and
-`SUNSHINE_DEPTH3D_EFFECT=SunshineGame3D` in the environment:
+`reshade_adaptive_raw_runtime_test` drives real game DSV draws through the integrated
+selector/sampler and the raw-depth scale controller into native Game 3D, with no FX. Each Present
+is observed through the test add-on's last-render query; Dump 3D captures verify the consumed
+depth pixels and constants and the mono/stereo SBS. Its oracle is the owning contract's formula
+applied to the independently known draw: gain `L/Q` from the full-image maximum and the zero at the
+contrast midpoint ([raw-depth automation](../../docs/reshade-sbs.md#experimental-raw-depth-automation)).
+Its scenarios check fresh single-window initialization, same-source pin/unpin continuity, a changed
+center patch that keeps the gain and moves only the zero, held gain and zero through depth and
+presentation gaps with current-color mono, a retained exact source resuming its own history, a
+destroyed source and an explicit recalibration starting fresh, zero-strength mono and finite HDR
+stereo, in both depth conventions. No camera/gain values or synthetic readback results are injected.
+Like the bind-switch fixture it needs no environment settings:
 
 ```text
-reshade_adaptive_raw_runtime_test.exe <ReShade64.dll> <Depth3D/Shaders> <SunshineSBSTest.addon64> <fresh-output-directory> <scrgb|pq> <normal|reversed> <width> <height>
+reshade_adaptive_raw_runtime_test.exe <ReShade64.dll> <frozenShaders> <SunshineSBSTest.addon64> <fresh-output-directory> <scrgb|pq> <normal|reversed> <width> <height>
 ```
 
-Set `SUNSHINE_DEPTH_RELOAD_TEST=1` to also reload the real effect while depth is absent,
-rediscover its new resources, and require fresh readiness, calibration and HDR stereo after
-depth returns. `reshade_depth_ready_uniform_cache_tests` covers reflection reuse and change-only
-publication by the shared Generic/API readiness owner.
-
-The fixture requires the separate test add-on for the real pin/unpin/**Recenter**
-actions. It checks native depth pixels, shader preparation and exported HDR pixels
-as well as the control trajectory. The production package excludes these test exports.
+The former `SUNSHINE_DEPTH_RELOAD_TEST` case required the retired effect's scale to restart after
+an FX reload; native capture and scale deliberately survive an FX reload
+(`reshade_game3d_native_depth_runtime_test`), and the case exits as a setup failure.
+`reshade_depth_ready_uniform_cache_tests` covers reflection reuse and change-only publication by
+the shared Generic/API readiness owner. The fixture requires the separate test add-on for the
+real pin/unpin and **Recalibrate** actions. The production package excludes these test exports.
 
 `reshade_depth_bind_switch_runtime_test` exercises preservation mode 2 with real
-D3D12 D32S8 draws through native Game 3D. Use the three environment settings above plus
-`SUNSHINE_DEPTH_BIND_SWITCH_TEST=1`; its arguments are only the runtime DLL,
+D3D12 D32S8 draws through native Game 3D. Like the NGX fixture it needs no environment settings
+and selects preservation mode 2 itself; its arguments are only the runtime DLL, frozen
 shader directory, test add-on and fresh output directory. Like the NGX fixture, it removes every
 FX technique after initialization. It reads readiness from the Automatic/scale queries on every present.
 Production Dump 3D captures supply the consumed depth, render constants and SBS. It runs 4K scRGB with
@@ -1013,22 +1035,29 @@ Add `SUNSHINE_DEPTH_GENERIC_ONLY_TEST=1` to disable both API sources, camera dia
 call tracing before initialization. The fixture verifies those settings and runs the same
 preservation and HDR checks, proving that shared capture does not depend on API discovery.
 
-`reshade_depth_probe_round_runtime_test` uses the same four arguments and
-environment settings to check bounded challenger sampling in Automatic mode.
+`reshade_depth_probe_round_runtime_test` uses the same four arguments and, like
+the bind-switch fixture, renders through native Game 3D with no FX and no environment
+settings to check bounded challenger sampling. The test add-on's last-render query
+(`SunshineGame3DTestLastRender`) reports the depth and constants each native render
+consumed; Dump 3D captures verify the consumed depth pixels.
 A real 4K source is created before six active flat peers; it must replace the
 calibrated lower-resolution source within three seconds, with its actual depth
 pixels verified. The unchanged old add-on must fail that promotion bound. The
-fixture also checks that an uncapturable candidate yields and an active manual
-pin remains authoritative. These are controlled regression bounds, not promised
-recovery times for every game. No selection, depth or camera values are injected.
+fixture also checks that an uncapturable candidate yields within its two bounded
+probe visits and an active manual pin remains authoritative. These are controlled
+regression bounds, not promised recovery times for every game. No selection, depth
+or camera values are injected. `--native-priority` runs the late-native case instead.
 
-`reshade_depth_alternating_runtime_test` uses those same four arguments and
-environment settings for an actual 4K rotating-allocation regression. Each allocation
+`reshade_depth_alternating_runtime_test` uses those same four arguments and, like the
+probe-round fixture, renders through native Game 3D with no FX and no environment settings
+for an actual 4K rotating-allocation regression. Each allocation
 first passes a continuous capture/calibration control. ABC and AABB cadences must
 then reach continuous current capture, readiness and full stereo within a bounded
-warmup; each allocation keeps its own deliberately different H/t0. Every checked
-present verifies the physical depth source, actual copied depth, a changing color
-marker in both exported eyes, and current mono when depth is unavailable. Additional
+warmup; each allocation keeps its own gain and zero, those of its own drawn range and
+contrast midpoint, which differ between the members. Every checked
+present verifies the physical depth source and actual copied depth its native render
+consumed, a changing color marker in both eyes of the exported SBS, and current mono when
+depth is unavailable. Additional
 phases cover off-turn transfer writes, exact manual pin/release, lifetime replacement,
 unsupported partial crops, full-layout return, real depth gaps and a moving-center
 trajectory. Run the identical executable against the frozen old and candidate add-ons;
@@ -1038,7 +1067,7 @@ not an uncontended frame-time benchmark. Execution is opt-in and serial, outside
 
 The same fixture accepts one optional isolated case after its four normal arguments:
 `--overlap`, `--interrupted-startup`, `--moving-startup`, `--rotating-startup`,
-`--flat-startup`, or `--layout`. Each case needs a
+`--crowded-rotating-startup`, `--flat-startup`, or `--layout`. Each case needs a
 fresh output directory. They cover complementary rotation becoming concurrent rendering,
 real asynchronous startup samples across missing presents, changing central depth from the
 first rendered scene, fresh ABC rotation without any prior continuous-source calibration,
@@ -1051,14 +1080,8 @@ Every checked present inspects current depth and source-color pixels, including 
 missing/unsupported depth. Run one frozen executable against both control and treatment;
 these checks deliberately exercise the capture/selection/calibration boundaries.
 
-The older `reshade_raw_scene_runtime_test` scenarios below remain fixed-gain baseline and
-component-research fixtures. Build that target explicitly when testing a historical control;
-it is excluded from the default build. Their startup, source and cached A → B → A assertions
-describe a previous controller; a frozen H alone does not make them the current reference-policy
-regression gate. Shared native-depth, uniform and HDR mono observations live in
-`test_raw_runtime_fixture.h`; the current fixture
-does not include or rename the old program's entrypoint. The shared shader/transport and
-independent physical-camera fixtures retain their own contracts.
+Shared native-depth, uniform and HDR mono observations of the depth fixtures live in
+`test_raw_runtime_fixture.h`. The shared shader/transport fixtures retain their own contracts.
 
 For full-pipeline rendering checks, use the D3D11/D3D12 fixtures described under
 [Full-pipeline shader tests](#full-pipeline-shader-tests). Set
@@ -1067,77 +1090,6 @@ For full-pipeline rendering checks, use the D3D11/D3D12 fixtures described under
 its own supported controls. A comparison must match the remaining shared controls explicitly.
 These rendering checks complement the current controller fixtures and
 installer/receiver workflow; they do not establish physical game/headset acceptance.
-
-For historical fixed-gain comparisons, the `reshade_raw_scene_runtime_test` fixture can record
-actual Automatic source color, game DSV depth, prepared depth and full-SBS outputs with AA off/on.
-Set `SUNSHINE_GAME3D_AUTOMATIC=1`, `SUNSHINE_DEPTH3D_EFFECT=SunshineGame3D` and
-`SUNSHINE_GAME3D_AUTOMATIC_EVIDENCE=1`; use the same fixture, shader source, dimensions, color and
-orientation with separate control/treatment add-on binaries and fresh output directories.
-Require identical `automatic-evidence` source color, game depth, final mono/stereo pixels and
-geometry metadata. The original prepared RG16F surface also stores temporal payloads in its
-corner G cells: report their differences separately and require every convergence R value and
-all remaining scene-depth G values to match. Retain the complete intermediates and never mask
-final stereo pixels. The fixture lets
-continuous rendering recover after large readbacks before capturing full-strength stereo.
-These snapshots exercise the actual selector, sampler, policy and shader without injected camera
-values; they are regression evidence for unchanged geometry, not a quality comparison between
-Manual and Automatic or a substitute for moving-game/headset acceptance.
-
-For the test-only action run, `SUNSHINE_GAME3D_LEGACY_CALIBRATION_TEST=1` adds
-read-only checks that a fresh Game3D session requests no legacy calibration and
-has no legacy cache entries, both after startup and after the existing source-change
-and Recalibrate checks. It requires `SUNSHINE_GAME3D_AUTOMATIC_ACTIONS_TEST=1`
-and the separate `SunshineSBSTest.addon64`; it rejects the distribution-test combination.
-The state-query export is not present in the production add-on and does not change
-the renderer's request. Use the same fixture/query on both control and treatment.
-
-`SUNSHINE_GAME3D_AUTOMATIC_GPU_COST=1` selects an isolated actual-runtime timing
-scenario instead. It uses the real selector and policy on two native-depth
-scenes, both AA settings, and stereo/mono/Normal Depth View. Each case waits for
-the real zero plane and reentry, then brackets 64 complete effect executions
-after 16 warmup frames. `gpu-cost/samples.csv` retains GPU ticks, frequency and
-actual H/t0/blend; complete source/depth/SBS files accompany the summary. Large
-readbacks and disk writes are outside the timestamp interval. This measures
-effects-begin through the selected technique, including COLOR capture, not game
-FPS or end-to-end streaming. Use fresh directories and no other scenario flags.
-The separate ReShade Performance Mode flag stays off so controls remain editable.
-
-`SUNSHINE_GAME3D_AUTOMATIC_STARTUP_TEST=1` instead exercises unsuccessful startup recovery through
-that production runtime fixture. After the first real calibration sample, a scissored game draw
-makes the center unsuitable for more than five seconds while preserving the surrounding scene.
-The fixture verifies the actual selected depth, current mono, a fresh stabilization interval and
-automatic recovery when useful depth returns. Add `SUNSHINE_GAME3D_AUTOMATIC_STARTUP_REPLACE=1`
-to replace the source before calibration commits. Use fresh directories and run these separately
-from snapshot, Performance Mode and test-only action scenarios. No shader/camera/depth values are
-injected into the integration. An already established reference cannot be reused by a different
-source. An exact return to the original source can recover as described in the owning contract.
-
-`SUNSHINE_GAME3D_AUTOMATIC_RETURN_TEST=1` exercises a transient selected A → B → A transition
-after calibration. The original DSV allocation stays alive; B has a different allocation/lifetime
-and is held for only 150 ms after selection, before persistent-replacement qualification can
-finish. B must remain mono. Returning A must recover with a fresh capture and the same H,
-followed by full-strength stereo pixels, without a Recalibrate action. Run with
-`SUNSHINE_GAME3D_AUTOMATIC=1` in a fresh directory, separately from startup, replacement,
-Performance Mode and test-only action scenarios.
-
-`SUNSHINE_GAME3D_AUTOMATIC_REPLACE_TEST=1` instead leaves B selected with a materially different
-depth distribution. For the frozen control add-on, leave
-`SUNSHINE_GAME3D_AUTOMATIC_EXPECT_RECOVERY` unset: the fixture requires persistent mono and the
-unchanged old H after 3.5 seconds. For the treatment, also set
-`SUNSHINE_GAME3D_AUTOMATIC_EXPECT_RECOVERY=1`: the fixture requires automatic recovery within its
-12-second bound, a fresh H/reference matching the independently read native replacement DSV,
-and full-strength stereo pixels. It writes selected depth, recovered SBS and reference/timing
-metadata under `source-recovery-evidence`. Both runs must use identical shader source, fixture,
-dimensions, color and orientation with separate add-on binaries and fresh directories. Run
-separately from startup, transient return, snapshots, distribution tests, Performance Mode and
-test-only actions; neither depth nor camera/calibration uniforms are injected.
-
-Those historical source-recovery scenarios used two successive qualification windows and kept
-H fixed within a source. The current controller uses one fresh initialization window for
-independent gain and zero, and resumes A's history when A → B → A stays within the retained
-capture set. Eviction or a change to A's exact source basis requires fresh initialization. Its
-[source and timing contract](../../docs/reshade-sbs.md#experimental-raw-depth-automation) owns
-the current behavior; the older frozen experiments do not establish current-policy acceptance.
 
 For paired DX12 collection, set `SUNSHINE_STEREO_PARITY=1` and run the original fixture in a fresh
 directory. It records source/depth bytes, linear floating-point stereo output, actual uniforms,
@@ -1199,7 +1151,11 @@ use `1` for the dedicated dynamic-calibration/readiness specialization check. Op
 height arguments enable 4K source testing. D3D11 additionally accepts a final source-bit-depth
 argument: `srgb 0 640 360 10` exercises SDR10, whose texture has no native sRGB view.
 Append `--statistics` to the automatic-selection fixture to verify calibration with content-based
-Auto-select disabled and a buffer chosen by draw statistics, without a manual override.
+Auto-select disabled and a buffer chosen by draw statistics, without a manual override. That
+fixture writes `[SUNSHINE_GAME3D] Enabled=0` itself, as reference effects require, and also
+reloads the effect while it keeps drawing the same depth: the rebuilt `Sunshine_DepthReady` must
+read ready, then unready on a color-only Present, then calibrate again, which checks that the
+shared change-only readiness cache republishes into a reloaded effect.
 The [owning validation section](../../docs/reshade-sbs.md#validation-and-remaining-device-check)
 describes the geometry, color, source-precision, AA and acquisition assertions. CTest includes
 the pure calibration policy alongside the existing selector and publisher lifecycle tests.
@@ -1226,8 +1182,11 @@ not a dependency of the shipping shader or installer.
 below. It uses a controlled paint effect with the independent effect's filename, technique and
 dynamic calibration ABI to isolate transport from stereo geometry. With the separate-process
 receiver proxy it checks real shared textures/fences, source timestamps, overlay pixels, reload,
-focus loss/recovery and receiver restart. It also poisons every calibration input and requires
-the publisher to replace the complete set on the next published frame. This complements the
+focus loss/recovery and receiver restart. It also poisons the calibration inputs and requires the
+publisher to rewrite them on the next prepared frame; readiness, which the shared cache writes only
+when it changes, is not poisoned and must read unready; because an unpublished uniform also
+defaults to false, this only rejects stale readiness, and `reshade_native_selection_runtime_test`
+(including its effect-reload case) is the check that readiness is actually published. This complements the
 production shader and automatic-selection fixtures; controlled paint does not test depth warping.
 
 Look in the game's `ReShade.log` for `Sunshine SBS:` messages:
@@ -1312,7 +1271,7 @@ runtime test with `scrgb` and `pq`, using separate output directories. These con
 their windows hidden and supply foreground observations for only their own window. They drive
 natural game `Present` calls through the official D3D11 or D3D12 proxy. The real receiver performs
 nonce negotiation, process checks, handle duplication, shared-fence checks, slot ownership and
-private GPU copies; the fixture does not modify the receiver's slot state. Pixels, declared
+direct reads of the claimed shared slot; the fixture does not modify the receiver's slot state. Pixels, declared
 transfer, retained timestamps, effect/overlay/reload/focus invalidation, recovery and receiver
 restart are checked. Producer and receiver run in one process on independent native devices;
 these tests do not establish access across a live game's process or host-service boundary.
@@ -1338,13 +1297,15 @@ Use the D3D12 presentation executable for that backend, and repeat with `scrgb` 
 The proxy starts its own hidden helper with a restricted set of inherited IPC handles and
 verifies its distinct process identity. The helper selects the same GPU and alone runs the
 unchanged production receiver, including the real cross-process `OpenProcess`, `DuplicateHandle`,
-texture/fence import and private GPU copy. The test then reads back that private copy and sends
-its pixels to the parent for inspection; this CPU path exists only in the fixture. Production
-texture transport remains entirely on the GPU. Receiver restart starts a new helper process.
+texture/fence import and direct shared-slot read. While the receiver holds the claimed slot
+`reading`, the test copies that slot to a staging texture and sends its pixels to the parent for
+inspection; this CPU path exists only in the fixture. Production texture transport remains
+entirely on the GPU. Receiver restart starts a new helper process.
 The logs record both PIDs and helper exit status. These checks cover separate processes under
 the same user/session/integrity level, not a live installed game or the elevated host-service
-boundary. All six D3D11/D3D12 SDR/scRGB/PQ cases passed locally, including receiver restart in a
-new process and clean shutdown of all twelve helper instances.
+boundary. All six D3D11/D3D12 SDR/scRGB/PQ cases passed locally again on 2026-10-05 with the
+direct-read receiver, including receiver restart in a new process and clean shutdown of all
+twelve helper instances.
 
 `SUNSHINE_SBS_RUNTIME_TESTS` defaults to **OFF**. Its `SunshineSBSTest.addon64` is for these isolated
 fixtures only. The shipping `SunshineSBS.addon64` retains the real Windows foreground check and

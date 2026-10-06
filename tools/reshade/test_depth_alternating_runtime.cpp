@@ -1,28 +1,28 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Actual rotation regression: unchanged executable/assertions for old/new add-ons.
+// Actual rotation regression through native Game 3D with no installed FX:
+// unchanged executable/assertions for old/new add-ons. Each Present's consumed
+// depth and constants come from the test add-on's last-render query, its SBS
+// from the production export ring. No depth, readiness or camera injection.
 #include "test_raw_runtime_fixture.h"
-#include "depth_addon.h"
+#include "test_game3d_native_observation.h"
 
 namespace {
-  using query_t=BOOL (*)(api::effect_runtime *,sunshine_depth::frame_depth *);
-  query_t query=nullptr;
-  sunshine_depth::frame_depth captured;
-  unsigned captured_render=0;
-  bool capture_ready=false;
-  void observe_rotation(api::effect_runtime *runtime,api::effect_technique technique,
-      api::command_list *,api::resource_view,api::resource_view) {
-    char name[256]{};runtime->get_technique_name(technique,name);
-    if(!named(name,technique_name))return;
-    captured={};capture_ready=query && query(runtime,&captured) && captured.ready;
-    captured_render=observed.renders;
-  }
-
   struct rotation_fixture:raw_runtime_fixture {
     enum class cadence { single,abc,aabb,offturn,missing,concurrent,interrupted,moving,auxiliary };
     using action_t=BOOL (*)(api::effect_runtime *);
     using select_t=BOOL (*)(api::effect_runtime *,std::uint64_t);
     using state_t=BOOL (*)(api::effect_runtime *,std::uint64_t *,BOOL *);
-    action_t recalibrate=nullptr;select_t select_manual=nullptr;state_t manual_state=nullptr;
+    select_t select_manual=nullptr;state_t manual_state=nullptr;
+    native_game3d_observer game3d{*this};
+    // What the native render of the latest Present consumed.
+    sunshine_game3d::test::last_render latest;
+    sunshine_depth::frame_depth captured;
+    bool capture_ready=false;
+    std::uint64_t rendered_sequence=0;
+    bool ready() const {return latest.rendered && latest.parameters.depth_ready && latest.parameters.camera_ready;}
+    float gain() const {return latest.parameters.depth_scale;}
+    float zero() const {return latest.parameters.convergence[1];}
+    float blend() const {return latest.parameters.strength_blend;}
     std::unique_ptr<target_t> third;
     std::vector<std::unique_ptr<target_t>> unrelated;
     cadence mode=cadence::single;
@@ -38,7 +38,7 @@ namespace {
     com_ptr<ID3D12Resource> pixel_readback;
     struct point {unsigned x,y;};
     std::array<point,32> points{};
-    static constexpr unsigned count=32,slots=count*3+1;
+    static constexpr unsigned count=32,slots=count*2+1;
     float eye_difference=0;
 
     target_t &member(unsigned role){return role==1 ? *scene : role==2 ? *decoy : *third;}
@@ -47,6 +47,35 @@ namespace {
       if(pattern==19)return .5f;
       if(pattern>=100 && pattern<=228)return .125f+float(pattern-100)/1024.f;
       return pattern==15 ? .25f : .125f;
+    }
+    // docs/reshade-sbs.md, raw-depth automation, applied to a member's known
+    // draw over its captured rectangle: gain L/Q from the full-image maximum
+    // Q of oriented raw t and the zero at the contrast midpoint
+    // b+0.5*sum(d*d)/sum(d), b the minimum and d=t-b.
+    static float raw(unsigned pattern,unsigned x,unsigned y,unsigned w,unsigned h){
+      const unsigned cx=std::min(31u,unsigned((float(x)+.5f)/float(w)*32.f)),cy=std::min(17u,unsigned((float(y)+.5f)/float(h)*18.f));
+      const bool inside=cx>=14 && cx<18 && cy>=7 && cy<11;
+      return inside ? center(pattern) : float(cx/8+1)/16.f;
+    }
+    std::array<double,2> basis(unsigned pattern,unsigned w,unsigned h) const {
+      double minimum=1,maximum=0,sum=0,square=0;
+      for(unsigned y=0;y<h;++y)for(unsigned x=0;x<w;++x){const double t=raw(pattern,x,y,w,h);minimum=std::min(minimum,t);maximum=std::max(maximum,t);}
+      for(unsigned y=0;y<h;++y)for(unsigned x=0;x<w;++x){const double d=raw(pattern,x,y,w,h)-minimum;sum+=d;square+=d*d;}
+      return {limit()/maximum,minimum+.5*square/sum};
+    }
+    double limit() const {
+      const double c=(double(height)/2160.*100.)/double(width);
+      return std::min({std::min(1.5,.04/c),std::min(2.5,.04/c),.01/c})/.05;
+    }
+    static bool close(double actual,double expected){
+      return std::isfinite(actual) && std::abs(actual-expected)<=1e-5*std::max(1.,std::abs(expected));
+    }
+    std::map<std::array<unsigned,3>,std::array<double,2>> bases;
+    const std::array<double,2> &expected_basis(unsigned pattern,unsigned w,unsigned h){
+      const std::array<unsigned,3> key{pattern,w,h};
+      auto found=bases.find(key);
+      if(found==bases.end())found=bases.emplace(key,basis(pattern,w,h)).first;
+      return found->second;
     }
     void set_mode(cadence next,unsigned role=1){mode=next;single_role=role;phase_present=0;}
     void draw_auxiliary_scene(){
@@ -134,16 +163,16 @@ namespace {
     }
     bool current(unsigned role){
       const auto &m=member(role);
-      return capture_ready && captured_render==observed.renders &&
+      return capture_ready &&
         captured.source_resource.handle==reinterpret_cast<std::uint64_t>(m.texture.p) &&
         captured.width==m.width && captured.height==m.height;
     }
-    bool full(){return drawn && current(drawn) && ready() && scalar("Sunshine_CameraStrengthBlend")==1.f;}
+    bool full(){return drawn && current(drawn) && ready() && blend()==1.f;}
     void require_basis(){
       require(drawn && current(drawn),"No actual current member for basis assertion");
-      const float t=center(member(drawn).pattern);
-      require(scalar("Sunshine_CameraDepthScale")==1.f/t && zero()[1]==t,
-        "Physical member inherited another member's H/t0 instead of its own exact raw basis");
+      const auto &expected=expected_basis(member(drawn).pattern,captured.active_width,captured.active_height);
+      require(close(gain(),expected[0]) && close(zero(),expected[1]),
+        "Physical member inherited another member's gain/zero instead of its own range and contrast midpoint");
     }
     void copy_pixel(ID3D12Resource *texture,unsigned x,unsigned y,unsigned slot,DXGI_FORMAT format){
       D3D12_TEXTURE_COPY_LOCATION from{},to{};
@@ -155,31 +184,31 @@ namespace {
       commands->CopyTextureRegion(&to,0,0,0,&from,&box);
     }
     void pixels(){
-      // Compact actual native readbacks each present, no fitted registration.
-      begin_commands();
-      transition(commands.p,exported.p,D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_SOURCE);
-      transition(commands.p,mono.p,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_COPY_SOURCE);
-      for(unsigned i=0;i<count;++i){
-        copy_pixel(exported.p,points[i].x,points[i].y,i*3,DXGI_FORMAT_R16G16B16A16_FLOAT);
-        copy_pixel(exported.p,width+points[i].x,points[i].y,i*3+1,DXGI_FORMAT_R16G16B16A16_FLOAT);
-        copy_pixel(mono.p,points[i].x,points[i].y,i*3+2,DXGI_FORMAT_R16G16B16A16_FLOAT);
-      }
-      transition(commands.p,mono.p,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_COPY_DEST);
-      transition(commands.p,exported.p,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
-      // The flat-startup oracle also reads the original game allocation when
-      // the selector correctly rejects its copy. A configured draw alone is
-      // not evidence that the real depth image contains the intended .5.
+      // Compact actual native readbacks each present, no fitted registration:
+      // this Present's exported SBS and the depth its render consumed.
       const bool direct_flat=!capture_ready && drawn && member(drawn).pattern==19;
       auto *depth_resource=capture_ready ? reinterpret_cast<ID3D12Resource *>(captured.resource.handle) :
         direct_flat ? member(drawn).texture.p : nullptr;
-      if(depth_resource){
-        const auto before=direct_flat ? D3D12_RESOURCE_STATE_DEPTH_WRITE : D3D12_RESOURCE_STATE_COPY_DEST;
-        transition(commands.p,depth_resource,before,D3D12_RESOURCE_STATE_COPY_SOURCE);
-        copy_pixel(depth_resource,direct_flat ? member(drawn).width/2 : captured.x+captured.active_width/2,
-          direct_flat ? member(drawn).height/2 : captured.y+captured.active_height/2,slots-1,DXGI_FORMAT_R32_TYPELESS);
-        transition(commands.p,depth_resource,D3D12_RESOURCE_STATE_COPY_SOURCE,before);
-      }
-      submit();
+      game3d.read_exported([&](ID3D12Resource *sbs){
+        begin_commands();
+        transition(commands.p,sbs,D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_COPY_SOURCE);
+        for(unsigned i=0;i<count;++i){
+          copy_pixel(sbs,points[i].x,points[i].y,i*2,DXGI_FORMAT_R16G16B16A16_FLOAT);
+          copy_pixel(sbs,width+points[i].x,points[i].y,i*2+1,DXGI_FORMAT_R16G16B16A16_FLOAT);
+        }
+        transition(commands.p,sbs,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_COMMON);
+        // The flat-startup oracle also reads the original game allocation when
+        // the selector correctly rejects its copy. A configured draw alone is
+        // not evidence that the real depth image contains the intended .5.
+        if(depth_resource){
+          const auto before=direct_flat ? D3D12_RESOURCE_STATE_DEPTH_WRITE : D3D12_RESOURCE_STATE_COPY_DEST;
+          transition(commands.p,depth_resource,before,D3D12_RESOURCE_STATE_COPY_SOURCE);
+          copy_pixel(depth_resource,direct_flat ? member(drawn).width/2 : captured.x+captured.active_width/2,
+            direct_flat ? member(drawn).height/2 : captured.y+captured.active_height/2,slots-1,DXGI_FORMAT_R32_TYPELESS);
+          transition(commands.p,depth_resource,D3D12_RESOURCE_STATE_COPY_SOURCE,before);
+        }
+        submit();
+      });
       void *mapped=nullptr;const D3D12_RANGE range{0,size_t(slots)*512};
       checked(pixel_readback->Map(0,&range,&mapped),"Map current native pixel probes");
       const auto *bytes=static_cast<const std::uint8_t *>(mapped);
@@ -190,9 +219,8 @@ namespace {
         for(unsigned c=0;c<4;++c){
           std::uint16_t code=0;std::memcpy(&code,source_bytes.data()+base+c*2,2);
           const float expected=c==1 ? half_float(marker) : half_float(code);
-          const float left=value(i*3,c),right=value(i*3+1,c),native=value(i*3+2,c);
-          require(std::isfinite(left)&&std::isfinite(right)&&std::isfinite(native),"Current native stereo/mono has nonfinite RGBA");
-          require(native==expected,"Physical mono is stale or differs from the current source");
+          const float left=value(i*2,c),right=value(i*2+1,c);
+          require(std::isfinite(left)&&std::isfinite(right),"Current native stereo/mono has nonfinite RGBA");
           if(c==1)require(std::abs(left-expected)<.001f && std::abs(right-expected)<.001f,"SBS carries a stale/wrong current-frame color marker");
           if(!ready())require(std::abs(left-expected)<.003f && std::abs(right-expected)<.003f,"Unavailable depth did not show actual current mono color");
           if(c==0 || c==2)eye_difference=std::max(eye_difference,std::abs(left-right));
@@ -206,20 +234,23 @@ namespace {
       if(drawn && full() && eye_difference>.002f)++stereo_observed[drawn-1];
     }
     void tick(const char *phase){
-      update_marker();step();
-      require(captured_render==observed.renders,"Missing actual technique observation");
+      update_marker();step();game3d.no_effects();
+      latest=game3d.last_render();
+      require(latest.sequence>rendered_sequence,"A Present had no native Game 3D render to observe");
+      rendered_sequence=latest.sequence;
+      captured=latest.depth;capture_ready=captured.ready;
       require(!capture_ready || (drawn && current(drawn)),"Wrong/old physical depth admitted for this rendered present");
       require(!ready() || capture_ready,"Camera ready without current legally preserved depth");
-      require(drawn || (!capture_ready && !ready() && scalar("Sunshine_CameraStrengthBlend")==0.f),"True color-only gap reused prior depth or stereo");
+      require(drawn || (!capture_ready && !ready() && blend()==0.f),"True color-only gap reused prior depth or stereo");
       if(capture_ready){
         lifetimes[drawn-1]=captured.source_id;layouts[drawn-1]=captured.layout_epoch;
         crops[drawn-1]={captured.x,captured.y,captured.active_width,captured.active_height};
       }
       pixels();
-      trace<<phase<<','<<GetTickCount64()<<','<<observed.renders<<','<<drawn<<','
+      trace<<phase<<','<<GetTickCount64()<<','<<latest.sequence<<','<<drawn<<','
         <<(drawn?reinterpret_cast<std::uint64_t>(member(drawn).texture.p):0)<<','<<captured.source_resource.handle<<','
         <<captured.source_id<<','<<captured.layout_epoch<<','<<captured.frame_index<<','<<capture_ready<<','<<ready()<<','
-        <<scalar("Sunshine_CameraDepthScale")<<','<<zero()[1]<<','<<scalar("Sunshine_CameraStrengthBlend")<<','
+        <<gain()<<','<<zero()<<','<<blend()<<','
         <<marker<<','<<eye_difference<<','<<(drawn?center(member(drawn).pattern):0.f)<<','
         <<captured.x<<','<<captured.y<<','<<captured.active_width<<','<<captured.active_height<<','<<raster_mask<<'\n';
       require(trace.good(),"Cannot record actual-frame rotation trajectory");
@@ -290,7 +321,7 @@ namespace {
         for(unsigned other=0;other<role;++other)
           require(lifetimes[role]!=lifetimes[other],"Fresh rotating resources share a lifetime identity");
       }
-      std::puts("PASS rotating startup: initial ABC without prior history, exact H8/H4/H16 bases,90 current-depth/current-color/full-stereo frames");
+      std::puts("PASS rotating startup: initial ABC without prior history, each member's own range/midpoint basis, 90 current-depth/current-color/full-stereo frames");
     }
     void check_crowded_startup(){
       // Every allocation is new. Older-lifetime unrelated buffers render on
@@ -311,7 +342,7 @@ namespace {
         for(unsigned other=0;other<role;++other)
           require(lifetimes[role]!=lifetimes[other],"Crowded rotating resources share a lifetime identity");
       }
-      std::puts("PASS crowded startup:12 older flat active buffers, fresh ABC H8/H4/H16, transfer-only offturn writes,90 current-color/current-depth/full-stereo frames");
+      std::puts("PASS crowded startup: 12 older flat active buffers, fresh ABC member bases, transfer-only offturn writes, 90 current-color/current-depth/full-stereo frames");
     }
     void check_flat_startup(){
       // A has rendered the same .5 plane since the first game draw, before
@@ -321,7 +352,7 @@ namespace {
       const auto initial_started=GetTickCount64();unsigned flat_frames=0;
       do{
         tick("flat-startup-mono");++flat_frames;
-        require(!ready() && scalar("Sunshine_CameraStrengthBlend")==0.f,
+        require(!ready() && blend()==0.f,
           "Flat interior depth initialized a camera instead of remaining current mono");
       }while(GetTickCount64()-initial_started<2600);
       std::printf("PASS initial flat depth: %u actual .5 draws over%llu ms, current mono throughout\n",flat_frames,
@@ -331,17 +362,21 @@ namespace {
       const auto useful_lifetime=lifetimes[0];
       require(scene->texture.p==original && useful_lifetime && stereo_observed[0]>0,
         "Flat-to-useful phase did not reach actual stereo on its original live allocation");
-      // A previously valid target may remain usable until its1500 ms expiry.
-      // Rejected flat samples must never move H/t0, even during that interval.
+      // A previously valid target may remain usable until its 1500 ms expiry.
+      // Rejected flat samples must never move the gain or zero, even during
+      // that interval: a ready render keeps the useful basis and the
+      // controller holds its gain once the render is mono.
+      const auto useful=expected_basis(14,width,height);
       scene->pattern=19;
       const auto flat_return_started=GetTickCount64();unsigned expired_mono=0;
       do{
         tick("useful-to-flat-hold");
-        require(scalar("Sunshine_CameraDepthScale")==8.f && zero()[1]==.125f,
-          "Rejected flat samples changed an established useful source's H/t0");
+        if(ready())require(close(gain(),useful[0]) && close(zero(),useful[1]),
+          "Rejected flat samples changed an established useful source's gain/zero");
+        else require(close(game3d.automatic().scale,useful[0]),"Rejected flat samples changed the held gain");
         if(current(1))require(captured.source_id==useful_lifetime,"Same live flat source changed lifetime identity");
         if(GetTickCount64()-flat_return_started>=1500){
-          require(!ready() && scalar("Sunshine_CameraStrengthBlend")==0.f,
+          require(!ready() && blend()==0.f,
             "Flat-only evidence kept stale ready depth beyond target expiry");
           ++expired_mono;
         }
@@ -351,7 +386,7 @@ namespace {
       warm("flat-return-useful-retained-reference");stable("flat-return-useful-sustained",30);
       require(scene->texture.p==original && lifetimes[0]==useful_lifetime && stereo_observed[0]>0,
         "Useful return changed lifetime or never restored actual current stereo");
-      std::puts("PASS flat content admission: no H2 startup, fresh H8/t0.125 on useful depth, held basis through later flat rejection and same-source stereo recovery");
+      std::puts("PASS flat content admission: no flat startup, fresh range/midpoint basis on useful depth, held basis through later flat rejection and same-source stereo recovery");
     }
     void check_moving_startup(){
       const auto started=GetTickCount64();unsigned consecutive=0,changes=0,previous=scene->pattern;
@@ -359,8 +394,10 @@ namespace {
         tick("moving-center-startup");
         if(scene->pattern!=previous){++changes;previous=scene->pattern;}
         if(full()){
-          const float H=scalar("Sunshine_CameraDepthScale"),t0=zero()[1];
-          require(std::isfinite(H) && H>=4.f && H<=16.f && std::isfinite(t0) && t0>=.0625f && t0<=.25f,
+          // Every moving pattern keeps the nearest band at .25: gain L/.25,
+          // and the zero stays within the drawn raw range.
+          const float t0=zero();
+          require(close(gain(),limit()/.25) && std::isfinite(t0) && t0>=.0625f && t0<=.25f,
             "Moving-source camera escaped the independently known raw range");
           ++consecutive;
         }else consecutive=0;
@@ -403,7 +440,7 @@ namespace {
       std::puts("PASS layout: stable captured partial view ignores unrelated auxiliary activity, real crop change starts a new basis");
     }
     void finish(){
-      observed.capture=false;render_tracked_depth={};reshade::unregister_event<reshade::addon_event::reshade_render_technique>(observe_rotation);
+      render_tracked_depth={};
     }
     void run(const std::string &test_case){
       create_pipeline();normal=false;
@@ -428,16 +465,11 @@ namespace {
       require(observed.runtime && observed.renders && !observed.inject,"Actual rotation fixture did not initialize");
       check_unified_addon();
       const auto module=GetModuleHandleW(L"SunshineSBSTest.addon64");
-      query=reinterpret_cast<query_t>(GetProcAddress(module,"SunshineDepthTestFrame"));
-      recalibrate=reinterpret_cast<action_t>(GetProcAddress(module,"SunshineGame3DTestRecalibrate"));
       select_manual=reinterpret_cast<select_t>(GetProcAddress(module,"SunshineDepthTestSelectManual"));
       manual_state=reinterpret_cast<state_t>(GetProcAddress(module,"SunshineDepthTestManualState"));
-      require(query && recalibrate && select_manual && manual_state,"Existing passive-frame/UI-action adapters required");
-      reshade::register_event<reshade::addon_event::reshade_render_technique>(observe_rotation);
-      set_int("Depth_Map_View",0);set_float("Depth_Adjustment",100);set_float("Sharpen_Power",0);
-      observed.runtime->set_uniform_value_bool(uniform("Show_Infill_Mask"),false);
-      find_texture("DoubleTex",exported,width*2,DXGI_FORMAT_R16G16B16A16_FLOAT);
-      observed.capture=true; // Existing hook copies THIS present's physical mono.
+      require(select_manual && manual_state,"Existing UI-action adapters required");
+      game3d.start();game3d.attach_export();game3d.set_strength(100);
+      rendered_sequence=game3d.await_render([&]{update_marker();step();});
       for(unsigned band=0;band<4;++band)for(unsigned i=0;i<8;++i)points[band*8+i]={(2*band+1)*width/8+i-4,height/4};
       buffer(pixel_readback,UINT64(slots)*512,D3D12_HEAP_TYPE_READBACK);
       if(!test_case.empty()){
@@ -502,7 +534,7 @@ namespace {
       set_mode(cadence::abc);warm("gap-current-depth-return");stable("gap-current-depth-return",30);
 
       for(unsigned r=1;r<=3;++r)member(r).pattern=14;
-      require(recalibrate(observed.runtime),"Cannot establish fresh equal-basis controls");set_mode(cadence::abc);
+      require(game3d.recalibrate(),"Cannot establish fresh equal-basis controls");set_mode(cadence::abc);
       warm("same-basis-warmup");stable("same-basis-steady",30);
       drift=true;set_mode(cadence::abc);stable("same-basis-slow-center",120,false);drift=false;
       // H/t0 and actual eye-difference traces support continuity review; no tiny
@@ -516,13 +548,12 @@ namespace {
 
 int main(int argc,char **argv){
   std::setvbuf(stdout,nullptr,_IONBF,0);
-  if(argc!=5 && argc!=6){std::fputs("usage: depth_alternating_runtime <official.dll> <Shaders> <test.addon64> <fresh-output> [--overlap|--interrupted-startup|--moving-startup|--rotating-startup|--crowded-rotating-startup|--flat-startup|--layout]\n",stderr);return 2;}
+  if(argc!=5 && argc!=6){std::fputs("usage: depth_alternating_runtime <official.dll> <frozenShaders> <test.addon64> <fresh-output> [--overlap|--interrupted-startup|--moving-startup|--rotating-startup|--crowded-rotating-startup|--flat-startup|--layout]\n",stderr);return 2;}
   std::thread([]{Sleep(360000);std::fputs("FAIL rotation watchdog\n",stderr);TerminateProcess(GetCurrentProcess(),124);}).detach();
   try{
     const std::string test_case=argc==6 ? argv[5] : "";
     require(test_case.empty() || test_case=="--overlap" || test_case=="--interrupted-startup" || test_case=="--moving-startup" || test_case=="--rotating-startup" || test_case=="--crowded-rotating-startup" || test_case=="--flat-startup" || test_case=="--layout","Unknown isolated rotation case");
-    require(sunshine_camera_fixture::flag("SUNSHINE_DEPTH_BIND_SWITCH_TEST") && sunshine_camera_fixture::flag("SUNSHINE_GAME3D_AUTOMATIC") &&
-      sunshine_camera_fixture::flag("SUNSHINE_GAME3D_AUTOMATIC_ACTIONS_TEST"),"Explicit preserve2 and Automatic test-action flags required");
+    select_native_boot(true);
     width=3840;height=2160;require(!fs::exists(fs::absolute(argv[4])),"Fresh rotation output required");
     rotation_fixture f;f.runtime_directory=fs::absolute(argv[4]);
     f.initialize(fs::absolute(argv[1]),fs::absolute(argv[2]),f.runtime_directory,2,0,fs::absolute(argv[3]));f.run(test_case);return 0;

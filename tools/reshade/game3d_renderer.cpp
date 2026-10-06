@@ -977,13 +977,14 @@ namespace sunshine_game3d {
         const alpha_auto_source &observation, api::resource_view paired_color, api::resource_view depth,
         uint32_t bits, uint32_t accepted, uint32_t flags, uint32_t per_frame) {
       std::array<api::resource_view, 15> views{};
-      // A HUD-less image is compared with the color of the frame it belongs to:
-      // its batch's tagged Backbuffer or a retained Present. Detection then also
-      // reads that color's alpha for the present-alpha candidate; eye rendering
-      // stays current.
+      // A HUD-less image is compared with the color of the frame it belongs to
+      // (t0): its batch's tagged Backbuffer or a retained Present; eye
+      // rendering stays current.
       views[0] = paired_color.handle ? paired_color : textures[source].srv;
-      // The presented color (t6): the tiles pass compares the offscreen UI
-      // layer with it (H1 d), the evidence passes measure it.
+      // The presented color (t6): its alpha is the current-alpha candidate
+      // (tiles and mask passes), the one-way test reads it beside the pair
+      // (A2), the tiles pass compares the offscreen UI layer with it (H1 d)
+      // and the evidence passes measure it.
       views[6] = textures[source].srv;
       // Candidate layout 2: the offscreen UI layer in its own slot (t7).
       views[7] = input.layer;
@@ -1073,14 +1074,17 @@ namespace sunshine_game3d {
       // CPU and writes decision texels 5 and 6 after the decision and mask;
       // without an acting-capable claim in the latest sample or a held
       // verdict nothing runs (scene_guard::state::measure; a proven layer that
-      // is the offer's pre-UI image always measures). The cells pass reads
+      // is the offer's pre-UI image always measures), and neither does it over
+      // depth that is not this frame's, which is no evidence (the sample stays
+      // not actionable, as the evidence sum would read it invalid). The cells pass reads
       // the pre-UI scene image the b2 constants name: the HUD-less image
       // (t14) when offered, else the offscreen UI layer's colour (t7), both
       // still bound from the detection passes above, beside the presented
       // color (t6).
       const bool proven_image = scene_layer_proven && ui_selection::pre_ui_image_of(bits) == ui_detection::pre_ui_image::layer;
       detection_pending_actionable = false;
-      if (scene_evidence_supported() && guard.measure(observation.now_ms, proven_image)) {
+      if (scene_evidence_supported() && !(per_frame & ui_detection::per_frame_depth_not_current) &&
+          guard.measure(observation.now_ms, proven_image)) {
         namespace scene = ui_detection::scene;
         detection_pending_actionable = true;
         views[1] = depth;

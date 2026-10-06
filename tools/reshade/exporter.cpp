@@ -16,6 +16,7 @@
 #include "game3d_ui_counters.h"
 #include "game3d_ui_selection.h"
 #include "game3d_debug_dump.h"
+#include "game3d_test_render.h"
 #include "diagnostic_log_gate.h"
 #include "streamline_camera_probe.h"
 #include "streamline_depth_capture.h"
@@ -837,6 +838,12 @@ namespace {
     std::string diagnostic_ui_source;
     std::string diagnostic_ui_capture_attempt;
     bool diagnostic_armed = false;
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+    // SunshineGame3DTestLastRender: this Present's prepared depth and the
+    // last native render's inputs.
+    sunshine_depth::frame_depth test_depth;
+    sunshine_game3d::test::last_render test_render;
+#endif
     api::effect_texture_variable texture {};
     std::string effect_name;
     api::effect_technique game_technique {}, native_technique {};
@@ -1006,6 +1013,16 @@ namespace {
       return found != runtimes_.end() && found->second.addon_native;
     }
 
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+    bool test_last_render(api::effect_runtime *runtime, sunshine_game3d::test::last_render &out) {
+      std::lock_guard<std::mutex> lock(mutex_);
+      const auto found = runtimes_.find(runtime);
+      if (found == runtimes_.end()) return false;
+      out = found->second.test_render;
+      return true;
+    }
+#endif
+
     void finish_present_timing(api::effect_runtime *runtime, const std::array<LARGE_INTEGER, 5> &marks, unsigned count) {
       if (!count) return;
       LARGE_INTEGER end{}, frequency{};
@@ -1032,7 +1049,7 @@ namespace {
         if (proof.renderer) proof.renderer->take_gpu_timing(gpu);
         using stage = sunshine_game3d::gpu_timing;
         std::snprintf(message, sizeof(message),
-          "Sunshine Game 3D timing: presents=%llu cpu_ms={mean=%.3f max=%.3f} cpu_worst_ms={setup=%.3f depth=%.3f ui=%.3f render=%.3f export=%.3f} gpu_frames=%u gpu_ms mean/max={total=%.3f/%.3f inputs=%.3f/%.3f source=%.3f/%.3f detection=%.3f/%.3f linearize=%.3f/%.3f candidate=%.3f/%.3f vertical=%.3f/%.3f horizontal=%.3f/%.3f eyes=%.3f/%.3f pack=%.3f/%.3f} gpu_profile=%s dropped_fence_pending=%u dropped_unresolved=%u incomplete=%u",
+          "Sunshine Game 3D timing: presents=%llu cpu_ms={mean=%.3f max=%.3f} cpu_worst_ms={setup=%.3f depth=%.3f ui=%.3f render=%.3f export=%.3f} gpu_frames=%u gpu_ms mean/max={total=%.3f/%.3f inputs=%.3f/%.3f source=%.3f/%.3f detection=%.3f/%.3f linearize=%.3f/%.3f candidate=%.3f/%.3f vertical=%.3f/%.3f horizontal=%.3f/%.3f eyes=%.3f/%.3f pack=%.3f/%.3f} gpu_profile=%s dropped_fence_pending=%u dropped_unresolved=%u incomplete=%u layer_fence_waits=%llu",
           static_cast<unsigned long long>(timing.presents), timing.cpu_sum_ms / double(timing.presents), timing.cpu_max_ms,
           timing.worst[0], timing.worst[1], timing.worst[2], timing.worst[3], timing.worst[4], gpu.frames,
           gpu.mean_ms[stage::total], gpu.max_ms[stage::total], gpu.mean_ms[stage::inputs], gpu.max_ms[stage::inputs],
@@ -1040,7 +1057,8 @@ namespace {
           gpu.mean_ms[stage::linearize], gpu.max_ms[stage::linearize], gpu.mean_ms[stage::candidate], gpu.max_ms[stage::candidate],
           gpu.mean_ms[stage::vertical], gpu.max_ms[stage::vertical], gpu.mean_ms[stage::horizontal], gpu.max_ms[stage::horizontal],
           gpu.mean_ms[stage::eyes], gpu.max_ms[stage::eyes], gpu.mean_ms[stage::pack], gpu.max_ms[stage::pack],
-          sunshine_game3d::name(gpu.state), gpu.dropped_fence_pending, gpu.dropped_unresolved, gpu.incomplete);
+          sunshine_game3d::name(gpu.state), gpu.dropped_fence_pending, gpu.dropped_unresolved, gpu.incomplete,
+          static_cast<unsigned long long>(sunshine_game3d::ui_layer::take_wait_count()));
         timing = {};
         timing.next_log = now + 10000;
       }
@@ -1209,6 +1227,13 @@ namespace {
         input.diagnostic_armed = proof.diagnostic_armed;
         input.depth_identity = depth_identity(proof);
         rendered = proof.frame.prepared && renderer->render(commands, input, true);
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+        ++proof.test_render.sequence;
+        proof.test_render.rendered = rendered;
+        proof.test_render.depth = proof.test_depth;
+        proof.test_render.parameters = p;
+        proof.test_depth = {}; // Never describe a later Present without its own preparation.
+#endif
         ui_input.complete(*renderer, rendered);
         source_alpha = ui_input.status;
         proof.frame.source_alpha = source_alpha;
@@ -1493,6 +1518,9 @@ namespace {
       proof.borrowed_depth = proof.addon_native && depth.ready ? depth.shader_resource : api::resource_view{};
       proof.diagnostic_armed = proof.addon_native && debug_dump_.requested();
       proof.diagnostic_depth = proof.diagnostic_armed ? depth : sunshine_depth::frame_depth{};
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+      proof.test_depth = depth;
+#endif
       {
         const sunshine_game3d::slow_step step("depth input observation");
         sunshine_game3d::depth_input::observe(runtime, commands, effects_rtv, depth);
@@ -2528,6 +2556,7 @@ namespace {
     // Observer metadata releases its source leases while capture/UI owners are
     // still alive; capture keeps any leases required by outstanding GPU work.
     addon_session().end([&] {
+      sunshine_streamline::native_observer::set_submission_listener(nullptr);
       sunshine_game3d::ui_layer::unregister_events();
       sunshine_game3d::depth_input::shutdown_observers();
       sunshine_depth::shutdown();
@@ -2698,6 +2727,12 @@ extern "C" {
   __declspec(dllexport) void SunshineSbsTestSetForeground(HWND window) {
     test_foreground_window.store(window, std::memory_order_release);
   }
+
+  // What the last native Game 3D render consumed (game3d_test_render.h).
+  __declspec(dllexport) BOOL SunshineGame3DTestLastRender(api::effect_runtime *runtime,
+      sunshine_game3d::test::last_render *out) {
+    return publisher && runtime && out && publisher->test_last_render(runtime, *out) ? TRUE : FALSE;
+  }
 #else
   __declspec(dllexport) const char *NAME = "Sunshine 3D";
   __declspec(dllexport) const char *DESCRIPTION = "Automatically selects and calibrates game depth for Sunshine stereo. Includes SDR/HDR sharing and stereo overlay controls.";
@@ -2733,6 +2768,9 @@ extern "C" {
       reshade::register_event<reshade::addon_event::reshade_open_overlay>(sunshine_addon_lifetime::guarded<on_overlay>);
       reshade::register_event<reshade::addon_event::reshade_overlay>(sunshine_addon_lifetime::guarded<on_draw_overlay>);
       sunshine_game3d::ui_layer::register_events();
+      // The layer's cross-queue fence is signalled right after each native
+      // submission that ran a copy away from the presenting queue.
+      sunshine_streamline::native_observer::set_submission_listener(sunshine_game3d::ui_layer::observed_submission);
       return true;
     } catch (...) {
       teardown_addon(addon, reshade);

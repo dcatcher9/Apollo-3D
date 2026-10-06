@@ -1718,12 +1718,18 @@ namespace {
       // of the previous real frame is missing too) has no decision of its own
       // and reuses that frame's selective tag decision once (T1); the next
       // ones have no mask.
+      // The malformed rows lie above the UI rectangle and cover more than 1%
+      // of the frame at any fixture size (rows * 100 > height); a fixed three
+      // rows did so only below 300 rows.
+      const unsigned malformed_rows = std::max(3u, gpu.height / 100 + 1);
+      require(malformed_rows * 100u > gpu.height && malformed_rows < gpu.height / 4,
+        "The V1 fixture cannot place more than 1% malformed rows above its UI");
       source.retained = source.dedicated_mask = false;
       bool first = true;
       for (const float invalid : {std::numeric_limits<float>::quiet_NaN(),
           std::numeric_limits<float>::infinity(), -1.f, 2.f}) {
         auto malformed = masks[1];
-        std::fill_n(malformed.begin(), 3 * gpu.width, invalid);
+        std::fill_n(malformed.begin(), size_t(malformed_rows) * gpu.width, invalid);
         gpu.pattern(malformed, true);
         source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
         require(exact(gpu.render(true, 1, false, false, false, {}, {}, {}, nullptr, &source), first ? on[1] : off[1]),
@@ -2158,6 +2164,64 @@ namespace {
     report << "automatic-hudless D3D11 final_alpha_opaque=1 paired_HUD_exact=1 scene_wide_motion_rejected=1 identical_pair_empty=1 same_frame_bad_pair_rejection=1 flattened_explicit_fallback=1 generated_present_hold=1 t1_chain_end=1 late_retained_pair=1 tagged_backbuffer_pair=1 full_frame_ui=1 t1_grace_once=1 hudless_earned_inexact=1 accepted_alpha=1 declared_one_way_revocation=1 one_way_revocation=1 current_RGB_preserved=1 manual_off_wins=1 no_review=1\n";
     std::puts("PASS D3D11 HUDless auto: exact HUD difference, scene-wide motion/identical rejection, flattened candidate fallback, generated Presents showing the last real decision without a cap and no mask once the chain ended, late pairing with retained color, exact tagged-Backbuffer pairing, full-frame UI flattening, the T1 grace reusing a real frame's decision once for a missing or invalid accepted source, acceptance earned from one selective sample (an inexact HUD-less pair, UIAlpha) before anything decides, one-way revocation of a full accepted UIAlpha and Backbuffer over the lit unchanged scene, and manual Off without review");
   }
+  // Current alpha is the presented frame's own (t6). A HUD-less capture that
+  // completes a Present after its own frame (another queue) pairs with the
+  // retained colour at t0, but an accepted current alpha that moves between
+  // frames still decides the mask from the presented frame. Until the 10-05
+  // review the current candidate read t0's alpha, so a late pair pinned
+  // moving HUD elements at their old position and warped them at the new one.
+  void verify_current_alpha_is_presented(fixture &gpu, std::ostream &report) {
+    using namespace sunshine_game3d;
+    const auto pixels = size_t(gpu.width) * gpu.height;
+    const auto bpp = gpu.color == 2 ? 8u : 4u;
+    const auto region = [&](unsigned left) {
+      std::vector<float> alpha(pixels, 0.f);
+      for (unsigned y = gpu.height / 4; y < gpu.height / 2; ++y)
+        for (unsigned x = left; x < left + gpu.width / 8; ++x) alpha[size_t(y) * gpu.width + x] = 1.f;
+      return alpha;
+    };
+    const auto before = region(gpu.width / 8), after = region(gpu.width / 2 + gpu.width / 8);
+    // The HUD-less image: the scene without the marker.
+    gpu.pattern(std::vector<float>(pixels, 0.f), true);
+    auto scene = gpu.original;
+    D3D11_TEXTURE2D_DESC desc{}; gpu.source->GetDesc(&desc); desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SUBRESOURCE_DATA data{scene.data(), gpu.width * bpp, 0};
+    ComPtr<ID3D11Texture2D> texture; ComPtr<ID3D11ShaderResourceView> view;
+    checked(gpu.device->CreateTexture2D(&desc, &data, &texture), "late HUD-less texture");
+    checked(gpu.device->CreateShaderResourceView(texture.Get(), nullptr, &view), "late HUD-less view");
+    const api::resource_view hudless{reinterpret_cast<std::uint64_t>(view.Get())};
+    // An accepted current alpha (restored, deciding from the first frame).
+    alpha_auto_policy policy;
+    require(policy.restore(gpu.key(ui_selection::kind::current)).restored == 1, "The current-alpha key was not restored");
+    alpha_auto_source source;
+    source.session = &policy; source.now_ms = source.tick_ms = 1000;
+    source.epoch = 41; source.revision = 1; source.sequence = 1;
+    ui_detection_inputs inputs;
+    inputs.current_color = true;
+    ui_render_input ui;
+    ui.kind = ui_input_kind::current_color_alpha; ui.automatic = &source; ui.detection = &inputs;
+    const auto frame = [&](const std::vector<float> &alpha, std::uint32_t presents_ago, api::resource_view offered,
+        const char *label) {
+      gpu.pattern(alpha, true);
+      inputs.hudless = offered; inputs.hudless_presents_ago = presents_ago;
+      source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
+      gpu.renderer.begin_present();
+      gpu.render(true, 1, false, false, false, {}, {}, {}, nullptr, nullptr, nullptr, nullptr, &ui);
+      const auto selected = gpu.read(gpu.renderer.diagnostics().ui_source);
+      for (unsigned y = 0; y < gpu.height; ++y) for (unsigned x = 0; x < gpu.width; ++x) {
+        const auto value = selected.channel(x, y, 0);
+        require(std::isfinite(value) && (value > 0.f) == (alpha[size_t(y) * gpu.width + x] > 0.f),
+          std::string(label) + ": the current-alpha mask does not follow the presented frame");
+      }
+    };
+    frame(before, 0, {}, "current alpha without a HUD-less image");
+    frame(after, 1, hudless, "current alpha beside a late HUD-less pair paired with the retained colour");
+    require(gpu.renderer.consumed_detection().candidates & ui_detection::candidate::hudless,
+      "The late HUD-less image was not offered beside current alpha");
+    frame(before, 1, hudless, "current alpha moving back beside a late pair");
+    report << "current-alpha D3D11 presented_frame_alpha=1 late_pair_retained_alpha_ignored=1\n";
+  }
+
   // V1 and S1 for the offscreen UI layer (docs/reshade-sbs.md, UI decision
   // framework). Stellar Blade draws its SDR scene image into the cleared
   // target that holds its UI layer in HDR: color everywhere, alpha nowhere.
@@ -2663,12 +2727,13 @@ namespace {
     }
     require(held_frames == 5, "A hold did not last exactly hold_ms after its last valid sample: " + std::to_string(held_frames));
     never_flat(logo_color, 3, "flat depth without edge cells");
-    // (d) Depth that is not this frame's gives no evidence and disables H1.
+    // (d) Depth that is not this frame's measures no evidence, so it never
+    // enters a hold (a held verdict would still act on it).
     gpu.depth_view = silhouette;
     gpu.depth_current = false;
     const auto stale = never_flat(logo_color, 4, "reused depth");
-    require(stale.sample.evidence.scene.ran && !stale.sample.evidence.scene.valid &&
-        stale.sample.evidence.scene.n >= ui_detection::scene::min_edges, "Reused depth gave valid hidden-scene evidence");
+    require(!stale.sample.evidence.scene.ran && !stale.sample.evidence.scene.valid,
+      "Reused depth measured hidden-scene evidence");
     gpu.depth_current = true;
     require(frames_to_flat(logo_color, 4, "current depth again") == 3, "Current depth did not re-enter after two hidden samples");
     // (e) Only an identity change (epoch or viewport) clears the guard. An
@@ -3410,6 +3475,7 @@ int main(int argc, char **argv) {
     verify_retained_fg_alpha(gpu, report, directory / "retained-alpha-dump");
     verify_automatic_source_alpha(gpu, report);
     verify_automatic_hudless(gpu, report);
+    verify_current_alpha_is_presented(gpu, report);
     verify_layer_detection_dump(gpu, report, directory / "layer-detection-dump");
     verify_layer_validity(gpu, report);
     verify_hidden_scene(gpu, report);

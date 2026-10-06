@@ -8,10 +8,25 @@
 // capture: the depth, constants and SBS consumed by one native render.
 // Nothing here injects depth, readiness, pixels or completion.
 #include "game3d_controls_model.h"
+#include "game3d_test_render.h"
 #include "../../src/game3d_debug_protocol.h"
 #include <nlohmann/json.hpp>
 
 namespace {
+  // Call before initialize(). A native fixture boots the official runtime with
+  // the frozen SunshineGame3D effect of its supplied shader directory and the
+  // test add-on, then removes the effect (native_game3d_observer::start). It
+  // selects that boot effect, its compile gate and the test add-on itself, as
+  // reshade_game3d_native_provider_runtime_test does, so no caller environment
+  // is required; preserve2 also selects DepthCopyBeforeClears=2.
+  inline void select_native_boot(bool preserve2 = false) {
+    require(_putenv_s("SUNSHINE_DEPTH3D_EFFECT", "SunshineGame3D") == 0 &&
+      _putenv_s("SUNSHINE_GAME3D_AUTOMATIC", "1") == 0 &&
+      _putenv_s("SUNSHINE_GAME3D_AUTOMATIC_ACTIONS_TEST", "1") == 0 &&
+      (!preserve2 || _putenv_s("SUNSHINE_DEPTH_BIND_SWITCH_TEST", "1") == 0),
+      "Could not select the native fixture's boot effect and test add-on");
+  }
+
   struct automatic_status {
     unsigned flags{}, basis{}, scale_state{};
     float scale{};
@@ -29,7 +44,7 @@ namespace {
     std::string provider;
     float depth_scale{}, strength_blend{};
     int coordinate_basis{};
-    std::array<float, 2> convergence{};
+    std::array<float, 2> convergence{}, projection{};
     std::array<float, 4> depth_rect{};
     // Full consumed R32F allocation when depth was ready; packed SBS on request.
     std::vector<std::uint8_t> raw_depth, sbs;
@@ -65,6 +80,7 @@ namespace {
       edit_float_ = reinterpret_cast<edit_float_t>(GetProcAddress(module, "SunshineGame3DTestEditFloat"));
       recalibrate_ = reinterpret_cast<action_t>(GetProcAddress(module, "SunshineGame3DTestRecalibrate"));
       set_foreground_ = reinterpret_cast<set_foreground_t>(GetProcAddress(module, "SunshineSbsTestSetForeground"));
+      last_render_ = reinterpret_cast<last_render_t>(GetProcAddress(module, "SunshineGame3DTestLastRender"));
       require(module && query_automatic_ && query_scale_ && edit_float_ && recalibrate_ && set_foreground_,
         "Native Game 3D fixture requires the test add-on's passive UI queries, controls and foreground observer");
       const auto effects = fixture_.runtime_directory / "effects";
@@ -119,6 +135,26 @@ namespace {
 
     bool recalibrate() { return recalibrate_(observed.runtime) != FALSE; }
 
+    // What the last native render consumed: its depth identity, allocation
+    // and readiness, and its constants. Per Present, without a dump; the
+    // caller compares sequence to know a render followed its Present.
+    sunshine_game3d::test::last_render last_render() const {
+      sunshine_game3d::test::last_render result;
+      require(last_render_ && last_render_(observed.runtime, &result), "Native Game 3D last-render observation failed");
+      return result;
+    }
+
+    // Presents through the caller until native Game 3D has rendered: the game
+    // stays 2D while the renderer compiles its shaders on the thread pool.
+    // Returns the last render's sequence; every later Present renders.
+    std::uint64_t await_render(const std::function<void()> &present) const {
+      const auto until = GetTickCount64() + 30000;
+      auto render = last_render();
+      while (!render.sequence && GetTickCount64() < until) { present(); render = last_render(); }
+      require(render.sequence != 0, "Native Game 3D never rendered; its shaders did not finish compiling");
+      return render.sequence;
+    }
+
     // Become the production streaming consumer. Every later native present
     // publishes its packed SBS to the shared export ring.
     void attach_export() {
@@ -132,6 +168,15 @@ namespace {
 
     // The newest completed publication, which belongs to the latest present.
     std::vector<std::uint8_t> exported() {
+      std::vector<std::uint8_t> pixels;
+      read_exported([&](ID3D12Resource *texture) { pixels = fixture_.read(texture, D3D12_RESOURCE_STATE_COMMON); });
+      return pixels;
+    }
+
+    // Claims the newest completed publication, which belongs to the latest
+    // present, and lends its shared texture (COMMON state) to read, for
+    // fixtures that copy only a few texels per Present.
+    void read_exported(const std::function<void(ID3D12Resource *)> &read) {
       namespace wire = reshade_bridge;
       require(export_state_ != nullptr, "Native export was read without a streaming consumer");
       const auto before = InterlockedCompareExchange(reinterpret_cast<volatile LONG *>(&export_state_->metadata_sequence), 0, 0);
@@ -167,10 +212,9 @@ namespace {
         checked(fixture_.game->OpenSharedHandle(reinterpret_cast<HANDLE>(metadata.ready_fence_handle), IID_PPV_ARGS(fence.put())), "Open native export fence");
         require(fence->GetCompletedValue() != UINT64_MAX && fence->GetCompletedValue() >= sequence, "Native export preceded GPU completion");
         checked(fixture_.game->OpenSharedHandle(reinterpret_cast<HANDLE>(metadata.texture_handles[index]), IID_PPV_ARGS(texture.put())), "Open native export texture");
-        auto pixels = fixture_.read(texture.p, D3D12_RESOURCE_STATE_COMMON);
+        read(texture.p);
         release();
         export_sequence_ = sequence;
-        return pixels;
       } catch (...) {
         release();
         throw;
@@ -212,6 +256,7 @@ namespace {
       frame.depth_scale = parameters.at("depth_scale");
       frame.strength_blend = parameters.at("strength_blend");
       frame.convergence = {parameters.at("convergence").at(0), parameters.at("convergence").at(1)};
+      frame.projection = {parameters.at("projection").at(0), parameters.at("projection").at(1)};
       for (unsigned i = 0; i < 4; ++i) frame.depth_rect[i] = parameters.at("depth_rect").at(i);
       require((parameters.at("depth_ready").get<unsigned>() != 0) == frame.depth_ready, "Native constants disagree with the consumed depth");
       for (unsigned i = 0; i < response.texture_count; ++i) {
@@ -247,6 +292,7 @@ namespace {
     using edit_float_t = BOOL (*)(api::effect_runtime *, unsigned, float);
     using action_t = BOOL (*)(api::effect_runtime *);
     using set_foreground_t = void (*)(HWND);
+    using last_render_t = BOOL (*)(api::effect_runtime *, sunshine_game3d::test::last_render *);
 
     static std::uint64_t load(std::uint64_t &value) {
       return std::uint64_t(InterlockedCompareExchange64(reinterpret_cast<volatile LONG64 *>(&value), 0, 0));
@@ -263,6 +309,7 @@ namespace {
     edit_float_t edit_float_{};
     action_t recalibrate_{};
     set_foreground_t set_foreground_{};
+    last_render_t last_render_{};
     unsigned fx_renders_{};
     HANDLE mapping_{}, export_mapping_{};
     game3d_debug::shared_state_t *state_{};

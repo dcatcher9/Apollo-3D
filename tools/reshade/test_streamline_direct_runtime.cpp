@@ -1,36 +1,26 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Real UAV scene depth -> native middleware copy/submission -> projection
-// controller -> full Automatic HDR shader. Only immutable middleware metadata
-// is synthetic; no depth binding, readiness, sampler result or fence is injected.
+// controller -> native Game 3D HDR rendering with no installed FX. Only
+// immutable middleware metadata is synthetic; no depth binding, readiness,
+// sampler result or fence is injected.
 #include "test_raw_runtime_fixture.h"
+#include "test_game3d_native_observation.h"
 #include "depth_addon.h"
 #include "streamline_depth_provider.h"
 #include "native_resource_identity.h"
+#include <deque>
 
 namespace {
   using capture_t = std::uint64_t (*)(std::uint64_t, std::uint64_t, std::uint32_t,
     const sunshine_streamline::camera_data *, std::uint64_t, bool);
   using finish_capture_t = void (*)(std::uint64_t, bool);
   using provider_status_t = BOOL (*)(api::effect_runtime *, sunshine_streamline::provider::source_status *);
-  using frame_t = BOOL (*)(api::effect_runtime *, sunshine_depth::frame_depth *);
   using select_t = BOOL (*)(api::effect_runtime *, std::uint64_t);
   using action_t = BOOL (*)(api::effect_runtime *);
-  frame_t query_frame{};
-  sunshine_depth::frame_depth captured;
-  unsigned captured_render{};
   std::uint64_t game_native_command{};
-  bool captured_ready{};
   constexpr GUID streamline_v1_state_guid{0x694b3e1c,0x0e33,0x416f,{0xba,0x83,0xfe,0x24,0x8d,0xa1,0xe8,0x5d}};
   constexpr std::uint32_t chi_shader_read=(1u<<5)|(1u<<6), chi_present=1u<<18;
   void observe_reset(api::command_list *commands) { game_native_command = commands->get_native(); }
-  void observe_source(api::effect_runtime *runtime, api::effect_technique technique,
-      api::command_list *, api::resource_view, api::resource_view) {
-    char name[256] {}; runtime->get_technique_name(technique, name);
-    if (!named(name, technique_name)) return;
-    captured = {};
-    captured_ready = query_frame && query_frame(runtime, &captured) && captured.ready;
-    captured_render = observed.renders;
-  }
 
   struct direct_fixture : raw_runtime_fixture {
     struct uav_target {
@@ -72,9 +62,60 @@ namespace {
     unsigned rotation_index{};
     unsigned v1_capture_calls{}, v2_capture_calls{};
     float center_raw = .015625f;
-    // Capture-only variants intentionally vary the center during startup. The
-    // functional reference/matrix scenarios instead use an independent oracle.
-    float expected_reference = std::numeric_limits<float>::quiet_NaN();
+    // Each Present's native render, observed without FX (only the direct
+    // runtime's own run(); derived fixtures keep their own observers).
+    native_game3d_observer direct_native{*this};
+    sunshine_game3d::test::last_render latest;
+    sunshine_depth::frame_depth captured;
+    bool captured_ready{};
+    std::uint64_t rendered_sequence{};
+    // What each recent Present drew, to check the render a Dump 3D consumed.
+    struct drawn_frame { std::uint64_t frame{}, source{}; unsigned pattern{}; float center{}; };
+    std::deque<drawn_frame> drawn_frames;
+    bool ready() const { return latest.rendered && latest.parameters.depth_ready && latest.parameters.camera_ready; }
+    float gain() const { return latest.parameters.depth_scale; }
+    std::array<float,2> zero() const { return latest.parameters.convergence; }
+    float blend() const { return latest.parameters.strength_blend; }
+    // docs/reshade-sbs.md, raw-depth automation, on inverse distance
+    // q=(raw-A)/B of the current camera: gain L/Q from the full-image maximum
+    // Q and the zero at the contrast midpoint b+0.5*sum(d*d)/sum(d), b the
+    // minimum and d=q-b. expect_gain holds while Q is unchanged since the last
+    // fresh reference; expect_zero once the zero has settled at the current
+    // content's midpoint. Capture-only variants vary the center every frame.
+    bool expect_gain = true, expect_zero = false;
+    float raw_at(const uav_target &target, unsigned x, unsigned y, float center) const {
+      const float u = (float(x)+.5f)/float(target.width), v = (float(y)+.5f)/float(target.height);
+      const unsigned cx = std::min(31u, unsigned(u*32.f)), cy = std::min(17u, unsigned(v*18.f));
+      if (cx >= 14 && cx < 18 && cy >= 7 && cy < 11) return center;
+      return target.pattern == 2 ? .015625f : .0078125f*float((target.pattern ? 31-cx : cx)/8+1);
+    }
+    std::array<double,2> oracle(const uav_target &target, float center) const {
+      const double A = camera.projection.m[2][2], inverseB = 1./camera.projection.m[3][2];
+      double minimum = INFINITY, maximum = -INFINITY, sum = 0, square = 0;
+      for (unsigned y = 0; y < target.height; ++y) for (unsigned x = 0; x < target.width; ++x) {
+        const double q = (raw_at(target, x, y, center)-A)*inverseB;
+        minimum = std::min(minimum, q); maximum = std::max(maximum, q);
+      }
+      for (unsigned y = 0; y < target.height; ++y) for (unsigned x = 0; x < target.width; ++x) {
+        const double d = (raw_at(target, x, y, center)-A)*inverseB-minimum;
+        sum += d; square += d*d;
+      }
+      const double c = (double(height)/2160.*100.)/double(width);
+      const double limit = std::min({std::min(1.5, .04/c), std::min(2.5, .04/c), .01/c})/.05;
+      return {limit/maximum, minimum+.5*square/sum};
+    }
+    // The nearest q of the current draw: the bands' farthest raw or a nearer center.
+    double nearest_gain(float center) const {
+      const double A = camera.projection.m[2][2], inverseB = 1./camera.projection.m[3][2];
+      const double band = selected->pattern == 2 ? .015625 : .03125;
+      const double c = (double(height)/2160.*100.)/double(width);
+      const double limit = std::min({std::min(1.5, .04/c), std::min(2.5, .04/c), .01/c})/.05;
+      return limit/((std::max(band, double(center))-A)*inverseB);
+    }
+    static bool close(double actual, double expected) {
+      return std::isfinite(actual) && std::abs(actual-expected) <= 1e-5*std::max(1., std::abs(expected));
+    }
+    std::vector<std::uint8_t> check_exported_mono() { return check_current_mono(direct_native.exported()); }
 
     static std::uint64_t native(const uav_target &v) { return reinterpret_cast<std::uint64_t>(v.resource.p); }
     void initialize_camera() {
@@ -374,58 +415,89 @@ RWTexture2D<float> depth : register(u0);
         transition(commands.p,selected->resource.p,D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     }
     bool current() const {
-      return captured_ready && captured_render==observed.renders && captured.projection.supplied &&
+      return captured_ready && captured.projection.supplied &&
         captured.source_resource.handle==native(*selected) && captured.width==selected->width && captured.height==selected->height &&
         captured.active_width==selected->width && captured.active_height==selected->height && !captured.x && !captured.y;
     }
-    void require_held_mono(const char *message) {
+    // Failed, missing or refused input holds the newest completed copy,
+    // unchanged and still owned by SL, within its source age bound, then
+    // renders current-color mono (docs/reshade-sbs.md); never Generic depth or
+    // an older copy, and no hold after mono. hold_begin starts each phase;
+    // the result counts this Present as mono.
+    sunshine_streamline::provider::source_status provider;
+    std::uint64_t present_started{}, fresh_ended{}, fresh_sequence{}, fresh_source{};
+    bool hold_saw_mono{};
+    void hold_begin() { hold_saw_mono=false; }
+    bool require_held_mono(const char *message) {
+      if(captured_ready || ready()) {
+        require(!hold_saw_mono && captured_ready && captured.reused_depth && ready() &&
+          captured.source_resource.handle==fresh_source &&
+          present_started<fresh_ended+sunshine_scene_depth::maximum_source_age_ms,message);
+        if(query_provider_status)
+          require(provider.selected && provider.ready && provider.reused_depth &&
+            provider.provider==sunshine_scene_depth::provider_kind::streamline && provider.current.sequence==fresh_sequence,
+            "A held API copy is not the newest completed SL capture");
+        return false;
+      }
+      hold_saw_mono=true;
       require(!current() && !captured_ready && !ready(),message);
       if(query_provider_status) {
-        sunshine_streamline::provider::source_status status;
-        require(query_provider_status(observed.runtime,&status) && status.selected && !status.ready &&
-          status.provider==sunshine_scene_depth::provider_kind::streamline && !status.current.resource &&
-          !status.current.capture && !status.current.sequence,
+        if(!provider.selected || provider.ready || provider.current.resource || provider.current.capture || provider.current.sequence)
+          std::printf("MEASURE unavailable SL status selected=%u ready=%u reused=%u provider=%u resource=0x%llx capture=%llu sequence=%llu\n",
+            unsigned(provider.selected),unsigned(provider.ready),unsigned(provider.reused_depth),unsigned(provider.provider),
+            static_cast<unsigned long long>(provider.current.resource),static_cast<unsigned long long>(provider.current.capture),
+            static_cast<unsigned long long>(provider.current.sequence));
+        require(provider.selected && !provider.ready &&
+          provider.provider==sunshine_scene_depth::provider_kind::streamline && !provider.current.resource &&
+          !provider.current.capture && !provider.current.sequence,
           "An unavailable API copy relinquished SL ownership or exposed a historical source as current");
       }
+      return true;
     }
     void tick(const char *phase) {
-      step();
-      trace<<phase<<','<<GetTickCount64()<<','<<observed.renders<<','<<sequence<<','<<ticket<<','<<unsigned(mode)<<','<<native(*selected)<<','
+      present_started=GetTickCount64();
+      step(); direct_native.no_effects();
+      latest=direct_native.last_render();
+      require(latest.sequence>rendered_sequence,"A Present had no native Game 3D render to observe");
+      rendered_sequence=latest.sequence;
+      captured=latest.depth; captured_ready=captured.ready;
+      if(query_provider_status) require(query_provider_status(observed.runtime,&provider),"SL provider UI observation failed");
+      if(captured_ready && !captured.reused_depth) {
+        fresh_ended=GetTickCount64(); fresh_source=captured.source_resource.handle;
+        fresh_sequence=query_provider_status ? provider.current.sequence : 0;
+      }
+      if(captured_ready) {
+        drawn_frames.push_back({captured.frame_index,native(*selected),selected->pattern,center_raw});
+        if(drawn_frames.size()>64) drawn_frames.pop_front();
+      }
+      trace<<phase<<','<<GetTickCount64()<<','<<latest.sequence<<','<<sequence<<','<<ticket<<','<<unsigned(mode)<<','<<native(*selected)<<','
         <<captured.source_resource.handle<<','<<captured.projection.supplied<<','<<captured_ready<<','<<ready()<<','
-        <<scalar("Sunshine_CameraDepthScale")<<','<<zero()[1]<<','<<scalar("Sunshine_CameraStrengthBlend")<<'\n';
+        <<gain()<<','<<zero()[1]<<','<<blend()<<'\n';
       require(trace.good(),"Cannot record direct Streamline trajectory");
     }
     void settle(const char *phase,unsigned timeout=15000) {
       const auto started=GetTickCount64(); unsigned continuous=0;
       do {
         tick(phase);
-        continuous=current() && ready() && scalar("Sunshine_CameraStrengthBlend")==1.f ? continuous+1 : 0;
+        continuous=current() && ready() && blend()==1.f ? continuous+1 : 0;
       } while (continuous<6 && GetTickCount64()-started<timeout);
       std::printf("MEASURE %s elapsed_ms=%llu current=%d camera_ready=%d ticket=%llu K=%.9g q0=%.9g\n",phase,
         static_cast<unsigned long long>(GetTickCount64()-started),current(),ready(),static_cast<unsigned long long>(ticket),
-        scalar("Sunshine_CameraDepthScale"),zero()[1]);
+        gain(),zero()[1]);
       require(continuous>=6,"Direct native source did not reach sustained projection rendering");
     }
     void check_projection() {
       require(current() && ready(),"Projection assertion requires actual current native source");
-      int basis=-1; float projection[2]{};
-      observed.runtime->get_uniform_value_int(uniform("Sunshine_CameraCoordinateBasis"),&basis,1);
-      observed.runtime->get_uniform_value_float(uniform("Sunshine_CameraProjection"),projection,2);
-      const float reference=scalar("Sunshine_CameraDepthScale");
-      require(basis==0 && projection[0]==camera.projection.m[2][2] && projection[1]==1.f/camera.projection.m[3][2] &&
-        std::isfinite(reference) && reference>0.f && zero()[0]==.05f && std::abs(reference*zero()[1]-1.f)<2e-6f,
-        "Actual shader did not receive the exact current projection and a valid depth reference");
-      if(std::isfinite(expected_reference))
-        require(std::abs(reference-expected_reference)<=expected_reference*1e-6f,
-          "Ordinary rendering replaced the established inverse-depth reference");
-      require(selected_binding().handle==captured.shader_resource.handle,"Actual shader binding differs from direct capture packet");
+      const auto &p=latest.parameters;
+      require(p.coordinate_basis==0 && p.projection[0]==camera.projection.m[2][2] && p.projection[1]==1.f/camera.projection.m[3][2] &&
+        std::isfinite(p.depth_scale) && p.depth_scale>0.f && p.convergence[0]==.05f && std::isfinite(p.convergence[1]),
+        "The native render did not receive the exact current projection and a valid depth reference");
+      if(expect_gain)
+        require(close(gain(),nearest_gain(center_raw)),"Ordinary rendering replaced the established gain L/Q of the nearest depth");
+      if(expect_zero)
+        require(close(zero()[1],oracle(*selected,center_raw)[1]),"The screen plane is not the current depth's contrast midpoint");
     }
-    float prepared_center() {
-      const float q=(center_raw-camera.projection.m[2][2])/camera.projection.m[3][2];
-      const float reference=std::isfinite(expected_reference) ? expected_reference : scalar("Sunshine_CameraDepthScale");
-      return 1.f/(1.f+reference*q);
-    }
-    void establish_new_reference(const char *phase,float expected) {
+    void establish_new_reference(const char *phase) {
       const auto started=GetTickCount64();
       require(recenter(observed.runtime),"Explicit projection Reset reference action was rejected");
       bool saw_unready=false;unsigned continuous=0;
@@ -434,35 +506,56 @@ RWTexture2D<float> depth : register(u0);
         const auto elapsed=GetTickCount64()-started;
         saw_unready|=!ready();
         require(elapsed>=750 || !ready(),"Reset reference reused old samples instead of gathering four fresh spaced captures");
-        continuous=current() && ready() && scalar("Sunshine_CameraStrengthBlend")==1.f ? continuous+1 : 0;
+        continuous=current() && ready() && blend()==1.f ? continuous+1 : 0;
       } while(continuous<6 && GetTickCount64()-started<15000);
       require(saw_unready && continuous>=6,"Explicit Reset reference failed to reinitialize from fresh rendered samples");
-      expected_reference=expected;
+      expect_gain=expect_zero=true;
       check_projection();
-      require(std::abs(zero()[1]-1.f/expected)<.001f,"Explicit Reset reference retained the old zero plane");
       std::printf("MEASURE %s elapsed_ms=%llu reference=%.9g q0=%.9g\n",phase,
-        static_cast<unsigned long long>(GetTickCount64()-started),scalar("Sunshine_CameraDepthScale"),zero()[1]);
+        static_cast<unsigned long long>(GetTickCount64()-started),gain(),zero()[1]);
     }
-    void verify_depth() {
-      check_projection();
-      auto *resource=reinterpret_cast<ID3D12Resource *>(captured.resource.handle);
-      require(resource && resource->GetDesc().Width==selected->width && resource->GetDesc().Height==selected->height,
-        "Direct preserved texture has incorrect geometry");
-      const auto bytes=read(resource,D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+    // One production Dump 3D capture: the exact depth and projection one
+    // native render consumed, matched to what its own Present drew.
+    // Which rotating source (1 first, 2 second) the last capture verified.
+    unsigned consumed_source{};
+    native_render consumed_depth(const char *phase) {
+      const auto consumed=direct_native.capture(phase,false,[&]{tick(phase);});
+      const auto drawn=std::find_if(drawn_frames.rbegin(),drawn_frames.rend(),[&](const drawn_frame &value) {
+        return value.frame==consumed.frame_index && value.source==consumed.source_resource;
+      });
+      require(consumed.depth_ready && drawn!=drawn_frames.rend(),"The captured native render consumed no observed current API depth");
+      const auto &target=*(drawn->source==native(*first) ? first : second);
+      consumed_source=drawn->source==native(*first) ? 1u : 2u;
+      require(consumed.width==target.width && consumed.height==target.height && consumed.projection_supplied &&
+        consumed.coordinate_basis==0 && consumed.projection[0]==camera.projection.m[2][2] &&
+        consumed.projection[1]==1.f/camera.projection.m[3][2],
+        "The native render did not consume this capture with its supplied projection coefficients");
       for (unsigned y=0;y<18;++y) for (unsigned x=0;x<32;++x) {
-        const unsigned px=(2*x+1)*selected->width/64,py=(2*y+1)*selected->height/36;
-        float actual{}; std::memcpy(&actual,bytes.data()+(size_t(py)*selected->width+px)*4,4);
+        const unsigned px=(2*x+1)*target.width/64,py=(2*y+1)*target.height/36;
+        const float actual=consumed.depth(px,py);
         const bool center=x>=14 && x<18 && y>=7 && y<11;
-        const unsigned band=(selected->pattern ? 31-x : x)/8;
-        const float expected=center ? center_raw : selected->pattern==2 ? .015625f : .0078125f*(band+1);
-        require(std::isfinite(actual) && actual==expected,"Native tagged UAV copy has stale, cleared or wrong spatial depth");
+        const unsigned band=(drawn->pattern ? 31-x : x)/8;
+        const float expected=center ? drawn->center : drawn->pattern==2 ? .015625f : .0078125f*(band+1);
+        require(std::isfinite(actual) && actual==expected,"Native tagged copy has stale, cleared or wrong spatial depth");
       }
-      const auto prepared=read(linear_depth.p);
-      const auto desc=linear_depth->GetDesc();
-      std::uint16_t half{};
-      std::memcpy(&half,prepared.data()+(size_t(desc.Height/2)*desc.Width+desc.Width/2)*4+2,2);
-      require(std::abs(half_float(half)-prepared_center())<.002f,
-        "Actual shader prepared depth does not use its captured projection coefficients");
+      return consumed;
+    }
+    unsigned verify_depth() {
+      check_projection();
+      consumed_depth("direct-consumed-depth");
+      return consumed_source;
+    }
+    // Verifies the consumed pixels of both rotating sources: a capture takes
+    // several Presents, so consecutive captures can land on one source.
+    void verify_both(const char *phase,bool packed,const std::function<void()> &each={}) {
+      unsigned verified=0;
+      for(unsigned i=0;verified!=3;++i) {
+        require(i<16,"The consumed depth of both rotating sources was never verified");
+        tick(phase);
+        if(i&1) tick(phase); // A capture spans a fixed number of Presents: shift its parity.
+        verified|=packed ? verify_packed_depth() : verify_depth();
+        if(each) each();
+      }
     }
     void matrix_change_cases() {
       // Change real camera metadata; never write camera scale/readiness uniforms.
@@ -486,33 +579,19 @@ RWTexture2D<float> depth : register(u0);
       const auto check_current_matrix=[&] {
         require(current() && ready() && captured.projection.epoch==epoch && captured.projection.viewport==viewport,
           "Changing camera matrix or rotating depth changed the logical projection domain");
-        int basis=-1;float projection[2]{};
-        observed.runtime->get_uniform_value_int(uniform("Sunshine_CameraCoordinateBasis"),&basis,1);
-        observed.runtime->get_uniform_value_float(uniform("Sunshine_CameraProjection"),projection,2);
-        require(basis==0 && projection[0]==camera.projection.m[2][2] && projection[1]==1.f/camera.projection.m[3][2],
-          "Actual shader interpolated or retained old A/B instead of using the current camera matrix");
-        require(selected_binding().handle==captured.shader_resource.handle,
-          "Matrix-transition shader samples a different source than the current API capture");
-        require(std::abs(scalar("Sunshine_CameraDepthScale")*zero()[1]-1.f)<2e-6f,
-          "Changing current A/B broke zero-plane normalization");
+        const auto &p=latest.parameters;
+        require(p.coordinate_basis==0 && p.projection[0]==camera.projection.m[2][2] && p.projection[1]==1.f/camera.projection.m[3][2],
+          "The native render interpolated or retained old A/B instead of using the current camera matrix");
+        require(std::isfinite(p.depth_scale) && p.depth_scale>0.f && p.convergence[0]==.05f && std::isfinite(p.convergence[1]),
+          "Changing current A/B left no valid gain or screen plane");
       };
+      // The consumed depth and A/B of one render, as its own Present drew them.
       const auto check_prepared=[&] {
         check_current_matrix();
-        const auto bytes=read(linear_depth.p);const auto desc=linear_depth->GetDesc();
-        const float A=camera.projection.m[2][2],inverseB=1.f/camera.projection.m[3][2];
-        const float reference=1.f/zero()[1];
-        for(unsigned y=0;y<18;++y) for(unsigned x=0;x<32;++x) {
-          const unsigned px=(2*x+1)*unsigned(desc.Width)/64,py=(2*y+1)*desc.Height/36;
-          std::uint16_t half{};std::memcpy(&half,bytes.data()+(size_t(py)*desc.Width+px)*4+2,2);
-          const bool center=x>=14 && x<18 && y>=7 && y<11;
-          const float raw=center ? center_raw : .0078125f*float((selected->pattern ? 31-x : x)/8+1);
-          const float expected=1.f/(1.f+reference*(raw-A)*inverseB);
-          require(std::abs(half_float(half)-expected)<.002f,
-            "Actual prepared depth does not combine current source pixels/current A/B with the established reference");
-        }
+        consumed_depth("matrix-consumed-depth");
       };
       const auto check_hdr=[&] {
-        const auto bytes=read(exported.p);float eye_difference=0;
+        const auto bytes=direct_native.exported();float eye_difference=0;
         for(unsigned y=0;y<height;++y) for(unsigned x=0;x<width;++x) for(unsigned c=0;c<4;++c) {
           const float l=channel(bytes,x,y,c),r=channel(bytes,width+x,y,c);
           require(std::isfinite(l) && std::isfinite(r),"Matrix transition produced nonfinite actual HDR stereo");
@@ -527,33 +606,44 @@ RWTexture2D<float> depth : register(u0);
       // Keep the first changed matrix adjacent to a valid current tick; slow
       // readback/inspection deliberately does not count as continuous exposure.
       tick("matrix-before-change");Sleep(16);
-      expected_reference=std::numeric_limits<float>::quiet_NaN();
+      // A new matrix changes every decoded distance, its nearest Q among them:
+      // the gain and zero then adapt toward the new targets.
+      expect_gain=expect_zero=false;
+      const auto before=oracle(*selected,center_raw);
       change_camera(.125f,64.f,1.1f);tick("matrix-near-doubled-first-frame");check_current_matrix();
-      const float changed_center=(center_raw-camera.projection.m[2][2])/camera.projection.m[3][2];
-      require(changed_center<.2f,
+      const auto changed=oracle(*selected,center_raw);
+      require(std::abs(changed[1]-before[1])>.05 && std::abs(changed[0]-before[0])>.5,
         "Matrix fixture did not change decoded distance independently of the reference");
       check_prepared();check_hdr();
+      // The readbacks above present nothing for longer than the one-second
+      // association timeout; resume the provider before the timed gap.
+      settle("matrix-before-provider-gap");
 
-      const float held_gain=scalar("Sunshine_CameraDepthScale");
+      const float held_gain=gain();
       emit=false;const auto missing_until=GetTickCount64()+700;
+      hold_begin();
       do {
         tick("matrix-transition-provider-gap");
-        require(!captured_ready && !ready() && scalar("Sunshine_CameraDepthScale")==held_gain,
-          "A provider gap changed the retained projection scale or exposed stale/Generic depth");
+        require_held_mono("A provider gap exposed stale or Generic depth");
+        require(direct_native.automatic().scale==held_gain && (!ready() || gain()==held_gain),
+          "A provider gap changed the retained projection scale");
       } while(GetTickCount64()<missing_until);
-      check_current_mono();
+      require(hold_saw_mono,"A 700 ms provider gap outlived the source age bound");
+      check_exported_mono();
       emit=true;tick("matrix-transition-gap-return");check_current_matrix();
-      require(scalar("Sunshine_CameraDepthScale")==held_gain,
+      require(gain()==held_gain,
         "Returning from a provider gap credited missing time or reset the retained projection gain");
 
       unsigned seen=0,transition_frames=0;
       const auto deadline=GetTickCount64()+10000;
       do {
-        tick("matrix-zero-plane-normalization");check_current_matrix();
+        tick("matrix-zero-plane-follows-depth");check_current_matrix();
         seen|=selected==first.get()?1u:2u;++transition_frames;
-      } while((std::abs(zero()[1]-changed_center)>.001f || scalar("Sunshine_CameraStrengthBlend")!=1.f || transition_frames<6) && GetTickCount64()<deadline);
-      require(std::abs(zero()[1]-changed_center)<=.001f && seen==3,
-        "Independent zero plane did not follow current decoded depth across both real sources");
+      } while((!close(zero()[1],changed[1]) || !close(gain(),changed[0]) || blend()!=1.f || transition_frames<6) &&
+        GetTickCount64()<deadline);
+      require(close(zero()[1],changed[1]) && close(gain(),changed[0]) && seen==3,
+        "Gain and zero plane did not follow current decoded depth across both real sources");
+      expect_gain=expect_zero=true;
       check_prepared();check_hdr();
 
       const float before_fov_zero=zero()[1];
@@ -564,9 +654,9 @@ RWTexture2D<float> depth : register(u0);
           "Changing only FOV reset the tracked screen plane");
       }
       check_prepared();
-      set_float("Depth_Adjustment",0);for(unsigned i=0;i<3;++i)tick("matrix-zero-strength-HDR");
-      check_current_mono();
-      std::printf("PASS actual matrix transition: reference=%.9g equals reciprocal zero, exact current A/B, current prepared pixels/HDR, zero=%.9g, gaps/rotation/FOV continuity\n",scalar("Sunshine_CameraDepthScale"),zero()[1]);
+      direct_native.set_strength(0);for(unsigned i=0;i<3;++i)tick("matrix-zero-strength-HDR");
+      check_exported_mono();
+      std::printf("PASS actual matrix transition: gain=%.9g and zero=%.9g follow the new decoded depth, exact current A/B, consumed pixels/HDR, gaps/rotation/FOV continuity\n",gain(),zero()[1]);
     }
     std::vector<std::uint8_t> read_packed_plane(ID3D12Resource *texture,unsigned plane,D3D12_RESOURCE_STATES state) {
       const auto desc=texture->GetDesc();
@@ -621,24 +711,20 @@ RWTexture2D<float> depth : register(u0);
       const D3D12_RANGE no_write{0,0}; staging->Unmap(0,&no_write);
       return bytes;
     }
-    void verify_packed_depth() {
+    unsigned verify_packed_depth() {
       check_projection();
-      auto *resource=reinterpret_cast<ID3D12Resource *>(captured.resource.handle);
-      require(resource && resource->GetDesc().Width==selected->width && resource->GetDesc().Height==selected->height,
-        "Packed direct capture has incorrect geometry");
-      const auto pixels=read_packed_plane(resource,0,D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+      consumed_depth("packed-consumed-depth");
+      const unsigned verified=consumed_source;
       const auto source=read_packed_plane(selected->resource.p,0,selected->state);
       const auto stencil=read_packed_plane(selected->resource.p,1,selected->state);
       for(unsigned y=0;y<18;++y) for(unsigned x=0;x<32;++x) {
         const unsigned px=(2*x+1)*selected->width/64,py=(2*y+1)*selected->height/36;
         const size_t offset=(size_t(py)*selected->width+px)*sizeof(float);
-        float actual{},original{};
-        std::memcpy(&actual,pixels.data()+offset,sizeof(actual));
+        float original{};
         std::memcpy(&original,source.data()+offset,sizeof(original));
         const bool center=x>=14 && x<18 && y>=7 && y<11;
         const float expected=center ? center_raw : .0078125f*float((selected->pattern ? 31-x : x)/8+1);
-        require(std::isfinite(actual) && actual==expected && original==expected,
-          "Packed capture or restored original depth plane has stale or incorrect pixels");
+        require(original==expected,"Restored original packed depth plane has stale or incorrect pixels");
       }
       for(unsigned y=0;y<selected->height;++y) for(unsigned x=0;x<selected->width;++x) {
         unsigned band=0;
@@ -646,11 +732,7 @@ RWTexture2D<float> depth : register(u0);
         require(stencil[size_t(y)*selected->width+x]==static_cast<std::uint8_t>(selected->stencil_seed+band),
           "Native depth-plane capture changed the original stencil plane");
       }
-      const auto prepared=read(linear_depth.p); const auto desc=linear_depth->GetDesc();
-      std::uint16_t half{};
-      std::memcpy(&half,prepared.data()+(size_t(desc.Height/2)*desc.Width+desc.Width/2)*4+2,sizeof(half));
-      require(std::abs(half_float(half)-prepared_center())<.002f,
-        "Actual shader did not prepare the current packed depth plane with the supplied projection");
+      return verified;
     }
     // Constant-depth rows outside the center patch let the actual source image
     // measure disparity without reproducing the production warp implementation.
@@ -688,7 +770,7 @@ RWTexture2D<float> depth : register(u0);
         const auto source=selected==first.get()?1u:2u;
         tagged|=source;
         if(current()) submitted|=source;
-        continuous=current() && ready() && scalar("Sunshine_CameraStrengthBlend")==1.f ? continuous+1 : 0;
+        continuous=current() && ready() && blend()==1.f ? continuous+1 : 0;
       } while(continuous<8 && GetTickCount64()-started<15000);
       std::printf("MEASURE cold V1 elapsed_ms=%llu v1_calls=%u v2_calls=%u tagged_mask=%u copied_mask=%u continuous=%u current=%d camera_ready=%d\n",
         static_cast<unsigned long long>(GetTickCount64()-started),v1_capture_calls,v2_capture_calls,
@@ -717,12 +799,14 @@ RWTexture2D<float> depth : register(u0);
           private_phase{private_case::common,"private-state-common-present-marker"}}) {
         private_input=phase.value;
         settle(phase.name);
-        unsigned seen=0;
-        for(unsigned i=0;i<4;++i) {
+        unsigned seen=0,verified=0;
+        for(unsigned i=0;i<4 || verified!=3;++i) {
+          require(i<16,"Provider-private state did not validate both real rotating sources");
           tick(phase.name);
           require(ticket && current() && ready(),"Provider-private state did not preserve the current native depth");
           seen|=selected==first.get()?1u:2u;
-          verify_depth();
+          if(i&1) tick(phase.name); // A capture spans a fixed number of Presents: shift its parity.
+          verified|=verify_depth();
         }
         require(seen==3,"Provider-private state did not cover both real rotating sources");
       }
@@ -734,12 +818,13 @@ RWTexture2D<float> depth : register(u0);
           private_phase{private_case::conflicting,"private-state-conflicting-transition"},
           private_phase{private_case::split,"private-state-split-transition"}}) {
         private_input=phase.value;
-        for(unsigned i=0;i<4;++i) {
+        hold_begin();
+        for(unsigned mono=0;mono<4;) {
           tick(phase.name);
-          require_held_mono(
+          mono+=require_held_mono(
             "Invalid provider-private state reused stale pixels or selected the generic depth fallback");
         }
-        check_current_mono();
+        check_exported_mono();
       }
       private_input=private_case::shader_read_present;
       settle("private-state-recovery");verify_depth();
@@ -753,30 +838,34 @@ RWTexture2D<float> depth : register(u0);
         private_input=input;
         const auto phase=input==private_case::common ? "packed-v1-COMMON" : "packed-v1-shader-read";
         settle(phase);
-        unsigned seen=0;
-        for(unsigned i=0;i<4;++i) {
+        unsigned seen=0,verified=0;
+        for(unsigned i=0;i<4 || verified!=3;++i) {
+          require(i<16,"Packed V1 regression did not validate both real format19 sources");
           tick(phase);
           require(ticket && current() && ready(),"Packed V1 source rotation lost its current independent capture");
           seen|=selected==first.get()?1u:2u;
-          verify_packed_depth();
+          if(i&1) tick(phase); // A capture spans a fixed number of Presents: shift its parity.
+          verified|=verify_packed_depth();
         }
-        require(seen==3,"Packed V1 regression did not validate both real format19 sources");
+        require(seen==3,"Packed V1 regression did not cover both real format19 sources");
       }
-      std::puts("PASS packed R32G8X24/D32S8 private-state rotation: submitted prior-CL state, exact depth-plane pixels, source depth/stencil preservation and actual projection preparation");
+      std::puts("PASS packed R32G8X24/D32S8 private-state rotation: submitted prior-CL state, exact consumed depth-plane pixels and projection, source depth/stencil preservation");
       private_input=private_case::missing;
-      for(unsigned i=0;i<4;++i) {
+      hold_begin();
+      for(unsigned mono=0;mono<4;) {
         tick("packed-v1-missing-metadata");
-        require_held_mono("Packed V1 missing metadata reused stale capture or generic depth");
+        mono+=require_held_mono("Packed V1 missing metadata reused stale capture or generic depth");
       }
-      check_current_mono();
+      check_exported_mono();
       private_input=private_case::shader_read_present;
       settle("packed-v1-metadata-recovery"); verify_packed_depth();
       valid_evaluation=false;
-      for(unsigned i=0;i<4;++i) {
+      hold_begin();
+      for(unsigned mono=0;mono<4;) {
         tick("packed-v1-failed-evaluation");
-        require_held_mono("Failed packed V1 frame reused capture or generic depth");
+        mono+=require_held_mono("Failed packed V1 frame reused capture or generic depth");
       }
-      check_current_mono();
+      check_exported_mono();
       valid_evaluation=true;
       settle("packed-v1-evaluation-recovery"); verify_packed_depth();
       require(!v2_capture_calls && v1_capture_calls,"Packed V1 regression invoked a V2 warming path");
@@ -835,16 +924,17 @@ RWTexture2D<float> depth : register(u0);
       unsigned seen=0;
       for(unsigned i=0;i<12;++i) {
         tick(phase);
-        require(ticket && current() && ready() && scalar("Sunshine_CameraStrengthBlend")==1.f,
+        require(ticket && current() && ready() && blend()==1.f,
           "Retained command-list pressure prevented current packed depth from reaching the actual shader");
         seen|=selected==first.get()?1u:2u;
         check_projection();
       }
       require(seen==3,"Command pressure did not retain both current rotating depth sources");
       // Read both spatial/depth patterns, changing center, original stencil and
-      // the actual shader's prepared depth while all pressure objects remain live.
-      for(unsigned i=0;i<2;++i) {tick(phase);verify_packed_depth();}
-      std::printf("PASS %s retained=%u both_sources=1 consecutive_full=12 actual_packed_and_shader_pixels=1\n",phase,retained);
+      // the depth and projection a native render consumed while all pressure
+      // objects remain live.
+      verify_both(phase,true);
+      std::printf("PASS %s retained=%u both_sources=1 consecutive_full=12 consumed_packed_pixels_and_projection=1\n",phase,retained);
     }
     void command_capacity_cases() {
       require(packed_state_mode && rotate && !v1_capture_calls && !v2_capture_calls,
@@ -863,11 +953,12 @@ RWTexture2D<float> depth : register(u0);
         verify_command_pressure("command-capacity-after-destroy",0);
       }
       valid_evaluation=false;
-      for(unsigned i=0;i<4;++i) {
+      hold_begin();
+      for(unsigned mono=0;mono<4;) {
         tick("command-capacity-failed-current");
-        require_held_mono("Command pressure recovery admitted failed or stale depth");
+        mono+=require_held_mono("Command pressure recovery admitted failed or stale depth");
       }
-      check_current_mono();
+      check_exported_mono();
       valid_evaluation=true;
       settle("command-capacity-valid-recovery");verify_packed_depth();
       require(!v2_capture_calls && v1_capture_calls,"Command capacity regression invoked a V2 warming path");
@@ -885,36 +976,40 @@ RWTexture2D<float> depth : register(u0);
       unsigned seen=0;
       for(unsigned i=0;i<12;++i) {
         tick("pending-evaluation-submitted-before-success");
-        require(ticket && current() && ready() && scalar("Sunshine_CameraStrengthBlend")==1.f,
+        require(ticket && current() && ready() && blend()==1.f,
           "Successful evaluation after actual producer submission did not reach the current shader");
         seen|=selected==first.get()?1u:2u;
         check_projection();
       }
       require(seen==3 && submitted_before_finish>=12,"Pending evaluation did not exercise both real rotating sources after submission");
-      for(unsigned i=0;i<2;++i) {tick("pending-evaluation-pixel-check");verify_packed_depth();}
-      std::printf("PASS submitted-before-success evaluations=%u both_sources=1 consecutive_full=12 actual_packed_and_shader_pixels=1\n",
+      verify_both("pending-evaluation-pixel-check",true);
+      std::printf("PASS submitted-before-success evaluations=%u both_sources=1 consecutive_full=12 consumed_packed_pixels_and_projection=1\n",
         submitted_before_finish);
 
       valid_evaluation=false;
       const auto before_failed=submitted_before_finish;
-      for(unsigned i=0;i<4;++i) {
+      unsigned failed_presents=0;
+      hold_begin();
+      for(unsigned mono=0;mono<4;++failed_presents) {
         tick("pending-evaluation-submitted-before-failure");
         require(ticket,"Submitted failed evaluation lost its nomination ticket");
-        require_held_mono("Failed evaluation after submission reused captured or generic depth");
+        mono+=require_held_mono("Failed evaluation after submission reused captured or generic depth");
       }
-      require(submitted_before_finish==before_failed+4,"Failed evaluation did not follow four actual producer submissions");
-      check_current_mono();
+      require(submitted_before_finish==before_failed+failed_presents,"Failed evaluation did not follow an actual producer submission every Present");
+      check_exported_mono();
       valid_evaluation=true;
       settle("pending-evaluation-failure-recovery");verify_packed_depth();
 
       replay_evaluation_recording=true;
-      for(unsigned i=0;i<4;++i) {
+      unsigned replay_presents=0;
+      hold_begin();
+      for(unsigned mono=0;mono<4;++replay_presents) {
         tick("pending-evaluation-real-producer-replay");
         require(ticket,"Replayed evaluation lost its nomination ticket");
-        require_held_mono("Replayed unchanged producer was accepted as a fresh depth frame");
+        mono+=require_held_mono("Replayed unchanged producer was accepted as a fresh depth frame");
       }
-      require(replayed_recordings==4,"Replay regression did not execute four unchanged native recordings twice");
-      check_current_mono();
+      require(replayed_recordings==replay_presents,"Replay regression did not execute every unchanged native recording twice");
+      check_exported_mono();
       replay_evaluation_recording=false;
       settle("pending-evaluation-replay-recovery");verify_packed_depth();
       require(!v2_capture_calls && v1_capture_calls,"Pending-evaluation regression invoked a V2 warming path");
@@ -948,15 +1043,15 @@ RWTexture2D<float> depth : register(u0);
       unsigned seen=0;
       for(unsigned i=0;i<12;++i) {
         tick(phase);
-        require(ticket && current() && ready() && scalar("Sunshine_CameraStrengthBlend")==1.f,
+        require(ticket && current() && ready() && blend()==1.f,
           "Large native batch prevented current packed depth from reaching the actual shader");
         seen|=selected==first.get()?1u:2u;
         check_projection();
         check_provider_status(true);
       }
       require(seen==3,"Large native batch did not exercise both rotating depth sources");
-      for(unsigned i=0;i<2;++i) {tick(phase);verify_packed_depth();check_provider_status(true);}
-      std::printf("PASS %s producer_index=%u producer_batches=%u idle_batches=%u barrier_batches=%u both_sources=1 consecutive_full=12 actual_packed_and_shader_pixels=1\n",
+      verify_both(phase,true,[&]{check_provider_status(true);});
+      std::printf("PASS %s producer_index=%u producer_batches=%u idle_batches=%u barrier_batches=%u both_sources=1 consecutive_full=12 consumed_packed_pixels_and_projection=1\n",
         phase,batch_producer_index,submitted_large_batches,submitted_idle_batches,recorded_large_barriers);
     }
     void large_batch_cases() {
@@ -1000,13 +1095,15 @@ RWTexture2D<float> depth : register(u0);
       // failed evaluation. A useful generic scene must not replace that frame.
       if(!barriers_only) large_submission=true;
       valid_evaluation=false;
-      for(unsigned i=0;i<4;++i) {
+      hold_begin();
+      for(unsigned mono=0;mono<4;) {
         tick("large-batch-failed-evaluation");
         require(ticket,"Large-batch failed evaluation lost its nomination ticket");
-        require_held_mono("Large-batch failed evaluation admitted stale or generic depth");
-        check_provider_status(false);
+        const bool unready=require_held_mono("Large-batch failed evaluation admitted stale or generic depth");
+        if(unready) check_provider_status(false);
+        mono+=unready;
       }
-      check_current_mono();
+      check_exported_mono();
       valid_evaluation=true;
       verify_large_batch_phase("large-batch-valid-recovery");
       large_submission=large_barriers=false;
@@ -1060,12 +1157,16 @@ RWTexture2D<float> depth : register(u0);
       }
       manual=reinterpret_cast<select_t>(GetProcAddress(module,"SunshineDepthTestSelectManual"));
       recenter=reinterpret_cast<action_t>(GetProcAddress(module,"SunshineGame3DTestRecalibrate"));
-      query_frame=reinterpret_cast<frame_t>(GetProcAddress(module,"SunshineDepthTestFrame"));
-      require(capture && capture_v1 && manual && recenter && query_frame,"Direct fixture requires TEST ONLY native input and passive frame/UI adapters");
-      reshade::register_event<reshade::addon_event::reshade_render_technique>(observe_source);
-      set_int("Depth_Map_View",0);set_float("Depth_Adjustment",100);set_float("Sharpen_Power",0);
-      find_texture("DoubleTex",exported,width*2,DXGI_FORMAT_R16G16B16A16_FLOAT);
-      find_texture("texzBufferN_P",linear_depth,0,DXGI_FORMAT_R16G16_FLOAT);
+      require(capture && capture_v1 && manual && recenter,"Direct fixture requires TEST ONLY native input and UI adapters");
+      // Remove the boot FX and present until the renderer has compiled, all
+      // without middleware calls: the cold and private-state regressions
+      // require an unwarmed capture.
+      emit=false;
+      direct_native.start();direct_native.attach_export();direct_native.set_strength(100);
+      rendered_sequence=direct_native.await_render([&]{step();});
+      emit=true;
+      // The capture-only variants vary the center every frame below the
+      // bands' nearest depth: the gain stays L/Q while the zero follows.
       if(cold_v1 || private_state || packed_state || command_capacity || pending_evaluation || large_batch) {
         if(cold_v1) cold_v1_rotation();
         else if(private_state) private_state_cases();
@@ -1074,12 +1175,12 @@ RWTexture2D<float> depth : register(u0);
         else if(pending_evaluation) pending_evaluation_cases();
         else large_batch_cases();
         render_tracked_depth={};
-        reshade::unregister_event<reshade::addon_event::reshade_render_technique>(observe_source);
         reshade::unregister_event<reshade::addon_event::reset_command_list>(observe_reset);
         return;
       }
-      // Startup center q=.015625/.0625=.25: Zref=1/qref=4.
-      expected_reference=4.f;
+      // Startup: a fresh reference of the static draw sets gain L/Q and the
+      // contrast-midpoint zero.
+      expect_zero=true;
       // Dead Space startup regression: a device is a valid COM object, but its
       // slot 9 is CreateCommandAllocator, not graphics-command-list Close.
       // A rejected middleware pointer must never install hooks on that vtable.
@@ -1095,7 +1196,6 @@ RWTexture2D<float> depth : register(u0);
       std::puts("PASS real lower-resolution R32_FLOAT UAV outside generic inventory drives projection stereo over an unrelated full-resolution DSV");
       if(matrix_change) {
         matrix_change_cases();render_tracked_depth={};
-        reshade::unregister_event<reshade::addon_event::reshade_render_technique>(observe_source);
         reshade::unregister_event<reshade::addon_event::reset_command_list>(observe_reset);
         return;
       }
@@ -1118,30 +1218,34 @@ RWTexture2D<float> depth : register(u0);
       rotate=false;selected=first.get();
       settle("first-source-return");
       const float initial_zero=zero()[1];
+      // A nearer center keeps the nearest Q, hence the gain, and moves the
+      // zero to the changed contrast midpoint.
       center_raw=.03125f;
-      expected_reference=std::numeric_limits<float>::quiet_NaN();
+      expect_zero=false;
+      const double changed_zero=oracle(*selected,center_raw)[1];
       const auto adapt_until=GetTickCount64()+6000;
-      do {tick("center-adaptation");check_projection();} while(GetTickCount64()<adapt_until && std::abs(zero()[1]-.5f)>.001f);
-      require(std::abs(zero()[1]-.5f)<.001f && zero()[1]>initial_zero+.1f,"Projection center did not follow a changed scene");
+      do {tick("center-adaptation");check_projection();} while(GetTickCount64()<adapt_until && !close(zero()[1],changed_zero));
+      require(close(zero()[1],changed_zero) && zero()[1]>initial_zero,"Projection screen plane did not follow a changed scene");
       center_raw=.0234375f;
-      establish_new_reference("projection-reset-reference",8.f/3.f);
+      establish_new_reference("projection-reset-reference");
       verify_depth();
-      std::puts("PASS reference follows the tracked zero through scene changes; explicit recenter establishes reference=8/3 from fresh samples");
+      std::puts("PASS gain holds L/Q while the zero follows a changed scene; explicit recenter establishes the current midpoint from fresh samples");
 
       // Force a known center on a constant background, then measure actual eye
       // translations at two user strengths using source stripe correlation.
       selected->pattern=2;center_raw=.03125f;
-      establish_new_reference("constant-background-reset-reference",2.f);verify_depth();
-      set_float("Depth_Adjustment",0);for(unsigned i=0;i<4;++i)tick("strength-zero");
-      const auto mono_pixels=check_current_mono();
-      set_float("Depth_Adjustment",50);settle("strength-half");check_projection();
-      const auto half_pixels=read(exported.p);const auto half_shift=shifts(mono_pixels,half_pixels,"50");
-      set_float("Depth_Adjustment",100);settle("strength-full");check_projection();
-      const auto full_pixels=read(exported.p);const auto full_shift=shifts(mono_pixels,full_pixels,"100");
-      // Background q=.25 and reset center qref=q0=.5 yield Zref=2.
-      // The normalized separation is .05*2*(.5-.25)=.025. The per-eye
-      // budget is 100 pixels at 2160p, giving 1.25/2.5 pixels at .5/1.
-      const float full_expected=.025f*100.f*float(height)/2160.f,half_expected=full_expected*.5f;
+      establish_new_reference("constant-background-reset-reference");verify_depth();
+      direct_native.set_strength(0);for(unsigned i=0;i<4;++i)tick("strength-zero");
+      const auto mono_pixels=check_exported_mono();
+      direct_native.set_strength(50);settle("strength-half");check_projection();
+      const auto half_pixels=direct_native.exported();const auto half_shift=shifts(mono_pixels,half_pixels,"50");
+      direct_native.set_strength(100);settle("strength-full");check_projection();
+      const auto full_pixels=direct_native.exported();const auto full_shift=shifts(mono_pixels,full_pixels,"100");
+      // Background q=.25 and the reset reference (gain L/Q, zero q0) give the
+      // normalized separation .05*gain*(q0-.25). The per-eye budget is 100
+      // pixels at 2160p.
+      const auto reference=oracle(*selected,center_raw);
+      const float full_expected=float(.05*reference[0]*(reference[1]-.25))*100.f*float(height)/2160.f,half_expected=full_expected*.5f;
       for(unsigned eye=0;eye<2;++eye) {
         const float direction=eye==0 ? 1.f : -1.f;
         require(std::abs(half_shift[eye]-direction*half_expected)<=1.f &&
@@ -1158,41 +1262,58 @@ RWTexture2D<float> depth : register(u0);
       std::puts("PASS actual projection shader preserves zero-strength HDR color and responds proportionally to user strength");
 
       valid_evaluation=false;
-      for(unsigned i=0;i<4;++i) {
+      hold_begin();
+      for(unsigned mono=0;mono<4;) {
         tick("failed-evaluation");
-        require_held_mono("Failed API frame selected generic depth or reused stale projection depth");
+        mono+=require_held_mono("Failed API frame selected generic depth or reused stale projection depth");
       }
-      check_current_mono();
+      check_exported_mono();
       valid_evaluation=true;settle("successful-evaluation-recovery");
       emit=false;
-      const auto missing_until=GetTickCount64()+1800;
+      const auto silence_began=GetTickCount64();
+      hold_begin();
+      for(unsigned mono=0;mono<4;) {
+        tick("missing-provider-frame");
+        mono+=require_held_mono("Silent active provider fell back to a heuristic buffer");
+      }
+      check_exported_mono();
+      // A silent provider keeps the queue mono only for the association
+      // timeout (one second without an evaluation); then the fixture's useful
+      // Generic scene may take over.
+      bool association_released=!query_provider_status;
       do {
         tick("missing-provider-frame");
-        require_held_mono("Silent active provider fell back to a heuristic buffer");
-      } while(GetTickCount64()<missing_until);
-      check_current_mono();
+        require(!current(),"A silent provider exposed its stale capture as current");
+        if(!query_provider_status) continue;
+        if(GetTickCount64()-silence_began<900)
+          require(provider.selected && !provider.ready && !ready(),"Silent provider released its association before the timeout");
+        if(!provider.selected) association_released=true;
+        else require(!association_released,"A released SL association returned without an evaluation");
+      } while(GetTickCount64()-silence_began<1800);
+      require(association_released,"Silent SL provider kept the queue mono past the association timeout");
       emit=true;settle("missing-provider-frame-recovery");check_projection();
-      std::puts("PASS failed and missing active-provider frames remain current-color mono despite a useful generic DSV; recovery preserves projection scale");
+      std::puts("PASS failed and missing active-provider frames hold only the newest completed copy within its age bound, then render current-color mono despite a useful generic DSV; one second of silence releases the association; recovery preserves projection scale");
 
       mode=capture_mode::v1_unknown_state;
-      for(unsigned i=0;i<4;++i) {
+      hold_begin();
+      for(unsigned mono=0;mono<4;) {
         tick("v1-omitted-state-without-transition");
-        require_held_mono("V1 omitted state reused stale proof or silently selected generic depth");
+        mono+=require_held_mono("V1 omitted state reused stale proof or silently selected generic depth");
       }
       mode=capture_mode::v1_observed_state;
       settle("v1-observed-nonzero-state");verify_depth();
       require(ticket,"V1 capture did not consume the actual nonzero transition proof");
       mode=capture_mode::v1_common_state;
-      for(unsigned i=0;i<4;++i) {
+      hold_begin();
+      for(unsigned mono=0;mono<4;) {
         tick("v1-observed-COMMON-is-not-proof");
-        require_held_mono("V1 omitted state treated COMMON as proof or silently selected generic depth");
+        mono+=require_held_mono("V1 omitted state treated COMMON as proof or silently selected generic depth");
       }
       mode=capture_mode::v1_observed_state;
       settle("v1-fresh-nonzero-recovery");verify_depth();
       std::puts("PASS V1 omitted state rejects missing/COMMON proof; actual same-recording nonzero transitions capture correct pixels and recover");
-      std::puts("PASS actual native copy/queue/fence/projection/HDR regression; no generic DSV dependency or fabricated GPU readiness");
+      std::puts("PASS actual native copy/queue/fence/projection/HDR regression; no generic DSV dependency or fabricated GPU readiness; no FX");
       render_tracked_depth={};
-      reshade::unregister_event<reshade::addon_event::reshade_render_technique>(observe_source);
       reshade::unregister_event<reshade::addon_event::reset_command_list>(observe_reset);
     }
   };
@@ -1201,13 +1322,13 @@ RWTexture2D<float> depth : register(u0);
 #ifndef SUNSHINE_DIRECT_RUNTIME_FIXTURE_ONLY
 int main(int argc,char **argv) {
   std::setvbuf(stdout,nullptr,_IONBF,0);
-  if(argc!=5 && argc!=7) {std::fputs("usage: streamline_direct_runtime <official.dll> <Shaders> <test.addon64> <fresh-output> [width height]\n",stderr);return 2;}
+  if(argc!=5 && argc!=7) {std::fputs("usage: streamline_direct_runtime <official.dll> <frozenShaders> <test.addon64> <fresh-output> [width height]\n",stderr);return 2;}
   std::thread([]{Sleep(300000);std::fputs("FAIL direct Streamline runtime watchdog\n",stderr);TerminateProcess(GetCurrentProcess(),124);}).detach();
   try {
     width=argc==7?unsigned(std::stoul(argv[5])):3840;height=argc==7?unsigned(std::stoul(argv[6])):2160;
     require(width>=640 && width<=3840 && height>=360 && height<=2160 && width%4==0 && height%4==0,"Invalid direct fixture dimensions");
-    require(sunshine_camera_fixture::flag("SUNSHINE_GAME3D_AUTOMATIC") && sunshine_camera_fixture::flag("SUNSHINE_GAME3D_AUTOMATIC_ACTIONS_TEST") &&
-      !sunshine_camera_fixture::flag("SUNSHINE_DEPTH_BIND_SWITCH_TEST"),"Direct fixture requires Automatic, TEST ONLY actions and mode2 unset");
+    require(!sunshine_camera_fixture::flag("SUNSHINE_DEPTH_BIND_SWITCH_TEST"),"Direct fixture requires preservation mode 2 unset");
+    select_native_boot();
     require(!fs::exists(fs::absolute(argv[4])),"Fresh isolated runtime output is required");
     direct_fixture fixture;fixture.runtime_directory=fs::absolute(argv[4]);
     fixture.initialize(fs::absolute(argv[1]),fs::absolute(argv[2]),fixture.runtime_directory,2,0,fs::absolute(argv[3]));

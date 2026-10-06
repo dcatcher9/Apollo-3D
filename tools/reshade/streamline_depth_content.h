@@ -261,6 +261,9 @@ namespace sunshine_streamline::content {
       out.state = check_resource(backup, dst);
       if (!out.valid()) return out;
       if (same(source, backup)) { out.state = status::backup_binding_mismatch; return out; }
+      // A copy on a list the tracker never saw reset (the runtime's own
+      // immediate list) has no recording, whatever its device.
+      if (!marker) { out.state = status::unknown_recording; return out; }
       if (!device || src->device != device || dst->device != device) { out.state = status::different_device; return out; }
       out.source = use(marker, source.native, device); out.state = out.source.state;
       if (!out.valid()) return out;

@@ -1210,7 +1210,10 @@ static captured_depth capture_record(effect_runtime *runtime, const generic_dept
 	depth.layout_epoch = info.layout_epoch; depth.frame_index = info.last_used_in_frame; depth.runtime_epoch = data.runtime_epoch;
 	depth.detected_orientation = info.orientation_evidence.detected();
 	depth.orientation_agreeing_frames = info.orientation_evidence.agreeing_frames();
-	depth.capture_marker = displayed_copy.recording; depth.depth_copy = displayed_copy;
+	// The capture marker is the actual preserved copy's recording, also when a
+	// D3D12 backup is published later on the runtime's own list (the displayed
+	// copy below): that forward records no command evidence of its own.
+	depth.capture_marker = info.last_frame_stats.capture_marker; depth.depth_copy = displayed_copy;
 	depth.ready = out.current(device_data.native_present_index, device_data.frame_index, data.runtime_epoch);
 	lock.unlock();
 	if (view != 0 && runtime->get_device()->get_resource_from_view(view) != sampled) return {};
@@ -5159,6 +5162,34 @@ extern "C" __declspec(dllexport) BOOL SunshineDepthTestCaptureDemand(effect_runt
 extern "C" __declspec(dllexport) BOOL SunshineDepthTestFrame(effect_runtime *runtime, sunshine_depth::frame_depth *output)
 {
 	return output != nullptr && sunshine_depth::get_frame_depth(runtime, *output, sunshine_depth::depth_orientation::automatic, false);
+}
+
+// The actual preserved copy behind the selected D3D12 backup published for this
+// Present: the before-clear copy into the capture owner's ticket texture, in the
+// game's recording. The frame's depth_copy is its runtime-list forward instead.
+extern "C" __declspec(dllexport) BOOL SunshineDepthTestPreservedCopy(effect_runtime *runtime,
+	sunshine_streamline::content::copy_snapshot *copy, uint64_t *texture, uint64_t *lifetime)
+{
+	if (!s_registered || runtime == nullptr || copy == nullptr || texture == nullptr || lifetime == nullptr) return FALSE;
+	*copy = {}; *texture = *lifetime = 0;
+	if (runtime->get_device()->get_api() != device_api::d3d12) return FALSE;
+	const auto *data = runtime->get_private_data<generic_depth_data>();
+	const auto *device_data = runtime->get_device()->get_private_data<generic_depth_device_data>();
+	if (!data || !device_data || !data->native_access_open || !data->capture_ready || data->selected_record.direct ||
+		data->native_access_present != device_data->native_present_index ||
+		!validate_capture_record(runtime, *data, *device_data, data->selected_record)) return FALSE;
+	const resource source{data->selected_record.source};
+	const std::shared_lock<std::shared_mutex> lock(s_mutex);
+	const auto found = device_data->depth_stencil_resources.find(source);
+	const auto backup = std::find_if(device_data->depth_stencil_backups.begin(), device_data->depth_stencil_backups.end(),
+		[source](const auto &entry) { return entry.depth_stencil == source; });
+	if (found == device_data->depth_stencil_resources.end() || found->second.identity != data->selected_record.identity ||
+		backup == device_data->depth_stencil_backups.end()) return FALSE;
+	const auto &ticket = found->second.last_frame_stats.capture_ticket;
+	if (!ticket || backup->published_ticket != ticket.id || backup->published_present != device_data->native_present_index) return FALSE;
+	*copy = found->second.last_frame_stats.depth_copy;
+	*texture = ticket.texture; *lifetime = ticket.resource_id;
+	return TRUE;
 }
 
 extern "C" __declspec(dllexport) BOOL SunshineDepthTestLegacyCalibrationState(effect_runtime *runtime, unsigned *requested, unsigned *entries)

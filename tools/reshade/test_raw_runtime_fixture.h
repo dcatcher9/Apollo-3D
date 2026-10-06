@@ -2,8 +2,7 @@
 #pragma once
 
 // Shared actual-runtime observations only. Calibration expectations and scenario
-// entrypoints belong to each fixture, so current adaptive tests never compile
-// or inherit the historical fixed-reference test program.
+// entrypoints belong to each fixture.
 #define SUNSHINE_RAW_SCENE_RUNTIME
 #include "test_depth_selection_runtime.cpp"
 #include <map>

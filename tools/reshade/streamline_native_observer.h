@@ -51,6 +51,14 @@ namespace sunshine_streamline::native_observer {
   void initialize(callbacks value);
   void set_active(bool value);
   void shutdown();
+  // A second owner's view of submissions (the offscreen UI layer's cross-queue
+  // fence, game3d_ui_layer.h): called like callbacks::submitted, after the
+  // native ExecuteCommandLists returns and under the same suppression, while
+  // the capture owner keeps the observer active. Its failures are its own: a
+  // listener never invalidates the capture owner's evidence. Null removes it;
+  // an already entered call may still finish.
+  using submission_listener = void (*)(std::uint64_t queue, unsigned count, const command_identity *commands) noexcept;
+  void set_submission_listener(submission_listener value);
   // Live IUnknown objects only. Discovery first requires QueryInterface for the
   // exact graphics-command-list/queue interface and uses the returned pointer;
   // unrelated interfaces are rejected before reading any D3D12 method offsets.

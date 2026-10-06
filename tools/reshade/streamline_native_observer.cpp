@@ -50,6 +50,7 @@ namespace sunshine_streamline::native_observer {
     std::atomic<decltype(callbacks::invalidated)> invalidated_callback{};
     std::atomic<decltype(callbacks::enhanced_textures)> enhanced_textures_callback{};
     std::atomic<decltype(callbacks::associate_recording)> associate_recording_callback{};
+    std::atomic<submission_listener> listener_callback{};
     std::atomic<std::uint64_t> calls{}, observed{}, unreadable{}, dropped{}, installed{}, rejected{}, nested{}, suppressed{};
     std::atomic<std::uint64_t> barrier_overflow{}, submission_overflow{}, discovery_contention{};
     thread_local unsigned suppression_depth{};
@@ -121,6 +122,14 @@ namespace sunshine_streamline::native_observer {
         }
       }
     }
+    // The submission listener: the same post-call point and suppression as
+    // notify, without its fail-closed invalidation (the listener is noexcept).
+    void listen(std::uintptr_t queue, unsigned count, const command_identity *commands) noexcept {
+      const auto listener = listener_callback.load(std::memory_order_acquire);
+      if (!listener || !enabled() || suppression_depth) return;
+      suppression_scope scope;
+      listener(queue, count, commands);
+    }
     void invalidate() noexcept { notify(invalidated_callback.load(std::memory_order_acquire)); }
     void drop(bool unreadable_input) noexcept {
       if (unreadable_input) ++unreadable;
@@ -188,6 +197,7 @@ namespace sunshine_streamline::native_observer {
       if (!call.notify()) return;
       if (!complete) { if (!allocated) ++submission_overflow; drop(allocated); return; }
       notify(submitted_callback.load(std::memory_order_acquire), reinterpret_cast<std::uintptr_t>(queue), count, identities.data());
+      listen(reinterpret_cast<std::uintptr_t>(queue), count, identities.data());
     }
     template<unsigned Index> void STDMETHODCALLTYPE enhanced_detour(ID3D12GraphicsCommandList7 *command, UINT32 count, const D3D12_BARRIER_GROUP *groups) {
       const DWORD incoming = GetLastError();
@@ -381,6 +391,9 @@ namespace sunshine_streamline::native_observer {
     requested.store(false, std::memory_order_release);
     ++activation_epoch;
   }
+  void set_submission_listener(submission_listener value) {
+    listener_callback.store(value, std::memory_order_release);
+  }
   void observe_command(std::uint64_t command) {
     if (sunshine_addon_lifetime::stopping() || !requested.load(std::memory_order_acquire) || suppression_depth) return;
     const restore_error incoming{GetLastError()};
@@ -505,7 +518,7 @@ namespace sunshine_streamline::native_observer {
     calls = observed = unreadable = dropped = installed = rejected = nested = suppressed = 0;
     barrier_overflow = submission_overflow = discovery_contention = 0;
     barrier_callback = nullptr; submitted_callback = nullptr; invalidated_callback = nullptr;
-    enhanced_textures_callback = nullptr; associate_recording_callback = nullptr;
+    enhanced_textures_callback = nullptr; associate_recording_callback = nullptr; listener_callback = nullptr;
   }
 #endif
 }

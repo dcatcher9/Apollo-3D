@@ -25,7 +25,7 @@ namespace sunshine_game3d {
   // Why a detection frame decided no mask (source 0). Exactly one reason per
   // such frame, the first that applies in this order (ui_selection::decide):
   // an informative full claim acted but H1 did not apply, because the CPU
-  // holds no hidden verdict or the depth is not this frame's (gate_no_hold,
+  // holds no hidden verdict (gate_no_hold,
   // the name kept for log compatibility); an offered, accepted declared alpha blocked an accepted,
   // valid inferred alpha (presented_blocked: every such declared alpha was
   // V1-invalid, since a valid one decides); an offered, accepted alpha was
@@ -66,7 +66,8 @@ namespace sunshine_game3d {
     // tag 2, Backbuffer 3 or current 4; before selection revision 10 inferred
     // alpha only) that the same frame's valid exact pair contradicts in the
     // one-way test (A2): at least a tenth of its pixels with alpha of at least
-    // 1/2 lie where the HUD-less image is lit and unchanged. The acceptance
+    // 1/2 lie where the HUD-less image is lit and unchanged against both the
+    // pair's colour and the presented frame. The acceptance
     // ledger revokes it from such samples. Since selection revision 10 the
     // one-way counts exist on sample frames only, so this counts samples.
     inline constexpr std::size_t contradicted = 17;

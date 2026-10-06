@@ -235,6 +235,43 @@ float ps(float4 position : SV_Position) : SV_Depth {
             require(channel(pixels, x, y, c) == channel(pixels, x + width, y, c), "Unavailable production depth does not give identical eyes");
     }
 
+    // An FX reload rebuilds every uniform at its initializer; the reference
+    // Sunshine_DepthReady has none, so it reads false until the add-on writes
+    // bufready_depth again. Readiness is published change-only, so keep
+    // drawing the same depth across the reload: its value does not change,
+    // and only the reload's invalidation of that cache can rewrite it into
+    // the rebuilt uniform.
+    void reload_with_unchanged_depth() {
+      require(flag("Sunshine_DepthReady"), "Reference readiness was not published before the FX reload");
+      const auto reloads = observed.reloads;
+      observed.runtime->reload_effect_next_frame(nullptr);
+      const auto reload_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(45);
+      while (observed.reloads == reloads && std::chrono::steady_clock::now() < reload_deadline) step();
+      require(observed.reloads > reloads, "Reference FX reload did not complete");
+      const auto renders = observed.renders;
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+      unsigned frames = 0;
+      do {
+        step(); ++frames;
+      } while ((observed.renders == renders || !flag("Sunshine_DepthReady")) && std::chrono::steady_clock::now() < deadline);
+      std::printf("MEASURE production readiness after FX reload frames=%u\n", frames);
+      require(observed.renders > renders && flag("Sunshine_DepthReady"),
+        "Reloaded reference effect lost unchanged depth readiness (bufready_depth not republished after reload)");
+
+      // The rebuilt uniform still follows the current frame both ways.
+      render_tracked_depth = {};
+      step();
+      require(!flag("Sunshine_DepthReady"), "Reloaded reference effect kept depth readiness on a color-only present");
+      render_tracked_depth = [&] { if (scene) draw_scene(*scene); if (decoy) draw_scene(*decoy); };
+      // The reload also rebuilt the export texture and the fixture's controls.
+      find_texture("DoubleTex", exported, width * 2, color == 1 ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_R16G16B16A16_FLOAT);
+      set_int("DepthDirection", 0);
+      set_bool("DepthView", true);
+      wait_calibrated("after FX reload", scene->normal);
+      verify_scene("after FX reload");
+      std::puts("PASS reloaded reference effect republishes unchanged depth readiness, then follows depth loss and return");
+    }
+
     void run_production() {
       // Compile/initialize with no scene, so subsequent startup cannot inherit
       // samples gathered while waiting for shader compilation.
@@ -281,6 +318,8 @@ float ps(float4 position : SV_Position) : SV_Depth {
       require_duplicate_eyes();
       wait_calibrated("same-resource offset change", true);
       verify_scene("same-resource offset change");
+
+      reload_with_unchanged_depth();
       require(!observed.inject && observed.ready_uniforms.empty(), "Fixture unexpectedly injected production inputs");
       std::printf("PASS production native depth selection/calibration integration (%s; no manual override)\n",
         statistics_mode ? "Auto-select OFF, draw statistics" : "Auto-select ON, content selection");

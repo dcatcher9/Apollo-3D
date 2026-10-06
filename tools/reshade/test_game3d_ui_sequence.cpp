@@ -874,8 +874,9 @@ namespace {
       if (!sample) {
         return;
       }
+      // Depth that is not this frame's measures no evidence.
       const bool proven_image = r.layer_proven && ui_selection::pre_ui_image_of(bits) == ui_detection::pre_ui_image::layer;
-      const bool evidence = guard.measure(now, proven_image);
+      const bool evidence = !(per_frame & ui_detection::per_frame_depth_not_current) && guard.measure(now, proven_image);
       pending_actionable = evidence;
       // The reduce zeroes texels 5 and 6; only the evidence passes write them.
       if (!evidence) {
@@ -1431,8 +1432,9 @@ namespace {
   void invalid_declared_source_never_lapses_and_forget_clears() {
     {
       // A3: a restored declared tag offered but invalid (more than 1%
-      // invalid pixels, V1) re-arms its reconfirm clock, so it never lapses
-      // during an invalid run however long; it confirms at its first valid
+      // invalid pixels, V1) is not testable and its reconfirm clock does not
+      // count, so it never lapses during an invalid run however long; it
+      // confirms at its first valid
       // selective sample afterwards. Meanwhile it decides nothing: no
       // decision of its own, and the T1 grace reuses only a decision of its
       // own, which no frame of the run had.
@@ -1681,8 +1683,8 @@ namespace {
           require(i >= entry || (f.decision.none_reason == ui_no_mask::gate_no_hold && f.decision.refused == candidate::hudless), "The title before the hold did not name its acting claim");
         } else if (f.now_ms >= 13000) {
           // The label follows the frame's own pushed bits: 8 exactly where
-          // the held hidden verdict acts with this frame's depth, else 6.
-          const bool hidden = (f.gpu.per_frame & ui_detection::per_frame_scene_hidden) && !(f.gpu.per_frame & ui_detection::per_frame_depth_not_current);
+          // the held hidden verdict acts, reused depth included, else 6.
+          const bool hidden = (f.gpu.per_frame & ui_detection::per_frame_scene_hidden) != 0u;
           relabelled += hidden ? 1 : 0;
           require(f.flat() && f.decision.s1_source == 6 && f.source == (hidden ? 8u : 6u) && f.decision.h1 == hidden, "The accepted pair did not decide the title flat, or H1 did not relabel it exactly under the held verdict");
         }
@@ -1692,6 +1694,50 @@ namespace {
       const auto c = session.counters();
       require(c[ui_counter::scene_entered] == 2 && c[ui_counter::scene_released] == 1 && !c[ui_counter::scene_refuted] && c[ui_counter::full_d_hidden] > 0 && !c[ui_counter::full_d_visible], "The title's H1 hold was not counted entered twice and released once");
       check_counters(s, "Hogwarts title");
+    }
+    {
+      // H1 under frame generation with reused depth: each generated Present
+      // re-offers the real frame's exact pair, so it detects, and consumes
+      // the real frame's depth (per_frame_depth_not_current). Its samples
+      // measure no evidence; the hold that the real frames' samples enter
+      // acts on every Present, so none of the held window falls back to its
+      // own S1 decision (none: the pair is not accepted).
+      alpha_auto_policy session;
+      sequence s(session, recorded_frames({recorded::hl_title, recorded::hl_title_held, recorded::hl_title_accepted}));
+      bool real = true;
+      for (std::uint64_t now = 10000; now < 12000; now += 8, real = !real) {
+        auto q = p;
+        q.now_ms = now;
+        q.depth_current = real;
+        s.step(q);
+      }
+      std::size_t entry = s.frames.size(), reused = 0;
+      for (std::size_t i = 0; i != s.frames.size() && entry == s.frames.size(); ++i) {
+        if (s.frames[i].gpu.per_frame & ui_detection::per_frame_scene_hidden) {
+          entry = i;
+        }
+      }
+      require(entry < s.frames.size(), "The title under FG never entered the hidden-scene hold");
+      for (std::size_t i = entry; i != s.frames.size(); ++i) {
+        const auto &f = s.frames[i];
+        reused += (f.gpu.per_frame & ui_detection::per_frame_depth_not_current) ? 1 : 0;
+        require((f.gpu.per_frame & ui_detection::per_frame_scene_hidden) && f.flat() && f.source == 8 && f.decision.h1, "A Present of the held window, reused depth included, was not flat as 8");
+      }
+      require(reused * 3 > (s.frames.size() - entry), "The held window had too few Presents over reused depth");
+      std::size_t unmeasured = 0;
+      for (const auto &f : s.frames) {
+        if (!f.submitted || !(f.gpu.per_frame & ui_detection::per_frame_depth_not_current)) {
+          continue;
+        }
+        for (const auto &sample : s.samples) {
+          if (sample.sample_tick_ms == f.now_ms) {
+            require(!measured(sample), "A sample over reused depth measured hidden-scene evidence");
+            ++unmeasured;
+          }
+        }
+      }
+      require(unmeasured > 0, "No sample was taken over reused depth");
+      check_counters(s, "Hogwarts title FG reused depth");
     }
   }
 
@@ -3598,13 +3644,14 @@ namespace {
   }
 
   // The tick of the sample at which a restored pre-UI proof lapses (A3, fix
-  // 1), zero when none does: its reconfirm clock runs from a testable sample
-  // (the layer offered without coverage while the presented frame's evidence
-  // is valid and visible) to the next sample that is not, and the proof
-  // lapses at the testable sample by which the clock has run
-  // alpha_trust_reconfirm_ms. The stream must not re-earn it.
+  // 1), zero when none does: its reconfirm clock counts the gaps between
+  // consecutive testable samples (the layer offered without coverage while
+  // the presented frame's evidence is valid and visible), each capped at
+  // alpha_trust_reconfirm_gap_ms, and the proof lapses at the testable sample
+  // by which it has counted alpha_trust_reconfirm_ms. The stream must not
+  // re-earn it.
   std::uint64_t pre_ui_lapse_tick(const sequence &s, std::uint64_t from) {
-    std::uint64_t elapsed = 0, running = 0;
+    std::uint64_t counted = 0, last = 0;
     for (const auto &sample : s.samples) {
       if (sample.sample_tick_ms < from) {
         continue;
@@ -3612,12 +3659,13 @@ namespace {
       const auto &e = sample.evidence;
       const bool testable = (e.candidates & candidate::layer) && !e.layer_covered && measured(sample) && e.scene.valid && e.scene.verdict == scene_verdict::visible;
       if (!testable) {
-        elapsed += running ? sample.sample_tick_ms - running : 0;
-        running = 0;
         continue;
       }
-      running = running ? running : sample.sample_tick_ms;
-      if (elapsed + (sample.sample_tick_ms - running) >= alpha_trust_reconfirm_ms) {
+      if (last && sample.sample_tick_ms > last) {
+        counted += std::min(sample.sample_tick_ms - last, alpha_trust_reconfirm_gap_ms);
+      }
+      last = sample.sample_tick_ms;
+      if (counted >= alpha_trust_reconfirm_ms) {
         return sample.sample_tick_ms;
       }
     }

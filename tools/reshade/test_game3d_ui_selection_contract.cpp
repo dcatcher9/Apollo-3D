@@ -958,6 +958,104 @@ namespace {
     return view;
   }
 
+  // One dispatch of the tiles pass over a 256 x 144 frame with these views
+  // bound and these b2 constants: its statistics rows, each tile's parts
+  // added as the reduce adds them (row * 16 + tile column).
+  std::vector<texel> tile_rows(gpu_t &gpu, ID3D11ComputeShader *tiles, const std::array<ID3D11ShaderResourceView *, 15> &bound,
+      const detection_constants &constants) {
+    D3D11_TEXTURE2D_DESC desc{};
+    constexpr std::size_t columns = detection::statistics_columns(detection::tile_parts);
+    desc.Width = UINT(columns);
+    desc.Height = detection::statistics_row_count;
+    desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
+    desc.Format = DXGI_FORMAT_R32G32B32A32_UINT;
+    desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+    ComPtr<ID3D11Texture2D> statistics, staging;
+    ComPtr<ID3D11UnorderedAccessView> statistics_view;
+    checked(gpu.device->CreateTexture2D(&desc, nullptr, &statistics), "tile statistics");
+    checked(gpu.device->CreateUnorderedAccessView(statistics.Get(), nullptr, &statistics_view), "tile statistics view");
+    desc.BindFlags = 0;
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    checked(gpu.device->CreateTexture2D(&desc, nullptr, &staging), "tile statistics staging");
+    gpu.context->UpdateSubresource(gpu.constants.Get(), 0, nullptr, &constants, 0, 0);
+    gpu.context->CSSetShader(tiles, nullptr, 0);
+    gpu.context->CSSetShaderResources(0, UINT(bound.size()), bound.data());
+    ID3D11Buffer *buffers[3]{nullptr, nullptr, gpu.constants.Get()};
+    gpu.context->CSSetConstantBuffers(0, 3, buffers);
+    ID3D11UnorderedAccessView *uav = statistics_view.Get();
+    gpu.context->CSSetUnorderedAccessViews(6, 1, &uav, nullptr);
+    // Each tile in its parts (group z), at columns 16 apart; the CPU adds
+    // them as the reduce does.
+    gpu.context->Dispatch(16, 16, detection::tile_parts);
+    ID3D11UnorderedAccessView *none = nullptr;
+    gpu.context->CSSetUnorderedAccessViews(6, 1, &none, nullptr);
+    ID3D11ShaderResourceView *cleared[15]{};
+    gpu.context->CSSetShaderResources(0, 15, cleared);
+    const auto parts = read<texel>(gpu, statistics.Get(), staging.Get(), columns * detection::statistics_row_count);
+    std::vector<texel> rows(16 * detection::statistics_row_count);
+    for (std::size_t row = 0; row != detection::statistics_row_count; ++row)
+      for (std::size_t column = 0; column != 16; ++column)
+        for (std::size_t part = 0; part != detection::tile_parts; ++part)
+          for (std::size_t k = 0; k != 4; ++k)
+            rows[row * 16 + column][k] += parts[row * columns + part * 16 + column][k];
+    return rows;
+  }
+
+  // A2 beside a Backbuffer tagged before the UI (the 10-05 review): an exact
+  // pair whose tagged Backbuffer (t0) equals the lit HUD-less image (t14)
+  // everywhere, so the set is empty, and a correct UIAlpha (t11) on a HUD
+  // region. Where the presented frame (t6) shows that HUD, its pixels changed
+  // against the HUD-less image: strong, never contradicted, and the tag is
+  // not refuted (until then, every strong pixel read contradicted). Where the
+  // presented frame shows the scene unchanged under the same alpha, the alpha
+  // marks no UI on screen and is contradicted. Current alpha (t6 .a) on the
+  // HUD region is judged the same way.
+  void check_pre_ui_tag(gpu_t &gpu, ID3D11ComputeShader *tiles) {
+    const auto hud = [](std::uint32_t x, std::uint32_t y) { return x < 64 && y < 36; };
+    constexpr std::uint32_t hud_pixels = 64 * 36;
+    const std::vector<std::array<float, 4>> pair(256 * 144, {.5f, .4f, .3f, 1.f});
+    std::vector<std::array<float, 4>> ui_alpha(256 * 144);
+    for (std::uint32_t y = 0; y != 144; ++y)
+      for (std::uint32_t x = 0; x != 256; ++x) ui_alpha[y * 256 + x] = {hud(x, y) ? 1.f : 0.f, 0.f, 0.f, 1.f};
+    for (const bool shown : {true, false}) {
+      std::vector<std::array<float, 4>> presented(256 * 144);
+      for (std::uint32_t y = 0; y != 144; ++y)
+        for (std::uint32_t x = 0; x != 256; ++x) {
+          const auto i = y * 256 + x;
+          presented[i] = hud(x, y) && shown ? std::array<float, 4>{.95f, .95f, .9f, 1.f} : pair[i];
+          presented[i][3] = hud(x, y) ? 1.f : 0.f;
+        }
+      const auto t0 = float_image(gpu, pair), t6 = float_image(gpu, presented), t11 = float_image(gpu, ui_alpha),
+        t14 = float_image(gpu, pair);
+      std::array<ID3D11ShaderResourceView *, 15> bound{};
+      bound[0] = t0.Get();
+      bound[6] = t6.Get();
+      bound[11] = t11.Get();
+      bound[14] = t14.Get();
+      const std::uint32_t offered = candidate::ui_alpha | candidate::current | candidate::hudless | candidate::exact;
+      const auto rows = tile_rows(gpu, tiles, bound, {offered, 2.f / 255.f, 0u, detection::per_frame_sample, 0.f, {}});
+      texel strong{}, contradicted{}, difference{};
+      for (std::size_t lane = 0; lane != 256; ++lane) {
+        const std::size_t column = lane % 16, row = lane / 16;
+        for (std::size_t k = 0; k != 4; ++k) {
+          strong[k] += rows[(row + detection::judgment_statistics_row) * 16 + column][k];
+          contradicted[k] += rows[(row + detection::judgment_statistics_row + 16) * 16 + column][k];
+          difference[k] += rows[(row + 32) * 16 + column][k];
+        }
+      }
+      require(!difference[0] && difference[2] == 256u * 144u, "A2 pre-UI tag: the exact pair was not an empty change set");
+      require(strong[0] == hud_pixels && strong[3] == hud_pixels, "A2 pre-UI tag: the HUD's strong pixels were not counted");
+      if (shown)
+        require(!contradicted[0] && !contradicted[3] && !selection::one_way_contradicted(strong[0], contradicted[0]),
+          "A2 pre-UI tag: a UIAlpha whose UI the presented frame shows was contradicted by a pair tagged before the UI");
+      else
+        require(contradicted[0] == hud_pixels && contradicted[3] == hud_pixels &&
+            selection::one_way_contradicted(strong[0], contradicted[0]),
+          "A2 pre-UI tag: alpha over the unchanged scene on screen was not contradicted");
+    }
+  }
+
   // The tiles pass's statistics (rows 0-111: alpha coverage and invalid
   // pixels, the HUD-less difference, lit and opaque pixels, the layer's
   // counts and the one-way judgment counts) on images of edge values, against
@@ -968,10 +1066,12 @@ namespace {
   // (V1); changed beyond the threshold, unchanged within half of it, lit
   // beyond eight times it (V2); on a status sample (per_frame_sample) only,
   // strong is alpha in [1/2, 1] of UIAlpha, the UI color tag, Backbuffer
-  // and current alpha, contradicted a strong pixel where an offered exact
-  // pair's HUD-less image is lit and unchanged, none without an exact pair
-  // nor of a declared tag pushed unaligned (A2; the layer copy is never
-  // judged, E2), and rows 128-143, the layer's
+  // and current alpha (the presented colour's, t6), contradicted a strong
+  // pixel where an offered exact pair's HUD-less image is lit and unchanged
+  // against both its paired colour (t0) and the presented colour (t6), none
+  // without an exact pair nor of a declared tag pushed unaligned (A2; the
+  // layer copy is never judged, E2); the difference and lit counts only
+  // with an offered HUD-less image (t0 is read only then); and rows 128-143, the layer's
   // colour against the presented colour (t6) at 8 times pre_ui_threshold
   // (b2 word 4; zero compares nothing): matching and lit layer pixels,
   // relative above one in scRGB (H1 d); a frame that is not a sample writes
@@ -985,12 +1085,14 @@ namespace {
     const std::array<std::array<float, 4>, 12> layers{{{0.f, 0.f, 0.f, 0.f}, {.5f, .5f, .5f, .5f}, {1.f, 1.f, 1.f, .1f},
       {.3f, 0.f, 0.f, 0.f}, {nan, 0.f, 0.f, .2f}, {0.f, 0.f, 0.f, -0.f}, {20.f, 0.f, 0.f, .5f}, {.2f, .2f, .2f, .999f},
       {0.f, 0.f, 0.f, nan}, {0.f, 0.f, 0.f, inf}, {.1f, .1f, .1f, 1.f}, {0.f, 0.f, 0.f, .49999997f}}};
-    // The current color (t0) and HUD-less (t14) rgb: lit or dark, equal,
+    // The paired color (t0) and HUD-less (t14) rgb: lit or dark, equal,
     // changed or non-finite.
     const std::array<float, 4> colors{.5f, .01f, 0.f, .25f};
     const std::array<float, 4> offsets{0.f, .5f, nan, .001f};
-    // The presented colour (t6): the layer's rgb moved by these multiples of
-    // the coarse threshold (none on a bound), or non-finite, or far brighter.
+    // The presented colour (t6): on a third of the pixels the paired colour
+    // (so the one-way test sees a pixel unchanged in both), else the layer's
+    // rgb moved by these multiples of the coarse threshold (none on a
+    // bound), or non-finite, or far brighter; its alpha is current alpha.
     const float coarse = pre_ui_threshold * 8.f;
     const std::array<float, 7> presented_offsets{0.f, .25f, -.5f, 3.f, -2.f, nan, 40.f};
     std::array<std::vector<std::array<float, 4>>, 7> images; // t11, t12, t13, t0, t7, t14, t6
@@ -1008,12 +1110,15 @@ namespace {
         const float moved = presented_offsets[(x * 3 + y * 5) % presented_offsets.size()] *
           (pre_ui_threshold > 0.f ? coarse : 16.f / 255.f);
         const auto &l = images[4][i];
-        images[6][i] = {l[0] + moved, l[1], l[2] + moved * .5f, 1.f};
+        const float current = alphas[(x * 7 + y * 2) % alphas.size()];
+        images[6][i] = (x + 3 * y) % 3 ? std::array<float, 4>{l[0] + moved, l[1], l[2] + moved * .5f, current} :
+          std::array<float, 4>{color, color, color, current};
       }
     // A candidate that is not offered is not bound, as the renderer and the
     // replay bind them: it reads zero (the pass skips its loads).
     const std::array<std::pair<std::size_t, std::uint32_t>, 5> slots{{{0, candidate::ui_alpha}, {1, candidate::ui_color},
       {2, candidate::backbuffer}, {4, candidate::layer}, {5, candidate::hudless}}};
+    const bool hudless_offered = (offered & candidate::hudless) != 0u;
     for (const auto &[image, bit] : slots)
       if (!(offered & bit)) std::fill(images[image].begin(), images[image].end(), std::array<float, 4>{});
     const auto okay = [](float a) { return std::isfinite(a) && a >= 0.f && a <= 1.f; };
@@ -1031,7 +1136,8 @@ namespace {
     for (std::uint32_t y = 0; y != 144; ++y)
       for (std::uint32_t x = 0; x != 256; ++x) {
         const auto i = y * 256 + x, tile = (y / 9) * 16 + x / 16;
-        const float a[4]{images[0][i][0], images[1][i][3], images[2][i][3], images[3][i][3]};
+        const float a[4]{images[0][i][0], images[1][i][3], images[2][i][3],
+          (offered & candidate::current) ? images[6][i][3] : 0.f};
         for (std::size_t k = 0; k != 4; ++k) {
           coverage[tile][k] += okay(a[k]) && a[k] > 0.f;
           invalid[tile][k] += !okay(a[k]);
@@ -1047,20 +1153,26 @@ namespace {
         layer[tile][2] += okay(l[3]) && l[3] >= opaque && !beyond;
         layer[tile][3] += okay(a[3]) && a[3] >= opaque;
         bound_counts[tile][0] += beyond;
-        // SunshineHUDlessDifference, relative above one in scRGB.
-        const auto &current = images[3][i], &hudless = images[5][i];
-        const bool finite = std::isfinite(current[0]) && std::isfinite(current[1]) && std::isfinite(current[2]) &&
-          std::isfinite(hudless[0]) && std::isfinite(hudless[1]) && std::isfinite(hudless[2]);
-        const float delta = std::max({std::abs(current[0] - hudless[0]), std::abs(current[1] - hudless[1]),
-          std::abs(current[2] - hudless[2])}) / (color == 2 ? std::max(1.f, peak(current)) : 1.f);
-        const bool unchanged = finite && delta <= threshold * .5f;
-        const bool lit_pixel = finite && std::max({std::abs(hudless[0]), std::abs(hudless[1]), std::abs(hudless[2])}) > threshold * 8.f;
-        difference[tile][0] += finite && delta > threshold;
-        difference[tile][1] += !finite;
+        // SunshineHUDlessDifference, relative above one in scRGB, of the
+        // paired colour (t0) and of the presented colour (t6).
+        const auto &hudless = images[5][i];
+        const auto apart = [&](const std::array<float, 4> &v, bool &finite) {
+          finite = std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]) &&
+            std::isfinite(hudless[0]) && std::isfinite(hudless[1]) && std::isfinite(hudless[2]);
+          return std::max({std::abs(v[0] - hudless[0]), std::abs(v[1] - hudless[1]), std::abs(v[2] - hudless[2])}) /
+            (color == 2 ? std::max(1.f, peak(v)) : 1.f);
+        };
+        bool finite = false, shown_finite = false;
+        const float delta = apart(images[3][i], finite), shown_delta = apart(images[6][i], shown_finite);
+        const bool unchanged = hudless_offered && finite && delta <= threshold * .5f;
+        const bool lit_pixel = hudless_offered && finite &&
+          std::max({std::abs(hudless[0]), std::abs(hudless[1]), std::abs(hudless[2])}) > threshold * 8.f;
+        difference[tile][0] += hudless_offered && finite && delta > threshold;
+        difference[tile][1] += hudless_offered && !finite;
         difference[tile][2] += unchanged;
         difference[tile][3] += 1u;
         lit[tile][0] += lit_pixel;
-        const bool shown = lit_pixel && unchanged;
+        const bool shown = lit_pixel && unchanged && shown_finite && shown_delta <= threshold * .5f;
         for (std::size_t k = 0; k != 4; ++k) {
           strong_counts[tile][k] += judging && judged[k] && strong(a[k]);
           contradicted[tile][k] += judging && judged[k] && strong(a[k]) && shown;
@@ -1080,24 +1192,7 @@ namespace {
       }
     std::array<ComPtr<ID3D11ShaderResourceView>, 7> views;
     for (std::size_t k = 0; k != views.size(); ++k) views[k] = float_image(gpu, images[k]);
-    D3D11_TEXTURE2D_DESC desc{};
-    constexpr std::size_t columns = detection::statistics_columns(detection::tile_parts);
-    desc.Width = UINT(columns);
-    desc.Height = detection::statistics_row_count;
-    desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
-    desc.Format = DXGI_FORMAT_R32G32B32A32_UINT;
-    desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
-    ComPtr<ID3D11Texture2D> statistics, staging;
-    ComPtr<ID3D11UnorderedAccessView> statistics_view;
-    checked(gpu.device->CreateTexture2D(&desc, nullptr, &statistics), "tile statistics");
-    checked(gpu.device->CreateUnorderedAccessView(statistics.Get(), nullptr, &statistics_view), "tile statistics view");
-    desc.BindFlags = 0;
-    desc.Usage = D3D11_USAGE_STAGING;
-    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    checked(gpu.device->CreateTexture2D(&desc, nullptr, &staging), "tile statistics staging");
-    const detection_constants constants{offered, threshold, 0u, flags, pre_ui_threshold, {}};
-    gpu.context->UpdateSubresource(gpu.constants.Get(), 0, nullptr, &constants, 0, 0);
-    ID3D11ShaderResourceView *bound[15]{};
+    std::array<ID3D11ShaderResourceView *, 15> bound{};
     bound[0] = views[3].Get();
     bound[6] = views[6].Get();
     bound[7] = (offered & candidate::layer) ? views[4].Get() : nullptr;
@@ -1105,26 +1200,7 @@ namespace {
     bound[12] = (offered & candidate::ui_color) ? views[1].Get() : nullptr;
     bound[13] = (offered & candidate::backbuffer) ? views[2].Get() : nullptr;
     bound[14] = (offered & candidate::hudless) ? views[5].Get() : nullptr;
-    gpu.context->CSSetShader(tiles, nullptr, 0);
-    gpu.context->CSSetShaderResources(0, 15, bound);
-    ID3D11Buffer *buffers[3]{nullptr, nullptr, gpu.constants.Get()};
-    gpu.context->CSSetConstantBuffers(0, 3, buffers);
-    ID3D11UnorderedAccessView *uav = statistics_view.Get();
-    gpu.context->CSSetUnorderedAccessViews(6, 1, &uav, nullptr);
-    // Each tile in its parts (group z), at columns 16 apart; the CPU adds
-    // them as the reduce does.
-    gpu.context->Dispatch(16, 16, detection::tile_parts);
-    ID3D11UnorderedAccessView *none = nullptr;
-    gpu.context->CSSetUnorderedAccessViews(6, 1, &none, nullptr);
-    ID3D11ShaderResourceView *cleared[15]{};
-    gpu.context->CSSetShaderResources(0, 15, cleared);
-    const auto parts = read<texel>(gpu, statistics.Get(), staging.Get(), columns * detection::statistics_row_count);
-    std::vector<texel> rows(16 * detection::statistics_row_count);
-    for (std::size_t row = 0; row != detection::statistics_row_count; ++row)
-      for (std::size_t column = 0; column != 16; ++column)
-        for (std::size_t part = 0; part != detection::tile_parts; ++part)
-          for (std::size_t k = 0; k != 4; ++k)
-            rows[row * 16 + column][k] += parts[row * columns + part * 16 + column][k];
+    const auto rows = tile_rows(gpu, tiles, bound, {offered, threshold, 0u, flags, pre_ui_threshold, {}});
     std::uint32_t total_contradicted = 0, total_beyond = 0;
     texel total_pre_ui{};
     for (std::size_t lane = 0; lane != 256; ++lane) {
@@ -1487,8 +1563,9 @@ int main() {
       d = selection::decide(c, 0x04, 0x04, hidden);
       require(flat(d) && d.s1_source == 3u && d.claims == candidate::backbuffer,
         "H1: an accepted winner with transparent pixels was not shown flat");
-      // (b) An unaccepted, valid, opaque-full layer; refuted, or over reused
-      // depth, it does not act.
+      // (b) An unaccepted, valid, opaque-full layer; refuted, it does not
+      // act. Reused depth keeps the held verdict acting: the guard measured
+      // it on samples with current depth.
       c = {};
       c.pixels = 1000;
       c.covered = {0, 0, 1000, 0, 1000};
@@ -1499,8 +1576,10 @@ int main() {
       require(!d.source && d.claims == candidate::layer && d.none_reason != sunshine_game3d::ui_no_mask::gate_no_hold,
         "H1: a refuted layer claim acted");
       d = selection::decide(c, 0x48, 0x00, hidden | detection::per_frame_depth_not_current);
+      require(flat(d) && d.h1 && d.claims == candidate::layer, "H1: reused depth under a held verdict did not flatten");
+      d = selection::decide(c, 0x48, 0x00, detection::per_frame_depth_not_current);
       require(!d.source && d.none_reason == sunshine_game3d::ui_no_mask::gate_no_hold && d.refused == candidate::layer,
-        "H1: depth that is not this frame's must not apply H1");
+        "H1: reused depth without a held verdict applied H1");
       // An unaccepted opaque UIAlpha or UI color tag is never informative.
       c = {};
       c.pixels = 1000;
@@ -1570,7 +1649,7 @@ int main() {
       require(d.reused && d.source == 8u && !d.h1 && !d.full_alpha, "H1: a stored 8 was not reused by the T1 grace");
     }
     std::puts("PASS UI hidden scene (H1): informative claims (a)-(d) flatten under a held hidden verdict whatever S1 selected, "
-      "a flat winner relabelled 8; refuted, reused-depth, unaccepted declared and blocked inferred claims never do");
+      "reused depth included, a flat winner relabelled 8; refuted, unaccepted declared and blocked inferred claims never do");
 
     std::ifstream input(SUNSHINE_GAME3D_NATIVE_HLSL, std::ios::binary);
     require(input.good(), "Cannot read game3d_native.hlsl");
@@ -1613,6 +1692,7 @@ int main() {
         for (const std::uint32_t sample : {unsigned(detection::per_frame_sample), 0u})
           check_tiles(gpu, tiles.Get(), detection::layer_detection_flags(false) | sample |
             (unaligned << detection::per_frame_unaligned_shift), 0x7fu, space, color, sample ? 2.f / 255.f : 0.f);
+      check_pre_ui_tag(gpu, tiles.Get());
       // Partial offers leave the other candidates unbound, as live renders
       // do: the skipped loads count as the zero an unbound view reads.
       for (const std::uint32_t offered : {0x08u, 0x0cu, 0x49u, 0x3au, 0x16u})

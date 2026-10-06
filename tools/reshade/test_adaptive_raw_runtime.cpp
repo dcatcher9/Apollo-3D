@@ -1,42 +1,75 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Actual DSV -> selector/sampler -> published Automatic controls -> HDR shader.
-// Reuse the established native fixture; no depth, gain or readiness injection.
+// Actual DSV -> selector/sampler -> raw-depth scale controller -> native
+// Game 3D HDR rendering with no installed FX. No depth, gain or readiness
+// injection; the scale and screen-plane oracle is the owning contract's
+// formula applied to the independently known draw.
 #include "test_raw_runtime_fixture.h"
-#include "depth_addon.h"
+#include "test_game3d_native_observation.h"
+#include <deque>
 
 namespace {
   struct scheduling_stall : std::runtime_error { using std::runtime_error::runtime_error; };
-  using depth_query_t = BOOL (*)(api::effect_runtime *, sunshine_depth::frame_depth *);
-  depth_query_t depth_query = nullptr;
-  struct depth_observation { std::uint64_t native{}, lifetime{}, frame{}; unsigned render{}; bool valid{}; } current_depth;
-  unsigned last_depth_render_reload{};
-  void observe_depth(api::effect_runtime *runtime, api::effect_technique technique, api::command_list *, api::resource_view, api::resource_view) {
-    char name[256] {}; runtime->get_technique_name(technique, name);
-    if (!named(name, technique_name)) return;
-    last_depth_render_reload = observed.reloads;
-    current_depth = {};
-    sunshine_depth::frame_depth value;
-    if (depth_query && depth_query(runtime, &value) && value.ready)
-      current_depth = {value.source_resource.handle, value.source_id, value.frame_index, observed.renders, true};
-  }
   struct adaptive_fixture : raw_runtime_fixture {
     std::ofstream trajectory;
     std::uint64_t last_frame_completed_ms = 0;
     bool require_continuous_frames = false;
     using select_t = BOOL (*)(api::effect_runtime *, std::uint64_t);
-    using action_t = BOOL (*)(api::effect_runtime *);
     select_t select_manual = nullptr;
-    action_t recalibrate = nullptr;
+    native_game3d_observer game3d{*this};
+    // What the native render of the latest Present consumed.
+    sunshine_game3d::test::last_render latest;
+    std::uint64_t rendered_sequence = 0;
+    // Recent renders, to find the one a Dump 3D capture consumed.
+    std::deque<sunshine_game3d::test::last_render> recent;
     unsigned pattern(bool changed) const { return (normal ? 16u : 14u) + unsigned(changed); }
-    float gain() { return scalar("Sunshine_CameraDepthScale"); }
-    float blend() { return scalar("Sunshine_CameraStrengthBlend"); }
+    float gain() const { return latest.parameters.depth_scale; }
+    float zero() const { return latest.parameters.convergence[1]; }
+    float blend() const { return latest.parameters.strength_blend; }
+    bool ready() const { return latest.rendered && latest.parameters.depth_ready && latest.parameters.camera_ready; }
+
+    // docs/reshade-sbs.md, raw-depth automation: oriented raw t (t=d reversed,
+    // t=1-d normal) of the coherent bands and fixed center patch; gain L/Q
+    // from the full-image maximum Q, zero at the contrast midpoint
+    // b+0.5*sum(d*d)/sum(d) with b the minimum and d=t-b.
+    static double oriented(unsigned x, unsigned y, unsigned w, unsigned h, bool changed) {
+      const unsigned cx = std::min(31u, unsigned((float(x) + .5f) / float(w) * 32.f));
+      const unsigned cy = std::min(17u, unsigned((float(y) + .5f) / float(h) * 18.f));
+      const bool center = cx >= 14 && cx < 18 && cy >= 7 && cy < 11;
+      return center ? (changed ? .25 : .125) : double(cx / 8 + 1) / 16.;
+    }
+    std::array<double, 2> oracle(bool changed) const {
+      double minimum = 1, maximum = 0, sum = 0, square = 0;
+      for (unsigned y = 0; y < scene->height; ++y) for (unsigned x = 0; x < scene->width; ++x) {
+        const double t = oriented(x, y, scene->width, scene->height, changed);
+        minimum = std::min(minimum, t); maximum = std::max(maximum, t);
+      }
+      for (unsigned y = 0; y < scene->height; ++y) for (unsigned x = 0; x < scene->width; ++x) {
+        const double d = oriented(x, y, scene->width, scene->height, changed) - minimum;
+        sum += d; square += d * d;
+      }
+      return {limit() / maximum, minimum + .5 * square / sum};
+    }
+    // The full-strength normalization L of the output shape.
+    double limit() const {
+      const double c = (double(height) / 2160. * 100.) / double(width);
+      return std::min({std::min(1.5, .04 / c), std::min(2.5, .04 / c), .01 / c}) / .05;
+    }
+    static bool close(double actual, double expected) {
+      return std::isfinite(actual) && std::abs(actual - expected) <= 1e-5 * std::max(1., std::abs(expected));
+    }
     void record(const char *phase) {
-      trajectory << phase << ',' << GetTickCount64() << ',' << observed.renders << ',' << current_depth.native << ','
-        << current_depth.lifetime << ',' << current_depth.frame << ',' << ready() << ',' << gain() << ',' << zero()[1] << ',' << blend() << '\n';
+      trajectory << phase << ',' << GetTickCount64() << ',' << latest.sequence << ',' << latest.depth.source_resource.handle << ','
+        << latest.depth.source_id << ',' << latest.depth.frame_index << ',' << ready() << ',' << gain() << ',' << zero() << ',' << blend() << '\n';
       require(trajectory.good(), "Cannot record actual adaptive trajectory");
     }
     void frame(const char *phase) {
-      step(); record(phase);
+      step(); game3d.no_effects();
+      latest = game3d.last_render();
+      require(latest.sequence > rendered_sequence, "A Present had no native Game 3D render to observe");
+      rendered_sequence = latest.sequence;
+      recent.push_back(latest);
+      if (recent.size() > 64) recent.pop_front();
+      record(phase);
       const auto now = GetTickCount64(), previous = last_frame_completed_ms;
       last_frame_completed_ms = now;
       if (require_continuous_frames && previous && now - previous > 250) {
@@ -46,35 +79,47 @@ namespace {
       }
     }
     bool selected_scene() const {
-      return current_depth.valid && current_depth.render == observed.renders && current_depth.native == reinterpret_cast<std::uint64_t>(scene->texture.p);
+      return latest.depth.ready && latest.depth.source_resource.handle == reinterpret_cast<std::uint64_t>(scene->texture.p);
     }
     template<class Check> void pump(unsigned ms, const char *phase, Check check) {
       const auto end = GetTickCount64() + ms;
       do { frame(phase); check(); } while (GetTickCount64() < end);
     }
-    void verify_depth(bool changed) {
-      const auto bytes = selected_native_depth();
+    // One production Dump 3D capture: the exact depth and constants a native
+    // render consumed, and optionally its packed SBS.
+    native_render inspect(const char *phase, bool sbs = false) {
+      return game3d.capture(phase, sbs, [&] { frame(phase); });
+    }
+    void verify_depth(const char *phase, bool changed) {
+      const auto consumed = inspect(phase);
+      require(consumed.depth_ready && consumed.source_resource == reinterpret_cast<std::uint64_t>(scene->texture.p) &&
+        consumed.width == scene->width && consumed.height == scene->height,
+        "The native render did not consume the current adaptive scene depth");
       for (unsigned y = 0; y < 18; ++y) for (unsigned x = 0; x < 32; ++x) {
         const auto px = (2 * x + 1) * scene->width / 64, py = (2 * y + 1) * scene->height / 36;
-        float raw = 0; std::memcpy(&raw, bytes.data() + (size_t(py) * scene->width + px) * 4, 4);
+        const float raw = consumed.depth(px, py);
         const bool center = x >= 14 && x < 18 && y >= 7 && y < 11;
         const float expected = center ? (changed ? .25f : .125f) : (float(x / 8 + 1) / 16.f);
         require(std::isfinite(raw) && (normal ? 1.f - raw : raw) == expected,
-          "Selected native depth differs from the independent coherent-band/center draw oracle");
+          "Consumed native depth differs from the independent coherent-band/center draw oracle");
       }
-      const auto prep = read(linear_depth.p);
-      const auto desc = linear_depth->GetDesc();
-      const auto tx = unsigned(desc.Width / 2), ty = desc.Height / 2;
-      std::uint16_t value = 0; std::memcpy(&value, prep.data() + (size_t(ty) * desc.Width + tx) * 4 + 2, 2);
-      const float expected = 1.f / (1.f + gain() * (changed ? .25f : .125f));
-      require(std::abs(half_float(value) - expected) < .002f, "Actual shader preparation did not use current adaptive gain and center depth");
+      // The same render, as each Present observed it.
+      const auto same = std::find_if(recent.rbegin(), recent.rend(), [&](const auto &render) {
+        return render.depth.ready && render.depth.frame_index == consumed.frame_index &&
+          render.depth.source_resource.handle == consumed.source_resource;
+      });
+      require(same != recent.rend(), "The captured native render was not among the observed Presents");
+      require(consumed.camera_ready && consumed.coordinate_basis == 1 && same->parameters.camera_ready &&
+        consumed.depth_scale == same->parameters.depth_scale && consumed.convergence == same->parameters.convergence &&
+        consumed.strength_blend == same->parameters.strength_blend,
+        "The native render did not consume the adaptive gain and screen plane of its own Present");
     }
     void settle_ready(const char *phase, unsigned timeout = 12000) {
       const auto end = GetTickCount64() + timeout;
       do { frame(phase); } while ((!ready() || !selected_scene() || blend() != 1.f) && GetTickCount64() < end);
       require(ready() && selected_scene() && blend() == 1.f, "Adaptive source did not reach ready full-strength stereo");
     }
-    void qualify_source(const char *phase, float expected_gain, float expected_zero, std::uint64_t retired_lifetime = 0) {
+    void qualify_source(const char *phase, bool changed, std::uint64_t retired_lifetime = 0) {
       // No draw of this new source/action epoch has occurred before entry.
       // Its samples may arrive before the renderer first selects it, so the
       // fresh-window lower bound belongs to this earliest possible draw, not
@@ -86,7 +131,7 @@ namespace {
         if (GetTickCount64() - first_possible_draw < 650)
           require(!ready() && blend() == 0.f, "Source initialization reused old scale before one fresh reference window");
         if (selected_scene()) {
-          require(!retired_lifetime || current_depth.lifetime != retired_lifetime,
+          require(!retired_lifetime || latest.depth.source_id != retired_lifetime,
             "Destroyed source replacement reused the retired lifetime identity");
           if (!first_selected) first_selected = GetTickCount64();
         }
@@ -97,68 +142,13 @@ namespace {
       } while (GetTickCount64() < end);
       require(first_selected && first_ready && first_ready - first_selected <= 1400,
         "Fresh selected source failed the bounded single-window initialization");
-      require(gain() == expected_gain && std::abs(zero()[1] - expected_zero) < 1e-7f,
-        "New source inherited an old reference instead of its own center mean");
+      const auto expected = oracle(changed);
+      require(close(gain(), expected[0]) && close(zero(), expected[1]),
+        "New source inherited an old reference instead of initializing from its own range and contrast midpoint");
       std::printf("PASS source initialization %s: draw-entry-to-ready=%llu ms selected-to-ready=%llu ms H=%.9g t0=%.9g; one fresh window\n",
         phase, static_cast<unsigned long long>(first_ready - first_possible_draw),
-        static_cast<unsigned long long>(first_ready - first_selected), gain(), zero()[1]);
+        static_cast<unsigned long long>(first_ready - first_selected), gain(), zero());
       settle_ready(phase);
-    }
-    void check_effect_reload() {
-      if (!sunshine_camera_fixture::flag("SUNSHINE_DEPTH_RELOAD_TEST")) return;
-      const auto check_depth_readiness = [&](bool expected) {
-        unsigned matched = 0;
-        observed.runtime->enumerate_uniform_variables(effect_file, [&](api::effect_runtime *runtime, api::effect_uniform_variable variable) {
-          char source[32]{};
-          if (!runtime->get_annotation_string_from_uniform_variable(variable, "source", source) ||
-              std::strcmp(source, "bufready_depth") != 0) return;
-          bool value = false;
-          runtime->get_uniform_value_bool(variable, &value, 1);
-          require(value == expected, "Reloaded effect has stale or uninitialized depth-readiness uniforms");
-          ++matched;
-        });
-        require(matched != 0, "Reloaded effect has no actual depth-readiness uniforms to validate");
-      };
-      settle_ready("before-effect-reload");
-      check_depth_readiness(true);
-      const auto previous_reload = observed.reloads, previous_renders = observed.renders;
-      // Start with a ready effect, then withhold all depth while replacement
-      // effects compile. Their fresh uniforms must not inherit that readiness.
-      render_tracked_depth = {};
-      exported.reset(); linear_depth.reset();
-      observed.runtime->reload_effect_next_frame(nullptr);
-      const auto deadline = GetTickCount64() + 45000;
-      do {
-        // The usual frame logger reads camera uniforms. They are deliberately
-        // absent during compilation, so use only the real present pump here.
-        step();
-      } while ((observed.reloads == previous_reload || observed.renders == previous_renders ||
-          last_depth_render_reload != observed.reloads) && GetTickCount64() < deadline);
-      require(observed.reloads > previous_reload && observed.renders > previous_renders &&
-          last_depth_render_reload == observed.reloads,
-        "Official ReShade did not render the newly compiled effect after reload");
-      find_texture("DoubleTex", exported, width * 2, DXGI_FORMAT_R16G16B16A16_FLOAT);
-      find_texture("texzBufferN_P", linear_depth, 0, DXGI_FORMAT_R16G16_FLOAT);
-      set_int("Depth_Map_View", 0); set_float("Sharpen_Power", 0); set_float("Depth_Adjustment", 100);
-      pump(100, "reloaded-without-depth", [&] {
-        require(!current_depth.valid && !ready() && blend() == 0.f,
-          "New effect reused pre-reload capture or calibration without current depth");
-        check_depth_readiness(false);
-      });
-      const auto mono = check_current_mono();
-      // Change the actual game depth center from .25 to .125. A retained H=4
-      // or old sample cannot satisfy the fresh reference window and H=8 oracle.
-      scene->pattern = pattern(false);
-      render_tracked_depth = [&] { if (scene) draw(*scene); };
-      qualify_source("effect-reload-fresh-reference", 8.f, .125f);
-      check_depth_readiness(true);
-      verify_depth(false);
-      settle_ready("effect-reload-final");
-      const auto stereo = read(exported.p);
-      require(image_difference(mono, stereo) > .002f, "Reloaded current depth did not produce fresh stereo pixels");
-      for (unsigned y = 0; y < height; ++y) for (unsigned x = 0; x < width * 2; ++x) for (unsigned c = 0; c < 4; ++c)
-        require(std::isfinite(channel(stereo, x, y, c)), "Reloaded HDR export contains nonfinite RGBA");
-      std::puts("PASS actual effect reload reacquires shader resources, clears stale bufready/calibration, and renders fresh exact-depth HDR stereo");
     }
     void run_adaptive(bool reversed) {
       normal = !reversed;
@@ -171,67 +161,65 @@ namespace {
       render_tracked_depth = [&] { if (decoy) draw(*decoy); if (scene) draw(*scene); };
       const auto load_end = GetTickCount64() + 45000;
       while ((!observed.runtime || !observed.renders) && GetTickCount64() < load_end) step();
-      require(observed.runtime && observed.renders && !observed.inject, "Actual adaptive effect did not initialize without injected depth");
+      require(observed.runtime && observed.renders && !observed.inject, "Actual adaptive fixture did not initialize without injected depth");
       check_unified_addon();
       const auto module = GetModuleHandleW(L"SunshineSBSTest.addon64");
       select_manual = reinterpret_cast<select_t>(GetProcAddress(module, "SunshineDepthTestSelectManual"));
-      recalibrate = reinterpret_cast<action_t>(GetProcAddress(module, "SunshineGame3DTestRecalibrate"));
-      depth_query = reinterpret_cast<depth_query_t>(GetProcAddress(module, "SunshineDepthTestFrame"));
-      require(select_manual && recalibrate && depth_query, "Adaptive fixture requires existing test-only real UI/identity adapters");
-      reshade::register_event<reshade::addon_event::reshade_render_technique>(observe_depth);
-      set_int("Depth_Map_View", 0); set_int("USE_AA", 0); set_float("Sharpen_Power", 0); set_float("Depth_Adjustment", 100);
-      find_texture("DoubleTex", exported, width * 2, DXGI_FORMAT_R16G16B16A16_FLOAT);
-      find_texture("texzBufferN_P", linear_depth, 0, DXGI_FORMAT_R16G16_FLOAT);
-      observed.runtime->enumerate_techniques(effect_file, [&](api::effect_runtime *runtime, api::effect_technique technique) {
-        char name[256] {}; runtime->get_technique_name(technique, name);
-        std::printf("DIAGNOSTIC actual technique name=%s enabled=%d\n", name, runtime->get_technique_state(technique));
-      });
-      for (const char *name : {"Sunshine_CameraDepthReady", "Sunshine_CameraCoordinateBasis", "Sunshine_CameraProjection", "Sunshine_CameraDepthScale", "Sunshine_CameraConvergence", "Sunshine_CameraStrengthBlend"}) {
-        char source[128] {}; observed.runtime->get_annotation_string_from_uniform_variable(uniform(name), "source", source);
-        std::printf("DIAGNOSTIC actual uniform=%s source=%s\n", name, source);
-      }
+      require(select_manual, "Adaptive fixture requires the test-only real UI-selection adapter");
+      game3d.start();
+      game3d.set_strength(100);
+      rendered_sequence = game3d.await_render([&] { step(); });
       settle_ready("initial");
-      require(gain() == 8.f && zero()[1] == .125f, "Constant center did not initialize H=8 and t0=.125");
-      verify_depth(false);
+      const auto initial = oracle(false), changed_scene = oracle(true);
+      std::printf("MEASURE adaptive oracle constant H=%.9g t0=%.9g changed t0=%.9g\n", initial[0], initial[1], changed_scene[1]);
+      require(close(gain(), initial[0]) && close(zero(), initial[1]),
+        "Constant scene did not initialize gain L/Q and its contrast-midpoint screen plane");
+      verify_depth("initial-consumed", false);
       settle_ready("after-initial-readback");
-      const auto binding = selected_binding();
-      const auto constant = [&] { require(ready() && blend() == 1.f && gain() == 8.f && zero()[1] == .125f && selected_binding() == binding,
-        "Constant-source pin/unpin changed scale, zero, binding or ready strength"); };
+      const auto binding = latest.depth.resource.handle;
+      const float constant_gain = gain(), constant_zero = zero();
+      const auto constant = [&] { require(ready() && blend() == 1.f && gain() == constant_gain && zero() == constant_zero &&
+        latest.depth.resource.handle == binding, "Constant-source pin/unpin changed scale, zero, binding or ready strength"); };
       require(select_manual(observed.runtime, reinterpret_cast<std::uint64_t>(scene->texture.p)), "Cannot pin actual adaptive source");
       pump(1200, "constant-pin", constant);
       require(select_manual(observed.runtime, 0), "Cannot release actual adaptive source");
       pump(1200, "constant-unpin", constant);
-      std::puts("PASS constant center and same-source pin/unpin retain H=8, t0=.125, binding, readiness and full blend");
+      std::printf("PASS constant scene and same-source pin/unpin retain H=%.9g, t0=%.9g, binding, readiness and full blend\n",
+        constant_gain, constant_zero);
 
+      // Only the center patch changes: the nearest reference Q, hence the
+      // gain target, is unchanged while the zero follows the new contrast
+      // midpoint with exponential smoothing, never moving away from it.
       scene->pattern = pattern(true);
       const auto started = GetTickCount64();
       require_continuous_frames = true;
-      pump(7000, "zero-plane-reference-changed-scene", [&] {
-        const auto elapsed = GetTickCount64() - started;
-        const float H = gain();
-        require(ready() && blend() == 1.f && selected_scene() && H >= 4.f && H <= 8.f &&
-          std::abs(H * zero()[1] - 1.f) < 2e-6f,
-          "Changed scene broke coupled normalization or lost readiness/source");
-        if (elapsed >= 5000) {
-          require(std::abs(zero()[1] - .25f) < 2e-5f, "Independent screen plane did not settle");
-        }
+      double distance = std::abs(double(zero()) - changed_scene[1]);
+      pump(7000, "zero-plane-changed-scene", [&] {
+        require(ready() && blend() == 1.f && selected_scene() && gain() == constant_gain,
+          "Changed center patch moved the gain or lost readiness/source");
+        const double now_distance = std::abs(double(zero()) - changed_scene[1]);
+        require(now_distance <= distance + 1e-7, "Screen plane moved away from the changed scene's contrast midpoint");
+        distance = now_distance;
+        if (GetTickCount64() - started >= 5000)
+          require(close(zero(), changed_scene[1]), "Independent screen plane did not settle at the changed scene's contrast midpoint");
       });
       require_continuous_frames = false;
-      require(std::abs(gain() - 4.f) < .001f && std::abs(zero()[1] - .25f) < 2e-5f,
-        "Screen-plane normalization retained the initial scene's scale");
-      std::printf("PASS screen-plane reference=8 -> %.9g; t0=%.9g reciprocal coupled, full blend retained\n", gain(), zero()[1]);
-      verify_depth(true);
+      std::printf("PASS screen plane %.9g -> %.9g with gain held at %.9g; full blend retained\n", constant_zero, zero(), gain());
+      verify_depth("changed-consumed", true);
       settle_ready("after-adaptive-readback");
 
-      const float before_gap = gain(), zero_before_gap = zero()[1];
+      const float before_gap = gain(), zero_before_gap = zero();
       const auto gap_started = GetTickCount64();
       render_tracked_depth = {};
       const auto missing_publication = [&] {
-        // Mono frames deliberately retain the last published H/t0 uniforms.
-        // This checks publication. A pending valid readback may update the zero
-        // target but cannot change the established reference.
-        require(!current_depth.valid && !ready() && blend() == 0.f && gain() == before_gap && zero()[1] == zero_before_gap,
-          "Missing current depth published stereo or changed held camera uniforms");
+        // A mono render carries no scene constants; the controller holds the
+        // established gain (its automatic scale) and zero. A pending valid
+        // readback may update the zero target but cannot move the plane: the
+        // first ready render after the gap shows the held zero.
+        const auto status = game3d.automatic();
+        require(!latest.depth.ready && !ready() && blend() == 0.f && !status.ready() &&
+          status.scale_state == unsigned(sunshine_game3d::automatic_scale_state::held) && status.scale == before_gap,
+          "Missing current depth rendered stereo or changed the held gain");
       };
       pump(100, "depth-gap-drain", missing_publication);
       // Change visible source color during the depth gap, so stale output cannot pass.
@@ -240,21 +228,21 @@ namespace {
         else { std::uint32_t pixel = 0; std::memcpy(&pixel, source_bytes.data() + i * 4, 4); pixel = (pixel & ~1023u) | 450u; std::memcpy(source_bytes.data() + i * 4, &pixel, 4); }
       }
       fill_upload(source_upload, backbuffers[0]->GetDesc(), source_bytes.data(), source_footprint);
-      frame("depth-gap-new-color");
-      check_current_mono();
+      const auto gap = inspect("depth-gap-new-color", true);
+      require(!gap.depth_ready && !gap.camera_ready, "A depth gap rendered with stale depth");
+      check_current_mono(gap.sbs);
       missing_publication();
       // No depth draws means no new selected captures. Continue presenting past
-      // the1500 ms evidence expiry: a stale target/duplicate must not accumulate
+      // the 1500 ms evidence expiry: a stale target/duplicate must not accumulate
       // hidden gain that would be revealed on the next ready publication.
       pump(1600, "depth-gap-no-new-samples", missing_publication);
       render_tracked_depth = [&] { if (scene) draw(*scene); };
       const auto first_ready_until = GetTickCount64() + 12000;
       do { frame("depth-return-first-ready"); } while (!ready() && GetTickCount64() < first_ready_until);
-      require(ready() && selected_scene(), "Depth return failed to publish a fresh current scene");
-      require(gain() == before_gap,
-        "Missing captures or their return changed the fixed reference");
-      require(zero()[1] == zero_before_gap, "First ready depth return spent missing-time zero-plane credit");
-      std::printf("PASS gap reference hold: elapsed=%llu ms reference=%.9g -> %.9g; zero held\n",
+      require(ready() && selected_scene(), "Depth return failed to render a fresh current scene");
+      require(gain() == before_gap, "Missing captures or their return changed the held gain");
+      require(zero() == zero_before_gap, "First ready depth return spent missing-time zero-plane credit");
+      std::printf("PASS gap hold: elapsed=%llu ms gain=%.9g -> %.9g; zero held\n",
         static_cast<unsigned long long>(GetTickCount64() - gap_started), before_gap, gain());
       settle_ready("depth-return");
       const float before_pause = gain();
@@ -262,16 +250,16 @@ namespace {
       frame("presentation-gap-first");
       require(gain() == before_pause && blend() == 0.f, "Presentation gap accumulated gain/reentry credit");
       settle_ready("presentation-return");
-      std::puts("PASS current-color mono while unavailable, fixed reference, and no missing/presentation-time zero catch-up credit");
+      std::puts("PASS current-color mono while unavailable, held gain, and no missing/presentation-time zero catch-up credit");
 
-      // Save the last actual A publication immediately before leaving it.
-      // The still-live exact source keeps its own numerical history off-turn.
+      // Save the last actual A render immediately before leaving it. The
+      // still-live exact source keeps its own numerical history off-turn.
       require(ready() && selected_scene() && blend() == 1.f, "Cannot save an unready A reference");
-      const auto original_lifetime = current_depth.lifetime;
-      const float original_gain = gain(), original_zero = zero()[1];
+      const auto original_lifetime = latest.depth.source_id;
+      const float original_gain = gain(), original_zero = zero();
       auto original = std::move(scene);
       scene = target(width, height, 1, pattern(true), false, true); scene->clear_depth = normal ? 1.f : 0.f;
-      qualify_source("replacement-B", 4.f, .25f);
+      qualify_source("replacement-B", true);
       auto replacement = std::move(scene);
       scene = std::move(original); scene->pattern = pattern(false);
       const auto return_end = GetTickCount64() + 10000;
@@ -284,54 +272,58 @@ namespace {
           "Retained A did not resume within bounded fresh-capture latency");
       } while (GetTickCount64() < return_end);
       require(return_selected && ready() && selected_scene() && GetTickCount64() - return_selected <= 1400 &&
-        current_depth.lifetime == original_lifetime, "Retained A did not resume its exact live source");
-      require(gain() == original_gain,
-        "Retained A reset its fixed reference while off-turn");
-      require(zero()[1] == original_zero, "Retained A reset its zero or spent off-turn motion credit");
+        latest.depth.source_id == original_lifetime, "Retained A did not resume its exact live source");
+      require(gain() == original_gain, "Retained A reset its gain while off-turn");
+      require(zero() == original_zero, "Retained A reset its zero or spent off-turn motion credit");
       std::printf("PASS retained A: lifetime=%llu H=%.9g -> %.9g t0=%.9g; prior basis resumed, no motion catch-up\n",
-        static_cast<unsigned long long>(original_lifetime), original_gain, gain(), zero()[1]);
+        static_cast<unsigned long long>(original_lifetime), original_gain, gain(), zero());
       settle_ready("return-A-full-strength");
-      verify_depth(false);
+      verify_depth("return-A-consumed", false);
       // Actual destruction must retire that history even if the native address
       // is reused by D3D12. The new lifetime still needs one fresh window.
       scene.reset();
       scene = target(width, height, 1, pattern(false), false, true); scene->clear_depth = normal ? 1.f : 0.f;
-      qualify_source("destroyed-A-replacement", 8.f, .125f, original_lifetime);
-      require(current_depth.lifetime != original_lifetime, "Destroyed A replacement reused the old lifetime identity");
-      verify_depth(false);
+      qualify_source("destroyed-A-replacement", false, original_lifetime);
+      require(latest.depth.source_id != original_lifetime, "Destroyed A replacement reused the old lifetime identity");
+      verify_depth("destroyed-A-replacement-consumed", false);
       settle_ready("before-recalibrate");
       scene->pattern = pattern(true);
       pump(1000, "before-recalibrate-changed", [&] { require(ready() && blend() == 1.f, "Pre-action adaptation lost readiness"); });
-      require(recalibrate(observed.runtime) && !recalibrate(observed.runtime), "Recalibrate did not admit exactly one pending real UI action");
-      qualify_source("explicit-recalibrate", 4.f, .25f);
-      verify_depth(true);
+      require(game3d.recalibrate() && !game3d.recalibrate(), "Recalibrate did not admit exactly one pending real UI action");
+      qualify_source("explicit-recalibrate", true);
+      verify_depth("explicit-recalibrate-consumed", true);
       settle_ready("final");
-      set_float("Depth_Adjustment", 0); pump(80, "zero-strength", [] {}); const auto mono = check_current_mono();
-      set_float("Depth_Adjustment", 100); settle_ready("stereo-restored");
-      const auto stereo = read(exported.p);
+      game3d.set_strength(0); pump(80, "zero-strength", [] {});
+      const auto mono = check_current_mono(inspect("zero-strength", true).sbs);
+      game3d.set_strength(100); settle_ready("stereo-restored");
+      const auto stereo = inspect("stereo-restored", true);
+      require(stereo.camera_ready && stereo.strength_blend == 1.f, "Restored stereo render was not at full strength");
       for (unsigned y = 0; y < height; ++y) for (unsigned x = 0; x < width * 2; ++x) for (unsigned c = 0; c < 4; ++c)
-        require(std::isfinite(channel(stereo, x, y, c)), "Adaptive HDR export contains nonfinite RGBA");
-      require(image_difference(mono, stereo) > .002f, "Adaptive ready state did not produce actual stereo pixels");
-      sunshine_parity::write_bytes(runtime_directory / "adaptive-final.sbs", stereo.data(), stereo.size());
+        require(std::isfinite(channel(stereo.sbs, x, y, c)), "Adaptive HDR SBS contains nonfinite RGBA");
+      require(image_difference(mono, stereo.sbs) > .002f, "Adaptive ready state did not produce actual stereo pixels");
+      sunshine_parity::write_bytes(runtime_directory / "adaptive-final.sbs", stereo.sbs.data(), stereo.sbs.size());
       sunshine_parity::write_bytes(runtime_directory / "adaptive-current-source.bin", source_bytes.data(), source_bytes.size());
-      std::puts("PASS actual zero-plane RAW HDR: coupled reference/zero, current mono, retained exact source, fresh lifetime/recenter and finite stereo");
-      check_effect_reload();
+      std::puts("PASS actual raw-depth HDR through native Game 3D: L/Q gain and contrast-midpoint zero, current mono, retained exact source, fresh lifetime/recalibration and finite stereo; no FX");
       render_tracked_depth = {};
-      reshade::unregister_event<reshade::addon_event::reshade_render_technique>(observe_depth);
     }
   };
 }
 
 int main(int argc, char **argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
-  if (argc != 9) { std::fputs("usage: adaptive_raw_runtime <official.dll> <Shaders> <test.addon64> <fresh-output> <scrgb|pq> <normal|reversed> width height\n", stderr); return 2; }
+  if (argc != 9) { std::fputs("usage: adaptive_raw_runtime <official.dll> <frozenShaders> <test.addon64> <fresh-output> <scrgb|pq> <normal|reversed> width height\n", stderr); return 2; }
   std::thread([] { Sleep(180000); std::fputs("FAIL adaptive runtime watchdog\n", stderr); TerminateProcess(GetCurrentProcess(), 124); }).detach();
   try {
     width = unsigned(std::stoul(argv[7])); height = unsigned(std::stoul(argv[8]));
     require(width >= 640 && width <= 3840 && height >= 360 && height <= 2160 && width % 2 == 0 && height % 2 == 0, "Invalid adaptive fixture dimensions");
     require(std::string(argv[5]) == "scrgb" || std::string(argv[5]) == "pq", "Invalid adaptive fixture color");
     require(std::string(argv[6]) == "normal" || std::string(argv[6]) == "reversed", "Invalid adaptive depth convention");
-    require(sunshine_camera_fixture::flag("SUNSHINE_GAME3D_AUTOMATIC") && sunshine_camera_fixture::flag("SUNSHINE_GAME3D_AUTOMATIC_ACTIONS_TEST"), "Adaptive fixture requires actual Automatic and explicit test-action add-on");
+    // The FX reload case covered the retired effect's own scale reset; native
+    // capture and scale deliberately survive an FX reload
+    // (reshade_game3d_native_depth_runtime_test).
+    require(!sunshine_camera_fixture::flag("SUNSHINE_DEPTH_RELOAD_TEST"),
+      "SUNSHINE_DEPTH_RELOAD_TEST is retired: native capture and scale survive an FX reload");
+    select_native_boot();
     require(!fs::exists(fs::absolute(argv[4])), "Adaptive fixture requires a fresh isolated output");
     adaptive_fixture fixture; fixture.runtime_directory = fs::absolute(argv[4]);
     fixture.initialize(fs::absolute(argv[1]), fs::absolute(argv[2]), fixture.runtime_directory, std::string(argv[5]) == "pq" ? 3 : 2, 0, fs::absolute(argv[3]));

@@ -263,9 +263,9 @@ namespace {
   }
 
   // A3 and the legacy discard: restored entries decide at once but lapse
-  // unless earned again within alpha_trust_reconfirm_ms of first being
-  // offered valid, a clock that pauses while a declared source is offered but
-  // invalid; anything that is not a key is discarded and counted.
+  // unless earned again within alpha_trust_reconfirm_ms of testable time,
+  // which counts only the capped gaps between samples that could earn or
+  // refute the source; anything that is not a key is discarded and counted.
   void restore_is_provisional_and_legacy_entries_are_discarded() {
     alpha_auto_policy legacy;
     for (const char *stored : {"4", "16", "0x1f"}) {
@@ -292,72 +292,101 @@ namespace {
     for (std::uint32_t format = 1; format <= 40; ++format) many += "current:" + std::to_string(format) + ":srgb,";
     require(capped.restore(many).restored == max_stored_ui_sources, "More than the cap was restored");
 
-    // Lapse: a minute after first being offered valid, unless earned again.
+    // Lapse: after a minute of testable samples, unless earned again. The
+    // clock counts the time between consecutive testable samples (one every
+    // 100 ms here, the detection cadence), each gap capped at
+    // alpha_trust_reconfirm_gap_ms.
     alpha_auto_policy remembered;
     remembered.restore("current:24:srgb");
-    for (std::uint64_t tick = 1000; tick <= 60000; tick += 1000)
-      feed(remembered, sample().alpha(kind::current, tick % 2000 ? 500u : 50u), tick);
+    for (std::uint64_t tick = 1000; tick < 61000; tick += 100)
+      feed(remembered, sample().alpha(kind::current, (tick / 100) % 2 ? 500u : 50u), tick);
     require(accepts(remembered, kind::current), "Restored acceptance lapsed before a minute");
     feed(remembered, sample().alpha(kind::current, 50), 61000);
     require(!accepts(remembered, kind::current) && remembered.counters()[ui_counter::trust_lapsed] == 1,
       "Unconfirmed restored acceptance did not lapse");
-    // The clock starts when the source is first offered valid, not at restore.
+    // The clock starts at the first testable sample, not at restore.
     alpha_auto_policy late;
     late.restore("current:24:srgb");
     feed(late, sample().alpha(kind::backbuffer, 0), 1000);
     feed(late, sample().alpha(kind::current, 500, 600), 2000);
-    feed(late, sample().alpha(kind::current, 0), 30000);
-    feed(late, sample().alpha(kind::current, 0), 89999);
-    require(accepts(late, kind::current), "The lapse clock started before the source was offered valid");
+    for (std::uint64_t tick = 30000; tick < 90000; tick += 100) feed(late, sample().alpha(kind::current, 0), tick);
+    require(accepts(late, kind::current), "The lapse clock started before the source was testable");
     feed(late, sample().alpha(kind::current, 0), 90000);
-    require(!accepts(late, kind::current), "The lapse clock did not start at the first valid offer");
+    require(!accepts(late, kind::current), "The lapse clock did not start at the first testable sample");
     // A sample opaque almost everywhere (a full menu: Stellar Blade's presented
     // alpha while frame generation is suspended) can neither earn nor refute
-    // the source, so the clock pauses there; empty samples run it again.
+    // the source, so a run of them counts no more than one capped gap.
     alpha_auto_policy menus;
     menus.restore("current:24:srgb");
     feed(menus, sample().alpha(kind::current, 0), 1000);
-    for (std::uint64_t tick = 2000; tick <= 200000; tick += 1000) feed(menus, sample().alpha(kind::current, 1000), tick);
+    for (std::uint64_t tick = 1100; tick < 201000; tick += 100) feed(menus, sample().alpha(kind::current, 1000), tick);
     require(accepts(menus, kind::current) && menus.counters()[ui_counter::trust_lapsed] == 0,
       "Full menus ran the reconfirm clock of a restored source");
-    feed(menus, sample().alpha(kind::current, 0), 201000);
-    feed(menus, sample().alpha(kind::current, 0), 259999);
-    require(accepts(menus, kind::current), "The clock counted the paused full menus");
-    feed(menus, sample().alpha(kind::current, 0), 260000);
+    const std::uint64_t menus_due = 201000 + alpha_trust_reconfirm_ms - alpha_trust_reconfirm_gap_ms;
+    std::uint64_t at = 201000;
+    for (; at < menus_due; at += 100) feed(menus, sample().alpha(kind::current, 0), at);
+    require(accepts(menus, kind::current), "The clock counted the full menus");
+    feed(menus, sample().alpha(kind::current, 0), at);
     require(!accepts(menus, kind::current), "An unconfirmed source did not lapse after 60 s of testable time");
+    // Time while the source is not testable never counts beyond one capped
+    // gap: two minutes each of frame generation that stops offering current
+    // alpha, of samples of another signature (an HDR toggle), of a manual
+    // mode and of no samples at all (a loading screen, alt-tab) leave a
+    // restored inferred source accepted when it is offered again, and it
+    // then lapses after a minute of testable samples.
+    alpha_auto_policy absent;
+    absent.restore("current:24:srgb");
+    feed(absent, sample().alpha(kind::current, 0), 1000);
+    for (std::uint64_t tick = 1100; tick < 121000; tick += 100)
+      feed(absent, sample().alpha(kind::ui_layer, 30).alpha(kind::backbuffer, 0), tick);
+    for (std::uint64_t tick = 121000; tick < 241000; tick += 100) feed(absent, sample().alpha(kind::current, 0), tick, 3);
+    absent.set_manual(true);
+    for (std::uint64_t tick = 241000; tick < 361000; tick += 100) feed(absent, sample().alpha(kind::current, 0), tick);
+    absent.set_automatic();
+    const std::uint64_t absent_due = 481000 + alpha_trust_reconfirm_ms - alpha_trust_reconfirm_gap_ms;
+    for (at = 481000; at < absent_due; at += 100) {
+      feed(absent, sample().alpha(kind::current, 0), at);
+      if (at == 481000)
+        require(accepts(absent, kind::current) && !absent.counters()[ui_counter::trust_lapsed],
+          "Time without testable samples lapsed a restored source");
+    }
+    require(accepts(absent, kind::current), "The absence counted more than one capped gap");
+    feed(absent, sample().alpha(kind::current, 0), at);
+    require(!accepts(absent, kind::current) && absent.counters()[ui_counter::trust_lapsed] == 1,
+      "A restored source never lapsed after its absence and a minute of testable samples");
     // A restored declared source confirmed by one selective sample keeps it.
     alpha_auto_policy confirmed;
     confirmed.restore("ui_alpha:61:srgb");
     feed(confirmed, sample().alpha(kind::ui_alpha, 100), 1000);
-    for (std::uint64_t tick = 2000; tick <= 200000; tick += 1000) feed(confirmed, sample().alpha(kind::ui_alpha, 0), tick);
+    for (std::uint64_t tick = 1100; tick <= 200000; tick += 100) feed(confirmed, sample().alpha(kind::ui_alpha, 0), tick);
     require(accepts(confirmed, kind::ui_alpha) && confirmed.counters()[ui_counter::trust_earned] == 1,
       "Acceptance earned again in this session lapsed later, or was not counted");
 
     // A restored declared tag offered but invalid (Resident Evil Requiem's
-    // rejected-tag frames) for longer than the lapse pauses its clock, from
-    // the first invalid offer to the next valid one: it lapses once its valid
-    // offers have run the clock for a minute in total.
+    // rejected-tag frames) for longer than the lapse is not testable: the run
+    // counts one capped gap, and the tag lapses once its testable samples
+    // have run the clock for a minute in total.
     alpha_auto_policy rejected;
     rejected.restore("ui_color:87:srgb");
     feed(rejected, sample().alpha(kind::ui_color, 0), 1000);
-    for (std::uint64_t tick = 2000; tick <= 100000; tick += 1000)
+    for (std::uint64_t tick = 1100; tick < 100500; tick += 100)
       feed(rejected, sample().alpha(kind::ui_color, 0, 600).alpha(kind::current, 400), tick);
     require(accepts(rejected, kind::ui_color) && !rejected.counters()[ui_counter::trust_lapsed],
       "A restored tag lapsed while it was offered but invalid");
-    feed(rejected, sample().alpha(kind::ui_color, 0), 100500);
-    feed(rejected, sample().alpha(kind::ui_color, 0), 159499);
-    require(accepts(rejected, kind::ui_color), "The paused clock did not resume at the next valid offer");
-    feed(rejected, sample().alpha(kind::ui_color, 0), 159500);
+    const std::uint64_t rejected_due = 100500 + alpha_trust_reconfirm_ms - alpha_trust_reconfirm_gap_ms;
+    for (at = 100500; at < rejected_due; at += 100) feed(rejected, sample().alpha(kind::ui_color, 0), at);
+    require(accepts(rejected, kind::ui_color), "The invalid run counted more than one capped gap");
+    feed(rejected, sample().alpha(kind::ui_color, 0), at);
     require(!accepts(rejected, kind::ui_color) && rejected.counters()[ui_counter::trust_lapsed] == 1,
-      "The paused clock never lapsed");
-    // Invalid offers never extend the clock: a tag invalid every other
-    // second lapses after 60 s of valid offers in total.
+      "The clock never lapsed after the invalid run");
+    // Invalid offers never restart the clock: a tag invalid on every other
+    // sample lapses a minute after its first testable one.
     alpha_auto_policy alternating;
     alternating.restore("ui_color:87:srgb");
-    for (std::uint64_t tick = 1000; tick <= 120000; tick += 1000)
-      feed(alternating, (tick / 1000) % 2 ? sample().alpha(kind::ui_color, 0) : sample().alpha(kind::ui_color, 0, 600), tick);
-    require(accepts(alternating, kind::ui_color), "An alternating tag lapsed before 60 s of valid offers");
-    feed(alternating, sample().alpha(kind::ui_color, 0), 121000);
+    for (std::uint64_t tick = 1000; tick < 61000; tick += 100)
+      feed(alternating, (tick / 100) % 2 ? sample().alpha(kind::ui_color, 0, 600) : sample().alpha(kind::ui_color, 0), tick);
+    require(accepts(alternating, kind::ui_color), "An alternating tag lapsed before 60 s");
+    feed(alternating, sample().alpha(kind::ui_color, 0), 61000);
     require(!accepts(alternating, kind::ui_color) && alternating.counters()[ui_counter::trust_lapsed] == 1,
       "Invalid offers kept restarting the clock of a tag that never confirmed");
     alpha_auto_policy recovered;
@@ -368,34 +397,33 @@ namespace {
     for (std::uint64_t tick = 101000; tick <= 300000; tick += 1000) feed(recovered, sample().alpha(kind::ui_color, 1000), tick);
     require(accepts(recovered, kind::ui_color) && recovered.counters()[ui_counter::trust_earned] == 1,
       "A tag that confirmed after its invalid run was not kept");
-    // A restored HUD-less pair runs its clock only on valid samples that are
-    // not full (a partial or, here, an empty change set): a mispaired
-    // (middle-band, V2-invalid) sample and a full change set (a menu) pause
-    // it, exact or not.
+    // A restored HUD-less pair is testable only on valid samples that are not
+    // full (a partial or, here, an empty change set): mispaired (middle-band,
+    // V2-invalid) samples and full change sets (a menu) count no more than
+    // one capped gap, exact or not.
     alpha_auto_policy pair;
     pair.restore("hudless:24:srgb");
     feed(pair, sample().pair(0, 1000, false), 1000);
-    for (std::uint64_t tick = 2000; tick <= 100000; tick += 1000)
-      feed(pair, (tick / 1000) % 2 ? sample().pair(500, 500, false) : sample().pair(990, 10), tick);
+    for (std::uint64_t tick = 1100; tick < 100500; tick += 100)
+      feed(pair, (tick / 100) % 2 ? sample().pair(500, 500, false) : sample().pair(990, 10), tick);
     require(accepts(pair, kind::hudless) && !pair.counters()[ui_counter::trust_lapsed],
       "A restored HUD-less pair lapsed during mispaired samples or full menus");
-    feed(pair, sample().pair(0, 1000, false), 100500);
-    feed(pair, sample().pair(0, 1000), 159499);
-    require(accepts(pair, kind::hudless), "The paused clock did not resume at the next empty change set");
-    feed(pair, sample().pair(0, 1000, false), 159500);
+    const std::uint64_t pair_due = 100500 + alpha_trust_reconfirm_ms - alpha_trust_reconfirm_gap_ms;
+    for (at = 100500; at < pair_due; at += 100) feed(pair, sample().pair(0, 1000, (at / 100) % 2 != 0), at);
+    require(accepts(pair, kind::hudless), "Mispaired samples or full menus counted more than one capped gap");
+    feed(pair, sample().pair(0, 1000, false), at);
     require(!accepts(pair, kind::hudless) && pair.counters()[ui_counter::trust_lapsed] == 1,
       "A restored HUD-less pair never lapsed after 60 s of testable samples");
-    // Inferred entries pause the same way: invalid samples neither run nor
+    // Inferred entries count the same way: invalid samples neither run nor
     // re-arm the clock.
     alpha_auto_policy inferred;
     inferred.restore("current:24:srgb");
     feed(inferred, sample().alpha(kind::current, 0), 1000);
-    for (std::uint64_t tick = 2000; tick <= 60000; tick += 1000) feed(inferred, sample().alpha(kind::current, 0, 600), tick);
-    feed(inferred, sample().alpha(kind::current, 0), 61000);
+    for (std::uint64_t tick = 1100; tick < 61000; tick += 100) feed(inferred, sample().alpha(kind::current, 0, 600), tick);
+    const std::uint64_t inferred_due = 61000 + alpha_trust_reconfirm_ms - alpha_trust_reconfirm_gap_ms;
+    for (at = 61000; at < inferred_due; at += 100) feed(inferred, sample().alpha(kind::current, 0), at);
     require(accepts(inferred, kind::current), "Invalid samples ran an inferred entry's clock");
-    feed(inferred, sample().alpha(kind::current, 0), 119999);
-    require(accepts(inferred, kind::current), "The inferred entry's paused clock did not resume");
-    feed(inferred, sample().alpha(kind::current, 0), 120000);
+    feed(inferred, sample().alpha(kind::current, 0), at);
     require(!accepts(inferred, kind::current) && inferred.counters()[ui_counter::trust_lapsed] == 1,
       "An inferred entry never lapsed after 60 s of testable samples");
   }
@@ -1212,22 +1240,22 @@ namespace {
     // without coverage, presented evidence valid and visible) without a match.
     alpha_auto_policy lapsing;
     lapsing.restore("pre_ui:87:srgb");
-    for (std::uint64_t tick = 1000; tick <= 60000; tick += 1000) lapsing.observe(mismatch, pixels, tick, sb);
+    for (std::uint64_t tick = 1000; tick < 61000; tick += 100) lapsing.observe(mismatch, pixels, tick, sb);
     require(lapsing.pre_ui_proven(layer), "A provisional proof lapsed before 60 s of testable time");
     lapsing.observe(mismatch, pixels, 61000, sb);
     require(!lapsing.pre_ui_proven(layer) && lapsing.stored().empty() && lapsing.counters()[n::trust_lapsed] == 1,
       "A provisional proof did not lapse after 60 s of testable time");
-    // The clock pauses on every sample that is not testable: the presented
-    // frame hidden or its evidence invalid, the layer missing, covered or of
-    // another signature.
+    // Samples that are not testable never count beyond one capped gap: the
+    // presented frame hidden or its evidence invalid, the layer missing,
+    // covered or of another signature.
     alpha_auto_policy paused;
     paused.restore("pre_ui:87:srgb");
-    for (std::uint64_t tick = 1000; tick <= 30000; tick += 1000) paused.observe(mismatch, pixels, tick, sb);
+    for (std::uint64_t tick = 1000; tick <= 31000; tick += 100) paused.observe(mismatch, pixels, tick, sb);
     alpha_auto_decision::detection_evidence no_layer;
     no_layer.candidates = candidate::current;
-    std::uint64_t tick = 31000;
-    for (; tick <= 200000; tick += 1000) {
-      switch ((tick / 1000) % 5) {
+    std::uint64_t tick = 31100;
+    for (; tick < 201000; tick += 100) {
+      switch ((tick / 100) % 5) {
         case 0: paused.observe(menu, pixels, tick, sb); break;
         case 1: paused.observe(sb_layer(350, 900, scene_verdict::none), pixels, tick, sb); break;
         case 2: paused.observe(no_layer, pixels, tick, sb); break;
@@ -1235,12 +1263,13 @@ namespace {
         default: paused.observe(mismatch, pixels, tick, sb_signatures(28)); break;
       }
     }
-    require(paused.pre_ui_proven(layer), "A provisional proof lapsed while its clock was paused");
-    // 30 s ran before the pause (1000 to the first paused sample at 31000);
-    // 30 more testable seconds lapse it.
-    for (tick = 201000; tick <= 230000; tick += 1000) paused.observe(mismatch, pixels, tick, sb);
-    require(paused.pre_ui_proven(layer), "A paused clock was charged with untestable time");
-    paused.observe(mismatch, pixels, 231000, sb);
+    require(paused.pre_ui_proven(layer), "A provisional proof lapsed while its samples were not testable");
+    // 30 s were counted before them (1000 to 31000) and one capped gap
+    // after; 30 more testable seconds lapse it.
+    const std::uint64_t due = 201000 + alpha_trust_reconfirm_ms - 30000 - alpha_trust_reconfirm_gap_ms;
+    for (tick = 201000; tick < due; tick += 100) paused.observe(mismatch, pixels, tick, sb);
+    require(paused.pre_ui_proven(layer), "Untestable samples were counted beyond one capped gap");
+    paused.observe(mismatch, pixels, tick, sb);
     require(!paused.pre_ui_proven(layer), "A provisional proof did not lapse after 60 s of testable time in all");
 
     // Forget clears it and reports it; the next menu needs it earned again.
@@ -1344,8 +1373,7 @@ namespace {
     // earn that confirms it counts.
     alpha_auto_policy lapsing;
     lapsing.restore("backbuffer:24:srgb");
-    feed(lapsing, sample().alpha(kind::backbuffer, 0), 1000);
-    feed(lapsing, sample().alpha(kind::backbuffer, 0), 61000);
+    for (std::uint64_t tick = 1000; tick <= 61000; tick += 100) feed(lapsing, sample().alpha(kind::backbuffer, 0), tick);
     require(!accepts(lapsing, kind::backbuffer) && lapsing.counters()[n::trust_restored] == 1 &&
         lapsing.counters()[n::trust_lapsed] == 1, "A restore or a provisional lapse was not counted");
     alpha_auto_policy confirmed;

@@ -9,6 +9,9 @@
 #include "game3d_ui_layer.h"
 #include "../../src/game3d_debug_protocol.h"
 #include <nlohmann/json.hpp>
+#include <functional>
+#include <string>
+#include <thread>
 
 namespace {
   // SUNSHINE_GAME3D_TEST_DIAGNOSTICS_OFF: the run keeps the Diagnostics switch
@@ -17,6 +20,20 @@ namespace {
   bool diagnostics_off() {
     const char *value = std::getenv("SUNSHINE_GAME3D_TEST_DIAGNOSTICS_OFF");
     return value && *value && std::strcmp(value, "0") != 0;
+  }
+
+  // The live layer as the add-on's execute handler left it, read inside
+  // ReShade's execute event of the one list armed here: ReShade invokes
+  // callbacks in registration order, so the test add-on's own handler ran
+  // and the native ExecuteCommandLists has not yet (layer queue order).
+  struct execute_probe_t {
+    BOOL (*query)(sunshine_game3d::ui_layer::test_live_state *){};
+    sunshine_game3d::ui_layer::test_live_state seen{};
+    bool armed{}, probed{};
+  } execute_probe;
+  void probe_execute(api::command_queue *, api::command_list *) {
+    if (!execute_probe.armed || execute_probe.probed) return;
+    execute_probe.probed = execute_probe.query && execute_probe.query(&execute_probe.seen);
   }
 }
 
@@ -638,9 +655,13 @@ namespace {
           straight_metadata.at("replay").at("source_alpha_auto").at("sampled_source") == sunshine_game3d::ui_detection::source_layer)
         throw std::runtime_error("The GPU admitted an offscreen layer with straight alpha: " + sampled.dump());
       // The live layer copy's queue facts on D3D12 (game3d_ui_layer.h, queue
-      // order): each copy keeps the queue that ran it; only one that ran on
-      // the presenting queue is bound directly.
+      // order): each copy keeps the queue that ran it; one run on the
+      // presenting queue is in queue order, one run on a second queue is
+      // ordered by that queue's fence (a GPU wait while it is pending), and a
+      // wait the game's own schedule closes into a cycle is released by the
+      // watchdog, which revokes that queue.
       if (resource_type == 0) {
+        using order = sunshine_game3d::ui_layer::read_order;
         const auto module = GetModuleHandleW(L"SunshineSBSTest.addon64");
         const auto live_state = reinterpret_cast<BOOL (*)(sunshine_game3d::ui_layer::test_live_state *)>(
           GetProcAddress(module, "SunshineUILayerTestLive"));
@@ -656,7 +677,10 @@ namespace {
           require(WaitForSingleObject(completion_event, 3000) == WAIT_OBJECT_0, "The layer list exceeded three seconds");
         };
         bool skip_layer = false;
+        // Presenting-queue work the game queues before a frame's list.
+        std::function<void()> before_frame;
         render_tracked_depth = [&] {
+          if (before_frame) before_frame();
           real_frame();
           if (!skip_layer) draw_layer();
         };
@@ -667,45 +691,270 @@ namespace {
         require(live.in_order && live.presents_since_copy == 1 && live.executed_queue &&
             live.executed_queue == live.presenting_queue,
           "A layer copy executed before its Present was not an in-order copy of the Present its count names");
-        // A layer list executed on a second direct queue: its copy has no
-        // queue order before the Present's reads.
+        require(live.order == unsigned(order::queue) && !live.fence_value,
+          "A layer copy on the presenting queue was ordered by a fence instead of queue order");
+        // A layer list executed on a second direct queue: the add-on's
+        // submission hook signals that queue's fence after it.
         com_ptr<ID3D12CommandQueue> second;
         D3D12_COMMAND_QUEUE_DESC second_desc{};
         second_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
         checked(game->CreateCommandQueue(&second_desc, IID_PPV_ARGS(second.put())), "Second direct queue");
         // The list also executes a bundle after its clear, as bundle-heavy
         // engines do for their UI draws: the list keeps its own copy.
-        com_ptr<ID3D12CommandAllocator> bundle_allocator, foreign_allocator;
-        com_ptr<ID3D12GraphicsCommandList> bundle, foreign;
+        com_ptr<ID3D12CommandAllocator> bundle_allocator;
+        com_ptr<ID3D12GraphicsCommandList> bundle;
         checked(game->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_BUNDLE, IID_PPV_ARGS(bundle_allocator.put())), "Bundle allocator");
         checked(game->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_BUNDLE, bundle_allocator.p, nullptr, IID_PPV_ARGS(bundle.put())),
           "Bundle");
         checked(bundle->Close(), "Close the bundle");
-        checked(game->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(foreign_allocator.put())),
-          "Foreign layer allocator");
-        checked(game->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, foreign_allocator.p, nullptr, IID_PPV_ARGS(foreign.put())),
-          "Foreign layer list");
+        // Two foreign layer lists, so a second frame's copy can be recorded
+        // while the first one's is still queued.
+        struct foreign_list {
+          com_ptr<ID3D12CommandAllocator> allocator;
+          com_ptr<ID3D12GraphicsCommandList> list;
+          bool open = true;
+        };
+        std::array<foreign_list, 2> foreign;
+        for (auto &l : foreign) {
+          checked(game->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(l.allocator.put())),
+            "Foreign layer allocator");
+          checked(game->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, l.allocator.p, nullptr, IID_PPV_ARGS(l.list.put())),
+            "Foreign layer list");
+        }
         const float transparent[4]{};
+        // The layer's first clear after the last Present, recorded into a
+        // foreign list (a new list is open; later ones are reset after their
+        // queue completed), executed on the second queue behind gate's value.
+        const auto run_foreign_on = [&](foreign_list &l, ID3D12Fence *gate, std::uint64_t value) {
+          if (!l.open) {
+            checked(l.allocator->Reset(), "Reset the foreign layer allocator");
+            checked(l.list->Reset(l.allocator.p, nullptr), "Reset the foreign layer list");
+          }
+          l.open = false;
+          l.list->ClearRenderTargetView(layer_rtv, transparent, 0, nullptr);
+          l.list->ExecuteBundle(bundle.p);
+          checked(l.list->Close(), "Close the foreign layer list");
+          if (gate) checked(second->Wait(gate, value), "Gate the second queue");
+          ID3D12CommandList *foreign_lists[]{l.list.p};
+          second->ExecuteCommandLists(1, foreign_lists);
+        };
+        const auto run_foreign = [&](ID3D12Fence *gate) { run_foreign_on(foreign[0], gate, 1); };
+        // Frames whose layer copies run on the presenting queue confirm the
+        // layer again after a long Present; the next frame skips its own clear.
+        const auto confirm = [&] {
+          skip_layer = false;
+          for (unsigned i = 0; i != 4; ++i) { step(); no_effects(); }
+          skip_layer = true;
+        };
+        const auto timed_step = [&] {
+          const auto start = GetTickCount64();
+          step(); no_effects();
+          return GetTickCount64() - start;
+        };
+        // A fence the test signals from the CPU; every exit opens it (to
+        // open), so a failure never strands either queue.
+        struct cpu_gate {
+          com_ptr<ID3D12Fence> fence;
+          std::thread opener;
+          std::uint64_t open = 1;
+          ~cpu_gate() {
+            if (opener.joinable()) opener.join();
+            if (fence.p) fence->Signal(open);
+          }
+        };
+        const auto make_gate = [&](cpu_gate &gate, const char *what) {
+          checked(game->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(gate.fence.put())), what);
+        };
+        // Every exit clears the frame hooks and the deferred completion.
+        struct clear_hooks {
+          std::function<void()> &before, &after;
+          bool &defer;
+          ~clear_hooks() { before = {}; after = {}; defer = false; }
+        } hooks{before_frame, after_present, defer_completion};
+        const auto rescue_after = sunshine_game3d::ui_layer::rescue_after_ms;
+        // Completed before its Present: the fence already passed its value,
+        // so the Present's reads need no wait. Inside ReShade's execute event,
+        // after the add-on's own handler and before the native call, the copy
+        // is held for its fence signal and the previous copy stays offered, so
+        // a Present in that window never reads a copy whose write is not yet
+        // submitted; once the call returned the copy is offered with its value.
         skip_layer = true;
-        foreign->ClearRenderTargetView(layer_rtv, transparent, 0, nullptr);
-        foreign->ExecuteBundle(bundle.p);
-        checked(foreign->Close(), "Close the foreign layer list");
-        ID3D12CommandList *foreign_lists[]{foreign.p};
-        second->ExecuteCommandLists(1, foreign_lists);
+        const auto before_passed = query();
+        execute_probe = {};
+        execute_probe.query = live_state;
+        reshade::register_event<reshade::addon_event::execute_command_list>(probe_execute);
+        {
+          struct unregister_probe {
+            ~unregister_probe() {
+              execute_probe.armed = false;
+              reshade::unregister_event<reshade::addon_event::execute_command_list>(probe_execute);
+            }
+          } scope;
+          execute_probe.armed = true;
+          run_foreign(nullptr);
+        }
+        const auto submitted = query();
+        const auto &window = execute_probe.seen;
+        require(execute_probe.probed && window.capture_id == before_passed.capture_id + 1 && window.owing == 1 &&
+            window.offered_id == before_passed.offered_id && window.offered_id != window.capture_id,
+          ("A second-queue layer copy was offered before its fence signal was recorded: probed=" +
+            std::to_string(execute_probe.probed) + " owing=" + std::to_string(window.owing) + " offered=" +
+            std::to_string(window.offered_id) + " captured=" + std::to_string(window.capture_id) + " before=" +
+            std::to_string(before_passed.offered_id)).c_str());
+        require(!submitted.owing && submitted.offered_id == window.capture_id && submitted.fence_value > before_passed.fence_value &&
+            (submitted.order == unsigned(order::fence_passed) || submitted.order == unsigned(order::fence_wait)),
+          "A second-queue layer copy was not offered with its fence value once its submission returned");
         wait(second.p);
         step(); no_effects();
         live = query();
-        require(!live.in_order && live.executed_queue && live.executed_queue != live.presenting_queue,
-          "A layer copy executed on a second queue, after a bundle, was in queue order");
+        require(live.in_order && live.order == unsigned(order::fence_passed) && live.fence_value && !live.revoked &&
+            live.executed_queue && live.executed_queue != live.presenting_queue && live.waits == before_passed.waits,
+          "A completed layer copy on a second queue, after a bundle, was not ordered by its passed fence");
+        // Pending at its Present: the second queue waits for a gate the test
+        // opens from the CPU 300 ms later, and the presenting queue waits on
+        // the GPU for the copy's fence, so the Present completes only after.
+        confirm();
+        const auto before_wait = query();
+        std::uint64_t wait_elapsed{};
+        {
+          cpu_gate gate;
+          make_gate(gate, "Second-queue gate");
+          run_foreign(gate.fence.p);
+          gate.opener = std::thread([fence = gate.fence.p] { Sleep(300); fence->Signal(1); });
+          const auto elapsed = wait_elapsed = timed_step();
+          live = query();
+          require(live.waits == before_wait.waits + 1 && elapsed >= 250 && live.in_order &&
+              live.order == unsigned(order::fence_passed) && live.fence_value > before_passed.fence_value &&
+              live.rescues == before_wait.rescues && !live.revoked,
+            ("The Present's reads did not wait on the GPU for a pending second-queue layer copy: elapsed_ms=" +
+              std::to_string(elapsed) + " waits=" + std::to_string(live.waits - before_wait.waits)).c_str());
+          wait(second.p);
+        }
+        // No cycle: the second queue waits for presenting-queue work queued
+        // before the add-on's wait, and that work takes longer than
+        // rescue_after_ms (a GPU hitch). The presenting queue never reached the
+        // wait meanwhile (its marker), so the watchdog neither rescues nor
+        // revokes, however long the fence made no progress.
+        confirm();
+        const auto before_slow = query();
+        std::uint64_t slow_elapsed{};
+        {
+          cpu_gate hitch, earlier;
+          make_gate(hitch, "Presenting-queue hitch gate");
+          make_gate(earlier, "Earlier presenting-queue work");
+          run_foreign(earlier.fence.p);
+          before_frame = [&, held = hitch.fence.p, done = earlier.fence.p] {
+            checked(queue->Wait(held, 1), "Hold the presenting queue's earlier work");
+            checked(queue->Signal(done, 1), "Finish the presenting queue's earlier work");
+          };
+          hitch.opener = std::thread([fence = hitch.fence.p, delay = rescue_after + 300] {
+            Sleep(DWORD(delay));
+            fence->Signal(1);
+          });
+          slow_elapsed = timed_step();
+          before_frame = {};
+          live = query();
+          require(live.waits == before_slow.waits + 1 && live.rescues == before_slow.rescues && !live.revoked &&
+              live.in_order && live.order == unsigned(order::fence_passed) && slow_elapsed + 50 >= rescue_after + 300,
+            ("The watchdog rescued a wait the presenting queue had not reached (earlier work held it): elapsed_ms=" +
+              std::to_string(slow_elapsed) + " rescues=" + std::to_string(live.rescues - before_slow.rescues) +
+              " waits=" + std::to_string(live.waits - before_slow.waits)).c_str());
+          wait(second.p);
+        }
+        // A legal game schedule the wait closes into a cycle, with two waits
+        // queued: each frame's copy on the second queue waits for a signal the
+        // presenting queue queues after that frame's Present (presented), and
+        // the presenting queue's next frame waits for the second queue's
+        // previous copy (copied). The CPU queues frame N+1, and its wait for
+        // F=b, while frame N's wait for F=a is still blocked. The watchdog
+        // releases W(F,a) after rescue_after_ms and revokes the queue; the
+        // second queue's own Signal(F,a) then moves the fence back below b
+        // before the presenting queue reaches W(F,b), where the cycle would
+        // close again. Both Presents must complete: where a queued wait is
+        // satisfied by the release itself (this machine's scheduler, measured)
+        // nothing more is needed; where it is evaluated only when reached, the
+        // watchdog releases it again (releases).
+        confirm();
+        const auto before_cycle = query();
+        std::uint64_t cycle_elapsed{}, cycle_queued_waits{}, cycle_releases{};
+        {
+          cpu_gate presented, copied;
+          presented.open = 2;
+          make_gate(presented, "Cycle gate after each Present");
+          make_gate(copied, "Second queue's copy of the previous frame");
+          com_ptr<ID3D12CommandAllocator> spare;
+          checked(game->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(spare.put())),
+            "Second frame allocator");
+          struct restore_allocator {
+            com_ptr<ID3D12CommandAllocator> &current, &other;
+            bool swapped = false;
+            ~restore_allocator() { if (swapped) std::swap(current.p, other.p); }
+          } frame_allocator{allocator, spare};
+          run_foreign_on(foreign[0], presented.fence.p, 1);
+          checked(second->Signal(copied.fence.p, 1), "Signal the second queue's frame-N copy");
+          after_present = [&, gate = presented.fence.p] {
+            checked(queue->Signal(gate, 1), "Open the second queue's gate after Present N");
+          };
+          const auto start = GetTickCount64();
+          defer_completion = true;
+          step(); no_effects();
+          defer_completion = false;
+          cycle_queued_waits = query().waits - before_cycle.waits;
+          run_foreign_on(foreign[1], presented.fence.p, 2);
+          // Frame N's list may still execute: frame N+1 records with another
+          // allocator.
+          std::swap(allocator.p, spare.p);
+          frame_allocator.swapped = true;
+          before_frame = [&, gate = copied.fence.p] {
+            checked(queue->Wait(gate, 1), "Frame N+1 waits for the second queue's frame-N copy");
+          };
+          after_present = [&, gate = presented.fence.p] {
+            checked(queue->Signal(gate, 2), "Open the second queue's gate after Present N+1");
+          };
+          step(); no_effects();
+          cycle_elapsed = GetTickCount64() - start;
+          before_frame = {};
+          after_present = {};
+          live = query();
+          cycle_releases = live.releases - before_cycle.releases;
+          require(cycle_queued_waits == 1 && live.waits == before_cycle.waits + 2 &&
+              live.rescues == before_cycle.rescues + 1 && live.revoked && !live.in_order &&
+              live.order == unsigned(order::unordered) && cycle_elapsed + 50 >= rescue_after,
+            ("The watchdog did not release both waits of a cyclic schedule whose fence went back below the second: "
+              "elapsed_ms=" + std::to_string(cycle_elapsed) + " rescues=" + std::to_string(live.rescues - before_cycle.rescues) +
+              " releases=" + std::to_string(live.releases - before_cycle.releases) + " waits=" +
+              std::to_string(live.waits - before_cycle.waits)).c_str());
+          wait(second.p);
+        }
+        // The revoked queue's next copy is unordered: copied into the
+        // renderer's slot, as before the fence.
+        confirm();
+        run_foreign(nullptr);
+        wait(second.p);
+        step(); no_effects();
+        live = query();
+        require(!live.in_order && live.revoked && live.order == unsigned(order::unordered) &&
+            live.executed_queue != live.presenting_queue && live.rescues == before_cycle.rescues + 1,
+          "A revoked queue's layer copy was ordered again");
         skip_layer = false;
         render_tracked_depth = [&] { real_frame(); draw_layer(); };
         step(); no_effects();
         live = query();
-        require(live.in_order && live.executed_queue == live.presenting_queue,
+        require(live.in_order && live.order == unsigned(order::queue) && live.executed_queue == live.presenting_queue,
           "The next layer copy run on the presenting queue was not in queue order again");
-        std::puts("PASS D3D12 layer queue order: a copy run on the presenting queue before its Present is in order and names "
-          "that Present; a copy run on a second direct queue, kept across a bundle, is not; the next copy on the "
-          "presenting queue is again (per copy, not sticky)");
+        evidence << "layer-cross-queue held_until_signal=1 fence_passed=1 gpu_wait_ms=" << wait_elapsed <<
+          " unreached_hitch_ms=" << slow_elapsed << " no_rescue=1 cycle_two_waits_released_ms=" << cycle_elapsed <<
+          " rereleases=" << cycle_releases << " revoked_unordered=1\n";
+        std::printf("MEASURE layer cross-queue: gpu_wait_ms=%llu unreached_hitch_ms=%llu cycle_two_waits_ms=%llu rereleases=%llu\n",
+          static_cast<unsigned long long>(wait_elapsed), static_cast<unsigned long long>(slow_elapsed),
+          static_cast<unsigned long long>(cycle_elapsed), static_cast<unsigned long long>(cycle_releases));
+        std::puts("PASS D3D12 layer queue order: a copy run on the presenting queue before its Present is in queue order and "
+          "names that Present; one run on a second direct queue, kept across a bundle, is held (the previous copy stays "
+          "offered) until its fence signal is recorded after the native submission, then ordered by that fence (passed, "
+          "or a GPU wait that holds the Present until the gated copy ran); a wait the presenting queue has not reached "
+          "is never rescued, however long earlier work holds it; two waits the game's schedule closes into a cycle, the "
+          "second reached after the queue's own signal moved the revoked fence back below it, both complete (its next "
+          "copy is unordered); the next copy on the presenting queue is in queue order again");
       }
       evidence << "public-ui-hook descriptor_type=" << resource_type << " source_format=90 captured_format=87 tag=23 covered=" << covered <<
         " exact_consumed_and_optional=1 post_tag_opaque_overwrite=1 host_ack_immutable=1 offscreen_ui_layer=1 live_ui_layer_mask=1 frame_tags=" << bool(frame_tag) << '\n';

@@ -166,9 +166,11 @@ namespace sunshine_game3d::ui_selection {
   }
   // A2, the one-way lit-pixel disagreement: at least a tenth of a judged
   // source's strong pixels (alpha of at least 1/2) lie where the exact
-  // HUD-less image is lit and unchanged. Dims and tints over dark or changed
-  // pixels never meet it, nor does real UI, which changes the pixels it
-  // covers; an opaque final image read as UI alpha does.
+  // HUD-less image is lit and unchanged against both the pair's colour and
+  // the presented frame. Dims and tints over dark or changed pixels never
+  // meet it, nor does real UI, which changes the pixels it covers (UI
+  // composited after the tagged Backbuffer changes the presented frame); an
+  // opaque final image read as UI alpha does.
   constexpr bool one_way_contradicted(std::uint32_t strong, std::uint32_t contradicted) {
     return strong && std::uint64_t(contradicted) * 10u >= strong;
   }
@@ -197,7 +199,8 @@ namespace sunshine_game3d::ui_selection {
     std::uint32_t changed{}, unchanged{}, nonfinite{}, lit{}, matching_tiles{};
     // A2, in judged_kinds order: pixels with alpha of at least 1/2, and those
     // of them where an offered exact pair's HUD-less image is lit and
-    // unchanged. The tiles pass counts them on sample frames with an exact
+    // unchanged against both the pair's colour and the presented colour.
+    // The tiles pass counts them on sample frames with an exact
     // pair only (per_frame_sample); they are zero otherwise.
     std::array<std::uint32_t, 4> strong{}, contradicted{};
     // Texel 11 (revision 4): the offscreen UI layer against the presented
@@ -395,8 +398,8 @@ namespace sunshine_game3d::ui_selection {
   // the CPU refuted its signature (per_frame_refuted_mask), and (d) only
   // while the CPU's held samples read the pre-UI image visible
   // (per_frame_pre_ui_visible). While the
-  // CPU holds a hidden verdict (per_frame_scene_hidden) and the depth is
-  // this frame's, an acting claim shows the frame flat as source 8, whatever
+  // CPU holds a hidden verdict (per_frame_scene_hidden), whether or not the
+  // depth is this frame's, an acting claim shows the frame flat as source 8, whatever
   // S1 selected (selection revision 10: a winner already flat everywhere is
   // relabelled 8 too, since UI pins at weight 1 either way, P1).
   // T1: a real frame that decided no source while an accepted candidate is
@@ -464,8 +467,9 @@ namespace sunshine_game3d::ui_selection {
     const std::uint32_t refuted = (flags >> ui_detection::per_frame_refuted_shift) & candidate_bits;
     const std::uint32_t acting = (claims & candidate_bits & ~refuted) |
       ((flags & ui_detection::per_frame_pre_ui_visible) ? (claims & ui_detection::claim_pre_ui) : 0u);
-    const bool h1 = acting && (flags & ui_detection::per_frame_scene_hidden) &&
-      !(flags & ui_detection::per_frame_depth_not_current);
+    // The held verdict is the guard's, measured only on samples with current
+    // depth, so reused depth (a generated Present, a late capture) keeps it.
+    const bool h1 = acting && (flags & ui_detection::per_frame_scene_hidden);
     if (h1) {
       source = 8u;
       covered = pixels;
@@ -475,8 +479,8 @@ namespace sunshine_game3d::ui_selection {
     d.h1 = h1;
     const std::uint32_t unaccepted = offered & ~accepted;
     // F1: the reason, in priority order, and the refused candidate it names.
-    // An acting claim that H1 did not apply (no held hidden verdict, or depth
-    // that is not this frame's) refuses its first claimant in draw order, and
+    // An acting claim that H1 did not apply (no held hidden verdict) refuses
+    // its first claimant in draw order, and
     // the pre-UI image alone its image (HUD-less when offered, else the layer).
     if (!source) {
       if (acting) {

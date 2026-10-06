@@ -306,7 +306,7 @@ float SunshineSelectedUIAlpha(uint2 coordinate)
 // authorize a changed candidate: session acceptance only names the sources
 // that carry UI coverage, and this frame's own pixels are the mask. The
 // tiles pass reads UIAlpha (t11 .r), the UI color tag (t12 .a), the
-// Backbuffer (t13 .a) and the current alpha (t0 .a).
+// Backbuffer (t13 .a) and the current alpha (the presented colour, t6 .a).
 float SunshineHUDlessDifferenceOf(float3 a, float3 b, out bool valid)
 {
     valid = all(isfinite(a)) && all(isfinite(b));
@@ -397,18 +397,19 @@ void SunshineUIDetectionTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_Grou
     const uint unaligned = Sunshine_UIDetectionFlags >> SUNSHINE_UI_PER_FRAME_UNALIGNED_SHIFT;
     const uint4 judged = uint4((unaligned & SUNSHINE_UI_CANDIDATE_UI_ALPHA) ? 0u : 1u,
         (unaligned & SUNSHINE_UI_CANDIDATE_UI_COLOR) ? 0u : 1u, 1u, 1u);
-    // A candidate that is not offered is not bound: uniform branches skip its
-    // loads and use the zero an unbound view reads. The presented color (t0)
-    // is always bound and always read.
+    // A candidate that is not offered is not bound or not read: uniform
+    // branches skip its loads and use zero. Current alpha is the presented
+    // frame's own (t6), whatever colour t0 pairs with a HUD-less image; the
+    // pair's colour (t0) is read only with an offered HUD-less image.
     const uint offered = Sunshine_UICandidates;
     [loop] for (uint y = first.y + thread.y + 16u * group.z; y < last.y; y += 16u * SUNSHINE_UI_DETECTION_TILE_PARTS)
     [loop] for (uint x = first.x + thread.x; x < last.x; x += 16u) {
         const int3 at = int3(x, y, 0);
-        const float4 presentedPair = SunshineSourceSampler.Load(at);
-        float4 a = float4(0.0, 0.0, 0.0, presentedPair.a);
+        float4 a = 0.0;
         [branch] if (offered & SUNSHINE_UI_CANDIDATE_UI_ALPHA) a.x = SunshineUIDedicatedAlpha.Load(at).r;
         [branch] if (offered & SUNSHINE_UI_CANDIDATE_UI_COLOR) a.y = SunshineUIColorAlpha.Load(at).a;
         [branch] if (offered & SUNSHINE_UI_CANDIDATE_BACKBUFFER) a.z = SunshineUIBackbufferAlpha.Load(at).a;
+        [branch] if (offered & SUNSHINE_UI_CANDIDATE_CURRENT) a.w = SunshinePresentedColor.Load(at).a;
         bool4 okay = isfinite(a) && a >= 0.0 && a <= 1.0;
         coverage += uint4(okay && a > 0.0);
         invalid += uint4(!okay);
@@ -428,26 +429,38 @@ void SunshineUIDetectionTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_Grou
         layerCounts.y += layerOkay ? 0u : 1u;
         layerCounts.z += layerOkay && layer.a >= 254.0 / 255.0 && !beyond ? 1u : 0u;
         beyondBound += beyond ? 1u : 0u;
+        // The HUD-less image against its paired colour (t0), only when one is
+        // offered: without it the difference and lit counts stay zero.
         float3 hudless = 0.0;
-        [branch] if (offered & SUNSHINE_UI_CANDIDATE_HUDLESS) hudless = SunshineHUDless.Load(at).rgb;
-        bool finite;
-        float delta = SunshineHUDlessDifferenceOf(presentedPair.rgb, hudless, finite);
-        bool unchanged = finite && delta <= Sunshine_UIDifferenceThreshold * .5;
-        difference.x += finite && delta > Sunshine_UIDifferenceThreshold ? 1u : 0u;
-        difference.y += finite ? 0u : 1u;
-        difference.z += unchanged ? 1u : 0u;
+        bool unchanged = false, litPixel = false;
+        [branch] if (offered & SUNSHINE_UI_CANDIDATE_HUDLESS) {
+            hudless = SunshineHUDless.Load(at).rgb;
+            bool finite;
+            const float delta = SunshineHUDlessDifferenceOf(SunshineSourceSampler.Load(at).rgb, hudless, finite);
+            unchanged = finite && delta <= Sunshine_UIDifferenceThreshold * .5;
+            difference.x += finite && delta > Sunshine_UIDifferenceThreshold ? 1u : 0u;
+            difference.y += finite ? 0u : 1u;
+            difference.z += unchanged ? 1u : 0u;
+            // A HUD-less pixel that shows scene content rather than black.
+            litPixel = finite && max(max(abs(hudless.r), abs(hudless.g)), abs(hudless.b)) > Sunshine_UIDifferenceThreshold * 8.0;
+            lit.x += litPixel ? 1u : 0u;
+        }
         difference.w += 1u;
-        // A HUD-less pixel that shows scene content rather than black.
-        bool litPixel = finite && max(max(abs(hudless.r), abs(hudless.g)), abs(hudless.b)) > Sunshine_UIDifferenceThreshold * 8.0;
-        lit.x += litPixel ? 1u : 0u;
         // A2, one way: a strong pixel (alpha in [1/2, 1], so finite)
         // contradicts its source where the exact HUD-less image is lit and
-        // unchanged, the scene shown without UI. Real UI changes the pixels it
-        // covers, and dims and tints over dark or changed pixels never do.
+        // unchanged against both the paired Backbuffer (t0) and the presented
+        // frame (t6): the scene shown without UI on screen. Real UI changes
+        // the pixels it covers, and dims and tints over dark or changed
+        // pixels never do; UI drawn after the tagged Backbuffer (a pre-UI
+        // tag, late subtitles or a cursor) changes the presented frame, so it
+        // never contradicts its own tag.
         [branch] if (judging) {
             const uint4 strongPixel = uint4(a >= .5 && a <= 1.0) & judged;
             strong += strongPixel;
-            contradicted += litPixel && unchanged ? strongPixel : uint4(0u, 0u, 0u, 0u);
+            bool shownFinite;
+            const float shownDelta = SunshineHUDlessDifferenceOf(SunshinePresentedColor.Load(at).rgb, hudless, shownFinite);
+            const bool shownUnchanged = shownFinite && shownDelta <= Sunshine_UIDifferenceThreshold * .5;
+            contradicted += litPixel && unchanged && shownUnchanged ? strongPixel : uint4(0u, 0u, 0u, 0u);
         }
         // H1 (d): the layer's colour against the presented colour (zero
         // without a pre-UI threshold, which only a sample frame pushes).
@@ -682,7 +695,7 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     // tag, Backbuffer or current alpha is never informative. A claim acts
     // unless the CPU refuted its signature, and (d) only while the CPU's
     // samples read the pre-UI image visible. While the CPU holds a hidden
-    // verdict of D on the presented frame and the depth is this frame's, an
+    // verdict of D on the presented frame, reused depth included, an
     // acting claim shows the frame flat (source 8), whatever S1 selected; a
     // winner already flat everywhere is relabelled 8 too, since UI pins at
     // weight 1 either way (P1). The evidence passes only measure.
@@ -711,8 +724,9 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     const uint refuted = (Sunshine_UIDetectionFlags >> SUNSHINE_UI_PER_FRAME_REFUTED_SHIFT) & candidate_bits;
     const uint acting = (claims & candidate_bits & ~refuted) |
         ((Sunshine_UIDetectionFlags & SUNSHINE_UI_PER_FRAME_PRE_UI_VISIBLE) ? (claims & SUNSHINE_UI_CLAIM_PRE_UI) : 0u);
-    const bool h1 = acting && (Sunshine_UIDetectionFlags & SUNSHINE_UI_PER_FRAME_SCENE_HIDDEN) &&
-        !(Sunshine_UIDetectionFlags & SUNSHINE_UI_PER_FRAME_DEPTH_NOT_CURRENT);
+    // The held verdict is measured only on samples with current depth, so
+    // reused depth (a generated Present, a late capture) keeps it.
+    const bool h1 = acting && (Sunshine_UIDetectionFlags & SUNSHINE_UI_PER_FRAME_SCENE_HIDDEN);
     if (h1) { source = 8u; covered = pixels; }
     const uint unaccepted = offered & ~accepted;
     // F1: without a source, the first reason that applies and the candidate
@@ -747,8 +761,9 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     const uint frame_reason = source ? SUNSHINE_UI_FRAME_REASON_DECIDED : none_reason;
     // A2: a valid exact change set judges the offered, valid UIAlpha, UI
     // color tag, Backbuffer and current alpha; at least a tenth of a source's
-    // strong pixels where the HUD-less image is lit and unchanged contradicts
-    // it. Its counts exist on status samples only.
+    // strong pixels where the HUD-less image is lit and unchanged against both
+    // the pair's colour and the presented colour contradicts it. Its counts
+    // exist on status samples only.
     const uint pair_bits = SUNSHINE_UI_CANDIDATE_HUDLESS | SUNSHINE_UI_CANDIDATE_EXACT;
     const bool exact_judge = (offered & pair_bits) == pair_bits && (valid & SUNSHINE_UI_CANDIDATE_HUDLESS);
     uint contradicted_bits = 0u;
@@ -852,7 +867,7 @@ void SunshineUIDetectionMaskCS(uint3 id : SV_DispatchThreadID)
     else if (source == 1u) mask = SunshineUIDedicatedAlpha.Load(at).r;
     else if (source == 2u) mask = SunshineUIColorAlpha.Load(at).a;
     else if (source == 3u) mask = SunshineUIBackbufferAlpha.Load(at).a;
-    else if (source == 4u) mask = SunshineSourceSampler.Load(at).a;
+    else if (source == 4u) mask = SunshinePresentedColor.Load(at).a;
     else if (source == SUNSHINE_UI_SOURCE_LAYER) mask = SunshineUILayer.Load(at).a;
     else if (source == 5u) {
         bool finite;

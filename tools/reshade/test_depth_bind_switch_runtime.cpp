@@ -194,9 +194,7 @@ int main(int argc,char **argv) {
   if(argc!=5){std::fputs("usage: depth_bind_switch_runtime <official.dll> <Shaders> <test.addon64> <fresh-output>\n",stderr);return 2;}
   std::thread([]{Sleep(180000);std::fputs("FAIL bind-switch watchdog\n",stderr);TerminateProcess(GetCurrentProcess(),124);}).detach();
   try {
-    require(sunshine_camera_fixture::flag("SUNSHINE_DEPTH_BIND_SWITCH_TEST") &&
-      sunshine_camera_fixture::flag("SUNSHINE_GAME3D_AUTOMATIC") && sunshine_camera_fixture::flag("SUNSHINE_GAME3D_AUTOMATIC_ACTIONS_TEST"),
-      "Fixture requires explicit preserve2 binding-switch and Automatic test-action flags");
+    select_native_boot(true);
     width=3840;height=2160;
     require(!fs::exists(fs::absolute(argv[4])),"Fresh bind-switch output required");
     bind_switch_fixture f;f.runtime_directory=fs::absolute(argv[4]);
