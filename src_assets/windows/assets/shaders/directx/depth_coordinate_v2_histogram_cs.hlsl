@@ -1,4 +1,4 @@
-// Mode-3 raw-depth scan, shared by geometry P05/P95 and cut-normalization P02/P98.
+// Host adaptive raw-depth scan, shared by geometry P05/P95 and cut-normalization P02/P98.
 // Every reduction group overwrites two independent 256-bin populations. Only the raw/exclusion
 // traversal is shared: signed finite geometry bounds and nonnegative normalization bounds retain
 // their exact, distinct validity and bin arithmetic. No clear, readback or reuse dispatch is needed.
@@ -24,7 +24,7 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID,
     float4 frame1 = FrameStats[V2_FRAME_STATS_VECTOR_VALID_COUNT];
     float minimum = V2_FRAME_STATS_MINIMUM(frame0);
     float range = V2_FRAME_STATS_MAXIMUM(frame0) - minimum;
-    bool valid = v2_joint_plane_mode == 3u && V2_FRAME_STATS_VALID(frame1) == 1.0f &&
+    bool valid = v2_joint_plane_mode == V2_ADAPTIVE_POLICY_ID && V2_FRAME_STATS_VALID(frame1) == 1.0f &&
         !isnan(range) && !isinf(range) && range >= 0.0f;
     float inverse_range = range > 0.0f ? 256.0f / range : 0.0f;
     valid = valid && !isnan(inverse_range) && !isinf(inverse_range);

@@ -223,10 +223,11 @@ namespace platf::sbs_debug {
         {"state_tag", subtitle_locator_state_tag},
         {"state_word_count", subtitle_locator_state_word_count},
         {"rectangle_capacity", subtitle_locator_rectangle_capacity},
-        {"experimental_adaptive_ui", {
-          {"modes", {3u}}, {"state_offset", subtitle_locator_adaptive_offset},
+        {"adaptive_ui", {
+          {"policy_id", adaptive_policy_id}, {"state_offset", subtitle_locator_adaptive_offset},
           {"state_word_count", subtitle_locator_adaptive_word_count},
           {"clock", "source-observation-microseconds"},
+          {"geometry_authority", subtitle_geometry_authority},
           {"probe", "union-of-current-authorized-covers-in-content"},
           {"clearance_per_eye_source_pixels", 2u},
           {"enter_covered_fraction", 0.20f}, {"enter_content_fraction", 0.02f},
@@ -281,60 +282,18 @@ namespace platf::sbs_debug {
           {"hard_cut_allowed", false},
         }},
         {"target_policy", {
-          {"units", "binocular-source-pixels"},
-          {"placement", {
-            {"primary", "aggregate-owner-median-member-center"},
-            {"fallback_on_primary_failure", true},
-            {"fallback_span",
-             "ordinary-core-horizontal-bounds-else-owner-core-horizontal-bounds"},
-            {"fallback_top", "ordinary-core-top-else-owner-core-top"},
-            {"fallback_step_denominator", subtitle_target_horizontal_step_denominator},
-            {"fallback_max_radius_steps",
-             subtitle_target_horizontal_fallback_max_radius_steps},
-            {"fallback_order_within_radius", {"negative", "positive"}},
-            {"fallback_radius_policy", "first-reliable-radius"},
-            {"fallback_requires_unclamped_sample_strip", true},
-            {"fallback_minimum_coherent_rows", 2u},
-            {"fallback_row_median_delta_max",
-             subtitle_target_max_row_median_delta_binocular_source_pixels},
-            {"fallback_probe_target", "mean-medians"},
-            {"fallback_pair_target_delta_max",
-             subtitle_target_max_row_median_delta_binocular_source_pixels},
-            {"fallback_pair_conflict", "unreliable-stop-search"},
-            {"fallback_within_radius_policy", "maximum-mean-within-delta"},
-            {"ribbon_places_fallback_with_ordinary", false},
-          }},
-          {"selection", {
-            {"applies_to", "primary"},
-            {"samples_per_row", 16u},
-            {"median_indices", {7u, 8u}},
-            {"iqr_lower_indices", {3u, 4u}},
-            {"iqr_upper_indices", {11u, 12u}},
-            {"row_validity", "independent-finite-direct-container"},
-            {"both_valid_row_iqr", "ignored"},
-            {"single_valid_row", "median-if-iqr-at-most-row-iqr-max"},
-            {"both_valid_within_delta", "mean-medians"},
-            {"both_valid_beyond_delta", "maximum-median"},
-          }},
-          {"evidence", {
-            {"row_iqr_max",
-             subtitle_target_max_row_iqr_binocular_source_pixels},
-            {"row_median_delta_max",
-             subtitle_target_max_row_median_delta_binocular_source_pixels},
-          }},
-          {"deadband", subtitle_target_deadband_binocular_source_pixels},
-          {"ema_alpha", subtitle_target_ema_alpha},
-          {"maximum_slew", subtitle_target_max_slew_binocular_source_pixels},
-          {"maximum_residual", subtitle_target_max_residual_binocular_source_pixels},
-          {"unreliable_hold", {
-            {"owner_state_word", 25u},
-            {"maximum_distinct_observations", subtitle_target_max_unreliable_holds},
-            {"increment_requires",
-             "continuing-same-scene-owner-current-authority-valid-target"},
-            {"preserve_without_current_authority", true},
-            {"duplicate_observation_ages", false},
-            {"hard_cut_allowed", false},
-          }},
+          {"units", "one-eye-analysis-source-U"},
+          {"selection", "authenticated-current-cover-conflict-histogram"},
+          {"candidate_step_per_eye_source_pixels", 4u},
+          {"clearance_per_eye_source_pixels", 2u},
+          {"approach_dwell_us", 100000u},
+          {"retreat_dwell_us", 1500000u},
+          {"approach_rate_source_u_per_second", 0.03f},
+          {"retreat_rate_source_u_per_second", 0.005f},
+          {"rate_tick_cap_us", 250000u},
+          {"current_cover_pin", "immediate-full-plane"},
+          {"collar", "existing-horizontal-plus-vertical-analytic-distance"},
+          {"owner_hold_word", "reserved-zero"},
           {"representation_limit", "direct-parallax-container"},
         }},
         {"shader_contract", subtitle_shader_contract_json(identity, {
@@ -353,10 +312,7 @@ namespace platf::sbs_debug {
     }
 
     bool subtitle_target_is_representable(const float target) {
-      // SLR13 tracks a signed local supporting plane. The evidence gates belong to the shader
-      // observation transaction; the compact state only carries an accepted target, so native
-      // dump trust authenticates its finite V2 representation domain exactly.
-      return std::isfinite(target) && std::abs(target) <= direct_container_limit;
+      return std::isfinite(target) && target >= 0.0f && target <= direct_container_limit;
     }
 
     std::uint32_t subtitle_word(
@@ -914,10 +870,11 @@ namespace platf::sbs_debug {
         for (std::size_t i = 0u; i < subtitle_locator_adaptive_word_count; ++i) {
           if (word(i) != 0u) return false;
         }
-        return joint_plane_mode != 3u ||
-          subtitle_word(locator, 20u) == 0u;
+        return joint_plane_mode == adaptive_policy_id && subtitle_word(locator, 20u) == 0u;
       }
-      if (joint_plane_mode != 3u) return false;
+      if (joint_plane_mode != adaptive_policy_id) {
+        return false;
+      }
       const auto flags = word(1u);
       const float applied = std::bit_cast<float>(word(3u));
       const float limit = std::bit_cast<float>(word(12u));
@@ -1063,7 +1020,7 @@ namespace platf::sbs_debug {
 
       if (target_valid) {
         if (!owner || target_reset || target_generation != owner_generation ||
-            !target_in_range || fade == 0u) {
+            !target_in_range || fade != 2u) {
           return false;
         }
       } else if (target_reset) {
@@ -1084,8 +1041,7 @@ namespace platf::sbs_debug {
             )) {
           return false;
         }
-        if (!owner || !target_valid || owner_count != 1u || fade != 2u ||
-            (provisional_fade != 1u && provisional_fade != 2u) ||
+        if (!owner || !target_valid || owner_count != 1u || fade != 2u || provisional_fade != 2u ||
             !subtitle_provisional_geometry_is_canonical(locator)) {
           return false;
         }
@@ -1093,10 +1049,8 @@ namespace platf::sbs_debug {
 
       const bool packed_grace_zero = packed_grace_x == 0u && packed_grace_y == 0u;
       if (owner) {
-        if (hold_or_grace > subtitle_target_max_unreliable_holds ||
-            (!provisional_current && !packed_grace_zero) ||
-            (hold_or_grace != 0u &&
-             (!target_valid || fade == 0u || last_event != 0u))) {
+        if (hold_or_grace != 0u ||
+            (!provisional_current && !packed_grace_zero)) {
           return false;
         }
         if (!target_valid && !target_reset &&
@@ -1196,13 +1150,13 @@ namespace platf::sbs_debug {
       const std::uint32_t confirmed_cut_count
     ) {
       const auto mode = completed.parallax_v2_joint_plane_mode;
-      float display_budget = direct_container_limit;
-      if (!joint_plane_mode_word_is_valid(mode)) return false;
-      if (mode == 3u) {
-        if (!std::isfinite(completed.parallax_v2_requested_gain) ||
-            completed.parallax_v2_requested_gain <= 0.0f) return false;
-        display_budget = models::depth_coordinate_v2::display_budget_for_mode(
-          completed.parallax_v2_requested_gain, mode);
+      const float display_budget = models::depth_coordinate_v2::display_budget();
+      if (!joint_plane_mode_word_is_valid(mode)) {
+        return false;
+      }
+      if (!std::isfinite(completed.parallax_v2_requested_gain) ||
+            completed.parallax_v2_requested_gain <= 0.0f) {
+        return false;
       }
       if (!subtitle_ocr_record_is_canonical_for_frame(ocr, completed) ||
           locator.size() != subtitle_locator_state_word_count * sizeof(std::uint32_t)) {
@@ -1475,8 +1429,7 @@ namespace platf::sbs_debug {
             }
             if ((locator_flags & subtitle_locator_flag_owner) == 0u ||
                 (locator_flags & subtitle_locator_flag_target_valid) == 0u ||
-                owner_count != 1u || word(locator_base + 24u) != 2u ||
-                (provisional_fade != 1u && provisional_fade != 2u) ||
+                owner_count != 1u || word(locator_base + 24u) != 2u || provisional_fade != 2u ||
                 !subtitle_provisional_geometry_is_canonical(
                   trace_rectangle(subtitle_locator_owner_offset), pending_core
                 )) {
@@ -1496,14 +1449,19 @@ namespace platf::sbs_debug {
             word(condition_base + 1u) == subtitle_condition_param_tag &&
             word(condition_base + 2u) == current_count &&
             word(condition_base + 3u) == current_kinds &&
+            word(condition_base + 4u) == 2u &&
             word(condition_base + 4u) == word(locator_base + expected_fade_word) &&
-            word(condition_base + 5u) == word(locator_base + expected_target_word);
+            word(condition_base + 5u) == word(locator_base + expected_target_word) &&
+            subtitle_target_is_representable(std::bit_cast<float>(word(condition_base + 5u)));
           bool condition_is_canonical_zero = true;
           for (std::size_t index = 0u; index < subtitle_condition_param_word_count; ++index) {
             condition_is_canonical_zero = condition_is_canonical_zero &&
               word(condition_base + index) == 0u;
           }
-          if (current_count != 0u ? !condition_matches_active_state :
+          // The historical ring has no complete geometry state. A current OCR cover can
+          // coexist with an unavailable geometry publication and canonical zero conditioning.
+          // The matched field verifier checks the complete geometry authority separately.
+          if (current_count != 0u ? !(condition_matches_active_state || condition_is_canonical_zero) :
                                    !condition_is_canonical_zero) {
             return false;
           }
@@ -1525,6 +1483,8 @@ namespace platf::sbs_debug {
                 static_cast<std::uint32_t>(completed.field_width) ||
               record(record_word_e::field_height) !=
                 static_cast<std::uint32_t>(completed.field_height) ||
+              (completed.matched_observation_timestamp_us != 0u &&
+               observation_timestamp_us != completed.matched_observation_timestamp_us) ||
               ((flags & input_domain_reset) != 0u) != completed.input_domain_reset) {
             return false;
           }
@@ -1691,10 +1651,10 @@ namespace platf::sbs_debug {
         return false;
       }
       const bool usable = statistics_valid && frame_stats[frame_stat_population_std] > collapse_abs_epsilon;
-      const auto mode = completed.parallax_v2_joint_plane_mode;
-      if (mode == 0u) return state_valid == usable;
-      const float budget = display_budget_for_mode(completed.parallax_v2_requested_gain, mode);
-      if ((state[gain_display_limit] != 0.0f || state_valid) && state[gain_display_limit] != budget) return false;
+      const float budget = display_budget();
+      if ((state[gain_display_limit] != 0.0f || state_valid) && state[gain_display_limit] != budget) {
+        return false;
+      }
       // Missing or regressed source time can disarm an established camera despite usable
       // current statistics. The sealed state admission still forbids false valid output.
       const bool quantiles_valid = percentile_valid == 1.0f;
@@ -2800,13 +2760,9 @@ namespace platf::sbs_debug {
         {"wire_contract", "authenticated live Host-SBS renderer input; not a client wire contract"},
         {"units", {
                     {"coordinate", "dimensionless canonical coordinate derived from raw depth"},
-                    {"gain", joint_plane_mode_value == 3u ?
-                      (completed.depth_input_region.is_video_region() ?
+                    {"gain", completed.depth_input_region.is_video_region() ?
                         "one-eye ROI-local source-U per coordinate unit" :
-                        "one-eye full-source-U per coordinate unit") :
-                      (completed.depth_input_region.is_video_region() ?
-                        "one-eye ROI-local source-U per curve unit" :
-                        "one-eye full-source-U per curve unit")},
+                        "one-eye full-source-U per coordinate unit"},
                     {"parallax", completed.depth_input_region.is_video_region() ?
                       "signed one-eye ROI-local source-U; full-source renderer authority additionally requires depth_input_region embedding" :
                       "signed one-eye full-source-U"},
@@ -2814,8 +2770,6 @@ namespace platf::sbs_debug {
         {"constants", {
                         {"raw_coordinate_scale", completed.parallax_v2_raw_coordinate_scale},
                         {"collapse_abs_epsilon", collapse_abs_epsilon},
-                        {"far_tau", far_tau},
-                        {"near_log_tau", near_log_tau},
                         {"gain_per_pop", gain_per_pop},
                         {"reference_pop_strength", reference_pop_strength},
                         {"reference_gain_at_reference_pop", parallax_gain},
@@ -2835,20 +2789,11 @@ namespace platf::sbs_debug {
         {"named_values", std::move(named_values)},
         {"decoded", decoded},
         {"adaptation_semantics", {
-                                    {"coordinate", joint_plane_mode_value == 3u ?
-                                      "bounded-source-time-linear-raw-mean-and-robust-amplitude-reference" :
-                                      "immediate-first-usable-center-latched-until-cut-fixed-authenticated-scale-retained-across-unusable"},
-                                    {"convergence_curve", joint_plane_mode_value == 3u ?
-                                      "continuously-tracked-mean-is-zero-plane-no-cut-latch" :
-                                      "arithmetic-mean-center-is-zero-plane"},
-                                    {"requested_gain", joint_plane_mode_value == 3u ?
-                                      "immutable-cfg-pop-strength-independent-of-display-limit" : "immutable-cfg-pop-strength"},
-                                    {"container_scale", joint_plane_mode_value == 3u ?
-                                      "abi-retained-identity-mode3-hard-representation-cap" :
-                                      "abi-retained-identity-pointwise-soft-container-is-map-local"},
-                                    {"near_curve", joint_plane_mode_value == 3u ?
-                                      "linear-coordinate-no-depth-curve-before-hard-representation-cap" :
-                                      "fixed-contract-logarithmic-tau-independent-of-content-occupancy"},
+                                    {"coordinate", "bounded-source-time-linear-raw-mean-and-robust-amplitude-reference"},
+                                    {"convergence_curve", "continuously-tracked-mean-is-zero-plane-no-cut-latch"},
+                                    {"requested_gain", "immutable-cfg-pop-strength-independent-of-display-limit"},
+                                    {"container_scale", "abi-retained-identity-mode3-hard-representation-cap"},
+                                    {"near_curve", "linear-coordinate-no-depth-curve-before-hard-representation-cap"},
                                     {"spatial_conditioner", "fixed-75pct-vertical-majorant-share-then-horizontal-majorant"},
                                   }},
       };
@@ -3106,7 +3051,7 @@ namespace platf::sbs_debug {
           {"renderer", "depth-coordinate-v2"},
           {"pop_strength", completed.parallax_v2_requested_pop_strength},
           {"adaptive_pop", false},
-          {"zero_plane_authority", "scene-latched selected raw center"},
+          {"zero_plane_authority", "continuously source-time tracked raw mean"},
           {"depth_model", model_name},
           {"depth_model_url", effective_model_url},
           {"model_input_width", completed.model_width},
@@ -3345,7 +3290,7 @@ namespace platf::sbs_debug {
           {"subtitle_condition", {
             {"word_offset", offset(record_word_e::subtitle_condition_begin)},
             {"word_count", subtitle_condition_word_count},
-            {"validity", "post-finalization condition params for an authenticated subtitle observation, or the byte-identical immediately prior params for held_with_depth: exact SLR tuple when current_count is nonzero, canonical zero6 when current_count is zero; suppressed output copies exact Base and these words are unused"},
+            {"validity", "post-finalization condition params for an authenticated subtitle observation, or the byte-identical immediately prior params for held_with_depth: exact SLR tuple or canonical zero6 when current_count is nonzero, canonical zero6 when current_count is zero; matched geometry authority is verified from the complete state separately; suppressed output copies exact Base and these words are unused"},
           }},
           {"observation_timestamp", {
             {"word_offset", offset(record_word_e::observation_timestamp_low)},
@@ -3516,9 +3461,8 @@ namespace platf::sbs_debug {
           condition_was_executed || subtitle_held_with_depth;
         const bool condition_active = condition_was_published && condition_valid &&
           condition_word(2u) != 0u &&
-          (condition_word(4u) == 1u || condition_word(4u) == 2u) &&
-          std::isfinite(condition_target) &&
-          std::fabs(condition_target) <= direct_container_limit;
+          condition_word(4u) == 2u &&
+          subtitle_target_is_representable(condition_target);
         const bool matched = frame_id == completed.matched_frame_id;
         if (matched) {
           matched_sequence = sequence;
@@ -3605,7 +3549,7 @@ namespace platf::sbs_debug {
              (locator_flags & subtitle_locator_flag_provisional_current) != 0u ?
                locator_word(subtitle_locator_provisional_fade_word) : 0u},
             {"lifetime_or_hold_count", lifetime_or_hold},
-            {"unreliable_hold_count", owner_count != 0u ?
+            {"reserved_owner_hold_count", owner_count != 0u ?
               nlohmann::json(lifetime_or_hold) : nlohmann::json(nullptr)},
             {"death_grace_count", owner_count == 0u ?
               nlohmann::json(lifetime_or_hold) : nlohmann::json(nullptr)},
@@ -4993,7 +4937,7 @@ namespace platf::sbs_debug {
             true,
             true,
             "compact SLR13 subtitle authority state",
-            "Exact 96-word little-endian SLR14 owner, pending, stabilized local-plane target, bounded unreliable-measurement hold count, target-publication authority state, and 16-word adaptive UI tail.",
+            "Exact 96-word little-endian SLR14 owner, pending, current-cover authority, ownerless death grace, and source-time adaptive UI plane state.",
             subtitle_locator_state_sha256
           );
         }
@@ -5299,13 +5243,14 @@ namespace platf::sbs_debug {
             {"artifact", nullptr},
           };
         nlohmann::json manifest {
-          {"schema", 41},
+          {"schema", 44},
           {"capture", "one matched, completed Host-SBS frame"},
           {"capture_status", "complete"},
           {"published_atomically", true},
           {"host_sbs_mode", "ai"},
           {"trigger", trigger_source},
           {"matched_frame_id", completed.matched_frame_id},
+          {"matched_observation_timestamp_us", completed.matched_observation_timestamp_us},
           {"depth_model", completed.depth_model},
           {"composite_runtime_provenance", composite_runtime_provenance},
           {"color_mode", color_mode},
@@ -6204,6 +6149,7 @@ namespace platf::sbs_debug {
         completed.raw_width != completed.model_width ||
         completed.raw_height != completed.model_height ||
         prepared_frame_id_ != completed.matched_frame_id ||
+        completed.matched_observation_timestamp_us == 0u ||
         completed.warp_depth != completed.shadow_final_parallax
       ) {
         retry_not_before_ = std::chrono::steady_clock::now() + retry_backoff;

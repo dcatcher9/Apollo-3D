@@ -1,8 +1,8 @@
 # Dump 3D format
 
 Dump 3D is one atomic, matched-frame diagnostic package for the authenticated Host SBS V2 path.
-The canonical geometry/metric reader accepts schema 41 only. Removed presentation-experiment
-schemas 42/43 remain historical artifacts and are rejected by the current reader. Retired SLR3--SLR9,
+The canonical geometry/metric reader accepts schema 44 only. Removed presentation-experiment
+schemas 41/42/43 remain historical artifacts and are rejected by the current reader. Retired SLR3--SLR9,
 GST/OGR/ORS, and offline overlay-detector packages are intentionally unsupported.
 
 ## Current package
@@ -13,7 +13,10 @@ availability, and SHA-256 hashes of numeric and state authority files. `capture_
 `complete` and `published_atomically` is `true`; a later frame never impersonates an unavailable
 requested frame. The manifest's V2 state summary is an exact authenticated mirror of the required
 `shadow_state.json`, whose frame-valid bit is cross-checked against the required same-frame
-`shadow_frame_stats.json`.
+`shadow_frame_stats.json`, including mandatory P05/P95 histogram authority. The root
+`matched_observation_timestamp_us` is a positive uint64 source-transaction clock from the completed
+publication; it must match the optional ring's matched record. It is independent of GPU state and
+never inferred from the camera or subtitle accepted clock.
 
 The core package contains:
 
@@ -78,7 +81,7 @@ ordinary limiter and, when active, SLR14 directly into that one field.
 
 ## Diagnostic GPU completion trace
 
-Schema 41 may carry a diagnostic-only 300-slot GPU completion ring. It records completed accepted
+Schema 44 may carry a diagnostic-only 300-slot GPU completion ring. It records completed accepted
 depth roots, not source frames, presentation frames, busy drops, or every captured desktop update.
 Each 192-word (768-byte) record binds an exact trace ordinal, matched frame, analysis generation,
 analysis-domain tag, transaction token, analysis-source and live-field extents, the immutable
@@ -114,9 +117,15 @@ resolve and condition-parameter publication on valid infer. A held reuse capture
 locator's older frame identity. When its predecessor remains in the ring, both stored tuples must be
 byte-identical to that immediately prior record. The raw ring remains schema 3; the trace contract
 document is schema 4 and decoded `gpu_trace.json` is schema 5. A nonzero
-SLR `current_count` requires the exact six-word condition tuple; normal authority uses
-durable target/fade words 18/24, while provisional-current flag bit 4 uses ephemeral words 29/30.
-A zero `current_count` requires the conditioner's canonical zero6 Base verdict. Suppression freezes
+SLR `current_count` admits either the exact six-word condition tuple or canonical zero6 in historical
+ring rows, because those rows do not contain the complete camera publication. Normal authority
+uses durable target/fade words 18/24; provisional-current flag bit 4 uses words 29/30. The matched
+package independently verifies the complete camera state, current clock and cut domain: ready
+geometry with current covers requires the exact pin, and unavailable geometry requires zero6 and
+exact content-clamped Base. A zero `current_count` also requires canonical zero6. A held current
+cover additionally requires its original subtitle publication in the authenticated ring, with the
+same complete SLR tuple; its source clock qualifies the retained geometry, while the root timestamp
+continues to describe the current transaction. Suppression freezes
 SLR, skips conditioning, and publishes immutable Base as the atomic final field; its stored SLR/condition
 sections may consequently be frozen or stale and are explicitly marked unused. The raw ring,
 decoded JSON, and trace contract
@@ -143,34 +152,23 @@ infer, and the trace-authenticated older tuple frame for whole-tuple reuse. See 
 The generated `subtitle_ocr.locator_state` contract owns SLR14's schema, the unambiguous
 little-endian `SL14` tag bytes, word layout,
 rectangle capacity, kind packing, numeric qualification/death-grace limits, and the complete
-local-supporting-plane target policy. Its resolver descriptor explicitly binds the symmetric
-ordinary-core corner rejection: edge clearance is strictly below `floor(content_width / 32)`, the
-core reaches `dynamic_ROI_bottom - 16`, threshold equality is accepted, and ribbons are exempt.
-The resolver descriptor serializes the aggregate-center
-primary policy exactly as `binocular-source-pixels`: two independent 16-sample rows; median indices
-`7/8`; both complete finite in-container rows bypass the IQR gate; a row-median difference of `4`
-is the both-valid mean-versus-maximum-median selection boundary; and a sole valid row is accepted
-only when its Tukey IQR at indices `3/4` and `11/12` is at most `8`. Schema 41 also authenticates
-the strict primary-failure fallback: ordinary-core span
-step `W/16`, maximum radius two, negative then positive order, ordinary-over-ribbon placement,
-unclamped 61-cell strips, two coherent rows and at most `4` pixels of intra-probe median separation.
-At one radius, two qualifying mean targets must themselves agree within `4` pixels; conflict stops
-the search and makes the observation unreliable. It also binds deadband `1`, EMA alpha `0.125`,
-maximum slew `0.25`, maximum continuing residual `8`,
-and at most two distinct continuing same-scene unreliable-measurement holds in owner state word
-25. Only current authority increments that counter; duplicates do not age it, absent current
-authority may preserve it without conditioning, and hard cuts cannot hold it. The signed
-direct-parallax container is the target's only representation limit. The dump
-serializes exactly that fixed word array as little-endian uint32 values. The reader authenticates
-every identity, flag, aggregate, rectangle, target, event, fade, contextual hold/grace counter,
-kind mask, and canonical zero slot, and requires current covers to come from the OCR8 record for
-the same target-publication frame. The provisional-current descriptor also owns flag bit 4, target/fade words 29/30, the exact
-single-ordinary mature-owner geometry bounds, and the requirement that the dump's matched record
-replay the exact selected OCR8 raw-core/final-cover pair. Historical trace rows have no OCR8 payload,
-so they validate the same state geometry, cover containment, and condition tuple structurally; they
-do not claim exact historical OCR replay. See the
-[live SLR14 contract](../../docs/host-sbs.md#ocr-box-subtitle-conditioner) for overlap, cut-survival,
-target, fade, death-grace, and conditioning semantics.
+adaptive UI-plane policy. Its resolver descriptor binds the symmetric ordinary-core corner
+rejection and ribbon exemption, exact current OCR8 covers, provisional single-line handoff,
+[0, 0.04] one-eye analysis-source-U target, canonical full pin (fade2), and owner word25 reserved
+zero. Ownerless word25 retains only the bounded death grace. The plane is selected from the union
+of authorized current covers through a conflict histogram with 4-pixel candidates and 2-pixel
+clearance; source-time dwell and bounded approach/retreat rates stabilize the plane. There is no
+local background median, per-owner unreliable hold or per-pixel fade. Full camera publication
+validity gates both probes and conditioning. Missing, collapsed or stale geometry preserves the
+plane/goal and OCR ownership, clears timing authority and dwell, and rearms on the next valid
+observation without catching up through the unavailable interval.
+
+The reader authenticates every identity, flag, aggregate, rectangle, target, event, fade,
+contextual death grace, kind mask and canonical zero slot. Current covers must come from the OCR8
+record for the same target-publication frame. Historical trace rows have no OCR8 payload and
+validate geometry, cover containment and condition tuples structurally; they do not claim exact
+historical OCR replay. See the [live SLR14 contract](../../docs/host-sbs.md#ocr-box-subtitle-conditioner)
+for overlap, cut-survival, ownership and conditioning semantics.
 
 The Python conditioner replay below is deliberately an independent dump-integrity verifier. It
 recomputes the frozen SM5 operation order, including the bounded one-ULP division alternatives, to
@@ -199,16 +197,16 @@ channels are normalized full-captured-source coordinates; multiply their signed 
 destination identity by the full captured width to measure one-eye source pixels. A binocular
 separation is twice a symmetric one-eye offset; these units must not be mixed.
 
-Current experimental mode 3 uses the authenticated linear Candidate
+The sole adaptive policy (diagnostic identity3) uses the authenticated linear Candidate
 `clamp(requested_gain*(raw-zero)/D, -0.04, +0.04)`, with no depth curve or soft envelope.
 Candidate, post-limiter Base, and conditioned Final remain separate actual numeric artifacts.
 The signed hard endpoint is in analysis-source U; it does not bypass the native slope/shear guards.
 Older with-curve experiment artifacts retain their original geometry identity and mapping and
 cannot be relabeled as the linear candidate.
 
-All current ROI packages, including experimental mode 3, use `warp_map_contract` schema `2`.
+All current ROI packages use `warp_map_contract` schema `2`.
 The map is the continuous 11-step inverse of the signed final field embedded into the full capture,
-with the same slope-limited outside-only collar in every mode. `warp_mask.png` red marks finite-source
+with the same slope-limited outside-only collar for the sole pipeline. `warp_mask.png` red marks finite-source
 boundary extrapolation; green and blue are zero. There are no source-kind or visibility flags,
 static-rim samples, or synthetic interior fill paths. Nearby browser pixels may move within the
 collar; only samples beyond its bounded support must be at zero displacement.

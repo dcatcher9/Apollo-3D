@@ -3,13 +3,8 @@
 
 #include "include/depth_coordinate_v2_contract.generated.hlsl"
 
-
 bool V2Finite(float value) {
     return !isnan(value) && !isinf(value);
-}
-
-bool V2ApproximatelyEqual(float left, float right) {
-    return V2Finite(left) && V2Finite(right) && abs(left - right) <= 1.0e-6f;
 }
 
 bool V2CalibrationRevisionValid(uint revision) {
@@ -18,14 +13,17 @@ bool V2CalibrationRevisionValid(uint revision) {
 }
 
 bool V2JointPlaneModeValid(uint mode) {
-    return mode == 0u || mode == 3u;
+    return mode == V2_ADAPTIVE_POLICY_ID;
 }
 
 bool V2JointPlaneConstantsValid() {
     return V2JointPlaneModeValid(v2_joint_plane_mode) &&
         v2_joint_plane_reserved0 == 0u && v2_joint_plane_reserved1 == 0u &&
         v2_joint_plane_reserved2 == 0u &&
-        v2_joint_observation_reserved0 == 0u && v2_joint_observation_reserved1 == 0u;
+        v2_joint_observation_reserved0 == 0u && v2_joint_observation_reserved1 == 0u &&
+        v2_coordinate_reserved0 == 0.0f && v2_coordinate_reserved1 == 0.0f &&
+        v2_direct_container_limit == V2_DIRECT_CONTAINER_LIMIT &&
+        v2_convergence_curve_default == V2_CONVERGENCE_CURVE_DEFAULT;
 }
 
 float V2DisplayBudget() {
@@ -33,7 +31,7 @@ float V2DisplayBudget() {
 }
 
 float V2BoundDisplayParallax(float value) {
-    return v2_joint_plane_mode == 3u ? clamp(value, -V2DisplayBudget(), V2DisplayBudget()) : value;
+    return clamp(value, -V2DisplayBudget(), V2DisplayBudget());
 }
 
 // All controller payloads remain integers, including mixed float words, until UAV publication.
@@ -68,13 +66,12 @@ uint V2CameraIntegrityBase(float4 active, float4 control, uint mode) {
     checksum = (checksum ^ asuint(V2_STATE_INVERSE_SCALE(active))) * 16777619u;
     checksum = (checksum ^ asuint(V2_STATE_CONVERGENCE_CURVE(active))) * 16777619u;
     checksum = (checksum ^ asuint(V2_STATE_CALIBRATION_REVISION(control))) * 16777619u;
-    return mode != 0u ? (checksum ^ mode) * 16777619u : checksum;
+    return (checksum ^ mode) * 16777619u;
 }
 
 uint V2CameraIntegrityWithAdaptiveState(float4 active, float4 control, uint4 mapping, V2AdaptiveCameraState camera_state) {
     uint checksum = V2CameraIntegrityBase(active, control, V2_STATE_JOINT_PLANE_MODE_BITS(mapping));
-    if (V2_STATE_JOINT_PLANE_MODE_BITS(mapping) == 3u) {
-        [unroll] for (uint component = 0u; component < 4u; ++component)
+    [unroll] for (uint component = 0u; component < 4u; ++component)
             checksum = (checksum ^ camera_state.clock[component]) * 16777619u;
         [unroll] for (uint component = 0u; component < 4u; ++component)
             checksum = (checksum ^ camera_state.target[component]) * 16777619u;
@@ -82,17 +79,13 @@ uint V2CameraIntegrityWithAdaptiveState(float4 active, float4 control, uint4 map
             checksum = (checksum ^ camera_state.seed_times[component]) * 16777619u;
         [unroll] for (uint component = 0u; component < 4u; ++component)
             checksum = (checksum ^ camera_state.seed_values[component]) * 16777619u;
-    }
     return checksum;
 }
 
 bool V2AdaptiveCameraTailValid(uint mode, V2AdaptiveCameraState camera_state) {
-    if (mode == 0u)
-        return all(camera_state.clock == 0u) && all(camera_state.target == 0u) &&
-            all(camera_state.seed_times == 0u) && all(camera_state.seed_values == 0u);
     float4 target = asfloat(camera_state.target);
     float2 seed = asfloat(camera_state.seed_values.xy);
-    if (mode != 3u || camera_state.clock.z > 1u || camera_state.clock.w > 1u ||
+    if (mode != V2_ADAPTIVE_POLICY_ID || camera_state.clock.z > 1u || camera_state.clock.w > 1u ||
         any(camera_state.seed_values.zw != 0u) ||
         (camera_state.clock.z != 0u && all(camera_state.clock.xy == 0u)) ||
         !V2Finite(target.x) || !V2Finite(target.y) || !V2Finite(target.z) ||
@@ -111,31 +104,6 @@ bool V2AdaptiveCameraTailValid(uint mode, V2AdaptiveCameraState camera_state) {
         !V2ClockAtLeast(camera_state.clock.xy, camera_state.seed_times.zw) ||
         seed.x <= 0.0f || target.w <= 0.0f) return false;
     return all(camera_state.seed_times.zw == camera_state.seed_times.xy);
-}
-
-// Authenticate both scene-camera coordinates. The inverse scale and revision are included
-// so a same-tag state assembled from different camera generations cannot accidentally validate.
-// Starting from zero deliberately keeps the generated empty-state word zero while still making
-// every acquired camera carry a deterministic non-zero checksum in the ordinary case. Integer
-// overflow is the specified modulo-2^32 checksum behavior.
-uint V2CameraCenterIntegrityBits(
-    float4 active,
-    float4 control,
-    float4 mapping_state
-) {
-    uint mode = asuint(V2_STATE_JOINT_PLANE_MODE_BITS(mapping_state));
-    // Preserve every legacy mode-zero seal, including the generated zero empty-state word.
-    return V2CameraIntegrityBase(active, control, mode);
-}
-
-bool V2CameraCenterIntegrityValid(float4 active, float4 control, float4 mapping_state) {
-    return asuint(V2_STATE_CAMERA_CENTER_INTEGRITY_BITS(mapping_state)) ==
-        V2CameraCenterIntegrityBits(active, control, mapping_state);
-}
-
-void V2SealCameraCenter(float4 active, float4 control, inout float4 mapping_state) {
-    V2_STATE_CAMERA_CENTER_INTEGRITY_BITS(mapping_state) = asfloat(
-        V2CameraCenterIntegrityBits(active, control, mapping_state));
 }
 
 bool V2MappingStateValid(float4 mapping_state) {
@@ -165,11 +133,8 @@ bool V2CameraParametersValid(
     float frame_valid = V2_STATE_FRAME_VALID(control);
     float container_scale = V2_STATE_CONTAINER_SCALE(active);
     float expected_inverse_scale = 1.0f / v2_raw_coordinate_scale;
-    uint mode = asuint(V2_STATE_JOINT_PLANE_MODE_BITS(mapping_state));
     float inverse_scale = V2_STATE_INVERSE_SCALE(active);
-    bool scale_valid = mode == 0u ?
-        V2ApproximatelyEqual(inverse_scale, expected_inverse_scale) :
-        V2Finite(inverse_scale) && inverse_scale > 0.0f &&
+    bool scale_valid = V2Finite(inverse_scale) && inverse_scale > 0.0f &&
         inverse_scale <= expected_inverse_scale + 2.0e-6f;
     uint revision = asuint(V2_STATE_CALIBRATION_REVISION(control));
     return asuint(V2_STATE_CONTRACT_TAG_BITS(control)) == V2_CONTRACT_TAG &&
@@ -184,18 +149,12 @@ bool V2CameraParametersValid(
         V2MappingStateValid(mapping_state);
 }
 
-bool V2CameraStateValid(float4 active, float4 control, float4 mapping_state) {
-    return asuint(V2_STATE_JOINT_PLANE_MODE_BITS(mapping_state)) == 0u &&
-        V2CameraParametersValid(active, control, mapping_state) &&
-        V2CameraCenterIntegrityValid(active, control, mapping_state);
-}
-
 bool V2CameraStateWithAdaptiveStateValid(float4 active, float4 control, uint4 mapping, V2AdaptiveCameraState camera_state) {
     return V2CameraParametersValid(active, control, asfloat(mapping)) &&
         V2AdaptiveCameraTailValid(V2_STATE_JOINT_PLANE_MODE_BITS(mapping), camera_state) &&
         mapping.x == V2CameraIntegrityWithAdaptiveState(active, control, mapping, camera_state) &&
-        (mapping.z == 0u || (camera_state.clock.w == 1u &&
-          (V2_STATE_FRAME_VALID(control) == 0.0f || camera_state.clock.z == 1u)));
+        camera_state.clock.w == 1u &&
+        (V2_STATE_FRAME_VALID(control) == 0.0f || camera_state.clock.z == 1u);
 }
 
 bool V2EmptyCameraParametersValid(
@@ -215,83 +174,11 @@ bool V2EmptyCameraParametersValid(
         V2MappingStateValid(mapping_state);
 }
 
-bool V2EmptyCameraStateValid(float4 active, float4 control, float4 mapping_state) {
-    return asuint(V2_STATE_JOINT_PLANE_MODE_BITS(mapping_state)) == 0u &&
-        V2EmptyCameraParametersValid(active, control, mapping_state) &&
-        V2CameraCenterIntegrityValid(active, control, mapping_state);
-}
-
 bool V2EmptyCameraStateWithAdaptiveStateValid(float4 active, float4 control, uint4 mapping, V2AdaptiveCameraState camera_state) {
     return V2EmptyCameraParametersValid(active, control, asfloat(mapping)) &&
         V2AdaptiveCameraTailValid(mapping.z, camera_state) &&
-        (mapping.z == 0u || camera_state.clock.w == 0u) &&
+        camera_state.clock.w == 0u &&
         mapping.x == V2CameraIntegrityWithAdaptiveState(active, control, mapping, camera_state);
-}
-
-// D3D shader model 5 has exp/log but not expm1/log1p. Preserve precision at both C1 joins with
-// short Taylor branches; ordinary values use the native transcendental instructions.
-float V2Expm1(float value) {
-    if (abs(value) < 1.0e-3f) {
-        float value2 = value * value;
-        return value + 0.5f * value2 + value2 * value * (1.0f / 6.0f);
-    }
-    return exp(value) - 1.0f;
-}
-
-float V2Log1p(float value) {
-    if (abs(value) < 1.0e-3f) {
-        float value2 = value * value;
-        return value - 0.5f * value2 + value2 * value * (1.0f / 3.0f);
-    }
-    return log(1.0f + value);
-}
-
-float V2CurveWithNearTau(float coordinate, float near_tau) {
-    if (coordinate < 0.0f) {
-        return v2_far_tau * V2Expm1(coordinate / v2_far_tau);
-    }
-    if (coordinate <= 1.0f) {
-        return coordinate;
-    }
-    return 1.0f + near_tau * V2Log1p((coordinate - 1.0f) / near_tau);
-}
-
-// The production reference applies this fixed curve. Adaptive Host mode is linear with an
-// independent hard representation bound.
-float V2Curve(float coordinate) {
-    return V2CurveWithNearTau(coordinate, v2_near_log_tau);
-}
-
-// Bound each texel independently instead of shrinking the whole frame to accommodate one raw
-// outlier.  The fourth-order soft container is odd, monotone, has unit derivative at the zero
-// plane, and approaches (but does not reach) the representation limit:
-//
-//   contained(x) = x / fourth_root(1 + (x / limit)^4)
-//
-// Its derivative is positive and no greater than one, so it cannot introduce a steeper cliff.
-// The final clamp is only a floating-point safety belt for the strict packed-field contract.
-float V2PointwiseContainer(float requested) {
-    if (!V2Finite(requested) ||
-        !V2Finite(v2_direct_container_limit) ||
-        v2_direct_container_limit <= 0.0f) {
-        return 0.0f;
-    }
-    // Factor the larger magnitude out of the fourth root. This is algebraically identical
-    // to the expression above but never forms an unbounded normalized^4 intermediate.
-    float requested_magnitude = abs(requested);
-    float smaller = min(requested_magnitude, v2_direct_container_limit);
-    float larger = max(requested_magnitude, v2_direct_container_limit);
-    float ratio = smaller / larger;
-    float ratio_squared = ratio * ratio;
-    float inverse_fourth_root = rsqrt(sqrt(
-        1.0f + ratio_squared * ratio_squared));
-    float contained_magnitude = smaller * inverse_fourth_root;
-    float contained = requested < 0.0f ? -contained_magnitude : contained_magnitude;
-    return clamp(
-        contained,
-        -v2_direct_container_limit,
-        v2_direct_container_limit
-    );
 }
 
 #endif

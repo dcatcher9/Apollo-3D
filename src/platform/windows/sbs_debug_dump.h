@@ -174,6 +174,8 @@ namespace platf::sbs_debug {
     models::depth_tensor_content_rect_t field_content {};
     bool refined_live_geometry_active = false;
     std::uint64_t matched_frame_id = 0;
+    /** Source transaction time from the matched publication; reused geometry retains its own clock. */
+    std::uint64_t matched_observation_timestamp_us = 0;
     /** Exact authenticated analysis domain bound to every model/depth/parallax artifact. */
     models::depth_input_region_t depth_input_region {};
     /** ROI planner result, present exactly when depth_input_region.is_video_region() is true. */
@@ -195,7 +197,7 @@ namespace platf::sbs_debug {
     float parallax_v2_raw_coordinate_scale = 0.0f;
     float parallax_v2_requested_pop_strength = 0.0f;
     float parallax_v2_requested_gain = 0.0f;
-    std::uint32_t parallax_v2_joint_plane_mode = 0u;
+    std::uint32_t parallax_v2_joint_plane_mode = models::depth_coordinate_v2::adaptive_policy_id;
     models::input_color_space color_space {};
     std::string depth_model;
   };

@@ -26,6 +26,7 @@
 #include <src/host_sbs_shader_cache.h>
 #include <src/host_sbs_v2_geometry.h>
 #include <src/video_colorspace.h>
+#include <tests/fixtures/host_sbs_adaptive_camera_state.h>
 
 namespace {
   using Microsoft::WRL::ComPtr;
@@ -68,15 +69,9 @@ namespace {
     state[v2::frame_valid] = std::bit_cast<std::uint32_t>(1.0f);
     state[v2::contract_tag_bits] = v2::contract_tag;
     state[v2::renderer_authorization_bits] = v2::contract_tag;
-    state[v2::joint_plane_mode_bits] = 0u;
+    state[v2::joint_plane_mode_bits] = v2::adaptive_policy_id;
     state[v2::mapping_state_reserved_2] = 0u;
-    state[v2::camera_center_integrity_bits] =
-      v2::camera_center_integrity_for_words(
-        state[v2::center],
-        state[v2::inverse_scale],
-        state[v2::convergence_curve],
-        state[v2::calibration_revision]
-      );
+    host_sbs_test::seal_adaptive_camera(state);
     return state;
   }
 

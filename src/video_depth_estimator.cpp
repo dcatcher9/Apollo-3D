@@ -2353,7 +2353,7 @@ namespace models {
     float parallax_v2_raw_coordinate_scale = 0.0f;
     const float parallax_v2_requested_pop_strength;
     const float parallax_v2_requested_gain;
-    const std::uint32_t joint_plane_mode;
+    static constexpr std::uint32_t joint_plane_mode = depth_coordinate_v2::adaptive_policy_id;
     std::shared_ptr<const raw_model_provenance_t> raw_model_provenance;
     std::shared_ptr<const composite_depth_runtime_provenance_t>
       composite_depth_runtime_provenance;
@@ -3257,7 +3257,6 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> buffer_to_tex_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> buffer_to_tex_pad_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_minmax_ema_cs;
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_hist_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_scene_cut_evidence_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_scene_cut_resolve_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_moments_cs;
@@ -5266,8 +5265,7 @@ namespace models {
             static_cast<float>(cfg.pop_strength)
           )
         ),
-        parallax_v2_requested_gain(depth_coordinate_v2::requested_gain_for_config(static_cast<float>(cfg.pop_strength))),
-        joint_plane_mode(cfg.joint_plane_experiment ? cfg.joint_plane_experiment_mode : 0u) {
+        parallax_v2_requested_gain(depth_coordinate_v2::requested_gain_for_config(static_cast<float>(cfg.pop_strength))) {
       const auto init_started = std::chrono::steady_clock::now();
       // Enable the process-wide rolling collector for diagnostic runs. Do not reset it here:
       // Galaxy XR and local-AR estimators may coexist, and one session must not invalidate the
@@ -5604,7 +5602,6 @@ namespace models {
         std::addressof(buffer_to_tex_cs),
         std::addressof(buffer_to_tex_pad_cs),
         std::addressof(depth_minmax_ema_cs),
-        std::addressof(depth_hist_cs),
         std::addressof(depth_scene_cut_evidence_cs),
         std::addressof(depth_scene_cut_resolve_cs),
         std::addressof(depth_coordinate_v2_moments_cs),
@@ -5813,7 +5810,7 @@ namespace models {
         near_identical_fused_preprocess_cs &&
         fused_preprocess_force_cbuffer && fused_preprocess_compare_cbuffer &&
         buffer_to_tex_cs && buffer_to_tex_pad_cs &&
-        depth_minmax_ema_cs && depth_hist_cs &&
+        depth_minmax_ema_cs &&
         minmax_raw_uav && minmax_ema_uav && minmax_ema_srv && hist_uav &&
         analysis_ready && cut_state_uav && cut_state_srv;
       if (!mandatory_resources_ready) {
@@ -6502,15 +6499,13 @@ namespace models {
                             depth_coordinate_v2_frame_stats_srv,
                             depth_coordinate_v2_frame_stats_uav
                           );
-      if (joint_plane_mode == 3u) {
-        resources_ok = resources_ok && create_float4_buffer(
-          static_cast<std::size_t>(reduce_groups) * 128u,
-          nullptr,
-          depth_coordinate_v2_histogram_buf,
-          depth_coordinate_v2_histogram_srv,
-          depth_coordinate_v2_histogram_uav
-        );
-      }
+      resources_ok = resources_ok && create_float4_buffer(
+        static_cast<std::size_t>(reduce_groups) * 128u,
+        nullptr,
+        depth_coordinate_v2_histogram_buf,
+        depth_coordinate_v2_histogram_srv,
+        depth_coordinate_v2_histogram_uav
+      );
 
       resources_ok = resources_ok &&
                      create_float4_buffer(
@@ -6568,8 +6563,8 @@ namespace models {
       const constants_t constants {
         .raw_coordinate_scale = parallax_v2_raw_coordinate_scale,
         .collapse_abs_epsilon = collapse_abs_epsilon,
-        .far_tau = far_tau,
-        .near_log_tau = near_log_tau,
+        .coordinate_reserved0 = 0.0f,
+        .coordinate_reserved1 = 0.0f,
         .requested_gain = parallax_v2_requested_gain,
         .max_horizontal_slope = max_horizontal_slope,
         .direct_container_limit = direct_container_limit,
@@ -6608,13 +6603,11 @@ namespace models {
       );
       context->ClearUnorderedAccessViewFloat(depth_coordinate_v2_final_uav.Get(), clear);
       parallax_v2_producer_active = true;
-      if (joint_plane_mode == 3u) {
-        BOOST_LOG(info)
-          << "Host SBS adaptive plane enabled: continuous mean zero, robust Host depth scale, "
-             "independent artistic gain, linear mapping, adaptive subtitle plane; "
-          << "maximum per-eye source-U displacement=" << depth_coordinate_v2::direct_container_limit
-          << ", source clock=monotonic microseconds.";
-      }
+      BOOST_LOG(info)
+        << "Host SBS adaptive plane: continuous mean zero, robust Host depth scale, "
+           "independent artistic gain, linear mapping, adaptive subtitle plane; "
+        << "maximum per-eye source-U displacement=" << depth_coordinate_v2::direct_container_limit
+        << ", source clock=monotonic microseconds.";
       BOOST_LOG(info)
         << "Host SBS V2 GPU producer active on one "
         << target_w << 'x' << target_h << " fused convex2x analysis/live grid"
@@ -6633,8 +6626,8 @@ namespace models {
       const constants_t constants {
         .raw_coordinate_scale = parallax_v2_raw_coordinate_scale,
         .collapse_abs_epsilon = collapse_abs_epsilon,
-        .far_tau = far_tau,
-        .near_log_tau = near_log_tau,
+        .coordinate_reserved0 = 0.0f,
+        .coordinate_reserved1 = 0.0f,
         .requested_gain = parallax_v2_requested_gain,
         .max_horizontal_slope = max_horizontal_slope,
         .direct_container_limit = direct_container_limit,
@@ -6656,7 +6649,7 @@ namespace models {
       if (!parallax_v2_producer_active) {
         return false;
       }
-      if (joint_plane_mode == 3u && !upload_parallax_v2_observation_constants()) {
+      if (!upload_parallax_v2_observation_constants()) {
         return false;
       }
 
@@ -6676,7 +6669,6 @@ namespace models {
         .minmax_raw_output = minmax_raw_uav.Get(),
         .moments_dispatch = parallax_v2_dispatch_command(reduce_groups, 1u, 1u, near_identical_gpu_infer_reduce_byte_offset),
         .frame_resolve_dispatch = parallax_v2_dispatch_command(1u, 1u, 1u, near_identical_gpu_infer_one_byte_offset),
-        .robust_quantiles = joint_plane_mode == 3u,
         .histogram_shader = depth_coordinate_v2_histogram_cs.Get(),
         .quantile_shader = depth_coordinate_v2_quantiles_cs.Get(),
         .frame_stats = depth_coordinate_v2_frame_stats_srv.Get(),
@@ -6931,7 +6923,8 @@ namespace models {
       if (!subtitle_locator_resolve_cs || !subtitle_condition_cs ||
           !subtitle_locator_cbuffer || !subtitle_locator_state_srv ||
           !subtitle_locator_state_uav || !subtitle_conditioned_srv ||
-          !subtitle_conditioned_uav || !depth_coordinate_v2_final_srv ||
+          !subtitle_conditioned_uav || !depth_coordinate_v2_state_srv ||
+          !depth_coordinate_v2_final_srv ||
           !depth_coordinate_v2_final_uav ||
           !depth_coordinate_v2_final_tex || !subtitle_conditioned_tex ||
           !subtitle_condition_params_srv || !subtitle_condition_params_uav ||
@@ -6958,7 +6951,6 @@ namespace models {
       // OCR8/SLR follows the current authenticated analysis field. An unsupported tensor or an
       // unprojectable bottom crop has no subtitle authority; the complete condition writer still
       // publishes Base exactly into the distinct live output texture.
-      const bool locator_geometry_valid = tensor_content && roi.valid();
       const auto field_content = tensor_content.value_or(depth_tensor_content_rect_t {});
       const std::array<std::uint32_t, 20> constants {
         field_width,
@@ -6995,13 +6987,12 @@ namespace models {
       ID3D11ShaderResourceView *null_srvs[9] = {};
       ID3D11UnorderedAccessView *null_uav = nullptr;
       context->CSSetConstantBuffers(0, 3, constant_buffers);
-      // resolve_main already publishes an empty authenticated state for invalid geometry. Keep
-      // that reset inside the same authenticated observation dispatch. Joint depth reuse and
-      // explicit subtitle suppression both leave SLR unchanged.
-      (void) locator_geometry_valid;
+      // Keep OCR ownership and UI timing in the same authenticated observation dispatch.
+      // An unusable geometry publication suspends UI timing and publishes Base exactly.
+      // Joint depth reuse and explicit subtitle suppression both leave SLR unchanged.
       context->CSSetShader(subtitle_locator_resolve_cs.Get(), nullptr, 0);
       ID3D11ShaderResourceView *resolve_srvs[8] = {
-        nullptr,
+        depth_coordinate_v2_state_srv.Get(),
         cut_state_srv.Get(),
         depth_coordinate_v2_final_srv.Get(),
         nullptr,
@@ -8029,33 +8020,7 @@ namespace models {
       // histogram consumes the latter. This remains GPU-resident and introduces no readback.
       const bool frame_stats_ready = dispatch_parallax_v2_frame_stats(perf_slot);
       if (frame_stats_ready && depth_minmax_ema_cs && minmax_raw_uav && minmax_ema_uav) {
-        ID3D11ShaderResourceView *reduction_srvs[2] = {
-          tensor_out_srv.Get(),
-          tensor_exclusion_srv.Get(),
-        };
-        ID3D11ShaderResourceView *null_reduction_srvs[2] = {nullptr, nullptr};
-
-        // Mode 3's preceding shared scan already overwrote this exact independent histogram.
-        // Mode 0 retains its existing scan, buffers and arithmetic without additional work.
-        if (joint_plane_mode == 0u && depth_hist_cs && hist_uav) {
-          context->CSSetShader(depth_hist_cs.Get(), nullptr, 0);
-          context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
-          context->CSSetShaderResources(0, 2, reduction_srvs);
-          ID3D11UnorderedAccessView *hist_uavs[2] = {hist_uav.Get(), minmax_raw_uav.Get()};
-          context->CSSetUnorderedAccessViews(0, 2, hist_uavs, nullptr);
-          dispatch_infer_postprocess(
-            reduce_groups,
-            1u,
-            1u,
-            near_identical_gpu_infer_reduce_byte_offset
-          );
-
-          ID3D11UnorderedAccessView *null_uavs_h[2] = {nullptr, nullptr};
-          context->CSSetUnorderedAccessViews(0, 2, null_uavs_h, nullptr);
-          context->CSSetShaderResources(0, 2, null_reduction_srvs);
-
-        }
-
+        // The shared raw scan already overwrote this independent cut-normalization histogram.
         // Pass B: fold into the EMA'd bounds and reset the accumulators (1 thread).
         context->CSSetShader(depth_minmax_ema_cs.Get(), nullptr, 0);
         ID3D11UnorderedAccessView *ema_uavs[4] = {

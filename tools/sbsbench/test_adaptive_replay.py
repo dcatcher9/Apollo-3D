@@ -26,7 +26,7 @@ class AdaptiveReplayPreflightTests(unittest.TestCase):
         self.exe = self.build / "sunshine.exe"
         self.exe.write_bytes(b"preflight-test-executable")
         self.conf = self.root / "mode3.conf"
-        self.conf.write_text("sbs_3d_joint_plane_experiment = enabled\n", encoding="utf-8")
+        self.conf.write_text("sbs_3d_pop_strength = 1.2\n", encoding="utf-8")
         self.frames = self.root / "frames"
         self.frames.mkdir()
         self.timeline = self.root / "observation_timeline.sbsotl"
@@ -66,7 +66,7 @@ class AdaptiveReplayPreflightTests(unittest.TestCase):
                 "timeout": 900, "env": self.environment,
             })
             self.assertEqual(self.conf.read_text(encoding="utf-8"),
-                             "sbs_3d_joint_plane_experiment = enabled\n")
+                             "sbs_3d_pop_strength = 1.2\n")
             self.engines.assert_not_called()
             return mock.Mock(returncode=0, stdout="ready", stderr="")
 

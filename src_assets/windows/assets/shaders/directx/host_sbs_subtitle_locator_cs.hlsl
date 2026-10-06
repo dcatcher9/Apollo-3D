@@ -1,4 +1,4 @@
-// Compact SLR14 lower-text authority, with an opt-in timed adaptive shared UI plane.
+// Compact SLR14 lower-text authority with one source-timed adaptive shared UI plane.
 //
 // OCR8 is the sole geometry source.  A coherent subtitle stack plus any bottom ribbon candidates
 // need two distinct, exact-frame observations before becoming one shared-plane owner. Only tight
@@ -12,6 +12,7 @@
 #include "include/depth_coordinate_v2.hlsl"
 #include "include/sbs_adaptive_state_contract.generated.hlsl"
 
+StructuredBuffer<uint4> GeometryState : register(t0);
 StructuredBuffer<float4> CutBridge : register(t1);
 Texture2D<float> BaseField : register(t2);
 StructuredBuffer<uint> LocatorStateRead : register(t3);
@@ -64,8 +65,6 @@ groupshared uint4 WorkRects[28];
 groupshared uint WorkKinds[28];
 groupshared uint4 StackCovers[MAX_LINES];
 groupshared uint4 MatchedCovers[MAX_LINES];
-groupshared float TargetSamples[32];
-groupshared float LineCenters[MAX_LINES];
 
 // The adaptive controller is owned by the versioned SLR tail. These are within-group scratch,
 // not another persistent authority source. Counts cover the complete current-cover union.
@@ -78,7 +77,8 @@ groupshared uint AdaptiveReset;
 groupshared uint AdaptiveDistinct;
 groupshared uint AdaptiveOcrValid;
 groupshared uint AdaptiveDomainValid;
-// Mode 3 retains four-source-pixel levels through the full representation cap. Supported Host
+groupshared uint AdaptiveGeometryReady;
+// The adaptive plane retains four-source-pixel levels through the full representation cap. Supported Host
 // sources are at most 5120 pixels wide: ceil(5120/100)=52 is the last level, with one extra
 // histogram bucket for samples no candidate can clear.
 static const uint ADAPTIVE_HOST_MAX_SOURCE_WIDTH = 5120u;
@@ -100,16 +100,39 @@ bool FiniteFloat(float value) {
     return (asuint(value) & 0x7f800000u) != 0x7f800000u;
 }
 
-bool JointPlaneEnabled() {
-    return v2_joint_plane_mode == 3u;
+bool AdaptivePolicyValid() {
+    return V2JointPlaneConstantsValid() &&
+        FiniteFloat(v2_requested_gain) && v2_requested_gain > 0.0f &&
+        all(uint2(v2_joint_observation_timestamp_low,
+                  v2_joint_observation_timestamp_high) == locator_observation.xy);
 }
 
-bool JointPlanePolicyValid() {
-    return V2JointPlaneConstantsValid() &&
-        (v2_joint_plane_mode != 3u ||
-         (FiniteFloat(v2_requested_gain) && v2_requested_gain > 0.0f &&
-          all(uint2(v2_joint_observation_timestamp_low,
-                    v2_joint_observation_timestamp_high) == locator_observation.xy)));
+// The existing raw-coordinate publication owns Base. Flat/failed geometry is not an empty
+// scene observation: it cannot contribute conflict counts, spend UI dwell, or lower the plane.
+// This check runs only in the observation/condition verdict resolver, never per conditioned pixel.
+bool GeometryPublicationReady() {
+    uint vector_count, stride;
+    GeometryState.GetDimensions(vector_count, stride);
+    if (vector_count * 4u != V2_SHADOW_STATE_WORD_COUNT || stride != 16u ||
+        !AdaptivePolicyValid()) return false;
+    float4 active = asfloat(GeometryState[0u]);
+    float4 control = asfloat(GeometryState[1u]);
+    uint4 mapping = GeometryState[2u];
+    V2AdaptiveCameraState camera;
+    camera.clock = GeometryState[3u];
+    camera.target = GeometryState[4u];
+    camera.seed_times = GeometryState[5u];
+    camera.seed_values = GeometryState[6u];
+    uint2 now = uint2(v2_joint_observation_timestamp_low,
+                     v2_joint_observation_timestamp_high);
+    return V2CameraStateWithAdaptiveStateValid(active, control, mapping, camera) &&
+        V2_STATE_FRAME_VALID(control) == 1.0f &&
+        mapping.y == V2_CONTRACT_TAG && mapping.z == V2_ADAPTIVE_POLICY_ID &&
+        any(now != 0u) && all(camera.clock.xy == now) &&
+        asuint(SBS_STATE_CUT_CONTRACT_TAG_BITS(
+            CutBridge[SBS_STATE_VECTOR_CUT_CONTRACT_TAG_BITS])) == SBS_CUT_CONTRACT_TAG &&
+        asuint(V2_STATE_CONFIRMED_CUT_COUNT(control)) ==
+            asuint(SBS_STATE_HARD_CUT_COUNT(CutBridge[SBS_STATE_VECTOR_HARD_CUT_COUNT]));
 }
 
 uint AdaptiveMaximumIndex() {
@@ -128,9 +151,8 @@ bool AdaptiveTailValid(bool previous) {
     for (uint word = 0u; word < V2_SUBTITLE_LOCATOR_ADAPTIVE_WORD_COUNT; ++word) {
         all_zero = all_zero && AdaptiveRead(previous, word) == 0u;
     }
-    if (!JointPlaneEnabled()) return all_zero;
-    // An inactive publication can authenticate only an empty current mask. Previous inactive or
-    // old-mode state still reacquires ownership before it can grant any current cover authority.
+    // An inactive publication can authenticate only an empty current mask. Previous inactive
+    // state reacquires ownership before it can grant any current cover authority.
     if (all_zero) return !previous && ConditionStateSnapshot[20u] == 0u;
     uint flags = AdaptiveRead(previous, 1u);
     uint2 clock = uint2(AdaptiveRead(previous, 4u), AdaptiveRead(previous, 5u));
@@ -141,7 +163,6 @@ bool AdaptiveTailValid(bool previous) {
     uint covered = AdaptiveRead(previous, 13u);
     uint content_area = (locator_content.z - locator_content.x) *
         (locator_content.w - locator_content.y);
-    uint current = previous ? PreviousState[20u] : ConditionStateSnapshot[20u];
     uint durable_target = previous ? PreviousState[18u] : ConditionStateSnapshot[18u];
     uint durable_fade = previous ? PreviousState[24u] : ConditionStateSnapshot[24u];
     uint owner_flags = previous ? PreviousState[2u] : ConditionStateSnapshot[2u];
@@ -149,7 +170,9 @@ bool AdaptiveTailValid(bool previous) {
         ConditionStateSnapshot[V2_SUBTITLE_LOCATOR_PROVISIONAL_TARGET_WORD];
     uint provisional_fade = previous ? PreviousState[V2_SUBTITLE_LOCATOR_PROVISIONAL_FADE_WORD] :
         ConditionStateSnapshot[V2_SUBTITLE_LOCATOR_PROVISIONAL_FADE_WORD];
-    if (current != 0u && (durable_target != asuint(applied) || durable_fade != 2u ||
+    if ((owner_flags & (FLAG_OWNER | FLAG_TARGET_VALID)) ==
+            (FLAG_OWNER | FLAG_TARGET_VALID) &&
+        (durable_target != asuint(applied) || durable_fade != 2u ||
         ((owner_flags & FLAG_PROVISIONAL_CURRENT) != 0u &&
          (provisional_target != asuint(applied) || provisional_fade != 2u)))) return false;
     return AdaptiveRead(previous, 0u) == 1u && (flags & ~15u) == 0u &&
@@ -166,10 +189,9 @@ bool AdaptiveTailValid(bool previous) {
         ((flags & ADAPTIVE_APPROACH) == 0u || !V2ClockAfter(approach, clock)) &&
         ((flags & ADAPTIVE_RETREAT) == 0u || !V2ClockAfter(retreat, clock)) &&
         covered <= content_area && AdaptiveRead(previous, 14u) <= covered &&
-        (v2_joint_plane_mode != 3u ||
-         (((flags & ADAPTIVE_CAPPED) != 0u) ==
-          (AdaptiveRead(previous, 14u) * 5u > covered ||
-           AdaptiveRead(previous, 14u) * 50u > content_area))) &&
+        (((flags & ADAPTIVE_CAPPED) != 0u) ==
+         (AdaptiveRead(previous, 14u) * 5u > covered ||
+          AdaptiveRead(previous, 14u) * 50u > content_area)) &&
         AdaptiveRead(previous, 15u) <= covered;
 }
 
@@ -183,7 +205,8 @@ uint LocatorContentWidth() {
 
 bool SubtitleTargetIsValid(float target) {
     return FiniteFloat(target) && FiniteFloat(v2_direct_container_limit) &&
-        v2_direct_container_limit > 0.0f && abs(target) <= v2_direct_container_limit;
+        v2_direct_container_limit > 0.0f && target >= 0.0f &&
+        target <= v2_direct_container_limit;
 }
 
 // The active field/ROI is carried by the existing runtime cbuffer and repeated in OCR8.  The host
@@ -193,10 +216,10 @@ bool SubtitleTargetIsValid(float target) {
 // authority; the complete writer publishes BaseField exactly, while full-content live production
 // emits zero indirect groups and leaves the final UAV untouched.
 bool LocatorDomainGeometryValid() {
-    if (!JointPlanePolicyValid() ||
+    if (!AdaptivePolicyValid() ||
         any(locator_observation.zw != 0u) ||
         locator_source.x == 0u || locator_source.y == 0u || locator_source.z > 1u ||
-        (v2_joint_plane_mode == 3u && locator_source.x > ADAPTIVE_HOST_MAX_SOURCE_WIDTH) ||
+        locator_source.x > ADAPTIVE_HOST_MAX_SOURCE_WIDTH ||
         locator_field.x == 0u || locator_field.y == 0u ||
         locator_field.x > 0xffffu || locator_field.y > 0xffffu ||
         locator_field.z >= locator_field.w || locator_field.w > locator_field.y ||
@@ -277,7 +300,9 @@ uint RectAreaSum(uint base, uint count) {
 }
 
 void CopyRects(uint destination, uint source, uint count) {
-    [unroll]
+    // Keep this bounded integer copy loop intact: forced unrolling across ownership branches
+    // triggers the SM5 compiler's register-type emitter failure after pipeline specialization.
+    [loop]
     for (uint index = 0u; index < MAX_LINES; ++index) {
         WorkRects[destination + index] = index < count ? WorkRects[source + index] :
             uint4(0u, 0u, 0u, 0u);
@@ -718,8 +743,7 @@ bool ValidatePreviousState() {
     float target = asfloat(PreviousState[18u]);
     uint lifetime_count = PreviousState[25u];
     if (owner) {
-        if (lifetime_count > V2_SUBTITLE_TARGET_MAX_UNRELIABLE_HOLDS ||
-            (lifetime_count != 0u && PreviousState[21u] != EVENT_NONE)) return false;
+        if (lifetime_count != 0u) return false;
         if (provisional_current) {
             uint owner_kinds = (packed_kinds >> V2_SUBTITLE_LOCATOR_OWNER_KIND_SHIFT) &
                 V2_SUBTITLE_LOCATOR_KIND_MASK;
@@ -752,8 +776,7 @@ bool ValidatePreviousState() {
                 !ProvisionalSingleLineReplacementRects(owner_core, pending_core) ||
                 !SubtitleTargetIsValid(asfloat(
                     PreviousState[V2_SUBTITLE_LOCATOR_PROVISIONAL_TARGET_WORD])) ||
-                (PreviousState[V2_SUBTITLE_LOCATOR_PROVISIONAL_FADE_WORD] != 1u &&
-                 PreviousState[V2_SUBTITLE_LOCATOR_PROVISIONAL_FADE_WORD] != 2u)) {
+                PreviousState[V2_SUBTITLE_LOCATOR_PROVISIONAL_FADE_WORD] != 2u) {
                 return false;
             }
         } else if (PreviousState[V2_SUBTITLE_LOCATOR_PROVISIONAL_TARGET_WORD] != 0u ||
@@ -763,7 +786,7 @@ bool ValidatePreviousState() {
         if (target_valid) {
             if (target_reset || PreviousState[19u] != PreviousState[3u] ||
                 !SubtitleTargetIsValid(target) ||
-                PreviousState[24u] == 0u) return false;
+                PreviousState[24u] != 2u) return false;
         } else if (target_reset) {
             if (lifetime_count != 0u || PreviousState[18u] != 0u ||
                 PreviousState[19u] != 0u || current_count != 0u ||
@@ -941,244 +964,6 @@ uint NextGeneration(uint value) {
     return value == 0u || value >= 0xfffffffdu ? 1u : value + 1u;
 }
 
-bool SampleTargetProbe(
-    float center,
-    uint owner_top,
-    bool require_consistent_rows,
-    out float target
-) {
-    target = 0.0f;
-    uint field_cell_scale =
-        V2SubtitleLocatorFieldCellScale(locator_field.x, locator_field.y);
-    if (field_cell_scale == 0u) return false;
-    float probe_half_span = 30.0f * (float)field_cell_scale;
-    float probe_x_step = 4.0f * (float)field_cell_scale;
-    if (require_consistent_rows) {
-        float first_x_float = center - probe_half_span;
-        float last_x_float = center - probe_half_span + probe_x_step * 15.0f;
-        if (floor(first_x_float + 0.5f) < (float)locator_content.x ||
-            floor(last_x_float + 0.5f) > (float)(locator_content.z - 1u)) return false;
-    }
-    uint outer_y_offset = 10u * field_cell_scale;
-    uint inner_y_offset = 4u * field_cell_scale;
-    uint sample_y0 = clamp(
-        owner_top >= outer_y_offset ? owner_top - outer_y_offset : 0u,
-        locator_content.y,
-        locator_content.w - 1u);
-    uint sample_y1 = clamp(
-        owner_top >= inner_y_offset ? owner_top - inner_y_offset : 0u,
-        locator_content.y,
-        locator_content.w - 1u);
-    bool first_row_valid = true;
-    bool second_row_valid = true;
-    [loop]
-    for (uint sample_index = 0u; sample_index < 16u; ++sample_index) {
-        float sample_x_float =
-            center - probe_half_span + probe_x_step * (float)sample_index;
-        uint sample_x = (uint)clamp(
-            floor(sample_x_float + 0.5f),
-            (float)locator_content.x,
-            (float)(locator_content.z - 1u));
-        float first = BaseField.Load(int3(sample_x, sample_y0, 0));
-        float second = BaseField.Load(int3(sample_x, sample_y1, 0));
-        bool first_valid = FiniteFloat(first) && abs(first) <= v2_direct_container_limit;
-        bool second_valid = FiniteFloat(second) && abs(second) <= v2_direct_container_limit;
-        first_row_valid = first_row_valid && first_valid;
-        second_row_valid = second_row_valid && second_valid;
-        TargetSamples[sample_index] = first_valid ? first : 0.0f;
-        TargetSamples[16u + sample_index] = second_valid ? second : 0.0f;
-    }
-    // Each row must independently describe the same local supporting plane. Sort the rows first
-    // so their medians reject a depth edge that happens to divide the fixed sampling strip.
-    [loop]
-    for (uint row = 0u; row < 2u; ++row) {
-        uint row_base = row * 16u;
-        bool row_valid = row == 0u ? first_row_valid : second_row_valid;
-        [loop]
-        for (uint row_sort_outer = 0u; row_sort_outer < 16u; ++row_sort_outer) {
-            uint outer_index = row_base + row_sort_outer;
-            uint minimum_index = outer_index;
-            [loop]
-            for (uint row_sort_scan = row_sort_outer + 1u;
-                 row_sort_scan < 16u; ++row_sort_scan) {
-                uint scan_index = row_base + row_sort_scan;
-                if (row_valid && TargetSamples[scan_index] < TargetSamples[minimum_index]) {
-                    minimum_index = scan_index;
-                }
-            }
-            float swap_value = TargetSamples[outer_index];
-            TargetSamples[outer_index] = TargetSamples[minimum_index];
-            TargetSamples[minimum_index] = swap_value;
-        }
-    }
-    precise float binocular_scale = 2.0f * (float)locator_source.x;
-    precise float first_row_median = 0.5f * (TargetSamples[7u] + TargetSamples[8u]);
-    precise float second_row_median = 0.5f * (TargetSamples[23u] + TargetSamples[24u]);
-    if (!FiniteFloat(binocular_scale) || binocular_scale <= 0.0f ||
-        !FiniteFloat(V2_SUBTITLE_TARGET_MAX_ROW_IQR_BINOCULAR_SOURCE_PIXELS) ||
-        V2_SUBTITLE_TARGET_MAX_ROW_IQR_BINOCULAR_SOURCE_PIXELS < 0.0f ||
-        !FiniteFloat(V2_SUBTITLE_TARGET_MAX_ROW_MEDIAN_DELTA_BINOCULAR_SOURCE_PIXELS) ||
-        V2_SUBTITLE_TARGET_MAX_ROW_MEDIAN_DELTA_BINOCULAR_SOURCE_PIXELS < 0.0f) {
-        return false;
-    }
-    precise float first_row_q1 = 0.5f * (TargetSamples[3u] + TargetSamples[4u]);
-    precise float first_row_q3 = 0.5f * (TargetSamples[11u] + TargetSamples[12u]);
-    precise float first_row_iqr = first_row_q3 - first_row_q1;
-    precise float second_row_q1 = 0.5f * (TargetSamples[19u] + TargetSamples[20u]);
-    precise float second_row_q3 = 0.5f * (TargetSamples[27u] + TargetSamples[28u]);
-    precise float second_row_iqr = second_row_q3 - second_row_q1;
-    bool first_row_coherent = first_row_valid &&
-        first_row_iqr * binocular_scale <=
-            V2_SUBTITLE_TARGET_MAX_ROW_IQR_BINOCULAR_SOURCE_PIXELS;
-    bool second_row_coherent = second_row_valid &&
-        second_row_iqr * binocular_scale <=
-            V2_SUBTITLE_TARGET_MAX_ROW_IQR_BINOCULAR_SOURCE_PIXELS;
-    precise float median_delta_pixels =
-        abs(second_row_median - first_row_median) * binocular_scale;
-    if (require_consistent_rows) {
-        if (!first_row_coherent || !second_row_coherent ||
-            median_delta_pixels >
-                V2_SUBTITLE_TARGET_MAX_ROW_MEDIAN_DELTA_BINOCULAR_SOURCE_PIXELS) {
-            return false;
-        }
-        target = 0.5f * (first_row_median + second_row_median);
-        return SubtitleTargetIsValid(target);
-    }
-    // Two complete independent primary rows authorize their robust medians even when motion or
-    // scene detail broadens both within-row IQRs. A lone row still needs the IQR gate before it
-    // can stand in for the missing observation. Shifted fallback probes remain strict above.
-    if (first_row_valid && second_row_valid) {
-        target = median_delta_pixels <=
-                V2_SUBTITLE_TARGET_MAX_ROW_MEDIAN_DELTA_BINOCULAR_SOURCE_PIXELS ?
-            0.5f * (first_row_median + second_row_median) :
-            max(first_row_median, second_row_median);
-    } else if (first_row_coherent) {
-        target = first_row_median;
-    } else {
-        if (!second_row_coherent) return false;
-        target = second_row_median;
-    }
-    return SubtitleTargetIsValid(target);
-}
-
-bool SampleOwnerTarget(uint owner_base, uint owner_count, out float target) {
-    target = 0.0f;
-    if ((owner_base != NEW_OWNER_BASE && owner_base != MATCHED_BASE) ||
-        owner_count == 0u || owner_count > MAX_LINES || locator_source.x == 0u ||
-        !FiniteFloat(v2_direct_container_limit) || v2_direct_container_limit <= 0.0f) return false;
-    [unroll]
-    for (uint center_index = 0u; center_index < MAX_LINES; ++center_index) {
-        LineCenters[center_index] = center_index < owner_count ?
-            0.5f * (float)(WorkRects[owner_base + center_index].x +
-                           WorkRects[owner_base + center_index].z - 1u) : 0.0f;
-    }
-    [unroll]
-    for (uint center_a = 0u; center_a < MAX_LINES; ++center_a) {
-        [unroll]
-        for (uint center_b = center_a + 1u; center_b < MAX_LINES; ++center_b) {
-            if (center_b < owner_count && LineCenters[center_b] < LineCenters[center_a]) {
-                float swap_value = LineCenters[center_a];
-                LineCenters[center_a] = LineCenters[center_b];
-                LineCenters[center_b] = swap_value;
-            }
-        }
-    }
-    precise float center = (owner_count & 1u) != 0u ? LineCenters[owner_count / 2u] :
-        0.5f * (LineCenters[owner_count / 2u - 1u] + LineCenters[owner_count / 2u]);
-    uint4 owner_summary = RectSummary(owner_base, owner_count);
-    if (SampleTargetProbe(center, owner_summary.y, false, target)) return true;
-
-    // The fixed center remains the aggregate owner median above. Only a failed primary activates
-    // four bounded near-center probes. A bottom UI ribbon keeps its own owner/cover authority but
-    // cannot widen or vertically place the search while ordinary text is present.
-    bool ordinary_found = false;
-    uint4 placement_summary = owner_summary;
-    [unroll]
-    for (uint placement_index = 0u; placement_index < MAX_LINES; ++placement_index) {
-        if (placement_index < owner_count && WorkKinds[owner_base + placement_index] == 0u) {
-            uint4 rectangle = WorkRects[owner_base + placement_index];
-            if (!ordinary_found) {
-                placement_summary = rectangle;
-                ordinary_found = true;
-            } else {
-                placement_summary.x = min(placement_summary.x, rectangle.x);
-                placement_summary.y = min(placement_summary.y, rectangle.y);
-                placement_summary.z = max(placement_summary.z, rectangle.z);
-                placement_summary.w = max(placement_summary.w, rectangle.w);
-            }
-        }
-    }
-    precise float horizontal_step =
-        (float)(placement_summary.z - placement_summary.x) /
-        (float)V2_SUBTITLE_TARGET_HORIZONTAL_STEP_DENOMINATOR;
-    [loop]
-    for (uint radius = 1u;
-         radius <= V2_SUBTITLE_TARGET_HORIZONTAL_FALLBACK_MAX_RADIUS_STEPS;
-         ++radius) {
-        precise float offset = horizontal_step * (float)radius;
-        float negative_target = 0.0f;
-        float positive_target = 0.0f;
-        bool negative_valid = SampleTargetProbe(
-            center - offset, placement_summary.y, true, negative_target);
-        bool positive_valid = SampleTargetProbe(
-            center + offset, placement_summary.y, true, positive_target);
-        if (negative_valid && positive_valid) {
-            precise float binocular_scale = 2.0f * (float)locator_source.x;
-            precise float pair_delta_pixels =
-                abs(positive_target - negative_target) * binocular_scale;
-            // Conflicting same-radius support makes the whole observation unreliable. Searching
-            // farther would hide the ambiguity instead of resolving it.
-            if (pair_delta_pixels >
-                V2_SUBTITLE_TARGET_MAX_ROW_MEDIAN_DELTA_BINOCULAR_SOURCE_PIXELS) return false;
-            target = max(negative_target, positive_target);
-            return true;
-        }
-        // Prefer the closest reliable ring. A sole strictly coherent probe is sufficient, while
-        // farther probes cannot override it.
-        if (negative_valid || positive_valid) {
-            target = negative_valid ? negative_target : positive_target;
-            return true;
-        }
-    }
-    return false;
-}
-
-bool UpdateOwnerTarget(float previous, float desired, out float updated) {
-    updated = previous;
-    if (!SubtitleTargetIsValid(previous) || !SubtitleTargetIsValid(desired) ||
-        !FiniteFloat(V2_SUBTITLE_TARGET_DEADBAND_BINOCULAR_SOURCE_PIXELS) ||
-        !FiniteFloat(V2_SUBTITLE_TARGET_EMA_ALPHA) ||
-        !FiniteFloat(V2_SUBTITLE_TARGET_MAX_SLEW_BINOCULAR_SOURCE_PIXELS) ||
-        V2_SUBTITLE_TARGET_DEADBAND_BINOCULAR_SOURCE_PIXELS < 0.0f ||
-        V2_SUBTITLE_TARGET_EMA_ALPHA <= 0.0f || V2_SUBTITLE_TARGET_EMA_ALPHA > 1.0f ||
-        V2_SUBTITLE_TARGET_MAX_SLEW_BINOCULAR_SOURCE_PIXELS <= 0.0f) {
-        return false;
-    }
-
-    precise float binocular_scale = 2.0f * (float)locator_source.x;
-    precise float delta_u = desired - previous;
-    precise float delta_pixels = delta_u * binocular_scale;
-    if (!FiniteFloat(V2_SUBTITLE_TARGET_MAX_RESIDUAL_BINOCULAR_SOURCE_PIXELS) ||
-        V2_SUBTITLE_TARGET_MAX_RESIDUAL_BINOCULAR_SOURCE_PIXELS < 0.0f ||
-        abs(delta_pixels) > V2_SUBTITLE_TARGET_MAX_RESIDUAL_BINOCULAR_SOURCE_PIXELS) {
-        return false;
-    }
-    // This branch is the temporal-stability contract: sub-deadband observations retain the exact
-    // previous R32_FLOAT bits rather than reconstructing an algebraically equal value.
-    if (abs(delta_pixels) <=
-        V2_SUBTITLE_TARGET_DEADBAND_BINOCULAR_SOURCE_PIXELS) return true;
-
-    precise float ema_pixels = delta_pixels * V2_SUBTITLE_TARGET_EMA_ALPHA;
-    precise float step_pixels = clamp(
-        ema_pixels,
-        -V2_SUBTITLE_TARGET_MAX_SLEW_BINOCULAR_SOURCE_PIXELS,
-        V2_SUBTITLE_TARGET_MAX_SLEW_BINOCULAR_SOURCE_PIXELS);
-    precise float step_u = step_pixels / binocular_scale;
-    precise float candidate = previous + step_u;
-    updated = clamp(candidate, -v2_direct_container_limit, v2_direct_container_limit);
-    return SubtitleTargetIsValid(updated);
-}
-
 void StoreRectBlock(uint offset, uint base, uint count) {
     [unroll]
     for (uint slot = 0u; slot < MAX_LINES; ++slot) {
@@ -1260,7 +1045,7 @@ void PublishState(
         target_valid ? current_count : 0u);
     [unroll]
     for (uint word = 0u; word < V2_SUBTITLE_LOCATOR_ADAPTIVE_WORD_COUNT; ++word) {
-        LocatorState[ADAPTIVE + word] = JointPlaneEnabled() && AdaptiveReset == 0u ?
+        LocatorState[ADAPTIVE + word] = AdaptiveReset == 0u ?
             PreviousState[ADAPTIVE + word] : 0u;
     }
 }
@@ -1270,6 +1055,7 @@ void ResolveObservation() {
     AdaptiveDistinct = 1u;
     AdaptiveOcrValid = 0u;
     AdaptiveDomainValid = 0u;
+    AdaptiveGeometryReady = 0u;
     [loop]
     for (uint index = 0u; index < V2_SUBTITLE_LOCATOR_STATE_WORD_COUNT; ++index) {
         PreviousState[index] = LocatorState[index];
@@ -1304,10 +1090,10 @@ void ResolveObservation() {
         PreviousState[ADAPTIVE] != 1u ? 1u : 0u;
     AdaptiveDistinct = distinct_observation ? 1u : 0u;
     AdaptiveDomainValid = cut_valid && locator_domain_valid ? 1u : 0u;
+    AdaptiveGeometryReady = AdaptiveDomainValid != 0u && GeometryPublicationReady() ? 1u : 0u;
 
     bool old_target_valid = old_valid && (PreviousState[2u] & FLAG_TARGET_VALID) != 0u;
     float old_target = old_target_valid ? asfloat(PreviousState[18u]) : 0.0f;
-    uint old_unreliable_holds = old_valid && old_owner_count != 0u ? PreviousState[25u] : 0u;
     uint old_grace = old_valid && old_owner_count == 0u ? PreviousState[25u] : 0u;
     bool old_provisional_current = old_valid &&
         (PreviousState[2u] & FLAG_PROVISIONAL_CURRENT) != 0u;
@@ -1360,12 +1146,7 @@ void ResolveObservation() {
     uint authority_count = 0u;
     uint owner_generation = 0u;
     uint event = EVENT_NONE;
-    bool continuing_owner = false;
-    bool new_owner = false;
-    bool cut_survivor = false;
-    bool inherit_target = false;
     bool provisional_candidate = false;
-    bool retain_provisional_duplicate = false;
     float inherited_target = 0.0f;
     uint grace = 0u;
     uint4 grace_bounds = uint4(0u, 0u, 0u, 0u);
@@ -1384,9 +1165,8 @@ void ResolveObservation() {
                 new_owner_count = matched;
                 authority_count = matched;
                 // A cut starts a new owner generation even when geometry survives. The old scene
-                // target is discarded below; reliable current evidence restarts at half strength.
+                // UI filter resets below; current covers immediately pin to the reset plane.
                 owner_generation = NextGeneration(PreviousState[3u]);
-                cut_survivor = true;
                 if (matched < stack_count) {
                     CopyRects(NEW_PENDING_BASE, STACK_BASE, stack_count);
                     new_pending_count = stack_count;
@@ -1422,14 +1202,13 @@ void ResolveObservation() {
         uint matched = MatchCurrentToOwner(stack_count, old_owner_count);
         // Established owner continuity has priority over a stale pending transaction. Otherwise a
         // current box that overlaps both tracks can confirm the pending geometry and needlessly
-        // bump generation/restart fade even though every current member still belongs to owner.
+        // bump generation even though every current member still belongs to owner.
         if (matched == stack_count && stack_count <= old_owner_count) {
             CopyRects(NEW_OWNER_BASE, STACK_BASE, stack_count);
             CopyStackCoversToCurrent(stack_count);
             new_owner_count = stack_count;
             authority_count = stack_count;
             owner_generation = PreviousState[3u];
-            continuing_owner = true;
         } else if (old_pending_count != 0u && distinct_observation &&
                    StackCompatible(
                        OLD_PENDING_BASE, old_pending_count, STACK_BASE, stack_count)) {
@@ -1438,12 +1217,7 @@ void ResolveObservation() {
             new_owner_count = stack_count;
             authority_count = stack_count;
             owner_generation = NextGeneration(PreviousState[3u]);
-            new_owner = true;
             event = EVENT_HANDOFF;
-            if (old_target_valid) {
-                inherit_target = true;
-                inherited_target = old_target;
-            }
         } else if (old_provisional_current && !distinct_observation &&
                    old_pending_count == 1u && stack_count == 1u &&
                    StackExactlyEqual(OLD_PENDING_BASE, 1u, STACK_BASE, 1u) &&
@@ -1458,9 +1232,7 @@ void ResolveObservation() {
             new_pending_count = stack_count;
             authority_count = stack_count;
             owner_generation = PreviousState[3u];
-            continuing_owner = true;
             provisional_candidate = true;
-            retain_provisional_duplicate = true;
         } else {
             CopyRects(NEW_OWNER_BASE, OLD_OWNER_BASE, old_owner_count);
             CopyRects(NEW_PENDING_BASE, STACK_BASE, stack_count);
@@ -1469,11 +1241,9 @@ void ResolveObservation() {
             new_pending_count = stack_count;
             authority_count = matched;
             owner_generation = PreviousState[3u];
-            continuing_owner = true;
             if (distinct_observation && matched == 0u && old_pending_count == 0u &&
                 old_target_valid && PreviousState[20u] == 1u &&
                 PreviousState[21u] == EVENT_NONE && PreviousState[24u] == 2u &&
-                old_unreliable_holds == 0u &&
                 old_owner_count == 1u && stack_count == 1u &&
                 ProvisionalSingleLineReplacement(OLD_OWNER_BASE, STACK_BASE)) {
                 // A centered same-baseline one-line replacement may condition only its exact
@@ -1493,12 +1263,7 @@ void ResolveObservation() {
             new_owner_count = stack_count;
             authority_count = stack_count;
             owner_generation = NextGeneration(0u);
-            new_owner = true;
             event = EVENT_BIRTH;
-            if (old_grace != 0u) {
-                inherit_target = true;
-                inherited_target = old_cached_target;
-            }
         } else {
             CopyRects(NEW_PENDING_BASE, STACK_BASE, stack_count);
             new_pending_count = stack_count;
@@ -1515,11 +1280,10 @@ void ResolveObservation() {
     bool target_reset = false;
     float target = 0.0f;
     uint fade_step = 0u;
-    uint unreliable_holds = 0u;
     bool provisional_current = false;
     float provisional_target = 0.0f;
     uint provisional_fade = 0u;
-    if (JointPlaneEnabled() && new_owner_count != 0u) {
+    if (new_owner_count != 0u) {
         // OCR ownership/current covers are unchanged. Plane selection is independent of the
         // local-support probe: an authorized cover must not disappear when that probe disagrees.
         target = AdaptiveReset == 0u ? asfloat(PreviousState[ADAPTIVE + 3u]) : 0.0f;
@@ -1533,135 +1297,6 @@ void ResolveObservation() {
             target_reset = true;
             authority_count = 0u;
         }
-    } else if (new_owner_count != 0u) {
-        // Every distinct authoritative owner observation samples the same local supporting plane.
-        // Reliable samples are not moved toward an absolute screen plane; an established target
-        // moves only through deadbanded EMA plus a binocular source-pixel slew bound. Exact
-        // redispatches do not sample and retain the previous target/fade bits.
-        bool retain_duplicate = old_target_valid && !distinct_observation && continuing_owner;
-        bool retain_failed_duplicate = old_valid &&
-            (PreviousState[2u] & FLAG_TARGET_RESET) != 0u && !distinct_observation &&
-            continuing_owner;
-        bool retain_without_current_authority = old_target_valid && continuing_owner &&
-            authority_count == 0u;
-        if (provisional_candidate) {
-            // The pending observation may affect only this exact current cover. Keep the durable
-            // owner target/fade bits untouched so a failed or reverted handoff cannot poison them.
-            target = old_target;
-            target_valid = SubtitleTargetIsValid(target);
-            fade_step = PreviousState[24u];
-            unreliable_holds = old_unreliable_holds;
-            if (retain_provisional_duplicate) {
-                provisional_target = asfloat(
-                    PreviousState[V2_SUBTITLE_LOCATOR_PROVISIONAL_TARGET_WORD]);
-                provisional_fade =
-                    PreviousState[V2_SUBTITLE_LOCATOR_PROVISIONAL_FADE_WORD];
-                provisional_current = SubtitleTargetIsValid(provisional_target) &&
-                    (provisional_fade == 1u || provisional_fade == 2u);
-            } else {
-                float desired = 0.0f;
-                bool sampled = SampleOwnerTarget(MATCHED_BASE, authority_count, desired);
-                if (sampled) {
-                    precise float residual_pixels =
-                        abs(desired - old_target) * (2.0f * (float)locator_source.x);
-                    if (residual_pixels >
-                        V2_SUBTITLE_TARGET_MAX_RESIDUAL_BINOCULAR_SOURCE_PIXELS) {
-                        provisional_target = desired;
-                        provisional_fade = 1u;
-                        provisional_current = SubtitleTargetIsValid(provisional_target);
-                    } else {
-                        provisional_current = UpdateOwnerTarget(
-                            old_target, desired, provisional_target);
-                        provisional_fade = provisional_current ? PreviousState[24u] : 0u;
-                    }
-                }
-            }
-            if (!target_valid || !provisional_current) {
-                provisional_current = false;
-                provisional_target = 0.0f;
-                provisional_fade = 0u;
-                authority_count = 0u;
-            }
-        } else if (retain_failed_duplicate) {
-            // The same observation that failed local-plane qualification cannot acquire authority
-            // by being redispatched; only a distinct reliable observation may restart at fade 1.
-        } else if (retain_duplicate || retain_without_current_authority) {
-            target = old_target;
-            target_valid = SubtitleTargetIsValid(target);
-            fade_step = PreviousState[24u];
-            unreliable_holds = old_unreliable_holds;
-        } else {
-            float desired = 0.0f;
-            uint sample_base = continuing_owner ? MATCHED_BASE : NEW_OWNER_BASE;
-            uint sample_count = continuing_owner ? authority_count : new_owner_count;
-            bool sampled = SampleOwnerTarget(sample_base, sample_count, desired);
-            if (sampled && cut_survivor) {
-                // A scene boundary invalidates the meaning of the old supporting plane. Restart
-                // from same-frame reliable evidence at half strength and never inherit the old
-                // scene target.
-                target = desired;
-                target_valid = true;
-                fade_step = 1u;
-            } else if (sampled && new_owner && inherit_target) {
-                precise float residual_pixels =
-                    abs(desired - inherited_target) * (2.0f * (float)locator_source.x);
-                if (residual_pixels >
-                    V2_SUBTITLE_TARGET_MAX_RESIDUAL_BINOCULAR_SOURCE_PIXELS) {
-                    target = desired;
-                    target_valid = true;
-                    fade_step = 1u;
-                } else {
-                    target_valid = UpdateOwnerTarget(inherited_target, desired, target);
-                    // A confirmed same-scene handoff whose new supporting plane is compatible
-                    // with the inherited target does not restart a mature fade. Outside the
-                    // separately authenticated exact-current provisional bridge, the first
-                    // unmatched pending observation remains exact Base; this only removes the
-                    // otherwise unnecessary half-strength step after confirmation. Grace
-                    // rebirths retain their ordinary EVENT_BIRTH half fade, and an invalid update
-                    // still fails closed below.
-                    fade_step = event == EVENT_HANDOFF && target_valid ?
-                        PreviousState[24u] : 1u;
-                }
-            } else if (sampled && new_owner) {
-                target = desired;
-                target_valid = true;
-                fade_step = 1u;
-            } else if (sampled && continuing_owner && old_target_valid) {
-                precise float residual_pixels =
-                    abs(desired - old_target) * (2.0f * (float)locator_source.x);
-                if (residual_pixels > V2_SUBTITLE_TARGET_MAX_RESIDUAL_BINOCULAR_SOURCE_PIXELS) {
-                    target = desired;
-                    target_valid = true;
-                    fade_step = 1u;
-                } else {
-                    target_valid = UpdateOwnerTarget(old_target, desired, target);
-                    fade_step = distinct_observation ? min(PreviousState[24u] + 1u, 2u) :
-                        PreviousState[24u];
-                }
-            } else if (sampled) {
-                // Fresh birth, or recovery after a target reset, begins at half strength on the
-                // reliable current local-plane observation.
-                target = desired;
-                target_valid = true;
-                fade_step = 1u;
-            } else if (continuing_owner && old_target_valid && authority_count != 0u &&
-                       distinct_observation &&
-                       old_unreliable_holds < V2_SUBTITLE_TARGET_MAX_UNRELIABLE_HOLDS) {
-                // A short same-scene measurement failure must not expose unconditioned glyph
-                // geometry immediately. Hold the exact prior target for two distinct current
-                // observations; a third failure resets below. Duplicates were retained above.
-                target = old_target;
-                target_valid = true;
-                fade_step = PreviousState[24u];
-                unreliable_holds = old_unreliable_holds + 1u;
-            }
-        }
-        if (!target_valid) {
-            target = 0.0f;
-            target_reset = true;
-            authority_count = 0u;
-            fade_step = 0u;
-        }
     } else if (grace != 0u) {
         target = inherited_target;
     }
@@ -1669,7 +1304,7 @@ void ResolveObservation() {
     PublishState(
         owner_generation, new_owner_count, new_pending_count, authority_count,
         target, target_valid, target_reset, fade_step,
-        new_owner_count != 0u ? unreliable_holds : grace,
+        new_owner_count != 0u ? 0u : grace,
         grace_bounds, event, scene_epoch, provisional_current,
         provisional_target, provisional_fade);
 }
@@ -1734,7 +1369,7 @@ bool ConditionStateValid(out uint current_count, out float target, out uint fade
         CutBridge[SBS_STATE_VECTOR_CUT_CONTRACT_TAG_BITS])) == SBS_CUT_CONTRACT_TAG;
     uint scene_epoch = cut_valid ? asuint(SBS_STATE_HARD_CUT_COUNT(
         CutBridge[SBS_STATE_VECTOR_HARD_CUT_COUNT])) : 0u;
-    if (!LocatorGeometryValid() || !AdaptiveTailValid(false) ||
+    if (!LocatorGeometryValid() || !GeometryPublicationReady() || !AdaptiveTailValid(false) ||
         !cut_valid || ConditionStateSnapshot[26u] != scene_epoch ||
         ConditionStateSnapshot[0u] != V2_SUBTITLE_LOCATOR_STATE_SCHEMA ||
         ConditionStateSnapshot[1u] != V2_SUBTITLE_LOCATOR_STATE_TAG ||
@@ -1750,11 +1385,9 @@ bool ConditionStateValid(out uint current_count, out float target, out uint fade
         ConditionStateSnapshot[22u] != locator_frame.x ||
         ConditionStateSnapshot[23u] != locator_frame.y ||
         ConditionStateSnapshot[21u] > EVENT_HANDOFF ||
-        (durable_fade != 1u && durable_fade != 2u) ||
-        (fade_step != 1u && fade_step != 2u) ||
-        ConditionStateSnapshot[25u] > V2_SUBTITLE_TARGET_MAX_UNRELIABLE_HOLDS ||
-        (ConditionStateSnapshot[25u] != 0u &&
-         ConditionStateSnapshot[21u] != EVENT_NONE) ||
+        durable_fade != 2u ||
+        fade_step != 2u ||
+        ConditionStateSnapshot[25u] != 0u ||
         ConditionStateSnapshot[27u] != locator_field.x ||
         ConditionStateSnapshot[28u] != locator_field.y ||
         (packed_kinds & ~known_kind_bits) != 0u ||
@@ -1766,10 +1399,9 @@ bool ConditionStateValid(out uint current_count, out float target, out uint fade
         !FiniteFloat(v2_max_vertical_shear) || v2_max_vertical_shear < 0.0f) {
         return false;
     }
-    if (JointPlaneEnabled() &&
-        (ConditionStateSnapshot[ADAPTIVE + 15u] != 0u || durable_fade != 2u ||
+    if (ConditionStateSnapshot[ADAPTIVE + 15u] != 0u || durable_fade != 2u ||
          fade_step != 2u || asuint(target) != ConditionStateSnapshot[ADAPTIVE + 3u] ||
-         asuint(durable_target) != ConditionStateSnapshot[ADAPTIVE + 3u])) return false;
+         asuint(durable_target) != ConditionStateSnapshot[ADAPTIVE + 3u]) return false;
     uint owner_kinds = (packed_kinds >> V2_SUBTITLE_LOCATOR_OWNER_KIND_SHIFT) &
         V2_SUBTITLE_LOCATOR_KIND_MASK;
     uint pending_kinds = (packed_kinds >> V2_SUBTITLE_LOCATOR_PENDING_KIND_SHIFT) &
@@ -1867,7 +1499,7 @@ void PublishConditionParamsFromSnapshot() {
     ConditionParamsOut[CONDITION_PARAM_TARGET_WORD] = state_valid ? asuint(target) : 0u;
 }
 
-// The live one-thread resolver owns both compact publications. Keeping the observation body in a
+// The source-timed controller probes the current immutable Base cover union.
 float AdaptiveMaximumPlane() {
     // Reserve the representation range for the independently selected UI plane.
     return V2DisplayBudget();
@@ -1941,6 +1573,18 @@ void AdaptiveAdvance() {
     if (asfloat(tail[12u]) != limit) AdaptiveDisarm(flags, tail);
     tail[12u] = asuint(limit);
     tail[3u] = asuint(applied);
+    if (AdaptiveGeometryReady == 0u) {
+        // Preserve the applied plane/goal and OCR transaction, but discard timing authority.
+        // Clearing the accepted clock makes the next ready observation rearm without spending
+        // a missing/collapsed/stale geometry interval or carrying a retreat dwell through it.
+        AdaptiveDisarm(flags, tail);
+        flags &= ~ADAPTIVE_CLOCK;
+        tail[4u] = 0u;
+        tail[5u] = 0u;
+        tail[1u] = flags;
+        AdaptivePublish(tail);
+        return;
+    }
     if (AdaptiveOcrValid == 0u) {
         // An abstention/malformed record supplies no probe, not an invented empty UI mask.
         AdaptiveDisarm(flags, tail);
@@ -2009,7 +1653,7 @@ void AdaptiveAdvance() {
         tail[7u] = 0u;
         tail[10u] = 0u;
         if (release_found && release_index < goal &&
-            (v2_joint_plane_mode != 3u || applied == AdaptiveCandidate(goal, limit))) {
+            applied == AdaptiveCandidate(goal, limit)) {
             if ((flags & ADAPTIVE_RETREAT) == 0u) {
                 flags |= ADAPTIVE_RETREAT;
                 tail[8u] = now.x;
@@ -2059,7 +1703,6 @@ uint AdaptiveFirstNonconflictingIndex(float desired, float limit, uint maximum_i
 }
 
 void AdaptiveResolveHistogram() {
-    if (v2_joint_plane_mode != 3u) return;
     uint maximum_index = AdaptiveMaximumIndex();
     uint conflicts = AdaptiveCounts[1u] + AdaptiveCounts[3u + maximum_index];
     // Bucket k names the first candidate that can clear a sample; only buckets above a level
@@ -2143,28 +1786,26 @@ void AdaptiveProbe(uint lane) {
 void resolve_main(uint3 dispatch_id : SV_DispatchThreadID, uint lane : SV_GroupIndex) {
     if (lane == 0u) ResolveObservation();
     AllMemoryBarrierWithGroupSync();
-    if (JointPlaneEnabled()) {
-        if (lane < ADAPTIVE_COUNT_WORDS) AdaptiveCounts[lane] = 0u;
-        // Snapshot the just-published authenticated current covers once per group. Reuse and
-        // redispatch retain their existing observation gates; this scratch grants no authority.
-        if (lane == 0u) AdaptiveCurrentCount = LocatorState[20u];
-        if (lane < MAX_LINES) {
-            uint offset = V2_SUBTITLE_LOCATOR_CURRENT_OFFSET + lane * 4u;
-            AdaptiveCurrentCovers[lane] = uint4(
-                LocatorState[offset], LocatorState[offset + 1u],
-                LocatorState[offset + 2u], LocatorState[offset + 3u]);
-        }
-        GroupMemoryBarrierWithGroupSync();
-        if (AdaptiveDomainValid != 0u && AdaptiveOcrValid != 0u &&
-            (AdaptiveDistinct != 0u || AdaptiveReset != 0u)) AdaptiveProbe(lane);
-        GroupMemoryBarrierWithGroupSync();
-        if (lane == 0u) {
-            if (AdaptiveDomainValid != 0u && AdaptiveOcrValid != 0u &&
-                (AdaptiveDistinct != 0u || AdaptiveReset != 0u)) AdaptiveResolveHistogram();
-            AdaptiveAdvance();
-        }
-        AllMemoryBarrierWithGroupSync();
+    if (lane < ADAPTIVE_COUNT_WORDS) AdaptiveCounts[lane] = 0u;
+    // Snapshot the just-published authenticated current covers once per group. Reuse and
+    // redispatch retain their existing observation gates; this scratch grants no authority.
+    if (lane == 0u) AdaptiveCurrentCount = LocatorState[20u];
+    if (lane < MAX_LINES) {
+        uint offset = V2_SUBTITLE_LOCATOR_CURRENT_OFFSET + lane * 4u;
+        AdaptiveCurrentCovers[lane] = uint4(
+            LocatorState[offset], LocatorState[offset + 1u],
+            LocatorState[offset + 2u], LocatorState[offset + 3u]);
     }
+    GroupMemoryBarrierWithGroupSync();
+    if (AdaptiveDomainValid != 0u && AdaptiveGeometryReady != 0u && AdaptiveOcrValid != 0u &&
+        (AdaptiveDistinct != 0u || AdaptiveReset != 0u)) AdaptiveProbe(lane);
+    GroupMemoryBarrierWithGroupSync();
+    if (lane == 0u) {
+        if (AdaptiveDomainValid != 0u && AdaptiveGeometryReady != 0u && AdaptiveOcrValid != 0u &&
+            (AdaptiveDistinct != 0u || AdaptiveReset != 0u)) AdaptiveResolveHistogram();
+        AdaptiveAdvance();
+    }
+    AllMemoryBarrierWithGroupSync();
     [loop]
     for (uint index = lane; index < V2_SUBTITLE_LOCATOR_STATE_WORD_COUNT; index += 256u) {
         ConditionStateSnapshot[index] = LocatorState[index];
@@ -2182,15 +1823,15 @@ bool ConditionParamsValid(
     current_kinds = ConditionParams[CONDITION_PARAM_CURRENT_KINDS_WORD];
     fade_step = ConditionParams[CONDITION_PARAM_FADE_STEP_WORD];
     target = asfloat(ConditionParams[CONDITION_PARAM_TARGET_WORD]);
-    return JointPlanePolicyValid() &&
+    return AdaptivePolicyValid() &&
         ConditionParams[CONDITION_PARAM_SCHEMA_WORD] == V2_SUBTITLE_CONDITION_PARAM_SCHEMA &&
         ConditionParams[CONDITION_PARAM_TAG_WORD] == V2_SUBTITLE_CONDITION_PARAM_TAG &&
         current_count != 0u && current_count <= MAX_LINES &&
         (current_kinds & ~V2_SUBTITLE_LOCATOR_KIND_MASK) == 0u &&
         PackedKindsValid(current_kinds, 0u, current_count) &&
-        (JointPlaneEnabled() ? fade_step == 2u : (fade_step == 1u || fade_step == 2u)) &&
+        fade_step == 2u &&
         SubtitleTargetIsValid(target) &&
-        (!JointPlaneEnabled() || (target >= 0.0f && target <= AdaptiveMaximumPlane()));
+        target <= AdaptiveMaximumPlane();
 }
 
 float EvaluateConditionedBase(
@@ -2199,7 +1840,6 @@ float EvaluateConditionedBase(
     bool state_valid,
     uint current_count,
     uint current_kinds,
-    uint fade_step,
     float condition_target,
     out bool changed) {
     changed = false;
@@ -2240,15 +1880,13 @@ float EvaluateConditionedBase(
             }
         }
     }
-    if (v2_joint_plane_mode == 3u && best_distance == 0.0f) {
+    if (best_distance == 0.0f) {
         // Current coarse OCR covers are the admitted UI mask. Pin every covered cell to exactly
         // one plane, including signed zero, rather than retaining a per-glyph depth slack.
         changed = asuint(base) != asuint(condition_target);
         return condition_target;
     }
-    precise float core_range = v2_joint_plane_mode == 3u ? 0.0f :
-        0.5f / (float)locator_source.x;
-    precise float budget = core_range + best_distance;
+    precise float budget = best_distance;
     precise float delta = base - condition_target;
     // Exact Base is a semantic branch, not an algebraic coincidence: bypassing reconstruction
     // avoids changing an already-safe R32_FLOAT bit pattern through target + (base - target).
@@ -2256,9 +1894,8 @@ float EvaluateConditionedBase(
         return base;
     }
     precise float full = condition_target + (delta < 0.0f ? -budget : budget);
-    precise float faded = base + 0.5f * (full - base);
     changed = true;
-    return fade_step == 1u ? faded : full;
+    return full;
 }
 
 // Sole production writer. It always reads immutable BaseField out of place and writes every output
@@ -2280,6 +1917,6 @@ void condition_main(uint3 dispatch_id : SV_DispatchThreadID) {
     bool changed;
     float conditioned = EvaluateConditionedBase(
         condition_position, base, state_valid, current_count, current_kinds,
-        fade_step, condition_target, changed);
+        condition_target, changed);
     ConditionedField[dispatch_id.xy] = conditioned;
 }

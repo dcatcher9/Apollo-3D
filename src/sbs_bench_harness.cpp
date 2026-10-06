@@ -1862,7 +1862,7 @@ namespace sbs_bench {
       // Schema 3: offline conversion caches the authenticated Depth Coordinate V2 geometry and
       // pins both halves of the path: the producer closure and the exact live renderer closure.
       // The "depth" section carries the SIGNED one-eye final-parallax field (source-U units,
-      // |value| <= the pointwise soft-container limit), and "state" carries the 12-word ParallaxState the
+      // |value| <= the direct representation limit), and "state" carries the complete ParallaxState the
       // live renderer authenticates per pixel. Legacy pop/subject/adaptive knobs are gone; the
       // renderer identity and producer closure make the geometry provenance explicit.
       try {
@@ -3052,8 +3052,6 @@ namespace sbs_bench {
       // Opt-in, synchronous research sidecars. This does not change live geometry or
       // the formal evaluator artifact schema; ordinary runs allocate no extra readback.
       bool subtitle_plane_diagnostics = false;
-      std::optional<bool> joint_plane_experiment;
-      std::optional<std::uint32_t> joint_plane_mode;
       std::string follow_format;
       std::size_t follow_count = 0;  // optional producer frame-count upper bound
       int eye_w = 0;  // 0 -> derive from source aspect; set with eye_h to test letterboxing
@@ -3095,20 +3093,6 @@ namespace sbs_bench {
           o.device_conditional_replay_control = true;
         } else if (a == "--subtitle-plane-diagnostics") {
           o.subtitle_plane_diagnostics = true;
-        } else if (a == "--joint-plane-experiment") {
-          const auto value = next("--joint-plane-experiment");
-          if (value != "on" && value != "off") {
-            BOOST_LOG(error) << "sbs-bench: --joint-plane-experiment must be on or off";
-            return false;
-          }
-          o.joint_plane_experiment = value == "on";
-        } else if (a == "--joint-plane-mode") {
-          const auto value = next("--joint-plane-mode");
-          if (value != "0" && value != "3") {
-            BOOST_LOG(error) << "sbs-bench: --joint-plane-mode must be 0 or 3";
-            return false;
-          }
-          o.joint_plane_mode = static_cast<std::uint32_t>(value[0] - '0');
         } else if (a == "--follow-format") {
           o.follow_format = next("--follow-format");
         } else if (a == "--follow-count") {
@@ -3184,7 +3168,7 @@ namespace sbs_bench {
         }
       }
       if (!o.capabilities.empty()) {
-        if (!o.frames.empty() || !o.out.empty() || o.joint_plane_experiment.has_value() || o.joint_plane_mode.has_value()) {
+        if (!o.frames.empty() || !o.out.empty()) {
           BOOST_LOG(error) << "sbs-bench: --capabilities is a standalone query";
           return false;
         }
@@ -3201,19 +3185,6 @@ namespace sbs_bench {
       const unsigned direct_geometry_input_count =
         (!o.direct_parallax_root.empty() ? 1u : 0u) +
         (!o.depth_coordinate_v2_manifest.empty() ? 1u : 0u);
-      if (o.joint_plane_experiment.has_value() && o.joint_plane_mode.has_value() &&
-          *o.joint_plane_experiment != (*o.joint_plane_mode != 0u)) {
-        BOOST_LOG(error) << "sbs-bench: joint-plane overrides disagree";
-        return false;
-      }
-      if ((o.joint_plane_experiment.has_value() || o.joint_plane_mode.has_value()) &&
-          (direct_geometry_input_count != 0u ||
-           !o.scene_cache.empty() || !o.render_cache.empty())) {
-        BOOST_LOG(error)
-          << "sbs-bench: --joint-plane-experiment requires estimator-owned geometry; "
-             "direct replay owns its mode in the manifest and caches cannot apply this override";
-        return false;
-      }
       if (o.subtitle_plane_diagnostics &&
           (o.artifacts != artifact_mode_e::evaluation || o.follow ||
            !o.scene_cache.empty() || !o.render_cache.empty() ||
@@ -3600,20 +3571,7 @@ namespace sbs_bench {
     // frame-driven rather than wall-clock-driven, so cadence throttling would make the result
     // depend on machine speed.
     auto sbs_cfg = config::video.sbs;
-    if (o.joint_plane_experiment.has_value()) {
-      sbs_cfg.joint_plane_experiment = *o.joint_plane_experiment;
-    }
-    if (o.joint_plane_mode.has_value()) {
-      sbs_cfg.joint_plane_experiment = *o.joint_plane_mode != 0u;
-      sbs_cfg.joint_plane_experiment_mode = *o.joint_plane_mode;
-    }
-    const auto estimator_joint_plane_mode = sbs_cfg.joint_plane_experiment ?
-      sbs_cfg.joint_plane_experiment_mode : 0u;
-    if (estimator_joint_plane_mode == 3u && observation_timestamps.empty()) {
-      BOOST_LOG(error)
-        << "sbs-bench: continuous gain tracking requires an explicit --observation-timeline";
-      return 2;
-    }
+    constexpr auto estimator_joint_plane_mode = models::depth_coordinate_v2::adaptive_policy_id;
     if (o.pop_strength >= 0.0) {
       sbs_cfg.pop_strength = o.pop_strength;
     }
@@ -3626,17 +3584,17 @@ namespace sbs_bench {
     const bool replay_mode = !o.render_cache.empty();
     // Direct replay supplies an authenticated, horizontally contractive final field plus an
     // independent canonical order. Native V2 sequence replay runs
-    // the production six-shader coordinate pipeline and feeds its exact final field through the
+    // the production coordinate pipeline and feeds its exact final field through the
     // same fixed-point renderer contract.
     const bool depth_coordinate_v2_gpu_mode =
       !o.depth_coordinate_v2_manifest.empty();
     const bool external_direct_parallax_mode = !o.direct_parallax_root.empty();
     const bool direct_parallax_mode =
       external_direct_parallax_mode || depth_coordinate_v2_gpu_mode;
-    if (sbs_cfg.joint_plane_experiment &&
-        (direct_parallax_mode || !o.scene_cache.empty() || !o.render_cache.empty())) {
+    const bool estimator_geometry = !direct_parallax_mode && !replay_mode && o.scene_cache.empty();
+    if (estimator_geometry && observation_timestamps.empty()) {
       BOOST_LOG(error)
-        << "sbs-bench: configured joint-plane experiment requires estimator-owned geometry";
+        << "sbs-bench: adaptive estimator geometry requires an explicit --observation-timeline";
       return 2;
     }
     // The fused model has one public high-resolution input/output pair. Capture the exact input
@@ -5683,7 +5641,6 @@ namespace sbs_bench {
                 {"raw_coordinate_scale", est.parallax_v2_raw_coordinate_scale},
                 {"requested_gain", est.parallax_v2_requested_gain},
                 {"requested_pop_strength", est.parallax_v2_requested_pop_strength},
-                {"joint_plane_experiment", sbs_cfg.joint_plane_experiment},
                 {"joint_plane_mode", est.parallax_v2_joint_plane_mode},
                 {"input_domain_reset", est.input_domain_reset},
                 {"subtitle_work_suppressed", est.subtitle_work_suppressed},
@@ -6257,8 +6214,6 @@ namespace sbs_bench {
                  << "  \"depth_reuse_interval\": "
                  << (o.device_conditional_replay ? "null" : "1") << ",\n"
                  << "  \"pop_strength\": " << sbs_cfg.pop_strength << ",\n"
-                 << "  \"joint_plane_experiment\": "
-                 << (sbs_cfg.joint_plane_experiment ? "true" : "false") << ",\n"
                  << "  \"joint_plane_mode\": " << estimator_joint_plane_mode << ",\n";
         if (!observation_timestamps.empty()) {
           contract

@@ -63,13 +63,6 @@ Useful variants are:
 & $SbsbenchPython tools/sbsbench/run_eval.py --comparison-only --label pop-1p0 `
   --extra --pop-strength 1.0
 
-# Opt-in joint zero/linear scale/adaptive subtitle live policy, against an off control
-& $SbsbenchPython tools/sbsbench/run_eval.py --comparison-only --label joint-control `
-  --extra --joint-plane-experiment off
-& $SbsbenchPython tools/sbsbench/run_eval.py --comparison-only --label joint-combo `
-  --report-control cmake-build-relwithdebinfo/sbs_eval/joint-control `
-  --extra --joint-plane-experiment on
-
 # Prepared public suite
 & $SbsbenchPython tools/sbsbench/run_eval.py --suite extended --comparison-only --label public-control
 
@@ -81,10 +74,14 @@ Useful variants are:
 The process exit code is the verdict: `0` pass, `1` regression, and `2` invalid or incomplete
 evidence.
 
-Timed adaptive-UI evidence also requires `--observation-timeline <timeline>` after `--extra`,
-with the same declared timeline on both legs. Prepared PNG clips without a timeline supply no
-source clock, so they cannot qualify UI-plane movement. Label authored clock stimuli explicitly;
-they do not recover the original video's timing or establish long-form temporal quality.
+Every estimator clip receives an authenticated source-observation timeline. An explicit
+`--extra --observation-timeline <timeline>` overrides the authored prepared-source cadence;
+its frame count must match every selected clip. Otherwise `meta.json`'s `fps` declares the
+cadence, or the evaluator explicitly authors 30 Hz when it is absent. Neither path uses wall time
+or inference speed. These authored stimuli do not recover original video timing or qualify
+long-form temporal behavior. Native raw/field/cache replay uses its own existing timing contract.
+Host SBS has one adaptive zero/scale and subtitle UI-plane pipeline; the former experiment/mode
+selectors are rejected before launch.
 
 ### Adaptive infer/reuse A/B without a headset
 
@@ -196,21 +193,21 @@ captures directly with:
 
 See [Dump and replay format](DUMP_FORMAT.md) before generating or interpreting preview PNGs. The
 reader accepts only the current SLR14/OCR8 dump schema; older experimental captures are
-intentionally unsupported. An active schema-41 package authenticates the OCR8/SLR14 tuple for the
+intentionally unsupported. An active schema-44 package authenticates the OCR8/SLR14 tuple for the
 atomic final field's publication frame, ordinary Base, conditioned final field, and the resolver's
-bounded strict fallback placement policy. It replays SLR14 directly into
+current-cover conflict histogram and source-time plane controller. It replays SLR14 directly into
 `shadow_final_parallax.f32`, which is authenticated once as both the atomic final field and warp
 input. An
 active resolver also authenticates the strict symmetric bottom-corner ordinary-core qualification
 and its ribbon exemption. An inactive package uses the one canonical `none` descriptor.
 
-Current schema-41 window-region packages preserve the complete authorized source rectangle at any
+Current schema-44 window-region packages preserve the complete authorized source rectangle at any
 aspect ratio. `depth_input_region.json` schema 4 records the centered integer content rectangle in
 the fixed DAV2 tensor and its edge-replicated excluded padding. Quantitative consumers must use
 that content width for limiter and SLR14 steps and must project OCR/SLR geometry only into that
 content rectangle; treating the whole tensor as real source pixels is rejected.
 
-Schema 41 packages no scalar/heat preview PNGs or redundant per-field shape sidecars. Generate a
+Schema 44 packages no scalar/heat preview PNGs or redundant per-field shape sidecars. Generate a
 verified diagnostic view from any retained authenticated `.f32` artifact outside the package:
 
 ```powershell

@@ -951,7 +951,7 @@ namespace models {
     float parallax_v2_raw_coordinate_scale = 0.0f;  ///< Fixed authenticated model/shape coordinate scale.
     float parallax_v2_requested_pop_strength = 0.0f;  ///< Fixed V2 request from cfg.pop_strength only; no legacy adaptive ratio or ceiling is consumed.
     float parallax_v2_requested_gain = 0.0f;  ///< One-eye source-U gain before safety attenuation.
-    std::uint32_t parallax_v2_joint_plane_mode = 0u;  ///< Exact policy sealed in the completed GPU state.
+    std::uint32_t parallax_v2_joint_plane_mode = models::depth_coordinate_v2::adaptive_policy_id;  ///< Fixed adaptive policy identity sealed in the completed GPU state.
     depth_input_region_t input_region {};  ///< Exact source domain that owns this completion.
     input_color_space color_space = input_color_space::srgb;  ///< Exact transfer domain used for this completion.
     bool input_domain_reset = false;  ///< Temporal/camera state was reset before this completion.

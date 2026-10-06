@@ -347,8 +347,6 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pop-strength", type=float, default=defaults.pop_strength,
                         help=("requested artistic maximum; mapped once through the calibrated "
                               f"{defaults.gain_per_pop:g} source-U gain per pop unit"))
-    parser.add_argument("--far-tau", type=float, default=defaults.far_tau)
-    parser.add_argument("--near-log-tau", type=float, default=defaults.near_log_tau)
     parser.add_argument("--max-horizontal-slope", type=float,
                         default=defaults.max_horizontal_slope)
     parser.add_argument(
@@ -411,8 +409,6 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("raw_depth.f32 changed after provenance validation")
         config = MappingV2Config(
             raw_coordinate_scale=raw_coordinate_scale,
-            far_tau=args.far_tau,
-            near_log_tau=args.near_log_tau,
             pop_strength=args.pop_strength,
             max_horizontal_slope=args.max_horizontal_slope,
             max_vertical_shear=args.max_vertical_shear,

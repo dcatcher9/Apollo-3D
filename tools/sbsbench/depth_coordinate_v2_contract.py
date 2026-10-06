@@ -9,7 +9,7 @@ import json
 import math
 from pathlib import Path
 import struct
-from typing import Any, Optional, Sequence
+from typing import Any, Optional
 
 
 CONTRACT_PATH = (
@@ -17,8 +17,7 @@ CONTRACT_PATH = (
 )
 CALIBRATED_DEFAULT_NAMES = (
     "collapse_abs_epsilon",
-    "far_tau",
-    "near_log_tau",
+    "adaptive_policy_id",
     "gain_per_pop",
     "reference_pop_strength",
     "direct_container_limit",
@@ -59,7 +58,6 @@ SHADER_SOURCE_SPECS = (
     ("buffer_to_tex_cs.hlsl", "main", "cs_5_0"),
     ("buffer_to_tex_cs.hlsl", "pad_main", "cs_5_0"),
     ("depth_minmax_ema_cs.hlsl", "main", "cs_5_0"),
-    ("depth_hist_cs.hlsl", "main", "cs_5_0"),
     ("depth_scene_cut_evidence_cs.hlsl", "main", "cs_5_0"),
     ("depth_scene_cut_resolve_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_moments_cs.hlsl", "main", "cs_5_0"),
@@ -85,6 +83,7 @@ EXPECTED_FINAL_PARALLAX = {
     "current_rgb_policy": "always-current-never-retained",
 }
 EXPECTED_SUBTITLE_OCR = {
+    "geometry_authority": "same-observation-sealed-parallax-state-required-for-ui-probe-and-time-advance-v1",
     "schema": 14,
     "logical_model": "ppocrv6_tiny_det_modelopt_fp16",
     "asset_path": "models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx",
@@ -156,15 +155,6 @@ EXPECTED_SUBTITLE_OCR = {
         "locator_corner_bottom_rows": 16,
         "locator_match_iou_threshold": 0.6,
         "locator_death_grace_observations": 6,
-        "locator_target_horizontal_fallback_max_radius_steps": 2,
-        "locator_target_horizontal_step_denominator": 16,
-        "locator_target_max_row_iqr_binocular_source_pixels": 8.0,
-        "locator_target_max_row_median_delta_binocular_source_pixels": 4.0,
-        "locator_target_max_residual_binocular_source_pixels": 8.0,
-        "locator_target_max_unreliable_holds": 2,
-        "locator_target_deadband_binocular_source_pixels": 1.0,
-        "locator_target_ema_alpha": 0.125,
-        "locator_target_max_slew_binocular_source_pixels": 0.25,
         "ocr_safe_row_top": 24,
         "ocr_safe_row_bottom": 155,
         "source_crop_aspect_width": 6,
@@ -207,8 +197,7 @@ EXPECTED_SUBTITLE_OCR = {
 @dataclass(frozen=True)
 class CalibratedDefaults:
     collapse_abs_epsilon: float
-    far_tau: float
-    near_log_tau: float
+    adaptive_policy_id: int
     gain_per_pop: float
     reference_pop_strength: float
     direct_container_limit: float
@@ -278,6 +267,7 @@ class FinalParallaxContract:
 
 @dataclass(frozen=True)
 class SubtitleOcrContract:
+    geometry_authority: str
     schema: int
     logical_model: str
     asset_path: str
@@ -318,15 +308,6 @@ class SubtitleOcrContract:
     locator_corner_bottom_rows: int
     locator_match_iou_threshold: float
     locator_death_grace_observations: int
-    locator_target_horizontal_fallback_max_radius_steps: int
-    locator_target_horizontal_step_denominator: int
-    locator_target_max_row_iqr_binocular_source_pixels: float
-    locator_target_max_row_median_delta_binocular_source_pixels: float
-    locator_target_max_residual_binocular_source_pixels: float
-    locator_target_max_unreliable_holds: int
-    locator_target_deadband_binocular_source_pixels: float
-    locator_target_ema_alpha: float
-    locator_target_max_slew_binocular_source_pixels: float
     ocr_safe_row_top: int
     ocr_safe_row_bottom: int
     source_crop_aspect_width: int
@@ -385,6 +366,7 @@ def _subtitle_ocr_contract(contract: dict[str, Any]) -> SubtitleOcrContract:
     locator = value["locator_state"]
     condition = value["condition_params"]
     return SubtitleOcrContract(
+        geometry_authority=value["geometry_authority"],
         schema=value["schema"],
         logical_model=value["logical_model"],
         asset_path=value["asset_path"],
@@ -431,23 +413,6 @@ def _subtitle_ocr_contract(contract: dict[str, Any]) -> SubtitleOcrContract:
         locator_match_iou_threshold=float(field_policy["locator_match_iou_threshold"]),
         locator_death_grace_observations=field_policy[
             "locator_death_grace_observations"],
-        locator_target_horizontal_fallback_max_radius_steps=field_policy[
-            "locator_target_horizontal_fallback_max_radius_steps"],
-        locator_target_horizontal_step_denominator=field_policy[
-            "locator_target_horizontal_step_denominator"],
-        locator_target_max_row_iqr_binocular_source_pixels=float(
-            field_policy["locator_target_max_row_iqr_binocular_source_pixels"]),
-        locator_target_max_row_median_delta_binocular_source_pixels=float(
-            field_policy["locator_target_max_row_median_delta_binocular_source_pixels"]),
-        locator_target_max_residual_binocular_source_pixels=float(
-            field_policy["locator_target_max_residual_binocular_source_pixels"]),
-        locator_target_max_unreliable_holds=field_policy[
-            "locator_target_max_unreliable_holds"],
-        locator_target_deadband_binocular_source_pixels=float(
-            field_policy["locator_target_deadband_binocular_source_pixels"]),
-        locator_target_ema_alpha=float(field_policy["locator_target_ema_alpha"]),
-        locator_target_max_slew_binocular_source_pixels=float(
-            field_policy["locator_target_max_slew_binocular_source_pixels"]),
         ocr_safe_row_top=field_policy["ocr_safe_row_top"],
         ocr_safe_row_bottom=field_policy["ocr_safe_row_bottom"],
         source_crop_aspect_width=field_policy["source_crop_aspect_width"],
@@ -687,7 +652,10 @@ def load_contract(path: Path = CONTRACT_PATH) -> dict[str, Any]:
         if (not isinstance(value, (int, float)) or isinstance(value, bool) or
                 not math.isfinite(float(value))):
             raise ValueError(f"depth-coordinate-v2 default {name} must be finite")
-        if name == "convergence_curve_default":
+        if name == "adaptive_policy_id":
+            if type(value) is not int or value != 3:
+                raise ValueError("adaptive_policy_id must be exactly integer three")
+        elif name == "convergence_curve_default":
             if float(value) != 0.0:
                 raise ValueError("convergence_curve_default must be exactly zero")
         elif float(value) <= 0.0:
@@ -711,7 +679,8 @@ CONTRACT_CANONICAL_SHA256 = hashlib.sha256(json.dumps(
     _CONTRACT, sort_keys=True, separators=(",", ":"), ensure_ascii=True
 ).encode("ascii")).hexdigest()
 CALIBRATED_DEFAULTS = CalibratedDefaults(
-    **{name: float(_CONTRACT["calibrated_defaults"][name])
+    **{name: (_CONTRACT["calibrated_defaults"][name] if name == "adaptive_policy_id"
+              else float(_CONTRACT["calibrated_defaults"][name]))
        for name in CALIBRATED_DEFAULT_NAMES}
 )
 CONTRACT_SCHEMA = int(_CONTRACT["schema"])
@@ -744,259 +713,6 @@ def subtitle_ocr_field_is_calibrated(field_width: int, field_height: int) -> boo
     """Return whether OCR projection may target a coarse or Stage-2 live field."""
 
     return subtitle_locator_field_cell_scale(field_width, field_height) != 0
-
-
-def subtitle_target_is_representable_source_u(target: float) -> bool:
-    """Return whether an SLR13 target fits the authenticated signed parallax container."""
-
-    value = _float32(target)
-    return math.isfinite(value) and abs(value) <= _float32(
-        CALIBRATED_DEFAULTS.direct_container_limit)
-
-
-def _subtitle_row_observation(
-        samples: tuple[float, ...], binocular_scale: float) -> tuple[bool, bool, float]:
-    """Return ``(valid, coherent, median)`` in SLR13's SM5 float32 order."""
-
-    converted: list[float] = []
-    for sample in samples:
-        try:
-            value = _float32(sample)
-        except (OverflowError, TypeError, ValueError, struct.error):
-            return False, False, 0.0
-        if not subtitle_target_is_representable_source_u(value):
-            return False, False, 0.0
-        converted.append(value)
-    converted.sort()
-
-    median = _float32(_float32(converted[7] + converted[8]) * _float32(0.5))
-    # Match the explicit precise HLSL quantiles: q1=.5*(v3+v4), q3=.5*(v11+v12).
-    q1 = _float32(_float32(0.5) * _float32(converted[3] + converted[4]))
-    q3 = _float32(_float32(0.5) * _float32(converted[11] + converted[12]))
-    iqr = _float32(q3 - q1)
-    iqr_pixels = _float32(iqr * binocular_scale)
-    coherent = (
-        math.isfinite(iqr_pixels) and
-        iqr_pixels <= _float32(
-            SUBTITLE_OCR.locator_target_max_row_iqr_binocular_source_pixels)
-    )
-    return True, coherent, median
-
-
-def select_subtitle_local_plane_source_u(
-        first_row: tuple[float, ...] | list[float],
-        second_row: tuple[float, ...] | list[float],
-        source_width: int) -> Optional[float]:
-    """Select SLR13's reliable local supporting plane from two independent rows.
-
-    Each row contains exactly 16 R32_FLOAT Base samples. A row is valid only when all of its
-    samples are finite and fit the signed direct-parallax container, and is coherent when its
-    Tukey IQR is at most the generated binocular-pixel threshold. Two valid primary rows use their
-    robust medians without an IQR gate: close medians are averaged and separated medians select the
-    larger source-U value (the nearer supporting plane). With only one valid row, that row must
-    still be coherent before its median can stand in for the missing independent observation.
-
-    All state-affecting arithmetic and comparisons are rounded to float32 in the same explicit
-    order as the shader. The thresholds use only addition, subtraction, multiplication, and the
-    exact power-of-two factor 0.5, so unlike reciprocal-based coordinate bounds there is no
-    alternate SM5 division candidate to admit at a boundary.
-    """
-
-    if (isinstance(source_width, bool) or not isinstance(source_width, int) or
-            source_width <= 0):
-        raise ValueError("subtitle target source width must be a positive integer")
-    if len(first_row) != 16 or len(second_row) != 16:
-        raise ValueError("subtitle target evidence must contain exactly 16 samples per row")
-    binocular_scale = _float32(_float32(2.0) * _float32(source_width))
-    if not math.isfinite(binocular_scale) or binocular_scale <= 0.0:
-        raise ValueError("subtitle target binocular scale must be finite and positive")
-
-    first_valid, first_coherent, first_median = _subtitle_row_observation(
-        tuple(first_row), binocular_scale)
-    second_valid, second_coherent, second_median = _subtitle_row_observation(
-        tuple(second_row), binocular_scale)
-    if first_valid and second_valid:
-        median_delta = _float32(second_median - first_median)
-        median_delta_pixels = _float32(abs(median_delta) * binocular_scale)
-        if median_delta_pixels <= _float32(
-                SUBTITLE_OCR.locator_target_max_row_median_delta_binocular_source_pixels):
-            return _float32(
-                _float32(first_median + second_median) * _float32(0.5))
-        return max(first_median, second_median)
-    if first_coherent:
-        return first_median
-    if second_coherent:
-        return second_median
-    return None
-
-
-def select_subtitle_local_plane_fallback_probe_source_u(
-        first_row: Sequence[float],
-        second_row: Sequence[float],
-        source_width: int) -> Optional[float]:
-    """Select one strict fallback probe from two mutually consistent coherent rows."""
-
-    if (isinstance(source_width, bool) or not isinstance(source_width, int) or
-            source_width <= 0):
-        raise ValueError("subtitle target source width must be a positive integer")
-    if len(first_row) != 16 or len(second_row) != 16:
-        raise ValueError("subtitle target evidence must contain exactly 16 samples per row")
-    binocular_scale = _float32(_float32(2.0) * _float32(source_width))
-    if not math.isfinite(binocular_scale) or binocular_scale <= 0.0:
-        raise ValueError("subtitle target binocular scale must be finite and positive")
-    first_valid, first_coherent, first_median = _subtitle_row_observation(
-        tuple(first_row), binocular_scale)
-    second_valid, second_coherent, second_median = _subtitle_row_observation(
-        tuple(second_row), binocular_scale)
-    median_delta_pixels = _float32(
-        abs(_float32(second_median - first_median)) * binocular_scale)
-    if (not first_valid or not second_valid or not first_coherent or not second_coherent or
-            median_delta_pixels > _float32(
-                SUBTITLE_OCR.locator_target_max_row_median_delta_binocular_source_pixels)):
-        return None
-    return _float32(_float32(first_median + second_median) * _float32(0.5))
-
-
-def subtitle_target_fallback_strip_is_unclamped(
-        center: float, content_left: int, content_right: int) -> bool:
-    """Return whether a fallback's rounded 16-sample strip lies in half-open content bounds."""
-
-    if (isinstance(content_left, bool) or not isinstance(content_left, int) or
-            isinstance(content_right, bool) or not isinstance(content_right, int) or
-            content_left < 0 or content_left >= content_right or content_right > 0xffff):
-        raise ValueError("subtitle target content bounds must be canonical field coordinates")
-    try:
-        center_f32 = _float32(center)
-    except (OverflowError, TypeError, ValueError, struct.error):
-        return False
-    if not math.isfinite(center_f32):
-        return False
-    first_x = _float32(center_f32 - _float32(30.0))
-    last_x = _float32(first_x + _float32(4.0 * 15.0))
-    rounded_first = math.floor(_float32(first_x + _float32(0.5)))
-    rounded_last = math.floor(_float32(last_x + _float32(0.5)))
-    return rounded_first >= content_left and rounded_last < content_right
-
-
-def subtitle_target_probe_centers(
-        cores: Sequence[tuple[int, int, int, int]],
-        kinds: Sequence[int]) -> tuple[float, ...]:
-    """Return SLR13's aggregate primary and bounded near-center fallback positions.
-
-    ``kinds`` uses the compact locator convention: zero is ordinary text and one is a ribbon.
-    The primary remains the median of all owner-member centers. The fallback step is one sixteenth
-    of the ordinary-core horizontal span when any ordinary member exists, otherwise one sixteenth
-    of the whole owner span. Positions are returned in shader order: primary, ``-step``, ``+step``,
-    ``-2*step``, ``+2*step``.
-    """
-
-    if (len(cores) == 0 or len(cores) > SUBTITLE_OCR.locator_rectangle_capacity or
-            len(kinds) != len(cores)):
-        raise ValueError("subtitle target placement requires one canonical owner stack")
-    normalized: list[tuple[int, int, int, int]] = []
-    normalized_kinds: list[int] = []
-    for rectangle, kind in zip(cores, kinds):
-        if (len(rectangle) != 4 or
-                any(isinstance(value, bool) or not isinstance(value, int)
-                    for value in rectangle)):
-            raise ValueError("subtitle target cores must contain four integer coordinates")
-        left, top, right, bottom = rectangle
-        if (left < 0 or top < 0 or left >= right or top >= bottom or
-                right > 0xffff or bottom > 0xffff):
-            raise ValueError("subtitle target core is outside the authenticated field domain")
-        if isinstance(kind, bool) or not isinstance(kind, int) or kind not in (0, 1):
-            raise ValueError("subtitle target kind must be ordinary text or ribbon")
-        normalized.append((left, top, right, bottom))
-        normalized_kinds.append(kind)
-
-    member_centers = sorted(
-        _float32(_float32(left + right - 1) * _float32(0.5))
-        for left, _top, right, _bottom in normalized
-    )
-    member_count = len(member_centers)
-    if member_count & 1:
-        primary = member_centers[member_count // 2]
-    else:
-        primary = _float32(
-            _float32(member_centers[member_count // 2 - 1] +
-                     member_centers[member_count // 2]) * _float32(0.5))
-
-    placement = [
-        rectangle for rectangle, kind in zip(normalized, normalized_kinds) if kind == 0
-    ]
-    if not placement:
-        placement = normalized
-    span = max(rectangle[2] for rectangle in placement) - min(
-        rectangle[0] for rectangle in placement)
-    step = _float32(
-        _float32(span) /
-        _float32(SUBTITLE_OCR.locator_target_horizontal_step_denominator))
-    centers = [primary]
-    fallback_count = 2 * SUBTITLE_OCR.locator_target_horizontal_fallback_max_radius_steps
-    for fallback_index in range(fallback_count):
-        radius = fallback_index // 2 + 1
-        offset = _float32(step * _float32(radius))
-        centers.append(_float32(
-            primary - offset if (fallback_index & 1) == 0 else primary + offset))
-    return tuple(centers)
-
-
-def select_subtitle_local_plane_with_fallback_source_u(
-        primary_first_row: Sequence[float],
-        primary_second_row: Sequence[float],
-        fallback_probes: Sequence[tuple[Sequence[float], Sequence[float]]],
-        fallback_centers: Sequence[float],
-        content_bounds: tuple[int, int],
-        source_width: int) -> Optional[float]:
-    """Select the primary or the first mutually consistent strict fallback radius.
-
-    A reliable primary short-circuits exactly. Fallback is considered only after primary failure;
-    every candidate needs an interior, unclamped strip and two coherent rows whose medians differ
-    by at most four pixels. A sole valid candidate wins its radius. Two valid candidates must also
-    differ by at most four pixels, then the larger-U target wins. A conflicting radius fails the
-    complete observation without searching farther. ``fallback_probes`` and ``fallback_centers``
-    exclude the primary and follow ``-radius, +radius`` order.
-    """
-
-    primary = select_subtitle_local_plane_source_u(
-        list(primary_first_row), list(primary_second_row), source_width)
-    if primary is not None:
-        return primary
-    expected_fallbacks = (
-        2 * SUBTITLE_OCR.locator_target_horizontal_fallback_max_radius_steps)
-    if len(fallback_probes) != expected_fallbacks or len(fallback_centers) != expected_fallbacks:
-        raise ValueError(
-            f"subtitle target fallback requires exactly {expected_fallbacks} probes")
-    if len(content_bounds) != 2:
-        raise ValueError("subtitle target fallback requires half-open content bounds")
-    content_left, content_right = content_bounds
-    binocular_scale = _float32(_float32(2.0) * _float32(source_width))
-    for pair_base in range(0, expected_fallbacks, 2):
-        pair_targets: list[Optional[float]] = []
-        for probe, center in zip(
-                fallback_probes[pair_base:pair_base + 2],
-                fallback_centers[pair_base:pair_base + 2]):
-            if len(probe) != 2:
-                raise ValueError("subtitle target fallback probe must contain two rows")
-            candidate = None
-            if subtitle_target_fallback_strip_is_unclamped(
-                    center, content_left, content_right):
-                candidate = select_subtitle_local_plane_fallback_probe_source_u(
-                    probe[0], probe[1], source_width)
-            pair_targets.append(candidate)
-        negative, positive = pair_targets
-        if negative is not None and positive is not None:
-            pair_delta_pixels = _float32(
-                abs(_float32(positive - negative)) * binocular_scale)
-            if pair_delta_pixels > _float32(
-                    SUBTITLE_OCR.locator_target_max_row_median_delta_binocular_source_pixels):
-                return None
-            return max(negative, positive)
-        if negative is not None:
-            return negative
-        if positive is not None:
-            return positive
-    return None
 
 
 def subtitle_ocr_project_row_ceil(
@@ -1103,10 +819,4 @@ __all__ = [
     "subtitle_ocr_field_is_calibrated",
     "subtitle_ocr_project_row_ceil",
     "subtitle_ocr_ribbon_min_bottom",
-    "select_subtitle_local_plane_fallback_probe_source_u",
-    "select_subtitle_local_plane_source_u",
-    "select_subtitle_local_plane_with_fallback_source_u",
-    "subtitle_target_fallback_strip_is_unclamped",
-    "subtitle_target_probe_centers",
-    "subtitle_target_is_representable_source_u",
 ]

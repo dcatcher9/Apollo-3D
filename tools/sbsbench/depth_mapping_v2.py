@@ -1,15 +1,8 @@
 #!/usr/bin/env python3
-"""NumPy comparison oracle for the production depth-coordinate-v2 GPU mapping.
+"""Diagnostic linear depth mapping with the production spatial conditioners.
 
-The camera is acquired from the first usable DAV2 field.  Scale is a fixed authenticated
-model/shape calibration and never adapts to a frame's distribution.  The arithmetic mean of that
-field establishes the zero plane immediately at startup or after a confirmed cut; later valid,
-invalid, and fast-motion frames hold it until the next cut.
-There is no pending state or late correction. It is exactly the zero
-plane: curve-space convergence remains zero for the arithmetic-mean selection.  The near
-curve remains fixed, so framing and content occupancy cannot select different transfer functions.
-The soft representation container is pointwise and stateless; requested gain never becomes
-mutable shot state and a raw outlier cannot shrink unrelated geometry.
+The native GPU owns continuous zero/scale adaptation and rendering. This module provides
+single-observation arithmetic diagnostics; it is never a temporal controller or renderer.
 """
 
 from dataclasses import asdict, dataclass
@@ -44,8 +37,6 @@ def vertical_share_coefficients(majorant_share: float) -> Tuple[float, float]:
 class MappingV2Config:
     raw_coordinate_scale: float = V2_MODEL_CALIBRATIONS[0].raw_coordinate_scale
     collapse_abs_epsilon: float = V2_DEFAULTS.collapse_abs_epsilon
-    far_tau: float = V2_DEFAULTS.far_tau
-    near_log_tau: float = V2_DEFAULTS.near_log_tau
     pop_strength: float = V2_DEFAULTS.reference_pop_strength
     gain_per_pop: float = V2_DEFAULTS.gain_per_pop
     max_horizontal_slope: float = V2_DEFAULTS.max_horizontal_slope
@@ -70,7 +61,7 @@ class CoordinateCalibration:
 
 
 @dataclass(frozen=True)
-class SceneCoordinateSelection:
+class CoordinateObservation:
     """Deterministic diagnostics for one arithmetic-mean camera acquisition."""
 
     observed_mean: float
@@ -88,7 +79,7 @@ class MappingV2Diagnostics:
     shape: Tuple[int, int]
     center_mean: float
     selected_center: float
-    scene_coordinate: SceneCoordinateSelection
+    coordinate_observation: CoordinateObservation
     observed_std: float
     raw_coordinate_scale: float
     collapse_threshold: float
@@ -99,8 +90,6 @@ class MappingV2Diagnostics:
     canonical_p99: float
     canonical_max: float
     convergence_curve: float
-    curve_far_limit: float
-    curve_near_limit: Optional[float]
     requested_gain: float
     effective_gain: float
     container_source_u_limit: float
@@ -162,8 +151,6 @@ def _validate_config(config: MappingV2Config) -> None:
         raise TypeError("config must be a MappingV2Config")
     _finite_positive("raw_coordinate_scale", config.raw_coordinate_scale)
     _finite_positive("collapse_abs_epsilon", config.collapse_abs_epsilon)
-    _finite_positive("far_tau", config.far_tau)
-    _finite_positive("near_log_tau", config.near_log_tau)
     _finite_positive("pop_strength", config.pop_strength)
     _finite_positive("gain_per_pop", config.gain_per_pop)
     _finite_positive("max_horizontal_slope", config.max_horizontal_slope)
@@ -201,7 +188,19 @@ def calibrate_coordinate(
     raw = _require_raw_depth(raw_depth)
     center = float(np.mean(raw, dtype=np.float64))
     observed_std = float(np.std(raw, dtype=np.float64))
+    # Match the native 256-bin bounded percentile definition, not sorted quantiles.
+    raw_min, raw_max = float(np.min(raw)), float(np.max(raw))
+    span = raw_max - raw_min
     scale = config.raw_coordinate_scale
+    if math.isfinite(span) and span > 0.0:
+        bins = int(V2_DEFAULTS.host_percentile_bin_count)
+        indices = np.minimum(np.floor((raw - raw_min) / span * bins).astype(np.int64), bins - 1)
+        cumulative = np.cumsum(np.bincount(indices.ravel(), minlength=bins))
+        low = int(np.searchsorted(cumulative, math.ceil(raw.size * V2_DEFAULTS.host_percentile_low)))
+        high = int(np.searchsorted(cumulative, math.ceil(raw.size * V2_DEFAULTS.host_percentile_high)))
+        p05 = raw_min + span * low / bins
+        p95 = min(raw_max, raw_min + span * (high + 1) / bins)
+        scale = max((p95 - p05) * 0.5, scale)
     raw_min = float(np.min(raw))
     raw_max = float(np.max(raw))
     if not all(math.isfinite(value) for value in (
@@ -218,9 +217,9 @@ def calibrate_coordinate(
     )
 
 
-def _selection_from_calibration(
-        calibration: CoordinateCalibration) -> SceneCoordinateSelection:
-    return SceneCoordinateSelection(
+def _observation_from_calibration(
+        calibration: CoordinateCalibration) -> CoordinateObservation:
+    return CoordinateObservation(
         observed_mean=calibration.center,
         selected_center=calibration.center,
         convergence_curve=V2_DEFAULTS.convergence_curve_default,
@@ -229,73 +228,42 @@ def _selection_from_calibration(
     )
 
 
-def select_scene_coordinate(
+def observe_raw_coordinate(
         raw_depth: np.ndarray,
-        config: MappingV2Config = MappingV2Config()) -> SceneCoordinateSelection:
-    """Select the scene-latched arithmetic-mean zero plane."""
+        config: MappingV2Config = MappingV2Config()) -> CoordinateObservation:
+    """Observe the arithmetic-mean zero target for one diagnostic field."""
 
-    return _selection_from_calibration(calibrate_coordinate(raw_depth, config))
+    return _observation_from_calibration(calibrate_coordinate(raw_depth, config))
 
 
-def asymmetric_curve(
-        canonical: np.ndarray,
-        config: MappingV2Config) -> np.ndarray:
+
+
+
+
+
+
+def linear_relative_coordinate(raw_depth: np.ndarray, center: float, scale: float,
+                               config: MappingV2Config = MappingV2Config()) -> np.ndarray:
+    """Map one field with an explicitly owned zero/divisor, without a depth curve."""
     _validate_config(config)
-    values = np.asarray(canonical, dtype=np.float64)
-    if not np.isfinite(values).all():
-        raise ValueError("canonical depth must contain only finite values")
-    resolved_near_tau = config.near_log_tau
-    curved = np.empty_like(values)
-    far = values < 0.0
-    linear = (values >= 0.0) & (values <= 1.0)
-    near = values > 1.0
-    curved[far] = config.far_tau * np.expm1(values[far] / config.far_tau)
-    curved[linear] = values[linear]
-    excess = values[near] - 1.0
-    curved[near] = 1.0 + resolved_near_tau * np.log1p(excess / resolved_near_tau)
-    if not np.isfinite(curved).all():
-        raise ValueError("asymmetric curve produced a non-finite value")
-    return curved
-
-
-def curve_relative_coordinate(
-        raw_depth: np.ndarray,
-        center: float,
-        scale: float,
-        config: MappingV2Config = MappingV2Config(),
-        *,
-        convergence_curve: float = V2_DEFAULTS.convergence_curve_default,
-        ) -> Tuple[np.ndarray, np.ndarray]:
     raw = _require_raw_depth(raw_depth)
     if not math.isfinite(center):
         raise ValueError("coordinate center must be finite")
     _finite_positive("coordinate scale", scale)
-    if not math.isfinite(convergence_curve):
-        raise ValueError("convergence_curve must be finite")
     canonical = (raw - center) / scale
-    curved = asymmetric_curve(canonical, config) - convergence_curve
-    if not np.isfinite(canonical).all() or not np.isfinite(curved).all():
-        raise ValueError("shot calibration produced a non-finite coordinate")
-    return canonical, curved
+    if not np.isfinite(canonical).all():
+        raise ValueError("coordinate mapping produced a non-finite value")
+    return canonical
 
 
-def pointwise_soft_container(
-        requested: np.ndarray,
-        limit: float = DIRECT_PARALLAX_SOURCE_U_LIMIT) -> np.ndarray:
-    """Apply the live fourth-order soft representation bound independently per texel."""
-
+def pointwise_hard_bound(requested: np.ndarray,
+                         limit: float = DIRECT_PARALLAX_SOURCE_U_LIMIT) -> np.ndarray:
+    """Bound each requested disparity independently without rescaling other pixels."""
     values = np.asarray(requested, dtype=np.float64)
     if np.iscomplexobj(requested) or not np.isfinite(values).all():
         raise ValueError("requested parallax must be finite and real-valued")
     bound = _finite_positive("limit", limit)
-    magnitudes = np.abs(values)
-    smaller = np.minimum(magnitudes, bound)
-    larger = np.maximum(magnitudes, bound)
-    ratio = smaller / larger
-    ratio_squared = ratio * ratio
-    fourth_root = np.sqrt(np.sqrt(1.0 + ratio_squared * ratio_squared))
-    contained = np.copysign(smaller / fourth_root, values)
-    return np.clip(contained, -bound, bound)
+    return np.clip(values, -bound, bound)
 
 
 def horizontal_lipschitz_majorant(field: np.ndarray, max_step: float) -> np.ndarray:
@@ -400,19 +368,19 @@ def generate_depth_mapping_v2(
     _validate_config(config)
     raw = _require_raw_depth(raw_depth)
     calibration = calibrate_coordinate(raw, config)
-    scene_coordinate = _selection_from_calibration(calibration)
+    coordinate_observation = _observation_from_calibration(calibration)
     width = raw.shape[1]
     max_step = config.max_horizontal_slope / width
     max_vertical_step = config.max_vertical_shear / width
-    convergence_curve = scene_coordinate.convergence_curve
+    convergence_curve = coordinate_observation.convergence_curve
 
     if calibration.collapsed:
         zero = np.zeros(raw.shape, dtype=np.float32)
         diagnostics = MappingV2Diagnostics(
             shape=raw.shape,
             center_mean=calibration.center,
-            selected_center=scene_coordinate.selected_center,
-            scene_coordinate=scene_coordinate,
+            selected_center=coordinate_observation.selected_center,
+            coordinate_observation=coordinate_observation,
             observed_std=calibration.observed_std,
             raw_coordinate_scale=config.raw_coordinate_scale,
             collapse_threshold=config.collapse_abs_epsilon,
@@ -420,7 +388,6 @@ def generate_depth_mapping_v2(
             canonical_min=0.0, canonical_p01=0.0, canonical_p50=0.0,
             canonical_p99=0.0, canonical_max=0.0,
             convergence_curve=convergence_curve,
-            curve_far_limit=-config.far_tau - convergence_curve, curve_near_limit=None,
             requested_gain=config.parallax_gain, effective_gain=0.0,
             container_source_u_limit=config.direct_container_limit,
             container_scale=1.0,
@@ -449,11 +416,10 @@ def generate_depth_mapping_v2(
         return MappingV2Result(
             zero.copy(), zero.copy(), zero.copy(), zero.copy(), zero, diagnostics)
 
-    canonical = (raw - scene_coordinate.selected_center) / calibration.scale
-    curve_relative = asymmetric_curve(canonical, config) - convergence_curve
-    requested = curve_relative * config.parallax_gain
+    canonical = (raw - coordinate_observation.selected_center) / calibration.scale
+    requested = canonical * config.parallax_gain
     container_scale = 1.0
-    conditioned = pointwise_soft_container(requested, config.direct_container_limit)
+    conditioned = pointwise_hard_bound(requested, config.direct_container_limit)
     vertical_majorant = vertical_lipschitz_majorant(conditioned, max_vertical_step)
     vertical_minorant = vertical_lipschitz_minorant(conditioned, max_vertical_step)
     # The contract is consumed by a float32 HLSL shader. Canonicalize both coefficients to the
@@ -485,8 +451,8 @@ def generate_depth_mapping_v2(
     diagnostics = MappingV2Diagnostics(
         shape=raw.shape,
         center_mean=calibration.center,
-        selected_center=scene_coordinate.selected_center,
-        scene_coordinate=scene_coordinate,
+        selected_center=coordinate_observation.selected_center,
+        coordinate_observation=coordinate_observation,
         observed_std=calibration.observed_std,
         raw_coordinate_scale=config.raw_coordinate_scale,
         collapse_threshold=config.collapse_abs_epsilon,
@@ -494,7 +460,6 @@ def generate_depth_mapping_v2(
         canonical_min=float(np.min(canonical)), canonical_p01=p01,
         canonical_p50=p50, canonical_p99=p99, canonical_max=float(np.max(canonical)),
         convergence_curve=convergence_curve,
-        curve_far_limit=-config.far_tau - convergence_curve, curve_near_limit=None,
         requested_gain=config.parallax_gain,
         effective_gain=config.parallax_gain,
         container_source_u_limit=config.direct_container_limit,
@@ -543,16 +508,15 @@ __all__ = [
     "MappingV2Config",
     "MappingV2Diagnostics",
     "MappingV2Result",
-    "SceneCoordinateSelection",
-    "asymmetric_curve",
+    "CoordinateObservation",
     "calibrate_coordinate",
-    "curve_relative_coordinate",
+    "linear_relative_coordinate",
     "decode_direct_parallax",
     "encode_direct_parallax",
     "generate_depth_mapping_v2",
     "horizontal_lipschitz_majorant",
-    "pointwise_soft_container",
-    "select_scene_coordinate",
+    "pointwise_hard_bound",
+    "observe_raw_coordinate",
     "vertical_lipschitz_majorant",
     "vertical_lipschitz_minorant",
 ]

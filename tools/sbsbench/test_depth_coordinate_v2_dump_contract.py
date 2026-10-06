@@ -196,16 +196,22 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "contract_tag_bits": tag,
             "camera_center_integrity_bits": 0,
             "renderer_authorization_bits": tag,
-            "joint_plane_mode_bits": 0,
+            "joint_plane_mode_bits": 3,
             "mapping_state_reserved_2": 0,
         }
         for descriptor in manifest["shadow_state"]["fields"][12:]:
             values[descriptor["name"]] = (0.0 if descriptor["gpu_encoding"] == "float" else 0)
+        values.update({
+            "gain_last_observation_low": 1000001, "gain_clock_armed": 1,
+            "gain_seed_count": 1, "gain_target_zero": values["center"],
+            "gain_target_inverse_scale": values["inverse_scale"],
+            "gain_target_nearest": raw_scale,
+            "gain_display_limit": dump_contract._float32(defaults.direct_container_limit),
+            "gain_seed_first_low": 1000001, "gain_seed_last_low": 1000001,
+            "gain_seed_mean_nearest": raw_scale, "gain_seed_mean_zero": values["center"],
+        })
         values["camera_center_integrity_bits"] = (
-            dump_contract.camera_center_integrity_bits(
-                values["center"], values["inverse_scale"],
-                values["convergence_curve"],
-                values["calibration_revision"]))
+            dump_contract.camera_center_integrity_for_state_values(values))
         fields = []
         for descriptor in manifest["shadow_state"]["fields"]:
             name = descriptor["name"]
@@ -230,8 +236,6 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         constants = {
             "raw_coordinate_scale": raw_scale,
             "collapse_abs_epsilon": defaults.collapse_abs_epsilon,
-            "far_tau": defaults.far_tau,
-            "near_log_tau": defaults.near_log_tau,
             "gain_per_pop": defaults.gain_per_pop,
             "reference_pop_strength": defaults.reference_pop_strength,
             "reference_gain_at_reference_pop":
@@ -257,14 +261,14 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "experimental diagnostic shadow; not selected by the renderer or client",
             "units": {
                 "coordinate": "dimensionless canonical coordinate derived from raw depth",
-                "gain": "one-eye source-U per curve unit",
+                "gain": "one-eye source-U per coordinate unit",
                 "parallax": "signed one-eye source-U",
             },
             "constants": constants,
             "fields": fields,
             "named_values": values,
             "decoded": {
-                "joint_plane_mode": 0,
+                "joint_plane_mode": 3,
                 "frame_valid": True,
                 "camera_valid": True,
                 "calibration_revision": values["calibration_revision"],
@@ -280,21 +284,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                     values["camera_center_integrity_bits"],
                 "renderer_authorization_bits": values["renderer_authorization_bits"],
             },
-            "adaptation_semantics": {
-                "coordinate": (
-                    "immediate-first-usable-center-latched-until-cut-fixed-"
-                    "authenticated-scale-retained-across-unusable"
-                ),
-                "convergence_curve":
-                    "arithmetic-mean-center-is-zero-plane",
-                "requested_gain": "immutable-cfg-pop-strength",
-                "container_scale":
-                    "abi-retained-identity-pointwise-soft-container-is-map-local",
-                "near_curve":
-                    "fixed-contract-logarithmic-tau-independent-of-content-occupancy",
-                "spatial_conditioner":
-                    "fixed-75pct-vertical-majorant-share-then-horizontal-majorant",
-            },
+            "adaptation_semantics": dump_contract.adaptation_semantics_for_mode(3),
         }
         self.live_state = copy.deepcopy(self.state)
         self.live_state["rendered_output_selected"] = True
@@ -302,7 +292,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "authenticated live Host-SBS renderer input; not a client wire contract")
         self.live_state["units"] = {
             "coordinate": "dimensionless canonical coordinate derived from raw depth",
-            "gain": "one-eye full-source-U per curve unit",
+            "gain": "one-eye full-source-U per coordinate unit",
             "parallax": "signed one-eye full-source-U",
         }
         stats = {
@@ -314,10 +304,10 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "texel_count": float(texel_count),
             "valid": 1.0,
             "reserved": 0.0,
-            "percentile_low": 0.0,
-            "percentile_high": 0.0,
-            "percentile_valid": 0.0,
-            "percentile_bin_width": 0.0,
+            "percentile_low": 1.1,
+            "percentile_high": 2.9,
+            "percentile_valid": 1.0,
+            "percentile_bin_width": 2.0 / 2048.0,
         }
         self.frame_stats = {
             "schema": dump_contract.SHADOW_FRAME_STATS_DUMP_SCHEMA,
@@ -352,6 +342,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "capture_status": "complete",
             "published_atomically": True,
             "matched_frame_id": 41,
+            "matched_observation_timestamp_us": 1000001,
             "color_mode": "srgb",
             "float_previews": {
                 "packaged": False,
@@ -734,7 +725,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 dump_contract.validate_v2_dump_manifest_document(changed)
 
     def test_current_subtitle_record_and_state_abi_partition_exact_word_counts(self):
-        self.assertEqual(dump_contract.DUMP_MANIFEST_SCHEMA, 41)
+        self.assertEqual(dump_contract.DUMP_MANIFEST_SCHEMA, 44)
         self.assertEqual(dump_contract.DEPTH_INPUT_REGION_SCHEMA, 4)
         self.assertEqual(dump_contract.SUBTITLE_OCR_RECORD_SCHEMA, 3)
         self.assertEqual(dump_contract.SHADOW_STATE_DUMP_SCHEMA, 18)
@@ -769,11 +760,12 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             dump_contract.SUBTITLE_LOCATOR_STATE_WORD_COUNT,
             dump_contract.SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET + rectangle_words + 16)
         self.assertEqual(dump_contract.SUBTITLE_LOCATOR_STATE_WORD_COUNT, 96)
-        self.assertEqual(self._valid_slr13_state_words()[80:96], [0] * 16)
+        self.assertEqual(self._valid_slr13_state_words()[80], 1)
+        self.assertEqual(self._valid_slr13_state_words()[83], self._valid_slr13_state_words()[18])
         self.assertEqual(
             struct.pack("<I", dump_contract.SUBTITLE_LOCATOR_STATE_TAG), b"SL14")
 
-    def test_schema41_accepts_exact_single_high_grid_and_rejects_split_or_arbitrary_high(self):
+    def test_schema44_accepts_exact_single_high_grid_and_rejects_split_or_arbitrary_high(self):
         high = copy.deepcopy(self.manifest)
         self._set_manifest_capture_grid(high, 1540, 868)
         high["composite_runtime_provenance"] = self._composite_runtime_provenance()
@@ -1148,55 +1140,18 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         self.assertEqual(
             manifest["subtitle_conditioning"]["resolver"]["target_policy"],
             {
-                "units": "binocular-source-pixels",
-                "placement": {
-                    "primary": "aggregate-owner-median-member-center",
-                    "fallback_on_primary_failure": True,
-                    "fallback_span": (
-                        "ordinary-core-horizontal-bounds-else-owner-core-horizontal-bounds"),
-                    "fallback_top": "ordinary-core-top-else-owner-core-top",
-                    "fallback_step_denominator": 16,
-                    "fallback_max_radius_steps": 2,
-                    "fallback_order_within_radius": ["negative", "positive"],
-                    "fallback_radius_policy": "first-reliable-radius",
-                    "fallback_requires_unclamped_sample_strip": True,
-                    "fallback_minimum_coherent_rows": 2,
-                    "fallback_row_median_delta_max": 4.0,
-                    "fallback_probe_target": "mean-medians",
-                    "fallback_pair_target_delta_max": 4.0,
-                    "fallback_pair_conflict": "unreliable-stop-search",
-                    "fallback_within_radius_policy": "maximum-mean-within-delta",
-                    "ribbon_places_fallback_with_ordinary": False,
-                },
-                "selection": {
-                    "applies_to": "primary",
-                    "samples_per_row": 16,
-                    "median_indices": [7, 8],
-                    "iqr_lower_indices": [3, 4],
-                    "iqr_upper_indices": [11, 12],
-                    "row_validity": "independent-finite-direct-container",
-                    "both_valid_row_iqr": "ignored",
-                    "single_valid_row": "median-if-iqr-at-most-row-iqr-max",
-                    "both_valid_within_delta": "mean-medians",
-                    "both_valid_beyond_delta": "maximum-median",
-                },
-                "evidence": {
-                    "row_iqr_max": 8.0,
-                    "row_median_delta_max": 4.0,
-                },
-                "deadband": 1.0,
-                "ema_alpha": 0.125,
-                "maximum_slew": 0.25,
-                "maximum_residual": 8.0,
-                "unreliable_hold": {
-                    "owner_state_word": 25,
-                    "maximum_distinct_observations": 2,
-                    "increment_requires": (
-                        "continuing-same-scene-owner-current-authority-valid-target"),
-                    "preserve_without_current_authority": True,
-                    "duplicate_observation_ages": False,
-                    "hard_cut_allowed": False,
-                },
+                "units": "one-eye-analysis-source-U",
+                "selection": "authenticated-current-cover-conflict-histogram",
+                "candidate_step_per_eye_source_pixels": 4,
+                "clearance_per_eye_source_pixels": 2,
+                "approach_dwell_us": 100000,
+                "retreat_dwell_us": 1500000,
+                "approach_rate_source_u_per_second": dump_contract._float32(0.03),
+                "retreat_rate_source_u_per_second": dump_contract._float32(0.005),
+                "rate_tick_cap_us": 250000,
+                "current_cover_pin": "immediate-full-plane",
+                "collar": "existing-horizontal-plus-vertical-analytic-distance",
+                "owner_hold_word": "reserved-zero",
                 "representation_limit": "direct-parallax-container",
             })
         self.assertEqual(
@@ -1219,8 +1174,8 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "enabled request"),
             "target-policy": (
                 lambda manifest: manifest["subtitle_conditioning"]["resolver"][
-                    "target_policy"]["evidence"].update(
-                        {"row_median_delta_max": 3.999}),
+                    "target_policy"].update(
+                        {"approach_dwell_us": 99999}),
                 "resolver provenance"),
             "qualification-policy": (
                 lambda manifest: manifest["subtitle_conditioning"]["resolver"][
@@ -1449,6 +1404,10 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         current_offset = dump_contract.SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET
         locator[owner_offset:owner_offset + 4] = core[:4]
         locator[current_offset:current_offset + 4] = cover[:4]
+        locator[24] = 2
+        limit_bits = struct.unpack("<I", struct.pack("<f", 0.04))[0]
+        locator[80:96] = [1, 8, 1, target_bits, 1000001, 0, 0, 0, 0, 0,
+                          0, 0, limit_bits, 144 * 16, 0, 0]
         decoded_locator = dump_contract.validate_subtitle_locator_state(
             self._pack_uint32_words(locator),
             matched_frame_id=41,
@@ -1559,6 +1518,10 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             current = dump_contract.SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET
             words[owner:owner + 4] = [100, 417, 900, core_bottom]
             words[current:current + 4] = [0, 413, field_width, field_height]
+            words[24] = 2
+            limit_bits = struct.unpack("<I", struct.pack("<f", 0.04))[0]
+            words[80:96] = [1, 8, 1, target_bits, 1000001, 0, 0, 0, 0, 0,
+                            0, 0, limit_bits, field_width * (field_height - 413), 0, 0]
             return words
 
         locator_arguments = {
@@ -1578,7 +1541,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         pending = [342, 368, 415, 386]
         cover = [337, 364, 420, 390]
         target_bits = struct.unpack("<I", struct.pack("<f", 2.0 / (2.0 * 1920.0)))[0]
-        provisional_bits = struct.unpack("<I", struct.pack("<f", 6.0 / (2.0 * 1920.0)))[0]
+        provisional_bits = target_bits
         words = [0] * dump_contract.SUBTITLE_LOCATOR_STATE_WORD_COUNT
         words[:32] = [
             dump_contract.SUBTITLE_LOCATOR_STATE_SCHEMA,
@@ -1599,6 +1562,9 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
               dump_contract.SUBTITLE_LOCATOR_PENDING_WORD_OFFSET + 4] = pending
         words[dump_contract.SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET:
               dump_contract.SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET + 4] = cover
+        limit_bits = struct.unpack("<I", struct.pack("<f", 0.04))[0]
+        words[80:96] = [1, 8, 1, target_bits, 1000001, 0, 0, 0, 0, 0,
+                        0, 0, limit_bits, (cover[2] - cover[0]) * (cover[3] - cover[1]), 0, 0]
         arguments = {
             "matched_frame_id": 41, "analysis_generation": 17,
             "source_width": 1920, "source_height": 1080,
@@ -1715,7 +1681,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             1,
             dump_contract.SUBTITLE_LOCATOR_EVENT_BIRTH,
             41, 0,
-            1,
+            2,
             0,
             3,
             770,
@@ -1729,6 +1695,9 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         current = dump_contract.SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET
         words[owner:owner + 4] = rectangle
         words[current:current + 4] = rectangle
+        limit_bits = struct.unpack("<I", struct.pack("<f", 0.04))[0]
+        words[80:96] = [1, 8, 1, target_bits, 1000001, 0, 0, 0, 0, 0,
+                        0, 0, limit_bits, 530 * 51, 0, 0]
         return words
 
     def test_current_slr13_state_validates_identity_rectangles_and_target(self):
@@ -1814,55 +1783,23 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "left": 120, "top": 350, "right": 650, "bottom": 401,
         })
 
-        held = self._valid_slr13_state_words()
-        held[25] = coordinate.SUBTITLE_OCR.locator_target_max_unreliable_holds
-        held[21] = dump_contract.SUBTITLE_LOCATOR_EVENT_NONE
-        decoded = dump_contract.validate_subtitle_locator_state(
-            self._pack_uint32_words(held),
-            matched_frame_id=41, analysis_generation=17,
-            source_width=1920, source_height=1080,
-            field_width=770, field_height=434)
-        self.assertEqual(
-            decoded["unreliable_target_holds"],
-            coordinate.SUBTITLE_OCR.locator_target_max_unreliable_holds)
-        self.assertEqual(decoded["target_grace"], 0)
-
-        # A missing current OCR authority frame preserves an existing hold counter and target but
-        # cannot age or condition with them. The serialized state therefore has no current cover.
-        held_without_current = held.copy()
-        held_without_current[20] = 0
-        current = dump_contract.SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET
-        held_without_current[current:current + 4] = [0, 0, 0, 0]
-        held_without_current[31] &= ~(
-            dump_contract.SUBTITLE_LOCATOR_KIND_MASK <<
-            dump_contract.SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT)
-        decoded = dump_contract.validate_subtitle_locator_state(
-            self._pack_uint32_words(held_without_current),
-            matched_frame_id=41, analysis_generation=17,
-            source_width=1920, source_height=1080,
-            field_width=770, field_height=434)
-        self.assertEqual(decoded["current_count"], 0)
-        self.assertEqual(
-            decoded["unreliable_target_holds"],
-            coordinate.SUBTITLE_OCR.locator_target_max_unreliable_holds)
-
-        too_many_holds = held.copy()
-        too_many_holds[25] += 1
-        with self.assertRaisesRegex(ValueError, "unreliable-target hold"):
-            dump_contract.validate_subtitle_locator_state(
-                self._pack_uint32_words(too_many_holds),
-                matched_frame_id=41, analysis_generation=17,
-                source_width=1920, source_height=1080,
-                field_width=770, field_height=434)
-
-        held_with_event = held.copy()
-        held_with_event[21] = dump_contract.SUBTITLE_LOCATOR_EVENT_BIRTH
-        with self.assertRaisesRegex(ValueError, "unreliable-target hold"):
-            dump_contract.validate_subtitle_locator_state(
-                self._pack_uint32_words(held_with_event),
-                matched_frame_id=41, analysis_generation=17,
-                source_width=1920, source_height=1080,
-                field_width=770, field_height=434)
+        # Local support/hold counters were retired. An owned adaptive plane cannot carry one,
+        # even while its current cover is temporarily absent.
+        for current_count in (0, 1):
+            held = self._valid_slr13_state_words()
+            held[25] = 1
+            held[21] = dump_contract.SUBTITLE_LOCATOR_EVENT_NONE
+            if current_count == 0:
+                held[20] = 0
+                current = dump_contract.SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET
+                held[current:current + 4] = [0, 0, 0, 0]
+            with self.subTest(current_count=current_count), self.assertRaisesRegex(
+                    ValueError, "owned hold word"):
+                dump_contract.validate_subtitle_locator_state(
+                    self._pack_uint32_words(held),
+                    matched_frame_id=41, analysis_generation=17,
+                    source_width=1920, source_height=1080,
+                    field_width=770, field_height=434)
 
         for cached in (-0.0401, 0.0401):
             invalid_grace = grace.copy()
@@ -1878,7 +1815,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                     field_width=770,
                     field_height=434)
 
-    def test_slr13_target_accepts_signed_local_planes_within_direct_container(self):
+    def test_slr14_target_accepts_only_nonnegative_adaptive_planes_within_direct_container(self):
         import numpy as np
 
         locator_arguments = {
@@ -1889,12 +1826,12 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "field_width": 770,
             "field_height": 434,
         }
-        permitted = (-0.03, -0.0005, 0.0, 0.0005, 0.03)
+        permitted = (0.0, 0.0005, 0.03)
         for target in permitted:
             target_bits = int(np.asarray(target, dtype=np.float32).view(np.uint32))
             with self.subTest(target=target, state="live"):
                 live = self._valid_slr13_state_words()
-                live[18] = target_bits
+                live[18] = live[83] = target_bits
                 decoded = dump_contract.validate_subtitle_locator_state(
                     self._pack_uint32_words(live), **locator_arguments)
                 self.assertEqual(decoded["target_bits"], target_bits)
@@ -1930,13 +1867,13 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
 
         rejected_bits = int(np.asarray(0.0401, dtype=np.float32).view(np.uint32))
         rejected = self._valid_slr13_state_words()
-        rejected[18] = rejected_bits
-        with self.assertRaisesRegex(ValueError, "representation"):
+        rejected[18] = rejected[83] = rejected_bits
+        with self.assertRaisesRegex(ValueError, "adaptive UI|representation"):
             dump_contract.validate_subtitle_locator_state(
                 self._pack_uint32_words(rejected), **locator_arguments)
 
         base = np.full((434, 770), np.float32(0.02), dtype=np.float32)
-        subtitle = {
+        subtitle = {"joint_plane_mode": 3,
             "current_rectangles": [{
                 "left": 120, "top": 350, "right": 650, "bottom": 401,
             }],
@@ -1995,6 +1932,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                         source_width=1920, source_height=1080, field_width=770, field_height=434,
                         joint_plane_mode=3)
         changed = self._valid_slr13_state_words()
+        changed[80:96] = [0] * 16
         changed[95] = 1
         with self.assertRaisesRegex(ValueError, "inactive adaptive UI tail"):
             dump_contract.validate_subtitle_locator_state(
@@ -2065,7 +2003,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
 
     def test_production_ui_state_cannot_inherit_an_adaptive_tail(self):
         words = self._valid_adaptive_ui_state_words()
-        with self.assertRaisesRegex(ValueError, "inactive adaptive UI tail"):
+        with self.assertRaisesRegex(ValueError, "invalid joint plane mode"):
             dump_contract._validate_adaptive_ui_tail(
                 tuple(words), 1920, (0, 0, 770, 434), joint_plane_mode=0)
 
@@ -2085,10 +2023,10 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         self.assertLessEqual(float(np.max(np.abs(np.diff(final, axis=1)))), 0.5 / width + 2e-7)
         self.assertLessEqual(float(np.max(np.abs(np.diff(final, axis=0)))), 2.0 / width + 2e-7)
         self.assertTrue(np.array_equal(final[:100].view(np.uint32), base[:100].view(np.uint32)))
-        empty = {**subtitle, "current_rectangles": []}
+        empty = {"joint_plane_mode": 3, **subtitle, "current_rectangles": []}
         self.assertTrue(np.array_equal(
             dump_contract._replay_slr13_conditioner(base, empty).view(np.uint32), base.view(np.uint32)))
-        with self.assertRaisesRegex(ValueError, "full geometric pin"):
+        with self.assertRaisesRegex(ValueError, "valid target/fade authority"):
             dump_contract._replay_slr13_conditioner(base, {**subtitle, "fade": 1})
         # Exact pin also canonicalizes a signed-zero Base cell to the shared plane bits.
         base[360, 300] = np.float32(-0.0)
@@ -2192,29 +2130,29 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "field coordinates"),
             "nan-target": (
                 lambda words: words.__setitem__(18, 0x7FC00000),
-                "valid target"),
+                "adaptive UI target"),
             "target-below-direct-container": (
                 lambda words: words.__setitem__(
                     18, struct.unpack("<I", struct.pack("<f", -0.0401))[0]),
-                "representation"),
+                "adaptive UI target"),
             "target-above-direct-container": (
                 lambda words: words.__setitem__(
                     18, struct.unpack("<I", struct.pack("<f", 0.0401))[0]),
-                "representation"),
+                "adaptive UI target"),
             "zero-fade-with-current": (
                 lambda words: words.__setitem__(24, 0),
-                "current rectangles require"),
+                "adaptive UI target or full pin"),
             "unknown-fade": (
                 lambda words: words.__setitem__(24, 3),
-                "fade step"),
+                "adaptive UI target or full pin"),
             "event": (lambda words: words.__setitem__(21, 4), "unknown last event"),
             "target-reset-stale-target": (
                 make_target_reset_with_stale_target,
                 "target reset must clear"),
             "owner-hold-above-contract-limit": (
                 lambda words: words.__setitem__(
-                    25, coordinate.SUBTITLE_OCR.locator_target_max_unreliable_holds + 1),
-                "unreliable-target hold"),
+                    25, 1),
+                "owned hold word"),
             "invalid-grace-bounds": (
                 make_invalid_grace,
                 "death-grace target or packed bounds"),
@@ -2495,7 +2433,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         locator[20] = 1
         locator[21] = dump_contract.SUBTITLE_LOCATOR_EVENT_BIRTH
         locator[22] = self.manifest["matched_frame_id"]
-        locator[24] = 1
+        locator[24] = 2
         locator[26] = 3
         locator[27] = field_width
         locator[28] = field_height
@@ -2504,9 +2442,12 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             coordinate.SUBTITLE_OCR.condition_param_tag,
             1,
             0,
-            1,
+            2,
             target_bits,
         ]
+        limit_bits = struct.unpack("<I", struct.pack("<f", 0.04))[0]
+        locator[80:96] = [1, 8, 5, target_bits, 1000001, 0, 0, 0, 0, 0,
+                          0, 0, limit_bits, 0, 0, 0]
         flags = (dump_contract.GPU_TRACE_FLAG_OCR_RECORD_SUBMITTED |
                  dump_contract.GPU_TRACE_FLAG_CONDITION_EXECUTED)
         if parsed["input_domain_reset"]:
@@ -2544,7 +2485,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         offsets = dump_contract.GPU_TRACE_RECORD_OFFSETS
         record[offsets["subtitle_locator_begin"]:offsets["subtitle_condition_begin"]] = locator
         record[offsets["subtitle_condition_begin"]:offsets["observation_timestamp_low"]] = condition
-        observation_timestamp_us = 1_000_000 + self.manifest["matched_frame_id"]
+        observation_timestamp_us = self.manifest["matched_observation_timestamp_us"]
         record[offsets["observation_timestamp_low"]] = observation_timestamp_us & 0xFFFFFFFF
         record[offsets["observation_timestamp_high"]] = observation_timestamp_us >> 32
         ring = [0] * dump_contract.GPU_TRACE_RING_WORD_COUNT
@@ -2762,7 +2703,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         return manifest
 
     def _activate_synthetic_slr13_current_dump(
-            self, root, manifest, fields, *, fade=1):
+            self, root, manifest, fields, *, fade=2):
         manifest = self._activate_synthetic_slr13_dump(root, manifest, fields)
         ocr = self._valid_ocr_record_words()
         ocr[7] = 0
@@ -2782,7 +2723,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "left": 120, "top": 350, "right": 650, "bottom": 401,
         }
         target = struct.unpack("<f", struct.pack("<I", locator[18]))[0]
-        subtitle = {
+        subtitle = {"joint_plane_mode": 3,
             "current_rectangles": [rectangle],
             "source_width": 1920,
             "field_width": 770,
@@ -3076,7 +3017,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         roi_state = copy.deepcopy(self.live_state)
         roi_state["units"] = {
             "coordinate": "dimensionless canonical coordinate derived from raw depth",
-            "gain": "one-eye ROI-local source-U per curve unit",
+            "gain": "one-eye ROI-local source-U per coordinate unit",
             "parallax": (
                 "signed one-eye ROI-local source-U; full-source renderer authority "
                 "additionally requires depth_input_region embedding"),
@@ -3367,6 +3308,102 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "shadow_base_final_parallax",
                 summary["chain_fields_verified"])
 
+    def test_schema44_requires_an_independent_positive_publication_clock(self):
+        for timestamp in (None, 0, -1, True, 1.0, 1 << 64):
+            changed = copy.deepcopy(self.manifest)
+            if timestamp is None:
+                changed.pop("matched_observation_timestamp_us")
+            else:
+                changed["matched_observation_timestamp_us"] = timestamp
+            with self.subTest(timestamp=timestamp), self.assertRaisesRegex(
+                    ValueError, "observation timestamp|publication timestamp"):
+                dump_contract.validate_v2_dump_manifest_document(changed)
+
+    def test_geometry_verifier_stale_ui_geometry_holds_owner_plane_and_requires_exact_base(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest, fields = self._write_synthetic_geometry_dump(root, width=770, height=434)
+            manifest, _, locator, _ = self._activate_synthetic_slr13_current_dump(
+                root, manifest, fields)
+            first = dump_contract.verify_v2_dump_geometry(root)["subtitle_conditioning"]
+            self.assertTrue(first["geometry_ready"])
+            plane = locator[18]
+            goal = locator[82]
+
+            # The complete old geometry remains sealed, but cannot lend its clock to a newer
+            # source publication. The subtitle owner survives with frozen plane/goal.
+            manifest["matched_observation_timestamp_us"] = 2000001
+            (root / "dump_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "unavailable geometry must disarm"):
+                dump_contract.verify_v2_dump_geometry(root)
+            locator[81] &= ~11
+            locator[84:92] = [0] * 8
+            self._write_hashed_payload(root, manifest, "subtitle_locator_state.u32",
+                                       self._pack_uint32_words(locator))
+            (root / "dump_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "no authorized current geometry"):
+                dump_contract.verify_v2_dump_geometry(root)
+            self._write_hashed_payload(root, manifest, "shadow_final_parallax.f32",
+                                       fields["shadow_final_parallax"].astype("<f4").tobytes())
+            (root / "dump_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+            held = dump_contract.verify_v2_dump_geometry(root)["subtitle_conditioning"]
+            self.assertFalse(held["geometry_ready"])
+            self.assertEqual(held["current_count"], 1)
+            self.assertEqual(locator[18], plane)
+            self.assertEqual(locator[82], goal)
+            self.assertEqual(held["geometry_publication_timestamp_us"], 2000001)
+
+    def test_matched_ui_authority_collapsed_depth_keeps_ocr_owner_but_cannot_pin_flat_base(self):
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest, fields = self._write_synthetic_geometry_dump(root, width=770, height=434)
+            manifest, _, locator, _ = self._activate_synthetic_slr13_current_dump(
+                root, manifest, fields)
+            state = copy.deepcopy(self.live_state)
+            for name, value in (("frame_valid", 0.0), ("gain_clock_armed", 0),
+                                ("gain_target_zero", 0.0), ("gain_target_inverse_scale", 0.0),
+                                ("gain_target_nearest", 0.0)):
+                self._set_state_word(state, name, value)
+            state["decoded"].update(frame_valid=False, effective_gain=0.0)
+            self._seal_camera_center(state)
+            self._write_hashed_payload(root, manifest, "shadow_state.json",
+                                       json.dumps(state).encode("utf-8"))
+            manifest["parallax_v2_shadow"]["state"].update(state["decoded"])
+            stats = copy.deepcopy(self.frame_stats)
+            stats["named_values"].update(mean=2.0, population_std=0.0, minimum=2.0,
+                                         maximum=2.0, percentile_low=2.0, percentile_high=2.0,
+                                         percentile_bin_width=0.0)
+            self._write_hashed_payload(root, manifest, "shadow_frame_stats.json",
+                                       json.dumps(stats).encode("utf-8"))
+            locator[81] &= ~11
+            locator[84:92] = [0] * 8
+            self._write_hashed_payload(root, manifest, "subtitle_locator_state.u32",
+                                       self._pack_uint32_words(locator))
+            flat = np.zeros((434, 770), dtype="<f4")
+            for name in (*fields, "shadow_base_final_parallax"):
+                self._write_hashed_payload(root, manifest, f"{name}.f32", flat.tobytes())
+            (root / "dump_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+            # Current native dump packages deliberately require a usable renderer frame. Verify
+            # the full-state UI leaf for a collapsed publication without relaxing that package gate.
+            with self.assertRaisesRegex(ValueError, "invalid V2 state summary"):
+                dump_contract.validate_v2_dump_manifest_document(manifest)
+            state_values = dump_contract.validate_shadow_state_document(state)
+            summary = dump_contract._verify_subtitle_conditioning_artifacts(
+                root, manifest, matched_frame_id=41, analysis_generation=0,
+                source_width=1920, source_height=1080, field_width=770, field_height=434,
+                tensor_content=(0, 0, 770, 434), confirmed_cut_count=3,
+                gpu_trace={"available": False}, joint_plane_mode=3,
+                requested_gain=state["constants"]["requested_gain"], shadow_state=state_values)
+            replay = dump_contract._replay_slr13_conditioner(flat, summary)
+            self.assertTrue(np.array_equal(replay.view(np.uint32), flat.view(np.uint32)))
+            self.assertFalse(summary["geometry_ready"])
+            self.assertEqual(summary["owner_count"], 1)
+            self.assertEqual(summary["current_count"], 1)
+            self.assertEqual(locator[18], locator[83])
+            self.assertGreater(summary["target"], 0.0)
+
     def test_geometry_verifier_rejects_slr13_scene_epoch_not_bound_to_shadow_state(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -3467,7 +3504,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "not the exact content-clamped Base"):
                 dump_contract.verify_v2_dump_geometry(root)
 
-    def test_geometry_verifier_replays_nonempty_slr13_rectangle_fade_and_ocr_binding(self):
+    def test_geometry_verifier_replays_full_plane_pin_and_rejects_half_fade_and_wrong_ocr(self):
         import numpy as np
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -3478,7 +3515,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 height=434)
             manifest, fade_one, locator, ocr = (
                 self._activate_synthetic_slr13_current_dump(
-                    root, manifest, fields, fade=1))
+                    root, manifest, fields, fade=2))
 
             summary = dump_contract.verify_v2_dump_geometry(root)
             self.assertEqual(summary["subtitle_conditioning"]["current_count"], 1)
@@ -3487,12 +3524,19 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             self.assertTrue(np.any(
                 fade_one[350:401, 120:650] != base[350:401, 120:650]))
 
+            locator[24] = 1
+            self._write_hashed_payload(
+                root, manifest, "subtitle_locator_state.u32",
+                self._pack_uint32_words(locator))
+            (root / "dump_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "full pin|full-plane pin"):
+                dump_contract.verify_v2_dump_geometry(root)
             locator[24] = 2
             self._write_hashed_payload(
                 root, manifest, "subtitle_locator_state.u32",
                 self._pack_uint32_words(locator))
             target = struct.unpack("<f", struct.pack("<I", locator[18]))[0]
-            fade_two = dump_contract._replay_slr13_conditioner(base, {
+            fade_two = dump_contract._replay_slr13_conditioner(base, {"joint_plane_mode": 3,
                 "current_rectangles": [{
                     "left": 120, "top": 350, "right": 650, "bottom": 401,
                 }],
@@ -3509,7 +3553,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 json.dumps(manifest), encoding="utf-8")
             summary = dump_contract.verify_v2_dump_geometry(root)
             self.assertEqual(summary["subtitle_conditioning"]["fade"], 2)
-            self.assertTrue(np.any(fade_two != fade_one))
+            self.assertTrue(np.array_equal(fade_two.view(np.uint32), fade_one.view(np.uint32)))
 
             tampered = fade_two.copy()
             tampered[360, 200] = np.nextafter(
@@ -3546,7 +3590,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         self.assertEqual(exact_bits, {0x39FFFFFF, 0x3A000000, 0x3A000001})
 
         exact_base = np.full((434, 770), np.float32(0.02), dtype=np.float32)
-        exact_subtitle = {
+        exact_subtitle = {"joint_plane_mode": 3,
             "current_rectangles": [{
                 "left": 210, "top": 393, "right": 561, "bottom": 430,
             }],
@@ -3561,7 +3605,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             for replay in dump_contract._replay_slr13_conditioner_sm5_candidates(
                 exact_base, exact_subtitle)
         }
-        self.assertEqual(exact_replay_bits, exact_bits)
+        self.assertEqual(exact_replay_bits, {0})
 
         candidates = dump_contract._sm5_power_of_two_division_candidates(0.5, 1101)
         candidate_bits = {
@@ -3572,7 +3616,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
 
         target = np.asarray([0x39FA3F70], dtype=np.uint32).view(np.float32)[0]
         base = np.full((434, 770), np.float32(0.02), dtype=np.float32)
-        subtitle = {
+        subtitle = {"joint_plane_mode": 3,
             "current_rectangles": [{
                 "left": 210, "top": 393, "right": 561, "bottom": 430,
             }],
@@ -3589,7 +3633,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         }
         # 0x3A742C0A is the production NVIDIA field bit from the supplied ROI dump;
         # 0x3A742C0B is the correctly rounded WARP/NumPy alternative.
-        self.assertEqual(replay_bits, {0x3A742C0A, 0x3A742C0B})
+        self.assertEqual(replay_bits, {int(target.view(np.uint32))})
 
     def test_slr13_replay_uses_content_width_and_boundary_extends_padding(self):
         import numpy as np
@@ -3597,7 +3641,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         content = (100, 10, 670, 424)
         base = np.full((434, 770), np.float32(-0.02), dtype=np.float32)
         base[content[1]:content[3], content[0]:content[2]] = np.float32(0.03)
-        subtitle = {
+        subtitle = {"joint_plane_mode": 3,
             "current_rectangles": [{
                 "left": 300, "top": 200, "right": 400, "bottom": 250,
             }],
@@ -3612,8 +3656,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         horizontal_step = np.float32(
             np.float32(coordinate.CALIBRATED_DEFAULTS.max_horizontal_slope) /
             np.float32(content[2] - content[0]))
-        core_range = np.float32(np.float32(0.5) / np.float32(1000))
-        expected_one_cell = np.add(core_range, horizontal_step, dtype=np.float32)
+        expected_one_cell = horizontal_step
         self.assertEqual(replay[220, 299], expected_one_cell)
 
         # Synthetic tensor padding is never conditioned from its own model value. It repeats the
@@ -3645,11 +3688,11 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         geometry = {
             "left": 120, "top": 350, "right": 650, "bottom": 401,
         }
-        ribbon = dump_contract._replay_slr13_conditioner(base, {
+        ribbon = dump_contract._replay_slr13_conditioner(base, {"joint_plane_mode": 3,
             **common,
             "current_rectangles": [{**geometry, "kind": "ribbon", "ribbon": True}],
         })
-        ordinary = dump_contract._replay_slr13_conditioner(base, {
+        ordinary = dump_contract._replay_slr13_conditioner(base, {"joint_plane_mode": 3,
             **common,
             "current_rectangles": [{**geometry, "kind": "text", "ribbon": False}],
         })
@@ -4180,7 +4223,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         oldest_locator = oldest_base + dump_contract.GPU_TRACE_RECORD_OFFSETS[
             "subtitle_locator_begin"]
         words[oldest_locator + 22] = 40
-        words[oldest_base + 190] = 1_000_040
+        words[oldest_base + 190] = 1_000_000
         words[oldest_base + 191] = 0
         words[4:8] = [3, 0, 1, 2]
         self._set_gpu_trace_reuse(
@@ -4414,15 +4457,17 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 field_width=16, field_height=12,
                 expected_domain_tag=domain_tag, input_domain_reset=False)
 
+        # The history record has no geometry state, so zero verdict can accompany valid OCR
+        # coverage. The matched dump verifier binds the complete current geometry separately.
         missing_active = words.copy()
         missing_active[condition:condition + dump_contract.GPU_TRACE_CONDITION_WORD_COUNT] = [0] * 6
-        with self.assertRaisesRegex(ValueError, "condition params disagree"):
-            dump_contract.validate_gpu_trace_ring(
-                struct.pack(f"<{len(missing_active)}I", *missing_active),
-                matched_frame_id=41, analysis_generation=0,
-                source_width=1920, source_height=1080,
-                field_width=16, field_height=12,
-                expected_domain_tag=domain_tag, input_domain_reset=False)
+        decoded = dump_contract.validate_gpu_trace_ring(
+            struct.pack(f"<{len(missing_active)}I", *missing_active),
+            matched_frame_id=41, analysis_generation=0,
+            source_width=1920, source_height=1080,
+            field_width=16, field_height=12,
+            expected_domain_tag=domain_tag, input_domain_reset=False)
+        self.assertFalse(decoded["decoded"]["records"][0]["subtitle_condition"]["valid"])
 
     def test_gpu_trace_provisional_condition_uses_ephemeral_tuple(self):
         input_region = copy.deepcopy(self.depth_input_region)
@@ -4669,12 +4714,12 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         variants = (
             {
                 "coordinate": "dimensionless canonical coordinate derived from raw depth",
-                "gain": "one-eye full-source-U per curve unit",
+                "gain": "one-eye full-source-U per coordinate unit",
                 "parallax": "signed one-eye full-source-U",
             },
             {
                 "coordinate": "dimensionless canonical coordinate derived from raw depth",
-                "gain": "one-eye ROI-local source-U per curve unit",
+                "gain": "one-eye ROI-local source-U per coordinate unit",
                 "parallax": (
                     "signed one-eye ROI-local source-U; full-source renderer authority "
                     "additionally requires depth_input_region embedding"),
@@ -4923,8 +4968,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         changed = copy.deepcopy(self.manifest)
         changed["parallax_v2_shadow"]["state"]["latched_scale"] = (
             2.250002145767212)
-        with self.assertRaisesRegex(ValueError, "state summary"):
-            dump_contract.validate_v2_dump_manifest_document(changed)
+        dump_contract.validate_v2_dump_manifest_document(changed)
 
     def test_requested_gain_authentication_uses_the_native_absolute_tolerance(self):
         changed = copy.deepcopy(self.state)
@@ -5086,13 +5130,11 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "container_scale": 1.0,
             "effective_gain": 0.0,
         })
+        for descriptor in coordinate.load_contract()["shadow_state"]["fields"][12:]:
+            self._set_state_word(changed, descriptor["name"],
+                                 0.0 if descriptor["gpu_encoding"] == "float" else 0)
         self._seal_camera_center(changed)
         dump_contract.validate_shadow_state_document(changed)
-
-
-
-
-
 
     def test_invalid_state_preserves_requested_gain_but_effective_is_zero(self):
         changed = copy.deepcopy(self.state)
@@ -5116,6 +5158,10 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         changed["decoded"]["camera_center_integrity_bits"] = (
             replacements["camera_center_integrity_bits"])
         changed["decoded"]["renderer_authorization_bits"] = 0
+        for descriptor in coordinate.load_contract()["shadow_state"]["fields"][12:]:
+            self._set_state_word(changed, descriptor["name"],
+                                 0.0 if descriptor["gpu_encoding"] == "float" else 0)
+        self._seal_camera_center(changed)
         dump_contract.validate_shadow_state_document(changed)
         self.assertEqual(
             changed["decoded"]["requested_gain"], changed["constants"]["requested_gain"])

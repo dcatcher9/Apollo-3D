@@ -33,22 +33,13 @@ import eval_parallel  # noqa: E402
 
 
 class EvalContractTests(unittest.TestCase):
-    def test_joint_plane_setting_is_default_off_and_exact_override_wins(self):
-        with tempfile.TemporaryDirectory() as root:
-            path = os.path.join(root, "sunshine.conf")
-            with open(path, "w", encoding="utf-8") as stream:
-                stream.write("sbs_3d_joint_plane_experiment = enabled\n")
-            self.assertFalse(run_eval.expected_joint_plane_experiment(
-                os.path.join(root, "absent.conf"), []))
-            self.assertTrue(run_eval.expected_joint_plane_experiment(path, []))
-            self.assertFalse(run_eval.expected_joint_plane_experiment(
-                path, ["--joint-plane-experiment", "on",
-                       "--joint-plane-experiment", "off"]))
-            for extra in (["--joint-plane-experiment"],
-                          ["--joint-plane-experiment", "true"],
-                          ["--joint-plane-experiment", "1"]):
-                with self.subTest(extra=extra), self.assertRaisesRegex(ValueError, "on or off"):
-                    run_eval.expected_joint_plane_experiment(path, extra)
+    def test_retired_geometry_selectors_are_rejected_before_launch(self):
+        run_eval.validate_unified_policy_options([])
+        for extra in (["--joint-plane-experiment", "on"],
+                      ["--joint-plane-mode", "3"]):
+            with self.subTest(extra=extra), self.assertRaisesRegex(ValueError, "removed"):
+                run_eval.validate_unified_policy_options(extra)
+
 
     @staticmethod
     def png_bytes(value=64, mode="RGB"):
@@ -2021,7 +2012,7 @@ class EvalContractTests(unittest.TestCase):
                                   "directx")
         for name in ("depth_coordinate_v2_moments_cs.hlsl",
                      "depth_coordinate_v2_frame_resolve_cs.hlsl",
-                     "depth_hist_cs.hlsl",
+                     "depth_coordinate_v2_histogram_cs.hlsl",
                      "buffer_to_tex_cs.hlsl"):
             shader_path = os.path.join(shader_dir, name)
             with self.subTest(shader=name), open(shader_path, encoding="utf-8") as fh:

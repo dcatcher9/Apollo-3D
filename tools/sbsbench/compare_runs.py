@@ -100,7 +100,8 @@ def compatibility_error(control, treatment):
     # These are evidence-contract fields, not treatment levers. Model/config/executable/depth-step
     # differences remain valid A/B dimensions for this textual comparator.
     for key in ("clip_set_sha1", "eval_schema", "suite", "mode", "run_kind",
-                "metric_sha256", "label_contract_sha256", "metric_runtime"):
+                "metric_sha256", "label_contract_sha256", "metric_runtime",
+                "observation_timeline_artifacts"):
         left = control["meta"].get(key)
         right = treatment["meta"].get(key)
         if left != right:

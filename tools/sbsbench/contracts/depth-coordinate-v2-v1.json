@@ -1,5 +1,5 @@
 {
-  "schema": 86,
+  "schema": 87,
   "vector_width": 4,
   "capture_provenance": {
     "schema": 3,
@@ -172,15 +172,6 @@
       "locator_corner_bottom_rows": 16,
       "locator_match_iou_threshold": 0.6,
       "locator_death_grace_observations": 6,
-      "locator_target_horizontal_fallback_max_radius_steps": 2,
-      "locator_target_horizontal_step_denominator": 16,
-      "locator_target_max_row_iqr_binocular_source_pixels": 8.0,
-      "locator_target_max_row_median_delta_binocular_source_pixels": 4.0,
-      "locator_target_max_residual_binocular_source_pixels": 8.0,
-      "locator_target_max_unreliable_holds": 2,
-      "locator_target_deadband_binocular_source_pixels": 1.0,
-      "locator_target_ema_alpha": 0.125,
-      "locator_target_max_slew_binocular_source_pixels": 0.25,
       "ocr_safe_row_top": 24,
       "ocr_safe_row_bottom": 155,
       "source_crop_aspect_width": 6,
@@ -232,7 +223,8 @@
       "schema": 3,
       "tag": 860898131,
       "word_count": 6
-    }
+    },
+    "geometry_authority": "same-observation-sealed-parallax-state-required-for-ui-probe-and-time-advance-v1"
   },
   "final_parallax": {
     "schema": 3,
@@ -264,11 +256,6 @@
       },
       {
         "source_file": "depth_minmax_ema_cs.hlsl",
-        "source_entrypoint": "main",
-        "source_target": "cs_5_0"
-      },
-      {
-        "source_file": "depth_hist_cs.hlsl",
         "source_entrypoint": "main",
         "source_target": "cs_5_0"
       },
@@ -348,12 +335,10 @@
         "source_target": "cs_5_0"
       }
     ],
-    "source_closure_sha256": "25eda2f214c67a3a2eb1fb75428c8d2ee4405c0bdaae720ea1b0994d409e7964"
+    "source_closure_sha256": "24050982be483a52e2a07501ae6166fbf353aa420cf80f47b30b4bafe672de91"
   },
   "calibrated_defaults": {
     "collapse_abs_epsilon": 1e-06,
-    "far_tau": 0.75,
-    "near_log_tau": 0.5,
     "gain_per_pop": 0.00375,
     "reference_pop_strength": 1.0,
     "direct_container_limit": 0.04,
@@ -367,7 +352,8 @@
     "adaptive_max_tick_gap_ms": 250.0,
     "host_percentile_bin_count": 256.0,
     "host_percentile_low": 0.05,
-    "host_percentile_high": 0.95
+    "host_percentile_high": 0.95,
+    "adaptive_policy_id": 3
   },
   "model_calibrations": [
     {
@@ -523,12 +509,12 @@
       },
       {
         "index": 2,
-        "name": "far_tau",
+        "name": "coordinate_reserved0",
         "type": "float32"
       },
       {
         "index": 3,
-        "name": "near_log_tau",
+        "name": "coordinate_reserved1",
         "type": "float32"
       },
       {
@@ -723,7 +709,7 @@
         "name": "camera_center_integrity_bits",
         "type": "uint32",
         "gpu_encoding": "uint_bits",
-        "initial": 0
+        "initial": 120202489
       },
       {
         "index": 9,
@@ -737,7 +723,7 @@
         "name": "joint_plane_mode_bits",
         "type": "uint32",
         "gpu_encoding": "uint_bits",
-        "initial": 0
+        "initial": 3
       },
       {
         "index": 11,

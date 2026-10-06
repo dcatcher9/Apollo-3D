@@ -107,6 +107,7 @@ _validate_metric_runtime(TREAT, "treatment", CURRENT_METRIC_RUNTIME)
 _SAME_CONTEXT = ["clip_set_sha1", "mode", "eval_schema", "depth_step", "suite", "run_kind",
                  "metric_sha256", "label_contract_sha256", "metric_runtime", "executable_sha256",
                  "runtime_shader_sha256"]
+_SAME_CONTEXT.append("observation_timeline_artifacts")
 if not allow_model_diff:
     _SAME_CONTEXT.extend(["model", "engine_sha256", "onnx_sha256"])
 if not allow_config_diff:

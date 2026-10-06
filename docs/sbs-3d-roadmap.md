@@ -26,10 +26,9 @@ detection is not part of Game provider discovery. The geometry and ROI behavior 
 Sunshine's V2 provider.
 
 Host V2 uses an authenticated DAV2 Small backbone with frozen ZipDepth convex-2x reconstruction,
-one high-resolution model input/output and one high-resolution downstream grid. Default mode 0 retains
-a scene-latched raw center and fixed divisor. Opt-in mode 3 continuously observes a Host-relative
-zero and scale, maps depth linearly, and protects current subtitle covers at an adaptive UI plane.
-Both retain literal configured pop, a bounded parallax field, bounded
+one high-resolution model input/output and one high-resolution downstream grid. Its sole pipeline
+continuously observes a Host-relative zero and scale, maps depth linearly, and protects current
+subtitle covers at an adaptive UI plane. It retains literal configured pop, a bounded parallax field, bounded
 vertical and horizontal cliff conditioning, and a unique contractive
 inverse. Invalid or unauthenticated geometry renders flat; there is no older geometry fallback.
 
@@ -59,7 +58,7 @@ owned by [Host SBS scene cuts](host-sbs-scene-cuts.md).
 
 - No geometry endpoint normalization into `[0,1]`, subject stretch/recenter, adaptive pop gain, or
   configurable zero-plane translation. Private normalized depth/range EMA remains cut/history
-  evidence, separate from the opt-in geometry zero/scale controller.
+  evidence, separate from the adaptive geometry zero/scale controller.
 - No damage-driven ROI selection, image-tracked ROI, background-window/tab ROI, or second-inference
   ROI. The foreground window-region route replaces that frame's full analysis with at most one
   causally attributed crop. DDup damage can only retain an independently authorized exact route;
@@ -72,8 +71,8 @@ owned by [Host SBS scene cuts](host-sbs-scene-cuts.md).
 - No timer-forced refresh of a valid near-identical depth/subtitle tuple. Geometry and UI adaptation
   consume genuine observations; authenticated reuse can freeze unfinished adaptation indefinitely.
 
-The extra model, routing and renderer exclusions are architectural boundaries. The opt-in geometry
-policy and its default-promotion requirements are owned by [Host SBS](host-sbs.md#opt-in-joint-plane-live-experiment).
+The extra model, routing and renderer exclusions are architectural boundaries. The sole adaptive
+geometry and subtitle-plane policy is owned by [Host SBS](host-sbs.md#adaptive-geometry-and-subtitle-plane).
 
 ## Known limitations
 
@@ -115,6 +114,11 @@ OCR8 bounded boxes and compact SLR14 owner/pending/current-authority rectangles 
 active field shape. It does not retain the retired row-history or general overlay-detector pipelines.
 Unsupported identities and shapes preserve ordinary V2 exactly. Dump and replay accept only the
 current SLR14/OCR8 schema. The host does not reconstruct hidden video.
+
+The adaptive subtitle UI plane is part of this pipeline. Precise glyph contours are the next
+separate step: current OCR covers can include background or miss stroke edges. That work must use
+consecutive observations and tolerate small position changes from encoding noise, while allowing
+real subtitle movement; absolute position equality is not a reliable ownership rule.
 
 Damage reuse is deliberately DDup-only and fail-open. Dirty and move metadata is semantic only as a
 proof that the exact current ROI pixels did not change: damage outside the crop may save inference,
@@ -182,8 +186,8 @@ complete atomic conditioned final field is rendered directly. The recurrence was
 earlier infer/reuse clocking hypothesis; removing it eliminates a persistent full-field resource and
 pass, effective field lag, and rendering semantics coupled to reuse-owner age. Keep the GPU history
 owner, diagnostic trace, mature
-single-line provisional bridge, and compatible-handoff fade preservation until separate evidence
-justifies changing them.
+single-line provisional bridge and exact current-cover ownership. Accepted covers use the adaptive
+UI plane immediately; old compatible-handoff depth fading has been retired.
 
 The current policy is schema 6: detector-only joint depth/subtitle reuse, legal work `0`/`1`/`2`,
 and whole-tuple holds. The earlier independent due-OCR work `8`/`16`, host age/count budget and
@@ -271,9 +275,9 @@ Before changing V2 geometry:
 5. Confirm the result in Galaxy XR at the intended pop strength before changing the production
    contract or baselines.
 
-The immediate priority is to qualify the single-high fused baseline and opt-in adaptive geometry
+The immediate priority is to qualify the single-high fused adaptive pipeline
 across paired dumps and Galaxy XR, including high-grid temporal/cut/reuse behavior and the
-small-source bilinear-upscale exception. Mode 3 now shares its raw histogram traversal with private
+small-source bilinear-upscale exception. The producer shares its raw histogram traversal with private
 cut normalization while preserving both populations and quantile policies; current-cover UI probes
 also retain their exact visits through cached group scratch and add/carry coordinates. These are
 work reductions requiring paired output and timing evidence, not a new distortion or gain policy.

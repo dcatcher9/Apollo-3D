@@ -1,11 +1,11 @@
 // 1-thread pass: fold this frame's raw min/max into an EMA'd min/max (temporal scale
 // stability, a la iw3's IncrementalEMAScaler), then reset the raw accumulator for the
-// next frame's fused moments/range reduction. Runs after depth_hist_cs on the D3D timeline.
+// next frame's fused moments/range reduction. Runs after the shared histogram/quantile resolve on the D3D timeline.
 //
 // w is this-frame validity: 0 = invalid/hold, 1 = valid with history, 2 = first valid frame.
 RWStructuredBuffer<float4> MinMaxEma : register(u0);  // [0]={min,max,initialized,frame_state}
 RWByteAddressBuffer        MinMaxRaw : register(u1);  // min/max bits, valid + eligible counts
-RWStructuredBuffer<uint>   Histogram : register(u2);  // permanent P2/P98 histogram from depth_hist_cs
+RWStructuredBuffer<uint>   Histogram : register(u2);  // permanent P2/P98 histogram from the shared quantile resolve
 // Cut/health bridge. Geometry does not consume this state directly:
 //   [3].zw = valid-depth fraction, effective EMA range width
 //   [4].zw = empty-raw count, collapsed-raw count (stored as uint bits)
@@ -34,7 +34,7 @@ void main() {
         DiagnosticState[SBS_STATE_VECTOR_RANGE_COLLAPSED];
 
     // Robust percentile bounds: replace the raw min/max with the permanent P2/P98 percentiles
-    // scanned from the 256-bin histogram (depth_hist_cs, binned over the raw range). Outlier
+    // scanned from the 256-bin histogram (shared scan, binned over the raw range). Outlier
     // pixels -- DA-V2's near-spike tail is the classic case -- land in the extreme bins and
     // are excluded from the normalization range instead of squeezing the whole scene's
     // parallax. Bin centers quantize the bound to ~0.4% of the frame range, far below the

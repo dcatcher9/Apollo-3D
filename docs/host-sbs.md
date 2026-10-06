@@ -19,8 +19,8 @@ Sunshine-generated geometry.
 
 ## Pipeline
 
-The diagram describes ordinary mode 0. The opt-in mode 3 policy below replaces its camera,
-coordinate map/container and adaptive subtitle plane; all modes share continuous ROI embedding.
+Live streaming, offline conversion and estimator evaluation use one adaptive geometry and
+subtitle-plane pipeline, including continuous ROI embedding.
 
 ```mermaid
 flowchart LR
@@ -33,9 +33,9 @@ flowchart LR
     CUT["Cut-only evidence and scene epoch"]
     OCR["PP-OCRv6 tiny detector (bottom 960x160)"]
     LOCATOR["OCR8 boxes and compact SLR14 tracker"]
-    CAMERA["Scene-latched raw center"]
-    CURVE["Fixed raw coordinate and curve"]
-    CONTAINER["Pointwise soft source-U container"]
+    CAMERA["Continuous mean zero and robust amplitude"]
+    CURVE["Linear relative-depth coordinate"]
+    CONTAINER["Independent signed displacement bound"]
     VERTICAL["75/25 vertical envelope share"]
     ROW["Horizontal majorant"]
     PLANE["Post-limit subtitle plane and analytic collar"]
@@ -64,8 +64,8 @@ diagnostics that explain how the final field was produced.
 ## Authenticated production contract
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
-schema 86/tag `0x063B91AB`, canonical SHA-256
-`3373d1c19e3e845d47fb0c97c4b8b4a818a7115fb829e57cb3b9c5789bcb56b3`. It binds the
+schema 87/tag `0x7D19520F`, canonical SHA-256
+`beb7f6fe43df21d1aaae136dbdb1f7d348bef5f43644e233a600d63efa6a94ed`. It binds the
 complete policy below, including all subtitle field/ROI semantics. The generated named closure
 groups are the shared C++, Python, JSON, and documentation authority for every ordered shader set
 and source pin. The optional `parallax_v2_p010_y` group remains fail-open to the canonical
@@ -76,14 +76,14 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | Closure group | Ordered roots | Source-closure SHA-256 |
 | --- | ---: | --- |
 | `preprocess` | 1 | `943f3295e6cdb490d0833d981b153a5cda9a5153696eb5c9ca0042e474d8d744` |
-| `parallax_v2_producer` | 20 | `25eda2f214c67a3a2eb1fb75428c8d2ee4405c0bdaae720ea1b0994d409e7964` |
-| `parallax_v2_coordinate_diagnostic` | 1 | `0e99c0896f4fe9a5699adddecae0a0be11c7b9b2d2db6a5de05d38d7cec02784` |
-| `near_identical_detector` | 4 | `721e0a9d0ebc2cd6120acb97d41d07a6017909736a26309ee5e0bf13b4c6b7d7` |
-| `gpu_trace` | 1 | `76eca37a1c103a5e525a907ff70c0a68cd43a2e88104e51b5528d2204e159829` |
-| `parallax_v2_live_renderer` | 2 | `e4308603ee41db242fa95cffdc0987b41312891bd6c6914ba90bf2fae0be3d6f` |
-| `parallax_v2_p010_y` | 1 | `674664b53eabe828c86de1fcc08942541cf9ce5679241b5082ef5c58cc2cd137` |
+| `parallax_v2_producer` | 19 | `24050982be483a52e2a07501ae6166fbf353aa420cf80f47b30b4bafe672de91` |
+| `parallax_v2_coordinate_diagnostic` | 1 | `0053d3c7c00c7bb79e95dd5cb22d32b372f4a2fcbddd4948e5ac6f882c2565ba` |
+| `near_identical_detector` | 4 | `3bfc9b406e91b9b5c983c9bf5282060401d4afb1f1066c5e49eb602e8f6f4504` |
+| `gpu_trace` | 1 | `ac67c32c9dc972aace4144d45b9b41b418bab87bd13bc46854749ea830204611` |
+| `parallax_v2_live_renderer` | 2 | `d187c2ccc013a6fddd0ecaf34b2ca7f2bd2b392bfd55a5abe31bcfa457ca6e87` |
+| `parallax_v2_p010_y` | 1 | `b905626f29b7f6e9493c448f88d9804a2568a809d30ec20f94cc13c4d95977e5` |
 | `sbs_flat_fallback` | 2 | `7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4` |
-| `parallax_v2_live_diagnostic` | 2 | `deb58ef3c4775bd59205c6ccce3e7ad182bc1e9ae747e2079369f9905c51c3c4` |
+| `parallax_v2_live_diagnostic` | 2 | `2371920cbec90eab7436b9ba85c294b149f2c7aeb765e84ab7e6969f625c1c4a` |
 <!-- END GENERATED HOST SBS SHADER CLOSURES -->
 
 The contract admits the following production calibration:
@@ -98,8 +98,6 @@ The contract admits the following production calibration:
 | Raw coordinate scale | `2.25` DAV2 units |
 | Gain per pop unit | `0.00375` source U |
 | Direct parallax container | `0.04` source U per eye |
-| Far exponential tau | `0.75` |
-| Near logarithmic tau | `0.5` |
 | Maximum horizontal slope | `0.5` |
 | Maximum vertical shear | `2.0` |
 | Vertical upper-envelope share | `0.75` |
@@ -115,14 +113,14 @@ Host SBS using Sunshine depth, production Web UI conversion, and the maintained 
 composite. A missing, non-regular, unreadable, or hash-mismatched asset fails flat; no raw DAV2
 runtime is selected. There is no supported Host SBS model selector.
 
-### Opt-in joint-plane live experiment
+### Adaptive geometry and subtitle plane
 
-`sbs_3d_joint_plane_experiment = enabled` selects experimental mode 3 within the same
-authenticated V2 producer and renderer. It defaults to disabled. Restart the development host
-after changing it. The ordinary mode 0 policy and calibration table above remain the control;
-Game 3D code and its native depth interpretation are unchanged.
+The adaptive policy is the sole production Host SBS pipeline. There is no geometry experiment
+switch, scene-latched camera, nonlinear depth curve, or alternative subtitle plane. The serialized
+`joint_plane_mode` word retains the fixed value `3` as an authenticated policy identifier; it is
+not a configuration selector. Other values fail closed. Game 3D keeps its native depth policy.
 
-Mode 3 uses a Host-specific relative-depth adapter. Every finite real-content DAV2 value,
+The pipeline uses a Host-specific relative-depth adapter. Every finite real-content DAV2 value,
 including edge foreground and signed values, contributes to the arithmetic mean and ordinary
 min/max/variance statistics. A GPU histogram uses 256 bins over that same finite raw range;
 P05 is the lower edge of its crossing bin and P95 is the upper edge of its crossing bin. These are
@@ -131,13 +129,13 @@ equal the valid real-content population. Empty, nonfinite, collapsed, malformed 
 statistics render the current frame flat while an established camera holds; unavailable percentile
 authority is canonical zero and cannot be replaced with extrema.
 
-Mode 3 shares the raw-depth/exclusion traversal with the private cut-normalization histogram.
+The producer shares the raw-depth/exclusion traversal with the private cut-normalization histogram.
 The two populations remain independent: geometry uses the signed finite FrameStats range and
 P05/P95 bounds above; normalization retains its nonnegative validity, unsigned float-bit extrema
 (including signed zero), P02/P98 policy, and its existing floored-range bin arithmetic. Each group
 overwrites both sets of partial bins. The existing quantile resolve publishes the geometry tail
-and overwrites the normalization histogram before the unchanged range EMA consumes it. Mode 0
-retains its original normalization histogram pass. Sharing the scan does not merge statistical
+and overwrites the normalization histogram before the unchanged range EMA consumes it. The
+separate normalization-histogram traversal is retired. Sharing the scan does not merge statistical
 authority, change the scene detector, or normalize geometry into `[0,1]`.
 
 The continuously observed targets are `zero_target = mean(raw)` and
@@ -156,8 +154,9 @@ Thus inverse scale can double/halve once per second and zero's rate is bounded i
 units. The sealed 64-bit source clock is in microseconds. Zero, repeated or regressed clocks cannot
 authorize adaptation; the first valid observation after interruption or a gap over 250 ms rearms
 without spending the missing interval. A confirmed cut remains authenticated detector/ownership
-metadata and does not reset or disarm the mode 3 geometry controller. A true input-domain reset
-clears all 28 state words. Authenticated reuse freezes the complete depth/OCR/UI/final tuple and
+metadata and does not reset or disarm the adaptive geometry controller. A true input-domain reset
+reinitializes the complete 28-word state to its sealed initial values. Authenticated reuse freezes
+the complete depth/OCR/UI/final tuple and
 controller state, so a static input can pause unfinished adaptation.
 
 The shader names this zero/scale/clock payload `V2AdaptiveCameraState`. Its four integer vectors
@@ -165,14 +164,14 @@ and historical state-tail wire names retain their existing layout and checksum o
 pop gain remains stream configuration; there is no quality-responsive gain controller.
 
 Gain, depth mapping and the display guard remain separate. The coordinate is
-`u=(raw-zero)*k`, and mode 3 maps it directly:
+`u=(raw-zero)*k`, and the producer maps it directly:
 
 ```text
 requested_gain = 0.00375 * pop_strength
 candidate      = clamp(requested_gain * u, -0.04, +0.04)
 ```
 
-Mode 3 has no depth curve or soft envelope. The signed hard bound is a representation guard,
+The coordinate map has no depth curve or soft envelope. The signed hard bound is a representation guard,
 independent of requested gain; it does not turn small raw-depth contrast into full disparity.
 The native 75/25 vertical envelope and row majorant still condition that candidate. At fixed
 gain and divisor, two unsaturated pre-limiter samples have separation
@@ -204,16 +203,20 @@ add/carry coordinates, including partial rows; overlap deduplication and conflic
 unchanged.
 
 Current covers receive the plane's exact float bits immediately, with zero within-cover depth
-range and full fade strength. This removes birth mixing and the production half-source-pixel
-per-eye core tolerance only for mode 3. A slope-safe outside collar conditions neighboring geometry.
+range and canonical full strength. Accepted cover pixels have neither birth mixing nor
+per-eye core tolerance. A slope-safe outside collar conditions neighboring geometry.
 Domain changes and confirmed cuts reset UI filter memory; an ordinary subtitle handoff does not.
 Missing current coverage means exact Base over real content. Reuse freezes the complete UI history,
-and invalid OCR/time cannot advance dwell. SLR14 retains its 16-word adaptive tail after the
-80-word ownership state; the default mode writes it as zero. A coarse cover can still miss part of
+and invalid OCR/time cannot advance dwell. UI probing and time advance also require the complete
+sealed ParallaxState at `t0` to authorize the same source observation and CutBridge epoch. Missing,
+stale, collapsed or invalid depth holds the UI plane and goal, clears dwell and the accepted clock,
+and copies Base. The next valid observation rearms without spending time from that gap. OCR
+ownership can continue independently during that interval. SLR14 retains its 16-word adaptive tail after the
+80-word ownership state; every active owner uses this same adaptive UI controller. A coarse cover can still miss part of
 a glyph, flatten enclosed scene pixels, or condition adjacent content. A full guard is not a comfort
 qualification. Include static-after-birth and partial-coverage cases in live inspection.
 
-For an exact authorized ROI, both supported modes use the same continuous full-capture inverse.
+For an exact authorized ROI, the pipeline uses the continuous full-capture inverse.
 DAV2 still analyzes only the authorized video/client rectangle. The renderer embeds its final
 parallax field into full-source coordinates and extends each signed boundary value through the
 existing slope-limited exterior collar. The field reaches zero beyond that collar; nearby browser
@@ -228,106 +231,9 @@ still have conflicting framing cues; neither continuous depth nor a smoother bro
 comfortable out-of-screen projection. The [dump map contract](../tools/sbsbench/DUMP_FORMAT.md#analysis-domains-and-window-provenance)
 records the same continuous inverse and finite-source boundary mask in every mode.
 
-Mode 0 retains the scene-latched mean and fixed 2.25 divisor. Modes 0 and 3 share
-authenticated publication and the native limiter pipeline. The adaptive policy remains opt-in
-and requires native paired evidence plus headset qualification before default promotion.
-The retained scale floor is a model-specific artistic reference, and the current UI guard is
-not a perceptual comfort guarantee. Neither policy resolves the missing silhouette or the
-contrasting browser strip when a source-cropped foreground projects beyond the original video.
-
-Fixed-shape shader bytecode is cached across restarts under the executable's trusted configuration
-directory at `shader-cache/host-sbs-v1`. Each artifact filename is keyed by the authenticated source
-closure, ordered entrypoint/target, and compile flags. Runtime reflection validates the cached stage
-and Shader Model 5.0 bytecode before use; missing, stale, truncated, or invalid artifacts are
-compiled from the immutable source snapshot and replaced atomically. Cache configuration occurs
-before command dispatch as well as live worker startup, so benchmark and conversion commands use
-the same executable-owned cache boundary. Command modes still return before background live-model
-preparation and own their TensorRT lifecycle. This startup optimization cannot weaken
-source-closure authentication or required shader-creation fail-flat
-behavior. One fused near-identical preprocess root is the mandatory calibrated preprocess and the
-sole runtime RGB-to-NCHW producer. Its prewarm, device creation, mode buffers, previous-input view,
-and tile output are required; failure leaves Host SBS flat instead of selecting a second producer or
-comparator. Successful prewarm retains the 128 most recently used artifacts so superseded closures
-cannot grow without bound.
-
-### Authenticated resolution fitting
-
-Moonlight 3D's 36 standard source resolutions cover XR, phone, and tablet dimensions in landscape
-and portrait. They fit one of 24 calibrated DAV2 logical shapes. The landscape families are below;
-each row also supports the exact transpose of its source and depth dimensions.
-
-| Source examples (width x height) | Internal DAV2 | Fused public/analysis/live |
-| --- | --- | --- |
-| `1920x1080`, `2560x1440`, `3840x2160` | `770x434` | `1540x868` |
-| `2560x1080`, `5120x2160` | `1022x434` | `2044x868` |
-| `3440x1440` | `1036x434` | `2072x868` |
-| `2048x1536`, `2732x2048` (4:3 tablet) | `574x434` | `1148x868` |
-| `2388x1668` (tablet) | `616x434` | `1232x868` |
-| `2360x1640`, `2420x1668` (tablet) | `630x434` | `1260x868` |
-| `2160x1440` (3:2 tablet) | `658x434` | `1316x868` |
-| `1920x1200`, `2560x1600` (16:10 tablet) | `700x434` | `1400x868` |
-| `2160x1080` (18:9 phone) | `868x434` | `1736x868` |
-| `2340x1080` (19.5:9 phone) | `938x434` | `1876x868` |
-| `2400x1080` (20:9 phone) | `966x434` | `1932x868` |
-| `2424x1080` (tall phone) | `980x434` | `1960x868` |
-
-The native-panel examples include [Galaxy S24](https://www.samsung.com/in/smartphones/galaxy-s/galaxy-s24-onyx-black-256gb-sm-s921ezkwins/),
-[Pixel](https://support.google.com/pixelphone/answer/7158570?hl=en), and
-[iPad Pro](https://www.apple.com/ipad-pro/specs/) dimensions. These are source/virtual-display
-choices in the existing XR client; they do not change its Android XR device requirement.
-Every preset has even dimensions for live codec mode changes and fits the existing source-raster
-budget. Native variants fitting the same patch-aligned tensor are also accepted.
-
-Each aspect family has its own fixed depth tensor so full-frame input uses the complete tensor
-without letterbox padding. The model's multiple-of-14 requirement introduces the existing small
-aspect rounding; it does not crop the source. Window-region content still uses the separate
-centered-content policy below.
-
-The fused runtime deterministically doubles the logical fit; it never fits the high grid
-independently. Membership in the 24-shape high allowlist is not sufficient: the selected high
-grid must be exactly twice the one calibrated coarse fit derived from the actual source dimensions.
-A different allowlisted profile, including the opposite transpose, is rejected. A custom source
-resolution is valid when the production fitter maps it exactly to one calibrated logical shape; for
-example, a same-aspect `1280x720` source maps to logical `770x434` and fused `1540x868`. A custom
-aspect whose logical fit is not allowlisted is rejected before live Host SBS starts. The host never
-substitutes a nearby tensor or silently emits a flat stream for an unsupported setup.
-
-Offline V2 conversion uses the same fitter and allowlist. It aborts an unsupported job rather than
-publishing a flat converted video. Other documents link to this section instead of maintaining a
-second resolution list.
-
-Portrait is an explicit `width < height` display mode. Host SBS does not rotate captured content;
-non-identity Windows display rotation is rejected before pipeline setup.
-
-The window-region route does not introduce another model shape. It keeps the current full-frame
-authenticated tensor shape and addresses the selected Chromium-video or foreground-client
-rectangle directly inside the retained full matched frame, regardless of its aspect ratio. The
-preprocessor treats that exact rectangle as its crop-local logical source and fits it into a
-deterministic centered integer content rectangle. It never stretches or discards pixels from that
-logical source.
-Synthetic tensor pixels outside the content rectangle replicate the nearest content edge and are
-excluded from depth statistics, scene-cut evidence, history comparison/authority, and
-OCR authority. The fused map still copies the complete raw padded history tuple, with exclusion `1`
-preventing synthetic cells from contributing detector evidence. Every
-domain uses the same canonical full-grid producer dispatch, including heavily padded force-infer
-frames. This deliberately repeats the clamped boundary footprint work instead of retaining a
-second content/padding entry-point topology; the removed specialization was bit-identical, and the
-single authority is simpler to authenticate and maintain. The published parallax field extends its
-content boundary through this padding so renderer filtering cannot turn padding into a false depth
-shelf.
-
-Chromium true fullscreen is selected separately from the strict semantic-video ROI candidate. The
-helper may recognize an available semantic `<video>` that covers the complete foreground browser
-client even when the element overscans that client, its owning document rectangle is clipped, or
-Chromium exposes multiple full-cover clones. The helper publishes the client rectangle as the
-fullscreen authority, and the host accepts that authority only when the client maps exactly to the
-capture extent. This semantic proof is distinct from the lower-priority generic foreground-client
-route. Any selected foreground client that independently equals the complete capture also
-canonicalizes to ordinary full-frame V2 rather than creating a redundant crop. Once admitted, either
-exact-full-capture case is canonical ordinary full-frame V2:
-it is not cropped or trimmed, does not enter a new ROI analysis domain, and does not require the ROI
-embedding branch. Dump 3D records it as the canonical full-source analysis domain.
-
+The canonical current pipeline retains the existing limiter, joined depth/OCR observation and
+atomic publication. A policy change must be evaluated with exact source clocks, authenticated
+models and per-leg provenance. Retired versions remain in Git for historical comparisons.
 ## Color and HDR
 
 Remote-session [stream gamma](stream-gamma.md) is applied only in the final encoder conversion.
@@ -363,10 +269,10 @@ The model and the rendered color have different color requirements:
 Tone-mapped debug PNGs are viewing aids, not numeric HDR evidence. Use the floating-point dump
 artifacts and manifest color fields when auditing the pipeline.
 
-## Scene camera and raw coordinate
+## Adaptive camera and raw coordinate
 
-This section describes the default mapping. The opt-in joint-plane policy above replaces its
-scene latch, fixed divisor, and nonlinear curve while retaining the same publication and renderer.
+The [adaptive geometry policy](#adaptive-geometry-and-subtitle-plane) owns zero, amplitude and
+source-time filtering. This section describes their shared statistics and analysis domain.
 
 For each finite public high-resolution depth field, the producer calculates exact extrema,
 arithmetic mean, and population standard deviation on the fused composite's single grid. Standard
@@ -382,25 +288,23 @@ invalidates normalization without changing V2's finite-value moment semantics. T
 resolve writes both records before normalization continues; there is no second full-tensor min/max
 traversal.
 
-At startup or after a confirmed cut, the first usable field acquires its arithmetic mean as the
-scene center. This gives occupancy-weighted behavior without a discrete scene classifier: a small
-near object barely moves the center and retains relief, while a large near region naturally pulls
-the zero plane toward itself and is not boosted as an isolated object.
-
+The first valid observation initializes the zero plane to the arithmetic mean and the amplitude
+to its robust model-prior-bounded spread. Subsequent genuine source-time observations adapt both
+continuously; confirmed cuts retain the geometry controller. Occupancy-weighted mean statistics
+include peripheral foreground without selecting a preferred central object.
 For an authorized window-region ROI, extrema, mean, standard deviation, cut evidence, and all depth
 histories are computed from the cropped analysis domain only. Pixels outside the selected Chromium
-video or foreground-client content source do not pull its scene center. Entering or leaving ROI
+video or foreground-client content source do not pull its zero-plane observation. Entering or leaving ROI
 analysis, changing its authority kind, identity or dimensions, or changing its input transfer
-domain resets the temporal and scene-camera state before the new domain is used. Chromium-video and foreground-client
+domain resets the temporal and adaptive-camera state before the new domain is used. Chromium-video and foreground-client
 authority are distinct even if their rectangles happen to match. Translating the same ROI without
 changing its dimensions is not a new analysis domain, so an ordinary window move does not by itself
 reacquire the camera.
 
 ### OCR-box subtitle conditioner
 
-Ownership and cover qualification apply to both modes. The local supporting-plane selection and
-half/full geometric fade described below apply to the default mode; experimental mode uses the
-adaptive UI plane and immediate full conditioning described above.
+The adaptive UI plane and immediate full conditioning use the current authenticated OCR covers.
+Ownership qualification remains independent of UI-plane filtering.
 
 The production subtitle path is the single current detector-only PP-OCRv6 tiny/OCR8/SLR14 route.
 It does not run text recognition, language classification, or logo recognition. For an authenticated
@@ -537,37 +441,33 @@ canonical order and IoU at least `0.6` for every corresponding member; high aggr
 other unchanged lines cannot confirm a disjoint replacement. A complete current-to-owner
 per-member match has priority over confirming an older pending stack: it continues the established
 generation and clears pending, so one box that overlaps both tracks cannot cause a spurious
-handoff/fade restart. Ordinarily, a compatible subset can remove a line immediately, while an
+handoff restart. Ordinarily, a compatible subset can remove a line immediately, while an
 appended or materially changed stack remains pending and conditions only lines still matched to the
 old owner until its second observation confirms the handoff.
 
 One narrow same-scene provisional bridge prevents a mature single-line replacement from exposing
 Base for its first pending observation without promoting that observation to durable owner. The
 previous state must have exactly one ordinary owner and one current cover, no pending stack, a valid
-target at full fade `2`, event `NONE`, zero unreliable holds, and a distinct frame/domain identity.
+target at canonical strength `2`, event `NONE`, canonical zero owner-lifetime word, and a distinct
+frame/domain identity.
 The new selected stack must contain exactly one ordinary core, fail the ordinary owner match
 (`IoU < 0.6`), overlap the old core vertically by at least `3/4` of the shorter height, have height
 ratio at most `2`, have doubled vertical-center separation at most one shorter height, and each
 core's horizontal center must lie inside the other core's half-open horizontal span. Equality is
 accepted for the vertical, height, and center-distance bounds; IoU equality belongs to ordinary
-owner continuity and cannot enter the bridge. Fresh onset, a half-faded/transitional or unreliable
-owner, an existing pending transaction, hard cut, input-domain reset, ribbon/multiline topology,
+owner continuity and cannot enter the bridge. Fresh onset, invalid target authority, an existing pending transaction, hard cut, input-domain reset, ribbon/multiline topology,
 and geometry outside those bounds remain pending with exact Base.
 
-The bridge authorizes only the exact final cover paired with that pending raw core in the current
-authenticated OCR8 selection. A reliable same-frame plane sample is mandatory. Residual above the
-existing `8`-pixel gate uses that current target at fade `1`; otherwise the ordinary bounded target
-update supplies the provisional target and preserves full fade `2`. Header flag bit `4` marks this
-ephemeral authority, word 29 carries its target bits, and word 30 carries its fade. The durable old
-owner rectangles, generation, target, fade, event, and hold count remain bit-exact. Condition
-preparation replays current OCR8 selection and the complete owner-to-pending geometry gate before
-using words 29/30; any mismatch publishes canonical zero parameters and copies Base. An exact
-duplicate identity retains the bridge only when both raw core and final cover are bit-identical.
-A changed cover at the same identity, unreliable sampling, revert to the old owner, incompatible
-distinct observation, death, cut, or reset clears it. A compatible next distinct observation uses
-the ordinary confirmed-handoff transaction and clears words 29/30. Thus no provisional cover or
-target becomes cache, generation, or future-frame authority.
-
+The bridge authorizes only the exact final cover paired with the pending raw core in current
+authenticated OCR8 selection. It uses the adaptive UI target at canonical full strength `2`;
+there is no local supporting-plane measurement or residual-triggered fade. Header flag bit `4`
+marks this ephemeral authority, word 29 carries the target bits, and word 30 carries canonical
+strength. Durable owner rectangles, generation and target remain unchanged until ordinary
+confirmation. Condition preparation revalidates current selection and the owner-to-pending
+geometry gate. A mismatch publishes zero parameters and copies Base. An exact duplicate identity
+retains the bridge only with bit-identical raw core and final cover. Changed covers, revert,
+incompatible distinct observations, death, cut or reset clear it. A compatible next distinct
+observation confirms the ordinary handoff; provisional covers never become historical authority.
 Count-changing detector splits and merges use the ordinary pending/confirmation transaction; no
 aggregate-bbox exception grants immediate authority. Per-member owner matches may remain current,
 but newly segmented or merged geometry becomes authoritative only after a second compatible
@@ -591,90 +491,28 @@ of cut authority: it clears the owner and treats any current boxes as the first 
 so a seek/reset landing on an already-visible static subtitle acquires on the following distinct
 observation without an onset edge.
 
-The primary observed-plane probe remains two independent 16-sample rows above the combined
-lower-text owner stack, horizontally placed at the median of all owner-member centers. With the
-same field-cell scale `s`, its rows are `10s` and `4s` cells above the owner top and each samples
-from `C-30s` through `C+30s` in `4s`-cell steps. Thus coarse and exact convex-2x fields observe the
-same source-space neighborhood. Only when
-that primary is unreliable, SLR14 performs a bounded near-center search. Let `W` be the horizontal
-span of the ordinary tight cores and let `C` be the unchanged aggregate primary center. It probes
-`C-W/16` then `C+W/16`; if either is reliable, the larger-U reliable result at that radius wins and
-the search stops. Only when neither is reliable does it probe `C-2W/16` then `C+2W/16` under the
-same rule. Thus at most five positions including the primary are sampled, and a farther coherent
-patch cannot override closer local support. When ordinary text exists, bottom UI ribbons remain
-independent tracked owner members with their own current covers but do not contribute to `W` or the
-fallback row top. A ribbon-only owner instead uses its complete core span and top.
+The [adaptive UI controller](#adaptive-geometry-and-subtitle-plane) independently observes the
+immutable post-limit Base field and the union of current accepted covers. It retains its filtered
+target through same-domain owner changes, and resets its filter on hard cuts or input-domain
+changes. Its source-time dwell/rate limits stabilize the plane; accepted cover pixels immediately
+take that plane. The owner-lifetime word is canonical zero while an owner exists. The ownerless
+death-grace cache remains bounded and cannot create current covers.
 
-At the primary, each row is sorted and is valid only when all 16 samples are finite and inside the
-direct container. When both rows are valid, their robust medians are used without an IQR gate:
-median separation of at most `4` binocular source pixels selects their mean, while larger
-separation selects the larger-U median. This is the captured full-screen case: scene detail and
-motion can broaden both rows without invalidating two complete, independent median observations.
-When exactly one row is valid, it may stand in for the missing row only when its Tukey
-interquartile range—the average of elements 11/12 minus the average of elements 3/4—is at most `8`
-pixels. A sole dispersed row, or no valid row, makes the primary unreliable and activates the
-strict fallback search.
-
-Fallback evidence is deliberately stricter. Its complete rounded strip (61 coarse cells or 121
-convex-2x cells, the same source-space width) must fit inside the analysis content without edge
-clamping; both rows must be valid and individually pass the same
-`8`-pixel IQR gate; and their medians must be within `4` pixels, producing their mean. If both
-directions at one radius qualify, their two mean targets must also be within `4` pixels. Agreement
-selects the larger-U mean; disagreement makes the whole observation unreliable and does not search
-the farther radius. A sole qualifying direction is used directly. This avoids manufacturing stable
-evidence from repeated edge texels or choosing between unrelated coherent surfaces while requiring
-mutually stable local support evidence. A target of `k` pixels is
-stored as `k / (2 * analysis_source_width)` signed one-eye source U; positive and negative targets
-are both permitted up to the signed direct-parallax container. There is no absolute screen-plane
-or near-screen clamp. These units are exact binocular output pixels for a native 1:1 SBS encode;
-packed-output downscaling reduces visible disparity by the eye-content-width to full-source-width
-ratio.
-
-Every distinct authoritative continuing, handoff, or grace-rebirth observation resamples that
-local plane. A fresh birth has no inherited target and starts directly on the reliable observation.
-A confirmed same-scene handoff inherits the previous owner target, and a grace rebirth inherits its
-valid cached target; a difference of at most `1` binocular source pixel then preserves those bits
-exactly. A reliable residual above `8` pixels reacquires the new supporting plane at half strength
-instead of slowly dragging the old plane through the scene. Otherwise the inherited or continuing
-target takes an exact `1/8` EMA step limited to `0.25` pixel per distinct observation. When that
-bounded update succeeds for a confirmed same-scene handoff at a residual of exactly `8` pixels or
-less, the handoff preserves the previous owner's fade step (`1` or `2`) instead of restarting at
-half strength. This does not relax durable ownership. Outside the bounded provisional bridge above,
-the first unmatched observation remains pending with no current cover and conditions exact Base. A
-residual above `8`, a failed update, a fresh birth, a
-grace rebirth, target recovery, or a hard-cut survivor still starts at fade step `1`; a previous
-half fade is only preserved, never promoted. Hard cuts never inherit either seed. Duplicate
-identities do no target arithmetic. A continuing same-scene owner with current geometry may hold its previous
-target, covers, and fade through at most two distinct unreliable measurements; header word 25 stores
-this count while an owner exists and still stores death grace when no owner exists. Duplicates and
-observations without current OCR authority do not age the hold; the latter preserve an existing
-counter and valid target but clear current covers and condition exact Base. The third distinct unreliable
-measurement resets target authority and publishes exact Base; the next reliable observation
-reacquires at half strength. Fresh owners and handoffs without a valid target never use this hold.
-Grace caches only a valid filtered target. A hard-cut survivor likewise restarts from the reliable
-new local plane at half strength, or publishes Base when neither row is reliable; it never
-conditions the new scene with the old full-strength target.
-A domain reset clears the owner and target so present geometry starts a new pending transaction.
-Owners that start or restart at fade step `1` advance to full strength on a later reliable
-continuing observation. The conditioner then evaluates
-distance directly to
-each current half-open cover. For integer cell `(x,y)`, `dx`/`dy` are zero inside a rectangle
-and count cells to its nearest included edge outside it:
+For each integer cell, the conditioner measures distance to the nearest included edge of each
+current half-open cover:
 
 ```text
-d      = min(dx * 0.5 / field_width + dy * 2.0 / field_width)
-budget = 0.5 / source_width + d
+d = min(dx * 0.5 / field_width + dy * 2.0 / field_width)
 ```
 
-Base values already within `budget` of the target are copied bit-for-bit. Values outside it move
-only to `target +/- budget`, with the half-strength birth/handoff fade when applicable. Thus each
-ordinary line has a dense cover and a V2-slope-safe analytic collar, nearby line collars may meet
-naturally, and the gap is never converted into one merged rectangle. Because a ribbon cover spans
-the complete field width and reaches the field bottom, its only exterior boundary—and therefore its
-only collar—is the corrected top edge. Missing current authority, invalid target
-state, unsupported tensor shape, or any identity failure copies ordinary post-limit V2 exactly.
+Covered cells take the UI target exactly. Outside the covers, Base within distance budget `d`
+is copied bit-for-bit; other values are bounded to `target +/- d`. This analytic collar preserves
+the horizontal/vertical slope constraints. Separate lines remain separate covers. A bottom ribbon
+has only its corrected top exterior boundary. Invalid current authority, target or geometry copies
+Base exactly. There is no per-pixel depth fade or half-source-pixel core slack.
+
 Lane zero of the 256-thread resolver group writes the complete 96-word state. The group
-uses all-memory synchronization for the experimental cover probe and UI controller, then
+uses all-memory synchronization for the adaptive cover probe and UI controller, then
 snapshots that state into group memory and validates the snapshot—including equality of
 its scene epoch and the authenticated CutBridge hard-cut count bound at `t1`—and publishes the six
 immutable condition words consumed by rendering: schema, tag, current count/kinds, fade, and target.
@@ -692,28 +530,21 @@ warps the current capture through the resulting atomic final field.
 There is no pixel history, row lease, onset accumulator, signature, horizontal-distance texture,
 full-resolution overlay detector, or GST/OGR/ORS dependency.
 
-## Pop and the pointwise soft container
+## Pop and the displacement bound
 
-`sbs_3d_pop_strength` is the live strength control. The joint-plane switch selects the policy.
-Ordinary mode 0 uses the following curve and soft container. Experimental mode 3 instead uses the
-linear map and hard bound in the [joint-plane policy](#opt-in-joint-plane-live-experiment).
+`sbs_3d_pop_strength` is the sole artistic strength control. The mapping is linear:
 
 ```text
+u = (raw - zero) / D
 requested_gain = pop_strength * 0.00375
-requested      = requested_gain * F(u)
-candidate      = requested / fourth_root(1 + (requested / 0.04)^4)
+candidate = clamp(requested_gain * u, -0.04, +0.04)
 ```
 
-The configured default is owned by [Configuration](configuration.md#sbs_3d_pop_strength). The
-container is odd, monotone, has unit slope at zero, and approaches the signed `0.04` source-U
-representation limit without a hard endpoint clamp. It is applied independently to every depth
-texel. An extreme object therefore cannot shrink the relief of unrelated geometry, and the
-container cannot make a local depth cliff steeper. It has no history and does not modify the scene
-camera or configured pop.
-
-The state prefix retains `container_scale` for ABI compatibility. Its only valid value is
-exactly `1.0`; all attenuation belongs to the pointwise map above. Dumps, replay traces, and the
-live state validator fail closed on any other value.
+Zero controls placement, `D` controls relative relief, and configured gain controls strength.
+The signed bound is a pointwise representation guard. The [configuration](configuration.md#sbs_3d_pop_strength)
+owns the configured default. No nonlinear curve, soft container, endpoint normalization or adaptive
+gain controller participates in this map. The historical state slots `convergence_curve=0` and
+`container_scale=1` remain checked inert ABI values and cannot select another mapping.
 
 ## Cliff conditioning
 
@@ -784,16 +615,13 @@ texture dimensions. An active ROI must first have a finite normalized source rec
 does the renderer query the depth extent and validate the integer tensor-content rectangle. Any
 invalid active geometry renders current color through flat identity.
 
-The opt-in mode 3 shares these exterior continuation and color-sampling rules. Only the
-producer's zero, relative-depth scale, linear candidate mapping and adaptive subtitle policy differ.
-
 ## Frame attribution and failure behavior
 
 Color, raw depth, scene state, and parallax are bound to an exact completed source-frame identity.
-An unusable current field renders the current color flat. It may retain the small scene camera so a
+An unusable current field renders the current color flat. It may retain the small adaptive camera so a
 later usable frame resumes the same coordinate, but outside the exact DDup proof below it never
-pairs old per-pixel geometry with new color. A confirmed cut invalidates the old camera; the next
-usable field acquires the new one.
+pairs old per-pixel geometry with new color. A confirmed cut updates history/subtitle ownership metadata while retaining the adaptive geometry
+controller; only an analysis-domain reset clears it.
 
 Desktop Duplication has one explicit current-color reuse exception with two conservative
 proofs. For full-source V2, when its non-null desktop-content timestamp is unchanged, the source
@@ -1170,7 +998,7 @@ nor a late receipt can establish authority on the new route.
 Model preparation, shader compilation, and the live renderer are fail-closed. Live shaders are
 compiled and cached at process startup. Dump-only resources are created lazily and cannot prevent a
 stream from starting. A failure in optional diagnostics has no rendering authority. An armed
-schema-41 dump preserves Base when SLR14 is active, the complete atomic conditioned final field,
+schema-44 dump preserves Base when SLR14 is active, the complete atomic conditioned final field,
 and the selected path's publication resources with ordered D3D11 `CopyResource` operations
 and one terminal event. Submission performs no GPU-to-CPU wait or synchronous Map. Later
 render-thread calls poll with `DONOTFLUSH`, collect staging resources with `DO_NOT_WAIT`, then hand
@@ -1179,6 +1007,12 @@ SRV must be the same resource at admission; the dump stages and authenticates it
 `shadow_final_parallax.f32`. The verifier replays the ordinary limiter and, when active, SLR14
 directly into that field. The same final-field contract and native renderer are used by live Host
 SBS and the native sbs-bench whole-clip harness.
+
+The schema-44 root `matched_observation_timestamp_us` records the completed source transaction's
+clock. A fresh publication must bind that clock to the full sealed geometry state before UI
+conditioning can be verified. Conditional reuse retains an older geometry/UI owner; the authenticated
+GPU trace must identify that owner's original observation, whose clock remains in the retained
+state. The current transaction clock never relabels reused geometry as a new depth observation.
 
 The manual Dump 3D button works independently of performance diagnostics. File-trigger polling
 requires diagnostics to be enabled; a manual dump does not enable it.
@@ -1190,7 +1024,7 @@ recover earlier history. With diagnostics enabled, a one-thread GPU pass runs on
 receipt and the infer-updated or reuse-held SLR14/condition tuple is finalized, before
 the receipt copy and production postprocess end marker; it copies the immutable 64-word
 transaction, SLR96, condition6, matched frame/domain identity, and authenticated depth/subtitle
-dispositions into a tag-last 176-word record. It reads the finalized transaction through its existing
+dispositions into a tag-last 192-word record. It reads the finalized transaction through its existing
 raw SRV; immediate-context ordering and explicit UAV/SRV unbinding remove the need for a separate
 diagnostic transaction buffer or copy. `held_with_depth` records the prior locator frame
 identity and exact frozen condition tuple for ordinary reuse; branch-gated infer derives execution
@@ -1350,10 +1184,10 @@ timer and is not a new counter or schema boundary. The cadence diagnostics repor
 `roi_direct_inputs/dump_copies`; the first counts admitted direct ROI inputs, while the second can
 increase only for an explicit Dump 3D diagnostic reconstruction after live timing has closed.
 
-In mode 3, `depth_parallax_stats_gpu` also includes both independent histogram populations and their
+`depth_parallax_stats_gpu` also includes both independent histogram populations and their
 shared resolve. The later normalization-only histogram dispatch is absent. Compare the complete
 `depth_postprocess_gpu` interval across the scan change, rather than treating the wider stats
-interval as new work. Mode 0 retains its prior timing scope.
+interval as new work.
 
 With diagnostics enabled and optional CUDA event-node support available, the parent conditional
 graph records one common start after its setter and one completion after each sibling IF node.
@@ -1679,7 +1513,7 @@ source conversion poll so even a completely static desktop receives every later 
 session ends or changes mode first, its unpublished diagnostic batch is cancelled at teardown
 instead of making teardown wait for the GPU.
 
-Use `.f32` artifacts for quantitative comparisons. Schema 41 does not store redundant scalar/heat
+Use `.f32` artifacts for quantitative comparisons. Schema 44 does not store redundant scalar/heat
 preview PNGs or per-field shape sidecars; dimensions and warp-map semantics are authenticated in
 the manifest, while `model_input_shape.json` remains calibrated preprocess authority. Generate
 verified diagnostic previews on demand, outside the atomic package, with

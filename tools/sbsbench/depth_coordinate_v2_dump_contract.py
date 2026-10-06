@@ -26,7 +26,7 @@ except ImportError:  # Direct script/module loading from tools/sbsbench.
     import prod_zipdepth_convex2x as convex2x_contract  # type: ignore
 
 
-DUMP_MANIFEST_SCHEMA = 41
+DUMP_MANIFEST_SCHEMA = 44
 GPU_TRACE_RING_SCHEMA = 4
 GPU_TRACE_CONTRACT_SCHEMA = 5
 GPU_TRACE_DECODED_SCHEMA = 6
@@ -214,7 +214,7 @@ _STATE_ROOT_KEYS = {
     "adaptation_semantics",
 }
 _STATE_CONSTANT_KEYS = {
-    "raw_coordinate_scale", "collapse_abs_epsilon", "far_tau", "near_log_tau",
+    "raw_coordinate_scale", "collapse_abs_epsilon",
     "gain_per_pop",
     "reference_pop_strength", "reference_gain_at_reference_pop", "requested_gain",
     "requested_pop_strength", "direct_container_limit", "max_horizontal_slope",
@@ -252,7 +252,7 @@ def _finite_float32(value: Any, label: str) -> float:
 
 
 def _display_budget_for_mode(requested_gain: Any, mode: int | None) -> float:
-    if mode is not None and (type(mode) is not int or mode not in (0, 3)):
+    if type(mode) is not int or mode != 3:
         raise ValueError("invalid joint plane mode")
     return _float32(_DEFAULTS.direct_container_limit)
 
@@ -263,24 +263,14 @@ def display_budget_for_mode(requested_gain: float, mode: int) -> float:
 
 
 def adaptation_semantics_for_mode(mode: int) -> Dict[str, str]:
-    if type(mode) is not int or mode not in (0, 3):
-        raise ValueError("invalid joint plane mode")
-    if mode == 3:
-        return {
-            "coordinate": "bounded-source-time-linear-raw-mean-and-robust-amplitude-reference",
-            "convergence_curve": "continuously-tracked-mean-is-zero-plane-no-cut-latch",
-            "requested_gain": "immutable-cfg-pop-strength-independent-of-display-limit",
-            "container_scale": "abi-retained-identity-mode3-hard-representation-cap",
-            "near_curve": "linear-coordinate-no-depth-curve-before-hard-representation-cap",
-            "spatial_conditioner": "fixed-75pct-vertical-majorant-share-then-horizontal-majorant",
-        }
+    if type(mode) is not int or mode != 3:
+        raise ValueError("invalid adaptive policy identity; expected 3")
     return {
-        "coordinate": "immediate-first-usable-center-latched-until-cut-fixed-"
-                      "authenticated-scale-retained-across-unusable",
-        "convergence_curve": "arithmetic-mean-center-is-zero-plane",
-        "requested_gain": "immutable-cfg-pop-strength",
-        "container_scale": "abi-retained-identity-pointwise-soft-container-is-map-local",
-        "near_curve": "fixed-contract-logarithmic-tau-independent-of-content-occupancy",
+        "coordinate": "bounded-source-time-linear-raw-mean-and-robust-amplitude-reference",
+        "convergence_curve": "continuously-tracked-mean-is-zero-plane-no-cut-latch",
+        "requested_gain": "immutable-cfg-pop-strength-independent-of-display-limit",
+        "container_scale": "abi-retained-identity-mode3-hard-representation-cap",
+        "near_curve": "linear-coordinate-no-depth-curve-before-hard-representation-cap",
         "spatial_conditioner": "fixed-75pct-vertical-majorant-share-then-horizontal-majorant",
     }
 
@@ -308,13 +298,27 @@ def shadow_state_constant_float32(document: Any, name: str) -> float:
 
 def shadow_frame_valid_from_statistics(
         state_document: Any, statistics: Dict[str, float]) -> bool:
-    """Apply the native frame-resolve validity predicate to validated dump evidence."""
-
-    collapse_epsilon = shadow_state_constant_float32(
-        state_document, "collapse_abs_epsilon")
-    return bool(
-        statistics["valid"] > 0.5 and
-        statistics["population_std"] > collapse_epsilon)
+    """Mirror native moments, mandatory quantiles and finite robust-amplitude admission."""
+    collapse = shadow_state_constant_float32(state_document, "collapse_abs_epsilon")
+    raw_scale = shadow_state_constant_float32(state_document, "raw_coordinate_scale")
+    try:
+        minimum, maximum, mean, std = (statistics[name] for name in (
+            "minimum", "maximum", "mean", "population_std"))
+        low, high, bin_width = (statistics[name] for name in (
+            "percentile_low", "percentile_high", "percentile_bin_width"))
+        half_span = _float32(_float32(high - low) * _float32(.5))
+        reference = _float32(max(half_span, raw_scale))
+        inverse = _float32(1.0 / reference) if reference > 0.0 else 0.0
+        return bool(
+            statistics["valid"] == 1.0 and statistics["percentile_valid"] == 1.0 and
+            all(math.isfinite(value) for value in (
+                minimum, maximum, mean, std, low, high, bin_width,
+                half_span, raw_scale, reference, inverse)) and
+            maximum > minimum and minimum <= mean <= maximum and std > collapse and
+            minimum <= low <= high <= maximum and bin_width >= 0.0 and
+            raw_scale > 0.0 and reference > 0.0 and inverse > 0.0)
+    except (KeyError, OverflowError, ValueError, ZeroDivisionError):
+        return False
 
 
 def _uint32(value: Any, label: str) -> int:
@@ -842,18 +846,16 @@ def _subtitle_provisional_geometry_is_canonical(
 
 def _validate_adaptive_ui_tail(words: tuple[int, ...], source_width: int,
                                content: tuple[int, int, int, int], *,
-                               joint_plane_mode: int | None = None,
+                               joint_plane_mode: int | None = 3,
                                requested_gain: float | None = None) -> None:
     display_budget = _display_budget_for_mode(requested_gain, joint_plane_mode)
     tail = words[80:96]
     if tail[0] == 0:
         if any(tail):
             raise ValueError("SLR14 inactive adaptive UI tail must be zero")
-        if joint_plane_mode == 3 and words[20] != 0:
+        if words[20] != 0:
             raise ValueError("SLR14 current cover requires an active adaptive UI tail")
         return
-    if joint_plane_mode != 3:
-        raise ValueError("SLR14 inactive adaptive UI tail must be zero in mode 0")
     if not 0 < source_width <= _MAXIMUM_SOURCE_LONG_SIDE:
         raise ValueError("SLR14 mode3 source width exceeds its supported histogram range")
     maximum_level = (source_width + 99) // 100
@@ -880,7 +882,7 @@ def _validate_adaptive_ui_tail(words: tuple[int, ...], source_width: int,
     capped_conflict = tail[14] * 5 > tail[13] or tail[14] * 50 > area
     if bool(tail[1] & 4) != capped_conflict:
         raise ValueError("SLR14 adaptive UI capped-conflict flag does not match its counts")
-    if words[20] != 0:
+    if (words[2] & (SUBTITLE_LOCATOR_FLAG_OWNER | SUBTITLE_LOCATOR_FLAG_TARGET_VALID)) == (SUBTITLE_LOCATOR_FLAG_OWNER | SUBTITLE_LOCATOR_FLAG_TARGET_VALID):
         provisional = bool(words[2] & SUBTITLE_LOCATOR_FLAG_PROVISIONAL_CURRENT)
         if (words[18] != tail[3] or words[24] != 2 or
                 (provisional and (words[29] != tail[3] or words[30] != 2))):
@@ -893,7 +895,7 @@ def validate_subtitle_locator_state(
         field_width: int, field_height: int,
         tensor_content: tuple[int, int, int, int] | None = None,
         expected_scene_epoch: int | None = None,
-        joint_plane_mode: int | None = None,
+        joint_plane_mode: int | None = 3,
         requested_gain: float | None = None) -> Dict[str, Any]:
     """Validate and decode the current SLR14 ownership and adaptive UI state."""
 
@@ -938,8 +940,8 @@ def validate_subtitle_locator_state(
             owner_count, pending_count, current_count)):
         raise ValueError("SLR13 state exceeds its fixed rectangle capacity")
     fade = words[24]
-    if fade > 2:
-        raise ValueError("SLR13 fade step must be zero, one, or two")
+    if fade not in (0, 2):
+        raise ValueError("SLR13 fade step must be zero or the full-plane pin")
     if words[21] not in {
             SUBTITLE_LOCATOR_EVENT_NONE,
             SUBTITLE_LOCATOR_EVENT_BIRTH,
@@ -1021,12 +1023,12 @@ def validate_subtitle_locator_state(
         raise ValueError("SLR13 owner generation disagrees with owner authority")
     if current_count > owner_count:
         raise ValueError("SLR13 current rectangle count cannot exceed its owner count")
-    if current_count != 0 and not (owner_flag and target_valid and fade in (1, 2)):
+    if current_count != 0 and not (owner_flag and target_valid and fade == 2):
         raise ValueError("SLR13 current rectangles require owner and valid target authority")
     if target_valid:
         if (not owner_flag or target_reset or words[19] != words[3] or
                 not math.isfinite(target) or
-                abs(target) > _DEFAULTS.direct_container_limit or fade not in (1, 2)):
+                not 0.0 <= target <= _DEFAULTS.direct_container_limit or fade != 2):
             raise ValueError("SLR13 valid target identity or representation is inconsistent")
     elif target_reset:
         if (not owner_flag or words[18] != 0 or words[19] != 0 or
@@ -1038,9 +1040,9 @@ def validate_subtitle_locator_state(
                 owner_kinds != 0 or pending_kinds != 0 or current_kinds != 0 or
                 words[21] != SUBTITLE_LOCATOR_EVENT_NONE or words[25] != 0 or
                 not math.isfinite(provisional_target) or
-                abs(provisional_target) > _DEFAULTS.direct_container_limit or
+                not 0.0 <= provisional_target <= _DEFAULTS.direct_container_limit or
                 not owner_flag or not target_valid or owner_count != 1 or fade != 2 or
-                provisional_fade not in (1, 2)):
+                provisional_fade != 2):
             raise ValueError("SLR13 provisional current authority is inconsistent")
         pending_core = pending[0]
         current_cover = current[0]
@@ -1060,16 +1062,8 @@ def validate_subtitle_locator_state(
     }
     packed_grace_zero = words[29] == 0 and words[30] == 0
     if owner_flag:
-        if (counter > coordinate_contract.SUBTITLE_OCR.locator_target_max_unreliable_holds or
-                (not provisional_current and not packed_grace_zero)):
-            raise ValueError("SLR13 unreliable-target hold exceeds its authenticated limit")
-        # Current authority is required to increment this counter, but an observation without
-        # current OCR authority preserves an existing valid target/counter without aging or
-        # conditioning. The serialized frame therefore may have current_count == 0 here.
-        if counter != 0 and not (
-                target_valid and fade in (1, 2) and
-                words[21] == SUBTITLE_LOCATOR_EVENT_NONE):
-            raise ValueError("SLR13 unreliable-target hold requires live target authority")
+        if counter != 0 or (not provisional_current and not packed_grace_zero):
+            raise ValueError("SLR14 owned hold word is reserved zero")
         if not target_valid and not target_reset and (
                 words[18] != 0 or words[19] != 0 or current_count != 0 or fade != 0):
             raise ValueError("SLR13 owner without target authority must clear target words")
@@ -1086,7 +1080,7 @@ def validate_subtitle_locator_state(
             raise ValueError("SLR13 death-grace exceeds the authenticated observation limit")
         if (target_valid or target_reset or words[19] != 0 or
                 not math.isfinite(target) or
-                abs(target) > _DEFAULTS.direct_container_limit or
+                not 0.0 <= target <= _DEFAULTS.direct_container_limit or
                 current_count != 0 or fade != 0 or
                 grace_bounds["left"] >= grace_bounds["right"] or
                 grace_bounds["top"] >= grace_bounds["bottom"] or
@@ -1705,7 +1699,7 @@ def validate_window_region_document(
 
 def camera_center_integrity_bits(
         center: float, inverse_scale: float, convergence_curve: float, revision: int,
-        joint_plane_mode: int = 0) -> int:
+        joint_plane_mode: int = 3) -> int:
     """Mirror the authenticated SM5 uint32 checksum over the latched camera center."""
 
     words = (
@@ -1717,8 +1711,7 @@ def camera_center_integrity_bits(
     checksum = 0
     for word in words:
         checksum = ((checksum ^ word) * 16777619) & 0xFFFFFFFF
-    if joint_plane_mode != 0:
-        checksum = ((checksum ^ joint_plane_mode) * 16777619) & 0xFFFFFFFF
+    checksum = ((checksum ^ joint_plane_mode) * 16777619) & 0xFFFFFFFF
     return checksum
 
 
@@ -1727,25 +1720,16 @@ def camera_center_integrity_for_state_values(values: Dict[str, Any]) -> int:
     checksum = camera_center_integrity_bits(
         values["center"], values["inverse_scale"], values["convergence_curve"],
         values["calibration_revision"], values["joint_plane_mode_bits"])
-    if values["joint_plane_mode_bits"] == 3:
-        for descriptor in _STATE_FIELDS[12:]:
-            value = values[descriptor["name"]]
-            bits = (struct.unpack("<I", struct.pack("<f", value))[0]
-                    if descriptor["gpu_encoding"] == "float" else int(value))
-            checksum = ((checksum ^ bits) * 16777619) & 0xFFFFFFFF
+    for descriptor in _STATE_FIELDS[12:]:
+        value = values[descriptor["name"]]
+        bits = (struct.unpack("<I", struct.pack("<f", value))[0]
+                if descriptor["gpu_encoding"] == "float" else int(value))
+        checksum = ((checksum ^ bits) * 16777619) & 0xFFFFFFFF
     return checksum
 
 
 def _validate_adaptive_controller_tail(values: Dict[str, Any]) -> None:
     mode = values["joint_plane_mode_bits"]
-    if mode != 3:
-        for descriptor in _STATE_FIELDS[12:]:
-            value = values[descriptor["name"]]
-            bits = (struct.unpack("<I", struct.pack("<f", value))[0]
-                    if descriptor["gpu_encoding"] == "float" else int(value))
-            if bits != 0:
-                raise ValueError("legacy mode requires a zero adaptive controller tail")
-        return
 
     def clock(name: str) -> int:
         return _uint64_words(values[name + "_low"], values[name + "_high"])
@@ -1786,7 +1770,7 @@ def _validate_adaptive_controller_tail(values: Dict[str, Any]) -> None:
 
 def validate_parallax_state_words(
         words: Any, *, raw_coordinate_scale: float,
-        expected_joint_plane_mode: int | None = None,
+        expected_joint_plane_mode: int | None = 3,
         requested_gain: float | None = None) -> Dict[str, Any]:
     """Authenticate the generated 28-word GPU tuple, including the adaptive controller tail.
 
@@ -1808,8 +1792,8 @@ def validate_parallax_state_words(
     if (expected_joint_plane_mode is not None and
             (isinstance(expected_joint_plane_mode, bool) or
              not isinstance(expected_joint_plane_mode, int) or
-             expected_joint_plane_mode not in (0, 3))):
-        raise ValueError("ParallaxState expected joint plane mode must be 0 or 3")
+             expected_joint_plane_mode != 3)):
+        raise ValueError("ParallaxState expected joint plane mode must be adaptive policy identity 3")
     values = {
         descriptor["name"]: (
             _finite_float32(_float32_bits(word), f"ParallaxState {descriptor['name']}")
@@ -1817,7 +1801,7 @@ def validate_parallax_state_words(
         for descriptor, word in zip(_STATE_FIELDS, raw)
     }
     mode = values["joint_plane_mode_bits"]
-    if (mode not in (0, 3) or
+    if (mode != 3 or
             (expected_joint_plane_mode is not None and mode != expected_joint_plane_mode) or
             values["mapping_state_reserved_2"] != 0):
         raise ValueError("ParallaxState has invalid mode or reserved mapping state")
@@ -1834,14 +1818,11 @@ def validate_parallax_state_words(
     revision = _calibration_revision(values["calibration_revision"], "ParallaxState revision")
     inverse = values["inverse_scale"]
     camera_initialized = inverse > 0.0 and revision > 0
-    if camera_initialized and mode == 0:
-        camera_initialized = _within_absolute_tolerance(
-            _float32(1.0 / inverse), scale, _RAW_COORDINATE_SCALE_AUTHENTICATION_TOLERANCE)
     camera_empty = values["center"] == 0.0 and inverse == 0.0
     samples = 1
-    if ((mode == 3 and valid == 1.0 and values["gain_clock_armed"] != 1) or
-            (mode == 3 and camera_initialized and values["gain_seed_count"] != samples) or
-            (mode == 3 and camera_empty and values["gain_seed_count"] >= samples) or
+    if ((valid == 1.0 and values["gain_clock_armed"] != 1) or
+            (camera_initialized and values["gain_seed_count"] != samples) or
+            (camera_empty and values["gain_seed_count"] >= samples) or
             (valid == 1.0 and not camera_initialized) or
             (valid == 0.0 and not (camera_initialized or camera_empty))):
         raise ValueError("ParallaxState violates frame/camera validity semantics")
@@ -1850,11 +1831,10 @@ def validate_parallax_state_words(
             (values["gain_target_nearest"] != 0.0 and values["gain_target_nearest"] < scale) or
             (values["gain_seed_mean_nearest"] != 0.0 and values["gain_seed_mean_nearest"] < scale)):
         raise ValueError("ParallaxState Host amplitude reference is below the model prior")
-    if mode == 3:
-        budget = _display_budget_for_mode(requested_gain, mode)
-        stored = values["gain_display_limit"]
-        if (stored != 0.0 or valid == 1.0) and stored != budget:
-            raise ValueError("ParallaxState adaptive representation budget disagrees with the contract")
+    budget = _display_budget_for_mode(requested_gain, mode)
+    stored = values["gain_display_limit"]
+    if (stored != 0.0 or valid == 1.0) and stored != budget:
+        raise ValueError("ParallaxState adaptive representation budget disagrees with the contract")
     return values
 
 
@@ -1912,9 +1892,9 @@ def validate_shadow_state_document(document: Any) -> Dict[str, Any]:
     mode_view = document.get("decoded")
     decoded_mode = mode_view.get("joint_plane_mode") if isinstance(mode_view, dict) else None
     if (isinstance(decoded_mode, bool) or not isinstance(decoded_mode, int) or
-            decoded_mode not in (0, 3)):
+            decoded_mode != 3):
         raise ValueError("shadow_state.json has an invalid joint plane mode")
-    gain_unit = "coordinate unit" if decoded_mode == 3 else "curve unit"
+    gain_unit = "coordinate unit"
     accepted_units = (
         {
             "coordinate": "dimensionless canonical coordinate derived from raw depth",
@@ -1948,8 +1928,6 @@ def validate_shadow_state_document(document: Any) -> Dict[str, Any]:
     }
     expected_defaults = {
         "collapse_abs_epsilon": _DEFAULTS.collapse_abs_epsilon,
-        "far_tau": _DEFAULTS.far_tau,
-        "near_log_tau": _DEFAULTS.near_log_tau,
         "gain_per_pop": _DEFAULTS.gain_per_pop,
         "reference_pop_strength": _DEFAULTS.reference_pop_strength,
         "reference_gain_at_reference_pop":
@@ -2034,7 +2012,7 @@ def validate_shadow_state_document(document: Any) -> Dict[str, Any]:
     expected_authorization = coordinate_tag if typed["frame_valid"] > 0.5 else 0
     if typed["renderer_authorization_bits"] != expected_authorization:
         raise ValueError("shadow_state.json renderer authorization disagrees with frame validity")
-    if (typed["joint_plane_mode_bits"] not in (0, 3) or
+    if (typed["joint_plane_mode_bits"] != 3 or
             typed["joint_plane_mode_bits"] != decoded_mode or
             typed["mapping_state_reserved_2"] != 0):
         raise ValueError("shadow_state.json has nonzero reserved mapping state")
@@ -2047,12 +2025,11 @@ def validate_shadow_state_document(document: Any) -> Dict[str, Any]:
             (typed["gain_seed_mean_nearest"] != 0.0 and
              typed["gain_seed_mean_nearest"] < native_constants["raw_coordinate_scale"])):
         raise ValueError("shadow_state.json Host amplitude reference is below the model prior")
-    if decoded_mode == 3:
-        budget = _display_budget_for_mode(native_constants["requested_gain"], decoded_mode)
-        stored_budget = typed["gain_display_limit"]
-        if ((stored_budget != 0.0 or typed["frame_valid"] == 1.0) and
-                stored_budget != budget):
-            raise ValueError("shadow_state.json adaptive representation budget disagrees with stream strength")
+    budget = _display_budget_for_mode(native_constants["requested_gain"], decoded_mode)
+    stored_budget = typed["gain_display_limit"]
+    if ((stored_budget != 0.0 or typed["frame_valid"] == 1.0) and
+            stored_budget != budget):
+        raise ValueError("shadow_state.json adaptive representation budget disagrees with stream strength")
 
     decoded = document.get("decoded")
     if not isinstance(decoded, dict) or set(decoded) != _DECODED_KEYS:
@@ -2113,11 +2090,8 @@ def validate_shadow_state_document(document: Any) -> Dict[str, Any]:
             native_decoded["effective_gain"] < 0.0 or
             native_decoded["effective_gain"] >
             native_decoded["requested_gain"] + 1.0e-7 or
-            (camera_valid and decoded_mode == 0 and not _within_absolute_tolerance(
-                native_latched_scale, native_constants["raw_coordinate_scale"],
-                _RAW_COORDINATE_SCALE_AUTHENTICATION_TOLERANCE)) or
             (decoded["frame_valid"] and not decoded["camera_valid"]) or
-            (decoded_mode == 3 and (
+            ((
                 (camera_valid and typed["gain_seed_count"] != 1) or
                 (not camera_valid and typed["gain_seed_count"] >= 1) or
                 (decoded["frame_valid"] and typed["gain_clock_armed"] != 1))) or
@@ -2219,10 +2193,7 @@ def _validate_shadow_manifest_summary(value: Any) -> Dict[str, Any]:
                 native_value["effective_gain"],
                 native_value["requested_gain"],
                 _REQUESTED_GAIN_AUTHENTICATION_TOLERANCE) or
-            (value["joint_plane_mode"] == 0 and not _within_absolute_tolerance(
-                native_value["latched_scale"], native_value["raw_coordinate_scale"],
-                _RAW_COORDINATE_SCALE_AUTHENTICATION_TOLERANCE)) or
-            value["joint_plane_mode"] not in (0, 3) or
+            value["joint_plane_mode"] != 3 or
             native_value["latched_scale"] <= 0.0 or
             native_value["convergence_curve"] !=
             _float32(_DEFAULTS.convergence_curve_default) or
@@ -2315,9 +2286,11 @@ def _subtitle_locator_resolver_contract() -> Dict[str, Any]:
         "state_tag": SUBTITLE_LOCATOR_STATE_TAG,
         "state_word_count": SUBTITLE_LOCATOR_STATE_WORD_COUNT,
         "rectangle_capacity": SUBTITLE_LOCATOR_RECT_CAPACITY,
-        "experimental_adaptive_ui": {
-            "modes": [3], "state_offset": 80, "state_word_count": 16,
+        "adaptive_ui": {
+            "policy_id": coordinate_contract.CALIBRATED_DEFAULTS.adaptive_policy_id,
+            "state_offset": 80, "state_word_count": 16,
             "clock": "source-observation-microseconds",
+            "geometry_authority": coordinate_contract.SUBTITLE_OCR.geometry_authority,
             "probe": "union-of-current-authorized-covers-in-content",
             "clearance_per_eye_source_pixels": 2,
             "enter_covered_fraction": _float32(0.20),
@@ -2379,72 +2352,18 @@ def _subtitle_locator_resolver_contract() -> Dict[str, Any]:
             "hard_cut_allowed": False,
         },
         "target_policy": {
-            "units": "binocular-source-pixels",
-            "placement": {
-                "primary": "aggregate-owner-median-member-center",
-                "fallback_on_primary_failure": True,
-                "fallback_span": (
-                    "ordinary-core-horizontal-bounds-else-owner-core-horizontal-bounds"),
-                "fallback_top": "ordinary-core-top-else-owner-core-top",
-                "fallback_step_denominator": (
-                    coordinate_contract.SUBTITLE_OCR.
-                    locator_target_horizontal_step_denominator),
-                "fallback_max_radius_steps": (
-                    coordinate_contract.SUBTITLE_OCR.
-                    locator_target_horizontal_fallback_max_radius_steps),
-                "fallback_order_within_radius": ["negative", "positive"],
-                "fallback_radius_policy": "first-reliable-radius",
-                "fallback_requires_unclamped_sample_strip": True,
-                "fallback_minimum_coherent_rows": 2,
-                "fallback_row_median_delta_max": (
-                    coordinate_contract.SUBTITLE_OCR.
-                    locator_target_max_row_median_delta_binocular_source_pixels),
-                "fallback_probe_target": "mean-medians",
-                "fallback_pair_target_delta_max": (
-                    coordinate_contract.SUBTITLE_OCR.
-                    locator_target_max_row_median_delta_binocular_source_pixels),
-                "fallback_pair_conflict": "unreliable-stop-search",
-                "fallback_within_radius_policy": "maximum-mean-within-delta",
-                "ribbon_places_fallback_with_ordinary": False,
-            },
-            "selection": {
-                "applies_to": "primary",
-                "samples_per_row": 16,
-                "median_indices": [7, 8],
-                "iqr_lower_indices": [3, 4],
-                "iqr_upper_indices": [11, 12],
-                "row_validity": "independent-finite-direct-container",
-                "both_valid_row_iqr": "ignored",
-                "single_valid_row": "median-if-iqr-at-most-row-iqr-max",
-                "both_valid_within_delta": "mean-medians",
-                "both_valid_beyond_delta": "maximum-median",
-            },
-            "evidence": {
-                "row_iqr_max": (
-                    coordinate_contract.SUBTITLE_OCR.
-                    locator_target_max_row_iqr_binocular_source_pixels),
-                "row_median_delta_max": (
-                    coordinate_contract.SUBTITLE_OCR.
-                    locator_target_max_row_median_delta_binocular_source_pixels),
-            },
-            "deadband": (
-                coordinate_contract.SUBTITLE_OCR.locator_target_deadband_binocular_source_pixels),
-            "ema_alpha": coordinate_contract.SUBTITLE_OCR.locator_target_ema_alpha,
-            "maximum_slew": (
-                coordinate_contract.SUBTITLE_OCR.locator_target_max_slew_binocular_source_pixels),
-            "maximum_residual": (
-                coordinate_contract.SUBTITLE_OCR.
-                locator_target_max_residual_binocular_source_pixels),
-            "unreliable_hold": {
-                "owner_state_word": 25,
-                "maximum_distinct_observations": (
-                    coordinate_contract.SUBTITLE_OCR.locator_target_max_unreliable_holds),
-                "increment_requires": (
-                    "continuing-same-scene-owner-current-authority-valid-target"),
-                "preserve_without_current_authority": True,
-                "duplicate_observation_ages": False,
-                "hard_cut_allowed": False,
-            },
+            "units": "one-eye-analysis-source-U",
+            "selection": "authenticated-current-cover-conflict-histogram",
+            "candidate_step_per_eye_source_pixels": 4,
+            "clearance_per_eye_source_pixels": 2,
+            "approach_dwell_us": 100000,
+            "retreat_dwell_us": 1500000,
+            "approach_rate_source_u_per_second": _float32(0.03),
+            "retreat_rate_source_u_per_second": _float32(0.005),
+            "rate_tick_cap_us": 250000,
+            "current_cover_pin": "immediate-full-plane",
+            "collar": "existing-horizontal-plus-vertical-analytic-distance",
+            "owner_hold_word": "reserved-zero",
             "representation_limit": "direct-parallax-container",
         },
         "shader_contract": _subtitle_shader_contract(_SUBTITLE_LOCATOR_SHADER_SPECS),
@@ -2607,9 +2526,9 @@ def _validate_final_parallax_manifest(document: Dict[str, Any]) -> Dict[str, Any
 def _validate_warp_map_manifest(
         document: Dict[str, Any], artifacts: Dict[str, Any],
         dimensions: Dict[str, Any], input_mode: str,
-        joint_plane_mode: int = 0) -> Dict[str, Any]:
+        joint_plane_mode: int = 3) -> Dict[str, Any]:
     """Validate the manifest-resident replacement for ``warp_map_shape.json``."""
-    if type(joint_plane_mode) is not int or joint_plane_mode not in (0, 3):
+    if type(joint_plane_mode) is not int or joint_plane_mode != 3:
         raise ValueError("dump_manifest.json has an invalid joint plane mode")
     contract = document.get("warp_map_contract")
     map_descriptor = artifacts.get("warp_map.f32")
@@ -2748,6 +2667,10 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
     if (document.get("capture_status") != "complete" or
             document.get("published_atomically") is not True):
         raise ValueError("dump_manifest.json is not a complete atomic publication")
+    timestamp = _uint64(document.get("matched_observation_timestamp_us"),
+                        "dump matched observation timestamp")
+    if timestamp == 0:
+        raise ValueError("dump matched observation timestamp must be nonzero")
     schema = document["schema"]
     renderer = document.get("renderer")
     shadow = document.get("parallax_v2_shadow")
@@ -3124,6 +3047,7 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
                 "and full-source depth input")
     return {
         "manifest_schema": schema,
+        "matched_observation_timestamp_us": timestamp,
         "active": active,
         "rendered_output_selected": selected,
         "mapping_artifacts_match_selected_renderer": mapping_matches,
@@ -3225,8 +3149,9 @@ def _gpu_trace_contract_expected_sections() -> Dict[str, Any]:
                 "validity": (
                     "post-finalization condition params for an authenticated subtitle "
                     "observation, or the byte-identical immediately prior params for "
-                    "held_with_depth: exact SLR tuple when current_count is nonzero, canonical "
-                    "zero6 when current_count is zero; "
+                    "held_with_depth: exact SLR tuple or canonical zero6 when current_count is nonzero, "
+                    "canonical zero6 when current_count is zero; "
+                    "matched geometry authority is verified from the complete state separately; "
                     "suppressed output copies exact Base and these words are unused"),
             },
             "observation_timestamp": {
@@ -3577,11 +3502,11 @@ def validate_gpu_trace_ring(
                         owner_kinds != 0 or pending_kinds != 0 or current_kinds != 0 or
                         locator[21] != SUBTITLE_LOCATOR_EVENT_NONE or locator[25] != 0 or
                         not math.isfinite(provisional_target) or
-                        abs(provisional_target) > _DEFAULTS.direct_container_limit or
+                        not 0.0 <= provisional_target <= _DEFAULTS.direct_container_limit or
                         not (locator_flags & SUBTITLE_LOCATOR_FLAG_OWNER) or
                         not (locator_flags & SUBTITLE_LOCATOR_FLAG_TARGET_VALID) or
                         locator[4] != 1 or locator[24] != 2 or
-                        provisional_fade not in (1, 2) or
+                        provisional_fade != 2 or
                         not _subtitle_provisional_geometry_is_canonical(
                             trace_rectangle(SUBTITLE_LOCATOR_OWNER_WORD_OFFSET),
                             pending_core) or
@@ -3604,7 +3529,7 @@ def validate_gpu_trace_ring(
                 coordinate_contract.SUBTITLE_OCR.condition_param_tag,
                 locator[20], current_kinds, expected_fade, expected_target
             ) if locator[20] != 0 else (0, 0, 0, 0, 0, 0))
-            if condition != expected_condition:
+            if condition != expected_condition and condition != (0, 0, 0, 0, 0, 0):
                 raise ValueError("GPU trace condition params disagree with finalized SLR13")
 
         matched = frame_id == matched_frame_id
@@ -3634,8 +3559,8 @@ def validate_gpu_trace_ring(
         condition_published = condition_executed or subtitle_held
         condition_active = bool(
             condition_published and condition_valid and condition[2] != 0 and
-            condition[4] in {1, 2} and condition_target is not None and
-            abs(condition_target) <=
+            condition[4] == 2 and condition_target is not None and
+            0.0 <= condition_target <=
             coordinate_contract.CALIBRATED_DEFAULTS.direct_container_limit)
         condition_summary = ({
             "active": False,
@@ -3719,7 +3644,7 @@ def validate_gpu_trace_ring(
                     locator[SUBTITLE_LOCATOR_PROVISIONAL_FADE_WORD]
                     if locator_flags & SUBTITLE_LOCATOR_FLAG_PROVISIONAL_CURRENT else 0),
                 "lifetime_or_hold_count": lifetime_or_hold,
-                "unreliable_hold_count": lifetime_or_hold if owner_count != 0 else None,
+                "reserved_owner_hold_count": lifetime_or_hold if owner_count != 0 else None,
                 "death_grace_count": lifetime_or_hold if owner_count == 0 else None,
                 "cut_epoch": locator[26],
                 "analysis_generation": _uint64_words(locator[10], locator[11]),
@@ -3800,6 +3725,8 @@ def _verify_gpu_trace_artifacts(
     matched_record = next(
         record for record in ring["decoded"]["records"]
         if record["matched_dump_frame"])
+    if matched_record["observation_timestamp_us"] != manifest["matched_observation_timestamp_us"]:
+        raise ValueError("GPU trace matched source observation timestamp disagrees with dump")
     return {
         "available": True,
         "record_count": ring["record_count"],
@@ -3817,8 +3744,8 @@ def _verify_subtitle_conditioning_artifacts(
         analysis_generation: int, source_width: int, source_height: int,
         field_width: int, field_height: int,
         tensor_content: tuple[int, int, int, int],
-        confirmed_cut_count: int, gpu_trace: Dict[str, Any],
-        joint_plane_mode: int = 0, requested_gain: float | None = None) -> Dict[str, Any]:
+        confirmed_cut_count: int, gpu_trace: Dict[str, Any], shadow_state: Dict[str, Any],
+        joint_plane_mode: int = 3, requested_gain: float | None = None) -> Dict[str, Any]:
     import json
 
     metadata_payload = _read_hashed_artifact(
@@ -3939,9 +3866,52 @@ def _verify_subtitle_conditioning_artifacts(
         if not selection_order_valid:
             raise ValueError(
                 "SLR13 current rectangles are outside the frozen same-frame OCR8 selection")
+        publication_timestamp = manifest["matched_observation_timestamp_us"]
+        matched_trace = gpu_trace.get("matched_record")
+        if held_with_depth and locator["current_count"] != 0:
+            origin = next((row for row in gpu_trace["records"]
+                           if row["frame_id"] == evidence_frame_id and
+                           row["subtitle_disposition"]["name"] in {"optional-ocr", "abstention"}), None)
+            if origin is None:
+                raise ValueError("held SLR cover lacks its original authenticated source-time row")
+            if origin["subtitle_locator_words"] != list(_uint32_words(
+                    locator_payload, SUBTITLE_LOCATOR_STATE_WORD_COUNT, "SLR locator state")):
+                raise ValueError("held SLR cover differs from its source-time owner publication")
+            publication_timestamp = origin["observation_timestamp_us"]
+        state_timestamp = _uint64_words(shadow_state["gain_last_observation_low"],
+                                       shadow_state["gain_last_observation_high"])
+        geometry_ready = bool(
+            shadow_state["frame_valid"] == 1.0 and
+            shadow_state["renderer_authorization_bits"] == _CONTRACT_TAG and
+            shadow_state["joint_plane_mode_bits"] == 3 and
+            state_timestamp == publication_timestamp and publication_timestamp != 0 and
+            shadow_state["confirmed_cut_count"] == locator["scene_epoch"])
+        locator_words = _uint32_words(locator_payload, SUBTITLE_LOCATOR_STATE_WORD_COUNT,
+                                      "SLR locator state")
+        tail = locator_words[80:96]
+        if not geometry_ready and not held_with_depth and tail[0] != 0 and (
+                tail[1] & 11 or any(tail[index] for index in range(4, 12))):
+            raise ValueError("unavailable geometry must disarm adaptive UI clock and dwell")
+        if geometry_ready and locator["current_count"] != 0 and (
+                not tail[1] & 8 or _uint64_words(tail[4], tail[5]) != publication_timestamp):
+            raise ValueError("current SLR cover clock differs from authenticated geometry publication")
+        if matched_trace is not None:
+            expected_condition = (0, 0, 0, 0, 0, 0)
+            if geometry_ready and locator["current_count"] != 0:
+                provisional = locator["provisional_current"]
+                expected_condition = (
+                    coordinate_contract.SUBTITLE_OCR.condition_param_schema,
+                    coordinate_contract.SUBTITLE_OCR.condition_param_tag,
+                    locator_words[20], locator["current_ribbon_mask"],
+                    locator_words[30] if provisional else locator_words[24],
+                    locator_words[29] if provisional else locator_words[18])
+            if tuple(matched_trace["subtitle_condition_words"]) != expected_condition:
+                raise ValueError("matched subtitle condition verdict disagrees with authenticated geometry authority")
         return {
             "mode": _SUBTITLE_MODE_SLR13,
             "subtitle_evidence_verified": True,
+            "geometry_ready": geometry_ready,
+            "geometry_publication_timestamp_us": publication_timestamp,
             "evidence_frame_id": evidence_frame_id,
             "held_with_depth": held_with_depth,
             "ocr_authoritative": ocr["authoritative"],
@@ -4051,10 +4021,10 @@ def _replay_slr13_conditioner(
     y_cells = np.clip(np.arange(height, dtype=np.int64), content[1], content[3] - 1)
     base_for_conditioning = base[np.ix_(y_cells, x_cells)]
     mode = subtitle.get("joint_plane_mode")
-    if mode is not None and (type(mode) is not int or mode not in (0, 3)):
+    if type(mode) is not int or mode != 3:
         raise ValueError("SLR14 conditioner has an invalid joint plane mode")
     rectangles = subtitle["current_rectangles"]
-    if not rectangles:
+    if not rectangles or subtitle.get("geometry_ready") is False:
         return base_for_conditioning.copy()
     source_width = _uint32(subtitle.get("source_width"), "SLR13 analysis source width")
     if source_width == 0:
@@ -4065,13 +4035,13 @@ def _replay_slr13_conditioner(
     else:
         target = subtitle.get("target")
         fade = subtitle.get("fade")
-    if target is None or fade not in (1, 2):
+    if target is None or fade != 2:
         raise ValueError("SLR13 current geometry lacks valid target/fade authority")
     target32 = np.float32(target)
     if (not np.isfinite(target32) or
-            abs(target32) > np.float32(_DEFAULTS.direct_container_limit)):
+            not np.float32(0.0) <= target32 <= np.float32(_DEFAULTS.direct_container_limit)):
         raise ValueError("SLR13 target exceeds its authenticated representation limit")
-    if mode == 3 and fade != 2:
+    if fade != 2:
         raise ValueError("SLR14 adaptive UI requires a full geometric pin")
 
     if (not coordinate_contract.subtitle_ocr_field_is_calibrated(width, height) or
@@ -4085,8 +4055,7 @@ def _replay_slr13_conditioner(
             np.float32(_DEFAULTS.max_horizontal_slope) / np.float32(content_width))
         vertical_step = np.float32(
             np.float32(_DEFAULTS.max_vertical_shear) / np.float32(content_width))
-        core_range = (np.float32(0.0) if mode == 3 else
-                      np.float32(np.float32(0.5) / np.float32(source_width)))
+        core_range = np.float32(0.0)
     else:
         horizontal_step, vertical_step, core_range = (
             np.float32(value) for value in division_values)
@@ -4120,18 +4089,11 @@ def _replay_slr13_conditioner(
         np.abs(base_for_conditioning), np.float32(_DEFAULTS.direct_container_limit))
     signed_budget = np.where(delta < np.float32(0.0), -budget, budget).astype(np.float32)
     full = np.add(target32, signed_budget, dtype=np.float32)
-    if fade == 1:
-        half_delta = np.multiply(
-            np.float32(0.5), np.subtract(full, base_for_conditioning, dtype=np.float32),
-            dtype=np.float32)
-        conditioned = np.add(base_for_conditioning, half_delta, dtype=np.float32)
-    else:
-        conditioned = full
+    conditioned = full
     result = np.where(
         base_in_range & ~safe, conditioned, base_for_conditioning).astype(np.float32)
-    if mode == 3:
-        result = np.where(base_in_range & (best_distance == np.float32(0.0)),
-                          target32, result).astype(np.float32)
+    result = np.where(base_in_range & (best_distance == np.float32(0.0)),
+                      target32, result).astype(np.float32)
     return result
 
 
@@ -4155,8 +4117,7 @@ def _replay_slr13_conditioner_sm5_candidates(
             _DEFAULTS.max_horizontal_slope, content_width),
         _sm5_power_of_two_division_candidates(
             _DEFAULTS.max_vertical_shear, content_width),
-        ((np.float32(0.0),) if subtitle.get("joint_plane_mode") == 3 else
-         _sm5_power_of_two_division_candidates(0.5, source_width)),
+        (np.float32(0.0),),
     )
     seen = set()
     for division_values in product(*choices):
@@ -4652,6 +4613,7 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
         gpu_trace=gpu_trace,
         joint_plane_mode=shadow_state["joint_plane_mode_bits"],
         requested_gain=shadow_state_constant_float32(shadow_state_document, "requested_gain"),
+        shadow_state=shadow_state,
     )
     subtitle_live = subtitle_summary["mode"] == _SUBTITLE_MODE_SLR13
     geometry_chain_fields = (
@@ -4673,6 +4635,10 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
             raise ValueError(f"{name}.f32 contains non-finite values")
         fields[name] = values.reshape(height, width)
     candidate = fields["shadow_candidate_parallax"]
+    if shadow_state["frame_valid"] == 0.0 and (
+            np.any(fields["shadow_coordinate"] != np.float32(0.0)) or
+            np.any(candidate != np.float32(0.0))):
+        raise ValueError("unavailable geometry must publish exact zero coordinate and candidate")
 
     # Exact replicas of the production serial/Q30 branches (validated bitwise against the GPU
     # intermediates; see docs/host-sbs.md#cliff-conditioning).
@@ -4711,9 +4677,9 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
                 float(np.max(np.abs(
                     fields["shadow_final_parallax"] - replayed_subtitle))))
         if not replay_matched:
-            if subtitle_summary["current_count"] == 0:
+            if subtitle_summary["current_count"] == 0 or not subtitle_summary["geometry_ready"]:
                 raise ValueError(
-                    "SLR13 has no current geometry but the final field is not the exact "
+                    "SLR13 has no authorized current geometry but the final field is not the exact "
                     "content-clamped Base extension")
             raise ValueError(
                 "shadow_final_parallax.f32 is not the exact SLR13 "
@@ -4747,7 +4713,7 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
 
 def generate_float_artifact_previews(
         dump_dir: Any, artifact_name: str, output_dir: Any) -> Dict[str, Any]:
-    """Generate diagnostic PNGs from one authenticated schema-41 ``.f32`` artifact.
+    """Generate diagnostic PNGs from one authenticated schema-44 ``.f32`` artifact.
 
     Preview files are deliberately written outside the atomic package contract. Scalar tensors
     receive finite-p2/p98 grayscale and jet views; ``model_input.f32`` receives an RGB view by

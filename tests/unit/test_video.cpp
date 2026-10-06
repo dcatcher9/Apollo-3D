@@ -37,6 +37,7 @@
   #include <src/nvenc/nvenc_d3d11.h>
   #include <src/platform/windows/display_config.h>
   #include <wrl/client.h>
+#include <tests/fixtures/host_sbs_adaptive_camera_state.h>
 
 namespace platf::dxgi {
   int init();
@@ -969,41 +970,16 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
   EXPECT_FLOAT_EQ(v2::requested_pop_strength(-1.0f), 0.0f);
   EXPECT_FLOAT_EQ(v2::requested_gain_for_config(-1.0f), 0.0f);
   EXPECT_FLOAT_EQ(v2::direct_container_limit, 0.04f);
-  EXPECT_FLOAT_EQ(v2::pointwise_container(0.0f), 0.0f);
-  EXPECT_NEAR(
-    v2::pointwise_container(-0.01f),
-    -v2::pointwise_container(0.01f),
-    1.0e-8f
-  );
-  EXPECT_NEAR(v2::pointwise_container(1.0e-5f), 1.0e-5f, 1.0e-10f);
-  float previous_contained = -v2::direct_container_limit;
-  for (const float requested : std::array {
-         -1.0e30f,
-         -1.0f,
-         -0.04f,
-         -0.01f,
-         0.0f,
-         0.01f,
-         0.04f,
-         1.0f,
-         1.0e30f
-       }) {
-    const float contained = v2::pointwise_container(requested);
-    EXPECT_TRUE(std::isfinite(contained));
-    EXPECT_GE(contained, previous_contained);
-    EXPECT_LE(std::abs(contained), v2::direct_container_limit);
-    previous_contained = contained;
-  }
+  EXPECT_FLOAT_EQ(v2::display_budget(), v2::direct_container_limit);
   EXPECT_FLOAT_EQ(v2::max_horizontal_slope, 0.5f);
   EXPECT_FLOAT_EQ(v2::convergence_curve_default, 0.0f);
   EXPECT_TRUE(v2::convergence_curve_is_valid(0.0f));
   EXPECT_FALSE(v2::convergence_curve_is_valid(-0.1f));
-  EXPECT_FLOAT_EQ(v2::far_tau, 0.75f);
-  EXPECT_FLOAT_EQ(v2::near_log_tau, 0.5f);
+  EXPECT_EQ(v2::adaptive_policy_id, 3u);
   EXPECT_GT(v2::max_horizontal_slope, 0.0f);
   EXPECT_LT(v2::max_horizontal_slope, 1.0f);
   EXPECT_FLOAT_EQ(v2::vertical_majorant_share, 0.75f);
-  EXPECT_EQ(v2::contract_schema, 86u);
+  EXPECT_EQ(v2::contract_schema, 87u);
   EXPECT_EQ(v2::capture_provenance_schema, 3u);
   EXPECT_EQ(v2::shadow_state_dump_schema, 18u);
   EXPECT_EQ(v2::shadow_frame_stats_dump_schema, 3u);
@@ -1245,13 +1221,12 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
   EXPECT_EQ(v2::state_initial_words[v2::convergence_curve], std::bit_cast<std::uint32_t>(0.0f));
   EXPECT_EQ(v2::state_initial_words[v2::container_scale], std::bit_cast<std::uint32_t>(1.0f));
   EXPECT_EQ(v2::state_initial_words[v2::contract_tag_bits], v2::contract_tag);
-  EXPECT_EQ(v2::state_initial_words[v2::camera_center_integrity_bits], 0u);
+  EXPECT_EQ(v2::state_initial_words[v2::camera_center_integrity_bits], v2::camera_center_integrity_for_state_words(v2::state_initial_words));
   EXPECT_EQ(v2::state_initial_words[v2::renderer_authorization_bits], 0u);
-  EXPECT_EQ(v2::state_initial_words[v2::joint_plane_mode_bits], 0u);
+  EXPECT_EQ(v2::state_initial_words[v2::joint_plane_mode_bits], v2::adaptive_policy_id);
   EXPECT_EQ(v2::state_initial_words[v2::mapping_state_reserved_2], 0u);
-  EXPECT_TRUE(v2::camera_center_integrity_is_valid(0u, 0u, 0u, 0u, 0u));
-  EXPECT_FALSE(v2::camera_center_integrity_is_valid(0u, 0u, std::bit_cast<std::uint32_t>(-0.1f), 0u, 0u));
-  EXPECT_FALSE(v2::camera_center_integrity_is_valid(std::bit_cast<std::uint32_t>(1.0f), 0u, 0u, 0u, 0u));
+  EXPECT_TRUE(v2::joint_plane_mode_word_is_valid(v2::adaptive_policy_id));
+  EXPECT_FALSE(v2::joint_plane_mode_word_is_valid(0u));
   EXPECT_FALSE(v2::cut_generation_changed(7u, 7u, false));
   EXPECT_TRUE(v2::cut_generation_changed(7u, 8u, false));
   EXPECT_TRUE(v2::cut_generation_changed(7u, 7u, true));
@@ -1288,13 +1263,7 @@ TEST(ParallaxV2ContractTest, SerializedRendererStateFailsClosedOnAnyBrokenSeal) 
   initialized[v2::calibration_revision] = 1u;
   initialized[v2::frame_valid] = std::bit_cast<std::uint32_t>(1.0f);
   initialized[v2::renderer_authorization_bits] = v2::contract_tag;
-  initialized[v2::camera_center_integrity_bits] =
-    v2::camera_center_integrity_for_words(
-      initialized[v2::center],
-      initialized[v2::inverse_scale],
-      initialized[v2::convergence_curve],
-      initialized[v2::calibration_revision]
-    );
+  host_sbs_test::seal_adaptive_camera(initialized);
   ASSERT_TRUE(v2::parallax_state_words_are_authenticated(initialized, raw_scale));
 
   for (const auto index : {
@@ -1318,11 +1287,8 @@ TEST(ParallaxV2ContractTest, AdaptiveStateBindsModeClockAndModelScaleFloor) {
   const auto seal = [](v2::state_words_t &words) {
     words[v2::camera_center_integrity_bits] = v2::camera_center_integrity_for_state_words(words);
   };
-  ASSERT_TRUE(v2::parallax_state_words_are_authenticated(state, raw_scale, 0u));
-  EXPECT_FALSE(v2::parallax_state_words_are_authenticated(state, raw_scale, 3u));
-  state[v2::joint_plane_mode_bits] = 3u;
-  seal(state);
-  ASSERT_TRUE(v2::parallax_state_words_are_authenticated(state, raw_scale, 3u));
+  ASSERT_TRUE(v2::parallax_state_words_are_authenticated(state, raw_scale, v2::adaptive_policy_id));
+  EXPECT_FALSE(v2::parallax_state_words_are_authenticated(state, raw_scale, 0u));
   state[v2::center] = std::bit_cast<std::uint32_t>(2.4f);
   state[v2::inverse_scale] = std::bit_cast<std::uint32_t>(1.0f / raw_scale);
   state[v2::calibration_revision] = 2u;
@@ -3197,7 +3163,7 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   auto adaptive_result = refined_result;
   adaptive_result.parallax_v2_joint_plane_mode = 3u;
   EXPECT_TRUE(models::parallax_v2_result_is_authenticated(adaptive_result));
-  for (const std::uint32_t mode : {1u, 2u, 4u, 0xffffffffu}) {
+  for (const std::uint32_t mode : {0u, 1u, 2u, 4u, 0xffffffffu}) {
     auto unknown_mode = refined_result;
     unknown_mode.parallax_v2_joint_plane_mode = mode;
     EXPECT_FALSE(models::parallax_v2_result_is_authenticated(unknown_mode)) << mode;
@@ -3655,7 +3621,7 @@ TEST(ParallaxV2ContractTest, DebugDumpUsesNonblockingGpuStagingBeforeCpuPublicat
   );
 }
 
-TEST(ParallaxV2ContractTest, DebugDumpSubtitleResolverProvenanceMatchesSchema41Contract) {
+TEST(ParallaxV2ContractTest, DebugDumpSubtitleResolverProvenanceMatchesSchema44Contract) {
   const auto source = read_source_file(
     SUNSHINE_SOURCE_DIR "/src/platform/windows/sbs_debug_dump.cpp"
   );
@@ -3679,7 +3645,7 @@ TEST(ParallaxV2ContractTest, DebugDumpSubtitleResolverProvenanceMatchesSchema41C
   EXPECT_LT(resolve, condition);
   EXPECT_EQ(resolver.find("condition_prepare_main"), std::string::npos);
 
-  EXPECT_NE(source.find("{\"schema\", 41}"), std::string::npos);
+  EXPECT_NE(source.find("{\"schema\", 44}"), std::string::npos);
   for (const auto *qualification_key : {
          "{\"qualification_policy\", {",
          "{\"corner_filter_applies_to\", \"non-ribbon-ordinary-cores\"}",
@@ -3690,24 +3656,16 @@ TEST(ParallaxV2ContractTest, DebugDumpSubtitleResolverProvenanceMatchesSchema41C
        }) {
     EXPECT_NE(resolver.find(qualification_key), std::string::npos) << qualification_key;
   }
-  for (const auto *placement_key : {
-         "{\"placement\", {",
-         "{\"fallback_step_denominator\"",
-         "{\"fallback_max_radius_steps\"",
-         "{\"fallback_requires_unclamped_sample_strip\"",
-         "{\"fallback_minimum_coherent_rows\", 2u}",
-         "{\"fallback_pair_conflict\", \"unreliable-stop-search\"}",
-         "{\"ribbon_places_fallback_with_ordinary\", false}",
-       }) {
-    EXPECT_NE(resolver.find(placement_key), std::string::npos) << placement_key;
-  }
   for (const auto *target_policy_key : {
          "{\"target_policy\", {",
-         "{\"both_valid_row_iqr\", \"ignored\"}",
-         "{\"single_valid_row\", \"median-if-iqr-at-most-row-iqr-max\"}",
+         "{\"selection\", \"authenticated-current-cover-conflict-histogram\"}",
+         "{\"current_cover_pin\", \"immediate-full-plane\"}",
+         "{\"owner_hold_word\", \"reserved-zero\"}",
        }) {
     EXPECT_NE(resolver.find(target_policy_key), std::string::npos) << target_policy_key;
   }
+  EXPECT_EQ(resolver.find("fallback_step_denominator"), std::string::npos);
+  EXPECT_EQ(resolver.find("unreliable_hold\""), std::string::npos);
 }
 
 TEST(ParallaxV2ContractTest, DebugDumpStagingPreservesEventAndRequestOrdering) {
@@ -4114,7 +4072,6 @@ TEST(DirectxShaderTest, CompilesGeneratedAdaptiveStateConsumers) {
     std::tuple {"rgb_to_nchw_near_identical_cs.hlsl", "fused_main", "cs_5_0"},
     std::tuple {"buffer_to_tex_cs.hlsl", "pad_main", "cs_5_0"},
     std::tuple {"depth_minmax_ema_cs.hlsl", "main", "cs_5_0"},
-    std::tuple {"depth_hist_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"depth_scene_cut_evidence_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"depth_scene_cut_resolve_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"depth_coordinate_v2_map_cs.hlsl", "main", "cs_5_0"},
@@ -7936,7 +7893,7 @@ TEST(DirectxShaderSourceTest, SubtitleResolveBindsExactOcrRecordAndConditionPara
   );
   EXPECT_NE(
     dispatch.find(
-      "nullptr,\n        cut_state_srv.Get(),\n"
+      "depth_coordinate_v2_state_srv.Get(),\n        cut_state_srv.Get(),\n"
       "        depth_coordinate_v2_final_srv.Get(),\n        nullptr,\n"
       "        nullptr,\n        nullptr,\n        nullptr,\n"
       "        ocr_box_record_srv.Get(),"
@@ -8966,7 +8923,7 @@ TEST(HostSbsTelemetryTest, RendererConfigUsesNeutralWirePlaneForV2) {
   video::sbs_telemetry_snapshot_t v2;
   v2.runtime_flags = video::sbs_telemetry_runtime_flag::adaptive_enabled;
   video::apply_sbs_telemetry_config(v2, settings);
-  // Telemetry v1 cannot encode V2's scene-latched coordinate policy. Its neutral compatibility
+  // Telemetry v1 cannot encode V2's continuously tracked coordinate policy. Its neutral compatibility
   // value is a protocol placeholder and must not imply a configurable V2 plane.
   EXPECT_EQ(v2.zero_plane_mode, 2);
   EXPECT_FLOAT_EQ(v2.pop_floor, 1.5f);

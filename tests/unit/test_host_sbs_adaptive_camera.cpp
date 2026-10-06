@@ -101,8 +101,6 @@ namespace {
       ASSERT_TRUE(compile("depth_coordinate_v2_limit_cs.hlsl", horizontal_shader));
       config.raw_coordinate_scale = v2::model_calibrations.front().raw_coordinate_scale;
       config.collapse_abs_epsilon = v2::collapse_abs_epsilon;
-      config.far_tau = v2::far_tau;
-      config.near_log_tau = v2::near_log_tau;
       config.requested_gain = v2::requested_gain_for_config(1.75f);
       config.max_horizontal_slope = v2::max_horizontal_slope;
       config.direct_container_limit = v2::direct_container_limit;
@@ -221,7 +219,6 @@ namespace {
         .minmax_raw_output = normalization_uav.Get(),
         .moments_dispatch = executor::dispatch_command_t::direct(1u, 1u, 1u),
         .frame_resolve_dispatch = executor::dispatch_command_t::direct(1u, 1u, 1u),
-        .robust_quantiles = true,
         .histogram_shader = histogram_shader.Get(),
         .quantile_shader = quantile_shader.Get(),
         .frame_stats = stats.srv.Get(),
@@ -265,7 +262,7 @@ namespace {
       // Exact equal-area two-layer moments provide a known distribution without a CPU renderer.
       std::array<float, v2::frame_stats_float_count> frame {low * .5f + high * .5f,
         collapsed ? 0.0f : (high - low) * .5f, low, high, float(width), float(width), 1.0f, 0.0f};
-      if (config.joint_plane_mode == 3u) {
+      {
         frame[v2::frame_stat_percentile_low] = low;
         frame[v2::frame_stat_percentile_high] = high;
         frame[v2::frame_stat_percentile_valid] = quantile_valid ? 1.0f : 0.0f;
@@ -436,20 +433,8 @@ TEST_F(HostSbsAdaptiveCameraGpuTest, MissingQuantileAuthorityCannotFallBackToExt
   EXPECT_FLOAT_EQ(scalar(v2::inverse_scale), held_inverse);
 }
 
-TEST_F(HostSbsAdaptiveCameraGpuTest, ProductionReferenceRetainsLatchAndZeroControllerTail) {
-  config.joint_plane_mode = 0u;
-  observe(100000u, 0.0f, 4.0f);
-  EXPECT_FLOAT_EQ(scalar(v2::center), 2.0f);
-  EXPECT_FLOAT_EQ(scalar(v2::inverse_scale), 1.0f / config.raw_coordinate_scale);
-  observe(200000u, 0.0f, 8.0f);
-  EXPECT_FLOAT_EQ(scalar(v2::center), 2.0f);
-  EXPECT_TRUE(std::all_of(words.begin() + v2::gain_last_observation_low, words.end(),
-    [](std::uint32_t word) { return word == 0u; }));
-  EXPECT_TRUE(v2::parallax_state_words_are_authenticated(words, config.raw_coordinate_scale, 0u));
-}
-
 TEST_F(HostSbsAdaptiveCameraGpuTest, RemovedCameraModesCannotAuthorizeGeometry) {
-  for (const std::uint32_t mode : {1u, 2u, 4u}) {
+  for (const std::uint32_t mode : {0u, 1u, 2u, 4u, 0xffffffffu}) {
     config.joint_plane_mode = mode;
     observe(100000u, 0.0f, 4.0f);
     EXPECT_FLOAT_EQ(scalar(v2::frame_valid), 0.0f);

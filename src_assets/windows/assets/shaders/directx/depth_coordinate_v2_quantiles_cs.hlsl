@@ -1,4 +1,4 @@
-// Resolve GPU histogram into the mode-3 quantile tail. P05 uses the lower crossing-bin
+// Resolve GPU histogram into the Host adaptive quantile tail. P05 uses the lower crossing-bin
 // edge and P95 the upper edge, clipped to the true range. These are FP32 256-bin bounds,
 // not exact interpolated percentiles. All original Welford statistics remain untouched.
 // The same resolve overwrites the independent normalization histogram. Its existing P02/P98
@@ -46,7 +46,7 @@ void main(uint3 tid : SV_GroupThreadID) {
             high_found = true;
         }
     }
-    bool valid = v2_joint_plane_mode == 3u && V2_FRAME_STATS_VALID(frame1) == 1.0f &&
+    bool valid = v2_joint_plane_mode == V2_ADAPTIVE_POLICY_ID && V2_FRAME_STATS_VALID(frame1) == 1.0f &&
         !isnan(bin_width) && !isinf(bin_width) && bin_width >= 0.0f &&
         total > 0u && (float)total == V2_FRAME_STATS_VALID_COUNT(frame1) &&
         low_found && high_found && low <= high;

@@ -34,7 +34,7 @@ namespace sbs_bench {
 
   inline constexpr unsigned depth_coordinate_v2_state_trace_schema = 22;
   inline constexpr std::string_view depth_coordinate_v2_state_trace_policy =
-    "authenticated-mode-selected-camera-host-robust-linear-hard-cap-vertical-share75-row-majorant-v22";
+    "authenticated-adaptive-camera-host-robust-linear-hard-cap-vertical-share75-row-majorant-v22";
   inline constexpr std::string_view depth_coordinate_v2_diagnostic_role =
     "non-controlling-mode-selected-camera-audit-v6";
   inline constexpr std::string_view depth_coordinate_v2_gpu_authority =

@@ -31,10 +31,10 @@ try:
     from .depth_mapping_v2 import (
         MappingV2Config,
         calibrate_coordinate,
-        curve_relative_coordinate,
+        linear_relative_coordinate,
         horizontal_lipschitz_majorant,
-        pointwise_soft_container,
-        select_scene_coordinate,
+        pointwise_hard_bound,
+        observe_raw_coordinate,
         vertical_lipschitz_majorant,
         vertical_lipschitz_minorant,
         vertical_share_coefficients,
@@ -44,10 +44,10 @@ except ImportError:  # Direct execution from tools/sbsbench.
     from depth_mapping_v2 import (  # type: ignore
         MappingV2Config,
         calibrate_coordinate,
-        curve_relative_coordinate,
+        linear_relative_coordinate,
         horizontal_lipschitz_majorant,
-        pointwise_soft_container,
-        select_scene_coordinate,
+        pointwise_hard_bound,
+        observe_raw_coordinate,
         vertical_lipschitz_majorant,
         vertical_lipschitz_minorant,
         vertical_share_coefficients,
@@ -93,7 +93,7 @@ def map_refined_with_statistics(
     refined = _require_field("refined_depth", refined_depth)
     statistics = _require_field("statistics_source", statistics_source)
     calibration = calibrate_coordinate(statistics, config)
-    selection = select_scene_coordinate(statistics, config)
+    selection = observe_raw_coordinate(statistics, config)
     if calibration.collapsed:
         zero = np.zeros(refined.shape, dtype=np.float32)
         return CameraMappedField(
@@ -104,15 +104,14 @@ def map_refined_with_statistics(
             final=zero,
         )
 
-    _, curved = curve_relative_coordinate(
+    coordinate = linear_relative_coordinate(
         refined,
         selection.selected_center,
-        config.raw_coordinate_scale,
+        calibration.scale,
         config,
-        convergence_curve=selection.convergence_curve,
     )
-    pre_spatial = pointwise_soft_container(
-        curved * config.parallax_gain, config.direct_container_limit)
+    pre_spatial = pointwise_hard_bound(
+        coordinate * config.parallax_gain, config.direct_container_limit)
     width = refined.shape[1]
     vertical_majorant = vertical_lipschitz_majorant(
         pre_spatial, config.max_vertical_shear / width)
@@ -405,7 +404,7 @@ def build_report(
                 "V2 fixed-scale asymmetric curve, pointwise soft container, vertical "
                 "majorant/minorant blend, and horizontal majorant"),
             "excluded": [
-                "scene-latched camera state and cut handling",
+                "native adaptive camera state and cut handling",
                 "temporal normalization, motion masks, depth reuse, and fallback",
                 "subtitle conditioning",
                 "live GPU arithmetic, renderer/reprojection, image quality, and latency",

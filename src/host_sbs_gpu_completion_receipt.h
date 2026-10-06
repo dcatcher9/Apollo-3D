@@ -66,7 +66,7 @@ namespace models::host_sbs_gpu_completion_receipt {
     std::uint32_t width = 0u;
     std::uint32_t height = 0u;
     float raw_coordinate_scale = 0.0f;
-    std::uint32_t joint_plane_mode = 0u;
+    std::uint32_t joint_plane_mode = depth_coordinate_v2::adaptive_policy_id;
     std::uint32_t expected_work = 0u;
     submission_class_e submission_class = submission_class_e::invalid;
     std::uint32_t flags = 0u;

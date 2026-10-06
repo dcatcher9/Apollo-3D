@@ -379,9 +379,15 @@ class RawModelProvenanceTests(unittest.TestCase):
             dump, _ = self._dump(root)
             (dump / "source.png").write_bytes(b"preview")
             output = root / "output"
+            build = root / "build"
+            build.mkdir()
+            (build / "sunshine.exe").write_bytes(b"never executed")
+            conf = root / "bench.conf"
+            conf.write_text("min_log_level = 2\n")
             stderr = io.StringIO()
             with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
-                replay.main(["--dump", str(dump), "--out", str(output), "--skip-score"])
+                replay.main(["--dump", str(dump), "--out", str(output), "--skip-score",
+                             "--build-dir", str(build), "--conf", str(conf)])
             self.assertEqual(raised.exception.code, 2)
             self.assertIn("lacks required raw_model_provenance", stderr.getvalue())
             self.assertFalse(output.exists())

@@ -1,7 +1,5 @@
-// Default mode acquires the shot mean and holds it until an authenticated cut, at fixed scale.
-// Mode 3 tracks Host mean zero / GPU P05-P95 amplitude with a declared model prior and linear map.
-// Reuse never dispatches this resolver. Unusable depth publishes flat without moving a valid
-// camera. Adaptive mode retains it through cuts; the reference clears it on an unusable cut update.
+// Continuous Host mean zero and robust depth amplitude. Only authenticated infer
+// publication observes the controller; cuts retain geometry and reuse holds the complete tuple.
 
 StructuredBuffer<float4> FrameStats : register(t0);
 StructuredBuffer<float4> CutBridgeState : register(t1);
@@ -21,7 +19,7 @@ void ResetMappingState(inout uint4 mapping_state) {
     // This row contains only integer payloads. Keep the mode token as an integer through local
     // reset/sealing; treating bit pattern 1 as a floating-point temporary can flush it to zero.
     mapping_state = uint4(0u, 0u,
-        V2JointPlaneConstantsValid() ? v2_joint_plane_mode : 0u, 0u);
+        V2_ADAPTIVE_POLICY_ID, 0u);
 }
 
 void ClearAdaptiveCameraState(inout V2AdaptiveCameraState camera_state) {
@@ -42,7 +40,6 @@ void DisarmAdaptiveCamera(inout V2AdaptiveCameraState camera_state) {
 }
 
 void StoreCameraState(float4 active, float4 control, inout uint4 mapping_state, V2AdaptiveCameraState camera_state) {
-    if (mapping_state.z == 0u) ClearAdaptiveCameraState(camera_state);
     V2_STATE_CAMERA_CENTER_INTEGRITY_BITS(mapping_state) =
         V2CameraIntegrityWithAdaptiveState(active, control, mapping_state, camera_state);
     // Seal the fully validated, current-frame-ready decision once. Per-texel producers and the
@@ -64,13 +61,6 @@ void ObserveAdaptiveCamera(inout float4 active, inout float4 control, inout uint
                      inout V2AdaptiveCameraState camera_state, float4 frame0, float4 frame1,
                      bool initialized) {
     V2_STATE_FRAME_VALID(control) = 0.0f;
-    if (mapping.z != v2_joint_plane_mode) {
-        active = float4(0.0f, 0.0f, v2_convergence_curve_default, 1.0f);
-        V2_STATE_CALIBRATION_REVISION(control) = asfloat(0u);
-        ResetMappingState(mapping);
-        ClearAdaptiveCameraState(camera_state);
-        initialized = false;
-    }
     // A cut remains authenticated frame metadata; it does not latch or disarm adaptation.
 
     uint2 now = uint2(v2_joint_observation_timestamp_low, v2_joint_observation_timestamp_high);
@@ -186,11 +176,9 @@ void main(uint3 id : SV_DispatchThreadID) {
     float4 cut_header = CutBridgeState[SBS_STATE_VECTOR_CUT_CONTRACT_TAG_BITS];
     bool cut_contract_matches =
         asuint(SBS_STATE_CUT_CONTRACT_TAG_BITS(cut_header)) == SBS_CUT_CONTRACT_TAG;
-    float4 cut_pulse = 0.0f;
     float4 cut_health = 0.0f;
     uint current_cut_count = 0u;
     if (cut_contract_matches) {
-        cut_pulse = CutBridgeState[SBS_STATE_VECTOR_HARD_CUT_PULSE];
         cut_health = CutBridgeState[SBS_STATE_VECTOR_HARD_CUT_COUNT];
         current_cut_count = asuint(SBS_STATE_HARD_CUT_COUNT(cut_health));
     }
@@ -217,8 +205,8 @@ void main(uint3 id : SV_DispatchThreadID) {
     }
     V2_STATE_CONTRACT_TAG_BITS(control) = asfloat(V2_CONTRACT_TAG);
 
-    // Runtime mode is an authenticated producer choice, never inferred from arbitrary state bits.
-    // Malformed constant padding or an unsupported mode cannot authorize a parallax field.
+    // The sole adaptive policy is authenticated, never inferred from arbitrary state bits.
+    // Malformed constant padding or a foreign policy cannot authorize a parallax field.
     if (!V2JointPlaneConstantsValid()) {
         PublishUnavailable(active, control, mapping_state, !camera_initialized);
         DisarmAdaptiveCamera(camera_state);
@@ -227,7 +215,7 @@ void main(uint3 id : SV_DispatchThreadID) {
     }
 
     // The cut buffer is an independently authenticated producer. A stale or same-sized foreign
-    // buffer makes this frame unavailable, but it must not erase a previously valid scene camera.
+    // buffer makes this frame unavailable, but it must not erase the established adaptive camera.
     if (!cut_contract_matches) {
         V2_STATE_CONFIRMED_CUT_COUNT(control) = asfloat(previous_cut_count);
         PublishUnavailable(active, control, mapping_state, false);
@@ -236,55 +224,12 @@ void main(uint3 id : SV_DispatchThreadID) {
         return;
     }
 
-    // Observe both authenticated signals. A persistent generation change recovers a cut if the
-    // transient pulse fell between shadow updates; a pulse alone remains sufficient on its frame.
-    bool confirmed_cut = SBS_STATE_HARD_CUT_PULSE(cut_pulse) > 0.5f ||
-        (contract_matches && current_cut_count != previous_cut_count);
+    // Keep the authenticated cut epoch for shared frame/subtitle ownership.
     V2_STATE_CONFIRMED_CUT_COUNT(control) = asfloat(current_cut_count);
 
     float4 frame0 = FrameStats[V2_FRAME_STATS_VECTOR_MEAN];
     float4 frame1 = FrameStats[V2_FRAME_STATS_VECTOR_VALID_COUNT];
-    if (v2_joint_plane_mode == 3u) {
-        ObserveAdaptiveCamera(active, control, mapping_state, camera_state, frame0, frame1,
-            camera_initialized);
-        StoreCameraState(active, control, mapping_state, camera_state);
-        return;
-    }
-    float observed_std = V2_FRAME_STATS_POPULATION_STD(frame0);
-    bool frame_valid = V2_FRAME_STATS_VALID(frame1) > 0.5f &&
-        V2Finite(observed_std) && observed_std > v2_collapse_abs_epsilon;
-    if (!frame_valid) {
-        PublishUnavailable(
-            active, control, mapping_state, confirmed_cut || !camera_initialized);
-        StoreCameraState(active, control, mapping_state, camera_state);
-        return;
-    }
-
-    bool mode_changed = V2_STATE_JOINT_PLANE_MODE_BITS(mapping_state) != v2_joint_plane_mode;
-    bool acquiring = !camera_initialized || confirmed_cut || mode_changed;
-    if (acquiring) {
-        float inverse_scale = 1.0f / v2_raw_coordinate_scale;
-        float acquired_center = V2_FRAME_STATS_MEAN(frame0);
-        if (!V2Finite(inverse_scale) || inverse_scale <= 0.0f) {
-            PublishUnavailable(active, control, mapping_state,
-                v2_joint_plane_mode == 0u || confirmed_cut ||
-                !camera_initialized || mode_changed);
-            StoreCameraState(active, control, mapping_state, camera_state);
-            return;
-        }
-        // Default acquisition retains the occupancy-weighted arithmetic mean and calibrated
-        // scale. Adaptive mode above continuously observes mean zero and robust amplitude.
-        active = float4(
-            acquired_center, inverse_scale, v2_convergence_curve_default, 1.0f);
-        ResetMappingState(mapping_state);
-        V2_STATE_CALIBRATION_REVISION(control) = asfloat(
-            IncrementExactCounter(asuint(V2_STATE_CALIBRATION_REVISION(control))));
-    }
-
-    // Keep the ABI field fixed at identity. The map pass applies the strict representation bound
-    // independently per texel, so one raw outlier can no longer pump the whole frame's pop.
-    V2_STATE_CONTAINER_SCALE(active) = 1.0f;
-    V2_STATE_FRAME_VALID(control) = 1.0f;
-
+    ObserveAdaptiveCamera(active, control, mapping_state, camera_state, frame0, frame1,
+        camera_initialized);
     StoreCameraState(active, control, mapping_state, camera_state);
 }

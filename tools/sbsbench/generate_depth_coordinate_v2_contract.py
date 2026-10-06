@@ -57,8 +57,7 @@ EXPECTED_FIELD_KEYS = {"index", "name", "type", "gpu_encoding", "initial"}
 EXPECTED_LAYOUT_FIELD_KEYS = {"index", "name", "type"}
 EXPECTED_DEFAULT_NAMES = (
     "collapse_abs_epsilon",
-    "far_tau",
-    "near_log_tau",
+    "adaptive_policy_id",
     "gain_per_pop",
     "reference_pop_strength",
     "direct_container_limit",
@@ -101,6 +100,7 @@ CANONICAL_FINAL_PARALLAX = {
     "current_rgb_policy": "always-current-never-retained",
 }
 CANONICAL_SUBTITLE_OCR = {
+    "geometry_authority": 'same-observation-sealed-parallax-state-required-for-ui-probe-and-time-advance-v1',
     "schema": 14,
     "logical_model": "ppocrv6_tiny_det_modelopt_fp16",
     "asset_path": "models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx",
@@ -177,15 +177,6 @@ CANONICAL_SUBTITLE_OCR = {
         "locator_corner_bottom_rows": 16,
         "locator_match_iou_threshold": 0.6,
         "locator_death_grace_observations": 6,
-        "locator_target_horizontal_fallback_max_radius_steps": 2,
-        "locator_target_horizontal_step_denominator": 16,
-        "locator_target_max_row_iqr_binocular_source_pixels": 8.0,
-        "locator_target_max_row_median_delta_binocular_source_pixels": 4.0,
-        "locator_target_max_residual_binocular_source_pixels": 8.0,
-        "locator_target_max_unreliable_holds": 2,
-        "locator_target_deadband_binocular_source_pixels": 1.0,
-        "locator_target_ema_alpha": 0.125,
-        "locator_target_max_slew_binocular_source_pixels": 0.25,
         "ocr_safe_row_top": 24,
         "ocr_safe_row_bottom": 155,
         "source_crop_aspect_width": 6,
@@ -243,8 +234,8 @@ CANONICAL_SUBTITLE_OCR = {
 EXPECTED_CONSTANT_FIELD_NAMES = (
     "raw_coordinate_scale",
     "collapse_abs_epsilon",
-    "far_tau",
-    "near_log_tau",
+    "coordinate_reserved0",
+    "coordinate_reserved1",
     "requested_gain",
     "max_horizontal_slope",
     "direct_container_limit",
@@ -417,7 +408,7 @@ def validate_contract(
 
     if contract.get("subtitle_ocr") != CANONICAL_SUBTITLE_OCR:
         raise ValueError(
-            "subtitle_ocr must exactly match the authenticated PP-OCRv6/OCR8/SLR13 contract")
+            "subtitle_ocr must exactly match the authenticated PP-OCRv6/OCR8/SLR14 contract")
     if contract.get("final_parallax") != CANONICAL_FINAL_PARALLAX:
         raise ValueError(
             "final_parallax must exactly match the authenticated direct-render contract")
@@ -467,7 +458,10 @@ def validate_contract(
         if (not isinstance(value, (int, float)) or isinstance(value, bool) or
                 not math.isfinite(float(value))):
             raise ValueError(f"calibrated default {name} must be finite")
-        if name == "convergence_curve_default":
+        if name == "adaptive_policy_id":
+            if type(value) is not int or value != 3:
+                raise ValueError("adaptive_policy_id must be exactly integer 3")
+        elif name == "convergence_curve_default":
             if float(value) != 0.0:
                 raise ValueError("convergence_curve_default must be exactly zero")
         elif float(value) <= 0.0:
@@ -798,6 +792,8 @@ def render_cpp(contract: dict[str, Any]) -> str:
         f"{json.dumps(final_parallax['invalid_policy'])};",
         f"  inline constexpr std::string_view final_parallax_current_rgb_policy = "
         f"{json.dumps(final_parallax['current_rgb_policy'])};",
+        f"  inline constexpr std::string_view subtitle_geometry_authority = "
+        f"{json.dumps(subtitle_ocr['geometry_authority'])};",
         f"  inline constexpr std::uint32_t subtitle_ocr_contract_schema = "
         f"{subtitle_ocr['schema']}u;",
         f"  inline constexpr std::string_view subtitle_ocr_model_name = "
@@ -903,24 +899,6 @@ def render_cpp(contract: dict[str, Any]) -> str:
         f"{_float_literal(field_policy['locator_match_iou_threshold'])};",
         f"  inline constexpr std::uint32_t subtitle_locator_death_grace_observations = "
         f"{field_policy['locator_death_grace_observations']}u;",
-        f"  inline constexpr std::uint32_t subtitle_target_horizontal_fallback_max_radius_steps = "
-        f"{field_policy['locator_target_horizontal_fallback_max_radius_steps']}u;",
-        f"  inline constexpr std::uint32_t subtitle_target_horizontal_step_denominator = "
-        f"{field_policy['locator_target_horizontal_step_denominator']}u;",
-        f"  inline constexpr float subtitle_target_max_row_iqr_binocular_source_pixels = "
-        f"{_float_literal(field_policy['locator_target_max_row_iqr_binocular_source_pixels'])};",
-        f"  inline constexpr float subtitle_target_max_row_median_delta_binocular_source_pixels = "
-        f"{_float_literal(field_policy['locator_target_max_row_median_delta_binocular_source_pixels'])};",
-        f"  inline constexpr float subtitle_target_max_residual_binocular_source_pixels = "
-        f"{_float_literal(field_policy['locator_target_max_residual_binocular_source_pixels'])};",
-        f"  inline constexpr std::uint32_t subtitle_target_max_unreliable_holds = "
-        f"{field_policy['locator_target_max_unreliable_holds']}u;",
-        f"  inline constexpr float subtitle_target_deadband_binocular_source_pixels = "
-        f"{_float_literal(field_policy['locator_target_deadband_binocular_source_pixels'])};",
-        f"  inline constexpr float subtitle_target_ema_alpha = "
-        f"{_float_literal(field_policy['locator_target_ema_alpha'])};",
-        f"  inline constexpr float subtitle_target_max_slew_binocular_source_pixels = "
-        f"{_float_literal(field_policy['locator_target_max_slew_binocular_source_pixels'])};",
         f"  inline constexpr std::uint32_t subtitle_ocr_crop_aspect_width = "
         f"{field_policy['source_crop_aspect_width']}u;",
         f"  inline constexpr std::uint32_t subtitle_ocr_crop_aspect_height = "
@@ -994,16 +972,6 @@ def render_cpp(contract: dict[str, Any]) -> str:
         "  static_assert(subtitle_locator_match_iou_threshold > 0.0f &&",
         "                subtitle_locator_match_iou_threshold <= 1.0f);",
         "  static_assert(subtitle_locator_death_grace_observations > 0u);",
-        "  static_assert(subtitle_target_max_row_iqr_binocular_source_pixels > 0.0f);",
-        "  static_assert(subtitle_target_max_row_median_delta_binocular_source_pixels > 0.0f);",
-        "  static_assert(subtitle_target_max_residual_binocular_source_pixels > 0.0f);",
-        "  static_assert(subtitle_target_max_unreliable_holds > 0u);",
-        "  static_assert(subtitle_target_deadband_binocular_source_pixels > 0.0f);",
-        "  static_assert(subtitle_target_ema_alpha > 0.0f &&",
-        "                subtitle_target_ema_alpha < 1.0f);",
-        "  static_assert(subtitle_target_max_slew_binocular_source_pixels > 0.0f &&",
-        "                subtitle_target_max_slew_binocular_source_pixels <=",
-        "                  subtitle_target_deadband_binocular_source_pixels);",
         "  static_assert(subtitle_ocr_text_join_gap_cells > 0u);",
         "  static_assert(subtitle_ocr_text_join_gap_cells <",
         "                subtitle_ocr_ribbon_join_gap_cells);",
@@ -1023,8 +991,6 @@ def render_cpp(contract: dict[str, Any]) -> str:
         "                subtitle_locator_rectangle_capacity * 4u);",
         "  static_assert(subtitle_locator_state_word_count == subtitle_locator_adaptive_offset +",
         "                subtitle_locator_adaptive_word_count);",
-        "  static_assert(subtitle_target_horizontal_fallback_max_radius_steps == 2u);",
-        "  static_assert(subtitle_target_horizontal_step_denominator == 16u);",
         "  static_assert(subtitle_condition_param_word_count == 6u);",
         "  inline constexpr std::uint32_t shader_source_closure_schema =",
         "    host_sbs_shader_cache::source_closure_schema;",
@@ -1041,7 +1007,9 @@ def render_cpp(contract: dict[str, Any]) -> str:
         "",
     ]
     lines.extend(
-        f"  inline constexpr float {_identifier(name)} = {_float_literal(defaults[name])};"
+        (f"  inline constexpr std::uint32_t {_identifier(name)} = {defaults[name]}u;"
+         if name == "adaptive_policy_id" else
+         f"  inline constexpr float {_identifier(name)} = {_float_literal(defaults[name])};")
         for name in EXPECTED_DEFAULT_NAMES
     )
     lines.extend([
@@ -1623,24 +1591,6 @@ def render_hlsl(contract: dict[str, Any]) -> str:
         f"{_float_literal(field_policy['locator_match_iou_threshold'])}",
         f"#define V2_SUBTITLE_LOCATOR_DEATH_GRACE_OBSERVATIONS "
         f"{field_policy['locator_death_grace_observations']}u",
-        f"#define V2_SUBTITLE_TARGET_HORIZONTAL_FALLBACK_MAX_RADIUS_STEPS "
-        f"{field_policy['locator_target_horizontal_fallback_max_radius_steps']}u",
-        f"#define V2_SUBTITLE_TARGET_HORIZONTAL_STEP_DENOMINATOR "
-        f"{field_policy['locator_target_horizontal_step_denominator']}u",
-        f"#define V2_SUBTITLE_TARGET_MAX_ROW_IQR_BINOCULAR_SOURCE_PIXELS "
-        f"{_float_literal(field_policy['locator_target_max_row_iqr_binocular_source_pixels'])}",
-        f"#define V2_SUBTITLE_TARGET_MAX_ROW_MEDIAN_DELTA_BINOCULAR_SOURCE_PIXELS "
-        f"{_float_literal(field_policy['locator_target_max_row_median_delta_binocular_source_pixels'])}",
-        f"#define V2_SUBTITLE_TARGET_MAX_RESIDUAL_BINOCULAR_SOURCE_PIXELS "
-        f"{_float_literal(field_policy['locator_target_max_residual_binocular_source_pixels'])}",
-        f"#define V2_SUBTITLE_TARGET_MAX_UNRELIABLE_HOLDS "
-        f"{field_policy['locator_target_max_unreliable_holds']}u",
-        f"#define V2_SUBTITLE_TARGET_DEADBAND_BINOCULAR_SOURCE_PIXELS "
-        f"{_float_literal(field_policy['locator_target_deadband_binocular_source_pixels'])}",
-        f"#define V2_SUBTITLE_TARGET_EMA_ALPHA "
-        f"{_float_literal(field_policy['locator_target_ema_alpha'])}",
-        f"#define V2_SUBTITLE_TARGET_MAX_SLEW_BINOCULAR_SOURCE_PIXELS "
-        f"{_float_literal(field_policy['locator_target_max_slew_binocular_source_pixels'])}",
         f"#define V2_SUBTITLE_LOCATOR_STATE_SCHEMA {locator_state['schema']}u",
         f"#define V2_SUBTITLE_LOCATOR_STATE_TAG 0x{locator_state['tag']:08X}u",
         f"#define V2_SUBTITLE_LOCATOR_STATE_WORD_COUNT {locator_state['word_count']}u",
@@ -1677,7 +1627,8 @@ def render_hlsl(contract: dict[str, Any]) -> str:
         # not bound at the warp draw's pixel stage.
         f"#define V2_CONVERGENCE_CURVE_DEFAULT "
         f"{_float_literal(defaults['convergence_curve_default'])}",
-        *[item for name in EXPECTED_DEFAULT_NAMES if name.startswith(("adaptive_", "host_percentile_"))
+        f"#define V2_ADAPTIVE_POLICY_ID {defaults['adaptive_policy_id']}u",
+        *[item for name in EXPECTED_DEFAULT_NAMES if name != "adaptive_policy_id" and name.startswith(("adaptive_", "host_percentile_"))
           for item in (
               f"#define V2_{name.upper()} {_float_literal(defaults[name])}",
               f"static const float v2_{name} = V2_{name.upper()};")],
@@ -1782,7 +1733,7 @@ def render_hlsl(contract: dict[str, Any]) -> str:
 
 
 def render_hlsl_ocr_assertions() -> str:
-    """Render the shared compile-time OCR8/SLR13 consumer invariants."""
+    """Render the shared compile-time OCR8/SLR14 consumer invariants."""
 
     return "\n".join([
         "// Generated by tools/sbsbench/generate_depth_coordinate_v2_contract.py.",
@@ -1793,26 +1744,19 @@ def render_hlsl_ocr_assertions() -> str:
         '#include "include/depth_coordinate_v2_contract.generated.hlsl"',
         "",
         "#if !defined(V2_OCR_SHADER_CONTRACT_GENERATED)",
-        '#error "Complete generated V2 OCR8/SLR13 contract is required"',
+        '#error "Complete generated V2 OCR8/SLR14 contract is required"',
         "#endif",
         "",
-        "#if !defined(V2_SUBTITLE_TARGET_MAX_ROW_IQR_BINOCULAR_SOURCE_PIXELS) || \\",
-        "    !defined(V2_SUBTITLE_TARGET_MAX_ROW_MEDIAN_DELTA_BINOCULAR_SOURCE_PIXELS) || \\",
-        "    !defined(V2_SUBTITLE_TARGET_MAX_RESIDUAL_BINOCULAR_SOURCE_PIXELS) || \\",
-        "    !defined(V2_SUBTITLE_TARGET_MAX_UNRELIABLE_HOLDS) || \\",
-        "    !defined(V2_SUBTITLE_LOCATOR_CORNER_EDGE_DIVISOR) || \\",
+        "#if !defined(V2_SUBTITLE_LOCATOR_CORNER_EDGE_DIVISOR) || \\",
         "    !defined(V2_SUBTITLE_LOCATOR_CORNER_BOTTOM_ROWS) || \\",
         "    !defined(V2_SUBTITLE_LOCATOR_PROVISIONAL_MIN_VERTICAL_OVERLAP_NUMERATOR) || \\",
         "    !defined(V2_SUBTITLE_LOCATOR_PROVISIONAL_MIN_VERTICAL_OVERLAP_DENOMINATOR) || \\",
         "    !defined(V2_SUBTITLE_LOCATOR_PROVISIONAL_MAX_HEIGHT_RATIO) || \\",
-        "    !defined(V2_SUBTITLE_LOCATOR_PROVISIONAL_MAX_CENTER_Y_DELTA_SHORTER_HEIGHT) || \\",
-        "    !defined(V2_SUBTITLE_TARGET_DEADBAND_BINOCULAR_SOURCE_PIXELS) || \\",
-        "    !defined(V2_SUBTITLE_TARGET_EMA_ALPHA) || \\",
-        "    !defined(V2_SUBTITLE_TARGET_MAX_SLEW_BINOCULAR_SOURCE_PIXELS)",
-        '#error "Complete generated V2 subtitle target policy is required"',
+        "    !defined(V2_SUBTITLE_LOCATOR_PROVISIONAL_MAX_CENTER_Y_DELTA_SHORTER_HEIGHT)",
+        '#error "Complete generated V2 subtitle ownership policy is required"',
         "#endif",
         "",
-        "#if V2_MODEL_CALIBRATED_SHAPE_COUNT != 24 || \\",
+        "#if V2_ADAPTIVE_POLICY_ID != 3u || V2_MODEL_CALIBRATED_SHAPE_COUNT != 24 || \\",
         "    V2_OCR_SAFE_ROW_TOP >= V2_OCR_SAFE_ROW_BOTTOM || \\",
         "    V2_OCR_SAFE_ROW_BOTTOM > V2_OCR_OUTPUT_HEIGHT || \\",
         "    V2_OCR_CROP_ASPECT_WIDTH == 0u || V2_OCR_CROP_ASPECT_HEIGHT == 0u || \\",
@@ -1842,7 +1786,6 @@ def render_hlsl_ocr_assertions() -> str:
         "    V2_SUBTITLE_LOCATOR_PROVISIONAL_MAX_HEIGHT_RATIO == 0u || \\",
         "    V2_SUBTITLE_LOCATOR_PROVISIONAL_MAX_CENTER_Y_DELTA_SHORTER_HEIGHT == 0u || \\",
         "    V2_SUBTITLE_LOCATOR_DEATH_GRACE_OBSERVATIONS == 0u || \\",
-        "    V2_SUBTITLE_TARGET_MAX_UNRELIABLE_HOLDS == 0u || \\",
         "    V2_OCR_RECORD_HEADER_WORD_COUNT != V2_OCR_RAW_BOX_OFFSET || \\",
         "    V2_OCR_FINAL_BOX_OFFSET != V2_OCR_RAW_BOX_OFFSET + \\",
         "        V2_OCR_RAW_BOX_CAPACITY * V2_OCR_BOX_WORD_COUNT || \\",
@@ -1864,10 +1807,8 @@ def render_hlsl_ocr_assertions() -> str:
         "    V2_SUBTITLE_LOCATOR_PROVISIONAL_CURRENT_FLAG != 16u || \\",
         "    V2_SUBTITLE_LOCATOR_PROVISIONAL_TARGET_WORD != 29u || \\",
         "    V2_SUBTITLE_LOCATOR_PROVISIONAL_FADE_WORD != 30u || \\",
-        "    V2_SUBTITLE_TARGET_HORIZONTAL_FALLBACK_MAX_RADIUS_STEPS != 2u || \\",
-        "    V2_SUBTITLE_TARGET_HORIZONTAL_STEP_DENOMINATOR != 16u || \\",
         "    V2_SUBTITLE_CONDITION_PARAM_WORD_COUNT != 6u",
-        '#error "Generated V2 OCR8/SLR13 contract invariants are inconsistent"',
+        '#error "Generated V2 OCR8/SLR14 contract invariants are inconsistent"',
         "#endif",
         "#if V2_SUBTITLE_LOCATOR_STATE_WORD_COUNT != (V2_SUBTITLE_LOCATOR_ADAPTIVE_OFFSET + V2_SUBTITLE_LOCATOR_ADAPTIVE_WORD_COUNT)",
         '#error "Generated adaptive subtitle tail is inconsistent"',

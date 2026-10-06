@@ -46,7 +46,7 @@ namespace models::depth_coordinate_v2 {
   inline constexpr float requested_gain_authentication_tolerance = 1.0e-7f;
 
   constexpr bool joint_plane_mode_word_is_valid(const std::uint32_t mode) {
-    return mode == 0u || mode == 3u;
+    return mode == adaptive_policy_id;
   }
 
   constexpr std::uint32_t camera_center_integrity_for_words(
@@ -54,56 +54,33 @@ namespace models::depth_coordinate_v2 {
     const std::uint32_t inverse_scale_bits,
     const std::uint32_t convergence_curve_bits,
     const std::uint32_t calibration_revision_bits,
-    const std::uint32_t joint_plane_mode_word = 0u
+    const std::uint32_t joint_plane_mode_word = adaptive_policy_id
   ) {
     std::uint32_t checksum = 0u;
     checksum = (checksum ^ center_bits) * 16777619u;
     checksum = (checksum ^ inverse_scale_bits) * 16777619u;
     checksum = (checksum ^ convergence_curve_bits) * 16777619u;
     checksum = (checksum ^ calibration_revision_bits) * 16777619u;
-    if (joint_plane_mode_word != 0u) {
-      checksum = (checksum ^ joint_plane_mode_word) * 16777619u;
-    }
+    checksum = (checksum ^ joint_plane_mode_word) * 16777619u;
     return checksum;
   }
-
-  constexpr bool camera_center_integrity_is_valid(
-    const std::uint32_t center_bits,
-    const std::uint32_t inverse_scale_bits,
-    const std::uint32_t convergence_curve_bits,
-    const std::uint32_t calibration_revision_bits,
-    const std::uint32_t integrity_bits,
-    const std::uint32_t joint_plane_mode_word = 0u
-  ) {
-    return integrity_bits == camera_center_integrity_for_words(
-      center_bits,
-      inverse_scale_bits,
-      convergence_curve_bits,
-      calibration_revision_bits,
-      joint_plane_mode_word
-    );
-  }
-
-  static_assert(camera_center_integrity_for_words(0u, 0u, 0u, 0u) == 0u);
 
   constexpr std::uint32_t camera_center_integrity_for_state_words(const state_words_t &words) {
     auto checksum = camera_center_integrity_for_words(
       words[center], words[inverse_scale], words[convergence_curve],
       words[calibration_revision], words[joint_plane_mode_bits]);
-    if (words[joint_plane_mode_bits] == 3u) {
-      for (std::size_t index = gain_last_observation_low; index < state_float_count; ++index) {
-        checksum = (checksum ^ words[index]) * 16777619u;
-      }
+    for (std::size_t index = gain_last_observation_low; index < state_float_count; ++index) {
+      checksum = (checksum ^ words[index]) * 16777619u;
     }
     return checksum;
   }
 
+  static_assert(state_initial_words[joint_plane_mode_bits] == adaptive_policy_id);
+  static_assert(state_initial_words[camera_center_integrity_bits] ==
+    camera_center_integrity_for_state_words(state_initial_words));
+
   inline bool adaptive_camera_tail_is_valid(const state_words_t &words) {
     const auto mode = words[joint_plane_mode_bits];
-    if (mode == 0u) {
-      return std::all_of(words.begin() + gain_last_observation_low, words.end(),
-        [](std::uint32_t value) { return value == 0u; });
-    }
     const auto f = [&](std::size_t index) { return std::bit_cast<float>(words[index]); };
     const auto clock = [&](std::size_t low) {
       return std::uint64_t(words[low]) | (std::uint64_t(words[low + 1u]) << 32u);
@@ -112,7 +89,7 @@ namespace models::depth_coordinate_v2 {
     const auto last = clock(gain_last_observation_low);
     const auto first = clock(gain_seed_first_low);
     const auto seed_last = clock(gain_seed_last_low);
-    if (mode != 3u || words[gain_clock_armed] > 1u || count > 1u ||
+    if (mode != adaptive_policy_id || words[gain_clock_armed] > 1u || count > 1u ||
         words[gain_reserved0] != 0u || words[gain_reserved1] != 0u ||
         (words[gain_clock_armed] != 0u && last == 0u) ||
         !std::isfinite(f(gain_target_zero)) ||
@@ -176,26 +153,22 @@ namespace models::depth_coordinate_v2 {
     }
 
     const bool camera_initialized =
-      inverse_scale_value > 0.0f && acquired_calibration_revision_is_valid(revision) &&
-      (mode != 0u ||
-       std::abs(1.0f / inverse_scale_value - raw_coordinate_scale) <=
-         raw_coordinate_scale_authentication_tolerance);
+      inverse_scale_value > 0.0f && acquired_calibration_revision_is_valid(revision);
     const bool camera_empty =
       center_value == 0.0f && inverse_scale_value == 0.0f &&
       calibration_revision_word_is_valid(revision);
-    if (mode == 3u && camera_initialized && words[gain_seed_count] != 1u) {
+    if (camera_initialized && words[gain_seed_count] != 1u) {
       return false;
     }
-    if (mode == 3u && camera_empty && words[gain_seed_count] != 0u) {
+    if (camera_empty && words[gain_seed_count] != 0u) {
       return false;
     }
-    if (mode == 3u && frame_is_valid && words[gain_clock_armed] != 1u) {
+    if (frame_is_valid && words[gain_clock_armed] != 1u) {
       return false;
     }
-    if (mode == 3u &&
-        ((camera_initialized && inverse_scale_value > 1.0f / raw_coordinate_scale + 2.0e-6f) ||
-         (scalar(gain_target_nearest) != 0.0f && scalar(gain_target_nearest) < raw_coordinate_scale) ||
-         (scalar(gain_seed_mean_nearest) != 0.0f && scalar(gain_seed_mean_nearest) < raw_coordinate_scale))) {
+    if ((camera_initialized && inverse_scale_value > 1.0f / raw_coordinate_scale + 2.0e-6f) ||
+        (scalar(gain_target_nearest) != 0.0f && scalar(gain_target_nearest) < raw_coordinate_scale) ||
+        (scalar(gain_seed_mean_nearest) != 0.0f && scalar(gain_seed_mean_nearest) < raw_coordinate_scale)) {
       return false;
     }
     return frame_is_valid ? camera_initialized : (camera_initialized || camera_empty);
@@ -213,7 +186,7 @@ namespace models::depth_coordinate_v2 {
     return gain_per_pop * requested_pop_strength(configured_pop);
   }
 
-  constexpr float display_budget_for_mode(const float, const std::uint32_t) {
+  constexpr float display_budget() {
     return direct_container_limit;
   }
 
@@ -236,24 +209,7 @@ namespace models::depth_coordinate_v2 {
            ) <= requested_gain_authentication_tolerance;
   }
 
-  inline float pointwise_container(
-    const float requested,
-    const float limit = direct_container_limit
-  ) {
-    if (!std::isfinite(requested) || !std::isfinite(limit) || limit <= 0.0f) {
-      return 0.0f;
-    }
-    const float requested_magnitude = std::abs(requested);
-    const float smaller = std::min(requested_magnitude, limit);
-    const float larger = std::max(requested_magnitude, limit);
-    const float ratio = smaller / larger;
-    const float ratio_squared = ratio * ratio;
-    const float fourth_root = std::sqrt(std::sqrt(
-      1.0f + ratio_squared * ratio_squared
-    ));
-    const float contained = std::copysign(smaller / fourth_root, requested);
-    return std::clamp(contained, -limit, limit);
-  }
+
 
   constexpr bool cut_generation_changed(
     const std::uint32_t previous_count,

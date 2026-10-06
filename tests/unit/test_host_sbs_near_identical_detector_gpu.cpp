@@ -422,7 +422,6 @@ TEST(HostSbsNearIdenticalPolicyTest, ProducerOutputsMatchCanonicalShaderOrder) {
     std::pair {std::string_view {"buffer_to_tex"}, std::string_view {"buffer_to_tex_cs"}},
     std::pair {std::string_view {"buffer_to_tex_pad"}, std::string_view {"buffer_to_tex_pad_cs"}},
     std::pair {std::string_view {"depth_minmax_ema"}, std::string_view {"depth_minmax_ema_cs"}},
-    std::pair {std::string_view {"depth_hist"}, std::string_view {"depth_hist_cs"}},
     std::pair {std::string_view {"depth_scene_cut_evidence"},
                std::string_view {"depth_scene_cut_evidence_cs"}},
     std::pair {std::string_view {"depth_scene_cut_resolve"},
@@ -2092,12 +2091,13 @@ namespace {
       const v2::constants_t constants {
         v2::model_calibrations.front().raw_coordinate_scale,
         v2::collapse_abs_epsilon,
-        v2::far_tau,
-        v2::near_log_tau,
+        0.0f,
+        0.0f,
         v2::requested_gain_for_config(v2::reference_pop_strength),
         v2::max_horizontal_slope,
         v2::direct_container_limit,
         v2::convergence_curve_default,
+        v2::adaptive_policy_id,
       };
       context_->UpdateSubresource(
         v2_constants_.Get(), 0u, nullptr, &constants, 0u, 0u

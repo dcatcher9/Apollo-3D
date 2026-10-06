@@ -2555,6 +2555,8 @@ namespace platf::dxgi {
                 dump_frame.refined_live_geometry_active =
                   est.refined_live_geometry_active;
                 dump_frame.matched_frame_id = est.completed_frame_id;
+                dump_frame.matched_observation_timestamp_us =
+                  est.publication.observation_timestamp_us;
                 dump_frame.depth_input_region = est.input_region;
                 dump_frame.depth_video_plan = matched_render_slot->depth_video_plan;
                 dump_frame.input_domain_reset = est.input_domain_reset;

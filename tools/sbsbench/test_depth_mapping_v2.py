@@ -15,14 +15,13 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from depth_coordinate_v2_contract import CALIBRATED_DEFAULTS  # noqa: E402
 from depth_mapping_v2 import (  # noqa: E402
     MappingV2Config,
-    asymmetric_curve,
     calibrate_coordinate,
     decode_direct_parallax,
     encode_direct_parallax,
     generate_depth_mapping_v2,
     horizontal_lipschitz_majorant,
-    pointwise_soft_container,
-    select_scene_coordinate,
+    pointwise_hard_bound,
+    observe_raw_coordinate,
     vertical_lipschitz_majorant,
     vertical_lipschitz_minorant,
 )
@@ -38,7 +37,7 @@ class DepthMappingV2Test(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     generate_depth_mapping_v2(raw)
 
-    def test_calibration_latches_mean_with_fixed_authenticated_scale(self):
+    def test_calibration_observes_mean_and_robust_divisor_with_floor(self):
         raw = np.asarray([[1.0, 2.0], [3.0, 8.0]], dtype=np.float64)
         expected_mean = float(np.mean(raw))
         expected_std = float(np.std(raw))
@@ -46,18 +45,19 @@ class DepthMappingV2Test(unittest.TestCase):
             raw, MappingV2Config(raw_coordinate_scale=0.5))
         self.assertAlmostEqual(calibration.center, expected_mean)
         self.assertAlmostEqual(calibration.observed_std, expected_std)
-        self.assertEqual(calibration.scale, 0.5)
+        self.assertGreater(calibration.scale, 0.5)
+        self.assertLessEqual(calibration.scale, 3.5)
 
-    def test_scene_selector_uses_arithmetic_mean_without_histogram_staging(self):
+    def test_coordinate_observation_uses_arithmetic_mean_without_histogram_staging(self):
         raw = np.asarray([[-1.0, 0.0, 1.0, 8.0]], dtype=np.float64)
-        selection = select_scene_coordinate(raw)
+        selection = observe_raw_coordinate(raw)
         self.assertEqual(selection.selected_center, float(np.mean(raw)))
         self.assertEqual(selection.convergence_curve, 0.0)
 
         result = generate_depth_mapping_v2(raw)
         self.assertAlmostEqual(result.diagnostics.center_mean, selection.observed_mean)
         self.assertAlmostEqual(result.diagnostics.selected_center, selection.selected_center)
-        self.assertEqual(result.diagnostics.scene_coordinate, selection)
+        self.assertEqual(result.diagnostics.coordinate_observation, selection)
 
     def test_collapse_is_absolute_and_keeps_requested_gain_diagnostic(self):
         config = MappingV2Config(
@@ -73,10 +73,10 @@ class DepthMappingV2Test(unittest.TestCase):
         self.assertEqual(result.diagnostics.convergence_curve, 0.0)
         np.testing.assert_array_equal(result.parallax, np.zeros(raw.shape, np.float32))
 
-    def test_contract_surface_has_fixed_near_curve_without_occupancy_state(self):
+    def test_contract_surface_has_no_depth_curve_configuration(self):
         self.assertEqual(
             tuple(field.name for field in fields(MappingV2Config)),
-            ("raw_coordinate_scale", "collapse_abs_epsilon", "far_tau", "near_log_tau",
+            ("raw_coordinate_scale", "collapse_abs_epsilon",
              "pop_strength", "gain_per_pop", "max_horizontal_slope",
              "max_vertical_shear", "vertical_majorant_share",
              "direct_container_limit"))
@@ -88,48 +88,8 @@ class DepthMappingV2Test(unittest.TestCase):
                 "source_u_safety_scale", "collapse_relative_epsilon"):
             self.assertNotIn(removed, names)
 
-    def test_fixed_near_curve_feeds_the_pointwise_soft_container(self):
-        canonical = np.concatenate((np.full(25, 12.0), np.full(75, -4.0))).reshape(10, 10)
-        config = MappingV2Config(
-            raw_coordinate_scale=0.5, pop_strength=20.0, gain_per_pop=0.01,
-            max_horizontal_slope=0.99)
-        raw = canonical * config.raw_coordinate_scale
-        result = generate_depth_mapping_v2(raw, config)
-        base_curve = asymmetric_curve(canonical, config)
-        self.assertEqual(result.diagnostics.container_scale, 1.0)
-        np.testing.assert_allclose(
-            result.desired_parallax,
-            (base_curve * config.parallax_gain).astype(np.float32), rtol=1.0e-6)
-        np.testing.assert_allclose(
-            result.pre_limiter_parallax,
-            pointwise_soft_container(
-                base_curve * config.parallax_gain,
-                config.direct_container_limit).astype(np.float32),
-            rtol=1.0e-6)
 
-    def test_fallback_convergence_is_separate_curve_coordinate_and_exactly_zero(self):
-        raw = np.asarray([[-2.0, 0.0, 2.0]], dtype=np.float64)
-        result = generate_depth_mapping_v2(
-            raw, MappingV2Config(raw_coordinate_scale=0.5, max_horizontal_slope=0.99))
-        self.assertEqual(CALIBRATED_DEFAULTS.convergence_curve_default, 0.0)
-        self.assertEqual(result.diagnostics.convergence_curve, 0.0)
-        self.assertAlmostEqual(result.diagnostics.center_mean, 0.0)
-        self.assertEqual(float(result.desired_parallax[0, 1]), 0.0)
-        self.assertAlmostEqual(
-            result.diagnostics.curve_far_limit,
-            -MappingV2Config().far_tau - result.diagnostics.convergence_curve)
 
-    def test_asymmetric_curve_is_monotone_far_bounded_and_near_unbounded(self):
-        config = MappingV2Config(far_tau=0.25, near_log_tau=2.0)
-        x = np.asarray([-100.0, -1.0, 0.0, 1.0, 4.0, 1000.0])
-        y = asymmetric_curve(x, config)
-        self.assertTrue(np.all(np.diff(y) > 0.0))
-        # At an extreme finite input expm1 may round to its asymptote exactly.
-        self.assertGreaterEqual(float(y[0]), -config.far_tau)
-        self.assertGreater(float(y[1]), -config.far_tau)
-        self.assertEqual(float(y[2]), 0.0)
-        self.assertEqual(float(y[3]), 1.0)
-        self.assertGreater(float(y[-1]), float(y[-2]))
 
     def test_additive_raw_offset_preserves_mapping_with_fixed_scale(self):
         raw = np.asarray([[-2.0, -0.5, 0.0], [0.5, 1.0, 4.0]])
@@ -156,14 +116,34 @@ class DepthMappingV2Test(unittest.TestCase):
 
     def test_pointwise_container_is_odd_monotone_and_does_not_scale_other_values(self):
         values = np.asarray([-1000.0, -0.01, 0.0, 0.01, 1000.0])
-        contained = pointwise_soft_container(values, 0.04)
+        contained = pointwise_hard_bound(values, 0.04)
         self.assertTrue(np.all(np.diff(contained) > 0.0))
         self.assertLessEqual(float(np.max(np.abs(contained))), 0.04)
         self.assertEqual(float(contained[2]), 0.0)
         self.assertAlmostEqual(float(contained[1]), -float(contained[3]))
-        unchanged = pointwise_soft_container(np.asarray([0.01]), 0.04)
-        with_outlier = pointwise_soft_container(np.asarray([0.01, 1.0e6]), 0.04)
+        unchanged = pointwise_hard_bound(np.asarray([0.01]), 0.04)
+        with_outlier = pointwise_hard_bound(np.asarray([0.01, 1.0e6]), 0.04)
         self.assertEqual(float(unchanged[0]), float(with_outlier[0]))
+
+    def test_linear_displacement_retains_pairwise_relief_when_zero_changes(self):
+        from depth_mapping_v2 import linear_relative_coordinate
+        raw = np.asarray([[1.0, 2.0, 4.0]])
+        a = linear_relative_coordinate(raw, 2.0, 2.25)
+        b = linear_relative_coordinate(raw, 3.0, 2.25)
+        np.testing.assert_allclose(np.diff(a), np.diff(b))
+        self.assertGreater(float(b[0, 2]), 0.0)
+
+    def test_hard_bound_preserves_unsaturated_values_and_only_clips_outliers(self):
+        values = np.asarray([-100.0, -0.01, 0.0, 0.01, 100.0])
+        np.testing.assert_array_equal(pointwise_hard_bound(values),
+                                      [-0.04, -0.01, 0.0, 0.01, 0.04])
+
+    def test_extreme_five_percent_tail_does_not_force_full_divisor_span(self):
+        raw = np.arange(1000, dtype=np.float64).reshape(20, 50) / 1000
+        raw[0, 0] = -100.0
+        raw[-1, -1] = 100.0
+        observed = calibrate_coordinate(raw)
+        self.assertAlmostEqual(observed.scale, MappingV2Config().raw_coordinate_scale)
 
     def test_horizontal_majorant_never_lowers_and_honors_step(self):
         field = np.asarray([[0.0, -1.0, -1.0, 0.5], [-0.2, 0.7, -0.8, -0.9]])
@@ -249,8 +229,6 @@ class DepthMappingV2Test(unittest.TestCase):
         invalid = (
             MappingV2Config(raw_coordinate_scale=-1.0),
             MappingV2Config(collapse_abs_epsilon=0.0),
-            MappingV2Config(far_tau=0.0),
-            MappingV2Config(near_log_tau=float("nan")),
             MappingV2Config(pop_strength=0.0),
             MappingV2Config(gain_per_pop=-1.0),
             MappingV2Config(max_horizontal_slope=0.0),

@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import re
 import shutil
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -19,7 +20,6 @@ try:
         _load_run_model_contract,
         _load_shape,
         _raw_files,
-        generate_first_latch_exact_sequence,
     )
     from .replay_depth_mapping_v2_sequence import (
         IMPLEMENTATION_SOURCE_FILES,
@@ -32,11 +32,10 @@ try:
         _diagnostic_summary,
         _exact_source_capture_grid_kind,
         _load_authenticated_cut_pulses, _materialize_gpu_replay_inputs,
+        _record_native_geometry_audit,
         _materialize_producer_evidence_bundle,
         _metric_contract_evidence,
         _publish_renderer_quality_score, _resolve_pop_strength, _source_frames,
-        _numpy_oracle_sequence,
-        _compare_gpu_with_numpy,
         _validate_frame_source_attestation, _validate_gpu_input_manifest_evidence,
         _validate_metric_contract_evidence, _validate_producer_evidence_bundle)
 except ImportError:  # Direct execution from tools/sbsbench.
@@ -50,7 +49,6 @@ except ImportError:  # Direct execution from tools/sbsbench.
         _load_run_model_contract,
         _load_shape,
         _raw_files,
-        generate_first_latch_exact_sequence,
     )
     from replay_depth_mapping_v2_sequence import (  # type: ignore
         IMPLEMENTATION_SOURCE_FILES,
@@ -63,11 +61,10 @@ except ImportError:  # Direct execution from tools/sbsbench.
         _diagnostic_summary,
         _exact_source_capture_grid_kind,
         _load_authenticated_cut_pulses, _materialize_gpu_replay_inputs,
+        _record_native_geometry_audit,
         _materialize_producer_evidence_bundle,
         _metric_contract_evidence,
         _publish_renderer_quality_score, _resolve_pop_strength, _source_frames,
-        _numpy_oracle_sequence,
-        _compare_gpu_with_numpy,
         _validate_frame_source_attestation, _validate_gpu_input_manifest_evidence,
         _validate_metric_contract_evidence, _validate_producer_evidence_bundle)
 
@@ -758,19 +755,6 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
                 [False, False, False],
             )
 
-            raw = np.tile(np.linspace(-1.0, 1.0, 8), (2, 1))
-            mapped = generate_first_latch_exact_sequence(
-                [raw, raw, raw],
-                [1, 2, 3],
-                cuts,
-                source,
-                confirmed_cut_counts=counts,
-            )
-            self.assertEqual(
-                [row["confirmed_cut_count"] for row in mapped.state_trace["frames"]],
-                [4, 5, 5],
-            )
-
             malformed = root / "unit_malformed_trace"
             malformed.mkdir()
             (malformed / "cut_state.json").write_text(
@@ -821,6 +805,7 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
                 run_model,
                 MappingV2Config(
                     raw_coordinate_scale=calibration.raw_coordinate_scale),
+                observation_timestamps_us=[1, 33334],
             )
             self.assertNotIn("output_hold", rows[0])
             self.assertEqual(rows[1]["rendered_source_frame_id"], "00002")
@@ -842,9 +827,9 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
                 manifest["frames"][1]["source_sha256"], rows[1]["input_source_sha256"])
             self.assertEqual(
                 {key: manifest["mapping_config"][key] for key in (
-                    "near_log_tau", "vertical_majorant_share")},
+                    "joint_plane_mode", "vertical_majorant_share")},
                 {
-                    "near_log_tau": CALIBRATED_DEFAULTS.near_log_tau,
+                    "joint_plane_mode": 3,
                     "vertical_majorant_share":
                         CALIBRATED_DEFAULTS.vertical_majorant_share,
                 })
@@ -1034,7 +1019,8 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             config = MappingV2Config(raw_coordinate_scale=calibration.raw_coordinate_scale)
             _, gpu_path = _materialize_gpu_replay_inputs(
                 output, {1: source}, dict(_raw_files(clip)), [1], [0], [False],
-                "cut-state-hard-cut-generation", shape, run_model, config)
+                "cut-state-hard-cut-generation", shape, run_model, config,
+                observation_timestamps_us=[1])
             gpu_reference = {
                 "file": "gpu_input/manifest.json", "schema": GPU_INPUT_MANIFEST_SCHEMA,
                 "sha256": whole_clip_raw_contract.file_sha256(gpu_path),
@@ -1132,28 +1118,28 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
                     output, {}, {}, [1], [0], [False], "unit-cut", (1, 1), {},
                     MappingV2Config(), joint_plane_mode=3)
             self.assertEqual(list(output.iterdir()), [])
-            with self.assertRaisesRegex(ValueError, "legacy replay modes"):
+            with self.assertRaisesRegex(ValueError, "invalid joint plane mode"):
                 _materialize_gpu_replay_inputs(
                     output, {}, {}, [1], [0], [False], "unit-cut", (1, 1), {},
-                    MappingV2Config(), observation_timestamps_us=[1])
+                    MappingV2Config(), joint_plane_mode=0, observation_timestamps_us=[1])
 
-    def test_new_native_modes_do_not_construct_or_claim_numpy_geometry(self):
+
+    def test_unified_native_geometry_audit_authenticates_fields_without_cpu_replica(self):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary)
             (output / "harness").mkdir()
             np.zeros((2, 2), dtype="<f4").tofile(output / "harness/depth_00001.f32")
             np.zeros((2, 2), dtype="<f4").tofile(output / "harness/parallax_00001.f32")
-            for mode in (3,):
-                with self.subTest(mode=mode), mock.patch(
-                        "replay_depth_mapping_v2_sequence._numpy_oracle_sequence") as oracle:
-                    document = _compare_gpu_with_numpy(
-                        output, [np.zeros((2, 2))], [1], [False], [0], "unit-cut",
-                        MappingV2Config(), {"mapping_config": {"joint_plane_mode": mode}})
-                    oracle.assert_not_called()
-                    self.assertIsNone(document["all_within_float32_tolerances"])
-                    self.assertEqual(document["role"], "not-applicable-mode-selected-native-only-v3")
-                    self.assertEqual(document["frames"][0]["frame_id"], "00001")
-
+            document = _record_native_geometry_audit(
+                output, [np.zeros((2, 2))], [1], [False], [0], "unit-cut",
+                MappingV2Config(), {"mapping_config": {"joint_plane_mode": 3}})
+            self.assertIsNone(document["all_within_float32_tolerances"])
+            self.assertEqual(document["role"], "not-applicable-mode-selected-native-only-v3")
+            self.assertEqual(document["frames"][0]["frame_id"], "00001")
+            for name in ("gpu_order_sha256", "gpu_parallax_sha256"):
+                self.assertRegex(document["frames"][0][name], r"^[0-9a-f]{64}$")
+            self.assertFalse(hasattr(sys.modules[_record_native_geometry_audit.__module__],
+                                     "_numpy_oracle_sequence"))
 
 if __name__ == "__main__":
     unittest.main()

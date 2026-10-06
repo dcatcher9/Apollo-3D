@@ -81,7 +81,7 @@ class HostAdaptiveAdapterAdmissionTests(unittest.TestCase):
                     corrupt, raw_coordinate_scale=self.scale, expected_joint_plane_mode=3)
 
     def test_retired_modes_cannot_be_admitted_by_resealing(self):
-        for mode in (1, 2, 4):
+        for mode in (0, 1, 2, 4):
             bad = dict(self.values, joint_plane_mode_bits=mode)
             with self.subTest(mode=mode), self.assertRaisesRegex(ValueError, 'mode'):
                 dump.validate_parallax_state_words(self.words(bad), raw_coordinate_scale=self.scale)

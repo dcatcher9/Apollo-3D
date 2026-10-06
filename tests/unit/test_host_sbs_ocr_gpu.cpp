@@ -6,7 +6,7 @@
 
 #ifdef _WIN32
 
-  #include "src/generated/depth_coordinate_v2_contract.h"
+  #include "src/depth_coordinate_v2.h"
 
   #include <algorithm>
   #include <array>
@@ -551,7 +551,14 @@ namespace {
           static_cast<std::uint32_t>(generation >> 32u),
         },
         {0u, 0u, field_width, field_height},
+        {static_cast<std::uint32_t>(frame), static_cast<std::uint32_t>(frame >> 32u), 0u, 0u},
       };
+      // This ownership fixture uses an authored microsecond cadence, shared by OCR and the
+      // sealed Base publication. It exercises no artificial UI dwell or model inference.
+      coordinate_constants_.joint_observation_timestamp_low = static_cast<std::uint32_t>(frame);
+      coordinate_constants_.joint_observation_timestamp_high = static_cast<std::uint32_t>(frame >> 32u);
+      context_->UpdateSubresource(v2_cb_.Get(), 0u, nullptr, &coordinate_constants_, 0u, 0u);
+      upload_geometry_publication(frame);
       context_->UpdateSubresource(
         subtitle_cb_.Get(),
         0u,
@@ -573,7 +580,7 @@ namespace {
 
       context_->CSSetShader(locator_resolve_.Get(), nullptr, 0u);
       std::array<ID3D11ShaderResourceView *, 8u> resolve_srvs {
-        nullptr,
+        geometry_state_srv_.Get(),
         cut_srv_.Get(),
         base_srv_.Get(),
         nullptr,
@@ -748,6 +755,14 @@ namespace {
         return false;
       }
 
+      const auto geometry_initial = v2::state_initial_words;
+      if (!create_structured_buffer(
+            device_.Get(), geometry_initial.data(), sizeof(geometry_initial),
+            4u * sizeof(std::uint32_t), D3D11_BIND_SHADER_RESOURCE,
+            geometry_state_buffer_, &geometry_state_srv_, nullptr)) {
+        return false;
+      }
+
       base_.assign(static_cast<std::size_t>(field_width) * field_height, 0.03f);
       for (std::uint32_t y = 380u; y < 398u; ++y) {
         std::fill_n(
@@ -791,15 +806,9 @@ namespace {
         {0u, 0u, field_width, field_height},
         {}
       };
-      const v2_constants_t coordinate_constants {
-        0.04f,
-        0.0001f,
-        0.0f,
-        0.0f,
-        1.0f,
-        0.5f,
-        0.04f,
-        0.0f
+      coordinate_constants_ = v2_constants_t {
+        0.04f, 0.0001f, 0.0f, 0.0f, 1.0f, 0.5f, 0.04f, 0.0f,
+        v2::adaptive_policy_id, {}, 0u, 0u, {}
       };
       const subtitle_constants_t subtitle_constants {
         {field_width, field_height, roi_top, roi_bottom},
@@ -815,8 +824,8 @@ namespace {
              ) &&
              create_constant_buffer(
                device_.Get(),
-               &coordinate_constants,
-               sizeof(coordinate_constants),
+               &coordinate_constants_,
+               sizeof(coordinate_constants_),
                v2_cb_
              ) &&
              create_constant_buffer(
@@ -825,6 +834,40 @@ namespace {
                sizeof(subtitle_constants),
                subtitle_cb_
              );
+    }
+
+    void upload_geometry_publication(const std::uint64_t timestamp) {
+      auto words = v2::state_initial_words;
+      const auto put_float = [&words](const std::size_t index, const float value) {
+        words[index] = std::bit_cast<std::uint32_t>(value);
+      };
+      const auto put_clock = [&words](const std::size_t index, const std::uint64_t value) {
+        words[index] = static_cast<std::uint32_t>(value);
+        words[index + 1u] = static_cast<std::uint32_t>(value >> 32u);
+      };
+      const auto source_time = std::max(timestamp, std::uint64_t {1u});
+      put_float(v2::center, 0.0f);
+      put_float(v2::inverse_scale, 1.0f / coordinate_constants_.raw_coordinate_scale);
+      put_float(v2::convergence_curve, 0.0f);
+      put_float(v2::container_scale, 1.0f);
+      words[v2::calibration_revision] = 1u;
+      put_float(v2::frame_valid, timestamp != 0u ? 1.0f : 0.0f);
+      words[v2::contract_tag_bits] = v2::contract_tag;
+      words[v2::renderer_authorization_bits] = timestamp != 0u ? v2::contract_tag : 0u;
+      words[v2::joint_plane_mode_bits] = v2::adaptive_policy_id;
+      put_clock(v2::gain_last_observation_low, source_time);
+      words[v2::gain_clock_armed] = timestamp != 0u ? 1u : 0u;
+      words[v2::gain_seed_count] = 1u;
+      put_float(v2::gain_target_zero, 0.0f);
+      put_float(v2::gain_target_inverse_scale, 1.0f / coordinate_constants_.raw_coordinate_scale);
+      put_float(v2::gain_target_nearest, coordinate_constants_.raw_coordinate_scale);
+      put_float(v2::gain_display_limit, v2::direct_container_limit);
+      put_clock(v2::gain_seed_first_low, source_time);
+      put_clock(v2::gain_seed_last_low, source_time);
+      put_float(v2::gain_seed_mean_nearest, coordinate_constants_.raw_coordinate_scale);
+      put_float(v2::gain_seed_mean_zero, 0.0f);
+      words[v2::camera_center_integrity_bits] = v2::camera_center_integrity_for_state_words(words);
+      context_->UpdateSubresource(geometry_state_buffer_.Get(), 0u, nullptr, words.data(), 0u, 0u);
     }
 
     void unbind() {
@@ -874,6 +917,8 @@ namespace {
     ComPtr<ID3D11UnorderedAccessView> condition_params_uav_;
     ComPtr<ID3D11Buffer> cut_buffer_;
     ComPtr<ID3D11ShaderResourceView> cut_srv_;
+    ComPtr<ID3D11Buffer> geometry_state_buffer_;
+    ComPtr<ID3D11ShaderResourceView> geometry_state_srv_;
     ComPtr<ID3D11Texture2D> base_texture_;
     ComPtr<ID3D11ShaderResourceView> base_srv_;
     ComPtr<ID3D11Texture2D> output_texture_;
@@ -881,6 +926,7 @@ namespace {
     ComPtr<ID3D11Buffer> depth_cb_;
     ComPtr<ID3D11Buffer> v2_cb_;
     ComPtr<ID3D11Buffer> subtitle_cb_;
+    v2_constants_t coordinate_constants_ {};
     std::vector<std::uint32_t> record_;
     std::vector<std::uint32_t> state_;
     std::vector<float> base_;
@@ -1603,7 +1649,7 @@ namespace {
       (std::array<std::uint32_t, 4u> {694u, 374u, 750u, 430u})
     );
 
-    // OCR deliberately preserves the separated square candidate. SLR13 owns the generic shape
+    // OCR deliberately preserves the separated square candidate. SLR14 owns the generic shape
     // rejection and admits only the wide subtitle line into pending/current authority.
     fixture.reset_locator();
     ASSERT_TRUE(fixture.dispatch_locator(10u, generation, true));
@@ -1642,7 +1688,7 @@ namespace {
     EXPECT_TRUE(fixture.output_is_exact_base());
 
     // Re-establish a line owner, then inject a non-finite probability. OCR8 abstains (flags=0),
-    // SLR13 discards all authority, and no stale target can alter Base.
+    // SLR14 discards all authority, and no stale target can alter Base.
     std::vector<float> line_only(ocr_pixels, 0.0f);
     paint_rectangle(line_only, 240u, 100u, 720u, 108u);
     ASSERT_TRUE(fixture.run_boxes(line_only, 13u, generation));

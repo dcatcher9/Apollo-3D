@@ -132,10 +132,15 @@ namespace {
   ) {
     namespace v2 = models::depth_coordinate_v2;
     auto authenticated_frames = frames;
+    std::size_t observation_index = 0u;
     for (auto &frame : authenticated_frames) {
       if (!frame.contains("source_sha256")) {
         frame["source_sha256"] = test_source_sha256();
       }
+      if (!frame.contains("observation_timestamp_us")) {
+        frame["observation_timestamp_us"] = std::uint64_t(100000u + observation_index * 100000u);
+      }
+      ++observation_index;
     }
     return {
       {"schema", 11u},
@@ -167,8 +172,7 @@ namespace {
       {"mapping_config", {
         {"raw_coordinate_scale", calibration.raw_coordinate_scale},
         {"collapse_abs_epsilon", v2::collapse_abs_epsilon},
-        {"far_tau", v2::far_tau},
-        {"near_log_tau", v2::near_log_tau},
+        {"joint_plane_mode", v2::adaptive_policy_id},
         {"pop_strength", pop_strength},
         {"gain_per_pop", v2::gain_per_pop},
         {"max_horizontal_slope", v2::max_horizontal_slope},
@@ -565,12 +569,13 @@ namespace {
     const v2::constants_t v2_constants {
       v2::model_calibrations.front().raw_coordinate_scale,
       v2::collapse_abs_epsilon,
-      v2::far_tau,
-      v2::near_log_tau,
+      0.0f,
+      0.0f,
       v2::requested_gain_for_config(v2::reference_pop_strength),
       v2::max_horizontal_slope,
       v2::direct_container_limit,
       v2::convergence_curve_default,
+      v2::adaptive_policy_id,
     };
     D3D11_BUFFER_DESC v2_constant_desc {};
     v2_constant_desc.ByteWidth = sizeof(v2_constants);
@@ -1648,7 +1653,7 @@ TEST(DepthCoordinateV2GpuTest, EveryAuthenticatedTensorShapeExecutesProductionPr
   }
 }
 
-TEST(DepthCoordinateV2GpuTest, ArithmeticMeanCenterLatchesAtCutAndHoldsAcrossLaterFramesOnGpu) {
+TEST(DepthCoordinateV2GpuTest, ArithmeticMeanCenterAdaptsAcrossCutsAndHoldsUnusableInputOnGpu) {
   namespace fs = std::filesystem;
   namespace v2 = models::depth_coordinate_v2;
 
@@ -1699,7 +1704,7 @@ TEST(DepthCoordinateV2GpuTest, ArithmeticMeanCenterLatchesAtCutAndHoldsAcrossLat
 
   std::vector<std::vector<float>> fields(12u, acquired);
   for (float &value : fields[1]) {
-    value += 0.25f;  // no cut: the first camera must remain latched
+    value += 0.25f;  // no cut: continuous source-time adaptation must move the camera
   }
   for (std::size_t index = 2u; index < fields.size(); ++index) {
     for (float &value : fields[index]) {
@@ -1762,25 +1767,26 @@ TEST(DepthCoordinateV2GpuTest, ArithmeticMeanCenterLatchesAtCutAndHoldsAcrossLat
   EXPECT_NEAR(rows[0]["center"].get<float>(), first_center, 2.0e-5f);
   EXPECT_FLOAT_EQ(
     rows[0]["convergence_curve"].get<float>(), v2::convergence_curve_default);
-  EXPECT_NEAR(rows[1]["center"].get<float>(), first_center, 2.0e-5f);
-  EXPECT_FLOAT_EQ(
-    rows[1]["convergence_curve"].get<float>(), v2::convergence_curve_default);
-  EXPECT_EQ(rows[1]["calibration_revision"], 1u);
-  EXPECT_NEAR(rows[2]["center"].get<float>(), first_center + 1.0f, 2.0e-5f);
-  EXPECT_FLOAT_EQ(
-    rows[2]["convergence_curve"].get<float>(), v2::convergence_curve_default);
+  EXPECT_GT(rows[1]["center"].get<float>(), first_center);
+  EXPECT_LT(rows[1]["center"].get<float>(), first_center + 0.25f);
+  EXPECT_EQ(rows[1]["calibration_revision"], 2u);
   EXPECT_EQ(rows[2]["confirmed_cut"], true);
-  EXPECT_EQ(rows[2]["calibration_revision"], 2u);
-  for (std::size_t index = 3u; index < fields.size(); ++index) {
-    EXPECT_NEAR(rows[index]["center"].get<float>(), first_center + 1.0f, 2.0e-5f);
-    EXPECT_EQ(rows[index]["calibration_revision"], 2u);
+  EXPECT_GT(rows[2]["center"].get<float>(), rows[1]["center"].get<float>());
+  EXPECT_LT(rows[2]["center"].get<float>(), first_center + 1.0f);
+  EXPECT_EQ(rows[2]["calibration_revision"], 3u);
+  for (std::size_t index = 3u; index < 10u; ++index) {
+    EXPECT_GT(rows[index]["center"].get<float>(), rows[index-1u]["center"].get<float>());
+    EXPECT_LT(rows[index]["center"].get<float>(), first_center + 1.0f);
+    EXPECT_EQ(rows[index]["calibration_revision"], index + 1u);
   }
   EXPECT_EQ(rows[10]["frame_valid"], false);
+  EXPECT_FLOAT_EQ(rows[10]["center"].get<float>(), rows[9]["center"].get<float>());
   EXPECT_EQ(rows[11]["frame_valid"], true);
+  EXPECT_FLOAT_EQ(rows[11]["center"].get<float>(), rows[9]["center"].get<float>());
   EXPECT_EQ(rows[11]["cut_attribution"], "none");
 }
 
-TEST(DepthCoordinateV2GpuTest, SixCoordinatePassReplayLatchesRecoversAndRelatchesExactly) {
+TEST(DepthCoordinateV2GpuTest, CoordinatePassReplayAuthenticatesAdaptiveStateAndRecoversExactly) {
   namespace fs = std::filesystem;
   namespace v2 = models::depth_coordinate_v2;
 
@@ -1838,7 +1844,7 @@ TEST(DepthCoordinateV2GpuTest, SixCoordinatePassReplayLatchesRecoversAndRelatche
   raw_fields.push_back(base);  // the same one-NaN field on a cut cannot seed the new camera
   raw_fields.back()[element_count / 3u] = std::numeric_limits<float>::quiet_NaN();
   const std::size_t ramp_foreground_count = element_count * 18u / 100u;
-  raw_fields.emplace_back(element_count, 0.0f);  // invalid+cut cleared; ramp reacquires
+  raw_fields.emplace_back(element_count, 0.0f);  // invalid+cut retained; next valid re-arms
   std::fill_n(raw_fields.back().begin(), ramp_foreground_count, 20.0f);
 
   nlohmann::ordered_json frames = nlohmann::ordered_json::array();
@@ -1945,41 +1951,30 @@ TEST(DepthCoordinateV2GpuTest, SixCoordinatePassReplayLatchesRecoversAndRelatche
             "authenticated-raw-depth-plus-eight-v2-compute-shaders-persistent-gpu-state-v11");
   EXPECT_EQ(trace["producer"]["tensor_shape"]["width"], replay->width());
   EXPECT_EQ(trace["producer"]["tensor_shape"]["height"], replay->height());
-  ASSERT_EQ(trace["producer"]["shader_sequence"].size(), 6u);
-  EXPECT_EQ(trace["producer"]["shader_sequence"][2],
-            "depth_coordinate_v2_state_resolve_cs.hlsl");
+  ASSERT_EQ(trace["producer"]["shader_sequence"].size(), 8u);
   EXPECT_EQ(trace["producer"]["shader_sequence"][4],
+            "depth_coordinate_v2_state_resolve_cs.hlsl");
+  EXPECT_EQ(trace["producer"]["shader_sequence"][6],
             "depth_coordinate_v2_vertical_limit_cs.hlsl");
   EXPECT_EQ(trace["producer"]["contract_canonical_sha256"],
             v2::contract_canonical_sha256);
 
   const auto &rows = trace.at("frames");
-  EXPECT_EQ(rows[0]["calibration_revision"], 1u);
-  EXPECT_EQ(rows[1]["calibration_revision"], 1u);
-  EXPECT_EQ(rows[2]["calibration_revision"], 1u);
-  EXPECT_EQ(rows[3]["calibration_revision"], 2u);
-  EXPECT_EQ(rows[4]["calibration_revision"], 2u);
-  EXPECT_EQ(rows[5]["calibration_revision"], 2u);
-  EXPECT_EQ(rows[6]["calibration_revision"], 2u);
-  EXPECT_EQ(rows[7]["calibration_revision"], 2u);
-  EXPECT_EQ(rows[8]["calibration_revision"], 3u);
-  EXPECT_EQ(rows[3]["confirmed_cut"], true);
-  EXPECT_EQ(rows[3]["confirmed_cut_count"], 1u);
-
-  const float first_center = rows[0]["center"].get<float>();
-  const float first_scale = rows[0]["latched_scale"].get<float>();
-  EXPECT_NEAR(rows[1]["center"].get<float>(), first_center, 2.0e-5f);
-  EXPECT_NEAR(rows[2]["center"].get<float>(), first_center, 2.0e-5f);
-  EXPECT_NEAR(rows[1]["latched_scale"].get<float>(), first_scale, 2.0e-5f);
-  EXPECT_NEAR(rows[2]["latched_scale"].get<float>(), first_scale, 2.0e-5f);
-  EXPECT_FLOAT_EQ(rows[0]["convergence_curve"].get<float>(), 0.0f);
-  EXPECT_FLOAT_EQ(rows[3]["convergence_curve"].get<float>(), 0.0f);
-  for (const auto &row : rows) {
-    if (row["camera_valid"].get<bool>()) {
-      EXPECT_NEAR(row["latched_scale"].get<float>(),
-                  calibration.raw_coordinate_scale, 2.0e-6f);
+  // Frame three deliberately injects a foreign contract. Its counters are not trusted: acquire
+  // revision one again, then advance only on usable observations; invalid frames hold it.
+  const std::array<std::uint32_t, 9u> revisions {1u, 2u, 1u, 2u, 2u, 2u, 3u, 3u, 4u};
+  for (std::size_t index = 0u; index < revisions.size(); ++index) {
+    EXPECT_EQ(rows[index]["calibration_revision"], revisions[index]);
+    EXPECT_FLOAT_EQ(rows[index]["convergence_curve"].get<float>(), 0.0f);
+    if (rows[index]["camera_valid"].get<bool>()) {
+      EXPECT_GE(rows[index]["latched_scale"].get<float>(), calibration.raw_coordinate_scale - 2.0e-6f);
     }
   }
+  EXPECT_EQ(rows[3]["confirmed_cut"], true);
+  EXPECT_EQ(rows[3]["confirmed_cut_count"], 1u);
+  const float first_center = rows[0]["center"].get<float>();
+  EXPECT_GT(rows[1]["center"].get<float>(), first_center);
+  EXPECT_LT(rows[3]["center"].get<float>(), rows[3]["observed_mean"].get<float>());
 
   // The ABI field remains present but the source-U container is pointwise and stateless.
   for (const auto &row : rows) {
@@ -2008,14 +2003,13 @@ TEST(DepthCoordinateV2GpuTest, SixCoordinatePassReplayLatchesRecoversAndRelatche
   EXPECT_EQ(rows[6]["camera_valid"], true);
   EXPECT_NEAR(rows[6]["center"].get<float>(), rows[3]["center"].get<float>(), 2.0e-5f);
   EXPECT_EQ(rows[7]["frame_valid"], false);
-  EXPECT_EQ(rows[7]["camera_valid"], false);
-  EXPECT_FLOAT_EQ(rows[7]["center"].get<float>(), 0.0f);
+  EXPECT_EQ(rows[7]["camera_valid"], true);
+  EXPECT_FLOAT_EQ(rows[7]["center"].get<float>(), rows[6]["center"].get<float>());
   EXPECT_FLOAT_EQ(outputs[7].encoded_minimum, 0.5f);
   EXPECT_FLOAT_EQ(outputs[7].encoded_maximum, 0.5f);
   EXPECT_EQ(rows[8]["frame_valid"], true);
   EXPECT_EQ(rows[8]["camera_valid"], true);
-  EXPECT_NEAR(rows[8]["center"].get<float>(),
-              rows[8]["observed_mean"].get<float>(), 2.0e-5f);
+  EXPECT_FLOAT_EQ(rows[8]["center"].get<float>(), rows[6]["center"].get<float>());
 
   const auto expect_rejected = [&](const nlohmann::ordered_json &candidate,
                                    const std::string_view name) {
@@ -2029,7 +2023,7 @@ TEST(DepthCoordinateV2GpuTest, SixCoordinatePassReplayLatchesRecoversAndRelatche
   };
 
   auto tampered_contract = nlohmann::ordered_json::parse(contract_bytes);
-  tampered_contract["calibrated_defaults"]["far_tau"] = 0.151f;
+  tampered_contract["calibrated_defaults"]["adaptive_time_constant_seconds"] = 0.151f;
   const std::string tampered_bytes = tampered_contract.dump(2) + "\n";
   ASSERT_TRUE(write_bytes(contract_copy, tampered_bytes));
   auto invalid = manifest;
@@ -2057,8 +2051,8 @@ TEST(DepthCoordinateV2GpuTest, SixCoordinatePassReplayLatchesRecoversAndRelatche
   invalid["frames"][0]["hard_cut_count"] = 0x100000000ull;
   expect_rejected(invalid, "overflow-hard-cut-generation");
   invalid = manifest;
-  invalid["mapping_config"]["near_log_tau"] = 1.9f;
-  expect_rejected(invalid, "mismatched-fixed-near-log-tau");
+  invalid["mapping_config"]["joint_plane_mode"] = 0u;
+  expect_rejected(invalid, "retired-policy-zero");
   invalid = manifest;
   invalid["source_color_mode"] = 0u;
   expect_rejected(invalid, "retired-source-color-mode");
@@ -2234,8 +2228,10 @@ void main(uint3 tid : SV_GroupThreadID) {
   const auto quantiles = compile("depth_coordinate_v2_quantiles_cs.hlsl");
   const auto old_histogram = compile("depth_coordinate_v2_histogram_cs.hlsl", reference_histogram);
   const auto old_quantiles = compile("depth_coordinate_v2_quantiles_cs.hlsl", reference_quantiles);
-  // Mode 0's production normalization histogram is unchanged by scan fusion.
-  const auto normalization_histogram = compile("depth_hist_cs.hlsl");
+  // Frozen pre-fusion normalization arithmetic remains an independent test-only oracle.
+  const auto normalization_histogram = compile("depth_coordinate_v2_histogram_cs.hlsl",
+    read_bytes(fs::path(SUNSHINE_SOURCE_DIR) /
+      "tests/fixtures/host_sbs_cut_normalization_histogram_reference_cs.hlsl"));
   ASSERT_TRUE(moments && frame_resolve && histogram && quantiles && old_histogram &&
     old_quantiles && normalization_histogram);
 
@@ -2369,8 +2365,7 @@ void main(uint3 tid : SV_GroupThreadID) {
       .minmax_raw_output = minmax.uav.Get(),
       .moments_dispatch = gpu::dispatch_command_t::direct(groups, 1u, 1u),
       .frame_resolve_dispatch = gpu::dispatch_command_t::direct(1u, 1u, 1u),
-      .robust_quantiles = true,
-      .histogram_shader = histogram.Get(),
+            .histogram_shader = histogram.Get(),
       .quantile_shader = quantiles.Get(),
       .frame_stats = shared_frame.srv.Get(),
       .histogram_output = shared_bins.uav.Get(),

@@ -1,12 +1,12 @@
 /**
  * @file tests/unit/test_host_sbs_subtitle_locator.cpp
- * @brief Deterministic WARP coverage for the compact OCR8/SLR13 lower-text authority.
+ * @brief Deterministic WARP coverage for OCR8/SLR14 ownership and the adaptive shared UI plane.
  */
 #include <gtest/gtest.h>
 
 #ifdef _WIN32
 
-  #include "src/generated/depth_coordinate_v2_contract.h"
+  #include "src/depth_coordinate_v2.h"
   #include "src/generated/sbs_adaptive_state_contract.h"
   #include "src/host_sbs_shader_cache.h"
   #include "src/platform/windows/sbs_debug_dump.h"
@@ -22,6 +22,7 @@
   #include <limits>
   #include <iostream>
   #include <numeric>
+  #include <optional>
   #include <string>
   #include <vector>
   #include <wrl/client.h>
@@ -114,8 +115,8 @@ namespace {
   struct v2_constants_t {
     float raw_coordinate_scale;
     float collapse_abs_epsilon;
-    float far_tau;
-    float near_log_tau;
+    float coordinate_reserved0;
+    float coordinate_reserved1;
     float requested_gain;
     float max_horizontal_slope;
     float direct_container_limit;
@@ -431,6 +432,12 @@ namespace {
             nullptr
       )) return false;
 
+      const auto geometry_initial = v2::state_initial_words;
+      if (!create_structured_buffer(
+            device_.Get(), geometry_initial.data(), sizeof(geometry_initial),
+            4u * sizeof(std::uint32_t), D3D11_BIND_SHADER_RESOURCE,
+            geometry_state_buffer_, &geometry_state_srv_, nullptr)) return false;
+
       base_.assign(static_cast<std::size_t>(field_width_) * field_height_, 0.03f);
       const auto cell_scale = fixture_field_cell_scale();
       const auto sample_top = std::min(roi_top_ + 5u * cell_scale, field_height_);
@@ -466,7 +473,8 @@ namespace {
         tensor_content_, {}
       };
       v2_constants_ = v2_constants_t {
-        0.04f, 0.0001f, 0.0f, 0.0f, 1.0f, 0.5f, 0.04f, 0.0f, 0u, {}, 0u, 0u, {}
+        0.04f, 0.0001f, 0.0f, 0.0f, 1.0f, 0.5f, 0.04f, 0.0f,
+        v2::adaptive_policy_id, {}, 0u, 0u, {}
       };
       const subtitle_constants_t subtitle_constants {
         {field_width_, field_height_, roi_top_, roi_bottom_},
@@ -492,8 +500,13 @@ namespace {
       const bool corrupt_first_score = false,
       const bool submitted = true,
       const bool = true,
-      const std::uint64_t observation_timestamp_us = 0u
+      std::uint64_t observation_timestamp_us = std::numeric_limits<std::uint64_t>::max()
     ) {
+      // Ownership tests use an explicit authored microsecond cadence; rate/dwell tests pass
+      // their source timestamps through observe_at. Duplicate identity retains the same clock.
+      if (observation_timestamp_us == std::numeric_limits<std::uint64_t>::max()) {
+        observation_timestamp_us = identity;
+      }
       std::array<std::uint32_t, 32u> cut_words {};
       cut_words[0u] = cut_tag;
       cut_words[16u] = scene_epoch_;
@@ -564,20 +577,21 @@ namespace {
       context_->UpdateSubresource(
         subtitle_cb_.Get(), 0u, nullptr, &subtitle_constants, 0u, 0u
       );
-      if (v2_constants_.joint_plane_mode == 3u &&
-          !override_joint_observation_) {
+      if (!override_joint_observation_) {
         v2_constants_.joint_observation_timestamp_low =
           static_cast<std::uint32_t>(observation_timestamp_us);
         v2_constants_.joint_observation_timestamp_high =
           static_cast<std::uint32_t>(observation_timestamp_us >> 32u);
         context_->UpdateSubresource(v2_cb_.Get(), 0u, nullptr, &v2_constants_, 0u, 0u);
       }
+      upload_geometry_publication(observation_timestamp_us);
       ID3D11Buffer *constant_buffers[] = {depth_cb_.Get(), v2_cb_.Get(), subtitle_cb_.Get()};
       context_->CSSetConstantBuffers(0u, 3u, constant_buffers);
 
       context_->CSSetShader(resolve_.Get(), nullptr, 0u);
       std::array<ID3D11ShaderResourceView *, 8u> resolve_srvs {
-        nullptr, cut_srv_.Get(), base_srv_.Get(), nullptr, nullptr, nullptr, nullptr, ocr_srv_.Get()
+        geometry_available_ ? geometry_state_srv_.Get() : nullptr,
+        cut_srv_.Get(), base_srv_.Get(), nullptr, nullptr, nullptr, nullptr, ocr_srv_.Get()
       };
       context_->CSSetShaderResources(0u, resolve_srvs.size(), resolve_srvs.data());
       std::array<ID3D11UnorderedAccessView *, 3u> resolve_uavs {
@@ -608,11 +622,7 @@ namespace {
       cut_pulse_ = pulse;
     }
 
-    void set_joint_plane_mode(const bool enabled) {
-      set_joint_plane_mode_words(enabled ? 3u : 0u);
-    }
-
-    void set_joint_plane_mode_words(
+    void set_adaptive_policy_words(
       const std::uint32_t mode,
       const std::uint32_t padding = 0u,
       const float requested_gain = 1.0f
@@ -622,6 +632,17 @@ namespace {
         mode, {padding, 0u, 0u}, 0u, 0u, {}
       };
       override_joint_observation_ = false;
+      context_->UpdateSubresource(v2_cb_.Get(), 0u, nullptr, &v2_constants_, 0u, 0u);
+    }
+
+    void set_geometry_ready(const bool ready) { geometry_ready_ = ready; }
+    void set_geometry_available(const bool available) { geometry_available_ = available; }
+    void override_geometry_clock(const std::optional<std::uint64_t> timestamp) {
+      geometry_clock_override_ = timestamp;
+    }
+
+    void set_display_guard(const float limit) {
+      v2_constants_.direct_container_limit = limit;
       context_->UpdateSubresource(v2_cb_.Get(), 0u, nullptr, &v2_constants_, 0u, 0u);
     }
 
@@ -833,47 +854,6 @@ namespace {
       );
     }
 
-    void set_target_probe_ring_alternating(
-      const float primary_center,
-      const std::uint32_t owner_top,
-      const std::uint32_t horizontal_span,
-      const float first_value,
-      const float second_value
-    ) {
-      set_background_probe_alternating(
-        primary_center, owner_top, first_value, second_value
-      );
-      const float step = static_cast<float>(horizontal_span) /
-                         static_cast<float>(
-                           v2::subtitle_target_horizontal_step_denominator
-                         );
-      for (std::uint32_t radius = 1u;
-           radius <= v2::subtitle_target_horizontal_fallback_max_radius_steps;
-           ++radius) {
-        const float offset = step * static_cast<float>(radius);
-        set_background_probe_alternating(
-          primary_center - offset, owner_top, first_value, second_value
-        );
-        set_background_probe_alternating(
-          primary_center + offset, owner_top, first_value, second_value
-        );
-      }
-    }
-
-    void set_target_probe_ring_alternating(
-      const line_box_t line,
-      const float first_value,
-      const float second_value
-    ) {
-      set_target_probe_ring_alternating(
-        0.5f * static_cast<float>(line.left + line.right - 1u),
-        line.top,
-        line.right - line.left,
-        first_value,
-        second_value
-      );
-    }
-
     std::uint32_t fixture_field_cell_scale() const {
       return std::max(
         1u,
@@ -923,13 +903,56 @@ namespace {
     }
 
    private:
+    void upload_geometry_publication(const std::uint64_t timestamp) {
+      // The fixture supplies a complete authenticated current Base publication without running
+      // a model. Production binds its already-published raw-coordinate state at the same slot.
+      auto words = v2::state_initial_words;
+      const auto now = geometry_clock_override_.value_or(timestamp);
+      const auto seed = now == 0u ? 1u : now;
+      const auto put_float = [&words](const std::size_t index, const float value) {
+        words[index] = std::bit_cast<std::uint32_t>(value);
+      };
+      const auto put_clock = [&words](const std::size_t index, const std::uint64_t value) {
+        words[index] = static_cast<std::uint32_t>(value);
+        words[index + 1u] = static_cast<std::uint32_t>(value >> 32u);
+      };
+      put_float(v2::center, 0.0f);
+      put_float(v2::inverse_scale, 1.0f / v2_constants_.raw_coordinate_scale);
+      put_float(v2::convergence_curve, 0.0f);
+      put_float(v2::container_scale, 1.0f);
+      words[v2::calibration_revision] = 1u;
+      const bool ready = geometry_ready_ && now != 0u;
+      put_float(v2::frame_valid, ready ? 1.0f : 0.0f);
+      words[v2::confirmed_cut_count] = scene_epoch_;
+      words[v2::contract_tag_bits] = v2::contract_tag;
+      words[v2::renderer_authorization_bits] = ready ? v2::contract_tag : 0u;
+      words[v2::joint_plane_mode_bits] = v2::adaptive_policy_id;
+      put_clock(v2::gain_last_observation_low, seed);
+      words[v2::gain_clock_armed] = ready ? 1u : 0u;
+      words[v2::gain_seed_count] = 1u;
+      put_float(v2::gain_target_zero, 0.0f);
+      put_float(v2::gain_target_inverse_scale,
+        ready ? 1.0f / v2_constants_.raw_coordinate_scale : 0.0f);
+      put_float(v2::gain_target_nearest, ready ? v2_constants_.raw_coordinate_scale : 0.0f);
+      put_float(v2::gain_display_limit, v2::direct_container_limit);
+      put_clock(v2::gain_seed_first_low, seed);
+      put_clock(v2::gain_seed_last_low, seed);
+      put_float(v2::gain_seed_mean_nearest, v2_constants_.raw_coordinate_scale);
+      put_float(v2::gain_seed_mean_zero, 0.0f);
+      words[v2::camera_center_integrity_bits] =
+        v2::camera_center_integrity_for_state_words(words);
+      context_->UpdateSubresource(
+        geometry_state_buffer_.Get(), 0u, nullptr, words.data(), 0u, 0u);
+    }
+
     bool dispatch_condition_validator_for_test() {
       ID3D11Buffer *constant_buffers[] = {depth_cb_.Get(), v2_cb_.Get(), subtitle_cb_.Get()};
       context_->CSSetConstantBuffers(0u, 3u, constant_buffers);
 
       context_->CSSetShader(condition_validate_test_.Get(), nullptr, 0u);
       std::array<ID3D11ShaderResourceView *, 8u> validator_srvs {
-        nullptr, cut_srv_.Get(), nullptr, state_srv_.Get(), nullptr, nullptr, nullptr, ocr_srv_.Get()
+        geometry_available_ ? geometry_state_srv_.Get() : nullptr,
+        cut_srv_.Get(), nullptr, state_srv_.Get(), nullptr, nullptr, nullptr, ocr_srv_.Get()
       };
       context_->CSSetShaderResources(0u, validator_srvs.size(), validator_srvs.data());
       context_->CSSetUnorderedAccessViews(
@@ -994,6 +1017,11 @@ namespace {
     ComPtr<ID3D11UnorderedAccessView> condition_params_uav_;
     ComPtr<ID3D11Buffer> ocr_buffer_;
     ComPtr<ID3D11ShaderResourceView> ocr_srv_;
+    ComPtr<ID3D11Buffer> geometry_state_buffer_;
+    ComPtr<ID3D11ShaderResourceView> geometry_state_srv_;
+    bool geometry_ready_ = true;
+    bool geometry_available_ = true;
+    std::optional<std::uint64_t> geometry_clock_override_;
     ComPtr<ID3D11Buffer> cut_buffer_;
     ComPtr<ID3D11ShaderResourceView> cut_srv_;
     ComPtr<ID3D11Texture2D> base_texture_;
@@ -1034,9 +1062,7 @@ namespace {
     // A single observation is pending and has no conditioning authority.
     ASSERT_TRUE(fixture.observe(1u, {first}, false));
     ASSERT_EQ(fixture.state().size(), state_words);
-    EXPECT_TRUE(std::all_of(
-      fixture.state().begin() + v2::subtitle_locator_adaptive_offset,
-      fixture.state().end(), [](const auto word) { return word == 0u; }));
+    EXPECT_EQ(fixture.state()[v2::subtitle_locator_adaptive_offset], 1u);
     EXPECT_EQ(fixture.state()[0u], slr_schema);
     EXPECT_EQ(fixture.state()[1u], slr_tag);
     EXPECT_EQ(fixture.state()[2u], flag_pending);
@@ -1060,7 +1086,7 @@ namespace {
     EXPECT_EQ(fixture.state()[4u], 0u);
     EXPECT_TRUE(fixture.output_is_exact_base());
 
-    // A distinct compatible observation births the owner at half fade.
+    // A distinct compatible observation births the owner with immediate full plane pin.
     ASSERT_TRUE(fixture.observe(2u, {first}, false));
     EXPECT_EQ(fixture.state()[2u], flag_owner | flag_target_valid);
     EXPECT_EQ(fixture.state()[3u], 1u);
@@ -1068,7 +1094,7 @@ namespace {
     EXPECT_EQ(fixture.state()[12u], 0u);
     EXPECT_EQ(fixture.state()[20u], 1u);
     EXPECT_EQ(fixture.state()[21u], 1u);
-    EXPECT_EQ(fixture.state()[24u], 1u);
+    EXPECT_EQ(fixture.state()[24u], 2u);
     ASSERT_EQ(
       fixture.condition_params().size(),
       v2::subtitle_condition_param_word_count
@@ -1089,10 +1115,10 @@ namespace {
       std::bit_cast<std::uint32_t>(0.03f)
     );
 
-    // The next observation reaches full strength.
+    // A later observation retains full strength without a glyph-depth fade.
     ASSERT_TRUE(fixture.observe(3u, {first}, false));
     EXPECT_EQ(fixture.state()[24u], 2u);
-    EXPECT_NEAR(fixture.output_at(300u, 364u), 0.0102604f, 0.00002f);
+    EXPECT_EQ(fixture.output_at(300u, 364u), std::bit_cast<float>(fixture.state()[18u]));
 
     // A newly appended translation line is pending.  Only the matched old line is current;
     // the new line receives at most the old line's analytic collar, never a fabricated core.
@@ -1562,15 +1588,14 @@ namespace {
     EXPECT_EQ(fixture.state()[21u], 1u);
   }
 
-  TEST(HostSbsSubtitleSlr13GpuTest, PartialAuthoritySamplesOnlyMatchedCurrentGeometry) {
+  TEST(HostSbsSubtitleSlr13GpuTest, PartialAuthorityKeepsOnlyMatchedCurrentCovers) {
     slr13_warp_fixture_t fixture;
     std::string error;
     ASSERT_TRUE(fixture.initialize(error)) << error;
 
     const line_box_t old_line {180u, 360u, 590u, 370u};
-    // A 100-cell shift retains just over 0.6 IoU with old_line. Its target-sampling strip is
-    // disjoint from old_line's strip, so this test distinguishes exact current evidence from the
-    // stale owner geometry retained while the appended stack is pending.
+    // A 100-cell shift retains just over 0.6 IoU. The matched current cover moves, while
+    // the appended unmatched line remains pending and cannot become a conditioning core.
     const line_box_t shifted_line {280u, 360u, 690u, 370u};
     const line_box_t appended_line {280u, 374u, 600u, 384u};
     fixture.set_base(0.0f);
@@ -1585,9 +1610,9 @@ namespace {
     EXPECT_EQ(fixture.state()[4u], 1u);
     EXPECT_EQ(fixture.state()[12u], 2u);
     EXPECT_EQ(fixture.state()[20u], 1u);
-    const auto one_slew =
-      v2::subtitle_target_max_slew_binocular_source_pixels / (2.0f * 1920.0f);
-    EXPECT_NEAR(std::bit_cast<float>(fixture.state()[18u]), one_slew, 1.0e-8f);
+    EXPECT_EQ(fixture.state()[18u], std::bit_cast<std::uint32_t>(0.0f));
+    EXPECT_EQ(fixture.state()[64u], shifted_line.left);
+    EXPECT_EQ(fixture.state()[66u], shifted_line.right);
   }
 
   TEST(HostSbsSubtitleSlr13GpuTest, NoncanonicalOwnerAndPendingCoreOrderFailFlat) {
@@ -1632,229 +1657,6 @@ namespace {
     EXPECT_EQ(pending_fixture.state()[4u], 0u);
     EXPECT_EQ(pending_fixture.state()[12u], 2u);
     EXPECT_TRUE(pending_fixture.output_is_exact_base());
-  }
-
-  TEST(HostSbsSubtitleSlr13GpuTest, OwnerTargetTracksReliableLocalPlaneWithoutPumping) {
-    slr13_warp_fixture_t fixture;
-    std::string error;
-    ASSERT_TRUE(fixture.initialize(error)) << error;
-
-    const line_box_t first {180u, 360u, 590u, 370u};
-    const line_box_t jittered {182u, 361u, 592u, 371u};
-    const line_box_t handoff {80u, 360u, 380u, 370u};
-    constexpr auto target_for_pixels = [](const float binocular_source_pixels) {
-      return binocular_source_pixels / (2.0f * static_cast<float>(1920u));
-    };
-    fixture.set_base(target_for_pixels(2.0f));
-    ASSERT_TRUE(fixture.observe(100u, {first}, false));
-    ASSERT_TRUE(fixture.observe(101u, {first}, false));
-    ASSERT_EQ(fixture.state()[2u], flag_owner | flag_target_valid);
-    const std::uint32_t birth_target = fixture.state()[18u];
-    // A reliable local supporting plane is used as-is instead of being pulled to an absolute
-    // near-screen band.
-    EXPECT_EQ(birth_target, std::bit_cast<std::uint32_t>(target_for_pixels(2.0f)));
-    EXPECT_EQ(fixture.state()[24u], 1u);
-
-    // A distinct observation within the one-pixel deadband preserves the exact target bits even
-    // when compatible OCR geometry jitters. This is the no-pumping path.
-    fixture.set_background_sample_rows(
-      jittered, target_for_pixels(2.75f), target_for_pixels(2.75f)
-    );
-    ASSERT_TRUE(fixture.observe(102u, {jittered}, false));
-    EXPECT_EQ(fixture.state()[18u], birth_target);
-    EXPECT_EQ(fixture.state()[24u], 2u);
-
-    // Outside the deadband, EMA asks for a larger move but the target advances by at most 0.25
-    // binocular source-equivalent pixels per distinct observation. A duplicate identity is an
-    // exact target/fade hold and cannot consume another slew step.
-    fixture.set_background_sample_rows(
-      jittered, target_for_pixels(6.0f), target_for_pixels(6.0f)
-    );
-    ASSERT_TRUE(fixture.observe(103u, {jittered}, false));
-    const auto first_slew = std::bit_cast<float>(fixture.state()[18u]);
-    EXPECT_NEAR(first_slew, target_for_pixels(2.25f), 1.0e-8f);
-    const auto first_slew_bits = fixture.state()[18u];
-    ASSERT_TRUE(fixture.observe(103u, {jittered}, false));
-    EXPECT_EQ(fixture.state()[18u], first_slew_bits);
-    EXPECT_EQ(fixture.state()[24u], 2u);
-    ASSERT_TRUE(fixture.observe(104u, {jittered}, false));
-    EXPECT_NEAR(
-      std::bit_cast<float>(fixture.state()[18u]), target_for_pixels(2.5f), 1.0e-8f
-    );
-
-    // A disjoint material handoff has no same-frame current authority on its first observation.
-    // It outputs exact Base and cannot use stale owner geometry to move the cached target. Once
-    // confirmed, its current geometry samples the compatible plane, takes one bounded step, and
-    // preserves the mature fade instead of inserting another half-strength frame.
-    const auto pre_handoff = std::bit_cast<float>(fixture.state()[18u]);
-    ASSERT_TRUE(fixture.observe(105u, {handoff}, false));
-    EXPECT_EQ(std::bit_cast<float>(fixture.state()[18u]), pre_handoff);
-    EXPECT_EQ(fixture.state()[20u], 0u);
-    EXPECT_TRUE(fixture.output_is_exact_base());
-    const auto pending_target = std::bit_cast<float>(fixture.state()[18u]);
-    fixture.set_background_sample_rows(
-      handoff, target_for_pixels(6.0f), target_for_pixels(6.0f)
-    );
-    ASSERT_TRUE(fixture.observe(106u, {handoff}, false));
-    ASSERT_EQ(fixture.state()[21u], 3u);
-    EXPECT_NEAR(
-      std::bit_cast<float>(fixture.state()[18u]) - pending_target,
-      target_for_pixels(0.25f),
-      1.0e-8f
-    );
-    EXPECT_EQ(fixture.state()[24u], 2u);
-
-    // Missing current evidence clears geometry immediately but caches the reliable target.
-    // Reacquisition during grace resumes through the same bounded update instead of reviving a
-    // stale scene plane unchanged.
-    ASSERT_TRUE(fixture.observe(107u, {}, false));
-    ASSERT_EQ(fixture.state()[25u], 6u);
-    const auto cached_target = std::bit_cast<float>(fixture.state()[18u]);
-    fixture.set_background_sample_rows(
-      handoff, target_for_pixels(6.0f), target_for_pixels(6.0f)
-    );
-    ASSERT_TRUE(fixture.observe(108u, {handoff}, false));
-    EXPECT_EQ(std::bit_cast<float>(fixture.state()[18u]), cached_target);
-    ASSERT_TRUE(fixture.observe(109u, {handoff}, false));
-    ASSERT_EQ(fixture.state()[2u], flag_owner | flag_target_valid);
-    EXPECT_NEAR(
-      std::bit_cast<float>(fixture.state()[18u]) - cached_target,
-      target_for_pixels(0.25f),
-      1.0e-8f
-    );
-    EXPECT_EQ(fixture.state()[21u], 1u);
-    EXPECT_EQ(fixture.state()[24u], 1u);
-
-    // A hard-cut survivor discards the old scene's plane and restarts from same-frame evidence.
-    const auto pre_cut_generation = fixture.state()[3u];
-    fixture.set_background_sample_rows(handoff, 0.03f, 0.03f);
-    fixture.set_cut(1u, true);
-    ASSERT_TRUE(fixture.observe(110u, {handoff}, false));
-    EXPECT_EQ(fixture.state()[24u], 1u);
-    EXPECT_EQ(fixture.state()[18u], std::bit_cast<std::uint32_t>(0.03f));
-    EXPECT_EQ(fixture.state()[3u], pre_cut_generation + 1u);
-
-    // A fresh birth retains a reliable plane well beyond the retired 0..8-pixel band.
-    slr13_warp_fixture_t local_plane;
-    ASSERT_TRUE(local_plane.initialize(error)) << error;
-    local_plane.set_base(0.03f);
-    ASSERT_TRUE(local_plane.observe(200u, {first}, false));
-    ASSERT_TRUE(local_plane.observe(201u, {first}, false));
-    EXPECT_EQ(local_plane.state()[18u], std::bit_cast<std::uint32_t>(0.03f));
-
-    // Event is part of the authenticated current-state envelope too; a foreign value must make
-    // the conditioner copy exact Base rather than accepting otherwise plausible geometry.
-    const auto birth_event = local_plane.state()[21u];
-    ASSERT_TRUE(local_plane.overwrite_state_word(21u, 4u));
-    ASSERT_TRUE(local_plane.condition_only());
-    EXPECT_TRUE(local_plane.output_is_exact_base());
-    ASSERT_TRUE(local_plane.overwrite_state_word(21u, birth_event));
-
-    // Corrupting an otherwise well-formed target outside the direct container invalidates the
-    // whole previous state. The next box is pending and conditioner output is exact Base.
-    ASSERT_TRUE(local_plane.overwrite_state_word(
-      18u,
-      std::bit_cast<std::uint32_t>(v2::direct_container_limit + 0.001f)
-    ));
-    ASSERT_TRUE(local_plane.condition_only());
-    EXPECT_TRUE(local_plane.output_is_exact_base());
-    ASSERT_TRUE(local_plane.observe(202u, {first}, false));
-    EXPECT_EQ(local_plane.state()[2u], flag_pending);
-    EXPECT_EQ(local_plane.state()[4u], 0u);
-    EXPECT_EQ(local_plane.state()[20u], 0u);
-    EXPECT_TRUE(local_plane.output_is_exact_base());
-
-  }
-
-  TEST(HostSbsSubtitleSlr13GpuTest, SameSceneHandoffPreservesOnlyCompatibleInheritedFade) {
-    constexpr auto target_for_pixels = [](const float binocular_source_pixels) {
-      return binocular_source_pixels / (2.0f * static_cast<float>(1920u));
-    };
-    const line_box_t owner {180u, 360u, 590u, 370u};
-    const line_box_t handoff {80u, 360u, 380u, 370u};
-    std::string error;
-
-    // A mature owner and a close, reliable replacement retain full fade after the required
-    // pending observation confirms the handoff. The pending observation itself still has no
-    // current geometry authority and therefore copies exact Base.
-    slr13_warp_fixture_t close;
-    ASSERT_TRUE(close.initialize(error)) << error;
-    close.set_base(target_for_pixels(2.0f));
-    ASSERT_TRUE(close.observe(300u, {owner}, false));
-    ASSERT_TRUE(close.observe(301u, {owner}, false));
-    ASSERT_TRUE(close.observe(302u, {owner}, false));
-    ASSERT_EQ(close.state()[24u], 2u);
-    close.set_background_sample_rows(
-      handoff, target_for_pixels(6.0f), target_for_pixels(6.0f)
-    );
-    ASSERT_TRUE(close.observe(303u, {handoff}, false));
-    EXPECT_EQ(close.state()[20u], 0u);
-    EXPECT_TRUE(close.output_is_exact_base());
-    ASSERT_TRUE(close.observe(304u, {handoff}, false));
-    EXPECT_EQ(close.state()[21u], 3u);
-    EXPECT_EQ(close.state()[24u], 2u);
-    EXPECT_NEAR(
-      std::bit_cast<float>(close.state()[18u]),
-      target_for_pixels(2.25f),
-      1.0e-8f
-    );
-
-    // Equality belongs to the compatible side of the existing eight-pixel residual boundary.
-    slr13_warp_fixture_t boundary;
-    ASSERT_TRUE(boundary.initialize(error)) << error;
-    boundary.set_base(target_for_pixels(2.0f));
-    ASSERT_TRUE(boundary.observe(310u, {owner}, false));
-    ASSERT_TRUE(boundary.observe(311u, {owner}, false));
-    ASSERT_TRUE(boundary.observe(312u, {owner}, false));
-    boundary.set_background_sample_rows(
-      handoff, target_for_pixels(10.0f), target_for_pixels(10.0f)
-    );
-    ASSERT_TRUE(boundary.observe(313u, {handoff}, false));
-    ASSERT_TRUE(boundary.observe(314u, {handoff}, false));
-    EXPECT_EQ(boundary.state()[21u], 3u);
-    EXPECT_EQ(boundary.state()[24u], 2u);
-    EXPECT_NEAR(
-      std::bit_cast<float>(boundary.state()[18u]),
-      target_for_pixels(2.25f),
-      1.0e-8f
-    );
-
-    // A replacement just beyond the residual boundary starts from its current plane at half
-    // strength, exactly as before; it must not inherit either the target or mature fade.
-    slr13_warp_fixture_t beyond;
-    ASSERT_TRUE(beyond.initialize(error)) << error;
-    beyond.set_base(target_for_pixels(2.0f));
-    ASSERT_TRUE(beyond.observe(320u, {owner}, false));
-    ASSERT_TRUE(beyond.observe(321u, {owner}, false));
-    ASSERT_TRUE(beyond.observe(322u, {owner}, false));
-    beyond.set_background_sample_rows(
-      handoff, target_for_pixels(10.25f), target_for_pixels(10.25f)
-    );
-    ASSERT_TRUE(beyond.observe(323u, {handoff}, false));
-    ASSERT_TRUE(beyond.observe(324u, {handoff}, false));
-    EXPECT_EQ(beyond.state()[21u], 3u);
-    EXPECT_EQ(beyond.state()[24u], 1u);
-    EXPECT_EQ(
-      beyond.state()[18u],
-      std::bit_cast<std::uint32_t>(target_for_pixels(10.25f))
-    );
-
-    // Preservation never promotes a half-faded prior owner to full strength.
-    slr13_warp_fixture_t half;
-    ASSERT_TRUE(half.initialize(error)) << error;
-    half.set_base(target_for_pixels(2.0f));
-    ASSERT_TRUE(half.observe(330u, {owner}, false));
-    ASSERT_TRUE(half.observe(331u, {owner}, false));
-    ASSERT_EQ(half.state()[24u], 1u);
-    half.set_background_sample_rows(
-      handoff, target_for_pixels(6.0f), target_for_pixels(6.0f)
-    );
-    ASSERT_TRUE(half.observe(332u, {handoff}, false));
-    EXPECT_EQ(half.state()[20u], 0u);
-    EXPECT_TRUE(half.output_is_exact_base());
-    ASSERT_TRUE(half.observe(333u, {handoff}, false));
-    EXPECT_EQ(half.state()[21u], 3u);
-    EXPECT_EQ(half.state()[24u], 1u);
   }
 
   TEST(HostSbsSubtitleSlr13GpuTest, ProvisionalPendingBridgeUsesExactCurrentPairOnly) {
@@ -1906,7 +1708,7 @@ namespace {
       fixture.condition_params()[4u],
       fixture.state()[v2::subtitle_locator_provisional_fade_word]
     );
-    EXPECT_EQ(fixture.state()[v2::subtitle_locator_provisional_fade_word], 1u);
+    EXPECT_EQ(fixture.state()[v2::subtitle_locator_provisional_fade_word], 2u);
     EXPECT_EQ(
       fixture.condition_params()[5u],
       fixture.state()[v2::subtitle_locator_provisional_target_word]
@@ -1930,7 +1732,7 @@ namespace {
     EXPECT_EQ(fixture.state()[3u], durable_generation + 1u);
     EXPECT_EQ(fixture.state()[21u], 3u);
     EXPECT_EQ(fixture.state()[18u], provisional_target_bits);
-    EXPECT_EQ(fixture.state()[24u], 1u);
+    EXPECT_EQ(fixture.state()[24u], 2u);
     EXPECT_EQ(fixture.state()[v2::subtitle_locator_provisional_target_word], 0u);
     EXPECT_EQ(fixture.state()[v2::subtitle_locator_provisional_fade_word], 0u);
     ASSERT_TRUE(fixture.observe(405u, {replacement}, false));
@@ -2052,19 +1854,22 @@ namespace {
     ASSERT_TRUE(unreliable.observe(430u, {owner}, false));
     unreliable.set_base(std::numeric_limits<float>::quiet_NaN());
     ASSERT_TRUE(unreliable.observe(431u, {overlap_boundary}, false));
-    EXPECT_EQ(unreliable.state()[2u] & flag_provisional_current, 0u);
-    EXPECT_EQ(unreliable.state()[20u], 0u);
+    EXPECT_NE(unreliable.state()[2u] & flag_provisional_current, 0u);
+    EXPECT_EQ(unreliable.state()[20u], 1u);
+    EXPECT_TRUE(std::all_of(unreliable.condition_params().begin(),
+      unreliable.condition_params().end(), [](const auto word) { return word == 0u; }));
     EXPECT_TRUE(unreliable.output_is_exact_base());
 
-    slr13_warp_fixture_t half_fade;
-    ASSERT_TRUE(half_fade.initialize(error)) << error;
-    half_fade.set_base(target_for_pixels(2.0f));
-    ASSERT_TRUE(half_fade.observe(430u, {owner}, false));
-    ASSERT_TRUE(half_fade.observe(431u, {owner}, false));
-    ASSERT_EQ(half_fade.state()[24u], 1u);
-    ASSERT_TRUE(half_fade.observe(432u, {overlap_boundary}, false));
-    EXPECT_EQ(half_fade.state()[2u] & flag_provisional_current, 0u);
-    EXPECT_TRUE(half_fade.output_is_exact_base());
+    slr13_warp_fixture_t fresh_owner;
+    ASSERT_TRUE(fresh_owner.initialize(error)) << error;
+    fresh_owner.set_base(target_for_pixels(2.0f));
+    ASSERT_TRUE(fresh_owner.observe(430u, {owner}, false));
+    ASSERT_TRUE(fresh_owner.observe(431u, {owner}, false));
+    ASSERT_EQ(fresh_owner.state()[24u], 2u);
+    // The owner event must settle before the narrow provisional handoff can be admitted.
+    ASSERT_TRUE(fresh_owner.observe(432u, {overlap_boundary}, false));
+    EXPECT_EQ(fresh_owner.state()[2u] & flag_provisional_current, 0u);
+    EXPECT_TRUE(fresh_owner.output_is_exact_base());
 
     slr13_warp_fixture_t cut;
     ASSERT_TRUE(cut.initialize(error)) << error;
@@ -2091,9 +1896,9 @@ namespace {
     EXPECT_NE(large_residual.state()[2u] & flag_provisional_current, 0u);
     EXPECT_EQ(large_residual.state()[24u], 2u);
     EXPECT_EQ(
-      large_residual.state()[v2::subtitle_locator_provisional_fade_word], 1u
+      large_residual.state()[v2::subtitle_locator_provisional_fade_word], 2u
     );
-    EXPECT_EQ(large_residual.condition_params()[4u], 1u);
+    EXPECT_EQ(large_residual.condition_params()[4u], 2u);
     EXPECT_FALSE(large_residual.output_is_exact_base());
   }
 
@@ -2197,509 +2002,6 @@ namespace {
     expect_condition_rejected();
   }
 
-  TEST(HostSbsSubtitleSlr13GpuTest, HandoffFadePolicyDoesNotChangeBirthGraceOrCutFade) {
-    constexpr auto target_for_pixels = [](const float binocular_source_pixels) {
-      return binocular_source_pixels / (2.0f * static_cast<float>(1920u));
-    };
-    const line_box_t first {180u, 360u, 590u, 370u};
-    const line_box_t reborn {80u, 360u, 380u, 370u};
-    slr13_warp_fixture_t fixture;
-    std::string error;
-    ASSERT_TRUE(fixture.initialize(error)) << error;
-    fixture.set_base(target_for_pixels(2.0f));
-
-    // A fresh owner still starts at half strength.
-    ASSERT_TRUE(fixture.observe(340u, {first}, false));
-    ASSERT_TRUE(fixture.observe(341u, {first}, false));
-    EXPECT_EQ(fixture.state()[21u], 1u);
-    EXPECT_EQ(fixture.state()[24u], 1u);
-    ASSERT_TRUE(fixture.observe(342u, {first}, false));
-    ASSERT_EQ(fixture.state()[24u], 2u);
-
-    // Death grace can seed a replacement target, but its confirmation remains a birth rather
-    // than a same-scene owner handoff and therefore restarts at half strength.
-    ASSERT_TRUE(fixture.observe(343u, {}, false));
-    ASSERT_EQ(fixture.state()[25u], 6u);
-    fixture.set_background_sample_rows(
-      reborn, target_for_pixels(6.0f), target_for_pixels(6.0f)
-    );
-    ASSERT_TRUE(fixture.observe(344u, {reborn}, false));
-    EXPECT_EQ(fixture.state()[20u], 0u);
-    EXPECT_TRUE(fixture.output_is_exact_base());
-    ASSERT_TRUE(fixture.observe(345u, {reborn}, false));
-    EXPECT_EQ(fixture.state()[21u], 1u);
-    EXPECT_EQ(fixture.state()[24u], 1u);
-
-    // A scene-epoch change discards inheritance and always restarts the surviving geometry from
-    // same-frame evidence at half strength.
-    fixture.set_background_sample_rows(
-      reborn, target_for_pixels(7.0f), target_for_pixels(7.0f)
-    );
-    fixture.set_cut(1u, true);
-    ASSERT_TRUE(fixture.observe(346u, {reborn}, false));
-    EXPECT_EQ(fixture.state()[24u], 1u);
-    EXPECT_EQ(
-      fixture.state()[18u],
-      std::bit_cast<std::uint32_t>(target_for_pixels(7.0f))
-    );
-  }
-
-  TEST(HostSbsSubtitleSlr13GpuTest, UnreliablePlaneHoldsTwiceThenFailsBaseAndRecovers) {
-    slr13_warp_fixture_t fixture;
-    std::string error;
-    ASSERT_TRUE(fixture.initialize(error)) << error;
-
-    const line_box_t line {180u, 360u, 590u, 370u};
-    constexpr auto target_for_pixels = [](const float binocular_source_pixels) {
-      return binocular_source_pixels / (2.0f * static_cast<float>(1920u));
-    };
-    fixture.set_base(target_for_pixels(2.0f));
-    ASSERT_TRUE(fixture.observe(210u, {line}, false));
-    ASSERT_TRUE(fixture.observe(211u, {line}, false));
-    ASSERT_EQ(fixture.state()[2u], flag_owner | flag_target_valid);
-
-    // A non-finite/out-of-container sample pair invalidates every primary and fallback row.
-    // Preserve the last reliable plane for two distinct observations so one failed estimate
-    // cannot expose warped glyph edges immediately.
-    fixture.set_target_probe_ring_alternating(
-      line,
-      std::numeric_limits<float>::quiet_NaN(),
-      v2::direct_container_limit + 0.001f
-    );
-    ASSERT_TRUE(fixture.observe(212u, {line}, false));
-    EXPECT_EQ(fixture.state()[2u], flag_owner | flag_target_valid);
-    EXPECT_EQ(fixture.state()[18u], std::bit_cast<std::uint32_t>(target_for_pixels(2.0f)));
-    EXPECT_EQ(fixture.state()[20u], 1u);
-    EXPECT_EQ(fixture.state()[25u], 1u);
-
-    // Redispatching the same failed identity cannot consume another hold.
-    ASSERT_TRUE(fixture.observe(212u, {line}, false));
-    EXPECT_EQ(fixture.state()[25u], 1u);
-    ASSERT_TRUE(fixture.observe(213u, {line}, false));
-    EXPECT_EQ(fixture.state()[25u], 2u);
-    EXPECT_EQ(fixture.state()[2u], flag_owner | flag_target_valid);
-
-    // The third distinct unreliable observation exhausts the bounded hold and copies exact Base.
-    ASSERT_TRUE(fixture.observe(214u, {line}, false));
-    EXPECT_EQ(fixture.state()[2u], flag_owner | flag_target_reset);
-    EXPECT_EQ(fixture.state()[20u], 0u);
-    EXPECT_EQ(fixture.state()[25u], 0u);
-    EXPECT_TRUE(fixture.output_is_exact_base());
-
-    // A later reliable observation reacquires directly at fade 1 and clears the hold counter.
-    fixture.set_background_sample_rows(
-      line, target_for_pixels(12.0f), target_for_pixels(12.0f)
-    );
-    ASSERT_TRUE(fixture.observe(215u, {line}, false));
-    EXPECT_EQ(fixture.state()[2u], flag_owner | flag_target_valid);
-    EXPECT_EQ(fixture.state()[18u], std::bit_cast<std::uint32_t>(target_for_pixels(12.0f)));
-    EXPECT_EQ(fixture.state()[24u], 1u);
-    EXPECT_EQ(fixture.state()[25u], 0u);
-  }
-
-  TEST(HostSbsSubtitleSlr13GpuTest, RowSelectionUsesStableEvidenceAndNearerPlane) {
-    std::string error;
-    const line_box_t line {180u, 360u, 590u, 370u};
-    constexpr auto target_for_pixels = [](const float binocular_source_pixels) {
-      return binocular_source_pixels / (2.0f * static_cast<float>(1920u));
-    };
-
-    // Two coherent nearby rows share their medians.
-    slr13_warp_fixture_t close;
-    ASSERT_TRUE(close.initialize(error)) << error;
-    close.set_background_sample_rows(
-      line, target_for_pixels(2.0f), target_for_pixels(5.0f)
-    );
-    ASSERT_TRUE(close.observe(220u, {line}, false));
-    ASSERT_TRUE(close.observe(221u, {line}, false));
-    const auto source_space_candidate = target_for_pixels(3.5f);
-    const auto sm5_operation_order_candidate =
-      0.5f * (target_for_pixels(2.0f) + target_for_pixels(5.0f));
-    EXPECT_TRUE(
-      close.state()[18u] == std::bit_cast<std::uint32_t>(source_space_candidate) ||
-      close.state()[18u] == std::bit_cast<std::uint32_t>(sm5_operation_order_candidate)
-    );
-
-    // Two coherent split rows select the numerically larger/nearer supporting plane.
-    slr13_warp_fixture_t split;
-    ASSERT_TRUE(split.initialize(error)) << error;
-    split.set_background_sample_rows(
-      line, target_for_pixels(2.0f), target_for_pixels(7.0f)
-    );
-    ASSERT_TRUE(split.observe(222u, {line}, false));
-    ASSERT_TRUE(split.observe(223u, {line}, false));
-    EXPECT_EQ(split.state()[18u], std::bit_cast<std::uint32_t>(target_for_pixels(7.0f)));
-
-    // Dump-1-like evidence has a coherent far row near 41.89 px and a heterogeneous nearer row
-    // whose median is 54.88 px. One coherent row establishes support; selecting the larger finite
-    // median avoids flattening almost the whole subtitle cover seventeen pixels away from Base.
-    std::array<float, 16u> coherent {};
-    coherent.fill(target_for_pixels(41.89f));
-    std::array<float, 16u> heterogeneous {
-      target_for_pixels(44.0f), target_for_pixels(44.0f), target_for_pixels(44.0f),
-      target_for_pixels(44.0f), target_for_pixels(44.0f), target_for_pixels(48.0f),
-      target_for_pixels(53.0f), target_for_pixels(54.0f), target_for_pixels(55.76f),
-      target_for_pixels(56.0f), target_for_pixels(58.0f), target_for_pixels(59.0f),
-      target_for_pixels(59.0f), target_for_pixels(59.0f), target_for_pixels(59.0f),
-      target_for_pixels(59.0f),
-    };
-    slr13_warp_fixture_t dump_like;
-    ASSERT_TRUE(dump_like.initialize(error)) << error;
-    dump_like.set_background_sample_row_values(line, coherent, heterogeneous);
-    ASSERT_TRUE(dump_like.observe(224u, {line}, false));
-    ASSERT_TRUE(dump_like.observe(225u, {line}, false));
-    EXPECT_NEAR(
-      std::bit_cast<float>(dump_like.state()[18u]), target_for_pixels(54.88f), 1.0e-8f
-    );
-
-    // If the heterogeneous row remains close to coherent support, their medians are averaged.
-    std::array<float, 16u> close_heterogeneous {
-      target_for_pixels(36.0f), target_for_pixels(36.0f), target_for_pixels(36.0f),
-      target_for_pixels(36.0f), target_for_pixels(36.0f), target_for_pixels(40.0f),
-      target_for_pixels(41.0f), target_for_pixels(42.0f), target_for_pixels(42.0f),
-      target_for_pixels(43.0f), target_for_pixels(46.0f), target_for_pixels(46.0f),
-      target_for_pixels(46.0f), target_for_pixels(46.0f), target_for_pixels(46.0f),
-      target_for_pixels(46.0f),
-    };
-    slr13_warp_fixture_t close_mixed;
-    ASSERT_TRUE(close_mixed.initialize(error)) << error;
-    close_mixed.set_background_sample_row_values(line, coherent, close_heterogeneous);
-    ASSERT_TRUE(close_mixed.observe(2250u, {line}, false));
-    ASSERT_TRUE(close_mixed.observe(2251u, {line}, false));
-    EXPECT_NEAR(
-      std::bit_cast<float>(close_mixed.state()[18u]),
-      target_for_pixels((41.89f + 42.0f) * 0.5f),
-      1.0e-8f
-    );
-
-    // A malformed second row does not revoke an independently coherent first row.
-    std::array<float, 16u> invalid {};
-    for (std::size_t index = 0u; index < invalid.size(); ++index) {
-      invalid[index] = (index & 1u) == 0u ?
-                         std::numeric_limits<float>::quiet_NaN() :
-                         v2::direct_container_limit + 0.001f;
-    }
-    slr13_warp_fixture_t one_valid;
-    ASSERT_TRUE(one_valid.initialize(error)) << error;
-    one_valid.set_background_sample_row_values(line, coherent, invalid);
-    ASSERT_TRUE(one_valid.observe(226u, {line}, false));
-    ASSERT_TRUE(one_valid.observe(227u, {line}, false));
-    EXPECT_EQ(
-      one_valid.state()[18u], std::bit_cast<std::uint32_t>(target_for_pixels(41.89f))
-    );
-
-    // The exact eight-pixel row-IQR boundary remains coherent.
-    std::array<float, 16u> boundary {
-      target_for_pixels(0.0f), target_for_pixels(0.0f), target_for_pixels(0.0f),
-      target_for_pixels(0.0f), target_for_pixels(0.0f), target_for_pixels(4.0f),
-      target_for_pixels(4.0f), target_for_pixels(4.0f), target_for_pixels(4.0f),
-      target_for_pixels(4.0f), target_for_pixels(8.0f), target_for_pixels(8.0f),
-      target_for_pixels(8.0f), target_for_pixels(8.0f), target_for_pixels(8.0f),
-      target_for_pixels(8.0f),
-    };
-    slr13_warp_fixture_t exact_boundary;
-    ASSERT_TRUE(exact_boundary.initialize(error)) << error;
-    exact_boundary.set_background_sample_row_values(line, boundary, invalid);
-    ASSERT_TRUE(exact_boundary.observe(228u, {line}, false));
-    ASSERT_TRUE(exact_boundary.observe(229u, {line}, false));
-    EXPECT_EQ(
-      exact_boundary.state()[18u], std::bit_cast<std::uint32_t>(target_for_pixels(4.0f))
-    );
-
-    // With neither row valid a fresh owner has no plane to hold and must copy exact Base.
-    slr13_warp_fixture_t neither;
-    ASSERT_TRUE(neither.initialize(error)) << error;
-    neither.set_target_probe_ring_alternating(
-      line,
-      std::numeric_limits<float>::quiet_NaN(),
-      v2::direct_container_limit + 0.001f
-    );
-    ASSERT_TRUE(neither.observe(230u, {line}, false));
-    ASSERT_TRUE(neither.observe(231u, {line}, false));
-    EXPECT_EQ(neither.state()[2u], flag_owner | flag_target_reset);
-    EXPECT_EQ(neither.state()[25u], 0u);
-    EXPECT_TRUE(neither.output_is_exact_base());
-  }
-
-  TEST(HostSbsSubtitleSlr13GpuTest, DumpCompleteDispersedPrimaryRowsRemainCurrentAndConditioned) {
-    const auto decode_row = [](const std::array<std::uint32_t, 16u> &bits) {
-      std::array<float, 16u> row {};
-      std::transform(
-        bits.begin(), bits.end(), row.begin(),
-        [](const std::uint32_t value) { return std::bit_cast<float>(value); }
-      );
-      return row;
-    };
-    const auto verify = [&decode_row](
-      const line_box_t line,
-      const std::array<std::uint32_t, 16u> &outer_bits,
-      const std::array<std::uint32_t, 16u> &inner_bits,
-      const std::uint32_t expected_target_bits,
-      const std::uint64_t first_identity
-    ) {
-      slr13_warp_fixture_t fixture(field_width, field_height, 3840u, 2160u);
-      std::string error;
-      ASSERT_TRUE(fixture.initialize(error)) << error;
-      fixture.set_background_sample_row_values(
-        line, decode_row(outer_bits), decode_row(inner_bits)
-      );
-
-      // The first exact observation is pending and therefore still publishes immutable Base.
-      ASSERT_TRUE(fixture.observe(first_identity, {line}, false));
-      EXPECT_EQ(fixture.state()[2u], flag_pending);
-      EXPECT_TRUE(fixture.output_is_exact_base());
-
-      // A distinct confirmation must accept the two complete primary rows despite both IQRs
-      // exceeding eight binocular source pixels. It must not enter the unreliable-target hold or
-      // TARGET_RESET path seen in the captured fullscreen transition.
-      ASSERT_TRUE(fixture.observe(first_identity + 1u, {line}, false));
-      EXPECT_EQ(fixture.state()[2u], flag_owner | flag_target_valid);
-      EXPECT_EQ(fixture.state()[18u], expected_target_bits);
-      EXPECT_EQ(fixture.state()[20u], 1u);
-      EXPECT_EQ(fixture.state()[24u], 1u);
-      EXPECT_EQ(fixture.state()[25u], 0u);
-      EXPECT_FALSE(fixture.output_is_exact_base());
-
-      // Continuing exact-frame OCR keeps the same target/current cover, reaches full fade, and
-      // remains conditioned without consuming a hold observation.
-      ASSERT_TRUE(fixture.observe(first_identity + 2u, {line}, false));
-      EXPECT_EQ(fixture.state()[2u], flag_owner | flag_target_valid);
-      EXPECT_EQ(fixture.state()[18u], expected_target_bits);
-      EXPECT_EQ(fixture.state()[20u], 1u);
-      EXPECT_EQ(fixture.state()[24u], 2u);
-      EXPECT_EQ(fixture.state()[25u], 0u);
-      EXPECT_FALSE(fixture.output_is_exact_base());
-
-      // The same geometry after a durable scene-epoch change must reacquire from these robust
-      // rows immediately. It cannot inherit the old scene target or misclassify the observation
-      // as an unreliable hold merely because both row IQRs are dispersed.
-      fixture.set_cut(1u, true);
-      ASSERT_TRUE(fixture.observe(first_identity + 3u, {line}, false));
-      EXPECT_EQ(fixture.state()[2u], flag_owner | flag_target_valid);
-      EXPECT_EQ(fixture.state()[18u], expected_target_bits);
-      EXPECT_EQ(fixture.state()[20u], 1u);
-      EXPECT_EQ(fixture.state()[24u], 1u);
-      EXPECT_EQ(fixture.state()[25u], 0u);
-      EXPECT_FALSE(fixture.output_is_exact_base());
-    };
-
-    // Dump _2: row IQRs are 16.359/11.373 px and the medians differ by 0.481 px, so the
-    // authoritative target is their mean (0x3b896b40).
-    verify(
-      {306u, 369u, 463u, 385u},
-      {
-        0x3b2d1cb4u, 0x3b3de960u, 0x3b4a3b2cu, 0x3b544f88u,
-        0x3b5ec36cu, 0x3b78e500u, 0x3b81ac60u, 0x3b84a8deu,
-        0x3b8c200eu, 0x3b8fdba0u, 0x3ba3a3ceu, 0x3bb0b3aeu,
-        0x3bb46f00u, 0x3bb64ca6u, 0x3bb7cac2u, 0x3bba6770u,
-      },
-      {
-        0x3b3fc738u, 0x3b4d974cu, 0x3b54af18u, 0x3b5bc6e0u,
-        0x3b657ba0u, 0x3b7b2264u, 0x3b85086eu, 0x3b88c408u,
-        0x3b8c200eu, 0x3b8e5d66u, 0x3b909abcu, 0x3b9811d0u,
-        0x3ba99c7au, 0x3bac98c8u, 0x3baf9514u, 0x3bb2f0e0u,
-      },
-      0x3b896b40u,
-      2350u
-    );
-
-    // Dump _3: row IQRs are 58.372/35.314 px and the medians differ by 9.026 px, so the
-    // authoritative target is the numerically larger outer-row median (0x3b8c1878).
-    verify(
-      {324u, 367u, 444u, 385u},
-      {
-        0xbb2dd154u, 0xbb2dd154u, 0xbb2f4618u, 0xbb3060acu,
-        0xbb2fc8c4u, 0xba9979e0u, 0x3abaf860u, 0x3b83daa8u,
-        0x3b945648u, 0x3b99ef90u, 0x3b9d4b82u, 0x3ba047e4u,
-        0x3ba40358u, 0x3ba5e110u, 0x3ba87ddau, 0x3baa5b8eu,
-      },
-      {
-        0xbb284b7cu, 0xba9ff8f0u, 0x3ab47950u, 0x3b0e2040u,
-        0x399beb60u, 0xbb16bbb4u, 0xb7fb1400u, 0x3b2842f8u,
-        0x3b6e11a0u, 0x3b8567feu, 0x3b95d47eu, 0x3b993076u,
-        0x3b9cebf6u, 0x3ba106fcu, 0x3ba462e4u, 0x3ba87ddau,
-      },
-      0x3b8c1878u,
-      2360u
-    );
-  }
-
-  TEST(HostSbsSubtitleSlr13GpuTest, PrimaryFailureUsesStrictNearestOrdinaryProbeBesideRibbon) {
-    slr13_warp_fixture_t fixture;
-    std::string error;
-    ASSERT_TRUE(fixture.initialize(error)) << error;
-
-    const line_box_t subtitle_core {40u, 360u, 728u, 370u};
-    const line_box_t subtitle_cover {36u, 356u, 732u, 374u};
-    const line_box_t ribbon_core {1u, 401u, 689u, roi_bottom};
-    const line_box_t ribbon_cover {0u, 397u, field_width, field_height};
-    const ocr_box_t subtitle {subtitle_core, subtitle_cover, 0u, 1u, 0u};
-    const ocr_box_t ribbon {ribbon_core, ribbon_cover, box_flag_ribbon, 7u, 4u};
-    constexpr auto target_for_pixels = [](const float binocular_source_pixels) {
-      return binocular_source_pixels / (2.0f * static_cast<float>(1920u));
-    };
-
-    // The unchanged aggregate primary center is the mean of the ordinary and ribbon member
-    // centers: (383.5 + 344.5) / 2 = 364. Its rows and every fallback ring start invalid.
-    // W/16 is 43 cells, so the five 4-cell sample lattices are disjoint.
-    constexpr float primary_center = 364.0f;
-    fixture.set_base(target_for_pixels(2.0f));
-    fixture.set_target_probe_ring_alternating(
-      primary_center,
-      subtitle_core.top,
-      subtitle_core.right - subtitle_core.left,
-      std::numeric_limits<float>::quiet_NaN(),
-      v2::direct_container_limit + 0.001f
-    );
-    constexpr float first_fallback_center = primary_center - 688.0f / 16.0f;
-    fixture.set_background_probe_rows(
-      first_fallback_center,
-      subtitle_core.top,
-      target_for_pixels(24.0f),
-      target_for_pixels(24.5f)
-    );
-
-    ASSERT_TRUE(fixture.observe(2320u, {subtitle, ribbon}, false));
-    ASSERT_TRUE(fixture.observe(2321u, {subtitle, ribbon}, false));
-    ASSERT_EQ(fixture.state()[2u], flag_owner | flag_target_valid);
-    ASSERT_EQ(fixture.state()[4u], 2u);
-    EXPECT_EQ(
-      fixture.state()[31u],
-      (2u << owner_kind_shift) | (2u << current_kind_shift)
-    );
-    EXPECT_NEAR(
-      std::bit_cast<float>(fixture.state()[18u]),
-      0.5f * (target_for_pixels(24.0f) + target_for_pixels(24.5f)),
-      1.0e-8f
-    );
-    EXPECT_FALSE(fixture.output_is_exact_base());
-  }
-
-  TEST(HostSbsSubtitleSlr13GpuTest, FallbackConflictAndClampedStripsFailExactBase) {
-    constexpr auto target_for_pixels = [](const float binocular_source_pixels) {
-      return binocular_source_pixels / (2.0f * static_cast<float>(1920u));
-    };
-    std::string error;
-
-    // Two strict radius-one probes on planes more than four pixels apart are an explicit
-    // conflict. Radius two is coherent, but must not hide that nearer ambiguity.
-    slr13_warp_fixture_t conflict;
-    ASSERT_TRUE(conflict.initialize(error)) << error;
-    const line_box_t line {40u, 360u, 728u, 370u};
-    constexpr float line_center = 383.5f;
-    constexpr float line_step = 688.0f / 16.0f;
-    conflict.set_base(target_for_pixels(2.0f));
-    conflict.set_target_probe_ring_alternating(
-      line,
-      std::numeric_limits<float>::quiet_NaN(),
-      v2::direct_container_limit + 0.001f
-    );
-    conflict.set_background_probe_rows(
-      line_center - line_step, line.top,
-      target_for_pixels(10.0f), target_for_pixels(10.5f)
-    );
-    conflict.set_background_probe_rows(
-      line_center + line_step, line.top,
-      target_for_pixels(20.0f), target_for_pixels(20.5f)
-    );
-    conflict.set_background_probe_rows(
-      line_center - 2.0f * line_step, line.top,
-      target_for_pixels(30.0f), target_for_pixels(30.5f)
-    );
-    conflict.set_background_probe_rows(
-      line_center + 2.0f * line_step, line.top,
-      target_for_pixels(31.0f), target_for_pixels(31.5f)
-    );
-    ASSERT_TRUE(conflict.observe(2330u, {line}, false));
-    ASSERT_TRUE(conflict.observe(2331u, {line}, false));
-    EXPECT_EQ(conflict.state()[2u], flag_owner | flag_target_reset);
-    EXPECT_TRUE(conflict.output_is_exact_base());
-
-    // Three members retain an aggregate center at x=31.5 while the earlier ribbon top keeps the
-    // primary rows independent from the ordinary fallback rows. The negative shifted rows
-    // look perfectly coherent only because their raw strip falls left of content and repeats x=0.
-    // The positive probes contain an invalid x=62 sample. Rejecting both clamped negative strips
-    // is therefore required for exact-Base output.
-    slr13_warp_fixture_t edge;
-    ASSERT_TRUE(edge.initialize(error)) << error;
-    const line_box_t upper {0u, 380u, 64u, 386u};
-    const line_box_t lower {0u, 389u, 64u, 395u};
-    const line_box_t edge_ribbon_core {1u, 350u, 689u, roi_bottom};
-    const line_box_t edge_ribbon_cover {0u, 346u, field_width, field_height};
-    const ocr_box_t edge_ribbon {
-      edge_ribbon_core, edge_ribbon_cover, box_flag_ribbon, 7u, 4u
-    };
-    edge.set_base(target_for_pixels(2.0f));
-    edge.set_background_probe_alternating(
-      31.5f, edge_ribbon_core.top,
-      std::numeric_limits<float>::quiet_NaN(),
-      v2::direct_container_limit + 0.001f
-    );
-    edge.set_background_probe_rows(
-      27.5f, upper.top, target_for_pixels(50.0f), target_for_pixels(50.0f)
-    );
-    const auto outer_y = upper.top - 10u;
-    const auto inner_y = upper.top - 4u;
-    edge.set_base_at(62u, outer_y, v2::direct_container_limit + 0.001f);
-    edge.set_base_at(62u, inner_y, v2::direct_container_limit + 0.001f);
-    ASSERT_TRUE(edge.observe(2340u, {upper, lower, edge_ribbon}, false));
-    ASSERT_TRUE(edge.observe(2341u, {upper, lower, edge_ribbon}, false));
-    EXPECT_EQ(edge.state()[2u], flag_owner | flag_target_reset);
-    EXPECT_TRUE(edge.output_is_exact_base());
-  }
-
-  TEST(HostSbsSubtitleSlr13GpuTest, LargeResidualAndHardCutRestartButCutNeverHolds) {
-    const line_box_t line {180u, 360u, 590u, 370u};
-    constexpr auto target_for_pixels = [](const float binocular_source_pixels) {
-      return binocular_source_pixels / (2.0f * static_cast<float>(1920u));
-    };
-    std::string error;
-
-    slr13_warp_fixture_t tracking;
-    ASSERT_TRUE(tracking.initialize(error)) << error;
-    tracking.set_base(target_for_pixels(2.0f));
-    ASSERT_TRUE(tracking.observe(230u, {line}, false));
-    ASSERT_TRUE(tracking.observe(231u, {line}, false));
-    tracking.set_background_sample_rows(
-      line, target_for_pixels(12.0f), target_for_pixels(12.0f)
-    );
-    ASSERT_TRUE(tracking.observe(232u, {line}, false));
-    EXPECT_EQ(tracking.state()[2u], flag_owner | flag_target_valid);
-    EXPECT_EQ(
-      tracking.state()[18u], std::bit_cast<std::uint32_t>(target_for_pixels(12.0f))
-    );
-    EXPECT_EQ(tracking.state()[24u], 1u);
-
-    // Across a confirmed scene boundary, old and new plane values are not temporally comparable.
-    // Reliable same-frame evidence restarts immediately at fade 1 instead of rendering the old
-    // plane at full strength and slewing through unrelated depths.
-    slr13_warp_fixture_t cut;
-    ASSERT_TRUE(cut.initialize(error)) << error;
-    cut.set_base(target_for_pixels(2.0f));
-    ASSERT_TRUE(cut.observe(240u, {line}, false));
-    ASSERT_TRUE(cut.observe(241u, {line}, false));
-    cut.set_background_sample_rows(
-      line, target_for_pixels(12.0f), target_for_pixels(12.0f)
-    );
-    cut.set_cut(1u, true);
-    ASSERT_TRUE(cut.observe(242u, {line}, false));
-    EXPECT_EQ(cut.state()[2u], flag_owner | flag_target_valid);
-    EXPECT_EQ(cut.state()[18u], std::bit_cast<std::uint32_t>(target_for_pixels(12.0f)));
-    EXPECT_EQ(cut.state()[24u], 1u);
-
-    // Unreliable evidence on a hard cut cannot hold the old scene's target.
-    cut.set_target_probe_ring_alternating(
-      line,
-      std::numeric_limits<float>::quiet_NaN(),
-      v2::direct_container_limit + 0.001f
-    );
-    cut.set_cut(2u, true);
-    ASSERT_TRUE(cut.observe(243u, {line}, false));
-    EXPECT_EQ(cut.state()[2u], flag_owner | flag_target_reset);
-    EXPECT_EQ(cut.state()[25u], 0u);
-    EXPECT_TRUE(cut.output_is_exact_base());
-  }
-
   TEST(HostSbsSubtitleSlr13GpuTest, DuplicateCutPulseIsBitExactIdempotent) {
     slr13_warp_fixture_t fixture;
     std::string error;
@@ -2739,12 +2041,12 @@ namespace {
     ASSERT_TRUE(fixture.observe(251u, {line}, false));
     fixture.set_cut(1u, true);
     ASSERT_TRUE(fixture.observe(252u, {line}, false));
-    ASSERT_EQ(fixture.state()[24u], 1u);
+    ASSERT_EQ(fixture.state()[24u], 2u);
     const auto generation_after_cut = fixture.state()[3u];
 
     // The next infer-authorized observation can still arrive while CutBridge exposes the prior
     // delivery's pulse. A distinct OCR identity in the same authenticated epoch is an ordinary
-    // continuation: the owner generation stays fixed and fade may mature normally.
+    // continuation: the owner generation stays fixed and full plane pin remains.
     fixture.set_cut(1u, true);
     ASSERT_TRUE(fixture.observe(253u, {line}, false));
     EXPECT_EQ(fixture.state()[3u], generation_after_cut);
@@ -2756,45 +2058,6 @@ namespace {
     ASSERT_TRUE(fixture.overwrite_state_word(26u, 2u));
     ASSERT_TRUE(fixture.condition_only());
     EXPECT_TRUE(fixture.output_is_exact_base());
-  }
-
-  TEST(HostSbsSubtitleSlr13GpuTest, MissedCutPulseEpochMismatchRestartsLocalPlane) {
-    slr13_warp_fixture_t fixture;
-    std::string error;
-    ASSERT_TRUE(fixture.initialize(error)) << error;
-
-    const line_box_t line {180u, 360u, 590u, 370u};
-    constexpr auto target_for_pixels = [](const float binocular_source_pixels) {
-      return binocular_source_pixels / (2.0f * static_cast<float>(1920u));
-    };
-    fixture.set_base(target_for_pixels(2.0f));
-    ASSERT_TRUE(fixture.observe(260u, {line}, false));
-    ASSERT_TRUE(fixture.observe(261u, {line}, false));
-    ASSERT_EQ(fixture.state()[2u], flag_owner | flag_target_valid);
-    ASSERT_EQ(
-      fixture.state()[18u], std::bit_cast<std::uint32_t>(target_for_pixels(2.0f))
-    );
-    ASSERT_EQ(fixture.state()[26u], 0u);
-    const auto previous_generation = fixture.state()[3u];
-
-    // Even if the one-frame pulse was missed, a newer authenticated CutBridge epoch is a hard
-    // scene boundary. It discards the old target and directly reacquires reliable current-plane
-    // evidence at half strength instead of taking a continuing-owner 0.25-pixel slew step.
-    fixture.set_background_sample_rows(
-      line, target_for_pixels(6.0f), target_for_pixels(6.0f)
-    );
-    fixture.set_cut(1u, false);
-    ASSERT_TRUE(fixture.observe(262u, {line}, false));
-    EXPECT_EQ(fixture.state()[2u], flag_owner | flag_target_valid);
-    EXPECT_EQ(fixture.state()[3u], previous_generation + 1u);
-    EXPECT_EQ(
-      fixture.state()[18u], std::bit_cast<std::uint32_t>(target_for_pixels(6.0f))
-    );
-    EXPECT_NE(
-      fixture.state()[18u], std::bit_cast<std::uint32_t>(target_for_pixels(2.25f))
-    );
-    EXPECT_EQ(fixture.state()[24u], 1u);
-    EXPECT_EQ(fixture.state()[26u], 1u);
   }
 
   TEST(HostSbsSubtitleSlr13GpuTest, InvalidOcrClearsCurrentButPreservesAndAgesTargetGrace) {
@@ -2824,7 +2087,7 @@ namespace {
     ASSERT_EQ(fixture.state()[12u], 1u);
     const std::uint32_t tracked_target = fixture.state()[18u];
     EXPECT_NEAR(
-      std::bit_cast<float>(tracked_target), target_for_pixels(2.0f), 1.0e-8f
+      std::bit_cast<float>(tracked_target), 0.0f, 1.0e-8f
     );
     fixture.poison_condition_params(0xd1ced1ceu);
     ASSERT_TRUE(fixture.observe(303u, {disjoint}, false, true, false, true));
@@ -2855,14 +2118,14 @@ namespace {
     EXPECT_TRUE(fixture.output_is_exact_base());
 
     // The first valid rebirth observation is still pending and retains the cached bits. The second
-    // confirms an owner and is the next distinct authoritative opportunity for one bounded step.
+    // confirms an owner while the independently stabilized global UI plane stays unchanged.
     ASSERT_TRUE(fixture.observe(305u, {disjoint}, false));
     EXPECT_EQ(fixture.state()[2u], flag_pending);
     EXPECT_EQ(fixture.state()[18u], tracked_target);
     ASSERT_TRUE(fixture.observe(306u, {disjoint}, false));
     EXPECT_EQ(fixture.state()[2u], flag_owner | flag_target_valid);
     EXPECT_NEAR(
-      std::bit_cast<float>(fixture.state()[18u]), target_for_pixels(2.25f), 1.0e-8f
+      std::bit_cast<float>(fixture.state()[18u]), 0.0f, 1.0e-8f
     );
 
     // A hard cut is an explicit lifetime boundary. Invalid same-frame OCR cannot carry grace or
@@ -2903,8 +2166,8 @@ namespace {
 
     // Word 25 is authenticated previous-state lifetime, not an open-ended counter. Corrupting it
     // above the generated observation limit must invalidate the whole previous state: the next
-    // box is a fresh first observation with no cached target, and only its successor may sample a
-    // new one.
+    // box is a fresh first observation with no cached target; only its successor gains current
+    // cover authority, and the UI controller reacquires independently of local scene depth.
     ASSERT_TRUE(fixture.overwrite_state_word(
       25u, v2::subtitle_locator_death_grace_observations + 1u
     ));
@@ -2919,8 +2182,9 @@ namespace {
 
     ASSERT_TRUE(fixture.observe(324u, {line}, false));
     EXPECT_EQ(fixture.state()[2u], flag_owner | flag_target_valid);
-    EXPECT_EQ(fixture.state()[18u], std::bit_cast<std::uint32_t>(0.029f));
-    EXPECT_NE(fixture.state()[18u], expired_target);
+    EXPECT_EQ(fixture.state()[18u], std::bit_cast<std::uint32_t>(0.0f));
+    EXPECT_EQ(fixture.state()[24u], 2u);
+    EXPECT_EQ(fixture.state()[25u], 0u);
   }
 
   TEST(HostSbsSubtitleSlr13GpuTest, TracksSubtitleAndBottomRibbonOnOnePlane) {
@@ -3012,14 +2276,14 @@ namespace {
     );
 
     // A same-frame mixed owner survives a hard cut as two independently matched core rectangles,
-    // restarts its shared local plane at half strength, and keeps current cover kinds.
+    // resets its shared UI controller, pins current covers fully, and keeps their kinds.
     fixture.set_cut(1u, true);
     ASSERT_TRUE(fixture.observe(24u, {changed, ribbon}, false));
     EXPECT_EQ(fixture.state()[2u], flag_owner | flag_target_valid);
     EXPECT_EQ(fixture.state()[4u], 2u);
     EXPECT_EQ(fixture.state()[12u], 0u);
     EXPECT_EQ(fixture.state()[20u], 2u);
-    EXPECT_EQ(fixture.state()[24u], 1u);
+    EXPECT_EQ(fixture.state()[24u], 2u);
     EXPECT_EQ(fixture.state()[26u], 1u);
     EXPECT_EQ(
       fixture.state()[31u],
@@ -3162,7 +2426,7 @@ namespace {
     EXPECT_TRUE(fixture.output_is_exact_base());
   }
 
-  TEST(HostSbsSubtitleSlr13GpuTest, HardCutSurvivorRestartsLocalPlaneButDisjointStackIsPending) {
+  TEST(HostSbsSubtitleSlr13GpuTest, HardCutResetsAdaptivePlaneAndKeepsDisjointStackPending) {
     slr13_warp_fixture_t fixture;
     std::string error;
     ASSERT_TRUE(fixture.initialize(error)) << error;
@@ -3181,7 +2445,7 @@ namespace {
     EXPECT_EQ(fixture.state()[12u], 0u);
     EXPECT_EQ(fixture.state()[20u], 1u);
     EXPECT_EQ(fixture.state()[21u], 0u);
-    EXPECT_EQ(fixture.state()[24u], 1u);
+    EXPECT_EQ(fixture.state()[24u], 2u);
     EXPECT_EQ(fixture.state()[26u], 1u);
 
     fixture.set_cut(2u, true);
@@ -3221,8 +2485,7 @@ namespace {
     ASSERT_EQ(fixture.state()[3u], 1u);
 
     // The cut observation retains only the two old-owner matches as current authority. The full
-    // three-line stack is deliberately pending, while the survivor restarts the new scene's
-    // supporting plane at half strength.
+    // three-line stack is deliberately pending, while the survivor pins the reset UI plane.
     fixture.set_cut(1u, true);
     ASSERT_TRUE(fixture.observe(52u, {first, second, added}, false));
     EXPECT_EQ(fixture.state()[2u], flag_owner | flag_pending | flag_target_valid);
@@ -3231,11 +2494,11 @@ namespace {
     EXPECT_EQ(fixture.state()[12u], 3u);
     EXPECT_EQ(fixture.state()[20u], 2u);
     EXPECT_EQ(fixture.state()[21u], 0u);
-    EXPECT_EQ(fixture.state()[24u], 1u);
+    EXPECT_EQ(fixture.state()[24u], 2u);
 
     // The next distinct matching observation confirms the material three-line handoff. Its
-    // generation bump and half-strength first fade are the specified second transaction, not a
-    // same-frame promotion of the newly added line.
+    // generation bump and full plane pin follow the second transaction; the newly added line
+    // never gains same-frame ownership on the pending observation.
     ASSERT_TRUE(fixture.observe(53u, {first, second, added}, false));
     EXPECT_EQ(fixture.state()[2u], flag_owner | flag_target_valid);
     EXPECT_EQ(fixture.state()[3u], 3u);
@@ -3243,7 +2506,7 @@ namespace {
     EXPECT_EQ(fixture.state()[12u], 0u);
     EXPECT_EQ(fixture.state()[20u], 3u);
     EXPECT_EQ(fixture.state()[21u], 3u);
-    EXPECT_EQ(fixture.state()[24u], 1u);
+    EXPECT_EQ(fixture.state()[24u], 2u);
 
     ASSERT_TRUE(fixture.observe(54u, {first, second, added}, false));
     EXPECT_EQ(fixture.state()[3u], 3u);
@@ -3283,7 +2546,7 @@ namespace {
     EXPECT_EQ(fixture.state()[12u], 0u);
     EXPECT_EQ(fixture.state()[20u], 1u);
     EXPECT_EQ(fixture.state()[21u], 1u);
-    EXPECT_EQ(fixture.state()[24u], 1u);
+    EXPECT_EQ(fixture.state()[24u], 2u);
   }
 
   TEST(HostSbsSubtitleSlr13GpuTest, SupportsAuthenticatedWideAndPortraitFields) {
@@ -3348,7 +2611,7 @@ namespace {
       EXPECT_EQ(fixture.state()[28u], field_case.field_height);
       EXPECT_EQ(
         fixture.state()[18u],
-        std::bit_cast<std::uint32_t>(0.01f)
+        std::bit_cast<std::uint32_t>(0.0f)
       );
       EXPECT_LT(
         fixture.output_at(
@@ -3712,11 +2975,84 @@ namespace {
     EXPECT_EQ(malformed_fixture.state()[20u], 0u);
     EXPECT_TRUE(malformed_fixture.output_is_exact_base());
   }
-  TEST(HostSbsSubtitleSlr13GpuTest, JointPlaneBirthPinsCurrentCoverAndUsesSourceTimeDwell) {
+  TEST(HostSbsSubtitleSlr13GpuTest, InactiveCurrentCoverageCannotHideDurablePlaneTampering) {
     slr13_warp_fixture_t fixture;
     std::string error;
     ASSERT_TRUE(fixture.initialize(error)) << error;
-    fixture.set_joint_plane_mode(true);
+    const line_box_t owner {180u, 360u, 590u, 370u};
+    const line_box_t replacement {80u, 395u, 380u, 405u};
+    ASSERT_TRUE(fixture.observe(1u, {owner}, false));
+    ASSERT_TRUE(fixture.observe(2u, {owner}, false));
+    ASSERT_TRUE(fixture.observe(3u, {replacement}, false));
+    ASSERT_EQ(fixture.state()[2u], flag_owner | flag_pending | flag_target_valid);
+    ASSERT_EQ(fixture.state()[4u], 1u);
+    ASSERT_EQ(fixture.state()[20u], 0u);
+    EXPECT_TRUE(fixture.output_is_exact_base());
+
+    // A retained owner has no current geometry, but its durable plane still belongs to the
+    // adaptive controller. A mismatched mirror must invalidate that whole previous ownership.
+    ASSERT_TRUE(fixture.overwrite_state_word(18u, std::bit_cast<std::uint32_t>(0.001f)));
+    ASSERT_TRUE(fixture.observe(4u, {owner}, false));
+    EXPECT_EQ(fixture.state()[2u], flag_pending);
+    EXPECT_EQ(fixture.state()[4u], 0u);
+    EXPECT_EQ(fixture.state()[12u], 1u);
+    EXPECT_EQ(fixture.state()[20u], 0u);
+    EXPECT_TRUE(fixture.output_is_exact_base());
+    ASSERT_TRUE(fixture.observe(5u, {owner}, false));
+    EXPECT_EQ(fixture.state()[2u], flag_owner | flag_target_valid);
+    EXPECT_EQ(fixture.state()[24u], 2u);
+  }
+
+  TEST(HostSbsSubtitleSlr13GpuTest, AdaptiveCutAndDomainResetClearTimedPlaneWithoutInventingCoverage) {
+    slr13_warp_fixture_t fixture;
+    std::string error;
+    ASSERT_TRUE(fixture.initialize(error)) << error;
+    fixture.set_base(0.018f);
+    const line_box_t line {180u, 360u, 590u, 370u};
+    const line_box_t added {180u, 374u, 500u, 384u};
+    constexpr auto adaptive = v2::subtitle_locator_adaptive_offset;
+    for (std::uint64_t identity = 1u; identity <= 5u; ++identity) {
+      ASSERT_TRUE(fixture.observe_at(identity, {line}, 1u + (identity - 1u) * 200000u));
+    }
+    ASSERT_GT(std::bit_cast<float>(fixture.state()[adaptive + 3u]), 0.01f);
+    const auto old_generation = fixture.state()[3u];
+
+    fixture.set_cut(1u, true);
+    ASSERT_TRUE(fixture.observe_at(6u, {line, added}, 1000001u));
+    EXPECT_EQ(fixture.state()[3u], old_generation + 1u);
+    EXPECT_EQ(fixture.state()[4u], 1u);
+    EXPECT_EQ(fixture.state()[12u], 2u);
+    EXPECT_EQ(fixture.state()[20u], 1u);
+    EXPECT_EQ(fixture.state()[18u], std::bit_cast<std::uint32_t>(0.0f));
+    EXPECT_EQ(fixture.state()[24u], 2u);
+    EXPECT_EQ(fixture.state()[adaptive + 2u], 0u);
+    EXPECT_EQ(fixture.state()[adaptive + 3u], std::bit_cast<std::uint32_t>(0.0f));
+    EXPECT_EQ(fixture.state()[adaptive + 4u], 1000001u);
+    EXPECT_EQ(fixture.state()[adaptive + 6u], 1000001u);
+    EXPECT_EQ(fixture.output_at(300u, 365u), 0.0f);
+    EXPECT_GT(fixture.output_at(300u, 378u), 0.0f);
+
+    // A real domain reset discards the old owner as well as the UI controller. Only the next
+    // distinct compatible observation can acquire the complete current stack.
+    ASSERT_TRUE(fixture.observe_at(7u, {line, added}, 1200001u, true));
+    EXPECT_EQ(fixture.state()[2u], flag_pending);
+    EXPECT_EQ(fixture.state()[4u], 0u);
+    EXPECT_EQ(fixture.state()[12u], 2u);
+    EXPECT_EQ(fixture.state()[20u], 0u);
+    EXPECT_EQ(fixture.state()[adaptive + 3u], std::bit_cast<std::uint32_t>(0.0f));
+    EXPECT_TRUE(fixture.output_is_exact_base());
+    ASSERT_TRUE(fixture.observe_at(8u, {line, added}, 1400001u));
+    EXPECT_EQ(fixture.state()[4u], 2u);
+    EXPECT_EQ(fixture.state()[20u], 2u);
+    EXPECT_EQ(fixture.state()[24u], 2u);
+    EXPECT_EQ(fixture.output_at(300u, 365u), std::bit_cast<float>(fixture.state()[18u]));
+    EXPECT_EQ(fixture.output_at(300u, 378u), std::bit_cast<float>(fixture.state()[18u]));
+  }
+
+  TEST(HostSbsSubtitleSlr13GpuTest, AdaptiveUiBirthPinsCurrentCoverAndUsesSourceTimeDwell) {
+    slr13_warp_fixture_t fixture;
+    std::string error;
+    ASSERT_TRUE(fixture.initialize(error)) << error;
     const line_box_t peripheral {10u, 360u, 100u, 370u};
     constexpr auto a = v2::subtitle_locator_adaptive_offset;
     fixture.set_base(5.0f / 1920.0f);
@@ -3749,11 +3085,10 @@ namespace {
     EXPECT_EQ(fixture.state()[a + 3u], 0u);
   }
 
-  TEST(HostSbsSubtitleSlr13GpuTest, JointPlaneInvalidClockHoldsAndReusePreservesTail) {
+  TEST(HostSbsSubtitleSlr13GpuTest, AdaptiveUiInvalidClockHoldsAndReusePreservesTail) {
     slr13_warp_fixture_t fixture;
     std::string error;
     ASSERT_TRUE(fixture.initialize(error)) << error;
-    fixture.set_joint_plane_mode(true);
     fixture.set_base(0.0395f);
     const line_box_t line {180u, 360u, 590u, 370u};
     constexpr auto a = v2::subtitle_locator_adaptive_offset;
@@ -3764,10 +3099,11 @@ namespace {
     EXPECT_NE(fixture.state()[a + 1u] & 4u, 0u);
     EXPECT_EQ(fixture.state()[a + 14u], fixture.state()[a + 13u]);
     const auto previous = fixture.state();
-    ASSERT_TRUE(fixture.observe_at(22u, {line}, 900001u));
+    // Reuse retains the original source identity and timestamp together.
+    ASSERT_TRUE(fixture.observe_at(22u, {line}, 500001u));
     EXPECT_TRUE(std::equal(previous.begin() + a, previous.end(), fixture.state().begin() + a));
     std::uint64_t identity = 23u;
-    for (const auto timestamp : {0ull, 499999ull, 500001ull}) {
+    for (const auto timestamp : {499999ull, 500001ull}) {
       const auto applied = fixture.state()[a + 3u];
       ASSERT_TRUE(fixture.observe_at(identity++, {line}, timestamp));
       EXPECT_EQ(fixture.state()[a + 3u], applied);
@@ -3785,11 +3121,118 @@ namespace {
     EXPECT_EQ(fixture.state()[a + 3u], 0u);
   }
 
-  TEST(HostSbsSubtitleSlr13GpuTest, JointPlaneFullBottomUnionCountsPeripheralGlobalConflict) {
+  TEST(HostSbsSubtitleSlr13GpuTest, AdaptiveUiCollapsedGeometryFreezesPlaneAndRearmsRetreatDwell) {
     slr13_warp_fixture_t fixture;
     std::string error;
     ASSERT_TRUE(fixture.initialize(error)) << error;
-    fixture.set_joint_plane_mode(true);
+    const line_box_t line {180u, 360u, 590u, 370u};
+    constexpr auto a = v2::subtitle_locator_adaptive_offset;
+    fixture.set_base(5.0f / 1920.0f);
+    ASSERT_TRUE(fixture.observe_at(1u, {line}, 1u));
+    ASSERT_TRUE(fixture.observe_at(2u, {line}, 100001u));
+    ASSERT_TRUE(fixture.observe_at(3u, {line}, 200001u));
+    ASSERT_TRUE(fixture.observe_at(4u, {line}, 400001u));
+    ASSERT_EQ(fixture.state()[a + 2u], 2u);
+    ASSERT_NEAR(std::bit_cast<float>(fixture.state()[a + 3u]), 8.0f / 1920.0f, 1.0e-7f);
+    const auto applied = fixture.state()[a + 3u];
+    const auto generation = fixture.state()[3u];
+
+    fixture.set_base(-0.01f);
+    ASSERT_TRUE(fixture.observe_at(5u, {line}, 500001u));
+    ASSERT_NE(fixture.state()[a + 1u] & 2u, 0u);
+    ASSERT_EQ(fixture.state()[a + 8u], 500001u);
+    const auto prior_covered = fixture.state()[a + 13u];
+
+    // Collapsed depth publishes a flat Base, but a valid OCR transaction still belongs to its
+    // current frame. It must neither probe manufactured zeros nor spend the pending release.
+    fixture.set_geometry_ready(false);
+    fixture.set_base(0.0f);
+    std::uint64_t identity = 6u;
+    for (const auto timestamp : {1000001ull, 3000001ull}) {
+      ASSERT_TRUE(fixture.observe_at(identity++, {line}, timestamp));
+      EXPECT_EQ(fixture.state()[3u], generation);
+      EXPECT_EQ(fixture.state()[20u], 1u);
+      EXPECT_EQ(fixture.state()[18u], applied);
+      EXPECT_EQ(fixture.state()[a + 3u], applied);
+      EXPECT_EQ(fixture.state()[a + 2u], 2u);
+      EXPECT_EQ(fixture.state()[a + 1u] & 11u, 0u);
+      EXPECT_EQ(fixture.state()[a + 4u], 0u);
+      EXPECT_EQ(fixture.state()[a + 8u], 0u);
+      EXPECT_EQ(fixture.state()[a + 13u], prior_covered);
+      EXPECT_TRUE(std::all_of(fixture.condition_params().begin(),
+        fixture.condition_params().end(), [](const auto word) { return word == 0u; }));
+      EXPECT_TRUE(fixture.output_is_exact_base());
+    }
+
+    fixture.set_geometry_ready(true);
+    fixture.set_base(-0.01f);
+    ASSERT_TRUE(fixture.observe_at(8u, {line}, 5000001u));
+    EXPECT_EQ(fixture.state()[a + 3u], applied);
+    EXPECT_EQ(fixture.state()[a + 2u], 2u);
+    EXPECT_EQ(fixture.state()[a + 4u], 5000001u);
+    EXPECT_EQ(fixture.state()[a + 8u], 5000001u);
+    EXPECT_EQ(fixture.condition_params()[2u], 1u);
+    EXPECT_EQ(std::bit_cast<std::uint32_t>(fixture.output_at(300u, 365u)), applied);
+    ASSERT_TRUE(fixture.observe_at(9u, {line}, 6499999u));
+    EXPECT_EQ(fixture.state()[a + 3u], applied);
+    EXPECT_EQ(fixture.state()[a + 2u], 2u);
+    ASSERT_TRUE(fixture.observe_at(10u, {line}, 6750001u));
+    EXPECT_EQ(fixture.state()[a + 2u], 0u);
+    EXPECT_LT(std::bit_cast<float>(fixture.state()[a + 3u]), std::bit_cast<float>(applied));
+    EXPECT_GT(std::bit_cast<float>(fixture.state()[a + 3u]), 0.0f);
+  }
+
+  TEST(HostSbsSubtitleSlr13GpuTest, AdaptiveUiMissingOrStaleGeometryHasNoConditioningAuthority) {
+    slr13_warp_fixture_t fixture;
+    std::string error;
+    ASSERT_TRUE(fixture.initialize(error)) << error;
+    const line_box_t line {180u, 360u, 590u, 370u};
+    constexpr auto a = v2::subtitle_locator_adaptive_offset;
+    fixture.set_base(0.018f);
+    ASSERT_TRUE(fixture.observe_at(1u, {line}, 1u));
+    ASSERT_TRUE(fixture.observe_at(2u, {line}, 100001u));
+    ASSERT_TRUE(fixture.observe_at(3u, {line}, 200001u));
+    ASSERT_GT(std::bit_cast<float>(fixture.state()[a + 3u]), 0.0f);
+    const auto applied = fixture.state()[a + 3u];
+    const auto goal = fixture.state()[a + 2u];
+
+    fixture.set_geometry_available(false);
+    ASSERT_TRUE(fixture.observe_at(4u, {line}, 900001u));
+    EXPECT_EQ(fixture.state()[20u], 1u);
+    EXPECT_EQ(fixture.state()[a + 3u], applied);
+    EXPECT_EQ(fixture.state()[a + 2u], goal);
+    EXPECT_EQ(fixture.state()[a + 1u] & 11u, 0u);
+    EXPECT_EQ(fixture.condition_params()[2u], 0u);
+    EXPECT_TRUE(fixture.output_is_exact_base());
+
+    fixture.set_geometry_available(true);
+    fixture.override_geometry_clock(900001u); // authentic, but sealed for an older Base
+    ASSERT_TRUE(fixture.observe_at(5u, {line}, 1900001u));
+    EXPECT_EQ(fixture.state()[20u], 1u);
+    EXPECT_EQ(fixture.state()[a + 3u], applied);
+    EXPECT_EQ(fixture.state()[a + 4u], 0u);
+    EXPECT_EQ(fixture.condition_params()[2u], 0u);
+    EXPECT_TRUE(fixture.output_is_exact_base());
+
+    fixture.override_geometry_clock(std::nullopt);
+    ASSERT_TRUE(fixture.observe_at(6u, {line}, 0u));
+    EXPECT_EQ(fixture.state()[20u], 1u);
+    EXPECT_EQ(fixture.state()[a + 3u], applied);
+    EXPECT_EQ(fixture.state()[a + 4u], 0u);
+    EXPECT_EQ(fixture.condition_params()[2u], 0u);
+    EXPECT_TRUE(fixture.output_is_exact_base());
+    ASSERT_TRUE(fixture.observe_at(7u, {line}, 2900001u));
+    EXPECT_EQ(fixture.state()[a + 3u], applied); // first ready frame only rearms the clock
+    EXPECT_EQ(fixture.state()[a + 4u], 2900001u);
+    EXPECT_EQ(fixture.condition_params()[2u], 1u);
+    ASSERT_TRUE(fixture.observe_at(8u, {line}, 3150001u));
+    EXPECT_GT(std::bit_cast<float>(fixture.state()[a + 3u]), std::bit_cast<float>(applied));
+  }
+
+  TEST(HostSbsSubtitleSlr13GpuTest, AdaptiveUiFullBottomUnionCountsPeripheralGlobalConflict) {
+    slr13_warp_fixture_t fixture;
+    std::string error;
+    ASSERT_TRUE(fixture.initialize(error)) << error;
     fixture.set_base(-0.01f);
     fixture.set_base_columns(0u, 125u, 5.0f / 1920.0f);
     const ocr_box_t ribbon {
@@ -3808,7 +3251,7 @@ namespace {
     EXPECT_EQ(fixture.state()[a + 15u], 0u);
   }
 
-  TEST(HostSbsSubtitleSlr13GpuTest, JointPlaneProbeVisitsAwkwardCoverWidthsAndPartialRows) {
+  TEST(HostSbsSubtitleSlr13GpuTest, AdaptiveUiProbeVisitsAwkwardCoverWidthsAndPartialRows) {
     // Strides span several rows below 256 cells and carry within a row above it. None of these
     // rectangles has an area divisible by the group size, so the final partial visits matter.
     for (const std::uint32_t width : {93u, 255u, 257u, 513u}) {
@@ -3816,7 +3259,6 @@ namespace {
       slr13_warp_fixture_t fixture;
       std::string error;
       ASSERT_TRUE(fixture.initialize(error)) << error;
-      fixture.set_joint_plane_mode(true);
       fixture.set_base(5.0f / 1920.0f);
       const line_box_t line {31u, 360u, 31u + width, 371u};
       constexpr auto a = v2::subtitle_locator_adaptive_offset;
@@ -3845,11 +3287,10 @@ namespace {
     }
   }
 
-  TEST(HostSbsSubtitleSlr13GpuTest, JointPlaneProbeDeduplicatesOverlappingCurrentCovers) {
+  TEST(HostSbsSubtitleSlr13GpuTest, AdaptiveUiProbeDeduplicatesOverlappingCurrentCovers) {
     slr13_warp_fixture_t fixture;
     std::string error;
     ASSERT_TRUE(fixture.initialize(error)) << error;
-    fixture.set_joint_plane_mode(true);
     fixture.set_base(0.0395f);
     const ocr_box_t first {
       {180u, 360u, 410u, 370u}, {170u, 356u, 427u, 374u}, 0u, 1u, 0u
@@ -3883,11 +3324,10 @@ namespace {
     EXPECT_TRUE(fixture.output_is_exact_base());
   }
 
-  TEST(HostSbsSubtitleSlr13GpuTest, JointPlaneRejectsFadeTargetModeAndPaddingTampering) {
+  TEST(HostSbsSubtitleSlr13GpuTest, AdaptiveUiRejectsFadeTargetPolicyAndPaddingTampering) {
     slr13_warp_fixture_t fixture;
     std::string error;
     ASSERT_TRUE(fixture.initialize(error)) << error;
-    fixture.set_joint_plane_mode(true);
     fixture.set_base(0.03f);
     const line_box_t line {180u, 360u, 590u, 370u};
     ASSERT_TRUE(fixture.observe_at(70u, {line}, 1u));
@@ -3902,21 +3342,52 @@ namespace {
     ASSERT_TRUE(fixture.condition_only());
     EXPECT_TRUE(fixture.output_is_exact_base());
 
-    fixture.set_joint_plane_mode_words(4u);
-    ASSERT_TRUE(fixture.observe_at(73u, {line}, 300001u));
-    EXPECT_TRUE(fixture.output_is_exact_base());
-    EXPECT_EQ(fixture.condition_params()[2u], 0u);
-    fixture.set_joint_plane_mode_words(3u, 1u);
+    for (const auto retired_or_foreign_policy : {0u, 1u, 2u, 4u, 0xffffffffu}) {
+      fixture.set_adaptive_policy_words(retired_or_foreign_policy);
+      ASSERT_TRUE(fixture.observe_at(73u, {line}, 300001u));
+      EXPECT_TRUE(fixture.output_is_exact_base());
+      EXPECT_EQ(fixture.condition_params()[2u], 0u);
+    }
+    fixture.set_adaptive_policy_words(v2::adaptive_policy_id, 1u);
     ASSERT_TRUE(fixture.observe_at(74u, {line}, 400001u));
     EXPECT_TRUE(fixture.output_is_exact_base());
     EXPECT_EQ(fixture.condition_params()[2u], 0u);
   }
 
-  TEST(HostSbsSubtitleSlr13GpuTest, JointPlaneClockCarriesAcrossUint32Boundary) {
+  TEST(HostSbsSubtitleSlr13GpuTest, AdaptiveUiRejectsMalformedRepresentationGuardBeforeProbe) {
     slr13_warp_fixture_t fixture;
     std::string error;
     ASSERT_TRUE(fixture.initialize(error)) << error;
-    fixture.set_joint_plane_mode(true);
+    fixture.set_base(0.03f);
+    const line_box_t line {180u, 360u, 590u, 370u};
+    ASSERT_TRUE(fixture.observe_at(1u, {line}, 1u));
+    ASSERT_TRUE(fixture.observe_at(2u, {line}, 100001u));
+    ASSERT_EQ(fixture.condition_params()[4u], 2u);
+    std::uint64_t identity = 3u;
+    for (const auto malformed_guard : {0.0f, 0.01f, 0.08f,
+           std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity()}) {
+      fixture.set_adaptive_policy_words(v2::adaptive_policy_id);
+      fixture.set_display_guard(malformed_guard);
+      ASSERT_TRUE(fixture.observe_at(identity, {line}, 1u + identity * 100000u));
+      EXPECT_EQ(fixture.state()[20u], 0u);
+      EXPECT_EQ(fixture.condition_params()[2u], 0u);
+      EXPECT_TRUE(fixture.output_is_exact_base());
+      ++identity;
+    }
+    fixture.set_adaptive_policy_words(v2::adaptive_policy_id);
+    ASSERT_TRUE(fixture.observe_at(identity, {line}, 1u + identity * 100000u));
+    EXPECT_EQ(fixture.state()[2u], flag_pending);
+    EXPECT_TRUE(fixture.output_is_exact_base());
+    ++identity;
+    ASSERT_TRUE(fixture.observe_at(identity, {line}, 1u + identity * 100000u));
+    EXPECT_EQ(fixture.state()[2u], flag_owner | flag_target_valid);
+    EXPECT_EQ(fixture.condition_params()[4u], 2u);
+  }
+
+  TEST(HostSbsSubtitleSlr13GpuTest, AdaptiveUiClockCarriesAcrossUint32Boundary) {
+    slr13_warp_fixture_t fixture;
+    std::string error;
+    ASSERT_TRUE(fixture.initialize(error)) << error;
     fixture.set_base(5.0f / 1920.0f);
     const line_box_t line {180u, 360u, 590u, 370u};
     constexpr auto a = v2::subtitle_locator_adaptive_offset;
@@ -3928,11 +3399,10 @@ namespace {
     EXPECT_EQ(fixture.state()[a + 2u], 2u);
     EXPECT_GT(std::bit_cast<float>(fixture.state()[a + 3u]), 0.0f);
   }
-  TEST(HostSbsSubtitleSlr13GpuTest, JointPlaneProvisionalHandoffKeepsGlobalPlaneAtEqualSourceTime) {
+  TEST(HostSbsSubtitleSlr13GpuTest, AdaptiveUiProvisionalHandoffKeepsGlobalPlaneAtEqualSourceTime) {
     slr13_warp_fixture_t fixture;
     std::string error;
     ASSERT_TRUE(fixture.initialize(error)) << error;
-    fixture.set_joint_plane_mode(true);
     fixture.set_base(5.0f / 1920.0f);
     const ocr_box_t owner {
       {203u, 369u, 566u, 384u}, {198u, 365u, 571u, 389u}, 0u, 1u, 0u
@@ -3967,11 +3437,10 @@ namespace {
     EXPECT_EQ(fixture.condition_params()[4u], 2u);
   }
 
-  TEST(HostSbsSubtitleSlr13GpuTest, JointPlaneAuthenticatedEmptyCoverReleasesWithoutConditioning) {
+  TEST(HostSbsSubtitleSlr13GpuTest, AdaptiveUiAuthenticatedEmptyCoverReleasesWithoutConditioning) {
     slr13_warp_fixture_t fixture;
     std::string error;
     ASSERT_TRUE(fixture.initialize(error)) << error;
-    fixture.set_joint_plane_mode(true);
     fixture.set_base(5.0f / 1920.0f);
     const line_box_t line {180u, 360u, 590u, 370u};
     constexpr auto a = v2::subtitle_locator_adaptive_offset;
@@ -4002,7 +3471,7 @@ namespace {
     std::string error;
     ASSERT_TRUE(fixture.initialize(error)) << error;
     constexpr float gain = 0.0065625f;
-    fixture.set_joint_plane_mode_words(3u, 0u, gain);
+    fixture.set_adaptive_policy_words(v2::adaptive_policy_id, 0u, gain);
     fixture.set_base(1.5f / 1920.0f);
     const ocr_box_t owner {
       {203u, 369u, 566u, 384u}, {198u, 365u, 571u, 389u}, 0u, 1u, 0u
@@ -4062,7 +3531,7 @@ namespace {
     std::string error;
     ASSERT_TRUE(fixture.initialize(error)) << error;
     constexpr float budget = 0.006f;
-    fixture.set_joint_plane_mode_words(3u, 0u, budget);
+    fixture.set_adaptive_policy_words(v2::adaptive_policy_id, 0u, budget);
     fixture.set_base(0.004f);
     const line_box_t line {180u, 360u, 590u, 370u};
     constexpr auto a = v2::subtitle_locator_adaptive_offset;
@@ -4081,7 +3550,7 @@ namespace {
     ASSERT_TRUE(fixture.observe_at(222u, {line}, 200001u));
     EXPECT_EQ(fixture.condition_params()[2u], 0u);
     EXPECT_TRUE(fixture.output_is_exact_base());
-    fixture.set_joint_plane_mode_words(3u, 0u, budget);
+    fixture.set_adaptive_policy_words(v2::adaptive_policy_id, 0u, budget);
     fixture.override_joint_observation(300001u, 1u);
     ASSERT_TRUE(fixture.observe_at(223u, {line}, 300001u));
     EXPECT_EQ(fixture.condition_params()[2u], 0u);
@@ -4092,7 +3561,7 @@ namespace {
     slr13_warp_fixture_t fixture;
     std::string error;
     ASSERT_TRUE(fixture.initialize(error)) << error;
-    fixture.set_joint_plane_mode_words(3u, 0u, 0.0065625f);
+    fixture.set_adaptive_policy_words(v2::adaptive_policy_id, 0u, 0.0065625f);
     fixture.set_base(0.012f);
     const line_box_t line {180u, 360u, 590u, 370u};
     constexpr auto a = v2::subtitle_locator_adaptive_offset;
@@ -4134,7 +3603,7 @@ namespace {
     slr13_warp_fixture_t fixture;
     std::string error;
     ASSERT_TRUE(fixture.initialize(error)) << error;
-    fixture.set_joint_plane_mode_words(3u, 0u, 0.0065625f);
+    fixture.set_adaptive_policy_words(v2::adaptive_policy_id, 0u, 0.0065625f);
     fixture.set_base(-0.006f);
     // A slope-safe staircase exercises nonuniform cover interiors and both collar directions.
     for (std::uint32_t column = 0u; column < 32u; ++column) {
@@ -4171,7 +3640,7 @@ namespace {
     slr13_warp_fixture_t fixture;
     std::string error;
     ASSERT_TRUE(fixture.initialize(error)) << error;
-    fixture.set_joint_plane_mode_words(3u, 0u, 0.0065625f);
+    fixture.set_adaptive_policy_words(v2::adaptive_policy_id, 0u, 0.0065625f);
     fixture.set_base(0.0395f);
     const line_box_t line {180u, 360u, 590u, 370u};
     constexpr auto a = v2::subtitle_locator_adaptive_offset;
@@ -4196,7 +3665,7 @@ namespace {
     slr13_warp_fixture_t fixture;
     std::string error;
     ASSERT_TRUE(fixture.initialize(error)) << error;
-    fixture.set_joint_plane_mode_words(3u, 0u, 0.0065625f);
+    fixture.set_adaptive_policy_words(v2::adaptive_policy_id, 0u, 0.0065625f);
     fixture.set_base(-0.01f);
     fixture.set_base_columns(0u, 125u, 0.018f);
     const ocr_box_t ribbon {
@@ -4217,7 +3686,7 @@ namespace {
     EXPECT_EQ(fixture.state()[a + 8u], 0u);
   }
 
-  void verify_joint_plane_native_dump_source_widths(
+  void verify_adaptive_ui_native_dump_source_widths(
     const D3D_DRIVER_TYPE driver,
     const std::uint32_t mode = 3u
   ) {
@@ -4249,7 +3718,7 @@ namespace {
         std::numeric_limits<std::uint32_t>::max(), source.content);
       std::string error;
       ASSERT_TRUE(fixture.initialize(error, driver)) << error;
-      fixture.set_joint_plane_mode_words(mode);
+      fixture.set_adaptive_policy_words(mode);
       fixture.set_cut(scene_epoch, false);
       fixture.set_base(0.03f);
       const auto top = subtitle_roi_edge(source.width, source.height, source.content,
@@ -4305,11 +3774,11 @@ namespace {
   }
 
       TEST(HostSbsSubtitleSlr13GpuTest, HostModelUiNativeDumpAuthenticatesArbitrarySourceWidths) {
-    verify_joint_plane_native_dump_source_widths(D3D_DRIVER_TYPE_WARP, 3u);
+    verify_adaptive_ui_native_dump_source_widths(D3D_DRIVER_TYPE_WARP, 3u);
   }
 
   TEST(HostSbsSubtitleSlr13GpuTest, HostModelUiHardwareDumpAuthenticatesArbitrarySourceWidths) {
-    verify_joint_plane_native_dump_source_widths(D3D_DRIVER_TYPE_HARDWARE, 3u);
+    verify_adaptive_ui_native_dump_source_widths(D3D_DRIVER_TYPE_HARDWARE, 3u);
   }
 }  // namespace
 

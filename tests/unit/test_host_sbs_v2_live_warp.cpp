@@ -28,6 +28,7 @@
 #include <src/host_sbs_shader_cache.h>
 #include <src/host_sbs_v2_geometry.h>
 #include <src/platform/windows/host_sbs_v2_renderer.h>
+#include <tests/fixtures/host_sbs_adaptive_camera_state.h>
 
 namespace {
   using Microsoft::WRL::ComPtr;
@@ -667,15 +668,9 @@ namespace {
       known_contract ? v2::contract_tag : (v2::contract_tag ^ 1u);
     state[v2::renderer_authorization_bits] = frame_valid ?
       (known_contract ? v2::contract_tag : (v2::contract_tag ^ 1u)) : 0u;
-    state[v2::joint_plane_mode_bits] = 0u;
+    state[v2::joint_plane_mode_bits] = v2::adaptive_policy_id;
     state[v2::mapping_state_reserved_2] = 0u;
-    state[v2::camera_center_integrity_bits] =
-      v2::camera_center_integrity_for_words(
-        state[v2::center],
-        state[v2::inverse_scale],
-        state[v2::convergence_curve],
-        state[v2::calibration_revision]
-      );
+    host_sbs_test::seal_adaptive_camera(state);
     return state;
   }
 
@@ -1419,94 +1414,6 @@ TEST(HostSbsV2LiveWarpGpuTest, RoiMapsOnlyTheIntegerTensorContentRectangle) {
   }
 }
 
-TEST(HostSbsV2LiveWarpGpuTest, ContinuousRoiMapAndColorMatchProductionForAllModes) {
-  namespace v2 = models::depth_coordinate_v2;
-  constexpr UINT width = 257u;
-  constexpr UINT height = 65u;
-  constexpr UINT depth_width = 64u;
-  constexpr UINT depth_height = 32u;
-  const host_sbs_v2_geometry_t roi {
-    .video_roi_active = 1.0f,
-    .video_roi_left = 53.0f / width,
-    .video_roi_top = 9.0f / height,
-    .video_roi_right = 203.0f / width,
-    .video_roi_bottom = 57.0f / height,
-    .tensor_content_left = 8u,
-    .tensor_content_top = 4u,
-    .tensor_content_right = 56u,
-    .tensor_content_bottom = 28u,
-  };
-  auto full_capture = roi;
-  full_capture.video_roi_left = 0.0f;
-  full_capture.video_roi_top = 0.0f;
-  full_capture.video_roi_right = 1.0f;
-  full_capture.video_roi_bottom = 1.0f;
-  auto one_column = roi;
-  one_column.video_roi_right = one_column.video_roi_left + 1.0f / width;
-  const std::array<host_sbs_v2_geometry_t, 4> geometries {
-    roi, full_capture, one_column, host_sbs_v2_geometry_t {},
-  };
-  std::vector<rgba32f_t> source(static_cast<std::size_t>(width) * height);
-  for (UINT y = 0u; y < height; ++y) {
-    for (UINT x = 0u; x < width; ++x) {
-      const float u = (static_cast<float>(x) + 0.5f) / width;
-      const float v = (static_cast<float>(y) + 0.5f) / height;
-      source[static_cast<std::size_t>(y) * width + x] =
-        rgba32f_t {u, v, 3.0f + 2.0f * u - 4.0f * v, 0.625f};
-      // A captured border is ordinary image content. No black-pair or corner classifier may
-      // give it different geometric authority in mode3.
-      if ((x == 54u || x == 55u || x == 200u || x == 201u) && y >= 9u && y < 57u) {
-        source[static_cast<std::size_t>(y) * width + x] = rgba32f_t {0, 0, 0, 1};
-      }
-    }
-  }
-  const std::size_t field_size = static_cast<std::size_t>(depth_width) * depth_height;
-  std::array<std::vector<float>, 4> fields {
-    std::vector<float>(field_size, 0.0f),
-    std::vector<float>(field_size, 0.03125f),
-    std::vector<float>(field_size, -0.03125f),
-    std::vector<float>(field_size),
-  };
-  for (UINT y = 0u; y < depth_height; ++y) {
-    for (UINT x = 0u; x < depth_width; ++x) {
-      const float u = (static_cast<float>(x) + 0.5f) / depth_width;
-      fields[3][static_cast<std::size_t>(y) * depth_width + x] =
-        std::clamp(0.5f * (u - 0.5f), -v2::direct_container_limit, v2::direct_container_limit);
-    }
-  }
-  std::string error;
-  live_v2_warp_fixture_t color;
-  live_v2_warp_fixture_t mapping;
-  ASSERT_TRUE(color.initialize(error)) << error;
-  ASSERT_TRUE(mapping.initialize(error, warp_shader_e::live_mapping)) << error;
-  const auto render = [&](live_v2_warp_fixture_t &fixture, const std::vector<float> &field,
-                          const host_sbs_v2_geometry_t &geometry, std::uint32_t mode) {
-    auto state = make_live_state(true, true);
-    state[v2::joint_plane_mode_bits] = mode;
-    state[v2::camera_center_integrity_bits] = v2::camera_center_integrity_for_state_words(state);
-    std::vector<std::byte> bytes;
-    EXPECT_TRUE(fixture.render(DXGI_FORMAT_R32G32B32A32_FLOAT, sizeof(rgba32f_t),
-      width, height, source.data(), field, fields[0], state, {0.9f, 0.1f, 0.7f, 0.4f},
-      bytes, error, depth_width, depth_height, geometry)) << error;
-    return bytes;
-  };
-  for (std::size_t geometry_index = 0u; geometry_index < geometries.size(); ++geometry_index) {
-    for (std::size_t field_index = 0u; field_index < fields.size(); ++field_index) {
-      SCOPED_TRACE("geometry=" + std::to_string(geometry_index) +
-                   ", field=" + std::to_string(field_index));
-      const auto production_map = render(mapping, fields[field_index], geometries[geometry_index], 0u);
-      const auto production_color = render(color, fields[field_index], geometries[geometry_index], 0u);
-      ASSERT_EQ(production_map.size(), source.size() * 2u * sizeof(float));
-      ASSERT_EQ(production_color.size(), source.size() * 2u * sizeof(rgba32f_t));
-      for (const std::uint32_t mode : {3u}) {
-        SCOPED_TRACE(mode);
-        EXPECT_EQ(render(mapping, fields[field_index], geometries[geometry_index], mode), production_map);
-        EXPECT_EQ(render(color, fields[field_index], geometries[geometry_index], mode), production_color);
-      }
-    }
-  }
-}
-
 TEST(HostSbsV2LiveWarpGpuTest, AdaptiveContinuousCollarSamplesGradientAndPreservesSignedSpill) {
   namespace v2 = models::depth_coordinate_v2;
   constexpr UINT width = 512u;
@@ -1696,9 +1603,7 @@ TEST(HostSbsV2LiveWarpGpuTest, AdaptiveContinuousRoiUsesDeclaredPaddedFieldEmbed
       bytes, error, depth_width, depth_height, placement)) << error;
     return bytes;
   };
-  const auto production_bytes = render(0u, geometry);
   const auto adaptive_bytes = render(3u, geometry);
-  EXPECT_EQ(adaptive_bytes, production_bytes);
   ASSERT_EQ(adaptive_bytes.size(), source.size() * 2u * sizeof(float));
   // Declaring padding as real content changes its spatial embedding. Comparing two actual GPU
   // maps makes this observable independently of mode parity and needs no CPU inverse oracle.
@@ -2153,7 +2058,7 @@ TEST(HostSbsV2LiveWarpGpuTest, ExactEarlyExitMatchesUnconditionalElevenIteration
     const std::vector<float> &field,
     const host_sbs_v2_geometry_t &geometry,
     const std::string &where,
-    const std::uint32_t mode = 0u
+    const std::uint32_t mode = v2::adaptive_policy_id
   ) {
     SCOPED_TRACE(where);
     auto state = make_live_state(true, true);

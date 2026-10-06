@@ -110,9 +110,12 @@ MAX_TRACE_FRAMES = depth_coordinate_v2_dump_contract.GPU_TRACE_CAPACITY
 UINT64_MAX = (1 << 64) - 1
 ADAPTIVE_REQUEST_POLICY_SCHEMA = 6
 FRAME_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp"}
-OBSERVATION_TIMELINE_MAGIC = b"SBSOTL1\0"
-OBSERVATION_TIMELINE_SCHEMA = 1
-OBSERVATION_TIMELINE_HEADER_BYTES = 24
+from source_observation_timeline import (
+    OBSERVATION_TIMELINE_MAGIC, OBSERVATION_TIMELINE_SCHEMA,
+    OBSERVATION_TIMELINE_HEADER_BYTES, TimelineError as EvidenceError,
+    parse_positive_rational, prepared_observation_timestamps,
+    write_observation_timeline, read_observation_timeline,
+)
 CONTROL_SCOPE = "force-infer oracle for private adaptive replay"
 TREATMENT_SCOPE = "shared estimator joint analysis refresh; offline full-frame admission"
 TRACE_ROLE = "shared production estimator joint analysis refresh; offline ordered full-frame admission"
@@ -136,8 +139,6 @@ RUNTIME_COMPOSITE_PROVENANCE_KEYS = CONTRACT_COMPOSITE_PROVENANCE_KEYS | {
 }
 
 
-class EvidenceError(RuntimeError):
-    """Invalid setup, subprocess output, or authenticated evidence."""
 
 
 def sha256_file(path: Path) -> str:
@@ -370,48 +371,12 @@ def video_observation_timestamps(video: Path, ffprobe: Path,
     return timestamps
 
 
-def parse_positive_rational(value: str, option: str) -> tuple[int, int]:
-    try:
-        numerator_text, denominator_text = value.split("/", 1)
-        numerator, denominator = int(numerator_text), int(denominator_text)
-    except (ValueError, AttributeError) as exc:
-        raise EvidenceError(f"{option} must be a positive NUM/DEN rational") from exc
-    if numerator <= 0 or denominator <= 0:
-        raise EvidenceError(f"{option} must be a positive NUM/DEN rational")
-    return numerator, denominator
 
 
-def prepared_observation_timestamps(frame_count: int, fps: str) -> list[int]:
-    numerator, denominator = parse_positive_rational(fps, "--prepared-fps")
-    return [1 + (index * 1_000_000 * denominator // numerator)
-            for index in range(frame_count)]
 
 
-def write_observation_timeline(path: Path, timestamps: list[int]) -> None:
-    if (not timestamps or any(timestamp <= 0 for timestamp in timestamps) or
-            any(later < earlier for earlier, later in zip(timestamps, timestamps[1:]))):
-        raise EvidenceError("observation timeline is empty, zero, or regressed")
-    payload = struct.pack(
-        "<8sIIQ", OBSERVATION_TIMELINE_MAGIC, OBSERVATION_TIMELINE_SCHEMA,
-        OBSERVATION_TIMELINE_HEADER_BYTES, len(timestamps))
-    payload += struct.pack(f"<{len(timestamps)}Q", *timestamps)
-    path.write_bytes(payload)
 
 
-def read_observation_timeline(path: Path) -> list[int]:
-    data = path.read_bytes()
-    if len(data) < OBSERVATION_TIMELINE_HEADER_BYTES:
-        raise EvidenceError("observation timeline is shorter than its header")
-    magic, schema, header_bytes, count = struct.unpack("<8sIIQ", data[:24])
-    if (magic != OBSERVATION_TIMELINE_MAGIC or schema != OBSERVATION_TIMELINE_SCHEMA or
-            header_bytes != OBSERVATION_TIMELINE_HEADER_BYTES or count == 0 or
-            len(data) != header_bytes + count * 8):
-        raise EvidenceError("observation timeline header or length is invalid")
-    timestamps = list(struct.unpack(f"<{count}Q", data[header_bytes:]))
-    if (any(timestamp == 0 for timestamp in timestamps) or
-            any(later < earlier for earlier, later in zip(timestamps, timestamps[1:]))):
-        raise EvidenceError("observation timeline timestamps are zero or regressed")
-    return timestamps
 
 
 def decode_video_once(video: Path, frames_dir: Path, ffmpeg: Path, max_frames: int) -> list[Path]:
@@ -1379,8 +1344,8 @@ Image residuals are diagnostics; optional command-line bounds make them gates.</
 <table><thead><tr>
 <th>Clip</th><th>Frames</th><th>Infer</th><th>Reuse</th><th>Exact final holds</th>
 <th>Final step p95</th><th>Final jerk p95</th>
-<th>Transaction mean Δ</th>
-<th>Scene residual Δ p95</th><th>Subtitle-band residual Δ p95</th>
+<th>Transaction mean Î”</th>
+<th>Scene residual Î” p95</th><th>Subtitle-band residual Î” p95</th>
 <th>Control</th><th>Treatment</th></tr></thead><tbody>%s</tbody></table>
 <h2>Failures</h2><code>%s</code>""" % (
         html.escape(payload["verdict"]), "".join(rows),

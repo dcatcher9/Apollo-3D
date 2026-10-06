@@ -75,6 +75,7 @@ namespace {
     frame.field_height = 434;
     frame.field_content = content;
     frame.matched_frame_id = 41u;
+    frame.parallax_v2_requested_gain = v2::requested_gain_for_config(1.0f);
     frame.depth_input_region = {
       .source_width = 3840u,
       .source_height = 2160u,
@@ -99,6 +100,7 @@ namespace {
     frame.field_height = 434;
     frame.field_content = {0u, 0u, 770u, 434u};
     frame.matched_frame_id = 41u;
+    frame.parallax_v2_requested_gain = v2::requested_gain_for_config(1.0f);
     frame.color_space = models::input_color_space::srgb;
     frame.depth_input_region = {
       .source_width = 1920u,
@@ -247,7 +249,7 @@ namespace {
       subtitle_held ? frame.matched_frame_id - 1u : frame.matched_frame_id;
     words[locator + 22u] = static_cast<std::uint32_t>(locator_frame_id);
     words[locator + 23u] = static_cast<std::uint32_t>(locator_frame_id >> 32u);
-    words[locator + 24u] = 1u;
+    words[locator + 24u] = 2u;
     words[locator + 26u] = subtitle_scene_epoch;
     words[locator + 27u] = static_cast<std::uint32_t>(frame.field_width);
     words[locator + 28u] = static_cast<std::uint32_t>(frame.field_height);
@@ -256,13 +258,17 @@ namespace {
     words[condition + 0u] = v2::subtitle_condition_param_schema;
     words[condition + 1u] = v2::subtitle_condition_param_tag;
     words[condition + 2u] = 1u;
-    words[condition + 4u] = 1u;
+    words[condition + 4u] = 2u;
     words[condition + 5u] = target;
     const auto observation_timestamp_us = 1'000'000u + frame.matched_frame_id;
-    set(gpu_trace::record_word_e::observation_timestamp_low,
-        static_cast<std::uint32_t>(observation_timestamp_us));
-    set(gpu_trace::record_word_e::observation_timestamp_high,
-        static_cast<std::uint32_t>(observation_timestamp_us >> 32u));
+    set(gpu_trace::record_word_e::observation_timestamp_low, static_cast<std::uint32_t>(observation_timestamp_us));
+    set(gpu_trace::record_word_e::observation_timestamp_high, static_cast<std::uint32_t>(observation_timestamp_us >> 32u));
+    constexpr auto adaptive = v2::subtitle_locator_adaptive_offset;
+    words[locator + adaptive] = 1u;
+    words[locator + adaptive + 1u] = 8u;
+    words[locator + adaptive + 3u] = target;
+    words[locator + adaptive + 4u] = 1u;
+    words[locator + adaptive + 12u] = std::bit_cast<std::uint32_t>(v2::display_budget());
 
     std::vector<std::uint8_t> bytes(words.size() * sizeof(std::uint32_t));
     std::memcpy(bytes.data(), words.data(), bytes.size());
@@ -309,6 +315,15 @@ namespace {
   }
 
   using subtitle_rect_t = std::array<std::uint32_t, 4>;
+
+  void seed_adaptive_ui_tail(std::array<std::uint32_t, v2::subtitle_locator_state_word_count> &words) {
+    constexpr auto adaptive = v2::subtitle_locator_adaptive_offset;
+    words[adaptive] = 1u;
+    words[adaptive + 1u] = 8u;
+    words[adaptive + 3u] = words[18u];
+    words[adaptive + 4u] = 1u;
+    words[adaptive + 12u] = std::bit_cast<std::uint32_t>(v2::display_budget());
+  }
 
   void store_ocr_pair(
     std::array<std::uint32_t, v2::subtitle_ocr_record_word_count> &words,
@@ -372,6 +387,7 @@ namespace {
       words[v2::subtitle_locator_current_offset + index] = first[index];
       words[v2::subtitle_locator_current_offset + 4u + index] = second[index];
     }
+    seed_adaptive_ui_tail(words);
     return words;
   }
 
@@ -457,6 +473,15 @@ namespace {
     );
     EXPECT_EQ(flags & gpu_trace::dump_forced, 0u)
       << "a dump may harvest a root that was already pending before the request";
+  }
+
+  TEST(SbsDebugDumpGpuTraceTest, MatchedPublicationClockMustEqualSourceTransaction) {
+    auto frame = gpu_trace_frame();
+    const auto ring = canonical_gpu_trace_ring(frame);
+    frame.matched_observation_timestamp_us = 1'000'000u + frame.matched_frame_id;
+    EXPECT_TRUE(dump_detail::gpu_trace_ring_is_canonical(ring, frame));
+    ++frame.matched_observation_timestamp_us;
+    EXPECT_FALSE(dump_detail::gpu_trace_ring_is_canonical(ring, frame));
   }
 
   TEST(SbsDebugDumpGpuTraceTest, SingleHighFieldExtentOwnsTheHighDomainIdentity) {
@@ -1119,11 +1144,15 @@ namespace {
     );
     EXPECT_FALSE(dump_detail::gpu_trace_ring_is_canonical(stale_condition, frame));
 
-    auto missing_active_condition = canonical;
+    // A historical row has no complete V2 geometry state. Current OCR ownership may remain
+    // while unavailable geometry suppresses its condition publication to exact zero6.
+    auto geometry_unavailable_condition = canonical;
     for (std::size_t index = 0u; index < v2::subtitle_condition_param_word_count; ++index) {
-      set_trace_word(missing_active_condition, condition + index, 0u);
+      set_trace_word(geometry_unavailable_condition, condition + index, 0u);
     }
-    EXPECT_FALSE(dump_detail::gpu_trace_ring_is_canonical(missing_active_condition, frame));
+    EXPECT_TRUE(dump_detail::gpu_trace_ring_is_canonical(geometry_unavailable_condition, frame));
+    set_trace_word(geometry_unavailable_condition, condition + 2u, 1u);
+    EXPECT_FALSE(dump_detail::gpu_trace_ring_is_canonical(geometry_unavailable_condition, frame));
   }
 
   TEST(SbsDebugDumpGpuTraceTest, ProvisionalConditionUsesEphemeralTupleAndStructuralBounds) {
@@ -1485,7 +1514,7 @@ namespace {
     EXPECT_FALSE(dumper.snapshot_requested());
   }
 
-  TEST(SbsDebugDumpAsyncTest, Schema41PackagesOnlyOneFinalFieldAndNoScalarPreviews) {
+  TEST(SbsDebugDumpAsyncTest, Schema44PackagesOnlyOneFinalFieldAndNoScalarPreviews) {
     std::ifstream stream(
       std::filesystem::path(SUNSHINE_SOURCE_DIR) /
         "src/platform/windows/sbs_debug_dump.cpp",
@@ -1516,7 +1545,8 @@ namespace {
          }) {
       EXPECT_EQ(source.find(retired), std::string::npos) << retired;
     }
-    EXPECT_NE(source.find("{\"schema\", 41}"), std::string::npos);
+    EXPECT_NE(source.find("{\"schema\", 44}"), std::string::npos);
+    EXPECT_NE(source.find("{\"matched_observation_timestamp_us\", completed.matched_observation_timestamp_us}"), std::string::npos);
     EXPECT_NE(
       source.find("{\"warp_input_artifact\", \"shadow_final_parallax.f32\"}"),
       std::string::npos
@@ -1833,30 +1863,14 @@ namespace {
     stats[v2::frame_stat_percentile_high] = 0.0f;
     stats[v2::frame_stat_population_std] = 0.0f;
     EXPECT_FALSE(dump_detail::parallax_v2_state_matches_frame(state, stats, frame));
-    // Ordinary mode retains the original iff-moments admission, including unavailable cases.
-    words = {};
-    words[v2::container_scale] = std::bit_cast<std::uint32_t>(1.0f);
-    words[v2::contract_tag_bits] = v2::contract_tag;
-    words[v2::camera_center_integrity_bits] = v2::camera_center_integrity_for_state_words(words);
-    std::memcpy(state.data(), words.data(), sizeof(words));
-    frame.parallax_v2_joint_plane_mode = 0u;
-    stats.assign(v2::frame_stats_float_count, 0.0f);
-    stats[v2::frame_stat_valid_count] = stats[v2::frame_stat_texel_count] = 16.0f;
-    EXPECT_TRUE(dump_detail::parallax_v2_state_matches_frame(state, stats, frame));
-    stats[v2::frame_stat_mean] = 2.0f;
-    stats[v2::frame_stat_population_std] = 0.5f;
-    stats[v2::frame_stat_minimum] = 1.0f;
-    stats[v2::frame_stat_maximum] = 4.0f;
-    stats[v2::frame_stat_valid] = 1.0f;
-    EXPECT_FALSE(dump_detail::parallax_v2_state_matches_frame(state, stats, frame));
   }
 
-  TEST(SbsDebugDumpAsyncTest, NativeFlatSerializationRejectsMalformedQuantileTailsInBothModes) {
+  TEST(SbsDebugDumpAsyncTest, NativeFlatSerializationRejectsMalformedQuantileTails) {
     auto frame = gpu_trace_frame();
     frame.parallax_v2_raw_coordinate_scale = 2.25f;
     frame.parallax_v2_requested_pop_strength = 1.0f;
     frame.parallax_v2_requested_gain = v2::requested_gain_for_config(1.0f);
-    for (const auto mode : {0u, 3u}) {
+    for (const auto mode : {v2::adaptive_policy_id}) {
       SCOPED_TRACE(mode);
       frame.parallax_v2_joint_plane_mode = mode;
       v2::state_words_t words {};
@@ -1908,7 +1922,7 @@ namespace {
     }
   }
 
-  TEST(SbsDebugDumpAsyncTest, NativeSubtitleValidationAcceptsSignedLocalPlaneWithinContainer) {
+  TEST(SbsDebugDumpAsyncTest, NativeSubtitleValidationAcceptsOnlyNonnegativeUiPlaneWithinContainer) {
     constexpr models::depth_tensor_content_rect_t content {0u, 0u, 770u, 434u};
     const auto frame = subtitle_frame(content, 3440u, 1440u);
     const auto geometry = models::fit_subtitle_analysis_geometry(
@@ -1921,8 +1935,6 @@ namespace {
 
     const float local_plane = 4.0f / 3440.0f;
     for (const float candidate : {
-           -v2::direct_container_limit,
-           -local_plane,
            0.0f,
            local_plane,
            v2::direct_container_limit,
@@ -1933,6 +1945,8 @@ namespace {
       ));
     }
     for (const float candidate : {
+           -local_plane,
+           -v2::direct_container_limit,
            std::nextafter(
              -v2::direct_container_limit,
              -std::numeric_limits<float>::infinity()
@@ -1996,7 +2010,7 @@ namespace {
     ));
   }
 
-  TEST(SbsDebugDumpAsyncTest, NativeSubtitleValidationBoundsUnreliableOwnerHold) {
+  TEST(SbsDebugDumpAsyncTest, NativeSubtitleValidationRejectsRetiredOwnerHold) {
     constexpr models::depth_tensor_content_rect_t content {0u, 0u, 770u, 434u};
     const auto frame = subtitle_frame(content, 1920u, 1080u);
     const auto geometry = models::fit_subtitle_analysis_geometry(
@@ -2016,23 +2030,22 @@ namespace {
 
     auto held = two_line_subtitle_state(frame, first, second);
     held[21u] = 0u;  // A hold is an ordinary continuing-owner observation.
-    for (std::uint32_t count = 1u;
-         count <= v2::subtitle_target_max_unreliable_holds;
-         ++count) {
+    ASSERT_TRUE(subtitle_records_match_frame(word_bytes(ocr), word_bytes(held), frame));
+    for (std::uint32_t count : {1u, 2u, 3u, 0xffffffffu}) {
       held[25u] = count;
-      EXPECT_TRUE(subtitle_records_match_frame(
-        word_bytes(ocr), word_bytes(held), frame
+      EXPECT_FALSE(subtitle_records_match_frame(
+        word_bytes(ocr),
+        word_bytes(held),
+        frame
       ));
     }
 
-    held[25u] = v2::subtitle_target_max_unreliable_holds + 1u;
+    held[25u] = 1u;
     EXPECT_FALSE(subtitle_records_match_frame(
       word_bytes(ocr), word_bytes(held), frame
     ));
 
-    // Word 25 is an unreliable-measurement hold only while the owner retains a valid target. It
-    // cannot be attached to a birth/handoff/death event. An observation with no matched current
-    // authority preserves the counter without aging it and conditions exact Base for that frame.
+    // Word 25 is reserved zero while an owner exists, including observations with no current cover.
     held[25u] = 1u;
     held[21u] = 3u;
     EXPECT_FALSE(subtitle_records_match_frame(
@@ -2045,7 +2058,7 @@ namespace {
       v2::subtitle_locator_rectangle_capacity * 4u,
       0u
     );
-    EXPECT_TRUE(subtitle_records_match_frame(
+    EXPECT_FALSE(subtitle_records_match_frame(
       word_bytes(ocr), word_bytes(held), frame
     ));
     held[2u] = 1u | 8u;
@@ -2178,8 +2191,7 @@ namespace {
     locator[26u] = subtitle_scene_epoch;
     locator[27u] = static_cast<std::uint32_t>(frame.model_width);
     locator[28u] = static_cast<std::uint32_t>(frame.model_height);
-    locator[v2::subtitle_locator_provisional_target_word] =
-      std::bit_cast<std::uint32_t>(6.0f / (2.0f * 1920.0f));
+    locator[v2::subtitle_locator_provisional_target_word] = locator[18u];
     locator[v2::subtitle_locator_provisional_fade_word] = 2u;
     std::copy(
       owner.begin(), owner.end(), locator.begin() + v2::subtitle_locator_owner_offset
@@ -2190,6 +2202,7 @@ namespace {
     std::copy(
       cover.begin(), cover.end(), locator.begin() + v2::subtitle_locator_current_offset
     );
+    seed_adaptive_ui_tail(locator);
     ASSERT_TRUE(subtitle_records_match_frame(
       word_bytes(ocr), word_bytes(locator), frame
     ));

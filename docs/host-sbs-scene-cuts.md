@@ -1,24 +1,14 @@
 # Host SBS scene cuts
 
 This document is the canonical contract and acceptance plan for the Host SBS scene-cut detector.
-The detector has one authority: emit a confirmed cut generation and one-frame pulse that invalidates
-the default scene camera described in [Host SBS pipeline](host-sbs.md). The opt-in joint-plane
-experiment selects mode 3 and continuously observes Host mean zero and relative-depth amplitude
-on fresh valid inference; its geometry has no scene latch. It uses linear requested-gain mapping
-and a hard signed `0.04` representation bound, without a depth curve or soft envelope. At fixed
-divisor/gain, moving zero preserves pairwise separation before saturation and spatial conditioning.
-Confirmed cuts remain detector and
-subtitle-ownership/UI-filter authority, but do not reset or disarm the mode 3 camera. Only a true
-input-domain reset clears that camera, as specified in
-[Host SBS pipeline](host-sbs.md#opt-in-joint-plane-live-experiment). The detector's normalized depth, history,
-telemetry slots, and classification flags never become per-pixel geometry.
-
-The design goal is deliberately asymmetric:
-
-- brightness alone must not reset stereo geometry;
-- persistent motion must not periodically retrigger a cut;
-- a later observable cut must remain detectable during sustained motion; and
-- ambiguous evidence should preserve the current scene rather than guess.
+The detector has one authority: emit a confirmed cut generation and one-frame pulse for history
+and subtitle ownership. The adaptive geometry described in [Host SBS pipeline](host-sbs.md) retains
+its controller across cuts. Its mean zero and robust
+relative-depth amplitude continuously follow authenticated source-time observations. Confirmed
+cuts retain that geometry controller and remain history/subtitle-ownership authority. The adaptive
+UI-plane filter resets on a cut or input-domain change. A true analysis-domain reset clears the
+geometry controller too. Private normalized depth, history, evidence and cut state remain separate
+from the curve-free geometry map.
 
 ## GPU evidence
 
@@ -57,7 +47,7 @@ independently transformed channels.
 Ordinary V2 computes every item above from the full captured frame. When a window-region ROI is
 authorized for an exact matched frame, its exact logical rectangle is the entire analysis domain
 even though shaders address it directly inside the retained full-frame texture: DAV2 input,
-normalized-depth comparison, appearance and ordinal evidence, scene center, baselines, and history
+normalized-depth comparison, appearance and ordinal evidence, adaptive zero, baselines, and history
 all exclude the surrounding desktop. A causally authenticated Chromium `<video>` has priority;
 otherwise a causally continuous foreground root client may provide the rectangle. The retained full
 captured color texture supplies those offset analysis loads and remains the final renderer source.
@@ -65,7 +55,7 @@ captured color texture supplies those offset analysis loads and remains the fina
 Evidence from different domains must never be compared. Entering or leaving ROI mode, changing the
 authority kind (`chromium_video` versus `foreground_client`), authorized identity or crop
 dimensions, or changing the input transfer domain clears cut history, baselines, pending
-confirmation, and the scene camera before analysis resumes. Translation of the same authority and
+confirmation, and the adaptive camera before analysis resumes. Translation of the same authority and
 same-sized crop retains the analysis domain and its histories; the exact matched-frame rectangle
 still determines where that frame is rendered. Translation nevertheless revokes any older
 positioned completion or cached ROI output; only a newly retained matched frame may reuse the
@@ -170,15 +160,16 @@ The production subtitle path applies no overlay exclusion to cut evidence or DAV
 appearance and disappearance remain ordinary scene evidence; the locator consumes the
 already-resolved cut result and can neither suppress nor retroactively change it.
 
-Adaptive geometry mode 3 consumes the same authenticated cut generation. It retains
+Adaptive geometry consumes the same authenticated cut generation. It retains
 continuously filtered mean zero and its model-prior-bounded P05/P95 amplitude across confirmed
 cuts, without invalidating its targets or disarming timing. It initializes on the first valid
 source-time observation. Its first valid observation after an interruption or gap over 250 ms
-rearms without spending the missing interval; an input-domain reset clears all 28 geometry words.
+rearms without spending the missing interval; an input-domain reset reinitializes the complete
+28-word geometry state to its sealed initial values.
 Reuse dispatches no geometry resolver and freezes controller state with the complete published
 tuple. This infer-only Host adaptation means static scenes can pause an unfinished transition.
 It is the Host relative-depth adapter described in the
-[joint-plane contract](host-sbs.md#opt-in-joint-plane-live-experiment), not a physical calibration
+[joint-plane contract](host-sbs.md#adaptive-geometry-and-subtitle-plane), not a physical calibration
 of model depth or a new cut detector. Confirmed cuts continue to reset subtitle UI filter memory
 and drive the current OCR/SLR ownership transaction independently of geometry adaptation.
 
@@ -192,13 +183,9 @@ unique-generation lifetime
 for one uninterrupted domain. The conditioner also binds that
 CutBridge resource and copies Base unless the locator scene epoch equals its authenticated hard-cut
 count. A confirmed cut clears pending and death-grace
-state, preserves only current OCR rectangles that still match an old owner, and samples the new
-local supporting plane. At the aggregate primary, two complete finite in-container rows use their
-robust medians without an interquartile-range gate: close medians are averaged and separated
-medians choose the larger-U, nearer support. If only one primary row is valid, that row must pass
-the generated IQR gate. Otherwise the same strict two-row coherent fallback policy applies.
-A reliable survivor restarts on the selected plane at half fade strength;
-an unreliable one conditions exact Base. The old full-strength target never crosses the cut.
+state, preserves only current OCR rectangles that still match an old owner, and resets the
+adaptive UI target to screen-plane zero at canonical full strength. The new source-time controller
+then observes current Base/cover conflict; an old full-strength target does not cross the cut.
 Additions or disjoint boxes
 start a new two-observation transaction. An
 input-domain reset clears the owner too and records current boxes only as the first pending
@@ -214,10 +201,9 @@ this scene-cut pipeline continue normally; because no OCR8 record or locator dis
 that transport-level suppression neither ages grace nor changes cut authority.
 
 The SLR14 same-scene provisional single-line bridge is never cut or reset authority. A hard-cut
-epoch change, input-domain reset, fresh onset, half-faded/transitional owner, unreliable local-plane
-sample, multiline/ribbon stack, or geometry outside its generated one-baseline bounds remains the
+epoch change, input-domain reset, fresh onset, invalid target authority, multiline/ribbon stack, or geometry outside its generated one-baseline bounds remains the
 ordinary first pending observation with exact Base. Only a distinct non-cut observation replacing
-a mature full-fade single ordinary owner may render its exact same-frame OCR8 cover provisionally;
+a mature full-strength single ordinary owner may render its exact same-frame OCR8 cover provisionally;
 the old durable owner/generation/target/fade remain unchanged and the following distinct
 observation must still confirm the ordinary handoff.
 
@@ -389,8 +375,7 @@ The committed conformance clips must prove at least these contracts:
 - a stable lower OCR line stack acquires only after two compatible observations with distinct exact
   frame/domain identities; processing one record again cannot self-confirm;
 - a hard cut clears pending/grace, preserves only same-frame rectangles that still overlap an old
-  owner, then either restarts from a reliable new local-plane sample at half strength or publishes
-  exact Base when sampling is unreliable; disjoint or
+  owner at the reset adaptive UI plane, and publishes exact Base without current authority; disjoint or
   appended lines remain pending; and
 - a no-owner cut or input reset landing on an already-visible static subtitle records the first box
   stack as pending and can acquire it on the next compatible distinct observation.
@@ -439,11 +424,11 @@ Exercise each sequence for at least 20 seconds and finish with five seconds of a
 19. Acquire one line, append a delayed translated line, and remove it again. Verify that the first
     line retains same-frame authority, the appended stack needs two observations, each line remains
     a separate dense rectangle, and empty/missed current OCR returns exact Base immediately.
-20. From a mature full-fade single ordinary owner, replace it with each captured single-line
-    geometry pair. Verify first-observation exact-current provisional conditioning, residual-above-8
-    half fade versus residual-at-or-below-8 full fade, unchanged durable owner/generation/target,
-    ordinary confirmation on the next distinct observation, and exact Base for cut/reset, half-fade,
-    unreliable, malformed, IoU-equality, changed-cover duplicate, and out-of-gate cases.
+20. From a mature full-strength single ordinary owner, replace it with each captured single-line
+    geometry pair. Verify exact-current provisional covers at the adaptive UI plane, unchanged
+    durable owner/generation, ordinary confirmation on the next distinct observation, and exact
+    Base for cut/reset, malformed identity, IoU-equality, changed-cover duplicate and out-of-gate
+    cases. Confirm full-pin cover pixels and a slope-safe exterior collar.
 
 Repeat representative cases in SDR and HDR and across authenticated landscape, ultrawide, and
 portrait tensor shapes. Record frame identity, all evidence fractions, reason flags, arm/latch
@@ -451,7 +436,7 @@ state, pending confirmation, scene age, baselines, cut generation, camera genera
 disparity percentiles.
 
 The live contract passes when exposure-only changes never reacquire the camera, sustained motion
-never pumps it, each qualified editorial cut creates exactly one camera acquisition, a cut during
+never pumps it, each qualified editorial cut creates exactly one authenticated epoch transition, a cut during
 persistent motion remains observable, ROI-domain transitions cannot compare incompatible history,
 pure ROI translation does not reacquire the camera, and diagnostics add no GPU queue stall.
 The subtitle portion additionally requires two distinct exact-frame observations for birth and

@@ -141,14 +141,9 @@ void main(uint3 id : SV_DispatchThreadID) {
         return;
     }
     float4 active = ShadowState[0];
-    uint mode = asuint(V2_STATE_JOINT_PLANE_MODE_BITS(ShadowState[2]));
-    float mapped_coordinate = mode == 0u ? V2Curve(coordinate) : coordinate;
-    float gain = v2_requested_gain;
-    float requested = gain *
-        (mapped_coordinate -
-         V2_STATE_CONVERGENCE_CURVE(active));
-    float candidate = mode == 3u ? V2BoundDisplayParallax(requested) :
-        V2PointwiseContainer(requested);
+    float requested = v2_requested_gain *
+        (coordinate - V2_STATE_CONVERGENCE_CURVE(active));
+    float candidate = V2BoundDisplayParallax(requested);
     if (!V2Finite(candidate)) {
         candidate = 0.0f;
     }

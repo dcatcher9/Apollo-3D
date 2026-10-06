@@ -1,6 +1,7 @@
 #pragma once
 
 #include <src/host_sbs_gpu_completion_receipt.h>
+#include <tests/fixtures/host_sbs_adaptive_camera_state.h>
 
 namespace host_sbs_gpu_completion_receipt_fixture {
   namespace receipt = models::host_sbs_gpu_completion_receipt;
@@ -111,9 +112,7 @@ namespace host_sbs_gpu_completion_receipt_fixture {
     state[v2::calibration_revision] = 1u;
     state[v2::frame_valid] = std::bit_cast<std::uint32_t>(1.0f);
     state[v2::renderer_authorization_bits] = v2::contract_tag;
-    state[v2::camera_center_integrity_bits] = v2::camera_center_integrity_for_words(
-      state[v2::center], state[v2::inverse_scale], state[v2::convergence_curve], state[v2::calibration_revision]
-    );
+    host_sbs_test::seal_adaptive_camera(state);
     std::copy(state.begin(), state.end(), words.begin() + receipt::parallax_state_begin);
     words[receipt::depth_frame_state_begin + 1u] = std::bit_cast<std::uint32_t>(1.0f);
     words[receipt::depth_frame_state_begin + 2u] = std::bit_cast<std::uint32_t>(1.0f);

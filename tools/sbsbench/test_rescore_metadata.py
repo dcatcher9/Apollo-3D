@@ -2,6 +2,7 @@
 
 import json
 import os
+from pathlib import Path
 import sys
 import tempfile
 import unittest
@@ -53,9 +54,16 @@ class RescoreMetadataTests(unittest.TestCase):
             os.path.join(artifact_dir, "warp_mask_00000.png"))
         np.zeros((8, 24), np.float32).tofile(
             os.path.join(artifact_dir, "warp_map_00000.f32"))
+        timeline = run_eval.prepare_clip_observation_timeline(
+            Path(artifact_dir), 1, {})
         contract = {
             "schema": run_eval.whole_clip_raw_contract.HARNESS_CONTRACT_SCHEMA,
             "model": "depth_anything_v2_fp16",
+            "joint_plane_mode": 3,
+            "observation_timeline": {
+                "schema": 1, "timestamp_unit": "monotonic-source-us-plus-one",
+                "count": 1, "sha256": timeline["sha256"],
+            },
             "depth_step": "current-once",
             "depth_reuse_interval": 1,
             "pop_strength": 1.2,
@@ -92,6 +100,8 @@ class RescoreMetadataTests(unittest.TestCase):
         data = {
             "meta": {
                 "suite": "core",
+                "joint_plane_mode": 3,
+                "observation_timeline_artifacts": {"demo": timeline},
                 "clip_set_sha1": {"demo": run_eval.sha1_dir(source_dir)},
                 "scored_artifact_sha256": {"demo": artifact_hash},
                 **{key: contract[key] for key in (
@@ -118,26 +128,25 @@ class RescoreMetadataTests(unittest.TestCase):
             self.assertEqual(rebuilt["source_frame_count"], 1)
             self.assertEqual(rebuilt["model"], "depth_anything_v2_fp16")
 
-    def test_joint_plane_attestation_cannot_be_shadowed_or_omitted(self):
+
+    def test_adaptive_policy_identity_cannot_be_shadowed_or_omitted(self):
         with tempfile.TemporaryDirectory() as root:
             data, clips_root, run_dir, _ = self._fixture(root)
-            path = os.path.join(run_dir, "demo", "contract.json")
-            with open(path, encoding="utf-8") as stream:
-                contract = json.load(stream)
-            contract["joint_plane_experiment"] = True
-            with open(path, "w", encoding="utf-8") as stream:
-                json.dump(contract, stream)
-            with self.assertRaisesRegex(SystemExit, "run joint-plane"):
+            data["meta"].pop("joint_plane_mode")
+            with self.assertRaisesRegex(SystemExit, "adaptive policy identity"):
                 rescore_run.authoritative_clip_meta(data, "demo", clips_root, run_dir)
-            data["meta"]["joint_plane_experiment"] = False
-            with self.assertRaisesRegex(SystemExit, "joint_plane_experiment"):
-                rescore_run.authoritative_clip_meta(data, "demo", clips_root, run_dir)
+            data["meta"]["joint_plane_mode"] = 3
             data["meta"]["joint_plane_experiment"] = True
-            # Contract bytes changed, so bind the new artifact digest before authenticating.
-            data["meta"]["scored_artifact_sha256"]["demo"] = (
-                run_eval.scored_artifact_sha256(os.path.join(run_dir, "demo")))
-            rebuilt = rescore_run.authoritative_clip_meta(data, "demo", clips_root, run_dir)
-            self.assertIs(rebuilt["joint_plane_experiment"], True)
+            with self.assertRaisesRegex(SystemExit, "retired pipeline-selection"):
+                rescore_run.authoritative_clip_meta(data, "demo", clips_root, run_dir)
+            data["meta"].pop("joint_plane_experiment")
+            path = Path(run_dir) / "demo/contract.json"
+            contract = json.loads(path.read_text())
+            contract["joint_plane_mode"] = 0
+            path.write_text(json.dumps(contract))
+            data["meta"]["scored_artifact_sha256"]["demo"] = run_eval.scored_artifact_sha256(str(path.parent))
+            with self.assertRaisesRegex(SystemExit, "adaptive policy identity"):
+                rescore_run.authoritative_clip_meta(data, "demo", clips_root, run_dir)
 
     def test_report_authentication_rejects_cached_scoring_meta(self):
         with tempfile.TemporaryDirectory() as root:

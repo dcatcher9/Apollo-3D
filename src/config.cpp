@@ -660,7 +660,6 @@ namespace config {
     video.sbs = {};
     bool_f(vars, "sbs_reshade", video.sbs.reshade);
     double_between_f(vars, "sbs_3d_pop_strength", video.sbs.pop_strength, {0.25, 2.0});
-    bool_f(vars, "sbs_3d_joint_plane_experiment", video.sbs.joint_plane_experiment);
     int_between_f(vars, "sbs_3d_max_encode_width", video.sbs.max_encode_width, {256, 16384});
     video.sbs.max_encode_width &= ~3;
 

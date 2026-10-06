@@ -225,7 +225,7 @@ namespace video {
     snapshot.valid_fields |= sbs_telemetry_valid_field::config;
     snapshot.runtime_flags &= ~sbs_telemetry_runtime_flag::adaptive_enabled;
     // Telemetry v1 requires one of its three legacy plane values whenever VALID_CONFIG is set,
-    // but it cannot represent V2's scene-latched raw center and fixed near curve. Keep the neutral
+    // but it cannot represent V2's continuous mean zero and linear relative-depth geometry. Keep the neutral
     // compatibility value stable; V2 has no configurable zero-plane field for this protocol.
     snapshot.zero_plane_mode = 2;
     snapshot.pop_floor = static_cast<float>(settings.pop_strength);

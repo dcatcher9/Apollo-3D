@@ -26,6 +26,7 @@ import argparse
 import copy
 import datetime
 import glob
+from fractions import Fraction
 import hashlib
 import json
 import ntpath
@@ -55,6 +56,11 @@ from PIL import Image  # noqa: E402
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 sys.path.insert(0, SCRIPT_DIR)
+from source_observation_timeline import (  # noqa: E402
+    observation_timeline_payload,
+    TimelineError, prepared_observation_timestamps,
+    read_observation_timeline, write_observation_timeline,
+)
 import sbsbench  # noqa: E402  (metric implementations)
 import eval_parallel  # noqa: E402  (evaluator scheduling; deliberately not metric math)
 import direct_geometry_contract as direct_geometry  # noqa: E402
@@ -223,6 +229,7 @@ def scored_artifact_digests(directory):
     """Hash authenticated and numeric-only artifact sets in one file traversal."""
     scored_fixed = {
         "contract.json", "sbs_perf.json", "warp_map_shape.json", "hdr_output_stats.json",
+        "observation.timeline",
         "cut_state.json", "direct_parallax_manifest.json",
         convex2x_diagnostics.SIDECAR_FILENAME,
     }
@@ -419,6 +426,7 @@ def label_contract_files():
         os.path.join(SCRIPT_DIR, "run_eval.py"),
         os.path.join(SCRIPT_DIR, "rescore_run.py"),
         os.path.join(SCRIPT_DIR, "eval_parallel.py"),
+        os.path.join(SCRIPT_DIR, "source_observation_timeline.py"),
     ]
 
 
@@ -505,6 +513,7 @@ def label_context_sha(meta):
         "parallax_v2_shadow", "parallax_v2_render", "parallax_v2_live",
         "training_labels", "training_label_gate", "metric_runtime",
         "scored_artifact_sha256", "baseline_snapshot_sha256",
+        "observation_timeline_artifacts",
     )
     return sha256_json({key: meta.get(key) for key in keys})
 
@@ -1375,7 +1384,7 @@ def source_evidence_digests(path):
                                      "required_gt_subtitle_sanitizer_oracle",
                                      "subtitle_transition_contract",
                                      "reference_stereo_available", "evaluation_role",
-                                     "content_type", "shot_state_contract") if k in meta}
+                                     "content_type", "shot_state_contract", "fps") if k in meta}
     semantic_bytes = json.dumps(semantic, sort_keys=True).encode()
     legacy.update(semantic_bytes)
     full.update(semantic_bytes)
@@ -1411,8 +1420,16 @@ def _validate_baseline_manifest(baseline, clip, source, required_common, clip_ha
             f"{clip}: committed baseline still claims retired Host SBS V1 controls {retired}; "
             "regenerate it with the canonical V2 evaluator")
     required = {**required_common, "clip_sha1": clip_hashes[clip]}
-    mismatches = {key: (meta.get(key), value) for key, value in required.items()
-                  if meta.get(key) != value}
+    mismatches = {}
+    for key, value in required.items():
+        actual = meta.get(key)
+        if key == "observation_timeline_artifacts":
+            # A canonical baseline may contain additional clips. Only this clip's clock
+            # qualifies its pixels; unrelated corpus clocks must not invalidate a subset run.
+            actual = actual.get(clip) if isinstance(actual, dict) else None
+            value = value.get(clip) if isinstance(value, dict) else None
+        if actual != value:
+            mismatches[key] = (actual, value)
     if mismatches:
         raise ValueError(
             f"{clip}: baseline context is stale/incompatible: {mismatches}. "
@@ -1540,6 +1557,7 @@ def baseline_required_context(candidate_meta):
         "conf_sha256": candidate_meta.get("conf_sha256"),
         "metric_sha256": candidate_meta.get("metric_sha256"),
         "metric_runtime": candidate_meta.get("metric_runtime"),
+        "observation_timeline_artifacts": candidate_meta.get("observation_timeline_artifacts"),
     }
 
 
@@ -2305,28 +2323,17 @@ def authoritative_remeasurement_clip_meta(
             raise ValueError(
                 f"clips.{clip}: parallax_v2_render must be true for a V2 live evaluation run")
     authoritative = {key: contract[key] for key in contract_keys if key in contract}
-    # Archived schema-22 controls predate this opt-in field and therefore attest default-off.
-    # A new run that records the setting must also have the matching native contract field.
     if "joint_plane_experiment" in contract or "joint_plane_experiment" in run_meta:
-        if type(contract.get("joint_plane_experiment")) is not bool:
-            raise ValueError(f"clips.{clip}: missing/invalid native joint-plane attestation")
-        if type(run_meta.get("joint_plane_experiment")) is not bool:
-            raise ValueError(f"clips.{clip}: missing/invalid run joint-plane setting")
-        _require_matching_result(
-            run_meta["joint_plane_experiment"], contract["joint_plane_experiment"],
-            f"meta.joint_plane_experiment vs clips.{clip}.contract")
-        authoritative["joint_plane_experiment"] = contract["joint_plane_experiment"]
-    if "joint_plane_mode" in contract or "joint_plane_mode" in run_meta:
-        mode = contract.get("joint_plane_mode")
-        if type(mode) is not int or mode not in {0, 3}:
-            raise ValueError(f"clips.{clip}: missing/invalid native joint-plane mode")
-        if type(run_meta.get("joint_plane_mode")) is not int:
-            raise ValueError(f"clips.{clip}: missing/invalid run joint-plane mode")
-        _require_matching_result(run_meta["joint_plane_mode"], mode,
-                                 f"meta.joint_plane_mode vs clips.{clip}.contract")
-        if (mode != 0) != contract.get("joint_plane_experiment"):
-            raise ValueError(f"clips.{clip}: joint-plane mode and enable flag disagree")
-        authoritative["joint_plane_mode"] = mode
+        raise ValueError(f"clips.{clip}: retired pipeline-selection attestation is unsupported")
+    if (type(contract.get("joint_plane_mode")) is not int or
+            contract["joint_plane_mode"] != 3 or
+            type(run_meta.get("joint_plane_mode")) is not int or
+            run_meta["joint_plane_mode"] != 3):
+        raise ValueError(f"clips.{clip}: adaptive policy identity must be 3")
+    authoritative["joint_plane_mode"] = 3
+    if not direct_parallax_run:
+        validate_run_observation_timeline(artifact_dir, run_meta, clip, contract,
+                                          len(source_files), source_meta)
     if not direct_parallax_run:
         # Recorded as the validated boolean attestation; the full renderer descriptor stays in
         # the harness contract so a clip-meta/baseline merge cannot shadow the run-level flag.
@@ -2737,33 +2744,108 @@ def expected_shared_number(conf, key, default, extra, cli_key, cast=float):
         fail(f"invalid numeric value for {key}: {value!r}")
 
 
-def expected_joint_plane_experiment(conf, extra):
-    return expected_joint_plane_mode(conf, extra) != 0
+def validate_unified_policy_options(extra):
+    """Reject removed selectors before GPU work instead of admitting another pipeline."""
+    for token in extra:
+        if token.split("=", 1)[0] in {"--joint-plane-experiment", "--joint-plane-mode"}:
+            raise ValueError(f"{token} was removed; Host SBS has one adaptive pipeline")
 
 
-def expected_joint_plane_mode(conf, extra):
-    """Resolve the default-off shared setting and its exact harness override."""
-    configured = str(conf_value(conf, "sbs_3d_joint_plane_experiment", "false")).lower()
-    if configured not in {"true", "false", "yes", "no", "on", "off", "1", "0",
-                          "enable", "enabled", "disable", "disabled"}:
-        raise ValueError(f"invalid boolean joint-plane setting: {configured!r}")
-    resolved = configured in {"true", "yes", "on", "1", "enable", "enabled"}
-    boolean_override = None
-    mode_override = None
-    for index, token in enumerate(extra):
-        if token == "--joint-plane-experiment":
-            if index + 1 >= len(extra) or extra[index + 1] not in {"on", "off"}:
-                raise ValueError("--joint-plane-experiment requires on or off")
-            boolean_override = extra[index + 1] == "on"
-        elif token == "--joint-plane-mode":
-            if index + 1 >= len(extra) or extra[index + 1] not in {"0", "3"}:
-                raise ValueError("--joint-plane-mode requires 0 or 3")
-            mode_override = int(extra[index + 1])
-    if mode_override is not None:
-        if boolean_override is not None and boolean_override != (mode_override != 0):
-            raise ValueError("joint-plane overrides disagree")
-        return mode_override
-    return 3 if (resolved if boolean_override is None else boolean_override) else 0
+def observation_timeline_override(extra):
+    """Take a single caller timeline out of harness extras for per-clip authentication."""
+    indices = [index for index, token in enumerate(extra) if token == "--observation-timeline"]
+    if len(indices) > 1:
+        raise ValueError("--observation-timeline may be supplied only once")
+    if not indices:
+        return None, list(extra)
+    index = indices[0]
+    if index + 1 >= len(extra) or extra[index + 1].startswith("--"):
+        raise ValueError("--observation-timeline needs a file")
+    path = Path(extra[index + 1]).resolve()
+    try:
+        read_observation_timeline(path)
+    except TimelineError as exc:
+        raise ValueError(f"invalid source observation timeline: {exc}") from exc
+    return path, list(extra[:index]) + list(extra[index + 2:])
+
+
+def prepared_source_cadence(clip_meta):
+    """Normalize the authenticated prepared clip's cadence declaration."""
+    declared = clip_meta.get("fps", "30/1")
+    if isinstance(declared, bool):
+        raise ValueError("prepared source cadence must be positive")
+    try:
+        cadence = Fraction(str(declared))
+    except (ValueError, ZeroDivisionError) as exc:
+        raise ValueError("prepared source cadence is not a positive rational") from exc
+    if cadence <= 0:
+        raise ValueError("prepared source cadence must be positive")
+    return f"{cadence.numerator}/{cadence.denominator}"
+
+
+def clip_observation_timeline_payload(frame_count, clip_meta, override=None):
+    """Declare authored prepared-source cadence; never use wall time or harness speed."""
+    if override is not None:
+        payload = override.read_bytes()
+        timestamps = read_observation_timeline(override)
+        if len(timestamps) != frame_count:
+            raise ValueError("explicit source timeline count differs from authenticated source frames")
+        provenance = {"kind": "explicit-source-timeline", "authored_cadence": None}
+    else:
+        fps = prepared_source_cadence(clip_meta)
+        timestamps = prepared_observation_timestamps(frame_count, fps)
+        payload = observation_timeline_payload(timestamps)
+        provenance = {
+            "kind": "authored-prepared-source-cadence",
+            "authored_cadence": fps,
+            "cadence_source": "clip-meta-fps" if "fps" in clip_meta else "declared-evaluator-default-30Hz",
+        }
+    return payload, {"file": "observation.timeline", "schema": 1, "count": frame_count,
+                     "sha256": hashlib.sha256(payload).hexdigest(), "time_provenance": provenance}
+
+
+def prepare_clip_observation_timeline(out_dir, frame_count, clip_meta, override=None):
+    payload, record = clip_observation_timeline_payload(frame_count, clip_meta, override)
+    (out_dir / record["file"]).write_bytes(payload)
+    return record
+
+
+def validate_run_observation_timeline(artifact_dir, run_meta, clip, contract, frame_count,
+                                      clip_meta):
+    records = run_meta.get("observation_timeline_artifacts")
+    record = records.get(clip) if isinstance(records, dict) else None
+    if (not isinstance(record, dict) or set(record) != {
+            "file", "schema", "count", "sha256", "time_provenance"} or
+            record["file"] != "observation.timeline" or record["schema"] != 1 or
+            type(record["count"]) is not int or record["count"] != frame_count):
+        raise ValueError("missing exact source observation timeline provenance")
+    timeline = Path(artifact_dir) / record["file"]
+    try:
+        timestamps = read_observation_timeline(timeline)
+    except TimelineError as exc:
+        raise ValueError(f"invalid source observation timeline: {exc}") from exc
+    if len(timestamps) != frame_count or file_sha256(timeline) != record["sha256"]:
+        raise ValueError("source observation timeline hash or frame count differs")
+    expected = {"schema": 1, "timestamp_unit": "monotonic-source-us-plus-one",
+                "count": frame_count, "sha256": record["sha256"]}
+    if contract.get("observation_timeline") != expected:
+        raise ValueError("native source observation timeline attestation differs")
+    provenance = record["time_provenance"]
+    if not isinstance(provenance, dict):
+        raise ValueError("invalid source-time provenance")
+    if provenance.get("kind") == "explicit-source-timeline":
+        if provenance != {"kind": "explicit-source-timeline", "authored_cadence": None}:
+            raise ValueError("invalid explicit source-time provenance")
+    elif provenance.get("kind") == "authored-prepared-source-cadence":
+        expected_source = ("clip-meta-fps" if "fps" in clip_meta else
+                           "declared-evaluator-default-30Hz")
+        if (set(provenance) != {"kind", "authored_cadence", "cadence_source"} or
+                provenance["cadence_source"] != expected_source or
+                provenance["authored_cadence"] != prepared_source_cadence(clip_meta) or
+                timestamps != prepared_observation_timestamps(frame_count, provenance["authored_cadence"])):
+            raise ValueError("authored source cadence differs from timeline bytes")
+    else:
+        raise ValueError("unknown source-time provenance")
 
 
 def expected_depth_model():
@@ -3097,11 +3179,13 @@ def check_engines(build_dir, model):
     return issues
 
 
-def run_engine_preflight(exe, conf, build_dir, frames_dir, model):
+def run_engine_preflight(exe, conf, build_dir, frames_dir, model, first_observation_us=1):
     """Build/resolve an engine outside measured clips, then require a fresh exact manifest."""
     with tempfile.TemporaryDirectory(prefix="sbs-engine-preflight-", dir=build_dir) as out_dir:
+        timeline = Path(out_dir) / "observation.timeline"
+        write_observation_timeline(timeline, [first_observation_us])
         cmd = [exe, os.path.abspath(conf), "--sbs-bench", "--frames", frames_dir,
-               "--out", out_dir, "--limit", "1"]
+               "--out", out_dir, "--limit", "1", "--observation-timeline", str(timeline)]
         try:
             result = subprocess.run(
                 cmd, cwd=build_dir, capture_output=True, text=True, timeout=900,
@@ -3257,12 +3341,11 @@ def main():
     expected_pop = expected_shared_number(
         args.conf, "pop_strength", 1.75, args.extra, "--pop-strength")
     try:
-        expected_joint_mode = expected_joint_plane_mode(args.conf, args.extra)
-        expected_joint_plane = expected_joint_mode != 0
+        validate_unified_policy_options(args.extra)
+        timeline_override, harness_extra = observation_timeline_override(args.extra)
     except ValueError as exc:
         fail(str(exc))
-    if direct_parallax_root and expected_joint_plane:
-        fail("joint-plane experiment requires estimator-owned geometry")
+    expected_joint_mode = 3
     expected_model = expected_depth_model()
     expected_model_url = expected_depth_model_url()
     expected_preprocess_source_sha = shader_source_closure_sha256()
@@ -3287,6 +3370,13 @@ def main():
         fail(str(exc))
     baseline_manifests = {}
     baseline_snapshot = None
+    try:
+        declared_timeline_artifacts = ({clip: clip_observation_timeline_payload(
+            len(sbsbench.indexed_files(os.path.join(clips_dir, clip, "frame_*.*"), "frame_")),
+            source_clip_meta[clip], timeline_override)[1] for clip in clips}
+            if not direct_parallax_root else {})
+    except (OSError, RuntimeError, ValueError) as exc:
+        fail(str(exc))
     if not args.update_baselines and not args.comparison_only:
         required_baseline_context = baseline_required_context({
             "mode": "canonical-v2",
@@ -3308,6 +3398,7 @@ def main():
             "metric_sha256": metric_sha,
             "label_contract_sha256": label_sha,
             "metric_runtime": metric_runtime,
+            "observation_timeline_artifacts": declared_timeline_artifacts,
         })
         try:
             baseline_manifests = preflight_baselines(
@@ -3332,7 +3423,8 @@ def main():
         print("run_eval: exact TRT engine is not ready; running one untimed preflight...",
               flush=True)
         run_engine_preflight(
-            exe, args.conf, args.build_dir, os.path.join(clips_dir, clips[0]), expected_model)
+            exe, args.conf, args.build_dir, os.path.join(clips_dir, clips[0]), expected_model,
+            read_observation_timeline(timeline_override)[0] if timeline_override else 1)
     try:
         evaluation_identity = evaluation_identity_snapshot(
             exe, args.build_dir, expected_model, args.conf)
@@ -3377,6 +3469,7 @@ def main():
         "clip_set_sha1": clip_hashes,
         "mode": "canonical-v2", "suite": args.suite, "clips_root": clips_dir,
         "extra_args": args.extra,
+        "observation_timeline_artifacts": declared_timeline_artifacts,
         "conf": os.path.relpath(args.conf, REPO),
         "model": expected_model,
         "depth_model_url": expected_model_url,
@@ -3393,7 +3486,6 @@ def main():
         # One explicit v2 artistic authority; exact v2 replay must inherit this resolved
         # global value unless its caller records an explicit CLI override.
         "pop_strength": expected_pop,
-        "joint_plane_experiment": expected_joint_plane,
         "joint_plane_mode": expected_joint_mode,
         "cuda_graph": expected_cuda_graph,
         "parallax_v2_shadow": expected_v2_shadow,
@@ -3436,7 +3528,19 @@ def main():
         shutil.rmtree(out_dir, ignore_errors=True)  # a reused label must not retain stale frame IDs
         cmd = [exe, os.path.abspath(args.conf), "--sbs-bench",
                "--frames", clip_dir, "--out", out_dir]
-        cmd += args.extra
+        clip_extra = list(harness_extra)
+        if not direct_parallax_root:
+            os.makedirs(out_dir, exist_ok=True)
+            source_count = len(sbsbench.indexed_files(os.path.join(clip_dir, "frame_*.*"), "frame_"))
+            try:
+                timeline = prepare_clip_observation_timeline(
+                    Path(out_dir), source_count, source_clip_meta[clip], timeline_override)
+            except (OSError, ValueError, TimelineError) as exc:
+                fail(f"{clip}: invalid source observation timeline: {exc}")
+            if timeline != declared_timeline_artifacts[clip]:
+                fail(f"{clip}: source observation timeline changed after preflight declaration")
+            clip_extra += ["--observation-timeline", str(Path(out_dir) / timeline["file"])]
+        cmd += clip_extra
         print(f"[{clip}] harness...", flush=True)
         try:
             r = subprocess.run(
@@ -3467,7 +3571,6 @@ def main():
             "depth_step": depth_step,
             "depth_reuse_interval": depth_reuse_interval,
             "pop_strength": expected_pop,
-            "joint_plane_experiment": expected_joint_plane,
             "joint_plane_mode": expected_joint_mode,
             "cuda_graph": expected_cuda_graph,
             "parallax_v2_shadow": expected_v2_shadow,
@@ -3490,6 +3593,12 @@ def main():
                       if contract.get(key) != expected}
         if mismatched:
             fail(f"{clip}: harness contract mismatch: {mismatched}")
+        if not direct_parallax_root:
+            try:
+                validate_run_observation_timeline(out_dir, meta, clip, contract, source_count,
+                                                  source_clip_meta[clip])
+            except (OSError, ValueError, TimelineError) as exc:
+                fail(f"{clip}: {exc}")
         baseline_graph_mode = _NO_CUDA_GRAPH_BASELINE
         if clip in baseline_manifests:
             baseline_meta = baseline_manifests[clip].get("meta", {})
@@ -3507,7 +3616,6 @@ def main():
                      "parallax_v2_shadow": contract["parallax_v2_shadow"],
                      "parallax_v2_render": contract["parallax_v2_render"],
                      "pop_strength": contract["pop_strength"],
-                     "joint_plane_experiment": contract["joint_plane_experiment"],
                      "joint_plane_mode": contract["joint_plane_mode"],
                      "cuda_graph_captured": contract["cuda_graph_captured"]}
         if direct_parallax_root:

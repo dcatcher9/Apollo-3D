@@ -1104,6 +1104,7 @@ class LabelProvenanceTests(unittest.TestCase):
                 "run_eval.py": "runner-v1\n",
                 "rescore_run.py": "rescorer-v1\n",
                 "eval_parallel.py": "clip-association-v1\n",
+                "source_observation_timeline.py": "source-time-v1\n",
             }
             for name, contents in paths.items():
                 with open(os.path.join(directory, name), "w", encoding="utf-8") as stream:
@@ -1341,11 +1342,18 @@ class ReportEvidenceContractTests(unittest.TestCase):
                 with open(os.path.join(artifact_dir, "warp_map_shape.json"), "w",
                           encoding="utf-8") as stream:
                     json.dump(shape, stream)
+                timeline = run_eval.prepare_clip_observation_timeline(
+                    Path(artifact_dir), 1, {})
                 with open(os.path.join(artifact_dir, "contract.json"), "w",
                           encoding="utf-8") as stream:
                     json.dump({
                         "schema": run_eval.whole_clip_raw_contract.HARNESS_CONTRACT_SCHEMA,
                         "model": "depth_anything_v2_fp16",
+                        "joint_plane_mode": 3,
+                        "observation_timeline": {
+                            "schema": 1, "timestamp_unit": "monotonic-source-us-plus-one",
+                            "count": 1, "sha256": timeline["sha256"],
+                        },
                         "depth_step": "current-once",
                         "depth_reuse_interval": 1,
                         "pop_strength": 1.2,
@@ -1403,6 +1411,8 @@ class ReportEvidenceContractTests(unittest.TestCase):
                 "git_dirty": False,
                 "clip_set_sha1": {"demo": clip_hash},
                 "mode": "canonical-v2",
+                "joint_plane_mode": 3,
+                "observation_timeline_artifacts": {"demo": timeline},
                 "suite": "core",
                 "clips_root": clips_root,
                 "extra_args": [],
@@ -1453,6 +1463,7 @@ class ReportEvidenceContractTests(unittest.TestCase):
                 artifact_hash = run_eval.scored_artifact_sha256(os.path.join(run_dir, "demo"))
                 meta["scored_artifact_sha256"] = {"demo": artifact_hash}
                 entry_meta = {
+                    "joint_plane_mode": 3,
                     "name": "current-schema report fixture",
                     "model": "depth_anything_v2_fp16",
                     "pop_strength": 1.2,
