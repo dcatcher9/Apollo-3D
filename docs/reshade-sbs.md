@@ -4719,8 +4719,8 @@ created per slot when the generation opens; there is no private copy. The newest
 `reading` while it is the newest, so repeat conversions and stream-gamma reconversion keep reading
 it. Every conversion that reads it then ends that slot's event query after all of its reads (Y,
 UV, Local AR, resample and the cursor patch) and flushes (`receiver_t::reads_recorded`). When a
-newer frame is claimed and that query has completed, the normal case because the previous encode
-finished those reads, the replaced slot returns to free at the claim itself, after the generation,
+newer frame is claimed and that query has completed, the normal case because the previous conversion's
+GPU work has finished by then, the replaced slot returns to free at the claim itself, after the generation,
 nonce and sequence checks. Otherwise (its reads are still running, or a poll returned the frame
 again after its query was ended) a query covering every read stays pending, and the slot returns
 to free only once it completes. It never blocks: queries are read without a flush, and one still
@@ -4765,13 +4765,14 @@ takes the fence callback's lock. The encode loop logs its own account at the sam
 `Video encode loop: I iterations in 20.0 s; N new-content and R repeated-content encodes; holding
 ... in H exact holds (requested ..., overshoot avg/max); waiting ... in W image waits (requested
 ...; T ran to their bound, overshoot avg/max); converting ...; encoding ... (NVENC submit ...,
-completion wait ...); loop work ...`. Encodes are told apart by the encoded content's identity,
+completion wait ...; up to D pictures in flight, B submitted behind another, submission to packet
+avg/max); loop work ...`. Encodes are told apart by the encoded content's identity,
 as the packets' content-age loggers do, so a keepalive that re-renders an unchanged export counts
 as repeated content although it converted. Image waits that run to their bound with an overshoot near 15.6 ms are tick-bound waits. While an
 export is live the loop neither polls nor repeats frames at stream cadence: new exports, cursor
 changes and the minimum-FPS keepalive (which re-checks the connection) produce frames, and a due
 stream-gamma white-level query runs in the next of them rather than forcing a repeat. A replaced
-slot whose reads were still pending at its claim is retired right after the next encode.
+slot whose reads were still pending at its claim is retired right after the next picture's submission.
 `RemoteEncodeProviderPacingTest.TickBoundWaitsReproduceTheLiveSixtyFrameCap` runs this loop's
 wait and schedule helpers against the ring's rules with the live FG off, 2x and 4x arrival
 patterns and waits as long as they really are, and reproduces the live 56-62 new frames/s with
@@ -4789,6 +4790,25 @@ default GPU timeout). On 10-06 the game's first frame-generation enable kept the
 conversion off the GPU for about 300 ms: the fixed budget failed the encoder at 251 ms with
 `input_producer=pending_at_251ms`, blocked new encoders, rebuilt the session, detached the receiver
 and so made the game build a second export ring. Such a stall now delays one picture.
+
+The encoder of an independent provider keeps up to two pictures in flight
+(`nvenc_base::pipeline_depth()`; desktop and Host SBS streams keep one). Each picture has its own
+NVENC input, bitstream and completion event: at submission the converted surface is copied into
+the picture's input on the immediate context (about 50 MB each way at 7680x2160 10-bit; the two
+inputs cost about 100 MB of video memory), so the next frame converts and starts encoding while the
+previous picture still encodes. A thread of its own (`encode_pipeline_t`) waits for the pictures in
+submission order and publishes each packet as soon as its picture completes, whatever the loop is
+doing; the loop waits only while two are in flight, and then for the oldest. Before, on 10-06 in
+Stellar Blade at 4K with FG on, `encode_frame()` waited for each picture: NVENC's completion wait
+averaged 8.5-12.2 ms (about 5 ms uncontended; the rest is the conversion's GPU work queued behind
+the game's) and the host took 55-71 new frames/s, against 80-90 with FG off. A reference
+invalidation or bitrate change first waits for the pictures in flight, as a returning
+`encode_frame()` did; an IDR applies to the next picture submitted. A picture that fails on that
+thread fails the encoder, every exit of the loop first delivers the pictures still in flight, and a
+picture's 250 ms budget starts when the wait for it does, after the previous one completed.
+`PicturesInFlightTakeEveryStreamFrameAtFrameGenerationEncodeTimes` runs the loop model with the
+live FG-on encode times (5.5-22 ms per picture): 68 new frames/s one picture at a time, 89 with two
+in flight, Present to packet within 0.5 ms.
 
 While a streaming encoder converts a live packed export it holds the display's capture-pixel
 claim, and Desktop Duplication and WGC forward only timestamps and cursor metadata. When the

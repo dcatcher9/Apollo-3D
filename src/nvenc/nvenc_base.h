@@ -4,9 +4,12 @@
  */
 #pragma once
 
+#include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <optional>
+#include <string>
 
 // lib includes
 #include <ffnvcodec/nvEncodeAPI.h>
@@ -103,8 +106,21 @@ namespace nvenc {
      */
     void destroy_encoder();
 
+    /** Pictures an encoder can have in flight at once (input surface, bitstream and event each). */
+    static constexpr unsigned max_pipeline_depth = 2;
+
     /**
-     * @brief Encode the next frame using platform-specific input surface.
+     * Pictures that may be submitted before the oldest is retrieved, fixed by create_encoder():
+     * `client_config`'s video::nvenc_pipeline_depth() when the encoder runs asynchronously and
+     * every picture got its own completion event, else 1.
+     */
+    [[nodiscard]] unsigned pipeline_depth() const noexcept {
+      return pipeline_depth_;
+    }
+
+    /**
+     * @brief Encode the next frame using platform-specific input surface: submit_frame() and then
+     *        retrieve_frame(), on the calling thread.
      * @param frame_index Frame index that uniquely identifies the frame.
      *        Afterwards serves as parameter for `invalidate_ref_frames()`.
      *        No restrictions on the first frame index, but later frame indexes must be subsequent.
@@ -119,16 +135,40 @@ namespace nvenc {
     );
 
     /**
+     * Submit the current input surface as the next picture without waiting for it. With a pipeline
+     * depth above 1 the surface is first copied into the picture's own input, so the caller may
+     * convert the next frame while this one encodes. Call from one thread (the encode thread).
+     * @return `false` on failure, or while `pipeline_depth()` pictures are still in flight.
+     */
+    bool submit_frame(uint64_t frame_index, bool force_idr);
+
+    /**
+     * Wait for the oldest submitted picture (the 250 ms encoder budget, from its input's completion
+     * when the GPU was still producing it) and copy its bitstream. Pictures are retrieved strictly
+     * in submission order. May run on a second thread concurrently with submit_frame(), as NVENC's
+     * asynchronous mode intends; never concurrently with itself or any other call.
+     * @return Encoded frame, or an empty one on failure (new encoders then wait for teardown).
+     */
+    nvenc_encoded_frame retrieve_frame(std::vector<std::uint8_t> frame_buffer = {});
+
+    /** Submitted pictures not yet retrieved. */
+    [[nodiscard]] unsigned frames_in_flight() const noexcept {
+      return in_flight_.load(std::memory_order_acquire);
+    }
+
+    /**
      * Reconfigure only the active encoder's CBR bitrate and matching VBV size.
      *
-     * The caller must serialize this between encode_frame() calls. A failure leaves the cached
-     * configuration unchanged so the caller can fall back to rebuilding the session. This path
-     * deliberately neither resets encoder state nor requests an IDR.
+     * The caller must serialize this between encode_frame() calls, with no picture in flight. A
+     * failure leaves the cached configuration unchanged so the caller can fall back to rebuilding
+     * the session. This path deliberately neither resets encoder state nor requests an IDR.
      */
     bool reconfigure_bitrate(int bitrate_kbps);
 
     /**
-     * @brief Perform reference frame invalidation (RFI) procedure.
+     * @brief Perform reference frame invalidation (RFI) procedure. Call with no picture in flight,
+     *        so that the range extends to the last submitted picture and the next submitted one is
+     *        the first encoded after it.
      * @param first_frame First frame index of the invalidation range.
      * @param last_frame Last frame index of the invalidation range.
      * @return `true` on success, `false` on error.
@@ -137,14 +177,20 @@ namespace nvenc {
     bool invalidate_ref_frames(uint64_t first_frame, uint64_t last_frame);
 
     /** Diagnostics: CPU time the last encode_frame() spent submitting its picture and waiting for
-     *  its completion. Zero while diagnostics are disabled and for a step the frame did not reach. */
+     *  its completion. Zero while diagnostics are disabled and for a step the frame did not reach.
+     *  Only for a caller that submits and retrieves on one thread. */
     struct frame_timing_t {
       std::chrono::nanoseconds submit {};
       std::chrono::nanoseconds completion_wait {};
     };
 
     [[nodiscard]] frame_timing_t last_frame_timing() const noexcept {
-      return last_frame_timing_;
+      return {last_submit_, last_completion_wait_};
+    }
+
+    /** Diagnostics: CPU time of the last submit_frame()'s picture submission; submitting thread. */
+    [[nodiscard]] std::chrono::nanoseconds last_submit_timing() const noexcept {
+      return last_submit_;
     }
 
   protected:
@@ -156,34 +202,54 @@ namespace nvenc {
     virtual bool init_library() = 0;
 
     /**
-     * @brief Required. Used for creating outside-facing input surface,
-     *        registering this surface with `nvenc->nvEncRegisterResource()` and setting `registered_input_buffer` variable.
-     *        Called during `create_encoder()`.
+     * @brief Required. Used for creating outside-facing input surface and registering with
+     *        `nvenc->nvEncRegisterResource()` the input of each picture slot below
+     *        `pipeline_depth()`, setting `registered_input_buffers[slot]`. With a depth of 1 that
+     *        is the outside-facing surface itself. Called during `create_encoder()`.
      * @return `true` on success, `false` on error
      */
     virtual bool create_and_register_input_buffer() = 0;
 
     /**
+     * @brief Required for a depth above 1, where it alone is called: fill picture `slot`'s
+     *        registered input from the outside-facing surface (a GPU copy) before it is mapped.
+     *        Submitting thread only.
+     */
+    virtual void prepare_input(unsigned slot) {}
+
+    /**
+     * @brief Optional. Completion event of picture slot `slot` (1 and up; slot 0 uses
+     *        `async_event_handle`), owned by the derived class until `release_async_event()`.
+     *        Without one the encoder keeps a pipeline depth of 1.
+     */
+    virtual void *create_completion_event(unsigned slot) {
+      return nullptr;
+    }
+
+    /**
      * @brief Optional. Override if you want to create encoder in async mode.
      *        In this case must also set `async_event_handle` variable.
+     * @param event A picture slot's completion event.
      * @param timeout_ms Wait timeout in milliseconds
      * @return Completion, elapsed timeout, or a wait failure with its native diagnostics.
      */
-    virtual nvenc_event_wait_result wait_for_async_event(uint32_t timeout_ms) {
+    virtual nvenc_event_wait_result wait_for_async_event(void *event, uint32_t timeout_ms) {
       return {};
     }
 
     /**
-     * @brief Optional. Mark the end of the GPU work that writes the input surface, immediately
-     *        before an asynchronous picture is submitted. Diagnostics only: never wait or flush.
+     * @brief Optional. Mark the end of the GPU work that writes picture slot `slot`'s input,
+     *        immediately before its asynchronous picture is submitted. Submitting thread only;
+     *        never wait.
      */
-    virtual void mark_input_producer_end() {}
+    virtual void mark_input_producer_end(unsigned slot) {}
 
     /**
-     * @brief Optional. Non-blocking check of the point marked above. Polled only after a slow
-     *        picture, to separate a late input producer from a slow encoder.
+     * @brief Optional. Non-blocking check of slot `slot`'s point marked above, from the retrieving
+     *        thread. Polled only after a slow picture, to separate a late input producer from a
+     *        slow encoder.
      */
-    virtual input_producer_state poll_input_producer() {
+    virtual input_producer_state poll_input_producer(unsigned slot) {
       return input_producer_state::unknown;
     }
 
@@ -228,46 +294,64 @@ namespace nvenc {
     } encoder_params;
 
     nvenc_hdr_metadata_t hdr_metadata;
-    std::string last_nvenc_error_string;
+    // Per thread: a retrieving thread reports its own failures while the submitting one runs.
+    static thread_local std::string last_nvenc_error_string;
 
     // Derived classes set these variables
     void *device = nullptr;  ///< Platform-specific handle of encoding device.
                              ///< Should be set in constructor or `init_library()`.
     std::shared_ptr<NV_ENCODE_API_FUNCTION_LIST> nvenc;  ///< Function pointers list produced by `NvEncodeAPICreateInstance()`.
                                                          ///< Should be set in `init_library()`.
-    NV_ENC_REGISTERED_PTR registered_input_buffer = nullptr;  ///< Platform-specific input surface registered with `NvEncRegisterResource()`.
-                                                              ///< Should be set in `create_and_register_input_buffer()`.
-    void *async_event_handle = nullptr;  ///< (optional) Platform-specific handle of event object event.
+    std::array<NV_ENC_REGISTERED_PTR, max_pipeline_depth> registered_input_buffers {};  ///< Each picture slot's input registered with `NvEncRegisterResource()`.
+                                                                                        ///< Should be set in `create_and_register_input_buffer()`.
+    void *async_event_handle = nullptr;  ///< (optional) Platform-specific handle of event object event; slot 0's completion event.
                                          ///< Can be set in constructor or `init_library()`, must override `wait_for_async_event()`.
 
   private:
-    NV_ENC_OUTPUT_PTR output_bitstream = nullptr;
-    bool async_event_registered = false;
+    enum class input_phase_t {
+      unmapped,
+      mapped,  ///< Mapped and not in flight: before its submission or after its retrieval.
+      submitted,
+      completion_seen,
+      locked
+    };
+
+    // One picture in flight. The submitting thread owns an unmapped or mapped slot and the
+    // retrieving thread a submitted one; `phase` hands it over (release/acquire).
+    struct picture_slot_t {
+      NV_ENC_OUTPUT_PTR output_bitstream = nullptr;
+      void *completion_event = nullptr;
+      bool event_registered = false;
+      NV_ENC_INPUT_PTR mapped_input = nullptr;
+      std::atomic<input_phase_t> phase {input_phase_t::unmapped};
+      uint64_t frame_index = 0;
+      bool after_ref_frame_invalidation = false;
+    };
+
+    std::array<picture_slot_t, max_pipeline_depth> slots;
+    unsigned pipeline_depth_ = 1;
+    unsigned next_submit_slot = 0;  ///< Submitting thread.
+    unsigned next_retrieve_slot = 0;  ///< Retrieving thread.
+    std::atomic<unsigned> in_flight_ {0};
     void *flush_event_handle = nullptr;
     bool flush_event_registered = false;
     bool flush_submitted = false;
     bool flush_completed = false;
     bool encoder_used = false;
-    bool cleanup_blocked = false;
+    std::atomic<bool> cleanup_blocked {false};  ///< Set by either thread; cleared by teardown.
     bool teardown_wait_failure_logged = false;
-    NV_ENC_INPUT_PTR mapped_input = nullptr;
-    enum class input_phase_t {
-      unmapped,
-      mapped,
-      submitted,
-      completion_seen,
-      locked
-    };
-    input_phase_t input_phase = input_phase_t::unmapped;
 
     void block_new_encoders();
     bool cleanup_succeeded(NVENCSTATUS status, const char *operation);
-    bool release_completed_input();
+    bool unlock_slot(picture_slot_t &slot);
+    bool unmap_slot(picture_slot_t &slot);
+    bool release_completed_input(picture_slot_t &slot);
     bool submit_flush();
+    bool drain_slot(picture_slot_t &slot);
     bool drain_input();
     bool release_encoder_resources();
     bool teardown_wait_ready(const nvenc_event_wait_result &result, const char *operation);
-    bool wait_for_frame_completion(uint64_t frame_index);
+    bool wait_for_frame_completion(unsigned slot_index);
 
     struct stage_diagnostics_t {
       logging::time_delta_periodic_logger input_map {info, "Video NVENC: input map CPU"};
@@ -280,7 +364,8 @@ namespace nvenc {
     };
 
     std::optional<stage_diagnostics_t> stage_diagnostics;
-    frame_timing_t last_frame_timing_;
+    std::chrono::nanoseconds last_submit_ {};  ///< Submitting thread.
+    std::chrono::nanoseconds last_completion_wait_ {};  ///< Retrieving thread.
 
     struct {
       uint64_t last_encoded_frame_index = 0;

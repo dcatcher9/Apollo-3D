@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <deque>
 #include <memory>
 #include <optional>
 #include <string>
@@ -411,6 +412,23 @@ namespace {
     std::chrono::nanoseconds max_gap {};  ///< Between new frames.
     std::chrono::nanoseconds mean_age {};  ///< From a claimed frame's Present to its claim.
     std::chrono::nanoseconds mean_claim_delay {}, max_claim_delay {};  ///< From its fence completion.
+    std::chrono::nanoseconds mean_encode {};  ///< From a new frame's claim to its packet.
+    std::chrono::nanoseconds mean_present_to_packet {};  ///< From a new frame's Present to its packet.
+    unsigned max_in_flight = 0;
+  };
+
+  // The encoder behind encode_run(). Unset: the encode loop blocks for conversion and NVENC
+  // (8.4-10.4 ms), the model the rules above were tuned against. Set: the conversion and picture
+  // submission cost the loop `cpu`; the picture completes `latency_low_ms`-`latency_high_ms` after
+  // its submission (the conversion's GPU work queued behind the game's, then NVENC), in order and
+  // at least `engine` after the previous one. With `depth` 1 the loop waits for that completion
+  // (nvenc_base::encode_frame()); with more, the loop submits another picture at once and waits only
+  // when `depth` are in flight (encode_pipeline_t), and the packet leaves when its picture completes.
+  struct encoder_model_t {
+    unsigned depth = 1;
+    double latency_low_ms = 0, latency_high_ms = 0;
+    std::chrono::nanoseconds cpu {400us};
+    std::chrono::nanoseconds engine {5ms};
   };
 
   // The export ring and encode_run() while an independent provider's export is live, stepped every
@@ -424,7 +442,7 @@ namespace {
   // converts once due, a due keepalive repeats the input, and anything else encodes nothing.
   // Waits take as long as they really do with this toolchain: a condition-variable wait that
   // nothing notifies ends at a Windows scheduler tick (windows_tick).
-  export_ring_result_t simulate_export_ring(game_frames_e mode, fence_wake_e wake, loop_rules_e rules, std::chrono::nanoseconds duration = 4s) {
+  export_ring_result_t simulate_export_ring(game_frames_e mode, fence_wake_e wake, loop_rules_e rules, std::chrono::nanoseconds duration = 4s, std::optional<encoder_model_t> encoder = std::nullopt) {
     constexpr auto stream = 11111111ns;  // 90 fps
     constexpr auto threshold = stream / 4;
     constexpr auto keepalive = 55555555ns;  // The 18 fps minimum of a 90 fps stream.
@@ -443,6 +461,9 @@ namespace {
     };
 
     sim_jitter_t jitter;
+    sim_jitter_t encode_jitter {54321};  // Its own sequence: the game's arrivals stay identical.
+    std::deque<std::chrono::nanoseconds> in_flight;  // Completion times, oldest first.
+    std::chrono::nanoseconds last_completion {}, total_encode {}, total_present_to_packet {};
     const auto presents = game_presents(mode, duration, jitter);
     std::vector<std::chrono::nanoseconds> captures;
     for (auto capture = jitter.between(0.0, 11.1); capture < duration; capture += jitter.between(10.1, 12.1)) {
@@ -613,8 +634,32 @@ namespace {
         } else {
           ++result.repeats;
         }
-        blocked_until = now + 8400us + 1ms * (encodes++ % 3);  // Conversion and NVENC: 8.4-10.4 ms.
+        if (!encoder) {
+          blocked_until = now + 8400us + 1ms * (encodes++ % 3);  // Conversion and NVENC: 8.4-10.4 ms.
+          last_encode = blocked_until;
+          continue;
+        }
+        // Retired pictures have left as packets.
+        while (!in_flight.empty() && in_flight.front() <= now) {
+          in_flight.pop_front();
+        }
+        auto submitted = now + encoder->cpu;
+        if (in_flight.size() >= encoder->depth) {
+          submitted = std::max(submitted, in_flight.front());  // acquire(): wait for the oldest.
+          in_flight.pop_front();
+        }
+        const auto completion = std::max(submitted + encode_jitter.between(encoder->latency_low_ms, encoder->latency_high_ms), last_completion + encoder->engine);
+        last_completion = completion;
+        in_flight.push_back(completion);
+        result.max_in_flight = std::max(result.max_in_flight, static_cast<unsigned>(in_flight.size()));
+        if (selected >= 0) {
+          total_encode += completion - now;
+          total_present_to_packet += completion - present_of[held];
+        }
+        // One picture at a time: encode_frame() returns once it completed.
+        blocked_until = encoder->depth == 1 ? completion : submitted;
         last_encode = blocked_until;
+        ++encodes;
       }
     }
     const double seconds = std::chrono::duration<double>(duration).count();
@@ -625,6 +670,8 @@ namespace {
     result.new_frames = new_frames / seconds;
     result.mean_age = new_frames ? total_age / new_frames : 0ns;
     result.mean_claim_delay = new_frames ? total_claim_delay / new_frames : 0ns;
+    result.mean_encode = new_frames ? total_encode / new_frames : 0ns;
+    result.mean_present_to_packet = new_frames ? total_present_to_packet / new_frames : 0ns;
     return result;
   }
 
@@ -698,6 +745,78 @@ namespace {
     EXPECT_GT(head.mean_claim_delay, 4ms);  // Each claim waited for the control poll's tick.
   }
 
+  void print_encoder_model(const char *label, game_frames_e mode, const export_ring_result_t &result) {
+    constexpr const char *modes[] {"FG off", "FG 2x", "FG 4x", "40 fps"};
+    const auto ms = [](std::chrono::nanoseconds value) {
+      return std::chrono::duration<double, std::milli>(value).count();
+    };
+    std::printf(
+      "[ MEASURE  ] %s, %s: new %.1f/s repeats %d, at most %u in flight, claim to packet mean %.2f ms, Present to packet mean %.2f ms, "
+      "mean claim age %.1f ms, max gap %.1f ms\n",
+      label,
+      modes[static_cast<int>(mode)],
+      result.new_frames,
+      result.repeats,
+      result.max_in_flight,
+      ms(result.mean_encode),
+      ms(result.mean_present_to_packet),
+      ms(result.mean_age),
+      ms(result.max_gap)
+    );
+  }
+
+  TEST(RemoteEncodeProviderPacingTest, PicturesInFlightTakeEveryStreamFrameAtFrameGenerationEncodeTimes) {
+    // Live 10-06 (Stellar Blade 4K HDR, 90 fps stream), after the loop's waits became exact: with
+    // FG off the host took 80-90 new frames/s, with FG on only 55-71/s, while encoding filled 10.4
+    // to 17.2 s of every 20 s. NVENC's completion wait averaged 8.5-12.2 ms per picture (about 5 ms
+    // uncontended at 7680x2160 10-bit HEVC; the rest is the conversion's GPU work queued behind the
+    // game's), 5.4 ms at least and with a long tail. encode_frame() submitted a picture and waited
+    // for it, so the next frame could not even be converted meanwhile: one picture per encode.
+    struct encode_times_t {
+      const char *label;
+      double low_ms, high_ms;
+      double serial_low, serial_high;  ///< New frames/s one picture at a time.
+    };
+
+    for (const auto &times : {
+           encode_times_t {"5.5-22 ms (the live FG-on spread)", 5.5, 22.0, 60.0, 72.0},
+           encode_times_t {"12 ms", 12.0, 12.0, 76.0, 81.0},  // At most one per 12.4 ms.
+         }) {
+      for (const auto mode : {game_frames_e::fg_2x, game_frames_e::fg_4x}) {
+        SCOPED_TRACE(times.label);
+        const auto serial = simulate_export_ring(mode, fence_wake_e::prompt, loop_rules_e::production, 4s, encoder_model_t {1, times.low_ms, times.high_ms});
+        const auto pipelined = simulate_export_ring(mode, fence_wake_e::prompt, loop_rules_e::production, 4s, encoder_model_t {2, times.low_ms, times.high_ms});
+        std::printf("[ MEASURE  ] encodes of %s:\n", times.label);
+        print_encoder_model("  one picture at a time", mode, serial);
+        print_encoder_model("  two pictures in flight", mode, pipelined);
+        EXPECT_GE(serial.new_frames, times.serial_low);
+        EXPECT_LE(serial.new_frames, times.serial_high);
+        EXPECT_GE(pipelined.new_frames, 87.5);  // Every stream frame, as with FG off.
+        EXPECT_LE(pipelined.new_frames, 90.5);
+        EXPECT_EQ(pipelined.repeats, 0);
+        EXPECT_LT(pipelined.max_gap, 2 * 11111111ns);
+        EXPECT_EQ(pipelined.max_in_flight, 2u);
+        // A frame starts encoding as soon as it is converted and its packet leaves as soon as its
+        // picture completes. Only NVENC's own order remains: a quick picture right behind a slow
+        // one completes after it, a fraction of a millisecond on average.
+        EXPECT_LE(pipelined.mean_encode, serial.mean_encode + 1ms);
+        EXPECT_LE(pipelined.mean_present_to_packet, serial.mean_present_to_packet + 500us);
+      }
+    }
+  }
+
+  TEST(RemoteEncodeProviderPacingTest, PicturesInFlightChangeNothingWhenEncodesFitTheStreamInterval) {
+    for (const auto mode : {game_frames_e::fg_off, game_frames_e::slow}) {
+      const auto serial = simulate_export_ring(mode, fence_wake_e::prompt, loop_rules_e::production, 4s, encoder_model_t {1, 5.0, 8.0});
+      const auto pipelined = simulate_export_ring(mode, fence_wake_e::prompt, loop_rules_e::production, 4s, encoder_model_t {2, 5.0, 8.0});
+      print_encoder_model("one picture at a time, 5-8 ms encodes", mode, serial);
+      print_encoder_model("two pictures in flight, 5-8 ms encodes", mode, pipelined);
+      EXPECT_GE(pipelined.new_frames, serial.new_frames - 0.5);
+      EXPECT_EQ(pipelined.repeats, 0);
+      EXPECT_LE(pipelined.mean_encode, serial.mean_encode + 500us);
+    }
+  }
+
   TEST(RemoteEncodeProviderPacingTest, ProviderHoldSleepsExactlyToAPendingFramesPollTarget) {
     constexpr std::chrono::nanoseconds stream {11111111ns};
     constexpr std::chrono::nanoseconds keepalive {55555555ns};
@@ -718,15 +837,37 @@ namespace {
     stats.waited(1ms, 15600us);  // Ran past its bound to the scheduler tick.
     stats.converted(170us);
     stats.encoded(true, 9600us, 300us, 9100us);
+    stats.pictures(0, 1, 9600us, 9600us);
     stats.encoded(false, 5ms, 200us, 4600us);
+    stats.pictures(0, 1, 5ms, 5ms);
     const auto line = stats.report(1s);
     EXPECT_NE(line.find("2 iterations in 1.0 s; 1 new-content and 1 repeated-content encodes"), std::string::npos) << line;
     EXPECT_NE(line.find("holding 2.0 ms in 1 exact holds (requested 1.5 ms, overshoot avg 0.50 max 0.50 ms)"), std::string::npos) << line;
     EXPECT_NE(line.find("waiting 18.6 ms in 2 image waits (requested 56.0 ms; 1 ran to their bound, overshoot avg 14.60 max 14.60 ms)"), std::string::npos) << line;
-    EXPECT_NE(line.find("converting 0.2 ms in 1 conversions; encoding 14.6 ms (NVENC submit 0.5 ms, completion wait 13.7 ms)"), std::string::npos) << line;
+    EXPECT_NE(line.find("converting 0.2 ms in 1 conversions; encoding 14.6 ms (NVENC submit 0.5 ms, completion wait 13.7 ms; "
+                        "up to 1 picture in flight, 0 submitted behind another, submission to packet avg 7.30 max 9.60 ms)"),
+              std::string::npos)
+      << line;
     EXPECT_NE(line.find("loop work 964.6 ms"), std::string::npos) << line;
     stats.reset();
     EXPECT_EQ(stats.iterations(), 0u);
+  }
+
+  TEST(RemoteEncodeLoopStatsTest, ReportsPicturesInFlightAndTheirSubmissionToPacketTime) {
+    // With two pictures in flight the loop spends only the submission (and any wait for the oldest
+    // picture) in its encode step; the retrieving thread reports each picture's whole encode.
+    video::detail::encode_loop_stats_t stats;
+    stats.set_pipeline_depth(2);
+    stats.encoded(true, 500us, 300us, 0us);
+    stats.encoded(true, 2500us, 300us, 2000us);
+    stats.pictures(1, 2, 24ms, 13ms);
+    const auto line = stats.report(1s);
+    EXPECT_NE(line.find("encoding 3.0 ms (NVENC submit 0.6 ms, completion wait 2.0 ms; up to 2 pictures in flight, 1 submitted behind another, "
+                        "submission to packet avg 12.00 max 13.00 ms)"),
+              std::string::npos)
+      << line;
+    stats.reset();
+    EXPECT_NE(stats.report(1s).find("up to 2 pictures in flight, 0 submitted behind another"), std::string::npos);
   }
 
   TEST(RemoteEncodeLoopStatsTest, AReconvertedUnchangedExportIsARepeatedContentEncode) {

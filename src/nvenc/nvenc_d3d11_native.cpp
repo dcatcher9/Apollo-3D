@@ -29,28 +29,41 @@ namespace nvenc {
   }
 
   bool nvenc_d3d11_native::create_and_register_input_buffer() {
+    D3D11_TEXTURE2D_DESC desc = {};
+    desc.Width = encoder_params.width;
+    desc.Height = encoder_params.height;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = dxgi_format_from_nvenc_format(encoder_params.buffer_format);
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_RENDER_TARGET;
     if (!d3d_input_texture) {
-      D3D11_TEXTURE2D_DESC desc = {};
-      desc.Width = encoder_params.width;
-      desc.Height = encoder_params.height;
-      desc.MipLevels = 1;
-      desc.ArraySize = 1;
-      desc.Format = dxgi_format_from_nvenc_format(encoder_params.buffer_format);
-      desc.SampleDesc.Count = 1;
-      desc.Usage = D3D11_USAGE_DEFAULT;
-      desc.BindFlags = D3D11_BIND_RENDER_TARGET;
       if (d3d_device->CreateTexture2D(&desc, nullptr, &d3d_input_texture) != S_OK) {
         BOOST_LOG(error) << "NvEnc: couldn't create input texture";
         return false;
       }
     }
 
-    if (!registered_input_buffer) {
+    // One picture at a time encodes the conversion target itself. With pictures in flight each
+    // has its own input, filled from the target at submission (prepare_input()), so converting
+    // the next frame never writes a surface NVENC is still reading.
+    const auto depth = pipeline_depth();
+    for (unsigned slot = 0; slot < depth; ++slot) {
+      if (depth > 1 && !picture_inputs[slot]) {
+        if (d3d_device->CreateTexture2D(&desc, nullptr, &picture_inputs[slot]) != S_OK) {
+          BOOST_LOG(error) << "NvEnc: couldn't create the input texture of picture " << slot;
+          return false;
+        }
+      }
+      if (registered_input_buffers[slot]) {
+        continue;
+      }
       NV_ENC_REGISTER_RESOURCE register_resource = {NV_ENC_REGISTER_RESOURCE_VER};
       register_resource.resourceType = NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
       register_resource.width = encoder_params.width;
       register_resource.height = encoder_params.height;
-      register_resource.resourceToRegister = d3d_input_texture.GetInterfacePtr();
+      register_resource.resourceToRegister = depth > 1 ? picture_inputs[slot].GetInterfacePtr() : d3d_input_texture.GetInterfacePtr();
       register_resource.bufferFormat = encoder_params.buffer_format;
       register_resource.bufferUsage = NV_ENC_INPUT_IMAGE;
 
@@ -59,10 +72,22 @@ namespace nvenc {
         return false;
       }
 
-      registered_input_buffer = register_resource.registeredResource;
+      registered_input_buffers[slot] = register_resource.registeredResource;
     }
 
     return true;
+  }
+
+  void nvenc_d3d11_native::prepare_input(unsigned slot) {
+    if (pipeline_depth() == 1 || slot >= picture_inputs.size() || !picture_inputs[slot]) {
+      return;
+    }
+    if (!copy_context) {
+      d3d_device->GetImmediateContext(&copy_context);
+    }
+    // Ordered on the immediate context after the conversion that wrote the target and before the
+    // next one, so the copy needs no other synchronization.
+    copy_context->CopyResource(picture_inputs[slot], d3d_input_texture);
   }
 
 }  // namespace nvenc

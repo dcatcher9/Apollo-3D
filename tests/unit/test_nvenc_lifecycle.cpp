@@ -199,7 +199,8 @@ namespace {
         return false;
       }
       input_owned = true;
-      registered_input_buffer = this;
+      EXPECT_EQ(pipeline_depth(), 1u);
+      registered_input_buffers[0] = this;
       return true;
     }
 
@@ -216,15 +217,17 @@ namespace {
       return fake_now;
     }
 
-    void mark_input_producer_end() override {
+    void mark_input_producer_end(unsigned slot) override {
       std::lock_guard lock(mutex);
+      EXPECT_EQ(slot, 0u);
       EXPECT_TRUE(input_mapped);
       EXPECT_FALSE(picture_pending);
       operations.emplace_back("producer-mark");
     }
 
-    nvenc::input_producer_state poll_input_producer() override {
+    nvenc::input_producer_state poll_input_producer(unsigned slot) override {
       std::lock_guard lock(mutex);
+      EXPECT_EQ(slot, 0u);
       EXPECT_TRUE(picture_pending);
       operations.emplace_back("producer-poll");
       if (producer_states.empty()) {
@@ -237,8 +240,9 @@ namespace {
       return state;
     }
 
-    nvenc::nvenc_event_wait_result wait_for_async_event(std::uint32_t timeout_ms) override {
+    nvenc::nvenc_event_wait_result wait_for_async_event(void *event, std::uint32_t timeout_ms) override {
       std::unique_lock lock(mutex);
+      EXPECT_EQ(event, async_event_handle);
       ++frame_wait_calls;
       frame_wait_timeouts.push_back(timeout_ms);
       EXPECT_TRUE(event_registered);

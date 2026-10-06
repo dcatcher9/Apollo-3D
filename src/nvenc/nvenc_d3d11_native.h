@@ -24,9 +24,12 @@ namespace nvenc {
 
   private:
     bool create_and_register_input_buffer() override;
+    void prepare_input(unsigned slot) override;
 
     const ID3D11DevicePtr d3d_device;
-    ID3D11Texture2DPtr d3d_input_texture;
+    ID3D11Texture2DPtr d3d_input_texture;  ///< Conversion target; registered itself at depth 1.
+    std::array<ID3D11Texture2DPtr, max_pipeline_depth> picture_inputs;  ///< Each picture's copy at depth 2.
+    ID3D11DeviceContextPtr copy_context;
   };
 
 }  // namespace nvenc

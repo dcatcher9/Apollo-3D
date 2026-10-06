@@ -243,7 +243,9 @@ namespace {
     const auto stream_source = read_source_file(SUNSHINE_SOURCE_DIR "/src/stream.cpp");
     ASSERT_FALSE(video_source.empty());
     ASSERT_FALSE(stream_source.empty());
-    EXPECT_NE(video_source.find("packet->processing_started = processing_started;"), std::string::npos);
+    // Captured with the picture's submission and carried to its packet, on whichever thread retrieves it.
+    EXPECT_NE(video_source.find("frame.processing_started = processing_started;"), std::string::npos);
+    EXPECT_NE(video_source.find("packet->processing_started = frame.processing_started;"), std::string::npos);
     EXPECT_NE(video_source.find("processing_started.reset();"), std::string::npos);
     EXPECT_NE(video_source.find("processing_started = std::chrono::steady_clock::now();"), std::string::npos);
     EXPECT_NE(video_source.find("bool first_encoder_output = true;"), std::string::npos);
@@ -8418,7 +8420,7 @@ namespace {
     }
 
     nvenc::nvenc_event_wait_result wait_picture(uint32_t timeout_ms = 0) {
-      return wait_for_async_event(timeout_ms);
+      return wait_for_async_event(async_event_handle, timeout_ms);
     }
 
     HANDLE make_flush_event() {
@@ -8600,7 +8602,7 @@ TEST(NvencBitrateReconfigureTest, FailureKeepsRequestOnExistingRebuildPath) {
     guard
   );
   const auto driver_call = video_source.find(
-    "if (!session->reconfigure_bitrate(requested->bitrate))",
+    "if ((pipeline && !pipeline->drain()) || !session->reconfigure_bitrate(requested->bitrate))",
     restore
   );
   const auto successful_ack = video_source.find(

@@ -554,6 +554,19 @@ namespace video {
     std::shared_ptr<encode_wake_t> encode_wake;
   };
 
+  /** Game 3D, and Host SBS fed by the ReShade export, convert an independent provider's frames as
+   *  they finish rather than at stream cadence (encode_run()). */
+  inline bool converts_independent_provider(const config_t &config) noexcept {
+    return is_game_mode(config.sbs_mode) || (config.sbs_mode == SBS_AI && config.sbs_config.reshade);
+  }
+
+  /** NVENC pictures that may be in flight at once. An independent provider's next frame converts and
+   *  starts encoding while the previous picture still encodes; every other stream encodes one
+   *  picture at a time, as before. */
+  inline unsigned nvenc_pipeline_depth(const config_t &config) noexcept {
+    return converts_independent_provider(config) ? 2u : 1u;
+  }
+
   // Preserve standard NTSC rates instead of approximating them as finite decimal fractions.
   struct rational_t {
     int num;

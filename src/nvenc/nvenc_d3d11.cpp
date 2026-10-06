@@ -102,8 +102,18 @@ namespace nvenc {
     return result;
   }
 
-  nvenc_event_wait_result nvenc_d3d11::wait_for_async_event(uint32_t timeout_ms) {
-    return wait_for_event(async_event_handle, timeout_ms);
+  void *nvenc_d3d11::create_completion_event(unsigned slot) {
+    if (slot == 0 || slot >= owned_completion_events.size()) {
+      return nullptr;
+    }
+    if (!owned_completion_events[slot]) {
+      owned_completion_events[slot].reset(CreateEvent(nullptr, FALSE, FALSE, nullptr));
+    }
+    return owned_completion_events[slot].get();
+  }
+
+  nvenc_event_wait_result nvenc_d3d11::wait_for_async_event(void *event, uint32_t timeout_ms) {
+    return wait_for_event(event, timeout_ms);
   }
 
   void *nvenc_d3d11::create_flush_event() {
@@ -120,40 +130,55 @@ namespace nvenc {
   void nvenc_d3d11::release_async_event() {
     async_event_handle = nullptr;
     owned_async_event.reset();
+    for (auto &event : owned_completion_events) {
+      event.reset();
+    }
     owned_flush_event.reset();
   }
 
-  void nvenc_d3d11::mark_input_producer_end() {
-    producer_marked = false;
-    if (producer_query_unavailable || !device || device_type != NV_ENC_DEVICE_TYPE_DIRECTX) {
+  void nvenc_d3d11::mark_input_producer_end(unsigned slot) {
+    if (slot >= producer_marks.size()) {
       return;
     }
-    if (!producer_query) {
+    producer_marks[slot] = 0;
+    if (producer_fence_unavailable || !device || device_type != NV_ENC_DEVICE_TYPE_DIRECTX) {
+      return;
+    }
+    if (!producer_fence) {
       auto d3d_device = static_cast<ID3D11Device *>(device);
-      const D3D11_QUERY_DESC desc {D3D11_QUERY_EVENT, 0};
-      if (FAILED(d3d_device->CreateQuery(&desc, &producer_query)) || !producer_query) {
-        producer_query_unavailable = true;
-        producer_query = nullptr;
+      ID3D11Device5Ptr device5;
+      ID3D11DeviceContextPtr context;
+      d3d_device->GetImmediateContext(&context);
+      const bool created = SUCCEEDED(d3d_device->QueryInterface(IID_ID3D11Device5, reinterpret_cast<void **>(&device5))) && device5 && context &&
+                           SUCCEEDED(context->QueryInterface(IID_ID3D11DeviceContext4, reinterpret_cast<void **>(&producer_context))) && producer_context &&
+                           SUCCEEDED(device5->CreateFence(0, D3D11_FENCE_FLAG_NONE, IID_ID3D11Fence, reinterpret_cast<void **>(&producer_fence))) && producer_fence;
+      if (!created) {
+        producer_fence_unavailable = true;
+        producer_fence = nullptr;
+        producer_context = nullptr;
         BOOST_LOG(warning) << "NvEnc: input producer diagnostics unavailable; slow pictures cannot name where they waited";
         return;
       }
-      d3d_device->GetImmediateContext(&producer_context);
     }
-    producer_context->End(producer_query);
-    producer_marked = true;
+    if (FAILED(producer_context->Signal(producer_fence, producer_value + 1))) {
+      return;
+    }
+    // Submit the marker with the work before it, so that "pending" means unfinished GPU work
+    // rather than commands the CPU never submitted. The picture submission follows at once.
+    producer_context->Flush();
+    producer_marks[slot] = ++producer_value;
   }
 
-  input_producer_state nvenc_d3d11::poll_input_producer() {
-    if (!producer_marked || !producer_query || !producer_context) {
+  input_producer_state nvenc_d3d11::poll_input_producer(unsigned slot) {
+    // Fence reads are free-threaded; the immediate context is the submitting thread's alone.
+    if (slot >= producer_marks.size() || !producer_marks[slot] || !producer_fence) {
       return input_producer_state::unknown;
     }
-    // Only a slow picture reaches this. Flags 0 may flush a still-queued marker so that
-    // "pending" means unfinished GPU work rather than commands the CPU never submitted.
-    const auto status = producer_context->GetData(producer_query, nullptr, 0, 0);
-    if (status == S_OK) {
-      return input_producer_state::complete;
+    const auto completed = producer_fence->GetCompletedValue();
+    if (completed == UINT64_MAX) {
+      return input_producer_state::unknown;  // Device removed: the wait itself reports it.
     }
-    return status == S_FALSE ? input_producer_state::pending : input_producer_state::unknown;
+    return completed >= producer_marks[slot] ? input_producer_state::complete : input_producer_state::pending;
   }
 
 }  // namespace nvenc

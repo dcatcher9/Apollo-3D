@@ -137,6 +137,8 @@ namespace {
 
 namespace nvenc {
 
+  thread_local std::string nvenc_base::last_nvenc_error_string;
+
   std::optional<int> max_encode_width_for_codec(int video_format) {
     if (video_format < 0 || video_format >= static_cast<int>(observed_codec_max_widths.size())) {
       return std::nullopt;
@@ -230,7 +232,7 @@ namespace nvenc {
     NV_ENC_BUFFER_FORMAT buffer_format,
     const std::optional<SS_HDR_METADATA> &hdr_metadata
   ) {
-    if (cleanup_blocked || blocked_encoder_cleanups.load(std::memory_order_acquire)) {
+    if (cleanup_blocked.load(std::memory_order_acquire) || blocked_encoder_cleanups.load(std::memory_order_acquire)) {
       BOOST_LOG(error) << "NvEnc: encoder cleanup is still pending; refusing a replacement session";
       return false;
     }
@@ -560,22 +562,43 @@ namespace nvenc {
       return false;
     }
 
+    // Each picture in flight needs its own input surface, bitstream and completion event; NVENC
+    // signals the events in submission order. Without asynchronous encoding there is one.
+    pipeline_depth_ = 1;
+    slots[0].completion_event = async_event_handle;
     if (async_event_handle) {
+      const auto requested_depth = std::clamp(video::nvenc_pipeline_depth(client_config), 1u, max_pipeline_depth);
+      while (pipeline_depth_ < requested_depth) {
+        slots[pipeline_depth_].completion_event = create_completion_event(pipeline_depth_);
+        if (!slots[pipeline_depth_].completion_event) {
+          break;
+        }
+        ++pipeline_depth_;
+      }
+      if (pipeline_depth_ < requested_depth) {
+        BOOST_LOG(warning) << "NvEnc: cannot create a completion event for every picture in flight; encoding "
+                           << pipeline_depth_ << " at a time";
+      }
+    }
+
+    for (unsigned slot = 0; slot < pipeline_depth_ && async_event_handle; ++slot) {
       NV_ENC_EVENT_PARAMS event_params = {NV_ENC_EVENT_PARAMS_VER};
-      event_params.completionEvent = async_event_handle;
+      event_params.completionEvent = slots[slot].completion_event;
       if (nvenc_failed(nvenc->nvEncRegisterAsyncEvent(encoder, &event_params))) {
         BOOST_LOG(error) << "NvEnc: NvEncRegisterAsyncEvent() failed: " << last_nvenc_error_string;
         return false;
       }
-      async_event_registered = true;
+      slots[slot].event_registered = true;
     }
 
-    NV_ENC_CREATE_BITSTREAM_BUFFER create_bitstream_buffer = {NV_ENC_CREATE_BITSTREAM_BUFFER_VER};
-    if (nvenc_failed(nvenc->nvEncCreateBitstreamBuffer(encoder, &create_bitstream_buffer))) {
-      BOOST_LOG(error) << "NvEnc: NvEncCreateBitstreamBuffer() failed: " << last_nvenc_error_string;
-      return false;
+    for (unsigned slot = 0; slot < pipeline_depth_; ++slot) {
+      NV_ENC_CREATE_BITSTREAM_BUFFER create_bitstream_buffer = {NV_ENC_CREATE_BITSTREAM_BUFFER_VER};
+      if (nvenc_failed(nvenc->nvEncCreateBitstreamBuffer(encoder, &create_bitstream_buffer))) {
+        BOOST_LOG(error) << "NvEnc: NvEncCreateBitstreamBuffer() failed: " << last_nvenc_error_string;
+        return false;
+      }
+      slots[slot].output_bitstream = create_bitstream_buffer.bitstreamBuffer;
     }
-    output_bitstream = create_bitstream_buffer.bitstreamBuffer;
 
     if (!create_and_register_input_buffer()) {
       return false;
@@ -619,6 +642,9 @@ namespace nvenc {
       if (enc_config.rcParams.enableAQ) {
         extra += " spatial-aq";
       }
+      if (pipeline_depth_ > 1) {
+        extra += std::format(" {} pictures in flight", pipeline_depth_);
+      }
 
       BOOST_LOG(info) << "NvEnc: created encoder " << video_format_string << quality_preset_string_from_guid(init_params.presetGUID) << extra;
     }
@@ -644,8 +670,7 @@ namespace nvenc {
   }
 
   void nvenc_base::block_new_encoders() {
-    if (!cleanup_blocked) {
-      cleanup_blocked = true;
+    if (!cleanup_blocked.exchange(true, std::memory_order_acq_rel)) {
       blocked_encoder_cleanups.fetch_add(1, std::memory_order_acq_rel);
       // Admission reopens once this session's teardown drains the submitted picture (normally
       // well under a second); retain_failed_encoder_until_exit() reports the terminal case.
@@ -658,7 +683,7 @@ namespace nvenc {
     if (status == NV_ENC_SUCCESS) {
       return true;
     }
-    if (!cleanup_blocked) {
+    if (!cleanup_blocked.load(std::memory_order_acquire)) {
       nvenc_failed(status);
       BOOST_LOG(error) << "NvEnc: " << operation << " failed: " << last_nvenc_error_string;
     }
@@ -666,39 +691,45 @@ namespace nvenc {
     return false;
   }
 
-  bool nvenc_base::release_completed_input() {
-    if (input_phase == input_phase_t::locked) {
-      if (stage_diagnostics) {
-        stage_diagnostics->bitstream_unlock.first_point_now();
-      }
-      const auto status = nvenc->nvEncUnlockBitstream(encoder, output_bitstream);
-      if (status == NV_ENC_SUCCESS) {
-        input_phase = input_phase_t::mapped;
-      }
-      if (stage_diagnostics) {
-        stage_diagnostics->bitstream_unlock.second_point_now_and_log();
-      }
-      if (!cleanup_succeeded(status, "NvEncUnlockBitstream()")) {
-        return false;
-      }
+  bool nvenc_base::unlock_slot(picture_slot_t &slot) {
+    if (slot.phase.load(std::memory_order_acquire) != input_phase_t::locked) {
+      return true;
     }
-    if (input_phase == input_phase_t::mapped) {
-      if (stage_diagnostics) {
-        stage_diagnostics->input_unmap.first_point_now();
-      }
-      const auto status = nvenc->nvEncUnmapInputResource(encoder, mapped_input);
-      if (status == NV_ENC_SUCCESS) {
-        mapped_input = nullptr;
-        input_phase = input_phase_t::unmapped;
-      }
-      if (stage_diagnostics) {
-        stage_diagnostics->input_unmap.second_point_now_and_log();
-      }
-      if (!cleanup_succeeded(status, "NvEncUnmapInputResource()")) {
-        return false;
-      }
+    if (stage_diagnostics) {
+      stage_diagnostics->bitstream_unlock.first_point_now();
     }
-    return input_phase == input_phase_t::unmapped;
+    const auto status = nvenc->nvEncUnlockBitstream(encoder, slot.output_bitstream);
+    if (stage_diagnostics) {
+      stage_diagnostics->bitstream_unlock.second_point_now_and_log();
+    }
+    if (!cleanup_succeeded(status, "NvEncUnlockBitstream()")) {
+      return false;
+    }
+    // Hands a retrieved picture's slot back to the submitting thread, which unmaps it on reuse.
+    slot.phase.store(input_phase_t::mapped, std::memory_order_release);
+    return true;
+  }
+
+  bool nvenc_base::unmap_slot(picture_slot_t &slot) {
+    if (slot.phase.load(std::memory_order_acquire) != input_phase_t::mapped) {
+      return slot.phase.load(std::memory_order_acquire) == input_phase_t::unmapped;
+    }
+    if (stage_diagnostics) {
+      stage_diagnostics->input_unmap.first_point_now();
+    }
+    const auto status = nvenc->nvEncUnmapInputResource(encoder, slot.mapped_input);
+    if (status == NV_ENC_SUCCESS) {
+      slot.mapped_input = nullptr;
+      slot.phase.store(input_phase_t::unmapped, std::memory_order_release);
+    }
+    if (stage_diagnostics) {
+      stage_diagnostics->input_unmap.second_point_now_and_log();
+    }
+    return cleanup_succeeded(status, "NvEncUnmapInputResource()");
+  }
+
+  bool nvenc_base::release_completed_input(picture_slot_t &slot) {
+    return unlock_slot(slot) && unmap_slot(slot);
   }
 
   bool nvenc_base::submit_flush() {
@@ -728,24 +759,35 @@ namespace nvenc {
     return true;
   }
 
-  bool nvenc_base::drain_input() {
-    if (input_phase == input_phase_t::submitted) {
-      if (async_event_handle && !teardown_wait_ready(wait_for_async_event(100), "picture completion")) {
+  bool nvenc_base::drain_slot(picture_slot_t &slot) {
+    if (slot.phase.load(std::memory_order_acquire) == input_phase_t::submitted) {
+      if (async_event_handle && !teardown_wait_ready(wait_for_async_event(slot.completion_event, 100), "picture completion")) {
         return false;
       }
-      input_phase = input_phase_t::completion_seen;
+      slot.phase.store(input_phase_t::completion_seen, std::memory_order_release);
     }
-    if (input_phase == input_phase_t::completion_seen) {
+    if (slot.phase.load(std::memory_order_acquire) == input_phase_t::completion_seen) {
       NV_ENC_LOCK_BITSTREAM bitstream {NV_ENC_LOCK_BITSTREAM_VER};
-      bitstream.outputBitstream = output_bitstream;
+      bitstream.outputBitstream = slot.output_bitstream;
       bitstream.doNotWait = 1;
       if (!cleanup_succeeded(nvenc->nvEncLockBitstream(encoder, &bitstream), "teardown bitstream lock")) {
         return false;
       }
       // Teardown discards this failed frame; a successful lock is still required before unmap.
-      input_phase = input_phase_t::locked;
+      slot.phase.store(input_phase_t::locked, std::memory_order_release);
     }
-    return release_completed_input();
+    return release_completed_input(slot);
+  }
+
+  bool nvenc_base::drain_input() {
+    // Teardown runs after any retrieving thread has stopped. Pictures complete and are locked in
+    // submission order, so start with the oldest one still in flight.
+    for (unsigned i = 0; i < pipeline_depth_; ++i) {
+      if (!drain_slot(slots[(next_retrieve_slot + i) % pipeline_depth_])) {
+        return false;
+      }
+    }
+    return true;
   }
 
   bool nvenc_base::teardown_wait_ready(const nvenc_event_wait_result &result, const char *operation) {
@@ -785,11 +827,13 @@ namespace nvenc {
   }
 
   bool nvenc_base::release_encoder_resources() {
-    if (output_bitstream) {
-      if (!cleanup_succeeded(nvenc->nvEncDestroyBitstreamBuffer(encoder, output_bitstream), "NvEncDestroyBitstreamBuffer()")) {
-        return false;
+    for (auto &slot : slots) {
+      if (slot.output_bitstream) {
+        if (!cleanup_succeeded(nvenc->nvEncDestroyBitstreamBuffer(encoder, slot.output_bitstream), "NvEncDestroyBitstreamBuffer()")) {
+          return false;
+        }
+        slot.output_bitstream = nullptr;
       }
-      output_bitstream = nullptr;
     }
     if (flush_event_registered) {
       NV_ENC_EVENT_PARAMS event {NV_ENC_EVENT_PARAMS_VER};
@@ -799,19 +843,23 @@ namespace nvenc {
       }
       flush_event_registered = false;
     }
-    if (async_event_registered) {
-      NV_ENC_EVENT_PARAMS event_params = {NV_ENC_EVENT_PARAMS_VER};
-      event_params.completionEvent = async_event_handle;
-      if (!cleanup_succeeded(nvenc->nvEncUnregisterAsyncEvent(encoder, &event_params), "NvEncUnregisterAsyncEvent()")) {
-        return false;
+    for (auto &slot : slots) {
+      if (slot.event_registered) {
+        NV_ENC_EVENT_PARAMS event_params = {NV_ENC_EVENT_PARAMS_VER};
+        event_params.completionEvent = slot.completion_event;
+        if (!cleanup_succeeded(nvenc->nvEncUnregisterAsyncEvent(encoder, &event_params), "NvEncUnregisterAsyncEvent()")) {
+          return false;
+        }
+        slot.event_registered = false;
       }
-      async_event_registered = false;
     }
-    if (registered_input_buffer) {
-      if (!cleanup_succeeded(nvenc->nvEncUnregisterResource(encoder, registered_input_buffer), "NvEncUnregisterResource()")) {
-        return false;
+    for (auto &registered_input : registered_input_buffers) {
+      if (registered_input) {
+        if (!cleanup_succeeded(nvenc->nvEncUnregisterResource(encoder, registered_input), "NvEncUnregisterResource()")) {
+          return false;
+        }
+        registered_input = nullptr;
       }
-      registered_input_buffer = nullptr;
     }
     if (encoder) {
       if (!cleanup_succeeded(nvenc->nvEncDestroyEncoder(encoder), "NvEncDestroyEncoder()")) {
@@ -823,28 +871,43 @@ namespace nvenc {
     encoder_state = {};
     encoder_params = {};
     hdr_metadata = {};
+    for (auto &slot : slots) {
+      // The derived class owns the events themselves until release_async_event().
+      slot.completion_event = nullptr;
+      slot.mapped_input = nullptr;
+      slot.phase.store(input_phase_t::unmapped, std::memory_order_relaxed);
+      slot.frame_index = 0;
+      slot.after_ref_frame_invalidation = false;
+    }
+    pipeline_depth_ = 1;
+    next_submit_slot = 0;
+    next_retrieve_slot = 0;
+    in_flight_.store(0, std::memory_order_release);
     flush_event_handle = nullptr;
     flush_submitted = false;
     flush_completed = false;
     encoder_used = false;
     teardown_wait_failure_logged = false;
-    if (cleanup_blocked) {
-      cleanup_blocked = false;
+    if (cleanup_blocked.exchange(false, std::memory_order_acq_rel)) {
       blocked_encoder_cleanups.fetch_sub(1, std::memory_order_acq_rel);
     }
     return true;
   }
 
-  bool nvenc_base::wait_for_frame_completion(uint64_t frame_index) {
+  bool nvenc_base::wait_for_frame_completion(unsigned slot_index) {
     using namespace std::chrono_literals;
     // The encoder gets 250 ms from submission, or from its input's completion when the GPU was
     // still producing the input. Such a picture waits on upstream work that no encoder rebuild can
     // speed up: live, the game's first frame-generation enable kept the host's conversion off the
     // GPU for about 300 ms, and failing at 250 ms blocked new encoders and rebuilt the session and
     // the game's export ring. Upstream work is bounded by the GPU timeout horizon (2 s, Windows'
-    // default TDR delay) instead; a hung GPU still ends there or by device removal.
+    // default TDR delay) instead; a hung GPU still ends there or by device removal. With pictures
+    // in flight the budget starts when the wait for this one does: once the previous picture
+    // completed, the encoder's next one.
     constexpr auto encoder_budget = 250ms;
     constexpr auto upstream_limit = 2000ms;
+    const auto &slot = slots[slot_index];
+    const auto frame_index = slot.frame_index;
     const auto started = async_wait_clock_now();
     auto deadline = started + encoder_budget;
     const auto elapsed_ms = [&] {
@@ -853,12 +916,12 @@ namespace nvenc {
     input_producer_progress_t producer;
     const auto observe_producer = [&] {
       const bool was_pending = producer.state == input_producer_state::pending;
-      producer.observe(poll_input_producer(), elapsed_ms());
+      producer.observe(poll_input_producer(slot_index), elapsed_ms());
       if (was_pending || producer.state == input_producer_state::pending) {
         deadline = std::min(started + upstream_limit, std::max(deadline, async_wait_clock_now() + encoder_budget));
       }
     };
-    auto result = wait_for_async_event(100);
+    auto result = wait_for_async_event(slot.completion_event, 100);
     const bool soft_timeout = result.status == nvenc_event_wait_status::timeout && !device_removed(result);
     if (soft_timeout) {
       observe_producer();
@@ -869,15 +932,15 @@ namespace nvenc {
                                "its input is still being produced, so the encoder's 250 ms budget starts when the input completes (2000 ms at most); " :
                                "allowing up to 250 ms total; ")
                          << producer.describe(elapsed_ms());
-      // Stay in this encode call with exactly one mapped/submitted input. Returning to the
-      // caller here would let conversion overwrite the texture still owned by NVENC.
+      // Keep waiting for this same picture: its input stays mapped and NVENC owns it until it
+      // completes, so neither a resubmission nor a conversion into it may happen meanwhile.
       while (result.status == nvenc_event_wait_status::timeout && !device_removed(result)) {
         const auto now = async_wait_clock_now();
         if (now >= deadline) {
           break;
         }
         const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(deadline - now);
-        result = wait_for_async_event(static_cast<std::uint32_t>(std::min(remaining, 25ms).count()));
+        result = wait_for_async_event(slot.completion_event, static_cast<std::uint32_t>(std::min(remaining, 25ms).count()));
         if (producer.state == input_producer_state::pending) {
           observe_producer();
         }
@@ -913,33 +976,58 @@ namespace nvenc {
     bool force_idr,
     std::vector<std::uint8_t> frame_buffer
   ) {
-    if (!encoder || cleanup_blocked || mapped_input) {
+    if (!submit_frame(frame_index, force_idr)) {
       return {};
     }
+    return retrieve_frame(std::move(frame_buffer));
+  }
 
-    assert(registered_input_buffer);
-    assert(output_bitstream);
+  bool nvenc_base::submit_frame(uint64_t frame_index, bool force_idr) {
+    if (!encoder || cleanup_blocked.load(std::memory_order_acquire)) {
+      return false;
+    }
+
+    const unsigned slot_index = next_submit_slot;
+    auto &slot = slots[slot_index];
+    // A retrieved picture's input stays mapped until its slot is reused: this thread maps and
+    // unmaps, the retrieving one only locks bitstreams (NVENC's asynchronous model).
+    if (slot.phase.load(std::memory_order_acquire) == input_phase_t::mapped && !unmap_slot(slot)) {
+      return false;
+    }
+    if (slot.phase.load(std::memory_order_acquire) != input_phase_t::unmapped) {
+      // Still in flight: the caller submits at most pipeline_depth() pictures before retrieving.
+      return false;
+    }
+
+    assert(registered_input_buffers[slot_index]);
+    assert(slot.output_bitstream);
+
+    // With pictures in flight, each has its own input: copy the converted surface into it so the
+    // next conversion cannot overwrite a picture NVENC is still reading.
+    if (pipeline_depth_ > 1) {
+      prepare_input(slot_index);
+    }
 
     NV_ENC_MAP_INPUT_RESOURCE mapped_input_buffer = {NV_ENC_MAP_INPUT_RESOURCE_VER};
-    mapped_input_buffer.registeredResource = registered_input_buffer;
+    mapped_input_buffer.registeredResource = registered_input_buffers[slot_index];
 
     if (stage_diagnostics) {
       stage_diagnostics->input_map.first_point_now();
     }
     const auto map_status = nvenc->nvEncMapInputResource(encoder, &mapped_input_buffer);
     if (map_status == NV_ENC_SUCCESS) {
-      mapped_input = mapped_input_buffer.mappedResource;
-      input_phase = input_phase_t::mapped;
+      slot.mapped_input = mapped_input_buffer.mappedResource;
+      slot.phase.store(input_phase_t::mapped, std::memory_order_release);
     }
     if (stage_diagnostics) {
       stage_diagnostics->input_map.second_point_now_and_log();
     }
     if (nvenc_failed(map_status)) {
       BOOST_LOG(error) << "NvEnc: NvEncMapInputResource() failed: " << last_nvenc_error_string;
-      return {};
+      return false;
     }
-    auto unmap_guard = util::fail_guard([this] {
-      if (!release_completed_input()) {
+    auto unmap_guard = util::fail_guard([this, &slot] {
+      if (!release_completed_input(slot)) {
         block_new_encoders();
       }
     });
@@ -952,8 +1040,8 @@ namespace nvenc {
     pic_params.pictureStruct = NV_ENC_PIC_STRUCT_FRAME;
     pic_params.inputBuffer = mapped_input_buffer.mappedResource;
     pic_params.bufferFmt = mapped_input_buffer.mappedBufferFmt;
-    pic_params.outputBitstream = output_bitstream;
-    pic_params.completionEvent = async_event_handle;
+    pic_params.outputBitstream = slot.output_bitstream;
+    pic_params.completionEvent = slot.completion_event;
 
     if (encoder_params.video_format == 1) {
       pic_params.codecPicParams.hevcPicParams.pMasteringDisplay =
@@ -968,52 +1056,82 @@ namespace nvenc {
     }
 
     if (async_event_handle) {
-      mark_input_producer_end();
+      mark_input_producer_end(slot_index);
     }
-    last_frame_timing_ = {};
+    last_submit_ = {};
     std::chrono::steady_clock::time_point stage_started;
     if (stage_diagnostics) {
       stage_started = std::chrono::steady_clock::now();
       stage_diagnostics->submit.first_point(stage_started);
     }
+    // Everything the retrieving thread reads about this picture is written before the phase
+    // store below hands the slot over.
+    slot.frame_index = frame_index;
+    slot.after_ref_frame_invalidation = encoder_state.rfi_needs_confirmation;
     const auto submit_status = nvenc->nvEncEncodePicture(encoder, &pic_params);
-    if (submit_status == NV_ENC_SUCCESS || submit_status == NV_ENC_ERR_NEED_MORE_INPUT) {
+    const bool accepted = submit_status == NV_ENC_SUCCESS || submit_status == NV_ENC_ERR_NEED_MORE_INPUT;
+    if (accepted) {
       encoder_used = true;
-      input_phase = input_phase_t::submitted;
+      // Invalidation is confirmed by the first picture submitted after it, and a later
+      // invalidation extends to this one (invalidate_ref_frames() runs with nothing in flight).
+      encoder_state.rfi_needs_confirmation = false;
+      encoder_state.last_encoded_frame_index = frame_index;
+      next_submit_slot = (slot_index + 1) % pipeline_depth_;
+      in_flight_.fetch_add(1, std::memory_order_acq_rel);
+      slot.phase.store(input_phase_t::submitted, std::memory_order_release);
     }
     if (stage_diagnostics) {
       const auto stage_ended = std::chrono::steady_clock::now();
       stage_diagnostics->submit.second_point_and_log(stage_ended);
-      last_frame_timing_.submit = stage_ended - stage_started;
+      last_submit_ = stage_ended - stage_started;
     }
     if (nvenc_failed(submit_status)) {
       BOOST_LOG(error) << "NvEnc: NvEncEncodePicture() failed: " << last_nvenc_error_string;
+      return false;
+    }
+    unmap_guard.disable();
+    return true;
+  }
+
+  nvenc_encoded_frame nvenc_base::retrieve_frame(std::vector<std::uint8_t> frame_buffer) {
+    if (!encoder || cleanup_blocked.load(std::memory_order_acquire)) {
       return {};
     }
+    const unsigned slot_index = next_retrieve_slot;
+    auto &slot = slots[slot_index];
+    if (slot.phase.load(std::memory_order_acquire) != input_phase_t::submitted) {
+      return {};
+    }
+    // A picture that did not complete, lock and unlock keeps its resources for teardown.
+    auto block_guard = util::fail_guard([this] {
+      block_new_encoders();
+    });
 
     NV_ENC_LOCK_BITSTREAM lock_bitstream = {NV_ENC_LOCK_BITSTREAM_VER};
-    lock_bitstream.outputBitstream = output_bitstream;
+    lock_bitstream.outputBitstream = slot.output_bitstream;
     lock_bitstream.doNotWait = async_event_handle ? 1 : 0;
 
+    last_completion_wait_ = {};
     if (async_event_handle) {
+      std::chrono::steady_clock::time_point stage_started;
       if (stage_diagnostics) {
         stage_started = std::chrono::steady_clock::now();
         stage_diagnostics->completion_wait.first_point(stage_started);
       }
-      const bool ready = wait_for_frame_completion(frame_index);
+      const bool ready = wait_for_frame_completion(slot_index);
       if (ready) {
-        input_phase = input_phase_t::completion_seen;
+        slot.phase.store(input_phase_t::completion_seen, std::memory_order_release);
       }
       if (stage_diagnostics) {
         const auto stage_ended = std::chrono::steady_clock::now();
         stage_diagnostics->completion_wait.second_point_and_log(stage_ended);
-        last_frame_timing_.completion_wait = stage_ended - stage_started;
+        last_completion_wait_ = stage_ended - stage_started;
       }
       if (!ready) {
         return {};
       }
     } else {
-      input_phase = input_phase_t::completion_seen;
+      slot.phase.store(input_phase_t::completion_seen, std::memory_order_release);
     }
 
     if (stage_diagnostics) {
@@ -1021,7 +1139,7 @@ namespace nvenc {
     }
     const auto lock_status = nvenc->nvEncLockBitstream(encoder, &lock_bitstream);
     if (lock_status == NV_ENC_SUCCESS) {
-      input_phase = input_phase_t::locked;
+      slot.phase.store(input_phase_t::locked, std::memory_order_release);
     }
     if (stage_diagnostics) {
       stage_diagnostics->bitstream_lock.second_point_now_and_log();
@@ -1051,25 +1169,21 @@ namespace nvenc {
       std::move(frame_buffer),
       lock_bitstream.outputTimeStamp,
       lock_bitstream.pictureType == NV_ENC_PIC_TYPE_IDR,
-      encoder_state.rfi_needs_confirmation,
+      slot.after_ref_frame_invalidation,
     };
-
-    if (encoder_state.rfi_needs_confirmation) {
-      // Invalidation request has been fulfilled, and video network packet will be marked as such
-      encoder_state.rfi_needs_confirmation = false;
-    }
-
-    encoder_state.last_encoded_frame_index = frame_index;
 
     if (encoded_frame.idr) {
       BOOST_LOG(debug) << "NvEnc: idr frame " << encoded_frame.frame_index;
     }
 
-    unmap_guard.disable();
-    if (!release_completed_input()) {
-      block_new_encoders();
+    // One picture at a time keeps its whole cycle on one thread, as before. With pictures in
+    // flight the unlock hands the slot back, and the submitting thread unmaps it on reuse.
+    if (!(pipeline_depth_ == 1 ? release_completed_input(slot) : unlock_slot(slot))) {
       return {};
     }
+    block_guard.disable();
+    next_retrieve_slot = (slot_index + 1) % pipeline_depth_;
+    in_flight_.fetch_sub(1, std::memory_order_acq_rel);
 
     encoder_state.frame_size_logger.collect_and_log(encoded_frame.data.size() / 1000.);
     // Both values are returned by NV_ENC_LOCK_BITSTREAM without enabling the substantially richer
@@ -1081,7 +1195,9 @@ namespace nvenc {
   }
 
   bool nvenc_base::reconfigure_bitrate(int bitrate_kbps) {
-    if (!encoder || cleanup_blocked || !encoder_state.bitrate_reconfiguration_supported) {
+    // A picture in flight would encode under whichever configuration the driver applies first:
+    // refuse, and the caller rebuilds the session as for any other refusal.
+    if (!encoder || cleanup_blocked.load(std::memory_order_acquire) || frames_in_flight() != 0 || !encoder_state.bitrate_reconfiguration_supported) {
       return false;
     }
 
@@ -1131,10 +1247,13 @@ namespace nvenc {
   }
 
   bool nvenc_base::invalidate_ref_frames(uint64_t first_frame, uint64_t last_frame) {
-    if (cleanup_blocked) {
+    if (cleanup_blocked.load(std::memory_order_acquire)) {
       return false;
     }
-    if (!encoder || !encoder_params.rfi) {
+    // A picture already submitted may reference the lost frames, and the next submitted picture
+    // confirms the invalidation. With one in flight neither holds: refuse, so the caller forces
+    // an IDR instead.
+    if (!encoder || !encoder_params.rfi || frames_in_flight() != 0) {
       return false;
     }
 

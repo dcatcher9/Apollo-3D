@@ -101,14 +101,30 @@ namespace video::detail {
       converting_ += elapsed;
     }
 
-    /** One encode() call, with its NVENC picture submission and completion wait. `new_content` is
-     *  the encoded content's identity (diagnostic_content_tracker_t), not whether a conversion ran:
-     *  a keepalive that re-renders an unchanged export encodes repeated content. */
+    /** One encode step of the loop, with its NVENC picture submission and the time the loop waited
+     *  for a picture's completion: its own with one picture at a time, else the oldest one's while
+     *  every picture was in flight. `new_content` is the encoded content's identity
+     *  (diagnostic_content_tracker_t), not whether a conversion ran: a keepalive that re-renders an
+     *  unchanged export encodes repeated content. */
     void encoded(bool new_content, duration_t call, duration_t submit, duration_t completion_wait) noexcept {
       ++(new_content ? new_encodes_ : repeat_encodes_);
       encoding_ += call;
       submitting_ += submit;
       completion_waiting_ += completion_wait;
+    }
+
+    /** NVENC pictures that may be in flight; kept across reset(). */
+    void set_pipeline_depth(unsigned depth) noexcept {
+      depth_ = depth;
+    }
+
+    /** Pictures published: `behind` were submitted while an earlier one was still in flight, and
+     *  each took from its submission to its packet `latency_total` in sum, `latency_max` at most. */
+    void pictures(std::uint64_t behind, std::uint64_t published, duration_t latency_total, duration_t latency_max) noexcept {
+      pictures_behind_ += behind;
+      pictures_ += published;
+      picture_latency_ += latency_total;
+      picture_latency_max_ = std::max(picture_latency_max_, latency_max);
     }
 
     [[nodiscard]] std::uint64_t iterations() const noexcept {
@@ -127,7 +143,8 @@ namespace video::detail {
         "Video encode loop: {} iterations in {:.1f} s; {} new-content and {} repeated-content encodes; holding {:.1f} ms in {} exact holds "
         "(requested {:.1f} ms, overshoot avg {:.2f} max {:.2f} ms); waiting {:.1f} ms in {} image waits (requested {:.1f} ms; "
         "{} ran to their bound, overshoot avg {:.2f} max {:.2f} ms); converting {:.1f} ms in {} conversions; encoding {:.1f} ms "
-        "(NVENC submit {:.1f} ms, completion wait {:.1f} ms); loop work {:.1f} ms.",
+        "(NVENC submit {:.1f} ms, completion wait {:.1f} ms; up to {} {} in flight, {} submitted behind another, submission to packet "
+        "avg {:.2f} max {:.2f} ms); loop work {:.1f} ms.",
         iterations_,
         std::chrono::duration<double>(window).count(),
         new_encodes_,
@@ -148,12 +165,19 @@ namespace video::detail {
         ms(encoding_),
         ms(submitting_),
         ms(completion_waiting_),
+        depth_,
+        depth_ == 1 ? "picture" : "pictures",
+        pictures_behind_,
+        average(picture_latency_, pictures_),
+        ms(picture_latency_max_),
         ms(std::max(window - busy, duration_t::zero()))
       );
     }
 
     void reset() noexcept {
+      const auto depth = depth_;
       *this = {};
+      depth_ = depth;
     }
 
   private:
@@ -161,6 +185,9 @@ namespace video::detail {
     duration_t hold_requested_ {}, hold_actual_ {}, hold_overshoot_max_ {};
     duration_t wait_requested_ {}, wait_actual_ {}, timeout_overshoot_ {}, timeout_overshoot_max_ {};
     duration_t converting_ {}, encoding_ {}, submitting_ {}, completion_waiting_ {};
+    unsigned depth_ = 1;
+    std::uint64_t pictures_behind_ = 0, pictures_ = 0;
+    duration_t picture_latency_ {}, picture_latency_max_ {};
   };
 
   /** Missing or regressed clocks are unavailable, not a fabricated zero-latency sample. */

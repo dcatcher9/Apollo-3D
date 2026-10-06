@@ -25,6 +25,7 @@
 #include "sync.h"
 #include "tracked_async_worker.h"
 #include "video.h"
+#include "video_encode_pipeline.h"
 #include "video_session_recovery.h"
 
 #ifdef _WIN32
@@ -488,6 +489,37 @@ namespace video {
 
     nvenc::nvenc_base::frame_timing_t last_frame_timing() const {
       return device && device->nvenc ? device->nvenc->last_frame_timing() : nvenc::nvenc_base::frame_timing_t {};
+    }
+
+    /** NVENC pictures that may be in flight (nvenc_base::pipeline_depth()). */
+    unsigned pipeline_depth() const {
+      return device && device->nvenc ? device->nvenc->pipeline_depth() : 1;
+    }
+
+    /** Encode thread, with pictures in flight: submit the converted input as the next picture.
+     *  NVENC encodes from the picture's own copy, so the next frame may convert at once. */
+    bool submit_frame(uint64_t frame_index) {
+      if (!device || !device->nvenc) {
+        return false;
+      }
+      const bool submitted = device->nvenc->submit_frame(frame_index, force_idr);
+      force_idr = false;
+      // Never blocks: hands back export slots whose conversion reads completed. It records on the
+      // device's immediate context, so it stays on this thread rather than the retrieving one.
+      device->encoder_consumed_input();
+      return submitted;
+    }
+
+    /** Retrieving thread: the oldest submitted picture, waited for (nvenc_base::retrieve_frame()). */
+    nvenc::nvenc_encoded_frame retrieve_frame() {
+      if (!device || !device->nvenc) {
+        return {};
+      }
+      return device->nvenc->retrieve_frame(acquire_frame_buffer());
+    }
+
+    std::chrono::nanoseconds last_submit_timing() const {
+      return device && device->nvenc ? device->nvenc->last_submit_timing() : std::chrono::nanoseconds {};
     }
 
     std::vector<std::uint8_t> acquire_frame_buffer() {
@@ -990,11 +1022,19 @@ namespace video {
     bool request_idr;
   };
 
-  encoded_packet_publish_result_t encode(
+  /** What a picture's packet carries, captured on the encode thread when the picture is submitted. */
+  struct encoded_frame_context_t {
+    int64_t frame_nr = 0;
+    std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
+    std::optional<std::chrono::steady_clock::time_point> content_timestamp;
+    detail::optional_frame_time_point_t processing_started;
+    bool encoder_input_retained = false;
+    detail::diagnostic_content_e diagnostic_content = detail::diagnostic_content_e::unknown;
+    detail::diagnostic_timestamp_t encode_started;  ///< Diagnostics only.
+  };
+
+  encoded_frame_context_t make_encoded_frame_context(
     int64_t frame_nr,
-    nvenc_encode_session_t &session,
-    safe::mail_raw_t::queue_t<packet_t> &packets,
-    const std::shared_ptr<void> &channel_data,
     std::optional<std::chrono::steady_clock::time_point> frame_timestamp,
     std::optional<std::chrono::steady_clock::time_point> content_timestamp,
     encode_stage_diagnostics_t *diagnostics,
@@ -1002,16 +1042,35 @@ namespace video {
     detail::optional_frame_time_point_t processing_started,
     bool first_encoder_output
   ) {
-    const auto encode_started = detail::diagnostic_timestamp(diagnostics != nullptr, detail::diagnostic_clock_t::now);
-    auto encoded_frame = session.encode_frame(
-      frame_nr,
-      session.acquire_frame_buffer()
-    );
+    encoded_frame_context_t frame;
+    frame.frame_nr = frame_nr;
+    frame.frame_timestamp = frame_timestamp;
+    frame.content_timestamp = content_timestamp;
+    frame.processing_started = processing_started;
+    frame.encoder_input_retained = detail::encoder_input_was_retained(first_encoder_output, converted_frame);
+    if (diagnostics) {
+      // In submission order on the encode thread, which is also the packets' order.
+      frame.diagnostic_content = diagnostics->output_content.observe(content_timestamp, !converted_frame);
+      frame.encode_started = detail::diagnostic_clock_t::now();
+    }
+    return frame;
+  }
+
+  /** Publish one retrieved picture. Runs on whichever thread retrieved it; with pictures in flight
+   *  that is the retrieving thread, which alone uses `diagnostics->nvenc_call` then. */
+  encoded_packet_publish_result_t publish_encoded_frame(
+    nvenc::nvenc_encoded_frame &&encoded_frame,
+    const encoded_frame_context_t &frame,
+    nvenc_encode_session_t &session,
+    safe::mail_raw_t::queue_t<packet_t> &packets,
+    const std::shared_ptr<void> &channel_data,
+    encode_stage_diagnostics_t *diagnostics
+  ) {
     if (diagnostics) {
       const auto measured_at = detail::diagnostic_clock_t::now();
-      log_diagnostic_elapsed(diagnostics->nvenc_call, encode_started, measured_at);
+      log_diagnostic_elapsed(diagnostics->nvenc_call, frame.encode_started, measured_at);
       if (diagnostics->performance) {
-        if (const auto elapsed = detail::diagnostic_elapsed_ms(encode_started, measured_at)) {
+        if (const auto elapsed = detail::diagnostic_elapsed_ms(frame.encode_started, measured_at)) {
           diagnostics->performance->record(host_sbs_telemetry::stage::encode, *elapsed, measured_at);
         }
       }
@@ -1022,8 +1081,8 @@ namespace video {
       return {true, 0, false};
     }
 
-    if (frame_nr != encoded_frame.frame_index) {
-      BOOST_LOG(error) << "NvENC frame index mismatch " << frame_nr << " " << encoded_frame.frame_index;
+    if (frame.frame_nr != static_cast<int64_t>(encoded_frame.frame_index)) {
+      BOOST_LOG(error) << "NvENC frame index mismatch " << frame.frame_nr << " " << encoded_frame.frame_index;
     }
 
     auto packet = std::make_unique<packet_raw_generic>(
@@ -1034,15 +1093,12 @@ namespace video {
     );
     packet->channel_data = channel_data;
     packet->after_ref_frame_invalidation = encoded_frame.after_ref_frame_invalidation;
-    packet->frame_timestamp = frame_timestamp;
-    packet->content_timestamp = content_timestamp;
-    packet->processing_started = processing_started;
-    packet->encoder_input_retained = detail::encoder_input_was_retained(
-      first_encoder_output,
-      converted_frame
-    );
+    packet->frame_timestamp = frame.frame_timestamp;
+    packet->content_timestamp = frame.content_timestamp;
+    packet->processing_started = frame.processing_started;
+    packet->encoder_input_retained = frame.encoder_input_retained;
     if (diagnostics) {
-      packet->diagnostic_content = diagnostics->output_content.observe(content_timestamp, !converted_frame);
+      packet->diagnostic_content = frame.diagnostic_content;
       packet->sbs_telemetry_performance = diagnostics->performance;
     }
     const bool packet_is_idr = packet->is_idr();
@@ -1062,6 +1118,49 @@ namespace video {
       publish_result.dropped > 0 && !packet_is_idr,
     };
   }
+
+  /** One picture at a time: submit, wait for and publish it on the encode thread. */
+  encoded_packet_publish_result_t encode(
+    nvenc_encode_session_t &session,
+    safe::mail_raw_t::queue_t<packet_t> &packets,
+    const std::shared_ptr<void> &channel_data,
+    const encoded_frame_context_t &frame,
+    encode_stage_diagnostics_t *diagnostics
+  ) {
+    auto encoded_frame = session.encode_frame(frame.frame_nr, session.acquire_frame_buffer());
+    return publish_encoded_frame(std::move(encoded_frame), frame, session, packets, channel_data, diagnostics);
+  }
+
+  /** Encoded-queue backpressure, on whichever thread publishes packets: a dropped delta frame asks
+   *  for a recovery IDR; drops are logged at most every 5 s. */
+  class encoded_queue_drop_report_t {
+  public:
+    void record(const encoded_packet_publish_result_t &result, safe::mail_raw_t::event_t<bool> &idr_events) {
+      if (result.dropped_packets == 0) {
+        return;
+      }
+      drops_since_log += result.dropped_packets;
+      if (result.request_idr) {
+        idr_events->try_raise(true);
+      }
+
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= next_log) {
+        BOOST_LOG(warning) << "Encoded video queue backpressure dropped "sv
+                           << drops_since_log
+                           << " frame(s); queue capacity="sv
+                           << ENCODED_PACKET_QUEUE_LIMIT
+                           << (result.request_idr ? ", recovery IDR requested."sv :
+                                                    ", newest IDR retained."sv);
+        drops_since_log = 0;
+        next_log = now + 5s;
+      }
+    }
+
+  private:
+    std::size_t drops_since_log = 0;
+    std::chrono::steady_clock::time_point next_log = std::chrono::steady_clock::now();
+  };
 
   std::unique_ptr<nvenc_encode_session_t> make_encode_session(const config_t &client_config, std::unique_ptr<platf::nvenc_encode_device_t> encode_device) {
     if (!encode_device->init_encoder(client_config, encode_device->colorspace)) {
@@ -1122,8 +1221,7 @@ namespace video {
     auto max_frametime = std::chrono::nanoseconds(1000ms) * 1000 / minimum_fps_target;
     auto encode_frame_threshold = std::chrono::nanoseconds(1000ms) * 1000 / config.encodingFramerate;
     auto frame_variation_threshold = encode_frame_threshold / 4;
-    const bool independent_provider = is_game_mode(config.sbs_mode) ||
-                                      (config.sbs_mode == SBS_AI && config.sbs_config.reshade);
+    const bool independent_provider = converts_independent_provider(config);
     BOOST_LOG(info) << "Minimum FPS target set to ~"sv << (minimum_fps_target / 1000) << "fps ("sv << max_frametime << ")"sv;
     BOOST_LOG(info) << "Encoding Frame threshold: "sv << encode_frame_threshold;
 
@@ -1208,8 +1306,8 @@ namespace video {
     bool missing_frame_timestamp_warning_logged = false;
     bool first_encoder_output = true;
     detail::optional_frame_time_point_t processing_started;
-    std::size_t encoded_queue_drops_since_log = 0;
-    auto next_encoded_queue_drop_log = std::chrono::steady_clock::now();
+    // Used by the encode thread with one picture at a time, else only by the retrieving thread.
+    encoded_queue_drop_report_t drop_report;
 
     // Most recent real captured frame. On a same-display rebuild, no new frame is delivered
     // until the desktop changes. Keep this source so the replacement can resume real content.
@@ -1255,6 +1353,38 @@ namespace video {
       hold_timer = platf::create_high_precision_timer();
       if (hold_timer && !static_cast<bool>(*hold_timer)) {
         hold_timer.reset();
+      }
+    }
+    // With pictures in flight (an independent provider; nvenc_base::pipeline_depth()) the next
+    // frame converts and its picture starts encoding while the previous one still encodes. A
+    // thread of their own retrieves the pictures in submission order and publishes each packet as
+    // soon as its picture completes, whatever this loop is doing. Declared after everything it
+    // uses; its destruction on any exit delivers the pictures still in flight, as returning from
+    // encode_frame() did, unless retrieval failed.
+    std::optional<detail::encode_pipeline_t<encoded_frame_context_t>> pipeline;
+    if (session->pipeline_depth() > 1) {
+      pipeline.emplace(
+        session->pipeline_depth(),
+        [&](encoded_frame_context_t &frame) {
+          auto encoded_frame = session->retrieve_frame();
+          const auto result = publish_encoded_frame(std::move(encoded_frame), frame, *session, packets, channel_data, encode_diagnostics ? &*encode_diagnostics : nullptr);
+          if (result.failed) {
+            BOOST_LOG(error) << "Could not encode video packet"sv;
+            return false;
+          }
+          drop_report.record(result, idr_events);
+          return true;
+        },
+        [images]() {
+          // The loop notices the failure at its next iteration.
+          images->wake();
+        },
+        []() {
+          platf::adjust_thread_priority(platf::thread_priority_e::high);
+        }
+      );
+      if (loop_stats) {
+        loop_stats->set_pipeline_depth(pipeline->depth());
       }
     }
     const auto convert_frame = [&](platf::img_t &img, std::optional<std::chrono::steady_clock::time_point> target = std::nullopt) {
@@ -1316,7 +1446,8 @@ namespace video {
         return false;
       }
 
-      if (!session->reconfigure_bitrate(requested->bitrate)) {
+      // Rate control changes between pictures: none may still be in flight.
+      if ((pipeline && !pipeline->drain()) || !session->reconfigure_bitrate(requested->bitrate)) {
         return false;
       }
 
@@ -1366,16 +1497,27 @@ namespace video {
     };
 
     auto lifecycle_change_requested = [&]() {
+      // A picture that failed on the retrieving thread fails this encoder (`failed` stays set), as
+      // a failed encode_frame() does. Its wake ends the loop's image wait.
+      const auto pipeline_failed = [&] {
+        return pipeline && pipeline->failed();
+      };
+      if (pipeline_failed()) {
+        return true;
+      }
       const bool shutting_down = shutdown_event->peek();
       const bool capture_stopped = !images->running();
       const bool display_reinit_pending = reinit_event.peek();
 
-      // A completed encode_frame() has no NVENC work in flight, and all calls in this loop run on
-      // one thread. Use that serialized seam for a same-geometry/same-cadence bitrate update. Any
-      // mismatch, unsupported GPU, or driver failure restores the request and takes the unchanged
-      // lifecycle rebuild path below.
+      // A completed encode_frame(), or a drained pipeline, has no NVENC work in flight, and all
+      // submissions run on this thread. Use that serialized seam for a same-geometry/same-cadence
+      // bitrate update. Any mismatch, unsupported GPU, or driver failure restores the request and
+      // takes the unchanged lifecycle rebuild path below.
       if (!shutting_down && !capture_stopped && !display_reinit_pending && video_mode_event->peek() && try_reconfigure_pending_bitrate()) {
         return false;
+      }
+      if (pipeline_failed()) {
+        return true;  // While draining for the reconfiguration.
       }
       // Any queued atomic presentation change that is not bitrate-only rebuilds the encode
       // session in place.
@@ -1395,6 +1537,10 @@ namespace video {
     while (true) {
       if (loop_stats) {
         if (const auto now = std::chrono::steady_clock::now(); now - loop_stats_since >= 20s) {
+          if (pipeline) {
+            const auto pictures = pipeline->take_stats();
+            loop_stats->pictures(pictures.pushed_behind, pictures.retired, pictures.latency_total, pictures.latency_max);
+          }
           BOOST_LOG(info) << loop_stats->report(now - loop_stats_since);
           loop_stats->reset();
           loop_stats_since = now;
@@ -1432,9 +1578,17 @@ namespace video {
 
       while (invalidate_ref_frames_events->peek()) {
         if (auto frames = invalidate_ref_frames_events->pop(0ms)) {
+          // The pictures in flight may reference the lost frames: the invalidation follows them, and
+          // the next picture submitted confirms it (refused, so an IDR, if one failed).
+          if (pipeline) {
+            pipeline->drain();
+          }
           session->invalidate_ref_frames(frames->first, frames->second);
           invalidated_ref_frames = true;
         }
+      }
+      if (pipeline && pipeline->failed()) {
+        break;  // While draining for the invalidation; `failed` stays set.
       }
 
       if (idr_events->peek()) {
@@ -1713,11 +1867,8 @@ namespace video {
       // re-renders an unchanged export converts again but encodes a repeat.
       const bool new_loop_content = loop_stats && loop_content.observe(content_timestamp, !converted_frame) == detail::diagnostic_content_e::new_content;
       const auto encode_started = std::chrono::steady_clock::now();
-      const auto publish_result = encode(
+      auto frame = make_encoded_frame_context(
         frame_nr++,
-        *session,
-        packets,
-        channel_data,
         frame_timestamp,
         content_timestamp,
         encode_diagnostics ? &*encode_diagnostics : nullptr,
@@ -1725,14 +1876,40 @@ namespace video {
         processing_started,
         first_encoder_output
       );
-      if (loop_stats) {
-        const auto timing = session->last_frame_timing();
-        loop_stats->encoded(new_loop_content, std::chrono::steady_clock::now() - encode_started, timing.submit, timing.completion_wait);
+      bool encoded = false;
+      if (pipeline) {
+        // Waits only while every picture is in flight, and then for the oldest one. The picture is
+        // published by the retrieving thread when it completes.
+        encoded = pipeline->acquire();
+        const auto completion_wait = std::chrono::steady_clock::now() - encode_started;
+        encoded = encoded && session->submit_frame(frame.frame_nr);
+        if (encoded) {
+          pipeline->push(std::move(frame));
+        }
+        if (loop_stats) {
+          loop_stats->encoded(new_loop_content, std::chrono::steady_clock::now() - encode_started, session->last_submit_timing(), completion_wait);
+        }
+      } else {
+        const auto publish_result = encode(*session, packets, channel_data, frame, encode_diagnostics ? &*encode_diagnostics : nullptr);
+        encoded = !publish_result.failed;
+        if (loop_stats) {
+          const auto timing = session->last_frame_timing();
+          const auto call = std::chrono::steady_clock::now() - encode_started;
+          loop_stats->encoded(new_loop_content, call, timing.submit, timing.completion_wait);
+          if (encoded) {
+            loop_stats->pictures(0, 1, call, call);
+          }
+        }
+        if (encoded) {
+          drop_report.record(publish_result, idr_events);
+        }
       }
-      if (publish_result.failed) {
+      if (!encoded) {
         BOOST_LOG(error) << "Could not encode video packet"sv;
         break;
       }
+      // A submitted picture counts as encoded for the keepalive and the stream-gamma proof: it is
+      // delivered unless the encoder fails, which rebuilds the session and reapplies the request.
       last_encode_at = std::chrono::steady_clock::now();
       if (converted_frame && session->rendered_content_timestamp() && config.stream_gamma_state) {
         const auto actual_mode = session->stream_gamma_mode();
@@ -1762,24 +1939,6 @@ namespace video {
         }
       }
       first_encoder_output = false;
-      if (publish_result.dropped_packets > 0) {
-        encoded_queue_drops_since_log += publish_result.dropped_packets;
-        if (publish_result.request_idr) {
-          idr_events->try_raise(true);
-        }
-
-        const auto now = std::chrono::steady_clock::now();
-        if (now >= next_encoded_queue_drop_log) {
-          BOOST_LOG(warning) << "Encoded video queue backpressure dropped "sv
-                             << encoded_queue_drops_since_log
-                             << " frame(s); queue capacity="sv
-                             << ENCODED_PACKET_QUEUE_LIMIT
-                             << (publish_result.request_idr ? ", recovery IDR requested."sv :
-                                                              ", newest IDR retained."sv);
-          encoded_queue_drops_since_log = 0;
-          next_encoded_queue_drop_log = now + 5s;
-        }
-      }
 
       session->request_normal_frame();
       refresh_mouse_keys_if_due(next_mouse_keys_refresh);
@@ -2390,7 +2549,7 @@ namespace video {
       ENCODED_PACKET_QUEUE_LIMIT
     );
     while (!packets->peek()) {
-      if (encode(1, *session, packets, nullptr, {}, {}, nullptr, true, {}, true).failed) {
+      if (encode(*session, packets, nullptr, make_encoded_frame_context(1, {}, {}, nullptr, true, {}, true), nullptr).failed) {
         return -1;
       }
     }
