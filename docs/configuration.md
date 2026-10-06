@@ -1594,8 +1594,9 @@ microphone_sink = CABLE Input (VB-Audio Virtual Cable)
             `NvEnc: frame ... exceeded the 100 ms completion wait; ... input_producer=done_by_...ms` while streaming
             a DX12 game with frame generation is consistent with that freeze: the encoder's input was ready by the
             first check, which comes only after 100 ms, so the delay was in the encoder or earlier upstream work.
-            `pending_at_...ms` or `done_at_...ms` instead show upstream GPU work still running. Disable this option
-            to test it. If stalls remain, `nvenc_split_encode` isolates split-frame encoding.
+            `pending_at_...ms` or `done_at_...ms` instead show upstream GPU work still running; the encoder's
+            250 ms budget then starts when that work completes (2 s at most), so such a stall delays one picture
+            rather than rebuilding the encoder. Disable this option to test it. If stalls remain, `nvenc_split_encode` isolates split-frame encoding.
         </td>
     </tr>
     <tr>

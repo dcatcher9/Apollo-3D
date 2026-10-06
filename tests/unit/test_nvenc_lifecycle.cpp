@@ -863,6 +863,87 @@ TEST(NvencLifecycleTest, SlowPicturePollsItsInputProducerOnlyUntilItFinishes) {
   EXPECT_FALSE(completed.picture_pending);
 }
 
+std::vector<std::uint32_t> frame_waits(std::size_t slices) {
+  std::vector<std::uint32_t> waits {100};
+  waits.insert(waits.end(), slices, 25);
+  return waits;
+}
+
+TEST(NvencLifecycleTest, UpstreamGpuStallLongerThanTheBudgetDeliversTheSamePicture) {
+  // Live 10-06: the game's first frame-generation enable kept the host's own conversion off the
+  // GPU for about 300 ms, so the picture's input was still being produced at 100 and 251 ms. A
+  // budget counted from submission failed the encoder, blocked new encoders and rebuilt the whole
+  // session (and the game's export ring). The encoder's 250 ms budget starts once its input completes.
+  nvenc_lifecycle_probe probe;
+  ASSERT_TRUE(probe.create());
+  probe.frame_timeouts_remaining = 13;  // 100 ms + 12 x 25 ms, then the picture completes.
+  probe.producer_states = std::vector<nvenc::input_producer_state>(12, nvenc::input_producer_state::pending);
+  probe.producer_states.push_back(nvenc::input_producer_state::complete);
+
+  const auto delivered = probe.encode_frame(1, false);
+  ASSERT_FALSE(delivered.data.empty());
+  EXPECT_EQ(delivered.frame_index, 1u);
+  const auto completed = probe.snapshot();
+  EXPECT_EQ(completed.frame_wait_timeouts, frame_waits(13));
+  EXPECT_EQ(completed.map_calls, 1);
+  EXPECT_EQ(completed.submit_calls, 1);
+  EXPECT_EQ(completed.lock_calls, 1);
+  EXPECT_EQ(completed.unmap_calls, 1);
+  EXPECT_FALSE(completed.picture_pending);
+
+  // Nothing was blocked: another encoder may start, and this one encodes its next frame.
+  nvenc_lifecycle_probe replacement;
+  EXPECT_TRUE(replacement.create());
+  ASSERT_FALSE(probe.encode_frame(2, false).data.empty());
+  EXPECT_EQ(probe.snapshot().submit_calls, 2);
+}
+
+TEST(NvencLifecycleTest, InputCompletingLateGetsTheFullEncoderBudgetAfterIt) {
+  // Pending at 100 and 125 ms, complete at 150 ms; the encoder then stays silent. It fails 250 ms
+  // after its input completed, not 250 ms after submission.
+  nvenc_lifecycle_probe probe;
+  ASSERT_TRUE(probe.create());
+  probe.frame_timeouts_remaining = 13 + 2;  // Two more for teardown's drain.
+  probe.producer_states = {
+    nvenc::input_producer_state::pending,
+    nvenc::input_producer_state::pending,
+    nvenc::input_producer_state::complete,
+  };
+  EXPECT_TRUE(probe.encode_frame(1, false).data.empty());
+  const auto expired = probe.snapshot();
+  EXPECT_EQ(expired.frame_wait_timeouts, frame_waits(12));  // 100 + 12 x 25 = 400 ms.
+  EXPECT_EQ(std::count(expired.operations.begin(), expired.operations.end(), "producer-poll"), 3);
+  EXPECT_TRUE(expired.picture_pending);
+  nvenc_lifecycle_probe replacement;
+  EXPECT_FALSE(replacement.create());
+  probe.destroy_encoder();
+  EXPECT_TRUE(replacement.create());
+}
+
+TEST(NvencLifecycleTest, SilentEncoderWithCompletedInputStillFailsAtTheBudget) {
+  nvenc_lifecycle_probe probe;
+  ASSERT_TRUE(probe.create());
+  probe.frame_timeouts_remaining = 7 + 2;
+  probe.producer_states = {nvenc::input_producer_state::complete};
+  EXPECT_TRUE(probe.encode_frame(1, false).data.empty());
+  EXPECT_EQ(probe.snapshot().frame_wait_timeouts, frame_waits(6));  // 250 ms, as before.
+  probe.destroy_encoder();
+}
+
+TEST(NvencLifecycleTest, InputThatNeverCompletesFailsAtTheGpuTimeoutHorizon) {
+  // A GPU that never finishes the input without a device removal is still detected, after 2 s.
+  nvenc_lifecycle_probe probe;
+  ASSERT_TRUE(probe.create());
+  probe.frame_timeouts_remaining = 77 + 2;
+  probe.producer_states = {nvenc::input_producer_state::pending};
+  EXPECT_TRUE(probe.encode_frame(1, false).data.empty());
+  EXPECT_EQ(probe.snapshot().frame_wait_timeouts, frame_waits(76));  // 100 + 76 x 25 = 2000 ms.
+  nvenc_lifecycle_probe replacement;
+  EXPECT_FALSE(replacement.create());
+  probe.destroy_encoder();
+  EXPECT_TRUE(replacement.create());
+}
+
 TEST(NvencLifecycleTest, NativeWaitFailureDoesNotEnterSoftTimeoutRecovery) {
   nvenc_lifecycle_probe probe;
   ASSERT_TRUE(probe.create());

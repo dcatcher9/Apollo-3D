@@ -647,8 +647,10 @@ namespace nvenc {
     if (!cleanup_blocked) {
       cleanup_blocked = true;
       blocked_encoder_cleanups.fetch_add(1, std::memory_order_acq_rel);
+      // Admission reopens once this session's teardown drains the submitted picture (normally
+      // well under a second); retain_failed_encoder_until_exit() reports the terminal case.
       BOOST_LOG(error) << "NvEnc: retaining unfinished encoder resources until safe teardown; "
-                          "new encoders are blocked. Restart the host if the driver does not recover.";
+                          "new encoders wait until it drains the submitted picture.";
     }
   }
 
@@ -835,20 +837,37 @@ namespace nvenc {
 
   bool nvenc_base::wait_for_frame_completion(uint64_t frame_index) {
     using namespace std::chrono_literals;
+    // The encoder gets 250 ms from submission, or from its input's completion when the GPU was
+    // still producing the input. Such a picture waits on upstream work that no encoder rebuild can
+    // speed up: live, the game's first frame-generation enable kept the host's conversion off the
+    // GPU for about 300 ms, and failing at 250 ms blocked new encoders and rebuilt the session and
+    // the game's export ring. Upstream work is bounded by the GPU timeout horizon (2 s, Windows'
+    // default TDR delay) instead; a hung GPU still ends there or by device removal.
+    constexpr auto encoder_budget = 250ms;
+    constexpr auto upstream_limit = 2000ms;
     const auto started = async_wait_clock_now();
-    const auto deadline = started + 250ms;
+    auto deadline = started + encoder_budget;
     const auto elapsed_ms = [&] {
       return std::chrono::duration_cast<std::chrono::milliseconds>(async_wait_clock_now() - started).count();
     };
+    input_producer_progress_t producer;
+    const auto observe_producer = [&] {
+      const bool was_pending = producer.state == input_producer_state::pending;
+      producer.observe(poll_input_producer(), elapsed_ms());
+      if (was_pending || producer.state == input_producer_state::pending) {
+        deadline = std::min(started + upstream_limit, std::max(deadline, async_wait_clock_now() + encoder_budget));
+      }
+    };
     auto result = wait_for_async_event(100);
     const bool soft_timeout = result.status == nvenc_event_wait_status::timeout && !device_removed(result);
-    input_producer_progress_t producer;
     if (soft_timeout) {
-      producer.observe(poll_input_producer(), elapsed_ms());
+      observe_producer();
     }
     if (soft_timeout && async_wait_clock_now() < deadline) {
-      BOOST_LOG(warning) << "NvEnc: frame " << frame_index
-                         << " exceeded the 100 ms completion wait; allowing up to 250 ms total; "
+      BOOST_LOG(warning) << "NvEnc: frame " << frame_index << " exceeded the 100 ms completion wait; "
+                         << (producer.state == input_producer_state::pending ?
+                               "its input is still being produced, so the encoder's 250 ms budget starts when the input completes (2000 ms at most); " :
+                               "allowing up to 250 ms total; ")
                          << producer.describe(elapsed_ms());
       // Stay in this encode call with exactly one mapped/submitted input. Returning to the
       // caller here would let conversion overwrite the texture still owned by NVENC.
@@ -860,7 +879,7 @@ namespace nvenc {
         const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(deadline - now);
         result = wait_for_async_event(static_cast<std::uint32_t>(std::min(remaining, 25ms).count()));
         if (producer.state == input_producer_state::pending) {
-          producer.observe(poll_input_producer(), elapsed_ms());
+          observe_producer();
         }
       }
     }
@@ -882,7 +901,8 @@ namespace nvenc {
                        << elapsed << " ms; " << event_wait_diagnostics(result);
     } else {
       BOOST_LOG(error) << "NvEnc: frame " << frame_index << " encode wait timeout after "
-                       << elapsed << " ms (250 ms budget); " << event_wait_diagnostics(result)
+                       << elapsed << " ms (250 ms after submission or after its input completed, 2000 ms at most); "
+                       << event_wait_diagnostics(result)
                        << "; " << producer.describe(elapsed);
     }
     return false;

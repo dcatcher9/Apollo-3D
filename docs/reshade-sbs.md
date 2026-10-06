@@ -4793,6 +4793,13 @@ claims every frame of a 40 fps game within 1 ms of its fence completion. Game mo
 producer's published source without attaching (a status-only READY): the game then creates no
 ring and packs no stereo.
 
+A picture whose input the GPU is still producing is waiting on upstream work, not on the encoder.
+The encoder's 250 ms completion budget then starts when that input completes (2 s at most, the
+default GPU timeout). On 10-06 the game's first frame-generation enable kept the host's own
+conversion off the GPU for about 300 ms: the fixed budget failed the encoder at 251 ms with
+`input_producer=pending_at_251ms`, blocked new encoders, rebuilt the session, detached the receiver
+and so made the game build a second export ring. Such a stall now delays one picture.
+
 While a streaming encoder converts a live packed export it holds the display's capture-pixel
 claim, and Desktop Duplication and WGC forward only timestamps and cursor metadata. When the
 claim is released (the export ends, or the encode loop exits or rebuilds), capture recovers the
