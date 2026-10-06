@@ -107,6 +107,14 @@ namespace platf::reshade_bridge {
   }  // namespace
 
   class receiver_t::impl_t {
+    // A replaced slot whose conversion reads may still be running on the GPU: it returns to free
+    // once the read fence completes `fence_value`, if it is still that frame of that connection.
+    struct retiring_t {
+      bool active = false;
+      std::uint64_t sequence = 0, generation = 0, nonce = 0;
+      std::uint64_t fence_value = 0;
+    };
+
   public:
     impl_t(ID3D11Device *device, ID3D11DeviceContext *context, observer_t observe):
         device_(device),
@@ -115,16 +123,27 @@ namespace platf::reshade_bridge {
       ComPtr<IDXGIDevice> dxgi_device;
       ComPtr<IDXGIAdapter> adapter;
       DXGI_ADAPTER_DESC desc {};
-      if (device && context && SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&device5_))) && SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&dxgi_device))) && SUCCEEDED(dxgi_device->GetAdapter(&adapter)) && SUCCEEDED(adapter->GetDesc(&desc))) {
+      if (device && context && SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&device5_))) && SUCCEEDED(context->QueryInterface(IID_PPV_ARGS(&context4_))) &&
+          SUCCEEDED(device5_->CreateFence(0, D3D11_FENCE_FLAG_NONE, IID_PPV_ARGS(&retire_fence_))) && SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&dxgi_device))) &&
+          SUCCEEDED(dxgi_device->GetAdapter(&adapter)) && SUCCEEDED(adapter->GetDesc(&desc))) {
         std::memcpy(&adapter_luid_, &desc.AdapterLuid, sizeof(adapter_luid_));
         supported_ = true;
+        retire_event_.reset(CreateEventW(nullptr, FALSE, FALSE, nullptr));
+        retire_wait_ = retire_event_.get() ? CreateThreadpoolWait(&impl_t::on_reads_completed, this, nullptr) : nullptr;
+        if (!retire_wait_) {
+          BOOST_LOG(warning) << "ReShade SBS: cannot wait on the receiver's read fence (error " << GetLastError() << "); replaced export slots return at the next conversion instead.";
+        }
       } else {
         BOOST_LOG(warning) << "ReShade SBS requires D3D11 shared NT textures and shared fences on the capture adapter.";
       }
     }
 
     ~impl_t() {
+      // Cancels the read-completion wait: no callback runs once it returns.
       detach();
+      if (retire_wait_) {
+        CloseThreadpoolWait(retire_wait_);
+      }
       if (wait_) {
         disarm_wake();
         // A callback already running finishes here; none starts after the wait is cleared.
@@ -237,16 +256,14 @@ namespace platf::reshade_bridge {
       retire_slots();
     }
 
-    // Ends the held slot's event query after every read recorded so far, so the claim that
-    // replaces it can prove those reads complete without issuing (and waiting for) a new one.
+    // Signals the read fence after every read of the held slot recorded so far, so the claim that
+    // replaces it can prove those reads complete without signalling (and waiting for) a new value.
     void reads_recorded() {
-      if (held_slot_ < 0 || !retire_queries_[held_slot_]) {
+      if (held_slot_ < 0) {
         return;
       }
-      context_->End(retire_queries_[held_slot_].Get());
-      // Submits the conversion just recorded; the encoder would submit it next anyway.
-      context_->Flush();
-      held_reads_ended_ = true;
+      held_reads_value_ = signal_reads();
+      held_reads_ended_ = held_reads_value_ != 0;
     }
 
     receiver_t::wake_counts_t take_wake_counts() {
@@ -434,25 +451,16 @@ namespace platf::reshade_bridge {
       }
       // Conversion reads the shared slot directly; it stays `reading` while it is the newest
       // frame, so repeat conversions keep their exact pixels. Every earlier read of the
-      // previously held slot is already recorded on this context, so an event query ended
-      // after them covers all of them. The slot returns to the producer only once that query
-      // completes: right here when reads_recorded() ended it and it already completed (the
-      // reads normally finished during the previous encode), otherwise from retire_slots().
+      // previously held slot is already recorded on this context, so a read-fence value
+      // signalled after them covers all of them: the one reads_recorded() signalled, or a new one
+      // when the frame was polled again since. The slot returns to the producer once that value
+      // completes, right here when it already has, otherwise when the GPU completes it.
       if (held_slot_ >= 0) {
-        auto &held_slot = shared_->slots[held_slot_];
-        if (held_reads_ended_ && context_->GetData(retire_queries_[held_slot_].Get(), nullptr, 0, D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK &&
-            read64(held_slot.sequence) == held_sequence_) {
-          claim(held_slot, metadata_.generation, wire::slot_state::reading, wire::slot_state::free);
-        } else {
-          if (!held_reads_ended_) {
-            context_->End(retire_queries_[held_slot_].Get());
-          }
-          retiring_[held_slot_] = {true, held_sequence_, metadata_.generation, 0};
-          // Flush submits bounded work; neither producer nor consumer waits for the GPU.
-          context_->Flush();
-        }
+        const auto reads_value = held_reads_ended_ ? held_reads_value_ : signal_reads();
+        retire_slot(held_slot_, {true, held_sequence_, metadata_.generation, nonce_, reads_value});
       }
       held_reads_ended_ = false;
+      held_reads_value_ = 0;
       held_slot_ = selected;
       held_sequence_ = sequence;
       ++claims_;
@@ -557,50 +565,122 @@ namespace platf::reshade_bridge {
           return false;
         }
       }
-      const D3D11_QUERY_DESC query {D3D11_QUERY_EVENT, 0};
-      for (auto &retire_query : retire_queries_) {
-        if (FAILED(device_->CreateQuery(&query, &retire_query))) {
-          reset_resources();
-          return false;
-        }
-      }
       return true;
     }
 
-    // Returns a replaced slot to the producer once every read recorded before its event query
-    // has completed. Never blocks. Later conversion work normally submits the query; a driver
-    // may otherwise hold a lone event query back, so a query still pending after two polls is
-    // checked once more with a flush.
+    // Signals the read fence after every read recorded so far on the context, and submits it
+    // (the encoder would submit the conversion next anyway; neither side waits for the GPU).
+    // Returns the value, or 0 when the device could not signal it.
+    std::uint64_t signal_reads() {
+      if (FAILED(context4_->Signal(retire_fence_.Get(), retire_value_ + 1))) {
+        return 0;
+      }
+      context_->Flush();
+      return ++retire_value_;
+    }
+
+    // Returns a replaced slot to the producer once the reads before `entry.fence_value` have
+    // completed: at once when they have, otherwise on the thread pool when the GPU completes that
+    // value, whatever the owner is doing (with two pictures in flight the next claim can come
+    // before the previous conversion's GPU work completes). Never blocks. A slot whose value could
+    // not be signalled stays `reading` until its generation ends, never released early.
+    void retire_slot(int index, const retiring_t &entry) {
+      if (entry.fence_value == 0) {
+        return;
+      }
+      std::lock_guard lock(retire_lock_);
+      retiring_[index] = entry;
+      if (free_completed_locked()) {
+        arm_retire_locked();
+      }
+    }
+
+    // The owner's check of the same, for a slot whose completion the thread pool could not wait
+    // for. Never blocks. False once the device was removed.
     bool retire_slots() {
       if (!shared_) {
         return true;
       }
+      bool device_present;
+      {
+        std::lock_guard lock(retire_lock_);
+        device_present = free_completed_locked();
+      }
+      if (!device_present) {
+        BOOST_LOG(warning) << "ReShade SBS receiver GPU read failed; this device must be recreated (device removed).";
+        reset_resources();
+        supported_ = false;
+        return false;
+      }
+      return true;
+    }
+
+    // Caller holds retire_lock_. Frees every retiring slot whose reads completed, after the
+    // generation, nonce and sequence checks. False if the device was removed: nothing is freed.
+    bool free_completed_locked() {
+      // An active entry implies the mapping: cancel_retirement() clears them before it is unmapped.
+      if (std::none_of(retiring_.begin(), retiring_.end(), [](const retiring_t &retiring) {
+            return retiring.active;
+          }) ||
+          !shared_) {
+        return true;
+      }
+      const auto completed = retire_fence_->GetCompletedValue();
+      if (completed == UINT64_MAX) {
+        return false;
+      }
       for (std::uint32_t i = 0; i < wire::slot_count; ++i) {
         auto &retiring = retiring_[i];
-        if (!retiring.active || !retire_queries_[i]) {
-          continue;
-        }
-        auto result = context_->GetData(retire_queries_[i].Get(), nullptr, 0, D3D11_ASYNC_GETDATA_DONOTFLUSH);
-        if (result == S_FALSE && ++retiring.pending_polls > 2) {
-          result = context_->GetData(retire_queries_[i].Get(), nullptr, 0, 0);
-        }
-        if (FAILED(result)) {
-          BOOST_LOG(warning) << "ReShade SBS receiver GPU read failed; this device must be recreated (HRESULT " << result << ").";
-          reset_resources();
-          supported_ = false;
-          return false;
-        }
-        if (result != S_OK) {
+        if (!retiring.active || retiring.fence_value > completed) {
           continue;
         }
         wire::metadata_t current;
         auto &slot = shared_->slots[i];
-        if (snapshot(*shared_, current) && current.generation == retiring.generation && current.accepted_consumer_nonce == nonce_ && read64(slot.sequence) == retiring.sequence) {
+        if (snapshot(*shared_, current) && current.generation == retiring.generation && current.accepted_consumer_nonce == retiring.nonce && read64(slot.sequence) == retiring.sequence) {
           claim(slot, retiring.generation, wire::slot_state::reading, wire::slot_state::free);
         }
         retiring = {};
       }
       return true;
+    }
+
+    // Caller holds retire_lock_. Waits on the thread pool for the lowest value still retiring; when
+    // that fails the owner's retire_slots() frees the slot instead.
+    void arm_retire_locked() {
+      std::uint64_t lowest = 0;
+      for (const auto &retiring : retiring_) {
+        if (retiring.active && (lowest == 0 || retiring.fence_value < lowest)) {
+          lowest = retiring.fence_value;
+        }
+      }
+      if (!retire_wait_ || lowest == 0 || FAILED(retire_fence_->SetEventOnCompletion(lowest, retire_event_.get()))) {
+        return;
+      }
+      SetThreadpoolWait(retire_wait_, retire_event_.get(), nullptr);
+    }
+
+    // Abandons every retiring slot: once this returns, no read-completion callback runs or starts
+    // until another slot retires.
+    void cancel_retirement() {
+      {
+        std::lock_guard lock(retire_lock_);
+        retiring_ = {};
+      }
+      if (retire_wait_) {
+        // A callback running now finds nothing to free and does not re-arm; one it re-armed
+        // before the entries were cleared is cancelled here.
+        SetThreadpoolWait(retire_wait_, nullptr, nullptr);
+        WaitForThreadpoolWaitCallbacks(retire_wait_, TRUE);
+      }
+    }
+
+    static void CALLBACK on_reads_completed(PTP_CALLBACK_INSTANCE, PVOID context, PTP_WAIT, TP_WAIT_RESULT) {
+      auto *self = static_cast<impl_t *>(context);
+      std::lock_guard lock(self->retire_lock_);
+      // A removed device completes every value: leave it to the owner's retire_slots().
+      if (self->free_completed_locked()) {
+        self->arm_retire_locked();
+      }
     }
 
     // Arms the wake on the held generation's fence once. Each completion re-arms it for the next
@@ -708,10 +788,8 @@ namespace platf::reshade_bridge {
       held_slot_ = -1;
       held_sequence_ = 0;
       held_reads_ended_ = false;
-      retiring_ = {};
-      for (auto &retire_query : retire_queries_) {
-        retire_query.Reset();
-      }
+      held_reads_value_ = 0;
+      cancel_retirement();
       for (auto &view : views_) {
         view.Reset();
       }
@@ -765,23 +843,27 @@ namespace platf::reshade_bridge {
     handle_t process_, mapping_;
     wire::shared_state_t *shared_ = nullptr;
     wire::metadata_t metadata_;
-    struct retiring_t {
-      bool active = false;
-      std::uint64_t sequence = 0, generation = 0;
-      std::uint32_t pending_polls = 0;
-    };
-
     std::array<ComPtr<ID3D11Texture2D>, wire::slot_count> textures_;
     std::array<ComPtr<ID3D11ShaderResourceView>, wire::slot_count> views_;
-    std::array<ComPtr<ID3D11Query>, wire::slot_count> retire_queries_;
-    std::array<retiring_t, wire::slot_count> retiring_ {};
     ComPtr<ID3D11Fence> ready_fence_;
     std::optional<frame_t> cached_;
     // The slot behind cached_ (or the last frame before cached_ was dropped), still `reading`.
     int held_slot_ = -1;
     std::uint64_t held_sequence_ = 0;
-    // The held slot's query was ended after every read since poll() last returned its frame.
+    // The read fence was signalled (held_reads_value_) after every read since poll() last returned
+    // the held frame.
     bool held_reads_ended_ = false;
+    std::uint64_t held_reads_value_ = 0;
+    // Read retirement: this context signals retire_fence_ (owner thread, retire_value_) after a
+    // conversion's reads, and a replaced slot returns to free once its value completes, from the
+    // owner or from the thread-pool wait on retire_event_. retire_lock_ guards retiring_ between them.
+    ComPtr<ID3D11DeviceContext4> context4_;
+    ComPtr<ID3D11Fence> retire_fence_;
+    std::uint64_t retire_value_ = 0;
+    handle_t retire_event_;
+    PTP_WAIT retire_wait_ = nullptr;
+    std::mutex retire_lock_;
+    std::array<retiring_t, wire::slot_count> retiring_ {};
     std::chrono::steady_clock::time_point next_attach_ {};
     std::uint64_t reported_generation_ = 0;
     int reported_width_ = 0, reported_height_ = 0;

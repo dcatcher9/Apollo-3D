@@ -4742,16 +4742,19 @@ exact copied pixels and source lifetimes.
 Sunshine claims the newest completed slot and converts straight from it through a shader view
 created per slot when the generation opens; there is no private copy. The newest frame's slot stays
 `reading` while it is the newest, so repeat conversions and stream-gamma reconversion keep reading
-it. Every conversion that reads it then ends that slot's event query after all of its reads (Y,
-UV, Local AR, resample and the cursor patch) and flushes (`receiver_t::reads_recorded`). When a
-newer frame is claimed and that query has completed, the normal case because the previous conversion's
-GPU work has finished by then, the replaced slot returns to free at the claim itself, after the generation,
-nonce and sequence checks. Otherwise (its reads are still running, or a poll returned the frame
-again after its query was ended) a query covering every read stays pending, and the slot returns
-to free only once it completes. It never blocks: queries are read without a flush, and one still
-pending after two polls is checked once with a flushing read (a lone event query was observed
-never completing otherwise). A generation change or detach abandons held and retiring slots rather
-than releasing them early. While the host encodes a frame it therefore holds only that frame's slot
+it. Every conversion that reads it then signals the receiver's own read fence after all of its
+reads (Y, UV, Local AR, resample and the cursor patch) and flushes (`receiver_t::reads_recorded`).
+When a newer frame is claimed and that value has completed, the replaced slot returns to free at the
+claim itself, after the generation, nonce and sequence checks. Otherwise (its reads are still
+running, or a poll returned the frame again after the signal, which then signals a new value) a
+thread-pool wait on that value returns the slot as the GPU completes it, whatever the encode loop is
+doing; the loop's polls and submissions check the same only as a fallback for a wait that could not
+be armed. With two pictures in flight a claim can come before the previous conversion's GPU work
+(queued behind the game's) completed, and the loop then sleeps to its next poll target: returning
+the slot only at the loop's next check left the producer one slot for part of each such interval
+(`AReplacedSlotReturnsAsItsReadsCompleteWithPicturesInFlight`: 85.5 and 86.5 against 88.8 and 89.5
+new frames/s with FG 2x and 4x and the live FG-on encode times). Nothing blocks. A generation change
+or detach abandons held and retiring slots rather than releasing them early, and cancels the wait. While the host encodes a frame it therefore holds only that frame's slot
 and leaves the producer two. Before, the replaced slot stayed `reading` until that encode returned,
 so for about 9 of every 11 ms at 90 fps the producer had one slot. There is no cross-process GPU
 wait and no texture overwrite while either side uses the slot. A new consumer requests fresh
@@ -4796,8 +4799,7 @@ as the packets' content-age loggers do, so a keepalive that re-renders an unchan
 as repeated content although it converted. Image waits that run to their bound with an overshoot near 15.6 ms are tick-bound waits. While an
 export is live the loop neither polls nor repeats frames at stream cadence: new exports, cursor
 changes and the minimum-FPS keepalive (which re-checks the connection) produce frames, and a due
-stream-gamma white-level query runs in the next of them rather than forcing a repeat. A replaced
-slot whose reads were still pending at its claim is retired right after the next picture's submission.
+stream-gamma white-level query runs in the next of them rather than forcing a repeat.
 `RemoteEncodeProviderPacingTest.TickBoundWaitsReproduceTheLiveSixtyFrameCap` runs this loop's
 wait and schedule helpers against the ring's rules with the live FG off, 2x and 4x arrival
 patterns and waits as long as they really are, and reproduces the live 56-62 new frames/s with
@@ -4826,11 +4828,19 @@ submission order and publishes each packet as soon as its picture completes, wha
 doing; the loop waits only while two are in flight, and then for the oldest. Before, on 10-06 in
 Stellar Blade at 4K with FG on, `encode_frame()` waited for each picture: NVENC's completion wait
 averaged 8.5-12.2 ms (about 5 ms uncontended; the rest is the conversion's GPU work queued behind
-the game's) and the host took 55-71 new frames/s, against 80-90 with FG off. A reference
-invalidation or bitrate change first waits for the pictures in flight, as a returning
-`encode_frame()` did; an IDR applies to the next picture submitted. A picture that fails on that
-thread fails the encoder, every exit of the loop first delivers the pictures still in flight, and a
-picture's 250 ms budget starts when the wait for it does, after the previous one completed.
+the game's) and the host took 55-71 new frames/s, against 80-90 with FG off. A bitrate change, and a
+reference invalidation that calls `NvEncInvalidateRefFrames`, first wait for the pictures in flight,
+as a returning `encode_frame()` did; one already handled, malformed or too large for the DPB (its
+range extends to the last submitted picture) becomes done or an IDR at once. An IDR applies to the
+next picture submitted. When the full encoded queue drops a delta frame and requests the recovery
+IDR, the deltas already in flight behind it are discarded until that IDR, so the first packet after
+the drop is the IDR. A picture that fails on that thread fails the encoder; a loop exit first
+delivers the pictures still in flight, and is clean only if none of them failed, so a failure then
+still keeps new encoders waiting for its teardown. A picture's 250 ms budget starts when the wait for
+it does, after the previous one completed. The loop claims at its poll target and then waits for
+the oldest picture when both are in flight: waiting first would claim a newer frame but rebase the
+schedule after every slow picture (`ClaimingAtThePollTargetKeepsTheCadenceWhenEveryPictureIsInFlight`:
+82.5 against 87.5-88.2 new frames/s and gaps of 34-35 ms with a 14-45 ms tail every eighth picture).
 `PicturesInFlightTakeEveryStreamFrameAtFrameGenerationEncodeTimes` runs the loop model with the
 live FG-on encode times (5.5-22 ms per picture): 68 new frames/s one picture at a time, 89 with two
 in flight, Present to packet within 0.5 ms.

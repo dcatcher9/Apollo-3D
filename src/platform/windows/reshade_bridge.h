@@ -92,13 +92,15 @@ namespace platf::reshade_bridge {
     // changes: polling then cannot change anything until captures or keepalives call poll().
     [[nodiscard]] bool frame_pending() const;
 
-    // Returns replaced slots whose reads have completed to the producer, without waiting. poll()
-    // does the same; calling this once the encoder consumed a conversion frees them a frame sooner.
+    // Returns replaced slots whose reads have completed to the producer, without waiting. A thread-
+    // pool wait on the receiver's read fence does this as each completes; poll() and this call are
+    // the owner's fallback for when that wait could not be armed.
     void retire();
 
     // Every read of the frame poll() last returned is now recorded on this receiver's context (call
-    // it once a conversion is recorded). The claim that replaces that frame then returns its slot
-    // to the producer at once when those reads have completed, rather than one conversion later.
+    // it once a conversion is recorded): signals the read fence after them. The claim that replaces
+    // that frame returns its slot to the producer at once when that value has completed, otherwise
+    // as soon as the GPU completes it.
     void reads_recorded();
 
     // Diagnostics since the last call: newer frames claimed, fence wakes, claims whose frame had

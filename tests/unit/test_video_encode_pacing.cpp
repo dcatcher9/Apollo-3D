@@ -421,21 +421,37 @@ namespace {
   // (8.4-10.4 ms), the model the rules above were tuned against. Set: the conversion and picture
   // submission cost the loop `cpu`; the picture completes `latency_low_ms`-`latency_high_ms` after
   // its submission (the conversion's GPU work queued behind the game's, then NVENC), in order and
-  // at least `engine` after the previous one. With `depth` 1 the loop waits for that completion
-  // (nvenc_base::encode_frame()); with more, the loop submits another picture at once and waits only
-  // when `depth` are in flight (encode_pipeline_t), and the packet leaves when its picture completes.
+  // at least `engine` after the previous one; the conversion's GPU work, and so its reads of the
+  // export slot, completes `engine` before that latency ends. With `depth` 1 the loop waits for the
+  // completion (nvenc_base::encode_frame()); with more, the loop submits another picture at once
+  // and waits only when `depth` are in flight (encode_pipeline_t), and the packet leaves when its
+  // picture completes.
   struct encoder_model_t {
     unsigned depth = 1;
     double latency_low_ms = 0, latency_high_ms = 0;
     std::chrono::nanoseconds cpu {400us};
     std::chrono::nanoseconds engine {5ms};
+    /** The tail: every `tail_every`-th picture takes `latency_high_ms`-`tail_high_ms` instead. */
+    unsigned tail_every = 0;
+    double tail_high_ms = 0;
+
+    /** When a slot replaced while its conversion's reads still ran returns to the producer. */
+    enum class retire_e {
+      reads_complete,  ///< As the GPU completes them: the receiver's read-fence wait.
+      encode_thread,  ///< At the encode thread's first check after that: the next submission or conversion (5798c45f).
+    } retire = retire_e::reads_complete;
+
+    /** With every picture in flight, the loop waits for the oldest before it claims, instead of
+     *  claiming and converting at its poll target and then waiting (encode_run()). */
+    bool wait_before_claim = false;
   };
 
   // The export ring and encode_run() while an independent provider's export is live, stepped every
   // 10 us. Producer, per Present: a free slot whose write completed, else the oldest ready slot
   // whose write completed and that a newer completed frame supersedes, else the Present drops.
   // Host: claims the newest ready frame past its held one whose fence passed and returns the
-  // replaced slot (its reads completed during the previous encode). Its wait composes
+  // replaced slot once its conversion's reads completed (with `encoder`, by its `retire` rule;
+  // without, they completed during the previous encode). Its wait composes
   // remaining_wait(), provider_keepalive_wait() and, by `rules`, provider_hold() as encode_run()
   // does; a fence wake or desktop capture ends an image wait early, and one that arrives while the
   // loop is busy ends the next image wait at once (event_t). After the wait a pending frame
@@ -476,6 +492,27 @@ namespace {
     export_ring_result_t result;
     std::chrono::nanoseconds total_age {}, total_claim_delay {};
     std::optional<std::chrono::nanoseconds> last_new;
+    // Slots replaced while the reads of their last conversion still ran, and when those completed.
+    struct retiring_slot_t {
+      int slot;
+      std::size_t sequence;
+      std::chrono::nanoseconds reads_done;
+    };
+
+    std::vector<retiring_slot_t> retiring;
+    std::chrono::nanoseconds held_reads_done {};  // The last conversion that read the held slot.
+    std::deque<std::chrono::nanoseconds> submissions;  // Encode-thread checks still to come.
+    const auto return_read_slots = [&](std::chrono::nanoseconds at) {
+      std::erase_if(retiring, [&](const retiring_slot_t &replaced) {
+        if (replaced.reads_done > at) {
+          return false;
+        }
+        if (ring[replaced.slot].state == slot_e::reading && ring[replaced.slot].sequence == replaced.sequence) {
+          ring[replaced.slot].state = slot_e::free;
+        }
+        return true;
+      });
+    };
 
     source_owner source;
     source.observe(std::make_shared<captured_source>(1, at(0ns)));
@@ -517,6 +554,14 @@ namespace {
     };
 
     for (std::chrono::nanoseconds now {}; now < duration; now += step) {
+      // Replaced slots whose reads completed: at once by the read-fence wait, else at the encode
+      // thread's checks (each submission here; each conversion below).
+      if (!encoder || encoder->retire == encoder_model_t::retire_e::reads_complete) {
+        return_read_slots(now);
+      }
+      for (; !submissions.empty() && submissions.front() <= now; submissions.pop_front()) {
+        return_read_slots(submissions.front());
+      }
       // Producer.
       for (; next_present < presents.size() && presents[next_present] <= now; ++next_present) {
         std::size_t newest_completed = 0;
@@ -575,6 +620,16 @@ namespace {
         continue;
       }
       if (loop == loop_e::start) {
+        if (encoder && encoder->depth > 1 && encoder->wait_before_claim) {
+          // Every picture in flight: wait for the oldest before planning the claim.
+          while (!in_flight.empty() && in_flight.front() <= now) {
+            in_flight.pop_front();
+          }
+          if (in_flight.size() >= encoder->depth) {
+            blocked_until = in_flight.front();
+            continue;
+          }
+        }
         loop = loop_e::planning;
         if (rules == loop_rules_e::head) {
           // stream_gamma_requests->pop(0ms) on its empty queue: a wait that nothing notifies.
@@ -617,8 +672,15 @@ namespace {
       if ((selected >= 0 || keepalive_due) && source.due(at(now), poll_target, false, true)) {
         target = video::detail::select_encode_frame_schedule(at(now), target, stream, threshold).next_encode_target;
         if (selected >= 0) {
+          // The conversion's poll first returns replaced slots whose reads completed; the claim
+          // then returns the held slot at once if its reads completed, else once they do.
+          return_read_slots(now);
           if (held_slot >= 0) {
-            ring[held_slot].state = slot_e::free;
+            if (held_reads_done <= now) {
+              ring[held_slot].state = slot_e::free;
+            } else {
+              retiring.push_back({held_slot, held, held_reads_done});
+            }
           }
           ring[selected].state = slot_e::reading;
           held_slot = selected;
@@ -637,6 +699,7 @@ namespace {
         if (!encoder) {
           blocked_until = now + 8400us + 1ms * (encodes++ % 3);  // Conversion and NVENC: 8.4-10.4 ms.
           last_encode = blocked_until;
+          held_reads_done = blocked_until;
           continue;
         }
         // Retired pictures have left as packets.
@@ -648,8 +711,12 @@ namespace {
           submitted = std::max(submitted, in_flight.front());  // acquire(): wait for the oldest.
           in_flight.pop_front();
         }
-        const auto completion = std::max(submitted + encode_jitter.between(encoder->latency_low_ms, encoder->latency_high_ms), last_completion + encoder->engine);
+        const bool tail = encoder->tail_every && encodes % encoder->tail_every == encoder->tail_every - 1;
+        const auto latency = tail ? encode_jitter.between(encoder->latency_high_ms, encoder->tail_high_ms) : encode_jitter.between(encoder->latency_low_ms, encoder->latency_high_ms);
+        const auto completion = std::max(submitted + latency, last_completion + encoder->engine);
         last_completion = completion;
+        held_reads_done = submitted + std::max(latency - encoder->engine, 0ns);
+        submissions.push_back(submitted);
         in_flight.push_back(completion);
         result.max_in_flight = std::max(result.max_in_flight, static_cast<unsigned>(in_flight.size()));
         if (selected >= 0) {
@@ -751,12 +818,13 @@ namespace {
       return std::chrono::duration<double, std::milli>(value).count();
     };
     std::printf(
-      "[ MEASURE  ] %s, %s: new %.1f/s repeats %d, at most %u in flight, claim to packet mean %.2f ms, Present to packet mean %.2f ms, "
-      "mean claim age %.1f ms, max gap %.1f ms\n",
+      "[ MEASURE  ] %s, %s: new %.1f/s repeats %d, dropped Presents %.0f/s, at most %u in flight, claim to packet mean %.2f ms, "
+      "Present to packet mean %.2f ms, mean claim age %.1f ms, max gap %.1f ms\n",
       label,
       modes[static_cast<int>(mode)],
       result.new_frames,
       result.repeats,
+      result.dropped,
       result.max_in_flight,
       ms(result.mean_encode),
       ms(result.mean_present_to_packet),
@@ -814,6 +882,54 @@ namespace {
       EXPECT_GE(pipelined.new_frames, serial.new_frames - 0.5);
       EXPECT_EQ(pipelined.repeats, 0);
       EXPECT_LE(pipelined.mean_encode, serial.mean_encode + 500us);
+    }
+  }
+
+  TEST(RemoteEncodeProviderPacingTest, AReplacedSlotReturnsAsItsReadsCompleteWithPicturesInFlight) {
+    // With two pictures in flight a claim can come before the previous conversion's GPU work (queued
+    // behind the game's) completed, so the slot it replaces is still being read. 5798c45f returned
+    // such a slot only at the encode thread's next check (a submission or the next conversion), and
+    // none runs during an exact hold: the producer meanwhile had one slot. The receiver's read-fence
+    // wait returns it as the GPU completes those reads.
+    for (const auto mode : {game_frames_e::fg_2x, game_frames_e::fg_4x}) {
+      encoder_model_t checks {2, 5.5, 22.0};
+      checks.retire = encoder_model_t::retire_e::encode_thread;
+      const auto at_checks = simulate_export_ring(mode, fence_wake_e::prompt, loop_rules_e::production, 4s, checks);
+      const auto at_completion = simulate_export_ring(mode, fence_wake_e::prompt, loop_rules_e::production, 4s, encoder_model_t {2, 5.5, 22.0});
+      print_encoder_model("two in flight, slot returned at the encode thread's next check", mode, at_checks);
+      print_encoder_model("two in flight, slot returned as its reads complete", mode, at_completion);
+      EXPECT_GE(at_completion.new_frames, 87.5);
+      EXPECT_GE(at_completion.new_frames, at_checks.new_frames + 1.5);
+      EXPECT_EQ(at_completion.repeats, 0);
+      EXPECT_LT(at_completion.max_gap, 2 * 11111111ns);
+      EXPECT_LT(at_completion.dropped, at_checks.dropped);
+    }
+  }
+
+  TEST(RemoteEncodeProviderPacingTest, ClaimingAtThePollTargetKeepsTheCadenceWhenEveryPictureIsInFlight) {
+    // In the encode times' long tail both pictures are still in flight when the next frame is due.
+    // encode_run() claims and converts the newest frame at its poll target and then waits for the
+    // oldest picture, so a frame completed during that wait goes to the next claim. Waiting for the
+    // slot first would claim that newer frame, but the claim would then come after its target: the
+    // schedule rebases to it (select_encode_frame_schedule()), which skips stream frames after every
+    // slow picture for a few tenths of a millisecond of Present to packet.
+    // Live (10-06, FG on) completion waits averaged 6.4-12.2 ms with maxima of 92-691 ms: here
+    // 5.5-14 ms, and every eighth picture 14-45 ms (12.2 ms on average).
+    encoder_model_t production {2, 5.5, 14.0};
+    production.tail_every = 8;
+    production.tail_high_ms = 45.0;
+    for (const auto mode : {game_frames_e::fg_2x, game_frames_e::fg_4x}) {
+      auto slot_first = production;
+      slot_first.wait_before_claim = true;
+      const auto at_target = simulate_export_ring(mode, fence_wake_e::prompt, loop_rules_e::production, 4s, production);
+      const auto after_slot = simulate_export_ring(mode, fence_wake_e::prompt, loop_rules_e::production, 4s, slot_first);
+      print_encoder_model("two in flight, claimed at the poll target, then waited for a slot", mode, at_target);
+      print_encoder_model("two in flight, waited for a slot, then claimed", mode, after_slot);
+      EXPECT_GE(at_target.new_frames, 87.0);
+      EXPECT_GE(at_target.new_frames, after_slot.new_frames + 3.0);
+      EXPECT_EQ(at_target.repeats, 0);
+      EXPECT_LT(at_target.max_gap, after_slot.max_gap);
+      EXPECT_LE(at_target.mean_present_to_packet, after_slot.mean_present_to_packet + 500us);
     }
   }
 

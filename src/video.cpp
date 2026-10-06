@@ -465,6 +465,13 @@ namespace video {
       }
     }
 
+    /** With pictures in flight: whether invalidate_ref_frames() must first wait for them, because it
+     *  would invalidate (an already handled, malformed or too-large range is decided at once). */
+    bool invalidation_needs_drain(int64_t first_frame, int64_t last_frame) const {
+      return device && device->nvenc && device->nvenc->frames_in_flight() != 0 &&
+             device->nvenc->would_invalidate_ref_frames(first_frame, last_frame);
+    }
+
     bool reconfigure_bitrate(int bitrate_kbps) {
       return device && device->nvenc && device->nvenc->reconfigure_bitrate(bitrate_kbps);
     }
@@ -504,8 +511,8 @@ namespace video {
       }
       const bool submitted = device->nvenc->submit_frame(frame_index, force_idr);
       force_idr = false;
-      // Never blocks: hands back export slots whose conversion reads completed. It records on the
-      // device's immediate context, so it stays on this thread rather than the retrieving one.
+      // Never blocks: the encode thread's fallback for export slots whose conversion reads
+      // completed (the receiver's read-fence wait normally hands them back), and its diagnostics.
       device->encoder_consumed_input();
       return submitted;
     }
@@ -1139,25 +1146,32 @@ namespace video {
       if (result.dropped_packets == 0) {
         return;
       }
-      drops_since_log += result.dropped_packets;
       if (result.request_idr) {
         idr_events->try_raise(true);
       }
+      log(result.dropped_packets, result.request_idr ? ", recovery IDR requested."sv : ", newest IDR retained."sv);
+    }
 
+    /** A delta frame discarded while the recovery IDR an earlier drop requested is still due. */
+    void record_awaiting_idr() {
+      log(1, ", awaiting the recovery IDR."sv);
+    }
+
+  private:
+    void log(std::size_t dropped, std::string_view outcome) {
+      drops_since_log += dropped;
       const auto now = std::chrono::steady_clock::now();
       if (now >= next_log) {
         BOOST_LOG(warning) << "Encoded video queue backpressure dropped "sv
                            << drops_since_log
                            << " frame(s); queue capacity="sv
                            << ENCODED_PACKET_QUEUE_LIMIT
-                           << (result.request_idr ? ", recovery IDR requested."sv :
-                                                    ", newest IDR retained."sv);
+                           << outcome;
         drops_since_log = 0;
         next_log = now + 5s;
       }
     }
 
-  private:
     std::size_t drops_since_log = 0;
     std::chrono::steady_clock::time_point next_log = std::chrono::steady_clock::now();
   };
@@ -1365,13 +1379,20 @@ namespace video {
     if (session->pipeline_depth() > 1) {
       pipeline.emplace(
         session->pipeline_depth(),
-        [&](encoded_frame_context_t &frame) {
+        [&, recovery_gate = detail::recovery_gate_t {}](encoded_frame_context_t &frame) mutable {
           auto encoded_frame = session->retrieve_frame();
+          if (!encoded_frame.data.empty() && !recovery_gate.admits(encoded_frame.idr)) {
+            // Submitted before the recovery IDR was requested: it references the dropped frame.
+            session->recycle_frame_buffer(std::move(encoded_frame.data));
+            drop_report.record_awaiting_idr();
+            return true;
+          }
           const auto result = publish_encoded_frame(std::move(encoded_frame), frame, *session, packets, channel_data, encode_diagnostics ? &*encode_diagnostics : nullptr);
           if (result.failed) {
             BOOST_LOG(error) << "Could not encode video packet"sv;
             return false;
           }
+          recovery_gate.published(result.request_idr);
           drop_report.record(result, idr_events);
           return true;
         },
@@ -1530,6 +1551,12 @@ namespace video {
         return false;
       }
 
+      // Deliver the pictures still in flight before the exit counts as clean: one that fails meanwhile
+      // (its budget, a removed device) fails this encoder, so fail_guard tracks the teardown that new
+      // encoders then wait for. Nothing is in flight afterwards, so nothing can fail later.
+      if (pipeline && !pipeline->drain()) {
+        return true;  // `failed` stays set.
+      }
       failed = false;
       return true;
     };
@@ -1578,9 +1605,11 @@ namespace video {
 
       while (invalidate_ref_frames_events->peek()) {
         if (auto frames = invalidate_ref_frames_events->pop(0ms)) {
-          // The pictures in flight may reference the lost frames: the invalidation follows them, and
-          // the next picture submitted confirms it (refused, so an IDR, if one failed).
-          if (pipeline) {
+          // The range extends to the pictures in flight, which may reference the lost frames, and
+          // the next picture submitted confirms it. Only an actual invalidation waits for them
+          // first (refused, so an IDR, if one failed); a handled, malformed or too-large range is
+          // decided at once, so its recovery frame converts without that wait.
+          if (pipeline && session->invalidation_needs_drain(frames->first, frames->second)) {
             pipeline->drain();
           }
           session->invalidate_ref_frames(frames->first, frames->second);
@@ -1878,7 +1907,10 @@ namespace video {
       );
       bool encoded = false;
       if (pipeline) {
-        // Waits only while every picture is in flight, and then for the oldest one. The picture is
+        // Waits only while every picture is in flight, and then for the oldest one. The claim above
+        // stays at its poll target: waiting for a slot before it would rebase the stream cadence
+        // after every slow picture (RemoteEncodeProviderPacingTest.
+        // ClaimingAtThePollTargetKeepsTheCadenceWhenEveryPictureIsInFlight). The picture is
         // published by the retrieving thread when it completes.
         encoded = pipeline->acquire();
         const auto completion_wait = std::chrono::steady_clock::now() - encode_started;

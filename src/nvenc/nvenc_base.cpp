@@ -1073,7 +1073,7 @@ namespace nvenc {
     if (accepted) {
       encoder_used = true;
       // Invalidation is confirmed by the first picture submitted after it, and a later
-      // invalidation extends to this one (invalidate_ref_frames() runs with nothing in flight).
+      // invalidation extends to this one, in flight or not.
       encoder_state.rfi_needs_confirmation = false;
       encoder_state.last_encoded_frame_index = frame_index;
       next_submit_slot = (slot_index + 1) % pipeline_depth_;
@@ -1246,25 +1246,41 @@ namespace nvenc {
     return true;
   }
 
-  bool nvenc_base::invalidate_ref_frames(uint64_t first_frame, uint64_t last_frame) {
-    if (cleanup_blocked.load(std::memory_order_acquire)) {
-      return false;
+  nvenc_base::rfi_plan_e nvenc_base::plan_ref_frame_invalidation(uint64_t first_frame, uint64_t last_frame) const {
+    if (cleanup_blocked.load(std::memory_order_acquire) || !encoder || !encoder_params.rfi) {
+      return rfi_plan_e::refused;
     }
-    // A picture already submitted may reference the lost frames, and the next submitted picture
-    // confirms the invalidation. With one in flight neither holds: refuse, so the caller forces
-    // an IDR instead.
-    if (!encoder || !encoder_params.rfi || frames_in_flight() != 0) {
+    if (first_frame >= encoder_state.last_rfi_range.first && last_frame <= encoder_state.last_rfi_range.second) {
+      return rfi_plan_e::done;
+    }
+    if (last_frame < first_frame) {
+      return rfi_plan_e::malformed;
+    }
+    // The range extends to the last submitted picture: those in flight may reference the lost frames.
+    if (encoder_state.last_encoded_frame_index - first_frame + 1 >= encoder_params.ref_frames_in_dpb) {
+      return rfi_plan_e::too_large;
+    }
+    return rfi_plan_e::invalidate;
+  }
+
+  bool nvenc_base::would_invalidate_ref_frames(uint64_t first_frame, uint64_t last_frame) const {
+    return plan_ref_frame_invalidation(first_frame, last_frame) == rfi_plan_e::invalidate;
+  }
+
+  bool nvenc_base::invalidate_ref_frames(uint64_t first_frame, uint64_t last_frame) {
+    const auto plan = plan_ref_frame_invalidation(first_frame, last_frame);
+    if (plan == rfi_plan_e::refused) {
       return false;
     }
 
-    if (first_frame >= encoder_state.last_rfi_range.first && last_frame <= encoder_state.last_rfi_range.second) {
+    if (plan == rfi_plan_e::done) {
       BOOST_LOG(debug) << "NvEnc: rfi request " << first_frame << "-" << last_frame << " already done";
       return true;
     }
 
     encoder_state.rfi_needs_confirmation = true;
 
-    if (last_frame < first_frame) {
+    if (plan == rfi_plan_e::malformed) {
       BOOST_LOG(error) << "NvEnc: invaid rfi request " << first_frame << "-" << last_frame << ", generating IDR";
       return false;
     }
@@ -1274,8 +1290,15 @@ namespace nvenc {
 
     encoder_state.last_rfi_range = {first_frame, last_frame};
 
-    if (last_frame - first_frame + 1 >= encoder_params.ref_frames_in_dpb) {
+    if (plan == rfi_plan_e::too_large) {
       BOOST_LOG(debug) << "NvEnc: rfi request too large, generating IDR";
+      return false;
+    }
+
+    // Only the invalidation itself needs no picture in flight (the caller retrieves them first:
+    // would_invalidate_ref_frames()). Should one still be in flight, fall back to an IDR.
+    if (frames_in_flight() != 0) {
+      BOOST_LOG(debug) << "NvEnc: rfi request with a picture in flight, generating IDR";
       return false;
     }
 

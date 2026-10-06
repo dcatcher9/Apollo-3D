@@ -166,15 +166,24 @@ namespace nvenc {
     bool reconfigure_bitrate(int bitrate_kbps);
 
     /**
-     * @brief Perform reference frame invalidation (RFI) procedure. Call with no picture in flight,
-     *        so that the range extends to the last submitted picture and the next submitted one is
-     *        the first encoded after it.
+     * @brief Perform reference frame invalidation (RFI) procedure. The range extends to the last
+     *        submitted picture and the next submitted one is the first encoded after it. A request
+     *        already done, malformed or too large for the DPB is decided (done, or an IDR) whatever
+     *        is in flight; one that invalidates (would_invalidate_ref_frames()) needs no picture in
+     *        flight and is refused, so an IDR, while one is.
      * @param first_frame First frame index of the invalidation range.
      * @param last_frame Last frame index of the invalidation range.
      * @return `true` on success, `false` on error.
      *         After error next frame must be encoded with `force_idr = true`.
      */
     bool invalidate_ref_frames(uint64_t first_frame, uint64_t last_frame);
+
+    /**
+     * Whether invalidate_ref_frames() with this range would call `NvEncInvalidateRefFrames()`,
+     * which must not run while a picture is in flight: only then must the caller first retrieve the
+     * pictures in flight. Submitting thread.
+     */
+    [[nodiscard]] bool would_invalidate_ref_frames(uint64_t first_frame, uint64_t last_frame) const;
 
     /** Diagnostics: CPU time the last encode_frame() spent submitting its picture and waiting for
      *  its completion. Zero while diagnostics are disabled and for a step the frame did not reach.
@@ -352,6 +361,17 @@ namespace nvenc {
     bool release_encoder_resources();
     bool teardown_wait_ready(const nvenc_event_wait_result &result, const char *operation);
     bool wait_for_frame_completion(unsigned slot_index);
+
+    /** What invalidate_ref_frames() does with a range, decided without side effects. */
+    enum class rfi_plan_e {
+      refused,  ///< No encoder, no RFI support or cleanup blocked: an IDR.
+      done,  ///< Covered by the previous range.
+      malformed,  ///< Last before first: an IDR.
+      too_large,  ///< The extended range reaches the DPB size: an IDR.
+      invalidate,  ///< NvEncInvalidateRefFrames() for the extended range.
+    };
+
+    [[nodiscard]] rfi_plan_e plan_ref_frame_invalidation(uint64_t first_frame, uint64_t last_frame) const;
 
     struct stage_diagnostics_t {
       logging::time_delta_periodic_logger input_map {info, "Video NVENC: input map CPU"};

@@ -179,4 +179,26 @@ namespace video::detail {
     std::thread worker_;  ///< Last: starts once every other member exists.
   };
 
+  /**
+   * Retiring thread: keeps the encoded queue's recovery invariant with pictures in flight. When the
+   * full queue drops a delta frame (with the stale packets) and requests a recovery IDR, the deltas
+   * already submitted behind it reference the dropped frame; they are discarded until that IDR, so
+   * the first packet queued after the drop is the IDR, as with one picture at a time.
+   */
+  class recovery_gate_t {
+  public:
+    /** Whether a retrieved picture may be published: an IDR always, a delta unless an IDR awaits. */
+    [[nodiscard]] bool admits(bool idr) const noexcept {
+      return idr || !awaiting_idr_;
+    }
+
+    /** After an admitted picture's publication: whether it was dropped and requested the IDR. */
+    void published(bool requested_idr) noexcept {
+      awaiting_idr_ = requested_idr;
+    }
+
+  private:
+    bool awaiting_idr_ = false;
+  };
+
 }  // namespace video::detail

@@ -515,8 +515,9 @@ namespace platf::dxgi {
     }
 
     void encoder_consumed_input() {
-      // The conversion's reads of a replaced export slot are normally complete once its encode
-      // returns; hand that slot back now instead of at the next conversion.
+      // A replaced export slot returns to the producer when the GPU completes the conversion's
+      // reads of it (the receiver's read-fence wait), which with pictures in flight can come after
+      // the next claim. This is the owner's fallback check, should that wait not be armed.
       if (reshade_receiver) {
         reshade_receiver->retire();
         if (diagnostics_enabled && ::video::is_packed_mode(sbs_mode)) {

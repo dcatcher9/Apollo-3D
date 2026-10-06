@@ -9214,3 +9214,41 @@ TEST(VideoPacketLifetimeTest, RetainsBroadcastStateUntilPacketIsConsumed) {
   packet.channel_data.reset();
   EXPECT_TRUE(weak_channel.expired());
 }
+
+TEST(EncodePipelineWiringTest, ExitsRecoveryAndInvalidationKeepTheirOneAtATimeGuarantees) {
+  // encode_run() with pictures in flight (Game 3D): guarantees encode_frame() gave by returning only
+  // once its picture completed, checked on the loop's own source.
+  const auto source = read_source_file(SUNSHINE_SOURCE_DIR "/src/video.cpp");
+  ASSERT_FALSE(source.empty());
+  const auto run = source.find("void encode_run(");
+  ASSERT_NE(run, std::string::npos);
+
+  // A lifecycle exit is clean only once the pictures in flight were delivered: one that fails
+  // while they drain keeps `failed`, so recovery tracks the teardown that blocks new encoders.
+  const auto lifecycle = source.find("auto lifecycle_change_requested = [&]()", run);
+  const auto lifecycle_drain = source.find("if (pipeline && !pipeline->drain()) {", lifecycle);
+  const auto clean_exit = source.find("failed = false;", lifecycle);
+  ASSERT_NE(lifecycle, std::string::npos);
+  ASSERT_NE(lifecycle_drain, std::string::npos);
+  ASSERT_NE(clean_exit, std::string::npos);
+  EXPECT_LT(lifecycle_drain, clean_exit);
+
+  // The retrieving thread discards deltas submitted behind an overflow drop until the recovery IDR.
+  const auto gate = source.find("!recovery_gate.admits(encoded_frame.idr)", run);
+  const auto publish = source.find("publish_encoded_frame(std::move(encoded_frame), frame, *session", run);
+  const auto gate_update = source.find("recovery_gate.published(result.request_idr);", run);
+  ASSERT_NE(gate, std::string::npos);
+  ASSERT_NE(publish, std::string::npos);
+  ASSERT_NE(gate_update, std::string::npos);
+  EXPECT_LT(gate, publish);
+  EXPECT_LT(publish, gate_update);
+
+  // Only an actual invalidation waits for the pictures in flight.
+  const auto invalidation = source.find("while (invalidate_ref_frames_events->peek())", lifecycle);
+  const auto invalidation_drain = source.find("if (pipeline && session->invalidation_needs_drain(frames->first, frames->second))", invalidation);
+  const auto invalidate = source.find("session->invalidate_ref_frames(frames->first, frames->second);", invalidation);
+  ASSERT_NE(invalidation, std::string::npos);
+  ASSERT_NE(invalidation_drain, std::string::npos);
+  ASSERT_NE(invalidate, std::string::npos);
+  EXPECT_LT(invalidation_drain, invalidate);
+}

@@ -817,6 +817,64 @@ TEST_F(ReShadeBridgeGpu, ClaimReturnsTheReplacedSlotOnceItsRecordedReadsComplete
   ASSERT_TRUE(await_slot(third_slot, protocol::slot_state::free));
 }
 
+// With two encoder pictures in flight the next claim can come while the previous conversion's GPU
+// work still runs (queued behind the game's), and the encode loop then sleeps to its next poll
+// target. The replaced slot must return to the producer when those reads complete, not at the
+// owner's next poll, submission or retire().
+TEST_F(ReShadeBridgeGpu, ReturnsAReplacedSlotWhenItsReadsCompleteWithoutAnotherCall) {
+  ComPtr<ID3D11Texture2D> scratch;
+  {
+    D3D11_TEXTURE2D_DESC desc {};
+    rings.back()->textures[0]->GetDesc(&desc);
+    desc.MiscFlags = 0;
+    ASSERT_EQ(consumer->CreateTexture2D(&desc, nullptr, &scratch), S_OK);
+  }
+  const auto slot_state = [this](int index) {
+    return protocol::control_state(state->slots[index].control);
+  };
+  // Without any receiver call: only its read-fence wait can return the slot.
+  const auto await_free = [&](int index) {
+    const auto deadline = bridge_clock_t::now() + std::chrono::seconds(2);
+    while (slot_state(index) != protocol::slot_state::free && bridge_clock_t::now() < deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return slot_state(index) == protocol::slot_state::free;
+  };
+
+  publish(1);
+  const auto first = await_frame();
+  ASSERT_TRUE(first);
+  const int first_slot = last_slot;
+  hold_consumer_reads(100);
+  consumer_context->CopyResource(scratch.Get(), first->texture);  // The conversion's read.
+  bridge->reads_recorded();
+  publish(2, false);
+  signal_ready(2);
+  const auto second = await_frame_after(1);
+  ASSERT_TRUE(second);
+  const int second_slot = last_slot;
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  EXPECT_EQ(slot_state(first_slot), protocol::slot_state::reading);  // Its read is still gated.
+  signal_ready(100);
+  copy_gate_active = false;
+  EXPECT_TRUE(await_free(first_slot));
+  EXPECT_EQ(slot_state(second_slot), protocol::slot_state::reading);
+
+  // A frame polled again after reads_recorded() may be read again: its claim signals a value
+  // after those reads too, and that value returns the slot.
+  bridge->reads_recorded();
+  ASSERT_TRUE(poll());
+  hold_consumer_reads(200);
+  consumer_context->CopyResource(scratch.Get(), second->texture);
+  publish(3, false);  // The gate's value 100 already covers sequence 3.
+  ASSERT_TRUE(await_frame_after(2));
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  EXPECT_EQ(slot_state(second_slot), protocol::slot_state::reading);
+  signal_ready(200);
+  copy_gate_active = false;
+  EXPECT_TRUE(await_free(second_slot));
+}
+
 TEST_F(ReShadeBridgeGpu, WakesWhenTheExportFenceCompletesAndRetiresWithoutAnotherPoll) {
   struct event_t {
     HANDLE value = CreateEventW(nullptr, FALSE, FALSE, nullptr);
@@ -868,11 +926,10 @@ TEST_F(ReShadeBridgeGpu, WakesWhenTheExportFenceCompletesAndRetiresWithoutAnothe
   EXPECT_EQ(untimed.claims_after_wake, 0u);
   EXPECT_EQ(untimed.wake_to_claim_max, std::chrono::nanoseconds::zero());
 
-  // The replaced slot returns once its reads complete, without waiting for another poll.
-  EXPECT_EQ(protocol::control_state(state->slots[first_slot].control), protocol::slot_state::reading);
+  // The replaced slot returns once its reads complete (nothing read it here, so its read-fence
+  // value completes at once), without another poll or retire().
   const auto deadline = bridge_clock_t::now() + std::chrono::seconds(2);
   while (protocol::control_state(state->slots[first_slot].control) != protocol::slot_state::free && bridge_clock_t::now() < deadline) {
-    bridge->retire();
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
   EXPECT_EQ(protocol::control_state(state->slots[first_slot].control), protocol::slot_state::free);

@@ -6,6 +6,7 @@
 #include <memory>
 #include <mutex>
 #include <set>
+#include <src/thread_safe.h>
 #include <src/video_encode_pipeline.h>
 #include <thread>
 #include <vector>
@@ -237,4 +238,82 @@ TEST(EncodePipelineTest, StartHookRunsOnTheRetiringThreadBeforeAnyRetirement) {
   ASSERT_EQ(started_future.wait_for(1s), std::future_status::ready);
   EXPECT_EQ(started_future.get(), retired_on);
   EXPECT_NE(retired_on, std::this_thread::get_id());
+}
+
+TEST(EncodePipelineTest, DrainReportsAPictureThatFailsWhileItWaits) {
+  // encode_run() drains before it declares a lifecycle exit clean: a picture that fails meanwhile
+  // must fail that encoder (recovery then tracks its teardown), and after a successful drain
+  // nothing is left in flight to fail during the pipeline's destruction.
+  retire_gate gate;
+  gate.failing = {2};
+  pipeline_t pipeline(2, [&gate](int &frame) {
+    return gate.retire(frame);
+  });
+  ASSERT_TRUE(pipeline.acquire());
+  pipeline.push(1);
+  ASSERT_TRUE(pipeline.acquire());
+  pipeline.push(2);
+  auto drained = std::async(std::launch::async, [&] {
+    return pipeline.drain();
+  });
+  EXPECT_EQ(drained.wait_for(50ms), std::future_status::timeout);
+  gate.release(1);
+  gate.release(2);  // Times out or loses its device while the exit drains.
+  ASSERT_EQ(drained.wait_for(3s), std::future_status::ready);
+  EXPECT_FALSE(drained.get());
+  EXPECT_TRUE(pipeline.failed());
+
+  retire_gate clean;
+  clean.open_all();
+  pipeline_t completed(2, [&clean](int &frame) {
+    return clean.retire(frame);
+  });
+  ASSERT_TRUE(completed.acquire());
+  completed.push(1);
+  ASSERT_TRUE(completed.acquire());
+  completed.push(2);
+  EXPECT_TRUE(completed.drain());
+  EXPECT_EQ(completed.in_flight(), 0u);
+  EXPECT_FALSE(completed.failed());
+}
+
+TEST(EncodeRecoveryGateTest, DeltasInFlightBehindAnOverflowDropWaitForTheRecoveryIdr) {
+  // The encoded queue's overflow policy (publish_encoded_frame()): a delta that finds the queue
+  // full is dropped with the stale packets and requests a recovery IDR. With two pictures in
+  // flight the next delta, and one converted before the encode thread saw that request, were
+  // already submitted and reference the dropped frame: they must not reach the emptied queue.
+  safe::queue_t<int> packets {3};
+  video::detail::recovery_gate_t gate;
+  std::vector<int> discarded;
+  const auto retire = [&](int frame, bool idr) {
+    if (!gate.admits(idr)) {
+      discarded.push_back(frame);
+      return;
+    }
+    const auto result = packets.raise_with_overflow_policy(idr, frame);
+    gate.published(result.dropped > 0 && !idr);
+  };
+  retire(1, true);
+  retire(2, false);
+  retire(3, false);
+  retire(4, false);  // The sender stalled: the full queue drops 1-3 and 4.
+  EXPECT_FALSE(packets.peek());
+  retire(5, false);
+  retire(6, false);
+  retire(7, true);  // The recovery IDR.
+  retire(8, false);
+  EXPECT_EQ(discarded, (std::vector<int> {5, 6}));
+  std::vector<int> sent;
+  while (auto packet = packets.pop(0ms)) {
+    sent.push_back(*packet);
+  }
+  EXPECT_EQ(sent, (std::vector<int> {7, 8}));  // The first packet after the drop is the IDR.
+
+  // An overflow that keeps the newest IDR asks for nothing: the deltas after it are published.
+  for (int frame = 9; frame <= 11; ++frame) {
+    retire(frame, false);
+  }
+  retire(12, true);
+  retire(13, false);
+  EXPECT_EQ(discarded, (std::vector<int> {5, 6}));
 }

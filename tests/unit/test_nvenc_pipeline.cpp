@@ -611,9 +611,8 @@ TEST(NvencPipelineTest, InvalidationWaitsForNoPictureInFlightAndMarksTheNextSubm
   ASSERT_TRUE(probe.submit_frame(1, true));
   ASSERT_FALSE(probe.retrieve_frame().data.empty());
   ASSERT_TRUE(probe.submit_frame(2, false));
-  // A submitted picture may reference the lost frames: refused, so the caller forces an IDR.
-  EXPECT_FALSE(probe.invalidate_ref_frames(2, 2));
-  EXPECT_TRUE(only(probe.operations(), {"invalidate"}).empty());
+  // The invalidation itself must not run with a picture in flight: the caller waits for it first.
+  EXPECT_TRUE(probe.would_invalidate_ref_frames(2, 2));
   EXPECT_FALSE(probe.reconfigure_bitrate(40'000));
   EXPECT_TRUE(only(probe.operations(), {"reconfigure"}).empty());
   const auto second = probe.retrieve_frame();
@@ -622,12 +621,54 @@ TEST(NvencPipelineTest, InvalidationWaitsForNoPictureInFlightAndMarksTheNextSubm
   EXPECT_EQ(only(probe.operations(), {"reconfigure"}), (std::vector<std::string> {"reconfigure"}));
 
   // Drained: the range extends to the last submitted picture and the next one confirms it.
+  EXPECT_TRUE(probe.would_invalidate_ref_frames(2, 2));
   EXPECT_TRUE(probe.invalidate_ref_frames(2, 2));
   EXPECT_EQ(only(probe.operations(), {"invalidate"}), (std::vector<std::string> {"invalidate-2"}));
+  EXPECT_FALSE(probe.would_invalidate_ref_frames(2, 2));  // Done.
   ASSERT_TRUE(probe.submit_frame(3, false));
   ASSERT_TRUE(probe.submit_frame(4, false));
   const auto confirmed = probe.retrieve_frame();
   EXPECT_EQ(confirmed.frame_index, 3u);
   EXPECT_TRUE(confirmed.after_ref_frame_invalidation);
   EXPECT_FALSE(probe.retrieve_frame().after_ref_frame_invalidation);
+}
+
+TEST(NvencPipelineTest, InvalidationThatNeedsNoDriverCallIsDecidedWithPicturesInFlight) {
+  // A range already handled, malformed or too large for the DPB (5 pictures for HEVC) calls no
+  // NvEncInvalidateRefFrames(): it is decided while both pictures still encode, so the recovery
+  // frame converts at once instead of after both completed.
+  nvenc_pipeline_probe probe;
+  ASSERT_TRUE(probe.create());
+  probe.complete_every_picture();
+  for (std::uint64_t frame = 1; frame <= 4; ++frame) {
+    ASSERT_TRUE(probe.submit_frame(frame, frame == 1));
+    ASSERT_FALSE(probe.retrieve_frame().data.empty());
+  }
+  ASSERT_TRUE(probe.submit_frame(5, false));
+  ASSERT_TRUE(probe.submit_frame(6, false));
+  ASSERT_EQ(probe.frames_in_flight(), 2u);
+
+  // One that would invalidate is refused while a picture is in flight (an IDR), never run: the
+  // caller waits for the pictures first.
+  EXPECT_TRUE(probe.would_invalidate_ref_frames(5, 5));
+  EXPECT_FALSE(probe.invalidate_ref_frames(5, 5));
+  EXPECT_TRUE(only(probe.operations(), {"invalidate"}).empty());
+
+  // 2-6 (extended to the last submitted picture) is five pictures: an IDR, decided now.
+  EXPECT_FALSE(probe.would_invalidate_ref_frames(2, 3));
+  EXPECT_FALSE(probe.invalidate_ref_frames(2, 3));
+  // Handled by that IDR: done.
+  EXPECT_FALSE(probe.would_invalidate_ref_frames(3, 4));
+  EXPECT_TRUE(probe.invalidate_ref_frames(3, 4));
+  // Malformed: an IDR.
+  EXPECT_FALSE(probe.would_invalidate_ref_frames(9, 8));
+  EXPECT_FALSE(probe.invalidate_ref_frames(9, 8));
+  EXPECT_TRUE(only(probe.operations(), {"invalidate"}).empty());
+  EXPECT_EQ(probe.frames_in_flight(), 2u);
+
+  // In flight pictures keep the confirmation they were submitted with; the next one carries it.
+  EXPECT_FALSE(probe.retrieve_frame().after_ref_frame_invalidation);
+  EXPECT_FALSE(probe.retrieve_frame().after_ref_frame_invalidation);
+  ASSERT_TRUE(probe.submit_frame(7, true));
+  EXPECT_TRUE(probe.retrieve_frame().after_ref_frame_invalidation);
 }
