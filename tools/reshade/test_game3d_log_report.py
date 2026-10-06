@@ -1201,6 +1201,38 @@ class ReadinessReport(unittest.TestCase):
                 'generated=0 reoffered=7 stale=0 other=0 none=0}; gate metadata does not authorize pixels')
         self.assertEqual(report.parse(BASE + [line('10:00:06', '[Sunshine 3D] ' + gate)]).gate_counted, 10)
 
+    def test_stream_delivery_compares_claimed_frames_with_the_games_offer(self):
+        # Stellar Blade 10-05 FG 4x before the export-throughput fix: the game offered ~220 frames/s, the stream ran at
+        # 90 fps, and the host claimed ~50/s (published - overwritten_unconsumed).
+        def out(t, published, dropped, overwritten):
+            return line(t, f'[Sunshine 3D] Sunshine SBS output: published={published} fg=0 scene_flat=0 '
+                           f'scene_fading=0 published_fresh_depth={published} published_reused_depth=0 '
+                           'published_depth_missing=0 '
+                           '(unavailable=0 reuse_after_gap=0 reuse_other_source=0) runtime=0x1 generation=7 '
+                           f'dropped={dropped} overwritten_unconsumed={overwritten}; cumulative')
+        slow = [out(f'10:00:{5 * i:02}', 600 * i, 500 * i, 350 * i) for i in range(1, 6)]
+        check = run(BASE + slow)['Stream delivery']
+        self.assertEqual(check.status, 'WARN')
+        self.assertTrue(check.detail.startswith('the host took 50.0 new frames/s of a target 90.0/s'), check.detail)
+        self.assertIn('stream 90 fps assumed', check.detail)
+        self.assertEqual(check.times, ['10:00:05-10:00:25 (20 s): 50.0 of 90.0 new frames/s'])
+        # A game offering 60/s and a host claiming all of them passes; the target follows the game.
+        follows = [out(f'10:00:{5 * i:02}', 300 * i, 0, 0) for i in range(1, 6)]
+        check = run(BASE + follows)['Stream delivery']
+        self.assertEqual(check.status, 'PASS')
+        self.assertTrue(check.detail.startswith('the host took 60.0 new frames/s of a target 60.0/s'), check.detail)
+        # The host log's stream rate replaces the assumption.
+        session = report.parse(BASE + slow)
+        session.stream_fps = 72.0
+        detail = [c for c in report.evaluate(session) if c.name == 'Stream delivery'][0].detail
+        self.assertIn('target 72.0/s', detail)
+        self.assertNotIn('assumed', detail)
+        exact = report.HOST_FPS.search('Requested frame rate [90/1 exactly 90fps]')
+        self.assertEqual(exact.groups(), ('90', '1', None))
+        self.assertEqual(report.HOST_FPS.search('Requested frame rate [60fps]').groups(), (None, None, '60'))
+        # Older logs without the slot counters have no such check.
+        self.assertNotIn('Stream delivery', run(BASE))
+
     def test_logs_of_the_removed_shadow_features_still_report(self):
         # The first-run shadow, texel 11's dark pre-UI statistics, rule H2's still screens and the S3 identity shadow
         # were removed (selection revision 9). Their builds' lines still parse; none adds a check of its own, and H2's

@@ -28,6 +28,13 @@ OUTPUT = re.compile(
     r'Sunshine SBS output: published=(\d+) fg=(\d+) scene_flat=(\d+) scene_fading=(\d+) '
     r'published_fresh_depth=(\d+) published_reused_depth=(\d+) published_depth_missing=(\d+) '
     r'\(unavailable=(\d+) reuse_after_gap=(\d+) reuse_other_source=(\d+)\) runtime=(0x[0-9a-fA-F]+)')
+# Since the export-slot counters (dropped, overwritten_unconsumed): what the consumer actually took of the published
+# frames. published - overwritten_unconsumed is the frames the host claimed; published + dropped is what the game
+# offered (Presents that tried to export).
+DELIVERY = re.compile(r'Sunshine SBS output: published=(\d+) .*?runtime=(0x[0-9a-fA-F]+) generation=(\d+) '
+                      r'dropped=(\d+) overwritten_unconsumed=(\d+)')
+# The host's stream frame rate (display_base.cpp): '[90/1 exactly 90fps]' or '[60fps]'.
+HOST_FPS = re.compile(r'Requested frame rate \[(?:(\d+)/(\d+) exactly [0-9.]+fps|(\d+)fps)\]')
 COVERAGE = re.compile(
     r'Sunshine list lifecycle: admissions covered=(\d+) \(states observed=(\d+) declared=(\d+)\) '
     r'not_open=\{unknown=(\d+) closed=(\d+) pass=(\d+)')
@@ -176,6 +183,10 @@ KIND_NAMES = dict(zip(ALPHA_KINDS, ALPHA_NAMES)) | {'hudless': 'HUD-less differe
 # Unprotected time shorter than this is counted, not listed: alpha_trust_span_ms (game3d_alpha_auto.h), the span over
 # which detection itself earns or loses confidence.
 UNPROTECTED_MIN_S = 2.0
+# Stream delivery: the stream follows the game, so the host should take min(what the game offers, the stream fps) new
+# frames per second. A window below this share of that target for this long warns; without a host log the stream is
+# assumed to run at DEFAULT_STREAM_FPS (the Game ceiling).
+DELIVERY_SHARE, DELIVERY_WARN_S, DEFAULT_STREAM_FPS = 0.85, 10.0, 90.0
 # Presents held without a decision to show (held.none, T1) in a counter interval: a share of Auto frames from which
 # the window is listed, and a share and length at which it fails (UI detection effectively never ran).
 HELD_NONE_WARN, HELD_NONE_FAIL, HELD_NONE_FAIL_S = 0.5, 0.9, 10.0
@@ -602,6 +613,10 @@ class Session:
     statuses: list[tuple[float, str]] = field(default_factory=list)  # Each Streamline depth status line.
     hitches: list[tuple[float, str, float]] = field(default_factory=list)
     timings: list[tuple] = field(default_factory=list)  # Every timing line's window.
+    # Export delivery counters: (t, runtime, generation, published, dropped, overwritten_unconsumed); and the
+    # host's stream fps when a host log was read.
+    delivery: list[tuple[float, str, int, int, int, int]] = field(default_factory=list)
+    stream_fps: float | None = None
     timing_profile: str = ''  # The last timing line's gpu_profile state ('disabled' with Diagnostics off).
     teardown: float | None = None  # The last runtime teardown line.
     diagnostics: list[tuple[float, bool]] = field(default_factory=list)  # Each Diagnostics switch line.
@@ -671,6 +686,9 @@ def parse(lines) -> Session:
             if not s.fg_switches or s.fg_switches[-1][1] != mode:
                 s.fg_switches.append((t, mode))
                 s.settle.append(t)
+        if found := DELIVERY.search(text):
+            published, runtime, generation, dropped, overwritten = found.groups()
+            s.delivery.append((t, runtime.lower(), int(generation), int(published), int(dropped), int(overwritten)))
         if found := OUTPUT.search(text):
             values = tuple(int(v) for v in found.groups()[:7])
             runtime = found.group(11)
@@ -1021,6 +1039,7 @@ def evaluate(s: Session) -> list[Check]:
                   f'CPU {cpu_mean:.2f} ms mean ({cpu_max:.1f} max) over {presents} Presents; '
                   + (f'GPU {gpu_mean:.2f} ms mean ({gpu_max:.1f} max)' if gpu_frames else
                      'GPU timing off (Diagnostics=0)' if disabled else 'no GPU timing samples')))
+    delivery_checks(s, add)
     if s.fg_switches:
         add(Check('INFO', 'Frame generation',
                   ', '.join(f'{clock(t)} {"on" if mode else "off"}' for t, mode in s.fg_switches)))
@@ -1400,6 +1419,47 @@ def counter_checks(c: dict[str, int], add, overrides_sampled: list[str], flatten
                      f'opaque proof set {get("trust.opaque_set")} and cleared {get("trust.opaque_cleared")}')))
 
 
+def delivery_checks(s: Session, add) -> None:
+    """'Stream delivery': the host should take every new frame the game offers, up to the stream fps (the stream
+    follows the game; no repeats). Per counter window, claimed = published - overwritten_unconsumed and offered =
+    published + dropped; the target is min(offered, stream fps). Windows that start in the settle time after an FG
+    switch, reset or export start are skipped."""
+    fps = s.stream_fps or DEFAULT_STREAM_FPS
+    rows = []
+    for a, b in zip(s.delivery, s.delivery[1:]):
+        dt = b[0] - a[0]
+        if (b[1], b[2]) != (a[1], a[2]) or b[3] < a[3] or dt < 2.0 or any(0 <= a[0] - m < SETTLE_S for m in s.settle):
+            continue
+        claimed = (b[3] - a[3]) - (b[5] - a[5])
+        offered = (b[3] - a[3]) + (b[4] - a[4])
+        if offered <= 0:
+            continue
+        rows.append((a[0], b[0], claimed / dt, min(offered / dt, fps), offered / dt))
+    if not rows:
+        return
+    total = sum(b - a for a, b, *_ in rows)
+    claimed = sum((b - a) * c for a, b, c, _, _ in rows) / total
+    target = sum((b - a) * g for a, b, _, g, _ in rows) / total
+    windows: list[list[float]] = []
+    for a, b, c, g, o in rows:
+        if c >= g * DELIVERY_SHARE:
+            continue
+        if windows and a - windows[-1][1] < 1.0:
+            windows[-1][1] = b
+            windows[-1][2:] = [windows[-1][2] + c * (b - a), windows[-1][3] + g * (b - a)]
+        else:
+            windows.append([a, b, c * (b - a), g * (b - a)])
+    long = [w for w in windows if w[1] - w[0] >= DELIVERY_WARN_S]
+    source = f'stream {fps:g} fps' + ('' if s.stream_fps else ' assumed (pass --host-log for the real one)')
+    add(Check('WARN' if long else 'PASS', 'Stream delivery',
+              f'the host took {claimed:.1f} new frames/s of a target {target:.1f}/s (what the game offered, capped at '
+              f'the {source})' + (f'; {len(long)} {"window" if len(long) == 1 else "windows"} below '
+                                  f'{DELIVERY_SHARE:.0%} of the target for {DELIVERY_WARN_S:g} s or longer' if long
+                                  else ''),
+              [f'{span(a, b)} ({b - a:.0f} s): {c / (b - a):.1f} of {g / (b - a):.1f} new frames/s'
+               for a, b, c, g in long][:6]))
+
+
 def held_none_checks(s: Session, add) -> None:
     """'UI holds without a decision' (T1): a Present held without a real-frame decision to show (held.none) has no UI
     mask. The counters advance only when a sample commits, so each window runs from one counter line that advanced to
@@ -1592,6 +1652,20 @@ def scene_checks(s: Session, add) -> None:
     add(Check('WARN' if uncovered else 'INFO', 'Hidden scene', detail, uncovered[:6]))
 
 
+def host_stream_fps(path: Path, start: datetime, end: datetime) -> float | None:
+    """The last stream frame rate the host log requested up to the session's end."""
+    fps = None
+    for line in path.read_text(encoding='utf-8', errors='replace').splitlines():
+        m = HOST_LINE.match(line)
+        if not m or (found := HOST_FPS.search(m.group(4))) is None:
+            continue
+        when = datetime.strptime(m.group(1), '%Y-%m-%d %H:%M:%S')
+        if when <= end + timedelta(minutes=1):
+            num, den, whole = found.groups()
+            fps = float(whole) if whole else float(num) / max(1.0, float(den))
+    return fps
+
+
 def host_checks(path: Path, start: datetime, end: datetime) -> list[Check]:
     checks: list[Check] = []
     stalls, connects, errors, fits = [], 0, [], []
@@ -1661,13 +1735,16 @@ def main(argv=None) -> int:
              'ended without exiting (crash or kill?)')
     print(f'Game 3D readiness: {session.exe or log}  {clock(session.first)} to {clock(session.last)} '
           f'({int(duration // 60)}m{int(duration % 60):02}s, {state})')
-    checks = evaluate(session)
+    end = None
     if args.host_log:
         # ReShade logs times without a date; the log's last write dates the session.
         written = datetime.fromtimestamp(log.stat().st_mtime)
         end = datetime.combine(written.date(), datetime.min.time()) + timedelta(seconds=session.last % 86400)
         if end > written + timedelta(minutes=5):
             end -= timedelta(days=1)
+        session.stream_fps = host_stream_fps(args.host_log, end - timedelta(seconds=duration), end)
+    checks = evaluate(session)
+    if end is not None:
         checks += host_checks(args.host_log, end - timedelta(seconds=duration), end)
     if not running and not session.exited and not torn_down:
         checks.append(Check('WARN', 'Session', 'the log ends without ReShade exiting or tearing its runtimes down'))
