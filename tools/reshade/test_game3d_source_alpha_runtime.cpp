@@ -1720,9 +1720,9 @@ namespace {
     }
     {
       const auto counted = policy.counters();
-      require(counted[ui_counter::none + ui_no_mask::unaccepted] && !counted[ui_counter::untrusted_inferred] &&
-          counted[ui_counter::trust_earned] >= 2 && counted[ui_counter::trust_restored] == 1,
-        "Selective sources before acceptance were not counted as unaccepted, or an inferred source decided unaccepted");
+      require(counted[ui_counter::none + ui_no_mask::unaccepted] && counted[ui_counter::trust_earned] >= 2 &&
+          counted[ui_counter::trust_restored] == 1,
+        "Selective sources before acceptance were not counted as unaccepted, or a trust event was lost");
     }
     if (gpu.color == 2) {
       // More than 1% of malformed pixels makes accepted alpha V1-invalid: it
@@ -2174,7 +2174,6 @@ namespace {
           delta.decided(3) && delta.decided(5) && delta.decided(6) && delta[ui_counter::contradicted] &&
           delta[ui_counter::inexact_difference] && delta[ui_counter::reused] >= 8 &&
           delta[ui_counter::reused] < delta[ui_counter::detection_frames] &&
-          !delta[ui_counter::presented_over_dedicated] && !delta[ui_counter::untrusted_inferred] &&
           delta[ui_counter::none + ui_no_mask::unaccepted] && end[ui_counter::trust_earned] >= 2 &&
           end[ui_counter::trust_revoked_exact] >= 1 && !delta[ui_counter::trust_revoked_declared],
         "D3D11 exact UI counters lost a decided source, a no-mask reason, a reuse or a trust event");
@@ -3084,8 +3083,7 @@ namespace {
     // claim measures, and the samples up to the one that enters the hidden
     // verdict's hold are its own whole-frame decisions (from then on H1
     // relabels it 8, selection revision 10, which the section before checks).
-    // Its frames count as full_alpha; full_alpha_d, which only the removed
-    // whole-frame diagnostic measured, stays zero.
+    // Its frames count as full_alpha, and full_d (H1's verdicts) stays zero.
     {
       alpha_auto_policy trusting;
       require(trusting.restore(gpu.key(ui_selection::kind::ui_layer)).restored == 1, "The layer key was not restored");
@@ -3100,11 +3098,9 @@ namespace {
           !trusted.sample.evidence.h1_applied && trusted.sample.evidence.s1_source == ui_detection::source_layer,
         "An accepted layer lost its own decision, or H1 overrode it");
       const auto counted = trusting.counters();
-      require(counted[ui_counter::full_alpha] >= 3 && !counted[ui_counter::full_alpha_d_hidden] &&
-          !counted[ui_counter::full_alpha_d_ambiguous] && !counted[ui_counter::full_alpha_d_visible] &&
-          !counted[ui_counter::full_alpha_d_invalid] && !counted[ui_counter::full_d_hidden] && !counted[ui_counter::full_d_visible] &&
+      require(counted[ui_counter::full_alpha] >= 3 && !counted[ui_counter::full_d_hidden] && !counted[ui_counter::full_d_visible] &&
           counted[ui_counter::scene_entered] == 1,
-        "The whole-frame layer's frames were not counted as full_alpha, full_alpha_d counted, or its entry not counted");
+        "The whole-frame layer's frames were not counted as full_alpha, full_d counted, or its entry not counted");
       source.session = &policy;
     }
     // (l) Without a claim nothing measures, and a claim enters after the same

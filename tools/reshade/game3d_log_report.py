@@ -1308,6 +1308,8 @@ def counter_checks(c: dict[str, int], add, overrides_sampled: list[str], flatten
     # counted frames only fail with a sampled run of three within 2 s that no revocation followed. Before S2a
     # trusted_full: an accepted alpha covering the frame over an exact pair that showed the scene, failing when a
     # sample of them was not resolved by a revocation (trust.revoked_full), or when nothing of that kind was revoked.
+    # presented_over_dedicated (an inferred alpha deciding beside an accepted declared one, zero by construction since
+    # S1) is on counter lines through dc7e3c77 only, so a current line reads it as 0.
     overrides = get('presented_over_dedicated')
     if s2a:
         flattened, revoked, sampled = get('contradicted'), get('trust.revoked_exact'), contradicted_sampled
@@ -1369,7 +1371,8 @@ def counter_checks(c: dict[str, int], add, overrides_sampled: list[str], flatten
     # claim over the scene before it), and unaccepted inferred alpha (UI inferred alpha). Dims and tints over dark or
     # changed pixels never meet the one-way test. Since S2b an exact full change-set (6) is counted with these accepted
     # whole-frame decisions. Builds before selection revision 9 measured D on the samples after such a decision
-    # (full_alpha_d, a diagnostic since removed and logged as 0), listed when present.
+    # (full_alpha_d, listed when it measured something); builds from revision 9 through dc7e3c77 logged it as 0 and
+    # later lines omit it.
     #
     # Only a same-batch Backbuffer pair is exact (E2): a Present-counted pair can belong to another frame and then
     # differs everywhere, so a session whose gate offered HUD-less pairs but never a same-batch one cannot have decided
@@ -1402,13 +1405,15 @@ def counter_checks(c: dict[str, int], add, overrides_sampled: list[str], flatten
                   + (' or an exact full change-set (6)' if s2b else '')))
 
     # Since S1 only accepted candidates decide, so the word is zero by construction: a count is a defect. Counters
-    # from before S1 (trust.opaque_set rather than trust.discarded) still let the untrusted pass decide.
-    inferred, s1 = get('untrusted_inferred'), 'trust.discarded' in c
-    add(Check(('FAIL' if s1 else 'WARN') if inferred else 'PASS', 'UI inferred alpha',
-              f'{inferred} frames ({percent(inferred, detected)} of detection frames) decided from unaccepted inferred '
-              'alpha (UI layer, Backbuffer or current alpha)'
-              + ('; only accepted candidates decide since S1' if s1 else '; expected before S1') if inferred else
-              'no frame decided from unaccepted inferred alpha'))
+    # from before S1 (trust.opaque_set rather than trust.discarded) still let the untrusted pass decide. Only counter
+    # lines through dc7e3c77 carry the word; a later line no longer measures it, so it has no check.
+    if 'untrusted_inferred' in c:
+        inferred, s1 = get('untrusted_inferred'), 'trust.discarded' in c
+        add(Check(('FAIL' if s1 else 'WARN') if inferred else 'PASS', 'UI inferred alpha',
+                  f'{inferred} frames ({percent(inferred, detected)} of detection frames) decided from unaccepted '
+                  'inferred alpha (UI layer, Backbuffer or current alpha)'
+                  + ('; only accepted candidates decide since S1' if s1 else '; expected before S1') if inferred else
+                  'no frame decided from unaccepted inferred alpha'))
     # A Present-counted (inexact) pair proposes the frame; its pixels decide whether the difference is UI (V2: a partial
     # change set within broad unchanged scene in clean tiles), so a partial difference from it is expected wherever a
     # game offers no same-batch pair. Only its whole-frame claim needs the hidden-scene guard (H1 d).

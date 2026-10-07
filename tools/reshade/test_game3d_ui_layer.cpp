@@ -132,15 +132,15 @@ int main() {
           images == detection::max_scene_evidence_images,
         "game3d_native.hlsl's UI detection size markers are not the current revision's (the renderer requires them)");
       // Selection revision 10: the unaligned-tag shift and the sample and
-      // re-offer bits, the layer-bound row, and the invariant counter words
-      // 14 and 18 reserved (no define).
+      // re-offer bits and the layer-bound row; the removed invariant counter
+      // words have no define.
       require(source.find("#define SUNSHINE_UI_PER_FRAME_UNALIGNED_SHIFT 12") != std::string::npos &&
           source.find("#define SUNSHINE_UI_PER_FRAME_SAMPLE 0x4000u") != std::string::npos &&
           source.find("#define SUNSHINE_UI_PER_FRAME_REOFFER 0x8000u") != std::string::npos &&
           source.find("#define SUNSHINE_UI_LAYER_BOUND_ROW 208") != std::string::npos &&
           source.find("SUNSHINE_UI_COUNTER_UNTRUSTED_INFERRED") == std::string::npos &&
           source.find("SUNSHINE_UI_COUNTER_PRESENTED_OVER_DEDICATED") == std::string::npos,
-        "game3d_native.hlsl does not mirror selection revision 10's bits, layer-bound row and reserved counter words");
+        "game3d_native.hlsl does not mirror selection revision 10's bits and layer-bound row, or defines a removed counter word");
     }
     // Selection revision 4 (fix 1) writes the pre-UI pixel counts in texel
     // 11 after the H1 texel 10. Revision 5 (fix 2) added H2's stillness
@@ -154,9 +154,11 @@ int main() {
     // 12-15 stay reserved zeros and words 32 and 36, the layer's one-way
     // counts, become reserved zeros) and rows 208-223 (the layer's pixels
     // beyond the premultiplied bound; rows 144-207 stay reserved), 17 texels
-    // and 224 rows, moves the stored/per-frame boundary to 0x1000 for the
+    // and 224 rows, and moves the stored/per-frame boundary to 0x1000 for the
     // unaligned declared tags (0x1000, 0x2000) and the sample and re-offer
-    // bits, and reserves counter words 14 and 18.
+    // bits. The counter texture holds 26 words: decided sources 0-10, then
+    // the judgments, no-mask reasons, full_alpha and reused, without the
+    // reserved words of removed rules.
     require(sunshine_game3d::ui_selection::revision == 10u && detection::h1_decision_texels == 11u &&
         detection::decision_word::h1 == 43u && detection::pre_ui_decision_texels == 12u &&
         detection::decision_word::pre_ui_match == 44u && detection::decision_word::pre_ui_image_lit == 45u &&
@@ -167,11 +169,10 @@ int main() {
         detection::per_frame_sample == 0x4000u && detection::per_frame_reoffer == 0x8000u &&
         detection::per_frame_mask == 0xfffff000u && detection::per_frame_unaligned_shift == 12u &&
         detection::per_frame_unaligned_mask == 0x3000u &&
-        detection::source_count == 12u && detection::source_layer == 10u && detection::b2_words == 6u &&
-        sunshine_game3d::ui_counter_word::decided_count == 13u && sunshine_game3d::ui_counter_word::count == 31u &&
-        sunshine_game3d::ui_counter_word::reserved_refined == 30u &&
-        sunshine_game3d::ui_counter_word::untrusted_inferred == 14u &&
-        sunshine_game3d::ui_counter_word::presented_over_dedicated == 18u,
+        detection::source_layer == 10u && detection::b2_words == 6u &&
+        sunshine_game3d::ui_counter_word::decided_count == 11u && sunshine_game3d::ui_counter_word::count == 26u &&
+        sunshine_game3d::ui_counter_word::inexact_difference == 12u && sunshine_game3d::ui_counter_word::none == 15u &&
+        sunshine_game3d::ui_counter_word::reused == 25u,
       "The decision layout is not selection revision 10 with 17 texels and 224 statistics rows");
     {
       std::ifstream input(SUNSHINE_GAME3D_NATIVE_HLSL, std::ios::binary);

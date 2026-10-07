@@ -219,9 +219,7 @@ namespace sunshine_game3d::ui_temporal {
   // counts snapshotted when it was submitted and the GPU words copied under
   // its fence, each as the change since the previous commit; when it decided
   // H1 (source 8), the hidden-scene verdict that same sample measured; and
-  // what the hidden-scene guard's observation of it did (scene). The
-  // full_alpha_d counters (accepted whole-frame decisions, which only a
-  // removed diagnostic evidence run measured) stay zero, reserved.
+  // what the hidden-scene guard's observation of it did (scene).
   inline ui_counters sample_counters(const alpha_auto_decision &sample, const ui_counters &cpu,
       const ui_counters &committed_cpu, const std::array<std::uint32_t, ui_counter_word::count> &words,
       const std::array<std::uint32_t, ui_counter_word::count> &committed_words, std::uint64_t through_ms,

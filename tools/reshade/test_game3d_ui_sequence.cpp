@@ -985,16 +985,11 @@ namespace {
     for (std::size_t reason = 0; reason != ui_no_mask::count; ++reason) {
       require(totals[ui_counter::none + reason] == expected[ui_counter::none + reason], what + ": none." + std::string(ui_no_mask::names[reason]) + " differs");
     }
-    require(!totals[ui_counter::untrusted_inferred] && !totals[ui_counter::presented_over_dedicated], what + ": an unaccepted inferred alpha decided, or an inferred alpha beside an accepted declared one");
     // The scene group counts the guard's observations of committed samples,
     // and every visible sample that decided H1 released a hold.
     require(totals[ui_counter::scene_entered] == s.scene_entered && totals[ui_counter::scene_released] == s.scene_released && totals[ui_counter::scene_refuted] == s.scene_refuted, what + ": the scene counters differ from the guard's observations");
     require(totals[ui_counter::full_d_visible] <= totals[ui_counter::scene_released], what + ": an H1 decision over a visible scene released no hold");
-    require(!totals.decided(7) && !totals.decided(9) && !totals.decided(11) && !totals.decided(12), what + ": a retired source decided");
-    // full_alpha_d is reserved: nothing measures an accepted whole-frame
-    // decision for itself since the whole-frame diagnostic was removed.
-    require(!totals[ui_counter::full_alpha_d_hidden] && !totals[ui_counter::full_alpha_d_ambiguous] &&
-      !totals[ui_counter::full_alpha_d_visible] && !totals[ui_counter::full_alpha_d_invalid], what + ": full_alpha_d counted");
+    require(!totals.decided(7) && !totals.decided(9), what + ": a retired source decided");
   }
 
   void run(sequence &s, present p, std::uint64_t from, std::uint64_t to, std::uint64_t interval = 16) {
@@ -3313,7 +3308,7 @@ namespace {
         previous_valid = !rejected;
       }
       const auto c = session.counters();
-      require(rejected_frames && reused && c[ui_counter::none + ui_no_mask::presented_blocked] > 0 && !c[ui_counter::presented_over_dedicated], "The declared block was not counted");
+      require(rejected_frames && reused && c[ui_counter::none + ui_no_mask::presented_blocked] > 0, "The declared block was not counted");
       require(!session.accepts(current) && c[ui_counter::trust_revoked_declared] == 1, "The tag's coverage did not revoke the disagreeing presented alpha");
       check_counters(s, "declared block");
     }

@@ -54,9 +54,7 @@ namespace sunshine_game3d::ui_detection {
   // before S2b), 11 (fix 2's still screen without a UI source, H2) and 12
   // (fix 3's pre-UI change set), all removed, are retired and never reused.
   // Candidate bit 0x100 (fix 3's pre-UI change set) is reserved likewise.
-  // source_count numbers the decided counter words, the retired ones
-  // included.
-  inline constexpr std::uint32_t source_layer = 10u, source_count = 12u;
+  inline constexpr std::uint32_t source_layer = 10u;
   inline constexpr std::string_view candidate_layout_marker = "SUNSHINE_UI_CANDIDATE_LAYOUT";
   inline constexpr std::uint32_t candidate_layout = 2u, legacy_candidate_layout = 1u;
   // The game3d_native.hlsl define mirroring each candidate bit, the layer's

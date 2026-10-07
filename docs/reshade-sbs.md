@@ -1425,8 +1425,8 @@ kept 95% of the D grid's cells still for 2 s was shown flat as source 11, behind
 it together with S3's frame identity, which shared decision texel 12: the stillness counts and
 their statistics rows, the previous-luma texture, the flag in `b2` word 5, the `Sunshine UI still
 screen` lines, the `still` counter and log groups, the panel's checkbox and its status texts are
-gone. Its identifiers stay reserved and are never reused: source 11 (its counter word stays zero),
-`b2` word 5 (pushed as zero), decision texel 12 (words 48-51) and statistics rows 144-159. A
+gone. Its identifiers stay reserved and are never reused: source 11 (its counter word stayed zero
+through dc7e3c77 and was then dropped), `b2` word 5 (pushed as zero), decision texel 12 (words 48-51) and statistics rows 144-159. A
 `ReShade.ini` that still carries `UIFlattenStillScreens` loads unchanged; the add-on ignores the
 key. A screen on which no UI source decides and no informative claim acts, such as Stellar Blade's
 SDR loading screen, stays 3D.
@@ -1436,9 +1436,10 @@ layer proven the pre-UI scene image as a change-set provider (candidate `0x100`,
 `UIPinChangedPixels`/`UIPinOnlyUI` switch, the refine rule and its change-set shadow), and fix 4
 added rule P2's darkening passes under the same switch. The user rejected both in SDR and HDR, and
 selection revision 7 removed them, so detection decides exactly as revision 5 did. Their
-identifiers stay reserved and are never reused: candidate bit `0x100`, source 12 (its counter word
-stays zero), the h1 word's bit `0x200`, `b2` word 5 bits `0x2`-`0x200`, decision texels 13-15,
-statistics rows 160-207, counter word 30 and Dump 3D artifacts 43-45. A `ReShade.ini` that still
+identifiers stay reserved and are never reused: candidate bit `0x100`, source 12, the h1 word's bit
+`0x200`, `b2` word 5 bits `0x2`-`0x200`, decision texels 13-15, statistics rows 160-207 and Dump 3D
+artifacts 43-45. Source 12's counter word and counter word 30 stayed zero through dc7e3c77 and were
+then dropped. A `ReShade.ini` that still
 carries `UIPinOnlyUI` or `UIPinChangedPixels` loads unchanged; the add-on ignores the key. Fix 1's
 pre-UI proof (the ledger key `pre_ui:<format>:<space>`, texel 11 and claim (d)) is unchanged, so
 a remembered proof keeps working. The D3D12 native runtime fixture keeps its `D3D12 pre-UI proof`
@@ -1559,12 +1560,11 @@ reserved), counted on status samples only (per-frame bit `0x4000`) and only of d
 exact pair's tag batch (per-frame bits `0x1000` and `0x2000`), the layer's pixels beyond the
 premultiplied bound invalidate it only when they lie on more than 1% of the frame and on more than
 5% of it or more than its opaque pixels (statistics rows 208-223), H1 overrides every S1 winner,
-and the invariant counter
-words 14 and 18 are reserved).
+and the shader no longer counts S1's invariants).
 `reshade_game3d_ui_selection_contract` runs the reduce on crafted and random counts, previous hold
 states and per-frame bits, and compares every decision word, the written hold store and the counter
 adds with `decide()` and `counter_adds()`; it asserts S1's invariants (no unaccepted inferred alpha
-decides, none beside an accepted declared alpha) on every case, whose counter words are reserved
+decides, none beside an accepted declared alpha) on every case, which the shader no longer counts
 since revision 10. The renderer runs automatic detection only with that layout, selection revision
 10, its 17 decision texels and both scene-evidence images; otherwise its frames count as
 `inactive.unprepared`. The live decoders (`ui_selection::counts_from_words`,
@@ -1701,7 +1701,7 @@ nothing there, so its reduce reads state none and never reuses a decision.
 **UI counters.** Each `Sunshine UI protection` line describes the latest 100 ms status sample;
 the UI counters count every frame. `tools/reshade/game3d_ui_counters.h` owns their names, the GPU
 word indices and the log text. On every detection frame thread 0 of `SunshineUIDetectionReduceCS` adds
-the frame's outcome to a 31-word `R32_UINT` texture (29 before fix 3, 28 before fix 2), `SunshineUICountersStore` at `u7`, which is
+the frame's outcome to a 26-word `R32_UINT` texture, `SunshineUICountersStore` at `u7`, which is
 bound for the reduce only. `SUNSHINE_UI_COUNTER_*` defines mirror the word indices, and
 `reshade_game3d_ui_layer` fails when they disagree. The renderer zero-clears the texture once and
 copies it beside the decision texels on sample frames, under the same fence. It then adds the
@@ -1710,14 +1710,16 @@ CPU counts as they stood when that sample was submitted. That is one locked call
 sample. The renderer and the sequence replay decode the sample and assemble its counts with the
 same functions in `tools/reshade/game3d_ui_temporal.h` (`decode_detection_sample`,
 `sample_counters`). Counting adds no per-frame CPU wait, lock or GPU synchronization. The renderer counts only
-with a shader whose `SUNSHINE_UI_COUNTER_WORDS` is 31, and the offline replay binds nothing at
-`u7`, so its adds are dropped. Since fix 2 `decided` has twelve words, sources 0-11, so every GPU
-word after it moved up by one; since fix 3 it has thirteen, sources 0-12, every later word moved
-up by one again, and word 30 (fix 3's `refined`) follows `reused`. Fix 3 was removed by user
-decision; source 12's word and word 30 stay, reserved and zero, so no later word moves again, and
-so does source 11's word since H2 was removed (selection revision 9). Tools use the named indices.
-S3's five identity verdict words after word 30 (31-35, a 36-word texture from a shader with
-`SUNSHINE_UI_IDENTITY`) were removed with S3 and stay reserved.
+with a shader whose `SUNSHINE_UI_COUNTER_WORDS` is 26, so a shader of another word layout leaves
+counting off instead of misattributing its words, and the offline replay binds nothing at `u7`, so
+its adds are dropped. `decided` has eleven words, sources 0-10 by index (the retired 7 and 9 stay
+zero), followed by `inexact_difference`, `depth_not_current`, `contradicted`, the nine no-mask
+reasons, `full_alpha` and `reused`. Tools use the named indices; no log, dump or replay tool reads
+the words themselves. Shaders through dc7e3c77 wrote 31 words (29 before fix 3, 28 before fix 2):
+`decided` had thirteen, sources 0-12 with the removed H2's 11 and fix 3's 12 kept as zero words,
+words 14 and 18 were S1's invariants (zero by construction, no longer written since selection
+revision 10) and word 30 fix 3's `refined`; S3's identity verdict words 31-35 (a 36-word texture
+from a shader with `SUNSHINE_UI_IDENTITY`) were removed with S3.
 
 | Field | Counts |
 | --- | --- |
@@ -1727,18 +1729,18 @@ S3's five identity verdict words after word 30 (31-35, a 36-word texture from a 
 | `held.none` | Generated Presents (offering nothing within the reported generated count of the last Present that offered a UI tag, or under FG re-offering exactly the snapshots of the last detecting Present) without such a decision in their identity scope: no mask, and the chain ends. A Present that offers a HUD-less image, a re-offered snapshot included, is real and never counts here: it detects, and when mispaired it reuses the held decision (`reused`). Counter lines before the 10-05 pairing change also count Presents the old HUD-less pairing held as generated. |
 | `reused` | Detection frames without a decision of their own that applied the held decision and mask (decision texel 9 bit 16): the T1 grace once after a real decision, and since selection revision 10 every HUD-less re-offer (`0x8000`) while a decision is held. |
 | `inactive.no_candidates`, `inactive.size`, `inactive.unprepared` | Requested renders without detection: no usable candidate, a frame larger than 3840, or detection resources that could not be prepared. |
-| `decided.N` | Detection frames by applied source 0-10, a reused decision included. 7, 9 and 11 (H2's still screen, logged by counter lines of fix 2 to selection revision 8) are retired and not logged; their GPU words stay zero. |
+| `decided.N` | Detection frames by applied source 0-10, a reused decision included. 7 and 9 are retired and not logged; their GPU words stay zero. Counter lines of fix 2 to selection revision 8 also have 11 (H2's still screen). |
 | `none.R` | Frames whose own decision was source 0 and that applied no mask, each by the first reason that applies: `gate_no_hold` (an informative full claim acted but H1 did not apply: no held hidden verdict; the name is kept for log compatibility), `presented_blocked` (an offered, accepted UIAlpha or UI color tag, invalid itself, kept an accepted, valid inferred alpha out), `trusted_invalid` (an offered, accepted alpha had more than 1% invalid pixels), `layer_aside` (the offered layer was V1-invalid, such as a layer without alpha), `unaccepted` (an offered, unaccepted candidate was valid and selective: its acceptance is still being earned), `difference_failed` (a HUD-less image was offered, including an inexact one that changed nearly everywhere without the pre-UI hold), `ambiguous` (an unaccepted valid alpha empty or nearly full), `no_candidate` (no alpha offered), then `other`. |
 | `full.6`, `full.8` | Repeat `decided.6` and `.8`. Counter lines before S2b also have `full.9`. |
 | `full.depth_not_current` | Detection frames pushed with `0x40000`, whatever they decided. |
 | `full_d.hidden`, `.ambiguous`, `.visible`, `.invalid` | Committed samples that decided H1 (source 8), by the hidden-scene verdict measured on that same sample. `invalid` includes evidence that was not measured. These count samples, not frames. Counter lines before S2b count sources 6, 8 and 9 here. |
 | `scene.entered`, `.released`, `.refuted` | The hidden-scene guard's observations of committed samples (since S2b): its hidden verdict entered; a held verdict released by a visible sample, every visible sample that decided 8 included; source signatures newly refuted. |
-| `untrusted_inferred` | Frames decided from an inferred source (Backbuffer 3, current alpha 4 or the offscreen UI layer 10) that was not accepted. Zero by construction since S1, where only accepted candidates decide. Since selection revision 10 its GPU word (14) is reserved and no shader writes it: the selection contract test asserts the invariant on every case, and the field is logged as 0. |
+| `untrusted_inferred` | Counter lines through dc7e3c77 only. Frames decided from an inferred source (Backbuffer 3, current alpha 4 or the offscreen UI layer 10) that was not accepted: zero by construction since S1, where only accepted candidates decide, and logged as 0 from selection revision 10, when the shader stopped counting it. The selection contract and sequence tests assert the invariant on every case. |
 | `inexact_difference` | Source 5 decided from an inexact HUD-less pair (before S2b also 9). |
 | `contradicted` | An accepted alpha (since selection revision 10 UIAlpha 1, the UI color tag 2, Backbuffer 3 or current alpha 4; before it Backbuffer, current alpha or the layer 10) decided by the frame's own decision, not overridden by H1, while the same frame's valid exact pair contradicted it one way (A2). It keeps deciding until the ledger revokes it. Since selection revision 10 the one-way counts exist on status samples only, so it counts samples rather than frames. Counter lines before S2a have `trusted_full` instead: an accepted alpha source (1-4, 10) covering at least 99% of pixels while an exact pair without invalid pixels left at least half of the frame unchanged. |
-| `presented_over_dedicated` | Inferred alpha (3, 4, 10) decided while an accepted UIAlpha or UI color tag was offered. The declared-alpha block keeps this 0. Since selection revision 10 its GPU word (18) is reserved and no shader writes it: the selection contract test asserts the invariant on every case, and the field is logged as 0. |
+| `presented_over_dedicated` | Counter lines through dc7e3c77 only. Inferred alpha (3, 4, 10) decided while an accepted UIAlpha or UI color tag was offered: the declared-alpha block keeps it 0, and it was logged as 0 from selection revision 10, when the shader stopped counting it. The selection contract and sequence tests assert the invariant on every case. |
 | `full_alpha` | An applied alpha source (1-4, 10) covering at least 99% of pixels: a whole-frame mask from alpha, with or without a HUD-less pair. Only accepted sources decide. |
-| `full_alpha_d.hidden`, `.ambiguous`, `.visible`, `.invalid` | Reserved, 0 since selection revision 9. Before it: committed samples that decided an accepted whole-frame decision, such a whole-frame alpha or (since S2b) an exact full change-set (6), by the hidden-scene verdict that a diagnostic evidence run, now removed, measured on that same sample from the sample after one that decided it. |
+| `full_alpha_d.hidden`, `.ambiguous`, `.visible`, `.invalid` | Counter lines through dc7e3c77 only, logged as 0 from selection revision 9. Before it: committed samples that decided an accepted whole-frame decision, such a whole-frame alpha or (since S2b) an exact full change-set (6), by the hidden-scene verdict that a diagnostic evidence run, now removed, measured on that same sample from the sample after one that decided it. |
 | `trust.earned`, `.revoked_exact`, `.revoked_declared`, `.lapsed`, `.restored`, `.discarded`, `.forgotten` | Session acceptance events. `earned`: a signature accepted, or a restored one confirmed, by this session's samples. `revoked_exact`: revoked when the one-way test of an exact pair contradicted it in the revoking sample (A2). `revoked_declared`: revoked by an accepted declared alpha's coverage. `lapsed`: a provisional restore lapsed. `restored`: restored entries. `discarded`: legacy `TrustedUISources` entries discarded on load. `forgotten`: accepted signatures that Forget cleared. Since fix 1 the layers' pre-UI proof keys (`pre_ui`) count with the accepted signatures: earned by matching samples, restored, lapsed and forgotten. Counter lines of S1 have `revoked_full` (a full claim over a visible exact pair) and `revoked_presented` (presented alpha disagreeing with an accepted UI channel) instead of `revoked_exact` and `revoked_declared`, and no `forgotten`; counter lines before S1 have `opaque_set` and `opaque_cleared` (the retired opaque-tag proof) instead of `discarded`. |
 | `samples`, `through_ms` | Committed samples, and the sample tick through which the totals are exact. |
 
@@ -1769,13 +1771,13 @@ check below reads every counter line, and the pairing check also sums the `hudle
 | Check | Status |
 | --- | --- |
 | The accounting identity above does not hold | FAIL `UI counters` |
-| `presented_over_dedicated` is above zero | FAIL `UI protection` |
+| `presented_over_dedicated` is above zero (counter lines through dc7e3c77) | FAIL `UI protection` |
 | `contradicted` is above zero | `UI protection`: PASS with the count: A2 revokes on the third contradiction within 2 s and never on shorter ones, which the counter cannot tell apart, so a handled case and a short one both count `contradicted`. The sampled lines decide: three sampled lines within 2 s in which a valid exact pair contradicts the same accepted alpha one way (an inferred alpha, or since selection revision 10 UIAlpha or the UI color tag from `sampled_declared_one_way`; decided or not, the T1 reuse included, never the one-frame-late layer), with no revocation of that kind within 10 s of the first, FAIL; the same run of declared-coverage contradictions alone WARNs; shorter sampled contradictions are noted. Counter lines of S1 keep the S1 rule: `trusted_full` with `trust.revoked_full`, and sampled lines of a full claim over an exact pair that shows the scene. |
-| `full_alpha` is above zero, or since S2b `decided.6` | INFO `UI full alpha` (accepted whole-frame decisions: alpha, or an exact full change-set 6), with the hidden-scene verdicts of their samples on counter lines before selection revision 9 (`full_alpha_d`, logged as 0 since). An accepted source's whole-frame alpha pins flat even over a visible scene, as the [opacity ruling](#ui-decision-framework) intends (P1); its wrong cases are counted by `contradicted` and `untrusted_inferred`. |
+| `full_alpha` is above zero, or since S2b `decided.6` | INFO `UI full alpha` (accepted whole-frame decisions: alpha, or an exact full change-set 6), with the hidden-scene verdicts of their samples on counter lines before selection revision 9 (`full_alpha_d`, logged as 0 from it through dc7e3c77). An accepted source's whole-frame alpha pins flat even over a visible scene, as the [opacity ruling](#ui-decision-framework) intends (P1); its wrong case, an accepted source a valid exact pair contradicts, is counted by `contradicted`. |
 | `decided.6` is above zero in a session whose capture gate lines counted Present-counted HUD-less pairings (`real`, `late` or `reoffered`) but never a same-batch one (`batch`) | FAIL `UI full frame pairing`: only a same-batch Backbuffer pair is exact (E2). A Present-counted pair can belong to another frame and then differs everywhere, so these frames were flattened from pairs that need not be their own (Hogwarts Legacy 10-05, which tagged only HUDLessColor, showed whole seconds of gameplay flat). |
 | `full_d.visible` exceeds `scene.released` (counter lines since S2b) | `UI full frame`: WARN: an H1 hold acted over a visible scene. The sample that releases a held hidden verdict decided 8 before its own evidence read the scene visible, and the guard counts it as a release, so `full_d.visible` never exceeds `scene.released` otherwise; PASS with the H1 samples' verdicts and the guard's entered, released and refuted counts. |
 | `full_d.visible` is above zero (counter lines before S2b) | `UI full frame`: WARN when the layer or HUD-less route (8 or 9) decided: each release of a held route counted one, and those lines cannot tell a release from a held route over a visible scene. INFO when only source 6 decided: an exact full change-set decided without a hold, as intended for an accepted exact pair (P1). |
-| `untrusted_inferred` is above zero | `UI inferred alpha`: FAIL: zero by construction since S1. WARN on counter lines before S1 (with `trust.opaque_set` rather than `trust.discarded`), whose untrusted pass could decide. |
+| `untrusted_inferred` is above zero (counter lines through dc7e3c77) | `UI inferred alpha`: FAIL: zero by construction since S1. WARN on counter lines before S1 (with `trust.opaque_set` rather than `trust.discarded`), whose untrusted pass could decide. PASS when it is zero; a later line, which no longer measures it, has no such check. |
 | `inexact_difference` is above zero | INFO `UI inexact difference`: source 5 from a Present-counted pair, which only proposes the frame; its own pixels validated the difference (V2), so it is expected wherever a game offers no same-batch pair. Before the 10-05 pairing change this warned pending S3's frame identity. |
 | A counter window (from one counter line whose `auto_frames` advanced to the next; windows less than 1 s apart merge) in which `held.none` was at least half of the Auto frames for at least 2 s | WARN `UI holds without a decision`, each window with its time, length, FG state and share: those Presents had no real-frame decision to show (T1) and so no UI mask. FAIL when a window held at least 90% for at least 10 s: UI detection effectively never ran (Hogwarts Legacy 10-05 at 4x frame generation, before the pairing change). PASS without such a window. |
 | Holds by kind (`held.generated`, `held.none`) and `reused`; on S1 lines the three hold kinds and the cap | INFO `UI holds` |
@@ -1789,7 +1791,8 @@ first-run shadow (`UI first-run shadow`), the dark pre-UI image statistics (`Dar
 (shadow)`), H2's still screens (`UI still screen`, from `Sunshine UI still screen` lines and the
 `still` groups) and S3's identity shadow (`UI identity (S3)`, from `Sunshine UI identity` and
 `Sunshine FG interposers` lines). Since selection revision 9 the add-on logs their remaining fields
-(`shadow`, `shadow_hidden_ms`, `presented_lit`, `presented_lit_differs` and `full_alpha_d`) as 0.
+(`shadow`, `shadow_hidden_ms`, `presented_lit` and `presented_lit_differs`) as 0; it logged
+`full_alpha_d` as 0 through dc7e3c77, and later counter lines omit it.
 
 The acceptance-dispute and time-based checks (`UI protection gaps`, hidden scene) still read the
 sampled lines; on lines since S2b the hidden-scene check lists the H1 samples by the pre-UI image

@@ -1338,7 +1338,7 @@ namespace {
     c[n::none + ui_no_mask::unaccepted] = 2;
     c[n::depth_not_current] = 1; c[n::full_d_hidden] = 1; c[n::inexact_difference] = 3; c[n::trust_earned] = 1;
     c[n::trust_discarded] = 2; c[n::trust_revoked_exact] = 1; c[n::trust_forgotten] = 3; c[n::contradicted] = 2;
-    c[n::full_alpha] = 2; c[n::full_alpha_d_visible] = 1;
+    c[n::full_alpha] = 2;
     c[n::scene_entered] = 1; c[n::scene_released] = 1; c[n::scene_refuted] = 2;
     c[n::samples] = 4; c.through_ms = 12345;
     c[n::detection_frames] += 5; c[n::auto_frames] += 5;
@@ -1352,8 +1352,7 @@ namespace {
         "inactive={no_candidates=1 size=0 unprepared=0} decided={0=2 1=0 2=0 3=0 4=0 5=3 6=1 8=0 10=4} "
         "none={layer_aside=0 trusted_invalid=0 presented_blocked=0 ambiguous=0 difference_failed=1 gate_no_hold=1 "
         "no_candidate=0 other=0 unaccepted=2} full={6=1 8=0 depth_not_current=1} full_d={hidden=1 ambiguous=0 visible=0 invalid=0} "
-        "scene={entered=1 released=1 refuted=2} untrusted_inferred=0 inexact_difference=3 contradicted=2 presented_over_dedicated=0 full_alpha=2 "
-        "full_alpha_d={hidden=0 ambiguous=0 visible=1 invalid=0} trust={earned=1 revoked_exact=1 "
+        "scene={entered=1 released=1 refuted=2} inexact_difference=3 contradicted=2 full_alpha=2 trust={earned=1 revoked_exact=1 "
         "revoked_declared=0 lapsed=0 restored=0 discarded=2 forgotten=3} samples=4 through_ms=12345",
       "The UI counters log text changed");
     ++c[n::auto_frames];
@@ -1364,16 +1363,13 @@ namespace {
     before[ui_counter_word::decided + 4] = 7u; now[ui_counter_word::decided + 4] = 9u;
     now[ui_counter_word::decided + 10] = 6u;
     now[ui_counter_word::none + ui_no_mask::ambiguous] = 5u; now[ui_counter_word::none + ui_no_mask::unaccepted] = 3u;
-    // Words 14 and 18 (S1's invariants) are reserved since selection
-    // revision 10: whatever they hold is never counted.
-    now[ui_counter_word::untrusted_inferred] = 2u; now[ui_counter_word::presented_over_dedicated] = 3u;
     now[ui_counter_word::full_alpha] = 4u;
     now[ui_counter_word::contradicted] = 7u; now[ui_counter_word::reused] = 8u;
     ui_counters gpu;
     gpu.add_gpu_delta(now, before);
     require(gpu[n::detection_frames] == 3 && gpu.decided(4) == 2 && gpu.decided(10) == 6 &&
         gpu[n::none + ui_no_mask::ambiguous] == 5 && gpu[n::none + ui_no_mask::unaccepted] == 3 &&
-        !gpu[n::untrusted_inferred] && !gpu[n::presented_over_dedicated] && gpu[n::full_alpha] == 4 &&
+        gpu[n::full_alpha] == 4 &&
         gpu[n::contradicted] == 7 && gpu[n::reused] == 8 && !gpu.decided(0), "GPU counter deltas are wrong");
     // A session sums every commit and keeps the latest tick.
     alpha_auto_policy session;
@@ -1478,8 +1474,7 @@ namespace {
       "The scene texels did not decode");
     require(!ui_temporal::decode_detection_sample(t.data(), 4, 1500, 9).pixels, "Too few texels decoded");
     // 995 of 1000 pixels from the layer (source 10) is a whole-frame alpha:
-    // the GPU counts it as full_alpha, while full_alpha_d (its verdict,
-    // measured only by the removed whole-frame diagnostic) stays zero.
+    // the GPU counts it as full_alpha, and full_d (H1's verdicts) stays zero.
     namespace n = ui_counter;
     std::array<std::uint32_t, ui_counter_word::count> before{}, after{};
     after[ui_counter_word::detection_frames] = 3; after[ui_counter_word::full_alpha] = 2;
@@ -1487,7 +1482,7 @@ namespace {
     cpu_now[n::auto_frames] = 4; cpu_now[n::held_generated] = 1;
     auto delta = ui_temporal::sample_counters(sample, cpu_now, cpu_then, after, before, 1500);
     require(delta[n::auto_frames] == 4 && delta[n::detection_frames] == 3 && delta[n::full_alpha] == 2 &&
-        !delta[n::full_alpha_d_visible] && !delta[n::full_d_visible] && delta[n::samples] == 1 &&
+        !delta[n::full_d_visible] && delta[n::samples] == 1 &&
         delta.through_ms == 1500 && delta.reconciled(), "A whole-frame alpha sample did not commit its counts");
     // full_d counts H1 samples (8) only, by the verdict they measured, and
     // the scene group the guard's observation of the sample.
@@ -1497,11 +1492,11 @@ namespace {
     observed.released = true;
     observed.refuted = 2;
     delta = ui_temporal::sample_counters(h1, cpu_now, cpu_then, after, before, 1500, observed);
-    require(delta[n::full_d_visible] == 1 && !delta[n::full_alpha_d_visible] &&
+    require(delta[n::full_d_visible] == 1 &&
         !delta[n::scene_entered] && delta[n::scene_released] == 1 && delta[n::scene_refuted] == 2,
       "An H1 sample was counted as a whole-frame decision, or its observation was not counted");
-    // The exact full change set (6) is an accepted whole-frame decision: no
-    // full_alpha_d either.
+    // The exact full change set (6) is an accepted whole-frame decision, not
+    // H1: no full_d.
     auto full_set = sample;
     full_set.source_kind = 6;
     full_set.covered = pixels;
@@ -1509,19 +1504,19 @@ namespace {
     observed = {};
     observed.entered = true;
     delta = ui_temporal::sample_counters(full_set, cpu_now, cpu_then, after, before, 1500, observed);
-    require(!delta[n::full_alpha_d_hidden] && !delta[n::full_d_hidden] && delta[n::scene_entered] == 1,
-      "A source-6 sample was counted in full_alpha_d or full_d, or its observation was not counted");
+    require(!delta[n::full_d_hidden] && delta[n::scene_entered] == 1,
+      "A source-6 sample was counted in full_d, or its observation was not counted");
     for (const std::uint32_t retired : {7u, 9u}) {
       auto old = sample;
       old.source_kind = retired;
       delta = ui_temporal::sample_counters(old, cpu_now, cpu_then, after, before, 1500);
-      require(!delta[n::full_d_visible] && !delta[n::full_alpha_d_visible], "A retired source was counted as full-frame");
+      require(!delta[n::full_d_visible], "A retired source was counted as full-frame");
     }
     auto partial = sample;
     partial.covered = 980;
     partial.evidence.scene.valid = false;
     delta = ui_temporal::sample_counters(partial, cpu_now, cpu_then, after, before, 1500);
-    require(!delta[n::full_alpha_d_invalid] && !delta[n::full_d_invalid], "A 98% alpha sample was counted as whole-frame");
+    require(!delta[n::full_d_invalid], "A 98% alpha sample was counted as whole-frame");
     // The one-way counts of a judged kind, none for the layer copy.
     require(one_way_of(e, kind::ui_color) == std::pair<std::uint32_t, std::uint32_t>{61, 63} &&
         one_way_of(e, kind::current) == std::pair<std::uint32_t, std::uint32_t>{42, 52} &&

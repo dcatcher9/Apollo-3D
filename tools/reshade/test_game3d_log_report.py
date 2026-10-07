@@ -159,6 +159,11 @@ S2B_COUNTER_GROUPS = tuple(
     group for key, inner in COUNTER_GROUPS
     for group in ((key, tuple(k for k in inner if k != '9') if key in ('decided', 'full') else inner),)
     + ((('scene', ('entered', 'released', 'refuted')),) if key == 'full_d' else ()))
+# The same after dc7e3c77 (format_ui_counters today): without the counters that only ever logged 0 there
+# (untrusted_inferred, presented_over_dedicated and full_alpha_d).
+CURRENT_COUNTER_GROUPS = tuple(
+    (key, inner) for key, inner in S2B_COUNTER_GROUPS
+    if key not in ('untrusted_inferred', 'presented_over_dedicated', 'full_alpha_d'))
 # The same since fix 2: decided adds 11 (H2's still screen), and H2's group follows the scene guard's.
 FIX2_COUNTER_GROUPS = tuple(
     group for key, inner in S2B_COUNTER_GROUPS
@@ -681,7 +686,7 @@ class ReadinessReport(unittest.TestCase):
                          ('WARN', ['10:00:15-10:00:20']))
 
     def test_counter_line_is_parsed_and_the_last_one_counts(self):
-        # The text test_game3d_alpha_auto pins for format_ui_counters (since S2a).
+        # An S2a counter line, as format_ui_counters wrote it before S2b.
         text = ('auto_frames=10 detection_frames=6 held={generated=2 none=1} reused=1 '
                 'inactive={no_candidates=1 size=0 unprepared=0} decided={0=2 1=0 2=0 3=0 4=0 5=3 6=1 8=0 9=0 10=4} '
                 'none={layer_aside=0 trusted_invalid=0 presented_blocked=0 ambiguous=0 difference_failed=1 '
@@ -990,8 +995,8 @@ class ReadinessReport(unittest.TestCase):
                       checks['UI protection'].detail)
 
     def test_s2b_counter_lines_check_the_h1_release_invariant(self):
-        # The text test_game3d_alpha_auto pins for format_ui_counters since S2b: decided and full omit 9, and the
-        # scene guard's group follows full_d.
+        # A counter line from S2b through dc7e3c77: decided and full omit 9, and the scene guard's group follows
+        # full_d.
         text = ('auto_frames=10 detection_frames=6 held={generated=2 none=1} reused=1 '
                 'inactive={no_candidates=1 size=0 unprepared=0} decided={0=2 1=0 2=0 3=0 4=0 5=3 6=1 8=0 10=4} '
                 'none={layer_aside=0 trusted_invalid=0 presented_blocked=0 ambiguous=0 difference_failed=1 '
@@ -1034,6 +1039,32 @@ class ReadinessReport(unittest.TestCase):
         clean = run(BASE + [counters('10:00:12', CLEAN_COUNTERS, groups=S2B_COUNTER_GROUPS)])
         self.assertEqual(clean['UI full alpha'].detail,
                          'no frame decided a whole-frame alpha or an exact full change-set (6)')
+
+    def test_current_counter_line_omits_the_counters_that_logged_zero(self):
+        # The text test_game3d_alpha_auto pins for format_ui_counters: builds after dc7e3c77 no longer log
+        # untrusted_inferred, presented_over_dedicated or full_alpha_d, which had logged only 0 since revision 9.
+        text = ('auto_frames=15 detection_frames=11 held={generated=2 none=1} reused=1 '
+                'inactive={no_candidates=1 size=0 unprepared=0} decided={0=2 1=0 2=0 3=0 4=0 5=3 6=1 8=0 10=4} '
+                'none={layer_aside=0 trusted_invalid=0 presented_blocked=0 ambiguous=0 difference_failed=1 '
+                'gate_no_hold=1 no_candidate=0 other=0 unaccepted=2} full={6=1 8=0 depth_not_current=1} '
+                'full_d={hidden=1 ambiguous=0 visible=0 invalid=0} scene={entered=1 released=1 refuted=2} '
+                'inexact_difference=3 contradicted=2 full_alpha=2 trust={earned=1 revoked_exact=1 '
+                'revoked_declared=0 lapsed=0 restored=0 discarded=2 forgotten=3} samples=4 through_ms=12345')
+        fields = report.counter_fields('runtime=0000000000000001 ' + text)
+        self.assertEqual((fields['scene.refuted'], fields['inexact_difference'], fields['full_alpha'],
+                          fields['trust.forgotten']), (2, 3, 2, 3))
+        self.assertFalse([k for k in fields
+                          if k.split('.')[0] in ('untrusted_inferred', 'presented_over_dedicated', 'full_alpha_d')])
+        self.assertEqual(report.counter_fields(report.COUNTERS.search(
+            counters('10:00:00', fields, groups=CURRENT_COUNTER_GROUPS)).group(1)), fields)
+        # A whole-frame alpha is reported without a breakdown, and the line no longer measures unaccepted inferred
+        # alpha, so it has no such check.
+        checks = run(BASE + [counters('10:00:12', {**CLEAN_COUNTERS, 'full_alpha': 40}, groups=CURRENT_COUNTER_GROUPS)])
+        self.assertEqual((checks['UI full alpha'].status, checks['UI full alpha'].detail),
+                         ('INFO', '40 frames decided a whole-frame alpha and 0 an exact full change-set (6) (50% of '
+                          'detection frames)'))
+        self.assertNotIn('UI inferred alpha', checks)
+        self.assertEqual((checks['UI counters'].status, checks['UI protection'].status), ('PASS', 'PASS'))
 
     def test_s2b_lines_parse_the_pre_ui_scene_and_the_scene_guard(self):
         # Stellar Blade SDR settings with FG suspended: the cleared output target holds the pre-UI scene (colour

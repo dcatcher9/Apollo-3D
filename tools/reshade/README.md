@@ -536,7 +536,8 @@ invariants from the last counter line (the holds check from every counter line),
   is exact (rule E2); a Present-counted pair can belong to another frame and then differs everywhere
   (Hogwarts Legacy 10-05, which tagged only `HUDLessColor`).
 - `UI inferred alpha`: a failure when an unaccepted inferred alpha decided, which only accepted
-  candidates do since S1 (a warning on counter lines logged before S1).
+  candidates do since S1 (a warning on counter lines logged before S1). Only counter lines through
+  dc7e3c77 carry the count, so later logs have no such check.
 - `UI inexact difference`: INFO, the frames whose HUD-less difference came from a Present-counted
   (inexact) pair, validated by its own pixels (V2); expected wherever a game offers no same-batch
   pair.
@@ -565,7 +566,9 @@ and `shadow_hidden_ms` fields of UI lines written before selection revision 9 st
 hidden-scene warning above), rule H2's still screens (`still` groups, `decided.11`, `Sunshine
 UI still screen` lines), the S3 identity shadow (`Sunshine UI identity`, `Sunshine FG interposers`),
 and the dark pre-UI statistics; since selection revision 9 the add-on logs their remaining fields
-(`shadow`, `shadow_hidden_ms`, `presented_lit`, `presented_lit_differs`, `full_alpha_d`) as 0.
+(`shadow`, `shadow_hidden_ms`, `presented_lit`, `presented_lit_differs`) as 0. It logged
+`full_alpha_d`, `untrusted_inferred` and `presented_over_dedicated` as 0 through dc7e3c77, and
+later counter lines omit them.
 Each `UI protection gaps` window lists its pieces with each line's own FG state; a line whose
 status sample was still pending (`checking` or `searching`), or an unrendered line, continues a run,
 labelled with that state after the last sample's reason.

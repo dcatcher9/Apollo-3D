@@ -57,8 +57,8 @@ namespace sunshine_game3d::ui_selection {
   // (per_frame_sample); the layer's pixels beyond its premultiplied bound
   // are uncovered (statistics rows 208-223) and invalidate it only when they
   // lie on more than 1% of the frame and on more than 5% of it or more than
-  // its opaque pixels; H1 overrides every S1 winner; and the invariant
-  // counter words 14 and 18 are reserved.
+  // its opaque pixels; H1 overrides every S1 winner; and the shader no
+  // longer counts S1's invariants.
   inline constexpr std::uint32_t revision = 10;
   inline constexpr std::string_view revision_marker = "SUNSHINE_UI_SELECTION_REVISION";
 
@@ -350,11 +350,7 @@ namespace sunshine_game3d::ui_selection {
     // re-offer without a decision of its own, the previous store unchanged.
     hold_state next{};
     // Counter words (game3d_ui_counters.h). full_alpha is of the applied
-    // decision, the others of the own decision. The invariants
-    // untrusted_inferred and presented_over_dedicated (an unaccepted inferred
-    // alpha, or one beside an accepted declared alpha, deciding) are zero by
-    // construction of S1; selection revision 10 reserved their words and the
-    // contract test asserts them.
+    // decision, the others of the own decision.
     bool inexact_difference{}, contradicted{}, full_alpha{};
     // H1: the raw informative full claims before refutation (candidate bits |
     // ui_detection::claim_pre_ui), the S1 winner's source, and whether H1
@@ -541,9 +537,7 @@ namespace sunshine_game3d::ui_selection {
 
   // The adds one detection frame makes to the GPU counter words: the applied
   // decision (detection frame, decided source, reused, whole-frame alpha,
-  // depth), and the own decision's reason without a mask and judgments. Words
-  // untrusted_inferred and presented_over_dedicated are reserved and stay
-  // zero.
+  // depth), and the own decision's reason without a mask and judgments.
   inline std::array<std::uint32_t, ui_counter_word::count> counter_adds(const decision &d, std::uint32_t flags) {
     std::array<std::uint32_t, ui_counter_word::count> adds{};
     adds[ui_counter_word::detection_frames] = 1;
@@ -556,9 +550,9 @@ namespace sunshine_game3d::ui_selection {
     adds[ui_counter_word::reused] = d.reused;
     return adds;
   }
-  // S1's invariants, zero by construction (their counter words are
-  // reserved): no unaccepted inferred alpha decides, and no inferred alpha
-  // decides while an accepted declared alpha is offered.
+  // S1's invariants, zero by construction and asserted by the selection
+  // contract and sequence tests: no unaccepted inferred alpha decides, and no
+  // inferred alpha decides while an accepted declared alpha is offered.
   constexpr bool untrusted_inferred(const decision &d, std::uint32_t accepted) {
     const std::uint32_t own = d.own_source == 3u ? candidate::backbuffer : d.own_source == 4u ? candidate::current :
       d.own_source == ui_detection::source_layer ? candidate::layer : 0u;

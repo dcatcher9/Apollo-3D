@@ -104,19 +104,18 @@
 #define SUNSHINE_UI_LAYER_BOUND_ROW 208
 // Exact per-session UI counters (docs/reshade-sbs.md, UI counters), mirrored
 // from game3d_ui_counters.h: the detection reduce adds every detection frame
-// to these words of SunshineUICountersStore. The no-mask reasons are offsets
-// from SUNSHINE_UI_COUNTER_NONE. The decided words of sources 11 and 12 and
-// word 30 (H2 and fix 3, removed) are reserved and stay zero, and so are
-// words 14 and 18 (S1's invariants, zero by construction) since revision 10.
-#define SUNSHINE_UI_COUNTER_WORDS 31
+// to these words of SunshineUICountersStore. The decided words are indexed by
+// source 0-10 and the no-mask reasons are offsets from
+// SUNSHINE_UI_COUNTER_NONE.
+#define SUNSHINE_UI_COUNTER_WORDS 26
 #define SUNSHINE_UI_COUNTER_DETECTION_FRAMES 0
 #define SUNSHINE_UI_COUNTER_DECIDED 1
-#define SUNSHINE_UI_COUNTER_INEXACT_DIFFERENCE 15
-#define SUNSHINE_UI_COUNTER_DEPTH_NOT_CURRENT 16
-#define SUNSHINE_UI_COUNTER_CONTRADICTED 17
-#define SUNSHINE_UI_COUNTER_NONE 19
-#define SUNSHINE_UI_COUNTER_FULL_ALPHA 28
-#define SUNSHINE_UI_COUNTER_REUSED 29
+#define SUNSHINE_UI_COUNTER_INEXACT_DIFFERENCE 12
+#define SUNSHINE_UI_COUNTER_DEPTH_NOT_CURRENT 13
+#define SUNSHINE_UI_COUNTER_CONTRADICTED 14
+#define SUNSHINE_UI_COUNTER_NONE 15
+#define SUNSHINE_UI_COUNTER_FULL_ALPHA 24
+#define SUNSHINE_UI_COUNTER_REUSED 25
 #define SUNSHINE_UI_NONE_LAYER_ASIDE 0
 #define SUNSHINE_UI_NONE_TRUSTED_INVALID 1
 #define SUNSHINE_UI_NONE_PRESENTED_BLOCKED 2

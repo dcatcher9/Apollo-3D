@@ -318,12 +318,12 @@ namespace {
       require(counts.reconciled() && frames + 1 >= counted.size() && counts[ui_counter::samples] &&
           counts[ui_counter::auto_frames] == frames && counts[ui_counter::detection_frames] == frames &&
           counts.decided(4) == current && counts.decided(0) == frames - current &&
-          !counts[ui_counter::untrusted_inferred] && current && frames > current &&
+          current && frames > current &&
           counts[ui_counter::none + ui_no_mask::unaccepted] == frames - current && !counts.held() && !counts.inactive() &&
-          !counts[ui_counter::contradicted] && !counts[ui_counter::reused] && !counts[ui_counter::presented_over_dedicated] &&
+          !counts[ui_counter::contradicted] && !counts[ui_counter::reused] &&
           counts[ui_counter::trust_restored] == 1 && session.stored() == current_key,
         "D3D12 exact UI counters differ from the scripted Auto frames");
-      std::printf("PASS D3D12 exact UI counters: %llu Auto frames through %llu ms reconcile; decided 4=%llu 0=%llu, unaccepted no-mask frames exact and no inferred source decided unaccepted\n",
+      std::printf("PASS D3D12 exact UI counters: %llu Auto frames through %llu ms reconcile; decided 4=%llu 0=%llu, unaccepted no-mask frames exact\n",
         static_cast<unsigned long long>(frames), static_cast<unsigned long long>(counts.through_ms),
         static_cast<unsigned long long>(current), static_cast<unsigned long long>(frames - current));
     }

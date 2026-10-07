@@ -348,7 +348,7 @@ namespace {
 
     const auto c = sums(test.statistics, test.offered, test.flags, test.pre_ui_threshold);
     const auto d = selection::decide(c, test.offered, test.accepted, test.flags, previous);
-    // S1's invariants, whose counter words are reserved (zero by construction).
+    // S1's invariants, zero by construction.
     require(!selection::untrusted_inferred(d, test.accepted) && !selection::inferred_over_declared(d, test.offered, test.accepted),
       test.name + ": an unaccepted inferred alpha decided, or an inferred alpha beside an accepted declared one");
     std::array<std::uint32_t, 4 * detection::decision_texels> want{};
@@ -1660,7 +1660,7 @@ int main() {
     const std::size_t crafted_count = cases.size();
     std::mt19937 random(0x5131u);
     for (unsigned i = 0; i != 6000; ++i) cases.push_back(random_case(random, i));
-    std::array<unsigned, detection::source_count> sources{};
+    std::array<unsigned, sunshine_game3d::ui_counter_word::decided_count> sources{};
     unsigned reused = 0, h1 = 0, gate_no_hold = 0, own_retired = 0;
     // The tiles pass in scRGB (relative tolerances above one), the pre-UI
     // counts at the .005 float pair threshold and without a comparable pair.
@@ -1718,7 +1718,7 @@ int main() {
       "decision word, hold store write and counter add; %u reused, %u H1, %u gate_no_hold; applied sources",
       gpu.adapter.c_str(), crafted_count, cases.size() - crafted_count, reused, h1, gate_no_hold);
     for (std::size_t s = 0; s != sources.size(); ++s)
-      if (s != 7 && s != 9 && s != 11) std::printf(" %zu=%u", s, sources[s]);
+      if (s != 7 && s != 9) std::printf(" %zu=%u", s, sources[s]);
     std::printf(" other=%u\n", sources[7]);
     return 0;
   } catch (const std::exception &error) {
