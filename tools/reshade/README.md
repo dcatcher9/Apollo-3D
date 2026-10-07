@@ -479,11 +479,18 @@ warning when the removed first-run shadow measured the presented frame hidden, n
 least 500 ms while no UI source decided (`shadow_hidden_ms`, listed once per run by its start); in
 logs since fix 1, `Pre-UI proof` for each layer proof key (`pre_ui:<format>:<space>`) restored,
 earned, lapsed or forgotten ([hidden-scene evidence](../../docs/reshade-sbs.md#setup) defines it);
-observation losses by cause; capture statuses outside the settle time after an export start, FG
-switch or reset (those inside it are INFO); unusual export pauses; present-thread hitches; Game 3D
+observation losses by cause; capture statuses of every API depth provider (Streamline, NGX and the
+API fallback, each listed time naming its provider) outside the settle time after an export start,
+FG switch or reset (those inside it are INFO); unusual export pauses; present-thread hitches; Game 3D
 CPU and GPU cost over every timing window (means weighted by each window's Presents or GPU frames,
-and the largest maximum); and, from the
-host log, the Game 3D link, size fit and encoder stalls. A log whose game process ended right
+and the largest maximum); `Stream delivery`, the new frames per second the host took (published
+minus overwritten-unconsumed slots) against what the game offered (published plus dropped), capped
+at the stream rate, which the host log supplies and which follows live 90/72 Hz changes; windows
+that start in the settle time are skipped, and one below 85% of that target for 10 s or longer
+warns. Without `--host-log` the stream rate is unknown, so the check only reports both rates as INFO
+(the `Sunshine SBS output` slot counters are defined in
+[Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection)); and, from the host log, the Game 3D link,
+size fit and encoder stalls (one per stalled frame, classified by its last line). A log whose game process ended right
 after ReShade tore its runtimes down (Unreal games often end before ReShade logs its exit) counts
 as a normal exit.
 

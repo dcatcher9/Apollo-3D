@@ -1224,22 +1224,29 @@ class ReadinessReport(unittest.TestCase):
                            '(unavailable=0 reuse_after_gap=0 reuse_other_source=0) runtime=0x1 generation=7 '
                            f'dropped={dropped} overwritten_unconsumed={overwritten}; cumulative')
         slow = [out(f'10:00:{5 * i:02}', 600 * i, 500 * i, 350 * i) for i in range(1, 6)]
-        check = run(BASE + slow)['Stream delivery']
+
+        def judged(lines, fps):
+            session = report.parse(BASE + lines)
+            session.stream_fps = fps
+            return [c for c in report.evaluate(session) if c.name == 'Stream delivery'][0]
+        check = judged(slow, 90.0)
         self.assertEqual(check.status, 'WARN')
         self.assertTrue(check.detail.startswith('the host took 50.0 new frames/s of a target 90.0/s'), check.detail)
-        self.assertIn('stream 90 fps assumed', check.detail)
         self.assertEqual(check.times, ['10:00:05-10:00:25 (20 s): 50.0 of 90.0 new frames/s'])
+        # Without the host log the stream rate is unknown, so nothing is judged: a 72 Hz stream that takes every frame
+        # it can (RE9 and Hogwarts 10-06) read as a WARN against an assumed 90 fps.
+        unknown = run(BASE + slow)['Stream delivery']
+        self.assertEqual(unknown.status, 'INFO')
+        self.assertEqual(unknown.detail, 'stream rate unknown (pass --host-log to judge it): the host took 50.0 new '
+                                         'frames/s, the game offered 220.0/s')
+        self.assertFalse(unknown.times)
         # A game offering 60/s and a host claiming all of them passes; the target follows the game.
         follows = [out(f'10:00:{5 * i:02}', 300 * i, 0, 0) for i in range(1, 6)]
-        check = run(BASE + follows)['Stream delivery']
+        check = judged(follows, 90.0)
         self.assertEqual(check.status, 'PASS')
         self.assertTrue(check.detail.startswith('the host took 60.0 new frames/s of a target 60.0/s'), check.detail)
-        # The host log's stream rate replaces the assumption.
-        session = report.parse(BASE + slow)
-        session.stream_fps = 72.0
-        detail = [c for c in report.evaluate(session) if c.name == 'Stream delivery'][0].detail
-        self.assertIn('target 72.0/s', detail)
-        self.assertNotIn('assumed', detail)
+        # The host log's stream rate is the cap.
+        self.assertIn('target 72.0/s', judged(slow, 72.0).detail)
         exact = report.HOST_FPS.search('Requested frame rate [90/1 exactly 90fps]')
         self.assertEqual(exact.groups(), ('90', '1', None))
         self.assertEqual(report.HOST_FPS.search('Requested frame rate [60fps]').groups(), (None, None, '60'))
@@ -1426,7 +1433,18 @@ class ReadinessReport(unittest.TestCase):
         self.assertEqual(run(BASE + [settling])['Capture status'].status, 'INFO')
         status = run(BASE + [settling, later])['Capture status']
         self.assertEqual((status.status, status.detail, status.times),
-                         ('WARN', 'conflicting_state 1; 1 more while settling', ['10:00:12 conflicting_state']))
+                         ('WARN', 'conflicting_state 1; 1 more while settling',
+                          ['10:00:12 Streamline conflicting_state']))
+        # Every API depth provider's statuses count (Stellar Blade's depth comes through NGX); the NGX periodic
+        # summary line is no status.
+        ngx = line('10:00:13', '[Sunshine 3D] Sunshine NGX depth: incomplete_state; viewport=0')
+        api = line('10:00:14', '[Sunshine 3D] Sunshine API depth: conflicting_state; capture=1; using generic depth '
+                               'fallback')
+        summary = line('10:00:15', '[Sunshine 3D] Sunshine NGX depth: confirmed_features=1 capture_eligible=1 '
+                                   'recovered_features=0 evaluations=4 nominations=4 copy_recorded=4 metadata_only=0')
+        status = run(BASE + [ngx, api, summary])['Capture status']
+        self.assertEqual((status.status, status.times),
+                         ('WARN', ['10:00:13 NGX incomplete_state', '10:00:14 API conflicting_state']))
 
     def test_host_lines_from_another_session_are_not_counted(self):
         with TemporaryDirectory() as folder:
@@ -1440,6 +1458,31 @@ class ReadinessReport(unittest.TestCase):
             self.assertEqual(checks['Encoder stalls'].times, ['10:00:05 encoder-side'])
             other = report.host_checks(host, datetime(2026, 9, 30, 23, 0), datetime(2026, 9, 30, 23, 5))
             self.assertEqual([c.name for c in other], ['Host log'])
+
+    def test_an_nvenc_stall_counts_once_by_its_last_line(self):
+        # E33 10-06: each stalled frame logged its warning and then its completion line, and the report counted 6
+        # stalls for 3 frames. A stall is one per frame, classified by its last line; frame numbers far apart in time
+        # (a new encoder session) are separate stalls.
+        with TemporaryDirectory() as folder:
+            host = Path(folder) / 'sunshine.log'
+            host.write_text(
+                '[2026-10-01 10:00:01.000]: Info: ReShade SBS connected: process 1, 7680x2160\n'
+                '[2026-10-01 10:00:05.000]: Warning: NvEnc: frame 120 exceeded the 100 ms completion wait; '
+                'its input is still being produced; input_producer=pending_at_101ms (upstream GPU delay)\n'
+                '[2026-10-01 10:00:05.200]: Info: NvEnc: frame 120 completed after soft timeout in 180 ms; '
+                'input_producer=done_by_99ms (finished before the first check; encoder or upstream)\n'
+                '[2026-10-01 10:00:09.000]: Warning: NvEnc: frame 340 exceeded the 100 ms completion wait; '
+                'allowing up to 250 ms total; input_producer=done_at_120ms (upstream GPU delay)\n'
+                '[2026-10-01 10:00:09.100]: Error: NvEnc: frame 340 encode wait timeout after 260 ms; x; '
+                'input_producer=done_at_120ms (upstream GPU delay)\n'
+                '[2026-10-01 10:00:18.000]: Info: NvEnc: frame 120 completed after soft timeout in 140 ms; '
+                'input_producer=done_by_99ms (finished before the first check; encoder or upstream)\n',
+                encoding='utf-8')
+            checks = {c.name: c for c in report.host_checks(host, datetime(2026, 10, 1, 10, 0, 0),
+                                                            datetime(2026, 10, 1, 10, 0, 20))}
+            stalls = checks['Encoder stalls']
+            self.assertEqual((stalls.status, stalls.detail), ('WARN', '3'))
+            self.assertEqual(stalls.times, ['10:00:05 encoder-side', '10:00:09 upstream GPU', '10:00:18 encoder-side'])
 
 
 if __name__ == '__main__':

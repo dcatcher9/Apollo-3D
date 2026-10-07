@@ -122,7 +122,8 @@ SELECTION = re.compile(r'\bselection=(\w+)')
 RUNTIME = re.compile(r'\bruntime=(0x[0-9a-fA-F]+)')
 # Either placement controller; the first word after the colon is its state.
 PLACEMENT = re.compile(r'Sunshine 3D (raw automation|Streamline scale): (\w+);')
-DEPTH_STATUS = re.compile(r'Sunshine Streamline depth: (\w+);')
+# Every API depth provider's status line (streamline_depth_provider.cpp): Streamline, NGX and the API fallback.
+DEPTH_STATUS = re.compile(r'Sunshine (Streamline|NGX|API) depth: (\w+);')
 HITCH = re.compile(r'Game 3D hitch: (.+?) took ([0-9.]+) ms')
 # The present-thread steps of a depth-source flip (Streamline <-> NGX <-> Generic) that each log their own hitch
 # line (docs/reshade-sbs.md, depth handoff): named in the hitch details.
@@ -148,6 +149,10 @@ TEARDOWN_TAIL_S = 10.0
 DISPLAY_SCALING = re.compile(r'display scaling limits the game: it renders at (\d+)x(\d+) on a (\d+)x(\d+) display '
                              r'because Windows display scaling is (\d+)%')
 HOST_LINE = re.compile(r'^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\.(\d{3})\]: (\w+): (.*)$')
+# An NVENC stall logs its warning and then its completion or timeout line for the same frame, each with the
+# producer's state (nvenc_base.cpp): one stall per frame, classified by its last line.
+NVENC_FRAME = re.compile(r'NvEnc: frame (\d+) ')
+NVENC_SAME_STALL_S = 5
 
 # ReShade and game noise that says nothing about Game 3D.
 BENIGN = (
@@ -191,9 +196,10 @@ KIND_NAMES = dict(zip(ALPHA_KINDS, ALPHA_NAMES)) | {'hudless': 'HUD-less differe
 # which detection itself earns or loses confidence.
 UNPROTECTED_MIN_S = 2.0
 # Stream delivery: the stream follows the game, so the host should take min(what the game offers, the stream fps) new
-# frames per second. A window below this share of that target for this long warns; without a host log the stream is
-# assumed to run at DEFAULT_STREAM_FPS (the Game ceiling).
-DELIVERY_SHARE, DELIVERY_WARN_S, DEFAULT_STREAM_FPS = 0.85, 10.0, 90.0
+# frames per second. A window below this share of that target for this long warns. Without a host log the stream rate
+# is unknown (a 72 Hz or 60 Hz stream that takes every frame it can reads below any assumed rate), so the rates are
+# reported as INFO, not judged.
+DELIVERY_SHARE, DELIVERY_WARN_S = 0.85, 10.0
 # Presents held without a decision to show (held.none, T1) in a counter interval: a share of Auto frames from which
 # the window is listed, and a share and length at which it fails (UI detection effectively never ran).
 HELD_NONE_WARN, HELD_NONE_FAIL, HELD_NONE_FAIL_S = 0.5, 0.9, 10.0
@@ -617,7 +623,7 @@ class Session:
     depth_episodes: list[DepthEpisode] = field(default_factory=list)
     streamed: list[list] = field(default_factory=list)  # From a generation to the next export inactive.
     placement: list[tuple[float, bool, str, str]] = field(default_factory=list)  # t, placed, state, provider.
-    statuses: list[tuple[float, str]] = field(default_factory=list)  # Each Streamline depth status line.
+    statuses: list[tuple[float, str, str]] = field(default_factory=list)  # Each depth status: time, status, provider.
     hitches: list[tuple[float, str, float]] = field(default_factory=list)
     timings: list[tuple] = field(default_factory=list)  # Every timing line's window.
     # Export delivery counters: (t, runtime, generation, published, dropped, overwritten_unconsumed); and the
@@ -776,7 +782,7 @@ def parse(lines) -> Session:
             s.placement.append((t, state in RAW_PLACED if raw else state == 'ready',
                                 ('raw ' if raw else 'projection ') + state, provider))
         if found := DEPTH_STATUS.search(text):
-            s.statuses.append((t, found.group(1)))
+            s.statuses.append((t, found.group(2), found.group(1)))
         if found := NGX.search(text):
             s.ngx = tuple(int(v or 0) for v in found.groups())
         if found := HITCH.search(text):
@@ -994,16 +1000,16 @@ def evaluate(s: Session) -> list[Check]:
 
     def settles(t: float) -> bool:
         return any(0 <= t - m <= SETTLE_S for m in s.settle)
-    outside = [(t, k) for t, k in s.statuses if k in failing and not settles(t)]
-    settling = Counter(k for t, k in s.statuses if k in failing and settles(t))
-    conflicts = Counter(k for _, k in outside)
+    outside = [(t, k, p) for t, k, p in s.statuses if k in failing and not settles(t)]
+    settling = Counter(k for t, k, _ in s.statuses if k in failing and settles(t))
+    conflicts = Counter(k for _, k, _ in outside)
     if conflicts:
         named = ', '.join(f'{k} {v}' for k, v in sorted(conflicts.items()))
         if 'incomplete_state' in conflicts:
             named += ' (incomplete_state: the source was blocked by a split barrier or a layout without a legacy state)'
         add(Check('WARN', 'Capture status', named + (f'; {sum(settling.values())} more while settling'
                                                      if settling else ''),
-                  [f'{clock(t)} {k}' for t, k in outside][:6]))
+                  [f'{clock(t)} {p} {k}' for t, k, p in outside][:6]))
     elif settling:
         add(Check('INFO', 'Capture status', ', '.join(f'{k} {v}' for k, v in sorted(settling.items()))
                   + f' within {SETTLE_S:g} s of an export start, FG switch or reset (settling)'))
@@ -1433,8 +1439,8 @@ def delivery_checks(s: Session, add) -> None:
     """'Stream delivery': the host should take every new frame the game offers, up to the stream fps (the stream
     follows the game; no repeats). Per counter window, claimed = published - overwritten_unconsumed and offered =
     published + dropped; the target is min(offered, stream fps). Windows that start in the settle time after an FG
-    switch, reset or export start are skipped."""
-    fps = s.stream_fps or DEFAULT_STREAM_FPS
+    switch, reset or export start are skipped. Without the host log's stream rate the rates are INFO only."""
+    fps = s.stream_fps or float('inf')
 
     def fps_at(t: float) -> float:
         current = s.stream_fps_timeline[0][1] if s.stream_fps_timeline else fps
@@ -1456,6 +1462,11 @@ def delivery_checks(s: Session, add) -> None:
         return
     total = sum(b - a for a, b, *_ in rows)
     claimed = sum((b - a) * c for a, b, c, _, _ in rows) / total
+    if not s.stream_fps:
+        offered = sum((b - a) * o for a, b, _, _, o in rows) / total
+        add(Check('INFO', 'Stream delivery', f'stream rate unknown (pass --host-log to judge it): the host took '
+                                             f'{claimed:.1f} new frames/s, the game offered {offered:.1f}/s'))
+        return
     target = sum((b - a) * g for a, b, _, g, _ in rows) / total
     windows: list[list[float]] = []
     for a, b, c, g, o in rows:
@@ -1470,8 +1481,7 @@ def delivery_checks(s: Session, add) -> None:
     # The rates in effect during this session: the one at its start and each later change.
     start = s.first if s.first is not None else 0.0
     rates = sorted({fps_at(start)} | {value for when, value in s.stream_fps_timeline if when > start})
-    source = (f'stream {fps:g} fps assumed (pass --host-log for the real one)' if not s.stream_fps else
-              f'stream {rates[0]:g}-{rates[-1]:g} fps, followed live' if len(rates) > 1 else f'stream {fps:g} fps')
+    source = f'stream {rates[0]:g}-{rates[-1]:g} fps, followed live' if len(rates) > 1 else f'stream {fps:g} fps'
     add(Check('WARN' if long else 'PASS', 'Stream delivery',
               f'the host took {claimed:.1f} new frames/s of a target {target:.1f}/s (what the game offered, capped at '
               f'the {source})' + (f'; {len(long)} {"window" if len(long) == 1 else "windows"} below '
@@ -1695,6 +1705,7 @@ def host_stream_fps(path: Path, start: datetime, end: datetime) -> list[tuple[da
 def host_checks(path: Path, start: datetime, end: datetime) -> list[Check]:
     checks: list[Check] = []
     stalls, connects, errors, fits = [], 0, [], []
+    open_stalls: dict[int, int] = {}  # NVENC frame -> index in stalls of its stall.
     span = []
     for line in path.read_text(encoding='utf-8', errors='replace').splitlines():
         m = HOST_LINE.match(line)
@@ -1707,8 +1718,15 @@ def host_checks(path: Path, start: datetime, end: datetime) -> list[Check]:
         t = when.hour * 3600 + when.minute * 60 + when.second
         level, text = m.group(3), m.group(4)
         if 'input_producer=' in text:
-            stalls.append(f'{clock(t)} ' + ('encoder-side' if 'done_by' in text else
-                                            'upstream GPU' if 'upstream' in text else 'unknown'))
+            kind = 'encoder-side' if 'done_by' in text else 'upstream GPU' if 'upstream' in text else 'unknown'
+            frame = NVENC_FRAME.search(text)
+            index = open_stalls.get(int(frame.group(1))) if frame else None
+            if index is not None and 0 <= t - stalls[index][0] <= NVENC_SAME_STALL_S:
+                stalls[index] = (stalls[index][0], kind)
+            else:
+                if frame:
+                    open_stalls[int(frame.group(1))] = len(stalls)
+                stalls.append((t, kind))
         if 'ReShade SBS connected' in text:
             connects += 1
         if 'ReShade SBS: game eyes' in text:
@@ -1723,7 +1741,7 @@ def host_checks(path: Path, start: datetime, end: datetime) -> list[Check]:
     for level, text in fits:
         checks.append(Check('FAIL' if level == 'Warning' else 'WARN', 'Host size', text))
     checks.append(Check('WARN' if stalls else 'PASS', 'Encoder stalls', str(len(stalls)) if stalls else 'none',
-                        stalls[:6]))
+                        [f'{clock(at)} {kind}' for at, kind in stalls[:6]]))
     if errors:
         checks.append(Check('WARN', 'Host errors', f'{len(errors)}', errors[:5]))
     return checks
