@@ -182,7 +182,7 @@ namespace {
     const auto &scene = evidence.scene, &pre_ui_scene = evidence.pre_ui_scene;
     // F1 and A2 (texels 8, 9 and 11): the one-way judgment counts of
     // Backbuffer and current alpha (lines through be7788bf led with the
-    // layer's, 0 since selection revision 10, which judges no layer copy) and
+    // layer's, 0 on every line: every layer was the never-judged late copy) and
     // of the declared alphas (sampled_declared_one_way: UIAlpha, UI color
     // tag), the sample's own-decision reason, the candidate it names and
     // whether the T1 grace reused a decision.

@@ -513,7 +513,8 @@ invariants from the last counter line (the holds check from every counter line),
 
 - `UI counters`: the add-on's own accounting (Auto frames are detection frames, generated Presents
   that held a real frame's decision or had none, and frames without detection).
-- `UI protection`: inferred alpha beside an accepted declared UI channel, and the frames in which a
+- `UI protection`: inferred alpha beside an accepted declared UI channel (`presented_over_dedicated`,
+  counter lines through dc7e3c77 only), and the frames in which a
   valid exact pair contradicted a deciding accepted alpha one way (`contradicted`; inferred alpha per frame, since selection revision 10 an accepted UIAlpha, UI color tag, Backbuffer or current alpha (never the one-frame-late layer copy), per sample), which
   fail only with a sampled run of three such contradictions within 2 s that no revocation followed:
   A2 never revokes shorter ones, and the counter cannot tell them apart. Counter lines logged
@@ -565,10 +566,15 @@ and add no check of their own: the first-run shadow's session line, which is ign
 and `shadow_hidden_ms` fields of UI lines written before selection revision 9 still feed the
 hidden-scene warning above), rule H2's still screens (`still` groups, `decided.11`, `Sunshine
 UI still screen` lines), the S3 identity shadow (`Sunshine UI identity`, `Sunshine FG interposers`),
-and the dark pre-UI statistics. From selection revision 9 the add-on logged their remaining fields
-as 0, and later lines omit them: `full_alpha_d`, `untrusted_inferred` and
-`presented_over_dedicated` through dc7e3c77, and `shadow`, `shadow_hidden_ms`, `presented_lit`,
-`presented_lit_differs` and the UI line's one-way layer column through be7788bf.
+and the dark pre-UI statistics. Fields the add-on logged as 0 are gone from later lines: on counter
+lines through dc7e3c77 `full_alpha_d` (0 from selection revision 9) and the S1 invariants
+`untrusted_inferred` and `presented_over_dedicated` (0 from selection revision 10); on UI lines
+through be7788bf `shadow`, `shadow_hidden_ms`, `presented_lit` and `presented_lit_differs` (0 from
+selection revision 9) and the one-way layer column (0 on every line since S2a, which added it: every
+layer was the one-frame-late copy, which no judge reads). UI lines from S2a through 180f1842 also
+carry `sampled_late_layer`, which only repeated that a layer was offered and is skipped. The
+[UI counters](../../docs/reshade-sbs.md#setup) table and the UI line description there own these
+ranges.
 Each `UI protection gaps` window lists its pieces with each line's own FG state; a line whose
 status sample was still pending (`checking` or `searching`), or an unrendered line, continues a run,
 labelled with that state after the last sample's reason.

@@ -1490,7 +1490,8 @@ in the summary are those offered, invalid ones included. The `Sunshine UI protec
 tag, Backbuffer and current, `accepted` as candidate bits, `sampled_layer` with the offscreen UI
 layer's `covered`, `invalid` and `opaque` pixels, `sampled_one_way` with the `strong` and
 `contradicted` pixels of Backbuffer and current alpha (lines through be7788bf lead each with the
-layer's, 0 since selection revision 10, which judges no layer copy), `sampled_reason` (the own
+layer's, 0 on every line: from S2a, which added the field, every offered layer was the
+one-frame-late copy, which no judge reads), `sampled_reason` (the own
 decision's `ui_no_mask` reason, or `decided`), `sampled_refused` (the refused candidate's kind,
 `ui_alpha`, `ui_color`, `ui_layer`, `backbuffer`, `current` or `hudless`, or `none`),
 `sampled_reused`, `sampled_hudless`, `sampled_alpha_opaque` for
