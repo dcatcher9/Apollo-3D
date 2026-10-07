@@ -153,8 +153,10 @@ BENIGN = (
     'Successfully compiled', 'IDirectInput8W::CreateDevice failed', 'is inconsistent',
     'Add-ons are still loaded', 'Game 3D hitch', 'display scaling limits the game',
 )
-# Export pauses that are part of normal play rather than faults.
-ROUTINE_INACTIVE = {'not_foreground', 'runtime_reset', 'no_consumer', 'present_without_render', 'runtime_gone'}
+# Export pauses that are part of normal play rather than faults (consumer_transfer_changed: a host attached or
+# left between a Present's render and its export, which the next Present renders for).
+ROUTINE_INACTIVE = {'not_foreground', 'runtime_reset', 'no_consumer', 'present_without_render', 'runtime_gone',
+                    'consumer_transfer_changed'}
 SETTLE_S = 3.0  # Recalibration and holds after an FG switch or runtime reset.
 CALIBRATION_MIN_S = 0.1  # A run without placement that had less depth than this calibrated nothing.
 LOG_GATE_S = 1.0  # A changed controller state waits this long after its previous line (diagnostic_log_gate.h).

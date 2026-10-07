@@ -517,6 +517,13 @@ class ReadinessReport(unittest.TestCase):
         self.assertEqual(expected['Present hitches'].status, 'PASS')
         self.assertEqual(run(BASE + [line('10:00:12', hitch, 'WARN')])['Present hitches'].status, 'WARN')
 
+    def test_a_consumer_transfer_change_is_a_routine_export_pause(self):
+        pause = ('[Sunshine 3D] Sunshine SBS: export inactive (consumer_transfer_changed); waiting for a valid '
+                 'focused technique')
+        self.assertEqual(run(BASE + [line('10:00:06', pause)])['Export'].status, 'PASS')
+        odd = '[Sunshine 3D] Sunshine SBS: export inactive (consumer_without_pq); waiting for a valid focused technique'
+        self.assertEqual(run(BASE + [line('10:00:06', odd)])['Export'].status, 'WARN')
+
     def test_depth_flip_hitches_are_named(self):
         hitch = '[Sunshine 3D] Sunshine Game 3D hitch: generic challenger release took 21.5 ms on the present thread'
         checks = run(BASE + [line('10:00:12', hitch, 'WARN')])

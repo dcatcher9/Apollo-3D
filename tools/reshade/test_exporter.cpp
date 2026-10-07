@@ -1553,6 +1553,24 @@ namespace {
           exports_pq(cs::scrgb, both) && !exports_pq(cs::scrgb, 0),
         "a native scRGB source packed PQ without an HDR10 stream, or FP16 for one");
       require(!exports_pq(cs::srgb, both) && !exports_pq(cs::unknown, both), "an SDR source packed PQ");
+      // C3: a native render is exported only to a consumer whose transfer
+      // answer matches the one it rendered for. A host that attaches between
+      // an HDR10 render made with no consumer (FP16) and its export, and
+      // takes PQ, gets the next Present's PQ render rather than an FP16 ring
+      // that the next Present would replace; the reverse holds too.
+      require(!transfer_current(true, false, wire::transfer::scrgb, exports_pq(cs::hdr10_pq, wire::consumer_accepts_pq)),
+        "an FP16 render made before a PQ consumer attached was exported to it");
+      require(!transfer_current(true, true, wire::transfer::pq, exports_pq(cs::hdr10_pq, 0)),
+        "a PQ render was exported to a consumer without PQ");
+      require(transfer_current(true, true, wire::transfer::pq, true) && transfer_current(true, false, wire::transfer::scrgb, false) &&
+          transfer_current(true, false, wire::transfer::srgb, exports_pq(cs::srgb, both)),
+        "a render was refused for the consumer it was made for");
+      // A requested PQ render that fell back to FP16 (no PQ pack, or its
+      // texture failed) still exports FP16 to that consumer.
+      require(transfer_current(true, true, wire::transfer::scrgb, true), "a PQ request's FP16 fallback was refused");
+      // A reference export cannot render again: only PQ output needs PQ.
+      require(!transfer_current(false, false, wire::transfer::pq, false) && transfer_current(false, false, wire::transfer::scrgb, true) &&
+          transfer_current(false, false, wire::transfer::pq, true), "the reference export's PQ check changed");
     }
 
     // Only a host that declared this export protocol is answered

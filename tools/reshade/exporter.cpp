@@ -392,6 +392,17 @@ namespace {
     return source == api::color_space::scrgb && (capabilities & wire::consumer_stream_pq) != 0;
   }
 
+  // C3: whether this Present's render may be exported to the consumer read at
+  // export (consumer_pq: exports_pq for it). A native render chose its
+  // transfer from the consumer it read before rendering (pq_requested), so
+  // it is exported only while the consumer answers the same, in either
+  // direction; otherwise the next Present renders for the new consumer and
+  // no ring of the other transfer is created. A reference export cannot
+  // render again: only its PQ output needs a consumer that takes PQ.
+  bool transfer_current(bool native_render, bool pq_requested, wire::transfer output, bool consumer_pq) {
+    return native_render ? consumer_pq == pq_requested : output != wire::transfer::pq || consumer_pq;
+  }
+
   // The colour space a transfer's export is encoded in (the overlay's target).
   api::color_space export_space(wire::transfer transfer) {
     return transfer == wire::transfer::srgb ? api::color_space::srgb :
@@ -879,6 +890,10 @@ namespace {
     std::uint32_t width = 0;
     std::uint32_t height = 0;
     export_color_t color;
+    // The native render's PQ request (exports_pq for the consumer it read
+    // before rendering): frame() exports that render only while the
+    // consumer it then reads answers the same.
+    bool pq_requested = false;
     // A runtime's device never changes adapter; resolve its LUID once.
     // Bounded timing of the add-on's own work inside the game's Present.
     struct {
@@ -1177,7 +1192,8 @@ namespace {
         // and a native scRGB one to a consumer that encodes HDR10 PQ; any
         // other consumer gets FP16 scRGB (exports_pq).
         const auto space = swapchain->get_color_space();
-        const bool pq = renderer->set_pq_output(exports_pq(space, read_capabilities(*shared_, read_nonce(*shared_))));
+        proof.pq_requested = exports_pq(space, read_capabilities(*shared_, read_nonce(*shared_)));
+        const bool pq = renderer->set_pq_output(proof.pq_requested);
         proof.color = {space, space == api::color_space::srgb ? wire::transfer::srgb : pq ? wire::transfer::pq : wire::transfer::scrgb};
         // The overlay compositor of this export is compiled off the Present
         // before the overlay first opens (once per process and transfer).
@@ -2002,10 +2018,12 @@ namespace {
       if (!consumer_speaks_protocol(runtime, nonce)) {
         return;
       }
-      // A PQ export only for a consumer that takes it (C3, exports_pq): one
-      // replaced since this Present's render gets the next Present's export.
-      if (source.color.output == wire::transfer::pq && !exports_pq(source.color.input, read_capabilities(*shared_, nonce))) {
-        deactivate(runtime, "consumer_without_pq");
+      // C3 (transfer_current): a consumer attached, replaced or detached
+      // between this Present's render and its export with another transfer
+      // gets the next Present's export, rendered for it.
+      if (!transfer_current(addon_render, proof.pq_requested, source.color.output,
+            exports_pq(source.color.input, read_capabilities(*shared_, nonce)))) {
+        deactivate(runtime, addon_render ? "consumer_transfer_changed" : "consumer_without_pq");
         return;
       }
       const bool replace = !generation_ || generation_->runtime != runtime || generation_->nonce != nonce ||

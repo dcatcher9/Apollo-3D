@@ -4700,8 +4700,15 @@ request unanswered with another's declaration and sends the whole request again 
 (the other backs off, as a replaced receiver does). A replaced receiver that finds the connection
 without any receiver (`consumer_nonce` zero, its replacement detached) requests again too. An HDR10 swapchain exports PQ to a consumer that accepts it, and a
 native scRGB swapchain exports PQ to a consumer that encodes HDR10 PQ (`exports_pq`; the bit
-implies acceptance). Any other consumer gets FP16 scRGB, and a consumer replaced between a
-Present's render and its export gets the next Present's export. For an HDR stream the host would
+implies acceptance). Any other consumer gets FP16 scRGB. The native render chooses the transfer
+from the consumer it reads before rendering, so a consumer attached, replaced or detached between
+a Present's render and its export whose answer differs, in either direction, gets the next
+Present's export, rendered for it (`transfer_current`, export reason
+`consumer_transfer_changed`); a reference export cannot render again and only refuses PQ output to
+a consumer without PQ (`consumer_without_pq`). Until the final review only that PQ direction was
+checked, so a PQ host attaching during an HDR10 render made with no consumer got an FP16 ring that
+the next Present replaced, two generations and up to two ring allocations on the Present thread
+for one attach. For an HDR stream the host would
 itself encode an FP16 scRGB export with `scRGBTo2100PQ`, so packing it in the game is the same
 encoding at half the shared bytes per frame. An SDR stream and Local AR keep FP16 scRGB from a
 native scRGB swapchain: wide-gamut and over-10000-nit values clip differently in PQ (a negative
