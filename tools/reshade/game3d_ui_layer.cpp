@@ -160,8 +160,11 @@ namespace sunshine_game3d::ui_layer {
       int newest = -1;
       // The entry latest() last offered, pinned until bound() registers the
       // reading Present (-1: none): between them it has no reader yet, and a
-      // copy promoted meanwhile may no longer be the newest. A Present that
-      // renders nothing never calls bound(); the next latest() moves the pin.
+      // copy promoted meanwhile may no longer be the newest. Every Present it
+      // was offered to calls bound(), one that renders nothing included (its
+      // slot copy, recorded at acquisition, may still read the entry), so
+      // such an entry stays busy until the renderer's next completion signal,
+      // which only a rendered Present sends.
       int reading = -1;
       std::uint32_t width{}, height{};
       api::format format{};

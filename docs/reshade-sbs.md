@@ -330,8 +330,11 @@ last reader, a renderer submission, completed (`ui_layer::bound` with the render
 fence and value). The entry `ui_layer::latest` offers stays pinned until `bound` registers that
 Present as its reader: in between it has no reader yet, and a game thread may promote a newer copy
 and clear the layer again, which before the 10-05 review could record the next copy into the entry
-the presenting queue was about to read. A Present that renders nothing never binds, and the next
-offer moves the pin, so it holds at most one entry; with
+the presenting queue was about to read. A Present that renders nothing still binds (a copy into
+the renderer's slot recorded at acquisition may read the entry), so its entry stays busy until the
+renderer's next completion signal, which only a rendered Present sends; a long run of Presents
+that acquire but do not render can therefore fill the ring, after which the first rendered Present
+may find no recent copy. With
 every entry busy the ring grows, and a full ring skips that copy, logs once and counts it in the
 timing line (`ui_layer={... skipped=...}`). A clear needs the offered entry, one entry per copy
 held for its cross-queue fence (one per frame the copy's queue runs behind), one per earlier
@@ -2673,7 +2676,14 @@ optional artifacts `ui_layer_candidate_0` to `_2` (IDs 40-42) with RGB and alpha
 (`captured_before_clear`, `copy_allocation_failed`, or `allocating` when the dump was taken while
 the copy, allocated outside the layer's lock since WP1b, was not yet published).
 The census shows every qualifying target; `active` marks the one the live tracker chose, which the
-dump's automatic candidate set names as `ui_layer`.
+dump's automatic candidate set names as `ui_layer`. Census copies carry none of the live copies'
+queue ordering (known limit): each is recorded into the game's list at the clear and handed to the
+dump as `captured_before_clear` whether or not that list has run. A target whose list runs on
+another queue than the presenting one (Stellar Blade's layer, The Witcher 3 with FG on) can be read
+before or while it is written, so its artifact may be empty or torn; check its alpha preview before
+using it as replay evidence (`ui_detection_replay` binds it at `t7`). Ordering census copies like
+live ones (submission hook and queue fence, with the capture deferred until they are seen complete)
+is open.
 
 The request uses diagnostic wire v3 with capacity for 40 textures, independent of streaming SBS v2.
 Host and add-on must agree on this mapping version; incompatible versions fail explicitly.
