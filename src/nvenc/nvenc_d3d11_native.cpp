@@ -49,6 +49,12 @@ namespace nvenc {
     // has its own input, filled from the target at submission (prepare_input()), so converting
     // the next frame never writes a surface NVENC is still reading.
     const auto depth = pipeline_depth();
+    if (depth == 1) {
+      // Including after create_encoder() fell back from pictures in flight: free their inputs.
+      for (auto &picture_input : picture_inputs) {
+        picture_input = nullptr;
+      }
+    }
     for (unsigned slot = 0; slot < depth; ++slot) {
       if (depth > 1 && !picture_inputs[slot]) {
         if (d3d_device->CreateTexture2D(&desc, nullptr, &picture_inputs[slot]) != S_OK) {

@@ -1397,6 +1397,11 @@ namespace video {
           }
           recovery_gate.published(result.request_idr);
           drop_report.record(result, idr_events);
+          if (result.request_idr) {
+            // The loop reads the recovery IDR right after its image wait, which nothing else ends
+            // for desktop sources, rather than when the next capture or the idle bound ends it.
+            images->wake();
+          }
           return true;
         },
         [images]() {
@@ -1708,6 +1713,16 @@ namespace video {
         } else if (!images->running()) {
           break;
         }
+        // An IDR requested during the wait (by the client, or by the retrieving thread, which wakes
+        // the wait when the full encoded queue dropped a delta frame) is read at the top of the loop
+        // first, as after a provider hold. The recovery frame is then this capture, still pending in
+        // `source`, or the retained input, rather than a P-frame the client cannot use (with pictures
+        // in flight, recovery_gate_t discards it) followed by the IDR. A held startup input still
+        // converts the capture at once: its wait does not shorten for a pending source.
+        const bool read_recovery_first = !hold_startup_input && idr_events->peek();
+        if (read_recovery_first && !captured) {
+          continue;
+        }
         if (captured) {
           frame_timestamp = last_img->frame_timestamp;
           if (!frame_timestamp) {
@@ -1727,6 +1742,9 @@ namespace video {
           // capture teardown or an encode-dimension change has been requested.
           if (lifecycle_change_requested()) {
             break;
+          }
+          if (read_recovery_first) {
+            continue;  // With any substitute timestamp persisted on the source it converts.
           }
 
           auto current_timestamp = *frame_timestamp;
@@ -1762,6 +1780,13 @@ namespace video {
           *frame_timestamp = schedule.presentation_timestamp;
           encode_frame_timestamp = schedule.next_encode_target;
         }
+      } else if (!independent_provider) {
+        // A recovery skips the wait, so the retrieving thread's wake for this IDR, if it came while
+        // nothing waited, is still pending. Left there, it would end the next capture wait at once
+        // and encode a repeat. A failed picture's wake is not needed: the loop checks for that
+        // failure before it encodes. (Such a wake is harmless to an independent provider, which
+        // encodes no repeats, and its provider and control wakes must not be lost.)
+        images->discard_wake();
       }
 
       // A final early capture may never be followed by another image event. Convert it when

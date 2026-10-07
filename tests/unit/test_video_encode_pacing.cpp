@@ -16,6 +16,7 @@
 #include <src/reshade_bridge_protocol.h>
 #include <src/video.h>
 #include <src/video_encode_pacing.h>
+#include <src/video_encode_pipeline.h>
 
 namespace {
   using namespace std::chrono_literals;
@@ -1358,6 +1359,287 @@ namespace {
       EXPECT_LE(pipelined.polls.size(), serial.polls.size() + 1);
       EXPECT_LE(pipelined.upgraded_packet, serial.upgraded_packet);
     }
+  }
+
+  // A recovery IDR on a desktop source (desktop Host SBS, or plain desktop one picture at a time),
+  // each encode_run() iteration with fixed times and no startup hold. The full encoded queue drops
+  // the delta picture of capture `dropped` and requests the IDR (encoded_queue_drop_report_t), or
+  // the client requests one at `client_idr`, which wakes nothing for a desktop source. One picture
+  // at a time, encode_frame() publishes on the encode thread, so the next iteration reads that IDR at
+  // its top. With pictures in flight the retrieving thread publishes while the loop converts or waits
+  // for the next capture, and recovery_gate_t discards the deltas published after the drop until
+  // the IDR. Captures arrive at the stream cadence, so none is early.
+  enum class recovery_rules_e {
+    top_only,  ///< cf0330ef: the loop reads an IDR only at the top of an iteration.
+    /** The retrieving thread wakes the image wait; the loop reads an IDR raised during the wait
+     *  before converting, and a recovery that skips the wait discards a pending wake. */
+    read_after_wait,
+  };
+
+  struct recovery_model_t {
+    unsigned depth = 2;
+    recovery_rules_e rules = recovery_rules_e::read_after_wait;
+    std::vector<std::chrono::nanoseconds> captures;  ///< When each capture reaches the image event.
+    std::optional<int> dropped;  ///< The capture whose delta picture the full queue drops.
+    std::optional<std::chrono::nanoseconds> client_idr;  ///< When the client requests an IDR.
+    std::chrono::nanoseconds conversion {3ms}, submit {400us}, encode {6ms}, engine {5ms};
+  };
+
+  struct recovery_result_t {
+    /** Each picture in submission order: I (IDR), P (a new capture) or R (a repeat) and the capture
+     *  it shows; then "d" if the full queue dropped it, "x" if recovery_gate_t discarded it. */
+    std::vector<std::string> pictures;
+    std::chrono::nanoseconds requested {}, idr_submitted {};
+  };
+
+  recovery_result_t simulate_recovery_idr(const recovery_model_t &model, std::chrono::nanoseconds duration = 60ms) {
+    using ns = std::chrono::nanoseconds;
+    constexpr ns stream {11111111ns}, idle {55555555ns};
+    constexpr ns threshold = stream / 4;
+    constexpr auto step = 10us;
+    const bool reads_after_wait = model.rules == recovery_rules_e::read_after_wait;
+    const bool wakes = reads_after_wait && model.depth > 1;  // Only a retrieving thread wakes.
+
+    struct picture_t {
+      ns completion;
+      bool idr;
+      int content;
+      std::size_t entry;
+    };
+
+    source_owner source;
+    source.observe(std::make_shared<captured_source>(-1, at(0ns)));  // The desktop before the run.
+    source.converted();
+    int target_content = -1;  // What the conversion target shows.
+    auto target = at(0ns);
+    std::optional<std::size_t> mailbox;
+    std::size_t next_capture = 0;
+    std::deque<picture_t> in_flight;  // Oldest first; completions are in submission order.
+    video::detail::recovery_gate_t gate;
+    bool idr_raised = false, woken = false, idr_latched = false, recovery = false;
+    bool dropped = false, client_requested = false;
+    enum class phase_e {
+      top,
+      waiting,
+      busy,
+    } phase = phase_e::top;
+    ns busy_until {}, wait_until {}, last_completion {};
+    recovery_result_t result;
+
+    for (ns now {}; now < duration; now += step) {
+      for (; next_capture < model.captures.size() && model.captures[next_capture] <= now; ++next_capture) {
+        mailbox = next_capture;  // The image event keeps only the newest capture.
+      }
+      if (model.client_idr && !client_requested && *model.client_idr <= now) {
+        client_requested = true;
+        idr_raised = true;
+        result.requested = now;
+      }
+      // Each completed picture is published, by the retrieving thread or by encode_frame().
+      while (!in_flight.empty() && in_flight.front().completion <= now) {
+        const auto picture = in_flight.front();
+        in_flight.pop_front();
+        if (!gate.admits(picture.idr)) {
+          result.pictures[picture.entry] += "x";
+          continue;
+        }
+        const bool drop = !dropped && model.dropped && picture.content == *model.dropped && !picture.idr;
+        gate.published(drop);
+        if (drop) {
+          dropped = true;
+          result.pictures[picture.entry] += "d";
+          result.requested = now;
+          idr_raised = true;  // idr_events->try_raise()
+          woken = woken || wakes;  // images->wake()
+        }
+      }
+      if (phase == phase_e::busy) {
+        if (now < busy_until) {
+          continue;
+        }
+        phase = phase_e::top;
+      }
+
+      for (bool again = true; again;) {
+        again = false;
+        if (phase == phase_e::top) {
+          // The session latches a requested IDR until it encodes a picture.
+          recovery = idr_raised;
+          idr_latched = idr_latched || idr_raised;
+          idr_raised = false;
+          if (!recovery || mailbox) {
+            const auto wait = video::detail::encode_image_wait(idle, stream, true, false, false, source.remaining_wait(at(now), target));
+            wait_until = wait > 0ns ? tick_wait_end(now, wait) : now;
+            phase = phase_e::waiting;
+          } else if (reads_after_wait) {
+            woken = false;  // images->discard_wake()
+          }
+        }
+        bool captured = false;
+        if (phase == phase_e::waiting) {
+          if (!mailbox && !woken && now < wait_until) {
+            break;  // Still waiting.
+          }
+          woken = false;  // Every timed pop consumes a wake.
+          if (mailbox) {
+            source.observe(std::make_shared<captured_source>(static_cast<int>(*mailbox), at(model.captures[*mailbox])));
+            mailbox.reset();
+            captured = source.pending();
+          }
+          if (reads_after_wait && idr_raised) {
+            phase = phase_e::top;  // `continue`: the capture stays pending in the source.
+            again = true;
+            continue;
+          }
+        }
+
+        std::optional<video::detail::encode_frame_schedule_t> schedule;
+        if (captured) {
+          schedule = video::detail::select_encode_frame_schedule(source.latest()->captured_at, target, stream, threshold);
+        } else if (source.pending() && source.due(at(now), target, recovery)) {
+          schedule = video::detail::select_encode_frame_schedule(at(now), target, stream, threshold);
+        }
+        auto converted = now;
+        if (schedule) {
+          converted += model.conversion;
+          target = schedule->next_encode_target;
+          target_content = source.latest()->pixels;
+          source.converted();
+        }
+        // acquire(): with every picture in flight, wait for the oldest.
+        auto acquired = converted;
+        const auto busy = static_cast<std::size_t>(std::count_if(in_flight.begin(), in_flight.end(), [&](const picture_t &picture) {
+          return picture.completion > converted;
+        }));
+        if (busy >= model.depth) {
+          acquired = in_flight[in_flight.size() - busy].completion;
+        }
+        const auto submitted = acquired + model.submit;
+        const auto completion = std::max(submitted + model.encode, last_completion + model.engine);
+        last_completion = completion;
+        const bool idr = idr_latched;
+        idr_latched = false;
+        result.pictures.push_back(std::string {idr ? "I" : schedule ? "P" : "R"} + std::to_string(target_content));
+        if (idr && result.idr_submitted == 0ns) {
+          result.idr_submitted = submitted;
+        }
+        in_flight.push_back({completion, idr, target_content, result.pictures.size() - 1});
+        busy_until = model.depth == 1 ? completion : submitted;
+        phase = phase_e::busy;
+      }
+    }
+    return result;
+  }
+
+  void print_recovery(const char *label, const recovery_model_t &model, const recovery_result_t &result) {
+    std::string pictures;
+    for (const auto &picture : result.pictures) {
+      pictures += (pictures.empty() ? "" : " ") + picture;
+    }
+    std::printf(
+      "[ MEASURE  ] %s, %u in flight, %s: IDR submitted %.1f ms after the request; %s\n",
+      label,
+      model.depth,
+      model.rules == recovery_rules_e::top_only ? "read at the top" : "read after the wait",
+      std::chrono::duration<double, std::milli>(result.idr_submitted - result.requested).count(),
+      pictures.c_str()
+    );
+  }
+
+  std::vector<recovery_result_t> simulate_recovery_rules(recovery_model_t model, const char *label, std::chrono::nanoseconds duration = 60ms) {
+    std::vector<recovery_result_t> results;
+    for (const auto &[depth, rules] : {std::pair {1u, recovery_rules_e::top_only}, std::pair {2u, recovery_rules_e::top_only}, std::pair {2u, recovery_rules_e::read_after_wait}}) {
+      model.depth = depth;
+      model.rules = rules;
+      results.push_back(simulate_recovery_idr(model, duration));
+      print_recovery(label, model, results.back());
+    }
+    return results;
+  }
+
+  // 90 fps captures handed over 2 ms into each stream interval.
+  std::vector<std::chrono::nanoseconds> ninety_fps_captures(int count) {
+    std::vector<std::chrono::nanoseconds> captures;
+    for (int capture = 0; capture < count; ++capture) {
+      captures.push_back(2ms + capture * 11110us);
+    }
+    return captures;
+  }
+
+  TEST(RemoteEncodeHostSbsPipelineTest, AQueueDropOnAStaticDesktopGetsItsRecoveryIdrAtOnce) {
+    // The desktop's last capture's picture is dropped while the loop waits with nothing to convert.
+    // Read only at the top, the IDR waited for that idle wait (the minimum-FPS bound, 55.6 ms at
+    // 90 fps) behind a repeat the gate discards; woken, it follows the drop as one at a time, and
+    // the idle repeat comes at its usual bound.
+    recovery_model_t model;
+    model.captures = {2ms};
+    model.dropped = 0;
+    const auto results = simulate_recovery_rules(model, "static desktop, queue drop", 100ms);
+    const auto &serial = results[0], &before = results[1], &after = results[2];
+    EXPECT_EQ(serial.idr_submitted - serial.requested, model.submit);
+    EXPECT_GE(before.idr_submitted - before.requested, 40ms);
+    EXPECT_EQ(before.pictures, (std::vector<std::string> {"P0d", "R0x", "I0"}));
+    EXPECT_EQ(after.idr_submitted - after.requested, model.submit);
+    EXPECT_EQ(after.pictures, serial.pictures);
+    EXPECT_EQ(after.pictures, (std::vector<std::string> {"P0d", "I0", "R0"}));
+  }
+
+  TEST(RemoteEncodeHostSbsPipelineTest, AQueueDropDuringTheCaptureWaitGetsItsRecoveryIdrBeforeTheNextCapture) {
+    // 90 fps desktop, conversion 3 ms, 6 ms to the packet: capture 0's picture is dropped while the
+    // loop waits for capture 1. Read only at the top, capture 1 converted and encoded as a delta the
+    // gate discards, and its IDR followed. Woken, the loop encodes the IDR at once, as one at a time,
+    // and capture 1 follows as a delta the client can decode.
+    recovery_model_t model;
+    model.captures = ninety_fps_captures(4);
+    model.dropped = 0;
+    const auto results = simulate_recovery_rules(model, "90 fps desktop, drop during the wait");
+    const auto &serial = results[0], &before = results[1], &after = results[2];
+    EXPECT_EQ(serial.idr_submitted - serial.requested, model.submit);
+    EXPECT_EQ(before.pictures, (std::vector<std::string> {"P0d", "P1x", "I1", "P2", "P3"}));
+    EXPECT_GE(before.idr_submitted - before.requested, model.conversion + model.submit);
+    EXPECT_EQ(after.idr_submitted - after.requested, model.submit);
+    EXPECT_EQ(after.pictures, (std::vector<std::string> {"P0d", "I0", "P1", "P2", "P3"}));
+  }
+
+  TEST(RemoteEncodeHostSbsPipelineTest, AQueueDropDuringAConversionLeavesNoRepeatBehindItsRecoveryIdr) {
+    // Conversion 4 ms, 9 ms to the packet: capture 0's picture is dropped while capture 1 converts,
+    // so capture 1 is a delta the gate discards whatever the loop does, and the IDR follows at the
+    // next iteration, which skips its wait. The retrieving thread's wake came while nothing waited:
+    // discarded then, it cannot end the next capture wait at once and encode a repeat.
+    recovery_model_t model;
+    model.captures = ninety_fps_captures(4);
+    model.dropped = 0;
+    model.conversion = 4ms;
+    model.encode = 9ms;
+    const auto results = simulate_recovery_rules(model, "90 fps desktop, drop during a conversion");
+    const auto &before = results[1], &after = results[2];
+    EXPECT_EQ(before.pictures, (std::vector<std::string> {"P0d", "P1x", "I1", "P2", "P3"}));
+    EXPECT_EQ(after.pictures, before.pictures);
+    EXPECT_EQ(after.idr_submitted, before.idr_submitted);
+  }
+
+  TEST(RemoteEncodeHostSbsPipelineTest, AClientIdrDuringTheCaptureWaitMakesTheCaptureTheIdr) {
+    // A client's IDR request wakes nothing for a desktop source: the next capture ends the wait.
+    // Read only at the top, that capture was encoded as a delta first and the IDR repeated it; read
+    // after the wait, the capture itself is the IDR, one picture earlier at either depth.
+    recovery_model_t model;
+    model.captures = ninety_fps_captures(4);
+    model.client_idr = 12ms;
+    const auto results = simulate_recovery_rules(model, "90 fps desktop, client IDR");
+    const auto &serial = results[0], &before = results[1], &after = results[2];
+    EXPECT_EQ(serial.pictures, (std::vector<std::string> {"P0", "P1", "I1", "P2", "P3"}));
+    EXPECT_EQ(before.pictures, serial.pictures);
+    EXPECT_EQ(after.pictures, (std::vector<std::string> {"P0", "I1", "P2", "P3"}));
+    EXPECT_EQ(after.idr_submitted, model.captures[1] + model.conversion + model.submit);
+    EXPECT_LT(after.idr_submitted, before.idr_submitted);
+
+    model.depth = 1;  // Plain desktop: the same rule, one picture at a time.
+    const auto plain = simulate_recovery_idr(model);
+    print_recovery("90 fps desktop, client IDR", model, plain);
+    EXPECT_EQ(plain.pictures, after.pictures);
+    EXPECT_EQ(plain.idr_submitted, after.idr_submitted);
+    // One at a time, the delta's whole encode no longer precedes the IDR.
+    EXPECT_EQ(serial.idr_submitted - plain.idr_submitted, model.encode + model.submit);
   }
 
   TEST(RemoteEncodeProviderPacingTest, ProviderHoldSleepsExactlyToAPendingFramesPollTarget) {

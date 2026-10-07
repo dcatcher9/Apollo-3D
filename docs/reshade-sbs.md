@@ -4870,7 +4870,10 @@ desktop keeps one, and Local AR presents without NVENC). Each picture has its ow
 NVENC input, bitstream and completion event: at submission the converted surface is copied into
 the picture's input on the immediate context (about 50 MB each way at 7680x2160 10-bit; the two
 inputs cost about 100 MB of video memory), so the next frame converts and starts encoding while the
-previous picture still encodes. A thread of its own (`encode_pipeline_t`) waits for the pictures in
+previous picture still encodes. An encoder that cannot create a completion event or an input for
+every picture (video memory short, as with Host SBS beside a GPU-bound game) encodes one picture at a
+time from the conversion target instead of failing the stream
+(`NvencPipelineTest.HostSbsEncodesOnePictureAtATimeWhenASecondInputDoesNotFit`). A thread of its own (`encode_pipeline_t`) waits for the pictures in
 submission order and publishes each packet as soon as its picture completes, whatever the loop is
 doing; the loop waits only while two are in flight, and then for the oldest. Before, on 10-06 in
 Stellar Blade at 4K with FG on, `encode_frame()` waited for each picture: NVENC's completion wait
@@ -4881,7 +4884,12 @@ as a returning `encode_frame()` did; one already handled, malformed or too large
 range extends to the last submitted picture) becomes done or an IDR at once. An IDR applies to the
 next picture submitted. When the full encoded queue drops a delta frame and requests the recovery
 IDR, the deltas already in flight behind it are discarded until that IDR, so the first packet after
-the drop is the IDR. A picture that fails on that thread fails the encoder; a loop exit first
+the drop is the IDR. That thread then wakes the loop's image wait, and the loop reads an IDR
+requested during its wait (by that thread or by the client) before converting, as after a provider
+hold: the recovery frame is the capture that ended the wait, or the retained input, not a delta the
+gate discards followed by the IDR. A recovery that skips the wait discards a wake that came while
+nothing waited, so a desktop source does not encode a repeat for it. A picture that fails on that
+thread fails the encoder; a loop exit first
 delivers the pictures still in flight, and is clean only if none of them failed, so a failure then
 still keeps new encoders waiting for its teardown. A picture's 250 ms budget starts when the wait for
 it does, after the previous one completed. The loop claims at its poll target and then waits for
@@ -4916,7 +4924,14 @@ stream), and at the 09-06 live times (conversion call 2.3 ms, NVENC 6 ms on aver
 ever submitted behind another: both depths take every capture and two in flight cost the copy into
 the picture's input (0.3 ms modelled for its 50 MB each way). Polls of a pending
 inference on a static desktop keep their stream-interval cadence and deliver the frame's own depth at
-the same time either way.
+the same time either way. A packet dropped by the full encoded queue while the loop waits needs the
+retrieving thread's wake, as desktop capture wakes nothing else: without it the IDR waited for the
+next capture, which became a discarded delta (the IDR 5.5 ms after the drop at 90 fps), or on a
+static desktop for the idle bound behind a discarded repeat (55 ms); with it the IDR is submitted
+0.4 ms after the drop, as one picture at a time. A client's IDR during the wait makes the capture
+that ends it the IDR, one picture earlier at either depth (10.9 ms after the request one at a time
+before, 4.5 ms now; `RemoteEncodeHostSbsPipelineTest.AQueueDrop*` and
+`AClientIdrDuringTheCaptureWaitMakesTheCaptureTheIdr`).
 
 While a streaming encoder converts a live packed export it holds the display's capture-pixel
 claim, and Desktop Duplication and WGC forward only timestamps and cursor metadata. When the

@@ -113,6 +113,8 @@ namespace {
     }
 
     std::array<nvenc::input_producer_state, 2> producer {nvenc::input_producer_state::unknown, nvenc::input_producer_state::unknown};
+    /** Video memory runs short for a second picture's input (E_OUTOFMEMORY in the native class). */
+    bool second_input_out_of_memory = false;
 
   protected:
     bool init_library() override {
@@ -123,6 +125,10 @@ namespace {
     bool create_and_register_input_buffer() override {
       std::lock_guard lock(mutex);
       for (unsigned slot = 0; slot < pipeline_depth(); ++slot) {
+        if (slot > 0 && second_input_out_of_memory) {
+          log.push_back("input-" + std::to_string(slot) + "-out-of-memory");
+          return false;
+        }
         registered_input_buffers[slot] = &inputs[slot];
         log.push_back("register-input-" + std::to_string(slot));
       }
@@ -457,6 +463,39 @@ TEST(NvencPipelineTest, IndependentProviderAndHostSbsGetTwoPicturesInFlightAndPl
   nvenc_pipeline_probe host_sbs_without_events(false);
   ASSERT_TRUE(host_sbs_without_events.create(video::SBS_AI));
   EXPECT_EQ(host_sbs_without_events.pipeline_depth(), 1u);
+}
+
+TEST(NvencPipelineTest, HostSbsEncodesOnePictureAtATimeWhenASecondInputDoesNotFit) {
+  // Host SBS beside a GPU-bound game near its video-memory budget: the second picture's input
+  // cannot be created. The stream keeps its 3D encoder, one picture at a time from the conversion
+  // target, as without a completion event for every picture, instead of failing (which would revert
+  // a live toggle into Host SBS or end its launch).
+  nvenc_pipeline_probe probe;
+  probe.second_input_out_of_memory = true;
+  ASSERT_TRUE(probe.create(video::SBS_AI));
+  EXPECT_EQ(probe.pipeline_depth(), 1u);
+  EXPECT_EQ(only(probe.operations(), {"register-input", "unregister-input", "input-"}), (std::vector<std::string> {"register-input-0", "input-1-out-of-memory", "unregister-input-0", "register-input-0"}));
+
+  probe.clear_operations();
+  probe.convert(7);
+  probe.complete_every_picture();
+  ASSERT_FALSE(probe.encode_frame(1, true).data.empty());
+  // The conversion target itself, as for plain desktop: no copy, unmapped at once.
+  EXPECT_EQ(only(probe.operations(), {"copy", "map", "submit", "lock", "unlock", "unmap"}), (std::vector<std::string> {"map-0", "submit-0:1:idr", "lock-0", "unlock-0", "unmap-0"}));
+  EXPECT_EQ(probe.encoded_contents(), (std::vector<std::pair<std::uint64_t, int>> {{1, 7}}));
+
+  // The second slot's event and bitstream, unused, are released with the encoder.
+  probe.clear_operations();
+  probe.destroy_encoder();
+  const auto released = only(probe.operations(), {"destroy-bitstream", "unregister-event", "unregister-input"});
+  EXPECT_EQ(released, (std::vector<std::string> {"destroy-bitstream-0", "destroy-bitstream-1", "unregister-event-0", "unregister-event-1", "unregister-input-0"}));
+
+  // Plain desktop never asks for a second input.
+  nvenc_pipeline_probe desktop;
+  desktop.second_input_out_of_memory = true;
+  ASSERT_TRUE(desktop.create(video::SBS_OFF));
+  EXPECT_EQ(desktop.pipeline_depth(), 1u);
+  EXPECT_TRUE(only(desktop.operations(), {"input-", "unregister-input"}).empty());
 }
 
 TEST(NvencPipelineTest, DesktopHostSbsKeepsItsCaptureCadenceWithTwoPicturesInFlight) {

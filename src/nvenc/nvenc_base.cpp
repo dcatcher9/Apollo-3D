@@ -601,7 +601,27 @@ namespace nvenc {
     }
 
     if (!create_and_register_input_buffer()) {
-      return false;
+      if (pipeline_depth_ == 1) {
+        return false;
+      }
+      // Each picture in flight needs a full-size input of its own. When video memory runs short
+      // (Host SBS beside a GPU-bound game), encode one picture at a time from the conversion target,
+      // as without a completion event for every picture, instead of failing the stream. The unused
+      // events and bitstreams of the other slots are released with the encoder.
+      for (auto &registered_input : registered_input_buffers) {
+        if (registered_input) {
+          if (nvenc_failed(nvenc->nvEncUnregisterResource(encoder, registered_input))) {
+            BOOST_LOG(error) << "NvEnc: NvEncUnregisterResource() failed: " << last_nvenc_error_string;
+            return false;
+          }
+          registered_input = nullptr;
+        }
+      }
+      pipeline_depth_ = 1;
+      BOOST_LOG(warning) << "NvEnc: cannot create an input for every picture in flight; encoding 1 at a time";
+      if (!create_and_register_input_buffer()) {
+        return false;
+      }
     }
 
     {
