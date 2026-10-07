@@ -38,8 +38,10 @@ namespace sunshine_ngx {
   struct evaluation {
     std::uint64_t epoch{}, ticket{}, source_id{};
     bool observed{}; // Confirmed feature, even when this frame's metadata fails.
-    bool capture_authority{}; // Recorded copy or shared preservation; pending completion is allowed.
-    bool capture_suppressed_by_depth_owner{}; // Dump parameters only; never a second resource copy.
+    bool capture_authority{}; // Recorded copy; pending completion is allowed.
+    // An enclosing SL evaluation or confirmed SL FG owns depth: no copy was
+    // recorded. Reported with the dump's parameters only.
+    bool capture_suppressed_by_depth_owner{};
     // Preserve the entire API-call identity through the original evaluation;
     // rebuilding only session/sequence loses the producing command list.
     sunshine_game3d::diagnostic::stamp diagnostic_observation {};
