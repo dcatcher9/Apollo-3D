@@ -637,8 +637,12 @@ over minutes never add up to acceptance. Coverage that swings more (scene effect
 in a transparent target) never earns acceptance. A source that is never selective is never accepted: an empty or nearly full-scene source
 is ambiguous, because an opaque channel can carry no UI at all (Hogwarts Legacy's UIColorAndAlpha,
 and Stellar Blade's in HDR, are the opaque final image during play). A sample in which an offered
-UIAlpha or UI color tag is invalid is void for earning: no run advances or restarts (Resident Evil
-Requiem's rejected-tag frames). Holds and manual inputs never earn.
+UIAlpha or UI color tag is invalid is void for Backbuffer and current alpha, the sources whose
+declared-coverage judge (below) it lacks: their runs neither advance nor restart, and it is not
+testable for them (Resident Evil Requiem's rejected-tag frames). The other declared tag, the layer
+and the HUD-less pair meet the same judges as on any sample and earn as usual; until the final
+review the void stopped them too, so a declared tag invalid on every frame (an uncleared FP16 target)
+left a restored HUD-less pair to lapse with nothing able to earn it back. Holds and manual inputs never earn.
 
 Once accepted, a source is the mask on every frame in which it is offered and valid, ahead of the
 sources after it in draw order, at any coverage (P1). A full-screen menu is then simply a source
@@ -731,7 +735,7 @@ two contradictions within 2 s never revoke. Because both judges read same-sample
 declared tag only from the exact pair's tag batch), a cut or animated UI does not contradict a
 correct source; at the 100 ms sample cadence a persistent
 contradiction revokes about 0.2 s after it starts. A contradicted sample also earns nothing and
-restarts an unaccepted source's earning run, unless the sample is void. A revoked source must
+restarts an unaccepted source's earning run, unless the sample is void for it. A revoked source must
 earn acceptance again; remembered acceptance is revoked the same way, and the revocation is
 remembered too. Manual mode edits leave it unchanged. In a context without a declared or exact judge
 (The Witcher 3, Stellar Blade in HDR and Expedition 33, all with FG off) a wrongly accepted inferred
@@ -747,7 +751,8 @@ set). The clock counts only the time between consecutive testable samples of the
 capped at 250 ms (`alpha_trust_reconfirm_gap_ms`, two and a half sample intervals), and nothing
 else touches it. Samples that are not testable for every kind (alpha that fails V1, a HUD-less pair
 whose change set is not V2-valid, such as the middle band of a pair mispaired with interpolated
-colour or an inexact pair changed everywhere, and a full sample), samples that do not offer the
+colour or an inexact pair changed everywhere, a full sample, and for Backbuffer and current alpha a
+void sample), samples that do not offer the
 source or offer another signature of its kind (frame generation that stops offering current alpha,
 an HDR toggle), a manual mode and a time without samples (a loading screen, alt-tab) therefore
 never count beyond one capped gap. A source never lapses during an invalid run, such as Resident

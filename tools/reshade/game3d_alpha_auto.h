@@ -263,8 +263,12 @@ namespace sunshine_game3d {
     // last selective sample, restarts the run, while empty samples within
     // that bound stay neutral. Alpha with more than 1% invalid pixels (V1,
     // the GPU's valid bits) is no evidence. A sample in which an offered
-    // declared alpha is V1-invalid is void for earning: no run advances or
-    // restarts (Resident Evil Requiem's rejected-tag frames).
+    // declared alpha is V1-invalid is void for Backbuffer and current alpha,
+    // the kinds whose declared-coverage judge it lacks: their runs neither
+    // advance nor restart, and it is not testable for them (Resident Evil
+    // Requiem's rejected-tag frames). The other declared tag, the layer and
+    // the HUD-less pair meet the same judges as on any sample and earn as
+    // usual, so a declared tag that is always invalid never stops them.
     // A2 revocation, by evidence of stronger provenance in the same sample,
     // whatever the drawing rank: every offered, V1-valid alpha but the
     // one-frame-late layer copy (UIAlpha, the UI color tag, Backbuffer,
@@ -535,6 +539,10 @@ namespace sunshine_game3d {
       // V1 as the GPU judged it: the offered alpha candidates outside the
       // sample's valid bits (decision texel 7 .w).
       const auto invalid = offered & ui_selection::alpha_bits & ~evidence.valid_bits;
+      // A void sample: an offered declared alpha is V1-invalid, so the
+      // declared-coverage judge of Backbuffer and current alpha is missing.
+      // It voids only those two kinds (voided below); every other source
+      // meets the same judges as on any sample and earns as usual.
       const bool void_sample = (offered & invalid & ui_selection::declared_alpha_bits) != 0;
       // A2 judges of this sample: a V2-valid exact change set, and the
       // coverage of every offered, accepted, V1-valid declared alpha.
@@ -551,13 +559,17 @@ namespace sunshine_game3d {
         if (invalid & ui_selection::bit(k)) continue;
         auto &e = at(signatures.of(k));
         const auto covered = alpha_counts_of(evidence, k).covered;
-        // A3: neither can a sample opaque almost everywhere (a full menu).
-        if (!ui_selection::full(covered, pixels)) reconfirm_tested(e, tick_ms);
         // A2: every judged kind (all alpha but the one-frame-late layer copy,
         // E2) meets the one-way test, with strong pixels to test; inferred
         // alpha also the declared alphas' coverage.
         const bool judged = std::find(ui_selection::judged_kinds.begin(), ui_selection::judged_kinds.end(), k) !=
           ui_selection::judged_kinds.end();
+        // A void sample leaves Backbuffer and current alpha as they are: no
+        // run advances or restarts, and since it cannot earn them it is not
+        // testable for them either (A3).
+        const bool voided = void_sample && judged && !ui_selection::declared(k);
+        // A3: neither can a sample opaque almost everywhere (a full menu).
+        if (!voided && !ui_selection::full(covered, pixels)) reconfirm_tested(e, tick_ms);
         const auto [strong, contradicted] = one_way_of(evidence, k);
         const bool exact_basis = judged && exact_judge && strong != 0;
         const bool declared_basis = judged && !ui_selection::declared(k) && declared_count != 0;
@@ -569,7 +581,7 @@ namespace sunshine_game3d {
           if (by_exact || by_declared) {
             // Not UI coverage: it earns nothing, and repeated contradiction
             // revokes it.
-            if (!void_sample) e.earned = {};
+            if (!voided) e.earned = {};
             if (e.accepted && e.doubt.add(tick_ms))
               revoke(e, by_exact ? ui_counter::trust_revoked_exact : ui_counter::trust_revoked_declared);
             lapse_if_due(e);
@@ -579,9 +591,9 @@ namespace sunshine_game3d {
         if (ui_selection::selective(covered, pixels)) {
           // An inferred run is consecutive and bounded: a selective sample
           // more than alpha_trust_span_ms after the run's last one restarts it.
-          if (!void_sample && (ui_selection::declared(k) || e.earned.add(tick_ms, covered, alpha_trust_span_ms))) accept(e);
+          if (!voided && (ui_selection::declared(k) || e.earned.add(tick_ms, covered, alpha_trust_span_ms))) accept(e);
         } else if (ui_selection::full(covered, pixels)) {
-          if (!void_sample) e.earned = {};
+          if (!voided) e.earned = {};
         }
         lapse_if_due(e);
       }
@@ -609,7 +621,7 @@ namespace sunshine_game3d {
         // set (ui_selection::change_set_selective).
         const bool valid = (evidence.valid_bits & candidate::hudless) != 0u;
         if (valid && !ui_selection::full(evidence.hudless_changed, pixels)) reconfirm_tested(e, tick_ms);
-        if (!void_sample && valid && ui_selection::selective(evidence.hudless_changed, pixels)) accept(e);
+        if (valid && ui_selection::selective(evidence.hudless_changed, pixels)) accept(e);
         lapse_if_due(e);
       }
     }

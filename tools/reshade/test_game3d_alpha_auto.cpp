@@ -114,15 +114,14 @@ namespace {
   }
 
   // A1: a declared source (UIAlpha, the UI color tag) is accepted by its first
-  // valid selective sample; a full, empty, invalid or void sample is none.
+  // valid selective sample; a full, empty or invalid sample is none.
   void declared_sources_are_accepted_by_one_selective_sample() {
     alpha_auto_policy policy;
     feed(policy, sample().alpha(kind::ui_color, 1000), 1000);        // Full (an opaque final image).
     feed(policy, sample().alpha(kind::ui_color, 0), 1100);           // Empty.
     feed(policy, sample().alpha(kind::ui_color, 26, 11), 1200);      // More than 1% invalid.
-    feed(policy, sample().alpha(kind::ui_color, 26).alpha(kind::ui_alpha, 30, 20), 1300); // Void: UIAlpha invalid.
     require(!accepts(policy, kind::ui_color) && !policy.accepted(0x3fu, signatures()),
-      "A full, empty, invalid or void sample accepted a declared source");
+      "A full, empty or invalid sample accepted a declared source");
     feed(policy, sample().alpha(kind::ui_color, 26, 10), 1400);      // 1% invalid is valid.
     require(accepts(policy, kind::ui_color) && policy.counters()[ui_counter::trust_earned] == 1,
       "One valid selective sample did not accept the UI color tag");
@@ -198,9 +197,11 @@ namespace {
     require(!accepts(effects, kind::ui_layer), "Fluctuating coverage was accepted");
   }
 
-  // A1 void: while an offered declared alpha is V1-invalid, no source's
-  // earning advances or restarts (Resident Evil Requiem's rejected-tag
-  // frames, where presented alpha covered 64-80%).
+  // A1 void: while an offered declared alpha is V1-invalid, the earning of
+  // Backbuffer and current alpha, whose declared-coverage judge is missing,
+  // neither advances nor restarts (Resident Evil Requiem's rejected-tag
+  // frames, where presented alpha covered 64-80%); every other source earns
+  // as usual.
   void an_invalid_declared_alpha_voids_earning() {
     alpha_auto_policy policy;
     feed(policy, sample().alpha(kind::backbuffer, 200), 1000);
@@ -233,6 +234,27 @@ namespace {
         .one_way(kind::backbuffer, 1000, 800), tick);
     require(!accepts(policy, kind::backbuffer) && policy.counters()[ui_counter::trust_revoked_exact] == 1,
       "A one-way contradiction in void samples was not revoked");
+    // An unknown engine whose UIColorAndAlpha is invalid on every sample (an
+    // uncleared FP16 target with NaN alpha): the void touches only Backbuffer
+    // and current alpha. UIAlpha, the layer and the HUD-less pair earn beside
+    // it, since none of them is judged by the missing declared coverage.
+    alpha_auto_policy others;
+    for (std::uint64_t tick = 1000; tick <= 3000; tick += 1000)
+      feed(others, sample().alpha(kind::ui_color, 0, 600).alpha(kind::ui_alpha, 30).alpha(kind::ui_layer, 100)
+        .alpha(kind::backbuffer, 200).pair(50, 950, false), tick);
+    require(accepts(others, kind::ui_alpha) && accepts(others, kind::ui_layer) && accepts(others, kind::hudless) &&
+        !accepts(others, kind::backbuffer) && !accepts(others, kind::ui_color),
+      "The void stopped a source other than Backbuffer and current alpha, or let Backbuffer earn");
+    // A restored HUD-less pair is earned again by such samples instead of
+    // lapsing through them, and a restored Backbuffer, which they can never
+    // earn, is not tested by them: its clock does not run.
+    alpha_auto_policy restored;
+    restored.restore("hudless:24:srgb,backbuffer:24:srgb");
+    for (std::uint64_t tick = 1000; tick <= 200000; tick += 100)
+      feed(restored, sample().alpha(kind::ui_color, 0, 600).alpha(kind::backbuffer, 200).pair(50, 950, false), tick);
+    require(accepts(restored, kind::hudless) && accepts(restored, kind::backbuffer) &&
+        !restored.counters()[ui_counter::trust_lapsed] && restored.counters()[ui_counter::trust_earned] == 1,
+      "A restored source lapsed through void samples, or the HUD-less pair was not earned again by them");
   }
 
   // A1 key: kind, typed format and the swapchain color space; FG mode is not
@@ -614,9 +636,9 @@ namespace {
       feed(policy, sample().pair(0, 1000, exact), 1100);                // An empty one (no UI).
       feed(policy, sample().pair(500, 500, exact), 1200);               // The middle band (mispaired).
       feed(policy, sample().pair(50, 900, exact, 100), 1300);           // Too few matching tiles.
-      feed(policy, sample().pair(50, 900, exact).alpha(kind::ui_alpha, 0, 20), 1400); // Void.
-      require(!accepts(policy, kind::hudless), "A full, empty, mispaired, noisy or void pair was accepted");
-      feed(policy, sample().pair(50, 900, exact), 1500);
+      require(!accepts(policy, kind::hudless), "A full, empty, mispaired or noisy pair was accepted");
+      // An invalid UIAlpha beside it voids only Backbuffer and current alpha.
+      feed(policy, sample().pair(50, 900, exact).alpha(kind::ui_alpha, 0, 20), 1500);
       require(accepts(policy, kind::hudless) && policy.accepted(candidate::hudless, signatures()) == candidate::hudless,
         "A valid selective change set was not accepted");
     }
