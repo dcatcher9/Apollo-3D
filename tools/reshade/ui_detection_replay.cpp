@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Offline check of Game 3D automatic UI detection. Runs the production
-// SunshineUIDetection{Tiles,Reduce,Mask}CS passes of a shader file, and its
-// SunshineScene{Cells,Compare,Evidence}CS hidden-scene evidence when it has them, on
-// the candidate textures saved in Dump 3D packages and compares each decision
-// with a labelled expectation. It replaces live trial and error when a detection
-// rule changes: every labelled screen of every game is judged at once. With a
-// shader of the current candidate layout and selection revision, each decision
-// is also checked against ui_selection::decide (mirror=match). A replay is a
+// SunshineUIDetection{Tiles,Reduce,Mask}CS passes and the
+// SunshineScene{Cells,Compare,Evidence}CS hidden-scene evidence of a shader
+// file of candidate layout 2 on the candidate textures saved in Dump 3D
+// packages and compares each decision with a labelled expectation. It replaces
+// live trial and error when a detection rule changes: every labelled screen of
+// every game is judged at once. With a shader of the current selection
+// revision, each decision is also checked against ui_selection::decide
+// (mirror=match). A replay is a
 // single real frame without a previous decision: nothing is bound at the T1
 // hold store (u5), so the reduce reads none and never reuses, and a dump taken
 // on a reused frame replays as its own decision. A label pushes the
@@ -78,24 +79,17 @@ namespace {
   // Candidate kinds by artifact name and their bits in candidate layout 2:
   // t11 UI alpha (R), t12 UI color tag (A), t13 Backbuffer (A), current color
   // alpha (the presented colour's, t6 A), t14 HUD-less, and an offscreen UI layer from the census
-  // (ui_layer_candidate_N) at t7 with the renderer's layer flags. Layout 1
-  // shaders (no SUNSHINE_UI_CANDIDATE_LAYOUT marker) take the layer in the UI
-  // color slot (t12, bit 0x2) and trusted slot indices in b2 word 2.
+  // (ui_layer_candidate_N) at t7 with the renderer's layer flags. The same
+  // bits name the accepted kinds in b2 word 2.
   const std::map<std::string, unsigned> candidate_bits{{"sl_ui_alpha", candidate::ui_alpha},
     {"sl_ui_color_alpha", candidate::ui_color}, {"sl_backbuffer", candidate::backbuffer}, {"current", candidate::current},
     {"sl_hudless_color", candidate::hudless}};
   bool ui_layer_kind(const std::string &name) { return name.rfind("ui_layer_candidate_", 0) == 0; }
-  // A candidate name's bit in the given layout; zero when unknown.
-  unsigned candidate_bit(const std::string &name, std::uint32_t layout) {
-    if (ui_layer_kind(name)) return layout >= contract::candidate_layout ? candidate::layer : candidate::ui_color;
+  // A candidate name's bit; zero when unknown.
+  unsigned candidate_bit(const std::string &name) {
+    if (ui_layer_kind(name)) return candidate::layer;
     const auto found = candidate_bits.find(name);
     return found == candidate_bits.end() ? 0u : found->second;
-  }
-  // An accepted name's bit in b2 word 2: its candidate bit in layout 2, its
-  // trusted alpha slot in layout 1 (where a HUD-less pair had no trust).
-  unsigned accepted_bit(const std::string &name, std::uint32_t layout) {
-    const auto bit = candidate_bit(name, layout);
-    return layout >= contract::candidate_layout ? bit : bit & 15u;
   }
   // A candidate name's kind (candidate layout 2), for its signature.
   std::optional<selection::kind> candidate_kind(const std::string &name) {
@@ -249,13 +243,12 @@ namespace {
     return shader;
   }
 
-  // Resource sizes from the shader's markers. Retired revisions without them
-  // wrote opaque counts to statistics rows 64-79 and decision texel 5, so
-  // every revision fits 80 rows and 6 texels. A shader with scene evidence
-  // measures both images and writes decision texels 5 and 6; candidate layout
-  // 2 adds the layer's statistics rows 64-79 and decision texel 7,
-  // selection revision 2 the one-way judgment rows 80-111 (the scene rows
-  // follow from 112, 121 rows in all) and decision texels 8 and 9, and
+  // Resource sizes from the shader's markers. Every shader of candidate
+  // layout 2 has them and scene evidence: it measures both images in decision
+  // texels 5 and 6 and has the layer's statistics rows 64-79 and decision
+  // texel 7 (8 texels). Selection revision 2 adds the one-way judgment rows
+  // 80-111 (the scene rows follow from 112, 121 rows in all, which every
+  // revision before 4 fits) and decision texels 8 and 9, and
   // selection revision 4 (12 decision texels) the pre-UI pixel rows 128-143
   // (144 rows in all) and decision texel 11; selection revisions 5 to 8 (13
   // decision texels) added H2's stillness rows from 144 (160 rows in all)
@@ -269,31 +262,25 @@ namespace {
   // and pads their decision words with zeros to the current count for the
   // decoders (as their missing texels read before).
   struct sizes_t {
-    UINT statistics_rows, decision_texels;
-    bool scene;
-    UINT tile_parts;
+    UINT statistics_rows, decision_texels, tile_parts;
   };
-  // A shader without the markers: 5 decision texels and no scene evidence.
-  constexpr std::uint32_t default_decision_texels = 5, default_scene_evidence_images = 0;
-  // The statistics rows of a shader with these markers.
-  constexpr std::uint32_t statistics_rows_of(std::uint32_t images, std::uint32_t texels) {
+  // The statistics rows of a shader with this many decision texels.
+  constexpr std::uint32_t statistics_rows_of(std::uint32_t texels) {
     return texels >= contract::declared_judgment_decision_texels ? contract::statistics_row_count :
       texels >= contract::pre_ui_decision_texels ? contract::pre_ui_statistics_row + 16u :
-      contract::scene_partial_row + (images ? contract::scene::cells_y / 16u : 0u);
+      contract::scene_partial_row + contract::scene::cells_y / 16u;
   }
-  static_assert(statistics_rows_of(0, contract::h1_decision_texels) == 112u && statistics_rows_of(2, contract::h1_decision_texels) == 121u &&
-    statistics_rows_of(2, contract::pre_ui_decision_texels) == 144u && statistics_rows_of(2, 13) == 144u &&
-    statistics_rows_of(2, contract::decision_texels) == 224u);
+  static_assert(statistics_rows_of(contract::layer_decision_texels) == 121u &&
+    statistics_rows_of(contract::h1_decision_texels) == 121u && statistics_rows_of(contract::pre_ui_decision_texels) == 144u &&
+    statistics_rows_of(13) == 144u && statistics_rows_of(contract::decision_texels) == 224u);
   sizes_t detection_sizes(const std::string &source) {
-    auto texels = sunshine_game3d::shader_marker(source, contract::decision_texels_marker);
-    auto images = sunshine_game3d::shader_marker(source, contract::scene_evidence_images_marker);
-    if (!texels) texels = default_decision_texels;
-    if (!images) images = default_scene_evidence_images;
-    const bool scene = images == contract::max_scene_evidence_images && texels >= contract::scene_decision_texels;
+    const auto texels = sunshine_game3d::shader_marker(source, contract::decision_texels_marker);
+    const auto images = sunshine_game3d::shader_marker(source, contract::scene_evidence_images_marker);
     const auto parts = sunshine_game3d::shader_marker(source, contract::tile_parts_marker);
-    if (texels > contract::max_decision_texels || (images && !scene) || parts > contract::max_tile_parts)
+    if (texels < contract::layer_decision_texels || texels > contract::max_decision_texels ||
+        images != contract::max_scene_evidence_images || parts > contract::max_tile_parts)
       throw std::runtime_error("unsupported detection size markers in the shader");
-    return {std::max(80u, statistics_rows_of(images, texels)), std::max(6u, texels), scene, std::max(parts, 1u)};
+    return {statistics_rows_of(texels), texels, std::max(parts, 1u)};
   }
   // Decision words padded with zeros to the current revision's count, for
   // the live decoders.
@@ -308,9 +295,9 @@ namespace {
     std::string mask_exact; // Empty unless the label asks for it.
     std::vector<float> mask;
     UINT width = 0, height = 0;
-    // The candidate layout, and the pushed candidate bits, accepted mask and
-    // detection flags (of the second pass when measured).
-    std::uint32_t layout = 0, offered = 0, accepted = 0, flags = 0;
+    // The pushed candidate bits, accepted mask and detection flags (of the
+    // second pass when measured).
+    std::uint32_t offered = 0, accepted = 0, flags = 0;
     // scene_hold "measured": the per-frame bits the scene guard derived.
     bool measured = false;
     std::uint32_t guard_bits = 0;
@@ -370,10 +357,8 @@ namespace {
     // The game's frame size; source_width/height is the host output, which
     // differs when the host scales the eyes.
     const auto width = artifacts.at(paired).at("width").get<UINT>(), height = artifacts.at(paired).at("height").get<UINT>();
-    auto layout = sunshine_game3d::shader_marker(shader_source, contract::candidate_layout_marker);
-    if (!layout) layout = contract::legacy_candidate_layout;
     std::array<const artifact_t *, 4> inputs{}; // t11..t14
-    const artifact_t *layer_input = nullptr;    // t7 (layout 2)
+    const artifact_t *layer_input = nullptr;    // t7
     unsigned bits = 0, flags = 0;
     // Selection revisions 2-9 read the one-frame-late layer bit 0x4, which
     // every layer copy carried through 180f1842 (now reserved): a shader that
@@ -382,13 +367,12 @@ namespace {
     for (const auto &kind : label.at("candidates")) {
       const auto name = kind.get<std::string>();
       const bool layer = ui_layer_kind(name);
-      const auto bit = candidate_bit(name, layout);
+      const auto bit = candidate_bit(name);
       if (!bit) throw std::runtime_error("unknown candidate " + name);
-      if (bits & bit)
-        throw std::runtime_error("two candidates share bit " + std::to_string(bit) + " in candidate layout " + std::to_string(layout));
+      if (bits & bit) throw std::runtime_error("two candidates share bit " + std::to_string(bit));
       bits |= bit;
       if (name == "current") continue;
-      if (layer && layout >= contract::candidate_layout) layer_input = &load(name);
+      if (layer) layer_input = &load(name);
       else {
         const unsigned slot = name == "sl_ui_alpha" ? 0 : bit == candidate::ui_color ? 1 : name == "sl_backbuffer" ? 2 : 3;
         inputs[slot] = &load(name);
@@ -416,8 +400,9 @@ namespace {
     unsigned accepted = 0;
     for (const auto &kind : label.value("accepted", json::array())) {
       const auto name = kind.get<std::string>();
-      if (!candidate_bit(name, layout)) throw std::runtime_error("unknown accepted kind " + name);
-      accepted |= accepted_bit(name, layout);
+      const auto bit = candidate_bit(name);
+      if (!bit) throw std::runtime_error("unknown accepted kind " + name);
+      accepted |= bit;
     }
     // The acceptance signature of every offered kind (A1): its artifact's
     // typed format (the current alpha's is the paired color's) and the
@@ -451,8 +436,8 @@ namespace {
     if (label.value("pre_ui_visible", false)) flags |= contract::per_frame_pre_ui_visible;
     for (const auto &kind : label.value("refuted", json::array())) {
       const auto name = kind.get<std::string>();
-      const auto bit = candidate_bit(name, layout);
-      if (!bit || layout < contract::candidate_layout) throw std::runtime_error("refuted names an unknown candidate kind " + name);
+      const auto bit = candidate_bit(name);
+      if (!bit) throw std::runtime_error("refuted names an unknown candidate kind " + name);
       flags |= bit << contract::per_frame_refuted_shift;
     }
     // A "sample" key is accepted and ignored: its flag 0x20000 is reserved and
@@ -483,23 +468,19 @@ namespace {
     }
 
     const auto sizes = detection_sizes(shader_source);
-    if (measured && !sizes.scene) throw std::runtime_error("scene_hold \"measured\" needs a shader with scene evidence");
     shaders_t shaders{compile(gpu, shader_source, "SunshineUIDetectionTilesCS", width, height, color),
       compile(gpu, shader_source, "SunshineUIDetectionReduceCS", width, height, color),
       compile(gpu, shader_source, "SunshineUIDetectionMaskCS", width, height, color)};
-    if (sizes.scene) {
-      shaders.cells = compile(gpu, shader_source, "SunshineSceneCellsCS", width, height, color);
-      shaders.compare = compile(gpu, shader_source, "SunshineSceneCompareCS", width, height, color);
-      shaders.evidence = compile(gpu, shader_source, "SunshineSceneEvidenceCS", width, height, color);
-    }
+    shaders.cells = compile(gpu, shader_source, "SunshineSceneCellsCS", width, height, color);
+    shaders.compare = compile(gpu, shader_source, "SunshineSceneCompareCS", width, height, color);
+    shaders.evidence = compile(gpu, shader_source, "SunshineSceneEvidenceCS", width, height, color);
     auto statistics = target(gpu, contract::statistics_columns(sizes.tile_parts), sizes.statistics_rows,
       DXGI_FORMAT_R32G32B32A32_UINT);
-    texture_t cells;
-    if (sizes.scene) cells = target(gpu, contract::scene::cells_x, contract::scene::cells_y, DXGI_FORMAT_R32G32B32A32_UINT);
+    const auto cells = target(gpu, contract::scene::cells_x, contract::scene::cells_y, DXGI_FORMAT_R32G32B32A32_UINT);
     auto decision = target(gpu, sizes.decision_texels, 1, DXGI_FORMAT_R32G32B32A32_UINT);
     auto mask = target(gpu, width, height, DXGI_FORMAT_R32_FLOAT);
     // Detection constants b2: candidate bits, difference threshold, accepted
-    // candidates (layout 1: trusted slots), flags and (selection revision 4)
+    // candidates, flags and (selection revision 4)
     // the offscreen UI layer's pair threshold with the presented color, from
     // the two artifacts' own encodings (zero without a layer or when not
     // comparable), padded with zeros to the 16-byte constant buffer
@@ -557,11 +538,9 @@ namespace {
     stage(shaders.mask.Get(), decision.srv.Get(), 0, mask.uav.Get(), (width + 7) / 8, (height + 7) / 8);
     // The hidden-scene evidence of a sample frame: measured after the
     // decision, it writes decision texels 5 and 6 only.
-    if (sizes.scene) {
-      stage(shaders.cells.Get(), nullptr, 6, cells.uav.Get(), contract::scene::cells_x / 16, contract::scene::cells_y);
-      stage(shaders.compare.Get(), cells.srv.Get(), 6, statistics.uav.Get(), contract::scene::cells_x / 16, contract::scene::cells_y / 16);
-      stage(shaders.evidence.Get(), statistics.srv.Get(), 6, decision.uav.Get(), 1, 1);
-    }
+    stage(shaders.cells.Get(), nullptr, 6, cells.uav.Get(), contract::scene::cells_x / 16, contract::scene::cells_y);
+    stage(shaders.compare.Get(), cells.srv.Get(), 6, statistics.uav.Get(), contract::scene::cells_x / 16, contract::scene::cells_y / 16);
+    stage(shaders.evidence.Get(), statistics.srv.Get(), 6, decision.uav.Get(), 1, 1);
     // scene_hold "measured": the scene guard observes this frame's sample as
     // the renderer would three consecutive samples of a static screen: at
     // tick 900 (not actionable unless a proven layer is the offer's pre-UI
@@ -595,7 +574,7 @@ namespace {
     result.decision = download<std::uint32_t>(gpu, decision);
     result.mask = download<float>(gpu, mask);
     result.width = width; result.height = height;
-    result.layout = layout; result.offered = bits; result.accepted = accepted; result.flags = flags;
+    result.offered = bits; result.accepted = accepted; result.flags = flags;
     result.pixels = result.mask.size();
     for (const float value : result.mask) {
       result.ui_pixels += value > 0.f ? 1u : 0u;
@@ -619,8 +598,7 @@ namespace {
   // "image" ("hudless" or "layer") the image it measured. "verdict" is one
   // name or a list (the pre-UI texel's verdict is read from its valid D with
   // the same bounds, else none); "d_min" and "d_max" bound D inclusively.
-  // Evidence that did not run, as from a shader without scene evidence, fails
-  // the check.
+  // Evidence that did not run fails the check.
   constexpr std::array<const char *, 3> pre_ui_image_names{"none", "hudless", "layer"};
   bool scene_matches(const std::vector<std::uint32_t> &d, const json &expected, bool pre_ui, std::string &text) {
     if (d.size() <= word::pre_ui_scene_image) {
@@ -717,13 +695,13 @@ namespace {
     if (label.contains("refuted")) {
       if (!label.at("refuted").is_array()) return "refuted must be a list of candidate kind names";
       for (const auto &kind : label.at("refuted"))
-        if (!kind.is_string() || !candidate_bit(kind.get<std::string>(), contract::candidate_layout))
+        if (!kind.is_string() || !candidate_bit(kind.get<std::string>()))
           return "refuted names an unknown candidate kind";
     }
     if (label.contains("accepted")) {
       if (!label.at("accepted").is_array()) return "accepted must be a list of candidate kind names";
       for (const auto &kind : label.at("accepted"))
-        if (!kind.is_string() || !candidate_bit(kind.get<std::string>(), contract::candidate_layout))
+        if (!kind.is_string() || !candidate_bit(kind.get<std::string>()))
           return "accepted names an unknown candidate kind";
     }
     if (!label.contains("xfail")) return {};
@@ -760,8 +738,7 @@ namespace {
   // hold store unbound): "match" when the GPU's
   // source, coverage, accepted
   // word, valid bits, refused candidate, frame reason, claims and h1 word
-  // agree, "n/a" for a shader of another candidate layout or selection
-  // revision.
+  // agree, "n/a" for a shader of another selection revision.
   std::string mirror_of(const outcome &result, bool mirrored) {
     const auto &d = result.decision;
     if (!mirrored || d.size() <= word::h1) return "n/a";
@@ -833,9 +810,9 @@ int main(int argc, char **argv) {
         "\"pre_ui_scene\": {\"image\", \"verdict\", \"d_min\", \"d_max\"}, \"pre_ui_match\": bool}, "
         "\"xfail\": {\"stage\", \"reason\", \"today\": {expect fields}}, \"needs_dump\": text}]}\n"
         "Binds each dump's candidates (t0 paired color, t11-t14, and a census ui_layer_candidate_N at t7 with the layer\n"
-        "flags; a shader without SUNSHINE_UI_CANDIDATE_LAYOUT takes the layer at t12), raw depth (t1; a 1x1 placeholder\n"
-        "without it), presented color (t6) and its exact 80-byte b0, and runs the shader's scene evidence passes as on a\n"
-        "sample frame. accepted names the candidate kinds the game session accepts (A1); the retired trusted key fails\n"
+        "flags), raw depth (t1; a 1x1 placeholder without it), presented color (t6) and its exact 80-byte b0, and runs the\n"
+        "shader's scene evidence passes as on a sample frame. Only shaders of candidate layout 2 (since S1) replay.\n"
+        "accepted names the candidate kinds the game session accepts (A1); the retired trusted key fails\n"
         "its case. The hidden-scene guard's per-frame bits (H1): scene_hold true pushes its held hidden verdict,\n"
         "pre_ui_visible its held visible pre-UI image, refuted the named kinds' refuted signatures; scene_hold \"measured\"\n"
         "has game3d_scene_guard.h observe this frame's own sample at ticks 900, 1000 and 1100 (signatures from the\n"
@@ -845,7 +822,7 @@ int main(int argc, char **argv) {
         "The retired scene_hold_hudless and hudless_scene keys fail their case.\n"
         "A HUD-less image not comparable with its pair (ui_selection::comparable, from the two artifact formats\n"
         "and the manifest color_space) is not offered, and the pair's threshold comes from the same function. With a\n"
-        "shader of the current layout and selection revision, every decision is checked against ui_selection::decide on\n"
+        "shader of the current selection revision, every decision is checked against ui_selection::decide on\n"
         "the GPU's counts with no previous decision, as nothing is bound at the T1 hold store (mirror=match); a\n"
         "mirror that differs fails its case. A case\n"
         "whose dump directory is gone, or whose needs_dump names what its dump lacks, is skipped; the run fails when no\n"
@@ -874,11 +851,14 @@ int main(int argc, char **argv) {
     }
     const auto shader_path = fs::absolute(positional[0]);
     const auto shader_source = read_text(shader_path);
-    // Shaders of the current candidate layout and selection revision are
-    // checked against ui_selection::decide.
-    const bool mirrored =
-      sunshine_game3d::shader_marker(shader_source, contract::candidate_layout_marker) == contract::candidate_layout &&
-      sunshine_game3d::shader_marker(shader_source, selection::revision_marker) == selection::revision;
+    // Only candidate layout 2 (UI framework S1, 10-02), the layout the
+    // renderer requires, is replayed: an older shader took the layer in the
+    // UI color slot.
+    if (sunshine_game3d::shader_marker(shader_source, contract::candidate_layout_marker) != contract::candidate_layout)
+      throw std::runtime_error("a shader without SUNSHINE_UI_CANDIDATE_LAYOUT 2 (before S1, 10-02) is not replayed");
+    // Shaders of the current selection revision are checked against
+    // ui_selection::decide.
+    const bool mirrored = sunshine_game3d::shader_marker(shader_source, selection::revision_marker) == selection::revision;
     const auto cases_path = fs::absolute(positional[1]);
     const auto document = json::parse(read_text(cases_path));
     fs::path root = document.value("dump_root", cases_path.parent_path().string());
@@ -961,7 +941,7 @@ int main(int argc, char **argv) {
         wanted += ", today " + today.wanted_mask + "; " + xfail->at("stage").get<std::string>() + ": " +
           xfail->at("reason").get<std::string>() + (target.okay ? "; remove xfail" : "");
       }
-      // The layer's own counts exist from candidate layout 2 (texel 7).
+      // The layer's own counts (texel 7).
       char layer[96] = "";
       if (d.size() > word::valid_bits)
         std::snprintf(layer, sizeof(layer), " layer={covered=%u invalid=%u opaque=%u} valid=0x%x", d[word::layer_covered],

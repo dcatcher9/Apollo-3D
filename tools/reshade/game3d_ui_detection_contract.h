@@ -36,9 +36,8 @@ namespace sunshine_game3d::ui_detection {
   // Candidate layout 2 (UI framework S1, E1): every candidate has its own
   // slot and bit in Sunshine_UICandidates (b2 word 0) and in the accepted mask
   // Sunshine_UIAcceptedCandidates (b2 word 2), so the tagged UIColorAndAlpha
-  // and the offscreen UI layer never share a slot. Shaders without the layout
-  // marker use layout 1: the layer in the UI color slot (t12, bit 0x2) with
-  // the late-layer bit 0x4, and b2 word 2 the trusted slot indices.
+  // and the offscreen UI layer never share a slot. The renderer and
+  // ui_detection_replay accept no other layout.
   namespace candidate {
     inline constexpr std::uint32_t ui_alpha = 0x1u;   // t11 .r: a UIAlpha tag.
     inline constexpr std::uint32_t ui_color = 0x2u;   // t12 .a: a UIColorAndAlpha tag, never the layer.
@@ -56,7 +55,7 @@ namespace sunshine_game3d::ui_detection {
   // Candidate bit 0x100 (fix 3's pre-UI change set) is reserved likewise.
   inline constexpr std::uint32_t source_layer = 10u;
   inline constexpr std::string_view candidate_layout_marker = "SUNSHINE_UI_CANDIDATE_LAYOUT";
-  inline constexpr std::uint32_t candidate_layout = 2u, legacy_candidate_layout = 1u;
+  inline constexpr std::uint32_t candidate_layout = 2u;
   // The game3d_native.hlsl define mirroring each candidate bit, the layer's
   // source id and the layout.
   inline constexpr std::array<std::pair<std::string_view, std::uint32_t>, 9> hlsl_candidate_defines{{
@@ -334,8 +333,7 @@ namespace sunshine_game3d::ui_detection {
     inline constexpr std::size_t candidates = 4, hudless_changed = 5, hudless_unchanged = 6, hudless_invalid = 7;
     // Four words each: UIAlpha, UI color tag, Backbuffer, current.
     inline constexpr std::size_t alpha_covered = 8, alpha_invalid = 12;
-    // accepted: the pushed accepted mask in candidate-bit positions (layout 1:
-    // the trusted slot indices).
+    // accepted: the pushed accepted mask in candidate-bit positions.
     inline constexpr std::size_t hudless_lit = 16, accepted = 17;
     // Pixels with alpha of at least 254/255 in UIAlpha and the UI color tag.
     inline constexpr std::size_t alpha_opaque = 18;

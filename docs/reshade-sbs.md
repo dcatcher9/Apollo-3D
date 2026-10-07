@@ -1575,8 +1575,9 @@ since revision 10. The renderer runs automatic detection only with that layout, 
 `inactive.unprepared`. The live decoders (`ui_selection::counts_from_words`,
 `ui_temporal::decode_detection_sample`, which the hidden-scene guard and the acceptance ledger read
 once decoded) read only that revision's texture. `ui_detection_replay` alone still replays a shader
-without the marker (layout 1, the layer in the UI color slot) or of an older revision, sizing its
-statistics rows and padding its decision words itself, without the mirror check.
+of an older selection revision, sizing its statistics rows and padding its decision words itself,
+without the mirror check; it refuses a shader without the layout marker (layout 1, before S1, which
+took the layer in the UI color slot).
 `Sunshine_UIDifferenceThreshold` (`b2` word 1) is the HUD-less pair's difference threshold. Since
 fix 1 `b2` has five words (a 32-byte constant buffer): `Sunshine_UIPreUIThreshold` (word 4, float) is the
 pair threshold of the offscreen UI layer and the presented colour (`ui_selection::comparable` of the
@@ -1846,11 +1847,11 @@ replay labels and sequence cases are those of the [UI decision framework](#ui-de
 updates the affected replay labels and sequence cases.
 
 Detection rule changes are checked offline before a live test. `ui_detection_replay` (built with
-the add-on) compiles the three detection passes from a shader file, and its three scene-evidence
-passes when the shader has them, binds each Dump 3D package's
+the add-on) compiles the three detection passes and the three scene-evidence passes from a shader
+file of candidate layout 2 (since S1), binds each Dump 3D package's
 captured candidates by artifact kind (presented color, Backbuffer, UIColorAndAlpha, UIAlpha,
 HUD-less, or a census `ui_layer_candidate_N` in the layer slot `t7` with the layer's stored flags;
-in the UI color slot for a layout 1 shader; a census with `ordering` carries such an artifact only
+a census with `ordering` carries such an artifact only
 for a copy proven complete, and a label naming an omitted one fails its case, while an older
 census's artifacts were read unordered ([census ordering](#dump-3d-diagnostics))), sets the candidate
 and exact-pair bits and the
@@ -1888,12 +1889,12 @@ the gate, as the first live sample showing a claim does), 1000 and 1100, with ea
 signature (its typed format and the manifest colour space), then reruns the reduce, mask and
 evidence passes with the bits the guard pushes at 1100; the line shows them as
 `measured(per_frame=...)`. It proves the relation within one sample, not temporal behaviour, which
-the sequence replay owns, and fails its case with a shader without scene evidence. The keys
+the sequence replay owns. The keys
 `scene_hold_hudless` and `hudless_scene` (in `expect` or `xfail.today`) are retired since S2b and
 fail their case, as do a malformed `scene_hold` and an unknown `refuted` kind. A `sample` key is
 accepted and ignored, because `0x20000` is reserved. It sizes the
-statistics and decision textures from the shader's markers, but
-never below 80 rows and 6 texels, so retired shader revisions still replay. `expect.mask_exact`
+statistics and decision textures from the shader's markers, which every layout-2 shader has, so
+older selection revisions still replay. `expect.mask_exact`
 compares the resolved R32 mask bit for bit with a CPU reference: the selected candidate's raw alpha
 (red for UIAlpha, the offscreen UI layer included), all zeros without a source, or all ones for a
 full-frame decision (sources 6 and 8); a HUD-less difference has no reference and fails the
@@ -1902,7 +1903,7 @@ layer's mask, so such a case reports `differs` with that shader. `expect.scene` 
 hidden-scene evidence in decision texel 5 and `expect.pre_ui_scene` the pre-UI scene image's in
 texel 6, with `image` (`hudless` or `layer`) the image it measured: `verdict` is one name or a list
 (none, hidden, ambiguous or visible; the pre-UI verdict is read from its valid D with the same
-bounds, else none) and `d_min` and `d_max` bound D inclusively. Evidence that did not run, as with a shader without scene evidence, fails the check.
+bounds, else none) and `d_min` and `d_max` bound D inclusively. Evidence that did not run fails the check.
 `expect.pre_ui_match` (`true` or `false`, since fix 1) checks whether the sample would count toward
 the layer's pre-UI proof: an offered layer without coverage and `ui_selection::pre_ui_match` on
 texel 11. Stellar Blade's SDR gameplay dumps expect `true`, its settings pages and its HDR layer
