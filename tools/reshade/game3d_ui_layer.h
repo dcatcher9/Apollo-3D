@@ -92,6 +92,19 @@ namespace sunshine_game3d::ui_layer {
   bool qualifies(const api::resource_desc &desc, const float color[4], std::uint32_t width, std::uint32_t height,
     std::uint32_t rect_count, const api::rect *rects);
 
+  // latest()'s recency gate, on GetTickCount64 ticks: the layer is still
+  // being cleared (its newest recorded copy is at most max_clear_gap_ms old)
+  // and the offered copy belongs to that unbroken run of copies (recorded at
+  // most max_clear_gap_ms before the newest). After a gap in clears or in
+  // demand the first new copy refreshes the newest tick while it is still
+  // held (its submission hook, its fence on another queue), so without the
+  // second bound the copy from before the gap, up to the ring's release time
+  // old, was offered as this frame's layer.
+  constexpr bool recent_copy(std::uint64_t now_ms, std::uint64_t newest_tick, std::uint64_t offered_tick) {
+    return now_ms >= newest_tick && now_ms - newest_tick <= max_clear_gap_ms && newest_tick >= offered_tick &&
+      newest_tick - offered_tick <= max_clear_gap_ms;
+  }
+
   // Pure selection state of the live tracker; no GPU or runtime calls.
   class layer_tracker {
   public:
@@ -253,7 +266,8 @@ namespace sunshine_game3d::ui_layer {
   // The active layer's offered copy on this device (the newest executed one
   // that is not held: held_for_submission, fence_pending; it never waits),
   // while its newest recorded copy was recorded less than max_clear_gap_ms
-  // ago. capture_id, tick and presents_since_copy all describe the offered
+  // ago and the offered one at most that long before it (recent_copy).
+  // capture_id, tick and presents_since_copy all describe the offered
   // copy. The first copy offered from another queue than the presenting one
   // with a fence, and the first without one for each reason, are logged. Each
   // call also asks for the next copies: the layer is tracked and copied only

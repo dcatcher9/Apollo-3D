@@ -231,6 +231,22 @@ int main() {
       require(!tracker.active(), "Reset kept an active layer");
     }
     std::puts("PASS UI layer tracking: confirmed after repeated clears, last-cleared layer active, one copy per Present, expiry");
+    {
+      // latest()'s recency gate (recent_copy): the newest recorded copy is
+      // recent and the offered one lags it by at most max_clear_gap_ms. A
+      // copy from before a gap in clears or demand is never offered, even
+      // once the first copy after the gap (still held for its fence) has
+      // refreshed the newest tick.
+      constexpr auto gap = layer::max_clear_gap_ms;
+      static_assert(layer::recent_copy(1000, 1000, 1000) && layer::recent_copy(1000 + gap, 1000, 1000 - gap));
+      require(layer::recent_copy(5050, 5040, 4990), "A copy a few frames behind the newest was not offered");
+      require(!layer::recent_copy(1000 + gap + 1, 1000, 1000), "A copy was offered after the layer stopped being cleared");
+      require(!layer::recent_copy(4000, 3990, 990), "A copy from before a 3 s gap was offered once the next copy was recorded");
+      require(!layer::recent_copy(4000, 3990, 3990 - gap - 1), "A copy from before a gap just over max_clear_gap_ms was offered");
+      require(!layer::recent_copy(999, 1000, 1000) && !layer::recent_copy(1000, 1000, 1001),
+        "A copy from the future was offered");
+    }
+    std::puts("PASS UI layer recency: only a copy of the current unbroken run of copies is offered");
     // The Present count at the live copy (frame(), recorded with the copy)
     // names the Present whose frame it holds (presents_since); the provider
     // reads it for the offered copy after the Present's observe_output and

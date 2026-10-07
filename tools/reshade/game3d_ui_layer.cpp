@@ -166,7 +166,7 @@ namespace sunshine_game3d::ui_layer {
       std::uint32_t width{}, height{};
       api::format format{};
       // The newest recorded copy's id (from state_t::next_capture_id) and
-      // tick (latest()'s recency gate, as the single live copy's).
+      // tick (latest()'s recency gate, recent_copy, with the offered copy's).
       std::uint64_t capture_id{}, tick{};
       bool saturated_logged{};
       const ring_entry *latest() const { return newest >= 0 ? &ring[unsigned(newest)] : nullptr; }
@@ -887,13 +887,15 @@ namespace sunshine_game3d::ui_layer {
     settle(s);
     const auto *entry = live.latest();
     // The executed copy is offered while the newest recorded one is recent,
-    // as the single live texture was (the recency gate uses the newest
-    // recorded copy's tick). The reported tick, capture_id (which names the
-    // entry for bound()) and presents_since_copy all describe the offered
-    // entry. An offered entry whose list executes again is held until the
-    // submission hook (and, on another queue, its fence) again.
+    // as the single live texture was, and only when it belongs to the same
+    // unbroken run of copies (recent_copy): never a copy from before a gap
+    // while the first one after it is still held. The reported tick,
+    // capture_id (which names the entry for bound()) and presents_since_copy
+    // all describe the offered entry. An offered entry whose list executes
+    // again is held until the submission hook (and, on another queue, its
+    // fence) again.
     if (!device || device != s.device || !entry || entry->pending || !entry->copy.handle || !entry->capture_id ||
-        !live.tracker.active() || now_ms < live.tick || now_ms - live.tick > max_clear_gap_ms) return false;
+        !live.tracker.active() || !recent_copy(now_ms, live.tick, entry->tick)) return false;
     // Pinned until bound() registers this Present as its reader.
     live.reading = live.newest;
     out.copy = entry->copy; out.view = entry->view; out.capture_id = entry->capture_id; out.tick = entry->tick;

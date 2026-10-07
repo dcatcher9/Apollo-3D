@@ -807,7 +807,11 @@ layer is confirmed anew after three cleared frames. Before WP1b clears and Prese
 with no reader. While UI detection
 asks for the layer (within the last second), the active layer is copied once per Present, at its
 first clear, into a persistent add-on texture; otherwise no copy is recorded into the game's
-frame. Auto offers the newest copy, if under 250 ms old, as a candidate of its own (candidate
+frame. Auto offers the newest executed copy while the newest recorded one is under 250 ms old and
+only when the offered copy was recorded at most 250 ms before it (`ui_layer::recent_copy`): after
+a gap in clears or in demand (a Game 3D or UI-source toggle keeps the ring for 10 s) the first new
+copy is still held for its fence, and until the final review the copy from before the gap was
+offered as this frame's layer meanwhile. It is offered as a candidate of its own (candidate
 bit `0x40`, deciding as source 10) beside any tagged UIColorAndAlpha; the two never share a slot
 or an acceptance (E1). Until S4 one layer, the tracker's active one, is offered. Copies are released through their own device, at the latest when it is
 destroyed. It is one frame late (stored flag `0x4`), and its UI may have moved since, but its
