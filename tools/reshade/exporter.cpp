@@ -895,8 +895,10 @@ namespace {
     bool pq_requested = false;
     // A runtime's device never changes adapter; resolve its LUID once.
     // Bounded timing of the add-on's own work inside the game's Present.
+    // start: GetTickCount64 when the window began (its first Present, or the
+    // previous timing line).
     struct {
-      std::uint64_t presents = 0, next_log = 0;
+      std::uint64_t presents = 0, next_log = 0, start = 0;
       double cpu_sum_ms = 0, cpu_max_ms = 0;
       std::array<double, 5> worst{}; // Setup, depth, UI, render, export of the slowest present.
     } timing;
@@ -1070,32 +1072,49 @@ namespace {
         auto &timing = proof.timing;
         ++timing.presents; timing.cpu_sum_ms += cpu_ms;
         if (cpu_ms > timing.cpu_max_ms) { timing.cpu_max_ms = cpu_ms; timing.worst = sections; }
-        if (!timing.next_log) timing.next_log = now + 10000;
+        if (!timing.next_log) {
+          timing.start = now;
+          timing.next_log = now + 10000;
+        }
         if (now < timing.next_log) return;
-        sunshine_game3d::gpu_timing gpu;
-        if (proof.renderer) proof.renderer->take_gpu_timing(gpu);
-        using stage = sunshine_game3d::gpu_timing;
-        // The offscreen UI layer's live copies over the same interval:
-        // recorded, skipped by a saturated ring, and the offered copy's
-        // Present count over the Presents it was offered to.
-        const auto layer = sunshine_game3d::ui_layer::take_stats();
-        std::snprintf(message, sizeof(message),
-          "Sunshine Game 3D timing: presents=%llu cpu_ms={mean=%.3f max=%.3f} cpu_worst_ms={setup=%.3f depth=%.3f ui=%.3f render=%.3f export=%.3f} gpu_frames=%u gpu_ms mean/max={total=%.3f/%.3f inputs=%.3f/%.3f source=%.3f/%.3f detection=%.3f/%.3f linearize=%.3f/%.3f candidate=%.3f/%.3f vertical=%.3f/%.3f horizontal=%.3f/%.3f eyes=%.3f/%.3f pack=%.3f/%.3f} gpu_profile=%s dropped_fence_pending=%u dropped_unresolved=%u incomplete=%u ui_layer={copies=%llu skipped=%llu offers=%llu presents_since_copy={mean=%.2f max=%u}}",
-          static_cast<unsigned long long>(timing.presents), timing.cpu_sum_ms / double(timing.presents), timing.cpu_max_ms,
-          timing.worst[0], timing.worst[1], timing.worst[2], timing.worst[3], timing.worst[4], gpu.frames,
-          gpu.mean_ms[stage::total], gpu.max_ms[stage::total], gpu.mean_ms[stage::inputs], gpu.max_ms[stage::inputs],
-          gpu.mean_ms[stage::source], gpu.max_ms[stage::source], gpu.mean_ms[stage::detection], gpu.max_ms[stage::detection],
-          gpu.mean_ms[stage::linearize], gpu.max_ms[stage::linearize], gpu.mean_ms[stage::candidate], gpu.max_ms[stage::candidate],
-          gpu.mean_ms[stage::vertical], gpu.max_ms[stage::vertical], gpu.mean_ms[stage::horizontal], gpu.max_ms[stage::horizontal],
-          gpu.mean_ms[stage::eyes], gpu.max_ms[stage::eyes], gpu.mean_ms[stage::pack], gpu.max_ms[stage::pack],
-          sunshine_game3d::name(gpu.state), gpu.dropped_fence_pending, gpu.dropped_unresolved, gpu.incomplete,
-          static_cast<unsigned long long>(layer.copies), static_cast<unsigned long long>(layer.skipped),
-          static_cast<unsigned long long>(layer.offers),
-          layer.offers ? double(layer.presents_since_sum) / double(layer.offers) : 0.0, layer.presents_since_max);
-        timing = {};
-        timing.next_log = now + 10000;
+        close_timing_window(proof, now, message);
       }
       log(reshade::log::level::info, message);
+    }
+
+    // Requires mutex_. Formats the timing line of the window ending now into
+    // message and starts the next window. window_ms is the window's length:
+    // 10 s from a periodic line, shorter for the last window of a runtime
+    // reset (invalidate), which closes it early so its counts (the UI layer's
+    // skipped copies among them) are logged rather than lost or carried into
+    // the next runtime's first line.
+    void close_timing_window(runtime_t &proof, std::uint64_t now, char (&message)[1024]) {
+      auto &timing = proof.timing;
+      sunshine_game3d::gpu_timing gpu;
+      if (proof.renderer) proof.renderer->take_gpu_timing(gpu);
+      using stage = sunshine_game3d::gpu_timing;
+      // The offscreen UI layer's live copies over the same interval:
+      // recorded, skipped by a saturated ring, and the offered copy's
+      // Present count over the Presents it was offered to.
+      const auto layer = sunshine_game3d::ui_layer::take_stats();
+      std::snprintf(message, sizeof(message),
+        "Sunshine Game 3D timing: presents=%llu cpu_ms={mean=%.3f max=%.3f} cpu_worst_ms={setup=%.3f depth=%.3f ui=%.3f render=%.3f export=%.3f} gpu_frames=%u gpu_ms mean/max={total=%.3f/%.3f inputs=%.3f/%.3f source=%.3f/%.3f detection=%.3f/%.3f linearize=%.3f/%.3f candidate=%.3f/%.3f vertical=%.3f/%.3f horizontal=%.3f/%.3f eyes=%.3f/%.3f pack=%.3f/%.3f} gpu_profile=%s dropped_fence_pending=%u dropped_unresolved=%u incomplete=%u ui_layer={copies=%llu skipped=%llu offers=%llu presents_since_copy={mean=%.2f max=%u}} window_ms=%llu",
+        static_cast<unsigned long long>(timing.presents),
+        timing.presents ? timing.cpu_sum_ms / double(timing.presents) : 0.0, timing.cpu_max_ms,
+        timing.worst[0], timing.worst[1], timing.worst[2], timing.worst[3], timing.worst[4], gpu.frames,
+        gpu.mean_ms[stage::total], gpu.max_ms[stage::total], gpu.mean_ms[stage::inputs], gpu.max_ms[stage::inputs],
+        gpu.mean_ms[stage::source], gpu.max_ms[stage::source], gpu.mean_ms[stage::detection], gpu.max_ms[stage::detection],
+        gpu.mean_ms[stage::linearize], gpu.max_ms[stage::linearize], gpu.mean_ms[stage::candidate], gpu.max_ms[stage::candidate],
+        gpu.mean_ms[stage::vertical], gpu.max_ms[stage::vertical], gpu.mean_ms[stage::horizontal], gpu.max_ms[stage::horizontal],
+        gpu.mean_ms[stage::eyes], gpu.max_ms[stage::eyes], gpu.mean_ms[stage::pack], gpu.max_ms[stage::pack],
+        sunshine_game3d::name(gpu.state), gpu.dropped_fence_pending, gpu.dropped_unresolved, gpu.incomplete,
+        static_cast<unsigned long long>(layer.copies), static_cast<unsigned long long>(layer.skipped),
+        static_cast<unsigned long long>(layer.offers),
+        layer.offers ? double(layer.presents_since_sum) / double(layer.offers) : 0.0, layer.presents_since_max,
+        static_cast<unsigned long long>(now >= timing.start ? now - timing.start : 0));
+      timing = {};
+      timing.start = now;
+      timing.next_log = now + 10000;
     }
 
     void render_present(api::swapchain *swapchain) {
@@ -1330,6 +1349,13 @@ namespace {
         proof.camera_ready = proof.camera_basis = proof.camera_projection = proof.camera_scale = proof.camera_zero = proof.camera_blend = proof.camera_rect = proof.camera_raw_range = proof.depth_jitter = proof.effect_strength = {};
         proof.texture = {}; proof.proof_checked = false;
         return;
+      }
+      // The reset discards the runtime's timing window: its partial window is
+      // logged now (before the renderer, whose GPU timing it takes, is parked).
+      if (current != runtimes_.end() && current->second.timing.presents) {
+        char message[1024]{};
+        close_timing_window(current->second, GetTickCount64(), message);
+        log(reshade::log::level::info, message);
       }
       // destroy_effect_runtime also precedes every swapchain resize (an SDR
       // and HDR toggle): the renderer is parked for the runtime's

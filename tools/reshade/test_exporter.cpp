@@ -1488,6 +1488,34 @@ namespace {
       std::puts("PASS runtime reset keeps the toggle rings until its swapchain is destroyed");
     }
 
+    // A timing line carries its window's length, so a runtime reset's early,
+    // shorter last window (and the UI layer copies it counted) is judged at
+    // its own rate; the next window starts at the line.
+    static void timing_window_length() {
+      publisher_t publisher;
+      auto &proof = publisher.runtimes_[owner()];
+      proof.timing.presents = 4;
+      proof.timing.cpu_sum_ms = 0.8;
+      proof.timing.cpu_max_ms = 0.5;
+      proof.timing.start = 1000;
+      proof.timing.next_log = 11000;
+      char message[1024]{};
+      publisher.close_timing_window(proof, 3500, message);
+      const std::string line = message;
+      const std::string tail = " window_ms=2500";
+      require(line.rfind("Sunshine Game 3D timing: presents=4 cpu_ms={mean=0.200 max=0.500}", 0) == 0 &&
+          line.find(" ui_layer={copies=") != std::string::npos && line.size() > tail.size() &&
+          line.compare(line.size() - tail.size(), tail.size(), tail) == 0,
+        "The timing line did not end with its window's length after the UI layer group");
+      require(!proof.timing.presents && proof.timing.start == 3500 && proof.timing.next_log == 13500,
+        "Closing a timing window did not start the next one at its line");
+      // An empty window (a line right after the previous one) logs zero means.
+      publisher.close_timing_window(proof, 3500, message);
+      require(std::strstr(message, "presents=0 cpu_ms={mean=0.000 max=0.000}") &&
+          std::strstr(message, " window_ms=0"), "An empty timing window was not logged as empty");
+      std::puts("PASS timing line: window length, early last window");
+    }
+
     static void color_contract() {
       for (std::uint32_t input = 0; input <= 5; ++input) {
         for (const char *output : {"srgb", "scrgb", "pq", ""}) {
@@ -2299,6 +2327,7 @@ int main(int argc, char **argv) {
     publisher_tests::disabled_native_reload_lifetime();
     publisher_tests::native_reload_clears_fx_handles();
     publisher_tests::runtime_reset_keeps_toggle_rings();
+    publisher_tests::timing_window_length();
     publisher_tests::color_contract();
     publisher_tests::consumer_protocol_refusal();
     publisher_tests::bounded_retirement();

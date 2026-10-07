@@ -140,6 +140,14 @@ NGX = re.compile(r'Sunshine NGX depth: .*?evaluations=(\d+) nominations=(\d+) co
 TIMING = re.compile(r'Sunshine Game 3D timing: presents=(\d+) cpu_ms=\{mean=([0-9.]+) max=([0-9.]+)\}'
                     r'.*?gpu_frames=(\d+)'
                     r' gpu_ms mean/max=\{total=([0-9.]+)/([0-9.]+)')
+# The timing line's offscreen UI layer group (since 10-06): live copies recorded, skipped by a full ring and offered.
+# Since 10-07 the line ends with its window's length; a runtime reset logs its last, shorter window. Older lines cover
+# the periodic 10 s (exporter.cpp).
+LAYER_TIMING = re.compile(r'ui_layer=\{copies=(\d+) skipped=(\d+) offers=(\d+) '
+                          r'presents_since_copy=\{mean=([0-9.]+) max=(\d+)\}\}(?: window_ms=(\d+))?')
+TIMING_WINDOW_S = 10.0
+# Logged once per ring when a copy is first skipped: a WARN before 10-07, INFO since. UI layer copies judges it.
+LAYER_SATURATED = 'Sunshine UI layer: every live copy is offered, held or still being read'
 LOADED = re.compile(r"loaded from '.*' into '(.*)'")
 # ReShade tears its runtimes down when the game closes; some games (Unreal) end the process before ReShade logs its own
 # exit, so a teardown at the end of the log is a normal exit.
@@ -157,7 +165,7 @@ NVENC_SAME_STALL_S = 5
 # ReShade and game noise that says nothing about Game 3D.
 BENIGN = (
     'Successfully compiled', 'IDirectInput8W::CreateDevice failed', 'is inconsistent',
-    'Add-ons are still loaded', 'Game 3D hitch', 'display scaling limits the game',
+    'Add-ons are still loaded', 'Game 3D hitch', 'display scaling limits the game', LAYER_SATURATED,
 )
 # Export pauses that are part of normal play rather than faults (consumer_transfer_changed: a host attached or
 # left between a Present's render and its export, which the next Present renders for).
@@ -626,6 +634,10 @@ class Session:
     statuses: list[tuple[float, str, str]] = field(default_factory=list)  # Each depth status: time, status, provider.
     hitches: list[tuple[float, str, float]] = field(default_factory=list)
     timings: list[tuple] = field(default_factory=list)  # Every timing line's window.
+    # Each timing line's UI layer group: (end, length s, Presents, copies, skipped, offers, presents_since_copy mean
+    # and max); and each logged-once full-ring line.
+    layer_windows: list[tuple] = field(default_factory=list)
+    layer_saturated: list[float] = field(default_factory=list)
     # Export delivery counters: (t, runtime, generation, published, dropped, overwritten_unconsumed); and the
     # host's stream fps when a host log was read.
     delivery: list[tuple[float, str, int, int, int, int]] = field(default_factory=list)
@@ -792,6 +804,13 @@ def parse(lines) -> Session:
                               int(found.group(4)), float(found.group(5)), float(found.group(6))))
             profile = GPU_PROFILE.search(text)
             s.timing_profile = profile.group(1) if profile else ''
+            if layer := LAYER_TIMING.search(text):
+                copies, skipped, offers, mean, peak, window_ms = layer.groups()
+                s.layer_windows.append((t, int(window_ms) / 1000.0 if window_ms else TIMING_WINDOW_S,
+                                        int(found.group(1)), int(copies), int(skipped), int(offers), float(mean),
+                                        int(peak)))
+        if LAYER_SATURATED in text:
+            s.layer_saturated.append(t)
         if found := DIAGNOSTICS.search(text):
             s.diagnostics.append((t, found.group(1) == 'on'))
     if s.last is not None:
@@ -1056,6 +1075,7 @@ def evaluate(s: Session) -> list[Check]:
                   + (f'GPU {gpu_mean:.2f} ms mean ({gpu_max:.1f} max)' if gpu_frames else
                      'GPU timing off (Diagnostics=0)' if disabled else 'no GPU timing samples')))
     delivery_checks(s, add)
+    layer_copy_checks(s, add)
     if s.fg_switches:
         add(Check('INFO', 'Frame generation',
                   ', '.join(f'{clock(t)} {"on" if mode else "off"}' for t, mode in s.fg_switches)))
@@ -1435,19 +1455,21 @@ def counter_checks(c: dict[str, int], add, overrides_sampled: list[str], flatten
                      f'opaque proof set {get("trust.opaque_set")} and cleared {get("trust.opaque_cleared")}')))
 
 
+def stream_fps_at(s: Session, t: float) -> float:
+    """The host's stream fps in effect at t on this log's clock (infinite when no host log was read)."""
+    current = s.stream_fps_timeline[0][1] if s.stream_fps_timeline else s.stream_fps or float('inf')
+    for when, value in s.stream_fps_timeline:
+        if when <= t:
+            current = value
+    return current
+
+
 def delivery_checks(s: Session, add) -> None:
     """'Stream delivery': the host should take every new frame the game offers, up to the stream fps (the stream
     follows the game; no repeats). Per counter window, claimed = published - overwritten_unconsumed and offered =
     published + dropped; the target is min(offered, stream fps). Windows that start in the settle time after an FG
     switch, reset or export start are skipped. Without the host log's stream rate the rates are INFO only."""
     fps = s.stream_fps or float('inf')
-
-    def fps_at(t: float) -> float:
-        current = s.stream_fps_timeline[0][1] if s.stream_fps_timeline else fps
-        for when, value in s.stream_fps_timeline:
-            if when <= t:
-                current = value
-        return current
     rows = []
     for a, b in zip(s.delivery, s.delivery[1:]):
         dt = b[0] - a[0]
@@ -1457,7 +1479,7 @@ def delivery_checks(s: Session, add) -> None:
         offered = (b[3] - a[3]) + (b[4] - a[4])
         if offered <= 0:
             continue
-        rows.append((a[0], b[0], claimed / dt, min(offered / dt, fps_at(a[0])), offered / dt))
+        rows.append((a[0], b[0], claimed / dt, min(offered / dt, stream_fps_at(s, a[0])), offered / dt))
     if not rows:
         return
     total = sum(b - a for a, b, *_ in rows)
@@ -1480,7 +1502,7 @@ def delivery_checks(s: Session, add) -> None:
     long = [w for w in windows if w[1] - w[0] >= DELIVERY_WARN_S]
     # The rates in effect during this session: the one at its start and each later change.
     start = s.first if s.first is not None else 0.0
-    rates = sorted({fps_at(start)} | {value for when, value in s.stream_fps_timeline if when > start})
+    rates = sorted({stream_fps_at(s, start)} | {value for when, value in s.stream_fps_timeline if when > start})
     source = f'stream {rates[0]:g}-{rates[-1]:g} fps, followed live' if len(rates) > 1 else f'stream {fps:g} fps'
     add(Check('WARN' if long else 'PASS', 'Stream delivery',
               f'the host took {claimed:.1f} new frames/s of a target {target:.1f}/s (what the game offered, capped at '
@@ -1489,6 +1511,56 @@ def delivery_checks(s: Session, add) -> None:
                                   else ''),
               [f'{span(a, b)} ({b - a:.0f} s): {c / (b - a):.1f} of {g / (b - a):.1f} new frames/s'
                for a, b, c, g in long][:6]))
+
+
+def layer_copy_checks(s: Session, add) -> None:
+    """'UI layer copies': the offscreen UI layer's ring of live copies (game3d_ui_layer.h) skips a copy when every
+    entry is offered, held for its fence or still read, and the offered copy stays offered. That is backpressure: it
+    costs the stream only when the copies left refreshed the layer less often than the stream shows frames, so that
+    streamed frames read a layer a real frame older than designed (a UI distortion risk). Per timing window, with
+    refreshed = copies per second and the stream fps at the window's start as the cap, skipped copies in a window that
+    overlaps a streamed span with refreshed below the cap warn (copies + skipped per second, capped, is the target).
+    Skips whose remaining copies still kept up with the stream (an uncapped game, such as The Witcher 3's ~590/s exit
+    screen 10-07) or that were not streamed are INFO; without the host log's stream rate they are INFO. A full-ring
+    line after the last timing line names copies whose count was never logged (before 10-07 a runtime reset dropped
+    its partial window). The rates are 10 s averages: a short burst of skips can hide in a window's average."""
+    windows = [w for w in s.layer_windows if w[3] or w[4]]
+    unlogged = [t for t in s.layer_saturated if not any(w[0] >= t for w in s.layer_windows)]
+    if not windows and not unlogged:
+        return
+
+    def windows_of(n: int) -> str:
+        return f'{n} timing {"window" if n == 1 else "windows"}'
+    warned, kept = [], []
+    for end, length, presents, copies, skipped, _, mean, peak in windows:
+        if not skipped:
+            continue
+        length = max(length, 0.001)
+        start = end - length
+        cap = stream_fps_at(s, start)
+        refreshed, target = copies / length, min((copies + skipped) / length, cap)
+        streamed = any(a < end and (b is None or b > start) for a, b in s.streamed)
+        row = (f'{span(start, end)} ({length:.1f} s): skipped {skipped} of {copies + skipped} copies, refreshed '
+               f'{refreshed:.1f} of a target {target:.1f} copies/s ({presents / length:.0f} Presents/s, '
+               f'presents_since_copy mean {mean:.2f} max {peak})' + ('' if streamed else ', not streamed'))
+        (warned if s.stream_fps and streamed and refreshed < cap else kept).append(row)
+    if warned:
+        add(Check('WARN', 'UI layer copies', f'{windows_of(len(warned))} streamed with skipped layer copies while the '
+                                             'copies left refreshed the layer below the stream rate (a full ring: '
+                                             'streamed frames read an older UI layer)',
+                  (warned + kept)[:6]))
+        return
+    named = windows_of(len(kept))
+    parts = ['no logged timing window counted layer copies' if not windows else
+             f'no layer copy skipped in {windows_of(len(windows))}' if not kept else
+             f'stream rate unknown (pass --host-log to judge it): {named} skipped layer copies' if not s.stream_fps else
+             f'{named} skipped layer copies (a full ring) while the copies left still refreshed the layer at the '
+             'stream rate or above, or outside the streamed export: backpressure']
+    if unlogged:
+        parts.append(f'copies skipped from {clock(unlogged[0])}, after the last timing line, were not counted in any '
+                     "logged window (an add-on before 10-07 dropped a runtime reset's partial window, or the process "
+                     'ended first)')
+    add(Check('INFO' if kept or unlogged else 'PASS', 'UI layer copies', '; '.join(parts), kept[:6]))
 
 
 def held_none_checks(s: Session, add) -> None:

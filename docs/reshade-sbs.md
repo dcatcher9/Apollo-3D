@@ -172,7 +172,10 @@ copies recorded, copies skipped because every ring entry was offered, held or st
 offered a copy, and the offered copy's Present count over those Presents (1 when every Present
 reads the copy of the frame before it; see the layer cross-queue fence under
 [Diagnostics switch and per-Present cost](#diagnostics-switch-and-per-present-cost)). All are zero
-while UI detection does not ask for the layer. The CPU entry also splits the slowest present into setup, depth, UI, render and
+while UI detection does not ask for the layer. Since 10-07 the line ends with `window_ms`, the
+window's length: 10 s for a periodic line, and shorter for the last window of a runtime reset or
+destruction, which logs its partial window instead of dropping it (before, a game's exit window, and
+any UI layer copies skipped in it, was never logged). The CPU entry also splits the slowest present into setup, depth, UI, render and
 export, and a rate-limited `Sunshine Game 3D hitch` warning names any present-thread step that
 takes more than 8 ms. Each step name has its own once-per-second throttle, so a nested step and the
 step around it both log. The GPU stage times exist only while the add-on's Diagnostics switch is on
@@ -335,8 +338,13 @@ the renderer's slot recorded at acquisition may read the entry), so its entry st
 renderer's next completion signal, which only a rendered Present sends; a long run of Presents
 that acquire but do not render can therefore fill the ring, after which the first rendered Present
 may find no recent copy. With
-every entry busy the ring grows, and a full ring skips that copy, logs once and counts it in the
-timing line (`ui_layer={... skipped=...}`). A clear needs the offered entry, one entry per copy
+every entry busy the ring grows, and a full ring skips that copy and keeps the offered copy offered,
+counts it in the timing line (`ui_layer={... skipped=...}`) and logs once per ring (INFO since 10-07,
+a WARN before). A full ring is backpressure, not a fault by itself: The Witcher 3's exit screen
+(10-07) presented about 590 times a second and shed copies the 90 fps stream never showed, while
+every Present still got a layer. The readiness report's `UI layer copies` check judges the counts:
+skipped copies warn only while streaming with the copies left refreshing the layer below the stream
+rate, where streamed frames read a layer a real frame older than designed. A clear needs the offered entry, one entry per copy
 held for its cross-queue fence (one per frame the copy's queue runs behind), one per earlier
 offered copy an unfinished Present still reads (one per frame the presenting queue runs behind) and
 the target: 2L + 2 with both queues L frames behind, so six entries hold L = 2. Four sufficed while a
@@ -1801,8 +1809,8 @@ pairings with the Present-counted ones.
 Besides these, the report checks the session as a whole (the
 [first-run report](../tools/reshade/README.md#first-run-of-a-new-game) lists them): add-on
 readiness, depth gaps and flat placement outside the settle time after an export start, FG switch
-or runtime reset, capture coverage and status, observation losses, export pauses, hitches, cost and
-the host log. A failing Streamline capture status inside that settle time is INFO (the source
+or runtime reset, capture coverage and status, observation losses, export pauses, hitches, cost,
+stream delivery, UI layer copies and the host log. A failing Streamline capture status inside that settle time is INFO (the source
 settling) and outside it WARN. `Game 3D cost` covers every timing line's window, each mean weighted
 by its window's Presents (CPU) or GPU frames, with the largest maximum. A log that ends within
 seconds of ReShade tearing its runtimes down (`Destroyed runtime environment on runtime`) counts as

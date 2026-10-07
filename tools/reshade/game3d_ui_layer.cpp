@@ -683,13 +683,16 @@ namespace sunshine_game3d::ui_layer {
       if (choice.index < 0) {
         // Every entry is offered, held or still read by an unfinished
         // renderer submission: this frame's copy is skipped (counted in the
-        // timing line) and the offered copy stays offered.
+        // timing line) and the offered copy stays offered. Backpressure, not
+        // a fault by itself (a game presenting far above the stream rate
+        // sheds copies the stream never shows): the readiness report judges
+        // the timing line's counts against the stream rate.
         s.counts.skipped.fetch_add(1, std::memory_order_relaxed);
         if (!live.saturated_logged) {
           live.saturated_logged = true;
-          sunshine_log::message(reshade::log::level::warning,
-            "Sunshine UI layer: every live copy is offered, held or still being read; skipping a layer copy (logged once; "
-            "the timing line counts them)");
+          sunshine_log::message(reshade::log::level::info,
+            "Sunshine UI layer: every live copy is offered, held or still being read; skipping a layer copy, the offered "
+            "copy stays offered (backpressure; logged once, the timing line counts skipped copies)");
         }
         return {};
       }

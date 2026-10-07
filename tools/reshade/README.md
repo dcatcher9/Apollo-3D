@@ -489,7 +489,16 @@ at the stream rate, which the host log supplies and which follows live 90/72 Hz 
 that start in the settle time are skipped, and one below 85% of that target for 10 s or longer
 warns. Without `--host-log` the stream rate is unknown, so the check only reports both rates as INFO
 (the `Sunshine SBS output` slot counters are defined in
-[Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection)); and, from the host log, the Game 3D link,
+[Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection)); `UI layer copies`,
+per timing window, the offscreen UI layer copies a full ring skipped (`ui_layer={copies skipped ...}`,
+over the line's `window_ms`, or 10 s on older lines): skipped copies warn when the window overlapped a
+streamed span and the copies left refreshed the layer less often than the stream rate (a streamed
+frame then reads a layer a real frame older than designed, with frame generation too, where the
+layer refreshes once per real frame); skips whose copies still kept up with the stream (an uncapped
+game shedding copies the stream never shows) or that were not streamed are INFO, as are all skips
+without `--host-log`. The once-per-ring full-ring line (a WARN before 10-07) belongs to this check, not
+to `Log warnings`, and one after the last timing line is named as uncounted. The rates are window
+averages, so a short burst of skips can hide in a window's average; and, from the host log, the Game 3D link,
 size fit and encoder stalls (one per stalled frame, classified by its last line). A log whose game process ended right
 after ReShade tore its runtimes down (Unreal games often end before ReShade logs its exit) counts
 as a normal exit.
