@@ -681,14 +681,15 @@ namespace sunshine_game3d::ui_input {
     return {direct ? kind : ui_input_kind::unavailable, direct ? view : api::resource_view{}, plane,
       &observation, &adaptive, channel, requested && detected ? &detection : nullptr};
   }
-  void frame::complete(const renderer &renderer, bool rendered) {
+  void frame::complete(renderer &renderer, bool rendered) {
     status.rendered = rendered; status.applied = rendered && renderer.consumed_source_alpha_ui();
     status.automatic = true;
     status.coverage = rendered ? renderer.consumed_alpha_auto() : observation.session->decision();
     // The live layer copy this Present read (bound directly or copied into the
     // renderer's slot, recorded on the renderer's list either way) stays
-    // unwritten until the renderer's next completion signal passes.
+    // unwritten until the completion signal this Present claims passes: its
+    // finish_present sends it even when nothing rendered.
     if (layer_capture)
-      ui_layer::bound(layer_device, layer_capture, renderer.completion_fence(), renderer.completion_value());
+      ui_layer::bound(layer_device, layer_capture, renderer.completion_fence(), renderer.claim_completion_value());
   }
 }

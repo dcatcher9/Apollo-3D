@@ -244,6 +244,51 @@ namespace sunshine_game3d::ui_layer {
     return choice;
   }
 
+  // What skipped copies cost (take_stats, skip_gap_max_us): how long the
+  // layer went without a recorded copy while copies were skipped. A skip
+  // measures the time since the newest recorded copy, and the first copy
+  // recorded after skips the whole gap. Streamed frames in that gap read a
+  // layer up to that much older than one refreshed at every clear, however
+  // fast the game presents; a ring that stays full keeps the gap growing.
+  // Only time while the layer keeps being cleared counts: an interval
+  // between clears longer than max_clear_gap_ms (no demand, a stall) is
+  // left out. Pure; the caller keeps the maximum and resets it with the
+  // ring.
+  struct skip_gap {
+    std::uint64_t last_us{}; // The last clear, recorded or skipped (0: none).
+    std::uint64_t gap_us{};  // Time since the newest recorded copy.
+    bool skipped{};          // A copy was skipped since it.
+    constexpr void advance(std::uint64_t now_us) {
+      if (last_us && now_us > last_us && now_us - last_us <= max_clear_gap_ms * 1000) gap_us += now_us - last_us;
+      last_us = now_us;
+    }
+    // A skipped copy: the gap so far.
+    constexpr std::uint64_t skip(std::uint64_t now_us) {
+      advance(now_us);
+      skipped = true;
+      return gap_us;
+    }
+    // A recorded copy: the whole gap when copies were skipped since the
+    // last one, else 0.
+    constexpr std::uint64_t record(std::uint64_t now_us) {
+      advance(now_us);
+      const auto gap = skipped ? gap_us : 0;
+      gap_us = 0;
+      skipped = false;
+      return gap;
+    }
+  };
+  static_assert([] {
+    skip_gap g;
+    const bool plain = g.record(10) == 0 && g.record(20) == 0; // No skip: no gap.
+    const bool skipped = g.skip(30) == 10 && g.skip(40) == 20 && g.record(50) == 30 && g.record(60) == 0;
+    // A lapse in clears (no demand) is no part of a gap, before or after a skip.
+    const auto lapse = max_clear_gap_ms * 1000 + 1;
+    const bool lapsed = g.skip(60 + lapse) == 0 && g.skip(70 + lapse) == 10 &&
+      g.record(80 + 2 * lapse) == 10 && g.record(90 + 2 * lapse) == 0;
+    return plain && skipped && lapsed;
+  }());
+
   struct live_capture {
     api::resource copy{};       // Add-on owned, shader_resource state between uses.
     // The copy's shader view, for direct binding; direct when it exists and
@@ -276,9 +321,10 @@ namespace sunshine_game3d::ui_layer {
   // The live copies since the last call, for the periodic timing line:
   // recorded copies, copies skipped by a saturated ring, and Presents
   // latest() offered a copy to with that copy's presents_since_copy (sum
-  // and maximum). The counters restart with each call.
+  // and maximum), and the longest skip gap (skip_gap, microseconds). The
+  // counters restart with each call.
   struct stats {
-    std::uint64_t copies{}, skipped{}, offers{}, presents_since_sum{};
+    std::uint64_t copies{}, skipped{}, offers{}, presents_since_sum{}, skip_gap_max_us{};
     std::uint32_t presents_since_max{};
   };
   stats take_stats();
@@ -321,7 +367,8 @@ namespace sunshine_game3d::ui_layer {
 
   // A renderer submission read the live copy capture_id (a direct binding or
   // the copy into the renderer's slot): that ring entry is not rewritten
-  // until fence reaches value (renderer::completion_fence/completion_value).
+  // until fence reaches value (renderer::completion_fence and
+  // claim_completion_value, signalled at that Present's finish_present).
   void bound(api::device *device, std::uint64_t capture_id, api::fence fence, std::uint64_t value);
 
   void register_events();

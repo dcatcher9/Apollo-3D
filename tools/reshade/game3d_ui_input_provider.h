@@ -55,7 +55,9 @@ namespace sunshine_game3d::ui_input {
 
     ui_adaptive::source match_scene(ui_adaptive::source source, bool scene_ready) const;
     ui_render_input for_render(const ui_plane_parameters &plane, const ui_adaptive::source &adaptive);
-    void complete(const renderer &renderer, bool rendered);
+    // Claims the renderer's next completion signal for the layer's ring
+    // (renderer::claim_completion_value) when this Present offered a copy.
+    void complete(renderer &renderer, bool rendered);
   };
   frame acquire(reshade::api::effect_runtime *runtime, renderer &renderer,
     source_alpha_ui_decision status, alpha_auto_policy &session, bool diagnostic);

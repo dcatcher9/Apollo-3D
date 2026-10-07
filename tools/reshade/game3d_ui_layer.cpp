@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <mutex>
 
@@ -162,9 +163,10 @@ namespace sunshine_game3d::ui_layer {
       // reading Present (-1: none): between them it has no reader yet, and a
       // copy promoted meanwhile may no longer be the newest. Every Present it
       // was offered to calls bound(), one that renders nothing included (its
-      // slot copy, recorded at acquisition, may still read the entry), so
-      // such an entry stays busy until the renderer's next completion signal,
-      // which only a rendered Present sends.
+      // slot copy, recorded at acquisition, may still read the entry), and
+      // its reader's value is the completion signal that Present claims,
+      // which its finish_present sends whether or not it rendered
+      // (renderer::claim_completion_value).
       int reading = -1;
       std::uint32_t width{}, height{};
       api::format format{};
@@ -172,8 +174,17 @@ namespace sunshine_game3d::ui_layer {
       // tick (latest()'s recency gate, recent_copy, with the offered copy's).
       std::uint64_t capture_id{}, tick{};
       bool saturated_logged{};
+      // The time without a recorded copy that skipped copies fell in.
+      skip_gap gap;
       const ring_entry *latest() const { return newest >= 0 ? &ring[unsigned(newest)] : nullptr; }
     };
+
+    // The skip gap's clock: steady microseconds, finer than GetTickCount64's
+    // ~16 ms ticks (an uncapped game clears the layer every 2 ms).
+    std::uint64_t steady_us() {
+      return std::uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
 
     // The live copy is recorded only while UI detection asked for the layer
     // this recently (latest() is called on every Present that wants it).
@@ -251,7 +262,7 @@ namespace sunshine_game3d::ui_layer {
       // under the lock and taken without it (the timing line holds the
       // exporter's lock).
       struct {
-        std::atomic<std::uint64_t> copies{0}, skipped{0}, offers{0}, presents_since_sum{0};
+        std::atomic<std::uint64_t> copies{0}, skipped{0}, offers{0}, presents_since_sum{0}, skip_gap_max_us{0};
         std::atomic<std::uint32_t> presents_since_max{0};
       } counts;
     };
@@ -604,11 +615,18 @@ namespace sunshine_game3d::ui_layer {
       api::format format{};
     };
 
+    // A skip gap (skip_gap) for the timing line's maximum.
+    void note_skip_gap(state_t &s, std::uint64_t gap_us) {
+      for (auto seen = s.counts.skip_gap_max_us.load(std::memory_order_relaxed); seen < gap_us &&
+           !s.counts.skip_gap_max_us.compare_exchange_weak(seen, gap_us, std::memory_order_relaxed);) {}
+    }
+
     // Requires the state lock. Records the target's previous-frame content
     // into an allocated ring entry.
     void record_live(state_t &s, api::command_list *commands, unsigned index, api::resource resource) {
       auto &live = s.live;
       auto &entry = live.ring[index];
+      note_skip_gap(s, live.gap.record(steady_us()));
       commands->barrier(entry.copy, api::resource_usage::shader_resource, api::resource_usage::copy_dest);
       record_copy(commands, resource, entry.copy);
       entry.capture_id = live.capture_id = ++s.next_capture_id;
@@ -651,6 +669,7 @@ namespace sunshine_game3d::ui_layer {
         for (unsigned i = 0; i != live.entries; ++i) retire_entry(s, device, live.ring[i], now);
         live.entries = 0;
         live.newest = live.reading = -1;
+        live.gap = {};
         ++s.live_scope;
         publish_watch(s);
       }
@@ -682,17 +701,21 @@ namespace sunshine_game3d::ui_layer {
       const auto choice = choose_ring_entry(live.entries, free, age, live.newest, live.reading);
       if (choice.index < 0) {
         // Every entry is offered, held or still read by an unfinished
-        // renderer submission: this frame's copy is skipped (counted in the
-        // timing line) and the offered copy stays offered. Backpressure, not
-        // a fault by itself (a game presenting far above the stream rate
-        // sheds copies the stream never shows): the readiness report judges
-        // the timing line's counts against the stream rate.
+        // renderer submission: this frame's copy is skipped and the offered
+        // copy stays offered, so Presents keep reading an older layer until a
+        // copy is recorded again. The timing line counts the skips and the
+        // longest time the layer went unrefreshed across them (skip_gap); the
+        // readiness report judges that time against the stream's frame
+        // interval, since a skip costs time, not a count (one skipped copy
+        // leaves a gap of two clear intervals: about 3 ms at 590 clears a
+        // second, 43 ms at 47).
         s.counts.skipped.fetch_add(1, std::memory_order_relaxed);
+        note_skip_gap(s, live.gap.skip(steady_us()));
         if (!live.saturated_logged) {
           live.saturated_logged = true;
           sunshine_log::message(reshade::log::level::info,
             "Sunshine UI layer: every live copy is offered, held or still being read; skipping a layer copy, the offered "
-            "copy stays offered (backpressure; logged once, the timing line counts skipped copies)");
+            "copy stays offered (logged once; the timing line counts skipped copies and their longest refresh gap)");
         }
         return {};
       }
@@ -954,6 +977,7 @@ namespace sunshine_game3d::ui_layer {
     value.offers = c.offers.exchange(0, std::memory_order_relaxed);
     value.presents_since_sum = c.presents_since_sum.exchange(0, std::memory_order_relaxed);
     value.presents_since_max = c.presents_since_max.exchange(0, std::memory_order_relaxed);
+    value.skip_gap_max_us = c.skip_gap_max_us.exchange(0, std::memory_order_relaxed);
     return value;
   }
 

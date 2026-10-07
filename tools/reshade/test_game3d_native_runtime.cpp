@@ -2437,8 +2437,32 @@ namespace {
     check_pre_ui_proof_d3d12(fixture, renderer, report);
     std::puts("PASS nearest-UI D3D12 current GPU scalar, corner coverage, both depth directions, floor/strength and v3 dump bindings");
     require(observed.renders == effect_renders, "An FX technique ran during native parity");
-    owner_queue->wait_idle();
-    renderer.reset_after_runtime_drain();
+    // A UI layer reader's claimed completion value (ui_layer::bound) is
+    // signalled by its Present's finish_present though nothing rendered, and
+    // by the release after the runtime's drain when that finish_present never
+    // came: a reader never waits for a later render, or for a renderer that
+    // is gone.
+    {
+      auto *device = observed.runtime->get_device();
+      const auto fence = renderer.completion_fence();
+      renderer.begin_present();
+      const auto claimed = renderer.claim_completion_value();
+      renderer.finish_present();
+      owner_queue->wait_idle();
+      require(fence.handle && claimed && device->get_completed_fence_value(fence) >= claimed,
+        "A claimed completion value was not signalled by its Present's finish_present without a render");
+      renderer.begin_present();
+      const auto missed = renderer.claim_completion_value();
+      owner_queue->wait_idle();
+      auto *native = reinterpret_cast<ID3D12Fence *>(fence.handle);
+      native->AddRef(); // As the UI layer's reader does.
+      renderer.reset_after_runtime_drain();
+      const auto completed = native->GetCompletedValue();
+      native->Release();
+      require(missed > claimed && completed >= missed,
+        "Releasing a renderer after its drain left a claimed completion value unsignalled");
+      std::puts("PASS completion claim D3D12: signalled without a render, and on release after a missed finish_present");
+    }
     require(report.good(), "Could not write native parity report");
     std::printf("PASS native D3D12 renderer: %zu FX-matched cases; no installed FX; HDR/SDR, depth loss, both diagnostics, camera/raw modes, jitter/crop and full-resolution recovery\n", tests.size());
   }

@@ -1267,14 +1267,15 @@ class ReadinessReport(unittest.TestCase):
         self.assertEqual(report.HOST_LIVE_FPS.search('Capture pacing updated to 90fps for a live video-mode change')
                          .group(1), '90')
 
-    def test_ui_layer_copies_judge_skipped_copies_against_the_stream_rate(self):
-        def timing(t, copies, skipped, presents=950, window_ms=10000, mean=3.6, peak=6):
+    def test_ui_layer_copies_judge_the_time_skipped_copies_left_the_layer_stale(self):
+        def timing(t, copies, skipped, gap=None, presents=950, window_ms=10000, mean=3.6, peak=6):
             return line(t, '[Sunshine 3D] Sunshine Game 3D timing: presents={} cpu_ms={{mean=0.125 max=0.300}} '
                            'cpu_worst_ms={{setup=0.004 depth=0.200 ui=0.005 render=0.050 export=0.040}} gpu_frames=0 '
                            'gpu_ms mean/max={{total=0.000/0.000 inputs=0.000/0.000}} gpu_profile=disabled '
                            'dropped_fence_pending=0 dropped_unresolved=0 incomplete=0 ui_layer={{copies={} skipped={} '
-                           'offers={} presents_since_copy={{mean={:.2f} max={}}}}}{}'.format(
+                           'offers={} presents_since_copy={{mean={:.2f} max={}}}{}}}{}'.format(
                                presents, copies, skipped, presents, mean, peak,
+                               '' if gap is None else f' skip_gap_ms={gap:.1f}',
                                '' if window_ms is None else f' window_ms={window_ms}'))
 
         def judged(lines, fps=90.0, timeline=()):
@@ -1282,51 +1283,65 @@ class ReadinessReport(unittest.TestCase):
             session.stream_fps = fps
             session.stream_fps_timeline = list(timeline)
             return {c.name: c for c in report.evaluate(session)}
-        # FG on (The Witcher 3 10-07: ~95 Presents/s, a copy per real frame, ~47/s): every skip below the 90 fps stream
-        # leaves streamed frames reading a layer a real frame older, although Presents outrun the stream.
-        fg = judged([timing('10:00:12', 470, 30)])['UI layer copies']
+        # FG on (The Witcher 3 10-07: ~95 Presents/s, a copy per real frame, ~47/s): one skipped copy leaves the layer
+        # unrefreshed for two real frames, ~43 ms, so streamed frames read a layer a real frame older than designed.
+        fg = judged([timing('10:00:12', 470, 30, gap=42.6)])['UI layer copies']
         self.assertEqual(fg.status, 'WARN')
-        self.assertEqual(fg.times, ['10:00:02-10:00:12 (10.0 s): skipped 30 of 500 copies, refreshed 47.0 of a target '
-                                    '50.0 copies/s (95 Presents/s, presents_since_copy mean 3.60 max 6)'])
-        # An uncapped game sheds copies the stream never shows: the copies left still refresh above the stream rate.
-        uncapped = judged([timing('10:00:12', 3000, 2900, presents=5900)])['UI layer copies']
-        self.assertEqual(uncapped.status, 'INFO')
-        self.assertIn('backpressure', uncapped.detail)
-        self.assertIn('refreshed 300.0 of a target 90.0 copies/s', uncapped.times[0])
-        # High demand whose copies still fell below the stream rate warns, and so does a ring that recorded nothing.
-        self.assertEqual(judged([timing('10:00:12', 500, 5400)])['UI layer copies'].status, 'WARN')
-        stuck = judged([timing('10:00:12', 0, 900)])['UI layer copies']
-        self.assertEqual(stuck.status, 'WARN')
-        self.assertIn('refreshed 0.0 of a target 90.0 copies/s', stuck.times[0])
-        # The cap is the stream rate at the window's start: 80 copies/s keep up with 72 fps but not with 90.
-        self.assertEqual(judged([timing('10:00:12', 800, 100)], 72.0, [(36000.0, 72.0)])['UI layer copies'].status,
-                         'INFO')
-        self.assertEqual(judged([timing('10:00:12', 800, 100)])['UI layer copies'].status, 'WARN')
-        # Skips before the export streamed are INFO.
-        early = judged([timing('10:00:01', 40, 10, window_ms=1000)])['UI layer copies']
+        self.assertEqual(fg.times, ['10:00:02-10:00:12 (10.0 s): skipped 30 of 500 copies, longest refresh gap 42.6 ms '
+                                    'of a 11.1 ms stream frame (95 Presents/s, presents_since_copy mean 3.60 max 6)'])
+        # An uncapped burst (~600 clears/s) skipping three of four copies costs ~3 ms: INFO, alone in its window or
+        # sharing one with 8 s of FG-on play at 47 copies/s, so the window's placement and averages change nothing.
+        burst = judged([timing('10:00:04', 300, 900, gap=3.4, presents=1200, window_ms=2000)])['UI layer copies']
+        shared = judged([timing('10:00:12', 676, 900, gap=3.4, presents=1960)])['UI layer copies']
+        for check in (burst, shared):
+            self.assertEqual((check.status, check.detail),
+                             ('INFO', '1 timing window skipped layer copies (a full ring): 1 every refresh gap within '
+                                      'a stream frame'))
+        self.assertIn('longest refresh gap 3.4 ms of a 11.1 ms stream frame', shared.times[0])
+        # A high rate is no excuse for a long gap (140 fps without FG, isolated skips of 30% of copies: ~14 ms).
+        self.assertEqual(judged([timing('10:00:12', 980, 420, gap=14.3, presents=1400)])['UI layer copies'].status,
+                         'WARN')
+        # The stream frame is the one at the window's start: 12.5 ms is within a 72 fps frame, not a 90 fps one.
+        self.assertEqual(judged([timing('10:00:12', 800, 100, gap=12.5)], 72.0, [(36000.0, 72.0)])
+                         ['UI layer copies'].status, 'INFO')
+        self.assertEqual(judged([timing('10:00:12', 800, 100, gap=12.5)])['UI layer copies'].status, 'WARN')
+        # A ring that stayed full past the layer's 250 ms recency gate warns in any window, with or without the host
+        # log: the layer was then no longer offered at all.
+        stuck = {c.name: c for c in report.evaluate(report.parse(BASE + [timing('10:00:12', 0, 900, gap=9950.0)]))}
+        self.assertEqual(stuck['UI layer copies'].status, 'WARN')
+        self.assertIn('unrefreshed for 250 ms or more, after which it is no longer offered',
+                      stuck['UI layer copies'].detail)
+        # Skips before the export streamed are INFO, and so are skips without the host log's stream rate.
+        early = judged([timing('10:00:01', 40, 10, gap=60.0, window_ms=1000)])['UI layer copies']
         self.assertEqual(early.status, 'INFO')
         self.assertTrue(early.times[0].endswith(', not streamed'), early.times[0])
-        # Without the host log the stream rate is unknown, so skips are INFO.
-        unknown = run(BASE + [timing('10:00:12', 470, 30)])['UI layer copies']
+        unknown = run(BASE + [timing('10:00:12', 470, 30, gap=42.6)])['UI layer copies']
         self.assertEqual((unknown.status, unknown.detail),
-                         ('INFO', 'stream rate unknown (pass --host-log to judge it): 1 timing window skipped layer '
-                                  'copies'))
+                         ('INFO', '1 timing window skipped layer copies (a full ring): 1 stream rate unknown (pass '
+                                  '--host-log to judge them)'))
+        self.assertIn('longest refresh gap 42.6 ms (95 Presents/s', unknown.times[0])
+        # A line before 10-07 logs no gap: its skips are named, not judged.
+        old = judged([timing('10:00:12', 470, 30)])['UI layer copies']
+        self.assertEqual((old.status, old.detail),
+                         ('INFO', '1 timing window skipped layer copies (a full ring): 1 refresh gap not logged (an '
+                                  'add-on before 10-07)'))
         # No skip passes; logs whose timing lines predate the group, or whose layer never copied, have no check.
-        clean = judged([timing('10:00:12', 500, 0), timing('10:00:22', 480, 0)])['UI layer copies']
+        clean = judged([timing('10:00:12', 500, 0, gap=0.0), timing('10:00:22', 480, 0)])['UI layer copies']
         self.assertEqual((clean.status, clean.detail), ('PASS', 'no layer copy skipped in 2 timing windows'))
         self.assertNotIn('UI layer copies', judged([timing('10:00:12', 0, 0)]))
         older = line('10:00:12', '[Sunshine 3D] Sunshine Game 3D timing: presents=600 cpu_ms={mean=0.4 max=1.2} '
                                  'gpu_frames=0 gpu_ms mean/max={total=0.00/0.00}')
         self.assertNotIn('UI layer copies', judged([older]))
-        # The line's own window length (a runtime reset's last window) sets the rate; older lines cover 10 s.
+        # The line's own window length (a runtime reset's last window) and gap; older lines cover 10 s, without a gap.
         session = report.parse(BASE + [timing('10:00:12', 500, 0, window_ms=None),
-                                       timing('10:00:18', 1000, 350, window_ms=5700)])
-        self.assertEqual([w[1] for w in session.layer_windows], [10.0, 5.7])
+                                       timing('10:00:18', 1000, 350, gap=3.4, window_ms=5700)])
+        self.assertEqual([(w[1], w[8]) for w in session.layer_windows], [(10.0, None), (5.7, 3.4)])
 
-    def test_witcher3_exit_full_ring_is_not_a_warning(self):
+    def test_witcher3_exit_full_ring_is_judged_by_its_refresh_gap(self):
         # The Witcher 3 10-07: the ring first filled at 00:29:19.747 as the quitting game jumped from ~66 to ~590
         # Presents/s; the runtime was destroyed at 00:29:22 before another timing line, so the skipped count was never
-        # logged. The once-only full-ring line (a WARN before 10-07) is the UI layer copies check's, not a log warning.
+        # logged, nor what the skips cost. The once-only full-ring line (a WARN before 10-07) is the UI layer copies
+        # check's, not a log warning, and it names those skips as uncounted rather than calling them harmless.
         lines = [
             '00:26:58:777 [54104] | INFO  | Registered add-on "Sunshine 3D" v0.0.0.0 using ReShade API version 20.',
             '00:27:11:511 [50588] | INFO  | [Sunshine 3D] Sunshine Game 3D: add-on GPU renderer ready (no FX file '
@@ -1350,26 +1365,31 @@ class ReadinessReport(unittest.TestCase):
         checks = {c.name: c for c in report.evaluate(session)}
         self.assertNotIn('Log warnings', checks)
         self.assertEqual((checks['UI layer copies'].status, checks['UI layer copies'].detail),
-                         ('INFO', 'no layer copy skipped in 1 timing window; copies skipped from 00:29:19, '
-                                  'after the last timing line, were not counted in any logged window (an add-on '
-                                  "before 10-07 dropped a runtime reset's partial window, or the process ended "
-                                  'first)'))
-        # Since 10-07 the line is INFO and the reset logs the last window; its copies kept far above the stream rate.
-        since = lines[:4] + [
-            lines[4].replace('WARN ', 'INFO ').replace(
-                'skipping a layer copy (logged once; the timing line counts them)',
-                'skipping a layer copy, the offered copy stays offered (backpressure; logged once, the timing line '
-                'counts skipped copies)'),
-            lines[3].replace('00:29:16:357', '00:29:22:047').replace('presents=912', 'presents=1530').replace(
-                'copies=547 skipped=0 offers=912', 'copies=1180 skipped=350 offers=1530') + ' window_ms=5690',
-            lines[5]]
-        session = report.parse(since)
-        session.stream_fps = 90.0
-        checks = {c.name: c for c in report.evaluate(session)}
-        self.assertNotIn('Log warnings', checks)
-        self.assertEqual(checks['UI layer copies'].status, 'INFO')
-        self.assertIn('backpressure', checks['UI layer copies'].detail)
-        self.assertNotIn('not counted', checks['UI layer copies'].detail)
+                         ('INFO', 'no layer copy skipped in 1 timing window; copies skipped from 00:29:19, after the '
+                                  'last timing line, were not counted in any logged window, so their refresh gap is '
+                                  "unknown (an add-on before 10-07 dropped a runtime reset's partial window, or the "
+                                  'process ended first)'))
+
+        # Since 10-07 the line is INFO and the reset logs its partial window, gap included. The counts below are
+        # illustrative, not from this log (~3.6 s of FG-off play at ~66/s, then the ~590/s exit): whatever the
+        # window's rates, its verdict follows the gap the skips left.
+        def since(gap):
+            return lines[:4] + [
+                lines[4].replace('WARN ', 'INFO ').replace(
+                    'skipping a layer copy (logged once; the timing line counts them)',
+                    'skipping a layer copy, the offered copy stays offered (logged once; the timing line counts '
+                    'skipped copies and their longest refresh gap)'),
+                lines[3].replace('00:29:16:357', '00:29:22:047').replace('presents=912', 'presents=1530').replace(
+                    'copies=547 skipped=0 offers=912', 'copies=780 skipped=750 offers=1530').replace(
+                    'max=5}}', f'max=9}} skip_gap_ms={gap}}}') + ' window_ms=5690',
+                lines[5]]
+        for gap, status in (('3.4', 'INFO'), ('15.3', 'WARN')):
+            session = report.parse(since(gap))
+            session.stream_fps = 90.0
+            checks = {c.name: c for c in report.evaluate(session)}
+            self.assertNotIn('Log warnings', checks)
+            self.assertEqual(checks['UI layer copies'].status, status, checks['UI layer copies'].detail)
+            self.assertNotIn('not counted', checks['UI layer copies'].detail)
 
     def test_logs_of_the_removed_shadow_features_still_report(self):
         # The first-run shadow, texel 11's dark pre-UI statistics, rule H2's still screens and the S3 identity shadow

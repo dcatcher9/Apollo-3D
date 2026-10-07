@@ -296,12 +296,16 @@ namespace sunshine_game3d {
     // original-device descriptor that push_descriptors can copy.
     reshade::api::resource_view bind_ui_snapshot(unsigned slot, std::uint64_t capture_id,
       reshade::api::resource resource, std::uint32_t view_format);
-    // The completion fence of this renderer's submissions and the value that
-    // its next signal (the current Present's finish_present, or a later one
-    // for a Present that missed it) sets: a resource read by work recorded so
-    // far is free once the fence reaches it.
+    // The completion fence of this renderer's submissions, and the value of
+    // its next signal claimed by a reader of a resource this Present bound or
+    // copied (ui_layer::bound): a resource read by work recorded so far is
+    // free once the fence reaches it. The claim makes the current Present's
+    // finish_present (or, for a Present that missed it, the next one) send
+    // that signal even when nothing rendered, so the reader never waits for a
+    // later rendered Present, nor for ever once this renderer is released
+    // (0 without a renderer).
     reshade::api::fence completion_fence() const;
-    std::uint64_t completion_value() const;
+    std::uint64_t claim_completion_value();
     // The copy callback takes the destination texture (resting in the
     // shader-resource state) and records the copy. The caller must first admit
     // a current capture: repeated presentations of that immutable capture
@@ -367,6 +371,9 @@ namespace sunshine_game3d {
     // No CPU wait: frames still in flight are reported by a later call.
     bool take_gpu_timing(gpu_timing &out);
     // ReShade's destroy_effect_runtime follows its GPU drain. No extra wait.
+    // A claimed completion value still owed (its Present missed
+    // finish_present) is first signalled from the CPU on D3D12, the drain
+    // having finished every read it covers.
     void reset_after_runtime_drain();
     // The same, for a runtime reset that may be a swapchain resize (an SDR and
     // HDR toggle): the renderer and its cached one are kept for the runtime's

@@ -1094,11 +1094,12 @@ namespace {
       if (proof.renderer) proof.renderer->take_gpu_timing(gpu);
       using stage = sunshine_game3d::gpu_timing;
       // The offscreen UI layer's live copies over the same interval:
-      // recorded, skipped by a saturated ring, and the offered copy's
-      // Present count over the Presents it was offered to.
+      // recorded, skipped by a saturated ring, the offered copy's Present
+      // count over the Presents it was offered to, and the longest time the
+      // layer went unrefreshed across skipped copies (ui_layer::skip_gap).
       const auto layer = sunshine_game3d::ui_layer::take_stats();
       std::snprintf(message, sizeof(message),
-        "Sunshine Game 3D timing: presents=%llu cpu_ms={mean=%.3f max=%.3f} cpu_worst_ms={setup=%.3f depth=%.3f ui=%.3f render=%.3f export=%.3f} gpu_frames=%u gpu_ms mean/max={total=%.3f/%.3f inputs=%.3f/%.3f source=%.3f/%.3f detection=%.3f/%.3f linearize=%.3f/%.3f candidate=%.3f/%.3f vertical=%.3f/%.3f horizontal=%.3f/%.3f eyes=%.3f/%.3f pack=%.3f/%.3f} gpu_profile=%s dropped_fence_pending=%u dropped_unresolved=%u incomplete=%u ui_layer={copies=%llu skipped=%llu offers=%llu presents_since_copy={mean=%.2f max=%u}} window_ms=%llu",
+        "Sunshine Game 3D timing: presents=%llu cpu_ms={mean=%.3f max=%.3f} cpu_worst_ms={setup=%.3f depth=%.3f ui=%.3f render=%.3f export=%.3f} gpu_frames=%u gpu_ms mean/max={total=%.3f/%.3f inputs=%.3f/%.3f source=%.3f/%.3f detection=%.3f/%.3f linearize=%.3f/%.3f candidate=%.3f/%.3f vertical=%.3f/%.3f horizontal=%.3f/%.3f eyes=%.3f/%.3f pack=%.3f/%.3f} gpu_profile=%s dropped_fence_pending=%u dropped_unresolved=%u incomplete=%u ui_layer={copies=%llu skipped=%llu offers=%llu presents_since_copy={mean=%.2f max=%u} skip_gap_ms=%.1f} window_ms=%llu",
         static_cast<unsigned long long>(timing.presents),
         timing.presents ? timing.cpu_sum_ms / double(timing.presents) : 0.0, timing.cpu_max_ms,
         timing.worst[0], timing.worst[1], timing.worst[2], timing.worst[3], timing.worst[4], gpu.frames,
@@ -1111,6 +1112,7 @@ namespace {
         static_cast<unsigned long long>(layer.copies), static_cast<unsigned long long>(layer.skipped),
         static_cast<unsigned long long>(layer.offers),
         layer.offers ? double(layer.presents_since_sum) / double(layer.offers) : 0.0, layer.presents_since_max,
+        double(layer.skip_gap_max_us) / 1000.0,
         static_cast<unsigned long long>(now >= timing.start ? now - timing.start : 0));
       timing = {};
       timing.start = now;

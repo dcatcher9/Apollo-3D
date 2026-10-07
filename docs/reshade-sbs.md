@@ -167,12 +167,14 @@ results through `ID3D12Device15::ResolveQueryData` whenever the game's D3D12 run
 (The Witcher 3 ships Agility SDK 1.619), but creates its query heaps without
 `D3D12_QUERY_HEAP_FLAG_CPU_RESOLVE`, so that read fails and every frame there was
 `dropped_unresolved`. D3D11 reads ReShade's results. The line ends with the offscreen UI layer's
-live copies over the same 10 s (`ui_layer={copies skipped offers presents_since_copy={mean max}}`):
-copies recorded, copies skipped because every ring entry was offered, held or still read, Presents
-offered a copy, and the offered copy's Present count over those Presents (1 when every Present
-reads the copy of the frame before it; see the layer cross-queue fence under
-[Diagnostics switch and per-Present cost](#diagnostics-switch-and-per-present-cost)). All are zero
-while UI detection does not ask for the layer. Since 10-07 the line ends with `window_ms`, the
+live copies over the same 10 s (`ui_layer={copies skipped offers presents_since_copy={mean max}
+skip_gap_ms}`): copies recorded, copies skipped because every ring entry was offered, held or still
+read, Presents offered a copy, the offered copy's Present count over those Presents (1 when every
+Present reads the copy of the frame before it; see the layer cross-queue fence under
+[Diagnostics switch and per-Present cost](#diagnostics-switch-and-per-present-cost)), and, since
+10-07, the longest time the layer went without a recorded copy across skipped copies
+(`ui_layer::skip_gap`, 0 without skips; time between clears more than 250 ms apart is left out). All
+are zero while UI detection does not ask for the layer. Since 10-07 the line ends with `window_ms`, the
 window's length: 10 s for a periodic line, and shorter for the last window of a runtime reset or
 destruction, which logs its partial window instead of dropping it (before, a game's exit window, and
 any UI layer copies skipped in it, was never logged). The CPU entry also splits the slowest present into setup, depth, UI, render and
@@ -334,17 +336,25 @@ fence and value). The entry `ui_layer::latest` offers stays pinned until `bound`
 Present as its reader: in between it has no reader yet, and a game thread may promote a newer copy
 and clear the layer again, which before the 10-05 review could record the next copy into the entry
 the presenting queue was about to read. A Present that renders nothing still binds (a copy into
-the renderer's slot recorded at acquisition may read the entry), so its entry stays busy until the
-renderer's next completion signal, which only a rendered Present sends; a long run of Presents
-that acquire but do not render can therefore fill the ring, after which the first rendered Present
-may find no recent copy. With
+the renderer's slot recorded at acquisition may read the entry), and every bound reader's value is
+the completion signal its Present claims (`renderer::claim_completion_value`), which that Present's
+`finish_present` sends whether or not it rendered, and which a renderer released after its
+runtime's drain signals from the CPU on D3D12 when that `finish_present` never came. Before 10-07 only
+a rendered Present signalled: a run of Presents that acquired without rendering (depth lost) kept
+each read entry busy until the next render and could fill the ring, and a renderer released before
+it rendered again (a swapchain recreated at the same size on the same device, or a cached renderer
+dropped) left its entry busy until the ring was retired. With
 every entry busy the ring grows, and a full ring skips that copy and keeps the offered copy offered,
 counts it in the timing line (`ui_layer={... skipped=...}`) and logs once per ring (INFO since 10-07,
-a WARN before). A full ring is backpressure, not a fault by itself: The Witcher 3's exit screen
-(10-07) presented about 590 times a second and shed copies the 90 fps stream never showed, while
-every Present still got a layer. The readiness report's `UI layer copies` check judges the counts:
-skipped copies warn only while streaming with the copies left refreshing the layer below the stream
-rate, where streamed frames read a layer a real frame older than designed. A clear needs the offered entry, one entry per copy
+a WARN before). Presents keep reading the older offered copy until a copy is recorded again, and the
+host publishes those Presents like any other, so a skip costs time, however fast the game presents:
+the timing line's `skip_gap_ms` is the longest time the layer went unrefreshed across skipped
+copies, about 3 ms for one skip at 590 clears a second and 43 ms at 47. The readiness report's `UI
+layer copies` check warns on a streamed window whose gap exceeded one stream frame interval, where
+streamed frames could read a UI layer that missed a whole stream frame of UI changes, and on any gap of
+250 ms or more, after which the layer is no longer offered at all. The Witcher 3's exit screen (10-07)
+presented about 590 times a second when the ring first filled; its skips were never counted, so
+their cost is unknown. A clear needs the offered entry, one entry per copy
 held for its cross-queue fence (one per frame the copy's queue runs behind), one per earlier
 offered copy an unfinished Present still reads (one per frame the presenting queue runs behind) and
 the target: 2L + 2 with both queues L frames behind, so six entries hold L = 2. Four sufficed while a

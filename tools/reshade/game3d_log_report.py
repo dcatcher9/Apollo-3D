@@ -141,11 +141,16 @@ TIMING = re.compile(r'Sunshine Game 3D timing: presents=(\d+) cpu_ms=\{mean=([0-
                     r'.*?gpu_frames=(\d+)'
                     r' gpu_ms mean/max=\{total=([0-9.]+)/([0-9.]+)')
 # The timing line's offscreen UI layer group (since 10-06): live copies recorded, skipped by a full ring and offered.
-# Since 10-07 the line ends with its window's length; a runtime reset logs its last, shorter window. Older lines cover
-# the periodic 10 s (exporter.cpp).
+# Since 10-07 the group ends with the longest time the layer went unrefreshed across skipped copies (skip_gap_ms,
+# ui_layer::skip_gap), and the line with its window's length; a runtime reset logs its last, shorter window. Older lines
+# cover the periodic 10 s (exporter.cpp) and have no gap.
 LAYER_TIMING = re.compile(r'ui_layer=\{copies=(\d+) skipped=(\d+) offers=(\d+) '
-                          r'presents_since_copy=\{mean=([0-9.]+) max=(\d+)\}\}(?: window_ms=(\d+))?')
+                          r'presents_since_copy=\{mean=([0-9.]+) max=(\d+)\}(?: skip_gap_ms=([0-9.]+))?\}'
+                          r'(?: window_ms=(\d+))?')
 TIMING_WINDOW_S = 10.0
+# The layer's recency gate (game3d_ui_layer.h max_clear_gap_ms): this long without a recorded copy, the layer is no
+# longer offered at all.
+LAYER_RECENCY_MS = 250.0
 # Logged once per ring when a copy is first skipped: a WARN before 10-07, INFO since. UI layer copies judges it.
 LAYER_SATURATED = 'Sunshine UI layer: every live copy is offered, held or still being read'
 LOADED = re.compile(r"loaded from '.*' into '(.*)'")
@@ -635,7 +640,7 @@ class Session:
     hitches: list[tuple[float, str, float]] = field(default_factory=list)
     timings: list[tuple] = field(default_factory=list)  # Every timing line's window.
     # Each timing line's UI layer group: (end, length s, Presents, copies, skipped, offers, presents_since_copy mean
-    # and max); and each logged-once full-ring line.
+    # and max, longest skip gap in ms or None before 10-07); and each logged-once full-ring line.
     layer_windows: list[tuple] = field(default_factory=list)
     layer_saturated: list[float] = field(default_factory=list)
     # Export delivery counters: (t, runtime, generation, published, dropped, overwritten_unconsumed); and the
@@ -805,10 +810,10 @@ def parse(lines) -> Session:
             profile = GPU_PROFILE.search(text)
             s.timing_profile = profile.group(1) if profile else ''
             if layer := LAYER_TIMING.search(text):
-                copies, skipped, offers, mean, peak, window_ms = layer.groups()
+                copies, skipped, offers, mean, peak, gap, window_ms = layer.groups()
                 s.layer_windows.append((t, int(window_ms) / 1000.0 if window_ms else TIMING_WINDOW_S,
                                         int(found.group(1)), int(copies), int(skipped), int(offers), float(mean),
-                                        int(peak)))
+                                        int(peak), float(gap) if gap is not None else None))
         if LAYER_SATURATED in text:
             s.layer_saturated.append(t)
         if found := DIAGNOSTICS.search(text):
@@ -1515,15 +1520,18 @@ def delivery_checks(s: Session, add) -> None:
 
 def layer_copy_checks(s: Session, add) -> None:
     """'UI layer copies': the offscreen UI layer's ring of live copies (game3d_ui_layer.h) skips a copy when every
-    entry is offered, held for its fence or still read, and the offered copy stays offered. That is backpressure: it
-    costs the stream only when the copies left refreshed the layer less often than the stream shows frames, so that
-    streamed frames read a layer a real frame older than designed (a UI distortion risk). Per timing window, with
-    refreshed = copies per second and the stream fps at the window's start as the cap, skipped copies in a window that
-    overlaps a streamed span with refreshed below the cap warn (copies + skipped per second, capped, is the target).
-    Skips whose remaining copies still kept up with the stream (an uncapped game, such as The Witcher 3's ~590/s exit
-    screen 10-07) or that were not streamed are INFO; without the host log's stream rate they are INFO. A full-ring
-    line after the last timing line names copies whose count was never logged (before 10-07 a runtime reset dropped
-    its partial window). The rates are 10 s averages: a short burst of skips can hide in a window's average."""
+    entry is offered, held for its fence or still read, and the offered copy stays offered: Presents keep reading an
+    older layer until a copy is recorded again, and the host publishes them like any other, whatever the game's or the
+    stream's rate. A skip's cost is that time, not a count or a rate, so the check judges each timing window's
+    skip_gap_ms: the longest time the layer went unrefreshed across skipped copies. While streamed (overlapping a
+    streamed span), a gap longer than one stream frame interval (the stream fps at the window's start) warns: streamed
+    frames could read a UI layer that missed a whole stream frame of UI changes (a UI distortion risk). A gap of
+    LAYER_RECENCY_MS or more warns in any window: the layer was then no longer offered at all (a ring that stayed
+    full, which backpressure never causes). Shorter gaps (The Witcher 3's ~590 Presents/s exit screen 10-07: one skip
+    costs about 3 ms), skips outside the streamed export or without the host log's stream rate, and skips on lines
+    before 10-07, whose gap is not logged, are INFO. A full-ring line after the last timing line names copies whose
+    count was never logged (before 10-07 a runtime reset dropped its partial window). The gap is a maximum per window,
+    so neither the window's other play nor its average rates can hide a burst of skips."""
     windows = [w for w in s.layer_windows if w[3] or w[4]]
     unlogged = [t for t in s.layer_saturated if not any(w[0] >= t for w in s.layer_windows)]
     if not windows and not unlogged:
@@ -1531,35 +1539,45 @@ def layer_copy_checks(s: Session, add) -> None:
 
     def windows_of(n: int) -> str:
         return f'{n} timing {"window" if n == 1 else "windows"}'
-    warned, kept = [], []
-    for end, length, presents, copies, skipped, _, mean, peak in windows:
+    stale, stuck, bounded, unstreamed, unjudged, unlogged_gap = [], [], [], [], [], []
+    for end, length, presents, copies, skipped, _, mean, peak, gap in windows:
         if not skipped:
             continue
         length = max(length, 0.001)
         start = end - length
-        cap = stream_fps_at(s, start)
-        refreshed, target = copies / length, min((copies + skipped) / length, cap)
+        frame_ms = 1000.0 / stream_fps_at(s, start) if s.stream_fps else None
         streamed = any(a < end and (b is None or b > start) for a, b in s.streamed)
-        row = (f'{span(start, end)} ({length:.1f} s): skipped {skipped} of {copies + skipped} copies, refreshed '
-               f'{refreshed:.1f} of a target {target:.1f} copies/s ({presents / length:.0f} Presents/s, '
-               f'presents_since_copy mean {mean:.2f} max {peak})' + ('' if streamed else ', not streamed'))
-        (warned if s.stream_fps and streamed and refreshed < cap else kept).append(row)
-    if warned:
-        add(Check('WARN', 'UI layer copies', f'{windows_of(len(warned))} streamed with skipped layer copies while the '
-                                             'copies left refreshed the layer below the stream rate (a full ring: '
-                                             'streamed frames read an older UI layer)',
-                  (warned + kept)[:6]))
+        cost = ('refresh gap not logged' if gap is None else
+                f'longest refresh gap {gap:.1f} ms' + (f' of a {frame_ms:.1f} ms stream frame' if frame_ms else ''))
+        row = (f'{span(start, end)} ({length:.1f} s): skipped {skipped} of {copies + skipped} copies, {cost} '
+               f'({presents / length:.0f} Presents/s, presents_since_copy mean {mean:.2f} max {peak})'
+               + ('' if streamed else ', not streamed'))
+        (unlogged_gap if gap is None else stuck if gap >= LAYER_RECENCY_MS else unstreamed if not streamed else
+         unjudged if not frame_ms else stale if gap > frame_ms else bounded).append(row)
+    if stale or stuck:
+        parts = []
+        if stale:
+            parts.append(f'{windows_of(len(stale))} streamed with skipped layer copies leaving the layer unrefreshed '
+                         'longer than a stream frame (a full ring: streamed frames read an older UI layer)')
+        if stuck:
+            parts.append(f'{windows_of(len(stuck))} with skipped layer copies leaving the layer unrefreshed for '
+                         f'{LAYER_RECENCY_MS:.0f} ms or more, after which it is no longer offered (a ring that stayed '
+                         'full)')
+        add(Check('WARN', 'UI layer copies', '; '.join(parts),
+                  (stuck + stale + unjudged + unstreamed + bounded + unlogged_gap)[:6]))
         return
-    named = windows_of(len(kept))
+    kept = unjudged + unstreamed + bounded + unlogged_gap
+    groups = [(bounded, 'every refresh gap within a stream frame'), (unstreamed, 'outside the streamed export'),
+              (unjudged, 'stream rate unknown (pass --host-log to judge them)'),
+              (unlogged_gap, 'refresh gap not logged (an add-on before 10-07)')]
     parts = ['no logged timing window counted layer copies' if not windows else
              f'no layer copy skipped in {windows_of(len(windows))}' if not kept else
-             f'stream rate unknown (pass --host-log to judge it): {named} skipped layer copies' if not s.stream_fps else
-             f'{named} skipped layer copies (a full ring) while the copies left still refreshed the layer at the '
-             'stream rate or above, or outside the streamed export: backpressure']
+             f'{windows_of(len(kept))} skipped layer copies (a full ring): '
+             + ', '.join(f'{len(rows)} {label}' for rows, label in groups if rows)]
     if unlogged:
         parts.append(f'copies skipped from {clock(unlogged[0])}, after the last timing line, were not counted in any '
-                     "logged window (an add-on before 10-07 dropped a runtime reset's partial window, or the process "
-                     'ended first)')
+                     "logged window, so their refresh gap is unknown (an add-on before 10-07 dropped a runtime "
+                     "reset's partial window, or the process ended first)")
     add(Check('INFO' if kept or unlogged else 'PASS', 'UI layer copies', '; '.join(parts), kept[:6]))
 
 

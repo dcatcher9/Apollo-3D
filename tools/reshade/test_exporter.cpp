@@ -1489,8 +1489,9 @@ namespace {
     }
 
     // A timing line carries its window's length, so a runtime reset's early,
-    // shorter last window (and the UI layer copies it counted) is judged at
-    // its own rate; the next window starts at the line.
+    // shorter last window (and the UI layer copies it counted) is logged; the
+    // UI layer group ends with its longest skip gap; the next window starts
+    // at the line.
     static void timing_window_length() {
       publisher_t publisher;
       auto &proof = publisher.runtimes_[owner()];
@@ -1504,16 +1505,17 @@ namespace {
       const std::string line = message;
       const std::string tail = " window_ms=2500";
       require(line.rfind("Sunshine Game 3D timing: presents=4 cpu_ms={mean=0.200 max=0.500}", 0) == 0 &&
-          line.find(" ui_layer={copies=") != std::string::npos && line.size() > tail.size() &&
+          line.find(" ui_layer={copies=") != std::string::npos && line.find(" skip_gap_ms=0.0}" + tail) != std::string::npos &&
+          line.size() > tail.size() &&
           line.compare(line.size() - tail.size(), tail.size(), tail) == 0,
-        "The timing line did not end with its window's length after the UI layer group");
+        "The timing line did not end with its window's length after the UI layer group and its skip gap");
       require(!proof.timing.presents && proof.timing.start == 3500 && proof.timing.next_log == 13500,
         "Closing a timing window did not start the next one at its line");
       // An empty window (a line right after the previous one) logs zero means.
       publisher.close_timing_window(proof, 3500, message);
       require(std::strstr(message, "presents=0 cpu_ms={mean=0.000 max=0.000}") &&
           std::strstr(message, " window_ms=0"), "An empty timing window was not logged as empty");
-      std::puts("PASS timing line: window length, early last window");
+      std::puts("PASS timing line: window length, early last window, UI layer skip gap");
     }
 
     static void color_contract() {

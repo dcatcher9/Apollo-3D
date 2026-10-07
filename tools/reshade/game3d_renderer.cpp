@@ -134,7 +134,8 @@ namespace sunshine_game3d {
     uint64_t field_memo_view{}, field_memo_epoch{}, mask_epoch{};
     renderer::conditioning_counters conditioning_counts;
     // pending: this presentation recorded work awaiting finish_present.
-    // unsignaled: an earlier presentation's work awaits the next signal.
+    // unsignaled: an earlier presentation's work, or a claimed completion
+    // value (renderer::claim_completion_value), awaits the next signal.
     bool pending = false, unsignaled = false, failed = false;
     com<ID3D11DeviceContext1> context11;
     com<ID3DDeviceContextState> isolated11;
@@ -1810,7 +1811,13 @@ namespace sunshine_game3d {
       data_->pipelines[impl::pack_pq].handle;
   }
   api::fence renderer::completion_fence() const { return data_ ? data_->completion : api::fence{}; }
-  std::uint64_t renderer::completion_value() const { return data_ ? data_->sequence + 1 : 0; }
+  std::uint64_t renderer::claim_completion_value() {
+    if (!data_) return 0;
+    // Owed like a missed presentation's work: the next finish_present
+    // signals it, whether or not this Present rendered.
+    data_->unsignaled = true;
+    return data_->sequence + 1;
+  }
   api::resource_view renderer::bind_ui_candidate(unsigned slot, std::uint64_t capture_id, api::resource_view view,
       api::resource resource) {
     if (!data_ || data_->failed || slot >= data_->direct_views.size() || !capture_id || !view.handle || !resource.handle)
@@ -1977,6 +1984,16 @@ namespace sunshine_game3d {
     data_->frame_state = false;
   }
   void renderer::reset_after_runtime_drain() {
+    // The drain finished every submission: a claimed value still owed is
+    // signalled from the CPU (ID3D12Fence::Signal), so no reader of the fence
+    // waits for a renderer that is gone. D3D11 signals only on its immediate
+    // context, which a teardown need not own; there a Present's own
+    // finish_present is the signal, and the UI layer's ring or device ends
+    // any reader it missed.
+    for (auto *value : {data_.get(), cached_.get()})
+      if (value && (value->pending || value->unsignaled) && value->completion.handle &&
+          value->device->get_api() == api::device_api::d3d12)
+        value->device->signal(value->completion, value->sequence + 1);
     ui_candidate_captures_.fill(0);
     resume_pending_ = false;
     data_.reset();
