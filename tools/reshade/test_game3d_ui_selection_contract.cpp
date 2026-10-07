@@ -14,9 +14,10 @@
 // 5, revision 8 adds the empty change set, revision 9 removes H2 (fix 2,
 // still screens) and S3 (frame identity) with their checks, and revision 10
 // adds T1's HUD-less re-offer bit, the one-way judgment of the declared
-// alphas on sample frames only (texel 16), the layer's premultiplied bound
-// counted apart (statistics rows 208-223) and H1 over every S1 winner, and
-// asserts S1's invariants instead of counting them.
+// alphas on sample frames only, the layer's premultiplied bound counted apart
+// and H1 over every S1 winner, and asserts S1's invariants instead of
+// counting them; revision 11 decides as 10 in 12 decision texels without a
+// zero word and 160 statistics rows.
 // Uses a hardware D3D11 device, else WARP.
 #include <windows.h>
 #include <d3d11.h>
@@ -375,9 +376,9 @@ namespace {
     want[word::layer_invalid] = c.invalid[2];
     want[word::layer_opaque] = c.opaque_layer;
     want[word::valid_bits] = d.valid_bits;
-    // The one-way counts in judged_kinds order: texel 16 for the declared
-    // alphas, texels 8 and 9 .y and .z for Backbuffer and current alpha (.x,
-    // the layer's before revision 10, and texels 12-15 are reserved zeros).
+    // The one-way counts in judged_kinds order: texels 8 and 9 .x and texel
+    // 11 .z and .w for the declared alphas, texels 8 and 9 .y and .z for
+    // Backbuffer and current alpha.
     want[word::strong_ui_alpha] = c.strong[0];
     want[word::strong_ui_color] = c.strong[1];
     want[word::strong_backbuffer] = c.strong[2];
@@ -394,8 +395,9 @@ namespace {
     want[word::claims] = d.claims;
     want[word::h1] = selection::h1_word(d);
     // Texel 11 (H1 d): the layer's pre-UI pixel counts, zero without a layer,
-    // a pre-UI threshold or a sample frame. Its .z and .w (words 46 and 47)
-    // are reserved zeros, whatever the statistics rows' .z and .w hold.
+    // a pre-UI threshold or a sample frame, whatever the pre-UI statistics
+    // rows' .z and .w hold; its .z and .w are the UI color tag's one-way
+    // counts above.
     want[word::pre_ui_match] = c.pre_ui_match;
     want[word::pre_ui_image_lit] = c.pre_ui_lit;
     // decide() reads its counts back from the words it is compared with.

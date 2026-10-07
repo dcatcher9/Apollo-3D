@@ -220,8 +220,8 @@ namespace sunshine_game3d::ui_detection {
   // Shader markers sizing the detection resources. The renderer and the
   // live decoders (ui_selection::counts_from_words,
   // ui_temporal::decode_detection_sample) read only the current revision's
-  // full texture; ui_detection_replay alone sizes and pads the decision
-  // texels of older shaders.
+  // full texture; ui_detection_replay alone sizes the resources of older
+  // shaders and maps their decision words to this layout.
   inline constexpr std::string_view decision_texels_marker = "SUNSHINE_UI_DECISION_TEXELS";
   inline constexpr std::string_view scene_evidence_images_marker = "SUNSHINE_UI_SCENE_EVIDENCE_IMAGES";
   // The decision texels of each layout in turn: 0-4 (min), 5-6 the scene
@@ -230,15 +230,13 @@ namespace sunshine_game3d::ui_detection {
   // texel 10 from selection revision 3, and the pre-UI pixel counts of texel
   // 11 from selection revision 4. A statistics cell holds the luma of two
   // images (presented, and the pre-UI scene image: HUD-less, else the UI
-  // layer). Texel 12 (H2's stillness counts and S3's identity words in
-  // selection revisions 5 to 8, both removed by revision 9) and texels 13-15
-  // are reserved zeros; selection revision 10 adds texel 16, the declared
-  // alphas' one-way judgment counts (A2), and writes 17 texels.
-  inline constexpr std::uint32_t min_decision_texels = 5, max_decision_texels = 17, max_scene_evidence_images = 2;
+  // layer). Selection revision 11 writes 12 texels, every word a count or a
+  // decision word; older layouts are ui_detection_replay's alone.
+  inline constexpr std::uint32_t min_decision_texels = 5, max_scene_evidence_images = 2;
   inline constexpr std::uint32_t scene_decision_texels = 7, layer_decision_texels = 8, judgment_decision_texels = 10,
-    h1_decision_texels = 11, pre_ui_decision_texels = 12, declared_judgment_decision_texels = 17;
+    h1_decision_texels = 11, pre_ui_decision_texels = 12;
   // The current revision's decision texels, which the renderer requires.
-  inline constexpr std::uint32_t decision_texels = declared_judgment_decision_texels;
+  inline constexpr std::uint32_t decision_texels = pre_ui_decision_texels;
 
   // Hidden-scene evidence D (docs/reshade-sbs.md, hidden-scene evidence),
   // mirrored by game3d_native.hlsl and inspect_game3d_dump.py: a grid of
@@ -283,14 +281,14 @@ namespace sunshine_game3d::ui_detection {
   // selection revision 4 (decision texels pre_ui_decision_texels) rows
   // 128-143 from pre_ui_statistics_row: per tile, the offscreen UI layer
   // against the presented frame {matching pixels, lit layer pixels, 0, 0}
-  // (decision texel 11), 144 rows in all. Rows 144-159 (fix 2's H2
-  // stillness counts) and 160-207 (fix 3's change-set shadow and fix 4's
-  // darkening), all removed, are reserved and never reused. From selection revision 10 rows
-  // 208-223 from layer_bound_statistics_row: per tile, the layer's pixels
-  // beyond the premultiplied bound {beyond, 0, 0, 0} (V1), 224 rows in all.
-  // The cells have a texture of their own, cells_x by cells_y.
+  // (decision texel 11), and from selection revision 10 rows from
+  // layer_bound_statistics_row: per tile, the layer's pixels beyond the
+  // premultiplied bound {beyond, 0, 0, 0} (V1), rows 144-159 since selection
+  // revision 11, 160 rows in all. Statistics never leave the GPU, so a row
+  // range a removed rule used is free for the next revision. The cells have a
+  // texture of their own, cells_x by cells_y.
   inline constexpr std::uint32_t layer_statistics_row = 64u, judgment_statistics_row = 80u, scene_partial_row = 112u,
-    pre_ui_statistics_row = 128u, layer_bound_statistics_row = 208u;
+    pre_ui_statistics_row = 128u, layer_bound_statistics_row = 144u;
   // The current revision's statistics rows.
   inline constexpr std::uint32_t statistics_row_count = layer_bound_statistics_row + 16u;
   // The per-tile rows (0-111 and the pre-UI rows 128-143) are counted in
@@ -308,7 +306,7 @@ namespace sunshine_game3d::ui_detection {
   }};
   static_assert(scene::cells_x == 16u * 16u && scene::cells_y % 16u == 0u, "Compare groups must fill the 16 statistics columns");
   static_assert(judgment_statistics_row + 32u == scene_partial_row && scene_partial_row + scene::cells_y / 16u <= pre_ui_statistics_row &&
-    pre_ui_statistics_row + 16u + 64u == layer_bound_statistics_row && statistics_row_count == 224u);
+    pre_ui_statistics_row + 16u == layer_bound_statistics_row && statistics_row_count == 160u);
   inline constexpr std::array<std::pair<std::string_view, std::uint32_t>, 14> hlsl_scene_defines{{
     {"SUNSHINE_UI_SCENE_CELLS_X", scene::cells_x},
     {"SUNSHINE_UI_SCENE_CELLS_Y", scene::cells_y},
@@ -352,18 +350,16 @@ namespace sunshine_game3d::ui_detection {
     // candidates that passed V1/V2, in candidate-bit positions.
     inline constexpr std::size_t layer_covered = 28, layer_invalid = 29, layer_opaque = 30, valid_bits = 31;
     // Texels 8 and 9 (selection revision 2): the one-way judgment counts (A2)
-    // of Backbuffer and current alpha in .y and .z (strong: alpha of at
-    // least 1/2; contradicted: strong where an offered exact pair's HUD-less
-    // image is lit and unchanged against both the pair's colour and the
-    // presented colour; counted on sample frames only since
-    // selection revision 10), the refused candidate bit of the own decision
-    // (F1, zero when it decided), and the frame reason word
-    // (frame_reason_decided, frame_reason_reused). Words 32 and 36 held the
-    // layer's counts until selection revision 10, which judges no layer copy
-    // (E2), and are reserved zeros.
-    inline constexpr std::size_t strong = 32, refused = 35, contradicted = 36, frame_reason = 39;
-    inline constexpr std::size_t strong_backbuffer = 33, strong_current = 34, contradicted_backbuffer = 37,
-      contradicted_current = 38;
+    // of UIAlpha, Backbuffer and current alpha in .x, .y and .z (strong:
+    // alpha of at least 1/2; contradicted: strong where an offered exact
+    // pair's HUD-less image is lit and unchanged against both the pair's
+    // colour and the presented colour; counted on sample frames only), the
+    // refused candidate bit of the own decision (F1, zero when it decided),
+    // and the frame reason word (frame_reason_decided, frame_reason_reused).
+    // The UI color tag's are texel 11 .z and .w.
+    inline constexpr std::size_t strong_ui_alpha = 32, strong_backbuffer = 33, strong_current = 34, refused = 35;
+    inline constexpr std::size_t contradicted_ui_alpha = 36, contradicted_backbuffer = 37, contradicted_current = 38,
+      frame_reason = 39;
     // Texel 10 (selection revision 3, H1): pixels with alpha of at least
     // 254/255 in the Backbuffer and the current alpha, the raw informative
     // claims before refutation (candidate bits | claim_pre_ui), and the h1
@@ -373,27 +369,15 @@ namespace sunshine_game3d::ui_detection {
     // the presented frame, whatever the offer's pre-UI image, at 8 times the
     // pair threshold (b2 word 4; all zero when that is zero): pixels whose
     // colours match and lit layer pixels, from which the acceptance ledger
-    // proves the layer the pre-UI scene image (ui_selection::pre_ui_match).
-    // Words 46 and 47 are reserved zeros (selection revisions 4 to 8 wrote
-    // counts there that nothing read).
-    inline constexpr std::size_t pre_ui_match = 44, pre_ui_image_lit = 45;
-    // Texels 12-15 (words 48-63) are reserved: selection revisions 5 to 8
-    // wrote the words of removed rules there (docs/reshade-sbs.md), and
-    // ui_detection_replay tells revisions apart by their texel count. Never
-    // reuse them; selection revision 10 writes them as zeros.
-    // Texel 16 (selection revision 10, D1): the one-way judgment counts of
-    // the declared alphas, {strong UIAlpha, strong UI color tag, contradicted
-    // UIAlpha, contradicted UI color tag}.
-    inline constexpr std::size_t strong_ui_alpha = 64, strong_ui_color = 65, contradicted_ui_alpha = 66,
-      contradicted_ui_color = 67;
+    // proves the layer the pre-UI scene image (ui_selection::pre_ui_match);
+    // then the UI color tag's strong and contradicted pixels (A2).
+    inline constexpr std::size_t pre_ui_match = 44, pre_ui_image_lit = 45, strong_ui_color = 46, contradicted_ui_color = 47;
   }
   static_assert(decision_word::alpha_opaque + 1 < 4 * min_decision_texels &&
     decision_word::pre_ui_scene_image < 4 * scene_decision_texels && decision_word::valid_bits < 4 * layer_decision_texels &&
     decision_word::frame_reason == 4 * judgment_decision_texels - 1 && decision_word::h1 == 4 * h1_decision_texels - 1 &&
-    decision_word::pre_ui_match == 4 * h1_decision_texels &&
-    decision_word::pre_ui_image_lit + 3 == 4 * pre_ui_decision_texels && decision_word::strong_ui_alpha == 4 * 16 &&
-    decision_word::contradicted_ui_color + 1 == 4 * declared_judgment_decision_texels &&
-    decision_texels <= max_decision_texels);
+    decision_word::pre_ui_match == 4 * h1_decision_texels && decision_word::strong_ui_alpha == 4 * 8 &&
+    decision_word::contradicted_ui_alpha == 4 * 9 && decision_word::contradicted_ui_color + 1 == 4 * decision_texels);
   enum class scene_verdict : std::uint32_t { none = 0, hidden = 1, ambiguous = 2, visible = 3 };
   inline const char *name(scene_verdict value) {
     switch (value) {

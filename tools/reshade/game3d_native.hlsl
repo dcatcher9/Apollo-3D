@@ -44,7 +44,7 @@
 // Automatic UI detection writes this many decision texels; its statistics
 // rows hold the cells of this many scene-evidence images (docs/reshade-sbs.md,
 // UI detection flags and decision texels).
-#define SUNSHINE_UI_DECISION_TEXELS 17
+#define SUNSHINE_UI_DECISION_TEXELS 12
 #define SUNSHINE_UI_SCENE_EVIDENCE_IMAGES 2
 // Each of the 16x16 statistics tiles is counted by this many groups (the
 // tiles pass's group z); part k of tile (x, y) stores its counts at
@@ -58,14 +58,15 @@
 // (game3d_ui_selection.h) line for line, the T1 grace and its hold store and
 // the H1 override included; this revision must equal ui_selection::revision.
 // Revisions 5 to 9 added and removed rule H2, fix 3, fix 4 and S3's frame
-// identity (candidate bit 0x100, sources 11 and 12 and decision texels 12-15
-// stay reserved); revision 8 adds the empty change set. Revision 10 keeps
-// T1's held decision across HUD-less re-offers, judges the declared alphas
-// one way (decision texel 16) on sample frames only, bounds the layer's
-// premultiplied test by its covered pixels and lets H1 override every S1
-// winner.
+// identity (candidate bit 0x100 and sources 11 and 12 stay reserved);
+// revision 8 adds the empty change set. Revision 10 keeps T1's held decision
+// across HUD-less re-offers, judges the declared alphas one way on sample
+// frames only, bounds the layer's premultiplied test by its covered pixels
+// and lets H1 override every S1 winner. Revision 11 decides as 10 in 12
+// decision texels: the declared alphas' one-way counts take the words no
+// count used (texels 8 and 9 .x, texel 11 .z and .w).
 #define SUNSHINE_UI_CANDIDATE_LAYOUT 2
-#define SUNSHINE_UI_SELECTION_REVISION 10
+#define SUNSHINE_UI_SELECTION_REVISION 11
 #define SUNSHINE_UI_CANDIDATE_UI_ALPHA 0x1u
 #define SUNSHINE_UI_CANDIDATE_UI_COLOR 0x2u
 #define SUNSHINE_UI_CANDIDATE_BACKBUFFER 0x4u
@@ -96,11 +97,11 @@
 // below the 112 rows of per-tile detection counts, of the per-tile pre-UI
 // pixel counts (H1 d: the offscreen UI layer against the presented frame,
 // rows 128-143), and of the layer's per-tile pixels beyond the premultiplied
-// bound (V1, rows 208-223; rows 144-207 are reserved).
+// bound (V1, rows 144-159).
 #define SUNSHINE_UI_JUDGMENT_ROW 80
 #define SUNSHINE_UI_SCENE_PARTIAL_ROW 112
 #define SUNSHINE_UI_PRE_UI_ROW 128
-#define SUNSHINE_UI_LAYER_BOUND_ROW 208
+#define SUNSHINE_UI_LAYER_BOUND_ROW 144
 // Exact per-session UI counters (docs/reshade-sbs.md, UI counters), mirrored
 // from game3d_ui_counters.h: the detection reduce adds every detection frame
 // to these words of SunshineUICountersStore. The decided words are indexed by
@@ -611,11 +612,10 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     // beside an opaque HUD).
     const bool scene_like = beyond * 100u > pixels && (beyond * 20u > pixels || beyond > layer_sum.z);
     const uint3 layer = uint3(layer_sum.x, layer_sum.y + (scene_like ? beyond : 0u), layer_sum.z);
-    // The layer against the presented frame (H1 d): {matching, lit layer, 0,
-    // 0} (words 46 and 47 are reserved zeros); zero without an offered layer
-    // or a pre-UI threshold.
-    const uint4 pre_ui_pixels = (Sunshine_UICandidates & SUNSHINE_UI_CANDIDATE_LAYER) && Sunshine_UIPreUIThreshold > 0.0 ?
-        uint4(pre_ui_sum.xy, 0u, 0u) : 0u;
+    // The layer against the presented frame (H1 d): {matching, lit layer};
+    // zero without an offered layer or a pre-UI threshold.
+    const uint2 pre_ui_pixels = (Sunshine_UICandidates & SUNSHINE_UI_CANDIDATE_LAYER) && Sunshine_UIPreUIThreshold > 0.0 ?
+        pre_ui_sum.xy : 0u;
     const uint offered = Sunshine_UICandidates, accepted = Sunshine_UIAcceptedCandidates;
     const uint alpha_bits = SUNSHINE_UI_CANDIDATE_UI_ALPHA | SUNSHINE_UI_CANDIDATE_UI_COLOR |
         SUNSHINE_UI_CANDIDATE_BACKBUFFER | SUNSHINE_UI_CANDIDATE_CURRENT | SUNSHINE_UI_CANDIDATE_LAYER;
@@ -824,24 +824,20 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     SunshineAlphaCoverageStore[uint2(5,0)] = 0u;
     SunshineAlphaCoverageStore[uint2(6,0)] = 0u;
     SunshineAlphaCoverageStore[uint2(7,0)] = uint4(layer, valid);
-    // The one-way counts of Backbuffer and current alpha; .x (the layer's
-    // before revision 10) is a reserved zero.
-    SunshineAlphaCoverageStore[uint2(8,0)] = uint4(0u, strong.zw, refused);
+    // The one-way counts (A2) of UIAlpha, Backbuffer and current alpha: strong
+    // pixels with the refused candidate, then contradicted pixels with the
+    // frame reason; the UI color tag's are texel 11 .z and .w.
+    SunshineAlphaCoverageStore[uint2(8,0)] = uint4(strong.xzw, refused);
     // The mask pass keeps the previous real frame's mask when reused.
-    SunshineAlphaCoverageStore[uint2(9,0)] = uint4(0u, contradicted.zw, frame_reason | (reused ? SUNSHINE_UI_FRAME_REASON_REUSED : 0u));
+    SunshineAlphaCoverageStore[uint2(9,0)] = uint4(contradicted.xzw, frame_reason | (reused ? SUNSHINE_UI_FRAME_REASON_REUSED : 0u));
     // H1: the opaque Backbuffer and current counts, the raw claims before
     // refutation, and the S1 winner with the applied bit.
     SunshineAlphaCoverageStore[uint2(10,0)] = uint4(opaque_backbuffer, opaque_current, claims,
         s1_source | (h1 ? SUNSHINE_UI_H1_APPLIED : 0u));
     // H1 (d): the pre-UI pixel counts the CPU's acceptance ledger proves the
-    // layer from; nothing on the GPU reads them.
-    SunshineAlphaCoverageStore[uint2(11,0)] = pre_ui_pixels;
-    // Texels 12-15 are reserved zeros, which tell this revision's 17 texels
-    // from older ones (game3d_ui_detection_contract.h).
-    [unroll] for (uint reserved = 12u; reserved < 16u; ++reserved) SunshineAlphaCoverageStore[uint2(reserved, 0u)] = 0u;
-    // A2 of the declared alphas: strong UIAlpha and UI color tag, then their
-    // contradicted pixels.
-    SunshineAlphaCoverageStore[uint2(16,0)] = uint4(strong.xy, contradicted.xy);
+    // layer from, then the UI color tag's strong and contradicted pixels;
+    // nothing on the GPU reads them.
+    SunshineAlphaCoverageStore[uint2(11,0)] = uint4(pre_ui_pixels, strong.y, contradicted.y);
 }
 [numthreads(8, 8, 1)]
 void SunshineUIDetectionMaskCS(uint3 id : SV_DispatchThreadID)

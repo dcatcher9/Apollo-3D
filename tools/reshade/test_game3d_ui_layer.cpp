@@ -129,19 +129,18 @@ int main() {
         "game3d_native.hlsl's candidate layout or selection revision differs from the contract");
       const auto texels = sunshine_game3d::shader_marker(source, detection::decision_texels_marker);
       const auto images = sunshine_game3d::shader_marker(source, detection::scene_evidence_images_marker);
-      require(texels == detection::decision_texels && texels <= detection::max_decision_texels &&
-          images == detection::max_scene_evidence_images,
+      require(texels == detection::decision_texels && images == detection::max_scene_evidence_images,
         "game3d_native.hlsl's UI detection size markers are not the current revision's (the renderer requires them)");
       // Selection revision 10: the unaligned-tag shift and the sample and
-      // re-offer bits and the layer-bound row; the removed invariant counter
-      // words have no define.
+      // re-offer bits; revision 11: the layer-bound row; the removed
+      // invariant counter words have no define.
       require(source.find("#define SUNSHINE_UI_PER_FRAME_UNALIGNED_SHIFT 12") != std::string::npos &&
           source.find("#define SUNSHINE_UI_PER_FRAME_SAMPLE 0x4000u") != std::string::npos &&
           source.find("#define SUNSHINE_UI_PER_FRAME_REOFFER 0x8000u") != std::string::npos &&
-          source.find("#define SUNSHINE_UI_LAYER_BOUND_ROW 208") != std::string::npos &&
+          source.find("#define SUNSHINE_UI_LAYER_BOUND_ROW 144") != std::string::npos &&
           source.find("SUNSHINE_UI_COUNTER_UNTRUSTED_INFERRED") == std::string::npos &&
           source.find("SUNSHINE_UI_COUNTER_PRESENTED_OVER_DEDICATED") == std::string::npos,
-        "game3d_native.hlsl does not mirror selection revision 10's bits and layer-bound row, or defines a removed counter word");
+        "game3d_native.hlsl does not mirror selection revision 11's bits and layer-bound row, or defines a removed counter word");
     }
     // Selection revision 4 (fix 1) writes the pre-UI pixel counts in texel
     // 11 after the H1 texel 10. Revision 5 (fix 2) added H2's stillness
@@ -151,22 +150,25 @@ int main() {
     // removes H2 and S3: 12 texels and 144 statistics rows again, with source
     // 11, texel 12 (words 48-51), rows 144-159, counter words 31-35 and b2
     // words 5-9 reserved, b2 shrunk to 6 words, and the removed defines gone.
-    // Revision 10 adds texel 16 (the declared alphas' one-way counts; texels
-    // 12-15 stay reserved zeros and words 32 and 36, the layer's one-way
-    // counts, become reserved zeros) and rows 208-223 (the layer's pixels
-    // beyond the premultiplied bound; rows 144-207 stay reserved), 17 texels
-    // and 224 rows, and moves the stored/per-frame boundary to 0x1000 for the
-    // unaligned declared tags (0x1000, 0x2000) and the sample and re-offer
-    // bits. The counter texture holds 26 words: decided sources 0-10, then
-    // the judgments, no-mask reasons, full_alpha and reused, without the
-    // reserved words of removed rules.
-    require(sunshine_game3d::ui_selection::revision == 10u && detection::h1_decision_texels == 11u &&
+    // Revision 10 added texel 16 (the declared alphas' one-way counts) and
+    // rows 208-223 (the layer's pixels beyond the premultiplied bound), 17
+    // texels and 224 rows, and moved the stored/per-frame boundary to 0x1000
+    // for the unaligned declared tags (0x1000, 0x2000) and the sample and
+    // re-offer bits. Revision 11 decides as 10 in 12 texels without a zero
+    // word: UIAlpha's one-way counts in words 32 and 36 (the layer's before
+    // revision 10), the UI color tag's in words 46 and 47, and the bound rows
+    // at 144-159 (160 rows). The counter texture holds 26 words: decided
+    // sources 0-10, then the judgments, no-mask reasons, full_alpha and
+    // reused, without the reserved words of removed rules.
+    require(sunshine_game3d::ui_selection::revision == 11u && detection::h1_decision_texels == 11u &&
         detection::decision_word::h1 == 43u && detection::pre_ui_decision_texels == 12u &&
         detection::decision_word::pre_ui_match == 44u && detection::decision_word::pre_ui_image_lit == 45u &&
         detection::per_frame_pre_ui_proven == 0x80000000u && detection::pre_ui_statistics_row == 128u &&
-        detection::decision_texels == 17u && detection::decision_word::strong_ui_alpha == 64u &&
+        detection::decision_texels == 12u && detection::decision_word::strong_ui_alpha == 32u &&
+        detection::decision_word::contradicted_ui_alpha == 36u && detection::decision_word::strong_ui_color == 46u &&
+        detection::decision_word::contradicted_ui_color == 47u &&
         detection::decision_word::strong_backbuffer == 33u && detection::decision_word::contradicted_current == 38u &&
-        detection::layer_bound_statistics_row == 208u && detection::statistics_row_count == 224u &&
+        detection::layer_bound_statistics_row == 144u && detection::statistics_row_count == 160u &&
         detection::per_frame_sample == 0x4000u && detection::per_frame_reoffer == 0x8000u &&
         detection::per_frame_mask == 0xfffff000u && detection::per_frame_unaligned_shift == 12u &&
         detection::per_frame_unaligned_mask == 0x3000u &&
@@ -174,7 +176,7 @@ int main() {
         sunshine_game3d::ui_counter_word::decided_count == 11u && sunshine_game3d::ui_counter_word::count == 26u &&
         sunshine_game3d::ui_counter_word::inexact_difference == 12u && sunshine_game3d::ui_counter_word::none == 15u &&
         sunshine_game3d::ui_counter_word::reused == 25u,
-      "The decision layout is not selection revision 10 with 17 texels and 224 statistics rows");
+      "The decision layout is not selection revision 11 with 12 texels and 160 statistics rows");
     {
       std::ifstream input(SUNSHINE_GAME3D_NATIVE_HLSL, std::ios::binary);
       const std::string source{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};

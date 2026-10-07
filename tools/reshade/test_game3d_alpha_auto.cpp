@@ -1167,10 +1167,10 @@ namespace {
         decoded.presented.verdict == H && decoded.presented.d == d && decoded.pre_ui.valid && decoded.pre_ui.d == pre_ui_d &&
         decoded.pre_ui.verdict == V && decoded.pre_ui_image == ui_detection::pre_ui_image::layer,
       "The scene guard did not read a decoded sample");
-    // Only the current revision's texture decodes (ui_detection_replay pads
+    // Only the current revision's texture decodes (ui_detection_replay maps
     // older shaders' words itself).
     const auto older = ui_temporal::guard_sample(ui_temporal::decode_detection_sample(t.data(),
-      4 * ui_detection::pre_ui_decision_texels, 1234, 1));
+      4 * ui_detection::h1_decision_texels, 1234, 1));
     require(!older.pixels && !older.offered && !older.claims && !older.presented.valid && !older.pre_ui_image,
       "A shorter decision texture decoded");
   }
@@ -1433,14 +1433,14 @@ namespace {
     t[word::opaque_backbuffer] = 997; t[word::opaque_current] = 998; t[word::claims] = 0xc0u;
     t[word::h1] = 10u | ui_detection::h1_applied;
     t[word::layer_covered] = 995; t[word::layer_invalid] = 2; t[word::layer_opaque] = 990; t[word::valid_bits] = 0x4a;
-    // Texels 8 and 9 .x are reserved (the layer's before revision 10); the
-    // declared alphas' counts are texel 16.
-    for (std::uint32_t i = 0; i != 3; ++i) { t[word::strong + i] = 40 + i; t[word::contradicted + i] = 50 + i; }
-    t[word::strong_ui_alpha] = 60; t[word::strong_ui_color] = 61; t[word::contradicted_ui_alpha] = 62;
-    t[word::contradicted_ui_color] = 63;
+    // The one-way counts: UIAlpha, Backbuffer and current alpha in texels 8
+    // and 9 .x-.z, the UI color tag's in texel 11 .z and .w.
+    t[word::strong_ui_alpha] = 60; t[word::strong_backbuffer] = 41; t[word::strong_current] = 42;
+    t[word::contradicted_ui_alpha] = 62; t[word::contradicted_backbuffer] = 51; t[word::contradicted_current] = 52;
+    t[word::strong_ui_color] = 61; t[word::contradicted_ui_color] = 63;
     t[word::refused] = candidate::backbuffer;
     t[word::frame_reason] = std::uint32_t(ui_no_mask::unaccepted) | ui_detection::frame_reason_reused;
-    t[word::pre_ui_match] = 960; t[word::pre_ui_image_lit] = 880; t[46] = 890; t[47] = 7;
+    t[word::pre_ui_match] = 960; t[word::pre_ui_image_lit] = 880;
     const auto sample = ui_temporal::decode_detection_sample(t.data(), t.size(), 1500, 9);
     const auto &e = sample.evidence;
     require(sample.source_kind == 10 && sample.enabled && sample.state == alpha_auto_state::automatic_on &&
@@ -1455,13 +1455,11 @@ namespace {
       "The one-way counts, refused candidate or frame reason did not decode");
     require(e.inferred_opaque == std::array<std::uint32_t, 2>{997, 998} && e.claims == 0xc0u && e.s1_source == 10 &&
         e.h1_applied, "Texel 10 did not decode");
-    // Words 46 and 47 (texel 11 .z and .w) are reserved: a sample of an older
-    // shader that wrote them decodes as before, without them.
     require(e.pre_ui_match == 960 && e.pre_ui_image_lit == 880, "Texel 11 did not decode");
     // Fewer words than the current revision's decode as no sample: the
-    // renderer refuses other revisions and ui_detection_replay pads them.
-    for (const std::uint32_t texels : {ui_detection::pre_ui_decision_texels, ui_detection::h1_decision_texels,
-           ui_detection::judgment_decision_texels, ui_detection::layer_decision_texels}) {
+    // renderer refuses other revisions and ui_detection_replay maps them.
+    for (const std::uint32_t texels : {ui_detection::h1_decision_texels, ui_detection::judgment_decision_texels,
+           ui_detection::layer_decision_texels}) {
       const auto older = ui_temporal::decode_detection_sample(t.data(), 4 * texels, 1500, 9);
       require(!older.pixels && !older.evidence.candidates, "An older revision's decision texels decoded");
     }

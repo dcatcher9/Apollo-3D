@@ -40,19 +40,22 @@ namespace sunshine_game3d::ui_selection {
   // (docs/reshade-sbs.md, UI detection flags and decision texels), so 9
   // decides as 8, which made a lit HUD-less pair without any changed pixel a
   // valid empty change set (change_set_empty), decided by an accepted pair as
-  // an empty mask of its own. Their candidate bit 0x100, sources 11 and 12,
-  // the h1 word's bit 0x200 and texels 12-15 stay reserved. 10:
+  // an empty mask of its own. Their candidate bit 0x100, sources 11 and 12
+  // and the h1 word's bit 0x200 stay reserved. 10:
   // T1 keeps the held decision across HUD-less re-offers
-  // (per_frame_reoffer); the one-way test (A2) judges the declared alphas too
-  // (texel 16), those captured in the exact pair's tag batch only
+  // (per_frame_reoffer); the one-way test (A2) judges the declared alphas too,
+  // those captured in the exact pair's tag batch only
   // (per_frame_unaligned_shift), and no longer counts the never-judged layer
-  // copy (words 32 and 36 reserved), only on sample frames
+  // copy, only on sample frames
   // (per_frame_sample); the layer's pixels beyond its premultiplied bound
-  // are uncovered (statistics rows 208-223) and invalidate it only when they
-  // lie on more than 1% of the frame and on more than 5% of it or more than
-  // its opaque pixels; H1 overrides every S1 winner; and the shader no
-  // longer counts S1's invariants.
-  inline constexpr std::uint32_t revision = 10;
+  // are uncovered (statistics rows of their own) and invalidate it only when
+  // they lie on more than 1% of the frame and on more than 5% of it or more
+  // than its opaque pixels; H1 overrides every S1 winner; and the shader no
+  // longer counts S1's invariants. 11 decides as 10 in 12 decision texels:
+  // the declared alphas' one-way counts moved from texel 16 into the words
+  // no count used (texels 8 and 9 .x, texel 11 .z and .w), and the layer's
+  // bound rows from 208 to 144.
+  inline constexpr std::uint32_t revision = 11;
   inline constexpr std::string_view revision_marker = "SUNSHINE_UI_SELECTION_REVISION";
 
   // Candidate kinds. Declared sources are the game's own UI contract (the
@@ -144,8 +147,8 @@ namespace sunshine_game3d::ui_selection {
 
   // A2: the kinds the one-way test judges, every alpha kind but the
   // one-frame-late layer copy (E2), in the order of counts::strong and
-  // counts::contradicted (decision texel 16 .x/.z and .y/.w, then texels 8
-  // and 9 .y and .z). A declared tag captured in another tag batch than the
+  // counts::contradicted (decision texels 8 and 9 .x, texel 11 .z and .w,
+  // then texels 8 and 9 .y and .z). A declared tag captured in another tag batch than the
   // exact pair (per_frame_unaligned_shift) counts no strong pixel on that
   // frame, so it is not judged there.
   inline constexpr std::array<kind, 4> judged_kinds{kind::ui_alpha, kind::ui_color, kind::backbuffer, kind::current};
@@ -176,8 +179,8 @@ namespace sunshine_game3d::ui_selection {
     one_way_contradicted(1000u, 100u) && !one_way_contradicted(1000u, 99u) && !one_way_contradicted(0u, 0u) &&
     coverage_disagrees(0u, 100u, 1000u) && !coverage_disagrees(150u, 51u, 1000u) && !coverage_disagrees(0u, 0u, 0u));
 
-  // One detection's counts as the reduce sums them (decision texels 0-4,
-  // 7-11 and 16).
+  // One detection's counts as the reduce sums them (decision texels 0-4 and
+  // 7-11).
   struct counts {
     std::uint32_t pixels{};
     // Alpha kinds in alpha_index order: UIAlpha, UI color tag, UI layer,
@@ -201,8 +204,8 @@ namespace sunshine_game3d::ui_selection {
     std::uint32_t pre_ui_match{}, pre_ui_lit{};
   };
   // Counts from the current revision's decision words (texel t, component c
-  // is word 4 t + c); fewer than 4 decision_texels words, as from an older
-  // shader that only ui_detection_replay pads, give no counts.
+  // is word 4 t + c); fewer than 4 decision_texels words give no counts
+  // (ui_detection_replay maps an older shader's words to this layout).
   inline counts counts_from_words(const std::uint32_t *words, std::size_t n) {
     namespace word = ui_detection::decision_word;
     counts c;

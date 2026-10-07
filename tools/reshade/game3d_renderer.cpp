@@ -199,9 +199,9 @@ namespace sunshine_game3d {
     // invalid alpha, lit HUD-less pixels with the accepted candidates, the
     // offscreen UI layer's counts with the valid candidates (texel 7), and the
     // one-way judgment counts with the refused candidate and the frame reason
-    // (texels 8 and 9, and the declared alphas' texel 16), the H1 texel 10
-    // (the opaque Backbuffer and current counts, the claims and the h1 word)
-    // and texel 11 (the layer's pre-UI pixel counts, H1 d). Detection runs
+    // (texels 8 and 9), the H1 texel 10 (the opaque Backbuffer and current
+    // counts, the claims and the h1 word) and texel 11 (the layer's pre-UI
+    // pixel counts, H1 d, and the UI color tag's one-way counts). Detection runs
     // only with the current revision's markers: its decision texels and both
     // scene-evidence images (docs/reshade-sbs.md, UI detection flags and
     // decision texels); zero when the shader has no marker.
@@ -832,7 +832,7 @@ namespace sunshine_game3d {
       // Live detection binds candidate layout 2 (the offscreen UI layer at t7
       // and the accepted mask in b2 word 2); a shader of another layout, such
       // as an older embedded replay shader, would misread both, so it gets
-      // none. Selection revision 10 with its 17 decision texels and both
+      // none. Selection revision 11 with its 12 decision texels and both
       // scene-evidence images (the T1 grace with its hold store at u5 and the
       // HUD-less re-offer bit, the one-way judgment of every alpha but the
       // layer on sample frames, the F1 reason words, H1 with its texel 10,

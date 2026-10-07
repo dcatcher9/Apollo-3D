@@ -121,13 +121,14 @@ namespace sunshine_game3d::ui_temporal {
 
   // The status sample poll_detection reads from the current revision's
   // decision texels `words` (4 per texel, ui_detection::decision_texels of
-  // them; anything shorter, as from an older shader that only
-  // ui_detection_replay pads, decodes as no sample): the decision, the
-  // candidates and counts, the scene evidence texels 5 and 6 (zero when the
-  // evidence passes did not run), the offscreen UI layer's texel 7, the
-  // one-way judgment counts (texels 16, 8 and 9), the refused candidate and
-  // the frame reason, the H1 texel 10 and the pre-UI pixel counts of texel
-  // 11. sequence numbers the submitted samples.
+  // them; anything shorter decodes as no sample, and only
+  // ui_detection_replay maps an older shader's words to this layout): the
+  // decision, the candidates and counts, the scene evidence texels 5 and 6
+  // (zero when the evidence passes did not run), the offscreen UI layer's
+  // texel 7, the one-way judgment counts (texels 8 and 9, and texel 11 .z
+  // and .w), the refused candidate and the frame reason, the H1 texel 10 and
+  // the pre-UI pixel counts of texel 11. sequence numbers the submitted
+  // samples.
   inline alpha_auto_decision decode_detection_sample(const std::uint32_t *words, std::size_t count,
       std::uint64_t tick_ms, std::uint64_t sequence) {
     namespace word = ui_detection::decision_word;

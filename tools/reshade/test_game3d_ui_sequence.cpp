@@ -152,8 +152,8 @@ namespace {
 
   // ---------------------------------------------------------------- decision texels
 
-  // Decision texels 0-16 as the renderer reads them back (selection revision
-  // 10; texels 12-15 are reserved zeros).
+  // Decision texels 0-11 as the renderer reads them back (selection revision
+  // 11).
   constexpr std::size_t texel_words = 4 * ui_detection::decision_texels;
   using texels = std::array<std::uint32_t, texel_words>;
   // Texels 5 and 6: the hidden-scene evidence of the presented frame and of
@@ -161,7 +161,11 @@ namespace {
   constexpr std::size_t scene_texels_begin = 4 * 5, scene_texels_end = 4 * ui_detection::scene_decision_texels;
 
   // A recording of 48 words, or of 44 (texels 0-10, recorded before
-  // selection revision 4: texel 11 reads zero).
+  // selection revision 4: texel 11 reads zero). Every recording predates
+  // selection revision 10: its words 32 and 36 held the layer's one-way
+  // counts and 46 and 47 shadow statistics, where the current layout keeps
+  // the declared alphas' one-way counts, which those revisions never
+  // measured, so they read zero.
   texels parse_texels(std::string_view csv) {
     texels result {};
     std::size_t count = 0;
@@ -179,6 +183,9 @@ namespace {
     }
     if ((count != 4 * ui_detection::pre_ui_decision_texels && count != 4 * ui_detection::h1_decision_texels) || at != end) {
       throw std::runtime_error("Recorded texels are not 44 or 48 words");
+    }
+    for (const auto w : {word::strong_ui_alpha, word::contradicted_ui_alpha, word::strong_ui_color, word::contradicted_ui_color}) {
+      result[w] = 0;
     }
     return result;
   }
@@ -226,14 +233,12 @@ namespace {
 
   // The counts of `t` with the words the reduce writes for these inputs:
   // the one-way judgment and pre-UI counts only on a status sample
-  // (per_frame_sample; words 32 and 36, the layer's before revision 10, are
-  // reserved zeros), none of a declared tag pushed unaligned with the exact
+  // (per_frame_sample), none of a declared tag pushed unaligned with the exact
   // pair (per_frame_unaligned_shift), texel 0 the applied decision, the
   // refused candidate and the frame reason (F1, with the T1 reused bit), and
   // texel 10's informative claims and h1 word (the S1 winner, and whether H1
   // overrode it).
   texels decision_words(texels t, const gpu_inputs &in) {
-    t[word::strong] = t[word::contradicted] = 0;
     const std::uint32_t unaligned = in.per_frame >> ui_detection::per_frame_unaligned_shift;
     if (unaligned & candidate::ui_alpha) {
       t[word::strong_ui_alpha] = t[word::contradicted_ui_alpha] = 0;

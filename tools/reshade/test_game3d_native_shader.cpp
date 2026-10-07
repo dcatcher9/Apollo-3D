@@ -348,8 +348,8 @@ int main(int argc, char **argv) {
     namespace detection = sunshine_game3d::ui_detection;
     const unsigned decision_texels = marker(std::string(detection::decision_texels_marker)),
       evidence_images = marker(std::string(detection::scene_evidence_images_marker));
-    require(decision_texels >= detection::min_decision_texels && decision_texels <= detection::max_decision_texels &&
-        evidence_images <= detection::max_scene_evidence_images, "UI detection size markers out of range");
+    require(decision_texels >= detection::min_decision_texels && evidence_images <= detection::max_scene_evidence_images,
+      "UI detection size markers out of range");
     const auto mirrored = [&source](const auto &defines) {
       for (const auto &[name, value] : defines) {
         const auto key = "#define " + std::string(name) + ' ';
@@ -378,10 +378,10 @@ int main(int argc, char **argv) {
       "The scRGB PQ pack and the live vertical pass must stay declared");
     // The reduce ports ui_selection::decide of this revision.
     require(marker(std::string(sunshine_game3d::ui_selection::revision_marker)) == sunshine_game3d::ui_selection::revision &&
-        sunshine_game3d::ui_selection::revision == 10u,
-      "SUNSHINE_UI_SELECTION_REVISION differs from ui_selection::revision 10");
-    require(decision_texels == detection::decision_texels && decision_texels == 17u,
-      "Selection revision 10 (texels 12-15 reserved, the declared alphas' one-way counts in texel 16) writes 17 decision texels");
+        sunshine_game3d::ui_selection::revision == 11u,
+      "SUNSHINE_UI_SELECTION_REVISION differs from ui_selection::revision 11");
+    require(decision_texels == detection::decision_texels && decision_texels == 12u,
+      "Selection revision 11 (every word a count or a decision word) writes 12 decision texels");
     // Hidden-scene evidence writes decision texels 5 and 6 from cells of both images.
     require(evidence_images == detection::max_scene_evidence_images && decision_texels >= detection::scene_decision_texels,
       "The native shader lost its hidden-scene evidence markers");

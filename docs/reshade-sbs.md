@@ -871,7 +871,8 @@ drawn into the target does, unless they lie on at most 5% of the frame and the l
 pixels (alpha of at least 254/255 within the bound) outnumber them, as a HUD or menu outnumbers an
 additive glow strip beside it. Before selection revision 10 more than 1% of the frame beyond the
 bound invalidated the layer outright, so such a glow strip would have disabled layer protection
-entirely; the GPU now counts them per tile (statistics rows 208-223) and the reduce reports them in
+entirely; the GPU now counts them per tile (statistics rows 144-159, 208-223 in selection revision
+10) and the reduce reports them in
 the layer's invalid pixels (decision texel 7 `.y`) only when they invalidate it. They are weighed
 against opaque pixels rather than covered ones because a scene buffer's luma-like alpha covers much
 of a dark frame faintly within the bound: weighed against covered pixels (as WP1a first did), two
@@ -1341,9 +1342,10 @@ also counted in texel 11 the lit presented pixels and those of them that differ 
 the same bound, which nothing acted on. They measured screens that no claim covers, such as Stellar
 Blade's SDR loading screen: the layer without coverage is an almost black scene image (invalid on
 only 0.2-0.4% of pixels, so V1-valid), the presented frame reads hidden and the layer only weakly
-(D 0.15-0.22), so H1 (d) does not apply and it stays 3D. Selection revision 9 writes texel 11's
-`.z` and `.w` as reserved zeros; the UI log line kept `presented_lit=0` and
-`presented_lit_differs=0` in place through be7788bf.
+(D 0.15-0.22), so H1 (d) does not apply and it stays 3D. Selection revisions 9 and 10 wrote texel
+11's `.z` and `.w` as zeros, and since selection revision 11 they hold the UI color tag's one-way
+counts; the UI log line kept `presented_lit=0` and `presented_lit_differs=0` in place through
+be7788bf.
 
 A visible sample also refutes the signature (`<kind>:<format>:<colour space>`, as for acceptance) of
 every candidate whose full claim it carried, since the presented frame then shows the depth's edges
@@ -1427,7 +1429,10 @@ it together with S3's frame identity, which shared decision texel 12: the stilln
 their statistics rows, the previous-luma texture, the flag in `b2` word 5, the `Sunshine UI still
 screen` lines, the `still` counter and log groups, the panel's checkbox and its status texts are
 gone. Its identifiers stay reserved and are never reused: source 11 (its counter word stayed zero
-through dc7e3c77 and was then dropped), `b2` word 5 (pushed as zero through be7788bf, then dropped), decision texel 12 (words 48-51) and statistics rows 144-159. A
+through dc7e3c77 and was then dropped) and `b2` word 5 (pushed as zero through be7788bf, then
+dropped). Its decision texel 12 (words 48-51) is gone: selection revision 10 wrote it as zero, and
+selection revisions 9 and 11 have 12 texels. Its statistics rows 144-159 hold the layer's bound
+counts since selection revision 11; statistics never leave the GPU. A
 `ReShade.ini` that still carries `UIFlattenStillScreens` loads unchanged; the add-on ignores the
 key. A screen on which no UI source decides and no informative claim acts, such as Stellar Blade's
 SDR loading screen, stays 3D.
@@ -1561,21 +1566,24 @@ with `b2` word 5, and texel 12; 7 removed fix 3 and fix 4 and decided as 5; 8 si
 change set, V2 above; 9: H2 and S3 removed, so texel 12 is reserved and 9 otherwise decides as 8;
 10 since WP1a: T1 keeps the held decision across HUD-less re-offers (per-frame bit `0x8000`), the
 one-way test judges the declared alphas too (texel 16) and no longer the layer copy (words 32 and 36
-reserved), counted on status samples only (per-frame bit `0x4000`) and only of declared tags in the
+zero), counted on status samples only (per-frame bit `0x4000`) and only of declared tags in the
 exact pair's tag batch (per-frame bits `0x1000` and `0x2000`), the layer's pixels beyond the
 premultiplied bound invalidate it only when they lie on more than 1% of the frame and on more than
 5% of it or more than its opaque pixels (statistics rows 208-223), H1 overrides every S1 winner,
-and the shader no longer counts S1's invariants).
+and the shader no longer counts S1's invariants; 11 decides as 10 without a zero or reserved word:
+12 decision texels, UIAlpha's one-way counts in texels 8 and 9 `.x` and the UI color tag's in texel
+11 `.z` and `.w`, and the layer's bound counts in statistics rows 144-159 of 160).
 `reshade_game3d_ui_selection_contract` runs the reduce on crafted and random counts, previous hold
 states and per-frame bits, and compares every decision word, the written hold store and the counter
 adds with `decide()` and `counter_adds()`; it asserts S1's invariants (no unaccepted inferred alpha
 decides, none beside an accepted declared alpha) on every case, which the shader no longer counts
 since revision 10. The renderer runs automatic detection only with that layout, selection revision
-10, its 17 decision texels and both scene-evidence images; otherwise its frames count as
+11, its 12 decision texels and both scene-evidence images; otherwise its frames count as
 `inactive.unprepared`. The live decoders (`ui_selection::counts_from_words`,
 `ui_temporal::decode_detection_sample`, which the hidden-scene guard and the acceptance ledger read
 once decoded) read only that revision's texture. `ui_detection_replay` alone still replays a shader
-of an older selection revision, sizing its statistics rows and padding its decision words itself,
+of an older selection revision, sizing its statistics rows and mapping its decision words to the
+current layout itself,
 without the mirror check; it refuses a shader without the layout marker (layout 1, before S1, which
 took the layer in the UI color slot).
 `Sunshine_UIDifferenceThreshold` (`b2` word 1) is the HUD-less pair's difference threshold. Since
@@ -1626,8 +1634,8 @@ candidate bits, and the h1 word marks an applied override with `0x100` (`SUNSHIN
 The decision texture has `SUNSHINE_UI_DECISION_TEXELS` `R32G32B32A32_UINT` texels (5 without the
 marker, 7 with scene evidence, 8 with candidate layout 2, 10 with selection revision 2, 11 with
 selection revision 3, 12 with selection revision 4, 13 with selection revisions 5 to 8, 12 with
-selection revision 9 and 17 with selection revision 10), and the bounded summary above is that whole
-texture, 272 bytes:
+selection revision 9, 17 with selection revision 10 and 12 with selection revision 11), and the
+bounded summary above is that whole texture, 192 bytes:
 
 | Texel | x | y | z | w |
 | --- | --- | --- | --- | --- |
@@ -1639,19 +1647,23 @@ texture, 272 bytes:
 | 5 | Presented `n` | `asuint(D)` | `valid \| ran << 1 \| verdict << 2` | Presented decided comparisons |
 | 6 | Pre-UI scene image `n` | `asuint(D)` | `valid \| ran << 1` | The image: 0 none, 1 HUD-less, 2 the offscreen UI layer |
 | 7 | Covered pixels of the offscreen UI layer (within the premultiplied bound since selection revision 10) | Its invalid pixels: out of range, plus those beyond the premultiplied bound when these lie on more than 1% of the frame and on more than 5% of it or more than its opaque ones (before selection revision 10 every pixel beyond the bound) | Its pixels at least 254/255 (within the bound) | Offered candidate bits that passed V1 or V2 |
-| 8 | Reserved zero (the layer's strong pixels before selection revision 10, always 0 for the late copy) | Strong pixels (finite alpha of at least 1/2) of Backbuffer alpha | Of current alpha | The refused candidate's bit (0 when the frame decided) |
-| 9 | Reserved zero (the layer's contradicted pixels before selection revision 10) | Strong pixels of Backbuffer alpha where an offered exact pair's HUD-less image is lit and unchanged against both the pair's colour and the presented colour | The same of current alpha | Bits 0-7: the own decision's `ui_no_mask` index, 0xFF when it decided a source; bit 16: the T1 grace reused the previous decision |
+| 8 | Strong pixels (finite alpha of at least 1/2) of UIAlpha (since selection revision 11; zero when pushed unaligned, `0x1000`) | Of Backbuffer alpha | Of current alpha | The refused candidate's bit (0 when the frame decided) |
+| 9 | Strong pixels of UIAlpha where an offered exact pair's HUD-less image is lit and unchanged against both the pair's colour and the presented colour (since selection revision 11) | The same of Backbuffer alpha | Of current alpha | Bits 0-7: the own decision's `ui_no_mask` index, 0xFF when it decided a source; bit 16: the T1 grace reused the previous decision |
 | 10 | Pixels of Backbuffer alpha at least 254/255 | Of current alpha | The informative full claims before refutation (candidate bits, `0x80` the pre-UI scene image) | The h1 word: bits 0-7 the S1 winner's source, `0x100` H1 applied |
-| 11 | Pixels where the offscreen UI layer's RGB equals the presented colour (words 44-47; since fix 1) | Lit layer pixels | Reserved zero (lit presented pixels in selection revisions 4 to 8) | Reserved zero (lit presented pixels that differ from the layer in selection revisions 4 to 8) |
-| 16 | Strong pixels of UIAlpha (words 64-67; since selection revision 10; zero when pushed unaligned, `0x1000`) | Of the UI color tag (zero when pushed unaligned, `0x2000`) | Strong pixels of UIAlpha where an offered exact pair's HUD-less image is lit and unchanged against both the pair's colour and the presented colour | The same of the UI color tag |
+| 11 | Pixels where the offscreen UI layer's RGB equals the presented colour (words 44-47; since fix 1) | Lit layer pixels | Strong pixels of the UI color tag (since selection revision 11; zero when pushed unaligned, `0x2000`) | Of them, those an offered exact pair contradicts as in texel 9 |
 
-Texel 12 (words 48-51) is reserved: selection revisions 5 to 8 wrote H2's still and compared cells
-there and, from a shader with `SUNSHINE_UI_IDENTITY`, S3's identity verdicts and deltas, both
-removed. Texels 13-15 (words 52-63) are reserved too: selection revision 6 (fix 3's change-set
-shadow and fix 4's darkening words) used them, and both were removed by user decision. Selection
-revision 10 writes texels 12-15 as zeros and the declared alphas' one-way counts in texel 16. The
-one-way counts of texels 8, 9 and 16 and texel 11 are zero on a frame that is not a status sample
-(per-frame bit `0x4000`).
+Every word is a count or a decision word. Older layouts, which only `ui_detection_replay` reads:
+texels 8 and 9 `.x` held the layer's one-way counts in selection revisions 2 to 9 (0 for the
+one-frame-late copy, which no judge reads) and were zero in revision 10; texel 11 `.z` and `.w`
+held lit presented pixels and those that differ from the layer in selection revisions 4 to 8 and
+were zero in revisions 9 and 10; selection revisions 5 to 8 wrote H2's still and compared cells in
+texel 12 (words 48-51) and, from a shader with `SUNSHINE_UI_IDENTITY`, S3's identity verdicts and
+deltas, both removed; selection revision 6 used texels 13-15 for fix 3's change-set shadow and fix
+4's darkening words, removed by user decision; and selection revision 10 wrote texels 12-15 as
+zeros and the declared alphas' one-way counts in texel 16 (words 64-67: strong UIAlpha, strong UI
+color tag, contradicted UIAlpha, contradicted UI color tag). The one-way counts of texels 8, 9 and
+11 and texel 11's pre-UI counts are zero on a frame that is not a status sample (per-frame bit
+`0x4000`).
 
 Texel 0 is the applied decision: the frame's own, or under the T1 grace the stored one of the
 previous real frame. The other texels describe the frame's own counts. The refused candidate is the
@@ -1661,12 +1673,12 @@ valid inferred alpha; for `trusted_invalid` the first accepted invalid alpha; fo
 layer; for `unaccepted` the first unaccepted valid selective candidate; for `difference_failed` the
 HUD-less image; for `ambiguous` the first unaccepted valid alpha that is not selective; none for
 `no_candidate` and `other`. A frame without candidates that runs only for the grace keeps the
-previous frame's statistics, so its texels 1-10 are stale; it never submits a sample. Texel 11
-compares at eight times `b2` word 4 (match: the largest channel difference at most that, relative
-above one in scRGB; lit: the largest channel above it) and is zero without a layer or a comparable
-pair; the reduce writes it as zero when no layer is offered, so a grace frame never carries an
-earlier layer's counts. Its first two words feed the layer's pre-UI proof
-(`ui_selection::pre_ui_match`); the last two are reserved zeros.
+previous frame's statistics, so its texels 1-10 are stale; it never submits a sample. Texel 11's
+pre-UI counts compare at eight times `b2` word 4 (match: the largest channel difference at most
+that, relative above one in scRGB; lit: the largest channel above it) and are zero without a layer
+or a comparable pair; the reduce writes them as zero when no layer is offered, so a grace frame
+never carries an earlier layer's counts. They feed the layer's pre-UI proof
+(`ui_selection::pre_ui_match`); the texel's last two words are the UI color tag's one-way counts.
 The verdict is 0 none, 1 hidden, 2 ambiguous or 3 visible. The detection reduce writes texels 5
 and 6 as zero on every frame and the evidence passes overwrite them when they run, so a sample
 never carries an earlier frame's evidence; texel 6 stays zero without a pre-UI scene image. The
@@ -1681,16 +1693,18 @@ layer's covered, invalid and nearly opaque pixels with (`.w`) the nearly opaque 
 alpha,
 80-95 (`SUNSHINE_UI_JUDGMENT_ROW` onward) the strong pixels of UIAlpha, the UI color tag,
 Backbuffer and current alpha (since selection revision 10; the layer, Backbuffer and current alpha
-before), and 96-111 those of them that an offered exact pair contradicts (the texel 8, 9 and 16
-counts per tile, on status samples only); rows 112-120 (`SUNSHINE_UI_SCENE_PARTIAL_ROW` onward) hold each 16x16-cell comparison
+before), and 96-111 those of them that an offered exact pair contradicts (the one-way counts of
+texels 8, 9 and 11 per tile, on status samples only); rows 112-120 (`SUNSHINE_UI_SCENE_PARTIAL_ROW` onward) hold each 16x16-cell comparison
 group's {n, wins - losses of each image, the presented image's decided comparisons}. Since selection
 revision 4 the texture has 144 rows: rows 128-143 (`SUNSHINE_UI_PRE_UI_ROW` onward) hold each
 tile's texel 11 counts {match, lit layer, 0, 0}, and rows
-121-127 are unused. Selection revisions 5 to 8 had 160 rows, rows 144-152 holding each comparison
-group's H2 counts {still cells, compared cells, 0, 0}; rows 144-207 are reserved. Since selection
-revision 10 the texture has 224 rows: rows 208-223 (`SUNSHINE_UI_LAYER_BOUND_ROW` onward) hold each
-tile's layer pixels beyond the premultiplied bound {beyond, 0, 0, 0}, which the reduce weighs
-against 5% of the frame and the layer's opaque pixels (V1). On a status sample the tiles pass and the reduce sum the
+121-127 are unused. Since selection revision 11 the texture has 160 rows: rows 144-159
+(`SUNSHINE_UI_LAYER_BOUND_ROW` onward) hold each tile's layer pixels beyond the premultiplied bound
+{beyond, 0, 0, 0}, which the reduce weighs against 5% of the frame and the layer's opaque pixels
+(V1). Statistics never leave the GPU, so a revision may reuse the rows of a removed rule: selection
+revisions 5 to 8 had 160 rows, rows 144-152 holding each comparison group's H2 counts {still cells,
+compared cells, 0, 0}, and selection revision 10 had 224, the bound counts in rows 208-223 and rows
+144-207 unused. On a status sample the tiles pass and the reduce sum the
 one-way and pre-UI counts in a second phase that reuses the coverage, invalid and difference
 group-shared arrays, which keeps both within the 32 KiB `cs_5_0` limit; every other frame skips it
 and writes those rows as zero. The 256 x 144
@@ -1916,15 +1930,19 @@ detection extent to `<new-dir>/<NN>_<dump>`, where `NN` is the case's position i
 with its `ui_source_color` replaced by the mask this replay resolved, for
 `replay_game3d_dump --shader`; any other package fails its case, and the captured package is never
 changed. The copy's `ui_detection_replay_mask` records the decision and the detection `flags` this
-replay pushed, which describe the replaced mask. `--verbose`
-prints every decision word (48 with selection revisions 4 and 9, 52 with revisions 5 to 8, 68 with
-revision 10). Each line also shows the own decision's
-reason (`(reused)` when the grace applied), the refused candidate, the one-way counts (since
-selection revision 10 the layer's as reserved zeros, and UIAlpha's and the UI color tag's as
-`declared_one_way`; every case pushes the status-sample bit `0x4000`), the
+replay pushed, which describe the replaced mask, as the shader wrote them. `--verbose`
+prints every decision word as the shader wrote it (48 with selection revisions 4, 9 and 11, 52
+with revisions 5 to 8, 68 with revision 10). Each line reads the words in the current layout
+(selection revision 10's texel 16 in words 32, 46, 36 and 47; older revisions, which measured no
+declared one-way counts, read zero there) and shows the own decision's
+reason (`(reused)` when the grace applied), the refused candidate, the one-way counts (Backbuffer's
+and current alpha's as `one_way`, and from a shader with texel 11 UIAlpha's and the UI color tag's
+as `declared_one_way`; every case pushes the status-sample bit `0x4000`; lines before selection
+revision 11 led `one_way` with the layer's column, always 0, as every replayed layer was the
+one-frame-late copy), the
 informative claims (`claims=`), the h1 word (`h1={applied=,winner=}`) and, since selection
 revision 4, texel 11 (`pre_ui_pixels={match= image_lit=}`).
-With a shader of the current layout and selection revision (10, **UI detection flags and decision
+With a shader of the current layout and selection revision (11, **UI detection flags and decision
 texels** above), every decision, its claims and its h1 word
 are checked against `decide()` on the GPU's counts with the pushed bits and no previous decision
 (`mirror=match`; a mirror that differs fails its case). A single-frame replay binds nothing at the hold store, so the T1 grace never
@@ -2278,7 +2296,9 @@ decision in texel 0; 11 with selection revision 3: texel 10 and the pre-UI scene
 selection revision 9; 13 with selection revisions 5 to 8: texel 12, H2's still and compared cells
 and, from a shader with `SUNSHINE_UI_IDENTITY`, S3's identity verdicts, both removed; selection
 revision 6's texels 13-15, fix 3's change-set shadow and fix 4's darkening counts, were removed;
-texels 12-15 stay reserved)
+17 with selection revision 10: texel 16, the declared alphas' one-way counts, after zero texels
+12-15; 12 again with selection revision 11, which moved those counts into texels 8, 9 and 11, so
+the captured shader's `SUNSHINE_UI_SELECTION_REVISION` tells the 12-texel layouts apart)
 and `evidence_images` markers; 0 means absent
 (binary pinning and the 5-texel decision of older packages, which replay
 that way with their embedded shader unless `--shader` is given). Packages of fix 2 to selection

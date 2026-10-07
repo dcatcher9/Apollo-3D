@@ -104,7 +104,7 @@ namespace sunshine_game3d {
       // S1 winner's source, and whether H1 overrode it with source 8.
       std::uint32_t claims{}, s1_source{};
       bool h1_applied{};
-      // A2, decision texels 16, 8 and 9 (selection revision 10), in
+      // A2, decision texels 8, 9 and 11 (selection revision 11), in
       // ui_selection::judged_kinds order (UIAlpha, UI color tag, Backbuffer,
       // current): pixels with alpha of at least 1/2, and those of them where
       // an offered exact pair's HUD-less image is lit and unchanged against
