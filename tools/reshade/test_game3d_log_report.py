@@ -1232,6 +1232,20 @@ class ReadinessReport(unittest.TestCase):
         self.assertEqual(report.HOST_FPS.search('Requested frame rate [60fps]').groups(), (None, None, '60'))
         # Older logs without the slot counters have no such check.
         self.assertNotIn('Stream delivery', run(BASE))
+        # The headset moved its panel to 72 Hz mid-session (RE9 10-06): the target follows the live stream rate, so a
+        # host claiming every frame at 72 fps passes.
+        at72 = [out(f'10:00:{5 * i:02}', 450 * i, 0, 90 * i) for i in range(1, 6)]
+        session = report.parse(BASE + at72)
+        session.stream_fps = 72.0
+        session.stream_fps_timeline = [(30000.0, 90.0), (36004.0, 72.0)]
+        check = [c for c in report.evaluate(session) if c.name == 'Stream delivery'][0]
+        self.assertEqual(check.status, 'PASS')
+        self.assertIn('target 72.0/s', check.detail)
+        self.assertIn('stream 72-90 fps, followed live', check.detail)
+        live = report.HOST_LIVE_FPS.search('Virtual display resized live to 3840x2160 @ 72 Hz.')
+        self.assertEqual(live.group(2), '72')
+        self.assertEqual(report.HOST_LIVE_FPS.search('Capture pacing updated to 90fps for a live video-mode change')
+                         .group(1), '90')
 
     def test_logs_of_the_removed_shadow_features_still_report(self):
         # The first-run shadow, texel 11's dark pre-UI statistics, rule H2's still screens and the S3 identity shadow

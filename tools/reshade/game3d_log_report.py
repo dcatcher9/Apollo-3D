@@ -35,6 +35,10 @@ DELIVERY = re.compile(r'Sunshine SBS output: published=(\d+) .*?runtime=(0x[0-9a
                       r'dropped=(\d+) overwritten_unconsumed=(\d+)')
 # The host's stream frame rate (display_base.cpp): '[90/1 exactly 90fps]' or '[60fps]'.
 HOST_FPS = re.compile(r'Requested frame rate \[(?:(\d+)/(\d+) exactly [0-9.]+fps|(\d+)fps)\]')
+# A live video-mode change applied mid-stream (the headset may move its panel between 90 and 72 Hz): the host logs
+# the new capture pacing or the live virtual-display resize.
+HOST_LIVE_FPS = re.compile(r'Capture pacing updated to (\d+)fps for a live video-mode change|'
+                           r'Virtual display resized live to \d+x\d+ @ (\d+) Hz')
 COVERAGE = re.compile(
     r'Sunshine list lifecycle: admissions covered=(\d+) \(states observed=(\d+) declared=(\d+)\) '
     r'not_open=\{unknown=(\d+) closed=(\d+) pass=(\d+)')
@@ -617,6 +621,8 @@ class Session:
     # host's stream fps when a host log was read.
     delivery: list[tuple[float, str, int, int, int, int]] = field(default_factory=list)
     stream_fps: float | None = None
+    # The stream fps over the session, (t, fps) on this log's clock, when a host log was read.
+    stream_fps_timeline: list[tuple[float, float]] = field(default_factory=list)
     timing_profile: str = ''  # The last timing line's gpu_profile state ('disabled' with Diagnostics off).
     teardown: float | None = None  # The last runtime teardown line.
     diagnostics: list[tuple[float, bool]] = field(default_factory=list)  # Each Diagnostics switch line.
@@ -1425,6 +1431,13 @@ def delivery_checks(s: Session, add) -> None:
     published + dropped; the target is min(offered, stream fps). Windows that start in the settle time after an FG
     switch, reset or export start are skipped."""
     fps = s.stream_fps or DEFAULT_STREAM_FPS
+
+    def fps_at(t: float) -> float:
+        current = s.stream_fps_timeline[0][1] if s.stream_fps_timeline else fps
+        for when, value in s.stream_fps_timeline:
+            if when <= t:
+                current = value
+        return current
     rows = []
     for a, b in zip(s.delivery, s.delivery[1:]):
         dt = b[0] - a[0]
@@ -1434,7 +1447,7 @@ def delivery_checks(s: Session, add) -> None:
         offered = (b[3] - a[3]) + (b[4] - a[4])
         if offered <= 0:
             continue
-        rows.append((a[0], b[0], claimed / dt, min(offered / dt, fps), offered / dt))
+        rows.append((a[0], b[0], claimed / dt, min(offered / dt, fps_at(a[0])), offered / dt))
     if not rows:
         return
     total = sum(b - a for a, b, *_ in rows)
@@ -1450,7 +1463,11 @@ def delivery_checks(s: Session, add) -> None:
         else:
             windows.append([a, b, c * (b - a), g * (b - a)])
     long = [w for w in windows if w[1] - w[0] >= DELIVERY_WARN_S]
-    source = f'stream {fps:g} fps' + ('' if s.stream_fps else ' assumed (pass --host-log for the real one)')
+    # The rates in effect during this session: the one at its start and each later change.
+    start = s.first if s.first is not None else 0.0
+    rates = sorted({fps_at(start)} | {value for when, value in s.stream_fps_timeline if when > start})
+    source = (f'stream {fps:g} fps assumed (pass --host-log for the real one)' if not s.stream_fps else
+              f'stream {rates[0]:g}-{rates[-1]:g} fps, followed live' if len(rates) > 1 else f'stream {fps:g} fps')
     add(Check('WARN' if long else 'PASS', 'Stream delivery',
               f'the host took {claimed:.1f} new frames/s of a target {target:.1f}/s (what the game offered, capped at '
               f'the {source})' + (f'; {len(long)} {"window" if len(long) == 1 else "windows"} below '
@@ -1652,18 +1669,23 @@ def scene_checks(s: Session, add) -> None:
     add(Check('WARN' if uncovered else 'INFO', 'Hidden scene', detail, uncovered[:6]))
 
 
-def host_stream_fps(path: Path, start: datetime, end: datetime) -> float | None:
-    """The last stream frame rate the host log requested up to the session's end."""
-    fps = None
+def host_stream_fps(path: Path, start: datetime, end: datetime) -> list[tuple[datetime, float]]:
+    """The stream frame rate the host log set up to the session's end: each requested rate at stream start and
+    each live video-mode change, in time order."""
+    timeline: list[tuple[datetime, float]] = []
     for line in path.read_text(encoding='utf-8', errors='replace').splitlines():
         m = HOST_LINE.match(line)
-        if not m or (found := HOST_FPS.search(m.group(4))) is None:
+        if not m:
             continue
         when = datetime.strptime(m.group(1), '%Y-%m-%d %H:%M:%S')
-        if when <= end + timedelta(minutes=1):
+        if when > end + timedelta(minutes=1):
+            continue
+        if found := HOST_FPS.search(m.group(4)):
             num, den, whole = found.groups()
-            fps = float(whole) if whole else float(num) / max(1.0, float(den))
-    return fps
+            timeline.append((when, float(whole) if whole else float(num) / max(1.0, float(den))))
+        elif found := HOST_LIVE_FPS.search(m.group(4)):
+            timeline.append((when, float(found.group(1) or found.group(2))))
+    return timeline
 
 
 def host_checks(path: Path, start: datetime, end: datetime) -> list[Check]:
@@ -1742,7 +1764,13 @@ def main(argv=None) -> int:
         end = datetime.combine(written.date(), datetime.min.time()) + timedelta(seconds=session.last % 86400)
         if end > written + timedelta(minutes=5):
             end -= timedelta(days=1)
-        session.stream_fps = host_stream_fps(args.host_log, end - timedelta(seconds=duration), end)
+        start = end - timedelta(seconds=duration)
+        timeline = host_stream_fps(args.host_log, start, end)
+        if timeline:
+            # Host times on this log's clock; the last rate before the session is in effect at its start.
+            session.stream_fps = timeline[-1][1]
+            session.stream_fps_timeline = [(session.first + (when - start).total_seconds(), fps)
+                                           for when, fps in timeline]
     checks = evaluate(session)
     if end is not None:
         checks += host_checks(args.host_log, end - timedelta(seconds=duration), end)
