@@ -290,7 +290,10 @@ namespace sunshine_game3d {
     // judged samples within alpha_trust_span_ms ("3 contradictions within
     // 2 s"); agreeing and unjudged samples change nothing, and invalid or
     // ambiguous samples never revoke. A contradicted sample earns nothing
-    // and restarts the earning run (unless void). A3: restored entries lapse
+    // and restarts the earning run (unless void). For the rest of the session
+    // a declared alpha that the one-way test revoked is accepted again only
+    // by a selective sample that judged it without contradicting it, never by
+    // an unjudged one. A3: restored entries lapse
     // unless earned again within alpha_trust_reconfirm_ms of testable time.
     // A testable sample could earn or refute the source: offered, valid (V1,
     // or V2 for a HUD-less pair) and not full (below 90% coverage, or a
@@ -470,6 +473,12 @@ namespace sunshine_game3d {
       std::uint64_t last_testable{}, testable_ms{};
       evidence_run earned;
       contradictions doubt;
+      // A2, for this session (Forget clears it): the exact pair's one-way test
+      // revoked this entry. A declared alpha is then accepted again only by
+      // a sample that judged it and did not contradict it, never by one
+      // unjudged selective sample (an opaque final image read selective
+      // during a fade over a dark, V2-invalid pair).
+      bool revoked_by_exact{};
     };
 
     bool accepts_locked(const ui_selection::signature &signature) const {
@@ -510,6 +519,7 @@ namespace sunshine_game3d {
       e.accepted = e.provisional = false;
       e.last_testable = e.testable_ms = 0;
       e.doubt = {};
+      if (event == ui_counter::trust_revoked_exact) e.revoked_by_exact = true;
       ++counters_[event];
     }
     // A3: a testable sample of a provisional entry counts the time since the
@@ -591,7 +601,11 @@ namespace sunshine_game3d {
         if (ui_selection::selective(covered, pixels)) {
           // An inferred run is consecutive and bounded: a selective sample
           // more than alpha_trust_span_ms after the run's last one restarts it.
-          if (!voided && (ui_selection::declared(k) || e.earned.add(tick_ms, covered, alpha_trust_span_ms))) accept(e);
+          // A declared alpha the one-way test revoked earns again only from a
+          // sample that judged it (exact_basis, not contradicted: above).
+          if (!voided && (ui_selection::declared(k) ? !e.revoked_by_exact || exact_basis :
+                e.earned.add(tick_ms, covered, alpha_trust_span_ms)))
+            accept(e);
         } else if (ui_selection::full(covered, pixels)) {
           if (!voided) e.earned = {};
         }

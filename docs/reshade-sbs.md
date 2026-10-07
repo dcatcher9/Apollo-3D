@@ -737,7 +737,12 @@ correct source; at the 100 ms sample cadence a persistent
 contradiction revokes about 0.2 s after it starts. A contradicted sample also earns nothing and
 restarts an unaccepted source's earning run, unless the sample is void for it. A revoked source must
 earn acceptance again; remembered acceptance is revoked the same way, and the revocation is
-remembered too. Manual mode edits leave it unchanged. In a context without a declared or exact judge
+remembered too. A declared alpha that the one-way test revoked earns again, for the rest of the
+session (until Forget), only from a selective sample that the exact pair judged without
+contradicting it, never from one unjudged selective sample: the opaque final image above reads
+selective again at the next fade, when the dark HUD-less image fails V2, and until the final review
+that sample accepted it again, so after every fade it showed the frame flat until three more
+contradictions and rewrote `TrustedUISources` twice. Manual mode edits leave it unchanged. In a context without a declared or exact judge
 (The Witcher 3, Stellar Blade in HDR and Expedition 33, all with FG off) a wrongly accepted inferred
 source is cleared only by Forget or by the provisional lapse below; that is an open question of the
 [framework](#ui-decision-framework).

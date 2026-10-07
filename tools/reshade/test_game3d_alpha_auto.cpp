@@ -561,6 +561,26 @@ namespace {
       "An exact pair did not revoke a declared alpha that marks the unchanged scene");
     feed(final_image, sample().alpha(kind::ui_color, 300).pair(20, 980).one_way(kind::ui_color, 300, 250), 1400);
     require(!accepts(final_image, kind::ui_color), "A contradicted selective sample accepted the declared alpha");
+    // The revocation holds for the session: at the next fade the tag reads
+    // selective again while nothing judges it (no pair, a dark pair that
+    // fails V2, a tag outside the pair's batch without strong pixels), and
+    // such samples never accept it again. A sample that judges it without
+    // contradicting it does; Forget clears the revocation.
+    feed(final_image, sample().alpha(kind::ui_color, 300), 1500);
+    feed(final_image, sample().alpha(kind::ui_color, 300).pair(500, 500), 1600);
+    feed(final_image, sample().alpha(kind::ui_color, 300).pair(20, 980).one_way(kind::ui_color, 0, 0), 1700);
+    require(!accepts(final_image, kind::ui_color),
+      "An unjudged selective sample accepted a declared alpha the one-way test revoked");
+    feed(final_image, sample().alpha(kind::ui_color, 200).pair(200, 800).one_way(kind::ui_color, 200, 0), 1800);
+    require(accepts(final_image, kind::ui_color),
+      "A judged, agreeing selective sample did not accept the revoked declared alpha again");
+    for (const std::uint64_t tick : {1900u, 2000u, 2100u})
+      feed(final_image, sample().alpha(kind::ui_color, 1000).pair(20, 980).one_way(kind::ui_color, 1000, 900), tick);
+    require(!accepts(final_image, kind::ui_color) && final_image.counters()[ui_counter::trust_revoked_exact] == 2,
+      "The re-accepted declared alpha was not revoked again");
+    final_image.forget();
+    feed(final_image, sample().alpha(kind::ui_color, 300), 2200);
+    require(accepts(final_image, kind::ui_color), "Forget did not clear the revocation");
     // Real UI changes the pixels it covers, so it never meets the test: an
     // accepted UIAlpha over its own exact change set stays accepted.
     alpha_auto_policy real_ui;
