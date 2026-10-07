@@ -750,10 +750,11 @@ reads, per-frame bit `0x4000`), in the passes' second phase, since no other fram
   while its presented alpha covers 35-100%, and in menus the UI color covers everything while the
   presented alpha covers 0.05%. The layer copy is neither judged (below) nor a judge.
 
-The one-frame-late layer copy (stored flag `0x4`, every layer until S4 replaces the copy) is not
+The one-frame-late layer copy (every layer until S4 replaces the copy) is not
 same-sample evidence (E2): it is no judged kind (`ui_selection::judged_kinds`), so the GPU counts
 no strong or contradicted pixel for it and neither judge reads it (before selection revision 10 the
-GPU kept a layer column that was always zero and the sample recorded `late_layer`). Comparing it with this frame's UIAlpha would otherwise contradict it on every UI
+GPU kept a layer column that was always zero and the sample recorded `late_layer`; through
+180f1842 every layer copy also carried stored flag `0x4`). Comparing it with this frame's UIAlpha would otherwise contradict it on every UI
 transition, and a moving marker would contradict it one way. An accepted source is revoked by three
 contradicting judged samples within 2 s (`alpha_trust_samples` and `alpha_trust_span_ms` in
 `game3d_alpha_auto.h`), counted `trust.revoked_exact` when the one-way test contradicted it in the
@@ -845,7 +846,7 @@ copy is still held for its fence, and until the final review the copy from befor
 offered as this frame's layer meanwhile. It is offered as a candidate of its own (candidate
 bit `0x40`, deciding as source 10) beside any tagged UIColorAndAlpha; the two never share a slot
 or an acceptance (E1). Until S4 one layer, the tracker's active one, is offered. Copies are released through their own device, at the latest when it is
-destroyed. It is one frame late (stored flag `0x4`), and its UI may have moved since, but its
+destroyed. It is one frame late, and its UI may have moved since, but its
 consumed mask is its raw alpha, exactly like every other source; the **UI pin band** (below) pins
 only finite positive alpha. UI that moves in the layer can therefore show a one-frame edge or tear.
 A motion margin, the alpha dilated by 6 texels in rows and in columns, was removed on 2026-10-02
@@ -1487,8 +1488,7 @@ layer's `covered`, `invalid` and `opaque` pixels, `sampled_one_way` with the `st
 Backbuffer and current alpha, `sampled_reason` (the own
 decision's `ui_no_mask` reason, or `decided`), `sampled_refused` (the refused candidate's kind,
 `ui_alpha`, `ui_color`, `ui_layer`, `backbuffer`, `current` or `hudless`, or `none`),
-`sampled_reused`, `sampled_late_layer` (a layer was offered: every layer is the one-frame-late
-copy, which no A2 judge reads), `sampled_hudless`, `sampled_alpha_opaque` for
+`sampled_reused`, `sampled_hudless`, `sampled_alpha_opaque` for
 UIAlpha and the UI color tag, `sampled_inferred_opaque` for Backbuffer and current alpha,
 `sampled_claims` (the informative full claims before refutation: candidate bits, `0x80` the pre-UI
 scene image), `sampled_h1` with `applied` (H1 overrode the S1 winner with 8) and `winner` (the S1
@@ -1516,6 +1516,9 @@ rejection names the failing check. `sampled_source` and `sampled_covered` are th
 which the T1 grace may have reused. Logs before S1 wrote `trusted_alpha` (slot bits) and
 `sampled_ui_layer` (the layer in the UI color slot) instead of `accepted` and `sampled_layer`; logs
 before S2a have no `sampled_one_way`, `sampled_reason`, `sampled_refused` or `sampled_reused`; logs
+from S2a through 180f1842 also have `sampled_late_layer` after `sampled_reused` (a layer was offered:
+every layer was the one-frame-late copy, which no A2 judge reads, so the report never judges the
+layer whether or not the field is there); logs
 before S2b have `sampled_hudless_scene` (the HUD-less image's evidence) and `scene_hold` (1 layer
 route, 2 HUD-less route) instead of `sampled_pre_ui_scene` and `scene_guard`, and no
 `sampled_inferred_opaque`, `sampled_claims` or `sampled_h1`; logs before fix 1 have no
@@ -1591,7 +1594,7 @@ through an `*_SRGB` view is not comparable with a UNORM presented frame, so it i
 | --- | --- | --- |
 | `0x1` | stored | The offscreen UI layer must pass the premultiplied bound (V1). |
 | `0x2` | stored | With a float layer's HDR headroom. |
-| `0x4` | stored | The layer is the one-frame-late copy. Its mask is the raw alpha, and it is never judged (A2, E2): it is no judged kind, and since selection revision 10 no pass reads the bit. |
+| `0x4` | stored | Reserved and never reused; the shader defines nothing for it. Through 180f1842 every layer copy carried it, marking the one-frame-late copy, which is never judged (A2, E2); selection revisions 2-9 read it, and `ui_detection_replay` pushes it to a shader that still defines `SUNSHINE_UI_STORED_LATE_LAYER`, so those revisions replay as before. |
 | `0x8` | stored | Reserved and never reused; the shader defines nothing for it. Since selection revision 10 stored bits end at `0x800` (`0x10`-`0x800` never used) and per-frame bits start at `0x1000`. |
 | `0x1000`, `0x2000` | per-frame | Since selection revision 10 (A2): the offered UIAlpha (`0x1000`) or UI color tag (`0x2000`), its candidate bit shifted by `SUNSHINE_UI_PER_FRAME_UNALIGNED_SHIFT` (12), was not captured in the exact HUD-less pair's tag batch. The tiles pass counts no strong or contradicted pixel of it, so the one-way test does not judge it on that frame. Pushed only beside an exact pair. |
 | `0x4000` | per-frame | Since selection revision 10: a status sample, a detection whose decision texels the CPU reads (at most one every 100 ms). Only it counts the one-way judgment (A2) and the pre-UI pixels (texel 11) in the passes' second phase; every other frame's one-way and pre-UI counts are zero. Every `ui_detection_replay` case pushes it. |
@@ -1608,8 +1611,8 @@ through an `*_SRGB` view is not comparable with a UNORM presented frame, so it i
 | `0x20000000` | per-frame | Reserved and never reused; bit 29, where the exact bit would shift to (never a refuted candidate). From S2b to fix 1 the evidence passes measured the offered layer as the pre-UI scene image beside an offered HUD-less image, for the guard's D proof of the layer. The shader defines nothing for it. |
 | `0x80000000` | per-frame | Bit 31 (`SUNSHINE_UI_PER_FRAME_PRE_UI_PROVEN`, since fix 1): the offered layer's signature is proven the pre-UI scene image (the ledger's `pre_ui` key), so a layer without coverage makes claim (d) (H1). |
 
-An 8-bit layer stores 5 and a layer in the `R16G16B16A16` or `R32G32B32A32` typeless family (UNORM
-included) 7. Stored bits describe the offscreen UI layer slot: the renderer keeps them between
+An 8-bit layer stores 1 and a layer in the `R16G16B16A16` or `R32G32B32A32` typeless family (UNORM
+included) 3 (5 and 7 through 180f1842). Stored bits describe the offscreen UI layer slot: the renderer keeps them between
 frames. They key no decision or status, and since S2b nothing on the CPU reads them.
 Per-frame bits ride only in one render's pushed word and are never stored.
 The tiles pass reads `0x4000`, the detection reduce the guard's bits, `0x4000`, `0x40000` and the

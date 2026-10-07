@@ -184,9 +184,8 @@ namespace {
     // line's order since S2a (layer, Backbuffer, current; the layer, never
     // judged since selection revision 10, as 0) and of the declared alphas
     // (sampled_declared_one_way: UIAlpha, UI color tag), the sample's
-    // own-decision reason, the candidate it names, whether the T1 grace
-    // reused a decision and whether a layer was offered (every layer is the
-    // one-frame-late copy, unjudged, A2).
+    // own-decision reason, the candidate it names and whether the T1 grace
+    // reused a decision.
     const auto reason = sunshine_game3d::ui_selection::frame_reason_name(evidence.frame_reason);
     const auto refused = sunshine_game3d::ui_selection::candidate_name(evidence.refused);
     // H1 (texels 6 and 10): the pre-UI scene image texel 6 measured. H1 (d),
@@ -201,7 +200,7 @@ namespace {
     const auto &guard = value.coverage.scene_guard;
     char message[3072];
     std::snprintf(message, sizeof(message),
-      "Sunshine UI protection: runtime=%p mode=%s rendered=%d mask_path=%d input=%s retained=%d fg=%d fg_known=%d fg_enabled=%d input_state=%s detection=%s selected=%s source=%s source_availability=%s sampled_source=%u sampled_covered=%u sampled_pixels=%u sampled_candidates=0x%x sampled_alpha_covered=%u/%u/%u/%u sampled_alpha_invalid=%u/%u/%u/%u accepted=0x%x sampled_layer={covered=%u invalid=%u opaque=%u} sampled_one_way={strong=%u/%u/%u contradicted=%u/%u/%u} sampled_reason=%.*s sampled_refused=%.*s sampled_reused=%d sampled_late_layer=%d sampled_hudless={changed=%u unchanged=%u invalid=%u matching_tiles=%u lit=%u} sampled_alpha_opaque=%u/%u sampled_inferred_opaque=%u/%u sampled_claims=0x%x sampled_h1={applied=%d winner=%u} sampled_scene={n=%u d=%.3f valid=%d ran=%d verdict=%s} sampled_pre_ui_scene={image=%s n=%u d=%.3f valid=%d} scene_guard={hidden=%d pre_ui=%d refuted=%u proven=%d} shadow=0 shadow_hidden_ms=0 sampled_pre_ui_pixels={match=%u image_lit=%u presented_lit=0 presented_lit_differs=0} sampled_declared_one_way={strong=%u/%u contradicted=%u/%u} status_revision=%llu",
+      "Sunshine UI protection: runtime=%p mode=%s rendered=%d mask_path=%d input=%s retained=%d fg=%d fg_known=%d fg_enabled=%d input_state=%s detection=%s selected=%s source=%s source_availability=%s sampled_source=%u sampled_covered=%u sampled_pixels=%u sampled_candidates=0x%x sampled_alpha_covered=%u/%u/%u/%u sampled_alpha_invalid=%u/%u/%u/%u accepted=0x%x sampled_layer={covered=%u invalid=%u opaque=%u} sampled_one_way={strong=%u/%u/%u contradicted=%u/%u/%u} sampled_reason=%.*s sampled_refused=%.*s sampled_reused=%d sampled_hudless={changed=%u unchanged=%u invalid=%u matching_tiles=%u lit=%u} sampled_alpha_opaque=%u/%u sampled_inferred_opaque=%u/%u sampled_claims=0x%x sampled_h1={applied=%d winner=%u} sampled_scene={n=%u d=%.3f valid=%d ran=%d verdict=%s} sampled_pre_ui_scene={image=%s n=%u d=%.3f valid=%d} scene_guard={hidden=%d pre_ui=%d refuted=%u proven=%d} shadow=0 shadow_hidden_ms=0 sampled_pre_ui_pixels={match=%u image_lit=%u presented_lit=0 presented_lit_differs=0} sampled_declared_one_way={strong=%u/%u contradicted=%u/%u} status_revision=%llu",
       static_cast<void *>(runtime), value.mode == sunshine_game3d::source_alpha_mode::automatic ? "auto" :
         value.mode == sunshine_game3d::source_alpha_mode::on ? "on" : "off",
       int(value.rendered), int(value.applied), sunshine_game3d::name(value.input), int(value.retained_alpha_ready),
@@ -214,7 +213,6 @@ namespace {
       evidence.accepted, evidence.layer_covered, evidence.layer_invalid, evidence.layer_opaque,
       0u, evidence.strong[2], evidence.strong[3], 0u, evidence.contradicted[2], evidence.contradicted[3],
       int(reason.size()), reason.data(), int(refused.size()), refused.data(), int(evidence.reused),
-      int((evidence.candidates & sunshine_game3d::ui_detection::candidate::layer) != 0u),
       evidence.hudless_changed, evidence.hudless_unchanged, evidence.hudless_invalid, evidence.matching_tiles, evidence.hudless_lit,
       evidence.alpha_opaque[0], evidence.alpha_opaque[1], evidence.inferred_opaque[0], evidence.inferred_opaque[1],
       evidence.claims, int(evidence.h1_applied), evidence.s1_source, scene.n, double(scene.d), int(scene.valid), int(scene.ran),

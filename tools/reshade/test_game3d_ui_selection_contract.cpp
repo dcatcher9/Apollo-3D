@@ -885,6 +885,8 @@ namespace {
     for (const auto bit : per_frame)
       if (random() & 1u) test.flags |= bit;
     if (random() & 1u) test.flags |= (std::uint32_t(random()) & 0x7fu) << detection::per_frame_refuted_shift;
+    // Random stored bits, the reserved 0x4 included: dumps through 180f1842
+    // record every layer with it, and the shader must ignore it.
     test.flags |= random() & 7u;
     // The previous real frame's hold store, or (one case in eight) whatever
     // the previous case's reduce wrote.

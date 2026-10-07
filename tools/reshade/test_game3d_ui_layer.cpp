@@ -63,21 +63,21 @@ int main() {
       "black only");
 
     // A layer copy in its own slot (candidate layout 2) carries the
-    // late-layer identity with the premultiplied check; float layers add HDR
-    // headroom. Typeless allocations are named by their typeless format.
+    // premultiplied check; float layers add HDR headroom. Typeless
+    // allocations are named by their typeless format. The reserved late-layer
+    // bit 0x4 is never set.
     namespace detection = sunshine_game3d::ui_detection;
     for (const auto format : {api::format::r8g8b8a8_unorm, api::format::r8g8b8a8_unorm_srgb, api::format::r8g8b8a8_typeless,
            api::format::b8g8r8a8_unorm, api::format::b8g8r8a8_unorm_srgb, api::format::b8g8r8a8_typeless})
-      require(layer::detection_flags(format) == 5u &&
-          layer::detection_flags(format) == (detection::stored_premultiplied | detection::stored_late_layer),
-        "An 8-bit layer lost its late-layer identity or premultiplied check");
+      require(layer::detection_flags(format) == 1u && layer::detection_flags(format) == detection::stored_premultiplied,
+        "An 8-bit layer lost its premultiplied check or set another bit");
     for (const auto format : {api::format::r16g16b16a16_float, api::format::r16g16b16a16_typeless, api::format::r16g16b16a16_unorm,
            api::format::r16g16b16a16_snorm, api::format::r16g16b16a16_uint, api::format::r16g16b16a16_sint,
            api::format::r32g32b32a32_float, api::format::r32g32b32a32_typeless, api::format::r32g32b32a32_uint,
            api::format::r32g32b32a32_sint})
-      require(layer::detection_flags(format) == 7u &&
-          layer::detection_flags(format) == (detection::stored_premultiplied | detection::stored_hdr_headroom | detection::stored_late_layer),
-        "A float layer lost its late-layer identity or HDR headroom");
+      require(layer::detection_flags(format) == 3u &&
+          layer::detection_flags(format) == (detection::stored_premultiplied | detection::stored_hdr_headroom),
+        "A float layer lost its premultiplied check or HDR headroom, or set another bit");
     // The contract's DXGI test, which ui_detection_replay also uses, names the
     // same float layers as ReShade's typeless families; stored flags never
     // carry a per-frame or reserved bit.
@@ -87,11 +87,12 @@ int main() {
         require(detection::float_layer_format(value) ==
             (typeless == api::format::r16g16b16a16_typeless || typeless == api::format::r32g32b32a32_typeless),
           "The contract's float layer formats differ from the renderer's typeless families");
-      // 0x8u is the reserved stored bit (game3d_ui_detection_contract.h).
-      require(!(layer::detection_flags(format) & (detection::per_frame_mask | 0x8u)),
+      // 0x4u and 0x8u are the reserved stored bits (game3d_ui_detection_contract.h).
+      require(!(layer::detection_flags(format) & (detection::per_frame_mask | 0x4u | 0x8u)),
         "Layer flags set a per-frame or reserved bit");
     }
-    std::puts("PASS UI layer detection flags: 5 for 8-bit and 7 for float layers, typeless included; no per-frame bits");
+    std::puts("PASS UI layer detection flags: 1 for 8-bit and 3 for float layers, typeless included; no per-frame or "
+      "reserved bits");
 
     // game3d_native.hlsl mirrors every flag and sizes detection within the
     // contract's range.
@@ -180,7 +181,7 @@ int main() {
       for (const char *removed : {"SUNSHINE_UI_CANDIDATE_PRE_UI", "SUNSHINE_UI_SOURCE_PRE_UI", "SUNSHINE_UI_CHANGE_SET_",
              "SUNSHINE_UI_DARKENING_", "SUNSHINE_UI_PIN_ONLY_UI", "SUNSHINE_UI_COUNTER_REFINED", "SUNSHINE_UI_H1_REFINED",
              "SUNSHINE_UI_TAG_LINEAR", "SUNSHINE_UI_IDENTITY", "SUNSHINE_UI_COUNTER_IDENTITY_",
-             "SUNSHINE_UI_SOURCE_STILL", "SUNSHINE_UI_STILL_"})
+             "SUNSHINE_UI_SOURCE_STILL", "SUNSHINE_UI_STILL_", "SUNSHINE_UI_STORED_LATE_LAYER"})
         require(source.find(std::string("#define ") + removed) == std::string::npos,
           (std::string("game3d_native.hlsl still defines the removed ") + removed).c_str());
     }

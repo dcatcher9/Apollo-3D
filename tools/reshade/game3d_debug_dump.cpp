@@ -389,7 +389,7 @@ namespace sunshine_game3d {
       if (f.source_alpha_ui && f.resources.ui_source.handle) {
         result["ui_source_allocation"] = allocation_json(device->get_resource_desc(f.resources.ui_source));
         result["ui_source"] = f.ui_source_metadata.empty() ? nlohmann::json::object() : nlohmann::json::parse(f.ui_source_metadata);
-        result["artifact_semantics"]["ui_source_color"] = "Exact typed texture consumed for UI coverage. b1 word3 selects alpha (RGBA) or red (single-channel mask). An automatic mask is the selected source's raw alpha, the one-frame-late offscreen UI layer's (replay.ui_detection.flags bit 0x4) included (docs/reshade-sbs.md, offscreen UI layer). A full-frame decision (sources 6, 8 and 11) is all 1.0; 9 is retired. Other channels never replace current source_color for eye rendering. This does not prove same-game-frame pairing.";
+        result["artifact_semantics"]["ui_source_color"] = "Exact typed texture consumed for UI coverage. b1 word3 selects alpha (RGBA) or red (single-channel mask). An automatic mask is the selected source's raw alpha, the one-frame-late offscreen UI layer's included (docs/reshade-sbs.md, offscreen UI layer). A full-frame decision (sources 6 and 8) is all 1.0; 7, 9 and 11 are retired. Other channels never replace current source_color for eye rendering. This does not prove same-game-frame pairing.";
       }
       if (d.ready && d.shader_resource.handle) {
         const auto resource = device->get_resource_from_view(d.shader_resource);

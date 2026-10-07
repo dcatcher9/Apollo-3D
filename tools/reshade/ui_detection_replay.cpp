@@ -376,6 +376,10 @@ namespace {
     std::array<const artifact_t *, 4> inputs{}; // t11..t14
     const artifact_t *layer_input = nullptr;    // t7 (layout 2)
     unsigned bits = 0, flags = 0;
+    // Selection revisions 2-9 read the one-frame-late layer bit 0x4, which
+    // every layer copy carried through 180f1842 (now reserved): a shader that
+    // still defines it gets it with the layer's flags, so it replays as before.
+    const bool late_layer_bit = shader_source.find("#define SUNSHINE_UI_STORED_LATE_LAYER ") != std::string::npos;
     for (const auto &kind : label.at("candidates")) {
       const auto name = kind.get<std::string>();
       const bool layer = ui_layer_kind(name);
@@ -390,7 +394,10 @@ namespace {
         const unsigned slot = name == "sl_ui_alpha" ? 0 : bit == candidate::ui_color ? 1 : name == "sl_backbuffer" ? 2 : 3;
         inputs[slot] = &load(name);
       }
-      if (layer) flags = contract::layer_detection_flags(contract::float_layer_format(artifacts.at(name).at("dxgi_format").get<unsigned>()));
+      if (layer) {
+        flags = contract::layer_detection_flags(contract::float_layer_format(artifacts.at(name).at("dxgi_format").get<unsigned>())) |
+          (late_layer_bit ? 0x4u : 0u);
+      }
     }
     // V2: the threshold from the pair's own encodings, and a HUD-less image
     // that is not comparable with its pair is not offered. Without one, the

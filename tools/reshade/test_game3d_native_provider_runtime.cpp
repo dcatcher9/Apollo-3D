@@ -370,14 +370,16 @@ namespace {
         "Public UI hook did not offer the actual tag23 alpha source to automatic detection");
       // The tagged UIColorAndAlpha and the offscreen UI layer are offered side
       // by side from the first frame, each in its own slot (E1): the stored
-      // flags describe the layer slot (5), and the accepted tag decides.
+      // flags describe the layer slot (the premultiplied bound, 1), and the
+      // accepted tag decides.
       namespace candidate = sunshine_game3d::ui_detection::candidate;
       const auto &tag_detection = replay.at("ui_detection");
       if (tag_detection.at("ran_or_held") == "inactive" ||
           (tag_detection.at("candidates").get<unsigned>() & (candidate::ui_color | candidate::layer)) !=
             (candidate::ui_color | candidate::layer) ||
           !(tag_detection.at("accepted").get<unsigned>() & candidate::ui_color) ||
-          (tag_detection.at("flags").get<unsigned>() & ~sunshine_game3d::ui_detection::per_frame_sample) != 5u)
+          (tag_detection.at("flags").get<unsigned>() & ~sunshine_game3d::ui_detection::per_frame_sample) !=
+            sunshine_game3d::ui_detection::stored_premultiplied)
         throw std::runtime_error("A tagged UIColorAndAlpha did not reach detection accepted beside the layer: " + tag_detection.dump());
       bool optional = false;
       for (const auto &entry : metadata.at("optional_captures")) if (entry.at("artifact_id") == 10) {
@@ -576,7 +578,7 @@ namespace {
               !(hidden_sample.at("claims").get<unsigned>() & candidate::layer) || scene.at("valid") != true ||
               scene.at("verdict") != "hidden" ||
               (flags & (sunshine_game3d::ui_detection::stored_mask | sunshine_game3d::ui_detection::per_frame_scene_hidden)) !=
-                (5u | sunshine_game3d::ui_detection::per_frame_scene_hidden)))
+                (sunshine_game3d::ui_detection::stored_premultiplied | sunshine_game3d::ui_detection::per_frame_scene_hidden)))
           throw std::runtime_error("D3D12 did not flatten the layer's claim over a hidden scene (H1): " + automatic.dump() +
             " full_frame=" + std::to_string(full_frame));
         evidence << "d3d12-h1-layer accepted_layer=" << accepted_layer << " sampled_source=" << automatic.at("sampled_source") <<
@@ -595,13 +597,14 @@ namespace {
       if (!layer_offered || tag23_offered)
         throw std::runtime_error("Auto did not offer the live offscreen UI layer once tag 23 stopped: " + layer_metadata.at("ui_source").dump());
       // An 8-bit layer forwards its stored flags in its own slot: the
-      // late-layer identity and the premultiplied bound (5).
+      // premultiplied bound (1).
       const auto &layer_detection = layer_metadata.at("replay").at("ui_detection");
       if (layer_detection.at("ran_or_held") == "inactive" || !(layer_detection.at("candidates").get<unsigned>() & candidate::layer) ||
           !(layer_detection.at("accepted").get<unsigned>() & candidate::layer) ||
-          (layer_detection.at("flags").get<unsigned>() & ~sunshine_game3d::ui_detection::per_frame_sample) != 5u ||
+          (layer_detection.at("flags").get<unsigned>() & ~sunshine_game3d::ui_detection::per_frame_sample) !=
+            sunshine_game3d::ui_detection::stored_premultiplied ||
           !layer_metadata.at("replay").contains("ui_pin"))
-        throw std::runtime_error("The offscreen UI layer did not reach detection accepted with flags 5: " + layer_detection.dump());
+        throw std::runtime_error("The offscreen UI layer did not reach detection accepted with flags 1: " + layer_detection.dump());
       // The layer is one frame late, but its mask is its raw alpha like every
       // other source: exactly the 160/255 rectangle, never a texel beyond it.
       const auto &pin = layer_metadata.at("replay").at("ui_pin");

@@ -197,7 +197,7 @@ Texture2D<float4> SunshineHUDless : register(t14);
 // Sunshine_UIDetectionFlags (docs/reshade-sbs.md, UI detection flags and
 // decision texels), mirrored from game3d_ui_detection_contract.h. Stored bits
 // describe the offscreen UI layer slot (t7): it must pass the premultiplied
-// bound, with a float layer's HDR headroom, and is the one-frame-late copy.
+// bound, with a float layer's HDR headroom.
 // Per-frame bits ride in one render's pushed word only: the offered UIAlpha
 // or UI color tag was not captured in the exact pair's tag batch (its
 // candidate bit from bit SUNSHINE_UI_PER_FRAME_UNALIGNED_SHIFT; the one-way
@@ -211,13 +211,11 @@ Texture2D<float4> SunshineHUDless : register(t14);
 // samples read the pre-UI scene image visible (H1), and, from bit
 // SUNSHINE_UI_PER_FRAME_REFUTED_SHIFT, the candidate bits whose full claims a
 // visible verdict refuted (H1), and the offered layer's signature is proven
-// the pre-UI scene image (H1 d, the acceptance ledger's pre-UI proof). Every
-// layer is the late copy (stored 0x4), which no pass judges (A2).
+// the pre-UI scene image (H1 d, the acceptance ledger's pre-UI proof).
 #define SUNSHINE_UI_STORED_PREMULTIPLIED 0x1u
 #define SUNSHINE_UI_STORED_HDR_HEADROOM 0x2u
-#define SUNSHINE_UI_STORED_LATE_LAYER 0x4u
-// 0x8u (stored), 0x10000u, 0x20000u, 0x80000u and 0x20000000u (per-frame)
-// are reserved and never reused.
+// 0x4u and 0x8u (stored), 0x10000u, 0x20000u, 0x80000u and 0x20000000u
+// (per-frame) are reserved and never reused.
 #define SUNSHINE_UI_PER_FRAME_UNALIGNED_SHIFT 12
 #define SUNSHINE_UI_PER_FRAME_SAMPLE 0x4000u
 #define SUNSHINE_UI_PER_FRAME_REOFFER 0x8000u

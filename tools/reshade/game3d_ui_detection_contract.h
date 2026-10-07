@@ -38,7 +38,7 @@ namespace sunshine_game3d::ui_detection {
   // Sunshine_UIAcceptedCandidates (b2 word 2), so the tagged UIColorAndAlpha
   // and the offscreen UI layer never share a slot. Shaders without the layout
   // marker use layout 1: the layer in the UI color slot (t12, bit 0x2) with
-  // stored_late_layer, and b2 word 2 the trusted slot indices.
+  // the late-layer bit 0x4, and b2 word 2 the trusted slot indices.
   namespace candidate {
     inline constexpr std::uint32_t ui_alpha = 0x1u;   // t11 .r: a UIAlpha tag.
     inline constexpr std::uint32_t ui_color = 0x2u;   // t12 .a: a UIColorAndAlpha tag, never the layer.
@@ -77,13 +77,12 @@ namespace sunshine_game3d::ui_detection {
   // hidden-scene state, and nothing on the CPU reads them back.
   inline constexpr std::uint32_t stored_premultiplied = 0x1u; // The layer must pass the premultiplied bound (V1).
   inline constexpr std::uint32_t stored_hdr_headroom = 0x2u;  // With a float layer's HDR headroom.
-  // The layer is the one-frame-late copy: inexact evidence (E2) that may
-  // decide but is never judged (A2, ui_selection::judged_kinds). Every layer
-  // copy carries it; no pass reads it since selection revision 10.
-  inline constexpr std::uint32_t stored_late_layer = 0x4u;
-  // 0x8u is reserved (a retired stage-2 bit) and never reused. Selection
-  // revision 10 moved the boundary down from 0x10000u: stored bits 0x10u to
-  // 0x800u are free, never having been used.
+  // 0x4u (the one-frame-late layer bit, which selection revisions 2-9 read;
+  // every layer copy carried it through 180f1842, so dumps until then record
+  // a layer's flags as 5 or 7) and 0x8u (a retired stage-2 bit) are reserved
+  // and never reused.
+  // Selection revision 10 moved the boundary down from 0x10000u: stored bits
+  // 0x10u to 0x800u are free, never having been used.
   inline constexpr std::uint32_t stored_mask = 0xfffu;
   // Per-frame bits ride in the pushed flags word of one render only. They are
   // never stored in the renderer's detection flags.
@@ -131,7 +130,7 @@ namespace sunshine_game3d::ui_detection {
   inline constexpr std::uint32_t per_frame_pre_ui_proven = 0x80000000u;
   inline constexpr std::uint32_t per_frame_mask = 0xfffff000u;
   static_assert((stored_mask & per_frame_mask) == 0 && (stored_mask | per_frame_mask) == 0xffffffffu &&
-    (stored_premultiplied | stored_hdr_headroom | stored_late_layer | 0x8u) <= stored_mask);
+    (stored_premultiplied | stored_hdr_headroom | 0x4u | 0x8u) <= stored_mask);
   static_assert(((candidate::ui_alpha | candidate::ui_color) << per_frame_unaligned_shift) == per_frame_unaligned_mask &&
     (per_frame_unaligned_mask & ~per_frame_mask) == 0 && per_frame_unaligned_mask < per_frame_sample);
   static_assert(((candidate::ui_alpha | candidate::ui_color | candidate::backbuffer | candidate::current | candidate::hudless |
@@ -143,10 +142,9 @@ namespace sunshine_game3d::ui_detection {
   static_assert(((per_frame_unaligned_mask | per_frame_sample | per_frame_reoffer) & ~per_frame_mask) == 0 &&
     (per_frame_unaligned_mask | per_frame_sample | per_frame_reoffer) < 0x10000u && per_frame_sample != per_frame_reoffer);
   // The game3d_native.hlsl define mirroring each flag.
-  inline constexpr std::array<std::pair<std::string_view, std::uint32_t>, 13> hlsl_flag_defines{{
+  inline constexpr std::array<std::pair<std::string_view, std::uint32_t>, 12> hlsl_flag_defines{{
     {"SUNSHINE_UI_STORED_PREMULTIPLIED", stored_premultiplied},
     {"SUNSHINE_UI_STORED_HDR_HEADROOM", stored_hdr_headroom},
-    {"SUNSHINE_UI_STORED_LATE_LAYER", stored_late_layer},
     {"SUNSHINE_UI_PER_FRAME_UNALIGNED_SHIFT", per_frame_unaligned_shift},
     {"SUNSHINE_UI_PER_FRAME_SAMPLE", per_frame_sample},
     {"SUNSHINE_UI_PER_FRAME_REOFFER", per_frame_reoffer},
@@ -208,9 +206,9 @@ namespace sunshine_game3d::ui_detection {
 
   // Flags for an offscreen UI layer copy in the layer slot; the tags have none.
   constexpr std::uint32_t layer_detection_flags(bool float_layer) {
-    return stored_premultiplied | stored_late_layer | (float_layer ? stored_hdr_headroom : 0u);
+    return stored_premultiplied | (float_layer ? stored_hdr_headroom : 0u);
   }
-  static_assert(layer_detection_flags(false) == 5u && layer_detection_flags(true) == 7u);
+  static_assert(layer_detection_flags(false) == 1u && layer_detection_flags(true) == 3u);
   // A layer of this DXGI format has HDR headroom: the whole R32G32B32A32
   // (1-4) or R16G16B16A16 (9-14) typeless family, UNORM included, as the
   // renderer names layer formats by their typeless format.

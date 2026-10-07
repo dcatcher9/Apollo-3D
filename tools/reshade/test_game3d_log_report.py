@@ -70,7 +70,8 @@ def ui2(t, source, covered, alpha, candidates, accepted, pixels=1000, hudless=(0
         tiles=0, lit=0, detection=None, fg=0, late=0):
     """A 'Sunshine UI protection' line since S2a: the S1 fields, then the one-way counts of the layer, Backbuffer and
     current alpha, the own decision's reason, the refused candidate, the T1 reuse and whether the layer was the
-    one-frame-late copy (exporter.cpp), and the HUD-less matching tiles and lit pixels."""
+    one-frame-late copy (exporter.cpp through 180f1842; late=None omits it, as later lines do), and the HUD-less
+    matching tiles and lit pixels."""
     detection = detection or ('detected' if source else 'no_usable_mask')
     reason = reason or ('decided' if source and not reused else 'unaccepted')
     a = '/'.join(str(v) for v in alpha)
@@ -85,7 +86,8 @@ def ui2(t, source, covered, alpha, candidates, accepted, pixels=1000, hudless=(0
                    f'sampled_candidates=0x{candidates:x} sampled_alpha_covered={a} sampled_alpha_invalid={i} '
                    f'accepted=0x{accepted:x} sampled_layer={{covered={layer[0]} invalid={layer[1]} opaque=0}} '
                    f'sampled_one_way={{strong={s} contradicted={c}}} sampled_reason={reason} '
-                   f'sampled_refused={refused} sampled_reused={reused} sampled_late_layer={late} '
+                   f'sampled_refused={refused} sampled_reused={reused} '
+                   + ('' if late is None else f'sampled_late_layer={late} ') +
                    f'sampled_hudless={{changed={hudless[0]} unchanged={hudless[1]} invalid=0 '
                    f'matching_tiles={tiles} lit={lit}}} sampled_alpha_opaque=0/0 '
                    f'sampled_scene={{n=0 d=0.000 valid=0 ran=0 verdict=none}} '
@@ -850,6 +852,13 @@ class ReadinessReport(unittest.TestCase):
         late = [ui2(t, 1, 20, (20, 0, 0, 0), 0x41, 0x41, layer=(400, 0), late=1)
                 for t in ('10:00:12', '10:00:13', '10:00:14')]
         self.assertEqual(run(BASE + late)['UI protection'].status, 'PASS')
+        # Lines after 180f1842 no longer carry sampled_late_layer; the layer is never judged all the same.
+        unmarked = [ui2(t, 1, 20, (20, 0, 0, 0), 0x41, 0x41, layer=(400, 0), late=None)
+                    for t in ('10:00:12', '10:00:13', '10:00:14')]
+        self.assertNotIn('sampled_late_layer', unmarked[0])
+        parsed = report.parse(BASE + unmarked).ui
+        self.assertEqual((len(parsed), parsed[0].s2a, parsed[0].late_layer), (3, True, False))
+        self.assertEqual(run(BASE + unmarked)['UI protection'].status, 'PASS')
 
     def test_counted_contradiction_resolved_by_revocation_passes(self):
         # The designed safety net (A2): an accepted Backbuffer that a valid exact pair contradicts one way keeps
@@ -899,26 +908,26 @@ class ReadinessReport(unittest.TestCase):
                          ['UI protection'].status, 'FAIL')
 
     def test_s2a_declared_coverage_disputes_name_their_revocation(self):
-        # A2 (b) since S2a: an accepted inferred alpha, a same-frame layer included, disagrees with an accepted
-        # UIAlpha. Three such samples within 2 s without a revocation warn; fewer are noted.
+        # A2 (b) since S2a: an accepted inferred alpha disagrees with an accepted UIAlpha. Three such samples within
+        # 2 s without a revocation warn; fewer are noted. The layer is never judged (the one-frame-late copy, E2).
 
         def disagreeing(t='10:00:12'):
-            return ui2(t, 1, 20, (20, 0, 0, 0), 0x41, 0x41, layer=(400, 0))
-        layer = disagreeing()
-        checks = run(BASE + [accepted_now('10:00:10', 'ui_alpha:61:srgb,ui_layer:28:srgb'), layer])
+            return ui2(t, 1, 20, (20, 0, 400, 0), 0x45, 0x45)
+        backbuffer = disagreeing()
+        checks = run(BASE + [accepted_now('10:00:10', 'ui_alpha:61:srgb,backbuffer:28:srgb'), backbuffer])
         self.assertEqual(checks['UI protection'].status, 'PASS')
         self.assertIn('1 sampled A2 contradictions shorter than the revocation condition',
                       checks['UI protection'].detail)
-        checks = run(BASE + [accepted_now('10:00:10', 'ui_alpha:61:srgb,ui_layer:28:srgb')]
+        checks = run(BASE + [accepted_now('10:00:10', 'ui_alpha:61:srgb,backbuffer:28:srgb')]
                      + [disagreeing(t) for t in ('10:00:12', '10:00:13', '10:00:14')])
         self.assertEqual(checks['UI protection'].status, 'WARN')
         self.assertIn('accepted inferred alpha disagreed with an accepted UI alpha or UI color tag 3 times within 2 s',
                       checks['UI protection'].detail)
-        handled = run(BASE + [accepted_now('10:00:10', 'ui_alpha:61:srgb,ui_layer:28:srgb'), layer,
+        handled = run(BASE + [accepted_now('10:00:10', 'ui_alpha:61:srgb,backbuffer:28:srgb'), backbuffer,
                               accepted_now('10:00:14', 'ui_alpha:61:srgb')])
         self.assertEqual(handled['UI protection'].status, 'PASS')
         self.assertEqual(handled['UI protection'].times,
-                         ['10:00:12 UI layer 40% vs declared UI 2.0%, acceptance revoked 10:00:14 '
+                         ['10:00:12 Backbuffer alpha 40% vs declared UI 2.0%, acceptance revoked 10:00:14 '
                           '(A2, declared coverage)'])
         # The layer no longer judges presented alpha, and an invalid declared alpha judges nothing.
         beside = ui2('10:00:12', 10, 5, (0, 0, 400, 0), 0x44, 0x44, layer=(5, 0))
@@ -1198,17 +1207,23 @@ class ReadinessReport(unittest.TestCase):
         # S2b logs have no proof keys, and so no such line.
         self.assertNotIn('Pre-UI proof', run(BASE + [restored.replace(',pre_ui:87:srgb', '')]))
 
-        # A pre-UI proof key is not a UI coverage source: a layer acceptance revoked beside a proof of the same
-        # format resolves the layer's dispute, and a proof that lapses alone resolves nothing.
+        # A pre-UI proof key is not a UI coverage source: an accepted source's revocation beside a proof of the same
+        # format resolves its dispute, and a proof that lapses alone resolves nothing. The layer the proof is about is
+        # never judged (the one-frame-late copy, E2), so its disagreement is no dispute either way.
         def disagreeing(t):
-            return ui2(t, 1, 20, (20, 0, 0, 0), 0x41, 0x41, layer=(400, 0))
+            return ui2(t, 1, 20, (20, 0, 400, 0), 0x45, 0x45)
         samples = [disagreeing(t) for t in ('10:00:12', '10:00:13', '10:00:14')]
-        start = accepted_now('10:00:10', 'ui_alpha:61:srgb,ui_layer:28:srgb,pre_ui:28:srgb')
+        start = accepted_now('10:00:10', 'ui_alpha:61:srgb,backbuffer:28:srgb,pre_ui:28:srgb')
         handled = run(BASE + [start] + samples + [accepted_now('10:00:15', 'ui_alpha:61:srgb,pre_ui:28:srgb')])
         self.assertEqual(handled['UI protection'].status, 'PASS')
         self.assertIn('acceptance revoked 10:00:15', handled['UI protection'].times[0])
-        unresolved = run(BASE + [start] + samples + [accepted_now('10:00:15', 'ui_alpha:61:srgb,ui_layer:28:srgb')])
+        unresolved = run(BASE + [start] + samples + [accepted_now('10:00:15', 'ui_alpha:61:srgb,backbuffer:28:srgb')])
         self.assertEqual(unresolved['UI protection'].status, 'WARN')
+        layer = [ui2(t, 1, 20, (20, 0, 0, 0), 0x41, 0x41, layer=(400, 0), late=None)
+                 for t in ('10:00:12', '10:00:13', '10:00:14')]
+        start = accepted_now('10:00:10', 'ui_alpha:61:srgb,ui_layer:28:srgb,pre_ui:28:srgb')
+        kept = run(BASE + [start] + layer + [accepted_now('10:00:15', 'ui_alpha:61:srgb,ui_layer:28:srgb')])
+        self.assertEqual((kept['UI protection'].status, kept['UI protection'].times), ('PASS', []))
 
     def test_empty_change_set_is_valid_v2_evidence(self):
         # Since selection revision 8 a lit pair without any changed pixel in clean tiles is a valid empty change set

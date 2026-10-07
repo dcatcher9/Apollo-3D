@@ -2467,8 +2467,9 @@ namespace {
     ui.automatic = &source; ui.detection = &inputs;
     const auto expected_flags = ui_detection::layer_detection_flags(gpu.color == 2);
     // Every automatic mask is its source's raw alpha: the one-frame-late layer
-    // (stored flag 0x4) exactly like a same-frame tagged UI color.
-    require(expected_flags & ui_detection::stored_late_layer, "The offscreen UI layer lost its late-layer flag");
+    // exactly like a same-frame tagged UI color. Its flags never carry the
+    // reserved late-layer bit 0x4.
+    require(!(expected_flags & 0x4u), "The offscreen UI layer carried the reserved late-layer bit");
     // per_frame: the T1 bits this detection pushes beside the stored flags;
     // each check is 100 ms after the previous one, so its detection is a
     // status sample (per_frame_sample).
@@ -2623,7 +2624,7 @@ namespace {
     const std::vector<float> ones(pixels, 1.f);
     const auto opaque_ui_alpha = as_view(view_of(ones.data(), width * 4u, DXGI_FORMAT_R32_FLOAT));
     const auto layer_flags = ui_layer::detection_flags(static_cast<api::format>(color_desc.Format));
-    require(layer_flags & ui_detection::stored_late_layer, "The fixture layer lost its late-layer identity");
+    require(!(layer_flags & 0x4u), "The fixture layer carried the reserved late-layer bit");
 
     alpha_auto_policy policy;
     alpha_auto_source source;

@@ -362,8 +362,8 @@ class UISample(NamedTuple):
     reused: bool = False
     tiles: int = 0  # HUD-less matching tiles and lit pixels (V2).
     lit: int = 0
-    # The offered layer was the one-frame-late copy, which no A2 judge reads (E2); since S2a, absent before. Since
-    # selection revision 10 the field means a layer was offered (the layer is never judged).
+    # sampled_late_layer, on lines from S2a through 180f1842: the offered layer was the one-frame-late copy, which
+    # no A2 judge reads (E2). Every layer was that copy, so the field only repeated that a layer was offered.
     late_layer: bool = False
     # Since selection revision 10: the declared alphas' (UIAlpha, UI colour tag) strong and one-way contradicted
     # pixels, ((strong...), (contradicted...)); None before.
@@ -1143,14 +1143,14 @@ def ui_checks(s: Session, add) -> None:
         if u.blocking(admitted=True) and u.source in tuple(ALPHA_SOURCES[c] for c in u.kept_out()):
             overrides.append(f'{clock(u.t)} source {u.source} covered {100 * u.covered / u.pixels:.0f}%')
         if u.s2a:
-            # A2 as the ledger judges it since S2a: an accepted, V1-valid inferred alpha (the layer, Backbuffer or
-            # current alpha; never the one-frame-late layer copy, E2) offered in the sample, contradicted (a) one way
+            # A2 as the ledger judges it since S2a: an accepted, V1-valid inferred alpha (Backbuffer or current alpha;
+            # never the layer, the one-frame-late copy, E2) offered in the sample, contradicted (a) one way
             # by a valid exact pair or (b) by coverage differing by at least 10% of the frame from every accepted,
             # valid UIAlpha or UI color tag offered in the same sample.
             masks = [u.alpha[c] for c in DECLARED if u.offered(c) and u.is_accepted(c) and u.valid(c)]
             judged = INFERRED + (DECLARED if u.declared_one_way is not None else ())
             for c in judged:
-                if not (u.offered(c) and u.is_accepted(c) and u.valid(c)) or (c == 4 and u.late_layer):
+                if not (u.offered(c) and u.is_accepted(c) and u.valid(c)) or c == 4:
                     continue
                 if u.one_way(c):
                     strong, against = u.one_way_counts(c)

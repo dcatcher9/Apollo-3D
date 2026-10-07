@@ -83,8 +83,7 @@ namespace sunshine_game3d::ui_layer {
   // Formats that can carry blended UI coverage in alpha: 8 bits or more.
   bool alpha_format(api::format format);
   // Sunshine_UIDetectionFlags of the layer slot for a copy of this format
-  // (ui_detection::layer_detection_flags): the late-layer identity, the
-  // premultiplied bound of V1 (no color above twice its alpha: UI blended over
+  // (ui_detection::layer_detection_flags): the premultiplied bound of V1 (no color above twice its alpha: UI blended over
   // transparent black, allowing tints brighter than white) and, for a float
   // layer, HDR headroom. A copy with color but no alpha fails that bound
   // nearly everywhere and is V1-invalid for that frame.
