@@ -2108,8 +2108,8 @@ namespace {
         generation.pending_ui_parallax_uv = float(sequence) * .001f;
         exporter_async_fixture::native_commands commands;
         commands.native = gpu.copies[pattern].commands.get();
-        require(generation.submit(&commands, {reinterpret_cast<std::uint64_t>(source.get())}, index, sequence),
-          "Production generation failed to record an asynchronous copy");
+        generation.submit(&commands, {reinterpret_cast<std::uint64_t>(source.get())}, index, sequence);
+        require(generation.last_submitted == sequence, "Production generation failed to record an asynchronous copy");
         require(publisher.acquire_slot(generation.completed()) == wire::slot_count,
           "An unfenced pending recording admitted another export");
         source.reset(); // Only production slot ownership keeps this source alive.

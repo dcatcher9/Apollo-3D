@@ -654,7 +654,7 @@ namespace {
     // writes every pixel of the slot from this same source (composite_ps
     // returns the source wherever the controls are transparent), so a copy
     // first would only be overwritten. The source is retained either way.
-    bool submit(api::command_list *commands, api::resource input, std::uint32_t index, std::uint64_t sequence,
+    void submit(api::command_list *commands, api::resource input, std::uint32_t index, std::uint64_t sequence,
         bool copy = true) {
       auto &submitted_source = submitted_sources[index];
       submitted_source.reset();
@@ -664,7 +664,7 @@ namespace {
       const auto destination = texture(index);
       // Set this before appending commands: an exception cannot make recorded work appear idle.
       last_submitted = sequence;
-      if (!copy) return true;
+      if (!copy) return;
       commands->barrier(input, api::resource_usage::shader_resource, api::resource_usage::copy_source);
       if (backend == api::device_api::d3d12) {
         commands->barrier(destination, api::resource_usage::general, api::resource_usage::copy_dest);
@@ -676,7 +676,6 @@ namespace {
       commands->barrier(input, api::resource_usage::copy_source, api::resource_usage::shader_resource);
       // The native overlay is drawn after techniques. Its composition must be included in
       // this same bounded submission before signalling or exposing the slot to Sunshine.
-      return true;
     }
   };
 
@@ -2147,10 +2146,7 @@ namespace {
           // With the overlay open its composite writes the whole slot from the
           // source in reshade_present, so nothing is copied first; a dump, a
           // reference export or a failed direct pack copies the source.
-          if (!generation_->submit(commands, source.resource, index, sequence, !overlay_open(runtime))) {
-            deactivate(runtime, "submit_failed");
-            return;
-          }
+          generation_->submit(commands, source.resource, index, sequence, !overlay_open(runtime));
         }
         if (dump) capture_diagnostic(runtime, proof, commands, generation_->id, sequence);
         if (overlay_open(runtime)) {
