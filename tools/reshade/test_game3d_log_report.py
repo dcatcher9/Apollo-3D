@@ -857,7 +857,9 @@ class ReadinessReport(unittest.TestCase):
                     for t in ('10:00:12', '10:00:13', '10:00:14')]
         self.assertNotIn('sampled_late_layer', unmarked[0])
         parsed = report.parse(BASE + unmarked).ui
-        self.assertEqual((len(parsed), parsed[0].s2a, parsed[0].late_layer), (3, True, False))
+        self.assertEqual((len(parsed), parsed[0].s2a), (3, True))
+        # A line that still carries the field parses to the same samples.
+        self.assertEqual(report.parse(BASE + late).ui, parsed)
         self.assertEqual(run(BASE + unmarked)['UI protection'].status, 'PASS')
 
     def test_counted_contradiction_resolved_by_revocation_passes(self):
@@ -1258,9 +1260,8 @@ class ReadinessReport(unittest.TestCase):
         sample = report.parse(BASE + [flat('10:00:12')]).ui[0]
         self.assertEqual((sample.s2a, sample.strong, sample.contradicted, sample.one_way_counts(2), sample.one_way(2),
                           sample.declared_one_way, sample.scene.s2b, sample.scene.pre_ui_pixels,
-                          sample.scene.hidden_ms, sample.late_layer),
-                         (True, (0, 1000, 0), (0, 800, 0), (1000, 800), True, ((0, 0), (0, 0)), True, (7, 9), 0,
-                          False))
+                          sample.scene.hidden_ms),
+                         (True, (0, 1000, 0), (0, 800, 0), (1000, 800), True, ((0, 0), (0, 0)), True, (7, 9), 0))
         # The same Backbuffer contradiction as on older lines: three within 2 s that no revocation followed fail.
         resolved = {**CLEAN_COUNTERS, 'contradicted': 120, 'trust.revoked_exact': 1}
         run3 = [flat('10:00:12'), flat('10:00:13'), flat('10:00:14')]

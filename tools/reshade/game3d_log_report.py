@@ -59,12 +59,13 @@ UI = re.compile(
     r'invalid=(?P<layer_invalid>\d+) opaque=\d+\}'
     r'|trusted_alpha=(?P<trusted>0x[0-9a-fA-F]+)(?: sampled_ui_layer=(?P<layer>\d))?) '
     # Since S2a the one-way judgment counts of the layer, Backbuffer and current alpha (A2; after be7788bf only
-    # Backbuffer and current alpha, as no build has judged the layer since selection revision 10), the sample's
-    # own-decision reason, the candidate it refused and whether the T1 grace reused the previous real frame's decision
-    # (F1).
+    # Backbuffer and current alpha: the layer's column was 0 on every line, as every layer was the never-judged
+    # one-frame-late copy), the sample's own-decision reason, the candidate it refused and whether the T1 grace reused
+    # the previous real frame's decision (F1). Lines from S2a through 180f1842 also carry sampled_late_layer, which
+    # only repeated that a layer was offered and is skipped.
     r'(?:sampled_one_way=\{strong=(?P<strong>\d+/\d+(?:/\d+)?) contradicted=(?P<contradicted>\d+/\d+(?:/\d+)?)\} '
     r'sampled_reason=(?P<reason>\w+) sampled_refused=(?P<refused>\w+) sampled_reused=(?P<reused>\d) '
-    r'(?:sampled_late_layer=(?P<late>\d) )?)?'
+    r'(?:sampled_late_layer=\d )?)?'
     r'sampled_hudless=\{changed=(?P<changed>\d+) unchanged=(?P<unchanged>\d+) invalid=(?P<hudless_invalid>\d+)'
     r'(?: matching_tiles=(?P<tiles>\d+) lit=(?P<lit>\d+))?')
 # Hidden-scene fields of the same line, absent from older logs. Before S2b the HUD-less image's D and the held routes
@@ -364,9 +365,6 @@ class UISample(NamedTuple):
     reused: bool = False
     tiles: int = 0  # HUD-less matching tiles and lit pixels (V2).
     lit: int = 0
-    # sampled_late_layer, on lines from S2a through 180f1842: the offered layer was the one-frame-late copy, which
-    # no A2 judge reads (E2). Every layer was that copy, so the field only repeated that a layer was offered.
-    late_layer: bool = False
     # Since selection revision 10: the declared alphas' (UIAlpha, UI colour tag) strong and one-way contradicted
     # pixels, ((strong...), (contradicted...)); None before.
     declared_one_way: tuple[tuple[int, int], tuple[int, int]] | None = None
@@ -549,7 +547,7 @@ def ui_sample(t: float, text: str, g: dict[str, str | None], scene: Scene | None
                     field_of(UI_AVAILABILITY, ''), field_of(UI_FG, '0') == '1', legacy,
                     judged(g['strong']) if s2a else None, judged(g['contradicted']) if s2a else None,
                     g['reason'] or '', g['refused'] or '', g['reused'] == '1', int(g['tiles'] or 0),
-                    int(g['lit'] or 0), g['late'] == '1')
+                    int(g['lit'] or 0))
 
 
 @dataclass
