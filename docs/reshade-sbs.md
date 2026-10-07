@@ -4818,11 +4818,21 @@ the rest of it. The loop then re-checks for an IDR or reference invalidation: on
 restarts the iteration, and the newest completed frame is encoded at once as the recovery frame
 rather than first as a P-frame the client cannot use. Shutdown, reinit and video-mode changes are
 re-checked before the conversion, and a stream-gamma request applies from the next one. Every
-other wait ends at a fence
-wake, a desktop capture, a control request or the keepalive. Waits on the image event cannot end
-at a target: with this toolchain (winpthreads; libstdc++ without a clock-based condition-variable
-wait) a timed wait that nothing notifies ends only at the next 15.625 ms Windows scheduler tick,
-even for a zero timeout and whatever the timer resolution. Until 10-06 every loop iteration also
+other wait ends at the first of a fence
+wake, a desktop capture, a control request and its bound (the pending frame's poll target or the
+keepalive). With this toolchain (winpthreads; libstdc++ without a clock-based condition-variable
+wait) a timed condition-variable wait that nothing notifies ends only at the next 15.625 ms Windows
+scheduler tick, even for a zero timeout and whatever the timer resolution. Every bounded image wait
+of the encode loop (Game 3D, desktop, desktop Host SBS, the keepalive) therefore waits on a
+deadline waiter (`platf::create_deadline_waiter`, `detail::pop_encode_image`): the encode thread
+itself waits for an event, which every raise, wake and stop of the image event sets while it waits,
+or for a high-resolution waitable timer armed at the bound, and then re-checks the bound against the
+steady clock, so a stale notification never ends a wait early and no callback outlives the wait.
+A wait that reaches its bound returns no image, as a timeout always did. Such waits ran 4.4-15.3 ms
+past their bound on average and up to 24 ms in `RemoteEncodeImageWaitTest` (live 10-06 desktop
+Host SBS: 48-133 of 1100-1400 waits per 20 s ran to their bound, 5.6 ms late on average and 12-13
+ms at most); they now end 0.2-0.45 ms after it on average and at most 0.8 ms (1.6 ms for a bare
+3 ms pop) over 25 repeated runs. Until 10-06 every loop iteration also
 began with a zero-timeout pop of the empty stream-gamma queue, so the loop ran at most once per
 tick: in Stellar Blade at 4K the host claimed 56-62 new frames/s of a 90 fps stream while its fence
 wakes arrived on time and the add-on replaced 25-109 finished frames/s that it never claimed.
@@ -4837,11 +4847,13 @@ delay only after the first such report starts its window, so without diagnostics
 takes the fence callback's lock. The encode loop logs its own account at the same interval,
 `Video encode loop: I iterations in 20.0 s; N new-content and R repeated-content encodes; holding
 ... in H exact holds (requested ..., overshoot avg/max); waiting ... in W image waits (requested
-...; T ran to their bound, overshoot avg/max); converting ...; encoding ... (NVENC submit ...,
+...; T ran to their bound on the deadline timer, overshoot avg/max); converting ...; encoding ... (NVENC submit ...,
 completion wait ...; up to D pictures in flight, B submitted behind another, submission to packet
 avg/max); loop work ...`. Encodes are told apart by the encoded content's identity,
 as the packets' content-age loggers do, so a keepalive that re-renders an unchanged export counts
-as repeated content although it converted. Image waits that run to their bound with an overshoot near 15.6 ms are tick-bound waits. While an
+as repeated content although it converted. On the deadline timer an image wait that runs to its
+bound overshoots it by a fraction of a millisecond; `at a scheduler tick` instead means the timer
+could not be created and such waits end up to 15.6 ms late. While an
 export is live the loop neither polls nor repeats frames at stream cadence: new exports, cursor
 changes and the minimum-FPS keepalive (which re-checks the connection) produce frames, and a due
 stream-gamma white-level query runs in the next of them rather than forcing a repeat.
@@ -4923,8 +4935,10 @@ flight take 90.0, 0.5/s with older depth, 15.7 and 19.7 ms. A conversion that al
 stream), and at the 09-06 live times (conversion call 2.3 ms, NVENC 6 ms on average), no picture is
 ever submitted behind another: both depths take every capture and two in flight cost the copy into
 the picture's input (0.3 ms modelled for its 50 MB each way). Polls of a pending
-inference on a static desktop keep their stream-interval cadence and deliver the frame's own depth at
-the same time either way. A packet dropped by the full encoded queue while the loop waits needs the
+inference on a static desktop never come faster than the stream interval; with their bound on the
+deadline timer, two in flight poll at that interval and one at a time each poll also waits for its
+picture, so the frame's own depth leaves 19.7 ms after its inference completes on average with two
+in flight against 24.7 ms one at a time. A packet dropped by the full encoded queue while the loop waits needs the
 retrieving thread's wake, as desktop capture wakes nothing else: without it the IDR waited for the
 next capture, which became a discarded delta (the IDR 5.5 ms after the drop at 90 fps), or on a
 static desktop for the idle bound behind a discarded repeat (55 ms); with it the IDR is submitted

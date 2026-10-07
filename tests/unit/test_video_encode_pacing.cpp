@@ -9,8 +9,10 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
+#include <src/platform/common.h>
 #include <src/platform/windows/capture_timing.h>
 #include <src/platform/windows/display.h>
 #include <src/reshade_bridge_protocol.h>
@@ -357,8 +359,16 @@ namespace {
   // re-waits until that count passes a timed wait's deadline, so even a zero timeout ends only at
   // the next tick; timeBeginPeriod and NtSetTimerResolution do not change it.
   constexpr auto windows_tick = 15625us;
-  // A high-resolution waitable timer ends a 1 ms sleep after 1.4-1.55 ms on average.
+  // A high-resolution waitable timer ends a 1 ms sleep after 1.4-1.55 ms on average: an exact hold,
+  // and since 10-06 an image wait that runs to its bound on the deadline timer (0.2-0.35 ms late in
+  // RemoteEncodeImageWaitTest; live holds 0.27-0.29 ms).
   constexpr auto hold_timer_overshoot = 500us;
+
+  // When an image wait that nothing else ends ends in the production loop: on the deadline timer
+  // (video::detail::pop_encode_image()), shortly after its bound.
+  std::chrono::nanoseconds deadline_wait_end(std::chrono::nanoseconds start, std::chrono::nanoseconds wait) {
+    return wait > 0ns ? start + wait + hold_timer_overshoot : start;
+  }
 
   // A condition-variable wait that nothing notifies ends at the first Windows scheduler tick at or
   // after its deadline, counted from the tick before it started (winpthreads without a clock-based
@@ -392,7 +402,8 @@ namespace {
      *  re-checked every millisecond from there (export_recheck_wait), both tick-bound. */
     head,
     /** Zero-timeout pops only check; a pending frame is held exactly to its poll target
-     *  (provider_hold()); every other wait ends at a wake, capture or its keepalive bound. */
+     *  (provider_hold()); every other wait ends at a wake, capture or its keepalive bound, that
+     *  bound on the deadline timer (deadline_wait_end()). */
     production,
   };
 
@@ -484,9 +495,10 @@ namespace {
   // does; a fence wake or desktop capture ends an image wait early, and one that arrives while the
   // loop is busy ends the next image wait at once (event_t). After the wait a pending frame
   // converts once due, a due keepalive repeats the input, and anything else encodes nothing.
-  // Waits take as long as they really do with this toolchain: a condition-variable wait that
-  // nothing notifies ends at a Windows scheduler tick (windows_tick). The ring has `slots` slots:
-  // the protocol's, or three for the ring before protocol 4.
+  // Waits take as long as they really do with this toolchain: under the head rules a
+  // condition-variable wait that nothing notifies ends at a Windows scheduler tick (windows_tick),
+  // under the production rules on the deadline timer. The ring has `slots` slots: the protocol's,
+  // or three for the ring before protocol 4.
   export_ring_result_t simulate_export_ring(game_frames_e mode, fence_wake_e wake, loop_rules_e rules, std::chrono::nanoseconds duration = 4s, std::optional<encoder_model_t> encoder = std::nullopt, int slots = static_cast<int>(::reshade_bridge::slot_count)) {
     constexpr auto stream = 11111111ns;  // 90 fps
     constexpr auto threshold = stream / 4;
@@ -665,7 +677,7 @@ namespace {
           continue;
         } else {
           const auto wait = pending_wait ? std::min(*pending_wait, keepalive_wait) : keepalive_wait;
-          wait_until = wait > 0ns ? tick_wait_end(now, wait) : now;
+          wait_until = deadline_wait_end(now, wait);
           loop = loop_e::waiting;
         }
       }
@@ -1064,10 +1076,10 @@ namespace {
       }
       if (!waiting) {
         // A capture already handed over ends the wait at once; otherwise only a capture or the
-        // bound (at a scheduler tick, as nothing else notifies) ends it.
+        // bound (on the deadline timer, as nothing else notifies) ends it.
         const auto pending_wait = source.remaining_wait(at(now), target);
         const auto wait = video::detail::encode_image_wait(idle, stream, true, false, false, pending_wait);
-        wait_until = wait > 0ns ? tick_wait_end(now, wait) : now;
+        wait_until = deadline_wait_end(now, wait);
         waiting = true;
       }
       if (!mailbox && now < wait_until) {
@@ -1278,10 +1290,10 @@ namespace {
 
   // The desktop then stays static, and the final capture's inference missed the same-frame budget:
   // it completes at `inference_done`. While that poll is pending encode_run() caps its image wait at
-  // the stream interval (encode_image_wait(); it ends at a scheduler tick, as no capture notifies),
-  // and each timeout reconverts the retained source. Its nonblocking query keeps the target while
-  // the inference is busy (a packed repeat) and draws the frame with its own depth once complete;
-  // the idle heartbeat then resumes. The final capture's picture was submitted at 4.4 ms.
+  // the stream interval (encode_image_wait(); it ends on the deadline timer, as no capture
+  // notifies), and each timeout reconverts the retained source. Its nonblocking query keeps the
+  // target while the inference is busy (a packed repeat) and draws the frame with its own depth once
+  // complete; the idle heartbeat then resumes. The final capture's picture was submitted at 4.4 ms.
   struct pending_inference_result_t {
     std::vector<std::chrono::nanoseconds> polls;  ///< When each retained-source poll converted.
     std::chrono::nanoseconds upgraded_packet {};  ///< When the frame drawn with its own depth left.
@@ -1301,7 +1313,7 @@ namespace {
     bool poll_pending = true;
     while (true) {
       const auto wait = video::detail::encode_image_wait(idle, stream, true, false, poll_pending, std::nullopt);
-      now = tick_wait_end(now, wait);
+      now = deadline_wait_end(now, wait);
       if (!poll_pending) {
         result.heartbeat = now;
         return result;
@@ -1331,6 +1343,7 @@ namespace {
 
   TEST(RemoteEncodeHostSbsPipelineTest, PendingInferencePollsKeepTheirCadenceWithPicturesInFlight) {
     constexpr std::chrono::nanoseconds stream {11111111ns}, idle {55555555ns};
+    std::chrono::nanoseconds serial_delivery {}, pipelined_delivery {};
     for (const std::chrono::nanoseconds inference_done : {6ms, 20ms, 30ms, 47ms, 80ms}) {
       const auto serial = simulate_pending_inference_on_static_desktop(1, inference_done);
       const auto pipelined = simulate_pending_inference_on_static_desktop(2, inference_done);
@@ -1350,15 +1363,30 @@ namespace {
         }
         // ...the first poll after the completion draws the frame with its own depth...
         EXPECT_GE(result->polls.back(), inference_done);
-        EXPECT_LT(result->polls.back() - inference_done, windows_tick);
+        if (result->polls.size() > 1) {
+          EXPECT_LT(result->polls[result->polls.size() - 2], inference_done);
+        }
         // ...and the idle heartbeat then resumes.
         EXPECT_GE(result->heartbeat - result->polls.back(), idle);
       }
+      // Two in flight poll at the stream interval (each wait ends on the deadline timer, after the
+      // poll's query and submission); one at a time each poll first waits for its picture.
+      for (std::size_t poll = 1; poll < pipelined.polls.size(); ++poll) {
+        EXPECT_LT(pipelined.polls[poll] - pipelined.polls[poll - 1], stream + 1500us);
+      }
       EXPECT_EQ(serial.max_in_flight, 1u);
       EXPECT_LE(pipelined.max_in_flight, 2u);
-      EXPECT_LE(pipelined.polls.size(), serial.polls.size() + 1);
-      EXPECT_LE(pipelined.upgraded_packet, serial.upgraded_packet);
+      serial_delivery += serial.upgraded_packet - inference_done;
+      pipelined_delivery += pipelined.upgraded_packet - inference_done;
     }
+    // Which poll comes first after a completion depends on its phase; on average two in flight
+    // deliver the frame's own depth sooner.
+    std::printf(
+      "[ MEASURE  ] own depth's packet after the inference completes: one at a time %.1f ms, two in flight %.1f ms on average\n",
+      std::chrono::duration<double, std::milli>(serial_delivery).count() / 5,
+      std::chrono::duration<double, std::milli>(pipelined_delivery).count() / 5
+    );
+    EXPECT_LT(pipelined_delivery, serial_delivery);
   }
 
   // A recovery IDR on a desktop source (desktop Host SBS, or plain desktop one picture at a time),
@@ -1469,7 +1497,7 @@ namespace {
           idr_raised = false;
           if (!recovery || mailbox) {
             const auto wait = video::detail::encode_image_wait(idle, stream, true, false, false, source.remaining_wait(at(now), target));
-            wait_until = wait > 0ns ? tick_wait_end(now, wait) : now;
+            wait_until = deadline_wait_end(now, wait);
             phase = phase_e::waiting;
           } else if (reads_after_wait) {
             woken = false;  // images->discard_wake()
@@ -1668,7 +1696,7 @@ namespace {
     const auto line = stats.report(1s);
     EXPECT_NE(line.find("2 iterations in 1.0 s; 1 new-content and 1 repeated-content encodes"), std::string::npos) << line;
     EXPECT_NE(line.find("holding 2.0 ms in 1 exact holds (requested 1.5 ms, overshoot avg 0.50 max 0.50 ms)"), std::string::npos) << line;
-    EXPECT_NE(line.find("waiting 18.6 ms in 2 image waits (requested 56.0 ms; 1 ran to their bound, overshoot avg 14.60 max 14.60 ms)"), std::string::npos) << line;
+    EXPECT_NE(line.find("waiting 18.6 ms in 2 image waits (requested 56.0 ms; 1 ran to their bound at a scheduler tick, overshoot avg 14.60 max 14.60 ms)"), std::string::npos) << line;
     EXPECT_NE(line.find("converting 0.2 ms in 1 conversions; encoding 14.6 ms (NVENC submit 0.5 ms, completion wait 13.7 ms; "
                         "up to 1 picture in flight, 0 submitted behind another, submission to packet avg 7.30 max 9.60 ms)"),
               std::string::npos)
@@ -1676,6 +1704,12 @@ namespace {
     EXPECT_NE(line.find("loop work 964.6 ms"), std::string::npos) << line;
     stats.reset();
     EXPECT_EQ(stats.iterations(), 0u);
+
+    // On the deadline timer a wait that runs to its bound ends a fraction of a millisecond late.
+    stats.set_deadline_timer(true);
+    stats.reset();
+    stats.waited(11111us, 11411us);
+    EXPECT_NE(stats.report(1s).find("1 ran to their bound on the deadline timer, overshoot avg 0.30 max 0.30 ms"), std::string::npos) << stats.report(1s);
   }
 
   TEST(RemoteEncodeLoopStatsTest, ReportsPicturesInFlightAndTheirSubmissionToPacketTime) {
@@ -1962,6 +1996,86 @@ namespace {
     const auto idle = std::chrono::steady_clock::now();
     EXPECT_FALSE(images.pop(20ms));  // A full wait again.
     EXPECT_GE(std::chrono::steady_clock::now() - idle, 15ms);
+  }
+
+  // Live 10-06 22:49 (desktop Host SBS): 48-133 of ~1100-1400 image waits per 20 s ran to their
+  // bound (a static or idle screen, the pending-inference re-poll, the minimum-FPS keepalive) and
+  // ended 5.6 ms past it on average, 12-13 ms at most. The real image event, as encode_run() waits
+  // on it, with the bounds those waits have: a pending capture's presentation deadline, the
+  // re-poll's stream interval and a short keepalive. On the condition variable alone these
+  // measured 15.3/4.4/11.1 ms late on average, 23.7/4.9/11.5 ms at most.
+  TEST(RemoteEncodeImageWaitTest, AnImageWaitThatNothingEndsEndsWithinAMillisecondOfItsBound) {
+    const auto waiter = platf::create_deadline_waiter();
+    ASSERT_TRUE(waiter);
+    safe::event_t<std::shared_ptr<captured_source>> images;
+    constexpr std::chrono::nanoseconds stream {11111111ns};
+
+    struct bound_t {
+      const char *label;
+      std::chrono::nanoseconds idle;
+      bool poll_pending;
+      std::optional<std::chrono::nanoseconds> pending_source;
+      std::chrono::nanoseconds expected;
+    };
+
+    for (const auto &bound : {
+           bound_t {"pending capture", 55555555ns, false, 2500us, 2500us},
+           bound_t {"pending inference re-poll", 55555555ns, true, std::nullopt, stream},
+           bound_t {"keepalive", 20ms, false, std::nullopt, 20ms},
+         }) {
+      std::chrono::nanoseconds total {}, max {};
+      constexpr int waits = 5;
+      for (int i = 0; i < waits; ++i) {
+        const auto wait = video::detail::encode_image_wait(bound.idle, stream, true, false, bound.poll_pending, bound.pending_source);
+        ASSERT_EQ(wait, bound.expected) << bound.label;
+        const auto started = std::chrono::steady_clock::now();
+        EXPECT_FALSE(video::detail::pop_encode_image(images, wait, waiter.get()));
+        const auto over = std::chrono::steady_clock::now() - started - bound.expected;
+        EXPECT_GE(over, 0ns) << bound.label;  // Never before its bound.
+        total += over;
+        max = std::max(max, std::chrono::duration_cast<std::chrono::nanoseconds>(over));
+      }
+      std::printf(
+        "[ MEASURE  ] %s image wait (%.1f ms): overshoot avg %.3f max %.3f ms\n",
+        bound.label,
+        std::chrono::duration<double, std::milli>(bound.expected).count(),
+        std::chrono::duration<double, std::milli>(total / waits).count(),
+        std::chrono::duration<double, std::milli>(max).count()
+      );
+      EXPECT_LT(total / waits, 1ms) << bound.label;
+      EXPECT_LT(max, 4ms) << bound.label;  // 0.3-0.8 ms measured.
+    }
+  }
+
+  TEST(RemoteEncodeImageWaitTest, CapturesWakesAndStopStillEndADeadlineImageWaitAsTheyArrive) {
+    const auto waiter = platf::create_deadline_waiter();
+    ASSERT_TRUE(waiter);
+    safe::event_t<std::shared_ptr<captured_source>> images;
+    const auto ended_by = [&](auto &&end) {
+      std::thread other {[&] {
+        std::this_thread::sleep_for(2ms);
+        end();
+      }};
+      const auto started = std::chrono::steady_clock::now();
+      auto image = video::detail::pop_encode_image(images, 500ms, waiter.get());
+      EXPECT_LT(std::chrono::steady_clock::now() - started, 250ms);
+      other.join();
+      return image;
+    };
+    // A capture, a provider or control wake (no image, as at a bound), and capture's stop.
+    const auto image = ended_by([&] {
+      images.raise(std::make_shared<captured_source>(7, at(1ms)));
+    });
+    ASSERT_TRUE(image);
+    EXPECT_EQ(image->pixels, 7);
+    EXPECT_FALSE(ended_by([&] {
+      images.wake();
+    }));
+    EXPECT_TRUE(images.running());
+    EXPECT_FALSE(ended_by([&] {
+      images.stop();
+    }));
+    EXPECT_FALSE(images.running());
   }
 
   TEST(RemoteEncodePendingSourceTest, FailureHandoffPreservesNewerQueuedCapture) {

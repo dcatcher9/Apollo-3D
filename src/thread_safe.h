@@ -35,6 +35,39 @@ namespace safe {
     return delay <= std::chrono::duration<Rep, Period>::zero();
   }
 
+  /**
+   * @brief Waits for a notification or a deadline, whichever comes first, outside the condition
+   * variable.
+   *
+   * For the same reason as no_wait(), a timed wait that nothing notifies cannot end at its deadline
+   * on the condition variable: it ends at the first scheduler tick at or after it, up to 15.625 ms
+   * late. A consumer that needs its deadline kept passes one of these to event_t::pop(delay, waiter)
+   * (platf::create_deadline_waiter(): a high-resolution waitable timer and an event on Windows).
+   * The consumer's own thread then waits on it, and every raise, wake and stop of the event
+   * notifies it meanwhile, so no other thread runs at the deadline and nothing outlives the pop.
+   */
+  class deadline_waiter_t {
+  public:
+    virtual ~deadline_waiter_t() = default;
+
+    /**
+     * @brief End the current or next wait_until() at once.
+     *
+     * Called with the event's lock held: it must neither block nor take that lock.
+     */
+    virtual void notify() noexcept = 0;
+
+    /**
+     * @brief Block until notify() or `deadline`, whichever comes first.
+     *
+     * A notification that came after its waiter last checked may end it early, so the caller
+     * re-checks its own state and the deadline.
+     *
+     * @return False when it could not wait; the caller then waits on its condition variable.
+     */
+    virtual bool wait_until(std::chrono::steady_clock::time_point deadline) noexcept = 0;
+  };
+
   template<class T>
   class event_t {
   public:
@@ -53,7 +86,7 @@ namespace safe {
         _status = status_t {std::forward<Args>(args)...};
       }
 
-      _cv.notify_all();
+      notify_all();
     }
 
     /**
@@ -74,7 +107,7 @@ namespace safe {
         _status = status_t {std::forward<Args>(args)...};
       }
 
-      _cv.notify_all();
+      notify_all();
       return true;
     }
 
@@ -136,6 +169,53 @@ namespace safe {
     }
 
     /**
+     * @brief A timed pop() whose deadline `waiter` keeps instead of the condition variable.
+     *
+     * The contract of pop(delay): it ends at a value, stop(), wake() or the deadline, whichever
+     * comes first, consumes a wake, and otherwise never ends before the deadline. It ends there
+     * within the waiter's precision (well under a millisecond on Windows) instead of at the next
+     * scheduler tick (deadline_waiter_t). The waiter is notified only while this pop waits on it.
+     * Each waiter serves one consumer; a pop that finds another consumer's waiter in use, or whose
+     * waiter cannot wait, waits on the condition variable as pop(delay) does.
+     */
+    template<class Rep, class Period>
+    status_t pop(std::chrono::duration<Rep, Period> delay, deadline_waiter_t &waiter) {
+      if (no_wait(delay)) {
+        return pop(delay);
+      }
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::ceil<std::chrono::steady_clock::duration>(delay);
+      std::unique_lock ul {_lock};
+
+      const auto ready = [this] {
+        return (bool) _status || !_continue || _woken;
+      };
+      while (!ready() && std::chrono::steady_clock::now() < deadline) {
+        if (_waiter) {
+          _cv.wait_until(ul, deadline, ready);
+          break;
+        }
+        // Every notification from here on reaches the waiter, so none is lost before it waits.
+        _waiter = &waiter;
+        ul.unlock();
+        const bool waited = waiter.wait_until(deadline);
+        ul.lock();
+        _waiter = nullptr;
+        if (!waited) {
+          _cv.wait_until(ul, deadline, ready);
+          break;
+        }
+      }
+      _woken = false;
+      if (!_continue || !_status) {
+        return util::false_v<status_t>;
+      }
+
+      auto val = std::move(_status);
+      _status = util::false_v<status_t>;
+      return val;
+    }
+
+    /**
      * @brief End the current or next timed pop() early without storing a value.
      *
      * A wake that arrives while nobody waits is kept for the next timed pop(), so it cannot be lost
@@ -145,7 +225,7 @@ namespace safe {
     void wake() {
       std::lock_guard lg {_lock};
       _woken = true;
-      _cv.notify_all();
+      notify_all();
     }
 
     /** @brief Forget a wake() that no timed pop() has consumed, for a consumer starting over. */
@@ -198,7 +278,7 @@ namespace safe {
 
       _continue = false;
 
-      _cv.notify_all();
+      notify_all();
     }
 
     void reset() {
@@ -215,9 +295,19 @@ namespace safe {
     }
 
   private:
+    // With the lock held.
+    void notify_all() {
+      _cv.notify_all();
+      if (_waiter) {
+        _waiter->notify();
+      }
+    }
+
     bool _continue {true};
     bool _woken {false};
     status_t _status {util::false_v<status_t>};
+    /** The waiter of a pop(delay, waiter) that is waiting on it. */
+    deadline_waiter_t *_waiter {nullptr};
 
     std::condition_variable _cv;
     mutable std::mutex _lock;

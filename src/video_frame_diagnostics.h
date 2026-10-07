@@ -83,8 +83,14 @@ namespace video::detail {
       hold_overshoot_max_ = std::max(hold_overshoot_max_, std::max(actual - requested, duration_t::zero()));
     }
 
+    /** Whether image waits keep their bound on the deadline timer (detail::pop_encode_image()) or
+     *  end at a scheduler tick; kept across reset(). */
+    void set_deadline_timer(bool deadline_timer) noexcept {
+      deadline_timer_ = deadline_timer;
+    }
+
     /** A wait on the image event. One that lasted its whole bound timed out (nothing woke it);
-     *  its overshoot past the bound is the scheduler's. */
+     *  its overshoot past the bound is the deadline timer's, or without it the scheduler tick's. */
     void waited(duration_t requested, duration_t actual) noexcept {
       ++waits_;
       wait_requested_ += requested;
@@ -142,7 +148,7 @@ namespace video::detail {
       return std::format(
         "Video encode loop: {} iterations in {:.1f} s; {} new-content and {} repeated-content encodes; holding {:.1f} ms in {} exact holds "
         "(requested {:.1f} ms, overshoot avg {:.2f} max {:.2f} ms); waiting {:.1f} ms in {} image waits (requested {:.1f} ms; "
-        "{} ran to their bound, overshoot avg {:.2f} max {:.2f} ms); converting {:.1f} ms in {} conversions; encoding {:.1f} ms "
+        "{} ran to their bound {}, overshoot avg {:.2f} max {:.2f} ms); converting {:.1f} ms in {} conversions; encoding {:.1f} ms "
         "(NVENC submit {:.1f} ms, completion wait {:.1f} ms; up to {} {} in flight, {} submitted behind another, submission to packet "
         "avg {:.2f} max {:.2f} ms); loop work {:.1f} ms.",
         iterations_,
@@ -158,6 +164,7 @@ namespace video::detail {
         waits_,
         ms(wait_requested_),
         timeouts_,
+        deadline_timer_ ? "on the deadline timer" : "at a scheduler tick",
         average(timeout_overshoot_, timeouts_),
         ms(timeout_overshoot_max_),
         ms(converting_),
@@ -176,8 +183,10 @@ namespace video::detail {
 
     void reset() noexcept {
       const auto depth = depth_;
+      const bool deadline_timer = deadline_timer_;
       *this = {};
       depth_ = depth;
+      deadline_timer_ = deadline_timer;
     }
 
   private:
@@ -186,6 +195,7 @@ namespace video::detail {
     duration_t wait_requested_ {}, wait_actual_ {}, timeout_overshoot_ {}, timeout_overshoot_max_ {};
     duration_t converting_ {}, encoding_ {}, submitting_ {}, completion_waiting_ {};
     unsigned depth_ = 1;
+    bool deadline_timer_ = false;
     std::uint64_t pictures_behind_ = 0, pictures_ = 0;
     duration_t picture_latency_ {}, picture_latency_max_ {};
   };

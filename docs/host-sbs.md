@@ -1111,7 +1111,9 @@ receipt reports finalized publication without a decision wait.
 
 When remote capture goes idle with conversion still pending, the encoder's image wait is capped
 at the requested frame interval (with a `1 ms` floor), or the configured idle heartbeat interval
-if that is shorter. The retained source is then reconverted on the same encoder owner to check
+if that is shorter. A capture ends the wait at once; otherwise it ends at that bound on a
+high-resolution timer, a fraction of a millisecond late rather than at the next 15.6 ms scheduler
+tick ([GPU handoff contract](reshade-sbs.md#gpu-handoff-contract)). The retained source is then reconverted on the same encoder owner to check
 completion. Once pending conversion is retired, the ordinary idle heartbeat resumes. This prevents
 a final update from waiting for the default one-fifth-rate heartbeat without spinning or encoding
 repeated frames faster than the requested cadence. Pipeline initialization readiness may bypass

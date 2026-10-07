@@ -7690,7 +7690,7 @@ TEST(EncodeWakeLifecycleSourceTests, ARecoveryRequestDuringAProviderHoldMakesThe
   const auto recheck = scope.find("if (idr_events->peek() || invalidate_ref_frames_events->peek()) {", hold);
   const auto restart = scope.find("continue;", recheck);
   const auto take = scope.find("pending_source_wait = std::chrono::nanoseconds::zero();", hold);
-  const auto pop = scope.find("auto img = images->pop(image_wait);", hold);
+  const auto pop = scope.find("auto img = detail::pop_encode_image(*images, image_wait, image_deadline_waiter.get());", hold);
   ASSERT_NE(recheck, std::string::npos);
   ASSERT_NE(restart, std::string::npos);
   ASSERT_NE(take, std::string::npos);
@@ -7698,6 +7698,19 @@ TEST(EncodeWakeLifecycleSourceTests, ARecoveryRequestDuringAProviderHoldMakesThe
   EXPECT_LT(recheck, take);
   EXPECT_LT(restart, take) << "The re-check must restart the iteration itself.";
   EXPECT_LT(take, pop);
+}
+
+TEST(EncodeWakeLifecycleSourceTests, EveryImageWaitKeepsItsBoundOnTheDeadlineTimer) {
+  const auto scope = encode_run_source_scope();
+  ASSERT_FALSE(scope.empty());
+  // Desktop, Host SBS, Game 3D and keepalive image waits are one wait, created before the loop.
+  const auto waiter = scope.find("const auto image_deadline_waiter = platf::create_deadline_waiter();");
+  const auto loop = scope.find("while (true) {", waiter);
+  ASSERT_NE(waiter, std::string::npos);
+  ASSERT_NE(loop, std::string::npos);
+  EXPECT_NE(scope.find("detail::pop_encode_image(*images, image_wait, image_deadline_waiter.get())", loop), std::string::npos);
+  EXPECT_EQ(scope.find("images->pop("), std::string::npos) << "An image wait on the condition variable ends at a scheduler tick.";
+  EXPECT_NE(scope.find("loop_stats->set_deadline_timer(image_deadline_waiter != nullptr);"), std::string::npos);
 }
 
 TEST(EncodeWakeLifecycleSourceTests, LoopStatsCountEncodesByContentIdentity) {

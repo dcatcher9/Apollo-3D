@@ -11,6 +11,9 @@
 #include <type_traits>
 #include <utility>
 
+// local includes
+#include "thread_safe.h"
+
 namespace video::detail {
   /** One encoder-owned source, retained until a newer capture replaces it.
    *
@@ -165,13 +168,14 @@ namespace video::detail {
   /** Exact sleep before an independent provider converts its pending frame.
    *
    * A pending frame (a completed export, a capture, or another reason to poll the provider) that
-   * is not yet due converts at its poll target, so `pending_wait` is the time left until then. A
-   * wait on the image event cannot end there: with this toolchain a condition-variable wait that
-   * nothing notifies ends only at the next Windows scheduler tick (15.625 ms; see safe::no_wait()).
-   * The Game 3D loop then claimed about 60 new frames/s of a 90 fps stream while the game offered
-   * more. The loop instead sleeps this long on a high-resolution timer and then takes, without
-   * waiting, whatever arrived meanwhile: a capture that arrives before the target is early too and
-   * would convert at the same target, and a newer export frame replaces the pending one. Nothing is
+   * is not yet due converts at its poll target, so `pending_wait` is the time left until then. An
+   * image wait without a deadline waiter cannot end there: with this toolchain a condition-variable
+   * wait that nothing notifies ends only at the next Windows scheduler tick (15.625 ms; see
+   * safe::no_wait()). The Game 3D loop then claimed about 60 new frames/s of a 90 fps stream while
+   * the game offered more. The loop instead sleeps this long on a high-resolution timer and then
+   * takes, without waiting, whatever arrived meanwhile: a capture that arrives before the target is
+   * early too and would convert at the same target, and a newer export frame replaces the pending
+   * one, so neither needs to end the hold. Nothing is
    * held when the frame is already due or the keepalive comes first. One hold is at most a frame
    * interval and a control wake does not end it: a control request that arrives during a hold waits
    * at most the rest of it. The loop then re-checks for an IDR or reference invalidation, which
@@ -224,6 +228,19 @@ namespace video::detail {
       }
     }
     return wait;
+  }
+
+  /** The encode loop's image wait: it ends at a capture, a wake, the event's stop or `wait`,
+   * whichever comes first. With `deadline_waiter` (platf::create_deadline_waiter()) a bound that
+   * nothing ends earlier ends within that timer's precision, well under a millisecond, instead of
+   * at the next scheduler tick up to 15.6 ms late (safe::deadline_waiter_t), which delayed a
+   * pending capture past its presentation target, Host SBS's pending-inference re-poll and the
+   * minimum-FPS keepalive. The loop's decisions are unchanged: a wait that reaches its bound still
+   * returns no image, so whatever a timeout converted or encoded before it still does, only on time.
+   */
+  template<class ImageEvent, class Duration>
+  auto pop_encode_image(ImageEvent &images, Duration wait, safe::deadline_waiter_t *deadline_waiter) {
+    return deadline_waiter ? images.pop(wait, *deadline_waiter) : images.pop(wait);
   }
 
   /** Wait for a new capture for at most encode_image_wait(). */

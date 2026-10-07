@@ -3598,6 +3598,73 @@ namespace platf {
     return std::make_unique<win32_high_precision_timer>();
   }
 
+  namespace {
+    /** safe::deadline_waiter_t: the waiting thread waits for its notification event or its
+     * high-resolution timer, which each wait arms at its deadline. */
+    class win32_deadline_waiter_t: public safe::deadline_waiter_t {
+    public:
+      win32_deadline_waiter_t(HANDLE timer, HANDLE notified) noexcept:
+          timer_ {timer},
+          notified_ {notified} {
+      }
+
+      ~win32_deadline_waiter_t() override {
+        CloseHandle(timer_);
+        CloseHandle(notified_);
+      }
+
+      win32_deadline_waiter_t(const win32_deadline_waiter_t &) = delete;
+      win32_deadline_waiter_t &operator=(const win32_deadline_waiter_t &) = delete;
+
+      void notify() noexcept override {
+        SetEvent(notified_);
+      }
+
+      bool wait_until(std::chrono::steady_clock::time_point deadline) noexcept override {
+        const auto left = deadline - std::chrono::steady_clock::now();
+        if (left <= std::chrono::steady_clock::duration::zero()) {
+          return true;
+        }
+        // Relative, in whole 100 ns units rounded up: the timer never ends before the deadline.
+        // Setting the timer also clears a signal left from an earlier deadline.
+        using timer_unit_t = std::chrono::duration<LONGLONG, std::ratio<1, 10'000'000>>;
+        LARGE_INTEGER due;
+        due.QuadPart = -std::chrono::ceil<timer_unit_t>(left).count();
+        if (!SetWaitableTimer(timer_, &due, 0, nullptr, nullptr, FALSE)) {
+          return false;
+        }
+        const HANDLE handles[] {notified_, timer_};
+        const auto result = WaitForMultipleObjects(2, handles, FALSE, INFINITE);
+        if (result == WAIT_OBJECT_0) {
+          // Notified first: no expiry is left to interrupt anything after this wait.
+          CancelWaitableTimer(timer_);
+          return true;
+        }
+        return result == WAIT_OBJECT_0 + 1;
+      }
+
+    private:
+      HANDLE timer_;
+      HANDLE notified_;
+    };
+  }  // namespace
+
+  std::unique_ptr<safe::deadline_waiter_t> create_deadline_waiter() {
+    // Without a high-resolution timer a waitable timer ends at the timer resolution, not its deadline.
+    HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_MODIFY_STATE | SYNCHRONIZE);
+    if (!timer) {
+      BOOST_LOG(error) << "Unable to create a high-resolution deadline timer, CreateWaitableTimerExW() failed: "sv << GetLastError();
+      return nullptr;
+    }
+    HANDLE notified = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!notified) {
+      BOOST_LOG(error) << "Unable to create a deadline waiter's event, CreateEventW() failed: "sv << GetLastError();
+      CloseHandle(timer);
+      return nullptr;
+    }
+    return std::make_unique<win32_deadline_waiter_t>(timer, notified);
+  }
+
   std::string
   get_clipboard() {
     std::string currentClipboard = to_utf8(getClipboardData());

@@ -1359,9 +1359,17 @@ namespace video {
     auto loop_stats = detail::make_diagnostic_state<detail::encode_loop_stats_t>(config::sunshine.diagnostics_enabled);
     auto loop_stats_since = std::chrono::steady_clock::now();
     detail::diagnostic_content_tracker_t loop_content;
-    // An independent provider's pending frame converts at its poll target. Image waits that nothing
-    // notifies end only at a scheduler tick, so it sleeps to the target on this timer instead
-    // (detail::provider_hold); without the timer it falls back to the image wait.
+    // Every bounded image wait (a pending capture's target, a retained-source poll, the keepalive)
+    // ends at the first of a capture, a wake and its bound, and that bound on this high-resolution
+    // timer rather than at the next scheduler tick (detail::pop_encode_image). Only this thread
+    // waits on it, and the image event notifies it only during such a wait.
+    const auto image_deadline_waiter = platf::create_deadline_waiter();
+    if (loop_stats) {
+      loop_stats->set_deadline_timer(image_deadline_waiter != nullptr);
+    }
+    // An independent provider's pending frame converts at its poll target. It sleeps to the target
+    // on this timer, which captures and wakes do not end (detail::provider_hold); without the timer
+    // it falls back to the image wait.
     std::unique_ptr<platf::high_precision_timer> hold_timer;
     if (independent_provider) {
       hold_timer = platf::create_high_precision_timer();
@@ -1700,7 +1708,7 @@ namespace video {
         bool captured = false;
         const auto image_wait = detail::encode_image_wait(idle_wait, encode_frame_threshold, last_img && !hold_startup_input, depth_pipeline_ready, conversion_poll_pending, pending_source_wait);
         const auto image_wait_started = std::chrono::steady_clock::now();
-        auto img = images->pop(image_wait);
+        auto img = detail::pop_encode_image(*images, image_wait, image_deadline_waiter.get());
         if (loop_stats && !safe::no_wait(image_wait)) {
           loop_stats->waited(std::chrono::duration_cast<std::chrono::nanoseconds>(image_wait), std::chrono::steady_clock::now() - image_wait_started);
         }

@@ -1034,6 +1034,14 @@ namespace platf {
    */
   std::unique_ptr<high_precision_timer> create_high_precision_timer();
 
+  /**
+   * @brief Create a waiter that ends safe::event_t timed pops at their deadline.
+   * @details Windows: a high-resolution waitable timer armed at each wait's deadline and an
+   * auto-reset event for the notifications; the waiting thread waits for either itself.
+   * @return The waiter, or nullptr when it cannot be created (such pops then end at a scheduler tick).
+   */
+  std::unique_ptr<safe::deadline_waiter_t> create_deadline_waiter();
+
   std::string
     get_clipboard();
 
