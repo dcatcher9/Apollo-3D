@@ -471,8 +471,12 @@ the registered immediate list skip their repeated interface checks.
 **Depth handoff.** When the API source is no longer associated (Streamline FG released while NGX
 evaluates, or the reverse), API ownership is held in mono (depth not ready) for at most 250 ms
 after the last associated Present, with the same runtime and swapchain size and a live API
-evaluation, instead of starting the Generic selector, its challenger and two DEPTH rebinds. An
-explicit release with no other evaluation falls back at once. The log line ends `holding API
+evaluation, instead of starting the Generic selector, its challenger and two DEPTH rebinds. Any
+real evaluation within those 250 ms is live, Streamline SR's (logical source 0) included; only the
+malformed-input marker (epoch 0) is not, and it never keeps an established Streamline SR source
+associated either. Until the final review a live evaluation needed a nonzero source, so FG Off in
+a game that runs SR and FG through Streamline fell back to Generic for a Present while SR's first
+capture was pending. An explicit release with no other evaluation falls back at once. The log line ends `holding API
 ownership (mono) for a provider handoff, at most 250 ms`, and the readiness reason is
 `source_handoff`. Display storage keeps one entry per shape and format (at most two), so a flip
 switches entries rather than reallocating; a replaced entry is retired by a fence signalled on a

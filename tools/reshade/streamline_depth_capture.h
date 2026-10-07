@@ -215,8 +215,9 @@ namespace sunshine_streamline::depth_capture {
   // packet keeps its own camera/encoding. Explicit FG still requires SL FG.
   void observe_provider(std::uint64_t command);
   bool provider_active(std::uint64_t queue);
-  // Handoff evidence only (provider hysteresis): some API provider began an
-  // evaluation with a source identity within window_ms. Grants nothing.
+  // Handoff evidence only (provider hysteresis): some API provider began a
+  // real evaluation (a nonzero epoch; Streamline SR's source 0 included, the
+  // malformed-input marker's epoch 0 not) within window_ms. Grants nothing.
   bool evaluation_live(std::uint64_t now_ms, std::uint64_t window_ms);
   bool provider_identity(std::uint64_t queue, sunshine_scene_depth::provider_kind &provider,
     std::uint64_t &source_id);

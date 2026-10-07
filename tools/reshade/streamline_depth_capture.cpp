@@ -1698,8 +1698,12 @@ namespace sunshine_streamline::depth_capture {
     void expire_association(queue_state &owner, std::uint64_t now) {
       if (!owner.provider_established || !valid_provider(owner.provider)) return;
       const auto &current = evaluations[provider_index(owner.provider)];
+      // The owner's own evaluations: its source and epoch, so the malformed-
+      // input marker (epoch 0, source 0) never keeps a Streamline SR owner
+      // (source 0) associated.
       const auto recent = [&](const evaluation_head &head) {
-        return head.source_id == owner.source_id && head.tick && now >= head.tick && now - head.tick <= association_timeout_ms;
+        return head.source_id == owner.source_id && head.epoch == owner.nominated_epoch && head.tick && now >= head.tick &&
+          now - head.tick <= association_timeout_ms;
       };
       if (recent(current.pending_nomination) || std::any_of(current.views.begin(), current.views.end(), recent)) return;
       owner.provider_established = false;
@@ -1719,8 +1723,10 @@ namespace sunshine_streamline::depth_capture {
   bool evaluation_live(std::uint64_t now_ms, std::uint64_t window_ms) {
     if (!requested.load()) return false;
     std::lock_guard lock(mutex);
+    // Any real evaluation: Streamline SR uses source 0 by design, and only the
+    // malformed-input marker begins one with epoch 0.
     const auto recent = [&](const evaluation_head &head) {
-      return head.source_id && head.tick && now_ms >= head.tick && now_ms - head.tick <= window_ms;
+      return head.epoch && head.tick && now_ms >= head.tick && now_ms - head.tick <= window_ms;
     };
     for (const auto &space : evaluations) {
       if (recent(space.pending_nomination)) return true;
@@ -3169,6 +3175,29 @@ namespace sunshine_streamline::depth_capture {
         }
       } restore;
       slots = {}; evaluations = {}; requested = true;
+      {
+        // Handoff evidence (evaluation_live): any real evaluation, Streamline
+        // SR's source 0 included (FG Off in a Streamline-only game holds the
+        // queue in mono while SR's first capture is pending); never the
+        // malformed-input marker, which alone uses epoch 0.
+        begin_evaluation(5, 1, 0, provider_kind::streamline);
+        if (!evaluation_live(GetTickCount64(), 250)) return false;
+        evaluations = {};
+        begin_evaluation(0, 2, UINT32_MAX, provider_kind::streamline);
+        if (evaluation_live(GetTickCount64(), 250)) return false;
+        // An established Streamline SR owner (source 0) stays associated
+        // through its own epoch's evaluations only, never through the marker.
+        queue_state sr;
+        sr.provider_established = true; sr.provider = provider_kind::streamline; sr.nominated_epoch = 5;
+        expire_association(sr, GetTickCount64());
+        if (sr.provider_established) return false;
+        evaluations = {};
+        begin_evaluation(5, 3, 0, provider_kind::streamline);
+        sr.provider_established = true; sr.nominated_epoch = 5;
+        expire_association(sr, GetTickCount64());
+        if (!sr.provider_established) return false;
+        evaluations = {};
+      }
       queue_state owner;
       constexpr std::uint64_t native = 77;
       {
