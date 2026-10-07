@@ -133,8 +133,9 @@ DEPTH_FLIP_STEPS = frozenset((
 # The add-on's Diagnostics switch (game3d_diagnostics.h): off by default, which records no per-pass GPU timing.
 DIAGNOSTICS = re.compile(r'Sunshine Game 3D: diagnostics (on|off) \(Diagnostics=(\d)\)')
 GPU_PROFILE = re.compile(r'\bgpu_profile=(\w+)')
+# fg_owned (since the final add-on review): evaluations that copied nothing while Streamline FG owned depth.
 NGX = re.compile(r'Sunshine NGX depth: .*?evaluations=(\d+) nominations=(\d+) copy_recorded=(\d+) '
-                 r'metadata_only=(\d+)')
+                 r'metadata_only=(\d+)(?: fg_owned=(\d+))?')
 TIMING = re.compile(r'Sunshine Game 3D timing: presents=(\d+) cpu_ms=\{mean=([0-9.]+) max=([0-9.]+)\}'
                     r'.*?gpu_frames=(\d+)'
                     r' gpu_ms mean/max=\{total=([0-9.]+)/([0-9.]+)')
@@ -777,7 +778,7 @@ def parse(lines) -> Session:
         if found := DEPTH_STATUS.search(text):
             s.statuses.append((t, found.group(1)))
         if found := NGX.search(text):
-            s.ngx = tuple(int(v) for v in found.groups())
+            s.ngx = tuple(int(v or 0) for v in found.groups())
         if found := HITCH.search(text):
             s.hitches.append((t, found.group(1), float(found.group(2))))
         if found := TIMING.search(text):
@@ -1006,8 +1007,9 @@ def evaluate(s: Session) -> list[Check]:
     elif settling:
         add(Check('INFO', 'Capture status', ', '.join(f'{k} {v}' for k, v in sorted(settling.items()))
                   + f' within {SETTLE_S:g} s of an export start, FG switch or reset (settling)'))
-    if s.ngx and s.ngx[0] and not s.ngx[2] and not s.ngx[3]:
-        add(Check('WARN', 'NGX depth', f'{s.ngx[0]} DLSS evaluations recorded no depth copy'))
+    # Evaluations while Streamline FG owned depth copy nothing by design.
+    if s.ngx and s.ngx[0] > s.ngx[4] and not s.ngx[2] and not s.ngx[3]:
+        add(Check('WARN', 'NGX depth', f'{s.ngx[0] - s.ngx[4]} DLSS evaluations recorded no depth copy'))
     if s.readiness:
         add(Check('INFO', 'Depth losses', ', '.join(f'{k} {v}' for k, v in s.readiness.most_common())))
 

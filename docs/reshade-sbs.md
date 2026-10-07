@@ -3837,7 +3837,14 @@ Creating the identity supplies no resource state: capture still requires an actu
 nonzero transition, and a submission with no observed recording cannot establish ownership.
 
 Nested NGX capture is suppressed only when an enclosing SL or NGX evaluation has actually recorded
-a valid native copy, or when SL has confirmed enabled FG authority for that viewport. A retained
+a valid native copy, or when SL has confirmed enabled FG authority for that viewport. A direct
+(not nested) NGX evaluation applies the same FG rule: while SL reports FG enabled on its one
+viewport it begins its evaluation (live handoff evidence) but records no depth copy, since
+selection never considers NGX while FG is required and FG Off makes every snapshot taken meanwhile
+inadmissible; a busy or ambiguous FG read copies as before. The `Sunshine NGX depth` line counts
+these evaluations as `fg_owned`. Before the final review a UE title with NVIDIA's DLSS plugin and
+the Streamline DLSS-G plugin copied its full depth plane on every real frame with FG on, for no
+consumer. A retained
 resource, metadata-only ticket or rejected native attempt does not block a usable inner NGX input.
 Pending recorded copies retain deduplication authority; all nonzero tickets still receive completion.
 SL and NGX observations remain separate, so malformed input from one cannot invalidate the other's

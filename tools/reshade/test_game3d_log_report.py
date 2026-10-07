@@ -554,6 +554,12 @@ class ReadinessReport(unittest.TestCase):
                              'unknown_feature=0')])
         self.assertIn('blocked', checks['Capture status'].detail)
         self.assertEqual(checks['NGX depth'].status, 'WARN')
+        # Evaluations while Streamline FG owned depth copy nothing by design.
+        owned = run(BASE + [
+            line('10:00:07', '[Sunshine 3D] Sunshine NGX depth: confirmed_features=1 capture_eligible=1 '
+                             'recovered_features=0 evaluations=40 nominations=0 copy_recorded=0 metadata_only=0 '
+                             'fg_owned=40 unknown_feature=0')])
+        self.assertNotIn('NGX depth', owned)
 
     def test_fg_switch_settles_before_flat_counts(self):
         checks = run(BASE + [line('10:00:16', '[Sunshine 3D] Sunshine Streamline frame generation: viewport=0 mode=1'),

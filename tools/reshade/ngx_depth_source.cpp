@@ -4,6 +4,7 @@
 #include "game3d_diagnostic_metadata.h"
 #include "streamline_depth_capture.h"
 #ifndef SUNSHINE_UPSCALER_TRACE_TEST
+#include "streamline_camera_probe.h"
 #include "streamline_native_observer.h"
 #endif
 #include <reshade.hpp>
@@ -65,7 +66,7 @@ namespace sunshine_ngx {
     // counter when the feature was never admitted or depth belongs to SL.
     std::atomic<std::uint64_t> unknown_diagnostic_sequence{};
     std::atomic<std::uint64_t> evaluations{}, nominations{}, copy_recorded{}, metadata_only{},
-      unknown{}, missing_parameters{}, failed{}, feature_overflow{}, recovered{};
+      unknown{}, missing_parameters{}, failed{}, feature_overflow{}, recovered{}, fg_owned{};
     std::uint64_t next_report{};
     bool calibration_probe_requested{}; // Protected by feature_lock, like the feature records.
     struct calibration_slot {
@@ -538,6 +539,18 @@ namespace sunshine_ngx {
         ReleaseSRWLockShared(&feature_lock);
       }
     }
+#ifndef SUNSHINE_UPSCALER_TRACE_TEST
+    // Confirmed Streamline FG owns depth: selection never considers NGX while
+    // FG is required, and FG Off raises the admission watermark past every
+    // snapshot taken meanwhile, so a copy now would have no consumer. The
+    // evaluation above stays live for the handoff hold. A busy or ambiguous
+    // FG read copies as before (nested NGX's rule, owns_nested_depth_capture).
+    if (frame_generation_snapshot fg; query_frame_generation(UINT32_MAX, fg) && fg.enabled) {
+      attempt.capture_suppressed_by_depth_owner = true;
+      ++fg_owned;
+      return attempt;
+    }
+#endif
     sunshine_streamline::depth_capture::record_diagnostic diagnostic;
     bool retaining = false;
 #ifdef SUNSHINE_UPSCALER_TRACE_TEST
@@ -638,10 +651,11 @@ namespace sunshine_ngx {
     for (unsigned i = 0; i < probe_count; ++i) report_calibration(probes[i]);
     char message[512]{};
     std::snprintf(message, sizeof(message),
-      "Sunshine NGX depth: confirmed_features=%u capture_eligible=%u recovered_features=%llu evaluations=%llu nominations=%llu copy_recorded=%llu metadata_only=%llu unknown_feature=%llu missing_parameters=%llu failed=%llu feature_capacity_loss=%llu; D3D12 NGX, named parameter exports, shared copy owner; recorded work is not completed pixels",
+      "Sunshine NGX depth: confirmed_features=%u capture_eligible=%u recovered_features=%llu evaluations=%llu nominations=%llu copy_recorded=%llu metadata_only=%llu fg_owned=%llu unknown_feature=%llu missing_parameters=%llu failed=%llu feature_capacity_loss=%llu; D3D12 NGX, named parameter exports, shared copy owner; fg_owned evaluations copied nothing while Streamline FG owned depth; recorded work is not completed pixels",
       count, capture_eligible, static_cast<unsigned long long>(recovered.load()),
       static_cast<unsigned long long>(evaluations.load()), static_cast<unsigned long long>(nominations.load()),
       static_cast<unsigned long long>(copy_recorded.load()), static_cast<unsigned long long>(metadata_only.load()),
+      static_cast<unsigned long long>(fg_owned.load()),
       static_cast<unsigned long long>(unknown.load()), static_cast<unsigned long long>(missing_parameters.load()),
       static_cast<unsigned long long>(failed.load()), static_cast<unsigned long long>(feature_overflow.load()));
     sunshine_log::message(reshade::log::level::info, message);
