@@ -582,8 +582,8 @@ namespace sunshine_ngx {
     // must continue through after_evaluate; ticket presence is not pixel proof.
     if (diagnostic.result != sunshine_streamline::depth_capture::status::recorded)
       remember_rejection(value, diagnostic, retaining, attempt.ticket);
-    // Keep completing metadata-only nominations, but only a recorded copy or
-    // authenticated shared preservation may suppress a nested usable input.
+    // Keep completing metadata-only nominations, but only a recorded copy may
+    // suppress a nested usable input.
     if (attempt.ticket) {
       ++nominations;
       if (attempt.capture_authority) ++copy_recorded;

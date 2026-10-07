@@ -11,8 +11,8 @@
 
 namespace sunshine_depth { struct sample_result; }
 
-// One ReShade-facing consumer for API-authoritative depth. Native snapshots and
-// shared ReShade preservation feed the same binding and calibration readback.
+// One ReShade-facing consumer for API-authoritative depth. API depth reaches it
+// only through native snapshots, which feed the binding and calibration readback.
 namespace sunshine_streamline::provider {
   // Busy queries retain a confirmed source choice, not stale pixel readiness.
   // Observation loss revokes FG scope while independent ordinary depth remains

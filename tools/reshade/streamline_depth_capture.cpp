@@ -212,7 +212,7 @@ namespace sunshine_streamline::depth_capture {
       return source_region(desc, resource, out);
     }
     // enhanced: value is the legacy equivalent of an enhanced Barrier layout
-    // (S3 shadow provenance; admission treats it like a legacy state).
+    // (diagnostic provenance only; admission treats it like a legacy state).
     struct source_state { std::uint64_t source{}; std::uint32_t value{}; bool known{}, blocked{}, enhanced{}; };
     struct command_state {
       std::uint64_t cookie{};
@@ -585,7 +585,7 @@ namespace sunshine_streamline::depth_capture {
         known->enhanced = true;
       }
     }
-    // S3 shadow provenance of an admitted copy's pre-copy state: an entry on the
+    // Diagnostic provenance (state_basis) of an admitted copy's pre-copy state: an entry on the
     // recording (the copy used or matched it), else the SDK contract or the
     // per-call declaration. It never changes which state the copy uses.
     state_basis copy_basis(const source_state *observed, const copy_state::decision &chosen) {
