@@ -537,7 +537,7 @@ namespace sunshine_game3d::ui_selection {
   inline std::array<std::uint32_t, ui_counter_word::count> counter_adds(const decision &d, std::uint32_t flags) {
     std::array<std::uint32_t, ui_counter_word::count> adds{};
     adds[ui_counter_word::detection_frames] = 1;
-    if (d.source < ui_counter_word::decided_count) adds[ui_counter_word::decided + d.source] = 1;
+    if (const auto slot = decided_slot(d.source); slot < ui_counter_word::decided_count) adds[ui_counter_word::decided + slot] = 1;
     if (!d.source) adds[ui_counter_word::none + d.none_reason] = 1;
     adds[ui_counter_word::inexact_difference] = d.inexact_difference;
     adds[ui_counter_word::depth_not_current] = (flags & ui_detection::per_frame_depth_not_current) != 0u;

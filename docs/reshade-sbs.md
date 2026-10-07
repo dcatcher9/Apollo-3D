@@ -1730,12 +1730,14 @@ CPU counts as they stood when that sample was submitted. That is one locked call
 sample. The renderer and the sequence replay decode the sample and assemble its counts with the
 same functions in `tools/reshade/game3d_ui_temporal.h` (`decode_detection_sample`,
 `sample_counters`). Counting adds no per-frame CPU wait, lock or GPU synchronization. The renderer counts only
-with a shader whose `SUNSHINE_UI_COUNTER_WORDS` is 26, so a shader of another word layout leaves
+with a shader whose `SUNSHINE_UI_COUNTER_WORDS` is 24, so a shader of another word layout leaves
 counting off instead of misattributing its words, and the offline replay binds nothing at `u7`, so
-its adds are dropped. `decided` has eleven words, sources 0-10 by index (the retired 7 and 9 stay
-zero), followed by `inexact_difference`, `depth_not_current`, `contradicted`, the nine no-mask
-reasons, `full_alpha` and `reused`. Tools use the named indices; no log, dump or replay tool reads
-the words themselves. Shaders through dc7e3c77 wrote 31 words (29 before fix 3, 28 before fix 2):
+its adds are dropped. `decided` has nine words, the sources a decision applies in turn (0-6, 8 and
+10: `decided_sources`, indexed by `decided_slot`; the retired 7 and 9 have none), followed by
+`inexact_difference`, `depth_not_current`, `contradicted`, the nine no-mask reasons, `full_alpha`
+and `reused`. Tools use the named indices; no log, dump or replay tool reads the words themselves.
+From 180f1842 until this layout shaders wrote 26 words, `decided` with eleven, sources 0-10 by
+index, the retired 7 and 9 as zero words. Shaders through dc7e3c77 wrote 31 words (29 before fix 3, 28 before fix 2):
 `decided` had thirteen, sources 0-12 with the removed H2's 11 and fix 3's 12 kept as zero words,
 words 14 and 18 were S1's invariants (zero by construction, no longer written since selection
 revision 10) and word 30 fix 3's `refined`; S3's identity verdict words 31-35 (a 36-word texture
@@ -1749,7 +1751,7 @@ from a shader with `SUNSHINE_UI_IDENTITY`) were removed with S3.
 | `held.none` | Generated Presents (offering nothing within the reported generated count of the last Present that offered a UI tag, or under FG re-offering exactly the snapshots of the last detecting Present) without such a decision in their identity scope: no mask, and the chain ends. A Present that offers a HUD-less image, a re-offered snapshot included, is real and never counts here: it detects, and when mispaired it reuses the held decision (`reused`). Counter lines before the 10-05 pairing change also count Presents the old HUD-less pairing held as generated. |
 | `reused` | Detection frames without a decision of their own that applied the held decision and mask (decision texel 9 bit 16): the T1 grace once after a real decision, and since selection revision 10 every HUD-less re-offer (`0x8000`) while a decision is held. |
 | `inactive.no_candidates`, `inactive.size`, `inactive.unprepared` | Requested renders without detection: no usable candidate, a frame larger than 3840, or detection resources that could not be prepared. |
-| `decided.N` | Detection frames by applied source 0-10, a reused decision included. 7 and 9 are retired and not logged; their GPU words stay zero. Counter lines of fix 2 to selection revision 8 also have 11 (H2's still screen). |
+| `decided.N` | Detection frames by applied source 0-6, 8 and 10, a reused decision included. 7 and 9 are retired: no decision applies them, they have no counter word and they are not logged. Counter lines of fix 2 to selection revision 8 also have 11 (H2's still screen). |
 | `none.R` | Frames whose own decision was source 0 and that applied no mask, each by the first reason that applies: `gate_no_hold` (an informative full claim acted but H1 did not apply: no held hidden verdict; the name is kept for log compatibility), `presented_blocked` (an offered, accepted UIAlpha or UI color tag, invalid itself, kept an accepted, valid inferred alpha out), `trusted_invalid` (an offered, accepted alpha had more than 1% invalid pixels), `layer_aside` (the offered layer was V1-invalid, such as a layer without alpha), `unaccepted` (an offered, unaccepted candidate was valid and selective: its acceptance is still being earned), `difference_failed` (a HUD-less image was offered, including an inexact one that changed nearly everywhere without the pre-UI hold), `ambiguous` (an unaccepted valid alpha empty or nearly full), `no_candidate` (no alpha offered), then `other`. |
 | `full.6`, `full.8` | Repeat `decided.6` and `.8`. Counter lines before S2b also have `full.9`. |
 | `full.depth_not_current` | Detection frames pushed with `0x40000`, whatever they decided. |

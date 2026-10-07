@@ -47,9 +47,9 @@ namespace sunshine_game3d {
   // detection frames.
   namespace ui_counter_word {
     inline constexpr std::size_t detection_frames = 0;
-    // One word per decided source 0-10, indexed by the source (the retired
-    // sources 7 and 9 keep their zero words).
-    inline constexpr std::size_t decided = 1, decided_count = 11;
+    // One word per source a decision applies (decided_sources, in turn: 0-6,
+    // 8 and 10); the retired sources 7 and 9 have none (decided_slot).
+    inline constexpr std::size_t decided = 1, decided_count = 9;
     // A HUD-less difference (5) from an inexact pair.
     inline constexpr std::size_t inexact_difference = decided + decided_count;
     // The consumed depth was not this frame's (per_frame_depth_not_current).
@@ -77,9 +77,24 @@ namespace sunshine_game3d {
     // word layout leaves counting off rather than misattributing its words.
     inline constexpr std::size_t count = reused + 1;
   }
-  static_assert(ui_counter_word::inexact_difference == 12 && ui_counter_word::contradicted == 14 &&
-    ui_counter_word::none == 15 && ui_counter_word::full_alpha == 24 && ui_counter_word::reused == 25 &&
-    ui_counter_word::count == 26);
+  static_assert(ui_counter_word::inexact_difference == 10 && ui_counter_word::contradicted == 12 &&
+    ui_counter_word::none == 13 && ui_counter_word::full_alpha == 22 && ui_counter_word::reused == 23 &&
+    ui_counter_word::count == 24);
+  // The sources of the decided words in word order: every applied source
+  // (ui_selection::decide), without the retired 7 and 9 (the HUD-less route
+  // before S2b).
+  inline constexpr std::array<std::uint32_t, ui_counter_word::decided_count> decided_sources{0, 1, 2, 3, 4, 5, 6, 8, 10};
+  // The decided word of an applied source, as the detection reduce indexes
+  // it (the source less the retired sources below it); decided_count for a
+  // retired or unknown source, which has no word.
+  constexpr std::size_t decided_slot(std::uint32_t source) {
+    return source == 7u || source == 9u || source > 10u ? ui_counter_word::decided_count :
+      std::size_t(source) - (source > 7u ? 1u : 0u) - (source > 9u ? 1u : 0u);
+  }
+  static_assert(decided_slot(6) == 6 && decided_slot(8) == 7 && decided_slot(10) == 8 &&
+    decided_slot(7) == ui_counter_word::decided_count && decided_slot(9) == ui_counter_word::decided_count &&
+    decided_slot(11) == ui_counter_word::decided_count && decided_slot(decided_sources[0]) == 0 &&
+    decided_slot(decided_sources[ui_counter_word::decided_count - 1]) == ui_counter_word::decided_count - 1);
   // The game3d_native.hlsl define mirroring each GPU word index the shader
   // writes.
   inline constexpr std::array<std::pair<std::string_view, std::uint32_t>, 18> hlsl_counter_defines{{
@@ -129,7 +144,7 @@ namespace sunshine_game3d {
     inline constexpr std::size_t auto_frames = 0, detection_frames = 1;
     inline constexpr std::size_t held_generated = 2, held_none = 3, reused = 4;
     inline constexpr std::size_t inactive_no_candidates = 5, inactive_size = 6, inactive_unprepared = 7;
-    inline constexpr std::size_t decided = 8; // Eleven counters, sources 0-10 (7 and 9 retired).
+    inline constexpr std::size_t decided = 8; // Nine counters, by decided_slot.
     inline constexpr std::size_t none = decided + ui_counter_word::decided_count; // ui_no_mask order.
     inline constexpr std::size_t depth_not_current = none + ui_no_mask::count;
     inline constexpr std::size_t full_d_hidden = depth_not_current + 1, full_d_ambiguous = full_d_hidden + 1,
@@ -152,8 +167,10 @@ namespace sunshine_game3d {
 
     std::uint64_t &operator[](std::size_t index) { return value[index]; }
     std::uint64_t operator[](std::size_t index) const { return value[index]; }
+    // Frames that applied this source; zero for a retired source.
     std::uint64_t decided(std::uint32_t source) const {
-      return source < ui_counter_word::decided_count ? value[ui_counter::decided + source] : 0;
+      const auto slot = decided_slot(source);
+      return slot < ui_counter_word::decided_count ? value[ui_counter::decided + slot] : 0;
     }
     // Presents without detection of their own (T1).
     std::uint64_t held() const { return value[ui_counter::held_generated] + value[ui_counter::held_none]; }
@@ -220,8 +237,7 @@ namespace sunshine_game3d {
       field("unprepared", c[n::inactive_unprepared]);
     });
     group("decided", [&] {
-      for (std::uint32_t source = 0; source != ui_counter_word::decided_count; ++source)
-        if (source != 7 && source != 9) field(std::to_string(source), c.decided(source));
+      for (const auto source : decided_sources) field(std::to_string(source), c.decided(source));
     });
     group("none", [&] {
       for (std::size_t reason = 0; reason != ui_no_mask::count; ++reason) field(ui_no_mask::names[reason], c[n::none + reason]);

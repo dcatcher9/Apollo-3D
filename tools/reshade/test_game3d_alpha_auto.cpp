@@ -1331,7 +1331,8 @@ namespace {
     c[n::auto_frames] = 10; c[n::detection_frames] = 6;
     c[n::held_generated] = 2; c[n::held_none] = 1; c[n::reused] = 1;
     c[n::inactive_no_candidates] = 1;
-    c[n::decided + 0] = 2; c[n::decided + 5] = 3; c[n::decided + 6] = 1; c[n::decided + 10] = 4;
+    c[n::decided + decided_slot(0)] = 2; c[n::decided + decided_slot(5)] = 3; c[n::decided + decided_slot(6)] = 1;
+    c[n::decided + decided_slot(10)] = 4;
     c[n::none + ui_no_mask::difference_failed] = 1; c[n::none + ui_no_mask::gate_no_hold] = 1;
     c[n::none + ui_no_mask::unaccepted] = 2;
     c[n::depth_not_current] = 1; c[n::full_d_hidden] = 1; c[n::inexact_difference] = 3; c[n::trust_earned] = 1;
@@ -1359,13 +1360,15 @@ namespace {
     std::array<std::uint32_t, ui_counter_word::count> before{}, now{};
     before[ui_counter_word::detection_frames] = 0xfffffffeu; now[ui_counter_word::detection_frames] = 1u;
     before[ui_counter_word::decided + 4] = 7u; now[ui_counter_word::decided + 4] = 9u;
-    now[ui_counter_word::decided + 10] = 6u;
+    // Source 10's word follows source 8's: the retired 7 and 9 have none.
+    now[ui_counter_word::decided + 8] = 6u;
     now[ui_counter_word::none + ui_no_mask::ambiguous] = 5u; now[ui_counter_word::none + ui_no_mask::unaccepted] = 3u;
     now[ui_counter_word::full_alpha] = 4u;
     now[ui_counter_word::contradicted] = 7u; now[ui_counter_word::reused] = 8u;
     ui_counters gpu;
     gpu.add_gpu_delta(now, before);
-    require(gpu[n::detection_frames] == 3 && gpu.decided(4) == 2 && gpu.decided(10) == 6 &&
+    require(gpu[n::detection_frames] == 3 && gpu.decided(4) == 2 && gpu.decided(10) == 6 && !gpu.decided(7) &&
+        !gpu.decided(9) &&
         gpu[n::none + ui_no_mask::ambiguous] == 5 && gpu[n::none + ui_no_mask::unaccepted] == 3 &&
         gpu[n::full_alpha] == 4 &&
         gpu[n::contradicted] == 7 && gpu[n::reused] == 8 && !gpu.decided(0), "GPU counter deltas are wrong");

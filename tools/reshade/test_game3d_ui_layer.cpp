@@ -157,9 +157,9 @@ int main() {
     // re-offer bits. Revision 11 decides as 10 in 12 texels without a zero
     // word: UIAlpha's one-way counts in words 32 and 36 (the layer's before
     // revision 10), the UI color tag's in words 46 and 47, and the bound rows
-    // at 144-159 (160 rows). The counter texture holds 26 words: decided
-    // sources 0-10, then the judgments, no-mask reasons, full_alpha and
-    // reused, without the reserved words of removed rules.
+    // at 144-159 (160 rows). The counter texture holds 24 words: the
+    // decided sources 0-6, 8 and 10, then the judgments, no-mask reasons,
+    // full_alpha and reused, without a word for a retired source or rule.
     require(sunshine_game3d::ui_selection::revision == 11u && detection::h1_decision_texels == 11u &&
         detection::decision_word::h1 == 43u && detection::pre_ui_decision_texels == 12u &&
         detection::decision_word::pre_ui_match == 44u && detection::decision_word::pre_ui_image_lit == 45u &&
@@ -173,9 +173,9 @@ int main() {
         detection::per_frame_mask == 0xfffff000u && detection::per_frame_unaligned_shift == 12u &&
         detection::per_frame_unaligned_mask == 0x3000u &&
         detection::source_layer == 10u && detection::b2_words == 5u &&
-        sunshine_game3d::ui_counter_word::decided_count == 11u && sunshine_game3d::ui_counter_word::count == 26u &&
-        sunshine_game3d::ui_counter_word::inexact_difference == 12u && sunshine_game3d::ui_counter_word::none == 15u &&
-        sunshine_game3d::ui_counter_word::reused == 25u,
+        sunshine_game3d::ui_counter_word::decided_count == 9u && sunshine_game3d::ui_counter_word::count == 24u &&
+        sunshine_game3d::ui_counter_word::inexact_difference == 10u && sunshine_game3d::ui_counter_word::none == 13u &&
+        sunshine_game3d::ui_counter_word::reused == 23u && sunshine_game3d::decided_slot(10) == 8u,
       "The decision layout is not selection revision 11 with 12 texels and 160 statistics rows");
     {
       std::ifstream input(SUNSHINE_GAME3D_NATIVE_HLSL, std::ios::binary);

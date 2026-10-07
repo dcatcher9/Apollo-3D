@@ -970,7 +970,8 @@ namespace {
         ++expected[ui_counter::inactive_no_candidates];
       } else {
         ++expected[ui_counter::detection_frames];
-        ++expected[ui_counter::decided + f.source];
+        require(decided_slot(f.source) < ui_counter_word::decided_count, what + ": a retired source decided");
+        ++expected[ui_counter::decided + decided_slot(f.source)];
         if (!f.source) {
           ++expected[ui_counter::none + f.decision.none_reason];
         }
@@ -984,7 +985,7 @@ namespace {
     for (const auto index : {ui_counter::auto_frames, ui_counter::detection_frames, ui_counter::held_generated, ui_counter::held_none, ui_counter::reused, ui_counter::inactive_no_candidates, ui_counter::contradicted, ui_counter::samples}) {
       require(totals[index] == expected[index], what + ": counter " + std::to_string(index) + " is " + std::to_string(totals[index]) + ", the stream says " + std::to_string(expected[index]));
     }
-    for (std::uint32_t source = 0; source != ui_counter_word::decided_count; ++source) {
+    for (const auto source : decided_sources) {
       require(totals.decided(source) == expected.decided(source), what + ": decided[" + std::to_string(source) + "] differs");
     }
     for (std::size_t reason = 0; reason != ui_no_mask::count; ++reason) {
@@ -994,7 +995,13 @@ namespace {
     // and every visible sample that decided H1 released a hold.
     require(totals[ui_counter::scene_entered] == s.scene_entered && totals[ui_counter::scene_released] == s.scene_released && totals[ui_counter::scene_refuted] == s.scene_refuted, what + ": the scene counters differ from the guard's observations");
     require(totals[ui_counter::full_d_visible] <= totals[ui_counter::scene_released], what + ": an H1 decision over a visible scene released no hold");
-    require(!totals.decided(7) && !totals.decided(9), what + ": a retired source decided");
+    // Every detection frame applied a source with a decided word (the retired
+    // 7 and 9 have none).
+    std::uint64_t decided = 0;
+    for (const auto source : decided_sources) {
+      decided += totals.decided(source);
+    }
+    require(decided == totals[ui_counter::detection_frames], what + ": the decided words do not sum to the detection frames");
   }
 
   void run(sequence &s, present p, std::uint64_t from, std::uint64_t to, std::uint64_t interval = 16) {

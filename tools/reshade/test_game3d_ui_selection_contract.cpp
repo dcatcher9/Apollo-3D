@@ -1663,7 +1663,8 @@ int main() {
     const std::size_t crafted_count = cases.size();
     std::mt19937 random(0x5131u);
     for (unsigned i = 0; i != 6000; ++i) cases.push_back(random_case(random, i));
-    std::array<unsigned, sunshine_game3d::ui_counter_word::decided_count> sources{};
+    // Applied decisions by decided word, then any other source.
+    std::array<unsigned, sunshine_game3d::ui_counter_word::decided_count + 1> sources{};
     unsigned reused = 0, h1 = 0, gate_no_hold = 0, own_retired = 0;
     // The tiles pass in scRGB (relative tolerances above one), the pre-UI
     // counts at the .005 float pair threshold and without a comparable pair.
@@ -1705,7 +1706,7 @@ int main() {
       for (const auto &test : cases) {
         const auto d = run(gpu, reduce.Get(), test, space);
         if (color == 1) {
-          ++sources[d.source < sources.size() ? d.source : 7];
+          ++sources[sunshine_game3d::decided_slot(d.source)];
           reused += d.reused;
           h1 += d.h1;
           own_retired += d.own_source == 7u || d.own_source == 9u || d.own_source == 11u;
@@ -1715,14 +1716,14 @@ int main() {
     }
     require(!own_retired && h1 && gate_no_hold, "The contract cases decided a retired source (7, 9, 11), or never exercised H1");
     std::printf("PASS UI detection tiles (V1, V2, A2, H1 d): alpha, layer, beyond-bound, difference, one-way and pre-UI pixel "
-      "counts on edge values match the CPU count for layer flags 0, 5 and 7, with and without an exact pair, a comparable layer, "
+      "counts on edge values match the CPU count for layer flags 0, 1 and 3, with and without an exact pair, a comparable layer, "
       "a status sample and unaligned declared tags, in sRGB, PQ and scRGB\n");
     std::printf("PASS UI selection GPU contract (%s): %zu crafted and %zu random cases in two color spaces match decide() in every "
       "decision word, hold store write and counter add; %u reused, %u H1, %u gate_no_hold; applied sources",
       gpu.adapter.c_str(), crafted_count, cases.size() - crafted_count, reused, h1, gate_no_hold);
-    for (std::size_t s = 0; s != sources.size(); ++s)
-      if (s != 7 && s != 9) std::printf(" %zu=%u", s, sources[s]);
-    std::printf(" other=%u\n", sources[7]);
+    for (std::size_t s = 0; s != sunshine_game3d::decided_sources.size(); ++s)
+      std::printf(" %u=%u", sunshine_game3d::decided_sources[s], sources[s]);
+    std::printf(" other=%u\n", sources.back());
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "FAIL %s\n", error.what());

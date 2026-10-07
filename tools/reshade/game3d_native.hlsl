@@ -104,18 +104,18 @@
 #define SUNSHINE_UI_LAYER_BOUND_ROW 144
 // Exact per-session UI counters (docs/reshade-sbs.md, UI counters), mirrored
 // from game3d_ui_counters.h: the detection reduce adds every detection frame
-// to these words of SunshineUICountersStore. The decided words are indexed by
-// source 0-10 and the no-mask reasons are offsets from
-// SUNSHINE_UI_COUNTER_NONE.
-#define SUNSHINE_UI_COUNTER_WORDS 26
+// to these words of SunshineUICountersStore. The decided words hold the
+// applied sources 0-6, 8 and 10 in turn (the retired 7 and 9 have none), and
+// the no-mask reasons are offsets from SUNSHINE_UI_COUNTER_NONE.
+#define SUNSHINE_UI_COUNTER_WORDS 24
 #define SUNSHINE_UI_COUNTER_DETECTION_FRAMES 0
 #define SUNSHINE_UI_COUNTER_DECIDED 1
-#define SUNSHINE_UI_COUNTER_INEXACT_DIFFERENCE 12
-#define SUNSHINE_UI_COUNTER_DEPTH_NOT_CURRENT 13
-#define SUNSHINE_UI_COUNTER_CONTRADICTED 14
-#define SUNSHINE_UI_COUNTER_NONE 15
-#define SUNSHINE_UI_COUNTER_FULL_ALPHA 24
-#define SUNSHINE_UI_COUNTER_REUSED 25
+#define SUNSHINE_UI_COUNTER_INEXACT_DIFFERENCE 10
+#define SUNSHINE_UI_COUNTER_DEPTH_NOT_CURRENT 11
+#define SUNSHINE_UI_COUNTER_CONTRADICTED 12
+#define SUNSHINE_UI_COUNTER_NONE 13
+#define SUNSHINE_UI_COUNTER_FULL_ALPHA 22
+#define SUNSHINE_UI_COUNTER_REUSED 23
 #define SUNSHINE_UI_NONE_LAYER_ASIDE 0
 #define SUNSHINE_UI_NONE_TRUSTED_INVALID 1
 #define SUNSHINE_UI_NONE_PRESENTED_BLOCKED 2
@@ -798,8 +798,12 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     const bool alpha = (applied >= 1u && applied <= 4u) || applied == SUNSHINE_UI_SOURCE_LAYER;
     const bool full_alpha = alpha && applied_covered * 100u >= pixels * 99u;
     InterlockedAdd(SunshineUICountersStore[uint2(SUNSHINE_UI_COUNTER_DETECTION_FRAMES, 0u)], 1u);
-    if (applied <= SUNSHINE_UI_SOURCE_LAYER)
-        InterlockedAdd(SunshineUICountersStore[uint2(SUNSHINE_UI_COUNTER_DECIDED + applied, 0u)], 1u);
+    // The applied source's decided word: the source less the retired 7 and 9
+    // below it (ui_counter_word::decided_slot). No decision applies 7 or 9,
+    // and a hold store that held one would add to no word.
+    if (applied <= SUNSHINE_UI_SOURCE_LAYER && applied != 7u && applied != 9u)
+        InterlockedAdd(SunshineUICountersStore[uint2(SUNSHINE_UI_COUNTER_DECIDED + applied - (applied > 7u ? 1u : 0u) -
+            (applied > 9u ? 1u : 0u), 0u)], 1u);
     if (!applied) InterlockedAdd(SunshineUICountersStore[uint2(SUNSHINE_UI_COUNTER_NONE + none_reason, 0u)], 1u);
     if (source == 5u && (offered & pair_bits) == SUNSHINE_UI_CANDIDATE_HUDLESS)
         InterlockedAdd(SunshineUICountersStore[uint2(SUNSHINE_UI_COUNTER_INEXACT_DIFFERENCE, 0u)], 1u);

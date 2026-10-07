@@ -2157,8 +2157,7 @@ namespace {
         }
       }
       std::uint64_t decided = 0, none = 0;
-      for (std::uint32_t source_kind = 0; source_kind != ui_counter_word::decided_count; ++source_kind)
-        decided += delta.decided(source_kind);
+      for (const auto source_kind : decided_sources) decided += delta.decided(source_kind);
       for (std::size_t reason = 0; reason != ui_no_mask::count; ++reason) none += delta[ui_counter::none + reason];
       require(end.reconciled() && end.through_ms + 200 >= source.now_ms &&
           delta[ui_counter::auto_frames] == expected[ui_counter::auto_frames] &&
