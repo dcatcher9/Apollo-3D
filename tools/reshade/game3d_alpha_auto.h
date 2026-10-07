@@ -282,7 +282,8 @@ namespace sunshine_game3d {
     // as UI does), and an inferred one
     // (Backbuffer, current) also by every offered, accepted, V1-valid
     // declared alpha, which contradict it when its coverage differs from each
-    // of theirs by at least a tenth of the frame. The one-way judge needs a
+    // of theirs by at least a tenth of the frame (not batch-aligned: the
+    // newest offered tag, which may be another frame's). The one-way judge needs a
     // basis: a source without strong pixels in the sample is not judged by
     // it. The layer copy is not same-sample evidence (E2) and is never
     // judged.

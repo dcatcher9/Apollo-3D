@@ -731,9 +731,13 @@ contradicting judged samples within 2 s (`alpha_trust_samples` and `alpha_trust_
 revoking sample and `trust.revoked_declared` otherwise. Older contradictions drop out of the 2 s
 window; agreeing samples and samples without a judge change nothing, so a source contradicted on
 most samples is revoked even when some agree, and ambiguous or invalid samples never revoke. One or
-two contradictions within 2 s never revoke. Because both judges read same-sample evidence (a
-declared tag only from the exact pair's tag batch), a cut or animated UI does not contradict a
-correct source; at the 100 ms sample cadence a persistent
+two contradictions within 2 s never revoke. The one-way judge reads same-sample evidence (a
+declared tag only from the exact pair's tag batch), so a cut or animated UI does not contradict a
+correct source through it. The coverage judge is not batch-aligned: it compares the newest offered
+declared tag, which may be another frame's (UIAlpha recorded in a list that completes a frame
+later), with this frame's inferred alpha, and only coverage that differs by a tenth of the frame on
+three samples within 2 s revokes, so a UI fading or flashing over most of the frame for that long
+could revoke a correct inferred source, which then earns again by its run. At the 100 ms sample cadence a persistent
 contradiction revokes about 0.2 s after it starts. A contradicted sample also earns nothing and
 restarts an unaccepted source's earning run, unless the sample is void for it. A revoked source must
 earn acceptance again; remembered acceptance is revoked the same way, and the revocation is
