@@ -1288,8 +1288,12 @@ source/content timestamps and RTP cadence are unchanged.
 NVENC also reports input mapping, picture submission, completion wait, and bitstream lock/copy/
 unlock/unmap separately. CPU stage summaries use the existing twenty-second min/max/average logs.
 The completion wait includes any unfinished input-surface GPU work and the host thread's wakeup
-delay as well as encoding; it is not an isolated NVENC hardware timer. The current serial encoder
-owner completes one output before reusing its single input surface and bitstream buffer.
+delay as well as encoding; it is not an isolated NVENC hardware timer. The encoder keeps up to two
+pictures in flight, each encoding its own copy of the conversion target with its own bitstream and
+event, so the next capture converts while the previous picture encodes and no later conversion
+changes a picture in flight ([pictures in flight](reshade-sbs.md#gpu-handoff-contract)). The NVENC
+encode/retrieve stage then runs from the encode loop's start of a picture to its retrieval on the
+retrieving thread, including any wait for the older picture while both are in flight.
 These stages complement the existing depth/preprocess/postprocess/warp GPU timers and FEC/send
 timers; nested intervals must not be summed as independent work. The diagnostic metadata and
 loggers are activated only with diagnostics enabled and never alter source timestamps, RTP timing,
@@ -1297,9 +1301,12 @@ frame pacing, or queue recovery. Missing timestamps or negative elapsed interval
 rather than inventing a zero-latency measurement.
 
 An accepted encode owns its mapped input until picture completion and a successful bitstream lock,
-unlock, and unmap. The streaming completion deadline remains `100 ms`; a timeout ends that encode
-attempt without releasing unfinished GPU resources. The complete failed session retires on a tracked
-teardown worker. It submits EOS, drains the outstanding picture, and waits for separate EOS
+unlock, and unmap. Each picture's streaming completion budget is `250 ms` from the start of its
+wait, or from its input's completion while the GPU was still producing it (`2 s` at most); a
+timeout ends that encode attempt without releasing unfinished GPU resources. Every exit of the
+encode loop first delivers the pictures still in flight unless one of them failed. The complete
+failed session retires on a tracked teardown worker. It submits EOS, drains the outstanding
+pictures, and waits for separate EOS
 completion before releasing buffers, registrations, events, the device, or the encoder DLL. Picture
 completion is latched so an already-consumed auto-reset event is not awaited again. This follows the
 [NVENC resource lifecycle](https://docs.nvidia.com/video-technologies/video-codec-sdk/13.1/nvenc-video-encoder-api-prog-guide/index.html).

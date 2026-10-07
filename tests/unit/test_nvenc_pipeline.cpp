@@ -10,6 +10,7 @@
 #include <src/video_encode_pipeline.h>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -93,6 +94,19 @@ namespace {
       return log;
     }
 
+    /** A conversion draws `content` into the conversion target (the encoder's input surface). */
+    void convert(int content) {
+      std::lock_guard lock(mutex);
+      target = content;
+    }
+
+    /** Each locked picture's frame index and the content NVENC encoded for it: its own input's
+     *  copy of the target with pictures in flight, else the target itself. */
+    std::vector<std::pair<std::uint64_t, int>> encoded_contents() {
+      std::lock_guard lock(mutex);
+      return encoded;
+    }
+
     void clear_operations() {
       std::lock_guard lock(mutex);
       log.clear();
@@ -119,6 +133,7 @@ namespace {
       std::lock_guard lock(mutex);
       EXPECT_FALSE(state[slot].mapped) << "A mapped input must not be written";
       EXPECT_FALSE(state[slot].pending);
+      input_content[slot] = target;
       log.push_back("copy-" + std::to_string(slot));
     }
 
@@ -186,6 +201,9 @@ namespace {
     mutable std::mutex mutex;
     std::chrono::steady_clock::time_point fake_now {};
     std::array<int, 2> events {}, inputs {}, mapped {}, bitstreams {};
+    int target = 0;  ///< The conversion target's content.
+    std::array<int, 2> input_content {};  ///< Each picture input's copy of the target (depth 2).
+    std::vector<std::pair<std::uint64_t, int>> encoded;
     std::array<slot_state_t, 2> state {};
     std::array<bool, 2> signaled {};
     std::array<int, 2> timeouts_first {};
@@ -341,6 +359,7 @@ namespace {
         EXPECT_EQ(probe.submitted.front(), slot) << "Bitstreams are locked in submission order";
       }
       probe.state[slot].locked = true;
+      probe.encoded.emplace_back(probe.state[slot].index, probe.pipeline_depth() > 1 ? probe.input_content[slot] : probe.target);
       static std::uint8_t bytes[4] {0, 0, 1, 0x26};
       params->bitstreamBufferPtr = bytes;
       params->bitstreamSizeInBytes = sizeof(bytes);
@@ -406,11 +425,15 @@ namespace {
   }
 }  // namespace
 
-TEST(NvencPipelineTest, IndependentProviderGetsTwoPicturesInFlightAndOthersOne) {
+TEST(NvencPipelineTest, IndependentProviderAndHostSbsGetTwoPicturesInFlightAndPlainDesktopOne) {
   nvenc_pipeline_probe game;
   ASSERT_TRUE(game.create(video::SBS_GAME_SBS));
   EXPECT_EQ(game.pipeline_depth(), 2u);
   EXPECT_EQ(only(game.operations(), {"register-"}), (std::vector<std::string> {"register-event-0", "register-event-1", "register-input-0", "register-input-1"}));
+
+  nvenc_pipeline_probe game_mono;
+  ASSERT_TRUE(game_mono.create(video::SBS_GAME_MONO));
+  EXPECT_EQ(game_mono.pipeline_depth(), 2u);
 
   nvenc_pipeline_probe desktop;
   ASSERT_TRUE(desktop.create(video::SBS_OFF));
@@ -421,13 +444,95 @@ TEST(NvencPipelineTest, IndependentProviderGetsTwoPicturesInFlightAndOthersOne) 
   // One picture at a time encodes the converted surface itself: no copy, unmapped at once.
   EXPECT_EQ(only(desktop.operations(), {"copy", "map", "submit", "lock", "unlock", "unmap"}), (std::vector<std::string> {"map-0", "submit-0:1:idr", "lock-0", "unlock-0", "unmap-0"}));
 
+  // Desktop Host SBS converts at capture cadence, but its AI conversion and 2W x H picture overlap
+  // as an independent provider's do.
   nvenc_pipeline_probe host_sbs;
   ASSERT_TRUE(host_sbs.create(video::SBS_AI));
-  EXPECT_EQ(host_sbs.pipeline_depth(), 1u);
+  EXPECT_EQ(host_sbs.pipeline_depth(), 2u);
+  EXPECT_EQ(only(host_sbs.operations(), {"register-"}), (std::vector<std::string> {"register-event-0", "register-event-1", "register-input-0", "register-input-1"}));
 
   nvenc_pipeline_probe without_events(false);
   ASSERT_TRUE(without_events.create(video::SBS_GAME_SBS));
   EXPECT_EQ(without_events.pipeline_depth(), 1u);  // Fails safe to one picture at a time.
+  nvenc_pipeline_probe host_sbs_without_events(false);
+  ASSERT_TRUE(host_sbs_without_events.create(video::SBS_AI));
+  EXPECT_EQ(host_sbs_without_events.pipeline_depth(), 1u);
+}
+
+TEST(NvencPipelineTest, DesktopHostSbsKeepsItsCaptureCadenceWithTwoPicturesInFlight) {
+  // The depth is encoder scheduling only: desktop Host SBS still converts each capture at capture
+  // cadence, not as an independent provider's frames as they finish (encode_run()).
+  video::config_t config {};
+  config.sbs_mode = video::SBS_OFF;
+  EXPECT_EQ(video::nvenc_pipeline_depth(config), 1u);
+  EXPECT_FALSE(video::converts_independent_provider(config));
+  config.sbs_mode = video::SBS_AI;
+  EXPECT_EQ(video::nvenc_pipeline_depth(config), 2u);
+  EXPECT_FALSE(video::converts_independent_provider(config));
+  config.sbs_config.reshade = true;  // Fed by the ReShade export: an independent provider.
+  EXPECT_EQ(video::nvenc_pipeline_depth(config), 2u);
+  EXPECT_TRUE(video::converts_independent_provider(config));
+  config.sbs_config.reshade = false;
+  for (const int mode : {video::SBS_GAME_MONO, video::SBS_GAME_SBS}) {
+    config.sbs_mode = mode;
+    EXPECT_EQ(video::nvenc_pipeline_depth(config), 2u);
+    EXPECT_TRUE(video::converts_independent_provider(config));
+  }
+}
+
+TEST(NvencPipelineTest, HostSbsPicturesKeepTheConversionTheyWereSubmittedWith) {
+  // Desktop Host SBS with two pictures in flight: encode_run() converts while earlier pictures still
+  // encode. A retained-source poll of pending inference keeps the conversion target when the
+  // inference is busy (a packed repeat without a draw) and redraws it with the frame's own depth
+  // once complete; the next capture, a depth-ready install or a stream-gamma reconversion redraws it
+  // too. Each picture encodes the target as it was when submitted, in submission order, also when
+  // the encoder tears down with pictures in flight.
+  enum content_e : int {
+    a_with_previous_depth = 1,  ///< Capture A; its inference missed the same-frame budget.
+    a_with_own_depth,
+    b,  ///< The next capture.
+    b_new_gamma,
+  };
+
+  nvenc_pipeline_probe probe;
+  ASSERT_TRUE(probe.create(video::SBS_AI));
+  ASSERT_EQ(probe.pipeline_depth(), 2u);
+  probe.clear_operations();
+
+  probe.convert(a_with_previous_depth);
+  ASSERT_TRUE(probe.submit_frame(1, true));
+  // The retained-source poll finds the inference busy: the target keeps its packed output.
+  ASSERT_TRUE(probe.submit_frame(2, false));
+  // The next poll finds it complete and redraws A with its own depth while both pictures encode.
+  probe.convert(a_with_own_depth);
+  probe.complete(0);
+  EXPECT_EQ(probe.retrieve_frame().frame_index, 1u);
+  ASSERT_TRUE(probe.submit_frame(3, false));
+  // Capture B converts while pictures 2 and 3 encode.
+  probe.convert(b);
+  probe.complete(1);
+  EXPECT_EQ(probe.retrieve_frame().frame_index, 2u);
+  ASSERT_TRUE(probe.submit_frame(4, false));
+  // A stream-gamma request reconverts B, then the encoder tears down with pictures 3 and 4 in flight.
+  probe.convert(b_new_gamma);
+  probe.complete_every_picture();
+  probe.destroy_encoder();
+
+  EXPECT_EQ(probe.encoded_contents(), (std::vector<std::pair<std::uint64_t, int>> {{1, a_with_previous_depth}, {2, a_with_previous_depth}, {3, a_with_own_depth}, {4, b}}));
+  EXPECT_EQ(only(probe.operations(), {"copy", "submit", "lock"}), (std::vector<std::string> {
+                                                                    "copy-0",
+                                                                    "submit-0:1:idr",
+                                                                    "copy-1",
+                                                                    "submit-1:2",
+                                                                    "lock-0",
+                                                                    "copy-0",
+                                                                    "submit-0:3",
+                                                                    "lock-1",
+                                                                    "copy-1",
+                                                                    "submit-1:4",
+                                                                    "lock-0",
+                                                                    "lock-1",
+                                                                  }));
 }
 
 TEST(NvencPipelineTest, TwoPicturesInFlightUseTheirOwnInputBitstreamAndEvent) {

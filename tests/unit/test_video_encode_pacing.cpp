@@ -9,8 +9,10 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 #include <src/platform/windows/capture_timing.h>
+#include <src/platform/windows/display.h>
 #include <src/reshade_bridge_protocol.h>
 #include <src/video.h>
 #include <src/video_encode_pacing.h>
@@ -357,6 +359,25 @@ namespace {
   // A high-resolution waitable timer ends a 1 ms sleep after 1.4-1.55 ms on average.
   constexpr auto hold_timer_overshoot = 500us;
 
+  // A condition-variable wait that nothing notifies ends at the first Windows scheduler tick at or
+  // after its deadline, counted from the tick before it started (winpthreads without a clock-based
+  // wait), whatever the timer resolution. The models' ticks run at this phase of their clock.
+  constexpr auto tick_phase = 3100us;
+
+  std::chrono::nanoseconds last_tick(std::chrono::nanoseconds t) {
+    constexpr auto offset = windows_tick - tick_phase;
+    return ((t + offset) / windows_tick) * windows_tick - offset;
+  }
+
+  std::chrono::nanoseconds tick_wait_end(std::chrono::nanoseconds start, std::chrono::nanoseconds wait) {
+    const auto deadline = last_tick(start) + std::chrono::ceil<std::chrono::milliseconds>(std::max(wait, 0ns));
+    auto end = last_tick(start) + windows_tick;
+    while (end < deadline) {
+      end += windows_tick;
+    }
+    return end;
+  }
+
   enum class fence_wake_e {
     prompt,
     late,  ///< 0-11 ms after the completion.
@@ -534,22 +555,6 @@ namespace {
       held,
     } loop = loop_e::start;
     bool woken = false;
-    // A condition-variable wait that nothing notifies ends at the first Windows scheduler tick at or
-    // after its deadline, counted from the tick before it started (winpthreads without a
-    // clock-based wait), whatever the timer resolution.
-    constexpr auto tick_phase = 3100us;  // Any phase relative to the game.
-    const auto last_tick = [&](std::chrono::nanoseconds t) {
-      constexpr auto offset = windows_tick - tick_phase;
-      return ((t + offset) / windows_tick) * windows_tick - offset;
-    };
-    const auto tick_wait_end = [&](std::chrono::nanoseconds start, std::chrono::nanoseconds wait) {
-      const auto deadline = last_tick(start) + std::chrono::ceil<std::chrono::milliseconds>(std::max(wait, 0ns));
-      auto end = last_tick(start) + windows_tick;
-      while (end < deadline) {
-        end += windows_tick;
-      }
-      return end;
-    };
     const auto frame_pending = [&]() {
       for (const auto &slot : ring) {
         if (slot.state == slot_e::ready && slot.sequence > held && slot.sequence <= completed) {
@@ -975,6 +980,383 @@ namespace {
         EXPECT_LT(at_target.max_gap, after_slot.max_gap);
         EXPECT_LE(at_target.mean_present_to_packet, after_slot.mean_present_to_packet + std::chrono::microseconds {slots == 3 ? 500 : 2000});
       }
+    }
+  }
+
+  // Desktop Host SBS (AI depth on desktop capture, a 7680x2160 picture at 4K) through encode_run()
+  // and its encoder. It is not an independent provider: it converts at capture cadence, holds
+  // nothing, and an image wait that runs out encodes the input again (a repeat). The desktop
+  // presents on the display's vblank grid (+-0.5 ms) and capture hands each change over `handoff`
+  // after its Present (09-06 live: 1.6 ms). A conversion costs the loop `admission` (DDup and
+  // adaptive admission, the TensorRT enqueue), then the same-frame poll waits for that capture's own
+  // inference (`infer_*`, one at a time on its stream) within its budget
+  // (host_sbs_same_frame_poll_plan(): at most 8 ms, ending 3 ms before the next encode target), then
+  // `output` (postprocess, warp and output draw recorded): 3-6 ms in all by default. An inference
+  // that misses the budget, or a capture admitted while the previous inference still runs
+  // (backpressure), is drawn with older depth (`depth_misses`). Without `same_frame_budget` the
+  // loop always waits for its inference: the conversion is a fixed 3-6 ms. The picture completes
+  // `encode_*` after its submission (the warp and output GPU work, then NVENC), in order and at least
+  // `engine` after the previous one; with two in flight the copy into the picture's own input comes
+  // first. With depth 1 the loop waits for that completion (nvenc_base::encode_frame()); with 2 it
+  // submits and waits only while both pictures are in flight (encode_pipeline_t), and each packet
+  // leaves when its picture completes.
+  struct host_sbs_desktop_model_t {
+    unsigned depth = 1;
+    double stream_fps = 90, content_fps = 90;
+    double infer_low_ms = 1.5, infer_high_ms = 4.5;
+    std::chrono::nanoseconds admission {500us}, output {1ms};
+    bool same_frame_budget = true;
+    double encode_low_ms = 6.0, encode_high_ms = 12.0;
+    std::chrono::nanoseconds submit {400us};
+    std::chrono::nanoseconds engine {5ms};
+    std::chrono::nanoseconds copy {300us};
+    std::chrono::nanoseconds handoff {1600us};
+  };
+
+  struct host_sbs_desktop_result_t {
+    double presents = 0, new_frames = 0, depth_misses = 0;  ///< Per second.
+    int repeats = 0;
+    std::chrono::nanoseconds mean_latency {}, max_latency {};  ///< From a new frame's Present to its packet.
+    std::chrono::nanoseconds max_gap {};  ///< Between new frames' packets.
+    unsigned max_in_flight = 0;
+  };
+
+  host_sbs_desktop_result_t simulate_host_sbs_desktop(const host_sbs_desktop_model_t &model, std::chrono::nanoseconds duration = 4s) {
+    using ns = std::chrono::nanoseconds;
+    const auto seconds = [](double value) {
+      return std::chrono::duration_cast<ns>(std::chrono::duration<double>(value));
+    };
+    const auto stream = seconds(1.0 / model.stream_fps);
+    const auto threshold = stream / 4;
+    // max_frametime: the minimum FPS target, a fifth of the stream rate and at least 10 fps.
+    const auto idle = seconds(1.0 / std::max(model.stream_fps / 5.0, 10.0));
+    const auto content = seconds(1.0 / model.content_fps);
+    constexpr auto step = 10us;
+
+    sim_jitter_t jitter;
+    sim_jitter_t work_jitter {54321};  // Its own sequence: the desktop's Presents stay identical.
+    std::vector<ns> presents;
+    const auto phase = jitter.between(1.0, std::chrono::duration<double, std::milli>(content).count());
+    for (auto vblank = phase; vblank < duration; vblank += content) {
+      presents.push_back(vblank - 500us + jitter.between(0.0, 1.0));
+    }
+
+    source_owner source;
+    source.observe(std::make_shared<captured_source>(-1, at(0ns)));  // The desktop before the run.
+    source.converted();
+    auto target = at(0ns);
+    std::optional<std::size_t> mailbox;  // The newest capture handed over and not yet taken.
+    std::size_t next_present = 0;
+    std::deque<ns> in_flight;  // Completion times, oldest first.
+    ns blocked_until {}, wait_until {}, last_completion {}, infer_free {}, total_latency {};
+    std::optional<ns> last_new_packet;
+    bool waiting = false;
+    int new_frames = 0, misses = 0;
+    host_sbs_desktop_result_t result;
+
+    for (ns now {}; now < duration; now += step) {
+      for (; next_present < presents.size() && presents[next_present] + model.handoff <= now; ++next_present) {
+        mailbox = next_present;  // The image event keeps only the newest capture.
+      }
+      if (now < blocked_until) {
+        continue;
+      }
+      if (!waiting) {
+        // A capture already handed over ends the wait at once; otherwise only a capture or the
+        // bound (at a scheduler tick, as nothing else notifies) ends it.
+        const auto pending_wait = source.remaining_wait(at(now), target);
+        const auto wait = video::detail::encode_image_wait(idle, stream, true, false, false, pending_wait);
+        wait_until = wait > 0ns ? tick_wait_end(now, wait) : now;
+        waiting = true;
+      }
+      if (!mailbox && now < wait_until) {
+        continue;
+      }
+      waiting = false;
+
+      std::optional<video::detail::encode_frame_schedule_t> schedule;
+      if (mailbox) {
+        const auto captured = *mailbox;
+        mailbox.reset();
+        source.observe(std::make_shared<captured_source>(static_cast<int>(captured), at(presents[captured])));
+        auto current = at(presents[captured]);
+        if (current - target < -threshold) {
+          if (!source.due(at(now), target)) {
+            continue;  // Early: deferred to its target.
+          }
+          current = at(now);
+        }
+        schedule = video::detail::select_encode_frame_schedule(current, target, stream, threshold);
+      } else if (source.pending() && source.due(at(now), target)) {
+        schedule = video::detail::select_encode_frame_schedule(at(now), target, stream, threshold);  // The deferred capture.
+      }
+
+      ns converted = now;
+      std::optional<std::size_t> new_frame;
+      if (schedule) {
+        const auto enqueued = now + model.admission;
+        ns polled_until = enqueued;
+        if (infer_free > enqueued) {
+          ++misses;  // The previous inference still runs: no new admission, older depth.
+        } else {
+          const auto inferred = enqueued + work_jitter.between(model.infer_low_ms, model.infer_high_ms);
+          infer_free = inferred;
+          const auto plan = platf::dxgi::detail::host_sbs_same_frame_poll_plan(true, false, schedule->next_encode_target, at(enqueued));
+          if (!model.same_frame_budget) {
+            polled_until = inferred;
+          } else if (plan.eligible) {
+            polled_until = std::min(inferred, plan.deadline.time_since_epoch());
+          }
+          if (inferred > polled_until) {
+            ++misses;
+          }
+        }
+        converted = polled_until + model.output;
+        target = schedule->next_encode_target;
+        new_frame = static_cast<std::size_t>(source.latest()->pixels);
+        source.converted();
+      } else {
+        ++result.repeats;  // The wait ran out: encode the input again.
+      }
+
+      // acquire(): with every picture in flight, wait for the oldest.
+      auto acquired = converted;
+      while (!in_flight.empty() && in_flight.front() <= acquired) {
+        in_flight.pop_front();
+      }
+      if (in_flight.size() >= model.depth) {
+        acquired = in_flight.front();
+        in_flight.pop_front();
+      }
+      const auto submitted = acquired + model.submit;
+      const auto latency = work_jitter.between(model.encode_low_ms, model.encode_high_ms) + (model.depth > 1 ? model.copy : 0ns);
+      const auto completion = std::max(submitted + latency, last_completion + model.engine);
+      last_completion = completion;
+      in_flight.push_back(completion);
+      result.max_in_flight = std::max(result.max_in_flight, static_cast<unsigned>(in_flight.size()));
+      // One picture at a time: encode_frame() returns once it completed.
+      blocked_until = model.depth == 1 ? completion : submitted;
+      if (new_frame) {
+        ++new_frames;
+        const auto latency_to_packet = completion - presents[*new_frame];
+        total_latency += latency_to_packet;
+        result.max_latency = std::max(result.max_latency, latency_to_packet);
+        if (last_new_packet) {
+          result.max_gap = std::max(result.max_gap, completion - *last_new_packet);
+        }
+        last_new_packet = completion;
+      }
+    }
+    const double elapsed = std::chrono::duration<double>(duration).count();
+    result.presents = static_cast<double>(presents.size()) / elapsed;
+    result.new_frames = new_frames / elapsed;
+    result.depth_misses = misses / elapsed;
+    result.mean_latency = new_frames ? total_latency / new_frames : 0ns;
+    return result;
+  }
+
+  void print_host_sbs_desktop(const char *label, const host_sbs_desktop_model_t &model, const host_sbs_desktop_result_t &result) {
+    const auto ms = [](std::chrono::nanoseconds value) {
+      return std::chrono::duration<double, std::milli>(value).count();
+    };
+    std::printf(
+      "[ MEASURE  ] %s, stream %.0f fps, desktop %.0f fps, %u in flight: presents %.0f/s new %.1f/s older-depth %.1f/s repeats %d, "
+      "Present to packet mean %.1f max %.1f ms, max gap %.1f ms, max in flight %u\n",
+      label,
+      model.stream_fps,
+      model.content_fps,
+      model.depth,
+      result.presents,
+      result.new_frames,
+      result.depth_misses,
+      result.repeats,
+      ms(result.mean_latency),
+      ms(result.max_latency),
+      ms(result.max_gap),
+      result.max_in_flight
+    );
+  }
+
+  TEST(RemoteEncodeHostSbsPipelineTest, TwoPicturesInFlightKeepEachCapturesOwnDepthAtNinetyFps) {
+    // Conversion 3-6 ms (the inference the same-frame poll waits for, 1.5-4.5 ms) and 6-12 ms from
+    // submission to packet, 90 fps desktop. One picture at a time the loop spends 9-18 ms per
+    // capture, so the next capture waits behind the encode and reaches its conversion with too little
+    // budget left: the loop keeps up by drawing almost every capture with older depth, and Present to
+    // packet grows by the wait. With two in flight the capture converts while the previous picture
+    // encodes, on time and with its own depth.
+    host_sbs_desktop_model_t serial;
+    auto pipelined = serial;
+    pipelined.depth = 2;
+    const auto before = simulate_host_sbs_desktop(serial);
+    const auto after = simulate_host_sbs_desktop(pipelined);
+    print_host_sbs_desktop("one at a time", serial, before);
+    print_host_sbs_desktop("two in flight", pipelined, after);
+    EXPECT_GE(before.depth_misses, 60.0);
+    EXPECT_GE(after.new_frames, after.presents - 0.5);  // Every capture.
+    EXPECT_GE(after.new_frames, before.new_frames);
+    EXPECT_LE(after.depth_misses, 1.0);
+    EXPECT_LE(after.mean_latency, before.mean_latency - 3ms);
+    EXPECT_LT(after.max_latency, before.max_latency);
+    EXPECT_LT(after.max_gap, 2 * 11111111ns);  // No stream frame skipped.
+    EXPECT_EQ(after.repeats, 0);
+    EXPECT_EQ(after.max_in_flight, 2u);
+    EXPECT_EQ(before.max_in_flight, 1u);
+  }
+
+  TEST(RemoteEncodeHostSbsPipelineTest, TwoPicturesInFlightTakeEveryCaptureWhenTheConversionCannotShrink) {
+    // The same times with a conversion that always costs the loop 3-6 ms (no same-frame budget to
+    // give up): one picture at a time drops about a fifth of the 90 fps captures.
+    host_sbs_desktop_model_t serial;
+    serial.same_frame_budget = false;
+    auto pipelined = serial;
+    pipelined.depth = 2;
+    const auto before = simulate_host_sbs_desktop(serial);
+    const auto after = simulate_host_sbs_desktop(pipelined);
+    print_host_sbs_desktop("fixed conversion, one at a time", serial, before);
+    print_host_sbs_desktop("fixed conversion, two in flight", pipelined, after);
+    EXPECT_LE(before.new_frames, 80.0);
+    EXPECT_GE(after.new_frames, after.presents - 0.5);
+    EXPECT_LE(after.mean_latency, before.mean_latency - 4ms);
+    EXPECT_LT(after.max_latency, before.max_latency);
+    EXPECT_LT(after.max_gap, 2 * 11111111ns);
+    EXPECT_EQ(after.repeats, 0);
+  }
+
+  TEST(RemoteEncodeHostSbsPipelineTest, SixtyFpsCapturesNeverOverlapAndPayOnlyTheInputCopy) {
+    // At 60 fps (a 90 or 60 fps stream) a picture completes before the next capture converts: both
+    // depths take every capture, no picture is ever submitted behind another, and two in flight cost
+    // the copy into the picture's own input.
+    for (const bool budget : {true, false}) {
+      for (const double stream_fps : {90.0, 60.0}) {
+        host_sbs_desktop_model_t serial;
+        serial.stream_fps = stream_fps;
+        serial.content_fps = 60.0;
+        serial.same_frame_budget = budget;
+        auto pipelined = serial;
+        pipelined.depth = 2;
+        const auto before = simulate_host_sbs_desktop(serial);
+        const auto after = simulate_host_sbs_desktop(pipelined);
+        print_host_sbs_desktop(budget ? "one at a time" : "fixed conversion, one at a time", serial, before);
+        print_host_sbs_desktop(budget ? "two in flight" : "fixed conversion, two in flight", pipelined, after);
+        EXPECT_GE(before.new_frames, before.presents - 0.5);
+        EXPECT_GE(after.new_frames, after.presents - 0.5);
+        EXPECT_EQ(after.depth_misses, before.depth_misses);
+        EXPECT_LE(after.mean_latency, before.mean_latency + pipelined.copy);
+        EXPECT_EQ(after.max_in_flight, 1u);
+        EXPECT_EQ(after.repeats, 0);
+      }
+    }
+  }
+
+  TEST(RemoteEncodeHostSbsPipelineTest, TwoPicturesInFlightChangeNothingWhenHostSbsFitsTheInterval) {
+    // 09-06 live Host SBS at 90 fps: conversion call 2.29 ms and NVENC encode and retrieve 6.05 ms on
+    // average. Both depths take every capture, no picture is submitted behind another, and two in
+    // flight cost only the input copy.
+    for (const double content_fps : {90.0, 60.0}) {
+      host_sbs_desktop_model_t serial;
+      serial.content_fps = content_fps;
+      serial.infer_low_ms = 0.8;
+      serial.infer_high_ms = 1.8;
+      serial.output = 500us;
+      serial.encode_low_ms = 5.0;
+      serial.encode_high_ms = 7.0;
+      auto pipelined = serial;
+      pipelined.depth = 2;
+      const auto before = simulate_host_sbs_desktop(serial);
+      const auto after = simulate_host_sbs_desktop(pipelined);
+      print_host_sbs_desktop("09-06 times, one at a time", serial, before);
+      print_host_sbs_desktop("09-06 times, two in flight", pipelined, after);
+      EXPECT_GE(before.new_frames, before.presents - 1.0);
+      EXPECT_GE(after.new_frames, after.presents - 1.0);
+      EXPECT_EQ(after.depth_misses, 0.0);
+      EXPECT_LE(after.mean_latency, before.mean_latency + pipelined.copy);
+      EXPECT_EQ(after.max_in_flight, 1u);
+      EXPECT_EQ(after.repeats, 0);
+    }
+  }
+
+  // The desktop then stays static, and the final capture's inference missed the same-frame budget:
+  // it completes at `inference_done`. While that poll is pending encode_run() caps its image wait at
+  // the stream interval (encode_image_wait(); it ends at a scheduler tick, as no capture notifies),
+  // and each timeout reconverts the retained source. Its nonblocking query keeps the target while
+  // the inference is busy (a packed repeat) and draws the frame with its own depth once complete;
+  // the idle heartbeat then resumes. The final capture's picture was submitted at 4.4 ms.
+  struct pending_inference_result_t {
+    std::vector<std::chrono::nanoseconds> polls;  ///< When each retained-source poll converted.
+    std::chrono::nanoseconds upgraded_packet {};  ///< When the frame drawn with its own depth left.
+    std::chrono::nanoseconds heartbeat {};  ///< The next encode after that.
+    unsigned max_in_flight = 0;
+  };
+
+  pending_inference_result_t simulate_pending_inference_on_static_desktop(unsigned depth, std::chrono::nanoseconds inference_done) {
+    using ns = std::chrono::nanoseconds;
+    constexpr ns stream {11111111ns}, idle {55555555ns};
+    constexpr ns query {300us}, output {1ms}, submit {400us}, encode {9ms}, engine {5ms};
+    constexpr ns final_submitted {4400us};
+    pending_inference_result_t result;
+    std::deque<ns> in_flight {final_submitted + encode};
+    auto last_completion = in_flight.front();
+    auto now = depth == 1 ? last_completion : final_submitted;
+    bool poll_pending = true;
+    while (true) {
+      const auto wait = video::detail::encode_image_wait(idle, stream, true, false, poll_pending, std::nullopt);
+      now = tick_wait_end(now, wait);
+      if (!poll_pending) {
+        result.heartbeat = now;
+        return result;
+      }
+      result.polls.push_back(now);
+      const bool upgraded = now >= inference_done;
+      poll_pending = !upgraded;
+      auto acquired = now + query + (upgraded ? output : 0ns);
+      while (!in_flight.empty() && in_flight.front() <= acquired) {
+        in_flight.pop_front();
+      }
+      if (in_flight.size() >= depth) {
+        acquired = in_flight.front();
+        in_flight.pop_front();
+      }
+      const auto submitted = acquired + submit;
+      const auto completion = std::max(submitted + encode, last_completion + engine);
+      last_completion = completion;
+      in_flight.push_back(completion);
+      result.max_in_flight = std::max(result.max_in_flight, static_cast<unsigned>(in_flight.size()));
+      if (upgraded) {
+        result.upgraded_packet = completion;
+      }
+      now = depth == 1 ? completion : submitted;
+    }
+  }
+
+  TEST(RemoteEncodeHostSbsPipelineTest, PendingInferencePollsKeepTheirCadenceWithPicturesInFlight) {
+    constexpr std::chrono::nanoseconds stream {11111111ns}, idle {55555555ns};
+    for (const std::chrono::nanoseconds inference_done : {6ms, 20ms, 30ms, 47ms, 80ms}) {
+      const auto serial = simulate_pending_inference_on_static_desktop(1, inference_done);
+      const auto pipelined = simulate_pending_inference_on_static_desktop(2, inference_done);
+      std::printf(
+        "[ MEASURE  ] inference complete at %.0f ms: one at a time %zu polls, own depth's packet at %.1f ms; two in flight %zu polls, packet at %.1f ms\n",
+        std::chrono::duration<double, std::milli>(inference_done).count(),
+        serial.polls.size(),
+        std::chrono::duration<double, std::milli>(serial.upgraded_packet).count(),
+        pipelined.polls.size(),
+        std::chrono::duration<double, std::milli>(pipelined.upgraded_packet).count()
+      );
+      for (const auto *result : {&serial, &pipelined}) {
+        ASSERT_FALSE(result->polls.empty());
+        // A busy poll never repeats the input faster than the stream rate...
+        for (std::size_t poll = 1; poll < result->polls.size(); ++poll) {
+          EXPECT_GE(result->polls[poll] - result->polls[poll - 1], stream);
+        }
+        // ...the first poll after the completion draws the frame with its own depth...
+        EXPECT_GE(result->polls.back(), inference_done);
+        EXPECT_LT(result->polls.back() - inference_done, windows_tick);
+        // ...and the idle heartbeat then resumes.
+        EXPECT_GE(result->heartbeat - result->polls.back(), idle);
+      }
+      EXPECT_EQ(serial.max_in_flight, 1u);
+      EXPECT_LE(pipelined.max_in_flight, 2u);
+      EXPECT_LE(pipelined.polls.size(), serial.polls.size() + 1);
+      EXPECT_LE(pipelined.upgraded_packet, serial.upgraded_packet);
     }
   }
 

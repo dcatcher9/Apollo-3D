@@ -4864,8 +4864,9 @@ conversion off the GPU for about 300 ms: the fixed budget failed the encoder at 
 `input_producer=pending_at_251ms`, blocked new encoders, rebuilt the session, detached the receiver
 and so made the game build a second export ring. Such a stall now delays one picture.
 
-The encoder of an independent provider keeps up to two pictures in flight
-(`nvenc_base::pipeline_depth()`; desktop and Host SBS streams keep one). Each picture has its own
+The encoder of an independent provider, and of desktop Host SBS, keeps up to two pictures in flight
+(`video::nvenc_pipeline_depth()`, fixed per encoder as `nvenc_base::pipeline_depth()`; plain
+desktop keeps one, and Local AR presents without NVENC). Each picture has its own
 NVENC input, bitstream and completion event: at submission the converted surface is copied into
 the picture's input on the immediate context (about 50 MB each way at 7680x2160 10-bit; the two
 inputs cost about 100 MB of video memory), so the next frame converts and starts encoding while the
@@ -4893,6 +4894,29 @@ where waiting first would also claim frames 1.3-1.7 ms fresher: smoothness first
 live FG-on encode times (5.5-22 ms per picture): 68 new frames/s one picture at a time on the
 three-slot ring the live 55-71/s came from (its calibration band) and 69 on four, 90 with two in
 flight, Present to packet within 0.5 ms of one picture at a time on the same ring.
+
+Desktop Host SBS (AI depth on desktop capture, a 7680x2160 picture at 4K) keeps its capture
+cadence: it is not an independent provider, so it holds nothing and an image wait that runs out
+still encodes the input again; only its picture now encodes while the next capture converts. A
+conversion writes only the conversion target, which each picture copied at its submission, so the
+next capture, a retained-source poll of pending inference (busy, it keeps the target and the picture
+repeats it; complete, it redraws the frame with its own depth), a depth-ready install and a
+stream-gamma reconversion never change a picture in flight
+(`NvencPipelineTest.HostSbsPicturesKeepTheConversionTheyWereSubmittedWith`). The same-frame poll
+reserves 3 ms after its inference wait for postprocess, output and NVENC submission
+([Host SBS](host-sbs.md)); one picture at a time the loop then also waited for the picture, so a
+capture taken behind a slow picture reached its conversion with too little budget left and was drawn
+with older depth. `RemoteEncodeHostSbsPipelineTest` runs the loop's wait, schedule and same-frame
+budget helpers with conversions of 3-6 ms (1.5-4.5 ms of it the awaited inference) and 6-12 ms from
+submission to packet. At 90 fps one picture at a time takes 87.2 new frames/s of 90, about 79 of them
+a second drawn with older depth, Present to packet 19.6 ms on average and 26.2 ms at most; two in
+flight take 90.0, 0.5/s with older depth, 15.7 and 19.7 ms. A conversion that always costs the loop
+3-6 ms gives 72.8 against 90.0 new frames/s and 20.9 against 15.7 ms. At 60 fps (a 60 or 90 fps
+stream), and at the 09-06 live times (conversion call 2.3 ms, NVENC 6 ms on average), no picture is
+ever submitted behind another: both depths take every capture and two in flight cost the copy into
+the picture's input (0.3 ms modelled for its 50 MB each way). Polls of a pending
+inference on a static desktop keep their stream-interval cadence and deliver the frame's own depth at
+the same time either way.
 
 While a streaming encoder converts a live packed export it holds the display's capture-pixel
 claim, and Desktop Duplication and WGC forward only timestamps and cursor metadata. When the

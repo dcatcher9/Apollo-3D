@@ -560,11 +560,14 @@ namespace video {
     return is_game_mode(config.sbs_mode) || (config.sbs_mode == SBS_AI && config.sbs_config.reshade);
   }
 
-  /** NVENC pictures that may be in flight at once. An independent provider's next frame converts and
-   *  starts encoding while the previous picture still encodes; every other stream encodes one
-   *  picture at a time, as before. */
+  /** NVENC pictures that may be in flight at once. An independent provider's next frame, and desktop
+   *  Host SBS's next capture (AI depth and warp, then a 2W x H picture), convert and start encoding
+   *  while the previous picture still encodes. Plain desktop encodes one picture at a time, as
+   *  before: its picture fits the stream interval, so a second input would add a copy and memory for
+   *  nothing. Local AR presents without NVENC. Pacing is unchanged: desktop Host SBS still converts
+   *  at capture cadence (converts_independent_provider() is false). */
   inline unsigned nvenc_pipeline_depth(const config_t &config) noexcept {
-    return converts_independent_provider(config) ? 2u : 1u;
+    return converts_independent_provider(config) || config.sbs_mode == SBS_AI ? 2u : 1u;
   }
 
   // Preserve standard NTSC rates instead of approximating them as finite decimal fractions.

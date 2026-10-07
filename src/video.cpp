@@ -1369,8 +1369,11 @@ namespace video {
         hold_timer.reset();
       }
     }
-    // With pictures in flight (an independent provider; nvenc_base::pipeline_depth()) the next
-    // frame converts and its picture starts encoding while the previous one still encodes. A
+    // With pictures in flight (an independent provider or desktop Host SBS;
+    // nvenc_base::pipeline_depth()) the next frame converts and its picture starts encoding while
+    // the previous one still encodes. Each picture encodes its own copy of the conversion target,
+    // taken at submission, so a later conversion (a new capture, a retained-source poll of pending
+    // inference, a depth-ready install or a stream-gamma reconversion) never changes it. A
     // thread of their own retrieves the pictures in submission order and publishes each packet as
     // soon as its picture completes, whatever this loop is doing. Declared after everything it
     // uses; its destruction on any exit delivers the pictures still in flight, as returning from
