@@ -1342,8 +1342,8 @@ the same bound, which nothing acted on. They measured screens that no claim cove
 Blade's SDR loading screen: the layer without coverage is an almost black scene image (invalid on
 only 0.2-0.4% of pixels, so V1-valid), the presented frame reads hidden and the layer only weakly
 (D 0.15-0.22), so H1 (d) does not apply and it stays 3D. Selection revision 9 writes texel 11's
-`.z` and `.w` as reserved zeros, and the UI log line keeps `presented_lit=0` and
-`presented_lit_differs=0` in place.
+`.z` and `.w` as reserved zeros; the UI log line kept `presented_lit=0` and
+`presented_lit_differs=0` in place through be7788bf.
 
 A visible sample also refutes the signature (`<kind>:<format>:<colour space>`, as for acceptance) of
 every candidate whose full claim it carried, since the presented frame then shows the depth's edges
@@ -1409,8 +1409,8 @@ reporting `shadow_hidden_ms`, the run of consecutive samples reading the present
 no source decided. It found Stellar Blade's SDR settings page with FG suspended hidden for about
 9 s per visit, which is flat through claim (d) once its layer is proven since fix 1. It was removed
 with its key, its `first-run shadow measures this session` line and its dump fields; the UI log
-line keeps `shadow=0 shadow_hidden_ms=0` in place, and a `ReShade.ini` that still carries
-`UISceneShadow` loads unchanged with the key ignored. Known first-session gaps stay open by design,
+line kept `shadow=0 shadow_hidden_ms=0` in place through be7788bf, and a `ReShade.ini` that still
+carries `UISceneShadow` loads unchanged with the key ignored. Known first-session gaps stay open by design,
 because none has an informative claim: Expedition 33 settings with FG off and The Witcher 3
 settings without a UI layer offer only presented alpha, and Expedition 33's Load Game with FG on
 only its tagged Backbuffer alpha, which flatten from the second session through remembered
@@ -1427,7 +1427,7 @@ it together with S3's frame identity, which shared decision texel 12: the stilln
 their statistics rows, the previous-luma texture, the flag in `b2` word 5, the `Sunshine UI still
 screen` lines, the `still` counter and log groups, the panel's checkbox and its status texts are
 gone. Its identifiers stay reserved and are never reused: source 11 (its counter word stayed zero
-through dc7e3c77 and was then dropped), `b2` word 5 (pushed as zero), decision texel 12 (words 48-51) and statistics rows 144-159. A
+through dc7e3c77 and was then dropped), `b2` word 5 (pushed as zero through be7788bf, then dropped), decision texel 12 (words 48-51) and statistics rows 144-159. A
 `ReShade.ini` that still carries `UIFlattenStillScreens` loads unchanged; the add-on ignores the
 key. A screen on which no UI source decides and no informative claim acts, such as Stellar Blade's
 SDR loading screen, stays 3D.
@@ -1484,8 +1484,8 @@ in the summary are those offered, invalid ones included. The `Sunshine UI protec
 (`sampled_candidates`, `sampled_alpha_covered` and `sampled_alpha_invalid` for UIAlpha, the UI color
 tag, Backbuffer and current, `accepted` as candidate bits, `sampled_layer` with the offscreen UI
 layer's `covered`, `invalid` and `opaque` pixels, `sampled_one_way` with the `strong` and
-`contradicted` pixels of the layer (0 since selection revision 10, which judges no layer copy),
-Backbuffer and current alpha, `sampled_reason` (the own
+`contradicted` pixels of Backbuffer and current alpha (lines through be7788bf lead each with the
+layer's, 0 since selection revision 10, which judges no layer copy), `sampled_reason` (the own
 decision's `ui_no_mask` reason, or `decided`), `sampled_refused` (the refused candidate's kind,
 `ui_alpha`, `ui_color`, `ui_layer`, `backbuffer`, `current` or `hudless`, or `none`),
 `sampled_reused`, `sampled_hudless`, `sampled_alpha_opaque` for
@@ -1498,15 +1498,13 @@ and `verdict`, `sampled_pre_ui_scene` with the pre-UI scene image's `image` (`no
 `scene_guard` with `hidden` and `pre_ui` (the verdicts the hidden-scene guard pushed with that
 render), `refuted` (the signatures it holds refuted) and `proven` (the offered layer's signature is
 proven the pre-UI scene image, the ledger's `pre_ui` key, so that its pre-UI image may act),
-`shadow` and `shadow_hidden_ms` (the removed first-run shadow's fields, 0 since selection revision
-9), then `sampled_pre_ui_pixels` with decision texel 11's `match` and `image_lit` and the reserved
-`presented_lit` and `presented_lit_differs` (0 since selection revision 9; the layer against the presented frame,
-**The layer's pre-UI proof**), then (since selection revision 10) `sampled_declared_one_way` with
+then `sampled_pre_ui_pixels` with decision texel 11's `match` and `image_lit` (the layer against
+the presented frame, **The layer's pre-UI proof**), then (since selection revision 10) `sampled_declared_one_way` with
 the `strong` and `contradicted` pixels of UIAlpha and the UI color tag (both 0 for a tag outside
 the exact pair's tag batch), and the dump's `source_alpha_auto.sampled_evidence` (`alpha_opaque`, `inferred_opaque`, `claims`, `h1`
 with `applied` and `winner`, `layer`, `accepted`, `valid_bits`,
 `scene` with the presented image's `decided` comparisons, `pre_ui_scene` with its `image` and
-`verdict`, `pre_ui_pixels` with the same four counts, the current run's
+`verdict`, `pre_ui_pixels` with `match` and `image_lit`, the current run's
 `one_way` with `strong` and `contradicted` by judged kind (`ui_alpha`, `ui_color`, `backbuffer`,
 `current` since selection revision 10; before it `ui_layer`, `backbuffer`, `current` and
 `late_layer`), `reason`, `refused` and
@@ -1525,9 +1523,13 @@ route, 2 HUD-less route) instead of `sampled_pre_ui_scene` and `scene_guard`, an
 `sampled_pre_ui_pixels`, their `proven` is the guard's D proof, and in them a V1-invalid layer
 claims `0x80` without a proof (since fix 1 an unproven layer adds nothing to `sampled_claims`);
 logs of fix 2 to selection revision 8 end with H2's `still` group (**Still screens without a UI
-source (H2, fix 2): removed**), and their dumps carry `still_short_ms` and `still_screen`. A
-presented verdict entering or leaving hidden logs within a second, like a change of source; turns
-between ambiguous and visible, frequent near the visible bound, wait for the next periodic line.
+source (H2, fix 2): removed**), and their dumps carry `still_short_ms` and `still_screen`; logs
+through be7788bf also have `shadow` and `shadow_hidden_ms` (the removed first-run shadow's fields, 0
+since selection revision 9) before `sampled_pre_ui_pixels`, and `presented_lit` and
+`presented_lit_differs` (texel 11's removed shadow statistics, 0 since selection revision 9) after
+its `image_lit`. A presented verdict entering or leaving hidden logs within a second, like a change
+of source; turns between ambiguous and visible, frequent near the visible bound, wait for the next
+periodic line.
 Without a mask the panel's status names the reason and the refused candidate: "No usable UI mask
 (learning the real-input alpha)" for an unaccepted Backbuffer (`ui_protection_reason_text` in
 `game3d_controls_model.h`).
@@ -1583,11 +1585,11 @@ when they are not comparable, at eight times which the tiles pass counts texel 1
 pushes it only on a detection sample frame (at most one every 100 ms, the frames whose decision
 texels the CPU reads); every other frame pushes 0, so the tiles pass skips the presented-colour
 loads and both passes skip the second sum and write texel 11 as zero. The decision never reads
-texel 11. Since selection revision 9 `b2` has six words (`ui_detection::b2_words`, a 32-byte
-constant buffer): word 5, `Sunshine_UIReserved`, is reserved and pushed as zero. H2's flag `0x1`
-(fix 2) and fix 3 and fix 4's bits `0x2`-`0x200` used it, all removed; S3's words 6-9 (the proposed
-labels and `Sunshine_UIIdentity`, 48 bytes in all) were removed with S3. A layer seen
-through an `*_SRGB` view is not comparable with a UNORM presented frame, so it is never proven.
+texel 11. `b2` has those five words (`ui_detection::b2_words`, a 32-byte constant buffer). Word 5,
+`Sunshine_UIReserved`, carried H2's flag `0x1` (fix 2) and fix 3 and fix 4's bits `0x2`-`0x200`;
+after those were removed it was pushed as zero through be7788bf, and older shaders read it as zero
+from the padding. S3's words 6-9 (the proposed labels and `Sunshine_UIIdentity`, 48 bytes in all)
+were removed with S3. A layer seen through an `*_SRGB` view is not comparable with a UNORM presented frame, so it is never proven.
 `Sunshine_UIDetectionFlags` (`b2` word 3) has stored and per-frame bits:
 
 | Value | Kind | Meaning |
@@ -1793,9 +1795,10 @@ The checks of removed features are gone, and their lines still parse without a c
 first-run shadow (`UI first-run shadow`), the dark pre-UI image statistics (`Dark pre-UI image
 (shadow)`), H2's still screens (`UI still screen`, from `Sunshine UI still screen` lines and the
 `still` groups) and S3's identity shadow (`UI identity (S3)`, from `Sunshine UI identity` and
-`Sunshine FG interposers` lines). Since selection revision 9 the add-on logs their remaining fields
-(`shadow`, `shadow_hidden_ms`, `presented_lit` and `presented_lit_differs`) as 0; it logged
-`full_alpha_d` as 0 through dc7e3c77, and later counter lines omit it.
+`Sunshine FG interposers` lines). From selection revision 9 the add-on logged their remaining
+fields as 0: `full_alpha_d` through dc7e3c77 and `shadow`, `shadow_hidden_ms`, `presented_lit` and
+`presented_lit_differs` through be7788bf. Later lines omit them, and the report reads them when
+present.
 
 The acceptance-dispute and time-based checks (`UI protection gaps`, hidden scene) still read the
 sampled lines; on lines since S2b the hidden-scene check lists the H1 samples by the pre-UI image
@@ -1863,9 +1866,10 @@ It also pushes the exact 80-byte `b0` from `replay.parameter_hex`, as every rend
 receives it, and binds the raw depth artifact at `t1` and the presented color at `t6` (`t0` stays
 the color HUD-less is paired with; current alpha reads `t6`) for the scene-evidence passes, which it runs after the decision
 as on a sample frame and which read the pre-UI scene image from `t14` or the layer slot `t7`; they
-write only decision texels 5 and 6. Its `b2` has the renderer's six words (32 bytes): word 4 is
+write only decision texels 5 and 6. Its `b2` has the renderer's five words, zero-padded to 32
+bytes, so a shader of selection revisions 5 to 9 reads its word 5 as zero: word 4 is
 `ui_selection::comparable` of the layer artifact's encoding and the presented one, so texel 11
-counts the captured layer against the captured presented colour, and word 5 is reserved and zero.
+counts the captured layer against the captured presented colour.
 A package of selection revisions 5 to 8 also records H2's flag (`still_bits`) and S3's stamps and
 proposals; the replay ignores them, and the `--identity` option is gone.
 Without a raw depth artifact
@@ -1932,7 +1936,8 @@ A label can record a known-wrong cell. Its `expect` then holds the target outcom
 holds three fields:
 
 - `stage`: the [roadmap stage](#ui-decision-framework) expected to fix the cell, one of S1, S2a,
-  S2b, S3, S4, S5 or S6.
+  S2b, S4, S5 or S6. S3 (the frame identity) was removed, so a label that still names it fails its
+  case until it names the stage that now owns the cell.
 - `reason`: text that names the [rule](#ui-decision-framework) that fixes it, as a standalone ID
   (E1, E2, V1, V2, A1, A2, A3, S1, S2, H1, P1, T1 or F1).
 - `today`: the outcome the current shader gives, with the fields of `expect`. `mask` and a

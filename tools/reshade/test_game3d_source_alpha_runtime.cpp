@@ -2848,7 +2848,7 @@ namespace {
         require(!quiet.flat && !quiet.held, std::string(label) + ": no claim flattened or held");
         runs += quiet.evidence;
       }
-      require(!runs, std::string(label) + ": evidence passes ran without a claim, a hold or the first-run shadow");
+      require(!runs, std::string(label) + ": evidence passes ran without a claim or a hold");
     };
     closed_gate(nearly_opaque_layer, false, "98.9% opaque layer");
     closed_gate(half_layer, false, "layer at alpha 0.5 over the whole frame");

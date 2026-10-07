@@ -57,14 +57,13 @@
 // 10. SunshineUIDetectionReduceCS ports ui_selection::decide
 // (game3d_ui_selection.h) line for line, the T1 grace and its hold store and
 // the H1 override included; this revision must equal ui_selection::revision.
-// Revision 7 decided exactly as revision 5: revision 6 (fix 3 and fix 4,
-// removed by user decision) added candidate bit 0x100 and source 12, which
-// stay reserved. Revision 8 adds the empty change set; revision 9 removes
-// H2's still screen (source 11, reserved) and S3's frame identity (decision
-// texel 12, reserved). Revision 10 keeps T1's held decision across HUD-less
-// re-offers, judges the declared alphas one way (decision texel 16) on
-// sample frames only, bounds the layer's premultiplied test by its covered
-// pixels and lets H1 override every S1 winner.
+// Revisions 5 to 9 added and removed rule H2, fix 3, fix 4 and S3's frame
+// identity (candidate bit 0x100, sources 11 and 12 and decision texels 12-15
+// stay reserved); revision 8 adds the empty change set. Revision 10 keeps
+// T1's held decision across HUD-less re-offers, judges the declared alphas
+// one way (decision texel 16) on sample frames only, bounds the layer's
+// premultiplied test by its covered pixels and lets H1 override every S1
+// winner.
 #define SUNSHINE_UI_CANDIDATE_LAYOUT 2
 #define SUNSHINE_UI_SELECTION_REVISION 10
 #define SUNSHINE_UI_CANDIDATE_UI_ALPHA 0x1u
@@ -259,9 +258,6 @@ cbuffer SunshineUIDetectionConstants : register(b2)
     // two are not comparable or on a frame that is not a detection sample
     // (H1 d, the pre-UI pixel counts, which the CPU reads from samples only).
     float Sunshine_UIPreUIThreshold;
-    // Reserved, pushed as zero: H2's still-screen flag (0x1) and fix 3 and
-    // fix 4's bits 0x2-0x200 used it, all removed.
-    uint Sunshine_UIReserved;
 };
 RWTexture2D<float> SunshineHostCandidateStore : register(u0);
 RWTexture2D<float> SunshineHostVerticalMajorantStore : register(u1);
@@ -319,10 +315,9 @@ float SunshineHUDlessDifference(uint2 xy, out bool valid)
 // The pre-UI pixel counts of one pixel (H1 d): the offscreen UI layer's
 // colour against the presented colour at a coarse threshold, eight times
 // their pair threshold as the lit test of a HUD-less image: {matching, lit
-// layer, 0, 0} (.z and .w held the removed lit-presented shadow statistics),
-// all zero when the pair is not comparable (threshold zero) or either colour
-// is not finite. scRGB is compared with the same relative tolerance above one
-// as SunshineHUDlessDifference.
+// layer, 0, 0}, all zero when the pair is not comparable (threshold zero) or
+// either colour is not finite. scRGB is compared with the same relative
+// tolerance above one as SunshineHUDlessDifference.
 uint4 SunshinePreUIPixel(uint2 xy, float3 layer)
 {
     const float coarse = Sunshine_UIPreUIThreshold * 8.0;
@@ -841,7 +836,8 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     // H1 (d): the pre-UI pixel counts the CPU's acceptance ledger proves the
     // layer from; nothing on the GPU reads them.
     SunshineAlphaCoverageStore[uint2(11,0)] = pre_ui_pixels;
-    // Texels 12-15 are reserved zeros (removed H2, S3, fix 3 and fix 4 words).
+    // Texels 12-15 are reserved zeros, which tell this revision's 17 texels
+    // from older ones (game3d_ui_detection_contract.h).
     [unroll] for (uint reserved = 12u; reserved < 16u; ++reserved) SunshineAlphaCoverageStore[uint2(reserved, 0u)] = 0u;
     // A2 of the declared alphas: strong UIAlpha and UI color tag, then their
     // contradicted pixels.

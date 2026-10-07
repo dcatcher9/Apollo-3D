@@ -11,8 +11,7 @@
 // acceptance ledger, below), never acceptance, slots, layer flags or the T1
 // hold, so the single-frame replay (ui_detection_replay) and the sequence
 // replay (test_game3d_ui_sequence) drive it exactly as the renderer does.
-// Rule H2 (still screens without a UI source, fix 2), whose run it held, was
-// removed. No ReShade dependency.
+// No ReShade dependency.
 //
 // Call order, per renderer (one state each):
 //   - on every detecting frame, before anything else here: enter_scope(epoch,
@@ -22,11 +21,10 @@
 //   - before detection: per_frame(now, offered, signatures, layer_proven) is
 //     ORed into the pushed flags; and measure(now, proven_image) says whether
 //     this sample frame runs the evidence passes, which is whether what they
-//     measure is actionable (kept with the pending sample; the first-run
-//     shadow and the whole-frame diagnostic that measured without acting were
-//     removed). layer_proven: the offered layer's signature is proven the
-//     pre-UI scene image (alpha_auto_policy::pre_ui_proven of its
-//     signature); proven_image: that layer is also the offer's pre-UI image;
+//     measure is actionable (kept with the pending sample). layer_proven: the
+//     offered layer's signature is proven the pre-UI scene image
+//     (alpha_auto_policy::pre_ui_proven of its signature); proven_image: that
+//     layer is also the offer's pre-UI image;
 //   - at poll, for a completed sample in scope: observe(sample, actionable,
 //     the signatures it was submitted with), before the acceptance ledger
 //     observes it, with sample the guard's view of the decoded status sample

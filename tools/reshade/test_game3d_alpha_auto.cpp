@@ -932,7 +932,7 @@ namespace {
     g.observe(scene_sample(1800, none), true, sigs);
     g.observe(scene_sample(1900, V), false, sigs);
     require(g.per_frame(2000, candidate::layer, sigs, false) == hidden_bit && !g.refuted_count,
-      "An ambiguous, invalid or shadow-only sample released or refuted");
+      "An ambiguous, invalid or non-actionable sample released or refuted");
     // One valid visible sample releases the hold and refutes the signature of
     // every candidate whose full claim it carried.
     observed = g.observe(scene_sample(1950, V), true, sigs);
@@ -960,11 +960,11 @@ namespace {
     gap.observe(scene_sample(1000, H), true, sigs);
     gap.observe(scene_sample(1100, none), true, sigs);
     require(gap.observe(scene_sample(1200, H), true, sigs).entered, "Invalid evidence broke the entry run");
-    scene_guard::state shadow_only;
-    shadow_only.enter_scope(1, 1);
-    shadow_only.observe(scene_sample(1000, H), false, sigs);
-    shadow_only.observe(scene_sample(1100, H), false, sigs);
-    require(!shadow_only.per_frame(1100, candidate::layer, sigs, false), "Evidence that was not actionable entered a hold");
+    scene_guard::state not_actionable;
+    not_actionable.enter_scope(1, 1);
+    not_actionable.observe(scene_sample(1000, H), false, sigs);
+    not_actionable.observe(scene_sample(1100, H), false, sigs);
+    require(!not_actionable.per_frame(1100, candidate::layer, sigs, false), "Evidence that was not actionable entered a hold");
     // A visible sample that decided H1 counts as a release even without a
     // hold at its tick (samples in flight).
     scene_guard::state late;
@@ -1121,9 +1121,7 @@ namespace {
       "The per-frame bits were not the held verdicts, the refuted offered candidates and the proven layer");
 
     // Measurement: nothing runs without an acting-capable claim, a held
-    // verdict or a proven pre-UI layer (above), and what runs is actionable
-    // (the first-run shadow and the whole-frame diagnostic, which measured
-    // without acting, were removed).
+    // verdict or a proven pre-UI layer (above), and what runs is actionable.
     scene_guard::state measured;
     measured.enter_scope(1, 1);
     require(!measured.measure(1000, false), "Evidence ran without a claim, a hold or a proven pre-UI layer");

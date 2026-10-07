@@ -58,9 +58,11 @@ UI = re.compile(
     r'(?:accepted=(?P<accepted>0x[0-9a-fA-F]+) sampled_layer=\{covered=(?P<layer_covered>\d+) '
     r'invalid=(?P<layer_invalid>\d+) opaque=\d+\}'
     r'|trusted_alpha=(?P<trusted>0x[0-9a-fA-F]+)(?: sampled_ui_layer=(?P<layer>\d))?) '
-    # Since S2a the one-way judgment counts of the layer, Backbuffer and current alpha (A2), the sample's own-decision
-    # reason, the candidate it refused and whether the T1 grace reused the previous real frame's decision (F1).
-    r'(?:sampled_one_way=\{strong=(?P<strong>\d+/\d+/\d+) contradicted=(?P<contradicted>\d+/\d+/\d+)\} '
+    # Since S2a the one-way judgment counts of the layer, Backbuffer and current alpha (A2; after be7788bf only
+    # Backbuffer and current alpha, as no build has judged the layer since selection revision 10), the sample's
+    # own-decision reason, the candidate it refused and whether the T1 grace reused the previous real frame's decision
+    # (F1).
+    r'(?:sampled_one_way=\{strong=(?P<strong>\d+/\d+(?:/\d+)?) contradicted=(?P<contradicted>\d+/\d+(?:/\d+)?)\} '
     r'sampled_reason=(?P<reason>\w+) sampled_refused=(?P<refused>\w+) sampled_reused=(?P<reused>\d) '
     r'(?:sampled_late_layer=(?P<late>\d) )?)?'
     r'sampled_hudless=\{changed=(?P<changed>\d+) unchanged=(?P<unchanged>\d+) invalid=(?P<hudless_invalid>\d+)'
@@ -71,8 +73,8 @@ UI = re.compile(
 # fix 1 (selection revision 4) also the offscreen UI layer against the presented frame (decision texel 11): matching and
 # lit layer pixels, which prove the layer's signature the pre-UI scene image. Logs of fix 1 to revision 8 also carry
 # lit presented pixels and those that differ from the layer, and the first-run shadow's fields (shadow,
-# shadow_hidden_ms); both were shadow statistics, removed in selection revision 9 (logged as 0 since), and optional
-# here.
+# shadow_hidden_ms); both were shadow statistics, removed in selection revision 9 and logged as 0 from it through
+# be7788bf, so they are optional here.
 SCENE = re.compile(
     r'sampled_alpha_opaque=(?P<opaque>\d+/\d+) sampled_scene=\{n=(?P<n>\d+) d=(?P<d>-?[0-9.]+) valid=(?P<valid>\d) '
     r'ran=(?P<ran>\d) verdict=(?P<verdict>\w+)\} sampled_hudless_scene=\{n=\d+ d=(?P<hudless_d>-?[0-9.]+) '
@@ -513,6 +515,11 @@ def ui_sample(t: float, text: str, g: dict[str, str | None], scene: Scene | None
     def counts(value: str) -> tuple[int, ...]:
         return tuple(int(v) for v in value.split('/'))
 
+    def judged(value: str) -> tuple[int, ...]:
+        # JUDGED order; a line after be7788bf omits the layer's column, which no build has counted since revision 10.
+        found = counts(value)
+        return (0,) * (len(JUDGED) - len(found)) + found
+
     def field_of(pattern: re.Pattern, default: str) -> str:
         return hit.group(1) if (hit := pattern.search(text)) else default
     alpha = counts(g['alpha'])
@@ -540,7 +547,7 @@ def ui_sample(t: float, text: str, g: dict[str, str | None], scene: Scene | None
                     (int(g['changed']), int(g['unchanged']), int(g['hudless_invalid'])), invalid, scene,
                     field_of(UI_RUNTIME, ''), field_of(UI_MODE, 'auto'), field_of(UI_RENDERED, '1') == '1',
                     field_of(UI_AVAILABILITY, ''), field_of(UI_FG, '0') == '1', legacy,
-                    counts(g['strong']) if s2a else None, counts(g['contradicted']) if s2a else None,
+                    judged(g['strong']) if s2a else None, judged(g['contradicted']) if s2a else None,
                     g['reason'] or '', g['refused'] or '', g['reused'] == '1', int(g['tiles'] or 0),
                     int(g['lit'] or 0), g['late'] == '1')
 

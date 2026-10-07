@@ -275,17 +275,16 @@ namespace {
     return result;
   }
 
-  // b2 as the renderer pushes it (ui_detection::b2_words, word 5 reserved
-  // and zero), padded to the buffer's 32 bytes.
+  // b2 as the renderer pushes it (ui_detection::b2_words), padded to the
+  // buffer's 32 bytes.
   struct detection_constants {
     std::uint32_t offered;
     float threshold;
     std::uint32_t accepted, flags;
     float pre_ui_threshold;
-    std::uint32_t reserved;
-    std::uint32_t padding[2];
+    std::uint32_t padding[3];
   };
-  static_assert(sizeof(detection_constants) == 32 && detection::b2_words == 6u);
+  static_assert(sizeof(detection_constants) == 32 && detection::b2_words == 5u);
 
   // Runs one case and compares it; returns the decision for the semantic checks.
   selection::decision run(gpu_t &gpu, ID3D11ComputeShader *reduce, const case_t &test, const char *space) {
@@ -315,7 +314,7 @@ namespace {
     }
     gpu.context->UpdateSubresource(gpu.statistics.Get(), 0, nullptr, rows.data(), UINT(columns * sizeof(texel)), 0);
     // The reduce reads b2 word 4 only as zero or not (texel 11 sums or zero).
-    const detection_constants constants{test.offered, 2.f / 255.f, test.accepted, test.flags, test.pre_ui_threshold, 0u, {}};
+    const detection_constants constants{test.offered, 2.f / 255.f, test.accepted, test.flags, test.pre_ui_threshold, {}};
     gpu.context->UpdateSubresource(gpu.constants.Get(), 0, nullptr, &constants, 0, 0);
     const std::array<std::uint32_t, 4> sentinel{0xdeadbeefu, 0xdeadbeefu, 0xdeadbeefu, 0xdeadbeefu};
     gpu.context->ClearUnorderedAccessViewUint(gpu.decision_view.Get(), sentinel.data());
@@ -1187,7 +1186,7 @@ namespace {
           const float scale = color == 2 ? std::max(1.f, peak(presented)) : 1.f;
           const float apart = std::max({std::abs(presented[0] - l[0]), std::abs(presented[1] - l[1]),
             std::abs(presented[2] - l[2])}) / scale;
-          // .z and .w (the removed lit-presented shadow statistics) stay zero.
+          // .z and .w stay zero.
           pre_ui[tile][0] += apart <= coarse;
           pre_ui[tile][1] += peak(l) > coarse;
         }

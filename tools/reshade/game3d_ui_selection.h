@@ -35,20 +35,13 @@ namespace sunshine_game3d::ui_selection {
   // (d) needs a layer without alpha whose signature the ledger proved the
   // pre-UI scene image by pixels (per_frame_pre_ui_proven) instead of a
   // V1-invalid layer, with the layer-against-presented pixel counts of texel
-  // 11 that prove it (b2 word 4, the layer's pair threshold). 5 (fix 2): H2,
-  // a frame without a UI source decision shown flat as source 11 while the
-  // CPU's run of still hidden samples pushes still::flatten (b2 word 5), with
-  // the stillness counts of texel 12. 6 (fix 3 and fix 4) added the pre-UI
-  // change set (source 12, candidate bit 0x100), the refine rule, the lit
-  // gate on partial change sets and the change-set shadow and darkening words
-  // of texels 13-15; the user rejected them and 7 removes them, so that 7
-  // decides exactly as 5 did. Source 12, candidate bit 0x100, the h1 word's
-  // bit 0x200, b2 word 5's bits 0x2-0x200 and texels 13-15 stay reserved. 8:
-  // a lit HUD-less pair without any changed pixel is a valid empty change set
-  // (change_set_empty), decided by an accepted pair as an empty mask of its
-  // own. 9: H2 (source 11 and b2 word 5's flag 0x1) and S3's identity verdict
-  // and gate (b2 words 6-9, texel 12 .z/.w) are removed, so source 11, texel
-  // 12 and all of b2 word 5 are reserved too; 9 otherwise decides as 8. 10:
+  // 11 that prove it (b2 word 4, the layer's pair threshold). 5 to 9 added
+  // and removed fix 2's rule H2, fix 3, fix 4 and S3's frame identity
+  // (docs/reshade-sbs.md, UI detection flags and decision texels), so 9
+  // decides as 8, which made a lit HUD-less pair without any changed pixel a
+  // valid empty change set (change_set_empty), decided by an accepted pair as
+  // an empty mask of its own. Their candidate bit 0x100, sources 11 and 12,
+  // the h1 word's bit 0x200 and texels 12-15 stay reserved. 10:
   // T1 keeps the held decision across HUD-less re-offers
   // (per_frame_reoffer); the one-way test (A2) judges the declared alphas too
   // (texel 16), those captured in the exact pair's tag batch only
@@ -203,8 +196,8 @@ namespace sunshine_game3d::ui_selection {
     std::array<std::uint32_t, 4> strong{}, contradicted{};
     // Texel 11 (revision 4): the offscreen UI layer against the presented
     // frame at 8 times their pair threshold: matching pixels and lit layer
-    // pixels (.z and .w are reserved zeros). No decision reads them; the
-    // acceptance ledger proves the layer from them.
+    // pixels. No decision reads them; the acceptance ledger proves the layer
+    // from them.
     std::uint32_t pre_ui_match{}, pre_ui_lit{};
   };
   // Counts from the current revision's decision words (texel t, component c

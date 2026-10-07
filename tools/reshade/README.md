@@ -565,10 +565,10 @@ and add no check of their own: the first-run shadow's session line, which is ign
 and `shadow_hidden_ms` fields of UI lines written before selection revision 9 still feed the
 hidden-scene warning above), rule H2's still screens (`still` groups, `decided.11`, `Sunshine
 UI still screen` lines), the S3 identity shadow (`Sunshine UI identity`, `Sunshine FG interposers`),
-and the dark pre-UI statistics; since selection revision 9 the add-on logs their remaining fields
-(`shadow`, `shadow_hidden_ms`, `presented_lit`, `presented_lit_differs`) as 0. It logged
-`full_alpha_d`, `untrusted_inferred` and `presented_over_dedicated` as 0 through dc7e3c77, and
-later counter lines omit them.
+and the dark pre-UI statistics. From selection revision 9 the add-on logged their remaining fields
+as 0, and later lines omit them: `full_alpha_d`, `untrusted_inferred` and
+`presented_over_dedicated` through dc7e3c77, and `shadow`, `shadow_hidden_ms`, `presented_lit`,
+`presented_lit_differs` and the UI line's one-way layer column through be7788bf.
 Each `UI protection gaps` window lists its pieces with each line's own FG state; a line whose
 status sample was still pending (`checking` or `searching`), or an unrendered line, continues a run,
 labelled with that state after the last sample's reason.

@@ -224,7 +224,6 @@ namespace sunshine_game3d {
     // when the two are not comparable or on a frame that is not a detection
     // sample (H1 d).
     std::uint32_t pre_ui_threshold_bits{};
-    // b2 word 5 is reserved and pushed as zero (ui_detection::b2_words).
   };
   inline const char *name(ui_detection_snapshot::run_state value) {
     switch (value) {

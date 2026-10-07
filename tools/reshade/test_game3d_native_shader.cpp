@@ -100,10 +100,9 @@ namespace {
     {"Sunshine_UIAcceptedCandidates", 8, 4, D3D_SVT_UINT},
     {"Sunshine_UIDetectionFlags", 12, 4, D3D_SVT_UINT},
     // Selection revision 4: the layer's pair threshold with the presented color.
+    // Word 5 (Sunshine_UIReserved, pushed as zero through be7788bf) and S3's
+    // words 6-9 are gone.
     {"Sunshine_UIPreUIThreshold", 16, 4, D3D_SVT_FLOAT},
-    // Reserved and pushed as zero since selection revision 9 (H2's still-screen
-    // flag and fix 3 and fix 4's bits, all removed); S3's words 6-9 are gone.
-    {"Sunshine_UIReserved", 20, 4, D3D_SVT_UINT},
   };
 
   struct entry_point {
@@ -248,12 +247,12 @@ namespace {
       require(SUCCEEDED(buffer->GetDesc(&description)), "Constant-buffer reflection failed");
       const bool ui = std::string(description.Name) == "SunshineUIConstants";
       const bool detection = std::string(description.Name) == "SunshineUIDetectionConstants";
-      // b2 is ui_detection::b2_words (six since selection revision 9), padded
-      // to the 16-byte constant buffer granularity.
+      // b2 is ui_detection::b2_words (five), padded to the 16-byte constant
+      // buffer granularity.
       require((ui && description.Size == 16) ||
           (detection && description.Size == (sunshine_game3d::ui_detection::b2_words * 4u + 15u) / 16u * 16u) ||
           (std::string(description.Name) == "SunshineGame3DConstants" && description.Size == 80),
-        "Native constants must retain the 80-byte b0, the 16-byte b1 and the six-word (32-byte) b2");
+        "Native constants must retain the 80-byte b0, the 16-byte b1 and the five-word (32-byte) b2");
       const constant *begin = detection ? std::begin(detection_constants) : ui ? std::begin(ui_constants) : std::begin(constants);
       const constant *end = detection ? std::end(detection_constants) : ui ? std::end(ui_constants) : std::end(constants);
       for (auto item = begin; item != end; ++item) {
@@ -342,6 +341,8 @@ int main(int argc, char **argv) {
     // offscreen layer's included, is its source's raw alpha: no margin marker.
     require(marker("SUNSHINE_UI_SOFT_PIN_GAIN") >= 1, "UI soft pin gain must be at least one");
     require(source.find("SUNSHINE_UI_LATE_MARGIN") == std::string::npos, "UI late-layer margin must stay removed");
+    // b2 word 5 was removed with the rules that used it; it must not return.
+    require(source.find("Sunshine_UIReserved") == std::string::npos, "The removed b2 word 5 must stay removed");
     // UI detection sizes its decision texels and statistics rows from these
     // markers, and its flag bits mirror game3d_ui_detection_contract.h.
     namespace detection = sunshine_game3d::ui_detection;

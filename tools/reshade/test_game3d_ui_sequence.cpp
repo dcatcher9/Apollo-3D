@@ -4448,15 +4448,17 @@ namespace {
         }
         // S2a: the one-way judgment counts (A2), the frame's own reason, its
         // refused candidate and the T1 grace (F1).
-        // The line's columns are the layer (never judged since selection
-        // revision 10), Backbuffer and current alpha; sampled_declared_one_way
-        // (revision 10) holds UIAlpha and the UI color tag. Evidence keeps
-        // judged_kinds order.
+        // The line's columns are Backbuffer and current alpha, led on lines
+        // through be7788bf by the layer's (never judged since selection revision
+        // 10); sampled_declared_one_way (revision 10) holds UIAlpha and the UI
+        // color tag. Evidence keeps judged_kinds order.
         if (const auto one_way = field_group(line, "sampled_one_way"); !one_way.empty()) {
-          const auto strong = field_quad(field_text(one_way, "strong")), contradicted = field_quad(field_text(one_way, "contradicted"));
+          const auto strong_text = field_text(one_way, "strong");
+          const std::size_t first = std::count(strong_text.begin(), strong_text.end(), '/') == 2 ? 1 : 0;
+          const auto strong = field_quad(strong_text), contradicted = field_quad(field_text(one_way, "contradicted"));
           for (std::size_t i = 0; i != 2; ++i) {
-            evidence.strong[2 + i] = strong[1 + i];
-            evidence.contradicted[2 + i] = contradicted[1 + i];
+            evidence.strong[2 + i] = strong[first + i];
+            evidence.contradicted[2 + i] = contradicted[first + i];
           }
         }
         if (const auto declared = field_group(line, "sampled_declared_one_way"); !declared.empty()) {

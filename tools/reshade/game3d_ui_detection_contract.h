@@ -261,13 +261,12 @@ namespace sunshine_game3d::ui_detection {
 
   // b2 words the renderer pushes (SunshineUIDetectionConstants): 0 the
   // offered candidates, 1 the HUD-less pair's difference threshold, 2 the
-  // accepted candidates, 3 the flags, 4 the layer's pre-UI threshold, and 5,
-  // which is reserved and pushed as zero: H2's still-screen flag (fix 2,
-  // 0x1) and fix 3 and fix 4's bits 0x2-0x200 used it, all removed. Words
-  // 6-9 (S3's proposals and identity bits, removed with S3's frame identity)
-  // are no longer pushed. Never reuse a reserved bit.
-  inline constexpr std::uint32_t b2_words = 6u;
-  inline constexpr std::uint32_t reserved_rule_bits = 0x3ffu;
+  // accepted candidates, 3 the flags and 4 the layer's pre-UI threshold.
+  // Word 5 (H2's still-screen flag 0x1 of fix 2 and fix 3 and fix 4's bits
+  // 0x2-0x200, all removed) was pushed as zero through be7788bf, and words 6-9
+  // (S3's proposals and identity bits) went with S3's frame identity. The
+  // buffer is padded to 16 bytes, so an older shader reads word 5 as zero.
+  inline constexpr std::uint32_t b2_words = 5u;
   // Statistics texture, 16 columns: 112 rows of per-tile counts (rows 0-63
   // the alpha coverage, alpha invalid, HUD-less difference and lit/opaque
   // groups, row 48 .w the Backbuffer's opaque pixels; rows 64-79 the
@@ -285,10 +284,9 @@ namespace sunshine_game3d::ui_detection {
   // selection revision 4 (decision texels pre_ui_decision_texels) rows
   // 128-143 from pre_ui_statistics_row: per tile, the offscreen UI layer
   // against the presented frame {matching pixels, lit layer pixels, 0, 0}
-  // (decision texel 11; .z and .w held the removed lit-presented shadow
-  // statistics), 144 rows in all. Rows 144-159 (fix 2's H2 stillness counts)
-  // and 160-207 (fix 3's change-set shadow and fix 4's darkening), all
-  // removed, are reserved and never reused. From selection revision 10 rows
+  // (decision texel 11), 144 rows in all. Rows 144-159 (fix 2's H2
+  // stillness counts) and 160-207 (fix 3's change-set shadow and fix 4's
+  // darkening), all removed, are reserved and never reused. From selection revision 10 rows
   // 208-223 from layer_bound_statistics_row: per tile, the layer's pixels
   // beyond the premultiplied bound {beyond, 0, 0, 0} (V1), 224 rows in all.
   // The cells have a texture of their own, cells_x by cells_y.
@@ -378,15 +376,13 @@ namespace sunshine_game3d::ui_detection {
     // pair threshold (b2 word 4; all zero when that is zero): pixels whose
     // colours match and lit layer pixels, from which the acceptance ledger
     // proves the layer the pre-UI scene image (ui_selection::pre_ui_match).
-    // Words 46 and 47 are reserved zeros: they held lit presented pixels and
-    // those that differ from the layer, shadow statistics that were removed.
+    // Words 46 and 47 are reserved zeros (selection revisions 4 to 8 wrote
+    // counts there that nothing read).
     inline constexpr std::size_t pre_ui_match = 44, pre_ui_image_lit = 45;
-    // Texel 12 (words 48-51) is reserved: from selection revision 5 H2's
-    // still and compared cells (fix 2) and S3's identity verdicts and deltas
-    // were written there, both removed. Texels 13-15 (words 52-63) are reserved
-    // too: selection revision 6 (fix 3 and fix 4) used them for the removed
-    // change-set shadow and darkening words. Never reuse them; selection
-    // revision 10 writes them as zeros.
+    // Texels 12-15 (words 48-63) are reserved: selection revisions 5 to 8
+    // wrote the words of removed rules there (docs/reshade-sbs.md), and
+    // ui_detection_replay tells revisions apart by their texel count. Never
+    // reuse them; selection revision 10 writes them as zeros.
     // Texel 16 (selection revision 10, D1): the one-way judgment counts of
     // the declared alphas, {strong UIAlpha, strong UI color tag, contradicted
     // UIAlpha, contradicted UI color tag}.

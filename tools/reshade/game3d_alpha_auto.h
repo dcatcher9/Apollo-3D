@@ -67,8 +67,7 @@ namespace sunshine_game3d {
     // Latest completed diagnostic: 1 UI R, 2 UI color tag A, 3 backbuffer A, 4
     // current A, 5 HUD-less difference, 6 full-frame UI (HUD-less differs
     // almost everywhere), 8 full-frame UI over a hidden scene (H1), 10 the
-    // offscreen UI layer A. 7 and 9 (the HUD-less route before S2b) and 11
-    // (rule H2's still screen, removed) are retired and never reused.
+    // offscreen UI layer A. 7, 9 and 11 are retired and never reused.
     std::uint32_t source_kind{};
     // Hidden-scene evidence of one image (docs/reshade-sbs.md, hidden-scene
     // evidence): edge cells n and D, whether the passes ran and the evidence
@@ -124,8 +123,7 @@ namespace sunshine_game3d {
       // against the presented frame at 8 times their pair threshold: pixels
       // whose colours match and lit layer pixels, which prove the layer the
       // pre-UI scene image (ui_selection::pre_ui_match). Both zero without a
-      // layer or a comparable pair. Texel 11 .z and .w (the lit presented
-      // pixels and those that differ, shadow statistics) are reserved zeros.
+      // layer or a comparable pair.
       std::uint32_t pre_ui_match{}, pre_ui_image_lit{};
     } evidence;
     // This render's state, not the sample's: the hidden-scene guard's

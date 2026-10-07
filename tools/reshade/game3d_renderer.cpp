@@ -1055,15 +1055,13 @@ namespace sunshine_game3d {
         if (reduce) uavs[5] = hold_texture.uav;
         cmd->bind_pipeline(api::pipeline_stage::compute_shader, pipelines[stage]);
         bindings(cmd, api::shader_stage::compute, p, views, uavs);
-        // b2 word 5 is reserved and pushed as zero.
         struct constants {
           uint32_t bits;
           float threshold;
           uint32_t accepted, flags;
           float pre_ui_threshold;
-          uint32_t reserved;
         } values{detection_run.candidates, difference_threshold, detection_run.accepted, detection_run.flags,
-          pushed_pre_ui_threshold, 0u};
+          pushed_pre_ui_threshold};
         static_assert(sizeof(values) == ui_detection::b2_words * sizeof(uint32_t));
         cmd->push_constants(api::shader_stage::compute, layout, 5, 0, ui_detection::b2_words, &values);
         cmd->dispatch(x, y, z);

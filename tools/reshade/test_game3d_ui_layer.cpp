@@ -170,7 +170,7 @@ int main() {
         detection::per_frame_sample == 0x4000u && detection::per_frame_reoffer == 0x8000u &&
         detection::per_frame_mask == 0xfffff000u && detection::per_frame_unaligned_shift == 12u &&
         detection::per_frame_unaligned_mask == 0x3000u &&
-        detection::source_layer == 10u && detection::b2_words == 6u &&
+        detection::source_layer == 10u && detection::b2_words == 5u &&
         sunshine_game3d::ui_counter_word::decided_count == 11u && sunshine_game3d::ui_counter_word::count == 26u &&
         sunshine_game3d::ui_counter_word::inexact_difference == 12u && sunshine_game3d::ui_counter_word::none == 15u &&
         sunshine_game3d::ui_counter_word::reused == 25u,

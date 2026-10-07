@@ -1236,6 +1236,39 @@ class ReadinessReport(unittest.TestCase):
                                               tiles=tiles, lit=lit)]).ui[0]
             self.assertFalse(sample.change_set_valid())
 
+    def test_current_ui_line_has_no_layer_column_or_zero_fields(self):
+        # The line exporter.cpp writes after be7788bf: sampled_one_way holds Backbuffer and current alpha only,
+        # and the removed first-run shadow's fields and texel 11's shadow statistics are gone.
+        def flat(t):
+            return line(t, '[Sunshine 3D] Sunshine UI protection: runtime=0000000000000001 mode=auto rendered=1 '
+                           'mask_path=1 input=automatic_gpu_mask retained=0 fg=0 fg_known=1 fg_enabled=0 '
+                           'input_state=input_seen detection=detected selected=automatic source=automatic '
+                           'source_availability=detected sampled_source=3 sampled_covered=1000 sampled_pixels=1000 '
+                           'sampled_candidates=0x34 sampled_alpha_covered=0/0/1000/0 sampled_alpha_invalid=0/0/0/0 '
+                           'accepted=0x4 sampled_layer={covered=0 invalid=0 opaque=0} '
+                           'sampled_one_way={strong=1000/0 contradicted=800/0} sampled_reason=decided '
+                           'sampled_refused=none sampled_reused=0 sampled_hudless={changed=50 unchanged=950 invalid=0 '
+                           'matching_tiles=200 lit=900} sampled_alpha_opaque=0/0 sampled_inferred_opaque=0/0 '
+                           'sampled_claims=0x0 sampled_h1={applied=0 winner=3} '
+                           'sampled_scene={n=463 d=0.600 valid=1 ran=1 verdict=visible} '
+                           'sampled_pre_ui_scene={image=none n=0 d=0.000 valid=0} '
+                           'scene_guard={hidden=0 pre_ui=0 refuted=0 proven=0} '
+                           'sampled_pre_ui_pixels={match=7 image_lit=9} '
+                           'sampled_declared_one_way={strong=0/0 contradicted=0/0} status_revision=1')
+        sample = report.parse(BASE + [flat('10:00:12')]).ui[0]
+        self.assertEqual((sample.s2a, sample.strong, sample.contradicted, sample.one_way_counts(2), sample.one_way(2),
+                          sample.declared_one_way, sample.scene.s2b, sample.scene.pre_ui_pixels,
+                          sample.scene.hidden_ms, sample.late_layer),
+                         (True, (0, 1000, 0), (0, 800, 0), (1000, 800), True, ((0, 0), (0, 0)), True, (7, 9), 0,
+                          False))
+        # The same Backbuffer contradiction as on older lines: three within 2 s that no revocation followed fail.
+        resolved = {**CLEAN_COUNTERS, 'contradicted': 120, 'trust.revoked_exact': 1}
+        run3 = [flat('10:00:12'), flat('10:00:13'), flat('10:00:14')]
+        checks = run(BASE + run3 + [counters('10:00:15', resolved, groups=CURRENT_COUNTER_GROUPS)])
+        self.assertEqual(checks['UI protection'].status, 'FAIL')
+        self.assertIn('10:00:12 Backbuffer alpha decided while an exact HUD-less pair showed 80% of its strong pixels',
+                      checks['UI protection'].times[0])
+
     def test_declared_alpha_one_way_contradictions_since_revision_10(self):
         # Since selection revision 10 the exact one-way judge also reads UIAlpha and the UI colour tag
         # (sampled_declared_one_way); three contradictions within 2 s that no revocation followed fail.

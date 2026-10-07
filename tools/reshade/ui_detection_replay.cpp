@@ -13,9 +13,8 @@
 // hidden-scene guard's per-frame bits (H1) itself, or has the guard
 // (game3d_scene_guard.h) derive them from the frame's own measured evidence;
 // pre_ui_proven stands for the acceptance ledger's pre-UI proof of the offered
-// layer's signature (H1 d). b2 word 5 is reserved and pushed as zero; a
-// dump's still_bits and S3 identity fields (selection revisions 5 to 8) are
-// ignored.
+// layer's signature (H1 d). A dump's still_bits and S3 identity fields
+// (selection revisions 5 to 8) are ignored.
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
@@ -500,11 +499,12 @@ namespace {
     auto decision = target(gpu, sizes.decision_texels, 1, DXGI_FORMAT_R32G32B32A32_UINT);
     auto mask = target(gpu, width, height, DXGI_FORMAT_R32_FLOAT);
     // Detection constants b2: candidate bits, difference threshold, accepted
-    // candidates (layout 1: trusted slots), flags, (selection revision 4)
+    // candidates (layout 1: trusted slots), flags and (selection revision 4)
     // the offscreen UI layer's pair threshold with the presented color, from
     // the two artifacts' own encodings (zero without a layer or when not
-    // comparable), and the reserved word 5 as zero, padded to the 16-byte
-    // constant buffer granularity.
+    // comparable), padded with zeros to the 16-byte constant buffer
+    // granularity: shaders of selection revisions 5 to 9 read their word 5
+    // there as zero, as the renderer pushed it.
     const float threshold = pair_threshold ? *pair_threshold :
       selection::comparable(encoding_of(paired), encoding_of(paired)).value_or(2.f / 255.f);
     float pre_ui_threshold = 0.f;
@@ -517,9 +517,8 @@ namespace {
       float threshold;
       std::uint32_t accepted, flags;
       float pre_ui_threshold;
-      std::uint32_t reserved;
-      std::uint32_t padding[2];
-    } constants{bits, threshold, accepted, flags, pre_ui_threshold, 0u, {}};
+      std::uint32_t padding[3];
+    } constants{bits, threshold, accepted, flags, pre_ui_threshold, {}};
     static_assert(sizeof(constants) == 32 && contract::b2_words * 4 <= sizeof(constants));
     const auto constant_buffer = [&](const void *bytes, UINT size) {
       D3D11_BUFFER_DESC buffer{};
@@ -730,10 +729,12 @@ namespace {
     if (!label.contains("xfail")) return {};
     const auto &xfail = label.at("xfail");
     if (!xfail.is_object()) return "xfail must be an object";
-    static const std::array<const char *, 7> stages{"S1", "S2a", "S2b", "S3", "S4", "S5", "S6"};
+    static const std::array<const char *, 6> stages{"S1", "S2a", "S2b", "S4", "S5", "S6"};
     const auto stage = xfail.value("stage", std::string{});
+    // Roadmap stage S3 (the frame identity) was removed.
+    if (stage == "S3") return "xfail.stage S3 was removed: name the stage that now owns the cell";
     if (std::none_of(stages.begin(), stages.end(), [&](const char *name) { return stage == name; }))
-      return "xfail.stage must be one of S1, S2a, S2b, S3, S4, S5, S6";
+      return "xfail.stage must be one of S1, S2a, S2b, S4, S5, S6";
     const auto reason = xfail.contains("reason") && xfail.at("reason").is_string() ? xfail.at("reason").get<std::string>() : "";
     // The reason names a framework rule the stage applies, as a standalone ID
     // (stages and rules: docs/reshade-sbs.md, UI decision framework).
@@ -850,8 +851,8 @@ int main(int argc, char **argv) {
         "whose dump directory is gone, or whose needs_dump names what its dump lacks, is skipped; the run fails when no\n"
         "case ran. A \"sample\" key is accepted and ignored: its flag 0x20000 is reserved.\n"
         "A case with xfail is a known-wrong cell: expect holds the target outcome, xfail.stage the roadmap stage (S1, S2a,\n"
-        "S2b, S3-S6) that reaches it, xfail.reason the rule it applies (E1, E2, V1, V2, A1-A3, S1, S2, H1, P1, T1, F1)\n"
-        "and xfail.today the outcome it has now\n"
+        "S2b, S4-S6; the removed S3 fails the case) that reaches it, xfail.reason the rule it applies (E1, E2, V1, V2,\n"
+        "A1-A3, S1, S2, H1, P1, T1, F1) and xfail.today the outcome it has now\n"
         "(mask and source required); docs/reshade-sbs.md (UI decision framework) defines the stages and rules.\n"
         "Meeting the target is XPASS (remove the xfail), else meeting today is XFAIL, else\n"
         "FAIL; a malformed xfail fails. The run fails on any FAIL, and with --strict also on any XPASS.\n"

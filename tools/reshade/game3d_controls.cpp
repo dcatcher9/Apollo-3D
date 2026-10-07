@@ -95,8 +95,6 @@ namespace sunshine_game3d {
         auto policy = std::make_shared<alpha_auto_policy>();
         const auto restored = policy->restore(read_accepted_sources());
         // The add-on's Diagnostics switch (game3d_diagnostics.h), process-wide.
-        // The removed first-run shadow's UISceneShadow is ignored like the
-        // other removed keys (game3d_controls_model.h).
         global_config_backend global;
         sunshine_log::message(reshade::log::level::info, diagnostics_log_text(load_diagnostics(global)).c_str());
         if (restored.discarded) {

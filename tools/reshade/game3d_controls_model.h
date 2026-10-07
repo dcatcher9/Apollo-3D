@@ -103,13 +103,10 @@ namespace sunshine_game3d {
     return any;
   }
 
-  // The first-run shadow of hidden-scene evidence (UISceneShadow) was
-  // removed: a ReShade.ini that still carries the key loads unchanged and it
-  // is ignored, like UIPinOnlyUI and UIFlattenStillScreens below.
+  // The removed per-game keys UIPinOnlyUI, UIPinChangedPixels,
+  // UIFlattenStillScreens and UISceneShadow are never read or written: a
+  // ReShade.ini that still carries them loads unchanged (test_game3d_controls).
 
-  // Rule H2 (still screens without a UI source) was removed: a ReShade.ini
-  // that still carries UIFlattenStillScreens loads unchanged and the key is
-  // ignored, like UIPinOnlyUI.
   // The add-on's Diagnostics switch (game3d_diagnostics.h; docs/reshade-sbs.md,
   // Diagnostics switch): per game in the global ReShade.ini, process-wide.
   // Absent writes 0 so the key is discoverable; 1 turns it on, anything else
