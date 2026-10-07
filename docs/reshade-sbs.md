@@ -538,11 +538,11 @@ release`, `generic depth rebinding`, `depth capture acquisition` and `depth disp
    in the generic list. **Last valid** describes history only; unavailable current depth remains 2D.
    Sunshine's host depth-strength control applies to Sunshine-generated stereo and offline conversion.
 
-When the game requests Frame Generation, the **Status** tab shows guidance below the controls.
-For **3× or higher**, select **Off** or **2×** in the game's settings. **2× may work**; turn it off
-if artifacts or stutter appear. **DLSS Super Resolution can stay on.** The message reflects verified
-game settings, including Auto mode, rather than measured generated output. Ambiguous settings are
-not guessed, and Sunshine does not change the game's Frame Generation options.
+When the game requests Frame Generation, the **Status** tab shows its multiplier (for example
+**Frame Generation: 4x**) without a hint: every multiplier is supported, and the stream takes each new
+frame the game presents up to the stream rate. **DLSS Super Resolution can stay on.** The line reflects
+verified game settings, including Auto mode, rather than measured generated output. Ambiguous settings
+are not guessed, and Sunshine does not change the game's Frame Generation options.
 When Automatic has identified the relative-depth fallback without associated camera data, it
 suggests trying **Frame Generation 2×**, if available, because some games supply Streamline camera
 data through FG. Availability is not guaranteed. An already observed enabled FG setting instead

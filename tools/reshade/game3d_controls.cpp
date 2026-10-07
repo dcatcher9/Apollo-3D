@@ -453,15 +453,11 @@ namespace sunshine_game3d {
     else if (!fg.enabled) ImGui::TextUnformatted("Frame Generation: off");
     if (fg.known && fg.enabled) {
       const char *automatic_mode = fg.automatic ? " (Auto)" : "";
-      // 2x is the preferred mode: its tags give UI protection and depth in
-      // every colour mode, so only a multiplier above 2x gets a hint.
-      if (fg.generated_frames >= 2) {
+      // Every multiplier is supported: the stream takes each new frame the
+      // game presents up to the stream rate, so no multiplier gets a hint.
+      if (fg.generated_frames >= 1) {
         const auto multiplier = static_cast<unsigned long long>(fg.generated_frames) + 1;
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.25f, 1.0f));
-        ImGui::TextWrapped("Frame Generation %llux%s: use 2x to reduce artifacts and stutter.", multiplier, automatic_mode);
-        ImGui::PopStyleColor();
-      } else if (fg.generated_frames == 1) {
-        ImGui::Text("Frame Generation: 2x%s", automatic_mode);
+        ImGui::Text("Frame Generation: %llux%s", multiplier, automatic_mode);
       } else {
         ImGui::Text("Frame Generation: on%s", automatic_mode);
       }
