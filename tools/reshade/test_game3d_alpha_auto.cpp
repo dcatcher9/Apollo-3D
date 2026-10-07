@@ -884,9 +884,6 @@ namespace {
     s.valid_bits = offered & ui_selection::candidate_bits;
     s.claims = claims;
     s.opaque.fill(pixels);
-    s.presented.n = 400;
-    s.presented.decided = 600;
-    s.presented.ran = true;
     s.presented.valid = presented != scene_verdict::none;
     s.presented.verdict = presented;
     s.presented.d = presented == scene_verdict::hidden ? .05f : presented == scene_verdict::visible ? .5f : .2f;
@@ -901,8 +898,6 @@ namespace {
     s.opaque.fill(0);
     s.pre_ui_image = ui_detection::pre_ui_image::layer;
     s.pre_ui.valid = pre_ui_d >= 0.f;
-    s.pre_ui.ran = true;
-    s.pre_ui.n = 400;
     s.pre_ui.d = pre_ui_d;
     s.pre_ui.verdict = s.pre_ui.valid ? ui_detection::scene_verdict_of(pre_ui_d) : ui_detection::scene_verdict::none;
     return s;
@@ -1171,7 +1166,7 @@ namespace {
     require(decoded.tick == 1234 && decoded.source == 8 && decoded.pixels == pixels && decoded.offered == 0x48 &&
         decoded.valid_bits == 0x8 && decoded.claims == 0x80 &&
         decoded.opaque == std::array<std::uint32_t, 5>{11, 12, 13, 14, 15} && decoded.presented.valid &&
-        decoded.presented.verdict == H && decoded.presented.decided == 600 && decoded.pre_ui.valid && decoded.pre_ui.n == 380 &&
+        decoded.presented.verdict == H && decoded.presented.d == d && decoded.pre_ui.valid && decoded.pre_ui.d == pre_ui_d &&
         decoded.pre_ui.verdict == V && decoded.pre_ui_image == ui_detection::pre_ui_image::layer,
       "The scene guard did not read a decoded sample");
     // Only the current revision's texture decodes (ui_detection_replay pads

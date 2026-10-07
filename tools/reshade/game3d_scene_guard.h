@@ -68,14 +68,13 @@ namespace sunshine_game3d::scene_guard {
 
   // One image's hidden-scene evidence in a sample (decision texel 5, the
   // presented frame, or 6, the pre-UI scene image, whose verdict the CPU
-  // derives from D).
+  // derives from D). The guard reads only these; the sample's edge and
+  // comparison counts stay in alpha_auto_decision::scene_evidence for the
+  // dump and the log.
   struct image_evidence {
-    std::uint32_t n{};
     float d{};
-    bool valid{}, ran{};
+    bool valid{};
     scene_verdict verdict = scene_verdict::none;
-    // The presented image's decided comparisons (wins + losses).
-    std::uint32_t decided{};
   };
 
   // What the guard reads of one completed detection sample (built from the

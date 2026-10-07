@@ -204,12 +204,9 @@ namespace sunshine_game3d::ui_temporal {
     s.opaque[alpha_index(kind::current)] = evidence.inferred_opaque[1];
     const auto image = [](const alpha_auto_decision::scene_evidence &e) {
       scene_guard::image_evidence result;
-      result.n = e.n;
       result.d = e.d;
       result.valid = e.valid;
-      result.ran = e.ran;
       result.verdict = e.verdict;
-      result.decided = e.decided;
       return result;
     };
     s.presented = image(evidence.scene);
