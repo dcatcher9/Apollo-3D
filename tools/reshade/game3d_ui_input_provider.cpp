@@ -473,10 +473,11 @@ namespace sunshine_game3d::ui_input {
     const bool tag_offered = result.detection.masks[0].handle || result.detection.masks[1].handle ||
       result.detection.masks[2].handle;
     // T1 (ui_detection::per_frame_reoffer): the render before offered this
-    // same snapshot, inexactly, and no UIAlpha, UI color or Backbuffer tag
-    // comes with it, so a mispaired re-offer keeps the decision it holds
-    // instead of spending the grace.
-    result.detection.hudless_reoffer = hudless_reoffered_now && !tag_offered;
+    // same snapshot, inexactly, so a mispaired re-offer keeps the decision it
+    // holds instead of spending the grace. A tag offered beside it does not
+    // matter: an accepted, valid one decides the frame itself, and one that is
+    // unaccepted or invalid cannot.
+    result.detection.hudless_reoffer = hudless_reoffered_now;
     if (capturing && !available &&
         ui_mask::generated_without_input(frame_sequence, input_present, fg_active, status.fg.generated_frames)) {
       if (diagnostic) candidates.push_back({{"source", "none"}, {"held_for_generated_present", true},

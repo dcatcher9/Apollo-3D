@@ -75,8 +75,8 @@ namespace sunshine_game3d {
     // full-screen UI rather than a mismatched pair.
     bool hudless_exact = false;
     // The provider offered this same inexact HUD-less snapshot on the
-    // previous render, and no UIAlpha, UI color or Backbuffer tag with it:
-    // the detection pushes ui_detection::per_frame_reoffer (T1).
+    // previous render, whatever tags come with it: the detection pushes
+    // ui_detection::per_frame_reoffer (T1).
     bool hudless_reoffer = false;
     // With an exact pair: the offered declared tags (candidate bits UIAlpha,
     // UI color) not captured in the pair's tag batch. The detection pushes

@@ -1007,8 +1007,11 @@ the renderer and the sequence replay follow:
   previous real frame's resolved mask stays. Any other frame without its own decision applies none
   and marks the store spent; a frame with its own decision applies and stores it.
 - HUD-less re-offers (selection revision 10). The CPU pushes `0x8000` when the offered inexact
-  HUD-less snapshot is the one the previous render offered and no UIAlpha, UI color or Backbuffer
-  tag comes with it. Such a re-offer without a decision of its own (a generated Present's
+  HUD-less snapshot is the one the previous render offered, whatever tags come with it: an
+  accepted, valid UIAlpha, UI color or Backbuffer tag decides the frame on its own, and an
+  unaccepted or invalid one cannot, so it must not cost the held decision (before the final review
+  any offered tag cleared the bit, so an unaccepted tag offered on every Present, such as an opaque
+  final image tagged as UI color, brought the window flicker back). Such a re-offer without a decision of its own (a generated Present's
   interpolated pair, V2-invalid; with FG off a re-offer pairs with its own retained frame, and is not
   offered once that is too old) leaves
   the store as it is and applies the stored decision while one is held (state own, or spent with a
@@ -1543,7 +1546,7 @@ through an `*_SRGB` view is not comparable with a UNORM presented frame, so it i
 | `0x8` | stored | Reserved and never reused; the shader defines nothing for it. Since selection revision 10 stored bits end at `0x800` (`0x10`-`0x800` never used) and per-frame bits start at `0x1000`. |
 | `0x1000`, `0x2000` | per-frame | Since selection revision 10 (A2): the offered UIAlpha (`0x1000`) or UI color tag (`0x2000`), its candidate bit shifted by `SUNSHINE_UI_PER_FRAME_UNALIGNED_SHIFT` (12), was not captured in the exact HUD-less pair's tag batch. The tiles pass counts no strong or contradicted pixel of it, so the one-way test does not judge it on that frame. Pushed only beside an exact pair. |
 | `0x4000` | per-frame | Since selection revision 10: a status sample, a detection whose decision texels the CPU reads (at most one every 100 ms). Only it counts the one-way judgment (A2) and the pre-UI pixels (texel 11) in the passes' second phase; every other frame's one-way and pre-UI counts are zero. Every `ui_detection_replay` case pushes it. |
-| `0x8000` | per-frame | Since selection revision 10 (T1): the offered inexact HUD-less snapshot is the one the previous render offered, and no UIAlpha, UI color or Backbuffer tag comes with it. Without a decision of its own the frame leaves the hold store as it is and applies the stored decision while one is held. |
+| `0x8000` | per-frame | Since selection revision 10 (T1): the offered inexact HUD-less snapshot is the one the previous render offered, whatever tags come with it. Without a decision of its own the frame leaves the hold store as it is and applies the stored decision while one is held. |
 | `0x10000` | per-frame | Reserved and never reused; before S2b the layer route's hidden-scene hold (source 8). The shader defines nothing for it. |
 | `0x20000` | per-frame | Reserved and never reused; no render pushes it and the shader defines nothing for it. |
 | `0x40000` | per-frame | The consumed depth is not this frame's (reused, or behind a generated Present). It only counts (`full.depth_not_current`) and makes the hidden-scene evidence invalid; the renderer then dispatches no evidence passes. H1 still acts on a held verdict. |
@@ -1949,7 +1952,9 @@ held decision, and adds `T1 HUD-less re-offers keep the held decision`: UIAlpha 
 only beside a HUD-less image re-offered on all of them at 3x and 4x, both orders, shows the last
 real UIAlpha on every generated Present; with FG off a re-offer pairs with its own retained frame
 and decides, and once it is too old to pair the accepted pair is missing, so the grace applies once;
-and no re-offer bit is pushed beside a tag or an exact pair. The A2 group also checks that a
+no re-offer bit is pushed beside an exact pair, while a tag beside an inexact re-offer leaves it pushed;
+and an unaccepted, opaque UI color tag offered on every Present beside the re-offered image at 3x and
+4x, both orders, leaves every generated Present the real frame's change set. The A2 group also checks that a
 declared tag pushed unaligned with the exact pair is never judged. The 10-05 review adds `T1
 generated Presents re-offering their real frame's snapshots hold`: at 2x-4x generated Presents
 re-offer the real frame's Backbuffer, UIAlpha and layer identities and hold by identity. That makes
@@ -2442,7 +2447,7 @@ acceptance and selection, hidden-scene guard, hold, pin weight. Diagnostics only
 | H1 Hidden scene (M5) | With valid depth, a held hidden D verdict (two hidden samples enter, renewals extend, a visible sample releases) and an informative full claim (from an accepted source, a layer proven cleared transparent this frame, an exact full change-set, or a pre-UI scene image on which D reads visible while D on the presented frame reads hidden: the declared HUD-less image, or an offscreen layer without coverage whose signature the ledger holds proven, A1), the frame is flat whatever M4 selected (a winner already flat is relabelled 8 too). A visible verdict refutes that signature's full claim until it shows below 99% opaque. Invalid D acts on nothing; only a scope change clears D state. |
 | H2 Still screen (M5, removed) | Fix 2's flattening of still SDR screens without a UI source, removed in selection revision 9 (**Still screens without a UI source (H2, fix 2): removed**); the ID is not reused. |
 | P1 Pin weight (M7) | `saturate(8 * c)` of the selected coverage at any coverage (binary for change-sets); 1 everywhere when H1 says flat. |
-| T1 Hold (M6) | A Present without its own fresh decision uses the last real decision; a real frame without one reuses the previous real frame's decision once, then has no mask, except that a mispaired re-offer of the previous render's HUD-less snapshot without a UI tag keeps the held decision for as long as that snapshot is re-offered. No multiplier constant and no time bound; real frames are identified by Present counting (S3's real-frame identity was removed): a Present that offers nothing within the reported generated count of the last UI tag is generated, and so, under FG, is one that re-offers exactly the snapshot identities of the last detecting Present (no current colour or inexact HUD-less image); one that offers any other input is real. |
+| T1 Hold (M6) | A Present without its own fresh decision uses the last real decision; a real frame without one reuses the previous real frame's decision once, then has no mask, except that a mispaired inexact re-offer of the previous render's HUD-less snapshot keeps the held decision for as long as that snapshot is re-offered, whatever tags come with it. No multiplier constant and no time bound; real frames are identified by Present counting (S3's real-frame identity was removed): a Present that offers nothing within the reported generated count of the last UI tag is generated, and so, under FG, is one that re-offers exactly the snapshot identities of the last detecting Present (no current colour or inexact HUD-less image); one that offers any other input is real. |
 | F1 Fail safe and diagnostics (M8) | No qualifying source gives no mask with a named reason and refused candidate, the panel warning and exact counters. Status freshness is keyed on the scope and the winning accepted candidate. Diagnostics feed nothing back. |
 
 Scope (runtime, device, epoch, viewport, size, colour mode and encoding, but not the FG multiplier)

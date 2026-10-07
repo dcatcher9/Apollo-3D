@@ -1660,10 +1660,12 @@ namespace sunshine_game3d {
         d.scene_layer_proven = layer_proven();
         d.scene_bits = d.guard.per_frame(observation.now_ms, bits, candidates.signatures.by_kind(), d.scene_layer_proven);
         // T1's re-offer bit: the provider offered the previous render's
-        // inexact HUD-less snapshot again, with no UIAlpha, UI color or
-        // Backbuffer tag (ui_detection::per_frame_reoffer).
-        constexpr uint32_t tags = candidate::ui_alpha | candidate::ui_color | candidate::backbuffer | candidate::exact;
-        const bool reoffer = candidates.hudless_reoffer && (bits & candidate::hudless) && !(bits & tags);
+        // inexact HUD-less snapshot again (ui_detection::per_frame_reoffer).
+        // A tag beside it never clears the bit: an accepted, valid tag
+        // decides the frame on its own, and an unaccepted or invalid one
+        // cannot, so the held decision serves that frame better than the
+        // one-shot grace.
+        const bool reoffer = candidates.hudless_reoffer && (bits & candidate::hudless) && !(bits & candidate::exact);
         // A2: the offered declared tags outside the exact pair's tag batch,
         // which the one-way test does not judge
         // (ui_detection::per_frame_unaligned_shift).

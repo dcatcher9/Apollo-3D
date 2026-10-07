@@ -618,8 +618,8 @@ namespace {
     bool hold_previous {};
     // The provider offered the previous render's inexact HUD-less snapshot
     // again (ui_detection_inputs::hudless_reoffer); the renderer pushes
-    // per_frame_reoffer when no UIAlpha, UI color or Backbuffer tag comes
-    // with it.
+    // per_frame_reoffer whatever tags come with it, unless the pair is
+    // exact.
     bool hudless_reoffer {};
     // With an exact pair, the offered declared tags (UIAlpha, UI color) not
     // captured in the pair's tag batch (ui_detection_inputs::
@@ -678,7 +678,7 @@ namespace {
   //                       guard's per_frame(..., layer_proven) + detect_ui +
   //                       detected() (t.detect with bits, or a zero-offer
   //                       real frame flagged accepted_missing; with
-  //                       per_frame_reoffer for a tagless HUD-less re-offer
+  //                       per_frame_reoffer for an inexact HUD-less re-offer
   //                       and the declared tags outside an exact pair's
   //                       batch from per_frame_unaligned_shift), or
   //                       inactive() (the guard keeps its state);
@@ -778,8 +778,7 @@ namespace {
         // read after the poll, so a sample that just earned it counts at once.
         r.layer_proven = (bits & candidate::layer) && session.pre_ui_proven(p.signatures.of(kind::ui_layer));
         r.scene_bits = guard.per_frame(p.now_ms, bits, p.signatures.by_kind(), r.layer_proven);
-        constexpr std::uint32_t tags = candidate::ui_alpha | candidate::ui_color | candidate::backbuffer | candidate::exact;
-        const bool reoffer = p.hudless_reoffer && (bits & candidate::hudless) && !(bits & tags);
+        const bool reoffer = p.hudless_reoffer && (bits & candidate::hudless) && !(bits & candidate::exact);
         const std::uint32_t unaligned = (bits & candidate::exact) ? p.unaligned_declared & bits & (candidate::ui_alpha | candidate::ui_color) : 0u;
         const std::uint32_t per_frame = r.scene_bits | r.hold.per_frame | (!p.depth_current ? ui_detection::per_frame_depth_not_current : 0u) |
           (reoffer ? ui_detection::per_frame_reoffer : 0u) | (unaligned << ui_detection::per_frame_unaligned_shift);
@@ -2585,7 +2584,7 @@ namespace {
           p.hudless_reoffer = !offer.first;
           const auto &r = s.step(p);
           require(r.detected && !r.held, "A W3 Present did not detect (" + name + ")");
-          require(((r.gpu.per_frame & ui_detection::per_frame_reoffer) != 0) == (!offer.first && !offer.real), "The re-offer bit was not pushed exactly on tagless re-offers (" + name + ")");
+          require(((r.gpu.per_frame & ui_detection::per_frame_reoffer) != 0) == !offer.first, "The re-offer bit was not pushed exactly on re-offers (" + name + ")");
           if (offer.real) {
             require(r.source == 1 && r.covered == 60 && !r.decision.reused, "The real W3 Present did not decide its accepted UIAlpha (" + name + ")");
             real_source = r.source;
@@ -2649,10 +2648,10 @@ namespace {
       check_counters(s, "FG-off stale re-offer");
     }
     {
-      // A re-offer beside a UIAlpha, UI color or Backbuffer tag, or paired
-      // exactly with its batch's Backbuffer, is a frame of its own: the
-      // renderer pushes no re-offer bit (an accepted tag decides it or the
-      // grace applies once).
+      // A re-offer paired exactly with its batch's Backbuffer is a frame of
+      // its own: the renderer pushes no re-offer bit. A UIAlpha, UI color or
+      // Backbuffer tag beside an inexact re-offer leaves the bit pushed (an
+      // accepted, valid tag decides the frame on its own anyway).
       alpha_auto_policy session;
       accept_hudless(session);
       sequence s(session, [](const gpu_inputs &in) {
@@ -2665,7 +2664,48 @@ namespace {
         p.now_ms = 10000 + 16 * s.frames.size();
         p.offered = candidate::hudless | with;
         p.hudless_reoffer = true;
-        require(!(s.step(p).gpu.per_frame & ui_detection::per_frame_reoffer), "A re-offer beside a tag or an exact pair pushed the re-offer bit");
+        const bool pushed = (s.step(p).gpu.per_frame & ui_detection::per_frame_reoffer) != 0;
+        require(pushed == (with != candidate::exact), "A re-offer beside an exact pair pushed the re-offer bit, or one beside a tag did not");
+      }
+    }
+    // An unaccepted UI color tag offered on every Present beside the re-offered
+    // HUD-less image (an opaque final image tagged as UI color, never
+    // selective, so never accepted) cannot decide a frame, so it must not
+    // cost the held decision: at 3x and 4x every generated Present shows its
+    // real frame's own change set. Before, the offered tag cleared the
+    // re-offer bit, the first generated Present spent the grace and the rest
+    // of each window had no mask.
+    for (const std::uint32_t generated : {2u, 3u}) {
+      for (const bool real_first : {false, true}) {
+        const hudless_window cadence {generated, real_first};
+        const std::string name = std::to_string(generated + 1) + "x, " + (real_first ? "real Present first" : "real Present last") + ", unaccepted UI color tag";
+        alpha_auto_policy session;
+        accept_hudless(session);
+        sequence s(session, [cadence](const gpu_inputs &in) {
+          synthetic f;
+          f.alpha(kind::ui_color, 1000).opaque(kind::ui_color, 1000).change_set(cadence.at((in.now_ms - 10000) / 8).own_frame ? 60 : 500).lit(1000);
+          return f.words(in);
+        });
+        std::size_t generated_presents = 0;
+        bool decided = false;
+        for (std::uint64_t now = 10000; now < 12000; now += 8) {
+          const auto offer = cadence.at((now - 10000) / 8);
+          present p;
+          p.now_ms = now;
+          p.offered = candidate::hudless | candidate::ui_color;
+          p.hudless_reoffer = !offer.first;
+          const auto &r = s.step(p);
+          require(r.detected && !r.held, "A Present beside an unaccepted tag did not detect (" + name + ")");
+          if (offer.own_frame) {
+            require(r.source == 5 && r.covered == 60 && !r.decision.reused, "The real Present did not decide its own change set (" + name + ")");
+            decided = true;
+          } else if (decided) {
+            ++generated_presents;
+            require(!r.decision.own_source && r.decision.reused && r.source == 5 && r.covered == 60, "A generated Present beside an unaccepted tag lost the held decision (" + name + ")");
+          }
+        }
+        require(generated_presents > 100 && session.accepted(candidate::ui_color, signatures_in(srgb)) == 0, "The stream had too few generated Presents, or accepted the opaque UI color tag (" + name + ")");
+        check_counters(s, "HUD-less re-offers beside an unaccepted tag " + name);
       }
     }
   }

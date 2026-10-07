@@ -101,8 +101,8 @@ namespace sunshine_game3d::ui_detection {
   // and the pre-UI pixels (H1 d) in the passes' sample phase.
   inline constexpr std::uint32_t per_frame_sample = 0x4000u;
   // T1 (selection revision 10): the offered inexact HUD-less snapshot is the
-  // one the previous render offered and no UIAlpha, UI color or Backbuffer
-  // tag comes with it. Such a re-offer without a decision of its own keeps
+  // one the previous render offered, whatever tags come with it. Such a
+  // re-offer without a decision of its own keeps
   // the hold store as it is: it reuses the held decision while one is held
   // instead of spending the grace (ui_selection::decide).
   inline constexpr std::uint32_t per_frame_reoffer = 0x8000u;
