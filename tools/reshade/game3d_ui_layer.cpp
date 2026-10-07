@@ -12,6 +12,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <mutex>
 
 namespace sunshine_game3d::ui_layer {
@@ -76,6 +77,7 @@ namespace sunshine_game3d::ui_layer {
       api::resource copy{};
       std::uint64_t tick{};
       api::resource_view view{};
+      std::uint64_t delay{}; // Milliseconds before it is destroyed (0: retire_delay_ms).
     };
 
     void destroy(const retired &r) {
@@ -121,32 +123,26 @@ namespace sunshine_game3d::ui_layer {
       // At most two renderers (the current one and a cached one of the other
       // colour transfer) read an entry at once.
       std::array<reader, 2> readers{};
-      // The game lists carrying this entry's copy (0: none), and whether the
-      // copy is recorded but none of them executed yet, or executed but the
-      // submission hook has not run after the native call (owed), or its
-      // fence signal is recorded but the CPU has not seen the fence reach it
-      // (awaiting). A pending entry is never offered (its copy's write may
-      // not be submitted yet, or may still run) nor written again.
-      std::array<std::uint64_t, 2> carriers{};
-      // The queue that executed the copy (merge_queue; 0 not yet).
-      std::uint64_t queue{};
-      // D3D12 (held_for_submission): the native list whose submission hook
-      // the copy waits for (0: none owed); for a copy run on one other queue
-      // than the presenting one, then the queue fence's slot and generation
-      // and the value signalled after that submission (0: none).
-      std::uint64_t owed{};
-      int fence = -1;
-      std::uint64_t fence_generation{}, signalled{};
-      bool pending{};
-      // The owed fence signal never came (its list was reset first, or no
-      // listener was heard): offered unordered, logged as unobserved.
-      bool unobserved{};
+      // The copy's queue order (copy_order): the game lists carrying it, the
+      // queue that executed it, the submission hook it is held for and the
+      // queue fence value signalled after it. A pending entry is never offered
+      // (its copy's write may not be submitted yet, or may still run) nor
+      // written again; one whose owed fence signal never came (unobserved) is
+      // offered unordered, logged as unobserved.
+      copy_order order;
       // The entry's copy is being allocated outside the lock (capture_live).
       bool allocating{};
-      bool free() const { return !pending && !allocating && readers[0].completed() && readers[1].completed(); }
-      bool carries(std::uint64_t list) const { return list && (carriers[0] == list || carriers[1] == list); }
-      // Its signal is recorded; held until the CPU sees the fence reach it.
-      bool awaiting() const { return pending && signalled; }
+      bool free() const { return !order.pending && !allocating && readers[0].completed() && readers[1].completed(); }
+    };
+
+    // A Dump 3D census target: its row, its copy's queue order (copy_order,
+    // judged by census_verdict when taken), the live tracker's Present count
+    // when the copy was recorded, and the copy's API.
+    struct census_entry {
+      candidate c;
+      copy_order order;
+      std::uint64_t frame{};
+      bool d3d12{};
     };
 
     struct live_state {
@@ -209,9 +205,11 @@ namespace sunshine_game3d::ui_layer {
     constexpr unsigned fence_capacity = 4;
 
     // One-time log lines.
+    // log_census is the first of eight bits, one per census_status that omits
+    // a census copy and per unordered reason (census_log_bit).
     enum log_bit : std::uint32_t {
       log_fenced = 1u << 0, log_unobserved = 1u << 1, log_mixed = 1u << 2, log_no_fence = 1u << 3,
-      log_create_failed = 1u << 4, log_signal_failed = 1u << 5, log_fence_capacity = 1u << 6,
+      log_create_failed = 1u << 4, log_signal_failed = 1u << 5, log_fence_capacity = 1u << 6, log_census = 1u << 7,
     };
 
     struct state_t {
@@ -232,7 +230,8 @@ namespace sunshine_game3d::ui_layer {
       std::uint64_t buffers_swapchain{}, buffers_first{};
       std::uint32_t buffers_count{}, buffers_width{}, buffers_height{};
       std::atomic<bool> buffers_valid{false};
-      std::vector<candidate> candidates;
+      // The armed census (max_candidates targets at most).
+      std::vector<census_entry> census;
       std::vector<retired> graveyard;
       live_state live;
       // The last live copy id handed out. Strictly increasing for the life of
@@ -246,15 +245,17 @@ namespace sunshine_game3d::ui_layer {
       std::uint64_t live_scope{}, census_scope{};
       std::uint32_t logged{}; // log_bit
       // The presenting queue's native handle at the last Present, and each
-      // ring entry's carriers, which the execute and reset events check
-      // without the lock, so lists that carried no live copy never take it.
+      // ring entry's and census copy's carriers (publish_watch), which the
+      // execute and reset events check without the lock, so lists that
+      // carried no layer copy never take it.
       std::uint64_t presenting_queue{};
-      std::array<std::atomic<std::uint64_t>, ring_capacity * 2> watched{};
-      // Cross-queue order: the queue fences, and each ring entry's owed native
-      // list, which the submission listener checks without the lock.
+      std::array<std::atomic<std::uint64_t>, (ring_capacity + max_candidates) * 2> watched{};
+      // Cross-queue order: the queue fences, and each ring entry's and census
+      // copy's owed native list, which the submission listener checks without
+      // the lock.
       std::array<queue_fence, fence_capacity> fences{};
       std::uint64_t fence_generation{};
-      std::array<std::atomic<std::uint64_t>, ring_capacity> owed{};
+      std::array<std::atomic<std::uint64_t>, ring_capacity + max_candidates> owed{};
       // GetTickCount64 when the submission listener was last called (0:
       // never): within listener_window_ms, a D3D12 execution is held for it.
       std::atomic<std::uint64_t> listened_ms{0};
@@ -283,13 +284,25 @@ namespace sunshine_game3d::ui_layer {
       return s.armed.load(std::memory_order_relaxed) || demanded(s, now);
     }
 
-    // Requires the state lock: publishes the ring entries' carriers and owed
-    // native lists to their lock-free copies.
+    // Requires the state lock. Calls visit(order, index) for each live ring
+    // entry's copy order (index: its ring index), then for each census copy's
+    // (index -1): both follow the same transitions, and only a ring entry is
+    // ever offered.
+    template<class F> void each_order(state_t &s, F &&visit) {
+      for (unsigned i = 0; i != s.live.entries; ++i) visit(s.live.ring[i].order, int(i));
+      for (auto &e : s.census) visit(e.order, -1);
+    }
+
+    // Requires the state lock: publishes the ring entries' and census copies'
+    // carriers and owed native lists to their lock-free copies.
     void publish_watch(state_t &s) {
-      for (std::size_t i = 0; i != ring_capacity; ++i) {
+      for (std::size_t i = 0; i != ring_capacity + max_candidates; ++i) {
+        const auto census = i - ring_capacity;
+        const copy_order *order = i < ring_capacity ? &s.live.ring[i].order :
+          census < s.census.size() ? &s.census[census].order : nullptr;
         for (std::size_t j = 0; j != 2; ++j)
-          s.watched[i * 2 + j].store(s.live.ring[i].carriers[j], std::memory_order_relaxed);
-        s.owed[i].store(s.live.ring[i].owed, std::memory_order_relaxed);
+          s.watched[i * 2 + j].store(order ? order->carriers[j] : 0, std::memory_order_relaxed);
+        s.owed[i].store(order ? order->owed : 0, std::memory_order_relaxed);
       }
     }
 
@@ -321,24 +334,18 @@ namespace sunshine_game3d::ui_layer {
     // submission and is offered once the CPU saw its fence reach it (settle).
     // Without a listener heard it is offered now (one owing a signal
     // unobserved). The newest of the others becomes the offered copy (the
-    // last executed copy, as a single live texture would hold).
+    // last executed copy, as a single live texture would hold). A census copy
+    // the list carries moves the same way (order_executed), never offered.
     void carriers_executed(state_t &s, std::uint64_t list, std::uint64_t native_list, std::uint64_t queue, bool d3d12,
         bool listening) {
       auto &live = s.live;
       int promoted = -1;
-      for (unsigned i = 0; i != live.entries; ++i) {
-        auto &entry = live.ring[i];
-        if (!entry.carries(list)) continue;
-        entry.queue = merge_queue(entry.queue, queue);
-        entry.fence = -1;
-        entry.fence_generation = entry.signalled = 0;
-        const bool owes = native_list && owes_signal(d3d12, entry.queue, s.presenting_queue);
-        entry.unobserved = owes && !listening;
-        entry.owed = native_list && held_for_submission(d3d12, entry.queue, listening) ? native_list : 0;
-        entry.pending = entry.owed != 0;
-        if (entry.pending) continue;
-        if (promoted < 0 || entry.capture_id > live.ring[unsigned(promoted)].capture_id) promoted = int(i);
-      }
+      each_order(s, [&](copy_order &order, int index) {
+        if (!order.carries(list)) return;
+        if (!order_executed(order, native_list, queue, d3d12, listening, s.presenting_queue) || index < 0) return;
+        if (promoted < 0 || live.ring[unsigned(index)].capture_id > live.ring[unsigned(promoted)].capture_id)
+          promoted = index;
+      });
       if (promoted >= 0) live.newest = promoted;
     }
 
@@ -349,29 +356,12 @@ namespace sunshine_game3d::ui_layer {
     // it and is offered (unobserved: unordered unless it ran on the
     // presenting queue, whose order order_of still reports). An entry whose
     // fence signal is recorded stays held for its fence (a list may be reset
-    // as soon as it was submitted, while its work still runs).
+    // as soon as it was submitted, while its work still runs). A census copy
+    // moves the same way (order_reset), never offered.
     void carriers_reset(state_t &s, std::uint64_t list, std::uint64_t native_list) {
-      for (unsigned i = 0; i != s.live.entries; ++i) {
-        auto &entry = s.live.ring[i];
-        bool unsigned_execution = false;
-        if (native_list && entry.owed == native_list) {
-          entry.owed = 0;
-          unsigned_execution = entry.pending;
-        }
-        if (entry.carries(list)) {
-          for (auto &c : entry.carriers) if (c == list) c = 0;
-          if (!entry.carriers[0] && !entry.carriers[1] && entry.pending && !entry.signalled) {
-            if (entry.owed) {
-              entry.owed = 0;
-              unsigned_execution = true;
-            } else entry.pending = false;
-          }
-        }
-        if (!unsigned_execution) continue;
-        entry.pending = false;
-        entry.unobserved = true;
-        promote(s.live, i);
-      }
+      each_order(s, [&](copy_order &order, int index) {
+        if (order_reset(order, list, native_list) && index >= 0) promote(s.live, unsigned(index));
+      });
     }
 
     void release(queue_fence &f) {
@@ -379,12 +369,12 @@ namespace sunshine_game3d::ui_layer {
       f = {};
     }
 
-    // Requires the state lock. The queue fence a live copy names, while that
+    // Requires the state lock. The queue fence a copy names, while that
     // record still holds the fence it was signalled on (null: none).
-    queue_fence *fence_of(state_t &s, const ring_entry &entry) {
-      if (entry.fence < 0 || unsigned(entry.fence) >= fence_capacity) return nullptr;
-      auto &f = s.fences[unsigned(entry.fence)];
-      return f.fence && f.generation == entry.fence_generation ? &f : nullptr;
+    queue_fence *fence_of(state_t &s, const copy_order &order) {
+      if (order.fence < 0 || unsigned(order.fence) >= fence_capacity) return nullptr;
+      auto &f = s.fences[unsigned(order.fence)];
+      return f.fence && f.generation == order.fence_generation ? &f : nullptr;
     }
     // Requires the state lock. How the presenting queue's reads are ordered
     // after an offered live copy, and the queue fence that orders it (null:
@@ -392,41 +382,36 @@ namespace sunshine_game3d::ui_layer {
     // (settle), and only its own queue signals that fence, in increasing
     // order, so it stays reached.
     read_order order_of(state_t &s, const ring_entry &entry, const queue_fence *&fence) {
-      const bool same = presented_in_order(entry.queue, s.presenting_queue);
-      fence = same ? nullptr : fence_of(s, entry);
-      return order_for(same, fence ? entry.signalled : 0);
+      const bool same = presented_in_order(entry.order.queue, s.presenting_queue);
+      fence = same ? nullptr : fence_of(s, entry.order);
+      return order_for(same, fence ? entry.order.signalled : 0);
     }
 
     // Requires the state lock. Each copy held for its fence (awaiting) whose
     // fence the CPU now sees at its value (GetCompletedValue, never a wait;
     // fence_pending) is offered unless a newer copy is. One whose fence
     // record is gone can never be seen complete: it is dropped, never offered.
+    // A census copy settles the same way (order_settled), never offered.
     void settle(state_t &s) {
-      auto &live = s.live;
-      for (unsigned i = 0; i != live.entries; ++i) {
-        auto &entry = live.ring[i];
-        if (!entry.awaiting()) continue;
-        const auto *f = fence_of(s, entry);
-        if (f && fence_pending(entry.signalled, f->fence->GetCompletedValue())) continue;
-        entry.pending = false;
-        if (!f) {
-          entry.fence = -1;
-          entry.fence_generation = entry.signalled = 0;
-          continue;
-        }
-        promote(live, i);
-      }
+      each_order(s, [&](copy_order &order, int index) {
+        if (!order.awaiting()) return;
+        const auto *f = fence_of(s, order);
+        if (order_settled(order, f != nullptr, f ? f->fence->GetCompletedValue() : 0) && index >= 0)
+          promote(s.live, unsigned(index));
+      });
     }
 
-    // Requires the state lock. A record no live copy names and whose last
-    // signal ran.
+    // Requires the state lock. A record no live or census copy names and
+    // whose last signal ran.
     bool reusable(state_t &s, unsigned index) {
       const auto &f = s.fences[index];
       if (f.failed) return f.device != s.device;
       if (!f.fence) return false;
-      for (unsigned i = 0; i != s.live.entries; ++i)
-        if (s.live.ring[i].fence == int(index) && s.live.ring[i].fence_generation == f.generation) return false;
-      return f.fence->GetCompletedValue() >= f.signalled;
+      bool named = false;
+      each_order(s, [&](copy_order &order, int) {
+        named |= order.fence == int(index) && order.fence_generation == f.generation;
+      });
+      return !named && f.fence->GetCompletedValue() >= f.signalled;
     }
 
     // Requires the state lock. The fence record of the current device's queue
@@ -476,28 +461,30 @@ namespace sunshine_game3d::ui_layer {
     // (no fence). Each one that ran on another queue gets the queue fence's
     // next value, signalled now, after that submission, and is held until the
     // CPU sees the fence reach it (settle); one no value could be signalled
-    // for is offered now, unordered.
+    // for is offered now, unordered. Census copies the submission ran are
+    // proven the same way (order_submitted, order_signalled), sharing the one
+    // signalled value, and never offered.
     void signal_owed(state_t &s, std::uint64_t queue, unsigned count,
         const sunshine_streamline::native_observer::command_identity *commands) {
       auto &live = s.live;
-      std::array<unsigned, ring_capacity> due{};
+      // The copies owing this queue's fence signal and their ring index (-1:
+      // a census copy).
+      std::array<copy_order *, ring_capacity + max_candidates> due{};
+      std::array<int, ring_capacity + max_candidates> due_index{};
       unsigned owing = 0;
       bool submitted = false;
-      for (unsigned i = 0; i != live.entries; ++i) {
-        auto &entry = live.ring[i];
+      each_order(s, [&](copy_order &order, int index) {
         bool ran = false;
-        for (unsigned c = 0; entry.owed && c != count && !ran; ++c) ran = commands[c].native_command == entry.owed;
-        if (!ran) continue;
+        for (unsigned c = 0; order.owed && c != count && !ran; ++c) ran = commands[c].native_command == order.owed;
+        if (!ran) return;
         submitted = true;
-        if (!presented_in_order(entry.queue, s.presenting_queue)) {
-          due[owing++] = i;
-          continue;
+        if (!presented_in_order(order.queue, s.presenting_queue)) {
+          due[owing] = &order;
+          due_index[owing++] = index;
+          return;
         }
-        entry.owed = 0;
-        if (!entry.pending) continue;
-        entry.pending = false;
-        promote(live, i);
-      }
+        if (order_submitted(order) && index >= 0) promote(live, unsigned(index));
+      });
       if (!submitted) return;
       if (!owing) {
         publish_watch(s);
@@ -518,16 +505,9 @@ namespace sunshine_game3d::ui_layer {
           sunshine_log::message(reshade::log::level::warning, message);
         }
       }
-      for (unsigned k = 0; k != owing; ++k) {
-        auto &entry = live.ring[due[k]];
-        entry.owed = 0;
-        entry.fence = slot;
-        entry.fence_generation = generation;
-        entry.signalled = value;
-        if (!entry.pending || value) continue;
-        entry.pending = false;
-        promote(live, due[k]);
-      }
+      for (unsigned k = 0; k != owing; ++k)
+        if (order_signalled(*due[k], slot, generation, value) && due_index[k] >= 0)
+          promote(live, unsigned(due_index[k]));
       publish_watch(s);
     }
 
@@ -536,18 +516,17 @@ namespace sunshine_game3d::ui_layer {
     // runs a secondary's (add).
     void carriers_follow(state_t &s, std::uint64_t from, std::uint64_t to, bool replace) {
       if (!from || !to) return;
-      for (unsigned i = 0; i != s.live.entries; ++i) {
-        auto &entry = s.live.ring[i];
-        if (!entry.carries(from) || entry.carries(to)) continue;
+      each_order(s, [&](copy_order &order, int) {
+        if (!order.carries(from) || order.carries(to)) return;
         if (replace) {
-          for (auto &c : entry.carriers) if (c == from) c = to;
-          continue;
+          for (auto &c : order.carriers) if (c == from) c = to;
+          return;
         }
         // Two carriers at most: a full entry keeps from and replaces the other.
-        auto &slot = !entry.carriers[0] ? entry.carriers[0] : !entry.carriers[1] ? entry.carriers[1] :
-          entry.carriers[0] == from ? entry.carriers[1] : entry.carriers[0];
+        auto &slot = !order.carriers[0] ? order.carriers[0] : !order.carriers[1] ? order.carriers[1] :
+          order.carriers[0] == from ? order.carriers[1] : order.carriers[0];
         slot = to;
-      }
+      });
     }
 
     bool watched(const state_t &s, const void *list) {
@@ -580,26 +559,47 @@ namespace sunshine_game3d::ui_layer {
     void reap(state_t &s, std::uint64_t now, std::vector<retired> &due, api::device *presenting) {
       auto keep = s.graveyard.begin();
       for (auto &r : s.graveyard) {
-        if (now < r.tick || now - r.tick < retire_delay_ms) *keep++ = r;
+        if (now < r.tick || now - r.tick < (r.delay ? r.delay : retire_delay_ms)) *keep++ = r;
         else if (r.device == presenting) due.push_back(r);
         else destroy(r);
       }
       s.graveyard.erase(keep, s.graveyard.end());
     }
 
-    // Requires the state lock. Retires census copies that no dump took.
-    void drop_candidates(state_t &s) {
-      for (auto &c : s.candidates)
-        if (c.copy.handle) {
-          s.graveyard.push_back({s.device, c.copy, GetTickCount64()});
-          s.holding.store(true, std::memory_order_relaxed);
-        }
-      s.candidates.clear();
+    // Requires the state lock. Retires a census entry's copy that no dump
+    // reads. One a game list still carries, or whose write may still be
+    // pending, is kept for live_release_ms rather than retire_delay_ms: its
+    // list may run late (at most max_candidates such copies per census).
+    void retire_census(state_t &s, const census_entry &e, std::uint64_t now) {
+      if (!e.c.copy.handle) return;
+      s.graveyard.push_back({s.device, e.c.copy, now, {}, e.order.pending || e.order.carried() ? live_release_ms : 0});
+      s.holding.store(true, std::memory_order_relaxed);
     }
 
-    // Records the target's previous-frame content into copy (in copy_dest
-    // state), leaving copy shader-readable and the target as the clear needs it.
-    void record_copy(api::command_list *commands, api::resource target, api::resource copy) {
+    // The log bit of an omitted census copy: one per status, and one per
+    // reason of an unordered copy (eight from log_census).
+    std::uint32_t census_log_bit(const census_result &verdict) {
+      const auto index = static_cast<unsigned>(verdict.status) - 1u;
+      if (verdict.status != census_status::unordered || !verdict.reason) return log_census << index;
+      return log_census << (index + (std::strcmp(verdict.reason, "mixed_queue") == 0 ? 0u :
+        std::strcmp(verdict.reason, "no_fence") == 0 ? 1u : 2u));
+    }
+
+    // Requires the state lock. Retires census copies that no dump took.
+    void drop_candidates(state_t &s) {
+      const auto now = GetTickCount64();
+      for (const auto &e : s.census) retire_census(s, e, now);
+      s.census.clear();
+      publish_watch(s);
+    }
+
+    // Records the target's previous-frame content into copy, an add-on texture
+    // kept in shader_resource state between uses (live and census copies are
+    // created in it), leaving copy shader-readable and the target as the clear
+    // needs it. A list executed again without a reset records the same
+    // transitions again, from the state the previous execution left.
+    void record_into(api::command_list *commands, api::resource target, api::resource copy) {
+      commands->barrier(copy, api::resource_usage::shader_resource, api::resource_usage::copy_dest);
       commands->barrier(target, api::resource_usage::render_target, api::resource_usage::copy_source);
       commands->copy_resource(target, copy);
       commands->barrier(target, api::resource_usage::copy_source, api::resource_usage::render_target);
@@ -627,30 +627,16 @@ namespace sunshine_game3d::ui_layer {
       auto &live = s.live;
       auto &entry = live.ring[index];
       note_skip_gap(s, live.gap.record(steady_us()));
-      commands->barrier(entry.copy, api::resource_usage::shader_resource, api::resource_usage::copy_dest);
-      record_copy(commands, resource, entry.copy);
+      record_into(commands, resource, entry.copy);
       entry.capture_id = live.capture_id = ++s.next_capture_id;
       entry.tick = live.tick = GetTickCount64();
       // The Present count at the copy: it holds the previous Present's frame.
       entry.frame = live.tracker.frame();
-      entry.queue = 0;
-      entry.owed = 0;
-      entry.unobserved = false;
-      entry.fence = -1;
-      entry.fence_generation = entry.signalled = 0;
-      entry.carriers = {};
       // A D3D11 immediate context is the presenting queue itself, so the copy
       // executed there; else the entry is pending until a list carrying it
       // executes, on the queue that runs it.
-      const auto list = commands->get_native();
-      if (list && list == s.presenting_queue) {
-        entry.queue = list;
-        entry.pending = false;
-        live.newest = int(index);
-      } else {
-        entry.carriers[0] = reinterpret_cast<std::uint64_t>(commands);
-        entry.pending = true;
-      }
+      const auto list = reinterpret_cast<std::uint64_t>(commands);
+      if (order_recorded(entry.order, list, commands->get_native(), s.presenting_queue)) live.newest = int(index);
       publish_watch(s);
       s.counts.copies.fetch_add(1, std::memory_order_relaxed);
       s.holding.store(true, std::memory_order_relaxed);
@@ -686,10 +672,10 @@ namespace sunshine_game3d::ui_layer {
         // submission hook never came, is abandoned (never offered). One whose
         // fence signal is recorded stays held until its fence reached it: its
         // queue may still write it.
-        if (entry.pending && !entry.signalled && now - entry.tick >= retire_delay_ms) {
-          entry.pending = false;
-          entry.carriers = {};
-          entry.owed = 0;
+        if (entry.order.pending && !entry.order.signalled && now - entry.tick >= retire_delay_ms) {
+          entry.order.pending = false;
+          entry.order.carriers = {};
+          entry.order.owed = 0;
           abandoned = true;
         }
         free[i] = entry.free();
@@ -763,14 +749,15 @@ namespace sunshine_game3d::ui_layer {
 
     // Requires the state lock. The dump census: each armed qualifying target once.
     census_allocation census(state_t &s, api::resource resource, const api::resource_desc &desc) {
-      const auto known = std::find_if(s.candidates.begin(), s.candidates.end(),
-        [&](const candidate &c) { return c.source == resource.handle; });
-      if (known != s.candidates.end()) {
-        ++known->clears;
+      const auto known = std::find_if(s.census.begin(), s.census.end(),
+        [&](const census_entry &e) { return e.c.source == resource.handle; });
+      if (known != s.census.end()) {
+        ++known->c.clears;
         return {};
       }
-      if (s.candidates.size() >= max_candidates) return {};
-      candidate c;
+      if (s.census.size() >= max_candidates) return {};
+      census_entry e;
+      auto &c = e.c;
       c.source = resource.handle;
       c.width = desc.texture.width;
       c.height = desc.texture.height;
@@ -778,28 +765,36 @@ namespace sunshine_game3d::ui_layer {
       c.format = static_cast<std::uint32_t>(typed);
       c.clears = 1;
       c.status = census_allocating;
-      s.candidates.push_back(c);
+      s.census.push_back(e);
       return {true, s.census_scope, resource.handle, api::resource_desc(c.width, c.height, 1, 1, typed, 1,
-        api::memory_heap::default_, api::resource_usage::copy_dest | api::resource_usage::shader_resource)};
+        api::memory_heap::default_,
+        api::resource_usage::copy_dest | api::resource_usage::copy_source | api::resource_usage::shader_resource)};
     }
 
     // Requires the state lock. Publishes a census copy allocated outside the
-    // lock and records it; false when the census moved on (the caller
-    // destroys the copy).
+    // lock (in shader_resource state, as live copies are) and records it into
+    // the game's list, whose execution its queue order then follows (the live
+    // copies' carriers, submission hook and queue fence); false when the
+    // census moved on (the caller destroys the copy).
     bool publish_census(state_t &s, api::command_list *commands, const census_allocation &plan, api::resource copy,
         api::resource resource) {
       if (s.census_scope != plan.scope) return false;
-      const auto c = std::find_if(s.candidates.begin(), s.candidates.end(), [&](const candidate &value) {
-        return value.source == plan.source && value.status == census_allocating;
+      const auto e = std::find_if(s.census.begin(), s.census.end(), [&](const census_entry &value) {
+        return value.c.source == plan.source && value.c.status == census_allocating;
       });
-      if (c == s.candidates.end()) return false;
+      if (e == s.census.end()) return false;
       if (!copy.handle) {
-        c->status = "copy_allocation_failed";
+        e->c.status = "copy_allocation_failed";
         return true;
       }
-      c->copy = copy;
-      record_copy(commands, resource, copy);
-      c->status = "captured_before_clear";
+      e->c.copy = copy;
+      record_into(commands, resource, copy);
+      // The Present count at the copy: it holds the previous Present's frame.
+      e->frame = s.live.tracker.frame();
+      e->d3d12 = commands->get_device()->get_api() == api::device_api::d3d12;
+      order_recorded(e->order, reinterpret_cast<std::uint64_t>(commands), commands->get_native(), s.presenting_queue);
+      e->c.status = "recorded";
+      publish_watch(s);
       return true;
     }
 
@@ -839,7 +834,7 @@ namespace sunshine_game3d::ui_layer {
                      api::resource_view_desc(live.format), &live_view))
             live_view = {};
         }
-        if (dump.wanted && !device->create_resource(dump.desc, nullptr, api::resource_usage::copy_dest, &dump_copy))
+        if (dump.wanted && !device->create_resource(dump.desc, nullptr, api::resource_usage::shader_resource, &dump_copy))
           dump_copy = {};
         bool live_kept = live.index < 0, dump_kept = !dump.wanted;
         {
@@ -870,7 +865,7 @@ namespace sunshine_game3d::ui_layer {
             (!demand || (now > demand && now - demand > live_release_ms)))
           retire_live(s, now);
         reap(s, now, due, presenting);
-        s.holding.store(s.live.entries || !s.graveyard.empty() || !s.candidates.empty(), std::memory_order_relaxed);
+        s.holding.store(s.live.entries || !s.graveyard.empty() || !s.census.empty(), std::memory_order_relaxed);
       }
       destroy(due);
     }
@@ -923,13 +918,13 @@ namespace sunshine_game3d::ui_layer {
     // all describe the offered entry. An offered entry whose list executes
     // again is held until the submission hook (and, on another queue, its
     // fence) again.
-    if (!device || device != s.device || !entry || entry->pending || !entry->copy.handle || !entry->capture_id ||
+    if (!device || device != s.device || !entry || entry->order.pending || !entry->copy.handle || !entry->capture_id ||
         !live.tracker.active() || !recent_copy(now_ms, live.tick, entry->tick)) return false;
     // Pinned until bound() registers this Present as its reader.
     live.reading = live.newest;
     out.copy = entry->copy; out.view = entry->view; out.capture_id = entry->capture_id; out.tick = entry->tick;
     out.format = static_cast<std::uint32_t>(live.format); out.presents_since_copy = live.tracker.presents_since(entry->frame);
-    out.executed_queue = entry->queue;
+    out.executed_queue = entry->order.queue;
     s.counts.offers.fetch_add(1, std::memory_order_relaxed);
     s.counts.presents_since_sum.fetch_add(out.presents_since_copy, std::memory_order_relaxed);
     for (auto seen = s.counts.presents_since_max.load(std::memory_order_relaxed); seen < out.presents_since_copy &&
@@ -940,7 +935,7 @@ namespace sunshine_game3d::ui_layer {
     // so it completed before anything this Present submits: no wait.
     const queue_fence *fence = nullptr;
     out.order = order_of(s, *entry, fence);
-    out.fence_value = fence ? entry->signalled : 0;
+    out.fence_value = fence ? entry->order.signalled : 0;
     out.in_order = out.order != read_order::unordered;
     out.direct = entry->view.handle && out.in_order;
     if (out.order == read_order::queue) return true;
@@ -948,8 +943,8 @@ namespace sunshine_game3d::ui_layer {
     const char *reason = nullptr;
     std::uint32_t bit = log_fenced;
     if (out.order == read_order::unordered) {
-      if (entry->queue == mixed_queue) { bit = log_mixed; reason = "it ran on more than one queue"; }
-      else if (entry->unobserved) { bit = log_unobserved; reason = "its submission was not observed by the add-on's submission hook"; }
+      if (entry->order.queue == mixed_queue) { bit = log_mixed; reason = "it ran on more than one queue"; }
+      else if (entry->order.unobserved) { bit = log_unobserved; reason = "its submission was not observed by the add-on's submission hook"; }
       else { bit = log_no_fence; reason = "no fence value was signalled after its submission"; }
     }
     if (first(s, bit)) {
@@ -958,12 +953,12 @@ namespace sunshine_game3d::ui_layer {
         std::snprintf(message, sizeof(message),
           "Sunshine UI layer: the live layer copy executed on queue 0x%llx, not on the presenting queue 0x%llx, and no "
           "fence orders it (%s); it is copied into the renderer unordered (logged once)",
-          static_cast<unsigned long long>(entry->queue), static_cast<unsigned long long>(s.presenting_queue), reason);
+          static_cast<unsigned long long>(entry->order.queue), static_cast<unsigned long long>(s.presenting_queue), reason);
       else
         std::snprintf(message, sizeof(message),
           "Sunshine UI layer: the live layer copy executed on queue 0x%llx, not on the presenting queue 0x%llx; such a "
           "copy is offered once the CPU sees the fence value signalled after it reached, never waited for (logged once)",
-          static_cast<unsigned long long>(entry->queue), static_cast<unsigned long long>(s.presenting_queue));
+          static_cast<unsigned long long>(entry->order.queue), static_cast<unsigned long long>(s.presenting_queue));
       sunshine_log::message(reshade::log::level::info, message);
     }
     return true;
@@ -985,6 +980,18 @@ namespace sunshine_game3d::ui_layer {
     switch (value) {
       case read_order::queue: return "queue";
       case read_order::fence_passed: return "fence_passed";
+      default: return "unordered";
+    }
+  }
+
+  const char *name(census_status value) {
+    switch (value) {
+      case census_status::captured: return "captured_before_clear";
+      case census_status::not_executed: return "not_executed";
+      case census_status::reset_unexecuted: return "reset_unexecuted";
+      case census_status::awaiting_submission: return "awaiting_submission";
+      case census_status::awaiting_fence: return "awaiting_fence";
+      case census_status::awaiting_list_reset: return "awaiting_list_reset";
       default: return "unordered";
     }
   }
@@ -1063,17 +1070,17 @@ namespace sunshine_game3d::ui_layer {
         }
         s.graveyard.erase(keep, s.graveyard.end());
         if (s.device == device) {
-          for (auto &c : s.candidates) if (c.copy.handle) doomed.push_back({device, c.copy});
+          for (auto &e : s.census) if (e.c.copy.handle) doomed.push_back({device, e.c.copy});
           for (unsigned i = 0; i != s.live.entries; ++i) {
             auto &entry = s.live.ring[i];
             doomed.push_back({device, entry.copy, 0, entry.view});
             for (auto &r : entry.readers) r.release();
           }
           s.live = {};
+          s.census.clear();
           ++s.live_scope;
           ++s.census_scope;
           publish_watch(s);
-          s.candidates.clear();
           s.back_buffers.clear();
           s.device = nullptr;
           s.presenting_queue = 0;
@@ -1244,20 +1251,68 @@ namespace sunshine_game3d::ui_layer {
     auto &s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
     drop_candidates(s);
+    // A clear adds entries on the game's recording thread without allocating.
+    s.census.reserve(max_candidates);
     ++s.census_scope;
     s.armed.store(true, std::memory_order_relaxed);
   }
 
-  std::vector<candidate> take(api::device *&device) {
+  bool census_pending() {
+    auto &s = state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    // A copy held for its fence that the CPU now sees reached is decided.
+    settle(s);
+    return std::any_of(s.census.begin(), s.census.end(), [&](const census_entry &e) {
+      return e.c.copy.handle ? census_waiting(census_verdict(e.order, e.d3d12, s.presenting_queue).status) :
+                               e.c.status == census_allocating;
+    });
+  }
+
+  std::vector<candidate> take(api::device *&device, std::uint64_t reading_queue) {
     auto &s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
     s.armed.store(false, std::memory_order_relaxed);
     ++s.census_scope;
     device = s.device;
-    // The live tracker's choice is what UI detection reads; the others are candidates only.
-    for (auto &c : s.candidates) c.active = c.source && c.source == s.live.tracker.active();
+    settle(s);
+    const auto now = GetTickCount64();
     std::vector<candidate> result;
-    result.swap(s.candidates);
+    result.reserve(s.census.size());
+    for (const auto &e : s.census) {
+      auto c = e.c;
+      // The live tracker's choice is what UI detection reads; the others are candidates only.
+      c.active = c.source && c.source == s.live.tracker.active();
+      c.waiting = c.status == census_allocating;
+      if (c.copy.handle) {
+        const auto verdict = census_verdict(e.order, e.d3d12, reading_queue);
+        c.order = verdict.order;
+        c.unordered_reason = verdict.reason;
+        c.executed_queue = e.order.queue;
+        c.fence_value = e.order.signalled;
+        c.presents_since_copy = s.live.tracker.presents_since(e.frame);
+        c.waiting = census_waiting(verdict.status);
+        c.status = name(verdict.status);
+        if (verdict.status != census_status::captured) {
+          // Never read: the dump omits its artifact.
+          retire_census(s, e, now);
+          c.copy = {};
+          if (first(s, census_log_bit(verdict))) {
+            char queue[48]{}, message[320]{};
+            if (e.order.queue)
+              std::snprintf(queue, sizeof(queue), ", executed on queue 0x%llx",
+                static_cast<unsigned long long>(e.order.queue));
+            std::snprintf(message, sizeof(message),
+              "Sunshine UI layer: a Dump 3D census copy was not proven complete before the dump read it (%s%s%s%s); its "
+              "artifact is omitted (logged once per status and reason)",
+              c.status, verdict.reason ? ", " : "", verdict.reason ? verdict.reason : "", queue);
+            sunshine_log::message(reshade::log::level::info, message);
+          }
+        }
+      }
+      result.push_back(c);
+    }
+    s.census.clear();
+    publish_watch(s);
     return result;
   }
 
@@ -1293,17 +1348,24 @@ extern "C" __declspec(dllexport) BOOL SunshineUILayerTestLive(sunshine_game3d::u
   out->capture_id = live.capture_id;
   out->presenting_queue = s.presenting_queue;
   for (unsigned i = 0; i != live.entries; ++i) {
-    out->owing += live.ring[i].owed != 0;
-    out->awaiting += live.ring[i].awaiting();
+    out->owing += live.ring[i].order.owed != 0;
+    out->awaiting += live.ring[i].order.awaiting();
+  }
+  // The armed census's copies, judged for reads on the presenting queue.
+  for (const auto &e : s.census) {
+    if (!e.c.copy.handle) continue;
+    ++out->census_copies;
+    out->census_pending += census_waiting(census_verdict(e.order, e.d3d12, s.presenting_queue).status);
+    out->census_awaiting += e.order.awaiting();
   }
   if (const auto *entry = live.latest()) {
-    out->offered_id = entry->pending ? 0 : entry->capture_id;
+    out->offered_id = entry->order.pending ? 0 : entry->capture_id;
     out->presents_since_copy = live.tracker.presents_since(entry->frame);
-    out->executed_queue = entry->queue;
+    out->executed_queue = entry->order.queue;
     // As latest() orders it.
     const queue_fence *fence = nullptr;
     const auto order = order_of(s, *entry, fence);
-    out->fence_value = fence ? entry->signalled : 0;
+    out->fence_value = fence ? entry->order.signalled : 0;
     out->order = static_cast<std::uint32_t>(order);
     out->in_order = entry->copy.handle && order != read_order::unordered;
   }

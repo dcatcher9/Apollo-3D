@@ -3328,6 +3328,47 @@ void verify_layer_queue_d3d11(fixture &gpu, std::ofstream &report) {
   report << "layer-queue-d3d11 immediate_same_queue=1 deferred_same_queue=1 presents_since_copy=" << live.presents_since_copy << '\n';
   std::puts("PASS D3D11 layer queue order: an immediate-context copy runs on the presenting queue one Present before its "
     "render reads it and is bound directly, and a deferred-context copy executed by the immediate context runs on the presenting queue too");
+  // The Dump 3D census on D3D11 (census_verdict): a copy recorded on the
+  // immediate context ran on the reading queue at once and is read in queue
+  // order; one recorded on a deferred context is undecided until the
+  // immediate context executes its list, and omitted (not_executed) when the
+  // census is taken before.
+  {
+    const auto reading = queue->get_native();
+    api::device *owner = nullptr;
+    const auto captured = [&](const std::vector<layer::candidate> &rows) {
+      return owner == device && rows.size() == 1 && rows[0].copy.handle && rows[0].order == layer::read_order::queue &&
+        std::string(rows[0].status) == "captured_before_clear" && rows[0].executed_queue == reading && !rows[0].waiting &&
+        !rows[0].unordered_reason;
+    };
+    layer::arm();
+    gpu.context->ClearRenderTargetView(target_rtv.Get(), transparent);
+    require(!layer::census_pending(), "an immediate-context census copy was left undecided");
+    auto rows = layer::take(owner, reading);
+    require(captured(rows), "an immediate-context census copy was not read in queue order");
+    layer::retire(owner, rows[0].copy);
+    layer::arm();
+    deferred->ClearRenderTargetView(target_rtv.Get(), transparent);
+    ComPtr<ID3D11CommandList> census_list;
+    checked(deferred->FinishCommandList(FALSE, &census_list), "finish the deferred census list");
+    require(layer::census_pending(), "a deferred census copy was decided before its list executed");
+    gpu.context->ExecuteCommandList(census_list.Get(), FALSE);
+    require(!layer::census_pending(), "a deferred census copy run by the immediate context stayed undecided");
+    rows = layer::take(owner, reading);
+    require(captured(rows), "a deferred census copy run by the immediate context was not read in queue order");
+    layer::retire(owner, rows[0].copy);
+    layer::arm();
+    deferred->ClearRenderTargetView(target_rtv.Get(), transparent);
+    ComPtr<ID3D11CommandList> unexecuted;
+    checked(deferred->FinishCommandList(FALSE, &unexecuted), "finish the unexecuted census list");
+    rows = layer::take(owner, reading);
+    require(rows.size() == 1 && !rows[0].copy.handle && std::string(rows[0].status) == "not_executed" && rows[0].waiting &&
+        !rows[0].executed_queue,
+      "a census copy whose deferred list never executed was not omitted as not_executed");
+  }
+  report << "layer-census-d3d11 immediate_queue_order=1 deferred_after_execution=1 unexecuted_omitted=1\n";
+  std::puts("PASS D3D11 layer census order: an immediate-context census copy and a deferred one run by the immediate "
+    "context are read in queue order; one whose deferred list never executed is omitted as not_executed");
 }
 
 namespace {

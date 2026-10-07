@@ -37,7 +37,11 @@
 // (see docs/reshade-sbs.md, UI decision framework).
 //
 // Dump census: while a Dump 3D is armed, qualifying clears are also recorded and
-// copied as diagnostic artifacts.
+// copied as diagnostic artifacts. A census copy follows the live copies' queue
+// order (copy_order below) and the dump reads it only with CPU proof that its
+// write completed before the dump's reads (census_verdict); the dump defers
+// for that proof for at most census_wait_ms, never with a GPU wait, and omits
+// a copy that has none.
 //
 // Queue order: each live copy remembers the queue that executed the list
 // carrying it. ReShade reports a D3D12 execution before the native
@@ -205,6 +209,228 @@ namespace sunshine_game3d::ui_layer {
     !held_for_submission(true, mixed_queue, true) && !held_for_submission(true, 0, true) && fence_pending(3, 2) &&
     !fence_pending(3, 3) && !fence_pending(3, 4) && !fence_pending(3, UINT64_MAX) && !fence_pending(0, 0));
 
+  // The queue order of one add-on copy recorded into a game list: a live ring
+  // entry's or a Dump 3D census copy's, both moved by the transitions below
+  // (pure). carriers: the game lists carrying the copy (0: none). queue: the
+  // queue that executed it (merge_queue; 0 not yet). pending: recorded but no
+  // carrier executed yet, or executed but the submission hook has not run
+  // after the native call (owed: that native list), or its fence signal is
+  // recorded (fence, fence_generation: the queue fence's slot and generation;
+  // signalled: the value) but the CPU has not seen the fence reach it
+  // (awaiting). A pending live copy is neither offered nor written again.
+  // unobserved: the owed fence signal never came (its list was reset first, or
+  // no listener was heard). observed: the submission hook ran after the latest
+  // execution's native call, the proof a D3D12 census copy needs (a live copy
+  // never reads it).
+  struct copy_order {
+    std::array<std::uint64_t, 2> carriers{};
+    std::uint64_t queue{}, owed{};
+    int fence = -1;
+    std::uint64_t fence_generation{}, signalled{};
+    bool pending{}, unobserved{}, observed{};
+    constexpr bool carries(std::uint64_t list) const { return list && (carriers[0] == list || carriers[1] == list); }
+    constexpr bool carried() const { return carriers[0] || carriers[1]; }
+    constexpr bool awaiting() const { return pending && signalled; }
+  };
+  // Recorded into a list (list: ReShade's command list; native: its native
+  // handle). One recorded on the presenting queue itself (D3D11's immediate
+  // context) executed there at once: true, readable now. Otherwise it is
+  // pending until a list carrying it executes, on the queue that runs it.
+  constexpr bool order_recorded(copy_order &c, std::uint64_t list, std::uint64_t native, std::uint64_t presenting) {
+    c = {};
+    if (native && native == presenting) {
+      c.queue = native;
+      return true;
+    }
+    c.carriers[0] = list;
+    c.pending = true;
+    return false;
+  }
+  // A carrying list executed on queue (native_list: its native handle; 0 for
+  // D3D11's ExecuteCommandList on the immediate context). This execution
+  // writes the copy again, so a fence value signalled after an earlier one,
+  // and the hook's proof of it, no longer cover it. ReShade reports a D3D12
+  // execution before the native call, so while the submission hook is heard
+  // (listening) a copy run on one queue is held for that hook
+  // (held_for_submission); one owing a fence signal without a listener is
+  // unobserved. True when it is readable now.
+  constexpr bool order_executed(copy_order &c, std::uint64_t native_list, std::uint64_t queue, bool d3d12,
+      bool listening, std::uint64_t presenting) {
+    c.queue = merge_queue(c.queue, queue);
+    c.fence = -1;
+    c.fence_generation = c.signalled = 0;
+    const bool owes = native_list && owes_signal(d3d12, c.queue, presenting);
+    c.unobserved = owes && !listening;
+    c.owed = native_list && held_for_submission(d3d12, c.queue, listening) ? native_list : 0;
+    c.pending = c.owed != 0;
+    c.observed = false;
+    return !c.pending;
+  }
+  // The submission hook ran after the owed native call returned, for a copy
+  // run on the presenting queue: true when it is readable now (queue order).
+  constexpr bool order_submitted(copy_order &c) {
+    c.owed = 0;
+    c.observed = true;
+    if (!c.pending) return false;
+    c.pending = false;
+    return true;
+  }
+  // The submission hook ran after the owed native call returned, for a copy
+  // run on another queue, and signalled that queue's fence (slot, generation)
+  // with value after it (0: none could be signalled). The copy stays held
+  // until the CPU sees the fence reach value; true when it is readable now,
+  // without one (unordered).
+  constexpr bool order_signalled(copy_order &c, int slot, std::uint64_t generation, std::uint64_t value) {
+    c.owed = 0;
+    c.fence = slot;
+    c.fence_generation = generation;
+    c.signalled = value;
+    c.observed = true;
+    if (!c.pending || value) return false;
+    c.pending = false;
+    return true;
+  }
+  // A carrying list was reset (native_list: its native handle): it carries the
+  // copy no more. A copy no executed list wrote drops back (pending no more,
+  // never readable). The hook the list's execution owed can no longer come (it
+  // is matched within that submission): a copy held for it executed without it
+  // and is readable now, unobserved (true). One whose fence signal is recorded
+  // stays held for its fence (a list may be reset as soon as it was submitted,
+  // while its work still runs).
+  constexpr bool order_reset(copy_order &c, std::uint64_t list, std::uint64_t native_list) {
+    bool unsigned_execution = false;
+    if (native_list && c.owed == native_list) {
+      c.owed = 0;
+      unsigned_execution = c.pending;
+    }
+    if (c.carries(list)) {
+      for (auto &k : c.carriers) if (k == list) k = 0;
+      if (!c.carried() && c.pending && !c.signalled) {
+        if (c.owed) {
+          c.owed = 0;
+          unsigned_execution = true;
+        } else c.pending = false;
+      }
+    }
+    if (!unsigned_execution) return false;
+    c.pending = false;
+    c.unobserved = true;
+    return true;
+  }
+  // The CPU read the fence of a copy held for it (fence_alive: its record
+  // still holds the fence it was signalled on; completed: GetCompletedValue,
+  // never a wait). True when the fence reached its value: readable now in
+  // fence order. One whose record is gone can never be seen complete: it is
+  // released, never readable through that fence.
+  constexpr bool order_settled(copy_order &c, bool fence_alive, std::uint64_t completed) {
+    if (!c.awaiting() || (fence_alive && fence_pending(c.signalled, completed))) return false;
+    c.pending = false;
+    if (fence_alive) return true;
+    c.fence = -1;
+    c.fence_generation = c.signalled = 0;
+    return false;
+  }
+  static_assert([] {
+    constexpr std::uint64_t list = 0x100, native = 0x200, presenting = 0x10, other = 0x20;
+    // The presenting queue's own copy (D3D11 immediate) is readable at once.
+    copy_order a;
+    const bool immediate = order_recorded(a, list, presenting, presenting) && a.queue == presenting && !a.carried();
+    // A cross-queue D3D12 copy: held for the hook, then for its fence, then
+    // readable; a reset after its submission keeps it held.
+    copy_order b;
+    const bool cross = !order_recorded(b, list, native, presenting) && b.pending && b.carries(list) &&
+      !order_executed(b, native, other, true, true, presenting) && b.owed == native &&
+      !order_signalled(b, 2, 7, 3) && b.awaiting() && b.observed && !order_reset(b, list, native) && b.awaiting() &&
+      !order_settled(b, true, 2) && b.pending && order_settled(b, true, 3) && !b.pending && b.signalled == 3;
+    // Executed again: the earlier proof and fence value no longer cover it.
+    const bool again = !order_executed(b, native, other, true, true, presenting) && !b.observed && !b.signalled;
+    // A reset before the hook: readable, unobserved.
+    copy_order c;
+    order_recorded(c, list, native, presenting);
+    order_executed(c, native, other, true, true, presenting);
+    const bool unsigned_reset = order_reset(c, list, native) && c.unobserved && !c.pending && !c.observed;
+    // Reset unexecuted: drops back, never readable.
+    copy_order d;
+    order_recorded(d, list, native, presenting);
+    const bool dropped = !order_reset(d, list, native) && !d.pending && !d.queue;
+    // A record gone: released without being readable.
+    copy_order e;
+    order_recorded(e, list, native, presenting);
+    order_executed(e, native, other, true, true, presenting);
+    order_signalled(e, 1, 4, 9);
+    const bool lost = !order_settled(e, false, 0) && !e.pending && !e.signalled && e.fence < 0;
+    return immediate && cross && again && unsigned_reset && dropped && lost;
+  }());
+
+  // A Dump 3D census copy is read only with CPU proof that its write completed
+  // before the dump's reads on reading_queue, never with a GPU wait
+  // (census_verdict): on D3D11 it executed on the reading queue; on D3D12 the
+  // submission hook ran after its latest execution (observed), it ran on the
+  // reading queue or its queue's fence reached the value signalled after it,
+  // and no list still carries it (a list run again would write it while the
+  // dump reads it). The dump defers while a copy is undecided
+  // (census_waiting), for at most census_wait_ms after it was armed, and then
+  // omits each copy without that proof, naming its status.
+  inline constexpr std::uint64_t census_wait_ms = 1000;
+  enum class census_status : std::uint32_t {
+    captured,            // Proven: read in queue or fence order.
+    not_executed,        // No list carrying it executed yet.
+    reset_unexecuted,    // Every list carrying it was reset before executing.
+    awaiting_submission, // Executed; the submission hook has not run after the native call.
+    awaiting_fence,      // Its queue's fence has not reached the value signalled after it.
+    awaiting_list_reset, // Complete, but a list still carries it and could run it again (D3D12).
+    unordered,           // Nothing can prove it: run on two queues, submission not observed, or no fence value.
+  };
+  // The row status of a census copy: captured is captured_before_clear.
+  const char *name(census_status value);
+  // An undecided copy, which the dump waits for (census_pending).
+  constexpr bool census_waiting(census_status value) {
+    return value == census_status::not_executed || value == census_status::awaiting_submission ||
+      value == census_status::awaiting_fence || value == census_status::awaiting_list_reset;
+  }
+  struct census_result {
+    census_status status{};
+    read_order order{read_order::unordered}; // captured: queue or fence_passed.
+    const char *reason{};                    // unordered: mixed_queue, submission_not_observed or no_fence.
+  };
+  constexpr census_result census_verdict(const copy_order &c, bool d3d12, std::uint64_t reading_queue) {
+    using status = census_status;
+    if (!c.queue) return {c.pending ? status::not_executed : status::reset_unexecuted};
+    if (c.queue == mixed_queue) return {status::unordered, read_order::unordered, "mixed_queue"};
+    if (c.pending) return {c.signalled ? status::awaiting_fence : status::awaiting_submission};
+    if (c.unobserved || (d3d12 && !c.observed))
+      return {status::unordered, read_order::unordered, "submission_not_observed"};
+    const bool same = presented_in_order(c.queue, reading_queue);
+    if (!same && !c.signalled) return {status::unordered, read_order::unordered, "no_fence"};
+    if (d3d12 && c.carried()) return {status::awaiting_list_reset};
+    return {status::captured, order_for(same, c.signalled)};
+  }
+  static_assert([] {
+    constexpr std::uint64_t list = 0x100, native = 0x200, reading = 0x10, other = 0x20;
+    const auto is = [](const copy_order &c, bool d3d12, std::uint64_t queue, census_status status) {
+      return census_verdict(c, d3d12, queue).status == status;
+    };
+    // D3D11 immediate: captured in queue order at once.
+    copy_order a;
+    order_recorded(a, list, reading, reading);
+    const bool immediate = is(a, false, reading, census_status::captured) &&
+      census_verdict(a, false, reading).order == read_order::queue;
+    // D3D12 on the reading queue: held for the hook, then for its list's reset.
+    copy_order b;
+    order_recorded(b, list, native, reading);
+    const bool recorded = is(b, true, reading, census_status::not_executed);
+    order_executed(b, native, reading, true, true, reading);
+    const bool owed = is(b, true, reading, census_status::awaiting_submission);
+    order_submitted(b);
+    const bool carried = is(b, true, reading, census_status::awaiting_list_reset);
+    order_reset(b, list, native);
+    const bool same = is(b, true, reading, census_status::captured) &&
+      census_verdict(b, true, reading).order == read_order::queue;
+    // ... but read on another queue nothing orders it.
+    const bool elsewhere = is(b, true, other, census_status::unordered);
+    return immediate && recorded && owed && carried && same && elsewhere;
+  }());
+
   // Live copies: a ring of add-on owned copies (ring_capacity at most). A
   // before-clear copy goes to an entry other than the offered one and the one
   // a Present is reading (offered by latest(), its reader not yet registered
@@ -340,11 +566,23 @@ namespace sunshine_game3d::ui_layer {
     const sunshine_streamline::native_observer::command_identity *commands) noexcept;
 
   struct candidate {
-    api::resource copy{};    // Add-on owned, shader_resource state; empty unless captured.
+    // Add-on owned, shader_resource state; empty unless its write is proven
+    // complete before the reading queue's reads (census_status::captured).
+    api::resource copy{};
     std::uint64_t source{};  // Game resource handle, identity only.
     std::uint32_t width{}, height{}, format{}; // DXGI format of the copy.
     std::uint32_t clears{};  // Qualifying clears seen while armed.
     bool active{};           // The live tracker's layer when the census was taken.
+    // Still undecided when taken: being allocated, or census_waiting.
+    bool waiting{};
+    // How the reading queue's reads are ordered after a captured copy.
+    read_order order{read_order::unordered};
+    // The queue that executed the copy (mixed_queue: more than one; 0: none)
+    // and the fence value signalled after it on another queue (0: none).
+    std::uint64_t executed_queue{}, fence_value{};
+    // Presents observed since the copy was recorded (layer_tracker::presents_since).
+    std::uint32_t presents_since_copy{};
+    const char *unordered_reason{}; // census_result::reason of an unordered copy.
     const char *status = "observed";
   };
 
@@ -358,11 +596,15 @@ namespace sunshine_game3d::ui_layer {
   // presents_since_copy the offered copy's count, as latest() reports it;
   // owing the copies held for the submission hook, and awaiting those whose
   // fence signal is recorded but whose fence the CPU has not seen reach it.
+  // census_copies counts an armed census's recorded copies, census_pending
+  // those still undecided read on the presenting queue (census_waiting), and
+  // census_awaiting those held for their fence.
   struct test_live_state {
     std::uint64_t capture_id{}, executed_queue{}, presenting_queue{};
     std::uint32_t presents_since_copy{}, in_order{};
     std::uint64_t fence_value{}, offered_id{};
     std::uint32_t order{}, owing{}, awaiting{};
+    std::uint32_t census_copies{}, census_pending{}, census_awaiting{};
   };
 
   // A renderer submission read the live copy capture_id (a direct binding or
@@ -382,10 +624,17 @@ namespace sunshine_game3d::ui_layer {
   // copies once due.
   void observe_output(api::swapchain *swapchain, api::command_queue *queue);
   void arm();
-  // Stops the census and hands over its candidates. Each copy stays valid
-  // while its device lives; the caller either keeps a reference and destroys
-  // its handle, or passes it to retire().
-  std::vector<candidate> take(api::device *&device);
+  // An armed census has an undecided copy (census_waiting on the presenting
+  // queue, or one still being allocated): the dump waits for its proof, at
+  // most census_wait_ms after it was armed. Settles copies held for their
+  // fence first (GetCompletedValue, never a wait).
+  bool census_pending();
+  // Stops the census and hands over its candidates, judged for reads on
+  // reading_queue (census_verdict). Only a captured copy keeps its handle; the
+  // others are retired (once no list can still write them) and name their
+  // status. A kept copy stays valid while its device lives; the caller either
+  // keeps a reference and destroys its handle, or passes it to retire().
+  std::vector<candidate> take(api::device *&device, std::uint64_t reading_queue);
   // Destroys a copy once any game command list that wrote it has executed.
   void retire(api::device *device, api::resource copy);
   // Drops an armed census whose dump was withdrawn.

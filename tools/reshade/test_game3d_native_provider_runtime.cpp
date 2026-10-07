@@ -390,15 +390,23 @@ namespace {
         optional = true;
       }
       require(optional, "Production dump omitted the observed tag23 capture");
-      // The census copies the layer before its next clear: the previous frame's UI.
+      // The census copies the layer before its next clear: the previous frame's
+      // UI. The frame's list ran on the presenting queue, the dump's own, so
+      // the copy is read in queue order once its submission was seen and its
+      // list reset (ordering proven), at least one Present after the copy.
       char layer_source[24];
       std::snprintf(layer_source, sizeof(layer_source), "0x%llx", static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(layer.p)));
       unsigned layer_artifact{};
-      for (const auto &entry : metadata.at("ui_layer_census").at("candidates"))
+      const auto &first_census = metadata.at("ui_layer_census");
+      for (const auto &entry : first_census.at("candidates"))
         if (entry.at("source") == layer_source && entry.at("captured") == true && entry.at("dxgi_format") == 28 &&
-            entry.at("width") == width && entry.at("height") == height && entry.at("clears_while_armed") >= 1)
+            entry.at("width") == width && entry.at("height") == height && entry.at("clears_while_armed") >= 1 &&
+            entry.at("status") == "captured_before_clear" && entry.at("read_order") == "queue" &&
+            entry.at("fence_value") == 0 && entry.at("presents_since_copy") >= 1 && entry.at("unordered_reason").is_null())
           layer_artifact = entry.at("artifact_id");
-      if (!layer_artifact) throw std::runtime_error("Dump census missed the offscreen UI layer: " + metadata.at("ui_layer_census").dump());
+      if (!layer_artifact || first_census.at("ordering") != "proven" || first_census.at("settled") != true ||
+          first_census.at("wait_ms") >= sunshine_game3d::ui_layer::census_wait_ms)
+        throw std::runtime_error("Dump census missed the offscreen UI layer or read it without queue order: " + first_census.dump());
       // No S3 ticket remains on the census copy or an offered candidate.
       for (const auto &entry : metadata.at("ui_layer_census").at("candidates"))
         require(!entry.contains("ticket"), ("The dump census copy kept its removed S3 ticket: " + entry.dump()).c_str());
@@ -985,6 +993,173 @@ namespace {
           "also across an early reset of its list; a Present meanwhile never waits for it; the frame-generation schedule "
           "that closed a cycle with a GPU wait runs at GPU speed and its copies are offered in fence order once reached; "
           "the next copy on the presenting queue is in queue order again");
+
+        // Dump 3D census copies follow the same queue order (game3d_ui_layer.h,
+        // census_verdict): the dump reads one only with CPU proof that its
+        // write completed (here: its second-queue fence reached and its list
+        // reset), defers for it at most census_wait_ms after arming, never
+        // makes the presenting queue wait, and omits a copy without proof.
+        // The layer holds layer_pattern (the last frame drew it); the frames
+        // below leave it alone, so only the foreign lists clear it.
+        {
+          using sunshine_game3d::ui_layer::census_wait_ms;
+          skip_layer = true;
+          render_tracked_depth = [&] {
+            real_frame();
+            if (!skip_layer) draw_layer();
+          };
+          const auto responded = [&] {
+            return std::uint64_t(InterlockedCompareExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->response_id), 0, 0)) ==
+              box.request;
+          };
+          // A new request; the next Present's poll arms the census, so the
+          // clears after it are its copies.
+          const auto request_census = [&] {
+            box.request = box.state->request_id + 1;
+            InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->request_id), box.request);
+            step(); no_effects();
+            require(!responded(), "A census dump completed at the Present that armed it");
+          };
+          const auto await_census = [&](std::uint64_t limit_ms) {
+            for (const auto until = GetTickCount64() + limit_ms; !responded() && GetTickCount64() < until;) { step(); no_effects(); }
+            require(responded() && box.state->response.result == dump::status::complete &&
+                box.state->response.json_bytes <= dump::max_json_bytes && box.state->response.texture_count <= dump::max_textures,
+              "Production Dump3D did not complete a census capture");
+            return nlohmann::json::parse(std::string(box.state->json, box.state->response.json_bytes));
+          };
+          const auto release_census = [&] {
+            InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->released_id), box.request);
+            step(); no_effects();
+          };
+          const auto layer_row = [&](const nlohmann::json &metadata) {
+            for (const auto &entry : metadata.at("ui_layer_census").at("candidates"))
+              if (entry.at("source") == layer_source) return entry;
+            throw std::runtime_error("The dump census has no row for the UI layer: " + metadata.at("ui_layer_census").dump());
+          };
+          const auto artifact = [&](unsigned kind) {
+            for (unsigned i = 0; i < box.state->response.texture_count; ++i)
+              if (unsigned(box.state->response.textures[i].kind) == kind) return int(i);
+            return -1;
+          };
+          const auto reset_list = [&](foreign_list &l) {
+            checked(l.allocator->Reset(), "Reset the census list's allocator");
+            checked(l.list->Reset(l.allocator.p, nullptr), "Reset the census list");
+            checked(l.list->Close(), "Close the reset census list");
+            l.open = false;
+          };
+          // (a) Gated on the second queue: the dump is not taken (nothing is
+          // published) and no Present waits while the copy's fence is below its
+          // value; once the fence reached it and its list was reset, the dump
+          // reads it in fence order and holds the layer as it was before the
+          // foreign clear.
+          std::uint64_t gated_ms{};
+          nlohmann::json fenced_row;
+          {
+            cpu_gate gate;
+            make_gate(gate, "Census copy gate");
+            request_census();
+            run_foreign_on(foreign[0], gate.fence.p, 1);
+            gate.arm(gate_limit_ms);
+            const auto submitted = query();
+            require(submitted.census_copies == 1 && submitted.census_awaiting == 1 && submitted.census_pending == 1,
+              ("A gated second-queue census copy was not held for its fence: copies=" +
+                std::to_string(submitted.census_copies) + " awaiting=" + std::to_string(submitted.census_awaiting) +
+                " pending=" + std::to_string(submitted.census_pending)).c_str());
+            for (unsigned i = 0; i != 4; ++i) {
+              gated_ms = std::max(gated_ms, timed_step());
+              require(!responded(), "The dump read a census copy whose second-queue fence had not reached its value");
+            }
+            require(gated_ms < gate_limit_ms / 2 && query().census_awaiting == 1,
+              ("A Present waited for a gated census copy, or the copy left its fence: slowest_ms=" +
+                std::to_string(gated_ms)).c_str());
+            gate.open();
+          }
+          wait(second.p);
+          reset_list(foreign[0]);
+          {
+            const auto metadata = await_census(5000);
+            const auto &census = metadata.at("ui_layer_census");
+            fenced_row = layer_row(metadata);
+            const auto presenting = query().presenting_queue;
+            if (!(fenced_row.at("captured") == true && fenced_row.at("status") == "captured_before_clear" &&
+                  fenced_row.at("read_order") == "fence_passed" && fenced_row.at("fence_value") > 0 &&
+                  fenced_row.at("executed_queue") != 0 && fenced_row.at("executed_queue") != presenting &&
+                  fenced_row.at("executed_queue") != sunshine_game3d::ui_layer::mixed_queue &&
+                  fenced_row.at("presents_since_copy") >= 1 && census.at("ordering") == "proven" &&
+                  census.at("settled") == true && census.at("wait_ms") < census_wait_ms))
+              throw std::runtime_error("A second-queue census copy was not read in fence order once its fence reached it: " +
+                census.dump());
+            const auto index = artifact(fenced_row.at("artifact_id").get<unsigned>());
+            require(index >= 0, "The dump omitted a census copy proven by its fence");
+            const auto &item = box.state->response.textures[unsigned(index)];
+            com_ptr<ID3D12Resource> copied;
+            checked(game->OpenSharedHandle(reinterpret_cast<HANDLE>(item.handle), IID_PPV_ARGS(copied.put())),
+              "Open the fenced census copy");
+            require(read(copied.p, D3D12_RESOURCE_STATE_COMMON) == layer_pattern,
+              "The fenced census copy is not the layer as it was before the foreign clear");
+            release_census();
+          }
+          // (b) Gated past census_wait_ms: the dump is taken at the deadline
+          // without reading the copy (awaiting_fence, no artifact, settled
+          // false) while the gate is still closed, and no Present waits.
+          std::uint64_t deadline_ms{};
+          {
+            constexpr DWORD census_gate_ms = DWORD(census_wait_ms) + 1000;
+            cpu_gate gate;
+            make_gate(gate, "Census gate past the wait");
+            request_census();
+            run_foreign_on(foreign[1], gate.fence.p, 1);
+            gate.arm(census_gate_ms);
+            const auto until = GetTickCount64() + census_gate_ms - 300;
+            while (!responded() && GetTickCount64() < until) deadline_ms = std::max(deadline_ms, timed_step());
+            require(responded() && gate.fence->GetCompletedValue() < 1,
+              "The census dump did not complete at its deadline while the copy's queue was still gated");
+            const auto metadata = await_census(0);
+            const auto &census = metadata.at("ui_layer_census");
+            const auto row = layer_row(metadata);
+            if (!(row.at("captured") == false && row.at("status") == "awaiting_fence" && row.at("read_order").is_null() &&
+                  row.at("fence_value") > 0 && census.at("settled") == false && census.at("wait_ms") >= census_wait_ms &&
+                  artifact(row.at("artifact_id").get<unsigned>()) < 0 && deadline_ms < gate_limit_ms / 2))
+              throw std::runtime_error("A census copy gated past the wait was read, waited for, or not reported awaiting "
+                "its fence: slowest_ms=" + std::to_string(deadline_ms) + " " + census.dump());
+            release_census();
+            gate.open();
+          }
+          wait(second.p);
+          reset_list(foreign[1]);
+          // (c) A clear recorded into a list that never executes: omitted at the
+          // deadline as not_executed; the list is then reset, never executed,
+          // so the retired copy is never written.
+          {
+            auto &l = foreign[0];
+            request_census();
+            checked(l.allocator->Reset(), "Reset the unexecuted census list's allocator");
+            checked(l.list->Reset(l.allocator.p, nullptr), "Reset the unexecuted census list");
+            l.list->ClearRenderTargetView(layer_rtv, transparent, 0, nullptr);
+            checked(l.list->Close(), "Close the unexecuted census list");
+            const auto metadata = await_census(census_wait_ms + 4000);
+            const auto &census = metadata.at("ui_layer_census");
+            const auto row = layer_row(metadata);
+            if (!(row.at("captured") == false && row.at("status") == "not_executed" && row.at("executed_queue") == 0 &&
+                  census.at("settled") == false && census.at("wait_ms") >= census_wait_ms &&
+                  artifact(row.at("artifact_id").get<unsigned>()) < 0))
+              throw std::runtime_error("A census copy whose list never executed was read or not reported not_executed: " +
+                census.dump());
+            release_census();
+            reset_list(l);
+          }
+          skip_layer = false;
+          render_tracked_depth = [&] { real_frame(); draw_layer(); };
+          evidence << "layer-census fence_passed=1 gated_present_ms=" << gated_ms << " fence_value=" <<
+            fenced_row.at("fence_value") << " deadline_awaiting_fence=1 deadline_present_ms=" << deadline_ms <<
+            " not_executed=1 presenting_queue_waits=0\n";
+          std::printf("MEASURE layer census: gated_present_ms=%llu deadline_present_ms=%llu\n",
+            static_cast<unsigned long long>(gated_ms), static_cast<unsigned long long>(deadline_ms));
+          std::puts("PASS D3D12 layer census order: a census copy run on a second queue is not read while its fence is "
+            "below its value (no Present waits), and is read in fence order with the layer's content once its fence "
+            "reached it and its list was reset; one still gated at the deadline and one never executed are omitted "
+            "(awaiting_fence, not_executed) and the dump completes without them");
+        }
       }
       evidence << "public-ui-hook descriptor_type=" << resource_type << " source_format=90 captured_format=87 tag=23 covered=" << covered <<
         " exact_consumed_and_optional=1 post_tag_opaque_overwrite=1 host_ack_immutable=1 offscreen_ui_layer=1 live_ui_layer_mask=1 frame_tags=" << bool(frame_tag) << '\n';

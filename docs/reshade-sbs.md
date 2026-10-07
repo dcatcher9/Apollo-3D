@@ -369,7 +369,9 @@ pending until a list carrying it executes (on D3D12, until the submission hook r
 call, and when it owes the layer cross-queue fence a signal, until the CPU saw the fence reach it);
 only then is it offered, so detection reads the newest such copy as
 the single live texture did. A carrying list reset unexecuted returns the entry
-(never offered), and a copy pending for 2 s is abandoned. Each entry keeps the queue that
+(never offered), and a copy pending for 2 s is abandoned. Dump 3D census copies follow the same
+pending rule (never abandoned) and are read only once proven complete
+([census ordering](#dump-3d-diagnostics)). Each entry keeps the queue that
 executed its carrying list (one executed on two queues has none). A copy that ran on the
 presenting queue alone (a D3D11 immediate or deferred-context copy always does) is in queue
 order before the Present's reads once its write reached that queue: on D3D12 it is offered only
@@ -422,8 +424,8 @@ unordered, logged as not observed; a same-queue copy in queue order), a copy hel
 since its queue may still write it), and while the hook was not heard in the last second (the
 capture owner's observer inactive) an execution offers its copy at once (a cross-queue copy
 unordered). The fence is created on first use, one per device and queue (at most four),
-from the queue's own device; a record is reused only once no live copy names it and its last
-signal ran.
+from the queue's own device; a record is reused only once no live or census copy names it and its
+last signal ran.
 
 From 10-05 to 10-06 (5b83f8a5, fcb47ad0, 19fa56a6) the presenting queue instead waited on the GPU
 for that value before reading the copy, bracketed by marker signals of its own, with a 1 s CPU
@@ -448,7 +450,9 @@ executed on queue ..., not on the presenting queue ..., and no fence orders it (
 first fenced copy logs `... such a copy is offered once the CPU sees the fence value signalled after
 it reached, never waited for`. Dumps record the layer's `read_order` (`queue`, `fence_passed` or
 `unordered`) and `fence_value` beside `executed_queue` and `presenting_queue_order` (queue order
-only). Refusing cross-queue copies was considered and rejected: the Stellar Blade (SDR, FG off) and
+only). Census rows record their own `read_order` and `fence_value`; a census copy without proof is
+omitted, never read unordered ([census ordering](#dump-3d-diagnostics)). Refusing cross-queue
+copies was considered and rejected: the Stellar Blade (SDR, FG off) and
 The Witcher 3 (FG on) dumps of 10-04 both record their layer copies as run on another queue than
 the presenting one, so a refusal would remove their layer protection; before this fence such a copy
 was read with no ordering at all (a torn or next-frame mask, both queues touching the texture).
@@ -826,7 +830,9 @@ A target cleared in at least three frames with gaps under 250 ms is a confirmed 
 the one cleared last in the frame is active, since UI draws last. Transient targets never displace
 a confirmed one. Only the foreground swapchain's Presents drive the tracker. The tracker runs only
 while the layer is wanted: UI detection asked for it within the last second, or a dump is armed
-(its census). Otherwise every clear returns before it resolves its view or takes a lock, and
+(its census, which can defer the dump, and so keep the layer wanted, for up to 1000 ms while its
+copies are not yet proven complete; see [census ordering](#dump-3d-diagnostics)). Otherwise every
+clear returns before it resolves its view or takes a lock, and
 Presents skip the output bookkeeping (**Present-thread bookkeeping** above); once wanted again the
 layer is confirmed anew after three cleared frames. Before WP1b clears and Presents were tracked
 with no reader. While UI detection
@@ -1835,7 +1841,10 @@ the add-on) compiles the three detection passes from a shader file, and its thre
 passes when the shader has them, binds each Dump 3D package's
 captured candidates by artifact kind (presented color, Backbuffer, UIColorAndAlpha, UIAlpha,
 HUD-less, or a census `ui_layer_candidate_N` in the layer slot `t7` with the layer's stored flags;
-in the UI color slot for a layout 1 shader), sets the candidate and exact-pair bits and the
+in the UI color slot for a layout 1 shader; a census with `ordering` carries such an artifact only
+for a copy proven complete, and a label naming an omitted one fails its case, while an older
+census's artifacts were read unordered ([census ordering](#dump-3d-diagnostics))), sets the candidate
+and exact-pair bits and the
 accepted candidates a label names (`accepted`, a list of those artifact kinds; the retired
 `trusted` key fails its case), and compares the decision
 and the resulting mask (empty, partial HUD, or flat) with that label:
@@ -2694,18 +2703,49 @@ pixel semantics. Comparing unsynchronized final and HUDless images is not reliab
 While a dump request is armed, the first clear of up to three
 [offscreen UI layer](#setup) candidates is also copied as
 optional artifacts `ui_layer_candidate_0` to `_2` (IDs 40-42) with RGB and alpha previews, and
-`ui_layer_census` lists each target's size, format, clears seen while armed and capture status
-(`captured_before_clear`, `copy_allocation_failed`, or `allocating` when the dump was taken while
-the copy, allocated outside the layer's lock since WP1b, was not yet published).
+`ui_layer_census` lists each target's size, format, clears seen while armed and capture status.
 The census shows every qualifying target; `active` marks the one the live tracker chose, which the
-dump's automatic candidate set names as `ui_layer`. Census copies carry none of the live copies'
-queue ordering (known limit): each is recorded into the game's list at the clear and handed to the
-dump as `captured_before_clear` whether or not that list has run. A target whose list runs on
-another queue than the presenting one (Stellar Blade's layer, The Witcher 3 with FG on) can be read
-before or while it is written, so its artifact may be empty or torn; check its alpha preview before
-using it as replay evidence (`ui_detection_replay` binds it at `t7`). Ordering census copies like
-live ones (submission hook and queue fence, with the capture deferred until they are seen complete)
-is open.
+dump's automatic candidate set names as `ui_layer`.
+
+**Census ordering.** A census copy is recorded into the game's list at the clear, like a live copy:
+created in the shader-resource state with the same leading barrier, so a list executed again
+records valid transitions. It follows the live copies' queue order (`ui_layer::copy_order`: the
+same carriers, submission hook and
+[layer cross-queue fence](#diagnostics-switch-and-per-present-cost)). The dump reads it only with
+CPU proof that its write completed before the dump's own reads on the presenting queue, never with
+a GPU wait (`ui_layer::census_verdict`). On D3D11 it ran on that queue (the immediate context, or a
+deferred list the immediate context executed). On D3D12 the submission hook ran after its latest
+execution, it ran on the dump's queue or the CPU saw its queue's fence reach
+the value signalled after it, and no game list still carries it: a list executed again would write
+it while the dump reads it, and games reset their lists within a few frames as their allocators
+rotate. The capture is deferred while any copy is undecided (`ui_layer::census_pending`: still being
+allocated, not executed, held for the hook or its fence, or still carried by a list), for at most
+`ui_layer::census_wait_ms` (1000 ms) after the dump was armed; Presents keep presenting and the
+presenting queue never waits meanwhile. Then the dump is taken, and each copy without proof is
+omitted (no artifact, `captured: false`) with a status that says why: `not_executed`,
+`reset_unexecuted` (every carrying list reset before running it), `awaiting_submission`,
+`awaiting_fence`, `awaiting_list_reset`, or `unordered` when nothing can prove it, with
+`unordered_reason` `mixed_queue` (run on two queues), `submission_not_observed` (the hook did not see
+it, or its list was reset before the hook ran) or `no_fence` (run on another queue than the dump's
+with no fence value, or its fence record was released). Each omission logs once per status and
+reason (`Sunshine UI layer: a Dump 3D census copy was not proven complete before the dump read it
+(...)`). An omitted copy that a list still carries or may still write is destroyed after 10 s
+instead of 2 s. A proven copy keeps the status `captured_before_clear`. Every row records
+`read_order` (`queue` or `fence_passed`; null without proof), `fence_value`, `executed_queue` and
+`presents_since_copy` (Presents since the copy, as for the live layer); the census records
+`ordering: proven`, `settled` (false when a copy was still undecided as the dump was taken: the
+deadline passed, or a target was first cleared just before the capture) and `wait_ms` (from arming
+to the capture). The other statuses are unchanged: `copy_allocation_failed`, `allocating` (the copy,
+allocated outside the layer's lock since WP1b, was not yet published), `transport_budget_exceeded`
+and `other_device`. A census without `ordering` comes from an older build, which handed every copy
+to the dump as `captured_before_clear` whether or not its list had run: a copy run on another queue
+than the presenting one (Stellar Blade's layer, The Witcher 3 with FG on) could be read before or
+while it was written, so check such an artifact's alpha preview before using it as replay evidence
+(`ui_detection_replay` binds it at `t7`). Cross-queue census copies stay supported: the D3D12
+provider fixture (`reshade_game3d_native_provider_runtime_test` with the frame-generation
+interposer) reads a copy gated on a second queue in fence order, with the layer's content, once its
+fence reached it and its list was reset, with no Present waiting meanwhile, and omits one still gated
+at the deadline (`awaiting_fence`) and one whose list never executed (`not_executed`).
 
 The request uses diagnostic wire v3 with capacity for 40 textures, independent of streaming SBS v2.
 Host and add-on must agree on this mapping version; incompatible versions fail explicitly.

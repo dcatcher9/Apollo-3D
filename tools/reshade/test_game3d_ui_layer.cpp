@@ -339,6 +339,185 @@ int main() {
     std::puts("PASS UI layer cross-queue order: only a D3D12 copy run on one other queue owes a fence signal; it is held "
       "while the CPU sees its fence below the value signalled after it (never a GPU wait) and then offered in fence order, "
       "unordered without a value; every D3D12 copy of one queue is held for the submission hook only while it is heard");
+    // The shared copy transitions (copy_order) move a live ring entry as the
+    // ring did before census copies shared them: readable (offered) only once
+    // its execution is submitted, and on another queue once its fence reached
+    // the value signalled after it.
+    {
+      constexpr std::uint64_t list = 0x100, native = 0x200, presenting = 0x10, other = 0x20;
+      layer::copy_order live;
+      require(!layer::order_recorded(live, list, native, presenting) && live.pending && live.carries(list),
+        "A recorded live copy was readable before a list carrying it executed");
+      require(!layer::order_executed(live, native, presenting, true, true, presenting) && live.owed == native &&
+          live.pending && !live.unobserved,
+        "A D3D12 live copy on the presenting queue was readable before its submission hook");
+      require(layer::order_submitted(live) && !live.pending && !live.owed && live.queue == presenting,
+        "The submission hook did not offer a live copy run on the presenting queue");
+      require(!layer::order_reset(live, list, native) && !live.carried() && !live.pending,
+        "Resetting the list of an offered live copy offered it again or held it");
+      // Another queue: owed, then signalled, held until the fence reached it.
+      layer::order_recorded(live, list, native, presenting);
+      require(!layer::order_executed(live, native, other, true, true, presenting) && live.owed == native,
+        "A cross-queue live copy was not held for its submission hook");
+      require(!layer::order_signalled(live, 1, 9, 3) && live.awaiting() && live.fence == 1 && live.fence_generation == 9,
+        "A cross-queue live copy with a fence value was readable before its fence reached it");
+      require(!layer::order_settled(live, true, 2) && live.awaiting() && layer::order_settled(live, true, 3) && !live.pending,
+        "A cross-queue live copy was not offered exactly once its fence reached its value");
+      // Without a value it is offered at once, unordered.
+      layer::order_recorded(live, list, native, presenting);
+      layer::order_executed(live, native, other, true, true, presenting);
+      require(layer::order_signalled(live, -1, 0, 0) && !live.pending && !live.signalled,
+        "A cross-queue live copy no value could be signalled for was not offered unordered");
+      // Without a listener a copy owing a signal is offered at the execution, unobserved.
+      layer::order_recorded(live, list, native, presenting);
+      require(layer::order_executed(live, native, other, true, false, presenting) && live.unobserved && !live.owed,
+        "A cross-queue live copy without a listener was not offered at once, unobserved");
+      // A reset before the hook offers it, unobserved; one unexecuted drops back.
+      layer::order_recorded(live, list, native, presenting);
+      layer::order_executed(live, native, other, true, true, presenting);
+      require(layer::order_reset(live, list, native) && live.unobserved && !live.pending,
+        "A live copy whose hook can no longer come was not offered unobserved");
+      layer::order_recorded(live, list, native, presenting);
+      require(!layer::order_reset(live, list, native) && !live.pending && !live.queue,
+        "A live copy reset unexecuted was offered or stayed held");
+    }
+    std::puts("PASS UI layer copy transitions: a live copy is offered after its submission hook on the presenting queue, "
+      "after its fence on another queue, at once without a value or a listener, unobserved after an early reset, and "
+      "never when its list was reset unexecuted");
+    // A Dump 3D census copy is read only with CPU proof (census_verdict),
+    // never a GPU wait; undecided copies are waited for (census_waiting).
+    {
+      using status = layer::census_status;
+      using order = layer::read_order;
+      constexpr std::uint64_t list = 0x100, native = 0x200, reading = 0x10, other = 0x20;
+      // Read on the reading queue unless another one is named.
+      const auto verdict = [](const layer::copy_order &c, bool d3d12, std::uint64_t queue = 0x10) {
+        return layer::census_verdict(c, d3d12, queue);
+      };
+      // Cross-queue D3D12 with the hook heard: owed, then held for the fence,
+      // then for its list's reset, then captured in fence order.
+      layer::copy_order cross;
+      layer::order_recorded(cross, list, native, reading);
+      require(verdict(cross, true).status == status::not_executed, "An unexecuted census copy was not not_executed");
+      layer::order_executed(cross, native, other, true, true, reading);
+      require(verdict(cross, true).status == status::awaiting_submission,
+        "A census copy executed before its submission hook was not awaiting_submission");
+      layer::order_signalled(cross, 0, 1, 3);
+      layer::order_settled(cross, true, 2);
+      require(verdict(cross, true).status == status::awaiting_fence, "A census copy below its fence value was not awaiting_fence");
+      layer::order_settled(cross, true, 3);
+      require(verdict(cross, true).status == status::awaiting_list_reset,
+        "A complete census copy its list still carries was not awaiting_list_reset");
+      layer::order_reset(cross, list, native);
+      const auto captured = verdict(cross, true);
+      require(captured.status == status::captured && captured.order == order::fence_passed && !captured.reason,
+        "A census copy proven by its fence was not captured in fence order");
+      // An early reset (after the submission, before the fence) keeps it held.
+      layer::copy_order early;
+      layer::order_recorded(early, list, native, reading);
+      layer::order_executed(early, native, other, true, true, reading);
+      layer::order_signalled(early, 0, 1, 4);
+      layer::order_reset(early, list, native);
+      require(verdict(early, true).status == status::awaiting_fence, "An early list reset dropped a census copy's fence");
+      layer::order_settled(early, true, 4);
+      require(verdict(early, true).status == status::captured && verdict(early, true).order == order::fence_passed,
+        "A census copy reset early was not captured once its fence reached it");
+      // The reading queue: held for the hook, then for its list's reset, then
+      // captured in queue order; read on another queue nothing orders it.
+      layer::copy_order same;
+      layer::order_recorded(same, list, native, reading);
+      layer::order_executed(same, native, reading, true, true, reading);
+      require(verdict(same, true).status == status::awaiting_submission,
+        "A census copy on the reading queue was not held for its submission hook");
+      layer::order_submitted(same);
+      require(verdict(same, true).status == status::awaiting_list_reset,
+        "A census copy on the reading queue its list still carries was not awaiting_list_reset");
+      layer::order_reset(same, list, native);
+      require(verdict(same, true).status == status::captured && verdict(same, true).order == order::queue,
+        "A census copy on the reading queue was not captured in queue order");
+      require(verdict(same, true, other).status == status::unordered &&
+          std::string(verdict(same, true, other).reason) == "no_fence" &&
+          verdict(same, true, 0).status == status::unordered,
+        "A census copy read on a queue other than the one that ran it, or an unknown one, was ordered without a fence");
+      // Executed again before the dump: the earlier proof no longer covers it.
+      layer::order_recorded(same, list, native, reading);
+      layer::order_executed(same, native, reading, true, true, reading);
+      layer::order_submitted(same);
+      layer::order_executed(same, native, reading, true, true, reading);
+      require(verdict(same, true).status == status::awaiting_submission && !same.observed,
+        "A census copy executed again kept the proof of its earlier execution");
+      // D3D11: the immediate context is the reading queue (captured at once);
+      // a deferred list is captured once the immediate context ran it.
+      layer::copy_order immediate, deferred;
+      layer::order_recorded(immediate, list, reading, reading);
+      require(verdict(immediate, false).status == status::captured && verdict(immediate, false).order == order::queue,
+        "A D3D11 immediate census copy was not captured in queue order");
+      layer::order_recorded(deferred, list, native, reading);
+      require(verdict(deferred, false).status == status::not_executed, "An unexecuted D3D11 deferred census copy was readable");
+      layer::order_executed(deferred, 0, reading, false, false, reading);
+      require(verdict(deferred, false).status == status::captured && verdict(deferred, false).order == order::queue,
+        "A D3D11 deferred census copy run by the immediate context was not captured in queue order");
+      // No proof can come: the hook not heard (either queue), two queues, no
+      // fence value, a lost fence record, or a reset before the hook.
+      for (const auto queue : {reading, other}) {
+        layer::copy_order unheard;
+        layer::order_recorded(unheard, list, native, reading);
+        layer::order_executed(unheard, native, queue, true, false, reading);
+        require(verdict(unheard, true).status == status::unordered &&
+            std::string(verdict(unheard, true).reason) == "submission_not_observed",
+          "A D3D12 census copy whose submission the hook did not see was not unordered");
+      }
+      layer::copy_order mixed;
+      layer::order_recorded(mixed, list, native, reading);
+      layer::order_executed(mixed, native, reading, true, true, reading);
+      layer::order_executed(mixed, native, other, true, true, reading);
+      require(verdict(mixed, true).status == status::unordered && std::string(verdict(mixed, true).reason) == "mixed_queue",
+        "A census copy run on two queues was not unordered");
+      layer::copy_order unsignalled;
+      layer::order_recorded(unsignalled, list, native, reading);
+      layer::order_executed(unsignalled, native, other, true, true, reading);
+      layer::order_signalled(unsignalled, -1, 0, 0);
+      layer::order_reset(unsignalled, list, native);
+      require(verdict(unsignalled, true).status == status::unordered &&
+          std::string(verdict(unsignalled, true).reason) == "no_fence",
+        "A cross-queue census copy without a fence value was not unordered");
+      layer::copy_order lost;
+      layer::order_recorded(lost, list, native, reading);
+      layer::order_executed(lost, native, other, true, true, reading);
+      layer::order_signalled(lost, 0, 1, 5);
+      layer::order_reset(lost, list, native);
+      layer::order_settled(lost, false, 0);
+      require(verdict(lost, true).status == status::unordered && std::string(verdict(lost, true).reason) == "no_fence",
+        "A census copy whose fence record is gone was not unordered");
+      layer::copy_order unsigned_reset;
+      layer::order_recorded(unsigned_reset, list, native, reading);
+      layer::order_executed(unsigned_reset, native, reading, true, true, reading);
+      layer::order_reset(unsigned_reset, list, native);
+      require(verdict(unsigned_reset, true).status == status::unordered &&
+          std::string(verdict(unsigned_reset, true).reason) == "submission_not_observed",
+        "A census copy whose list was reset before its hook was not unordered");
+      layer::copy_order unexecuted;
+      layer::order_recorded(unexecuted, list, native, reading);
+      layer::order_reset(unexecuted, list, native);
+      require(verdict(unexecuted, true).status == status::reset_unexecuted, "A census copy reset unexecuted was not reset_unexecuted");
+      // The dump waits only for copies that can still be proven.
+      require(layer::census_waiting(status::not_executed) && layer::census_waiting(status::awaiting_submission) &&
+          layer::census_waiting(status::awaiting_fence) && layer::census_waiting(status::awaiting_list_reset) &&
+          !layer::census_waiting(status::captured) && !layer::census_waiting(status::reset_unexecuted) &&
+          !layer::census_waiting(status::unordered) && layer::census_wait_ms == 1000,
+        "The census waits for a decided copy, or not for an undecided one");
+      require(std::string(layer::name(status::captured)) == "captured_before_clear" &&
+          std::string(layer::name(status::not_executed)) == "not_executed" &&
+          std::string(layer::name(status::reset_unexecuted)) == "reset_unexecuted" &&
+          std::string(layer::name(status::awaiting_submission)) == "awaiting_submission" &&
+          std::string(layer::name(status::awaiting_fence)) == "awaiting_fence" &&
+          std::string(layer::name(status::awaiting_list_reset)) == "awaiting_list_reset" &&
+          std::string(layer::name(status::unordered)) == "unordered",
+        "The census status names changed");
+    }
+    std::puts("PASS UI layer census order: a census copy is captured only with CPU proof (D3D11: run on the reading queue; "
+      "D3D12: its submission seen, on the reading queue or its fence reached, and no list still carrying it); undecided "
+      "copies are waited for and the others are omitted unordered, unexecuted or reset unexecuted");
     // An older copy offered while a newer one is held names its own Present.
     {
       layer::layer_tracker tracker;

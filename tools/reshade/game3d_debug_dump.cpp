@@ -656,17 +656,20 @@ namespace sunshine_game3d {
       }
     };
 
-    // Adds each copied candidate UI layer as an optional artifact and describes
-    // every qualifying target the armed census saw (docs/reshade-sbs.md).
-    nlohmann::json ui_layer_census(capture_batch &batch, api::device *device) {
+    // Adds each census copy proven complete before this batch's reads on its
+    // queue as an optional artifact and describes every qualifying target the
+    // armed census saw (docs/reshade-sbs.md); wait_ms: since it was armed.
+    nlohmann::json ui_layer_census(capture_batch &batch, api::device *device, std::uint64_t wait_ms) {
       api::device *owner = nullptr;
-      auto layers = ui_layer::take(owner);
+      auto layers = ui_layer::take(owner, batch.native_queue);
       auto rows = nlohmann::json::array();
+      bool settled = true;
       for (unsigned i = 0; i < layers.size() && i < wire::ui_layer_count; ++i) {
         auto &c = layers[i];
         const auto kind = static_cast<wire::artifact>(static_cast<unsigned>(wire::artifact::ui_layer_0) + i);
         std::string status = c.status;
         bool added = false;
+        settled &= !c.waiting;
         if (c.copy.handle) {
           added = owner == device && batch.add(kind, c.copy);
           if (!added) status = owner == device ? "transport_budget_exceeded" : "other_device";
@@ -675,16 +678,28 @@ namespace sunshine_game3d {
         std::snprintf(source, sizeof(source), "0x%llx", static_cast<unsigned long long>(c.source));
         rows.push_back({{"artifact_id", static_cast<unsigned>(kind)}, {"kind", wire::ui_layer_names[i]}, {"captured", added},
           {"status", status}, {"source", source}, {"width", c.width}, {"height", c.height}, {"dxgi_format", c.format},
-          {"clears_while_armed", c.clears}, {"active", c.active}});
+          {"clears_while_armed", c.clears}, {"active", c.active},
+          {"read_order", c.copy.handle ? nlohmann::json(ui_layer::name(c.order)) : nlohmann::json(nullptr)},
+          {"unordered_reason", c.unordered_reason ? nlohmann::json(c.unordered_reason) : nlohmann::json(nullptr)},
+          {"executed_queue", c.executed_queue}, {"fence_value", c.fence_value},
+          {"presents_since_copy", c.presents_since_copy}});
         // add() holds its own reference; the add-on's handle is released once
         // any game command list that wrote the copy has executed.
         ui_layer::retire(owner, c.copy);
       }
       return {{"meaning", "Output-resolution color targets the game cleared to transparent black while this request was armed, "
-        "the signature of an offscreen UI layer. Each copy was taken before a clear, so it shows the previous frame's content. "
-        "active marks the target the live tracker chose; without a tagged UI buffer its copy is UI detection's color+alpha "
-        "candidate, admitted only while premultiplied. The others are candidates only, and none is verified UI."},
-        {"candidates", std::move(rows)}};
+        "the signature of an offscreen UI layer. Each copy was taken before a clear, so it shows the previous frame's content "
+        "(presents_since_copy Presents before this dump). ordering proven: a copy is read, and captured, only with CPU proof "
+        "that its write completed before the dump's reads, never with a GPU wait: it ran on the dump's queue (read_order "
+        "queue) or its queue's add-on fence reached the value signalled after it (fence_passed, fence_value), and on D3D12 "
+        "the submission hook saw its execution and no game list still carries it. The dump waited up to 1000 ms after it was "
+        "armed for that proof (wait_ms; settled false: a copy was still undecided). A copy without it is omitted and its "
+        "status says why: not_executed, reset_unexecuted, awaiting_submission, awaiting_fence, awaiting_list_reset, or "
+        "unordered with unordered_reason mixed_queue, submission_not_observed or no_fence; executed_queue is the queue that "
+        "ran it. A census without ordering is from an older build that read every copy unordered. active marks the target "
+        "the live tracker chose; without a tagged UI buffer its copy is UI detection's color+alpha candidate, admitted only "
+        "while premultiplied. The others are candidates only, and none is verified UI."},
+        {"ordering", "proven"}, {"settled", settled}, {"wait_ms", wait_ms}, {"candidates", std::move(rows)}};
     }
   }  // namespace
 
@@ -782,7 +797,12 @@ namespace sunshine_game3d {
           // FG can present several times without a game/vendor evaluation.
           // Observe a real SDK call when possible, while keeping generic/no-API
           // captures bounded and never blocking rendering for diagnostics.
-          armed_ready = has_diagnostic_frame_observation() || GetTickCount64() - armed_tick >= 100;
+          // The UI layer census defers the capture while a copy is undecided
+          // (its write not yet proven complete), at most census_wait_ms after
+          // arming; the presenting queue never waits for it.
+          const auto now = GetTickCount64();
+          armed_ready = (has_diagnostic_frame_observation() || now - armed_tick >= 100) &&
+            (now - armed_tick >= ui_layer::census_wait_ms || !ui_layer::census_pending());
         }
       }
     }
@@ -883,7 +903,7 @@ namespace sunshine_game3d {
       if (!r.source.handle || !r.sbs.handle || !next->add(wire::artifact::source_color, r.source) || !next->add(wire::artifact::linear_color, r.linear_color) || !next->add(wire::artifact::candidate, r.candidate) || !next->add(wire::artifact::vertical_majorant, r.vertical_majorant) || !next->add(wire::artifact::vertical_field, r.vertical_field) || !next->add(wire::artifact::final_field, r.final_field) || !next->add(wire::artifact::sbs, r.sbs)) {
         throw std::runtime_error("Cannot allocate the bounded shared diagnostic textures");
       }
-      metadata["ui_layer_census"] = ui_layer_census(*next, runtime->get_device());
+      metadata["ui_layer_census"] = ui_layer_census(*next, runtime->get_device(), GetTickCount64() - d.armed_tick);
       next->json = metadata.dump();
       const auto &depth = frame.depth;
       if (depth.ready && depth.shader_resource.handle) {
