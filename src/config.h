@@ -55,7 +55,7 @@ namespace config {
     bool local_ar_virtual_display_only;
 
     int max_bitrate;  // Maximum bitrate, sets ceiling in kbps for bitrate requested from client
-    double minimum_fps_target;  ///< Lowest framerate used when streaming. Range 0-1000; 0 = max(one fifth of the requested rate, 10 FPS).
+    double minimum_fps_target;  ///< Lowest framerate used when streaming. Range 0-1000; 0 = max(one fifth of the requested rate, 10 FPS). Never above the requested rate.
 
     // Live Host 3D can receive authored ReShade stereo. Sunshine-generated live/offline geometry
     // uses the Depth Coordinate V2 pipeline with its fixed calibration.

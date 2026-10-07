@@ -1230,8 +1230,8 @@ namespace video {
       launch_async_teardown_worker(std::move(teardown));
     });
 
-    // set max frame time based on client-requested target framerate.
-    double minimum_fps_target = (config::video.minimum_fps_target > 0.0) ? config::video.minimum_fps_target * 1000 : std::max(config.encodingFramerate / 5, 10000);
+    // set max frame time based on client-requested target framerate; never shorter than its interval.
+    const double minimum_fps_target = detail::minimum_fps_target(config::video.minimum_fps_target, config.encodingFramerate);
     auto max_frametime = std::chrono::nanoseconds(1000ms) * 1000 / minimum_fps_target;
     auto encode_frame_threshold = std::chrono::nanoseconds(1000ms) * 1000 / config.encodingFramerate;
     auto frame_variation_threshold = encode_frame_threshold / 4;

@@ -148,6 +148,19 @@ namespace video::detail {
     std::optional<std::chrono::steady_clock::time_point> deadline_;
   };
 
+  /** The minimum-FPS keepalive target in milli-fps (`encoding_framerate`'s unit).
+   *
+   * The configured target `minimum_fps` (FPS; 0 picks a fifth of the stream rate, at least 10 FPS),
+   * never above the stream rate. A desktop image wait that runs to this keepalive with nothing
+   * pending encodes a repeat, and an independent provider's keepalive repeats its export, so a
+   * faster target would send more pictures than the client asked for. A scheduler tick capped
+   * those repeats at about 64/s while image waits ended there; on the deadline waiter they keep it.
+   */
+  [[nodiscard]] inline double minimum_fps_target(double minimum_fps, int encoding_framerate) noexcept {
+    const double target = minimum_fps > 0.0 ? minimum_fps * 1000 : std::max(encoding_framerate / 5, 10000);
+    return std::min(target, static_cast<double>(encoding_framerate));
+  }
+
   /** Time left until an independent provider's minimum-FPS keepalive is due.
    *
    * Such a provider wakes the encode loop itself and is not polled at stream cadence, and its

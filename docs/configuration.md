@@ -898,11 +898,11 @@ microphone_sink = CABLE Input (VB-Audio Virtual Cable)
     <tr>
         <td rowspan="3">Choices</td>
         <td>0</td>
-        <td>Use one fifth of the stream's FPS, with a 10 FPS floor, as the minimum target.</td>
+        <td>Use one fifth of the stream's FPS, with a 10 FPS floor (never above the stream's FPS), as the minimum target.</td>
     </tr>
     <tr>
         <td>1-1000</td>
-        <td>Specify your own value. The real minimum may differ from this value.</td>
+        <td>Specify your own value. The real minimum may differ from this value. A target above the stream's FPS is capped at the stream's FPS.</td>
     </tr>
 </table>
 
