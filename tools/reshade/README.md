@@ -224,10 +224,10 @@ The sole depth setup uses source-associated Streamline
 projection data when available. Otherwise it uses oriented raw depth and labels the conversion
 **relative depth (assumed infinite far plane)**. Both use the same 0–100 **3D strength** slider.
 The fallback does not claim recovered meters or game units.
-When this fallback is active, the panel suggests trying **Frame Generation 2×**, if supported:
+When this fallback is active, the panel suggests trying **Frame Generation**, if supported:
 some games supply usable Streamline camera data through FG. This is not guaranteed. If FG is
 already observed enabled, the panel reports the missing camera data without asking to enable it
-again; the existing 3×/higher and artifact guidance still applies. Initial unknown depth status
+again. Initial unknown depth status
 does not show this hint, and Sunshine does not change the game's FG setting.
 
 The current production policy trials a contrast midpoint for the scene's zero plane, using the
@@ -863,8 +863,10 @@ While settings are open, a public ImGui draw callback adds an FP16 target to ReS
 overlay pass. ReShade still draws its actual controls, textures, tooltips and cursor and handles
 input. A compatible GUI pipeline retains the game's native target and captures linear color
 with full alpha in the additional target. A final GPU pass composes that layer into both eyes,
-blending in linear light and encoding SDR back to sRGB. HDR remains linear scRGB, including
-negative values and highlights above SDR white. D3D11 composition restores the application
+blending in linear light and encoding SDR back to sRGB. An scRGB export stays linear scRGB,
+including negative values and highlights above SDR white; a PQ export is decoded, blended in
+linear scRGB and encoded back as PQ ([Color and HDR](../../docs/reshade-sbs.md#color-and-hdr)).
+D3D11 composition restores the application
 state it touches; D3D12 uses ReShade's own immediate command list. Composition shares the
 existing slot and fence lifetime; there is no additional queue wait or CPU image readback.
 

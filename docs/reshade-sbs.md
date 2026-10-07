@@ -551,9 +551,9 @@ frame the game presents up to the stream rate. **DLSS Super Resolution can stay 
 verified game settings, including Auto mode, rather than measured generated output. Ambiguous settings
 are not guessed, and Sunshine does not change the game's Frame Generation options.
 When Automatic has identified the relative-depth fallback without associated camera data, it
-suggests trying **Frame Generation 2×**, if available, because some games supply Streamline camera
+suggests trying **Frame Generation**, if available, because some games supply Streamline camera
 data through FG. Availability is not guaranteed. An already observed enabled FG setting instead
-shows that camera data is still unavailable; the existing 3×/higher guidance remains above it.
+shows that camera data is still unavailable.
 The hint is not shown during the initial unknown-depth state. A busy or ambiguous FG observation
 does not produce a suggestion to enable a mode that may already be enabled.
 

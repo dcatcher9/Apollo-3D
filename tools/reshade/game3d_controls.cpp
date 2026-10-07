@@ -236,7 +236,7 @@ namespace sunshine_game3d {
       if (fg.known && fg.enabled)
         ImGui::TextWrapped("Camera data unavailable with this game's Frame Generation.");
       else
-        ImGui::TextWrapped("Camera data unavailable. Try Frame Generation 2x if supported.");
+        ImGui::TextWrapped("Camera data unavailable. Try Frame Generation if supported.");
       ImGui::SetItemTooltip("Some games provide Streamline camera data only with Frame Generation. This is not guaranteed. Without it, relative depth assumes an infinite far plane. Sunshine does not change game settings.");
     }
 
@@ -461,7 +461,7 @@ namespace sunshine_game3d {
       } else {
         ImGui::Text("Frame Generation: on%s", automatic_mode);
       }
-      ImGui::SetItemTooltip("Change Frame Generation in the game's settings. DLSS Super Resolution can stay on. This is the game's requested setting, not a measurement of generated frames. Sunshine does not change it automatically.");
+      ImGui::SetItemTooltip("Frame Generation is set in the game's settings; the stream follows any multiplier. DLSS Super Resolution can stay on. This is the game's requested setting, not a measurement of generated frames. Sunshine does not change it automatically.");
     }
     namespace buffers = sunshine_streamline::buffers;
     if (const auto contract = buffers::active(); contract.known) {
