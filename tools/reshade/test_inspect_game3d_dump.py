@@ -309,6 +309,22 @@ class GameDumpReaderTest(unittest.TestCase):
                          {"up_1": 10, "up_2": 10, "up_4": 10, "down_4": 0, "right_4": 4, "up_8": 0, "down_8": 0,
                           "right_8": 8, "up_8_right_8": 0, "right_16": 10})
 
+    def test_pin_metrics_never_substitute_another_layer_for_an_omitted_active_copy(self):
+        self.pin_dump()
+        manifest = json.loads((self.root / "manifest.json").read_text(encoding="utf-8"))
+        census = manifest["producer_metadata"]["ui_layer_census"]
+        # The active target's copy was omitted (unproven); candidate 0 is another target's.
+        census["candidates"] = [dict(kind="ui_layer_candidate_0", active=False, captured=True),
+                                dict(kind="ui_layer_candidate_1", active=True, captured=False, status="awaiting_fence")]
+        (self.root / "manifest.json").write_text(json.dumps(manifest))
+        metrics = reader.pin_metrics(self.root)
+        self.assertIsNone(metrics["layer"])
+        self.assertIsNone(metrics["torn_glyph_pixels"])
+        # A dump that marks no row active (an older one) still reads the first copy.
+        census["candidates"] = [dict(kind="ui_layer_candidate_0")]
+        (self.root / "manifest.json").write_text(json.dumps(manifest))
+        self.assertEqual(reader.pin_metrics(self.root)["layer"], "ui_layer_candidate_0")
+
     def test_pin_metrics_measure_a_replayed_field(self):
         self.pin_dump()
         unpinned = self.root / "replayed_final_field.bin"

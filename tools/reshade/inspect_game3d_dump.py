@@ -442,9 +442,15 @@ def pin_metrics(root, field=None, bands=None, layer=None):
     if alpha.shape != h.shape:
         raise ValueError("The consumed UI mask differs from the field's extent")
     if layer is None:
+        # The active census row's copy; a dump that marks no row active (an older one) falls back to the first
+        # copy. An active row without an artifact (its copy unproven, so omitted) leaves no layer rather than
+        # another candidate's.
         census = metadata.get("ui_layer_census", {}).get("candidates", [])
-        active = [entry.get("kind") for entry in census if entry.get("active") and entry.get("kind") in artifacts]
-        layer = active[0] if active else "ui_layer_candidate_0" if "ui_layer_candidate_0" in artifacts else None
+        active = [entry.get("kind") for entry in census if entry.get("active")]
+        if active:
+            layer = active[0] if active[0] in artifacts else None
+        else:
+            layer = "ui_layer_candidate_0" if "ui_layer_candidate_0" in artifacts else None
     if layer is not None:
         codes = np.rint(read_artifact(root, artifacts[layer]).astype(np.float64) * 255)
         if codes.shape[:2] != h.shape:
