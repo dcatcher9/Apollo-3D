@@ -502,7 +502,14 @@ before 10-07, which log no gap, are INFO. The gap is a maximum, so neither a win
 average rates can hide a burst of skips. The once-per-ring full-ring line (a WARN before 10-07) belongs
 to this check, not to `Log warnings`, and one after the last timing line is named as uncounted, its
 cost unknown; and, from the host log, the Game 3D link,
-size fit and encoder stalls (one per stalled frame, classified by its last line). A log whose game process ended right
+size fit and encoder stalls (one per stalled frame, classified by its last line). An upstream stall that completed
+within 2 s of one of the game's frame-generation switches or runtime resets is INFO and names it: the game's own
+GPU reconfiguration kept the host's conversion off the GPU, and the encoder's budget starting at its input's
+completion lets that delay one picture by design
+([GPU handoff contract](../../docs/reshade-sbs.md#gpu-handoff-contract)). Live 10-04 to 10-07 every such stall
+but E33's came within 0.8 s of one; the add-on's log drains asynchronously, so its line can follow the event. An
+encoder-side stall, a timeout (listed as `timed out`) and an upstream stall with no such transition near it warn;
+a focus loss or export start explains none, since the host's switch to or from the desktop is its own work. A log whose game process ended right
 after ReShade tore its runtimes down (Unreal games often end before ReShade logs its exit) counts
 as a normal exit.
 
