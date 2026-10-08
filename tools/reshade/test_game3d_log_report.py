@@ -1686,8 +1686,10 @@ class ReadinessReport(unittest.TestCase):
                                                             datetime(2026, 10, 1, 10, 0, 20))}
             stalls = checks['Encoder stalls']
             self.assertEqual((stalls.status, stalls.detail), ('WARN', '3'))
-            self.assertEqual(stalls.times,
-                             ['10:00:05 encoder-side', '10:00:09 upstream GPU timed out', '10:00:18 encoder-side'])
+            # Each lists its length; frame 340's encoder ran 140 ms past its input before timing out.
+            self.assertEqual(stalls.times, ['10:00:05 encoder-side 180 ms',
+                                            '10:00:09 upstream GPU + encoder-side 260 ms timed out',
+                                            '10:00:18 encoder-side 140 ms'])
 
     def test_an_upstream_stall_at_the_games_fg_switch_or_reset_is_info(self):
         # W3 10-07: the game lost focus and switched frame generation off; the GPU then ran the host's conversion
@@ -1712,16 +1714,18 @@ class ReadinessReport(unittest.TestCase):
             host = Path(folder) / 'sunshine.log'
             host.write_text(w3, encoding='utf-8')
             stalls = {c.name: c for c in report.host_checks(host, start, end, transitions)}['Encoder stalls']
-            self.assertEqual((stalls.status, stalls.times), ('INFO', ['20:57:32 upstream GPU at FG off 20:57:32']))
+            self.assertEqual((stalls.status, stalls.times),
+                             ('INFO', ['20:57:32 upstream GPU 165 ms at FG off 20:57:32']))
+            self.assertIn('of at most 250 ms', stalls.detail)
             # Focus loss alone explains nothing: the host's own switch to the desktop is its work.
             focus = report.gpu_transitions(report.parse(lines[:1]))
             stalls = {c.name: c for c in report.host_checks(host, start, end, focus)}['Encoder stalls']
-            self.assertEqual((stalls.status, stalls.times), ('WARN', ['20:57:32 upstream GPU']))
+            self.assertEqual((stalls.status, stalls.times), ('WARN', ['20:57:32 upstream GPU 165 ms']))
             # A runtime reset 1.9 s after the stall explains it (the add-on's line can follow the event); 2.1 s
             # before it does not.
             reset = [(75454.4, 'runtime reset')]
             stalls = {c.name: c for c in report.host_checks(host, start, end, reset)}['Encoder stalls']
-            self.assertEqual(stalls.times, ['20:57:32 upstream GPU at runtime reset 20:57:34'])
+            self.assertEqual(stalls.times, ['20:57:32 upstream GPU 165 ms at runtime reset 20:57:34'])
             stalls = {c.name: c for c in report.host_checks(host, start, end, [(75450.3, 'FG on')])}['Encoder stalls']
             self.assertEqual(stalls.status, 'WARN')
             # E33 10-06: upstream stalls with no FG switch or reset near them still warn, beside an explained one; so
@@ -1739,14 +1743,68 @@ class ReadinessReport(unittest.TestCase):
             stalls = {c.name: c for c in report.host_checks(host, start, end, transitions)}['Encoder stalls']
             self.assertEqual((stalls.status, stalls.detail, stalls.times),
                              ('WARN', "2; 1 more upstream GPU at the game's FG switches or resets",
-                              ['20:57:36 upstream GPU', '20:57:38 encoder-side']))
+                              ['20:57:36 upstream GPU 203 ms', '20:57:38 encoder-side at FG on 20:57:39']))
             host.write_text(
                 '[2026-10-07 20:57:32.474]: Warning: NvEnc: frame 12195 exceeded the 100 ms completion wait; '
                 'input_producer=pending_at_100ms (upstream GPU delay)\n'
                 '[2026-10-07 20:57:34.474]: Error: NvEnc: frame 12195 encode wait timeout after 2000 ms; x; '
                 'input_producer=pending_at_2000ms (upstream GPU delay)\n', encoding='utf-8')
             stalls = {c.name: c for c in report.host_checks(host, start, end, transitions)}['Encoder stalls']
-            self.assertEqual((stalls.status, stalls.times), ('WARN', ['20:57:32 upstream GPU timed out']))
+            self.assertEqual((stalls.status, stalls.times),
+                             ('WARN', ['20:57:32 upstream GPU 2000 ms timed out at FG off 20:57:32']))
+
+    def test_a_transition_explains_only_a_short_completed_upstream_stall(self):
+        # Review of the 10-07 rule: a transition explains a picture frozen no longer than the encoder's 250 ms
+        # budget, and only when the encoder finished within two 25 ms polls of its input. Stellar Blade 10-06 froze
+        # 690 ms at FG on; an encoder that ran 245 ms past its input, a removed device or a failed wait at the switch,
+        # and a stall the log never ends all still warn, each with its length and the transition named.
+        start, end = datetime(2026, 10, 7, 20, 55, 21), datetime(2026, 10, 7, 20, 57, 59)
+        transitions = [(75452.302, 'FG off')]
+        warn = ('[2026-10-07 20:57:32.474]: Warning: NvEnc: frame 12195 exceeded the 100 ms completion wait; its input '
+                'is still being produced; input_producer=pending_at_100ms (upstream GPU delay)\n')
+        cases = {
+            'Info: NvEnc: frame 12195 completed after soft timeout in 250 ms; input_producer=done_at_210ms '
+            '(upstream GPU delay)': ('INFO', '20:57:32 upstream GPU 250 ms at FG off 20:57:32'),
+            'Info: NvEnc: frame 12195 completed after soft timeout in 690 ms; input_producer=done_at_690ms '
+            '(upstream GPU delay)': ('WARN', '20:57:32 upstream GPU 690 ms at FG off 20:57:32'),
+            'Info: NvEnc: frame 12195 completed after soft timeout in 350 ms; input_producer=done_at_105ms '
+            '(upstream GPU delay)': ('WARN', '20:57:32 upstream GPU + encoder-side 350 ms at FG off 20:57:32'),
+            'Info: NvEnc: frame 12195 completed after soft timeout in 160 ms; input_producer=done_at_105ms '
+            '(upstream GPU delay)': ('WARN', '20:57:32 upstream GPU + encoder-side 160 ms at FG off 20:57:32'),
+            'Error: NvEnc: frame 12195 device removed during encode wait after 520 ms; native_wait=0x00000000, '
+            'native_error=0x00000000, device_removed_reason=0x887a0006': (
+                'WARN', '20:57:32 upstream GPU 520 ms failed at FG off 20:57:32'),
+            'Error: NvEnc: frame 12195 completion event wait failed after 130 ms; native_wait=0xffffffff': (
+                'WARN', '20:57:32 upstream GPU 130 ms failed at FG off 20:57:32'),
+            None: ('WARN', '20:57:32 upstream GPU at FG off 20:57:32'),
+        }
+        with TemporaryDirectory() as folder:
+            host = Path(folder) / 'sunshine.log'
+            for last, expected in cases.items():
+                host.write_text(warn + (f'[2026-10-07 20:57:33.000]: {last}\n' if last else ''), encoding='utf-8')
+                stalls = {c.name: c for c in report.host_checks(host, start, end, transitions)}['Encoder stalls']
+                self.assertEqual((stalls.status, stalls.times[0]), expected, last)
+            # A failure with no warning before it is a stall of its own.
+            host.write_text('[2026-10-07 20:57:32.600]: Error: NvEnc: frame 12195 device removed during encode wait '
+                            'after 90 ms; native_wait=0x00000000\n', encoding='utf-8')
+            stalls = {c.name: c for c in report.host_checks(host, start, end, transitions)}['Encoder stalls']
+            self.assertEqual((stalls.status, stalls.times),
+                             ('WARN', ['20:57:32 unknown 90 ms failed at FG off 20:57:32']))
+
+    def test_a_stall_names_its_nearest_transition(self):
+        # Stellar Blade 10-06: the stall at 13:45:56.980 came 1.49 s after a runtime reset and 0.59 s after FG on.
+        start, end = datetime(2026, 10, 6, 13, 45, 0), datetime(2026, 10, 6, 13, 47, 0)
+        transitions = [(13 * 3600 + 45 * 60 + 55.417, 'runtime reset'), (13 * 3600 + 45 * 60 + 56.390, 'FG on')]
+        with TemporaryDirectory() as folder:
+            host = Path(folder) / 'sunshine.log'
+            host.write_text(
+                '[2026-10-06 13:45:56.980]: Warning: NvEnc: frame 4211 exceeded the 100 ms completion wait; '
+                'input_producer=pending_at_99ms (upstream GPU delay)\n'
+                '[2026-10-06 13:45:56.993]: Info: NvEnc: frame 4211 completed after soft timeout in 112 ms; '
+                'input_producer=done_at_112ms (upstream GPU delay)\n', encoding='utf-8')
+            stalls = {c.name: c for c in report.host_checks(host, start, end, transitions)}['Encoder stalls']
+            self.assertEqual((stalls.status, stalls.times),
+                             ('INFO', ['13:45:56 upstream GPU 112 ms at FG on 13:45:56']))
 
 
 if __name__ == '__main__':

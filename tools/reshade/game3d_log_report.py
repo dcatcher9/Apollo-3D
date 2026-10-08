@@ -165,15 +165,23 @@ TEARDOWN_TAIL_S = 10.0
 DISPLAY_SCALING = re.compile(r'display scaling limits the game: it renders at (\d+)x(\d+) on a (\d+)x(\d+) display '
                              r'because Windows display scaling is (\d+)%')
 HOST_LINE = re.compile(r'^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\.(\d{3})\]: (\w+): (.*)$')
-# An NVENC stall logs its warning and then its completion or timeout line for the same frame, each with the
-# producer's state (nvenc_base.cpp): one stall per frame, classified by its last line.
+# An NVENC stall logs its warning and then its completion, timeout or failure line for the same frame, each but a
+# failure with the producer's state (nvenc_base.cpp): one stall per frame, classified by its last line, which gives
+# its length ('in N ms' or 'after N ms') and when its input completed (done_at_N).
 NVENC_FRAME = re.compile(r'NvEnc: frame (\d+) ')
+NVENC_ELAPSED = re.compile(r'(?:in|after) (\d+) ms')
+NVENC_INPUT_DONE = re.compile(r'input_producer=done_at_(\d+)ms')
 NVENC_SAME_STALL_S = 5
+# The producer is polled every 25 ms while its input is pending: an encoder that finished more than two polls after
+# its input completed delayed the picture itself too.
+NVENC_ENCODER_TAIL_MS = 50
 # A game's frame-generation switch or runtime reset reconfigures its own GPU work, which can keep the host's
 # conversion off the GPU for a picture or two (an upstream stall, nvenc_base.cpp). Live 10-04..10-07 every completed
 # upstream stall but E33's came -0.8..+0.8 s from such a line; the add-on's log drains asynchronously, so its line
-# can follow the event.
+# can follow the event. Such a cause explains a frozen picture no longer than the encoder's own 250 ms budget
+# (10-04..10-07: 112-209 ms); a longer one (Stellar Blade 10-06 FG on: 690 ms) still warns.
 NVENC_TRANSITION_S = 2.0
+NVENC_TRANSITION_MAX_MS = 250
 
 # ReShade and game noise that says nothing about Game 3D.
 BENIGN = (
@@ -1819,7 +1827,8 @@ def host_checks(path: Path, start: datetime, end: datetime,
                 transitions: list[tuple[float, str]] = ()) -> list[Check]:
     """The host log's checks for this session; `transitions` are gpu_transitions() on the game log's clock."""
     checks: list[Check] = []
-    stalls, connects, errors, fits = [], 0, [], []
+    stalls: list[dict] = []
+    connects, errors, fits = 0, [], []
     open_stalls: dict[int, int] = {}  # NVENC frame -> index in stalls of its stall.
     span = []
     for line in path.read_text(encoding='utf-8', errors='replace').splitlines():
@@ -1832,17 +1841,25 @@ def host_checks(path: Path, start: datetime, end: datetime,
             continue
         t = when.hour * 3600 + when.minute * 60 + when.second
         level, text = m.group(3), m.group(4)
-        if 'input_producer=' in text:
-            kind = 'encoder-side' if 'done_by' in text else 'upstream GPU' if 'upstream' in text else 'unknown'
-            timed_out = 'encode wait timeout' in text
-            frame = NVENC_FRAME.search(text)
+        frame = NVENC_FRAME.search(text)
+        if 'input_producer=' in text or (frame and level == 'Error'):
             index = open_stalls.get(int(frame.group(1))) if frame else None
-            if index is not None and 0 <= t - stalls[index][0] <= NVENC_SAME_STALL_S:
-                stalls[index] = (*stalls[index][:2], kind, timed_out)
-            else:
+            if index is None or not 0 <= t - stalls[index]['at'] <= NVENC_SAME_STALL_S:
                 if frame:
                     open_stalls[int(frame.group(1))] = len(stalls)
-                stalls.append((t, t + int(m.group(2)) / 1000, kind, timed_out))
+                index = len(stalls)
+                stalls.append({'at': t, 'precise': t + int(m.group(2)) / 1000, 'kind': 'unknown'})
+            stall = stalls[index]
+            if 'input_producer=' in text:
+                stall['kind'] = ('encoder-side' if 'done_by' in text else 'upstream GPU' if 'upstream' in text
+                                 else 'unknown')
+            # Only a completion line ends a stall well: a timeout, a removed device or a failed wait does not.
+            stall['end'] = ('completed' if 'completed after soft timeout' in text else 'timed out'
+                            if 'encode wait timeout' in text else 'failed' if level == 'Error' else None)
+            elapsed = NVENC_ELAPSED.search(text) if stall['end'] else None
+            done = NVENC_INPUT_DONE.search(text)
+            stall['ms'] = int(elapsed.group(1)) if elapsed else None
+            stall['done_ms'] = int(done.group(1)) if done else None
         if 'ReShade SBS connected' in text:
             connects += 1
         if 'ReShade SBS: game eyes' in text:
@@ -1858,27 +1875,35 @@ def host_checks(path: Path, start: datetime, end: datetime,
         checks.append(Check('FAIL' if level == 'Warning' else 'WARN', 'Host size', text))
 
     def transition(at: float) -> str | None:
-        """The game's GPU reconfiguration within NVENC_TRANSITION_S of a host time (both seconds of a day)."""
-        for mark, label in transitions:
-            gap = (at - mark) % 86400
-            if min(gap, 86400 - gap) <= NVENC_TRANSITION_S:
-                return f'{label} {clock(mark)}'
-        return None
+        """The game's GPU reconfiguration nearest a host time, within NVENC_TRANSITION_S (both seconds of a day)."""
+        def gap(mark: tuple[float, str]) -> float:
+            return min((at - mark[0]) % 86400, (mark[0] - at) % 86400)
+        nearest = min(transitions, key=gap, default=None)
+        return f'{nearest[1]} {clock(nearest[0])}' if nearest and gap(nearest) <= NVENC_TRANSITION_S else None
 
     # A completed upstream stall at the game's own GPU reconfiguration delayed one picture by design (the encoder's
-    # budget starts when its input completes); an encoder-side or timed-out one, or one with no such cause, did not.
-    causes = [transition(precise) if kind == 'upstream GPU' and not timed_out else None
-              for _, precise, kind, timed_out in stalls]
-    explained = [f'{clock(at)} {kind} at {cause}' for (at, _, kind, _), cause in zip(stalls, causes) if cause]
-    unexplained = [f'{clock(at)} {kind}' + (' timed out' if timed_out else '')
-                   for (at, _, kind, timed_out), cause in zip(stalls, causes) if not cause]
+    # budget starts when its input completes), within the encoder's own budget. An encoder that also took longer
+    # than its input, a longer freeze, a timeout or failure, or a stall with no such cause did not.
+    explained, unexplained = [], []
+    for stall in stalls:
+        kind, end, ms, done_ms = stall['kind'], stall['end'], stall['ms'], stall['done_ms']
+        if ms is not None and done_ms is not None and ms - done_ms > NVENC_ENCODER_TAIL_MS:
+            kind += ' + encoder-side'
+        cause = transition(stall['precise'])
+        line = ' '.join(part for part in (
+            clock(stall['at']), kind, f'{ms} ms' if ms is not None else '',
+            end if end in ('timed out', 'failed') else '', f'at {cause}' if cause else '') if part)
+        fits = (kind == 'upstream GPU' and end == 'completed' and done_ms is not None and ms is not None
+                and ms <= NVENC_TRANSITION_MAX_MS)
+        (explained if cause and fits else unexplained).append(line)
     if unexplained:
         checks.append(Check('WARN', 'Encoder stalls', f'{len(unexplained)}' + (
             f"; {len(explained)} more upstream GPU at the game's FG switches or resets" if explained else ''),
             unexplained[:6]))
     elif explained:
-        checks.append(Check('INFO', 'Encoder stalls', f"{len(explained)} upstream GPU at the game's FG switches or "
-                            "resets (its own GPU reconfiguration delayed the host's conversion)", explained[:6]))
+        checks.append(Check('INFO', 'Encoder stalls', f"{len(explained)} upstream GPU of at most "
+                            f"{NVENC_TRANSITION_MAX_MS} ms at the game's FG switches or resets (its own GPU "
+                            "reconfiguration delayed the host's conversion)", explained[:6]))
     else:
         checks.append(Check('PASS', 'Encoder stalls', 'none'))
     if errors:

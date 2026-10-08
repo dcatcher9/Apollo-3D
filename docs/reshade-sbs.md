@@ -5018,11 +5018,14 @@ The encoder's 250 ms completion budget then starts when that input completes (2 
 default GPU timeout). On 10-06 the game's first frame-generation enable kept the host's own
 conversion off the GPU for about 300 ms: the fixed budget failed the encoder at 251 ms with
 `input_producer=pending_at_251ms`, blocked new encoders, rebuilt the session, detached the receiver
-and so made the game build a second export ring. Such a stall now delays one picture. Live 10-06 and 10-07
-the game's frame-generation switches and runtime resets caused them (Stellar Blade, and The Witcher 3 losing focus
-with FG turning off: 165 ms); the add-on cannot avoid them, since it never delays a Signal, and the host waits on no
-game fence on the GPU. The [first-run report](../tools/reshade/README.md#first-run-of-a-new-game) lists them as INFO
-and still warns on encoder-side stalls, timeouts and upstream stalls with no such transition.
+and so made the game build a second export ring. Such a stall now delays one picture. Live 10-04 to 10-07
+most such stalls (all but E33 10-06's two) came at the game's frame-generation switches or runtime resets
+(Stellar Blade, and The Witcher 3 losing focus with FG turning off: 165 ms); the add-on cannot avoid them, since it
+never delays a Signal, and the host waits on no game fence on the GPU. The
+[first-run report](../tools/reshade/README.md#first-run-of-a-new-game) lists one there as INFO only while it froze
+its picture no longer than the encoder's own budget and the encoder finished with its input; it still warns on a
+longer one (Stellar Blade's 690 ms at its 10-06 FG enable), on encoder-side delay, timeouts and failures, and on
+upstream stalls with no such transition.
 
 The encoder of an independent provider, and of desktop Host SBS, keeps up to two pictures in flight
 (`video::nvenc_pipeline_depth()`, fixed per encoder as `nvenc_base::pipeline_depth()`; plain
