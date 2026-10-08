@@ -89,6 +89,15 @@ namespace video {
                presentation_timestamp;
     }
 
+    /** The captured pixels' timestamp that the capture and conversion diagnostics age an image by,
+     *  or none for an image whose pixels capture skipped. While an external export (Game 3D) owns
+     *  the stream such an image carries the last copied desktop's timestamps, but the encoder
+     *  converts the export: its age describes nothing encoded and grew without bound (live 10-07,
+     *  115 s). The export's age is the output stage's, from its rendered content timestamp. */
+    inline optional_frame_time_point_t diagnostic_captured_content_timestamp(const platf::img_t &img) noexcept {
+      return img.pixels_skipped ? std::nullopt : select_content_timestamp(img.content_timestamp, img.frame_timestamp);
+    }
+
     /** The first output of a replacement encoder has no preceding input-image proof. */
     [[nodiscard]] constexpr bool encoder_input_was_retained(
       const bool first_encoder_output,

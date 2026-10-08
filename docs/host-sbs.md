@@ -1275,7 +1275,11 @@ as V2 rendered-field authority.
 
 The host's CPU stage logs distinguish content age from time spent processing a frame. Content age
 begins at the captured pixels' presentation timestamp, so repeated output can be older even when
-its delivery is fast. Diagnostics report fresh and repeated output separately, along with capture
+its delivery is fast. A capture whose desktop pixels were skipped because an external export (Game 3D)
+owned the stream carries only the last copied desktop's timestamps, and the encoder converts the export
+instead: it records no capture or conversion content age and no handoff to conversion
+(`video::detail::diagnostic_captured_content_timestamp`). Before 10-07 those ages grew by the log
+window, to 115 s, for pixels nothing encoded. The export's own age is the output stage's. Diagnostics report fresh and repeated output separately, along with capture
 handoff, conversion, NVENC encode/retrieve, encoded-packet queue residence, and packetization time.
 The standard video-header processing-latency field measures the current conversion-pass start
 through send-side packetization admission, including that pass, NVENC, and encoded-packet queue

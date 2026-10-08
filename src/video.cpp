@@ -67,8 +67,10 @@ namespace video {
 
       void record(platf::img_t &img) {
         const auto ready = detail::diagnostic_clock_t::now();
-        img.diagnostic_capture_ready_timestamp = ready;
-        const auto timestamp = detail::select_content_timestamp(img.content_timestamp, img.frame_timestamp);
+        // An image whose pixels capture skipped is not the encoded content: it has neither a
+        // content age nor a handoff to conversion (detail::diagnostic_captured_content_timestamp).
+        img.diagnostic_capture_ready_timestamp = img.pixels_skipped ? detail::diagnostic_timestamp_t {} : ready;
+        const auto timestamp = detail::diagnostic_captured_content_timestamp(img);
         const auto kind = content.observe(timestamp);
         if (kind != detail::diagnostic_content_e::unknown) {
           log_diagnostic_elapsed(
@@ -118,7 +120,7 @@ namespace video {
 
       void begin_conversion(const platf::img_t &img) {
         const auto entered = detail::diagnostic_clock_t::now();
-        const auto timestamp = detail::select_content_timestamp(img.content_timestamp, img.frame_timestamp);
+        const auto timestamp = detail::diagnostic_captured_content_timestamp(img);
         const auto content_kind = input_content.observe(timestamp);
         if (content_kind != detail::diagnostic_content_e::unknown) {
           log_diagnostic_elapsed(

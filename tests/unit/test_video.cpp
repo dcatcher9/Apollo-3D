@@ -204,6 +204,28 @@ namespace {
     EXPECT_EQ(presentation_t1, std::chrono::steady_clock::time_point {20ms});
   }
 
+  TEST(VideoFrameDiagnosticsTest, AnImageWhosePixelsCaptureSkippedHasNoContentAge) {
+    // W3 10-07: while Game 3D owned the stream, capture forwarded images that kept the last copied
+    // desktop's timestamps, and their "retained content age" grew 20 s per log window to 115 s.
+    using content = video::detail::diagnostic_content_e;
+    const auto desktop = std::chrono::steady_clock::time_point {10ms};
+    platf::img_t img;
+    img.content_timestamp = desktop;
+    img.frame_timestamp = desktop + 5ms;
+    EXPECT_EQ(video::detail::diagnostic_captured_content_timestamp(img), desktop);
+
+    video::detail::diagnostic_content_tracker_t tracker;
+    EXPECT_EQ(tracker.observe(video::detail::diagnostic_captured_content_timestamp(img)), content::new_content);
+    img.pixels_skipped = true;
+    img.frame_timestamp = desktop + 100s;
+    EXPECT_FALSE(video::detail::diagnostic_captured_content_timestamp(img));
+    EXPECT_EQ(tracker.observe(video::detail::diagnostic_captured_content_timestamp(img)), content::unknown);
+    // The first desktop copied after the export is new content again.
+    img.pixels_skipped = false;
+    img.content_timestamp = desktop + 101s;
+    EXPECT_EQ(tracker.observe(video::detail::diagnostic_captured_content_timestamp(img)), content::new_content);
+  }
+
   TEST(VideoProcessingLatencyTest, OldContentAndCadenceDoNotInflateCurrentProcessingWork) {
     const auto content = std::chrono::steady_clock::time_point {10ms};
     const auto conversion_started = content + 30s;
@@ -259,6 +281,22 @@ namespace {
     EXPECT_NE(wire_body.find("packet->content_timestamp,\n            packet->frame_timestamp"), std::string::npos);
     EXPECT_NE(wire_body.find("stage_diagnostics->repeated_content_age"), std::string::npos);
     EXPECT_NE(wire_body.find("frame_header.frame_processing_latency = 0;"), std::string::npos);
+  }
+
+  TEST(VideoFrameDiagnosticsTest, CaptureAndConversionAgeOnlyImagesWithCapturedPixels) {
+    const auto video_source = read_source_file(SUNSHINE_SOURCE_DIR "/src/video.cpp");
+    ASSERT_FALSE(video_source.empty());
+    const auto record = video_source.find("void record(platf::img_t &img) {");
+    const auto begin = video_source.find("void begin_conversion(const platf::img_t &img) {");
+    ASSERT_NE(record, std::string::npos);
+    ASSERT_NE(begin, std::string::npos);
+    const auto record_body = video_source.substr(record, video_source.find("\n      }\n", record) - record);
+    const auto begin_body = video_source.substr(begin, video_source.find("\n      }\n", begin) - begin);
+    // A skipped image's capture timestamps age neither stage, and its handoff starts no conversion delay.
+    EXPECT_NE(record_body.find("detail::diagnostic_captured_content_timestamp(img)"), std::string::npos);
+    EXPECT_NE(record_body.find("img.diagnostic_capture_ready_timestamp = img.pixels_skipped ? detail::diagnostic_timestamp_t {} : ready;"), std::string::npos);
+    EXPECT_NE(begin_body.find("detail::diagnostic_captured_content_timestamp(img)"), std::string::npos);
+    EXPECT_EQ(video_source.find("select_content_timestamp(img.content_timestamp, img.frame_timestamp)"), std::string::npos);
   }
 
   TEST(HostSbsTelemetryTest, CompletedHealthCannotBecomePublicationAuthority) {
