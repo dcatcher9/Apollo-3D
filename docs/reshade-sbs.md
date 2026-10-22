@@ -5068,7 +5068,11 @@ never delays a Signal, and the host waits on no game fence on the GPU. The
 [first-run report](../tools/reshade/README.md#first-run-of-a-new-game) lists one there as INFO only while it froze
 its picture no longer than the encoder's own budget and the encoder finished with its input; it still warns on a
 longer one (Stellar Blade's 690 ms at its 10-06 FG enable), on encoder-side delay, timeouts and failures, and on
-upstream stalls with no such transition.
+upstream stalls with no such transition. E33 on 10-22 had one of those, 293 ms with no transition: the game itself
+presented nothing then (its Streamline camera and depth tag were 313 ms old at its next Present, after a camera cut),
+no add-on or host work was logged in it, and the host finished about 6 ms before that Present, so the stream showed
+the game's own freeze. It still warns: it froze the picture longer than the budget, and the log cannot tell a
+whole-GPU freeze of the game's making from one of the host's.
 
 The encoder of an independent provider, and of desktop Host SBS, keeps up to two pictures in flight
 (`video::nvenc_pipeline_depth()`, fixed per encoder as `nvenc_base::pipeline_depth()`; plain
