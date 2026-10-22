@@ -917,7 +917,20 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_state;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_frame_stats;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ocr_box_record;  ///< Exact-frame OCR8 only when subtitle_evidence_is_exact_frame() succeeds.
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_locator_state;  ///< Exact-frame SLR13 only when subtitle_evidence_is_exact_frame() succeeds.
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_locator_state;  ///< Current UIP2 header/controller, valid only with its exact OCR8/source completion.
+    // Diagnostic views of the same joined contour observation. They never supply independent
+    // geometry authority; the final parallax is the sole renderer field. Reuse holds all views.
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_contour_support;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_contour_field_pin;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_contour_distance;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_contour_identity;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_contour_history;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_contour_source;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_ocr_probability;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_gaussian_weight;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_gaussian_blend;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_gaussian_vertical_conditioned;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_gaussian_control;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> gpu_trace_ring;  ///< Optional diagnostic-only rolling completion trace; never rendering authority.
     std::shared_ptr<const parallax_v2_shader_provenance_t>
       parallax_v2_shader_provenance;  ///< Exact producer shader closure when V2 is active.
@@ -1166,6 +1179,27 @@ namespace models {
     bool failed = false;
   };
 
+  /** Research-only aliases of existing OCR working resources after one joined completion.
+   * These are not completed snapshots or rendering authority. ComPtr retains their lifetime,
+   * not their contents: the owning evaluation thread must synchronously copy them before its
+   * next estimator input. The raw transaction/resolve constants must establish whether optional
+   * OCR actually ran; a completed depth owner alone does not authenticate working P/cells/RGB.
+   */
+  struct ocr_working_research_views_t {
+    std::uint64_t completed_frame_id = 0u;
+    std::uint64_t observation_timestamp_us = 0u;
+    depth_input_region_t input_region {};
+    std::uint32_t field_width = 0u;
+    std::uint32_t field_height = 0u;
+    depth_tensor_content_rect_t field_content {};
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> working_probability;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> source_band;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> cell_stats;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> transaction;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> dispatch_arguments;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> resolve_constants;
+  };
+
   class video_depth_estimator {
   public:
     /**
@@ -1290,6 +1324,15 @@ namespace models {
      */
     [[nodiscard]] bool publication_is_current(
       const host_sbs_gpu_completion_receipt::expected_t &publication
+    ) const noexcept;
+
+    /** Borrow existing working OCR resources for an offline, synchronous research copy only.
+     * Call after consuming this exact completion and before submitting another input, on the
+     * estimator's owning thread. Rejects pending/unavailable/terminal or mismatched publications;
+     * does not allocate, dispatch, poll, read back, or alter the completed rendering tuple.
+     */
+    [[nodiscard]] std::optional<ocr_working_research_views_t> ocr_working_views_for_evaluation(
+      std::uint64_t expected_completed_frame_id
     ) const noexcept;
 
   private:

@@ -28,19 +28,13 @@ namespace {
     std::copy_n(words.begin() + receipt::parallax_state_begin, geometry_before.size(), geometry_before.begin());
     std::copy_n(words.begin() + receipt::subtitle_condition_begin, condition_before.size(), condition_before.begin());
     const auto locator = receipt::subtitle_locator_begin;
-    // Completion snapshots copy only the compact header, followed immediately by condition and
-    // geometry slices. Full SLR rectangle blocks and its adaptive tail are absent from this ABI.
-    static_assert(receipt::subtitle_locator_word_count == 32u);
-    words[locator + 2u] = 1u | 4u;
-    words[locator + 3u] = 1u;
-    words[locator + 4u] = 1u;
-    words[locator + 18u] = std::bit_cast<std::uint32_t>(0.01f);
-    words[locator + 19u] = 1u;
-    words[locator + 20u] = 1u;
-    words[locator + 24u] = 2u;
-    constexpr std::array<std::uint32_t, 4u> cover {180u, 360u, 590u, 370u};
-    std::copy(cover.begin(), cover.end(), words.begin() + locator + 5u);
-    words[locator + 9u] = (cover[2u] - cover[0u]) * (cover[3u] - cover[1u]);
+    // The complete40-word controller is inside the receipt, before condition and geometry.
+    static_assert(receipt::subtitle_locator_word_count == 40u);
+    words[locator + v2::subtitle_plane_flags_word] = v2::subtitle_plane_current_valid_flag;
+    words[locator + v2::subtitle_plane_current_slot_mask_word] = 1u;
+    words[locator + v2::subtitle_plane_adaptive_offset] = 1u;
+    words[locator + v2::subtitle_plane_adaptive_offset + 3u] = std::bit_cast<std::uint32_t>(0.01f);
+    words[locator + v2::subtitle_plane_adaptive_offset + 12u] = std::bit_cast<std::uint32_t>(v2::display_budget());
     EXPECT_TRUE(std::equal(geometry_before.begin(), geometry_before.end(), words.begin() + receipt::parallax_state_begin));
     EXPECT_TRUE(std::equal(condition_before.begin(), condition_before.end(), words.begin() + receipt::subtitle_condition_begin));
   }
@@ -50,14 +44,20 @@ namespace {
     const auto condition = receipt::subtitle_condition_begin;
     words[condition] = v2::subtitle_condition_param_schema;
     words[condition + 1u] = v2::subtitle_condition_param_tag;
-    words[condition + 2u] = words[locator + 20u];
+    words[locator + v2::subtitle_plane_flags_word] = v2::subtitle_plane_current_valid_flag;
+    words[locator + v2::subtitle_plane_current_slot_mask_word] = 1u;
+    words[condition + 2u] = 1u;
     words[condition + 4u] = 2u;
-    words[condition + 5u] = words[locator + 18u];
+    words[condition + 5u] = words[locator + v2::subtitle_plane_adaptive_offset + 3u];
   }
 
   void publish_zero_condition(receipt::snapshot_words_t &words) {
     std::fill_n(words.begin() + receipt::subtitle_condition_begin,
       receipt::subtitle_condition_word_count, 0u);
+    words[receipt::subtitle_condition_begin] = v2::subtitle_condition_param_schema;
+    words[receipt::subtitle_condition_begin + 1u] = v2::subtitle_condition_param_tag;
+    words[receipt::subtitle_locator_begin + v2::subtitle_plane_flags_word] = 0u;
+    words[receipt::subtitle_locator_begin + v2::subtitle_plane_current_slot_mask_word] = 0u;
   }
 
   TEST(HostSbsGpuCompletionReceipt, ConditionalInferAuthenticatesNativeGroupedLimiterCounts) {
@@ -148,6 +148,13 @@ namespace {
         expected.observation_timestamp_us = owner_timestamp_us + gap * 60'000u;
         auto words = fixture::snapshot(expected);
         fixture::put_u64(words, receipt::history_owner_begin + 8u, owner_timestamp_us);
+        fixture::put_u64(words, receipt::subtitle_locator_begin + v2::subtitle_plane_observation_timestamp_offset, owner_timestamp_us);
+        v2::state_words_t state {};
+        std::copy_n(words.begin() + receipt::parallax_state_begin, state.size(), state.begin());
+        state[v2::gain_last_observation_low] = static_cast<std::uint32_t>(owner_timestamp_us);
+        state[v2::gain_last_observation_high] = static_cast<std::uint32_t>(owner_timestamp_us >> 32u);
+        state[v2::camera_center_integrity_bits] = v2::camera_center_integrity_for_state_words(state);
+        std::copy(state.begin(), state.end(), words.begin() + receipt::parallax_state_begin);
         const auto held = receipt::decode(words, expected);
         ASSERT_TRUE(held);
         EXPECT_TRUE(held->depth_cache_authorized());
@@ -175,7 +182,7 @@ namespace {
     EXPECT_TRUE(decoded->subtitle_is_current());
   }
 
-  TEST(HostSbsGpuCompletionReceipt, CollapsedGeometryRetainsCurrentCoverageWithZeroConditioning) {
+  TEST(HostSbsGpuCompletionReceipt, CollapsedGeometryClearsCurrentSlotsWithZeroConditioning) {
     const auto expected = fixture::expected(graph::work_flag_e::optional_ocr);
     auto words = fixture::snapshot(expected, graph::branch_e::infer);
     auto state = v2::state_initial_words;
@@ -195,11 +202,14 @@ namespace {
     std::copy(state.begin(), state.end(), words.begin() + receipt::parallax_state_begin);
     words[receipt::history_owner_begin] = 0u;
     words[receipt::depth_frame_state_begin + 3u] = std::bit_cast<std::uint32_t>(0.0f);
+    publish_zero_condition(words);
     ASSERT_TRUE(receipt::decode(words, expected));  // Invalid geometry itself is a valid receipt.
 
-    publish_retained_coverage(words);  // OCR ownership continues independently of depth validity.
+    publish_retained_coverage(words);
+    EXPECT_FALSE(receipt::decode(words, expected));  // Current slots cannot survive invalid geometry.
+    publish_zero_condition(words);
     const auto decoded = receipt::decode(words, expected);
-    EXPECT_TRUE(decoded);  // The shader copies exact Base and deliberately publishes zero6.
+    EXPECT_TRUE(decoded);  // The shader copies exact Base and publishes SCP4 with zero payload.
     if (decoded) {
       EXPECT_FALSE(decoded->geometry_valid);
       EXPECT_FALSE(decoded->depth_cache_authorized());
@@ -255,7 +265,7 @@ namespace {
       EXPECT_FALSE(receipt::decode(words, expected));
       publish_zero_condition(words);
       EXPECT_TRUE(receipt::decode(words, expected));
-      words[receipt::subtitle_locator_begin + 26u] = 1u;
+      words[receipt::subtitle_locator_begin + v2::subtitle_plane_cut_epoch_word] = 1u;
       publish_active_condition(words);
       EXPECT_TRUE(receipt::decode(words, expected));
     }
@@ -278,6 +288,7 @@ namespace {
     EXPECT_FALSE(decoded->depth_cache_authorized());
     EXPECT_TRUE(decoded->subtitle_is_current());
     publish_zero_condition(words);
+    publish_retained_coverage(words);  // Preserve claimed current slots while forging inactive SCP4.
     EXPECT_FALSE(receipt::decode(words, expected));
   }
 
@@ -303,7 +314,7 @@ namespace {
     ASSERT_TRUE(receipt::decode(good, expected));
     for (const auto subtitle_frame : {6u, 8u, 11u, 12u}) {
       auto words = good;
-      fixture::put_u64(words, receipt::subtitle_locator_begin + 22u, subtitle_frame);
+      fixture::put_u64(words, receipt::subtitle_locator_begin + v2::subtitle_plane_frame_offset, subtitle_frame);
       EXPECT_FALSE(receipt::decode(words, expected));
     }
     for (const auto retired_work : {8u, 16u}) {
@@ -402,49 +413,158 @@ namespace {
     expected.analysis_generation = 0u;  // Full-source domains legitimately use generation zero.
     auto words = fixture::snapshot(expected, graph::branch_e::infer);
     ASSERT_TRUE(receipt::decode(words, expected));
-    fixture::put_u64(words, receipt::subtitle_locator_begin + 10u, expected.domain_tag);
+    fixture::put_u64(words, receipt::subtitle_locator_begin + v2::subtitle_plane_analysis_generation_offset, expected.domain_tag);
     EXPECT_FALSE(receipt::decode(words, expected));
     words = fixture::snapshot(expected, graph::branch_e::infer);
-    fixture::put_u64(words, receipt::subtitle_locator_begin + 22u, expected.frame_id - 1u);
+    fixture::put_u64(words, receipt::subtitle_locator_begin + v2::subtitle_plane_frame_offset, expected.frame_id - 1u);
     EXPECT_FALSE(receipt::decode(words, expected));
     words = fixture::snapshot(expected, graph::branch_e::infer);
     words[receipt::subtitle_locator_begin + 2u] |= 1u << 31u;
     EXPECT_FALSE(receipt::decode(words, expected));
   }
 
-  TEST(HostSbsGpuCompletionReceipt, ConditionPublicationMustMatchCurrentOrProvisionalLocator) {
+  TEST(HostSbsGpuCompletionReceipt, ConditionPublicationMustMatchFullCurrentController) {
     const auto expected = fixture::expected();
     const auto locator = receipt::subtitle_locator_begin;
     const auto condition = receipt::subtitle_condition_begin;
     auto words = fixture::snapshot(expected);
-    words[condition] = v2::subtitle_condition_param_schema;
-    EXPECT_FALSE(receipt::decode(words, expected));  // An empty observation requires canonical zeros.
-
-    words[locator + 20u] = 1u;
-    words[locator + 24u] = 2u;
-    words[locator + 18u] = std::bit_cast<std::uint32_t>(0.01f);
-    words[condition + 1u] = v2::subtitle_condition_param_tag;
-    words[condition + 2u] = 1u;
-    words[condition + 4u] = 2u;
-    words[condition + 5u] = words[locator + 18u];
+    ASSERT_TRUE(receipt::decode(words, expected));  // Legal empty has schema/tag and zero payload.
+    words[condition + 5u] = 1u;
+    EXPECT_FALSE(receipt::decode(words, expected));
+    words = fixture::snapshot(expected);
+    publish_retained_coverage(words);
+    publish_active_condition(words);
     ASSERT_TRUE(receipt::decode(words, expected));
-    words[locator + 24u] = 1u;
     words[condition + 4u] = 1u;
-    EXPECT_FALSE(receipt::decode(words, expected));  // Held coverage also requires immediate full pin.
-    words[locator + 24u] = 2u;
+    EXPECT_FALSE(receipt::decode(words, expected));  // No birth or per-pixel fade.
     words[condition + 4u] = 2u;
     words[condition + 5u] ^= 1u;
     EXPECT_FALSE(receipt::decode(words, expected));
 
-    words[locator + 2u] = v2::subtitle_locator_provisional_current_flag;
-    words[locator + v2::subtitle_locator_provisional_target_word] = std::bit_cast<std::uint32_t>(0.02f);
-    words[locator + v2::subtitle_locator_provisional_fade_word] = 1u;
-    words[condition + 4u] = 1u;
-    words[condition + 5u] = words[locator + v2::subtitle_locator_provisional_target_word];
+    publish_active_condition(words);
+    for (const auto offset : {v2::subtitle_plane_reserved_offset,
+           v2::subtitle_plane_adaptive_offset + 2u,
+           v2::subtitle_plane_adaptive_offset + 12u,
+           v2::subtitle_plane_adaptive_offset + 14u}) {
+      auto corrupt = words;
+      corrupt[locator + offset] = 0xffffffffu;
+      EXPECT_FALSE(receipt::decode(corrupt, expected));
+    }
+    words[locator + v2::subtitle_plane_current_slot_mask_word] = 5u;
+    EXPECT_FALSE(receipt::decode(words, expected));  // Every current slot must be contiguous.
+  }
+
+  TEST(HostSbsGpuCompletionReceipt, AbstentionCannotClaimAnExecutedValidEmptyOcrRecord) {
+    const auto expected = fixture::expected(graph::work_flag_e::subtitle_observation);
+    auto words = fixture::snapshot(expected, graph::branch_e::infer, false);
+    ASSERT_TRUE(receipt::decode(words, expected));
+    words[receipt::subtitle_locator_begin + v2::subtitle_plane_flags_word] = v2::subtitle_plane_current_valid_flag;
     EXPECT_FALSE(receipt::decode(words, expected));
-    words[locator + v2::subtitle_locator_provisional_fade_word] = 2u;
-    words[condition + 4u] = 2u;
+  }
+
+  TEST(HostSbsGpuCompletionReceipt, CurrentHistoryResetMaskIsAnEightBitSubsetOfCurrentSlots) {
+    const auto expected = fixture::expected();
+    const auto locator = receipt::subtitle_locator_begin;
+    auto words = fixture::snapshot(expected, graph::branch_e::infer);
+    publish_retained_coverage(words);
+    publish_active_condition(words);
+    words[locator + v2::subtitle_plane_history_reset_mask_word] = 1u;
+    const auto valid = receipt::decode(words, expected);
+    ASSERT_TRUE(valid);
+    EXPECT_TRUE(valid->subtitle_is_current());
+    // This proves header integrity, not the reduction or prior-P witness that produced the bit.
+    for (const auto forged : {2u, 256u, 0xffffffffu}) {
+      auto corrupt = words;
+      corrupt[locator + v2::subtitle_plane_history_reset_mask_word] = forged;
+      EXPECT_FALSE(receipt::decode(corrupt, expected)) << "mask=" << forged;
+    }
+    for (auto reserved = v2::subtitle_plane_reserved_offset;
+         reserved < v2::subtitle_plane_reserved_offset + v2::subtitle_plane_reserved_word_count; ++reserved) {
+      auto corrupt = words;
+      corrupt[locator + reserved] = 1u;
+      EXPECT_FALSE(receipt::decode(corrupt, expected));
+    }
+    for (const auto malformed : {5u, 6u, 7u, 13u, 14u, 15u, 16u}) {
+      auto malformed_warmup = words;
+      malformed_warmup[locator + v2::subtitle_plane_warmup_word] = malformed;
+      EXPECT_FALSE(receipt::decode(malformed_warmup, expected)) << "warmup=" << malformed;
+    }
+    for (const auto legal : {0u, 1u, 2u, 3u, 4u, 8u, 9u, 10u, 11u, 12u}) {
+      auto valid_warmup = words;
+      valid_warmup[locator + v2::subtitle_plane_warmup_word] = legal;
+      EXPECT_TRUE(receipt::decode(valid_warmup, expected)) << "warmup=" << legal;
+    }
+    publish_zero_condition(words);
+    EXPECT_FALSE(receipt::decode(words, expected)); // No slots cannot carry a reset witness.
+    words[locator + v2::subtitle_plane_history_reset_mask_word] = 0u;
     EXPECT_TRUE(receipt::decode(words, expected));
+  }
+
+  TEST(HostSbsGpuCompletionReceipt, WholeTupleReuseMayHoldItsOwnersResetMaskWithoutANewObservation) {
+    const auto expected = fixture::expected();
+    const auto locator = receipt::subtitle_locator_begin;
+    auto words = fixture::snapshot(expected, graph::branch_e::reuse);
+    publish_retained_coverage(words);
+    publish_active_condition(words);
+    words[locator + v2::subtitle_plane_history_reset_mask_word] = 1u;
+    const auto held = receipt::decode(words, expected);
+    ASSERT_TRUE(held);
+    EXPECT_EQ(held->subtitle, receipt::subtitle_disposition_e::held_with_depth);
+    EXPECT_EQ(held->subtitle_frame_id, expected.baseline_frame_id);
+    EXPECT_FALSE(held->subtitle_is_current());
+  }
+
+  TEST(HostSbsGpuCompletionReceipt, EqualSourceClockReuseHoldsOriginalOwnerWithoutNewObservation) {
+    const auto expected = fixture::expected();
+    auto words = fixture::snapshot(expected);
+    fixture::put_u64(words, receipt::history_owner_begin + 8u, expected.observation_timestamp_us);
+    fixture::put_u64(words, receipt::subtitle_locator_begin + v2::subtitle_plane_observation_timestamp_offset,
+      expected.observation_timestamp_us);
+    v2::state_words_t state {};
+    std::copy_n(words.begin() + receipt::parallax_state_begin, state.size(), state.begin());
+    state[v2::gain_last_observation_low] = static_cast<std::uint32_t>(expected.observation_timestamp_us);
+    state[v2::gain_last_observation_high] = static_cast<std::uint32_t>(expected.observation_timestamp_us >> 32u);
+    state[v2::camera_center_integrity_bits] = v2::camera_center_integrity_for_state_words(state);
+    std::copy(state.begin(), state.end(), words.begin() + receipt::parallax_state_begin);
+    const auto held = receipt::decode(words, expected);
+    ASSERT_TRUE(held);
+    EXPECT_EQ(held->subtitle, receipt::subtitle_disposition_e::held_with_depth);
+    EXPECT_EQ(held->subtitle_frame_id, expected.baseline_frame_id);
+    EXPECT_FALSE(held->subtitle_is_current());
+    fixture::put_u64(words, receipt::history_owner_begin + 8u, expected.observation_timestamp_us + 1u);
+    EXPECT_FALSE(receipt::decode(words, expected));
+  }
+
+  TEST(HostSbsGpuCompletionReceipt, CurrentPlaneRequiresExactSourceClockAndCompleteDomain) {
+    const auto expected = fixture::expected();
+    for (const auto branch : {graph::branch_e::infer, graph::branch_e::reuse}) {
+      const auto good = fixture::snapshot(expected, branch);
+      ASSERT_TRUE(receipt::decode(good, expected));
+      for (std::size_t index = 0u; index < expected.subtitle_domain.size(); ++index) {
+        auto bad = good;
+        bad[receipt::subtitle_locator_begin + v2::subtitle_plane_source_extent_offset + index] ^= 1u;
+        EXPECT_FALSE(receipt::decode(bad, expected));
+      }
+      auto bad = good;
+      ++bad[receipt::subtitle_locator_begin + v2::subtitle_plane_observation_timestamp_offset];
+      EXPECT_FALSE(receipt::decode(bad, expected));
+    }
+  }
+
+  TEST(HostSbsGpuCompletionReceipt, InvalidProbeRetainsCurrentUnionWithoutConditioningAuthority) {
+    const auto expected = fixture::expected();
+    auto words = fixture::snapshot(expected, graph::branch_e::infer);
+    publish_retained_coverage(words);
+    publish_active_condition(words);
+    const auto tail = receipt::subtitle_locator_begin + v2::subtitle_plane_adaptive_offset;
+    words[tail + 13u] = 1000u;
+    words[tail + 15u] = 1u;
+    EXPECT_FALSE(receipt::decode(words, expected));  // Invalid Base samples cannot condition.
+    std::fill_n(words.begin() + receipt::subtitle_condition_begin + 2u, 4u, 0u);
+    ASSERT_TRUE(receipt::decode(words, expected));
+    EXPECT_EQ(words[receipt::subtitle_locator_begin + v2::subtitle_plane_current_slot_mask_word], 1u);
+    words[receipt::subtitle_condition_begin + 5u] = words[tail + 3u];
+    EXPECT_FALSE(receipt::decode(words, expected));  // Inactive target must be positive zero.
   }
 
   TEST(HostSbsGpuCompletionReceipt, PublicationSequenceRejectsStaleBorrowedResourcesWithRepeatedFrameId) {

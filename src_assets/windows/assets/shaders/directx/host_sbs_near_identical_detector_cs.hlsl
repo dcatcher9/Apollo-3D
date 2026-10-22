@@ -34,6 +34,10 @@ cbuffer NearIdenticalOcrConstants : register(b2) {
     uint near_identical_ocr_roi_top;
     uint near_identical_ocr_roi_bottom;
     uint4 near_identical_ocr_tensor_content;
+    int near_identical_ocr_line_center_twice_source;
+    uint near_identical_ocr_line_reference_width;
+    int near_identical_ocr_line_search_top_source;
+    uint near_identical_ocr_line_reserved;
 };
 
 // The single-high finalizer binds the same immutable high-grid depth constants at b0 and b3.

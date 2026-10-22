@@ -11,7 +11,6 @@ from __future__ import annotations
 import math
 import re
 import struct
-from itertools import product
 from typing import Any, Dict, Tuple
 
 try:
@@ -26,17 +25,17 @@ except ImportError:  # Direct script/module loading from tools/sbsbench.
     import prod_zipdepth_convex2x as convex2x_contract  # type: ignore
 
 
-DUMP_MANIFEST_SCHEMA = 44
-GPU_TRACE_RING_SCHEMA = 4
-GPU_TRACE_CONTRACT_SCHEMA = 5
-GPU_TRACE_DECODED_SCHEMA = 6
+DUMP_MANIFEST_SCHEMA = 49
+GPU_TRACE_RING_SCHEMA = 5
+GPU_TRACE_CONTRACT_SCHEMA = 6
+GPU_TRACE_DECODED_SCHEMA = 7
 GPU_TRACE_RING_TAG = 0x48525447
 GPU_TRACE_RECORD_TAG = 0x31525447
 GPU_TRACE_CAPACITY = 300
 GPU_TRACE_HEADER_WORD_COUNT = 16
-GPU_TRACE_RECORD_WORD_COUNT = 192
+GPU_TRACE_RECORD_WORD_COUNT = 136
 GPU_TRACE_TRANSACTION_WORD_COUNT = 64
-GPU_TRACE_LOCATOR_WORD_COUNT = 96
+GPU_TRACE_PLANE_WORD_COUNT = 40
 GPU_TRACE_CONDITION_WORD_COUNT = 6
 GPU_TRACE_RING_WORD_COUNT = (
     GPU_TRACE_HEADER_WORD_COUNT + GPU_TRACE_CAPACITY * GPU_TRACE_RECORD_WORD_COUNT)
@@ -83,9 +82,9 @@ GPU_TRACE_RECORD_OFFSETS = {
     "source_width": 18, "source_height": 19,
     "field_width": 20, "field_height": 21, "transaction_words": 22,
     "reserved0": 23, "transaction_begin": 24, "subtitle_locator_begin": 88,
-    "subtitle_condition_begin": 184,
-    "observation_timestamp_low": 190, "observation_timestamp_high": 191,
-    "reserved_begin": 192, "end": 192,
+    "subtitle_condition_begin": 128,
+    "observation_timestamp_low": 134, "observation_timestamp_high": 135,
+    "reserved_begin": 136, "end": 136,
 }
 SUBTITLE_OCR_RECORD_SCHEMA = coordinate_contract.SUBTITLE_OCR.record_schema
 SUBTITLE_OCR_RECORD_TAG = coordinate_contract.SUBTITLE_OCR.record_tag
@@ -99,45 +98,12 @@ SUBTITLE_OCR_BOX_KNOWN_FLAGS = coordinate_contract.SUBTITLE_OCR.box_known_flags
 SUBTITLE_OCR_RAW_BOX_WORD_OFFSET = coordinate_contract.SUBTITLE_OCR.raw_box_offset
 SUBTITLE_OCR_FINAL_BOX_WORD_OFFSET = coordinate_contract.SUBTITLE_OCR.final_box_offset
 SUBTITLE_OCR_OUTPUT_WIDTH = coordinate_contract.SUBTITLE_OCR.output_shape[3]
-SUBTITLE_LOCATOR_STATE_SCHEMA = coordinate_contract.SUBTITLE_OCR.locator_schema
-SUBTITLE_LOCATOR_STATE_TAG = coordinate_contract.SUBTITLE_OCR.locator_tag
-SUBTITLE_LOCATOR_STATE_WORD_COUNT = coordinate_contract.SUBTITLE_OCR.locator_word_count
-SUBTITLE_LOCATOR_HEADER_WORD_COUNT = (
-    coordinate_contract.SUBTITLE_OCR.locator_header_word_count)
-SUBTITLE_LOCATOR_RECT_CAPACITY = (
-    coordinate_contract.SUBTITLE_OCR.locator_rectangle_capacity)
-SUBTITLE_LOCATOR_OWNER_WORD_OFFSET = coordinate_contract.SUBTITLE_OCR.locator_owner_offset
-SUBTITLE_LOCATOR_PENDING_WORD_OFFSET = coordinate_contract.SUBTITLE_OCR.locator_pending_offset
-SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET = coordinate_contract.SUBTITLE_OCR.locator_current_offset
-SUBTITLE_LOCATOR_KIND_WORD = coordinate_contract.SUBTITLE_OCR.locator_kind_word
-SUBTITLE_LOCATOR_OWNER_KIND_SHIFT = (
-    coordinate_contract.SUBTITLE_OCR.locator_owner_kind_shift)
-SUBTITLE_LOCATOR_PENDING_KIND_SHIFT = (
-    coordinate_contract.SUBTITLE_OCR.locator_pending_kind_shift)
-SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT = (
-    coordinate_contract.SUBTITLE_OCR.locator_current_kind_shift)
-SUBTITLE_LOCATOR_KIND_MASK = coordinate_contract.SUBTITLE_OCR.locator_kind_mask
-SUBTITLE_LOCATOR_FLAG_OWNER = 1 << 0
-SUBTITLE_LOCATOR_FLAG_PENDING = 1 << 1
-SUBTITLE_LOCATOR_FLAG_TARGET_VALID = 1 << 2
-SUBTITLE_LOCATOR_FLAG_TARGET_RESET = 1 << 3
-SUBTITLE_LOCATOR_FLAG_PROVISIONAL_CURRENT = (
-    coordinate_contract.SUBTITLE_OCR.locator_provisional_current_flag)
-SUBTITLE_LOCATOR_PROVISIONAL_TARGET_WORD = (
-    coordinate_contract.SUBTITLE_OCR.locator_provisional_target_word)
-SUBTITLE_LOCATOR_PROVISIONAL_FADE_WORD = (
-    coordinate_contract.SUBTITLE_OCR.locator_provisional_fade_word)
-SUBTITLE_LOCATOR_KNOWN_FLAGS = (
-    SUBTITLE_LOCATOR_FLAG_OWNER |
-    SUBTITLE_LOCATOR_FLAG_PENDING |
-    SUBTITLE_LOCATOR_FLAG_TARGET_VALID |
-    SUBTITLE_LOCATOR_FLAG_TARGET_RESET |
-    SUBTITLE_LOCATOR_FLAG_PROVISIONAL_CURRENT
-)
-SUBTITLE_LOCATOR_EVENT_NONE = 0
-SUBTITLE_LOCATOR_EVENT_BIRTH = 1
-SUBTITLE_LOCATOR_EVENT_DEATH = 2
-SUBTITLE_LOCATOR_EVENT_HANDOFF = 3
+SUBTITLE_PLANE_STATE_SCHEMA = coordinate_contract.SUBTITLE_OCR.plane_schema
+SUBTITLE_PLANE_STATE_TAG = coordinate_contract.SUBTITLE_OCR.plane_tag
+SUBTITLE_PLANE_STATE_WORD_COUNT = coordinate_contract.SUBTITLE_OCR.plane_word_count
+SUBTITLE_PLANE_COVER_CAPACITY = coordinate_contract.SUBTITLE_OCR.plane_cover_capacity
+SUBTITLE_PLANE_CURRENT_VALID_FLAG = coordinate_contract.SUBTITLE_OCR.plane_current_valid_flag
+SUBTITLE_PLANE_ADAPTIVE_OFFSET = coordinate_contract.SUBTITLE_OCR.plane_adaptive_offset
 DEPTH_INPUT_REGION_SCHEMA = 4
 WINDOW_REGION_SCHEMA = 1
 WINDOW_REGION_AUTHORITY_KINDS = frozenset({"chromium-video", "foreground-client"})
@@ -173,7 +139,7 @@ _MAXIMUM_SOURCE_LONG_SIDE = 5120
 _MAXIMUM_SOURCE_PIXELS = 5120 * 2160
 
 _SUBTITLE_MODE_NONE = "none"
-_SUBTITLE_MODE_SLR13 = "subtitle-slr13"
+_SUBTITLE_MODE_CONTOURS = "subtitle-contours-v1"
 _SUBTITLE_OCR_CONTRACT_SCHEMA = coordinate_contract.SUBTITLE_OCR.schema
 _SUBTITLE_OCR_MODEL_NAME = coordinate_contract.SUBTITLE_OCR.logical_model
 _SUBTITLE_OCR_ASSET_PATH = coordinate_contract.SUBTITLE_OCR.asset_path
@@ -192,10 +158,41 @@ _SUBTITLE_OCR_SHADER_SPECS = (
     ("host_sbs_ocr_boxes_cs.hlsl", "cells_main", "cs_5_0"),
     ("host_sbs_ocr_boxes_cs.hlsl", "resolve_main", "cs_5_0"),
 )
-_SUBTITLE_LOCATOR_SHADER_SPECS = (
-    ("host_sbs_subtitle_locator_cs.hlsl", "resolve_main", "cs_5_0"),
-    ("host_sbs_subtitle_locator_cs.hlsl", "condition_main", "cs_5_0"),
+_SUBTITLE_PLANE_SHADER_SPECS = tuple(
+    spec for spec in coordinate_contract.SHADER_SOURCE_SPECS
+    if spec[0] in {
+        "host_sbs_subtitle_locator_cs.hlsl", "host_sbs_subtitle_contour_cs.hlsl",
+        "host_sbs_subtitle_contour_distance_cs.hlsl",
+    } or (spec[0] in {
+        "depth_coordinate_v2_vertical_limit_cs.hlsl", "depth_coordinate_v2_limit_cs.hlsl"
+    } and spec[1] == "subtitle_main")
 )
+_SUBTITLE_CONTOUR_ARTIFACT_FILES = {
+    "contour_support": "contour_support.u32",
+    "contour_field_pin": "contour_field_pin.u32",
+    "contour_distance": "contour_distance.f32",
+    "contour_identity": "contour_identity.u32",
+    "contour_history": "contour_history.rgba32f",
+    "contour_source": "contour_source.rgba16f",
+    "ocr_probability": "ocr_probability.f32",
+    "gaussian_weight": "gaussian_weight.f32",
+    "gaussian_blend": "gaussian_blend.f32",
+    "gaussian_vertical_conditioned": "gaussian_vertical_conditioned.f32",
+    "gaussian_control": "gaussian_control.u32",
+}
+_SUBTITLE_CONTOUR_ARTIFACT_STAGES = {
+    "contour_support": "native current subtitle contour support",
+    "contour_field_pin": "projected subtitle contour field pins",
+    "contour_distance": "native-source squared Euclidean subtitle distance",
+    "contour_identity": "SCT5 subtitle temporal-mask identity",
+    "contour_history": "native subtitle contour history",
+    "contour_source": "joined subtitle source display crop",
+    "ocr_probability": "joined OCR detector probability",
+    "gaussian_weight": "literal max-union Gaussian subtitle weight",
+    "gaussian_blend": "literal Gaussian UI-Base proposal",
+    "gaussian_vertical_conditioned": "post-Gaussian shared vertical75-25 field",
+    "gaussian_control": "actual Gaussian smoothing-enabled control",
+}
 
 
 def _float32(value: float) -> float:
@@ -484,7 +481,12 @@ def validate_subtitle_ocr_record(
         source_width: int, source_height: int, field_width: int, field_height: int,
         roi_top: int, roi_bottom: int,
         tensor_content: tuple[int, int, int, int] | None = None) -> Dict[str, Any]:
-    """Validate and decode the sole current OCR8 208-word lower-text record."""
+    """Validate the retained OCR8 pairs; preselection line membership is not in this ABI.
+
+    Center eligibility uses a group's complete tight-core union before capacity selection.
+    Individual retained fragments may be off center, and omitted group members cannot be
+    reconstructed from these words. The authenticated producer contract owns that rule.
+    """
 
     expected_frame = _uint64(matched_frame_id, "OCR8 matched frame id")
     expected_generation = _uint64(analysis_generation, "OCR8 analysis generation")
@@ -589,259 +591,32 @@ def validate_subtitle_ocr_record(
         "raw_boxes": raw_boxes,
         "final_boxes": final_boxes,
         "tensor_content_rect": expected_content,
+        "ordinary_cover_horizontal_guard": {
+            "cells": coordinate_contract.SUBTITLE_OCR.ordinary_cover_horizontal_guard_cells,
+            "policy": coordinate_contract.SUBTITLE_OCR.ordinary_cover_horizontal_guard_policy,
+        },
+        "line_centering": {
+            "group_policy": coordinate_contract.SUBTITLE_OCR.line_group_policy,
+            "minimum_vertical_span_iou_ratio": [
+                coordinate_contract.SUBTITLE_OCR.line_group_min_vertical_iou_numerator,
+                coordinate_contract.SUBTITLE_OCR.line_group_min_vertical_iou_denominator],
+            "maximum_horizontal_gap_height_ratio": [
+                coordinate_contract.SUBTITLE_OCR.line_group_max_horizontal_gap_height_numerator,
+                coordinate_contract.SUBTITLE_OCR.line_group_max_horizontal_gap_height_denominator],
+            "horizontal_gap_metric": coordinate_contract.SUBTITLE_OCR.line_group_horizontal_gap_metric,
+            "center_reference": coordinate_contract.SUBTITLE_OCR.line_center_reference,
+            "reference_params": coordinate_contract.SUBTITLE_OCR.line_center_reference_params,
+            "center_tolerance_ratio": [
+                coordinate_contract.SUBTITLE_OCR.line_center_tolerance_numerator,
+                coordinate_contract.SUBTITLE_OCR.line_center_tolerance_denominator],
+            "search_bottom_height_ratio": [
+                coordinate_contract.SUBTITLE_OCR.line_search_bottom_height_numerator,
+                coordinate_contract.SUBTITLE_OCR.line_search_bottom_height_denominator],
+            "search_region": coordinate_contract.SUBTITLE_OCR.line_search_region,
+            "preselection_geometry_verified": False,
+            "verification_limit": "retained-pairs-do-not-encode-complete-preselection-line-membership-or-reference",
+        },
     }
-
-
-def _decode_subtitle_locator_rectangles(
-        words: tuple[int, ...], *, offset: int, count: int,
-        field_width: int, field_height: int, roi_top: int, roi_bottom: int,
-        tensor_content: tuple[int, int, int, int], ribbon_min_bottom: int,
-        ribbon_mask: int, current_cover: bool,
-        label: str) -> list[Dict[str, Any]]:
-    decoded: list[Dict[str, Any]] = []
-    for slot in range(SUBTITLE_LOCATOR_RECT_CAPACITY):
-        start = offset + slot * 4
-        left, top, right, bottom = words[start:start + 4]
-        if slot >= count:
-            if left != 0 or top != 0 or right != 0 or bottom != 0:
-                raise ValueError(f"{label} unused rectangle slots must be canonical zero")
-            continue
-        ribbon = bool(ribbon_mask & (1 << slot))
-        content_left, content_top, content_right, content_bottom = tensor_content
-        if (left >= right or top >= bottom or left < content_left or
-                top < content_top or right > content_right or
-                bottom > content_bottom or top < roi_top):
-            raise ValueError(
-                f"{label} rectangles must be nonempty half-open field coordinates")
-        if current_cover and ribbon:
-            if (left != content_left or right != content_right or
-                    bottom != content_bottom):
-                raise ValueError(f"{label} ribbon cover is not the canonical bottom strip")
-        elif ribbon and bottom < ribbon_min_bottom:
-            raise ValueError(f"{label} ribbon core is outside its projected bottom tolerance")
-        elif bottom > roi_bottom:
-            raise ValueError(f"{label} rectangles must remain inside the OCR ROI")
-        decoded.append({
-            "left": left,
-            "top": top,
-            "right": right,
-            "bottom": bottom,
-            "kind": "ribbon" if ribbon else "text",
-            "ribbon": ribbon,
-        })
-    return decoded
-
-
-def _subtitle_rectangle_aggregate(
-        rectangles: list[Dict[str, int]]) -> tuple[tuple[int, int, int, int], int]:
-    if not rectangles:
-        return (0, 0, 0, 0), 0
-    bbox = (
-        min(rectangle["left"] for rectangle in rectangles),
-        min(rectangle["top"] for rectangle in rectangles),
-        max(rectangle["right"] for rectangle in rectangles),
-        max(rectangle["bottom"] for rectangle in rectangles),
-    )
-    area = sum(
-        (rectangle["right"] - rectangle["left"]) *
-        (rectangle["bottom"] - rectangle["top"])
-        for rectangle in rectangles)
-    return bbox, area
-
-
-def _subtitle_coherent_lines(a: Dict[str, Any], b: Dict[str, Any]) -> bool:
-    """Mirror the frozen SLR13 vertically-adjacent ordinary-line predicate."""
-
-    width_a = a["right"] - a["left"]
-    width_b = b["right"] - b["left"]
-    height_a = a["bottom"] - a["top"]
-    height_b = b["bottom"] - b["top"]
-    overlap = max(0, min(a["right"], b["right"]) - max(a["left"], b["left"]))
-    center_x_delta_twice = abs(
-        (a["left"] + a["right"]) - (b["left"] + b["right"]))
-    left_delta = abs(a["left"] - b["left"])
-    right_delta = abs(a["right"] - b["right"])
-    center_y_delta_twice = abs(
-        (a["top"] + a["bottom"]) - (b["top"] + b["bottom"]))
-    gap = 0
-    if a["bottom"] <= b["top"]:
-        gap = b["top"] - a["bottom"]
-    elif b["bottom"] <= a["top"]:
-        gap = a["top"] - b["bottom"]
-    shorter_height = min(height_a, height_b)
-    taller_height = max(height_a, height_b)
-    return (
-        overlap * 2 >= min(width_a, width_b) and
-        (center_x_delta_twice <= taller_height or
-         left_delta <= taller_height or right_delta <= taller_height) and
-        taller_height <= 2 * shorter_height and
-        center_y_delta_twice >= shorter_height and
-        gap * 2 <= taller_height
-    )
-
-
-def _subtitle_same_baseline_segments(
-        a: Dict[str, Any], b: Dict[str, Any], field_width: int) -> bool:
-    """Mirror the frozen SLR13 horizontally-disjoint same-baseline predicate."""
-
-    if not (a["right"] <= b["left"] or b["right"] <= a["left"]):
-        return False
-    height_a = a["bottom"] - a["top"]
-    height_b = b["bottom"] - b["top"]
-    shorter_height = min(height_a, height_b)
-    taller_height = max(height_a, height_b)
-    vertical_overlap = max(
-        0, min(a["bottom"], b["bottom"]) - max(a["top"], b["top"]))
-    center_y_delta_twice = abs(
-        (a["top"] + a["bottom"]) - (b["top"] + b["bottom"]))
-    horizontal_gap = (
-        b["left"] - a["right"] if a["right"] <= b["left"]
-        else a["left"] - b["right"])
-    combined_span = max(a["right"], b["right"]) - min(a["left"], b["left"])
-    policy = coordinate_contract.SUBTITLE_OCR
-    return (
-        vertical_overlap * 4 >= 3 * shorter_height and
-        taller_height <= 2 * shorter_height and
-        center_y_delta_twice <= shorter_height and
-        horizontal_gap <= 8 * taller_height and
-        combined_span * policy.locator_max_width_denominator <=
-        field_width * policy.locator_max_width_numerator
-    )
-
-
-def _subtitle_qualified_ocr_core(
-        rectangle: Dict[str, Any], tensor_content: tuple[int, int, int, int],
-        roi_bottom: int, *, field_width: int, field_height: int) -> bool:
-    """Mirror native core qualification in the authenticated locator field grid."""
-
-    width = rectangle["right"] - rectangle["left"]
-    height = rectangle["bottom"] - rectangle["top"]
-    policy = coordinate_contract.SUBTITLE_OCR
-    content_width = tensor_content[2] - tensor_content[0]
-    field_cell_scale = coordinate_contract.subtitle_locator_field_cell_scale(
-        field_width, field_height)
-    if (field_cell_scale == 0 or
-            width < policy.locator_min_width_cells * field_cell_scale or
-            height < policy.locator_min_height_cells * field_cell_scale or
-            width * policy.locator_min_aspect_denominator <
-            policy.locator_min_aspect_numerator * height):
-        return False
-    if rectangle["kind"] == "ribbon":
-        return True
-    corner_edge_threshold = content_width // policy.locator_corner_edge_divisor
-    edge_clearance = min(
-        rectangle["left"] - tensor_content[0],
-        tensor_content[2] - rectangle["right"])
-    if (edge_clearance < corner_edge_threshold and
-            rectangle["bottom"] +
-            policy.locator_corner_bottom_rows * field_cell_scale >= roi_bottom):
-        return False
-    return (width * policy.locator_max_width_denominator <=
-            content_width * policy.locator_max_width_numerator)
-
-
-def _subtitle_selected_ocr_indices(
-        raw_boxes: list[Dict[str, Any]], tensor_content: tuple[int, int, int, int],
-        roi_bottom: int, *, field_width: int, field_height: int) -> list[int]:
-    """Replay frozen SLR13 component closure/selection on same-frame OCR8 cores."""
-
-    content_width = tensor_content[2] - tensor_content[0]
-    qualified = [
-        index for index, rectangle in enumerate(raw_boxes)
-        if _subtitle_qualified_ocr_core(
-            rectangle, tensor_content, roi_bottom,
-            field_width=field_width, field_height=field_height)
-    ]
-    ordinary = [index for index in qualified if raw_boxes[index]["kind"] == "text"]
-    ribbon = [index for index in qualified if raw_boxes[index]["kind"] == "ribbon"]
-
-    unseen = set(ordinary)
-    components: list[list[int]] = []
-    while unseen:
-        root = min(unseen)
-        reached = {root}
-        frontier = [root]
-        unseen.remove(root)
-        while frontier:
-            left = frontier.pop()
-            for right in tuple(unseen):
-                if (_subtitle_coherent_lines(raw_boxes[left], raw_boxes[right]) or
-                        _subtitle_same_baseline_segments(
-                            raw_boxes[left], raw_boxes[right], content_width)):
-                    reached.add(right)
-                    frontier.append(right)
-                    unseen.remove(right)
-        components.append(sorted(reached))
-
-    best: list[int] = []
-    best_key: tuple[int, int, int, int] | None = None
-    for component in components:
-        if len(component) > SUBTITLE_LOCATOR_RECT_CAPACITY:
-            continue
-        rectangles = [raw_boxes[index] for index in component]
-        bbox, area = _subtitle_rectangle_aggregate(rectangles)
-        policy = coordinate_contract.SUBTITLE_OCR
-        if ((bbox[2] - bbox[0]) * policy.locator_max_width_denominator >
-                content_width * policy.locator_max_width_numerator):
-            continue
-        # Selection maximizes summed core area. Ties prefer lower bottom, then lower top, then
-        # smaller left exactly as BuildCurrentStack's deterministic comparison does.
-        key = (area, bbox[3], bbox[1], -bbox[0])
-        if best_key is None or key > best_key:
-            best = component
-            best_key = key
-
-    selected = sorted(
-        best + ribbon,
-        key=lambda index: (
-            raw_boxes[index]["top"], raw_boxes[index]["left"], index))
-    if len(selected) > SUBTITLE_LOCATOR_RECT_CAPACITY:
-        return []
-    return selected
-
-
-def _subtitle_rectangles_are_top_left_ordered(
-        rectangles: list[Dict[str, Any]]) -> bool:
-    keys = [
-        (rectangle["top"], rectangle["left"])
-        for rectangle in rectangles
-    ]
-    return keys == sorted(keys)
-
-
-def _subtitle_provisional_geometry_is_canonical(
-        owner: Dict[str, Any], pending: Dict[str, Any]) -> bool:
-    owner_height = owner["bottom"] - owner["top"]
-    pending_height = pending["bottom"] - pending["top"]
-    shorter_height = min(owner_height, pending_height)
-    taller_height = max(owner_height, pending_height)
-    vertical_overlap = max(
-        0, min(owner["bottom"], pending["bottom"]) -
-        max(owner["top"], pending["top"]))
-    owner_center_x_twice = owner["left"] + owner["right"]
-    pending_center_x_twice = pending["left"] + pending["right"]
-    center_y_delta_twice = abs(
-        owner["top"] + owner["bottom"] - pending["top"] - pending["bottom"])
-    intersection_width = max(
-        0, min(owner["right"], pending["right"]) -
-        max(owner["left"], pending["left"]))
-    intersection = intersection_width * vertical_overlap
-    union = ((owner["right"] - owner["left"]) * owner_height +
-             (pending["right"] - pending["left"]) * pending_height - intersection)
-    iou = 0.0 if union == 0 else _float32(
-        _float32(float(intersection)) / _float32(float(union)))
-    policy = coordinate_contract.SUBTITLE_OCR
-    return (
-        iou < policy.locator_match_iou_threshold and
-        vertical_overlap * policy.locator_provisional_min_vertical_overlap_denominator >=
-        shorter_height * policy.locator_provisional_min_vertical_overlap_numerator and
-        taller_height <= policy.locator_provisional_max_height_ratio * shorter_height and
-        center_y_delta_twice <=
-        policy.locator_provisional_max_center_y_delta_shorter_height * shorter_height and
-        owner_center_x_twice >= 2 * pending["left"] and
-        owner_center_x_twice < 2 * pending["right"] and
-        pending_center_x_twice >= 2 * owner["left"] and
-        pending_center_x_twice < 2 * owner["right"])
 
 
 def _validate_adaptive_ui_tail(words: tuple[int, ...], source_width: int,
@@ -849,19 +624,19 @@ def _validate_adaptive_ui_tail(words: tuple[int, ...], source_width: int,
                                joint_plane_mode: int | None = 3,
                                requested_gain: float | None = None) -> None:
     display_budget = _display_budget_for_mode(requested_gain, joint_plane_mode)
-    tail = words[80:96]
+    tail = words[SUBTITLE_PLANE_ADAPTIVE_OFFSET:SUBTITLE_PLANE_STATE_WORD_COUNT]
     if tail[0] == 0:
         if any(tail):
-            raise ValueError("SLR14 inactive adaptive UI tail must be zero")
-        if words[20] != 0:
-            raise ValueError("SLR14 current cover requires an active adaptive UI tail")
+            raise ValueError("UIP4 inactive adaptive UI tail must be zero")
+        if words[coordinate_contract.SUBTITLE_OCR.plane_current_slot_mask_word] != 0:
+            raise ValueError("UIP4 current cover requires an active adaptive UI tail")
         return
     if not 0 < source_width <= _MAXIMUM_SOURCE_LONG_SIDE:
-        raise ValueError("SLR14 mode3 source width exceeds its supported histogram range")
+        raise ValueError("UIP4 mode3 source width exceeds its supported histogram range")
     maximum_level = (source_width + 99) // 100
     if (tail[0] != 1 or tail[1] & ~15 or (tail[1] & 3) == 3 or
             any(tail[i] > maximum_level for i in (2, 10, 11))):
-        raise ValueError("SLR14 adaptive UI schema, flags, or index is invalid")
+        raise ValueError("UIP4 adaptive UI schema, flags, or index is invalid")
     applied, limit = _float32_bits(tail[3]), _float32_bits(tail[12])
     expected_limit = _float32(display_budget)
     # The representation constant is copied directly, so it requires its exact bits.
@@ -878,262 +653,143 @@ def _validate_adaptive_ui_tail(words: tuple[int, ...], source_width: int,
             (bool(tail[1] & 1) != (approach != 0)) or
             (bool(tail[1] & 2) != (retreat != 0)) or
             approach > last or retreat > last):
-        raise ValueError("SLR14 adaptive UI range, clock, or count is invalid")
+        raise ValueError("UIP4 adaptive UI range, clock, or count is invalid")
     capped_conflict = tail[14] * 5 > tail[13] or tail[14] * 50 > area
     if bool(tail[1] & 4) != capped_conflict:
-        raise ValueError("SLR14 adaptive UI capped-conflict flag does not match its counts")
-    if (words[2] & (SUBTITLE_LOCATOR_FLAG_OWNER | SUBTITLE_LOCATOR_FLAG_TARGET_VALID)) == (SUBTITLE_LOCATOR_FLAG_OWNER | SUBTITLE_LOCATOR_FLAG_TARGET_VALID):
-        provisional = bool(words[2] & SUBTITLE_LOCATOR_FLAG_PROVISIONAL_CURRENT)
-        if (words[18] != tail[3] or words[24] != 2 or
-                (provisional and (words[29] != tail[3] or words[30] != 2))):
-            raise ValueError("SLR14 adaptive UI target or full pin is inconsistent")
+        raise ValueError("UIP4 adaptive UI capped-conflict flag does not match its counts")
 
 
-def validate_subtitle_locator_state(
+def validate_subtitle_plane_snapshot(
         payload: Any, *, matched_frame_id: int, analysis_generation: int,
-        source_width: int, source_height: int,
-        field_width: int, field_height: int,
+        source_width: int, source_height: int, field_width: int, field_height: int,
         tensor_content: tuple[int, int, int, int] | None = None,
         expected_scene_epoch: int | None = None,
-        joint_plane_mode: int | None = 3,
-        requested_gain: float | None = None) -> Dict[str, Any]:
-    """Validate and decode the current SLR14 ownership and adaptive UI state."""
+        expected_observation_timestamp_us: int | None = None,
+        joint_plane_mode: int = 3, requested_gain: float | None = None) -> Dict[str, Any]:
+    """Authenticate UIP4 layout/domain/controller only; it contains no cover geometry.
 
-    expected_frame = _uint64(matched_frame_id, "SLR13 matched frame id")
-    expected_generation = _uint64(analysis_generation, "SLR13 analysis generation")
-    expected_source_width = _uint32(source_width, "SLR13 source width")
-    expected_source_height = _uint32(source_height, "SLR13 source height")
-    expected_field_width = _uint32(field_width, "SLR13 field width")
-    expected_field_height = _uint32(field_height, "SLR13 field height")
-    authenticated_scene_epoch = (
-        None if expected_scene_epoch is None else
-        _uint32(expected_scene_epoch, "SLR13 expected scene epoch")
-    )
-    expected_content = _subtitle_tensor_content(
-        expected_field_width, expected_field_height, tensor_content)
-    if not coordinate_contract.subtitle_ocr_field_is_calibrated(
-            expected_field_width, expected_field_height):
-        raise ValueError("SLR13 expected field geometry is invalid")
-    dynamic_roi = _subtitle_dynamic_roi(
-        expected_source_width, expected_source_height, expected_content)
-    if dynamic_roi is None:
-        raise ValueError("SLR13 expected field geometry is invalid")
-    expected_roi_top, expected_roi_bottom = dynamic_roi
-    ribbon_min_bottom = _subtitle_ribbon_min_bottom(
-        expected_source_width, expected_source_height, expected_content)
-    if ribbon_min_bottom is None or not expected_roi_top < ribbon_min_bottom <= expected_roi_bottom:
-        raise ValueError("SLR13 projected ribbon bottom tolerance is invalid")
-
-    words = _uint32_words(payload, SUBTITLE_LOCATOR_STATE_WORD_COUNT, "SLR13 state")
-    if words[0] != SUBTITLE_LOCATOR_STATE_SCHEMA or words[1] != SUBTITLE_LOCATOR_STATE_TAG:
-        raise ValueError("SLR13 state has an unknown schema or tag")
-    _validate_adaptive_ui_tail(words, expected_source_width, expected_content,
-                              joint_plane_mode=joint_plane_mode,
-                              requested_gain=requested_gain)
-    flags = words[2]
-    if flags & ~SUBTITLE_LOCATOR_KNOWN_FLAGS:
-        raise ValueError("SLR13 state has unknown flags")
-    owner_count = words[4]
-    pending_count = words[12]
-    current_count = words[20]
-    if any(count > SUBTITLE_LOCATOR_RECT_CAPACITY for count in (
-            owner_count, pending_count, current_count)):
-        raise ValueError("SLR13 state exceeds its fixed rectangle capacity")
-    fade = words[24]
-    if fade not in (0, 2):
-        raise ValueError("SLR13 fade step must be zero or the full-plane pin")
-    if words[21] not in {
-            SUBTITLE_LOCATOR_EVENT_NONE,
-            SUBTITLE_LOCATOR_EVENT_BIRTH,
-            SUBTITLE_LOCATOR_EVENT_DEATH,
-            SUBTITLE_LOCATOR_EVENT_HANDOFF}:
-        raise ValueError("SLR13 state has an unknown last event")
-    packed_kinds = words[SUBTITLE_LOCATOR_KIND_WORD]
-    known_kind_bits = (
-        (SUBTITLE_LOCATOR_KIND_MASK << SUBTITLE_LOCATOR_OWNER_KIND_SHIFT) |
-        (SUBTITLE_LOCATOR_KIND_MASK << SUBTITLE_LOCATOR_PENDING_KIND_SHIFT) |
-        (SUBTITLE_LOCATOR_KIND_MASK << SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT)
-    )
-    if packed_kinds & ~known_kind_bits:
-        raise ValueError("SLR13 state has unknown packed-kind bits")
-
-    def kind_mask(shift: int, count: int, label: str) -> int:
-        value = (packed_kinds >> shift) & SUBTITLE_LOCATOR_KIND_MASK
-        used = (1 << count) - 1 if count else 0
-        if value & ~used:
-            raise ValueError(f"SLR13 {label} kind mask exceeds its rectangle count")
-        return value
-
-    owner_kinds = kind_mask(SUBTITLE_LOCATOR_OWNER_KIND_SHIFT, owner_count, "owner")
-    pending_kinds = kind_mask(SUBTITLE_LOCATOR_PENDING_KIND_SHIFT, pending_count, "pending")
-    current_kinds = kind_mask(SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT, current_count, "current")
-
-    generation = _uint64_words(words[10], words[11])
-    frame_id = _uint64_words(words[22], words[23])
-    if (generation != expected_generation or frame_id != expected_frame or
-            words[27] != expected_field_width or words[28] != expected_field_height):
-        raise ValueError("SLR13 state identity disagrees with the matched dump frame")
-    if authenticated_scene_epoch is not None and words[26] != authenticated_scene_epoch:
-        raise ValueError(
-            "SLR13 state scene epoch disagrees with authenticated cut generation")
-
-    owner = _decode_subtitle_locator_rectangles(
-        words, offset=SUBTITLE_LOCATOR_OWNER_WORD_OFFSET, count=owner_count,
-        field_width=expected_field_width, field_height=expected_field_height,
-        roi_top=expected_roi_top, roi_bottom=expected_roi_bottom,
-        tensor_content=expected_content, ribbon_min_bottom=ribbon_min_bottom,
-        ribbon_mask=owner_kinds, current_cover=False, label="SLR13 owner")
-    pending = _decode_subtitle_locator_rectangles(
-        words, offset=SUBTITLE_LOCATOR_PENDING_WORD_OFFSET, count=pending_count,
-        field_width=expected_field_width, field_height=expected_field_height,
-        roi_top=expected_roi_top, roi_bottom=expected_roi_bottom,
-        tensor_content=expected_content, ribbon_min_bottom=ribbon_min_bottom,
-        ribbon_mask=pending_kinds, current_cover=False, label="SLR13 pending")
-    current = _decode_subtitle_locator_rectangles(
-        words, offset=SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET, count=current_count,
-        field_width=expected_field_width, field_height=expected_field_height,
-        roi_top=expected_roi_top, roi_bottom=expected_roi_bottom,
-        tensor_content=expected_content, ribbon_min_bottom=ribbon_min_bottom,
-        ribbon_mask=current_kinds, current_cover=True,
-        label="SLR13 current-authority")
-    # Owner and pending store cores and therefore expose the producer's canonical core order.
-    # Current stores paired covers; their expansion can change cover-top order, so its canonical
-    # order is checked later against the selected OCR core order rather than cover coordinates.
-    for label, rectangles in (("owner", owner), ("pending", pending)):
-        if not _subtitle_rectangles_are_top_left_ordered(rectangles):
-            raise ValueError(f"SLR13 {label} rectangles are not in canonical top/left order")
-    owner_bbox, owner_area = _subtitle_rectangle_aggregate(owner)
-    pending_bbox, pending_area = _subtitle_rectangle_aggregate(pending)
-    if tuple(words[5:9]) != owner_bbox or words[9] != owner_area:
-        raise ValueError("SLR13 owner bbox or area disagrees with its rectangles")
-    if tuple(words[13:17]) != pending_bbox or words[17] != pending_area:
-        raise ValueError("SLR13 pending bbox or area disagrees with its rectangles")
-
-    target = _float32_bits(words[18])
-    target_valid = bool(flags & SUBTITLE_LOCATOR_FLAG_TARGET_VALID)
-    owner_flag = bool(flags & SUBTITLE_LOCATOR_FLAG_OWNER)
-    pending_flag = bool(flags & SUBTITLE_LOCATOR_FLAG_PENDING)
-    target_reset = bool(flags & SUBTITLE_LOCATOR_FLAG_TARGET_RESET)
-    provisional_current = bool(flags & SUBTITLE_LOCATOR_FLAG_PROVISIONAL_CURRENT)
-    provisional_target = _float32_bits(words[SUBTITLE_LOCATOR_PROVISIONAL_TARGET_WORD])
-    provisional_fade = words[SUBTITLE_LOCATOR_PROVISIONAL_FADE_WORD]
-    if owner_flag != (owner_count != 0) or pending_flag != (pending_count != 0):
-        raise ValueError("SLR13 owner/pending flags disagree with their rectangle counts")
-    if owner_flag != (words[3] != 0):
-        raise ValueError("SLR13 owner generation disagrees with owner authority")
-    if current_count > owner_count:
-        raise ValueError("SLR13 current rectangle count cannot exceed its owner count")
-    if current_count != 0 and not (owner_flag and target_valid and fade == 2):
-        raise ValueError("SLR13 current rectangles require owner and valid target authority")
-    if target_valid:
-        if (not owner_flag or target_reset or words[19] != words[3] or
-                not math.isfinite(target) or
-                not 0.0 <= target <= _DEFAULTS.direct_container_limit or fade != 2):
-            raise ValueError("SLR13 valid target identity or representation is inconsistent")
-    elif target_reset:
-        if (not owner_flag or words[18] != 0 or words[19] != 0 or
-                current_count != 0 or fade != 0):
-            raise ValueError("SLR13 target reset must clear target and current authority")
-
-    if provisional_current:
-        if (not pending_flag or target_reset or pending_count != 1 or current_count != 1 or
-                owner_kinds != 0 or pending_kinds != 0 or current_kinds != 0 or
-                words[21] != SUBTITLE_LOCATOR_EVENT_NONE or words[25] != 0 or
-                not math.isfinite(provisional_target) or
-                not 0.0 <= provisional_target <= _DEFAULTS.direct_container_limit or
-                not owner_flag or not target_valid or owner_count != 1 or fade != 2 or
-                provisional_fade != 2):
-            raise ValueError("SLR13 provisional current authority is inconsistent")
-        pending_core = pending[0]
-        current_cover = current[0]
-        if (not _subtitle_provisional_geometry_is_canonical(owner[0], pending_core) or
-                current_cover["left"] > pending_core["left"] or
-                current_cover["top"] > pending_core["top"] or
-                current_cover["right"] < pending_core["right"] or
-                current_cover["bottom"] < pending_core["bottom"]):
-            raise ValueError("SLR13 provisional current cover does not contain its pending core")
-
-    counter = words[25]
-    grace_bounds = {
-        "left": words[29] & 0xFFFF,
-        "right": words[29] >> 16,
-        "top": words[30] & 0xFFFF,
-        "bottom": words[30] >> 16,
-    }
-    packed_grace_zero = words[29] == 0 and words[30] == 0
-    if owner_flag:
-        if counter != 0 or (not provisional_current and not packed_grace_zero):
-            raise ValueError("SLR14 owned hold word is reserved zero")
-        if not target_valid and not target_reset and (
-                words[18] != 0 or words[19] != 0 or current_count != 0 or fade != 0):
-            raise ValueError("SLR13 owner without target authority must clear target words")
-        if target_reset and counter != 0:
-            raise ValueError("SLR13 target reset must clear unreliable-target hold")
-    elif counter == 0:
-        if (provisional_current or not packed_grace_zero or current_count != 0 or
-                words[18] != 0 or words[19] != 0 or
-                target_valid or target_reset or fade != 0):
-            raise ValueError("SLR13 absent owner/grace state must be canonical zero")
-    else:
-        if (provisional_current or
-                counter > coordinate_contract.SUBTITLE_OCR.locator_death_grace_observations):
-            raise ValueError("SLR13 death-grace exceeds the authenticated observation limit")
-        if (target_valid or target_reset or words[19] != 0 or
-                not math.isfinite(target) or
-                not 0.0 <= target <= _DEFAULTS.direct_container_limit or
-                current_count != 0 or fade != 0 or
-                grace_bounds["left"] >= grace_bounds["right"] or
-                grace_bounds["top"] >= grace_bounds["bottom"] or
-                grace_bounds["left"] < expected_content[0] or
-                grace_bounds["right"] > expected_content[2] or
-                grace_bounds["top"] < expected_roi_top or
-                grace_bounds["bottom"] > expected_roi_bottom):
-            raise ValueError("SLR13 death-grace target or packed bounds are inconsistent")
-
+    A trace snapshot cannot establish actual OCR8 covers. Call validate_subtitle_plane_state
+    with the independently validated current OCR8 record to authenticate those covers.
+    """
+    policy = coordinate_contract.SUBTITLE_OCR
+    words = _uint32_words(payload, SUBTITLE_PLANE_STATE_WORD_COUNT, "UIP4 plane state")
+    expected_frame = _uint64(matched_frame_id, "UIP4 matched frame")
+    expected_generation = _uint64(analysis_generation, "UIP4 analysis generation")
+    expected_extents = tuple(_uint32(value, "UIP4 extent") for value in
+                             (source_width, source_height, field_width, field_height))
+    if (not expected_frame or any(value == 0 for value in expected_extents) or
+            words[0] != SUBTITLE_PLANE_STATE_SCHEMA or words[1] != SUBTITLE_PLANE_STATE_TAG):
+        raise ValueError("UIP4 state has invalid schema/tag/expected domain")
+    flags = words[policy.plane_flags_word]
+    mask = words[policy.plane_current_slot_mask_word]
+    # Legacy API names remain compatible: this is a current-core probability cue mask,
+    # not proof that any qualifying same-pixel RGB reference or count was reset.
+    resets = words[policy.plane_history_reset_mask_word]
+    warmup = words[policy.plane_warmup_word]
+    warmup_known_bits = policy.plane_warmup_remaining_mask | policy.plane_warmup_cue_bit
+    capacity_mask = (1 << SUBTITLE_PLANE_COVER_CAPACITY) - 1
+    if (warmup & ~warmup_known_bits or (warmup & policy.plane_warmup_remaining_mask) > policy.plane_warmup_observations or flags & ~SUBTITLE_PLANE_CURRENT_VALID_FLAG or mask & ~capacity_mask or
+            mask & (mask + 1) or (flags == 0 and mask != 0) or resets & ~mask or
+            any(words[policy.plane_reserved_offset:policy.plane_adaptive_offset])):
+        raise ValueError("UIP4 flags/slot mask/reserved words are not canonical")
+    frame = _uint64_words(*words[policy.plane_frame_offset:policy.plane_frame_offset + 2])
+    generation = _uint64_words(*words[policy.plane_analysis_generation_offset:policy.plane_analysis_generation_offset + 2])
+    timestamp = _uint64_words(*words[policy.plane_observation_timestamp_offset:policy.plane_observation_timestamp_offset + 2])
+    content = _subtitle_tensor_content(field_width, field_height,
+                                      tuple(words[policy.plane_content_offset:policy.plane_content_offset + 4]))
+    if tensor_content is not None and content != _subtitle_tensor_content(field_width, field_height, tensor_content):
+        raise ValueError("UIP4 content differs from the exact analysis domain")
+    roi = _subtitle_dynamic_roi(source_width, source_height, content)
+    if (frame != expected_frame or generation != expected_generation or timestamp == 0 or
+            tuple(words[policy.plane_source_extent_offset:policy.plane_source_extent_offset + 2]) != expected_extents[:2] or
+            tuple(words[policy.plane_field_extent_offset:policy.plane_field_extent_offset + 2]) != expected_extents[2:] or
+            roi is None or tuple(words[policy.plane_roi_offset:policy.plane_roi_offset + 2]) != roi):
+        raise ValueError("UIP4 frame/time/source/field/ROI identity differs from current publication")
+    epoch = words[policy.plane_cut_epoch_word]
+    if expected_scene_epoch is not None and epoch != _uint32(expected_scene_epoch, "UIP4 cut epoch"):
+        raise ValueError("UIP4 cut epoch differs from authenticated geometry")
+    if (expected_observation_timestamp_us is not None and
+            timestamp != _uint64(expected_observation_timestamp_us, "UIP4 expected observation time")):
+        raise ValueError("UIP4 observation timestamp differs from completed source")
+    _validate_adaptive_ui_tail(words, source_width, content,
+                              joint_plane_mode=joint_plane_mode, requested_gain=requested_gain)
+    tail = words[policy.plane_adaptive_offset:]
+    if warmup and (flags != SUBTITLE_PLANE_CURRENT_VALID_FLAG or mask == 0 or tail[0] != 1 or tail[15] != 0):
+        raise ValueError("UIP4 warmup requires current nonempty authority and a valid probe")
+    if resets and tail[15]:
+        raise ValueError("UIP4 invalid Base probe cannot publish history resets")
     return {
-        "schema": words[0],
-        "tag": words[1],
-        "flags": flags,
-        "owner_generation": words[3],
-        "owner_count": owner_count,
-        "owner_bbox": owner_bbox,
-        "owner_area": owner_area,
-        "analysis_generation": generation,
-        "pending_count": pending_count,
-        "pending_bbox": pending_bbox,
-        "pending_area": pending_area,
-        "target": target if target_valid else None,
-        "cached_target": target if not owner_flag and counter != 0 else None,
-        "target_bits": words[18],
-        "target_generation": words[19],
-        "target_reset": target_reset,
-        "provisional_current": provisional_current,
-        "provisional_target": provisional_target if provisional_current else None,
-        "provisional_target_bits": words[SUBTITLE_LOCATOR_PROVISIONAL_TARGET_WORD],
-        "provisional_fade": provisional_fade if provisional_current else 0,
-        "current_count": current_count,
-        "last_event": words[21],
-        "matched_frame_id": frame_id,
-        "fade": fade,
-        "target_grace": counter if not owner_flag else 0,
-        "unreliable_target_holds": counter if owner_flag else 0,
-        "scene_epoch": words[26],
-        "field_width": words[27],
-        "field_height": words[28],
-        "tensor_content_rect": expected_content,
-        "packed_grace_x": words[29],
-        "packed_grace_y": words[30],
-        "packed_kinds": packed_kinds,
-        "owner_ribbon_mask": owner_kinds,
-        "pending_ribbon_mask": pending_kinds,
-        "current_ribbon_mask": current_kinds,
-        "grace_bounds": grace_bounds if not owner_flag and counter != 0 else None,
-        "owner_rectangles": owner,
-        "pending_rectangles": pending,
-        "current_rectangles": current,
-        "joint_plane_mode": joint_plane_mode,
+        "schema": words[0], "tag": words[1], "flags": flags,
+        "current_valid": flags == SUBTITLE_PLANE_CURRENT_VALID_FLAG,
+        "current_slot_mask": mask, "current_count": mask.bit_count(),
+        "history_reset_mask": resets,
+        "warmup_packed": warmup, "warmup_remaining": warmup & policy.plane_warmup_remaining_mask,
+        "warmup_previous_cue": bool(warmup & policy.plane_warmup_cue_bit),
+        "matched_frame_id": frame, "analysis_generation": generation,
+        "observation_timestamp_us": timestamp, "scene_epoch": epoch,
+        "source_width": source_width, "source_height": source_height,
+        "field_width": field_width, "field_height": field_height,
+        "roi_top": roi[0], "roi_bottom": roi[1], "tensor_content_rect": content,
+        "target": _float32_bits(tail[3]) if tail[0] else None,
+        "target_bits": tail[3], "joint_plane_mode": joint_plane_mode,
         "display_budget": _display_budget_for_mode(requested_gain, joint_plane_mode),
+        "adaptive": {
+            "initialized": tail[0] == 1, "flags": tail[1], "current_level": tail[2],
+            "accepted_observation_timestamp_us": _uint64_words(tail[4], tail[5]),
+            "approach_since_us": _uint64_words(tail[6], tail[7]),
+            "retreat_since_us": _uint64_words(tail[8], tail[9]),
+            "approach_level": tail[10], "retreat_level": tail[11],
+            "display_budget": _float32_bits(tail[12]),
+            "covered_count": tail[13], "conflict_count": tail[14], "invalid_count": tail[15],
+        },
+        "cover_geometry_verified": False,
     }
+
+
+def validate_subtitle_plane_state(payload: Any, *, ocr_record: Dict[str, Any], **context: Any) -> Dict[str, Any]:
+    """Join UIP4 current slots to every paired cover in the exact validated current OCR8 record."""
+    state = validate_subtitle_plane_snapshot(payload, **context)
+    if not isinstance(ocr_record, dict) or type(ocr_record.get("authoritative")) is not bool:
+        raise ValueError("UIP4 requires the independently validated current OCR8 record")
+    for key in ("matched_frame_id", "analysis_generation", "source_width", "source_height",
+                "field_width", "field_height", "roi_top", "roi_bottom", "tensor_content_rect"):
+        if ocr_record.get(key) != state[key]:
+            raise ValueError("UIP4 and OCR8 frame/domain identity differs")
+    count = _uint32(ocr_record.get("final_count"), "OCR8 current cover count")
+    boxes = ocr_record.get("final_boxes")
+    if not isinstance(boxes, list) or len(boxes) != count or count > SUBTITLE_PLANE_COVER_CAPACITY:
+        raise ValueError("UIP4 requires all exact current OCR8 covers")
+    if state["current_valid"]:
+        if not ocr_record["authoritative"] or state["current_slot_mask"] != (1 << count) - 1:
+            raise ValueError("UIP4 current slots differ from authoritative current OCR8")
+        current = [dict(box) for box in boxes]
+    else:
+        current = []
+    kinds = sum(1 << index for index, box in enumerate(current) if box["kind"] == "ribbon")
+    return {**state, "current_rectangles": current, "current_ribbon_mask": kinds,
+            "cover_geometry_verified": True}
+
+
+def validate_subtitle_condition_words(payload: Any, *, plane_state: Dict[str, Any],
+                                     geometry_ready: bool, require_ocr_kinds: bool = True) -> tuple[int, ...]:
+    """Authenticate SCP4 without granting geometry from a plane-only trace snapshot."""
+    words = _uint32_words(payload, coordinate_contract.SUBTITLE_OCR.condition_param_word_count, "SCP4 condition")
+    if words[:2] != (coordinate_contract.SUBTITLE_OCR.condition_param_schema,
+                     coordinate_contract.SUBTITLE_OCR.condition_param_tag):
+        raise ValueError("SCP4 condition has an invalid schema/tag")
+    count = plane_state["current_count"]
+    active = bool(geometry_ready and plane_state["current_valid"] and count and
+                  plane_state["adaptive"]["invalid_count"] == 0)
+    if not active:
+        if any(words[2:]):
+            raise ValueError("SCP4 inactive payload must be canonical positive zero")
+    elif (words[2] != count or words[3] >> count or words[4] != 2 or
+          words[5] != plane_state["target_bits"]):
+        raise ValueError("SCP4 active payload differs from UIP4 slots/applied plane")
+    elif require_ocr_kinds and (not plane_state.get("cover_geometry_verified") or
+                               words[3] != plane_state.get("current_ribbon_mask")):
+        raise ValueError("SCP4 ribbon kinds require actual current OCR8 covers")
+    return words
 
 
 def _int32(value: Any, label: str) -> int:
@@ -2203,10 +1859,13 @@ def _validate_shadow_manifest_summary(value: Any) -> Dict[str, Any]:
 
 
 def _required_hashed_artifact(
-        artifacts: Dict[str, Any], name: str, label: str) -> Dict[str, Any]:
+        artifacts: Dict[str, Any], name: str, label: str, *,
+        byte_count: int | None = None) -> Dict[str, Any]:
     descriptor = artifacts.get(name)
-    if (not isinstance(descriptor, dict) or set(descriptor) != {
-            "available", "required", "stage", "description", "sha256"} or
+    keys = {"available", "required", "stage", "description", "sha256"}
+    if byte_count is not None:
+        keys.add("byte_count")
+    if (not isinstance(descriptor, dict) or set(descriptor) != keys or
             descriptor.get("available") is not True or
             descriptor.get("required") is not True or
             not isinstance(descriptor.get("stage"), str) or not descriptor["stage"] or
@@ -2214,7 +1873,49 @@ def _required_hashed_artifact(
             not descriptor["description"] or
             not _is_sha256_hex(descriptor.get("sha256"))):
         raise ValueError(f"dump_manifest.json has an invalid {label} artifact descriptor")
+    if byte_count is not None and (type(descriptor.get("byte_count")) is not int or
+                                  descriptor["byte_count"] != byte_count):
+        raise ValueError(f"dump_manifest.json has an invalid {label} byte_count")
     return descriptor
+
+
+def _subtitle_contour_artifact_layouts(
+        source_width: int, source_height: int, field_width: int, field_height: int
+        ) -> Dict[str, tuple[Dict[str, Any], int]]:
+    """Return the eleven exact native tuple shapes, formats and byte lengths."""
+    policy = coordinate_contract.EXPECTED_SUBTITLE_OCR["contour_policy"]
+    if any(type(value) is not int or not 0 < value <= 0xFFFFFFFF
+           for value in (source_width, source_height)) or any(
+               type(value) is not int or not 0 < value <= _MAXIMUM_SOURCE_LONG_SIDE
+               for value in (field_width, field_height)):
+        raise ValueError("subtitle contour source/field extent is unsupported")
+    crop_height = min(source_height, (source_width + 5) // 6)
+    eligible = max(source_width, source_height) <= policy["source_max_extent"]
+    native_width, native_height = ((source_width, crop_height) if eligible else (1, 1))
+    native_count = native_width * native_height
+    field_count = field_width * field_height
+
+    def texture(width: int, height: int, fmt: str, value: int) -> Dict[str, Any]:
+        return {"width": width, "height": height, "format": "DXGI_FORMAT_" + fmt,
+                "format_value": value}
+
+    return {
+        "contour_support": (texture(native_width, native_height, "R32_UINT", 42), native_count * 4),
+        "contour_field_pin": (texture(field_width, field_height, "R32_UINT", 42), field_count * 4),
+        "contour_distance": (texture(field_width, field_height, "R32_FLOAT", 41), field_count * 4),
+        "contour_identity": ({"word_count": policy["history_word_count"],
+                              "format": "uint32-le structured buffer"}, policy["history_word_count"] * 4),
+        "contour_history": (texture(native_width, native_height, "R32G32B32A32_FLOAT", 2), native_count * 16),
+        "contour_source": (texture(native_width, native_height, "R16G16B16A16_FLOAT", 10), native_count * 8),
+        "ocr_probability": ({"width": coordinate_contract.SUBTITLE_OCR.output_shape[3],
+                             "height": coordinate_contract.SUBTITLE_OCR.output_shape[2],
+                             "format": "float32-le structured buffer"},
+                            math.prod(coordinate_contract.SUBTITLE_OCR.output_shape) * 4),
+        "gaussian_weight": (texture(field_width, field_height, "R32_FLOAT", 41), field_count * 4),
+        "gaussian_blend": (texture(field_width, field_height, "R32_FLOAT", 41), field_count * 4),
+        "gaussian_vertical_conditioned": (texture(field_width, field_height, "R32_FLOAT", 41), field_count * 4),
+        "gaussian_control": ({"word_count": 1, "format": "uint32-le structured buffer"}, 4),
+    }
 
 
 def _subtitle_shader_contract(
@@ -2280,15 +1981,16 @@ def _subtitle_ocr_producer_contract() -> Dict[str, Any]:
     }
 
 
-def _subtitle_locator_resolver_contract() -> Dict[str, Any]:
+def _subtitle_plane_resolver_contract() -> Dict[str, Any]:
     return {
-        "state_schema": SUBTITLE_LOCATOR_STATE_SCHEMA,
-        "state_tag": SUBTITLE_LOCATOR_STATE_TAG,
-        "state_word_count": SUBTITLE_LOCATOR_STATE_WORD_COUNT,
-        "rectangle_capacity": SUBTITLE_LOCATOR_RECT_CAPACITY,
+        "state_schema": SUBTITLE_PLANE_STATE_SCHEMA,
+        "state_tag": SUBTITLE_PLANE_STATE_TAG,
+        "state_word_count": SUBTITLE_PLANE_STATE_WORD_COUNT,
+        "cover_capacity": SUBTITLE_PLANE_COVER_CAPACITY,
+        "contour_policy": dict(coordinate_contract.EXPECTED_SUBTITLE_OCR["contour_policy"]),
         "adaptive_ui": {
             "policy_id": coordinate_contract.CALIBRATED_DEFAULTS.adaptive_policy_id,
-            "state_offset": 80, "state_word_count": 16,
+            "state_offset": SUBTITLE_PLANE_ADAPTIVE_OFFSET, "state_word_count": 16,
             "clock": "source-observation-microseconds",
             "geometry_authority": coordinate_contract.SUBTITLE_OCR.geometry_authority,
             "probe": "union-of-current-authorized-covers-in-content",
@@ -2300,7 +2002,7 @@ def _subtitle_locator_resolver_contract() -> Dict[str, Any]:
             "approach_delay_ms": 100, "retreat_delay_ms": 1500,
             "approach_source_u_per_second": _float32(0.03),
             "retreat_source_u_per_second": _float32(0.005),
-            "geometric_pin": "full-on-current-cover-authority",
+            "geometric_pin": "full-on-current-contour-authority",
             "host_model_policy": {
                 "mode": 3,
                 "maximum_plane_source_u": _float32(_DEFAULTS.direct_container_limit),
@@ -2312,44 +2014,13 @@ def _subtitle_locator_resolver_contract() -> Dict[str, Any]:
                 "capped_conflict": "derived-from-top-candidate-counts",
             },
         },
-        "qualification_policy": {
-            "corner_filter_applies_to": "non-ribbon-ordinary-cores",
-            "corner_edge_clearance": "strictly-less-than-floor-content-width-over-divisor",
-            "corner_edge_divisor": (
-                coordinate_contract.SUBTITLE_OCR.locator_corner_edge_divisor),
-            "corner_bottom": "at-or-below-dynamic-roi-bottom-minus-rows",
-            "corner_bottom_rows": (
-                coordinate_contract.SUBTITLE_OCR.locator_corner_bottom_rows),
-            "edge_threshold_equality": "accepted",
-            "ribbon_exempt": True,
-        },
-        "provisional_current_policy": {
-            "flag": coordinate_contract.SUBTITLE_OCR.locator_provisional_current_flag,
-            "target_word": coordinate_contract.SUBTITLE_OCR.locator_provisional_target_word,
-            "fade_word": coordinate_contract.SUBTITLE_OCR.locator_provisional_fade_word,
-            "applies_to": "first-distinct-unmatched-single-ordinary-replacement",
-            "prior_requires": {
-                "owner_count": 1, "current_count": 1, "pending_count": 0,
-                "fade": 2, "event": "none", "unreliable_holds": 0,
-            },
-            "minimum_vertical_overlap": {
-                "numerator": coordinate_contract.SUBTITLE_OCR.
-                locator_provisional_min_vertical_overlap_numerator,
-                "denominator": coordinate_contract.SUBTITLE_OCR.
-                locator_provisional_min_vertical_overlap_denominator,
-            },
-            "maximum_height_ratio": coordinate_contract.SUBTITLE_OCR.
-            locator_provisional_max_height_ratio,
-            "maximum_center_y_delta": {
-                "numerator": coordinate_contract.SUBTITLE_OCR.
-                locator_provisional_max_center_y_delta_shorter_height,
-                "denominator": 1, "unit": "shorter-height",
-            },
-            "horizontal_center_containment": "mutual-half-open",
-            "current_authority": "exact-same-frame-selected-ocr8-core-cover-pair",
-            "durable_state": "owner-generation-target-fade-unchanged",
-            "duplicate_requires": "exact-identity-core-and-cover",
-            "hard_cut_allowed": False,
+        "current_cover_policy": {
+            "selection": "all-valid-current-ocr8-core-cover-pairs",
+            "capacity": SUBTITLE_PLANE_COVER_CAPACITY,
+            "geometry_source": "exact-current-ocr8-record-final-payload",
+            "history_authority": "per-pixel-four-genuine-rgb-confirmations",
+            "box_identity_resets_history": False,
+            "held_reuse": "byte-identical-latest-published-ocr8-and-uip2-tuple",
         },
         "target_policy": {
             "units": "one-eye-analysis-source-U",
@@ -2361,12 +2032,11 @@ def _subtitle_locator_resolver_contract() -> Dict[str, Any]:
             "approach_rate_source_u_per_second": _float32(0.03),
             "retreat_rate_source_u_per_second": _float32(0.005),
             "rate_tick_cap_us": 250000,
-            "current_cover_pin": "immediate-full-plane",
-            "collar": "existing-horizontal-plus-vertical-analytic-distance",
-            "owner_hold_word": "reserved-zero",
+            "current_cover_pin": "confirmed-native-temporal-support-literal-gaussian-weight",
+            "collar": "untruncated-max-union-gaussian-before-shared-slope-conditioning",
             "representation_limit": "direct-parallax-container",
         },
-        "shader_contract": _subtitle_shader_contract(_SUBTITLE_LOCATOR_SHADER_SPECS),
+        "shader_contract": _subtitle_shader_contract(_SUBTITLE_PLANE_SHADER_SPECS),
     }
 
 
@@ -2397,26 +2067,27 @@ def _validate_subtitle_conditioning_manifest(
             "artifact_files": {},
             "subtitle_evidence_complete": False,
         }
-    if mode == _SUBTITLE_MODE_SLR13:
+    if mode == _SUBTITLE_MODE_CONTOURS:
         expected_files = {
             "ocr_record": "subtitle_ocr_record.u32",
             "locator_state": "subtitle_locator_state.u32",
             "base_field": "shadow_base_final_parallax.f32",
             "conditioned_field": "shadow_final_parallax.f32",
+            **_SUBTITLE_CONTOUR_ARTIFACT_FILES,
         }
         if subtitle.get("request") is not True:
-            raise ValueError("active SLR13 subtitle conditioning must bind an enabled request")
+            raise ValueError("active UIP4 subtitle conditioning must bind an enabled request")
         if subtitle.get("producer") != _subtitle_ocr_producer_contract():
-            raise ValueError("active SLR13 subtitle conditioning has unknown OCR8 provenance")
-        if subtitle.get("resolver") != _subtitle_locator_resolver_contract():
-            raise ValueError("active SLR13 subtitle conditioning has unknown resolver provenance")
+            raise ValueError("active UIP4 subtitle conditioning has unknown OCR8 provenance")
+        if subtitle.get("resolver") != _subtitle_plane_resolver_contract():
+            raise ValueError("active UIP4 subtitle conditioning has unknown resolver provenance")
         if subtitle.get("artifacts") != expected_files:
-            raise ValueError("active SLR13 subtitle conditioning has unknown artifact roles")
+            raise ValueError("active UIP4 subtitle conditioning has unknown artifact roles")
         required = {
             "subtitle_ocr_record.u32": "OCR8 subtitle boxes for atomic target",
-            "subtitle_locator_state.u32": "compact SLR13 subtitle authority state",
+            "subtitle_locator_state.u32": "compact UIP4 current subtitle plane state",
             "shadow_base_final_parallax.f32": (
-                "ordinary post-limiter V2 field before SLR13 conditioning"),
+                "ordinary post-limiter V2 field before UIP4 conditioning"),
         }
         for name, stage in required.items():
             descriptor = _required_hashed_artifact(
@@ -2424,8 +2095,22 @@ def _validate_subtitle_conditioning_manifest(
             if descriptor.get("stage") != stage:
                 raise ValueError(
                     f"dump_manifest.json misattributes active subtitle artifact {name}")
+        dimensions = document.get("dimensions", {})
+        source_shape = dimensions.get("analysis_source", {})
+        field_shape = dimensions.get("shadow_final_parallax", {})
+        layouts = _subtitle_contour_artifact_layouts(
+            source_shape.get("width"), source_shape.get("height"),
+            field_shape.get("width"), field_shape.get("height"))
+        for role, (layout, byte_count) in layouts.items():
+            name = _SUBTITLE_CONTOUR_ARTIFACT_FILES[role]
+            descriptor = _required_hashed_artifact(
+                artifacts, name, f"active subtitle {name}", byte_count=byte_count)
+            if descriptor["stage"] != _SUBTITLE_CONTOUR_ARTIFACT_STAGES[role]:
+                raise ValueError(f"dump_manifest.json misattributes contour artifact {name}")
+            if dimensions.get(role) != layout:
+                raise ValueError(f"dump_manifest.json contour tuple dimensions disagree for {role}")
         return {
-            "mode": _SUBTITLE_MODE_SLR13,
+            "mode": _SUBTITLE_MODE_CONTOURS,
             "live": True,
             "request": True,
             "artifact_files": expected_files,
@@ -2771,7 +2456,7 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
     if selected and not active:
         raise ValueError("dump_manifest.json selects V2 without an active producer")
     if subtitle_live and (not active or not selected):
-        raise ValueError("active SLR13 subtitle conditioning requires selected V2 geometry")
+        raise ValueError("active UIP4 subtitle conditioning requires selected V2 geometry")
     requested = renderer.get("parallax_v2_render_requested")
     mapping_matches = renderer.get("mapping_artifacts_match_selected_renderer")
     if (not isinstance(requested, bool) or
@@ -2828,12 +2513,12 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
     expected_final_role = (
         (("least row-wise crop-local q >= shadow_vertical_conditioned with horizontal slope <= "
           "max_horizontal_slope and vertical shear <= max_vertical_shear produces "
-          "shadow_base_final_parallax; SLR13 publishes shadow_final_parallax atomically as "
+          "shadow_base_final_parallax; UIP4 publishes shadow_final_parallax atomically as "
           "direct live authority with depth_input_region embedding")
          if subtitle_live and input_mode == "window-region" else
          ("least row-wise q >= shadow_vertical_conditioned with horizontal slope <= "
           "max_horizontal_slope and vertical shear <= max_vertical_shear produces "
-          "shadow_base_final_parallax; SLR13 publishes shadow_final_parallax atomically as "
+          "shadow_base_final_parallax; UIP4 publishes shadow_final_parallax atomically as "
           "direct live authority")
          if subtitle_live else
          ("least row-wise crop-local q >= shadow_vertical_conditioned with horizontal slope <= "
@@ -2879,7 +2564,7 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
     }
     if subtitle_live:
         expected_artifacts["shadow_base_final_parallax.f32"] = (
-            "ordinary post-limiter V2 field before SLR13 conditioning", True)
+            "ordinary post-limiter V2 field before UIP4 conditioning", True)
     for name, (stage, required) in expected_artifacts.items():
         descriptor = artifacts.get(name)
         # Exact geometry fields carry a mandatory SHA-256 of the written bytes; a manifest
@@ -2944,7 +2629,7 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
         if subtitle_live and not coordinate_contract.subtitle_ocr_field_is_calibrated(
                 geometry_width, geometry_height):
             raise ValueError(
-                "active SLR13 subtitle conditioning requires a calibrated live field")
+                "active UIP4 subtitle conditioning requires a calibrated live field")
         model_dimensions = dimensions.get("model_input")
         raw_dimensions = dimensions.get("raw_depth")
         source_dimensions = dimensions.get("source")
@@ -3004,7 +2689,7 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
     if not subtitle_live and (
             "shadow_base_final_parallax.f32" in artifacts or
             "shadow_base_final_parallax" in dimensions):
-        raise ValueError("inactive subtitle conditioning exposes an SLR13 base field")
+        raise ValueError("inactive subtitle conditioning exposes a UIP4 base field")
 
     region_summary = document.get("window_region")
     region_descriptor = artifacts.get("window_region.json")
@@ -3104,6 +2789,8 @@ def _read_hashed_artifact(
     if (not isinstance(descriptor, dict) or
             hashlib.sha256(payload).hexdigest() != descriptor.get("sha256")):
         raise ValueError(f"{name} content hash mismatch")
+    if "byte_count" in descriptor and len(payload) != descriptor["byte_count"]:
+        raise ValueError(f"{name} exact byte_count mismatch")
     return payload
 
 
@@ -3137,30 +2824,28 @@ def _gpu_trace_contract_expected_sections() -> Dict[str, Any]:
                     "unless RQST/CBRG/cookies/token/class all authenticate"),
             },
             "subtitle_locator": {
-                "word_offset": 88, "word_count": 96,
+                "word_offset": 88, "word_count": 40,
                 "validity": (
-                    "post-finalization SLR13 for an authenticated subtitle observation; "
+                    "post-finalization UIP4 for an authenticated subtitle observation; "
                     "held_with_depth preserves the byte-identical immediately prior tuple "
                     "and frame identity; "
                     "subtitle_suppressed bytes are frozen/unused"),
             },
             "subtitle_condition": {
-                "word_offset": 184, "word_count": 6,
+                "word_offset": 128, "word_count": 6,
                 "validity": (
-                    "post-finalization condition params for an authenticated subtitle "
-                    "observation, or the byte-identical immediately prior params for "
-                    "held_with_depth: exact SLR tuple or canonical zero6 when current_count is nonzero, "
-                    "canonical zero6 when current_count is zero; "
-                    "matched geometry authority is verified from the complete state separately; "
-                    "suppressed output copies exact Base and these words are unused"),
+                    "post-finalization SCP4 for an authenticated subtitle observation; active payload "
+                    "matches current UIP4 slots and applied target, inactive payload is zero with fresh "
+                    "schema/tag; held_with_depth preserves the byte-identical immediately prior params; "
+                    "suppressed words are unused; actual OCR8 covers are verified separately"),
             },
             "observation_timestamp": {
-                "word_offset": 190, "word_count": 2,
+                "word_offset": 134, "word_count": 2,
                 "validity": (
                     "nonzero monotonic source-observation microseconds; zero is invalid"),
             },
             "reserved": {
-                "word_offset": 192, "word_count": 0, "validity": "must be zero"},
+                "word_offset": 136, "word_count": 0, "validity": "must be zero"},
         },
         "transaction_word_offsets": {
             "receipt": {"word_offset": 0, "word_count": 8},
@@ -3217,9 +2902,9 @@ def _gpu_trace_contract_expected_sections() -> Dict[str, Any]:
             },
         },
         "subtitle_locator": {
-            "schema": SUBTITLE_LOCATOR_STATE_SCHEMA,
-            "tag": SUBTITLE_LOCATOR_STATE_TAG,
-            "word_count": GPU_TRACE_LOCATOR_WORD_COUNT,
+            "schema": SUBTITLE_PLANE_STATE_SCHEMA,
+            "tag": SUBTITLE_PLANE_STATE_TAG,
+            "word_count": GPU_TRACE_PLANE_WORD_COUNT,
         },
         "subtitle_condition": {
             "schema": coordinate_contract.SUBTITLE_OCR.condition_param_schema,
@@ -3379,7 +3064,6 @@ _GPU_TRACE_OUTCOME_NAMES = {
 _GPU_TRACE_WORK_NAMES = {
     0: "none", 1: "optional-ocr", 2: "subtitle-observation",
 }
-_GPU_TRACE_EVENT_NAMES = {0: "none", 1: "birth", 2: "death", 3: "handoff"}
 
 
 def _gpu_trace_json_float(word: int) -> float | None:
@@ -3425,7 +3109,7 @@ def validate_gpu_trace_ring(
         generation = _uint64_words(record[6], record[7])
         domain_tag = _uint64_words(record[8], record[9])
         token = _uint64_words(record[10], record[11])
-        observation_timestamp_us = _uint64_words(record[190], record[191])
+        observation_timestamp_us = _uint64_words(record[134], record[135])
         if (frame_id == 0 or domain_tag == 0 or token == 0 or
                 record[18] == 0 or record[19] == 0 or
                 record[20] == 0 or record[21] == 0):
@@ -3444,93 +3128,38 @@ def validate_gpu_trace_ring(
             record[14], record[17], depth, receipt_valid, optional, record[16])
         if record[15] != subtitle:
             raise ValueError("GPU trace subtitle disposition disagrees with raw proof")
-        locator = tuple(record[88:184])
-        condition = tuple(record[184:190])
+        plane = tuple(record[88:128])
+        condition = tuple(record[128:134])
         suppressed = bool(record[16] & GPU_TRACE_FLAG_SUBTITLE_SUPPRESSED)
         subtitle_held = subtitle == 5
         if subtitle_held and ordinal != 0:
             previous_slot = (oldest_slot + ordinal - 1) % GPU_TRACE_CAPACITY
             previous_base = (GPU_TRACE_HEADER_WORD_COUNT +
                              previous_slot * GPU_TRACE_RECORD_WORD_COUNT)
-            if (locator != tuple(words[previous_base + 88:previous_base + 184]) or
-                    condition != tuple(words[previous_base + 184:previous_base + 190])):
+            if (plane != tuple(words[previous_base + 88:previous_base + 128]) or
+                    condition != tuple(words[previous_base + 128:previous_base + 134])):
                 raise ValueError(
                     "GPU trace held subtitle tuple differs from the immediately prior record")
         if not suppressed:
-            locator_frame_id = _uint64_words(locator[22], locator[23])
-            locator_frame_valid = (
-                locator_frame_id != 0 and
-                (locator_frame_id < frame_id if subtitle_held else
-                 locator_frame_id == frame_id))
-            if (locator[0] != SUBTITLE_LOCATOR_STATE_SCHEMA or
-                    locator[1] != SUBTITLE_LOCATOR_STATE_TAG or
-                    locator[2] & ~SUBTITLE_LOCATOR_KNOWN_FLAGS or
-                    locator[4] > SUBTITLE_LOCATOR_RECT_CAPACITY or
-                    locator[12] > SUBTITLE_LOCATOR_RECT_CAPACITY or
-                    locator[20] > SUBTITLE_LOCATOR_RECT_CAPACITY or
-                    _uint64_words(locator[10], locator[11]) != generation or
-                    not locator_frame_valid or
-                    locator[27] != record[20] or locator[28] != record[21]):
-                raise ValueError("GPU trace has an invalid finalized SLR13 state")
-            current_kinds = ((locator[SUBTITLE_LOCATOR_KIND_WORD] >>
-                              SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT) &
-                             SUBTITLE_LOCATOR_KIND_MASK)
-            owner_kinds = ((locator[SUBTITLE_LOCATOR_KIND_WORD] >>
-                            SUBTITLE_LOCATOR_OWNER_KIND_SHIFT) &
-                           SUBTITLE_LOCATOR_KIND_MASK)
-            pending_kinds = ((locator[SUBTITLE_LOCATOR_KIND_WORD] >>
-                              SUBTITLE_LOCATOR_PENDING_KIND_SHIFT) &
-                             SUBTITLE_LOCATOR_KIND_MASK)
-            locator_flags = locator[2]
-            provisional_current = bool(
-                locator_flags & SUBTITLE_LOCATOR_FLAG_PROVISIONAL_CURRENT)
-            if provisional_current:
-                provisional_target = _float32_bits(
-                    locator[SUBTITLE_LOCATOR_PROVISIONAL_TARGET_WORD])
-                provisional_fade = locator[SUBTITLE_LOCATOR_PROVISIONAL_FADE_WORD]
-
-                def trace_rectangle(offset: int) -> Dict[str, int]:
-                    return {
-                        "left": locator[offset + 0], "top": locator[offset + 1],
-                        "right": locator[offset + 2], "bottom": locator[offset + 3],
-                    }
-                pending_core = trace_rectangle(SUBTITLE_LOCATOR_PENDING_WORD_OFFSET)
-                current_cover = trace_rectangle(SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET)
-                if (not (locator_flags & SUBTITLE_LOCATOR_FLAG_PENDING) or
-                        locator_flags & SUBTITLE_LOCATOR_FLAG_TARGET_RESET or
-                        locator[12] != 1 or locator[20] != 1 or
-                        owner_kinds != 0 or pending_kinds != 0 or current_kinds != 0 or
-                        locator[21] != SUBTITLE_LOCATOR_EVENT_NONE or locator[25] != 0 or
-                        not math.isfinite(provisional_target) or
-                        not 0.0 <= provisional_target <= _DEFAULTS.direct_container_limit or
-                        not (locator_flags & SUBTITLE_LOCATOR_FLAG_OWNER) or
-                        not (locator_flags & SUBTITLE_LOCATOR_FLAG_TARGET_VALID) or
-                        locator[4] != 1 or locator[24] != 2 or
-                        provisional_fade != 2 or
-                        not _subtitle_provisional_geometry_is_canonical(
-                            trace_rectangle(SUBTITLE_LOCATOR_OWNER_WORD_OFFSET),
-                            pending_core) or
-                        current_cover["left"] > pending_core["left"] or
-                        current_cover["top"] > pending_core["top"] or
-                        current_cover["right"] < pending_core["right"] or
-                        current_cover["bottom"] < pending_core["bottom"]):
-                    raise ValueError(
-                        "GPU trace has inconsistent provisional SLR13 authority")
-            elif (locator_flags & SUBTITLE_LOCATOR_FLAG_OWNER and
-                  (locator[SUBTITLE_LOCATOR_PROVISIONAL_TARGET_WORD] != 0 or
-                   locator[SUBTITLE_LOCATOR_PROVISIONAL_FADE_WORD] != 0)):
-                raise ValueError("GPU trace has noncanonical SLR13 auxiliary words")
-            expected_fade = locator[
-                SUBTITLE_LOCATOR_PROVISIONAL_FADE_WORD if provisional_current else 24]
-            expected_target = locator[
-                SUBTITLE_LOCATOR_PROVISIONAL_TARGET_WORD if provisional_current else 18]
-            expected_condition = ((
-                coordinate_contract.SUBTITLE_OCR.condition_param_schema,
-                coordinate_contract.SUBTITLE_OCR.condition_param_tag,
-                locator[20], current_kinds, expected_fade, expected_target
-            ) if locator[20] != 0 else (0, 0, 0, 0, 0, 0))
-            if condition != expected_condition and condition != (0, 0, 0, 0, 0, 0):
-                raise ValueError("GPU trace condition params disagree with finalized SLR13")
+            plane_frame_id = _uint64_words(plane[4], plane[5])
+            if (plane_frame_id == 0 or
+                    (plane_frame_id >= frame_id if subtitle_held else plane_frame_id != frame_id)):
+                raise ValueError("GPU trace has an invalid finalized UIP4 frame")
+            decoded_plane = validate_subtitle_plane_snapshot(
+                struct.pack("<40I", *plane), matched_frame_id=plane_frame_id,
+                analysis_generation=generation, source_width=record[18], source_height=record[19],
+                field_width=record[20], field_height=record[21])
+            if subtitle == 2 and (decoded_plane["current_valid"] or decoded_plane["current_slot_mask"]):
+                raise ValueError("GPU trace abstention cannot grant current UIP4 slots")
+            if decoded_plane["observation_timestamp_us"] > observation_timestamp_us:
+                raise ValueError("GPU trace UIP4 source time cannot be newer than the transaction")
+            if not subtitle_held and decoded_plane["observation_timestamp_us"] != observation_timestamp_us:
+                raise ValueError("GPU trace UIP4 source time differs from current publication")
+            validate_subtitle_condition_words(
+                struct.pack("<6I", *condition), plane_state=decoded_plane,
+                geometry_ready=decoded_plane["current_valid"], require_ocr_kinds=False)
+        else:
+            decoded_plane = None
 
         matched = frame_id == matched_frame_id
         if matched:
@@ -3542,8 +3171,6 @@ def validate_gpu_trace_ring(
                 raise ValueError("GPU trace matched record disagrees with the dump domain")
             matched_sequence = sequence
 
-        locator_flags, owner_count = locator[2], locator[4]
-        lifetime_or_hold = locator[25]
         condition_valid = (
             not suppressed and
             condition[0] == coordinate_contract.SUBTITLE_OCR.condition_param_schema and
@@ -3565,7 +3192,7 @@ def validate_gpu_trace_ring(
         condition_summary = ({
             "active": False,
             "unused": True,
-            "reason": "subtitle-suppressed transaction freezes SLR and skips conditioning",
+            "reason": "subtitle-suppressed transaction freezes UIP4 and skips conditioning",
         } if suppressed else {
             "active": condition_active,
             "valid": condition_valid,
@@ -3576,7 +3203,7 @@ def validate_gpu_trace_ring(
             "tag": condition[1],
             "current_count": condition[2],
             "current_kinds": condition[3],
-            "fade_step": condition[4],
+            "active_level": condition[4],
             "target": condition_target,
             "target_bits": condition[5],
         })
@@ -3615,44 +3242,28 @@ def validate_gpu_trace_ring(
             "analysis_source": {"width": record[18], "height": record[19]},
             "field": {"width": record[20], "height": record[21]},
             "matched_dump_frame": matched,
-            "subtitle_locator": {
-                "schema": locator[0], "tag": locator[1],
-                "flags": {
-                    "value": locator_flags,
-                    "owner": bool(locator_flags & SUBTITLE_LOCATOR_FLAG_OWNER),
-                    "pending": bool(locator_flags & SUBTITLE_LOCATOR_FLAG_PENDING),
-                    "target_valid": bool(locator_flags & SUBTITLE_LOCATOR_FLAG_TARGET_VALID),
-                    "target_reset": bool(locator_flags & SUBTITLE_LOCATOR_FLAG_TARGET_RESET),
-                    "provisional_current": bool(
-                        locator_flags & SUBTITLE_LOCATOR_FLAG_PROVISIONAL_CURRENT),
+            "subtitle_plane": {
+                "schema": plane[0], "tag": plane[1],
+                "flags": {"value": plane[2], "current_valid": plane[2] == SUBTITLE_PLANE_CURRENT_VALID_FLAG},
+                "current_slot_mask": plane[3], "current_count": plane[3].bit_count(),
+                "frame_id": _uint64_words(plane[4], plane[5]),
+                "analysis_generation": _uint64_words(plane[6], plane[7]),
+                "observation_timestamp_us": _uint64_words(plane[8], plane[9]),
+                "cut_epoch": plane[20], "target": _gpu_trace_json_float(plane[27]),
+                "target_bits": plane[27],
+                "adaptive": {
+                    "initialized": plane[24] == 1, "flags": plane[25], "current_level": plane[26],
+                    "accepted_observation_timestamp_us": _uint64_words(plane[28], plane[29]),
+                    "approach_since_us": _uint64_words(plane[30], plane[31]),
+                    "retreat_since_us": _uint64_words(plane[32], plane[33]),
+                    "approach_level": plane[34], "retreat_level": plane[35],
+                    "display_budget": _gpu_trace_json_float(plane[36]),
+                    "covered_count": plane[37], "conflict_count": plane[38], "invalid_count": plane[39],
                 },
-                "owner_generation": locator[3], "owner_count": owner_count,
-                "pending_count": locator[12], "current_count": locator[20],
-                "target": _gpu_trace_json_float(locator[18]),
-                "target_bits": locator[18],
-                "event": {
-                    "value": locator[21],
-                    "name": _GPU_TRACE_EVENT_NAMES.get(locator[21], "invalid")},
-                "fade_step": locator[24],
-                "provisional_target": (
-                    _gpu_trace_json_float(
-                        locator[SUBTITLE_LOCATOR_PROVISIONAL_TARGET_WORD])
-                    if locator_flags & SUBTITLE_LOCATOR_FLAG_PROVISIONAL_CURRENT else None),
-                "provisional_target_bits": locator[
-                    SUBTITLE_LOCATOR_PROVISIONAL_TARGET_WORD],
-                "provisional_fade_step": (
-                    locator[SUBTITLE_LOCATOR_PROVISIONAL_FADE_WORD]
-                    if locator_flags & SUBTITLE_LOCATOR_FLAG_PROVISIONAL_CURRENT else 0),
-                "lifetime_or_hold_count": lifetime_or_hold,
-                "reserved_owner_hold_count": lifetime_or_hold if owner_count != 0 else None,
-                "death_grace_count": lifetime_or_hold if owner_count == 0 else None,
-                "cut_epoch": locator[26],
-                "analysis_generation": _uint64_words(locator[10], locator[11]),
-                "frame_id": _uint64_words(locator[22], locator[23]),
             },
             "subtitle_condition": condition_summary,
             "transaction_words": list(transaction),
-            "subtitle_locator_words": list(locator),
+            "subtitle_plane_words": list(plane),
             "subtitle_condition_words": list(condition),
         })
     if matched_sequence == 0:
@@ -3739,6 +3350,371 @@ def _verify_gpu_trace_artifacts(
     }
 
 
+def _subtitle_contour_cover_mask(
+        rectangles: Any, source_width: int, source_height: int,
+        crop_top: int, crop_height: int, content: tuple[int, int, int, int]) -> Any:
+    import numpy as np
+
+    left, top, right, bottom = content
+    x = 2 * left * source_width + (2 * np.arange(source_width, dtype=np.int64) + 1) * (right - left)
+    y = 2 * top * source_height + (2 * (np.arange(crop_height, dtype=np.int64) + crop_top) + 1) * (bottom - top)
+    covered = np.zeros((crop_height, source_width), dtype=bool)
+    for rectangle in rectangles:
+        covered |= ((x[None, :] >= 2 * rectangle["left"] * source_width) &
+                    (x[None, :] < 2 * rectangle["right"] * source_width) &
+                    (y[:, None] >= 2 * rectangle["top"] * source_height) &
+                    (y[:, None] < 2 * rectangle["bottom"] * source_height))
+    return covered
+
+
+def _subtitle_contour_project_support(
+        support: Any, source_height: int, crop_top: int,
+        field_width: int, field_height: int, content: tuple[int, int, int, int]) -> Any:
+    """Independent integer summed-area oracle for the complete bilinear-node footprint."""
+    import numpy as np
+
+    native = np.asarray(support, dtype=bool)
+    crop_height, source_width = native.shape
+    left, top, right, bottom = content
+    x = np.arange(right - left, dtype=np.int64)
+    y = np.arange(bottom - top, dtype=np.int64)
+    begin_x = np.maximum(0, ((2 * x - 1) * source_width) // (2 * (right - left)))
+    end_x = np.minimum(source_width, -(-(2 * x + 3) * source_width // (2 * (right - left))))
+    begin_y = np.maximum(crop_top, ((2 * y - 1) * source_height) // (2 * (bottom - top))) - crop_top
+    end_y = np.minimum(crop_top + crop_height, -(-(2 * y + 3) * source_height // (2 * (bottom - top)))) - crop_top
+    begin_y = np.clip(begin_y, 0, crop_height)
+    end_y = np.clip(end_y, 0, crop_height)
+    prefix = np.pad(native.astype(np.int64), ((1, 0), (1, 0))).cumsum(axis=0).cumsum(axis=1)
+    sums = (prefix[end_y[:, None], end_x[None, :]] - prefix[begin_y[:, None], end_x[None, :]] -
+            prefix[end_y[:, None], begin_x[None, :]] + prefix[begin_y[:, None], begin_x[None, :]])
+    result = np.zeros((field_height, field_width), dtype=bool)
+    result[top:bottom, left:right] = sums > 0
+    return result
+
+
+def _subtitle_contour_squared_source_distance(
+        support: Any, source_width: int, source_height: int, crop_top: int,
+        field_width: int, field_height: int, content: tuple[int, int, int, int]) -> Any:
+    """Independent float64 nearest-five-center minimum; no classifier or stereo rendering.
+
+    Horizontal nearest-center queries and a float64 parabola envelope avoid the native FP32
+    prefix/hull implementation. The declared numerical envelope is checked separately.
+    """
+    import numpy as np
+
+    mask = np.asarray(support, dtype=bool)
+    left, top, right, bottom = content
+    result = np.full((field_height, field_width), np.inf, dtype=np.float64)
+    if not mask.any():
+        return result
+    offset = coordinate_contract.EXPECTED_SUBTITLE_OCR["contour_policy"]["gaussian_center_offset_source_pixels"]
+    expanded = np.zeros((mask.shape[0] + 2 * offset, source_width + 2 * offset), dtype=bool)
+    for dx, dy in ((0, 0), (-offset, 0), (offset, 0), (0, -offset), (0, offset)):
+        expanded[offset + dy:offset + dy + mask.shape[0], offset + dx:offset + dx + source_width] |= mask
+    x = (np.arange(right - left, dtype=np.float64) + .5) * source_width / (right - left) - .5 + offset
+    y = (np.arange(bottom - top, dtype=np.float64) + .5) * source_height / (bottom - top) - .5 - crop_top + offset
+    costs = np.full((expanded.shape[0], right - left), np.inf, dtype=np.float64)
+    for row in range(expanded.shape[0]):
+        centers = np.flatnonzero(expanded[row])
+        if not centers.size:
+            continue
+        position = np.searchsorted(centers, x)
+        before = centers[np.maximum(position - 1, 0)]
+        after = centers[np.minimum(position, len(centers) - 1)]
+        costs[row] = np.minimum((x - before) ** 2, (x - after) ** 2)
+    rows = np.flatnonzero(np.isfinite(costs[:, 0]))
+    for column in range(right - left):
+        hull, starts = [], []
+        for row in rows:
+            row = int(row)
+            start = -math.inf
+            while hull:
+                previous = hull[-1]
+                start = .5 * (row + previous) + (costs[row, column] - costs[previous, column]) / (2 * (row - previous))
+                if start > starts[-1]:
+                    break
+                hull.pop(); starts.pop()
+            hull.append(row); starts.append(-math.inf if len(hull) == 1 else start)
+        chosen = np.maximum(np.searchsorted(starts, y, side="left") - 1, 0)
+        selected = np.asarray(hull, dtype=np.int64)[chosen]
+        result[top:bottom, left + column] = costs[selected, column] + (y - selected) ** 2
+    return result
+
+
+def _subtitle_gaussian_q_error_bound(reference: Any, source_width: int, source_height: int) -> Any:
+    """Explicit IEEE FP32 coordinate/square/add bound shared with native exhaustive tests.
+
+    Native x uses four and y six epsilon-scaled source-coordinate operations. This is a
+    representational admission envelope, never a quality tolerance or exact-word claim.
+    """
+    import numpy as np
+
+    q = np.asarray(reference, dtype=np.float64)
+    epsilon = float(np.finfo(np.float32).eps)
+    delta = math.hypot(4 * epsilon * source_width, 6 * epsilon * source_height)
+    return 2 * np.sqrt(q) * delta + delta * delta + 4 * epsilon * np.maximum(q, 1)
+
+
+def _subtitle_gaussian_weight_from_q(q: Any, source_width: int, source_height: int) -> Any:
+    import numpy as np
+
+    policy = coordinate_contract.EXPECTED_SUBTITLE_OCR["contour_policy"]
+    sigma = np.divide(np.float32(min(source_width, source_height)),
+                      np.float32(policy["gaussian_sigma_short_side_divisor"]), dtype=np.float32)
+    denominator = np.multiply(np.float32(2), np.multiply(sigma, sigma, dtype=np.float32), dtype=np.float32)
+    values = np.asarray(q, dtype=np.float32)
+    with np.errstate(under="ignore"):
+        result = np.exp(-values.astype(np.float64) / float(denominator)).astype(np.float32)
+    result[np.isposinf(values)] = np.float32(0)
+    result[values == 0] = np.float32(1)
+    return result
+
+
+def _subtitle_current_cover_gaussian_q(field_width: int, field_height: int, source_width: int,
+                                       source_height: int, content: tuple[int, int, int, int],
+                                       rectangles: list[Dict[str, Any]]) -> Any:
+    """Presentation distance to current rectangles; this never changes native support/q."""
+    import numpy as np
+
+    cx = np.clip(np.arange(field_width), content[0], content[2] - 1)
+    cy = np.clip(np.arange(field_height), content[1], content[3] - 1)
+    scale_x = np.float32(source_width) / np.float32(content[2] - content[0])
+    scale_y = np.float32(source_height) / np.float32(content[3] - content[1])
+    x = cx.astype(np.float32) + np.float32(.5)
+    y = cy.astype(np.float32) + np.float32(.5)
+    q = np.full((field_height, field_width), np.inf, dtype=np.float32)
+    for rectangle in rectangles:
+        left, right = np.float32(rectangle["left"]), np.float32(rectangle["right"])
+        top, bottom = np.float32(rectangle["top"]), np.float32(rectangle["bottom"])
+        dx = np.maximum(np.maximum(left - x, np.float32(0)), x - right) * scale_x
+        dy = np.maximum(np.maximum(top - y, np.float32(0)), y - bottom) * scale_y
+        q = np.minimum(q, dy[:, None] * dy[:, None] + dx[None, :] * dx[None, :])
+    return q
+
+
+def validate_subtitle_contour_tuple(
+        payloads: Any, *, evidence_frame_id: int, analysis_generation: int,
+        source_width: int, source_height: int, field_width: int, field_height: int,
+        tensor_content: tuple[int, int, int, int], roi_top: int, roi_bottom: int,
+        scene_epoch: int, observation_timestamp_us: int, geometry_ready: bool,
+        ocr_authoritative: bool, current_rectangles: Any,
+        plane_state: Any) -> Dict[str, Any]:
+    """Authenticate the eleven joined contour/Gaussian artifacts, without reimplementing classification.
+
+    The context is supplied by the strict OCR8/UIP4, geometry and accepted-root trace readers.
+    Source belongs to the retained inference owner. It is deliberately not compared with current
+    presentation RGB. Probability is opaque detector evidence, never a recovered glyph alpha.
+    """
+    import numpy as np
+
+    if not isinstance(payloads, dict) or set(payloads) != set(_SUBTITLE_CONTOUR_ARTIFACT_FILES):
+        raise ValueError("subtitle contour tuple must contain all eleven exact artifact roles")
+    layouts = _subtitle_contour_artifact_layouts(source_width, source_height, field_width, field_height)
+    for role, payload in payloads.items():
+        if not isinstance(payload, (bytes, bytearray, memoryview)) or len(payload) != layouts[role][1]:
+            raise ValueError(f"{role} has an invalid exact byte length/type")
+    content = _subtitle_tensor_content(field_width, field_height, tensor_content)
+    _uint64(evidence_frame_id, "contour inference-owner frame")
+    _uint64(analysis_generation, "contour analysis generation")
+    _uint64(observation_timestamp_us, "contour inference-owner timestamp")
+    _uint32(scene_epoch, "contour scene epoch")
+    if (evidence_frame_id == 0 or observation_timestamp_us == 0 or
+            type(geometry_ready) is not bool or type(ocr_authoritative) is not bool or
+            not isinstance(current_rectangles, list)):
+        raise ValueError("subtitle contour tuple has invalid owner/gate identity")
+    if (type(roi_top) is not int or type(roi_bottom) is not int or
+            not content[1] <= roi_top < roi_bottom <= content[3]):
+        raise ValueError("subtitle contour tuple has invalid authenticated OCR ROI")
+    if len(current_rectangles) > SUBTITLE_PLANE_COVER_CAPACITY:
+        raise ValueError("subtitle contour tuple has too many current covers")
+    for rectangle in current_rectangles:
+        if (not isinstance(rectangle, dict) or
+                any(type(rectangle.get(key)) is not int
+                    for key in ("left", "top", "right", "bottom")) or
+                not content[0] <= rectangle["left"] < rectangle["right"] <= content[2] or
+                not content[1] <= rectangle["top"] < rectangle["bottom"] <= content[3]):
+            raise ValueError("subtitle contour tuple has invalid authenticated current covers")
+    if not isinstance(plane_state, dict) or plane_state.get("cover_geometry_verified") is not True:
+        raise ValueError("subtitle contour tuple requires authenticated UIP4/current OCR8 state")
+    current_count = _uint32(plane_state.get("current_count"), "contour UIP4 current count")
+    flags = _uint32(plane_state.get("flags"), "contour UIP4 flags")
+    plane_content = plane_state.get("tensor_content_rect")
+    if (current_count > SUBTITLE_PLANE_COVER_CAPACITY or current_count != len(current_rectangles) or
+            flags not in (0, SUBTITLE_PLANE_CURRENT_VALID_FLAG) or
+            plane_state.get("current_valid") != (flags == SUBTITLE_PLANE_CURRENT_VALID_FLAG) or
+            plane_state.get("current_slot_mask") != (1 << current_count) - 1 or
+            (flags == 0 and current_count != 0) or
+            plane_state.get("current_rectangles") != current_rectangles or
+            plane_state.get("matched_frame_id") != evidence_frame_id or
+            plane_state.get("analysis_generation") != analysis_generation or
+            plane_state.get("observation_timestamp_us") != observation_timestamp_us or
+            plane_state.get("scene_epoch") != scene_epoch or
+            plane_state.get("source_width") != source_width or plane_state.get("source_height") != source_height or
+            plane_state.get("field_width") != field_width or plane_state.get("field_height") != field_height or
+            not isinstance(plane_content, (tuple, list)) or tuple(plane_content) != content):
+        raise ValueError("subtitle contour tuple disagrees with authenticated UIP4/current OCR8 context")
+    current_authority = bool(plane_state["current_valid"] and current_count and
+                             plane_state["adaptive"]["invalid_count"] == 0)
+    policy = coordinate_contract.EXPECTED_SUBTITLE_OCR["contour_policy"]
+    eligible = max(source_width, source_height) <= policy["source_max_extent"]
+    crop_height = min(source_height, (source_width + 5) // 6)
+    crop_top = source_height - crop_height
+    native_shape = ((crop_height, source_width) if eligible else (1, 1))
+    support = np.frombuffer(payloads["contour_support"], dtype="<u4").reshape(native_shape)
+    pin = np.frombuffer(payloads["contour_field_pin"], dtype="<u4").reshape(field_height, field_width)
+    distance = np.frombuffer(payloads["contour_distance"], dtype="<f4").reshape(field_height, field_width)
+    identity = _uint32_words(payloads["contour_identity"], policy["history_word_count"], "SCT5 temporal-mask identity")
+    source = np.frombuffer(payloads["contour_source"], dtype="<f2").reshape(*native_shape, 4)
+    history = np.frombuffer(payloads["contour_history"], dtype="<f4").reshape(*native_shape, 4)
+    probability = np.frombuffer(payloads["ocr_probability"], dtype="<f4")
+    authority = bool(eligible and geometry_ready and ocr_authoritative and current_authority)
+    snapshot_gate = bool(eligible and geometry_ready and ocr_authoritative)
+    expected_identity = [
+        policy["history_schema"], policy["history_tag"], int(authority), scene_epoch if snapshot_gate else 0,
+        evidence_frame_id & 0xFFFFFFFF, evidence_frame_id >> 32,
+        analysis_generation & 0xFFFFFFFF, analysis_generation >> 32,
+        source_width, source_height, crop_top, crop_height,
+        field_width, field_height, roi_top, roi_bottom, *content,
+        observation_timestamp_us & 0xFFFFFFFF, observation_timestamp_us >> 32,
+        policy["recipe"], *([0] * (policy["history_word_count"] - 23)),
+    ]
+    expected_identity[policy["history_snapshot_valid_word"]] = int(snapshot_gate)
+    if identity != tuple(expected_identity):
+        raise ValueError("SCT5 temporal-mask identity disagrees with exact owner/clock/generation/cut/source/ROI/content/recipe/snapshot/current authority")
+    admitted = support != 0
+    if np.any(support > 1) or np.any(pin > 1):
+        raise ValueError("subtitle temporal support/pin has nonbinary support or unknown enum values")
+    if (np.any(np.isnan(distance)) or np.any(distance < 0) or np.any(np.isneginf(distance)) or
+            np.any((distance == 0) & (distance.view(np.uint32) != 0))):
+        raise ValueError("Gaussian squared source distance has invalid nonnegative float/positive-zero evidence")
+    if not snapshot_gate:
+        if np.any(source.view(np.uint16)) or np.any(probability.view(np.uint32)):
+            raise ValueError("globally invalid OCR/geometry/source must publish canonical cleared source/probability snapshots")
+    else:
+        if not np.isfinite(source).all() or np.any((source[..., 3] != 0) & (source[..., 3] != 1)):
+            raise ValueError("contour source snapshot has invalid finite RGBA16F/alpha evidence")
+        if np.any(source[source[..., 3] == 0].view(np.uint16)):
+            raise ValueError("alpha-zero contour source pixels must be canonical zero")
+    if not authority and (admitted.any() or pin.any() or np.any(distance.view(np.uint32) != policy["distance_empty_bits"])):
+        raise ValueError("invalid contour pin authority must publish canonical empty support/pins/distance")
+    color_valid = ((source[..., 3] == 1) & np.isfinite(source[..., :3]).all(axis=2) &
+                   (source[..., :3] >= 0).all(axis=2) & (source[..., :3] <= 1).all(axis=2))
+    if authority:
+        covers = _subtitle_contour_cover_mask(current_rectangles, source_width, source_height, crop_top, crop_height, content)
+        if np.any(admitted & (~covers | ~color_valid)):
+            raise ValueError("native temporal support escapes current covers or valid current source pixels")
+    # Authenticate the saved state, not an unobserved temporal chain or a replicated classifier.
+    # Valid empty OCR still retains current RGB at count0. Counts0/1 use current RGB exactly;
+    # established streaks carry a fixed anchor bounded against this genuine current observation.
+    valid_bit = policy["history_feature_valid_bit"]
+    mask_bit = policy["history_feature_mask_bit"]
+    confirmation_count = policy["history_confirmation_observations"]
+    count_shift = policy["history_feature_count_shift"]
+    legal_codes = np.array([
+        valid_bit | (count << count_shift) | (mask_bit if count == confirmation_count else 0)
+        for count in range(confirmation_count + 1)
+    ], dtype=np.float32)
+    code = history[..., 3]
+    valid_history = color_valid & snapshot_gate
+    if (np.any(history[~valid_history].view(np.uint32)) or
+            np.any(~np.isin(code[valid_history], legal_codes))):
+        raise ValueError("temporal history has noncanonical invalid pixels or unknown confirmation codes")
+    # Cast only validated small exact codes, avoiding NaN/Inf integer coercion.
+    counts = np.zeros(native_shape, dtype=np.uint32)
+    counts[valid_history] = code[valid_history].astype(np.uint32) >> count_shift
+    if np.any(admitted != (valid_history & (counts == confirmation_count))):
+        raise ValueError("temporal history confirmed count and binary support disagree")
+    if not authority and np.any(counts):
+        raise ValueError("temporal history without current pin authority must retain count0 only")
+    if authority and np.any((counts != 0) & ~covers):
+        raise ValueError("temporal history confirmation streak escapes current covers")
+    current_rgb = source[..., :3].astype(np.float32)
+    current_anchor = valid_history & (counts <= 1)
+    if not np.array_equal(history[..., :3][current_anchor].view(np.uint32),
+                          current_rgb[current_anchor].view(np.uint32)):
+        raise ValueError("temporal history count0/1 anchor is not bit-exact current source RGB")
+    established = valid_history & (counts >= 2)
+    anchor = history[..., :3][established]
+    if (not np.isfinite(anchor).all() or np.any((anchor < 0) | (anchor > 1)) or
+            np.any(np.max(np.abs(anchor - current_rgb[established]), axis=1) >
+                   np.float32(policy["history_rgb_distance"]))):
+        raise ValueError("temporal history established anchor is invalid or differs too far from current RGB")
+    anchor_mismatch = valid_history & np.any(
+        history[..., :3].view(np.uint32) != current_rgb.view(np.uint32), axis=2)
+    expected_pin = _subtitle_contour_project_support(admitted, source_height, crop_top, field_width, field_height, content)
+    if not np.array_equal(pin, expected_pin.astype(np.uint32)):
+        raise ValueError("contour field pins differ from the exact integer bilinear footprint")
+    reference = _subtitle_contour_squared_source_distance(admitted, source_width, source_height, crop_top,
+        field_width, field_height, content)
+    finite_reference = np.isfinite(reference)
+    if (np.any(distance[~finite_reference].view(np.uint32) != policy["distance_empty_bits"]) or
+            not np.isfinite(distance[finite_reference]).all()):
+        raise ValueError("Gaussian squared source distance empty/padding or finite-content state differs from admitted centers")
+    error = np.abs(distance[finite_reference].astype(np.float64) - reference[finite_reference])
+    bound = _subtitle_gaussian_q_error_bound(reference[finite_reference], source_width, source_height)
+    if np.any(error > bound):
+        raise ValueError("Gaussian squared source distance differs from independent nearest-five-center minimum beyond its IEEE coordinate bound")
+    weight = np.frombuffer(payloads["gaussian_weight"], dtype="<f4").reshape(field_height, field_width)
+    proposal = np.frombuffer(payloads["gaussian_blend"], dtype="<f4").reshape(field_height, field_width)
+    vertical = np.frombuffer(payloads["gaussian_vertical_conditioned"], dtype="<f4").reshape(field_height, field_width)
+    control = _uint32_words(payloads["gaussian_control"], 1, "Gaussian smoothing control")[0]
+    warmup = _uint32(plane_state.get("warmup_packed"), "UIP4 packed warmup")
+    warmup_policy = coordinate_contract.SUBTITLE_OCR
+    if warmup & ~(warmup_policy.plane_warmup_remaining_mask | warmup_policy.plane_warmup_cue_bit) or (warmup & warmup_policy.plane_warmup_remaining_mask) > warmup_policy.plane_warmup_observations or (warmup and not authority):
+        raise ValueError("UIP4 packed warmup lacks current nonempty valid authority")
+    warmup_remaining = warmup & warmup_policy.plane_warmup_remaining_mask
+    presentation_q = distance
+    if warmup_remaining:
+        presentation_q = np.minimum(distance, _subtitle_current_cover_gaussian_q(
+            field_width, field_height, source_width, source_height, content, current_rectangles))
+    expected_control = int(authority and np.isfinite(presentation_q[content[1], content[0]]) and presentation_q[content[1], content[0]] >= 0)
+    if control not in (0, 1) or control != expected_control:
+        raise ValueError("Gaussian smoothing control disagrees with current authority and first-content distance")
+    if (not np.isfinite(weight).all() or np.any((weight < 0) | (weight > 1)) or
+            not np.isfinite(proposal).all() or not np.isfinite(vertical).all() or
+            np.any(np.abs(proposal) > np.float32(_DEFAULTS.direct_container_limit)) or
+            np.any(np.abs(vertical) > np.float32(_DEFAULTS.direct_container_limit))):
+        raise ValueError("Gaussian weight/proposal/vertical contains invalid finite unit-range/container evidence")
+    cx = np.clip(np.arange(field_width), content[0], content[2] - 1)
+    cy = np.clip(np.arange(field_height), content[1], content[3] - 1)
+    joined_q = presentation_q[np.ix_(cy, cx)]
+    expected_weight = (_subtitle_gaussian_weight_from_q(joined_q, source_width, source_height)
+                       if control else np.zeros_like(weight))
+    if (np.any(np.abs(weight.astype(np.float64) - expected_weight.astype(np.float64)) > policy["gaussian_weight_absolute_error_limit"]) or
+            np.any(weight[(joined_q == 0) & bool(control)].view(np.uint32) != np.float32(1).view(np.uint32)) or
+            (not control and np.any(weight.view(np.uint32)))):
+        raise ValueError("Gaussian weight differs from literal untruncated exp or exact disabled/center endpoints")
+    return {
+        "tuple_verified": True, "authority_valid": authority, "snapshot_gate_valid": snapshot_gate,
+        "native_source_eligible": eligible, "native_width": native_shape[1], "native_height": native_shape[0],
+        "inference_owner_frame_id": evidence_frame_id, "inference_owner_observation_timestamp_us": observation_timestamp_us,
+        "support_pixels": int(admitted.sum()), "field_pin_nodes": int(pin.sum()),
+        "weak_support_pixels": 0,
+        "support_semantics": "binary-current-temporal-RGB-stability-not-semantic-text-membership",
+        "history_rgb_valid_pixels": int(valid_history.sum()),
+        "history_confirmation_count_histogram": {
+            str(count): int(np.count_nonzero(valid_history & (counts == count)))
+            for count in range(confirmation_count + 1)},
+        "history_anchor_current_bit_mismatch_pixels": int(anchor_mismatch.sum()),
+        "history_anchor_current_numeric_mismatch_pixels": int(np.count_nonzero(
+            valid_history & np.any(history[..., :3] != current_rgb, axis=2))),
+        "history_confirmation_chain_verified": False,
+        "warmup_packed": warmup, "warmup_remaining": warmup_remaining,
+        "gaussian_presentation_policy": "current-cover-max-union-until-four-genuine-cue-free-observations-otherwise-confirmed-pixels",
+        "source_alpha_zero_pixels": int(np.count_nonzero(source[..., 3] == 0)),
+        "probability_nonfinite_words": int(np.count_nonzero(~np.isfinite(probability))),
+        "probability_out_of_range_finite_words": int(np.count_nonzero(np.isfinite(probability) & ((probability < 0) | (probability > 1)))),
+        "probability_semantics": "opaque-joined-detector-evidence-not-glyph-alpha",
+        "source_pixel_relation": "sealed-inference-owner-snapshot-no-current-presentation-RGB-equality-claim",
+        "integer_bilinear_projection_verified": True, "squared_source_distance_verified": True,
+        "squared_source_distance_admission": "float64-independent-nearest-five-center-IEEE-coordinate-error-envelope",
+        "squared_source_distance_max_absolute_error": float(error.max()) if error.size else 0.0,
+        "squared_source_distance_max_error_to_bound_ratio": float(np.max(error / bound)) if error.size else 0.0,
+        "gaussian_smoothing_enabled": bool(control), "gaussian_weight_verified": True,
+        "gaussian_weight_max_absolute_error": float(np.max(np.abs(weight.astype(np.float64) - expected_weight))),
+    }
+
+
 def _verify_subtitle_conditioning_artifacts(
         dump_dir: Any, manifest: Dict[str, Any], *, matched_frame_id: int,
         analysis_generation: int, source_width: int, source_height: int,
@@ -3748,387 +3724,253 @@ def _verify_subtitle_conditioning_artifacts(
         joint_plane_mode: int = 3, requested_gain: float | None = None) -> Dict[str, Any]:
     import json
 
-    metadata_payload = _read_hashed_artifact(
-        dump_dir, manifest["artifacts"], "subtitle_conditioning.json")
+    metadata_payload = _read_hashed_artifact(dump_dir, manifest["artifacts"], "subtitle_conditioning.json")
     try:
         metadata = json.loads(metadata_payload.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ValueError("subtitle_conditioning.json is malformed") from error
     if metadata != manifest.get("subtitle_conditioning"):
         raise ValueError("subtitle_conditioning.json disagrees with the manifest")
-    mode = metadata.get("mode")
-    if mode == _SUBTITLE_MODE_SLR13:
-        content = _subtitle_tensor_content(field_width, field_height, tensor_content)
-        dynamic_roi = _subtitle_dynamic_roi(source_width, source_height, content)
-        if dynamic_roi is None:
-            raise ValueError(
-                "active SLR13 subtitle conditioning has unsupported source/field geometry")
-        roi_top, roi_bottom = dynamic_roi
-        ocr_payload = _read_hashed_artifact(
-            dump_dir, manifest["artifacts"], "subtitle_ocr_record.u32")
-        locator_payload = _read_hashed_artifact(
-            dump_dir, manifest["artifacts"], "subtitle_locator_state.u32")
-        evidence_frame_id = matched_frame_id
-        held_with_depth = False
-        if gpu_trace.get("available"):
-            matched_trace = gpu_trace["matched_record"]
-            held_with_depth = (
-                matched_trace["subtitle_disposition"]["name"] == "held-with-depth")
-            if held_with_depth:
-                evidence_frame_id = matched_trace["subtitle_locator"]["frame_id"]
-                locator_words = _uint32_words(
-                    locator_payload, SUBTITLE_LOCATOR_STATE_WORD_COUNT,
-                    "SLR13 locator state")
-                if list(locator_words) != matched_trace["subtitle_locator_words"]:
-                    raise ValueError(
-                        "held SLR13 artifact disagrees with the authenticated trace tuple")
-        ocr = validate_subtitle_ocr_record(
-            ocr_payload,
-            matched_frame_id=evidence_frame_id,
-            analysis_generation=analysis_generation,
-            source_width=source_width,
-            source_height=source_height,
-            field_width=field_width,
-            field_height=field_height,
-            roi_top=roi_top,
-            roi_bottom=roi_bottom,
-            tensor_content=content,
-        )
-        locator = validate_subtitle_locator_state(
-            locator_payload,
-            matched_frame_id=evidence_frame_id,
-            analysis_generation=analysis_generation,
-            source_width=source_width,
-            source_height=source_height,
-            field_width=field_width,
-            field_height=field_height,
-            tensor_content=content,
-            expected_scene_epoch=confirmed_cut_count,
-            joint_plane_mode=joint_plane_mode,
-            requested_gain=requested_gain,
-        )
-        if not ocr["authoritative"] and locator["current_count"] != 0:
-            raise ValueError("an abstaining OCR8 record cannot authorize SLR13 current rectangles")
-        selected_indices = _subtitle_selected_ocr_indices(
-            ocr["raw_boxes"], content, roi_bottom,
-            field_width=field_width, field_height=field_height)
-        selected_final_rectangles = [
-            (ocr["final_boxes"][index]["left"],
-             ocr["final_boxes"][index]["top"],
-             ocr["final_boxes"][index]["right"],
-             ocr["final_boxes"][index]["bottom"],
-             ocr["final_boxes"][index]["kind"])
-            for index in selected_indices
-        ]
-        if locator["provisional_current"]:
-            if len(selected_indices) != 1:
-                raise ValueError(
-                    "SLR13 provisional current requires one exact selected OCR8 pair")
-            selected_index = selected_indices[0]
-            selected_raw = ocr["raw_boxes"][selected_index]
-            selected_final = ocr["final_boxes"][selected_index]
-            pending_rectangle = locator["pending_rectangles"][0]
-            current_rectangle = locator["current_rectangles"][0]
-            coordinate_keys = ("left", "top", "right", "bottom", "kind")
-            if (any(pending_rectangle[key] != selected_raw[key] for key in coordinate_keys) or
-                    any(current_rectangle[key] != selected_final[key]
-                        for key in coordinate_keys) or selected_raw["kind"] != "text"):
-                raise ValueError(
-                    "SLR13 provisional current is not the exact selected OCR8 core/cover pair")
-        final_rectangles = {
-            (rectangle["left"], rectangle["top"], rectangle["right"], rectangle["bottom"],
-             rectangle["kind"])
-            for rectangle in ocr["final_boxes"]
-        }
-        if any(
-                (rectangle["left"], rectangle["top"],
-                 rectangle["right"], rectangle["bottom"],
-                 rectangle["kind"]) not in final_rectangles
-                for rectangle in locator["current_rectangles"]):
-            raise ValueError(
-                "SLR13 current rectangles/kinds are not exact covers from same-frame OCR8")
-        current_tuples = [
-            (rectangle["left"], rectangle["top"],
-             rectangle["right"], rectangle["bottom"], rectangle["kind"])
-            for rectangle in locator["current_rectangles"]
-        ]
-        selected_position = 0
-        selection_order_valid = True
-        for rectangle in current_tuples:
-            while (selected_position < len(selected_final_rectangles) and
-                   selected_final_rectangles[selected_position] != rectangle):
-                selected_position += 1
-            if selected_position < len(selected_final_rectangles):
-                selected_position += 1
-            else:
-                selection_order_valid = False
-                break
-        if not selection_order_valid:
-            raise ValueError(
-                "SLR13 current rectangles are outside the frozen same-frame OCR8 selection")
-        publication_timestamp = manifest["matched_observation_timestamp_us"]
-        matched_trace = gpu_trace.get("matched_record")
-        if held_with_depth and locator["current_count"] != 0:
-            origin = next((row for row in gpu_trace["records"]
-                           if row["frame_id"] == evidence_frame_id and
-                           row["subtitle_disposition"]["name"] in {"optional-ocr", "abstention"}), None)
-            if origin is None:
-                raise ValueError("held SLR cover lacks its original authenticated source-time row")
-            if origin["subtitle_locator_words"] != list(_uint32_words(
-                    locator_payload, SUBTITLE_LOCATOR_STATE_WORD_COUNT, "SLR locator state")):
-                raise ValueError("held SLR cover differs from its source-time owner publication")
-            publication_timestamp = origin["observation_timestamp_us"]
-        state_timestamp = _uint64_words(shadow_state["gain_last_observation_low"],
-                                       shadow_state["gain_last_observation_high"])
-        geometry_ready = bool(
-            shadow_state["frame_valid"] == 1.0 and
-            shadow_state["renderer_authorization_bits"] == _CONTRACT_TAG and
-            shadow_state["joint_plane_mode_bits"] == 3 and
-            state_timestamp == publication_timestamp and publication_timestamp != 0 and
-            shadow_state["confirmed_cut_count"] == locator["scene_epoch"])
-        locator_words = _uint32_words(locator_payload, SUBTITLE_LOCATOR_STATE_WORD_COUNT,
-                                      "SLR locator state")
-        tail = locator_words[80:96]
-        if not geometry_ready and not held_with_depth and tail[0] != 0 and (
-                tail[1] & 11 or any(tail[index] for index in range(4, 12))):
-            raise ValueError("unavailable geometry must disarm adaptive UI clock and dwell")
-        if geometry_ready and locator["current_count"] != 0 and (
-                not tail[1] & 8 or _uint64_words(tail[4], tail[5]) != publication_timestamp):
-            raise ValueError("current SLR cover clock differs from authenticated geometry publication")
-        if matched_trace is not None:
-            expected_condition = (0, 0, 0, 0, 0, 0)
-            if geometry_ready and locator["current_count"] != 0:
-                provisional = locator["provisional_current"]
-                expected_condition = (
-                    coordinate_contract.SUBTITLE_OCR.condition_param_schema,
-                    coordinate_contract.SUBTITLE_OCR.condition_param_tag,
-                    locator_words[20], locator["current_ribbon_mask"],
-                    locator_words[30] if provisional else locator_words[24],
-                    locator_words[29] if provisional else locator_words[18])
-            if tuple(matched_trace["subtitle_condition_words"]) != expected_condition:
-                raise ValueError("matched subtitle condition verdict disagrees with authenticated geometry authority")
-        return {
-            "mode": _SUBTITLE_MODE_SLR13,
-            "subtitle_evidence_verified": True,
-            "geometry_ready": geometry_ready,
-            "geometry_publication_timestamp_us": publication_timestamp,
-            "evidence_frame_id": evidence_frame_id,
-            "held_with_depth": held_with_depth,
-            "ocr_authoritative": ocr["authoritative"],
-            "ocr_raw_count": ocr["raw_count"],
-            "ocr_final_count": ocr["final_count"],
-            "source_width": ocr["source_width"],
-            "source_height": ocr["source_height"],
-            "field_width": ocr["field_width"],
-            "field_height": ocr["field_height"],
-            "tensor_content_rect": content,
-            "roi_top": ocr["roi_top"],
-            "roi_bottom": ocr["roi_bottom"],
-            "owner_count": locator["owner_count"],
-            "pending_count": locator["pending_count"],
-            "current_count": locator["current_count"],
-            "last_event": locator["last_event"],
-            "cached_target": locator["cached_target"],
-            "target_grace": locator["target_grace"],
-            "unreliable_target_holds": locator["unreliable_target_holds"],
-            "grace_bounds": locator["grace_bounds"],
-            "current_rectangles": locator["current_rectangles"],
-            "target": locator["target"],
-            "fade": locator["fade"],
-            "provisional_current": locator["provisional_current"],
-            "provisional_target": locator["provisional_target"],
-            "provisional_fade": locator["provisional_fade"],
-            "joint_plane_mode": joint_plane_mode,
-            "display_budget": locator["display_budget"],
-        }
+    if metadata.get("mode") != _SUBTITLE_MODE_CONTOURS:
+        return {"mode": _SUBTITLE_MODE_NONE, "subtitle_evidence_verified": False}
+    content = _subtitle_tensor_content(field_width, field_height, tensor_content)
+    dynamic_roi = _subtitle_dynamic_roi(source_width, source_height, content)
+    if dynamic_roi is None:
+        raise ValueError("active UIP4 subtitle conditioning has unsupported source/field geometry")
+    roi_top, roi_bottom = dynamic_roi
+    ocr_payload = _read_hashed_artifact(dump_dir, manifest["artifacts"], "subtitle_ocr_record.u32")
+    plane_payload = _read_hashed_artifact(dump_dir, manifest["artifacts"], "subtitle_locator_state.u32")
+    plane_words = _uint32_words(plane_payload, SUBTITLE_PLANE_STATE_WORD_COUNT, "UIP4 plane state")
+    evidence_frame_id = matched_frame_id
+    publication_timestamp = manifest["matched_observation_timestamp_us"]
+    matched_trace = gpu_trace.get("matched_record")
+    held_with_depth = bool(matched_trace and
+                           matched_trace["subtitle_disposition"]["name"] == "held-with-depth")
+    if held_with_depth:
+        evidence_frame_id = matched_trace["subtitle_plane"]["frame_id"]
+        if list(plane_words) != matched_trace["subtitle_plane_words"]:
+            raise ValueError("held UIP4 artifact differs from the authenticated trace tuple")
+        publication_timestamp = _uint64_words(plane_words[8], plane_words[9])
+        if publication_timestamp == 0 or publication_timestamp > manifest["matched_observation_timestamp_us"]:
+            raise ValueError("held UIP4 source time must be positive and no newer than current source")
+        origin = next((row for row in gpu_trace["records"] if
+                       row["frame_id"] == evidence_frame_id and
+                       row["subtitle_disposition"]["name"] in {"optional-ocr", "abstention"}), None)
+        if origin is not None and (origin["subtitle_plane_words"] != list(plane_words) or
+                                   origin["observation_timestamp_us"] != publication_timestamp):
+            raise ValueError("held UIP4 tuple differs from its original source-time publication")
+    ocr = validate_subtitle_ocr_record(
+        ocr_payload, matched_frame_id=evidence_frame_id, analysis_generation=analysis_generation,
+        source_width=source_width, source_height=source_height,
+        field_width=field_width, field_height=field_height,
+        roi_top=roi_top, roi_bottom=roi_bottom, tensor_content=content)
+    plane = validate_subtitle_plane_state(
+        plane_payload, ocr_record=ocr, matched_frame_id=evidence_frame_id,
+        analysis_generation=analysis_generation, source_width=source_width, source_height=source_height,
+        field_width=field_width, field_height=field_height, tensor_content=content,
+        expected_scene_epoch=confirmed_cut_count,
+        expected_observation_timestamp_us=publication_timestamp,
+        joint_plane_mode=joint_plane_mode, requested_gain=requested_gain)
+    state_timestamp = _uint64_words(shadow_state["gain_last_observation_low"],
+                                   shadow_state["gain_last_observation_high"])
+    geometry_ready = bool(
+        shadow_state["frame_valid"] == 1.0 and
+        shadow_state["renderer_authorization_bits"] == _CONTRACT_TAG and
+        shadow_state["joint_plane_mode_bits"] == 3 and
+        state_timestamp == publication_timestamp and publication_timestamp != 0 and
+        shadow_state["confirmed_cut_count"] == plane["scene_epoch"])
+    if plane["current_valid"] != bool(geometry_ready and ocr["authoritative"]):
+        raise ValueError("UIP4 current-valid verdict differs from current OCR8/geometry authority")
+    tail = plane_words[SUBTITLE_PLANE_ADAPTIVE_OFFSET:]
+    if not geometry_ready and tail[0] and (tail[1] & 11 or any(tail[index] for index in range(4, 12))):
+        raise ValueError("unavailable geometry must disarm adaptive UI clock and dwell")
+    if (not ocr["authoritative"] or tail[15] != 0) and (tail[1] & 3 or any(tail[index] for index in range(6, 12))):
+        raise ValueError("invalid OCR/probe must disarm adaptive UI dwell")
+    active = bool(plane["current_valid"] and plane["current_count"] and tail[15] == 0)
+    if matched_trace is not None:
+        condition = validate_subtitle_condition_words(
+            struct.pack("<6I", *matched_trace["subtitle_condition_words"]),
+            plane_state=plane, geometry_ready=geometry_ready)
+        active = condition[4] == coordinate_contract.SUBTITLE_OCR.condition_param_fully_active_value
+    contour = validate_subtitle_contour_tuple(
+        {role: _read_hashed_artifact(dump_dir, manifest["artifacts"], name)
+         for role, name in _SUBTITLE_CONTOUR_ARTIFACT_FILES.items()},
+        evidence_frame_id=evidence_frame_id, analysis_generation=analysis_generation,
+        source_width=source_width, source_height=source_height,
+        field_width=field_width, field_height=field_height, tensor_content=content,
+        roi_top=roi_top, roi_bottom=roi_bottom, scene_epoch=plane["scene_epoch"],
+        observation_timestamp_us=publication_timestamp, geometry_ready=geometry_ready,
+        ocr_authoritative=ocr["authoritative"], current_rectangles=plane["current_rectangles"],
+        plane_state=plane)
     return {
-        "mode": _SUBTITLE_MODE_NONE,
-        "subtitle_evidence_verified": False,
+        "mode": _SUBTITLE_MODE_CONTOURS, "subtitle_evidence_verified": True,
+        "geometry_ready": geometry_ready, "geometry_publication_timestamp_us": publication_timestamp,
+        "evidence_frame_id": evidence_frame_id, "held_with_depth": held_with_depth,
+        "ocr_authoritative": ocr["authoritative"], "ocr_raw_count": ocr["raw_count"],
+        "ocr_ordinary_cover_horizontal_guard": ocr["ordinary_cover_horizontal_guard"],
+        "ocr_line_centering": ocr["line_centering"],
+        "ocr_final_count": ocr["final_count"], "source_width": source_width, "source_height": source_height,
+        "field_width": field_width, "field_height": field_height, "tensor_content_rect": content,
+        "roi_top": roi_top, "roi_bottom": roi_bottom,
+        "current_valid": plane["current_valid"], "current_slot_mask": plane["current_slot_mask"],
+        "current_count": plane["current_count"], "current_rectangles": plane["current_rectangles"],
+        "current_ribbon_mask": plane["current_ribbon_mask"],
+        "target": plane["target"], "target_bits": plane["target_bits"], "active_level": 2 if active else 0,
+        "joint_plane_mode": joint_plane_mode, "display_budget": plane["display_budget"],
+        "adaptive": plane["adaptive"], "warmup_packed": plane["warmup_packed"],
+        "warmup_remaining": plane["warmup_remaining"], "contour": contour,
     }
 
 
-def _sm5_power_of_two_division_candidates(
-        numerator: float, denominator: int) -> tuple[Any, ...]:
-    """Return every bit-exact SM5 result for this bounded positive division.
-
-    SLR13's three divisions all have an exactly representable power-of-two numerator and an
-    exactly representable positive integer denominator.  The D3D11.3 functional specification,
-    section 3.1.3.1, permits ``x / y`` to execute as ``x * (1 / y)`` with a reciprocal accurate
-    to one ULP.  Scaling that reciprocal by these power-of-two numerators is exact in SLR13's
-    bounded normal range.  A nonrepresentable quotient therefore admits exactly its two
-    bracketing float32 values; an exactly representable quotient admits itself and its two
-    immediate neighbors.  The choice is device-dependent: NVIDIA hardware uses the lower
-    bracketing value for 0.5 / 1101 while WARP and NumPy use the upper one.
-
-    Keeping this as a finite set of exact bit patterns is important.  It is not an epsilon: a
-    captured field must still equal one globally consistent SM5 recurrence bit for bit.
-    """
-
-    import numpy as np
-
-    denominator32 = np.float32(denominator)
-    numerator32 = np.float32(numerator)
-    if (denominator <= 0 or denominator > _MAXIMUM_SOURCE_LONG_SIDE or
-            int(denominator32) != denominator or
-            not np.isfinite(numerator32) or numerator32 <= np.float32(0.0)):
-        raise ValueError(
-            "SM5 replay division requires bounded exact positive float32 operands")
-    numerator_integer, numerator_denominator = float(numerator32).as_integer_ratio()
-    if ((numerator_integer & (numerator_integer - 1)) != 0 or
-            (numerator_denominator & (numerator_denominator - 1)) != 0):
-        raise ValueError("SM5 replay division numerator must be an exact power of two")
-
-    nearest = np.divide(numerator32, denominator32, dtype=np.float32)
-    nearest_integer, nearest_denominator = float(nearest).as_integer_ratio()
-    # Compare the rounded float with numerator / denominator using integers only.  Within the
-    # production bound (<= 5120), a non-power-of-two denominator is far from a float32 binade
-    # boundary, so the one-ULP reciprocal allowance contains exactly the two floats bracketing
-    # the rational.  A power-of-two denominator makes the rational exact, hence the explicit
-    # exact-plus-neighbors case above.  Multiplication by SLR13's power-of-two numerator only
-    # changes the exponent, so it neither introduces rounding nor changes this candidate count.
-    comparison = (
-        nearest_integer * numerator_denominator * denominator -
-        numerator_integer * nearest_denominator
-    )
-    if comparison == 0:
-        return (
-            nearest,
-            np.nextafter(nearest, np.float32(-np.inf), dtype=np.float32),
-            np.nextafter(nearest, np.float32(np.inf), dtype=np.float32),
-        )
-    direction = np.float32(-np.inf if comparison > 0 else np.inf)
-    adjacent = np.nextafter(nearest, direction, dtype=np.float32)
-    return (nearest, adjacent)
-
-
-def _replay_slr13_conditioner(
-        base_field: Any, subtitle: Dict[str, Any], *,
-        division_values: tuple[Any, Any, Any] | None = None) -> Any:
-    """Replay the frozen SLR13 analytic rectangle conditioner in float32 order."""
-
+def _subtitle_gaussian_joined_base(base_field: Any, subtitle: Dict[str, Any]) -> tuple[Any, tuple[int, int, int, int]]:
     import numpy as np
 
     base = np.asarray(base_field, dtype=np.float32)
-    if base.ndim != 2:
-        raise ValueError("SLR13 Base field must be a two-dimensional float32 array")
+    if base.ndim != 2 or not np.isfinite(base).all() or np.any(np.abs(base) > np.float32(_DEFAULTS.direct_container_limit)):
+        raise ValueError("Gaussian Base must be a finite two-dimensional sealed display field")
     height, width = base.shape
-    content = _subtitle_tensor_content(
-        width, height, subtitle.get("tensor_content_rect"))
-    content_width = content[2] - content[0]
-    # The shader evaluates all synthetic padding at its nearest real content cell and loads Base
-    # there, including the inactive/empty-current path.
-    x_cells = np.clip(np.arange(width, dtype=np.int64), content[0], content[2] - 1)
-    y_cells = np.clip(np.arange(height, dtype=np.int64), content[1], content[3] - 1)
-    base_for_conditioning = base[np.ix_(y_cells, x_cells)]
-    mode = subtitle.get("joint_plane_mode")
-    if type(mode) is not int or mode != 3:
-        raise ValueError("SLR14 conditioner has an invalid joint plane mode")
-    rectangles = subtitle["current_rectangles"]
-    if not rectangles or subtitle.get("geometry_ready") is False:
-        return base_for_conditioning.copy()
-    source_width = _uint32(subtitle.get("source_width"), "SLR13 analysis source width")
-    if source_width == 0:
-        raise ValueError("SLR13 analysis source width must be positive")
-    if subtitle.get("provisional_current"):
-        target = subtitle.get("provisional_target")
-        fade = subtitle.get("provisional_fade")
-    else:
-        target = subtitle.get("target")
-        fade = subtitle.get("fade")
-    if target is None or fade != 2:
-        raise ValueError("SLR13 current geometry lacks valid target/fade authority")
-    target32 = np.float32(target)
-    if (not np.isfinite(target32) or
-            not np.float32(0.0) <= target32 <= np.float32(_DEFAULTS.direct_container_limit)):
-        raise ValueError("SLR13 target exceeds its authenticated representation limit")
-    if fade != 2:
-        raise ValueError("SLR14 adaptive UI requires a full geometric pin")
-
-    if (not coordinate_contract.subtitle_ocr_field_is_calibrated(width, height) or
-            width != subtitle.get("field_width") or
-            height != subtitle.get("field_height")):
-        raise ValueError("SLR13 conditioner field does not match its calibrated authority")
-    x = x_cells[None, :]
-    y = y_cells[:, None]
-    if division_values is None:
-        horizontal_step = np.float32(
-            np.float32(_DEFAULTS.max_horizontal_slope) / np.float32(content_width))
-        vertical_step = np.float32(
-            np.float32(_DEFAULTS.max_vertical_shear) / np.float32(content_width))
-        core_range = np.float32(0.0)
-    else:
-        horizontal_step, vertical_step, core_range = (
-            np.float32(value) for value in division_values)
-    best_distance = np.full(base.shape, np.float32(np.inf), dtype=np.float32)
-    for rectangle in rectangles:
-        left = rectangle["left"]
-        top = rectangle["top"]
-        right = rectangle["right"]
-        bottom = rectangle["bottom"]
-        if rectangle.get("ribbon") is True:
-            # A bottom ribbon is a constant plane whose only exterior boundary is its
-            # corrected top edge.  Its authenticated cover is full-width/to-bottom, but
-            # keeping the analytic replay explicitly top-only prevents future geometry
-            # refactors from silently reintroducing side or bottom collars.
-            dx = np.zeros_like(x, dtype=np.float32)
-            dy = np.maximum(top - y, 0).astype(np.float32)
-        else:
-            dx = np.where(x < left, left - x,
-                          np.where(x >= right, x - (right - 1), 0)).astype(np.float32)
-            dy = np.where(y < top, top - y,
-                          np.where(y >= bottom, y - (bottom - 1), 0)).astype(np.float32)
-        horizontal_distance = np.multiply(dx, horizontal_step, dtype=np.float32)
-        vertical_distance = np.multiply(dy, vertical_step, dtype=np.float32)
-        distance = np.add(horizontal_distance, vertical_distance, dtype=np.float32)
-        best_distance = np.minimum(best_distance, distance)
-
-    budget = np.add(core_range, best_distance, dtype=np.float32)
-    delta = np.subtract(base_for_conditioning, target32, dtype=np.float32)
-    safe = np.less_equal(np.abs(delta), budget)
-    base_in_range = np.less_equal(
-        np.abs(base_for_conditioning), np.float32(_DEFAULTS.direct_container_limit))
-    signed_budget = np.where(delta < np.float32(0.0), -budget, budget).astype(np.float32)
-    full = np.add(target32, signed_budget, dtype=np.float32)
-    conditioned = full
-    result = np.where(
-        base_in_range & ~safe, conditioned, base_for_conditioning).astype(np.float32)
-    result = np.where(base_in_range & (best_distance == np.float32(0.0)),
-                      target32, result).astype(np.float32)
-    return result
+    content = _subtitle_tensor_content(width, height, subtitle.get("tensor_content_rect"))
+    cx = np.clip(np.arange(width), content[0], content[2] - 1)
+    cy = np.clip(np.arange(height), content[1], content[3] - 1)
+    return base[np.ix_(cy, cx)], content
 
 
-def _replay_slr13_conditioner_sm5_candidates(
-        base_field: Any, subtitle: Dict[str, Any]):
-    """Yield the finite, globally consistent bit-exact SM5 SLR13 recurrences."""
-
+def _subtitle_gaussian_target(subtitle: Dict[str, Any]) -> Any:
     import numpy as np
 
-    base = np.asarray(base_field, dtype=np.float32)
-    if base.ndim != 2:
-        raise ValueError("SLR13 Base field must be a two-dimensional float32 array")
-    source_width = _uint32(subtitle.get("source_width"), "SLR13 analysis source width")
-    width = base.shape[1]
-    height = base.shape[0]
-    content = _subtitle_tensor_content(
-        width, height, subtitle.get("tensor_content_rect"))
-    content_width = content[2] - content[0]
-    choices = (
-        _sm5_power_of_two_division_candidates(
-            _DEFAULTS.max_horizontal_slope, content_width),
-        _sm5_power_of_two_division_candidates(
-            _DEFAULTS.max_vertical_shear, content_width),
-        (np.float32(0.0),),
-    )
-    seen = set()
-    for division_values in product(*choices):
-        bit_key = tuple(
-            int(np.asarray(value, dtype=np.float32).view(np.uint32))
-            for value in division_values)
-        if bit_key in seen:
-            continue
-        seen.add(bit_key)
-        yield _replay_slr13_conditioner(
-            base, subtitle, division_values=division_values)
+    target32 = np.float32(subtitle.get("target"))
+    if (subtitle.get("joint_plane_mode") != 3 or subtitle.get("active_level") != 2 or
+            not np.isfinite(target32) or
+            not np.float32(0) <= target32 <= np.float32(_DEFAULTS.direct_container_limit)):
+        raise ValueError("Gaussian proposal lacks authenticated fully active current plane")
+    return target32
+
+
+def _subtitle_gaussian_literal_blend(base: Any, weight: Any, target: Any) -> Any:
+    import numpy as np
+
+    base = np.asarray(base, dtype=np.float32)
+    m = np.asarray(weight, dtype=np.float32)
+    if m.shape != base.shape or not np.isfinite(m).all() or np.any((m < 0) | (m > 1)):
+        raise ValueError("Gaussian weight must be finite unit-range and match Base")
+    one_minus = np.subtract(np.float32(1), m, dtype=np.float32)
+    base_term = np.multiply(one_minus, base, dtype=np.float32)
+    ui_term = np.multiply(m, np.float32(target), dtype=np.float32)
+    proposal = np.add(base_term, ui_term, dtype=np.float32)
+    proposal[m == 0] = base[m == 0]
+    proposal[m == 1] = np.float32(target)
+    return proposal
+
+
+def _subtitle_gaussian_blend_interval(base: Any, weight: Any, target: Any) -> tuple[Any, Any]:
+    """SM5 representational enclosure for separate subtract/multiply/multiply/add.
+
+    Each exact double operation on binary FP32 operands is enclosed by its adjacent FP32
+    values, including signed-zero flush only for genuinely subnormal operation results.
+    This never admits FMA or an alternate interpolation formula; endpoints are exact.
+    """
+    import numpy as np
+
+    def floor32(value):
+        exact = np.asarray(value, dtype=np.float64)
+        rounded = exact.astype(np.float32)
+        enclosed = np.where(rounded.astype(np.float64) > exact,
+                            np.nextafter(rounded, np.float32(-np.inf)), rounded).astype(np.float32)
+        return np.where((exact > 0) & (exact < np.finfo(np.float32).tiny),
+                        np.float32(0), enclosed).astype(np.float32)
+
+    def ceil32(value):
+        exact = np.asarray(value, dtype=np.float64)
+        rounded = exact.astype(np.float32)
+        enclosed = np.where(rounded.astype(np.float64) < exact,
+                            np.nextafter(rounded, np.float32(np.inf)), rounded).astype(np.float32)
+        return np.where((exact < 0) & (exact > -np.finfo(np.float32).tiny),
+                        np.float32(-0.0), enclosed).astype(np.float32)
+
+    b = np.asarray(base, dtype=np.float32).astype(np.float64)
+    m = np.asarray(weight, dtype=np.float32).astype(np.float64)
+    om_lo, om_hi = floor32(1.0 - m).astype(np.float64), ceil32(1.0 - m).astype(np.float64)
+    bt_lo = floor32(np.minimum(om_lo * b, om_hi * b)).astype(np.float64)
+    bt_hi = ceil32(np.maximum(om_lo * b, om_hi * b)).astype(np.float64)
+    ui_lo = floor32(m * float(np.float32(target))).astype(np.float64)
+    ui_hi = ceil32(m * float(np.float32(target))).astype(np.float64)
+    return floor32(bt_lo + ui_lo), ceil32(bt_hi + ui_hi)
+
+
+def validate_subtitle_gaussian_fields(
+        payloads: Dict[str, bytes], base_field: Any, subtitle: Dict[str, Any], *,
+        final_field: Any = None) -> Dict[str, Any]:
+    """Authenticate actual saved M/proposal/C75 and optional renderer Final; no stereo renderer.
+
+    Call validate_subtitle_contour_tuple first for independent q/M/current-authority admission.
+    The limiter is replayed from the saved literal proposal, never from a fabricated ideal M.
+    """
+    import numpy as np
+
+    base, content = _subtitle_gaussian_joined_base(base_field, subtitle)
+    if set(payloads) != set(_SUBTITLE_CONTOUR_ARTIFACT_FILES):
+        raise ValueError("Gaussian field proof requires all eleven joined artifact roles")
+    shape = base.shape
+    leaves = {}
+    for role in ("gaussian_weight", "gaussian_blend", "gaussian_vertical_conditioned"):
+        payload = payloads[role]
+        if len(payload) != base.size * 4:
+            raise ValueError("Gaussian field leaf has wrong exact byte length")
+        leaves[role] = np.frombuffer(payload, dtype="<f4").reshape(shape)
+        if not np.isfinite(leaves[role]).all():
+            raise ValueError("Gaussian field leaf contains nonfinite data")
+    control = _uint32_words(payloads["gaussian_control"], 1, "Gaussian smoothing control")[0]
+    if control not in (0, 1) or bool(control) != bool(subtitle["contour"]["gaussian_smoothing_enabled"]):
+        raise ValueError("Gaussian field control does not bind the authenticated tuple verdict")
+    m, proposal, vertical = (leaves[role] for role in ("gaussian_weight", "gaussian_blend", "gaussian_vertical_conditioned"))
+    if np.any((m < 0) | (m > 1)):
+        raise ValueError("Gaussian weight is not finite unit-range")
+    if not control:
+        if (np.any(m.view(np.uint32)) or not np.array_equal(proposal.view(np.uint32), base.view(np.uint32)) or
+                not np.array_equal(vertical.view(np.uint32), base.view(np.uint32))):
+            raise ValueError("inactive Gaussian M/proposal/C75 must publish exact Base bits without reconditioning")
+        replayed_final = base
+    else:
+        target = _subtitle_gaussian_target(subtitle)
+        if (np.any(proposal[m == 0].view(np.uint32) != base[m == 0].view(np.uint32)) or
+                np.any(proposal[m == 1].view(np.uint32) != target.view(np.uint32))):
+            raise ValueError("Gaussian literal blend zero/one endpoints are not bit-exact Base/target")
+        low, high = _subtitle_gaussian_blend_interval(base, m, target)
+        interior = (m > 0) & (m < 1)
+        impossible_negative_zero = interior & (proposal == 0) & np.signbit(proposal) & ~np.signbit(base) & ~np.signbit(target)
+        if (np.any(impossible_negative_zero) or
+                np.any((proposal[interior] < low[interior]) | (proposal[interior] > high[interior]))):
+            raise ValueError("Gaussian proposal differs from separate literal precise arithmetic beyond SM5 representational enclosure")
+        _, replayed_vertical, replayed_final = _replay_v2_limiter_fields(proposal, content[2] - content[0])
+        if not np.array_equal(vertical.view(np.uint32), replayed_vertical.view(np.uint32)):
+            raise ValueError("Gaussian vertical-conditioned field is not exact shared C75/serial-Q30 replay of saved proposal")
+    if final_field is not None:
+        final = np.asarray(final_field, dtype=np.float32)
+        if final.shape != shape or not np.array_equal(final.view(np.uint32), replayed_final.view(np.uint32)):
+            raise ValueError("Gaussian Final is not exact shared horizontal Q30 replay or inactive Base copy")
+    return {"gaussian_blend_verified": True, "gaussian_vertical_conditioned_verified": True,
+            "gaussian_final_verified": final_field is not None, "gaussian_smoothing_enabled": bool(control),
+            "blend_arithmetic_admission": "separate-fp32-operation-adjacent-representable-enclosure-bit-exact-endpoints",
+            "post_conditioning": "shared-vertical75-25-horizontal-Q30-no-exact-repin"}
+
+
+def _replay_subtitle_contour_conditioner(base_field: Any, subtitle: Dict[str, Any], distance_field: Any) -> Any:
+    """Mathematical literal Gaussian proposal helper for authored fixtures, not actual exp words.
+
+    Actual native validation consumes saved M/blend and validate_subtitle_gaussian_fields.
+    """
+    import numpy as np
+
+    base, content = _subtitle_gaussian_joined_base(base_field, subtitle)
+    q = np.asarray(distance_field, dtype=np.float32)
+    if q.shape != base.shape:
+        raise ValueError("Gaussian Base/q field shapes differ")
+    if not subtitle["contour"]["authority_valid"] or not np.isfinite(q[content[1], content[0]]) or q[content[1], content[0]] < 0:
+        return base.copy()
+    x = np.clip(np.arange(base.shape[1]), content[0], content[2] - 1)
+    y = np.clip(np.arange(base.shape[0]), content[1], content[3] - 1)
+    weight = _subtitle_gaussian_weight_from_q(q[np.ix_(y, x)], subtitle["source_width"], subtitle["source_height"])
+    return _subtitle_gaussian_literal_blend(base, weight, _subtitle_gaussian_target(subtitle))
 
 
 def _verify_roi_exterior_zero_warp_map(
@@ -4439,7 +4281,7 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
       2. every field matches the manifest geometry dimensions and is entirely finite;
       3. the conditioning chain is internally consistent with the contract's serial/Q30 branches:
          ``vertical_majorant``/``vertical_conditioned``/ordinary Base are bitwise equal to the
-         recurrences recomputed from ``candidate``; SLR13's analytic rectangle budget and fade
+         recurrences recomputed from ``candidate``; the native Gaussian proposal and shared limiter chain
          exactly reproduce the atomic final field; and the atomic final artifact is the sole
          warp-input authority.
 
@@ -4615,7 +4457,7 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
         requested_gain=shadow_state_constant_float32(shadow_state_document, "requested_gain"),
         shadow_state=shadow_state,
     )
-    subtitle_live = subtitle_summary["mode"] == _SUBTITLE_MODE_SLR13
+    subtitle_live = subtitle_summary["mode"] == _SUBTITLE_MODE_CONTOURS
     geometry_chain_fields = (
         "shadow_coordinate",
         "shadow_candidate_parallax",
@@ -4664,27 +4506,12 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
                 f"(max abs diff {mismatch})")
 
     if subtitle_live:
-        replay_matched = False
-        minimum_mismatch = math.inf
-        for replayed_subtitle in _replay_slr13_conditioner_sm5_candidates(
-                fields["shadow_base_final_parallax"], subtitle_summary):
-            if np.array_equal(
-                    fields["shadow_final_parallax"], replayed_subtitle):
-                replay_matched = True
-                break
-            minimum_mismatch = min(
-                minimum_mismatch,
-                float(np.max(np.abs(
-                    fields["shadow_final_parallax"] - replayed_subtitle))))
-        if not replay_matched:
-            if subtitle_summary["current_count"] == 0 or not subtitle_summary["geometry_ready"]:
-                raise ValueError(
-                    "SLR13 has no authorized current geometry but the final field is not the exact "
-                    "content-clamped Base extension")
-            raise ValueError(
-                "shadow_final_parallax.f32 is not the exact SLR13 "
-                "rectangle-conditioning "
-                f"recurrence (minimum max abs diff {minimum_mismatch})")
+        gaussian = validate_subtitle_gaussian_fields(
+            {role: _read_hashed_artifact(dump_dir, artifacts, name)
+             for role, name in _SUBTITLE_CONTOUR_ARTIFACT_FILES.items()},
+            fields["shadow_base_final_parallax"], subtitle_summary,
+            final_field=fields["shadow_final_parallax"])
+        subtitle_summary["gaussian"] = gaussian
 
     exterior_zero = None
     if input_region["mode"] == "window-region":
@@ -4713,7 +4540,7 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
 
 def generate_float_artifact_previews(
         dump_dir: Any, artifact_name: str, output_dir: Any) -> Dict[str, Any]:
-    """Generate diagnostic PNGs from one authenticated schema-44 ``.f32`` artifact.
+    """Generate diagnostic PNGs from one authenticated schema-46 ``.f32`` artifact.
 
     Preview files are deliberately written outside the atomic package contract. Scalar tensors
     receive finite-p2/p98 grayscale and jet views; ``model_input.f32`` receives an RGB view by
@@ -4872,25 +4699,8 @@ __all__ = [
     "LIVE_RENDERER_SOURCE_CLOSURE_SHA256",
     "SHADOW_FRAME_STATS_DUMP_SCHEMA",
     "SHADOW_STATE_DUMP_SCHEMA",
-    "SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET",
-    "SUBTITLE_LOCATOR_EVENT_BIRTH",
-    "SUBTITLE_LOCATOR_EVENT_DEATH",
-    "SUBTITLE_LOCATOR_EVENT_HANDOFF",
-    "SUBTITLE_LOCATOR_EVENT_NONE",
-    "SUBTITLE_LOCATOR_FLAG_OWNER",
-    "SUBTITLE_LOCATOR_FLAG_PENDING",
-    "SUBTITLE_LOCATOR_FLAG_PROVISIONAL_CURRENT",
-    "SUBTITLE_LOCATOR_FLAG_TARGET_RESET",
-    "SUBTITLE_LOCATOR_FLAG_TARGET_VALID",
-    "SUBTITLE_LOCATOR_HEADER_WORD_COUNT",
-    "SUBTITLE_LOCATOR_OWNER_WORD_OFFSET",
-    "SUBTITLE_LOCATOR_PENDING_WORD_OFFSET",
-    "SUBTITLE_LOCATOR_PROVISIONAL_FADE_WORD",
-    "SUBTITLE_LOCATOR_PROVISIONAL_TARGET_WORD",
-    "SUBTITLE_LOCATOR_RECT_CAPACITY",
-    "SUBTITLE_LOCATOR_STATE_SCHEMA",
-    "SUBTITLE_LOCATOR_STATE_TAG",
-    "SUBTITLE_LOCATOR_STATE_WORD_COUNT",
+    "SUBTITLE_PLANE_STATE_SCHEMA",
+    "SUBTITLE_PLANE_STATE_TAG",
     "SUBTITLE_OCR_BOX_WORD_COUNT",
     "SUBTITLE_OCR_FINAL_BOX_CAPACITY",
     "SUBTITLE_OCR_FINAL_BOX_WORD_OFFSET",
@@ -4916,7 +4726,17 @@ __all__ = [
     "validate_composite_runtime_provenance",
     "validate_gpu_trace_contract_document",
     "validate_gpu_trace_ring",
-    "validate_subtitle_locator_state",
+    "validate_subtitle_contour_tuple",
+    "validate_subtitle_gaussian_fields",
+    "SUBTITLE_PLANE_STATE_SCHEMA",
+    "SUBTITLE_PLANE_STATE_TAG",
+    "SUBTITLE_PLANE_STATE_WORD_COUNT",
+    "SUBTITLE_PLANE_COVER_CAPACITY",
+    "SUBTITLE_PLANE_CURRENT_VALID_FLAG",
+    "SUBTITLE_PLANE_ADAPTIVE_OFFSET",
+    "validate_subtitle_plane_snapshot",
+    "validate_subtitle_plane_state",
+    "validate_subtitle_condition_words",
     "validate_subtitle_ocr_record",
     "validate_window_region_document",
     "validate_v2_dump_manifest_document",

@@ -55,7 +55,7 @@ namespace platf::sbs_debug {
       bool poll_is_empty
     ) noexcept;
 
-    /** Pure exact-frame OCR8/SLR13 validation used before diagnostic publication. */
+    /** Pure exact-frame OCR8/UIP4 validation used before diagnostic publication. */
     bool subtitle_records_match_frame(
       const std::vector<std::uint8_t> &ocr,
       const std::vector<std::uint8_t> &locator,
@@ -96,7 +96,58 @@ namespace platf::sbs_debug {
     /** Bind a high-grid dump to the exact schema-2 fused composite runtime identity. */
     bool composite_runtime_provenance_is_authenticated(const frame &completed) noexcept;
 
-    /** Authenticate the optional OCR8/SLR13 resource set against the active capture field. */
+    enum class subtitle_contour_texture_e : std::uint8_t {
+      support, field_pin, distance, history, source, gaussian_weight, gaussian_blend, gaussian_vertical_conditioned,
+    };
+
+    /** Exact texture ABI, including the canonical 1x1 unsupported-source variant. */
+    bool subtitle_contour_texture_layout_is_authenticated(
+      subtitle_contour_texture_e role,
+      DXGI_FORMAT format,
+      std::uint32_t width,
+      std::uint32_t height,
+      std::size_t row_bytes,
+      std::size_t byte_count,
+      const frame &completed
+    ) noexcept;
+
+    /** Join SCT5 to already-authenticated OCR8/UIP4 and the completed geometry owner. */
+    bool subtitle_contour_identity_matches_completion(
+      const std::vector<std::uint8_t> &identity,
+      const std::vector<std::uint8_t> &ocr,
+      const std::vector<std::uint8_t> &locator,
+      const std::vector<float> &state,
+      const frame &completed
+    ) noexcept;
+
+    /** Fail closed when contour authority or the independent detector snapshot gate abstains. */
+    bool subtitle_contour_clear_policy_is_authenticated(
+      const std::vector<std::uint8_t> &identity,
+      const std::vector<std::uint8_t> &ocr,
+      const std::vector<float> &state,
+      const std::vector<std::uint8_t> &support,
+      const std::vector<std::uint8_t> &field_pin,
+      const std::vector<std::uint8_t> &distance,
+      const std::vector<std::uint8_t> &history,
+      const std::vector<std::uint8_t> &source,
+      const std::vector<std::uint8_t> &probability
+    ) noexcept;
+
+    /** Authenticate the literal Gaussian proposal and the actual shared-conditioner leaves. */
+    bool subtitle_gaussian_fields_are_authenticated(
+      const std::vector<std::uint8_t> &identity,
+      const std::vector<std::uint8_t> &locator,
+      const std::vector<std::uint8_t> &ocr,
+      const std::vector<std::uint8_t> &distance,
+      const std::vector<std::uint8_t> &weight,
+      const std::vector<std::uint8_t> &blend,
+      const std::vector<std::uint8_t> &vertical,
+      const std::vector<std::uint8_t> &control,
+      const std::vector<std::uint8_t> &base,
+      const std::vector<std::uint8_t> &final
+    ) noexcept;
+
+    /** Authenticate the optional OCR8/UIP4 and complete contour resource set. */
     bool subtitle_capture_resources_are_authenticated(const frame &completed) noexcept;
 
     /** Serialize the exact GPU-trace wire contract used by Dump 3D diagnostics. */
@@ -124,9 +175,9 @@ namespace platf::sbs_debug {
    * scene-cut bridge; it never authorizes a dump or controls live geometry. The immutable V2
    * candidate feeds shadow_vertical_majorant (the exact upper-envelope diagnostic) and
    * shadow_vertical_conditioned (the fixed 75/25 vertical share), then the row majorant produces
-   * shadow_base_final_parallax. When OCR8 and SLR13 are active, the compact publication record and
-   * locator state condition that Base into shadow_final_parallax; an empty current-authority block
-   * copies Base bit for bit. That complete atomic field is sampled directly by the renderer. In
+   * shadow_base_final_parallax. When OCR8 and UIP4 are active, the compact publication record,
+   * current UI-plane state, and exact native contour support condition that Base into shadow_final_parallax;
+   * empty current authority copies Base bit for bit. That complete atomic field is sampled directly by the renderer. In
    * ROI mode it remains crop-local and is not by itself a full-source position field.
    * shadow_coordinate is allocated and written only for this explicit
    * dump; it is never a live resource. V2 supplies an exact fixed-point inverse warp_map when its
@@ -155,6 +206,17 @@ namespace platf::sbs_debug {
     ID3D11ShaderResourceView *shadow_final_parallax = nullptr;
     ID3D11ShaderResourceView *ocr_box_record = nullptr;
     ID3D11ShaderResourceView *subtitle_locator_state = nullptr;
+    ID3D11ShaderResourceView *subtitle_contour_support = nullptr;
+    ID3D11ShaderResourceView *subtitle_contour_field_pin = nullptr;
+    ID3D11ShaderResourceView *subtitle_contour_distance = nullptr;
+    ID3D11ShaderResourceView *subtitle_contour_identity = nullptr;
+    ID3D11ShaderResourceView *subtitle_contour_history = nullptr;
+    ID3D11ShaderResourceView *subtitle_contour_source = nullptr;
+    ID3D11ShaderResourceView *subtitle_ocr_probability = nullptr;
+    ID3D11ShaderResourceView *subtitle_gaussian_weight = nullptr;
+    ID3D11ShaderResourceView *subtitle_gaussian_blend = nullptr;
+    ID3D11ShaderResourceView *subtitle_gaussian_vertical_conditioned = nullptr;
+    ID3D11ShaderResourceView *subtitle_gaussian_control = nullptr;
     ID3D11ShaderResourceView *gpu_trace_ring = nullptr;
     ID3D11ShaderResourceView *shadow_state = nullptr;
     ID3D11ShaderResourceView *shadow_frame_stats = nullptr;
@@ -184,7 +246,7 @@ namespace platf::sbs_debug {
     bool input_domain_reset = false;
     /** True when the completed depth branch remains device-owned and needs the trace for proof. */
     bool gpu_undecided_completion = false;
-    /** True when native interaction published Base as target without advancing OCR8/SLR13. */
+    /** True when native interaction published Base as target without advancing OCR8/UIP4. */
     bool subtitle_work_suppressed = false;
     /** Optional matched-window provenance stamped onto matched_frame_id. */
     std::optional<window_region_snapshot> window_region;

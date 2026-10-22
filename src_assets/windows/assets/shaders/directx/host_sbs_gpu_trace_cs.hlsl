@@ -1,5 +1,5 @@
 // Diagnostic-only completion ring. This pass snapshots the immutable postprocessed CBRG/RQST
-// transaction, finalized SLR state, and condition parameters. A separate cumulative counter
+// transaction, current UIP1 state, and condition parameters. A separate cumulative counter
 // buffer permits asynchronous aggregate diagnostics without reading back individual decisions.
 // Neither output has rendering authority; failures must not affect Host SBS production.
 
@@ -34,14 +34,14 @@ cbuffer TraceConstants : register(b0) {
     uint trace_padding1;
 };
 
-#define GPU_TRACE_RING_SCHEMA 4u
+#define GPU_TRACE_RING_SCHEMA 5u
 #define GPU_TRACE_RING_TAG 0x48525447u
 #define GPU_TRACE_RECORD_TAG 0x31525447u
 #define GPU_TRACE_CAPACITY 300u
 #define GPU_TRACE_HEADER_WORDS 16u
-#define GPU_TRACE_RECORD_WORDS 192u
+#define GPU_TRACE_RECORD_WORDS 136u
 #define GPU_TRACE_TRANSACTION_WORDS 64u
-#define GPU_TRACE_LOCATOR_WORDS 96u
+#define GPU_TRACE_LOCATOR_WORDS 40u
 #define GPU_TRACE_CONDITION_WORDS 6u
 
 // Independent of the Dump ring ABI: schema, tag, then infer/reuse/invalid low/high pairs.
@@ -85,9 +85,9 @@ cbuffer TraceConstants : register(b0) {
 #define GPU_TRACE_RECORD_RESERVED0 23u
 #define GPU_TRACE_RECORD_TRANSACTION_BEGIN 24u
 #define GPU_TRACE_RECORD_LOCATOR_BEGIN 88u
-#define GPU_TRACE_RECORD_CONDITION_BEGIN 184u
-#define GPU_TRACE_RECORD_OBSERVATION_TIMESTAMP_LOW 190u
-#define GPU_TRACE_RECORD_OBSERVATION_TIMESTAMP_HIGH 191u
+#define GPU_TRACE_RECORD_CONDITION_BEGIN 128u
+#define GPU_TRACE_RECORD_OBSERVATION_TIMESTAMP_LOW 134u
+#define GPU_TRACE_RECORD_OBSERVATION_TIMESTAMP_HIGH 135u
 
 #define GPU_TRACE_CLASS_FORCE_INFER 1u
 #define GPU_TRACE_CLASS_GPU_UNDECIDED 2u
@@ -118,7 +118,7 @@ cbuffer TraceConstants : register(b0) {
 #define GPU_TRACE_WORK_OPTIONAL_OCR (1u << 0u)
 #define GPU_TRACE_WORK_SUBTITLE_OBSERVATION (1u << 1u)
 
-#if V2_SUBTITLE_LOCATOR_STATE_WORD_COUNT != GPU_TRACE_LOCATOR_WORDS
+#if V2_SUBTITLE_PLANE_STATE_WORD_COUNT != GPU_TRACE_LOCATOR_WORDS
 #error GPU trace locator word count is stale
 #endif
 #if V2_SUBTITLE_CONDITION_PARAM_WORD_COUNT != GPU_TRACE_CONDITION_WORDS

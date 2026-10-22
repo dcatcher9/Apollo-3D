@@ -91,146 +91,177 @@ EXPECTED_SHADER_IMPLEMENTATION_KEYS = {
 EXPECTED_SHADER_SPEC_KEYS = {
     "source_file", "source_entrypoint", "source_target",
 }
-CANONICAL_FINAL_PARALLAX = {
-    "schema": 3,
-    "authority": "complete-atomic-subtitle-conditioned-r32f-live-render-authority",
-    "publication_policy": "authenticated-infer-or-cpu-known-publication-direct-render",
-    "reuse_policy": "reuse-holds-complete-depth-ocr-slr-final-tuple-byte-for-byte",
-    "invalid_policy": "fail-closed-flat",
-    "current_rgb_policy": "always-current-never-retained",
-}
-CANONICAL_SUBTITLE_OCR = {
-    "geometry_authority": 'same-observation-sealed-parallax-state-required-for-ui-probe-and-time-advance-v1',
-    "schema": 14,
-    "logical_model": "ppocrv6_tiny_det_modelopt_fp16",
-    "asset_path": "models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx",
-    "artifact_onnx_sha256": (
-        "169a233ba0ff7cac27f8ec7dccb6a406e614b25b21fe6a5638c423bf2118bb44"),
-    "source_url": (
-        "https://huggingface.co/PaddlePaddle/PP-OCRv6_tiny_det_onnx/resolve/"
-        "2ba1506c0380b8f0b03dd142459aac66d4421f6c/inference.onnx?download=true"),
-    "source_onnx_sha256": (
-        "193bab7a04fca699a6c82e6abb5b81bdb28177f0abd4062552b04908dafb19f8"),
-    "conversion_tool": "nvidia-modelopt",
-    "conversion_version": "0.45.0",
-    "conversion_recipe": "nvidia-modelopt-autocast-fp16-keep-io-fp32-v1",
-    "conversion_calibration_profile": "apollo-live8-bottom960x160-v1",
-    "engine_recipe": (
-        "trt-strong-modelopt045-fp16-iofp32-tf32-fixed960x160-level5-v2"),
-    "preprocess_profile": "apollo-ppocrv6-bottom-6x1-bgr-imagenet-v1",
-    "source_crop": "bottom-6:1",
-    "input_tensor": {
-        "name": "x",
-        "dtype": "float32",
-        "layout": "NCHW",
-        "shape": [1, 3, 160, 960],
-        "channels": ["B", "G", "R"],
-        "imagenet_mean": [0.485, 0.456, 0.406],
-        "imagenet_std": [0.229, 0.224, 0.225],
-    },
-    "output_tensor": {
-        "name": "fetch_name_0",
-        "dtype": "float32",
-        "layout": "NCHW",
-        "shape": [1, 1, 160, 960],
-    },
-    "field_policy": {
-        "live_field_shapes": [
-            {"width": 1540, "height": 868},
-            {"width": 2044, "height": 868},
-            {"width": 2072, "height": 868},
-            {"width": 868, "height": 1540},
-            {"width": 868, "height": 2044},
-            {"width": 868, "height": 2072},
-            {"width": 1148, "height": 868},
-            {"width": 1232, "height": 868},
-            {"width": 1260, "height": 868},
-            {"width": 1316, "height": 868},
-            {"width": 1400, "height": 868},
-            {"width": 1736, "height": 868},
-            {"width": 1876, "height": 868},
-            {"width": 1932, "height": 868},
-            {"width": 1960, "height": 868},
-            {"width": 868, "height": 1148},
-            {"width": 868, "height": 1232},
-            {"width": 868, "height": 1260},
-            {"width": 868, "height": 1316},
-            {"width": 868, "height": 1400},
-            {"width": 868, "height": 1736},
-            {"width": 868, "height": 1876},
-            {"width": 868, "height": 1932},
-            {"width": 868, "height": 1960},
-        ],
-        "detector_active_probability_threshold": 0.2,
-        "detector_min_mean_score": 0.4,
-        "locator_max_width_numerator": 9,
-        "locator_max_width_denominator": 10,
-        "locator_min_width_cells": 48,
-        "locator_min_height_cells": 6,
-        "locator_min_aspect_numerator": 2,
-        "locator_min_aspect_denominator": 1,
-        "locator_provisional_min_vertical_overlap_numerator": 3,
-        "locator_provisional_min_vertical_overlap_denominator": 4,
-        "locator_provisional_max_height_ratio": 2,
-        "locator_provisional_max_center_y_delta_shorter_height": 1,
-        "locator_corner_edge_divisor": 32,
-        "locator_corner_bottom_rows": 16,
-        "locator_match_iou_threshold": 0.6,
-        "locator_death_grace_observations": 6,
-        "ocr_safe_row_top": 24,
-        "ocr_safe_row_bottom": 155,
-        "source_crop_aspect_width": 6,
-        "source_crop_aspect_height": 1,
-        "text_join_gap_cells": 4,
-        "ribbon_join_gap_cells": 12,
-        "ribbon_structural_gap_min_cells": 3,
-        "ribbon_min_structural_gaps": 3,
-        "ribbon_min_width_numerator": 1,
-        "ribbon_min_width_denominator": 2,
-        "ribbon_bottom_tolerance_pixels": 2,
-        "ribbon_bottom_tolerance_projection":
-            "exact-ceil-detector-edge-through-bottom-crop-v1",
-        "ribbon_cover_pad_limit": 8,
-    },
-    "ocr_record": {
-        "schema": 3,
-        "tag": 0x3852434F,
-        "word_count": 208,
-        "header_word_count": 16,
-        "box_word_count": 8,
-        "box_flag_ribbon": 1,
-        "box_known_flags": 1,
-        "raw_box_offset": 16,
-        "raw_box_capacity": 16,
-        "final_box_offset": 144,
-        "final_box_capacity": 8,
-    },
-    "locator_state": {
-        "schema": 14,
-        "tag": 0x34314C53,
-        "word_count": 96,
-        "header_word_count": 32,
-        "rectangle_capacity": 4,
-        "owner_offset": 32,
-        "pending_offset": 48,
-        "current_offset": 64,
-        "kind_word": 31,
-        "owner_kind_shift": 0,
-        "pending_kind_shift": 4,
-        "current_kind_shift": 8,
-        "kind_mask": 15,
-        "provisional_current_flag": 1 << 4,
-        "provisional_target_word": 29,
-        "provisional_fade_word": 30,
-        "adaptive_offset": 80,
-        "adaptive_word_count": 16,
-    },
-    "condition_params": {
-        "schema": 3,
-        "tag": 0x33504353,
-        "word_count": 6,
-    },
-}
+CANONICAL_FINAL_PARALLAX = {'schema': 3,
+ 'authority': 'complete-atomic-subtitle-conditioned-r32f-live-render-authority',
+ 'publication_policy': 'authenticated-infer-or-cpu-known-publication-direct-render',
+ 'reuse_policy': 'reuse-holds-complete-depth-ocr-uip4-final-tuple-byte-for-byte',
+ 'invalid_policy': 'fail-closed-flat',
+ 'current_rgb_policy': 'always-current-never-retained'}
+CANONICAL_SUBTITLE_OCR = {'schema': 27,
+ 'logical_model': 'ppocrv6_tiny_det_modelopt_fp16',
+ 'asset_path': 'models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx',
+ 'artifact_onnx_sha256': '169a233ba0ff7cac27f8ec7dccb6a406e614b25b21fe6a5638c423bf2118bb44',
+ 'source_url': 'https://huggingface.co/PaddlePaddle/PP-OCRv6_tiny_det_onnx/resolve/2ba1506c0380b8f0b03dd142459aac66d4421f6c/inference.onnx?download=true',
+ 'source_onnx_sha256': '193bab7a04fca699a6c82e6abb5b81bdb28177f0abd4062552b04908dafb19f8',
+ 'conversion_tool': 'nvidia-modelopt',
+ 'conversion_version': '0.45.0',
+ 'conversion_recipe': 'nvidia-modelopt-autocast-fp16-keep-io-fp32-v1',
+ 'conversion_calibration_profile': 'apollo-live8-bottom960x160-v1',
+ 'engine_recipe': 'trt-strong-modelopt045-fp16-iofp32-tf32-fixed960x160-level5-v2',
+ 'preprocess_profile': 'apollo-ppocrv6-bottom-6x1-bgr-imagenet-v1',
+ 'source_crop': 'bottom-6:1',
+ 'input_tensor': {'name': 'x',
+                  'dtype': 'float32',
+                  'layout': 'NCHW',
+                  'shape': [1, 3, 160, 960],
+                  'channels': ['B', 'G', 'R'],
+                  'imagenet_mean': [0.485, 0.456, 0.406],
+                  'imagenet_std': [0.229, 0.224, 0.225]},
+ 'output_tensor': {'name': 'fetch_name_0',
+                   'dtype': 'float32',
+                   'layout': 'NCHW',
+                   'shape': [1, 1, 160, 960]},
+ 'field_policy': {'live_field_shapes': [{'width': 1540, 'height': 868},
+                                        {'width': 2044, 'height': 868},
+                                        {'width': 2072, 'height': 868},
+                                        {'width': 868, 'height': 1540},
+                                        {'width': 868, 'height': 2044},
+                                        {'width': 868, 'height': 2072},
+                                        {'width': 1148, 'height': 868},
+                                        {'width': 1232, 'height': 868},
+                                        {'width': 1260, 'height': 868},
+                                        {'width': 1316, 'height': 868},
+                                        {'width': 1400, 'height': 868},
+                                        {'width': 1736, 'height': 868},
+                                        {'width': 1876, 'height': 868},
+                                        {'width': 1932, 'height': 868},
+                                        {'width': 1960, 'height': 868},
+                                        {'width': 868, 'height': 1148},
+                                        {'width': 868, 'height': 1232},
+                                        {'width': 868, 'height': 1260},
+                                        {'width': 868, 'height': 1316},
+                                        {'width': 868, 'height': 1400},
+                                        {'width': 868, 'height': 1736},
+                                        {'width': 868, 'height': 1876},
+                                        {'width': 868, 'height': 1932},
+                                        {'width': 868, 'height': 1960}],
+                  'detector_active_probability_threshold': 0.2,
+                  'detector_min_mean_score': 0.4,
+                  'ocr_safe_row_top': 24,
+                  'ocr_safe_row_bottom': 155,
+                  'source_crop_aspect_width': 6,
+                  'source_crop_aspect_height': 1,
+                  'text_join_gap_cells': 4,
+                  'ordinary_cover_horizontal_guard_cells': 1,
+                  'ordinary_cover_horizontal_guard_policy': 'ordinary-only-add-guard-cells-times-producer-ocr-cell-width-to-horizontal-db-unclip-cover-clamped-detector-bounds-before-map-current-canonical-cover-all-consumers-no-second-mask-vertical-and-ribbon-unchanged-v1',
+                  'line_group_min_vertical_iou_numerator': 1,
+                  'line_group_min_vertical_iou_denominator': 2,
+                  'line_group_max_horizontal_gap_height_numerator': 4,
+                  'line_group_max_horizontal_gap_height_denominator': 1,
+                  'line_group_horizontal_gap_metric': 'native-source-horizontal-gap-to-current-union-edge-relative-to-max-candidate-and-fixed-anchor-height-exact-cross-multiplied-v1',
+                  'line_center_tolerance_numerator': 1,
+                  'line_center_tolerance_denominator': 10,
+                  'line_search_bottom_height_numerator': 1,
+                  'line_search_bottom_height_denominator': 4,
+                  'line_search_region': 'lower-quarter-of-center-reference-intersect-existing-safe-detector-crop-v1',
+                  'line_group_policy': 'same-detector-active-row-band-first-qualifying-fixed-tight-core-anchor-span-iou-and-bounded-native-horizontal-union-gap-before-capacity-union-eligibility-only-original-ordinary-and-ribbon-pairs-v2',
+                  'line_center_reference': 'video-roi-otherwise-full-screen-horizontal-center-and-width-in-analysis-source-pixels-v1',
+                  'line_center_reference_params': 'ocr-resolve-prefix16-then-signed-twice-center-unsigned-width-signed-search-top-zero-reserved-word-80bytes-v1',
+                  'ribbon_join_gap_cells': 12,
+                  'ribbon_structural_gap_min_cells': 3,
+                  'ribbon_min_structural_gaps': 3,
+                  'ribbon_min_width_numerator': 1,
+                  'ribbon_min_width_denominator': 2,
+                  'ribbon_bottom_tolerance_pixels': 2,
+                  'ribbon_bottom_tolerance_projection': 'exact-ceil-detector-edge-through-bottom-crop-v1',
+                  'ribbon_cover_pad_limit': 8},
+ 'candidate_selection': {'policy': 'bounded-largest-core-area-v1',
+                         'capacity': 'min-raw-and-final-box-capacity',
+                         'ranking': 'tight-core-field-area-descending',
+                         'tie_break': 'earlier-raster-discovery',
+                         'publication_order': 'raster-discovery-order',
+                         'overflow': 'retain-best-paired-candidates'},
+ 'ocr_record': {'schema': 3,
+                'tag': 944915279,
+                'word_count': 208,
+                'header_word_count': 16,
+                'box_word_count': 8,
+                'box_flag_ribbon': 1,
+                'box_known_flags': 1,
+                'raw_box_offset': 16,
+                'raw_box_capacity': 16,
+                'final_box_offset': 144,
+                'final_box_capacity': 8},
+ 'condition_params': {'schema': 4,
+                      'word_count': 6,
+                      'current_count_word': 2,
+                      'current_kind_mask_word': 3,
+                      'active_word': 4,
+                      'fully_active_value': 2,
+                      'target_word': 5,
+                      'tag': 877675347},
+ 'geometry_authority': 'same-observation-sealed-parallax-state-required-for-ui-probe-and-time-advance-v1',
+ 'contour_policy': {'schema': 5,
+                    'recipe': 23,
+                    'source': 'same-joined-ocr-source-bottom-crop-display-srgb-finite-rgba16f-v1',
+                    'source_max_extent': 5120,
+                    'source_extent_policy': 'native-exact-crop-for-supported-source-otherwise-canonical-1x1-empty-support-history-source-and-zero-probability-v1',
+                    'history_jitter_radius_source_pixels': 2,
+                    'probability_validity_policy': 'all-interpolation-contributors-finite-in-unit-range-even-without-fresh-threshold-v1',
+                    'diagnostic_snapshot_policy': 'same-joined-valid-ocr-geometry-source-clock-copy-before-next-admission-clear-invalid-whole-reuse-hold-v1',
+                    'native_support': 'r32u-binary-current-temporally-stable-ui-support-v1',
+                    'authority': 'current-ocr8-uip4-scp4-cut-source-clock-identity-only-v2',
+                    'projection': 'native-visible-support-to-all-bilinear-field-nodes-integer-footprint-v1',
+                    'history': 'current-cover-fixed-rgb-anchor-four-genuine-confirmations-same-pixel-first-current-core-probability-cue-blocks-neighbor-fallback-v4',
+                    'history_schema': 5,
+                    'history_tag': 894714707,
+                    'history_word_count': 32,
+                    'conditioning': 'post-gaussian-shared-vertical75-25-and-horizontal-q30-no-presentation-support-or-invalid-current-authority-exact-base-v2',
+                    'reuse': 'whole-depth-ocr-uip4-native-mask-field-pin-q-gaussian-weight-blend-vertical-control-history-source-probability-final-tuple-held-v1',
+                    'uncertain_support': 'raw-support-abstains-presentation-current-cover-fallback-until-four-genuine-cue-free-observations-v3',
+                    'history_snapshot_valid_word': 23,
+                    'history_feature_valid_bit': 2,
+                    'history_feature_mask_bit': 1,
+                    'history_rgb_distance': 0.08,
+                    'mask_evidence_policy': 'current-ocr8-cover-color-agnostic-four-genuine-fixed-anchor-matches-same-pixel-first-probability-cue-blocks-neighbor-fallback-in-current-raw-core-v8',
+                    'history_confirmation_observations': 4,
+                    'history_feature_count_shift': 2,
+                    'history_anchor_policy': 'same-pixel-qualified-fixed-anchor-first-even-with-current-core-probability-cue-otherwise-unflagged-min-rgb-distance-then-squared-spatial-distance-then-scan-order-v3',
+                    'distance_policy': 'source-pixel-five-center-euclidean-squared-r32f-positive-infinity-v1',
+                    'distance_empty_bits': 2139095040,
+                    'gaussian_center_offset_source_pixels': 2,
+                    'gaussian_sigma_short_side_divisor': 60.0,
+                    'gaussian_weight_policy': 'fp32-exp-negative-min-native-q-current-cover-q-until-four-genuine-cue-free-observations-max-union-v3',
+                    'gaussian_weight_absolute_error_limit': 2e-06,
+                    'gaussian_blend_policy': 'precise-ui-times-M-plus-base-times-one-minus-M-bit-exact-endpoints-v1',
+                    'history_reserved_offset': 24,
+                    'history_reserved_word_count': 8,
+                    'probability_change_ratio': 0.125,
+                    'probability_change_policy': 'current-core-native-center-soft-probability-unit-mass-spatial-tv-strict-ratio-cue-both-zero-no-cue-one-zero-cue-v3'},
+ 'plane_state': {'schema': 4,
+                 'word_count': 40,
+                 'header_word_count': 24,
+                 'cover_capacity': 8,
+                 'flags_word': 2,
+                 'current_valid_flag': 1,
+                 'current_slot_mask_word': 3,
+                 'frame_offset': 4,
+                 'analysis_generation_offset': 6,
+                 'observation_timestamp_offset': 8,
+                 'source_extent_offset': 10,
+                 'field_extent_offset': 12,
+                 'roi_offset': 14,
+                 'content_offset': 16,
+                 'cut_epoch_word': 20,
+                 'reserved_offset': 23,
+                 'reserved_word_count': 1,
+                 'adaptive_offset': 24,
+                 'adaptive_word_count': 16,
+                 'tag': 877676885,
+                 'history_reset_mask_word': 21,
+                 'warmup_word': 22,
+                 'warmup_observations': 4,
+                 'warmup_cue_bit': 8}}
 EXPECTED_CONSTANT_FIELD_NAMES = (
     "raw_coordinate_scale",
     "collapse_abs_epsilon",
@@ -408,7 +439,21 @@ def validate_contract(
 
     if contract.get("subtitle_ocr") != CANONICAL_SUBTITLE_OCR:
         raise ValueError(
-            "subtitle_ocr must exactly match the authenticated PP-OCRv6/OCR8/SLR14 contract")
+            "subtitle_ocr must exactly match the authenticated PP-OCRv6/OCR8/UIP4 contract")
+    for name in ("ordinary_cover_horizontal_guard_cells",
+                 "line_search_bottom_height_numerator", "line_search_bottom_height_denominator",
+                 "line_group_min_vertical_iou_numerator", "line_group_min_vertical_iou_denominator",
+                 "line_group_max_horizontal_gap_height_numerator", "line_group_max_horizontal_gap_height_denominator",
+                 "line_center_tolerance_numerator", "line_center_tolerance_denominator"):
+        if type(contract["subtitle_ocr"]["field_policy"][name]) is not int:
+            raise ValueError("subtitle_ocr detector guard and line policy values must be exact integers")
+    for name in ("plane_state", "condition_params"):
+        if any(type(value) is not int for value in contract["subtitle_ocr"][name].values()):
+            raise ValueError(f"subtitle_ocr.{name} layout words must be exact integers")
+    for name in ("schema", "recipe", "history_schema", "history_tag", "history_word_count",
+                 "history_reserved_offset", "history_reserved_word_count"):
+        if type(contract["subtitle_ocr"]["contour_policy"][name]) is not int:
+            raise ValueError("subtitle_ocr.contour_policy layout words must be exact integers")
     if contract.get("final_parallax") != CANONICAL_FINAL_PARALLAX:
         raise ValueError(
             "final_parallax must exactly match the authenticated direct-render contract")
@@ -468,6 +513,14 @@ def validate_contract(
             raise ValueError(f"calibrated default {name} must be positive")
     if calibrated_defaults["max_horizontal_slope"] >= 1.0:
         raise ValueError("max_horizontal_slope must be below one")
+    contour_policy = contract["subtitle_ocr"]["contour_policy"]
+    offset = contour_policy["gaussian_center_offset_source_pixels"]
+    if type(offset) is not int or not 0 <= offset <= 2:
+        raise ValueError("subtitle Gaussian center offset must be a bounded source-pixel integer")
+    for name in ("gaussian_sigma_short_side_divisor", "gaussian_weight_absolute_error_limit"):
+        value = contour_policy[name]
+        if type(value) is not float or not math.isfinite(value) or value <= 0.0:
+            raise ValueError("subtitle Gaussian parameters must be positive finite floats")
     if (calibrated_defaults["host_percentile_bin_count"] != 256 or
             not 0.0 < calibrated_defaults["host_percentile_low"] <
             calibrated_defaults["host_percentile_high"] < 1.0):
@@ -739,7 +792,7 @@ def render_cpp(contract: dict[str, Any]) -> str:
     ocr_output = subtitle_ocr["output_tensor"]
     field_policy = subtitle_ocr["field_policy"]
     ocr_record = subtitle_ocr["ocr_record"]
-    locator_state = subtitle_ocr["locator_state"]
+    plane_state = subtitle_ocr["plane_state"]
     condition_params = subtitle_ocr["condition_params"]
     calibrated_shapes = [
         (calibration["calibration_id"], shape["width"], shape["height"])
@@ -796,6 +849,27 @@ def render_cpp(contract: dict[str, Any]) -> str:
         f"{json.dumps(subtitle_ocr['geometry_authority'])};",
         f"  inline constexpr std::uint32_t subtitle_ocr_contract_schema = "
         f"{subtitle_ocr['schema']}u;",
+        f"  inline constexpr std::uint32_t subtitle_contour_schema = {subtitle_ocr['contour_policy']['schema']}u;",
+        f"  inline constexpr std::uint32_t subtitle_contour_recipe = {subtitle_ocr['contour_policy']['recipe']}u;",
+        f"  inline constexpr std::uint32_t subtitle_contour_history_tag = {subtitle_ocr['contour_policy']['history_tag']}u;",
+        f"  inline constexpr std::uint32_t subtitle_contour_history_word_count = {subtitle_ocr['contour_policy']['history_word_count']}u;",
+        f"  inline constexpr std::uint32_t subtitle_contour_history_snapshot_valid_word = {subtitle_ocr['contour_policy']['history_snapshot_valid_word']}u;",
+        f"  inline constexpr std::uint32_t subtitle_contour_history_reserved_offset = {subtitle_ocr['contour_policy']['history_reserved_offset']}u;",
+        f"  inline constexpr std::uint32_t subtitle_contour_history_reserved_word_count = {subtitle_ocr['contour_policy']['history_reserved_word_count']}u;",
+        f"  inline constexpr std::uint32_t subtitle_contour_history_feature_valid_bit = {subtitle_ocr['contour_policy']['history_feature_valid_bit']}u;",
+        f"  inline constexpr std::uint32_t subtitle_contour_history_feature_mask_bit = {subtitle_ocr['contour_policy']['history_feature_mask_bit']}u;",
+        f"  inline constexpr float subtitle_contour_history_rgb_distance = {_float_literal(subtitle_ocr['contour_policy']['history_rgb_distance'])};",
+        f"  inline constexpr float subtitle_contour_probability_change_ratio = {_float_literal(subtitle_ocr['contour_policy']['probability_change_ratio'])};",
+        f"  inline constexpr std::uint32_t subtitle_contour_history_confirmation_observations = {subtitle_ocr['contour_policy']['history_confirmation_observations']}u;",
+        f"  inline constexpr std::uint32_t subtitle_contour_history_feature_count_shift = {subtitle_ocr['contour_policy']['history_feature_count_shift']}u;",
+        f"  inline constexpr std::uint32_t subtitle_contour_source_max_extent = {subtitle_ocr['contour_policy']['source_max_extent']}u;",
+        f"  inline constexpr std::uint32_t subtitle_contour_history_jitter_radius_source_pixels = {subtitle_ocr['contour_policy']['history_jitter_radius_source_pixels']}u;",
+        f"  inline constexpr std::uint32_t subtitle_contour_distance_empty_bits = {subtitle_ocr['contour_policy']['distance_empty_bits']}u;",
+        f"  inline constexpr std::uint32_t subtitle_contour_gaussian_center_offset_source_pixels = {subtitle_ocr['contour_policy']['gaussian_center_offset_source_pixels']}u;",
+        f"  inline constexpr float subtitle_contour_gaussian_sigma_short_side_divisor = {_float_literal(subtitle_ocr['contour_policy']['gaussian_sigma_short_side_divisor'])};",
+        f"  inline constexpr float subtitle_contour_gaussian_weight_absolute_error_limit = {_float_literal(subtitle_ocr['contour_policy']['gaussian_weight_absolute_error_limit'])};",
+        f"  inline constexpr std::string_view subtitle_contour_policy_json = "
+        f"{json.dumps(json.dumps(subtitle_ocr['contour_policy'], separators=(',', ':')))};",
         f"  inline constexpr std::string_view subtitle_ocr_model_name = "
         f"{json.dumps(subtitle_ocr['logical_model'])};",
         f"  inline constexpr std::string_view subtitle_ocr_asset_path = "
@@ -868,43 +942,42 @@ def render_cpp(contract: dict[str, Any]) -> str:
         f"{_float_literal(field_policy['detector_active_probability_threshold'])};",
         f"  inline constexpr float subtitle_ocr_min_mean_score = "
         f"{_float_literal(field_policy['detector_min_mean_score'])};",
-        f"  inline constexpr std::uint32_t subtitle_locator_max_width_numerator = "
-        f"{field_policy['locator_max_width_numerator']}u;",
-        f"  inline constexpr std::uint32_t subtitle_locator_max_width_denominator = "
-        f"{field_policy['locator_max_width_denominator']}u;",
-        f"  inline constexpr std::uint32_t subtitle_locator_min_width_cells = "
-        f"{field_policy['locator_min_width_cells']}u;",
-        f"  inline constexpr std::uint32_t subtitle_locator_min_height_cells = "
-        f"{field_policy['locator_min_height_cells']}u;",
-        f"  inline constexpr std::uint32_t subtitle_locator_min_aspect_numerator = "
-        f"{field_policy['locator_min_aspect_numerator']}u;",
-        f"  inline constexpr std::uint32_t subtitle_locator_min_aspect_denominator = "
-        f"{field_policy['locator_min_aspect_denominator']}u;",
-        "  inline constexpr std::uint32_t "
-        "subtitle_locator_provisional_min_vertical_overlap_numerator = "
-        f"{field_policy['locator_provisional_min_vertical_overlap_numerator']}u;",
-        "  inline constexpr std::uint32_t "
-        "subtitle_locator_provisional_min_vertical_overlap_denominator = "
-        f"{field_policy['locator_provisional_min_vertical_overlap_denominator']}u;",
-        "  inline constexpr std::uint32_t subtitle_locator_provisional_max_height_ratio = "
-        f"{field_policy['locator_provisional_max_height_ratio']}u;",
-        "  inline constexpr std::uint32_t "
-        "subtitle_locator_provisional_max_center_y_delta_shorter_height = "
-        f"{field_policy['locator_provisional_max_center_y_delta_shorter_height']}u;",
-        f"  inline constexpr std::uint32_t subtitle_locator_corner_edge_divisor = "
-        f"{field_policy['locator_corner_edge_divisor']}u;",
-        f"  inline constexpr std::uint32_t subtitle_locator_corner_bottom_rows = "
-        f"{field_policy['locator_corner_bottom_rows']}u;",
-        f"  inline constexpr float subtitle_locator_match_iou_threshold = "
-        f"{_float_literal(field_policy['locator_match_iou_threshold'])};",
-        f"  inline constexpr std::uint32_t subtitle_locator_death_grace_observations = "
-        f"{field_policy['locator_death_grace_observations']}u;",
         f"  inline constexpr std::uint32_t subtitle_ocr_crop_aspect_width = "
         f"{field_policy['source_crop_aspect_width']}u;",
         f"  inline constexpr std::uint32_t subtitle_ocr_crop_aspect_height = "
         f"{field_policy['source_crop_aspect_height']}u;",
         f"  inline constexpr std::uint32_t subtitle_ocr_text_join_gap_cells = "
         f"{field_policy['text_join_gap_cells']}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_ordinary_cover_horizontal_guard_cells = "
+        f"{field_policy['ordinary_cover_horizontal_guard_cells']}u;",
+        f"  inline constexpr std::string_view subtitle_ocr_ordinary_cover_horizontal_guard_policy = "
+        f"{json.dumps(field_policy['ordinary_cover_horizontal_guard_policy'])};",
+        f"  inline constexpr std::uint32_t subtitle_ocr_line_group_min_vertical_iou_numerator = "
+        f"{field_policy['line_group_min_vertical_iou_numerator']}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_line_group_min_vertical_iou_denominator = "
+        f"{field_policy['line_group_min_vertical_iou_denominator']}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_line_group_max_horizontal_gap_height_numerator = "
+        f"{field_policy['line_group_max_horizontal_gap_height_numerator']}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_line_group_max_horizontal_gap_height_denominator = "
+        f"{field_policy['line_group_max_horizontal_gap_height_denominator']}u;",
+        f"  inline constexpr std::string_view subtitle_ocr_line_group_horizontal_gap_metric = "
+        f"{json.dumps(field_policy['line_group_horizontal_gap_metric'])};",
+        f"  inline constexpr std::uint32_t subtitle_ocr_line_center_tolerance_numerator = "
+        f"{field_policy['line_center_tolerance_numerator']}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_line_center_tolerance_denominator = "
+        f"{field_policy['line_center_tolerance_denominator']}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_line_search_bottom_height_numerator = "
+        f"{field_policy['line_search_bottom_height_numerator']}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_line_search_bottom_height_denominator = "
+        f"{field_policy['line_search_bottom_height_denominator']}u;",
+        f"  inline constexpr std::string_view subtitle_ocr_line_search_region = "
+        f"{json.dumps(field_policy['line_search_region'])};",
+        f"  inline constexpr std::string_view subtitle_ocr_line_group_policy = "
+        f"{json.dumps(field_policy['line_group_policy'])};",
+        f"  inline constexpr std::string_view subtitle_ocr_line_center_reference = "
+        f"{json.dumps(field_policy['line_center_reference'])};",
+        f"  inline constexpr std::string_view subtitle_ocr_line_center_reference_params = "
+        f"{json.dumps(field_policy['line_center_reference_params'])};",
         f"  inline constexpr std::uint32_t subtitle_ocr_ribbon_join_gap_cells = "
         f"{field_policy['ribbon_join_gap_cells']}u;",
         f"  inline constexpr std::uint32_t subtitle_ocr_ribbon_structural_gap_min_cells = "
@@ -921,36 +994,54 @@ def render_cpp(contract: dict[str, Any]) -> str:
         f"{json.dumps(field_policy['ribbon_bottom_tolerance_projection'])};",
         f"  inline constexpr std::uint32_t subtitle_ocr_ribbon_cover_pad_limit = "
         f"{field_policy['ribbon_cover_pad_limit']}u;",
-        f"  inline constexpr std::uint32_t subtitle_locator_state_schema = {locator_state['schema']}u;",
-        f"  inline constexpr std::uint32_t subtitle_locator_state_tag = 0x{locator_state['tag']:08X}u;",
-        f"  inline constexpr std::uint32_t subtitle_locator_state_word_count = {locator_state['word_count']}u;",
-        f"  inline constexpr std::uint32_t subtitle_locator_header_word_count = {locator_state['header_word_count']}u;",
-        "  inline constexpr std::uint32_t subtitle_locator_rectangle_capacity = "
-        f"{locator_state['rectangle_capacity']}u;",
-        f"  inline constexpr std::uint32_t subtitle_locator_owner_offset = {locator_state['owner_offset']}u;",
-        f"  inline constexpr std::uint32_t subtitle_locator_pending_offset = {locator_state['pending_offset']}u;",
-        f"  inline constexpr std::uint32_t subtitle_locator_current_offset = {locator_state['current_offset']}u;",
-        f"  inline constexpr std::uint32_t subtitle_locator_adaptive_offset = {locator_state['adaptive_offset']}u;",
-        f"  inline constexpr std::uint32_t subtitle_locator_adaptive_word_count = {locator_state['adaptive_word_count']}u;",
-        f"  inline constexpr std::uint32_t subtitle_locator_kind_word = {locator_state['kind_word']}u;",
-        f"  inline constexpr std::uint32_t subtitle_locator_owner_kind_shift = {locator_state['owner_kind_shift']}u;",
-        "  inline constexpr std::uint32_t subtitle_locator_pending_kind_shift = "
-        f"{locator_state['pending_kind_shift']}u;",
-        "  inline constexpr std::uint32_t subtitle_locator_current_kind_shift = "
-        f"{locator_state['current_kind_shift']}u;",
-        f"  inline constexpr std::uint32_t subtitle_locator_kind_mask = {locator_state['kind_mask']}u;",
-        "  inline constexpr std::uint32_t subtitle_locator_provisional_current_flag = "
-        f"{locator_state['provisional_current_flag']}u;",
-        "  inline constexpr std::uint32_t subtitle_locator_provisional_target_word = "
-        f"{locator_state['provisional_target_word']}u;",
-        "  inline constexpr std::uint32_t subtitle_locator_provisional_fade_word = "
-        f"{locator_state['provisional_fade_word']}u;",
+        f"  inline constexpr std::uint32_t subtitle_plane_state_schema = {plane_state['schema']}u;",
+        f"  inline constexpr std::uint32_t subtitle_plane_state_word_count = {plane_state['word_count']}u;",
+        f"  inline constexpr std::uint32_t subtitle_plane_header_word_count = {plane_state['header_word_count']}u;",
+        f"  inline constexpr std::uint32_t subtitle_plane_cover_capacity = {plane_state['cover_capacity']}u;",
+        f"  inline constexpr std::uint32_t subtitle_plane_flags_word = {plane_state['flags_word']}u;",
+        f"  inline constexpr std::uint32_t subtitle_plane_current_valid_flag = {plane_state['current_valid_flag']}u;",
+        f"  inline constexpr std::uint32_t subtitle_plane_current_slot_mask_word = {plane_state['current_slot_mask_word']}u;",
+        f"  inline constexpr std::uint32_t subtitle_plane_frame_offset = {plane_state['frame_offset']}u;",
+        f"  inline constexpr std::uint32_t subtitle_plane_analysis_generation_offset = {plane_state['analysis_generation_offset']}u;",
+        f"  inline constexpr std::uint32_t subtitle_plane_observation_timestamp_offset = {plane_state['observation_timestamp_offset']}u;",
+        f"  inline constexpr std::uint32_t subtitle_plane_source_extent_offset = {plane_state['source_extent_offset']}u;",
+        f"  inline constexpr std::uint32_t subtitle_plane_field_extent_offset = {plane_state['field_extent_offset']}u;",
+        f"  inline constexpr std::uint32_t subtitle_plane_roi_offset = {plane_state['roi_offset']}u;",
+        f"  inline constexpr std::uint32_t subtitle_plane_content_offset = {plane_state['content_offset']}u;",
+        f"  inline constexpr std::uint32_t subtitle_plane_cut_epoch_word = {plane_state['cut_epoch_word']}u;",
+        "  // Legacy reset-mask name: current-core probability cues block neighbor fallback only.",
+        f"  inline constexpr std::uint32_t subtitle_plane_history_reset_mask_word = {plane_state['history_reset_mask_word']}u;",
+        f"  inline constexpr std::uint32_t subtitle_plane_warmup_word = {plane_state['warmup_word']}u;",
+        f"  inline constexpr std::uint32_t subtitle_plane_warmup_observations = {plane_state['warmup_observations']}u;",
+        f"  inline constexpr std::uint32_t subtitle_plane_warmup_cue_bit = {plane_state['warmup_cue_bit']}u;",
+        '  inline constexpr std::uint32_t subtitle_plane_warmup_remaining_mask = subtitle_plane_warmup_cue_bit - 1u;',
+        f"  inline constexpr std::uint32_t subtitle_plane_reserved_offset = {plane_state['reserved_offset']}u;",
+        f"  inline constexpr std::uint32_t subtitle_plane_reserved_word_count = {plane_state['reserved_word_count']}u;",
+        f"  inline constexpr std::uint32_t subtitle_plane_adaptive_offset = {plane_state['adaptive_offset']}u;",
+        f"  inline constexpr std::uint32_t subtitle_plane_adaptive_word_count = {plane_state['adaptive_word_count']}u;",
+        f"  inline constexpr std::uint32_t subtitle_plane_state_tag = 0x{plane_state['tag']:08X}u;",
         f"  inline constexpr std::uint32_t subtitle_condition_param_schema = "
         f"{condition_params['schema']}u;",
         f"  inline constexpr std::uint32_t subtitle_condition_param_tag = "
         f"0x{condition_params['tag']:08X}u;",
         f"  inline constexpr std::uint32_t subtitle_condition_param_word_count = "
         f"{condition_params['word_count']}u;",
+        f"  inline constexpr std::uint32_t subtitle_condition_param_current_count_word = {condition_params['current_count_word']}u;",
+        f"  inline constexpr std::uint32_t subtitle_condition_param_current_kind_mask_word = {condition_params['current_kind_mask_word']}u;",
+        f"  inline constexpr std::uint32_t subtitle_condition_param_active_word = {condition_params['active_word']}u;",
+        f"  inline constexpr std::uint32_t subtitle_condition_param_fully_active_value = {condition_params['fully_active_value']}u;",
+        f"  inline constexpr std::uint32_t subtitle_condition_param_target_word = {condition_params['target_word']}u;",
+        '  static_assert(subtitle_plane_state_schema == 4u && subtitle_plane_state_tag == 0x34504955u);',
+        '  static_assert(subtitle_plane_state_word_count == 40u && subtitle_plane_header_word_count == 24u);',
+        '  static_assert(subtitle_plane_cover_capacity == subtitle_ocr_final_box_capacity);',
+        '  static_assert(subtitle_plane_warmup_word == 22u && subtitle_plane_warmup_observations == 4u && subtitle_plane_warmup_cue_bit == 8u && subtitle_plane_warmup_remaining_mask == 7u);',
+        '  static_assert(subtitle_plane_warmup_observations == subtitle_contour_history_confirmation_observations);',
+        '  static_assert(subtitle_plane_reserved_offset + subtitle_plane_reserved_word_count == subtitle_plane_adaptive_offset);',
+        '  static_assert(subtitle_plane_adaptive_offset == subtitle_plane_header_word_count);',
+        '  static_assert(subtitle_plane_state_word_count == subtitle_plane_adaptive_offset + subtitle_plane_adaptive_word_count);',
+        '  static_assert(subtitle_condition_param_schema == 4u && subtitle_condition_param_word_count == 6u);',
+        '  static_assert(subtitle_condition_param_target_word + 1u == subtitle_condition_param_word_count);',
+        '  static_assert(subtitle_contour_history_reserved_offset == 24u && subtitle_contour_history_reserved_word_count == 8u);',
         "  static_assert(subtitle_ocr_input_n == 1u && subtitle_ocr_input_c == 3u);",
         "  static_assert(subtitle_ocr_output_n == 1u && subtitle_ocr_output_c == 1u);",
         "  static_assert(subtitle_ocr_active_probability_threshold > 0.0f &&",
@@ -958,20 +1049,6 @@ def render_cpp(contract: dict[str, Any]) -> str:
         "  static_assert(subtitle_ocr_min_mean_score >",
         "                subtitle_ocr_active_probability_threshold);",
         "  static_assert(subtitle_ocr_min_mean_score <= 1.0f);",
-        "  static_assert(subtitle_locator_min_width_cells > 0u);",
-        "  static_assert(subtitle_locator_min_height_cells > 0u);",
-        "  static_assert(subtitle_locator_min_aspect_numerator > 0u);",
-        "  static_assert(subtitle_locator_min_aspect_denominator > 0u);",
-        "  static_assert(subtitle_locator_provisional_min_vertical_overlap_numerator > 0u);",
-        "  static_assert(subtitle_locator_provisional_min_vertical_overlap_denominator >= "
-        "                subtitle_locator_provisional_min_vertical_overlap_numerator);",
-        "  static_assert(subtitle_locator_provisional_max_height_ratio >= 1u);",
-        "  static_assert(subtitle_locator_provisional_max_center_y_delta_shorter_height >= 1u);",
-        "  static_assert(subtitle_locator_corner_edge_divisor > 1u);",
-        "  static_assert(subtitle_locator_corner_bottom_rows > 0u);",
-        "  static_assert(subtitle_locator_match_iou_threshold > 0.0f &&",
-        "                subtitle_locator_match_iou_threshold <= 1.0f);",
-        "  static_assert(subtitle_locator_death_grace_observations > 0u);",
         "  static_assert(subtitle_ocr_text_join_gap_cells > 0u);",
         "  static_assert(subtitle_ocr_text_join_gap_cells <",
         "                subtitle_ocr_ribbon_join_gap_cells);",
@@ -983,14 +1060,6 @@ def render_cpp(contract: dict[str, Any]) -> str:
         "                subtitle_ocr_raw_box_capacity * subtitle_ocr_box_word_count);",
         "  static_assert(subtitle_ocr_record_word_count == subtitle_ocr_final_box_offset +",
         "                subtitle_ocr_final_box_capacity * subtitle_ocr_box_word_count);",
-        "  static_assert(subtitle_locator_pending_offset == subtitle_locator_owner_offset +",
-        "                subtitle_locator_rectangle_capacity * 4u);",
-        "  static_assert(subtitle_locator_current_offset == subtitle_locator_pending_offset +",
-        "                subtitle_locator_rectangle_capacity * 4u);",
-        "  static_assert(subtitle_locator_adaptive_offset == subtitle_locator_current_offset +",
-        "                subtitle_locator_rectangle_capacity * 4u);",
-        "  static_assert(subtitle_locator_state_word_count == subtitle_locator_adaptive_offset +",
-        "                subtitle_locator_adaptive_word_count);",
         "  static_assert(subtitle_condition_param_word_count == 6u);",
         "  inline constexpr std::uint32_t shader_source_closure_schema =",
         "    host_sbs_shader_cache::source_closure_schema;",
@@ -1126,7 +1195,7 @@ def render_cpp(contract: dict[str, Any]) -> str:
     lines.extend([
         "  }};",
         "",
-        "  constexpr std::uint32_t subtitle_locator_field_cell_scale(",
+        "  constexpr std::uint32_t subtitle_ocr_field_cell_scale(",
         "    const std::uint32_t width,",
         "    const std::uint32_t height",
         "  ) {",
@@ -1147,7 +1216,7 @@ def render_cpp(contract: dict[str, Any]) -> str:
         "    const std::uint32_t width,",
         "    const std::uint32_t height",
         "  ) {",
-        "    return subtitle_locator_field_cell_scale(width, height) != 0u;",
+        "    return subtitle_ocr_field_cell_scale(width, height) != 0u;",
         "  }",
         "",
         "  struct subtitle_ocr_roi_t {",
@@ -1434,7 +1503,7 @@ def render_hlsl(contract: dict[str, Any]) -> str:
     ocr_output = subtitle_ocr["output_tensor"]
     field_policy = subtitle_ocr["field_policy"]
     ocr_record = subtitle_ocr["ocr_record"]
-    locator_state = subtitle_ocr["locator_state"]
+    plane_state = subtitle_ocr["plane_state"]
     condition_params = subtitle_ocr["condition_params"]
     calibrated_shapes = [
         (shape["width"], shape["height"])
@@ -1497,6 +1566,26 @@ def render_hlsl(contract: dict[str, Any]) -> str:
         f"#define V2_SHADOW_STATE_WORD_COUNT {len(fields)}u",
         f"#define V2_SHADOW_STATE_VECTOR_COUNT {len(fields) // contract['vector_width']}u",
         f"#define V2_SUBTITLE_OCR_CONTRACT_SCHEMA {subtitle_ocr['schema']}u",
+        f"#define V2_SUBTITLE_CONTOUR_SCHEMA {subtitle_ocr['contour_policy']['schema']}u",
+        f"#define V2_SUBTITLE_CONTOUR_RECIPE {subtitle_ocr['contour_policy']['recipe']}u",
+        f"#define V2_SUBTITLE_CONTOUR_HISTORY_SCHEMA {subtitle_ocr['contour_policy']['history_schema']}u",
+        f"#define V2_SUBTITLE_CONTOUR_HISTORY_TAG 0x{subtitle_ocr['contour_policy']['history_tag']:08X}u",
+        f"#define V2_SUBTITLE_CONTOUR_HISTORY_WORD_COUNT {subtitle_ocr['contour_policy']['history_word_count']}u",
+        f"#define V2_SUBTITLE_CONTOUR_HISTORY_SNAPSHOT_VALID_WORD {subtitle_ocr['contour_policy']['history_snapshot_valid_word']}u",
+        f"#define V2_SUBTITLE_CONTOUR_HISTORY_RESERVED_OFFSET {subtitle_ocr['contour_policy']['history_reserved_offset']}u",
+        f"#define V2_SUBTITLE_CONTOUR_HISTORY_RESERVED_WORD_COUNT {subtitle_ocr['contour_policy']['history_reserved_word_count']}u",
+        f"#define V2_SUBTITLE_CONTOUR_HISTORY_FEATURE_VALID_BIT {subtitle_ocr['contour_policy']['history_feature_valid_bit']}u",
+        f"#define V2_SUBTITLE_CONTOUR_HISTORY_FEATURE_MASK_BIT {subtitle_ocr['contour_policy']['history_feature_mask_bit']}u",
+        f"#define V2_SUBTITLE_CONTOUR_HISTORY_RGB_DISTANCE {_float_literal(subtitle_ocr['contour_policy']['history_rgb_distance'])}",
+        f"#define V2_SUBTITLE_CONTOUR_PROBABILITY_CHANGE_RATIO {_float_literal(subtitle_ocr['contour_policy']['probability_change_ratio'])}",
+        f"#define V2_SUBTITLE_CONTOUR_HISTORY_CONFIRMATION_OBSERVATIONS {subtitle_ocr['contour_policy']['history_confirmation_observations']}u",
+        f"#define V2_SUBTITLE_CONTOUR_HISTORY_FEATURE_COUNT_SHIFT {subtitle_ocr['contour_policy']['history_feature_count_shift']}u",
+        f"#define V2_SUBTITLE_CONTOUR_SOURCE_MAX_EXTENT {subtitle_ocr['contour_policy']['source_max_extent']}u",
+        f"#define V2_SUBTITLE_CONTOUR_HISTORY_JITTER_RADIUS_SOURCE_PIXELS {subtitle_ocr['contour_policy']['history_jitter_radius_source_pixels']}u",
+        f"#define V2_SUBTITLE_CONTOUR_DISTANCE_EMPTY_BITS {subtitle_ocr['contour_policy']['distance_empty_bits']}u",
+        f"#define V2_SUBTITLE_CONTOUR_GAUSSIAN_CENTER_OFFSET_SOURCE_PIXELS {subtitle_ocr['contour_policy']['gaussian_center_offset_source_pixels']}u",
+        f"#define V2_SUBTITLE_CONTOUR_GAUSSIAN_SIGMA_SHORT_SIDE_DIVISOR {_float_literal(subtitle_ocr['contour_policy']['gaussian_sigma_short_side_divisor'])}",
+        f"#define V2_SUBTITLE_CONTOUR_GAUSSIAN_WEIGHT_ABSOLUTE_ERROR_LIMIT {_float_literal(subtitle_ocr['contour_policy']['gaussian_weight_absolute_error_limit'])}",
         f"#define V2_OCR_INPUT_N {ocr_input['shape'][0]}u",
         f"#define V2_OCR_INPUT_C {ocr_input['shape'][1]}u",
         f"#define V2_OCR_INPUT_HEIGHT {ocr_input['shape'][2]}u",
@@ -1549,6 +1638,24 @@ def render_hlsl(contract: dict[str, Any]) -> str:
         f"{field_policy['source_crop_aspect_height']}u",
         f"#define V2_OCR_TEXT_JOIN_GAP_CELLS "
         f"{field_policy['text_join_gap_cells']}u",
+        f"#define V2_OCR_ORDINARY_COVER_HORIZONTAL_GUARD_CELLS "
+        f"{field_policy['ordinary_cover_horizontal_guard_cells']}u",
+        f"#define V2_OCR_LINE_GROUP_MIN_VERTICAL_IOU_NUMERATOR "
+        f"{field_policy['line_group_min_vertical_iou_numerator']}u",
+        f"#define V2_OCR_LINE_GROUP_MIN_VERTICAL_IOU_DENOMINATOR "
+        f"{field_policy['line_group_min_vertical_iou_denominator']}u",
+        f"#define V2_OCR_LINE_GROUP_MAX_HORIZONTAL_GAP_HEIGHT_NUMERATOR "
+        f"{field_policy['line_group_max_horizontal_gap_height_numerator']}u",
+        f"#define V2_OCR_LINE_GROUP_MAX_HORIZONTAL_GAP_HEIGHT_DENOMINATOR "
+        f"{field_policy['line_group_max_horizontal_gap_height_denominator']}u",
+        f"#define V2_OCR_LINE_CENTER_TOLERANCE_NUMERATOR "
+        f"{field_policy['line_center_tolerance_numerator']}u",
+        f"#define V2_OCR_LINE_CENTER_TOLERANCE_DENOMINATOR "
+        f"{field_policy['line_center_tolerance_denominator']}u",
+        f"#define V2_OCR_LINE_SEARCH_BOTTOM_HEIGHT_NUMERATOR "
+        f"{field_policy['line_search_bottom_height_numerator']}u",
+        f"#define V2_OCR_LINE_SEARCH_BOTTOM_HEIGHT_DENOMINATOR "
+        f"{field_policy['line_search_bottom_height_denominator']}u",
         f"#define V2_OCR_RIBBON_JOIN_GAP_CELLS "
         f"{field_policy['ribbon_join_gap_cells']}u",
         f"#define V2_OCR_RIBBON_STRUCTURAL_GAP_MIN_CELLS "
@@ -1563,58 +1670,40 @@ def render_hlsl(contract: dict[str, Any]) -> str:
         f"{field_policy['ribbon_bottom_tolerance_pixels']}u",
         f"#define V2_OCR_RIBBON_COVER_PAD_LIMIT "
         f"{field_policy['ribbon_cover_pad_limit']}u",
-        f"#define V2_SUBTITLE_LOCATOR_MAX_WIDTH_NUMERATOR "
-        f"{field_policy['locator_max_width_numerator']}u",
-        f"#define V2_SUBTITLE_LOCATOR_MAX_WIDTH_DENOMINATOR "
-        f"{field_policy['locator_max_width_denominator']}u",
-        f"#define V2_SUBTITLE_LOCATOR_MIN_WIDTH_CELLS "
-        f"{field_policy['locator_min_width_cells']}u",
-        f"#define V2_SUBTITLE_LOCATOR_MIN_HEIGHT_CELLS "
-        f"{field_policy['locator_min_height_cells']}u",
-        f"#define V2_SUBTITLE_LOCATOR_MIN_ASPECT_NUMERATOR "
-        f"{field_policy['locator_min_aspect_numerator']}u",
-        f"#define V2_SUBTITLE_LOCATOR_MIN_ASPECT_DENOMINATOR "
-        f"{field_policy['locator_min_aspect_denominator']}u",
-        "#define V2_SUBTITLE_LOCATOR_PROVISIONAL_MIN_VERTICAL_OVERLAP_NUMERATOR "
-        f"{field_policy['locator_provisional_min_vertical_overlap_numerator']}u",
-        "#define V2_SUBTITLE_LOCATOR_PROVISIONAL_MIN_VERTICAL_OVERLAP_DENOMINATOR "
-        f"{field_policy['locator_provisional_min_vertical_overlap_denominator']}u",
-        "#define V2_SUBTITLE_LOCATOR_PROVISIONAL_MAX_HEIGHT_RATIO "
-        f"{field_policy['locator_provisional_max_height_ratio']}u",
-        "#define V2_SUBTITLE_LOCATOR_PROVISIONAL_MAX_CENTER_Y_DELTA_SHORTER_HEIGHT "
-        f"{field_policy['locator_provisional_max_center_y_delta_shorter_height']}u",
-        f"#define V2_SUBTITLE_LOCATOR_CORNER_EDGE_DIVISOR "
-        f"{field_policy['locator_corner_edge_divisor']}u",
-        f"#define V2_SUBTITLE_LOCATOR_CORNER_BOTTOM_ROWS "
-        f"{field_policy['locator_corner_bottom_rows']}u",
-        f"#define V2_SUBTITLE_LOCATOR_MATCH_IOU_THRESHOLD "
-        f"{_float_literal(field_policy['locator_match_iou_threshold'])}",
-        f"#define V2_SUBTITLE_LOCATOR_DEATH_GRACE_OBSERVATIONS "
-        f"{field_policy['locator_death_grace_observations']}u",
-        f"#define V2_SUBTITLE_LOCATOR_STATE_SCHEMA {locator_state['schema']}u",
-        f"#define V2_SUBTITLE_LOCATOR_STATE_TAG 0x{locator_state['tag']:08X}u",
-        f"#define V2_SUBTITLE_LOCATOR_STATE_WORD_COUNT {locator_state['word_count']}u",
-        f"#define V2_SUBTITLE_LOCATOR_HEADER_WORD_COUNT {locator_state['header_word_count']}u",
-        f"#define V2_SUBTITLE_LOCATOR_RECTANGLE_CAPACITY {locator_state['rectangle_capacity']}u",
-        f"#define V2_SUBTITLE_LOCATOR_OWNER_OFFSET {locator_state['owner_offset']}u",
-        f"#define V2_SUBTITLE_LOCATOR_PENDING_OFFSET {locator_state['pending_offset']}u",
-        f"#define V2_SUBTITLE_LOCATOR_CURRENT_OFFSET {locator_state['current_offset']}u",
-        f"#define V2_SUBTITLE_LOCATOR_ADAPTIVE_OFFSET {locator_state['adaptive_offset']}u",
-        f"#define V2_SUBTITLE_LOCATOR_ADAPTIVE_WORD_COUNT {locator_state['adaptive_word_count']}u",
-        f"#define V2_SUBTITLE_LOCATOR_KIND_WORD {locator_state['kind_word']}u",
-        f"#define V2_SUBTITLE_LOCATOR_OWNER_KIND_SHIFT {locator_state['owner_kind_shift']}u",
-        f"#define V2_SUBTITLE_LOCATOR_PENDING_KIND_SHIFT {locator_state['pending_kind_shift']}u",
-        f"#define V2_SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT {locator_state['current_kind_shift']}u",
-        f"#define V2_SUBTITLE_LOCATOR_KIND_MASK {locator_state['kind_mask']}u",
-        "#define V2_SUBTITLE_LOCATOR_PROVISIONAL_CURRENT_FLAG "
-        f"{locator_state['provisional_current_flag']}u",
-        "#define V2_SUBTITLE_LOCATOR_PROVISIONAL_TARGET_WORD "
-        f"{locator_state['provisional_target_word']}u",
-        "#define V2_SUBTITLE_LOCATOR_PROVISIONAL_FADE_WORD "
-        f"{locator_state['provisional_fade_word']}u",
+        f"#define V2_SUBTITLE_PLANE_STATE_SCHEMA {plane_state['schema']}u",
+        f"#define V2_SUBTITLE_PLANE_STATE_WORD_COUNT {plane_state['word_count']}u",
+        f"#define V2_SUBTITLE_PLANE_HEADER_WORD_COUNT {plane_state['header_word_count']}u",
+        f"#define V2_SUBTITLE_PLANE_COVER_CAPACITY {plane_state['cover_capacity']}u",
+        f"#define V2_SUBTITLE_PLANE_FLAGS_WORD {plane_state['flags_word']}u",
+        f"#define V2_SUBTITLE_PLANE_CURRENT_VALID_FLAG {plane_state['current_valid_flag']}u",
+        f"#define V2_SUBTITLE_PLANE_CURRENT_SLOT_MASK_WORD {plane_state['current_slot_mask_word']}u",
+        f"#define V2_SUBTITLE_PLANE_FRAME_OFFSET {plane_state['frame_offset']}u",
+        f"#define V2_SUBTITLE_PLANE_ANALYSIS_GENERATION_OFFSET {plane_state['analysis_generation_offset']}u",
+        f"#define V2_SUBTITLE_PLANE_OBSERVATION_TIMESTAMP_OFFSET {plane_state['observation_timestamp_offset']}u",
+        f"#define V2_SUBTITLE_PLANE_SOURCE_EXTENT_OFFSET {plane_state['source_extent_offset']}u",
+        f"#define V2_SUBTITLE_PLANE_FIELD_EXTENT_OFFSET {plane_state['field_extent_offset']}u",
+        f"#define V2_SUBTITLE_PLANE_ROI_OFFSET {plane_state['roi_offset']}u",
+        f"#define V2_SUBTITLE_PLANE_CONTENT_OFFSET {plane_state['content_offset']}u",
+        f"#define V2_SUBTITLE_PLANE_CUT_EPOCH_WORD {plane_state['cut_epoch_word']}u",
+        "// Legacy reset-mask name: current-core probability cues block neighbor fallback only.",
+        f"#define V2_SUBTITLE_PLANE_HISTORY_RESET_MASK_WORD {plane_state['history_reset_mask_word']}u",
+        f"#define V2_SUBTITLE_PLANE_WARMUP_WORD {plane_state['warmup_word']}u",
+        f"#define V2_SUBTITLE_PLANE_WARMUP_OBSERVATIONS {plane_state['warmup_observations']}u",
+        f"#define V2_SUBTITLE_PLANE_WARMUP_CUE_BIT {plane_state['warmup_cue_bit']}u",
+        '#define V2_SUBTITLE_PLANE_WARMUP_REMAINING_MASK (V2_SUBTITLE_PLANE_WARMUP_CUE_BIT - 1u)',
+        f"#define V2_SUBTITLE_PLANE_RESERVED_OFFSET {plane_state['reserved_offset']}u",
+        f"#define V2_SUBTITLE_PLANE_RESERVED_WORD_COUNT {plane_state['reserved_word_count']}u",
+        f"#define V2_SUBTITLE_PLANE_ADAPTIVE_OFFSET {plane_state['adaptive_offset']}u",
+        f"#define V2_SUBTITLE_PLANE_ADAPTIVE_WORD_COUNT {plane_state['adaptive_word_count']}u",
+        f"#define V2_SUBTITLE_PLANE_STATE_TAG 0x{plane_state['tag']:08X}u",
         f"#define V2_SUBTITLE_CONDITION_PARAM_SCHEMA {condition_params['schema']}u",
         f"#define V2_SUBTITLE_CONDITION_PARAM_TAG 0x{condition_params['tag']:08X}u",
         f"#define V2_SUBTITLE_CONDITION_PARAM_WORD_COUNT {condition_params['word_count']}u",
+        f"#define V2_SUBTITLE_CONDITION_PARAM_CURRENT_COUNT_WORD {condition_params['current_count_word']}u",
+        f"#define V2_SUBTITLE_CONDITION_PARAM_CURRENT_KIND_MASK_WORD {condition_params['current_kind_mask_word']}u",
+        f"#define V2_SUBTITLE_CONDITION_PARAM_ACTIVE_WORD {condition_params['active_word']}u",
+        f"#define V2_SUBTITLE_CONDITION_PARAM_FULLY_ACTIVE_VALUE {condition_params['fully_active_value']}u",
+        f"#define V2_SUBTITLE_CONDITION_PARAM_TARGET_WORD {condition_params['target_word']}u",
         "#define V2_OCR_SHADER_CONTRACT_GENERATED 1u",
         f"#define V2_DIRECT_CONTAINER_LIMIT "
         f"{_float_literal(defaults['direct_container_limit'])}",
@@ -1635,14 +1724,14 @@ def render_hlsl(contract: dict[str, Any]) -> str:
         "static const float v2_max_vertical_shear = V2_MAX_VERTICAL_SHEAR;",
         "static const float v2_vertical_majorant_share = V2_VERTICAL_MAJORANT_SHARE;",
         "",
-        "uint V2SubtitleLocatorFieldCellScale(uint field_width, uint field_height) {",
+        "uint V2SubtitleOcrFieldCellScale(uint field_width, uint field_height) {",
         f"    if ({coarse_shape_predicate}) return 1u;",
         f"    if ({live_shape_predicate}) return 2u;",
         "    return 0u;",
         "}",
         "",
         "bool V2SubtitleOcrFieldIsCalibrated(uint field_width, uint field_height) {",
-        "    return V2SubtitleLocatorFieldCellScale(field_width, field_height) != 0u;",
+        "    return V2SubtitleOcrFieldCellScale(field_width, field_height) != 0u;",
         "}",
         "",
         "// Resolve the authenticated bottom crop without uint64 arithmetic.",
@@ -1733,90 +1822,74 @@ def render_hlsl(contract: dict[str, Any]) -> str:
 
 
 def render_hlsl_ocr_assertions() -> str:
-    """Render the shared compile-time OCR8/SLR14 consumer invariants."""
-
-    return "\n".join([
-        "// Generated by tools/sbsbench/generate_depth_coordinate_v2_contract.py.",
-        "// Edit tools/sbsbench/contracts/depth-coordinate-v2-v1.json instead.",
-        "#ifndef DEPTH_COORDINATE_V2_OCR_ASSERT_GENERATED_HLSL",
-        "#define DEPTH_COORDINATE_V2_OCR_ASSERT_GENERATED_HLSL",
-        "",
-        '#include "include/depth_coordinate_v2_contract.generated.hlsl"',
-        "",
-        "#if !defined(V2_OCR_SHADER_CONTRACT_GENERATED)",
-        '#error "Complete generated V2 OCR8/SLR14 contract is required"',
-        "#endif",
-        "",
-        "#if !defined(V2_SUBTITLE_LOCATOR_CORNER_EDGE_DIVISOR) || \\",
-        "    !defined(V2_SUBTITLE_LOCATOR_CORNER_BOTTOM_ROWS) || \\",
-        "    !defined(V2_SUBTITLE_LOCATOR_PROVISIONAL_MIN_VERTICAL_OVERLAP_NUMERATOR) || \\",
-        "    !defined(V2_SUBTITLE_LOCATOR_PROVISIONAL_MIN_VERTICAL_OVERLAP_DENOMINATOR) || \\",
-        "    !defined(V2_SUBTITLE_LOCATOR_PROVISIONAL_MAX_HEIGHT_RATIO) || \\",
-        "    !defined(V2_SUBTITLE_LOCATOR_PROVISIONAL_MAX_CENTER_Y_DELTA_SHORTER_HEIGHT)",
-        '#error "Complete generated V2 subtitle ownership policy is required"',
-        "#endif",
-        "",
-        "#if V2_ADAPTIVE_POLICY_ID != 3u || V2_MODEL_CALIBRATED_SHAPE_COUNT != 24 || \\",
-        "    V2_OCR_SAFE_ROW_TOP >= V2_OCR_SAFE_ROW_BOTTOM || \\",
-        "    V2_OCR_SAFE_ROW_BOTTOM > V2_OCR_OUTPUT_HEIGHT || \\",
-        "    V2_OCR_CROP_ASPECT_WIDTH == 0u || V2_OCR_CROP_ASPECT_HEIGHT == 0u || \\",
-        "    V2_OCR_CROP_ASPECT_HEIGHT > V2_OCR_CROP_ASPECT_WIDTH || \\",
-        "    V2_OCR_BOX_FLAG_RIBBON != 1u || V2_OCR_BOX_KNOWN_FLAGS != 1u || \\",
-        "    V2_OCR_TEXT_JOIN_GAP_CELLS == 0u || \\",
-        "    V2_OCR_TEXT_JOIN_GAP_CELLS >= V2_OCR_RIBBON_JOIN_GAP_CELLS || \\",
-        "    V2_OCR_RIBBON_STRUCTURAL_GAP_MIN_CELLS == 0u || \\",
-        "    V2_OCR_RIBBON_JOIN_GAP_CELLS < V2_OCR_RIBBON_STRUCTURAL_GAP_MIN_CELLS || \\",
-        "    V2_OCR_RIBBON_MIN_STRUCTURAL_GAPS == 0u || \\",
-        "    V2_OCR_RIBBON_MIN_WIDTH_DENOMINATOR == 0u || \\",
-        "    V2_OCR_RIBBON_MIN_WIDTH_NUMERATOR >= V2_OCR_RIBBON_MIN_WIDTH_DENOMINATOR || \\",
-        "    V2_OCR_RIBBON_BOTTOM_TOLERANCE_PIXELS >= V2_OCR_SAFE_ROW_BOTTOM || \\",
-        "    V2_OCR_RIBBON_COVER_PAD_LIMIT == 0u || \\",
-        "    V2_SUBTITLE_LOCATOR_MAX_WIDTH_DENOMINATOR == 0u || \\",
-        "    V2_SUBTITLE_LOCATOR_MAX_WIDTH_NUMERATOR >= \\",
-        "        V2_SUBTITLE_LOCATOR_MAX_WIDTH_DENOMINATOR || \\",
-        "    V2_SUBTITLE_LOCATOR_MIN_WIDTH_CELLS == 0u || \\",
-        "    V2_SUBTITLE_LOCATOR_MIN_HEIGHT_CELLS == 0u || \\",
-        "    V2_SUBTITLE_LOCATOR_MIN_ASPECT_NUMERATOR == 0u || \\",
-        "    V2_SUBTITLE_LOCATOR_MIN_ASPECT_DENOMINATOR == 0u || \\",
-        "    V2_SUBTITLE_LOCATOR_CORNER_EDGE_DIVISOR <= 1u || \\",
-        "    V2_SUBTITLE_LOCATOR_CORNER_BOTTOM_ROWS == 0u || \\",
-        "    V2_SUBTITLE_LOCATOR_PROVISIONAL_MIN_VERTICAL_OVERLAP_NUMERATOR == 0u || \\",
-        "    V2_SUBTITLE_LOCATOR_PROVISIONAL_MIN_VERTICAL_OVERLAP_DENOMINATOR < \\",
-        "        V2_SUBTITLE_LOCATOR_PROVISIONAL_MIN_VERTICAL_OVERLAP_NUMERATOR || \\",
-        "    V2_SUBTITLE_LOCATOR_PROVISIONAL_MAX_HEIGHT_RATIO == 0u || \\",
-        "    V2_SUBTITLE_LOCATOR_PROVISIONAL_MAX_CENTER_Y_DELTA_SHORTER_HEIGHT == 0u || \\",
-        "    V2_SUBTITLE_LOCATOR_DEATH_GRACE_OBSERVATIONS == 0u || \\",
-        "    V2_OCR_RECORD_HEADER_WORD_COUNT != V2_OCR_RAW_BOX_OFFSET || \\",
-        "    V2_OCR_FINAL_BOX_OFFSET != V2_OCR_RAW_BOX_OFFSET + \\",
-        "        V2_OCR_RAW_BOX_CAPACITY * V2_OCR_BOX_WORD_COUNT || \\",
-        "    V2_OCR_RECORD_WORD_COUNT != V2_OCR_FINAL_BOX_OFFSET + \\",
-        "        V2_OCR_FINAL_BOX_CAPACITY * V2_OCR_BOX_WORD_COUNT || \\",
-        "    V2_SUBTITLE_LOCATOR_RECTANGLE_CAPACITY != 4u || \\",
-        "    V2_SUBTITLE_LOCATOR_HEADER_WORD_COUNT != V2_SUBTITLE_LOCATOR_OWNER_OFFSET || \\",
-        "    V2_SUBTITLE_LOCATOR_PENDING_OFFSET != V2_SUBTITLE_LOCATOR_OWNER_OFFSET + \\",
-        "        V2_SUBTITLE_LOCATOR_RECTANGLE_CAPACITY * 4u || \\",
-        "    V2_SUBTITLE_LOCATOR_CURRENT_OFFSET != V2_SUBTITLE_LOCATOR_PENDING_OFFSET + \\",
-        "        V2_SUBTITLE_LOCATOR_RECTANGLE_CAPACITY * 4u || \\",
-        "    V2_SUBTITLE_LOCATOR_ADAPTIVE_OFFSET != V2_SUBTITLE_LOCATOR_CURRENT_OFFSET + \\",
-        "        V2_SUBTITLE_LOCATOR_RECTANGLE_CAPACITY * 4u || \\",
-        "    V2_SUBTITLE_LOCATOR_KIND_WORD != 31u || \\",
-        "    V2_SUBTITLE_LOCATOR_OWNER_KIND_SHIFT != 0u || \\",
-        "    V2_SUBTITLE_LOCATOR_PENDING_KIND_SHIFT != 4u || \\",
-        "    V2_SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT != 8u || \\",
-        "    V2_SUBTITLE_LOCATOR_KIND_MASK != 15u || \\",
-        "    V2_SUBTITLE_LOCATOR_PROVISIONAL_CURRENT_FLAG != 16u || \\",
-        "    V2_SUBTITLE_LOCATOR_PROVISIONAL_TARGET_WORD != 29u || \\",
-        "    V2_SUBTITLE_LOCATOR_PROVISIONAL_FADE_WORD != 30u || \\",
-        "    V2_SUBTITLE_CONDITION_PARAM_WORD_COUNT != 6u",
-        '#error "Generated V2 OCR8/SLR14 contract invariants are inconsistent"',
-        "#endif",
-        "#if V2_SUBTITLE_LOCATOR_STATE_WORD_COUNT != (V2_SUBTITLE_LOCATOR_ADAPTIVE_OFFSET + V2_SUBTITLE_LOCATOR_ADAPTIVE_WORD_COUNT)",
-        '#error "Generated adaptive subtitle tail is inconsistent"',
-        "#endif",
-        "",
-        "#endif",
-        "",
-    ])
+    """Render OCR8/UIP4/SCP4 consumer invariants, without historical ownership policy."""
+    return "\n".join(['// Generated by tools/sbsbench/generate_depth_coordinate_v2_contract.py.',
+ '// Edit tools/sbsbench/contracts/depth-coordinate-v2-v1.json instead.',
+ '#ifndef DEPTH_COORDINATE_V2_OCR_ASSERT_GENERATED_HLSL',
+ '#define DEPTH_COORDINATE_V2_OCR_ASSERT_GENERATED_HLSL',
+ '',
+ '#include "include/depth_coordinate_v2_contract.generated.hlsl"',
+ '',
+ '#if !defined(V2_OCR_SHADER_CONTRACT_GENERATED) || !defined(V2_SUBTITLE_PLANE_STATE_SCHEMA)',
+ '#error "Complete generated V2 OCR8/UIP4 contract is required"',
+ '#endif',
+ '',
+ '#if V2_ADAPTIVE_POLICY_ID != 3u || V2_MODEL_CALIBRATED_SHAPE_COUNT != 24 || \\',
+ '    V2_OCR_SAFE_ROW_TOP >= V2_OCR_SAFE_ROW_BOTTOM || \\',
+ '    V2_OCR_SAFE_ROW_BOTTOM > V2_OCR_OUTPUT_HEIGHT || \\',
+ '    V2_OCR_CROP_ASPECT_WIDTH == 0u || V2_OCR_CROP_ASPECT_HEIGHT == 0u || \\',
+ '    V2_OCR_CROP_ASPECT_HEIGHT > V2_OCR_CROP_ASPECT_WIDTH || \\',
+ '    V2_OCR_LINE_SEARCH_BOTTOM_HEIGHT_NUMERATOR != 1u || V2_OCR_LINE_SEARCH_BOTTOM_HEIGHT_DENOMINATOR != 4u || \\',
+ '    V2_OCR_LINE_GROUP_MIN_VERTICAL_IOU_NUMERATOR != 1u || V2_OCR_LINE_GROUP_MIN_VERTICAL_IOU_DENOMINATOR != 2u || \\',
+ '    V2_OCR_LINE_CENTER_TOLERANCE_NUMERATOR != 1u || V2_OCR_LINE_CENTER_TOLERANCE_DENOMINATOR != 10u || \\',
+ '    V2_OCR_BOX_FLAG_RIBBON != 1u || V2_OCR_BOX_KNOWN_FLAGS != 1u || \\',
+ '    V2_OCR_TEXT_JOIN_GAP_CELLS == 0u || V2_OCR_TEXT_JOIN_GAP_CELLS >= V2_OCR_RIBBON_JOIN_GAP_CELLS || \\',
+ '    V2_OCR_RIBBON_STRUCTURAL_GAP_MIN_CELLS == 0u || \\',
+ '    V2_OCR_RIBBON_JOIN_GAP_CELLS < V2_OCR_RIBBON_STRUCTURAL_GAP_MIN_CELLS || \\',
+ '    V2_OCR_RIBBON_MIN_STRUCTURAL_GAPS == 0u || \\',
+ '    V2_OCR_RIBBON_MIN_WIDTH_DENOMINATOR == 0u || \\',
+ '    V2_OCR_RIBBON_MIN_WIDTH_NUMERATOR >= V2_OCR_RIBBON_MIN_WIDTH_DENOMINATOR || \\',
+ '    V2_OCR_RIBBON_BOTTOM_TOLERANCE_PIXELS >= V2_OCR_SAFE_ROW_BOTTOM || \\',
+ '    V2_OCR_RIBBON_COVER_PAD_LIMIT == 0u || \\',
+ '    V2_OCR_RECORD_HEADER_WORD_COUNT != V2_OCR_RAW_BOX_OFFSET || \\',
+ '    V2_OCR_FINAL_BOX_OFFSET != V2_OCR_RAW_BOX_OFFSET + V2_OCR_RAW_BOX_CAPACITY * V2_OCR_BOX_WORD_COUNT || '
+ '\\',
+ '    V2_OCR_RECORD_WORD_COUNT != V2_OCR_FINAL_BOX_OFFSET + V2_OCR_FINAL_BOX_CAPACITY * '
+ 'V2_OCR_BOX_WORD_COUNT',
+ '#error "Generated V2 OCR8 producer invariants are inconsistent"',
+ '#endif',
+ '',
+ '#if V2_SUBTITLE_PLANE_STATE_SCHEMA != 4u || V2_SUBTITLE_PLANE_STATE_TAG != 0x34504955u || \\',
+ '    V2_SUBTITLE_PLANE_STATE_WORD_COUNT != 40u || V2_SUBTITLE_PLANE_HEADER_WORD_COUNT != 24u || \\',
+ '    V2_SUBTITLE_PLANE_COVER_CAPACITY != V2_OCR_FINAL_BOX_CAPACITY || \\',
+ '    V2_SUBTITLE_PLANE_FLAGS_WORD != 2u || V2_SUBTITLE_PLANE_CURRENT_VALID_FLAG != 1u || \\',
+ '    V2_SUBTITLE_PLANE_CURRENT_SLOT_MASK_WORD != 3u || \\',
+ '    V2_SUBTITLE_PLANE_FRAME_OFFSET != 4u || V2_SUBTITLE_PLANE_ANALYSIS_GENERATION_OFFSET != 6u || \\',
+ '    V2_SUBTITLE_PLANE_OBSERVATION_TIMESTAMP_OFFSET != 8u || V2_SUBTITLE_PLANE_SOURCE_EXTENT_OFFSET != 10u '
+ '|| \\',
+ '    V2_SUBTITLE_PLANE_FIELD_EXTENT_OFFSET != 12u || V2_SUBTITLE_PLANE_ROI_OFFSET != 14u || \\',
+ '    V2_SUBTITLE_PLANE_CONTENT_OFFSET != 16u || V2_SUBTITLE_PLANE_CUT_EPOCH_WORD != 20u || \\',
+ '    V2_SUBTITLE_PLANE_HISTORY_RESET_MASK_WORD != 21u || V2_SUBTITLE_PLANE_WARMUP_WORD != 22u || V2_SUBTITLE_PLANE_WARMUP_OBSERVATIONS != 4u || V2_SUBTITLE_PLANE_WARMUP_OBSERVATIONS != V2_SUBTITLE_CONTOUR_HISTORY_CONFIRMATION_OBSERVATIONS || V2_SUBTITLE_PLANE_WARMUP_CUE_BIT != 8u || V2_SUBTITLE_PLANE_WARMUP_REMAINING_MASK != 7u || V2_SUBTITLE_PLANE_RESERVED_OFFSET != 23u || V2_SUBTITLE_PLANE_RESERVED_WORD_COUNT != 1u || \\',
+ '    V2_SUBTITLE_PLANE_ADAPTIVE_OFFSET != 24u || V2_SUBTITLE_PLANE_ADAPTIVE_WORD_COUNT != 16u || \\',
+ '    V2_SUBTITLE_PLANE_STATE_WORD_COUNT != V2_SUBTITLE_PLANE_ADAPTIVE_OFFSET + '
+ 'V2_SUBTITLE_PLANE_ADAPTIVE_WORD_COUNT || \\',
+ '    V2_SUBTITLE_CONDITION_PARAM_SCHEMA != 4u || V2_SUBTITLE_CONDITION_PARAM_TAG != 0x34504353u || \\',
+ '    V2_SUBTITLE_CONDITION_PARAM_WORD_COUNT != 6u || \\',
+ '    V2_SUBTITLE_CONDITION_PARAM_CURRENT_COUNT_WORD != 2u || '
+ 'V2_SUBTITLE_CONDITION_PARAM_CURRENT_KIND_MASK_WORD != 3u || \\',
+ '    V2_SUBTITLE_CONDITION_PARAM_ACTIVE_WORD != 4u || V2_SUBTITLE_CONDITION_PARAM_FULLY_ACTIVE_VALUE != 2u '
+ '|| \\',
+ '    V2_SUBTITLE_CONDITION_PARAM_TARGET_WORD != 5u || \\',
+ '    V2_SUBTITLE_CONTOUR_SCHEMA != 5u || V2_SUBTITLE_CONTOUR_RECIPE != ' + str(CANONICAL_SUBTITLE_OCR["contour_policy"]["recipe"]) + 'u || \\',
+ '    V2_SUBTITLE_CONTOUR_HISTORY_SCHEMA != 5u || V2_SUBTITLE_CONTOUR_HISTORY_TAG != 0x35544353u || \\',
+ '    V2_SUBTITLE_CONTOUR_HISTORY_WORD_COUNT != 32u || \\',
+ '    V2_SUBTITLE_CONTOUR_HISTORY_RESERVED_OFFSET != 24u || V2_SUBTITLE_CONTOUR_HISTORY_RESERVED_WORD_COUNT '
+ '!= 8u',
+ '#error "Generated V2 UIP4/SCP4/SCT5 layout invariants are inconsistent"',
+ '#endif',
+ '',
+ '#endif',
+ ''])
 
 
 def _write_or_check(path: Path, expected: str, check: bool) -> bool:

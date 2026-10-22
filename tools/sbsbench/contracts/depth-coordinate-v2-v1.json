@@ -1,5 +1,5 @@
 {
-  "schema": 87,
+  "schema": 115,
   "vector_width": 4,
   "capture_provenance": {
     "schema": 3,
@@ -7,7 +7,7 @@
     "binding": "raw-depth-model-input-and-preprocess-source-produced-by-calibrated-identity-v3"
   },
   "subtitle_ocr": {
-    "schema": 14,
+    "schema": 27,
     "logical_model": "ppocrv6_tiny_det_modelopt_fp16",
     "asset_path": "models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx",
     "artifact_onnx_sha256": "169a233ba0ff7cac27f8ec7dccb6a406e614b25b21fe6a5638c423bf2118bb44",
@@ -158,25 +158,26 @@
       ],
       "detector_active_probability_threshold": 0.2,
       "detector_min_mean_score": 0.4,
-      "locator_max_width_numerator": 9,
-      "locator_max_width_denominator": 10,
-      "locator_min_width_cells": 48,
-      "locator_min_height_cells": 6,
-      "locator_min_aspect_numerator": 2,
-      "locator_min_aspect_denominator": 1,
-      "locator_provisional_min_vertical_overlap_numerator": 3,
-      "locator_provisional_min_vertical_overlap_denominator": 4,
-      "locator_provisional_max_height_ratio": 2,
-      "locator_provisional_max_center_y_delta_shorter_height": 1,
-      "locator_corner_edge_divisor": 32,
-      "locator_corner_bottom_rows": 16,
-      "locator_match_iou_threshold": 0.6,
-      "locator_death_grace_observations": 6,
       "ocr_safe_row_top": 24,
       "ocr_safe_row_bottom": 155,
       "source_crop_aspect_width": 6,
       "source_crop_aspect_height": 1,
       "text_join_gap_cells": 4,
+      "ordinary_cover_horizontal_guard_cells": 1,
+      "ordinary_cover_horizontal_guard_policy": "ordinary-only-add-guard-cells-times-producer-ocr-cell-width-to-horizontal-db-unclip-cover-clamped-detector-bounds-before-map-current-canonical-cover-all-consumers-no-second-mask-vertical-and-ribbon-unchanged-v1",
+      "line_group_min_vertical_iou_numerator": 1,
+      "line_group_min_vertical_iou_denominator": 2,
+      "line_group_max_horizontal_gap_height_numerator": 4,
+      "line_group_max_horizontal_gap_height_denominator": 1,
+      "line_group_horizontal_gap_metric": "native-source-horizontal-gap-to-current-union-edge-relative-to-max-candidate-and-fixed-anchor-height-exact-cross-multiplied-v1",
+      "line_center_tolerance_numerator": 1,
+      "line_center_tolerance_denominator": 10,
+      "line_search_bottom_height_numerator": 1,
+      "line_search_bottom_height_denominator": 4,
+      "line_search_region": "lower-quarter-of-center-reference-intersect-existing-safe-detector-crop-v1",
+      "line_group_policy": "same-detector-active-row-band-first-qualifying-fixed-tight-core-anchor-span-iou-and-bounded-native-horizontal-union-gap-before-capacity-union-eligibility-only-original-ordinary-and-ribbon-pairs-v2",
+      "line_center_reference": "video-roi-otherwise-full-screen-horizontal-center-and-width-in-analysis-source-pixels-v1",
+      "line_center_reference_params": "ocr-resolve-prefix16-then-signed-twice-center-unsigned-width-signed-search-top-zero-reserved-word-80bytes-v1",
       "ribbon_join_gap_cells": 12,
       "ribbon_structural_gap_min_cells": 3,
       "ribbon_min_structural_gaps": 3,
@@ -185,6 +186,14 @@
       "ribbon_bottom_tolerance_pixels": 2,
       "ribbon_bottom_tolerance_projection": "exact-ceil-detector-edge-through-bottom-crop-v1",
       "ribbon_cover_pad_limit": 8
+    },
+    "candidate_selection": {
+      "policy": "bounded-largest-core-area-v1",
+      "capacity": "min-raw-and-final-box-capacity",
+      "ranking": "tight-core-field-area-descending",
+      "tie_break": "earlier-raster-discovery",
+      "publication_order": "raster-discovery-order",
+      "overflow": "retain-best-paired-candidates"
     },
     "ocr_record": {
       "schema": 3,
@@ -199,38 +208,88 @@
       "final_box_offset": 144,
       "final_box_capacity": 8
     },
-    "locator_state": {
-      "schema": 14,
-      "tag": 875646035,
-      "word_count": 96,
-      "header_word_count": 32,
-      "rectangle_capacity": 4,
-      "owner_offset": 32,
-      "pending_offset": 48,
-      "current_offset": 64,
-      "kind_word": 31,
-      "owner_kind_shift": 0,
-      "pending_kind_shift": 4,
-      "current_kind_shift": 8,
-      "kind_mask": 15,
-      "provisional_current_flag": 16,
-      "provisional_target_word": 29,
-      "provisional_fade_word": 30,
-      "adaptive_offset": 80,
-      "adaptive_word_count": 16
-    },
     "condition_params": {
-      "schema": 3,
-      "tag": 860898131,
-      "word_count": 6
+      "schema": 4,
+      "word_count": 6,
+      "current_count_word": 2,
+      "current_kind_mask_word": 3,
+      "active_word": 4,
+      "fully_active_value": 2,
+      "target_word": 5,
+      "tag": 877675347
     },
-    "geometry_authority": "same-observation-sealed-parallax-state-required-for-ui-probe-and-time-advance-v1"
+    "geometry_authority": "same-observation-sealed-parallax-state-required-for-ui-probe-and-time-advance-v1",
+    "contour_policy": {
+      "schema": 5,
+      "recipe": 23,
+      "source": "same-joined-ocr-source-bottom-crop-display-srgb-finite-rgba16f-v1",
+      "source_max_extent": 5120,
+      "source_extent_policy": "native-exact-crop-for-supported-source-otherwise-canonical-1x1-empty-support-history-source-and-zero-probability-v1",
+      "history_jitter_radius_source_pixels": 2,
+      "probability_validity_policy": "all-interpolation-contributors-finite-in-unit-range-even-without-fresh-threshold-v1",
+      "diagnostic_snapshot_policy": "same-joined-valid-ocr-geometry-source-clock-copy-before-next-admission-clear-invalid-whole-reuse-hold-v1",
+      "native_support": "r32u-binary-current-temporally-stable-ui-support-v1",
+      "authority": "current-ocr8-uip4-scp4-cut-source-clock-identity-only-v2",
+      "projection": "native-visible-support-to-all-bilinear-field-nodes-integer-footprint-v1",
+      "history": "current-cover-fixed-rgb-anchor-four-genuine-confirmations-same-pixel-first-current-core-probability-cue-blocks-neighbor-fallback-v4",
+      "history_schema": 5,
+      "history_tag": 894714707,
+      "history_word_count": 32,
+      "conditioning": "post-gaussian-shared-vertical75-25-and-horizontal-q30-no-presentation-support-or-invalid-current-authority-exact-base-v2",
+      "reuse": "whole-depth-ocr-uip4-native-mask-field-pin-q-gaussian-weight-blend-vertical-control-history-source-probability-final-tuple-held-v1",
+      "uncertain_support": "raw-support-abstains-presentation-current-cover-fallback-until-four-genuine-cue-free-observations-v3",
+      "history_snapshot_valid_word": 23,
+      "history_feature_valid_bit": 2,
+      "history_feature_mask_bit": 1,
+      "history_rgb_distance": 0.08,
+      "mask_evidence_policy": "current-ocr8-cover-color-agnostic-four-genuine-fixed-anchor-matches-same-pixel-first-probability-cue-blocks-neighbor-fallback-in-current-raw-core-v8",
+      "history_confirmation_observations": 4,
+      "history_feature_count_shift": 2,
+      "history_anchor_policy": "same-pixel-qualified-fixed-anchor-first-even-with-current-core-probability-cue-otherwise-unflagged-min-rgb-distance-then-squared-spatial-distance-then-scan-order-v3",
+      "distance_policy": "source-pixel-five-center-euclidean-squared-r32f-positive-infinity-v1",
+      "distance_empty_bits": 2139095040,
+      "gaussian_center_offset_source_pixels": 2,
+      "gaussian_sigma_short_side_divisor": 60.0,
+      "gaussian_weight_policy": "fp32-exp-negative-min-native-q-current-cover-q-until-four-genuine-cue-free-observations-max-union-v3",
+      "gaussian_weight_absolute_error_limit": 2e-06,
+      "gaussian_blend_policy": "precise-ui-times-M-plus-base-times-one-minus-M-bit-exact-endpoints-v1",
+      "history_reserved_offset": 24,
+      "history_reserved_word_count": 8,
+      "probability_change_ratio": 0.125,
+      "probability_change_policy": "current-core-native-center-soft-probability-unit-mass-spatial-tv-strict-ratio-cue-both-zero-no-cue-one-zero-cue-v3"
+    },
+    "plane_state": {
+      "schema": 4,
+      "word_count": 40,
+      "header_word_count": 24,
+      "cover_capacity": 8,
+      "flags_word": 2,
+      "current_valid_flag": 1,
+      "current_slot_mask_word": 3,
+      "frame_offset": 4,
+      "analysis_generation_offset": 6,
+      "observation_timestamp_offset": 8,
+      "source_extent_offset": 10,
+      "field_extent_offset": 12,
+      "roi_offset": 14,
+      "content_offset": 16,
+      "cut_epoch_word": 20,
+      "reserved_offset": 23,
+      "reserved_word_count": 1,
+      "adaptive_offset": 24,
+      "adaptive_word_count": 16,
+      "tag": 877676885,
+      "history_reset_mask_word": 21,
+      "warmup_word": 22,
+      "warmup_observations": 4,
+      "warmup_cue_bit": 8
+    }
   },
   "final_parallax": {
     "schema": 3,
     "authority": "complete-atomic-subtitle-conditioned-r32f-live-render-authority",
     "publication_policy": "authenticated-infer-or-cpu-known-publication-direct-render",
-    "reuse_policy": "reuse-holds-complete-depth-ocr-slr-final-tuple-byte-for-byte",
+    "reuse_policy": "reuse-holds-complete-depth-ocr-uip4-final-tuple-byte-for-byte",
     "invalid_policy": "fail-closed-flat",
     "current_rgb_policy": "always-current-never-retained"
   },
@@ -333,9 +392,49 @@
         "source_file": "host_sbs_subtitle_locator_cs.hlsl",
         "source_entrypoint": "condition_main",
         "source_target": "cs_5_0"
+      },
+      {
+        "source_file": "host_sbs_subtitle_contour_cs.hlsl",
+        "source_entrypoint": "temporal_main",
+        "source_target": "cs_5_0"
+      },
+      {
+        "source_file": "host_sbs_subtitle_contour_cs.hlsl",
+        "source_entrypoint": "project_main",
+        "source_target": "cs_5_0"
+      },
+      {
+        "source_file": "host_sbs_subtitle_contour_cs.hlsl",
+        "source_entrypoint": "history_main",
+        "source_target": "cs_5_0"
+      },
+      {
+        "source_file": "host_sbs_subtitle_contour_distance_cs.hlsl",
+        "source_entrypoint": "horizontal_main",
+        "source_target": "cs_5_0"
+      },
+      {
+        "source_file": "host_sbs_subtitle_contour_distance_cs.hlsl",
+        "source_entrypoint": "vertical_main",
+        "source_target": "cs_5_0"
+      },
+      {
+        "source_file": "host_sbs_subtitle_contour_cs.hlsl",
+        "source_entrypoint": "snapshot_main",
+        "source_target": "cs_5_0"
+      },
+      {
+        "source_file": "depth_coordinate_v2_vertical_limit_cs.hlsl",
+        "source_entrypoint": "subtitle_main",
+        "source_target": "cs_5_0"
+      },
+      {
+        "source_file": "depth_coordinate_v2_limit_cs.hlsl",
+        "source_entrypoint": "subtitle_main",
+        "source_target": "cs_5_0"
       }
     ],
-    "source_closure_sha256": "24050982be483a52e2a07501ae6166fbf353aa420cf80f47b30b4bafe672de91"
+    "source_closure_sha256": "90220f4dbe978b461a71b570e0eb93b305fc4cf35a0456fe6db23034808d42ff"
   },
   "calibrated_defaults": {
     "collapse_abs_epsilon": 1e-06,

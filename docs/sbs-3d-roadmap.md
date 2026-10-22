@@ -69,7 +69,9 @@ owned by [Host SBS scene cuts](host-sbs-scene-cuts.md).
   fill.
 - No CPU depth fallback or best-effort use of an unauthenticated model/shape.
 - No timer-forced refresh of a valid near-identical depth/subtitle tuple. Geometry and UI adaptation
-  consume genuine observations; authenticated reuse can freeze unfinished adaptation indefinitely.
+  consume genuine observations. Exact DDup/redelivery, or authorized changed-frame reuse with OCR
+  unavailable or ineligible, can freeze unfinished adaptation indefinitely. A genuinely admitted
+  ordinary source with eligible current OCR work uses the existing joined force-infer path.
 
 The extra model, routing and renderer exclusions are architectural boundaries. The sole adaptive
 geometry and subtitle-plane policy is owned by [Host SBS](host-sbs.md#adaptive-geometry-and-subtitle-plane).
@@ -110,40 +112,70 @@ The helper reports strict windowed evidence as `ok` and relaxed full-client evid
 the full-source domain only after exact capture mapping.
 
 The route has no compositor-visible-region oracle. The current subtitle treatment therefore uses
-OCR8 bounded boxes and compact SLR14 owner/pending/current-authority rectangles at the authenticated
-active field shape. It does not retain the retired row-history or general overlay-detector pipelines.
+every producer-admitted paired current OCR8 cover and compact UIP4 current-publication state
+at the authenticated active field shape. It does not retain the retired row-history or general overlay-detector pipelines.
 Unsupported identities and shapes preserve ordinary V2 exactly. Dump and replay accept only the
-current SLR14/OCR8 schema. The host does not reconstruct hidden video.
+current UIP4/OCR8 schema. The host does not reconstruct hidden video.
 
-The adaptive subtitle UI plane is part of this pipeline. Precise glyph contours are the next
-separate step: current OCR covers can include background or miss stroke edges. That work must use
-consecutive observations and tolerate small position changes from encoding noise, while allowing
-real subtitle movement; absolute position equality is not a reliable ownership rule.
+The current subtitle pipeline, finalized as candidate115, passed native regression checks,
+same-input real-clip comparisons, authenticated production-dump inspection, and the user's Galaxy XR
+live check, which reported normal character edges. This acceptance covers the tested material; it
+does not establish complete glyph recall, a production false-positive rate, or performance across
+devices and workloads. Earlier candidate results are historical evidence rather than the status of
+the current implementation.
+
+OCR supplies current search covers and geometric subtitle eligibility. Nearby boxes can form a
+line for the eligibility check, while distant columns cannot borrow each other's center. The
+reference comes from a matched video ROI when available and otherwise from the captured screen.
+An ordinary cover includes a small horizontal search guard for an omitted end glyph. None of these
+operations replaces pixel protection with a line-union rectangle. The authoritative center,
+lower-region, grouping, capacity and guard rules remain in
+[native subtitle contours and UI plane](host-sbs.md#native-subtitle-contours-and-ui-plane).
+
+Within those covers, native pixels acquire support through genuine consecutive observations of a
+fixed RGB reference, with bounded correspondence for small jitter. Confirmed pixels supply Gaussian
+presentation centers at the adaptive UI plane, followed by the shared depth limits. Current-cover
+protection bridges acquisition and is rearmed by a genuine current probability cue; duplicates and
+whole-tuple reuse do not manufacture pixel confirmations. The current route retains neither the
+former cover-owner tracker nor a second subtitle pipeline. Its history, cue, warmup and Gaussian
+semantics are owned by the same canonical subtitle section.
+
+The boxes and temporal rule do not identify semantic glyphs. Static scenery inside a persistent
+cover and similar-color replacements can retain support. Persistent cues can prolong provisional
+cover protection, and false OCR boxes receive the same treatment. A busy text region can discard
+smaller candidates; detector omissions beyond the guard and off-center captions without a matched
+video ROI can still be missed. Antialiasing, fades and changing background RGB can restart individual
+pixels. Broader font, color, HDR, transition and false-positive qualification remains useful work
+beyond the tested character-edge acceptance.
 
 Damage reuse is deliberately DDup-only and fail-open. Dirty and move metadata is semantic only as a
 proof that the exact current ROI pixels did not change: damage outside the crop may save inference,
 whereas an intersecting move source or destination, a sequence gap, metadata failure, protected
 content, route movement, authority change, or WGC forces the wrapper's inference path. Reuse freezes the
-depth/cut/camera/OCR/SLR observation state and always warps the current capture color rather than
+depth/cut/camera/OCR/UIP4 observation state and always warps the current capture color rather than
 repeating a packed SBS frame. This exact-current DDup proof is distinct from the presentation-only
 fallback below, which is eligible only when no matched completion reaches the render deadline.
 
-When changed B reuses the complete tuple owned by A and then stays static, exact continuity from
+When changed B reuses the complete tuple owned by A through the OCR-unavailable or ineligible
+GPU-undecided route and then stays static, exact continuity from
 B's authenticated publication may retain A indefinitely. There is no idle-tail correction or
 periodic refresh. B remains the completed color and A remains the depth/subtitle owner; the next
 changed candidate compares against A. Local and remote display conversion share this behavior.
 
 GPU adaptive reuse is always part of the Host SBS depth pipeline. Exact cache reuse remains higher
 priority; otherwise host-only route, identity and complete DDup history classify a changed frame as
-either force-infer or GPU-undecided. No host motion-size/shape heuristic stands between an
-authority-valid frame and the dense atomics-free model-space detector, which compares every admitted
-current NCHW texel with the authenticated state-1 history and applies finite, global medium/strong,
-and supported-tile local bounds. The GPU selects the DAV2 infer/reuse branch without a CPU decision
-poll or wait. Only after final D3D publication may a nonblocking receipt report the completed outcome
-to the CPU. Depth and subtitle use one joint observation policy. Current-ready OCR (`1`) or current
+either force-infer or GPU-undecided. Eligible ordinary OCR work uses the existing force-infer request;
+only the remaining OCR-unavailable or ineligible changed candidate may be GPU-undecided. Eligibility
+uses host-owned resource, work-mode and source-geometry facts, without reading image-derived OCR
+evidence. No host motion-size/shape heuristic applies. The dense atomics-free model-space detector
+compares every admitted current NCHW texel with the authenticated state-1 history and applies finite,
+global medium/strong, and supported-tile local bounds. For GPU-undecided work, the GPU selects the
+DAV2 infer/reuse branch without a CPU decision poll or wait. Only after final D3D publication may a
+nonblocking receipt report the completed outcome to the CPU. Depth and subtitle use one joint
+observation policy. Current-ready OCR (`1`) or current
 ineligible abstention (`2`) publishes only on valid infer; native USER32 suppression (`0`) advances
-neither OCR nor locator state. Every reuse preserves depth/cut/camera/V2 Base and the complete
-OCR8/SLR14/conditioned-final tuple. No mode relabels
+neither OCR nor plane state. Every reuse preserves depth/cut/camera/V2 Base and the complete
+OCR8/UIP4/conditioned-final tuple. No mode relabels
 retained boxes as a new OCR observation, and there is no adaptive OCR-band, localized subtitle or
 SLR-state veto.
 
@@ -158,7 +190,7 @@ that fixed comparison baseline, and neither elapsed time nor hold count forces i
 Without receipt proof, a completed draw may retain its already-rendered packed SBS pixels only for
 bounded presentation continuity. If the next root misses the same-frame completion budget, that
 image can be redelivered on the unchanged route/domain instead of flashing flat; packed pixels alone
-carry no depth, OCR, SLR, damage or adaptive-submission authority. Invalid ownership, route/proof
+carry no depth, OCR, UIP4, damage or adaptive-submission authority. Invalid ownership, route/proof
 failure, or interop-signature drift still forces CPU-known inference. Diagnostic traces and aggregate
 outcome counters remain separate from production receipt authority.
 
@@ -168,26 +200,29 @@ terminal flat rather than a hidden raw-TensorRT fallback. The canonical threshol
 sub-threshold depth-reuse risk and reset matrix are in
 [Host SBS frame attribution](host-sbs.md#frame-attribution-and-failure-behavior).
 
-Depth and subtitle share one detector decision, with no time/count expiration. Current-ready OCR
-uses `1`; an ineligible OCR input/interop/child uses `2` and publishes current abstention on valid
-infer. A suppressed completion cannot authorize ordinary joint reuse without a complete ordinary
-owner under the current route. Exact unchanged DDup proof bypasses admission and submits no root.
+Depth and subtitle share one joined disposition, with no time/count expiration. A genuinely admitted
+ordinary source with eligible OCR work uses force-infer; the remaining GPU-undecided work shares the
+device detector decision. Current-ready OCR uses `1`; an ineligible OCR input/interop/child uses `2`
+and publishes current abstention on valid infer. A suppressed completion cannot authorize ordinary
+joint reuse without a complete ordinary owner under the current route. Exact unchanged DDup proof
+bypasses admission and submits no root.
 Dump 3D always forces a complete ordinary observation.
 
 ### Adaptive completion status
 
 The presentation-only packed-SBS fallback is deliberately narrower than semantic cache reuse:
 already-rendered packed pixels may provide bounded continuity after a missed render deadline without
-becoming DAV2, OCR, SLR, damage, telemetry, or adaptive-submission authority. Same-frame polling is
+becoming DAV2, OCR, UIP4, damage, telemetry, or adaptive-submission authority. Same-frame polling is
 therefore a freshness/latency optimization rather than a geometry-correctness boundary.
 
 Completed in schema 67: the schedule-coupled three-phase display recurrence was removed and the
 complete atomic conditioned final field is rendered directly. The recurrence was introduced for the
 earlier infer/reuse clocking hypothesis; removing it eliminates a persistent full-field resource and
 pass, effective field lag, and rendering semantics coupled to reuse-owner age. Keep the GPU history
-owner, diagnostic trace, mature
-single-line provisional bridge and exact current-cover ownership. Accepted covers use the adaptive
-UI plane immediately; old compatible-handoff depth fading has been retired.
+owner and diagnostic trace. The subtitle route uses exact current OCR8 covers without historical
+cover ownership. It applies cue-held provisional protection from those current covers, followed by
+confirmed-native-pixel Gaussians using the adaptive UI plane. Historical compatible-handoff fading
+from an old depth field remains retired; the current fallback reuses neither old covers nor old depth.
 
 The current policy is schema 6: detector-only joint depth/subtitle reuse, legal work `0`/`1`/`2`,
 and whole-tuple holds. The earlier independent due-OCR work `8`/`16`, host age/count budget and
@@ -214,7 +249,7 @@ root completion, and do not establish isolated model time or OCR slack. Their se
 by [Host SBS performance observations](host-sbs.md#performance-observations). If profiling shows OCR
 slack, the first candidate is its buffer-only probability-cell reduction and OCR8 candidate resolve moved into an OCR
 child tail after TensorRT. Keep shared RGB-to-NCHW and similarity work before the root, and keep
-SLR/conditioning/warp after the join. Port OCR crop preprocessing only if its measured benefit
+UIP4/conditioning/warp after the join. Port OCR crop preprocessing only if its measured benefit
 exceeds the source-texture interop cost. This is expected to offer only a modest critical-path saving,
 not a utilization claim, and must pass a weak-GPU contention gate. Remove each superseded HLSL
 implementation after corpus parity rather than maintaining duplicate live/offline algorithms.

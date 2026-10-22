@@ -121,6 +121,46 @@ HOST_SBS_SUBTITLE_CONDITION = ShaderSpec(
     source_entrypoint="condition_main",
     source_target="cs_5_0",
 )
+HOST_SBS_SUBTITLE_CONTOUR_TEMPORAL = ShaderSpec(
+    source_file="host_sbs_subtitle_contour_cs.hlsl",
+    source_entrypoint="temporal_main",
+    source_target="cs_5_0",
+)
+HOST_SBS_SUBTITLE_CONTOUR_PROJECT = ShaderSpec(
+    source_file="host_sbs_subtitle_contour_cs.hlsl",
+    source_entrypoint="project_main",
+    source_target="cs_5_0",
+)
+HOST_SBS_SUBTITLE_CONTOUR_HISTORY = ShaderSpec(
+    source_file="host_sbs_subtitle_contour_cs.hlsl",
+    source_entrypoint="history_main",
+    source_target="cs_5_0",
+)
+HOST_SBS_SUBTITLE_CONTOUR_HORIZONTAL = ShaderSpec(
+    source_file="host_sbs_subtitle_contour_distance_cs.hlsl",
+    source_entrypoint="horizontal_main",
+    source_target="cs_5_0",
+)
+HOST_SBS_SUBTITLE_CONTOUR_VERTICAL = ShaderSpec(
+    source_file="host_sbs_subtitle_contour_distance_cs.hlsl",
+    source_entrypoint="vertical_main",
+    source_target="cs_5_0",
+)
+HOST_SBS_SUBTITLE_CONTOUR_SNAPSHOT = ShaderSpec(
+    source_file="host_sbs_subtitle_contour_cs.hlsl",
+    source_entrypoint="snapshot_main",
+    source_target="cs_5_0",
+)
+HOST_SBS_SUBTITLE_GAUSSIAN_VERTICAL_LIMIT = ShaderSpec(
+    source_file="depth_coordinate_v2_vertical_limit_cs.hlsl",
+    source_entrypoint="subtitle_main",
+    source_target="cs_5_0",
+)
+HOST_SBS_SUBTITLE_GAUSSIAN_HORIZONTAL_LIMIT = ShaderSpec(
+    source_file="depth_coordinate_v2_limit_cs.hlsl",
+    source_entrypoint="subtitle_main",
+    source_target="cs_5_0",
+)
 HOST_SBS_NEAR_IDENTICAL_FUSED_PREPROCESS = ShaderSpec(
     source_file="rgb_to_nchw_near_identical_cs.hlsl",
     source_entrypoint="fused_main",
@@ -202,6 +242,14 @@ SHADER_SPECS: Dict[str, ShaderSpec] = {
     "host_sbs_ocr_resolve": HOST_SBS_OCR_RESOLVE,
     "host_sbs_subtitle_locator_resolve": HOST_SBS_SUBTITLE_LOCATOR_RESOLVE,
     "host_sbs_subtitle_condition": HOST_SBS_SUBTITLE_CONDITION,
+    "host_sbs_subtitle_contour_temporal": HOST_SBS_SUBTITLE_CONTOUR_TEMPORAL,
+    "host_sbs_subtitle_contour_project": HOST_SBS_SUBTITLE_CONTOUR_PROJECT,
+    "host_sbs_subtitle_contour_history": HOST_SBS_SUBTITLE_CONTOUR_HISTORY,
+    "host_sbs_subtitle_contour_horizontal": HOST_SBS_SUBTITLE_CONTOUR_HORIZONTAL,
+    "host_sbs_subtitle_contour_vertical": HOST_SBS_SUBTITLE_CONTOUR_VERTICAL,
+    "host_sbs_subtitle_contour_snapshot": HOST_SBS_SUBTITLE_CONTOUR_SNAPSHOT,
+    "host_sbs_subtitle_gaussian_vertical_limit": HOST_SBS_SUBTITLE_GAUSSIAN_VERTICAL_LIMIT,
+    "host_sbs_subtitle_gaussian_horizontal_limit": HOST_SBS_SUBTITLE_GAUSSIAN_HORIZONTAL_LIMIT,
     "host_sbs_near_identical_fused_preprocess": HOST_SBS_NEAR_IDENTICAL_FUSED_PREPROCESS,
     "host_sbs_near_identical_resolve": HOST_SBS_NEAR_IDENTICAL_RESOLVE,
     "host_sbs_near_identical_scene_seed": HOST_SBS_NEAR_IDENTICAL_SCENE_SEED,
@@ -252,8 +300,16 @@ PARALLAX_V2_PRODUCER_GROUP = ClosureGroup(
         HOST_SBS_OCR_RESOLVE,
         HOST_SBS_SUBTITLE_LOCATOR_RESOLVE,
         HOST_SBS_SUBTITLE_CONDITION,
+        HOST_SBS_SUBTITLE_CONTOUR_TEMPORAL,
+        HOST_SBS_SUBTITLE_CONTOUR_PROJECT,
+        HOST_SBS_SUBTITLE_CONTOUR_HISTORY,
+        HOST_SBS_SUBTITLE_CONTOUR_HORIZONTAL,
+        HOST_SBS_SUBTITLE_CONTOUR_VERTICAL,
+        HOST_SBS_SUBTITLE_CONTOUR_SNAPSHOT,
+        HOST_SBS_SUBTITLE_GAUSSIAN_VERTICAL_LIMIT,
+        HOST_SBS_SUBTITLE_GAUSSIAN_HORIZONTAL_LIMIT,
     ),
-    source_closure_sha256="24050982be483a52e2a07501ae6166fbf353aa420cf80f47b30b4bafe672de91",
+    source_closure_sha256="90220f4dbe978b461a71b570e0eb93b305fc4cf35a0456fe6db23034808d42ff",
 )
 
 PARALLAX_V2_COORDINATE_DIAGNOSTIC_GROUP = ClosureGroup(
@@ -264,7 +320,7 @@ PARALLAX_V2_COORDINATE_DIAGNOSTIC_GROUP = ClosureGroup(
     specs=(
         DEPTH_COORDINATE_V2_COORDINATE_DIAGNOSTIC,
     ),
-    source_closure_sha256="0053d3c7c00c7bb79e95dd5cb22d32b372f4a2fcbddd4948e5ac6f882c2565ba",
+    source_closure_sha256="8d84dd68c42600b107ac392eb1b8727c5b325b3faf1ad43c0748ba23afb3f982",
 )
 
 NEAR_IDENTICAL_DETECTOR_GROUP = ClosureGroup(
@@ -278,7 +334,7 @@ NEAR_IDENTICAL_DETECTOR_GROUP = ClosureGroup(
         HOST_SBS_NEAR_IDENTICAL_FINALIZE,
         HOST_SBS_NEAR_IDENTICAL_REUSE_DEPTH,
     ),
-    source_closure_sha256="3bfc9b406e91b9b5c983c9bf5282060401d4afb1f1066c5e49eb602e8f6f4504",
+    source_closure_sha256="12e429c6f617ebed9df2d267d41a4767b3a2b2508d76efe52b3ef43e0a6b7516",
 )
 
 GPU_TRACE_GROUP = ClosureGroup(
@@ -289,7 +345,7 @@ GPU_TRACE_GROUP = ClosureGroup(
     specs=(
         HOST_SBS_GPU_TRACE,
     ),
-    source_closure_sha256="ac67c32c9dc972aace4144d45b9b41b418bab87bd13bc46854749ea830204611",
+    source_closure_sha256="cd089deb118d2ae61a12c15531da1930317743b59352ada119e8744901e351b9",
 )
 
 PARALLAX_V2_LIVE_RENDERER_GROUP = ClosureGroup(
@@ -301,7 +357,7 @@ PARALLAX_V2_LIVE_RENDERER_GROUP = ClosureGroup(
         PARALLAX_V2_LIVE_RENDERER,
         SBS_REPROJECTION_VERTEX,
     ),
-    source_closure_sha256="d187c2ccc013a6fddd0ecaf34b2ca7f2bd2b392bfd55a5abe31bcfa457ca6e87",
+    source_closure_sha256="b91d6702173ae8e15425ef5b70a22b294100842cea6c5d4ec97d11d277c56070",
 )
 
 PARALLAX_V2_P010_Y_GROUP = ClosureGroup(
@@ -312,7 +368,7 @@ PARALLAX_V2_P010_Y_GROUP = ClosureGroup(
     specs=(
         PARALLAX_V2_P010_Y_RENDERER,
     ),
-    source_closure_sha256="b905626f29b7f6e9493c448f88d9804a2568a809d30ec20f94cc13c4d95977e5",
+    source_closure_sha256="132018f408bb35df073758fbffa3959bcfca7590c4c2646bd0e5f4de203a352a",
 )
 
 SBS_FLAT_FALLBACK_GROUP = ClosureGroup(
@@ -336,7 +392,7 @@ PARALLAX_V2_LIVE_DIAGNOSTIC_GROUP = ClosureGroup(
         PARALLAX_V2_LIVE_MAPPING,
         PARALLAX_V2_LIVE_MASK,
     ),
-    source_closure_sha256="2371920cbec90eab7436b9ba85c294b149f2c7aeb765e84ab7e6969f625c1c4a",
+    source_closure_sha256="69f2a263ce2ce71a8030390bae0057ea59ab086ab8b0dc7cb92990bdc5310784",
 )
 
 CLOSURE_GROUPS: Dict[str, ClosureGroup] = {

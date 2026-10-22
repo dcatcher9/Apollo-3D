@@ -20,7 +20,6 @@
 #define OCR8_SCHEMA V2_OCR_RECORD_SCHEMA
 #define OCR8_TAG V2_OCR_RECORD_TAG
 #define OCR8_VALID 1u
-#define OCR8_OVERFLOW 2u
 StructuredBuffer<float> ProbabilityMap : register(t0);
 RWStructuredBuffer<uint> CellStatsWrite : register(u0);
 
@@ -93,6 +92,10 @@ cbuffer OcrResolveConstants : register(b0) {
     uint roi_top;
     uint roi_bottom;
     uint4 tensor_content;
+    int line_center_twice_source;
+    uint line_reference_width;
+    int line_search_top_source;
+    uint line_reserved;
 };
 
 uint CellBase(uint x, uint y) {
@@ -174,11 +177,20 @@ uint MapYCeil(uint y) {
 
 // The host authenticates the DAV2 field shape before enabling OCR.  This shader still validates
 // every runtime dimension and proves that its ROI is a non-empty subset of the exact bottom-6:1
-// crop. OCR8 then carries those dimensions and bounds to SLR13, which cross-checks them against the
-// actual BaseField dispatch. The 64-byte cbuffer also binds the integer tensor-content rectangle,
+// crop. OCR8 then carries those dimensions and bounds to the current locator, which cross-checks them against the
+// actual BaseField dispatch. The 80-byte cbuffer also binds the integer tensor-content rectangle,
 // avoiding a shape-specific OCR record or a second ABI.
 bool ResolveGeometryValid() {
-    if (source_width == 0u || source_height == 0u || field_width == 0u || field_height == 0u ||
+    if (line_reference_width == 0u ||
+        line_reference_width > V2_SUBTITLE_CONTOUR_SOURCE_MAX_EXTENT ||
+        line_center_twice_source < -(int)line_reference_width ||
+        line_center_twice_source > (int)line_reference_width ||
+        line_search_top_source < -(int)V2_SUBTITLE_CONTOUR_SOURCE_MAX_EXTENT ||
+        line_search_top_source > (int)V2_SUBTITLE_CONTOUR_SOURCE_MAX_EXTENT ||
+        line_reserved != 0u ||
+        source_width > V2_SUBTITLE_CONTOUR_SOURCE_MAX_EXTENT ||
+        source_height > V2_SUBTITLE_CONTOUR_SOURCE_MAX_EXTENT ||
+        source_width == 0u || source_height == 0u || field_width == 0u || field_height == 0u ||
         field_width > 0xffffu || field_height > 0xffffu ||
         roi_top >= roi_bottom || roi_bottom > field_height || crop_height_pixels == 0u ||
         crop_top_pixels > source_height ||
@@ -272,6 +284,15 @@ struct CandidateStats {
     uint island_count;
     uint structural_gap_count;
 };
+
+// Lane zero queues the independent cores before selection. A line union is eligibility only;
+// original constituent covers and the downstream pixel/Gaussian mask remain unchanged.
+groupshared CandidateStats LineCandidates[OCR_GRID_WIDTH];
+groupshared float LineScores[OCR_GRID_WIDTH];
+groupshared uint LineKinds[OCR_GRID_WIDTH];
+groupshared uint LineMembership[OCR_GRID_WIDTH];
+groupshared uint4 LineBounds[OCR_GRID_WIDTH];
+groupshared uint2 LineAnchorSpans[OCR_GRID_WIDTH];
 
 void ResetCandidateStats(out CandidateStats stats) {
     stats.tight_left = 0xffffffffu;
@@ -368,18 +389,13 @@ void MergeRetainedIsland(
     previous_island_end = island_end;
 }
 
-void PublishCandidate(
-    CandidateStats stats,
-    float score,
-    uint kind_flags,
-    inout uint status,
-    inout uint raw_total,
-    inout uint final_total) {
+bool PrepareCandidateBoxes(
+    CandidateStats stats, uint kind_flags, out uint4 tight_box, out uint4 expanded_box) {
     uint tight_width = stats.tight_right - stats.tight_left;
     uint tight_height = stats.tight_bottom - stats.tight_top;
-    uint4 tight_box = MapBox(
+    tight_box = MapBox(
         stats.tight_left, stats.tight_top, stats.tight_right, stats.tight_bottom);
-    if (tight_box.x >= tight_box.z || tight_box.y >= tight_box.w) return;
+    if (tight_box.x >= tight_box.z || tight_box.y >= tight_box.w) return false;
 
     float perimeter = 2.0f * (float)(tight_width + tight_height);
     float expand = ceil((float)(tight_width * tight_height) * 1.4f / max(perimeter, 1.0f));
@@ -389,33 +405,160 @@ void PublishCandidate(
     uint db_pad = (uint)max(expand, 1.0f);
     uint pad = kind_flags == V2_OCR_BOX_FLAG_RIBBON ?
         min(db_pad, V2_OCR_RIBBON_COVER_PAD_LIMIT) : db_pad;
-    uint expanded_left = stats.tight_left > pad ? stats.tight_left - pad : 0u;
+    // A detector can omit a short token at either end of an otherwise valid text line. Keep a
+    // one-cell horizontal search guard; its pixels still need the ordinary RGB confirmations.
+    // Vertical DB padding and the ribbon's bounded full-width cover keep their existing rules.
+    uint horizontal_pad = pad + (kind_flags == V2_OCR_BOX_FLAG_RIBBON ? 0u :
+        V2_OCR_ORDINARY_COVER_HORIZONTAL_GUARD_CELLS * OCR_CELL_WIDTH);
+    uint expanded_left = stats.tight_left > horizontal_pad ?
+        stats.tight_left - horizontal_pad : 0u;
     uint expanded_top = stats.tight_top > pad ? stats.tight_top - pad : 0u;
-    uint expanded_right = min(stats.tight_right + pad, OCR_WIDTH);
+    uint expanded_right = min(stats.tight_right + horizontal_pad, OCR_WIDTH);
     uint expanded_bottom = min(stats.tight_bottom + pad, OCR_HEIGHT);
-    if (min(expanded_right - expanded_left, expanded_bottom - expanded_top) < 5u) return;
+    if (min(expanded_right - expanded_left, expanded_bottom - expanded_top) < 5u) return false;
 
     // A ribbon conditions the complete bottom strip. Ordinary candidates preserve their own
     // expanded cover, including gaps only among independently valid retained islands.
-    uint4 expanded_box = kind_flags == V2_OCR_BOX_FLAG_RIBBON ?
+    expanded_box = kind_flags == V2_OCR_BOX_FLAG_RIBBON ?
         uint4(tensor_content.x, MapYFloor(expanded_top),
               tensor_content.z, tensor_content.w) :
         MapBox(expanded_left, expanded_top, expanded_right, expanded_bottom);
-    if (expanded_box.x >= expanded_box.z || expanded_box.y >= expanded_box.w) return;
+    if (expanded_box.x >= expanded_box.z || expanded_box.y >= expanded_box.w) return false;
 
+    return true;
+}
+
+void PublishCandidate(
+    CandidateStats stats, float score, uint kind_flags,
+    inout uint raw_total, inout uint final_total) {
+    uint4 tight_box, expanded_box;
+    if (!PrepareCandidateBoxes(stats, kind_flags, tight_box, expanded_box)) return;
+    uint pair_capacity = min(OCR8_RAW_CAPACITY, OCR8_FINAL_CAPACITY);
     uint pair_index = final_total;
-    ++raw_total;
-    ++final_total;
-    if (pair_index < OCR8_RAW_CAPACITY && pair_index < OCR8_FINAL_CAPACITY) {
-        StoreBox(
-            OCR8_RAW_OFFSET, pair_index, tight_box, score,
-            kind_flags, stats.island_count, stats.structural_gap_count);
-        StoreBox(
-            OCR8_FINAL_OFFSET, pair_index, expanded_box, score,
-            kind_flags, stats.island_count, stats.structural_gap_count);
+    if (final_total < pair_capacity) {
+        ++raw_total;
+        ++final_total;
     } else {
-        status |= OCR8_OVERFLOW;
+        // Keep the largest tight cores without giving crowded text a global veto. Equal areas
+        // keep their earlier raster discovery. Evict the last equal minimum, then shift whole
+        // core/cover pairs so publication order remains the original discovery order.
+        uint smallest_area = 0xffffffffu;
+        uint remove_index = 0u;
+        [loop]
+        for (uint slot = 0u; slot < pair_capacity; ++slot) {
+            uint offset = OCR8_RAW_OFFSET + slot * OCR8_BOX_WORDS;
+            uint area = (OcrBoxRecord[offset + 2u] - OcrBoxRecord[offset + 0u]) *
+                (OcrBoxRecord[offset + 3u] - OcrBoxRecord[offset + 1u]);
+            if (area <= smallest_area) {
+                smallest_area = area;
+                remove_index = slot;
+            }
+        }
+        uint candidate_area = (tight_box.z - tight_box.x) * (tight_box.w - tight_box.y);
+        if (candidate_area <= smallest_area) return;
+        [loop]
+        for (uint shift = remove_index; shift + 1u < pair_capacity; ++shift) {
+            [unroll]
+            for (uint word = 0u; word < OCR8_BOX_WORDS; ++word) {
+                OcrBoxRecord[OCR8_RAW_OFFSET + shift * OCR8_BOX_WORDS + word] =
+                    OcrBoxRecord[OCR8_RAW_OFFSET + (shift + 1u) * OCR8_BOX_WORDS + word];
+                OcrBoxRecord[OCR8_FINAL_OFFSET + shift * OCR8_BOX_WORDS + word] =
+                    OcrBoxRecord[OCR8_FINAL_OFFSET + (shift + 1u) * OCR8_BOX_WORDS + word];
+            }
+        }
+        pair_index = pair_capacity - 1u;
     }
+    StoreBox(
+        OCR8_RAW_OFFSET, pair_index, tight_box, score,
+        kind_flags, stats.island_count, stats.structural_gap_count);
+    StoreBox(
+        OCR8_FINAL_OFFSET, pair_index, expanded_box, score,
+        kind_flags, stats.island_count, stats.structural_gap_count);
+}
+
+bool QueueLineCandidate(
+    CandidateStats stats, float score, uint kind_flags, inout uint candidate_count) {
+    uint4 tight_box, expanded_box;
+    if (!PrepareCandidateBoxes(stats, kind_flags, tight_box, expanded_box)) return true;
+    if (candidate_count >= OCR_GRID_WIDTH) return false;
+    LineCandidates[candidate_count] = stats;
+    LineScores[candidate_count] = score;
+    LineKinds[candidate_count] = kind_flags;
+    ++candidate_count;
+    return true;
+}
+
+bool SameTextLine(CandidateStats candidate, uint2 anchor, uint4 bounds) {
+    uint intersection_top = max(candidate.tight_top, anchor.x);
+    uint intersection_bottom = min(candidate.tight_bottom, anchor.y);
+    if (intersection_top >= intersection_bottom) return false;
+    uint union_height = max(candidate.tight_bottom, anchor.y) -
+        min(candidate.tight_top, anchor.x);
+    if ((intersection_bottom - intersection_top) *
+        V2_OCR_LINE_GROUP_MIN_VERTICAL_IOU_DENOMINATOR <
+        union_height * V2_OCR_LINE_GROUP_MIN_VERTICAL_IOU_NUMERATOR) return false;
+    // Compare native-source lengths, including rounded or height-clipped OCR crops. A row
+    // at the same height in a distant column cannot lend this line a false centered union.
+    uint gap_begin = max(candidate.tight_left, bounds.x);
+    uint gap_end = min(candidate.tight_right, bounds.z);
+    uint gap = gap_begin > gap_end ? gap_begin - gap_end : 0u;
+    uint height = max(candidate.tight_bottom - candidate.tight_top, anchor.y - anchor.x);
+    // Validated source extents, exact crop and the fixed 4/1 policy bound both uint32 products.
+    return gap * source_width * OCR_HEIGHT *
+        V2_OCR_LINE_GROUP_MAX_HORIZONTAL_GAP_HEIGHT_DENOMINATOR <=
+        height * crop_height_pixels * OCR_WIDTH *
+        V2_OCR_LINE_GROUP_MAX_HORIZONTAL_GAP_HEIGHT_NUMERATOR;
+}
+
+bool LineIsCentered(uint4 bounds) {
+    // Native extents/reference are bounded to 5120. Even the largest signed difference times
+    // the tolerance denominator is <=147,456,000: exact int32 comparison keeps both edges equal.
+    int delta = (int)(bounds.x + bounds.z) * (int)source_width -
+        line_center_twice_source * (int)OCR_WIDTH;
+    uint error = (uint)abs(delta);
+    return error * V2_OCR_LINE_CENTER_TOLERANCE_DENOMINATOR <=
+        2u * line_reference_width * OCR_WIDTH * V2_OCR_LINE_CENTER_TOLERANCE_NUMERATOR;
+}
+
+void PublishCenteredLines(uint candidate_count, inout uint raw_total, inout uint final_total) {
+    uint group_count = 0u;
+    [loop]
+    for (uint candidate = 0u; candidate < candidate_count; ++candidate) {
+        CandidateStats stats = LineCandidates[candidate];
+        uint group = 0u;
+        [loop]
+        while (group < group_count &&
+            !SameTextLine(stats, LineAnchorSpans[group], LineBounds[group])) ++group;
+        uint4 bounds = uint4(stats.tight_left, stats.tight_top, stats.tight_right, stats.tight_bottom);
+        if (group == group_count) {
+            // Keep the first member's vertical span fixed: growing anchors can bridge other rows.
+            LineAnchorSpans[group] = uint2(stats.tight_top, stats.tight_bottom);
+            LineBounds[group] = bounds;
+            ++group_count;
+        } else {
+            // Horizontal adjacency follows the current union so nearby words can form a long
+            // line. The separate first-member vertical anchor above never grows.
+            LineBounds[group] = uint4(min(LineBounds[group].xy, bounds.xy),
+                                     max(LineBounds[group].zw, bounds.zw));
+        }
+        LineMembership[candidate] = group;
+    }
+    [loop]
+    for (uint candidate = 0u; candidate < candidate_count; ++candidate) {
+        if (LineIsCentered(LineBounds[LineMembership[candidate]])) {
+            PublishCandidate(LineCandidates[candidate], LineScores[candidate], LineKinds[candidate],
+                             raw_total, final_total);
+        }
+    }
+}
+
+uint LineSearchBegin() {
+    // Intersect the matched reference's lower quarter with the existing OCR crop and safe rows.
+    // Validation bounds the signed subtraction and this exact ceiling's numerator below uint32.
+    int delta = line_search_top_source - (int)crop_top_pixels;
+    uint row = delta <= 0 ? 0u : min(OCR_HEIGHT,
+        ((uint)delta * OCR_HEIGHT + crop_height_pixels - 1u) / crop_height_pixels);
+    return max(row, V2_OCR_SAFE_ROW_TOP);
 }
 
 // Deterministic lower-text DB postprocess. All lanes first build a compact, exact cell-occupancy
@@ -476,18 +619,19 @@ void resolve_main(uint3 group_thread_id : SV_GroupThreadID) {
         }
     }
 
-    uint status = OCR8_VALID;
     uint raw_total = 0u;
     uint final_total = 0u;
-    uint y = 0u;
+    uint y = LineSearchBegin();
+    uint search_end = V2_OCR_SAFE_ROW_BOTTOM;
     [loop]
-    while (y < OCR_HEIGHT) {
-        while (y < OCR_HEIGHT && !RowActive(y)) ++y;
-        if (y >= OCR_HEIGHT) break;
+    while (y < search_end) {
+        while (y < search_end && !RowActive(y)) ++y;
+        if (y >= search_end) break;
         uint band_top = y;
-        while (y < OCR_HEIGHT && RowActive(y)) ++y;
+        while (y < search_end && RowActive(y)) ++y;
         uint band_bottom = y;
         uint4 band_active = BuildBandActiveMask(band_top, band_bottom);
+        uint band_candidate_count = 0u;
 
         uint x = 0u;
         [loop]
@@ -539,10 +683,7 @@ void resolve_main(uint3 group_thread_id : SV_GroupThreadID) {
                     broad.structural_gap_count >= V2_OCR_RIBBON_MIN_STRUCTURAL_GAPS;
             }
             if (broad_is_ribbon) {
-                PublishCandidate(
-                    broad, broad_score, V2_OCR_BOX_FLAG_RIBBON,
-                    status, raw_total, final_total);
-                if ((status & OCR8_OVERFLOW) != 0u) {
+                if (!QueueLineCandidate(broad, broad_score, V2_OCR_BOX_FLAG_RIBBON, band_candidate_count)) {
                     ClearAndPublishInvalidRecord();
                     return;
                 }
@@ -603,10 +744,7 @@ void resolve_main(uint3 group_thread_id : SV_GroupThreadID) {
                             island_start - previous_island_end > V2_OCR_TEXT_JOIN_GAP_CELLS) {
                             float retained_score;
                             if (CandidateEvidenceValid(retained, retained_score)) {
-                                PublishCandidate(
-                                    retained, retained_score, 0u,
-                                    status, raw_total, final_total);
-                                if ((status & OCR8_OVERFLOW) != 0u) {
+                                if (!QueueLineCandidate(retained, retained_score, 0u, band_candidate_count)) {
                                     ClearAndPublishInvalidRecord();
                                     return;
                                 }
@@ -623,21 +761,15 @@ void resolve_main(uint3 group_thread_id : SV_GroupThreadID) {
 
                 float text_score;
                 if (CandidateEvidenceValid(retained, text_score)) {
-                    PublishCandidate(
-                        retained, text_score, 0u, status, raw_total, final_total);
-                    if ((status & OCR8_OVERFLOW) != 0u) {
+                    if (!QueueLineCandidate(retained, text_score, 0u, band_candidate_count)) {
                         ClearAndPublishInvalidRecord();
                         return;
                     }
                 }
             }
         }
+        PublishCenteredLines(band_candidate_count, raw_total, final_total);
     }
 
-    const bool authoritative = status == OCR8_VALID;
-    if (!authoritative) {
-        [loop]
-        for (uint word = 0u; word < OCR8_WORDS; ++word) OcrBoxRecord[word] = 0u;
-    }
-    PublishHeader(authoritative, raw_total, final_total);
+    PublishHeader(true, raw_total, final_total);
 }

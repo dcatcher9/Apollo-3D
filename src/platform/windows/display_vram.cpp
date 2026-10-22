@@ -2584,6 +2584,17 @@ namespace platf::dxgi {
                 dump_frame.ocr_box_record = est.ocr_box_record.Get();
                 dump_frame.subtitle_locator_state =
                   est.subtitle_locator_state.Get();
+                dump_frame.subtitle_contour_support = est.subtitle_contour_support.Get();
+                dump_frame.subtitle_contour_field_pin = est.subtitle_contour_field_pin.Get();
+                dump_frame.subtitle_contour_distance = est.subtitle_contour_distance.Get();
+                dump_frame.subtitle_contour_identity = est.subtitle_contour_identity.Get();
+                dump_frame.subtitle_contour_history = est.subtitle_contour_history.Get();
+                dump_frame.subtitle_contour_source = est.subtitle_contour_source.Get();
+                dump_frame.subtitle_ocr_probability = est.subtitle_ocr_probability.Get();
+                dump_frame.subtitle_gaussian_weight = est.subtitle_gaussian_weight.Get();
+                dump_frame.subtitle_gaussian_blend = est.subtitle_gaussian_blend.Get();
+                dump_frame.subtitle_gaussian_vertical_conditioned = est.subtitle_gaussian_vertical_conditioned.Get();
+                dump_frame.subtitle_gaussian_control = est.subtitle_gaussian_control.Get();
                 dump_frame.gpu_trace_ring = est.gpu_trace_ring.Get();
                 dump_frame.shadow_state = est.shadow_state.Get();
                 dump_frame.shadow_frame_stats = est.shadow_frame_stats.Get();

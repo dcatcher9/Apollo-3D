@@ -25,6 +25,7 @@ namespace host_sbs_gpu_completion_receipt_fixture {
       .baseline_frame_id = submission == receipt::submission_class_e::gpu_undecided ? 11u : 0u,
       .width = 770u,
       .height = 434u,
+      .subtitle_domain = {1920u, 1080u, 770u, 434u, 325u, 424u, 1u, 1u, 769u, 433u},
       .raw_coordinate_scale = 4.0f,
       .expected_work = graph::work_flags_value(work),
       .submission_class = submission,
@@ -100,12 +101,18 @@ namespace host_sbs_gpu_completion_receipt_fixture {
     put_u64(words, owner + 8u, infer ? expected.observation_timestamp_us : expected.observation_timestamp_us - 1000u);
     if (subtitle != receipt::subtitle_disposition_e::suppressed) {
       const auto locator = receipt::subtitle_locator_begin;
-      words[locator] = v2::subtitle_locator_state_schema;
-      words[locator + 1u] = v2::subtitle_locator_state_tag;
-      put_u64(words, locator + 10u, expected.analysis_generation);
-      put_u64(words, locator + 22u, observation ? expected.frame_id : expected.baseline_frame_id);
-      words[locator + 27u] = expected.width;
-      words[locator + 28u] = expected.height;
+      words[locator] = v2::subtitle_plane_state_schema;
+      words[locator + 1u] = v2::subtitle_plane_state_tag;
+      words[locator + v2::subtitle_plane_flags_word] = subtitle == receipt::subtitle_disposition_e::abstention ?
+        0u : v2::subtitle_plane_current_valid_flag;
+      put_u64(words, locator + v2::subtitle_plane_analysis_generation_offset, expected.analysis_generation);
+      put_u64(words, locator + v2::subtitle_plane_frame_offset, observation ? expected.frame_id : expected.baseline_frame_id);
+      put_u64(words, locator + v2::subtitle_plane_observation_timestamp_offset,
+        observation ? expected.observation_timestamp_us : expected.observation_timestamp_us - 1000u);
+      std::copy(expected.subtitle_domain.begin(), expected.subtitle_domain.end(),
+        words.begin() + locator + v2::subtitle_plane_source_extent_offset);
+      words[receipt::subtitle_condition_begin] = v2::subtitle_condition_param_schema;
+      words[receipt::subtitle_condition_begin + 1u] = v2::subtitle_condition_param_tag;
     }
     auto state = v2::state_initial_words;
     state[v2::inverse_scale] = std::bit_cast<std::uint32_t>(1.0f / expected.raw_coordinate_scale);

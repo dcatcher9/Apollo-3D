@@ -1415,6 +1415,51 @@ namespace sbs_bench {
       return succeeded;
     }
 
+    // Diagnostic-only opaque texture export. Preserve packed contour support, integer distance,
+    // and native display/history values exactly; PNG previews cannot authenticate these fields.
+    bool dump_contour_texture(
+      ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11ShaderResourceView *srv,
+      const DXGI_FORMAT expected_format, const std::size_t bytes_per_pixel,
+      const fs::path &path, ComPtr<ID3D11Texture2D> &stage_cache
+    ) {
+      if (!dev || !ctx || !srv) return false;
+      ComPtr<ID3D11Resource> resource;
+      ComPtr<ID3D11Texture2D> texture;
+      srv->GetResource(&resource);
+      if (!resource || FAILED(resource.As(&texture))) return false;
+      D3D11_TEXTURE2D_DESC desc {};
+      texture->GetDesc(&desc);
+      if (desc.Format != expected_format || desc.Width == 0u || desc.Height == 0u ||
+          desc.MipLevels != 1u || desc.ArraySize != 1u || desc.SampleDesc.Count != 1u) return false;
+      D3D11_TEXTURE2D_DESC previous {};
+      if (stage_cache) stage_cache->GetDesc(&previous);
+      if (!stage_cache || previous.Width != desc.Width || previous.Height != desc.Height ||
+          previous.Format != desc.Format) {
+        stage_cache.Reset();
+        auto stage_desc = desc;
+        stage_desc.Usage = D3D11_USAGE_STAGING;
+        stage_desc.BindFlags = 0u;
+        stage_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        stage_desc.MiscFlags = 0u;
+        if (FAILED(dev->CreateTexture2D(&stage_desc, nullptr, &stage_cache))) return false;
+      }
+      ctx->CopyResource(stage_cache.Get(), texture.Get());
+      D3D11_MAPPED_SUBRESOURCE mapped {};
+      if (FAILED(ctx->Map(stage_cache.Get(), 0u, D3D11_MAP_READ, 0u, &mapped))) return false;
+      std::ofstream out(path, std::ios::binary | std::ios::trunc);
+      const auto row_bytes = static_cast<std::streamsize>(desc.Width * bytes_per_pixel);
+      if (out) {
+        for (UINT y = 0u; y < desc.Height; ++y) {
+          out.write(static_cast<const char *>(mapped.pData) +
+                      static_cast<std::size_t>(y) * mapped.RowPitch, row_bytes);
+        }
+        out.flush();
+      }
+      const bool succeeded = out.good();
+      ctx->Unmap(stage_cache.Get(), 0u);
+      return succeeded;
+    }
+
     // Preserve the exact raw model output for stage-by-stage parity checks. Unlike the display
     // PNG, this is not clamped or normalized: it is row-major float32, width*height values.
     bool dump_float_buffer(
@@ -1469,6 +1514,42 @@ namespace sbs_bench {
           static_cast<const char *>(mapped.pData),
           static_cast<std::streamsize>(byte_count)
         );
+        out.flush();
+      }
+      const bool succeeded = out.good();
+      ctx->Unmap(stage_cache.Get(), 0u);
+      return succeeded;
+    }
+
+    // Research-only full opaque buffer export, including a constant buffer without an SRV.
+    // Requiring the exact allocation size prevents a partial readback from hiding tail words.
+    bool dump_ocr_working_buffer(
+      ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11Buffer *buffer,
+      const std::size_t byte_count, const fs::path &path,
+      ComPtr<ID3D11Buffer> &stage_cache
+    ) {
+      if (!dev || !ctx || !buffer || byte_count == 0u) return false;
+      D3D11_BUFFER_DESC source_desc {};
+      buffer->GetDesc(&source_desc);
+      if (byte_count != source_desc.ByteWidth) return false;
+      D3D11_BUFFER_DESC previous {};
+      if (stage_cache) stage_cache->GetDesc(&previous);
+      if (!stage_cache || previous.ByteWidth != source_desc.ByteWidth) {
+        stage_cache.Reset();
+        auto stage_desc = source_desc;
+        stage_desc.Usage = D3D11_USAGE_STAGING;
+        stage_desc.BindFlags = 0u;
+        stage_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        stage_desc.MiscFlags = 0u;
+        if (FAILED(dev->CreateBuffer(&stage_desc, nullptr, &stage_cache))) return false;
+      }
+      ctx->CopyResource(stage_cache.Get(), buffer);
+      D3D11_MAPPED_SUBRESOURCE mapped {};
+      if (FAILED(ctx->Map(stage_cache.Get(), 0u, D3D11_MAP_READ, 0u, &mapped))) return false;
+      std::ofstream out(path, std::ios::binary | std::ios::trunc);
+      if (out) {
+        out.write(static_cast<const char *>(mapped.pData),
+                  static_cast<std::streamsize>(byte_count));
         out.flush();
       }
       const bool succeeded = out.good();
@@ -1763,6 +1844,115 @@ namespace sbs_bench {
   }  // namespace
 
   namespace detail {
+    bool validate_subtitle_diagnostic_observation_ranges(
+      const std::vector<subtitle_diagnostic_observation_range> &ranges,
+      const std::uint64_t input_count,
+      std::string &error
+    ) {
+      error.clear();
+      if (ranges.empty() || input_count == 0u) {
+        error = "diagnostic selection and input must be nonempty";
+        return false;
+      }
+      std::uint64_t previous_last = 0u;
+      for (const auto &range : ranges) {
+        if (range.first == 0u || range.first > range.last ||
+            range.first <= previous_last || range.last > input_count) {
+          error = "diagnostic ranges must be positive, ordered, disjoint and inside the input";
+          return false;
+        }
+        previous_last = range.last;
+      }
+      return true;
+    }
+
+    std::optional<std::vector<subtitle_diagnostic_observation_range>>
+    parse_subtitle_diagnostic_observation_ranges(
+      const std::string_view text,
+      std::string &error
+    ) {
+      error.clear();
+      if (text.empty()) {
+        error = "diagnostic selection must not be empty";
+        return std::nullopt;
+      }
+      const auto positive_decimal = [](const std::string_view value,
+                                        std::uint64_t &number) {
+        if (value.empty() || !std::all_of(value.begin(), value.end(), [](const char c) {
+              return c >= '0' && c <= '9';
+            })) {
+          return false;
+        }
+        const auto parsed = std::from_chars(value.data(), value.data() + value.size(), number);
+        return parsed.ec == std::errc {} && parsed.ptr == value.data() + value.size() &&
+               number != 0u;
+      };
+      std::vector<subtitle_diagnostic_observation_range> ranges;
+      std::size_t begin = 0u;
+      while (begin < text.size()) {
+        const auto comma = text.find(',', begin);
+        const auto token = text.substr(begin, comma == std::string_view::npos ?
+                                                text.size() - begin : comma - begin);
+        const auto dash = token.find('-');
+        subtitle_diagnostic_observation_range range;
+        if (dash == std::string_view::npos) {
+          if (!positive_decimal(token, range.first)) {
+            error = "diagnostic IDs must be positive uint64 decimal values";
+            return std::nullopt;
+          }
+          range.last = range.first;
+        } else if (!positive_decimal(token.substr(0u, dash), range.first) ||
+                   !positive_decimal(token.substr(dash + 1u), range.last)) {
+          error = "diagnostic ranges must be inclusive first-last decimal values";
+          return std::nullopt;
+        }
+        ranges.push_back(range);
+        if (comma == std::string_view::npos) {
+          break;
+        }
+        begin = comma + 1u;
+        if (begin == text.size()) {
+          error = "diagnostic selection must not end with a comma";
+          return std::nullopt;
+        }
+      }
+      if (!validate_subtitle_diagnostic_observation_ranges(
+            ranges, std::numeric_limits<std::uint64_t>::max(), error
+          )) {
+        return std::nullopt;
+      }
+      return ranges;
+    }
+
+    bool subtitle_diagnostic_observation_selected(
+      const std::vector<subtitle_diagnostic_observation_range> &ranges,
+      const std::uint64_t observation
+    ) {
+      if (observation == 0u) {
+        return false;
+      }
+      const auto found = std::lower_bound(
+        ranges.begin(), ranges.end(), observation,
+        [](const subtitle_diagnostic_observation_range &range, const std::uint64_t value) {
+          return range.last < value;
+        }
+      );
+      return found != ranges.end() && found->first <= observation;
+    }
+
+    bool subtitle_diagnostic_should_render(
+      const std::uint64_t observation,
+      const std::uint64_t output_every,
+      const std::vector<subtitle_diagnostic_observation_range> *ranges,
+      const bool render_selected
+    ) {
+      if (observation == 0u || output_every == 0u) {
+        return false;
+      }
+      return (observation - 1u) % output_every == 0u ||
+             (render_selected && ranges && subtitle_diagnostic_observation_selected(*ranges, observation));
+    }
+
     std::optional<resolved_sbs_geometry> resolve_sbs_geometry(
       const std::uint32_t source_width,
       const std::uint32_t source_height,
@@ -3052,6 +3242,14 @@ namespace sbs_bench {
       // Opt-in, synchronous research sidecars. This does not change live geometry or
       // the formal evaluator artifact schema; ordinary runs allocate no extra readback.
       bool subtitle_plane_diagnostics = false;
+      // Save actual stereo for selected research observations as well as the normal cadence.
+      // Default false preserves existing output sampling; estimator processing is unchanged.
+      bool subtitle_plane_diagnostic_render_selected = false;
+      // Borrow mutable working OCR resources only for an explicitly completed offline frame.
+      // They diagnose detector/resolve admission and never supply rendering authority.
+      bool ocr_working_diagnostics = false;
+      std::optional<std::vector<detail::subtitle_diagnostic_observation_range>>
+        subtitle_plane_diagnostic_ranges;
       std::string follow_format;
       std::size_t follow_count = 0;  // optional producer frame-count upper bound
       int eye_w = 0;  // 0 -> derive from source aspect; set with eye_h to test letterboxing
@@ -3093,6 +3291,24 @@ namespace sbs_bench {
           o.device_conditional_replay_control = true;
         } else if (a == "--subtitle-plane-diagnostics") {
           o.subtitle_plane_diagnostics = true;
+        } else if (a == "--subtitle-plane-diagnostic-render-selected") {
+          o.subtitle_plane_diagnostic_render_selected = true;
+        } else if (a == "--ocr-working-diagnostics") {
+          o.ocr_working_diagnostics = true;
+        } else if (a == "--subtitle-plane-diagnostic-frames") {
+          if (o.subtitle_plane_diagnostic_ranges) {
+            BOOST_LOG(error) << "sbs-bench: diagnostic frame selection must appear once";
+            return false;
+          }
+          std::string selection_error;
+          o.subtitle_plane_diagnostic_ranges = detail::parse_subtitle_diagnostic_observation_ranges(
+            next("--subtitle-plane-diagnostic-frames"), selection_error
+          );
+          if (!o.subtitle_plane_diagnostic_ranges) {
+            BOOST_LOG(error) << "sbs-bench: invalid --subtitle-plane-diagnostic-frames: "
+                             << selection_error;
+            return false;
+          }
         } else if (a == "--follow-format") {
           o.follow_format = next("--follow-format");
         } else if (a == "--follow-count") {
@@ -3168,7 +3384,9 @@ namespace sbs_bench {
         }
       }
       if (!o.capabilities.empty()) {
-        if (!o.frames.empty() || !o.out.empty()) {
+        if (!o.frames.empty() || !o.out.empty() || o.subtitle_plane_diagnostic_ranges ||
+            o.subtitle_plane_diagnostic_render_selected ||
+            o.ocr_working_diagnostics) {
           BOOST_LOG(error) << "sbs-bench: --capabilities is a standalone query";
           return false;
         }
@@ -3185,14 +3403,37 @@ namespace sbs_bench {
       const unsigned direct_geometry_input_count =
         (!o.direct_parallax_root.empty() ? 1u : 0u) +
         (!o.depth_coordinate_v2_manifest.empty() ? 1u : 0u);
+      if (o.ocr_working_diagnostics &&
+          (!o.subtitle_plane_diagnostics || o.observation_timeline.empty())) {
+        BOOST_LOG(error)
+          << "sbs-bench: --ocr-working-diagnostics requires --subtitle-plane-diagnostics "
+             "and an explicit --observation-timeline";
+        return false;
+      }
+      if (o.subtitle_plane_diagnostic_ranges &&
+          (!o.subtitle_plane_diagnostics || o.observation_timeline.empty())) {
+        BOOST_LOG(error)
+          << "sbs-bench: diagnostic frame selection requires --subtitle-plane-diagnostics "
+             "and an explicit --observation-timeline";
+        return false;
+      }
+      if (o.subtitle_plane_diagnostic_render_selected &&
+          (!o.subtitle_plane_diagnostics || !o.subtitle_plane_diagnostic_ranges)) {
+        BOOST_LOG(error)
+          << "sbs-bench: --subtitle-plane-diagnostic-render-selected requires "
+             "--subtitle-plane-diagnostics and --subtitle-plane-diagnostic-frames";
+        return false;
+      }
       if (o.subtitle_plane_diagnostics &&
           (o.artifacts != artifact_mode_e::evaluation || o.follow ||
            !o.scene_cache.empty() || !o.render_cache.empty() ||
            direct_geometry_input_count != 0u || o.device_conditional_replay ||
-           o.device_conditional_replay_control || o.output_every != 1)) {
+           o.device_conditional_replay_control ||
+           (o.output_every != 1 && !o.subtitle_plane_diagnostic_ranges))) {
         BOOST_LOG(error)
           << "sbs-bench: --subtitle-plane-diagnostics requires ordinary evaluation "
-             "with output cadence 1 and no replay, follow, or cache";
+             "with no replay, follow, or cache; output cadence other than 1 requires "
+             "--subtitle-plane-diagnostic-frames";
         return false;
       }
       if (direct_geometry_input_count > 0u) {
@@ -3499,6 +3740,17 @@ namespace sbs_bench {
                              "png/jpg/PFM")
                        << " frames in " << o.frames;
       return 4;
+    }
+    if (o.subtitle_plane_diagnostic_ranges) {
+      std::string selection_error;
+      if (!detail::validate_subtitle_diagnostic_observation_ranges(
+            *o.subtitle_plane_diagnostic_ranges,
+            static_cast<std::uint64_t>(frames.size()), selection_error
+          )) {
+        BOOST_LOG(error) << "sbs-bench: invalid selected diagnostic input range: "
+                         << selection_error;
+        return 4;
+      }
     }
     std::vector<std::uint64_t> observation_timestamps;
     std::string observation_timeline_sha256;
@@ -3969,8 +4221,241 @@ namespace sbs_bench {
     ComPtr<ID3D11Texture2D> structure_field_stage;
     ComPtr<ID3D11Texture2D> final_parallax_field_stage;
     ComPtr<ID3D11Texture2D> subtitle_plane_texture_stage;
+    ComPtr<ID3D11Texture2D> subtitle_contour_texture_stage;
     ComPtr<ID3D11Buffer> subtitle_plane_buffer_stage;
     nlohmann::json subtitle_plane_frames = nlohmann::json::array();
+    std::vector<std::uint64_t> captured_subtitle_observations;
+    std::vector<std::uint64_t> rendered_subtitle_observations;
+    std::vector<std::string> rendered_subtitle_source_ids;
+    ComPtr<ID3D11Buffer> ocr_working_buffer_stage;
+    ComPtr<ID3D11Texture2D> ocr_working_texture_stage;
+    nlohmann::json ocr_working_frames = nlohmann::json::array();
+    std::vector<std::uint64_t> captured_ocr_working_observations;
+    const auto write_ocr_working_diagnostics = [&](
+      const models::estimate_result &result,
+      const std::string &output_id,
+      const std::size_t global_sequence,
+      const UINT frame_width,
+      const UINT frame_height
+    ) {
+      if (!estimator || !result.completed_frame_valid ||
+          result.completed_frame_id != global_sequence ||
+          !models::parallax_v2_result_is_authenticated(result)) return false;
+      const auto views = estimator->ocr_working_views_for_evaluation(global_sequence);
+      if (!views || views->completed_frame_id != global_sequence ||
+          views->observation_timestamp_us != observation_timestamps.at(global_sequence - 1u) ||
+          views->input_region != result.input_region ||
+          views->field_width != static_cast<std::uint32_t>(result.field_width) ||
+          views->field_height != static_cast<std::uint32_t>(result.field_height) ||
+          views->field_content != result.field_content) return false;
+      const auto diagnostic_dir = fs::path(o.out) / "ocr-working" / ("frame_" + output_id);
+      std::error_code diagnostic_error;
+      // Each frame owns a new sibling directory; never overwrite an earlier probe payload.
+      if (!fs::create_directories(diagnostic_dir, diagnostic_error) || diagnostic_error) return false;
+      nlohmann::json artifacts = nlohmann::json::object();
+      const auto describe_file = [&](const char *name, const char *dtype,
+                                      const nlohmann::json &shape, std::size_t expected_bytes) {
+        const auto path = diagnostic_dir / name;
+        const auto digest = models::file_sha256_hex(path);
+        if (digest.empty() || fs::file_size(path) != expected_bytes) return false;
+        artifacts[name] = {
+          {"sha256", digest}, {"byte_count", expected_bytes},
+          {"dtype", dtype}, {"layout", "row-major"}, {"shape", shape}
+        };
+        return true;
+      };
+      const auto write_buffer = [&](ID3D11Buffer *buffer, const char *name,
+                                     const char *dtype, const nlohmann::json &shape,
+                                     std::size_t expected_bytes) {
+        return dump_ocr_working_buffer(dev.Get(), ctx.Get(), buffer, expected_bytes,
+                                      diagnostic_dir / name, ocr_working_buffer_stage) &&
+          describe_file(name, dtype, shape, expected_bytes);
+      };
+      const auto write_view = [&](ID3D11ShaderResourceView *view, const char *name,
+                                   const char *dtype, const nlohmann::json &shape,
+                                   std::size_t expected_bytes) {
+        ComPtr<ID3D11Resource> resource;
+        ComPtr<ID3D11Buffer> buffer;
+        return view && (view->GetResource(&resource), SUCCEEDED(resource.As(&buffer))) &&
+          write_buffer(buffer.Get(), name, dtype, shape, expected_bytes);
+      };
+      ComPtr<ID3D11Resource> source_resource;
+      ComPtr<ID3D11Texture2D> source_texture;
+      if (!views->source_band ||
+          (views->source_band->GetResource(&source_resource),
+           FAILED(source_resource.As(&source_texture)))) return false;
+      D3D11_TEXTURE2D_DESC source_desc {};
+      source_texture->GetDesc(&source_desc);
+      const auto probability_width = models::depth_coordinate_v2::subtitle_ocr_output_width;
+      const auto probability_height = models::depth_coordinate_v2::subtitle_ocr_output_height;
+      const auto cell_width = probability_width / 8u;
+      if (!write_view(views->working_probability.Get(), "working_probability.f32", "float32-le",
+                      {probability_height, probability_width},
+                      static_cast<std::size_t>(probability_width) * probability_height * sizeof(float)) ||
+          !write_view(views->cell_stats.Get(), "cell_stats.u32", "uint32-le",
+                      {probability_height, cell_width},
+                      static_cast<std::size_t>(cell_width) * probability_height * sizeof(std::uint32_t)) ||
+          !write_buffer(views->transaction.Get(), "transaction.u32", "uint32-le",
+                        {models::near_identical_gpu_decision_word_count},
+                        models::near_identical_gpu_decision_byte_count) ||
+          !write_buffer(views->resolve_constants.Get(), "resolve_constants.u32", "uint32-le",
+                        {16u}, 16u * sizeof(std::uint32_t)) ||
+          !dump_contour_texture(dev.Get(), ctx.Get(), views->source_band.Get(),
+                                DXGI_FORMAT_R16G16B16A16_FLOAT, 8u,
+                                diagnostic_dir / "source_band.rgba16f", ocr_working_texture_stage) ||
+          !describe_file("source_band.rgba16f", "float16-le",
+                         {source_desc.Height, source_desc.Width, 4u},
+                         static_cast<std::size_t>(source_desc.Width) * source_desc.Height * 8u)) return false;
+      const nlohmann::json diagnostic = {
+        {"schema", 1u},
+        {"scope", "mutable-working-exact-completed-research-not-rendering-authority"},
+        {"production_dump", false}, {"rendering_authority", false},
+        {"working_payload_currentness_requires_transaction_proof", true},
+        {"observation_ordinal", global_sequence}, {"source_file_id", output_id},
+        {"completed_frame_id", views->completed_frame_id},
+        {"observation_timestamp_us", views->observation_timestamp_us},
+        {"source_width", frame_width}, {"source_height", frame_height},
+        {"analysis_region", {result.input_region.left, result.input_region.top,
+                              result.input_region.right, result.input_region.bottom}},
+        {"analysis_generation", result.input_region.analysis_generation},
+        {"field_width", result.field_width}, {"field_height", result.field_height},
+        {"content", {result.field_content.left, result.field_content.top,
+                     result.field_content.right, result.field_content.bottom}},
+        {"source_band_width", source_desc.Width}, {"source_band_height", source_desc.Height},
+        {"crop_geometry_source", "resolve_constants.u32 words8-11; band shape is actual allocation"},
+        {"input_domain_reset", result.input_domain_reset},
+        {"subtitle_work_suppressed", result.subtitle_work_suppressed},
+        {"exact_subtitle_evidence", models::subtitle_evidence_is_exact_frame(result)},
+        {"coordinate_contract_schema", models::depth_coordinate_v2::contract_schema},
+        {"coordinate_contract_sha256", models::depth_coordinate_v2::contract_canonical_sha256},
+        {"producer_source_closure_sha256", models::depth_coordinate_v2::shader_source_closure_sha256},
+        {"transaction_optional_receipt_included", true},
+        {"artifact_digests", artifacts}
+      };
+      std::ofstream diagnostic_stream(diagnostic_dir / "metadata.json");
+      diagnostic_stream << diagnostic.dump(2) << '\n';
+      diagnostic_stream.flush();
+      if (!diagnostic_stream.good()) return false;
+      ocr_working_frames.push_back({
+        {"observation_ordinal", global_sequence}, {"source_file_id", output_id},
+        {"metadata", "ocr-working/frame_" + output_id + "/metadata.json"}
+      });
+      captured_ocr_working_observations.push_back(global_sequence);
+      return true;
+    };
+    // One native writer serves full legacy exports and selected pre-render snapshots.
+    // Each staging holder is reused synchronously before the next source observation.
+    const auto write_subtitle_plane_diagnostics = [&](
+      const models::estimate_result &result,
+      const std::string &output_id,
+      const std::size_t global_sequence,
+      const UINT frame_width,
+      const UINT frame_height
+    ) {
+      const auto diagnostic_dir =
+        fs::path(o.out) / "subtitle-plane" / ("frame_" + output_id);
+      std::error_code diagnostic_error;
+      fs::create_directories(diagnostic_dir, diagnostic_error);
+      if (diagnostic_error) {
+        BOOST_LOG(error) << "sbs-bench: cannot create subtitle plane diagnostic directory";
+        return false;
+      }
+      const auto write_field = [&](ID3D11ShaderResourceView *view, const char *name) {
+        ComPtr<ID3D11Resource> resource;
+        ComPtr<ID3D11Texture2D> texture;
+        return view &&
+          (view->GetResource(&resource), SUCCEEDED(resource.As(&texture))) &&
+          dump_float_texture(dev.Get(), ctx.Get(), texture.Get(),
+                             diagnostic_dir / name, subtitle_plane_texture_stage);
+      };
+      const auto write_words = [&](ID3D11ShaderResourceView *view,
+                                    std::size_t count, const char *name) {
+        // The helper copies opaque bytes; uint words are never converted to floats.
+        return dump_float_buffer(dev.Get(), ctx.Get(), view, count,
+                                 diagnostic_dir / name, subtitle_plane_buffer_stage);
+      };
+      const bool exact_subtitle = models::subtitle_evidence_is_exact_frame(result);
+      const auto write_contour = [&](ID3D11ShaderResourceView *view,
+                                     DXGI_FORMAT format, std::size_t bytes,
+                                     const char *name) {
+        return dump_contour_texture(dev.Get(), ctx.Get(), view, format, bytes,
+                                    diagnostic_dir / name, subtitle_contour_texture_stage);
+      };
+      if (!write_field(result.shadow_candidate_parallax.Get(), "candidate.f32") ||
+          !write_field(result.shadow_vertical_conditioned.Get(), "vertical.f32") ||
+          !write_field(result.shadow_base_final_parallax.Get(), "base.f32") ||
+          !write_field(result.shadow_final_parallax.Get(), "final.f32") ||
+          !write_words(result.shadow_state.Get(), models::depth_coordinate_v2::state_float_count, "state.f32") ||
+          !write_words(result.cut_state.Get(), 32u, "cut_state.f32") ||
+          (exact_subtitle &&
+           (!write_words(result.ocr_box_record.Get(), 208u, "ocr_record.u32") ||
+            !write_words(result.subtitle_locator_state.Get(), models::depth_coordinate_v2::subtitle_plane_state_word_count, "locator_state.u32") ||
+            !write_words(result.subtitle_contour_identity.Get(), models::depth_coordinate_v2::subtitle_contour_history_word_count, "contour_identity.u32") ||
+            !write_words(result.subtitle_ocr_probability.Get(), 960u * 160u, "ocr_probability.f32") ||
+            !write_contour(result.subtitle_contour_support.Get(), DXGI_FORMAT_R32_UINT, 4u, "contour_support.u32") ||
+            !write_contour(result.subtitle_contour_field_pin.Get(), DXGI_FORMAT_R32_UINT, 4u, "contour_field_pin.u32") ||
+            !write_contour(result.subtitle_contour_distance.Get(), DXGI_FORMAT_R32_FLOAT, 4u, "contour_distance.f32") ||
+            !write_field(result.subtitle_gaussian_weight.Get(), "gaussian_weight.f32") ||
+            !write_field(result.subtitle_gaussian_blend.Get(), "gaussian_blend.f32") ||
+            !write_field(result.subtitle_gaussian_vertical_conditioned.Get(), "gaussian_vertical_conditioned.f32") ||
+            !write_words(result.subtitle_gaussian_control.Get(), 1u, "gaussian_control.u32") ||
+            !write_contour(result.subtitle_contour_history.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT, 16u, "contour_history.rgba32f") ||
+            !write_contour(result.subtitle_contour_source.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, 8u, "contour_source.rgba16f")))) {
+        BOOST_LOG(error) << "sbs-bench: incomplete exact-frame subtitle plane diagnostic export";
+        return false;
+      }
+      nlohmann::json artifact_digests = nlohmann::json::object();
+      for (const auto &entry : fs::directory_iterator(diagnostic_dir)) {
+        if (!entry.is_regular_file() || entry.path().filename() == "metadata.json") continue;
+        const auto digest = models::file_sha256_hex(entry.path());
+        if (digest.empty()) return false;
+        artifact_digests[entry.path().filename().string()] = {
+          {"sha256", digest}, {"byte_count", entry.file_size()}
+        };
+      }
+      const nlohmann::json diagnostic = {
+        {"schema", 3u},
+        {"role", "opt-in-synchronous-subtitle-plane-research-input"},
+        {"production_dump", false},
+        {"source_frame_id", global_sequence},
+        {"completed_frame_id", result.completed_frame_id},
+        {"source_width", frame_width}, {"source_height", frame_height},
+        {"analysis_width", result.input_region.width()},
+        {"analysis_height", result.input_region.height()},
+        {"field_width", result.field_width}, {"field_height", result.field_height},
+        {"content", {result.field_content.left, result.field_content.top,
+                     result.field_content.right, result.field_content.bottom}},
+        {"analysis_generation", result.input_region.analysis_generation},
+        {"raw_coordinate_scale", result.parallax_v2_raw_coordinate_scale},
+        {"requested_gain", result.parallax_v2_requested_gain},
+        {"requested_pop_strength", result.parallax_v2_requested_pop_strength},
+        {"joint_plane_mode", result.parallax_v2_joint_plane_mode},
+        {"input_domain_reset", result.input_domain_reset},
+        {"subtitle_work_suppressed", result.subtitle_work_suppressed},
+        {"exact_subtitle_evidence", exact_subtitle},
+        {"contour_schema", models::depth_coordinate_v2::subtitle_contour_schema},
+        {"contour_recipe", models::depth_coordinate_v2::subtitle_contour_recipe},
+        {"producer_source_closure_sha256", models::depth_coordinate_v2::shader_source_closure_sha256},
+        {"artifact_digests", artifact_digests},
+        {"observation_timestamp_us", observation_timestamps.empty() ?
+            0u : observation_timestamps.at(global_sequence - 1u)},
+        {"coordinate_contract_schema", models::depth_coordinate_v2::contract_schema},
+        {"coordinate_contract_sha256", models::depth_coordinate_v2::contract_canonical_sha256}
+      };
+      std::ofstream diagnostic_stream(diagnostic_dir / "metadata.json");
+      diagnostic_stream << diagnostic.dump(2) << '\n';
+      diagnostic_stream.flush();
+      if (!diagnostic_stream.good()) {
+        BOOST_LOG(error) << "sbs-bench: cannot write subtitle plane diagnostic metadata";
+        return false;
+      }
+      subtitle_plane_frames.push_back({
+        {"source_frame_id", global_sequence},
+        {"metadata", "subtitle-plane/frame_" + output_id + "/metadata.json"}
+      });
+      return true;
+    };
+
     ComPtr<ID3D11Buffer> cut_state_stage;
     ComPtr<ID3D11Texture2D> scene_cache_depth_stage;
     ComPtr<ID3D11Buffer> scene_cache_state_stage;
@@ -5254,9 +5739,47 @@ namespace sbs_bench {
         continue;
       }
 
+      if (o.ocr_working_diagnostics &&
+          (!o.subtitle_plane_diagnostic_ranges ||
+           detail::subtitle_diagnostic_observation_selected(
+             *o.subtitle_plane_diagnostic_ranges, global_sequence
+           )) &&
+          !write_ocr_working_diagnostics(
+            est, output_id, global_sequence, frame_width, frame_height
+          )) {
+        BOOST_LOG(error) << "sbs-bench: working OCR diagnostic did not bind the current "
+                         << "completed observation " << global_sequence;
+        return 6;
+      }
+
+      if (o.subtitle_plane_diagnostic_ranges &&
+          detail::subtitle_diagnostic_observation_selected(
+            *o.subtitle_plane_diagnostic_ranges, global_sequence
+          )) {
+        // A selected observation must publish its own joined field/contour transaction.
+        // Never relabel an older reused tuple with the newer input ordinal.
+        if (!est.completed_frame_valid || est.completed_frame_id != global_sequence ||
+            !models::parallax_v2_result_is_authenticated(est) ||
+            !write_subtitle_plane_diagnostics(
+              est, output_id, global_sequence, frame_width, frame_height
+            )) {
+          BOOST_LOG(error) << "sbs-bench: selected subtitle diagnostic did not publish "
+                           << "the current authenticated observation " << global_sequence;
+          return 6;
+        }
+        captured_subtitle_observations.push_back(global_sequence);
+        subtitle_plane_frames.back()["observation_ordinal"] = global_sequence;
+        subtitle_plane_frames.back()["source_file_id"] = output_id;
+      }
+
       // Sampling output must never sample the depth/EMA/cut pipeline itself. Every source
       // frame above was inferred and consumed; only expensive composite/readback is skipped.
-      if ((fi % (size_t) o.output_every) != 0) {
+      if (!detail::subtitle_diagnostic_should_render(
+            static_cast<std::uint64_t>(fi) + 1u,
+            static_cast<std::uint64_t>(o.output_every),
+            o.subtitle_plane_diagnostic_ranges ? &*o.subtitle_plane_diagnostic_ranges : nullptr,
+            o.subtitle_plane_diagnostic_render_selected
+          )) {
         continue;
       }
 
@@ -5534,6 +6057,10 @@ namespace sbs_bench {
         if (frame_written) {
           written++;
           output_completed = true;
+          if (o.subtitle_plane_diagnostic_ranges) {
+            rendered_subtitle_observations.push_back(global_sequence);
+            rendered_subtitle_source_ids.push_back(output_id);
+          }
         }
         if (o.artifacts == artifact_mode_e::evaluation) {
           if (direct_parallax_mode) {
@@ -5589,78 +6116,11 @@ namespace sbs_bench {
               return 6;
             }
 
-            if (o.subtitle_plane_diagnostics) {
-              const auto diagnostic_dir =
-                fs::path(o.out) / "subtitle-plane" / ("frame_" + output_id);
-              std::error_code diagnostic_error;
-              fs::create_directories(diagnostic_dir, diagnostic_error);
-              if (diagnostic_error) {
-                BOOST_LOG(error) << "sbs-bench: cannot create subtitle plane diagnostic directory";
-                return 6;
-              }
-              const auto write_field = [&](ID3D11ShaderResourceView *view, const char *name) {
-                ComPtr<ID3D11Resource> resource;
-                ComPtr<ID3D11Texture2D> texture;
-                return view &&
-                  (view->GetResource(&resource), SUCCEEDED(resource.As(&texture))) &&
-                  dump_float_texture(dev.Get(), ctx.Get(), texture.Get(),
-                                     diagnostic_dir / name, subtitle_plane_texture_stage);
-              };
-              const auto write_words = [&](ID3D11ShaderResourceView *view,
-                                            std::size_t count, const char *name) {
-                // The helper copies opaque bytes; uint words are never converted to floats.
-                return dump_float_buffer(dev.Get(), ctx.Get(), view, count,
-                                         diagnostic_dir / name, subtitle_plane_buffer_stage);
-              };
-              const bool exact_subtitle = models::subtitle_evidence_is_exact_frame(est);
-              if (!write_field(est.shadow_candidate_parallax.Get(), "candidate.f32") ||
-                  !write_field(est.shadow_vertical_conditioned.Get(), "vertical.f32") ||
-                  !write_field(est.shadow_base_final_parallax.Get(), "base.f32") ||
-                  !write_field(est.shadow_final_parallax.Get(), "final.f32") ||
-                  !write_words(est.shadow_state.Get(), models::depth_coordinate_v2::state_float_count, "state.f32") ||
-                  !write_words(est.cut_state.Get(), 32u, "cut_state.f32") ||
-                  (exact_subtitle &&
-                   (!write_words(est.ocr_box_record.Get(), 208u, "ocr_record.u32") ||
-                    !write_words(est.subtitle_locator_state.Get(), models::depth_coordinate_v2::subtitle_locator_state_word_count, "locator_state.u32")))) {
-                BOOST_LOG(error) << "sbs-bench: incomplete exact-frame subtitle plane diagnostic export";
-                return 6;
-              }
-              const nlohmann::json diagnostic = {
-                {"schema", 1u},
-                {"role", "opt-in-synchronous-subtitle-plane-research-input"},
-                {"production_dump", false},
-                {"source_frame_id", global_sequence},
-                {"completed_frame_id", est.completed_frame_id},
-                {"source_width", frame_width}, {"source_height", frame_height},
-                {"analysis_width", est.input_region.width()},
-                {"analysis_height", est.input_region.height()},
-                {"field_width", est.field_width}, {"field_height", est.field_height},
-                {"content", {est.field_content.left, est.field_content.top,
-                             est.field_content.right, est.field_content.bottom}},
-                {"analysis_generation", est.input_region.analysis_generation},
-                {"raw_coordinate_scale", est.parallax_v2_raw_coordinate_scale},
-                {"requested_gain", est.parallax_v2_requested_gain},
-                {"requested_pop_strength", est.parallax_v2_requested_pop_strength},
-                {"joint_plane_mode", est.parallax_v2_joint_plane_mode},
-                {"input_domain_reset", est.input_domain_reset},
-                {"subtitle_work_suppressed", est.subtitle_work_suppressed},
-                {"exact_subtitle_evidence", exact_subtitle},
-                {"observation_timestamp_us", observation_timestamps.empty() ?
-                    0u : observation_timestamps.at(global_sequence - 1u)},
-                {"coordinate_contract_schema", models::depth_coordinate_v2::contract_schema},
-                {"coordinate_contract_sha256", models::depth_coordinate_v2::contract_canonical_sha256}
-              };
-              std::ofstream diagnostic_stream(diagnostic_dir / "metadata.json");
-              diagnostic_stream << diagnostic.dump(2) << '\n';
-              diagnostic_stream.flush();
-              if (!diagnostic_stream.good()) {
-                BOOST_LOG(error) << "sbs-bench: cannot write subtitle plane diagnostic metadata";
-                return 6;
-              }
-              subtitle_plane_frames.push_back({
-                {"source_frame_id", global_sequence},
-                {"metadata", "subtitle-plane/frame_" + output_id + "/metadata.json"}
-              });
+            if (o.subtitle_plane_diagnostics && !o.subtitle_plane_diagnostic_ranges &&
+                !write_subtitle_plane_diagnostics(
+                  est, output_id, global_sequence, frame_width, frame_height
+                )) {
+              return 6;
             }
 
             if (device_conditional_replay_evidence) {
@@ -6164,18 +6624,88 @@ namespace sbs_bench {
                       << publication_receipt_failures;
     }
     if (o.subtitle_plane_diagnostics) {
-      const nlohmann::json diagnostic_manifest = {
-        {"schema", 1u},
+      nlohmann::json diagnostic_manifest = {
+        {"schema", 2u},
         {"role", "opt-in-synchronous-subtitle-plane-research-input"},
         {"production_dump", false},
         {"geometry_changed", false},
+        {"diagnostic_render_selected", o.subtitle_plane_diagnostic_render_selected},
         {"frames", subtitle_plane_frames}
       };
+      if (o.subtitle_plane_diagnostic_ranges) {
+        std::vector<std::uint64_t> requested_observations;
+        for (const auto &range : *o.subtitle_plane_diagnostic_ranges) {
+          for (std::uint64_t observation = range.first;; ++observation) {
+            requested_observations.push_back(observation);
+            if (observation == range.last) {
+              break;
+            }
+          }
+        }
+        if (captured_subtitle_observations != requested_observations ||
+            subtitle_plane_frames.size() != requested_observations.size() ||
+            rendered_subtitle_observations.size() != static_cast<std::size_t>(written) ||
+            rendered_subtitle_source_ids.size() != rendered_subtitle_observations.size() ||
+            (o.subtitle_plane_diagnostic_render_selected &&
+             !std::includes(rendered_subtitle_observations.begin(), rendered_subtitle_observations.end(),
+                            requested_observations.begin(), requested_observations.end())) ||
+            cut_state_records.size() != completed_frame_count) {
+          BOOST_LOG(error) << "sbs-bench: selected subtitle diagnostics did not cover "
+                           << "the exact requested observations and rendered outputs";
+          return 6;
+        }
+        // The render-side processed counter may stop at the last output sample. The already
+        // authenticated complete cut trace records every source observation before output skip.
+        diagnostic_manifest["schema"] = 2u;
+        diagnostic_manifest["selection_basis"] = "one-based-observation-ordinal";
+        diagnostic_manifest["processed_frame_count"] = cut_state_records.size();
+        diagnostic_manifest["requested_observation_ids"] = requested_observations;
+        diagnostic_manifest["captured_observation_ids"] = captured_subtitle_observations;
+        diagnostic_manifest["output_every"] = o.output_every;
+        diagnostic_manifest["rendered_observation_ids"] = rendered_subtitle_observations;
+        diagnostic_manifest["rendered_source_frame_ids"] = rendered_subtitle_source_ids;
+      }
       std::ofstream diagnostic_manifest_stream(fs::path(o.out) / "subtitle_plane_diagnostics.json");
       diagnostic_manifest_stream << diagnostic_manifest.dump(2) << '\n';
       diagnostic_manifest_stream.flush();
       if (!diagnostic_manifest_stream.good()) {
         BOOST_LOG(error) << "sbs-bench: cannot write subtitle plane diagnostic manifest";
+        return 6;
+      }
+    }
+    if (o.ocr_working_diagnostics) {
+      std::vector<std::uint64_t> requested_observations;
+      for (std::size_t index = 0u; index < completed_frame_count; ++index) {
+        const auto ordinal = static_cast<std::uint64_t>(index) + 1u;
+        if (!o.subtitle_plane_diagnostic_ranges ||
+            detail::subtitle_diagnostic_observation_selected(
+              *o.subtitle_plane_diagnostic_ranges, ordinal
+            )) requested_observations.push_back(ordinal);
+      }
+      if (captured_ocr_working_observations != requested_observations ||
+          ocr_working_frames.size() != requested_observations.size() ||
+          (o.subtitle_plane_diagnostic_ranges &&
+           captured_ocr_working_observations != captured_subtitle_observations) ||
+          cut_state_records.size() != completed_frame_count) {
+        BOOST_LOG(error) << "sbs-bench: working OCR diagnostics did not cover the exact "
+                         << "requested observations";
+        return 6;
+      }
+      const nlohmann::json diagnostic_manifest = {
+        {"schema", 1u},
+        {"scope", "mutable-working-exact-completed-research-not-rendering-authority"},
+        {"production_dump", false}, {"rendering_authority", false}, {"geometry_changed", false},
+        {"selection_basis", "one-based-observation-ordinal"},
+        {"processed_frame_count", completed_frame_count},
+        {"requested_observation_ids", requested_observations},
+        {"captured_observation_ids", captured_ocr_working_observations},
+        {"output_every", o.output_every}, {"frames", ocr_working_frames}
+      };
+      std::ofstream diagnostic_manifest_stream(fs::path(o.out) / "ocr_working_diagnostics.json");
+      diagnostic_manifest_stream << diagnostic_manifest.dump(2) << '\n';
+      diagnostic_manifest_stream.flush();
+      if (!diagnostic_manifest_stream.good()) {
+        BOOST_LOG(error) << "sbs-bench: cannot write working OCR diagnostic manifest";
         return 6;
       }
     }
@@ -6189,7 +6719,7 @@ namespace sbs_bench {
       }
       // Machine-readable execution contract. Evaluation must not scrape human log prose. The
       // independent evaluation-harness schema 22 attests the formal V2-only configuration
-      // surface. Private adaptive replay uses schemas 28 (treatment) and 29 (force oracle) so its
+      // surface. Private adaptive replay uses schemas 30 (treatment) and 31 (force oracle) so its
       // additional exact-field evidence cannot silently expand run_eval's schema-22 contract;
       // it is unrelated to Dump 3D and the independently versioned DVC2 contract (the direct-replay schema stays
       // pinned by its own validator).
@@ -6200,7 +6730,7 @@ namespace sbs_bench {
                  << (direct_parallax_mode ?
                        direct_geometry_contract_schema :
                         (o.device_conditional_replay ?
-                           28u : (o.device_conditional_replay_control ? 29u : 22u)))
+                           30u : (o.device_conditional_replay_control ? 31u : 22u)))
                  << ",\n"
                  << "  \"model\": " << json_string(model.name) << ",\n"
                  << "  \"depth_step\": "

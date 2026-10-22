@@ -37,6 +37,7 @@
 #include "src/generated/sbs_adaptive_state_contract.h"
 #include "src/depth_coordinate_v2.h"
 #include "src/host_sbs_resolution.h"
+#include "src/host_sbs_subtitle_plane.h"
 #include "src/host_sbs_gpu_trace.h"
 #include "src/host_sbs_shader_cache.h"
 #include "src/logging.h"
@@ -103,21 +104,6 @@ namespace platf::sbs_debug {
       binding[word_count_key] = word_count;
       return binding;
     }
-
-    constexpr std::uint32_t subtitle_locator_flag_owner = 1u;
-    constexpr std::uint32_t subtitle_locator_flag_pending = 2u;
-    constexpr std::uint32_t subtitle_locator_flag_target_valid = 4u;
-    constexpr std::uint32_t subtitle_locator_flag_target_reset = 8u;
-    constexpr std::uint32_t subtitle_locator_flag_provisional_current =
-      subtitle_locator_provisional_current_flag;
-    constexpr std::uint32_t subtitle_locator_known_flags =
-      subtitle_locator_flag_owner |
-      subtitle_locator_flag_pending |
-      subtitle_locator_flag_target_valid |
-      subtitle_locator_flag_target_reset |
-      subtitle_locator_flag_provisional_current;
-    constexpr std::uint32_t subtitle_locator_max_event = 3u;
-    constexpr std::uint32_t subtitle_locator_max_fade = 2u;
 
     nlohmann::json subtitle_shader_contract_json(
       const models::parallax_v2_shader_provenance_t &identity,
@@ -215,17 +201,17 @@ namespace platf::sbs_debug {
       };
     }
 
-    nlohmann::json subtitle_locator_resolver_contract_json(
+    nlohmann::json subtitle_plane_resolver_contract_json(
       const models::parallax_v2_shader_provenance_t &identity
     ) {
       return {
-        {"state_schema", subtitle_locator_state_schema},
-        {"state_tag", subtitle_locator_state_tag},
-        {"state_word_count", subtitle_locator_state_word_count},
-        {"rectangle_capacity", subtitle_locator_rectangle_capacity},
+        {"state_schema", subtitle_plane_state_schema},
+        {"state_tag", subtitle_plane_state_tag},
+        {"state_word_count", subtitle_plane_state_word_count},
+        {"cover_capacity", subtitle_plane_cover_capacity},
         {"adaptive_ui", {
-          {"policy_id", adaptive_policy_id}, {"state_offset", subtitle_locator_adaptive_offset},
-          {"state_word_count", subtitle_locator_adaptive_word_count},
+          {"policy_id", adaptive_policy_id}, {"state_offset", subtitle_plane_adaptive_offset},
+          {"state_word_count", subtitle_plane_adaptive_word_count},
           {"clock", "source-observation-microseconds"},
           {"geometry_authority", subtitle_geometry_authority},
           {"probe", "union-of-current-authorized-covers-in-content"},
@@ -235,7 +221,7 @@ namespace platf::sbs_debug {
           {"approach_delay_ms", 100u}, {"retreat_delay_ms", 1500u},
           {"approach_source_u_per_second", 0.03f},
           {"retreat_source_u_per_second", 0.005f},
-          {"geometric_pin", "full-on-current-cover-authority"},
+          {"geometric_pin", "full-on-current-contour-authority"},
           {"host_model_policy", {
             {"mode", 3u}, {"maximum_plane_source_u", direct_container_limit},
             {"candidate_step_per_eye_source_pixels", 4u},
@@ -246,40 +232,13 @@ namespace platf::sbs_debug {
             {"capped_conflict", "derived-from-top-candidate-counts"},
           }},
         }},
-        {"qualification_policy", {
-          {"corner_filter_applies_to", "non-ribbon-ordinary-cores"},
-          {"corner_edge_clearance",
-           "strictly-less-than-floor-content-width-over-divisor"},
-          {"corner_edge_divisor", subtitle_locator_corner_edge_divisor},
-          {"corner_bottom", "at-or-below-dynamic-roi-bottom-minus-rows"},
-          {"corner_bottom_rows", subtitle_locator_corner_bottom_rows},
-          {"edge_threshold_equality", "accepted"},
-          {"ribbon_exempt", true},
-        }},
-        {"provisional_current_policy", {
-          {"flag", subtitle_locator_provisional_current_flag},
-          {"target_word", subtitle_locator_provisional_target_word},
-          {"fade_word", subtitle_locator_provisional_fade_word},
-          {"applies_to", "first-distinct-unmatched-single-ordinary-replacement"},
-          {"prior_requires", {
-            {"owner_count", 1u}, {"current_count", 1u}, {"pending_count", 0u},
-            {"fade", 2u}, {"event", "none"}, {"unreliable_holds", 0u},
-          }},
-          {"minimum_vertical_overlap", {
-            {"numerator", subtitle_locator_provisional_min_vertical_overlap_numerator},
-            {"denominator", subtitle_locator_provisional_min_vertical_overlap_denominator},
-          }},
-          {"maximum_height_ratio", subtitle_locator_provisional_max_height_ratio},
-          {"maximum_center_y_delta", {
-            {"numerator",
-             subtitle_locator_provisional_max_center_y_delta_shorter_height},
-            {"denominator", 1u}, {"unit", "shorter-height"},
-          }},
-          {"horizontal_center_containment", "mutual-half-open"},
-          {"current_authority", "exact-same-frame-selected-ocr8-core-cover-pair"},
-          {"durable_state", "owner-generation-target-fade-unchanged"},
-          {"duplicate_requires", "exact-identity-core-and-cover"},
-          {"hard_cut_allowed", false},
+        {"current_cover_policy", {
+          {"selection", "all-valid-current-ocr8-core-cover-pairs"},
+          {"capacity", subtitle_plane_cover_capacity},
+          {"geometry_source", "exact-current-ocr8-record-final-payload"},
+          {"history_authority", "per-pixel-four-genuine-rgb-confirmations"},
+          {"box_identity_resets_history", false},
+          {"held_reuse", "byte-identical-latest-published-ocr8-and-uip2-tuple"},
         }},
         {"target_policy", {
           {"units", "one-eye-analysis-source-U"},
@@ -291,11 +250,11 @@ namespace platf::sbs_debug {
           {"approach_rate_source_u_per_second", 0.03f},
           {"retreat_rate_source_u_per_second", 0.005f},
           {"rate_tick_cap_us", 250000u},
-          {"current_cover_pin", "immediate-full-plane"},
-          {"collar", "existing-horizontal-plus-vertical-analytic-distance"},
-          {"owner_hold_word", "reserved-zero"},
+          {"current_cover_pin", "confirmed-native-temporal-support-literal-gaussian-weight"},
+          {"collar", "untruncated-max-union-gaussian-before-shared-slope-conditioning"},
           {"representation_limit", "direct-parallax-container"},
         }},
+        {"contour_policy", nlohmann::json::parse(subtitle_contour_policy_json)},
         {"shader_contract", subtitle_shader_contract_json(identity, {
           {
             {"source_file", "host_sbs_subtitle_locator_cs.hlsl"},
@@ -305,6 +264,46 @@ namespace platf::sbs_debug {
           {
             {"source_file", "host_sbs_subtitle_locator_cs.hlsl"},
             {"entrypoint", "condition_main"},
+            {"target", "cs_5_0"},
+          },
+          {
+            {"source_file", "host_sbs_subtitle_contour_cs.hlsl"},
+            {"entrypoint", "temporal_main"},
+            {"target", "cs_5_0"},
+          },
+          {
+            {"source_file", "host_sbs_subtitle_contour_cs.hlsl"},
+            {"entrypoint", "project_main"},
+            {"target", "cs_5_0"},
+          },
+          {
+            {"source_file", "host_sbs_subtitle_contour_cs.hlsl"},
+            {"entrypoint", "history_main"},
+            {"target", "cs_5_0"},
+          },
+          {
+            {"source_file", "host_sbs_subtitle_contour_distance_cs.hlsl"},
+            {"entrypoint", "horizontal_main"},
+            {"target", "cs_5_0"},
+          },
+          {
+            {"source_file", "host_sbs_subtitle_contour_distance_cs.hlsl"},
+            {"entrypoint", "vertical_main"},
+            {"target", "cs_5_0"},
+          },
+          {
+            {"source_file", "host_sbs_subtitle_contour_cs.hlsl"},
+            {"entrypoint", "snapshot_main"},
+            {"target", "cs_5_0"},
+          },
+          {
+            {"source_file", "depth_coordinate_v2_vertical_limit_cs.hlsl"},
+            {"entrypoint", "subtitle_main"},
+            {"target", "cs_5_0"},
+          },
+          {
+            {"source_file", "depth_coordinate_v2_limit_cs.hlsl"},
+            {"entrypoint", "subtitle_main"},
             {"target", "cs_5_0"},
           },
         })},
@@ -426,662 +425,14 @@ namespace platf::sbs_debug {
       return true;
     }
 
-    struct subtitle_rectangle_summary_t {
-      std::array<std::uint32_t, 4> bbox {};
-      std::uint32_t area = 0u;
-    };
-
-    bool subtitle_locator_rectangles_are_canonical(
-      const std::vector<std::uint8_t> &bytes,
-      const std::size_t offset,
-      const std::uint32_t count,
-      const std::uint32_t field_width,
-      const std::uint32_t field_height,
-      const models::depth_tensor_content_rect_t tensor_content,
-      const std::uint32_t roi_top,
-      const std::uint32_t roi_bottom,
-      const std::uint32_t ribbon_min_bottom,
-      const std::uint32_t ribbon_mask,
-      const bool current_cover,
-      subtitle_rectangle_summary_t &summary
-    ) {
-      summary = {};
-      for (std::uint32_t slot = 0u; slot < subtitle_locator_rectangle_capacity; ++slot) {
-        const std::size_t first = offset + static_cast<std::size_t>(slot) * 4u;
-        const auto left = subtitle_word(bytes, first);
-        const auto top = subtitle_word(bytes, first + 1u);
-        const auto right = subtitle_word(bytes, first + 2u);
-        const auto bottom = subtitle_word(bytes, first + 3u);
-        const bool ribbon = (ribbon_mask & (1u << slot)) != 0u;
-        if (slot >= count) {
-          if (left != 0u || top != 0u || right != 0u || bottom != 0u) {
-            return false;
-          }
-        } else if (left >= right || top >= bottom ||
-                   left < tensor_content.left || top < tensor_content.top ||
-                   right > tensor_content.right || bottom > tensor_content.bottom ||
-                   right > field_width || bottom > field_height || top < roi_top ||
-                   (current_cover && ribbon ?
-                      (left != tensor_content.left || right != tensor_content.right ||
-                       bottom != tensor_content.bottom) :
-                      (bottom > roi_bottom || (ribbon && bottom < ribbon_min_bottom)))) {
-          return false;
-        } else {
-          if (!current_cover && slot != 0u) {
-            const std::size_t previous = first - 4u;
-            const auto previous_left = subtitle_word(bytes, previous);
-            const auto previous_top = subtitle_word(bytes, previous + 1u);
-            if (top < previous_top || (top == previous_top && left < previous_left)) {
-              return false;
-            }
-          }
-          if (slot == 0u) {
-            summary.bbox = {left, top, right, bottom};
-          } else {
-            summary.bbox[0] = std::min(summary.bbox[0], left);
-            summary.bbox[1] = std::min(summary.bbox[1], top);
-            summary.bbox[2] = std::max(summary.bbox[2], right);
-            summary.bbox[3] = std::max(summary.bbox[3], bottom);
-          }
-          summary.area += (right - left) * (bottom - top);
-        }
-      }
-      return true;
+    models::host_sbs_subtitle_plane::words_t subtitle_plane_words(
+      const std::vector<std::uint8_t> &bytes
+    ) noexcept {
+      models::host_sbs_subtitle_plane::words_t words {};
+      if (bytes.size() == sizeof(words)) std::memcpy(words.data(), bytes.data(), sizeof(words));
+      return words;
     }
 
-    bool subtitle_rectangle_summary_matches(
-      const std::vector<std::uint8_t> &bytes,
-      const std::size_t bbox_offset,
-      const std::size_t area_offset,
-      const subtitle_rectangle_summary_t &summary
-    ) {
-      return subtitle_word(bytes, bbox_offset) == summary.bbox[0] &&
-             subtitle_word(bytes, bbox_offset + 1u) == summary.bbox[1] &&
-             subtitle_word(bytes, bbox_offset + 2u) == summary.bbox[2] &&
-             subtitle_word(bytes, bbox_offset + 3u) == summary.bbox[3] &&
-             subtitle_word(bytes, area_offset) == summary.area;
-    }
-
-    struct subtitle_selected_box_t {
-      std::array<std::uint32_t, 4> core {};
-      std::array<std::uint32_t, 4> cover {};
-      bool ribbon = false;
-    };
-
-    std::uint32_t subtitle_rectangle_area(
-      const std::array<std::uint32_t, 4> &rectangle
-    ) {
-      return (rectangle[2] - rectangle[0]) * (rectangle[3] - rectangle[1]);
-    }
-
-    bool subtitle_lines_are_coherent(
-      const std::array<std::uint32_t, 4> &a,
-      const std::array<std::uint32_t, 4> &b
-    ) {
-      const auto width_a = a[2] - a[0];
-      const auto width_b = b[2] - b[0];
-      const auto height_a = a[3] - a[1];
-      const auto height_b = b[3] - b[1];
-      const auto overlap = std::min(a[2], b[2]) > std::max(a[0], b[0]) ?
-        std::min(a[2], b[2]) - std::max(a[0], b[0]) : 0u;
-      const auto center_x_a = a[0] + a[2];
-      const auto center_x_b = b[0] + b[2];
-      const auto center_x_delta_twice = center_x_a > center_x_b ?
-        center_x_a - center_x_b : center_x_b - center_x_a;
-      const auto left_delta = a[0] > b[0] ? a[0] - b[0] : b[0] - a[0];
-      const auto right_delta = a[2] > b[2] ? a[2] - b[2] : b[2] - a[2];
-      const auto center_y_a = a[1] + a[3];
-      const auto center_y_b = b[1] + b[3];
-      const auto center_y_delta_twice = center_y_a > center_y_b ?
-        center_y_a - center_y_b : center_y_b - center_y_a;
-      const auto gap = a[3] <= b[1] ? b[1] - a[3] :
-                       b[3] <= a[1] ? a[1] - b[3] : 0u;
-      return static_cast<std::uint64_t>(overlap) * 2u >= std::min(width_a, width_b) &&
-             (center_x_delta_twice <= std::max(height_a, height_b) ||
-              left_delta <= std::max(height_a, height_b) ||
-              right_delta <= std::max(height_a, height_b)) &&
-             std::max(height_a, height_b) <= 2u * std::min(height_a, height_b) &&
-             center_y_delta_twice >= std::min(height_a, height_b) &&
-             static_cast<std::uint64_t>(gap) * 2u <= std::max(height_a, height_b);
-    }
-
-    bool subtitle_segments_share_baseline(
-      const std::array<std::uint32_t, 4> &a,
-      const std::array<std::uint32_t, 4> &b,
-      const std::uint32_t content_width
-    ) {
-      const bool a_before_b = a[2] <= b[0];
-      const bool b_before_a = b[2] <= a[0];
-      if (!a_before_b && !b_before_a) {
-        return false;
-      }
-      const auto height_a = a[3] - a[1];
-      const auto height_b = b[3] - b[1];
-      const auto shorter_height = std::min(height_a, height_b);
-      const auto taller_height = std::max(height_a, height_b);
-      const auto vertical_overlap = std::min(a[3], b[3]) > std::max(a[1], b[1]) ?
-        std::min(a[3], b[3]) - std::max(a[1], b[1]) : 0u;
-      const auto center_y_a = a[1] + a[3];
-      const auto center_y_b = b[1] + b[3];
-      const auto center_y_delta_twice = center_y_a > center_y_b ?
-        center_y_a - center_y_b : center_y_b - center_y_a;
-      const auto horizontal_gap = a_before_b ? b[0] - a[2] : a[0] - b[2];
-      const auto combined_span = std::max(a[2], b[2]) - std::min(a[0], b[0]);
-      const auto maximum_width = static_cast<std::uint32_t>(
-        static_cast<std::uint64_t>(content_width) *
-          subtitle_locator_max_width_numerator /
-          subtitle_locator_max_width_denominator
-      );
-      return static_cast<std::uint64_t>(vertical_overlap) * 4u >=
-               static_cast<std::uint64_t>(shorter_height) * 3u &&
-             taller_height <= 2u * shorter_height &&
-             center_y_delta_twice <= shorter_height &&
-             horizontal_gap <= 8u * taller_height &&
-             combined_span <= maximum_width;
-    }
-
-    std::vector<subtitle_selected_box_t> subtitle_selected_ocr_boxes(
-      const std::vector<std::uint8_t> &ocr,
-      const std::uint32_t final_count,
-      const models::depth_tensor_content_rect_t tensor_content,
-      const std::uint32_t roi_bottom
-    ) {
-      const auto content_width = tensor_content.width();
-      std::vector<subtitle_selected_box_t> qualified;
-      qualified.reserve(final_count);
-      std::uint32_t ribbon_mask = 0u;
-      const auto maximum_width = static_cast<std::uint32_t>(
-        static_cast<std::uint64_t>(content_width) *
-          subtitle_locator_max_width_numerator /
-          subtitle_locator_max_width_denominator
-      );
-      for (std::uint32_t slot = 0u; slot < final_count; ++slot) {
-        const std::size_t raw = subtitle_ocr_raw_box_offset +
-          static_cast<std::size_t>(slot) * subtitle_ocr_box_word_count;
-        const std::size_t final = subtitle_ocr_final_box_offset +
-          static_cast<std::size_t>(slot) * subtitle_ocr_box_word_count;
-        subtitle_selected_box_t box {
-          .core = {
-            subtitle_word(ocr, raw), subtitle_word(ocr, raw + 1u),
-            subtitle_word(ocr, raw + 2u), subtitle_word(ocr, raw + 3u),
-          },
-          .cover = {
-            subtitle_word(ocr, final), subtitle_word(ocr, final + 1u),
-            subtitle_word(ocr, final + 2u), subtitle_word(ocr, final + 3u),
-          },
-          .ribbon = (subtitle_word(ocr, raw + 5u) & subtitle_ocr_box_flag_ribbon) != 0u,
-        };
-        const auto width = box.core[2] - box.core[0];
-        const auto height = box.core[3] - box.core[1];
-        const auto corner_edge_threshold =
-          content_width / subtitle_locator_corner_edge_divisor;
-        const auto left_clearance = box.core[0] - tensor_content.left;
-        const auto right_clearance = tensor_content.right - box.core[2];
-        const bool bottom_corner_ordinary =
-          !box.ribbon && std::min(left_clearance, right_clearance) < corner_edge_threshold &&
-          box.core[3] + subtitle_locator_corner_bottom_rows >= roi_bottom;
-        if (width < subtitle_locator_min_width_cells ||
-            bottom_corner_ordinary ||
-            (!box.ribbon && width > maximum_width) ||
-            height < subtitle_locator_min_height_cells ||
-            static_cast<std::uint64_t>(width) *
-                subtitle_locator_min_aspect_denominator <
-              static_cast<std::uint64_t>(subtitle_locator_min_aspect_numerator) * height) {
-          continue;
-        }
-        if (box.ribbon) {
-          ribbon_mask |= 1u << qualified.size();
-        }
-        qualified.push_back(box);
-      }
-      if (qualified.empty()) {
-        return {};
-      }
-
-      std::array<std::uint32_t, subtitle_ocr_final_box_capacity> component_masks {};
-      for (std::size_t index = 0u; index < qualified.size(); ++index) {
-        if (!qualified[index].ribbon) {
-          component_masks[index] = 1u << index;
-        }
-      }
-      for (std::uint32_t pass = 0u; pass < subtitle_ocr_final_box_capacity; ++pass) {
-        for (std::size_t a = 0u; a < qualified.size(); ++a) {
-          auto expanded = component_masks[a];
-          for (std::size_t b = 0u; b < qualified.size(); ++b) {
-            if (qualified[b].ribbon || (expanded & (1u << b)) == 0u) {
-              continue;
-            }
-            for (std::size_t c = 0u; c < qualified.size(); ++c) {
-              if (!qualified[c].ribbon &&
-                  (subtitle_lines_are_coherent(qualified[b].core, qualified[c].core) ||
-                   subtitle_segments_share_baseline(
-                     qualified[b].core, qualified[c].core, content_width
-                   ))) {
-                expanded |= 1u << c;
-              }
-            }
-          }
-          component_masks[a] = expanded;
-        }
-      }
-
-      std::uint32_t best_mask = 0u;
-      std::uint32_t best_area = 0u;
-      std::array<std::uint32_t, 4> best_bbox {};
-      for (std::size_t root = 0u; root < qualified.size(); ++root) {
-        if (qualified[root].ribbon) {
-          continue;
-        }
-        const auto mask = component_masks[root];
-        if ((mask & ((1u << root) - 1u)) != 0u) {
-          continue;
-        }
-        std::uint32_t count = 0u;
-        std::uint32_t area = 0u;
-        std::array<std::uint32_t, 4> bbox {
-          std::numeric_limits<std::uint32_t>::max(),
-          std::numeric_limits<std::uint32_t>::max(), 0u, 0u
-        };
-        for (std::size_t index = 0u; index < qualified.size(); ++index) {
-          if ((mask & (1u << index)) == 0u) {
-            continue;
-          }
-          const auto &rectangle = qualified[index].core;
-          ++count;
-          area += subtitle_rectangle_area(rectangle);
-          bbox[0] = std::min(bbox[0], rectangle[0]);
-          bbox[1] = std::min(bbox[1], rectangle[1]);
-          bbox[2] = std::max(bbox[2], rectangle[2]);
-          bbox[3] = std::max(bbox[3], rectangle[3]);
-        }
-        const bool better = count <= subtitle_locator_rectangle_capacity &&
-          bbox[2] - bbox[0] <= maximum_width &&
-          (best_mask == 0u || area > best_area ||
-           (area == best_area &&
-            (bbox[3] > best_bbox[3] ||
-             (bbox[3] == best_bbox[3] &&
-              (bbox[1] > best_bbox[1] ||
-               (bbox[1] == best_bbox[1] && bbox[0] < best_bbox[0]))))));
-        if (better) {
-          best_mask = mask;
-          best_area = area;
-          best_bbox = bbox;
-        }
-      }
-
-      const auto selected_mask = best_mask | ribbon_mask;
-      if (selected_mask == 0u ||
-          std::popcount(selected_mask) > subtitle_locator_rectangle_capacity) {
-        return {};
-      }
-      std::vector<subtitle_selected_box_t> selected;
-      for (std::size_t index = 0u; index < qualified.size(); ++index) {
-        if ((selected_mask & (1u << index)) != 0u) {
-          selected.push_back(qualified[index]);
-        }
-      }
-      std::stable_sort(selected.begin(), selected.end(), [](const auto &a, const auto &b) {
-        return a.core[1] != b.core[1] ? a.core[1] < b.core[1] : a.core[0] < b.core[0];
-      });
-      return selected;
-    }
-
-    bool subtitle_current_rectangles_match_ocr_selection(
-      const std::vector<std::uint8_t> &ocr,
-      const std::uint32_t final_count,
-      const std::vector<std::uint8_t> &locator,
-      const std::uint32_t current_count,
-      const std::uint32_t current_ribbon_mask,
-      const models::depth_tensor_content_rect_t tensor_content,
-      const std::uint32_t roi_bottom
-    ) {
-      const auto selected = subtitle_selected_ocr_boxes(
-        ocr, final_count, tensor_content, roi_bottom
-      );
-      std::size_t selected_position = 0u;
-      for (std::uint32_t current_slot = 0u; current_slot < current_count; ++current_slot) {
-        const std::size_t current =
-          subtitle_locator_current_offset + static_cast<std::size_t>(current_slot) * 4u;
-        const bool current_ribbon =
-          (current_ribbon_mask & (1u << current_slot)) != 0u;
-        bool found = false;
-        while (selected_position < selected.size()) {
-          const auto &candidate = selected[selected_position++];
-          if (subtitle_word(locator, current) == candidate.cover[0] &&
-              subtitle_word(locator, current + 1u) == candidate.cover[1] &&
-              subtitle_word(locator, current + 2u) == candidate.cover[2] &&
-              subtitle_word(locator, current + 3u) == candidate.cover[3] &&
-              current_ribbon == candidate.ribbon) {
-            found = true;
-            break;
-          }
-        }
-        if (!found) {
-          return false;
-        }
-      }
-      return true;
-    }
-
-    bool subtitle_provisional_current_matches_ocr_selection(
-      const std::vector<std::uint8_t> &ocr,
-      const std::uint32_t final_count,
-      const std::vector<std::uint8_t> &locator,
-      const models::depth_tensor_content_rect_t tensor_content,
-      const std::uint32_t roi_bottom
-    ) {
-      const auto selected = subtitle_selected_ocr_boxes(
-        ocr, final_count, tensor_content, roi_bottom
-      );
-      if (selected.size() != 1u || selected.front().ribbon) {
-        return false;
-      }
-      const auto &candidate = selected.front();
-      for (std::size_t coordinate = 0u; coordinate < 4u; ++coordinate) {
-        if (subtitle_word(
-              locator, subtitle_locator_pending_offset + coordinate
-            ) != candidate.core[coordinate] ||
-            subtitle_word(
-              locator, subtitle_locator_current_offset + coordinate
-            ) != candidate.cover[coordinate]) {
-          return false;
-        }
-      }
-      return true;
-    }
-
-    bool subtitle_provisional_geometry_is_canonical(
-      const std::array<std::uint32_t, 4u> &owner,
-      const std::array<std::uint32_t, 4u> &pending
-    ) {
-      const std::uint64_t owner_height = owner[3] - owner[1];
-      const std::uint64_t pending_height = pending[3] - pending[1];
-      const auto shorter_height = std::min(owner_height, pending_height);
-      const auto taller_height = std::max(owner_height, pending_height);
-      const std::uint64_t overlap_top = std::max(owner[1], pending[1]);
-      const std::uint64_t overlap_bottom = std::min(owner[3], pending[3]);
-      const std::uint64_t vertical_overlap =
-        overlap_bottom > overlap_top ? overlap_bottom - overlap_top : 0u;
-      const std::uint64_t owner_center_x_twice =
-        static_cast<std::uint64_t>(owner[0]) + owner[2];
-      const std::uint64_t pending_center_x_twice =
-        static_cast<std::uint64_t>(pending[0]) + pending[2];
-      const std::uint64_t owner_center_y_twice =
-        static_cast<std::uint64_t>(owner[1]) + owner[3];
-      const std::uint64_t pending_center_y_twice =
-        static_cast<std::uint64_t>(pending[1]) + pending[3];
-      const auto center_y_delta_twice = owner_center_y_twice > pending_center_y_twice ?
-        owner_center_y_twice - pending_center_y_twice :
-        pending_center_y_twice - owner_center_y_twice;
-      const std::uint64_t intersection_left = std::max(owner[0], pending[0]);
-      const std::uint64_t intersection_right = std::min(owner[2], pending[2]);
-      const std::uint64_t intersection_width =
-        intersection_right > intersection_left ? intersection_right - intersection_left : 0u;
-      const std::uint64_t intersection = intersection_width * vertical_overlap;
-      const std::uint64_t owner_area =
-        static_cast<std::uint64_t>(owner[2] - owner[0]) * owner_height;
-      const std::uint64_t pending_area =
-        static_cast<std::uint64_t>(pending[2] - pending[0]) * pending_height;
-      const std::uint64_t union_area = owner_area + pending_area - intersection;
-      const float iou = union_area == 0u ? 0.0f :
-        static_cast<float>(intersection) / static_cast<float>(union_area);
-      return iou < subtitle_locator_match_iou_threshold &&
-             vertical_overlap *
-                 subtitle_locator_provisional_min_vertical_overlap_denominator >=
-               shorter_height *
-                 subtitle_locator_provisional_min_vertical_overlap_numerator &&
-             taller_height <=
-               subtitle_locator_provisional_max_height_ratio * shorter_height &&
-             center_y_delta_twice <=
-               subtitle_locator_provisional_max_center_y_delta_shorter_height *
-                 shorter_height &&
-             owner_center_x_twice >= 2u * pending[0] &&
-             owner_center_x_twice < 2u * pending[2] &&
-             pending_center_x_twice >= 2u * owner[0] &&
-             pending_center_x_twice < 2u * owner[2];
-    }
-
-    bool subtitle_provisional_geometry_is_canonical(
-      const std::vector<std::uint8_t> &locator
-    ) {
-      const auto rectangle = [&locator](const std::size_t offset) {
-        return std::array<std::uint32_t, 4u> {
-          subtitle_word(locator, offset + 0u), subtitle_word(locator, offset + 1u),
-          subtitle_word(locator, offset + 2u), subtitle_word(locator, offset + 3u),
-        };
-      };
-      return subtitle_provisional_geometry_is_canonical(
-        rectangle(subtitle_locator_owner_offset),
-        rectangle(subtitle_locator_pending_offset)
-      );
-    }
-
-    bool subtitle_adaptive_ui_state_is_canonical(
-      const std::vector<std::uint8_t> &locator,
-      const std::uint32_t source_width,
-      const models::depth_tensor_content_rect_t content,
-      const std::uint32_t joint_plane_mode,
-      const float display_budget
-    ) {
-      const auto word = [&](const std::size_t offset) {
-        return subtitle_word(locator, subtitle_locator_adaptive_offset + offset);
-      };
-      if (word(0u) == 0u) {
-        for (std::size_t i = 0u; i < subtitle_locator_adaptive_word_count; ++i) {
-          if (word(i) != 0u) return false;
-        }
-        return joint_plane_mode == adaptive_policy_id && subtitle_word(locator, 20u) == 0u;
-      }
-      if (joint_plane_mode != adaptive_policy_id) {
-        return false;
-      }
-      const auto flags = word(1u);
-      const float applied = std::bit_cast<float>(word(3u));
-      const float limit = std::bit_cast<float>(word(12u));
-      if (source_width == 0u ||
-          source_width > models::host_sbs_v2_max_source_long_side) return false;
-      const auto maximum_level = (source_width + 99u) / 100u;
-      // The Host policy uses the representation constant directly; its cap is bit-exact.
-      const auto expected_limit_bits = std::bit_cast<std::uint32_t>(display_budget);
-      const auto limit_bits = word(12u);
-      const auto last = subtitle_u64(locator, subtitle_locator_adaptive_offset + 4u);
-      const auto approach = subtitle_u64(locator, subtitle_locator_adaptive_offset + 6u);
-      const auto retreat = subtitle_u64(locator, subtitle_locator_adaptive_offset + 8u);
-      const std::uint64_t area = static_cast<std::uint64_t>(content.width()) * content.height();
-      if (word(0u) != 1u || (flags & ~15u) != 0u || (flags & 3u) == 3u ||
-          word(2u) > maximum_level || word(10u) > maximum_level ||
-          word(11u) > maximum_level ||
-          !std::isfinite(applied) || !std::isfinite(limit) || limit_bits != expected_limit_bits ||
-          applied < 0.0f || applied > limit || word(13u) > area ||
-          word(14u) > word(13u) || word(15u) > word(13u) ||
-          ((flags & 8u) != 0u) != (last != 0u) ||
-          ((flags & 1u) != 0u) != (approach != 0u) ||
-          ((flags & 2u) != 0u) != (retreat != 0u) || approach > last || retreat > last) {
-        return false;
-      }
-      const std::uint64_t conflicts = word(14u);
-      const std::uint64_t covered = word(13u);
-      const bool capped_conflict = conflicts * 5u > covered ||
-        conflicts * 50u > area;
-      if (((flags & 4u) != 0u) != capped_conflict) return false;
-      const bool provisional = (subtitle_word(locator, 2u) &
-        subtitle_locator_flag_provisional_current) != 0u;
-      return subtitle_word(locator, 20u) == 0u ||
-        (subtitle_word(locator, 18u) == word(3u) && subtitle_word(locator, 24u) == 2u &&
-         (!provisional || (subtitle_word(locator, 29u) == word(3u) &&
-                          subtitle_word(locator, 30u) == 2u)));
-    }
-
-    bool subtitle_locator_state_is_canonical(
-      const std::vector<std::uint8_t> &ocr,
-      const std::uint32_t ocr_flags,
-      const std::uint32_t final_count,
-      const std::vector<std::uint8_t> &locator,
-      const std::uint32_t field_width,
-      const std::uint32_t field_height,
-      const models::depth_tensor_content_rect_t tensor_content,
-      const std::uint32_t roi_top,
-      const std::uint32_t roi_bottom,
-      const std::uint32_t ribbon_min_bottom,
-      const std::uint32_t joint_plane_mode,
-      const float display_budget
-    ) {
-      if (!subtitle_adaptive_ui_state_is_canonical(
-            locator, subtitle_word(ocr, 9u), tensor_content,
-            joint_plane_mode, display_budget)) {
-        return false;
-      }
-      const auto flags = subtitle_word(locator, 2u);
-      const auto owner_generation = subtitle_word(locator, 3u);
-      const auto owner_count = subtitle_word(locator, 4u);
-      const auto pending_count = subtitle_word(locator, 12u);
-      const auto target_bits = subtitle_word(locator, 18u);
-      const float target = std::bit_cast<float>(target_bits);
-      const auto target_generation = subtitle_word(locator, 19u);
-      const auto current_count = subtitle_word(locator, 20u);
-      const auto last_event = subtitle_word(locator, 21u);
-      const auto fade = subtitle_word(locator, 24u);
-      const auto hold_or_grace = subtitle_word(locator, 25u);
-      const auto packed_grace_x = subtitle_word(locator, 29u);
-      const auto packed_grace_y = subtitle_word(locator, 30u);
-      const auto packed_kinds = subtitle_word(locator, subtitle_locator_kind_word);
-      const auto owner_ribbon_mask =
-        (packed_kinds >> subtitle_locator_owner_kind_shift) & subtitle_locator_kind_mask;
-      const auto pending_ribbon_mask =
-        (packed_kinds >> subtitle_locator_pending_kind_shift) & subtitle_locator_kind_mask;
-      const auto current_ribbon_mask =
-        (packed_kinds >> subtitle_locator_current_kind_shift) & subtitle_locator_kind_mask;
-      const auto known_kind_bits =
-        (subtitle_locator_kind_mask << subtitle_locator_owner_kind_shift) |
-        (subtitle_locator_kind_mask << subtitle_locator_pending_kind_shift) |
-        (subtitle_locator_kind_mask << subtitle_locator_current_kind_shift);
-      const auto count_mask = [](const std::uint32_t count) {
-        return count == 0u ? 0u : (1u << count) - 1u;
-      };
-      const bool owner = (flags & subtitle_locator_flag_owner) != 0u;
-      const bool pending = (flags & subtitle_locator_flag_pending) != 0u;
-      const bool target_valid = (flags & subtitle_locator_flag_target_valid) != 0u;
-      const bool target_reset = (flags & subtitle_locator_flag_target_reset) != 0u;
-      const bool provisional_current =
-        (flags & subtitle_locator_flag_provisional_current) != 0u;
-      const bool target_in_range = subtitle_target_is_representable(target);
-      const auto provisional_target_bits = subtitle_word(
-        locator, subtitle_locator_provisional_target_word
-      );
-      const float provisional_target = std::bit_cast<float>(provisional_target_bits);
-      const auto provisional_fade = subtitle_word(
-        locator, subtitle_locator_provisional_fade_word
-      );
-
-      subtitle_rectangle_summary_t owner_summary;
-      subtitle_rectangle_summary_t pending_summary;
-      subtitle_rectangle_summary_t current_summary;
-      if ((flags & ~subtitle_locator_known_flags) != 0u ||
-          owner_count > subtitle_locator_rectangle_capacity ||
-          pending_count > subtitle_locator_rectangle_capacity ||
-          current_count > subtitle_locator_rectangle_capacity ||
-          (packed_kinds & ~known_kind_bits) != 0u ||
-          (owner_ribbon_mask & ~count_mask(owner_count)) != 0u ||
-          (pending_ribbon_mask & ~count_mask(pending_count)) != 0u ||
-          (current_ribbon_mask & ~count_mask(current_count)) != 0u ||
-          fade > subtitle_locator_max_fade || last_event > subtitle_locator_max_event ||
-          !subtitle_locator_rectangles_are_canonical(
-            locator, subtitle_locator_owner_offset, owner_count,
-            field_width, field_height, tensor_content, roi_top, roi_bottom,
-            ribbon_min_bottom,
-            owner_ribbon_mask, false, owner_summary
-          ) ||
-          !subtitle_locator_rectangles_are_canonical(
-            locator, subtitle_locator_pending_offset, pending_count,
-            field_width, field_height, tensor_content, roi_top, roi_bottom,
-            ribbon_min_bottom,
-            pending_ribbon_mask, false, pending_summary
-          ) ||
-          !subtitle_locator_rectangles_are_canonical(
-            locator, subtitle_locator_current_offset, current_count,
-            field_width, field_height, tensor_content, roi_top, roi_bottom,
-            ribbon_min_bottom,
-            current_ribbon_mask, true, current_summary
-          ) ||
-          !subtitle_rectangle_summary_matches(locator, 5u, 9u, owner_summary) ||
-          !subtitle_rectangle_summary_matches(locator, 13u, 17u, pending_summary) ||
-          owner != (owner_count != 0u) || pending != (pending_count != 0u) ||
-          owner != (owner_generation != 0u) ||
-          current_count > owner_count ||
-          (current_count != 0u && !provisional_current &&
-           (!owner || !target_valid || fade == 0u)) ||
-          (ocr_flags == 0u && current_count != 0u) ||
-          !subtitle_current_rectangles_match_ocr_selection(
-            ocr, final_count, locator, current_count, current_ribbon_mask,
-            tensor_content, roi_bottom
-          )) {
-        return false;
-      }
-
-      if (target_valid) {
-        if (!owner || target_reset || target_generation != owner_generation ||
-            !target_in_range || fade != 2u) {
-          return false;
-        }
-      } else if (target_reset) {
-        if (!owner || target_bits != 0u || target_generation != 0u ||
-            current_count != 0u || fade != 0u) {
-          return false;
-        }
-      }
-
-      if (provisional_current) {
-        if (!pending || target_reset || pending_count != 1u || current_count != 1u ||
-            owner_ribbon_mask != 0u || pending_ribbon_mask != 0u ||
-            current_ribbon_mask != 0u || last_event != 0u ||
-            hold_or_grace != 0u ||
-            !subtitle_target_is_representable(provisional_target) ||
-            !subtitle_provisional_current_matches_ocr_selection(
-              ocr, final_count, locator, tensor_content, roi_bottom
-            )) {
-          return false;
-        }
-        if (!owner || !target_valid || owner_count != 1u || fade != 2u || provisional_fade != 2u ||
-            !subtitle_provisional_geometry_is_canonical(locator)) {
-          return false;
-        }
-      }
-
-      const bool packed_grace_zero = packed_grace_x == 0u && packed_grace_y == 0u;
-      if (owner) {
-        if (hold_or_grace != 0u ||
-            (!provisional_current && !packed_grace_zero)) {
-          return false;
-        }
-        if (!target_valid && !target_reset &&
-            (target_bits != 0u || target_generation != 0u ||
-             current_count != 0u || fade != 0u)) {
-          return false;
-        }
-      } else if (hold_or_grace == 0u) {
-        if (provisional_current || target_bits != 0u || target_generation != 0u ||
-            !packed_grace_zero ||
-            current_count != 0u || target_valid || target_reset || fade != 0u) {
-          return false;
-        }
-      } else {
-        const auto grace_left = packed_grace_x & 0xFFFFu;
-        const auto grace_right = packed_grace_x >> 16u;
-        const auto grace_top = packed_grace_y & 0xFFFFu;
-        const auto grace_bottom = packed_grace_y >> 16u;
-        if (provisional_current ||
-            hold_or_grace > subtitle_locator_death_grace_observations ||
-            target_valid || target_reset || target_generation != 0u || !target_in_range ||
-            current_count != 0u || fade != 0u ||
-            grace_left >= grace_right || grace_top >= grace_bottom ||
-            grace_left < tensor_content.left || grace_right > tensor_content.right ||
-            grace_bottom > tensor_content.bottom || grace_top < roi_top ||
-            grace_bottom > roi_bottom) {
-          return false;
-        }
-      }
-      return true;
-    }
 
   }  // namespace
 
@@ -1145,52 +496,40 @@ namespace platf::sbs_debug {
 
     bool subtitle_records_match_frame(
       const std::vector<std::uint8_t> &ocr,
-      const std::vector<std::uint8_t> &locator,
+      const std::vector<std::uint8_t> &plane,
       const frame &completed,
       const std::uint32_t confirmed_cut_count
     ) {
-      const auto mode = completed.parallax_v2_joint_plane_mode;
-      const float display_budget = models::depth_coordinate_v2::display_budget();
-      if (!joint_plane_mode_word_is_valid(mode)) {
-        return false;
-      }
-      if (!std::isfinite(completed.parallax_v2_requested_gain) ||
-            completed.parallax_v2_requested_gain <= 0.0f) {
-        return false;
-      }
-      if (!subtitle_ocr_record_is_canonical_for_frame(ocr, completed) ||
-          locator.size() != subtitle_locator_state_word_count * sizeof(std::uint32_t)) {
-        return false;
-      }
-      const auto field_width = static_cast<std::uint32_t>(completed.field_width);
-      const auto field_height = static_cast<std::uint32_t>(completed.field_height);
+      namespace ui = models::host_sbs_subtitle_plane;
+      if (!joint_plane_mode_word_is_valid(completed.parallax_v2_joint_plane_mode) ||
+          !std::isfinite(completed.parallax_v2_requested_gain) || completed.parallax_v2_requested_gain <= 0.0f ||
+          completed.matched_frame_id == 0u || completed.matched_observation_timestamp_us == 0u ||
+          !subtitle_ocr_record_is_canonical_for_frame(ocr, completed) || plane.size() != sizeof(ui::words_t)) return false;
+      const auto words = subtitle_plane_words(plane);
       const auto geometry = models::fit_subtitle_analysis_geometry(
-        completed.depth_input_region.width(),
-        completed.depth_input_region.height(),
-        {completed.field_width, completed.field_height},
-        completed.field_content
-      );
-      if (!geometry.valid()) {
-        return false;
-      }
-      const auto ocr_flags = subtitle_word(ocr, 2u);
-      const auto final_count = subtitle_word(ocr, 4u);
-      if (subtitle_word(locator, 0u) != subtitle_locator_state_schema ||
-          subtitle_word(locator, 1u) != subtitle_locator_state_tag ||
-          subtitle_u64(locator, 10u) != completed.depth_input_region.analysis_generation ||
-          subtitle_u64(locator, 22u) != completed.matched_frame_id ||
-          subtitle_word(locator, 26u) != confirmed_cut_count ||
-          subtitle_word(locator, 27u) != field_width ||
-          subtitle_word(locator, 28u) != field_height ||
-          !subtitle_locator_state_is_canonical(
-            ocr, ocr_flags, final_count, locator,
-            field_width, field_height, geometry.tensor_content,
-            geometry.roi_top, geometry.roi_bottom, geometry.ribbon_min_bottom,
-            mode, display_budget
-          )) {
-        return false;
-      }
-      return true;
+        completed.depth_input_region.width(), completed.depth_input_region.height(),
+        {completed.field_width, completed.field_height}, completed.field_content);
+      if (!geometry.valid() || !ui::state_words_are_canonical(words, display_budget()) ||
+          ui::join(words.data() + subtitle_plane_frame_offset) != completed.matched_frame_id ||
+          ui::join(words.data() + subtitle_plane_analysis_generation_offset) != completed.depth_input_region.analysis_generation ||
+          ui::join(words.data() + subtitle_plane_observation_timestamp_offset) != completed.matched_observation_timestamp_us ||
+          words[subtitle_plane_cut_epoch_word] != confirmed_cut_count ||
+          words[subtitle_plane_source_extent_offset] != completed.depth_input_region.width() ||
+          words[subtitle_plane_source_extent_offset + 1u] != completed.depth_input_region.height() ||
+          words[subtitle_plane_field_extent_offset] != static_cast<std::uint32_t>(completed.field_width) ||
+          words[subtitle_plane_field_extent_offset + 1u] != static_cast<std::uint32_t>(completed.field_height) ||
+          words[subtitle_plane_roi_offset] != geometry.roi_top || words[subtitle_plane_roi_offset + 1u] != geometry.roi_bottom ||
+          words[subtitle_plane_content_offset] != completed.field_content.left ||
+          words[subtitle_plane_content_offset + 1u] != completed.field_content.top ||
+          words[subtitle_plane_content_offset + 2u] != completed.field_content.right ||
+          words[subtitle_plane_content_offset + 3u] != completed.field_content.bottom) return false;
+      const bool current_valid = words[subtitle_plane_flags_word] == subtitle_plane_current_valid_flag;
+      const auto count = subtitle_word(ocr, 4u);
+      // UIP4 contains no rectangle copy or component choice. Each admitted slot is the exact
+      // independently authenticated current OCR8 pair in producer order, including legal empty.
+      return current_valid ? subtitle_word(ocr, 2u) == 1u &&
+        words[subtitle_plane_current_slot_mask_word] == (1u << count) - 1u :
+        words[subtitle_plane_current_slot_mask_word] == 0u;
     }
 
     bool gpu_trace_ring_is_canonical(
@@ -1354,117 +693,37 @@ namespace platf::sbs_debug {
 
         const bool suppressed = (flags & subtitle_suppressed) != 0u;
         if (!suppressed) {
-          const auto locator_base =
-            base + word_index(record_word_e::subtitle_locator_begin);
-          const auto condition_base =
-            base + word_index(record_word_e::subtitle_condition_begin);
-          const auto locator_flags = word(locator_base + 2u);
-          if (word(locator_base) != subtitle_locator_state_schema ||
-              word(locator_base + 1u) != subtitle_locator_state_tag ||
-              (locator_flags & ~subtitle_locator_known_flags) != 0u ||
-              word(locator_base + 4u) > subtitle_locator_rectangle_capacity ||
-              word(locator_base + 12u) > subtitle_locator_rectangle_capacity ||
-              word(locator_base + 20u) > subtitle_locator_rectangle_capacity ||
-              join_u64(word(locator_base + 10u), word(locator_base + 11u)) !=
-                analysis_generation ||
-              (subtitle_held_with_depth ?
-                 (join_u64(word(locator_base + 22u), word(locator_base + 23u)) == 0u ||
-                  join_u64(word(locator_base + 22u), word(locator_base + 23u)) >= frame_id) :
-                 join_u64(word(locator_base + 22u), word(locator_base + 23u)) != frame_id) ||
-              word(locator_base + 27u) != record(record_word_e::field_width) ||
-              word(locator_base + 28u) != record(record_word_e::field_height)) {
-            return false;
-          }
-          const auto current_count = word(locator_base + 20u);
-          const auto owner_count = word(locator_base + 4u);
-          const auto pending_count = word(locator_base + 12u);
-          const auto packed_kinds = word(locator_base + subtitle_locator_kind_word);
-          const auto owner_kinds =
-            (packed_kinds >> subtitle_locator_owner_kind_shift) &
-            subtitle_locator_kind_mask;
-          const auto pending_kinds =
-            (packed_kinds >> subtitle_locator_pending_kind_shift) &
-            subtitle_locator_kind_mask;
-          const auto current_kinds =
-            (packed_kinds >> subtitle_locator_current_kind_shift) &
-            subtitle_locator_kind_mask;
-          const bool provisional_current =
-            (locator_flags & subtitle_locator_flag_provisional_current) != 0u;
-          if (provisional_current) {
-            const float provisional_target = std::bit_cast<float>(
-              word(locator_base + subtitle_locator_provisional_target_word)
-            );
-            const auto provisional_fade =
-              word(locator_base + subtitle_locator_provisional_fade_word);
-            const auto trace_rectangle = [locator_base, &word](const std::size_t offset) {
-              return std::array<std::uint32_t, 4u> {
-                word(locator_base + offset + 0u), word(locator_base + offset + 1u),
-                word(locator_base + offset + 2u), word(locator_base + offset + 3u),
-              };
-            };
-            if ((locator_flags & subtitle_locator_flag_pending) == 0u ||
-                (locator_flags & subtitle_locator_flag_target_reset) != 0u ||
-                pending_count != 1u || current_count != 1u ||
-                owner_kinds != 0u || pending_kinds != 0u || current_kinds != 0u ||
-                word(locator_base + 21u) != 0u || word(locator_base + 25u) != 0u ||
-                !subtitle_target_is_representable(provisional_target)) {
-              return false;
-            }
-            const auto pending_core = trace_rectangle(subtitle_locator_pending_offset);
-            const auto current_cover = trace_rectangle(subtitle_locator_current_offset);
-            const auto trace_rectangle_is_valid = [&record](
-              const std::array<std::uint32_t, 4u> &rectangle
-            ) {
-              return rectangle[0] < rectangle[2] && rectangle[1] < rectangle[3] &&
-                     rectangle[2] <= record(record_word_e::field_width) &&
-                     rectangle[3] <= record(record_word_e::field_height);
-            };
-            if (!trace_rectangle_is_valid(pending_core) ||
-                !trace_rectangle_is_valid(current_cover) ||
-                current_cover[0] > pending_core[0] ||
-                current_cover[1] > pending_core[1] ||
-                current_cover[2] < pending_core[2] ||
-                current_cover[3] < pending_core[3]) {
-              return false;
-            }
-            if ((locator_flags & subtitle_locator_flag_owner) == 0u ||
-                (locator_flags & subtitle_locator_flag_target_valid) == 0u ||
-                owner_count != 1u || word(locator_base + 24u) != 2u || provisional_fade != 2u ||
-                !subtitle_provisional_geometry_is_canonical(
-                  trace_rectangle(subtitle_locator_owner_offset), pending_core
-                )) {
-              return false;
-            }
-          } else if ((locator_flags & subtitle_locator_flag_owner) != 0u &&
-                     (word(locator_base + subtitle_locator_provisional_target_word) != 0u ||
-                      word(locator_base + subtitle_locator_provisional_fade_word) != 0u)) {
-            return false;
-          }
-          const auto expected_fade_word = provisional_current ?
-            subtitle_locator_provisional_fade_word : 24u;
-          const auto expected_target_word = provisional_current ?
-            subtitle_locator_provisional_target_word : 18u;
-          const bool condition_matches_active_state =
-            word(condition_base + 0u) == subtitle_condition_param_schema &&
-            word(condition_base + 1u) == subtitle_condition_param_tag &&
-            word(condition_base + 2u) == current_count &&
-            word(condition_base + 3u) == current_kinds &&
-            word(condition_base + 4u) == 2u &&
-            word(condition_base + 4u) == word(locator_base + expected_fade_word) &&
-            word(condition_base + 5u) == word(locator_base + expected_target_word) &&
-            subtitle_target_is_representable(std::bit_cast<float>(word(condition_base + 5u)));
-          bool condition_is_canonical_zero = true;
-          for (std::size_t index = 0u; index < subtitle_condition_param_word_count; ++index) {
-            condition_is_canonical_zero = condition_is_canonical_zero &&
-              word(condition_base + index) == 0u;
-          }
-          // The historical ring has no complete geometry state. A current OCR cover can
-          // coexist with an unavailable geometry publication and canonical zero conditioning.
-          // The matched field verifier checks the complete geometry authority separately.
-          if (current_count != 0u ? !(condition_matches_active_state || condition_is_canonical_zero) :
-                                   !condition_is_canonical_zero) {
-            return false;
-          }
+          namespace ui = models::host_sbs_subtitle_plane;
+          const auto plane_base = base + word_index(record_word_e::subtitle_locator_begin);
+          const auto condition_base = base + word_index(record_word_e::subtitle_condition_begin);
+          ui::words_t plane {};
+          ui::condition_words_t condition {};
+          for (std::size_t index = 0u; index < plane.size(); ++index) plane[index] = word(plane_base + index);
+          for (std::size_t index = 0u; index < condition.size(); ++index) condition[index] = word(condition_base + index);
+          const auto published_frame = ui::join(plane.data() + subtitle_plane_frame_offset);
+          const auto published_time = ui::join(plane.data() + subtitle_plane_observation_timestamp_offset);
+          const auto content = models::depth_tensor_content_rect_t {
+            plane[subtitle_plane_content_offset], plane[subtitle_plane_content_offset + 1u],
+            plane[subtitle_plane_content_offset + 2u], plane[subtitle_plane_content_offset + 3u],
+          };
+          const auto geometry = models::fit_subtitle_analysis_geometry(
+            plane[subtitle_plane_source_extent_offset], plane[subtitle_plane_source_extent_offset + 1u],
+            {static_cast<int>(plane[subtitle_plane_field_extent_offset]), static_cast<int>(plane[subtitle_plane_field_extent_offset + 1u])}, content);
+          if (!ui::state_words_are_canonical(plane, display_budget()) || !geometry.valid() ||
+              (subtitle_disposition == subtitle_disposition_e::abstention &&
+               (plane[subtitle_plane_flags_word] != 0u || plane[subtitle_plane_current_slot_mask_word] != 0u)) ||
+              ui::join(plane.data() + subtitle_plane_analysis_generation_offset) != analysis_generation ||
+              plane[subtitle_plane_source_extent_offset] != record(record_word_e::source_width) ||
+              plane[subtitle_plane_source_extent_offset + 1u] != record(record_word_e::source_height) ||
+              plane[subtitle_plane_field_extent_offset] != record(record_word_e::field_width) ||
+              plane[subtitle_plane_field_extent_offset + 1u] != record(record_word_e::field_height) ||
+              plane[subtitle_plane_roi_offset] != geometry.roi_top || plane[subtitle_plane_roi_offset + 1u] != geometry.roi_bottom ||
+              (subtitle_held_with_depth ? published_frame == 0u || published_frame >= frame_id ||
+                 published_time == 0u || published_time > observation_timestamp_us :
+                 published_frame != frame_id || published_time != observation_timestamp_us) ||
+              !ui::condition_words_match_plane(condition, plane, true)) return false;
+          // Historical UIP4 snapshots prove identity/controller state and SCP4, not OCR cover
+          // geometry. Exact paired covers are joined only from the separately captured OCR8.
         }
         if (matched_frame) {
           const auto expected_domain_tag = models::near_identical_input_domain_tag(
@@ -1534,15 +793,18 @@ namespace platf::sbs_debug {
       }
       if (!completed.gpu_undecided_completion ||
           !gpu_trace_ring_is_canonical(ring, completed) ||
-          locator.size() != subtitle_locator_state_word_count * sizeof(std::uint32_t)) {
+          locator.size() != subtitle_plane_state_word_count * sizeof(std::uint32_t)) {
         return false;
       }
-      const auto held_frame_id = subtitle_u64(locator, 22u);
+      const auto held_frame_id = subtitle_u64(locator, subtitle_plane_frame_offset);
       if (held_frame_id == 0u || held_frame_id >= completed.matched_frame_id) {
         return false;
       }
       frame held = completed;
       held.matched_frame_id = held_frame_id;
+      held.matched_observation_timestamp_us = subtitle_u64(locator, subtitle_plane_observation_timestamp_offset);
+      if (held.matched_observation_timestamp_us == 0u ||
+          held.matched_observation_timestamp_us > completed.matched_observation_timestamp_us) return false;
       held.input_domain_reset = false;
       held.gpu_undecided_completion = false;
       if (!subtitle_records_match_frame(
@@ -1588,7 +850,7 @@ namespace platf::sbs_debug {
           )) != subtitle_disposition_e::held_with_depth) {
         return false;
       }
-      for (std::size_t index = 0u; index < subtitle_locator_state_word_count;
+      for (std::size_t index = 0u; index < subtitle_plane_state_word_count;
            ++index) {
         if (word(*matched_locator_base + index) != subtitle_word(locator, index)) {
           return false;
@@ -1726,6 +988,17 @@ namespace platf::sbs_debug {
       texture_snapshot shadow_final;
       std::vector<std::uint8_t> subtitle_ocr_record;
       std::vector<std::uint8_t> subtitle_locator_state;
+      texture_snapshot contour_support;
+      texture_snapshot contour_field_pin;
+      texture_snapshot contour_distance;
+      texture_snapshot gaussian_weight;
+      texture_snapshot gaussian_blend;
+      texture_snapshot gaussian_vertical_conditioned;
+      texture_snapshot contour_history;
+      texture_snapshot contour_source;
+      std::vector<std::uint8_t> contour_identity;
+      std::vector<std::uint8_t> ocr_probability;
+      std::vector<std::uint8_t> gaussian_control;
       std::vector<std::uint8_t> gpu_trace_ring;
       std::vector<float> shadow_state;
       std::vector<float> shadow_frame_stats;
@@ -1779,6 +1052,17 @@ namespace platf::sbs_debug {
       shadow_frame_stats,
       subtitle_ocr_record,
       subtitle_locator_state,
+      contour_support,
+      contour_field_pin,
+      contour_distance,
+      contour_identity,
+      contour_history,
+      contour_source,
+      ocr_probability,
+      gaussian_weight,
+      gaussian_blend,
+      gaussian_vertical_conditioned,
+      gaussian_control,
       gpu_trace_ring,
       validate_gpu_trace,
       validate_evidence,
@@ -1822,6 +1106,17 @@ namespace platf::sbs_debug {
       staged_texture shadow_final;
       staged_buffer subtitle_ocr_record;
       staged_buffer subtitle_locator_state;
+      staged_texture contour_support;
+      staged_texture contour_field_pin;
+      staged_texture contour_distance;
+      staged_texture gaussian_weight;
+      staged_texture gaussian_blend;
+      staged_texture gaussian_vertical_conditioned;
+      staged_texture contour_history;
+      staged_texture contour_source;
+      staged_buffer contour_identity;
+      staged_buffer ocr_probability;
+      staged_buffer gaussian_control;
       staged_buffer gpu_trace_ring;
       staged_buffer shadow_state;
       staged_buffer shadow_frame_stats;
@@ -1833,7 +1128,7 @@ namespace platf::sbs_debug {
       std::vector<std::uint8_t> normalization_state_bytes;
       collection_stage_e collection_stage = collection_stage_e::shadow_state;
 
-      bool subtitle_slr13_active = false;
+      bool subtitle_plane_active = false;
       bool gpu_trace_requested = false;
       bool depth_input_source_available = false;
       bool scene_cut_bridge_requested = false;
@@ -1891,6 +1186,8 @@ namespace platf::sbs_debug {
           return 4;
         case DXGI_FORMAT_R16G16B16A16_FLOAT:
           return 8;
+        case DXGI_FORMAT_R32G32B32A32_FLOAT:
+          return 16;
         default:
           return 0;
       }
@@ -1914,6 +1211,8 @@ namespace platf::sbs_debug {
           return "DXGI_FORMAT_R8G8B8A8_UNORM_SRGB";
         case DXGI_FORMAT_R16G16B16A16_FLOAT:
           return "DXGI_FORMAT_R16G16B16A16_FLOAT";
+        case DXGI_FORMAT_R32G32B32A32_FLOAT:
+          return "DXGI_FORMAT_R32G32B32A32_FLOAT";
         default:
           return "DXGI_FORMAT_UNKNOWN_" + std::to_string(static_cast<unsigned>(format));
       }
@@ -2208,6 +1507,32 @@ namespace platf::sbs_debug {
       return true;
     }
 
+    bool stage_exact_scalar_buffer(
+      ID3D11Device *device,
+      ID3D11DeviceContext *ctx,
+      ID3D11ShaderResourceView *srv,
+      const std::size_t word_count,
+      staged_buffer &staging
+    ) {
+      if (!srv || word_count == 0u ||
+          word_count > std::numeric_limits<UINT>::max() / sizeof(std::uint32_t)) return false;
+      Microsoft::WRL::ComPtr<ID3D11Resource> resource;
+      Microsoft::WRL::ComPtr<ID3D11Buffer> buffer;
+      srv->GetResource(&resource);
+      if (!resource || FAILED(resource.As(&buffer))) return false;
+      D3D11_BUFFER_DESC desc {};
+      D3D11_SHADER_RESOURCE_VIEW_DESC view {};
+      buffer->GetDesc(&desc);
+      srv->GetDesc(&view);
+      if (desc.ByteWidth != word_count * sizeof(std::uint32_t) ||
+          desc.StructureByteStride != sizeof(std::uint32_t) ||
+          (desc.MiscFlags & D3D11_RESOURCE_MISC_BUFFER_STRUCTURED) == 0u ||
+          view.ViewDimension != D3D11_SRV_DIMENSION_BUFFER ||
+          view.Format != DXGI_FORMAT_UNKNOWN || view.Buffer.FirstElement != 0u ||
+          view.Buffer.NumElements != word_count) return false;
+      return stage_buffer(device, ctx, srv, desc.ByteWidth, staging);
+    }
+
     bool stage_texture(
       ID3D11Device *device,
       ID3D11DeviceContext *ctx,
@@ -2251,6 +1576,32 @@ namespace platf::sbs_debug {
       }
       ctx->CopyResource(staging.resource.Get(), texture.Get());
       return true;
+    }
+
+    bool stage_contour_texture(
+      ID3D11Device *device,
+      ID3D11DeviceContext *ctx,
+      ID3D11ShaderResourceView *srv,
+      const detail::subtitle_contour_texture_e role,
+      const frame &completed,
+      staged_texture &staging
+    ) {
+      if (!srv) return false;
+      Microsoft::WRL::ComPtr<ID3D11Resource> resource;
+      Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+      srv->GetResource(&resource);
+      if (!resource || FAILED(resource.As(&texture))) return false;
+      D3D11_TEXTURE2D_DESC desc {};
+      D3D11_SHADER_RESOURCE_VIEW_DESC view {};
+      texture->GetDesc(&desc);
+      srv->GetDesc(&view);
+      const auto row_bytes = static_cast<std::size_t>(desc.Width) * format_bytes_per_pixel(desc.Format);
+      if (view.ViewDimension != D3D11_SRV_DIMENSION_TEXTURE2D || view.Format != desc.Format ||
+          view.Texture2D.MostDetailedMip != 0u || view.Texture2D.MipLevels != 1u ||
+          !detail::subtitle_contour_texture_layout_is_authenticated(
+            role, desc.Format, desc.Width, desc.Height, row_bytes,
+            row_bytes * desc.Height, completed)) return false;
+      return stage_texture(device, ctx, srv, staging);
     }
 
     collect_status_e collect_buffer(
@@ -2776,10 +2127,6 @@ namespace platf::sbs_debug {
                         {"requested_gain", completed.parallax_v2_requested_gain},
                         {"requested_pop_strength", completed.parallax_v2_requested_pop_strength},
                         {"direct_container_limit", direct_container_limit},
-                        {"adaptive_max_tick_gap_ms", adaptive_max_tick_gap_ms},
-                        {"adaptive_time_constant_seconds", adaptive_time_constant_seconds},
-                        {"adaptive_log_scale_rate", adaptive_log_scale_rate},
-                        {"adaptive_zero_budget_per_second", adaptive_zero_budget_per_second},
                         {"max_horizontal_slope", max_horizontal_slope},
                         {"max_vertical_shear", max_vertical_shear},
                         {"vertical_majorant_share", vertical_majorant_share},
@@ -3163,21 +2510,6 @@ namespace platf::sbs_debug {
       return "invalid";
     }
 
-    const char *gpu_trace_locator_event_name(const std::uint32_t value) noexcept {
-      switch (value) {
-        case 0u:
-          return "none";
-        case 1u:
-          return "birth";
-        case 2u:
-          return "death";
-        case 3u:
-          return "handoff";
-        default:
-          return "invalid";
-      }
-    }
-
     std::uint32_t gpu_trace_word(
       const std::vector<std::uint8_t> &ring,
       const std::size_t index
@@ -3285,12 +2617,12 @@ namespace platf::sbs_debug {
           {"subtitle_locator", {
             {"word_offset", offset(record_word_e::subtitle_locator_begin)},
             {"word_count", subtitle_locator_word_count},
-            {"validity", "post-finalization SLR13 for an authenticated subtitle observation; held_with_depth preserves the byte-identical immediately prior tuple and frame identity; subtitle_suppressed bytes are frozen/unused"},
+            {"validity", "post-finalization UIP4 for an authenticated subtitle observation; held_with_depth preserves the byte-identical immediately prior tuple and frame identity; subtitle_suppressed bytes are frozen/unused"},
           }},
           {"subtitle_condition", {
             {"word_offset", offset(record_word_e::subtitle_condition_begin)},
             {"word_count", subtitle_condition_word_count},
-            {"validity", "post-finalization condition params for an authenticated subtitle observation, or the byte-identical immediately prior params for held_with_depth: exact SLR tuple or canonical zero6 when current_count is nonzero, canonical zero6 when current_count is zero; matched geometry authority is verified from the complete state separately; suppressed output copies exact Base and these words are unused"},
+            {"validity", "post-finalization SCP4 for an authenticated subtitle observation; active payload matches current UIP4 slots and applied target, inactive payload is zero with fresh schema/tag; held_with_depth preserves the byte-identical immediately prior params; suppressed words are unused; actual OCR8 covers are verified separately"},
           }},
           {"observation_timestamp", {
             {"word_offset", offset(record_word_e::observation_timestamp_low)},
@@ -3358,8 +2690,8 @@ namespace platf::sbs_debug {
           }},
         }},
         {"subtitle_locator", {
-          {"schema", subtitle_locator_state_schema},
-          {"tag", subtitle_locator_state_tag},
+          {"schema", subtitle_plane_state_schema},
+          {"tag", subtitle_plane_state_tag},
           {"word_count", subtitle_locator_word_count},
         }},
         {"subtitle_condition", {
@@ -3432,12 +2764,10 @@ namespace platf::sbs_debug {
         const auto condition_word = [&ring, condition_base](const std::size_t index) {
           return gpu_trace_word(ring, condition_base + index);
         };
-        const auto locator_flags = locator_word(2u);
-        const auto owner_count = locator_word(4u);
-        const auto lifetime_or_hold = locator_word(25u);
-        const auto target_bits = locator_word(18u);
+        const auto plane_flags = locator_word(subtitle_plane_flags_word);
+        const auto slot_mask = locator_word(subtitle_plane_current_slot_mask_word);
+        const auto target_bits = locator_word(subtitle_plane_adaptive_offset + 3u);
         const auto target = std::bit_cast<float>(target_bits);
-        const auto event = locator_word(21u);
         const bool suppressed = (flags & subtitle_suppressed) != 0u;
         const bool condition_valid = !suppressed &&
           condition_word(0u) == subtitle_condition_param_schema &&
@@ -3517,51 +2847,35 @@ namespace platf::sbs_debug {
             {"height", word(record_word_e::field_height)},
           }},
           {"matched_dump_frame", matched},
-          {"subtitle_locator", {
-            {"schema", locator_word(0u)},
-            {"tag", locator_word(1u)},
-            {"flags", {
-              {"value", locator_flags},
-              {"owner", (locator_flags & 1u) != 0u},
-              {"pending", (locator_flags & 2u) != 0u},
-              {"target_valid", (locator_flags & 4u) != 0u},
-              {"target_reset", (locator_flags & 8u) != 0u},
-              {"provisional_current",
-               (locator_flags & subtitle_locator_flag_provisional_current) != 0u},
+          {"subtitle_plane", {
+            {"schema", locator_word(0u)}, {"tag", locator_word(1u)},
+            {"flags", {{"value", plane_flags}, {"current_valid", (plane_flags & subtitle_plane_current_valid_flag) != 0u}}},
+            {"current_slot_mask", slot_mask}, {"current_count", std::popcount(slot_mask)},
+            {"target", target}, {"target_bits", target_bits},
+            {"cut_epoch", locator_word(subtitle_plane_cut_epoch_word)},
+            {"analysis_generation", join_u64(locator_word(subtitle_plane_analysis_generation_offset), locator_word(subtitle_plane_analysis_generation_offset + 1u))},
+            {"frame_id", join_u64(locator_word(subtitle_plane_frame_offset), locator_word(subtitle_plane_frame_offset + 1u))},
+            {"observation_timestamp_us", join_u64(locator_word(subtitle_plane_observation_timestamp_offset), locator_word(subtitle_plane_observation_timestamp_offset + 1u))},
+            {"adaptive", {
+              {"initialized", locator_word(subtitle_plane_adaptive_offset)},
+              {"flags", locator_word(subtitle_plane_adaptive_offset + 1u)},
+              {"current_level", locator_word(subtitle_plane_adaptive_offset + 2u)},
+              {"accepted_observation_timestamp_us", join_u64(locator_word(subtitle_plane_adaptive_offset + 4u), locator_word(subtitle_plane_adaptive_offset + 5u))},
+              {"approach_since_us", join_u64(locator_word(subtitle_plane_adaptive_offset + 6u), locator_word(subtitle_plane_adaptive_offset + 7u))},
+              {"retreat_since_us", join_u64(locator_word(subtitle_plane_adaptive_offset + 8u), locator_word(subtitle_plane_adaptive_offset + 9u))},
+              {"approach_level", locator_word(subtitle_plane_adaptive_offset + 10u)},
+              {"retreat_level", locator_word(subtitle_plane_adaptive_offset + 11u)},
+              {"display_budget", std::bit_cast<float>(locator_word(subtitle_plane_adaptive_offset + 12u))},
+              {"covered_count", locator_word(subtitle_plane_adaptive_offset + 13u)},
+              {"conflict_count", locator_word(subtitle_plane_adaptive_offset + 14u)},
+              {"invalid_count", locator_word(subtitle_plane_adaptive_offset + 15u)},
             }},
-            {"owner_generation", locator_word(3u)},
-            {"owner_count", owner_count},
-            {"pending_count", locator_word(12u)},
-            {"current_count", locator_word(20u)},
-            {"target", target},
-            {"target_bits", target_bits},
-            {"event", {{"value", event}, {"name", gpu_trace_locator_event_name(event)}}},
-            {"fade_step", locator_word(24u)},
-            {"provisional_target",
-             (locator_flags & subtitle_locator_flag_provisional_current) != 0u ?
-               nlohmann::json(std::bit_cast<float>(locator_word(
-                 subtitle_locator_provisional_target_word
-               ))) : nlohmann::json(nullptr)},
-            {"provisional_target_bits", locator_word(
-              subtitle_locator_provisional_target_word
-            )},
-            {"provisional_fade_step",
-             (locator_flags & subtitle_locator_flag_provisional_current) != 0u ?
-               locator_word(subtitle_locator_provisional_fade_word) : 0u},
-            {"lifetime_or_hold_count", lifetime_or_hold},
-            {"reserved_owner_hold_count", owner_count != 0u ?
-              nlohmann::json(lifetime_or_hold) : nlohmann::json(nullptr)},
-            {"death_grace_count", owner_count == 0u ?
-              nlohmann::json(lifetime_or_hold) : nlohmann::json(nullptr)},
-            {"cut_epoch", locator_word(26u)},
-            {"analysis_generation", join_u64(locator_word(10u), locator_word(11u))},
-            {"frame_id", join_u64(locator_word(22u), locator_word(23u))},
           }},
           {"subtitle_condition", suppressed ?
             nlohmann::json {
               {"active", false},
               {"unused", true},
-              {"reason", "subtitle-suppressed transaction freezes SLR and skips conditioning"},
+              {"reason", "subtitle-suppressed transaction freezes UIP4 and skips conditioning"},
             } :
             nlohmann::json {
               {"active", condition_active},
@@ -3573,7 +2887,7 @@ namespace platf::sbs_debug {
               {"tag", condition_word(1u)},
               {"current_count", condition_word(2u)},
               {"current_kinds", condition_word(3u)},
-              {"fade_step", condition_word(4u)},
+              {"active_level", condition_word(4u)},
               {"target", condition_target},
               {"target_bits", condition_target_bits},
             }},
@@ -3582,7 +2896,7 @@ namespace platf::sbs_debug {
             base + word_index(record_word_e::transaction_begin),
             transaction_word_count
           )},
-          {"subtitle_locator_words", gpu_trace_word_array(
+          {"subtitle_plane_words", gpu_trace_word_array(
             ring,
             base + word_index(record_word_e::subtitle_locator_begin),
             subtitle_locator_word_count
@@ -4121,6 +3435,394 @@ namespace platf::sbs_debug {
       }
     }
 
+    bool subtitle_contour_texture_layout_is_authenticated(
+      const subtitle_contour_texture_e role,
+      const DXGI_FORMAT format,
+      const std::uint32_t width,
+      const std::uint32_t height,
+      const std::size_t row_bytes,
+      const std::size_t byte_count,
+      const frame &completed
+    ) noexcept {
+      using namespace models::depth_coordinate_v2;
+      const auto source_width = completed.depth_input_region.width();
+      const auto source_height = completed.depth_input_region.height();
+      if (source_width == 0u || source_height == 0u || completed.field_width <= 0 ||
+          completed.field_height <= 0) return false;
+      const bool supported = source_width <= subtitle_contour_source_max_extent &&
+                             source_height <= subtitle_contour_source_max_extent;
+      const bool field = role == subtitle_contour_texture_e::field_pin ||
+                         role == subtitle_contour_texture_e::distance ||
+                         role == subtitle_contour_texture_e::gaussian_weight ||
+                         role == subtitle_contour_texture_e::gaussian_blend ||
+                         role == subtitle_contour_texture_e::gaussian_vertical_conditioned;
+      const auto expected_width = field ? static_cast<std::uint32_t>(completed.field_width) :
+                                         (supported ? source_width : 1u);
+      const auto expected_height = field ? static_cast<std::uint32_t>(completed.field_height) :
+        (supported ? models::subtitle_ocr_source_crop_height(source_width, source_height) : 1u);
+      DXGI_FORMAT expected_format = DXGI_FORMAT_R32_UINT;
+      std::size_t pixel_bytes = sizeof(std::uint32_t);
+      if (field && role != subtitle_contour_texture_e::field_pin) {
+        expected_format = DXGI_FORMAT_R32_FLOAT;
+      } else if (role == subtitle_contour_texture_e::history) {
+        expected_format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+        pixel_bytes = 4u * sizeof(float);
+      } else if (role == subtitle_contour_texture_e::source) {
+        expected_format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        pixel_bytes = 4u * sizeof(std::uint16_t);
+      } else if (!field && role != subtitle_contour_texture_e::support) {
+        return false;
+      }
+      return width == expected_width && height == expected_height && format == expected_format &&
+             row_bytes == static_cast<std::size_t>(expected_width) * pixel_bytes &&
+             byte_count == row_bytes * expected_height;
+    }
+
+    bool subtitle_contour_identity_matches_completion(
+      const std::vector<std::uint8_t> &identity,
+      const std::vector<std::uint8_t> &ocr,
+      const std::vector<std::uint8_t> &locator,
+      const std::vector<float> &state,
+      const frame &completed
+    ) noexcept {
+      using namespace models::depth_coordinate_v2;
+      if (identity.size() != subtitle_contour_history_word_count * sizeof(std::uint32_t) ||
+          ocr.size() != subtitle_ocr_record_word_count * sizeof(std::uint32_t) ||
+          locator.size() != subtitle_plane_state_word_count * sizeof(std::uint32_t) ||
+          state.size() != state_float_count) return false;
+      const auto word = [&identity](std::size_t index) { return subtitle_word(identity, index); };
+      state_words_t geometry {};
+      std::memcpy(geometry.data(), state.data(), sizeof(geometry));
+      const auto owner_frame = subtitle_u64(ocr, 5u);
+      const auto owner_clock = static_cast<std::uint64_t>(geometry[gain_last_observation_low]) |
+        (static_cast<std::uint64_t>(geometry[gain_last_observation_high]) << 32u);
+      const auto source_width = completed.depth_input_region.width();
+      const auto source_height = completed.depth_input_region.height();
+      const auto crop_height = models::subtitle_ocr_source_crop_height(source_width, source_height);
+      const auto analysis = models::fit_subtitle_analysis_geometry(
+        source_width, source_height, {completed.field_width, completed.field_height}, completed.field_content);
+      if (!analysis.valid() || source_width == 0u || source_height == 0u ||
+          word(0u) != subtitle_contour_schema || word(1u) != subtitle_contour_history_tag ||
+          word(2u) > 1u || word(subtitle_contour_history_snapshot_valid_word) > 1u ||
+          word(22u) != subtitle_contour_recipe ||
+          subtitle_u64(identity, 4u) != owner_frame || subtitle_u64(locator, subtitle_plane_frame_offset) != owner_frame ||
+          subtitle_u64(identity, 6u) != completed.depth_input_region.analysis_generation ||
+          subtitle_u64(identity, 6u) != subtitle_u64(ocr, 7u) ||
+          word(8u) != source_width || word(9u) != source_height ||
+          word(10u) != source_height - crop_height || word(11u) != crop_height ||
+          word(12u) != static_cast<std::uint32_t>(completed.field_width) ||
+          word(13u) != static_cast<std::uint32_t>(completed.field_height) ||
+          word(14u) != analysis.roi_top || word(15u) != analysis.roi_bottom ||
+          word(16u) != completed.field_content.left || word(17u) != completed.field_content.top ||
+          word(18u) != completed.field_content.right || word(19u) != completed.field_content.bottom) return false;
+      for (std::size_t index = 8u; index < 10u; ++index) {
+        if (word(index) != subtitle_word(ocr, index + 1u)) return false;
+      }
+      for (std::size_t index = 12u; index < 16u; ++index) {
+        if (word(index) != subtitle_word(ocr, index - 1u)) return false;
+      }
+      for (std::size_t index = subtitle_contour_history_reserved_offset; index < subtitle_contour_history_word_count; ++index) {
+        if (word(index) != 0u) return false;
+      }
+      const bool current = owner_frame == completed.matched_frame_id;
+      const auto clock = subtitle_u64(identity, 20u);
+      if (owner_frame == 0u || clock == 0u ||
+          clock != subtitle_u64(locator, subtitle_plane_observation_timestamp_offset) ||
+          (current ? clock != completed.matched_observation_timestamp_us :
+            (!completed.gpu_undecided_completion || owner_frame >= completed.matched_frame_id ||
+             clock > completed.matched_observation_timestamp_us || clock != owner_clock))) return false;
+      frame published = completed;
+      published.matched_frame_id = owner_frame;
+      published.matched_observation_timestamp_us = clock;
+      if (!subtitle_records_match_frame(ocr, locator, published, subtitle_word(locator, subtitle_plane_cut_epoch_word))) return false;
+      const bool snapshot_valid = source_width <= subtitle_contour_source_max_extent &&
+                                  source_height <= subtitle_contour_source_max_extent &&
+                                  state[frame_valid] == 1.0f && clock == owner_clock &&
+                                  subtitle_word(ocr, 2u) == 1u;
+      if (word(subtitle_contour_history_snapshot_valid_word) != static_cast<std::uint32_t>(snapshot_valid) ||
+          word(3u) != (snapshot_valid ? geometry[confirmed_cut_count] : 0u)) return false;
+      const auto plane = subtitle_plane_words(locator);
+      // The caller authenticates the complete sealed camera state before this artifact join.
+      // Its ready publication and actual current OCR verdict must grant every current slot,
+      // including valid empty. An invalid Base probe only suppresses conditioning below.
+      const bool geometry_ready = state[frame_valid] == 1.0f &&
+        geometry[renderer_authorization_bits] == contract_tag &&
+        geometry[joint_plane_mode_bits] == adaptive_policy_id && clock == owner_clock &&
+        geometry[confirmed_cut_count] == plane[subtitle_plane_cut_epoch_word];
+      const bool expected_current_valid = geometry_ready && subtitle_word(ocr, 2u) == 1u;
+      if ((plane[subtitle_plane_flags_word] == subtitle_plane_current_valid_flag) != expected_current_valid) return false;
+      const bool pin_authority = snapshot_valid &&
+        word(3u) == plane[subtitle_plane_cut_epoch_word] && subtitle_word(ocr, 4u) != 0u &&
+        plane[subtitle_plane_flags_word] == subtitle_plane_current_valid_flag &&
+        models::host_sbs_subtitle_plane::current_count(plane) == subtitle_word(ocr, 4u) &&
+        plane[subtitle_plane_adaptive_offset] == 1u && plane[subtitle_plane_adaptive_offset + 15u] == 0u;
+      return word(2u) == static_cast<std::uint32_t>(pin_authority);
+    }
+
+    bool subtitle_contour_clear_policy_is_authenticated(
+      const std::vector<std::uint8_t> &identity,
+      const std::vector<std::uint8_t> &ocr,
+      const std::vector<float> &state,
+      const std::vector<std::uint8_t> &support,
+      const std::vector<std::uint8_t> &field_pin,
+      const std::vector<std::uint8_t> &distance,
+      const std::vector<std::uint8_t> &history,
+      const std::vector<std::uint8_t> &source,
+      const std::vector<std::uint8_t> &probability
+    ) noexcept {
+      using namespace models::depth_coordinate_v2;
+      if (identity.size() != subtitle_contour_history_word_count * sizeof(std::uint32_t) ||
+          ocr.size() != subtitle_ocr_record_word_count * sizeof(std::uint32_t) ||
+          state.size() != state_float_count || support.empty() || field_pin.empty() ||
+          distance.empty() || history.empty() || source.empty() || probability.empty()) return false;
+      const auto zero = [](const auto &bytes) {
+        return std::all_of(bytes.begin(), bytes.end(), [](std::uint8_t value) { return value == 0u; });
+      };
+      const bool supported = subtitle_word(identity, 8u) <= subtitle_contour_source_max_extent &&
+                             subtitle_word(identity, 9u) <= subtitle_contour_source_max_extent;
+      const auto field_width = subtitle_word(identity, 12u);
+      const auto field_height = subtitle_word(identity, 13u);
+      const auto native_width = supported ? subtitle_word(identity, 8u) : 1u;
+      const auto native_height = supported ? subtitle_word(identity, 11u) : 1u;
+      if (native_width == 0u || native_height == 0u ||
+          native_height > subtitle_contour_source_max_extent ||
+          field_width == 0u || field_height == 0u ||
+          field_width > subtitle_contour_source_max_extent ||
+          field_height > subtitle_contour_source_max_extent) return false;
+      const auto native_pixels = static_cast<std::size_t>(native_width) * native_height;
+      const auto field_pixels = static_cast<std::size_t>(field_width) * field_height;
+      if (support.size() != native_pixels * sizeof(std::uint32_t) ||
+          field_pin.size() != field_pixels * sizeof(std::uint32_t) ||
+          distance.size() != field_pixels * sizeof(std::uint32_t) ||
+          history.size() != native_pixels * 4u * sizeof(float) ||
+          source.size() != native_pixels * 4u * sizeof(std::uint16_t) ||
+          probability.size() != subtitle_ocr_output_width * subtitle_ocr_output_height * sizeof(float)) return false;
+      const auto contour_valid = subtitle_word(identity, 2u);
+      if (contour_valid > 1u || (!supported && contour_valid != 0u)) return false;
+      if (contour_valid == 0u) {
+        if (!zero(support) || !zero(field_pin) ||
+            distance.size() % sizeof(std::uint32_t) != 0u) return false;
+        for (std::size_t word = 0u; word < distance.size() / sizeof(std::uint32_t); ++word) {
+          if (subtitle_word(distance, word) != subtitle_contour_distance_empty_bits) return false;
+        }
+      }
+      const auto geometry_clock = static_cast<std::uint64_t>(std::bit_cast<std::uint32_t>(state[gain_last_observation_low])) |
+        (static_cast<std::uint64_t>(std::bit_cast<std::uint32_t>(state[gain_last_observation_high])) << 32u);
+      const bool snapshot_eligible = supported && subtitle_word(ocr, 2u) == 1u &&
+                                     state[frame_valid] == 1.0f &&
+                                     subtitle_u64(identity, 20u) == geometry_clock;
+      if (subtitle_word(identity, subtitle_contour_history_snapshot_valid_word) !=
+          static_cast<std::uint32_t>(snapshot_eligible)) return false;
+      if (!snapshot_eligible) return zero(source) && zero(probability) && zero(history);
+      // Authenticate saved confirmation state without inventing its missing temporal chain.
+      // Pending/empty UI retains current RGB with count0; established counts retain a bounded
+      // fixed anchor. Invalid source RGB has no valid bit, even when it resembles black ink.
+      for (std::size_t pixel = 0u; pixel < native_pixels; ++pixel) {
+        const auto mask = subtitle_word(support, pixel);
+        if (mask > 1u) return false;
+        std::array<std::uint16_t, 4u> half {};
+        std::memcpy(half.data(), source.data() + pixel * sizeof(half), sizeof(half));
+        std::array<float, 4u> color {};
+        for (std::size_t lane = 0u; lane < 4u; ++lane) {
+          color[lane] = half_to_float(half[lane]);
+          if (!std::isfinite(color[lane])) return false;
+        }
+        if (color[3u] != 0.0f && color[3u] != 1.0f) return false;
+        if (color[3u] == 0.0f && std::any_of(half.begin(), half.end(), [](auto bits) { return bits != 0u; })) return false;
+        const bool color_valid = color[3u] == 1.0f &&
+          std::all_of(color.begin(), color.begin() + 3u, [](float value) { return value >= 0.0f && value <= 1.0f; });
+        if (mask != 0u && (!color_valid || contour_valid == 0u)) return false;
+        const auto code_bits = subtitle_word(history, pixel * 4u + 3u);
+        std::uint32_t count = 0u;
+        bool known_code = !color_valid && code_bits == 0u;
+        if (color_valid) {
+          for (std::uint32_t candidate = 0u; candidate <= subtitle_contour_history_confirmation_observations; ++candidate) {
+            const auto code = subtitle_contour_history_feature_valid_bit |
+              (candidate << subtitle_contour_history_feature_count_shift) |
+              (candidate == subtitle_contour_history_confirmation_observations ? subtitle_contour_history_feature_mask_bit : 0u);
+            if (code_bits == std::bit_cast<std::uint32_t>(static_cast<float>(code))) {
+              count = candidate;
+              known_code = true;
+              break;
+            }
+          }
+        }
+        if (!known_code || (contour_valid == 0u && count != 0u) ||
+            mask != static_cast<std::uint32_t>(color_valid && count == subtitle_contour_history_confirmation_observations)) return false;
+        for (std::size_t lane = 0u; lane < 3u; ++lane) {
+          const auto anchor_bits = subtitle_word(history, pixel * 4u + lane);
+          if (!color_valid || count <= 1u) {
+            const auto expected = color_valid ? std::bit_cast<std::uint32_t>(color[lane]) : 0u;
+            if (anchor_bits != expected) return false;
+          } else {
+            const auto anchor = std::bit_cast<float>(anchor_bits);
+            if (!std::isfinite(anchor) || anchor < 0.0f || anchor > 1.0f ||
+                std::abs(anchor - color[lane]) > subtitle_contour_history_rgb_distance) return false;
+          }
+        }
+      }
+      // Detector probability stays opaque, including preserved model-fault bits.
+      return true;
+    }
+
+    bool subtitle_gaussian_fields_are_authenticated(
+      const std::vector<std::uint8_t> &identity,
+      const std::vector<std::uint8_t> &locator,
+      const std::vector<std::uint8_t> &ocr,
+      const std::vector<std::uint8_t> &distance,
+      const std::vector<std::uint8_t> &weight,
+      const std::vector<std::uint8_t> &blend,
+      const std::vector<std::uint8_t> &vertical,
+      const std::vector<std::uint8_t> &control,
+      const std::vector<std::uint8_t> &base,
+      const std::vector<std::uint8_t> &final
+    ) noexcept {
+      using namespace models::depth_coordinate_v2;
+      if (identity.size() != subtitle_contour_history_word_count * sizeof(std::uint32_t) ||
+          locator.size() != subtitle_plane_state_word_count * sizeof(std::uint32_t) ||
+          ocr.size() != subtitle_ocr_record_word_count * sizeof(std::uint32_t) ||
+          control.size() != sizeof(std::uint32_t)) return false;
+      const auto width = subtitle_word(identity, 12u), height = subtitle_word(identity, 13u);
+      const auto left = subtitle_word(identity, 16u), top = subtitle_word(identity, 17u);
+      const auto right = subtitle_word(identity, 18u), bottom = subtitle_word(identity, 19u);
+      if (width == 0u || height == 0u || width > subtitle_contour_source_max_extent ||
+          height > subtitle_contour_source_max_extent || left >= right || top >= bottom ||
+          right > width || bottom > height) return false;
+      const auto bytes = static_cast<std::size_t>(width) * height * sizeof(float);
+      if (distance.size() != bytes || weight.size() != bytes || blend.size() != bytes ||
+          vertical.size() != bytes || base.size() != bytes || final.size() != bytes) return false;
+      const auto f = [](const auto &payload, const std::size_t index) {
+        return std::bit_cast<float>(subtitle_word(payload, index));
+      };
+      const auto enabled = subtitle_word(control, 0u);
+      const auto plane = subtitle_plane_words(locator);
+      if (!models::host_sbs_subtitle_plane::state_words_are_canonical(plane, display_budget())) return false;
+      const auto remaining = plane[subtitle_plane_warmup_word] & subtitle_plane_warmup_remaining_mask;
+      const auto source_width = subtitle_word(identity, 8u), source_height = subtitle_word(identity, 9u);
+      if (plane[subtitle_plane_warmup_word] != 0u) {
+        frame current;
+        current.field_width = static_cast<int>(width);
+        current.field_height = static_cast<int>(height);
+        current.field_content = {left, top, right, bottom};
+        current.matched_frame_id = subtitle_u64(identity, 4u);
+        current.depth_input_region.source_width = source_width;
+        current.depth_input_region.source_height = source_height;
+        current.depth_input_region.right = source_width;
+        current.depth_input_region.bottom = source_height;
+        current.depth_input_region.analysis_generation = subtitle_u64(identity, 6u);
+        if (!subtitle_ocr_record_is_canonical_for_frame(ocr, current) ||
+            subtitle_word(ocr, 2u) != 1u ||
+            subtitle_word(ocr, 4u) != models::host_sbs_subtitle_plane::current_count(plane) ||
+            subtitle_word(ocr, 13u) != subtitle_word(identity, 14u) ||
+            subtitle_word(ocr, 14u) != subtitle_word(identity, 15u)) return false;
+      }
+      // The native distance remains a diagnostic of confirmed pixels. During cue-held grace
+      // only, current joined OCR rectangles contribute to the presentation max-union.
+      const auto presentation_q = [&](const std::uint32_t x, const std::uint32_t y) {
+        float q = f(distance, static_cast<std::size_t>(y) * width + x);
+        if (remaining == 0u) return q;
+        const float scale_x = static_cast<float>(source_width) / static_cast<float>(right - left);
+        const float scale_y = static_cast<float>(source_height) / static_cast<float>(bottom - top);
+        const float px = static_cast<float>(x) + .5f;
+        const float py = static_cast<float>(y) + .5f;
+        for (std::uint32_t slot = 0u; slot < subtitle_word(ocr, 4u); ++slot) {
+          const auto offset = subtitle_ocr_final_box_offset + slot * subtitle_ocr_box_word_count;
+          const float l = static_cast<float>(subtitle_word(ocr, offset));
+          const float t = static_cast<float>(subtitle_word(ocr, offset + 1u));
+          const float r = static_cast<float>(subtitle_word(ocr, offset + 2u));
+          const float b = static_cast<float>(subtitle_word(ocr, offset + 3u));
+          const float dx = std::max({l - px, 0.0f, px - r}) * scale_x;
+          const float dy = std::max({t - py, 0.0f, py - b}) * scale_y;
+          const float xx = dx * dx, yy = dy * dy;
+          q = std::min(q, xx + yy);
+        }
+        return q;
+      };
+      const auto first_q = presentation_q(left, top);
+      const auto target_bits = plane[subtitle_plane_adaptive_offset + 3u];
+      const auto target = std::bit_cast<float>(target_bits);
+      const bool authority = subtitle_word(identity, 2u) == 1u &&
+        plane[subtitle_plane_flags_word] == subtitle_plane_current_valid_flag &&
+        models::host_sbs_subtitle_plane::current_count(plane) != 0u &&
+        plane[subtitle_plane_adaptive_offset] == 1u && plane[subtitle_plane_adaptive_offset + 15u] == 0u &&
+        std::isfinite(target) && target >= 0.0f && target <= direct_container_limit;
+      if (enabled > 1u || enabled != static_cast<std::uint32_t>(
+            authority && std::isfinite(first_q) && first_q >= 0.0f)) return false;
+      const auto short_side = std::min(subtitle_word(identity, 8u), subtitle_word(identity, 9u));
+      if (short_side == 0u) return false;
+      const float sigma = static_cast<float>(short_side) / subtitle_contour_gaussian_sigma_short_side_divisor;
+      const float sigma_squared = sigma * sigma;
+      const float denominator = 2.0f * sigma_squared;
+      if (!std::isfinite(denominator) || denominator <= 0.0f) return false;
+      // SM5 permits representational round-direction differences in each separate arithmetic
+      // operation. Enclose those operations; endpoints remain exact bit-identity branches.
+      const auto floor_float = [](const double value) {
+        // SM5 arithmetic may flush a positive subnormal operation result to +0.
+        if (value > 0.0 && value < std::numeric_limits<float>::min()) return 0.0f;
+        float rounded = static_cast<float>(value);
+        if (static_cast<double>(rounded) > value) rounded = std::nextafter(rounded, -std::numeric_limits<float>::infinity());
+        return rounded;
+      };
+      const auto ceil_float = [](const double value) {
+        // Negative subnormal operation results may similarly flush to -0.
+        if (value < 0.0 && value > -std::numeric_limits<float>::min()) return -0.0f;
+        float rounded = static_cast<float>(value);
+        if (static_cast<double>(rounded) < value) rounded = std::nextafter(rounded, std::numeric_limits<float>::infinity());
+        return rounded;
+      };
+      for (std::uint32_t y = 0u; y < height; ++y) {
+        for (std::uint32_t x = 0u; x < width; ++x) {
+          const auto index = static_cast<std::size_t>(y) * width + x;
+          const auto sx = std::clamp(x, left, right - 1u), sy = std::clamp(y, top, bottom - 1u);
+          const auto source_index = static_cast<std::size_t>(sy) * width + sx;
+          const auto raw_q = f(distance, index);
+          const bool in_content = x >= left && x < right && y >= top && y < bottom;
+          if ((raw_q == 0.0f && subtitle_word(distance, index) != 0u) ||
+              (in_content && !(std::isfinite(raw_q) && raw_q >= 0.0f) &&
+               subtitle_word(distance, index) != subtitle_contour_distance_empty_bits) ||
+              (!in_content && subtitle_word(distance, index) != subtitle_contour_distance_empty_bits)) return false;
+          const auto b = f(base, source_index), m = f(weight, index), proposal = f(blend, index);
+          const auto v = f(vertical, index), result = f(final, index);
+          if (!std::isfinite(b) || !std::isfinite(m) || m < 0.0f || m > 1.0f ||
+              !std::isfinite(proposal) || !std::isfinite(v) || !std::isfinite(result) ||
+              std::abs(b) > direct_container_limit || std::abs(proposal) > direct_container_limit ||
+              std::abs(v) > direct_container_limit || std::abs(result) > direct_container_limit) return false;
+          if (enabled == 0u) {
+            if (subtitle_word(weight, index) != 0u ||
+                subtitle_word(blend, index) != subtitle_word(base, source_index) ||
+                subtitle_word(vertical, index) != subtitle_word(base, source_index) ||
+                subtitle_word(final, index) != subtitle_word(base, source_index)) return false;
+            continue;
+          }
+          const auto q = presentation_q(sx, sy);
+          if (!std::isfinite(q) || q < 0.0f) return false;
+          const auto expected_weight = std::exp(-static_cast<double>(q) / denominator);
+          if ((q == 0.0f && subtitle_word(weight, index) != std::bit_cast<std::uint32_t>(1.0f)) ||
+              std::abs(static_cast<double>(m) - expected_weight) > subtitle_contour_gaussian_weight_absolute_error_limit) return false;
+          if (m == 0.0f) {
+            if (subtitle_word(blend, index) != subtitle_word(base, source_index)) return false;
+          } else if (m == 1.0f) {
+            if (subtitle_word(blend, index) != target_bits) return false;
+          } else {
+            const double one_minus_exact = 1.0 - static_cast<double>(m);
+            const float om_low = floor_float(one_minus_exact), om_high = ceil_float(one_minus_exact);
+            const double bt0 = static_cast<double>(om_low) * b, bt1 = static_cast<double>(om_high) * b;
+            const float bt_low = floor_float(std::min(bt0, bt1)), bt_high = ceil_float(std::max(bt0, bt1));
+            const double ui_exact = static_cast<double>(m) * target;
+            const float ui_low = floor_float(ui_exact), ui_high = ceil_float(ui_exact);
+            const auto low = floor_float(static_cast<double>(bt_low) + ui_low);
+            const auto high = ceil_float(static_cast<double>(bt_high) + ui_high);
+            if (proposal < low || proposal > high ||
+                (proposal == 0.0f && !std::signbit(b) && !std::signbit(target) &&
+                 std::signbit(proposal))) return false;
+          }
+        }
+      }
+      // Exact q minimum and the shared C75/Q30 recurrences are independently replayed by the
+      // versioned dump reader; this bounded native guard does not invent a second renderer.
+      return true;
+    }
+
     bool subtitle_capture_resources_are_authenticated(const frame &completed) noexcept {
       const bool ocr_present = completed.ocr_box_record != nullptr;
       const bool locator_present = completed.subtitle_locator_state != nullptr;
@@ -4131,6 +3833,17 @@ namespace platf::sbs_debug {
         !completed.subtitle_work_suppressed && ocr_present && locator_present;
       return !active ||
              (completed.shadow_base_final_parallax &&
+              completed.subtitle_contour_support &&
+              completed.subtitle_contour_field_pin &&
+              completed.subtitle_contour_distance &&
+              completed.subtitle_contour_identity &&
+              completed.subtitle_contour_history &&
+              completed.subtitle_contour_source &&
+              completed.subtitle_ocr_probability &&
+              completed.subtitle_gaussian_weight &&
+              completed.subtitle_gaussian_blend &&
+              completed.subtitle_gaussian_vertical_conditioned &&
+              completed.subtitle_gaussian_control &&
               completed.model_width > 0 && completed.model_height > 0 &&
               models::depth_coordinate_v2::subtitle_ocr_field_is_calibrated(
                 static_cast<std::uint32_t>(completed.model_width),
@@ -4472,17 +4185,17 @@ namespace platf::sbs_debug {
                                            job.depth_input_source :
                                            job.source;
         const auto &sbs = job.sbs;
-        const bool subtitle_slr13_active =
+        const bool subtitle_plane_active =
           !job.subtitle_ocr_record.empty() &&
           !job.subtitle_locator_state.empty();
-        const nlohmann::json subtitle_conditioning = subtitle_slr13_active ?
+        const nlohmann::json subtitle_conditioning = subtitle_plane_active ?
           nlohmann::json {
-            {"mode", "subtitle-slr13"},
+            {"mode", "subtitle-contours-v1"},
             {"request", true},
             {"producer", subtitle_ocr_producer_contract_json(
               *completed.parallax_v2_shader_provenance
             )},
-            {"resolver", subtitle_locator_resolver_contract_json(
+            {"resolver", subtitle_plane_resolver_contract_json(
               *completed.parallax_v2_shader_provenance
             )},
             {"artifacts", {
@@ -4490,6 +4203,17 @@ namespace platf::sbs_debug {
               {"locator_state", "subtitle_locator_state.u32"},
               {"base_field", "shadow_base_final_parallax.f32"},
               {"conditioned_field", "shadow_final_parallax.f32"},
+              {"contour_support", "contour_support.u32"},
+              {"contour_field_pin", "contour_field_pin.u32"},
+              {"contour_distance", "contour_distance.f32"},
+              {"contour_identity", "contour_identity.u32"},
+              {"contour_history", "contour_history.rgba32f"},
+              {"contour_source", "contour_source.rgba16f"},
+              {"ocr_probability", "ocr_probability.f32"},
+              {"gaussian_weight", "gaussian_weight.f32"},
+              {"gaussian_blend", "gaussian_blend.f32"},
+              {"gaussian_vertical_conditioned", "gaussian_vertical_conditioned.f32"},
+              {"gaussian_control", "gaussian_control.u32"},
             }},
           } :
           nlohmann::json {
@@ -4540,7 +4264,7 @@ namespace platf::sbs_debug {
             tensor_width,
             tensor_height
           ) ||
-          (subtitle_slr13_active && !scalar_tensor_snapshot_matches(
+          (subtitle_plane_active && !scalar_tensor_snapshot_matches(
             job.shadow_base_final,
             tensor_width,
             tensor_height
@@ -4551,6 +4275,67 @@ namespace platf::sbs_debug {
             << "SBS debug dump: a completed parallax-v2 tensor texture does not match "sv
                "the authenticated model extent/R32_FLOAT contract."sv;
           break;
+        }
+        const std::array<std::pair<const char *, const std::vector<std::uint8_t> *>, 11u> contour_artifacts {{
+          {"contour_support.u32", &job.contour_support.bytes},
+          {"contour_field_pin.u32", &job.contour_field_pin.bytes},
+          {"contour_distance.f32", &job.contour_distance.bytes},
+          {"contour_identity.u32", &job.contour_identity},
+          {"contour_history.rgba32f", &job.contour_history.bytes},
+          {"contour_source.rgba16f", &job.contour_source.bytes},
+          {"ocr_probability.f32", &job.ocr_probability},
+          {"gaussian_weight.f32", &job.gaussian_weight.bytes},
+          {"gaussian_blend.f32", &job.gaussian_blend.bytes},
+          {"gaussian_vertical_conditioned.f32", &job.gaussian_vertical_conditioned.bytes},
+          {"gaussian_control.u32", &job.gaussian_control},
+        }};
+        std::array<std::string, 11u> contour_sha256 {};
+        if (subtitle_plane_active) {
+          bool contours_valid = job.contour_identity.size() == subtitle_contour_history_word_count * sizeof(std::uint32_t) &&
+            job.ocr_probability.size() == subtitle_ocr_output_width * subtitle_ocr_output_height * sizeof(float);
+          contours_valid = contours_valid && detail::subtitle_contour_texture_layout_is_authenticated(
+            detail::subtitle_contour_texture_e::support, job.contour_support.desc.Format,
+            job.contour_support.desc.Width, job.contour_support.desc.Height, job.contour_support.row_bytes, job.contour_support.bytes.size(), completed);
+          contours_valid = contours_valid && detail::subtitle_contour_texture_layout_is_authenticated(
+            detail::subtitle_contour_texture_e::field_pin, job.contour_field_pin.desc.Format,
+            job.contour_field_pin.desc.Width, job.contour_field_pin.desc.Height, job.contour_field_pin.row_bytes, job.contour_field_pin.bytes.size(), completed);
+          contours_valid = contours_valid && detail::subtitle_contour_texture_layout_is_authenticated(
+            detail::subtitle_contour_texture_e::distance, job.contour_distance.desc.Format,
+            job.contour_distance.desc.Width, job.contour_distance.desc.Height, job.contour_distance.row_bytes, job.contour_distance.bytes.size(), completed);
+          contours_valid = contours_valid && detail::subtitle_contour_texture_layout_is_authenticated(
+            detail::subtitle_contour_texture_e::history, job.contour_history.desc.Format,
+            job.contour_history.desc.Width, job.contour_history.desc.Height, job.contour_history.row_bytes, job.contour_history.bytes.size(), completed);
+          contours_valid = contours_valid && detail::subtitle_contour_texture_layout_is_authenticated(
+            detail::subtitle_contour_texture_e::source, job.contour_source.desc.Format,
+            job.contour_source.desc.Width, job.contour_source.desc.Height, job.contour_source.row_bytes, job.contour_source.bytes.size(), completed);
+          contours_valid = contours_valid && detail::subtitle_contour_texture_layout_is_authenticated(
+            detail::subtitle_contour_texture_e::gaussian_weight, job.gaussian_weight.desc.Format,
+            job.gaussian_weight.desc.Width, job.gaussian_weight.desc.Height, job.gaussian_weight.row_bytes, job.gaussian_weight.bytes.size(), completed);
+          contours_valid = contours_valid && detail::subtitle_contour_texture_layout_is_authenticated(
+            detail::subtitle_contour_texture_e::gaussian_blend, job.gaussian_blend.desc.Format,
+            job.gaussian_blend.desc.Width, job.gaussian_blend.desc.Height, job.gaussian_blend.row_bytes, job.gaussian_blend.bytes.size(), completed);
+          contours_valid = contours_valid && detail::subtitle_contour_texture_layout_is_authenticated(
+            detail::subtitle_contour_texture_e::gaussian_vertical_conditioned, job.gaussian_vertical_conditioned.desc.Format,
+            job.gaussian_vertical_conditioned.desc.Width, job.gaussian_vertical_conditioned.desc.Height, job.gaussian_vertical_conditioned.row_bytes, job.gaussian_vertical_conditioned.bytes.size(), completed);
+          contours_valid = contours_valid && job.gaussian_control.size() == sizeof(std::uint32_t);
+          if (!contours_valid || !detail::subtitle_contour_identity_matches_completion(
+                job.contour_identity, job.subtitle_ocr_record, job.subtitle_locator_state, job.shadow_state, completed) ||
+              !detail::subtitle_contour_clear_policy_is_authenticated(
+                job.contour_identity, job.subtitle_ocr_record, job.shadow_state, job.contour_support.bytes,
+                job.contour_field_pin.bytes, job.contour_distance.bytes, job.contour_history.bytes,
+                job.contour_source.bytes, job.ocr_probability) ||
+              !detail::subtitle_gaussian_fields_are_authenticated(
+                job.contour_identity, job.subtitle_locator_state, job.subtitle_ocr_record, job.contour_distance.bytes,
+                job.gaussian_weight.bytes, job.gaussian_blend.bytes, job.gaussian_vertical_conditioned.bytes,
+                job.gaussian_control, job.shadow_base_final.bytes, job.shadow_final.bytes)) {
+            BOOST_LOG(warning) << "SBS debug dump: joined contour tuple ABI, identity, or abstention policy is invalid."sv;
+            break;
+          }
+          bool written = true;
+          for (const auto &[name, bytes] : contour_artifacts) {
+            written = written && write_bytes(paths.temporary / name, bytes->data(), bytes->size());
+          }
+          if (!written) break;
         }
         if (sbs.desc.Width < 2u || (sbs.desc.Width & 1u) != 0u) {
           BOOST_LOG(warning)
@@ -4576,7 +4361,7 @@ namespace platf::sbs_debug {
             paths.temporary / "subtitle_conditioning.json",
             subtitle_conditioning
           ) ||
-          (subtitle_slr13_active && (
+          (subtitle_plane_active && (
             !write_bytes(
               paths.temporary / "subtitle_ocr_record.u32",
               job.subtitle_ocr_record.data(),
@@ -4638,13 +4423,13 @@ namespace platf::sbs_debug {
         const auto gpu_trace = publish_gpu_trace_artifacts(
           job, paths.temporary
         );
-        const bool held_subtitle_evidence = subtitle_slr13_active &&
-          subtitle_u64(job.subtitle_locator_state, 22u) !=
+        const bool held_subtitle_evidence = subtitle_plane_active &&
+          subtitle_u64(job.subtitle_locator_state, subtitle_plane_frame_offset) !=
             completed.matched_frame_id;
-        if (subtitle_slr13_active && held_subtitle_evidence &&
+        if (subtitle_plane_active && held_subtitle_evidence &&
             !gpu_trace.available) {
           BOOST_LOG(warning)
-            << "SBS debug dump: held OCR8/SLR13 evidence requires its authenticated "sv
+            << "SBS debug dump: held OCR8/UIP4 evidence requires its authenticated "sv
                "GPU trace artifact; publication aborted."sv;
           break;
         }
@@ -4666,16 +4451,23 @@ namespace platf::sbs_debug {
         const std::string subtitle_conditioning_sha256 = models::file_sha256_hex(
           paths.temporary / "subtitle_conditioning.json"
         );
-        const std::string subtitle_ocr_record_sha256 = subtitle_slr13_active ?
+        const std::string subtitle_ocr_record_sha256 = subtitle_plane_active ?
           models::file_sha256_hex(paths.temporary / "subtitle_ocr_record.u32") :
           std::string {};
-        const std::string subtitle_locator_state_sha256 = subtitle_slr13_active ?
+        const std::string subtitle_locator_state_sha256 = subtitle_plane_active ?
           models::file_sha256_hex(paths.temporary / "subtitle_locator_state.u32") :
           std::string {};
-        if (raw_depth_sha256.empty() || model_input_sha256.empty() ||
+        bool contour_hashes_complete = true;
+        if (subtitle_plane_active) {
+          for (std::size_t index = 0u; index < contour_artifacts.size(); ++index) {
+            contour_sha256[index] = models::file_sha256_hex(paths.temporary / contour_artifacts[index].first);
+            contour_hashes_complete = contour_hashes_complete && !contour_sha256[index].empty();
+          }
+        }
+        if (!contour_hashes_complete || raw_depth_sha256.empty() || model_input_sha256.empty() ||
             model_input_shape_sha256.empty() || depth_input_region_sha256.empty() ||
             subtitle_conditioning_sha256.empty() ||
-            (subtitle_slr13_active && (
+            (subtitle_plane_active && (
               subtitle_ocr_record_sha256.empty() ||
               subtitle_locator_state_sha256.empty()
             ))) {
@@ -4713,7 +4505,7 @@ namespace platf::sbs_debug {
              paths.temporary,
              "shadow_vertical_conditioned"
            ) ||
-           (subtitle_slr13_active && !dump_shadow_float_texture(
+           (subtitle_plane_active && !dump_shadow_float_texture(
              shadow_base_final,
              paths.temporary,
              "shadow_base_final_parallax"
@@ -4877,7 +4669,7 @@ namespace platf::sbs_debug {
           models::file_sha256_hex(paths.temporary / "shadow_vertical_majorant.f32");
         const std::string shadow_vertical_conditioned_sha256 =
           models::file_sha256_hex(paths.temporary / "shadow_vertical_conditioned.f32");
-        const std::string shadow_base_final_sha256 = subtitle_slr13_active ?
+        const std::string shadow_base_final_sha256 = subtitle_plane_active ?
           models::file_sha256_hex(
             paths.temporary / "shadow_base_final_parallax.f32"
           ) :
@@ -4893,7 +4685,7 @@ namespace platf::sbs_debug {
             shadow_vertical_majorant_sha256.empty() ||
             shadow_vertical_conditioned_sha256.empty() || shadow_final_sha256.empty() ||
             shadow_state_sha256.empty() || shadow_frame_stats_sha256.empty() ||
-            (subtitle_slr13_active && shadow_base_final_sha256.empty())) {
+            (subtitle_plane_active && shadow_base_final_sha256.empty())) {
           BOOST_LOG(warning)
             << "SBS debug dump: failed to hash a written V2 geometry field; dump rejected."sv;
           break;
@@ -4922,10 +4714,10 @@ namespace platf::sbs_debug {
           true,
           true,
           "subtitle conditioning authority",
-          "Canonical current-schema subtitle authority descriptor: none or exact OCR8/SLR13.",
+          "Canonical current-schema subtitle authority descriptor: none or exact joined OCR8/UIP4/native contour tuple.",
           subtitle_conditioning_sha256
         );
-        if (subtitle_slr13_active) {
+        if (subtitle_plane_active) {
           artifacts["subtitle_ocr_record.u32"] = hashed_artifact_description(
             true,
             true,
@@ -4936,10 +4728,31 @@ namespace platf::sbs_debug {
           artifacts["subtitle_locator_state.u32"] = hashed_artifact_description(
             true,
             true,
-            "compact SLR13 subtitle authority state",
-            "Exact 96-word little-endian SLR14 owner, pending, current-cover authority, ownerless death grace, and source-time adaptive UI plane state.",
+            "compact UIP4 current subtitle plane state",
+            "Exact 40-word little-endian UIP4 current OCR8 slot authority, source/domain identity, and independent source-time adaptive UI controller state.",
             subtitle_locator_state_sha256
           );
+          constexpr std::array<const char *, 11u> contour_stages {{
+            "native current subtitle contour support",
+            "projected subtitle contour field pins",
+            "native-source squared Euclidean subtitle distance",
+            "SCT5 subtitle temporal-mask identity",
+            "native subtitle contour history",
+            "joined subtitle source display crop",
+            "joined OCR detector probability",
+            "literal max-union Gaussian subtitle weight",
+            "literal Gaussian UI-Base proposal",
+            "post-Gaussian shared vertical75-25 field",
+            "actual Gaussian smoothing-enabled control",
+          }};
+          for (std::size_t index = 0u; index < contour_artifacts.size(); ++index) {
+            auto descriptor = hashed_artifact_description(
+              true, true, contour_stages[index],
+              "Exact joined completed subtitle contour evidence; raw little-endian payload.",
+              contour_sha256[index]);
+            descriptor["byte_count"] = contour_artifacts[index].second->size();
+            artifacts[contour_artifacts[index].first] = std::move(descriptor);
+          }
         }
         artifacts["gpu_trace_ring.u32"] = gpu_trace.available ?
           hashed_artifact_description(
@@ -4960,7 +4773,7 @@ namespace platf::sbs_debug {
             true,
             false,
             "decoded diagnostic GPU history",
-            "Chronological decoded records with raw transaction, SLR13, and condition words plus authenticated device dispositions.",
+            "Chronological decoded records with raw transaction, UIP4, and condition words plus authenticated device dispositions.",
             gpu_trace.decoded_sha256
           ) :
           artifact_description(
@@ -5060,14 +4873,14 @@ namespace platf::sbs_debug {
             "Exact signed one-eye full-source-U after the fixed 75/25 share of the column upper/lower envelopes; may raise or lower candidate while preserving the vertical shear bound.",
           shadow_vertical_conditioned_sha256
         );
-        if (subtitle_slr13_active) {
+        if (subtitle_plane_active) {
           artifacts["shadow_base_final_parallax.f32"] = hashed_artifact_description(
             true,
             true,
-            "ordinary post-limiter V2 field before SLR13 conditioning",
+            "ordinary post-limiter V2 field before UIP4 conditioning",
             video_region ?
-              "Exact ordinary crop-local row-majorant field before SLR13; not renderer authority without current SLR13 conditioning and depth_input_region embedding." :
-              "Exact ordinary full-source-U row-majorant field before SLR13; not selected renderer authority.",
+              "Exact ordinary crop-local row-majorant field before UIP4; not renderer authority without current UIP4 conditioning and depth_input_region embedding." :
+              "Exact ordinary full-source-U row-majorant field before UIP4; not selected renderer authority.",
             shadow_base_final_sha256
           );
         }
@@ -5187,9 +5000,26 @@ namespace platf::sbs_debug {
           texture_description(shadow_vertical);
         dimensions["shadow_vertical_conditioned"] =
           texture_description(shadow_vertical_conditioned);
-        if (subtitle_slr13_active) {
+        if (subtitle_plane_active) {
           dimensions["shadow_base_final_parallax"] =
             texture_description(shadow_base_final);
+          dimensions["contour_support"] = texture_description(job.contour_support);
+          dimensions["contour_field_pin"] = texture_description(job.contour_field_pin);
+          dimensions["contour_distance"] = texture_description(job.contour_distance);
+          dimensions["gaussian_weight"] = texture_description(job.gaussian_weight);
+          dimensions["gaussian_blend"] = texture_description(job.gaussian_blend);
+          dimensions["gaussian_vertical_conditioned"] = texture_description(job.gaussian_vertical_conditioned);
+          dimensions["gaussian_control"] = {{"word_count", 1u}, {"format", "uint32-le structured buffer"}};
+          dimensions["contour_history"] = texture_description(job.contour_history);
+          dimensions["contour_source"] = texture_description(job.contour_source);
+          dimensions["contour_identity"] = {
+            {"word_count", subtitle_contour_history_word_count},
+            {"format", "uint32-le structured buffer"},
+          };
+          dimensions["ocr_probability"] = {
+            {"width", subtitle_ocr_output_width}, {"height", subtitle_ocr_output_height},
+            {"format", "float32-le structured buffer"},
+          };
         }
         dimensions["shadow_final_parallax"] = texture_description(shadow_final);
 
@@ -5243,7 +5073,7 @@ namespace platf::sbs_debug {
             {"artifact", nullptr},
           };
         nlohmann::json manifest {
-          {"schema", 44},
+          {"schema", 49},
           {"capture", "one matched, completed Host-SBS frame"},
           {"capture_status", "complete"},
           {"published_atomically", true},
@@ -5275,10 +5105,10 @@ namespace platf::sbs_debug {
                          {"parallax_v2_coordinate_role", "shadow_coordinate is diagnostic only; it has no renderer authority"},
                          {"parallax_v2_vertical_majorant_role", "least column-wise upper envelope v+ >= candidate with adjacent-row source-U change <= max_vertical_shear/content_width; diagnostic evidence only"},
                          {"parallax_v2_vertical_conditioned_role", "fixed 75/25 share of column upper/lower envelopes; may raise or lower candidate and feeds the row majorant"},
-                         {"parallax_v2_conditioner_role", subtitle_slr13_active ?
+                         {"parallax_v2_conditioner_role", subtitle_plane_active ?
                            (video_region ?
-                             "least row-wise crop-local q >= shadow_vertical_conditioned with horizontal slope <= max_horizontal_slope and vertical shear <= max_vertical_shear produces shadow_base_final_parallax; SLR13 publishes shadow_final_parallax atomically as direct live authority with depth_input_region embedding" :
-                             "least row-wise q >= shadow_vertical_conditioned with horizontal slope <= max_horizontal_slope and vertical shear <= max_vertical_shear produces shadow_base_final_parallax; SLR13 publishes shadow_final_parallax atomically as direct live authority") :
+                             "least row-wise crop-local q >= shadow_vertical_conditioned with horizontal slope <= max_horizontal_slope and vertical shear <= max_vertical_shear produces shadow_base_final_parallax; UIP4 publishes shadow_final_parallax atomically as direct live authority with depth_input_region embedding" :
+                             "least row-wise q >= shadow_vertical_conditioned with horizontal slope <= max_horizontal_slope and vertical shear <= max_vertical_shear produces shadow_base_final_parallax; UIP4 publishes shadow_final_parallax atomically as direct live authority") :
                            (video_region ?
                              "least row-wise crop-local q >= shadow_vertical_conditioned with horizontal slope <= max_horizontal_slope and vertical shear <= max_vertical_shear publishes shadow_final_parallax atomically as direct live authority with depth_input_region embedding" :
                              "least row-wise q >= shadow_vertical_conditioned with horizontal slope <= max_horizontal_slope and vertical shear <= max_vertical_shear publishes shadow_final_parallax atomically as direct live authority")},
@@ -5722,7 +5552,7 @@ namespace platf::sbs_debug {
             break;
 
           case stage_e::subtitle_ocr_record:
-            if (!pending.subtitle_slr13_active) {
+            if (!pending.subtitle_plane_active) {
               pending.collection_stage = stage_e::gpu_trace_ring;
               break;
             }
@@ -5745,6 +5575,83 @@ namespace platf::sbs_debug {
                     job.subtitle_locator_state,
                     budget
                   ),
+                  stage_e::contour_support
+                )) return;
+            break;
+
+          case stage_e::contour_support:
+            if (!collect_required(
+                  collect_texture(ctx, pending.contour_support, job.contour_support, budget),
+                  stage_e::contour_field_pin
+                )) return;
+            break;
+
+          case stage_e::contour_field_pin:
+            if (!collect_required(
+                  collect_texture(ctx, pending.contour_field_pin, job.contour_field_pin, budget),
+                  stage_e::contour_distance
+                )) return;
+            break;
+
+          case stage_e::contour_distance:
+            if (!collect_required(
+                  collect_texture(ctx, pending.contour_distance, job.contour_distance, budget),
+                  stage_e::contour_identity
+                )) return;
+            break;
+
+          case stage_e::contour_identity:
+            if (!collect_required(
+                  collect_buffer(ctx, pending.contour_identity, job.contour_identity, budget),
+                  stage_e::contour_history
+                )) return;
+            break;
+
+          case stage_e::contour_history:
+            if (!collect_required(
+                  collect_texture(ctx, pending.contour_history, job.contour_history, budget),
+                  stage_e::contour_source
+                )) return;
+            break;
+
+          case stage_e::contour_source:
+            if (!collect_required(
+                  collect_texture(ctx, pending.contour_source, job.contour_source, budget),
+                  stage_e::ocr_probability
+                )) return;
+            break;
+
+          case stage_e::ocr_probability:
+            if (!collect_required(
+                  collect_buffer(ctx, pending.ocr_probability, job.ocr_probability, budget),
+                  stage_e::gaussian_weight
+                )) return;
+            break;
+
+          case stage_e::gaussian_weight:
+            if (!collect_required(
+                  collect_texture(ctx, pending.gaussian_weight, job.gaussian_weight, budget),
+                  stage_e::gaussian_blend
+                )) return;
+            break;
+
+          case stage_e::gaussian_blend:
+            if (!collect_required(
+                  collect_texture(ctx, pending.gaussian_blend, job.gaussian_blend, budget),
+                  stage_e::gaussian_vertical_conditioned
+                )) return;
+            break;
+
+          case stage_e::gaussian_vertical_conditioned:
+            if (!collect_required(
+                  collect_texture(ctx, pending.gaussian_vertical_conditioned, job.gaussian_vertical_conditioned, budget),
+                  stage_e::gaussian_control
+                )) return;
+            break;
+
+          case stage_e::gaussian_control:
+            if (!collect_required(
+                  collect_buffer(ctx, pending.gaussian_control, job.gaussian_control, budget),
                   stage_e::gpu_trace_ring
                 )) return;
             break;
@@ -5800,7 +5707,7 @@ namespace platf::sbs_debug {
               );
               return;
             }
-            if (pending.subtitle_slr13_active && !detail::subtitle_records_match_completion(
+            if (pending.subtitle_plane_active && !detail::subtitle_records_match_completion(
                   job.subtitle_ocr_record,
                   job.subtitle_locator_state,
                   job.gpu_trace_ring,
@@ -5814,7 +5721,14 @@ namespace platf::sbs_debug {
                   }()
                 )) {
               finish_poll();
-              fail_capture("OCR8/SLR13 record identity or layout is invalid", false);
+              fail_capture("OCR8/UIP4 record identity or layout is invalid", false);
+              return;
+            }
+            if (pending.subtitle_plane_active && !detail::subtitle_contour_identity_matches_completion(
+                  job.contour_identity, job.subtitle_ocr_record, job.subtitle_locator_state, job.shadow_state,
+                  job.completed)) {
+              finish_poll();
+              fail_capture("SCT5 contour identity does not match the joined completed tuple", false);
               return;
             }
             pending.collection_stage = stage_e::scene_normalization;
@@ -5953,7 +5867,7 @@ namespace platf::sbs_debug {
             break;
 
           case stage_e::shadow_base_final:
-            if (!pending.subtitle_slr13_active) {
+            if (!pending.subtitle_plane_active) {
               pending.collection_stage = stage_e::shadow_final;
               break;
             }
@@ -6197,12 +6111,12 @@ namespace platf::sbs_debug {
       }
       const bool subtitle_ocr_present = completed.ocr_box_record != nullptr;
       const bool subtitle_locator_present = completed.subtitle_locator_state != nullptr;
-      const bool subtitle_slr13_active =
+      const bool subtitle_plane_active =
         !completed.subtitle_work_suppressed &&
         subtitle_ocr_present && subtitle_locator_present;
       if (!detail::subtitle_capture_resources_are_authenticated(completed)) {
         BOOST_LOG(warning)
-          << "SBS debug dump: OCR8/SLR13 resources are partial; dump rejected."sv;
+          << "SBS debug dump: OCR8/UIP4/contour resources are partial; dump rejected."sv;
         retry_not_before_ = std::chrono::steady_clock::now() + retry_backoff;
         return false;
       }
@@ -6273,7 +6187,7 @@ namespace platf::sbs_debug {
       job.preprocess = &capture_calibration->preprocess;
       job.warp_map_available = completed.warp_map != nullptr;
       job.warp_mask_available = completed.warp_mask != nullptr;
-      pending->subtitle_slr13_active = subtitle_slr13_active;
+      pending->subtitle_plane_active = subtitle_plane_active;
       pending->gpu_trace_requested = completed.gpu_trace_ring != nullptr &&
         gpu_trace_shader_identity_matches_contract(completed.gpu_trace_provenance);
       pending->depth_input_source_available =
@@ -6349,7 +6263,7 @@ namespace platf::sbs_debug {
           models::depth_coordinate_v2::frame_stats_float_count * sizeof(float),
           pending->shadow_frame_stats
         );
-      if (staged && subtitle_slr13_active) {
+      if (staged && subtitle_plane_active) {
         staged =
           stage_texture(
             device,
@@ -6368,8 +6282,49 @@ namespace platf::sbs_debug {
             device,
             ctx,
             completed.subtitle_locator_state,
-            subtitle_locator_state_word_count * sizeof(std::uint32_t),
+            subtitle_plane_state_word_count * sizeof(std::uint32_t),
             pending->subtitle_locator_state
+          ) &&
+          stage_contour_texture(
+            device, ctx, completed.subtitle_contour_support, detail::subtitle_contour_texture_e::support,
+            completed, pending->contour_support
+          ) &&
+          stage_contour_texture(
+            device, ctx, completed.subtitle_contour_field_pin, detail::subtitle_contour_texture_e::field_pin,
+            completed, pending->contour_field_pin
+          ) &&
+          stage_contour_texture(
+            device, ctx, completed.subtitle_contour_distance, detail::subtitle_contour_texture_e::distance,
+            completed, pending->contour_distance
+          ) &&
+          stage_exact_scalar_buffer(
+            device, ctx, completed.subtitle_contour_identity, subtitle_contour_history_word_count, pending->contour_identity
+          ) &&
+          stage_contour_texture(
+            device, ctx, completed.subtitle_contour_history, detail::subtitle_contour_texture_e::history,
+            completed, pending->contour_history
+          ) &&
+          stage_contour_texture(
+            device, ctx, completed.subtitle_contour_source, detail::subtitle_contour_texture_e::source,
+            completed, pending->contour_source
+          ) &&
+          stage_exact_scalar_buffer(
+            device, ctx, completed.subtitle_ocr_probability, subtitle_ocr_output_width * subtitle_ocr_output_height, pending->ocr_probability
+          ) &&
+          stage_contour_texture(
+            device, ctx, completed.subtitle_gaussian_weight, detail::subtitle_contour_texture_e::gaussian_weight,
+            completed, pending->gaussian_weight
+          ) &&
+          stage_contour_texture(
+            device, ctx, completed.subtitle_gaussian_blend, detail::subtitle_contour_texture_e::gaussian_blend,
+            completed, pending->gaussian_blend
+          ) &&
+          stage_contour_texture(
+            device, ctx, completed.subtitle_gaussian_vertical_conditioned, detail::subtitle_contour_texture_e::gaussian_vertical_conditioned,
+            completed, pending->gaussian_vertical_conditioned
+          ) &&
+          stage_exact_scalar_buffer(
+            device, ctx, completed.subtitle_gaussian_control, 1u, pending->gaussian_control
           );
       }
       if (staged && pending->gpu_trace_requested) {
@@ -6452,6 +6407,17 @@ namespace platf::sbs_debug {
       job.completed.shadow_final_parallax = nullptr;
       job.completed.ocr_box_record = nullptr;
       job.completed.subtitle_locator_state = nullptr;
+      job.completed.subtitle_contour_support = nullptr;
+      job.completed.subtitle_contour_field_pin = nullptr;
+      job.completed.subtitle_contour_distance = nullptr;
+      job.completed.subtitle_contour_identity = nullptr;
+      job.completed.subtitle_contour_history = nullptr;
+      job.completed.subtitle_contour_source = nullptr;
+      job.completed.subtitle_ocr_probability = nullptr;
+      job.completed.subtitle_gaussian_weight = nullptr;
+      job.completed.subtitle_gaussian_blend = nullptr;
+      job.completed.subtitle_gaussian_vertical_conditioned = nullptr;
+      job.completed.subtitle_gaussian_control = nullptr;
       job.completed.gpu_trace_ring = nullptr;
       job.completed.shadow_state = nullptr;
       job.completed.shadow_frame_stats = nullptr;

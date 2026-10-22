@@ -120,6 +120,33 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             85: "7c4d5902f1ff91c262e624f124a727cd23174fc7de40622e24efd20b4ee27eda",
             86: "3373d1c19e3e845d47fb0c97c4b8b4a818a7115fb829e57cb3b9c5789bcb56b3",
             87: "beb7f6fe43df21d1aaae136dbdb1f7d348bef5f43644e233a600d63efa6a94ed",
+            88: "6136bf360c7050017130a18f60ba4484afc16867455c0fb819c54196af790231",
+            89: "b50cf93a35adbf6730c96f5960204eb29bfd168bf4604538450a788c21cfa385",
+            90: "0b8314b869a170b361de6421486105f18adec9cedf54e54efde893b58e4100a2",
+            91: "3f3f80581e09df0b15e0c294b999fb0962a524dcc96dfef565e1f3ff81f24774",
+            92: "949f771362cd490e9b60d071050fea31d30fca628bcdd25ab45f5c09eab7dd15",
+            93: "7f6c3326ed8c8adda0f861603b6229eafcd60d454bd3b52e502ceeddfd217baa",
+            94: "341cf66f03ce0b6c285bda57c24878ce8b2e22b0302eda577bd5016843b353f0",
+            95: "d8562916f7d01de53807e69538c7366a6fb7b086382dd9352f4f523b75507cb7",
+            96: "7c61b2c34d55e4d2f9bc53749c9d477e114d998502cbc319609cab0d75545883",
+            97: "5a731570b911f12bebec0606bace069054be527478cdfd30776c39efe027d22e",
+            98: "2c6e10cae2c3d7c3f6305f795b58509d6acb0f26f1e6df56aaf7b3b075f6c06f",
+            99: "f1a67964452a3928579c3529b8ff2b7f828c0531627b26ae3167177c8b92c2a6",
+            100: "8e7105021a6651f5366713001914f861dc709d55c35d6520dfaa49ccbe80b88f",
+            101: "75838fdd15f52d547bd6d6445ccde5d70953be9fb36d58008ccf990acb8fdb5c",
+            102: "9553e57922902d0168f3a19af0bf24628d139e6c39b7111eb7943ccf69022317",
+            103: "e9c8ac260c099fb4f907aa266633ba3658dd4f93fae5fbec6de3d1299bc80762",
+            104: "d4b5930503b3da95ad30ca68c6ca1add397e9b6f2e123ac832690bb7e28db5d4",
+            105: "8d6b9e7dd2ea2e37af44942e2b3da663f1adc0033c865a463be3a835c4d4f7c2",
+            106: "0f316a073b58d66387c3deb695635b0388c18bebcd9ba16c62b0fc2180da9784",
+            107: "b145d0ceafa418284538e6d867e2332a5d18c4f08c741d8ec272eb75fb4c7b09",
+            108: "888c2ab168f7698e6ad3b9cd10981a15620200146d6a37d5e9675aac6e00e789",
+            110: "f74787df46558a26d98218331c1d28ff79c8892636738548e72bd1da96ca9d8e",
+            111: "f7192b26f4ea319e8156a5d6e954885c134f4e4ce78a90570509ae10309db294",
+            112: "7e723e7a036a49634e04e785c406bb9260cfa4af3598422ec55cdbe6f5f656c5",
+            113: "7dd439ebe1cf597c4e3c58af5a3370bcd716dc29711d794f01cdc36c349809d7",
+            114: "d7e7c7e1d8a297ddc350b16af48ba227801db45948479e55f12284850f578fdf",
+            115: "eb4b9304f2ac6557758fc9049a2af349a92b3d1d22d0ddf579d5aa856fc04a83",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -127,14 +154,14 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.contract_digest(contract),
             "v2 semantics changed without a reviewed schema version",
         )
-        self.assertEqual(generator.contract_tag(contract), 0x7D19520F)
+        self.assertEqual(generator.contract_tag(contract), 0x640A940C)
         self.assertEqual(
             generator.contract_tag_semantic_digest(contract),
-            "7d19520fec2daecaa19f73a4c5503db642ff1dcd739b76abdec5f359d371ee99",
+            "640a940c9509bbf043fe18dd7b4d8116e6ad4fb77ca2a8a49ad354660ba323b6",
         )
         self.assertEqual(
             contract["shader_implementation"]["source_closure_sha256"],
-            "24050982be483a52e2a07501ae6166fbf353aa420cf80f47b30b4bafe672de91",
+            "90220f4dbe978b461a71b570e0eb93b305fc4cf35a0456fe6db23034808d42ff",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(
@@ -288,7 +315,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
 
     def test_subtitle_ocr_contract_binds_model_profile_tensor_and_record_abis(self):
         ocr = python_contract.SUBTITLE_OCR
-        self.assertEqual(ocr.schema, 14)
+        self.assertEqual(ocr.schema, 27)
         self.assertEqual(ocr.logical_model, "ppocrv6_tiny_det_modelopt_fp16")
         self.assertEqual(
             ocr.asset_path,
@@ -327,31 +354,42 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertEqual(ocr.detector_active_probability_threshold, 0.2)
         self.assertEqual(ocr.detector_min_mean_score, 0.4)
         self.assertEqual(
-            (ocr.locator_min_width_cells, ocr.locator_min_height_cells,
-             ocr.locator_min_aspect_numerator,
-             ocr.locator_min_aspect_denominator),
-            (48, 6, 2, 1))
-        self.assertEqual(
-            (ocr.locator_corner_edge_divisor, ocr.locator_corner_bottom_rows),
-            (32, 16))
-        self.assertEqual(
-            (ocr.locator_provisional_min_vertical_overlap_numerator,
-             ocr.locator_provisional_min_vertical_overlap_denominator,
-             ocr.locator_provisional_max_height_ratio,
-             ocr.locator_provisional_max_center_y_delta_shorter_height),
-            (3, 4, 2, 1))
-        self.assertEqual(ocr.locator_match_iou_threshold, 0.6)
-        self.assertEqual(ocr.locator_death_grace_observations, 6)
-        self.assertFalse(any(key.startswith("locator_target_") for key in
-                             generator.load_contract()["subtitle_ocr"]["field_policy"]))
-        self.assertEqual(
-            (ocr.locator_max_width_numerator, ocr.locator_max_width_denominator,
-             ocr.ocr_safe_row_top, ocr.ocr_safe_row_bottom,
+            (ocr.ocr_safe_row_top, ocr.ocr_safe_row_bottom,
              ocr.source_crop_aspect_width, ocr.source_crop_aspect_height),
-            (9, 10, 24, 155, 6, 1))
+            (24, 155, 6, 1))
         self.assertEqual(
             (ocr.text_join_gap_cells, ocr.ribbon_join_gap_cells),
             (4, 12))
+        self.assertEqual(ocr.ordinary_cover_horizontal_guard_cells, 1)
+        self.assertEqual(
+            ocr.ordinary_cover_horizontal_guard_policy,
+            "ordinary-only-add-guard-cells-times-producer-ocr-cell-width-to-horizontal-db-unclip-cover-clamped-detector-bounds-before-map-current-canonical-cover-all-consumers-no-second-mask-vertical-and-ribbon-unchanged-v1")
+        self.assertEqual(
+            (ocr.line_group_min_vertical_iou_numerator,
+             ocr.line_group_min_vertical_iou_denominator), (1, 2))
+        self.assertEqual(
+            (ocr.line_group_max_horizontal_gap_height_numerator,
+             ocr.line_group_max_horizontal_gap_height_denominator), (4, 1))
+        self.assertEqual(
+            ocr.line_group_horizontal_gap_metric,
+            "native-source-horizontal-gap-to-current-union-edge-relative-to-max-candidate-and-fixed-anchor-height-exact-cross-multiplied-v1")
+        self.assertEqual(
+            (ocr.line_center_tolerance_numerator,
+             ocr.line_center_tolerance_denominator), (1, 10))
+        self.assertEqual(
+            (ocr.line_search_bottom_height_numerator,
+             ocr.line_search_bottom_height_denominator), (1, 4))
+        self.assertIn("intersect-existing-safe-detector-crop", ocr.line_search_region)
+        self.assertEqual(ocr.line_group_policy, generator.CANONICAL_SUBTITLE_OCR[
+            "field_policy"]["line_group_policy"])
+        self.assertIn("fixed-tight-core-anchor", ocr.line_group_policy)
+        self.assertIn("bounded-native-horizontal-union-gap", ocr.line_group_policy)
+        self.assertIn("union-eligibility-only", ocr.line_group_policy)
+        self.assertIn("full-screen", ocr.line_center_reference)
+        self.assertNotIn("foreground", ocr.line_center_reference)
+        self.assertIn("signed-twice-center", ocr.line_center_reference_params)
+        self.assertIn("signed-search-top", ocr.line_center_reference_params)
+        self.assertIn("80bytes", ocr.line_center_reference_params)
         self.assertGreater(ocr.text_join_gap_cells, 0)
         self.assertLess(ocr.text_join_gap_cells, ocr.ribbon_join_gap_cells)
         self.assertGreaterEqual(
@@ -360,29 +398,47 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertEqual((ocr.record_schema, ocr.record_tag), (3, 0x3852434F))
         self.assertEqual((ocr.record_word_count, ocr.raw_box_offset), (208, 16))
         self.assertEqual((ocr.final_box_offset, ocr.final_box_capacity), (144, 8))
-        self.assertEqual((ocr.locator_schema, ocr.locator_tag), (14, 0x34314C53))
+        self.assertEqual((ocr.plane_schema, ocr.plane_tag), (4, 0x34504955))
+        self.assertEqual(ocr.plane_warmup_remaining_mask, 7)
+        self.assertEqual(ocr.plane_warmup_observations, generator.CANONICAL_SUBTITLE_OCR["contour_policy"]["history_confirmation_observations"])
         self.assertEqual(
-            (ocr.locator_word_count, ocr.locator_owner_offset,
-             ocr.locator_pending_offset, ocr.locator_current_offset),
-            (96, 32, 48, 64))
+            (ocr.plane_word_count, ocr.plane_header_word_count,
+             ocr.plane_cover_capacity, ocr.plane_adaptive_offset,
+             ocr.plane_adaptive_word_count), (40, 24, 8, 24, 16))
         self.assertEqual(
             (ocr.condition_param_schema, ocr.condition_param_tag,
-             ocr.condition_param_word_count),
-            (3, 0x33504353, 6))
+             ocr.condition_param_word_count), (4, 0x34504353, 6))
+        self.assertEqual(
+            (ocr.condition_param_current_count_word,
+             ocr.condition_param_current_kind_mask_word,
+             ocr.condition_param_active_word,
+             ocr.condition_param_fully_active_value,
+             ocr.condition_param_target_word), (2, 3, 4, 2, 5))
 
         contract = generator.load_contract(verify_shader_source_closure=False)
         cpp = generator.render_cpp(contract)
         hlsl = generator.render_hlsl(contract)
         for token in (
-                'contract_schema = 87u',
+                'contract_schema = 115u',
                 'final_parallax_contract_schema = 3u',
                 'final_parallax_authority = '
                 '"complete-atomic-subtitle-conditioned-r32f-live-render-authority"',
                 'final_parallax_publication_policy = '
                 '"authenticated-infer-or-cpu-known-publication-direct-render"',
                 'final_parallax_reuse_policy = '
-                '"reuse-holds-complete-depth-ocr-slr-final-tuple-byte-for-byte"',
-                'subtitle_ocr_contract_schema = 14u',
+                '"reuse-holds-complete-depth-ocr-uip4-final-tuple-byte-for-byte"',
+                'subtitle_ocr_contract_schema = 27u',
+                'subtitle_contour_recipe = 23u',
+                'subtitle_contour_schema = 5u',
+                'subtitle_contour_history_snapshot_valid_word = 23u',
+                'subtitle_contour_history_feature_valid_bit = 2u',
+                'subtitle_contour_history_feature_mask_bit = 1u',
+                'subtitle_contour_history_rgb_distance = 0.08f',
+                'subtitle_contour_probability_change_ratio = 0.125f',
+                'subtitle_contour_history_confirmation_observations = 4u',
+                'subtitle_contour_history_feature_count_shift = 2u',
+                'subtitle_contour_gaussian_center_offset_source_pixels = 2u',
+                'subtitle_contour_gaussian_sigma_short_side_divisor = 60.0f',
                 'subtitle_ocr_model_name = "ppocrv6_tiny_det_modelopt_fp16"',
                 'subtitle_ocr_asset_path = '
                 '"models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx"',
@@ -401,13 +457,27 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 'std::array<double, 3> subtitle_ocr_imagenet_mean {{0.485, 0.456, 0.406}}',
                 'subtitle_ocr_output_width = 960u',
                 'subtitle_ocr_record_tag = 0x3852434Fu',
-                'subtitle_locator_state_schema = 14u',
-                'subtitle_locator_state_tag = 0x34314C53u',
-                'subtitle_locator_provisional_current_flag = 16u',
-                'subtitle_locator_provisional_target_word = 29u',
-                'subtitle_locator_provisional_fade_word = 30u',
-                'subtitle_condition_param_schema = 3u',
-                'subtitle_condition_param_tag = 0x33504353u',
+                'subtitle_plane_state_schema = 4u',
+                'subtitle_plane_state_tag = 0x34504955u',
+                'subtitle_plane_state_word_count = 40u',
+                'subtitle_plane_header_word_count = 24u',
+                'subtitle_plane_cover_capacity = 8u',
+                'subtitle_plane_current_valid_flag = 1u',
+                'subtitle_plane_current_slot_mask_word = 3u',
+                'subtitle_plane_history_reset_mask_word = 21u',
+                'subtitle_plane_warmup_word = 22u',
+                'subtitle_plane_warmup_observations = 4u',
+                'subtitle_plane_warmup_cue_bit = 8u',
+                'subtitle_plane_warmup_remaining_mask = subtitle_plane_warmup_cue_bit - 1u',
+                'subtitle_plane_reserved_offset = 23u',
+                'subtitle_plane_reserved_word_count = 1u',
+                'subtitle_plane_adaptive_offset = 24u',
+                'subtitle_plane_adaptive_word_count = 16u',
+                'subtitle_contour_history_reserved_offset = 24u',
+                'subtitle_contour_history_reserved_word_count = 8u',
+                'constexpr std::uint32_t subtitle_ocr_field_cell_scale(',
+                'subtitle_condition_param_schema = 4u',
+                'subtitle_condition_param_tag = 0x34504353u',
                 'subtitle_condition_param_word_count = 6u',
                 'limiter_serial_max_lines = 32u',
                 'limiter_group_lines = 8u',
@@ -422,45 +492,70 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 'subtitle_ocr_crop_aspect_width = 6u',
                 'subtitle_ocr_crop_aspect_height = 1u',
                 'subtitle_ocr_text_join_gap_cells = 4u',
+                'subtitle_ocr_ordinary_cover_horizontal_guard_cells = 1u',
+                'subtitle_ocr_ordinary_cover_horizontal_guard_policy = '
+                '"ordinary-only-add-guard-cells-times-producer-ocr-cell-width-to-horizontal-db-unclip-cover-clamped-detector-bounds-before-map-current-canonical-cover-all-consumers-no-second-mask-vertical-and-ribbon-unchanged-v1"',
+                'subtitle_ocr_line_group_min_vertical_iou_numerator = 1u',
+                'subtitle_ocr_line_group_min_vertical_iou_denominator = 2u',
+                'subtitle_ocr_line_group_max_horizontal_gap_height_numerator = 4u',
+                'subtitle_ocr_line_group_max_horizontal_gap_height_denominator = 1u',
+                'subtitle_ocr_line_group_horizontal_gap_metric = '
+                '"native-source-horizontal-gap-to-current-union-edge-relative-to-max-candidate-and-fixed-anchor-height-exact-cross-multiplied-v1"',
+                'subtitle_ocr_line_center_tolerance_numerator = 1u',
+                'subtitle_ocr_line_center_tolerance_denominator = 10u',
+                'subtitle_ocr_line_search_bottom_height_numerator = 1u',
+                'subtitle_ocr_line_search_bottom_height_denominator = 4u',
                 'subtitle_ocr_ribbon_join_gap_cells = 12u',
-                'subtitle_locator_max_width_numerator = 9u',
-                'subtitle_locator_max_width_denominator = 10u',
                 'subtitle_ocr_active_probability_threshold = 0.2f',
                 'subtitle_ocr_min_mean_score = 0.4f',
-                'subtitle_locator_min_width_cells = 48u',
-                'subtitle_locator_min_height_cells = 6u',
-                'subtitle_locator_min_aspect_numerator = 2u',
-                'subtitle_locator_min_aspect_denominator = 1u',
-                'subtitle_locator_provisional_min_vertical_overlap_numerator = 3u',
-                'subtitle_locator_provisional_min_vertical_overlap_denominator = 4u',
-                'subtitle_locator_provisional_max_height_ratio = 2u',
-                'subtitle_locator_provisional_max_center_y_delta_shorter_height = 1u',
-                'subtitle_locator_corner_edge_divisor = 32u',
-                'subtitle_locator_corner_bottom_rows = 16u',
-                'subtitle_locator_match_iou_threshold = 0.6f',
-                'subtitle_locator_death_grace_observations = 6u',
-                'constexpr std::uint32_t subtitle_locator_field_cell_scale(',
                 'constexpr bool subtitle_ocr_field_is_calibrated('):
             self.assertIn(token, cpp)
         for token in (
-                '#define V2_CONTRACT_SCHEMA 87u',
-                '#define V2_SUBTITLE_OCR_CONTRACT_SCHEMA 14u',
+                '#define V2_CONTRACT_SCHEMA 115u',
+                '#define V2_SUBTITLE_CONTOUR_RECIPE 23u',
+                '#define V2_SUBTITLE_CONTOUR_SCHEMA 5u',
+                '#define V2_SUBTITLE_CONTOUR_HISTORY_SNAPSHOT_VALID_WORD 23u',
+                '#define V2_SUBTITLE_CONTOUR_HISTORY_FEATURE_VALID_BIT 2u',
+                '#define V2_SUBTITLE_CONTOUR_HISTORY_FEATURE_MASK_BIT 1u',
+                '#define V2_SUBTITLE_CONTOUR_HISTORY_RGB_DISTANCE 0.08f',
+                '#define V2_SUBTITLE_CONTOUR_PROBABILITY_CHANGE_RATIO 0.125f',
+                '#define V2_SUBTITLE_CONTOUR_HISTORY_CONFIRMATION_OBSERVATIONS 4u',
+                '#define V2_SUBTITLE_CONTOUR_HISTORY_FEATURE_COUNT_SHIFT 2u',
+                '#define V2_SUBTITLE_CONTOUR_GAUSSIAN_CENTER_OFFSET_SOURCE_PIXELS 2u',
+                '#define V2_SUBTITLE_OCR_CONTRACT_SCHEMA 27u',
+                '#define V2_OCR_ORDINARY_COVER_HORIZONTAL_GUARD_CELLS 1u',
+                '#define V2_OCR_LINE_GROUP_MIN_VERTICAL_IOU_NUMERATOR 1u',
+                '#define V2_OCR_LINE_GROUP_MIN_VERTICAL_IOU_DENOMINATOR 2u',
+                '#define V2_OCR_LINE_GROUP_MAX_HORIZONTAL_GAP_HEIGHT_NUMERATOR 4u',
+                '#define V2_OCR_LINE_GROUP_MAX_HORIZONTAL_GAP_HEIGHT_DENOMINATOR 1u',
+                '#define V2_OCR_LINE_CENTER_TOLERANCE_NUMERATOR 1u',
+                '#define V2_OCR_LINE_CENTER_TOLERANCE_DENOMINATOR 10u',
+                '#define V2_OCR_LINE_SEARCH_BOTTOM_HEIGHT_NUMERATOR 1u',
+                '#define V2_OCR_LINE_SEARCH_BOTTOM_HEIGHT_DENOMINATOR 4u',
                 '#define V2_OCR_INPUT_WIDTH 960u',
                 '#define V2_OCR_OUTPUT_WIDTH 960u',
                 '#define V2_OCR_IMAGENET_MEAN_B 0.485f',
                 '#define V2_OCR_IMAGENET_STD_R 0.225f',
                 '#define V2_OCR_RECORD_TAG 0x3852434Fu',
-                '#define V2_SUBTITLE_LOCATOR_STATE_SCHEMA 14u',
-                '#define V2_SUBTITLE_LOCATOR_STATE_TAG 0x34314C53u',
-                '#define V2_SUBTITLE_LOCATOR_PROVISIONAL_CURRENT_FLAG 16u',
-                '#define V2_SUBTITLE_LOCATOR_PROVISIONAL_TARGET_WORD 29u',
-                '#define V2_SUBTITLE_LOCATOR_PROVISIONAL_FADE_WORD 30u',
-                '#define V2_SUBTITLE_LOCATOR_PROVISIONAL_MIN_VERTICAL_OVERLAP_NUMERATOR 3u',
-                '#define V2_SUBTITLE_LOCATOR_PROVISIONAL_MIN_VERTICAL_OVERLAP_DENOMINATOR 4u',
-                '#define V2_SUBTITLE_LOCATOR_PROVISIONAL_MAX_HEIGHT_RATIO 2u',
-                '#define V2_SUBTITLE_LOCATOR_PROVISIONAL_MAX_CENTER_Y_DELTA_SHORTER_HEIGHT 1u',
-                '#define V2_SUBTITLE_CONDITION_PARAM_SCHEMA 3u',
-                '#define V2_SUBTITLE_CONDITION_PARAM_TAG 0x33504353u',
+                '#define V2_SUBTITLE_PLANE_STATE_SCHEMA 4u',
+                '#define V2_SUBTITLE_PLANE_STATE_TAG 0x34504955u',
+                '#define V2_SUBTITLE_PLANE_STATE_WORD_COUNT 40u',
+                '#define V2_SUBTITLE_PLANE_HEADER_WORD_COUNT 24u',
+                '#define V2_SUBTITLE_PLANE_COVER_CAPACITY 8u',
+                '#define V2_SUBTITLE_PLANE_CURRENT_VALID_FLAG 1u',
+                '#define V2_SUBTITLE_PLANE_CURRENT_SLOT_MASK_WORD 3u',
+                '#define V2_SUBTITLE_PLANE_HISTORY_RESET_MASK_WORD 21u',
+                '#define V2_SUBTITLE_PLANE_WARMUP_OBSERVATIONS 4u',
+                '#define V2_SUBTITLE_PLANE_WARMUP_CUE_BIT 8u',
+                '#define V2_SUBTITLE_PLANE_WARMUP_REMAINING_MASK (V2_SUBTITLE_PLANE_WARMUP_CUE_BIT - 1u)',
+                '#define V2_SUBTITLE_PLANE_RESERVED_OFFSET 23u',
+                '#define V2_SUBTITLE_PLANE_RESERVED_WORD_COUNT 1u',
+                '#define V2_SUBTITLE_PLANE_ADAPTIVE_OFFSET 24u',
+                '#define V2_SUBTITLE_PLANE_ADAPTIVE_WORD_COUNT 16u',
+                '#define V2_SUBTITLE_CONTOUR_HISTORY_RESERVED_OFFSET 24u',
+                '#define V2_SUBTITLE_CONTOUR_HISTORY_RESERVED_WORD_COUNT 8u',
+                '#define V2_SUBTITLE_CONDITION_PARAM_SCHEMA 4u',
+                '#define V2_SUBTITLE_CONDITION_PARAM_TAG 0x34504353u',
                 '#define V2_SUBTITLE_CONDITION_PARAM_WORD_COUNT 6u',
                 '#define V2_MODEL_CALIBRATED_SHAPE_COUNT 24u',
                 '#define V2_LIMITER_SERIAL_MAX_LINES 32u',
@@ -483,23 +578,42 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 '#define V2_OCR_CROP_ASPECT_HEIGHT 1u',
                 '#define V2_OCR_TEXT_JOIN_GAP_CELLS 4u',
                 '#define V2_OCR_RIBBON_JOIN_GAP_CELLS 12u',
-                '#define V2_SUBTITLE_LOCATOR_MAX_WIDTH_NUMERATOR 9u',
-                '#define V2_SUBTITLE_LOCATOR_MAX_WIDTH_DENOMINATOR 10u',
                 '#define V2_OCR_ACTIVE_PROBABILITY_THRESHOLD 0.2f',
                 '#define V2_OCR_MIN_MEAN_SCORE 0.4f',
-                '#define V2_SUBTITLE_LOCATOR_MIN_WIDTH_CELLS 48u',
-                '#define V2_SUBTITLE_LOCATOR_MIN_HEIGHT_CELLS 6u',
-                '#define V2_SUBTITLE_LOCATOR_MIN_ASPECT_NUMERATOR 2u',
-                '#define V2_SUBTITLE_LOCATOR_MIN_ASPECT_DENOMINATOR 1u',
-                '#define V2_SUBTITLE_LOCATOR_CORNER_EDGE_DIVISOR 32u',
-                '#define V2_SUBTITLE_LOCATOR_CORNER_BOTTOM_ROWS 16u',
-                '#define V2_SUBTITLE_LOCATOR_MATCH_IOU_THRESHOLD 0.6f',
-                '#define V2_SUBTITLE_LOCATOR_DEATH_GRACE_OBSERVATIONS 6u',
-                'uint V2SubtitleLocatorFieldCellScale(',
+                'uint V2SubtitleOcrFieldCellScale(',
                 'bool V2SubtitleOcrFieldIsCalibrated('):
             self.assertIn(token, hlsl)
         self.assertNotIn("subtitle_ocr_join_gap_cells", cpp)
         self.assertNotIn("V2_OCR_JOIN_GAP_CELLS", hlsl)
+
+    def test_direct_current_plane_has_no_historical_cover_authority(self):
+        contract = generator.load_contract(verify_shader_source_closure=False)
+        ocr = contract["subtitle_ocr"]
+        self.assertEqual(ocr["plane_state"], {
+            "schema": 4, "tag": 0x34504955, "word_count": 40,
+            "header_word_count": 24, "cover_capacity": 8,
+            "flags_word": 2, "current_valid_flag": 1,
+            "current_slot_mask_word": 3, "frame_offset": 4,
+            "analysis_generation_offset": 6, "observation_timestamp_offset": 8,
+            "source_extent_offset": 10, "field_extent_offset": 12,
+            "roi_offset": 14, "content_offset": 16, "cut_epoch_word": 20,
+            "history_reset_mask_word": 21, "warmup_word": 22, "warmup_observations": 4,
+            "warmup_cue_bit": 8, "reserved_offset": 23, "reserved_word_count": 1,
+            "adaptive_offset": 24, "adaptive_word_count": 16,
+        })
+        self.assertNotIn("locator_state", ocr)
+        self.assertFalse(any(key.startswith("locator_") for key in ocr["field_policy"]))
+        self.assertFalse(any(key.startswith("locator_") for key in
+                             python_contract.SubtitleOcrContract.__dataclass_fields__))
+        self.assertEqual(ocr["contour_policy"]["history_reserved_offset"], 24)
+        self.assertEqual(ocr["contour_policy"]["history_reserved_word_count"], 8)
+        for key in ("history_owner_generation_word", "history_current_count_word",
+                    "history_current_kind_mask_word", "history_group_policy"):
+            self.assertNotIn(key, ocr["contour_policy"])
+        self.assertNotIn("subtitle_locator_", generator.render_cpp(contract))
+        self.assertNotIn("V2_SUBTITLE_LOCATOR_", generator.render_hlsl(contract))
+        for key, value in ocr["plane_state"].items():
+            self.assertEqual(getattr(python_contract.SUBTITLE_OCR, "plane_" + key), value)
 
     def test_subtitle_ocr_dynamic_roi_covers_all_calibrated_fields(self):
         cases = (
@@ -519,7 +633,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         for arguments, expected_roi, expected_ribbon_bottom, expected_scale in cases:
             with self.subTest(arguments=arguments):
                 self.assertEqual(
-                    python_contract.subtitle_locator_field_cell_scale(
+                    python_contract.subtitle_ocr_field_cell_scale(
                         arguments[2], arguments[3]),
                     expected_scale)
                 self.assertTrue(
@@ -537,7 +651,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                         python_contract.SUBTITLE_OCR.ribbon_bottom_tolerance_pixels),
                     expected_ribbon_bottom)
         self.assertEqual(
-            python_contract.subtitle_locator_field_cell_scale(768, 432), 0)
+            python_contract.subtitle_ocr_field_cell_scale(768, 432), 0)
         self.assertFalse(python_contract.subtitle_ocr_field_is_calibrated(768, 432))
         self.assertIsNone(
             python_contract.subtitle_ocr_dynamic_roi(1920, 1080, 768, 432))
@@ -546,14 +660,55 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
 
     def test_generated_ocr_assertions_do_not_compare_float_macros_in_preprocessor(self):
         assertions = generator.render_hlsl_ocr_assertions()
-        self.assertIn("!defined(V2_SUBTITLE_LOCATOR_CORNER_EDGE_DIVISOR)", assertions)
-        self.assertIn("!defined(V2_SUBTITLE_LOCATOR_CORNER_BOTTOM_ROWS)", assertions)
+        self.assertIn(
+            f"V2_SUBTITLE_CONTOUR_RECIPE != {python_contract.EXPECTED_SUBTITLE_OCR['contour_policy']['recipe']}u",
+            assertions)
+        self.assertIn("!defined(V2_SUBTITLE_PLANE_STATE_SCHEMA)", assertions)
+        self.assertIn("V2_SUBTITLE_PLANE_STATE_WORD_COUNT != 40u", assertions)
+        self.assertIn("V2_SUBTITLE_CONTOUR_HISTORY_RESERVED_OFFSET != 24u", assertions)
         self.assertIn("V2_ADAPTIVE_POLICY_ID != 3u", assertions)
+        self.assertNotIn("SUBTITLE_LOCATOR", assertions)
         integer_start = assertions.index("#if V2_ADAPTIVE_POLICY_ID")
-        integer_end = assertions.index('#error "Generated V2 OCR8/SLR14 contract invariants', integer_start)
+        integer_end = assertions.index('#error "Generated V2 OCR8 producer invariants', integer_start)
         for macro in ("V2_DIRECT_CONTAINER_LIMIT", "V2_ADAPTIVE_TIME_CONSTANT_SECONDS",
-                      "V2_HOST_PERCENTILE_LOW", "V2_SUBTITLE_LOCATOR_MATCH_IOU_THRESHOLD"):
+                      "V2_HOST_PERCENTILE_LOW", "V2_SUBTITLE_CONTOUR_HISTORY_RGB_DISTANCE"):
             self.assertNotIn(macro, assertions[integer_start:integer_end])
+
+    def test_gaussian_presentation_policy_and_generated_constants(self):
+        original = generator.load_contract(verify_shader_source_closure=False)
+        policy = original["subtitle_ocr"]["contour_policy"]
+        self.assertIs(type(policy["gaussian_center_offset_source_pixels"]), int)
+        self.assertEqual(policy["gaussian_center_offset_source_pixels"], 2)
+        self.assertEqual(policy["gaussian_sigma_short_side_divisor"], 60.0)
+        self.assertEqual(policy["distance_empty_bits"], 0x7f800000)
+        self.assertNotIn("presentation_margin_field_cells", policy)
+        self.assertNotIn("distance_horizontal_weight", policy)
+        self.assertNotIn("local_contrast_distance", policy)
+        self.assertNotIn("local_contrast_radius_detector_pixels", policy)
+        self.assertNotIn("subtitle_contour_local_contrast", generator.render_cpp(original))
+        self.assertNotIn("V2_SUBTITLE_CONTOUR_LOCAL_CONTRAST", generator.render_hlsl(original))
+        self.assertIn("subtitle_contour_gaussian_center_offset_source_pixels = 2u", generator.render_cpp(original))
+        self.assertIn("#define V2_SUBTITLE_CONTOUR_GAUSSIAN_SIGMA_SHORT_SIDE_DIVISOR 60.0f", generator.render_hlsl(original))
+        mutations = [("gaussian_center_offset_source_pixels", value) for value in
+                     (2.0, True, -1, 3, None, "2", 0, 1)]
+        mutations += [(key, value) for key in
+                      ("gaussian_sigma_short_side_divisor", "gaussian_weight_absolute_error_limit")
+                      for value in (True, 0.0, -1.0, float("nan"), float("inf"), None, "120", 1.0)]
+        mutations += [("presentation_margin_field_cells", 2)]
+        mutations += [("local_contrast_distance", 0.16),
+                      ("local_contrast_radius_detector_pixels", 2)]
+        mutations += [("gaussian_sigma_short_side_divisor", 120.0)]
+        for key, value in mutations:
+            with self.subTest(key=key, value=value):
+                changed = copy.deepcopy(original)
+                changed["subtitle_ocr"]["contour_policy"][key] = value
+                with self.assertRaises(ValueError):
+                    generator.validate_contract(changed, verify_shader_source_closure=False)
+                with tempfile.TemporaryDirectory() as temporary:
+                    path = Path(temporary) / "contract.json"
+                    path.write_text(json.dumps(changed), encoding="utf-8")
+                    with self.assertRaises(ValueError):
+                        python_contract.load_contract(path)
 
     def test_subtitle_ocr_contract_rejects_model_tensor_profile_and_abi_drift(self):
         original = generator.load_contract(verify_shader_source_closure=False)
@@ -576,6 +731,10 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 {"ocr_safe_row_top": 23}),
             "crop-aspect": lambda value: value["subtitle_ocr"]["field_policy"].update(
                 {"source_crop_aspect_width": 7}),
+            "line-search-bool": lambda value: value["subtitle_ocr"]["field_policy"].update(
+                {"line_search_bottom_height_numerator": True}),
+            "line-search-float": lambda value: value["subtitle_ocr"]["field_policy"].update(
+                {"line_search_bottom_height_denominator": 4.0}),
             "locator-max-width": lambda value: value["subtitle_ocr"]["field_policy"].update(
                 {"locator_max_width_numerator": 8}),
             "locator-corner-edge": lambda value: value["subtitle_ocr"]["field_policy"].update(
@@ -584,6 +743,52 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 {"locator_corner_bottom_rows": 15}),
             "text-join-gap": lambda value: value["subtitle_ocr"]["field_policy"].update(
                 {"text_join_gap_cells": 5}),
+            "ordinary-cover-no-guard": lambda value: value["subtitle_ocr"]["field_policy"].update(
+                {"ordinary_cover_horizontal_guard_cells": 0}),
+            "ordinary-cover-extra-guard": lambda value: value["subtitle_ocr"]["field_policy"].update(
+                {"ordinary_cover_horizontal_guard_cells": 2}),
+            "ordinary-cover-bool-guard": lambda value: value["subtitle_ocr"]["field_policy"].update(
+                {"ordinary_cover_horizontal_guard_cells": True}),
+            "ordinary-cover-float-guard": lambda value: value["subtitle_ocr"]["field_policy"].update(
+                {"ordinary_cover_horizontal_guard_cells": 1.0}),
+            "ordinary-cover-vertical-and-ribbon-guard": lambda value: value["subtitle_ocr"]["field_policy"].update(
+                {"ordinary_cover_horizontal_guard_policy": "expand-both-axes-and-ribbons"}),
+            "ordinary-cover-separate-mask": lambda value: value["subtitle_ocr"]["field_policy"].update(
+                {"ordinary_cover_horizontal_guard_policy": "separate-gaussian-only-guard"}),
+            "line-center-tolerance": lambda value: value["subtitle_ocr"]["field_policy"].update(
+                {"line_center_tolerance_denominator": 8}),
+            "line-search-height": lambda value: value["subtitle_ocr"]["field_policy"].update(
+                {"line_search_bottom_height_denominator": 3}),
+            "line-search-model-crop-change": lambda value: value["subtitle_ocr"]["field_policy"].update(
+                {"line_search_region": "new-model-crop-bottom-quarter"}),
+            "line-center-bool-ratio": lambda value: value["subtitle_ocr"]["field_policy"].update(
+                {"line_center_tolerance_numerator": True}),
+            "line-center-float-ratio": lambda value: value["subtitle_ocr"]["field_policy"].update(
+                {"line_center_tolerance_denominator": 10.0}),
+            "line-group-iou": lambda value: value["subtitle_ocr"]["field_policy"].update(
+                {"line_group_min_vertical_iou_denominator": 3}),
+            "line-group-bool-ratio": lambda value: value["subtitle_ocr"]["field_policy"].update(
+                {"line_group_min_vertical_iou_numerator": True}),
+            "line-group-float-ratio": lambda value: value["subtitle_ocr"]["field_policy"].update(
+                {"line_group_min_vertical_iou_denominator": 2.0}),
+            "line-group-horizontal-gap-ratio": lambda value: value["subtitle_ocr"]["field_policy"].update(
+                {"line_group_max_horizontal_gap_height_numerator": 5}),
+            "line-group-horizontal-gap-bool-ratio": lambda value: value["subtitle_ocr"]["field_policy"].update(
+                {"line_group_max_horizontal_gap_height_denominator": True}),
+            "line-group-horizontal-gap-float-ratio": lambda value: value["subtitle_ocr"]["field_policy"].update(
+                {"line_group_max_horizontal_gap_height_numerator": 4.0}),
+            "line-group-horizontal-gap-zero-denominator": lambda value: value["subtitle_ocr"]["field_policy"].update(
+                {"line_group_max_horizontal_gap_height_denominator": 0}),
+            "line-group-horizontal-gap-grid-metric": lambda value: value["subtitle_ocr"]["field_policy"].update(
+                {"line_group_horizontal_gap_metric": "detector-grid-pixels"}),
+            "line-group-horizontal-gap-growing-height": lambda value: value["subtitle_ocr"]["field_policy"].update(
+                {"line_group_horizontal_gap_metric": "native-source-gap-relative-to-growing-group-height"}),
+            "line-group-growing-anchor": lambda value: value["subtitle_ocr"]["field_policy"].update(
+                {"line_group_policy": "transitive-growing-union-anchor"}),
+            "line-center-foreground-reference": lambda value: value["subtitle_ocr"]["field_policy"].update(
+                {"line_center_reference": "foreground-window-center"}),
+            "line-center-params-prefix": lambda value: value["subtitle_ocr"]["field_policy"].update(
+                {"line_center_reference_params": "unsigned-center-64bytes"}),
             "ribbon-join-gap": lambda value: value["subtitle_ocr"]["field_policy"].update(
                 {"ribbon_join_gap_cells": 11}),
             "target-iqr": lambda value: value["subtitle_ocr"]["field_policy"].update(
@@ -596,8 +801,32 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 {"locator_target_max_unreliable_holds": 3}),
             "ocr-tag": lambda value: value["subtitle_ocr"]["ocr_record"].update(
                 {"tag": 0}),
-            "locator-words": lambda value: value["subtitle_ocr"]["locator_state"].update(
-                {"word_count": 112}),
+            "plane-words": lambda value: value["subtitle_ocr"]["plane_state"].update(
+                {"word_count": 96}),
+            "plane-bool-schema": lambda value: value["subtitle_ocr"]["plane_state"].update(
+                {"schema": True}),
+            "plane-float-schema": lambda value: value["subtitle_ocr"]["plane_state"].update(
+                {"schema": 1.0}),
+            "old-locator-state": lambda value: value["subtitle_ocr"].update(
+                {"locator_state": {"schema": 14, "word_count": 96}}),
+            "plane-extra-owner": lambda value: value["subtitle_ocr"]["plane_state"].update(
+                {"owner_offset": 32}),
+            "plane-mask-word": lambda value: value["subtitle_ocr"]["plane_state"].update(
+                {"current_slot_mask_word": 31}),
+            "plane-reserved": lambda value: value["subtitle_ocr"]["plane_state"].update(
+                {"reserved_word_count": 4}),
+            "old-condition": lambda value: value["subtitle_ocr"]["condition_params"].update(
+                {"schema": 3, "tag": 0x33504353}),
+            "condition-fade-alias": lambda value: value["subtitle_ocr"]["condition_params"].update(
+                {"fade_word": 4}),
+            "condition-float-active": lambda value: value["subtitle_ocr"]["condition_params"].update(
+                {"fully_active_value": 2.0}),
+            "history-owner-identity": lambda value: value["subtitle_ocr"]["contour_policy"].update(
+                {"history_owner_generation_word": 24}),
+            "history-reserved": lambda value: value["subtitle_ocr"]["contour_policy"].update(
+                {"history_reserved_offset": 25}),
+            "history-float-schema": lambda value: value["subtitle_ocr"]["contour_policy"].update(
+                {"history_schema": 5.0}),
         }
         for name, mutate in mutations.items():
             with self.subTest(name=name):
@@ -721,6 +950,19 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertNotEqual(generator.render_cpp(original), generator.render_cpp(changed))
         self.assertNotEqual(generator.render_hlsl(original), generator.render_hlsl(changed))
         self._assert_stale_check_fails(changed)
+
+    def test_shared_gaussian_limiter_bounds_are_independent_of_presentation_sigma(self):
+        original = generator.load_contract()
+        for vertical_bound in (0.25, 0.5, 1.0, 2.0):
+            with self.subTest(vertical_bound=vertical_bound):
+                changed = copy.deepcopy(original)
+                changed["calibrated_defaults"]["max_vertical_shear"] = vertical_bound
+                with tempfile.TemporaryDirectory() as temporary:
+                    path = Path(temporary) / "contract.json"
+                    path.write_text(json.dumps(changed), encoding="utf-8")
+                    generator.validate_contract(changed)
+                    self.assertEqual(python_contract.load_contract(path), changed)
+                    self.assertEqual(changed["subtitle_ocr"]["contour_policy"]["gaussian_sigma_short_side_divisor"], 60.0)
 
     def test_vertical_share_rejects_values_that_round_to_float32_endpoints(self):
         original = generator.load_contract()

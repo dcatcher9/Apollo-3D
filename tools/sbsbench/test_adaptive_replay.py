@@ -219,6 +219,18 @@ class AdaptiveReplayContractTests(unittest.TestCase):
                     (replay.TRACE_RECORD_FIELD_WIDTH, field_shape[0]),
                     (replay.TRACE_RECORD_FIELD_HEIGHT, field_shape[1])):
                 self.mutate_trace_word(treatment, frame_id, word, value)
+            policy = replay.depth_coordinate_v2_contract.SUBTITLE_OCR
+            roi = replay.depth_coordinate_v2_contract.subtitle_ocr_dynamic_roi(
+                *source_shape, *field_shape)
+            self.assertIsNotNone(roi)
+            for offset, values in (
+                    (policy.plane_source_extent_offset, source_shape),
+                    (policy.plane_field_extent_offset, field_shape),
+                    (policy.plane_roi_offset, roi),
+                    (policy.plane_content_offset, (0, 0, *field_shape))):
+                for index, value in enumerate(values):
+                    self.mutate_trace_word(treatment, frame_id,
+                        replay.TRACE_RECORD_PLANE_BEGIN + offset + index, value)
         engine_sha256 = "e" * 64
         manifest_sha256 = "f" * 64
         return {
@@ -320,8 +332,17 @@ class AdaptiveReplayContractTests(unittest.TestCase):
             replay.TRACE_RING_SCHEMA, replay.TRACE_RING_TAG, capacity, record_words,
             frame_count + 1, 0, frame_count, frame_count,
         ]
-        locator = [0] * replay.TRACE_LOCATOR_WORDS
-        locator[replay.TRACE_LOCATOR_CUT_EPOCH_WORD] = 7
+        plane = [0] * replay.TRACE_PLANE_WORDS
+        policy = replay.depth_coordinate_v2_contract.SUBTITLE_OCR
+        plane[:2] = [policy.plane_schema, policy.plane_tag]
+        plane[policy.plane_analysis_generation_offset:policy.plane_analysis_generation_offset + 2] = [
+            analysis_generation & 0xFFFFFFFF, analysis_generation >> 32]
+        plane[policy.plane_source_extent_offset:policy.plane_source_extent_offset + 2] = [1920, 1080]
+        plane[policy.plane_field_extent_offset:policy.plane_field_extent_offset + 2] = [770, 434]
+        plane[policy.plane_roi_offset:policy.plane_roi_offset + 2] = list(
+            replay.depth_coordinate_v2_contract.subtitle_ocr_dynamic_roi(1920, 1080, 770, 434))
+        plane[policy.plane_content_offset:policy.plane_content_offset + 4] = [0, 0, 770, 434]
+        plane[replay.TRACE_PLANE_CUT_EPOCH_WORD] = 7
         condition = [0] * replay.TRACE_CONDITION_WORDS
         subtitle_counts = {
             "suppressed": 0, "optional_ocr": 0,
@@ -329,13 +350,13 @@ class AdaptiveReplayContractTests(unittest.TestCase):
         }
         infer_count = 0
         reuse_count = 0
-        previous_locator = locator.copy()
+        previous_plane = plane.copy()
         previous_condition = condition.copy()
         row_subtitles = []
         for slot, mode in enumerate(modes):
             frame_id = slot + 1
             timestamp = timestamps[slot]
-            row_locator = previous_locator.copy()
+            row_plane = previous_plane.copy()
             row_condition = previous_condition.copy()
             if mode == "suppress":
                 submission = replay.TRACE_SUBMISSION_FORCE
@@ -381,14 +402,22 @@ class AdaptiveReplayContractTests(unittest.TestCase):
                 else:
                     reuse_count += 1
                 if subtitle != replay.TRACE_SUBTITLE_HELD_WITH_DEPTH:
-                    row_locator[replay.TRACE_LOCATOR_FRAME_WORD] = frame_id
-                    row_locator[replay.TRACE_LOCATOR_FRAME_WORD + 1] = 0
-                    row_locator[20] = 1
-                    row_locator[64:68] = [0, 0, 2, 2]
-                    row_condition = [100 + frame_id + index
-                                     for index in range(replay.TRACE_CONDITION_WORDS)]
+                    row_plane[replay.TRACE_PLANE_FRAME_WORD] = frame_id
+                    row_plane[replay.TRACE_PLANE_FRAME_WORD + 1] = 0
+                    row_plane[policy.plane_flags_word] = policy.plane_current_valid_flag if optional_executed else 0
+                    row_plane[policy.plane_current_slot_mask_word] = 1 if optional_executed else 0
+                    row_plane[policy.plane_observation_timestamp_offset:policy.plane_observation_timestamp_offset + 2] = [
+                        timestamp & 0xFFFFFFFF, timestamp >> 32]
+                    applied = struct.unpack('<I', struct.pack('<f', .01))[0]
+                    limit = struct.unpack('<I', struct.pack('<f', .04))[0]
+                    row_plane[policy.plane_adaptive_offset:] = [
+                        1, 8, 0, applied, timestamp & 0xFFFFFFFF, timestamp >> 32,
+                        0, 0, 0, 0, 0, 0, limit, 1000, 0, 0]
+                    row_condition = [policy.condition_param_schema, policy.condition_param_tag,
+                        1, 0, 2, applied] if optional_executed else [
+                        policy.condition_param_schema, policy.condition_param_tag, 0, 0, 0, 0]
                 if mode == "cut":
-                    row_locator[replay.TRACE_LOCATOR_CUT_EPOCH_WORD] += 1
+                    row_plane[replay.TRACE_PLANE_CUT_EPOCH_WORD] += 1
 
             authentic_subtitle = subtitle
             if invalid_hold_disposition and subtitle == replay.TRACE_SUBTITLE_HELD_WITH_DEPTH:
@@ -409,10 +438,10 @@ class AdaptiveReplayContractTests(unittest.TestCase):
             words[base + replay.TRACE_RECORD_SUBTITLE] = subtitle
             words[base + replay.TRACE_RECORD_FLAGS] = flags
             words[base + replay.TRACE_RECORD_HOST_SUBTITLE_OUTCOME] = host_outcome
-            words[base + replay.TRACE_RECORD_SOURCE_WIDTH] = 2
-            words[base + replay.TRACE_RECORD_SOURCE_HEIGHT] = 2
-            words[base + replay.TRACE_RECORD_FIELD_WIDTH] = 2
-            words[base + replay.TRACE_RECORD_FIELD_HEIGHT] = 2
+            words[base + replay.TRACE_RECORD_SOURCE_WIDTH] = 1920
+            words[base + replay.TRACE_RECORD_SOURCE_HEIGHT] = 1080
+            words[base + replay.TRACE_RECORD_FIELD_WIDTH] = 770
+            words[base + replay.TRACE_RECORD_FIELD_HEIGHT] = 434
             words[base + replay.TRACE_RECORD_TRANSACTION_WORDS] = replay.TRACE_TRANSACTION_WORDS
             token = frame_id
             branch = 0 if depth == replay.TRACE_DEPTH_REUSE else 1
@@ -434,18 +463,18 @@ class AdaptiveReplayContractTests(unittest.TestCase):
                 base + replay.TRACE_RECORD_TRANSACTION_BEGIN + replay.TRACE_TRANSACTION_WORDS
             ] = transaction
             if corrupt_hold and authentic_subtitle == replay.TRACE_SUBTITLE_HELD_WITH_DEPTH:
-                row_locator[0] += 1
+                row_plane[0] += 1
             words[
-                base + replay.TRACE_RECORD_LOCATOR_BEGIN:
-                base + replay.TRACE_RECORD_LOCATOR_BEGIN + replay.TRACE_LOCATOR_WORDS
-            ] = row_locator
+                base + replay.TRACE_RECORD_PLANE_BEGIN:
+                base + replay.TRACE_RECORD_PLANE_BEGIN + replay.TRACE_PLANE_WORDS
+            ] = row_plane
             words[
                 base + replay.TRACE_RECORD_CONDITION_BEGIN:
                 base + replay.TRACE_RECORD_CONDITION_BEGIN + replay.TRACE_CONDITION_WORDS
             ] = row_condition
             words[base + replay.TRACE_RECORD_OBSERVATION_TIMESTAMP] = timestamp & 0xFFFFFFFF
             words[base + replay.TRACE_RECORD_OBSERVATION_TIMESTAMP_HIGH] = timestamp >> 32
-            previous_locator = row_locator
+            previous_plane = row_plane
             previous_condition = row_condition
             row_subtitles.append(authentic_subtitle)
         trace_name = "device_conditional_gpu_trace_ring.u32"
@@ -472,10 +501,10 @@ class AdaptiveReplayContractTests(unittest.TestCase):
             "capture_match": {
                 "matched_frame_id": frame_count,
                 "analysis_generation": analysis_generation,
-                "source_width": 2,
-                "source_height": 2,
-                "field_width": 2,
-                "field_height": 2,
+                "source_width": 1920,
+                "source_height": 1080,
+                "field_width": 770,
+                "field_height": 434,
                 "domain_tag": 0x1234,
                 "input_domain_reset": bool(row_subtitles and
                     words[replay.TRACE_HEADER_WORDS +
@@ -570,7 +599,7 @@ class AdaptiveReplayContractTests(unittest.TestCase):
                     checks["transition_metrics"]["treatment"]
                     ["final_step_mae"]["count"], 1)
 
-    def test_rejects_non_bit_exact_ordinary_reuse_locator_hold(self):
+    def test_rejects_non_bit_exact_ordinary_reuse_plane_hold(self):
         with tempfile.TemporaryDirectory() as directory:
             control, treatment = self.make_pair(Path(directory), corrupt_hold=True)
             with self.assertRaisesRegex(replay.EvidenceError, "bit-exactly hold"):
@@ -797,36 +826,128 @@ class AdaptiveReplayContractTests(unittest.TestCase):
             with self.assertRaisesRegex(replay.EvidenceError, "unexpected trace identity"):
                 replay._validate_contract_and_trace(control, treatment, 2)
 
-    def test_decodes_current_native_layout_and_complete_nonzero_adaptive_tail(self):
+    def test_decodes_current_native_layout_and_complete_canonical_adaptive_tail(self):
         self.assertEqual((
-            replay.TRACE_RING_SCHEMA, replay.TRACE_RECORD_WORDS, replay.TRACE_LOCATOR_WORDS,
-            replay.TRACE_RECORD_LOCATOR_BEGIN, replay.TRACE_RECORD_CONDITION_BEGIN,
+            replay.TRACE_RING_SCHEMA, replay.TRACE_RECORD_WORDS, replay.TRACE_PLANE_WORDS,
+            replay.TRACE_RECORD_PLANE_BEGIN, replay.TRACE_RECORD_CONDITION_BEGIN,
             replay.TRACE_RECORD_OBSERVATION_TIMESTAMP,
             replay.TRACE_RECORD_OBSERVATION_TIMESTAMP_HIGH, replay.TRACE_RECORD_RESERVED_BEGIN,
-        ), (4, 192, 96, 88, 184, 190, 191, 192))
+        ), (5, 136, 40, 88, 128, 134, 135, 136))
+        self.assertEqual((replay.CONTROL_HARNESS_SCHEMA, replay.CONDITIONAL_HARNESS_SCHEMA), (31, 30))
+        self.assertEqual((replay.depth_coordinate_v2_dump_contract.GPU_TRACE_CONTRACT_SCHEMA,
+                          replay.depth_coordinate_v2_dump_contract.GPU_TRACE_DECODED_SCHEMA), (6, 7))
         with tempfile.TemporaryDirectory() as directory:
             control, treatment = self.make_pair(Path(directory))
             trace = treatment / replay.TRACE_FILENAME
             words = list(struct.unpack(f"<{trace.stat().st_size // 4}I", trace.read_bytes()))
-            tail = list(range(0x40000000, 0x40000010))
+            applied = struct.unpack('<I', struct.pack('<f', .01))[0]
+            limit = struct.unpack('<I', struct.pack('<f', .04))[0]
+            tail = [1, 9, 2, applied, 1, 0, 1, 0, 0, 0, 3, 0, limit, 1000, 1, 0]
             for slot in (0, 1):
-                base = 16 + slot * 192
-                words[base + 88 + 80:base + 88 + 96] = tail
+                base = replay.TRACE_HEADER_WORDS + slot * replay.TRACE_RECORD_WORDS
+                start = base + replay.TRACE_RECORD_PLANE_BEGIN + 24
+                words[start:start + 16] = tail
             trace.write_bytes(struct.pack(f"<{len(words)}I", *words))
             _, records = replay._validate_contract_and_trace(control, treatment, 2)
             for record in records:
-                self.assertEqual(len(record["locator"]), 96)
-                self.assertEqual(record["locator"][80:96], tuple(tail))
-                self.assertEqual(record["condition"], tuple(range(101, 107)))
+                self.assertEqual(len(record["subtitle_plane"]), 40)
+                self.assertEqual(record["subtitle_plane"][24:40], tuple(tail))
+                policy = replay.depth_coordinate_v2_contract.SUBTITLE_OCR
+                self.assertEqual(record["condition"], (policy.condition_param_schema,
+                    policy.condition_param_tag, 1, 0, 2, applied))
             self.assertEqual([row["observation_timestamp_us"] for row in records], [1, 16668])
 
     def test_rejects_changed_first_or_last_adaptive_tail_word_on_reuse(self):
-        for tail_word in (80, 95):
+        for tail_word in (24, 39):
             with self.subTest(word=tail_word), tempfile.TemporaryDirectory() as directory:
                 control, treatment = self.make_pair(Path(directory))
-                self.mutate_trace_word(treatment, 2, 88 + tail_word, 0x40000000)
-                with self.assertRaisesRegex(replay.EvidenceError, "bit-exactly hold SLR96"):
+                self.mutate_trace_word(treatment, 2, replay.TRACE_RECORD_PLANE_BEGIN + tail_word, 0x40000000)
+                with self.assertRaisesRegex(replay.EvidenceError, "bit-exactly hold UIP2/40"):
                     replay._validate_contract_and_trace(control, treatment, 2)
+
+    def test_rejects_current_plane_mixed_source_domain_and_controller_payloads(self):
+        policy = replay.depth_coordinate_v2_contract.SUBTITLE_OCR
+        mutations = (
+            (replay.TRACE_RECORD_PLANE_BEGIN + policy.plane_frame_offset, 1),
+            (replay.TRACE_RECORD_PLANE_BEGIN + policy.plane_observation_timestamp_offset, 1),
+            (replay.TRACE_RECORD_PLANE_BEGIN + policy.plane_analysis_generation_offset, 10),
+            (replay.TRACE_RECORD_PLANE_BEGIN + policy.plane_source_extent_offset, 1919),
+            (replay.TRACE_RECORD_PLANE_BEGIN + policy.plane_field_extent_offset, 769),
+            (replay.TRACE_RECORD_PLANE_BEGIN + policy.plane_roi_offset, 1),
+            (replay.TRACE_RECORD_PLANE_BEGIN + policy.plane_reserved_offset, 1),
+            (replay.TRACE_RECORD_PLANE_BEGIN + policy.plane_current_slot_mask_word, 5),
+            (replay.TRACE_RECORD_PLANE_BEGIN + policy.plane_adaptive_offset + 2, 21),
+            (replay.TRACE_RECORD_PLANE_BEGIN + policy.plane_adaptive_offset + 12, 0),
+            (replay.TRACE_RECORD_CONDITION_BEGIN + 2, 2),
+            (replay.TRACE_RECORD_CONDITION_BEGIN + 4, 1),
+            (replay.TRACE_RECORD_CONDITION_BEGIN + 5, 0),
+        )
+        for word, value in mutations:
+            with self.subTest(word=word), tempfile.TemporaryDirectory() as directory:
+                control, treatment = self.make_pair(Path(directory), modes=('force', 'opaque'))
+                self.mutate_trace_word(treatment, 2, word, value)
+                with self.assertRaises(replay.EvidenceError):
+                    replay._validate_contract_and_trace(control, treatment, 2)
+
+    def test_invalid_probe_requires_inactive_positive_zero_condition(self):
+        policy = replay.depth_coordinate_v2_contract.SUBTITLE_OCR
+        with tempfile.TemporaryDirectory() as directory:
+            control, treatment = self.make_pair(Path(directory), modes=('force', 'opaque'))
+            self.mutate_trace_word(treatment, 2,
+                replay.TRACE_RECORD_PLANE_BEGIN + policy.plane_adaptive_offset + 15, 1)
+            with self.assertRaisesRegex(replay.EvidenceError, 'inactive payload'):
+                replay._validate_contract_and_trace(control, treatment, 2)
+            for word in range(2, replay.TRACE_CONDITION_WORDS):
+                self.mutate_trace_word(treatment, 2, replay.TRACE_RECORD_CONDITION_BEGIN + word, 0)
+            replay._validate_contract_and_trace(control, treatment, 2)
+            self.mutate_trace_word(treatment, 2, replay.TRACE_RECORD_CONDITION_BEGIN + 5, 0x80000000)
+            with self.assertRaisesRegex(replay.EvidenceError, 'inactive payload'):
+                replay._validate_contract_and_trace(control, treatment, 2)
+
+    def test_abstaining_ocr_cannot_forge_an_otherwise_valid_current_union(self):
+        policy = replay.depth_coordinate_v2_contract.SUBTITLE_OCR
+        with tempfile.TemporaryDirectory() as directory:
+            control, treatment = self.make_pair(Path(directory), modes=('force_no_ocr', 'opaque_no_ocr'))
+            for offset in (policy.plane_flags_word, policy.plane_current_slot_mask_word):
+                self.mutate_trace_word(treatment, 2, replay.TRACE_RECORD_PLANE_BEGIN + offset, 1)
+            for offset, value in ((2, 1), (4, 2), (5, struct.unpack('<I', struct.pack('<f', .01))[0])):
+                self.mutate_trace_word(treatment, 2, replay.TRACE_RECORD_CONDITION_BEGIN + offset, value)
+            with self.assertRaisesRegex(replay.EvidenceError, 'abstaining OCR'):
+                replay._validate_contract_and_trace(control, treatment, 2)
+
+    def test_controller_clock_can_hold_independently_from_current_source_time(self):
+        policy = replay.depth_coordinate_v2_contract.SUBTITLE_OCR
+        with tempfile.TemporaryDirectory() as directory:
+            control, treatment = self.make_pair(Path(directory), modes=('force', 'opaque'))
+            self.mutate_trace_word(treatment, 2,
+                replay.TRACE_RECORD_PLANE_BEGIN + policy.plane_adaptive_offset + 4, 1)
+            _, records = replay._validate_contract_and_trace(control, treatment, 2)
+            self.assertEqual(records[1]['subtitle_plane'][policy.plane_observation_timestamp_offset], 16668)
+            self.assertEqual(records[1]['subtitle_plane'][policy.plane_adaptive_offset + 4], 1)
+
+    def test_reuse_source_clock_must_match_authenticated_depth_owner(self):
+        plane = [0] * replay.TRACE_PLANE_WORDS
+        plane[replay.TRACE_PLANE_FRAME_WORD] = 1
+        plane[replay.TRACE_PLANE_TIMESTAMP_WORD] = 11
+        records = [
+            {'frame_id': 1, 'depth': replay.TRACE_DEPTH_INFER,
+             'observation_timestamp_us': 10, 'flags': 0},
+            {'frame_id': 2, 'depth': replay.TRACE_DEPTH_REUSE,
+             'observation_timestamp_us': 20, 'flags': 0, 'subtitle_plane': tuple(plane)},
+        ]
+        with self.assertRaisesRegex(replay.EvidenceError, 'source clock.*depth owner'):
+            replay._authenticated_reuse_owner_ages(records)
+
+    def test_equal_source_clock_holds_tuple_without_a_new_time_observation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            control, treatment = self.make_pair(Path(directory), timestamps=(10, 10))
+            _, records, checks = self.validate_pair(control, treatment, 2)
+            self.assertEqual(records[0]['subtitle_plane'], records[1]['subtitle_plane'])
+            self.assertEqual(records[0]['condition'], records[1]['condition'])
+            self.assertEqual(checks['authenticated_reuse_owner_ages'], {'2': 1})
+            records[1]['observation_timestamp_us'] = 9
+            with self.assertRaisesRegex(replay.EvidenceError, 'source clock is newer'):
+                replay._validate_subtitle_record(records[1], records[0])
 
     def test_decodes_shifted_timestamp_low_and_high_words_and_rejects_mutations(self):
         timestamps = [(1 << 32) + 1, (1 << 32) + 33334]
@@ -836,7 +957,7 @@ class AdaptiveReplayContractTests(unittest.TestCase):
             self.assertEqual([row["observation_timestamp_us"] for row in records], timestamps)
             trace = treatment / replay.TRACE_FILENAME
             original = trace.read_bytes()
-            for timestamp_word in (190, 191):
+            for timestamp_word in (134, 135):
                 with self.subTest(word=timestamp_word):
                     trace.write_bytes(original)
                     self.mutate_trace_word(treatment, 2, timestamp_word, 0)
@@ -844,7 +965,7 @@ class AdaptiveReplayContractTests(unittest.TestCase):
                         replay._validate_contract_and_trace(control, treatment, 2)
 
     def test_rejects_obsolete_layout_even_when_binary_and_metadata_agree(self):
-        for schema, record_words in ((3, 192), (4, 176), (3, 176)):
+        for schema, record_words in ((4, 192), (3, 176), (5, 192), (4, 136)):
             with self.subTest(schema=schema, words=record_words), \
                     tempfile.TemporaryDirectory() as directory:
                 _, treatment = self.make_pair(Path(directory))
@@ -853,9 +974,8 @@ class AdaptiveReplayContractTests(unittest.TestCase):
                 words = native[:16] + [0] * (300 * record_words)
                 words[0], words[3] = schema, record_words
                 for slot in (0, 1):
-                    row = native[16 + slot * 192:16 + (slot + 1) * 192]
-                    if record_words == 176:
-                        row = row[:168] + row[184:190] + row[190:192]
+                    row = native[16 + slot * 136:16 + (slot + 1) * 136]
+                    row = row[:record_words] + [0] * max(0, record_words - len(row))
                     row[0] = schema
                     words[16 + slot * record_words:16 + (slot + 1) * record_words] = row
                 trace.write_bytes(struct.pack(f"<{len(words)}I", *words))
@@ -974,6 +1094,15 @@ class AdaptiveReplayContractTests(unittest.TestCase):
                     treatment, frame_id, replay.TRACE_RECORD_FIELD_WIDTH, 770)
                 self.mutate_trace_word(
                     treatment, frame_id, replay.TRACE_RECORD_FIELD_HEIGHT, 434)
+                policy = replay.depth_coordinate_v2_contract.SUBTITLE_OCR
+                roi = replay.depth_coordinate_v2_contract.subtitle_ocr_dynamic_roi(1920, 1080, 770, 434)
+                for offset, values in (
+                        (policy.plane_field_extent_offset, (770, 434)),
+                        (policy.plane_roi_offset, roi),
+                        (policy.plane_content_offset, (0, 0, 770, 434))):
+                    for index, value in enumerate(values):
+                        self.mutate_trace_word(treatment, frame_id,
+                            replay.TRACE_RECORD_PLANE_BEGIN + offset + index, value)
             with self.assertRaisesRegex(replay.EvidenceError, "downgraded"):
                 replay.validate_contract_and_trace(
                     control, treatment, 2,

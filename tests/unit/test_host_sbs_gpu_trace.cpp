@@ -45,14 +45,14 @@ namespace {
     EXPECT_NE(shader.find("uint trace_observation_timestamp_high;"), std::string::npos);
     EXPECT_NE(shader.find("uint trace_padding1;"), std::string::npos);
     const std::array definitions {
-      "#define GPU_TRACE_RING_SCHEMA 4u",
+      "#define GPU_TRACE_RING_SCHEMA 5u",
       "#define GPU_TRACE_RING_TAG 0x48525447u",
       "#define GPU_TRACE_RECORD_TAG 0x31525447u",
       "#define GPU_TRACE_CAPACITY 300u",
       "#define GPU_TRACE_HEADER_WORDS 16u",
-      "#define GPU_TRACE_RECORD_WORDS 192u",
+      "#define GPU_TRACE_RECORD_WORDS 136u",
       "#define GPU_TRACE_TRANSACTION_WORDS 64u",
-      "#define GPU_TRACE_LOCATOR_WORDS 96u",
+      "#define GPU_TRACE_LOCATOR_WORDS 40u",
       "#define GPU_TRACE_CONDITION_WORDS 6u",
       "#define GPU_TRACE_HEADER_NEXT_SEQUENCE_LOW 4u",
       "#define GPU_TRACE_HEADER_NEXT_SEQUENCE_HIGH 5u",
@@ -76,9 +76,9 @@ namespace {
       "#define GPU_TRACE_RECORD_TRANSACTION_WORD_COUNT 22u",
       "#define GPU_TRACE_RECORD_TRANSACTION_BEGIN 24u",
       "#define GPU_TRACE_RECORD_LOCATOR_BEGIN 88u",
-      "#define GPU_TRACE_RECORD_CONDITION_BEGIN 184u",
-      "#define GPU_TRACE_RECORD_OBSERVATION_TIMESTAMP_LOW 190u",
-      "#define GPU_TRACE_RECORD_OBSERVATION_TIMESTAMP_HIGH 191u",
+      "#define GPU_TRACE_RECORD_CONDITION_BEGIN 128u",
+      "#define GPU_TRACE_RECORD_OBSERVATION_TIMESTAMP_LOW 134u",
+      "#define GPU_TRACE_RECORD_OBSERVATION_TIMESTAMP_HIGH 135u",
       "#define GPU_TRACE_CLASS_FORCE_INFER 1u",
       "#define GPU_TRACE_CLASS_GPU_UNDECIDED 2u",
       "#define GPU_TRACE_DEPTH_INVALID 0u",
@@ -509,27 +509,35 @@ namespace {
     )));
 
     std::array<std::uint32_t, trace::subtitle_locator_word_count> locator {};
-    locator[0u] = v2::subtitle_locator_state_schema;
-    locator[1u] = v2::subtitle_locator_state_tag;
-    locator[2u] = 1u | 4u;
+    locator[0u] = v2::subtitle_plane_state_schema;
+    locator[1u] = v2::subtitle_plane_state_tag;
+    locator[2u] = v2::subtitle_plane_current_valid_flag;
     locator[3u] = 1u;
-    locator[4u] = 1u;
-    locator[18u] = 0x3c23d70au;  // float32 0.01
-    locator[19u] = 1u;
-    locator[20u] = 1u;
-    locator[21u] = 1u;
-    locator[22u] = 41u;
+    locator[4u] = 41u;
+    locator[6u] = 9u;
+    locator[8u] = 12000u;
+    locator[10u] = 1920u;
+    locator[11u] = 1080u;
+    locator[12u] = 770u;
+    locator[13u] = 434u;
+    locator[14u] = 325u;
+    locator[15u] = 424u;
+    locator[16u] = 1u;
+    locator[17u] = 1u;
+    locator[18u] = 769u;
+    locator[19u] = 433u;
+    locator[20u] = 3u;
     locator[24u] = 1u;
-    locator[26u] = 3u;
-    locator[27u] = 770u;
-    locator[28u] = 434u;
+    locator[27u] = 0x3c23d70au;  // applied float32 0.01
+    locator[36u] = std::bit_cast<std::uint32_t>(v2::direct_container_limit);
+    locator[37u] = 4100u;
     std::array<std::uint32_t, trace::subtitle_condition_word_count> condition {
       v2::subtitle_condition_param_schema,
       v2::subtitle_condition_param_tag,
       1u,
       0u,
-      1u,
-      locator[18u],
+      2u,
+      locator[27u],
     };
     ComPtr<ID3D11Buffer> locator_buffer;
     ComPtr<ID3D11ShaderResourceView> locator_srv;

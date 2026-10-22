@@ -14,12 +14,44 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <vector>
 
 namespace offline_sbs { struct raw_frame_transport; }
 
 namespace sbs_bench {
 #ifdef _WIN32
   namespace detail {
+    struct subtitle_diagnostic_observation_range {
+      std::uint64_t first = 0;
+      std::uint64_t last = 0;
+    };
+
+    /** Strict inclusive ranges of 1-based observations, independent of source filenames. */
+    std::optional<std::vector<subtitle_diagnostic_observation_range>>
+    parse_subtitle_diagnostic_observation_ranges(std::string_view text, std::string &error);
+
+    /** Validate the canonical ranges against the actual input count after --limit. */
+    bool validate_subtitle_diagnostic_observation_ranges(
+      const std::vector<subtitle_diagnostic_observation_range> &ranges,
+      std::uint64_t input_count,
+      std::string &error
+    );
+
+    /** Query already validated ranges without expanding them into per-frame storage. */
+    bool subtitle_diagnostic_observation_selected(
+      const std::vector<subtitle_diagnostic_observation_range> &ranges,
+      std::uint64_t observation
+    );
+
+    /** Normal output cadence, optionally unioned with already validated diagnostic ranges. */
+    bool subtitle_diagnostic_should_render(
+      std::uint64_t observation,
+      std::uint64_t output_every,
+      const std::vector<subtitle_diagnostic_observation_range> *ranges = nullptr,
+      bool render_selected = false
+    );
+
     struct resolved_sbs_geometry {
       std::uint32_t eye_width = 0;
       std::uint32_t eye_height = 0;

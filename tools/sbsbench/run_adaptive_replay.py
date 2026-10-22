@@ -39,8 +39,8 @@ import depth_coordinate_v2_contract  # noqa: E402
 import depth_coordinate_v2_dump_contract  # noqa: E402
 import host_sbs_shader_manifest  # noqa: E402
 
-CONTROL_HARNESS_SCHEMA = 29
-CONDITIONAL_HARNESS_SCHEMA = 28
+CONTROL_HARNESS_SCHEMA = 31
+CONDITIONAL_HARNESS_SCHEMA = 30
 CONDITIONAL_METADATA_SCHEMA = 3
 TRACE_HEADER_WORDS = depth_coordinate_v2_dump_contract.GPU_TRACE_HEADER_WORD_COUNT
 TRACE_HEADER_RESERVED_BEGIN = depth_coordinate_v2_dump_contract.GPU_TRACE_HEADER_OFFSETS[
@@ -67,9 +67,9 @@ TRACE_RECORD_RESERVED0 = depth_coordinate_v2_dump_contract.GPU_TRACE_RECORD_OFFS
 TRACE_RECORD_TRANSACTION_BEGIN = depth_coordinate_v2_dump_contract.GPU_TRACE_RECORD_OFFSETS[
     "transaction_begin"]
 TRACE_TRANSACTION_WORDS = depth_coordinate_v2_dump_contract.GPU_TRACE_TRANSACTION_WORD_COUNT
-TRACE_LOCATOR_WORDS = depth_coordinate_v2_dump_contract.GPU_TRACE_LOCATOR_WORD_COUNT
+TRACE_PLANE_WORDS = depth_coordinate_v2_dump_contract.GPU_TRACE_PLANE_WORD_COUNT
 TRACE_CONDITION_WORDS = depth_coordinate_v2_dump_contract.GPU_TRACE_CONDITION_WORD_COUNT
-TRACE_RECORD_LOCATOR_BEGIN = depth_coordinate_v2_dump_contract.GPU_TRACE_RECORD_OFFSETS[
+TRACE_RECORD_PLANE_BEGIN = depth_coordinate_v2_dump_contract.GPU_TRACE_RECORD_OFFSETS[
     "subtitle_locator_begin"]
 TRACE_RECORD_CONDITION_BEGIN = depth_coordinate_v2_dump_contract.GPU_TRACE_RECORD_OFFSETS[
     "subtitle_condition_begin"]
@@ -96,8 +96,9 @@ TRACE_FLAG_SUBTITLE_SUPPRESSED = 1 << 3
 TRACE_FLAG_CONDITION_EXECUTED = 1 << 4
 TRACE_FLAG_SUBTITLE_BRANCH_GATED = 1 << 5
 TRACE_KNOWN_FLAGS = ((1 << 6) - 1)
-TRACE_LOCATOR_CUT_EPOCH_WORD = 26
-TRACE_LOCATOR_FRAME_WORD = 22
+TRACE_PLANE_CUT_EPOCH_WORD = depth_coordinate_v2_contract.SUBTITLE_OCR.plane_cut_epoch_word
+TRACE_PLANE_FRAME_WORD = depth_coordinate_v2_contract.SUBTITLE_OCR.plane_frame_offset
+TRACE_PLANE_TIMESTAMP_WORD = depth_coordinate_v2_contract.SUBTITLE_OCR.plane_observation_timestamp_offset
 WORK_NONE = 0
 WORK_OPTIONAL_OCR = 1
 WORK_SUBTITLE_OBSERVATION = 2
@@ -550,9 +551,9 @@ def decode_trace(path: Path, metadata: dict, expected_frames: int) -> list[dict]
             "field_height": row[TRACE_RECORD_FIELD_HEIGHT],
             "transaction": transaction,
             "optional_ocr_executed": transaction[7] == OPTIONAL_OCR_RECEIPT_MAGIC,
-            "locator": tuple(row[
-                TRACE_RECORD_LOCATOR_BEGIN:
-                TRACE_RECORD_LOCATOR_BEGIN + TRACE_LOCATOR_WORDS]),
+            "subtitle_plane": tuple(row[
+                TRACE_RECORD_PLANE_BEGIN:
+                TRACE_RECORD_PLANE_BEGIN + TRACE_PLANE_WORDS]),
             "condition": tuple(row[
                 TRACE_RECORD_CONDITION_BEGIN:
                 TRACE_RECORD_CONDITION_BEGIN + TRACE_CONDITION_WORDS]),
@@ -627,21 +628,47 @@ def _validate_subtitle_record(record: dict, previous: dict | None) -> None:
     else:
         raise EvidenceError(f"frame {frame_id} has an invalid submission class")
 
-    locator_frame = _join_u64(
-        record["locator"][TRACE_LOCATOR_FRAME_WORD],
-        record["locator"][TRACE_LOCATOR_FRAME_WORD + 1])
+    plane_frame = _join_u64(
+        record["subtitle_plane"][TRACE_PLANE_FRAME_WORD],
+        record["subtitle_plane"][TRACE_PLANE_FRAME_WORD + 1])
     if expected_subtitle == TRACE_SUBTITLE_HELD_WITH_DEPTH:
         if (previous is None or
-                (record["locator"], record["condition"]) !=
-                (previous["locator"], previous["condition"])):
+                (record["subtitle_plane"], record["condition"]) !=
+                (previous["subtitle_plane"], previous["condition"])):
             raise EvidenceError(
-                f"ordinary reuse did not bit-exactly hold SLR{TRACE_LOCATOR_WORDS} + "
+                f"ordinary reuse did not bit-exactly hold UIP2/{TRACE_PLANE_WORDS} + "
                 f"condition{TRACE_CONDITION_WORDS}")
-        if locator_frame == 0 or locator_frame >= frame_id:
+        if plane_frame == 0 or plane_frame >= frame_id:
             raise EvidenceError("held subtitle tuple does not retain an older frame identity")
     elif expected_subtitle in (TRACE_SUBTITLE_OPTIONAL_OCR, TRACE_SUBTITLE_ABSTENTION):
-        if locator_frame != frame_id:
+        if plane_frame != frame_id:
             raise EvidenceError("published subtitle tuple is not bound to the current frame")
+    else:
+        return  # A suppressed dispatch grants no current subtitle state authority.
+
+    # Trace bytes prove a source-bound plane/controller publication, not actual OCR geometry.
+    # Held snapshots keep their original observation clock; only a current infer uses this row's
+    # clock. The adaptive controller's accepted clock may legitimately lag either source clock.
+    expected_time = (record["observation_timestamp_us"]
+                     if expected_subtitle != TRACE_SUBTITLE_HELD_WITH_DEPTH else
+                     _join_u64(previous["subtitle_plane"][TRACE_PLANE_TIMESTAMP_WORD],
+                               previous["subtitle_plane"][TRACE_PLANE_TIMESTAMP_WORD + 1]))
+    if expected_time > record["observation_timestamp_us"]:
+        raise EvidenceError("held subtitle source clock is newer than the current row")
+    try:
+        plane = depth_coordinate_v2_dump_contract.validate_subtitle_plane_snapshot(
+            struct.pack(f"<{TRACE_PLANE_WORDS}I", *record["subtitle_plane"]), matched_frame_id=plane_frame,
+            analysis_generation=record["analysis_generation"],
+            source_width=record["source_width"], source_height=record["source_height"],
+            field_width=record["field_width"], field_height=record["field_height"],
+            expected_observation_timestamp_us=expected_time)
+        depth_coordinate_v2_dump_contract.validate_subtitle_condition_words(
+            struct.pack(f"<{TRACE_CONDITION_WORDS}I", *record["condition"]), plane_state=plane,
+            geometry_ready=plane["current_valid"], require_ocr_kinds=False)
+    except ValueError as exc:
+        raise EvidenceError(f"frame {frame_id} subtitle plane publication: {exc}") from exc
+    if expected_subtitle == TRACE_SUBTITLE_ABSTENTION and plane["current_valid"]:
+        raise EvidenceError("abstaining OCR cannot grant a current subtitle plane union")
 
 
 def _validate_contract_and_trace(control_dir: Path, treatment_dir: Path,
@@ -1050,11 +1077,15 @@ def _authenticated_reuse_owner_ages(records: list[dict]) -> dict[int, int]:
                     record["observation_timestamp_us"] <= 0 or observation_age < 0):
                 raise EvidenceError(
                     "reuse has invalid authenticated GPU history-owner time ordering")
-            locator = record["locator"]
-            subtitle_frame = _join_u64(locator[TRACE_LOCATOR_FRAME_WORD],
-                                      locator[TRACE_LOCATOR_FRAME_WORD + 1])
+            plane = record["subtitle_plane"]
+            subtitle_frame = _join_u64(plane[TRACE_PLANE_FRAME_WORD],
+                                      plane[TRACE_PLANE_FRAME_WORD + 1])
             if subtitle_frame != most_recent_infer_frame_id:
                 raise EvidenceError("reuse subtitle observation does not match its depth owner")
+            subtitle_time = _join_u64(plane[TRACE_PLANE_TIMESTAMP_WORD],
+                                      plane[TRACE_PLANE_TIMESTAMP_WORD + 1])
+            if subtitle_time != most_recent_infer_timestamp_us:
+                raise EvidenceError("reuse subtitle source clock does not match its depth owner")
             result[frame_id] = owner_age
         else:
             raise EvidenceError("cannot derive owner age for invalid depth disposition")

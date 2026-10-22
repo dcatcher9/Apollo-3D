@@ -1,5 +1,6 @@
 Texture2D<float4> InputTexture : register(t0);
 RWStructuredBuffer<float> OcrInput : register(u0);
+RWTexture2D<float4> ContourDisplayBand : register(u1);
 
 #include "include/depth_color.hlsl"
 #include "include/depth_coordinate_v2_contract.generated.hlsl"
@@ -72,4 +73,24 @@ void main(uint3 id : SV_DispatchThreadID) {
         (rgb.g - V2_OCR_IMAGENET_MEAN_G) / V2_OCR_IMAGENET_STD_G;
     OcrInput[index + 2u * stride] =
         (rgb.r - V2_OCR_IMAGENET_MEAN_R) / V2_OCR_IMAGENET_STD_R;
+
+    // Capture the exact source pixels under the same optional-inference decision as OCR.
+    // Grid strides retain native detail without a second inference input or a full-frame copy.
+    // Async finalization consequently never classifies a later presentation frame's RGB.
+    uint band_width, band_height;
+    ContourDisplayBand.GetDimensions(band_width, band_height);
+    if (band_width == source_w && band_height == crop_height) {
+        [loop]
+        for (uint y = id.y; y < band_height; y += OCR_HEIGHT) {
+            [loop]
+            for (uint x = id.x; x < band_width; x += OCR_WIDTH) {
+                float3 captured = InputTexture.Load(int3(
+                    int2(source_left + x, source_top + crop_top + y), 0)).rgb;
+                float3 display = DepthColorToSrgb(captured, color_mode);
+                bool valid = all(isfinite(captured)) && all(isfinite(display));
+                ContourDisplayBand[uint2(x, y)] = valid ?
+                    float4(display, 1.0f) : float4(0.0f, 0.0f, 0.0f, 0.0f);
+            }
+        }
+    }
 }

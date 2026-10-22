@@ -12,10 +12,10 @@
 #include <type_traits>
 
 namespace models::depth_coordinate_v2 {
-  inline constexpr std::uint32_t contract_schema = 87u;
-  inline constexpr std::uint32_t contract_tag = 0x7D19520Fu;
-  inline constexpr std::string_view contract_canonical_sha256 = "beb7f6fe43df21d1aaae136dbdb1f7d348bef5f43644e233a600d63efa6a94ed";
-  inline constexpr std::string_view contract_tag_semantic_sha256 = "7d19520fec2daecaa19f73a4c5503db642ff1dcd739b76abdec5f359d371ee99";
+  inline constexpr std::uint32_t contract_schema = 115u;
+  inline constexpr std::uint32_t contract_tag = 0x640A940Cu;
+  inline constexpr std::string_view contract_canonical_sha256 = "eb4b9304f2ac6557758fc9049a2af349a92b3d1d22d0ddf579d5aa856fc04a83";
+  inline constexpr std::string_view contract_tag_semantic_sha256 = "640a940c9509bbf043fe18dd7b4d8116e6ad4fb77ca2a8a49ad354660ba323b6";
   inline constexpr std::string_view shadow_state_source = "depth_coordinate_v2_state_resolve_cs.ShadowState";
   inline constexpr std::string_view shadow_state_capture = "after-every-complete-depth-coordinate-v2-state-update";
   inline constexpr std::string_view frame_stats_source = "depth_coordinate_v2_frame_resolve_cs.FrameStats";
@@ -27,11 +27,31 @@ namespace models::depth_coordinate_v2 {
   inline constexpr std::uint32_t final_parallax_contract_schema = 3u;
   inline constexpr std::string_view final_parallax_authority = "complete-atomic-subtitle-conditioned-r32f-live-render-authority";
   inline constexpr std::string_view final_parallax_publication_policy = "authenticated-infer-or-cpu-known-publication-direct-render";
-  inline constexpr std::string_view final_parallax_reuse_policy = "reuse-holds-complete-depth-ocr-slr-final-tuple-byte-for-byte";
+  inline constexpr std::string_view final_parallax_reuse_policy = "reuse-holds-complete-depth-ocr-uip4-final-tuple-byte-for-byte";
   inline constexpr std::string_view final_parallax_invalid_policy = "fail-closed-flat";
   inline constexpr std::string_view final_parallax_current_rgb_policy = "always-current-never-retained";
   inline constexpr std::string_view subtitle_geometry_authority = "same-observation-sealed-parallax-state-required-for-ui-probe-and-time-advance-v1";
-  inline constexpr std::uint32_t subtitle_ocr_contract_schema = 14u;
+  inline constexpr std::uint32_t subtitle_ocr_contract_schema = 27u;
+  inline constexpr std::uint32_t subtitle_contour_schema = 5u;
+  inline constexpr std::uint32_t subtitle_contour_recipe = 23u;
+  inline constexpr std::uint32_t subtitle_contour_history_tag = 894714707u;
+  inline constexpr std::uint32_t subtitle_contour_history_word_count = 32u;
+  inline constexpr std::uint32_t subtitle_contour_history_snapshot_valid_word = 23u;
+  inline constexpr std::uint32_t subtitle_contour_history_reserved_offset = 24u;
+  inline constexpr std::uint32_t subtitle_contour_history_reserved_word_count = 8u;
+  inline constexpr std::uint32_t subtitle_contour_history_feature_valid_bit = 2u;
+  inline constexpr std::uint32_t subtitle_contour_history_feature_mask_bit = 1u;
+  inline constexpr float subtitle_contour_history_rgb_distance = 0.08f;
+  inline constexpr float subtitle_contour_probability_change_ratio = 0.125f;
+  inline constexpr std::uint32_t subtitle_contour_history_confirmation_observations = 4u;
+  inline constexpr std::uint32_t subtitle_contour_history_feature_count_shift = 2u;
+  inline constexpr std::uint32_t subtitle_contour_source_max_extent = 5120u;
+  inline constexpr std::uint32_t subtitle_contour_history_jitter_radius_source_pixels = 2u;
+  inline constexpr std::uint32_t subtitle_contour_distance_empty_bits = 2139095040u;
+  inline constexpr std::uint32_t subtitle_contour_gaussian_center_offset_source_pixels = 2u;
+  inline constexpr float subtitle_contour_gaussian_sigma_short_side_divisor = 60.0f;
+  inline constexpr float subtitle_contour_gaussian_weight_absolute_error_limit = 2e-06f;
+  inline constexpr std::string_view subtitle_contour_policy_json = "{\"schema\":5,\"recipe\":23,\"source\":\"same-joined-ocr-source-bottom-crop-display-srgb-finite-rgba16f-v1\",\"source_max_extent\":5120,\"source_extent_policy\":\"native-exact-crop-for-supported-source-otherwise-canonical-1x1-empty-support-history-source-and-zero-probability-v1\",\"history_jitter_radius_source_pixels\":2,\"probability_validity_policy\":\"all-interpolation-contributors-finite-in-unit-range-even-without-fresh-threshold-v1\",\"diagnostic_snapshot_policy\":\"same-joined-valid-ocr-geometry-source-clock-copy-before-next-admission-clear-invalid-whole-reuse-hold-v1\",\"native_support\":\"r32u-binary-current-temporally-stable-ui-support-v1\",\"authority\":\"current-ocr8-uip4-scp4-cut-source-clock-identity-only-v2\",\"projection\":\"native-visible-support-to-all-bilinear-field-nodes-integer-footprint-v1\",\"history\":\"current-cover-fixed-rgb-anchor-four-genuine-confirmations-same-pixel-first-current-core-probability-cue-blocks-neighbor-fallback-v4\",\"history_schema\":5,\"history_tag\":894714707,\"history_word_count\":32,\"conditioning\":\"post-gaussian-shared-vertical75-25-and-horizontal-q30-no-presentation-support-or-invalid-current-authority-exact-base-v2\",\"reuse\":\"whole-depth-ocr-uip4-native-mask-field-pin-q-gaussian-weight-blend-vertical-control-history-source-probability-final-tuple-held-v1\",\"uncertain_support\":\"raw-support-abstains-presentation-current-cover-fallback-until-four-genuine-cue-free-observations-v3\",\"history_snapshot_valid_word\":23,\"history_feature_valid_bit\":2,\"history_feature_mask_bit\":1,\"history_rgb_distance\":0.08,\"mask_evidence_policy\":\"current-ocr8-cover-color-agnostic-four-genuine-fixed-anchor-matches-same-pixel-first-probability-cue-blocks-neighbor-fallback-in-current-raw-core-v8\",\"history_confirmation_observations\":4,\"history_feature_count_shift\":2,\"history_anchor_policy\":\"same-pixel-qualified-fixed-anchor-first-even-with-current-core-probability-cue-otherwise-unflagged-min-rgb-distance-then-squared-spatial-distance-then-scan-order-v3\",\"distance_policy\":\"source-pixel-five-center-euclidean-squared-r32f-positive-infinity-v1\",\"distance_empty_bits\":2139095040,\"gaussian_center_offset_source_pixels\":2,\"gaussian_sigma_short_side_divisor\":60.0,\"gaussian_weight_policy\":\"fp32-exp-negative-min-native-q-current-cover-q-until-four-genuine-cue-free-observations-max-union-v3\",\"gaussian_weight_absolute_error_limit\":2e-06,\"gaussian_blend_policy\":\"precise-ui-times-M-plus-base-times-one-minus-M-bit-exact-endpoints-v1\",\"history_reserved_offset\":24,\"history_reserved_word_count\":8,\"probability_change_ratio\":0.125,\"probability_change_policy\":\"current-core-native-center-soft-probability-unit-mass-spatial-tv-strict-ratio-cue-both-zero-no-cue-one-zero-cue-v3\"}";
   inline constexpr std::string_view subtitle_ocr_model_name = "ppocrv6_tiny_det_modelopt_fp16";
   inline constexpr std::string_view subtitle_ocr_asset_path = "models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx";
   inline constexpr std::string_view subtitle_ocr_artifact_onnx_sha256 = "169a233ba0ff7cac27f8ec7dccb6a406e614b25b21fe6a5638c423bf2118bb44";
@@ -76,23 +96,24 @@ namespace models::depth_coordinate_v2 {
   inline constexpr std::uint32_t subtitle_ocr_safe_row_bottom = 155u;
   inline constexpr float subtitle_ocr_active_probability_threshold = 0.2f;
   inline constexpr float subtitle_ocr_min_mean_score = 0.4f;
-  inline constexpr std::uint32_t subtitle_locator_max_width_numerator = 9u;
-  inline constexpr std::uint32_t subtitle_locator_max_width_denominator = 10u;
-  inline constexpr std::uint32_t subtitle_locator_min_width_cells = 48u;
-  inline constexpr std::uint32_t subtitle_locator_min_height_cells = 6u;
-  inline constexpr std::uint32_t subtitle_locator_min_aspect_numerator = 2u;
-  inline constexpr std::uint32_t subtitle_locator_min_aspect_denominator = 1u;
-  inline constexpr std::uint32_t subtitle_locator_provisional_min_vertical_overlap_numerator = 3u;
-  inline constexpr std::uint32_t subtitle_locator_provisional_min_vertical_overlap_denominator = 4u;
-  inline constexpr std::uint32_t subtitle_locator_provisional_max_height_ratio = 2u;
-  inline constexpr std::uint32_t subtitle_locator_provisional_max_center_y_delta_shorter_height = 1u;
-  inline constexpr std::uint32_t subtitle_locator_corner_edge_divisor = 32u;
-  inline constexpr std::uint32_t subtitle_locator_corner_bottom_rows = 16u;
-  inline constexpr float subtitle_locator_match_iou_threshold = 0.6f;
-  inline constexpr std::uint32_t subtitle_locator_death_grace_observations = 6u;
   inline constexpr std::uint32_t subtitle_ocr_crop_aspect_width = 6u;
   inline constexpr std::uint32_t subtitle_ocr_crop_aspect_height = 1u;
   inline constexpr std::uint32_t subtitle_ocr_text_join_gap_cells = 4u;
+  inline constexpr std::uint32_t subtitle_ocr_ordinary_cover_horizontal_guard_cells = 1u;
+  inline constexpr std::string_view subtitle_ocr_ordinary_cover_horizontal_guard_policy = "ordinary-only-add-guard-cells-times-producer-ocr-cell-width-to-horizontal-db-unclip-cover-clamped-detector-bounds-before-map-current-canonical-cover-all-consumers-no-second-mask-vertical-and-ribbon-unchanged-v1";
+  inline constexpr std::uint32_t subtitle_ocr_line_group_min_vertical_iou_numerator = 1u;
+  inline constexpr std::uint32_t subtitle_ocr_line_group_min_vertical_iou_denominator = 2u;
+  inline constexpr std::uint32_t subtitle_ocr_line_group_max_horizontal_gap_height_numerator = 4u;
+  inline constexpr std::uint32_t subtitle_ocr_line_group_max_horizontal_gap_height_denominator = 1u;
+  inline constexpr std::string_view subtitle_ocr_line_group_horizontal_gap_metric = "native-source-horizontal-gap-to-current-union-edge-relative-to-max-candidate-and-fixed-anchor-height-exact-cross-multiplied-v1";
+  inline constexpr std::uint32_t subtitle_ocr_line_center_tolerance_numerator = 1u;
+  inline constexpr std::uint32_t subtitle_ocr_line_center_tolerance_denominator = 10u;
+  inline constexpr std::uint32_t subtitle_ocr_line_search_bottom_height_numerator = 1u;
+  inline constexpr std::uint32_t subtitle_ocr_line_search_bottom_height_denominator = 4u;
+  inline constexpr std::string_view subtitle_ocr_line_search_region = "lower-quarter-of-center-reference-intersect-existing-safe-detector-crop-v1";
+  inline constexpr std::string_view subtitle_ocr_line_group_policy = "same-detector-active-row-band-first-qualifying-fixed-tight-core-anchor-span-iou-and-bounded-native-horizontal-union-gap-before-capacity-union-eligibility-only-original-ordinary-and-ribbon-pairs-v2";
+  inline constexpr std::string_view subtitle_ocr_line_center_reference = "video-roi-otherwise-full-screen-horizontal-center-and-width-in-analysis-source-pixels-v1";
+  inline constexpr std::string_view subtitle_ocr_line_center_reference_params = "ocr-resolve-prefix16-then-signed-twice-center-unsigned-width-signed-search-top-zero-reserved-word-80bytes-v1";
   inline constexpr std::uint32_t subtitle_ocr_ribbon_join_gap_cells = 12u;
   inline constexpr std::uint32_t subtitle_ocr_ribbon_structural_gap_min_cells = 3u;
   inline constexpr std::uint32_t subtitle_ocr_ribbon_min_structural_gaps = 3u;
@@ -101,27 +122,51 @@ namespace models::depth_coordinate_v2 {
   inline constexpr std::uint32_t subtitle_ocr_ribbon_bottom_tolerance_pixels = 2u;
   inline constexpr std::string_view subtitle_ocr_ribbon_bottom_tolerance_projection = "exact-ceil-detector-edge-through-bottom-crop-v1";
   inline constexpr std::uint32_t subtitle_ocr_ribbon_cover_pad_limit = 8u;
-  inline constexpr std::uint32_t subtitle_locator_state_schema = 14u;
-  inline constexpr std::uint32_t subtitle_locator_state_tag = 0x34314C53u;
-  inline constexpr std::uint32_t subtitle_locator_state_word_count = 96u;
-  inline constexpr std::uint32_t subtitle_locator_header_word_count = 32u;
-  inline constexpr std::uint32_t subtitle_locator_rectangle_capacity = 4u;
-  inline constexpr std::uint32_t subtitle_locator_owner_offset = 32u;
-  inline constexpr std::uint32_t subtitle_locator_pending_offset = 48u;
-  inline constexpr std::uint32_t subtitle_locator_current_offset = 64u;
-  inline constexpr std::uint32_t subtitle_locator_adaptive_offset = 80u;
-  inline constexpr std::uint32_t subtitle_locator_adaptive_word_count = 16u;
-  inline constexpr std::uint32_t subtitle_locator_kind_word = 31u;
-  inline constexpr std::uint32_t subtitle_locator_owner_kind_shift = 0u;
-  inline constexpr std::uint32_t subtitle_locator_pending_kind_shift = 4u;
-  inline constexpr std::uint32_t subtitle_locator_current_kind_shift = 8u;
-  inline constexpr std::uint32_t subtitle_locator_kind_mask = 15u;
-  inline constexpr std::uint32_t subtitle_locator_provisional_current_flag = 16u;
-  inline constexpr std::uint32_t subtitle_locator_provisional_target_word = 29u;
-  inline constexpr std::uint32_t subtitle_locator_provisional_fade_word = 30u;
-  inline constexpr std::uint32_t subtitle_condition_param_schema = 3u;
-  inline constexpr std::uint32_t subtitle_condition_param_tag = 0x33504353u;
+  inline constexpr std::uint32_t subtitle_plane_state_schema = 4u;
+  inline constexpr std::uint32_t subtitle_plane_state_word_count = 40u;
+  inline constexpr std::uint32_t subtitle_plane_header_word_count = 24u;
+  inline constexpr std::uint32_t subtitle_plane_cover_capacity = 8u;
+  inline constexpr std::uint32_t subtitle_plane_flags_word = 2u;
+  inline constexpr std::uint32_t subtitle_plane_current_valid_flag = 1u;
+  inline constexpr std::uint32_t subtitle_plane_current_slot_mask_word = 3u;
+  inline constexpr std::uint32_t subtitle_plane_frame_offset = 4u;
+  inline constexpr std::uint32_t subtitle_plane_analysis_generation_offset = 6u;
+  inline constexpr std::uint32_t subtitle_plane_observation_timestamp_offset = 8u;
+  inline constexpr std::uint32_t subtitle_plane_source_extent_offset = 10u;
+  inline constexpr std::uint32_t subtitle_plane_field_extent_offset = 12u;
+  inline constexpr std::uint32_t subtitle_plane_roi_offset = 14u;
+  inline constexpr std::uint32_t subtitle_plane_content_offset = 16u;
+  inline constexpr std::uint32_t subtitle_plane_cut_epoch_word = 20u;
+  // Legacy reset-mask name: current-core probability cues block neighbor fallback only.
+  inline constexpr std::uint32_t subtitle_plane_history_reset_mask_word = 21u;
+  inline constexpr std::uint32_t subtitle_plane_warmup_word = 22u;
+  inline constexpr std::uint32_t subtitle_plane_warmup_observations = 4u;
+  inline constexpr std::uint32_t subtitle_plane_warmup_cue_bit = 8u;
+  inline constexpr std::uint32_t subtitle_plane_warmup_remaining_mask = subtitle_plane_warmup_cue_bit - 1u;
+  inline constexpr std::uint32_t subtitle_plane_reserved_offset = 23u;
+  inline constexpr std::uint32_t subtitle_plane_reserved_word_count = 1u;
+  inline constexpr std::uint32_t subtitle_plane_adaptive_offset = 24u;
+  inline constexpr std::uint32_t subtitle_plane_adaptive_word_count = 16u;
+  inline constexpr std::uint32_t subtitle_plane_state_tag = 0x34504955u;
+  inline constexpr std::uint32_t subtitle_condition_param_schema = 4u;
+  inline constexpr std::uint32_t subtitle_condition_param_tag = 0x34504353u;
   inline constexpr std::uint32_t subtitle_condition_param_word_count = 6u;
+  inline constexpr std::uint32_t subtitle_condition_param_current_count_word = 2u;
+  inline constexpr std::uint32_t subtitle_condition_param_current_kind_mask_word = 3u;
+  inline constexpr std::uint32_t subtitle_condition_param_active_word = 4u;
+  inline constexpr std::uint32_t subtitle_condition_param_fully_active_value = 2u;
+  inline constexpr std::uint32_t subtitle_condition_param_target_word = 5u;
+  static_assert(subtitle_plane_state_schema == 4u && subtitle_plane_state_tag == 0x34504955u);
+  static_assert(subtitle_plane_state_word_count == 40u && subtitle_plane_header_word_count == 24u);
+  static_assert(subtitle_plane_cover_capacity == subtitle_ocr_final_box_capacity);
+  static_assert(subtitle_plane_warmup_word == 22u && subtitle_plane_warmup_observations == 4u && subtitle_plane_warmup_cue_bit == 8u && subtitle_plane_warmup_remaining_mask == 7u);
+  static_assert(subtitle_plane_warmup_observations == subtitle_contour_history_confirmation_observations);
+  static_assert(subtitle_plane_reserved_offset + subtitle_plane_reserved_word_count == subtitle_plane_adaptive_offset);
+  static_assert(subtitle_plane_adaptive_offset == subtitle_plane_header_word_count);
+  static_assert(subtitle_plane_state_word_count == subtitle_plane_adaptive_offset + subtitle_plane_adaptive_word_count);
+  static_assert(subtitle_condition_param_schema == 4u && subtitle_condition_param_word_count == 6u);
+  static_assert(subtitle_condition_param_target_word + 1u == subtitle_condition_param_word_count);
+  static_assert(subtitle_contour_history_reserved_offset == 24u && subtitle_contour_history_reserved_word_count == 8u);
   static_assert(subtitle_ocr_input_n == 1u && subtitle_ocr_input_c == 3u);
   static_assert(subtitle_ocr_output_n == 1u && subtitle_ocr_output_c == 1u);
   static_assert(subtitle_ocr_active_probability_threshold > 0.0f &&
@@ -129,19 +174,6 @@ namespace models::depth_coordinate_v2 {
   static_assert(subtitle_ocr_min_mean_score >
                 subtitle_ocr_active_probability_threshold);
   static_assert(subtitle_ocr_min_mean_score <= 1.0f);
-  static_assert(subtitle_locator_min_width_cells > 0u);
-  static_assert(subtitle_locator_min_height_cells > 0u);
-  static_assert(subtitle_locator_min_aspect_numerator > 0u);
-  static_assert(subtitle_locator_min_aspect_denominator > 0u);
-  static_assert(subtitle_locator_provisional_min_vertical_overlap_numerator > 0u);
-  static_assert(subtitle_locator_provisional_min_vertical_overlap_denominator >=                 subtitle_locator_provisional_min_vertical_overlap_numerator);
-  static_assert(subtitle_locator_provisional_max_height_ratio >= 1u);
-  static_assert(subtitle_locator_provisional_max_center_y_delta_shorter_height >= 1u);
-  static_assert(subtitle_locator_corner_edge_divisor > 1u);
-  static_assert(subtitle_locator_corner_bottom_rows > 0u);
-  static_assert(subtitle_locator_match_iou_threshold > 0.0f &&
-                subtitle_locator_match_iou_threshold <= 1.0f);
-  static_assert(subtitle_locator_death_grace_observations > 0u);
   static_assert(subtitle_ocr_text_join_gap_cells > 0u);
   static_assert(subtitle_ocr_text_join_gap_cells <
                 subtitle_ocr_ribbon_join_gap_cells);
@@ -153,14 +185,6 @@ namespace models::depth_coordinate_v2 {
                 subtitle_ocr_raw_box_capacity * subtitle_ocr_box_word_count);
   static_assert(subtitle_ocr_record_word_count == subtitle_ocr_final_box_offset +
                 subtitle_ocr_final_box_capacity * subtitle_ocr_box_word_count);
-  static_assert(subtitle_locator_pending_offset == subtitle_locator_owner_offset +
-                subtitle_locator_rectangle_capacity * 4u);
-  static_assert(subtitle_locator_current_offset == subtitle_locator_pending_offset +
-                subtitle_locator_rectangle_capacity * 4u);
-  static_assert(subtitle_locator_adaptive_offset == subtitle_locator_current_offset +
-                subtitle_locator_rectangle_capacity * 4u);
-  static_assert(subtitle_locator_state_word_count == subtitle_locator_adaptive_offset +
-                subtitle_locator_adaptive_word_count);
   static_assert(subtitle_condition_param_word_count == 6u);
   inline constexpr std::uint32_t shader_source_closure_schema =
     host_sbs_shader_cache::source_closure_schema;
@@ -323,7 +347,7 @@ namespace models::depth_coordinate_v2 {
     {{868u, 1960u}},
   }};
 
-  constexpr std::uint32_t subtitle_locator_field_cell_scale(
+  constexpr std::uint32_t subtitle_ocr_field_cell_scale(
     const std::uint32_t width,
     const std::uint32_t height
   ) {
@@ -344,7 +368,7 @@ namespace models::depth_coordinate_v2 {
     const std::uint32_t width,
     const std::uint32_t height
   ) {
-    return subtitle_locator_field_cell_scale(width, height) != 0u;
+    return subtitle_ocr_field_cell_scale(width, height) != 0u;
   }
 
   struct subtitle_ocr_roi_t {

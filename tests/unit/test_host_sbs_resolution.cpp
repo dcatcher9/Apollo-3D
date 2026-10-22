@@ -6,6 +6,7 @@
 
 #include <array>
 #include <cstdint>
+#include <limits>
 #include <src/host_sbs_resolution.h>
 
 TEST(HostSbsResolutionTest, EveryStandardMoonlight3dChoiceMapsToAuthenticatedShape) {
@@ -350,5 +351,123 @@ TEST(HostSbsResolutionTest, RejectsInvalidGeometryAndUnauthenticatedTensorOnly) 
   ));
   EXPECT_FALSE(models::plan_host_sbs_v2_video_region(
     {0u, 0u, 1920u, 1080u}, 3840u, 2160u, {1008, 434}
+  ));
+}
+
+TEST(HostSbsResolutionTest, SubtitleLineReferenceUsesVideoRoiCenterAndLowerQuarter) {
+  constexpr auto reference = models::subtitle_ocr_line_reference(
+    2536u, 1427u, 3840u, 2160u, 277u, 415u, true
+  );
+  static_assert(reference.has_value());
+  EXPECT_EQ(*reference, (models::subtitle_ocr_line_reference_t {2536, 2536u, 1070}));
+}
+
+TEST(HostSbsResolutionTest, FullscreenSubtitleLineReferencesAgreeWithVideoRoi) {
+  constexpr auto screen = models::subtitle_ocr_line_reference(
+    1920u, 1080u, 1920u, 1080u, 0u, 0u, false
+  );
+  constexpr auto video = models::subtitle_ocr_line_reference(
+    1920u, 1080u, 1920u, 1080u, 0u, 0u, true
+  );
+  static_assert(screen && video && *screen == *video);
+  EXPECT_EQ(*screen, (models::subtitle_ocr_line_reference_t {1920, 1920u, 810}));
+}
+
+TEST(HostSbsResolutionTest, ForegroundSubtitleReferencePreservesTranslatedScreenCoordinates) {
+  const auto reference = models::subtitle_ocr_line_reference(
+    2536u, 1427u, 3840u, 2160u, 277u, 415u, false
+  );
+  ASSERT_TRUE(reference);
+  EXPECT_EQ(*reference, (models::subtitle_ocr_line_reference_t {3286, 3840u, 1205}));
+
+  const auto negative = models::subtitle_ocr_line_reference(
+    500u, 160u, 3840u, 2160u, 3000u, 2000u, false
+  );
+  ASSERT_TRUE(negative);
+  EXPECT_EQ(*negative, (models::subtitle_ocr_line_reference_t {-2160, 3840u, -380}));
+}
+
+TEST(HostSbsResolutionTest, SubtitleLineReferenceDoesNotRecenterWindowOutsideScreenLowerQuarter) {
+  const auto reference = models::subtitle_ocr_line_reference(
+    100u, 100u, 3840u, 2160u, 100u, 100u, false
+  );
+  ASSERT_TRUE(reference);
+  EXPECT_EQ(*reference, (models::subtitle_ocr_line_reference_t {3640, 3840u, 1520}));
+  EXPECT_GT(reference->search_top_source, 100);
+}
+
+TEST(HostSbsResolutionTest, SubtitleLineReferenceRoundsQuarterHeightUpForOddNativeHeight) {
+  constexpr std::array heights {1u, 2u, 3u, 4u, 5u, 1081u, 1083u};
+  constexpr std::array expected_tops {0, 1, 2, 3, 3, 810, 812};
+  for (std::size_t index = 0u; index < heights.size(); ++index) {
+    const auto reference = models::subtitle_ocr_line_reference(
+      1920u, heights[index], 1920u, heights[index], 0u, 0u, false
+    );
+    ASSERT_TRUE(reference);
+    EXPECT_EQ(reference->search_top_source, expected_tops[index]);
+  }
+}
+
+TEST(HostSbsResolutionTest, SubtitleLineReferenceRejectsEmptyOutsideOverflowAndUnrepresentableBounds) {
+  struct case_t {
+    std::uint32_t analysis_width, analysis_height, capture_width, capture_height;
+    std::uint32_t left, top;
+    bool video;
+  };
+  constexpr auto maximum = std::numeric_limits<std::uint32_t>::max();
+  constexpr std::array cases {
+    case_t {0u, 100u, 1920u, 1080u, 0u, 0u, false},
+    case_t {100u, 0u, 1920u, 1080u, 0u, 0u, true},
+    case_t {100u, 100u, 0u, 1080u, 0u, 0u, false},
+    case_t {100u, 100u, 1920u, 0u, 0u, 0u, true},
+    case_t {100u, 100u, 1920u, 1080u, 1821u, 0u, false},
+    case_t {100u, 100u, 1920u, 1080u, 0u, 981u, true},
+    case_t {100u, 100u, maximum, maximum, maximum, 0u, false},
+    case_t {100u, 100u, maximum, maximum, 0u, maximum, true},
+    case_t {100u, 100u, maximum, 1080u, 0u, 0u, false},
+    case_t {100u, 100u, 1920u, maximum, 0u, 0u, false},
+    case_t {maximum, 100u, maximum, 1080u, 0u, 0u, true},
+  };
+  for (const auto &test_case : cases) {
+    EXPECT_FALSE(models::subtitle_ocr_line_reference(
+      test_case.analysis_width, test_case.analysis_height,
+      test_case.capture_width, test_case.capture_height,
+      test_case.left, test_case.top, test_case.video
+    ));
+  }
+}
+
+TEST(HostSbsResolutionTest, SubtitleLineReferenceSharesNativeExtentBoundWithoutLimitingValidVideoRoiCapture) {
+  constexpr auto maximum = models::depth_coordinate_v2::subtitle_contour_source_max_extent;
+  const auto supported = models::subtitle_ocr_line_reference(
+    maximum, 2160u, maximum, 2160u, 0u, 0u, false
+  );
+  ASSERT_TRUE(supported);
+  EXPECT_EQ(supported->width, maximum);
+  EXPECT_FALSE(models::subtitle_ocr_line_reference(
+    maximum + 1u, 2160u, maximum + 1u, 2160u, 0u, 0u, true
+  ));
+  EXPECT_FALSE(models::subtitle_ocr_line_reference(
+    1920u, maximum + 1u, 3840u, maximum + 1u, 0u, 0u, true
+  ));
+  EXPECT_FALSE(models::subtitle_ocr_line_reference(
+    1920u, 1080u, maximum + 1u, 2160u, 0u, 0u, false
+  ));
+  const auto video = models::subtitle_ocr_line_reference(
+    1920u, 1080u, maximum + 1u, 2160u, 0u, 0u, true
+  );
+  ASSERT_TRUE(video);
+  EXPECT_EQ(video->width, 1920u);
+}
+
+TEST(HostSbsResolutionTest, SubtitleLineReferenceRejectsSearchTranslationOutsideNativeBound) {
+  EXPECT_TRUE(models::subtitle_ocr_line_reference(
+    100u, 100u, 1920u, 6827u, 0u, 0u, false
+  ));
+  EXPECT_FALSE(models::subtitle_ocr_line_reference(
+    100u, 100u, 1920u, 6828u, 0u, 0u, false
+  ));
+  EXPECT_FALSE(models::subtitle_ocr_line_reference(
+    100u, 100u, 1920u, 30000u, 0u, 29900u, false
   ));
 }

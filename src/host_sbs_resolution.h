@@ -361,6 +361,62 @@ namespace models {
     return static_cast<std::uint32_t>(std::min<std::uint64_t>(requested, source_height));
   }
 
+  /** Subtitle eligibility reference, expressed in native analysis-source coordinates. */
+  struct subtitle_ocr_line_reference_t {
+    std::int32_t center_twice_source = 0;
+    std::uint32_t width = 0u;
+    std::int32_t search_top_source = 0;
+
+    constexpr bool operator==(const subtitle_ocr_line_reference_t &) const = default;
+  };
+
+  /** Use a video ROI when present; otherwise preserve full-screen center and lower quarter. */
+  inline constexpr std::optional<subtitle_ocr_line_reference_t> subtitle_ocr_line_reference(
+    const std::uint32_t analysis_width,
+    const std::uint32_t analysis_height,
+    const std::uint32_t capture_width,
+    const std::uint32_t capture_height,
+    const std::uint32_t analysis_left,
+    const std::uint32_t analysis_top,
+    const bool video_roi
+  ) noexcept {
+    constexpr auto maximum_extent = depth_coordinate_v2::subtitle_contour_source_max_extent;
+    if (analysis_width == 0u || analysis_height == 0u ||
+        analysis_width > maximum_extent || analysis_height > maximum_extent ||
+        capture_width == 0u || capture_height == 0u ||
+        static_cast<std::uint64_t>(analysis_left) + analysis_width > capture_width ||
+        static_cast<std::uint64_t>(analysis_top) + analysis_height > capture_height) {
+      return std::nullopt;
+    }
+    const auto reference_width = video_roi ? analysis_width : capture_width;
+    const auto reference_height = video_roi ? analysis_height : capture_height;
+    if (reference_width > maximum_extent) {
+      return std::nullopt;
+    }
+    const auto lower_height = depth_coordinate_v2::subtitle_ocr_ceil_div(
+      static_cast<std::uint64_t>(reference_height) *
+        depth_coordinate_v2::subtitle_ocr_line_search_bottom_height_numerator,
+      depth_coordinate_v2::subtitle_ocr_line_search_bottom_height_denominator
+    );
+    const auto center_twice = video_roi ? static_cast<std::int64_t>(analysis_width) :
+      static_cast<std::int64_t>(capture_width) - 2 * static_cast<std::int64_t>(analysis_left);
+    const auto search_top = static_cast<std::int64_t>(reference_height) -
+      static_cast<std::int64_t>(lower_height) -
+      (video_roi ? 0 : static_cast<std::int64_t>(analysis_top));
+    if (center_twice < std::numeric_limits<std::int32_t>::min() ||
+        center_twice > std::numeric_limits<std::int32_t>::max() ||
+        search_top < std::numeric_limits<std::int32_t>::min() ||
+        search_top > std::numeric_limits<std::int32_t>::max() ||
+        search_top < -static_cast<std::int64_t>(maximum_extent) ||
+        search_top > static_cast<std::int64_t>(maximum_extent)) {
+      return std::nullopt;
+    }
+    return subtitle_ocr_line_reference_t {
+      static_cast<std::int32_t>(center_twice), reference_width,
+      static_cast<std::int32_t>(search_top),
+    };
+  }
+
   /** Fit the exact source tensor requested by the fixed live Host SBS V2 calibration. */
   inline depth_tensor_shape_t fit_host_sbs_v2_depth_tensor_shape(
     const std::uint32_t source_width,

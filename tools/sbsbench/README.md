@@ -83,6 +83,28 @@ long-form temporal behavior. Native raw/field/cache replay uses its own existing
 Host SBS has one adaptive zero/scale and subtitle UI-plane pipeline; the former experiment/mode
 selectors are rejected before launch.
 
+For bounded subtitle research, ordinary evaluation can use
+`--subtitle-plane-diagnostics --subtitle-plane-diagnostic-frames 61-78,111-121,143-146`
+with an explicit observation timeline. The ordered, disjoint ranges select one-based input
+observations independently of `--output-every`; every input still advances the real estimator.
+The selected diagnostic manifest records processed observations, captured snapshots and rendered
+outputs separately. The current manifest is schema2 and per-frame metadata schema3. These synchronous
+internal snapshots are research evidence, not live timing
+or a complete per-frame render capture. Without the range selector, subtitle diagnostics retain
+their full-cadence output contract.
+
+Add `--subtitle-plane-diagnostic-render-selected` to save actual stereo output for every
+selected observation as well as the regular output cadence. This option requires the range
+selector and records `diagnostic_render_selected` in the manifest. It increases stored outputs;
+it does not change estimator processing or live rendering. Keep the selection bounded.
+
+To diagnose an unavailable OCR record, add `--ocr-working-diagnostics`. This requires subtitle
+diagnostics and an explicit observation timeline, and writes a separate `ocr-working` directory.
+The probability, cell, native source-band, transaction and resolve-constant resources are mutable
+working data copied synchronously after the exact joined completion. They are research inputs;
+the raw transaction must prove current optional OCR execution before interpreting P/cells/RGB.
+They do not replace the completed subtitle snapshots or authorize rendering.
+
 ### Adaptive infer/reuse A/B without a headset
 
 Use the maintained adaptive replay when a bug may depend on DAV2's private device decision. One
@@ -101,10 +123,10 @@ first requires and verifies the current `sunshine` target, then binds the execut
 runtime shader tree, production composite
 engine/ONNX, OCR engine/contract ONNX, and generated coordinate contract across both serial legs.
 The default gate requires at least one actual reuse and proves that every reuse retained the
-preceding fused `refined_depth`, SLR14 locator state, condition parameters and
+preceding fused `refined_depth`, UIP4 source/controller state, condition parameters and
 `final_parallax_<frame-id>.f32` bit-exactly. Native geometry replay authenticates the paired source
 snapshot hash but receives no source texture, color mode or HDR scale. Every reuse holds the whole
-depth/OCR/SLR/final tuple; only valid infer publishes current OCR or abstention. The runner derives
+depth/OCR/UIP4/final tuple; only valid infer publishes current OCR or abstention. The runner derives
 GPU history-owner age from frame identity and the exact source-observation timeline, not processing
 speed or a host baseline delta. Reuse preserves the actual infer owner. Every infer raw field must
 match the same-frame force control.
@@ -131,7 +153,7 @@ retained-source idle delivery, or encode-deadline scheduling. Those remain live 
 Request formation, bounded nonblocking completion receipts, known actual-owner lineage, estimator, conditioner, renderer and
 GPU trace are the same
 production code, so the offline path does not maintain a second infer/reuse state machine.
-The runner uses private replay harness schemas 29 (force oracle) and 28 (conditional treatment),
+The runner uses private replay harness schemas 31 (force oracle) and 30 (conditional treatment),
 plus metadata schema 3, leaving formal `run_eval.py` schema 22 and its baseline evidence untouched.
 Formal old-code/new-code reports use `--report-allow-executable-diff` (or the report launcher's
 `--allow-executable-diff`) for the binary and HLSL difference. Each run still authenticates its source,
@@ -147,8 +169,8 @@ unrecognized historical options fail argument parsing.
 
 ### Current subtitle authority
 
-The current dump reader accepts the authenticated OCR8 record and compact SLR14 locator state as
-the only live subtitle authority. Retired SLR3--SLR9, GST/OGR/ORS, and offline overlay-detector
+The current dump reader accepts the authenticated OCR8 record, 40-word UIP4 source/controller state and
+complete joined native contour tuple as live subtitle authority. Retired SLR3--SLR9, GST/OGR/ORS, and offline overlay-detector
 paths are not accepted as live or replay authority.
 
 ## Reports and comparisons
@@ -192,22 +214,28 @@ captures directly with:
 ```
 
 See [Dump and replay format](DUMP_FORMAT.md) before generating or interpreting preview PNGs. The
-reader accepts only the current SLR14/OCR8 dump schema; older experimental captures are
-intentionally unsupported. An active schema-44 package authenticates the OCR8/SLR14 tuple for the
+reader accepts only the current UIP4/OCR8 dump schema; older experimental captures are
+intentionally unsupported. An active schema-49 package authenticates the OCR8/UIP4/contour tuple for the
 atomic final field's publication frame, ordinary Base, conditioned final field, and the resolver's
-current-cover conflict histogram and source-time plane controller. It replays SLR14 directly into
-`shadow_final_parallax.f32`, which is authenticated once as both the atomic final field and warp
+current-cover conflict histogram and source-time plane controller. It independently validates
+native support projection and the weighted distance collar into `shadow_final_parallax.f32`, which is authenticated once as both the atomic final field and warp
 input. An
-active resolver also authenticates the strict symmetric bottom-corner ordinary-core qualification
-and its ribbon exemption. An inactive package uses the one canonical `none` descriptor.
+active resolver authenticates all admitted current OCR8 paired covers without a second
+geometry selection. Per-pixel RGB history survives cover count/order/split/merge changes. An inactive package uses the one canonical `none` descriptor.
 
-Current schema-44 window-region packages preserve the complete authorized source rectangle at any
+The current OCR producer's centered-line eligibility and source-reference selection are defined in
+the [Host SBS owner contract](../../docs/host-sbs.md#native-subtitle-contours-and-ui-plane).
+Eligibility does not replace the existing confirmed-pixel Gaussian protection with a line rectangle.
+During cue-held warmup, current OCR covers also contribute to the Gaussian protection until four
+consecutive cue-free genuine observations; mature protection uses confirmed pixels.
+
+Current schema-49 window-region packages preserve the complete authorized source rectangle at any
 aspect ratio. `depth_input_region.json` schema 4 records the centered integer content rectangle in
 the fixed DAV2 tensor and its edge-replicated excluded padding. Quantitative consumers must use
-that content width for limiter and SLR14 steps and must project OCR/SLR geometry only into that
+that content width for limiter and UI-plane steps and must project current OCR cover geometry only into that
 content rectangle; treating the whole tensor as real source pixels is rejected.
 
-Schema 44 packages no scalar/heat preview PNGs or redundant per-field shape sidecars. Generate a
+Schema 49 packages no scalar/heat preview PNGs or redundant per-field shape sidecars. Generate a
 verified diagnostic view from any retained authenticated `.f32` artifact outside the package:
 
 ```powershell

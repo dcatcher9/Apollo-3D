@@ -32,6 +32,7 @@
   #include <src/generated/depth_coordinate_v2_contract.h>
   #include <src/depth_coordinate_v2.h>
   #include <src/host_sbs_gpu_trace.h>
+  #include <src/host_sbs_subtitle_plane.h>
   #include <src/host_sbs_shader_cache.h>
   #include <src/platform/windows/sbs_debug_dump.h>
   #include <src/platform/windows/sbs_debug_dump_async.h>
@@ -48,6 +49,13 @@ namespace {
   std::vector<std::uint8_t> word_bytes(const std::array<std::uint32_t, WordCount> &words) {
     std::vector<std::uint8_t> bytes(sizeof(words));
     std::memcpy(bytes.data(), words.data(), sizeof(words));
+    return bytes;
+  }
+
+  std::vector<std::uint8_t> repeated_word_bytes(const std::uint32_t value, const std::size_t count) {
+    const std::vector<std::uint32_t> words(count, value);
+    std::vector<std::uint8_t> bytes(count * sizeof(value));
+    std::memcpy(bytes.data(), words.data(), bytes.size());
     return bytes;
   }
 
@@ -75,6 +83,7 @@ namespace {
     frame.field_height = 434;
     frame.field_content = content;
     frame.matched_frame_id = 41u;
+    frame.matched_observation_timestamp_us = 1'000'000u + frame.matched_frame_id;
     frame.parallax_v2_requested_gain = v2::requested_gain_for_config(1.0f);
     frame.depth_input_region = {
       .source_width = 3840u,
@@ -100,6 +109,7 @@ namespace {
     frame.field_height = 434;
     frame.field_content = {0u, 0u, 770u, 434u};
     frame.matched_frame_id = 41u;
+    frame.matched_observation_timestamp_us = 1'000'000u + frame.matched_frame_id;
     frame.parallax_v2_requested_gain = v2::requested_gain_for_config(1.0f);
     frame.color_space = models::input_color_space::srgb;
     frame.depth_input_region = {
@@ -116,13 +126,52 @@ namespace {
     return frame;
   }
 
+  models::host_sbs_subtitle_plane::words_t current_subtitle_plane(
+    const platf::sbs_debug::frame &frame, const std::uint32_t count,
+    const bool current_valid = true, const float target = 0.001f
+  ) {
+    models::host_sbs_subtitle_plane::words_t words {};
+    const auto geometry = models::fit_subtitle_analysis_geometry(
+      frame.depth_input_region.width(), frame.depth_input_region.height(),
+      {frame.field_width, frame.field_height}, frame.field_content);
+    words[0u] = v2::subtitle_plane_state_schema;
+    words[1u] = v2::subtitle_plane_state_tag;
+    words[v2::subtitle_plane_flags_word] = current_valid ? v2::subtitle_plane_current_valid_flag : 0u;
+    words[v2::subtitle_plane_current_slot_mask_word] = current_valid ? (1u << count) - 1u : 0u;
+    const auto put64 = [&words](const std::size_t index, const std::uint64_t value) {
+      words[index] = static_cast<std::uint32_t>(value);
+      words[index + 1u] = static_cast<std::uint32_t>(value >> 32u);
+    };
+    put64(v2::subtitle_plane_frame_offset, frame.matched_frame_id);
+    put64(v2::subtitle_plane_analysis_generation_offset, frame.depth_input_region.analysis_generation);
+    put64(v2::subtitle_plane_observation_timestamp_offset, frame.matched_observation_timestamp_us);
+    words[v2::subtitle_plane_source_extent_offset] = frame.depth_input_region.width();
+    words[v2::subtitle_plane_source_extent_offset + 1u] = frame.depth_input_region.height();
+    words[v2::subtitle_plane_field_extent_offset] = static_cast<std::uint32_t>(frame.field_width);
+    words[v2::subtitle_plane_field_extent_offset + 1u] = static_cast<std::uint32_t>(frame.field_height);
+    words[v2::subtitle_plane_roi_offset] = geometry.roi_top;
+    words[v2::subtitle_plane_roi_offset + 1u] = geometry.roi_bottom;
+    words[v2::subtitle_plane_content_offset] = frame.field_content.left;
+    words[v2::subtitle_plane_content_offset + 1u] = frame.field_content.top;
+    words[v2::subtitle_plane_content_offset + 2u] = frame.field_content.right;
+    words[v2::subtitle_plane_content_offset + 3u] = frame.field_content.bottom;
+    words[v2::subtitle_plane_cut_epoch_word] = subtitle_scene_epoch;
+    const auto a = v2::subtitle_plane_adaptive_offset;
+    words[a] = 1u; words[a + 1u] = 8u;
+    words[a + 3u] = std::bit_cast<std::uint32_t>(target);
+    put64(a + 4u, frame.matched_observation_timestamp_us);
+    words[a + 12u] = std::bit_cast<std::uint32_t>(v2::display_budget());
+    return words;
+  }
+
   std::vector<std::uint8_t> canonical_gpu_trace_ring(
     const platf::sbs_debug::frame &frame,
     const gpu_trace::submission_class_e submission_class =
       gpu_trace::submission_class_e::force_infer,
     const cuda_conditional_graph::branch_e branch =
       cuda_conditional_graph::branch_e::infer,
-    const bool label_authenticated_depth = true
+    const bool label_authenticated_depth = true,
+    const bool optional_child_present = true
   ) {
     std::vector<std::uint32_t> words(gpu_trace::ring_word_count, 0u);
     words[gpu_trace::word_index(gpu_trace::header_word_e::schema)] =
@@ -143,11 +192,11 @@ namespace {
     };
     constexpr std::uint64_t token = 0x1020304050607080ull;
     const auto request = cuda_conditional_graph::make_request(
-      token, cuda_conditional_graph::work_flag_e::subtitle_observation
+      token, cuda_conditional_graph::work_flag_e::optional_ocr
     );
     const auto proposal = cuda_conditional_graph::make_proposal(branch, token);
     const auto receipt = cuda_conditional_graph::resolve_proposal(
-      proposal, request, false
+      proposal, request, optional_child_present
     );
     set(gpu_trace::record_word_e::schema, gpu_trace::ring_schema);
     set(gpu_trace::record_word_e::commit_tag, gpu_trace::record_tag);
@@ -185,16 +234,19 @@ namespace {
                                     static_cast<std::uint32_t>(gpu_trace::depth_disposition_e::reuse));
     set(gpu_trace::record_word_e::expected_work,
         cuda_conditional_graph::work_flags_value(
-          cuda_conditional_graph::work_flag_e::subtitle_observation));
+          cuda_conditional_graph::work_flag_e::optional_ocr));
     const bool branch_gated =
       submission_class == gpu_trace::submission_class_e::gpu_undecided;
     const bool subtitle_held =
       branch_gated && branch == cuda_conditional_graph::branch_e::reuse;
+    const bool subtitle_current =
+      branch == cuda_conditional_graph::branch_e::infer && optional_child_present;
     set(
       gpu_trace::record_word_e::subtitle_disposition,
       static_cast<std::uint32_t>(
         subtitle_held ? gpu_trace::subtitle_disposition_e::held_with_depth :
-                        gpu_trace::subtitle_disposition_e::abstention
+        subtitle_current ? gpu_trace::subtitle_disposition_e::optional_ocr :
+                           gpu_trace::subtitle_disposition_e::abstention
       )
     );
     const auto flags =
@@ -228,47 +280,26 @@ namespace {
     );
     const auto locator =
       base + gpu_trace::word_index(gpu_trace::record_word_e::subtitle_locator_begin);
-    constexpr std::uint32_t owner_generation = 1u;
+    auto publication = frame;
+    if (subtitle_held) {
+      --publication.matched_frame_id;
+      --publication.matched_observation_timestamp_us;
+    }
     const auto target = std::bit_cast<std::uint32_t>(0.01f);
-    words[locator + 0u] = v2::subtitle_locator_state_schema;
-    words[locator + 1u] = v2::subtitle_locator_state_tag;
-    words[locator + 2u] = 1u | 4u;
-    words[locator + 3u] = owner_generation;
-    words[locator + 4u] = 1u;
-    words[locator + 10u] = static_cast<std::uint32_t>(
-      frame.depth_input_region.analysis_generation
-    );
-    words[locator + 11u] = static_cast<std::uint32_t>(
-      frame.depth_input_region.analysis_generation >> 32u
-    );
-    words[locator + 18u] = target;
-    words[locator + 19u] = owner_generation;
-    words[locator + 20u] = 1u;
-    words[locator + 21u] = 1u;
-    const auto locator_frame_id =
-      subtitle_held ? frame.matched_frame_id - 1u : frame.matched_frame_id;
-    words[locator + 22u] = static_cast<std::uint32_t>(locator_frame_id);
-    words[locator + 23u] = static_cast<std::uint32_t>(locator_frame_id >> 32u);
-    words[locator + 24u] = 2u;
-    words[locator + 26u] = subtitle_scene_epoch;
-    words[locator + 27u] = static_cast<std::uint32_t>(frame.field_width);
-    words[locator + 28u] = static_cast<std::uint32_t>(frame.field_height);
-    const auto condition =
-      base + gpu_trace::word_index(gpu_trace::record_word_e::subtitle_condition_begin);
-    words[condition + 0u] = v2::subtitle_condition_param_schema;
+    const auto plane = current_subtitle_plane(
+      publication, subtitle_current || subtitle_held ? 1u : 0u,
+      subtitle_current || subtitle_held, 0.01f);
+    std::copy(plane.begin(), plane.end(), words.begin() + locator);
+    const auto condition = base + gpu_trace::word_index(gpu_trace::record_word_e::subtitle_condition_begin);
+    words[condition] = v2::subtitle_condition_param_schema;
     words[condition + 1u] = v2::subtitle_condition_param_tag;
-    words[condition + 2u] = 1u;
-    words[condition + 4u] = 2u;
-    words[condition + 5u] = target;
-    const auto observation_timestamp_us = 1'000'000u + frame.matched_frame_id;
-    set(gpu_trace::record_word_e::observation_timestamp_low, static_cast<std::uint32_t>(observation_timestamp_us));
-    set(gpu_trace::record_word_e::observation_timestamp_high, static_cast<std::uint32_t>(observation_timestamp_us >> 32u));
-    constexpr auto adaptive = v2::subtitle_locator_adaptive_offset;
-    words[locator + adaptive] = 1u;
-    words[locator + adaptive + 1u] = 8u;
-    words[locator + adaptive + 3u] = target;
-    words[locator + adaptive + 4u] = 1u;
-    words[locator + adaptive + 12u] = std::bit_cast<std::uint32_t>(v2::display_budget());
+    if (subtitle_current || subtitle_held) {
+      words[condition + 2u] = 1u;
+      words[condition + 4u] = v2::subtitle_condition_param_fully_active_value;
+      words[condition + 5u] = target;
+    }
+    set(gpu_trace::record_word_e::observation_timestamp_low, static_cast<std::uint32_t>(frame.matched_observation_timestamp_us));
+    set(gpu_trace::record_word_e::observation_timestamp_high, static_cast<std::uint32_t>(frame.matched_observation_timestamp_us >> 32u));
 
     std::vector<std::uint8_t> bytes(words.size() * sizeof(std::uint32_t));
     std::memcpy(bytes.data(), words.data(), bytes.size());
@@ -316,15 +347,6 @@ namespace {
 
   using subtitle_rect_t = std::array<std::uint32_t, 4>;
 
-  void seed_adaptive_ui_tail(std::array<std::uint32_t, v2::subtitle_locator_state_word_count> &words) {
-    constexpr auto adaptive = v2::subtitle_locator_adaptive_offset;
-    words[adaptive] = 1u;
-    words[adaptive + 1u] = 8u;
-    words[adaptive + 3u] = words[18u];
-    words[adaptive + 4u] = 1u;
-    words[adaptive + 12u] = std::bit_cast<std::uint32_t>(v2::display_budget());
-  }
-
   void store_ocr_pair(
     std::array<std::uint32_t, v2::subtitle_ocr_record_word_count> &words,
     const std::uint32_t slot,
@@ -346,79 +368,95 @@ namespace {
     std::copy_n(words.begin() + raw + 4u, 4u, words.begin() + final + 4u);
   }
 
-  std::array<std::uint32_t, v2::subtitle_locator_state_word_count>
-  two_line_subtitle_state(
+  models::host_sbs_subtitle_plane::words_t two_line_subtitle_state(
     const platf::sbs_debug::frame &frame,
-    const subtitle_rect_t first,
-    const subtitle_rect_t second
+    const subtitle_rect_t first, const subtitle_rect_t second
   ) {
-    std::array<std::uint32_t, v2::subtitle_locator_state_word_count> words {};
-    constexpr std::uint32_t owner_generation = 9u;
-    words[0u] = v2::subtitle_locator_state_schema;
-    words[1u] = v2::subtitle_locator_state_tag;
-    words[2u] = 1u | 4u;
-    words[3u] = owner_generation;
-    words[4u] = 2u;
-    words[5u] = std::min(first[0], second[0]);
-    words[6u] = std::min(first[1], second[1]);
-    words[7u] = std::max(first[2], second[2]);
-    words[8u] = std::max(first[3], second[3]);
-    words[9u] = (first[2] - first[0]) * (first[3] - first[1]) +
-                (second[2] - second[0]) * (second[3] - second[1]);
-    words[10u] = static_cast<std::uint32_t>(frame.depth_input_region.analysis_generation);
-    words[11u] = static_cast<std::uint32_t>(
-      frame.depth_input_region.analysis_generation >> 32u
-    );
-    words[18u] = std::bit_cast<std::uint32_t>(
-      4.0f / (2.0f * static_cast<float>(frame.depth_input_region.width()))
-    );
-    words[19u] = owner_generation;
-    words[20u] = 2u;
-    words[21u] = 1u;
-    words[22u] = static_cast<std::uint32_t>(frame.matched_frame_id);
-    words[23u] = static_cast<std::uint32_t>(frame.matched_frame_id >> 32u);
-    words[24u] = 2u;
-    words[26u] = subtitle_scene_epoch;
-    words[27u] = static_cast<std::uint32_t>(frame.field_width);
-    words[28u] = static_cast<std::uint32_t>(frame.field_height);
-    for (std::size_t index = 0u; index < first.size(); ++index) {
-      words[v2::subtitle_locator_owner_offset + index] = first[index];
-      words[v2::subtitle_locator_owner_offset + 4u + index] = second[index];
-      words[v2::subtitle_locator_current_offset + index] = first[index];
-      words[v2::subtitle_locator_current_offset + 4u + index] = second[index];
-    }
-    seed_adaptive_ui_tail(words);
+    auto words = current_subtitle_plane(frame, 2u);
+    const auto overlap_width = std::max(0, static_cast<int>(std::min(first[2u], second[2u])) - static_cast<int>(std::max(first[0u], second[0u])));
+    const auto overlap_height = std::max(0, static_cast<int>(std::min(first[3u], second[3u])) - static_cast<int>(std::max(first[1u], second[1u])));
+    words[v2::subtitle_plane_adaptive_offset + 13u] =
+      (first[2u] - first[0u]) * (first[3u] - first[1u]) +
+      (second[2u] - second[0u]) * (second[3u] - second[1u]) -
+      static_cast<std::uint32_t>(overlap_width * overlap_height);
     return words;
   }
 
-  std::array<std::uint32_t, v2::subtitle_locator_state_word_count> cached_grace_state(
-    const platf::sbs_debug::frame &frame,
-    const models::subtitle_analysis_geometry_t geometry,
-    const std::uint32_t grace
+  struct contour_dump_fixture {
+    platf::sbs_debug::frame completed;
+    std::array<std::uint32_t, v2::subtitle_ocr_record_word_count> ocr;
+    std::array<std::uint32_t, v2::subtitle_plane_state_word_count> locator;
+    std::array<std::uint32_t, v2::subtitle_contour_history_word_count> identity {};
+    std::vector<float> state;
+  };
+
+  contour_dump_fixture current_contour_dump_fixture(
+    const std::uint32_t first_width = 240u,
+    const std::uint32_t second_width = 240u
   ) {
-    std::array<std::uint32_t, v2::subtitle_locator_state_word_count> words {};
-    words[0] = v2::subtitle_locator_state_schema;
-    words[1] = v2::subtitle_locator_state_tag;
-    words[10] = static_cast<std::uint32_t>(frame.depth_input_region.analysis_generation);
-    words[11] = static_cast<std::uint32_t>(
-      frame.depth_input_region.analysis_generation >> 32u
-    );
-    words[18] = std::bit_cast<std::uint32_t>(
-      4.0f / (2.0f * static_cast<float>(frame.depth_input_region.width()))
-    );
-    words[22] = static_cast<std::uint32_t>(frame.matched_frame_id);
-    words[23] = static_cast<std::uint32_t>(frame.matched_frame_id >> 32u);
-    words[25] = grace;
-    words[26] = subtitle_scene_epoch;
-    words[27] = static_cast<std::uint32_t>(frame.field_width);
-    words[28] = static_cast<std::uint32_t>(frame.field_height);
-    constexpr std::uint32_t left = 120u;
-    constexpr std::uint32_t right = 650u;
-    const std::uint32_t top = geometry.roi_top + 1u;
-    const std::uint32_t bottom = geometry.roi_bottom - 1u;
-    words[29] = left | (right << 16u);
-    words[30] = top | (bottom << 16u);
-    return words;
+    contour_dump_fixture fixture;
+    auto &completed = fixture.completed;
+    completed = subtitle_frame({24u, 0u, 746u, 434u}, 1280u, 720u);
+    completed.matched_frame_id = 0x200000041ull;
+    completed.matched_observation_timestamp_us = 0x300000001ull;
+    completed.depth_input_region.analysis_generation = 0x400000011ull;
+    const auto geometry = models::fit_subtitle_analysis_geometry(
+      completed.depth_input_region.width(), completed.depth_input_region.height(),
+      {completed.field_width, completed.field_height}, completed.field_content);
+    const subtitle_rect_t first {120u, geometry.roi_top + 2u, 120u + first_width, geometry.roi_bottom - 4u};
+    const subtitle_rect_t second {450u, geometry.roi_top + 3u, 450u + second_width, geometry.roi_bottom - 3u};
+    fixture.ocr = empty_ocr(completed, geometry);
+    fixture.ocr[2u] = 1u;
+    fixture.ocr[3u] = fixture.ocr[4u] = 2u;
+    store_ocr_pair(fixture.ocr, 0u, first, first);
+    store_ocr_pair(fixture.ocr, 1u, second, second);
+    fixture.locator = two_line_subtitle_state(completed, first, second);
+    constexpr auto adaptive = v2::subtitle_plane_adaptive_offset;
+    fixture.locator[adaptive + 4u] = static_cast<std::uint32_t>(completed.matched_observation_timestamp_us);
+    fixture.locator[adaptive + 5u] = static_cast<std::uint32_t>(completed.matched_observation_timestamp_us >> 32u);
+
+    auto &identity = fixture.identity;
+    identity[0u] = v2::subtitle_contour_schema;
+    identity[1u] = v2::subtitle_contour_history_tag;
+    identity[2u] = 1u;
+    identity[3u] = subtitle_scene_epoch;
+    identity[4u] = static_cast<std::uint32_t>(completed.matched_frame_id);
+    identity[5u] = static_cast<std::uint32_t>(completed.matched_frame_id >> 32u);
+    identity[6u] = static_cast<std::uint32_t>(completed.depth_input_region.analysis_generation);
+    identity[7u] = static_cast<std::uint32_t>(completed.depth_input_region.analysis_generation >> 32u);
+    identity[8u] = completed.depth_input_region.width();
+    identity[9u] = completed.depth_input_region.height();
+    identity[11u] = models::subtitle_ocr_source_crop_height(identity[8u], identity[9u]);
+    identity[10u] = identity[9u] - identity[11u];
+    identity[12u] = static_cast<std::uint32_t>(completed.field_width);
+    identity[13u] = static_cast<std::uint32_t>(completed.field_height);
+    identity[14u] = geometry.roi_top;
+    identity[15u] = geometry.roi_bottom;
+    identity[16u] = completed.field_content.left;
+    identity[17u] = completed.field_content.top;
+    identity[18u] = completed.field_content.right;
+    identity[19u] = completed.field_content.bottom;
+    identity[20u] = fixture.locator[adaptive + 4u];
+    identity[21u] = fixture.locator[adaptive + 5u];
+    identity[22u] = v2::subtitle_contour_recipe;
+    identity[v2::subtitle_contour_history_snapshot_valid_word] = 1u;
+
+    // The existing camera-authentication tests validate its seal separately; these tests join
+    // contour evidence to the exact full-sized completed state without emulating a renderer.
+    fixture.state.resize(v2::state_float_count, 0.0f);
+    fixture.state[v2::frame_valid] = 1.0f;
+    fixture.state[v2::renderer_authorization_bits] = std::bit_cast<float>(v2::contract_tag);
+    fixture.state[v2::joint_plane_mode_bits] = std::bit_cast<float>(v2::adaptive_policy_id);
+    fixture.state[v2::confirmed_cut_count] = std::bit_cast<float>(subtitle_scene_epoch);
+    fixture.state[v2::gain_last_observation_low] = std::bit_cast<float>(identity[20u]);
+    fixture.state[v2::gain_last_observation_high] = std::bit_cast<float>(identity[21u]);
+    return fixture;
+  }
+
+  bool contour_identity_matches(const contour_dump_fixture &fixture) {
+    return dump_detail::subtitle_contour_identity_matches_completion(
+      word_bytes(fixture.identity), word_bytes(fixture.ocr), word_bytes(fixture.locator),
+      fixture.state, fixture.completed);
   }
 
   class scoped_dump_trigger_environment {
@@ -709,12 +747,44 @@ namespace {
       completed.ocr_box_record = resource;
       completed.subtitle_locator_state = resource;
       completed.shadow_base_final_parallax = resource;
+      completed.subtitle_contour_support = resource;
+      completed.subtitle_contour_field_pin = resource;
+      completed.subtitle_contour_distance = resource;
+      completed.subtitle_contour_identity = resource;
+      completed.subtitle_contour_history = resource;
+      completed.subtitle_contour_source = resource;
+      completed.subtitle_ocr_probability = resource;
+      completed.subtitle_gaussian_weight = resource;
+      completed.subtitle_gaussian_blend = resource;
+      completed.subtitle_gaussian_vertical_conditioned = resource;
+      completed.subtitle_gaussian_control = resource;
       SCOPED_TRACE(
         std::to_string(test_case.field_width) + "x" +
         std::to_string(test_case.field_height)
       );
       ASSERT_TRUE(dump_detail::capture_tensor_grid_is_authenticated(completed));
       EXPECT_TRUE(dump_detail::subtitle_capture_resources_are_authenticated(completed));
+      for (auto member : {
+             &platf::sbs_debug::frame::subtitle_contour_support,
+             &platf::sbs_debug::frame::subtitle_contour_field_pin,
+             &platf::sbs_debug::frame::subtitle_contour_distance,
+             &platf::sbs_debug::frame::subtitle_contour_identity,
+             &platf::sbs_debug::frame::subtitle_contour_history,
+             &platf::sbs_debug::frame::subtitle_contour_source,
+             &platf::sbs_debug::frame::subtitle_ocr_probability,
+             &platf::sbs_debug::frame::subtitle_gaussian_weight,
+             &platf::sbs_debug::frame::subtitle_gaussian_blend,
+             &platf::sbs_debug::frame::subtitle_gaussian_vertical_conditioned,
+             &platf::sbs_debug::frame::subtitle_gaussian_control,
+           }) {
+        auto partial_contour = completed;
+        partial_contour.*member = nullptr;
+        EXPECT_FALSE(dump_detail::subtitle_capture_resources_are_authenticated(partial_contour));
+      }
+      completed.subtitle_work_suppressed = true;
+      completed.subtitle_contour_source = nullptr;
+      EXPECT_TRUE(dump_detail::subtitle_capture_resources_are_authenticated(completed))
+        << "suppressed subtitle work keeps the existing none descriptor";
     }
 
     auto partial = gpu_trace_frame();
@@ -725,6 +795,437 @@ namespace {
     missing_base.ocr_box_record = resource;
     missing_base.subtitle_locator_state = resource;
     EXPECT_FALSE(dump_detail::subtitle_capture_resources_are_authenticated(missing_base));
+  }
+
+  TEST(SbsDebugDumpContourTest, JoinsCurrentSct5ToCropDomainCutAndSourceClock) {
+    const auto too_tall = current_contour_dump_fixture(180u, 200u);
+    ASSERT_TRUE(dump_detail::subtitle_ocr_record_is_canonical_for_frame(
+      word_bytes(too_tall.ocr), too_tall.completed));
+    EXPECT_TRUE(subtitle_records_match_frame(
+      word_bytes(too_tall.ocr), word_bytes(too_tall.locator), too_tall.completed))
+      << "all producer-qualified current OCR pairs are retained, including tall cores";
+    const auto fixture = current_contour_dump_fixture();
+    ASSERT_TRUE(subtitle_records_match_frame(
+      word_bytes(fixture.ocr), word_bytes(fixture.locator), fixture.completed));
+    ASSERT_TRUE(contour_identity_matches(fixture));
+    for (const std::size_t index : {
+           0u, 1u, 3u, 4u, 5u, 6u, 7u, 8u, 9u, 10u, 11u, 12u, 13u,
+           14u, 15u, 16u, 17u, 18u, 19u, 20u, 21u, 22u, 23u, 24u, 25u, 26u, 31u,
+         }) {
+      auto forged = fixture;
+      forged.identity[index] ^= 1u;
+      EXPECT_FALSE(contour_identity_matches(forged)) << "SCT5 word " << index;
+    }
+    auto forged = fixture;
+    forged.identity[2u] = 2u;
+    EXPECT_FALSE(contour_identity_matches(forged));
+    forged = fixture;
+    forged.state[v2::gain_last_observation_low] = std::bit_cast<float>(fixture.identity[20u] + 1u);
+    EXPECT_FALSE(contour_identity_matches(forged));
+    forged = fixture;
+    forged.state[v2::confirmed_cut_count] = std::bit_cast<float>(subtitle_scene_epoch + 1u);
+    EXPECT_FALSE(contour_identity_matches(forged));
+    forged = fixture;
+    forged.state[v2::frame_valid] = 0.0f;
+    EXPECT_FALSE(contour_identity_matches(forged));
+    forged.identity[2u] = forged.identity[3u] = 0u;
+    forged.identity[v2::subtitle_contour_history_snapshot_valid_word] = 0u;
+    forged.state[v2::renderer_authorization_bits] = 0.0f;
+    forged.locator[v2::subtitle_plane_flags_word] = 0u;
+    forged.locator[v2::subtitle_plane_current_slot_mask_word] = 0u;
+    EXPECT_TRUE(contour_identity_matches(forged)) << "invalid geometry can publish canonical empty contour evidence";
+  }
+
+  TEST(SbsDebugDumpContourTest, CurrentCoversCannotForgeInactivePixelAuthority) {
+    auto fixture = current_contour_dump_fixture();
+    ASSERT_TRUE(contour_identity_matches(fixture));
+    fixture.identity[2u] = 0u;
+    EXPECT_FALSE(contour_identity_matches(fixture));
+  }
+
+  TEST(SbsDebugDumpContourTest, ReadyActualOcrCannotForgeCurrentPlaneAbstention) {
+    auto fixture = current_contour_dump_fixture();
+    ASSERT_TRUE(contour_identity_matches(fixture));
+    fixture.locator[v2::subtitle_plane_flags_word] = 0u;
+    fixture.locator[v2::subtitle_plane_current_slot_mask_word] = 0u;
+    fixture.identity[2u] = 0u;
+    EXPECT_FALSE(contour_identity_matches(fixture))
+      << "a ready actual nonempty OCR record grants all current slots even if support is cleared";
+
+    auto empty = current_contour_dump_fixture();
+    empty.ocr[3u] = empty.ocr[4u] = 0u;
+    std::fill(empty.ocr.begin() + v2::subtitle_ocr_raw_box_offset, empty.ocr.end(), 0u);
+    empty.locator[v2::subtitle_plane_current_slot_mask_word] = 0u;
+    empty.identity[2u] = 0u;
+    ASSERT_TRUE(contour_identity_matches(empty))
+      << "ready authoritative empty OCR retains a valid current publication without pins";
+    empty.locator[v2::subtitle_plane_flags_word] = 0u;
+    EXPECT_FALSE(contour_identity_matches(empty));
+
+    auto invalid_probe = current_contour_dump_fixture();
+    invalid_probe.locator[v2::subtitle_plane_adaptive_offset + 15u] = 1u;
+    invalid_probe.identity[2u] = 0u;
+    EXPECT_TRUE(contour_identity_matches(invalid_probe))
+      << "invalid Base probe suppresses pins while retaining exact current OCR slots";
+  }
+
+  TEST(SbsDebugDumpContourTest, ControllerClockIsIndependentButInvalidProbeAbstains) {
+    auto fixture = current_contour_dump_fixture();
+    const auto a = v2::subtitle_plane_adaptive_offset;
+    fixture.locator[a + 4u] = 1234u;
+    fixture.locator[a + 5u] = 0u;
+    ASSERT_TRUE(contour_identity_matches(fixture));
+    fixture.locator[a + 1u] = 0u;
+    fixture.locator[a + 4u] = 0u;
+    ASSERT_TRUE(contour_identity_matches(fixture));
+    fixture.locator[a + 15u] = 1u;
+    EXPECT_FALSE(contour_identity_matches(fixture));
+    fixture.identity[2u] = 0u;
+    EXPECT_TRUE(contour_identity_matches(fixture));
+    EXPECT_EQ(fixture.identity[v2::subtitle_contour_history_snapshot_valid_word], 1u);
+  }
+
+  TEST(SbsDebugDumpContourTest, HeldTupleUsesRetainedSourceClockAndCannotFreshStampIdentity) {
+    auto held = current_contour_dump_fixture();
+    ++held.completed.matched_frame_id;
+    held.completed.matched_observation_timestamp_us += 33333u;
+    held.completed.gpu_undecided_completion = true;
+    // subtitle_records_match_completion additionally proves the older OCR8/UIP1 tuple from the
+    // committed completion ring. SCT5 must independently join that same older frame and clock.
+    ASSERT_TRUE(contour_identity_matches(held));
+    auto forged = held;
+    forged.identity[4u] = static_cast<std::uint32_t>(held.completed.matched_frame_id);
+    forged.identity[5u] = static_cast<std::uint32_t>(held.completed.matched_frame_id >> 32u);
+    EXPECT_FALSE(contour_identity_matches(forged));
+    forged = held;
+    forged.identity[20u] = static_cast<std::uint32_t>(held.completed.matched_observation_timestamp_us);
+    forged.identity[21u] = static_cast<std::uint32_t>(held.completed.matched_observation_timestamp_us >> 32u);
+    EXPECT_FALSE(contour_identity_matches(forged));
+    held.completed.gpu_undecided_completion = false;
+    EXPECT_FALSE(contour_identity_matches(held));
+  }
+
+  TEST(SbsDebugDumpContourTest, HeldOlderFrameMayRetainTheCurrentSourceTimestamp) {
+    auto held = current_contour_dump_fixture();
+    ++held.completed.matched_frame_id;
+    held.completed.gpu_undecided_completion = true;
+    // The source timeline is nondecreasing. Equal PTS belongs to the frozen older tuple;
+    // it does not create another RGB confirmation or spend adaptive controller time.
+    ASSERT_TRUE(contour_identity_matches(held));
+    auto future = held;
+    --future.completed.matched_observation_timestamp_us;
+    EXPECT_FALSE(contour_identity_matches(future));
+    held.identity[4u] = static_cast<std::uint32_t>(held.completed.matched_frame_id);
+    held.identity[5u] = static_cast<std::uint32_t>(held.completed.matched_frame_id >> 32u);
+    EXPECT_FALSE(contour_identity_matches(held));
+  }
+
+  TEST(SbsDebugDumpContourTest, TextureAbiRequiresExactTypedBytesAndUnsupportedPlaceholder) {
+    using role_e = dump_detail::subtitle_contour_texture_e;
+    auto completed = current_contour_dump_fixture().completed;
+    const auto verify = [&](role_e role, DXGI_FORMAT format, std::uint32_t width,
+                            std::uint32_t height, std::size_t pixel_bytes) {
+      const auto row_bytes = static_cast<std::size_t>(width) * pixel_bytes;
+      const auto byte_count = row_bytes * height;
+      EXPECT_TRUE(dump_detail::subtitle_contour_texture_layout_is_authenticated(
+        role, format, width, height, row_bytes, byte_count, completed));
+      EXPECT_FALSE(dump_detail::subtitle_contour_texture_layout_is_authenticated(
+        role, format == DXGI_FORMAT_R32_FLOAT ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R32_FLOAT,
+        width, height, row_bytes, byte_count, completed));
+      EXPECT_FALSE(dump_detail::subtitle_contour_texture_layout_is_authenticated(
+        role, format, width, height, row_bytes + 4u, byte_count, completed));
+      EXPECT_FALSE(dump_detail::subtitle_contour_texture_layout_is_authenticated(
+        role, format, width, height, row_bytes, byte_count - 1u, completed));
+      EXPECT_FALSE(dump_detail::subtitle_contour_texture_layout_is_authenticated(
+        role, format, width + 1u, height, row_bytes, byte_count, completed));
+    };
+    const auto crop_height = models::subtitle_ocr_source_crop_height(1280u, 720u);
+    verify(role_e::support, DXGI_FORMAT_R32_UINT, 1280u, crop_height, 4u);
+    verify(role_e::history, DXGI_FORMAT_R32G32B32A32_FLOAT, 1280u, crop_height, 16u);
+    verify(role_e::source, DXGI_FORMAT_R16G16B16A16_FLOAT, 1280u, crop_height, 8u);
+    verify(role_e::field_pin, DXGI_FORMAT_R32_UINT, 770u, 434u, 4u);
+    verify(role_e::distance, DXGI_FORMAT_R32_FLOAT, 770u, 434u, 4u);
+    verify(role_e::gaussian_weight, DXGI_FORMAT_R32_FLOAT, 770u, 434u, 4u);
+    verify(role_e::gaussian_blend, DXGI_FORMAT_R32_FLOAT, 770u, 434u, 4u);
+    verify(role_e::gaussian_vertical_conditioned, DXGI_FORMAT_R32_FLOAT, 770u, 434u, 4u);
+    completed.depth_input_region.source_width = completed.depth_input_region.right =
+      v2::subtitle_contour_source_max_extent + 1u;
+    verify(role_e::support, DXGI_FORMAT_R32_UINT, 1u, 1u, 4u);
+    verify(role_e::history, DXGI_FORMAT_R32G32B32A32_FLOAT, 1u, 1u, 16u);
+    verify(role_e::source, DXGI_FORMAT_R16G16B16A16_FLOAT, 1u, 1u, 8u);
+    verify(role_e::field_pin, DXGI_FORMAT_R32_UINT, 770u, 434u, 4u);
+    verify(role_e::distance, DXGI_FORMAT_R32_FLOAT, 770u, 434u, 4u);
+    verify(role_e::gaussian_weight, DXGI_FORMAT_R32_FLOAT, 770u, 434u, 4u);
+    verify(role_e::gaussian_blend, DXGI_FORMAT_R32_FLOAT, 770u, 434u, 4u);
+    verify(role_e::gaussian_vertical_conditioned, DXGI_FORMAT_R32_FLOAT, 770u, 434u, 4u);
+    EXPECT_FALSE(dump_detail::subtitle_contour_texture_layout_is_authenticated(
+      role_e::source, DXGI_FORMAT_R16G16B16A16_FLOAT, 1u, 2u, 8u, 16u, completed));
+    EXPECT_FALSE(dump_detail::subtitle_contour_texture_layout_is_authenticated(
+      role_e::support, DXGI_FORMAT_R32_UINT, 1280u, crop_height, 5120u,
+      5120u * crop_height, completed));
+  }
+
+  TEST(SbsDebugDumpContourTest, EmptyContourGatePreservesIndependentLegalEmptyDetectorSnapshot) {
+    auto fixture = current_contour_dump_fixture();
+    fixture.identity[2u] = 0u;
+    fixture.ocr[3u] = fixture.ocr[4u] = 0u;
+    std::fill(fixture.ocr.begin() + v2::subtitle_ocr_raw_box_offset, fixture.ocr.end(), 0u);
+    const auto native_pixels = static_cast<std::size_t>(fixture.identity[8u]) * fixture.identity[11u];
+    const auto field_pixels = static_cast<std::size_t>(fixture.identity[12u]) * fixture.identity[13u];
+    std::vector<std::uint8_t> support(native_pixels * 4u), pin(field_pixels * 4u);
+    std::vector<std::uint8_t> history(native_pixels * 16u), source(native_pixels * 8u);
+    std::vector<std::uint8_t> probability(v2::subtitle_ocr_output_width * v2::subtitle_ocr_output_height * 4u);
+    auto distance = repeated_word_bytes(v2::subtitle_contour_distance_empty_bits, field_pixels);
+    source[1u] = 0x38u;  // RGBA16F red=0.5, alpha=1, matching the finite display-crop ABI.
+    source[7u] = 0x3cu;
+    history[3u] = 0x3fu;  // RGB red=0.5 from the same source pixel.
+    history[14u] = 0x00u; history[15u] = 0x40u;  // Valid RGB, empty UI mask: code2.
+    probability[3u] = 0x3fu;  // Opaque float32 detector probability=0.5.
+    const auto valid = [&]() {
+      return dump_detail::subtitle_contour_clear_policy_is_authenticated(
+        word_bytes(fixture.identity), word_bytes(fixture.ocr), fixture.state,
+        support, pin, distance, history, source, probability);
+    };
+    ASSERT_TRUE(valid()) << "legal empty OCR is valid evidence before any current cover is admitted";
+    for (auto *payload : {&support, &pin, &history}) {
+      (*payload)[0u] = 1u;
+      EXPECT_FALSE(valid());
+      (*payload)[0u] = 0u;
+    }
+    distance[0u] = 1u;
+    EXPECT_FALSE(valid());
+    distance = repeated_word_bytes(v2::subtitle_contour_distance_empty_bits, field_pixels);
+    fixture.ocr[2u] = 0u;
+    EXPECT_FALSE(valid()) << "globally invalid detector output cannot authorize raw snapshots";
+    std::fill(source.begin(), source.end(), 0u);
+    std::fill(probability.begin(), probability.end(), 0u);
+    std::fill(history.begin(), history.end(), 0u);
+    fixture.identity[v2::subtitle_contour_history_snapshot_valid_word] = 0u;
+    fixture.identity[3u] = 0u;
+    EXPECT_TRUE(valid());
+    fixture.ocr[2u] = 1u;
+    fixture.state[v2::gain_last_observation_low] = std::bit_cast<float>(fixture.identity[20u] + 1u);
+    probability[0u] = 1u;
+    EXPECT_FALSE(valid()) << "a stale geometry clock cannot authorize the next Pmap";
+    probability[0u] = 0u;
+    EXPECT_TRUE(valid());
+  }
+
+  TEST(SbsDebugDumpContourTest, UnsupportedSourceAcceptsOnlyCanonicalEmptySeedPayloads) {
+    auto fixture = current_contour_dump_fixture();
+    fixture.identity[2u] = fixture.identity[3u] = 0u;
+    fixture.identity[v2::subtitle_contour_history_snapshot_valid_word] = 0u;
+    fixture.identity[8u] = v2::subtitle_contour_source_max_extent + 1u;
+    const auto field_pixels = static_cast<std::size_t>(fixture.identity[12u]) * fixture.identity[13u];
+    std::vector<std::uint8_t> support(4u), pin(field_pixels * 4u), history(16u), source(8u);
+    std::vector<std::uint8_t> probability(v2::subtitle_ocr_output_width * v2::subtitle_ocr_output_height * 4u);
+    const auto distance = repeated_word_bytes(v2::subtitle_contour_distance_empty_bits, field_pixels);
+    const auto valid = [&]() {
+      return dump_detail::subtitle_contour_clear_policy_is_authenticated(
+        word_bytes(fixture.identity), word_bytes(fixture.ocr), fixture.state,
+        support, pin, distance, history, source, probability);
+    };
+    ASSERT_TRUE(valid());
+    for (auto *payload : {&support, &pin, &history, &source, &probability}) {
+      (*payload)[0u] = 1u;
+      EXPECT_FALSE(valid());
+      (*payload)[0u] = 0u;
+    }
+    source.push_back(0u);
+    EXPECT_FALSE(valid()) << "even cleared unsupported snapshots require the exact placeholder byte count";
+    source.pop_back();
+    fixture.identity[2u] = 1u;
+    EXPECT_FALSE(valid());
+  }
+
+  TEST(SbsDebugDumpContourTest, GaussianFieldsRequireJoinedControlEndpointsAndExactEmptyBase) {
+    // This isolates saved-field admission; real q/plane production is covered by native shaders.
+    auto fixture = current_contour_dump_fixture();
+    fixture.identity[12u] = 3u; fixture.identity[13u] = 2u;
+    fixture.identity[16u] = 1u; fixture.identity[17u] = 0u;
+    fixture.identity[18u] = 2u; fixture.identity[19u] = 2u;
+    auto locator = fixture.locator;
+    locator[v2::subtitle_plane_current_slot_mask_word] = 1u;
+    locator[v2::subtitle_plane_field_extent_offset] = 3u;
+    locator[v2::subtitle_plane_field_extent_offset + 1u] = 2u;
+    locator[v2::subtitle_plane_content_offset] = 1u;
+    locator[v2::subtitle_plane_content_offset + 1u] = 0u;
+    locator[v2::subtitle_plane_content_offset + 2u] = 2u;
+    locator[v2::subtitle_plane_content_offset + 3u] = 2u;
+    locator[v2::subtitle_plane_adaptive_offset + 13u] = 2u;
+    constexpr auto target_bits = 0x80000000u;
+    locator[v2::subtitle_plane_adaptive_offset + 3u] = target_bits;
+    auto distance = repeated_word_bytes(v2::subtitle_contour_distance_empty_bits, 6u);
+    auto weight = repeated_word_bytes(0u, 6u);
+    auto base = repeated_word_bytes(std::bit_cast<std::uint32_t>(0.01234567f), 6u);
+    const auto store_word = [](auto &bytes, std::size_t index, std::uint32_t value) {
+      std::memcpy(bytes.data() + index * sizeof(value), &value, sizeof(value));
+    };
+    // Real content has signed zero in row0 and a non-Q30 constant in row1. Padding is poison.
+    store_word(base, 1u, target_bits);
+    auto expected_base = base;
+    for (std::size_t row = 0u; row < 2u; ++row) {
+      const auto i = row * 3u + 1u;
+      std::uint32_t value;
+      std::memcpy(&value, base.data() + i * 4u, 4u);
+      store_word(expected_base, row * 3u, value);
+      store_word(expected_base, row * 3u + 2u, value);
+    }
+    auto blend = expected_base, vertical = expected_base, final = expected_base;
+    auto control = repeated_word_bytes(0u, 1u);
+    const auto valid = [&]() {
+      return dump_detail::subtitle_gaussian_fields_are_authenticated(
+        word_bytes(fixture.identity), word_bytes(locator), word_bytes(fixture.ocr), distance, weight, blend,
+        vertical, control, base, final);
+    };
+    ASSERT_TRUE(valid());
+    for (auto *payload : {&blend, &vertical, &final}) {
+      (*payload)[0u] ^= 1u;
+      EXPECT_FALSE(valid());
+      (*payload)[0u] ^= 1u;
+    }
+    weight[0u] = 1u;
+    EXPECT_FALSE(valid());
+    weight[0u] = 0u;
+    control[0u] = 1u;
+    EXPECT_FALSE(valid()) << "empty q cannot run shared conditioning";
+    control[0u] = 0u;
+    control.push_back(0u);
+    EXPECT_FALSE(valid()) << "control is exactly one uint32";
+    control.pop_back();
+
+    for (std::size_t i : {1u, 4u}) store_word(distance, i, 0u);
+    weight = repeated_word_bytes(std::bit_cast<std::uint32_t>(1.0f), 6u);
+    blend = repeated_word_bytes(target_bits, 6u);
+    vertical = blend; final = blend; control[0u] = 1u;
+    ASSERT_TRUE(valid()) << "q0/M1 retains signed target, including nearest-content padding";
+    for (auto *payload : {&weight, &blend}) {
+      (*payload)[0u] ^= 1u;
+      EXPECT_FALSE(valid());
+      (*payload)[0u] ^= 1u;
+    }
+    store_word(distance, 1u, target_bits);
+    EXPECT_FALSE(valid()) << "q zero is positive, not signed depth zero";
+    store_word(distance, 1u, 0u);
+    locator[v2::subtitle_plane_flags_word] = 0u;
+    EXPECT_FALSE(valid()) << "current full-strength plane authority is required";
+  }
+
+  TEST(SbsDebugDumpContourTest, WarmupGaussianRequiresExactCurrentCoversAndExpiresWithEmptyNativeQ) {
+    auto fixture = current_contour_dump_fixture();
+    auto locator = fixture.locator;
+    locator[v2::subtitle_plane_warmup_word] = v2::subtitle_plane_warmup_observations;
+    locator[v2::subtitle_plane_adaptive_offset + 3u] = std::bit_cast<std::uint32_t>(0.0f);
+    const auto width = fixture.identity[12u], height = fixture.identity[13u];
+    const auto left = fixture.identity[16u], top = fixture.identity[17u];
+    const auto right = fixture.identity[18u], bottom = fixture.identity[19u];
+    const auto pixels = static_cast<std::size_t>(width) * height;
+    const auto distance = repeated_word_bytes(v2::subtitle_contour_distance_empty_bits, pixels);
+    auto weight = repeated_word_bytes(0u, pixels);
+    const auto zero = repeated_word_bytes(0u, pixels);
+    auto control = repeated_word_bytes(1u, 1u);
+    const double sigma = std::min(fixture.identity[8u], fixture.identity[9u]) / 60.0;
+    for (std::uint32_t y = 0u; y < height; ++y) {
+      for (std::uint32_t x = 0u; x < width; ++x) {
+        const double fx = std::clamp(x, left, right - 1u) + .5;
+        const double fy = std::clamp(y, top, bottom - 1u) + .5;
+        double q = std::numeric_limits<double>::infinity();
+        for (std::uint32_t slot = 0u; slot < fixture.ocr[4u]; ++slot) {
+          const auto offset = v2::subtitle_ocr_final_box_offset + slot * v2::subtitle_ocr_box_word_count;
+          const double dx = std::max({fixture.ocr[offset] - fx, 0.0, fx - fixture.ocr[offset + 2u]}) *
+            fixture.identity[8u] / (right - left);
+          const double dy = std::max({fixture.ocr[offset + 1u] - fy, 0.0, fy - fixture.ocr[offset + 3u]}) *
+            fixture.identity[9u] / (bottom - top);
+          q = std::min(q, dx * dx + dy * dy);
+        }
+        const float m = static_cast<float>(std::exp(-q / (2.0 * sigma * sigma)));
+        std::memcpy(weight.data() + (static_cast<std::size_t>(y) * width + x) * 4u, &m, 4u);
+      }
+    }
+    const auto valid = [&]() {
+      return dump_detail::subtitle_gaussian_fields_are_authenticated(
+        word_bytes(fixture.identity), word_bytes(locator), word_bytes(fixture.ocr),
+        distance, weight, zero, zero, control, zero, zero);
+    };
+    ASSERT_TRUE(valid()) << "presentation warmup can be finite while raw pixel q remains empty";
+    for (const auto packed : {1u, 2u, 3u, 4u, 9u, 10u, 11u, 12u}) {
+      locator[v2::subtitle_plane_warmup_word] = packed;
+      EXPECT_TRUE(valid());
+    }
+    for (const auto packed : {0u, 8u, 5u, 6u, 7u, 13u, 14u, 15u, 16u, 0xffffffffu}) {
+      locator[v2::subtitle_plane_warmup_word] = packed;
+      EXPECT_FALSE(valid()) << "expired or malformed countdown cannot admit rectangle weight";
+    }
+    locator[v2::subtitle_plane_warmup_word] = 4u;
+    fixture.ocr[5u] ^= 1u;
+    EXPECT_FALSE(valid()) << "a stale current OCR frame cannot authorize warmup";
+    fixture.ocr[5u] ^= 1u;
+    fixture.ocr[v2::subtitle_ocr_final_box_offset + 4u] ^= 1u;
+    EXPECT_FALSE(valid()) << "raw/final cover payload correspondence remains authenticated";
+  }
+
+  TEST(SbsDebugDumpContourTest, ConfirmationCodesBindBinarySupportAndBoundedCurrentAnchors) {
+    auto fixture = current_contour_dump_fixture();
+    const auto native_pixels = static_cast<std::size_t>(fixture.identity[8u]) * fixture.identity[11u];
+    const auto field_pixels = static_cast<std::size_t>(fixture.identity[12u]) * fixture.identity[13u];
+    const auto pixel = 64u * static_cast<std::size_t>(fixture.identity[8u]) + 200u;
+    std::vector<std::uint8_t> support(native_pixels * 4u), pin(field_pixels * 4u);
+    std::vector<std::uint8_t> history(native_pixels * 16u), source(native_pixels * 8u);
+    std::vector<std::uint8_t> probability(v2::subtitle_ocr_output_width * v2::subtitle_ocr_output_height * 4u);
+    const auto distance = repeated_word_bytes(v2::subtitle_contour_distance_empty_bits, field_pixels);
+    const std::array<std::uint16_t, 4u> color {0x3800u, 0x3800u, 0x3800u, 0x3c00u};
+    std::memcpy(source.data() + pixel * sizeof(color), color.data(), sizeof(color));
+    const auto set_history = [&](const std::array<float, 4u> &feature) {
+      std::memcpy(history.data() + pixel * sizeof(feature), feature.data(), sizeof(feature));
+    };
+    const auto set_mask = [&](const std::uint32_t value) {
+      std::memcpy(support.data() + pixel * sizeof(value), &value, sizeof(value));
+    };
+    const auto valid = [&]() {
+      return dump_detail::subtitle_contour_clear_policy_is_authenticated(
+        word_bytes(fixture.identity), word_bytes(fixture.ocr), fixture.state,
+        support, pin, distance, history, source, probability);
+    };
+    // This checks typed saved-state admission, not a fabricated four-observation chain.
+    for (std::uint32_t count = 0u; count <= v2::subtitle_contour_history_confirmation_observations; ++count) {
+      const auto mask = static_cast<std::uint32_t>(count == v2::subtitle_contour_history_confirmation_observations);
+      const auto code = v2::subtitle_contour_history_feature_valid_bit |
+        (count << v2::subtitle_contour_history_feature_count_shift) |
+        (mask ? v2::subtitle_contour_history_feature_mask_bit : 0u);
+      set_mask(mask);
+      set_history({0.5f, 0.5f, 0.5f, static_cast<float>(code)});
+      ASSERT_TRUE(valid()) << "legal count " << count;
+      set_mask(1u - mask);
+      EXPECT_FALSE(valid()) << "support disagrees with count " << count;
+      set_mask(mask);
+      set_history({0.5625f, 0.5f, 0.5f, static_cast<float>(code)});
+      EXPECT_EQ(valid(), count >= 2u) << "fixed anchor is permitted only at count2+";
+    }
+    set_mask(0u);
+    for (const auto code : {0.0f, 1.0f, 3.0f, 7.0f, 11.0f, 15.0f, 18.0f, 19.0f, 22.0f,
+                           2.5f, -0.0f, std::numeric_limits<float>::infinity(),
+                           std::numeric_limits<float>::quiet_NaN()}) {
+      set_history({0.5f, 0.5f, 0.5f, code});
+      EXPECT_FALSE(valid()) << "unknown/mismatched code " << code;
+    }
+    for (const auto anchor : {0.625f, -0.001f, 1.001f, std::numeric_limits<float>::infinity(),
+                             std::numeric_limits<float>::quiet_NaN()}) {
+      set_history({anchor, 0.5f, 0.5f, 10.0f});
+      EXPECT_FALSE(valid()) << "invalid/distant count2 anchor " << anchor;
+    }
+    set_history({0.5625f, 0.5f, 0.5f, 10.0f});
+    ASSERT_TRUE(valid());
+    fixture.identity[2u] = 0u;
+    EXPECT_FALSE(valid()) << "no current authority may carry a confirmation streak";
+    set_history({0.5f, 0.5f, 0.5f, 2.0f});
+    EXPECT_TRUE(valid()) << "empty current covers still retains current RGB at count0";
+    source[pixel * sizeof(color) + 7u] = 0u;
+    EXPECT_FALSE(valid()) << "alpha-zero source with nonzero RGB is not canonical";
+    std::fill(source.begin() + pixel * sizeof(color), source.begin() + (pixel + 1u) * sizeof(color), 0u);
+    set_history({0.0f, 0.0f, 0.0f, 0.0f});
+    EXPECT_TRUE(valid());
+    set_history({0.0f, 0.0f, 0.0f, -0.0f});
+    EXPECT_FALSE(valid()) << "invalid source must have bitwise zero history";
   }
 
   TEST(SbsDebugDumpTensorGridTest, SingleHighRoiRetainsCoarsePlannerAndDoublesContent) {
@@ -805,6 +1306,7 @@ namespace {
     completed.gpu_undecided_completion = true;
     auto evidence = completed;
     --evidence.matched_frame_id;
+    --evidence.matched_observation_timestamp_us;
     const auto geometry = models::fit_subtitle_analysis_geometry(
       evidence.depth_input_region.width(),
       evidence.depth_input_region.height(),
@@ -856,7 +1358,7 @@ namespace {
     set_trace_word(ring, condition_base + 2u, 2u);
     set_trace_word(ring, condition_base + 3u, 0u);
     set_trace_word(ring, condition_base + 4u, 2u);
-    set_trace_word(ring, condition_base + 5u, locator[18u]);
+    set_trace_word(ring, condition_base + 5u, locator[v2::subtitle_plane_adaptive_offset + 3u]);
     ASSERT_TRUE(dump_detail::gpu_trace_ring_is_canonical(ring, completed));
     EXPECT_TRUE(dump_detail::subtitle_records_match_completion(
       word_bytes(ocr), word_bytes(locator), ring, completed, subtitle_scene_epoch
@@ -864,8 +1366,8 @@ namespace {
 
     set_trace_word(
       ring,
-      locator_base + v2::subtitle_locator_owner_offset,
-      locator[v2::subtitle_locator_owner_offset] + 1u
+      locator_base + v2::subtitle_plane_current_slot_mask_word,
+      locator[v2::subtitle_plane_current_slot_mask_word] + 1u
     );
     EXPECT_FALSE(dump_detail::subtitle_records_match_completion(
       word_bytes(ocr), word_bytes(locator), ring, completed, subtitle_scene_epoch
@@ -907,7 +1409,68 @@ namespace {
     );
     reject(condition + 5u, trace_word(canonical, condition + 5u) ^ 1u);
     reject(locator + 2u, trace_word(canonical, locator + 2u) | 0x10u);
-    reject(locator + 4u, v2::subtitle_locator_rectangle_capacity + 1u);
+    reject(locator + v2::subtitle_plane_current_slot_mask_word, 1u << v2::subtitle_plane_cover_capacity);
+  }
+
+  TEST(SbsDebugDumpGpuTraceTest, AbstentionCannotClaimTheAuthorityOfAnExecutedEmptyOcrChild) {
+    const auto frame = gpu_trace_frame();
+    const auto abstention = canonical_gpu_trace_ring(
+      frame, gpu_trace::submission_class_e::force_infer,
+      cuda_conditional_graph::branch_e::infer, true, false);
+    const auto base = gpu_trace::record_base(0u);
+    const auto plane = base + gpu_trace::word_index(gpu_trace::record_word_e::subtitle_locator_begin);
+    const auto condition = base + gpu_trace::word_index(gpu_trace::record_word_e::subtitle_condition_begin);
+    ASSERT_TRUE(dump_detail::gpu_trace_ring_is_canonical(abstention, frame));
+    EXPECT_EQ(trace_word(abstention, plane + v2::subtitle_plane_flags_word), 0u);
+    EXPECT_EQ(trace_word(abstention, plane + v2::subtitle_plane_current_slot_mask_word), 0u);
+
+    auto forged_empty_authority = abstention;
+    set_trace_word(forged_empty_authority, plane + v2::subtitle_plane_flags_word, v2::subtitle_plane_current_valid_flag);
+    EXPECT_FALSE(dump_detail::gpu_trace_ring_is_canonical(forged_empty_authority, frame))
+      << "no optional OCR child cannot claim even valid-empty current OCR authority";
+    auto forged_active = canonical_gpu_trace_ring(frame);
+    std::memcpy(forged_active.data() + base * sizeof(std::uint32_t),
+                abstention.data() + base * sizeof(std::uint32_t),
+                gpu_trace::word_index(gpu_trace::record_word_e::subtitle_locator_begin) * sizeof(std::uint32_t));
+    EXPECT_FALSE(dump_detail::gpu_trace_ring_is_canonical(forged_active, frame));
+
+    auto valid_empty = canonical_gpu_trace_ring(frame);
+    set_trace_word(valid_empty, plane + v2::subtitle_plane_current_slot_mask_word, 0u);
+    for (std::size_t index = 2u; index < v2::subtitle_condition_param_word_count; ++index)
+      set_trace_word(valid_empty, condition + index, 0u);
+    EXPECT_TRUE(dump_detail::gpu_trace_ring_is_canonical(valid_empty, frame))
+      << "an executed OCR child may publish a valid current empty record";
+  }
+
+  TEST(SbsDebugDumpGpuTraceTest, HeldOlderTupleAllowsEqualTimestampWithoutItsOriginInTheRing) {
+    auto completed = gpu_trace_frame();
+    completed.gpu_undecided_completion = true;
+    auto evidence = completed;
+    --evidence.matched_frame_id;
+    const auto geometry = models::fit_subtitle_analysis_geometry(
+      evidence.depth_input_region.width(), evidence.depth_input_region.height(),
+      {evidence.model_width, evidence.model_height}, evidence.depth_input_region.tensor_content);
+    ASSERT_TRUE(geometry.valid());
+    auto ocr = empty_ocr(evidence, geometry);
+    const subtitle_rect_t cover {120u, 350u, 650u, 400u};
+    store_ocr_pair(ocr, 0u, cover, cover);
+    ocr[2u] = 1u;
+    ocr[3u] = ocr[4u] = 1u;
+    const auto plane = current_subtitle_plane(evidence, 1u, true, 0.01f);
+    auto ring = canonical_gpu_trace_ring(
+      completed, gpu_trace::submission_class_e::gpu_undecided,
+      cuda_conditional_graph::branch_e::reuse);
+    const auto base = gpu_trace::record_base(0u);
+    const auto plane_base = base + gpu_trace::word_index(gpu_trace::record_word_e::subtitle_locator_begin);
+    for (std::size_t index = 0u; index < plane.size(); ++index)
+      set_trace_word(ring, plane_base + index, plane[index]);
+    ASSERT_TRUE(dump_detail::gpu_trace_ring_is_canonical(ring, completed));
+    EXPECT_TRUE(dump_detail::subtitle_records_match_completion(
+      word_bytes(ocr), word_bytes(plane), ring, completed, subtitle_scene_epoch));
+    auto future = ring;
+    set_trace_word(future, plane_base + v2::subtitle_plane_observation_timestamp_offset,
+                   static_cast<std::uint32_t>(completed.matched_observation_timestamp_us + 1u));
+    EXPECT_FALSE(dump_detail::gpu_trace_ring_is_canonical(future, completed));
   }
 
   TEST(SbsDebugDumpGpuTraceTest, ForceReuseIsInvalidButSubtitleFallbackRemainsExact) {
@@ -963,11 +1526,11 @@ namespace {
 
     const auto locator =
       base + gpu_trace::word_index(gpu_trace::record_word_e::subtitle_locator_begin);
-    EXPECT_EQ(trace_word(reused, locator + 22u), frame.matched_frame_id - 1u);
+    EXPECT_EQ(trace_word(reused, locator + v2::subtitle_plane_frame_offset), frame.matched_frame_id - 1u);
     auto falsely_current_locator = reused;
     set_trace_word(
       falsely_current_locator,
-      locator + 22u,
+      locator + v2::subtitle_plane_frame_offset,
       static_cast<std::uint32_t>(frame.matched_frame_id)
     );
     EXPECT_FALSE(dump_detail::gpu_trace_ring_is_canonical(
@@ -1004,6 +1567,7 @@ namespace {
     );
     auto prior_frame = frame;
     --prior_frame.matched_frame_id;
+    --prior_frame.matched_observation_timestamp_us;
     const auto prior = canonical_gpu_trace_ring(prior_frame);
     const auto current_base = gpu_trace::record_base(0u);
     const auto oldest_base = gpu_trace::record_base(gpu_trace::capacity - 1u);
@@ -1040,8 +1604,8 @@ namespace {
     const auto current_condition = current_base + gpu_trace::word_index(
       gpu_trace::record_word_e::subtitle_condition_begin
     );
-    const auto changed_target = trace_word(changed, current_locator + 18u) ^ 1u;
-    set_trace_word(changed, current_locator + 18u, changed_target);
+    const auto changed_target = trace_word(changed, current_locator + v2::subtitle_plane_adaptive_offset + 3u) ^ 1u;
+    set_trace_word(changed, current_locator + v2::subtitle_plane_adaptive_offset + 3u, changed_target);
     set_trace_word(changed, current_condition + 5u, changed_target);
     EXPECT_FALSE(dump_detail::gpu_trace_ring_is_canonical(changed, frame));
   }
@@ -1110,127 +1674,32 @@ namespace {
     EXPECT_TRUE(infer_record.at("subtitle_condition").at("active"));
   }
 
-  TEST(SbsDebugDumpGpuTraceTest, InactiveLocatorRequiresCanonicalZeroConditionVerdict) {
+  TEST(SbsDebugDumpGpuTraceTest, EmptyAndInvalidProbeRequireFreshInactiveScp4) {
     const auto frame = gpu_trace_frame();
     const auto canonical = canonical_gpu_trace_ring(frame);
     const auto base = gpu_trace::record_base(0u);
-    const auto locator = base + gpu_trace::word_index(
-      gpu_trace::record_word_e::subtitle_locator_begin
-    );
-    const auto condition = base + gpu_trace::word_index(
-      gpu_trace::record_word_e::subtitle_condition_begin
-    );
-
+    const auto plane = base + gpu_trace::word_index(gpu_trace::record_word_e::subtitle_locator_begin);
+    const auto condition = base + gpu_trace::word_index(gpu_trace::record_word_e::subtitle_condition_begin);
     auto inactive = canonical;
-    set_trace_word(inactive, locator + 2u, 0u);
-    set_trace_word(inactive, locator + 3u, 0u);
-    set_trace_word(inactive, locator + 4u, 0u);
-    set_trace_word(inactive, locator + 12u, 0u);
-    set_trace_word(inactive, locator + 18u, 0u);
-    set_trace_word(inactive, locator + 19u, 0u);
-    set_trace_word(inactive, locator + 20u, 0u);
-    set_trace_word(inactive, locator + 21u, 0u);
-    set_trace_word(inactive, locator + 24u, 0u);
-    set_trace_word(inactive, locator + 25u, 0u);
-    set_trace_word(inactive, locator + v2::subtitle_locator_kind_word, 0u);
-    for (std::size_t index = 0u; index < v2::subtitle_condition_param_word_count; ++index) {
+    set_trace_word(inactive, plane + v2::subtitle_plane_flags_word, 0u);
+    set_trace_word(inactive, plane + v2::subtitle_plane_current_slot_mask_word, 0u);
+    for (std::size_t index = 2u; index < v2::subtitle_condition_param_word_count; ++index)
       set_trace_word(inactive, condition + index, 0u);
-    }
-    EXPECT_TRUE(dump_detail::gpu_trace_ring_is_canonical(inactive, frame));
-
-    auto stale_condition = inactive;
-    set_trace_word(
-      stale_condition, condition, v2::subtitle_condition_param_schema
-    );
-    EXPECT_FALSE(dump_detail::gpu_trace_ring_is_canonical(stale_condition, frame));
-
-    // A historical row has no complete V2 geometry state. Current OCR ownership may remain
-    // while unavailable geometry suppresses its condition publication to exact zero6.
-    auto geometry_unavailable_condition = canonical;
-    for (std::size_t index = 0u; index < v2::subtitle_condition_param_word_count; ++index) {
-      set_trace_word(geometry_unavailable_condition, condition + index, 0u);
-    }
-    EXPECT_TRUE(dump_detail::gpu_trace_ring_is_canonical(geometry_unavailable_condition, frame));
-    set_trace_word(geometry_unavailable_condition, condition + 2u, 1u);
-    EXPECT_FALSE(dump_detail::gpu_trace_ring_is_canonical(geometry_unavailable_condition, frame));
-  }
-
-  TEST(SbsDebugDumpGpuTraceTest, ProvisionalConditionUsesEphemeralTupleAndStructuralBounds) {
-    const auto frame = gpu_trace_frame();
-    auto ring = canonical_gpu_trace_ring(frame);
-    const auto base = gpu_trace::record_base(0u);
-    const auto locator = base + gpu_trace::word_index(
-      gpu_trace::record_word_e::subtitle_locator_begin
-    );
-    const auto condition = base + gpu_trace::word_index(
-      gpu_trace::record_word_e::subtitle_condition_begin
-    );
-    constexpr subtitle_rect_t owner {203u, 369u, 566u, 384u};
-    constexpr subtitle_rect_t pending {342u, 368u, 415u, 386u};
-    constexpr subtitle_rect_t cover {337u, 364u, 420u, 390u};
-    const auto provisional_target = std::bit_cast<std::uint32_t>(
-      6.0f / (2.0f * 1920.0f)
-    );
-    set_trace_word(
-      ring, locator + 2u,
-      1u | 2u | 4u | v2::subtitle_locator_provisional_current_flag
-    );
-    set_trace_word(ring, locator + 12u, 1u);
-    set_trace_word(ring, locator + 20u, 1u);
-    set_trace_word(ring, locator + 21u, 0u);
-    set_trace_word(ring, locator + 24u, 2u);
-    set_trace_word(
-      ring, locator + v2::subtitle_locator_provisional_target_word, provisional_target
-    );
-    set_trace_word(ring, locator + v2::subtitle_locator_provisional_fade_word, 2u);
-    for (std::size_t coordinate = 0u; coordinate < 4u; ++coordinate) {
-      set_trace_word(
-        ring, locator + v2::subtitle_locator_owner_offset + coordinate, owner[coordinate]
-      );
-      set_trace_word(
-        ring, locator + v2::subtitle_locator_pending_offset + coordinate, pending[coordinate]
-      );
-      set_trace_word(
-        ring, locator + v2::subtitle_locator_current_offset + coordinate, cover[coordinate]
-      );
-    }
-    set_trace_word(ring, condition + 4u, 2u);
-    set_trace_word(ring, condition + 5u, provisional_target);
-    ASSERT_TRUE(dump_detail::gpu_trace_ring_is_canonical(ring, frame));
-
-    auto durable_tuple = ring;
-    set_trace_word(
-      durable_tuple, condition + 5u, trace_word(ring, locator + 18u)
-    );
-    EXPECT_FALSE(dump_detail::gpu_trace_ring_is_canonical(durable_tuple, frame));
-
-    auto widened_cover = ring;
-    set_trace_word(
-      widened_cover, locator + v2::subtitle_locator_current_offset + 0u,
-      pending[0] + 1u
-    );
-    EXPECT_FALSE(dump_detail::gpu_trace_ring_is_canonical(widened_cover, frame));
-
-    // Match equality belongs to established owner continuity, never the provisional bridge.
-    auto iou_equality = ring;
-    constexpr subtitle_rect_t equal_owner {100u, 360u, 200u, 370u};
-    constexpr subtitle_rect_t equal_pending {125u, 360u, 225u, 370u};
-    constexpr subtitle_rect_t equal_cover {120u, 356u, 230u, 374u};
-    for (std::size_t coordinate = 0u; coordinate < 4u; ++coordinate) {
-      set_trace_word(
-        iou_equality, locator + v2::subtitle_locator_owner_offset + coordinate,
-        equal_owner[coordinate]
-      );
-      set_trace_word(
-        iou_equality, locator + v2::subtitle_locator_pending_offset + coordinate,
-        equal_pending[coordinate]
-      );
-      set_trace_word(
-        iou_equality, locator + v2::subtitle_locator_current_offset + coordinate,
-        equal_cover[coordinate]
-      );
-    }
-    EXPECT_FALSE(dump_detail::gpu_trace_ring_is_canonical(iou_equality, frame));
+    ASSERT_TRUE(dump_detail::gpu_trace_ring_is_canonical(inactive, frame));
+    auto missing_schema = inactive;
+    set_trace_word(missing_schema, condition, 0u);
+    EXPECT_FALSE(dump_detail::gpu_trace_ring_is_canonical(missing_schema, frame));
+    auto stale_payload = inactive;
+    set_trace_word(stale_payload, condition + 2u, 1u);
+    EXPECT_FALSE(dump_detail::gpu_trace_ring_is_canonical(stale_payload, frame));
+    auto invalid_probe = canonical;
+    set_trace_word(invalid_probe, plane + v2::subtitle_plane_adaptive_offset + 13u, 100u);
+    set_trace_word(invalid_probe, plane + v2::subtitle_plane_adaptive_offset + 15u, 1u);
+    EXPECT_FALSE(dump_detail::gpu_trace_ring_is_canonical(invalid_probe, frame))
+      << "canonical invalid Base sample cannot retain active SCP4";
+    for (std::size_t index = 2u; index < v2::subtitle_condition_param_word_count; ++index)
+      set_trace_word(invalid_probe, condition + index, 0u);
+    EXPECT_TRUE(dump_detail::gpu_trace_ring_is_canonical(invalid_probe, frame));
   }
 
   TEST(SbsDebugDumpGpuTraceTest, WrappedChronologyAndSuppressedFrozenSectionsValidate) {
@@ -1514,7 +1983,7 @@ namespace {
     EXPECT_FALSE(dumper.snapshot_requested());
   }
 
-  TEST(SbsDebugDumpAsyncTest, Schema44PackagesOnlyOneFinalFieldAndNoScalarPreviews) {
+  TEST(SbsDebugDumpAsyncTest, Schema49PackagesCompleteContourTupleAndNoScalarPreviews) {
     std::ifstream stream(
       std::filesystem::path(SUNSHINE_SOURCE_DIR) /
         "src/platform/windows/sbs_debug_dump.cpp",
@@ -1545,7 +2014,31 @@ namespace {
          }) {
       EXPECT_EQ(source.find(retired), std::string::npos) << retired;
     }
-    EXPECT_NE(source.find("{\"schema\", 44}"), std::string::npos);
+    EXPECT_NE(source.find("{\"schema\", 49}"), std::string::npos);
+    EXPECT_NE(source.find("{\"mode\", \"subtitle-contours-v1\"}"), std::string::npos);
+    EXPECT_NE(source.find("nlohmann::json::parse(subtitle_contour_policy_json)"), std::string::npos);
+    for (const std::string_view artifact : {
+           "contour_support.u32", "contour_field_pin.u32", "contour_distance.f32",
+           "contour_identity.u32", "contour_history.rgba32f", "contour_source.rgba16f",
+           "ocr_probability.f32", "gaussian_weight.f32", "gaussian_blend.f32",
+           "gaussian_vertical_conditioned.f32", "gaussian_control.u32",
+         }) {
+      EXPECT_NE(source.find(artifact), std::string::npos) << artifact;
+    }
+    const auto terminal_query = source.find("ctx->End(pending->completion.Get())");
+    ASSERT_NE(terminal_query, std::string::npos);
+    for (const std::string_view resource : {
+           "subtitle_contour_support", "subtitle_contour_field_pin", "subtitle_contour_distance",
+           "subtitle_contour_identity", "subtitle_contour_history", "subtitle_contour_source",
+           "subtitle_ocr_probability", "subtitle_gaussian_weight", "subtitle_gaussian_blend",
+           "subtitle_gaussian_vertical_conditioned", "subtitle_gaussian_control",
+         }) {
+      const auto staging = source.find("device, ctx, completed." + std::string(resource));
+      EXPECT_NE(staging, std::string::npos) << resource;
+      EXPECT_LT(staging, terminal_query) << resource;
+      EXPECT_NE(source.find("job.completed." + std::string(resource) + " = nullptr;"), std::string::npos)
+        << resource;
+    }
     EXPECT_NE(source.find("{\"matched_observation_timestamp_us\", completed.matched_observation_timestamp_us}"), std::string::npos);
     EXPECT_NE(
       source.find("{\"warp_input_artifact\", \"shadow_final_parallax.f32\"}"),
@@ -1604,6 +2097,51 @@ namespace {
       dump_detail::bounded_collection_chunk_bytes(7u, 4u, 4u, true),
       0u
     );
+  }
+
+  TEST(SbsDebugDumpAsyncTest, DirectCurrentPublicationRetainsEveryPairedOcrSlot) {
+    const auto frame = subtitle_frame({0u, 0u, 770u, 434u}, 1920u, 1080u);
+    const auto geometry = models::fit_subtitle_analysis_geometry(
+      frame.depth_input_region.width(), frame.depth_input_region.height(),
+      {frame.field_width, frame.field_height}, frame.field_content);
+    ASSERT_TRUE(geometry.valid());
+    auto ocr = empty_ocr(frame, geometry);
+    ocr[2u] = 1u; ocr[3u] = ocr[4u] = v2::subtitle_plane_cover_capacity;
+    auto plane = current_subtitle_plane(frame, v2::subtitle_plane_cover_capacity);
+    for (std::uint32_t slot = 0u; slot < v2::subtitle_plane_cover_capacity; ++slot) {
+      const subtitle_rect_t core {4u + slot * 80u, geometry.roi_top + 2u,
+        14u + slot * 80u, geometry.roi_top + 22u};
+      const subtitle_rect_t cover {core[0u] - 2u, core[1u] - 1u, core[2u] + 2u, core[3u] + 1u};
+      store_ocr_pair(ocr, slot, core, cover);
+    }
+    ASSERT_TRUE(subtitle_records_match_frame(word_bytes(ocr), word_bytes(plane), frame));
+    // Current producer order may change; no winner geometry is duplicated in UIP1.
+    for (const auto offset : {v2::subtitle_ocr_raw_box_offset, v2::subtitle_ocr_final_box_offset}) {
+      for (std::size_t word = 0u; word < v2::subtitle_ocr_box_word_count; ++word)
+        std::swap(ocr[offset + word], ocr[offset + 7u * v2::subtitle_ocr_box_word_count + word]);
+    }
+    EXPECT_TRUE(subtitle_records_match_frame(word_bytes(ocr), word_bytes(plane), frame));
+    auto missing_slot = plane;
+    missing_slot[v2::subtitle_plane_current_slot_mask_word] = 127u;
+    EXPECT_FALSE(subtitle_records_match_frame(word_bytes(ocr), word_bytes(missing_slot), frame));
+    auto mismatched_pair = ocr;
+    mismatched_pair[v2::subtitle_ocr_final_box_offset + 4u] ^= 1u;
+    EXPECT_FALSE(subtitle_records_match_frame(word_bytes(mismatched_pair), word_bytes(plane), frame));
+    for (const auto index : {v2::subtitle_plane_frame_offset, v2::subtitle_plane_analysis_generation_offset,
+        v2::subtitle_plane_observation_timestamp_offset, v2::subtitle_plane_source_extent_offset,
+        v2::subtitle_plane_field_extent_offset, v2::subtitle_plane_roi_offset,
+        v2::subtitle_plane_content_offset, v2::subtitle_plane_cut_epoch_word, v2::subtitle_plane_reserved_offset}) {
+      auto corrupt = plane; corrupt[index] ^= 1u;
+      EXPECT_FALSE(subtitle_records_match_frame(word_bytes(ocr), word_bytes(corrupt), frame)) << index;
+    }
+    // Legal empty has exact current identity; invalid OCR can publish only no-current authority.
+    ocr = empty_ocr(frame, geometry); ocr[2u] = 1u;
+    plane = current_subtitle_plane(frame, 0u);
+    EXPECT_TRUE(subtitle_records_match_frame(word_bytes(ocr), word_bytes(plane), frame));
+    ocr[2u] = 0u;
+    EXPECT_FALSE(subtitle_records_match_frame(word_bytes(ocr), word_bytes(plane), frame));
+    plane[v2::subtitle_plane_flags_word] = 0u;
+    EXPECT_TRUE(subtitle_records_match_frame(word_bytes(ocr), word_bytes(plane), frame));
   }
 
   TEST(SbsDebugDumpAsyncTest, NativeSubtitleValidationUsesVerticallyPaddedContent) {
@@ -1674,41 +2212,6 @@ namespace {
     ));
   }
 
-  TEST(SbsDebugDumpAsyncTest, NativeSubtitleValidationAuthenticatesDeathGraceLimit) {
-    constexpr models::depth_tensor_content_rect_t content {0u, 0u, 770u, 434u};
-    const auto frame = subtitle_frame(content, 1920u, 1080u);
-    const auto geometry = models::fit_subtitle_analysis_geometry(
-      frame.depth_input_region.width(), frame.depth_input_region.height(),
-      {frame.model_width, frame.model_height}, content
-    );
-    ASSERT_TRUE(geometry.valid());
-    const auto ocr = empty_ocr(frame, geometry);
-    auto locator = cached_grace_state(
-      frame, geometry, v2::subtitle_locator_death_grace_observations
-    );
-    EXPECT_TRUE(subtitle_records_match_frame(
-      word_bytes(ocr), word_bytes(locator), frame
-    ));
-
-    locator[18] = std::bit_cast<std::uint32_t>(
-      std::nextafter(
-        v2::direct_container_limit,
-        std::numeric_limits<float>::infinity()
-      )
-    );
-    EXPECT_FALSE(subtitle_records_match_frame(
-      word_bytes(ocr), word_bytes(locator), frame
-    ));
-
-    locator = cached_grace_state(
-      frame, geometry, v2::subtitle_locator_death_grace_observations
-    );
-
-    locator[25] = v2::subtitle_locator_death_grace_observations + 1u;
-    EXPECT_FALSE(subtitle_records_match_frame(
-      word_bytes(ocr), word_bytes(locator), frame
-    ));
-  }
 
   TEST(SbsDebugDumpAsyncTest, NativeAdaptiveUiAuthenticatesHostCapAndRejectsOtherModes) {
     constexpr models::depth_tensor_content_rect_t content {0u, 0u, 770u, 434u};
@@ -1720,15 +2223,8 @@ namespace {
       {frame.field_width, frame.field_height}, content);
     ASSERT_TRUE(geometry.valid());
     const auto ocr = empty_ocr(frame, geometry);
-    std::array<std::uint32_t, v2::subtitle_locator_state_word_count> locator {};
-    locator[0u] = v2::subtitle_locator_state_schema;
-    locator[1u] = v2::subtitle_locator_state_tag;
-    locator[10u] = static_cast<std::uint32_t>(frame.depth_input_region.analysis_generation);
-    locator[22u] = static_cast<std::uint32_t>(frame.matched_frame_id);
-    locator[26u] = subtitle_scene_epoch;
-    locator[27u] = frame.field_width;
-    locator[28u] = frame.field_height;
-    constexpr auto a = v2::subtitle_locator_adaptive_offset;
+    auto locator = current_subtitle_plane(frame, 0u, false);
+    constexpr auto a = v2::subtitle_plane_adaptive_offset;
     locator[a] = 1u;
     locator[a + 1u] = 8u;
     locator[a + 4u] = 1234u;
@@ -1931,7 +2427,7 @@ namespace {
     );
     ASSERT_TRUE(geometry.valid());
     const auto ocr = empty_ocr(frame, geometry);
-    auto locator = cached_grace_state(frame, geometry, 1u);
+    auto locator = current_subtitle_plane(frame, 0u, false);
 
     const float local_plane = 4.0f / 3440.0f;
     for (const float candidate : {
@@ -1939,7 +2435,7 @@ namespace {
            local_plane,
            v2::direct_container_limit,
          }) {
-      locator[18] = std::bit_cast<std::uint32_t>(candidate);
+      locator[v2::subtitle_plane_adaptive_offset + 3u] = std::bit_cast<std::uint32_t>(candidate);
       EXPECT_TRUE(subtitle_records_match_frame(
         word_bytes(ocr), word_bytes(locator), frame
       ));
@@ -1957,317 +2453,12 @@ namespace {
            ),
            std::numeric_limits<float>::quiet_NaN(),
          }) {
-      locator[18] = std::bit_cast<std::uint32_t>(candidate);
+      locator[v2::subtitle_plane_adaptive_offset + 3u] = std::bit_cast<std::uint32_t>(candidate);
       EXPECT_FALSE(subtitle_records_match_frame(
         word_bytes(ocr), word_bytes(locator), frame
       ));
     }
   }
 
-  TEST(SbsDebugDumpAsyncTest, NativeSubtitleValidationKeepsResetStateOutOfGrace) {
-    constexpr models::depth_tensor_content_rect_t content {0u, 0u, 770u, 434u};
-    const auto frame = subtitle_frame(content, 1920u, 1080u);
-    const auto geometry = models::fit_subtitle_analysis_geometry(
-      frame.depth_input_region.width(), frame.depth_input_region.height(),
-      {frame.model_width, frame.model_height}, content
-    );
-    ASSERT_TRUE(geometry.valid());
-
-    constexpr subtitle_rect_t first {180u, 350u, 590u, 360u};
-    constexpr subtitle_rect_t second {180u, 364u, 500u, 374u};
-    auto ocr = empty_ocr(frame, geometry);
-    ocr[2u] = 1u;
-    ocr[3u] = 2u;
-    ocr[4u] = 2u;
-    store_ocr_pair(ocr, 0u, first, first);
-    store_ocr_pair(ocr, 1u, second, second);
-
-    auto reset = two_line_subtitle_state(frame, first, second);
-    reset[2u] = 1u | 8u;  // owner + target-reset
-    reset[18u] = 0u;
-    reset[19u] = 0u;
-    reset[20u] = 0u;
-    reset[24u] = 0u;
-    std::fill_n(
-      reset.begin() + v2::subtitle_locator_current_offset,
-      v2::subtitle_locator_rectangle_capacity * 4u,
-      0u
-    );
-    EXPECT_TRUE(subtitle_records_match_frame(
-      word_bytes(ocr), word_bytes(reset), frame
-    ));
-
-    // An unreliable or excessive-residual observation retains only the owner transaction. Its
-    // zero reset marker is not a cached plane and therefore cannot enter death grace.
-    reset[25u] = 1u;
-    EXPECT_FALSE(subtitle_records_match_frame(
-      word_bytes(ocr), word_bytes(reset), frame
-    ));
-    reset[25u] = 0u;
-    reset[18u] = std::bit_cast<std::uint32_t>(-0.0f);
-    EXPECT_FALSE(subtitle_records_match_frame(
-      word_bytes(ocr), word_bytes(reset), frame
-    ));
-  }
-
-  TEST(SbsDebugDumpAsyncTest, NativeSubtitleValidationRejectsRetiredOwnerHold) {
-    constexpr models::depth_tensor_content_rect_t content {0u, 0u, 770u, 434u};
-    const auto frame = subtitle_frame(content, 1920u, 1080u);
-    const auto geometry = models::fit_subtitle_analysis_geometry(
-      frame.depth_input_region.width(), frame.depth_input_region.height(),
-      {frame.model_width, frame.model_height}, content
-    );
-    ASSERT_TRUE(geometry.valid());
-
-    constexpr subtitle_rect_t first {180u, 350u, 590u, 360u};
-    constexpr subtitle_rect_t second {180u, 364u, 500u, 374u};
-    auto ocr = empty_ocr(frame, geometry);
-    ocr[2u] = 1u;
-    ocr[3u] = 2u;
-    ocr[4u] = 2u;
-    store_ocr_pair(ocr, 0u, first, first);
-    store_ocr_pair(ocr, 1u, second, second);
-
-    auto held = two_line_subtitle_state(frame, first, second);
-    held[21u] = 0u;  // A hold is an ordinary continuing-owner observation.
-    ASSERT_TRUE(subtitle_records_match_frame(word_bytes(ocr), word_bytes(held), frame));
-    for (std::uint32_t count : {1u, 2u, 3u, 0xffffffffu}) {
-      held[25u] = count;
-      EXPECT_FALSE(subtitle_records_match_frame(
-        word_bytes(ocr),
-        word_bytes(held),
-        frame
-      ));
-    }
-
-    held[25u] = 1u;
-    EXPECT_FALSE(subtitle_records_match_frame(
-      word_bytes(ocr), word_bytes(held), frame
-    ));
-
-    // Word 25 is reserved zero while an owner exists, including observations with no current cover.
-    held[25u] = 1u;
-    held[21u] = 3u;
-    EXPECT_FALSE(subtitle_records_match_frame(
-      word_bytes(ocr), word_bytes(held), frame
-    ));
-    held[21u] = 0u;
-    held[20u] = 0u;
-    std::fill_n(
-      held.begin() + v2::subtitle_locator_current_offset,
-      v2::subtitle_locator_rectangle_capacity * 4u,
-      0u
-    );
-    EXPECT_FALSE(subtitle_records_match_frame(
-      word_bytes(ocr), word_bytes(held), frame
-    ));
-    held[2u] = 1u | 8u;
-    held[18u] = 0u;
-    held[19u] = 0u;
-    held[24u] = 0u;
-    EXPECT_FALSE(subtitle_records_match_frame(
-      word_bytes(ocr), word_bytes(held), frame
-    ));
-  }
-
-  TEST(SbsDebugDumpAsyncTest, NativeSubtitleValidationBindsCurrentToSelectedOcrOrder) {
-    constexpr models::depth_tensor_content_rect_t content {0u, 0u, 770u, 434u};
-    const auto frame = subtitle_frame(content, 1920u, 1080u);
-    const auto geometry = models::fit_subtitle_analysis_geometry(
-      frame.depth_input_region.width(), frame.depth_input_region.height(),
-      {frame.model_width, frame.model_height}, content
-    );
-    ASSERT_TRUE(geometry.valid());
-
-    constexpr subtitle_rect_t first {180u, 350u, 590u, 360u};
-    constexpr subtitle_rect_t second {180u, 364u, 500u, 374u};
-    // This is valid OCR8 evidence but deliberately fails SLR13's 48-cell/two-to-one core gate.
-    constexpr subtitle_rect_t unselected {40u, 380u, 60u, 400u};
-    auto ocr = empty_ocr(frame, geometry);
-    ocr[2u] = 1u;
-    ocr[3u] = 3u;
-    ocr[4u] = 3u;
-    store_ocr_pair(ocr, 0u, first, first);
-    store_ocr_pair(ocr, 1u, second, second);
-    store_ocr_pair(ocr, 2u, unselected, unselected);
-    ASSERT_TRUE(dump_detail::subtitle_ocr_record_is_canonical_for_frame(
-      word_bytes(ocr), frame
-    ));
-
-    const auto valid = two_line_subtitle_state(frame, first, second);
-    ASSERT_TRUE(subtitle_records_match_frame(
-      word_bytes(ocr), word_bytes(valid), frame
-    ));
-
-    auto foreign_scene_epoch = valid;
-    foreign_scene_epoch[26u] = subtitle_scene_epoch + 1u;
-    EXPECT_FALSE(subtitle_records_match_frame(
-      word_bytes(ocr), word_bytes(foreign_scene_epoch), frame
-    ));
-
-    const auto store_current = [](
-      auto &words,
-      const std::size_t slot,
-      const subtitle_rect_t rectangle
-    ) {
-      std::copy(
-        rectangle.begin(), rectangle.end(),
-        words.begin() + v2::subtitle_locator_current_offset + slot * 4u
-      );
-    };
-
-    auto selected_subsequence = valid;
-    selected_subsequence[20u] = 1u;
-    store_current(selected_subsequence, 0u, second);
-    store_current(selected_subsequence, 1u, {});
-    EXPECT_TRUE(subtitle_records_match_frame(
-      word_bytes(ocr), word_bytes(selected_subsequence), frame
-    ));
-
-    auto reversed = valid;
-    store_current(reversed, 0u, second);
-    store_current(reversed, 1u, first);
-    EXPECT_FALSE(subtitle_records_match_frame(
-      word_bytes(ocr), word_bytes(reversed), frame
-    ));
-
-    auto duplicate = valid;
-    store_current(duplicate, 1u, first);
-    EXPECT_FALSE(subtitle_records_match_frame(
-      word_bytes(ocr), word_bytes(duplicate), frame
-    ));
-
-    auto outside_selection = valid;
-    outside_selection[20u] = 1u;
-    store_current(outside_selection, 0u, unselected);
-    store_current(outside_selection, 1u, {});
-    EXPECT_FALSE(subtitle_records_match_frame(
-      word_bytes(ocr), word_bytes(outside_selection), frame
-    ));
-  }
-
-  TEST(SbsDebugDumpAsyncTest, NativeSubtitleValidationAuthenticatesProvisionalExactPair) {
-    constexpr models::depth_tensor_content_rect_t content {0u, 0u, 770u, 434u};
-    const auto frame = subtitle_frame(content, 1920u, 1080u);
-    const auto geometry = models::fit_subtitle_analysis_geometry(
-      frame.depth_input_region.width(), frame.depth_input_region.height(),
-      {frame.model_width, frame.model_height}, content
-    );
-    ASSERT_TRUE(geometry.valid());
-    constexpr subtitle_rect_t owner {203u, 369u, 566u, 384u};
-    constexpr subtitle_rect_t pending {342u, 368u, 415u, 386u};
-    constexpr subtitle_rect_t cover {337u, 364u, 420u, 390u};
-
-    auto ocr = empty_ocr(frame, geometry);
-    ocr[2u] = 1u;
-    ocr[3u] = 1u;
-    ocr[4u] = 1u;
-    store_ocr_pair(ocr, 0u, pending, cover);
-
-    std::array<std::uint32_t, v2::subtitle_locator_state_word_count> locator {};
-    constexpr std::uint32_t generation = 9u;
-    locator[0u] = v2::subtitle_locator_state_schema;
-    locator[1u] = v2::subtitle_locator_state_tag;
-    locator[2u] = 1u | 2u | 4u | v2::subtitle_locator_provisional_current_flag;
-    locator[3u] = generation;
-    locator[4u] = 1u;
-    std::copy(owner.begin(), owner.end(), locator.begin() + 5u);
-    locator[9u] = (owner[2] - owner[0]) * (owner[3] - owner[1]);
-    locator[10u] = static_cast<std::uint32_t>(
-      frame.depth_input_region.analysis_generation
-    );
-    locator[11u] = static_cast<std::uint32_t>(
-      frame.depth_input_region.analysis_generation >> 32u
-    );
-    locator[12u] = 1u;
-    std::copy(pending.begin(), pending.end(), locator.begin() + 13u);
-    locator[17u] = (pending[2] - pending[0]) * (pending[3] - pending[1]);
-    locator[18u] = std::bit_cast<std::uint32_t>(2.0f / (2.0f * 1920.0f));
-    locator[19u] = generation;
-    locator[20u] = 1u;
-    locator[22u] = static_cast<std::uint32_t>(frame.matched_frame_id);
-    locator[23u] = static_cast<std::uint32_t>(frame.matched_frame_id >> 32u);
-    locator[24u] = 2u;
-    locator[26u] = subtitle_scene_epoch;
-    locator[27u] = static_cast<std::uint32_t>(frame.model_width);
-    locator[28u] = static_cast<std::uint32_t>(frame.model_height);
-    locator[v2::subtitle_locator_provisional_target_word] = locator[18u];
-    locator[v2::subtitle_locator_provisional_fade_word] = 2u;
-    std::copy(
-      owner.begin(), owner.end(), locator.begin() + v2::subtitle_locator_owner_offset
-    );
-    std::copy(
-      pending.begin(), pending.end(), locator.begin() + v2::subtitle_locator_pending_offset
-    );
-    std::copy(
-      cover.begin(), cover.end(), locator.begin() + v2::subtitle_locator_current_offset
-    );
-    seed_adaptive_ui_tail(locator);
-    ASSERT_TRUE(subtitle_records_match_frame(
-      word_bytes(ocr), word_bytes(locator), frame
-    ));
-
-    auto wrong_cover = locator;
-    wrong_cover[v2::subtitle_locator_current_offset] = cover[0] - 1u;
-    EXPECT_FALSE(subtitle_records_match_frame(
-      word_bytes(ocr), word_bytes(wrong_cover), frame
-    ));
-
-    auto wrong_geometry = locator;
-    constexpr subtitle_rect_t unrelated {100u, 330u, 500u, 340u};
-    std::copy(unrelated.begin(), unrelated.end(), wrong_geometry.begin() + 5u);
-    wrong_geometry[9u] =
-      (unrelated[2] - unrelated[0]) * (unrelated[3] - unrelated[1]);
-    std::copy(
-      unrelated.begin(), unrelated.end(),
-      wrong_geometry.begin() + v2::subtitle_locator_owner_offset
-    );
-    EXPECT_FALSE(subtitle_records_match_frame(
-      word_bytes(ocr), word_bytes(wrong_geometry), frame
-    ));
-  }
-
-  TEST(SbsDebugDumpAsyncTest, NativeSubtitleValidationMirrorsStrictCornerCoreFilter) {
-    constexpr models::depth_tensor_content_rect_t content {0u, 0u, 770u, 434u};
-    const auto frame = subtitle_frame(content, 1920u, 1080u);
-    const auto geometry = models::fit_subtitle_analysis_geometry(
-      frame.depth_input_region.width(), frame.depth_input_region.height(),
-      {frame.model_width, frame.model_height}, content
-    );
-    ASSERT_TRUE(geometry.valid());
-    const auto edge_threshold = content.width() / v2::subtitle_locator_corner_edge_divisor;
-    const auto bottom_threshold =
-      geometry.roi_bottom - v2::subtitle_locator_corner_bottom_rows;
-    ASSERT_EQ(edge_threshold, 24u);
-
-    const subtitle_rect_t center {
-      200u, bottom_threshold - 10u, 400u, bottom_threshold,
-    };
-    const subtitle_rect_t edge_equal {
-      edge_threshold, bottom_threshold - 10u,
-      edge_threshold + 116u, bottom_threshold,
-    };
-    auto ocr = empty_ocr(frame, geometry);
-    ocr[2u] = 1u;
-    ocr[3u] = 2u;
-    ocr[4u] = 2u;
-    store_ocr_pair(ocr, 0u, edge_equal, edge_equal);
-    store_ocr_pair(ocr, 1u, center, center);
-    const auto locator = two_line_subtitle_state(frame, edge_equal, center);
-    EXPECT_TRUE(subtitle_records_match_frame(
-      word_bytes(ocr), word_bytes(locator), frame
-    ));
-
-    // Moving the same core one cell strictly inside the corner threshold removes it from the
-    // selected ordinary component, so an SLR state claiming both lines must fail authentication.
-    const subtitle_rect_t strict_corner {
-      edge_threshold - 1u, bottom_threshold - 10u,
-      edge_threshold + 115u, bottom_threshold,
-    };
-    store_ocr_pair(ocr, 0u, strict_corner, strict_corner);
-    EXPECT_FALSE(subtitle_records_match_frame(
-      word_bytes(ocr), word_bytes(locator), frame
-    ));
-  }
 }  // namespace
 #endif

@@ -19,6 +19,7 @@
 #include <src/depth_coordinate_v2.h>
 #include <src/generated/sbs_adaptive_state_contract.h>
 #include <src/host_sbs_shader_cache.h>
+#include <src/model_manager.h>
 #include <src/nvenc/nvenc_base.h>
 #include <src/nvenc/nvenc_config.h>
 #include <src/platform/windows/video_dom_client.h>
@@ -37,6 +38,7 @@
   #include <src/nvenc/nvenc_d3d11.h>
   #include <src/platform/windows/display_config.h>
   #include <wrl/client.h>
+  #include <wincodec.h>
 #include <tests/fixtures/host_sbs_adaptive_camera_state.h>
 
 namespace platf::dxgi {
@@ -1019,7 +1021,7 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
   EXPECT_GT(v2::max_horizontal_slope, 0.0f);
   EXPECT_LT(v2::max_horizontal_slope, 1.0f);
   EXPECT_FLOAT_EQ(v2::vertical_majorant_share, 0.75f);
-  EXPECT_EQ(v2::contract_schema, 87u);
+  EXPECT_EQ(v2::contract_schema, 115u);
   EXPECT_EQ(v2::capture_provenance_schema, 3u);
   EXPECT_EQ(v2::shadow_state_dump_schema, 18u);
   EXPECT_EQ(v2::shadow_frame_stats_dump_schema, 3u);
@@ -2290,6 +2292,53 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
     << "No hot observation completed inside the production eight-millisecond poll cap.";
 
   // Exercise the integrated D3D proposal -> CUDA conditional child -> final D3D receipt path.
+  // Ordinary OCR-ready frames deliberately force a fresh observation, so use a legal thin
+  // foreground region whose one-pixel OCR crop cannot project onto distinct safe field rows.
+  // The retained source still selects the same authenticated model profile and the earlier
+  // ordinary observations have already warmed the real OCR child in this same estimator.
+  constexpr UINT conditional_width = 1920u, conditional_height = 1080u;
+  const auto coarse_shape = models::fit_host_sbs_v2_depth_tensor_shape(
+    conditional_width, conditional_height
+  );
+  ASSERT_EQ(coarse_shape, models::fit_host_sbs_v2_depth_tensor_shape(width, height));
+  const auto thin_plan = models::plan_host_sbs_v2_video_region(
+    {0u, 0u, 1u, conditional_height}, conditional_width, conditional_height, coarse_shape
+  );
+  ASSERT_TRUE(thin_plan);
+  const auto high_content = models::host_sbs_convex2x_content_rect(
+    thin_plan->tensor_content, coarse_shape
+  );
+  const auto high_shape = models::host_sbs_convex2x_field_shape(coarse_shape);
+  ASSERT_TRUE(high_content);
+  ASSERT_TRUE(high_shape);
+  ASSERT_FALSE(models::fit_subtitle_analysis_geometry(
+    thin_plan->source_rect.width(), thin_plan->source_rect.height(), *high_shape, *high_content
+  ).valid());
+  const models::depth_input_region_t conditional_region {
+    .source_width = conditional_width, .source_height = conditional_height,
+    .left = 0u, .top = 0u, .right = 1u, .bottom = conditional_height,
+    .tensor_content = thin_plan->tensor_content,
+    .analysis_generation = 1u,
+    .authority = models::depth_analysis_authority_e::foreground_client,
+  };
+  ASSERT_TRUE(conditional_region.valid());
+  const std::vector<std::uint32_t> conditional_pixels(
+    static_cast<std::size_t>(conditional_width) * conditional_height, 0xff304050u
+  );
+  auto conditional_desc = desc;
+  conditional_desc.Width = conditional_width;
+  conditional_desc.Height = conditional_height;
+  const D3D11_SUBRESOURCE_DATA conditional_initial {
+    conditional_pixels.data(), conditional_width * sizeof(std::uint32_t), 0u
+  };
+  ComPtr<ID3D11Texture2D> conditional_texture;
+  ComPtr<ID3D11ShaderResourceView> conditional_source;
+  ASSERT_TRUE(SUCCEEDED(device->CreateTexture2D(
+    &conditional_desc, &conditional_initial, &conditional_texture
+  )));
+  ASSERT_TRUE(SUCCEEDED(device->CreateShaderResourceView(
+    conditional_texture.Get(), nullptr, &conditional_source
+  )));
   // Test-only waiting makes the receipt assertions deterministic; production polls never wait.
   const auto wait_until_reusable = [&]() {
     const auto deadline =
@@ -2328,13 +2377,99 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
   const std::uint64_t conditional_token = 0x13579bdf2468ace0ull;
   const auto baseline_frame_id = conditional_frame_id - 1u;
   const auto baseline = estimator.estimate_depth(
-    source.Get(), models::input_color_space::srgb, baseline_frame_id, false, {},
+    conditional_source.Get(), models::input_color_space::srgb, baseline_frame_id,
+    false, conditional_region,
     models::depth_optional_work_mode_e::ordinary,
     {.observation_timestamp_us = baseline_frame_id}
   );
   ASSERT_TRUE(baseline.inference_enqueued);
+  ASSERT_FALSE(baseline.subtitle_ocr_inference_enqueued);
   const auto baseline_completed = estimator.finish_pending_depth_for_evaluation();
   ASSERT_TRUE(baseline_completed.completed_frame_valid);
+  ASSERT_TRUE(baseline_completed.parallax_v2_producer_active);
+  // An unprojectable OCR crop still completes valid depth. Its exact-current abstention must
+  // clear every box and every protection diagnostic, with the published Final copying Base.
+  const auto read_words = [&](ID3D11ShaderResourceView *view, std::vector<std::uint32_t> &words) {
+    if (!view) return false;
+    ComPtr<ID3D11Resource> resource;
+    view->GetResource(&resource);
+    D3D11_RESOURCE_DIMENSION dimension {};
+    resource->GetType(&dimension);
+    D3D11_MAPPED_SUBRESOURCE mapped {};
+    if (dimension == D3D11_RESOURCE_DIMENSION_BUFFER) {
+      ComPtr<ID3D11Buffer> buffer, staging;
+      if (FAILED(resource.As(&buffer))) return false;
+      D3D11_BUFFER_DESC desc {};
+      buffer->GetDesc(&desc);
+      if (desc.ByteWidth == 0u || desc.ByteWidth % sizeof(std::uint32_t) != 0u ||
+          desc.ByteWidth > 128u * 1024u * 1024u) return false;
+      desc.Usage = D3D11_USAGE_STAGING; desc.BindFlags = 0u;
+      desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ; desc.MiscFlags = 0u; desc.StructureByteStride = 0u;
+      if (FAILED(device->CreateBuffer(&desc, nullptr, &staging))) return false;
+      context->CopyResource(staging.Get(), buffer.Get());
+      if (FAILED(context->Map(staging.Get(), 0u, D3D11_MAP_READ, 0u, &mapped))) return false;
+      words.resize(desc.ByteWidth / sizeof(std::uint32_t));
+      std::memcpy(words.data(), mapped.pData, desc.ByteWidth);
+      context->Unmap(staging.Get(), 0u);
+      return true;
+    }
+    if (dimension != D3D11_RESOURCE_DIMENSION_TEXTURE2D) return false;
+    ComPtr<ID3D11Texture2D> texture, staging;
+    if (FAILED(resource.As(&texture))) return false;
+    D3D11_TEXTURE2D_DESC desc {};
+    texture->GetDesc(&desc);
+    if ((desc.Format != DXGI_FORMAT_R32_UINT && desc.Format != DXGI_FORMAT_R32_FLOAT) ||
+        desc.MipLevels != 1u || desc.ArraySize != 1u || desc.Width == 0u || desc.Height == 0u ||
+        std::uint64_t(desc.Width) * desc.Height > 32u * 1024u * 1024u) return false;
+    desc.Usage = D3D11_USAGE_STAGING; desc.BindFlags = 0u;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ; desc.MiscFlags = 0u;
+    if (FAILED(device->CreateTexture2D(&desc, nullptr, &staging))) return false;
+    context->CopyResource(staging.Get(), texture.Get());
+    if (FAILED(context->Map(staging.Get(), 0u, D3D11_MAP_READ, 0u, &mapped))) return false;
+    words.resize(static_cast<std::size_t>(desc.Width) * desc.Height);
+    for (UINT y = 0u; y < desc.Height; ++y) {
+      std::memcpy(words.data() + static_cast<std::size_t>(y) * desc.Width,
+        static_cast<const std::uint8_t *>(mapped.pData) + y * mapped.RowPitch,
+        static_cast<std::size_t>(desc.Width) * sizeof(std::uint32_t));
+    }
+    context->Unmap(staging.Get(), 0u);
+    return true;
+  };
+  namespace v2 = models::depth_coordinate_v2;
+  std::vector<std::uint32_t> ocr_words;
+  ASSERT_TRUE(read_words(baseline_completed.ocr_box_record.Get(), ocr_words));
+  std::vector<std::uint32_t> abstention(v2::subtitle_ocr_record_word_count, 0u);
+  abstention[0u] = v2::subtitle_ocr_record_schema;
+  abstention[1u] = v2::subtitle_ocr_record_tag;
+  abstention[5u] = static_cast<std::uint32_t>(baseline_frame_id);
+  abstention[6u] = static_cast<std::uint32_t>(baseline_frame_id >> 32u);
+  abstention[7u] = static_cast<std::uint32_t>(conditional_region.analysis_generation);
+  abstention[8u] = static_cast<std::uint32_t>(conditional_region.analysis_generation >> 32u);
+  abstention[9u] = conditional_region.width();
+  abstention[10u] = conditional_region.height();
+  abstention[11u] = static_cast<std::uint32_t>(high_shape->width);
+  abstention[12u] = static_cast<std::uint32_t>(high_shape->height);
+  EXPECT_EQ(ocr_words, abstention);
+  std::vector<std::uint32_t> locator_words;
+  ASSERT_TRUE(read_words(baseline_completed.subtitle_locator_state.Get(), locator_words));
+  ASSERT_EQ(locator_words.size(), v2::subtitle_plane_state_word_count);
+  EXPECT_EQ(locator_words[v2::subtitle_plane_current_slot_mask_word], 0u);
+  for (auto *view : {
+         baseline_completed.subtitle_contour_support.Get(),
+         baseline_completed.subtitle_contour_field_pin.Get(),
+         baseline_completed.subtitle_gaussian_weight.Get(),
+       }) {
+    ASSERT_NE(view, nullptr);
+    std::vector<std::uint32_t> protection;
+    ASSERT_TRUE(read_words(view, protection));
+    EXPECT_TRUE(std::all_of(protection.begin(), protection.end(), [](auto word) { return word == 0u; }));
+  }
+  ASSERT_NE(baseline_completed.shadow_base_final_parallax.Get(), nullptr);
+  ASSERT_NE(baseline_completed.shadow_final_parallax.Get(), nullptr);
+  std::vector<std::uint32_t> base_words, final_words;
+  ASSERT_TRUE(read_words(baseline_completed.shadow_base_final_parallax.Get(), base_words));
+  ASSERT_TRUE(read_words(baseline_completed.shadow_final_parallax.Get(), final_words));
+  EXPECT_EQ(final_words, base_words);
   // An idle encode/presentation iteration drains the shared readback without submitting another
   // frame. The next functional caller still receives the exact completed proof from the cache.
   context->Flush();
@@ -2366,13 +2501,12 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
   ASSERT_EQ(baseline_receipt->depth_owner_frame_id, baseline_frame_id);
   ASSERT_TRUE(wait_until_reusable());
   const auto conditional = estimator.estimate_depth(
-    source.Get(),
+    conditional_source.Get(),
     models::input_color_space::srgb,
     conditional_frame_id,
     false,
-    {},
-    // The earlier observations built the real DAV2+OCR superset. The conditional root retains
-    // that topology while its device branch reuses depth and subtitle analysis together.
+    conditional_region,
+    // The OCR-ineligible ordinary route retains actual device-owned infer/reuse decisions.
     models::depth_optional_work_mode_e::ordinary,
     models::gpu_adaptive_reuse_request {
       .authorize_gpu_undecided_reuse = true,
@@ -2383,7 +2517,7 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
   );
   ASSERT_TRUE(conditional.gpu_undecided_transaction_enqueued);
   EXPECT_FALSE(conditional.inference_enqueued);
-  EXPECT_EQ(conditional.subtitle_ocr_inference_enqueued, observed_ocr_child_armed);
+  EXPECT_FALSE(conditional.subtitle_ocr_inference_enqueued);
 
   const auto conditional_completed = estimator.finish_pending_depth_for_evaluation();
   ASSERT_TRUE(conditional_completed.completed_frame_valid);
@@ -2403,11 +2537,11 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
   ASSERT_TRUE(wait_until_reusable());
   const auto followup_frame_id = conditional_frame_id + 1u;
   const auto followup = estimator.estimate_depth(
-    source.Get(),
+    conditional_source.Get(),
     models::input_color_space::srgb,
     followup_frame_id,
     false,
-    {},
+    conditional_region,
     models::depth_optional_work_mode_e::ordinary,
     models::gpu_adaptive_reuse_request {
       .authorize_gpu_undecided_reuse = true,
@@ -2419,7 +2553,7 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
   EXPECT_FALSE(followup.completed_frame_valid);
   EXPECT_FALSE(followup.inference_enqueued);
   EXPECT_TRUE(followup.gpu_undecided_transaction_enqueued);
-  EXPECT_EQ(followup.subtitle_ocr_inference_enqueued, observed_ocr_child_armed);
+  EXPECT_FALSE(followup.subtitle_ocr_inference_enqueued);
 
   const auto followup_completed = estimator.finish_pending_depth_for_evaluation();
   ASSERT_TRUE(followup_completed.completed_frame_valid);
@@ -2431,11 +2565,11 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
   ASSERT_TRUE(wait_until_reusable());
   const auto forced_frame_id = followup_frame_id + 1u;
   const auto forced = estimator.estimate_depth(
-    source.Get(),
+    conditional_source.Get(),
     models::input_color_space::srgb,
     forced_frame_id,
     false,
-    {},
+    conditional_region,
     models::depth_optional_work_mode_e::ordinary,
     models::gpu_adaptive_reuse_request {
       .authorize_gpu_undecided_reuse = true,
@@ -2464,16 +2598,16 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
   // the production integration proof that the in-place-sanitized TensorRT child executes inside
   // an undecided wrapper transaction, rather than testing only the identical-input reuse branch.
   const std::vector<std::uint32_t> changed_pixels(
-    static_cast<std::size_t>(width) * height,
+    static_cast<std::size_t>(conditional_width) * conditional_height,
     0xffffffffu
   );
   const D3D11_SUBRESOURCE_DATA changed_initial {
-    changed_pixels.data(), width * sizeof(std::uint32_t), 0u
+    changed_pixels.data(), conditional_width * sizeof(std::uint32_t), 0u
   };
   ComPtr<ID3D11Texture2D> changed_texture;
   ComPtr<ID3D11ShaderResourceView> changed_source;
   ASSERT_TRUE(SUCCEEDED(device->CreateTexture2D(
-    &desc, &changed_initial, &changed_texture
+    &conditional_desc, &changed_initial, &changed_texture
   )));
   ASSERT_TRUE(SUCCEEDED(device->CreateShaderResourceView(
     changed_texture.Get(), nullptr, &changed_source
@@ -2485,7 +2619,7 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
     models::input_color_space::srgb,
     changed_frame_id,
     false,
-    {},
+    conditional_region,
     models::depth_optional_work_mode_e::ordinary,
     models::gpu_adaptive_reuse_request {
       .authorize_gpu_undecided_reuse = true,
@@ -2545,6 +2679,809 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
   EXPECT_TRUE(ordinary_receipt->subtitle_is_current());
 
   EXPECT_FALSE(estimator.has_terminal_failure());
+}
+
+TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedElevenViewTuple) {
+  const auto *enabled = std::getenv("APOLLO_RUN_TENSORRT_TESTS");
+  if (!enabled || std::string_view {enabled} != "1") {
+    GTEST_SKIP() << "Set APOLLO_RUN_TENSORRT_TESTS=1 for the local NVIDIA/TensorRT integration check.";
+  }
+
+  using Microsoft::WRL::ComPtr;
+  namespace v2 = models::depth_coordinate_v2;
+  ComPtr<ID3D11Device> device;
+  ComPtr<ID3D11DeviceContext> context;
+  D3D_FEATURE_LEVEL actual {};
+  constexpr D3D_FEATURE_LEVEL requested[] {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
+  ASSERT_TRUE(SUCCEEDED(D3D11CreateDevice(
+    nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+    requested, static_cast<UINT>(std::size(requested)), D3D11_SDK_VERSION,
+    &device, &actual, &context
+  )));
+
+  constexpr UINT source_width = 1280u;
+  constexpr UINT source_height = 720u;
+  constexpr std::uint64_t frame_n = 0x10001abc0ull;
+  constexpr std::uint64_t clock_n = 0x200030000ull;
+  const auto assets = std::filesystem::path {SUNSHINE_TEST_BIN_DIR}.parent_path() / "assets";
+  struct source_t {
+    UINT width, height;
+    std::vector<std::uint32_t> pixels;
+    ComPtr<ID3D11Texture2D> texture;
+    ComPtr<ID3D11ShaderResourceView> view;
+  };
+  const auto create_source = [&](UINT width, UINT height, bool follower, source_t &out) {
+    out.width = width;
+    out.height = height;
+    out.pixels.resize(static_cast<std::size_t>(width) * height);
+    // Deterministic nonuniform RGB exercises real depth and OCR without an external image asset.
+    // The follower uses different scene and glyph colors, so its crop cannot match N's.
+    for (UINT y = 0u; y < height; ++y) {
+      for (UINT x = 0u; x < width; ++x) {
+        const UINT r = 32u + x * 159u / (width - 1u);
+        const UINT g = 24u + y * 143u / (height - 1u);
+        const UINT b = 20u + ((x / 64u + y / 48u) % 2u) * 68u;
+        const auto rgb = (r << 16u) | (g << 8u) | b;
+        out.pixels[static_cast<std::size_t>(y) * width + x] =
+          0xff000000u | (follower ? (rgb ^ 0x00ffffffu) : rgb);
+      }
+    }
+    // Author readable light glyphs with dark outlines inside the canonical bottom OCR band.
+    // This is input fixture construction, not a CPU contour/conditioner oracle.
+    constexpr std::array<std::array<std::uint8_t, 7u>, 10u> glyphs {{
+      {{14, 17, 17, 31, 17, 17, 17}}, // A
+      {{30, 17, 17, 30, 16, 16, 16}}, // P
+      {{14, 17, 17, 17, 17, 17, 14}}, // O
+      {{16, 16, 16, 16, 16, 16, 31}}, // L
+      {{15, 16, 16, 14, 1, 1, 30}},   // S
+      {{17, 17, 17, 17, 17, 17, 14}}, // U
+      {{30, 17, 17, 30, 17, 17, 30}}, // B
+      {{31, 4, 4, 4, 4, 4, 4}},      // T
+      {{14, 4, 4, 4, 4, 4, 14}},     // I
+      {{31, 16, 16, 30, 16, 16, 31}}, // E
+    }};
+    constexpr std::array<int, 15u> text {0, 1, 2, 3, 3, 2, -1, 4, 5, 6, 7, 8, 7, 3, 9};
+    constexpr UINT scale = 8u;
+    const UINT left = (width - static_cast<UINT>(text.size()) * 6u * scale) / 2u;
+    const UINT top = height - 104u;
+    for (UINT pass = 0u; pass < 2u; ++pass) {
+      for (std::size_t character = 0u; character < text.size(); ++character) {
+        if (text[character] < 0) continue;
+        for (UINT row = 0u; row < 7u; ++row) {
+          for (UINT column = 0u; column < 5u; ++column) {
+            if ((glyphs[static_cast<std::size_t>(text[character])][row] & (16u >> column)) == 0u) continue;
+            const int radius = pass == 0u ? 2 : 0;
+            const int x0 = static_cast<int>(left + character * 6u * scale + column * scale);
+            const int y0 = static_cast<int>(top + row * scale);
+            for (int y = y0 - radius; y < y0 + static_cast<int>(scale) + radius; ++y) {
+              for (int x = x0 - radius; x < x0 + static_cast<int>(scale) + radius; ++x) {
+                out.pixels[static_cast<std::size_t>(y) * width + static_cast<UINT>(x)] =
+                  pass == 0u ? 0xff080808u : (follower ? 0xffd02880u : 0xfff5f0e8u);
+              }
+            }
+          }
+        }
+      }
+    }
+    D3D11_TEXTURE2D_DESC desc {};
+    desc.Width = width;
+    desc.Height = height;
+    desc.MipLevels = 1u;
+    desc.ArraySize = 1u;
+    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    desc.SampleDesc.Count = 1u;
+    desc.Usage = D3D11_USAGE_IMMUTABLE;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    const D3D11_SUBRESOURCE_DATA initial {
+      out.pixels.data(), width * static_cast<UINT>(sizeof(std::uint32_t)), 0u
+    };
+    return SUCCEEDED(device->CreateTexture2D(&desc, &initial, &out.texture)) &&
+      SUCCEEDED(device->CreateShaderResourceView(out.texture.Get(), nullptr, &out.view));
+  };
+  source_t source_n;
+  ASSERT_TRUE(create_source(source_width, source_height, false, source_n));
+
+  struct payload_t {
+    D3D11_RESOURCE_DIMENSION dimension = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+    UINT width = 0u, height = 0u, element_stride = 0u;
+    std::vector<std::uint8_t> bytes;
+  };
+  using tuple_t = std::array<payload_t, 11u>;
+  constexpr std::array<const char *, 11u> names {
+    "support", "field pin", "distance", "identity", "history", "source", "probability",
+    "Gaussian weight", "Gaussian blend", "Gaussian vertical conditioned", "Gaussian control"
+  };
+  const auto read_view = [&](ID3D11ShaderResourceView *view, payload_t &out) {
+    if (!view) return false;
+    out = {};
+    ComPtr<ID3D11Resource> resource;
+    view->GetResource(&resource);
+    resource->GetType(&out.dimension);
+    D3D11_MAPPED_SUBRESOURCE mapped {};
+    if (out.dimension == D3D11_RESOURCE_DIMENSION_BUFFER) {
+      ComPtr<ID3D11Buffer> buffer, staging;
+      if (FAILED(resource.As(&buffer))) return false;
+      D3D11_BUFFER_DESC desc {};
+      buffer->GetDesc(&desc);
+      out.width = desc.ByteWidth;
+      out.height = 1u;
+      out.element_stride = desc.StructureByteStride;
+      desc.Usage = D3D11_USAGE_STAGING;
+      desc.BindFlags = 0u;
+      desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+      desc.MiscFlags = 0u;
+      desc.StructureByteStride = 0u;
+      if (FAILED(device->CreateBuffer(&desc, nullptr, &staging))) return false;
+      context->CopyResource(staging.Get(), buffer.Get());
+      if (FAILED(context->Map(staging.Get(), 0u, D3D11_MAP_READ, 0u, &mapped))) return false;
+      out.bytes.resize(desc.ByteWidth);
+      std::memcpy(out.bytes.data(), mapped.pData, out.bytes.size());
+      context->Unmap(staging.Get(), 0u);
+      return true;
+    }
+    if (out.dimension != D3D11_RESOURCE_DIMENSION_TEXTURE2D) return false;
+    ComPtr<ID3D11Texture2D> texture, staging;
+    if (FAILED(resource.As(&texture))) return false;
+    D3D11_TEXTURE2D_DESC desc {};
+    texture->GetDesc(&desc);
+    out.format = desc.Format;
+    out.width = desc.Width;
+    out.height = desc.Height;
+    out.element_stride = desc.Format == DXGI_FORMAT_R32_UINT || desc.Format == DXGI_FORMAT_R32_FLOAT ? 4u :
+      desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT ? 8u :
+      desc.Format == DXGI_FORMAT_R32G32B32A32_FLOAT ? 16u : 0u;
+    if (out.element_stride == 0u || desc.MipLevels != 1u || desc.ArraySize != 1u) return false;
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.BindFlags = 0u;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    desc.MiscFlags = 0u;
+    if (FAILED(device->CreateTexture2D(&desc, nullptr, &staging))) return false;
+    context->CopyResource(staging.Get(), texture.Get());
+    if (FAILED(context->Map(staging.Get(), 0u, D3D11_MAP_READ, 0u, &mapped))) return false;
+    const auto row_bytes = static_cast<std::size_t>(out.width) * out.element_stride;
+    out.bytes.resize(row_bytes * out.height);
+    for (UINT y = 0u; y < out.height; ++y) {
+      std::memcpy(out.bytes.data() + y * row_bytes,
+                  static_cast<const std::uint8_t *>(mapped.pData) + y * mapped.RowPitch, row_bytes);
+    }
+    context->Unmap(staging.Get(), 0u);
+    return true;
+  };
+  const auto read_tuple = [&](const models::estimate_result &result, tuple_t &out) {
+    const std::array<ID3D11ShaderResourceView *, 11u> views {
+      result.subtitle_contour_support.Get(), result.subtitle_contour_field_pin.Get(),
+      result.subtitle_contour_distance.Get(), result.subtitle_contour_identity.Get(),
+      result.subtitle_contour_history.Get(), result.subtitle_contour_source.Get(),
+      result.subtitle_ocr_probability.Get(), result.subtitle_gaussian_weight.Get(),
+      result.subtitle_gaussian_blend.Get(), result.subtitle_gaussian_vertical_conditioned.Get(),
+      result.subtitle_gaussian_control.Get()
+    };
+    for (std::size_t i = 0u; i < views.size(); ++i) {
+      if (!read_view(views[i], out[i])) return false;
+    }
+    return true;
+  };
+  const auto wait_until_reusable = [](models::video_depth_estimator &estimator) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds {2};
+    do {
+      if (estimator.can_accept_frame()) return true;
+      if (estimator.has_terminal_failure()) return false;
+      std::this_thread::yield();
+    } while (std::chrono::steady_clock::now() < deadline);
+    return false;
+  };
+  const auto submit_n = [&](models::video_depth_estimator &estimator, bool warm) {
+    return estimator.estimate_depth(
+      source_n.view.Get(), models::input_color_space::srgb, warm ? frame_n - 1u : frame_n,
+      false, {}, models::depth_optional_work_mode_e::ordinary,
+      {.observation_timestamp_us = warm ? clock_n - 33333u : clock_n}
+    );
+  };
+
+  // A serialized control supplies actual production probability/support bytes, not a CPU model.
+  // Release its physical engine context before constructing either pipelined estimator.
+  tuple_t expected;
+  {
+    models::video_depth_estimator control {
+      device, context, assets, config::video_t::sbs_t {}, video::host_sbs_v2_depth_model()
+    };
+    ASSERT_TRUE(control.is_valid());
+    const auto warm = submit_n(control, true);
+    ASSERT_TRUE(warm.inference_enqueued);
+    ASSERT_TRUE(warm.subtitle_ocr_inference_enqueued);
+    ASSERT_TRUE(control.finish_pending_depth_for_evaluation().completed_frame_valid);
+    ASSERT_TRUE(wait_until_reusable(control));
+    const auto submission = submit_n(control, false);
+    ASSERT_TRUE(submission.inference_enqueued);
+    ASSERT_TRUE(submission.subtitle_ocr_inference_enqueued);
+    const auto expected_metadata = control.finish_pending_depth_for_evaluation();
+    ASSERT_TRUE(models::subtitle_evidence_is_exact_frame(expected_metadata));
+    ASSERT_EQ(expected_metadata.completed_frame_id, frame_n);
+    ASSERT_TRUE(read_tuple(expected_metadata, expected));
+  }
+
+  const UINT crop_height = models::subtitle_ocr_source_crop_height(source_width, source_height);
+  const auto half_unorm8 = [](std::uint32_t channel) -> std::uint16_t {
+    if (channel == 0u) return 0u;
+    const auto bits = std::bit_cast<std::uint32_t>(static_cast<float>(channel) / 255.0f);
+    // The native R16_FLOAT texture store converts these normal positive FP32 values with
+    // round-to-zero. A nearest-even CPU cast is a different numeric oracle.
+    return static_cast<std::uint16_t>((((bits >> 23u) & 255u) - 112u) << 10u |
+                                      ((bits & 0x7fffffu) >> 13u));
+  };
+  std::vector<std::uint16_t> expected_source(static_cast<std::size_t>(source_width) * crop_height * 4u);
+  for (UINT y = 0u; y < crop_height; ++y) {
+    for (UINT x = 0u; x < source_width; ++x) {
+      const auto rgb = source_n.pixels[static_cast<std::size_t>(source_height - crop_height + y) * source_width + x];
+      const auto index = (static_cast<std::size_t>(y) * source_width + x) * 4u;
+      expected_source[index] = half_unorm8((rgb >> 16u) & 255u);
+      expected_source[index + 1u] = half_unorm8((rgb >> 8u) & 255u);
+      expected_source[index + 2u] = half_unorm8(rgb & 255u);
+      expected_source[index + 3u] = 0x3c00u;
+    }
+  }
+  ASSERT_EQ(expected[5u].bytes.size(), expected_source.size() * sizeof(std::uint16_t));
+  ASSERT_EQ(std::memcmp(expected[5u].bytes.data(), expected_source.data(), expected[5u].bytes.size()), 0)
+    << "The control must publish actual native source pixels, not a zeroed/ineligible snapshot.";
+  ASSERT_EQ(expected[6u].bytes.size(), 960u * 160u * sizeof(float));
+  ASSERT_TRUE(std::any_of(expected[6u].bytes.begin(), expected[6u].bytes.end(),
+                          [](std::uint8_t byte) { return byte != 0u; }))
+    << "A zero probability placeholder cannot serve as the detector oracle.";
+
+  constexpr std::array<std::array<UINT, 2u>, 2u> followers {{{1280u, 720u}, {1920u, 1080u}}};
+  for (const auto &extent : followers) {
+    SCOPED_TRACE(std::to_string(extent[0u]) + 'x' + std::to_string(extent[1u]));
+    source_t follower;
+    ASSERT_TRUE(create_source(extent[0u], extent[1u], true, follower));
+    models::video_depth_estimator estimator {
+      device, context, assets, config::video_t::sbs_t {}, video::host_sbs_v2_depth_model()
+    };
+    ASSERT_TRUE(estimator.is_valid());
+    const auto warm = submit_n(estimator, true);
+    ASSERT_TRUE(warm.inference_enqueued);
+    ASSERT_TRUE(warm.subtitle_ocr_inference_enqueued);
+    ASSERT_TRUE(estimator.finish_pending_depth_for_evaluation().completed_frame_valid);
+    ASSERT_TRUE(wait_until_reusable(estimator));
+    const auto pending_n = submit_n(estimator, false);
+    ASSERT_TRUE(pending_n.inference_enqueued);
+    ASSERT_TRUE(pending_n.subtitle_ocr_inference_enqueued);
+    ASSERT_FALSE(pending_n.completed_frame_valid);
+    // Query readiness only. No finish/poll consumes N: the next estimate call must perform the
+    // complete consume-N/admit-N+1 transition before any diagnostic readback is attempted.
+    ASSERT_TRUE(wait_until_reusable(estimator));
+    const auto completed_n = estimator.estimate_depth(
+      follower.view.Get(), models::input_color_space::srgb, frame_n + 1u, false, {},
+      models::depth_optional_work_mode_e::ordinary,
+      {.observation_timestamp_us = clock_n + 33333u}
+    );
+    ASSERT_TRUE(completed_n.completed_frame_valid);
+    ASSERT_EQ(completed_n.completed_frame_id, frame_n);
+    ASSERT_TRUE(completed_n.inference_enqueued);
+    ASSERT_TRUE(completed_n.subtitle_ocr_inference_enqueued);
+    ASSERT_TRUE(models::subtitle_evidence_is_exact_frame(completed_n));
+    ASSERT_TRUE(estimator.publication_is_current(completed_n.publication));
+    ASSERT_EQ(completed_n.input_region.source_width, source_width);
+    ASSERT_EQ(completed_n.input_region.source_height, source_height);
+
+    tuple_t before, after;
+    ASSERT_TRUE(read_tuple(completed_n, before));
+    ASSERT_EQ(before[3u].bytes.size(), v2::subtitle_contour_history_word_count * sizeof(std::uint32_t));
+    std::array<std::uint32_t, v2::subtitle_contour_history_word_count> identity {};
+    std::memcpy(identity.data(), before[3u].bytes.data(), before[3u].bytes.size());
+    EXPECT_EQ(identity[0u], v2::subtitle_contour_schema);
+    EXPECT_EQ(identity[1u], v2::subtitle_contour_history_tag);
+    EXPECT_EQ(identity[4u], static_cast<std::uint32_t>(frame_n));
+    EXPECT_EQ(identity[5u], static_cast<std::uint32_t>(frame_n >> 32u));
+    EXPECT_EQ(identity[6u], 0u);
+    EXPECT_EQ(identity[7u], 0u);
+    EXPECT_EQ(identity[8u], source_width);
+    EXPECT_EQ(identity[9u], source_height);
+    EXPECT_EQ(identity[10u], source_height - crop_height);
+    EXPECT_EQ(identity[11u], crop_height);
+    EXPECT_EQ(identity[12u], static_cast<UINT>(completed_n.field_width));
+    EXPECT_EQ(identity[13u], static_cast<UINT>(completed_n.field_height));
+    EXPECT_EQ(identity[20u], static_cast<std::uint32_t>(clock_n));
+    EXPECT_EQ(identity[21u], static_cast<std::uint32_t>(clock_n >> 32u));
+    EXPECT_EQ(identity[22u], v2::subtitle_contour_recipe);
+    for (const auto index : {0u, 4u, 5u}) {
+      EXPECT_EQ(before[index].width, source_width) << names[index];
+      EXPECT_EQ(before[index].height, crop_height) << names[index];
+    }
+    for (std::size_t i = 0u; i < before.size(); ++i) {
+      SCOPED_TRACE(names[i]);
+      EXPECT_EQ(before[i].dimension, expected[i].dimension);
+      EXPECT_EQ(before[i].format, expected[i].format);
+      EXPECT_EQ(before[i].width, expected[i].width);
+      EXPECT_EQ(before[i].height, expected[i].height);
+      EXPECT_EQ(before[i].element_stride, expected[i].element_stride);
+      EXPECT_EQ(before[i].bytes, expected[i].bytes);
+    }
+    // N+1 may finish CUDA while its working source/probability are reused. It remains unconsumed,
+    // so N is still the current publication and every completed diagnostic must retain its bits.
+    ASSERT_TRUE(wait_until_reusable(estimator));
+    ASSERT_TRUE(estimator.publication_is_current(completed_n.publication));
+    ASSERT_TRUE(read_tuple(completed_n, after));
+    for (std::size_t i = 0u; i < after.size(); ++i) {
+      SCOPED_TRACE(names[i]);
+      EXPECT_EQ(after[i].dimension, before[i].dimension);
+      EXPECT_EQ(after[i].format, before[i].format);
+      EXPECT_EQ(after[i].width, before[i].width);
+      EXPECT_EQ(after[i].height, before[i].height);
+      EXPECT_EQ(after[i].element_stride, before[i].element_stride);
+      EXPECT_EQ(after[i].bytes, before[i].bytes);
+    }
+    // Cleanup occurs only after the pipeline assertions; a new publication ends N's borrowed
+    // view lifetime. Never claim that saved SRVs authenticate N after that invalidation.
+    const auto completed_follower = estimator.finish_pending_depth_for_evaluation();
+    ASSERT_TRUE(completed_follower.completed_frame_valid);
+    EXPECT_EQ(completed_follower.completed_frame_id, frame_n + 1u);
+    EXPECT_FALSE(estimator.publication_is_current(completed_n.publication));
+    EXPECT_FALSE(estimator.has_terminal_failure());
+  }
+}
+
+// Actual joined observations, native count history and publication; no CPU contour/warp oracle.
+TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHoldIdleTupleAndResetExtent) {
+  const auto *enabled = std::getenv("APOLLO_RUN_TENSORRT_TESTS");
+  if (!enabled || std::string_view {enabled} != "1") {
+    GTEST_SKIP() << "Set APOLLO_RUN_TENSORRT_TESTS=1 for the local NVIDIA/TensorRT integration check.";
+  }
+  using Microsoft::WRL::ComPtr;
+  namespace v2 = models::depth_coordinate_v2;
+  namespace receipt = models::host_sbs_gpu_completion_receipt;
+  const auto image_path = std::filesystem::path {SUNSHINE_SOURCE_DIR} /
+    "tools/sbsbench/clips/subtitle_cjk_dense/frame_00008.png";
+  constexpr auto image_sha = "4e8e31f48ff3d209f924e81224b1b25f055d3c94bb481d7eaf304a1aaedae406";
+  ASSERT_EQ(models::file_sha256_hex(image_path), image_sha);
+  RecordProperty("committed_source_sha256", image_sha);
+
+  struct com_scope_t {
+    HRESULT status = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    ~com_scope_t() { if (SUCCEEDED(status)) CoUninitialize(); }
+  } com_scope;
+  ASSERT_TRUE(SUCCEEDED(com_scope.status) || com_scope.status == RPC_E_CHANGED_MODE);
+  ComPtr<IWICImagingFactory> factory;
+  ComPtr<IWICBitmapDecoder> decoder;
+  ComPtr<IWICBitmapFrameDecode> image;
+  ComPtr<IWICFormatConverter> converter;
+  ASSERT_TRUE(SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr,
+    CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory))));
+  ASSERT_TRUE(SUCCEEDED(factory->CreateDecoderFromFilename(image_path.c_str(), nullptr,
+    GENERIC_READ, WICDecodeMetadataCacheOnLoad, &decoder)));
+  ASSERT_TRUE(SUCCEEDED(decoder->GetFrame(0u, &image)));
+  UINT source_width = 0u, source_height = 0u;
+  ASSERT_TRUE(SUCCEEDED(image->GetSize(&source_width, &source_height)));
+  ASSERT_EQ(source_width, 854u);
+  ASSERT_EQ(source_height, 480u);
+  ASSERT_TRUE(SUCCEEDED(factory->CreateFormatConverter(&converter)));
+  ASSERT_TRUE(SUCCEEDED(converter->Initialize(image.Get(), GUID_WICPixelFormat32bppBGRA,
+    WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom)));
+  std::vector<std::uint32_t> image_pixels(static_cast<std::size_t>(source_width) * source_height);
+  ASSERT_TRUE(SUCCEEDED(converter->CopyPixels(nullptr, source_width * 4u,
+    static_cast<UINT>(image_pixels.size() * 4u), reinterpret_cast<BYTE *>(image_pixels.data()))));
+  converter.Reset(); image.Reset(); decoder.Reset(); factory.Reset();
+
+  ComPtr<ID3D11Device> device;
+  ComPtr<ID3D11DeviceContext> context;
+  D3D_FEATURE_LEVEL actual {};
+  constexpr D3D_FEATURE_LEVEL requested[] {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
+  ASSERT_TRUE(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, requested, static_cast<UINT>(std::size(requested)),
+    D3D11_SDK_VERSION, &device, &actual, &context)));
+  constexpr std::uint32_t changed_rgb = 0xff00ff00u;
+  const auto create_source = [&](UINT width, UINT height, ComPtr<ID3D11ShaderResourceView> &view,
+                               std::optional<std::array<UINT, 2u>> patch_center = std::nullopt) {
+    // The extent-reset input is the same committed scene at a declared nearest-neighbour raster
+    // size. This is fixture preparation, never a CPU depth/contour/warp implementation.
+    std::vector<std::uint32_t> pixels(static_cast<std::size_t>(width) * height);
+    for (UINT y = 0u; y < height; ++y) {
+      for (UINT x = 0u; x < width; ++x) {
+        pixels[static_cast<std::size_t>(y) * width + x] = image_pixels[
+          static_cast<std::size_t>(std::uint64_t(y) * source_height / height) * source_width +
+          static_cast<std::size_t>(std::uint64_t(x) * source_width / width)];
+      }
+    }
+    if (patch_center) {
+      // A fixed five-by-five appearance change excludes every old +/-2 anchor at its center.
+      // The detector/current-cover owner is still obtained from the actual production path.
+      for (UINT y = (*patch_center)[1u] - 2u; y <= (*patch_center)[1u] + 2u; ++y) {
+        for (UINT x = (*patch_center)[0u] - 2u; x <= (*patch_center)[0u] + 2u; ++x) {
+          pixels[static_cast<std::size_t>(y) * width + x] = changed_rgb;
+        }
+      }
+    }
+    D3D11_TEXTURE2D_DESC desc {};
+    desc.Width = width; desc.Height = height; desc.MipLevels = 1u; desc.ArraySize = 1u;
+    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM; desc.SampleDesc.Count = 1u;
+    desc.Usage = D3D11_USAGE_IMMUTABLE; desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    const D3D11_SUBRESOURCE_DATA initial {pixels.data(), width * 4u, 0u};
+    ComPtr<ID3D11Texture2D> texture;
+    return SUCCEEDED(device->CreateTexture2D(&desc, &initial, &texture)) &&
+      SUCCEEDED(device->CreateShaderResourceView(texture.Get(), nullptr, &view));
+  };
+  ComPtr<ID3D11ShaderResourceView> source, larger_source;
+  ASSERT_TRUE(create_source(source_width, source_height, source));
+  ASSERT_TRUE(create_source(1920u, 1080u, larger_source));
+
+  struct payload_t {
+    D3D11_RESOURCE_DIMENSION dimension = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+    UINT width = 0u, height = 0u, stride = 0u;
+    std::vector<std::uint8_t> bytes;
+  };
+  constexpr std::array<const char *, 24u> names {
+    "depth", "cut", "depth frame state", "raw model depth", "candidate", "vertical majorant",
+    "vertical conditioned", "Base", "Final", "camera", "frame statistics", "OCR", "SLR",
+    "support", "field pin", "distance", "contour identity", "contour history", "source", "Pmap",
+    "Gaussian weight", "Gaussian blend", "Gaussian vertical conditioned", "Gaussian control"
+  };
+  using tuple_t = std::array<payload_t, names.size()>;
+  const auto read_view = [&](ID3D11ShaderResourceView *view, payload_t &out) {
+    if (!view) return false;
+    out = {};
+    ComPtr<ID3D11Resource> resource;
+    view->GetResource(&resource);
+    resource->GetType(&out.dimension);
+    D3D11_MAPPED_SUBRESOURCE mapped {};
+    if (out.dimension == D3D11_RESOURCE_DIMENSION_BUFFER) {
+      ComPtr<ID3D11Buffer> buffer, staging;
+      if (FAILED(resource.As(&buffer))) return false;
+      D3D11_BUFFER_DESC desc {};
+      buffer->GetDesc(&desc);
+      out.width = desc.ByteWidth; out.height = 1u; out.stride = desc.StructureByteStride;
+      if (desc.ByteWidth == 0u || desc.ByteWidth > 128u * 1024u * 1024u) return false;
+      desc.Usage = D3D11_USAGE_STAGING; desc.BindFlags = 0u;
+      desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ; desc.MiscFlags = 0u; desc.StructureByteStride = 0u;
+      if (FAILED(device->CreateBuffer(&desc, nullptr, &staging))) return false;
+      context->CopyResource(staging.Get(), buffer.Get());
+      if (FAILED(context->Map(staging.Get(), 0u, D3D11_MAP_READ, 0u, &mapped))) return false;
+      out.bytes.resize(desc.ByteWidth);
+      std::memcpy(out.bytes.data(), mapped.pData, out.bytes.size());
+      context->Unmap(staging.Get(), 0u);
+      return true;
+    }
+    if (out.dimension != D3D11_RESOURCE_DIMENSION_TEXTURE2D) return false;
+    ComPtr<ID3D11Texture2D> texture, staging;
+    if (FAILED(resource.As(&texture))) return false;
+    D3D11_TEXTURE2D_DESC desc {};
+    texture->GetDesc(&desc);
+    out.format = desc.Format; out.width = desc.Width; out.height = desc.Height;
+    out.stride = desc.Format == DXGI_FORMAT_R32_UINT || desc.Format == DXGI_FORMAT_R32_FLOAT ? 4u :
+      desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT ? 8u :
+      desc.Format == DXGI_FORMAT_R32G32B32A32_FLOAT ? 16u : 0u;
+    if (out.stride == 0u || desc.MipLevels != 1u || desc.ArraySize != 1u) return false;
+    desc.Usage = D3D11_USAGE_STAGING; desc.BindFlags = 0u;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ; desc.MiscFlags = 0u;
+    if (FAILED(device->CreateTexture2D(&desc, nullptr, &staging))) return false;
+    context->CopyResource(staging.Get(), texture.Get());
+    if (FAILED(context->Map(staging.Get(), 0u, D3D11_MAP_READ, 0u, &mapped))) return false;
+    const auto row_bytes = static_cast<std::size_t>(desc.Width) * out.stride;
+    out.bytes.resize(row_bytes * desc.Height);
+    for (UINT y = 0u; y < desc.Height; ++y) {
+      std::memcpy(out.bytes.data() + y * row_bytes,
+        static_cast<const std::uint8_t *>(mapped.pData) + y * mapped.RowPitch, row_bytes);
+    }
+    context->Unmap(staging.Get(), 0u);
+    return true;
+  };
+  const auto read_tuple = [&](const models::estimate_result &result, tuple_t &out) {
+    const std::array<ID3D11ShaderResourceView *, names.size()> views {
+      result.depth.Get(), result.cut_state.Get(), result.depth_frame_state.Get(), result.raw_model_depth.Get(),
+      result.shadow_candidate_parallax.Get(), result.shadow_vertical_majorant.Get(),
+      result.shadow_vertical_conditioned.Get(), result.shadow_base_final_parallax.Get(),
+      result.shadow_final_parallax.Get(), result.shadow_state.Get(), result.shadow_frame_stats.Get(),
+      result.ocr_box_record.Get(), result.subtitle_locator_state.Get(), result.subtitle_contour_support.Get(),
+      result.subtitle_contour_field_pin.Get(), result.subtitle_contour_distance.Get(),
+      result.subtitle_contour_identity.Get(), result.subtitle_contour_history.Get(),
+      result.subtitle_contour_source.Get(), result.subtitle_ocr_probability.Get(),
+      result.subtitle_gaussian_weight.Get(), result.subtitle_gaussian_blend.Get(),
+      result.subtitle_gaussian_vertical_conditioned.Get(), result.subtitle_gaussian_control.Get()
+    };
+    for (std::size_t i = 0u; i < views.size(); ++i) {
+      if (!read_view(views[i], out[i])) return false;
+    }
+    return true;
+  };
+  const auto word = [](const payload_t &payload, std::size_t index) {
+    std::uint32_t value = 0u;
+    if ((index + 1u) * sizeof(value) <= payload.bytes.size()) {
+      std::memcpy(&value, payload.bytes.data() + index * sizeof(value), sizeof(value));
+    }
+    return value;
+  };
+  const auto any_words = [&](const payload_t &payload, bool distance) {
+    for (std::size_t i = 0u; i < payload.bytes.size() / sizeof(std::uint32_t); ++i) {
+      const auto bits = word(payload, i);
+      const auto q = std::bit_cast<float>(bits);
+      if (distance ? std::isfinite(q) && q >= 0.0f && bits != 0x80000000u : bits != 0u) {
+        return true;
+      }
+    }
+    return false;
+  };
+  const auto nonempty = [&](const tuple_t &tuple) {
+    return word(tuple[12u], v2::subtitle_plane_flags_word) == v2::subtitle_plane_current_valid_flag &&
+      word(tuple[12u], v2::subtitle_plane_current_slot_mask_word) != 0u && any_words(tuple[13u], false) &&
+      any_words(tuple[14u], false) && any_words(tuple[15u], true) &&
+      tuple[7u].bytes != tuple[8u].bytes;
+  };
+  const auto feature_count = [&](const tuple_t &tuple, std::size_t pixel) {
+    const auto code = std::bit_cast<float>(word(tuple[17u], pixel * 4u + 3u));
+    constexpr auto maximum_code = v2::subtitle_contour_history_feature_valid_bit |
+      (v2::subtitle_contour_history_confirmation_observations <<
+        v2::subtitle_contour_history_feature_count_shift) |
+      v2::subtitle_contour_history_feature_mask_bit;
+    if (!std::isfinite(code) || code < 0.0f || code > static_cast<float>(maximum_code)) return 0u;
+    const auto integer = static_cast<std::uint32_t>(code);
+    const auto count = integer >> v2::subtitle_contour_history_feature_count_shift;
+    const auto expected_code = v2::subtitle_contour_history_feature_valid_bit |
+      (count << v2::subtitle_contour_history_feature_count_shift) |
+      (count == v2::subtitle_contour_history_confirmation_observations ?
+         v2::subtitle_contour_history_feature_mask_bit : 0u);
+    return code == static_cast<float>(expected_code) ? count : 0u;
+  };
+  const auto assets = std::filesystem::path {SUNSHINE_TEST_BIN_DIR}.parent_path() / "assets";
+  models::video_depth_estimator estimator {
+    device, context, assets, config::video_t::sbs_t {}, video::host_sbs_v2_depth_model()
+  };
+  ASSERT_TRUE(estimator.is_valid());
+  const auto wait_until_reusable = [&]() {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds {2};
+    do {
+      if (estimator.can_accept_frame()) return true;
+      if (estimator.has_terminal_failure()) return false;
+      std::this_thread::yield();
+    } while (std::chrono::steady_clock::now() < deadline);
+    return false;
+  };
+  const auto wait_for_receipt = [&](const models::estimate_result &publication)
+    -> std::optional<receipt::receipt_t> {
+    context->Flush();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds {2};
+    do {
+      const auto batch = estimator.poll_publication_receipts();
+      if (batch.failed) return std::nullopt;
+      if (batch.current_publication && receipt::matches_publication(
+            *batch.current_publication, publication.publication)) {
+        return batch.current_publication;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds {1});
+    } while (std::chrono::steady_clock::now() < deadline);
+    return std::nullopt;
+  };
+  constexpr std::uint64_t first_frame = 0x10000a000ull;
+  constexpr std::uint64_t first_clock = 0x200040000ull;
+  std::uint64_t frame_id = first_frame, clock_us = first_clock;
+  models::estimate_result baseline;
+  std::optional<receipt::receipt_t> owner;
+  tuple_t expected;
+  const auto observe = [&](ID3D11ShaderResourceView *input) {
+    ASSERT_TRUE(wait_until_reusable());
+    const auto request = owner ? models::make_gpu_adaptive_request(
+      frame_id, true, &*owner, baseline.publication, clock_us
+    ) : models::gpu_adaptive_reuse_request {.observation_timestamp_us = clock_us};
+    if (owner) {
+      ASSERT_TRUE(request.authorize_gpu_undecided_reuse);
+    }
+    const auto old_publication = baseline.publication;
+    const auto submitted = estimator.estimate_depth(input, models::input_color_space::srgb,
+      frame_id, false, {}, models::depth_optional_work_mode_e::ordinary, request);
+    ASSERT_TRUE(submitted.inference_enqueued);
+    ASSERT_FALSE(submitted.gpu_undecided_transaction_enqueued);
+    ASSERT_TRUE(submitted.subtitle_ocr_inference_enqueued);
+    baseline = estimator.finish_pending_depth_for_evaluation();
+    ASSERT_TRUE(models::subtitle_evidence_is_exact_frame(baseline));
+    EXPECT_EQ(baseline.completed_frame_id, frame_id);
+    if (owner) {
+      EXPECT_FALSE(estimator.publication_is_current(old_publication));
+    }
+    owner = wait_for_receipt(baseline);
+    ASSERT_TRUE(owner);
+    ASSERT_EQ(owner->depth, receipt::depth_disposition_e::infer);
+    ASSERT_TRUE(owner->depth_cache_authorized());
+    ASSERT_TRUE(owner->subtitle_is_current());
+    EXPECT_EQ(owner->depth_owner_frame_id, frame_id);
+    EXPECT_EQ(owner->depth_owner_timestamp_us, clock_us);
+    EXPECT_EQ(owner->subtitle_frame_id, frame_id);
+    ASSERT_TRUE(read_tuple(baseline, expected));
+    ASSERT_EQ(expected[17u].format, DXGI_FORMAT_R32G32B32A32_FLOAT);
+    EXPECT_EQ(word(expected[16u], 20u), static_cast<std::uint32_t>(clock_us));
+    EXPECT_EQ(word(expected[16u], 21u), static_cast<std::uint32_t>(clock_us >> 32u));
+  };
+  std::optional<std::size_t> witness;
+  for (unsigned observation = 0u; observation < 8u; ++observation) {
+    observe(source.Get());
+    ASSERT_FALSE(HasFatalFailure());
+    // Select native count-one history inside a current OCR cover, with room for the authored
+    // patch. Green must differ from all possible old anchors, rather than assuming no jitter.
+    for (UINT y = 2u; !witness && y + 2u < expected[17u].height; ++y) {
+      for (UINT x = 2u; !witness && x + 2u < expected[17u].width; ++x) {
+        bool eligible = true;
+        for (int dy = -2; eligible && dy <= 2; ++dy) {
+          for (int dx = -2; eligible && dx <= 2; ++dx) {
+            const auto p = static_cast<std::size_t>(int(y) + dy) * expected[17u].width + int(x) + dx;
+            const auto red = std::bit_cast<float>(word(expected[17u], p * 4u));
+            const auto green = std::bit_cast<float>(word(expected[17u], p * 4u + 1u));
+            const auto blue = std::bit_cast<float>(word(expected[17u], p * 4u + 2u));
+            eligible = feature_count(expected, p) == 1u &&
+              std::max({std::abs(red), std::abs(1.0f - green), std::abs(blue)}) >
+                v2::subtitle_contour_history_rgb_distance;
+          }
+        }
+        if (eligible) witness = static_cast<std::size_t>(y) * expected[17u].width + x;
+      }
+    }
+    if (witness) break;
+    ++frame_id; clock_us += 100000u;
+  }
+  ASSERT_TRUE(witness) << "The real detector must acquire a current-cover count-one pixel.";
+  const auto subtitle_slot_mask = word(expected[12u], v2::subtitle_plane_current_slot_mask_word);
+  ASSERT_NE(subtitle_slot_mask, 0u);
+  EXPECT_EQ(feature_count(expected, *witness), 1u);
+  EXPECT_EQ(word(expected[13u], *witness), 0u);
+  for (std::uint32_t count = 2u; count <= v2::subtitle_contour_history_confirmation_observations; ++count) {
+    ++frame_id; clock_us += 100000u;
+    observe(source.Get());
+    ASSERT_FALSE(HasFatalFailure());
+    EXPECT_EQ(word(expected[12u], v2::subtitle_plane_current_slot_mask_word), subtitle_slot_mask);
+    EXPECT_EQ(feature_count(expected, *witness), count);
+    EXPECT_EQ(word(expected[13u], *witness),
+      count == v2::subtitle_contour_history_confirmation_observations ? 1u : 0u);
+  }
+  ASSERT_TRUE(nonempty(expected))
+    << "Four genuine eligible observations must produce nonzero support/pins and conditioned Final.";
+  const auto original_owner_frame = owner->depth_owner_frame_id;
+  const auto original_owner_clock = owner->depth_owner_timestamp_us;
+  const auto verify_idle_hold = [&]() {
+    const auto old_publication = baseline.publication;
+    const auto old_owner = *owner;
+    const auto idle = estimator.try_finish_pending_depth_nonblocking(
+      models::input_color_space::srgb, false
+    );
+    ASSERT_TRUE(idle.ready);
+    EXPECT_FALSE(idle.result.completed_frame_valid);
+    EXPECT_FALSE(idle.result.inference_enqueued);
+    EXPECT_FALSE(idle.result.gpu_undecided_transaction_enqueued);
+    EXPECT_EQ(idle.query_count, 0u);
+    const auto batch = estimator.poll_publication_receipts();
+    ASSERT_FALSE(batch.failed);
+    ASSERT_TRUE(batch.current_publication);
+    EXPECT_EQ(batch.current_publication->expected, old_publication);
+    EXPECT_EQ(batch.current_publication->depth_owner_frame_id, old_owner.depth_owner_frame_id);
+    EXPECT_EQ(batch.current_publication->depth_owner_timestamp_us, old_owner.depth_owner_timestamp_us);
+    EXPECT_EQ(batch.current_publication->subtitle_frame_id, old_owner.subtitle_frame_id);
+    ASSERT_TRUE(estimator.publication_is_current(old_publication));
+    tuple_t held;
+    ASSERT_TRUE(read_tuple(baseline, held));
+    for (std::size_t i = 0u; i < expected.size(); ++i) {
+      SCOPED_TRACE(names[i]);
+      EXPECT_EQ(held[i].dimension, expected[i].dimension);
+      EXPECT_EQ(held[i].format, expected[i].format);
+      EXPECT_EQ(held[i].width, expected[i].width);
+      EXPECT_EQ(held[i].height, expected[i].height);
+      EXPECT_EQ(held[i].stride, expected[i].stride);
+      EXPECT_EQ(held[i].bytes, expected[i].bytes);
+    }
+  };
+  verify_idle_hold();
+  ASSERT_FALSE(HasFatalFailure());
+  verify_idle_hold();
+  ASSERT_FALSE(HasFatalFailure());
+  EXPECT_EQ(owner->depth_owner_frame_id, original_owner_frame);
+  EXPECT_EQ(owner->depth_owner_timestamp_us, original_owner_clock);
+  ComPtr<ID3D11ShaderResourceView> changed_source;
+  const std::array<UINT, 2u> patch_center {
+    static_cast<UINT>(*witness % expected[17u].width),
+    static_cast<UINT>(*witness / expected[17u].width) + source_height - expected[17u].height,
+  };
+  ASSERT_TRUE(create_source(source_width, source_height, changed_source, patch_center));
+  RecordProperty("authored_changed_patch", std::to_string(patch_center[0u]) + "," +
+    std::to_string(patch_center[1u]) + ":5x5 BGRA ff00ff00");
+  const auto old_source = expected[18u].bytes;
+  ++frame_id; clock_us += 100000u;
+  observe(changed_source.Get());
+  ASSERT_FALSE(HasFatalFailure());
+  EXPECT_FALSE(baseline.input_domain_reset);
+  EXPECT_EQ(word(expected[12u], v2::subtitle_plane_current_slot_mask_word), subtitle_slot_mask);
+  EXPECT_NE(expected[18u].bytes, old_source);
+  EXPECT_EQ(feature_count(expected, *witness), 1u);
+  EXPECT_EQ(word(expected[13u], *witness), 0u);
+  EXPECT_EQ(word(expected[17u], *witness * 4u), std::bit_cast<std::uint32_t>(0.0f));
+  EXPECT_EQ(word(expected[17u], *witness * 4u + 1u), std::bit_cast<std::uint32_t>(1.0f));
+  EXPECT_EQ(word(expected[17u], *witness * 4u + 2u), std::bit_cast<std::uint32_t>(0.0f));
+  verify_idle_hold();
+  ASSERT_FALSE(HasFatalFailure());
+
+  for (std::uint32_t count = 2u; count <= v2::subtitle_contour_history_confirmation_observations; ++count) {
+    ++frame_id; clock_us += 100000u;
+    observe(changed_source.Get());
+    ASSERT_FALSE(HasFatalFailure());
+    EXPECT_EQ(word(expected[12u], v2::subtitle_plane_current_slot_mask_word), subtitle_slot_mask);
+    EXPECT_EQ(feature_count(expected, *witness), count);
+    EXPECT_EQ(word(expected[13u], *witness),
+      count == v2::subtitle_contour_history_confirmation_observations ? 1u : 0u);
+  }
+  verify_idle_hold();
+  ASSERT_FALSE(HasFatalFailure());
+
+  // An old-domain receipt is otherwise valid. A changed source extent must force/reset rather
+  // than carry the mature old contour into a newly sized observation. The new current OCR
+  // cover can still provide provisional protection while its own pixel history confirms.
+  ASSERT_TRUE(wait_until_reusable());
+  ++frame_id; clock_us += 100000u;
+  const auto old_domain = baseline.publication.domain_tag;
+  const auto reset_request = models::make_gpu_adaptive_request(frame_id, true, &*owner,
+    baseline.publication, clock_us);
+  ASSERT_TRUE(reset_request.authorize_gpu_undecided_reuse);
+  const auto resized = estimator.estimate_depth(larger_source.Get(), models::input_color_space::srgb,
+    frame_id, false, {}, models::depth_optional_work_mode_e::ordinary, reset_request);
+  ASSERT_TRUE(resized.inference_enqueued);
+  EXPECT_FALSE(resized.gpu_undecided_transaction_enqueued);
+  baseline = estimator.finish_pending_depth_for_evaluation();
+  ASSERT_TRUE(baseline.completed_frame_valid);
+  EXPECT_TRUE(baseline.input_domain_reset);
+  EXPECT_NE(baseline.publication.domain_tag, old_domain);
+  ASSERT_TRUE(models::subtitle_evidence_is_exact_frame(baseline));
+  owner = wait_for_receipt(baseline);
+  ASSERT_TRUE(owner);
+  ASSERT_EQ(owner->depth, receipt::depth_disposition_e::infer);
+  ASSERT_TRUE(owner->subtitle_is_current());
+  EXPECT_EQ(owner->depth_owner_frame_id, frame_id);
+  EXPECT_EQ(owner->depth_owner_timestamp_us, clock_us);
+  ASSERT_TRUE(read_tuple(baseline, expected));
+  EXPECT_EQ(expected[18u].width, 1920u);
+  EXPECT_EQ(expected[18u].height, models::subtitle_ocr_source_crop_height(1920u, 1080u));
+  EXPECT_EQ(word(expected[16u], 8u), 1920u);
+  EXPECT_EQ(word(expected[16u], 9u), 1080u);
+  EXPECT_EQ(word(expected[16u], 20u), static_cast<std::uint32_t>(clock_us));
+  EXPECT_EQ(word(expected[16u], 21u), static_cast<std::uint32_t>(clock_us >> 32u));
+  EXPECT_EQ(word(expected[12u], v2::subtitle_plane_cut_epoch_word), word(expected[16u], 3u));
+  EXPECT_FALSE(any_words(expected[13u], false));
+  EXPECT_FALSE(any_words(expected[14u], false));
+  bool canonical_empty_distance = true;
+  for (std::size_t index = 0u; index < expected[15u].bytes.size() / sizeof(std::uint32_t); ++index) {
+    canonical_empty_distance &= word(expected[15u], index) == v2::subtitle_contour_distance_empty_bits;
+  }
+  EXPECT_TRUE(canonical_empty_distance);
+  bool canonical_reset_history = true;
+  std::uint32_t maximum_reset_count = 0u;
+  for (std::size_t pixel = 0u; pixel < expected[17u].bytes.size() / 16u; ++pixel) {
+    const auto code = std::bit_cast<float>(word(expected[17u], pixel * 4u + 3u));
+    constexpr auto valid = v2::subtitle_contour_history_feature_valid_bit;
+    constexpr auto first = valid | (1u << v2::subtitle_contour_history_feature_count_shift);
+    canonical_reset_history &= code == 0.0f || code == static_cast<float>(valid) ||
+      code == static_cast<float>(first);
+    maximum_reset_count = std::max(maximum_reset_count, feature_count(expected, pixel));
+  }
+  EXPECT_TRUE(canonical_reset_history);
+  EXPECT_LE(maximum_reset_count, 1u);
+  const auto reset_slot_mask = word(expected[12u], v2::subtitle_plane_current_slot_mask_word);
+  const auto reset_warmup = word(expected[12u], v2::subtitle_plane_warmup_word);
+  if (reset_slot_mask != 0u) {
+    EXPECT_EQ(word(expected[12u], v2::subtitle_plane_flags_word), v2::subtitle_plane_current_valid_flag);
+    EXPECT_EQ(maximum_reset_count, 1u);
+    EXPECT_EQ(reset_warmup & v2::subtitle_plane_warmup_remaining_mask,
+      v2::subtitle_plane_warmup_observations);
+    EXPECT_TRUE(any_words(expected[20u], false));
+  } else {
+    EXPECT_EQ(maximum_reset_count, 0u);
+    EXPECT_EQ(reset_warmup, 0u);
+    EXPECT_EQ(expected[7u].bytes, expected[8u].bytes);
+  }
+
+  bool admitted = false;
+  for (unsigned observation = 0u; observation < 8u; ++observation) {
+    ++frame_id; clock_us += 100000u;
+    observe(larger_source.Get());
+    ASSERT_FALSE(HasFatalFailure());
+    if (nonempty(expected)) { admitted = true; break; }
+  }
+  ASSERT_TRUE(admitted) << "The new extent must acquire its own nonempty tuple before testing its idle hold.";
+  EXPECT_NE(owner->depth_owner_frame_id, original_owner_frame);
+  EXPECT_NE(owner->depth_owner_timestamp_us, original_owner_clock);
+  verify_idle_hold();
+  ASSERT_FALSE(HasFatalFailure());
 }
 
 TEST(TensorRtConditionalWrapperGpuTest, AllAuthenticatedShapesBuildAndExecute) {
@@ -3661,14 +4598,14 @@ TEST(ParallaxV2ContractTest, DebugDumpUsesNonblockingGpuStagingBeforeCpuPublicat
   );
 }
 
-TEST(ParallaxV2ContractTest, DebugDumpSubtitleResolverProvenanceMatchesSchema44Contract) {
+TEST(ParallaxV2ContractTest, DebugDumpSubtitleResolverProvenanceMatchesCurrentOcrContract) {
   const auto source = read_source_file(
     SUNSHINE_SOURCE_DIR "/src/platform/windows/sbs_debug_dump.cpp"
   );
   ASSERT_FALSE(source.empty());
 
   const auto resolver_begin = source.find(
-    "nlohmann::json subtitle_locator_resolver_contract_json("
+    "nlohmann::json subtitle_plane_resolver_contract_json("
   );
   const auto resolver_end = source.find(
     "bool subtitle_target_is_representable(", resolver_begin
@@ -3685,27 +4622,27 @@ TEST(ParallaxV2ContractTest, DebugDumpSubtitleResolverProvenanceMatchesSchema44C
   EXPECT_LT(resolve, condition);
   EXPECT_EQ(resolver.find("condition_prepare_main"), std::string::npos);
 
-  EXPECT_NE(source.find("{\"schema\", 44}"), std::string::npos);
-  for (const auto *qualification_key : {
-         "{\"qualification_policy\", {",
-         "{\"corner_filter_applies_to\", \"non-ribbon-ordinary-cores\"}",
-         "{\"corner_edge_divisor\", subtitle_locator_corner_edge_divisor}",
-         "{\"corner_bottom_rows\", subtitle_locator_corner_bottom_rows}",
-         "{\"edge_threshold_equality\", \"accepted\"}",
-         "{\"ribbon_exempt\", true}",
+  EXPECT_NE(source.find("{\"schema\", 49}"), std::string::npos);
+  for (const auto *current_policy_key : {
+         "{\"current_cover_policy\", {",
+         "{\"selection\", \"all-valid-current-ocr8-core-cover-pairs\"}",
+         "{\"geometry_source\", \"exact-current-ocr8-record-final-payload\"}",
+         "{\"history_authority\", \"per-pixel-four-genuine-rgb-confirmations\"}",
+         "{\"box_identity_resets_history\", false}",
        }) {
-    EXPECT_NE(resolver.find(qualification_key), std::string::npos) << qualification_key;
+    EXPECT_NE(resolver.find(current_policy_key), std::string::npos) << current_policy_key;
   }
   for (const auto *target_policy_key : {
          "{\"target_policy\", {",
          "{\"selection\", \"authenticated-current-cover-conflict-histogram\"}",
-         "{\"current_cover_pin\", \"immediate-full-plane\"}",
-         "{\"owner_hold_word\", \"reserved-zero\"}",
+         "{\"current_cover_pin\", \"confirmed-native-temporal-support-literal-gaussian-weight\"}",
        }) {
     EXPECT_NE(resolver.find(target_policy_key), std::string::npos) << target_policy_key;
   }
   EXPECT_EQ(resolver.find("fallback_step_denominator"), std::string::npos);
   EXPECT_EQ(resolver.find("unreliable_hold\""), std::string::npos);
+  EXPECT_EQ(resolver.find("qualification_policy"), std::string::npos);
+  EXPECT_EQ(resolver.find("provisional_current_policy"), std::string::npos);
 }
 
 TEST(ParallaxV2ContractTest, DebugDumpStagingPreservesEventAndRequestOrdering) {
@@ -7980,20 +8917,23 @@ TEST(DirectxShaderSourceTest, SubtitleResolveBindsExactOcrRecordAndConditionPara
   ASSERT_NE(end, std::string::npos);
   const auto dispatch = estimator.substr(begin, end - begin);
   EXPECT_NE(
-    dispatch.find("ID3D11ShaderResourceView *resolve_srvs[8]"),
+    dispatch.find("ID3D11ShaderResourceView *resolve_srvs[10]"),
     std::string::npos
   );
   EXPECT_NE(
     dispatch.find(
       "depth_coordinate_v2_state_srv.Get(),\n        cut_state_srv.Get(),\n"
       "        depth_coordinate_v2_final_srv.Get(),\n        nullptr,\n"
-      "        nullptr,\n        nullptr,\n        nullptr,\n"
-      "        ocr_box_record_srv.Get(),"
+      "        nullptr,\n        nullptr,\n"
+      "        subtitle_contour_identity.srv.Get(),\n"
+      "        ocr_box_record_srv.Get(),\n"
+      "        ocr_output_srv.Get(),\n"
+      "        subtitle_contour_probability_snapshot.srv.Get(),"
     ),
     std::string::npos
   );
   EXPECT_NE(
-    dispatch.find("CSSetShaderResources(0, 8, resolve_srvs)"),
+    dispatch.find("CSSetShaderResources(0, 10, resolve_srvs)"),
     std::string::npos
   );
   EXPECT_NE(
@@ -8007,22 +8947,38 @@ TEST(DirectxShaderSourceTest, SubtitleResolveBindsExactOcrRecordAndConditionPara
     dispatch.find("CSSetUnorderedAccessViews(2, 3, resolve_uavs, nullptr)"),
     std::string::npos
   );
+
+  const auto bind = dispatch.find("CSSetShaderResources(0, 10, resolve_srvs)");
+  ASSERT_NE(bind, std::string::npos);
+  const auto resolve = dispatch.find("context->DispatchIndirect(", bind);
+  ASSERT_NE(resolve, std::string::npos);
+  const auto unbind = dispatch.find("CSSetShaderResources(0, 10, null_srvs)", resolve);
+  ASSERT_NE(unbind, std::string::npos);
+  const auto contours = dispatch.find(
+    "if (!dispatch_subtitle_contours(ocr_record_submitted, input_domain_reset))"
+  );
+  ASSERT_NE(contours, std::string::npos);
+  // Identity/probability history must stay read-only through resolve, then be unbound
+  // before the contour pass writes the next observation into those resources.
+  EXPECT_LT(bind, resolve);
+  EXPECT_LT(resolve, unbind);
+  EXPECT_LT(unbind, contours);
 }
 
-TEST(DirectxShaderSourceTest, OcrResolveConstantsRetainExactSixteenWordShaderLayout) {
+TEST(DirectxShaderSourceTest, OcrResolveConstantsAppendSignedLineReferenceToExactPrefix) {
   const auto estimator =
     read_source_file(SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.cpp");
   ASSERT_FALSE(estimator.empty());
   EXPECT_NE(
-    estimator.find("using ocr_resolve_constants_t = std::array<std::uint32_t, 16u>"),
+    estimator.find("using ocr_resolve_constants_t = std::array<std::uint32_t, 20u>"),
     std::string::npos
   );
   EXPECT_NE(
-    estimator.find("static_assert(sizeof(ocr_resolve_constants_t) == 64u)"),
+    estimator.find("static_assert(sizeof(ocr_resolve_constants_t) == 80u)"),
     std::string::npos
   );
   EXPECT_NE(
-    estimator.find("create_constant_buffer(64u, ocr_resolve_cbuffer)"),
+    estimator.find("create_constant_buffer(sizeof(ocr_resolve_constants_t), ocr_resolve_cbuffer)"),
     std::string::npos
   );
 
@@ -8046,8 +9002,12 @@ TEST(DirectxShaderSourceTest, OcrResolveConstantsRetainExactSixteenWordShaderLay
          "static_cast<std::uint32_t>(target_h)",
          "source_height - crop_height", "crop_height",
          "roi.roi_top", "roi.roi_bottom",
-         "roi.tensor_content.left", "roi.tensor_content.top",
-         "roi.tensor_content.right", "roi.tensor_content.bottom",
+         "tensor_content->left", "tensor_content->top",
+         "tensor_content->right", "tensor_content->bottom",
+         "std::bit_cast<std::uint32_t>(line_reference->center_twice_source)",
+         "line_reference->width",
+         "std::bit_cast<std::uint32_t>(line_reference->search_top_source)",
+         "0u",
        }) {
     cursor = layout.find(word, cursor);
     ASSERT_NE(cursor, std::string::npos) << word;

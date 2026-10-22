@@ -6,7 +6,7 @@
 [numthreads(1, 1, 1)]
 void condition_validate_test_main(uint3 dispatch_id : SV_DispatchThreadID) {
     [loop]
-    for (uint index = 0u; index < V2_SUBTITLE_LOCATOR_STATE_WORD_COUNT; ++index) {
+    for (uint index = 0u; index < V2_SUBTITLE_PLANE_STATE_WORD_COUNT; ++index) {
         ConditionStateSnapshot[index] = LocatorStateRead[index];
     }
     GroupMemoryBarrierWithGroupSync();

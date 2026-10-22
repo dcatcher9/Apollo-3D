@@ -37,6 +37,14 @@ namespace models::host_sbs_shader_cache {
   inline constexpr shader_spec host_sbs_ocr_resolve {"host_sbs_ocr_boxes_cs.hlsl", "resolve_main", "cs_5_0"};
   inline constexpr shader_spec host_sbs_subtitle_locator_resolve {"host_sbs_subtitle_locator_cs.hlsl", "resolve_main", "cs_5_0"};
   inline constexpr shader_spec host_sbs_subtitle_condition {"host_sbs_subtitle_locator_cs.hlsl", "condition_main", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_subtitle_contour_temporal {"host_sbs_subtitle_contour_cs.hlsl", "temporal_main", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_subtitle_contour_project {"host_sbs_subtitle_contour_cs.hlsl", "project_main", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_subtitle_contour_history {"host_sbs_subtitle_contour_cs.hlsl", "history_main", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_subtitle_contour_horizontal {"host_sbs_subtitle_contour_distance_cs.hlsl", "horizontal_main", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_subtitle_contour_vertical {"host_sbs_subtitle_contour_distance_cs.hlsl", "vertical_main", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_subtitle_contour_snapshot {"host_sbs_subtitle_contour_cs.hlsl", "snapshot_main", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_subtitle_gaussian_vertical_limit {"depth_coordinate_v2_vertical_limit_cs.hlsl", "subtitle_main", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_subtitle_gaussian_horizontal_limit {"depth_coordinate_v2_limit_cs.hlsl", "subtitle_main", "cs_5_0"};
   inline constexpr shader_spec host_sbs_near_identical_fused_preprocess {"rgb_to_nchw_near_identical_cs.hlsl", "fused_main", "cs_5_0"};
   inline constexpr shader_spec host_sbs_near_identical_resolve {"host_sbs_near_identical_detector_cs.hlsl", "resolve_main", "cs_5_0"};
   inline constexpr shader_spec host_sbs_near_identical_scene_seed {"host_sbs_near_identical_detector_cs.hlsl", "scene_seed_main", "cs_5_0"};
@@ -76,15 +84,23 @@ namespace models::host_sbs_shader_cache {
     host_sbs_ocr_resolve,
     host_sbs_subtitle_locator_resolve,
     host_sbs_subtitle_condition,
+    host_sbs_subtitle_contour_temporal,
+    host_sbs_subtitle_contour_project,
+    host_sbs_subtitle_contour_history,
+    host_sbs_subtitle_contour_horizontal,
+    host_sbs_subtitle_contour_vertical,
+    host_sbs_subtitle_contour_snapshot,
+    host_sbs_subtitle_gaussian_vertical_limit,
+    host_sbs_subtitle_gaussian_horizontal_limit,
   };
   inline constexpr std::string_view parallax_v2_producer_source_closure_sha256 =
-    "24050982be483a52e2a07501ae6166fbf353aa420cf80f47b30b4bafe672de91";
+    "90220f4dbe978b461a71b570e0eb93b305fc4cf35a0456fe6db23034808d42ff";
 
   inline constexpr std::array parallax_v2_coordinate_diagnostic_specs {
     depth_coordinate_v2_coordinate_diagnostic,
   };
   inline constexpr std::string_view parallax_v2_coordinate_diagnostic_source_closure_sha256 =
-    "0053d3c7c00c7bb79e95dd5cb22d32b372f4a2fcbddd4948e5ac6f882c2565ba";
+    "8d84dd68c42600b107ac392eb1b8727c5b325b3faf1ad43c0748ba23afb3f982";
 
   inline constexpr std::array near_identical_detector_specs {
     host_sbs_near_identical_resolve,
@@ -93,26 +109,26 @@ namespace models::host_sbs_shader_cache {
     host_sbs_near_identical_reuse_depth,
   };
   inline constexpr std::string_view near_identical_detector_source_closure_sha256 =
-    "3bfc9b406e91b9b5c983c9bf5282060401d4afb1f1066c5e49eb602e8f6f4504";
+    "12e429c6f617ebed9df2d267d41a4767b3a2b2508d76efe52b3ef43e0a6b7516";
 
   inline constexpr std::array gpu_trace_specs {
     host_sbs_gpu_trace,
   };
   inline constexpr std::string_view gpu_trace_source_closure_sha256 =
-    "ac67c32c9dc972aace4144d45b9b41b418bab87bd13bc46854749ea830204611";
+    "cd089deb118d2ae61a12c15531da1930317743b59352ada119e8744901e351b9";
 
   inline constexpr std::array parallax_v2_live_renderer_specs {
     parallax_v2_live_renderer,
     sbs_reprojection_vertex,
   };
   inline constexpr std::string_view parallax_v2_live_renderer_source_closure_sha256 =
-    "d187c2ccc013a6fddd0ecaf34b2ca7f2bd2b392bfd55a5abe31bcfa457ca6e87";
+    "b91d6702173ae8e15425ef5b70a22b294100842cea6c5d4ec97d11d277c56070";
 
   inline constexpr std::array parallax_v2_p010_y_specs {
     parallax_v2_p010_y_renderer,
   };
   inline constexpr std::string_view parallax_v2_p010_y_source_closure_sha256 =
-    "b905626f29b7f6e9493c448f88d9804a2568a809d30ec20f94cc13c4d95977e5";
+    "132018f408bb35df073758fbffa3959bcfca7590c4c2646bd0e5f4de203a352a";
 
   inline constexpr std::array sbs_flat_fallback_specs {
     sbs_flat_identity,
@@ -126,6 +142,6 @@ namespace models::host_sbs_shader_cache {
     parallax_v2_live_mask,
   };
   inline constexpr std::string_view parallax_v2_live_diagnostic_source_closure_sha256 =
-    "2371920cbec90eab7436b9ba85c294b149f2c7aeb765e84ab7e6969f625c1c4a";
+    "69f2a263ce2ce71a8030390bae0057ea59ab086ab8b0dc7cb92990bdc5310784";
 
 }  // namespace models::host_sbs_shader_cache

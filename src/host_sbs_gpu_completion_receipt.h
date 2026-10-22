@@ -8,6 +8,7 @@
 #include "generated/sbs_adaptive_state_contract.h"
 #include "host_sbs_gpu_outcomes.h"
 #include "host_sbs_gpu_trace.h"
+#include "host_sbs_subtitle_plane.h"
 
 #include <algorithm>
 #include <array>
@@ -34,10 +35,10 @@ namespace models::host_sbs_gpu_completion_receipt {
   inline constexpr std::size_t history_owner_begin = 64u;
   inline constexpr std::size_t history_owner_word_count = 10u;
   inline constexpr std::size_t subtitle_locator_begin = 74u;
-  inline constexpr std::size_t subtitle_locator_word_count = 32u;
-  inline constexpr std::size_t subtitle_condition_begin = 106u;
-  inline constexpr std::size_t subtitle_condition_word_count = 6u;
-  inline constexpr std::size_t parallax_state_begin = 112u;
+  inline constexpr std::size_t subtitle_locator_word_count = v2::subtitle_plane_state_word_count;
+  inline constexpr std::size_t subtitle_condition_begin = subtitle_locator_begin + subtitle_locator_word_count;
+  inline constexpr std::size_t subtitle_condition_word_count = v2::subtitle_condition_param_word_count;
+  inline constexpr std::size_t parallax_state_begin = subtitle_condition_begin + subtitle_condition_word_count;
   inline constexpr std::size_t parallax_state_word_count = v2::state_float_count;
   inline constexpr std::size_t depth_frame_state_begin = parallax_state_begin + parallax_state_word_count;
   inline constexpr std::size_t depth_frame_state_word_count = 4u;
@@ -65,6 +66,7 @@ namespace models::host_sbs_gpu_completion_receipt {
     std::uint64_t baseline_frame_id = 0u;
     std::uint32_t width = 0u;
     std::uint32_t height = 0u;
+    host_sbs_subtitle_plane::domain_words_t subtitle_domain {};
     float raw_coordinate_scale = 0.0f;
     std::uint32_t joint_plane_mode = depth_coordinate_v2::adaptive_policy_id;
     std::uint32_t expected_work = 0u;
@@ -282,48 +284,36 @@ namespace models::host_sbs_gpu_completion_receipt {
       // The stronger depth finalizer cannot authorize reuse without a valid retained owner.
       return std::nullopt;
     }
-    const auto locator = words.data() + subtitle_locator_begin;
     if (subtitle != subtitle_disposition_e::suppressed) {
-      const auto frame = trace::join_u64(locator[22u], locator[23u]);
-      const auto generation = trace::join_u64(locator[10u], locator[11u]);
-      constexpr std::uint32_t known_locator_flags = 1u | 2u | 4u | 8u | v2::subtitle_locator_provisional_current_flag;
-      if (locator[0u] != v2::subtitle_locator_state_schema || locator[1u] != v2::subtitle_locator_state_tag ||
-          (locator[2u] & ~known_locator_flags) != 0u ||
-          generation != expected.analysis_generation || locator[27u] != expected.width || locator[28u] != expected.height ||
-          locator[4u] > v2::subtitle_locator_rectangle_capacity ||
-          locator[12u] > v2::subtitle_locator_rectangle_capacity ||
-          locator[20u] > v2::subtitle_locator_rectangle_capacity ||
+      host_sbs_subtitle_plane::words_t plane {};
+      std::copy_n(words.begin() + subtitle_locator_begin, plane.size(), plane.begin());
+      const auto frame = host_sbs_subtitle_plane::join(plane.data() + v2::subtitle_plane_frame_offset);
+      const auto generation = host_sbs_subtitle_plane::join(plane.data() + v2::subtitle_plane_analysis_generation_offset);
+      const auto timestamp = host_sbs_subtitle_plane::join(plane.data() + v2::subtitle_plane_observation_timestamp_offset);
+      const auto subtitle_timestamp = current_subtitle ? expected.observation_timestamp_us : result.depth_owner_timestamp_us;
+      if (!host_sbs_subtitle_plane::state_words_are_canonical(plane, v2::display_budget()) ||
+          (subtitle == subtitle_disposition_e::abstention &&
+            (plane[v2::subtitle_plane_flags_word] != 0u || plane[v2::subtitle_plane_current_slot_mask_word] != 0u)) ||
+          generation != expected.analysis_generation || timestamp != subtitle_timestamp ||
+          !std::equal(expected.subtitle_domain.begin(), expected.subtitle_domain.end(),
+            plane.begin() + v2::subtitle_plane_source_extent_offset) ||
           frame == 0u || (current_subtitle ? frame != expected.frame_id :
             (!result.depth_owner_valid || frame != result.depth_owner_frame_id))) {
         return std::nullopt;
       }
-      const auto condition = words.data() + subtitle_condition_begin;
+      host_sbs_subtitle_plane::condition_words_t condition {};
+      std::copy_n(words.begin() + subtitle_condition_begin, condition.size(), condition.begin());
       const auto geometry_timestamp = trace::join_u64(
         state[v2::gain_last_observation_low], state[v2::gain_last_observation_high]);
-      const auto subtitle_timestamp = current_subtitle ?
-        expected.observation_timestamp_us : result.depth_owner_timestamp_us;
-      // OCR ownership survives an unavailable geometry observation, but its conditioning must
-      // abstain. Use the mandatory state/locator tuple: the optional cut diagnostic payload
-      // cannot grant or revoke publication authority. Reuse retains the original source clock.
+      // The full controller and current source domain are part of the completion proof.
+      // Diagnostic CutBridge bytes cannot grant authority; reuse retains its original clock.
       const bool subtitle_geometry_ready = std::bit_cast<float>(state[v2::frame_valid]) == 1.0f &&
         subtitle_timestamp != 0u &&
-        geometry_timestamp == subtitle_timestamp && state[v2::confirmed_cut_count] == locator[26u];
-      if (locator[20u] == 0u || !subtitle_geometry_ready) {
-        if (!std::all_of(condition, condition + subtitle_condition_word_count, [](auto word) { return word == 0u; })) {
-          return std::nullopt;
-        }
-      } else {
-        const bool provisional = (locator[2u] & v2::subtitle_locator_provisional_current_flag) != 0u;
-        const auto fade = locator[provisional ? v2::subtitle_locator_provisional_fade_word : 24u];
-        const auto target = locator[provisional ? v2::subtitle_locator_provisional_target_word : 18u];
-        const auto kinds = (locator[v2::subtitle_locator_kind_word] >> v2::subtitle_locator_current_kind_shift) & v2::subtitle_locator_kind_mask;
-        // The active condition must select the exact retained or provisional locator target.
-        if (condition[0u] != v2::subtitle_condition_param_schema || condition[1u] != v2::subtitle_condition_param_tag ||
-            condition[2u] != locator[20u] || condition[3u] != kinds ||
-            condition[4u] != fade || condition[5u] != target ||
-            fade != 2u || !std::isfinite(std::bit_cast<float>(target))) {
-          return std::nullopt;
-        }
+        geometry_timestamp == subtitle_timestamp && state[v2::confirmed_cut_count] == plane[v2::subtitle_plane_cut_epoch_word];
+      if ((plane[v2::subtitle_plane_flags_word] != 0u && !subtitle_geometry_ready) ||
+          !host_sbs_subtitle_plane::condition_words_match_plane(condition, plane,
+            subtitle_geometry_ready, !current_subtitle)) {
+        return std::nullopt;
       }
       result.subtitle_frame_id = frame;
       result.subtitle_domain_tag = expected.domain_tag;
@@ -359,8 +349,8 @@ namespace models::host_sbs_gpu_completion_receipt {
     std::optional<expected_t> pending_;
   };
 
-  static_assert(snapshot_byte_count == 736u);
+  static_assert(snapshot_byte_count == 768u);
   static_assert(transaction_word_count == trace::transaction_word_count);
-  static_assert(subtitle_locator_word_count == v2::subtitle_locator_header_word_count);
+  static_assert(subtitle_locator_word_count == v2::subtitle_plane_state_word_count);
   static_assert(parallax_state_word_count == v2::state_words_t {}.size());
 }  // namespace models::host_sbs_gpu_completion_receipt
