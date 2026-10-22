@@ -340,6 +340,110 @@ E33_DEPTH_LOSS.insert(-2, E33_DEPTH_LOSS[7].replace('13:47:15:633', '13:47:17:37
                       .replace('status_revision=5', 'status_revision=6'))
 
 
+# Real lines of E33 10-22 session B (14:35-14:37): the title screen into the first scene (NGX depth, no frame
+# generation), the render-section hitch window, and the host's two upstream stalls.
+E33B_TITLE = [
+    '14:35:02:546 [44960] | INFO  | Registered add-on "Sunshine 3D" v0.0.0.0 using ReShade API version 20.',
+    '14:35:09:015 [42172] | INFO  | [Sunshine 3D] Sunshine Game 3D: add-on GPU renderer ready (built off the present '
+    'thread in 22 ms, longest step SunshineApplyUICS 4.5 ms; present-thread adoption 0.002 ms; 3840x2160, colour 1)',
+    '14:35:09:246 [41592] | INFO  | [Sunshine 3D] Sunshine SBS: generation 1, 7680x2160 full SBS, DXGI 24, D3D12, '
+    'sRGB, protocol 4 (source color 1)',
+    '14:35:10:016 [41592] | INFO  | [Sunshine 3D] Sunshine 3D raw automation: calibrating; source=1; samples=0 '
+    'stereo_scale=0 target_scale=0 t0=0 target_t0=0 reference_Q=0 normalization_L=7.67999971 reference_valid=0 '
+    'plane_state=holding_stereo_controls; uncalibrated relative raw basis; depth_path=NGX feedback_revision=3',
+    '14:35:14:233 [53312] | INFO  | [Sunshine 3D] Sunshine SBS output: published=1077 fg=0 scene_flat=1077 '
+    'scene_fading=0 published_fresh_depth=964 published_reused_depth=113 published_depth_missing=0 (unavailable=0 '
+    'reuse_after_gap=0 reuse_other_source=0) runtime=0x1ca461a32d0 generation=1 dropped=0 overwritten_unconsumed=644; '
+    'cumulative Game 3D publications; scene_flat had depth but showed the colour frame; reused depth is bounded and '
+    'does not advance calibration; unavailable reasons are in Sunshine depth readiness; dropped found no reusable '
+    'export slot, overwritten_unconsumed replaced a ready slot the consumer never claimed',
+    '14:35:19:234 [53312] | INFO  | [Sunshine 3D] Sunshine SBS output: published=2253 fg=0 scene_flat=2253 '
+    'scene_fading=0 published_fresh_depth=2056 published_reused_depth=197 published_depth_missing=0 (unavailable=0 '
+    'reuse_after_gap=0 reuse_other_source=0) runtime=0x1ca461a32d0 generation=1 dropped=0 overwritten_unconsumed=1370; '
+    'cumulative Game 3D publications; scene_flat had depth but showed the colour frame; reused depth is bounded and '
+    'does not advance calibration; unavailable reasons are in Sunshine depth readiness; dropped found no reusable '
+    'export slot, overwritten_unconsumed replaced a ready slot the consumer never claimed',
+    '14:35:24:236 [53312] | INFO  | [Sunshine 3D] Sunshine SBS output: published=3423 fg=0 scene_flat=3423 '
+    'scene_fading=0 published_fresh_depth=3185 published_reused_depth=238 published_depth_missing=0 (unavailable=0 '
+    'reuse_after_gap=0 reuse_other_source=0) runtime=0x1ca461a32d0 generation=1 dropped=0 overwritten_unconsumed=2089; '
+    'cumulative Game 3D publications; scene_flat had depth but showed the colour frame; reused depth is bounded and '
+    'does not advance calibration; unavailable reasons are in Sunshine depth readiness; dropped found no reusable '
+    'export slot, overwritten_unconsumed replaced a ready slot the consumer never claimed',
+    '14:35:29:234 [53312] | INFO  | [Sunshine 3D] Sunshine SBS output: published=4579 fg=0 scene_flat=4579 '
+    'scene_fading=0 published_fresh_depth=4278 published_reused_depth=301 published_depth_missing=0 (unavailable=0 '
+    'reuse_after_gap=0 reuse_other_source=0) runtime=0x1ca461a32d0 generation=1 dropped=0 overwritten_unconsumed=2796; '
+    'cumulative Game 3D publications; scene_flat had depth but showed the colour frame; reused depth is bounded and '
+    'does not advance calibration; unavailable reasons are in Sunshine depth readiness; dropped found no reusable '
+    'export slot, overwritten_unconsumed replaced a ready slot the consumer never claimed',
+    '14:35:30:766 [53312] | INFO  | [Sunshine 3D] Sunshine depth readiness: lost reason=retained_depth_expired '
+    'runtime=0x1ca461a32d0 native_swapchain=0x1ca46818980 present=4919 unavailable_ms=0 suppressed_episodes=0; '
+    'provider=NGX prior_provider=NGX selected=0 snapshot_ready=0 copied=0 output_reused=0 display=not_attempted '
+    'selection=inactive_views status=stale failure=none capture=352847 sequence=4900 newest_sequence=4900 epoch=4 '
+    'source=1 viewport=0 selection_tick_ms=62478828 source_age_ms=250 newest_view_age_ms=250 active_views=0 finished=1 '
+    'success=1 submitted=1 invalid=0 capture_pending=0 capture_repeated=0 fence=4896 completed=4896 completion_valid=1 '
+    'producer_retired=1; FG_query=3 FG_known=1 FG_enabled=0 FG_mode=0 FG_generated=1 FG_epoch=4 FG_viewport=1 '
+    'require_FG=0 policy_epoch=0; prior_output_ready=1 prior_retained=1 prior_age_ms=250 prior_present=4901 '
+    'prior_capture=352847 prior_sequence=4900 prior_epoch=4 prior_source=1 prior_viewport=0 prior_observation=0 '
+    'current_observation=0 prior_feedback=3 current_feedback=0 prior_reset=0 current_reset=0 '
+    'retained_clear=retained_depth_expired; source_action=invalidate source_reason=retained_depth_expired '
+    'cache_reason=retained_depth_expired consumer=not_attempted consumer_loss=none cookie=0 slot_invalid=0',
+    '14:35:30:768 [53312] | INFO  | [Sunshine 3D] Sunshine 3D raw automation: depth_unavailable; source=0; samples=0 '
+    'stereo_scale=0 target_scale=0 t0=0 target_t0=0 reference_Q=0 normalization_L=7.67999971 reference_valid=0 '
+    'plane_state=holding_stereo_controls; uncalibrated relative raw basis; depth_path=NGX feedback_revision=3',
+    '14:35:31:598 [41592] | INFO  | [Sunshine 3D] Sunshine depth readiness: recovered reason=fresh_copy '
+    'runtime=0x1ca461a32d0 native_swapchain=0x1ca46818980 present=5131 unavailable_ms=828 suppressed_episodes=0; '
+    'provider=NGX prior_provider=NGX selected=1 snapshot_ready=1 copied=1 output_reused=0 display=ready '
+    'selection=completed_snapshot status=ready failure=none capture=354848 sequence=4902 newest_sequence=4903 epoch=4 '
+    'source=1 viewport=0 selection_tick_ms=62479656 source_age_ms=16 newest_view_age_ms=0 active_views=1 finished=1 '
+    'success=1 submitted=1 invalid=0 capture_pending=0 capture_repeated=0 fence=4898 completed=4898 completion_valid=1 '
+    'producer_retired=1; FG_query=3 FG_known=1 FG_enabled=0 FG_mode=0 FG_generated=1 FG_epoch=4 FG_viewport=1 '
+    'require_FG=0 policy_epoch=0; prior_output_ready=0 prior_retained=0 prior_age_ms=18446744073709551615 '
+    'prior_present=0 prior_capture=0 prior_sequence=0 prior_epoch=0 prior_source=0 prior_viewport=0 '
+    'prior_observation=0 current_observation=0 prior_feedback=0 current_feedback=5 prior_reset=0 current_reset=1 '
+    'retained_clear=none; source_action=copy_fresh source_reason=fresh_copy_candidate cache_reason=none consumer=ready '
+    'consumer_loss=none cookie=354872 slot_invalid=0',
+    '14:35:31:772 [41592] | INFO  | [Sunshine 3D] Sunshine 3D raw automation: calibrating; source=1; samples=1 '
+    'stereo_scale=0 target_scale=0 t0=0 target_t0=0 reference_Q=0 normalization_L=7.67999971 reference_valid=0 '
+    'plane_state=holding_stereo_controls; uncalibrated relative raw basis; depth_path=NGX feedback_revision=5',
+    '14:35:32:770 [41592] | INFO  | [Sunshine 3D] Sunshine 3D raw automation: ready; source=1; samples=4 '
+    'stereo_scale=1760.48376 target_scale=1736.10669 t0=0.00153324299 target_t0=0.0015611807 reference_Q=0.00442369096 '
+    'normalization_L=7.67999971 reference_valid=1 plane_state=adjusting_stereo_controls; uncalibrated relative raw '
+    'basis; depth_path=NGX feedback_revision=5',
+    '14:35:34:238 [41592] | INFO  | [Sunshine 3D] Sunshine SBS output: published=5527 fg=0 scene_flat=5071 '
+    'scene_fading=73 published_fresh_depth=4855 published_reused_depth=460 published_depth_missing=212 '
+    '(unavailable=212 reuse_after_gap=0 reuse_other_source=0) runtime=0x1ca461a32d0 generation=1 dropped=0 '
+    'overwritten_unconsumed=3306; cumulative Game 3D publications; scene_flat had depth but showed the colour frame; '
+    'reused depth is bounded and does not advance calibration; unavailable reasons are in Sunshine depth readiness; '
+    'dropped found no reusable export slot, overwritten_unconsumed replaced a ready slot the consumer never claimed',
+]
+
+E33B_RENDER_HITCH = [
+    '14:36:23:771 [53312] | INFO  | [Sunshine 3D] Sunshine Streamline frame generation: viewport=1 mode=0 '
+    'generated_frames=3 supported=1 success=1',
+    '14:36:27:488 [41592] | INFO  | [Sunshine 3D] Sunshine Game 3D timing: presents=1031 cpu_ms={mean=0.205 '
+    'max=47.306} cpu_worst_ms={setup=0.005 depth=0.055 ui=0.025 render=47.097 export=0.124} gpu_frames=0 gpu_ms '
+    'mean/max={total=0.000/0.000 inputs=0.000/0.000 source=0.000/0.000 detection=0.000/0.000 linearize=0.000/0.000 '
+    'candidate=0.000/0.000 vertical=0.000/0.000 horizontal=0.000/0.000 eyes=0.000/0.000 pack=0.000/0.000} '
+    'gpu_profile=disabled dropped_fence_pending=0 dropped_unresolved=0 incomplete=0 ui_layer={copies=0 skipped=0 '
+    'offers=0 presents_since_copy={mean=0.00 max=0} skip_gap_ms=0.0} window_ms=10000',
+]
+
+E33B_HOST_STALLS = [
+    '[2026-10-22 14:35:09.251]: Info: ReShade SBS connected: process 46096, 7680x2160, sRGB SDR, protocol 4, '
+    'generation 1.',
+    '[2026-10-22 14:35:58.793]: Warning: NvEnc: frame 5931 exceeded the 100 ms completion wait; its input is still '
+    "being produced, so the encoder's 250 ms budget starts when the input completes (2000 ms at most); "
+    'input_producer=pending_at_99ms (upstream GPU delay)',
+    '[2026-10-22 14:35:58.922]: Info: NvEnc: frame 5931 completed after soft timeout in 229 ms; '
+    'input_producer=done_at_225ms (upstream GPU delay)',
+    '[2026-10-22 14:36:30.622]: Warning: NvEnc: frame 8615 exceeded the 100 ms completion wait; its input is still '
+    "being produced, so the encoder's 250 ms budget starts when the input completes (2000 ms at most); "
+    'input_producer=pending_at_100ms (upstream GPU delay)',
+    '[2026-10-22 14:36:30.863]: Info: NvEnc: frame 8615 completed after soft timeout in 341 ms; '
+    'input_producer=done_at_341ms (upstream GPU delay)',
+]
+
+
 class ReadinessReport(unittest.TestCase):
     def test_clean_session_passes(self):
         checks = run(BASE + [ui('10:00:12', 2, 5, (0, 5, 0, 0), 0x2, 0x2), line('10:00:20', 'Finished exiting.')])
@@ -1958,6 +2062,161 @@ class ReadinessReport(unittest.TestCase):
             stalls = {c.name: c for c in report.host_checks(host, start, end, transitions)}['Encoder stalls']
             self.assertEqual((stalls.status, stalls.times),
                              ('INFO', ['13:45:56 upstream GPU 112 ms at FG on 13:45:56']))
+
+    def test_e33_title_depth_pause_and_scene_wait_are_the_games_own(self):
+        # E33 10-22 session B, the title screen (real lines): NGX evaluated DLSS while the scene behind the title
+        # rendered, so its depth was fresh, but the raw controller accepted no sample from it for 20 s. Leaving the
+        # title, the game ran no DLSS for 828 ms (no active depth view) and resumed with its own history reset
+        # (current_reset=1); the controller then had its reference within a second. The pause and the wait are the
+        # game's own: INFO, each listed.
+        checks = run(E33B_TITLE)
+        self.assertEqual(checks['Depth'].status, 'PASS')
+        self.assertEqual((checks['Depth paused by the game'].status, checks['Depth paused by the game'].times),
+                         ('INFO', ['14:35:30.766-14:35:31.598 (828 ms) retained_depth_expired, NGX '
+                                   'selection=inactive_views (the game supplied no depth)']))
+        self.assertEqual(checks['Placement flat'].status, 'PASS')
+        waited = checks['Placement waited for the scene']
+        self.assertEqual((waited.status, waited.times),
+                         ('INFO', ['14:35:10.016-14:35:32.770 raw calibrating (21.9 s with depth), game scene reset '
+                                   '14:35:31.598']))
+        # Without the game's reset neither is the game's own: the loss is a depth gap and the run a flat window.
+        no_reset = [x.replace('current_reset=1', 'current_reset=0') for x in E33B_TITLE]
+        checks = run(no_reset)
+        self.assertEqual(checks['Depth'].status, 'WARN')
+        self.assertNotIn('Depth paused by the game', checks)
+        self.assertEqual(checks['Placement flat'].status, 'WARN')
+        self.assertNotIn('Placement waited for the scene', checks)
+        # A loss the add-on had a depth view for (its own capture failing) is not the game pausing DLSS.
+        own = [x.replace('selection=inactive_views', 'selection=completed_already_consumed') for x in E33B_TITLE]
+        self.assertEqual(run(own)['Depth'].status, 'WARN')
+        # Placement more than the settle time (and the log gate) after the reset did not come from the new scene.
+        late = [x.replace('14:35:32:770', '14:35:35:700') if 'raw automation: ready' in x else x for x in E33B_TITLE]
+        self.assertEqual(run(late)['Placement flat'].status, 'WARN')
+        # A controller in an error state was not waiting for a reference.
+        error = E33B_TITLE[:4] + [E33B_TITLE[3].replace('14:35:10:016', '14:35:20:000').replace(
+            'automation: calibrating;', 'automation: invalid_source;')] + E33B_TITLE[4:]
+        checks = run(error)
+        self.assertEqual(checks['Placement flat'].status, 'WARN')
+        self.assertNotIn('Placement waited for the scene', checks)
+
+    def test_frame_generation_sessions_count_reused_depth_as_depth(self):
+        # E33 10-22 session A at 4x frame generation (real lines): a quarter of the publications carry fresh depth
+        # and the rest bounded reuse of it. The depth checks began only once more than half were fresh, so a session
+        # that started with FG on had none, and its 13:47:15 loss went unreported.
+        checks = run(E33_DEPTH_LOSS)
+        self.assertEqual((checks['Depth'].status, checks['Depth'].times),
+                         ('WARN', ['13:47:15.502-13:47:17.373 (1859 ms) retained_depth_expired, Streamline '
+                                   'selection=inactive_views (the game supplied no depth)']))
+        self.assertIn('fresh from 13:47:14', checks['Depth'].detail)
+        # Reused depth alone, with no fresh depth at all, has not started.
+        reused = [x.replace('published_fresh_depth=476', 'published_fresh_depth=336') for x in E33_DEPTH_LOSS]
+        self.assertEqual(run(reused)['Depth'].status, 'FAIL')
+
+    def test_a_slow_present_without_a_named_step_is_a_hitch(self):
+        # E33 10-22 session B (real lines): the window to 14:36:27 had a 47 ms Present in its render section, which
+        # had no named step, and the report said 'Present hitches: none'. An FG switch lies in that window, so it is
+        # expected there, and listed.
+        checks = run(BASE + E33B_RENDER_HITCH)
+        self.assertEqual((checks['Present hitches'].status, checks['Present hitches'].times),
+                         ('PASS', ['14:36:27 render section (no step named; the slowest Present of 14:36:17-14:36:27) '
+                                   '47.3 ms']))
+        # Without a transition in the window it warns.
+        checks = run(BASE + E33B_RENDER_HITCH[1:])
+        self.assertEqual(checks['Present hitches'].status, 'WARN')
+        self.assertEqual(checks['Present hitches'].times,
+                         ['14:36:27 render section (no step named; the slowest Present of 14:36:17-14:36:27) 47.3 ms'])
+        # A named step in the window accounts for its slowest Present.
+        named = line('14:36:20', '[Sunshine 3D] Sunshine Game 3D hitch: stereo render took 47.0 ms on the present '
+                                 'thread vram_local_mib=9000/14000 nonlocal_mib=200', 'WARN')
+        checks = run(BASE + E33B_RENDER_HITCH[1:] + [named])
+        self.assertEqual(checks['Present hitches'].times, ['14:36:20 stereo render 47.0 ms'])
+        # A window whose slowest Present stayed under the hitch threshold is none.
+        quick = [E33B_RENDER_HITCH[1].replace('max=47.306', 'max=7.990')]
+        self.assertEqual(run(BASE + quick)['Present hitches'].detail, 'none')
+
+    def test_vram_samples_warn_only_at_events_under_pressure(self):
+        # The add-on's 10 s VRAM line (game3d_vram.h, its unit test's exact format) and the latest sample on a depth
+        # loss: a loss at 15350 of a 15400 MiB budget came under pressure; the window alone (over budget for 250 ms,
+        # with nothing visible) is INFO. Logs before 10-22 have neither check.
+        window = line('10:00:12', '[Sunshine 3D] Sunshine Game 3D VRAM: local_mib={usage=15100 budget=15000} '
+                                  'nonlocal_mib={usage=400 budget=60000} window={samples=2 max_usage_mib=15100 '
+                                  'min_budget_mib=15000 min_headroom_mib=-100 over_budget_ms=250 budget_changes=0} '
+                                  'window_ms=10000')
+        lost = line('10:00:13', '[Sunshine 3D] Sunshine depth readiness: lost reason=retained_depth_expired '
+                                'runtime=0x1 present=10 unavailable_ms=0 suppressed_episodes=0; provider=NGX '
+                                'selection=inactive_views status=stale consumer=x consumer_loss=none cookie=0 '
+                                'slot_invalid=0 vram_local_mib=15350/15400 nonlocal_mib=410')
+        checks = run(BASE + [window])
+        self.assertNotIn('VRAM pressure', checks)
+        self.assertEqual(checks['Video memory'].status, 'INFO')
+        self.assertIn('peaked at 15100 MiB', checks['Video memory'].detail)
+        self.assertIn('as low as -100 MiB; 250 ms over budget', checks['Video memory'].detail)
+        checks = run(BASE + [window, lost])
+        self.assertEqual((checks['VRAM pressure'].status, checks['VRAM pressure'].times),
+                         ('WARN', ['10:00:13.000 depth loss at 15350/15400 MiB']))
+        roomy = lost.replace('15350/15400', '14000/15400')
+        self.assertNotIn('VRAM pressure', run(BASE + [window, roomy]))
+        # A recovery line's sample is not an event.
+        recovered = lost.replace('lost reason=retained_depth_expired', 'recovered reason=fresh_copy')
+        self.assertNotIn('VRAM pressure', run(BASE + [window, recovered]))
+        self.assertNotIn('Video memory', run(BASE))
+        gap = report.parse([line('10:00:14', '[Sunshine 3D] Sunshine Game 3D present gap: 343 ms since the previous '
+                                             'Present; fg=1 foreground=0 suppressed=0 vram_local_mib=9000/14000 '
+                                             'nonlocal_mib=200')])
+        self.assertEqual(gap.present_gaps, [(36014.0, 343.0, True, False)])
+        self.assertEqual(gap.vram_points, [(36014.0, 9000, 14000, 'present gap')])
+
+    def test_an_upstream_stall_inside_the_games_own_freeze_is_info(self):
+        # E33 10-22 session B (real host lines): frames 5931 and 8615 waited 229 and 341 ms for the host's own
+        # conversion; the game presented nothing over either stall (240 and 343 ms Present gaps, the second as it lost
+        # focus with FG on). The add-on now logs such gaps; a stall a game gap covers is the game holding the whole
+        # GPU, unless video memory was under pressure at it. Before the gap lines both warned, as they still do here.
+        start, end = datetime(2026, 10, 22, 14, 35, 2), datetime(2026, 10, 22, 14, 37, 4)
+        fg_off = [(14 * 3600 + 36 * 60 + 30.880, 'FG off')]
+
+        def gap(t, ms, foreground=1, vram='9618/14000'):
+            return (f'{t} [41592] | INFO  | [Sunshine 3D] Sunshine Game 3D present gap: {ms} ms since the previous '
+                    f'Present; fg=1 foreground={foreground} suppressed=0 vram_local_mib={vram} nonlocal_mib=208')
+        gaps = [gap('14:35:58:940', 240), gap('14:36:30:861', 343, foreground=0)]
+
+        def stalls(host_lines, game_lines):
+            with TemporaryDirectory() as folder:
+                host = Path(folder) / 'sunshine.log'
+                host.write_text('\n'.join(host_lines) + '\n', encoding='utf-8')
+                memory = report.game_memory(report.parse(game_lines))
+                return {c.name: c for c in report.host_checks(host, start, end, fg_off, memory)}
+        before = stalls(E33B_HOST_STALLS, [])['Encoder stalls']
+        self.assertEqual((before.status, before.times),
+                         ('WARN', ['14:35:58 upstream GPU 229 ms', '14:36:30 upstream GPU 341 ms at FG off 14:36:30']))
+        froze = stalls(E33B_HOST_STALLS, gaps)['Encoder stalls']
+        self.assertEqual((froze.status, froze.times),
+                         ('INFO', ['14:35:58 upstream GPU 229 ms during a 240 ms game freeze (FG on before it)',
+                                   '14:36:30 upstream GPU 341 ms at FG off 14:36:30 during a 343 ms game freeze (FG on '
+                                   'before it, not foreground)']))
+        self.assertIn('the game itself presented nothing', froze.detail)
+        # A gap shorter than the stall, or one that ended before it did, does not cover it.
+        for partial in (gap('14:35:58:940', 120), gap('14:35:58:800', 240)):
+            checks = stalls(E33B_HOST_STALLS, [partial, gaps[1]])['Encoder stalls']
+            self.assertEqual((checks.status, checks.times[0]), ('WARN', '14:35:58 upstream GPU 229 ms'))
+        # Video memory under pressure at the stall, the game's or the host's, keeps it a warning.
+        squeezed = stalls(E33B_HOST_STALLS, [gap('14:35:58:940', 240, vram='15350/15400'), gaps[1]])
+        squeezed = squeezed['Encoder stalls']
+        self.assertEqual((squeezed.status, squeezed.times[0]),
+                         ('WARN', '14:35:58 upstream GPU 229 ms during a 240 ms game freeze (FG on before it) '
+                                  'game VRAM 15350/15400 MiB'))
+        host_vram = [x + ' host_vram_mib={local=5990/6000 nonlocal=300}' if 'frame 8615' in x else x
+                     for x in E33B_HOST_STALLS]
+        checks = stalls(host_vram, gaps)
+        self.assertEqual((checks['Encoder stalls'].status, checks['Encoder stalls'].times),
+                         ('WARN', ['14:36:30 upstream GPU 341 ms at FG off 14:36:30 during a 343 ms game freeze (FG on '
+                                   'before it, not foreground) host VRAM 5990/6000 MiB']))
+        self.assertEqual(checks['Host video memory'].detail, 'host local usage peaked at 5990 MiB; its headroom was as '
+                                                             'low as 10 MiB (5990/6000 MiB at 14:36:30)')
+        # An encoder that ran past its input is not explained by the game's freeze.
+        slow = [x.replace('done_at_225ms', 'done_at_100ms') for x in E33B_HOST_STALLS]
+        checks = stalls(slow, gaps)['Encoder stalls']
+        self.assertEqual((checks.status, checks.times),
+                         ('WARN', ['14:35:58 upstream GPU + encoder-side 229 ms']))
 
 
 if __name__ == '__main__':

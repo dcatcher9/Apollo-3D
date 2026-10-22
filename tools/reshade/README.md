@@ -454,7 +454,10 @@ python tools\reshade\game3d_log_report.py "D:\Games\<game>" --host-log E:\Apollo
 
 It reads existing log lines only and prints PASS, WARN or FAIL per check with the times to look
 at; the exit code is 1 when a check failed. The checks cover: add-on and renderer readiness;
-fresh depth and gaps outside the settle time after FG switches and runtime resets; publications
+fresh depth and gaps outside the settle time after FG switches and runtime resets (depth starts at the
+first counter interval in which fresh depth and the bounded reuse frame generation shows between real
+frames carry most publications: at 4x only a quarter are fresh, and before 10-22 a session that started
+with FG on was never checked); publications
 that showed the colour frame with depth; capture coverage by the list lifecycle; whether the
 camera projection or only the raw controller places the scene (the latter while a valid camera
 exists is a warning); UI acceptance changes and Forget; inferred alpha
@@ -489,7 +492,12 @@ logs since fix 1, `Pre-UI proof` for each layer proof key (`pre_ui:<format>:<spa
 earned, lapsed or forgotten ([hidden-scene evidence](../../docs/reshade-sbs.md#setup) defines it);
 observation losses by cause; capture statuses of every API depth provider (Streamline, NGX and the
 API fallback, each listed time naming its provider) outside the settle time after an export start,
-FG switch or reset (those inside it are INFO); unusual export pauses; present-thread hitches; Game 3D
+FG switch or reset (those inside it are INFO); unusual export pauses; present-thread hitches, named
+by their step, and, from each timing line, a window whose slowest Present took the hitch threshold
+(8 ms) or more with no hitch line in it, named by its slowest section (no step named; before 10-22 the
+render section had none): its time within the window is unknown, so it is expected, and listed with
+the PASS, when a reset, FG switch, export start or overlay opening lies in that window or within the
+settle time before it; Game 3D
 CPU and GPU cost over every timing window (means weighted by each window's Presents or GPU frames,
 and the largest maximum); `Stream delivery`, the new frames per second the host took (published
 minus overwritten-unconsumed slots) against what the game offered (published plus dropped), capped
@@ -518,10 +526,18 @@ reconfiguration kept the host's conversion off the GPU, and the encoder's budget
 completion lets that delay one picture by design
 ([GPU handoff contract](../../docs/reshade-sbs.md#gpu-handoff-contract)). Live 10-04 to 10-07 every completed
 upstream stall but E33's two came within 0.8 s of one, and all but Stellar Blade's 690 ms at its 10-06 FG enable
-lasted 112-209 ms; the add-on's log drains asynchronously, so its line can follow the event. A longer one, one
+lasted 112-209 ms; the add-on's log drains asynchronously, so its line can follow the event. Since 10-22 a
+completed upstream stall (encoder finished with its input) that a game `Sunshine Game 3D present gap` covers, both
+ends within 50 ms, is INFO however long: the game presented nothing for the whole stall, so it held the whole GPU
+(E33 10-22: 229 and 341 ms). The stall names the gap, the FG state before it and a focus loss at its end. Video
+memory under pressure at the stall keeps it a warning: the host's own sample on the stall's line, or a game sample
+within 1 s, over its local budget or within 128 MiB of it, each named (`host VRAM` or `game VRAM` usage/budget). A
+longer stall at a transition without such a gap, one
 whose encoder also ran past its input (`upstream GPU + encoder-side`), an encoder-side stall, a timeout or a
-removed device or failed wait (`timed out`, `failed`), and an upstream stall with no such transition near it warn;
-a focus loss or export start explains none, since the host's switch to or from the desktop is its own work. A log whose game process ended right
+removed device or failed wait (`timed out`, `failed`), and an upstream stall with no such transition or gap near it
+warn; a focus loss or export start alone explains none, since the host's switch to or from the desktop is its own
+work. Host logs since 10-22 add `Host video memory`, INFO: the host process's largest local usage and smallest
+headroom on its stall and 20 s encode-loop lines. A log whose game process ended right
 after ReShade tore its runtimes down (Unreal games often end before ReShade logs its exit) counts
 as a normal exit.
 
@@ -594,6 +610,13 @@ layer was the one-frame-late copy, which no judge reads). UI lines from S2a thro
 carry `sampled_late_layer`, which only repeated that a layer was offered and is skipped. The
 [UI counters](../../docs/reshade-sbs.md#setup) table and the UI line description there own these
 ranges.
+Logs since 10-22 carry the game process's video memory
+([Diagnostics switch and per-Present cost](../../docs/reshade-sbs.md#diagnostics-switch-and-per-present-cost)).
+`VRAM pressure` warns for each depth loss, hitch or Present gap line whose own sample put the game's local usage
+over its budget or within 128 MiB of it (the OS demotes allocations above the budget, which can stall the whole
+GPU), listed with its usage and budget; `Video memory` is INFO with the windows' largest usage, smallest budget and
+headroom, and the time over budget, which with nothing visible at it warns of nothing. Older logs have neither.
+
 Each `UI protection gaps` window lists its pieces with each line's own FG state; a line whose
 status sample was still pending (`checking` or `searching`), or an unrendered line, continues a run,
 labelled with that state after the last sample's reason.
@@ -601,12 +624,21 @@ labelled with that state after the last sample's reason.
 The depth and flat checks decide from the periodic `Sunshine SBS output` counters, then name
 the add-on's own evidence for each window. A depth gap lists each `Sunshine depth readiness`
 loss inside it, paired with the same runtime's recovery, with its exact start, `unavailable_ms`,
-reason, provider and selection (`inactive_views` means the game supplied no depth view). A flat
+reason, provider and selection (`inactive_views` means the game supplied no depth view). A gap
+whose every loss had `inactive_views` and recovered with the game's own declared history reset
+(`current_reset=1` on the recovered line: a new scene) is INFO `Depth paused by the game`: the game
+ran no DLSS (a menu or loading screen; E33 10-22 leaving its title, 828 and 1265 ms) and every frame
+was flat. A loss without that reset, or one the add-on had a depth view for, stays a gap. A flat
 window is reported as INFO `Placement calibration` only when every placement-controller run
 without placement inside it (raw automation other than `ready`/`holding_reference`, or
 Streamline scale other than `ready`) followed a cause the log names (a depth-provider or frame
 generation switch, a depth loss, or the export starting) and had depth for no longer in total
-than the report's settle time. A longer or unexplained run, or flat output while placement was
+than the report's settle time, or, as INFO `Placement waited for the scene`, when the run only waited
+for a reference (its states calibrating, waiting for depth or depth unavailable, never an error
+state) and placed within the settle time and the log gate of the game's own scene reset inside it:
+the depth before the reset gave no reference and the next scene did at once (E33 10-22 title
+screens: 20 and 23 s, ready 0.9 and 1.2 s after the game's reset); its length is how long the
+player stayed there. A longer or unexplained run, or flat output while placement was
 ready, stays a warning that names the controller's state. The add-on's diagnostic log gate can
 hold a controller line, so run ends are approximate and a cause may lead its run by that gate.
 From `Sunshine SBS: export inactive` until the next `Sunshine SBS: generation` nothing is

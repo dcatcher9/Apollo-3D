@@ -130,6 +130,31 @@ PLACEMENT = re.compile(r'Sunshine 3D (raw automation|Streamline scale): (\w+);')
 # Every API depth provider's status line (streamline_depth_provider.cpp): Streamline, NGX and the API fallback.
 DEPTH_STATUS = re.compile(r'Sunshine (Streamline|NGX|API) depth: (\w+);')
 HITCH = re.compile(r'Game 3D hitch: (.+?) took ([0-9.]+) ms')
+# A step logs its hitch line from this long on (game3d_slow_step.h); the timing line's slowest Present (cpu_ms max,
+# split into its sections) shows a hitch in a section without a named step.
+HITCH_MS = 8.0
+TIMING_WORST = re.compile(r'cpu_worst_ms=\{setup=([0-9.]+) depth=([0-9.]+) ui=([0-9.]+) render=([0-9.]+) '
+                          r'export=([0-9.]+)\}')
+TIMING_SECTIONS = ('setup', 'depth', 'ui', 'render', 'export')
+# The game's own declared DLSS history reset on a depth readiness line (a new scene: a camera cut, a menu or loading
+# screen left).
+CURRENT_RESET = re.compile(r'\bcurrent_reset=(\d)')
+# Since 10-22: a gap between two Presents of one runtime of 100 ms or more (exporter.cpp present_gap_ms), logged by
+# the Present that ended it: the game presented nothing for that long.
+PRESENT_GAP = re.compile(r'Sunshine Game 3D present gap: ([0-9.]+) ms since the previous Present; fg=(\d) '
+                         r'foreground=(\d)')
+# Since 10-22: the game process's video memory (game3d_vram.h): each timing window's line, and the latest sample on a
+# depth readiness, hitch and present-gap line; the host's own on each stalled picture's lines (nvenc_base.cpp).
+VRAM_WINDOW = re.compile(r'Sunshine Game 3D VRAM: local_mib=\{usage=(\d+) budget=(\d+)\} nonlocal_mib=\{usage=(\d+) '
+                         r'budget=(\d+)\} window=\{samples=(\d+) max_usage_mib=(\d+) min_budget_mib=(\d+) '
+                         r'min_headroom_mib=(-?\d+) over_budget_ms=(\d+) budget_changes=(\d+)\}')
+VRAM_POINT = re.compile(r'\bvram_local_mib=(\d+)/(\d+)')
+HOST_VRAM = re.compile(r'host_vram_mib=\{local=(\d+)/(\d+) nonlocal=(\d+)\}')
+# Local video memory this close to its budget, or over it, is pressure: the OS demotes the process's allocations to
+# system memory above its budget, which can stall the whole GPU. A sample within this many MiB of the budget counts.
+VRAM_MARGIN_MIB = 128
+# A stall, depth loss, hitch or Present gap is near a video-memory sample this close in time.
+VRAM_NEAR_S = 1.0
 # The present-thread steps of a depth-source flip (Streamline <-> NGX <-> Generic) that each log their own hitch
 # line (docs/reshade-sbs.md, depth handoff): named in the hitch details.
 DEPTH_FLIP_STEPS = frozenset((
@@ -153,6 +178,7 @@ LAYER_TIMING = re.compile(r'ui_layer=\{copies=(\d+) skipped=(\d+) offers=(\d+) '
                           r'presents_since_copy=\{mean=([0-9.]+) max=(\d+)\}(?: skip_gap_ms=([0-9.]+))?\}'
                           r'(?: window_ms=(\d+))?')
 TIMING_WINDOW_S = 10.0
+WINDOW_MS = re.compile(r'\bwindow_ms=(\d+)')
 # The layer's recency gate (game3d_ui_layer.h max_clear_gap_ms): this long without a recorded copy, the layer is no
 # longer offered at all.
 LAYER_RECENCY_MS = 250.0
@@ -574,6 +600,7 @@ class Interval:
     flat: int
     missing: int
     fresh: int
+    reused: int = 0  # Publications with bounded reused depth (frame generation shows a real frame's depth).
 
 
 @dataclass
@@ -591,6 +618,12 @@ class DepthEpisode:
     # episode's Presents without depth are the ones from its loss up to, not including, its recovery.
     lost_present: int | None = None
     recovered_present: int | None = None
+    reset: bool = False  # Its recovery came with the game's own declared reset (current_reset=1): a new scene.
+
+    def paused_by_game(self) -> bool:
+        """The game ran no DLSS (no active depth view) and resumed it with its own scene reset: a menu or loading
+        screen left, not a capture the add-on lost."""
+        return self.selection == 'inactive_views' and self.ending == 'recovered' and self.reset
 
     def presents(self) -> int | None:
         if self.ending != 'recovered' or self.lost_present is None or self.recovered_present is None:
@@ -619,6 +652,7 @@ class Unplaced:
     states: list[tuple[float, str]] = field(default_factory=list)  # Each line's time and controller state.
     with_depth: list[tuple[float, float]] = field(default_factory=list)  # Parts streamed with depth available.
     cause: str = ''  # The switch, loss or export start that began it, or '' when the log names none.
+    reset: float | None = None  # The game's own scene reset it ended after (waited_for_scene), else None.
 
     def depth_s(self) -> float:
         return sum(b - a for a, b in self.with_depth)
@@ -630,6 +664,14 @@ class Unplaced:
     def calibration(self) -> bool:
         """The designed recalibration: it followed a named cause and had depth for at most SETTLE_S."""
         return bool(self.with_depth and self.cause) and not self.long()
+
+    def waited_for_scene(self) -> bool:
+        """A run that only waited for a reference (calibrating or waiting for depth, never an error state) until the
+        game's own scene reset, and placed within SETTLE_S of it: the game's depth before it (a title screen) gave no
+        reference, and the next scene did at once."""
+        return self.reset is not None and all(
+            'calibrating' in state or 'waiting_for_depth' in state or state.endswith('depth_unavailable')
+            for _, state in self.states)
 
     def state(self) -> str:
         """The state its lines reported for the longest time."""
@@ -680,6 +722,15 @@ class Session:
     statuses: list[tuple[float, str, str]] = field(default_factory=list)  # Each depth status: time, status, provider.
     hitches: list[tuple[float, str, float]] = field(default_factory=list)
     timings: list[tuple] = field(default_factory=list)  # Every timing line's window.
+    # Each timing line's end, length in s, slowest Present (cpu_ms max) and that Present's sections.
+    timing_worst: list[tuple[float, float, float, tuple[float, ...]]] = field(default_factory=list)
+    game_resets: list[float] = field(default_factory=list)  # Each depth readiness line with current_reset=1.
+    # Since 10-22: each Present gap (end, ms, FG on before it, foreground at its end); each VRAM window line (end,
+    # length s, max usage, min budget, min headroom, over-budget ms); each VRAM sample on an event line (t, usage,
+    # budget, what logged it).
+    present_gaps: list[tuple[float, float, bool, bool]] = field(default_factory=list)
+    vram_windows: list[tuple[float, float, int, int, int, int]] = field(default_factory=list)
+    vram_points: list[tuple[float, int, int, str]] = field(default_factory=list)
     # Each timing line's UI layer group: (end, length s, Presents, copies, skipped, offers, presents_since_copy mean
     # and max, longest skip gap in ms or None before 10-07); and each logged-once full-ring line.
     layer_windows: list[tuple] = field(default_factory=list)
@@ -770,7 +821,7 @@ def parse(lines) -> Session:
             if before and values[0] >= before[1][0]:
                 d = [a - b for a, b in zip(values, before[1])]
                 if d[0]:
-                    s.intervals.append(Interval(before[0], t, d[0], d[1], d[2], d[6], d[4]))
+                    s.intervals.append(Interval(before[0], t, d[0], d[1], d[2], d[6], d[4], d[5]))
             previous_output[runtime] = (t, values)
             generation = GENERATION_FIELD.search(text)
             s.output_counts.append(OutputCount(t, runtime.lower(), generation.group(1) if generation else '',
@@ -830,6 +881,10 @@ def parse(lines) -> Session:
             key = runtime.group(1).lower() if runtime else ''
             present = PRESENT.search(text)
             present = int(present.group(1)) if present else None
+            reset = CURRENT_RESET.search(text)
+            reset = bool(reset and reset.group(1) == '1')
+            if reset:
+                s.game_resets.append(t)
             if found.group(1) == 'lost' and s.streamed and s.streamed[-1][1] is None:
                 s.readiness[found.group(2)] += 1
                 selection = SELECTION.search(text)
@@ -843,6 +898,7 @@ def parse(lines) -> Session:
                 episode.end, episode.ending = t, 'recovered'
                 episode.unavailable_ms = int(unavailable.group(1)) if unavailable else None
                 episode.recovered_present = present
+                episode.reset = reset
         if found := PLACEMENT.search(text):
             state, raw = found.group(2), found.group(1) == 'raw automation'
             s.placement.append((t, state in RAW_PLACED if raw else state == 'ready',
@@ -853,9 +909,25 @@ def parse(lines) -> Session:
             s.ngx = tuple(int(v or 0) for v in found.groups())
         if found := HITCH.search(text):
             s.hitches.append((t, found.group(1), float(found.group(2))))
+        if found := PRESENT_GAP.search(text):
+            s.present_gaps.append((t, float(found.group(1)), found.group(2) == '1', found.group(3) == '1'))
+        if found := VRAM_WINDOW.search(text):
+            window = WINDOW_MS.search(text)
+            length = int(window.group(1)) / 1000.0 if window else TIMING_WINDOW_S
+            values = [int(v) for v in found.groups()]
+            s.vram_windows.append((t, length, values[5], values[6], values[7], values[8]))
+        if found := VRAM_POINT.search(text):
+            readiness = READINESS.search(text)
+            what = (('depth loss' if readiness.group(1) == 'lost' else 'depth recovery') if readiness else
+                    'hitch' if HITCH.search(text) else 'present gap' if PRESENT_GAP.search(text) else 'sample')
+            s.vram_points.append((t, int(found.group(1)), int(found.group(2)), what))
         if found := TIMING.search(text):
             s.timings.append((int(found.group(1)), float(found.group(2)), float(found.group(3)),
                               int(found.group(4)), float(found.group(5)), float(found.group(6))))
+            if worst := TIMING_WORST.search(text):
+                length = WINDOW_MS.search(text)
+                s.timing_worst.append((t, int(length.group(1)) / 1000.0 if length else TIMING_WINDOW_S,
+                                       float(found.group(3)), tuple(float(v) for v in worst.groups())))
             profile = GPU_PROFILE.search(text)
             s.timing_profile = profile.group(1) if profile else ''
             if layer := LAYER_TIMING.search(text):
@@ -902,6 +974,10 @@ def unplaced(s: Session) -> list[Unplaced]:
             if b > a:
                 run.with_depth.append((a, b))
         run.cause = cause(s, run)
+        if run.after:
+            # The controller line that placed it can be held by the log gate after the reset.
+            run.reset = next((r for r in s.game_resets
+                              if run.start <= r <= run.end and run.end - r <= SETTLE_S + LOG_GATE_S), None)
     return runs
 
 
@@ -957,6 +1033,13 @@ def span(a: float, b: float, ms: bool = False) -> str:
     return f'{clock(a, ms)}-{clock(b, ms)}'
 
 
+def paused_by_game(s: Session, window: list[float]) -> bool:
+    """A depth gap window whose every loss episode the game paused itself (DepthEpisode.paused_by_game)."""
+    a, b = window
+    inside = [e for e in s.depth_episodes if e.start < b and e.end > a]
+    return bool(inside) and all(e.paused_by_game() for e in inside)
+
+
 def depth_gaps(s: Session, ranges: list[list[float]]) -> list[str]:
     """Each gap window as the add-on's own loss episodes inside it, or the window when it logged none."""
     times = []
@@ -988,8 +1071,9 @@ def evaluate(s: Session) -> list[Check]:
                   [clock(t) for t, _ in s.display_scaling][:6]))
 
     published = sum(i.published for i in s.intervals)
-    # Depth has started once most of an interval's publications carry it.
-    depth_start = next((i for i in s.intervals if i.fresh * 2 >= i.published), None)
+    # Depth has started once most of an interval's publications carry it: fresh depth, or the bounded reuse of a real
+    # frame's depth that frame generation shows on its generated frames (at 4x only a quarter are fresh).
+    depth_start = next((i for i in s.intervals if i.fresh and (i.fresh + i.reused) * 2 >= i.published), None)
     if not published:
         add(Check('FAIL', 'Depth', 'nothing was published (export never active)'))
     elif not depth_start:
@@ -998,11 +1082,19 @@ def evaluate(s: Session) -> list[Check]:
         after = [i for i in s.intervals if i.start >= depth_start.start]
         pub = sum(i.published for i in after) or 1
         missing = sum(i.missing for i in after)
-        gaps = depth_gaps(s, windows(s, lambda i: i.start >= depth_start.start and i.missing * 10 > i.published))
+        ranges = windows(s, lambda i: i.start >= depth_start.start and i.missing * 10 > i.published)
+        paused = [r for r in ranges if paused_by_game(s, r)]
+        gaps = depth_gaps(s, [r for r in ranges if r not in paused])
         add(Check('WARN' if gaps else 'PASS', 'Depth',
                   f'fresh from {clock(depth_start.start)}; '
                   f'{100 * missing / pub:.1f}% of later publications without depth'
                   + ('; gaps outside FG switches and resets' if gaps else ''), gaps))
+        if paused:
+            losses = depth_gaps(s, paused)
+            add(Check('INFO', 'Depth paused by the game',
+                      f'{len(losses)} depth loss{"es" if len(losses) > 1 else ""} in which the game ran no DLSS (no '
+                      'active depth view: a menu or loading screen) and resumed it with its own scene reset; those '
+                      'frames were flat', losses))
         # Flat output is depth without placement. Within runs without placement that each followed a named
         # cause and had depth for at most SETTLE_S in total it is the designed calibration; a longer or
         # unexplained run, or flat output while placed, warns.
@@ -1010,7 +1102,7 @@ def evaluate(s: Session) -> list[Check]:
 
         def calibrating(i: Interval) -> bool:
             found = [r for r in runs if r.start < i.end and r.end > i.start]
-            return bool(found) and all(r.calibration() for r in found)
+            return bool(found) and all(r.calibration() or r.waited_for_scene() for r in found)
 
         def flagged(i: Interval) -> bool:
             return i.start >= depth_start.start and i.flat * 4 > i.published
@@ -1026,15 +1118,26 @@ def evaluate(s: Session) -> list[Check]:
                   f'{100 * flat / pub:.1f}% of publications showed the colour frame with depth'
                   + ('; flat windows outside FG switches and resets' if flats else ''),
                   [span(a, b) + ''.join(f', {why(r)}' for r in runs
-                                        if not r.calibration() and r.start < b and r.end > a) for a, b in flats]))
+                                        if not (r.calibration() or r.waited_for_scene()) and r.start < b and r.end > a)
+                   for a, b in flats]))
         # Each calibration run is listed once; a run with almost no depth (a depth loss inside the window) is none.
         seen = [r for r in runs if r.depth_s() >= CALIBRATION_MIN_S
                 and any(r.start < b and r.end > a for a, b in calibrations)]
-        if seen:
+        designed = [r for r in seen if r.calibration()]
+        if designed:
             add(Check('INFO', 'Placement calibration',
-                      ('1 flat run was a calibration' if len(seen) == 1 else f'{len(seen)} flat runs were calibrations')
-                      + f' with depth for at most {SETTLE_S:g} s',
-                      [f'{span(r.start, r.end, True)} {r.cause}' for r in seen][:6]))
+                      ('1 flat run was a calibration' if len(designed) == 1 else
+                       f'{len(designed)} flat runs were calibrations') + f' with depth for at most {SETTLE_S:g} s',
+                      [f'{span(r.start, r.end, True)} {r.cause}' for r in designed][:6]))
+        waited = [r for r in seen if not r.calibration()]
+        if waited:
+            add(Check('INFO', 'Placement waited for the scene',
+                      f'{len(waited)} flat run{"s" if len(waited) > 1 else ""} waited for a depth reference until the '
+                      f'game\'s own scene reset and placed within {SETTLE_S:g} s of it: the depth before the reset (a '
+                      'title or menu scene) gave none, the next scene did at once; its length is how long the game '
+                      'stayed there',
+                      [f'{span(r.start, r.end, True)} {r.state()} ({r.depth_s():.1f} s with depth), game scene reset '
+                       f'{clock(r.reset, True)}' for r in waited][:6]))
 
     if s.coverage:
         covered, observed, declared, unknown, closed, passes = s.coverage
@@ -1102,15 +1205,30 @@ def evaluate(s: Session) -> list[Check]:
     expected_marks = s.settle + s.overlay
     expected = [h for h in s.hitches if any(0 <= h[0] - mark <= SETTLE_S for mark in expected_marks)]
     unexpected = [h for h in s.hitches if h not in expected]
-    if unexpected:
-        worst = sorted(unexpected, key=lambda h: -h[2])[:3]
-        add(Check('WARN', 'Present hitches', f'{len(unexpected)} outside resets, FG switches and overlay opening, '
-                                             f'worst {worst[0][2]:.1f} ms',
-                  [f'{clock(t)} {what} {ms:.1f} ms' + (' (depth-source flip step)' if what in DEPTH_FLIP_STEPS else '')
-                   for t, what, ms in worst]))
+    # A timing window's slowest Present over the hitch threshold with no hitch line in that window was slow in a
+    # section without a named step (before 10-22 the render section had none). Its time within the window is unknown:
+    # it is expected when a reset, FG switch, export start or overlay opening lies in the window or just before it.
+    unnamed, unnamed_expected = [], []
+    for end, length, slowest, sections in s.timing_worst:
+        start = end - length
+        if slowest < HITCH_MS or any(start - LOG_GATE_S <= t <= end + LOG_GATE_S for t, _, _ in s.hitches):
+            continue
+        section = TIMING_SECTIONS[max(range(len(sections)), key=lambda k: sections[k])]
+        entry = (end, f'{section} section (no step named; the slowest Present of {span(start, end)})', slowest)
+        expect = any(start - SETTLE_S <= mark <= end for mark in expected_marks)
+        (unnamed_expected if expect else unnamed).append(entry)
+
+    def named(what: str) -> str:
+        return ' (depth-source flip step)' if what in DEPTH_FLIP_STEPS else ''
+    if unexpected or unnamed:
+        worst = sorted(unexpected + unnamed, key=lambda h: -h[2])[:3]
+        add(Check('WARN', 'Present hitches', f'{len(unexpected) + len(unnamed)} outside resets, FG switches and '
+                                             f'overlay opening, worst {worst[0][2]:.1f} ms',
+                  [f'{clock(t)} {what} {ms:.1f} ms{named(what)}' for t, what, ms in worst]))
     else:
-        add(Check('PASS', 'Present hitches', f'{len(expected)} at resets, FG switches or overlay opening' if expected
-                  else 'none'))
+        count = len(expected) + len(unnamed_expected)
+        add(Check('PASS', 'Present hitches', f'{count} at resets, FG switches or overlay opening' if count else 'none',
+                  [f'{clock(t)} {what} {ms:.1f} ms' for t, what, ms in unnamed_expected][:3]))
 
     if s.diagnostics:
         on = s.diagnostics[-1][1]
@@ -1128,6 +1246,7 @@ def evaluate(s: Session) -> list[Check]:
                   f'CPU {cpu_mean:.2f} ms mean ({cpu_max:.1f} max) over {presents} Presents; '
                   + (f'GPU {gpu_mean:.2f} ms mean ({gpu_max:.1f} max)' if gpu_frames else
                      'GPU timing off (Diagnostics=0)' if disabled else 'no GPU timing samples')))
+    vram_checks(s, add)
     delivery_checks(s, add)
     layer_copy_checks(s, add)
     if s.fg_switches:
@@ -1523,6 +1642,32 @@ def stream_fps_at(s: Session, t: float) -> float:
     return current
 
 
+def pressured(usage: int, budget: int) -> bool:
+    """Local video memory over its budget or within VRAM_MARGIN_MIB of it."""
+    return usage + VRAM_MARGIN_MIB >= budget
+
+
+def vram_checks(s: Session, add) -> None:
+    """Since 10-22: the game's local video memory against its budget. A depth loss, hitch or Present gap whose own
+    sample (the latest, taken on that Present before its depth preparation) shows pressure warns; otherwise the
+    windows' extremes are INFO. Older logs have no samples and no check."""
+    if not s.vram_windows and not s.vram_points:
+        return
+    events = [p for p in s.vram_points if p[3] in ('depth loss', 'hitch', 'present gap') and pressured(p[1], p[2])]
+    if events:
+        add(Check('WARN', 'VRAM pressure', f'{len(events)} depth loss, hitch or Present gap line(s) came with the '
+                  f'game\'s local video memory over its budget or within {VRAM_MARGIN_MIB} MiB of it',
+                  [f'{clock(t, True)} {what} at {usage}/{budget} MiB' for t, usage, budget, what in events][:6]))
+    if s.vram_windows:
+        peak = max(w[2] for w in s.vram_windows)
+        low = min(w[3] for w in s.vram_windows)
+        headroom = min(w[4] for w in s.vram_windows)
+        over = sum(w[5] for w in s.vram_windows)
+        add(Check('INFO', 'Video memory', f'game local usage peaked at {peak} MiB; its budget was as low as {low} MiB '
+                  f'and its headroom as low as {headroom} MiB; {over} ms over budget'
+                  + ('' if events else ' (no depth loss, hitch or Present gap under pressure)')))
+
+
 def delivery_checks(s: Session, add) -> None:
     """'Stream delivery': the host should take every new frame the game offers, up to the stream fps (the stream
     follows the game; no repeats). Per counter window, claimed = published - overwritten_unconsumed and offered =
@@ -1910,6 +2055,17 @@ def host_stream_fps(path: Path, start: datetime, end: datetime) -> list[tuple[da
     return timeline
 
 
+class Memory(NamedTuple):
+    """The game log's evidence the host checks read on its clock (seconds of the day): each Present gap (end, ms, FG on
+    before it, foreground at its end) and each game video-memory sample on an event line (t, usage, budget, what)."""
+    gaps: list[tuple[float, float, bool, bool]] = []
+    vram: list[tuple[float, int, int, str]] = []
+
+
+def game_memory(s: Session) -> Memory:
+    return Memory(s.present_gaps, s.vram_points)
+
+
 def gpu_transitions(s: Session) -> list[tuple[float, str]]:
     """The game's own GPU reconfigurations: its frame-generation switches and runtime resets, with their names."""
     return sorted([(t, 'FG on' if mode else 'FG off') for t, mode in s.fg_switches]
@@ -1917,10 +2073,12 @@ def gpu_transitions(s: Session) -> list[tuple[float, str]]:
 
 
 def host_checks(path: Path, start: datetime, end: datetime,
-                transitions: list[tuple[float, str]] = ()) -> list[Check]:
-    """The host log's checks for this session; `transitions` are gpu_transitions() on the game log's clock."""
+                transitions: list[tuple[float, str]] = (), game: Memory = Memory()) -> list[Check]:
+    """The host log's checks for this session; `transitions` are gpu_transitions() and `game` game_memory() on the game
+    log's clock."""
     checks: list[Check] = []
     stalls: list[dict] = []
+    host_vram: list[tuple[float, int, int]] = []  # Every host video-memory sample: (t, usage, budget).
     connects, errors, fits = 0, [], []
     open_stalls: dict[int, int] = {}  # NVENC frame -> index in stalls of its stall.
     span = []
@@ -1943,6 +2101,7 @@ def host_checks(path: Path, start: datetime, end: datetime,
                 index = len(stalls)
                 stalls.append({'at': t, 'precise': t + int(m.group(2)) / 1000, 'kind': 'unknown'})
             stall = stalls[index]
+            stall['last'] = t + int(m.group(2)) / 1000
             if 'input_producer=' in text:
                 stall['kind'] = ('encoder-side' if 'done_by' in text else 'upstream GPU' if 'upstream' in text
                                  else 'unknown')
@@ -1953,6 +2112,10 @@ def host_checks(path: Path, start: datetime, end: datetime,
             done = NVENC_INPUT_DONE.search(text)
             stall['ms'] = int(elapsed.group(1)) if elapsed else None
             stall['done_ms'] = int(done.group(1)) if done else None
+            if memory := HOST_VRAM.search(text):
+                stall['vram'] = (int(memory.group(1)), int(memory.group(2)))
+        if memory := HOST_VRAM.search(text):
+            host_vram.append((t + int(m.group(2)) / 1000, int(memory.group(1)), int(memory.group(2))))
         if 'ReShade SBS connected' in text:
             connects += 1
         if 'ReShade SBS: game eyes' in text:
@@ -1974,31 +2137,76 @@ def host_checks(path: Path, start: datetime, end: datetime,
         nearest = min(transitions, key=gap, default=None)
         return f'{nearest[1]} {clock(nearest[0])}' if nearest and gap(nearest) <= NVENC_TRANSITION_S else None
 
+    def freeze(stall: dict, ms: int) -> tuple[float, bool, bool] | None:
+        """The game's Present gap that covers a completed stall (both ends within NVENC_ENCODER_TAIL_MS), as (gap ms,
+        FG on before it, foreground at its end): the game presented nothing for the whole stall."""
+        tolerance = NVENC_ENCODER_TAIL_MS / 1000
+        stall_end = stall['last'] % 86400
+        for gap_end, gap_ms, fg, foreground in game.gaps:
+            gap_end %= 86400
+            if gap_end - gap_ms / 1000 <= stall_end - ms / 1000 + tolerance and gap_end >= stall_end - tolerance:
+                return gap_ms, fg, foreground
+        return None
+
+    def game_pressure(at: float) -> tuple[int, int] | None:
+        """The game's own video-memory sample under pressure within VRAM_NEAR_S of a host time."""
+        for t, usage, budget, _ in game.vram:
+            if min((at - t) % 86400, (t - at) % 86400) <= VRAM_NEAR_S and pressured(usage, budget):
+                return usage, budget
+        return None
+
     # A completed upstream stall at the game's own GPU reconfiguration delayed one picture by design (the encoder's
-    # budget starts when its input completes), within the encoder's own budget. An encoder that also took longer
-    # than its input, a longer freeze, a timeout or failure, or a stall with no such cause did not.
-    explained, unexplained = [], []
+    # budget starts when its input completes), within the encoder's own budget. Since 10-22 the game log names its own
+    # freezes: a completed upstream stall during which the game presented nothing at all (a Present gap covering it)
+    # is the game holding the whole GPU, however long, unless video memory was under pressure at it, the host's or
+    # the game's. An encoder that also took longer than its input, a longer freeze at a transition, a timeout or
+    # failure, or a stall with no such cause warns.
+    explained, froze, unexplained = [], [], []
     for stall in stalls:
         kind, end, ms, done_ms = stall['kind'], stall['end'], stall['ms'], stall['done_ms']
         if ms is not None and done_ms is not None and ms - done_ms > NVENC_ENCODER_TAIL_MS:
             kind += ' + encoder-side'
         cause = transition(stall['precise'])
+        completed = kind == 'upstream GPU' and end == 'completed' and done_ms is not None and ms is not None
+        gap = freeze(stall, ms) if completed else None
+        host = stall.get('vram')
+        host_pressure = host if host and pressured(*host) else None
+        game_mem = game_pressure(stall['last'])
         line = ' '.join(part for part in (
             clock(stall['at']), kind, f'{ms} ms' if ms is not None else '',
-            end if end in ('timed out', 'failed') else '', f'at {cause}' if cause else '') if part)
-        fits = (kind == 'upstream GPU' and end == 'completed' and done_ms is not None and ms is not None
-                and ms <= NVENC_TRANSITION_MAX_MS)
-        (explained if cause and fits else unexplained).append(line)
+            end if end in ('timed out', 'failed') else '', f'at {cause}' if cause else '',
+            f'during a {gap[0]:.0f} ms game freeze (FG {"on" if gap[1] else "off"} before it'
+            + ('' if gap[2] else ', not foreground') + ')' if gap else '',
+            f'host VRAM {host_pressure[0]}/{host_pressure[1]} MiB' if host_pressure else '',
+            f'game VRAM {game_mem[0]}/{game_mem[1]} MiB' if game_mem else '') if part)
+        if host_pressure or game_mem:
+            unexplained.append(line)
+        elif gap:
+            froze.append(line)
+        elif cause and completed and ms <= NVENC_TRANSITION_MAX_MS:
+            explained.append(line)
+        else:
+            unexplained.append(line)
+    more = '; '.join(part for part in (
+        f"{len(explained)} more upstream GPU at the game's FG switches or resets" if explained else '',
+        f'{len(froze)} more upstream GPU during the game\'s own freezes' if froze else '') if part)
     if unexplained:
-        checks.append(Check('WARN', 'Encoder stalls', f'{len(unexplained)}' + (
-            f"; {len(explained)} more upstream GPU at the game's FG switches or resets" if explained else ''),
-            unexplained[:6]))
-    elif explained:
-        checks.append(Check('INFO', 'Encoder stalls', f"{len(explained)} upstream GPU of at most "
-                            f"{NVENC_TRANSITION_MAX_MS} ms at the game's FG switches or resets (its own GPU "
-                            "reconfiguration delayed the host's conversion)", explained[:6]))
+        checks.append(Check('WARN', 'Encoder stalls', f'{len(unexplained)}' + (f'; {more}' if more else ''),
+                            unexplained[:6]))
+    elif explained or froze:
+        detail = '; '.join(part for part in (
+            f"{len(explained)} upstream GPU of at most {NVENC_TRANSITION_MAX_MS} ms at the game's FG switches or "
+            "resets (its own GPU reconfiguration delayed the host's conversion)" if explained else '',
+            f'{len(froze)} upstream GPU while the game itself presented nothing (it held the whole GPU; video memory '
+            'was not under pressure)' if froze else '') if part)
+        checks.append(Check('INFO', 'Encoder stalls', detail, (explained + froze)[:6]))
     else:
         checks.append(Check('PASS', 'Encoder stalls', 'none'))
+    if host_vram:
+        peak = max(host_vram, key=lambda v: v[1])
+        tight = min(host_vram, key=lambda v: v[2] - v[1])
+        checks.append(Check('INFO', 'Host video memory', f'host local usage peaked at {peak[1]} MiB; its headroom was '
+                            f'as low as {tight[2] - tight[1]} MiB ({tight[1]}/{tight[2]} MiB at {clock(tight[0])})'))
     if errors:
         checks.append(Check('WARN', 'Host errors', f'{len(errors)}', errors[:5]))
     return checks
@@ -2052,7 +2260,8 @@ def main(argv=None) -> int:
                                            for when, fps in timeline]
     checks = evaluate(session)
     if end is not None:
-        checks += host_checks(args.host_log, end - timedelta(seconds=duration), end, gpu_transitions(session))
+        checks += host_checks(args.host_log, end - timedelta(seconds=duration), end, gpu_transitions(session),
+                              game_memory(session))
     if not running and not session.exited and not torn_down:
         checks.append(Check('WARN', 'Session', 'the log ends without ReShade exiting or tearing its runtimes down'))
     for check in checks:
