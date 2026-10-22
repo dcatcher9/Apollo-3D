@@ -1172,7 +1172,10 @@ namespace sunshine_streamline {
       }
       else if (value.status == evidence_status::source_associated_evaluation &&
           value.loss_revision != loss_revision.load(std::memory_order_acquire)) value.status = evidence_status::observation_lost;
-      auto update = write_metadata(ticket);
+      // The game never repeats an evaluation: a writer busy for a moment
+      // (another thread's camera or FG update) must not lose it (RE
+      // Requiem 10-22 lost one as records_busy).
+      auto update = write_metadata(ticket, true);
       if (!update) { if (current(ticket)) metadata_write_lost(update, __func__, __LINE__, details); return; }
       if (current(ticket)) {
         auto &state = *update;
