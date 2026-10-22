@@ -81,7 +81,7 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | `near_identical_detector` | 4 | `12e429c6f617ebed9df2d267d41a4767b3a2b2508d76efe52b3ef43e0a6b7516` |
 | `gpu_trace` | 1 | `cd089deb118d2ae61a12c15531da1930317743b59352ada119e8744901e351b9` |
 | `parallax_v2_live_renderer` | 2 | `b91d6702173ae8e15425ef5b70a22b294100842cea6c5d4ec97d11d277c56070` |
-| `parallax_v2_p010_y` | 1 | `132018f408bb35df073758fbffa3959bcfca7590c4c2646bd0e5f4de203a352a` |
+| `parallax_v2_p010_y` | 1 | `60092d23c490d9878e8326adb73b9dcaa63b292fcec1d1dcf582829c80cdf289` |
 | `sbs_flat_fallback` | 2 | `7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4` |
 | `parallax_v2_live_diagnostic` | 2 | `69f2a263ce2ce71a8030390bae0057ea59ab086ab8b0dc7cb92990bdc5310784` |
 <!-- END GENERATED HOST SBS SHADER CLOSURES -->

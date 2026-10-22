@@ -128,7 +128,7 @@ namespace models::host_sbs_shader_cache {
     parallax_v2_p010_y_renderer,
   };
   inline constexpr std::string_view parallax_v2_p010_y_source_closure_sha256 =
-    "132018f408bb35df073758fbffa3959bcfca7590c4c2646bd0e5f4de203a352a";
+    "60092d23c490d9878e8326adb73b9dcaa63b292fcec1d1dcf582829c80cdf289";
 
   inline constexpr std::array sbs_flat_fallback_specs {
     sbs_flat_identity,

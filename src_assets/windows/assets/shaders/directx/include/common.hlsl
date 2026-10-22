@@ -38,12 +38,14 @@ float SRGBCodeToBT709Code(float x)
     // and have a dense-domain maximum code-value error below 3.7e-5 (< 0.01 of an 8-bit
     // code step). That is substantially cheaper than up to six transfer evaluations per
     // output UV pixel in the 7680x2160 type0s path and avoids the extra fetches of a 1D LUT.
+    // Each domain map t = (2x - (hi + lo)) / (hi - lo) is one mad with its coefficients
+    // rounded once to float; FXC otherwise emits a mad plus a mul on every tap.
     if (x <= 0.04045) {
         return x * (4.5 / 12.92);
     }
 
     if (x < 0.142825681303039) { // sRGB code value whose decoded linear value is 0.018
-        float t = (2.0 * x - 0.183275681303039) / 0.102375681303039;
+        float t = mad(x, 19.5358887, -1.7902267);
         return mad(
             mad(
                 mad(
@@ -59,7 +61,7 @@ float SRGBCodeToBT709Code(float x)
         );
     }
 
-    float t = (2.0 * x - 1.142825681303039) / 0.857174318696961;
+    float t = mad(x, 2.33324766, -1.33324766);
     return saturate(
         mad(
             mad(
