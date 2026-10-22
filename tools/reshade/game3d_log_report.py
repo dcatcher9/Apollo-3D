@@ -1068,8 +1068,20 @@ def depth_gaps(s: Session, ranges: list[list[float]]) -> list[str]:
             took = f' ({e.unavailable_ms} ms)' if e.unavailable_ms is not None else ''
             times.append(f'{span(e.start, e.end, True)}{took} {e.reason}, {e.provider} selection={e.selection}'
                          + (f' ({hint})' if hint else '')
-                         + {'paused': ', until the export paused', 'open': ', until the log ended'}.get(e.ending, ''))
+                         + {'paused': ', until the export paused', 'open': ', until the log ended'}.get(e.ending, '')
+                         + game_froze(s, e.start, e.end))
     return times
+
+
+def game_froze(s: Session, start: float, end: float) -> str:
+    """The game's own Present gaps (100 ms or more) within a loss (each logged when it ended, by the async log at most
+    SWITCH_LEAD_S late): '; the game froze N ms' names the longest, so a loss at a game hitch reads apart from one the
+    add-on caused. The loss still counts (E33 10-22: 243 and 773 ms while it streamed in assets)."""
+    gaps = [ms for t, ms, _, _ in s.present_gaps
+            if t - ms / 1000 < end + SWITCH_LEAD_S and t > start]
+    if not gaps:
+        return ''
+    return f'; the game froze {max(gaps):.0f} ms' + (f' ({len(gaps)} Present gaps)' if len(gaps) > 1 else '')
 
 
 def evaluate(s: Session) -> list[Check]:

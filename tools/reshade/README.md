@@ -628,7 +628,11 @@ reason, provider and selection (`inactive_views` means the game supplied no dept
 whose every loss had `inactive_views` and recovered with the game's own declared history reset
 (`current_reset=1` on the recovered line: a new scene) is INFO `Depth paused by the game`: the game
 ran no DLSS (a menu or loading screen; E33 10-22 leaving its title, 828 and 1265 ms) and every frame
-was flat. A loss without that reset, or one the add-on had a depth view for, stays a gap. A flat
+was flat. A loss without that reset, or one the add-on had a depth view for, stays a gap. A loss
+that a `Sunshine Game 3D present gap` falls inside ends with `the game froze N ms` (the longest), so a
+game hitch reads apart from a loss the add-on caused; it still counts (E33 10-22 15:43:35, 773 ms
+while the game streamed in assets). A loss that ends within an FG switch's or reset's settle time
+and starts at most 0.25 s before the switch line is the switch's own handover. A flat
 window is reported as INFO `Placement calibration` only when every placement-controller run
 without placement inside it (raw automation other than `ready`/`holding_reference`, or
 Streamline scale other than `ready`) followed a cause the log names (a depth-provider or frame

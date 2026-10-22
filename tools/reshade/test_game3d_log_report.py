@@ -875,6 +875,29 @@ class ReadinessReport(unittest.TestCase):
         early = run(BASE + [readiness('10:00:17:000', 'lost', 'no_completed_snapshot'), fg, recovered] + tail)
         self.assertEqual(early['Depth'].status, 'WARN')
 
+    def test_a_depth_gap_names_the_games_own_freeze_inside_it(self):
+        # E33 2026-10-22 15:43:35: the game stopped presenting for 773 ms while it streamed in assets and supplied no
+        # depth for 1.9 s around it. The gap still warns, and names the freeze; a Present gap before the loss does not
+        # belong to it.
+        def readiness(t, kind):
+            return (f'{t} [ 1234] | INFO  | [Sunshine 3D] Sunshine depth readiness: {kind} reason='
+                    f'{"retained_depth_expired" if kind == "lost" else "fresh_copy"} runtime=0x1 present=10 '
+                    f'unavailable_ms={0 if kind == "lost" else 1907} suppressed_episodes=0; provider=Streamline '
+                    f'prior_provider=Streamline selection={"inactive_views" if kind == "lost" else "current_capture"}')
+
+        def gap(t, ms):
+            return (f'{t} [ 1234] | INFO  | [Sunshine 3D] Sunshine Game 3D present gap: {ms} ms since the previous '
+                    f'Present; fg=1 foreground=1 suppressed=0 vram_local_mib=8698/12084 nonlocal_mib=460')
+        lines = [gap('10:00:14:776', 243), readiness('10:00:15:784', 'lost'), gap('10:00:17:694', 773),
+                 readiness('10:00:17:694', 'recovered'), output('10:00:20', 1000, 0, 0, 750, 250)]
+        depth = run(BASE + lines)['Depth']
+        self.assertEqual((depth.status, depth.times), ('WARN', [
+            '10:00:15.784-10:00:17.694 (1907 ms) retained_depth_expired, Streamline selection=inactive_views '
+            '(the game supplied no depth); the game froze 773 ms']))
+        two = run(BASE + lines[:2] + [gap('10:00:16:500', 300)] + lines[2:])['Depth']
+        self.assertTrue(two.times[0].endswith('; the game froze 773 ms (2 Present gaps)'))
+        self.assertFalse(run(BASE + lines[1:2] + lines[3:])['Depth'].times[0].endswith('ms'))
+
     def test_an_observation_loss_is_dated_by_its_own_tick(self):
         # RE Requiem 2026-10-22: a metadata write lost at finish_evaluation (records_busy) was sampled 7.8 s later
         # with the FG switch's depth loss; the report names the loss's own time and site.
