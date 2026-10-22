@@ -117,7 +117,9 @@ GATE = re.compile(r'Sunshine UI capture gate: .*?hudless_presents=\{batch=(\d+) 
 # Since selection revision 10 the exact one-way judge (A2) also reads the declared alphas, UIAlpha and the UI colour
 # tag, logged as their own group before status_revision.
 DECLARED_ONE_WAY = re.compile(r'sampled_declared_one_way=\{strong=(\d+)/(\d+) contradicted=(\d+)/(\d+)\}')
-LOSS = re.compile(r'sampled_only=\{revision=(\d+) found=1 cause=(\w+)')
+LOSS = re.compile(r'sampled_only=\{revision=(\d+) found=1 cause=(\w+)(?: site=(\w+))?(?:[^}]*? tick_ms=(\d+))?')
+# The evidence line's own tick: a loss sampled with a later depth loss happened tick_ms earlier than its line.
+SAMPLED_TICK = re.compile(r'\bsampled_tick_ms=(\d+)')
 READINESS = re.compile(r'Sunshine depth readiness: (lost|recovered) reason=(\w+)')
 UNAVAILABLE_MS = re.compile(r'\bunavailable_ms=(\d+)')
 PROVIDER = re.compile(r'\bprovider=(\w+)')
@@ -221,6 +223,7 @@ BENIGN = (
 ROUTINE_INACTIVE = {'not_foreground', 'runtime_reset', 'no_consumer', 'present_without_render', 'runtime_gone',
                     'consumer_transfer_changed'}
 SETTLE_S = 3.0  # Recalibration and holds after an FG switch or runtime reset.
+SWITCH_LEAD_S = 0.25  # A switch's own depth loss may be logged this long before the switch line (async log order).
 CALIBRATION_MIN_S = 0.1  # A run without placement that had less depth than this calibrated nothing.
 LOG_GATE_S = 1.0  # A changed controller state waits this long after its previous line (diagnostic_log_gate.h).
 RAW_PLACED = ('ready', 'holding_reference')  # Raw automation states that place the scene (raw_scene_policy.h).
@@ -713,7 +716,8 @@ class Session:
     # The UI capture gate's HUD-less pairings summed over the session: same-batch (exact) and Present-counted.
     gate_batch: int = 0
     gate_counted: int = 0
-    losses: dict[int, tuple[float, str]] = field(default_factory=dict)
+    # Per loss revision: when it happened (its own tick, else the line logging it), its cause and site.
+    losses: dict[int, tuple[float, str, str | None]] = field(default_factory=dict)
     readiness: Counter = field(default_factory=Counter)  # Losses while the export streamed.
     depth_episodes: list[DepthEpisode] = field(default_factory=list)
     output_counts: list[OutputCount] = field(default_factory=list)  # Every 'Sunshine SBS output' line.
@@ -872,7 +876,13 @@ def parse(lines) -> Session:
             s.counters = values
             s.counter_history.append((t, values))
         if found := LOSS.search(text):
-            s.losses.setdefault(int(found.group(1)), (t, found.group(2)))
+            revision, cause, site, tick = found.groups()
+            sampled = SAMPLED_TICK.search(text)
+            at = t
+            if tick and sampled and 0 <= int(sampled.group(1)) - int(tick) < 86_400_000:
+                # Logged with a later depth loss (RE Requiem 10-22: a records_busy 7.8 s before the FG switch's loss).
+                at = t - (int(sampled.group(1)) - int(tick)) / 1000
+            s.losses.setdefault(int(revision), (at, cause, site))
         if found := READINESS.search(text):
             named = PROVIDER.search(text)
             if named and named.group(1) != 'unknown':
@@ -1044,7 +1054,13 @@ def depth_gaps(s: Session, ranges: list[list[float]]) -> list[str]:
     """Each gap window as the add-on's own loss episodes inside it, or the window when it logged none."""
     times = []
     for a, b in ranges:
-        inside = [e for e in s.depth_episodes if e.start < b and e.end > a]
+        overlapping = [e for e in s.depth_episodes if e.start < b and e.end > a]
+        # A loss the switch itself caused (a provider handover) ends inside the settle time and may be logged up to
+        # SWITCH_LEAD_S before the switch's own line (Stellar Blade 10-22: lost 42 ms before 'mode=1').
+        inside = [e for e in overlapping if not any(
+            m - SWITCH_LEAD_S <= e.start and e.end <= m + SETTLE_S for m in s.settle)]
+        if overlapping and not inside:
+            continue
         if not inside:
             times.append(span(a, b))
         for e in inside:
@@ -1162,13 +1178,14 @@ def evaluate(s: Session) -> list[Check]:
 
     ui_checks(s, add)
 
-    tokens = sum(1 for _, cause in s.losses.values() if cause == 'tokens_busy')
-    causes = Counter(cause for _, cause in s.losses.values())
+    tokens = sum(1 for _, cause, _ in s.losses.values() if cause == 'tokens_busy')
+    causes = Counter(cause for _, cause, _ in s.losses.values())
     minutes = max((s.last - s.first) / 60.0, 1.0) if s.first is not None else 1.0
     bad = {c: n for c, n in causes.items() if c != 'lifecycle'}
     add(Check('WARN' if tokens > minutes / 2 or any(c != 'tokens_busy' for c in bad) else 'PASS',
               'Observation losses', ', '.join(f'{c} {n}' for c, n in sorted(causes.items())) or 'none',
-              [f'{clock(t)} {c}' for r, (t, c) in sorted(s.losses.items()) if c != 'lifecycle'][:6]))
+              [f'{clock(t)} {c}' + (f' at {site}' if site else '')
+               for r, (t, c, site) in sorted(s.losses.items()) if c != 'lifecycle'][:6]))
 
     # A capture status during the settle time after an export start, FG switch or reset is the source settling.
     failing = ('conflicting_state', 'incomplete_state', 'missing_state', 'failed', 'unsupported_state',

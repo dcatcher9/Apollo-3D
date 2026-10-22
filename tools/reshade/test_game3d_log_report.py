@@ -852,6 +852,50 @@ class ReadinessReport(unittest.TestCase):
         open_loss = run(BASE + [lost, output('10:00:20', 1000, 0, 0, 750, 250)])
         self.assertTrue(open_loss['Depth'].times[0].endswith('until the log ended'))
 
+    def test_a_depth_loss_logged_just_before_its_fg_switch_belongs_to_the_switch(self):
+        # Stellar Blade 2026-10-22: turning FG on handed depth from NGX to Streamline. The loss was logged 42 ms
+        # before the switch's own line (the add-on logs asynchronously) and recovered 158 ms later.
+        def readiness(t, kind, selection):
+            return (f'{t} [ 1234] | INFO  | [Sunshine 3D] Sunshine depth readiness: {kind} reason='
+                    f'{"retained_depth_expired" if kind == "lost" else "fresh_copy"} runtime=0x1 present=10 '
+                    f'unavailable_ms=0 suppressed_episodes=0; provider=NGX prior_provider=NGX selection={selection}')
+        lost = readiness('10:00:17:358', 'lost', 'no_completed_snapshot')
+        recovered = readiness('10:00:17:516', 'recovered', 'completed_snapshot')
+        fg = ('10:00:17:400 [ 1234] | INFO  | [Sunshine 3D] Sunshine Streamline frame generation: viewport=1 mode=1 '
+              'generated_frames=2 supported=1 success=1')
+        tail = [output('10:00:25', 1000, 0, 0, 750, 250)]
+        checks = run(BASE + [lost, fg, recovered] + tail)
+        self.assertEqual((checks['Depth'].status, checks['Depth'].times), ('PASS', []))
+        # Without the switch the same loss is a gap.
+        self.assertEqual(run(BASE + [lost, recovered] + tail)['Depth'].times, [
+            '10:00:17.358-10:00:17.516 (0 ms) retained_depth_expired, NGX selection=no_completed_snapshot'])
+        # A loss at the switch that outlasts its settle time, or one logged well before the switch, is still a gap.
+        outlasting = run(BASE + [lost, fg, readiness('10:00:21:000', 'recovered', 'completed_snapshot')] + tail)
+        self.assertEqual(outlasting['Depth'].status, 'WARN')
+        early = run(BASE + [readiness('10:00:17:000', 'lost', 'no_completed_snapshot'), fg, recovered] + tail)
+        self.assertEqual(early['Depth'].status, 'WARN')
+
+    def test_an_observation_loss_is_dated_by_its_own_tick(self):
+        # RE Requiem 2026-10-22: a metadata write lost at finish_evaluation (records_busy) was sampled 7.8 s later
+        # with the FG switch's depth loss; the report names the loss's own time and site.
+        sampled = line('10:00:17', '[Sunshine 3D] Sunshine depth observation evidence: lost runtime=0x1 '
+                                   'loss_present=1970 loss_tick_ms=63342234 sampled_tick_ms=63342234 '
+                                   'origin=episode_start; sampled_only={revision=4 found=1 cause=records_busy '
+                                   'site=finish_evaluation line=1176 tick_ms=63334468 thread=9284 sequence=13651 '
+                                   'viewport=0 feature=0 sdk_known=1 sdk_result=0 reset=4294967295}')
+        session = report.parse(BASE + [sampled])
+        at, cause, site = session.losses[4]
+        self.assertAlmostEqual(at, report.seconds('10', '00', '17', '000') - 7.766)
+        self.assertEqual((cause, site), ('records_busy', 'finish_evaluation'))
+        checks = run(BASE + [sampled])
+        self.assertEqual((checks['Observation losses'].status, checks['Observation losses'].times),
+                         ('WARN', ['10:00:09 records_busy at finish_evaluation']))
+        # An older line without the site or tick keeps the line's own time.
+        old = line('10:00:17', '[Sunshine 3D] Sunshine depth observation evidence: lost runtime=0x1; '
+                               'sampled_only={revision=5 found=1 cause=tokens_busy}')
+        self.assertEqual(report.parse(BASE + [old]).losses[5],
+                         (report.seconds('10', '00', '17', '000'), 'tokens_busy', None))
+
     def test_nothing_counts_while_the_export_is_inactive(self):
         # The game in the background: no output is streamed from 'export inactive' to the next generation,
         # so its depth losses are not losses the viewer saw.
