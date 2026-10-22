@@ -2,6 +2,7 @@
 #include "game3d_renderer.h"
 #include "game3d_shader_source.h"
 #include <reshade.hpp>
+#include "addon_lifetime.h"
 #include "async_log.h"
 #include "game3d_diagnostics.h"
 #include "game3d_shader_cache.h"
@@ -13,9 +14,14 @@
 #include <d3d12.h>
 #include <d3dcompiler.h>
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstring>
+#include <functional>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <utility>
@@ -371,10 +377,13 @@ namespace sunshine_game3d {
       if (precompiled && !(code = shader_cache::find(config, {entry, target})).empty()) return true;
       return shader_cache::compile(config, {entry, target}, code);
     }
-    bool pipeline_create(pass id, const char *entry, bool compute, api::shader_desc vs) {
+    // The vertex shader of every graphics pass (setup step "PostProcessVS").
+    shader_cache::blob vs_code;
+    bool pipeline_create(pass id, const char *entry, bool compute) {
       shader_cache::blob code;
       if (!compile(entry, compute ? "cs_5_0" : "ps_5_0", code)) return false;
       api::shader_desc shader{code.data(), code.size()};
+      api::shader_desc vs{vs_code.data(), vs_code.size()};
       if (compute) {
         const api::pipeline_subobject part{api::pipeline_subobject_type::compute_shader, 1, &shader};
         return device->create_pipeline(layout, 1, &part, &pipelines[id]);
@@ -398,8 +407,51 @@ namespace sunshine_game3d {
         {api::pipeline_subobject_type::viewport_count, 1, &count}};
       return device->create_pipeline(layout, uint32_t(std::size(parts)), parts, &pipelines[id]);
     }
-    bool initialize(api::effect_runtime *runtime, const api::resource_desc &desc, uint32_t input_color) {
-      device = runtime->get_device(); queue = runtime->get_command_queue();
+    // A compute pass a lazily prepared feature shares with the background
+    // setup steps, which may have created it already.
+    bool compute_pipeline(pass id, const char *entry) { return pipelines[id].handle || pipeline_create(id, entry, true); }
+    bool fits() const { return width <= 3840 && height <= 3840; }
+    // The shader drives automatic UI detection (prepare_detection).
+    bool detection_supported() const {
+      // Live detection binds candidate layout 2 (the offscreen UI layer at t7
+      // and the accepted mask in b2 word 2); a shader of another layout, such
+      // as an older embedded replay shader, would misread both, so it gets
+      // none. Selection revision 11 with its 12 decision texels and both
+      // scene-evidence images (the T1 grace with its hold store at u5 and the
+      // HUD-less re-offer bit, the one-way judgment of every alpha but the
+      // layer on sample frames, the F1 reason words, H1 with its texel 10,
+      // the layer's pre-UI pixel counts in texel 11 with b2 word 4, the empty
+      // change set, and the layer's premultiplied bound counted apart) is the
+      // only one this renderer drives; ui_detection_replay alone reads older
+      // shaders.
+      return shader_source().find("#define SUNSHINE_UI_AUTOMATIC_DETECTION 1") != std::string_view::npos &&
+        shader_marker(shader_source(), ui_detection::candidate_layout_marker) == ui_detection::candidate_layout &&
+        shader_marker(shader_source(), ui_selection::revision_marker) == ui_selection::revision &&
+        scene_evidence_supported() && detection_tile_parts <= ui_detection::max_tile_parts;
+    }
+    bool adaptive_probe_supported() const {
+      return display_fraction_ui_supported &&
+        shader_source().find("#define SUNSHINE_UI_ABSOLUTE_LEVEL_PROBE 1") != std::string_view::npos;
+    }
+    void destroy_texture(texture_id id) {
+      auto &t = textures[id];
+      if (t.srv.handle) device->destroy_resource_view(t.srv);
+      if (t.uav.handle) device->destroy_resource_view(t.uav);
+      if (t.rtv.handle) device->destroy_resource_view(t.rtv);
+      if (t.resource.handle) device->destroy_resource(t.resource);
+      t = {};
+    }
+    // The 10-bit PQ export's internal side-by-side image (set_pq_output).
+    bool create_pq_export() {
+      if (textures[packed_pq].resource.handle) return true;
+      if (texture_create(packed_pq, width * 2, height, api::format::r10g10b10a2_unorm,
+          api::resource_usage::render_target | api::resource_usage::copy_source)) return true;
+      destroy_texture(packed_pq);
+      return false;
+    }
+    // The configuration's fields and shader markers: no device call.
+    void begin(api::device *target, api::command_queue *target_queue, const api::resource_desc &desc, uint32_t input_color) {
+      device = target; queue = target_queue;
       width = desc.texture.width; height = desc.texture.height; source_format = typed(desc.texture.format); color = input_color;
       nearest_ui_supported = shader_source().find("#define SUNSHINE_UI_NEAREST_PLANE 1") != std::string_view::npos;
       front_limit_ui_supported = shader_source().find("#define SUNSHINE_UI_FRONT_LIMIT_PLANE 1") != std::string_view::npos;
@@ -422,56 +474,137 @@ namespace sunshine_game3d {
       detection_tile_parts = shader_marker(shader_source(), ui_detection::tile_parts_marker);
       counter_words = shader_marker(shader_source(), "SUNSHINE_UI_COUNTER_WORDS") == ui_counter_word::count ?
         uint32_t(ui_counter_word::count) : 0u;
-      if (!device->create_fence(0, api::fence_flags::none, &completion)) return false;
-      if (device->get_api() == api::device_api::d3d12 &&
-          (!device->create_resource_view({}, api::resource_usage::shader_resource, api::resource_view_desc(api::format::r32_float), &null_srv) ||
-           !device->create_resource_view({}, api::resource_usage::unordered_access, api::resource_view_desc(api::format::r32_float), &null_uav))) return false;
-      if (device->get_api() == api::device_api::d3d11) {
-        com<ID3D11Device1> native;
-        if (FAILED(reinterpret_cast<ID3D11Device *>(device->get_native())->QueryInterface(IID_PPV_ARGS(native.put())))) return false;
-        native->GetImmediateContext1(context11.put());
-        const D3D_FEATURE_LEVEL levels[]{D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
-        if (FAILED(native->CreateDeviceContextState(0, levels, 2, D3D11_SDK_VERSION, __uuidof(ID3D11Device), nullptr, isolated11.put()))) return false;
+    }
+    // One part of the setup: a device call or a few (renderer::configure).
+    // Steps only create device objects (no runtime, queue or command list),
+    // so any thread may run them in order.
+    struct setup_step {
+      const char *name;
+      std::function<bool()> run;
+    };
+    // The setup after begin(), in order. eager adds what the first render
+    // would otherwise create (the background build's): automatic UI
+    // detection, the adaptive probe and the PQ export target. Their failure
+    // never fails the setup: it leaves the feature unavailable, as it would
+    // on first use, and nothing retries it.
+    std::vector<setup_step> setup_steps(bool eager) {
+      std::vector<setup_step> steps;
+      const auto add = [&](const char *name, std::function<bool()> run) { steps.push_back({name, std::move(run)}); };
+      const auto add_texture = [&](const char *name, texture_id id, uint32_t w, uint32_t h, api::format format,
+          api::resource_usage usage) {
+        add(name, [this, id, w, h, format, usage] { return texture_create(id, w, h, format, usage); });
+      };
+      add("fence", [this] { return device->create_fence(0, api::fence_flags::none, &completion); });
+      if (device->get_api() == api::device_api::d3d12)
+        add("null views", [this] {
+          return device->create_resource_view({}, api::resource_usage::shader_resource, api::resource_view_desc(api::format::r32_float), &null_srv) &&
+            device->create_resource_view({}, api::resource_usage::unordered_access, api::resource_view_desc(api::format::r32_float), &null_uav);
+        });
+      if (device->get_api() == api::device_api::d3d11)
+        add("device context state", [this] {
+          com<ID3D11Device1> native;
+          if (FAILED(reinterpret_cast<ID3D11Device *>(device->get_native())->QueryInterface(IID_PPV_ARGS(native.put())))) return false;
+          native->GetImmediateContext1(context11.put());
+          // A single-threaded device takes a single-threaded state object.
+          const UINT flags = (native->GetCreationFlags() & D3D11_CREATE_DEVICE_SINGLETHREADED) != 0 ?
+            D3D11_1_CREATE_DEVICE_CONTEXT_STATE_SINGLETHREADED : 0;
+          const D3D_FEATURE_LEVEL levels[]{D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
+          return SUCCEEDED(native->CreateDeviceContextState(flags, levels, 2, D3D11_SDK_VERSION, __uuidof(ID3D11Device), nullptr,
+            isolated11.put()));
+        });
+      add("pipeline layout", [this] {
+        const api::pipeline_layout_param params[]{
+          api::constant_range{0, 0, 0, sizeof(render_parameters) / 4, api::shader_stage::all},
+          api::descriptor_range{0, 0, 0, 3, api::shader_stage::all, 1, api::descriptor_type::sampler},
+          api::descriptor_range{0, 0, 0, 15, api::shader_stage::all, 1, api::descriptor_type::shader_resource_view},
+          api::descriptor_range{0, 0, 0, 8, api::shader_stage::compute, 1, api::descriptor_type::unordered_access_view},
+          api::constant_range{0, 1, 0, 4, api::shader_stage::compute},
+          api::constant_range{0, 2, 0, ui_detection::b2_words, api::shader_stage::compute}};
+        return device->create_pipeline_layout(uint32_t(std::size(params)), params, &layout);
+      });
+      add("samplers", [this] {
+        for (unsigned i = 0; i < samplers.size(); ++i) {
+          api::sampler_desc sampler;
+          sampler.filter = i == 1 ? api::filter_mode::min_mag_linear_mip_point : api::filter_mode::min_mag_mip_point;
+          if (i == 2) { sampler.address_u = sampler.address_v = sampler.address_w = api::texture_address_mode::border; std::memset(sampler.border_color, 0, sizeof(sampler.border_color)); }
+          if (!device->create_sampler(sampler, &samplers[i])) return false;
+        }
+        return true;
+      });
+      add_texture("source texture", source, width, height, source_format, api::resource_usage::copy_dest);
+      add_texture("empty depth texture", empty_depth, 1, 1, api::format::r32_float, api::resource_usage::undefined);
+      if (color == 3 && !pq_per_tap)
+        add_texture("linear texture", linear, width, height, api::format::r16g16b16a16_float, api::resource_usage::render_target);
+      if (fits()) {
+        add_texture("candidate texture", raw, width, height, api::format::r32_float, api::resource_usage::unordered_access);
+        add_texture("vertical majorant texture", vertical_majorant, width, height, api::format::r32_float,
+          api::resource_usage::unordered_access);
+        add_texture("vertical field texture", vertical_field, width, height, api::format::r32_float, api::resource_usage::unordered_access);
+        add_texture("field texture", field, width, height, api::format::r32_float, api::resource_usage::unordered_access);
       }
-      const api::pipeline_layout_param params[]{
-        api::constant_range{0, 0, 0, sizeof(render_parameters) / 4, api::shader_stage::all},
-        api::descriptor_range{0, 0, 0, 3, api::shader_stage::all, 1, api::descriptor_type::sampler},
-        api::descriptor_range{0, 0, 0, 15, api::shader_stage::all, 1, api::descriptor_type::shader_resource_view},
-        api::descriptor_range{0, 0, 0, 8, api::shader_stage::compute, 1, api::descriptor_type::unordered_access_view},
-        api::constant_range{0, 1, 0, 4, api::shader_stage::compute},
-        api::constant_range{0, 2, 0, ui_detection::b2_words, api::shader_stage::compute}};
-      if (!device->create_pipeline_layout(uint32_t(std::size(params)), params, &layout)) return false;
-      for (unsigned i = 0; i < samplers.size(); ++i) {
-        api::sampler_desc sampler;
-        sampler.filter = i == 1 ? api::filter_mode::min_mag_linear_mip_point : api::filter_mode::min_mag_mip_point;
-        if (i == 2) { sampler.address_u = sampler.address_v = sampler.address_w = api::texture_address_mode::border; std::memset(sampler.border_color, 0, sizeof(sampler.border_color)); }
-        if (!device->create_sampler(sampler, &samplers[i])) return false;
+      if (!packed_eyes) {
+        add_texture("left eye texture", left, width, height, api::format::r16g16b16a16_float, api::resource_usage::render_target);
+        add_texture("right eye texture", right, width, height, api::format::r16g16b16a16_float, api::resource_usage::render_target);
       }
-      if (!texture_create(source, width, height, source_format, api::resource_usage::copy_dest) ||
-          !texture_create(empty_depth, 1, 1, api::format::r32_float, api::resource_usage::undefined)) return false;
-      if (color == 3 && !pq_per_tap &&
-          !texture_create(linear, width, height, api::format::r16g16b16a16_float, api::resource_usage::render_target)) return false;
-      if (width <= 3840 && height <= 3840)
-        for (auto id : {raw, vertical_majorant, vertical_field, field})
-          if (!texture_create(id, width, height, api::format::r32_float, api::resource_usage::unordered_access)) return false;
-      if (!packed_eyes)
-        for (auto id : {left, right})
-          if (!texture_create(id, width, height, api::format::r16g16b16a16_float, api::resource_usage::render_target)) return false;
-      if (!texture_create(packed, width * 2, height, packed_format(),
-          api::resource_usage::render_target | api::resource_usage::copy_source)) return false;
-      shader_cache::blob vs_code;
-      if (!compile("PostProcessVS", "vs_5_0", vs_code)) return false;
-      const api::shader_desc vs{vs_code.data(), vs_code.size()};
-      if (color == 3 && !pq_per_tap && !pipeline_create(pq, "SunshinePreparePQPS", false, vs)) return false;
-      if (((color == 3 && pq_per_tap) || (color == 2 && scrgb_pq_pack)) &&
-          !pipeline_create(pack_pq, "SunshineRenderPackedPQPS", false, vs)) return false;
-      if (width <= 3840 && height <= 3840)
-        if (!pipeline_create(candidate, "SunshineHostCandidateCS", true, vs) || !pipeline_create(vertical, "SunshineHostVerticalCS", true, vs) ||
-            !pipeline_create(horizontal, "SunshineHostHorizontalCS", true, vs) ||
-            (limiter_lines && !pipeline_create(ui_apply, "SunshineApplyUICS", true, vs)) ||
-            (vertical_live_supported && !pipeline_create(vertical_live, "SunshineHostVerticalLiveCS", true, vs))) return false;
-      if (packed_eyes) return pipeline_create(pack, "SunshineRenderPackedPS", false, vs);
-      return pipeline_create(eyes, "SunshineRenderEyesPS", false, vs) && pipeline_create(pack, "SunshinePackEyesPS", false, vs);
+      add_texture("packed texture", packed, width * 2, height, packed_format(),
+        api::resource_usage::render_target | api::resource_usage::copy_source);
+      add("PostProcessVS", [this] { return compile("PostProcessVS", "vs_5_0", vs_code); });
+      const auto add_pipeline = [&](pass id, const char *entry, bool compute) {
+        add(entry, [this, id, entry, compute] { return pipeline_create(id, entry, compute); });
+      };
+      if (color == 3 && !pq_per_tap) add_pipeline(pq, "SunshinePreparePQPS", false);
+      if ((color == 3 && pq_per_tap) || (color == 2 && scrgb_pq_pack)) add_pipeline(pack_pq, "SunshineRenderPackedPQPS", false);
+      if (fits()) {
+        add_pipeline(candidate, "SunshineHostCandidateCS", true);
+        add_pipeline(vertical, "SunshineHostVerticalCS", true);
+        add_pipeline(horizontal, "SunshineHostHorizontalCS", true);
+        if (limiter_lines) add_pipeline(ui_apply, "SunshineApplyUICS", true);
+        if (vertical_live_supported) add_pipeline(vertical_live, "SunshineHostVerticalLiveCS", true);
+      }
+      if (packed_eyes) add_pipeline(pack, "SunshineRenderPackedPS", false);
+      else {
+        add_pipeline(eyes, "SunshineRenderEyesPS", false);
+        add_pipeline(pack, "SunshinePackEyesPS", false);
+      }
+      if (!eager) return steps;
+      // A feature's pass that cannot be created leaves the feature
+      // unavailable, as its first use would (no retry).
+      const auto add_feature_pipeline = [&](pass id, const char *entry, bool &attempted_flag, bool &ready_flag) {
+        add(entry, [this, id, entry, attempted = &attempted_flag, ready = &ready_flag] {
+          if (!*attempted && !compute_pipeline(id, entry)) {
+            *attempted = true;
+            *ready = false;
+          }
+          return true;
+        });
+      };
+      // Live detection and the adaptive probe run only at supported sizes.
+      if (fits() && detection_supported()) {
+        add_feature_pipeline(detection_tiles, "SunshineUIDetectionTilesCS", detection_attempted, detection_ready);
+        add_feature_pipeline(detection_reduce, "SunshineUIDetectionReduceCS", detection_attempted, detection_ready);
+        add_feature_pipeline(detection_mask, "SunshineUIDetectionMaskCS", detection_attempted, detection_ready);
+        add_feature_pipeline(scene_cells, "SunshineSceneCellsCS", detection_attempted, detection_ready);
+        add_feature_pipeline(scene_compare, "SunshineSceneCompareCS", detection_attempted, detection_ready);
+        add_feature_pipeline(scene_evidence, "SunshineSceneEvidenceCS", detection_attempted, detection_ready);
+        add("detection resources", [this] { prepare_detection(); return true; });
+      }
+      if (fits() && adaptive_probe_supported()) {
+        add_feature_pipeline(ui_conflict, "SunshineUIConflictCS", adaptive_probe_attempted, adaptive_probe_ready);
+        if (!limiter_lines) add_feature_pipeline(ui_apply, "SunshineApplyUICS", adaptive_probe_attempted, adaptive_probe_ready);
+        add("adaptive probe resources", [this] { prepare_adaptive_probe(); return true; });
+      }
+      // A failed target is created again by set_pq_output, as before.
+      if ((color == 3 && pq_per_tap) || (color == 2 && scrgb_pq_pack))
+        add("PQ export texture", [this] { create_pq_export(); return true; });
+      return steps;
+    }
+    // The synchronous setup (replay, fixtures and explicit sources): GPU
+    // objects of first-use features stay lazy.
+    bool initialize(api::effect_runtime *runtime, const api::resource_desc &desc, uint32_t input_color) {
+      begin(runtime->get_device(), runtime->get_command_queue(), desc, input_color);
+      for (auto &step : setup_steps(false))
+        if (!step.run()) return false;
+      return true;
     }
     bool prepare_nearest_ui() {
       if (nearest_ui_attempted) return nearest_ui_ready;
@@ -482,8 +615,8 @@ namespace sunshine_game3d {
       if (!texture_create(ui_plane_tiles, (width + 15) / 16, (height + 15) / 16, api::format::r32_float,
             api::resource_usage::unordered_access) ||
           !texture_create(ui_plane_resolved, 1, 1, api::format::r32_float, api::resource_usage::unordered_access) ||
-          !pipeline_create(ui_tiles, "SunshineUINearestTilesCS", true, {}) ||
-          !pipeline_create(ui_reduce, "SunshineUINearestReduceCS", true, {})) return false;
+          !pipeline_create(ui_tiles, "SunshineUINearestTilesCS", true) ||
+          !pipeline_create(ui_reduce, "SunshineUINearestReduceCS", true)) return false;
       nearest_ui_ready = true;
       return true;
     }
@@ -829,22 +962,8 @@ namespace sunshine_game3d {
     bool prepare_detection() {
       if (detection_attempted) return detection_ready;
       detection_attempted = true;
-      // Live detection binds candidate layout 2 (the offscreen UI layer at t7
-      // and the accepted mask in b2 word 2); a shader of another layout, such
-      // as an older embedded replay shader, would misread both, so it gets
-      // none. Selection revision 11 with its 12 decision texels and both
-      // scene-evidence images (the T1 grace with its hold store at u5 and the
-      // HUD-less re-offer bit, the one-way judgment of every alpha but the
-      // layer on sample frames, the F1 reason words, H1 with its texel 10,
-      // the layer's pre-UI pixel counts in texel 11 with b2 word 4, the empty
-      // change set, and the layer's premultiplied bound counted apart) is the
-      // only one this renderer drives; ui_detection_replay alone reads older
-      // shaders.
-      if (shader_source().find("#define SUNSHINE_UI_AUTOMATIC_DETECTION 1") == std::string_view::npos ||
-          shader_marker(shader_source(), ui_detection::candidate_layout_marker) != ui_detection::candidate_layout ||
-          shader_marker(shader_source(), ui_selection::revision_marker) != ui_selection::revision ||
-          !scene_evidence_supported() ||
-          detection_tile_parts > ui_detection::max_tile_parts ||
+      // The background setup may have created the passes already.
+      if (!detection_supported() ||
           !texture_create(detection_statistics, ui_detection::statistics_columns(detection_tile_parts),
             ui_detection::statistics_row_count, api::format::r32g32b32a32_uint, api::resource_usage::unordered_access) ||
           !texture_create(detection_decision, detection_decision_texels, 1, api::format::r32g32b32a32_uint,
@@ -852,14 +971,14 @@ namespace sunshine_game3d {
           !texture_create(detected_mask, width, height, api::format::r32_float, api::resource_usage::unordered_access) ||
           !texture_create(detection_hold, ui_detection::hold::store_texels, 1, api::format::r32_uint,
             api::resource_usage::unordered_access) ||
-          !pipeline_create(detection_tiles, "SunshineUIDetectionTilesCS", true, {}) ||
-          !pipeline_create(detection_reduce, "SunshineUIDetectionReduceCS", true, {}) ||
-          !pipeline_create(detection_mask, "SunshineUIDetectionMaskCS", true, {}) ||
+          !compute_pipeline(detection_tiles, "SunshineUIDetectionTilesCS") ||
+          !compute_pipeline(detection_reduce, "SunshineUIDetectionReduceCS") ||
+          !compute_pipeline(detection_mask, "SunshineUIDetectionMaskCS") ||
           !texture_create(scene_cell_sums, ui_detection::scene::cells_x, ui_detection::scene::cells_y,
             api::format::r32g32b32a32_uint, api::resource_usage::unordered_access) ||
-          !pipeline_create(scene_cells, "SunshineSceneCellsCS", true, {}) ||
-          !pipeline_create(scene_compare, "SunshineSceneCompareCS", true, {}) ||
-          !pipeline_create(scene_evidence, "SunshineSceneEvidenceCS", true, {})) return false;
+          !compute_pipeline(scene_cells, "SunshineSceneCellsCS") ||
+          !compute_pipeline(scene_compare, "SunshineSceneCompareCS") ||
+          !compute_pipeline(scene_evidence, "SunshineSceneEvidenceCS")) return false;
       if (context11.p) {
         D3D11_TEXTURE2D_DESC desc{};
         desc.Width = desc.Height = desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
@@ -1151,12 +1270,11 @@ namespace sunshine_game3d {
     bool prepare_adaptive_probe() {
       if (adaptive_probe_attempted) return adaptive_probe_ready;
       adaptive_probe_attempted = true;
-      if (!display_fraction_ui_supported ||
-          shader_source().find("#define SUNSHINE_UI_ABSOLUTE_LEVEL_PROBE 1") == std::string_view::npos ||
+      if (!adaptive_probe_supported() ||
           !texture_create(ui_conflict_statistics, 16, 32, api::format::r32g32b32a32_uint,
             api::resource_usage::unordered_access | api::resource_usage::copy_source) ||
-          !pipeline_create(ui_conflict, "SunshineUIConflictCS", true, {}) ||
-          (!pipelines[ui_apply].handle && !pipeline_create(ui_apply, "SunshineApplyUICS", true, {}))) return false;
+          !compute_pipeline(ui_conflict, "SunshineUIConflictCS") ||
+          !compute_pipeline(ui_apply, "SunshineApplyUICS")) return false;
       if (context11.p) {
         D3D11_TEXTURE2D_DESC desc{};
         desc.Width = 16; desc.Height = 32;
@@ -1358,12 +1476,202 @@ namespace sunshine_game3d {
       adaptive_readback_pending = adaptive_awaiting_signal = true;
     }
   };
+#ifdef SUNSHINE_GAME3D_RENDERER_TEST
+  namespace {
+    std::atomic<const char *> test_fail_step{nullptr};
+    std::atomic<unsigned> test_step_delay_ms{0}, test_builds_started{0};
+    std::atomic<bool> test_present_thread{false};
+  }
+#endif
+  // A renderer's setup off the present thread (configure). One pool task
+  // runs the setup steps in order; where the device must not be called from
+  // another thread (a single-threaded D3D11 device), configure runs them a
+  // time slice per Present instead. A pool build is registered process-wide
+  // from its start until it is adopted or ends, so that a destroyed device
+  // can wait for the one step in progress (renderer::device_destroyed). The
+  // setup records no GPU work: an unwanted build is destroyed without a wait.
+  struct renderer::build_job {
+    enum class phase { running, ready, failed, released };
+    using clock = std::chrono::steady_clock;
+    // A present-thread build runs steps until this much of a Present is used.
+    static constexpr double present_thread_slice_ms = 4.0;
+    build_key key;
+    std::unique_ptr<impl> next;
+    std::vector<impl::setup_step> steps;
+    std::size_t cursor = 0;
+    // Why configure runs the steps (nullptr: a pool task does).
+    const char *present_thread = nullptr;
+    // Set under the registry's mutex; read by the executor between steps.
+    std::atomic<bool> cancel{false};
+    // Guarded by the registry's mutex. The fields below are the executor's
+    // until it publishes a state other than running.
+    phase state = phase::running;
+    const char *failed_step = nullptr, *slowest_step = nullptr;
+    double slowest_ms = 0, build_ms = 0;
+    unsigned slices = 0;
+    clock::time_point started = clock::now();
+
+    struct registry_t {
+      std::mutex mutex;
+      std::condition_variable changed;
+      std::vector<std::shared_ptr<build_job>> jobs;
+    };
+    // Deliberately leaked: a pool task may finish during process exit.
+    static registry_t &registry() {
+      static auto *value = new registry_t;
+      return *value;
+    }
+    static double since(clock::time_point from) {
+      return std::chrono::duration<double, std::milli>(clock::now() - from).count();
+    }
+    // Requires the registry's mutex.
+    void unregister() {
+      auto &jobs = registry().jobs;
+      jobs.erase(std::remove_if(jobs.begin(), jobs.end(), [this](const auto &job) { return job.get() == this; }), jobs.end());
+    }
+    // Runs steps in order until every one has run, one fails, the build is
+    // no longer wanted or (slice_ms > 0) the slice is used. Returns false
+    // while steps remain.
+    bool advance(double slice_ms) {
+      const auto slice_start = clock::now();
+      ++slices;
+      bool okay = true;
+      while (cursor < steps.size()) {
+        if (cancel.load(std::memory_order_acquire) || sunshine_addon_lifetime::stopping()) {
+          okay = false;
+          break;
+        }
+#ifdef SUNSHINE_GAME3D_RENDERER_TEST
+        if (const auto delay = test_step_delay_ms.load()) Sleep(delay);
+#endif
+        const auto &step = steps[cursor];
+        const auto before = clock::now();
+        bool done = false;
+        try {
+          done = step.run();
+        } catch (...) {
+          done = false;
+        }
+#ifdef SUNSHINE_GAME3D_RENDERER_TEST
+        if (const char *fail = test_fail_step.load(); fail && !std::strcmp(fail, step.name)) done = false;
+#endif
+        const double ms = since(before);
+        if (ms > slowest_ms) {
+          slowest_ms = ms;
+          slowest_step = step.name;
+        }
+        if (!done) {
+          failed_step = step.name;
+          okay = false;
+          break;
+        }
+        ++cursor;
+        if (slice_ms > 0 && cursor < steps.size() && since(slice_start) >= slice_ms) return false;
+      }
+      finish(okay);
+      return true;
+    }
+    // Publishes the outcome. A failed or unwanted build destroys what it
+    // built first: device_destroyed waits for that, so its device is alive.
+    void finish(bool okay) {
+      build_ms = since(started);
+      auto &r = registry();
+      {
+        std::lock_guard<std::mutex> lock(r.mutex);
+        if (okay && !cancel.load(std::memory_order_acquire)) {
+          state = phase::ready;
+          r.changed.notify_all();
+          return;
+        }
+      }
+      steps.clear();
+      // At process exit the device may be gone: what was built is left.
+      if (sunshine_addon_lifetime::stopping()) next.release();
+      else next.reset();
+      {
+        std::lock_guard<std::mutex> lock(r.mutex);
+        state = cancel.load(std::memory_order_acquire) ? phase::released : phase::failed;
+        unregister();
+      }
+      r.changed.notify_all();
+    }
+    static void CALLBACK task(PTP_CALLBACK_INSTANCE instance, void *context) {
+      const std::unique_ptr<std::shared_ptr<build_job>> owner(static_cast<std::shared_ptr<build_job> *>(context));
+      if (instance) CallbackMayRunLong(instance);
+      (*owner)->advance(0.0);
+    }
+  };
   renderer::renderer() = default;
   renderer::~renderer() {
+    cancel_build();
     // Explicit hot-unload is rare. Never free a recorded frame or block the game.
     if (data_ && !data_->idle()) data_.release();
     if (cached_ && !cached_->idle()) cached_.release();
   }
+  // Never waits: a pool task ends at its next step and destroys what it
+  // built; a present-thread build, which runs no step now, ends here.
+  void renderer::cancel_build() {
+    const auto job = std::move(building_);
+    if (!job) return;
+    std::unique_ptr<impl> unwanted;
+    bool finish_here = false;
+    {
+      std::lock_guard<std::mutex> lock(build_job::registry().mutex);
+      job->cancel.store(true, std::memory_order_release);
+      if (job->state == build_job::phase::ready) {
+        unwanted = std::move(job->next);
+        job->state = build_job::phase::released;
+        job->unregister();
+      } else finish_here = job->state == build_job::phase::running && job->present_thread;
+    }
+    if (finish_here) job->finish(false);
+    // No GPU work used these objects: they go at once.
+    unwanted.reset();
+  }
+  void renderer::device_destroyed(api::device *device) {
+    auto &r = build_job::registry();
+    std::vector<std::unique_ptr<impl>> unwanted;
+    {
+      std::unique_lock<std::mutex> lock(r.mutex);
+      const auto on_device = [device](const std::shared_ptr<build_job> &job) { return job->key.device == device; };
+      for (const auto &job : r.jobs)
+        if (on_device(job)) job->cancel.store(true, std::memory_order_release);
+      // A step in progress is one device call; its task then destroys what
+      // it built and unregisters.
+      r.changed.wait(lock, [&] {
+        return std::none_of(r.jobs.begin(), r.jobs.end(), [&](const std::shared_ptr<build_job> &job) {
+          return on_device(job) && job->state == build_job::phase::running;
+        });
+      });
+      for (auto it = r.jobs.begin(); it != r.jobs.end();) {
+        if (!on_device(*it)) { ++it; continue; }
+        unwanted.push_back(std::move((*it)->next));
+        (*it)->state = build_job::phase::released;
+        it = r.jobs.erase(it);
+      }
+    }
+    unwanted.clear();
+  }
+#ifdef SUNSHINE_GAME3D_RENDERER_TEST
+  void renderer::set_build_test_hooks(const build_test_hooks &hooks) {
+    test_fail_step.store(hooks.fail_step);
+    test_step_delay_ms.store(hooks.step_delay_ms);
+    test_present_thread.store(hooks.present_thread);
+  }
+  unsigned renderer::builds_started() { return test_builds_started.load(); }
+  unsigned renderer::builds_in_flight() {
+    auto &r = build_job::registry();
+    std::lock_guard<std::mutex> lock(r.mutex);
+    return unsigned(r.jobs.size());
+  }
+  bool renderer::first_render_prepared() const {
+    if (!data_) return false;
+    const auto &d = *data_;
+    const bool pq = (d.color == 3 && d.pq_per_tap) || (d.color == 2 && d.scrgb_pq_pack);
+    return d.detection_attempted && d.detection_ready && d.adaptive_probe_attempted && d.adaptive_probe_ready &&
+      (!pq || d.textures[impl::packed_pq].resource.handle);
+  }
+#endif
   std::string_view renderer::shader_source() { return {game3d_shader_source, sizeof(game3d_shader_source) - 1}; }
   std::string_view renderer::active_shader_source() const { return data_ ? data_->shader_source() : shader_source(); }
   // Every entry point a renderer for this configuration may create, eagerly
@@ -1399,6 +1707,7 @@ namespace sunshine_game3d {
   }
   bool renderer::configure(api::effect_runtime *runtime, api::resource backbuffer, api::color_space color, std::string_view source_override,
       bool prepare_in_background) {
+    const auto entered = build_job::clock::now();
     preparing_ = false;
     auto *device = runtime->get_device();
     const auto desc = device->get_resource_desc(backbuffer);
@@ -1409,11 +1718,23 @@ namespace sunshine_game3d {
         desc.texture.samples != 1 || desc.texture.depth_or_layers != 1 ||
         // ReShade draws its GUI to an internal alpha-bearing resolve target
         // for X8 swapchains. Our native overlay target must be the backbuffer.
-        format == api::format::r8g8b8x8_unorm || format == api::format::b8g8r8x8_unorm) return false;
+        format == api::format::r8g8b8x8_unorm || format == api::format::b8g8r8x8_unorm) {
+      // Nothing of this configuration is built; an earlier one's build is unwanted.
+      cancel_build();
+      return false;
+    }
     const auto matches = [&](const impl &value) {
       return value.device == device && value.width == desc.texture.width && value.height == desc.texture.height &&
         value.source_format == typed(desc.texture.format) && value.color == c && value.source_override == source_override;
     };
+    const bool background = prepare_in_background && source_override.empty();
+    const build_key key{device, desc.texture.width, desc.texture.height, c, format};
+    // A build of another configuration is no longer wanted (an extent,
+    // format or colour change, or a toggle back to the current or cached
+    // renderer), nor is any build once the synchronous path is asked for.
+    if (building_ && (!background || !(building_->key == key))) cancel_build();
+    // A remembered failure lasts while the same configuration is requested.
+    if (build_failed_ && !(failed_key_ == key)) build_failed_ = false;
     const auto now = GetTickCount64();
     // The cached renderer of the other colour transfer is released once idle
     // this long (item 6: bounded to one cached entry).
@@ -1441,31 +1762,126 @@ namespace sunshine_game3d {
       sunshine_log::message(reshade::log::level::info, "Sunshine Game 3D: reusing the cached add-on GPU renderer of this colour transfer");
       return true;
     }
-    if (data_ && !data_->idle()) return false;
-    const bool background = prepare_in_background && source_override.empty();
-    if (background) {
+    // The outgoing renderer (idle) stays cached for a toggle back, replacing
+    // an older cached one only once that is idle too.
+    const auto replace_current = [&](std::unique_ptr<impl> next) {
+      ui_candidate_captures_.fill(0);
+      if (data_ && !data_->failed && (!cached_ || cached_->idle())) {
+        cached_ = std::move(data_);
+        cached_since_ = now;
+      }
+      data_ = std::move(next);
+      resume_pending_ = false;
+    };
+    if (!background) {
+      // Replay, fixtures and explicit sources build here, synchronously.
+      if (data_ && !data_->idle()) return false;
+      replace_current(nullptr);
+      auto next = std::make_unique<impl>();
+      next->source_override.assign(source_override);
+      if (!next->initialize(runtime, desc, c)) return false;
+      data_ = std::move(next);
+      sunshine_log::message(reshade::log::level::info, "Sunshine Game 3D: add-on GPU renderer ready (no FX file required)");
+      return true;
+    }
+    // The live path: shaders compile, then the renderer's GPU objects are
+    // built, off the present thread; the game stays 2D meanwhile. This call
+    // never waits and never creates a GPU object, but on a single-threaded
+    // D3D11 device it runs a time slice of the build.
+    if (build_failed_) return false;
+    if (!building_) {
       const auto state = shader_cache::prepare({shader_source(), desc.texture.width, desc.texture.height, c},
         shader_entries(shader_source(), desc.texture.width, desc.texture.height, c));
       if (state != shader_cache::state::ready) {
         preparing_ = state == shader_cache::state::pending;
         return false;
       }
+      auto job = std::make_shared<build_job>();
+      job->key = key;
+      job->next = std::make_unique<impl>();
+      job->next->precompiled = true;
+      job->next->begin(device, runtime->get_command_queue(), desc, c);
+      job->steps = job->next->setup_steps(true);
+      // A single-threaded device must not be called from another thread.
+      if (device->get_api() == api::device_api::d3d11 &&
+          (reinterpret_cast<ID3D11Device *>(device->get_native())->GetCreationFlags() & D3D11_CREATE_DEVICE_SINGLETHREADED))
+        job->present_thread = "single-threaded device";
+#ifdef SUNSHINE_GAME3D_RENDERER_TEST
+      if (!job->present_thread && test_present_thread.load()) job->present_thread = "fixture";
+      ++test_builds_started;
+#endif
+      building_ = job;
+      if (!job->present_thread) {
+        auto &r = build_job::registry();
+        {
+          std::lock_guard<std::mutex> lock(r.mutex);
+          r.jobs.push_back(job);
+        }
+        auto *context = new std::shared_ptr<build_job>(job);
+        if (!TrySubmitThreadpoolCallback(build_job::task, context, nullptr)) {
+          // Without a pool thread, build here a slice per Present.
+          delete context;
+          std::lock_guard<std::mutex> lock(r.mutex);
+          job->unregister();
+          job->present_thread = "no pool thread";
+        }
+      }
     }
-    ui_candidate_captures_.fill(0);
-    // The outgoing renderer (idle) stays cached for a toggle back, replacing
-    // an older cached one only once that is idle too.
-    if (data_ && !data_->failed && (!cached_ || cached_->idle())) {
-      cached_ = std::move(data_);
-      cached_since_ = now;
+    auto &job = *building_;
+    const auto state_of = [&job] {
+      std::lock_guard<std::mutex> lock(build_job::registry().mutex);
+      return job.state;
+    };
+    if (job.present_thread && state_of() == build_job::phase::running) job.advance(build_job::present_thread_slice_ms);
+    switch (state_of()) {
+      case build_job::phase::running:
+        preparing_ = true;
+        return false;
+      case build_job::phase::failed: {
+        char text[256];
+        std::snprintf(text, sizeof(text), "Sunshine Game 3D: add-on GPU renderer setup failed at %s (%ux%u, colour %u); "
+          "the game stays 2D until its swapchain or colour changes", job.failed_step ? job.failed_step : "an unknown step",
+          key.width, key.height, key.color);
+        sunshine_log::message(reshade::log::level::error, text);
+        build_failed_ = true;
+        failed_key_ = key;
+        building_.reset();
+        return false;
+      }
+      case build_job::phase::released:
+        // Its device was destroyed under it; the next call starts again.
+        building_.reset();
+        preparing_ = true;
+        return false;
+      case build_job::phase::ready:
+        break;
     }
-    data_.reset();
-    resume_pending_ = false;
-    auto next = std::make_unique<impl>();
-    next->source_override.assign(source_override);
-    next->precompiled = background;
-    if (!next->initialize(runtime, desc, c)) return false;
-    data_ = std::move(next);
-    sunshine_log::message(reshade::log::level::info, "Sunshine Game 3D: add-on GPU renderer ready (no FX file required)");
+    // Adoption replaces the current renderer, which must be idle first.
+    if (data_ && !data_->idle()) {
+      preparing_ = true;
+      return false;
+    }
+    std::unique_ptr<impl> next;
+    {
+      std::lock_guard<std::mutex> lock(build_job::registry().mutex);
+      next = std::move(job.next);
+      job.state = build_job::phase::released;
+      job.unregister();
+    }
+    const auto finished = std::move(building_);
+    replace_current(std::move(next));
+    char text[320];
+    if (finished->present_thread)
+      std::snprintf(text, sizeof(text), "Sunshine Game 3D: add-on GPU renderer ready (built on the present thread, %s, over %u "
+        "Presents in %.0f ms, longest step %s %.1f ms; %ux%u, colour %u)", finished->present_thread, finished->slices,
+        finished->build_ms, finished->slowest_step ? finished->slowest_step : "none", finished->slowest_ms, key.width,
+        key.height, key.color);
+    else
+      std::snprintf(text, sizeof(text), "Sunshine Game 3D: add-on GPU renderer ready (built off the present thread in %.0f ms, "
+        "longest step %s %.1f ms; present-thread adoption %.3f ms; %ux%u, colour %u)", finished->build_ms,
+        finished->slowest_step ? finished->slowest_step : "none", finished->slowest_ms, build_job::since(entered), key.width,
+        key.height, key.color);
+    sunshine_log::message(reshade::log::level::info, text);
     return true;
   }
   bool renderer::render(api::command_list *cmd, const render_frame_input &input, bool defer_pack) {
@@ -1783,16 +2199,8 @@ namespace sunshine_game3d {
     if (!data_) return !pq;
     auto &d = *data_;
     if (pq && !pq_output_supported()) pq = false;
-    if (pq && !d.textures[impl::packed_pq].resource.handle &&
-        !d.texture_create(impl::packed_pq, d.width * 2, d.height, api::format::r10g10b10a2_unorm,
-          api::resource_usage::render_target | api::resource_usage::copy_source)) {
-      auto &t = d.textures[impl::packed_pq];
-      if (t.srv.handle) d.device->destroy_resource_view(t.srv);
-      if (t.rtv.handle) d.device->destroy_resource_view(t.rtv);
-      if (t.resource.handle) d.device->destroy_resource(t.resource);
-      t = {};
-      pq = false;
-    }
+    // A background build created the target already.
+    if (pq && !d.create_pq_export()) pq = false;
     if (d.pq_output != pq && !d.export_views.empty()) {
       // Export views carry the transfer's format; RTV descriptors are consumed
       // at record time, so they go without waiting.
@@ -1992,15 +2400,22 @@ namespace sunshine_game3d {
       if (value && (value->pending || value->unsignaled) && value->completion.handle &&
           value->device->get_api() == api::device_api::d3d12)
         value->device->signal(value->completion, value->sequence + 1);
+    cancel_build();
+    build_failed_ = false;
     ui_candidate_captures_.fill(0);
     resume_pending_ = false;
     data_.reset();
     cached_.reset();
   }
-  api::device *renderer::device() const { return data_ ? data_->device : cached_ ? cached_->device : nullptr; }
+  api::device *renderer::device() const {
+    return data_ ? data_->device : cached_ ? cached_->device : building_ ? building_->key.device : nullptr;
+  }
   void renderer::park_after_runtime_drain() {
     ui_candidate_captures_.fill(0);
     preparing_ = false;
+    // A background build continues: a reinitialised runtime of the same
+    // configuration adopts it, and any other cancels it (configure).
+    build_failed_ = false;
     // The swapchain's back buffers are released or recreated by the reset:
     // drop the views of them (a D3D11 view would keep a buffer referenced,
     // failing ResizeBuffers).

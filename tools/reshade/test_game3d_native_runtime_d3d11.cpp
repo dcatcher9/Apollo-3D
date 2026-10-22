@@ -8,6 +8,8 @@
 #include "test_game3d_debug_dump_runtime.h"
 #include "test_game3d_budget.h"
 #include "test_game3d_ui_pin_band.h"
+#include "test_game3d_startup_measure.h"
+#include "test_game3d_renderer_build.h"
 
 namespace {
   struct native11_case {
@@ -103,6 +105,10 @@ namespace {
     for (const auto &entry : fs::recursive_directory_iterator(directory / "effects"))
       require(entry.path().extension() != ".fx", "D3D11 native phase retains installed FX");
     const auto effects = observed.renders;
+    // Evidence: the present-thread start of a 4K renderer, first in this
+    // process (its own bytecode: no in-process pipeline reuse).
+    sunshine_game3d_test::measure_startup(observed.runtime, fixture.color, "D3D11");
+    sunshine_game3d_test::check_background_build(observed.runtime, fixture.color, "D3D11");
     sunshine_game3d::renderer renderer;
     sunshine_game3d_test::dump_fixture dump;
     auto *queue = observed.runtime->get_command_queue();

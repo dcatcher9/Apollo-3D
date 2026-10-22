@@ -202,7 +202,11 @@ edits and persistence. Model/API tests or Home-tab overlay tests alone cannot ca
 cross-compiler ABI failures in the panel's layout calls.
 The retired `SUNSHINE_GAME3D_ALPHA_DELAYED_STARTUP_TEST=1` flag now exits with code 2 before
 graphics initialization. Current source-alpha and native renderer runtime tests exercise
-automatic validation, source revocation, manual modes and exact field/SBS pixels.
+automatic validation, source revocation, manual modes and exact field/SBS pixels. The native
+renderer runtime tests (D3D12 and D3D11) also print the present-thread cost of a 4K renderer
+start (`MEASURE <api> startup`) and check every path of its background build: cancellation,
+park, device teardown, failure without retry and the present-thread executor
+([renderer start](../../docs/reshade-sbs.md#native-renderer-ownership)).
 No editable shader definitions are required. Obsolete Game3D/debug definitions are removed from
 their saved scopes; shared definitions belonging to other effects remain unchanged. Original
 SuperDepth3D controls and includes remain in their separate reference installation.

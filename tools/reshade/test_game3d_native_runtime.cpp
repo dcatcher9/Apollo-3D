@@ -7,6 +7,8 @@
 #include "test_game3d_debug_dump_runtime.h"
 #include "test_game3d_budget.h"
 #include "test_game3d_ui_pin_band.h"
+#include "test_game3d_startup_measure.h"
+#include "test_game3d_renderer_build.h"
 #include "game3d_ui_layer.h"
 #include "game3d_diagnostics.h"
 #include <d3d12sdklayers.h>
@@ -1752,6 +1754,10 @@ namespace {
       require(entry.path().extension() != ".fx", "Native fixture still has an installed FX shader");
     const auto effect_renders = observed.renders;
     std::puts("PASS native phase has zero installed/loaded FX techniques");
+    // Evidence: the present-thread start of a 4K renderer, first in this
+    // process (its own bytecode: no in-process pipeline reuse).
+    sunshine_game3d_test::measure_startup(observed.runtime, fixture.color, "D3D12");
+    sunshine_game3d_test::check_background_build(observed.runtime, fixture.color, "D3D12");
 
     sunshine_game3d::renderer renderer;
     sunshine_game3d_test::dump_fixture dump;

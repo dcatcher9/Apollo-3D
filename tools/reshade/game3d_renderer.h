@@ -246,12 +246,43 @@ namespace sunshine_game3d {
     ~renderer();
     renderer(const renderer &) = delete;
     renderer &operator=(const renderer &) = delete;
-    // Background preparation (production shader only) compiles missing
-    // entry points on the thread pool and returns false while they are
-    // pending; preparing() then distinguishes that from an unusable mode.
+    // Background preparation (production shader only; the exporter's live
+    // path) compiles missing entry points on the thread pool, then builds the
+    // renderer's GPU objects there too, including those its first render
+    // used to create (docs/reshade-sbs.md, renderer start). Every such call
+    // returns at once: false while either is pending, preparing() then
+    // distinguishes that from an unusable mode, and the call that finds the
+    // build ready only adopts it. A failed build is not retried until the
+    // configuration changes or the runtime resets. The synchronous path
+    // (replay and fixtures) builds on the calling thread.
     bool configure(reshade::api::effect_runtime *runtime, reshade::api::resource backbuffer,
       reshade::api::color_space color, std::string_view source_override = {}, bool prepare_in_background = false);
     bool preparing() const { return preparing_; }
+    // A destroyed device ends every background build on it, whichever
+    // renderer started it: waits while a build step is in progress (one
+    // device call), then releases what was built. Called from destroy_device,
+    // which still owns the device, outside every lock a build takes.
+    static void device_destroyed(reshade::api::device *device);
+#ifdef SUNSHINE_GAME3D_RENDERER_TEST
+    // Fixture controls of the background build: a step that fails, a delay
+    // before each step (so that fixtures act mid-build), and the
+    // present-thread executor (a single-threaded D3D11 device's).
+    struct build_test_hooks {
+      const char *fail_step = nullptr;
+      unsigned step_delay_ms = 0;
+      bool present_thread = false;
+    };
+    static void set_build_test_hooks(const build_test_hooks &hooks);
+    // Builds started by this process, and those still registered (running,
+    // or ready and not yet adopted).
+    static unsigned builds_started();
+    static unsigned builds_in_flight();
+    bool building() const { return building_ != nullptr; }
+    // The current renderer prepared automatic UI detection, the adaptive
+    // probe and (where supported) the PQ export target before its first
+    // render.
+    bool first_render_prepared() const;
+#endif
     static std::string_view shader_source();
     std::string_view active_shader_source() const;
     // Mode-5 live adaptation uses caller-owned source identity only. Omitting
@@ -375,11 +406,13 @@ namespace sunshine_game3d {
     // having finished every read it covers.
     void reset_after_runtime_drain();
     // The same, for a runtime reset that may be a swapchain resize (an SDR and
-    // HDR toggle): the renderer and its cached one are kept for the runtime's
-    // reinitialisation; only the views of the swapchain's back buffers go.
+    // HDR toggle): the renderer, its cached one and any background build are
+    // kept for the runtime's reinitialisation (reset_after_runtime_drain
+    // cancels a build); only the views of the swapchain's back buffers go.
     // The next configure starts the decision state as a new renderer would.
     void park_after_runtime_drain();
-    // The device of the current renderer (nullptr before the first configure).
+    // The device of the current renderer, else of its cached one, else of
+    // its background build (nullptr before the first configure).
     reshade::api::device *device() const;
     // Recorded conditioning since configure: recorded in full, skipped for a
     // pack that shows the source mono, and recorded with the depth candidate
@@ -393,6 +426,20 @@ namespace sunshine_game3d {
     conditioning_counters conditioning_activity() const;
   private:
     struct impl;
+    // A renderer's GPU objects being built off the present thread
+    // (configure), shared with its pool task and the process registry.
+    struct build_job;
+    // The configuration a renderer serves.
+    struct build_key {
+      reshade::api::device *device = nullptr;
+      std::uint32_t width = 0, height = 0, color = 0;
+      reshade::api::format format = reshade::api::format::unknown;
+      bool operator==(const build_key &other) const {
+        return device == other.device && width == other.width && height == other.height && color == other.color &&
+          format == other.format;
+      }
+    };
+    void cancel_build();
     std::unique_ptr<impl> data_;
     // The renderer of the previous colour transfer (SDR and HDR toggles),
     // reused on a toggle back and released once idle for cached_idle_ms.
@@ -400,6 +447,13 @@ namespace sunshine_game3d {
     std::uint64_t cached_since_ = 0;
     static constexpr std::uint64_t cached_idle_ms = 60000;
     std::array<std::uint64_t, 5> ui_candidate_captures_{};
+    // The background build for the latest requested configuration, until
+    // adopted, failed or no longer wanted.
+    std::shared_ptr<build_job> building_;
+    // The configuration whose background build failed: not retried until
+    // another is requested or the runtime resets.
+    build_key failed_key_;
+    bool build_failed_ = false;
     bool preparing_ = false;
     bool resume_pending_ = false;
   };

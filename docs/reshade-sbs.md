@@ -210,6 +210,38 @@ remembered rather than retried every Present. Replay and test renderers with exp
 still compile synchronously and never use the cache. With the cache in place the slowest renderer
 setup Present went from 1,969 ms to about 10 ms in the 4K provider fixture.
 
+**Renderer start.** That 10 ms held only with a warm driver cache. On D3D12 the driver compiles
+each pipeline from the bytecode inside `Create*PipelineState` (30-940 ms per pass when its cache
+is cold), and it keys that cache by the exact bytecode, so the first start of a game after each
+shader change, and each new size or colour transfer, is cold. Creating the renderer's pipelines,
+root signature and textures on the Present froze every live start for 0.6-1.1 s, and the first
+render then created the UI detection and adaptive-probe passes for another 0.26-0.32 s (Hogwarts
+Legacy, Expedition 33, Dead Space and The Witcher 3, `cpu_worst_ms` setup and render). Once the
+bytecode is ready, one pool task now builds the whole renderer, including what its first render
+used to create: the detection, scene-evidence and adaptive-probe passes with their resources and
+the 10-bit PQ export target. The game stays 2D with the same overlay status until the build is
+ready, and the Present that finds it ready only adopts it (once the renderer it replaces is
+idle). The build only creates device objects (no command list, queue or runtime call, and no
+initial data), which ReShade 6.8 and both APIs allow from any thread; on a device created with
+`D3D11_CREATE_DEVICE_SINGLETHREADED`, `configure` runs the same steps itself, about 4 ms of them
+per Present. A build serves one configuration (device, extent, format and colour). A change of
+it, a toggle back to the current or cached renderer, a runtime reset or a destroyed swapchain
+cancels the build: its task stops after the step in progress and destroys what it built, which
+no GPU work has used, so nothing waits. A park over a runtime reset keeps the build for the
+reinitialised runtime, and `destroy_device` waits for the one device call in progress before it
+releases every build on that device. A failed step is logged once
+(`add-on GPU renderer setup failed at <step>`) and leaves the game 2D and the renderer
+unavailable, without a retry, until the configuration changes or the runtime resets. The ready
+line reports the build (`add-on GPU renderer ready (built off the present thread in <ms>,
+longest step <entry> <ms>; present-thread adoption <ms>; ...)`). In the 4K D3D12 native fixture
+with a cold driver cache, the longest configure call of a start went from 467 ms to 0.3 ms and its
+first render from 338 ms to 2.4 ms; the pool build took about 0.7 s. Through the exporter (the 4K
+provider fixture, cold) the worst Present of the first timing window, which had setup 484 ms and
+render 262 ms, is no longer the start: its setup and render are under 0.1 ms. Replay and
+fixtures that ask for a synchronous renderer still build it on the calling thread, with
+first-use objects lazy. The export ring, the depth content sampler's pass and the overlay
+compositor's pipelines are still created on the Present when first needed.
+
 The vertical and horizontal limit passes are mechanical translations of the host shaders, whose
 tiling is described in [Host SBS pipeline](host-sbs.md). Each group owns eight adjacent columns or
 rows, so the passes no longer hold whole lines in group memory. UI pinning always runs as its own

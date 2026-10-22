@@ -1186,10 +1186,11 @@ namespace {
         auto &proof = runtimes_[runtime];
         if (!proof.renderer) proof.renderer = std::make_unique<sunshine_game3d::renderer>();
         renderer = proof.renderer.get();
-        // Shaders compile on the thread pool; the game stays 2D until they are ready.
+        // Shaders compile, and the renderer's GPU objects are built, on the
+        // thread pool; the game stays 2D until the renderer is ready.
         if (!renderer->configure(runtime, backbuffer, swapchain->get_color_space(), {}, true)) {
           const bool preparing = renderer->preparing();
-          if (diagnostic_owner) debug_dump_.unavailable(preparing ? "The foreground Game 3D renderer is still compiling its shaders." :
+          if (diagnostic_owner) debug_dump_.unavailable(preparing ? "The foreground Game 3D renderer is still being prepared." :
             "The foreground Game 3D renderer is unavailable for this swapchain format, extent or transition.");
           deactivate(runtime, "renderer_unavailable");
           sunshine_game3d::automatic_status unavailable;
@@ -1431,6 +1432,9 @@ namespace {
 
     // A destroyed device takes any renderer still parked on it.
     void device_destroyed(api::device *device) {
+      // First every background renderer build on it: this may wait for the
+      // one device call in progress, so never under mutex_.
+      sunshine_game3d::renderer::device_destroyed(device);
       std::lock_guard<std::mutex> lock(mutex_);
       for (auto it = parked_.begin(); it != parked_.end();) {
         if (it->device == device) {
