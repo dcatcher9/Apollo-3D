@@ -250,6 +250,83 @@ SB_FIX1_SETTINGS = SB_S2B_SETTINGS.replace('sampled_claims=0x80', 'sampled_claim
     'presented_lit=5994692 presented_lit_differs=5238234} ')
 
 
+# Real lines of Clair Obscur: Expedition 33 (2026-10-22, generation 2, FG on at 4x): the game stopped tagging depth and
+# its UI buffers together (they share one Streamline tag batch) and nearly stalled. Depth readiness was lost from
+# 13:47:15.502 to 17.373, so those 69 Presents were packed flat; the UI lines read no UI source from 15.633 until
+# detection resumed (logged at 18.376, held by the 1 s log gate). The second no-source line, written by the recovering
+# Present, differs from the first only in its time and status_revision.
+E33_DEPTH_LOSS = [
+    '13:45:06:786 [19344] | INFO  | Registered add-on "Sunshine 3D" v0.0.0.0 using ReShade API version 20.',
+    '13:47:05:005 [51480] | INFO  | [Sunshine 3D] Sunshine Game 3D: add-on GPU renderer ready (built off the present '
+    'thread in 35 ms, longest step adaptive probe resources 9.5 ms; present-thread adoption 0.002 ms; 3840x2160, '
+    'colour 1)',
+    '13:47:09:062 [40860] | INFO  | [Sunshine 3D] Sunshine Streamline frame generation: viewport=1 mode=1 '
+    'generated_frames=3 supported=1 success=1',
+    '13:47:09:353 [40860] | INFO  | [Sunshine 3D] Sunshine SBS: generation 2, 7680x2160 full SBS, DXGI 24, D3D12, '
+    'sRGB, protocol 4 (source color 1)',
+    '13:47:14:632 [40860] | INFO  | [Sunshine 3D] Sunshine UI protection: runtime=000002df57f5f5a0 mode=auto '
+    'rendered=1 mask_path=1 input=automatic_gpu_mask retained=1 fg=1 fg_known=1 fg_enabled=1 input_state=input_seen '
+    'detection=detected selected=automatic source=automatic source_availability=detected sampled_source=8 '
+    'sampled_covered=8294400 sampled_pixels=8294400 sampled_candidates=0x14 sampled_alpha_covered=0/0/8294400/0 '
+    'sampled_alpha_invalid=0/0/0/0 accepted=0x14 sampled_layer={covered=0 invalid=0 opaque=0} '
+    'sampled_one_way={strong=0/0 contradicted=0/0} sampled_reason=decided sampled_refused=none sampled_reused=0 '
+    'sampled_hudless={changed=7874482 unchanged=144608 invalid=0 matching_tiles=0 lit=1190451} '
+    'sampled_alpha_opaque=0/0 sampled_inferred_opaque=8294382/0 sampled_claims=0x84 sampled_h1={applied=1 winner=3} '
+    'sampled_scene={n=0 d=0.000 valid=0 ran=0 verdict=none} sampled_pre_ui_scene={image=none n=0 d=0.000 valid=0} '
+    'scene_guard={hidden=1 pre_ui=1 refuted=0 proven=0} sampled_pre_ui_pixels={match=0 image_lit=0} '
+    'sampled_declared_one_way={strong=0/0 contradicted=0/0} status_revision=4',
+    '13:47:15:502 [40860] | INFO  | [Sunshine 3D] Sunshine depth readiness: lost reason=retained_depth_expired '
+    'runtime=0x2df57f5f5a0 native_swapchain=0x2df4a8b7bf0 present=21830 unavailable_ms=0 suppressed_episodes=0; '
+    'provider=Streamline prior_provider=Streamline selected=0 snapshot_ready=0 copied=0 output_reused=0 '
+    'display=not_attempted selection=inactive_views status=stale failure=none capture=994596 sequence=90117 '
+    'newest_sequence=90117 epoch=4 source=9223372036854775809 viewport=1 selection_tick_ms=59583578 source_age_ms=250 '
+    'newest_view_age_ms=250 active_views=0 finished=1 success=1 submitted=1 invalid=0 capture_pending=0 '
+    'capture_repeated=0 fence=30597 completed=30598 completion_valid=1 producer_retired=1; FG_query=3 FG_known=1 '
+    'FG_enabled=1 FG_mode=1 FG_generated=3 FG_epoch=4 FG_viewport=1 require_FG=1 policy_epoch=4; prior_output_ready=1 '
+    'prior_retained=1 prior_age_ms=250 prior_present=21814 prior_capture=994596 prior_sequence=90117 prior_epoch=4 '
+    'prior_source=9223372036854775809 prior_viewport=1 prior_observation=4 current_observation=0 prior_feedback=6 '
+    'current_feedback=0 prior_reset=0 current_reset=0 retained_clear=retained_depth_expired; source_action=invalidate '
+    'source_reason=retained_depth_expired cache_reason=retained_depth_expired consumer=not_attempted '
+    'consumer_loss=none cookie=0 slot_invalid=0',
+    '13:47:15:633 [40860] | INFO  | [Sunshine 3D] Sunshine UI protection: runtime=000002df57f5f5a0 mode=auto '
+    'rendered=1 mask_path=0 input=none retained=0 fg=1 fg_known=1 fg_enabled=1 input_state=not_observed '
+    'detection=searching selected=automatic source=automatic source_availability=source_unavailable sampled_source=0 '
+    'sampled_covered=0 sampled_pixels=0 sampled_candidates=0x0 sampled_alpha_covered=0/0/0/0 '
+    'sampled_alpha_invalid=0/0/0/0 accepted=0x0 sampled_layer={covered=0 invalid=0 opaque=0} '
+    'sampled_one_way={strong=0/0 contradicted=0/0} sampled_reason=decided sampled_refused=none sampled_reused=0 '
+    'sampled_hudless={changed=0 unchanged=0 invalid=0 matching_tiles=0 lit=0} sampled_alpha_opaque=0/0 '
+    'sampled_inferred_opaque=0/0 sampled_claims=0x0 sampled_h1={applied=0 winner=0} sampled_scene={n=0 d=0.000 '
+    'valid=0 ran=0 verdict=none} sampled_pre_ui_scene={image=none n=0 d=0.000 valid=0} scene_guard={hidden=0 pre_ui=0 '
+    'refuted=0 proven=0} sampled_pre_ui_pixels={match=0 image_lit=0} sampled_declared_one_way={strong=0/0 '
+    'contradicted=0/0} status_revision=5',
+    '13:47:17:373 [40860] | INFO  | [Sunshine 3D] Sunshine depth readiness: recovered reason=fresh_copy '
+    'runtime=0x2df57f5f5a0 native_swapchain=0x2df4a8b7bf0 present=21899 unavailable_ms=1859 suppressed_episodes=0; '
+    'provider=Streamline prior_provider=Streamline selected=1 snapshot_ready=1 copied=1 output_reused=0 display=ready '
+    'selection=current_capture status=ready failure=none capture=995532 sequence=90124 newest_sequence=90124 epoch=4 '
+    'source=9223372036854775809 viewport=1 selection_tick_ms=59585437 source_age_ms=141 newest_view_age_ms=141 '
+    'active_views=1 finished=1 success=1 submitted=1 invalid=0 capture_pending=0 capture_repeated=0 fence=30599 '
+    'completed=30599 completion_valid=1 producer_retired=1; FG_query=3 FG_known=1 FG_enabled=1 FG_mode=1 '
+    'FG_generated=3 FG_epoch=4 FG_viewport=1 require_FG=1 policy_epoch=4; prior_output_ready=0 prior_retained=0 '
+    'prior_age_ms=18446744073709551615 prior_present=0 prior_capture=0 prior_sequence=0 prior_epoch=0 prior_source=0 '
+    'prior_viewport=0 prior_observation=0 current_observation=4 prior_feedback=0 current_feedback=6 prior_reset=0 '
+    'current_reset=0 retained_clear=none; source_action=copy_fresh source_reason=fresh_copy_candidate '
+    'cache_reason=none consumer=ready consumer_loss=none cookie=995421 slot_invalid=0',
+    '13:47:18:376 [40860] | INFO  | [Sunshine 3D] Sunshine UI protection: runtime=000002df57f5f5a0 mode=auto '
+    'rendered=1 mask_path=1 input=automatic_gpu_mask retained=1 fg=1 fg_known=1 fg_enabled=1 input_state=input_seen '
+    'detection=detected selected=automatic source=automatic source_availability=detected sampled_source=3 '
+    'sampled_covered=232 sampled_pixels=8294400 sampled_candidates=0x34 sampled_alpha_covered=0/0/232/0 '
+    'sampled_alpha_invalid=0/0/0/0 accepted=0x14 sampled_layer={covered=0 invalid=0 opaque=0} '
+    'sampled_one_way={strong=232/0 contradicted=0/0} sampled_reason=decided sampled_refused=none sampled_reused=0 '
+    'sampled_hudless={changed=245 unchanged=8294138 invalid=0 matching_tiles=256 lit=8137908} '
+    'sampled_alpha_opaque=0/0 sampled_inferred_opaque=0/0 sampled_claims=0x0 sampled_h1={applied=0 winner=3} '
+    'sampled_scene={n=0 d=0.000 valid=0 ran=0 verdict=none} sampled_pre_ui_scene={image=none n=0 d=0.000 valid=0} '
+    'scene_guard={hidden=0 pre_ui=0 refuted=0 proven=0} sampled_pre_ui_pixels={match=0 image_lit=0} '
+    'sampled_declared_one_way={strong=0/0 contradicted=0/0} status_revision=7',
+]
+E33_DEPTH_LOSS.insert(-1, E33_DEPTH_LOSS[6].replace('13:47:15:633', '13:47:17:377')
+                      .replace('status_revision=5', 'status_revision=6'))
+
+
 class ReadinessReport(unittest.TestCase):
     def test_clean_session_passes(self):
         checks = run(BASE + [ui('10:00:12', 2, 5, (0, 5, 0, 0), 0x2, 0x2), line('10:00:20', 'Finished exiting.')])
@@ -462,6 +539,43 @@ class ReadinessReport(unittest.TestCase):
                          ['10:00:06-10:00:12 (6 s) FG off: current alpha covers 100% (not accepted)'])
         self.assertEqual(run(BASE + [checking, protected])['UI protection gaps'].detail,
                          'every streamed Auto frame had a UI mask or a UI channel showing no UI')
+
+    def test_unprotected_time_without_depth_is_flat_not_a_gap(self):
+        # E33 2026-10-22: no UI source from 13:47:15.633 to 18.376 was a 3 s WARN, but depth was lost until 17.373
+        # and every frame then was flat. What remains is the log gate's second after the recovery (its 4 Presents
+        # were flat too, at the strength ramp's start, but no line shows that), a brief gap.
+        gaps = run(E33_DEPTH_LOSS)['UI protection gaps']
+        self.assertEqual((gaps.status, gaps.detail), (
+            'PASS', 'every streamed Auto frame had a UI mask or a UI channel showing no UI except 1 gap shorter than '
+                    '2 s (1.0 s); 1.7 s without a mask while depth was lost (every frame flat) not counted'))
+        # The same UI lines without the depth loss are the 3 s gap the report listed.
+        shown = run([u for u in E33_DEPTH_LOSS if 'depth readiness' not in u])['UI protection gaps']
+        self.assertEqual((shown.status, shown.times), ('WARN', ['13:47:15-13:47:18 (3 s) FG on: no UI source offered']))
+
+        # Time with depth still counts around a loss, and only the runtime that lost depth is excused.
+        def readiness(t, kind, runtime='0x1'):
+            return line(t, f'[Sunshine 3D] Sunshine depth readiness: {kind} reason=retained_depth_expired '
+                           f'runtime={runtime} unavailable_ms=0; provider=Streamline selection=inactive_views')
+        bare = ui('10:00:06', 0, 0, (0, 0, 0, 0), 0x0, 0x0, pixels=0, detection='searching',
+                  availability='source_unavailable')
+        protected = ui('10:00:12', 2, 5, (0, 5, 0, 0), 0x2, 0x2)
+        around = run(BASE + [bare, readiness('10:00:10', 'lost'), readiness('10:00:11', 'recovered'), protected])
+        gaps = around['UI protection gaps']
+        self.assertEqual((gaps.status, gaps.times), ('WARN', ['10:00:06-10:00:10 (4 s) FG off: no UI source offered']))
+        self.assertTrue(gaps.detail.endswith('; 1 gap shorter than 2 s (1.0 s) not listed; 1.0 s without a mask '
+                                             'while depth was lost (every frame flat) not counted'), gaps.detail)
+        other = run(BASE + [bare, readiness('10:00:07', 'lost', '0x2'), readiness('10:00:11', 'recovered', '0x2'),
+                            protected])['UI protection gaps']
+        self.assertEqual((other.status, other.times),
+                         ('WARN', ['10:00:06-10:00:12 (6 s) FG off: no UI source offered']))
+        # A loss never recovered excuses the rest of the log; a loss line that names no runtime excuses every runtime.
+        unnamed = line('10:00:07', '[Sunshine 3D] Sunshine depth readiness: lost reason=no_retained_depth '
+                                   'unavailable_ms=0; provider=Streamline selection=inactive_views')
+        held = run(BASE + [bare, unnamed, ui('10:00:12', 0, 0, (0, 0, 0, 0), 0x0, 0x0, pixels=0,
+                                             detection='searching', availability='source_unavailable')])
+        self.assertEqual(held['UI protection gaps'].detail,
+                         'every streamed Auto frame had a UI mask or a UI channel showing no UI except 1 gap shorter '
+                         'than 2 s (1.0 s); 5.0 s without a mask while depth was lost (every frame flat) not counted')
 
     def test_hidden_scene_routes_and_uncovered_hidden_runs(self):
         # Stellar Blade's notice splash: an opaque untrusted UI layer over a scene its picture hides.

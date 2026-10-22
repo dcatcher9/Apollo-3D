@@ -584,6 +584,7 @@ class DepthEpisode:
     end: float | None = None
     ending: str = 'open'  # recovered, paused (export inactive) or open (the log ended).
     unavailable_ms: int | None = None  # The add-on's own duration, from its recovered line.
+    runtime: str = ''  # As the line logs it ('0x2df57f5f5a0'), or '' when it names none.
 
 
 @dataclass
@@ -808,7 +809,7 @@ def parse(lines) -> Session:
                 selection = SELECTION.search(text)
                 if key not in open_episodes:
                     open_episodes[key] = DepthEpisode(t, found.group(2), named.group(1) if named else 'unknown',
-                                                      selection.group(1) if selection else 'unknown')
+                                                      selection.group(1) if selection else 'unknown', runtime=key)
                     s.depth_episodes.append(open_episodes[key])
             elif found.group(1) == 'recovered' and (episode := open_episodes.pop(key, None)):
                 unavailable = UNAVAILABLE_MS.search(text)
@@ -1670,12 +1671,33 @@ def full_frame_s2b(c: dict[str, int], add, detected: int) -> None:
                  if acted else '')))
 
 
+def minus(parts: list[tuple[float, float]], cuts) -> list[tuple[float, float]]:
+    """The parts of each range outside every cut range."""
+    for c, d in cuts:
+        parts = [(p, q) for x, y in parts for p, q in ((x, min(y, c)), (max(x, d), y)) if q > p]
+    return parts
+
+
 def outside_settle(s: Session, a: float, b: float) -> list[tuple[float, float]]:
     """The parts of a..b outside the settle time after each FG switch, runtime reset and export start."""
-    parts = [(a, b)]
-    for mark in s.settle:
-        parts = [(p, q) for x, y in parts for p, q in ((x, min(y, mark)), (max(x, mark + SETTLE_S), y)) if q > p]
-    return parts
+    return minus([(a, b)], ((mark, mark + SETTLE_S) for mark in s.settle))
+
+
+def runtime_number(value: str) -> int | None:
+    """A runtime as its lines log it: '0x2df57f5f5a0' on depth lines, '000002df57f5f5a0' on UI lines."""
+    try:
+        return int(value, 16)
+    except ValueError:
+        return None
+
+
+def depth_lost(s: Session, runtime: str) -> list[tuple[float, float]]:
+    """Each depth readiness loss of this runtime (or of a line naming none), from its line to its recovery, the export
+    pausing or the log's end. Every Present in one had no depth, so the renderer packed the colour frame flat
+    (game3d_renderer.cpp, shows_mono): nothing on screen, HUD and menus included, took the scene's depth."""
+    own = runtime_number(runtime)
+    return [(e.start, e.end if e.end is not None else s.last) for e in s.depth_episodes
+            if own is None or (number := runtime_number(e.runtime)) is None or number == own]
 
 
 @dataclass
@@ -1685,8 +1707,9 @@ class Gap:
     reasons: Counter = field(default_factory=Counter)  # Seconds each description held.
 
 
-def unprotected_gaps(s: Session) -> list[Gap]:
-    """Streamed time in which Auto left rendered frames without a UI mask, outside settle times.
+def unprotected_gaps(s: Session) -> tuple[list[Gap], float]:
+    """Streamed time in which Auto left rendered frames without a UI mask while they showed depth, outside settle
+    times; and the seconds of such time left out because depth was lost, when every frame was flat (depth_lost).
 
     A UI protection line's state holds until that runtime's next line (written on a change, at most once per
     LOG_GATE_S, else every UI_LINE_PERIOD_S), so its ends are approximate by up to a second. Gaps less than a
@@ -1696,8 +1719,9 @@ def unprotected_gaps(s: Session) -> list[Gap]:
     runtimes: dict[str, list[UISample]] = {}
     for u in s.ui:
         runtimes.setdefault(u.runtime, []).append(u)
-    pieces = []
-    for samples in runtimes.values():
+    pieces, flat = [], 0.0
+    for runtime, samples in runtimes.items():
+        lost = depth_lost(s, runtime)
         last = ''
         for u, following in zip(samples, samples[1:] + [None]):
             if u.unprotected():
@@ -1710,34 +1734,40 @@ def unprotected_gaps(s: Session) -> list[Gap]:
                 continue
             end = min(following.t if following else s.last, u.t + UI_LINE_PERIOD_S + LOG_GATE_S)
             for a, b in s.streamed:
-                pieces += [(p, q, reason) for p, q in outside_settle(s, max(a, u.t), min(b, end))]
+                for p, q in outside_settle(s, max(a, u.t), min(b, end)):
+                    shown = minus([(p, q)], lost)
+                    flat += q - p - sum(y - x for x, y in shown)
+                    pieces += [(x, y, reason) for x, y in shown]
     gaps: list[Gap] = []
     for a, b, reason in sorted(pieces):
         if not gaps or a - gaps[-1].end >= 1.0:
             gaps.append(Gap(a, b))
         gaps[-1].end = max(gaps[-1].end, b)
         gaps[-1].reasons[reason] += b - a
-    return gaps
+    return gaps, flat
 
 
 def gap_checks(s: Session, add) -> None:
-    """Warn where Auto left streamed frames without a UI mask: HUD and menus then take the scene's depth."""
+    """Warn where Auto left streamed frames that showed depth without a UI mask: HUD and menus then take the scene's
+    depth. Time without depth is left out and counted: every frame was flat there."""
     if not any(u.mode == 'auto' and u.rendered for u in s.ui):
         add(Check('INFO', 'UI protection gaps', 'no rendered Auto samples'))
         return
-    gaps = unprotected_gaps(s)
+    gaps, flat = unprotected_gaps(s)
     listed = [g for g in gaps if g.end - g.start >= UNPROTECTED_MIN_S]
     brief = [g for g in gaps if g.end - g.start < UNPROTECTED_MIN_S]
     note = (f'{len(brief)} {"gap" if len(brief) == 1 else "gaps"} shorter than {UNPROTECTED_MIN_S:g} s '
             f'({sum(g.end - g.start for g in brief):.1f} s)') if brief else ''
+    lost = (f'; {flat:.1f} s without a mask while depth was lost (every frame flat) not counted'
+            if round(flat, 1) else '')
     if not listed:
         add(Check('PASS', 'UI protection gaps', 'every streamed Auto frame had a UI mask or a UI channel showing no UI'
-                  + (f' except {note}' if note else '')))
+                  + (f' except {note}' if note else '') + lost))
         return
     total = sum(g.end - g.start for g in listed)
     add(Check('WARN', 'UI protection gaps',
               f'no usable UI mask for {total:.0f} s in {len(listed)} {"window" if len(listed) == 1 else "windows"}; '
-              "HUD and menus took the scene's depth there" + (f'; {note} not listed' if note else ''),
+              "HUD and menus took the scene's depth there" + (f'; {note} not listed' if note else '') + lost,
               [f'{span(g.start, g.end)} ({g.end - g.start:.0f} s) {g.reasons.most_common(1)[0][0]}'
                for g in listed][:6]))
 

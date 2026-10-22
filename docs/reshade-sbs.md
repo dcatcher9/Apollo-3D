@@ -645,7 +645,13 @@ unprotected when no source decided and either no UI source was offered or no ded
 (UIAlpha, UI color or the UI layer) was offered clean and empty. A clean empty dedicated channel
 means no UI on screen, and an accepted channel deciding an empty mask protects, so neither warns.
 `source_alpha_ui_decision::unprotected()` owns this definition and the log report's
-`UI protection gaps` check mirrors it with the same 2 s minimum. The exporter keeps the start of
+`UI protection gaps` check mirrors it with the same 2 s minimum, over streamed time that showed
+depth only: from a `Sunshine depth readiness` loss to its recovery every Present packs the colour
+frame flat (the renderer's `shows_mono`), so no HUD takes the scene's depth and the warning, hidden
+in 2D, does not show; the report names that time as not counted. E33 on 10-22 offered no UI source
+for 2.7 s while it nearly stalled and tagged neither depth nor its UI buffers (one Streamline tag
+batch carries both); depth was lost for 1.7 s of it, and the rest was the 1 s log gate after the
+recovery, whose first Presents restart the strength ramp at zero. The exporter keeps the start of
 the current unprotected run: a decided rendered frame (a mask, or a clean empty UI channel), a
 manual mode, protection Off or Game 3D off clears it. A Present that rendered nothing, or whose
 status sample is still being collected after a change of the winning accepted candidate or of the
