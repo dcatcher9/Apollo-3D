@@ -31,7 +31,7 @@
 #include <cstring>
 #include <d3d11_4.h>
 #include <d3d12.h>
-#include <dxgi1_2.h>
+#include <dxgi1_4.h>
 #include <imgui.h>
 #include <memory>
 #include <mutex>
@@ -46,6 +46,7 @@
 #include <windows.h>
 #include "game3d_slow_step.h"
 #include "game3d_ui_layer.h"
+#include "game3d_vram.h"
 #include "game3d_diagnostics.h"
 
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
@@ -331,6 +332,24 @@ namespace {
 #else
     sunshine_log::message(level, message);
 #endif
+  }
+
+  // This process's video memory on the adapter (game3d_vram.h): two CPU-only
+  // DXGI queries, made at most every vram::sample_period_ms.
+  sunshine_game3d::vram::reading query_vram(IDXGIAdapter3 *adapter) {
+    using sunshine_game3d::vram::to_mib;
+    sunshine_game3d::vram::reading out;
+    DXGI_QUERY_VIDEO_MEMORY_INFO local {}, nonlocal {};
+    if (!adapter || FAILED(adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &local)) ||
+        FAILED(adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &nonlocal))) {
+      return out;
+    }
+    out.local_usage_mib = to_mib(local.CurrentUsage);
+    out.local_budget_mib = to_mib(local.Budget);
+    out.nonlocal_usage_mib = to_mib(nonlocal.CurrentUsage);
+    out.nonlocal_budget_mib = to_mib(nonlocal.Budget);
+    out.valid = true;
+    return out;
   }
 
   void log_hr(const char *operation, HRESULT hr) {
@@ -899,6 +918,16 @@ namespace {
     } timing;
     std::uint64_t adapter_luid = 0;
     bool adapter_known = false;
+    // The adapter whose video memory this process's samples read
+    // (game3d_vram.h), opened once from the device on an enabled Present.
+    com_ptr<IDXGIAdapter3> vram_adapter;
+    bool vram_adapter_checked = false;
+    // Gaps between this runtime's Presents (present_gap_ms): the previous
+    // Present's QueryPerformanceCounter, and this 10 s window's logged and
+    // suppressed gap lines.
+    std::int64_t last_present_qpc = 0;
+    std::uint64_t gap_window_start = 0;
+    unsigned gap_lines = 0, gap_suppressed = 0;
     bool proof_checked = false;
     bool rendered_since_present = false;
     frame_decision_t frame;
@@ -1061,6 +1090,7 @@ namespace {
       for (unsigned i = 0; i < count; ++i) sections[i] = ms(marks[i], i + 1 < count ? marks[i + 1] : end);
       const auto now = GetTickCount64();
       char message[1024]{};
+      unsigned long long window_ms = 0;
       {
         std::lock_guard<std::mutex> lock(mutex_);
         auto &proof = runtimes_[runtime];
@@ -1072,9 +1102,89 @@ namespace {
           timing.next_log = now + 10000;
         }
         if (now < timing.next_log) return;
+        window_ms = now >= timing.start ? now - timing.start : 0;
         close_timing_window(proof, now, message);
       }
       log(reshade::log::level::info, message);
+      // The game's video memory over the same window (game3d_vram.h): its own
+      // line, since the timing line's buffer is nearly full.
+      char memory[384];
+      if (sunshine_game3d::vram::format_window_line(memory, sizeof(memory), sunshine_game3d::vram::process().take_window(),
+            window_ms))
+        log(reshade::log::level::info, memory);
+    }
+
+    // A gap between two Presents of one runtime long enough to freeze the
+    // picture: the host's first check of a stalled picture comes at 100 ms
+    // too (nvenc_base.cpp). A game that freezes the whole GPU presents
+    // nothing meanwhile, which the log report matches against the host's
+    // upstream stalls. A loading screen below 10 fps logs at most this many
+    // lines per 10 s and counts the rest.
+    static constexpr double present_gap_ms = 100.0;
+    static constexpr unsigned present_gap_lines_per_window = 10;
+    struct present_gap_t {
+      double ms = 0;
+      bool fg = false, log = false;
+      unsigned suppressed = 0;
+    };
+    // Requires mutex_. Every Present of the runtime counts, Game 3D enabled
+    // or not; fg is the frame-generation state of the Present before the gap.
+    present_gap_t measure_present_gap(runtime_t &proof, std::int64_t qpc, std::uint64_t now) {
+      present_gap_t gap;
+      if (proof.last_present_qpc && qpc > proof.last_present_qpc) {
+        LARGE_INTEGER frequency {};
+        QueryPerformanceFrequency(&frequency);
+        gap.ms = double(qpc - proof.last_present_qpc) * 1000.0 / double(frequency.QuadPart);
+      }
+      proof.last_present_qpc = qpc;
+      if (gap.ms < present_gap_ms) return gap;
+      gap.fg = proof.frame.diagnostics.frame_generation_active;
+      if (!proof.gap_window_start || now - proof.gap_window_start >= 10000) {
+        proof.gap_window_start = now;
+        proof.gap_lines = 0;
+      }
+      if (proof.gap_lines >= present_gap_lines_per_window) {
+        ++proof.gap_suppressed;
+        return gap;
+      }
+      ++proof.gap_lines;
+      gap.suppressed = std::exchange(proof.gap_suppressed, 0u);
+      gap.log = true;
+      return gap;
+    }
+
+    // Enabled Presents only: a disabled Present touches no window or device.
+    void log_present_gap(api::effect_runtime *runtime, const present_gap_t &gap) {
+      const sunshine_game3d::vram::latest_suffix memory;
+      const bool foreground = static_cast<HWND>(runtime->get_hwnd()) == observed_foreground_window();
+      char message[256];
+      std::snprintf(message, sizeof(message),
+        "Sunshine Game 3D present gap: %.0f ms since the previous Present; fg=%d foreground=%d suppressed=%u%s", gap.ms,
+        int(gap.fg), int(foreground), gap.suppressed, memory.text);
+      log(reshade::log::level::info, message);
+    }
+
+    // Requires mutex_. The adapter of the runtime's device, opened once (a
+    // failure is not retried); the caller adds its own reference to use it
+    // outside the lock.
+    IDXGIAdapter3 *vram_adapter(runtime_t &proof, api::device *device, IDXGISwapChain *swapchain) {
+      if (proof.vram_adapter_checked) return proof.vram_adapter.get();
+      proof.vram_adapter_checked = true;
+      com_ptr<IDXGIAdapter> adapter;
+      if (device->get_api() == api::device_api::d3d11) {
+        com_ptr<IDXGIDevice> dxgi;
+        auto *native = reinterpret_cast<ID3D11Device *>(device->get_native());
+        if (FAILED(native->QueryInterface(IID_PPV_ARGS(dxgi.put()))) || FAILED(dxgi->GetAdapter(adapter.put()))) return nullptr;
+      } else {
+        // A D3D12 device has no DXGI parent: the swapchain's factory opens
+        // the device's adapter by its LUID.
+        com_ptr<IDXGIFactory4> factory;
+        const LUID luid = reinterpret_cast<ID3D12Device *>(device->get_native())->GetAdapterLuid();
+        if (!swapchain || FAILED(swapchain->GetParent(IID_PPV_ARGS(factory.put()))) ||
+            FAILED(factory->EnumAdapterByLuid(luid, IID_PPV_ARGS(adapter.put())))) return nullptr;
+      }
+      if (FAILED(adapter->QueryInterface(IID_PPV_ARGS(proof.vram_adapter.put())))) return nullptr;
+      return proof.vram_adapter.get();
     }
 
     // Requires mutex_. Formats the timing line of the window ending now into
@@ -1127,11 +1237,15 @@ namespace {
       const auto presentation = sunshine_game3d::ui_input::observe();
       sunshine_game3d::source_alpha_ui_decision source_alpha;
       sunshine_depth::set_native_driver(runtime, settings.enabled);
+      LARGE_INTEGER present_qpc {};
+      QueryPerformanceCounter(&present_qpc);
+      present_gap_t gap;
       {
         std::lock_guard<std::mutex> lock(mutex_);
         auto &proof = runtimes_[runtime];
         proof.addon_native = settings.enabled;
         source_alpha = sunshine_game3d::ui_input::resolve(proof.source_alpha_policy, settings, presentation);
+        gap = measure_present_gap(proof, present_qpc.QuadPart, GetTickCount64());
       }
       struct publish_alpha_decision {
         api::effect_runtime *runtime;
@@ -1178,6 +1292,21 @@ namespace {
         if (FAILED(native_swapchain->GetBuffer(index, IID_PPV_ARGS(back12.put())))) return;
         backbuffer.handle = reinterpret_cast<uint64_t>(back12.get());
       }
+      // The game's video memory (game3d_vram.h), at most every 250 ms and
+      // queried outside the lock; before depth preparation, whose readiness
+      // line, like a hitch and the gap line below, reports this sample.
+      auto &memory = sunshine_game3d::vram::process();
+      if (const auto tick = GetTickCount64(); memory.due(tick)) {
+        IDXGIAdapter3 *adapter = nullptr;
+        {
+          std::lock_guard<std::mutex> lock(mutex_);
+          adapter = vram_adapter(runtimes_[runtime], device, native_swapchain);
+          if (adapter) adapter->AddRef();
+        }
+        memory.record(query_vram(adapter), tick);
+        if (adapter) adapter->Release();
+      }
+      if (gap.log) log_present_gap(runtime, gap);
       sunshine_game3d::ui_input::request(runtime, backbuffer, source_alpha, settings, swapchain->get_color_space());
       sunshine_game3d::renderer *renderer = nullptr;
       api::resource_view rtv{};
@@ -1258,6 +1387,9 @@ namespace {
       // a later SDK observation. No RGB from the retained input is displayed.
       bool rendered = false;
       {
+        // The timing line's render section: this lock, the UI input's match
+        // and completion, and the render itself (named on its own below).
+        const sunshine_game3d::slow_step section("stereo render section");
         std::lock_guard<std::mutex> lock(mutex_);
         auto &proof = runtimes_[runtime];
         const auto &scene = proof.frame.scene;
@@ -1281,7 +1413,10 @@ namespace {
         // was rejected), but submits no probe.
         input.adaptive_probe = read_nonce(*shared_) != 0 || proof.diagnostic_armed;
         input.depth_identity = depth_identity(proof);
-        rendered = proof.frame.prepared && renderer->render(commands, input, true);
+        {
+          const sunshine_game3d::slow_step step("stereo render");
+          rendered = proof.frame.prepared && renderer->render(commands, input, true);
+        }
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
         ++proof.test_render.sequence;
         proof.test_render.rendered = rendered;

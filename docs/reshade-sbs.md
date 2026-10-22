@@ -180,13 +180,42 @@ destruction, which logs its partial window instead of dropping it (before, a gam
 any UI layer copies skipped in it, was never logged). The CPU entry also splits the slowest present into setup, depth, UI, render and
 export, and a rate-limited `Sunshine Game 3D hitch` warning names any present-thread step that
 takes more than 8 ms. Each step name has its own once-per-second throttle, so a nested step and the
-step around it both log. The GPU stage times exist only while the add-on's Diagnostics switch is on
+step around it both log. Since 10-22 the render section has steps of its own: `stereo render section`
+(the export lock, the UI input's match and completion, and the render) around `stereo render` (the
+render alone), and `UI retention textures` inside it (the two full-size colour copies a
+Present-counted HUD-less pair creates on first need). Before, E33 10-22 logged a 47 ms render
+section that no hitch line named. The GPU stage times exist only while the add-on's Diagnostics switch is on
 ([Diagnostics switch and per-Present cost](#diagnostics-switch-and-per-present-cost)); off, no
 timestamp is recorded, the line keeps its CPU fields and reports `gpu_profile=disabled`, and the
 query heap is created on the first enable. The conditioning stages (`linearize` through
 `horizontal`) time the depth conditioning wherever it was recorded: with the pack it was owed to,
 or in the render for a probe frame; a render whose pack never comes counts with zero conditioning
 and pack, and only a missing render mark counts as `incomplete`.
+
+Two more lines, since 10-22, record what the add-on cannot change but the log report must tell
+apart: the game's own freezes and its video memory. `Sunshine Game 3D present gap: G ms since the
+previous Present; fg=F foreground=W suppressed=S` is logged by the enabled Present that ends a gap
+of 100 ms or more since the runtime's previous Present (every Present counts, Game 3D enabled or
+not; `fg` is frame generation before the gap, `foreground` the window's focus at its end). A game
+that holds the whole GPU presents nothing meanwhile, and the host's picture of that time waits on
+its own conversion (an upstream stall, [GPU handoff contract](#gpu-handoff-contract)); 100 ms is
+also when the host first checks a stalled picture. A loading screen below 10 fps logs at most 10
+such lines per 10 s and counts the rest in `suppressed`. The add-on samples the game process's
+video memory with DXGI `QueryVideoMemoryInfo` (two CPU-only queries of this process's usage and
+OS-granted budget, for the adapter's local and non-local segment groups) on the Present thread at
+most every 250 ms, never per Present, before depth preparation, and outside the export lock
+(`game3d_vram.h`). After each timing line it logs `Sunshine Game 3D VRAM: local_mib={usage budget}
+nonlocal_mib={usage budget} window={samples max_usage_mib min_budget_mib min_headroom_mib
+over_budget_ms budget_changes} window_ms`: the last sample, then the window's largest local usage,
+smallest local budget and headroom (budget minus usage, negative over budget), the time attributed
+to samples over budget (each sample's interval since the previous one, at most 1 s, so a freeze
+counts at most that), and how many samples saw the budget change. Above its local budget the OS
+demotes the process's allocations to system memory, which can stall the whole GPU. The depth
+readiness line, the hitch line and the gap line end with the latest sample, `vram_local_mib=U/B
+nonlocal_mib=N`. Nothing that decides reads either: no wait, readback or GPU work is added, and
+the adapter is opened once per runtime (D3D11 from its device, D3D12 by the device's LUID from the
+swapchain's factory). The add-on's own allocations are not counted per category; the report
+compares the game process's total with its budget.
 
 ReShade writes every log line through to disk synchronously. In Hogwarts Legacy single lines took
 up to ~50 ms while the game streamed assets, and the periodic depth, camera and UI diagnostics were
@@ -3661,7 +3690,9 @@ bounded diagnostic episode independently of the one-second status-log gate. At m
 episodes per second are admitted, each with a paired recovery; suppressed episodes are counted.
 The record freezes source and newest-view ages at selection, the prior retained depth identity
 before invalidation, FG scope, reset/observation revisions, copy outcome, source action/reason and
-the cache's final reason. A zero timestamp is unavailable (reported age `UINT64_MAX`), not fresh
+the cache's final reason. Since 10-22 the line ends with the game's latest video-memory sample
+(`vram_local_mib`, see the timing line in
+[Diagnostics switch and per-Present cost](#diagnostics-switch-and-per-present-cost)). A zero timestamp is unavailable (reported age `UINT64_MAX`), not fresh
 data. Explicit lifecycle/reuse invalidation clears
 are also identified. This is read-only evidence: it adds no GPU pass, readback, wait, or extension
 of depth freshness, and does not change source selection or stereo placement.
@@ -5046,7 +5077,9 @@ takes the fence callback's lock. The encode loop logs its own account at the sam
 ... in H exact holds (requested ..., overshoot avg/max); waiting ... in W image waits (requested
 ...; T ran to their bound on the deadline timer, overshoot avg/max); converting ...; encoding ... (NVENC submit ...,
 completion wait ...; up to D pictures in flight, B submitted behind another, submission to packet
-avg/max); loop work ...`. Encodes are told apart by the encoded content's identity,
+avg/max); loop work ...`, since 10-22 followed by the host's own video memory, `host_vram_mib={local=U/B
+nonlocal=N}` (usage and budget of the host process on the encoder's adapter, from two CPU-only DXGI
+queries). Encodes are told apart by the encoded content's identity,
 as the packets' content-age loggers do, so a keepalive that re-renders an unchanged export counts
 as repeated content although it converted. On the deadline timer an image wait that runs to its
 bound overshoots it by a fraction of a millisecond; `at a scheduler tick` instead means the timer
@@ -5083,7 +5116,15 @@ presented nothing then (its Streamline camera and depth tag were 313 ms old at i
 and no add-on or host work was logged in it, so the stream showed the game's own freeze. The host's completion and
 that Present are a few ms apart in the two logs, too close to order: game-log lines are stamped when the add-on's
 background writer drains them (`async_log.h`). It still warns: it froze the picture longer than the budget, and the
-log cannot tell a whole-GPU freeze of the game's making from one of the host's.
+log cannot tell a whole-GPU freeze of the game's making from one of the host's. A second E33 session on 10-22 froze
+229 ms (no transition) and 341 ms (losing focus with FG on, as The Witcher 3 did on 10-07) the same way. Since then
+the add-on logs each gap between the game's Presents of 100 ms or more (`Sunshine Game 3D present gap`), and the
+game's and host's video memory against their budgets: the game's on its depth losses, hitches, gaps and every 10 s,
+the host's on each stalled picture's warning, completion and timeout lines and on the encode loop's 20 s line
+(`host_vram_mib={local=U/B nonlocal=N}`, `nvenc_base::video_memory_diagnostics()`). The report counts a completed
+upstream stall that a game gap covers as the game's own freeze, unless either process's local video memory was over
+its budget or within 128 MiB of it at the stall, which the OS resolves by moving allocations out of video memory and
+which can stall the whole GPU.
 
 The encoder of an independent provider, and of desktop Host SBS, keeps up to two pictures in flight
 (`video::nvenc_pipeline_depth()`, fixed per encoder as `nvenc_base::pipeline_depth()`; plain

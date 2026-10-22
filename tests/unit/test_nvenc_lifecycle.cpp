@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -186,6 +187,13 @@ namespace {
     std::chrono::milliseconds extra_frame_timeout_elapsed {0};
     // States returned by successive input-producer polls; the last one repeats.
     std::vector<nvenc::input_producer_state> producer_states;
+    // Video-memory reports a stalled picture's lines asked for.
+    mutable std::atomic<int> memory_queries {0};
+
+    std::string video_memory_diagnostics() const override {
+      ++memory_queries;
+      return nvenc::format_video_memory(2218ull << 20, 6000ull << 20, 286ull << 20);
+    }
 
   protected:
     bool init_library() override {
@@ -865,6 +873,24 @@ TEST(NvencLifecycleTest, SlowPicturePollsItsInputProducerOnlyUntilItFinishes) {
   EXPECT_EQ(std::find(ready, ops.end(), "producer-poll"), ops.end());
   EXPECT_EQ(completed.submit_calls, 1);
   EXPECT_FALSE(completed.picture_pending);
+}
+
+TEST(NvencLifecycleTest, StalledPictureLinesReportVideoMemoryAndOnTimePicturesDoNotQueryIt) {
+  // A stall's warning and its completion line carry the host's video memory, so the log report can
+  // tell memory pressure at the stall from a game's own freeze; an on-time picture queries nothing.
+  nvenc_lifecycle_probe probe;
+  ASSERT_TRUE(probe.create());
+  ASSERT_FALSE(probe.encode_frame(1, true).data.empty());
+  EXPECT_EQ(probe.memory_queries.load(), 0);
+  probe.frame_timeouts_remaining = 3;
+  probe.producer_states = {nvenc::input_producer_state::pending, nvenc::input_producer_state::complete};
+  ASSERT_FALSE(probe.encode_frame(2, false).data.empty());
+  EXPECT_EQ(probe.memory_queries.load(), 2);
+}
+
+TEST(NvencVideoMemoryTest, StalledPictureSuffixIsWholeMebibytes) {
+  EXPECT_EQ(nvenc::format_video_memory((9618ull << 20) + 5, 14000ull << 20, (208ull << 20) + (1ull << 19)),
+            " host_vram_mib={local=9618/14000 nonlocal=208}");
 }
 
 std::vector<std::uint32_t> frame_waits(std::size_t slices) {

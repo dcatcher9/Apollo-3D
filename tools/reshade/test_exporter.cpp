@@ -1518,6 +1518,34 @@ namespace {
       std::puts("PASS timing line: window length, early last window, UI layer skip gap");
     }
 
+    // A gap of 100 ms or more between a runtime's Presents is logged (E33 10-22 froze 229 and 341 ms while the
+    // host's picture waited on the GPU); a slower stretch, a loading screen below 10 fps, logs at most 10 lines
+    // per 10 s and counts the rest on the next line it logs. fg is the state before the gap.
+    static void present_gap_measurement() {
+      publisher_t publisher;
+      auto &proof = publisher.runtimes_[owner()];
+      LARGE_INTEGER frequency {};
+      QueryPerformanceFrequency(&frequency);
+      const auto at_ms = [&](double ms) { return static_cast<std::int64_t>(ms * double(frequency.QuadPart) / 1000.0); };
+      const auto first = publisher.measure_present_gap(proof, at_ms(1000), 1000);
+      require(!first.log && first.ms == 0, "The first Present measured a gap");
+      require(!publisher.measure_present_gap(proof, at_ms(1099), 1099).log, "A 99 ms frame was logged as a gap");
+      proof.frame.diagnostics.frame_generation_active = true;
+      const auto freeze = publisher.measure_present_gap(proof, at_ms(1440), 1440);
+      require(freeze.log && freeze.fg && freeze.ms > 340.5 && freeze.ms < 341.5 && !freeze.suppressed,
+        "A 341 ms freeze was not logged with its length and the FG state before it");
+      double at = 1440;
+      for (unsigned i = 0; i != 11; ++i) {
+        at += 150;
+        const auto gap = publisher.measure_present_gap(proof, at_ms(at), std::uint64_t(at));
+        require(gap.log == (i < 9), "A slow stretch logged more than 10 gaps in a window");
+      }
+      at = 11440 + 150;
+      const auto next = publisher.measure_present_gap(proof, at_ms(at), std::uint64_t(at));
+      require(next.log && next.suppressed == 2, "The next window's first gap did not count the gaps left unlogged");
+      std::puts("PASS present gaps: 100 ms threshold, FG state before the gap, 10 lines per 10 s");
+    }
+
     static void color_contract() {
       for (std::uint32_t input = 0; input <= 5; ++input) {
         for (const char *output : {"srgb", "scrgb", "pq", ""}) {
@@ -2330,6 +2358,7 @@ int main(int argc, char **argv) {
     publisher_tests::native_reload_clears_fx_handles();
     publisher_tests::runtime_reset_keeps_toggle_rings();
     publisher_tests::timing_window_length();
+    publisher_tests::present_gap_measurement();
     publisher_tests::color_contract();
     publisher_tests::consumer_protocol_refusal();
     publisher_tests::bounded_retirement();

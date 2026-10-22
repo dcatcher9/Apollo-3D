@@ -38,6 +38,8 @@ namespace nvenc {
      */
     virtual ID3D11Texture2D *get_input_texture() = 0;
 
+    std::string video_memory_diagnostics() const override;
+
   protected:
     bool init_library() override;
     void *create_completion_event(unsigned slot) override;

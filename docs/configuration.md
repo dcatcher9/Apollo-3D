@@ -1596,7 +1596,10 @@ microphone_sink = CABLE Input (VB-Audio Virtual Cable)
             first check, which comes only after 100 ms, so the delay was in the encoder or earlier upstream work.
             `pending_at_...ms` or `done_at_...ms` instead show upstream GPU work still running; the encoder's
             250 ms budget then starts when that work completes (2 s at most), so such a stall delays one picture
-            rather than rebuilding the encoder. Disable this option to test it. If stalls remain, `nvenc_split_encode` isolates split-frame encoding.
+            rather than rebuilding the encoder. Since 10-22 these lines end with
+            `host_vram_mib={local=usage/budget nonlocal=usage}`, the host process's video memory on the encoder's
+            adapter in MiB: local usage at or near its budget is the pressure this freeze needs. Disable this option
+            to test it. If stalls remain, `nvenc_split_encode` isolates split-frame encoding.
         </td>
     </tr>
     <tr>

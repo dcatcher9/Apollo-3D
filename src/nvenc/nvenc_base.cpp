@@ -951,7 +951,7 @@ namespace nvenc {
                          << (producer.state == input_producer_state::pending ?
                                "its input is still being produced, so the encoder's 250 ms budget starts when the input completes (2000 ms at most); " :
                                "allowing up to 250 ms total; ")
-                         << producer.describe(elapsed_ms());
+                         << producer.describe(elapsed_ms()) << video_memory_diagnostics();
       // Keep waiting for this same picture: its input stays mapped and NVENC owns it until it
       // completes, so neither a resubmission nor a conversion into it may happen meanwhile.
       while (result.status == nvenc_event_wait_status::timeout && !device_removed(result)) {
@@ -970,7 +970,7 @@ namespace nvenc {
       if (soft_timeout) {
         const auto elapsed = elapsed_ms();
         BOOST_LOG(info) << "NvEnc: frame " << frame_index << " completed after soft timeout in "
-                        << elapsed << " ms; " << producer.describe(elapsed);
+                        << elapsed << " ms; " << producer.describe(elapsed) << video_memory_diagnostics();
       }
       return true;
     }
@@ -986,7 +986,7 @@ namespace nvenc {
       BOOST_LOG(error) << "NvEnc: frame " << frame_index << " encode wait timeout after "
                        << elapsed << " ms (250 ms after submission or after its input completed, 2000 ms at most); "
                        << event_wait_diagnostics(result)
-                       << "; " << producer.describe(elapsed);
+                       << "; " << producer.describe(elapsed) << video_memory_diagnostics();
     }
     return false;
   }

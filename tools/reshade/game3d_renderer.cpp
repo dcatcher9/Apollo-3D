@@ -6,6 +6,7 @@
 #include "async_log.h"
 #include "game3d_diagnostics.h"
 #include "game3d_shader_cache.h"
+#include "game3d_slow_step.h"
 #include "game3d_ui_counters.h"
 #include "game3d_ui_detection_contract.h"
 #include "game3d_ui_selection.h"
@@ -740,6 +741,8 @@ namespace sunshine_game3d {
     bool prepare_retention() {
       if (retention_attempted) return retention_ready;
       retention_attempted = true;
+      // Two full-size textures created on the present thread: named if slow.
+      const slow_step step("UI retention textures");
       for (unsigned i = 0; i != ui_detection_inputs::max_retained_presents; ++i)
         if (!texture_create(texture_id(retained_color + i), width, height, source_format, api::resource_usage::copy_dest)) return false;
       return retention_ready = true;

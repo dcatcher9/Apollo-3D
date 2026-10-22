@@ -500,6 +500,11 @@ namespace video {
       return device && device->nvenc ? device->nvenc->last_frame_timing() : nvenc::nvenc_base::frame_timing_t {};
     }
 
+    /** This process's video memory on the encoder's adapter (nvenc_base::video_memory_diagnostics()). */
+    std::string video_memory_diagnostics() const {
+      return device && device->nvenc ? device->nvenc->video_memory_diagnostics() : std::string {};
+    }
+
     /** NVENC pictures that may be in flight (nvenc_base::pipeline_depth()). */
     unsigned pipeline_depth() const {
       return device && device->nvenc ? device->nvenc->pipeline_depth() : 1;
@@ -1586,7 +1591,7 @@ namespace video {
             const auto pictures = pipeline->take_stats();
             loop_stats->pictures(pictures.pushed_behind, pictures.retired, pictures.latency_total, pictures.latency_max);
           }
-          BOOST_LOG(info) << loop_stats->report(now - loop_stats_since);
+          BOOST_LOG(info) << loop_stats->report(now - loop_stats_since) << session->video_memory_diagnostics();
           loop_stats->reset();
           loop_stats_since = now;
         }

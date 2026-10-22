@@ -8,6 +8,8 @@
 #ifdef _WIN32
   #include "nvenc_d3d11.h"
 
+  #include <dxgi1_4.h>
+
 namespace nvenc {
 
   nvenc_d3d11::nvenc_d3d11(NV_ENC_DEVICE_TYPE device_type):
@@ -167,6 +169,27 @@ namespace nvenc {
     // rather than commands the CPU never submitted. The picture submission follows at once.
     producer_context->Flush();
     producer_marks[slot] = ++producer_value;
+  }
+
+  std::string nvenc_d3d11::video_memory_diagnostics() const {
+    if (!device || device_type != NV_ENC_DEVICE_TYPE_DIRECTX) {
+      return {};
+    }
+    // DXGI adapter queries are free-threaded; the device is only asked for its adapter.
+    IDXGIDevice *dxgi = nullptr;
+    IDXGIAdapter *adapter = nullptr;
+    IDXGIAdapter3 *adapter3 = nullptr;
+    DXGI_QUERY_VIDEO_MEMORY_INFO local {}, nonlocal {};
+    const bool queried = SUCCEEDED(static_cast<ID3D11Device *>(device)->QueryInterface(IID_PPV_ARGS(&dxgi))) &&
+                         SUCCEEDED(dxgi->GetAdapter(&adapter)) && SUCCEEDED(adapter->QueryInterface(IID_PPV_ARGS(&adapter3))) &&
+                         SUCCEEDED(adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &local)) &&
+                         SUCCEEDED(adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &nonlocal));
+    for (IUnknown *object : std::initializer_list<IUnknown *> {adapter3, adapter, dxgi}) {
+      if (object) {
+        object->Release();
+      }
+    }
+    return queried ? format_video_memory(local.CurrentUsage, local.Budget, nonlocal.CurrentUsage) : std::string {};
   }
 
   input_producer_state nvenc_d3d11::poll_input_producer(unsigned slot) {

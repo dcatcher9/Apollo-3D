@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <reshade.hpp>
 #include "async_log.h"
+#include "game3d_vram.h"
 
 namespace sunshine_game3d {
   namespace slow_step_detail {
@@ -59,8 +60,11 @@ namespace sunshine_game3d {
       const auto now = GetTickCount64();
       auto due = throttle.next_log.load(std::memory_order_relaxed);
       if (now < due || !throttle.next_log.compare_exchange_strong(due, now + 1000)) return;
-      char message[160];
-      std::snprintf(message, sizeof(message), "Sunshine Game 3D hitch: %s took %.1f ms on the present thread", name_, ms);
+      // The game process's latest video-memory sample (game3d_vram.h) follows.
+      const vram::latest_suffix memory;
+      char message[224];
+      std::snprintf(message, sizeof(message), "Sunshine Game 3D hitch: %s took %.1f ms on the present thread%s", name_, ms,
+        memory.text);
       sunshine_log::message(reshade::log::level::warning, message);
     }
     slow_step(const slow_step &) = delete;

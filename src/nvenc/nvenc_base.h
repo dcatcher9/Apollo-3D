@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <format>
 #include <optional>
 #include <string>
 
@@ -47,6 +48,15 @@ namespace nvenc {
     pending,
     complete
   };
+
+  /**
+   * This process's video memory as a stalled picture's line reports it (docs/reshade-sbs.md, GPU
+   * handoff contract): " host_vram_mib={local=usage/budget nonlocal=usage}", whole MiB rounded down.
+   */
+  inline std::string format_video_memory(std::uint64_t local_usage, std::uint64_t local_budget, std::uint64_t nonlocal_usage) {
+    constexpr std::uint64_t mib = 1024ull * 1024ull;
+    return std::format(" host_vram_mib={{local={}/{} nonlocal={}}}", local_usage / mib, local_budget / mib, nonlocal_usage / mib);
+  }
 
   /** Last per-codec width capability reported by the active NVENC driver probe. */
   std::optional<int> max_encode_width_for_codec(int video_format);
@@ -195,6 +205,16 @@ namespace nvenc {
 
     [[nodiscard]] frame_timing_t last_frame_timing() const noexcept {
       return {last_submit_, last_completion_wait_};
+    }
+
+    /**
+     * @brief Diagnostics: this process's video memory on the encoder's adapter, as
+     *        " host_vram_mib={local=usage/budget nonlocal=usage}" (format_video_memory()), or
+     *        empty where the device cannot tell. Two CPU-only DXGI queries; any thread. Logged
+     *        only on a stalled picture's lines and the encode loop's 20 s line, never per frame.
+     */
+    [[nodiscard]] virtual std::string video_memory_diagnostics() const {
+      return {};
     }
 
     /** Diagnostics: CPU time of the last submit_frame()'s picture submission; submitting thread. */

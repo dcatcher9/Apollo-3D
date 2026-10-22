@@ -298,6 +298,9 @@ namespace sunshine_streamline::provider {
       // FG policy can still establish Streamline authority before a tag exists.
       const char *current_provider = c.capture_id || c.sequence ? provider_name(c.provider) :
         e.selection.require_frame_generation ? "Streamline" : "unknown";
+      // The game process's latest video-memory sample (game3d_vram.h), which
+      // the present thread took before this Present's depth preparation.
+      const sunshine_game3d::vram::latest_suffix memory;
       char text[3072]{};
       std::snprintf(text, sizeof(text),
         "Sunshine depth readiness: %s reason=%s runtime=0x%llx native_swapchain=0x%llx present=%llu unavailable_ms=%llu suppressed_episodes=%llu; "
@@ -311,7 +314,7 @@ namespace sunshine_streamline::provider {
         "prior_viewport=%u prior_observation=%llu current_observation=%llu prior_feedback=%llu current_feedback=%llu "
         "prior_reset=%u current_reset=%u retained_clear=%s; "
         "source_action=%s source_reason=%s cache_reason=%s "
-        "consumer=%s consumer_loss=%s cookie=%llu slot_invalid=%u",
+        "consumer=%s consumer_loss=%s cookie=%llu slot_invalid=%u%s",
         ready ? "recovered" : "lost", why, u(reinterpret_cast<std::uint64_t>(runtime)), u(runtime->get_native()), u(e.present),
         ready && now >= data.trace_loss_tick ? u(now - data.trace_loss_tick) : 0ull, u(data.suppressed_trace_episodes),
         current_provider, e.prior_provider_known ? provider_name(e.prior_provider) : "unknown", unsigned(e.available),
@@ -329,7 +332,7 @@ namespace sunshine_streamline::provider {
         u(p.feedback.revision), u(current.feedback.revision), unsigned(p.feedback.reset), unsigned(current.feedback.reset),
         data.cache.reason(), name(e.action), e.source_reason, e.cache_reason,
         depth_capture::name(e.consumer.result), depth_capture::name(e.consumer.invalidation),
-        u(e.consumer.cookie), unsigned(e.consumer.slot_invalid));
+        u(e.consumer.cookie), unsigned(e.consumer.slot_invalid), memory.text);
       sunshine_log::message(reshade::log::level::info, text);
       // Repeat the frozen first-loss evidence on recovery, without querying a
       // newer revision or retroactively filling a missing/busy journal entry.
