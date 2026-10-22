@@ -123,6 +123,8 @@ UNAVAILABLE_MS = re.compile(r'\bunavailable_ms=(\d+)')
 PROVIDER = re.compile(r'\bprovider=(\w+)')
 SELECTION = re.compile(r'\bselection=(\w+)')
 RUNTIME = re.compile(r'\bruntime=(0x[0-9a-fA-F]+)')
+PRESENT = re.compile(r'\bpresent=(\d+)')  # Not prior_present: '_' is a word character.
+GENERATION_FIELD = re.compile(r'\bgeneration=(\d+)')
 # Either placement controller; the first word after the colon is its state.
 PLACEMENT = re.compile(r'Sunshine 3D (raw automation|Streamline scale): (\w+);')
 # Every API depth provider's status line (streamline_depth_provider.cpp): Streamline, NGX and the API fallback.
@@ -585,6 +587,24 @@ class DepthEpisode:
     ending: str = 'open'  # recovered, paused (export inactive) or open (the log ended).
     unavailable_ms: int | None = None  # The add-on's own duration, from its recovered line.
     runtime: str = ''  # As the line logs it ('0x2df57f5f5a0'), or '' when it names none.
+    # The Present index of the loss line and of the recovered line, None where the line logs none. A recovered
+    # episode's Presents without depth are the ones from its loss up to, not including, its recovery.
+    lost_present: int | None = None
+    recovered_present: int | None = None
+
+    def presents(self) -> int | None:
+        if self.ending != 'recovered' or self.lost_present is None or self.recovered_present is None:
+            return None
+        return self.recovered_present - self.lost_present if self.recovered_present > self.lost_present else None
+
+
+class OutputCount(NamedTuple):
+    """One runtime's cumulative 'Sunshine SBS output' counters as logged; each export generation restarts them."""
+    t: float
+    runtime: str
+    generation: str
+    published: int
+    missing: int  # Publications without depth: the renderer packed the colour frame flat.
 
 
 @dataclass
@@ -654,6 +674,7 @@ class Session:
     losses: dict[int, tuple[float, str]] = field(default_factory=dict)
     readiness: Counter = field(default_factory=Counter)  # Losses while the export streamed.
     depth_episodes: list[DepthEpisode] = field(default_factory=list)
+    output_counts: list[OutputCount] = field(default_factory=list)  # Every 'Sunshine SBS output' line.
     streamed: list[list] = field(default_factory=list)  # From a generation to the next export inactive.
     placement: list[tuple[float, bool, str, str]] = field(default_factory=list)  # t, placed, state, provider.
     statuses: list[tuple[float, str, str]] = field(default_factory=list)  # Each depth status: time, status, provider.
@@ -751,6 +772,9 @@ def parse(lines) -> Session:
                 if d[0]:
                     s.intervals.append(Interval(before[0], t, d[0], d[1], d[2], d[6], d[4]))
             previous_output[runtime] = (t, values)
+            generation = GENERATION_FIELD.search(text)
+            s.output_counts.append(OutputCount(t, runtime.lower(), generation.group(1) if generation else '',
+                                               values[0], values[6]))
         if found := COVERAGE.search(text):
             s.coverage = tuple(int(v) for v in found.groups())
         if found := SCALE.search(text):
@@ -804,17 +828,21 @@ def parse(lines) -> Session:
                 provider = named.group(1)
             runtime = RUNTIME.search(text)
             key = runtime.group(1).lower() if runtime else ''
+            present = PRESENT.search(text)
+            present = int(present.group(1)) if present else None
             if found.group(1) == 'lost' and s.streamed and s.streamed[-1][1] is None:
                 s.readiness[found.group(2)] += 1
                 selection = SELECTION.search(text)
                 if key not in open_episodes:
                     open_episodes[key] = DepthEpisode(t, found.group(2), named.group(1) if named else 'unknown',
-                                                      selection.group(1) if selection else 'unknown', runtime=key)
+                                                      selection.group(1) if selection else 'unknown', runtime=key,
+                                                      lost_present=present)
                     s.depth_episodes.append(open_episodes[key])
             elif found.group(1) == 'recovered' and (episode := open_episodes.pop(key, None)):
                 unavailable = UNAVAILABLE_MS.search(text)
                 episode.end, episode.ending = t, 'recovered'
                 episode.unavailable_ms = int(unavailable.group(1)) if unavailable else None
+                episode.recovered_present = present
         if found := PLACEMENT.search(text):
             state, raw = found.group(2), found.group(1) == 'raw automation'
             s.placement.append((t, state in RAW_PLACED if raw else state == 'ready',
@@ -1691,13 +1719,48 @@ def runtime_number(value: str) -> int | None:
         return None
 
 
+def missing_around(s: Session, own: int, a: float, b: float) -> tuple[float, float, int] | None:
+    """From this runtime's last 'Sunshine SBS output' line before a to its first after b, with the publications
+    without depth counted between them; None when no line brackets a side or the counters restarted (a new export
+    generation) in between."""
+    lines = [o for o in s.output_counts if runtime_number(o.runtime) == own]
+    before = [o for o in lines if o.t < a]
+    after = [o for o in lines if o.t > b]
+    if not before or not after:
+        return None
+    between = [o for o in lines if before[-1].t <= o.t <= after[0].t]
+    if any(o.generation != p.generation or o.published < p.published or o.missing < p.missing
+           for p, o in zip(between, between[1:])):
+        return None
+    return before[-1].t, after[0].t, after[0].missing - before[-1].missing
+
+
 def depth_lost(s: Session, runtime: str) -> list[tuple[float, float]]:
-    """Each depth readiness loss of this runtime (or of a line naming none), from its line to its recovery, the export
-    pausing or the log's end. Every Present in one had no depth, so the renderer packed the colour frame flat
-    (game3d_renderer.cpp, shows_mono): nothing on screen, HUD and menus included, took the scene's depth."""
+    """Each depth readiness loss of this runtime, from its line to its recovery, that the add-on's own output counters
+    show was flat: every Present in it went out without depth, so the renderer packed the colour frame flat
+    (game3d_renderer.cpp, shows_mono) and nothing on screen, HUD and menus included, took the scene's depth.
+
+    A loss line alone does not show that. When the API provider gives up the pass (source_not_associated,
+    provider_disallowed, unsupported_API, or a source_handoff hold that expires) the generic depth capture takes over
+    and can show depth without another readiness line, since only the API provider logs readiness and only on a
+    change. So a loss counts as flat only when it recovered, both lines log their Present index, and the
+    publications without depth between the output counter lines around it are at least the Presents of every loss of
+    this runtime between those lines (widened until each such loss lies wholly between them). A loss that never
+    recovered, or whose counters cannot be bracketed, is not left out."""
     own = runtime_number(runtime)
-    return [(e.start, e.end if e.end is not None else s.last) for e in s.depth_episodes
-            if own is None or (number := runtime_number(e.runtime)) is None or number == own]
+    episodes = [e for e in s.depth_episodes if own is not None and runtime_number(e.runtime) == own]
+    flat = []
+    for e in episodes:
+        a, b = e.start, e.end  # parse() ends every loss: at its recovery, the export pausing or the log's end.
+        while (around := missing_around(s, own, a, b)) is not None:
+            inside = [o for o in episodes if o.start <= around[1] and o.end >= around[0]]
+            if a <= min(o.start for o in inside) and max(o.end for o in inside) <= b:
+                presents = [o.presents() for o in inside]
+                if None not in presents and around[2] >= sum(presents):
+                    flat.append((e.start, e.end))
+                break
+            a, b = min([a] + [o.start for o in inside]), max([b] + [o.end for o in inside])
+    return flat
 
 
 @dataclass
@@ -1708,8 +1771,8 @@ class Gap:
 
 
 def unprotected_gaps(s: Session) -> tuple[list[Gap], float]:
-    """Streamed time in which Auto left rendered frames without a UI mask while they showed depth, outside settle
-    times; and the seconds of such time left out because depth was lost, when every frame was flat (depth_lost).
+    """Streamed time in which Auto left rendered frames without a UI mask, outside settle times and outside depth
+    losses the output counters show were flat; and the seconds of such time left out for those losses (depth_lost).
 
     A UI protection line's state holds until that runtime's next line (written on a change, at most once per
     LOG_GATE_S, else every UI_LINE_PERIOD_S), so its ends are approximate by up to a second. Gaps less than a
@@ -1748,8 +1811,8 @@ def unprotected_gaps(s: Session) -> tuple[list[Gap], float]:
 
 
 def gap_checks(s: Session, add) -> None:
-    """Warn where Auto left streamed frames that showed depth without a UI mask: HUD and menus then take the scene's
-    depth. Time without depth is left out and counted: every frame was flat there."""
+    """Warn where Auto left streamed frames without a UI mask: HUD and menus then take the scene's depth. A depth loss
+    whose Presents the output counters show all went out flat is left out and its time named."""
     if not any(u.mode == 'auto' and u.rendered for u in s.ui):
         add(Check('INFO', 'UI protection gaps', 'no rendered Auto samples'))
         return
@@ -1758,7 +1821,7 @@ def gap_checks(s: Session, add) -> None:
     brief = [g for g in gaps if g.end - g.start < UNPROTECTED_MIN_S]
     note = (f'{len(brief)} {"gap" if len(brief) == 1 else "gaps"} shorter than {UNPROTECTED_MIN_S:g} s '
             f'({sum(g.end - g.start for g in brief):.1f} s)') if brief else ''
-    lost = (f'; {flat:.1f} s without a mask while depth was lost (every frame flat) not counted'
+    lost = (f'; {flat:.1f} s without a mask while depth was lost (every frame flat by the output counters) not counted'
             if round(flat, 1) else '')
     if not listed:
         add(Check('PASS', 'UI protection gaps', 'every streamed Auto frame had a UI mask or a UI channel showing no UI'

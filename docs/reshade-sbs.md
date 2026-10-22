@@ -644,14 +644,24 @@ trust): "No UI mask in this game mode: HUD and menus take the scene's depth." A 
 unprotected when no source decided and either no UI source was offered or no dedicated UI channel
 (UIAlpha, UI color or the UI layer) was offered clean and empty. A clean empty dedicated channel
 means no UI on screen, and an accepted channel deciding an empty mask protects, so neither warns.
-`source_alpha_ui_decision::unprotected()` owns this definition and the log report's
-`UI protection gaps` check mirrors it with the same 2 s minimum, over streamed time that showed
-depth only: from a `Sunshine depth readiness` loss to its recovery every Present packs the colour
-frame flat (the renderer's `shows_mono`), so no HUD takes the scene's depth and the warning, hidden
-in 2D, does not show; the report names that time as not counted. E33 on 10-22 offered no UI source
-for 2.7 s while it nearly stalled and tagged neither depth nor its UI buffers (one Streamline tag
-batch carries both); depth was lost for 1.7 s of it, and the rest was the 1 s log gate after the
-recovery, whose first Presents restart the strength ramp at zero. The exporter keeps the start of
+`source_alpha_ui_decision::unprotected()` owns this definition, and the log report's
+`UI protection gaps` check applies it to each UI line with the same 2 s minimum, but the two
+measure different time. The report leaves out a `Sunshine depth readiness` loss, from its line to
+its recovery, and names that time as not counted, only when the `Sunshine SBS output` counters
+around it count at least as many publications without depth as the loss had Presents (from the
+Present index on its loss line to the one on its recovery line): each of them packed the colour
+frame flat (the renderer's `shows_mono`), so no HUD took the scene's depth. A loss line alone does
+not show that. Once the API provider gives up the pass (`source_not_associated`,
+`provider_disallowed`, `unsupported_API`, or a `source_handoff` hold that runs out), generic depth
+can be shown with no further readiness line, so a loss that never recovers, or whose counters
+cannot be bracketed, still counts. The overlay's run includes flat time: a Present packed flat
+during a depth loss is still rendered and unprotected, so it starts or continues the run, and once
+3D returns the warning, hidden in 2D, can show at once, before the report would list a gap. E33 on
+10-22 offered no UI source for 2.7 s while it nearly stalled and tagged neither depth nor its UI
+buffers (one Streamline tag batch carries both); depth was lost for 1.7 s of it (69 Presents, 69
+publications without depth), and the rest was the 1 s log gate after the recovery, whose first
+Presents restart the strength ramp at zero. The report reads that second as a brief gap; the
+overlay could warn in it. The exporter keeps the start of
 the current unprotected run: a decided rendered frame (a mask, or a clean empty UI channel), a
 manual mode, protection Off or Game 3D off clears it. A Present that rendered nothing, or whose
 status sample is still being collected after a change of the winning accepted candidate or of the

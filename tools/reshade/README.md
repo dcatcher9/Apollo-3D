@@ -471,9 +471,11 @@ outside settle times in which Auto rendered frames without a UI mask (no UI sour
 usable mask while no UI channel was offered clean and empty, which means no UI on screen), so HUD
 and menus took the scene's depth, with each window's time and the reason each offered channel gave
 no mask, and in logs since S2a the add-on's own reason and refused candidate (gaps shorter than the overlay warning's minimum, defined in the
-[UI protection panel](../../docs/reshade-sbs.md#setup), are counted, not listed; time from a runtime's
-`Sunshine depth readiness` loss to its recovery is left out and its length named, since every frame
-there was flat and no HUD took depth); how many samples were
+[UI protection panel](../../docs/reshade-sbs.md#setup), are counted, not listed; a runtime's
+`Sunshine depth readiness` loss is left out, from its line to its recovery, and its length named only
+when the `Sunshine SBS output` counters around it count as many publications without depth as it had
+Presents, so every frame there was flat and no HUD took depth; a loss that never recovered still
+counts); how many samples were
 full-frame UI over a hidden scene (H1, source 8; in logs before S2b source 8 or 9), by the pre-UI
 scene image whose claim acted (HUD-less image or UI layer), with the hidden-scene guard's entered,
 released and refuted counts from the last counter line, and how many hidden samples had a pre-UI

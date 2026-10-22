@@ -252,7 +252,8 @@ SB_FIX1_SETTINGS = SB_S2B_SETTINGS.replace('sampled_claims=0x80', 'sampled_claim
 
 # Real lines of Clair Obscur: Expedition 33 (2026-10-22, generation 2, FG on at 4x): the game stopped tagging depth and
 # its UI buffers together (they share one Streamline tag batch) and nearly stalled. Depth readiness was lost from
-# 13:47:15.502 to 17.373, so those 69 Presents were packed flat; the UI lines read no UI source from 15.633 until
+# 13:47:15.502 (Present 21830) to 17.373 (Present 21899), and the output counter lines around it count those 69
+# Presents as published without depth, so they were packed flat; the UI lines read no UI source from 15.633 until
 # detection resumed (logged at 18.376, held by the 1 s log gate). The second no-source line, written by the recovering
 # Present, differs from the first only in its time and status_revision.
 E33_DEPTH_LOSS = [
@@ -264,6 +265,12 @@ E33_DEPTH_LOSS = [
     'generated_frames=3 supported=1 success=1',
     '13:47:09:353 [40860] | INFO  | [Sunshine 3D] Sunshine SBS: generation 2, 7680x2160 full SBS, DXGI 24, D3D12, '
     'sRGB, protocol 4 (source color 1)',
+    '13:47:14:412 [40860] | INFO  | [Sunshine 3D] Sunshine SBS output: published=1343 fg=1343 scene_flat=266 '
+    'scene_fading=128 published_fresh_depth=336 published_reused_depth=1007 published_depth_missing=0 (unavailable=0 '
+    'reuse_after_gap=0 reuse_other_source=0) runtime=0x2df57f5f5a0 generation=2 dropped=0 overwritten_unconsumed=898; '
+    'cumulative Game 3D publications; scene_flat had depth but showed the colour frame; reused depth is bounded and '
+    'does not advance calibration; unavailable reasons are in Sunshine depth readiness; dropped found no reusable '
+    'export slot, overwritten_unconsumed replaced a ready slot the consumer never claimed',
     '13:47:14:632 [40860] | INFO  | [Sunshine 3D] Sunshine UI protection: runtime=000002df57f5f5a0 mode=auto '
     'rendered=1 mask_path=1 input=automatic_gpu_mask retained=1 fg=1 fg_known=1 fg_enabled=1 input_state=input_seen '
     'detection=detected selected=automatic source=automatic source_availability=detected sampled_source=8 '
@@ -322,8 +329,14 @@ E33_DEPTH_LOSS = [
     'sampled_scene={n=0 d=0.000 valid=0 ran=0 verdict=none} sampled_pre_ui_scene={image=none n=0 d=0.000 valid=0} '
     'scene_guard={hidden=0 pre_ui=0 refuted=0 proven=0} sampled_pre_ui_pixels={match=0 image_lit=0} '
     'sampled_declared_one_way={strong=0/0 contradicted=0/0} status_revision=7',
+    '13:47:19:407 [40860] | INFO  | [Sunshine 3D] Sunshine SBS output: published=1983 fg=1983 scene_flat=270 '
+    'scene_fading=197 published_fresh_depth=476 published_reused_depth=1438 published_depth_missing=69 '
+    '(unavailable=69 reuse_after_gap=0 reuse_other_source=0) runtime=0x2df57f5f5a0 generation=2 dropped=0 '
+    'overwritten_unconsumed=1202; cumulative Game 3D publications; scene_flat had depth but showed the colour frame; '
+    'reused depth is bounded and does not advance calibration; unavailable reasons are in Sunshine depth readiness; '
+    'dropped found no reusable export slot, overwritten_unconsumed replaced a ready slot the consumer never claimed',
 ]
-E33_DEPTH_LOSS.insert(-1, E33_DEPTH_LOSS[6].replace('13:47:15:633', '13:47:17:377')
+E33_DEPTH_LOSS.insert(-2, E33_DEPTH_LOSS[7].replace('13:47:15:633', '13:47:17:377')
                       .replace('status_revision=5', 'status_revision=6'))
 
 
@@ -542,40 +555,66 @@ class ReadinessReport(unittest.TestCase):
 
     def test_unprotected_time_without_depth_is_flat_not_a_gap(self):
         # E33 2026-10-22: no UI source from 13:47:15.633 to 18.376 was a 3 s WARN, but depth was lost until 17.373
-        # and every frame then was flat. What remains is the log gate's second after the recovery (its 4 Presents
-        # were flat too, at the strength ramp's start, but no line shows that), a brief gap.
+        # and the output counters show its 69 Presents all went out without depth, so every frame then was flat. What
+        # remains is the log gate's second after the recovery (its 4 Presents were flat too, at the strength ramp's
+        # start, but no line shows that), a brief gap.
         gaps = run(E33_DEPTH_LOSS)['UI protection gaps']
         self.assertEqual((gaps.status, gaps.detail), (
             'PASS', 'every streamed Auto frame had a UI mask or a UI channel showing no UI except 1 gap shorter than '
-                    '2 s (1.0 s); 1.7 s without a mask while depth was lost (every frame flat) not counted'))
-        # The same UI lines without the depth loss are the 3 s gap the report listed.
-        shown = run([u for u in E33_DEPTH_LOSS if 'depth readiness' not in u])['UI protection gaps']
-        self.assertEqual((shown.status, shown.times), ('WARN', ['13:47:15-13:47:18 (3 s) FG on: no UI source offered']))
+                    '2 s (1.0 s); 1.7 s without a mask while depth was lost (every frame flat by the output counters) '
+                    'not counted'))
+        # The same UI lines without the depth loss, or without the counters that show it flat, are the 3 s gap.
+        for kept in ('Sunshine SBS output', 'depth readiness'):
+            shown = run([u for u in E33_DEPTH_LOSS if kept not in u])['UI protection gaps']
+            self.assertEqual((shown.status, shown.times),
+                             ('WARN', ['13:47:15-13:47:18 (3 s) FG on: no UI source offered']), kept)
+        # Counters that show some of its Presents with depth (the generic capture can serve it) excuse nothing.
+        served = [u.replace('published_depth_missing=69 (unavailable=69', 'published_depth_missing=68 (unavailable=68')
+                  for u in E33_DEPTH_LOSS]
+        self.assertEqual(run(served)['UI protection gaps'].status, 'WARN')
 
         # Time with depth still counts around a loss, and only the runtime that lost depth is excused.
-        def readiness(t, kind, runtime='0x1'):
-            return line(t, f'[Sunshine 3D] Sunshine depth readiness: {kind} reason=retained_depth_expired '
-                           f'runtime={runtime} unavailable_ms=0; provider=Streamline selection=inactive_views')
+        def readiness(t, kind, present, runtime='0x1', reason='retained_depth_expired'):
+            return line(t, f'[Sunshine 3D] Sunshine depth readiness: {kind} reason={reason} runtime={runtime} '
+                           f'present={present} unavailable_ms=0; provider=Streamline prior_present=1 '
+                           f'selection=inactive_views')
+        head = BASE[:-3]  # Without its output counter lines.
+        before = output('10:00:05', 100, 0, 0, 100, 0)
         bare = ui('10:00:06', 0, 0, (0, 0, 0, 0), 0x0, 0x0, pixels=0, detection='searching',
                   availability='source_unavailable')
         protected = ui('10:00:12', 2, 5, (0, 5, 0, 0), 0x2, 0x2)
-        around = run(BASE + [bare, readiness('10:00:10', 'lost'), readiness('10:00:11', 'recovered'), protected])
-        gaps = around['UI protection gaps']
+        flat = output('10:00:15', 700, 0, 0, 640, 60)  # The loss's 60 Presents went out without depth.
+        loss = [readiness('10:00:10', 'lost', 1000), readiness('10:00:11', 'recovered', 1060)]
+        gaps = run(head + [before, bare] + loss + [protected, flat])['UI protection gaps']
         self.assertEqual((gaps.status, gaps.times), ('WARN', ['10:00:06-10:00:10 (4 s) FG off: no UI source offered']))
         self.assertTrue(gaps.detail.endswith('; 1 gap shorter than 2 s (1.0 s) not listed; 1.0 s without a mask '
-                                             'while depth was lost (every frame flat) not counted'), gaps.detail)
-        other = run(BASE + [bare, readiness('10:00:07', 'lost', '0x2'), readiness('10:00:11', 'recovered', '0x2'),
-                            protected])['UI protection gaps']
-        self.assertEqual((other.status, other.times),
-                         ('WARN', ['10:00:06-10:00:12 (6 s) FG off: no UI source offered']))
-        # A loss never recovered excuses the rest of the log; a loss line that names no runtime excuses every runtime.
+                                             'while depth was lost (every frame flat by the output counters) not '
+                                             'counted'), gaps.detail)
+        whole = ['10:00:06-10:00:12 (6 s) FG off: no UI source offered']
+        other = run(head + [before, bare, readiness('10:00:07', 'lost', 1000, '0x2'),
+                            readiness('10:00:11', 'recovered', 1060, '0x2'), protected, flat])['UI protection gaps']
+        self.assertEqual((other.status, other.times), ('WARN', whole))
+        # The loss counts as flat only when the counters show it: not when they count fewer Presents without depth
+        # than it had (here the generic depth fallback served them), restart in between or do not follow it.
+        handoff = [readiness('10:00:10', 'lost', 1000, reason='source_handoff'),
+                   line('10:00:10', '[Sunshine 3D] Sunshine API depth: stale; capture=1 cause=none; using generic '
+                                    'depth fallback'),
+                   readiness('10:00:11', 'recovered', 1060)]
+        for counters in ([output('10:00:15', 700, 0, 0, 700, 0)], [flat.replace('generation=1', 'generation=2')],
+                         []):
+            served = run(head + [before, bare] + handoff + [protected] + counters)['UI protection gaps']
+            self.assertEqual((served.status, served.times, 'not counted' in served.detail), ('WARN', whole, False),
+                             counters)
+        # A loss that never recovers, or a loss line that names no runtime, excuses nothing, even with every later
+        # publication without depth: after source_not_associated the generic capture can show depth unlogged.
+        searching = ui('10:00:12', 0, 0, (0, 0, 0, 0), 0x0, 0x0, pixels=0, detection='searching',
+                       availability='source_unavailable')
         unnamed = line('10:00:07', '[Sunshine 3D] Sunshine depth readiness: lost reason=no_retained_depth '
-                                   'unavailable_ms=0; provider=Streamline selection=inactive_views')
-        held = run(BASE + [bare, unnamed, ui('10:00:12', 0, 0, (0, 0, 0, 0), 0x0, 0x0, pixels=0,
-                                             detection='searching', availability='source_unavailable')])
-        self.assertEqual(held['UI protection gaps'].detail,
-                         'every streamed Auto frame had a UI mask or a UI channel showing no UI except 1 gap shorter '
-                         'than 2 s (1.0 s); 5.0 s without a mask while depth was lost (every frame flat) not counted')
+                                   'present=1000 unavailable_ms=0; provider=Streamline selection=inactive_views')
+        for lost in (readiness('10:00:07', 'lost', 1000, reason='source_not_associated'), unnamed):
+            held = run(head + [before, bare, lost, searching, output('10:00:15', 700, 0, 0, 0, 600)])
+            self.assertEqual(held['UI protection gaps'].status, 'WARN', lost)
+            self.assertNotIn('not counted', held['UI protection gaps'].detail)
 
     def test_hidden_scene_routes_and_uncovered_hidden_runs(self):
         # Stellar Blade's notice splash: an opaque untrusted UI layer over a scene its picture hides.
