@@ -2076,8 +2076,8 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn('fs::path(o.out) / "contract.json"', harness)
         self.assertIn(
             '(direct_parallax_mode ? direct_geometry_contract_schema : '
-            '(o.device_conditional_replay ? 28u : '
-            '(o.device_conditional_replay_control ? 29u : 22u)))',
+            '(o.device_conditional_replay ? 30u : '
+            '(o.device_conditional_replay_control ? 31u : 22u)))',
             " ".join(harness.split()))
         self.assertIn('direct_geometry_contract_schema = 25u', harness)
         self.assertIn('direct_geometry_manifest_schema = 6u', harness)
@@ -2180,8 +2180,8 @@ class EvalContractTests(unittest.TestCase):
         self.assertNotIn('SBS_CANDIDATE_GAP_FILL', harness)
         self.assertIn(
             '(direct_parallax_mode ? direct_geometry_contract_schema : '
-            '(o.device_conditional_replay ? 28u : '
-            '(o.device_conditional_replay_control ? 29u : 22u)))',
+            '(o.device_conditional_replay ? 30u : '
+            '(o.device_conditional_replay_control ? 31u : 22u)))',
             " ".join(harness.split()))
         self.assertIn('{"renderer_uses_order", false}', harness)
         self.assertIn(
