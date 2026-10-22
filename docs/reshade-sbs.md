@@ -5080,9 +5080,10 @@ its picture no longer than the encoder's own budget and the encoder finished wit
 longer one (Stellar Blade's 690 ms at its 10-06 FG enable), on encoder-side delay, timeouts and failures, and on
 upstream stalls with no such transition. E33 on 10-22 had one of those, 293 ms with no transition: the game itself
 presented nothing then (its Streamline camera and depth tag were 313 ms old at its next Present, after a camera cut),
-no add-on or host work was logged in it, and the host finished about 6 ms before that Present, so the stream showed
-the game's own freeze. It still warns: it froze the picture longer than the budget, and the log cannot tell a
-whole-GPU freeze of the game's making from one of the host's.
+and no add-on or host work was logged in it, so the stream showed the game's own freeze. The host's completion and
+that Present are a few ms apart in the two logs, too close to order: game-log lines are stamped when the add-on's
+background writer drains them (`async_log.h`). It still warns: it froze the picture longer than the budget, and the
+log cannot tell a whole-GPU freeze of the game's making from one of the host's.
 
 The encoder of an independent provider, and of desktop Host SBS, keeps up to two pictures in flight
 (`video::nvenc_pipeline_depth()`, fixed per encoder as `nvenc_base::pipeline_depth()`; plain
