@@ -1739,7 +1739,10 @@ namespace sunshine_game3d {
     // The cached renderer of the other colour transfer is released once idle
     // this long (item 6: bounded to one cached entry).
     if (cached_ && now - cached_since_ >= cached_idle_ms && cached_->idle()) cached_.reset();
+    // The current or cached renderer serves this configuration: a build of
+    // it (the only one left above) is a duplicate and is cancelled.
     if (data_ && matches(*data_)) {
+      cancel_build();
       // The first configure after a parked runtime reset starts the current
       // renderer's decision state as a new renderer would.
       if (resume_pending_ && !data_->failed) {
@@ -1751,9 +1754,15 @@ namespace sunshine_game3d {
       return !data_->failed;
     }
     // A toggle back (SDR and HDR) reuses the cached renderer: its pipelines,
-    // textures and detection state, without a wait or recompilation. The
-    // outgoing one has no unsignaled work, so its own fence retires it.
-    if (cached_ && matches(*cached_) && !cached_->failed && (!data_ || (!data_->pending && !data_->unsignaled))) {
+    // textures and detection state, without recompilation. The swap waits
+    // (2D, building nothing) until the outgoing one has no unsignaled work,
+    // so that its own fence retires it.
+    if (cached_ && matches(*cached_) && !cached_->failed) {
+      cancel_build();
+      if (data_ && (data_->pending || data_->unsignaled)) {
+        preparing_ = true;
+        return false;
+      }
       std::swap(data_, cached_);
       cached_since_ = now;
       resume_pending_ = false;

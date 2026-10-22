@@ -67,13 +67,16 @@ namespace sunshine_game3d_test {
         Sleep(1);
       }
     };
-    const auto render_once = [&](renderer &r, const target &t) {
+    const auto frame_of = [](const target &t) {
       sunshine_game3d::render_frame_input frame;
       frame.color = t.resource;
       frame.scene.depth_ready = frame.scene.camera_ready = 0;
+      return frame;
+    };
+    const auto render_once = [&](renderer &r, const target &t) {
       r.begin_present();
       auto *commands = queue->get_immediate_command_list();
-      check(r.render(commands, frame, true) && r.pack(commands), "an adopted renderer rejected its frame");
+      check(r.render(commands, frame_of(t), true) && r.pack(commands), "an adopted renderer rejected its frame");
       queue->flush_immediate_command_list();
       r.finish_present();
       queue->wait_idle();
@@ -120,9 +123,28 @@ namespace sunshine_game3d_test {
       check(r.configure(runtime, b.resource, space, {}, true) && !r.building() && r.output().handle != cached.handle,
         "the toggle back did not reuse the cached renderer at once");
       check(renderer::builds_started() == started + 4, "the cached toggle back built again");
+      // A toggle back while the outgoing renderer still owes a signal (its
+      // Present's finish_present has not run, or was missed) waits 2D and
+      // builds nothing; the swap follows once that work is signalled.
+      r.begin_present();
+      auto *commands = queue->get_immediate_command_list();
+      check(r.render(commands, frame_of(b), true) && r.pack(commands), "the current renderer rejected its frame");
+      queue->flush_immediate_command_list();
+      const auto current = r.output();
+      check(!r.configure(runtime, b.resource, other_space, {}, true) && r.preparing() && !r.building(),
+        "a toggle back over a pending renderer did not wait without building");
+      r.begin_present();
+      check(!r.configure(runtime, b.resource, other_space, {}, true) && r.preparing() && !r.building(),
+        "a toggle back over a missed finish_present did not wait without building");
+      r.finish_present();
+      queue->wait_idle();
+      check(r.configure(runtime, b.resource, other_space, {}, true) && !r.building() && r.output().handle != current.handle,
+        "the toggle back did not reuse the cached renderer once the outgoing one was signalled");
+      check(renderer::builds_started() == started + 4 && !renderer::builds_in_flight(),
+        "a toggle back over unsignaled work built a duplicate renderer");
       r.reset_after_runtime_drain();
       std::printf("PASS %s background build: an extent change cancels the build in progress, a toggle back to the current "
-        "or cached renderer cancels it or builds nothing\n", api_name);
+        "or cached renderer cancels it or builds nothing, also while the outgoing renderer owes a signal\n", api_name);
     }
     {
       // A reset cancels the build; a park keeps it for the same configuration.

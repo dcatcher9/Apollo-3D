@@ -227,7 +227,9 @@ initial data), which ReShade 6.8 and both APIs allow from any thread; on a devic
 per Present. A build serves one configuration (device, extent, format and colour). A change of
 it, a toggle back to the current or cached renderer, a runtime reset or a destroyed swapchain
 cancels the build: its task stops after the step in progress and destroys what it built, which
-no GPU work has used, so nothing waits. A park over a runtime reset keeps the build for the
+no GPU work has used, so nothing waits. A toggle back to the cached renderer builds nothing even
+while the renderer it replaces still owes a Present's fence signal: the game stays 2D until that
+signal, then swaps. A park over a runtime reset keeps the build for the
 reinitialised runtime, and `destroy_device` waits for the one device call in progress before it
 releases every build on that device. A failed step is logged once
 (`add-on GPU renderer setup failed at <step>`) and leaves the game 2D and the renderer
