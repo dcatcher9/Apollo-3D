@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "depth_content_sampler.h"
+#include "addon_lifetime.h"
 #include "async_log.h"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <d3d11.h>
@@ -185,6 +187,32 @@ void main(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID,
   }
 }
 )";
+
+  HRESULT compile_shader(ID3DBlob **code, ID3DBlob **errors) {
+    return D3DCompile(shader_source, std::strlen(shader_source), "SunshineDepthContent", nullptr, nullptr,
+      "main", "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, code, errors);
+  }
+  // The shader's bytecode, compiled once per process on the thread pool by
+  // warm() at device creation: D3DCompile took ~57 ms on the Present of the
+  // first sample. A sample before the task finished compiles it there as
+  // before. Deliberately leaked: the task may finish during process exit.
+  struct warm_shader_t {
+    std::atomic<bool> started{false};
+    std::mutex mutex;
+    ID3DBlob *code = nullptr;
+  };
+  warm_shader_t &warm_shader() {
+    static auto *value = new warm_shader_t;
+    return *value;
+  }
+  void CALLBACK warm_task(PTP_CALLBACK_INSTANCE, void *) {
+    if (sunshine_addon_lifetime::stopping()) return;
+    ID3DBlob *code = nullptr;
+    if (FAILED(compile_shader(&code, nullptr)) || !code) return; // Compiled, and reported, on first use.
+    auto &state = warm_shader();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    state.code = code;
+  }
 
   DXGI_FORMAT depth_srv_format(DXGI_FORMAT format) {
     switch (format) {
@@ -686,9 +714,13 @@ void main(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID,
       const auto api = runtime->get_device()->get_api();
       if (api != api::device_api::d3d11 && api != api::device_api::d3d12) return false;
       if (!shader_.get()) {
+        auto &warmed = warm_shader();
+        std::lock_guard<std::mutex> warm_lock(warmed.mutex);
+        shader_.retain(warmed.code);
+      }
+      if (!shader_.get()) {
         com_ptr<ID3DBlob> errors;
-        if (FAILED(D3DCompile(shader_source, std::strlen(shader_source), "SunshineDepthContent", nullptr, nullptr,
-            "main", "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, shader_.put(), errors.put()))) {
+        if (FAILED(compile_shader(shader_.put(), errors.put()))) {
           warning("Sunshine depth selection: content sampler shader compilation failed; sampling disabled");
           shader_failed_ = true;
           return false;
@@ -824,4 +856,9 @@ std::optional<sample_result> poll(api::effect_runtime *runtime) { return sampler
 void begin_present(api::swapchain *swapchain) { sampler.begin_present(swapchain); }
 void finish_present(api::command_queue *queue, api::swapchain *swapchain) { sampler.finish_present(queue, swapchain); }
 void retire_runtime(api::effect_runtime *runtime) { sampler.retire(runtime); }
+void warm() {
+  auto &state = warm_shader();
+  if (state.started.exchange(true)) return;
+  if (!TrySubmitThreadpoolCallback(warm_task, nullptr, nullptr)) state.started.store(false); // Compiled on first use.
+}
 }

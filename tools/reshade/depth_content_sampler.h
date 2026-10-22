@@ -68,4 +68,7 @@ namespace sunshine_depth {
   // Also releases this runtime's idle immutable-pipeline cache. The cache holds
   // one retained native device; pending samples own their program independently.
   void retire_runtime(reshade::api::effect_runtime *runtime);
+  // Compiles the sampler's shader on the thread pool, once per process, so
+  // that the first sample's Present does not (call at device creation).
+  void warm();
 }

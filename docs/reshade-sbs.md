@@ -235,12 +235,15 @@ unavailable, without a retry, until the configuration changes or the runtime res
 line reports the build (`add-on GPU renderer ready (built off the present thread in <ms>,
 longest step <entry> <ms>; present-thread adoption <ms>; ...)`). In the 4K D3D12 native fixture
 with a cold driver cache, the longest configure call of a start went from 467 ms to 0.3 ms and its
-first render from 338 ms to 2.4 ms; the pool build took about 0.7 s. Through the exporter (the 4K
-provider fixture, cold) the worst Present of the first timing window, which had setup 484 ms and
-render 262 ms, is no longer the start: its setup and render are under 0.1 ms. Replay and
-fixtures that ask for a synchronous renderer still build it on the calling thread, with
-first-use objects lazy. The export ring, the depth content sampler's pass and the overlay
-compositor's pipelines are still created on the Present when first needed.
+first render from 338 ms to 2.4 ms; the pool build took about 0.7 s. Replay and fixtures that
+ask for a synchronous renderer still build it on the calling thread, with first-use objects
+lazy. The depth content sampler's shader likewise compiles on the thread pool at device
+creation: D3DCompile of it took ~57 ms on the Present of the first depth sample in every process
+(a sample that comes first still compiles it there). Through the exporter (the 4K provider
+fixture) the worst Present of the first timing window went from 749 ms (setup 484, render 262)
+to 36 ms with a cold driver cache, and from 60 ms to 2.4 ms with a warm one. The 36 ms is the
+sampler's pipeline (2 ms warm), which is still created on the Present of its first sample, as
+are the export ring and the overlay compositor's pipelines on first use.
 
 The vertical and horizontal limit passes are mechanical translations of the host shaders, whose
 tiling is described in [Host SBS pipeline](host-sbs.md). Each group owns eight adjacent columns or

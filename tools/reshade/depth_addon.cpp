@@ -2070,6 +2070,8 @@ static void on_init_device(device *device)
 	// catches the game's linked NGX exports even if the runtime DLL loads later.
 	if (device->get_api() == device_api::d3d12)
 		sunshine_upscaler_trace::poll();
+	// The content sampler's shader compiles off the first sample's Present.
+	sunshine_depth::warm();
 	reshade::get_config_value(nullptr, "SUNSHINE_DEPTH", "AutoSelectSceneDepth", s_sunshine_auto);
 
 	reshade::get_config_value(nullptr, "DEPTH", "DisableINTZ", s_disable_intz);
