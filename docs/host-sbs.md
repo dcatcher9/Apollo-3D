@@ -65,7 +65,7 @@ diagnostics that explain how the final field was produced.
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
 schema 115/tag `0x640A940C`, canonical SHA-256
-`eb4b9304f2ac6557758fc9049a2af349a92b3d1d22d0ddf579d5aa856fc04a83`. It binds the
+`38004b65bf37d9a1a385d6534dbe3eb68672bf9936d905a9fa4df4607b67abb5`. It binds the
 complete policy below, including all subtitle field/ROI semantics. The generated named closure
 groups are the shared C++, Python, JSON, and documentation authority for every ordered shader set
 and source pin. The optional `parallax_v2_p010_y` group remains fail-open to the canonical
@@ -76,7 +76,7 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | Closure group | Ordered roots | Source-closure SHA-256 |
 | --- | ---: | --- |
 | `preprocess` | 1 | `943f3295e6cdb490d0833d981b153a5cda9a5153696eb5c9ca0042e474d8d744` |
-| `parallax_v2_producer` | 27 | `90220f4dbe978b461a71b570e0eb93b305fc4cf35a0456fe6db23034808d42ff` |
+| `parallax_v2_producer` | 27 | `559867900c8014c700ad5482a5580cbd673e74c86a4032d9e89af20eb422d754` |
 | `parallax_v2_coordinate_diagnostic` | 1 | `8d84dd68c42600b107ac392eb1b8727c5b325b3faf1ad43c0748ba23afb3f982` |
 | `near_identical_detector` | 4 | `12e429c6f617ebed9df2d267d41a4767b3a2b2508d76efe52b3ef43e0a6b7516` |
 | `gpu_trace` | 1 | `cd089deb118d2ae61a12c15531da1930317743b59352ada119e8744901e351b9` |
@@ -379,7 +379,10 @@ score bits, a ribbon-kind bit, island count, and structural-gap count. Tight cor
 calibrated depth field's dynamic bottom
 ROI obtained by projecting detector rows `[24,155)` through the exact bottom-6:1 source crop. For a
 16:9 source and `770x434` field this remains `[325,430)`; ultrawide and portrait fields have different
-row intervals. Schema/tag,
+row intervals. Detector-pixel box edges map into the integer tensor-content rectangle by exact
+integer rationals, columns directly and rows through that crop: left and top edges floor, right and
+bottom edges ceil, and rows clamp to the ROI. A ribbon cover maps only its top this way; its sides
+and bottom are the content edges described below. Schema/tag,
 authoritative flag, exact matched-frame and analysis-generation identity, source dimensions, field,
 ROI, finite score, paired containment and metadata, topology, counts, and all unused words must
 validate together. `flags == 1` with
@@ -439,8 +442,12 @@ its eligibility, confidence, or capacity rank. The producer publishes one expand
 probing, temporary protection, and temporal search. Guard pixels need the same four RGB confirmations
 as other covered pixels, with the existing Gaussian treatment afterward. It is not a second mask,
 new OCR detection, palette rule, or guarantee that every omitted token lies within the guard.
-A ribbon's final cover is the canonical bottom strip
-`[0, corrected_top, field_width, field_height)`, while its paired raw box remains tight evidence.
+A ribbon's final cover is the canonical bottom strip of the tensor-content rectangle,
+`[content_left, cover_top, content_right, content_bottom)`, while its paired raw box remains tight
+evidence. `cover_top` is the floor projection of the ribbon's expanded detector top (its tight top
+minus the capped pad), clamped to the ROI.
+Only a field without pillarbox or letterbox padding makes the strip
+`[0, cover_top, field_width, field_height)`.
 The detector tolerance is preserved after coordinate conversion: the inclusive minimum raw-core
 bottom is the exact rational ceil projection of detector row `155 - 2 = 153` through the same
 bottom-6:1 source crop into the active depth field. A core at that projected row is valid; one field

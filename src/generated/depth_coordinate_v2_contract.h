@@ -14,7 +14,7 @@
 namespace models::depth_coordinate_v2 {
   inline constexpr std::uint32_t contract_schema = 115u;
   inline constexpr std::uint32_t contract_tag = 0x640A940Cu;
-  inline constexpr std::string_view contract_canonical_sha256 = "eb4b9304f2ac6557758fc9049a2af349a92b3d1d22d0ddf579d5aa856fc04a83";
+  inline constexpr std::string_view contract_canonical_sha256 = "38004b65bf37d9a1a385d6534dbe3eb68672bf9936d905a9fa4df4607b67abb5";
   inline constexpr std::string_view contract_tag_semantic_sha256 = "640a940c9509bbf043fe18dd7b4d8116e6ad4fb77ca2a8a49ad354660ba323b6";
   inline constexpr std::string_view shadow_state_source = "depth_coordinate_v2_state_resolve_cs.ShadowState";
   inline constexpr std::string_view shadow_state_capture = "after-every-complete-depth-coordinate-v2-state-update";

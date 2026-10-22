@@ -1320,7 +1320,7 @@ namespace {
     };
     const std::array<cover_case_t, 3u> cases {{
       {{240u, 100u, 720u, 108u}, {234u, 94u, 726u, 114u}},
-      // Stay inside center eligibility and away from MapXCeil's unrelated FP32 integer edge.
+      // Stay inside center eligibility.
       {{0u, 100u, 776u, 108u}, {0u, 94u, 782u, 114u}},
       {{192u, 100u, 960u, 108u}, {186u, 94u, 960u, 114u}},
     }};
@@ -1352,6 +1352,41 @@ namespace {
         EXPECT_GT(cover[2u], previous_db_cover[2u]);
       }
       EXPECT_EQ(fixture.record()[v2::subtitle_ocr_raw_box_offset + 5u], 0u);
+    }
+  }
+
+  TEST(HostSbsOcrGpuTest, ColumnEdgesOnExactFieldMultiplesUseTheExactCeil) {
+    ocr_warp_fixture_t fixture;
+    std::string error;
+    ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+    // On the 770-column field, 576 * 770 / 960 = 462 and 768 * 770 / 960 = 616 are exact. A float
+    // multiply by the rounded-up reciprocal of 960 lifted both just above the integer, so ceil
+    // returned one extra field column. The first case puts that edge on the core, the second on
+    // its expanded cover (DB pad 6 plus the eight-pixel guard).
+    struct edge_case_t {
+      std::array<std::uint32_t, 4u> core;
+      std::array<std::uint32_t, 4u> db_cover;
+    };
+    const std::array<edge_case_t, 2u> cases {{
+      {{384u, 100u, 576u, 108u}, {378u, 94u, 582u, 114u}},
+      {{206u, 100u, 754u, 108u}, {200u, 94u, 760u, 114u}},
+    }};
+    static_assert(576u * field_width % ocr_width == 0u);
+    static_assert((760u + 8u) * field_width % ocr_width == 0u);
+    for (const auto &test_case : cases) {
+      SCOPED_TRACE(std::to_string(test_case.core[2u]));
+      const auto &core = test_case.core;
+      const auto &db = test_case.db_cover;
+      std::vector<float> probability(ocr_pixels, 0.0f);
+      paint_rectangle(probability, core[0u], core[1u], core[2u], core[3u]);
+      ASSERT_TRUE(fixture.run_boxes(probability, 41u, 77u));
+      ASSERT_EQ(fixture.record()[2u], 1u);
+      ASSERT_EQ(fixture.record()[3u], 1u);
+      ASSERT_EQ(fixture.record()[4u], 1u);
+      EXPECT_EQ(read_box(fixture.record(), v2::subtitle_ocr_raw_box_offset),
+        default_ocr_box(core[0u], core[1u], core[2u], core[3u]));
+      EXPECT_EQ(read_box(fixture.record(), v2::subtitle_ocr_final_box_offset),
+        default_ordinary_cover(db[0u], db[1u], db[2u], db[3u]));
     }
   }
 
