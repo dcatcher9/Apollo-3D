@@ -3875,7 +3875,17 @@ The direct provider supports D3D12 full-resource, single-sample
 device depth and positive linear view distance with UntilEvaluate/UntilPresent lifetimes; it accepts bounded active rectangles while
 copying the full allocation's depth plane. Evaluation-bound native capture declines OnlyValidNow;
 the synchronous v2 tag boundary supports it with or without FG. Native capture still declines
-unknown depth encodings, unknown resource states or layouts and ambiguous viewports. For V1.1.1, an
+unknown depth encodings, unknown resource states or layouts and ambiguous viewports. One rule
+([`depth_view_format.h`](../tools/reshade/depth_view_format.h)), shared by the capture, the
+content sampler and the V1.1.1 adapter, stores a depth input in its typeless family and names the
+view the snapshot is read through: the allocation's own R32_FLOAT, R16_FLOAT or R16_UNORM; the
+depth alias of the D32, D16, D24S8 and D32S8 families (R32_TYPELESS reads as R32_FLOAT); for
+R16_TYPELESS a declared Streamline `nativeFormat` of that family (R16_FLOAT, R16_UNORM or D16), and
+without one R16_UNORM only for device depth. A linear R16_TYPELESS without a declaration is refused
+(`unsupported_resource`) rather than guessed. A mip chain is copied at mip 0 into a single-mip
+snapshot (only subresource 0 is transitioned, and barriers on other subresources do not change its
+state); arrays, MSAA and 3D textures stay refused, and the V1.1.1 adapter keeps its single-mip
+shape. For V1.1.1, an
 explicit nonzero tag state takes priority. If omitted, its adapter reads the provider's resource
 state at evaluation entry, just as that version's DLSS implementation does. This private,
 version-pinned encoding is enabled only after validating the loaded `sl.common` version too.

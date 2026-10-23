@@ -2,6 +2,7 @@
 #pragma once
 
 #include "scene_depth_source.h"
+#include "depth_view_format.h"
 #include <d3d12.h>
 #include <cstdint>
 
@@ -55,15 +56,11 @@ namespace sunshine_streamline::v1_resource_state {
     // Pinned DLSS applies this provider state to ALL subresources, including
     // packed depth/stencil. Capture uses that same input-state contract but
     // copies/transitions only subresource 0 (depth), leaving stencil untouched.
+    // The capture's formats (depth_view_format.h); the pinned adapter keeps
+    // its exact single-mip shape.
     if (desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || !desc.Width || !desc.Height ||
         desc.MipLevels != 1 || desc.DepthOrArraySize != 1 || desc.SampleDesc.Count != 1) return false;
-    switch (desc.Format) {
-    case DXGI_FORMAT_R32_FLOAT: case DXGI_FORMAT_R32_TYPELESS: case DXGI_FORMAT_D32_FLOAT:
-    case DXGI_FORMAT_R16_UNORM: case DXGI_FORMAT_R16_TYPELESS: case DXGI_FORMAT_D16_UNORM:
-    case DXGI_FORMAT_D32_FLOAT_S8X24_UINT: case DXGI_FORMAT_R32G8X24_TYPELESS: case DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS:
-    case DXGI_FORMAT_D24_UNORM_S8_UINT: case DXGI_FORMAT_R24G8_TYPELESS: case DXGI_FORMAT_R24_UNORM_X8_TYPELESS: return true;
-    default: return false;
-    }
+    return sunshine_depth_format::storage(desc.Format) != DXGI_FORMAT_UNKNOWN;
   }
 
   inline bool decode_property(HRESULT result, UINT bytes, std::uint32_t value, std::uint32_t &native) {

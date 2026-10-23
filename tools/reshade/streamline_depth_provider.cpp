@@ -72,14 +72,14 @@ namespace sunshine_streamline::provider {
       api::resource display_texture{};
       api::resource_view display_view{}, bound_view{};
       sunshine_depth::ready_uniform_cache<api::effect_uniform_variable> depth_ready;
-      std::uint32_t display_width{}, display_height{}, display_format{};
+      std::uint32_t display_width{}, display_height{}, display_format{}, display_view_format{};
       // Display storage per shape/format (NGX and Streamline usually differ),
       // so a provider flip reuses the other entry instead of reallocating.
       // The active entry is mirrored in display_texture/display_view above.
       struct display_entry {
         api::resource texture{};
         api::resource_view view{};
-        std::uint32_t width{}, height{}, format{};
+        std::uint32_t width{}, height{}, format{}, view_format{};
       };
       std::array<display_entry, 2> displays{};
       // The view last passed to update_texture_bindings by this provider.
@@ -212,7 +212,7 @@ namespace sunshine_streamline::provider {
       if (data.retire_fence.handle) device->destroy_fence(data.retire_fence);
       data.retire_fence = {};
       data.display_view = {}; data.display_texture = {};
-      data.display_width = data.display_height = data.display_format = 0;
+      data.display_width = data.display_height = data.display_format = data.display_view_format = 0;
     }
     // Once per Present. A retired display is fenced on a Present after the one
     // that replaced it, when every earlier read of it (effects, renderer,
@@ -366,14 +366,16 @@ namespace sunshine_streamline::provider {
     void activate_display(state &data, const state::display_entry &entry) {
       data.display_texture = entry.texture; data.display_view = entry.view;
       data.display_width = entry.width; data.display_height = entry.height; data.display_format = entry.format;
+      data.display_view_format = entry.view_format;
     }
     display_status prepare_display(api::effect_runtime *runtime, state &data, const depth_capture::packet &packet,
         std::uint64_t present) {
       const auto matches = [&](const state::display_entry &entry) {
-        return entry.texture.handle && entry.width == packet.width && entry.height == packet.height && entry.format == packet.format;
+        return entry.texture.handle && entry.width == packet.width && entry.height == packet.height && entry.format == packet.format &&
+          entry.view_format == packet.srv_format;
       };
       if (data.display_texture.handle && data.display_width == packet.width && data.display_height == packet.height &&
-          data.display_format == packet.format) return display_status::ready;
+          data.display_format == packet.format && data.display_view_format == packet.srv_format) return display_status::ready;
       // Resolution/format changes are rare lifecycle events. Ordinary rotation
       // never allocates a texture or changes descriptors. A provider flip
       // (NGX and Streamline usually differ in shape or format) switches to the
@@ -410,6 +412,7 @@ namespace sunshine_streamline::provider {
         return display_status::view_creation_failed;
       }
       created.width = packet.width; created.height = packet.height; created.format = packet.format;
+      created.view_format = packet.srv_format;
       *victim = created;
       activate_display(data, created);
       return display_status::ready;
@@ -903,6 +906,7 @@ namespace sunshine_streamline::provider {
       // retains its COM source and submits after these effects on the same
       // runtime queue; no pooled preservation backup escapes its owner.
       request.source = data->display_texture;
+      request.view_format = data->display_view_format;
       request.before = api::resource_usage::shader_resource;
       request.source_width = data->frame.width;
       request.source_height = data->frame.height;

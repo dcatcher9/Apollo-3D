@@ -16,6 +16,9 @@ namespace sunshine_depth {
     std::uint64_t capture_id = 0, source_lifetime = 0;
     sunshine_camera_binding::scope_key capture_scope;
     reshade::api::resource source {};
+    // The DXGI view to read source through (an API snapshot's resolved depth
+    // view); 0 derives it from source's own format.
+    std::uint32_t view_format = 0;
     reshade::api::resource_usage before = reshade::api::resource_usage::copy_dest;
     std::uint32_t source_width = 0, source_height = 0;
     // A nonempty rectangle fully inside the source is sampled. Otherwise use the

@@ -3,6 +3,7 @@
 #include "streamline_depth_capture.h"
 #include "streamline_native_observer.h"
 #include "native_resource_identity.h"
+#include "depth_view_format.h"
 #include <d3d11_1.h>
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
@@ -140,9 +141,11 @@ namespace {
     unsigned bpp{}, width{64}, height{48};
     capture::input input;
     texture_case(fixture &gpu, DXGI_FORMAT format, unsigned bytes,
-        D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_NONE, bool retain_before_barrier = true) : bpp(bytes) {
+        D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_NONE, bool retain_before_barrier = true,
+        UINT16 mips = 1, UINT16 slices = 1) : bpp(bytes) {
       D3D12_RESOURCE_DESC desc{}; desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-      desc.Width = width; desc.Height = height; desc.DepthOrArraySize = desc.MipLevels = desc.SampleDesc.Count = 1; desc.Format = format;
+      desc.Width = width; desc.Height = height; desc.SampleDesc.Count = 1; desc.Format = format;
+      desc.MipLevels = mips; desc.DepthOrArraySize = slices;
       desc.Flags = flags;
       auto properties = heap(D3D12_HEAP_TYPE_DEFAULT);
       check(gpu.device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&source)), "source texture");
@@ -376,6 +379,86 @@ namespace {
     capture::poll();
     gpu.check_debug_errors();
     std::printf("PASS first native recording and resource: barrier before registration/Reset/retain_source preserves observed-only NGX depth and exact pixels; cross-recording state rejected%s\n",
+      gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
+  }
+
+  // Depth formats and shapes (depth_view_format.h): a float-16 depth, a
+  // typeless one with or without a declared format, a mip chain and an array.
+  // The snapshot keeps subresource 0's exact bytes and names the view the
+  // shared rule resolves; a barrier on another mip leaves subresource 0.
+  void depth_format_and_mips(fixture &gpu) {
+    if (gpu.debug_messages) gpu.debug_messages->ClearStoredMessages();
+    consumer_fixture consumer(gpu);
+    std::uint64_t sequence = 100, present = 100;
+    using encoding = sunshine_scene_depth::depth_encoding;
+    const auto capture_case = [&](DXGI_FORMAT format, unsigned bpp, UINT16 mips, UINT16 slices, DXGI_FORMAT declared,
+        encoding kind, DXGI_FORMAT expected_view, DXGI_FORMAT typed) {
+      texture_case depth(gpu, format, bpp, D3D12_RESOURCE_FLAG_NONE, slices == 1, mips, slices);
+      gpu.submit(); gpu.wait(); gpu.reset(); // Subresource 0 reaches NON_PIXEL_SHADER_RESOURCE on a retired recording.
+      auto input = depth.input;
+      if (!input.source) input.source = capture::retain_source(native(depth.source.Get()));
+      input.provider = sunshine_scene_depth::provider_kind::ngx;
+      input.epoch = 75; input.source_id = 93; input.viewport = 0;
+      input.valid_until = sunshine_scene_depth::lifetime::until_evaluation; input.force_snapshot = false;
+      input.source_present_generation = capture::source_present_generation(input.source);
+      input.native_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+      input.proof = sunshine_scene_depth::state_proof::sdk_contract;
+      input.resource.native_format = std::uint32_t(declared);
+      if (kind == encoding::linear_distance) {
+        input.projection.encoding = kind; input.projection.direction_supplied = true;
+        input.projection.raw_scale = 1; input.projection.raw_bias = 0;
+      }
+      input.sequence = ++sequence; input.tick = GetTickCount64();
+      if (mips > 1) {
+        // Mip 3 leaves COPY_DEST on this recording; subresource 0 keeps no entry.
+        D3D12_RESOURCE_BARRIER other{}; other.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        other.Transition = {depth.source.Get(), 3, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE};
+        gpu.list->ResourceBarrier(1, &other);
+      }
+      capture::record_diagnostic diagnostic;
+      const auto ticket = input.source ? capture::nominate_evaluation(native(gpu.list.Get()), input, UINT64_MAX, &diagnostic) :
+        std::uint64_t{};
+      if (expected_view == DXGI_FORMAT_UNKNOWN) {
+        if (ticket) capture::finish(ticket, false);
+        require(!input.source || (diagnostic.result == capture::status::unsupported_resource &&
+            diagnostic.stage == capture::record_stage::resource_region),
+          "an array or an undeclared linear R16_TYPELESS depth was captured");
+        gpu.submit(); gpu.wait(); gpu.reset();
+        capture::retire_source(input.provider, input.epoch, input.source_id);
+        return;
+      }
+      require(ticket && diagnostic.result == capture::status::recorded && !diagnostic.observed && diagnostic.used_contract_state,
+        "a supported depth format or mip chain was refused, or another mip's barrier became subresource 0's state");
+      capture::finish(ticket, true);
+      gpu.submit(); gpu.wait(); gpu.reset();
+      capture::packet packet;
+      capture::capture_diagnostic acquired;
+      require(capture::acquire(native(gpu.foreign_queue.Get()), ++present, packet, &acquired) && packet.pixel_ready &&
+          packet.capture_id == ticket && packet.srv_format == std::uint32_t(expected_view) &&
+          packet.format == std::uint32_t(sunshine_depth_format::storage(format)),
+        "the depth snapshot did not name its resolved view and storage");
+      auto target = destination(gpu.device.Get(), typed);
+      readback actual(gpu, target.Get());
+      require(capture::copy_current(native(consumer.list.Get()), packet, native(target.Get()),
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE), "depth-format consumer copy failed");
+      actual.record(consumer.list.Get(), target.Get());
+      capture::complete_frame(packet, present);
+      consumer.submit(); consumer.wait(); consumer.reset();
+      actual.verify(depth.width, depth.height, depth.bpp);
+      packet = {};
+      capture::retire_source(input.provider, input.epoch, input.source_id);
+      capture::poll();
+    };
+    constexpr auto unknown = DXGI_FORMAT_UNKNOWN;
+    capture_case(DXGI_FORMAT_R16_FLOAT, 2, 1, 1, unknown, encoding::linear_distance, DXGI_FORMAT_R16_FLOAT, DXGI_FORMAT_R16_FLOAT);
+    capture_case(DXGI_FORMAT_R16_TYPELESS, 2, 1, 1, DXGI_FORMAT_R16_FLOAT, encoding::linear_distance, DXGI_FORMAT_R16_FLOAT,
+      DXGI_FORMAT_R16_FLOAT);
+    capture_case(DXGI_FORMAT_R16_TYPELESS, 2, 1, 1, unknown, encoding::device, DXGI_FORMAT_R16_UNORM, DXGI_FORMAT_R16_UNORM);
+    capture_case(DXGI_FORMAT_R16_TYPELESS, 2, 1, 1, unknown, encoding::linear_distance, unknown, unknown);
+    capture_case(DXGI_FORMAT_R32_FLOAT, 4, 6, 1, unknown, encoding::device, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT);
+    capture_case(DXGI_FORMAT_R32_FLOAT, 4, 1, 2, unknown, encoding::device, unknown, unknown);
+    gpu.check_debug_errors();
+    std::printf("PASS depth formats and mips: R16_FLOAT and declared R16_TYPELESS read as R16_FLOAT, undeclared device R16_TYPELESS as R16_UNORM, linear refused; mip 0 of a 6-mip chain with exact bytes, other mips' barriers ignored; arrays refused%s\n",
       gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
   }
 
@@ -1585,6 +1668,7 @@ int main(int argc, char **argv) {
     local_view_lease(gpu);
     first_recording_depth_capture(gpu);
     ngx_contract_depth_capture(gpu);
+    depth_format_and_mips(gpu);
     local_same_queue_ordered_capture(gpu);
     immediate_consumer_without_list_hooks(gpu);
     list_lifecycle_coverage(gpu);

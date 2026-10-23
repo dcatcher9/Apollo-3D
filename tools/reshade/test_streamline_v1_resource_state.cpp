@@ -103,7 +103,7 @@ namespace {
     desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D; desc.Width = 2228; desc.Height = 1256;
     desc.MipLevels = desc.DepthOrArraySize = desc.SampleDesc.Count = 1;
     for (const auto format : {DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_D32_FLOAT,
-        DXGI_FORMAT_R16_UNORM, DXGI_FORMAT_R16_TYPELESS, DXGI_FORMAT_D16_UNORM,
+        DXGI_FORMAT_R16_UNORM, DXGI_FORMAT_R16_TYPELESS, DXGI_FORMAT_D16_UNORM, DXGI_FORMAT_R16_FLOAT,
         DXGI_FORMAT_D32_FLOAT_S8X24_UINT, DXGI_FORMAT_R32G8X24_TYPELESS, DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS,
         DXGI_FORMAT_D24_UNORM_S8_UINT, DXGI_FORMAT_R24G8_TYPELESS, DXGI_FORMAT_R24_UNORM_X8_TYPELESS}) {
       desc.Format = format;
@@ -181,9 +181,42 @@ namespace {
   }
 }
 
+  // The one depth format rule (depth_view_format.h) the capture, the
+  // content sampler and this adapter share.
+  void depth_formats() {
+    namespace depth = sunshine_depth_format;
+    struct row { DXGI_FORMAT allocation, declared; bool device; DXGI_FORMAT storage, view; };
+    constexpr auto unknown = DXGI_FORMAT_UNKNOWN;
+    for (const auto &value : std::initializer_list<row>{
+        {DXGI_FORMAT_R16_FLOAT, unknown, false, DXGI_FORMAT_R16_TYPELESS, DXGI_FORMAT_R16_FLOAT},
+        {DXGI_FORMAT_R16_UNORM, unknown, false, DXGI_FORMAT_R16_TYPELESS, DXGI_FORMAT_R16_UNORM},
+        {DXGI_FORMAT_D16_UNORM, unknown, true, DXGI_FORMAT_R16_TYPELESS, DXGI_FORMAT_R16_UNORM},
+        {DXGI_FORMAT_R16_TYPELESS, unknown, true, DXGI_FORMAT_R16_TYPELESS, DXGI_FORMAT_R16_UNORM},
+        {DXGI_FORMAT_R16_TYPELESS, DXGI_FORMAT_R16_FLOAT, true, DXGI_FORMAT_R16_TYPELESS, DXGI_FORMAT_R16_FLOAT},
+        {DXGI_FORMAT_R16_TYPELESS, DXGI_FORMAT_R16_FLOAT, false, DXGI_FORMAT_R16_TYPELESS, DXGI_FORMAT_R16_FLOAT},
+        {DXGI_FORMAT_R16_TYPELESS, DXGI_FORMAT_D16_UNORM, false, DXGI_FORMAT_R16_TYPELESS, DXGI_FORMAT_R16_UNORM},
+        {DXGI_FORMAT_R16_TYPELESS, unknown, false, DXGI_FORMAT_R16_TYPELESS, unknown},
+        {DXGI_FORMAT_R16_TYPELESS, DXGI_FORMAT_R8G8B8A8_UNORM, false, DXGI_FORMAT_R16_TYPELESS, unknown},
+        {DXGI_FORMAT_R16_FLOAT, DXGI_FORMAT_R16_UNORM, true, DXGI_FORMAT_R16_TYPELESS, DXGI_FORMAT_R16_FLOAT},
+        {DXGI_FORMAT_R32_TYPELESS, unknown, false, DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_R32_FLOAT},
+        {DXGI_FORMAT_D32_FLOAT, unknown, true, DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_R32_FLOAT},
+        {DXGI_FORMAT_D24_UNORM_S8_UINT, unknown, true, DXGI_FORMAT_R24G8_TYPELESS, DXGI_FORMAT_R24_UNORM_X8_TYPELESS},
+        {DXGI_FORMAT_R32G8X24_TYPELESS, unknown, true, DXGI_FORMAT_R32G8X24_TYPELESS, DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS},
+        {DXGI_FORMAT_R8G8B8A8_UNORM, unknown, true, unknown, unknown}}) {
+      require(depth::storage(value.allocation) == value.storage &&
+          depth::view(value.allocation, value.declared, value.device) == value.view,
+        "A depth allocation's storage or view changed");
+    }
+    require(depth::readable(DXGI_FORMAT_R16_TYPELESS, DXGI_FORMAT_R16_FLOAT) &&
+        depth::readable(DXGI_FORMAT_R24G8_TYPELESS, DXGI_FORMAT_R24_UNORM_X8_TYPELESS) &&
+        !depth::readable(DXGI_FORMAT_R16_TYPELESS, DXGI_FORMAT_R32_FLOAT) &&
+        !depth::readable(DXGI_FORMAT_R16_TYPELESS, DXGI_FORMAT_UNKNOWN),
+      "A snapshot view outside its storage family was readable");
+  }
+
 int main() {
   try {
-    mapping(); property_contract(); precedence_and_fallback(); exact_interface();
+    mapping(); property_contract(); precedence_and_fallback(); exact_interface(); depth_formats();
     std::puts("PASS Streamline 1.1.1 resource state: exact chi mapping, property ABI, packed depth scope, explicit-state precedence and observed fallback");
     return 0;
   } catch (const std::exception &error) {

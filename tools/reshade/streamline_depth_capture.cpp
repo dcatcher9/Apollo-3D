@@ -4,6 +4,7 @@
 #include "streamline_native_observer.h"
 #include "native_command_storage.h"
 #include "native_resource_identity.h"
+#include "depth_view_format.h"
 #include "../../src/game3d_debug_formats.h"
 #include <d3d12.h>
 #include <algorithm>
@@ -94,31 +95,24 @@ namespace sunshine_streamline::depth_capture {
       if (SUCCEEDED(result)) return size == sizeof(identity) ? identity : 0;
       return result == DXGI_ERROR_NOT_FOUND ? retain_source_cookie(value) : 0;
     }
-    DXGI_FORMAT typeless(DXGI_FORMAT value) {
-      switch (value) {
-      case DXGI_FORMAT_D32_FLOAT: case DXGI_FORMAT_R32_TYPELESS: case DXGI_FORMAT_R32_FLOAT: return DXGI_FORMAT_R32_TYPELESS;
-      case DXGI_FORMAT_D32_FLOAT_S8X24_UINT: case DXGI_FORMAT_R32G8X24_TYPELESS: case DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS: return DXGI_FORMAT_R32G8X24_TYPELESS;
-      case DXGI_FORMAT_D24_UNORM_S8_UINT: case DXGI_FORMAT_R24G8_TYPELESS: case DXGI_FORMAT_R24_UNORM_X8_TYPELESS: return DXGI_FORMAT_R24G8_TYPELESS;
-      case DXGI_FORMAT_D16_UNORM: case DXGI_FORMAT_R16_TYPELESS: case DXGI_FORMAT_R16_UNORM: return DXGI_FORMAT_R16_TYPELESS;
-      default: return DXGI_FORMAT_UNKNOWN;
-      }
-    }
-    DXGI_FORMAT view_format(DXGI_FORMAT value) {
-      switch (typeless(value)) {
-      case DXGI_FORMAT_R32_TYPELESS: return DXGI_FORMAT_R32_FLOAT;
-      case DXGI_FORMAT_R32G8X24_TYPELESS: return DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
-      case DXGI_FORMAT_R24G8_TYPELESS: return DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
-      case DXGI_FORMAT_R16_TYPELESS: return DXGI_FORMAT_R16_UNORM;
-      default: return DXGI_FORMAT_UNKNOWN;
-      }
+    // Depth storage and views: sunshine_depth_format (depth_view_format.h).
+    DXGI_FORMAT typeless(DXGI_FORMAT value) { return sunshine_depth_format::storage(value); }
+    // The view a depth input is read through: its declared nativeFormat
+    // resolves R16_TYPELESS, and only device depth reads an undeclared one.
+    DXGI_FORMAT depth_view(DXGI_FORMAT format, const input &value) {
+      return sunshine_depth_format::view(format, static_cast<DXGI_FORMAT>(value.resource.native_format),
+        value.projection.encoding == sunshine_scene_depth::depth_encoding::device);
     }
     struct copy_region {
       std::uint32_t width{}, height{};
       sunshine_scene_depth::extent area;
     };
+    // A single-sample, single-slice 2D texture of a depth format. Its mip
+    // chain is irrelevant: only subresource 0 (mip 0) is transitioned and
+    // copied, into a single-mip snapshot. Arrays, MSAA and 3D stay refused.
     bool supported_description(const D3D12_RESOURCE_DESC &desc) {
       return desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && desc.SampleDesc.Count == 1 &&
-        desc.DepthOrArraySize == 1 && desc.MipLevels == 1 && desc.Width && desc.Width <= 16384 &&
+        desc.DepthOrArraySize == 1 && desc.MipLevels >= 1 && desc.Width && desc.Width <= 16384 &&
         desc.Height && desc.Height <= 16384 && typeless(desc.Format) != DXGI_FORMAT_UNKNOWN;
     }
     DXGI_FORMAT diagnostic_storage_format(DXGI_FORMAT format) {
@@ -1372,7 +1366,9 @@ namespace sunshine_streamline::depth_capture {
       out.area = value.metadata.resource.area.width ? value.metadata.resource.area :
         sunshine_scene_depth::extent{0, 0, out.width, out.height};
       out.format = typeless(desc.Format);
-      out.srv_format = view_format(desc.Format);
+      // The snapshot's view was resolved at capture (depth_view); a
+      // metadata-only nomination resolves its source's the same way.
+      out.srv_format = value.nomination_only ? depth_view(desc.Format, value.metadata) : value.texture->view_format;
       out.pixel_ready = !value.nomination_only;
     }
     void collect_retired() {
@@ -2111,6 +2107,11 @@ namespace sunshine_streamline::depth_capture {
         (diagnostic_description(desc) ? source_region(desc, value.resource, region) : status::unsupported_resource) :
         capture_region(desc, value.resource, region);
       if (region_status != status::ready) return reject(region_status, record_stage::resource_region);
+      // A depth snapshot is read through one view, resolved now; a linear
+      // R16_TYPELESS without a declared format has none.
+      const auto snapshot_view = diagnostic_copy ? DXGI_FORMAT_UNKNOWN : depth_view(desc.Format, value);
+      if (!diagnostic_copy && snapshot_view == DXGI_FORMAT_UNKNOWN)
+        return reject(status::unsupported_resource, record_stage::resource_region);
       if (owner->invalid) return reject(status::unavailable, record_stage::recording_invalid);
       // Unobserved lists (refused or moved method tables) use the declared state.
       const auto *observed = states_observed ? state(*owner, value.source->cookie, false) : nullptr;
@@ -2146,7 +2147,8 @@ namespace sunshine_streamline::depth_capture {
         if (!texture || texture->device_identity != value.source->device_identity) return false;
         if (diagnostic_copy && bool(texture->shared_handle) == reusable_storage) return false;
         const auto existing = texture->resource->GetDesc();
-        return existing.Width == region.width && existing.Height == region.height && existing.Format == texture_format;
+        return existing.Width == region.width && existing.Height == region.height && existing.Format == texture_format &&
+          (diagnostic_copy || texture->view_format == snapshot_view);
       };
       // Another attempt's live reservation is not available to this one.
       const auto free_for_us = [&](const slot &entry) { return !reserved_by_other(entry, reservation); };
@@ -2191,6 +2193,7 @@ namespace sunshine_streamline::depth_capture {
           auto &destination = plan.desc;
           destination = desc; destination.Format = texture_format; destination.Flags = D3D12_RESOURCE_FLAG_NONE;
           destination.Width = region.width; destination.Height = region.height;
+          destination.MipLevels = 1; destination.DepthOrArraySize = 1; // Subresource 0 only.
           plan.state = resting_state;
           if (diagnostic_copy) {
             destination.Alignment = 0;
@@ -2215,7 +2218,7 @@ namespace sunshine_streamline::depth_capture {
             discarded.push_back(std::move(found->texture));
           } else {
             plan.descriptors = true;
-            plan.view = view_format(desc.Format);
+            plan.view = snapshot_view;
             // Sizes the idle-storage budget (release_idle_slots).
             plan.allocation_bytes = plan.device->GetResourceAllocationInfo(0, 1, &destination).SizeInBytes;
           }
@@ -3220,7 +3223,12 @@ namespace sunshine_streamline::depth_capture {
           region.area.left != 1 || region.area.top != 2 || region.area.width != 2227 || region.area.height != 1252) return false;
       resource.area = {};
       if (capture_region(desc, resource, region) != status::ready) return false;
-      desc = ordinary; desc.MipLevels = 2;
+      // A mip chain copies mip 0 into a single-mip snapshot; R16_FLOAT is depth.
+      desc = ordinary; desc.MipLevels = 6;
+      if (capture_region(desc, resource, region) != status::ready || region.width != 2228 || region.height != 1256) return false;
+      desc = ordinary; desc.Format = DXGI_FORMAT_R16_FLOAT;
+      if (capture_region(desc, resource, region) != status::ready) return false;
+      desc = ordinary; desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
       if (capture_region(desc, resource, region) != status::unsupported_resource) return false;
       desc = ordinary; desc.DepthOrArraySize = 2;
       if (capture_region(desc, resource, region) != status::unsupported_resource) return false;

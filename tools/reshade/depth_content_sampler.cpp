@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "depth_content_sampler.h"
 #include "addon_lifetime.h"
+#include "depth_view_format.h"
 #include "async_log.h"
 
 #include <algorithm>
@@ -214,27 +215,15 @@ void main(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID,
     state.code = code;
   }
 
-  DXGI_FORMAT depth_srv_format(DXGI_FORMAT format) {
-    switch (format) {
-    case DXGI_FORMAT_R32_TYPELESS:
-    case DXGI_FORMAT_D32_FLOAT:
-    case DXGI_FORMAT_R32_FLOAT:
-      return DXGI_FORMAT_R32_FLOAT;
-    case DXGI_FORMAT_R32G8X24_TYPELESS:
-    case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
-    case DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS:
-      return DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
-    case DXGI_FORMAT_R24G8_TYPELESS:
-    case DXGI_FORMAT_D24_UNORM_S8_UINT:
-    case DXGI_FORMAT_R24_UNORM_X8_TYPELESS:
-      return DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
-    case DXGI_FORMAT_R16_TYPELESS:
-    case DXGI_FORMAT_D16_UNORM:
-    case DXGI_FORMAT_R16_UNORM:
-      return DXGI_FORMAT_R16_UNORM;
-    default:
-      return DXGI_FORMAT_UNKNOWN;
-    }
+  // The capture's rule (depth_view_format.h); a buffer's own depth format
+  // is device depth.
+  DXGI_FORMAT depth_srv_format(DXGI_FORMAT format) { return sunshine_depth_format::view(format); }
+  // The request's explicit view (an API snapshot's resolved format) when it
+  // reads this storage, else the source format's own.
+  DXGI_FORMAT request_view(const sample_request &request, DXGI_FORMAT source) {
+    if (!request.view_format) return depth_srv_format(source);
+    const auto view = static_cast<DXGI_FORMAT>(request.view_format);
+    return sunshine_depth_format::readable(source, view) ? view : DXGI_FORMAT_UNKNOWN;
   }
 
   // Only immutable, device-owned objects are shared. Mutable scratch objects
@@ -415,7 +404,7 @@ void main(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID,
     sample.source11->GetDesc(&source_desc);
     sample.result.source = {reinterpret_cast<std::uint64_t>(sample.source11.get())};
     sample.result.source_format = static_cast<std::uint32_t>(source_desc.Format);
-    const DXGI_FORMAT format = depth_srv_format(source_desc.Format);
+    const DXGI_FORMAT format = request_view(request, source_desc.Format);
     if (format == DXGI_FORMAT_UNKNOWN || source_desc.ArraySize != 1 || source_desc.MipLevels != 1 ||
         source_desc.SampleDesc.Count != 1 || !(source_desc.BindFlags & D3D11_BIND_SHADER_RESOURCE) ||
         !set_region(sample, request, source_desc.Width, source_desc.Height)) return false;
@@ -489,7 +478,7 @@ void main(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID,
     const D3D12_RESOURCE_DESC source_desc = sample.source12->GetDesc(); // Native MinGW COM adapter.
     sample.result.source = {reinterpret_cast<std::uint64_t>(sample.source12.get())};
     sample.result.source_format = static_cast<std::uint32_t>(source_desc.Format);
-    const DXGI_FORMAT format = depth_srv_format(source_desc.Format);
+    const DXGI_FORMAT format = request_view(request, source_desc.Format);
     if (format == DXGI_FORMAT_UNKNOWN || source_desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
         source_desc.DepthOrArraySize != 1 || source_desc.MipLevels != 1 || source_desc.SampleDesc.Count != 1 ||
         source_desc.Width > UINT32_MAX || (source_desc.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) ||
