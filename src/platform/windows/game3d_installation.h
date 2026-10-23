@@ -71,9 +71,13 @@ namespace platf::game3d {
     const std::filesystem::path &bundle_directory = bundled_addon_directory()
   );
 
-  // Confirmed fresh setup: the ReShade runtime, then the Sunshine add-on. When the add-on step
-  // fails, the runtime files this call created are removed again (unless changed since), so no
-  // bare ReShade is left and the folder stays fresh for a retry.
+  // Confirmed fresh setup: the ReShade runtime, then the Sunshine add-on. A folder that still
+  // holds a Sunshine add-on without ReShade is refused before anything is written. When the
+  // add-on step fails, also when its timeout or host shutdown stops it, the files this call
+  // created are removed again unless changed since: dxgi.dll and ReShade.ini as the runtime step
+  // wrote them, and the add-on, its license and a new preset, which only the add-on step writes.
+  // The step's backup folder goes too, and the folder is fresh for a retry. A changed file is
+  // kept, together with the backups, and named in the result.
   installation_status install_reshade_and_addon_for_next_launch(
     const std::filesystem::path &game_executable,
     const std::filesystem::path &bundle_directory = bundled_addon_directory()

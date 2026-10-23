@@ -319,6 +319,60 @@ namespace platf::game3d {
       return left.eof() && right.eof() ? std::optional<bool>(true) : std::nullopt;
     }
 
+    bool path_exists(const fs::path &path) {
+      return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+    }
+
+    std::optional<std::string> read_file(const fs::path &path) {
+      std::ifstream input(path, std::ios::binary);
+      if (!input) {
+        return std::nullopt;
+      }
+      std::string content {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+      if (input.bad()) {
+        return std::nullopt;
+      }
+      return content;
+    }
+
+    // Names directly inside a folder; empty when it does not exist.
+    std::vector<std::wstring> folder_entries(const fs::path &folder) {
+      std::vector<std::wstring> names;
+      WIN32_FIND_DATAW entry {};
+      const auto pattern = folder / L"*";
+      const auto find = FindFirstFileExW(pattern.c_str(), FindExInfoBasic, &entry, FindExSearchNameMatch, nullptr, 0);
+      if (find == INVALID_HANDLE_VALUE) {
+        return names;
+      }
+      do {
+        const std::wstring_view name {entry.cFileName};
+        if (name != L"." && name != L"..") {
+          names.emplace_back(name);
+        }
+      } while (FindNextFileW(find, &entry));
+      FindClose(find);
+      return names;
+    }
+
+    // An installer backup holds only regular files; a subfolder or link leaves it in place.
+    void remove_backup_folder(const fs::path &folder) {
+      const auto attributes = GetFileAttributesW(folder.c_str());
+      if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY) || (attributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+        return;
+      }
+      const auto names = folder_entries(folder);
+      for (const auto &name : names) {
+        const auto file = GetFileAttributesW((folder / name).c_str());
+        if (file == INVALID_FILE_ATTRIBUTES || (file & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))) {
+          return;
+        }
+      }
+      for (const auto &name : names) {
+        DeleteFileW((folder / name).c_str());
+      }
+      RemoveDirectoryW(folder.c_str());
+    }
+
     installation_status unavailable(installation_status status, std::string detail) {
       status.state = installation_state_e::unavailable;
       status.detail = std::move(detail);
@@ -723,8 +777,14 @@ namespace platf::game3d {
     const auto directory = status.executable.parent_path();
     const auto proxy = directory / "dxgi.dll";
     const auto configuration = directory / "ReShade.ini";
-    const bool proxy_existed = GetFileAttributesW(proxy.c_str()) != INVALID_FILE_ATTRIBUTES;
-    const bool configuration_existed = GetFileAttributesW(configuration.c_str()) != INVALID_FILE_ATTRIBUTES;
+    // The new ReShade.ini loads add-ons from the game folder. A Sunshine add-on left there would
+    // turn the add-on step into a no-op or a refusal, and the new runtime would be removed again
+    // on every launch: stop before writing anything.
+    if (path_exists(directory / "SunshineSBS.addon64")) {
+      return unavailable(std::move(status), "A Sunshine 3D add-on (SunshineSBS.addon64) remains in the game folder without ReShade. Remove it, or install ReShade manually, to set up this game.");
+    }
+    const bool proxy_existed = path_exists(proxy);
+    const bool configuration_existed = path_exists(configuration);
     status = install_reshade_for_next_launch(status.executable, bundle_directory);
     if (status.state != installation_state_e::installed) {
       return status;
@@ -732,45 +792,63 @@ namespace platf::game3d {
     // The add-on installer never touches the proxy, but it edits ReShade.ini and restores it
     // from its own backup on failure; compare the proxy by file identity, the INI by content.
     const auto created_proxy = proxy_existed ? std::string {} : file_identity(proxy);
-    std::optional<std::string> created_configuration;
-    if (!configuration_existed) {
-      std::ifstream input(configuration, std::ios::binary);
-      created_configuration.emplace(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
-    }
+    const auto created_configuration = configuration_existed ? std::nullopt : read_file(configuration);
+    // What the add-on step writes besides: the add-on and its license in the folder the new
+    // ReShade.ini names, the preset (the new ReShade.ini names none) and a backup folder.
+    const auto addon = status.addon;
+    const auto license = addon.empty() ? fs::path {} : addon.parent_path() / "SunshineSBS-LICENSES.txt";
+    const auto preset = directory / "ReShadePreset.ini";
+    const auto backups = directory / "Sunshine3D-backups";
+    const bool addon_existed = addon.empty() || path_exists(addon);
+    const bool license_existed = license.empty() || path_exists(license);
+    const bool preset_existed = path_exists(preset);
+    const auto preset_before = preset_existed ? read_file(preset) : std::nullopt;
+    const bool backups_existed = path_exists(backups);
+    const auto backups_before = folder_entries(backups);
     status = install_addon_for_next_launch(status.executable, bundle_directory);
     if (status.state == installation_state_e::installed) {
       status.detail = "ReShade and the Sunshine 3D add-on are installed beside the game executable. Keep playing; Game 3D takes effect on the next launch.";
       return status;
     }
-    // A bare runtime would show ReShade's own overlay in the game without Game 3D. Remove only
-    // the files this call created and nobody changed since, proxy first; the folder is then
-    // fresh again for a retry.
+    // A bare runtime would show ReShade's own overlay in the game without Game 3D. Remove the
+    // files this call created and nobody changed since, proxy first. An add-on step stopped by
+    // its timeout or host shutdown skips install.ps1's own restore, so the files only that step
+    // writes (the add-on, its license and a new preset, possibly partly written) are removed
+    // here whatever their content.
     std::string kept;
     const auto keep = [&kept](const fs::path &path) {
       kept += (kept.empty() ? "" : ", ") + utf8(path);
     };
-    const auto exists = [](const fs::path &path) {
-      return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
-    };
-    if (!proxy_existed && exists(proxy) && (created_proxy.empty() || file_identity(proxy) != created_proxy || !DeleteFileW(proxy.c_str()))) {
+    if (!proxy_existed && path_exists(proxy) && (created_proxy.empty() || file_identity(proxy) != created_proxy || !DeleteFileW(proxy.c_str()))) {
       keep(proxy);
     }
-    if (created_configuration && exists(configuration)) {
-      std::string current;
-      bool read = false;
-      if (std::ifstream input {configuration, std::ios::binary}) {
-        current.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
-        read = !input.bad();
+    if (!configuration_existed && path_exists(configuration) && (!created_configuration || read_file(configuration) != created_configuration || !DeleteFileW(configuration.c_str()))) {
+      keep(configuration);
+    }
+    for (const auto &[path, existed] : {std::pair {addon, addon_existed}, std::pair {license, license_existed}, std::pair {preset, preset_existed}}) {
+      if (!existed && path_exists(path) && !DeleteFileW(path.c_str())) {
+        keep(path);
       }
-      if (!read || current != *created_configuration || !DeleteFileW(configuration.c_str())) {
-        keep(configuration);
+    }
+    if (preset_existed && (!preset_before || read_file(preset) != preset_before)) {
+      keep(preset);
+    }
+    // Once everything is undone, the step's backup folder holds only copies of unchanged files.
+    if (kept.empty() && !has_reparse_component(backups)) {
+      for (const auto &name : folder_entries(backups)) {
+        if (std::find(backups_before.begin(), backups_before.end(), name) == backups_before.end()) {
+          remove_backup_folder(backups / name);
+        }
+      }
+      if (!backups_existed) {
+        RemoveDirectoryW(backups.c_str());
       }
     }
     const auto failure = status.detail;
     status = inspect_installation(status.executable, bundle_directory);
     if (!kept.empty()) {
-      return unavailable(std::move(status), "The Sunshine 3D add-on could not be installed, and the new ReShade files could not be removed again: " + kept + ". Remove them or finish setup manually. " + failure);
+      return unavailable(std::move(status), "The Sunshine 3D add-on could not be installed, and setup could not undo its changes to " + kept + ". Remove or restore them (backups are in the game folder's Sunshine3D-backups) or finish setup manually. " + failure);
     }
-    return unavailable(std::move(status), "The Sunshine 3D add-on could not be installed, so the new ReShade runtime was removed again; setup retries on the next game launch. " + failure);
+    return unavailable(std::move(status), "The Sunshine 3D add-on could not be installed, so the files this setup created were removed again; setup retries on the next game launch. " + failure);
   }
 }  // namespace platf::game3d

@@ -185,10 +185,56 @@ namespace {
     fake_installers("[IO.File]::AppendAllText((Join-Path $directory 'ReShade.ini'), 'UserEdit=1')\nexit 1");
     const auto status = game3d::install_reshade_and_addon_for_next_launch(game, bundle);
     EXPECT_EQ(status.state, state::unavailable);
-    EXPECT_NE(status.detail.find("could not be removed"), std::string::npos) << status.detail;
+    EXPECT_NE(status.detail.find("could not undo its changes to "), std::string::npos) << status.detail;
+    EXPECT_NE(status.detail.find("ReShade.ini"), std::string::npos) << status.detail;
     // The proxy is removed first, so no runtime loads; the edited configuration is preserved.
     EXPECT_FALSE(fs::exists(game.parent_path() / "dxgi.dll"));
     EXPECT_NE(read(game.parent_path() / "ReShade.ini").find("UserEdit=1"), std::string::npos);
+  }
+
+  TEST_F(Game3DInstallation, StoppedAddonStepLeavesNothingBehindForTheRetry) {
+    fs::remove(game.parent_path() / "dxgi.dll");
+    const auto backups = game.parent_path() / "Sunshine3D-backups";
+    fs::create_directories(backups / "earlier");
+    write(backups / "earlier" / "manifest.json", "[]");
+    // An add-on step stopped by its timeout or host shutdown never runs install.ps1's own
+    // restore: its backup folder, a partly copied add-on, the license and a new preset remain.
+    fake_installers(
+      "$backup = Join-Path (Join-Path $directory 'Sunshine3D-backups') 'stopped'\n"
+      "New-Item -ItemType Directory -Path $backup | Out-Null\n"
+      "[IO.File]::WriteAllText((Join-Path $backup 'manifest.json'), '[]')\n"
+      "[IO.File]::WriteAllText((Join-Path $directory 'SunshineSBS.addon64'), 'partly copied')\n"
+      "Copy-Item -LiteralPath (Join-Path $AddonDirectory 'SunshineSBS-LICENSES.txt') -Destination $directory\n"
+      "[IO.File]::WriteAllText((Join-Path $directory 'ReShadePreset.ini'), 'Techniques=')\n"
+      "exit 1"
+    );
+    const auto status = game3d::install_reshade_and_addon_for_next_launch(game, bundle);
+    EXPECT_EQ(status.state, state::unavailable);
+    EXPECT_NE(status.detail.find("removed again"), std::string::npos) << status.detail;
+    std::vector<fs::path> left;
+    for (const auto &entry : fs::recursive_directory_iterator(game.parent_path())) {
+      left.push_back(entry.path());
+    }
+    std::sort(left.begin(), left.end());
+    // Only the game and an earlier, unrelated backup remain.
+    EXPECT_EQ(left, (std::vector<fs::path> {backups, backups / "earlier", backups / "earlier" / "manifest.json", game}));
+    EXPECT_EQ(game3d::inspect_installation(game, bundle).state, state::missing_reshade);
+    fake_installers("Copy-Item -LiteralPath (Join-Path $AddonDirectory 'SunshineSBS.addon64') -Destination (Join-Path $directory 'SunshineSBS.addon64')");
+    const auto retry = game3d::install_reshade_and_addon_for_next_launch(game, bundle);
+    EXPECT_EQ(retry.state, state::installed) << retry.detail;
+  }
+
+  TEST_F(Game3DInstallation, LeftoverAddonWithoutReShadeStopsFreshSetupBeforeWriting) {
+    fs::remove(game.parent_path() / "dxgi.dll");
+    write(game.parent_path() / "SunshineSBS.addon64", "matching bundled addon");
+    fake_installers("Copy-Item -LiteralPath (Join-Path $AddonDirectory 'SunshineSBS.addon64') -Destination (Join-Path $directory 'SunshineSBS.addon64') -Force");
+    // Without the check, the runtime would be written and removed again on every launch.
+    write(bundle / "install-runtime.ps1", "param([string] $GameExecutable)\n[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'runtime ran.txt'), 'ran')\nexit 1\n");
+    const auto before = files();
+    const auto status = game3d::install_reshade_and_addon_for_next_launch(game, bundle);
+    EXPECT_EQ(status.state, state::unavailable);
+    EXPECT_NE(status.detail.find("SunshineSBS.addon64"), std::string::npos) << status.detail;
+    EXPECT_EQ(files(), before);
   }
 
   TEST_F(Game3DInstallation, CombinedInstallLeavesExistingFilesAndFinishesBothSteps) {

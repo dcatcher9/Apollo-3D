@@ -617,9 +617,15 @@ under `Sunshine3D\cache\ReShade` in the host account's local application data (t
 profile when Sunshine runs as its Windows service). A missing or damaged cached installer is
 downloaded again and verified before use. Existing graphics proxies, linked installation paths,
 ambiguous configuration and incompatible official ReShade compatibility entries stop runtime
-installation and leave a setup message. If the add-on step then fails, the `dxgi.dll` and
-`ReShade.ini` that the runtime step created are removed again unless they changed since, so no
-bare ReShade runtime is left and the folder stays fresh for the retry. A leftover preset without
+installation and leave a setup message, and so does a `SunshineSBS.addon64` left in the folder
+without ReShade, before anything is written. If the add-on step then fails, also when its timeout
+or host shutdown stops it before its own restore, setup removes what it created unless changed
+since: the `dxgi.dll` and `ReShade.ini` as the runtime step wrote them, the add-on, its license and
+a new preset, which only the add-on step writes (a stopped copy can be partial), and that step's
+folder under `Sunshine3D-backups`. No bare ReShade runtime is left, and the folder is fresh for the
+retry. A file that changed since, such as a `ReShade.ini` the stopped step already rewrote, is kept
+with the backups and named in the setup message; the retry then stops until it is removed or
+restored. A leftover preset without
 a runtime or `ReShade.ini` can be retained during setup; the add-on installer backs it up and
 applies its ordinary settings migration.
 
