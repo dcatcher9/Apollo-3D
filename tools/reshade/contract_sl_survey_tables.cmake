@@ -155,12 +155,58 @@ foreach(release_dir IN LISTS release_dirs)
     endif()
   endif()
 
+  # The 2.x enumerations the oracle reads per release: how many ResourceType
+  # and DLSSGMode values come before eCount (0 where the release declares no
+  # such enumeration), and whether numFramesToGenerate may exceed 1 (before
+  # 2.7 its comment reads "Must be 1").
+  set(enumeration_names ResourceType DLSSGMode)
+  set(enumeration_fields resource_types dlssg_modes)
+  set(resource_types 0)
+  set(dlssg_modes 0)
+  set(dlssg_multi_frame false)
+  foreach(header IN LISTS headers)
+    file(READ "${header}" header_text)
+    string(REGEX REPLACE "//[^\n]*" "" header_code "${header_text}")
+    foreach(enumeration field IN ZIP_LISTS enumeration_names enumeration_fields)
+      string(REGEX MATCH "enum class ${enumeration}[^{;]*{[^}]*}" body "${header_code}")
+      if(NOT body)
+        continue()
+      endif()
+      if(NOT ${field} EQUAL 0)
+        message(FATAL_ERROR "${tag}: ${enumeration} is declared more than once")
+      endif()
+      string(REGEX REPLACE "^[^{]*{([^}]*)}$" "\\1" body "${body}")
+      string(REGEX REPLACE "[ \t\r\n]" "" body "${body}")
+      string(REPLACE "," ";" enumerators "${body}")
+      list(FIND enumerators eCount count)
+      if(count LESS 1 OR body MATCHES "=")
+        message(FATAL_ERROR "${tag}: ${enumeration} is not a plain enumeration ending in eCount")
+      endif()
+      set(${field} ${count})
+    endforeach()
+    # The DLSSGOptions member and the comment line right above it.
+    file(STRINGS "${header}" header_lines)
+    set(previous "")
+    foreach(line IN LISTS header_lines)
+      if(line MATCHES "^[ \t]*uint32_t[ \t]+numFramesToGenerate[ \t]*=")
+        set(dlssg_multi_frame true)
+        if(previous MATCHES "Must be 1")
+          set(dlssg_multi_frame false)
+        endif()
+      endif()
+      set(previous "${line}")
+    endforeach()
+  endforeach()
+  if(dlssg_modes EQUAL 0 AND dlssg_multi_frame)
+    message(FATAL_ERROR "${tag}: numFramesToGenerate is declared without DLSSGMode")
+  endif()
+
   if(NOT DEFINED dll_${tag})
     message(FATAL_ERROR "${tag}: all-release-dll-results.json has no version resource")
   endif()
   string(REPLACE "." "_" array "${tag}_types")
   string(APPEND type_arrays "\n  inline constexpr buffer_type ${array}[] {\n${rows}  };\n")
-  string(APPEND release_rows "    {\"${tag}\", ${major}, ${minor}, ${patch}, ${array}, ${type_count}, ${constants}, ${resource}, ${resource_tag}, ${precision_info}, ${viewport_handle}, ${dlssg_options}, ${resource_state}, ${dll_${tag}}},\n")
+  string(APPEND release_rows "    {\"${tag}\", ${major}, ${minor}, ${patch}, ${array}, ${type_count}, ${constants}, ${resource}, ${resource_tag}, ${precision_info}, ${viewport_handle}, ${dlssg_options}, ${resource_state}, ${resource_types}, ${dlssg_modes}, ${dlssg_multi_frame}, ${dll_${tag}}},\n")
   math(EXPR release_count "${release_count} + 1")
 endforeach()
 if(release_count EQUAL 0)
@@ -191,6 +237,10 @@ string(CONCAT generated
   "    // Declared struct versions; 0 where the release declares no versioned struct.\n"
   "    std::uint32_t constants, resource, resource_tag, precision_info, viewport_handle, dlssg_options;\n"
   "    bool resource_state;  // The Resource carries a state word.\n"
+  "    // The ResourceType and DLSSGMode values declared before eCount (0 without\n"
+  "    // the enumeration), and whether numFramesToGenerate may exceed 1.\n"
+  "    std::uint32_t resource_types, dlssg_modes;\n"
+  "    bool dlssg_multi_frame;\n"
   "    // The interposer DLL's fixed file version and its FileVersion and\n"
   "    // ProductVersion strings.\n"
   "    std::uint32_t dll_fixed[4];\n"

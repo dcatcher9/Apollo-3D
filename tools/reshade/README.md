@@ -1359,7 +1359,8 @@ executable takes `--list`, `--case <id>` or `--case <sl|ngx>:<name=value,...>` (
 and `--shard <i>/<N>`. `reshade_contract_oracle_independence` refuses any add-on include or name in
 the oracle's headers and the generator, and compiles each on its own.
 
-Buffer-type meanings come from
+Buffer-type meanings, and each release's `DLSSGMode` values, multi frame generation and
+`ResourceType` values, come from
 [`test_sl_survey_tables.generated.h`](test_sl_survey_tables.generated.h), never from the add-on's
 contract table. [`contract_sl_survey_tables.cmake`](contract_sl_survey_tables.cmake) generates it
 from the Streamline ABI survey: each release's own headers and its interposer DLL's version
