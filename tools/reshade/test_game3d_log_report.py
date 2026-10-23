@@ -1837,6 +1837,25 @@ class ReadinessReport(unittest.TestCase):
             self.assertEqual(checks['UI layer copies'].status, status, checks['UI layer copies'].detail)
             self.assertNotIn('not counted', checks['UI layer copies'].detail)
 
+    def test_ui_layer_targets_dropped_are_parsed_and_reported(self):
+        # C12: a timing line's layer group counts the qualifying clears the tracker dropped with every entry taken;
+        # its window and gap still parse, and the drops are an INFO check of their own.
+        def timing(t, dropped):
+            return line(t, '[Sunshine 3D] Sunshine Game 3D timing: presents=600 cpu_ms={mean=0.125 max=0.300} '
+                           'cpu_worst_ms={setup=0.004 depth=0.200 ui=0.005 render=0.050 export=0.040} gpu_frames=0 '
+                           'gpu_ms mean/max={total=0.000/0.000 inputs=0.000/0.000} gpu_profile=disabled '
+                           'dropped_fence_pending=0 dropped_unresolved=0 incomplete=0 ui_layer={copies=600 skipped=0 '
+                           'offers=600 presents_since_copy={mean=1.00 max=1} skip_gap_ms=0.0 '
+                           f'targets_dropped={dropped}}} window_ms=8000')
+        session = report.parse(BASE + [timing('10:00:12', 40), timing('10:00:22', 0)])
+        self.assertEqual([w[1] for w in session.layer_windows], [8.0, 8.0])
+        self.assertEqual(session.layer_targets_dropped, [(session.layer_targets_dropped[0][0], 40)])
+        checks = {c.name: c for c in report.evaluate(session)}
+        self.assertEqual(checks['UI layer targets'].status, 'INFO')
+        self.assertIn('40 qualifying clears in 1 timing windows', checks['UI layer targets'].detail)
+        quiet = report.evaluate(report.parse(BASE + [timing('10:00:12', 0)]))
+        self.assertNotIn('UI layer targets', {c.name for c in quiet})
+
     def test_logs_of_the_removed_shadow_features_still_report(self):
         # The first-run shadow, texel 11's dark pre-UI statistics, rule H2's still screens and the S3 identity shadow
         # were removed (selection revision 9). Their builds' lines still parse; none adds a check of its own, and H2's

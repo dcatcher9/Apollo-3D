@@ -62,37 +62,62 @@ int main() {
     std::puts("PASS UI layer census qualification: output-size single-sample 2D alpha targets cleared whole to transparent "
       "black only");
 
+    // The copy's format follows the view the game cleared (C12 #20): a
+    // UNORM, FLOAT or SRGB view of an alpha family, SRGB kept so the copy
+    // reads the linear values the game blended; a view without a format
+    // falls back to a typed resource's own. A typeless resource without a
+    // view format, an integer or SNORM view, and a view outside the
+    // resource's family are no layer.
+    {
+      using f = api::format;
+      const auto is = [](f resource, f view, f want) { return layer::layer_format(resource, view) == want; };
+      require(is(f::r16g16b16a16_typeless, f::r16g16b16a16_unorm, f::r16g16b16a16_unorm) &&
+          is(f::r16g16b16a16_typeless, f::r16g16b16a16_float, f::r16g16b16a16_float) &&
+          is(f::r8g8b8a8_typeless, f::r8g8b8a8_unorm_srgb, f::r8g8b8a8_unorm_srgb) &&
+          is(f::r8g8b8a8_typeless, f::r8g8b8a8_unorm, f::r8g8b8a8_unorm) &&
+          is(f::b8g8r8a8_unorm, f::unknown, f::b8g8r8a8_unorm) && is(f::r32g32b32a32_float, f::unknown, f::r32g32b32a32_float) &&
+          is(f::r8g8b8a8_unorm, f::r8g8b8a8_unorm_srgb, f::r8g8b8a8_unorm_srgb),
+        "A UNORM, FLOAT or SRGB view of an alpha family was not copied as that view");
+      require(is(f::r16g16b16a16_typeless, f::unknown, f::unknown) && is(f::r8g8b8a8_typeless, f::unknown, f::unknown) &&
+          is(f::r16g16b16a16_typeless, f::r16g16b16a16_uint, f::unknown) &&
+          is(f::r16g16b16a16_typeless, f::r16g16b16a16_snorm, f::unknown) &&
+          is(f::r8g8b8a8_typeless, f::r8g8b8a8_sint, f::unknown) && is(f::r16g16b16a16_uint, f::unknown, f::unknown) &&
+          is(f::r16g16b16a16_typeless, f::r8g8b8a8_unorm, f::unknown) && is(f::r10g10b10a2_typeless, f::r10g10b10a2_unorm, f::unknown) &&
+          is(f::r11g11b10_float, f::unknown, f::unknown),
+        "A typeless resource without a view format, an integer or SNORM view, a foreign view or a 2-bit alpha was a layer");
+    }
+    std::puts("PASS UI layer view format: the cleared view's UNORM, FLOAT or SRGB format of an alpha family, a typed "
+      "resource's own without one; typeless without a view, integer, SNORM and foreign views refused");
+
     // A layer copy in its own slot (candidate layout 2) carries the
-    // premultiplied check; float layers add HDR headroom. Typeless
-    // allocations are named by their typeless format. The reserved late-layer
-    // bit 0x4 is never set.
+    // premultiplied check; a FLOAT view adds HDR headroom, a UNORM one none
+    // (C12 #20: the flag follows the view). The reserved late-layer bit 0x4
+    // is never set.
     namespace detection = sunshine_game3d::ui_detection;
-    for (const auto format : {api::format::r8g8b8a8_unorm, api::format::r8g8b8a8_unorm_srgb, api::format::r8g8b8a8_typeless,
-           api::format::b8g8r8a8_unorm, api::format::b8g8r8a8_unorm_srgb, api::format::b8g8r8a8_typeless})
+    for (const auto format : {api::format::r8g8b8a8_unorm, api::format::r8g8b8a8_unorm_srgb, api::format::b8g8r8a8_unorm,
+           api::format::b8g8r8a8_unorm_srgb, api::format::r16g16b16a16_unorm})
       require(layer::detection_flags(format) == 1u && layer::detection_flags(format) == detection::stored_premultiplied,
-        "An 8-bit layer lost its premultiplied check or set another bit");
-    for (const auto format : {api::format::r16g16b16a16_float, api::format::r16g16b16a16_typeless, api::format::r16g16b16a16_unorm,
-           api::format::r16g16b16a16_snorm, api::format::r16g16b16a16_uint, api::format::r16g16b16a16_sint,
-           api::format::r32g32b32a32_float, api::format::r32g32b32a32_typeless, api::format::r32g32b32a32_uint,
-           api::format::r32g32b32a32_sint})
+        "A UNORM or SRGB layer lost its premultiplied check, or set another bit");
+    for (const auto format : {api::format::r16g16b16a16_float, api::format::r32g32b32a32_float})
       require(layer::detection_flags(format) == 3u &&
           layer::detection_flags(format) == (detection::stored_premultiplied | detection::stored_hdr_headroom),
         "A float layer lost its premultiplied check or HDR headroom, or set another bit");
-    // The contract's DXGI test, which ui_detection_replay also uses, names the
-    // same float layers as ReShade's typeless families; stored flags never
-    // carry a per-frame or reserved bit.
+    // The contract's DXGI test, which ui_detection_replay also uses, gives
+    // headroom to the FLOAT layer views only; stored flags never carry a
+    // per-frame or reserved bit, nor the UIAlpha channel bit.
     for (std::uint32_t value = 0; value != 256; ++value) {
-      const auto format = static_cast<api::format>(value), typeless = api::format_to_typeless(format);
-      if (layer::alpha_format(format))
+      const auto format = static_cast<api::format>(value);
+      if (layer::layer_format(format, format) == format && format != api::format::unknown)
         require(detection::float_layer_format(value) ==
-            (typeless == api::format::r16g16b16a16_typeless || typeless == api::format::r32g32b32a32_typeless),
-          "The contract's float layer formats differ from the renderer's typeless families");
+            (format == api::format::r16g16b16a16_float || format == api::format::r32g32b32a32_float),
+          "The contract's float layer formats differ from the FLOAT layer views");
       // 0x4u and 0x8u are the reserved stored bits (game3d_ui_detection_contract.h).
-      require(!(layer::detection_flags(format) & (detection::per_frame_mask | 0x4u | 0x8u)),
-        "Layer flags set a per-frame or reserved bit");
+      require(!(layer::detection_flags(format) &
+                (detection::per_frame_mask | 0x4u | 0x8u | detection::stored_ui_alpha_in_alpha)),
+        "Layer flags set a per-frame, reserved or UIAlpha bit");
     }
-    std::puts("PASS UI layer detection flags: 1 for 8-bit and 3 for float layers, typeless included; no per-frame or "
-      "reserved bits");
+    std::puts("PASS UI layer detection flags: 1 for UNORM and SRGB and 3 for FLOAT layer views; no per-frame, reserved "
+      "or UIAlpha bits");
 
     // game3d_native.hlsl mirrors every flag and sizes detection within the
     // contract's range.
@@ -234,6 +259,54 @@ int main() {
       tracker.reset();
       require(!tracker.active(), "Reset kept an active layer");
     }
+    // Capacity (C12 #18): with 9 and with tracker_capacity + 1 targets cleared
+    // every frame in one order, the one cleared last confirms after
+    // confirm_clears frames; beyond capacity the targets cleared first are
+    // dropped and counted instead of evicting one another every frame (the 8
+    // entries before tracked none of 9).
+    for (const unsigned targets : {9u, layer::tracker_capacity + 1u, 2u * layer::tracker_capacity}) {
+      layer::layer_tracker tracker;
+      std::uint64_t now = 1000;
+      const auto all = [&] {
+        for (std::uint64_t t = 1; t <= targets; ++t) tracker.clear(t, now);
+        tracker.present(now);
+        now += 16;
+      };
+      for (unsigned i = 1; i < layer::confirm_clears; ++i) {
+        all();
+        require(!tracker.active(), "A layer was trusted before enough clears");
+      }
+      all();
+      require(tracker.active() == targets, "The target cleared last was not confirmed among many qualifying targets");
+      const auto dropped = tracker.dropped();
+      require(targets > layer::tracker_capacity ? dropped >= targets - layer::tracker_capacity : !dropped,
+        "Targets beyond the tracker's capacity were not counted, or targets within it were dropped");
+      all();
+      require(tracker.active() == targets &&
+          tracker.dropped() == dropped + (targets > layer::tracker_capacity ? targets - layer::tracker_capacity : 0u),
+        "The tracked set did not settle on the targets cleared last");
+      // A transient target cleared after them neither displaces the
+      // confirmed layer nor stays: every entry is confirmed by now.
+      for (std::uint64_t t = 1; t <= targets; ++t) tracker.clear(t, now);
+      tracker.clear(1000 + targets, now);
+      tracker.present(now);
+      require(tracker.active() == targets, "A transient target displaced the confirmed layer at capacity");
+    }
+    {
+      // Twenty new targets every frame before the layer: once every entry is
+      // taken, a newcomer replaces only an entry cleared earlier in the same
+      // frame, so the layer, cleared last, keeps its entry and confirms.
+      layer::layer_tracker tracker;
+      std::uint64_t now = 1000, transient = 5000;
+      for (unsigned i = 0; i < 2 * layer::confirm_clears; ++i, now += 16) {
+        for (unsigned k = 0; k != 20; ++k) tracker.clear(transient++, now);
+        tracker.clear(7, now);
+        tracker.present(now);
+      }
+      require(tracker.active() == 7, "A stream of transient targets kept the layer cleared last from confirming");
+    }
+    std::puts("PASS UI layer tracker capacity: 32 entries; with 9, 33 and 64 targets the one cleared last confirms, "
+      "targets beyond capacity are dropped and counted, never rotated, and transients never displace a confirmed layer");
     std::puts("PASS UI layer tracking: confirmed after repeated clears, last-cleared layer active, one copy per Present, expiry");
     {
       // latest()'s recency gate (recent_copy): the newest recorded copy is

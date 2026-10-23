@@ -1505,10 +1505,10 @@ namespace {
       const std::string line = message;
       const std::string tail = " window_ms=2500";
       require(line.rfind("Sunshine Game 3D timing: presents=4 cpu_ms={mean=0.200 max=0.500}", 0) == 0 &&
-          line.find(" ui_layer={copies=") != std::string::npos && line.find(" skip_gap_ms=0.0}" + tail) != std::string::npos &&
+          line.find(" ui_layer={copies=") != std::string::npos && line.find(" skip_gap_ms=0.0 targets_dropped=0}" + tail) != std::string::npos &&
           line.size() > tail.size() &&
           line.compare(line.size() - tail.size(), tail.size(), tail) == 0,
-        "The timing line did not end with its window's length after the UI layer group and its skip gap");
+        "The timing line did not end with its window's length after the UI layer group, its skip gap and dropped targets");
       require(!proof.timing.presents && proof.timing.start == 3500 && proof.timing.next_log == 13500,
         "Closing a timing window did not start the next one at its line");
       // An empty window (a line right after the previous one) logs zero means.

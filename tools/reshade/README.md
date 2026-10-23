@@ -527,7 +527,9 @@ second costs about 3 ms), skips that were not streamed or without `--host-log`, 
 before 10-07, which log no gap, are INFO. The gap is a maximum, so neither a window's placement nor its
 average rates can hide a burst of skips. The once-per-ring full-ring line (a WARN before 10-07) belongs
 to this check, not to `Log warnings`, and one after the last timing line is named as uncounted, its
-cost unknown; and, from the host log, the Game 3D link,
+cost unknown; `UI layer targets` (INFO, since C12) counts the qualifying clears the layer tracker
+dropped with all 32 of its entries taken (the timing group's `targets_dropped`: the targets cleared
+first in a frame, beyond the 32 cleared last); and, from the host log, the Game 3D link,
 size fit and encoder stalls (one per stalled frame, classified by its last line and listed with its length and
 the nearest of the game's frame-generation switches or runtime resets within 2 s). An upstream stall that
 completed within 2 s of such a transition, froze its picture no longer than the encoder's own 250 ms budget, and

@@ -182,10 +182,11 @@ TIMING = re.compile(r'Sunshine Game 3D timing: presents=(\d+) cpu_ms=\{mean=([0-
 # The timing line's offscreen UI layer group (since 10-06): live copies recorded, skipped by a full ring and offered.
 # Since 10-07 the group ends with the longest time the layer went unrefreshed across skipped copies (skip_gap_ms,
 # ui_layer::skip_gap), and the line with its window's length; a runtime reset logs its last, shorter window. Older lines
-# cover the periodic 10 s (exporter.cpp) and have no gap.
+# cover the periodic 10 s (exporter.cpp) and have no gap. Since C12 the group also counts targets_dropped, the
+# qualifying clears the layer tracker dropped with all of its ui_layer::tracker_capacity (32) entries taken.
 LAYER_TIMING = re.compile(r'ui_layer=\{copies=(\d+) skipped=(\d+) offers=(\d+) '
-                          r'presents_since_copy=\{mean=([0-9.]+) max=(\d+)\}(?: skip_gap_ms=([0-9.]+))?\}'
-                          r'(?: window_ms=(\d+))?')
+                          r'presents_since_copy=\{mean=([0-9.]+) max=(\d+)\}(?: skip_gap_ms=([0-9.]+))?'
+                          r'(?: targets_dropped=(\d+))?\}(?: window_ms=(\d+))?')
 TIMING_WINDOW_S = 10.0
 WINDOW_MS = re.compile(r'\bwindow_ms=(\d+)')
 # The layer's recency gate (game3d_ui_layer.h max_clear_gap_ms): this long without a recorded copy, the layer is no
@@ -747,6 +748,8 @@ class Session:
     # Each timing line's UI layer group: (end, length s, Presents, copies, skipped, offers, presents_since_copy mean
     # and max, longest skip gap in ms or None before 10-07); and each logged-once full-ring line.
     layer_windows: list[tuple] = field(default_factory=list)
+    # (time, count): timing windows whose layer tracker dropped qualifying clears with every entry taken.
+    layer_targets_dropped: list[tuple] = field(default_factory=list)
     layer_saturated: list[float] = field(default_factory=list)
     # Export delivery counters: (t, runtime, generation, published, dropped, overwritten_unconsumed); and the
     # host's stream fps when a host log was read.
@@ -954,7 +957,9 @@ def parse(lines) -> Session:
             profile = GPU_PROFILE.search(text)
             s.timing_profile = profile.group(1) if profile else ''
             if layer := LAYER_TIMING.search(text):
-                copies, skipped, offers, mean, peak, gap, window_ms = layer.groups()
+                copies, skipped, offers, mean, peak, gap, dropped, window_ms = layer.groups()
+                if dropped and int(dropped):
+                    s.layer_targets_dropped.append((t, int(dropped)))
                 s.layer_windows.append((t, int(window_ms) / 1000.0 if window_ms else TIMING_WINDOW_S,
                                         int(found.group(1)), int(copies), int(skipped), int(offers), float(mean),
                                         int(peak), float(gap) if gap is not None else None))
@@ -1793,6 +1798,15 @@ def layer_copy_checks(s: Session, add) -> None:
     before 10-07, whose gap is not logged, are INFO. A full-ring line after the last timing line names copies whose
     count was never logged (before 10-07 a runtime reset dropped its partial window). The gap is a maximum per window,
     so neither the window's other play nor its average rates can hide a burst of skips."""
+    if s.layer_targets_dropped:
+        # More qualifying targets were cleared within the clear gap than the tracker holds: those cleared first in a
+        # frame are not tracked (bounded by design; the layer is the confirmed target cleared last). INFO: a UI
+        # layer cleared before 32 other qualifying targets would be among them.
+        total = sum(n for _, n in s.layer_targets_dropped)
+        add(Check('INFO', 'UI layer targets',
+                  f'{total} qualifying clears in {len(s.layer_targets_dropped)} timing windows found every one of the '
+                  'layer tracker\'s 32 entries taken and were not tracked (the targets cleared first in a frame)',
+                  [f'{clock(t)}: targets_dropped={n}' for t, n in s.layer_targets_dropped[:6]]))
     windows = [w for w in s.layer_windows if w[3] or w[4]]
     unlogged = [t for t in s.layer_saturated if not any(w[0] >= t for w in s.layer_windows)]
     if not windows and not unlogged:

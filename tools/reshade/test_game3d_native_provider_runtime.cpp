@@ -1014,6 +1014,97 @@ namespace {
           "that closed a cycle with a GPU wait runs at GPU speed and its copies are offered in fence order once reached; "
           "the next copy on the presenting queue is in queue order again");
 
+        // C12 #17: a D3D12 render pass whose render target begins with a
+        // CLEAR to (0, 0, 0, 0) is a layer clear. ReShade reports it before
+        // the native BeginRenderPass, so the copy recorded there, outside the
+        // pass, holds the previous frame's layer: the layer, no longer
+        // cleared any other way, expires, is confirmed again by render-pass
+        // clears alone, and its offered copy holds the drawn layer's alpha
+        // exactly (a copy recorded after the native call would sit inside the
+        // pass, after the clear). A CLEAR to alpha 1 records no copy.
+        {
+          com_ptr<ID3D12GraphicsCommandList4> pass_list;
+          checked(commands->QueryInterface(IID_PPV_ARGS(pass_list.put())), "The game list has no render passes");
+          float pass_clear[4]{};
+          const auto pass_layer = [&] {
+            D3D12_RENDER_PASS_RENDER_TARGET_DESC target{};
+            target.cpuDescriptor = layer_rtv;
+            target.BeginningAccess.Type = D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_CLEAR;
+            target.BeginningAccess.Clear.ClearValue.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            std::memcpy(target.BeginningAccess.Clear.ClearValue.Color, pass_clear, sizeof(pass_clear));
+            target.EndingAccess.Type = D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_PRESERVE;
+            pass_list->BeginRenderPass(1, &target, nullptr, D3D12_RENDER_PASS_FLAG_NONE);
+            pass_list->EndRenderPass();
+            // The UI drawn after the pass, as draw_layer draws it after its clear.
+            transition(commands.p, layer.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_DEST);
+            D3D12_TEXTURE_COPY_LOCATION from{}, to{};
+            from.pResource = layer_upload.p; from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            from.PlacedFootprint = layer_footprint;
+            to.pResource = layer.p; to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            commands->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+            transition(commands.p, layer.p, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET);
+          };
+          // Expire the layer: no clear for longer than max_clear_gap_ms.
+          render_tracked_depth = [&] { real_frame(); };
+          step(); no_effects();
+          Sleep(DWORD(sunshine_game3d::ui_layer::max_clear_gap_ms + 50));
+          step(); no_effects();
+          const auto expired = query().capture_id;
+          render_tracked_depth = [&] { real_frame(); pass_layer(); };
+          for (unsigned i = 0; i != sunshine_game3d::ui_layer::confirm_clears; ++i) {
+            step(); no_effects();
+            require(query().capture_id == expired, "A render-pass clear copied the layer before it was confirmed again");
+          }
+          step(); no_effects();
+          step(); no_effects();
+          live = query();
+          require(live.capture_id > expired && live.offered_id == live.capture_id && live.offered_copy && live.in_order &&
+              live.order == unsigned(order::queue) && live.format == unsigned(DXGI_FORMAT_R8G8B8A8_UNORM),
+            ("Render-pass clears alone did not confirm the layer and offer its copy in queue order: captured=" +
+              std::to_string(live.capture_id) + " expired=" + std::to_string(expired) + " offered=" +
+              std::to_string(live.offered_id) + " format=" + std::to_string(live.format)).c_str());
+          // The offered copy holds the previous frame's layer, exactly.
+          com_ptr<ID3D12Resource> copy_back;
+          auto *copy = reinterpret_cast<ID3D12Resource *>(live.offered_copy);
+          const auto copy_desc = copy->GetDesc();
+          D3D12_PLACED_SUBRESOURCE_FOOTPRINT back_footprint{};
+          UINT64 back_bytes = 0;
+          game->GetCopyableFootprints(&copy_desc, 0, 1, 0, &back_footprint, nullptr, nullptr, &back_bytes);
+          buffer(copy_back, back_bytes, D3D12_HEAP_TYPE_READBACK);
+          begin_commands();
+          constexpr auto sampled = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+          transition(commands.p, copy, sampled, D3D12_RESOURCE_STATE_COPY_SOURCE);
+          D3D12_TEXTURE_COPY_LOCATION back_from{}, back_to{};
+          back_from.pResource = copy; back_from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+          back_to.pResource = copy_back.p; back_to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+          back_to.PlacedFootprint = back_footprint;
+          commands->CopyTextureRegion(&back_to, 0, 0, 0, &back_from, nullptr);
+          transition(commands.p, copy, D3D12_RESOURCE_STATE_COPY_SOURCE, sampled);
+          submit();
+          const std::uint8_t *bytes = nullptr;
+          checked(copy_back->Map(0, nullptr, reinterpret_cast<void **>(const_cast<std::uint8_t **>(&bytes))), "Map the layer copy");
+          std::size_t mismatched = 0;
+          for (unsigned y = 0; y != height; ++y)
+            for (unsigned x = 0; x != width; ++x)
+              mismatched += bytes[back_footprint.Offset + size_t(y) * back_footprint.Footprint.RowPitch + size_t(x) * 4 + 3] !=
+                layer_pattern[(size_t(y) * width + x) * 4 + 3];
+          const D3D12_RANGE no_write{};
+          copy_back->Unmap(0, &no_write);
+          require(!mismatched, ("The render-pass layer copy does not hold the previous frame's layer alpha: " +
+            std::to_string(mismatched) + " pixels differ").c_str());
+          // A CLEAR to alpha 1 is no layer clear: no copy.
+          const auto before_opaque = query().capture_id;
+          pass_clear[3] = 1.f;
+          for (unsigned i = 0; i != 3; ++i) { step(); no_effects(); }
+          require(query().capture_id == before_opaque, "A render-pass CLEAR to alpha 1 copied the layer");
+          render_tracked_depth = [&] { real_frame(); draw_layer(); };
+          for (unsigned i = 0; i != 2; ++i) { step(); no_effects(); }
+          evidence << "layer-render-pass confirmed_by_pass_clears=1 copy_before_native_pass=1 opaque_clear_ignored=1\n";
+          std::puts("PASS D3D12 layer render-pass clear: a pass beginning with a CLEAR to (0, 0, 0, 0) confirms the layer "
+            "on its own and its copy, recorded before the native BeginRenderPass, holds the previous frame's layer alpha "
+            "exactly; a CLEAR to alpha 1 records no copy");
+        }
+
         // Dump 3D census copies follow the same queue order (game3d_ui_layer.h,
         // census_verdict): the dump reads one only with CPU proof that its
         // write completed (here: its second-queue fence reached and its list

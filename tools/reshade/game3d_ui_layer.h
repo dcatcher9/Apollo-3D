@@ -16,7 +16,9 @@
 // frame generation is on).
 //
 // Live tracking: while the layer is wanted (UI detection asked for it within
-// the last second, or a Dump 3D is armed), every qualifying clear is observed;
+// the last second, or a Dump 3D is armed), every qualifying clear is observed
+// (ClearRenderTargetView, or on D3D12 a render pass whose render target
+// begins with a CLEAR, observed before the native BeginRenderPass);
 // otherwise a clear returns before any lookup or lock, and Presents skip the
 // output bookkeeping. A target cleared whole (no rectangles, or one covering
 // the target) in at least confirm_clears frames with gaps under
@@ -80,12 +82,24 @@ namespace sunshine_game3d::ui_layer {
   inline constexpr std::uint32_t confirm_clears = 3;
   inline constexpr std::uint64_t max_clear_gap_ms = 250;
 
-  // Formats that can carry blended UI coverage in alpha: 8 bits or more.
+  // Resource formats that can carry blended UI coverage in alpha: 8 bits or
+  // more (the R8G8B8A8, B8G8R8A8, R16G16B16A16 and R32G32B32A32 families).
   bool alpha_format(api::format format);
+  // The format a layer copy of a target is stored and read as: the format of
+  // the view the game cleared it through (ClearRenderTargetView's RTV or the
+  // render-pass entry's), or, for a view without one, the typed resource's
+  // own. Only a UNORM, FLOAT or SRGB view of an alpha family is a layer
+  // (R8G8B8A8 and B8G8R8A8 UNORM or SRGB, R16G16B16A16 FLOAT or UNORM,
+  // R32G32B32A32 FLOAT); an SRGB view stays SRGB, so the copy reads the
+  // linear values the game blended, as the premultiplied bound needs. A
+  // typeless resource without a view format, an integer or SNORM view, or a
+  // view outside the resource's family is not a layer (unknown).
+  api::format layer_format(api::format resource, api::format view);
   // Sunshine_UIDetectionFlags of the layer slot for a copy of this format
   // (ui_detection::layer_detection_flags): the premultiplied bound of V1 (no color above twice its alpha: UI blended over
   // transparent black, allowing tints brighter than white) and, for a float
-  // layer, HDR headroom. A copy with color but no alpha fails that bound
+  // view (layer_format: R16G16B16A16 or R32G32B32A32 FLOAT; a UNORM view has
+  // none), HDR headroom. A copy with color but no alpha fails that bound
   // nearly everywhere and is V1-invalid for that frame.
   std::uint32_t detection_flags(api::format format);
   // A single-sample 2D color target at the output size cleared whole to
@@ -108,7 +122,18 @@ namespace sunshine_game3d::ui_layer {
       newest_tick - offered_tick <= max_clear_gap_ms;
   }
 
-  // Pure selection state of the live tracker; no GPU or runtime calls.
+  // Pure selection state of the live tracker; no GPU or runtime calls. It
+  // tracks up to tracker_capacity targets. A target takes its own entry, a
+  // free one or one not cleared within max_clear_gap_ms. With every entry
+  // recent it may replace only an unconfirmed entry cleared earlier in the
+  // same frame (the earliest such): the targets cleared last in a frame (UI
+  // draws last) keep their entries and a confirmed layer is never displaced.
+  // Otherwise the newcomer is dropped and counted (dropped()). Of more
+  // targets than entries cleared every frame in one order, the ones cleared
+  // first are dropped at their turn while every entry is still recent, so
+  // the last tracker_capacity settle instead of evicting one another each
+  // frame.
+  inline constexpr unsigned tracker_capacity = 32;
   class layer_tracker {
   public:
     // A qualifying clear. True when it is the active layer's first clear since
@@ -128,6 +153,9 @@ namespace sunshine_game3d::ui_layer {
     std::uint32_t presents_since(std::uint64_t frame) const {
       return frame <= frame_ && frame_ - frame <= 0xffffffffu ? static_cast<std::uint32_t>(frame_ - frame) : 0u;
     }
+    // Qualifying clears of targets that found no entry, since construction
+    // or reset.
+    std::uint64_t dropped() const { return dropped_; }
     void reset() { *this = {}; }
   private:
     struct entry {
@@ -138,8 +166,8 @@ namespace sunshine_game3d::ui_layer {
       return value.resource && value.streak >= confirm_clears && now_ms >= value.last_ms &&
         now_ms - value.last_ms <= max_clear_gap_ms;
     }
-    std::array<entry, 8> entries_{};
-    std::uint64_t order_{}, frame_{}, active_{};
+    std::array<entry, tracker_capacity> entries_{};
+    std::uint64_t order_{}, frame_{}, active_{}, dropped_{};
     bool captured_since_present_{};
   };
 
@@ -546,10 +574,11 @@ namespace sunshine_game3d::ui_layer {
   // The live copies since the last call, for the periodic timing line:
   // recorded copies, copies skipped by a saturated ring, and Presents
   // latest() offered a copy to with that copy's presents_since_copy (sum
-  // and maximum), and the longest skip gap (skip_gap, microseconds). The
-  // counters restart with each call.
+  // and maximum), the longest skip gap (skip_gap, microseconds) and the
+  // qualifying clears the tracker dropped with every entry taken
+  // (targets_dropped). The counters restart with each call.
   struct stats {
-    std::uint64_t copies{}, skipped{}, offers{}, presents_since_sum{}, skip_gap_max_us{};
+    std::uint64_t copies{}, skipped{}, offers{}, presents_since_sum{}, skip_gap_max_us{}, targets_dropped{};
     std::uint32_t presents_since_max{};
   };
   stats take_stats();
@@ -604,6 +633,9 @@ namespace sunshine_game3d::ui_layer {
     std::uint64_t fence_value{}, offered_id{};
     std::uint32_t order{}, owing{}, awaiting{};
     std::uint32_t census_copies{}, census_pending{}, census_awaiting{};
+    // The offered copy (api::resource handle) and the live copies' format.
+    std::uint64_t offered_copy{};
+    std::uint32_t format{};
   };
 
   // A renderer submission read the live copy capture_id (a direct binding or

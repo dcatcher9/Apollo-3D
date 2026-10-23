@@ -21,18 +21,25 @@ namespace sunshine_game3d::ui_layer {
     const auto recent = [&](const entry &value) {
       return value.resource && now_ms >= value.last_ms && now_ms - value.last_ms <= max_clear_gap_ms;
     };
-    // Otherwise replace a free or expired entry, then the shortest streak,
-    // cleared longest ago: transient targets never displace a confirmed layer.
-    const auto worse = [&](const entry &a, const entry &b) {
-      return !recent(a) || (recent(b) && (a.streak < b.streak || (a.streak == b.streak && a.order < b.order)));
-    };
-    auto *slot = &entries_[0];
-    bool found = false;
+    // The target's own entry, else a free or expired one, else the earliest
+    // unconfirmed entry already cleared in this frame (tracker_capacity):
+    // transient targets never displace a confirmed layer, and targets cleared
+    // before the last tracker_capacity of a frame are dropped, not rotated in.
+    entry *slot = nullptr, *free = nullptr, *earlier = nullptr;
     for (auto &value : entries_) {
-      if (value.resource == resource) { slot = &value; found = true; break; }
-      if (worse(value, *slot)) slot = &value;
+      if (value.resource == resource) { slot = &value; break; }
+      if (!recent(value)) { if (!free) free = &value; }
+      else if (value.frame == frame_ && !confirmed(value, now_ms) && (!earlier || value.order < earlier->order))
+        earlier = &value;
     }
-    if (!found) *slot = {resource};
+    if (!slot) {
+      slot = free ? free : earlier;
+      if (!slot) {
+        ++dropped_;
+        return false;
+      }
+      *slot = {resource};
+    }
     // The streak counts frames: repeated clears within one frame count once.
     if (!recent(*slot)) slot->streak = 1;
     else if (slot->frame != frame_) ++slot->streak;
@@ -57,6 +64,10 @@ namespace sunshine_game3d::ui_layer {
     bool transparent_black(const float color[4]) {
       return color[0] == 0.f && color[1] == 0.f && color[2] == 0.f && color[3] == 0.f;
     }
+
+    // A render pass may name a target at most this often (D3D12's
+    // simultaneous render target count).
+    constexpr std::uint32_t max_pass_targets = 8;
 
     // A clear without rectangles, or with one covering the whole target.
     bool whole_clear(const api::resource_desc &desc, std::uint32_t rect_count, const api::rect *rects) {
@@ -210,6 +221,7 @@ namespace sunshine_game3d::ui_layer {
     enum log_bit : std::uint32_t {
       log_fenced = 1u << 0, log_unobserved = 1u << 1, log_mixed = 1u << 2, log_no_fence = 1u << 3,
       log_create_failed = 1u << 4, log_signal_failed = 1u << 5, log_fence_capacity = 1u << 6, log_census = 1u << 7,
+      log_dropped = 1u << 15, // After log_census's eight bits.
     };
 
     struct state_t {
@@ -263,7 +275,8 @@ namespace sunshine_game3d::ui_layer {
       // under the lock and taken without it (the timing line holds the
       // exporter's lock).
       struct {
-        std::atomic<std::uint64_t> copies{0}, skipped{0}, offers{0}, presents_since_sum{0}, skip_gap_max_us{0};
+        std::atomic<std::uint64_t> copies{0}, skipped{0}, offers{0}, presents_since_sum{0}, skip_gap_max_us{0},
+          targets_dropped{0};
         std::atomic<std::uint32_t> presents_since_max{0};
       } counts;
     };
@@ -646,9 +659,8 @@ namespace sunshine_game3d::ui_layer {
     // into a ring entry, before the game's clear. An entry without a copy is
     // reserved instead and returned for allocation outside the lock.
     live_allocation capture_live(state_t &s, api::command_list *commands, api::device *device, api::resource resource,
-        const api::resource_desc &desc) {
+        const api::resource_desc &desc, api::format typed) {
       auto &live = s.live;
-      const auto typed = api::format_to_default_typed(desc.texture.format, 0);
       const auto now = GetTickCount64();
       if (live.entries && (live.width != desc.texture.width || live.height != desc.texture.height || live.format != typed)) {
         // A new copy shape is a new scope.
@@ -748,7 +760,7 @@ namespace sunshine_game3d::ui_layer {
     constexpr const char *census_allocating = "allocating";
 
     // Requires the state lock. The dump census: each armed qualifying target once.
-    census_allocation census(state_t &s, api::resource resource, const api::resource_desc &desc) {
+    census_allocation census(state_t &s, api::resource resource, const api::resource_desc &desc, api::format typed) {
       const auto known = std::find_if(s.census.begin(), s.census.end(),
         [&](const census_entry &e) { return e.c.source == resource.handle; });
       if (known != s.census.end()) {
@@ -761,7 +773,6 @@ namespace sunshine_game3d::ui_layer {
       c.source = resource.handle;
       c.width = desc.texture.width;
       c.height = desc.texture.height;
-      const auto typed = api::format_to_default_typed(desc.texture.format, 0);
       c.format = static_cast<std::uint32_t>(typed);
       c.clears = 1;
       c.status = census_allocating;
@@ -798,32 +809,43 @@ namespace sunshine_game3d::ui_layer {
       return true;
     }
 
-    bool on_clear(api::command_list *commands, api::resource_view view, const float color[4], std::uint32_t rect_count,
-        const api::rect *rects) {
-      auto &s = state();
-      // Cheap rejection before any lookup or lock: only exact transparent
-      // black qualifies, and only while the layer is wanted.
-      if (!transparent_black(color) || !wanted(s, GetTickCount64())) return false;
+    // One qualifying clear of a target (resource) through view, from
+    // ClearRenderTargetView or a render pass that begins with a CLEAR.
+    void observe_clear(state_t &s, api::command_list *commands, api::device *device, api::resource resource,
+        api::resource_view view, const float color[4], std::uint32_t rect_count, const api::rect *rects) {
       try {
-        auto *device = commands->get_device();
-        const auto resource = device->get_resource_from_view(view);
-        if (!resource.handle) return false;
         const auto desc = device->get_resource_desc(resource);
+        // The copy's format follows the view the game cleared (layer_format).
+        const auto format = layer_format(desc.texture.format, device->get_resource_view_desc(view).format);
+        if (format == api::format::unknown) return;
         live_allocation live;
         census_allocation dump;
         {
           std::lock_guard<std::mutex> lock(s.mutex);
           if (device != s.device ||
-              std::find(s.back_buffers.begin(), s.back_buffers.end(), resource.handle) != s.back_buffers.end()) return false;
-          if (!qualifies(desc, color, s.width, s.height, rect_count, rects)) return false;
+              std::find(s.back_buffers.begin(), s.back_buffers.end(), resource.handle) != s.back_buffers.end()) return;
+          if (!qualifies(desc, color, s.width, s.height, rect_count, rects)) return;
           // Clearing requires the render-target state on every API, so the
           // previous frame's layer can be copied here before the clear erases it.
           const auto now = GetTickCount64();
+          const auto dropped = s.live.tracker.dropped();
           if (s.live.tracker.clear(resource.handle, now) && demanded(s, now))
-            live = capture_live(s, commands, device, resource, desc);
-          if (s.armed.load(std::memory_order_relaxed)) dump = census(s, resource, desc);
+            live = capture_live(s, commands, device, resource, desc, format);
+          if (s.live.tracker.dropped() != dropped) {
+            s.counts.targets_dropped.fetch_add(1, std::memory_order_relaxed);
+            if (!(s.logged & log_dropped)) {
+              s.logged |= log_dropped;
+              char message[256];
+              std::snprintf(message, sizeof(message),
+                "Sunshine UI layer: more than %u qualifying targets are cleared within %llu ms; a target cleared before "
+                "them is not tracked (logged once; the timing line counts targets_dropped)",
+                tracker_capacity, static_cast<unsigned long long>(max_clear_gap_ms));
+              sunshine_log::message(reshade::log::level::info, message);
+            }
+          }
+          if (s.armed.load(std::memory_order_relaxed)) dump = census(s, resource, desc, format);
         }
-        if (live.index < 0 && !dump.wanted) return false;
+        if (live.index < 0 && !dump.wanted) return;
         // New copies are allocated outside the lock, so a slow allocation
         // never stalls the Present thread or another recording thread.
         api::resource live_copy{}, dump_copy{};
@@ -850,7 +872,56 @@ namespace sunshine_game3d::ui_layer {
       } catch (...) {
         // A failure never propagates into the game's command recording.
       }
+    }
+
+    bool on_clear(api::command_list *commands, api::resource_view view, const float color[4], std::uint32_t rect_count,
+        const api::rect *rects) {
+      auto &s = state();
+      // Cheap rejection before any lookup or lock: only exact transparent
+      // black qualifies, and only while the layer is wanted.
+      if (!transparent_black(color) || !wanted(s, GetTickCount64())) return false;
+      try {
+        auto *device = commands->get_device();
+        const auto resource = device->get_resource_from_view(view);
+        if (resource.handle) observe_clear(s, commands, device, resource, view, color, rect_count, rects);
+      } catch (...) {
+        // A failure never propagates into the game's command recording.
+      }
       return false; // Never skip the game's clear.
+    }
+
+    // A D3D12 render pass whose render targets begin with a CLEAR clears each
+    // of them as ClearRenderTargetView would, with no rectangles. ReShade
+    // reports it before the native BeginRenderPass, outside any pass, where
+    // each such target is in the render-target state the pass requires, so
+    // the previous frame's layer is copied there exactly as before a clear.
+    // A resuming pass continues a suspended one with nothing allowed between
+    // them: it records nothing. Each target counts once per pass, and an
+    // entry whose view resolves to no resource is skipped. Nothing is
+    // recorded at the pass's end or inside it.
+    bool on_begin_render_pass(api::command_list *commands, std::uint32_t count, const api::render_pass_render_target_desc *rts,
+        const api::render_pass_depth_stencil_desc *, api::render_pass_flags flags) {
+      auto &s = state();
+      if (!rts || !count || (flags & api::render_pass_flags::resume) != 0 || !wanted(s, GetTickCount64())) return false;
+      try {
+        auto *device = commands->get_device();
+        if (device->get_api() != api::device_api::d3d12) return false;
+        std::array<std::uint64_t, max_pass_targets> seen{};
+        unsigned observed = 0;
+        for (std::uint32_t i = 0; i != count && i != max_pass_targets; ++i) {
+          const auto &target = rts[i];
+          if (target.load_op != api::render_pass_load_op::clear || !target.view.handle ||
+              !transparent_black(target.clear_color)) continue;
+          const auto resource = device->get_resource_from_view(target.view);
+          if (!resource.handle || std::find(seen.begin(), seen.begin() + observed, resource.handle) != seen.begin() + observed)
+            continue;
+          seen[observed++] = resource.handle;
+          observe_clear(s, commands, device, resource, target.view, target.clear_color, 0, nullptr);
+        }
+      } catch (...) {
+        // A failure never propagates into the game's command recording.
+      }
+      return false; // Never skip the game's render pass.
     }
 
     // Requires no lock. The layer is not wanted: live copies are retired once
@@ -885,6 +956,23 @@ namespace sunshine_game3d::ui_layer {
         return true;
       default:
         return false;
+    }
+  }
+
+  api::format layer_format(api::format resource, api::format view) {
+    const auto format = view != api::format::unknown ? view : resource;
+    if (api::format_to_typeless(format) != api::format_to_typeless(resource)) return api::format::unknown;
+    switch (format) {
+      case api::format::r8g8b8a8_unorm:
+      case api::format::r8g8b8a8_unorm_srgb:
+      case api::format::b8g8r8a8_unorm:
+      case api::format::b8g8r8a8_unorm_srgb:
+      case api::format::r16g16b16a16_float:
+      case api::format::r16g16b16a16_unorm:
+      case api::format::r32g32b32a32_float:
+        return format;
+      default:
+        return api::format::unknown;
     }
   }
 
@@ -973,6 +1061,7 @@ namespace sunshine_game3d::ui_layer {
     value.presents_since_sum = c.presents_since_sum.exchange(0, std::memory_order_relaxed);
     value.presents_since_max = c.presents_since_max.exchange(0, std::memory_order_relaxed);
     value.skip_gap_max_us = c.skip_gap_max_us.exchange(0, std::memory_order_relaxed);
+    value.targets_dropped = c.targets_dropped.exchange(0, std::memory_order_relaxed);
     return value;
   }
 
@@ -1157,6 +1246,7 @@ namespace sunshine_game3d::ui_layer {
 
   void register_events() {
     reshade::register_event<reshade::addon_event::clear_render_target_view>(sunshine_addon_lifetime::guarded<on_clear>);
+    reshade::register_event<reshade::addon_event::begin_render_pass>(sunshine_addon_lifetime::guarded<on_begin_render_pass>);
     reshade::register_event<reshade::addon_event::destroy_device>(sunshine_addon_lifetime::guarded<on_destroy_device>);
     reshade::register_event<reshade::addon_event::execute_command_list>(sunshine_addon_lifetime::guarded<on_execute>);
     reshade::register_event<reshade::addon_event::execute_secondary_command_list>(
@@ -1168,6 +1258,7 @@ namespace sunshine_game3d::ui_layer {
 
   void unregister_events() {
     reshade::unregister_event<reshade::addon_event::clear_render_target_view>(sunshine_addon_lifetime::guarded<on_clear>);
+    reshade::unregister_event<reshade::addon_event::begin_render_pass>(sunshine_addon_lifetime::guarded<on_begin_render_pass>);
     reshade::unregister_event<reshade::addon_event::destroy_device>(sunshine_addon_lifetime::guarded<on_destroy_device>);
     reshade::unregister_event<reshade::addon_event::execute_command_list>(sunshine_addon_lifetime::guarded<on_execute>);
     reshade::unregister_event<reshade::addon_event::execute_secondary_command_list>(
@@ -1347,6 +1438,7 @@ extern "C" __declspec(dllexport) BOOL SunshineUILayerTestLive(sunshine_game3d::u
   // settles a copy).
   out->capture_id = live.capture_id;
   out->presenting_queue = s.presenting_queue;
+  out->format = static_cast<std::uint32_t>(live.format);
   for (unsigned i = 0; i != live.entries; ++i) {
     out->owing += live.ring[i].order.owed != 0;
     out->awaiting += live.ring[i].order.awaiting();
@@ -1360,6 +1452,7 @@ extern "C" __declspec(dllexport) BOOL SunshineUILayerTestLive(sunshine_game3d::u
   }
   if (const auto *entry = live.latest()) {
     out->offered_id = entry->order.pending ? 0 : entry->capture_id;
+    out->offered_copy = entry->order.pending ? 0 : entry->copy.handle;
     out->presents_since_copy = live.tracker.presents_since(entry->frame);
     out->executed_queue = entry->order.queue;
     // As latest() orders it.

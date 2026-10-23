@@ -214,14 +214,13 @@ namespace sunshine_game3d::ui_detection {
     return stored_premultiplied | (float_layer ? stored_hdr_headroom : 0u);
   }
   static_assert(layer_detection_flags(false) == 1u && layer_detection_flags(true) == 3u);
-  // A layer of this DXGI format has HDR headroom: the whole R32G32B32A32
-  // (1-4) or R16G16B16A16 (9-14) typeless family, UNORM included, as the
-  // renderer names layer formats by their typeless format.
-  constexpr bool float_layer_format(std::uint32_t dxgi_format) {
-    return (dxgi_format >= 1u && dxgi_format <= 4u) || (dxgi_format >= 9u && dxgi_format <= 14u);
-  }
-  static_assert(float_layer_format(10u) && float_layer_format(11u) && float_layer_format(2u) &&
-    !float_layer_format(28u) && !float_layer_format(87u) && !float_layer_format(24u));
+  // A layer of this DXGI format has HDR headroom: a FLOAT view
+  // (R32G32B32A32_FLOAT 2, R16G16B16A16_FLOAT 10). A layer copy is named by
+  // the view the game cleared it through (ui_layer::layer_format); a UNORM
+  // view, R16G16B16A16_UNORM included, holds no value above 1 and has none.
+  constexpr bool float_layer_format(std::uint32_t dxgi_format) { return dxgi_format == 2u || dxgi_format == 10u; }
+  static_assert(float_layer_format(10u) && !float_layer_format(11u) && float_layer_format(2u) &&
+    !float_layer_format(28u) && !float_layer_format(87u) && !float_layer_format(24u) && !float_layer_format(9u));
 
   // Shader markers sizing the detection resources. The renderer and the
   // live decoders (ui_selection::counts_from_words,

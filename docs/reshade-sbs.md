@@ -173,7 +173,10 @@ read, Presents offered a copy, the offered copy's Present count over those Prese
 Present reads the copy of the frame before it; see the layer cross-queue fence under
 [Diagnostics switch and per-Present cost](#diagnostics-switch-and-per-present-cost)), and, since
 10-07, the longest time the layer went without a recorded copy across skipped copies
-(`ui_layer::skip_gap`, 0 without skips; time between clears more than 250 ms apart is left out). All
+(`ui_layer::skip_gap`, 0 without skips; time between clears more than 250 ms apart is left out),
+and, since C12, `targets_dropped`: qualifying clears the layer tracker dropped because all 32 of
+its entries were taken (see the offscreen UI layer below; `game3d_log_report` reports them as the
+INFO check `UI layer targets`). All
 are zero while UI detection does not ask for the layer. Since 10-07 the line ends with `window_ms`, the
 window's length: 10 s for a periodic line, and shorter for the last window of a runtime reset or
 destruction, which logs its partial window instead of dropping it (before, a game's exit window, and
@@ -960,10 +963,31 @@ layer clear; before WP1b any rectangle qualified. A 2-bit alpha
 (R10G10B10A2) cannot hold blended coverage; with FG on The Witcher 3 also clears such a scene
 target, which otherwise became the active layer and claimed the whole frame. Clearing requires the render-target state on
 every API, so a target can be copied just before its clear: the copy shows the previous frame.
+Since C12 a clear is `ClearRenderTargetView` or, on D3D12, a render pass whose render-target entry
+begins with a CLEAR to exactly (0, 0, 0, 0): ReShade reports `begin_render_pass` before the native
+`BeginRenderPass`, outside any pass, where that target is in the render-target state the pass
+requires, so it is observed exactly as a whole clear without rectangles. A resuming pass (nothing
+may come between it and the pass it resumes) records nothing, an entry whose view resolves to no
+resource is skipped, each target counts once per pass, and nothing is recorded at the pass's end or
+inside it. The copy's format follows the view the game cleared (`ui_layer::layer_format`): the
+RTV's or render-pass entry's format, or for a view without one the typed resource's own; only a
+UNORM, FLOAT or SRGB view of an alpha family is a layer (R8G8B8A8 and B8G8R8A8 UNORM or SRGB,
+R16G16B16A16 FLOAT or UNORM, R32G32B32A32 FLOAT). An SRGB view stays SRGB, so detection reads the
+linear values the game blended, which the premultiplied bound is defined on. A typeless resource
+without a view format, an integer or SNORM view, or a view outside the resource's family is not a
+layer; before C12 a typeless RGBA16 target was always read as FLOAT and an integer RGBA target was
+tracked. HDR headroom follows the view: FLOAT views only.
 
 A target cleared in at least three frames with gaps under 250 ms is a confirmed layer; of several,
-the one cleared last in the frame is active, since UI draws last. Transient targets never displace
-a confirmed one. Only the foreground swapchain's Presents drive the tracker. The tracker runs only
+the one cleared last in the frame is active, since UI draws last. The tracker holds 32 targets
+(`ui_layer::tracker_capacity`; 8 before C12, which a game clearing 9 or more qualifying targets
+every frame rotated through without confirming any). A target takes its own entry, a free one or
+one not cleared within 250 ms; with every entry recent it may replace only an unconfirmed entry
+cleared earlier in the same frame, so the targets cleared last in a frame keep their entries and
+transient targets never displace a confirmed one. Otherwise it is dropped and counted
+(`targets_dropped` on the timing line, and a one-time log line): of more targets than entries
+cleared every frame in one order, those cleared first are dropped at their turn while every entry
+is still recent, and the last 32 settle. Only the foreground swapchain's Presents drive the tracker. The tracker runs only
 while the layer is wanted: UI detection asked for it within the last second, or a dump is armed
 (its census, which can defer the dump, and so keep the layer wanted, for up to 1000 ms while its
 copies are not yet proven complete; see [census ordering](#dump-3d-diagnostics)). Otherwise every
@@ -1758,8 +1782,10 @@ were removed with S3. A layer seen through an `*_SRGB` view is not comparable wi
 | `0x20000000` | per-frame | Reserved and never reused; bit 29, where the exact bit would shift to (never a refuted candidate). From S2b to fix 1 the evidence passes measured the offered layer as the pre-UI scene image beside an offered HUD-less image, for the guard's D proof of the layer. The shader defines nothing for it. |
 | `0x80000000` | per-frame | Bit 31 (`SUNSHINE_UI_PER_FRAME_PRE_UI_PROVEN`, since fix 1): the offered layer's signature is proven the pre-UI scene image (the ledger's `pre_ui` key), so a layer without coverage makes claim (d) (H1). |
 
-An 8-bit layer stores 1 and a layer in the `R16G16B16A16` or `R32G32B32A32` typeless family (UNORM
-included) 3 (5 and 7 through 180f1842). Stored bits describe the encoding of an input slot: the offscreen UI layer, whose
+An 8-bit or `R16G16B16A16_UNORM` layer stores 1 and a `R16G16B16A16_FLOAT` or `R32G32B32A32_FLOAT`
+layer 3 (5 and 7 through 180f1842); before C12 the whole `R16G16B16A16` and `R32G32B32A32`
+typeless families stored 3, UNORM included, as the copy was named by its resource's family rather
+than the view the game cleared. Stored bits describe the encoding of an input slot: the offscreen UI layer, whose
 bits the renderer keeps with its copy between frames, and UIAlpha (`0x10`). They key no decision or status, and since S2b
 nothing on the CPU reads them.
 Per-frame bits ride only in one render's pushed word and are never stored.
