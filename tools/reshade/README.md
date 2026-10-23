@@ -1323,6 +1323,32 @@ readbacks restore resource state and must not advance the shader clock. Compare
 all 40 texture files and 20 layout records as well as the final images when
 claiming an exact preparation-preserving change.
 
+### Test builds
+
+[`CMakeLists.txt`](CMakeLists.txt) lists the add-on's production sources once
+(`sunshine_game3d_core_sources`). Each set of test seam defines compiles them once, as a view: an
+OBJECT library that an add-on DLL links whole, and `<view>_archive`, the same objects as a static
+library from which a test executable links only what it uses. A view's seam defines are public, so
+every file of a binary sees the same declarations; a binary links one view.
+
+| View | Seam defines | Linked by |
+|---|---|---|
+| `sunshine_game3d_core` | none | `SunshineSBS`, `replay_game3d_dump`, and the tests without a seam (UI mask, UI capture, UI layer, camera data, queue-cycle and source-alpha) |
+| `sunshine_game3d_core_runtime_test` | `SUNSHINE_SBS_RUNTIME_TEST_ADDON` | `SunshineSBSTest` |
+| `sunshine_game3d_core_sbs_test` | `SUNSHINE_SBS_TEST` | `reshade_exporter_tests`, whose test file compiles `exporter.cpp` itself |
+| `sunshine_game3d_core_probe_test` | Streamline probe, NGX call trace, native observers, synchronous log | the probe, contract matrix, call trace, native observer and diagnostic-texture tests |
+| `sunshine_game3d_core_renderer_test` | `SUNSHINE_GAME3D_RENDERER_TEST` | the native runtime tests |
+
+Production files hold no tests. A white-box test reaches a file's internals through that file's
+`*_test_access.h`: the capture owner's regressions are in
+[`test_streamline_depth_capture.cpp`](test_streamline_depth_capture.cpp), and the test add-on's
+exports of the depth add-on and the Streamline probe are in
+[`test_depth_addon_exports.cpp`](test_depth_addon_exports.cpp) and
+[`test_streamline_camera_probe_exports.cpp`](test_streamline_camera_probe_exports.cpp). In the
+shipping build such a header changes nothing: the internals keep internal linkage. In the view that
+builds the tests they get external linkage (an inline namespace, or `inline` for the depth add-on's
+shared state) and the header declares the ones the tests use.
+
 ### API contract matrix
 
 The [rules for new game behaviour](../../docs/reshade-sbs.md#rules-for-new-game-behaviour) gate
@@ -1337,8 +1363,8 @@ also removes its row; in the hook families a recorded gap must also keep failing
 and the way the row records. Never change the oracle to match the add-on: a disagreement is either a
 gap row or a fix, and an open owner question is EITHER or a pending row.
 
-`ctest -L contract` runs the matrix. `reshade_contract_matrix_cpu` is built with the Streamline
-probe tests' sources and defines and holds two layers. The pure layer identifies every surveyed
+`ctest -L contract` runs the matrix. `reshade_contract_matrix_cpu` links the Streamline probe
+tests' view of the production sources ([Test builds](#test-builds)) and holds two layers. The pure layer identifies every surveyed
 Streamline release's interposer DLL as the probe's discovery does (the matrix mirrors that contract
 selection) and reads raw buffer types 0 to 80 through the selected contract; it judges the capture
 state table over every legal state cell and a set of deliberately illegal rows; and it reads every

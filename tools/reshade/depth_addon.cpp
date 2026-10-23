@@ -32,11 +32,6 @@
 #include <string>
 #include <type_traits>
 #include "upscaler_call_trace.h"
-#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-#include <chrono>
-#include <stdexcept>
-#include "depth_selection_snapshot_test.h"
-#endif
 #include "depth_addon.h"
 #include "depth_content_sampler.h"
 #include "depth_selection_policy.h"
@@ -50,716 +45,9 @@
 #include "native_resource_identity.h"
 #include "camera_sample_observation.h"
 #include "game3d_slow_step.h"
+#include "depth_addon_test_access.h"
 
 using namespace reshade::api;
-
-static std::shared_mutex s_mutex;
-static bool s_sunshine_auto = true;
-static bool s_registered = false;
-static bool s_initialized = false;
-// Fixed for each add-on registration; changing the diagnostic requires restart.
-static bool s_streamline_probe_events = false;
-static bool s_streamline_source_events = false;
-static bool s_frame_activity_trace = false; // Opt-in metadata only; never changes capture policy.
-static const char *s_status_message = "Depth selection has not been initialized.";
-static constexpr const char *s_overlay_title = "Sunshine 3D";
-static std::atomic<uint64_t> s_next_command_identity { 1 };
-static std::atomic<uint64_t> s_next_sample_scope { 1 };
-
-static bool content_supported(const resource_desc &desc)
-{
-	return desc.type == resource_type::texture_2d && desc.texture.levels == 1 &&
-		desc.texture.depth_or_layers == 1 && desc.texture.samples == 1;
-}
-
-// One challenger may be tracked across all runtimes/devices. The sampler also
-// permits only one globally in-flight GPU readback. Ownership is short-lived
-// and no native resource address is ever saved in configuration.
-static effect_runtime *s_challenger_owner = nullptr;
-static std::mutex s_challenger_mutex;
-
-enum class draw_stats_heuristic : unsigned int
-{
-	prefer_vertices = 0,
-	vertices,
-	drawcalls
-};
-enum class aspect_ratio_heuristic : unsigned int
-{
-	none = 0,
-	similar_aspect_ratio,
-	multiples_of_resolution,
-	match_resolution_exactly,
-	match_custom_resolution_exactly
-};
-
-static bool s_disable_intz = false;
-// Enable or disable the creation of backup copies at clear operations on the selected depth-stencil
-static unsigned int s_preserve_depth_buffers = 0;
-// Choose impact of draw statistics in the detection heuristic
-static draw_stats_heuristic s_draw_stats_heuristic = draw_stats_heuristic::prefer_vertices;
-// Enable or disable the aspect ratio check from 'check_aspect_ratio' in the detection heuristic
-static aspect_ratio_heuristic s_aspect_ratio_heuristic = aspect_ratio_heuristic::similar_aspect_ratio;
-// Enable or disable the format check from 'check_depth_format' in the detection heuristic
-static unsigned int s_format_filtering = 0;
-static unsigned int s_custom_resolution_filtering[2] = {};
-
-enum class clear_op : uint8_t
-{
-	clear_depth_stencil_view,
-	fullscreen_draw,
-	unbind_depth_stencil_view,
-	direct_depth_switch,
-};
-
-struct depth_tracking_demand
-{
-	bool counters = true;
-	bool clear_history = true;
-};
-
-struct draw_stats
-{
-	uint32_t vertices = 0;
-	uint32_t drawcalls = 0;
-	uint32_t drawcalls_indirect = 0;
-	uint32_t scene_writes = 0; // Mesh dispatches and depth copies/resolves have no known vertex count.
-	viewport last_viewport = {};
-	bool observed_work = false; // Preservation eligibility does not require candidate counters.
-
-	bool has_work() const { return observed_work || drawcalls != 0 || scene_writes != 0; }
-	uint64_t work_count() const { return uint64_t(drawcalls) + scene_writes; }
-	void clear_counters()
-	{
-		observed_work = has_work();
-		vertices = drawcalls = drawcalls_indirect = scene_writes = 0;
-	}
-
-	bool operator>(const draw_stats &other) const
-	{
-		if (s_draw_stats_heuristic == draw_stats_heuristic::vertices)
-			return vertices > other.vertices;
-		if (s_draw_stats_heuristic == draw_stats_heuristic::drawcalls)
-			return work_count() > other.work_count();
-
-		return (scene_writes == 0 && drawcalls_indirect < (drawcalls / 3) ?
-			// Choose snapshot with the most vertices, since that is likely to contain the main scene
-			vertices > other.vertices :
-			// Or check draw calls, since vertices may not be accurate if application is using indirect draw calls
-			work_count() > other.work_count());
-	}
-};
-struct clear_stats : public draw_stats
-{
-	clear_op clear_op = clear_op::clear_depth_stencil_view;
-	bool copied_during_frame = false;
-};
-
-struct depth_stencil_frame_stats
-{
-	draw_stats total;
-	draw_stats current; // Stats since last clear operation
-	// Command-list-local proof only. A real D3D12 depth clear requires DEPTH_WRITE;
-	// any later barrier or opaque execution revokes this rather than inferring
-	// native state from ReShade's lossy resource_usage conversion.
-	bool direct_clear_depth_write = false;
-	draw_stats best_copy_stats; // Per resource, so a busy decoy cannot starve a low-draw scene.
-	viewport copied_viewport = {}; // Last submitted copy, independent of greatest workload.
-	bool copy_provenance_ambiguous = false;
-	sunshine_streamline::commands::recording_marker capture_marker {};
-	sunshine_streamline::content::copy_snapshot depth_copy {};
-	std::vector<clear_stats> clears;
-	bool copied_during_frame = false;
-	// Pixel storage and GPU lifetime belong to the common capture owner. This
-	// lease survives recording reset until the submitted frame is consumed.
-	sunshine_streamline::depth_capture::preservation_ticket capture_ticket;
-	// Only this reservation may publish an EOF capture for the source/frame.
-	uint64_t preservation_reservation = 0;
-	bool reversed_clear_value = false;
-	bool clear_zero = false, clear_one = false, clear_other = false;
-	// Passive transport capability: a real scene was followed by a boundary
-	// where this preservation mode can copy. This is never pixel-readiness proof.
-	bool preservation_boundary = false;
-
-	void limit_tracking(depth_tracking_demand demand)
-	{
-		if (!demand.counters)
-		{
-			total.clear_counters();
-			current.clear_counters();
-			best_copy_stats.clear_counters();
-		}
-		if (!demand.clear_history) clears.clear();
-	}
-};
-
-struct resource_hash
-{
-	size_t operator()(resource value) const
-	{
-		// Simply use the handle (which is usually a pointer) as hash value (with some bits shaved off due to pointer alignment)
-		return static_cast<size_t>(value.handle >> 4);
-	}
-};
-
-struct __declspec(uuid("806c3b54-baf6-46a7-a72a-28c629143d84")) state_tracking
-{
-	const bool is_queue;
-	const uint64_t command_identity = s_next_command_identity.fetch_add(1, std::memory_order_relaxed);
-	viewport current_viewport = {};
-	resource current_depth_stencil = { 0 };
-	uint64_t current_depth_lifetime = 0;
-	resource render_pass_depth = {};
-	bool render_pass_depth_uncertain = false;
-	bool inside_render_pass = false;
-	std::unordered_map<resource, depth_stencil_frame_stats, resource_hash> stats_per_used_depth_stencil;
-	bool first_draw_since_bind = true;
-	explicit state_tracking(bool is_queue) : is_queue(is_queue)
-	{
-		// Reserve some space upfront to avoid rehashing during command recording
-		stats_per_used_depth_stencil.reserve(32);
-	}
-
-	void reset()
-	{
-		stats_per_used_depth_stencil.clear();
-		current_depth_stencil = { 0 };
-		current_depth_lifetime = 0;
-		render_pass_depth = {};
-		render_pass_depth_uncertain = false;
-		inside_render_pass = false;
-	}
-	void invalidate_direct_clear_proofs()
-	{
-		for (auto &[depth, stats] : stats_per_used_depth_stencil)
-			stats.direct_clear_depth_write = false;
-	}
-	void reset_on_present()
-	{
-		assert(is_queue);
-		stats_per_used_depth_stencil.clear();
-	}
-
-	void merge(const state_tracking &source, depth_tracking_demand demand = {})
-	{
-		// Executing a command list in a different command list inherits state
-		current_depth_stencil = source.current_depth_stencil;
-		current_depth_lifetime = source.current_depth_lifetime;
-
-		if (source.stats_per_used_depth_stencil.empty())
-			return;
-
-		stats_per_used_depth_stencil.reserve(source.stats_per_used_depth_stencil.size());
-		for (const auto &[depth_stencil, source_stats] : source.stats_per_used_depth_stencil)
-		{
-			depth_stencil_frame_stats &stats = stats_per_used_depth_stencil[depth_stencil];
-			stats.limit_tracking(demand);
-			stats.total.observed_work |= source_stats.total.has_work();
-			stats.current.observed_work |= source_stats.current.has_work();
-			if (demand.counters)
-			{
-				stats.total.vertices += source_stats.total.vertices;
-				stats.total.drawcalls += source_stats.total.drawcalls;
-				stats.total.drawcalls_indirect += source_stats.total.drawcalls_indirect;
-				stats.total.scene_writes += source_stats.total.scene_writes;
-				stats.current.vertices += source_stats.current.vertices;
-				stats.current.drawcalls += source_stats.current.drawcalls;
-				stats.current.drawcalls_indirect += source_stats.current.drawcalls_indirect;
-				stats.current.scene_writes += source_stats.current.scene_writes;
-			}
-			// The proof belongs to one native recording sequence, never a merged
-			// queue or secondary list's statistics.
-			stats.direct_clear_depth_write = false;
-			if (source_stats.best_copy_stats.vertices >= stats.best_copy_stats.vertices)
-			{
-				stats.best_copy_stats = source_stats.best_copy_stats;
-				if (!demand.counters) stats.best_copy_stats.clear_counters();
-			}
-			if (source_stats.total.last_viewport.width * source_stats.total.last_viewport.height >=
-				stats.total.last_viewport.width * stats.total.last_viewport.height)
-				stats.total.last_viewport = source_stats.total.last_viewport;
-
-			if (demand.clear_history)
-				stats.clears.insert(stats.clears.end(), source_stats.clears.begin(), source_stats.clears.end());
-			if (source_stats.copied_during_frame)
-			{
-				stats.copied_viewport = source_stats.copied_viewport;
-				stats.copy_provenance_ambiguous = source_stats.copy_provenance_ambiguous;
-				stats.capture_marker = source_stats.capture_marker;
-				stats.depth_copy = source_stats.depth_copy;
-				stats.capture_ticket = source_stats.capture_ticket;
-			}
-
-			stats.copied_during_frame |= source_stats.copied_during_frame;
-			stats.reversed_clear_value = source_stats.reversed_clear_value;
-			stats.clear_zero |= source_stats.clear_zero;
-			stats.clear_one |= source_stats.clear_one;
-			stats.clear_other |= source_stats.clear_other;
-			stats.preservation_boundary |= source_stats.preservation_boundary;
-		}
-	}
-};
-
-struct capture_region
-{
-	uint32_t x = 0, y = 0, width = 0, height = 0;
-	uint64_t layout_epoch = 0;
-	bool operator==(const capture_region &other) const
-	{
-		return x == other.x && y == other.y && width == other.width && height == other.height && layout_epoch == other.layout_epoch;
-	}
-};
-
-enum class depth_binding_state { waiting_game, waiting_activity, filtered, binding_failed, waiting_capture, ready };
-enum class native_depth_ui_state { inactive, waiting_depth, calibrating, waiting_orientation, ready };
-
-struct __declspec(uuid("c072221d-786d-4b6d-8f0b-52e0f325903e")) generic_depth_data
-{
-    // Runtime ownership, separate from retained backup/view lifetime. API
-    // capture can suspend generic work without destroying in-flight resources.
-    bool generic_capture_enabled = false;
-#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-    uint64_t generic_capture_transitions = 0;
-#endif
-    uint64_t runtime_epoch = s_next_sample_scope.fetch_add(1, std::memory_order_relaxed);
-    bool raw_scene_requested = false, raw_latest_available = false;
-    uint64_t raw_basis_epoch = 0, raw_pending_capture_id = 0;
-    sunshine_camera_binding::mailbox raw_sample_binding;
-    sunshine_raw_scene::selected_frame raw_pending_metadata;
-    sunshine_camera_binding::submission raw_latest_submission;
-    sunshine_raw_scene::sample raw_latest_sample;
-    uint64_t next_camera_observation_report = 0;
-	struct raw_member_sample
-	{
-		uint64_t identity = 0, next_tick = 0;
-		bool available = false;
-		sunshine_raw_scene::sample sample;
-		sunshine_camera_binding::submission submission;
-	};
-	std::array<raw_member_sample, 4> raw_members {};
-	sunshine_depth::raw_source_roster raw_roster;
-	sunshine_depth_capture::budget capture_budget;
-	sunshine_depth_capture::capture_set captures;
-	sunshine_depth_capture::capture_record selected_record;
-	sunshine_depth::frame_depth selected_capture;
-	resource anchor_depth_stencil {};
-	uint64_t anchor_identity = 0;
-	struct member_view
-	{
-		resource source {};
-		uint64_t identity = 0, retire_after = 0;
-		resource_view view {};
-		uint64_t capture_after = 0;
-	};
-	// Four admitted views plus a bounded retirement window; exhausted slots wait.
-	std::array<member_view, 8> member_views {};
-	// The depth-stencil resource that is currently selected as being the main depth target
-	resource selected_depth_stencil = { 0 };
-	uint64_t selected_identity = 0;
-	resource_desc selected_desc = {};
-	bool capture_ready = false;
-	bool native_access_open = false;
-	bool native_driver = false;
-	bool native_effects_lease = false;
-	bool native_depth_requested = false;
-	uint64_t native_access_present = 0;
-	// Presentation-only snapshot: no borrowed GPU handles survive get_frame_depth.
-	native_depth_ui_state native_ui_state = native_depth_ui_state::inactive;
-	unsigned native_ui_samples = 0;
-	uint64_t native_ui_present = 0;
-	depth_binding_state binding_state = depth_binding_state::waiting_game;
-	const char *binding_detail = "Waiting for the game to create a depth buffer.";
-	const char *selection_reason = "waiting for depth";
-
-	// Resource used to override automatic depth-stencil selection
-	resource override_depth_stencil = { 0 };
-	uint64_t override_identity = 0; // Resource lifetime; DLSS viewport changes retain the manual choice.
-	sunshine_depth::manual_recovery_watch manual_recovery;
-	bool manual_recovery_probing = false;
-
-	// The current depth shader resource view bound to shaders
-	// This can be created from either the selected depth-stencil resource (if it supports shader access) or from a backup resource
-	resource_view selected_shader_resource = { 0 };
-
-	// True when the shader resource view was created from the backup resource, false when it was created from the original depth-stencil
-	bool using_backup_texture = false;
-
-	// The view effects bind as DEPTH. ReShade 6.8 waits for the whole GPU queue
-	// on every binding update, so it changes only when this view does, never
-	// for a readiness flip. A logical source rotating through several physical
-	// members (rotating) binds one stable copy per format and size instead of
-	// each member's view. The add-on's renderer reads selected_shader_resource,
-	// so that copy exists only while effects are enabled and an enabled technique
-	// may read DEPTH (effects_read_depth); otherwise a rotating source binds nothing. Retired
-	// copies are destroyed after the usual delay.
-	resource_view effects_view = { 0 };
-	bool effects_bound = false;
-	bool rotating = false;
-	bool stable_current = false; // The stable copy holds this Present's selected capture.
-	// Any enabled technique (a safe over-approximation of a DEPTH reader).
-	// Recounted at begin_effects after an effect reload or a technique toggle.
-	bool effects_read_depth = false;
-	bool effects_read_depth_dirty = true;
-	struct stable_binding
-	{
-		resource texture = { 0 };
-		resource_view view = { 0 };
-		resource_desc desc = {};
-		uint64_t destroy_after_frame = 0;
-	};
-	stable_binding stable;
-	// Identity, sampled backup, frame and Present of the capture the stable copy
-	// holds: an unchanged capture is not copied again.
-	std::array<uint64_t, 4> stable_capture = {};
-	std::vector<stable_binding> retired_stable;
-
-	sunshine_depth::selection_policy selection;
-	resource challenger_depth_stencil = { 0 };
-	uint64_t challenger_id = 0;
-	uint64_t challenger_started_frame = 0;
-	uint64_t challenger_retired_until = 0;
-	unsigned challenger_samples = 0;
-	uint64_t probe_target_id = 0;
-	uint64_t probe_started_tick = 0;
-	sunshine_depth_probe::discovery_hint discovery_hint;
-	resource sampled_depth_stencil = { 0 };
-	uint64_t sampled_frame = 0;
-	capture_region sampled_region;
-	uint64_t next_sample_tick = 0;
-	uint64_t last_current_sample_tick = 0;
-	std::vector<uint64_t> observed_ids;
-	std::unordered_map<uint64_t, capture_region> observed_regions;
-	// Raw calibration summaries only; no textures or native pointers are cached.
-	std::unordered_map<uint64_t, sunshine_depth::native_depth_calibration> native_calibrations;
-	uint64_t last_logged_id = 0;
-	bool last_logged_manual = false;
-	depth_binding_state last_logged_state = depth_binding_state::waiting_game;
-	sunshine_diagnostics::log_gate status_log;
-	// Observation only: these fields never participate in routing or readiness.
-	const char *capture_wait_detail = nullptr;
-	struct capture_trace_record
-	{
-		uint64_t present = 0, frame = 0, anchor = 0, epoch = 0;
-		unsigned count = 0, raster = 0, copied = 0, ambiguous = 0, confirmed = 0, views = 0, floors = 0;
-		std::array<uint64_t, 4> members {};
-		std::array<uint64_t, 4> last_used {}, draws {}, writes {};
-		std::array<capture_region, 4> regions {};
-		const char *reason = "not_observed";
-	} trace_capture;
-	uint64_t trace_effect_present = std::numeric_limits<uint64_t>::max();
-	uint64_t trace_access_present = std::numeric_limits<uint64_t>::max();
-	uint64_t trace_snapshot_frame = 0, trace_snapshot_present = 0;
-	sunshine_diagnostics::family_gap_observer trace_gaps;
-};
-
-struct depth_stencil_backup
-{
-	// The number of effect runtimes referencing this backup
-	uint32_t references = 1;
-
-	// The depth-stencil that should be copied from
-	resource depth_stencil = { 0 };
-
-	// A resource used as target for a backup copy of this depth-stencil
-	resource backup_texture = { 0 };
-	// Assignment identity also rotates when pooled storage is bound to a new source.
-	uint64_t content_identity = 0;
-	// This allocation is a stable shader/probe presentation surface. D3D12
-	// before-clear pixels are owned by capture_ticket, never by this cache.
-	uint64_t published_ticket = 0, published_present = 0;
-	sunshine_streamline::content::copy_snapshot published_depth_copy {};
-	bool content_layout_supported = false;
-
-	// Index of the frame after which the backup resource may be destroyed (used to delay destruction until resource is no longer in use)
-	uint64_t destroy_after_frame = std::numeric_limits<uint64_t>::max();
-
-	// Frame dimensions of the last effect runtime this backup was used with
-	uint32_t frame_width = 0;
-	uint32_t frame_height = 0;
-
-	// Set to zero for automatic detection, otherwise will use the clear operation at the specific index within a frame
-	uint32_t force_clear_index = 0;
-	// Counted by recording threads under the shared lock (interlocked).
-	LONG current_clear_index = 0;
-};
-
-static uint32_t configured_clear_index()
-{
-	uint32_t value = 0;
-	reshade::get_config_value(nullptr, "DEPTH", "DepthCopyAtClearIndex", value);
-	return value;
-}
-
-struct depth_stencil_resource
-{
-	resource_desc desc;
-	uint64_t identity = 0;
-	bool api_identity = false;
-	uint64_t layout_epoch = 1;
-	sunshine_depth::depth_orientation_evidence orientation_evidence;
-	capture_region preserved_region;
-	bool have_preserved_region = false;
-
-	depth_stencil_frame_stats last_frame_stats;
-
-	// Index of the frame in which the depth-stencil was last/first seen used in
-	uint64_t last_used_in_frame = std::numeric_limits<uint64_t>::max();
-	uint64_t first_used_in_frame = std::numeric_limits<uint64_t>::max();
-};
-
-// Selection needs only these values. In particular, it does not consume the
-// per-clear history, command provenance or orientation history retained by the
-// recording/capture paths. Keep the unlocked snapshot contiguous and owned.
-struct depth_selection_resource
-{
-	resource_desc desc;
-	uint64_t identity, layout_epoch;
-	capture_region preserved_region;
-	bool have_preserved_region;
-	struct frame_stats
-	{
-		draw_stats total;
-		viewport copied_viewport;
-		bool copied_during_frame, copy_provenance_ambiguous;
-	} last_frame_stats;
-	uint64_t last_used_in_frame, first_used_in_frame;
-
-	explicit depth_selection_resource(const depth_stencil_resource &info) :
-		desc(info.desc), identity(info.identity), layout_epoch(info.layout_epoch),
-		preserved_region(info.preserved_region), have_preserved_region(info.have_preserved_region),
-		last_frame_stats { info.last_frame_stats.total, info.last_frame_stats.copied_viewport,
-			info.last_frame_stats.copied_during_frame, info.last_frame_stats.copy_provenance_ambiguous },
-		last_used_in_frame(info.last_used_in_frame), first_used_in_frame(info.first_used_in_frame) {}
-};
-static_assert(std::is_trivially_copyable_v<depth_selection_resource>);
-using depth_selection_snapshot = std::vector<std::pair<resource, depth_selection_resource>>;
-
-static depth_selection_snapshot snapshot_depth_selection(
-	const std::unordered_map<resource, depth_stencil_resource, resource_hash> &resources)
-{
-	depth_selection_snapshot result;
-	result.reserve(resources.size());
-	for (const auto &[resource, info] : resources)
-		result.emplace_back(resource, depth_selection_resource(info));
-	return result;
-}
-
-static auto find_depth_selection(const depth_selection_snapshot &snapshot, resource resource)
-{
-	return std::find_if(snapshot.begin(), snapshot.end(),
-		[resource](const auto &entry) { return entry.first == resource; });
-}
-
-struct __declspec(uuid("94e283ef-6714-4d50-b936-71d6308a4be4")) generic_depth_device_data
-{
-    uint64_t native_identity{};
-    const uint64_t device_epoch = s_next_sample_scope.fetch_add(1, std::memory_order_relaxed);
-	// Draw/clear recording can run on other threads. A shared backup is still
-	// needed if any effect runtime on this device uses generic/manual capture.
-	std::atomic<unsigned> generic_capture_users { 0 };
-	// UI requests expire at Present, including when the whole overlay is closed.
-	// Bit 0 is the request since last Present, bit 1 is the current frame demand.
-	std::atomic<unsigned> candidate_list_request { 0 };
-	uint64_t frame_index = 0;
-	uint64_t native_present_index = 0, native_depth_present_index = 0;
-	// Callback ordinals, NOT game/frame-generation IDs. At most four short
-	// diagnostic bursts; a scene-confirmed failure is required to start one.
-	struct activity_trace_state
-	{
-		unsigned bursts = 0, effects = 0, accesses = 0, dropped_events = 0;
-		uint64_t first_present = 0, last_present = 0, next_start_tick = 0;
-		uint64_t event_present = 0, focus_source = 0;
-	} activity_trace;
-
-	// List of queues created for this device
-	std::vector<command_queue *> queues;
-
-	// List of all encountered depth-stencils of the last frame
-	std::unordered_map<resource, depth_stencil_resource, resource_hash> depth_stencil_resources;
-
-	// List of depth-stencils that should be tracked throughout each frame and potentially be backed up during clear operations
-	std::vector<depth_stencil_backup> depth_stencil_backups;
-
-	depth_stencil_backup *find_depth_stencil_backup(resource resource)
-	{
-		for (depth_stencil_backup &backup : depth_stencil_backups)
-			if (backup.depth_stencil == resource)
-				return &backup;
-		return nullptr;
-	}
-
-	// Recording threads read a backup's frame size and clear index under the
-	// shared lock (on_clear_depth_impl); the effects thread writes them here.
-	static void configure_backup(depth_stencil_backup &backup, uint32_t width, uint32_t height,
-		std::optional<uint32_t> force_clear_index = std::nullopt)
-	{
-		const std::unique_lock<std::shared_mutex> lock(s_mutex);
-		backup.frame_width = width;
-		backup.frame_height = height;
-		if (force_clear_index) backup.force_clear_index = *force_clear_index;
-	}
-
-	depth_stencil_backup *track_depth_stencil_for_backup(device *device, resource depth_stencil, resource_desc desc)
-	{
-		assert(depth_stencil != 0);
-
-		const auto it = std::find_if(depth_stencil_backups.begin(), depth_stencil_backups.end(),
-			[depth_stencil](const depth_stencil_backup &existing) { return existing.depth_stencil == depth_stencil; });
-		if (it != depth_stencil_backups.end())
-		{
-			depth_stencil_backup &backup = *it;
-			backup.references++;
-
-			return &backup;
-		}
-
-		const device_api api = device->get_api();
-		if (api <= device_api::d3d12)
-		{
-			std::shared_lock<std::shared_mutex> lock(s_mutex);
-			if (depth_stencil_resources.find(depth_stencil) == depth_stencil_resources.end())
-				return nullptr;
-
-			// Add reference to the resource so that it is not destroyed while it is being copied to the backup texture
-			reinterpret_cast<IUnknown *>(depth_stencil.handle)->AddRef();
-		}
-
-		desc.type = resource_type::texture_2d;
-		desc.heap = memory_heap::default_;
-		desc.usage = resource_usage::shader_resource | resource_usage::copy_dest;
-
-		if (desc.texture.samples > 1)
-		{
-			desc.texture.samples = 1;
-			desc.usage |= resource_usage::resolve_dest;
-		}
-
-		if (api == device_api::d3d9)
-			desc.texture.format = format::r32_float; // D3DFMT_R32F, since INTZ does not support D3DUSAGE_RENDERTARGET which is required for copying
-		// Use depth format as-is in OpenGL and Vulkan, since those are valid for shader resource views there
-		else if (api != device_api::opengl && api != device_api::vulkan)
-			desc.texture.format = format_to_typeless(desc.texture.format);
-
-		// First try to revive a backup resource that was previously enqueued for delayed destruction
-		for (depth_stencil_backup &backup : depth_stencil_backups)
-		{
-			if (backup.depth_stencil != 0)
-				continue;
-
-			assert(backup.references == 0 && backup.destroy_after_frame != std::numeric_limits<uint64_t>::max() && backup.backup_texture != 0);
-
-			const resource_desc existing_desc = device->get_resource_desc(backup.backup_texture);
-			if (desc.texture.width == existing_desc.texture.width &&
-				desc.texture.height == existing_desc.texture.height &&
-				desc.texture.format == existing_desc.texture.format &&
-				(desc.usage & existing_desc.usage) == desc.usage)
-			{
-				// Recording threads look backups up under the shared lock.
-				const std::unique_lock<std::shared_mutex> lock(s_mutex);
-				backup.references++;
-				backup.depth_stencil = depth_stencil;
-				backup.destroy_after_frame = std::numeric_limits<uint64_t>::max();
-				backup.content_identity = sunshine_native_identity::allocate_identity();
-				backup.published_ticket = backup.published_present = 0;
-				backup.published_depth_copy = {};
-				backup.content_layout_supported = content_supported(existing_desc);
-				if (s_streamline_probe_events && api == device_api::d3d12)
-					sunshine_streamline::depth_resource_initialized(backup.backup_texture.handle, backup.content_identity,
-						device->get_native(), content_supported(existing_desc));
-
-				return &backup;
-			}
-		}
-
-		depth_stencil_backup new_backup;
-		new_backup.depth_stencil = depth_stencil;
-
-		if (device->create_resource(desc, nullptr, resource_usage::copy_dest, &new_backup.backup_texture))
-		{
-			device->set_resource_name(new_backup.backup_texture, "Sunshine depth presentation texture");
-			new_backup.content_identity = sunshine_native_identity::allocate_identity();
-			new_backup.content_layout_supported = content_supported(desc);
-			if (s_streamline_probe_events && api == device_api::d3d12)
-				sunshine_streamline::depth_resource_initialized(new_backup.backup_texture.handle, new_backup.content_identity,
-					device->get_native(), content_supported(desc));
-
-			// Growth can move every entry: exclude recording-thread lookups.
-			const std::unique_lock<std::shared_mutex> lock(s_mutex);
-			return &depth_stencil_backups.emplace_back(std::move(new_backup));
-		}
-		else
-		{
-			if (api <= device_api::d3d12)
-				reinterpret_cast<IUnknown *>(depth_stencil.handle)->Release();
-			sunshine_log::message(reshade::log::level::error, "Failed to create backup depth-stencil texture!");
-
-			return nullptr;
-		}
-	}
-
-	// Frames an unreferenced backup stays revivable before its delayed destruction.
-	static constexpr uint64_t backup_retirement_frames = 50;
-
-	void untrack_depth_stencil(device *device, resource depth_stencil, uint64_t retire_frames = backup_retirement_frames)
-	{
-		assert(depth_stencil != 0);
-
-		const auto it = std::find_if(depth_stencil_backups.begin(), depth_stencil_backups.end(),
-			[depth_stencil](const depth_stencil_backup &existing) { return existing.depth_stencil == depth_stencil; });
-		if (it == depth_stencil_backups.end() || --it->references != 0)
-			return;
-
-		depth_stencil_backup &backup = *it;
-		if (s_streamline_probe_events && device->get_api() == device_api::d3d12)
-			sunshine_streamline::depth_resource_destroyed(backup.backup_texture.handle, backup.content_identity);
-		{
-			// Recording threads look backups up by this source under the shared lock.
-			const std::unique_lock<std::shared_mutex> lock(s_mutex);
-			backup.depth_stencil = { 0 };
-		}
-
-		// Do not destroy backup texture immediately since it may still be referenced by a command list that is in flight or was prerecorded
-		// Instead mark it for delayed destruction in the future
-		backup.destroy_after_frame = frame_index + retire_frames;
-
-		const device_api api = device->get_api();
-		if (api <= device_api::d3d12)
-		{
-			// Release the reference that was added above
-			reinterpret_cast<IUnknown *>(depth_stencil.handle)->Release();
-		}
-	}
-};
-
-#ifdef __MINGW32__
-__CRT_UUID_DECL(state_tracking, 0x806c3b54, 0xbaf6, 0x46a7, 0xa7, 0x2a, 0x28, 0xc6, 0x29, 0x14, 0x3d, 0x84)
-__CRT_UUID_DECL(generic_depth_data, 0xc072221d, 0x786d, 0x4b6d, 0x8f, 0x0b, 0x52, 0xe0, 0xf3, 0x25, 0x90, 0x3e)
-__CRT_UUID_DECL(generic_depth_device_data, 0x94e283ef, 0x6714, 0x4d50, 0xb9, 0x36, 0x71, 0xd6, 0x30, 0x8a, 0x4b, 0xe4)
-#endif
-
-static void request_depth_candidate_list(generic_depth_device_data *data)
-{
-	if (data) data->candidate_list_request.fetch_or(3, std::memory_order_relaxed);
-}
-
-static void consume_depth_candidate_list_request(generic_depth_device_data &data)
-{
-	auto request = data.candidate_list_request.load(std::memory_order_relaxed);
-	while (!data.candidate_list_request.compare_exchange_weak(request, (request & 1) ? 2u : 0u,
-		std::memory_order_relaxed)) {}
-}
-
-static depth_tracking_demand tracking_demand(const generic_depth_device_data &data)
-{
-	const bool visible = data.candidate_list_request.load(std::memory_order_relaxed) != 0;
-	return {visible || s_frame_activity_trace || data.generic_capture_users.load(std::memory_order_relaxed) != 0, visible};
-}
-
-static depth_tracking_demand tracking_demand(device *device)
-{
-	const auto *data = device->get_private_data<generic_depth_device_data>();
-	return data ? tracking_demand(*data) : depth_tracking_demand {};
-}
 
 // Temporary, bounded metadata diagnostics. No resource is read, retained or
 // transitioned here. Logging happens after the caller's resource-map lock exits.
@@ -1030,7 +318,7 @@ static bool valid_depth_viewport(const viewport &view, const resource_desc &desc
 }
 
 template <typename DepthInfo>
-static capture_region effective_capture_region(const DepthInfo &info)
+SUNSHINE_DEPTH_ADDON_INTERNAL capture_region effective_capture_region(const DepthInfo &info)
 {
 	if (info.have_preserved_region) return info.preserved_region;
 	const viewport &view = info.last_frame_stats.copied_during_frame ?
@@ -1057,7 +345,7 @@ static bool raw_alignment_assumed(const capture_region &region, uint32_t source_
 }
 
 template <typename DepthInfo>
-static void observe_candidate(generic_depth_data &data, const DepthInfo &info, uint32_t width, uint32_t height)
+SUNSHINE_DEPTH_ADDON_INTERNAL void observe_candidate(generic_depth_data &data, const DepthInfo &info, uint32_t width, uint32_t height)
 {
 	capture_region region = effective_capture_region(info);
 	const auto previous = data.observed_regions.find(info.identity);
@@ -1075,7 +363,7 @@ static void observe_candidate(generic_depth_data &data, const DepthInfo &info, u
 		info.last_frame_stats.total.work_count(), info.last_frame_stats.total.vertices });
 }
 
-static void prune_depth_selection(generic_depth_data &data, const std::vector<uint64_t> &eligible_ids)
+SUNSHINE_DEPTH_ADDON_INTERNAL void prune_depth_selection(generic_depth_data &data, const std::vector<uint64_t> &eligible_ids)
 {
 	for (const uint64_t previous_id : data.observed_ids)
 		if (std::find(eligible_ids.begin(), eligible_ids.end(), previous_id) == eligible_ids.end())
@@ -1087,7 +375,7 @@ static void prune_depth_selection(generic_depth_data &data, const std::vector<ui
 	data.observed_ids = eligible_ids;
 }
 
-static void observe_preserved_layout(depth_stencil_resource &info, const depth_stencil_frame_stats &stats)
+SUNSHINE_DEPTH_ADDON_INTERNAL void observe_preserved_layout(depth_stencil_resource &info, const depth_stencil_frame_stats &stats)
 {
 	if (!stats.copied_during_frame || stats.copy_provenance_ambiguous) return;
 	capture_region region {0, 0, info.desc.texture.width, info.desc.texture.height, info.layout_epoch};
@@ -1108,7 +396,7 @@ static void observe_preserved_layout(depth_stencil_resource &info, const depth_s
 }
 
 template <typename DepthInfo>
-static bool candidate_matches_shape(const DepthInfo &info, uint32_t width, uint32_t height)
+SUNSHINE_DEPTH_ADDON_INTERNAL bool candidate_matches_shape(const DepthInfo &info, uint32_t width, uint32_t height)
 {
 	if (s_aspect_ratio_heuristic == aspect_ratio_heuristic::none ||
 		check_aspect_ratio(static_cast<float>(info.desc.texture.width), static_cast<float>(info.desc.texture.height),
@@ -1220,7 +508,7 @@ static captured_depth capture_record(effect_runtime *runtime, const generic_dept
 	return result;
 }
 
-static bool validate_capture_record(effect_runtime *runtime, const generic_depth_data &data,
+SUNSHINE_DEPTH_ADDON_INTERNAL bool validate_capture_record(effect_runtime *runtime, const generic_depth_data &data,
 	const generic_depth_device_data &device_data, const sunshine_depth_capture::capture_record &record)
 {
 	const auto current = capture_record(runtime, data, device_data, resource{record.source}, record.identity,
@@ -1772,7 +1060,7 @@ static const char *binding_state_name(depth_binding_state state)
 
 static const char *const format_to_string(format value);
 
-static void on_clear_depth_impl(command_list *cmd_list, state_tracking &state, resource depth_stencil, clear_op op)
+SUNSHINE_DEPTH_ADDON_INTERNAL void on_clear_depth_impl(command_list *cmd_list, state_tracking &state, resource depth_stencil, clear_op op)
 {
 	if (depth_stencil == 0)
 		return;
@@ -2351,7 +1639,7 @@ static void on_destroy_resource(device *device, resource resource)
 	}
 }
 
-static bool on_draw(command_list *cmd_list, uint32_t vertices, uint32_t instances, uint32_t, uint32_t)
+SUNSHINE_DEPTH_ADDON_INTERNAL bool on_draw(command_list *cmd_list, uint32_t vertices, uint32_t instances, uint32_t, uint32_t)
 {
 	if (!vertices || !instances) return false;
 	auto &state = *cmd_list->get_private_data<state_tracking>();
@@ -2396,11 +1684,11 @@ static bool on_draw(command_list *cmd_list, uint32_t vertices, uint32_t instance
 
 	return false;
 }
-static bool on_draw_indexed(command_list *cmd_list, uint32_t indices, uint32_t instances, uint32_t, int32_t, uint32_t)
+SUNSHINE_DEPTH_ADDON_INTERNAL bool on_draw_indexed(command_list *cmd_list, uint32_t indices, uint32_t instances, uint32_t, int32_t, uint32_t)
 {
 	return on_draw(cmd_list, indices, instances, 0, 0);
 }
-static bool on_draw_indirect(command_list *cmd_list, indirect_command type, resource, uint64_t, uint32_t draw_count, uint32_t)
+SUNSHINE_DEPTH_ADDON_INTERNAL bool on_draw_indirect(command_list *cmd_list, indirect_command type, resource, uint64_t, uint32_t draw_count, uint32_t)
 {
 	if (!draw_count || type == indirect_command::dispatch || type == indirect_command::dispatch_rays)
 		return false; // Compute/ray dispatches do not rasterize into the bound DSV.
@@ -2591,7 +1879,7 @@ static void record_copied_depth(command_list *cmd_list, resource dest, uint32_t 
 	record_scene_write(state, dest, {}, tracking_demand(*device_data));
 }
 
-static bool on_dispatch_mesh(command_list *cmd_list, uint32_t groups_x, uint32_t groups_y, uint32_t groups_z)
+SUNSHINE_DEPTH_ADDON_INTERNAL bool on_dispatch_mesh(command_list *cmd_list, uint32_t groups_x, uint32_t groups_y, uint32_t groups_z)
 {
 	auto &state = *cmd_list->get_private_data<state_tracking>();
 	if (!groups_x || !groups_y || !groups_z || state.current_depth_stencil == 0) return false;
@@ -2602,7 +1890,7 @@ static bool on_dispatch_mesh(command_list *cmd_list, uint32_t groups_x, uint32_t
 	record_scene_write(state, state.current_depth_stencil, state.current_viewport, tracking_demand(cmd_list->get_device()));
 	return false;
 }
-static bool on_copy_resource(command_list *cmd_list, resource, resource dest)
+SUNSHINE_DEPTH_ADDON_INTERNAL bool on_copy_resource(command_list *cmd_list, resource, resource dest)
 {
 	record_copied_depth(cmd_list, dest);
 	if (s_streamline_probe_events && cmd_list->get_device()->get_api() == device_api::d3d12)
@@ -2613,7 +1901,7 @@ static bool empty_copy_box(const subresource_box *box)
 {
 	return box != nullptr && (box->left >= box->right || box->top >= box->bottom || box->front >= box->back);
 }
-static bool on_copy_texture_region(command_list *cmd_list, resource, uint32_t, const subresource_box *source_box,
+SUNSHINE_DEPTH_ADDON_INTERNAL bool on_copy_texture_region(command_list *cmd_list, resource, uint32_t, const subresource_box *source_box,
 	resource dest, uint32_t subresource, const subresource_box *dest_box, filter_mode)
 {
 	if (empty_copy_box(source_box) || empty_copy_box(dest_box)) return false;
@@ -2622,7 +1910,7 @@ static bool on_copy_texture_region(command_list *cmd_list, resource, uint32_t, c
 		sunshine_streamline::depth_content_invalidate(cmd_list->get_native(), dest.handle);
 	return false;
 }
-static bool on_copy_buffer_to_texture(command_list *cmd_list, resource, uint64_t, uint32_t, uint32_t,
+SUNSHINE_DEPTH_ADDON_INTERNAL bool on_copy_buffer_to_texture(command_list *cmd_list, resource, uint64_t, uint32_t, uint32_t,
 	resource dest, uint32_t subresource, const subresource_box *dest_box)
 {
 	if (empty_copy_box(dest_box)) return false;
@@ -2631,7 +1919,7 @@ static bool on_copy_buffer_to_texture(command_list *cmd_list, resource, uint64_t
 		sunshine_streamline::depth_content_invalidate(cmd_list->get_native(), dest.handle);
 	return false;
 }
-static bool on_resolve_texture_region(command_list *cmd_list, resource, uint32_t, const subresource_box *source_box,
+SUNSHINE_DEPTH_ADDON_INTERNAL bool on_resolve_texture_region(command_list *cmd_list, resource, uint32_t, const subresource_box *source_box,
 	resource dest, uint32_t subresource, uint32_t, uint32_t, uint32_t, format)
 {
 	if (empty_copy_box(source_box)) return false;
@@ -3828,7 +3116,7 @@ static const char *const format_to_string(format format)
 	}
 }
 
-static void set_manual_depth_override(generic_depth_data &data, resource depth_stencil, uint64_t identity)
+SUNSHINE_DEPTH_ADDON_INTERNAL void set_manual_depth_override(generic_depth_data &data, resource depth_stencil, uint64_t identity)
 {
 	data.override_depth_stencil = depth_stencil;
 	data.override_identity = identity;
@@ -3889,7 +3177,7 @@ static void reset_depth_selection(effect_runtime *runtime, generic_depth_data &d
 	update_effect_runtime(runtime);
 }
 
-static sunshine_streamline::provider::source_status describe_streamline_source(effect_runtime *runtime)
+SUNSHINE_DEPTH_ADDON_INTERNAL sunshine_streamline::provider::source_status describe_streamline_source(effect_runtime *runtime)
 {
 	const auto *device_data = runtime->get_device()->get_private_data<generic_depth_device_data>();
 	uint64_t present;
@@ -4667,544 +3955,14 @@ const char *sunshine_depth::status_message()
 }
 
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-static void require_snapshot(bool value, const char *message)
-{
-	if (!value) throw std::runtime_error(message);
-}
-
-static auto snapshot_test_resources(unsigned count, unsigned clears)
-{
-	std::unordered_map<resource, depth_stencil_resource, resource_hash> resources;
-	for (unsigned i = 0; i < count; ++i)
-	{
-		depth_stencil_resource info;
-		info.desc.type = resource_type::texture_2d;
-		info.desc.heap = memory_heap::default_;
-		info.desc.usage = resource_usage::depth_stencil | resource_usage::copy_source;
-		info.desc.texture = { i % 2 ? 1920u : 3840u, i % 2 ? 1080u : 2160u, 1, 1, format::d32_float, 1 };
-		info.identity = i + 1;
-		info.layout_epoch = i + 3;
-		info.last_used_in_frame = 100 - i % 4;
-		info.first_used_in_frame = i % 5;
-		auto &frame = info.last_frame_stats;
-		frame.total = { i * 300 + 6, i + 2, i % 4, i % 3,
-			{ 0, 0, static_cast<float>(info.desc.texture.width), static_cast<float>(info.desc.texture.height), 0, 1 } };
-		frame.current = frame.best_copy_stats = frame.total;
-		frame.copied_viewport = { 16, 8, frame.total.last_viewport.width - 32, frame.total.last_viewport.height - 16, .1f, .9f };
-		frame.copied_during_frame = i % 2;
-		frame.copy_provenance_ambiguous = i % 3 == 0;
-		if (i % 7 == 0) frame.total.last_viewport = {}; // Unknown draw/copy coverage.
-		if (i % 5 == 0) frame.copied_viewport = {};
-		frame.clears.resize(clears);
-		for (auto &clear : frame.clears)
-		{
-			static_cast<draw_stats &>(clear) = frame.total;
-			clear.copied_during_frame = true;
-		}
-		resources.emplace(resource { 0x1000 + uint64_t(i) * 16 }, std::move(info));
-	}
-	return resources;
-}
-
-static bool same_snapshot_viewport(const viewport &a, const viewport &b)
-{
-	return a.x == b.x && a.y == b.y && a.width == b.width && a.height == b.height &&
-		a.min_depth == b.min_depth && a.max_depth == b.max_depth;
-}
-
-static void check_snapshot_row(const depth_selection_resource &a, const depth_stencil_resource &b)
-{
-	require_snapshot(a.desc.type == b.desc.type && a.desc.heap == b.desc.heap && a.desc.usage == b.desc.usage &&
-		a.desc.flags == b.desc.flags && a.desc.texture.width == b.desc.texture.width && a.desc.texture.height == b.desc.texture.height &&
-		a.desc.texture.depth_or_layers == b.desc.texture.depth_or_layers && a.desc.texture.levels == b.desc.texture.levels &&
-		a.desc.texture.format == b.desc.texture.format && a.desc.texture.samples == b.desc.texture.samples &&
-		a.identity == b.identity && a.layout_epoch == b.layout_epoch && a.last_used_in_frame == b.last_used_in_frame &&
-		a.first_used_in_frame == b.first_used_in_frame, "Snapshot changed resource identity, description or frame activity");
-	const auto &x = a.last_frame_stats;
-	const auto &y = b.last_frame_stats;
-	require_snapshot(x.total.vertices == y.total.vertices && x.total.drawcalls == y.total.drawcalls &&
-		x.total.drawcalls_indirect == y.total.drawcalls_indirect && x.total.scene_writes == y.total.scene_writes &&
-		x.total.has_work() == y.total.has_work() && x.total.work_count() == y.total.work_count() &&
-		same_snapshot_viewport(x.total.last_viewport, y.total.last_viewport) && same_snapshot_viewport(x.copied_viewport, y.copied_viewport) &&
-		x.copied_during_frame == y.copied_during_frame && x.copy_provenance_ambiguous == y.copy_provenance_ambiguous,
-		"Snapshot changed draw, mesh/copy work, viewport or copied-frame flags");
-	require_snapshot(effective_capture_region(a) == effective_capture_region(b) &&
-		candidate_matches_shape(a, 3840, 2160) == candidate_matches_shape(b, 3840, 2160),
-		"Snapshot changed capture region or candidate shape admission");
-}
-
-static void check_depth_snapshot_contract()
-{
-	// UI work is an expiring request, independent of the capture-owner count.
-	generic_depth_device_data demand_device;
-	require_snapshot(!tracking_demand(demand_device).clear_history &&
-		tracking_demand(demand_device).counters == s_frame_activity_trace, "Hidden API-native path retained candidate demand");
-	request_depth_candidate_list(&demand_device);
-	require_snapshot(tracking_demand(demand_device).counters && tracking_demand(demand_device).clear_history,
-		"Opening manual depth selection did not request live candidate details");
-	consume_depth_candidate_list_request(demand_device);
-	require_snapshot(tracking_demand(demand_device).clear_history, "UI request lost its one-Present grace");
-	consume_depth_candidate_list_request(demand_device);
-	require_snapshot(!tracking_demand(demand_device).clear_history, "Closing the whole overlay left background history enabled");
-	demand_device.generic_capture_users.store(1);
-	require_snapshot(tracking_demand(demand_device).counters && !tracking_demand(demand_device).clear_history,
-		"Generic/shared preservation lost numeric capture statistics with the UI hidden");
-
-	// An already recorded command list may execute after UI/candidate demand
-	// stops. Merge preserves transport evidence, never its old optional details.
-	const resource tracked {0x1000};
-	state_tracking cached(false), merged(false);
-	auto &cached_stats = cached.stats_per_used_depth_stencil[tracked];
-	cached_stats.total = {1200, 12, 3, 2, {0, 0, 1920, 1080, 0, 1}};
-	cached_stats.current = cached_stats.best_copy_stats = cached_stats.total;
-	cached_stats.clears.push_back({cached_stats.current, clear_op::fullscreen_draw, true});
-	cached_stats.preservation_boundary = cached_stats.copied_during_frame = cached_stats.clear_zero = true;
-	cached_stats.copied_viewport = cached_stats.total.last_viewport;
-	cached_stats.capture_ticket.id = 77;
-	cached_stats.capture_ticket.texture = 88;
-	merged.merge(cached); // Existing detailed accumulation must be cleared too.
-	merged.merge(cached, {false, false});
-	const auto &paused = merged.stats_per_used_depth_stencil.at(tracked);
-	require_snapshot(paused.total.has_work() && paused.current.has_work() && paused.total.work_count() == 0 &&
-		paused.total.vertices == 0 && paused.total.drawcalls_indirect == 0 && paused.current.work_count() == 0 &&
-		paused.best_copy_stats.vertices == 0 && paused.clears.empty(),
-		"Cached command lists repopulated paused candidate counters/history");
-	require_snapshot(paused.preservation_boundary && paused.copied_during_frame && paused.clear_zero &&
-		paused.capture_ticket.id == 77 && paused.capture_ticket.texture == 88 &&
-		same_snapshot_viewport(paused.total.last_viewport, cached_stats.total.last_viewport) &&
-		same_snapshot_viewport(paused.copied_viewport, cached_stats.copied_viewport),
-		"Pausing candidate details changed preservation eligibility, layout or capture ownership");
-	state_tracking resumed(false);
-	resumed.merge(merged, {true, false});
-	require_snapshot(resumed.stats_per_used_depth_stencil.at(tracked).total.has_work() &&
-		resumed.stats_per_used_depth_stencil.at(tracked).total.work_count() == 0,
-		"Resuming counters invented workload for a recording observed while details were paused");
-	resumed.merge(cached, {true, false});
-	require_snapshot(resumed.stats_per_used_depth_stencil.at(tracked).total.vertices == 1200 &&
-		resumed.stats_per_used_depth_stencil.at(tracked).total.drawcalls == 12 &&
-		resumed.stats_per_used_depth_stencil.at(tracked).clears.empty(),
-		"Resumed Generic/shared preservation changed known workload or retained hidden clear history");
-
-	auto resources = snapshot_test_resources(16, 8);
-	// Exercise the real capture-layout owner, including transfer/activity-only
-	// frames and ambiguous captures. Aggregate rendering does not redefine a copy.
-	auto layout = resources.begin()->second;
-	layout.last_frame_stats.copied_during_frame = true;
-	layout.last_frame_stats.copy_provenance_ambiguous = false;
-	layout.last_frame_stats.copied_viewport = {16, 8, 1280, 720, 0, 1};
-	observe_preserved_layout(layout, layout.last_frame_stats);
-	const auto captured_region = effective_capture_region(layout);
-	const auto captured_epoch = layout.layout_epoch;
-	layout.last_frame_stats.copied_during_frame = false;
-	layout.last_frame_stats.total.last_viewport = {0, 0, 100, 100, 0, 1};
-	observe_preserved_layout(layout, layout.last_frame_stats);
-	require_snapshot(effective_capture_region(layout) == captured_region && layout.layout_epoch == captured_epoch,
-		"Activity-only viewport changed preserved capture layout");
-	require_snapshot(effective_capture_region(depth_selection_resource(layout)) == captured_region,
-		"Compact source snapshot lost authoritative captured crop");
-	layout.last_frame_stats.copied_during_frame = true;
-	layout.last_frame_stats.copy_provenance_ambiguous = true;
-	layout.last_frame_stats.copied_viewport = {0, 0, 1024, 576, 0, 1};
-	observe_preserved_layout(layout, layout.last_frame_stats);
-	require_snapshot(effective_capture_region(layout) == captured_region, "Ambiguous copy changed numeric basis");
-	layout.last_frame_stats.copy_provenance_ambiguous = false;
-	observe_preserved_layout(layout, layout.last_frame_stats);
-	require_snapshot(layout.layout_epoch == captured_epoch + 1 && effective_capture_region(layout).width == 1024,
-		"A real changed captured viewport did not advance layout identity");
-	resources.begin()->second.last_frame_stats.total = {};
-	resources.begin()->second.last_used_in_frame = 90; // Live but inactive manual row must survive the snapshot.
-	const auto legacy = resources; // Exact former on_begin_render_effects copy.
-	const auto compact = snapshot_depth_selection(resources);
-	require_snapshot(compact.size() == legacy.size(), "Snapshot lost depth resources");
-	generic_depth_data old_data, new_data;
-	auto old = legacy.begin();
-	for (const auto &[resource, info] : compact)
-	{
-		require_snapshot(old != legacy.end() && old->first == resource, "Snapshot changed workload tie traversal order");
-		check_snapshot_row(info, old->second);
-		const capture_region retained { 32, 16, 1280, 720, info.layout_epoch };
-		old_data.observed_regions[info.identity] = new_data.observed_regions[info.identity] = retained;
-		observe_candidate(old_data, old->second, 3840, 2160);
-		observe_candidate(new_data, info, 3840, 2160);
-		require_snapshot(old_data.observed_regions.at(info.identity) == new_data.observed_regions.at(info.identity),
-			"Snapshot changed retained/copy-ambiguous viewport evidence");
-		old_data.observed_regions.erase(info.identity); new_data.observed_regions.erase(info.identity);
-		observe_candidate(old_data, old->second, 3840, 2160);
-		observe_candidate(new_data, info, 3840, 2160);
-		require_snapshot(old_data.observed_regions.at(info.identity) == new_data.observed_regions.at(info.identity),
-			"Snapshot changed viewport fallback without an earlier observed region");
-		++old;
-	}
-	require_snapshot(old_data.selection.choose(100).id == new_data.selection.choose(100).id,
-		"Snapshot changed candidate scoring");
-	const auto resource = compact.front().first;
-	const auto original = resources.at(resource);
-	require_snapshot(find_depth_selection(compact, resource) != compact.end() && !compact.front().second.last_frame_stats.total.has_work(),
-		"Snapshot filtered out a live inactive manual source");
-	auto recropped = original;
-	++recropped.layout_epoch;
-	recropped.last_frame_stats.copied_during_frame = true;
-	recropped.last_frame_stats.copy_provenance_ambiguous = false;
-	recropped.last_frame_stats.copied_viewport = { 64, 32, 1280, 720, 0, 1 };
-	old_data.native_calibrations[original.identity] = {}; new_data.native_calibrations[original.identity] = {};
-	observe_candidate(old_data, recropped, 3840, 2160);
-	observe_candidate(new_data, depth_selection_resource(recropped), 3840, 2160);
-	require_snapshot(old_data.observed_regions.at(original.identity) == new_data.observed_regions.at(original.identity) &&
-		new_data.observed_regions.at(original.identity).x == 64 && !old_data.native_calibrations.count(original.identity) &&
-		!new_data.native_calibrations.count(original.identity), "Snapshot retained calibration across a changed content crop");
-	resources.clear();
-	for (const auto &[handle, info] : compact)
-		check_snapshot_row(info, legacy.at(handle)); // No borrowed rows/history after unlock.
-	auto replacement = original;
-	replacement.identity += 1000;
-	++replacement.layout_epoch;
-	replacement.last_frame_stats.copied_during_frame = true;
-	replacement.last_frame_stats.copy_provenance_ambiguous = false;
-	replacement.last_frame_stats.copied_viewport = { 64, 32, 1280, 720, 0, 1 };
-	resources.emplace(resource, replacement);
-	const auto replaced = snapshot_depth_selection(resources);
-	const auto fresh = find_depth_selection(replaced, resource);
-	require_snapshot(fresh != replaced.end() && fresh->second.identity != compact.front().second.identity &&
-		fresh->second.layout_epoch == replacement.layout_epoch && effective_capture_region(fresh->second).x == 64,
-		"Native address reuse inherited old snapshot lifetime or crop");
-
-	// Compare the removed live-ID pass + eligible-ID pass with the single final
-	// pass. A manual inactive row is retained; a destroyed and a filtered row
-	// are erased before delayed readbacks/selection can see their old evidence.
-	const auto quality = sunshine_depth::depth_quality { sunshine_depth::content_kind::useful, 100 };
-	generic_depth_data before, after;
-	for (uint64_t id : { 1u, 2u, 3u, 9u })
-	{
-		depth_stencil_resource info = original;
-		info.identity = id;
-		info.last_frame_stats.total.drawcalls = id == 1 ? 0 : 10;
-		info.last_frame_stats.total.scene_writes = 0;
-		info.last_used_in_frame = id == 1 ? 90 : 100;
-		observe_candidate(before, info, 3840, 2160);
-		observe_candidate(after, depth_selection_resource(info), 3840, 2160);
-		before.observed_ids.push_back(id); after.observed_ids.push_back(id);
-		before.native_calibrations[id] = {}; after.native_calibrations[id] = {};
-		for (uint64_t frame : { 98u, 99u, 100u })
-		{
-			before.selection.sample(id, quality, frame);
-			after.selection.sample(id, quality, frame);
-		}
-	}
-	const std::vector<uint64_t> live { 1, 2, 3 }, eligible { 1, 2 };
-	for (const auto id : before.observed_ids)
-		if (std::find(live.begin(), live.end(), id) == live.end())
-		{
-			before.selection.erase(id); before.observed_regions.erase(id); before.native_calibrations.erase(id);
-		}
-	prune_depth_selection(before, eligible);
-	prune_depth_selection(after, eligible);
-	for (uint64_t id : { 1u, 2u, 3u, 9u })
-	{
-		const bool retained = id <= 2;
-		require_snapshot((after.selection.evidence(id) != nullptr) == retained &&
-			after.observed_regions.count(id) == retained && after.native_calibrations.count(id) == retained &&
-			before.observed_regions.count(id) == after.observed_regions.count(id) &&
-			before.native_calibrations.count(id) == after.native_calibrations.count(id), "Single prune pass changed candidate lifetime");
-		after.selection.sample(id, quality, 101);
-		require_snapshot((after.selection.evidence(id) != nullptr) == retained, "Late readback resurrected a removed source");
-	}
-	require_snapshot(after.selection.evidence(1)->confirmed_good && after.native_calibrations.count(1),
-		"Inactive manual row lost its retained histogram or calibration");
-	observe_candidate(after, fresh->second, 3840, 2160);
-	require_snapshot(!after.selection.evidence(replacement.identity)->confirmed_good,
-		"Recycled resource inherited the prior lifetime's content evidence");
-}
-
-template <typename Snapshot>
-static uint64_t depth_snapshot_checksum(const Snapshot &snapshot)
-{
-	uint64_t result = 0;
-	for (const auto &[resource, info] : snapshot)
-	{
-		const auto &stats = info.last_frame_stats;
-		result += resource.handle + info.identity * 17 + info.layout_epoch * 31 + info.last_used_in_frame + info.first_used_in_frame +
-			info.desc.texture.width + info.desc.texture.height + stats.total.vertices + stats.total.work_count() +
-			stats.total.drawcalls_indirect + static_cast<uint64_t>(stats.total.last_viewport.width + stats.total.last_viewport.height) +
-			static_cast<uint64_t>(stats.copied_viewport.x + stats.copied_viewport.y + stats.copied_viewport.width + stats.copied_viewport.height) +
-			stats.copied_during_frame + stats.copy_provenance_ambiguous;
-	}
-	return result;
-}
-
-extern "C" __declspec(dllexport) BOOL SunshineDepthTestSnapshot(unsigned buffers, unsigned clears, unsigned iterations,
-	sunshine_depth_snapshot_test_result *output)
-{
-	if (!output) return FALSE;
-	*output = {};
-	try
-	{
-		require_snapshot(buffers <= 512 && clears <= 1024 && iterations && iterations <= 100000, "Invalid benchmark workload");
-		check_depth_snapshot_contract();
-		const auto resources = snapshot_test_resources(buffers, clears);
-		output->clear_records = uint64_t(buffers) * clears;
-		output->deep_value_bytes = buffers * sizeof(decltype(resources)::value_type) + output->clear_records * sizeof(clear_stats);
-		output->compact_value_bytes = buffers * sizeof(depth_selection_snapshot::value_type);
-		const uint64_t expected = depth_snapshot_checksum(resources) * iterations;
-		const auto measure = [&](bool deep) {
-			uint64_t checksum = 0;
-			const auto start = std::chrono::steady_clock::now();
-			for (unsigned i = 0; i < iterations; ++i)
-			{
-				if (deep) { const auto snapshot = resources; checksum += depth_snapshot_checksum(snapshot); }
-				else { const auto snapshot = snapshot_depth_selection(resources); checksum += depth_snapshot_checksum(snapshot); }
-			}
-			const auto stop = std::chrono::steady_clock::now();
-			require_snapshot(checksum == expected, "Timed snapshots did not produce the same consumed values");
-			output->checksum ^= checksum;
-			return std::chrono::duration<double, std::nano>(stop - start).count() / iterations;
-		};
-		measure(true); measure(false); // Warm both allocation paths outside reported rounds.
-		for (unsigned round = 0; round < output->rounds; ++round)
-		{
-			if (round % 2) { output->compact_ns[round] = measure(false); output->deep_ns[round] = measure(true); }
-			else { output->deep_ns[round] = measure(true); output->compact_ns[round] = measure(false); }
-		}
-		output->checksum = expected;
-		return TRUE;
-	}
-	catch (const std::exception &error)
-	{
-		std::snprintf(output->error, sizeof(output->error), "%s", error.what());
-		return FALSE;
-	}
-}
-
-// Test adapter uses the same lifetime lookup and override handover as the UI.
-// It is absent from the production DLL and never injects depth pixels.
-extern "C" __declspec(dllexport) BOOL SunshineDepthTestProviderStatus(effect_runtime *runtime,
-	sunshine_streamline::provider::source_status *output)
-{
-	if (!s_registered || runtime == nullptr || output == nullptr) return FALSE;
-	*output = describe_streamline_source(runtime);
-	return TRUE;
-}
-
-extern "C" __declspec(dllexport) BOOL SunshineDepthTestSelectManual(effect_runtime *runtime, uint64_t native_resource)
-{
-	if (!s_registered || runtime == nullptr)
-		return FALSE;
-	auto *data = runtime->get_private_data<generic_depth_data>();
-	auto *device_data = runtime->get_device()->get_private_data<generic_depth_device_data>();
-	if (data == nullptr || device_data == nullptr)
-		return FALSE;
-	if (native_resource == 0)
-	{
-		set_manual_depth_override(*data, {}, 0);
-		s_sunshine_auto = true;
-		reshade::set_config_value(nullptr, "SUNSHINE_DEPTH", "AutoSelectSceneDepth", s_sunshine_auto);
-		return TRUE;
-	}
-	{
-		const std::shared_lock<std::shared_mutex> lock(s_mutex);
-		const auto found = device_data->depth_stencil_resources.find(resource { native_resource });
-		if (found == device_data->depth_stencil_resources.end() || found->second.last_used_in_frame != device_data->frame_index)
-			return FALSE;
-		set_manual_depth_override(*data, found->first, found->second.identity);
-	}
-	return TRUE;
-}
-
-extern "C" __declspec(dllexport) BOOL SunshineDepthTestManualState(effect_runtime *runtime, uint64_t *native_resource, BOOL *recovering)
-{
-	if (!s_registered || runtime == nullptr || native_resource == nullptr || recovering == nullptr)
-		return FALSE;
-	const auto *data = runtime->get_private_data<generic_depth_data>();
-	if (data == nullptr)
-		return FALSE;
-	*native_resource = data->override_depth_stencil.handle;
-	*recovering = data->manual_recovery_probing ? TRUE : FALSE;
-	return TRUE;
-}
-
-// Calls the real event handlers on an isolated snapshot of this runtime's
-// command state. It checks accounting only; no mesh/copy GPU command is issued.
-extern "C" __declspec(dllexport) BOOL SunshineDepthTestActivityAccounting(effect_runtime *runtime, uint64_t native_resource)
-{
-	if (!s_registered || runtime == nullptr || native_resource == 0 || s_streamline_probe_events) return FALSE;
-	auto *queue = runtime->get_command_queue();
-	if (queue == nullptr) return FALSE;
-	auto *cmd = queue->get_immediate_command_list();
-	// ReShade's internal D3D12 list does not raise application init_command_list.
-	// Own scratch tracking only for this test; issue no commands and remove it on exit.
-	const bool temporary_tracking = cmd->get_private_data<state_tracking>() == nullptr;
-	if (temporary_tracking) cmd->create_private_data<state_tracking>(false);
-	struct release_tracking {
-		command_list *cmd;
-		bool owned;
-		~release_tracking() { if (owned) cmd->destroy_private_data<state_tracking>(); }
-	} tracking {cmd, temporary_tracking};
-	auto *ptr = cmd->get_private_data<state_tracking>();
-	if (ptr == nullptr) return FALSE;
-	auto &state = *ptr;
-	struct restore_state {
-		state_tracking &state;
-		decltype(state.stats_per_used_depth_stencil) stats;
-		resource depth;
-		uint64_t lifetime;
-		viewport view;
-		bool first;
-		~restore_state() {
-			const std::unique_lock<std::shared_mutex> lock(s_mutex);
-			state.stats_per_used_depth_stencil = std::move(stats);
-			state.current_depth_stencil = depth; state.current_depth_lifetime = lifetime;
-			state.current_viewport = view; state.first_draw_since_bind = first;
-		}
-	};
-	std::unique_lock<std::shared_mutex> lock(s_mutex);
-	restore_state saved {state, std::move(state.stats_per_used_depth_stencil), state.current_depth_stencil,
-		state.current_depth_lifetime, state.current_viewport, state.first_draw_since_bind};
-	state.stats_per_used_depth_stencil.clear();
-	state.current_depth_stencil = {native_resource}; state.current_depth_lifetime = 0;
-	state.current_viewport = {0, 0, 1280, 720, 0, 1}; state.first_draw_since_bind = true;
-	lock.unlock();
-	const resource target {native_resource};
-	bool ok = true;
-	const auto checkpoint = [&](const char *label) {
-		if (!ok) sunshine_log::message(reshade::log::level::error, label);
-		return ok;
-	};
-	for (const auto type : {indirect_command::dispatch, indirect_command::dispatch_rays})
-		ok &= !on_draw_indirect(cmd, type, {}, 0, 3, 0);
-	for (const auto type : {indirect_command::unknown, indirect_command::draw, indirect_command::draw_indexed, indirect_command::dispatch_mesh})
-		ok &= !on_draw_indirect(cmd, type, {}, 0, 0, 0);
-	ok &= !on_dispatch_mesh(cmd, 0, 1, 1) && !on_dispatch_mesh(cmd, 1, 0, 1) && !on_dispatch_mesh(cmd, 1, 1, 0);
-	ok &= !on_draw(cmd, 0, 1, 0, 0) && !on_draw_indexed(cmd, 3, 0, 0, 0, 0);
-	ok &= state.stats_per_used_depth_stencil.empty() && state.first_draw_since_bind;
-	if (!checkpoint("Depth activity test: no-op accounting failed")) return FALSE;
-	ok &= !on_dispatch_mesh(cmd, 2, 3, 4);
-	auto &mesh = state.stats_per_used_depth_stencil[target];
-	ok &= mesh.total.has_work() && mesh.total.scene_writes == 1 && mesh.current.scene_writes == 1 &&
-		mesh.total.drawcalls == 0 && mesh.total.vertices == 0 && mesh.current.vertices == 0 &&
-		mesh.current.last_viewport.width == 1280 && !state.first_draw_since_bind;
-	state_tracking merged(false); merged.merge(state);
-	ok &= merged.stats_per_used_depth_stencil[target].total.scene_writes == 1 &&
-		merged.stats_per_used_depth_stencil[target].current.scene_writes == 1;
-	merged.reset(); ok &= merged.stats_per_used_depth_stencil.empty();
-	if (!checkpoint("Depth activity test: mesh/merge/reset accounting failed")) return FALSE;
-	state.stats_per_used_depth_stencil.clear();
-	ok &= !on_draw(cmd, 3, 2, 0, 0) && !on_draw_indexed(cmd, 6, 1, 0, 0, 0);
-	for (const auto type : {indirect_command::unknown, indirect_command::draw, indirect_command::draw_indexed, indirect_command::dispatch_mesh})
-		ok &= !on_draw_indirect(cmd, type, {}, 0, 2, 0);
-	const auto &drawn = state.stats_per_used_depth_stencil[target];
-	ok &= drawn.total.drawcalls == 10 && drawn.total.drawcalls_indirect == 8 && drawn.total.vertices == 12 && drawn.total.scene_writes == 0;
-	if (!checkpoint("Depth activity test: raster/indirect accounting failed")) return FALSE;
-	state.stats_per_used_depth_stencil.clear();
-	for (const subresource_box box : {subresource_box{0, 0, 0, 0, 1, 1}, subresource_box{0, 0, 0, 1, 0, 1}, subresource_box{0, 0, 0, 1, 1, 0}}) {
-		ok &= !on_copy_texture_region(cmd, {}, 0, &box, target, 0, nullptr, filter_mode::min_mag_mip_point);
-		ok &= !on_copy_texture_region(cmd, {}, 0, nullptr, target, 0, &box, filter_mode::min_mag_mip_point);
-		ok &= !on_copy_buffer_to_texture(cmd, {}, 0, 0, 0, target, 0, &box);
-		ok &= !on_resolve_texture_region(cmd, {}, 0, &box, target, 0, 0, 0, 0, format::unknown);
-	}
-	ok &= state.stats_per_used_depth_stencil.empty(); // Explicit zero-volume transfers cannot refresh clear-only depth.
-	ok &= !on_copy_texture_region(cmd, {}, 0, nullptr, target, 1, nullptr, filter_mode::min_mag_mip_point);
-	ok &= state.stats_per_used_depth_stencil.empty(); // A stencil plane or other mip is not the sampled depth.
-	if (!checkpoint("Depth activity test: empty/subresource copy accounting failed")) return FALSE;
-	ok &= !on_copy_resource(cmd, {}, target);
-	ok &= !on_copy_texture_region(cmd, {}, 0, nullptr, target, 0, nullptr, filter_mode::min_mag_mip_point);
-	ok &= !on_copy_buffer_to_texture(cmd, {}, 0, 0, 0, target, 0, nullptr);
-	ok &= !on_resolve_texture_region(cmd, {}, 0, nullptr, target, 0, 0, 0, 0, format::unknown);
-	const auto &copied = state.stats_per_used_depth_stencil[target];
-	ok &= copied.total.scene_writes == 4 && copied.current.scene_writes == 4 && copied.total.has_work() &&
-		copied.total.drawcalls == 0 && copied.total.vertices == 0 && copied.total.last_viewport.width == 0;
-	if (!checkpoint("Depth activity test: base-depth copy accounting failed")) return FALSE;
-	if (!s_frame_activity_trace)
-	{
-		auto *device_data = runtime->get_device()->get_private_data<generic_depth_device_data>();
-		if (device_data == nullptr) return FALSE;
-		struct restore_demand {
-			generic_depth_device_data &data;
-			unsigned captures, list;
-			~restore_demand() {
-				data.generic_capture_users.store(captures);
-				data.candidate_list_request.store(list);
-			}
-		} demand {*device_data, device_data->generic_capture_users.exchange(0), device_data->candidate_list_request.exchange(0)};
-		state.stats_per_used_depth_stencil.clear();
-		ok &= !on_draw(cmd, 3, 1, 0, 0) && !on_draw_indirect(cmd, indirect_command::draw, {}, 0, 2, 0) &&
-			!on_dispatch_mesh(cmd, 1, 1, 1) && !on_copy_resource(cmd, {}, target);
-		auto &passive = state.stats_per_used_depth_stencil[target];
-		ok &= passive.total.has_work() && passive.current.has_work() && passive.total.work_count() == 0 &&
-			passive.total.vertices == 0 && passive.total.drawcalls_indirect == 0 && passive.total.last_viewport.width == 1280;
-		// Capture is disabled here, so this exercises the real boundary classifier
-		// without recording a GPU copy or changing any existing backup assignment.
-		on_clear_depth_impl(cmd, state, target, clear_op::unbind_depth_stencil_view);
-		ok &= passive.preservation_boundary && passive.clears.empty();
-		request_depth_candidate_list(device_data);
-		ok &= !on_draw(cmd, 3, 1, 0, 0) && passive.total.drawcalls == 1 && passive.total.vertices == 3;
-		consume_depth_candidate_list_request(*device_data);
-		consume_depth_candidate_list_request(*device_data);
-		ok &= !on_draw(cmd, 3, 1, 0, 0) && passive.total.has_work() && passive.total.work_count() == 0;
-		device_data->generic_capture_users.store(1);
-		ok &= !on_draw(cmd, 3, 1, 0, 0) && passive.total.drawcalls == 1 && passive.total.vertices == 3;
-		if (!checkpoint("Depth activity test: hidden API counters/UI expiry/preservation recovery failed")) return FALSE;
-	}
-	state.stats_per_used_depth_stencil.clear(); state.current_depth_stencil = {};
-	ok &= !on_dispatch_mesh(cmd, 1, 1, 1) && state.stats_per_used_depth_stencil.empty();
-	return ok ? TRUE : FALSE;
-}
-
-extern "C" __declspec(dllexport) BOOL SunshineDepthTestCaptureDemand(effect_runtime *runtime,
-	BOOL *enabled, unsigned *users, uint64_t *transitions)
-{
-	if (!runtime || !enabled || !users || !transitions) return FALSE;
-	const auto *data = runtime->get_private_data<generic_depth_data>();
-	const auto *device_data = runtime->get_device()->get_private_data<generic_depth_device_data>();
-	if (!data || !device_data) return FALSE;
-	*enabled = data->generic_capture_enabled ? TRUE : FALSE;
-	*users = device_data->generic_capture_users.load(std::memory_order_relaxed);
-	*transitions = data->generic_capture_transitions;
-	return TRUE;
-}
-
-extern "C" __declspec(dllexport) BOOL SunshineDepthTestFrame(effect_runtime *runtime, sunshine_depth::frame_depth *output)
-{
-	return output != nullptr && sunshine_depth::get_frame_depth(runtime, *output, sunshine_depth::depth_orientation::automatic, false);
-}
-
-// The actual preserved copy behind the selected D3D12 backup published for this
-// Present: the before-clear copy into the capture owner's ticket texture, in the
-// game's recording. The frame's depth_copy is its runtime-list forward instead.
-extern "C" __declspec(dllexport) BOOL SunshineDepthTestPreservedCopy(effect_runtime *runtime,
-	sunshine_streamline::content::copy_snapshot *copy, uint64_t *texture, uint64_t *lifetime)
-{
-	if (!s_registered || runtime == nullptr || copy == nullptr || texture == nullptr || lifetime == nullptr) return FALSE;
-	*copy = {}; *texture = *lifetime = 0;
-	if (runtime->get_device()->get_api() != device_api::d3d12) return FALSE;
-	const auto *data = runtime->get_private_data<generic_depth_data>();
-	const auto *device_data = runtime->get_device()->get_private_data<generic_depth_device_data>();
-	if (!data || !device_data || !data->native_access_open || !data->capture_ready || data->selected_record.direct ||
-		data->native_access_present != device_data->native_present_index ||
-		!validate_capture_record(runtime, *data, *device_data, data->selected_record)) return FALSE;
-	const resource source{data->selected_record.source};
-	const std::shared_lock<std::shared_mutex> lock(s_mutex);
-	const auto found = device_data->depth_stencil_resources.find(source);
-	const auto backup = std::find_if(device_data->depth_stencil_backups.begin(), device_data->depth_stencil_backups.end(),
-		[source](const auto &entry) { return entry.depth_stencil == source; });
-	if (found == device_data->depth_stencil_resources.end() || found->second.identity != data->selected_record.identity ||
-		backup == device_data->depth_stencil_backups.end()) return FALSE;
-	const auto &ticket = found->second.last_frame_stats.capture_ticket;
-	if (!ticket || backup->published_ticket != ticket.id || backup->published_present != device_data->native_present_index) return FALSE;
-	*copy = found->second.last_frame_stats.depth_copy;
-	*texture = ticket.texture; *lifetime = ticket.resource_id;
-	return TRUE;
-}
-
-extern "C" __declspec(dllexport) BOOL SunshineDepthTestLegacyCalibrationState(effect_runtime *runtime, unsigned *requested, unsigned *entries)
-{
-	if (!s_registered || runtime == nullptr || requested == nullptr || entries == nullptr)
-		return FALSE;
-	const auto *data = runtime->get_private_data<generic_depth_data>();
-	if (data == nullptr)
-		return FALSE;
-	*requested = data->native_depth_requested ? 1u : 0u;
-	*entries = static_cast<unsigned>(data->native_calibrations.size());
-	return TRUE;
-}
+// The test add-on's exports (test_depth_addon_exports.cpp) use these with
+// both the recorded and the snapshot resource rows.
+template capture_region effective_capture_region(const depth_stencil_resource &);
+template capture_region effective_capture_region(const depth_selection_resource &);
+template bool candidate_matches_shape(const depth_stencil_resource &, uint32_t, uint32_t);
+template bool candidate_matches_shape(const depth_selection_resource &, uint32_t, uint32_t);
+template void observe_candidate(generic_depth_data &, const depth_stencil_resource &, uint32_t, uint32_t);
+template void observe_candidate(generic_depth_data &, const depth_selection_resource &, uint32_t, uint32_t);
 #endif
 
 void sunshine_depth::set_raw_scene_request(effect_runtime *runtime, uint64_t basis_epoch, bool enabled)
