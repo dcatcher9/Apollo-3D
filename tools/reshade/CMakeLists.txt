@@ -260,6 +260,17 @@ if(BUILD_TESTING)
     add_test(NAME reshade_${policy} COMMAND reshade_${policy}_tests)
     set_tests_properties(reshade_${policy} PROPERTIES TIMEOUT 15)
   endforeach()
+  # The first-run report's checks and its goldens over saved game logs (log_report_goldens). They need
+  # only a Python 3 interpreter and are not registered without one.
+  find_package(Python3 3.9 COMPONENTS Interpreter)
+  if(Python3_Interpreter_FOUND)
+    foreach(report_test IN ITEMS game3d_log_report game3d_log_report_golden)
+      add_test(NAME reshade_${report_test} COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/test_${report_test}.py")
+      set_tests_properties(reshade_${report_test} PROPERTIES TIMEOUT 60 ENVIRONMENT PYTHONUTF8=1)
+    endforeach()
+  else()
+    message(STATUS "No Python 3.9 interpreter: the Game 3D log report tests are not registered")
+  endif()
 
   add_executable(reshade_display_depth_cache_tests test_display_depth_cache.cpp)
   target_compile_features(reshade_display_depth_cache_tests PRIVATE cxx_std_17)

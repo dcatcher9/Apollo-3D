@@ -1,0 +1,42 @@
+Game 3D readiness: HogwartsLegacy.exe  23:00:56 to 23:02:56 (1m59s, exited)
+[PASS] Add-on: loaded; output 7680x2160 PQ D3D12 (generation 1)
+[PASS] Depth: fresh from 23:01:32; 1.2% of later publications without depth
+[PASS] Placement flat: 5.2% of publications showed the colour frame with depth
+[INFO] Placement calibration: 1 flat run was a calibration with depth for at most 3 s
+         23:01:56.203-23:01:57.723 after frame generation switch
+[PASS] Capture coverage: 29363 covered (29360 observed, 3 declared states); not open: unknown 0, closed 0, render pass 0
+[PASS] Placement: camera projection drives placement
+[INFO] UI trust: 23:00:58 restored accepted UI sources hudless:24:pq
+[INFO] UI trust: 23:01:00 restored accepted UI sources hudless:24:pq
+[INFO] UI trust: 23:01:46 accepted UI sources are now ui_layer:87:pq,hudless:24:pq
+[PASS] UI channel admission: no selective UI channel rejected for invalid pixels
+[PASS] UI counters: 16745 Auto frames through the last of 693 committed samples: 16201 detected, 542 held, 2 without detection
+[PASS] UI protection: decided no mask (0) 50%, HUD-less difference (5) 1.9%, full frame (exact pair) (6) 1.8%, full frame over a hidden scene (H1) (8) 10%, UI layer (10) 36% of detection frames
+[PASS] UI full frame: 1993 full-frame frames (6: 299, 8: 1694; 12% of detection frames); H1 samples (8) read the scene hidden 95, ambiguous 0, visible 2, invalid or unmeasured 18; scene guard entered 5, released 3, refuted 7; depth not current on 586 detection frames
+[INFO] UI full alpha: 2170 frames decided a whole-frame alpha and 299 an exact full change-set (6) (15% of detection frames)
+[PASS] UI inferred alpha: no frame decided from unaccepted inferred alpha
+[INFO] UI inexact difference: 5 frames (0.03% of detection frames) decided a HUD-less difference from a Present-counted pair, validated by its own pixels (V2)
+[INFO] UI holds: generated 542, none 0 (3.2% of Auto frames); 55 detection frames (0.34%) reused the previous real frame's decision (T1)
+[INFO] UI no mask: 48% of Auto frames had no mask; decided none: ambiguous 47%, difference failed 0.35%, gate no hold 0.51%, no candidate 0.02%, unaccepted 0.45%; without detection: no candidates 0.01%; sampled reasons with the refused candidate: ambiguous (current alpha) 1, unaccepted (UI layer) 1, gate no hold (UI layer) 1
+[INFO] UI trust events: earned 2, revoked one way by an exact pair 0, revoked by a declared alpha's coverage 0, lapsed 0, restored 1, legacy entries discarded 0, forgotten 0
+[PASS] UI holds without a decision: no window held most Auto frames without a decision
+[PASS] UI protection gaps: every streamed Auto frame had a UI mask or a UI channel showing no UI except 1 gap shorter than 2 s (0.2 s); 1.0 s without a mask while depth was lost (every frame flat by the output counters) not counted
+[INFO] Hidden scene: H1 hidden scene (8) in 10 samples (pre-UI image: hudless 9, layer 0), entered 5, released 3, refuted 7; 18 of 44 samples measured
+[PASS] Observation losses: lifecycle 1
+[INFO] Depth losses: retained_depth_expired 4, source_handoff 1
+[PASS] Export: runtime_reset 1
+[WARN] Present hitches: 1 outside resets, FG switches and overlay opening, worst 1407.6 ms
+         23:01:21 setup section (no step named; the slowest Present of 23:01:11-23:01:21) 1407.6 ms
+[INFO] Diagnostics: Diagnostics=0: no per-pass GPU timing (its lines are absent by design)
+[INFO] Game 3D cost: CPU 0.22 ms mean (1407.6 max) over 15446 Presents; GPU timing off (Diagnostics=0)
+[INFO] Stream delivery: stream rate unknown (pass --host-log to judge it): the host took 66.8 new frames/s, the game offered 120.8/s
+[PASS] UI layer copies: no layer copy skipped in 7 timing windows
+[INFO] Frame generation: 23:01:22 off, 23:01:38 on, 23:01:56 off
+[INFO] Other log warnings: 6 WARN/ERROR lines from ReShade, the game or another add-on, none about the Sunshine 3D add-on
+         23:00:59 WARN Reference count for IDXGIAdapter0 object 0000000010172750 (00000000000F3230) is inconsistent (2).
+         23:00:59 WARN Reference count for ID3D11Device0 object 0000000010FB4670 (000000000E918CE0) is inconsistent (1).
+         23:00:59 WARN Reference count for IDXGIFactory0 object 000000005C06A6A0 (00000000001B00C0) is inconsistent (3).
+         23:02:35 WARN Reference count for ID3D12CommandQueue0 object 0000000265B00650 (00000002A691BBC0) is inconsistent (9).
+         23:02:37 WARN Reference count for ID3D11Device5 object 00000002194EF1F0 (0000000207707C00) is inconsistent (2).
+         23:02:55 WARN Add-ons are still loaded! Application may crash on exit.
+Overall: WARN (0 fail, 1 warn)

@@ -1,0 +1,36 @@
+Game 3D readiness: Dead Space.exe  22:51:05 to 22:52:13 (1m07s, exited)
+[PASS] Add-on: loaded; output 7680x2160 PQ D3D12 (generation 1)
+[PASS] Depth: fresh from 22:51:18; 6.8% of later publications without depth
+[PASS] Placement flat: 6.3% of publications showed the colour frame with depth
+[PASS] Capture coverage: 5952 covered (5951 observed, 1 declared states); not open: unknown 0, closed 0, render pass 0
+[PASS] Placement: camera projection drives placement
+[PASS] UI channel admission: no selective UI channel rejected for invalid pixels
+[PASS] UI counters: 6198 Auto frames through the last of 466 committed samples: 6198 detected, 0 held, 0 without detection
+[PASS] UI protection: decided no mask (0) 100% of detection frames
+[PASS] UI full frame: 0 full-frame frames (6: 0, 8: 0; 0% of detection frames); H1 samples (8) read the scene hidden 0, ambiguous 0, visible 0, invalid or unmeasured 0; scene guard entered 0, released 0, refuted 0; depth not current on 112 detection frames
+[PASS] UI full alpha: no frame decided a whole-frame alpha or an exact full change-set (6)
+[PASS] UI inferred alpha: no frame decided from unaccepted inferred alpha
+[PASS] UI inexact difference: no HUD-less difference decided from an inexact pair
+[INFO] UI holds: generated 0, none 0 (0% of Auto frames); 0 detection frames (0%) reused the previous real frame's decision (T1)
+[INFO] UI no mask: 100% of Auto frames had no mask; decided none: layer aside 0.03%, ambiguous 100%, gate no hold 0.03%; sampled reasons with the refused candidate: ambiguous (current alpha) 5, ambiguous (UI layer) 1
+[INFO] UI trust events: earned 0, revoked one way by an exact pair 0, revoked by a declared alpha's coverage 0, lapsed 0, restored 0, legacy entries discarded 0, forgotten 0
+[PASS] UI holds without a decision: no window held most Auto frames without a decision
+[WARN] UI protection gaps: no usable UI mask for 44 s in 1 window; HUD and menus took the scene's depth there
+         22:51:29-22:52:13 (44 s) FG off: current alpha covers 100% (not accepted) (reason ambiguous: current alpha)
+[INFO] Hidden scene: H1 hidden scene (8) in 0 samples (pre-UI image: hudless 0, layer 0), entered 0, released 0, refuted 0; 0 of 9 samples measured
+[PASS] Observation losses: lifecycle 1
+[WARN] Capture status: conflicting_state 1; 1 more while settling
+         22:51:21 Streamline conflicting_state
+[INFO] Depth losses: retained_depth_expired 2
+[PASS] Export: never paused
+[WARN] Present hitches: 1 outside resets, FG switches and overlay opening, worst 33.8 ms
+         22:51:31 render section (no step named; the slowest Present of 22:51:21-22:51:31) 33.8 ms
+[INFO] Diagnostics: Diagnostics=0: no per-pass GPU timing (its lines are absent by design)
+[INFO] Game 3D cost: CPU 0.32 ms mean (1128.4 max) over 6888 Presents; GPU timing off (Diagnostics=0)
+[INFO] Stream delivery: stream rate unknown (pass --host-log to judge it): the host took 89.7 new frames/s, the game offered 115.3/s
+[PASS] UI layer copies: no layer copy skipped in 2 timing windows
+[INFO] Other log warnings: 8 WARN/ERROR lines from ReShade, the game or another add-on, none about the Sunshine 3D add-on
+         22:51:09 WARN IDirectInput8W::CreateDevice failed with error code E_FAIL. (3 such lines)
+         22:51:11 WARN Successfully compiled '<GAME>\reshade-shaders\Shaders\SweetFX\Nostalgia.fx' in 0.042000 s with warnings: (4 such lines)
+         22:52:12 WARN Add-ons are still loaded! Application may crash on exit.
+Overall: WARN (0 fail, 3 warn)

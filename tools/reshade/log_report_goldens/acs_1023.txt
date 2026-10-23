@@ -1,0 +1,50 @@
+Game 3D readiness: ACShadows.exe  08:23:00 to 08:25:37 (2m36s, ended without exiting (crash or kill?))
+[PASS] Add-on: loaded; output 7680x2160 PQ D3D12 (generation 4)
+[WARN] Depth: fresh from 08:23:26; 7.3% of later publications without depth; gaps outside FG switches and resets
+         08:24:44.910-08:24:45.036 (125 ms) depth_shape_changed, Streamline selection=layout_changed
+         08:24:46.950-08:24:47.121 (172 ms) depth_shape_changed, Streamline selection=layout_changed
+         08:24:47.235-08:24:47.425 (187 ms) retained_depth_expired, Streamline selection=completed_before_gap
+         08:24:49.082-08:24:49.362 (281 ms) depth_shape_changed, Streamline selection=completed_before_gap
+         08:24:49.433-08:24:49.788 (360 ms) depth_shape_changed, Streamline selection=layout_changed
+         08:24:49.888-08:24:50.251 (438 ms) depth_shape_changed, Streamline selection=layout_changed
+         08:24:53.181-08:24:53.181 explicit_reuse_invalidation, unknown selection=not_attempted, until the export paused
+[INFO] Depth paused by the game: 1 depth loss in which the game ran no DLSS (no active depth view: a menu or loading screen) and resumed it with its own scene reset; those frames were flat
+         08:23:52.599-08:23:53.816 (1219 ms) retained_depth_expired, Streamline selection=inactive_views (the game supplied no depth)
+[PASS] Placement flat: 10.5% of publications showed the colour frame with depth
+[PASS] Capture coverage: 7573 covered (7572 observed, 1 declared states); not open: unknown 0, closed 0, render pass 0
+[INFO] Placement: raw controller only; its gain varied 3x
+[INFO] UI trust: 08:23:02 restored accepted UI sources ui_layer:10:pq,ui_layer:28:pq,current:24:pq
+[WARN] UI channel admission: 4 samples left the frame unprotected after rejecting a selective UI channel for invalid pixels
+         08:24:34 UI layer 8.2% covered, 4558493 invalid pixels, accepted
+         08:24:44 UI layer 10.0% covered, 2922554 invalid pixels, accepted
+         08:24:53 UI layer 9.8% covered, 2843490 invalid pixels, accepted
+         08:25:35 UI layer 8.6% covered, 2810242 invalid pixels, accepted
+[PASS] UI counters: 8002 Auto frames through the last of 843 committed samples: 7113 detected, 878 held, 11 without detection
+[PASS] UI protection: decided no mask (0) 50%, current alpha (4) 43%, full frame over a hidden scene (H1) (8) 5.3%, UI layer (10) 1.2% of detection frames
+[PASS] UI full frame: 376 full-frame frames (6: 0, 8: 376; 5.3% of detection frames); H1 samples (8) read the scene hidden 53, ambiguous 1, visible 0, invalid or unmeasured 1; scene guard entered 2, released 1, refuted 0; depth not current on 631 detection frames
+[INFO] UI full alpha: 1521 frames decided a whole-frame alpha and 0 an exact full change-set (6) (21% of detection frames)
+[PASS] UI inexact difference: no HUD-less difference decided from an inexact pair
+[INFO] UI holds: generated 878, none 0 (11% of Auto frames); 0 detection frames (0%) reused the previous real frame's decision (T1)
+[INFO] UI no mask: 45% of Auto frames had no mask; decided none: trusted invalid 11%, ambiguous 0.30%, gate no hold 4.0%, no candidate 30%; without detection: no candidates 0.14%; sampled reasons with the refused candidate: trusted invalid (UI layer) 4, gate no hold (UI layer) 2
+[INFO] UI trust events: earned 3, revoked one way by an exact pair 0, revoked by a declared alpha's coverage 0, lapsed 0, restored 3, legacy entries discarded 0, forgotten 0; 1 selective layer samples earned nothing for colour without coverage (A1)
+[PASS] UI holds without a decision: no window held most Auto frames without a decision
+[WARN] UI protection gaps: no usable UI mask for 25 s in 2 windows; HUD and menus took the scene's depth there; 0.6 s without a mask while depth was lost (every frame flat by the output counters) not counted
+         08:23:13-08:23:22 (8 s) FG off: UI layer covers 100% (not accepted); current alpha covers 100% (not accepted) (reason gate no hold: UI layer)
+         08:24:36-08:24:53 (17 s) FG on: UI layer rejected (8.2% covered, 55% invalid) (reason trusted invalid: UI layer)
+[INFO] Hidden scene: H1 hidden scene (8) in 3 samples (pre-UI image: hudless 0, layer 0), entered 2, released 1, refuted 0; 9 of 38 samples measured
+[PASS] Observation losses: lifecycle 1
+[INFO] Depth losses: depth_shape_changed 7, retained_depth_expired 4, no_retained_depth 1, source_changed 1, explicit_reuse_invalidation 1
+[PASS] Export: runtime_reset 2, not_foreground 1
+[PASS] Present hitches: 1 at resets, FG switches or overlay opening
+         08:23:16 export section (no step named; the slowest Present of 08:23:06-08:23:16) 8.1 ms
+[INFO] Diagnostics: Diagnostics=0: no per-pass GPU timing (its lines are absent by design)
+[INFO] Game 3D cost: CPU 0.14 ms mean (8.1 max) over 8257 Presents; GPU timing off (Diagnostics=0)
+[INFO] Video memory: game local usage peaked at 10380 MiB; its budget was as low as 11818 MiB and its headroom as low as 1760 MiB; 0 ms over budget (no depth loss, hitch or Present gap under pressure)
+[PASS] Stream delivery: the host took 53.7 new frames/s of a target 53.7/s (what the game offered, capped at the stream 90 fps)
+[PASS] UI layer copies: no layer copy skipped in 12 timing windows
+[INFO] Frame generation: 08:24:28 off, 08:24:33 on
+[PASS] Host link: ReShade SBS connected 4 time(s)
+[PASS] Encoder stalls: none
+[INFO] Host video memory: host local usage peaked at 1814 MiB; its headroom was as low as 2411 MiB (1555/3966 MiB at 08:25:30)
+[WARN] Session: the log ends without ReShade exiting or tearing its runtimes down
+Overall: WARN (0 fail, 4 warn)

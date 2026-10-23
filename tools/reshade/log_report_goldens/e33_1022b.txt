@@ -1,0 +1,44 @@
+Game 3D readiness: SandFall-Win64-Shipping.exe  14:35:02 to 14:37:04 (2m02s, exited)
+[PASS] Add-on: loaded; output 7680x2160 sRGB D3D12 (generation 4)
+[PASS] Depth: fresh from 14:35:09; 2.1% of later publications without depth
+[INFO] Depth paused by the game: 2 depth losses in which the game ran no DLSS (no active depth view: a menu or loading screen) and resumed it with its own scene reset; those frames were flat
+         14:35:30.766-14:35:31.598 (828 ms) retained_depth_expired, NGX selection=inactive_views (the game supplied no depth)
+         14:35:36.825-14:35:38.087 (1265 ms) retained_depth_expired, NGX selection=inactive_views (the game supplied no depth)
+[PASS] Placement flat: 41.9% of publications showed the colour frame with depth
+[INFO] Placement calibration: 1 flat run was a calibration with depth for at most 3 s
+         14:36:27.212-14:36:29.318 after the export started
+[INFO] Placement waited for the scene: 1 flat run waited for a depth reference until the game's own scene reset and placed within 3 s of it: the depth before the reset (a title or menu scene) gave none, the next scene did at once; its length is how long the game stayed there
+         14:35:09.018-14:35:32.770 raw calibrating (22.7 s with depth), game scene reset 14:35:31.598
+[PASS] Capture coverage: 14708 covered (14704 observed, 4 declared states); not open: unknown 0, closed 0, render pass 0
+[PASS] Placement: camera projection drives placement
+[INFO] UI trust: 14:35:02 restored accepted UI sources backbuffer:24:srgb,current:24:srgb,hudless:24:srgb
+[PASS] UI channel admission: no selective UI channel rejected for invalid pixels
+[PASS] UI counters: 14914 Auto frames through the last of 954 committed samples: 10527 detected, 4382 held, 5 without detection
+[PASS] UI protection: decided no mask (0) 0.03%, Backbuffer alpha (3) 36%, current alpha (4) 61%, HUD-less difference (5) 0.02%, full frame over a hidden scene (H1) (8) 3.3% of detection frames
+[PASS] UI full frame: 350 full-frame frames (6: 0, 8: 350; 3.3% of detection frames); H1 samples (8) read the scene hidden 21, ambiguous 0, visible 0, invalid or unmeasured 5; scene guard entered 3, released 1, refuted 3; depth not current on 1738 detection frames
+[INFO] UI full alpha: 5991 frames decided a whole-frame alpha and 0 an exact full change-set (6) (57% of detection frames)
+[INFO] UI inexact difference: 2 frames (0.02% of detection frames) decided a HUD-less difference from a Present-counted pair, validated by its own pixels (V2)
+[INFO] UI holds: generated 4382, none 0 (29% of Auto frames); 7 detection frames (0.07%) reused the previous real frame's decision (T1)
+[INFO] UI no mask: 0.05% of Auto frames had no mask; decided none: no candidate 0.02%; without detection: no candidates 0.03%
+[INFO] UI trust events: earned 3, revoked one way by an exact pair 0, revoked by a declared alpha's coverage 0, lapsed 0, restored 3, legacy entries discarded 0, forgotten 0
+[PASS] UI holds without a decision: no window held most Auto frames without a decision
+[PASS] UI protection gaps: every streamed Auto frame had a UI mask or a UI channel showing no UI
+[INFO] Hidden scene: H1 hidden scene (8) in 2 samples (pre-UI image: hudless 0, layer 0), entered 3, released 1, refuted 3; 12 of 32 samples measured
+[PASS] Observation losses: lifecycle 1
+[INFO] Depth losses: retained_depth_expired 4, no_retained_depth 1, explicit_reuse_invalidation 1
+[PASS] Export: not_foreground 3, runtime_reset 1
+[PASS] Present hitches: 1 at resets, FG switches or overlay opening
+         14:36:27 render section (no step named; the slowest Present of 14:36:17-14:36:27) 47.3 ms
+[INFO] Diagnostics: Diagnostics=0: no per-pass GPU timing (its lines are absent by design)
+[INFO] Game 3D cost: CPU 0.13 ms mean (47.3 max) over 14940 Presents; GPU timing off (Diagnostics=0)
+[PASS] Stream delivery: the host took 83.6 new frames/s of a target 86.7/s (what the game offered, capped at the stream 90 fps)
+[INFO] Frame generation: 14:35:10 off, 14:35:49 on, 14:36:23 off, 14:36:28 on, 14:36:30 off, 14:36:39 on, 14:36:47 off, 14:36:54 on
+[INFO] Other log warnings: 4 WARN/ERROR lines from ReShade, the game or another add-on, none about the Sunshine 3D add-on
+         14:35:07 WARN Successfully compiled '<GAME>\Sandfall\Binaries\Win64\reshade-shaders\Shaders\SweetFX\Nostalgia.fx' in 0.004000 s with warnings: (2 such lines)
+         14:37:00 WARN Reference count for ID3D12CommandQueue0 object 000001CA42B32C20 (000001CA42B94CB0) is inconsistent (9).
+         14:37:03 WARN Add-ons are still loaded! Application may crash on exit.
+[PASS] Host link: ReShade SBS connected 4 time(s)
+[WARN] Encoder stalls: 2
+         14:35:58 upstream GPU 229 ms
+         14:36:30 upstream GPU 341 ms at FG off 14:36:30
+Overall: WARN (0 fail, 1 warn)

@@ -1,0 +1,60 @@
+Game 3D readiness: bf6.exe  21:21:59 to 21:26:51 (4m51s, ended without exiting (crash or kill?))
+[PASS] Add-on: loaded; output 7680x2160 PQ D3D12 (generation 2)
+[WARN] Depth: fresh from 21:22:06; 40.1% of later publications without depth; gaps outside FG switches and resets
+         21:22:10.912-21:22:13.605 (2687 ms) retained_depth_expired, Streamline selection=no_completed_snapshot
+         21:25:02.159-21:25:03.396 (1250 ms) source_not_associated, unknown selection=inactive_views (the game supplied no depth)
+         21:25:03.607-21:26:14.316 (70704 ms) retained_depth_expired, unknown selection=no_current_nomination; the game froze 240 ms
+         21:26:14.538-21:26:51.246 retained_depth_expired, unknown selection=no_current_nomination, until the log ended
+[PASS] Placement flat: 3.5% of publications showed the colour frame with depth
+[PASS] Capture coverage: 26757 covered (26756 observed, 1 declared states); not open: unknown 0, closed 0, render pass 0
+[PASS] Placement: camera projection drives placement
+[INFO] UI trust: 21:23:54 accepted UI sources are now ui_layer:28:pq
+[WARN] UI channel admission: 15 samples left the frame unprotected after rejecting a selective UI channel for invalid pixels
+         21:23:03 UI layer 58.8% covered, 3420762 invalid pixels
+         21:23:13 UI layer 53.1% covered, 3891169 invalid pixels
+         21:23:23 UI layer 63.1% covered, 3064359 invalid pixels
+         21:23:33 UI layer 63.2% covered, 3053135 invalid pixels
+         21:23:43 UI layer 53.9% covered, 3824642 invalid pixels
+         21:23:56 UI layer 63.3% covered, 3044518 invalid pixels, accepted
+[PASS] UI counters: 29255 Auto frames through the last of 1144 committed samples: 19316 detected, 9939 held, 0 without detection
+[PASS] UI protection: decided no mask (0) 77%, UI layer (10) 23% of detection frames
+[PASS] UI full frame: 0 full-frame frames (6: 0, 8: 0; 0% of detection frames); H1 samples (8) read the scene hidden 0, ambiguous 0, visible 0, invalid or unmeasured 0; scene guard entered 0, released 0, refuted 0; depth not current on 636 detection frames
+[INFO] UI full alpha: 809 frames decided a whole-frame alpha and 0 an exact full change-set (6) (4.2% of detection frames)
+[PASS] UI inexact difference: no HUD-less difference decided from an inexact pair
+[INFO] UI holds: generated 9939, none 0 (34% of Auto frames); 253 detection frames (1.3%) reused the previous real frame's decision (T1)
+[INFO] UI no mask: 51% of Auto frames had no mask; decided none: layer aside 23%, trusted invalid 27%, ambiguous 0.01%, unaccepted 0.54%; sampled reasons with the refused candidate: trusted invalid (UI layer) 10, layer aside (UI layer) 5, unaccepted (UI layer) 1
+[INFO] UI trust events: earned 1, revoked one way by an exact pair 0, revoked by a declared alpha's coverage 0, lapsed 0, restored 0, legacy entries discarded 0, forgotten 0
+[PASS] UI holds without a decision: no window held most Auto frames without a decision
+[WARN] UI protection gaps: no usable UI mask for 152 s in 4 windows; HUD and menus took the scene's depth there; 2 gaps shorter than 2 s (2.8 s) not listed; 0.1 s without a mask while depth was lost (every frame flat by the output counters) not counted
+         21:23:05-21:23:55 (50 s) FG off: UI layer rejected (63% covered, 37% invalid); current alpha covers 100% (not accepted) (reason layer aside: UI layer)
+         21:23:59-21:24:09 (10 s) FG off: UI layer rejected (64% covered, 36% invalid); current alpha covers 100% (not accepted) (reason trusted invalid: UI layer)
+         21:24:29-21:24:54 (25 s) FG on: UI layer rejected (82% covered, 18% invalid) (reason trusted invalid: UI layer)
+         21:24:59-21:26:06 (67 s) FG on: checking; last sample: UI layer rejected (51% covered, 49% invalid) (reason trusted invalid: UI layer)
+[INFO] Hidden scene: H1 hidden scene (8) in 0 samples (pre-UI image: hudless 0, layer 0), entered 0, released 0, refuted 0; 0 of 143 samples measured
+[WARN] Observation losses: lifecycle 1, sdk_failure 2; sdk_failure warn at any count (input the SDK contract refuses, an SDK failure or a cause this report does not know)
+         21:25:03 sdk_failure at finish_evaluation sdk_result=39 (eWarnOutOfVRAM)
+         21:26:14 sdk_failure at finish_evaluation sdk_result=39 (eWarnOutOfVRAM)
+[INFO] Depth losses: retained_depth_expired 3, depth_shape_changed 2, no_retained_depth 1, source_not_associated 1
+[PASS] Export: runtime_reset 2
+[WARN] Present hitches: 1 outside resets, FG switches and overlay opening, worst 8.1 ms
+         21:25:11 depth section (no step named; the slowest Present of 21:25:01-21:25:11) 8.1 ms
+[INFO] Diagnostics: Diagnostics=0: no per-pass GPU timing (its lines are absent by design)
+[INFO] Game 3D cost: CPU 0.12 ms mean (9.4 max) over 37518 Presents; GPU timing off (Diagnostics=0)
+[WARN] Streamline VRAM warnings: 2 sampled observation loss(es) came from eWarnOutOfVRAM, a warning this add-on treated as an SDK failure: every such call lost its depth (fixed 10-22)
+[WARN] VRAM pressure: 3 depth loss, hitch or Present gap line(s) came with the game's local video memory over its budget or within 128 MiB of it
+         21:25:03.607 depth loss at 13115/12640 MiB
+         21:26:05.540 present gap at 13286/12821 MiB
+         21:26:14.538 depth loss at 13947/12721 MiB
+[INFO] Video memory: game local usage peaked at 14411 MiB; its budget was as low as 11483 MiB and its headroom as low as -1690 MiB; 105625 ms over budget
+[PASS] Stream delivery: the host took 89.5 new frames/s of a target 90.0/s (what the game offered, capped at the stream 90 fps)
+[PASS] UI layer copies: no layer copy skipped in 29 timing windows
+[INFO] Frame generation: 21:22:07 off, 21:24:11 on
+[INFO] Other log warnings: 3 WARN/ERROR lines from ReShade, the game or another add-on, none about the Sunshine 3D add-on
+         21:22:04 WARN IDirectInput8W::CreateDevice failed with error code E_FAIL. (3 such lines)
+[PASS] Host link: ReShade SBS connected 2 time(s)
+[INFO] Host size: 21:22:06 ReShade SBS: game eyes 4800x2700 are scaled to the stream's 3840x2160 eyes. Run the game at 3840x2160 for native sharpness.
+[INFO] Host size: 21:22:06 ReShade SBS: game eyes 4800x2700 are scaled to the stream's 3840x2160 eyes. Run the game at 3840x2160 for native sharpness.
+[PASS] Encoder stalls: none
+[INFO] Host video memory: host local usage peaked at 1751 MiB; its headroom was as low as 1279 MiB (1364/2643 MiB at 21:26:01)
+[WARN] Session: the log ends without ReShade exiting or tearing its runtimes down
+Overall: WARN (0 fail, 8 warn)

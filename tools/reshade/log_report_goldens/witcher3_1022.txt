@@ -1,0 +1,34 @@
+Game 3D readiness: witcher3.exe  14:45:27 to 14:48:43 (3m15s, exited (the process ended before ReShade logged its exit))
+[PASS] Add-on: loaded; output 7680x2160 PQ D3D12 (generation 1)
+[PASS] Depth: fresh from 14:45:51; 0.3% of later publications without depth
+[PASS] Placement flat: 2.2% of publications showed the colour frame with depth
+[PASS] Capture coverage: 15231 covered (11498 observed, 3733 declared states); not open: unknown 0, closed 0, render pass 0
+[PASS] Placement: camera projection drives placement
+[INFO] UI trust: 14:45:28 restored accepted UI sources ui_alpha:61:pq,ui_layer:28:pq
+[PASS] UI channel admission: no selective UI channel rejected for invalid pixels
+[PASS] UI counters: 15217 Auto frames through the last of 1688 committed samples: 15214 detected, 3 held, 0 without detection
+[PASS] UI protection: decided no mask (0) 0.05%, UI alpha (1) 8.1%, full frame over a hidden scene (H1) (8) 7.5%, UI layer (10) 84% of detection frames
+[PASS] UI full frame: 1134 full-frame frames (6: 0, 8: 1134; 7.5% of detection frames); H1 samples (8) read the scene hidden 163, ambiguous 0, visible 2, invalid or unmeasured 1; scene guard entered 4, released 3, refuted 2; depth not current on 622 detection frames
+[INFO] UI full alpha: 4843 frames decided a whole-frame alpha and 0 an exact full change-set (6) (32% of detection frames)
+[PASS] UI inexact difference: no HUD-less difference decided from an inexact pair
+[INFO] UI holds: generated 3, none 0 (0.02% of Auto frames); 1 detection frames (0.01%) reused the previous real frame's decision (T1)
+[INFO] UI no mask: 0.05% of Auto frames had no mask; decided none: ambiguous 0.05%
+[INFO] UI trust events: earned 2, revoked one way by an exact pair 0, revoked by a declared alpha's coverage 0, lapsed 0, restored 2, legacy entries discarded 0, forgotten 0
+[PASS] UI holds without a decision: no window held most Auto frames without a decision
+[PASS] UI protection gaps: every streamed Auto frame had a UI mask or a UI channel showing no UI
+[INFO] Hidden scene: H1 hidden scene (8) in 6 samples (pre-UI image: hudless 0, layer 0), entered 4, released 3, refuted 2; 16 of 39 samples measured
+[PASS] Observation losses: lifecycle 1
+[INFO] Depth losses: source_changed 1, no_retained_depth 1, source_not_associated 1, retained_depth_expired 1
+[PASS] Export: runtime_reset 1
+[PASS] Present hitches: none
+[INFO] Diagnostics: Diagnostics=0: no per-pass GPU timing (its lines are absent by design)
+[INFO] Game 3D cost: CPU 0.13 ms mean (4.7 max) over 15227 Presents; GPU timing off (Diagnostics=0)
+[PASS] Stream delivery: the host took 62.4 new frames/s of a target 62.5/s (what the game offered, capped at the stream 90 fps)
+[INFO] UI layer copies: 1 timing window skipped layer copies (a full ring): 1 every refresh gap within a stream frame
+         14:45:36-14:45:46 (10.0 s): skipped 441 of 3721 copies, longest refresh gap 6.4 ms of a 11.1 ms stream frame (372 Presents/s, presents_since_copy mean 3.76 max 5)
+[INFO] Frame generation: 14:45:37 off, 14:45:50 on, 14:45:59 off, 14:46:02 on, 14:46:07 off
+[INFO] Other log warnings: 1 WARN/ERROR line from ReShade, the game or another add-on, none about the Sunshine 3D add-on
+         14:48:43 WARN Reference count for ID3D12CommandQueue0 object 0000020C86240E10 (000002092DBD7C50) is inconsistent (10).
+[PASS] Host link: ReShade SBS connected 1 time(s)
+[PASS] Encoder stalls: none
+Overall: PASS (0 fail, 0 warn)

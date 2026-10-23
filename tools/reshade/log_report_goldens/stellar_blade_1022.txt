@@ -1,0 +1,40 @@
+Game 3D readiness: SB-Win64-Shipping.exe  14:41:20 to 14:43:28 (2m08s, exited)
+[PASS] Add-on: loaded; output 7680x2160 PQ D3D12 (generation 3)
+[WARN] Depth: fresh from 14:41:31; 1.0% of later publications without depth; gaps outside FG switches and resets
+         14:41:45.607-14:41:48.065 (2453 ms) retained_depth_expired, NGX selection=inactive_views (the game supplied no depth)
+[PASS] Placement flat: 3.4% of publications showed the colour frame with depth
+[INFO] Placement calibration: 1 flat run was a calibration with depth for at most 3 s
+         14:41:50.359-14:41:51.479 after provider switch (NGX to Streamline)
+[PASS] Capture coverage: 14793 covered (14790 observed, 3 declared states); not open: unknown 0, closed 0, render pass 0
+[PASS] Placement: camera projection drives placement
+[INFO] UI trust: 14:41:22 restored accepted UI sources ui_color:87:srgb,ui_layer:87:pq,backbuffer:24:srgb,current:24:srgb,hudless:24:pq,hudless:87:srgb,pre_ui:87:srgb
+[INFO] Pre-UI proof: 14:41:22 pre_ui:87:srgb restored from an earlier session, provisional: 3 samples over 2 s whose layer equals the presented frame on at least 90% of pixels and is lit on at least half confirm it, and it lapses after 60 s of testable time (the layer offered without coverage while the presented frame reads visible) without them
+[PASS] UI channel admission: no selective UI channel rejected for invalid pixels
+[PASS] UI counters: 13192 Auto frames through the last of 919 committed samples: 11469 detected, 1723 held, 0 without detection
+[PASS] UI protection: decided no mask (0) 0.03%, UI colour (2) 16%, current alpha (4) 21%, full frame over a hidden scene (H1) (8) 41%, UI layer (10) 22% of detection frames
+[PASS] UI full frame: 4678 full-frame frames (6: 0, 8: 4678; 41% of detection frames); H1 samples (8) read the scene hidden 304, ambiguous 0, visible 2, invalid or unmeasured 11; scene guard entered 10, released 5, refuted 1; depth not current on 874 detection frames
+[INFO] UI full alpha: 2633 frames decided a whole-frame alpha and 0 an exact full change-set (6) (23% of detection frames)
+[PASS] UI inexact difference: no HUD-less difference decided from an inexact pair
+[INFO] UI holds: generated 1723, none 0 (13% of Auto frames); 1 detection frames (0.01%) reused the previous real frame's decision (T1)
+[INFO] UI no mask: 0.03% of Auto frames had no mask; decided none: ambiguous 0.03%
+[INFO] UI trust events: earned 5, revoked one way by an exact pair 0, revoked by a declared alpha's coverage 0, lapsed 0, restored 7, legacy entries discarded 0, forgotten 0
+[PASS] UI holds without a decision: no window held most Auto frames without a decision
+[PASS] UI protection gaps: every streamed Auto frame had a UI mask or a UI channel showing no UI
+[INFO] Hidden scene: H1 hidden scene (8) in 13 samples (pre-UI image: hudless 0, layer 8), entered 10, released 5, refuted 1; 26 of 40 samples measured
+[PASS] Observation losses: lifecycle 1
+[INFO] Depth losses: retained_depth_expired 5, source_handoff 1
+[PASS] Export: runtime_reset 3
+[PASS] Present hitches: 1 at resets, FG switches or overlay opening
+[INFO] Diagnostics: Diagnostics=0: no per-pass GPU timing (its lines are absent by design)
+[INFO] Game 3D cost: CPU 0.14 ms mean (30.6 max) over 13809 Presents; GPU timing off (Diagnostics=0)
+[PASS] Stream delivery: the host took 84.9 new frames/s of a target 88.3/s (what the game offered, capped at the stream 90 fps)
+[PASS] UI layer copies: no layer copy skipped in 12 timing windows
+[INFO] Frame generation: 14:41:32 off, 14:41:50 on, 14:42:10 off
+[INFO] Other log warnings: 5 WARN/ERROR lines from ReShade, the game or another add-on, none about the Sunshine 3D add-on
+         14:41:29 WARN IDirectInput8W::CreateDevice failed with error code E_FAIL.
+         14:41:32 WARN Successfully compiled '<GAME>\SB\Binaries\Win64\reshade-shaders\Shaders\Depth3D\SuperDepth3D.fx' in 4.382000 s with warnings: (2 such lines)
+         14:43:19 WARN Reference count for ID3D12CommandQueue0 object 000000005FDDE320 (000000004ADA2600) is inconsistent (9).
+         14:43:27 WARN Add-ons are still loaded! Application may crash on exit.
+[PASS] Host link: ReShade SBS connected 3 time(s)
+[PASS] Encoder stalls: none
+Overall: WARN (0 fail, 1 warn)

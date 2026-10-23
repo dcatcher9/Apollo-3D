@@ -1,0 +1,38 @@
+Game 3D readiness: re9.exe  14:49:27 to 14:51:27 (2m00s, exited (the process ended before ReShade logged its exit))
+[PASS] Add-on: loaded; output 7680x2160 PQ D3D12 (generation 2)
+[PASS] Depth: fresh from 14:49:37; 0.1% of later publications without depth
+[PASS] Placement flat: 5.5% of publications showed the colour frame with depth
+[PASS] Capture coverage: 11438 covered (11436 observed, 2 declared states); not open: unknown 0, closed 0, render pass 0
+[PASS] Placement: camera projection drives placement
+[INFO] UI trust: 14:49:31 restored accepted UI sources ui_color:28:pq,ui_layer:28:pq,hudless:24:pq
+[PASS] UI channel admission: no selective UI channel rejected for invalid pixels
+[PASS] UI counters: 17789 Auto frames through the last of 1003 committed samples: 17789 detected, 0 held, 0 without detection
+[PASS] UI protection: decided no mask (0) 0.30%, UI colour (2) 98%, full frame over a hidden scene (H1) (8) 2.0%, UI layer (10) 0.07% of detection frames
+[PASS] UI full frame: 362 full-frame frames (6: 0, 8: 362; 2.0% of detection frames); H1 samples (8) read the scene hidden 32, ambiguous 0, visible 0, invalid or unmeasured 7; scene guard entered 2, released 0, refuted 0; depth not current on 11607 detection frames
+[INFO] UI full alpha: 1595 frames decided a whole-frame alpha and 0 an exact full change-set (6) (9.0% of detection frames)
+[PASS] UI inexact difference: no HUD-less difference decided from an inexact pair
+[INFO] UI holds: generated 0, none 0 (0% of Auto frames); 0 detection frames (0%) reused the previous real frame's decision (T1)
+[INFO] UI no mask: 0.30% of Auto frames had no mask; decided none: ambiguous 0.29%, unaccepted 0.01%; sampled reasons with the refused candidate: ambiguous (current alpha) 1
+[INFO] UI trust events: earned 3, revoked one way by an exact pair 0, revoked by a declared alpha's coverage 0, lapsed 0, restored 3, legacy entries discarded 0, forgotten 0
+[PASS] UI holds without a decision: no window held most Auto frames without a decision
+[PASS] UI protection gaps: every streamed Auto frame had a UI mask or a UI channel showing no UI
+[INFO] Hidden scene: H1 hidden scene (8) in 4 samples (pre-UI image: hudless 1, layer 0), entered 2, released 0, refuted 0; 11 of 31 samples measured
+[PASS] Observation losses: records_busy 1; capacity losses (a full bounded table) below their warning rate
+         14:49:46 records_busy at finish_evaluation
+[INFO] Depth losses: no_retained_depth 1, source_changed 1
+[PASS] Export: runtime_reset 2, consumer_transfer_changed 1
+[PASS] Present hitches: 2 at resets, FG switches or overlay opening
+         14:49:37 export section (no step named; the slowest Present of 14:49:36-14:49:37) 14.6 ms
+[INFO] Diagnostics: Diagnostics=0: no per-pass GPU timing (its lines are absent by design)
+[INFO] Game 3D cost: CPU 0.12 ms mean (14.6 max) over 17901 Presents; GPU timing off (Diagnostics=0)
+[PASS] Stream delivery: the host took 89.2 new frames/s of a target 90.0/s (what the game offered, capped at the stream 90 fps)
+[PASS] UI layer copies: no layer copy skipped in 11 timing windows
+[INFO] Frame generation: 14:49:37 off, 14:49:54 on, 14:51:22 off
+[INFO] Other log warnings: 19 WARN/ERROR lines from ReShade, the game or another add-on, none about the Sunshine 3D add-on
+         14:49:35 WARN IDirectInput8W::CreateDevice failed with error code E_FAIL. (3 such lines)
+         14:49:35 WARN Successfully compiled '<GAME>\reshade-shaders\Shaders\SweetFX\Nostalgia.fx' in 0.154000 s with warnings: (13 such lines)
+         14:49:40 WARN Reference count for ID3D11Device0 object 0000002413D16D40 (00000024C8B021F0) is inconsistent (7).
+         14:51:27 WARN Reference count for ID3D12CommandQueue0 object 0000002412F0D7E0 (000000244B9FCA50) is inconsistent (7). (2 such lines)
+[PASS] Host link: ReShade SBS connected 2 time(s)
+[PASS] Encoder stalls: none
+Overall: PASS (0 fail, 0 warn)

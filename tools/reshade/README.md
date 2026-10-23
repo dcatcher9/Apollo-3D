@@ -719,8 +719,18 @@ the report counts that one with the pause too.
 
 A failing check is a bug report: fix the rule at its root (see
 [the generalization rules](../../docs/reshade-sbs.md#rules-for-new-game-behaviour)), then add a
-check here when a new signature appears. Run its tests with
-`python -m unittest tools/reshade/test_game3d_log_report.py`.
+check here when a new signature appears. Its tests run with the add-on's other tests when CMake
+finds a Python 3.9 interpreter: `reshade_game3d_log_report` checks each signature on synthetic
+lines, and `reshade_game3d_log_report_golden` compares the report's exact output on saved
+first-launch logs of real games with its golden in `log_report_goldens/`. Both also run directly,
+as `python tools/reshade/test_game3d_log_report.py` and `test_game3d_log_report_golden.py`. When
+a report change moves a golden on purpose, rewrite the goldens with
+`python tools/reshade/test_game3d_log_report_golden.py --update` and review their diff in the
+commit. The repository is public, so a new game's log enters only through
+`scrub_game3d_log.py <name> "<game>" <ReShade.log> [--host-log sunshine.log]`, run on the saved
+log with its original modification time. It replaces install, user and other drive paths, names
+and addresses with placeholders and keeps only the session's host lines. The golden test fails on
+anything left to scrub.
 
 UI decision changes have two offline gates; [UI protection](../../docs/reshade-sbs.md#setup)
 owns their contracts. The first is the single-frame replay of the labelled dumps. Run it from

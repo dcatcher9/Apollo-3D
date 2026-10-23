@@ -1,0 +1,46 @@
+Game 3D readiness: ACShadows.exe  21:58:54 to 22:01:51 (2m56s, ended without exiting (crash or kill?))
+[PASS] Add-on: loaded; output 7680x2160 PQ D3D12 (generation 3)
+[FAIL] Depth: 6653 publications, none with fresh depth
+[PASS] Capture coverage: 17651 covered (17650 observed, 1 declared states); not open: unknown 0, closed 0, render pass 0
+[WARN] Placement: neither projection nor raw placement became ready
+[INFO] UI trust: 21:59:28 accepted UI sources are now ui_layer:28:pq
+[INFO] UI trust: 21:59:36 accepted UI sources are now ui_layer:28:pq,current:24:pq
+[INFO] UI trust: 21:59:54 accepted UI sources are now ui_layer:10:pq,ui_layer:28:pq,current:24:pq
+[WARN] UI channel admission: 2 samples left the frame unprotected after rejecting a selective UI channel for invalid pixels
+         21:59:16 UI layer 13.4% covered, 916160 invalid pixels
+         21:59:31 UI layer 22.6% covered, 898441 invalid pixels, accepted
+[PASS] UI counters: 8994 Auto frames through the last of 1488 committed samples: 8994 detected, 0 held, 0 without detection
+[PASS] UI protection: decided no mask (0) 20%, current alpha (4) 78%, UI layer (10) 2.2% of detection frames
+[PASS] UI full frame: 0 full-frame frames (6: 0, 8: 0; 0% of detection frames); H1 samples (8) read the scene hidden 0, ambiguous 0, visible 0, invalid or unmeasured 0; scene guard entered 0, released 0, refuted 0; depth not current on 0 detection frames
+[INFO] UI full alpha: 426 frames decided a whole-frame alpha and 0 an exact full change-set (6) (4.7% of detection frames)
+[PASS] UI inexact difference: no HUD-less difference decided from an inexact pair
+[INFO] UI holds: generated 0, none 0 (0% of Auto frames); 1 detection frames (0.01%) reused the previous real frame's decision (T1)
+[INFO] UI no mask: 20% of Auto frames had no mask; decided none: layer aside 11%, trusted invalid 3.3%, ambiguous 0.09%, gate no hold 4.9%, unaccepted 1.5%; sampled reasons with the refused candidate: gate no hold (UI layer) 2, layer aside (UI layer) 1, unaccepted (UI layer) 1, trusted invalid (UI layer) 1
+[INFO] UI trust events: earned 3, revoked one way by an exact pair 0, revoked by a declared alpha's coverage 0, lapsed 0, restored 0, legacy entries discarded 0, forgotten 0
+[PASS] UI holds without a decision: no window held most Auto frames without a decision
+[WARN] UI protection gaps: no usable UI mask for 26 s in 3 windows; HUD and menus took the scene's depth there
+         21:59:04-21:59:15 (12 s) FG off: UI layer covers 100% (not accepted); current alpha covers 100% (not accepted) (reason gate no hold: UI layer)
+         21:59:19-21:59:29 (10 s) FG off: UI layer rejected (13% covered, 11% invalid); current alpha covers 100% (not accepted) (reason layer aside: UI layer)
+         21:59:31-21:59:36 (5 s) FG off: UI layer rejected (23% covered, 11% invalid); current alpha covers 11% (not accepted) (reason trusted invalid: UI layer)
+[INFO] Hidden scene: H1 hidden scene (8) in 0 samples (pre-UI image: hudless 0, layer 0), entered 0, released 0, refuted 0; 1 of 35 samples measured
+[PASS] Observation losses: none
+[WARN] Capture status: incomplete_state 15 (incomplete_state: the source was blocked by a split barrier or a layout without a legacy state); 1 more while settling
+         21:59:10 Streamline incomplete_state
+         21:59:15 Streamline incomplete_state
+         21:59:41 Streamline incomplete_state
+         21:59:42 NGX incomplete_state
+         21:59:51 NGX incomplete_state
+         21:59:51 API incomplete_state
+[PASS] Export: not_foreground 2, runtime_reset 1
+[WARN] Present hitches: 1 outside resets, FG switches and overlay opening, worst 8.9 ms
+         22:01:04 stereo export 8.9 ms
+[INFO] Diagnostics: Diagnostics=0: no per-pass GPU timing (its lines are absent by design)
+[INFO] Game 3D cost: CPU 0.14 ms mean (50.8 max) over 8839 Presents; GPU timing off (Diagnostics=0)
+[INFO] Video memory: game local usage peaked at 10023 MiB; its budget was as low as 11723 MiB and its headroom as low as 2600 MiB; 0 ms over budget (no depth loss, hitch or Present gap under pressure)
+[PASS] Stream delivery: the host took 53.3 new frames/s of a target 53.5/s (what the game offered, capped at the stream 90 fps)
+[PASS] UI layer copies: no layer copy skipped in 15 timing windows
+[PASS] Host link: ReShade SBS connected 3 time(s)
+[PASS] Encoder stalls: none
+[INFO] Host video memory: host local usage peaked at 1878 MiB; its headroom was as low as 2668 MiB (1236/3904 MiB at 22:00:01)
+[WARN] Session: the log ends without ReShade exiting or tearing its runtimes down
+Overall: FAIL (1 fail, 6 warn)

@@ -1,0 +1,37 @@
+Game 3D readiness: bf6.exe  21:09:45 to 21:10:06 (0m20s, exited)
+[PASS] Add-on: loaded; output 9600x2700 PQ D3D12 (generation 1)
+[FAIL] Depth: 2287 publications, none with fresh depth
+[PASS] Capture coverage: 3781 covered (3780 observed, 1 declared states); not open: unknown 0, closed 0, render pass 0
+[PASS] Placement: camera projection drives placement
+[PASS] UI channel admission: no selective UI channel rejected for invalid pixels
+[PASS] UI counters: 0 Auto frames through the last of 0 committed samples: 0 detected, 0 held, 0 without detection
+[PASS] UI protection: decided nothing of detection frames
+[PASS] UI full frame: 0 full-frame frames (6: 0, 8: 0; 0% of detection frames); H1 samples (8) read the scene hidden 0, ambiguous 0, visible 0, invalid or unmeasured 0; scene guard entered 0, released 0, refuted 0; depth not current on 0 detection frames
+[PASS] UI full alpha: no frame decided a whole-frame alpha or an exact full change-set (6)
+[PASS] UI inexact difference: no HUD-less difference decided from an inexact pair
+[INFO] UI holds: generated 0, none 0 (0% of Auto frames); 0 detection frames (0%) reused the previous real frame's decision (T1)
+[INFO] UI no mask: 0% of Auto frames had no mask
+[INFO] UI trust events: earned 0, revoked one way by an exact pair 0, revoked by a declared alpha's coverage 0, lapsed 0, restored 0, legacy entries discarded 0, forgotten 0
+[PASS] UI holds without a decision: no window held most Auto frames without a decision
+[PASS] UI protection gaps: every streamed Auto frame had a UI mask or a UI channel showing no UI
+[INFO] Hidden scene: H1 hidden scene (8) in 0 samples (pre-UI image: hudless 0, layer 0), entered 0, released 0, refuted 0; 0 of 4 samples measured
+[PASS] Observation losses: none
+[PASS] Export: never paused
+[PASS] Present hitches: 1 at resets, FG switches or overlay opening
+[INFO] Diagnostics: Diagnostics=0: no per-pass GPU timing (its lines are absent by design)
+[INFO] Game 3D cost: CPU 0.09 ms mean (9.1 max) over 4107 Presents; GPU timing off (Diagnostics=0)
+[INFO] Video memory: game local usage peaked at 9134 MiB; its budget was as low as 11086 MiB and its headroom as low as 2158 MiB; 0 ms over budget (no depth loss, hitch or Present gap under pressure)
+[PASS] UI layer copies: no layer copy skipped in 1 timing window
+[INFO] Frame generation: 21:09:57 off
+[INFO] Other log warnings: 4 WARN/ERROR lines from ReShade, the game or another add-on, none about the Sunshine 3D add-on
+         21:09:49 WARN IDirectInput8W::CreateDevice failed with error code E_FAIL. (3 such lines)
+         21:10:05 WARN Add-ons are still loaded! Application may crash on exit.
+[PASS] Host link: ReShade SBS connected 2 time(s)
+[INFO] Host size: 21:09:51 ReShade SBS: game eyes 4800x2700 are scaled to the stream's 3840x2160 eyes. Run the game at 3840x2160 for native sharpness.
+[INFO] Host size: 21:09:52 ReShade SBS: game eyes 4800x2700 are scaled to the stream's 3840x2160 eyes. Run the game at 3840x2160 for native sharpness.
+[INFO] Host size: 21:09:52 ReShade SBS: game eyes 4800x2700 are scaled to the stream's 3840x2160 eyes. Run the game at 3840x2160 for native sharpness.
+[INFO] Host size: 21:10:13 ReShade SBS: game eyes 4800x2700 are scaled to the stream's 3840x2160 eyes. Run the game at 3840x2160 for native sharpness.
+[INFO] Host size: 21:10:13 ReShade SBS: game eyes 4800x2700 are scaled to the stream's 3840x2160 eyes. Run the game at 3840x2160 for native sharpness.
+[PASS] Encoder stalls: none
+[INFO] Host video memory: host local usage peaked at 1442 MiB; its headroom was as low as 1899 MiB (1442/3341 MiB at 21:10:33)
+Overall: FAIL (1 fail, 0 warn)
