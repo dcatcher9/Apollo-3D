@@ -105,6 +105,16 @@ namespace sunshine_upscaler_trace {
     constexpr ULONG module_loaded_reason = 1; // LDR_DLL_NOTIFICATION_REASON_LOADED
     std::atomic<std::uint64_t> module_loads{1};
     std::uint64_t scanned_loads{}, scans{}; // poll-owned
+    // One scan examines at most this many modules: a bound against a
+    // pathological enumeration, not a module count any game reaches. A scan
+    // that hits it reports truncated=1 and the next poll rescans from the
+    // first module it did not examine. Written by discovery under poll_lock.
+    constexpr unsigned module_scan_limit = 65536;
+    std::atomic<bool> scan_truncated{};
+    unsigned scan_resume{}, scan_truncations{};
+#ifdef SUNSHINE_UPSCALER_TRACE_TEST
+    unsigned synthetic_modules{}; // Enumeration entries ahead of the real modules (no module).
+#endif
     std::atomic<void *> loader_cookie{}; // Written by initialize/shutdown; poll reads it.
     void NTAPI module_loaded(ULONG reason, const void *, void *) {
       if (reason == module_loaded_reason) module_loads.fetch_add(1, std::memory_order_release);
@@ -385,9 +395,24 @@ namespace sunshine_upscaler_trace {
       if (snapshot == INVALID_HANDLE_VALUE) return;
       MODULEENTRY32W value{};
       value.dwSize = sizeof(value);
-      unsigned examined = 0;
-      if (Module32FirstW(snapshot, &value)) do {
-        if (++examined > 1024) break;
+      // Entries before scan_resume were examined by the truncated scan before.
+      const unsigned skip = std::exchange(scan_resume, 0u);
+      unsigned position = 0, examined = 0;
+      bool truncated = false;
+      const auto admit = [&] {
+        if (position++ < skip) return false;
+        if (examined == module_scan_limit) { truncated = true; return false; }
+        ++examined;
+        return true;
+      };
+#ifdef SUNSHINE_UPSCALER_TRACE_TEST
+      for (unsigned i = 0; i != synthetic_modules && !truncated; ++i) admit();
+#endif
+      if (!truncated && Module32FirstW(snapshot, &value)) do {
+        if (!admit()) {
+          if (truncated) break;
+          continue;
+        }
         // DLSS Frame Generation refuses to create its feature once its module's
         // NGX entry points are patched: The Witcher 3 got NVSDK_NGX_Result
         // FAIL_PlatformError (0xBAD00002) on every attempt while hooked, and
@@ -420,6 +445,8 @@ namespace sunshine_upscaler_trace {
         FreeLibrary(retained);
       } while (Module32NextW(snapshot, &value));
       CloseHandle(snapshot);
+      if (truncated) { scan_resume = position - 1; ++scan_truncations; }
+      scan_truncated.store(truncated, std::memory_order_release);
     }
     // Discovery runs on a pool thread, so the present thread neither scans
     // modules nor waits for MinHook's system-wide thread snapshot; it is
@@ -466,9 +493,10 @@ namespace sunshine_upscaler_trace {
       for (unsigned i = 0; i != target_count; ++i) installed += targets[i].state.load() == 2;
       char text[1200]{};
       std::snprintf(text, sizeof(text),
-        "Sunshine upscaler trace: epoch=%llu elapsed_ms=%llu SL_hook=%u modules=%u skipped_frame_generation=%u exports=%u NGX_hooks=%u/%u rejected=%u SL_evaluate=%llu NGX_create=%llu NGX_evaluate=%llu NGX_release=%llu inside_observed_SL=%llu outside_observed_SL=%llu unknown_feature=%llu dropped=%llu stale=%llu; zero means no observed calls in this window, not API absence; outside is not proof of a direct path",
+        "Sunshine upscaler trace: epoch=%llu elapsed_ms=%llu SL_hook=%u modules=%u truncated=%u truncations=%u skipped_frame_generation=%u exports=%u NGX_hooks=%u/%u rejected=%u SL_evaluate=%llu NGX_create=%llu NGX_evaluate=%llu NGX_release=%llu inside_observed_SL=%llu outside_observed_SL=%llu unknown_feature=%llu dropped=%llu stale=%llu; zero means no observed calls in this window, not API absence; outside is not proof of a direct path",
         static_cast<unsigned long long>(active_epoch.load()), static_cast<unsigned long long>(GetTickCount64() - began),
-        streamline_covered.load() ? 1 : 0, found_modules, skipped_frame_generation, found_exports, installed, target_count, rejected,
+        streamline_covered.load() ? 1 : 0, found_modules, scan_truncated.load(std::memory_order_acquire) ? 1u : 0u,
+        scan_truncations, skipped_frame_generation, found_exports, installed, target_count, rejected,
         static_cast<unsigned long long>(counts[3]), static_cast<unsigned long long>(counts[0]),
         static_cast<unsigned long long>(counts[1]), static_cast<unsigned long long>(counts[2]),
         static_cast<unsigned long long>(inside), static_cast<unsigned long long>(outside),
@@ -548,7 +576,8 @@ namespace sunshine_upscaler_trace {
     const auto loads = module_loads.load(std::memory_order_acquire);
     const bool notified = loader_cookie.load(std::memory_order_acquire) != nullptr;
     const bool pending = discovery_pending.load(std::memory_order_acquire);
-    if (!pending && now >= next_poll && (!notified || loads != scanned_loads)) {
+    if (!pending && now >= next_poll &&
+        (!notified || loads != scanned_loads || scan_truncated.load(std::memory_order_acquire))) {
       // Loads observed during this scan leave the count changed for the next one.
       scanned_loads = loads;
       next_poll = now + (notified ? 250 : 1000);
@@ -607,6 +636,9 @@ namespace sunshine_upscaler_trace {
       out.discovered = target_count;
       out.rejected = rejected;
       out.scans = scans;
+      out.modules = found_modules;
+      out.truncated = scan_truncated.load();
+      out.truncations = scan_truncations;
       out.load_notifications = loader_cookie.load() != nullptr;
       for (unsigned i = 0; i != target_count; ++i) out.installed += targets[i].state.load() == 2;
       AcquireSRWLockShared(&records_lock);
@@ -641,6 +673,11 @@ namespace sunshine_upscaler_trace {
     void wait_discovery() {
       while (discovery_pending.load(std::memory_order_acquire)) Sleep(1);
       AcquireSRWLockExclusive(&poll_lock); // The pool thread releases it after clearing pending.
+      ReleaseSRWLockExclusive(&poll_lock);
+    }
+    void set_synthetic_modules(unsigned count) {
+      AcquireSRWLockExclusive(&poll_lock);
+      synthetic_modules = count;
       ReleaseSRWLockExclusive(&poll_lock);
     }
   }

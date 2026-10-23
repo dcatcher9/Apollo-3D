@@ -41,8 +41,9 @@ namespace sunshine_upscaler_trace {
       std::uint64_t epoch{}, ngx_create{}, ngx_evaluate{}, ngx_release{}, streamline{},
         inside_streamline{}, outside_streamline{}, succeeded{}, failed{},
         unknown_feature{}, dropped{}, stale{}, reports{};
-      unsigned installed{}, discovered{}, rejected{};
+      unsigned installed{}, discovered{}, rejected{}, modules{}, truncations{};
       std::uint64_t scans{};
+      bool truncated{};
       bool enabled{}, streamline_covered{}, load_notifications{};
     };
     summary counts();
@@ -51,6 +52,9 @@ namespace sunshine_upscaler_trace {
     void report_now();
     // Discovery scheduled by poll() completes on a pool thread.
     void wait_discovery();
+    // Enumeration entries that are not modules, examined ahead of the real
+    // ones by every later scan (the module-count bound).
+    void set_synthetic_modules(unsigned count);
     // Modules discovery never patches: DLSS Frame Generation refuses a patched module.
     bool frame_generation_module(const wchar_t *path);
   }

@@ -325,6 +325,9 @@ namespace {
     poll();
     create(); evaluate(); release();
     require(!enabled() && testing::counts().installed == 0 && messages.empty(), "default-off installed hooks or emitted logs");
+    // The process image enumerates first; 1100 entries ahead of it put its NGX
+    // exports past the former 1024-module cap.
+    testing::set_synthetic_modules(1100);
     initialize(self, true);
     SetLastError(input_error);
     poll();
@@ -335,6 +338,8 @@ namespace {
     auto counts = testing::counts();
     require(counts.installed == 4 && counts.ngx_evaluate == 0 && counts.reports == 1,
       "real export discovery or no-call coverage failed");
+    require(counts.modules >= 1 && !counts.truncated && counts.truncations == 0 && logged("truncated=0 truncations=0"),
+      "discovery past 1024 enumerated modules was truncated or not counted");
     require(logged("NGX_evaluate=0") && logged("not API absence") && logged("SL_hook=0"),
       "zero-call report omitted coverage limits");
     // Discovery walks every module's exports. With loader notifications it
@@ -347,6 +352,26 @@ namespace {
     Sleep(300); poll(); testing::wait_discovery();
     require(testing::counts().scans == 2, "a newly loaded module did not trigger discovery");
     FreeLibrary(added);
+    // A scan that reaches the 65536-module bound reports the truncation and
+    // the next poll, without a module load, resumes at the first entry it
+    // did not examine; the real modules after the bound are then counted.
+    testing::set_synthetic_modules(65536 + 3);
+    const auto bounded = LoadLibraryExW(L"msimg32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    require(bounded != nullptr, "bound fixture could not load a system module");
+    Sleep(300); poll(); testing::wait_discovery();
+    counts = testing::counts();
+    require(counts.scans == 3 && counts.truncated && counts.truncations == 1 && counts.modules == 0,
+      "a scan at the module bound did not stop and report its truncation");
+    testing::report_now();
+    require(logged("modules=0 truncated=1 truncations=1"), "the coverage report omitted the truncation");
+    Sleep(300); poll(); testing::wait_discovery();
+    counts = testing::counts();
+    require(counts.scans == 4 && !counts.truncated && counts.truncations == 1 && counts.modules >= 1 && counts.installed == 4,
+      "a truncated scan did not resume at its first unexamined module");
+    Sleep(300); poll(); testing::wait_discovery();
+    require(testing::counts().scans == 4, "a completed resumed scan rescanned without a module load");
+    testing::set_synthetic_modules(0);
+    FreeLibrary(bounded);
     create(); evaluate(); evaluate(true);
     counts = testing::counts();
     require(counts.ngx_create == 1 && counts.ngx_evaluate == 2 && counts.outside_streamline == 3 &&

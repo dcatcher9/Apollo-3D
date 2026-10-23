@@ -4219,7 +4219,10 @@ the game executable when it exports the NGX SDK. This switch adds diagnostics on
 hooks separately serve the default-on NGX depth adapter described above; the trace does not enable
 or disable production capture, choose depth, or change stereo/scale.
 Discovery never patches a DLSS Frame Generation module (`dlssg` in its path: `nvngx_dlssg.dll` or
-a driver model under `NGX\models\dlssg`); `skipped_frame_generation` counts them. Frame
+a driver model under `NGX\models\dlssg`); `skipped_frame_generation` counts them. A scan examines
+every loaded module up to a 65,536-entry safety bound (`modules` counts those that resolved). A
+scan that reaches the bound logs `truncated=1`, `truncations` counts such scans, and the next poll
+resumes at the first module that scan did not examine. Frame
 Generation refuses to create its feature once its entry points are patched: The Witcher 3
 Remastered got `FAIL_PlatformError` (`0xBAD00002`) on every attempt while hooked and generated
 frames with the NGX hooks off. It supplies no depth through NGX; Streamline tags carry FG depth.
