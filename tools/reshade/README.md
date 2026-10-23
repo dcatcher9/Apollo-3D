@@ -817,7 +817,8 @@ depth-stencil inventory, preserves them through native command submission, and c
 spatial depth pattern against the consumed depth. It also checks rotating resources, manual
 pin/release, a changed center that moves only the zero, explicit recentering, proportional strength,
 failed, missing and refused evaluations (the newest completed copy held within its age bound, then
-current-color mono; one second of silence releases the association), and zero-strength HDR color.
+current-color mono; one second of silence or of rejected evaluations releases the association), and
+zero-strength HDR color.
 It uses the same arguments as the NGX fixture below, with
 `reshade_streamline_direct_runtime_test.exe` and a fresh output directory. Its test-only
 seam supplies middleware metadata, never shader readiness, copied pixels or GPU completion.

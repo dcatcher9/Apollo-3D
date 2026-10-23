@@ -3402,9 +3402,11 @@ device/extent/lifetime mismatches and an unsuccessful or unsubmitted first evalu
 establish authority. A loaded DLL alone cannot establish it either. Once established, temporary
 missing or failed observations retain ownership. Explicit source release, disable or lifecycle
 teardown ends it, and so does one second without any evaluation of the established source (a
-game that switches DLSS to TAA, or a cutscene without DLSS, without releasing the feature); the
-queue then returns to Generic through its usual selection. A silent owner never blocks another
-live API source.
+game that switches DLSS to TAA, or a cutscene without DLSS, without releasing the feature), or one
+second in which the API rejected every evaluation of it (an API that fails every call delivers no
+depth; Battlefield 6 kept a source this way for 70 s). The queue then returns to Generic through
+its usual selection, and the next accepted evaluation establishes the source again. A silent or
+rejected owner never blocks another live API source.
 
 One native D3D12 capture owner serves both API-selected and Generic-selected sources. It owns the
 snapshot pool, recording/submission identities, source and snapshot leases, consumer registration
@@ -3532,6 +3534,11 @@ resource identity, active rectangle and lifetime remain the copy contract; it do
 state evidence for a different NGX command list. Constants and depth tags are associated within
 their own viewport/frame scope. Observed successful enabled FG options assign the separate FG
 source role; a tag boundary alone never implies FG.
+Streamline's only warning, `eWarnOutOfVRAM` (39 in every 2.x SDK), counts as a successful call for
+every hook and for the add-on's own options lookup: sl.common raises it while the game is over its
+video-memory budget and still runs the call. Battlefield 6 got it on every DLSS evaluation while SR
+and DLSS-G kept running. Warned game calls are counted as `vram_warnings` on the `Streamline camera
+availability` line, and the `Streamline frame generation` options line logs `sdk_result`.
 The consumed `DLSSGOptions` mode/count prefix is validated for structure versions 1–5. Off, On,
 Auto and Dynamic modes are recognized; Auto/Dynamic describe an enabled policy, not proof that
 a particular presentation was generated. The requested count is diagnostic metadata, not an
