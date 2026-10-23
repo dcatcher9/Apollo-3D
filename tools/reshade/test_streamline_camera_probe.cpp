@@ -2400,6 +2400,29 @@ namespace {
         function != returned_feature_function, "a warned FG getter did not return the forwarding wrapper");
     result_v2 = 0;
   }
+  // The add-on's own discovery lookup accepts the same warning, so a pointer the
+  // engine cached before observation is still detoured; the lookup is not a
+  // game call and does not count as one.
+  void test_frame_generation_warned_discovery() {
+    fixture cleanup;
+    probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+    returned_feature_function = reinterpret_cast<void *>(&fake_fg_options);
+    void *cached_entry{};
+    require(call_feature_function(1000, "slDLSSGSetOptions", cached_entry) == 0 && cached_entry == returned_feature_function,
+      "pre-observation SDK options cache did not keep the native entry");
+    auto cached_options = reinterpret_cast<fg_function>(cached_entry);
+    require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "warned FG discovery install failed");
+    const auto warnings = testing::counts().vram_warnings;
+    result_v2 = abi_v2::result_warn_out_of_vram;
+    const bool discovered = testing::discover_frame_generation_hooks();
+    result_v2 = 0;
+    require(discovered && testing::counts().vram_warnings == warnings,
+      "a warned FG discovery lookup failed or was counted as a game call");
+    auto view = viewport(11); fg_options options; frame_generation_snapshot fg;
+    const auto calls = fg_call.calls;
+    require(cached_options(view, options) == 0 && fg_call.calls == calls + 1 && query_frame_generation(view.value, fg) &&
+        fg.enabled, "a warned FG discovery lookup left the cached options pointer unobserved");
+  }
   void test_evaluation_ambiguity_and_invalid_tags() {
     fixture cleanup;
     require(testing::install(testing::abi::v1_1_1, v1_targets), "v1 ambiguity install failed");
@@ -4197,6 +4220,7 @@ int main(int argc, char **argv) {
     std::puts("PASS v2 observed token generations, numeric provenance, frame tags and local overrides");
     test_sdk_vram_warning();
     test_frame_generation_vram_warning();
+    test_frame_generation_warned_discovery();
     std::puts("PASS eWarnOutOfVRAM keeps evaluations, inputs, FG knowledge and the FG depth source; other SDK results still fail");
     test_evaluation_ambiguity_and_invalid_tags();
     std::puts("PASS ambiguous viewport and newer invalid tag rejection");

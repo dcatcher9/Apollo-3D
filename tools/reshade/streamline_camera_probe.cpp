@@ -858,9 +858,11 @@ namespace sunshine_streamline {
       // Engines may cache this public function before the first ReShade poll.
       // Resolve its real entry at discovery so those cached pointers also pass
       // through our deferred detour. A lookup never establishes enabled state.
+      // Same verdict as every 2.x call (eWarnOutOfVRAM is a success), but the
+      // add-on's own lookup is not a game call, so vram_warnings ignores it.
       const DWORD saved = GetLastError();
       void *entry{};
-      if (original_feature_function_v2(1000, "slDLSSGSetOptions", entry) == 0 && current(ticket) && entry)
+      if (abi_v2::accepted(original_feature_function_v2(1000, "slDLSSGSetOptions", entry)) && current(ticket) && entry)
         retain_fg_target(entry, ticket);
       SetLastError(saved);
     }
