@@ -383,8 +383,11 @@ both Generic preservation boundaries and API evaluation opportunities, including
 submission, consumer leases and retirement. API capture snapshots the nominated resource at the
 middleware call, including tracked depth-stencil resources; matching a Generic backup's resource
 identity cannot authenticate its contents. While a live source's successor is pending, acquisition
-may advance to that source's unconsumed completed snapshot with its own sequence and metadata under
-the contract's ordering, freshness and interruption checks, whether or not it already owns selection.
+may advance to that source's unconsumed completed snapshot with its own sequence, metadata,
+allocation size and active rectangle under the contract's ordering, freshness and interruption
+checks, whether or not it already owns selection. A new render size of the same source (dynamic
+resolution) neither refuses that snapshot nor ends the hold of the last copied depth; only another
+storage format, view or resource kind does (`format_changed`, `depth_format_changed`).
 When neither API supplies readable pixels, an established API selection can remain unavailable and
 return mono. A live owner that copied a frame within 250 ms keeps its source while readable or while
 a successor of that frame is pending. Otherwise readable SL takes priority over NGX, also for an
@@ -686,7 +689,11 @@ was flat. A loss without that reset, or one the add-on had a depth view for, sta
 that a `Sunshine Game 3D present gap` falls inside ends with `the game froze N ms` (the longest), so a
 game hitch reads apart from a loss the add-on caused; it still counts (E33 10-22 15:43:35, 773 ms
 while the game streamed in assets). A loss that ends within an FG switch's or reset's settle time
-and starts at most 0.25 s before the switch line is the switch's own handover. A flat
+and starts at most 0.25 s before the switch line is the switch's own handover. Render-size changes
+of one depth source (dynamic resolution) keep depth since 10-23 and are no gap: INFO
+`Depth render size` sums the `Sunshine depth render size` lines (changes, Presents held across a
+pending size, the smallest and largest active extent). Before, each change was a
+`depth_shape_changed` loss (Assassin's Creed Shadows with FG on: 125-438 ms, six in 6 s). A flat
 window is reported as INFO `Placement calibration` only when every placement-controller run
 without placement inside it (raw automation other than `ready`/`holding_reference`, or
 Streamline scale other than `ready`) followed a cause the log names (a depth-provider or frame
@@ -799,8 +806,10 @@ reshade_depth_queue_cycle_test.exe --content 3840 2160
 The default case checks that a pending foreign producer cannot introduce a reverse GPU queue
 dependency, then verifies natural recovery and same-queue admission. `--pipeline` checks admission
 of an unconsumed completed NGX snapshot while its successor is CPU-recorded or GPU-pending or
-carries new observation/feedback revisions or a reset flag, plus rejection across failed/missing
-input, epoch and layout changes. `--foreign-reclaim` retires producer and consumer recordings and
+carries new observation/feedback revisions, a reset flag, a new active crop or a new
+dynamic-resolution allocation (the completed snapshot keeps its own 64x64 allocation), plus
+rejection across failed/missing input, epoch and storage format changes (`format_changed`).
+`--foreign-reclaim` retires producer and consumer recordings and
 releases private snapshot leases before allocating an unrelated NGX capture or a Generic
 preservation copy from a separate resource. Its ten cases check that SL FG nomination authority,
 current depth and completed depth beneath a pending successor survive reclamation, while
@@ -824,7 +833,10 @@ reshade_game3d_native_provider_runtime_test.exe <ReShade64.dll> <frozenShaders> 
 
 It exercises real GPU depth production, capture, sampling and matrix preparation, including
 padded/nonzero-offset rectangles, failed evaluation and recovery. The optional metadata-only
-interposer enables the SL FG 2x case: retained real depth, generated presentations, FG-off
+interposer enables the SL FG 2x case: retained real depth, generated presentations, a tagged
+extent changing every second real frame (dynamic resolution: fresh depth of each extent, held on
+the generated frame, the matrix scale active without recalibration, and a
+`Sunshine depth render size` line), FG-off
 rejection and fresh SL recovery. It also checks repeated holds against the original capture's
 expiry, camera reset, and FG off/on without a fresh capture; none may revive invalidated depth.
 Fresh copies must recover each interval. It injects no captured pixels, readiness or GPU completion.

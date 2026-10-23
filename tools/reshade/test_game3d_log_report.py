@@ -939,6 +939,28 @@ class ReadinessReport(unittest.TestCase):
         open_loss = run(BASE + [lost, output('10:00:20', 1000, 0, 0, 750, 250)])
         self.assertTrue(open_loss['Depth'].times[0].endswith('until the log ended'))
 
+    def test_dynamic_resolution_is_no_depth_gap(self):
+        # Assassin's Creed Shadows with FG on (10-23): each SR depth render-size change was a 125-438 ms
+        # depth_shape_changed loss. A render-size change of one source now keeps depth: the add-on counts the
+        # changes on its render size line, and the report lists them as information, never as a gap or a loss.
+        size = line('10:00:17', '[Sunshine 3D] Sunshine depth render size: changed=6 held=5 total=6 '
+                                'active=2206x1240..2442x1374 now allocation=2442x1374 active=0,0,2442,1374; '
+                                'provider=Streamline epoch=2 source=0 viewport=0; dynamic resolution of one source: '
+                                'each copy keeps its own size, a new size is used at once and a pending one holds the '
+                                'previous copy, so depth stays ready')
+        later = size.replace('10:00:17', '10:00:22').replace('changed=6 held=5 total=6', 'changed=2 held=0 total=8')
+        later = later.replace('active=2206x1240..2442x1374', 'active=2206x1240..2658x1494')
+        checks = run(BASE + [size, output('10:00:20', 1000, 500, 0, 1000, 0), later])
+        self.assertEqual((checks['Depth'].status, checks['Depth'].times), ('PASS', []))
+        self.assertNotIn('Depth losses', checks)
+        self.assertEqual(checks['Depth render size'].status, 'INFO')
+        self.assertEqual(checks['Depth render size'].detail,
+                         '8 render-size changes of one Streamline depth source (dynamic resolution, active 2206x1240 '
+                         'to 2658x1494) kept depth ready; 5 Presents held the previous size while the next was '
+                         'pending')
+        self.assertEqual(checks['Depth render size'].times, ['10:00:17', '10:00:22'])
+        self.assertNotIn('Depth render size', run(BASE))
+
     def test_a_depth_loss_logged_just_before_its_fg_switch_belongs_to_the_switch(self):
         # Stellar Blade 2026-10-22: turning FG on handed depth from NGX to Streamline. The loss was logged 42 ms
         # before the switch's own line (the add-on logs asynchronously) and recovered 158 ms later.

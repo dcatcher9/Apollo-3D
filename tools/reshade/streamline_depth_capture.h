@@ -65,11 +65,14 @@ namespace sunshine_streamline::depth_capture {
     queue_retired, consumer_capacity, source_retired
   };
   // Selection evidence only; never grants GPU access to a pending snapshot.
+  // format_changed: the completed snapshot's storage family, view or resource
+  // kind differs from its pending successor's (a dynamic render size of the
+  // same source does not refuse it).
   enum class selection_reason {
     not_attempted, no_current_nomination, inactive_views, ambiguous_views,
     pending_nomination, current_capture, current_already_consumed, no_admissible_capture,
     no_completed_snapshot, completed_before_gap, completed_not_older,
-    completed_already_consumed, presentation_already_selected, layout_changed,
+    completed_already_consumed, presentation_already_selected, format_changed,
     completed_not_readable, completed_snapshot, fg_scope_missing, fg_scope_mismatch
   };
   // Acquisition authority, frozen under the capture lock. Diagnostics may be

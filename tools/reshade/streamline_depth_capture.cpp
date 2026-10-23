@@ -883,20 +883,23 @@ namespace sunshine_streamline::depth_capture {
       }
       return best;
     }
-    bool same_depth_layout(const input &a, const input &b) {
+    // Two snapshots of one logical source read the same way: one storage
+    // family through one view, of one resource kind. The allocation size and
+    // the tag's active rectangle are not part of it: dynamic resolution gives
+    // the same source a new allocation or extent every few frames (Assassin's
+    // Creed Shadows with FG, 10-23: 2206x1240, 2442x1374, 2658x1494), and each
+    // snapshot carries its own allocation and rectangle to its consumer.
+    bool same_depth_storage(const input &a, const input &b) {
       if (!a.source || !b.source) return false;
-      const auto &left = a.source->desc;
-      const auto &right = b.source->desc;
-      return left.Width == right.Width && left.Height == right.Height && left.Format == right.Format &&
-        a.resource.kind == b.resource.kind && a.resource.area.left == b.resource.area.left &&
-        a.resource.area.top == b.resource.area.top && a.resource.area.width == b.resource.area.width &&
-        a.resource.area.height == b.resource.area.height;
+      const auto left = a.source->desc.Format, right = b.source->desc.Format;
+      return typeless(left) == typeless(right) && depth_view(left, a) == depth_view(right, b) &&
+        a.resource.kind == b.resource.kind;
     }
     selection_reason completed_fallback_reason(const queue_state &owner, std::uint64_t present,
         const slot &latest, const slot &completed) {
       if (completed.id <= owner.admission_after) return selection_reason::completed_before_gap;
       if (completed.metadata.sequence >= latest.metadata.sequence) return selection_reason::completed_not_older;
-      if (!same_depth_layout(completed.metadata, latest.metadata)) return selection_reason::layout_changed;
+      if (!same_depth_storage(completed.metadata, latest.metadata)) return selection_reason::format_changed;
       // The consumed watermark belongs to the owner's provider; sequences of
       // another provider's namespace are not comparable with it.
       if (owner.provider == completed.metadata.provider && owner.last_epoch == completed.metadata.epoch &&
@@ -2973,7 +2976,7 @@ namespace sunshine_streamline::depth_capture {
     CASE(not_attempted); CASE(no_current_nomination); CASE(inactive_views); CASE(ambiguous_views);
     CASE(pending_nomination); CASE(current_capture); CASE(current_already_consumed); CASE(no_admissible_capture);
     CASE(no_completed_snapshot); CASE(completed_before_gap); CASE(completed_not_older);
-    CASE(completed_already_consumed); CASE(presentation_already_selected); CASE(layout_changed);
+    CASE(completed_already_consumed); CASE(presentation_already_selected); CASE(format_changed);
     CASE(completed_not_readable); CASE(completed_snapshot); CASE(fg_scope_missing); CASE(fg_scope_mismatch);
 #undef CASE
     }
@@ -3449,9 +3452,38 @@ namespace sunshine_streamline::depth_capture {
         consumed.present = 20;
         if (completed_fallback_reason(consumed, 21, latest, completed) != selection_reason::completed_already_consumed)
           return false;
-        ++latest.metadata.resource.area.top;
-        if (completed_fallback_reason(consumed, 21, latest, completed) != selection_reason::layout_changed) return false;
-        latest.metadata.resource.area.top = 0;
+        // Dynamic resolution: the successor's new allocation (a typed alias of
+        // the same family) or new extent is the same source, never a refusal.
+        auto resized = std::make_shared<source_reference>();
+        resized->desc = source->desc; resized->desc.Width = 176; resized->desc.Height = 99;
+        resized->desc.Format = DXGI_FORMAT_D32_FLOAT;
+        latest.metadata.source = resized;
+        for (const sunshine_scene_depth::extent area : {sunshine_scene_depth::extent{0, 0, 176, 99},
+            sunshine_scene_depth::extent{0, 0, 150, 84}, sunshine_scene_depth::extent{8, 4, 160, 90}}) {
+          latest.metadata.resource.area = area;
+          if (completed_fallback_reason(consumed, 21, latest, completed) != selection_reason::completed_already_consumed)
+            return false;
+        }
+        // Another storage family, another view of one family (a declared
+        // R16_TYPELESS read as FLOAT, then as UNORM) or another resource kind
+        // is another encoding.
+        for (unsigned change = 0; change != 3; ++change) {
+          auto other = std::make_shared<source_reference>();
+          other->desc = resized->desc;
+          auto before = completed; auto after = latest;
+          after.metadata.source = other;
+          if (change == 0) other->desc.Format = DXGI_FORMAT_R16_UNORM;
+          if (change == 1) {
+            auto half = std::make_shared<source_reference>();
+            half->desc = source->desc; half->desc.Format = DXGI_FORMAT_R16_TYPELESS;
+            before.metadata.source = half; before.metadata.resource.native_format = DXGI_FORMAT_R16_FLOAT;
+            other->desc.Format = DXGI_FORMAT_R16_TYPELESS; after.metadata.resource.native_format = DXGI_FORMAT_R16_UNORM;
+          }
+          if (change == 2) after.metadata.resource.kind = sunshine_scene_depth::resource_kind::display_depth;
+          if (completed_fallback_reason(consumed, 21, after, before) != selection_reason::format_changed) return false;
+        }
+        // The checks below run with the resized successor: it reaches
+        // completed_snapshot like an unchanged one.
         consumed.admission_after = completed.id;
         if (completed_fallback_reason(consumed, 21, latest, completed) != selection_reason::completed_before_gap) return false;
         consumed.admission_after = 0; consumed.last_sequence = 9;
@@ -4062,7 +4094,8 @@ namespace sunshine_streamline::depth_capture {
             queue.last_sequence = chosen.value->metadata.sequence;
             queue.last_source_tick = chosen.value->metadata.tick;
             const auto copy = describe(*chosen.value, chosen.result);
-            retained = {copy.metadata, copy.capture_id, present, copy.width, copy.height, copy.format, copy.area};
+            retained = {copy.metadata, copy.capture_id, present, copy.width, copy.height, copy.format, copy.srv_format,
+              copy.area};
           }
         }
         return chosen;
@@ -4376,6 +4409,54 @@ namespace sunshine_streamline::depth_capture {
         auto &completed = *fg.pending;
         advance(fg);
         if (!completed_pick(present_frame(owner, ++present, policy), &completed) || owner.provider != provider_kind::streamline) return false;
+      }
+      // (g) Dynamic resolution (Assassin's Creed Shadows with FG on, 10-23): a
+      // pipelined SR source on another queue changes its allocation every
+      // second real frame (2206x1240, 2442x1374, 2658x1494) and its extent
+      // within one, and FG presents a generated frame after each real one.
+      // The previous size's completed snapshot is the real frame's fresh depth
+      // while the new size is pending, and the generated frame holds that copy:
+      // depth on every Present. Refusing either (layout_changed, then the
+      // display's depth_shape_changed) dropped depth for 125-438 ms six times
+      // in 6 s. Another storage family is another encoding: it is refused until
+      // a snapshot of that family completes, and then re-establishes.
+      {
+        restart();
+        auto &owner = fresh_owner();
+        auto sr = streamline();
+        const source_ref sizes[] = {layout(2206, 1240), layout(2442, 1374), layout(2658, 1494)};
+        sr.source = sizes[0];
+        if (!deliver(owner, sr, present)) return false;
+        for (unsigned frame = 0; frame != 18; ++frame) {
+          sr.source = sizes[(frame / 2) % 3];
+          auto &completed = *sr.pending;
+          auto &next = advance(sr);
+          // Every third frame renders a smaller extent of its allocation.
+          if (frame % 3 == 2) next.metadata.resource.area = {0, 0, 1792, 1008};
+          const auto real = present_frame(owner, ++present);
+          if (!completed_pick(real, &completed) || display(real).action != display_action::copy_fresh ||
+              retained.capture_id != completed.id) return false;
+          const auto generated = present_frame(owner, ++present);
+          const auto held = display(generated);
+          if (generated.result == status::ready || !generated.value || generated.value != sr.pending ||
+              held.action != display_action::hold || std::string_view(held.reason) != "retained_copy" ||
+              retained.capture_id != completed.id) return false;
+        }
+        auto packed = layout(2442, 1374);
+        packed->desc.Format = DXGI_FORMAT_R24G8_TYPELESS;
+        sr.source = packed;
+        advance(sr);
+        const auto refused = present_frame(owner, ++present);
+        const auto refusal = display(refused);
+        if (refused.result == status::ready || refused.selection != selection_reason::format_changed ||
+            refusal.action != display_action::invalidate || std::string_view(refusal.reason) != "depth_format_changed")
+          return false;
+        retained = {}; // The provider's cache invalidates; only a fresh copy re-arms it.
+        auto &first_packed = *sr.pending;
+        advance(sr);
+        const auto recovered = present_frame(owner, ++present);
+        if (!completed_pick(recovered, &first_packed) || display(recovered).action != display_action::copy_fresh ||
+            retained.capture_id != first_packed.id) return false;
       }
       return true;
     }

@@ -8,10 +8,12 @@ namespace sunshine_streamline::depth_capture {
 
   // Description of the last successful private display copy. It retains no
   // game-resource lease, capture-pool allocation, or independently aged copy.
+  // format is the copy's storage family, view_format the view it is read
+  // through (packet::format and packet::srv_format).
   struct retained_depth {
     sunshine_scene_depth::frame metadata;
     std::uint64_t capture_id{}, real_present{};
-    std::uint32_t width{}, height{}, format{};
+    std::uint32_t width{}, height{}, format{}, view_format{};
     sunshine_scene_depth::extent area;
   };
   struct display_decision {
@@ -20,10 +22,14 @@ namespace sunshine_streamline::depth_capture {
   };
 
   namespace detail {
-    inline bool same_layout(const retained_depth &previous, const packet &next) {
-      return next.width == previous.width && next.height == previous.height && next.format == previous.format &&
-        next.area.left == previous.area.left && next.area.top == previous.area.top &&
-        next.area.width == previous.area.width && next.area.height == previous.area.height;
+    // The retained copy reads like the candidate: one storage family through
+    // one view, of one resource kind. Its allocation size and active rectangle
+    // are not compared: a dynamic render size gives the same source a new
+    // allocation or extent every few frames, and the held copy is presented
+    // with its own size and rectangle (consumers map that rectangle).
+    inline bool same_storage(const retained_depth &previous, const packet &next) {
+      return next.format == previous.format && next.srv_format == previous.view_format &&
+        next.metadata.resource.kind == previous.metadata.resource.kind;
     }
     // Logical source identity survives ordinary rotation of resource pointers.
     // Without any current nomination there is no newer identity to contradict.
@@ -42,9 +48,10 @@ namespace sunshine_streamline::depth_capture {
   // copy: failure must invalidate, not re-enter this policy to hold old pixels.
   // Otherwise the newest successful private copy is held while it is younger
   // than maximum_source_age_ms and the provider still names the same source.
-  // A pending, failed or missing newer frame, a camera reset and tag or
-  // observation bookkeeping never discard it; a changed source, layout or
-  // encoding and its age do. hold still requires the cache owner's local
+  // A pending, failed or missing newer frame, a new render size of the same
+  // source, a camera reset and tag or observation bookkeeping never discard
+  // it; a changed source, storage format, view or resource kind, encoding and
+  // its age do. hold still requires the cache owner's local
   // storage, color extent, immediate-command and consumer-queue checks. Only a
   // successful fresh copy may replace retained_depth; holds never refresh it.
   inline display_decision decide_display(const acquisition_decision &current, const packet &candidate,
@@ -76,8 +83,8 @@ namespace sunshine_streamline::depth_capture {
       out.reason = "source_changed";
       return out;
     }
-    if (current.source_selected && !detail::same_layout(previous, candidate)) {
-      out.reason = "depth_shape_changed";
+    if (current.source_selected && !detail::same_storage(previous, candidate)) {
+      out.reason = "depth_format_changed";
       return out;
     }
     if (current.source_selected && before.projection.encoding != candidate.metadata.projection.encoding) {

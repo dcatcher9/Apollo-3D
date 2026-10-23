@@ -113,6 +113,16 @@ namespace sunshine_streamline::provider {
       bool traced_ready{}, traced_loss{};
       std::uint64_t next_trace_episode{}, trace_loss_tick{}, suppressed_trace_episodes{};
       observation_loss_episode trace_observation_loss;
+      // Dynamic resolution of one logical source: the last fresh copy's
+      // identity, storage and size, and the size changes since the last
+      // render size line (diagnostic only; no decision reads it).
+      struct render_size_state {
+        std::array<std::uint64_t, 4> source{}; // provider, epoch, source_id, viewport
+        std::uint32_t width{}, height{}, format{}, view_format{};
+        sunshine_scene_depth::extent area;
+        std::uint64_t changes{}, held{}, total{}, next_line{};
+        std::uint32_t min_width{}, min_height{}, max_width{}, max_height{};
+      } render_size;
     };
 }
 #if defined(__MINGW32__)
@@ -363,6 +373,69 @@ namespace sunshine_streamline::provider {
       data.suppressed_trace_episodes = 0;
       if (ready) data.traced_loss = false;
     }
+    void log_render_size(state::render_size_state &size, std::uint64_t now) {
+      size.next_line = now + 5000;
+      const auto provider = static_cast<sunshine_scene_depth::provider_kind>(size.source[0]);
+      char text[640]{};
+      std::snprintf(text, sizeof(text),
+        "Sunshine depth render size: changed=%llu held=%llu total=%llu active=%ux%u..%ux%u now allocation=%ux%u "
+        "active=%u,%u,%u,%u; provider=%s epoch=%llu source=%llu viewport=%llu; dynamic resolution of one source: "
+        "each copy keeps its own size, a new size is used at once and a pending one holds the previous copy, so depth "
+        "stays ready",
+        static_cast<unsigned long long>(size.changes), static_cast<unsigned long long>(size.held),
+        static_cast<unsigned long long>(size.total), size.min_width, size.min_height, size.max_width, size.max_height,
+        size.width, size.height, size.area.left, size.area.top, size.area.width, size.area.height,
+        provider == sunshine_scene_depth::provider_kind::ngx ? "NGX" : "Streamline",
+        static_cast<unsigned long long>(size.source[1]), static_cast<unsigned long long>(size.source[2]),
+        static_cast<unsigned long long>(size.source[3]));
+      sunshine_log::message(reshade::log::level::info, text);
+      size.changes = size.held = 0;
+    }
+    // Counts render-size changes of one logical source (dynamic resolution),
+    // which keep depth ready: a fresh copy of a new size is used at once, and
+    // a Present whose newer size is still pending holds the previous copy
+    // (depth_capture::decide_display). At most one line every 5 s while the
+    // size changes. A new source, storage format or view first reports the
+    // previous source's unreported changes, then restarts the count.
+    void track_render_size(state &data, bool copied, bool held, bool selected) {
+      auto &size = data.render_size;
+      if (copied) {
+        const auto &packet = data.frame;
+        const auto &metadata = packet.metadata;
+        const std::array<std::uint64_t, 4> source{static_cast<std::uint64_t>(metadata.provider), metadata.epoch,
+          metadata.source_id, metadata.viewport};
+        const bool same = size.width && source == size.source && packet.format == size.format &&
+          packet.srv_format == size.view_format;
+        const bool resized = same && (packet.width != size.width || packet.height != size.height ||
+          packet.area.left != size.area.left || packet.area.top != size.area.top ||
+          packet.area.width != size.area.width || packet.area.height != size.area.height);
+        if (!same) {
+          if (size.changes) log_render_size(size, GetTickCount64());
+          size = {source, 0, 0, 0, 0, {}, 0, 0, 0, size.next_line};
+        }
+        if (resized) {
+          if (!size.changes) {
+            size.min_width = size.max_width = size.area.width;
+            size.min_height = size.max_height = size.area.height;
+          }
+          ++size.changes; ++size.total;
+          size.min_width = std::min(size.min_width, packet.area.width);
+          size.min_height = std::min(size.min_height, packet.area.height);
+          size.max_width = std::max(size.max_width, packet.area.width);
+          size.max_height = std::max(size.max_height, packet.area.height);
+        }
+        size.width = packet.width; size.height = packet.height; size.area = packet.area;
+        size.format = packet.format; size.view_format = packet.srv_format;
+      } else if (held && selected && size.width &&
+          (data.frame.width != data.output.width || data.frame.height != data.output.height ||
+           data.frame.area.width != data.output.active_width || data.frame.area.height != data.output.active_height)) {
+        // The held copy is the previous size; the selected newer one is pending.
+        ++size.held;
+      }
+      if (!size.changes) return;
+      const auto now = GetTickCount64();
+      if (now >= size.next_line) log_render_size(size, now);
+    }
     void activate_display(state &data, const state::display_entry &entry) {
       data.display_texture = entry.texture; data.display_view = entry.view;
       data.display_width = entry.width; data.display_height = entry.height; data.display_format = entry.format;
@@ -455,6 +528,7 @@ namespace sunshine_streamline::provider {
       data->associated_tick = 0;
       data->associated_width = data->associated_height = 0;
       data->handoff_hold = false;
+      data->render_size = {};
       // The sampler independently retains any submitted slot until completion.
       data->pending_id = 0;
       trace_readiness(runtime, *data, evidence, false, "runtime_reload");
@@ -760,7 +834,7 @@ namespace sunshine_streamline::provider {
       // Retaining it never extends a game texture's lifetime or adds a GPU wait.
       std::uint32_t color_width{}, color_height{};
       runtime->get_screenshot_width_and_height(&color_width, &color_height);
-      data->cache.commit(out, packet.capture_id, packet.format, color_width, color_height);
+      data->cache.commit(out, packet.capture_id, packet.format, packet.srv_format, color_width, color_height);
     } else if (update.action == depth_capture::display_action::hold) {
       display_cache_context context;
       std::uint32_t color_width{}, color_height{};
@@ -784,6 +858,7 @@ namespace sunshine_streamline::provider {
       data->cache.invalidate(update.action == depth_capture::display_action::copy_fresh ?
         "display_copy_failed" : update.reason);
     }
+    track_render_size(*data, copied, display == display_status::reused_depth, available);
     const char *readiness_reason = copied ? "fresh_copy" : data->output.ready ? "retained_copy" : data->cache.reason();
     evidence.cache_reason = data->cache.reason();
     evidence.copied = copied;

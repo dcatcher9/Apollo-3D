@@ -30,14 +30,17 @@ namespace sunshine_streamline::provider {
       out.width = depth_.width;
       out.height = depth_.height;
       out.format = format_;
+      out.view_format = view_format_;
       out.area = {depth_.x, depth_.y, depth_.active_width, depth_.active_height};
       return out;
     }
 
     // Only the caller's successful fresh copy can arm the cache. In particular,
     // feeding a held output back here cannot refresh its age or NGX present limit.
+    // format and view_format: the copy's storage family and the view it is
+    // read through (packet::format, packet::srv_format).
     void commit(const sunshine_depth::frame_depth &value, std::uint64_t capture_id,
-        std::uint32_t format, std::uint32_t color_width, std::uint32_t color_height) {
+        std::uint32_t format, std::uint32_t view_format, std::uint32_t color_width, std::uint32_t color_height) {
       if (!value.ready || value.reused_depth || !capture_id) {
         invalidate("invalid_fresh_copy");
         return;
@@ -45,6 +48,7 @@ namespace sunshine_streamline::provider {
       depth_ = value;
       capture_id_ = capture_id;
       format_ = format;
+      view_format_ = view_format;
       color_width_ = color_width;
       color_height_ = color_height;
       reason_ = "none";
@@ -55,7 +59,7 @@ namespace sunshine_streamline::provider {
     void invalidate(const char *reason) {
       depth_ = {};
       capture_id_ = 0;
-      format_ = color_width_ = color_height_ = 0;
+      format_ = view_format_ = color_width_ = color_height_ = 0;
       reason_ = reason ? reason : "invalidated";
     }
     const char *reason() const { return reason_; }
@@ -89,7 +93,7 @@ namespace sunshine_streamline::provider {
     bool reject(const char *reason) { invalidate(reason); return false; }
     sunshine_depth::frame_depth depth_;
     std::uint64_t capture_id_{};
-    std::uint32_t format_{}, color_width_{}, color_height_{};
+    std::uint32_t format_{}, view_format_{}, color_width_{}, color_height_{};
     const char *reason_{"no_retained_depth"};
   };
 }

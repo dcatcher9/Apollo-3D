@@ -298,7 +298,7 @@ namespace {
 
   enum class pipeline_case {
     recorded, submitted, failed, missing, observation_reset, feedback_reset,
-    reset_flag, epoch_change, layout_change
+    reset_flag, epoch_change, layout_change, allocation_change, format_change
   };
 
   const char *name(pipeline_case value) {
@@ -312,6 +312,8 @@ namespace {
       case pipeline_case::reset_flag: return "explicit reset";
       case pipeline_case::epoch_change: return "provider epoch changed";
       case pipeline_case::layout_change: return "active depth crop changed";
+      case pipeline_case::allocation_change: return "dynamic-resolution allocation changed";
+      case pipeline_case::format_change: return "depth storage format changed";
     }
     return "unknown";
   }
@@ -395,6 +397,24 @@ namespace {
     if (scenario == pipeline_case::reset_flag) input.feedback.reset = true;
     if (scenario == pipeline_case::epoch_change) ++input.epoch;
     if (scenario == pipeline_case::layout_change) input.resource.area.width = 32;
+    // Dynamic resolution gives the same source a new allocation (Assassin's
+    // Creed Shadows with FG on, 10-23); another storage format is another
+    // encoding. The newest frame uses a second resource for either.
+    com_ptr<ID3D12Resource> successor;
+    if (scenario == pipeline_case::allocation_change || scenario == pipeline_case::format_change) {
+      D3D12_HEAP_PROPERTIES heap{};
+      heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+      D3D12_RESOURCE_DESC texture = gpu.source->GetDesc();
+      if (scenario == pipeline_case::allocation_change) { texture.Width = 48; texture.Height = 40; }
+      else texture.Format = DXGI_FORMAT_R16_FLOAT;
+      checked(gpu.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &texture, D3D12_RESOURCE_STATE_COPY_SOURCE,
+        nullptr, IID_ID3D12Resource, reinterpret_cast<void **>(successor.put())), "Create successor depth texture");
+      const auto width = static_cast<std::uint32_t>(texture.Width);
+      input.resource = {successor.native(), width, texture.Height, {0, 0, width, texture.Height}};
+      input.source = capture::retain_source(successor.native());
+      input.source_present_generation = capture::source_present_generation(input.source);
+      require(bool(input.source), "Retain successor depth source");
+    }
     if (scenario == pipeline_case::missing) {
       capture::begin_evaluation(input.epoch, input.sequence, input.viewport, input.provider, input.source_id);
     } else {
@@ -411,17 +431,28 @@ namespace {
     const bool acquired = capture::acquire(gpu.consumer.native(), 2, selected, &diagnostic);
     // Selection does not consult observation or feedback revisions or the
     // reset flag: they are bookkeeping, not evidence against finished depth.
-    // A reset starts a new scene-history segment; the depth stays valid.
+    // A reset starts a new scene-history segment; the depth stays valid. A
+    // new extent or allocation of the same source (dynamic resolution) does
+    // not refuse the completed frame either: it carries its own allocation
+    // and rectangle. Only another storage format does (format_changed).
     const bool allows_completed = scenario == pipeline_case::recorded || scenario == pipeline_case::submitted ||
       scenario == pipeline_case::observation_reset || scenario == pipeline_case::feedback_reset ||
-      scenario == pipeline_case::reset_flag;
-    std::printf("pipeline %s: selected=%llu newest=%llu ready=%d status=%s\n", name(scenario),
-      static_cast<unsigned long long>(selected.metadata.sequence),
-      static_cast<unsigned long long>(diagnostic.newest_sequence), int(selected.pixel_ready), capture::name(diagnostic.result));
+      scenario == pipeline_case::reset_flag || scenario == pipeline_case::layout_change ||
+      scenario == pipeline_case::allocation_change;
+    std::printf("pipeline %s: selected=%llu newest=%llu ready=%d status=%s selection=%s allocation=%ux%u active=%u,%u,%u,%u\n",
+      name(scenario), static_cast<unsigned long long>(selected.metadata.sequence),
+      static_cast<unsigned long long>(diagnostic.newest_sequence), int(selected.pixel_ready), capture::name(diagnostic.result),
+      capture::name(diagnostic.selection), selected.width, selected.height, selected.area.left, selected.area.top,
+      selected.area.width, selected.area.height);
     if (allows_completed) {
       require(acquired && selected.pixel_ready && selected.capture_id == completed_ticket &&
-        selected.metadata.sequence == 2 && diagnostic.newest_sequence == 3,
+        selected.metadata.sequence == 2 && diagnostic.newest_sequence == 3 &&
+        diagnostic.selection == capture::selection_reason::completed_snapshot,
         "Completed NGX frame was starved by a newer pending evaluation");
+      // The completed frame keeps its own allocation and rectangle; the
+      // successor's new size never relabels it.
+      require(selected.width == 64 && selected.height == 64 && selected.area.left == 0 && selected.area.top == 0 &&
+        selected.area.width == 64 && selected.area.height == 64, "Completed frame took its successor's size");
       // Submission behind the producer's blocked frame would hang here if the
       // production owner inserted a reverse GPU wait instead of using frame 2.
       consume(selected, 2);
@@ -430,6 +461,9 @@ namespace {
     } else {
       require(!selected.pixel_ready && selected.capture_id != completed_ticket,
         "Invalid/missing/changed input reused an older NGX snapshot");
+      if (scenario == pipeline_case::format_change)
+        require(diagnostic.selection == capture::selection_reason::format_changed,
+          "A storage format change was not refused as format_changed");
       if (scenario == pipeline_case::failed || scenario == pipeline_case::missing) {
         // Acquiring a known gap raises the admission watermark. A subsequent
         // valid but pending attempt cannot bring a pre-gap frame back to life.
@@ -868,7 +902,8 @@ int main(int argc, char **argv) {
     } else if (pipeline) {
       for (const auto scenario : {pipeline_case::recorded, pipeline_case::submitted, pipeline_case::failed,
         pipeline_case::missing, pipeline_case::observation_reset, pipeline_case::feedback_reset,
-        pipeline_case::reset_flag, pipeline_case::epoch_change, pipeline_case::layout_change})
+        pipeline_case::reset_flag, pipeline_case::epoch_change, pipeline_case::layout_change,
+        pipeline_case::allocation_change, pipeline_case::format_change})
         run_pipeline(scenario);
     } else run(expect_cycle);
     return 0;

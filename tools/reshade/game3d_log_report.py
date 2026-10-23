@@ -130,6 +130,9 @@ SL_VRAM_WARNINGS = re.compile(r'Sunshine Streamline camera availability: .*\bvra
 # The evidence line's own tick: a loss sampled with a later depth loss happened tick_ms earlier than its line.
 SAMPLED_TICK = re.compile(r'\bsampled_tick_ms=(\d+)')
 READINESS = re.compile(r'Sunshine depth readiness: (lost|recovered) reason=(\w+)')
+# Since 10-23: render-size changes of one depth source (dynamic resolution) since the last line, each kept ready.
+RENDER_SIZE = re.compile(r'Sunshine depth render size: changed=(\d+) held=(\d+) total=\d+ '
+                         r'active=(\d+)x(\d+)\.\.(\d+)x(\d+) .*?provider=(\w+)')
 UNAVAILABLE_MS = re.compile(r'\bunavailable_ms=(\d+)')
 PROVIDER = re.compile(r'\bprovider=(\w+)')
 SELECTION = re.compile(r'\bselection=(\w+)')
@@ -761,6 +764,9 @@ class Session:
     sl_vram_warnings: int = 0  # Since 10-22: Streamline calls answered eWarnOutOfVRAM (cumulative).
     readiness: Counter = field(default_factory=Counter)  # Losses while the export streamed.
     depth_episodes: list[DepthEpisode] = field(default_factory=list)
+    # Each render size line: time, changes, Presents held across a pending size, smallest and largest active extent,
+    # provider.
+    render_sizes: list[tuple[float, int, int, tuple[int, int], tuple[int, int], str]] = field(default_factory=list)
     output_counts: list[OutputCount] = field(default_factory=list)  # Every 'Sunshine SBS output' line.
     streamed: list[list] = field(default_factory=list)  # From a generation to the next export inactive.
     placement: list[tuple[float, bool, str, str]] = field(default_factory=list)  # t, placed, state, provider.
@@ -960,6 +966,9 @@ def parse(lines) -> Session:
                 episode.unavailable_ms = int(unavailable.group(1)) if unavailable else None
                 episode.recovered_present = present
                 episode.reset = reset
+        if found := RENDER_SIZE.search(text):
+            changed, held, low_w, low_h, high_w, high_h = (int(v) for v in found.groups()[:6])
+            s.render_sizes.append((t, changed, held, (low_w, low_h), (high_w, high_h), found.group(7)))
         if found := PLACEMENT.search(text):
             state, raw = found.group(2), found.group(1) == 'raw automation'
             s.placement.append((t, state in RAW_PLACED if raw else state == 'ready',
@@ -1266,6 +1275,19 @@ def evaluate(s: Session) -> list[Check]:
         add(Check('WARN', 'NGX depth', f'{s.ngx[0] - s.ngx[4]} DLSS evaluations recorded no depth copy'))
     if s.readiness:
         add(Check('INFO', 'Depth losses', ', '.join(f'{k} {v}' for k, v in s.readiness.most_common())))
+    if s.render_sizes:
+        # Dynamic resolution keeps depth (since 10-23): a render-size change of one source is no depth gap. Before,
+        # each change was a 'depth_shape_changed' loss (Assassin's Creed Shadows with FG on: 125-438 ms, six in 6 s).
+        changes = sum(r[1] for r in s.render_sizes)
+        held = sum(r[2] for r in s.render_sizes)
+        low = min((r[3] for r in s.render_sizes), key=lambda v: v[0] * v[1])
+        high = max((r[4] for r in s.render_sizes), key=lambda v: v[0] * v[1])
+        providers = '/'.join(sorted({r[5] for r in s.render_sizes}))
+        add(Check('INFO', 'Depth render size',
+                  f'{changes} render-size change{"s" if changes != 1 else ""} of one {providers} depth source '
+                  f'(dynamic resolution, active {low[0]}x{low[1]} to {high[0]}x{high[1]}) kept depth ready; '
+                  f'{held} Present{"s" if held != 1 else ""} held the previous size while the next was pending',
+                  [clock(r[0]) for r in s.render_sizes][:6]))
 
     export_checks(s, add)
 

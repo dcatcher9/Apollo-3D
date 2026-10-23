@@ -1577,6 +1577,35 @@ namespace {
           generated.source.current.sequence == real.source.current.sequence && same_scale(generated.scale, real.scale),
           "Generated presentation failed to retain completed real depth and its native matrix scale");
       }
+      // Dynamic resolution (Assassin's Creed Shadows with FG on, 10-23): the
+      // tagged extent of the same source changes every second real frame.
+      // Each real Present has fresh depth of its own extent and each
+      // generated one holds it with the real frame's scale; the matrix scale
+      // stays active (a reset would recalibrate). The fixture crops one fixed
+      // scene, so a smaller extent shows other content and the scale may
+      // adapt to it within its rate bound. The provider reports the changes
+      // on its render size line.
+      const sunshine_streamline::extent drs[] = {{0, 0, selected->width, selected->height-3},
+        {0, 0, selected->width*7/8, selected->height*7/8}, {0, 0, selected->width*3/4, selected->height*3/4}};
+      for (unsigned pair = 0; pair < 12; ++pair) {
+        active_area = drs[pair / 2 % 3];
+        render_tracked_depth = real_frame;
+        step(); no_effects(); const auto real = inspect();
+        render_tracked_depth = {};
+        step(); no_effects(); const auto generated = inspect();
+        if (pair % 2 == 0) log_status("SLFG-dynamic-resolution-generated", generated);
+        require(active(real) && !real.source.reused_depth && active(generated) && generated.source.reused_depth &&
+          generated.source.current.capture == real.source.current.capture && same_scale(generated.scale, real.scale),
+          "A dynamic render size of the same FG source lost depth or reset its scale");
+      }
+      active_area = {0, 0, selected->width, selected->height-3};
+      render_tracked_depth = real_frame;
+      // Its line (at most every 5 s) names the smallest extent of this run.
+      const auto smallest = "active=" + std::to_string(drs[2].width) + 'x' + std::to_string(drs[2].height) + "..";
+      require(reshade_log_contains({"Sunshine depth render size: changed=", smallest.c_str(), "provider=Streamline",
+          "depth stays ready"}),
+        "Dynamic render sizes produced no render size line");
+      render_tracked_depth = {};
       configure(false);
       step(); no_effects();
       const auto off = inspect(); log_status("FG-off-without-new-depth", off);

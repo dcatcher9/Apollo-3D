@@ -172,7 +172,7 @@ namespace {
       using sunshine_scene_depth::provider_kind;
       depth_capture::retained_depth previous;
       previous.capture_id = 500; previous.real_present = 100;
-      previous.width = 1920; previous.height = 1080; previous.format = 39;
+      previous.width = 1920; previous.height = 1080; previous.format = 39; previous.view_format = 41;
       previous.area = {0, 0, 1920, 1080};
       auto &metadata = previous.metadata;
       metadata.provider = provider_kind::streamline;
@@ -255,6 +255,7 @@ namespace {
       static_cast<sunshine_scene_depth::frame &>(candidate.metadata) = metadata;
       candidate.metadata.sequence = pending.sequence;
       candidate.width = previous.width; candidate.height = previous.height; candidate.format = previous.format;
+      candidate.srv_format = previous.view_format;
       candidate.area = previous.area; candidate.capture_id = pending.capture_id;
       auto selected = pending; selected.source_selected = true;
       require(held(previous, selected, candidate), "A selected unready snapshot could not retain finished private pixels");
@@ -262,20 +263,37 @@ namespace {
       changed_encoding.metadata.projection.encoding = sunshine_scene_depth::depth_encoding::linear_distance;
       require(std::strcmp(decide(previous, selected, changed_encoding).reason, "depth_encoding_changed") == 0,
         "Retained pixels crossed a changed depth encoding");
-      for (unsigned field = 0; field != 7; ++field) {
+      // A new render size of the same source (dynamic resolution: a new
+      // allocation, or a new extent within one) is no change: the held copy
+      // keeps its own size and rectangle. Assassin's Creed Shadows with FG on
+      // (10-23) changed its SR depth allocation every few frames, and each
+      // change dropped depth for 125-438 ms as depth_shape_changed.
+      for (unsigned field = 0; field != 8; ++field) {
         auto next = candidate;
         switch (field) {
-          case 0: ++next.width; break;
-          case 1: ++next.height; break;
-          case 2: ++next.format; break;
-          case 3: ++next.area.left; break;
-          case 4: ++next.area.top; break;
-          case 5: --next.area.width; break;
-          case 6: --next.area.height; break;
+          case 0: next.width += 236; break;
+          case 1: next.height += 134; break;
+          case 2: next.area.left += 8; next.area.width -= 8; break;
+          case 3: next.area.top += 4; next.area.height -= 4; break;
+          case 4: next.area.width -= 128; break;
+          case 5: next.area.height -= 72; break;
+          case 6: next.width = 2442; next.height = 1374; next.area = {0, 0, 2442, 1374}; break;
+          case 7: next.width = 2206; next.height = 1240; next.area = {0, 0, 2048, 1152}; break;
+        }
+        require(held(previous, selected, next), "A new render size of the same source discarded its finished copy");
+      }
+      // Another storage family, another view of it or another resource kind is
+      // another encoding: the old copy cannot stand in until a fresh copy.
+      for (unsigned field = 0; field != 3; ++field) {
+        auto next = candidate;
+        switch (field) {
+          case 0: ++next.format; break;
+          case 1: ++next.srv_format; break;
+          case 2: next.metadata.resource.kind = sunshine_scene_depth::resource_kind::display_depth; break;
         }
         const auto rejected = decide(previous, selected, next);
-        require(rejected.action == action::invalidate && std::strcmp(rejected.reason, "depth_shape_changed") == 0,
-          "A changed selected layout inherited old private pixels");
+        require(rejected.action == action::invalidate && std::strcmp(rejected.reason, "depth_format_changed") == 0,
+          "A changed depth storage format, view or kind inherited old private pixels");
       }
       candidate.pixel_ready = true;
       require(decide({}, selected, candidate).action == action::copy_fresh &&

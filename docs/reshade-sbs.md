@@ -3647,9 +3647,15 @@ completion is still required for allocation retirement. The selected capture sta
 the pass. While a same-source successor is pending, SL and NGX may advance to the newest unconsumed
 completed snapshot: on the consumer's own queue one already submitted there (queue order, as for a
 current capture), from another queue one whose recording retired and whose producer fence
-completed. Its original sequence, timestamp, projection, jitter and feedback travel with
-its pixels. Provider, epoch, logical source, viewport, FG role and known
-depth layout must match, and the snapshot must be within the source age. Later camera resets and
+completed. Its original sequence, timestamp, projection, jitter, feedback, allocation size and
+active rectangle travel with its pixels. Provider, epoch, logical source, viewport, FG role and
+depth storage (typeless storage family, the view it is read through and the resource kind) must
+match, and the snapshot must be within the source age; otherwise the selection reports
+`format_changed`. A new render size of the same source is no refusal: dynamic resolution gives a
+source a new allocation or a new extent within one every few frames, and the snapshot keeps its own
+(Assassin's Creed Shadows with FG on, 10-23, moved its SR depth between 2206x1240, 2442x1374 and
+2658x1494 allocations; refusing the previous size's snapshot as `layout_changed` dropped depth for
+125-438 ms six times in 6 s). Later camera resets and
 observation bookkeeping do not revoke its eligibility. The pool retains one eligible completed snapshot while recording its successor, so
 CPU nomination cannot continually hide or overwrite the newest usable pixels. This selection does
 not repeatedly reuse an already consumed snapshot or prove exact color/depth frame correspondence.
@@ -3802,8 +3808,11 @@ copied into its private display texture. One rule serves SR, FG and NGX. The com
 selection described above supplies newer pixels first; the hold reads only the previous private
 display copy, and copying a new snapshot still requires its ordering conditions. The hold ends when
 the provider names a different source (provider, epoch, logical source, viewport, or an older
-sequence), when a selected snapshot has a different layout or encoding, when the enabled FG scope
-changes, or at the age bound below.
+sequence), when a selected snapshot has a different depth storage (storage family, view or resource
+kind: `depth_format_changed`) or encoding (`depth_encoding_changed`), when the enabled FG scope
+changes, or at the age bound below. A selected snapshot of a new render size of the same source
+(dynamic resolution) does not end it: the held copy keeps its own allocation and active rectangle,
+which consumers map to the screen like any crop, until the new size's first copy replaces it.
 Explicit source interruptions advance the existing admission watermark,
 preventing pre-interruption captures from returning.
 Reused real depth retains its applied gain, zero plane, crop and jitter and does not advance
@@ -3824,12 +3833,19 @@ The current implementation does not synthesize depth for generated frames.
 Nomination, admission of completed snapshots and display-depth reuse share one freshness limit:
 less than 250 ms from the original depth capture timestamp, defined by
 `sunshine_scene_depth::maximum_source_age_ms`. Display-depth reuse also requires the same runtime
-queue and display allocation, unchanged color dimensions and any known depth dimensions/crop; under
-enabled FG the retained copy must belong to that FG scope. Failed consumer copies, loss of the
-source association (for example FG Off before an ordinary source exists), focus/technique/lifecycle
-changes and expiry invalidate reusable history until a fresh copy succeeds. A nomination gap cannot
-prove an as-yet unknown depth layout; its same-source reuse remains subject to the short bound and
-color dimensions. Under required FG a present without a nomination still names the FG scope but no
+queue and display allocation, unchanged color dimensions and any known depth storage, view and
+resource kind; under enabled FG the retained copy must belong to that FG scope. Failed consumer
+copies, loss of the source association (for example FG Off before an ordinary source exists),
+focus/technique/lifecycle changes and expiry invalidate reusable history until a fresh copy
+succeeds. A nomination gap cannot prove an as-yet unknown depth storage; its same-source reuse
+remains subject to the short bound and color dimensions. Placement calibration is keyed to the
+logical source, never to a pixel size (below), so a render-size change neither resets nor moves it;
+its statistics are per-pixel means over each copy's own active rectangle. The provider counts
+render-size changes of one source on a `Sunshine depth render size` line (at most every 5 s while
+the size changes): `changed=` copies of a new size and `held=` Presents that held the previous
+size's copy while the next was pending since the last line, `total=`, the smallest and largest
+active extent and the current allocation; the readiness report lists them as information, never
+as a depth gap. Under required FG a present without a nomination still names the FG scope but no
 sequence; that gap holds the retained copy instead of reading as a source change. Before this, The
 Witcher 3 with FG on (one to four generated frames) dropped depth for 94-172 ms whenever one real
 frame's FG tag capture was refused (`status=unsupported_lifetime`, reported as
