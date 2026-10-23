@@ -232,12 +232,15 @@ namespace sunshine_streamline {
     std::uint32_t max_age_ms = 250);
 
 #ifdef SUNSHINE_STREAMLINE_PROBE_TEST
+  namespace versioning { struct number; }
   namespace testing {
-    enum class abi { unsupported, v1_0_0, v1_1_1, v2_7_30, v2_11_1, v2_12_0 };
     struct targets { void *constants{}, *tag{}, *tag_for_frame{}, *evaluate{}, *new_frame_token{}, *get_feature_function{}; };
     struct counters { std::uint64_t constants{}, tags{}, evaluations{}, dropped{}, invalid{}, vram_warnings{}, depth_untags{}; };
-    // Real inline hooks on fixture functions, without pinning the process executable.
-    bool install(abi version, const targets &functions);
+    // Real inline hooks on fixture functions, without pinning the process
+    // executable, with the ABI family and buffer contract discovery selects
+    // for an interposer whose version resource names exactly this version
+    // (streamline_camera_version.h).
+    bool install(const versioning::number &version, const targets &functions);
     counters counts();
     bool latest(std::uint32_t viewport, std::uint64_t &resource, bool &has_camera,
       bool &explicit_same_frame, bool &same_token_address);

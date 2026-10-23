@@ -3681,17 +3681,16 @@ namespace sunshine_streamline {
     }
     bool install_presentation_hooks() { return install_pcl_hooks(); }
     bool discover_frame_generation_hooks() { discover_fg_options(); return install_fg_hooks(); }
-    bool install(testing::abi version, const testing::targets &functions) {
+    bool install(const versioning::number &version, const testing::targets &functions) {
       if (!middleware_requested() && !sunshine_upscaler_trace::enabled()) return false;
-      const auto native_version = version == testing::abi::v1_1_1 ? sunshine_streamline::abi::legacy :
-        version == testing::abi::v1_0_0 ? sunshine_streamline::abi::legacy_no_state :
-        version == testing::abi::v2_7_30 || version == testing::abi::v2_11_1 || version == testing::abi::v2_12_0 ?
-          sunshine_streamline::abi::v2 : sunshine_streamline::abi::unsupported;
-      const versioning::number number = version == testing::abi::v1_1_1 ? versioning::number{1, 1, 1, 0} :
-        version == testing::abi::v1_0_0 ? versioning::number{1, 0, 0, 0} :
-        version == testing::abi::v2_11_1 ? versioning::number{2, 11, 1, 0} :
-        version == testing::abi::v2_12_0 ? versioning::number{2, 12, 0, 0} : versioning::number{2, 7, 30, 0};
-      const bool success = install_hooks(native_version, {functions.constants, functions.tag, functions.tag_for_frame, functions.evaluate, functions.new_frame_token, functions.get_feature_function}, buffers::for_version(number));
+      // discover()'s selection for a version resource naming exactly this version.
+      versioning::information resource;
+      resource.fixed_valid = true;
+      resource.file_ms = resource.product_ms = MAKELONG(version.minor, version.major);
+      resource.file_ls = resource.product_ls = MAKELONG(version.build, version.patch);
+      const abi native_version = versioning::classify(resource);
+      const auto contract = native_version == abi::unsupported ? buffers::contract{} : buffers::for_version(version);
+      const bool success = install_hooks(native_version, {functions.constants, functions.tag, functions.tag_for_frame, functions.evaluate, functions.new_frame_token, functions.get_feature_function}, contract);
       if (success) observing.store(middleware_requested(), std::memory_order_release);
       sunshine_upscaler_trace::set_streamline_coverage(success);
       return success;

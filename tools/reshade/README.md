@@ -1336,13 +1336,28 @@ add-on falls short. A recorded gap that starts passing fails its test, so the fi
 also removes its row. Never change the oracle to match the add-on: a disagreement is either a gap
 row or a fix.
 
-`ctest -L contract` runs the matrix. Its pure layer, `reshade_contract_matrix_cpu`, is built with
-the Streamline probe tests' sources and defines. It identifies every surveyed Streamline release's
-interposer DLL as the probe does and reads raw buffer types 0 to 80 through the selected contract;
-it judges the capture state table over every legal state cell and a set of deliberately illegal
-rows; and it reads every pair of DXGI allocation and declared formats through
-[`depth_view_format.h`](depth_view_format.h). `reshade_contract_oracle_independence` refuses any
-add-on include or name in the oracle's headers and compiles each on its own.
+`ctest -L contract` runs the matrix. `reshade_contract_matrix_cpu` is built with the Streamline
+probe tests' sources and defines and holds two layers. The pure layer identifies every surveyed
+Streamline release's interposer DLL as the probe does and reads raw buffer types 0 to 80 through
+the selected contract; it judges the capture state table over every legal state cell and a set of
+deliberately illegal rows; and it reads every pair of DXGI allocation and declared formats through
+[`depth_view_format.h`](depth_view_format.h).
+
+The hook layer drives the real adapters without a device. Streamline cases go through the probe's
+own hooks on fixture entry points (`testing::install` takes the release's version number and selects
+the ABI and buffer contract as discovery does for that version resource). They cover the full
+product of tag entry point, lifecycle, command list, copy point and generated Presents; every
+other value alone; a pairwise covering array over all dimensions, seeded with rows from the games
+the add-on was tuned on; and one row per open owner question. A changing extent runs two render
+sizes and must keep one logical source. NGX cases go through the evaluation adapter over every
+combination of its dimensions, DLSS-G's own `DLSSG.*` inputs included. The admission checks the
+layer cannot run without a device (the copy's command list and present generation, and DLSS-G's
+observed-state nomination) are repeated from the capture owner; the device and runtime layers
+replace them. [`test_contract_matrix_generator.h`](test_contract_matrix_generator.h) builds the
+cases: a case id hashes its non-default assignment, so adding a value renames no case. The
+executable takes `--list`, `--case <id>` or `--case <sl|ngx>:<name=value,...>` (one case, described),
+and `--shard <i>/<N>`. `reshade_contract_oracle_independence` refuses any add-on include or name in
+the oracle's headers and the generator, and compiles each on its own.
 
 Buffer-type meanings come from
 [`test_sl_survey_tables.generated.h`](test_sl_survey_tables.generated.h), never from the add-on's

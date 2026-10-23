@@ -3,8 +3,9 @@
 # oracle derives every expected outcome from the Streamline, D3D12 and NGX
 # contracts, never from the add-on, so its headers may include only <d3d12.h>,
 # <cstdint>, each other and generated SDK constant tables, and may name nothing
-# the add-on declares. With COMPILER set, each header must also compile on its
-# own, which proves it uses no declaration it did not include.
+# the add-on declares; the case generator includes only the standard library.
+# With COMPILER set, each header must also compile on its own, which proves it
+# uses no declaration it did not include.
 #
 #   cmake -DSOURCE_DIR=<tools/reshade> [-DWORK_DIR=<dir> -DCOMPILER=<c++>
 #     -DCOMPILER_FRONTEND=<GNU|MSVC>] -P test_game3d_api_contract_independence.cmake
@@ -19,13 +20,16 @@ set(generated_tables "\"${survey_tables}\"")
 set(dimensions "test_game3d_api_contract_dimensions.h")
 set(oracle "test_game3d_api_contract_oracle.h")
 set(known_gaps "test_game3d_api_contract_known_gaps.h")
-set(headers ${survey_tables} ${dimensions} ${oracle} ${known_gaps})
+set(generator "test_contract_matrix_generator.h")
+set(headers ${survey_tables} ${dimensions} ${oracle} ${known_gaps} ${generator})
 # The generated tables hold survey data only (contract_sl_survey_tables.cmake).
 set(allowed_${survey_tables} "<cstdint>")
 set(allowed_${dimensions} "<cstdint>" "<d3d12.h>" ${generated_tables})
 set(allowed_${oracle} "<cstdint>" "<d3d12.h>" ${generated_tables} "\"${dimensions}\"")
 # The oracle never includes the known-gap table: gaps describe the add-on.
 set(allowed_${known_gaps} "<cstdint>" "<d3d12.h>" "\"${dimensions}\"" "\"${oracle}\"")
+# The case generator knows only dimension names and values (standard library).
+set(allowed_${generator} "<algorithm>" "<cstdint>" "<cstdio>" "<cstdlib>" "<cstring>" "<functional>" "<string>" "<vector>")
 
 # Appends one message per violation in text to the list named by out.
 function(contract_violations text allowed out)

@@ -71,6 +71,12 @@ extern "C" __declspec(dllexport) bool ReShadeGetConfigValue(void *, reshade::api
   return true;
 }
 
+// The interposer releases these fixtures stand in for (testing::install).
+namespace sunshine_streamline::testing::abi {
+  constexpr versioning::number unsupported {}, v1_0_0 {1, 0, 0, 0}, v1_1_1 {1, 1, 1, 0}, v2_7_30 {2, 7, 30, 0},
+    v2_11_1 {2, 11, 1, 0}, v2_12_0 {2, 12, 0, 0};
+}  // namespace sunshine_streamline::testing::abi
+
 namespace {
   using namespace sunshine_streamline;
 
@@ -3145,7 +3151,7 @@ namespace {
   void test_versioned_ui_alpha_tags() {
     namespace mask = sunshine_game3d::ui_mask;
     namespace buffers = sunshine_streamline::buffers;
-    struct expectation { testing::abi version; std::uint32_t raw; bool offered; };
+    struct expectation { versioning::number version; std::uint32_t raw; bool offered; };
     const expectation cases[]{
       {testing::abi::v2_11_1, 68, true}, {testing::abi::v2_11_1, 69, false},
       {testing::abi::v2_12_0, 69, true}, {testing::abi::v2_12_0, 68, false},
@@ -3155,7 +3161,7 @@ namespace {
       probe_setting = "0"; source_setting = "1"; initialize(nullptr);
       require(testing::install(c.version, presentation_v2_targets), "versioned UI alpha hook install failed");
       const auto contract = buffers::active();
-      require(contract.known && buffers::ui_alpha_authenticated(contract) == (c.version != testing::abi::v2_7_30),
+      require(contract.known && buffers::ui_alpha_authenticated(contract) == !(c.version == testing::abi::v2_7_30),
         "installed interposer did not publish its buffer contract");
       returned_feature_function = reinterpret_cast<void *>(&fake_fg_options);
       void *function{};

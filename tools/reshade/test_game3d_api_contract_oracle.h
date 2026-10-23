@@ -16,7 +16,9 @@
 // inputs follow the tag contract and UI alpha on 2.15 or later stays
 // manual-only; R5 the viewport bound to frame generation breaks a tie between
 // two active viewports, otherwise mono; R6 an eError* refusal is global
-// across viewports.
+// across viewports. With a2563fa2 the owner also decided N4: DLSS-G's own
+// NGX evaluation supplies frame-generation depth only through a copy on its
+// own command list in a state recorded there.
 //
 // Only <d3d12.h>, <cstdint>, the dimensions header and generated SDK
 // constant tables may be included (reshade_contract_oracle_independence).
@@ -43,7 +45,7 @@ namespace game3d_contract {
     inline constexpr rule S6 {"S6", "Lifecycle 1 with no command list: CAPTURE at the same-frame evaluate, else on the Present queue before that frame's Present (R2)", "SLA:145, 162 (null cmdBuffer legal for eValidUntilPresent); SLT:393-396 (try eValidUntilPresent first); owner ruling R2"};
     inline constexpr rule S7 {"S7", "Lifecycle 1 with 1-3 generated Presents of earlier frames before the evaluate: CAPTURE", "SLT:402: valid 'until the frame is presented', that frame's own Present"};
     inline constexpr rule S8 {"S8", "Lifecycle 1 after its frame's Present, lifecycle 2 after its evaluate returned, or lifecycle 3 or more: REFUSE lifetime / malformed", "SLT:397-405: three lifecycles, each ending at its stated point"};
-    inline constexpr rule S9 {"S9", "Untag (null Resource or null native): HOLD the earlier capture, then mono; the frame-generation source is not withdrawn", "SLA:143, 160: 'set to null to remove the specified tag'"};
+    inline constexpr rule S9 {"S9", "Untag (null Resource or null native), or a later copy point of a tag the game untagged after setting it: HOLD the earlier capture, then mono; the frame-generation source is not withdrawn", "SLA:143, 160: 'set to null to remove the specified tag'"};
     inline constexpr rule S10 {"S10", "Declared state UINT_MAX and no observation: REFUSE state_unprovable", "SLT:335, 357-359: state is MANDATORY; its UINT_MAX default declares nothing"};
     inline constexpr rule S10a {"S10a", "A declared state at the point it describes, with no observation: CAPTURE from the declaration", "SLT:357: 'State is MANDATORY and needs to be correct when tagged resources are actually used'"};
     inline constexpr rule S11 {"S11", "At a tag call before the declared use (lifecycle 1 or 2), an observed state: CAPTURE from the observation", "SLT:357: the declaration describes the state at use (Present or evaluate), not at the tag call"};
@@ -63,7 +65,7 @@ namespace game3d_contract {
     inline constexpr rule S18 {"S18", "33 to 73 tags in one call with depth among them: CAPTURE; other slots are not wiped", "SLA:143-173: numTags is a uint32_t with no stated limit"};
     inline constexpr rule S19 {"S19", "Two SR viewports active together: the viewport bound to frame generation CAPTUREs, any other REFUSE ambiguous_view (R5)", "SLT:614-621 ViewportHandle (any number); owner ruling R5"};
     inline constexpr rule S19b {"S19b", "Viewports rotating, one active at a time: CAPTURE", "SLT:614-621 ViewportHandle"};
-    inline constexpr rule S20 {"S20", "Frame generation Auto and Dynamic are enabled; mode 4+, failed options, Off or On with 0 frames leave no frame-generation scope: a frame-generation tag-call copy REFUSE fg_scope, SR unaffected", "sl_dlss_g.h:34-40 DLSSGMode {eOff, eOn, eAuto, eDynamic}; sl_dlss_g.h:75-79 numFramesToGenerate"};
+    inline constexpr rule S20 {"S20", "Frame generation Auto and Dynamic are enabled; mode 4+, failed options, Off, or On or Auto with 0 frames leave no frame-generation scope (Dynamic chooses its own count): a frame-generation tag-call copy REFUSE fg_scope, SR unaffected", "sl_dlss_g.h:34-40 DLSSGMode {eOff, eOn, eAuto, eDynamic}; sl_dlss_g.h:75-79 numFramesToGenerate (the multiplier); sl_dlss_g.h:116-118 dynamicTargetFrameRate (Dynamic adapts it)"};
     inline constexpr rule S21 {"S21", "Result 39 (eWarnOutOfVRAM): treated as success", "sl_result.h:74: eWarnOutOfVRAM is the only warning"};
     inline constexpr rule S21b {"S21b", "eError* on the tag or evaluate: that copy is discarded, HOLD, then mono (global across viewports, R6)", "sl_result.h:33-73; owner ruling R6"};
     inline constexpr rule S22 {"S22", "COMPUTE evaluate list with a compute-legal state: CAPTURE", "SLA:253: the command buffer must be created on a device where the feature is supported (no list type is required)"};
@@ -97,7 +99,7 @@ namespace game3d_contract {
     inline constexpr rule N1 {"N1", "SR with Depth via SetD3d12Resource, Use.HW.Depth 0 or 1, subrect valid: CAPTURE from the observed state, otherwise the SDK contract's NON_PIXEL_SHADER_RESOURCE", "dlssg-guide.txt:529, 2842 and DLSS Programming Guide 3.4: inputs 'must be in state D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE'"};
     inline constexpr rule N2 {"N2", "Use.HW.Depth other than 0 or 1 (or absent outside SR), subrect with one side only or out of bounds: REFUSE malformed", "nvsdk_ngx_defs.h:803-812 DLSS.Use.HW.Depth and the subrect keys"};
     inline constexpr rule N3 {"N3", "Evaluate failure: HOLD, then mono", "nvsdk_ngx_defs.h:99-177 NVSDK_NGX_Result_Fail (0xBAD00000)"};
-    inline constexpr rule N4 {"N4", "Feature 11 (frame generation) directly through NGX: REFUSE (pinned decision)", "pinned decision; direct NGX DLSS-G inputs wait for the concurrent DLSS-G NGX work"};
+    inline constexpr rule N4 {"N4", "DLSS-G's own evaluation (feature 11): DLSSG.Depth, set as a D3D12 resource or a void pointer the capture owner validates, CAPTUREs as the frame-generation depth only from a state recorded on the evaluation's own command list; no recorded state, or no DLSSG.Depth: REFUSE", "nvsdk_ngx_helpers_dlssg_d3d.h:73-78 (DLSSG.Depth, HUDLess, UI, UIAlpha and Backbuffer); dlssg-guide.txt:2321-2324 (the evaluation's command list); owner decision with a2563fa2 (docs/reshade-sbs.md, DLSS-G's own NGX evaluation): only a recorded state, not dlssg-guide.txt:529-530's NON_PIXEL_SHADER_RESOURCE, is a copy basis"};
     inline constexpr rule N5 {"N5", "Depth set other than through SetD3d12Resource: REFUSE malformed", "nvsdk_ngx_params.h:55-71; nvsdk_ngx_helpers_d3d.h:305 writes Depth with SetD3d12Resource"};
     inline constexpr rule N6 {"N6", "DENY_SHADER_RESOURCE allocation with no observation: REFUSE", "D3D12_RESOURCE_FLAGS: DENY_SHADER_RESOURCE 'disables the resource from transitioning into' NON_PIXEL_SHADER_RESOURCE, so the SDK contract cannot hold"};
     inline constexpr rule N7 {"N7", "COMPUTE list: CAPTURE (NON_PIXEL_SHADER_RESOURCE is legal on compute)", "dlssg-guide.txt:2321-2324: 'Executed on a non-copy command queue'"};
@@ -457,8 +459,8 @@ namespace game3d_contract {
 
   namespace detail {
     constexpr bool frame_generation_scope(const sl_case &value) {
-      return (value.fg == fg_mode::on || value.fg == fg_mode::automatic || value.fg == fg_mode::dynamic) && value.frames_generated &&
-             value.options_result != sl_result::error;
+      const bool counted = value.fg == fg_mode::on || value.fg == fg_mode::automatic;
+      return ((counted && value.frames_generated) || value.fg == fg_mode::dynamic) && value.options_result != sl_result::error;
     }
 
     constexpr bool local(tag_entry entry) {
@@ -509,6 +511,10 @@ namespace game3d_contract {
       return refuse(rules::S24, refusal::unknown_abi);
     }
     if (value.resource == resource_form::null_resource || value.resource == resource_form::null_native) {
+      return plain(rules::S9, outcome_kind::hold);
+    }
+    // An untag after the tag call removes the tag before any later copy point.
+    if (value.untag == untag_pattern::null_after_each && value.at != copy_point::tag_call && !local(value.entry)) {
       return plain(rules::S9, outcome_kind::hold);
     }
     if (value.tag_header == struct_form::unknown_chained || value.resource_header == struct_form::unknown_chained || (value.tags_in_call > 1 && value.tag_header == struct_form::above_known)) {
@@ -576,9 +582,10 @@ namespace game3d_contract {
           point = &rules::S4;
           break;
         }
-        point = value.commands == tag_commands::none      ? &rules::S6 :
-                value.generated_presents && until_present ? &rules::S7 :
-                                                            &rules::S5;
+        // A local input is tagged at its own evaluate: no Present can come between.
+        point = value.commands == tag_commands::none                             ? &rules::S6 :
+                value.generated_presents && until_present && !local(value.entry) ? &rules::S7 :
+                                                                                   &rules::S5;
         break;
       default:
         return refuse(value.life == lifecycle::only_valid_now ? rules::S3 : rules::S8, refusal::lifetime);
@@ -613,23 +620,32 @@ namespace game3d_contract {
     return out;
   }
 
-  // An NGX super-resolution or ray-reconstruction evaluation (N-rules).
+  // An NGX evaluation (N-rules): super resolution, ray reconstruction or
+  // another feature through Depth, or DLSS-G through its own DLSSG.* inputs
+  // (the subrect dimension is then DLSSG.DepthSubrect*).
   constexpr outcome expect(const ngx_case &value) {
     using namespace detail;
-    if (value.feature == ngx_feature::frame_generation) {
-      return refuse(rules::N4, refusal::fg_scope);
-    }
-    if (value.depth_set != ngx_depth_set::d3d12_resource) {
-      return refuse(rules::N5, refusal::malformed);
+    const bool frame_generation = value.feature == ngx_feature::frame_generation;
+    if (frame_generation ? value.depth_set == ngx_depth_set::missing || value.depth_set == ngx_depth_set::null : value.depth_set != ngx_depth_set::d3d12_resource) {
+      return refuse(frame_generation ? rules::N4 : rules::N5, refusal::malformed);
     }
     // SR defaults to device depth; other features must state the encoding.
-    const bool encoding = value.hw_depth == ngx_hw_depth::linear || value.hw_depth == ngx_hw_depth::device ||
+    // DLSSG.Depth is device depth (DLSSG.DepthInverted names its direction).
+    const bool encoding = frame_generation || value.hw_depth == ngx_hw_depth::linear || value.hw_depth == ngx_hw_depth::device ||
                           (value.hw_depth == ngx_hw_depth::absent && value.feature == ngx_feature::super_resolution);
     if (!encoding || value.subrect == ngx_subrect::one_side || value.subrect == ngx_subrect::outside) {
       return refuse(rules::N2, refusal::malformed);
     }
     if (value.result == ngx_result::failure) {
       return plain(rules::N3, outcome_kind::hold);
+    }
+    if (frame_generation) {
+      // No contract state: only the evaluation's own recording proves one.
+      auto out = expect(state_case {value.depth, consumer::depth, claim::none, 0, claim_scope::at_use, value.list});
+      if (!either(out) && (out.kind == outcome_kind::capture || out.by == &rules::D0)) {
+        out.by = &rules::N4;
+      }
+      return out;
     }
     auto out = expect(state_case {value.depth, consumer::depth, claim::ngx_contract, 0, claim_scope::at_use, value.list});
     if (out.kind != outcome_kind::capture || either(out)) {
@@ -1039,6 +1055,9 @@ namespace game3d_contract {
     static_assert(refuses(expect(tag(present, copy_point::after_present)), rules::S8, refusal::lifetime));
     static_assert(refuses(expect(tag(lifecycle::undeclared, evaluate)), rules::S8, refusal::malformed));
     static_assert(decides(expect(with(tag(present, evaluate), &sl_case::resource, resource_form::null_native)), rules::S9, outcome_kind::hold));
+    static_assert(decides(expect(with(tag(present, evaluate), &sl_case::untag, untag_pattern::null_after_each)), rules::S9, outcome_kind::hold));
+    static_assert(captures(expect(with(tag(present, copy_point::tag_call, tag_commands::none), &sl_case::untag, untag_pattern::null_after_each)), rules::S6, nps));
+    static_assert(captures(expect(with(tag(present, evaluate, tag_commands::game_list, tag_entry::local_array), &sl_case::generated_presents, 3u)), rules::S5, nps));
     static_assert(refuses(expect(with(tag(present, evaluate), &sl_case::resource, resource_form::type_buffer)), rules::S12, refusal::not_depth));
     static_assert(captures(expect(with(tag(present, evaluate), &sl_case::resource, resource_form::type_unknown)), rules::S5, nps));
     static_assert(captures(expect(with(tag(present, evaluate), &sl_case::constants, struct_form::above_known)), rules::S13, nps));
@@ -1058,6 +1077,8 @@ namespace game3d_contract {
     static_assert(refuses(expect(with(tag(present, copy_point::tag_call), &sl_case::fg, fg_mode::undeclared)), rules::S20, refusal::fg_scope));
     static_assert(refuses(expect(with(tag(present, copy_point::tag_call), &sl_case::frames_generated, 0u)), rules::S20, refusal::fg_scope));
     static_assert(captures(expect(with(tag(present, copy_point::tag_call), &sl_case::fg, fg_mode::dynamic)), rules::S11b, nps));
+    static_assert(captures(expect(with(with(tag(present, copy_point::tag_call), &sl_case::fg, fg_mode::dynamic), &sl_case::frames_generated, 0u)), rules::S11b, nps));
+    static_assert(refuses(expect(with(with(tag(present, copy_point::tag_call), &sl_case::fg, fg_mode::automatic), &sl_case::frames_generated, 0u)), rules::S20, refusal::fg_scope));
     static_assert(captures(expect(with(tag(present, evaluate), &sl_case::evaluate_result, sl_result::warn_out_of_vram)), rules::S21, nps));
     static_assert(decides(expect(with(tag(present, evaluate), &sl_case::evaluate_result, sl_result::error)), rules::S21b, outcome_kind::hold));
     static_assert(captures(expect(with(tag(present, evaluate), &sl_case::list, list_type::compute)), rules::S22, nps));
@@ -1069,7 +1090,10 @@ namespace game3d_contract {
     static_assert(refuses(expect(with(ngx_case {}, &ngx_case::hw_depth, ngx_hw_depth::other)), rules::N2, refusal::malformed));
     static_assert(refuses(expect(with(ngx_case {}, &ngx_case::feature, ngx_feature::ray_reconstruction)), rules::N2, refusal::malformed));
     static_assert(decides(expect(with(ngx_case {}, &ngx_case::result, ngx_result::failure)), rules::N3, outcome_kind::hold));
-    static_assert(refuses(expect(with(ngx_case {}, &ngx_case::feature, ngx_feature::frame_generation)), rules::N4, refusal::fg_scope));
+    static_assert(refuses(expect(with(ngx_case {}, &ngx_case::feature, ngx_feature::frame_generation)), rules::N4, refusal::state_unprovable));
+    static_assert(captures(expect(with(with(ngx_case {}, &ngx_case::feature, ngx_feature::frame_generation), &ngx_case::depth, recorded(ds, evidence::transition, depth_read))), rules::N4, depth_read));
+    static_assert(captures(expect(with(with(with(ngx_case {}, &ngx_case::feature, ngx_feature::frame_generation), &ngx_case::depth_set, ngx_depth_set::void_pointer), &ngx_case::depth, recorded(ds, evidence::transition, nps))), rules::N4, nps));
+    static_assert(refuses(expect(with(with(ngx_case {}, &ngx_case::feature, ngx_feature::frame_generation), &ngx_case::depth_set, ngx_depth_set::missing)), rules::N4, refusal::malformed));
     static_assert(refuses(expect(with(ngx_case {}, &ngx_case::depth_set, ngx_depth_set::void_pointer)), rules::N5, refusal::malformed));
     static_assert(captures(expect(with(ngx_case {}, &ngx_case::list, list_type::compute)), rules::N7, nps));
     static_assert(captures(expect(with(ngx_case {}, &ngx_case::lifetime, ngx_lifetime::release_recreate)), rules::N9, nps));
