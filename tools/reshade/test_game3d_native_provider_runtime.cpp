@@ -1635,7 +1635,8 @@ namespace {
       // withdraws the FG source, so no presentation copies fresh depth.
       render_tracked_depth = [&] {
         real_frame();
-        abi_v2::resource malformed{}; malformed.base = {nullptr, resource_guid, 7};
+        // A typed Resource of version 0 (a later version is read by its v1 fields).
+        abi_v2::resource malformed{}; malformed.base = {nullptr, resource_guid, 0};
         malformed.type = 8; malformed.native = selected->resource.p; malformed.state = unsigned(selected->state);
         malformed.width = selected->width; malformed.height = selected->height;
         const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &malformed, 0, 0, active_area};
