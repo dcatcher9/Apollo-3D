@@ -2472,15 +2472,32 @@ def enum_names(text, enum):
 
 class SchemaMirrors(unittest.TestCase):
     """The report's copies of the add-on's names, checked against the C++ that owns them: a name added, renamed or
-    removed there fails here until the report classifies it."""
+    removed there fails here until it is classified (in the report, or for a failure in the lists below)."""
+
+    # The report fails every capture status outside CAPTURE_OK and warns on every export pause outside
+    # ROUTINE_INACTIVE, a new name included. These lists name today's failures so that a status or pause reason
+    # added in the C++ fails this test until someone decides its class.
+    CAPTURE_FAIL = frozenset((
+        'malformed', 'unsupported_state', 'missing_state', 'conflicting_state', 'incomplete_state',
+        'unsupported_lifetime', 'unsupported_resource', 'unsupported_queue', 'exhausted', 'failed'))
+    FAULT_PAUSES = frozenset((
+        'consumer_protocol', 'consumer_undeclared', 'deferred_command_list', 'device_removed', 'fence_signal_failed',
+        'generation_limit', 'native_depth_unprepared', 'output_unavailable', 'overlay_capture_failed',
+        'overlay_prepare_failed', 'present_not_finished', 'renderer_unavailable', 'ring_creation_failed',
+        'source_unavailable', 'unsupported_api'))
 
     def test_export_pauses(self):
         text = source('exporter.cpp')
         routine = re.search(r'routine_export_pauses\{([^}]*)\}', text).group(1)
         self.assertEqual(report.ROUTINE_INACTIVE, frozenset(re.findall(r'"(\w+)"', routine)))
-        # Every routine reason is one the exporter pauses with.
-        paused = set(re.findall(r'"(\w+)"', ' '.join(re.findall(r'\bdeactivate\([^;]*\);', text))))
-        self.assertLessEqual(report.ROUTINE_INACTIVE, paused)
+        # Every reason the exporter pauses with is routine or a listed fault, never both, and every call names its
+        # reason as a literal.
+        calls = re.findall(r'\bdeactivate\([^;]*\);', text)
+        self.assertTrue(calls)
+        self.assertEqual([call for call in calls if '"' not in call], [])
+        paused = set(re.findall(r'"(\w+)"', ' '.join(calls)))
+        self.assertEqual(sorted(report.ROUTINE_INACTIVE | self.FAULT_PAUSES), sorted(paused))
+        self.assertFalse(report.ROUTINE_INACTIVE & self.FAULT_PAUSES)
         # The pause line's format, filled in, is the line the report reads.
         line_format = re.search(r'"(Sunshine SBS: export inactive [^"]*)"', text).group(1)
         found = report.INACTIVE.search(line_format.replace('%s', 'ring_replaced', 1).replace('%s', 'routine', 1))
@@ -2488,8 +2505,9 @@ class SchemaMirrors(unittest.TestCase):
 
     def test_capture_statuses(self):
         names = enum_names(source('streamline_depth_capture.h'), 'status')
-        self.assertLessEqual(report.CAPTURE_OK, set(names))
-        self.assertLessEqual({'unsupported_queue', 'malformed', 'exhausted', 'failed'}, set(names) - report.CAPTURE_OK)
+        self.assertEqual(sorted(report.CAPTURE_OK | self.CAPTURE_FAIL), sorted(names))
+        self.assertFalse(report.CAPTURE_OK & self.CAPTURE_FAIL)
+        self.assertEqual(len(set(names)), len(names))
 
     def test_observation_loss_causes(self):
         text = source('observation_loss_journal.h')

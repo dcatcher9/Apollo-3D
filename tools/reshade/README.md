@@ -585,9 +585,12 @@ Since 10-23 these checks judge each event by its origin rather than warning at a
 - `Host size`: game eyes scaled to the stream's (the same aspect) or fitted into it (letterboxed or
   pillarboxed) are INFO; eyes the host refuses, which stay 2D, fail.
 
-The test's `SchemaMirrors` reads these names from the C++ that owns them (`routine_export_pauses`,
-`depth_capture::status`, `loss_diagnostics::reason` and `format_ui_counters`), so a reason, status,
-cause or counter added there fails the test until the report classifies it. A `Sunshine UI
+The test's `SchemaMirrors` reads these names from the C++ that owns them (`routine_export_pauses`
+and every `deactivate` reason, `depth_capture::status`, `loss_diagnostics::reason` and
+`format_ui_counters`), so a reason, status, cause or counter added there fails the test until it is
+classified: the report's routine pauses and OK statuses beside the test's own lists of fault pauses
+and failing statuses (the report itself still fails an unknown status and warns on an unknown pause
+by default). A `Sunshine UI
 counters` reason for frames without detection that the report does not know still counts in the
 accounting and is listed after the known ones.
 
