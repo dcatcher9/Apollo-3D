@@ -596,9 +596,9 @@ export stereo until it covers the display anyway. Detection is a heuristic, so a
 fullscreen Direct3D application (a media center or slideshow, for example) can be detected; it is
 only offered, never written. Stereo export still requires the fullscreen ownership described below.
 
-Sunshine never writes into a game folder without consent. A detected executable whose folder has
-no ReShade is shown as **Ready to set up** on the host's **Game 3D setup** overview card, with its
-name and full path, and nothing is written. **Install for this game** confirms that exact
+Sunshine never writes into a game folder without consent. A detected executable without the
+Sunshine add-on, whether or not its folder already has ReShade, is shown as **Ready to set up** on
+the host's **Game 3D setup** overview card, with its name and full path, and nothing is written. **Install for this game** confirms that exact
 executable: the Web UI sends its path and file identity (volume, file ID, size and last write
 time) to the authenticated `POST /api/game3d/setup/decision`, which accepts only the executable
 the host currently offers. **Never for this game** declines it. Choices persist across host
@@ -606,8 +606,8 @@ restarts in `game3d_setup.json` in the host's configuration directory. A decline
 offered or written again, also after a game update, until **Set up this game** is chosen. An
 install confirmation applies only while the executable file is unchanged; a game update makes
 setup ask again. A failed confirmed installation retries on the game's next launch, and a
-completed one consumes the confirmation, so a later removal of ReShade is offered again rather
-than reinstalled. The desktop tray notification only opens the overview card; clicking it never
+completed one consumes the confirmation, so a later removal of ReShade or the add-on is offered
+again rather than reinstalled. The desktop tray notification only opens the overview card; clicking it never
 installs.
 
 Confirmed setup downloads the pinned official ReShade 6.8.0 build with full add-on support,
@@ -623,9 +623,15 @@ bare ReShade runtime is left and the folder stays fresh for the retry. A leftove
 a runtime or `ReShade.ini` can be retained during setup; the add-on installer backs it up and
 applies its ordinary settings migration.
 
-A folder that already contains ReShade receives the Sunshine add-on automatically, without
-creating any proxy DLL, unless its executable was declined. Existing ReShade installations retain
-their configuration and add-on search path. An `AddonPath` or `PresetPath` that uses environment
+Confirmed setup of a folder that already contains ReShade installs only the Sunshine add-on and
+never creates a proxy DLL. The add-on installer copies `SunshineSBS.addon64` and its license into
+the folder that `[ADDON] AddonPath` names, which can lie outside the game folder. In `ReShade.ini`
+it disables ReShade's own Generic Depth add-on and the retired Sunshine Depth add-on, turns on
+scene-depth auto-selection and Game 3D unless already set, and records the preset path; it creates
+or migrates that preset and keeps the files it changes under `Sunshine3D-backups` in the game
+folder. An add-on that is already installed, by a confirmed or a manual setup, is kept matched to
+this host without a new confirmation, as described below; a declined executable is not updated. An
+`AddonPath` or `PresetPath` that uses environment
 variables (`%LOCALAPPDATA%` and similar) needs manual setup, because Sunshine's worker would
 expand it in its own account rather than the game user's. Runtime presence does not prove that
 full add-on support is active; the ReShade panel remains the authority when an installed game

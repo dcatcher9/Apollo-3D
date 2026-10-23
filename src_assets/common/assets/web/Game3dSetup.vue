@@ -24,8 +24,11 @@
           recognize as a single-player game. It takes effect the next time you launch the game.
         </p>
         <p v-else class="game3d-hint">
-          Setting up installs and updates the Sunshine 3D add-on beside this game's existing ReShade. It takes effect the
-          next time you launch the game.
+          ReShade is already installed here. Installing the missing Sunshine 3D add-on copies it and its license into the
+          add-on folder that this game's <code>ReShade.ini</code> names, disables ReShade's Generic Depth add-on and enables
+          Game 3D there, and keeps the files it changes in <code>Sunshine3D-backups</code> in the setup folder. Once
+          installed, the add-on is updated automatically after the game exits. It takes effect the next time you launch the
+          game.
         </p>
         <div class="game3d-actions">
           <button class="btn btn-apollo-primary" type="button" :disabled="Boolean(busy)" @click="decide('install')">
@@ -78,10 +81,10 @@ export default {
   },
   computed: {
     needsReShade() {
-      return this.setup?.detected && (this.setup.state === 'ready_to_install' || (this.setup.state === 'declined' && !this.setup.reshade_present))
+      return this.setup?.detected && ['ready_to_install', 'declined'].includes(this.setup.state) && !this.setup.reshade_present
     },
     needsAddon() {
-      return this.setup?.detected && this.setup.state === 'missing_addon'
+      return this.setup?.detected && (this.setup.state === 'missing_addon' || (this.setup.state === 'ready_to_install' && this.setup.reshade_present))
     },
     canDecide() {
       return this.setup?.detected && ['ready_to_install', 'declined'].includes(this.setup.state) && Boolean(this.setup.identity)
@@ -115,16 +118,16 @@ export default {
         return { label: this.setup.detected ? 'Setup unavailable' : 'Unavailable', tone: this.setup.detected ? 'warning' : 'neutral', description: this.setup.detail || 'Game detection or setup is unavailable. Refresh to try again.' }
       }
       if (!this.setup.active && !this.setup.detected) {
-        return { label: 'On demand', tone: 'neutral', description: 'Choose Game 3D in Moonlight 3D, then launch your game fullscreen. Sunshine 3D offers to install ReShade and its Game 3D add-on for that game; nothing is written into a game folder until you confirm it here. Folders that already contain ReShade receive the matching add-on automatically.' }
+        return { label: 'On demand', tone: 'neutral', description: 'Choose Game 3D in Moonlight 3D, then launch your game fullscreen. Sunshine 3D offers to install ReShade and its Game 3D add-on for that game, or only the add-on where ReShade is already installed; nothing is written into a game folder until you confirm it here. An installed add-on is kept matched to this host automatically.' }
       }
       if (!this.setup.detected) {
         return { label: 'Waiting for a game', tone: 'neutral', description: this.setup.detail || 'Game 3D is active. Launch your game fullscreen on the streamed display to check its setup.' }
       }
       const states = {
-        ready_to_install: { label: 'Ready to set up', tone: 'warning', description: 'Sunshine 3D can install ReShade with full add-on support and its Game 3D add-on for this executable. Nothing is written until you confirm.' },
+        ready_to_install: { label: 'Ready to set up', tone: 'warning', description: 'Sunshine 3D can set up Game 3D for this executable. Nothing is written until you confirm.' },
         declined: { label: 'Not set up', tone: 'neutral', description: 'You chose not to set up this game. Sunshine 3D does not change its folder.' },
         anti_cheat: { label: 'Not offered', tone: 'neutral', description: 'Anti-cheat detected, so Sunshine 3D does not install ReShade for this game.' },
-        missing_addon: { label: 'Preparing add-on', tone: 'warning', description: 'ReShade is already installed; Sunshine 3D will install its bundled add-on for this game when possible.' },
+        missing_addon: { label: 'Add-on missing', tone: 'warning', description: 'ReShade is installed without the Sunshine 3D add-on.' },
         installing: { label: 'Installing', tone: 'active', description: 'Installing the confirmed components beside this game.' },
         installed: { label: 'Installed for next launch', tone: 'success', description: 'ReShade and the Sunshine 3D add-on are installed. They will activate the next time you launch the game.' },
         blocked: { label: 'Setup needs attention', tone: 'warning', description: 'Setup could not proceed for this game. Review the detected installation before trying again.' },

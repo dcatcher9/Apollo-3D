@@ -177,30 +177,31 @@ namespace platf::game3d {
         status.detail = "You chose not to set up this game, so Sunshine 3D does not change its folder. Choose Set up this game to change that.";
         return outcome;
       }
-      if (status.state == installation_state_e::missing_reshade) {
+      // A first installation writes new files and settings into the game's folders, also where
+      // the user already installed ReShade: the add-on installer disables ReShade's Generic
+      // Depth add-on and enables Game 3D in ReShade.ini. It needs the user's confirmation.
+      if (status.state == installation_state_e::missing_reshade || status.state == installation_state_e::missing_addon) {
+        const bool fresh = status.state == installation_state_e::missing_reshade;
         if (decision != setup_decision_e::install) {
           outcome.state = "ready_to_install";
-          status.detail = "Sunshine 3D can install ReShade with full add-on support and its Game 3D add-on beside this executable. Nothing is written until you confirm this game.";
+          status.detail = fresh ? "Sunshine 3D can install ReShade with full add-on support and its Game 3D add-on beside this executable. Nothing is written until you confirm this game." :
+                                  "ReShade is installed for this executable. Sunshine 3D can add its Game 3D add-on, which also disables ReShade's Generic Depth add-on and enables Game 3D in ReShade.ini. Nothing is written until you confirm this game.";
           return outcome;
         }
-        progress("Installing ReShade with full add-on support and the Sunshine 3D add-on beside the game executable. Keep playing; setup takes effect on the next launch.");
-        status = install_reshade_and_addon_for_next_launch(status.executable, bundle_directory);
+        progress(fresh ? "Installing ReShade with full add-on support and the Sunshine 3D add-on beside the game executable. Keep playing; setup takes effect on the next launch." :
+                         "Installing the Sunshine 3D add-on for the next launch. Your current game can stay open.");
+        status = fresh ? install_reshade_and_addon_for_next_launch(status.executable, bundle_directory) : install_addon_for_next_launch(status.executable, bundle_directory);
         // The confirmation covered this installation. A failure keeps it, so the next launch
-        // retries; success consumes it, so a later removal of ReShade is offered again.
+        // retries; success consumes it, so a later removal is offered again.
         if (status.state == installation_state_e::installed && !decisions.record(status.executable, {}, setup_decision_e::none)) {
           BOOST_LOG(warning) << "Game 3D setup: could not clear the completed install confirmation for \"" << utf8(status.executable) << '"';
         }
         return outcome;
       }
-      // ReShade already exists in this folder: keep the Sunshine add-on present and matched. A
-      // confirmation for the runtime is no longer needed once a runtime is present.
+      // The Sunshine add-on is already installed, by a confirmed or a manual setup: keep it
+      // matched to this host. A confirmation is no longer needed.
       if (decision == setup_decision_e::install && !decisions.record(status.executable, {}, setup_decision_e::none)) {
         BOOST_LOG(warning) << "Game 3D setup: could not clear a no longer needed install confirmation for \"" << utf8(status.executable) << '"';
-      }
-      if (status.state == installation_state_e::missing_addon) {
-        progress("Installing the Sunshine 3D add-on for the next launch. Your current game can stay open.");
-        status = install_addon_for_next_launch(status.executable, bundle_directory);
-        return outcome;
       }
       status = update_existing_addon(status.executable, bundle_directory);
       return outcome;

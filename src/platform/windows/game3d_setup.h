@@ -77,9 +77,10 @@ namespace platf::game3d {
     };
 
     // One confirmed detection. Writes only what the folder's state and the user's choice
-    // permit: nothing for anti-cheat, an unconfirmed fresh folder (ready_to_install) or a
-    // declined executable; ReShade plus the add-on after an install confirmation; and the
-    // add-on install or update where ReShade already exists. Never creates a proxy otherwise.
+    // permit: nothing for anti-cheat, an unconfirmed executable without the Sunshine add-on
+    // (ready_to_install) or a declined executable; after an install confirmation, ReShade plus
+    // the add-on in a fresh folder, or only the add-on where ReShade already exists; and an
+    // update of an add-on that is already installed. Never creates a proxy otherwise.
     [[nodiscard]] setup_outcome apply_setup(
       const std::filesystem::path &executable,
       setup_decisions &decisions,

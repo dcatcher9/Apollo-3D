@@ -171,12 +171,35 @@ namespace {
     EXPECT_EQ(read(game.parent_path() / "SunshineSBS.addon64"), "matching bundled addon");
   }
 
-  TEST_F(Game3DSetup, ExistingReShadeFolderReceivesTheAddonAutomatically) {
+  TEST_F(Game3DSetup, ExistingReShadeFolderReceivesTheAddonOnlyAfterConfirmation) {
+    game3d::detail::setup_decisions decisions {choices};
+    // The user's own ReShade, for example for depth effects that use Generic Depth.
+    fs::copy_file(SUNSHINE_TEST_RESHADE_DLL, game.parent_path() / "dxgi.dll");
+    write(game.parent_path() / "ReShade.ini", "[GENERAL]\n");
+    const auto before = game_files();
+    auto outcome = apply(decisions);
+    EXPECT_EQ(outcome.state, "ready_to_install");
+    EXPECT_EQ(outcome.installation.state, state::missing_addon);
+    EXPECT_TRUE(outcome.installation.reshade_present);
+    EXPECT_EQ(outcome.identity, game3d::file_identity(game));
+    EXPECT_TRUE(progress.empty());
+    EXPECT_EQ(game_files(), before);
+    EXPECT_FALSE(fs::exists(choices));
+    ASSERT_TRUE(decisions.record(game, outcome.identity, decision::install));
+    outcome = apply(decisions);
+    EXPECT_EQ(outcome.installation.state, state::installed) << outcome.installation.detail;
+    EXPECT_EQ(progress.size(), 1U);
+    EXPECT_EQ(read(game.parent_path() / "SunshineSBS.addon64"), "matching bundled addon");
+    EXPECT_EQ(decisions.lookup(game, game3d::file_identity(game)), decision::none);
+  }
+
+  TEST_F(Game3DSetup, InstalledAddonUpdatesWithoutAConfirmation) {
     game3d::detail::setup_decisions decisions {choices};
     fs::copy_file(SUNSHINE_TEST_RESHADE_DLL, game.parent_path() / "dxgi.dll");
     write(game.parent_path() / "ReShade.ini", "[GENERAL]\n");
+    write(game.parent_path() / "SunshineSBS.addon64", "old addon");
     const auto outcome = apply(decisions);
-    EXPECT_EQ(outcome.installation.state, state::installed) << outcome.installation.detail;
+    EXPECT_EQ(outcome.installation.state, state::updated) << outcome.installation.detail;
     EXPECT_EQ(read(game.parent_path() / "SunshineSBS.addon64"), "matching bundled addon");
     EXPECT_FALSE(fs::exists(choices));
   }
