@@ -118,6 +118,13 @@ GATE = re.compile(r'Sunshine UI capture gate: .*?hudless_presents=\{batch=(\d+) 
 # tag, logged as their own group before status_revision.
 DECLARED_ONE_WAY = re.compile(r'sampled_declared_one_way=\{strong=(\d+)/(\d+) contradicted=(\d+)/(\d+)\}')
 LOSS = re.compile(r'sampled_only=\{revision=(\d+) found=1 cause=(\w+)(?: site=(\w+))?(?:[^}]*? tick_ms=(\d+))?')
+# The SDK result an observation loss carries, when the call returned one.
+LOSS_SDK = re.compile(r'sampled_only=\{[^}]*?\bsdk_known=1 sdk_result=(-?\d+)')
+# sl::Result::eWarnOutOfVRAM, Streamline's only warning: the process is over its video-memory budget and the call
+# still ran. Since 10-22 the add-on accepts it (streamline_camera_data.h) and counts it on the camera availability
+# line; an older add-on lost the observation on every such call (BF6 10-22: 70 s of mono).
+SL_WARN_OUT_OF_VRAM = 39
+SL_VRAM_WARNINGS = re.compile(r'Sunshine Streamline camera availability: .*\bvram_warnings=(\d+)')
 # The evidence line's own tick: a loss sampled with a later depth loss happened tick_ms earlier than its line.
 SAMPLED_TICK = re.compile(r'\bsampled_tick_ms=(\d+)')
 READINESS = re.compile(r'Sunshine depth readiness: (lost|recovered) reason=(\w+)')
@@ -718,6 +725,8 @@ class Session:
     gate_counted: int = 0
     # Per loss revision: when it happened (its own tick, else the line logging it), its cause and site.
     losses: dict[int, tuple[float, str, str | None]] = field(default_factory=dict)
+    loss_sdk: dict[int, int] = field(default_factory=dict)  # Per loss revision: the SDK result it carried.
+    sl_vram_warnings: int = 0  # Since 10-22: Streamline calls answered eWarnOutOfVRAM (cumulative).
     readiness: Counter = field(default_factory=Counter)  # Losses while the export streamed.
     depth_episodes: list[DepthEpisode] = field(default_factory=list)
     output_counts: list[OutputCount] = field(default_factory=list)  # Every 'Sunshine SBS output' line.
@@ -840,6 +849,8 @@ def parse(lines) -> Session:
                 s.raw_scales.append(float(found.group(2)))
         if found := CAMERA.search(text):
             s.camera_valid |= found.group(1) == '1'
+        if found := SL_VRAM_WARNINGS.search(text):
+            s.sl_vram_warnings = max(s.sl_vram_warnings, int(found.group(1)))
         if found := UI.search(text):
             scene = None
             if evidence := SCENE.search(text):
@@ -883,6 +894,8 @@ def parse(lines) -> Session:
                 # Logged with a later depth loss (RE Requiem 10-22: a records_busy 7.8 s before the FG switch's loss).
                 at = t - (int(sampled.group(1)) - int(tick)) / 1000
             s.losses.setdefault(int(revision), (at, cause, site))
+            if sdk := LOSS_SDK.search(text):
+                s.loss_sdk.setdefault(int(revision), int(sdk.group(1)))
         if found := READINESS.search(text):
             named = PROVIDER.search(text)
             if named and named.group(1) != 'unknown':
@@ -1196,7 +1209,7 @@ def evaluate(s: Session) -> list[Check]:
     bad = {c: n for c, n in causes.items() if c != 'lifecycle'}
     add(Check('WARN' if tokens > minutes / 2 or any(c != 'tokens_busy' for c in bad) else 'PASS',
               'Observation losses', ', '.join(f'{c} {n}' for c, n in sorted(causes.items())) or 'none',
-              [f'{clock(t)} {c}' + (f' at {site}' if site else '')
+              [f'{clock(t)} {c}' + (f' at {site}' if site else '') + sdk_note(s.loss_sdk.get(r))
                for r, (t, c, site) in sorted(s.losses.items()) if c != 'lifecycle'][:6]))
 
     # A capture status during the settle time after an export start, FG switch or reset is the source settling.
@@ -1676,10 +1689,26 @@ def pressured(usage: int, budget: int) -> bool:
     return usage + VRAM_MARGIN_MIB >= budget
 
 
+def sdk_note(result: int | None) -> str:
+    """An observation loss's non-zero SDK result, named when it is Streamline's out-of-VRAM warning."""
+    if not result:
+        return ''
+    return f' sdk_result={result}' + (' (eWarnOutOfVRAM)' if result == SL_WARN_OUT_OF_VRAM else '')
+
+
 def vram_checks(s: Session, add) -> None:
     """Since 10-22: the game's local video memory against its budget. A depth loss, hitch or Present gap whose own
     sample (the latest, taken on that Present before its depth preparation) shows pressure warns; otherwise the
-    windows' extremes are INFO. Older logs have no samples and no check."""
+    windows' extremes are INFO. Older logs have no samples and no check. Streamline's out-of-VRAM warnings are INFO
+    when accepted (since 10-22) and WARN when an older add-on lost depth on them."""
+    warned = sum(1 for result in s.loss_sdk.values() if result == SL_WARN_OUT_OF_VRAM)
+    if warned:
+        add(Check('WARN', 'Streamline VRAM warnings', f'{warned} sampled observation loss(es) came from '
+                  'eWarnOutOfVRAM, a warning this add-on treated as an SDK failure: every such call lost its depth '
+                  '(fixed 10-22)'))
+    if s.sl_vram_warnings:
+        add(Check('INFO', 'Streamline VRAM warnings', f'Streamline answered {s.sl_vram_warnings} call(s) with '
+                  'eWarnOutOfVRAM (the game over its video-memory budget); each was accepted and kept its depth'))
     if not s.vram_windows and not s.vram_points:
         return
     events = [p for p in s.vram_points if p[3] in ('depth loss', 'hitch', 'present gap') and pressured(p[1], p[2])]

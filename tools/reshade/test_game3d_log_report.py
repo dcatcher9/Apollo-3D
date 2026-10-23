@@ -919,6 +919,36 @@ class ReadinessReport(unittest.TestCase):
         self.assertEqual(report.parse(BASE + [old]).losses[5],
                          (report.seconds('10', '00', '17', '000'), 'tokens_busy', None))
 
+    def test_streamline_out_of_vram_warnings_are_named(self):
+        # Battlefield 6 2026-10-22 (bf6_sp_1022c): over its video-memory budget, Streamline answered every DLSS
+        # evaluation with eWarnOutOfVRAM (39) and the add-on of that day lost the observation on each one.
+        lost = line('10:00:17', '[Sunshine 3D] Sunshine depth observation evidence: lost runtime=0x2424dd60e0 '
+                                'loss_present=23268 loss_tick_ms=87051296 sampled_tick_ms=87051296 '
+                                'origin=episode_start; sampled_only={revision=94 found=1 cause=sdk_failure '
+                                'site=finish_evaluation line=1171 tick_ms=87051296 thread=19736 sequence=349634 '
+                                'viewport=0 feature=0 sdk_known=1 sdk_result=39 reset=0}')
+        self.assertEqual(report.parse(BASE + [lost]).loss_sdk, {94: 39})
+        checks = run(BASE + [lost])
+        self.assertEqual(checks['Observation losses'].times,
+                         ['10:00:17 sdk_failure at finish_evaluation sdk_result=39 (eWarnOutOfVRAM)'])
+        self.assertEqual(checks['Streamline VRAM warnings'].status, 'WARN')
+        # Another SDK error is shown but is not the warning.
+        error = lost.replace('sdk_result=39', 'sdk_result=20')
+        checks = run(BASE + [error])
+        self.assertEqual(checks['Observation losses'].times,
+                         ['10:00:17 sdk_failure at finish_evaluation sdk_result=20'])
+        self.assertNotIn('Streamline VRAM warnings', checks)
+        # Since 10-22 the add-on accepts the warning and counts it on the camera availability line.
+        counted = line('10:00:12', '[Sunshine 3D] Sunshine Streamline camera availability: constants_calls=18608 '
+                                   'cameras=1 recent_valid_projection=1 vram_warnings=4211; NGX_frame_match=unproven; '
+                                   'availability does not authorize cross-API scale')
+        checks = run(BASE + [counted])
+        self.assertEqual(checks['Streamline VRAM warnings'].status, 'INFO')
+        self.assertIn('4211 call(s)', checks['Streamline VRAM warnings'].detail)
+        none = counted.replace('vram_warnings=4211', 'vram_warnings=0')
+        self.assertNotIn('Streamline VRAM warnings', run(BASE + [none]))
+        self.assertNotIn('Streamline VRAM warnings', run(BASE))
+
     def test_nothing_counts_while_the_export_is_inactive(self):
         # The game in the background: no output is streamed from 'export inactive' to the next generation,
         # so its depth losses are not losses the viewer saw.

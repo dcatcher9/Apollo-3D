@@ -86,6 +86,14 @@ namespace sunshine_streamline {
     using get_feature_function = std::int32_t (*)(std::uint32_t feature, const char *name, void *&function);
     using pcl_set_marker = std::int32_t (*)(std::uint32_t marker, const frame_token &frame);
     inline constexpr std::uint32_t feature_pcl = 4;
+    // sl::Result: eOk is 0 and eWarnOutOfVRAM (39) is the enum's only warning
+    // in every SL 2.x (test_streamline_sdk_abi.cpp). sl.common raises it while
+    // the process is over its video-memory budget ("various performance issues
+    // including stuttering can be expected"): the call still took its inputs,
+    // so it is not a failure. BF6 10-22 got it on every DLSS evaluation for
+    // 70 s while SR and DLSS-G kept running; any other value is a failure.
+    inline constexpr std::int32_t result_warn_out_of_vram = 39;
+    constexpr bool accepted(std::int32_t result) { return result == 0 || result == result_warn_out_of_vram; }
   }
   static_assert(sizeof(void *) == 8, "Streamline observer supports Windows x64 only");
   static_assert(sizeof(base_structure) == 32 && sizeof(common_constants) == 412);

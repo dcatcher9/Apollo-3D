@@ -117,6 +117,12 @@ static_assert(sl::kBufferTypeDepth == 0 && sl::kBufferTypeMotionVectors == 1 && 
 static_assert(sl::ResourceLifecycle::eOnlyValidNow == 0 && sl::ResourceLifecycle::eValidUntilPresent == 1 &&
   sl::ResourceLifecycle::eValidUntilEvaluate == 2);
 static_assert(static_cast<unsigned>(sl::Result::eOk) == 0 && sl::kFeatureDLSS_G == 1000);
+// The one warning the observer accepts as a successful call (BF6 10-22).
+static_assert(static_cast<int>(sl::Result::eWarnOutOfVRAM) == api::result_warn_out_of_vram &&
+  api::accepted(static_cast<std::int32_t>(sl::Result::eOk)) &&
+  api::accepted(static_cast<std::int32_t>(sl::Result::eWarnOutOfVRAM)) &&
+  !api::accepted(static_cast<std::int32_t>(sl::Result::eErrorInvalidState)) &&
+  !api::accepted(static_cast<std::int32_t>(sl::Result::eErrorMissingInputParameter)));
 static_assert(static_cast<unsigned>(sl::DLSSGMode::eOff) == 0 && static_cast<unsigned>(sl::DLSSGMode::eOn) == 1);
 #if SUNSHINE_SL_MINOR >= 2
 static_assert(sl::kFeatureDLSS == 0);

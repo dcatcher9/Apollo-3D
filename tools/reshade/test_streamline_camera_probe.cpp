@@ -2292,6 +2292,114 @@ namespace {
     call_v2_new_token(output, reinterpret_cast<const std::uint32_t *>(1));
     expect_evidence(selection(&native_a), evidence_status::observation_lost, "unreadable token index left accepted evidence");
   }
+  // BF6 10-22: over its video-memory budget, Streamline answered every DLSS
+  // evaluation with eWarnOutOfVRAM (39) while SR and DLSS-G kept running. The
+  // warning accepts the call's inputs; every other non-zero result fails it.
+  void test_sdk_vram_warning() {
+    fixture cleanup;
+    require(testing::install(testing::abi::v2_7_30, tracked_v2_targets), "v2 warning install failed");
+    auto view = viewport(3);
+    auto constants = modern_camera();
+    opaque_token token;
+    std::uint32_t number = 200;
+    int native{};
+    auto resource = modern_resource(&native);
+    auto tag = depth_tag_for(resource);
+    const base_structure *inputs[] {&view.base};
+    const auto frame = [&](std::int32_t inputs_result, std::int32_t evaluate_result) {
+      ++number; mint(token, &number);
+      result_v2 = inputs_result;
+      require(call_v2_constants(constants, token.ref(), view) == inputs_result &&
+        call_v2_framed_tag(token.ref(), view, &tag, 1, nullptr) == inputs_result, "input call result changed");
+      result_v2 = evaluate_result;
+      const auto returned = call_v2_evaluate(0, token.ref(), inputs, 1, nullptr);
+      result_v2 = 0;
+      require(returned == evaluate_result, "evaluation result changed");
+    };
+    const auto accepted = [&](const char *message) {
+      evaluation_snapshot snapshot;
+      require(query_evaluation(selection(&native), snapshot) == evidence_status::source_associated_evaluation &&
+        snapshot.successful_evaluation && snapshot.sequence, message);
+    };
+    frame(0, 0);
+    accepted("warning fixture baseline was not accepted");
+    const auto revision = depth_observation_revision();
+    frame(0, abi_v2::result_warn_out_of_vram);
+    accepted("an over-budget warning on a DLSS evaluation discarded its accepted inputs");
+    require(depth_observation_revision() == revision && testing::counts().vram_warnings == 1,
+      "an over-budget warning on a DLSS evaluation was counted as an observation loss");
+    frame(abi_v2::result_warn_out_of_vram, abi_v2::result_warn_out_of_vram);
+    accepted("over-budget warnings on constants and tags discarded them");
+    require(depth_observation_revision() == revision && testing::counts().vram_warnings == 4,
+      "over-budget warnings on constants and tags were counted as observation losses");
+    // Errors next to the warning (eErrorInvalidState 38, the unknown 40, a
+    // negative value) still fail the evaluation and lose its observation.
+    for (const std::int32_t error : {38, 40, -39}) {
+      const auto before = depth_observation_revision();
+      frame(0, error);
+      expect_evidence(selection(&native), evidence_status::evaluation_failed, "an SDK error was accepted like the warning");
+      require(depth_observation_revision() > before && testing::counts().vram_warnings == 4,
+        "an SDK error was not an observation loss, or was counted as a warning");
+      frame(0, 0);
+      accepted("a successful evaluation did not recover after an SDK error");
+    }
+  }
+  // The same warning on DLSS-G options (BF6 10-22: success=0 retired the FG
+  // source while frame generation kept running) keeps FG knowledge and the FG
+  // depth source; a real error still revokes them.
+  void test_frame_generation_vram_warning() {
+    fixture cleanup;
+    probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+    require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "FG warning hook install failed");
+    returned_feature_function = reinterpret_cast<void *>(&fake_fg_options);
+    void *function{};
+    require(call_feature_function(1000, "slDLSSGSetOptions", function) == 0 && function &&
+        function != returned_feature_function, "FG getter did not return the forwarding wrapper");
+    auto set_options = reinterpret_cast<fg_function>(function);
+    auto view = viewport(11);
+    fg_options options;
+    frame_generation_snapshot fg;
+    result_v2 = abi_v2::result_warn_out_of_vram;
+    require(set_options(view, options) == abi_v2::result_warn_out_of_vram && query_frame_generation(UINT32_MAX, fg) &&
+        fg.known && fg.viewport == view.value && fg.enabled && fg.generated_frames == 1, "a warned FG On was not accepted");
+    result_v2 = 0;
+    opaque_token token; std::uint32_t numeric = 61;
+    auto constants = modern_camera();
+    int native{}, commands{};
+    auto resource = modern_resource(&native);
+    resource.type = 8;
+    auto tag = depth_tag_for(resource); tag.lifecycle = 0;
+    sunshine_scene_depth::frame normalized;
+    const auto fg_source = [&] {
+      mint(token, &++numeric); call_v2_constants(constants, token.ref(), view);
+      call_v2_framed_tag(token.ref(), view, &tag, 1, &commands);
+      return testing::normalized_source(view.value, 0, normalized) && normalized.frame_generation_input &&
+        normalized.source_id == ((1ull << 63) | view.value);
+    };
+    require(fg_source(), "a warned FG On did not route FG depth");
+    result_v2 = abi_v2::result_warn_out_of_vram;
+    require(set_options(view, options) == abi_v2::result_warn_out_of_vram, "warned FG options result changed");
+    result_v2 = 0;
+    require(query_frame_generation(view.value, fg) && fg.known && fg.enabled && fg_source(),
+      "a repeated warned FG On revoked FG knowledge or its depth source");
+    options.mode = 0; result_v2 = abi_v2::result_warn_out_of_vram;
+    set_options(view, options);
+    result_v2 = 0;
+    require(query_frame_generation(UINT32_MAX, fg) && fg.known && !fg.enabled, "a warned FG Off was not accepted");
+    options.mode = 1; set_options(view, options);
+    require(query_frame_generation(view.value, fg) && fg.enabled && fg_source(), "FG On after a warned Off failed");
+    result_v2 = 38;
+    set_options(view, options);
+    result_v2 = 0;
+    frame_generation_query_status status{};
+    require(!query_frame_generation(UINT32_MAX, fg, &status) && !fg.known && !fg_source(),
+      "a failed FG On kept FG knowledge or its FG depth source");
+    // A warned getter still hands out the wrapper that observes the options.
+    function = nullptr; result_v2 = abi_v2::result_warn_out_of_vram;
+    require(call_feature_function(1000, "slDLSSGSetOptions", function) == abi_v2::result_warn_out_of_vram && function &&
+        function != returned_feature_function, "a warned FG getter did not return the forwarding wrapper");
+    result_v2 = 0;
+  }
   void test_evaluation_ambiguity_and_invalid_tags() {
     fixture cleanup;
     require(testing::install(testing::abi::v1_1_1, v1_targets), "v1 ambiguity install failed");
@@ -4087,6 +4195,9 @@ int main(int argc, char **argv) {
     std::puts("PASS immutable evaluation ordering, bounded frame eviction and age limits");
     test_evaluation_v2_tokens();
     std::puts("PASS v2 observed token generations, numeric provenance, frame tags and local overrides");
+    test_sdk_vram_warning();
+    test_frame_generation_vram_warning();
+    std::puts("PASS eWarnOutOfVRAM keeps evaluations, inputs, FG knowledge and the FG depth source; other SDK results still fail");
     test_evaluation_ambiguity_and_invalid_tags();
     std::puts("PASS ambiguous viewport and newer invalid tag rejection");
     test_evaluation_global_contract();

@@ -187,6 +187,13 @@ namespace sunshine_streamline {
     std::atomic<bool> source_requested{};
     std::atomic<std::uint64_t> observation_generation{};
     std::atomic<std::uint64_t> constant_calls{}, tag_calls{}, evaluation_calls{}, dropped{}, invalid{};
+    // SDK calls answered with eWarnOutOfVRAM: accepted, counted for the log.
+    std::atomic<std::uint64_t> vram_warnings{};
+    // One verdict per 2.x call (abi_v2::accepted): the warning is a success.
+    bool sdk_accepted(std::int32_t result) {
+      if (result == abi_v2::result_warn_out_of_vram) vram_warnings.fetch_add(1, std::memory_order_relaxed);
+      return abi_v2::accepted(result);
+    }
     std::atomic<std::uint64_t> call_sequence{}, loss_revision{};
     // Lost constants observations (each may have hidden a camera reset) and
     // observation restarts. With a viewport's own resets this alone bounds
@@ -707,7 +714,7 @@ namespace sunshine_streamline {
       SetLastError(incoming);
       const auto result = pcl_targets[Index].original.load(std::memory_order_acquire)(marker, frame);
       const DWORD outgoing = GetLastError();
-      if (serial) finish_presentation_marker(marker, serial, result == 0, ticket);
+      if (serial) finish_presentation_marker(marker, serial, sdk_accepted(result), ticket);
       SetLastError(outgoing);
       return result;
     }
@@ -763,8 +770,10 @@ namespace sunshine_streamline {
       const auto result = fg_targets[Index].original.load(std::memory_order_acquire)(viewport, options);
       --fg_forwarding_depth;
       const DWORD outgoing = GetLastError();
+      // Only the sampling entry judges (and counts) the result.
+      const bool sdk_ok = sample && sdk_accepted(result);
       std::uint64_t retired_epoch{};
-      if (sample) dump_metadata::observe_sl_fg(dump_stamp(ticket, serial, GetTickCount64(), valid_viewport ? id : UINT32_MAX), copy.mode, copy.generated_frames, valid, result == 0);
+      if (sample) dump_metadata::observe_sl_fg(dump_stamp(ticket, serial, GetTickCount64(), valid_viewport ? id : UINT32_MAX), copy.mode, copy.generated_frames, valid, sdk_ok);
       bool changed = false;
       // A game may set its FG options once: a busy writer must not leave the
       // mode unknown until the next call.
@@ -779,12 +788,12 @@ namespace sunshine_streamline {
           } else {
             auto &state = slot(*update, id).frame_generation;
             if (serial >= state.sequence) {
-              const bool known = valid && result == 0;
+              const bool known = valid && sdk_ok;
               changed = !state.sequence || state.known != known ||
                 (known && (state.mode != copy.mode || state.generated_frames != copy.generated_frames));
               state = {update->epoch, serial, GetTickCount64(), options_loss, id, copy.mode, copy.generated_frames,
-                valid && result == 0, valid && result == 0 && copy.mode != 0, valid && copy.mode >= 2};
-              if (!valid || result != 0 || copy.mode == 0) retired_epoch = update->epoch;
+                known, known && copy.mode != 0, valid && copy.mode >= 2};
+              if (!known || copy.mode == 0) retired_epoch = update->epoch;
             }
           }
         }
@@ -800,14 +809,14 @@ namespace sunshine_streamline {
       // Only an actual FG-mode/knowledge transition revokes UI scope. Games
       // can call unsupported Off options after every successful HUDless tag;
       // repeated failure is not a new failure of those independent input tags.
-      if (sample && changed && current(ticket) && (!valid || result != 0 || retired_epoch)) {
+      if (sample && changed && current(ticket) && (!valid || !sdk_ok || retired_epoch)) {
         if (valid_viewport) sunshine_game3d::ui_mask::invalidate_scope(epoch, id);
         else sunshine_game3d::ui_mask::invalidate_all();
       }
       if (changed) {
         char text[256]{};
-        std::snprintf(text, sizeof(text), "Sunshine Streamline frame generation: viewport=%u mode=%u generated_frames=%u supported=%u success=%u",
-          id, copy.mode, copy.generated_frames, valid, result == 0);
+        std::snprintf(text, sizeof(text), "Sunshine Streamline frame generation: viewport=%u mode=%u generated_frames=%u supported=%u success=%u sdk_result=%d",
+          id, copy.mode, copy.generated_frames, valid, sdk_ok, static_cast<int>(result));
         message(text);
       }
       SetLastError(outgoing);
@@ -870,14 +879,15 @@ namespace sunshine_streamline {
       SetLastError(incoming);
       const auto result = original_feature_function_v2(feature, function_name, function);
       const DWORD outgoing = GetLastError();
+      const bool sdk_ok = (wanted || fg_wanted) && sdk_accepted(result);
       if (wanted && current(ticket)) {
         void *entry{};
-        if (result == 0 && read_bytes(&function, &entry, sizeof(entry))) queue_pcl_target(entry, ticket);
+        if (sdk_ok && read_bytes(&function, &entry, sizeof(entry))) queue_pcl_target(entry, ticket);
         else { current_pcl_target = nullptr; pcl_available = false; lose_presentation(); }
       }
       if (fg_wanted && current(ticket)) {
         void *entry{};
-        if (result == 0 && read_bytes(&function, &entry, sizeof(entry))) {
+        if (sdk_ok && read_bytes(&function, &entry, sizeof(entry))) {
           // The SDK helper caches this pointer and may set On only once. A
           // returned wrapper observes that first call without installing an
           // inline hook or suspending renderer threads in this callback. Poll
@@ -1730,12 +1740,13 @@ namespace sunshine_streamline {
       SetLastError(incoming);
       const auto result = original_constants_v2(values, frame, viewport);
       const DWORD outgoing = GetLastError();
+      const bool sdk_ok = sdk_accepted(result);
       loss_context.sdk_result = result; loss_context.has_sdk_result = true;
-      if (diagnostic.session) dump_metadata::finish_sl_call(diagnostic, result == 0);
-      if (sample && result == 0 && valid_viewport)
+      if (diagnostic.session) dump_metadata::finish_sl_call(diagnostic, sdk_ok);
+      if (sample && sdk_ok && valid_viewport)
         store_camera(id, camera, decoded, 0, false, reinterpret_cast<std::uintptr_t>(&frame), ticket, identity, serial, loss, entry_tick);
       else if (sample && current(ticket))
-        lose(result != 0 ? loss_diagnostics::reason::sdk_failure : loss_diagnostics::reason::invalid_input, __func__, __LINE__);
+        lose(!sdk_ok ? loss_diagnostics::reason::sdk_failure : loss_diagnostics::reason::invalid_input, __func__, __LINE__);
       SetLastError(outgoing);
       return result;
     }
@@ -1889,15 +1900,16 @@ namespace sunshine_streamline {
       SetLastError(incoming);
       const std::int32_t result = forward();
       const DWORD outgoing = GetLastError();
+      const bool sdk_ok = sdk_accepted(result);
       loss_context.sdk_result = result; loss_context.has_sdk_result = true;
-      if (diagnostic.session) dump_metadata::finish_sl_call(diagnostic, result == 0);
-      finish_capture(captured, result == 0, ticket);
-      if (sample && result == 0 && out.count) store_tags(out);
-      else if (sample && (result != 0 || !out.valid_viewport) && current(ticket))
-        lose(result != 0 ? loss_diagnostics::reason::sdk_failure : loss_diagnostics::reason::invalid_input, __func__, __LINE__);
-      if (snapshot.tag_boundary) finish_evaluation(snapshot, result == 0, ticket);
+      if (diagnostic.session) dump_metadata::finish_sl_call(diagnostic, sdk_ok);
+      finish_capture(captured, sdk_ok, ticket);
+      if (sample && sdk_ok && out.count) store_tags(out);
+      else if (sample && (!sdk_ok || !out.valid_viewport) && current(ticket))
+        lose(!sdk_ok ? loss_diagnostics::reason::sdk_failure : loss_diagnostics::reason::invalid_input, __func__, __LINE__);
+      if (snapshot.tag_boundary) finish_evaluation(snapshot, sdk_ok, ticket);
       for (const auto &attempt : alpha) sunshine_game3d::ui_mask::finish(attempt,
-        result == 0 && current(ticket) && loss == loss_revision.load(std::memory_order_acquire));
+        sdk_ok && current(ticket) && loss == loss_revision.load(std::memory_order_acquire));
       SetLastError(outgoing);
       return result;
     }
@@ -2016,20 +2028,23 @@ namespace sunshine_streamline {
       SetLastError(incoming);
       const auto result = original_evaluate_v2(feature, frame, inputs, count, commands);
       const DWORD outgoing = GetLastError();
+      // The depth copy and camera recorded before forwarding are the game's
+      // own; an over-budget warning leaves them as valid as a plain success.
+      const bool sdk_ok = sdk_accepted(result);
       loss_context.sdk_result = result; loss_context.has_sdk_result = true;
       if (sample && diagnostic.session) {
-        dump_metadata::finish_sl_call(diagnostic, result == 0);
-        dump_metadata::observe_sl_evaluation(diagnostic, feature, result == 0);
+        dump_metadata::finish_sl_call(diagnostic, sdk_ok);
+        dump_metadata::observe_sl_evaluation(diagnostic, feature, sdk_ok);
       }
-      call_trace.finish(result == 0);
-      finish_capture(captured, result == 0, ticket);
+      call_trace.finish(sdk_ok);
+      finish_capture(captured, sdk_ok, ticket);
       if (sample && out.valid_viewport) {
-        if (result == 0 && out.count) store_tags(out);
-        finish_evaluation(snapshot, result == 0, ticket);
+        if (sdk_ok && out.count) store_tags(out);
+        finish_evaluation(snapshot, sdk_ok, ticket);
       } else if (sample && current(ticket)) {
         // An unresolvable evaluation viewport cannot leave any older camera
         // evidence looking applicable to a new successful call.
-        lose(result != 0 ? loss_diagnostics::reason::sdk_failure : loss_diagnostics::reason::invalid_input, __func__, __LINE__);
+        lose(!sdk_ok ? loss_diagnostics::reason::sdk_failure : loss_diagnostics::reason::invalid_input, __func__, __LINE__);
       }
       SetLastError(outgoing);
       return result;
@@ -2045,11 +2060,12 @@ namespace sunshine_streamline {
       SetLastError(incoming);
       const auto result = original_new_token_v2(token, frame_index);
       const DWORD outgoing = GetLastError();
+      const bool sdk_ok = sdk_accepted(result);
       loss_context.sdk_result = result; loss_context.has_sdk_result = true;
       if (current(ticket)) {
         abi_v2::frame_token *returned{};
-        if (result != 0 || !index_ok || !read(&token, returned) || !returned) {
-          invalid_observation(result != 0 ? loss_diagnostics::reason::sdk_failure : loss_diagnostics::reason::invalid_input,
+        if (!sdk_ok || !index_ok || !read(&token, returned) || !returned) {
+          invalid_observation(!sdk_ok ? loss_diagnostics::reason::sdk_failure : loss_diagnostics::reason::invalid_input,
             __func__, __LINE__);
         } else {
           const auto address = reinterpret_cast<std::uintptr_t>(returned);
@@ -2825,10 +2841,13 @@ namespace sunshine_streamline {
         camera_pin.reset();
         camera_report_at = now + 5000;
         if (calls != camera_report_count) {
-          char availability[320]{};
+          // vram_warnings: SDK calls answered with eWarnOutOfVRAM since the
+          // observation began, each accepted as a success.
+          char availability[352]{};
           std::snprintf(availability, sizeof(availability),
-            "Sunshine Streamline camera availability: constants_calls=%llu cameras=%u recent_valid_projection=%u; NGX_frame_match=unproven; availability does not authorize cross-API scale",
-            static_cast<unsigned long long>(calls), cameras, valid_recent);
+            "Sunshine Streamline camera availability: constants_calls=%llu cameras=%u recent_valid_projection=%u vram_warnings=%llu; NGX_frame_match=unproven; availability does not authorize cross-API scale",
+            static_cast<unsigned long long>(calls), cameras, valid_recent,
+            static_cast<unsigned long long>(vram_warnings.load(std::memory_order_relaxed)));
           message(availability);
           if (camera_sample_tick) {
             char detail[1800]{};
@@ -3208,7 +3227,9 @@ namespace sunshine_streamline {
       sunshine_upscaler_trace::set_streamline_coverage(success);
       return success;
     }
-    counters counts() { return {constant_calls.load(), tag_calls.load(), evaluation_calls.load(), dropped.load(), invalid.load()}; }
+    counters counts() {
+      return {constant_calls.load(), tag_calls.load(), evaluation_calls.load(), dropped.load(), invalid.load(), vram_warnings.load()};
+    }
     void lose_observation() { dropped_observation(loss_diagnostics::reason::test_injected, __func__, __LINE__, {}); }
     bool latest(std::uint32_t viewport, std::uint64_t &resource, bool &has_camera, bool &explicit_same_frame, bool &same_token_address) {
       auto pin = read_metadata();
@@ -3256,7 +3277,7 @@ namespace sunshine_streamline {
       v1_private_state_checked = false;
       installed_abi = sunshine_streamline::abi::unsupported;
       installed_targets = {};
-      constant_calls = tag_calls = evaluation_calls = dropped = invalid = 0;
+      constant_calls = tag_calls = evaluation_calls = dropped = invalid = vram_warnings = 0;
       initialize(nullptr);
     }
   }
