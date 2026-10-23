@@ -968,7 +968,7 @@ namespace models {
     depth_input_region_t input_region {};  ///< Exact source domain that owns this completion.
     input_color_space color_space = input_color_space::srgb;  ///< Exact transfer domain used for this completion.
     bool input_domain_reset = false;  ///< Temporal/camera state was reset before this completion.
-    bool subtitle_work_suppressed = false;  ///< This completion published Base and did not advance same-domain locator state.
+    bool subtitle_work_suppressed = false;  ///< This completion published Base without a subtitle observation.
     bool subtitle_ocr_inference_enqueued = false;  ///< This call requested OCR participation under the shared depth/subtitle inference decision.
   };
 
@@ -1254,6 +1254,10 @@ namespace models {
      * @param snapshot_debug_inputs Copy the completed frame's exact model input and raw output
      *        before the next asynchronous inference can overwrite them. Intended only for an
      *        explicit Dump 3D.
+     * @param subtitle_context_generation Live subtitle-scope epoch. A changed admitted epoch
+     *        clears only subtitle history and forces inference; zero preserves offline behavior.
+     *        If this call completes a prior frame, it returns that publication without enqueueing;
+     *        submit the changed context again after consuming the returned frame.
      * @return estimate_result; all views are owned by the estimator and overwritten by later calls.
      */
     estimate_result estimate_depth(
@@ -1263,7 +1267,8 @@ namespace models {
       bool snapshot_debug_inputs = false,
       depth_input_region_t input_region = {},
       depth_optional_work_mode_e optional_work = depth_optional_work_mode_e::ordinary,
-      gpu_adaptive_reuse_request adaptive_reuse = {}
+      gpu_adaptive_reuse_request adaptive_reuse = {},
+      std::uint64_t subtitle_context_generation = 0u
     );
 
     /**

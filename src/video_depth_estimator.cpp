@@ -891,6 +891,7 @@ namespace models {
                    cuda_conditional_graph::work_flag_e::optional_ocr :
                    cuda_conditional_graph::work_flag_e::subtitle_observation;
         case depth_optional_work_mode_e::suppress_subtitle:
+        case depth_optional_work_mode_e::disable_subtitle:
           return cuda_conditional_graph::work_flag_e::none;
       }
       return cuda_conditional_graph::work_flag_e::none;
@@ -3525,6 +3526,8 @@ namespace models {
     // that the device executed it. The authenticated receipt remains OCR-output authority.
     depth_optional_work_mode_e pending_optional_work =
       depth_optional_work_mode_e::ordinary;
+    std::uint64_t accepted_subtitle_context_generation = 0u;
+    bool accepted_subtitle_context_disabled = false;
     enum class pending_submission_class_e : std::uint8_t {
       force_infer,
       gpu_undecided,
@@ -6334,6 +6337,43 @@ namespace models {
                             DXGI_FORMAT_R32_FLOAT, subtitle_gaussian_vertical_conditioned);
     }
 
+    void reset_subtitle_state() {
+      invalidate_publication();
+      // The preceding joined root and its consumers must be retired first. These are the same
+      // zero-initialized subtitle resources used at startup; depth, cut and camera stay intact.
+      const UINT zero[4] = {};
+      for (auto *uav : {
+             ocr_box_record_uav.Get(), subtitle_locator_state_uav.Get(),
+             subtitle_condition_params_uav.Get(), subtitle_contour_identity.uav.Get(),
+             subtitle_contour_probability_snapshot.uav.Get(), subtitle_gaussian_control.uav.Get(),
+             subtitle_contour_source.uav.Get(), subtitle_contour_source_snapshot.uav.Get(),
+             subtitle_contour_previous_features.uav.Get(), subtitle_contour_next_features.uav.Get(),
+             subtitle_contour_support.uav.Get(), subtitle_contour_field_mask.uav.Get(),
+             subtitle_contour_horizontal_distance.uav.Get(), subtitle_contour_distance.uav.Get(),
+             subtitle_gaussian_weight.uav.Get(), subtitle_gaussian_blend.uav.Get(),
+             subtitle_gaussian_vertical_majorant.uav.Get(),
+             subtitle_gaussian_vertical_conditioned.uav.Get(),
+           }) {
+        if (uav) {
+          context->ClearUnorderedAccessViewUint(uav, zero);
+        }
+      }
+      const float zero_float[4] = {};
+      if (subtitle_conditioned_uav) {
+        context->ClearUnorderedAccessViewFloat(subtitle_conditioned_uav.Get(), zero_float);
+      }
+      // Disabled completions may expose these initialized views only as unused diagnostics.
+      // Reentry cannot retain snapshots belonging to a prior source extent or subtitle context.
+      completed_contour = {
+        subtitle_contour_support.srv, subtitle_contour_field_mask.srv,
+        subtitle_contour_distance.srv, subtitle_contour_identity.srv,
+        subtitle_contour_previous_features.srv, subtitle_contour_source_snapshot.srv,
+        subtitle_contour_probability_snapshot.srv,
+        subtitle_gaussian_weight.srv, subtitle_gaussian_blend.srv,
+        subtitle_gaussian_vertical_conditioned.srv, subtitle_gaussian_control.srv
+      };
+    }
+
     bool ensure_subtitle_resources() {
       invalidate_publication();
       auto create_uint_buffer = [&](
@@ -6442,15 +6482,7 @@ namespace models {
         return false;
       }
 
-      const UINT zero[4] = {};
-      context->ClearUnorderedAccessViewUint(subtitle_contour_identity.uav.Get(), zero);
-      context->ClearUnorderedAccessViewUint(subtitle_contour_probability_snapshot.uav.Get(), zero);
-      context->ClearUnorderedAccessViewUint(subtitle_gaussian_control.uav.Get(), zero);
-      context->ClearUnorderedAccessViewUint(ocr_box_record_uav.Get(), zero);
-      context->ClearUnorderedAccessViewUint(subtitle_locator_state_uav.Get(), zero);
-      context->ClearUnorderedAccessViewUint(subtitle_condition_params_uav.Get(), zero);
-      const float zero_float[4] = {};
-      context->ClearUnorderedAccessViewFloat(subtitle_conditioned_uav.Get(), zero_float);
+      reset_subtitle_state();
 
       if (!ocr_available) {
         return true;
@@ -7980,7 +8012,7 @@ namespace models {
       const auto completed_color_space = pending_color_space;
       const bool completed_gpu_undecided = gpu_undecided_postprocess_pending();
       const bool completed_subtitle_work_suppressed =
-        pending_optional_work == depth_optional_work_mode_e::suppress_subtitle;
+        depth_optional_work_suppresses_subtitle(pending_optional_work);
       if (!completed_gpu_undecided) {
         gpu_undecided_requires_force_infer_refresh = false;
       }
@@ -8378,11 +8410,10 @@ namespace models {
       // event follows both children and every interop-unmap tail, so both outputs are safe before
       // any next-frame mapping reuses the fixed buffers.
       const bool subtitle_work_suppressed =
-        pending_optional_work == depth_optional_work_mode_e::suppress_subtitle;
-      // Native interactive move/resize keeps the depth/cut/camera pipeline live, but OCR evidence
-      // would describe a rapidly moving, deliberately de-authorized window. Leave same-domain
-      // locator bytes untouched and publish the freshly produced Base field for this completion;
-      // an analysis-domain transition still performed its mandatory reset above.
+        depth_optional_work_suppresses_subtitle(pending_optional_work);
+      // Native move/resize and ineligible video contexts keep depth/cut/camera live and publish
+      // fresh Base. Move/resize freezes same-context subtitle memory; context admission separately
+      // clears subtitle state when entering/leaving hard disable or changing the scope epoch.
       bool ocr_record_submitted = false;
       auto trace_host_subtitle_outcome =
         host_sbs_gpu_trace::host_subtitle_outcome_e::suppressed;
@@ -8583,7 +8614,7 @@ namespace models {
           trace_condition_executed = !subtitle_publication_branch_opaque;
         }
         if (!conditioner_ready) {
-          // Native suppression deliberately skips the conditioner and advances no OCR/SLR state.
+          // Suppressed/disabled work skips the conditioner and advances no OCR/SLR state.
           // Publish the fresh immutable Base through the same complete out-of-place texture used
           // by every transaction class. Non-suppressed conditioner failure returned terminal above.
           if (subtitle_conditioned_tex && depth_coordinate_v2_final_tex) {
@@ -8712,7 +8743,8 @@ namespace models {
       bool snapshot_raw_model_depth,
       depth_input_region_t input_region,
       depth_optional_work_mode_e optional_work,
-      const gpu_adaptive_reuse_request &adaptive_reuse_request
+      const gpu_adaptive_reuse_request &adaptive_reuse_request,
+      const std::uint64_t subtitle_context_generation
     ) {
       if (!is_operational() || !input_srv) {
         return {};
@@ -8728,10 +8760,11 @@ namespace models {
       bool completed_input_domain_reset = false;
       bool completed_subtitle_work_suppressed = false;
       bool completed_gpu_undecided = false;
-      // An explicitly armed Dump 3D frame always runs ordinary exact-frame OCR/locator work.
-      auto accepted_optional_work = snapshot_raw_model_depth ?
-                                      depth_optional_work_mode_e::ordinary :
-                                      optional_work;
+      // Dump may override temporary move/size suppression, but never enables an ineligible
+      // subtitle context. Suppressed dump sections remain explicitly unused in the package.
+      const auto accepted_optional_work =
+        snapshot_raw_model_depth && optional_work != depth_optional_work_mode_e::disable_subtitle ?
+          depth_optional_work_mode_e::ordinary : optional_work;
 
       auto &cuda = cuda_driver_api::get();
       if (!cuda.is_valid()) {
@@ -9119,7 +9152,7 @@ namespace models {
       if (has_previous_frame) {
         completed_gpu_undecided = gpu_undecided_postprocess_pending();
         completed_subtitle_work_suppressed =
-          pending_optional_work == depth_optional_work_mode_e::suppress_subtitle;
+          depth_optional_work_suppresses_subtitle(pending_optional_work);
         completed_input_domain_reset = prepare_pending_input_domain();
         if (!normalize_depth_output(
               d3d_timer,
@@ -9206,6 +9239,35 @@ namespace models {
         mark_d3d_post_end(d3d_timer);
       }
 
+      const bool subtitle_context_disabled =
+        accepted_optional_work == depth_optional_work_mode_e::disable_subtitle;
+      const bool subtitle_context_changed =
+        subtitle_context_generation != accepted_subtitle_context_generation ||
+        subtitle_context_disabled != accepted_subtitle_context_disabled;
+      if (completed_frame_valid && subtitle_context_changed) {
+        // This call must hand the preceding publication to its caller before clearing any of
+        // the singleton subtitle/final resources it owns. Admit the changed context on a later
+        // call; neither its epoch nor its optional work has been accepted yet.
+        mark_d3d_pre_start(d3d_timer);
+        end_d3d_perf(d3d_timer);
+        return make_result(
+          true,
+          completed_frame_id,
+          false,
+          raw_snapshot_valid,
+          model_input_snapshot_valid,
+          composite_snapshots_valid,
+          coordinate_snapshot_valid,
+          completed_input_region,
+          completed_color_space,
+          completed_input_domain_reset,
+          completed_subtitle_work_suppressed,
+          false,
+          false,
+          completed_gpu_undecided
+        );
+      }
+
       // The first ROI trial deliberately keeps one session tensor shape. A validated crop whose
       // fitted shape differs is not allowed to poison the authenticated producer; consume any old
       // completion above, skip this enqueue, and let the caller use its full-frame fallback.
@@ -9276,6 +9338,12 @@ namespace models {
         end_d3d_perf(d3d_timer);
         return {};
       }
+      if (subtitle_context_changed) {
+        // Busy/invalid/shape-rejected calls and calls returning a preceding completion have
+        // returned before this point. Queue only subtitle clears before this source's
+        // preprocessing; remember the epoch only after successful admission.
+        reset_subtitle_state();
+      }
       const std::uint32_t ocr_crop_height = subtitle_ocr_source_crop_height(
         input_region.width(),
         input_region.height()
@@ -9310,6 +9378,7 @@ namespace models {
         frame_id > adaptive_reuse_request.baseline_frame_id &&
         !gpu_undecided_requires_force_infer_refresh &&
         !ocr_signature_refresh_required &&
+        !subtitle_context_changed &&
         // Every new OCR-eligible source observation runs the joined depth/subtitle path.
         // Similarity reuse would otherwise freeze four-observation pixel confirmation.
         !ocr_frame_eligible &&
@@ -9984,6 +10053,8 @@ namespace models {
       has_previous_frame = enqueued;
       pending_ocr_submitted = enqueued && ocr_armed;
       if (enqueued) {
+        accepted_subtitle_context_generation = subtitle_context_generation;
+        accepted_subtitle_context_disabled = subtitle_context_disabled;
         pending_color_space = color_space;
         pending_frame_id = frame_id;
         pending_input_region = input_region;
@@ -10012,7 +10083,7 @@ namespace models {
           ) {
             throughput_stats_gpu_undecided_enqueues++;
           }
-          if (accepted_optional_work == depth_optional_work_mode_e::suppress_subtitle) {
+          if (depth_optional_work_suppresses_subtitle(accepted_optional_work)) {
             throughput_stats_subtitle_suppressed++;
           }
           if (ocr_armed) {
@@ -10086,7 +10157,8 @@ namespace models {
     bool snapshot_debug_inputs,
     depth_input_region_t input_region,
     depth_optional_work_mode_e optional_work,
-    gpu_adaptive_reuse_request adaptive_reuse
+    gpu_adaptive_reuse_request adaptive_reuse,
+    std::uint64_t subtitle_context_generation
   ) {
     return pimpl->estimate(
       input_srv,
@@ -10095,7 +10167,8 @@ namespace models {
       snapshot_debug_inputs,
       input_region,
       optional_work,
-      adaptive_reuse
+      adaptive_reuse,
+      subtitle_context_generation
     );
   }
 

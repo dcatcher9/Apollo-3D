@@ -1527,16 +1527,27 @@ TEST(ParallaxV2RendererTest, OpaqueRenderedHitBridgesOnePendingTimeout) {
   ));
 }
 
-TEST(ParallaxV2RendererTest, SubtitleEligibilityUsesOnlyNativeSuppressionAndExplicitDump) {
+TEST(ParallaxV2RendererTest, SubtitleEligibilityRestrictsDumpToEligibleVideoContexts) {
   using models::depth_optional_work_allows_gpu_undecided;
   using models::depth_optional_work_mode_e;
+  using models::depth_optional_work_suppresses_subtitle;
   using models::select_depth_optional_work_mode;
   EXPECT_EQ(select_depth_optional_work_mode(), depth_optional_work_mode_e::ordinary);
   EXPECT_EQ(select_depth_optional_work_mode(true, false), depth_optional_work_mode_e::suppress_subtitle);
   // An explicit diagnostic snapshot remains a complete exact-frame observation.
   EXPECT_EQ(select_depth_optional_work_mode(true, true), depth_optional_work_mode_e::ordinary);
+  for (const bool moving : {false, true}) {
+    for (const bool dumping : {false, true}) {
+      EXPECT_EQ(select_depth_optional_work_mode(moving, dumping, false),
+        depth_optional_work_mode_e::disable_subtitle);
+    }
+  }
   EXPECT_TRUE(depth_optional_work_allows_gpu_undecided(depth_optional_work_mode_e::ordinary));
   EXPECT_FALSE(depth_optional_work_allows_gpu_undecided(depth_optional_work_mode_e::suppress_subtitle));
+  EXPECT_FALSE(depth_optional_work_allows_gpu_undecided(depth_optional_work_mode_e::disable_subtitle));
+  EXPECT_FALSE(depth_optional_work_suppresses_subtitle(depth_optional_work_mode_e::ordinary));
+  EXPECT_TRUE(depth_optional_work_suppresses_subtitle(depth_optional_work_mode_e::suppress_subtitle));
+  EXPECT_TRUE(depth_optional_work_suppresses_subtitle(depth_optional_work_mode_e::disable_subtitle));
 }
 
 TEST(ParallaxV2RendererTest, OcrSignatureRefreshRequiresAnEligibleForceChild) {
@@ -1548,6 +1559,13 @@ TEST(ParallaxV2RendererTest, OcrSignatureRefreshRequiresAnEligibleForceChild) {
     true,
     true,
     depth_optional_work_mode_e::suppress_subtitle,
+    false
+  ));
+  EXPECT_FALSE(ocr_signature_refresh_satisfied(
+    true,
+    true,
+    true,
+    depth_optional_work_mode_e::disable_subtitle,
     false
   ));
   EXPECT_FALSE(ocr_signature_refresh_satisfied(
@@ -2678,6 +2696,61 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
   EXPECT_EQ(ordinary_receipt->depth_owner_frame_id, ordinary_frame_id);
   EXPECT_TRUE(ordinary_receipt->subtitle_is_current());
 
+  // A changed subtitle epoch must force inference even when OCR geometry is ineligible and an
+  // exact same-domain request could otherwise select the detector's identical-input reuse.
+  ASSERT_TRUE(wait_until_reusable());
+  const auto scope_baseline_frame = ordinary_frame_id + 1u;
+  const auto scope_baseline = estimator.estimate_depth(
+    conditional_source.Get(), models::input_color_space::srgb, scope_baseline_frame,
+    false, conditional_region, models::depth_optional_work_mode_e::ordinary,
+    {.observation_timestamp_us = scope_baseline_frame}
+  );
+  ASSERT_TRUE(scope_baseline.inference_enqueued);
+  const auto scope_baseline_completed = estimator.finish_pending_depth_for_evaluation();
+  ASSERT_TRUE(scope_baseline_completed.completed_frame_valid);
+  const auto scope_baseline_receipt = wait_for_publication(scope_baseline_completed);
+  ASSERT_TRUE(scope_baseline_receipt);
+  ASSERT_TRUE(wait_until_reusable());
+  const auto scope_frame = scope_baseline_frame + 1u;
+  const auto scope_request = models::make_gpu_adaptive_request(scope_frame, true,
+    &*scope_baseline_receipt, scope_baseline_completed.publication, scope_frame);
+  ASSERT_TRUE(scope_request.authorize_gpu_undecided_reuse);
+  const auto scoped = estimator.estimate_depth(
+    conditional_source.Get(), models::input_color_space::srgb, scope_frame,
+    false, conditional_region, models::depth_optional_work_mode_e::ordinary,
+    scope_request, 1u
+  );
+  ASSERT_TRUE(scoped.inference_enqueued);
+  EXPECT_FALSE(scoped.gpu_undecided_transaction_enqueued);
+  const auto scoped_completed = estimator.finish_pending_depth_for_evaluation();
+  ASSERT_TRUE(scoped_completed.completed_frame_valid);
+  EXPECT_FALSE(scoped_completed.input_domain_reset);
+  EXPECT_EQ(scoped_completed.publication.domain_tag, scope_baseline_completed.publication.domain_tag);
+  const auto scoped_receipt = wait_for_publication(scoped_completed);
+  ASSERT_TRUE(scoped_receipt);
+  EXPECT_EQ(scoped_receipt->depth_owner_frame_id, scope_frame);
+
+  // The accepted epoch is stable: later same-epoch requests retain ordinary reuse eligibility.
+  ASSERT_TRUE(wait_until_reusable());
+  const auto scoped_followup_frame = scope_frame + 1u;
+  const auto scoped_followup_request = models::make_gpu_adaptive_request(scoped_followup_frame, true,
+    &*scoped_receipt, scoped_completed.publication, scoped_followup_frame);
+  ASSERT_TRUE(scoped_followup_request.authorize_gpu_undecided_reuse);
+  const auto scoped_followup = estimator.estimate_depth(
+    conditional_source.Get(), models::input_color_space::srgb, scoped_followup_frame,
+    false, conditional_region, models::depth_optional_work_mode_e::ordinary,
+    scoped_followup_request, 1u
+  );
+  ASSERT_TRUE(scoped_followup.gpu_undecided_transaction_enqueued);
+  EXPECT_FALSE(scoped_followup.inference_enqueued);
+  const auto scoped_followup_completed = estimator.finish_pending_depth_for_evaluation();
+  ASSERT_TRUE(scoped_followup_completed.completed_frame_valid);
+  const auto scoped_followup_receipt = wait_for_publication(scoped_followup_completed);
+  ASSERT_TRUE(scoped_followup_receipt);
+  EXPECT_EQ(scoped_followup_receipt->depth,
+    models::host_sbs_gpu_completion_receipt::depth_disposition_e::reuse);
+  EXPECT_EQ(scoped_followup_receipt->depth_owner_frame_id, scope_frame);
+
   EXPECT_FALSE(estimator.has_terminal_failure());
 }
 
@@ -2787,10 +2860,11 @@ TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedElev
     UINT width = 0u, height = 0u, element_stride = 0u;
     std::vector<std::uint8_t> bytes;
   };
-  using tuple_t = std::array<payload_t, 11u>;
-  constexpr std::array<const char *, 11u> names {
+  using tuple_t = std::array<payload_t, 14u>;
+  constexpr std::array<const char *, 14u> names {
     "support", "field pin", "distance", "identity", "history", "source", "probability",
-    "Gaussian weight", "Gaussian blend", "Gaussian vertical conditioned", "Gaussian control"
+    "Gaussian weight", "Gaussian blend", "Gaussian vertical conditioned", "Gaussian control",
+    "Final", "OCR8", "UIP4"
   };
   const auto read_view = [&](ID3D11ShaderResourceView *view, payload_t &out) {
     if (!view) return false;
@@ -2849,13 +2923,14 @@ TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedElev
     return true;
   };
   const auto read_tuple = [&](const models::estimate_result &result, tuple_t &out) {
-    const std::array<ID3D11ShaderResourceView *, 11u> views {
+    const std::array<ID3D11ShaderResourceView *, 14u> views {
       result.subtitle_contour_support.Get(), result.subtitle_contour_field_pin.Get(),
       result.subtitle_contour_distance.Get(), result.subtitle_contour_identity.Get(),
       result.subtitle_contour_history.Get(), result.subtitle_contour_source.Get(),
       result.subtitle_ocr_probability.Get(), result.subtitle_gaussian_weight.Get(),
       result.subtitle_gaussian_blend.Get(), result.subtitle_gaussian_vertical_conditioned.Get(),
-      result.subtitle_gaussian_control.Get()
+      result.subtitle_gaussian_control.Get(), result.shadow_final_parallax.Get(),
+      result.ocr_box_record.Get(), result.subtitle_locator_state.Get()
     };
     for (std::size_t i = 0u; i < views.size(); ++i) {
       if (!read_view(views[i], out[i])) return false;
@@ -2929,11 +3004,25 @@ TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedElev
                           [](std::uint8_t byte) { return byte != 0u; }))
     << "A zero probability placeholder cannot serve as the detector oracle.";
 
-  constexpr std::array<std::array<UINT, 2u>, 2u> followers {{{1280u, 720u}, {1920u, 1080u}}};
-  for (const auto &extent : followers) {
-    SCOPED_TRACE(std::to_string(extent[0u]) + 'x' + std::to_string(extent[1u]));
+  struct follower_case_t {
+    UINT width, height;
+    models::depth_optional_work_mode_e optional_work;
+    std::uint64_t subtitle_context_generation;
+  };
+  constexpr std::array<follower_case_t, 4u> followers {{
+    {1280u, 720u, models::depth_optional_work_mode_e::ordinary, 0u},
+    {1920u, 1080u, models::depth_optional_work_mode_e::ordinary, 0u},
+    {1280u, 720u, models::depth_optional_work_mode_e::ordinary, 1u},
+    {1280u, 720u, models::depth_optional_work_mode_e::disable_subtitle, 0u},
+  }};
+  for (const auto &test_case : followers) {
+    const bool defer_context_admission = test_case.subtitle_context_generation != 0u ||
+      test_case.optional_work == models::depth_optional_work_mode_e::disable_subtitle;
+    SCOPED_TRACE(std::to_string(test_case.width) + 'x' + std::to_string(test_case.height) +
+      " scope=" + std::to_string(test_case.subtitle_context_generation) +
+      " disable=" + std::to_string(test_case.optional_work == models::depth_optional_work_mode_e::disable_subtitle));
     source_t follower;
-    ASSERT_TRUE(create_source(extent[0u], extent[1u], true, follower));
+    ASSERT_TRUE(create_source(test_case.width, test_case.height, true, follower));
     models::video_depth_estimator estimator {
       device, context, assets, config::video_t::sbs_t {}, video::host_sbs_v2_depth_model()
     };
@@ -2947,18 +3036,21 @@ TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedElev
     ASSERT_TRUE(pending_n.inference_enqueued);
     ASSERT_TRUE(pending_n.subtitle_ocr_inference_enqueued);
     ASSERT_FALSE(pending_n.completed_frame_valid);
-    // Query readiness only. No finish/poll consumes N: the next estimate call must perform the
-    // complete consume-N/admit-N+1 transition before any diagnostic readback is attempted.
+    // Query readiness only. The next estimate consumes N and may admit N+1 only when its
+    // context does not need to clear any singleton resource belonging to N's publication.
     ASSERT_TRUE(wait_until_reusable(estimator));
     const auto completed_n = estimator.estimate_depth(
       follower.view.Get(), models::input_color_space::srgb, frame_n + 1u, false, {},
-      models::depth_optional_work_mode_e::ordinary,
-      {.observation_timestamp_us = clock_n + 33333u}
+      test_case.optional_work,
+      {.observation_timestamp_us = clock_n + 33333u},
+      test_case.subtitle_context_generation
     );
     ASSERT_TRUE(completed_n.completed_frame_valid);
     ASSERT_EQ(completed_n.completed_frame_id, frame_n);
-    ASSERT_TRUE(completed_n.inference_enqueued);
-    ASSERT_TRUE(completed_n.subtitle_ocr_inference_enqueued);
+    ASSERT_EQ(completed_n.inference_enqueued, !defer_context_admission);
+    ASSERT_EQ(completed_n.subtitle_ocr_inference_enqueued, !defer_context_admission);
+    ASSERT_FALSE(completed_n.gpu_undecided_transaction_enqueued);
+    ASSERT_FALSE(completed_n.subtitle_work_suppressed);
     ASSERT_TRUE(models::subtitle_evidence_is_exact_frame(completed_n));
     ASSERT_TRUE(estimator.publication_is_current(completed_n.publication));
     ASSERT_EQ(completed_n.input_region.source_width, source_width);
@@ -2997,8 +3089,8 @@ TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedElev
       EXPECT_EQ(before[i].element_stride, expected[i].element_stride);
       EXPECT_EQ(before[i].bytes, expected[i].bytes);
     }
-    // N+1 may finish CUDA while its working source/probability are reused. It remains unconsumed,
-    // so N is still the current publication and every completed diagnostic must retain its bits.
+    // N+1 may finish CUDA or remain unadmitted. Neither case may replace N's complete published
+    // tuple, including Final/OCR8/UIP4, before the next admission or completion is consumed.
     ASSERT_TRUE(wait_until_reusable(estimator));
     ASSERT_TRUE(estimator.publication_is_current(completed_n.publication));
     ASSERT_TRUE(read_tuple(completed_n, after));
@@ -3011,18 +3103,39 @@ TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedElev
       EXPECT_EQ(after[i].element_stride, before[i].element_stride);
       EXPECT_EQ(after[i].bytes, before[i].bytes);
     }
-    // Cleanup occurs only after the pipeline assertions; a new publication ends N's borrowed
-    // view lifetime. Never claim that saved SRVs authenticate N after that invalidation.
+    if (defer_context_admission) {
+      // Returning N did not accept any part of the new request. No hidden pending work exists,
+      // and the next actual admission must still perform the requested context reset.
+      const auto no_pending = estimator.finish_pending_depth_for_evaluation();
+      ASSERT_FALSE(no_pending.completed_frame_valid);
+      ASSERT_TRUE(estimator.publication_is_current(completed_n.publication));
+      const auto admitted_follower = estimator.estimate_depth(
+        follower.view.Get(), models::input_color_space::srgb, frame_n + 1u, false, {},
+        test_case.optional_work,
+        {.observation_timestamp_us = clock_n + 33333u},
+        test_case.subtitle_context_generation
+      );
+      ASSERT_FALSE(admitted_follower.completed_frame_valid);
+      ASSERT_TRUE(admitted_follower.inference_enqueued);
+      ASSERT_FALSE(admitted_follower.gpu_undecided_transaction_enqueued);
+      EXPECT_EQ(admitted_follower.subtitle_ocr_inference_enqueued,
+        test_case.optional_work == models::depth_optional_work_mode_e::ordinary);
+      EXPECT_FALSE(estimator.publication_is_current(completed_n.publication));
+    }
+    // A new publication ends N's borrowed view lifetime. Never claim that saved SRVs
+    // authenticate N after that invalidation.
     const auto completed_follower = estimator.finish_pending_depth_for_evaluation();
     ASSERT_TRUE(completed_follower.completed_frame_valid);
     EXPECT_EQ(completed_follower.completed_frame_id, frame_n + 1u);
+    EXPECT_EQ(completed_follower.subtitle_work_suppressed,
+      test_case.optional_work == models::depth_optional_work_mode_e::disable_subtitle);
     EXPECT_FALSE(estimator.publication_is_current(completed_n.publication));
     EXPECT_FALSE(estimator.has_terminal_failure());
   }
 }
 
 // Actual joined observations, native count history and publication; no CPU contour/warp oracle.
-TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHoldIdleTupleAndResetExtent) {
+TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHoldIdleTupleAndResetScopeAndExtent) {
   const auto *enabled = std::getenv("APOLLO_RUN_TENSORRT_TESTS");
   if (!enabled || std::string_view {enabled} != "1") {
     GTEST_SKIP() << "Set APOLLO_RUN_TENSORRT_TESTS=1 for the local NVIDIA/TensorRT integration check.";
@@ -3253,6 +3366,7 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
   constexpr std::uint64_t first_frame = 0x10000a000ull;
   constexpr std::uint64_t first_clock = 0x200040000ull;
   std::uint64_t frame_id = first_frame, clock_us = first_clock;
+  std::uint64_t subtitle_context_generation = 1u;
   models::estimate_result baseline;
   std::optional<receipt::receipt_t> owner;
   tuple_t expected;
@@ -3266,7 +3380,8 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
     }
     const auto old_publication = baseline.publication;
     const auto submitted = estimator.estimate_depth(input, models::input_color_space::srgb,
-      frame_id, false, {}, models::depth_optional_work_mode_e::ordinary, request);
+      frame_id, false, {}, models::depth_optional_work_mode_e::ordinary, request,
+      subtitle_context_generation);
     ASSERT_TRUE(submitted.inference_enqueued);
     ASSERT_FALSE(submitted.gpu_undecided_transaction_enqueued);
     ASSERT_TRUE(submitted.subtitle_ocr_inference_enqueued);
@@ -3405,6 +3520,67 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
   verify_idle_hold();
   ASSERT_FALSE(HasFatalFailure());
 
+  // A scope rejection can happen without changing the caller's semantic epoch. Hard disable
+  // must still clear mature subtitle history, skip OCR even for Dump, and publish Base exactly.
+  ASSERT_TRUE(wait_until_reusable());
+  ++frame_id; clock_us += 100000u;
+  const auto scope_domain = baseline.publication.domain_tag;
+  const auto disabled_request = models::make_gpu_adaptive_request(frame_id, true, &*owner,
+    baseline.publication, clock_us);
+  ASSERT_TRUE(disabled_request.authorize_gpu_undecided_reuse);
+  const auto disabled = estimator.estimate_depth(changed_source.Get(), models::input_color_space::srgb,
+    frame_id, true, {}, models::depth_optional_work_mode_e::disable_subtitle, disabled_request,
+    subtitle_context_generation);
+  ASSERT_TRUE(disabled.inference_enqueued);
+  EXPECT_FALSE(disabled.gpu_undecided_transaction_enqueued);
+  EXPECT_FALSE(disabled.subtitle_ocr_inference_enqueued);
+  baseline = estimator.finish_pending_depth_for_evaluation();
+  ASSERT_TRUE(baseline.completed_frame_valid);
+  EXPECT_TRUE(baseline.subtitle_work_suppressed);
+  EXPECT_FALSE(baseline.input_domain_reset);
+  EXPECT_EQ(baseline.publication.domain_tag, scope_domain);
+  EXPECT_FALSE(models::subtitle_evidence_is_exact_frame(baseline));
+  owner = wait_for_receipt(baseline);
+  ASSERT_TRUE(owner);
+  EXPECT_EQ(owner->subtitle, receipt::subtitle_disposition_e::suppressed);
+  ASSERT_TRUE(read_tuple(baseline, expected));
+  EXPECT_EQ(expected[7u].bytes, expected[8u].bytes);
+  for (std::size_t index = 11u; index < expected.size(); ++index) {
+    SCOPED_TRACE(names[index]);
+    EXPECT_TRUE(std::all_of(expected[index].bytes.begin(), expected[index].bytes.end(),
+      [](const std::uint8_t byte) { return byte == 0u; }));
+  }
+
+  // Returning to ordinary work under that same epoch also resets. The unchanged source cannot
+  // borrow mature counts or a prior UIP4 plane, and reentry needs its own four observations.
+  owner.reset();
+  ++frame_id; clock_us += 100000u;
+  observe(changed_source.Get());
+  ASSERT_FALSE(HasFatalFailure());
+  EXPECT_FALSE(baseline.input_domain_reset);
+  EXPECT_EQ(baseline.publication.domain_tag, scope_domain);
+  EXPECT_EQ(feature_count(expected, *witness), 1u);
+  EXPECT_EQ(word(expected[13u], *witness), 0u);
+  for (std::uint32_t count = 2u; count <= v2::subtitle_contour_history_confirmation_observations; ++count) {
+    ++frame_id; clock_us += 100000u;
+    observe(changed_source.Get());
+    ASSERT_FALSE(HasFatalFailure());
+    EXPECT_EQ(feature_count(expected, *witness), count);
+    EXPECT_EQ(word(expected[13u], *witness),
+      count == v2::subtitle_contour_history_confirmation_observations ? 1u : 0u);
+  }
+
+  // An intervening disabled desktop may have been dropped while inference was busy. A later
+  // changed epoch must reset even when both admitted transactions are ordinary and same-domain.
+  ++subtitle_context_generation;
+  ++frame_id; clock_us += 100000u;
+  observe(changed_source.Get());
+  ASSERT_FALSE(HasFatalFailure());
+  EXPECT_FALSE(baseline.input_domain_reset);
+  EXPECT_EQ(baseline.publication.domain_tag, scope_domain);
+  EXPECT_EQ(feature_count(expected, *witness), 1u);
+  EXPECT_EQ(word(expected[13u], *witness), 0u);
+
   // An old-domain receipt is otherwise valid. A changed source extent must force/reset rather
   // than carry the mature old contour into a newly sized observation. The new current OCR
   // cover can still provide provisional protection while its own pixel history confirms.
@@ -3415,7 +3591,8 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
     baseline.publication, clock_us);
   ASSERT_TRUE(reset_request.authorize_gpu_undecided_reuse);
   const auto resized = estimator.estimate_depth(larger_source.Get(), models::input_color_space::srgb,
-    frame_id, false, {}, models::depth_optional_work_mode_e::ordinary, reset_request);
+    frame_id, false, {}, models::depth_optional_work_mode_e::ordinary, reset_request,
+    subtitle_context_generation);
   ASSERT_TRUE(resized.inference_enqueued);
   EXPECT_FALSE(resized.gpu_undecided_transaction_enqueued);
   baseline = estimator.finish_pending_depth_for_evaluation();

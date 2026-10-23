@@ -86,7 +86,14 @@ namespace models {
   enum class depth_optional_work_mode_e : std::uint8_t {
     ordinary,
     suppress_subtitle,  ///< Publish Base and freeze OCR8/SLR13 for native move/size.
+    disable_subtitle,  ///< Publish Base without subtitle work outside an eligible video context.
   };
+
+  [[nodiscard]] constexpr bool depth_optional_work_suppresses_subtitle(
+    const depth_optional_work_mode_e work
+  ) noexcept {
+    return work != depth_optional_work_mode_e::ordinary;
+  }
 
   [[nodiscard]] constexpr bool depth_optional_work_allows_gpu_undecided(
     const depth_optional_work_mode_e work
@@ -97,8 +104,12 @@ namespace models {
   /** Explicit subtitle eligibility is independent of the GPU similarity decision. */
   [[nodiscard]] constexpr depth_optional_work_mode_e select_depth_optional_work_mode(
     const bool observed_interactive_move_size = false,
-    const bool snapshot_debug_inputs = false
+    const bool snapshot_debug_inputs = false,
+    const bool subtitle_context_eligible = true
   ) noexcept {
+    if (!subtitle_context_eligible) {
+      return depth_optional_work_mode_e::disable_subtitle;
+    }
     return observed_interactive_move_size && !snapshot_debug_inputs ?
              depth_optional_work_mode_e::suppress_subtitle :
              depth_optional_work_mode_e::ordinary;

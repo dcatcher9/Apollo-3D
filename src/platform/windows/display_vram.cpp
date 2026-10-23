@@ -44,6 +44,7 @@
 #include "src/host_sbs_provider.h"
 #include "src/host_sbs_resolution.h"
 #include "src/host_sbs_shader_cache.h"
+#include "src/host_subtitle_context.h"
 #include "src/host_sbs_v2_geometry.h"
 #include "src/logging.h"
 #include "src/model_manager.h"
@@ -54,6 +55,7 @@
 #include "src/video.h"
 #include "src/video_depth_estimator.h"
 #include "video_dom_client.h"
+#include "video_player_context.h"
 
 #if !defined(SUNSHINE_SHADERS_DIR)  // for testing this needs to be defined in cmake as we don't do an install
   #define SUNSHINE_SHADERS_DIR SUNSHINE_ASSETS_DIR "/shaders/directx"
@@ -630,7 +632,9 @@ namespace platf::dxgi {
         .estimator_present = static_cast<bool>(depth_estimator),
         .pipeline_build_pending = depth_estimator_build.valid(),
         .depth_completion_pending = depth_completion_poll_pending,
-        .authority_reprocess_pending = depth_authority_reprocess_pending,
+        .authority_reprocess_pending = depth_authority_reprocess_pending || subtitle_context_reprocess_pending ||
+          (sbs_mode != ::video::SBS_OFF && models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer) &&
+           video_player_registry && !video_player_registry_ready_observed && video_player_registry->ready()),
         .dump_pending = sbs_dumper.needs_conversion_poll(),
       };
       return work.needs_service([]() {
@@ -1202,6 +1206,14 @@ namespace platf::dxgi {
             if (!matched_render_slot) {
               return false;
             }
+            if (!subtitle_context.matches(matched_render_slot->subtitle_context_generation)) {
+              // Normal focus/video transitions retire old work without displaying its protected field.
+              matched_render_slot = nullptr;
+              est = {};
+              render_input_srv = img_ctx->encoder_input_res.get();
+              matched_presentation_cache.invalidate();
+              return false;
+            }
             if (
               !est.completed_frame_valid ||
               est.completed_frame_id != matched_render_slot->frame_id ||
@@ -1225,10 +1237,12 @@ namespace platf::dxgi {
               matched_render_slot->window_region &&
               !window_region_authorized_for_render(*matched_render_slot)
             ) {
-              if (matched_render_slot->depth_input_region.is_video_region()) {
+              if (matched_render_slot->depth_input_region.is_video_region() ||
+                  matched_render_slot->subtitle_context_eligible) {
                 // The completion is still consumed and releases its pending slot, but geometry
                 // observed before a focus/move/resize/monitor transition cannot warp newer pixels.
-                clear_cached_roi_output();
+                matched_presentation_cache.reset();
+                latest_v2_lineage.reset();
                 matched_render_slot = nullptr;
                 est = {};
                 render_input_srv = img_ctx->encoder_input_res.get();
@@ -1240,6 +1254,7 @@ namespace platf::dxgi {
               matched_render_slot->window_region_mapping_status = "not-mapped";
               matched_render_slot->live_window_authority_generation = 0u;
             }
+            subtitle_context_reprocess_pending = false;
             return true;
           };
 
@@ -1438,7 +1453,7 @@ namespace platf::dxgi {
             .parallax_v2_renderer =
               host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2,
             .snapshot_debug_inputs = snapshot_debug_inputs,
-            .authority_reprocess_pending = depth_authority_reprocess_pending,
+            .authority_reprocess_pending = depth_authority_reprocess_pending || subtitle_context_reprocess_pending,
             .producer_terminal = producer_terminal,
             .interactive_move_size = current_interactive_move_size,
           };
@@ -1512,7 +1527,8 @@ namespace platf::dxgi {
                   live_source_desc.Height,
                   input_color_space,
                   depth_authority_reprocess_pending,
-                  producer_terminal
+                  producer_terminal,
+                  subtitle_context.generation()
                 ),
             }
           );
@@ -1713,7 +1729,8 @@ namespace platf::dxgi {
                   );
                 const auto optional_work = models::select_depth_optional_work_mode(
                   matched_candidate_slot->observed_interactive_move_size,
-                  snapshot_debug_inputs
+                  snapshot_debug_inputs,
+                  matched_candidate_slot->subtitle_context_eligible
                 );
                 const bool authorize_gpu_undecided =
                   dedup_gate_open &&
@@ -1744,8 +1761,20 @@ namespace platf::dxgi {
                   snapshot_debug_inputs,
                   matched_candidate_slot->depth_input_region,
                   optional_work,
-                  adaptive_request
+                  adaptive_request,
+                  matched_candidate_slot->subtitle_context_generation
                 );
+                if (completion_finalized_before_admission &&
+                    !depth_estimator->publication_is_current(est.publication)) {
+                  // Admission can reset subtitle state without changing the depth domain.
+                  // Borrowed views from the early completion no longer authorize this draw.
+                  matched_render_slot = nullptr;
+                  est = {};
+                  render_input_srv = img_ctx->encoder_input_res.get();
+                  matched_presentation_cache.reset();
+                  latest_v2_lineage.reset();
+                  completion_finalized_before_admission = false;
+                }
                 if (
                   diagnostics_enabled &&
                   matched_candidate_slot->depth_input_region.is_video_region() &&
@@ -2217,7 +2246,8 @@ namespace platf::dxgi {
               live_source_desc.Height,
               input_color_space,
               depth_authority_reprocess_pending,
-              producer_terminal
+              producer_terminal,
+              subtitle_context.generation()
             );
           const bool repeat_matched_output =
             models::host_sbs_should_repeat_packed_presentation(
@@ -2443,7 +2473,8 @@ namespace platf::dxgi {
                 matched_render_slot->color_space,
                 est.refined_live_geometry_active,
                 est.field_width,
-                est.field_height
+                est.field_height,
+                matched_render_slot->subtitle_context_generation
               );
             } else {
               // Flat identity cannot seed packed presentation continuity. This cache remains
@@ -2981,6 +3012,7 @@ namespace platf::dxgi {
       matched_presentation_cache.reset();
       depth_completion_poll_pending = false;
       depth_authority_reprocess_pending = false;
+      subtitle_context_reprocess_pending = false;
       sbs_dumper.cancel_pending_request();
       publish_depth_status(0);
     }
@@ -2992,6 +3024,9 @@ namespace platf::dxgi {
       if (!models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer)) {
         sbs_dumper.cancel_pending_request();
         return false;
+      }
+      if (!video_player_registry) {
+        video_player_registry = std::make_unique<video_player::registry_t>();
       }
       if (depth_estimator) {
         return true;
@@ -3483,7 +3518,8 @@ namespace platf::dxgi {
         const models::input_color_space presented_color_space,
         const bool presented_refined_live_geometry_active,
         const int presented_field_width,
-        const int presented_field_height
+        const int presented_field_height,
+        const std::uint64_t subtitle_context_generation
       ) noexcept {
         // A recovered matched completion clears timeout_active at its existing policy site.
         valid_ = true;
@@ -3496,6 +3532,7 @@ namespace platf::dxgi {
         refined_live_geometry_active_ = presented_refined_live_geometry_active;
         field_width_ = presented_field_width;
         field_height_ = presented_field_height;
+        subtitle_context_generation_ = subtitle_context_generation;
       }
 
       [[nodiscard]] bool has_fresh_pixels() const noexcept {
@@ -3525,12 +3562,14 @@ namespace platf::dxgi {
         const UINT source_height,
         const models::input_color_space color_space,
         const bool reprocess_pending,
-        const bool producer_terminal
+        const bool producer_terminal,
+        const std::uint64_t subtitle_context_generation
       ) const noexcept {
         return valid_ && input_region_.valid() &&
                input_region_.source_width == source_width &&
                input_region_.source_height == source_height &&
-               color_space_ == color_space && !reprocess_pending && !producer_terminal;
+               color_space_ == color_space && !reprocess_pending && !producer_terminal &&
+               subtitle_context_generation_ == subtitle_context_generation;
       }
 
       [[nodiscard]] const std::optional<std::chrono::steady_clock::time_point> &
@@ -3580,6 +3619,7 @@ namespace platf::dxgi {
       int field_width_ = 0;
       int field_height_ = 0;
       bool timeout_active_ = false;
+      std::uint64_t subtitle_context_generation_ = 0u;
     };
 
     struct matched_frame_slot_t {
@@ -3615,6 +3655,8 @@ namespace platf::dxgi {
       std::uint64_t observed_region_authority_generation = 0u;
       std::uint64_t observed_browser_authority_epoch = 0u;
       bool observed_interactive_move_size = false;
+      std::uint64_t subtitle_context_generation = 0u;
+      bool subtitle_context_eligible = false;
       // CPU-owned submission class authenticates matched completion metadata. The exact final
       // publication receipt independently reports the actual infer/reuse branch and depth owner.
       bool gpu_undecided_transaction = false;
@@ -3739,6 +3781,8 @@ namespace platf::dxgi {
       destination.observed_browser_authority_epoch =
         source.observed_browser_authority_epoch;
       destination.observed_interactive_move_size = source.observed_interactive_move_size;
+      destination.subtitle_context_generation = source.subtitle_context_generation;
+      destination.subtitle_context_eligible = source.subtitle_context_eligible;
       destination.gpu_undecided_transaction = source.gpu_undecided_transaction;
       destination.pending = false;
     }
@@ -3871,6 +3915,7 @@ namespace platf::dxgi {
       const bool current_interactive_move_size
     ) const noexcept {
       if (
+        !subtitle_context.matches(slot.subtitle_context_generation) ||
         !slot.depth_input_region.valid() ||
         slot.depth_input_region.source_width != source_desc.Width ||
         slot.depth_input_region.source_height != source_desc.Height ||
@@ -3883,7 +3928,7 @@ namespace platf::dxgi {
       ) {
         return false;
       }
-      return !slot.depth_input_region.is_video_region() ||
+      return (!slot.depth_input_region.is_video_region() && !slot.subtitle_context_eligible) ||
              window_region_authorized_for_render(slot);
     }
 
@@ -3895,7 +3940,7 @@ namespace platf::dxgi {
       const std::uint64_t current_browser_authority_epoch,
       const bool current_interactive_move_size
     ) const noexcept {
-      return depth_estimator &&
+      return depth_estimator && subtitle_context.matches(latest_v2_lineage.slot.subtitle_context_generation) &&
              depth_estimator->publication_is_current(latest_v2_lineage.estimate.publication) &&
              latest_v2_lineage.route_matches(
                source_desc,
@@ -3905,7 +3950,8 @@ namespace platf::dxgi {
                current_browser_authority_epoch,
                current_interactive_move_size
              ) &&
-             (!latest_v2_lineage.slot.depth_input_region.is_video_region() ||
+             ((!latest_v2_lineage.slot.depth_input_region.is_video_region() &&
+               !latest_v2_lineage.slot.subtitle_context_eligible) ||
               window_region_authorized_for_render(latest_v2_lineage.slot));
     }
 
@@ -3917,6 +3963,7 @@ namespace platf::dxgi {
       const models::input_color_space current_color_space
     ) {
       const bool completion_route_matches_current =
+        subtitle_context.matches(slot.subtitle_context_generation) &&
         slot.inference_content_timestamp && estimate.completed_frame_id == slot.frame_id &&
         depth_completion_region_matches_submission(estimate, slot.depth_input_region) &&
         estimate.color_space == slot.color_space && estimate.color_space == current_color_space &&
@@ -3929,6 +3976,7 @@ namespace platf::dxgi {
           authority_generation(live_foreground_region) &&
         slot.observed_browser_authority_epoch == live_browser_authority_epoch &&
         slot.observed_interactive_move_size == interactive_move_size_observed &&
+        (!slot.subtitle_context_eligible || window_region_authorized_for_render(slot)) &&
         (!slot.depth_input_region.is_video_region() ||
          (slot.inference_ddup_damage && window_region_authorized_for_render(slot)));
       if (!detail::host_sbs_latest_v2_completion_retention_allowed(
@@ -4392,12 +4440,63 @@ namespace platf::dxgi {
       // the live epoch derived from it, and any later ROI mapping remain one attribution unit.
       const auto browser_snapshot = video_dom_lease ? video_dom_lease->latest() : nullptr;
       observe_live_browser_authority(browser_snapshot);
+      observe_subtitle_context(observed, browser_snapshot, output_desc, source_desc, content_timestamp);
       return {
         .foreground = observed,
         .browser_snapshot = browser_snapshot,
         .browser_authority = live_browser_authority,
         .browser_authority_epoch = live_browser_authority_epoch,
       };
+    }
+
+    // Subtitle permission is independent of the generic foreground depth ROI. Fullscreen keeps
+    // its semantic video identity even when depth analysis canonicalizes to the whole source.
+    void observe_subtitle_context(
+      const foreground_window::snapshot_t &foreground,
+      const video_dom::snapshot_ptr &browser,
+      const DXGI_OUTPUT_DESC &output,
+      const D3D11_TEXTURE2D_DESC &source,
+      const std::optional<std::chrono::steady_clock::time_point> &content_timestamp
+    ) {
+      using namespace models::host_subtitle_context;
+      key_t next;
+      video_player_registry_ready_observed = video_player_registry && video_player_registry->ready();
+      const auto now = std::chrono::steady_clock::now();
+      if (live_foreground_region && foreground_window::usable_for_content(
+            foreground, content_timestamp, now, std::chrono::milliseconds {250})) {
+        const bool browser_identity_matches = browser && live_browser_authority &&
+          browser->window == foreground.window && browser->process_id == foreground.process_id;
+        bool browser_video = false;
+        if (browser_identity_matches && video_dom::detail::usable_for_content(
+              *browser, content_timestamp, now, std::chrono::milliseconds {2500})) {
+          const auto mapped = video_dom::map_screen_rect_to_capture(
+            browser->screen_rect,
+            {output.DesktopCoordinates.left, output.DesktopCoordinates.top,
+             output.DesktopCoordinates.right, output.DesktopCoordinates.bottom},
+            source.Width, source.Height, video_dom::rotation_e::identity);
+          browser_video = mapped && (browser->status != video_dom::status_e::ok_fullscreen ||
+            (mapped.capture_pixels.left == 0 && mapped.capture_pixels.top == 0 &&
+             mapped.capture_pixels.right == source.Width && mapped.capture_pixels.bottom == source.Height));
+        }
+        if (browser_video) {
+          next = {kind_e::browser_video, foreground.window, foreground.process_id,
+                  foreground.generation, live_browser_authority_epoch};
+        } else if (!browser_identity_matches && video_player_registry &&
+                   video_player_registry->contains_process(foreground.process_id)) {
+          next = {kind_e::registered_video_player, foreground.window, foreground.process_id,
+                  foreground.generation, 0u};
+        }
+      }
+      if (subtitle_context.update(next)) {
+        // Revoke even full-source completions and already-packed output. The generation survives
+        // busy drops, so returning to the same video cannot revive pre-transition protection.
+        matched_presentation_cache.reset();
+        latest_v2_lineage.reset();
+        subtitle_context_reprocess_pending = true;
+        BOOST_LOG(info) << "Host SBS subtitle context="sv
+                        << kind_name(subtitle_context.kind())
+                        << " generation="sv << subtitle_context.generation() << '.';
+      }
     }
 
     bool window_region_matches_live_authority(
@@ -5106,6 +5205,11 @@ namespace platf::dxgi {
         authority_generation(live_foreground_region);
       slot.observed_browser_authority_epoch = copied_authority.browser_authority_epoch;
       slot.observed_interactive_move_size = interactive_move_size_observed;
+      slot.subtitle_context_generation = subtitle_context.generation();
+      slot.subtitle_context_eligible = subtitle_context.eligible() && slot.window_region &&
+        window_region_matches_live_authority(*slot.window_region) &&
+        ((subtitle_context.kind() == models::host_subtitle_context::kind_e::browser_video) ==
+         (slot.window_region->authority_kind == sbs_debug::window_region_authority_kind_e::chromium_video));
       if (slot.depth_input_region.is_video_region() && slot.live_window_authority_generation == 0u) {
         slot.window_region.reset();
         slot.window_region_observer_status = "not-observed";
@@ -5528,6 +5632,9 @@ namespace platf::dxgi {
       live_foreground_region.reset();
       live_browser_authority.reset();
       live_browser_authority_epoch = 0u;
+      subtitle_context = {};
+      subtitle_context_reprocess_pending = false;
+      video_player_registry_ready_observed = false;
       interactive_move_size_observed = false;
       browser_roi_not_before = {};
       last_window_region.reset();
@@ -6349,6 +6456,10 @@ namespace platf::dxgi {
     D3D11_VIEWPORT sbs_viewport;
     std::array<matched_frame_slot_t, 2> matched_frame_slots;
     std::optional<video_dom::lease_t> video_dom_lease;
+    std::unique_ptr<video_player::registry_t> video_player_registry;
+    bool video_player_registry_ready_observed = false;
+    models::host_subtitle_context::tracker_t subtitle_context;
+    bool subtitle_context_reprocess_pending = false;
     models::depth_analysis_generation_tracker_t depth_analysis_generation_tracker;
     foreground_window::continuity_tracker_t foreground_window_tracker;
     std::optional<foreground_window::snapshot_t> live_window_authority;

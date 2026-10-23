@@ -6,8 +6,10 @@ and subtitle ownership. The adaptive geometry described in [Host SBS pipeline](h
 its controller across cuts. Its mean zero and robust
 relative-depth amplitude continuously follow authenticated source-time observations. Confirmed
 cuts retain that geometry controller and remain depth/subtitle-history reset authority. The adaptive
-UI-plane filter resets on a cut or input-domain change. A true analysis-domain reset clears the
-geometry controller too. Private normalized depth, history, evidence and cut state remain separate
+UI-plane filter resets on a cut, input-domain change or admitted live subtitle-context change.
+The last of these clears subtitle history only and changes no scene-cut evidence or camera state.
+A true analysis-domain reset clears the geometry controller too. Private normalized depth,
+history, evidence and cut state remain separate
 from the curve-free geometry map.
 
 ## GPU evidence
@@ -72,6 +74,21 @@ host rejects an `ok-fullscreen` subrectangle. The subtitle path observes whichev
 V2 actually used. Any real input-domain transition resets subtitle history together with the
 ordinary cut and camera histories.
 
+Live subtitle permission is a separate Host AI 3D scope. Positive Chromium semantic video evidence
+admits windowed or fullscreen video; native players require the authenticated active process to
+match a Windows `Software\Clients\Media` registration with video capabilities. A generic foreground
+ROI and fullscreen geometry alone are insufficient. This identifies a player application rather
+than proving loaded or playing media; players without qualifying registration fail closed. The detailed
+scope belongs to [the subtitle contract](host-sbs.md#native-subtitle-contours-and-ui-plane), and
+Game 3D remains unchanged. Explicit offline video consumers retain default eligibility and the
+existing zero context epoch.
+
+A live subtitle-context transition revokes older completions and packed-output caches even when
+the depth domain stays full-source. The monotonic scope generation records changes while inference
+is busy, preventing video/desktop/video ABA from reviving old protection. The next admitted
+generation resets only subtitle state and forces inference; cut history, baselines and geometry
+keep their ordinary authority. A true depth-domain transition still applies the broader reset above.
+
 A proven unchanged DDup reuse of authenticated completed content creates no scene observation. Once an
 authenticated ROI completion owns the exact positioned route, a contiguous and complete sequence of dirty/move metadata may prove
 that every later desktop change was wholly outside that analysis domain. Repeated delivery of one
@@ -96,8 +113,8 @@ The GPU adaptive path may omit repeated depth observations for an authenticated 
 candidate when current OCR work is unavailable or ineligible. After exact unchanged reuse has been
 ruled out, a genuinely admitted ordinary source with an eligible current OCR path submits the
 existing force-infer request through the same joined depth/OCR root. Eligibility uses host-owned
-resource, work-mode and source-geometry facts. It does not inspect OCR-band image content, boxes,
-probabilities or SLR state. Otherwise the host uses route, identity and complete retained DDup
+video-context, resource, work-mode and source-geometry facts. It does not inspect OCR-band image
+content, boxes, probabilities or SLR state. Otherwise the host uses route, identity and complete retained DDup
 history to classify that frame as GPU-undecided; it does not apply a motion-area or rectangle-shape
 heuristic. A dense GPU comparison against the exact state-1 active model-input history then applies
 finite, global medium/strong, and supported-tile local bounds. That input is the fused composite's
@@ -108,10 +125,12 @@ ordered source timestamps and the same authenticated domain and dimensions. Reus
 that owner and conceal cumulative drift.
 
 Depth and subtitle advance or hold together inside one joined completion. Current-ready OCR work
-`1`, or current ineligible abstention work `2`, publishes only on valid inference. Work `0` suppresses
-subtitle observation during native USER32 move/size. Every reuse freezes the complete
-OCR8/UIP4/contour/conditioned-final tuple along with depth, cut, camera and V2 Base. Suppression advances
-neither OCR nor locator state and publishes Base as the atomic final field. Only a validated
+`1`, or current ineligible abstention work `2`, publishes only on valid inference. Work `0` covers
+temporary USER32 move/size suppression and hard video-context disable. Neither submits an OCR or
+locator observation; both publish Base through the atomic final-field texture. Temporary
+suppression freezes subtitle memory, while an admitted hard-context transition clears it.
+Every reuse within the current context freezes the complete OCR8/UIP4/contour/conditioned-final
+tuple along with depth, cut, camera and V2 Base. Only a validated
 completed-publication receipt can establish CPU reuse lineage; an external health snapshot cannot.
 
 The device comparison has no OCR-band, localized subtitle-transition or SLR-state veto. The
@@ -160,7 +179,8 @@ owned by [Host SBS frame attribution and failure behavior](host-sbs.md#frame-att
 
 There is no OCR-only DDup retained-box proof. Each accepted ordinary root requests current-ready
 OCR (`1`) or current ineligible abstention (`2`). Neither path relabels an older OCR8 payload. An
-armed Dump 3D root remains a complete ordinary force-infer observation. Exact unchanged DDup
+armed Dump 3D root forces depth inference and remains a complete ordinary subtitle observation
+only in eligible context; it cannot override hard context disable. Exact unchanged DDup
 deliveries submit no root, whether the current color was inferred or reused an older analysis owner.
 The temporal pixel mask's four confirmations count genuine completed eligible inference
 observations with distinct source frame and time, not display frames. Duplicate delivery, exact
@@ -217,9 +237,11 @@ probes preserve the current OCR union but publish inactive SCP4 parameters. Thes
 from valid empty OCR.
 
 There is no preprocessing exclusion, recognizer, subtitle-driven cut veto or detector-private
-pause branch. Native USER32 interactive move/size can suppress the entire optional subtitle
-observation while DAV2 and cut detection continue normally. That suppression advances neither
-pixel confirmation nor the UI controller and does not change cut authority.
+pause branch. Native USER32 interactive move/size can temporarily suppress the entire optional
+subtitle observation while DAV2 and cut detection continue normally. Within an unchanged eligible
+context, that suppression freezes pixel confirmation and the UI controller. Loss of video authority
+instead selects hard disable, which takes precedence over move/size and Dump 3D. Neither mode
+changes cut authority.
 
 ## Appearance proposals
 

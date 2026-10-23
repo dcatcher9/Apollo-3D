@@ -305,6 +305,26 @@ reacquire the camera.
 
 ### Native subtitle contours and UI plane
 
+Live subtitle detection and protection run only in Host AI 3D with authenticated video context.
+The Chromium helper must supply current positive semantic video evidence, including its distinct
+fullscreen result; a generic foreground depth ROI or fullscreen geometry alone grants nothing.
+For native players, the current causal foreground process must match the full executable path of
+a Windows `Software\Clients\Media` registration with a video file-association capability. A bounded
+background registry census supplies this application classification without a player-name list.
+It proves a registered video-player application, not that media is loaded or playing; an empty or
+audio-only window in that application remains eligible. Players without qualifying registration,
+including unregistered portable installations, and unavailable evidence fail closed. Game 3D does
+not use this detector or protection path.
+
+The live subtitle-context generation is independent of the depth analysis domain. Context loss or
+identity change revokes pending completions, retained analysis lineage and packed output, including
+full-source output. Sampling continues while inference is busy, so leaving video and returning to
+the same window cannot revive an earlier conditioned frame. The next admitted context generation
+clears only OCR/UI-plane/contour history and forces a fresh observation; it does not itself reset
+depth, scene-cut or camera state. A real depth-domain transition retains its existing broader reset.
+Explicit offline video consumers keep their default eligible request with context generation zero;
+their evaluator identity and epoch behavior are unchanged.
+
 The adaptive UI controller samples Base under the current authenticated OCR covers. Those covers
 bound the contour search. Until four consecutive cue-free genuine observations, the current OCR cover union supplies provisional protection. Multi-frame confirmed native pixels supply Gaussian centers; the soft
 max-union mask blends Base toward the UI plane before shared slope conditioning.
@@ -333,8 +353,10 @@ When the authenticated detector is available, OCR is an optional child inside th
 publication unit as DAV2. After private warmup/capture, DAV2 and OCR are sibling conditional children
 of one CUDA root and share one completion event after every interop-unmap tail. The authenticated
 subtitle work value is `1` for current-ready OCR, `2` for current ineligible abstention, or `0` for
-native USER32 suppression. Both ordinary dispositions publish only on valid inference; abstention
-keeps the optional OCR handle and `OOCR` marker zero. Suppression advances neither OCR8 nor UIP4.
+native USER32 suppression or hard context disable. Both ordinary dispositions publish only on valid
+inference; abstention keeps the optional OCR handle and `OOCR` marker zero. Neither work-`0` mode
+advances OCR8 or UIP4. Temporary suppression freezes same-context subtitle memory; hard disable
+also clears it on the admitted context transition.
 
 Every reuse leaves OCR crop/TensorRT/postprocess/plane/condition work dormant and holds the complete
 depth/cut/camera/OCR8/UIP4/contour/history/conditioned-final tuple byte-for-byte. Reprojection samples that atomic
@@ -345,8 +367,8 @@ fault. OCR does not run for source frames dropped while the previous observation
 Depth and subtitle advance together in one authenticated completion. After exact unchanged reuse
 has been ruled out, a genuinely admitted ordinary source with a complete eligible OCR path submits
 the existing force-infer request, so current OCR and temporal pixel evidence can observe it. This
-eligibility uses host-owned resource, work-mode and source-geometry facts, not OCR pixels, boxes,
-probabilities or UIP4 state. When OCR is unavailable or currently ineligible, an otherwise authorized
+eligibility uses host-owned video-context, resource, work-mode and source-geometry facts, not OCR
+pixels, boxes, probabilities or UIP4 state. When OCR is unavailable or currently ineligible, an otherwise authorized
 changed-source candidate may remain GPU-undecided; the near-identical comparison then selects
 complete inference or whole-tuple reuse. Neither elapsed source time nor accepted hold count forces
 an observation. Each comparison uses the actual last inference input, so reuse cannot conceal
@@ -355,18 +377,25 @@ not an expiry clock. Exact unchanged DDup reuse
 submits no root and creates no depth or subtitle observation, including when the current color was
 previously accepted by a near-identical reuse of older analysis.
 
+Outside eligible live video context, hard disable submits no OCR preprocessing, inference, OCR8,
+UIP4 or subtitle conditioning. A valid depth inference publishes the fresh post-limit Base through
+the existing final-field publication texture. Dump 3D cannot override this exclusion or serialize
+frozen subtitle resources as current evidence.
+
 During a native USER32 interactive move/size
 observation, the accepted full-source depth frame explicitly suppresses the optional subtitle
 branch: OCR preprocessing and inference,
-OCR8 reduction, UIP4 observation, and subtitle conditioning do not run. This is no OCR observation
-rather than an abstaining or missing record, so the retained UIP4 state does not age or clear; the
-frame publishes the ordinary post-limit Base field. Scene-cut analysis, depth normalization/EMA,
+OCR8 reduction, UIP4 observation, and subtitle conditioning do not run. When temporary suppression
+is selected within an unchanged eligible context, this is no OCR observation rather than an
+abstaining or missing record, so retained UIP4 state does not age or clear. The frame publishes the
+ordinary post-limit Base field. Scene-cut analysis, depth normalization/EMA,
 the V2 camera and the remaining geometry producer continue normally. An explicitly armed Dump 3D
-frame remains an ordinary complete observation so frozen OCR/UIP4 resources are never serialized as
-current-frame evidence. A suppressed completion cannot authorize ordinary joint reuse: a later
+frame remains an ordinary complete observation only when its subtitle context is eligible, so frozen
+OCR/UIP4 resources are never serialized as current-frame evidence. Hard context disable takes
+precedence if video authority is lost. A suppressed completion cannot authorize ordinary joint reuse: a later
 noninteractive candidate needs a complete ordinary depth/subtitle owner under the current route.
 Without that proof it forces an ordinary observation with current-ready OCR (`1`) or exact-current
-ineligible abstention (`2`). Dump 3D forces a complete ordinary observation.
+ineligible abstention (`2`). Dump 3D forces a complete depth observation and retains hard context exclusion.
 
 There is no OCR-only DDup box reuse or retained-box identity-republication path. Desktop damage
 metadata cannot prove the exact OCR tensor after the separately composed hardware cursor has
@@ -1651,8 +1680,10 @@ continues full-source 3D for the current captured display instead of chasing a m
 rectangle. DAV2, depth normalization/EMA, scene-cut analysis, the V2 camera and geometry production
 retain their normal full-frame behavior. The optional subtitle branch is suppressed as described
 above, so moving desktop text cannot acquire or age subtitle authority and the current Base field is
-rendered without subtitle conditioning. An explicitly armed Dump 3D request retains complete
-ordinary observation behavior. When the loop ends, ordinary foreground causality must authorize a
+rendered without subtitle conditioning. Temporary suppression freezes subtitle memory only while
+the video context remains eligible; lost video authority selects hard disable. An explicitly armed
+Dump 3D request overrides temporary suppression, but cannot override hard context disable.
+When the loop ends, ordinary foreground causality must authorize a
 new private matched-frame copy before the matched-domain transition can submit a new ROI; output may briefly be
 identity while that exact ROI completion is pending. This covers standard caption dragging, border
 resizing, and borderless applications that delegate native hit-testing to USER32. For fully custom
