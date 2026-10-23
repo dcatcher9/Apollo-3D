@@ -187,6 +187,11 @@ namespace sunshine_streamline {
     std::atomic<bool> source_requested{};
     std::atomic<std::uint64_t> observation_generation{};
     std::atomic<std::uint64_t> constant_calls{}, tag_calls{}, evaluation_calls{}, dropped{}, invalid{};
+    // Depth tags naming no resource (Streamline's untag): a null Resource
+    // pointer, or a Resource whose native is null.
+    std::atomic<std::uint64_t> depth_untags{};
+    // Next tick each bounded tag line may be written (5 s apart).
+    std::atomic<std::uint64_t> next_compatibility_report{}, next_untag_report{};
     // SDK calls answered with eWarnOutOfVRAM: accepted, counted for the log.
     std::atomic<std::uint64_t> vram_warnings{};
     // One verdict per 2.x call (abi_v2::accepted): the warning is a success.
@@ -1286,8 +1291,9 @@ namespace sunshine_streamline {
       // An opaque FrameToken address can be reused. Its identity is diagnostic
       // only and must never be promoted to an exact numeric frame identifier.
       value.value.explicit_frame = false;
-      if (value.supported && zero_resource_header && index < 3) {
-        static std::atomic<std::uint64_t> next_compatibility_report{};
+      // A null Resource also reads as the zero header; only a real native is
+      // the compatibility layout. An untag is reported on its own line.
+      if (value.supported && zero_resource_header && index < 3 && tag.resource_ptr && value.value.native_resource) {
         const auto now = GetTickCount64();
         auto next = next_compatibility_report.load(std::memory_order_relaxed);
         if (now >= next && next_compatibility_report.compare_exchange_strong(next, now + 5000, std::memory_order_relaxed)) {
@@ -1297,6 +1303,20 @@ namespace sunshine_streamline {
             tag.type, out.viewport, static_cast<unsigned long long>(value.value.native_resource), resource.type, resource.state,
             value.state_requires_observation ? "requires-observed-state" : "declared", resource.width, resource.height,
             value.direct_source ? 1u : 0u);
+          message(text);
+        }
+      }
+      if (value.supported && index < 3 && !value.value.native_resource) {
+        const auto count = depth_untags.fetch_add(1, std::memory_order_relaxed) + 1;
+        const auto now = GetTickCount64();
+        auto next = next_untag_report.load(std::memory_order_relaxed);
+        if (now >= next && next_untag_report.compare_exchange_strong(next, now + 5000, std::memory_order_relaxed)) {
+          char text[320]{};
+          std::snprintf(text, sizeof(text),
+            "Sunshine Streamline depth untag: tag_type=%u viewport=%u scope=%s lifecycle=%u resource=%s untags=%llu; "
+            "a depth tag without a native resource ends that tag and names no depth source",
+            tag.type, out.viewport, source == origin::global ? "global" : source == origin::frame ? "frame" : "local",
+            tag.lifecycle, tag.resource_ptr ? "null_native" : "null", static_cast<unsigned long long>(count));
           message(text);
         }
       }
@@ -1494,6 +1514,19 @@ namespace sunshine_streamline {
     bool direct_tag_admissible(const evaluation_snapshot &snapshot, const evaluated_depth_tag &tag) {
       return !tag_rejection(snapshot, tag);
     }
+    // Streamline's untag (sl_core_api.h: a null resource removes the tag):
+    // every depth tag of this call names no native resource. It ends those
+    // tags and is not a capture attempt, so it names no source to withdraw. A
+    // malformed or loss-marked tag is unsupported and still withdraws.
+    bool depth_untag(const evaluation_snapshot &snapshot) {
+      bool any = false;
+      for (const auto &tag : snapshot.tags) {
+        if (!tag.present) continue;
+        if (!tag.supported || tag.value.native_resource) return false;
+        any = true;
+      }
+      return any;
+    }
     sunshine_scene_depth::jitter_offset depth_frame_jitter(const evaluation_snapshot &snapshot,
         const evaluated_depth_tag &tag) {
       if (!snapshot.frame_correlated || snapshot.decoded != decode_status::ok || !snapshot.camera.jitter_supplied)
@@ -1612,6 +1645,11 @@ namespace sunshine_streamline {
           sunshine_scene_depth::provider_kind::streamline, snapshot.frame_generation_input ? (1ull << 63) | snapshot.viewport : 0,
           snapshot.frame_generation_input ? 0 : snapshot.tag_boundary ? (1ull << 63) | snapshot.viewport : UINT64_MAX);
       };
+      // Pixels already copied stay bounded by the source age and the consumed
+      // watermark; the probe metadata still reports no current depth tag.
+      // Assassin's Creed Shadows (10-22) sends a null FG depth tag every
+      // frame, which used to withdraw its FG source each time.
+      if (snapshot.tag_boundary && depth_untag(snapshot)) return 0;
       if (!direct_source_admissible(snapshot)) { withdraw_invalid_attempt(); return 0; }
       // The adapter defines semantic priority; the capture owner tries this
       // ordered set as one evaluation, including its in-progress lifetime.
@@ -3230,7 +3268,8 @@ namespace sunshine_streamline {
       return success;
     }
     counters counts() {
-      return {constant_calls.load(), tag_calls.load(), evaluation_calls.load(), dropped.load(), invalid.load(), vram_warnings.load()};
+      return {constant_calls.load(), tag_calls.load(), evaluation_calls.load(), dropped.load(), invalid.load(), vram_warnings.load(),
+        depth_untags.load()};
     }
     void lose_observation() { dropped_observation(loss_diagnostics::reason::test_injected, __func__, __LINE__, {}); }
     bool latest(std::uint32_t viewport, std::uint64_t &resource, bool &has_camera, bool &explicit_same_frame, bool &same_token_address) {
@@ -3279,7 +3318,8 @@ namespace sunshine_streamline {
       v1_private_state_checked = false;
       installed_abi = sunshine_streamline::abi::unsupported;
       installed_targets = {};
-      constant_calls = tag_calls = evaluation_calls = dropped = invalid = vram_warnings = 0;
+      constant_calls = tag_calls = evaluation_calls = dropped = invalid = vram_warnings = depth_untags = 0;
+      next_compatibility_report = next_untag_report = 0;
       initialize(nullptr);
     }
   }

@@ -427,8 +427,9 @@ presentation returns to mono. No completion wait or extra copy is added.
 When a supported Streamline Frame Generation source is enabled, its depth and associated camera
 data take priority over NGX, including while its current snapshot is pending. A missing usable FG
 copy stays with that source and uses the documented bounded real-depth reuse or mono behavior;
-it does not borrow an NGX depth texture and attach unrelated SL constants. Explicit FG Off retires
-that source and lets a fresh NGX submission resume. Motion-vector interpolation of two real depth
+it does not borrow an NGX depth texture and attach unrelated SL constants. A depth untag (a null
+resource, which ends the tag) is not a capture attempt and never withdraws depth already captured
+at the frame's tag. Explicit FG Off retires that source and lets a fresh NGX submission resume. Motion-vector interpolation of two real depth
 frames for FG 2x is future work; the current implementation does not generate intermediate depth.
 Reused depth holds its applied gain and zero without learning. User strength reductions apply
 immediately, including zero; increases wait for fresh real depth and a new placement decision.

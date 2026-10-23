@@ -1596,6 +1596,44 @@ namespace {
       settle("SL-until-present-clear-foreign-reset");
       std::puts("PASS native SL provider: depth cleared after evaluation and another viewport's per-frame camera reset keep fresh depth every presentation; no FX");
 
+      // Assassin's Creed Shadows with FG on (10-22): after its FG depth tag
+      // each frame sends a global depth untag, a null Resource or one whose
+      // native is null, with or without a command list (sl_core_api.h: a null
+      // resource removes the tag). An untag is not a capture attempt: the FG
+      // depth captured at the tag stays the viewport's source, so every
+      // presentation keeps fresh FG depth.
+      configure(true);
+      for (const bool null_native : {false, true}) for (const bool untag_commands : {true, false}) {
+        render_tracked_depth = [&] {
+          real_frame();
+          abi_v2::resource empty{};
+          const abi_v2::resource_tag untag{{nullptr, tag_guid, 1}, null_native ? &empty : nullptr, 0, 0, {}};
+          require(global_tag_call(viewport, &untag, 1, untag_commands ? reinterpret_cast<void *>(game_native_command) : nullptr) == 0,
+            "FG depth untag changed the SDK result");
+        };
+        settle(null_native ? untag_commands ? "SLFG-untag-null-native" : "SLFG-untag-null-native-without-commands" :
+          untag_commands ? "SLFG-untag-null-resource" : "SLFG-untag-null-resource-without-commands");
+      }
+      // A malformed tag that names a native resource is no untag: it still
+      // withdraws the FG source, so no presentation copies fresh depth.
+      render_tracked_depth = [&] {
+        real_frame();
+        abi_v2::resource malformed{}; malformed.base = {nullptr, resource_guid, 7};
+        malformed.type = 8; malformed.native = selected->resource.p; malformed.state = unsigned(selected->state);
+        malformed.width = selected->width; malformed.height = selected->height;
+        const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &malformed, 0, 0, active_area};
+        require(global_tag_call(viewport, &tag, 1, reinterpret_cast<void *>(game_native_command)) == 0,
+          "Malformed FG depth tag changed the SDK result");
+      };
+      for (unsigned frame = 0; frame < 12; ++frame) {
+        step(); no_effects(); const auto s = inspect();
+        if (!frame) log_status("SLFG-malformed-tag-after-depth", s);
+        require(!(active(s) && !s.source.reused_depth), "A malformed FG tag naming a native was treated as an untag");
+      }
+      render_tracked_depth = real_frame;
+      settle("SLFG-recovered-after-malformed-tag");
+      std::puts("PASS native SLFG untag: a null Resource or null native after each FG tag, with or without commands, keeps fresh FG depth every presentation; a malformed tag still withdraws; no FX");
+
       // Use the same public SDK boundary for linear RR depth with no usable
       // camera. The native copy, provider acquisition and GPU moment readback
       // remain production paths; only the game-authored input is synthetic.

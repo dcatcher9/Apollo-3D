@@ -12,6 +12,7 @@
 #include "game3d_ui_mask.h"
 #include <reshade.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -19,10 +20,13 @@
 #include <cstring>
 #include <initializer_list>
 #include <limits>
+#include <mutex>
 #include <new>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <tuple>
+#include <vector>
 
 #if defined(__GNUC__) && !defined(__clang__)
   #define FIXTURE_NOINLINE __attribute__((noinline, noipa))
@@ -38,7 +42,14 @@ extern "C" __declspec(dllexport) bool ReShadeRegisterAddon(void *, std::uint32_t
 
 extern "C" __declspec(dllexport) void ReShadeUnregisterAddon(void *) {}
 
-extern "C" __declspec(dllexport) void ReShadeLogMessage(void *, int, const char *) {}
+// The target logs synchronously (SUNSHINE_SYNCHRONOUS_LOG): lines are kept
+// for the tests that check what the observer reports.
+static std::mutex logged_lock;
+static std::vector<std::string> logged_lines;
+extern "C" __declspec(dllexport) void ReShadeLogMessage(void *, int, const char *message) {
+  std::lock_guard lock(logged_lock);
+  if (message && logged_lines.size() < 4096) logged_lines.emplace_back(message);
+}
 
 // Diagnostic fixtures explicitly opt in through the same public config API as
 // the game. nullptr models a missing setting for the default-off regression.
@@ -84,6 +95,15 @@ namespace {
     if (!condition) {
       throw std::runtime_error(message);
     }
+  }
+  void forget_logged() { std::lock_guard lock(logged_lock); logged_lines.clear(); }
+  // Lines containing every one of the given fragments.
+  unsigned logged(std::initializer_list<const char *> fragments) {
+    std::lock_guard lock(logged_lock);
+    unsigned count{};
+    for (const auto &line : logged_lines)
+      count += std::all_of(fragments.begin(), fragments.end(), [&](const char *part) { return line.find(part) != std::string::npos; });
+    return count;
   }
 
   void block_if_requested() {
@@ -3450,6 +3470,47 @@ namespace {
       "Unsupported tag lifetime invented a synchronous depth opportunity or revoked the earlier capture");
   }
 
+  // Streamline's untag (sl_core_api.h: a null resource removes the tag) is
+  // counted and reported as an untag, never as the zero-header Resource
+  // compatibility layout, which only a real native can have (ACS 10-22 logged
+  // its FG untags as "zero-base resource compatibility ... native=0x0").
+  void test_depth_untag_reporting() {
+    fixture cleanup;
+    probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+    require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "Untag hook install failed");
+    auto view = viewport(0);
+    int native{}, commands{};
+    auto resource = modern_resource(&native);
+    resource.base = {}; resource.state = 0x60; // The zero-header layout with a real native.
+    auto depth = depth_tag_for(resource); depth.lifecycle = 0;
+    auto untag = depth; untag.resource_ptr = nullptr;
+    abi_v2::resource empty{};
+    auto zero_native = depth; zero_native.resource_ptr = &empty;
+    forget_logged();
+    const auto before = testing::counts().depth_untags;
+    require(call_v2_tag(view, &untag, 1, &commands) == 0 && testing::counts().depth_untags == before + 1 &&
+        logged({"Sunshine Streamline depth untag:", "viewport=0", "scope=global", "lifecycle=0", "resource=null ", "untags=1"}) == 1 &&
+        !logged({"zero-base resource compatibility"}),
+      "A null depth Resource was not reported as an untag, or was reported as the zero-header layout");
+    require(call_v2_tag(view, &zero_native, 1, nullptr) == 0 && testing::counts().depth_untags == before + 2 &&
+        !logged({"zero-base resource compatibility"}),
+      "A Resource with a null native was not counted as an untag, or was reported as the zero-header layout");
+    evaluation_snapshot snapshot; sunshine_scene_depth::frame normalized;
+    require(testing::latest_snapshot(0, snapshot) && snapshot.tag_boundary && snapshot.tags[0].present &&
+        snapshot.tags[0].supported && !snapshot.tags[0].value.native_resource && !testing::normalized_source(0, 0, normalized),
+      "An untag changed the probe's no-current-depth metadata");
+    require(call_v2_tag(view, &depth, 1, &commands) == 0 && testing::counts().depth_untags == before + 2 &&
+        logged({"zero-base resource compatibility", "native=0x0 "}) == 0 &&
+        logged({"zero-base resource compatibility", "native_retained=0"}) == 1 && testing::normalized_source(0, 0, normalized),
+      "The zero-header layout with a real native lost its compatibility report or its depth");
+    // A malformed Resource is unsupported, not an untag, whatever its native.
+    auto malformed = resource; malformed.base.version = 1; malformed.native = nullptr;
+    auto rejected = depth; rejected.resource_ptr = &malformed;
+    require(call_v2_tag(view, &rejected, 1, &commands) == 0 && testing::counts().depth_untags == before + 2 &&
+        testing::latest_snapshot(0, snapshot) && !snapshot.tags[0].supported,
+      "A malformed Resource with a null native was counted as an untag");
+  }
+
   void test_frame_generation_tags() {
     fixture cleanup;
     probe_setting = "0"; source_setting = "1"; initialize(nullptr);
@@ -4152,6 +4213,7 @@ int main(int argc, char **argv) {
     std::puts("PASS v1/v2 frame-owned jitter, padded render extent, high-res domain proof and optional metadata rejection");
     test_source_without_projection();
     test_standalone_depth_tags();
+    test_depth_untag_reporting();
     test_frame_generation_color_only_alpha();
     test_versioned_ui_alpha_tags();
     test_ui_gate_viewport_zero_mixed_batch();

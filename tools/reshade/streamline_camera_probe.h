@@ -214,7 +214,7 @@ namespace sunshine_streamline {
   namespace testing {
     enum class abi { unsupported, v1_0_0, v1_1_1, v2_7_30, v2_11_1, v2_12_0 };
     struct targets { void *constants{}, *tag{}, *tag_for_frame{}, *evaluate{}, *new_frame_token{}, *get_feature_function{}; };
-    struct counters { std::uint64_t constants{}, tags{}, evaluations{}, dropped{}, invalid{}, vram_warnings{}; };
+    struct counters { std::uint64_t constants{}, tags{}, evaluations{}, dropped{}, invalid{}, vram_warnings{}, depth_untags{}; };
     // Real inline hooks on fixture functions, without pinning the process executable.
     bool install(abi version, const targets &functions);
     counters counts();

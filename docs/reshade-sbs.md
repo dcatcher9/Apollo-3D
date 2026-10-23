@@ -3639,7 +3639,17 @@ constants, a null or replaced tag and an observation loss affect only later eval
 starts a new temporal history for its own viewport, an invalid camera removes metric scale, a
 cleared tag removes that kind, and a loss makes metadata recorded before it unusable for new
 captures. None of them revokes an evaluation already captured, its completed snapshot or the
-private display copy. Only a real observation loss (contended or failed hook bookkeeping, a failed
+private display copy. A depth untag is no capture attempt either, also at a synchronous tag
+boundary: a tag call whose every depth tag names no native resource (a null `Resource`, which
+Streamline's `sl_core_api.h` defines as removing the tag, or a `Resource` with a null native)
+never withdraws the viewport's depth source, so depth captured at the frame's own tag stays
+current within the source age and the consumed watermark. Assassin's Creed Shadows (10-22) sends
+a null FG depth tag every frame, and each one withdrew the FG source. The probe
+metadata still reports no current tag of that kind, and an unsupported or malformed tag, whatever
+its native, still withdraws. Untags are counted on a `Sunshine Streamline depth untag` line (at
+most every 5 s, `untags=` total, `resource=null` or `null_native`); the
+`zero-base resource compatibility` line is written only for a tag with a real native.
+Only a real observation loss (contended or failed hook bookkeeping, a failed
 SDK call or lifecycle) advances the Streamline observation revision. A frame-token request that
 finds another thread writing the token table retries briefly (a few microseconds, still
 non-blocking) before counting as `tokens_busy`: The Witcher 3 requests about 30 tokens a frame
