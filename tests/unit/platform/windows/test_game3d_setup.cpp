@@ -160,6 +160,17 @@ namespace {
     EXPECT_EQ(game_files(), before);
   }
 
+  TEST_F(Game3DSetup, AntiCheatDoesNotStopUpdatesWhereTheUserInstalledReShade) {
+    game3d::detail::setup_decisions decisions {choices};
+    fs::create_directory(game.parent_path().parent_path() / "EasyAntiCheat");
+    fs::copy_file(SUNSHINE_TEST_RESHADE_DLL, game.parent_path() / "dxgi.dll");
+    write(game.parent_path() / "ReShade.ini", "[GENERAL]\n");
+    write(game.parent_path() / "SunshineSBS.addon64", "old addon");
+    const auto outcome = apply(decisions);
+    EXPECT_EQ(outcome.installation.state, state::updated) << outcome.installation.detail;
+    EXPECT_EQ(read(game.parent_path() / "SunshineSBS.addon64"), "matching bundled addon");
+  }
+
   TEST_F(Game3DSetup, ExistingReShadeFolderReceivesTheAddonAutomatically) {
     game3d::detail::setup_decisions decisions {choices};
     fs::copy_file(SUNSHINE_TEST_RESHADE_DLL, game.parent_path() / "dxgi.dll");

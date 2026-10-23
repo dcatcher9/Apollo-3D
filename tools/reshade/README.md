@@ -115,7 +115,7 @@ and obsolete files left in an existing build directory are not part of that pack
 
 The host bundles its matching add-on. While Game 3D is active it detects the fullscreen game and
 offers setup on its Game 3D setup card; nothing is written into a game folder until the user
-confirms that executable, and games with kernel anti-cheat are not offered. Folders that already
+confirms that executable, and Sunshine never installs ReShade itself for a game with kernel anti-cheat. Folders that already
 contain ReShade receive the matching add-on automatically. ReShade downloads are verified and
 cached for reuse, fresh installations take effect on the next game launch, and existing add-on
 updates wait for the game to exit. See [setup, consent and its discovery limits](../../docs/reshade-sbs.md#setup).

@@ -100,8 +100,8 @@ can be viewed live.
 Streamed Game 3D requires compatible host/client Game provider support, ReShade 6.8 with full
 add-on support, and `SunshineSBS.addon64`. No external FX shader or Depth3D checkout is required.
 While Game 3D is active, the host's **Game 3D setup** card offers to install both for the detected
-fullscreen game. Nothing is written into a game folder until you confirm that game there, and games
-with kernel anti-cheat are not offered; see [setup](./docs/reshade-sbs.md#setup).
+fullscreen game. Nothing is written into a game folder until you confirm that game there, and Sunshine
+never installs ReShade itself for a game with kernel anti-cheat; see [setup](./docs/reshade-sbs.md#setup).
 Adjust strength in **ReShade → Add-ons → Sunshine 3D**; native controls save automatically.
 Select Game 3D in Moonlight 3D without changing a host provider toggle or
 restarting Sunshine. SDR and native HDR DirectX 11/12 input are supported; an HDR10 game reaches a

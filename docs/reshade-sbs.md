@@ -631,8 +631,8 @@ expand it in its own account rather than the game user's. Runtime presence does 
 full add-on support is active; the ReShade panel remains the authority when an installed game
 stays 2D.
 
-Sunshine neither offers nor performs setup, including add-on installs and updates, for an
-executable whose folder or up to four parent folders (the game root of Unreal-style
+Sunshine neither offers nor installs a ReShade runtime for an executable without ReShade whose
+folder or up to four parent folders (the game root of Unreal-style
 `Binaries\Win64` layouts, at most the library folder) contain a kernel anti-cheat marker:
 `EasyAntiCheat*` (including `EasyAntiCheat_EOS*`), `start_protected_game.exe`, `BattlEye*`,
 `*_BE.exe`, `EAAntiCheat*`, `GameGuard`, `XIGNCODE*`, `AntiCheatExpert*`, `HoYoKProtect*`,
@@ -641,7 +641,9 @@ stops before Program Files, the Windows directory and a volume root, where the a
 services' own installations live, and never enters sibling game folders; a folder that cannot be
 listed also prevents setup. `install-runtime.ps1` repeats the same check independently. A marker
 in a shared parent within that range, such as anti-cheat logs beside a launcher's library under
-the roaming profile, also blocks setup; manual setup remains possible.
+the roaming profile, also blocks setup; manual setup remains possible. The check guards only the
+proxy DLL that Sunshine itself would create: a folder where the user already installed ReShade is
+not refused, so its Sunshine add-on is installed and updated as in any other ReShade folder.
 
 Fresh files can be installed while the game stays open and load on its next launch. An existing
 Sunshine add-on that differs from this host's bundled DLL is queued for replacement after the

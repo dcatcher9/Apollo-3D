@@ -76,12 +76,11 @@ namespace {
     }
   };
 
-  TEST_F(Game3DInstallation, AntiCheatMarkersInTheGameFolderOrItsParentsRefuseEveryWriter) {
+  TEST_F(Game3DInstallation, AntiCheatMarkersInTheGameFolderOrItsParentsRefuseAFreshRuntime) {
     const auto title = game.parent_path();
     const auto unreal_game = title / "Project" / "Binaries" / "Win64" / "Project-Win64-Shipping.exe";
     fs::create_directories(unreal_game.parent_path());
     write(unreal_game, "unreal shipping executable");
-    fs::copy_file(SUNSHINE_TEST_RESHADE_DLL, unreal_game.parent_path() / "dxgi.dll");
     fake_installers("[IO.File]::WriteAllText((Join-Path $directory 'SunshineSBS.addon64'), 'written')");
     const std::vector<std::pair<std::string, bool>> markers {
       {"EasyAntiCheat", true},
@@ -97,27 +96,36 @@ namespace {
       directory ? (void) fs::create_directory(marker) : write(marker, "marker");
       for (const auto &executable : {game, unreal_game}) {
         SCOPED_TRACE(executable.string());
-        const auto ini = executable.parent_path() / "ReShade.ini";
-        fs::remove(ini);
+        const auto before = files();
         EXPECT_EQ(game3d::inspect_installation(executable, bundle).state, state::anti_cheat);
-        auto status = game3d::install_reshade_and_addon_for_next_launch(executable, bundle);
+        const auto status = game3d::install_reshade_and_addon_for_next_launch(executable, bundle);
         EXPECT_EQ(status.state, state::anti_cheat);
         EXPECT_NE(status.detail.find(name), std::string::npos) << status.detail;
-        EXPECT_FALSE(fs::exists(ini));
         EXPECT_EQ(game3d::install_reshade_for_next_launch(executable, bundle).state, state::anti_cheat);
-        EXPECT_FALSE(fs::exists(ini));
-        write(ini, "[GENERAL]\n");
-        EXPECT_EQ(game3d::install_addon_for_next_launch(executable, bundle).state, state::anti_cheat);
-        EXPECT_FALSE(fs::exists(executable.parent_path() / "SunshineSBS.addon64"));
-        write(executable.parent_path() / "SunshineSBS.addon64", "old addon");
-        EXPECT_EQ(game3d::update_existing_addon(executable, bundle).state, state::anti_cheat);
-        EXPECT_EQ(read(executable.parent_path() / "SunshineSBS.addon64"), "old addon");
-        fs::remove(executable.parent_path() / "SunshineSBS.addon64");
-        fs::remove(ini);
+        EXPECT_EQ(files(), before);
       }
       fs::remove_all(marker);
       EXPECT_EQ(game3d::inspect_installation(game, bundle).state, state::missing_reshade);
     }
+  }
+
+  TEST_F(Game3DInstallation, AntiCheatMarkersDoNotRefuseAnExistingReShadeInstallation) {
+    // Battlefield 6's campaign: the user installed ReShade beside SP\bf6.exe, and the game root
+    // above it holds EA AntiCheat. Sunshine creates no proxy there, but keeps the add-on current.
+    const auto campaign = game.parent_path() / "SP" / "bf6.exe";
+    fs::create_directories(campaign.parent_path());
+    write(campaign, "campaign executable");
+    write(game.parent_path() / "EAAntiCheat.GameServiceLauncher.exe", "marker");
+    fs::copy_file(SUNSHINE_TEST_RESHADE_DLL, campaign.parent_path() / "dxgi.dll");
+    write(campaign.parent_path() / "ReShade.ini", "[GENERAL]\n");
+    fake_installers("Copy-Item -LiteralPath (Join-Path $AddonDirectory 'SunshineSBS.addon64') -Destination (Join-Path $directory 'SunshineSBS.addon64')");
+    EXPECT_EQ(game3d::inspect_installation(campaign, bundle).state, state::missing_addon);
+    const auto installed = game3d::install_addon_for_next_launch(campaign, bundle);
+    EXPECT_EQ(installed.state, state::installed) << installed.detail;
+    write(campaign.parent_path() / "SunshineSBS.addon64", "old addon");
+    const auto updated = game3d::update_existing_addon(campaign, bundle);
+    EXPECT_EQ(updated.state, state::updated) << updated.detail;
+    EXPECT_EQ(read(campaign.parent_path() / "SunshineSBS.addon64"), "matching bundled addon");
   }
 
   TEST_F(Game3DInstallation, AntiCheatWalkStopsAtFourParentsAndNeverEntersSiblingGames) {

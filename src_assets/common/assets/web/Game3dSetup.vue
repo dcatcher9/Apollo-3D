@@ -123,7 +123,7 @@ export default {
       const states = {
         ready_to_install: { label: 'Ready to set up', tone: 'warning', description: 'Sunshine 3D can install ReShade with full add-on support and its Game 3D add-on for this executable. Nothing is written until you confirm.' },
         declined: { label: 'Not set up', tone: 'neutral', description: 'You chose not to set up this game. Sunshine 3D does not change its folder.' },
-        anti_cheat: { label: 'Not offered', tone: 'neutral', description: 'Anti-cheat detected, so Sunshine 3D does not offer setup for this game.' },
+        anti_cheat: { label: 'Not offered', tone: 'neutral', description: 'Anti-cheat detected, so Sunshine 3D does not install ReShade for this game.' },
         missing_addon: { label: 'Preparing add-on', tone: 'warning', description: 'ReShade is already installed; Sunshine 3D will install its bundled add-on for this game when possible.' },
         installing: { label: 'Installing', tone: 'active', description: 'Installing the confirmed components beside this game.' },
         installed: { label: 'Installed for next launch', tone: 'success', description: 'ReShade and the Sunshine 3D add-on are installed. They will activate the next time you launch the game.' },

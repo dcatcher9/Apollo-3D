@@ -556,20 +556,22 @@ namespace platf::game3d {
       if (error || !regular_file(status.executable) || !same_path(status.executable.extension(), L".exe")) {
         return unavailable(std::move(status), "The game executable is unavailable.");
       }
-      fs::path marker;
-      switch (find_anti_cheat(status.executable, marker)) {
-        case anti_cheat_e::present:
-          status.state = installation_state_e::anti_cheat;
-          status.detail = "Anti-cheat detected (" + utf8(marker.filename()) + " in " + utf8(marker.parent_path()) + "), so Sunshine 3D does not offer or perform setup for this game.";
-          return status;
-        case anti_cheat_e::unknown:
-          return unavailable(std::move(status), "The game's folders could not be checked for anti-cheat, so Sunshine 3D does not offer setup for this game.");
-        case anti_cheat_e::absent:
-          break;
-      }
       const auto ini = status.executable.parent_path() / "ReShade.ini";
       status.reshade_present = regular_file(ini) && reshade_runtime_present(status.executable.parent_path());
       if (!status.reshade_present) {
+        // Anti-cheat refuses only the proxy DLL Sunshine itself would create. A folder where the
+        // user already installed ReShade keeps its add-on installs and updates.
+        fs::path marker;
+        switch (find_anti_cheat(status.executable, marker)) {
+          case anti_cheat_e::present:
+            status.state = installation_state_e::anti_cheat;
+            status.detail = "Anti-cheat detected (" + utf8(marker.filename()) + " in " + utf8(marker.parent_path()) + "), so Sunshine 3D does not install ReShade for this game.";
+            return status;
+          case anti_cheat_e::unknown:
+            return unavailable(std::move(status), "The game's folders could not be checked for anti-cheat, so Sunshine 3D does not install ReShade for this game.");
+          case anti_cheat_e::absent:
+            break;
+        }
         status.state = installation_state_e::missing_reshade;
         status.detail = "Install ReShade with full add-on support for this game's executable, then install the Sunshine 3D add-on.";
         return status;
