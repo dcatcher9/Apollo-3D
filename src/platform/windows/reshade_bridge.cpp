@@ -94,7 +94,9 @@ namespace platf::reshade_bridge {
     }
 
     // The swapchain window's chain in physical pixels, the coordinates of
-    // foreground_window::sample(). Empty (refused) when the thread cannot become DPI aware.
+    // foreground_window::sample(). Empty when the thread cannot become DPI aware or the window
+    // no longer exists; identify() then treats it as a plain identity mismatch (classify() says
+    // not_child), not as a refused child, so the consumer keeps its request.
     ::reshade_bridge::window_owner::chain_t query_window_physical(std::uint64_t window) {
       const auto previous = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
       ::reshade_bridge::window_owner::chain_t chain;
