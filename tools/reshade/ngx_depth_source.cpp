@@ -22,6 +22,9 @@ namespace sunshine_ngx {
     // nvsdk_ngx_defs.h and nvsdk_ngx_helpers_d3d.h. The public C Get* wrappers
     // dispatch through the owning SDK's own C++ ABI. We never decode that ABI.
     constexpr std::uint32_t super_sampling = 1, inverted_depth = 1u << 3;
+    // NVSDK_NGX_Feature_FrameGeneration (DLSS-G), nvsdk_ngx_defs.h. Its inputs
+    // are the DLSSG.* parameters of nvsdk_ngx_defs_dlssg.h, not SR's Depth.
+    constexpr std::uint32_t frame_generation_feature = 11;
     // D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE. NVIDIA's DLSS Programming
     // Guide, section 3.4 "Resource States": every D3D12 input must be in this
     // state at the evaluation call, and DLSS always restores it afterwards.
@@ -66,7 +69,23 @@ namespace sunshine_ngx {
     // counter when the feature was never admitted or depth belongs to SL.
     std::atomic<std::uint64_t> unknown_diagnostic_sequence{};
     std::atomic<std::uint64_t> evaluations{}, nominations{}, copy_recorded{}, metadata_only{},
-      unknown{}, missing_parameters{}, failed{}, feature_overflow{}, recovered{}, fg_owned{};
+      unknown{}, missing_parameters{}, failed{}, feature_overflow{}, recovered{}, fg_owned{}, fg_feature{};
+    // missing_parameters by feature ID: the first few IDs seen, then other.
+    struct feature_count {
+      std::atomic<std::uint32_t> feature{UINT32_MAX};
+      std::atomic<std::uint64_t> count{};
+    };
+    std::array<feature_count, 4> missing_by_feature;
+    std::atomic<std::uint64_t> missing_other_feature{};
+    void count_missing_parameters(std::uint32_t feature) {
+      ++missing_parameters;
+      for (auto &entry : missing_by_feature) {
+        auto id = entry.feature.load(std::memory_order_acquire);
+        if (id == UINT32_MAX && entry.feature.compare_exchange_strong(id, feature, std::memory_order_acq_rel)) id = feature;
+        if (id == feature) { ++entry.count; return; }
+      }
+      ++missing_other_feature;
+    }
     std::uint64_t next_report{};
     bool calibration_probe_requested{}; // Protected by feature_lock, like the feature records.
     struct calibration_slot {
@@ -170,6 +189,17 @@ namespace sunshine_ngx {
       // A boolean HDR flag alone does not identify PQ vs scRGB; preserve it as
       // evidence without assigning a transfer function to the captured pixels.
       probe("DLSSG.ColorBuffersHDR", kind::unsigned_integer);
+      // DLSS-G's own depth input and its convention, crop, frame index and
+      // camera planes (nvsdk_ngx_defs_dlssg.h). Evidence only: no capture.
+      // DLSS-G may store the depth as a void pointer: when the D3D12 getter
+      // fails, the void-pointer getter reports it too.
+      const auto depth_probe = out.parameter_count;
+      probe("DLSSG.Depth", kind::resource);
+      if (depth_probe < out.parameter_count && !out.parameters[depth_probe].successful) probe("DLSSG.Depth", kind::pointer);
+      for (const char *name : {"DLSSG.DepthInverted", "DLSSG.DepthSubrectBaseX", "DLSSG.DepthSubrectBaseY",
+          "DLSSG.DepthSubrectWidth", "DLSSG.DepthSubrectHeight", "DLSSG.MultiFrameIndex", "DLSSG.MultiFrameCount"})
+        probe(name, kind::unsigned_integer);
+      for (const char *name : {"DLSSG.CameraNear", "DLSSG.CameraFar"}) probe(name, kind::floating);
       for (const char *name : {"WorldToViewMatrix", "ViewToClipMatrix", "InvViewProjectionMatrix", "ClipToPrevClipMatrix"}) probe(name, kind::pointer);
       for (const char *name : {"DLSS.Use.HW.Depth", "Width", "Height", "OutWidth", "OutHeight", "Color.Format", "Output.Format",
           "DLSS.Render.Subrect.Dimensions.Width", "DLSS.Render.Subrect.Dimensions.Height",
@@ -289,6 +319,8 @@ namespace sunshine_ngx {
     calibration_slots = {};
     ReleaseSRWLockExclusive(&calibration_lock);
     evaluations = nominations = copy_recorded = metadata_only = unknown = missing_parameters = failed = feature_overflow = recovered = 0;
+    fg_owned = fg_feature = missing_other_feature = 0;
+    for (auto &entry : missing_by_feature) { entry.feature = UINT32_MAX; entry.count = 0; }
     next_report = 0;
     rejected_captures = 0;
 #ifndef SUNSHINE_UPSCALER_TRACE_TEST
@@ -437,9 +469,17 @@ namespace sunshine_ngx {
     }
     if (!selected.handle || selected.parameters.epoch != attempt.epoch)
       selected = recover_feature(owner, handle, api, parameters, attempt.epoch, selected_slot);
+    // DLSS-G is a known feature with no SR Depth input to miss: its depth is
+    // DLSSG.Depth, which an armed dump probes (diagnostic only; no source).
+    if (selected.handle && selected.parameters.epoch == attempt.epoch &&
+        selected.parameters.feature == frame_generation_feature) {
+      ++fg_feature;
+      if (diagnostic_session) observe_without_capture(selected, false);
+      return attempt;
+    }
     if (!selected.handle || selected.parameters.epoch != attempt.epoch || !selected.parameters.valid) {
       if (!selected.handle || selected.parameters.epoch != attempt.epoch) { ++unknown; selected = {}; }
-      else ++missing_parameters;
+      else count_missing_parameters(selected.parameters.feature);
       // An unrecoverable or incomplete feature still reports its named parameters.
       if (diagnostic_session) observe_without_capture(selected, false);
       return attempt;
@@ -495,7 +535,7 @@ namespace sunshine_ngx {
         area.width, area.height, selected.parameters.width, selected.parameters.height, true) &&
       read_pair(api, parameters, "DLSS.Input.Depth.Subrect.Base.X", "DLSS.Input.Depth.Subrect.Base.Y", area.left, area.top, 0, 0) &&
       valid_dimension(area.width) && valid_dimension(area.height) && area.left < 16384 && area.top < 16384;
-    if (!valid) { ++missing_parameters; return attempt; }
+    if (!valid) { count_missing_parameters(selected.parameters.feature); return attempt; }
     value.resource.native = reinterpret_cast<std::uint64_t>(resource);
     if (api.floating) {
       float jitter_x{}, jitter_y{};
@@ -651,14 +691,27 @@ namespace sunshine_ngx {
     if (read_probes) ReleaseSRWLockExclusive(&calibration_lock);
     ReleaseSRWLockShared(&feature_lock);
     for (unsigned i = 0; i < probe_count; ++i) report_calibration(probes[i]);
-    char message[512]{};
+    // missing_parameters by feature ID, e.g. "1:3,13:7" (other: IDs past the table).
+    char by_feature[160]{};
+    std::size_t used = 0;
+    for (const auto &entry : missing_by_feature) {
+      const auto id = entry.feature.load(std::memory_order_acquire);
+      if (id == UINT32_MAX || used >= sizeof(by_feature)) continue;
+      const auto written = std::snprintf(by_feature + used, sizeof(by_feature) - used, "%s%u:%llu", used ? "," : "", id,
+        static_cast<unsigned long long>(entry.count.load()));
+      if (written > 0) used += std::size_t(written);
+    }
+    if (const auto other = missing_other_feature.load(); other && used < sizeof(by_feature))
+      std::snprintf(by_feature + used, sizeof(by_feature) - used, "%sother:%llu", used ? "," : "", static_cast<unsigned long long>(other));
+    char message[640]{};
     std::snprintf(message, sizeof(message),
-      "Sunshine NGX depth: confirmed_features=%u capture_eligible=%u recovered_features=%llu evaluations=%llu nominations=%llu copy_recorded=%llu metadata_only=%llu fg_owned=%llu unknown_feature=%llu missing_parameters=%llu failed=%llu feature_capacity_loss=%llu; D3D12 NGX, named parameter exports, shared copy owner; fg_owned evaluations copied nothing while Streamline FG owned depth; recorded work is not completed pixels",
+      "Sunshine NGX depth: confirmed_features=%u capture_eligible=%u recovered_features=%llu evaluations=%llu nominations=%llu copy_recorded=%llu metadata_only=%llu fg_owned=%llu unknown_feature=%llu missing_parameters=%llu missing_by_feature=%s fg_feature=%llu failed=%llu feature_capacity_loss=%llu; D3D12 NGX, named parameter exports, shared copy owner; fg_owned evaluations copied nothing while Streamline FG owned depth; fg_feature counts DLSS-G (feature 11) evaluations, whose depth is DLSSG.Depth and never a source; recorded work is not completed pixels",
       count, capture_eligible, static_cast<unsigned long long>(recovered.load()),
       static_cast<unsigned long long>(evaluations.load()), static_cast<unsigned long long>(nominations.load()),
       static_cast<unsigned long long>(copy_recorded.load()), static_cast<unsigned long long>(metadata_only.load()),
       static_cast<unsigned long long>(fg_owned.load()),
       static_cast<unsigned long long>(unknown.load()), static_cast<unsigned long long>(missing_parameters.load()),
+      used || missing_other_feature.load() ? by_feature : "none", static_cast<unsigned long long>(fg_feature.load()),
       static_cast<unsigned long long>(failed.load()), static_cast<unsigned long long>(feature_overflow.load()));
     sunshine_log::message(reshade::log::level::info, message);
 #ifndef SUNSHINE_UPSCALER_TRACE_TEST

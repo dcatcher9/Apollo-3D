@@ -2811,7 +2811,11 @@ the three optional UI inputs need not be supplied. Successful capture produces
 Each input's own complete subrectangle is retained; all-zero or entirely unavailable
 subrectangle fields use the full allocation, while partial or malformed rectangles reject
 that optional copy. `DLSSG.ColorBuffersHDR` is recorded but does not alone identify a transfer
-function. Copies require observed native resource-state evidence and successful evaluation.
+function. DLSS-G's own depth input is recorded as evidence only, never copied: `DLSSG.Depth`
+through the D3D12 resource getter and, when that fails, the void-pointer getter (DLSS-G may store
+it as a `void *`), with `DLSSG.DepthInverted`, `DLSSG.DepthSubrectBaseX`/`BaseY`/`Width`/`Height`,
+`DLSSG.MultiFrameIndex`, `DLSSG.MultiFrameCount`, `DLSSG.CameraNear` and `DLSSG.CameraFar`, all
+defined by the same pinned header. A dump keeps up to 96 named parameters per evaluation. Copies require observed native resource-state evidence and successful evaluation.
 The existing SL-first depth ownership gate remains in force: a successfully admitted SL
 capture suppresses nested NGX resource copies. During an armed dump, the outer supported
 NGX evaluation still records bounded named-parameter observations, including UI inputs,
@@ -4118,7 +4122,12 @@ FG Off makes every snapshot taken meanwhile inadmissible; a busy or ambiguous FG
 FG scope, copies as before. The `Sunshine NGX depth` line counts
 these evaluations as `fg_owned`. Before the final review a UE title with NVIDIA's DLSS plugin and
 the Streamline DLSS-G plugin copied its full depth plane on every real frame with FG on, for no
-consumer. A retained
+consumer. DLSS-G itself (NGX feature 11, `NVSDK_NGX_Feature_FrameGeneration` in the pinned
+`nvsdk_ngx_defs.h`) is a known FG feature with no Super Resolution `Depth` input: its evaluations
+are counted as `fg_feature` and never as `missing_parameters` (Assassin's Creed Shadows counted
+about 42 DLSS-G evaluations a second there), and never become a depth source. The line splits
+`missing_parameters` by feature ID as `missing_by_feature=<id>:<count>,...` (the first four IDs
+seen, then `other`; `none` when nothing was missing). A retained
 resource, metadata-only ticket or rejected native attempt does not block a usable inner NGX input.
 Pending recorded copies retain deduplication authority; all nonzero tickets still receive completion.
 SL and NGX observations remain separate, so malformed input from one cannot invalidate the other's

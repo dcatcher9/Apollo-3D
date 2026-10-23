@@ -82,7 +82,9 @@ namespace sunshine_game3d {
       double number {};
     };
 
-    inline constexpr unsigned maximum_parameters = 80;
+    // ngx_depth_source.cpp probes 80 named parameters (81 with the
+    // void-pointer DLSSG.Depth retry); the rest is headroom.
+    inline constexpr unsigned maximum_parameters = 96;
 
     struct ngx_evaluation {
       stamp observation;

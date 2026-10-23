@@ -17,6 +17,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #if defined(__GNUC__) && !defined(__clang__)
@@ -76,6 +77,8 @@ namespace {
     std::array<probe_reply, 5> probe_values{};
     std::array<probe_reply, 4> dlssg_values{};
     bool dlssg_rect_available{};
+    // DLSS-G's own depth input, answered by the void-pointer getter only.
+    void *dlssg_depth{};
   };
   sunshine_scene_depth::frame captured_frame;
   std::uint64_t captured_command{};
@@ -204,6 +207,12 @@ extern "C" __declspec(dllexport) FIXTURE_NOINLINE result __cdecl NVSDK_NGX_Param
     *output = value.dlssg_rect_available ? rectangle[i] : 0xdeadbeef;
     return value.dlssg_rect_available ? ngx_success : ngx_failure;
   }
+  if (value.dlssg_depth) {
+    constexpr std::pair<const char *, unsigned> depth_keys[]{{"DLSSG.DepthInverted", 1}, {"DLSSG.DepthSubrectBaseX", 5},
+      {"DLSSG.DepthSubrectBaseY", 6}, {"DLSSG.DepthSubrectWidth", 640}, {"DLSSG.DepthSubrectHeight", 360},
+      {"DLSSG.MultiFrameIndex", 1}, {"DLSSG.MultiFrameCount", 3}};
+    for (const auto &[name, number] : depth_keys) if (!std::strcmp(key, name)) { *output = number; return ngx_success; }
+  }
   if (std::strcmp(key, "Width") == 0) *output = value.width;
   else if (std::strcmp(key, "Height") == 0) *output = value.height;
   else if (std::strcmp(key, "DLSS.Render.Subrect.Dimensions.Width") == 0 && !value.missing_render) *output = value.render_width;
@@ -247,6 +256,10 @@ extern "C" __declspec(dllexport) FIXTURE_NOINLINE result __cdecl NVSDK_NGX_Param
     *output = value.jitter_y;
     return value.missing_jitter_y ? ngx_failure : ngx_success;
   }
+  if (value.dlssg_depth && (!std::strcmp(key, "DLSSG.CameraNear") || !std::strcmp(key, "DLSSG.CameraFar"))) {
+    *output = key[12] == 'N' ? .25f : 1000.f;
+    return ngx_success;
+  }
   return ngx_failure;
 }
 extern "C" __declspec(dllexport) FIXTURE_NOINLINE result __cdecl NVSDK_NGX_Parameter_GetVoidPointer(
@@ -261,6 +274,7 @@ extern "C" __declspec(dllexport) FIXTURE_NOINLINE result __cdecl NVSDK_NGX_Param
   constexpr const char *names[] = {"WorldToViewMatrix", "ViewToClipMatrix", "InvViewProjectionMatrix", "ClipToPrevClipMatrix"};
   for (unsigned i = 0; i != 4; ++i)
     if (std::strcmp(key, names[i]) == 0) return optional_pointer_reply(value.probe_values[i + 1], output);
+  if (value.dlssg_depth && std::strcmp(key, "DLSSG.Depth") == 0) { *output = value.dlssg_depth; return ngx_success; }
   *output = reinterpret_cast<void *>(1);
   return ngx_failure;
 }
@@ -1278,6 +1292,64 @@ namespace {
     sunshine_game3d::arm_diagnostic_metadata(false);
     d::set_resource_callbacks(nullptr); shutdown(); sunshine_ngx::testing::set_callbacks({});
   }
+  // DLSS-G (feature 11) is a known FG feature: its evaluations count as
+  // fg_feature, never as missing SR parameters, which are split by feature
+  // ID, and an armed dump reports DLSSG.Depth with its convention, crop,
+  // frame index and camera planes, through the void-pointer getter when the
+  // D3D12 getter fails. None of it captures depth. (Assassin's Creed Shadows
+  // 10-22 counted every DLSS-G evaluation as missing_parameters.)
+  void dlssg_feature_accounting_test() {
+    initialize(GetModuleHandleW(nullptr), false, true);
+    captures = finishes = 0;
+    sunshine_ngx::testing::set_callbacks({
+      [](std::uint64_t, const sunshine_scene_depth::frame &) -> std::uint64_t { ++captures; return 93; },
+      [](std::uint64_t, bool) { ++finishes; }, nullptr});
+    fixture_parameters parameters;
+    parameters.dlssg_depth = reinterpret_cast<void *>(0xd1550000);
+    void *handle{};
+    return_result = ngx_success;
+    const auto evaluate = [&] {
+      SetLastError(input_error);
+      require(evaluate_entry(reinterpret_cast<void *>(0x123), handle, &parameters, &callback) == ngx_success &&
+          GetLastError() == output_error, "DLSS-G accounting changed the SDK result or LastError");
+    };
+    require(create_entry(reinterpret_cast<void *>(0x123), 11, &parameters, &handle) == ngx_success, "DLSS-G fixture create failed");
+    sunshine_game3d::arm_diagnostic_metadata(false);
+    sunshine_game3d::arm_diagnostic_metadata(true);
+    evaluate(); evaluate();
+    const auto snapshot = nlohmann::json::parse(sunshine_game3d::diagnostic_metadata_json());
+    const auto found = std::find_if(snapshot["ngx"].begin(), snapshot["ngx"].end(),
+      [](const auto &value) { return value["feature"] == 11; });
+    require(found != snapshot["ngx"].end() && (*found)["truncated"] == false, "DLSS-G depth probes were missing or truncated");
+    const auto parameter = [&](const std::string &name, unsigned type) {
+      for (const auto &p : (*found)["parameters"]) if (p["name"] == name && p["type"] == type) return p;
+      throw std::runtime_error("Missing DLSS-G depth parameter: " + name);
+    };
+    require(parameter("DLSSG.Depth", 0)["successful"] == false && parameter("DLSSG.Depth", 1)["successful"] == true &&
+        parameter("DLSSG.Depth", 1)["value"] == "0xd1550000",
+      "DLSSG.Depth was not retried through the void-pointer getter after the D3D12 getter failed");
+    constexpr std::pair<const char *, unsigned> depth_keys[]{{"DLSSG.DepthInverted", 1}, {"DLSSG.DepthSubrectBaseX", 5},
+      {"DLSSG.DepthSubrectBaseY", 6}, {"DLSSG.DepthSubrectWidth", 640}, {"DLSSG.DepthSubrectHeight", 360},
+      {"DLSSG.MultiFrameIndex", 1}, {"DLSSG.MultiFrameCount", 3}};
+    for (const auto &[name, number] : depth_keys)
+      require(parameter(name, 2)["successful"] == true && parameter(name, 2)["value"] == number, "DLSS-G depth metadata key/value changed");
+    require(parameter("DLSSG.CameraNear", 4)["value"] == .25 && parameter("DLSSG.CameraFar", 4)["value"] == 1000.,
+      "DLSS-G camera planes were not reported");
+    sunshine_game3d::arm_diagnostic_metadata(false);
+    // An incomplete feature, and SR without its Depth, stay missing, by feature.
+    require(create_entry(reinterpret_cast<void *>(0x123), 60002, &parameters, &handle) == ngx_success, "Incomplete fixture create failed");
+    evaluate();
+    parameters.missing_depth = true;
+    require(create_entry(reinterpret_cast<void *>(0x123), 1, &parameters, &handle) == ngx_success, "SR fixture create failed");
+    evaluate();
+    parameters.missing_depth = false;
+    messages.clear();
+    sunshine_ngx::poll();
+    require(logged("missing_parameters=2 missing_by_feature=60002:1,1:1 fg_feature=2 ") && captures == 0 && finishes == 0,
+      "DLSS-G evaluations were counted as missing parameters, missing parameters lost their feature, or depth was captured");
+    require(release_entry(handle) == ngx_success, "Release DLSS-G accounting fixture");
+    shutdown(); sunshine_ngx::testing::set_callbacks({});
+  }
   void depth_owned_ui_diagnostics_test() {
     namespace d = sunshine_game3d::diagnostic;
     initialize(GetModuleHandleW(nullptr), false, true);
@@ -1495,6 +1567,8 @@ int main() {
     std::puts("PASS armed unknown-feature NGX diagnostic parameters/results with unchanged capture rejection, original calls and disarmed getter silence");
     dlssg_input_diagnostics_test();
     std::puts("PASS exact DLSSG UI resource/subrect queries across SR, FG, RR, arbitrary/unknown features");
+    dlssg_feature_accounting_test();
+    std::puts("PASS DLSS-G evaluations count as fg_feature, missing parameters split by feature, armed DLSSG.Depth/convention/crop/frame/camera probes with void-pointer retry; no capture");
     depth_owned_ui_diagnostics_test();
     std::puts("PASS SL-owned depth retains dump-only NGX UI evidence, deduplicates wrappers and preserves depth/reset ordering");
     diagnostic_completion_identity_test();
