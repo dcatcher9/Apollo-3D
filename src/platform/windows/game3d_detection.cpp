@@ -37,16 +37,26 @@ namespace platf::game3d {
     }
 
     [[nodiscard]] bool excluded_executable(const std::filesystem::path &executable) {
-      // Browser and launcher UI can load both D3D and gaming SDKs. Editors can load the same
-      // engine libraries as games. Their foreground windows must never prompt for game setup.
+      // Non-game applications that commonly present a fullscreen Direct3D client: browsers and
+      // their embedded runtimes, store launchers, media players, presentation/office and creative
+      // tools, editors, communication, capture/overlay and VR compositors, and the shell. Setup
+      // never writes without confirmation; this list only keeps them from being offered.
       constexpr std::array excluded {
+        // Browsers and embedded web runtimes.
         L"chrome.exe",
         L"msedge.exe",
+        L"msedgewebview2.exe",
         L"firefox.exe",
+        L"librewolf.exe",
+        L"waterfox.exe",
+        L"floorp.exe",
+        L"zen.exe",
         L"brave.exe",
         L"opera.exe",
         L"vivaldi.exe",
+        L"thorium.exe",
         L"arc.exe",
+        // Store and game launchers.
         L"steam.exe",
         L"steamwebhelper.exe",
         L"EpicGamesLauncher.exe",
@@ -61,10 +71,77 @@ namespace platf::game3d {
         L"Origin.exe",
         L"Battle.net.exe",
         L"Battle.net Helper.exe",
+        L"RiotClientServices.exe",
+        L"RiotClientUx.exe",
+        L"RockstarLauncher.exe",
+        L"Amazon Games UI.exe",
+        L"itch.exe",
+        L"Heroic.exe",
         L"XboxPcApp.exe",
         L"GamingServicesUI.exe",
         L"Playnite.DesktopApp.exe",
         L"Playnite.FullscreenApp.exe",
+        // Media players.
+        L"vlc.exe",
+        L"mpv.exe",
+        L"mpvnet.exe",
+        L"kodi.exe",
+        L"mpc-hc64.exe",
+        L"mpc-be64.exe",
+        L"mpc-qt.exe",
+        L"PotPlayerMini64.exe",
+        L"PotPlayer64.exe",
+        L"KMPlayer64.exe",
+        L"smplayer.exe",
+        L"wmplayer.exe",
+        L"Microsoft.Media.Player.exe",
+        L"Video.UI.exe",
+        L"Plex.exe",
+        L"Plex HTPC.exe",
+        L"JellyfinMediaPlayer.exe",
+        L"stremio.exe",
+        L"Spotify.exe",
+        // Office, presentation and creative tools.
+        L"POWERPNT.EXE",
+        L"WINWORD.EXE",
+        L"EXCEL.EXE",
+        L"OUTLOOK.EXE",
+        L"olk.exe",
+        L"ONENOTE.EXE",
+        L"MSACCESS.EXE",
+        L"VISIO.EXE",
+        L"Photoshop.exe",
+        L"AfterFX.exe",
+        L"Adobe Premiere Pro.exe",
+        L"Resolve.exe",
+        L"blender.exe",
+        // Engine editors and IDEs.
+        L"Unity.exe",
+        L"Unity Hub.exe",
+        L"UnrealEditor.exe",
+        L"UE4Editor.exe",
+        L"Code.exe",
+        L"devenv.exe",
+        L"rider64.exe",
+        L"idea64.exe",
+        L"clion64.exe",
+        // Communication, capture, overlays, streaming and VR compositors.
+        L"Discord.exe",
+        L"Teams.exe",
+        L"ms-teams.exe",
+        L"slack.exe",
+        L"Zoom.exe",
+        L"obs64.exe",
+        L"Streamlabs OBS.exe",
+        L"NVIDIA app.exe",
+        L"NVIDIA Overlay.exe",
+        L"NVIDIA Share.exe",
+        L"sunshine.exe",
+        L"moonlight.exe",
+        L"vrcompositor.exe",
+        L"vrmonitor.exe",
+        L"OculusClient.exe",
+        // Shell and system surfaces outside the Windows directory check.
         L"explorer.exe",
         L"ApplicationFrameHost.exe",
         L"ShellExperienceHost.exe",
@@ -74,33 +151,11 @@ namespace platf::game3d {
         L"LockApp.exe",
         L"SystemSettings.exe",
         L"Taskmgr.exe",
-        L"sunshine.exe",
-        L"moonlight.exe",
-        L"Discord.exe",
-        L"obs64.exe",
-        L"vlc.exe",
-        L"mpv.exe",
-        L"Unity.exe",
-        L"Unity Hub.exe",
-        L"UnrealEditor.exe",
-        L"UE4Editor.exe",
-        L"blender.exe",
       };
       const auto name = executable.filename().wstring();
       return std::any_of(excluded.begin(), excluded.end(), [&](const auto candidate) {
         return equal_name(name, candidate);
       });
-    }
-
-    [[nodiscard]] bool unreal_shipping_layout(const std::filesystem::path &executable) {
-      // The engine's Binaries/Win64 layout and Shipping target identify the actual game rather
-      // than its launcher without maintaining a list of individual games.
-      const auto parent = executable.parent_path();
-      const auto stem = executable.stem().wstring();
-      constexpr std::wstring_view suffix = L"-Win64-Shipping";
-      return equal_name(parent.filename().wstring(), L"Win64") &&
-             equal_name(parent.parent_path().filename().wstring(), L"Binaries") &&
-             stem.size() > suffix.size() && equal_name(std::wstring_view {stem}.substr(stem.size() - suffix.size()), suffix);
     }
 
     [[nodiscard]] std::uint64_t process_creation_time(HANDLE process) noexcept {
@@ -177,70 +232,32 @@ namespace platf::game3d {
     }
   }  // namespace
 
-  std::optional<detection_evidence_e> detail::classify_game_candidate(
-    const std::filesystem::path &executable,
-    const std::span<const std::filesystem::path> loaded_modules,
-    const foreground_window::observation_t &foreground,
-    const RECT capture_rect
-  ) {
-    if (!foreground_window::carries_geometry(foreground.status) || !foreground.window || !foreground.process_id || !executable.is_absolute() || !equal_name(executable.extension().wstring(), L".exe") || excluded_executable(executable)) {
-      return std::nullopt;
-    }
-    const auto client = foreground.client_screen_rect;
-    if (!client.valid() || capture_rect.right <= capture_rect.left || capture_rect.bottom <= capture_rect.top) {
-      return std::nullopt;
-    }
-    const auto width = static_cast<std::int64_t>(client.right) - client.left;
-    const auto height = static_cast<std::int64_t>(client.bottom) - client.top;
-    const auto overlap_width = (std::min<std::int64_t>) (client.right, capture_rect.right) - (std::max<std::int64_t>) (client.left, capture_rect.left);
-    const auto overlap_height = (std::min<std::int64_t>) (client.bottom, capture_rect.bottom) - (std::max<std::int64_t>) (client.top, capture_rect.top);
-    // Admit ordinary windowed games, but not tiny helper windows or an application mostly on a
-    // different display. This geometry is setup evidence only; stereo export keeps its own
-    // stricter fullscreen ownership contract.
-    if (width < 320 || height < 180 || overlap_width <= 0 || overlap_height <= 0 || static_cast<long double>(overlap_width) * overlap_height < static_cast<long double>(width) * height * 0.75L) {
-      return std::nullopt;
-    }
-    bool direct3d = false;
-    bool game_runtime = unreal_shipping_layout(executable);
-    constexpr std::array game_modules {
-      L"steam_api64.dll",
-      L"UnityPlayer.dll",
-      L"GameAssembly.dll",
-      L"Galaxy64.dll",
-      L"EOSSDK-Win64-Shipping.dll",
-      L"uplay_r1_loader64.dll",
-      L"upc_r1_loader64.dll",
-    };
-    for (const auto &module : loaded_modules) {
-      const auto name = module.filename().wstring();
-      direct3d = direct3d || equal_name(name, L"d3d11.dll") || equal_name(name, L"d3d12.dll");
-      game_runtime = game_runtime || std::any_of(game_modules.begin(), game_modules.end(), [&](const auto candidate) {
-                       return equal_name(name, candidate);
-                     });
-    }
-    if (!direct3d) {
-      return std::nullopt;
-    }
-    if (game_runtime) {
-      return detection_evidence_e::known_runtime;
-    }
-    // Engines and storefront SDKs change independently of the host. A foreground Direct3D
-    // client filling this exact output is general game evidence even without a known module.
-    // Use the client, not the outer frame: ordinary maximized application chrome and windows
-    // spanning multiple outputs must not become automatic installation targets this way.
-    if (client.left == capture_rect.left && client.top == capture_rect.top && client.right == capture_rect.right && client.bottom == capture_rect.bottom) {
-      return detection_evidence_e::fullscreen_direct3d;
-    }
-    return std::nullopt;
-  }
-
   bool detail::is_game_candidate(
     const std::filesystem::path &executable,
     const std::span<const std::filesystem::path> loaded_modules,
     const foreground_window::observation_t &foreground,
     const RECT capture_rect
   ) {
-    return classify_game_candidate(executable, loaded_modules, foreground, capture_rect).has_value();
+    if (!foreground_window::carries_geometry(foreground.status) || !foreground.window || !foreground.process_id || !executable.is_absolute() || !equal_name(executable.extension().wstring(), L".exe") || excluded_executable(executable)) {
+      return false;
+    }
+    const auto client = foreground.client_screen_rect;
+    if (!client.valid() || capture_rect.right <= capture_rect.left || capture_rect.bottom <= capture_rect.top) {
+      return false;
+    }
+    // Use the client, not the outer frame, and require it to cover exactly this output: that is
+    // the presentation Game 3D export itself requires. Maximized application chrome, windows
+    // spanning several outputs and ordinary windows do not qualify. A windowed (e.g. >=75%
+    // overlap) rule is deliberately not offered: almost every desktop application now loads
+    // D3D11 (Chromium/Electron, Office, WinUI), so it would turn every focused window into a
+    // setup offer, while a windowed game cannot export stereo until it covers the output anyway.
+    if (client.left != capture_rect.left || client.top != capture_rect.top || client.right != capture_rect.right || client.bottom != capture_rect.bottom) {
+      return false;
+    }
+    return std::any_of(loaded_modules.begin(), loaded_modules.end(), [](const auto &module) {
+      const auto name = module.filename().wstring();
+      return equal_name(name, L"d3d11.dll") || equal_name(name, L"d3d12.dll");
+    });
   }
 
   std::optional<detected_game> detection_confirmation::observe(
@@ -252,10 +269,6 @@ namespace platf::game3d {
     if (!candidate) {
       reset();
       return std::nullopt;
-    }
-    if (candidate->evidence == detection_evidence_e::known_runtime) {
-      reset();
-      return candidate;
     }
     if (!candidate->process_id || !candidate->creation_time || !candidate->window || capture_rect.right <= capture_rect.left || capture_rect.bottom <= capture_rect.top) {
       reset();
@@ -304,8 +317,7 @@ namespace platf::game3d {
       if (!modules) {
         return std::nullopt;
       }
-      const auto evidence = detail::classify_game_candidate(*executable, *modules, foreground, capture_rect);
-      if (!evidence) {
+      if (!detail::is_game_candidate(*executable, *modules, foreground, capture_rect)) {
         return std::nullopt;
       }
       const auto after = foreground_window::sample();
@@ -313,7 +325,7 @@ namespace platf::game3d {
       if (!foreground_window::carries_geometry(after.status) || after.window != foreground.window || after.process_id != foreground.process_id || after.client_screen_rect != foreground.client_screen_rect || !executable_after || !equal_name(executable->wstring(), executable_after->wstring()) || process_creation_time(process.get()) != creation_time || WaitForSingleObject(process.get(), 0) != WAIT_TIMEOUT) {
         return std::nullopt;
       }
-      return detected_game {*executable, foreground.process_id, creation_time, display_name(*executable), *evidence, foreground.window};
+      return detected_game {*executable, foreground.process_id, creation_time, display_name(*executable), foreground.window};
     } catch (...) {
       // This advisory must not break an active stream on a path conversion/allocation failure.
       return std::nullopt;

@@ -128,7 +128,6 @@ namespace platf::game3d {
         announced_.emplace(notification_key, true);
         BOOST_LOG(info) << "Game 3D setup: " << game.name << " [" << label << "] executable=\"" << executable
                         << "\" pid=" << game.process_id << " creation_time=" << game.creation_time
-                        << " evidence=" << (game.evidence == detection_evidence_e::fullscreen_direct3d ? "fullscreen_direct3d" : "known_runtime")
                         << ": " << installation.detail;
 #if defined(SUNSHINE_TRAY) && SUNSHINE_TRAY >= 1
         if (installation.state != installation_state_e::current) {
