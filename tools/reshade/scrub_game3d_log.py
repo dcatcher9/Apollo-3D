@@ -11,7 +11,10 @@ fixture in manifest.json. Record its report afterwards with
 
     python tools/reshade/scrub_game3d_log.py <name> "<game>" <ReShade.log> [--host-log sunshine.log]
 
-Exit code: 0 when the fixture was written, 2 when a log is unusable or the game's install folder is unknown.
+After a rule is added, `--rescrub` applies it to the committed fixtures in place; their goldens should not move.
+
+Exit code: 0 when the fixture was written, 2 when a log is unusable or already scrubbed or the game's install folder is
+unknown.
 """
 
 from __future__ import annotations
@@ -73,6 +76,8 @@ def install_folder(lines: list[str]) -> str | None:
     for line in lines:
         if found := report.LOADED.search(line):
             folder = PureWindowsPath(found.group(1)).parent
+            if not folder.drive:
+                return None  # A scrubbed log's '<GAME>\...' or a relative path: no folder to replace.
             unreal = False
             while folder.name.lower() in BUILD_FOLDERS or folder.name.lower().startswith('x64_'):
                 unreal = unreal or folder.name.lower() == 'binaries'
@@ -117,10 +122,12 @@ def ipv6(found: re.Match) -> str:
 
 
 def scrub_line(line: str, install: str | None = None, names: tuple[tuple[str, str], ...] = ()) -> str:
-    """One log line with every identifying value replaced by its placeholder; idempotent."""
-    if install:
-        parts = [re.escape(part) for part in PureWindowsPath(install).parts]
-        root = re.escape(PureWindowsPath(install).drive) + SEP + SEP.join(parts[1:])
+    """One log line with every identifying value replaced by its placeholder; idempotent. An install folder replaces
+    nothing unless it has a drive and a folder below it: a bare root's pattern would match any separator."""
+    folder = PureWindowsPath(install or '')
+    if folder.drive and len(folder.parts) > 1:
+        parts = [re.escape(part) for part in folder.parts]
+        root = re.escape(folder.drive) + SEP + SEP.join(parts[1:])
         line = re.sub(rf'(?<![A-Za-z0-9]){root}(?=$|{SEP}|[\'"\s])', '<GAME>', line, flags=re.I)
     line = USER_PROFILE.sub('<USER_PROFILE>', line)
     line = DEVICE_PATH.sub('<DEVICE_PATH>', line)
@@ -178,14 +185,40 @@ def load_manifest() -> list[dict]:
     return json.loads(MANIFEST.read_text(encoding='utf-8')) if MANIFEST.exists() else []
 
 
+def rescrub() -> int:
+    """Applies the current rules to the committed fixtures in place. The raw logs are not kept; a fixture's install
+    folder is already <GAME> and its host lines are already the session's, so only the line rules run again."""
+    names = local_names()
+    for fixture in load_manifest():
+        paths = [GOLDENS / f'{fixture["name"]}.ReShade.log.gz']
+        if fixture['host_log']:
+            paths.append(GOLDENS / f'{fixture["name"]}.sunshine.log.gz')
+        for path in paths:
+            lines = gzip.decompress(path.read_bytes()).decode('utf-8').splitlines()
+            scrubbed = [scrub_line(line, None, names) for line in lines]
+            if scrubbed != lines:
+                write_gzip(path, scrubbed)
+                print(f'{path.name}: {sum(a != b for a, b in zip(lines, scrubbed))} lines scrubbed')
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
-    parser.add_argument('name', help='fixture name, for example stellar_blade_1022')
-    parser.add_argument('game', help='the game, for example "Stellar Blade"')
-    parser.add_argument('log', type=Path, help="the game's saved ReShade.log, with its original modification time")
+    parser.add_argument('name', nargs='?', help='fixture name, for example stellar_blade_1022')
+    parser.add_argument('game', nargs='?', help='the game, for example "Stellar Blade"')
+    parser.add_argument('log', nargs='?', type=Path,
+                        help="the game's saved ReShade.log, with its original modification time")
     parser.add_argument('--host-log', type=Path, help="Sunshine's log of the same session")
     parser.add_argument('--install', help="the game's install folder, when it is not found from its executable")
+    parser.add_argument('--rescrub', action='store_true',
+                        help='apply the current rules to the committed fixtures in place, after a rule is added')
     args = parser.parse_args(argv)
+    if args.rescrub:
+        if args.name or args.host_log or args.install:
+            parser.error('--rescrub takes no other arguments')
+        return rescrub()
+    if not args.log:
+        parser.error('name, game and log are required')
     if not re.fullmatch(r'[a-z0-9_]+', args.name):
         parser.error('name: use lower-case letters, digits and underscores')
     try:
@@ -195,6 +228,10 @@ def main(argv=None) -> int:
         start, end = session_window(lines, written)
     except (OSError, ValueError) as error:
         print(f'cannot read the logs: {error}')
+        return 2
+    if any('<GAME>' in line for line in lines):
+        # Its install folder is already <GAME> and its host lines are cut to the session: --rescrub reruns the rules.
+        print(f'{args.log} is already a scrubbed fixture: run with --rescrub to apply new rules to the fixtures')
         return 2
     install = args.install or install_folder(lines)
     if not install:

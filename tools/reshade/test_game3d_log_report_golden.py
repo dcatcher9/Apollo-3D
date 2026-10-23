@@ -12,11 +12,13 @@ import contextlib
 import gzip
 import io
 import os
+import shutil
 import sys
 import unittest
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import game3d_log_report as report  # noqa: E402
@@ -77,6 +79,29 @@ class GoldenReports(unittest.TestCase):
                 with self.subTest(path.name):
                     text = gzip.decompress(path.read_bytes()).decode('utf-8')
                     self.assertEqual(scrub.leftovers(text, names)[:5], [])
+
+    def test_fixtures_scrub_again_unchanged(self):
+        # The raw logs are not kept, so a new rule reaches the fixtures by scrubbing them again. A fixture's <GAME> is
+        # no install folder to replace, a full scrub refuses the fixture, and --rescrub rewrites none of its bytes.
+        with TemporaryDirectory() as directory:
+            copy = Path(directory) / 'goldens'
+            shutil.copytree(scrub.GOLDENS, copy)
+            manifest = copy / 'manifest.json'
+            with mock.patch.object(scrub, 'GOLDENS', copy), mock.patch.object(scrub, 'MANIFEST', manifest):
+                for path in (path for fixture in self.fixtures for path in filter(None, logs(fixture))):
+                    with self.subTest(path.name):
+                        lines = gzip.decompress(path.read_bytes()).decode('utf-8').splitlines()
+                        self.assertIsNone(scrub.install_folder(lines))
+                        self.assertEqual([line for line in lines if scrub.scrub_line(line, '<GAME>') != line][:5], [])
+                log = Path(directory) / 'ReShade.log'
+                log.write_bytes(gzip.decompress(logs(self.fixtures[0])[0].read_bytes()))
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(scrub.main(['probe', 'Probe', str(log)]), 2)
+                    self.assertEqual(scrub.rescrub(), 0)
+            self.assertEqual(sorted(path.name for path in copy.iterdir()),
+                             sorted(path.name for path in scrub.GOLDENS.iterdir()))
+            for path in scrub.GOLDENS.iterdir():
+                self.assertEqual((copy / path.name).read_bytes(), path.read_bytes(), path.name)
 
     def test_every_file_belongs_to_a_fixture(self):
         if UPDATE:
