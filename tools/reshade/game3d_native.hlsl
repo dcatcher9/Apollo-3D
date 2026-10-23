@@ -196,8 +196,9 @@ Texture2D<float4> SunshineUIBackbufferAlpha : register(t13);
 Texture2D<float4> SunshineHUDless : register(t14);
 // Sunshine_UIDetectionFlags (docs/reshade-sbs.md, UI detection flags and
 // decision texels), mirrored from game3d_ui_detection_contract.h. Stored bits
-// describe the offscreen UI layer slot (t7): it must pass the premultiplied
-// bound, with a float layer's HDR headroom.
+// describe the encoding of an input slot: the offscreen UI layer (t7) must
+// pass the premultiplied bound, with a float layer's HDR headroom, and an
+// A8_UNORM UIAlpha (t11) carries its opacity in alpha instead of red.
 // Per-frame bits ride in one render's pushed word only: the offered UIAlpha
 // or UI color tag was not captured in the exact pair's tag batch (its
 // candidate bit from bit SUNSHINE_UI_PER_FRAME_UNALIGNED_SHIFT; the one-way
@@ -214,6 +215,7 @@ Texture2D<float4> SunshineHUDless : register(t14);
 // the pre-UI scene image (H1 d, the acceptance ledger's pre-UI proof).
 #define SUNSHINE_UI_STORED_PREMULTIPLIED 0x1u
 #define SUNSHINE_UI_STORED_HDR_HEADROOM 0x2u
+#define SUNSHINE_UI_STORED_UI_ALPHA_IN_ALPHA 0x10u
 // 0x4u and 0x8u (stored), 0x10000u, 0x20000u, 0x80000u and 0x20000000u
 // (per-frame) are reserved and never reused.
 #define SUNSHINE_UI_PER_FRAME_UNALIGNED_SHIFT 12
@@ -295,11 +297,19 @@ float SunshineSelectedUIAlpha(uint2 coordinate)
     float4 value = SunshineSourceSampler.Load(int3(int2(coordinate), 0));
     return Sunshine_UIMaskChannel == 1u ? value.r : value.a;
 }
+// The offered UIAlpha's opacity (t11): red of a single-channel image, alpha
+// of an A8_UNORM one (SUNSHINE_UI_STORED_UI_ALPHA_IN_ALPHA); the tiles and
+// mask passes read the same channel.
+float SunshineUIDedicatedAlphaAt(int3 at)
+{
+    float4 value = SunshineUIDedicatedAlpha.Load(at);
+    return (Sunshine_UIDetectionFlags & SUNSHINE_UI_STORED_UI_ALPHA_IN_ALPHA) != 0u ? value.a : value.r;
+}
 
 // Auto validates each CURRENT pair on the GPU. No prior CPU observation can
 // authorize a changed candidate: session acceptance only names the sources
 // that carry UI coverage, and this frame's own pixels are the mask. The
-// tiles pass reads UIAlpha (t11 .r), the UI color tag (t12 .a), the
+// tiles pass reads UIAlpha (t11 .r, or .a of an A8_UNORM image), the UI color tag (t12 .a), the
 // Backbuffer (t13 .a) and the current alpha (the presented colour, t6 .a).
 float SunshineHUDlessDifferenceOf(float3 a, float3 b, out bool valid)
 {
@@ -399,7 +409,7 @@ void SunshineUIDetectionTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_Grou
     [loop] for (uint x = first.x + thread.x; x < last.x; x += 16u) {
         const int3 at = int3(x, y, 0);
         float4 a = 0.0;
-        [branch] if (offered & SUNSHINE_UI_CANDIDATE_UI_ALPHA) a.x = SunshineUIDedicatedAlpha.Load(at).r;
+        [branch] if (offered & SUNSHINE_UI_CANDIDATE_UI_ALPHA) a.x = SunshineUIDedicatedAlphaAt(at);
         [branch] if (offered & SUNSHINE_UI_CANDIDATE_UI_COLOR) a.y = SunshineUIColorAlpha.Load(at).a;
         [branch] if (offered & SUNSHINE_UI_CANDIDATE_BACKBUFFER) a.z = SunshineUIBackbufferAlpha.Load(at).a;
         [branch] if (offered & SUNSHINE_UI_CANDIDATE_CURRENT) a.w = SunshinePresentedColor.Load(at).a;
@@ -857,7 +867,7 @@ void SunshineUIDetectionMaskCS(uint3 id : SV_DispatchThreadID)
     if (source == 6u || source == 8u) mask = 1.0;
     // Otherwise load only the selected candidate's raw mask (the same channel
     // the tiles pass reads).
-    else if (source == 1u) mask = SunshineUIDedicatedAlpha.Load(at).r;
+    else if (source == 1u) mask = SunshineUIDedicatedAlphaAt(at);
     else if (source == 2u) mask = SunshineUIColorAlpha.Load(at).a;
     else if (source == 3u) mask = SunshineUIBackbufferAlpha.Load(at).a;
     else if (source == 4u) mask = SunshinePresentedColor.Load(at).a;

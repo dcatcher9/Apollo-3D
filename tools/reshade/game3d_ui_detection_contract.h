@@ -39,7 +39,7 @@ namespace sunshine_game3d::ui_detection {
   // and the offscreen UI layer never share a slot. The renderer and
   // ui_detection_replay accept no other layout.
   namespace candidate {
-    inline constexpr std::uint32_t ui_alpha = 0x1u;   // t11 .r: a UIAlpha tag.
+    inline constexpr std::uint32_t ui_alpha = 0x1u;   // t11 .r (.a with stored_ui_alpha_in_alpha): a UIAlpha tag.
     inline constexpr std::uint32_t ui_color = 0x2u;   // t12 .a: a UIColorAndAlpha tag, never the layer.
     inline constexpr std::uint32_t backbuffer = 0x4u; // t13 .a: the Backbuffer tag.
     inline constexpr std::uint32_t current = 0x8u;    // t0 .a: the current (or paired) color.
@@ -70,18 +70,22 @@ namespace sunshine_game3d::ui_detection {
     {"SUNSHINE_UI_SOURCE_LAYER", source_layer},
   }};
 
-  // Sunshine_UIDetectionFlags, b2 word 3. Stored bits describe the offscreen
-  // UI layer slot (t7) and the renderer keeps them between frames. Only the
-  // tiles pass reads them; they key no decision, no status (F1) and no
+  // Sunshine_UIDetectionFlags, b2 word 3. Stored bits describe the encoding
+  // of an input slot: the offscreen UI layer (t7), whose bits the renderer
+  // keeps with its copy between frames, and UIAlpha (t11). Only the tiles and
+  // mask passes read them; they key no decision, no status (F1) and no
   // hidden-scene state, and nothing on the CPU reads them back.
   inline constexpr std::uint32_t stored_premultiplied = 0x1u; // The layer must pass the premultiplied bound (V1).
   inline constexpr std::uint32_t stored_hdr_headroom = 0x2u;  // With a float layer's HDR headroom.
+  // The offered UIAlpha (t11) is an A8_UNORM image (ui_mask::
+  // ui_alpha_in_alpha): its opacity is read from alpha, not red.
+  inline constexpr std::uint32_t stored_ui_alpha_in_alpha = 0x10u;
   // 0x4u (the one-frame-late layer bit, which selection revisions 2-9 read;
   // every layer copy carried it through 180f1842, so dumps until then record
   // a layer's flags as 5 or 7) and 0x8u (a retired stage-2 bit) are reserved
   // and never reused.
   // Selection revision 10 moved the boundary down from 0x10000u: stored bits
-  // 0x10u to 0x800u are free, never having been used.
+  // 0x20u to 0x800u are free, never having been used.
   inline constexpr std::uint32_t stored_mask = 0xfffu;
   // Per-frame bits ride in the pushed flags word of one render only. They are
   // never stored in the renderer's detection flags.
@@ -129,7 +133,8 @@ namespace sunshine_game3d::ui_detection {
   inline constexpr std::uint32_t per_frame_pre_ui_proven = 0x80000000u;
   inline constexpr std::uint32_t per_frame_mask = 0xfffff000u;
   static_assert((stored_mask & per_frame_mask) == 0 && (stored_mask | per_frame_mask) == 0xffffffffu &&
-    (stored_premultiplied | stored_hdr_headroom | 0x4u | 0x8u) <= stored_mask);
+    (stored_premultiplied | stored_hdr_headroom | 0x4u | 0x8u | stored_ui_alpha_in_alpha) <= stored_mask &&
+    !((stored_premultiplied | stored_hdr_headroom | 0x4u | 0x8u) & stored_ui_alpha_in_alpha));
   static_assert(((candidate::ui_alpha | candidate::ui_color) << per_frame_unaligned_shift) == per_frame_unaligned_mask &&
     (per_frame_unaligned_mask & ~per_frame_mask) == 0 && per_frame_unaligned_mask < per_frame_sample);
   static_assert(((candidate::ui_alpha | candidate::ui_color | candidate::backbuffer | candidate::current | candidate::hudless |
@@ -141,9 +146,10 @@ namespace sunshine_game3d::ui_detection {
   static_assert(((per_frame_unaligned_mask | per_frame_sample | per_frame_reoffer) & ~per_frame_mask) == 0 &&
     (per_frame_unaligned_mask | per_frame_sample | per_frame_reoffer) < 0x10000u && per_frame_sample != per_frame_reoffer);
   // The game3d_native.hlsl define mirroring each flag.
-  inline constexpr std::array<std::pair<std::string_view, std::uint32_t>, 12> hlsl_flag_defines{{
+  inline constexpr std::array<std::pair<std::string_view, std::uint32_t>, 13> hlsl_flag_defines{{
     {"SUNSHINE_UI_STORED_PREMULTIPLIED", stored_premultiplied},
     {"SUNSHINE_UI_STORED_HDR_HEADROOM", stored_hdr_headroom},
+    {"SUNSHINE_UI_STORED_UI_ALPHA_IN_ALPHA", stored_ui_alpha_in_alpha},
     {"SUNSHINE_UI_PER_FRAME_UNALIGNED_SHIFT", per_frame_unaligned_shift},
     {"SUNSHINE_UI_PER_FRAME_SAMPLE", per_frame_sample},
     {"SUNSHINE_UI_PER_FRAME_REOFFER", per_frame_reoffer},

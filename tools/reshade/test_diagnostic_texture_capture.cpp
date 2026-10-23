@@ -925,6 +925,33 @@ namespace {
       local ? "local" : "shared", unsigned(format), unsigned(target_format));
   }
 
+  // An A8_UNORM UIAlpha is copied for the live renderer only (local
+  // storage), byte for byte; a shared copy is refused, as the D3D11 host
+  // cannot open a shared A8_UNORM texture.
+  void local_a8_snapshot(fixture &gpu) {
+    consumer_fixture consumer(gpu);
+    texture_case image(gpu, DXGI_FORMAT_A8_UNORM, 1);
+    capture::record_diagnostic diagnostic;
+    require(!capture::record_diagnostic_texture(native(gpu.list.Get()), image.input, &diagnostic) &&
+        diagnostic.result == capture::status::unsupported_resource, "a shared A8_UNORM snapshot was recorded");
+    auto ticket = capture::record_local_texture(native(gpu.list.Get()), image.input, &diagnostic);
+    require(bool(ticket), "a live A8_UNORM UIAlpha snapshot was not recorded");
+    capture::finish_diagnostic_texture(ticket, true);
+    gpu.submit(); gpu.wait(); gpu.reset();
+    const auto queue = native(gpu.foreign_queue.Get());
+    capture::diagnostic_texture snapshot;
+    require(capture::acquire_local_texture(ticket, queue, snapshot) == capture::status::ready &&
+        snapshot.format == unsigned(DXGI_FORMAT_A8_UNORM), "a live A8_UNORM snapshot was not ready as A8_UNORM");
+    auto target = destination(gpu.device.Get(), DXGI_FORMAT_A8_UNORM);
+    require(capture::copy_local_texture(native(consumer.list.Get()), queue, ticket, native(target.Get()),
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE), "a live A8_UNORM snapshot was not copied");
+    readback actual(gpu, target.Get()); actual.record(consumer.list.Get(), target.Get());
+    consumer.submit(); consumer.wait(); consumer.reset();
+    actual.verify(image.width, image.height, 1);
+    capture::release_diagnostic_texture(ticket); capture::poll();
+    std::puts("PASS live A8_UNORM UIAlpha snapshot: exact bytes on a consumer queue; a shared copy refused");
+  }
+
   void local_same_queue_ordered_capture(fixture &gpu) {
     consumer_fixture consumer(gpu);
     texture_case image(gpu, DXGI_FORMAT_R10G10B10A2_UNORM, 4);
@@ -1331,11 +1358,14 @@ namespace {
     capture::observe_queue(native(gpu.foreign_queue.Get())); capture::poll();
     std::puts("PASS auxiliary consumer discard, same-queue replay, cross-queue replay rejection and queue retirement");
   }
+  // declared: the source's declared view format (Streamline
+  // Resource.nativeFormat), which resolves a typeless allocation's snapshot.
   void captured_mutation(fixture &gpu, DXGI_FORMAT format, unsigned bpp,
-      DXGI_FORMAT snapshot_format = DXGI_FORMAT_UNKNOWN) {
+      DXGI_FORMAT snapshot_format = DXGI_FORMAT_UNKNOWN, DXGI_FORMAT declared = DXGI_FORMAT_UNKNOWN) {
     if (snapshot_format == DXGI_FORMAT_UNKNOWN) snapshot_format = format;
     if (snapshot_format != format && gpu.debug_messages) gpu.debug_messages->ClearStoredMessages();
     texture_case image(gpu, format, bpp);
+    image.input.resource.native_format = declared;
     auto wrong = image.input; wrong.native_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     capture::record_diagnostic diagnostic;
     require(!capture::record_diagnostic_texture(native(gpu.list.Get()), wrong, &diagnostic) &&
@@ -1704,6 +1734,27 @@ int main(int argc, char **argv) {
     captured_mutation(gpu, DXGI_FORMAT_R8G8B8A8_TYPELESS, 4, DXGI_FORMAT_R8G8B8A8_UNORM);
     captured_mutation(gpu, DXGI_FORMAT_B8G8R8A8_TYPELESS, 4, DXGI_FORMAT_B8G8R8A8_UNORM);
     captured_mutation(gpu, DXGI_FORMAT_R16G16B16A16_FLOAT, 8);
+    // C11: typeless UI allocations resolve to a typed snapshot, byte for
+    // byte: R10G10B10A2 and B8G8R8X8 by their same-bits UNORM view, the
+    // others only through a declared view of their family; A8_UNORM as is.
+    captured_mutation(gpu, DXGI_FORMAT_R10G10B10A2_TYPELESS, 4, DXGI_FORMAT_R10G10B10A2_UNORM);
+    captured_mutation(gpu, DXGI_FORMAT_B8G8R8X8_TYPELESS, 4, DXGI_FORMAT_B8G8R8X8_UNORM);
+    captured_mutation(gpu, DXGI_FORMAT_R16G16B16A16_TYPELESS, 8, DXGI_FORMAT_R16G16B16A16_UNORM, DXGI_FORMAT_R16G16B16A16_UNORM);
+    captured_mutation(gpu, DXGI_FORMAT_R8_TYPELESS, 1, DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8_UNORM);
+    local_a8_snapshot(gpu);
+    for (const auto [format, declared] : {std::pair{DXGI_FORMAT_R16G16B16A16_TYPELESS, DXGI_FORMAT_UNKNOWN},
+           std::pair{DXGI_FORMAT_R16G16B16A16_TYPELESS, DXGI_FORMAT_R8G8B8A8_UNORM},
+           std::pair{DXGI_FORMAT_R8_TYPELESS, DXGI_FORMAT_UNKNOWN}, std::pair{DXGI_FORMAT_A8_UNORM, DXGI_FORMAT_UNKNOWN}}) {
+      texture_case image(gpu, format, format == DXGI_FORMAT_R16G16B16A16_TYPELESS ? 8 : 1);
+      image.input.resource.native_format = declared;
+      capture::record_diagnostic diagnostic;
+      require(!capture::record_diagnostic_texture(native(gpu.list.Get()), image.input, &diagnostic) &&
+          diagnostic.result == capture::status::unsupported_resource && diagnostic.stage == capture::record_stage::resource_region,
+        "a typeless allocation without a declared view of its family, or a shared A8_UNORM copy, was recorded");
+      gpu.submit(); gpu.wait(); gpu.reset();
+    }
+    std::puts("PASS typeless UI snapshots: R10G10B10A2 and B8G8R8X8 stored as UNORM, declared R16G16B16A16 and R8 views "
+      "stored as declared, A8_UNORM live only; undeclared or foreign declarations and shared A8_UNORM refused");
     live_auxiliary_copy(gpu, DXGI_FORMAT_R8G8B8A8_UNORM, 4);
     live_auxiliary_copy(gpu, DXGI_FORMAT_R10G10B10A2_UNORM, 4);
     live_auxiliary_copy(gpu, DXGI_FORMAT_R16G16B16A16_FLOAT, 8);

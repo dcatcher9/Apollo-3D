@@ -4,6 +4,7 @@
 #include "streamline_buffer_types.h"
 #include "streamline_camera_data.h"
 #include "streamline_depth_capture.h"
+#include "game3d_ui_selection.h"
 
 #include <array>
 #include <cstddef>
@@ -36,13 +37,56 @@ namespace sunshine_game3d::ui_mask {
     return kind == source_kind::alpha ? 0u : kind == source_kind::color_and_alpha ? 1u :
       kind == source_kind::backbuffer ? 2u : 3u;
   }
-  // A snapshot's typed DXGI format (depth_capture::auxiliary_snapshot_format of
-  // the tagged resource's format) that the kind can be read from.
-  inline bool supported_format(source_kind kind, std::uint32_t format) {
-    if (kind == source_kind::alpha) return format == 41 || format == 54 || format == 56 || format == 61;
-    return (kind == source_kind::backbuffer || kind == source_kind::color_and_alpha || kind == source_kind::hudless) &&
-      (format == 2 || format == 10 || format == 24 || format == 28 || format == 29 || format == 87 || format == 91);
+  // UIAlpha is a single-channel image of the UI's opacity (the DLSS-G guide):
+  // R32_FLOAT, R16_FLOAT, R16_UNORM and R8_UNORM carry it in red, A8_UNORM in
+  // alpha (ui_alpha_in_alpha; the detection reads it there through
+  // ui_detection::stored_ui_alpha_in_alpha). A typeless single-channel
+  // allocation is one of them only through its declared nativeFormat
+  // (depth_capture::auxiliary_snapshot_format).
+  constexpr bool ui_alpha_format(std::uint32_t format) {
+    return format == 41 || format == 54 || format == 56 || format == 61 || format == 65;
   }
+  constexpr bool ui_alpha_in_alpha(std::uint32_t format) { return format == 65; }
+  // A snapshot's typed DXGI format (depth_capture::auxiliary_snapshot_format of
+  // the tagged resource's format and declared nativeFormat) that the kind can
+  // be read from: UIAlpha one of its single-channel formats; HUD-less any
+  // colour format ui_selection::detail::classify knows; Backbuffer and the UI
+  // color tag only those with alpha. Unknown formats stay refused.
+  constexpr bool supported_format(source_kind kind, std::uint32_t format) {
+    if (kind == source_kind::alpha) return ui_alpha_format(format);
+    const auto colour = ui_selection::detail::classify(format);
+    if (colour.kind == ui_selection::detail::family::unknown) return false;
+    return kind == source_kind::hudless ||
+      ((kind == source_kind::backbuffer || kind == source_kind::color_and_alpha) && colour.has_alpha);
+  }
+  // The gate and the classifier agree on every DXGI format, and every typeless
+  // allocation is judged by its resolved snapshot format: HUD-less admits
+  // 2, 10, 11, 24, 26, 28, 29, 87, 88, 91 and 93; Backbuffer and UIColorAndAlpha
+  // those of them with alpha; UIAlpha 41, 54, 56, 61 and 65.
+  static_assert([] {
+    namespace selection = ui_selection::detail;
+    namespace capture = sunshine_streamline::depth_capture;
+    std::uint32_t hudless = 0, alpha = 0, ui_alpha = 0;
+    for (std::uint32_t f = 0; f <= 132; ++f) {
+      const auto c = selection::classify(f);
+      const bool known = c.kind != selection::family::unknown;
+      if (supported_format(source_kind::hudless, f) != known ||
+          supported_format(source_kind::backbuffer, f) != (known && c.has_alpha) ||
+          supported_format(source_kind::color_and_alpha, f) != (known && c.has_alpha) ||
+          supported_format(source_kind::alpha, f) != ui_alpha_format(f) ||
+          (capture::typeless_color(f) && (known || ui_alpha_format(f))))
+        return false;
+      // A resolved snapshot format is never typeless.
+      if (capture::typeless_color(capture::auxiliary_snapshot_format(f)) ||
+          capture::typeless_color(capture::auxiliary_snapshot_format(f, f + 1)))
+        return false;
+      hudless += supported_format(source_kind::hudless, f) ? f : 0;
+      alpha += supported_format(source_kind::backbuffer, f) ? f : 0;
+      ui_alpha += supported_format(source_kind::alpha, f) ? f : 0;
+    }
+    return hudless == 2 + 10 + 11 + 24 + 26 + 28 + 29 + 87 + 88 + 91 + 93 &&
+      alpha == 2 + 10 + 11 + 24 + 28 + 29 + 87 + 91 && ui_alpha == 41 + 54 + 56 + 61 + 65;
+  }());
   // A request is live while its runtime refreshes it (set_request on every
   // Present that wants UI captures): only requests refreshed within
   // maximum_source_age_ms of a tag match it, so a swapchain that stopped
@@ -68,7 +112,9 @@ namespace sunshine_game3d::ui_mask {
     source_kind kind = source_kind::backbuffer;
     std::uint64_t source_present_generation{}; // Captured at this exact tag entry.
     // The tagged resource's DXGI format (depth_capture::retain_source; 0
-    // unknown). begin() refuses a format the kind cannot be read from (format)
+    // unknown). begin() resolves it with the tag's declared nativeFormat
+    // (input.resource.native_format, depth_capture::auxiliary_snapshot_format)
+    // and refuses a snapshot format the kind cannot be read from (format)
     // before any copy.
     std::uint32_t format{};
     // An unsupported tag's cause, which names begin()'s refusal stage.

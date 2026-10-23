@@ -221,6 +221,8 @@ namespace {
         }
         case DXGI_FORMAT_R8_UNORM:
           value = channel ? (channel == 3 ? 1.f : 0.f) : float(*texel(x, y, 1)) / 255.f; break;
+        case DXGI_FORMAT_A8_UNORM:
+          value = channel == 3 ? float(*texel(x, y, 1)) / 255.f : 0.f; break;
         default: return {};
       }
     }
@@ -351,7 +353,9 @@ namespace {
     else if (source <= 4u || source == contract::source_layer) {
       const auto *input = source == 4u ? &paired : source == contract::source_layer ? layer : inputs[source - 1];
       if (!input) return "no-reference(missing candidate)";
-      reference = component(*input, source == 1u ? 0 : 3);
+      // UIAlpha reads red, or alpha of an A8_UNORM image (stored_ui_alpha_in_alpha).
+      const bool red = source == 1u && input->descriptor.at("dxgi_format").get<unsigned>() != DXGI_FORMAT_A8_UNORM;
+      reference = component(*input, red ? 0 : 3);
       if (reference.empty()) return "no-reference(format " + input->descriptor.at("dxgi_format").dump() + ")";
     } else return "no-reference(source " + std::to_string(source) + ")";
     if (reference.size() != result.mask.size()) return "differs(extent)";
@@ -413,9 +417,12 @@ namespace {
       else {
         const unsigned slot = name == "sl_ui_alpha" ? 0 : bit == candidate::ui_color ? 1 : name == "sl_backbuffer" ? 2 : 3;
         inputs[slot] = &load(name);
+        // An A8_UNORM UIAlpha carries its opacity in alpha, as the renderer pushes it.
+        if (!slot && artifacts.at(name).at("dxgi_format").get<unsigned>() == DXGI_FORMAT_A8_UNORM)
+          flags |= contract::stored_ui_alpha_in_alpha;
       }
       if (layer) {
-        flags = contract::layer_detection_flags(contract::float_layer_format(artifacts.at(name).at("dxgi_format").get<unsigned>())) |
+        flags |= contract::layer_detection_flags(contract::float_layer_format(artifacts.at(name).at("dxgi_format").get<unsigned>())) |
           (late_layer_bit ? 0x4u : 0u);
       }
     }

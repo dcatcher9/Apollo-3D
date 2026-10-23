@@ -115,23 +115,34 @@ namespace sunshine_streamline::depth_capture {
         desc.DepthOrArraySize == 1 && desc.MipLevels >= 1 && desc.Width && desc.Width <= 16384 &&
         desc.Height && desc.Height <= 16384 && typeless(desc.Format) != DXGI_FORMAT_UNKNOWN;
     }
-    DXGI_FORMAT diagnostic_storage_format(DXGI_FORMAT format) {
-      // Color/alpha allocations may be typeless while their UI views are UNORM.
-      // Copy those bytes into a compatible typed snapshot so both the renderer
-      // and diagnostic host receive an explicit format (the UI capture owner
-      // checks the same mapping before it records a copy).
-      return static_cast<DXGI_FORMAT>(auxiliary_snapshot_format(static_cast<std::uint32_t>(format)));
+    DXGI_FORMAT diagnostic_storage_format(DXGI_FORMAT format, std::uint32_t declared) {
+      // Color/alpha allocations may be typeless while their UI views are typed.
+      // Copy those bytes into a typed snapshot of the declared or same-bits
+      // UNORM view so both the renderer and diagnostic host receive an
+      // explicit format (the UI capture owner checks the same mapping before
+      // it records a copy); an unresolved typeless allocation has none.
+      return static_cast<DXGI_FORMAT>(auxiliary_snapshot_format(static_cast<std::uint32_t>(format), declared));
     }
     static_assert(auxiliary_snapshot_format(DXGI_FORMAT_R8G8B8A8_TYPELESS) == std::uint32_t(DXGI_FORMAT_R8G8B8A8_UNORM) &&
       auxiliary_snapshot_format(DXGI_FORMAT_B8G8R8A8_TYPELESS) == std::uint32_t(DXGI_FORMAT_B8G8R8A8_UNORM) &&
-      auxiliary_snapshot_format(DXGI_FORMAT_R10G10B10A2_TYPELESS) == std::uint32_t(DXGI_FORMAT_R10G10B10A2_TYPELESS));
-    unsigned diagnostic_pixel_bytes(DXGI_FORMAT format) {
-      return game3d_debug::pixel_bytes(static_cast<unsigned>(diagnostic_storage_format(format)));
+      auxiliary_snapshot_format(DXGI_FORMAT_R10G10B10A2_TYPELESS) == std::uint32_t(DXGI_FORMAT_R10G10B10A2_UNORM) &&
+      auxiliary_snapshot_format(DXGI_FORMAT_R16G16B16A16_TYPELESS, DXGI_FORMAT_R16G16B16A16_FLOAT) ==
+        std::uint32_t(DXGI_FORMAT_R16G16B16A16_FLOAT) &&
+      !auxiliary_snapshot_format(DXGI_FORMAT_R16G16B16A16_TYPELESS));
+    // A8_UNORM (a UIAlpha tag's format) is read by the live renderer only:
+    // the D3D11 host cannot open a shared A8_UNORM texture (OpenSharedResource1
+    // returns E_INVALIDARG), so a shared (Dump 3D) copy keeps the host's
+    // format table (the record path refuses it there).
+    unsigned diagnostic_pixel_bytes(DXGI_FORMAT format, std::uint32_t declared) {
+      const auto storage = diagnostic_storage_format(format, declared);
+      return storage == DXGI_FORMAT_A8_UNORM ? 1u : game3d_debug::pixel_bytes(static_cast<unsigned>(storage));
     }
-    bool diagnostic_description(const D3D12_RESOURCE_DESC &desc) {
+    // declared: the source's declared view format (Streamline
+    // Resource.nativeFormat; 0 none), which resolves a typeless allocation.
+    bool diagnostic_description(const D3D12_RESOURCE_DESC &desc, std::uint32_t declared = 0) {
       return desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && desc.SampleDesc.Count == 1 &&
         desc.DepthOrArraySize == 1 && desc.MipLevels == 1 && desc.Width && desc.Width <= 16384 &&
-        desc.Height && desc.Height <= 16384 && diagnostic_pixel_bytes(desc.Format) &&
+        desc.Height && desc.Height <= 16384 && diagnostic_pixel_bytes(desc.Format, declared) &&
         !(desc.Flags & (D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL | D3D12_RESOURCE_FLAG_VIDEO_DECODE_REFERENCE_ONLY |
           D3D12_RESOURCE_FLAG_VIDEO_ENCODE_REFERENCE_ONLY));
     }
@@ -144,43 +155,13 @@ namespace sunshine_streamline::depth_capture {
       default: return format;
       }
     }
-    // A typed view format of a color storage family; only families whose
-    // view reinterpretation is a plain cast. Anything else is incompatible.
-    DXGI_FORMAT color_family(DXGI_FORMAT value) {
-      switch (value) {
-      case DXGI_FORMAT_R8G8B8A8_TYPELESS: case DXGI_FORMAT_R8G8B8A8_UNORM: case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
-        return DXGI_FORMAT_R8G8B8A8_TYPELESS;
-      case DXGI_FORMAT_B8G8R8A8_TYPELESS: case DXGI_FORMAT_B8G8R8A8_UNORM: case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
-        return DXGI_FORMAT_B8G8R8A8_TYPELESS;
-      case DXGI_FORMAT_B8G8R8X8_TYPELESS: case DXGI_FORMAT_B8G8R8X8_UNORM: case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB:
-        return DXGI_FORMAT_B8G8R8X8_TYPELESS;
-      case DXGI_FORMAT_R10G10B10A2_TYPELESS: case DXGI_FORMAT_R10G10B10A2_UNORM: return DXGI_FORMAT_R10G10B10A2_TYPELESS;
-      case DXGI_FORMAT_R16G16B16A16_TYPELESS: case DXGI_FORMAT_R16G16B16A16_FLOAT: case DXGI_FORMAT_R16G16B16A16_UNORM:
-        return DXGI_FORMAT_R16G16B16A16_TYPELESS;
-      case DXGI_FORMAT_R32G32B32A32_TYPELESS: case DXGI_FORMAT_R32G32B32A32_FLOAT: return DXGI_FORMAT_R32G32B32A32_TYPELESS;
-      case DXGI_FORMAT_R11G11B10_FLOAT: return DXGI_FORMAT_R11G11B10_FLOAT;
-      case DXGI_FORMAT_R8_TYPELESS: case DXGI_FORMAT_R8_UNORM: return DXGI_FORMAT_R8_TYPELESS;
-      case DXGI_FORMAT_A8_UNORM: return DXGI_FORMAT_A8_UNORM;
-      case DXGI_FORMAT_R16_TYPELESS: case DXGI_FORMAT_R16_FLOAT: case DXGI_FORMAT_R16_UNORM: return DXGI_FORMAT_R16_TYPELESS;
-      case DXGI_FORMAT_R32_TYPELESS: case DXGI_FORMAT_R32_FLOAT: return DXGI_FORMAT_R32_TYPELESS;
-      default: return DXGI_FORMAT_UNKNOWN;
-      }
-    }
-    bool typeless_color(DXGI_FORMAT value) {
-      switch (value) {
-      case DXGI_FORMAT_R8G8B8A8_TYPELESS: case DXGI_FORMAT_B8G8R8A8_TYPELESS: case DXGI_FORMAT_B8G8R8X8_TYPELESS:
-      case DXGI_FORMAT_R10G10B10A2_TYPELESS: case DXGI_FORMAT_R16G16B16A16_TYPELESS: case DXGI_FORMAT_R32G32B32A32_TYPELESS:
-      case DXGI_FORMAT_R8_TYPELESS: case DXGI_FORMAT_R16_TYPELESS: case DXGI_FORMAT_R32_TYPELESS: return true;
-      default: return false;
-      }
-    }
-    // A legal SRV format of the storage without relaxed format casting: the
-    // storage's own typed format, or a typed member of a typeless storage's
-    // family. (An sRGB storage read through UNORM is not; it keeps the copy.)
-    bool same_color_family(DXGI_FORMAT storage, DXGI_FORMAT view) {
-      if (typeless_color(view) || color_family(view) == DXGI_FORMAT_UNKNOWN) return false;
-      return view == storage || (typeless_color(storage) && color_family(view) == color_family(storage));
-    }
+    // Colour view families: color_family, typeless_color and same_color_family
+    // (streamline_depth_capture.h), shared with the UI capture gate.
+    static_assert(color_family(DXGI_FORMAT_R16G16B16A16_UNORM) == DXGI_FORMAT_R16G16B16A16_TYPELESS &&
+      color_family(DXGI_FORMAT_A8_UNORM) == DXGI_FORMAT_A8_UNORM && !color_family(DXGI_FORMAT_R8G8B8A8_UINT) &&
+      same_color_family(DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB) &&
+      !same_color_family(DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DXGI_FORMAT_R8G8B8A8_UNORM) &&
+      !same_color_family(DXGI_FORMAT_R16_TYPELESS, DXGI_FORMAT_D16_UNORM));
     status source_region(const D3D12_RESOURCE_DESC &desc,
         const sunshine_scene_depth::resource_description &resource, copy_region &out) {
       out = {};
@@ -2114,7 +2095,8 @@ namespace sunshine_streamline::depth_capture {
       nomination_command = cookie; nomination_source = reinterpret_cast<std::uint64_t>(checked_source.p);
       nomination_recording = owner.life();
       const auto region_status = diagnostic_copy ?
-        (diagnostic_description(desc) ? source_region(desc, value.resource, region) : status::unsupported_resource) :
+        (diagnostic_description(desc, value.resource.native_format) ? source_region(desc, value.resource, region) :
+          status::unsupported_resource) :
         capture_region(desc, value.resource, region);
       if (region_status != status::ready) return reject(region_status, record_stage::resource_region);
       // A depth snapshot is read through one view, resolved now; a linear
@@ -2152,7 +2134,11 @@ namespace sunshine_streamline::depth_capture {
       if (diagnostic_copy) collect_diagnostics();
       auto *pixel_begin = diagnostic_copy ? diagnostic_slots.data() : slots.data();
       auto *pixel_end = pixel_begin + (diagnostic_copy ? diagnostic_slot_limit : pixel_slot_limit);
-      const auto texture_format = diagnostic_copy ? diagnostic_storage_format(desc.Format) : typeless(desc.Format);
+      const auto texture_format = diagnostic_copy ? diagnostic_storage_format(desc.Format, value.resource.native_format) :
+        typeless(desc.Format);
+      // A shared copy is opened by the host: only formats its table knows.
+      if (diagnostic_copy && !reusable_storage && !game3d_debug::pixel_bytes(static_cast<unsigned>(texture_format)))
+        return reject(status::unsupported_resource, record_stage::resource_region);
       const auto compatible_storage = [&](const auto &texture) {
         if (!texture || texture->device_identity != value.source->device_identity) return false;
         if (diagnostic_copy && bool(texture->shared_handle) == reusable_storage) return false;
@@ -3071,15 +3057,24 @@ namespace sunshine_streamline::depth_capture {
       D3D12_RESOURCE_DESC desc{};
       desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D; desc.Width = 64; desc.Height = 48;
       desc.DepthOrArraySize = desc.MipLevels = desc.SampleDesc.Count = 1;
+      // Typeless allocations resolve as auxiliary_snapshot_format does: the
+      // same-bits UNORM families without a declaration, every other one only
+      // through a declared view of its family.
       for (const auto format : {DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8_UINT, DXGI_FORMAT_R16G16B16A16_FLOAT,
-          DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_B8G8R8A8_TYPELESS}) {
+          DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_B8G8R8A8_TYPELESS, DXGI_FORMAT_B8G8R8X8_TYPELESS,
+          DXGI_FORMAT_R10G10B10A2_TYPELESS, DXGI_FORMAT_A8_UNORM}) {
         desc.Format = format;
         if (!diagnostic_description(desc)) return false;
       }
       for (const auto format : {DXGI_FORMAT_R8_TYPELESS, DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_R16G16B16A16_TYPELESS,
-          DXGI_FORMAT_B8G8R8X8_TYPELESS, DXGI_FORMAT_D32_FLOAT, DXGI_FORMAT_NV12, DXGI_FORMAT_BC1_UNORM}) {
+          DXGI_FORMAT_D32_FLOAT, DXGI_FORMAT_NV12, DXGI_FORMAT_BC1_UNORM}) {
         desc.Format = format;
         if (diagnostic_description(desc)) return false;
+      }
+      for (const auto [format, declared] : {std::pair{DXGI_FORMAT_R16G16B16A16_TYPELESS, DXGI_FORMAT_R16G16B16A16_UNORM},
+          std::pair{DXGI_FORMAT_R8_TYPELESS, DXGI_FORMAT_R8_UNORM}, std::pair{DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_R32_FLOAT}}) {
+        desc.Format = format;
+        if (!diagnostic_description(desc, declared) || diagnostic_description(desc, DXGI_FORMAT_R8G8B8A8_UNORM)) return false;
       }
       desc.Format = DXGI_FORMAT_R8_UNORM; desc.SampleDesc.Count = 2;
       if (diagnostic_description(desc)) return false;

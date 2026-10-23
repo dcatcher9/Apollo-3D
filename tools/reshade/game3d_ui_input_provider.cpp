@@ -113,7 +113,8 @@ namespace sunshine_game3d::ui_input {
       const auto &origin = selected.origin;
       base.source = choice_for(origin.kind); base.provider = 1; base.source_id = origin.source.source_id;
       base.epoch = origin.source.epoch; base.revision = origin.source.observation_revision; base.viewport = origin.source.viewport;
-      base.channel = origin.kind == ui_mask::source_kind::alpha ? 1 : 0;
+      // A UIAlpha reads red (1), or alpha (0) from an A8_UNORM image.
+      base.channel = origin.kind == ui_mask::source_kind::alpha && !ui_mask::ui_alpha_in_alpha(selected.texture.format) ? 1 : 0;
       base.mask_width = selected.texture.width; base.mask_height = selected.texture.height; base.mask_format = selected.texture.format;
       base.left = selected.texture.area.left; base.top = selected.texture.area.top;
       base.width = selected.texture.area.width; base.height = selected.texture.area.height;
@@ -136,7 +137,9 @@ namespace sunshine_game3d::ui_input {
       return {
         {"source", ui_qualification::name(choice_for(origin.kind))}, {"candidate_bit", candidate_bit},
         {"tag_type", static_cast<std::uint32_t>(origin.kind)}, {"tag_scope", origin.tag_scope},
-        {"channel", origin.kind == ui_mask::source_kind::hudless ? "rgb_difference" : origin.kind == ui_mask::source_kind::alpha ? "red" : "alpha"}, {"format", copy.format},
+        {"channel", origin.kind == ui_mask::source_kind::hudless ? "rgb_difference" :
+          origin.kind == ui_mask::source_kind::alpha && !ui_mask::ui_alpha_in_alpha(copy.format) ? "red" : "alpha"},
+        {"format", copy.format},
         {"available_for_detection", admitted}, {"current_present_pair", paired},
         {"association", origin.kind == ui_mask::source_kind::hudless ? "present_after_tag_inexact" : "latest_submitted_input_approximation"},
         {"epoch", source.epoch}, {"observation_revision", source.observation_revision},
@@ -406,6 +409,10 @@ namespace sunshine_game3d::ui_input {
       } else {
         result.detection.masks[slot] = view;
         offered_inputs[slot] = selected.ticket.id;
+        // An A8_UNORM UIAlpha carries its opacity in alpha.
+        if (kind == ui_mask::source_kind::alpha)
+          result.detection.ui_alpha_flags = ui_mask::ui_alpha_in_alpha(selected.texture.format) ?
+            ui_detection::stored_ui_alpha_in_alpha : 0u;
       }
       signatures.set(slot_kinds[slot], typed_format(selected.texture.format));
       result.status.retained_alpha_ready = true;
@@ -527,7 +534,8 @@ namespace sunshine_game3d::ui_input {
         const auto kind = kinds[slot];
         candidate = captured_scope(base, pick.selected); result.view = pick.view;
         result.kind = kind == ui_mask::source_kind::backbuffer ? ui_input_kind::captured_color_alpha : ui_input_kind::dedicated_mask;
-        result.channel = kind == ui_mask::source_kind::alpha ? ui_mask_channel::red : ui_mask_channel::alpha;
+        result.channel = kind == ui_mask::source_kind::alpha && !ui_mask::ui_alpha_in_alpha(pick.selected.texture.format) ?
+          ui_mask_channel::red : ui_mask_channel::alpha;
         result.status.input = kind == ui_mask::source_kind::alpha ? source_alpha_input::sl_ui_alpha :
           kind == ui_mask::source_kind::color_and_alpha ? source_alpha_input::sl_ui_color_alpha : source_alpha_input::sl_backbuffer_alpha;
         result.source_metadata = pick.metadata;

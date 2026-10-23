@@ -368,8 +368,11 @@ namespace sunshine_game3d::ui_mask {
           refusal == tag_refusal::unreadable || refusal == tag_refusal::header_version ? begin_stage::header_version :
           refusal == tag_refusal::extension || refusal == tag_refusal::precision ? begin_stage::extension :
           refusal == tag_refusal::resource_type ? begin_stage::resource_type : begin_stage::unsupported_lifetime;
-      } else if (!supported_format(where.kind, capture::auxiliary_snapshot_format(where.format))) {
-        // The snapshot could never be read as this kind: no copy is made.
+      } else if (!supported_format(where.kind,
+                   capture::auxiliary_snapshot_format(where.format, input.resource.native_format))) {
+        // The snapshot could never be read as this kind (an unknown format,
+        // or a typeless one neither its declared nativeFormat nor its family
+        // resolves): no copy is made.
         revoke();
         stage = begin_stage::format;
       } else {

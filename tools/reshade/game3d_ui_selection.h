@@ -588,20 +588,38 @@ namespace sunshine_game3d::ui_selection {
     enum class family : std::uint8_t { unknown, float_color, unorm, srgb_typed };
     struct format_class {
       family kind = family::unknown;
-      std::uint32_t bits{};
+      std::uint32_t bits{}; // UNORM bits per colour channel; 0 for float.
+      bool has_alpha{};
     };
-    // Color formats a HUD-less pair can hold; typeless allocations read as
-    // their default typed format (UNORM, or FLOAT for 16- and 32-bit floats).
+    // The one classifier of UI colour formats: the capture gate
+    // (ui_mask::supported_format: a HUD-less image any of them, Backbuffer and
+    // UIColorAndAlpha only those with alpha) and pair comparability below.
+    // Typed formats only: a typeless allocation resolves first
+    // (depth_capture::auxiliary_snapshot_format), and every caller passes a
+    // snapshot's or view's typed format.
     constexpr format_class classify(std::uint32_t dxgi) {
       switch (dxgi) {
-        case 1: case 2: case 9: case 10: case 26: return {family::float_color, 16u};
-        case 11: return {family::unorm, 16u};
-        case 23: case 24: return {family::unorm, 10u};
-        case 27: case 28: case 87: case 88: case 90: case 92: return {family::unorm, 8u};
-        case 29: case 91: case 93: return {family::srgb_typed, 8u};
+        case 2: case 10: return {family::float_color, 0u, true}; // R32G32B32A32 and R16G16B16A16 FLOAT
+        case 26: return {family::float_color, 0u, false};        // R11G11B10_FLOAT
+        case 11: return {family::unorm, 16u, true};              // R16G16B16A16_UNORM
+        case 24: return {family::unorm, 10u, true};              // R10G10B10A2_UNORM
+        case 28: case 87: return {family::unorm, 8u, true};      // R8G8B8A8, B8G8R8A8 UNORM
+        case 88: return {family::unorm, 8u, false};              // B8G8R8X8_UNORM
+        case 29: case 91: return {family::srgb_typed, 8u, true}; // R8G8B8A8, B8G8R8A8 UNORM_SRGB
+        case 93: return {family::srgb_typed, 8u, false};         // B8G8R8X8_UNORM_SRGB
         default: return {};
       }
     }
+    constexpr bool classified(std::uint32_t dxgi) { return classify(dxgi).kind != family::unknown; }
+    static_assert([] {
+      std::uint32_t known = 0, alpha = 0;
+      for (std::uint32_t f = 0; f <= 132; ++f) {
+        known += classified(f);
+        alpha += classified(f) && classify(f).has_alpha;
+      }
+      return known == 11 && alpha == 8 && !classified(1) && !classified(9) && !classified(23) && !classified(27) &&
+        !classified(90) && !classified(92);
+    }());
   }
   // The difference threshold for a pair, or none when the two encodings do
   // not share a transfer: float color is linear and comparable only under

@@ -321,13 +321,64 @@ namespace sunshine_streamline::depth_capture {
       value.valid_until == sunshine_scene_depth::lifetime::at_call ?
       texture_state_policy::prefer_observed_recording : texture_state_policy::source_contract;
   }
-  // The DXGI format of an auxiliary snapshot of a source of this format: the
-  // 8-bit RGBA typeless families (27, 90) are stored typed UNORM (28, 87), as
-  // their UI views are UNORM and alpha is unaffected by an sRGB RGB view;
-  // every other format as is (no float/integer guess for other families).
-  constexpr std::uint32_t auxiliary_snapshot_format(std::uint32_t format) {
-    return format == 27 ? 28u : format == 90 ? 87u : format;
+  // The storage family of a colour format whose views are plain casts of one
+  // another: its typeless DXGI format (R11G11B10_FLOAT and A8_UNORM are their
+  // own), or 0 for none. Only UNORM, FLOAT and SRGB views belong; integer,
+  // SNORM and depth views are never read as colour.
+  constexpr std::uint32_t color_family(std::uint32_t format) {
+    switch (format) {
+      case 27: case 28: case 29: return 27; // R8G8B8A8
+      case 90: case 87: case 91: return 90; // B8G8R8A8
+      case 92: case 88: case 93: return 92; // B8G8R8X8
+      case 23: case 24: return 23;          // R10G10B10A2
+      case 9: case 10: case 11: return 9;   // R16G16B16A16
+      case 1: case 2: return 1;             // R32G32B32A32
+      case 26: return 26;                   // R11G11B10_FLOAT
+      case 60: case 61: return 60;          // R8
+      case 65: return 65;                   // A8_UNORM
+      case 53: case 54: case 56: return 53; // R16
+      case 39: case 41: return 39;          // R32
+      default: return 0;
+    }
   }
+  constexpr bool typeless_color(std::uint32_t format) {
+    return format == 27 || format == 90 || format == 92 || format == 23 || format == 9 || format == 1 || format == 60 ||
+      format == 53 || format == 39;
+  }
+  // A legal view format of the storage without relaxed format casting: the
+  // storage's own typed format, or a typed member of a typeless storage's
+  // family. (An sRGB storage read through UNORM is not.)
+  constexpr bool same_color_family(std::uint32_t storage, std::uint32_t view) {
+    if (typeless_color(view) || !color_family(view)) return false;
+    return view == storage || (typeless_color(storage) && color_family(view) == color_family(storage));
+  }
+  // The typed DXGI format an auxiliary (UI) snapshot of a source allocation
+  // of this format is stored and read as, 0 for none. A typed allocation as
+  // is. A typeless one as declared (Streamline Resource.nativeFormat) when
+  // the declaration is a view of its family (same_color_family), an sRGB
+  // declaration as its UNORM copy, since UI views read the stored bits and
+  // an sRGB RGB view leaves alpha alone; else, for the families whose every
+  // colour view reads the same bits as UNORM, that UNORM format (R10G10B10A2,
+  // R8G8B8A8, B8G8R8A8, B8G8R8X8). R16G16B16A16 (FLOAT or UNORM),
+  // R32G32B32A32 and the single-channel families are never guessed, and a
+  // declaration outside the family is ignored.
+  constexpr std::uint32_t auxiliary_snapshot_format(std::uint32_t format, std::uint32_t declared = 0) {
+    if (!typeless_color(format)) return format;
+    if (declared && same_color_family(format, declared))
+      return declared == 29 ? 28u : declared == 91 ? 87u : declared == 93 ? 88u : declared;
+    return format == 23 ? 24u : format == 27 ? 28u : format == 90 ? 87u : format == 92 ? 88u : 0u;
+  }
+  static_assert(auxiliary_snapshot_format(27) == 28 && auxiliary_snapshot_format(90) == 87 &&
+    auxiliary_snapshot_format(23) == 24 && auxiliary_snapshot_format(92) == 88 && !auxiliary_snapshot_format(9) &&
+    !auxiliary_snapshot_format(1) && !auxiliary_snapshot_format(39) && !auxiliary_snapshot_format(53) &&
+    !auxiliary_snapshot_format(60) && auxiliary_snapshot_format(9, 10) == 10 && auxiliary_snapshot_format(9, 11) == 11 &&
+    !auxiliary_snapshot_format(9, 13) && auxiliary_snapshot_format(1, 2) == 2 && auxiliary_snapshot_format(27, 29) == 28 &&
+    auxiliary_snapshot_format(90, 91) == 87 && auxiliary_snapshot_format(92, 93) == 88 &&
+    auxiliary_snapshot_format(23, 28) == 24 && auxiliary_snapshot_format(39, 41) == 41 &&
+    !auxiliary_snapshot_format(39, 40) && auxiliary_snapshot_format(53, 54) == 54 &&
+    auxiliary_snapshot_format(53, 56) == 56 && !auxiliary_snapshot_format(53, 55) &&
+    auxiliary_snapshot_format(60, 61) == 61 && !auxiliary_snapshot_format(60, 65) &&
+    auxiliary_snapshot_format(28, 87) == 28 && auxiliary_snapshot_format(65) == 65);
   // prefer_observed_recording is restricted to at-call Streamline auxiliary
   // snapshots. UI adapters use it for both local and shared copies, independently
   // of FG mode or storage lifetime. It prefers the known, unblocked, nonzero state on this

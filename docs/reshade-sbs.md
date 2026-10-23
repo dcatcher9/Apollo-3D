@@ -1741,7 +1741,8 @@ were removed with S3. A layer seen through an `*_SRGB` view is not comparable wi
 | `0x1` | stored | The offscreen UI layer must pass the premultiplied bound (V1). |
 | `0x2` | stored | With a float layer's HDR headroom. |
 | `0x4` | stored | Reserved and never reused; the shader defines nothing for it. Through 180f1842 every layer copy carried it, marking the one-frame-late copy, which is never judged (A2, E2); selection revisions 2-9 read it, and `ui_detection_replay` pushes it to a shader that still defines `SUNSHINE_UI_STORED_LATE_LAYER`, so those revisions replay as before. |
-| `0x8` | stored | Reserved and never reused; the shader defines nothing for it. Since selection revision 10 stored bits end at `0x800` (`0x10`-`0x800` never used) and per-frame bits start at `0x1000`. |
+| `0x8` | stored | Reserved and never reused; the shader defines nothing for it. Since selection revision 10 stored bits end at `0x800` (`0x20`-`0x800` never used) and per-frame bits start at `0x1000`. |
+| `0x10` | stored | `SUNSHINE_UI_STORED_UI_ALPHA_IN_ALPHA`: the offered UIAlpha (`t11`) is an `A8_UNORM` image, so the tiles and mask passes read its opacity from alpha instead of red. Pushed with an offered UIAlpha of that format only; `ui_detection_replay` derives it from the UIAlpha artifact's format. |
 | `0x1000`, `0x2000` | per-frame | Since selection revision 10 (A2): the offered UIAlpha (`0x1000`) or UI color tag (`0x2000`), its candidate bit shifted by `SUNSHINE_UI_PER_FRAME_UNALIGNED_SHIFT` (12), was not captured in the exact HUD-less pair's tag batch. The tiles pass counts no strong or contradicted pixel of it, so the one-way test does not judge it on that frame. Pushed only beside an exact pair. |
 | `0x4000` | per-frame | Since selection revision 10: a status sample, a detection whose decision texels the CPU reads (at most one every 100 ms). Only it counts the one-way judgment (A2) and the pre-UI pixels (texel 11) in the passes' second phase; every other frame's one-way and pre-UI counts are zero. Every `ui_detection_replay` case pushes it. |
 | `0x8000` | per-frame | Since selection revision 10 (T1): the offered inexact HUD-less snapshot is the one the previous render offered, whatever tags come with it. Without a decision of its own the frame leaves the hold store as it is and applies the stored decision while one is held. |
@@ -1758,8 +1759,9 @@ were removed with S3. A layer seen through an `*_SRGB` view is not comparable wi
 | `0x80000000` | per-frame | Bit 31 (`SUNSHINE_UI_PER_FRAME_PRE_UI_PROVEN`, since fix 1): the offered layer's signature is proven the pre-UI scene image (the ledger's `pre_ui` key), so a layer without coverage makes claim (d) (H1). |
 
 An 8-bit layer stores 1 and a layer in the `R16G16B16A16` or `R32G32B32A32` typeless family (UNORM
-included) 3 (5 and 7 through 180f1842). Stored bits describe the offscreen UI layer slot: the renderer keeps them between
-frames. They key no decision or status, and since S2b nothing on the CPU reads them.
+included) 3 (5 and 7 through 180f1842). Stored bits describe the encoding of an input slot: the offscreen UI layer, whose
+bits the renderer keeps with its copy between frames, and UIAlpha (`0x10`). They key no decision or status, and since S2b
+nothing on the CPU reads them.
 Per-frame bits ride only in one render's pushed word and are never stored.
 The tiles pass reads `0x4000`, the detection reduce the guard's bits, `0x4000`, `0x40000` and the
 three T1 bits, and the evidence sum reads `0x40000`; a dump's `replay.ui_detection.flags` records the pushed word. The informative
@@ -2480,10 +2482,28 @@ capture attempt: `no_request`, `ambiguous_request`, `kind_filtered`, `not_newer`
 `unsupported_lifetime`, `header_version`, `extension` and `resource_type` (an unsupported tag's
 cause: a structure GUID or version or an unreadable tag, an unknown chained structure or
 PrecisionInfo, a non-texture resource), `no_reservation`, `no_reader` (the reader rule above) and `format` (the
-tagged resource's format, stored as its snapshot would be, cannot be read as its kind:
+tagged resource's format, resolved as its snapshot would be stored, cannot be read as its kind:
 `ui_mask::supported_format`, checked before any copy; such a tag revokes the kind's older
 snapshots like any invalid tag); `begin_last` names the request's latest. `no_reader` and `format`
 are new in WP1b: before it such tags were copied and then never read or never usable.
+
+One classifier decides the UI tag formats (`ui_selection::detail::classify`, typed DXGI formats
+with a `has_alpha` bit); the capture gate and pair comparability both use it. A HUD-less image
+admits every colour format it knows (`R32G32B32A32_FLOAT`, `R16G16B16A16_FLOAT` and `_UNORM`,
+`R10G10B10A2_UNORM`, `R11G11B10_FLOAT`, `R8G8B8A8_UNORM` and `_SRGB`, `B8G8R8A8_UNORM` and
+`_SRGB`, `B8G8R8X8_UNORM` and `_SRGB`: the DLSS-G guide asks only that it share the back buffer's
+colour space); the Backbuffer and UIColorAndAlpha tags only those with alpha. UIAlpha is a
+single-channel opacity image: `R32_FLOAT`, `R16_FLOAT`, `R16_UNORM` and `R8_UNORM` read red,
+`A8_UNORM` reads alpha (stored flag `0x10`, the dump's `channel` names it). A typeless allocation
+is judged by the typed snapshot format it resolves to (`depth_capture::auxiliary_snapshot_format`):
+its Streamline `Resource.nativeFormat` when that declares a view of the allocation's family (an
+`*_SRGB` declaration as its UNORM copy); otherwise the families whose every colour view reads the
+same bits as UNORM (`R10G10B10A2`, `R8G8B8A8`, `B8G8R8A8`, `B8G8R8X8`) as that UNORM format; any
+other typeless family (`R16G16B16A16`, `R32G32B32A32` and the single-channel ones) is never
+guessed and is refused as `format`, and a declaration outside the family is ignored. Unknown
+formats stay refused, a pair `comparable()` cannot compare gets no threshold, and the snapshot's
+`RENDER_TARGET` support check is unchanged. An `A8_UNORM` snapshot is live only: the D3D11 host
+cannot open a shared `A8_UNORM` texture, so a Dump 3D copy of it is refused (`unsupported_resource`).
 A bounded `Sunshine UI capture gate` log reports the same evidence. An admitted hook with a
 zero capture boundary and a changing request generation indicates that the request was replaced
 or invalidated after admission, rather than that the game supplied no UI tag. Its
@@ -2853,11 +2873,13 @@ SL v2 descriptors accept `eTex2d` and `eUnknown` identities, matching live captu
 only `eTex2d`. `eUnknown` still requires native COM, device and texture-description validation;
 known buffer and invalid resource types remain unsupported.
 Optional copies preserve the full allocation's native bytes and its own rectangle; they do not apply
-the selected depth crop or jitter. RGBA8/BGRA8 typeless color allocations are copied into compatible
-UNORM snapshots without changing their bytes, including alpha. This normalization is shared by live
-UI capture and diagnostics; source diagnostics retain the original allocation format while captured
-artifacts report their actual typed format. Other typeless families remain unsupported here because
-their numeric interpretation cannot be inferred from storage alone. Unsupported formats, expired resources, readback failures and
+the selected depth crop or jitter. Typeless color allocations are copied into typed snapshots
+without changing their bytes, including alpha: as their declared Streamline `nativeFormat` view
+when it belongs to their family, else `R10G10B10A2`, `R8G8B8A8`, `B8G8R8A8` and `B8G8R8X8` as
+UNORM (`depth_capture::auxiliary_snapshot_format`). This normalization is shared by live UI
+capture and diagnostics; source diagnostics retain the original allocation format while captured
+artifacts report their actual typed format. Other typeless families remain unsupported without a
+declaration because their numeric interpretation cannot be inferred from storage alone. Unsupported formats, expired resources, readback failures and
 capture-budget limits are reported per resource without discarding the main replay inputs.
 `ui_resources` contains middleware observations; `optional_captures` describes frozen optional
 copy decisions, and host-side failures appear in `optional_capture_errors`. These scopes must not

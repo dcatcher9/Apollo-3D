@@ -1990,9 +1990,10 @@ namespace sunshine_game3d {
     // or has no mask (unavailable). Only a real Present whose accepted inputs
     // are all offered adopts them.
     const auto arbitration = d.temporal.arbitrate({candidates.hold_previous}, observation, bits);
-    // The layer's stored flags are pushed with its detection; nothing on the
-    // CPU reads them back.
-    const uint32_t flags = (bits & candidate::layer) ? candidates.layer_flags : 0u;
+    // The layer's and UIAlpha's stored flags are pushed with their detection;
+    // nothing on the CPU reads them back.
+    const uint32_t flags = ((bits & candidate::layer) ? candidates.layer_flags : 0u) |
+      ((bits & candidate::ui_alpha) ? candidates.ui_alpha_flags & ui_detection::stored_ui_alpha_in_alpha : 0u);
     if (arbitration.adopt) d.temporal.adopt(bits, accepted);
     d.difference_threshold = pair_threshold ? *pair_threshold : ui_selection::comparable(presented, presented).value_or(2.f / 255.f);
     // H1 (d): the offscreen UI layer's pair threshold with the presented

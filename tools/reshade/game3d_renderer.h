@@ -38,15 +38,19 @@ namespace sunshine_game3d {
   enum class ui_input_kind { unavailable, current_color_alpha, captured_color_alpha, dedicated_mask, hudless_difference };
   struct ui_detection_inputs {
     // Provider-admitted, current native captures, each candidate in its own
-    // slot (UI framework E1): masks are the UIAlpha tag (R), the tagged
-    // UIColorAndAlpha (A, never the offscreen UI layer) and the Backbuffer tag
-    // (A); layer is the offscreen UI layer copy (A). Selection among them is
-    // the shader's (ui_selection::decide), not this order.
-    std::array<reshade::api::resource_view, 3> masks{}; // UI alpha R, UI color tag A, backbuffer A.
+    // slot (UI framework E1): masks are the UIAlpha tag (R, or A of an
+    // A8_UNORM image: ui_alpha_flags), the tagged UIColorAndAlpha (A, never
+    // the offscreen UI layer) and the Backbuffer tag (A); layer is the
+    // offscreen UI layer copy (A). Selection among them is the shader's
+    // (ui_selection::decide), not this order.
+    std::array<reshade::api::resource_view, 3> masks{}; // UI alpha R (or A), UI color tag A, backbuffer A.
     reshade::api::resource_view layer{};
     // Stored Sunshine_UIDetectionFlags of the layer slot: ui_layer::detection_flags
     // of the offered layer (game3d_ui_detection_contract.h).
     std::uint32_t layer_flags = 0;
+    // Stored Sunshine_UIDetectionFlags of the UIAlpha slot:
+    // ui_detection::stored_ui_alpha_in_alpha for an A8_UNORM UIAlpha, else 0.
+    std::uint32_t ui_alpha_flags = 0;
     // The acceptance signature of each offered kind (A1): its typed DXGI format
     // and the swapchain color space. A kind left at format zero, or a zero color
     // space, takes the renderer's own view format and color space.

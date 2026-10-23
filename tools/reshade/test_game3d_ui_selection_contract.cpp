@@ -961,6 +961,22 @@ namespace {
     return view;
   }
 
+  // A one-byte-per-texel 256 x 144 image (R8_UNORM or A8_UNORM).
+  ComPtr<ID3D11ShaderResourceView> byte_image(gpu_t &gpu, DXGI_FORMAT format, const std::vector<std::uint8_t> &texels) {
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = 256;
+    desc.Height = 144;
+    desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
+    desc.Format = format;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    const D3D11_SUBRESOURCE_DATA data{texels.data(), 256, 0};
+    ComPtr<ID3D11Texture2D> texture;
+    checked(gpu.device->CreateTexture2D(&desc, &data, &texture), "byte image");
+    ComPtr<ID3D11ShaderResourceView> view;
+    checked(gpu.device->CreateShaderResourceView(texture.Get(), nullptr, &view), "byte image view");
+    return view;
+  }
+
   // One dispatch of the tiles pass over a 256 x 144 frame with these views
   // bound and these b2 constants: its statistics rows, each tile's parts
   // added as the reduce adds them (row * 16 + tile column).
@@ -1057,6 +1073,38 @@ namespace {
             selection::one_way_contradicted(strong[0], contradicted[0]),
           "A2 pre-UI tag: alpha over the unchanged scene on screen was not contradicted");
     }
+  }
+
+  // C11: UIAlpha (t11) is red of a single-channel image, or alpha of an
+  // A8_UNORM one (stored_ui_alpha_in_alpha). Opacity 128/255 on the left half
+  // covers that half through the flagged alpha of an A8_UNORM image and
+  // nothing through its red; an R8_UNORM image covers it through red, and
+  // read through alpha (1 everywhere) the whole frame.
+  void check_ui_alpha_channel(gpu_t &gpu, ID3D11ComputeShader *tiles) {
+    std::vector<std::uint8_t> bytes(256 * 144);
+    for (std::uint32_t y = 0; y != 144; ++y)
+      for (std::uint32_t x = 0; x != 256; ++x) bytes[y * 256 + x] = x < 128 ? 128 : 0;
+    const auto covered = [&](DXGI_FORMAT format, std::uint32_t flags) {
+      const auto view = byte_image(gpu, format, bytes);
+      std::array<ID3D11ShaderResourceView *, 15> bound{};
+      bound[11] = view.Get();
+      const auto rows = tile_rows(gpu, tiles, bound, {candidate::ui_alpha, 2.f / 255.f, 0u, flags, 0.f, {}});
+      std::uint32_t sum = 0, invalid = 0;
+      for (std::size_t lane = 0; lane != 256; ++lane) {
+        const std::size_t column = lane % 16, row = lane / 16;
+        sum += rows[row * 16 + column][0];
+        invalid += rows[(row + 16) * 16 + column][0];
+      }
+      require(!invalid, "UIAlpha channel: a UNORM image counted invalid pixels");
+      return sum;
+    };
+    constexpr std::uint32_t half = 128 * 144, all = 256 * 144;
+    require(covered(DXGI_FORMAT_A8_UNORM, detection::stored_ui_alpha_in_alpha) == half,
+      "UIAlpha channel: an A8_UNORM UIAlpha read through its alpha did not cover its UI");
+    require(!covered(DXGI_FORMAT_A8_UNORM, 0), "UIAlpha channel: an A8_UNORM UIAlpha read through red covered pixels");
+    require(covered(DXGI_FORMAT_R8_UNORM, 0) == half, "UIAlpha channel: an R8_UNORM UIAlpha read through red lost its UI");
+    require(covered(DXGI_FORMAT_R8_UNORM, detection::stored_ui_alpha_in_alpha) == all,
+      "UIAlpha channel: the stored flag did not move the read to alpha");
   }
 
   // The tiles pass's statistics (rows 0-111: alpha coverage and invalid
@@ -1255,6 +1303,14 @@ int main() {
       "Same-transfer UNORM pairs must compare at 2/255");
     require(!threshold(29, 1, 28, 1) && threshold(29, 1, 91, 1) == 2.f / 255.f, "sRGB views compare only with sRGB views");
     require(!threshold(0, 1, 24, 1) && !threshold(24, 0, 24, 0), "Unknown formats or color spaces must not compare");
+    // One classifier (C11): an R11G11B10_FLOAT HUD-less image is float color,
+    // and BGRX and 16-bit UNORM images compare as UNORM; typeless formats are
+    // resolved before they reach it and never classify.
+    require(threshold(26, 2, 10, 2) == .005f && !threshold(26, 1, 10, 1), "R11G11B10_FLOAT must compare with float under scRGB only");
+    require(threshold(88, 1, 87, 1) == 2.f / 255.f && threshold(93, 1, 91, 1) == 2.f / 255.f &&
+        threshold(11, 3, 24, 3) == 2.f / 255.f && !threshold(93, 1, 87, 1), "BGRX or 16-bit UNORM images lost their family");
+    require(!threshold(27, 1, 28, 1) && !threshold(9, 2, 10, 2) && !threshold(23, 1, 24, 1) && !threshold(90, 1, 87, 1),
+      "A typeless format classified");
     std::puts("PASS UI pair comparability (V2): same transfer only; 4/1023 for 10/10-bit, 2/255 otherwise, .005 for scRGB float");
 
     // The acceptance key (A1).
@@ -1695,6 +1751,7 @@ int main() {
           check_tiles(gpu, tiles.Get(), detection::layer_detection_flags(false) | sample |
             (unaligned << detection::per_frame_unaligned_shift), 0x7fu, space, color, sample ? 2.f / 255.f : 0.f);
       check_pre_ui_tag(gpu, tiles.Get());
+      check_ui_alpha_channel(gpu, tiles.Get());
       // Partial offers leave the other candidates unbound, as live renders
       // do: the skipped loads count as the zero an unbound view reads.
       for (const std::uint32_t offered : {0x08u, 0x0cu, 0x49u, 0x3au, 0x16u})

@@ -372,14 +372,14 @@ namespace {
   }
 
   void dedicated_kind_format_and_provenance() {
-    for (auto format : {41u, 54u, 56u, 61u}) {
+    for (auto format : {41u, 54u, 56u, 61u, 65u}) {
       reset(); record_format = format;
       auto alpha = begin(input(1), mask::source_kind::alpha); mask::finish(alpha, true); complete(alpha);
       const auto value = selected(1);
       require(value.origin.kind == mask::source_kind::alpha && value.texture.format == format,
         "Single-channel UIAlpha lost its explicit tag semantics or exact format");
     }
-    for (auto format : {2u, 10u, 24u, 28u, 29u, 87u, 91u}) {
+    for (auto format : {2u, 10u, 11u, 24u, 28u, 29u, 87u, 91u}) {
       reset(); record_format = format;
       auto color = begin(input(1), mask::source_kind::color_and_alpha); mask::finish(color, true); complete(color);
       require(selected(1).origin.kind == mask::source_kind::color_and_alpha,
@@ -400,13 +400,45 @@ namespace {
       absent(1011);
       require(snapshots.at(older.ticket.id).released, "An incompatible tag format kept its kind's older snapshot");
     }
-    // A typeless 8-bit allocation is stored as UNORM (auxiliary_snapshot_format)
-    // and admitted; a typeless 10-bit one is not.
-    for (const auto format : {27u, 90u, 23u}) {
-      reset(); record_format = format;
-      auto tag = begin(input(1), mask::source_kind::color_and_alpha); mask::finish(tag, true);
-      require(bool(tag.reservation) == (format != 23u) && records == (format != 23u ? 1u : 0u),
-        "A typeless tag format was not judged by its snapshot format");
+    // One classifier (C11): a HUD-less image admits every colour format it
+    // knows, alpha or not; the UI color tag and Backbuffer only those with
+    // alpha. Typeless allocations are judged by their snapshot format
+    // (auxiliary_snapshot_format): the same-bits UNORM families resolve on
+    // their own, the others only through a declared nativeFormat of their
+    // family, and a declaration outside the family is ignored.
+    struct format_case {
+      std::uint32_t format, declared;
+      mask::source_kind kind;
+      std::uint32_t snapshot; // 0: refused as format.
+    };
+    using k = mask::source_kind;
+    for (const auto &c : {format_case{26, 0, k::hudless, 26}, format_case{88, 0, k::hudless, 88},
+           format_case{93, 0, k::hudless, 93}, format_case{11, 0, k::hudless, 11}, format_case{26, 0, k::color_and_alpha, 0},
+           format_case{88, 0, k::color_and_alpha, 0}, format_case{93, 0, k::backbuffer, 0},
+           format_case{11, 0, k::color_and_alpha, 11}, format_case{27, 0, k::color_and_alpha, 28},
+           format_case{90, 0, k::backbuffer, 87}, format_case{23, 0, k::color_and_alpha, 24},
+           format_case{23, 28, k::color_and_alpha, 24}, format_case{92, 0, k::hudless, 88},
+           format_case{92, 0, k::color_and_alpha, 0}, format_case{9, 0, k::hudless, 0}, format_case{9, 10, k::hudless, 10},
+           format_case{9, 11, k::color_and_alpha, 11}, format_case{9, 13, k::color_and_alpha, 0},
+           format_case{9, 28, k::color_and_alpha, 0}, format_case{1, 0, k::backbuffer, 0}, format_case{1, 2, k::backbuffer, 2},
+           format_case{27, 29, k::color_and_alpha, 28}, format_case{90, 91, k::hudless, 87},
+           format_case{39, 0, k::alpha, 0}, format_case{39, 41, k::alpha, 41}, format_case{53, 54, k::alpha, 54},
+           format_case{53, 56, k::alpha, 56}, format_case{53, 55, k::alpha, 0}, format_case{60, 0, k::alpha, 0},
+           format_case{60, 61, k::alpha, 61}, format_case{60, 65, k::alpha, 0}, format_case{61, 0, k::color_and_alpha, 0}}) {
+      reset(); record_format = c.format;
+      auto value = input(1); value.resource.native_format = c.declared;
+      auto tag = begin(value, c.kind); mask::finish(tag, true);
+      mask::diagnostic_snapshot report;
+      require(bool(tag.reservation) == (c.snapshot != 0) && records == (c.snapshot ? 1u : 0u) &&
+          mask::query_diagnostic(runtime, report) &&
+          (c.snapshot ? report.record_attempted : report.begin_refusal == mask::begin_stage::format),
+        ("A tag format was not judged by its resolved snapshot format: " + std::to_string(c.format) + " declared " +
+          std::to_string(c.declared) + " kind " + std::to_string(unsigned(c.kind))).c_str());
+      if (!c.snapshot) continue;
+      complete(tag);
+      mask::selection chosen;
+      require(kind_of(c.kind, chosen, 1001) && chosen.texture.format == c.snapshot,
+        "An admitted tag was not offered as its resolved snapshot format");
     }
     reset();
     require(!begin(input(1), static_cast<mask::source_kind>(54)).runtime && !records,
@@ -846,7 +878,9 @@ namespace sunshine_streamline::depth_capture {
     snapshot.texture.ownership = lease; snapshot.texture.texture = 0x500 + id;
     snapshot.texture.device = device; snapshot.texture.device_identity = device;
     snapshot.texture.width = value.resource.width; snapshot.texture.height = value.resource.height;
-    snapshot.texture.area = value.resource.area; snapshot.texture.format = record_format; snapshot.texture.capture_id = id;
+    // The owner stores a typeless allocation as its resolved typed format.
+    snapshot.texture.area = value.resource.area; snapshot.texture.capture_id = id;
+    snapshot.texture.format = auxiliary_snapshot_format(record_format, value.resource.native_format);
     if (during_record) { auto callback = std::move(during_record); callback(); }
     return {id, std::move(lease)};
   }
