@@ -3855,7 +3855,7 @@ The direct provider supports D3D12 full-resource, single-sample
 device depth and positive linear view distance with UntilEvaluate/UntilPresent lifetimes; it accepts bounded active rectangles while
 copying the full allocation's depth plane. Evaluation-bound native capture declines OnlyValidNow;
 the synchronous v2 tag boundary supports it with or without FG. Native capture still declines
-unknown depth encodings, enhanced/unknown resource states and ambiguous viewports. For V1.1.1, an
+unknown depth encodings, unknown resource states or layouts and ambiguous viewports. For V1.1.1, an
 explicit nonzero tag state takes priority. If omitted, its adapter reads the provider's resource
 state at evaluation entry, just as that version's DLSS implementation does. This private,
 version-pinned encoding is enabled only after validating the loaded `sl.common` version too.
@@ -3864,18 +3864,32 @@ its cached input state for all subresources, and capture uses that same provider
 transitioning, copying and restoring only depth plane 0. Stencil is neither copied nor modified;
 malformed or missing metadata still requires observed nonzero state on the actual command
 recording. An observed conflicting or incomplete transition always rejects capture. An enhanced
-(CommandList7) texture barrier that includes subresource 0 sets that texture's observed state to
-its new layout's legacy equivalent (COMMON, GENERIC_READ, RENDER_TARGET, UNORDERED_ACCESS,
-DEPTH_STENCIL_WRITE/READ, SHADER_RESOURCE as pixel and non-pixel shader resource, COPY_SOURCE/DEST,
-RESOLVE_SOURCE/DEST), exactly as a legacy transition does, so the capture's own legacy copy
-barriers start from it; other subresources keep subresource 0's state. A legacy split barrier's
+(CommandList7) texture barrier that includes subresource 0 sets that texture's layout and access
+on the recording; other subresources keep subresource 0's. The
+[D3D12 Enhanced Barriers](https://microsoft.github.io/DirectX-Specs/d3d/D3D12EnhancedBarriers.html)
+contract forbids a legacy barrier on a texture in an enhanced layout other than COMMON and defines
+no legacy equivalent for queue-specific layouts, so such a copy uses the list's CommandList7
+`Barrier` (a list without that interface refuses it as `command_interface`). It leaves the exact
+observed layout and access after all prior work (`SyncBefore=ALL`) for COPY_SOURCE, in its
+direct-queue form for a direct-queue layout (a COMMON layout already admits copy reads, so only
+the access changes), and restores both with `SyncAfter=ALL`, so every later command waits for the
+copy. Admissible layouts are those a direct list can copy from: COMMON, GENERIC_READ,
+RENDER_TARGET, UNORDERED_ACCESS, DEPTH_STENCIL_WRITE/READ, SHADER_RESOURCE, COPY_SOURCE/DEST,
+RESOLVE_SOURCE and their direct-queue forms. A compute- or video-queue, video, shading-rate,
+resolve-destination or undefined layout, `NO_ACCESS`, or a split begun with `SyncAfter=SPLIT`
+refuses the copy (`incomplete_state`) until a later barrier (the split's end) names an admissible
+layout. An enhanced COMMON layout is an explicit layout, not missing evidence. A declared legacy
+state agrees with an observed layout only through the contract's equivalent-layout table (pixel or
+non-pixel shader resource is SHADER_RESOURCE, DEPTH_READ with or without them DEPTH_STENCIL_READ,
+GENERIC_READ, COPY_SOURCE and so on); any other declaration conflicts. The NGX rejection line
+reports `enhanced=1 layout=<D3D12_BARRIER_LAYOUT> access=0x<D3D12_BARRIER_ACCESS>`, with
+`observed_state` the layout's legacy equivalent (`0xffffffff` without one). A legacy split barrier's
 BEGIN_ONLY on subresource 0 (or all) leaves the state in transition, refused as
 `incomplete_state` (`split=1` on the NGX rejection line), until its END_ONLY or a later plain
-transition defines it; a split of another subresource leaves subresource 0's state. An enhanced
-barrier into a layout without a legacy equivalent (queue-specific and video layouts), a barrier
-flag combination other than none, BEGIN_ONLY or END_ONLY, or an enhanced barrier during a pending
-legacy split blocks the affected resource for that recording until Reset (`incomplete_state`),
-and no later barrier clears that block; unrelated
+transition defines it; a split of another subresource leaves subresource 0's state. A barrier
+flag combination other than none, BEGIN_ONLY or END_ONLY, or a legacy and an enhanced barrier
+inside each other's pending split blocks the affected resource for that recording until Reset
+(`incomplete_state`), and no later barrier clears that block; unrelated
 resources remain eligible, and enhanced global or buffer barriers change no texture state. Per-resource state
 storage grows with the actual command recording and reuses its allocation on Reset; unrelated
 resources cannot invalidate depth by exceeding a fixed entry count. An actual state-storage

@@ -725,7 +725,7 @@ namespace sunshine_ngx {
         const auto observer = sunshine_streamline::native_observer::counts();
         char rejected[1900]{};
         std::snprintf(rejected, sizeof(rejected),
-          "Sunshine NGX capture rejection: count=%llu operation=%s result=%s stage=%s loss=%s source=%llu sequence=%llu nomination_ticket=%llu command=0x%llx cookie=%llu type=%u resource=0x%llx dimensions=%ux%u format=%u flags=0x%x dimension=%u mips=%u layers=%u samples=%u area=%u,%u,%u,%u state=0x%x observed_state=0x%x observed=%u blocked=%u split=%u closed=%u invalid=%u render_pass=%u generation=%llu/%llu device=%llu/%llu; recording barriers=%llu transitions=%llu tracked_sources=%llu last_barrier_command=0x%llx source_cookie=%llu; observer calls=%llu observed=%llu unreadable=%llu dropped=%llu installed=%llu/%llu rejected=%llu barrier_overflow=%llu submission_overflow=%llu discovery_contention=%llu",
+          "Sunshine NGX capture rejection: count=%llu operation=%s result=%s stage=%s loss=%s source=%llu sequence=%llu nomination_ticket=%llu command=0x%llx cookie=%llu type=%u resource=0x%llx dimensions=%ux%u format=%u flags=0x%x dimension=%u mips=%u layers=%u samples=%u area=%u,%u,%u,%u state=0x%x observed_state=0x%x observed=%u blocked=%u split=%u enhanced=%u layout=%u access=0x%x closed=%u invalid=%u render_pass=%u generation=%llu/%llu device=%llu/%llu; recording barriers=%llu transitions=%llu tracked_sources=%llu last_barrier_command=0x%llx source_cookie=%llu; observer calls=%llu observed=%llu unreadable=%llu dropped=%llu installed=%llu/%llu rejected=%llu barrier_overflow=%llu submission_overflow=%llu discovery_contention=%llu",
           static_cast<unsigned long long>(rejected_count), snapshot.retaining ? "retain_source" : "nominate",
           sunshine_streamline::depth_capture::name(d.result), sunshine_streamline::depth_capture::name(d.stage),
           sunshine_streamline::depth_capture::name(d.loss), static_cast<unsigned long long>(snapshot.source_id),
@@ -735,7 +735,7 @@ namespace sunshine_ngx {
           d.width, d.height, d.format, d.flags, d.dimension, d.mip_levels, d.array_size, d.samples,
           snapshot.area.left, snapshot.area.top, snapshot.area.width, snapshot.area.height,
           d.native_state, d.observed_state, d.observed ? 1 : 0, d.blocked ? 1 : 0, d.pending_split ? 1 : 0,
-          d.recording_closed ? 1 : 0,
+          d.observed_enhanced ? 1 : 0, d.observed_layout, d.observed_access, d.recording_closed ? 1 : 0,
           d.recording_invalid ? 1 : 0, d.render_pass ? 1 : 0,
           static_cast<unsigned long long>(d.expected_generation), static_cast<unsigned long long>(d.current_generation),
           static_cast<unsigned long long>(d.expected_device_identity), static_cast<unsigned long long>(d.device_identity),

@@ -233,7 +233,9 @@ namespace sunshine_streamline::native_observer {
               (range.NumMipLevels == 0 ? range.IndexOrFirstMipLevel == 0 :
                 range.IndexOrFirstMipLevel == 0 && range.FirstArraySlice == 0 && range.FirstPlane == 0 &&
                 range.NumArraySlices != 0 && range.NumPlanes != 0);
-            textures.data()[at++] = {barrier.pResource, static_cast<std::uint32_t>(barrier.LayoutAfter), first};
+            textures.data()[at++] = {barrier.pResource, static_cast<std::uint32_t>(barrier.LayoutAfter), first,
+              static_cast<std::uint32_t>(barrier.AccessAfter), static_cast<std::uint32_t>(barrier.SyncBefore),
+              static_cast<std::uint32_t>(barrier.SyncAfter)};
           }
         }
       }

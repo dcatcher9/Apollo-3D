@@ -60,9 +60,18 @@ namespace {
     ComPtr<ID3D11Device1> host1;
     ComPtr<ID3D11DeviceContext> context;
     std::uint64_t completion{};
-    fixture() {
+    // gpu_validation: the debug layer's GPU-based validation, which checks
+    // every subresource's layout/state at execution.
+    explicit fixture(bool gpu_validation = false) {
       ComPtr<ID3D12Debug> debug;
-      if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)))) debug->EnableDebugLayer();
+      if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)))) {
+        debug->EnableDebugLayer();
+        ComPtr<ID3D12Debug1> validation;
+        if (gpu_validation) {
+          check(debug.As(&validation), "GPU-based validation interface");
+          validation->SetEnableGPUBasedValidation(TRUE);
+        }
+      } else require(!gpu_validation, "GPU-based validation needs the D3D12 debug layer");
       check(CreateDXGIFactory1(IID_PPV_ARGS(&factory)), "DXGI factory");
       for (unsigned index = 0; factory->EnumAdapters1(index, &adapter) != DXGI_ERROR_NOT_FOUND; ++index) {
         DXGI_ADAPTER_DESC1 desc{}; adapter->GetDesc1(&desc);
@@ -1122,9 +1131,11 @@ namespace {
   }
 
   void enhanced_barrier_capture(fixture &gpu) {
-    // An enhanced (CommandList7) texture barrier sets the texture's state to its
-    // layout's legacy equivalent. The capture's legacy copy barriers start from
-    // that state, restore it, and copy exact pixels.
+    // A game texture in an enhanced (CommandList7) layout: the capture leaves
+    // and restores its exact layout and access with enhanced barriers (the
+    // D3D12 contract forbids a legacy barrier on it), copies exact pixels,
+    // and the game's next Barrier from that layout stays valid, so its later
+    // write never reaches the snapshot.
     D3D12_FEATURE_DATA_D3D12_OPTIONS12 options{};
     ComPtr<ID3D12GraphicsCommandList7> list7;
     if (FAILED(gpu.device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS12, &options, sizeof(options))) ||
@@ -1132,54 +1143,65 @@ namespace {
       std::puts("SKIP enhanced barrier capture: no enhanced barriers on this device or runtime");
       return;
     }
+    if (gpu.debug_messages) gpu.debug_messages->ClearStoredMessages();
     capture::observe_command(native(gpu.list.Get())); capture::poll();
-    texture_case image(gpu, DXGI_FORMAT_R8G8B8A8_UNORM, 4); // Left in NON_PIXEL_SHADER_RESOURCE by a legacy barrier.
-    const auto enhanced = [&](D3D12_BARRIER_LAYOUT before, D3D12_BARRIER_LAYOUT after,
-        D3D12_BARRIER_ACCESS access_before, D3D12_BARRIER_ACCESS access_after) {
-      D3D12_TEXTURE_BARRIER barrier{};
-      barrier.SyncBefore = barrier.SyncAfter = D3D12_BARRIER_SYNC_ALL;
-      barrier.AccessBefore = access_before; barrier.AccessAfter = access_after;
-      barrier.LayoutBefore = before; barrier.LayoutAfter = after;
-      barrier.pResource = image.source.Get();
-      barrier.Subresources.IndexOrFirstMipLevel = UINT32_MAX;
+    const auto barrier = [&](ID3D12Resource *resource, D3D12_BARRIER_SYNC sync_before, D3D12_BARRIER_ACCESS access_before,
+        D3D12_BARRIER_LAYOUT before, D3D12_BARRIER_SYNC sync_after, D3D12_BARRIER_ACCESS access_after, D3D12_BARRIER_LAYOUT after) {
+      D3D12_TEXTURE_BARRIER value{};
+      value.SyncBefore = sync_before; value.SyncAfter = sync_after;
+      value.AccessBefore = access_before; value.AccessAfter = access_after;
+      value.LayoutBefore = before; value.LayoutAfter = after;
+      value.pResource = resource;
+      value.Subresources.IndexOrFirstMipLevel = UINT32_MAX;
       D3D12_BARRIER_GROUP group{};
-      group.Type = D3D12_BARRIER_TYPE_TEXTURE; group.NumBarriers = 1; group.pTextureBarriers = &barrier;
+      group.Type = D3D12_BARRIER_TYPE_TEXTURE; group.NumBarriers = 1; group.pTextureBarriers = &value;
       list7->Barrier(1, &group);
     };
-    enhanced(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_COPY_DEST,
-      D3D12_BARRIER_ACCESS_SHADER_RESOURCE, D3D12_BARRIER_ACCESS_COPY_DEST);
-    enhanced(D3D12_BARRIER_LAYOUT_COPY_DEST, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE,
-      D3D12_BARRIER_ACCESS_COPY_DEST, D3D12_BARRIER_ACCESS_SHADER_RESOURCE);
-    constexpr auto shader = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-    auto input = image.input; input.native_state = shader;
-    capture::record_diagnostic diagnostic;
-    auto ticket = capture::record_local_texture(native(gpu.list.Get()), input, &diagnostic);
-    require(bool(ticket) && diagnostic.observed && !diagnostic.blocked && diagnostic.observed_state == shader &&
-        diagnostic.copy_state_known && diagnostic.copy_state == shader,
-      "an enhanced SHADER_RESOURCE layout did not become the observed legacy state");
-    capture::finish_diagnostic_texture(ticket, true);
-    gpu.submit(); gpu.wait();
-    capture::diagnostic_texture pixels;
-    require(capture::acquire_local_texture(ticket, native(gpu.queue.Get()), pixels) == capture::status::ready,
-      "the enhanced-barrier capture was not readable");
-    {
-      consumer_fixture consumer(gpu);
-      auto output = destination(gpu.device.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
-      capture::consumer_diagnostic copied_diagnostic;
-      require(capture::copy_local_texture(native(consumer.list.Get()), native(gpu.queue.Get()), ticket, native(output.Get()),
-          D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &copied_diagnostic, true), "enhanced-barrier capture copy failed");
-      readback copied(gpu, output.Get());
-      copied.record(consumer.list.Get(), output.Get());
-      pixels = {};
-      check(close_list(consumer.list.Get()), "enhanced consumer close");
-      execute(gpu.queue.Get(), consumer.list.Get());
-      gpu.wait(); copied.verify(image.width, image.height, 4);
-      capture::release_diagnostic_texture(ticket); ticket = {};
-      consumer.reset();
+    for (const auto layout : {D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_GENERIC_READ,
+        D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COMMON, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_COMMON}) {
+      const bool direct = layout >= D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COMMON;
+      texture_case image(gpu, DXGI_FORMAT_R8G8B8A8_UNORM, 4); // Left in NON_PIXEL_SHADER_RESOURCE by a legacy barrier.
+      // The contract: a legacy state returns to COMMON before an enhanced barrier.
+      transition(gpu.list.Get(), image.source.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
+      barrier(image.source.Get(), D3D12_BARRIER_SYNC_NONE, D3D12_BARRIER_ACCESS_NO_ACCESS, D3D12_BARRIER_LAYOUT_COMMON,
+        D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_ACCESS_SHADER_RESOURCE, layout);
+      auto input = image.input; input.proof = sunshine_scene_depth::state_proof::observed_nonzero; input.native_state = 0;
+      capture::record_diagnostic diagnostic;
+      auto ticket = capture::record_local_texture(native(gpu.list.Get()), input, &diagnostic);
+      require(bool(ticket) && diagnostic.observed && !diagnostic.blocked && diagnostic.observed_enhanced &&
+          diagnostic.observed_layout == std::uint32_t(layout) && diagnostic.observed_access == D3D12_BARRIER_ACCESS_SHADER_RESOURCE &&
+          diagnostic.enhanced_copy && diagnostic.copy_state_known && diagnostic.used_observed_state,
+        "an enhanced layout was not copied with its exact layout and access");
+      // The game continues from its own layout: a write after the capture.
+      barrier(image.source.Get(), D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_ACCESS_SHADER_RESOURCE, layout,
+        D3D12_BARRIER_SYNC_COPY, D3D12_BARRIER_ACCESS_COPY_DEST,
+        direct ? D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COPY_DEST : D3D12_BARRIER_LAYOUT_COPY_DEST);
+      image.copy(gpu, 1);
+      capture::finish_diagnostic_texture(ticket, true);
+      gpu.submit(); gpu.wait();
+      capture::diagnostic_texture pixels;
+      require(capture::acquire_local_texture(ticket, native(gpu.queue.Get()), pixels) == capture::status::ready,
+        "the enhanced-barrier capture was not readable");
+      {
+        consumer_fixture consumer(gpu);
+        auto output = destination(gpu.device.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
+        capture::consumer_diagnostic copied_diagnostic;
+        require(capture::copy_local_texture(native(consumer.list.Get()), native(gpu.queue.Get()), ticket, native(output.Get()),
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &copied_diagnostic, true), "enhanced-barrier capture copy failed");
+        readback copied(gpu, output.Get());
+        copied.record(consumer.list.Get(), output.Get());
+        pixels = {};
+        check(close_list(consumer.list.Get()), "enhanced consumer close");
+        execute(gpu.queue.Get(), consumer.list.Get());
+        gpu.wait(); copied.verify(image.width, image.height, 4, 0);
+        capture::release_diagnostic_texture(ticket); ticket = {};
+        consumer.reset();
+      }
+      gpu.reset(); capture::poll();
+      gpu.check_debug_errors();
+      std::printf("PASS enhanced barrier layout %u: exact layout/access restored around the copy, exact pixels before the game's next write%s\n",
+        unsigned(layout), gpu.debug_messages ? "; D3D12 validation clean" : "");
     }
-    gpu.reset(); capture::poll();
-    gpu.check_debug_errors();
-    std::puts("PASS enhanced barrier: a legacy-compatible layout becomes the observed state, with exact pixels");
   }
 
   void auxiliary_consumer_replay_and_discard(fixture &gpu) {
@@ -1541,8 +1563,22 @@ namespace {
     std::puts("PASS unlocked storage allocation: the capture lock is free during allocation, re-validation rejects a closed recording");
   }
 }
-int main() {
+int main(int argc, char **argv) {
   try {
+    if (argc > 1 && std::strcmp(argv[1], "--gpu-validation") == 0) {
+      // GPU-based validation checks each copy's layouts at execution time. It
+      // needs the D3D12 debug layer (Windows Graphics Tools).
+      ComPtr<ID3D12Debug> available;
+      if (FAILED(D3D12GetDebugInterface(IID_PPV_ARGS(&available)))) {
+        std::puts("SKIP GPU-based validation: the D3D12 debug layer (d3d12SDKLayers.dll) is not installed");
+        return 0;
+      }
+      available.Reset();
+      fixture gpu(true);
+      enhanced_barrier_capture(gpu);
+      std::puts("PASS diagnostic texture capture under GPU-based validation (enhanced layouts)");
+      return 0;
+    }
     require(capture::testing::diagnostic_snapshot_regression(), "diagnostic retirement/fence/format policy regression");
     fixture gpu;
     unlocked_allocation(gpu);

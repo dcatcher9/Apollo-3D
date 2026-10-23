@@ -211,12 +211,16 @@ namespace sunshine_streamline::depth_capture {
       if (!supported_description(desc)) { out = {}; return status::unsupported_resource; }
       return source_region(desc, resource, out);
     }
-    // enhanced: value is the legacy equivalent of an enhanced Barrier layout
-    // (diagnostic provenance only; admission treats it like a legacy state).
-    // pending_split: a BEGIN_ONLY split barrier's state is unknown until its
-    // END_ONLY or a later plain transition defines it. blocked is sticky
-    // until Reset and no later barrier clears it.
-    struct source_state { std::uint64_t source{}; std::uint32_t value{}; bool known{}, blocked{}, enhanced{}, pending_split{}; };
+    // enhanced: the latest barrier was an enhanced Barrier into layout with
+    // access; value is then only the layout's legacy equivalent (diagnostic,
+    // UINT32_MAX without one).
+    // pending_split: a split barrier's state is unknown until its end or a
+    // later plain barrier defines it. blocked is sticky until Reset and no
+    // later barrier clears it.
+    struct source_state {
+      std::uint64_t source{}; std::uint32_t value{}; bool known{}, blocked{}, enhanced{}, pending_split{};
+      std::uint32_t layout{}, access{};
+    };
     struct command_state {
       std::uint64_t cookie{};
       std::uint64_t observation_generation{};
@@ -497,6 +501,8 @@ namespace sunshine_streamline::depth_capture {
           auto *known = state(*owner, identity, true);
           if (!known) { invalidate(*owner, recording_loss::source_state_capacity); continue; }
           if (known->blocked) continue;
+          // A legacy barrier inside an enhanced split is outside the D3D12 contract.
+          if (known->pending_split && known->enhanced) { known->blocked = true; continue; }
           // BEGIN_ONLY leaves the state in transition; END_ONLY, like a
           // plain transition, completes in StateAfter.
           known->pending_split = flags == D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY;
@@ -558,9 +564,8 @@ namespace sunshine_streamline::depth_capture {
         if (value.command == cookie) invalidate(value, capture_failure::close_failed);
       });
     }
-    // The legacy state equivalent to an enhanced barrier layout, which the
-    // capture's own legacy copy barriers may then use. Queue-specific and video
-    // layouts have no legacy equivalent.
+    // The legacy state equivalent to a generic enhanced barrier layout, for
+    // diagnostics only. Queue-specific and video layouts have none.
     std::optional<std::uint32_t> legacy_state(std::uint32_t layout) {
       switch (static_cast<D3D12_BARRIER_LAYOUT>(layout)) {
         case D3D12_BARRIER_LAYOUT_COMMON: return D3D12_RESOURCE_STATE_COMMON;
@@ -579,9 +584,12 @@ namespace sunshine_streamline::depth_capture {
       }
     }
     // An enhanced texture barrier that includes subresource 0 sets that
-    // texture's state to its new layout's legacy equivalent, exactly as a
-    // legacy transition does; a layout without one blocks the texture for this
-    // recording. Other subresources (a stencil plane) keep subresource 0's state.
+    // texture's layout and access on this recording; other subresources (a
+    // stencil plane) keep subresource 0's. The copy then leaves and restores
+    // exactly that layout and access with enhanced barriers. A layout the
+    // copy cannot use (copy_state::layouts::admissible) or NO_ACCESS refuses
+    // the copy until a later barrier names another; a SyncAfter of SPLIT
+    // leaves the layout in transition until the split's end barrier.
     void enhanced_textures(std::uint64_t native, std::uint64_t cookie, unsigned count,
         const native_observer::enhanced_texture *textures) {
       // No capture lock, exactly as barriers().
@@ -590,24 +598,26 @@ namespace sunshine_streamline::depth_capture {
       for (unsigned i = 0; i != count; ++i) {
         const auto &texture = textures[i];
         if (!texture.resource || !texture.first_subresource) continue;
-        const auto legacy = legacy_state(texture.layout_after);
-        if (!legacy) { block_source(*owner, texture.resource); continue; }
         const auto identity = observed_source_cookie(texture.resource);
         if (!identity) { invalidate(*owner, recording_loss::source_identity_unavailable); continue; }
         auto *known = state(*owner, identity, true);
         if (!known) { invalidate(*owner, recording_loss::source_state_capacity); continue; }
         if (known->blocked) continue;
         // An enhanced barrier inside a legacy split is outside the D3D12 contract.
-        if (known->pending_split) { known->blocked = true; continue; }
-        known->known = copy_state::supported(*legacy);
-        known->value = *legacy;
+        if (known->pending_split && !known->enhanced) { known->blocked = true; continue; }
+        const auto layout = texture.layout_after;
         known->enhanced = true;
+        known->layout = layout; known->access = texture.access_after;
+        known->value = legacy_state(copy_state::layouts::generic(layout)).value_or(UINT32_MAX);
+        known->pending_split = texture.sync_after == D3D12_BARRIER_SYNC_SPLIT;
+        known->known = !known->pending_split && copy_state::layouts::admissible(layout) &&
+          texture.access_after != D3D12_BARRIER_ACCESS_NO_ACCESS;
       }
     }
     // The capture's state evidence for a source from its entry on the recording.
     copy_state::observation observation_of(const source_state *observed) {
-      return observed ? copy_state::observation{true, observed->known, observed->blocked, observed->value, observed->pending_split} :
-        copy_state::observation{};
+      return observed ? copy_state::observation{true, observed->known, observed->blocked, observed->value, observed->pending_split,
+        observed->enhanced, observed->layout, observed->access} : copy_state::observation{};
     }
     // Diagnostic provenance (state_basis) of an admitted copy's pre-copy state: an entry on the
     // recording (the copy used or matched it), else the SDK contract or the
@@ -2107,9 +2117,17 @@ namespace sunshine_streamline::depth_capture {
       if (diagnostic && observed) {
         diagnostic->observed = true; diagnostic->observed_state = observed->value; diagnostic->blocked = observed->blocked;
         diagnostic->pending_split = observed->pending_split;
+        diagnostic->observed_enhanced = observed->enhanced;
+        diagnostic->observed_layout = observed->layout; diagnostic->observed_access = observed->access;
       }
       const auto chosen = copy_state::resolve(state_rule, value.native_state, observation_of(observed), desc.Flags);
       if (!chosen.admitted) return reject(chosen.result, chosen.stage);
+      // The D3D12 contract forbids a legacy barrier on a texture in an
+      // enhanced layout: that copy needs this list's CommandList7 Barrier.
+      com_ptr<ID3D12GraphicsCommandList7> enhanced_list;
+      if (chosen.enhanced && !query_native(native, IID_ID3D12GraphicsCommandList7, enhanced_list))
+        return reject(status::unsupported_queue, record_stage::command_interface);
+      if (diagnostic) diagnostic->enhanced_copy = chosen.enhanced;
       const auto before = chosen.state;
       const auto basis = copy_basis(observed, chosen);
       if (diagnostic) {
@@ -2236,7 +2254,21 @@ namespace sunshine_streamline::depth_capture {
       transitions[0].Type = transitions[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
       transitions[0].Transition = {value.source->resource.p, 0, static_cast<D3D12_RESOURCE_STATES>(before), D3D12_RESOURCE_STATE_COPY_SOURCE};
       transitions[1].Transition = {found->texture->resource.p, 0, resting_state, D3D12_RESOURCE_STATE_COPY_DEST};
-      if (before == D3D12_RESOURCE_STATE_COPY_SOURCE) list->ResourceBarrier(1, &transitions[1]);
+      // An enhanced source leaves its exact layout and access for the copy
+      // after all prior work (subresource 0: the zero range is index form).
+      D3D12_TEXTURE_BARRIER source_layout{};
+      D3D12_BARRIER_GROUP source_group{};
+      if (chosen.enhanced) {
+        source_layout.SyncBefore = D3D12_BARRIER_SYNC_ALL; source_layout.SyncAfter = D3D12_BARRIER_SYNC_COPY;
+        source_layout.AccessBefore = static_cast<D3D12_BARRIER_ACCESS>(chosen.access);
+        source_layout.AccessAfter = D3D12_BARRIER_ACCESS_COPY_SOURCE;
+        source_layout.LayoutBefore = static_cast<D3D12_BARRIER_LAYOUT>(chosen.layout);
+        source_layout.LayoutAfter = static_cast<D3D12_BARRIER_LAYOUT>(copy_state::layouts::copy_source(chosen.layout));
+        source_layout.pResource = value.source->resource.p;
+        source_group.Type = D3D12_BARRIER_TYPE_TEXTURE; source_group.NumBarriers = 1; source_group.pTextureBarriers = &source_layout;
+        list->ResourceBarrier(1, &transitions[1]);
+        enhanced_list->Barrier(1, &source_group);
+      } else if (before == D3D12_RESOURCE_STATE_COPY_SOURCE) list->ResourceBarrier(1, &transitions[1]);
       else list->ResourceBarrier(2, transitions);
       D3D12_TEXTURE_COPY_LOCATION source{}, destination{};
       source.pResource = value.source->resource.p; source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
@@ -2246,7 +2278,15 @@ namespace sunshine_streamline::depth_capture {
       list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
       std::swap(transitions[0].Transition.StateBefore, transitions[0].Transition.StateAfter);
       std::swap(transitions[1].Transition.StateBefore, transitions[1].Transition.StateAfter);
-      if (before != D3D12_RESOURCE_STATE_COPY_SOURCE && !(before & write_states)) {
+      if (chosen.enhanced) {
+        // Restore the exact layout and access. SyncAfter ALL makes every later
+        // command wait for the copy: the enhanced form of the legacy write
+        // boundary below, so a later game write cannot overlap the read.
+        std::swap(source_layout.AccessBefore, source_layout.AccessAfter);
+        std::swap(source_layout.LayoutBefore, source_layout.LayoutAfter);
+        source_layout.SyncBefore = D3D12_BARRIER_SYNC_COPY; source_layout.SyncAfter = D3D12_BARRIER_SYNC_ALL;
+        enhanced_list->Barrier(1, &source_group);
+      } else if (before != D3D12_RESOURCE_STATE_COPY_SOURCE && !(before & write_states)) {
         // The asynchronous copy/reuse regression exposes partial later writes
         // when restoring only a read state here. Complete the injected source
         // read at an explicit write-state boundary before restoring the game's
@@ -2256,7 +2296,7 @@ namespace sunshine_streamline::depth_capture {
         list->ResourceBarrier(1, &completion);
         transitions[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
       }
-      if (before == D3D12_RESOURCE_STATE_COPY_SOURCE) list->ResourceBarrier(1, &transitions[1]);
+      if (chosen.enhanced || before == D3D12_RESOURCE_STATE_COPY_SOURCE) list->ResourceBarrier(1, &transitions[1]);
       else list->ResourceBarrier(2, transitions);
       if (!preservation_only) set_attempt(value.provider, status::recorded);
       if (diagnostic) { diagnostic->result = status::recorded; diagnostic->stage = record_stage::recorded; }
@@ -4490,22 +4530,53 @@ namespace sunshine_streamline::depth_capture {
       render_pass(address, next_cookie, true);
       if (!owner->render_pass) return false;
       render_pass(address, next_cookie, false);
-      // An enhanced texture barrier into a layout with a legacy equivalent sets
-      // the texture's state; one without (queue-specific) blocks only it.
+      // An enhanced texture barrier sets the texture's exact layout and access
+      // (value is only the legacy equivalent, for diagnostics).
       const native_observer::enhanced_texture shader_resource{reinterpret_cast<ID3D12Resource *>(&resource),
-        D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, true};
+        D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, true, D3D12_BARRIER_ACCESS_SHADER_RESOURCE};
       enhanced_textures(address, next_cookie, 1, &shader_resource);
       const auto *mapped = state(*owner, source_cookie(&resource), false);
-      if (owner->render_pass || owner->invalid || !mapped || mapped->blocked || !mapped->known ||
+      if (owner->render_pass || owner->invalid || !mapped || mapped->blocked || !mapped->known || !mapped->enhanced ||
+          mapped->layout != D3D12_BARRIER_LAYOUT_SHADER_RESOURCE || mapped->access != D3D12_BARRIER_ACCESS_SHADER_RESOURCE ||
           mapped->value != (D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE))
         return false;
       const native_observer::enhanced_texture stencil_only{reinterpret_cast<ID3D12Resource *>(&resource),
-        D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE, false};
+        D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_SHADER_RESOURCE, false};
       enhanced_textures(address, next_cookie, 1, &stencil_only);
-      if (mapped->blocked) return false;
+      if (mapped->blocked || !mapped->known || mapped->layout != D3D12_BARRIER_LAYOUT_SHADER_RESOURCE) return false;
+      // A direct-queue layout is the capture's own queue type: admitted as is.
       enhanced_textures(address, next_cookie, 1, &enhanced_texture);
       const auto *enhanced = state(*owner, source_cookie(&resource), false);
-      if (owner->render_pass || owner->invalid || !enhanced || !enhanced->blocked) return false;
+      if (owner->render_pass || owner->invalid || !enhanced || enhanced->blocked || !enhanced->known ||
+          enhanced->layout != D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE) return false;
+      // Layouts the copy cannot use refuse it until a later barrier names an
+      // admissible one; they never block the texture for the recording.
+      for (const auto layout : {D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_UNDEFINED,
+          D3D12_BARRIER_LAYOUT_VIDEO_DECODE_READ, D3D12_BARRIER_LAYOUT_RESOLVE_DEST, D3D12_BARRIER_LAYOUT_VIDEO_QUEUE_COMMON}) {
+        const native_observer::enhanced_texture refused_layout{reinterpret_cast<ID3D12Resource *>(&resource), layout, true};
+        enhanced_textures(address, next_cookie, 1, &refused_layout);
+        if (owner->invalid || enhanced->blocked || enhanced->known || enhanced->layout != std::uint32_t(layout)) return false;
+        enhanced_textures(address, next_cookie, 1, &shader_resource);
+        if (enhanced->blocked || !enhanced->known) return false;
+      }
+      const native_observer::enhanced_texture no_access{reinterpret_cast<ID3D12Resource *>(&resource),
+        D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, true, D3D12_BARRIER_ACCESS_NO_ACCESS};
+      enhanced_textures(address, next_cookie, 1, &no_access);
+      if (enhanced->blocked || enhanced->known) return false;
+      // A split (SyncAfter SPLIT) is in transition until its end barrier.
+      native_observer::enhanced_texture begin_split{reinterpret_cast<ID3D12Resource *>(&resource),
+        D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE, true, D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+        D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_SYNC_SPLIT};
+      enhanced_textures(address, next_cookie, 1, &begin_split);
+      if (enhanced->blocked || enhanced->known || !enhanced->pending_split) return false;
+      auto end_split = begin_split; end_split.sync_before = D3D12_BARRIER_SYNC_SPLIT; end_split.sync_after = D3D12_BARRIER_SYNC_ALL;
+      enhanced_textures(address, next_cookie, 1, &end_split);
+      if (enhanced->blocked || !enhanced->known || enhanced->pending_split) return false;
+      // A legacy barrier inside an enhanced split is outside the contract: blocked until Reset.
+      enhanced_textures(address, next_cookie, 1, &begin_split);
+      barriers(address, next_cookie, 1, &transition);
+      enhanced_textures(address, next_cookie, 1, &shader_resource);
+      if (!enhanced->blocked || enhanced->known) return false;
 
       private_object closed, pass, malformed, refused, orphan;
       std::uint64_t first{};
@@ -4629,9 +4700,11 @@ namespace sunshine_streamline::depth_capture {
         recording.life()->cookie.store(cookie);
         private_object depth;
         if (enhanced_block) {
-          const native_observer::enhanced_texture video{reinterpret_cast<ID3D12Resource *>(&depth),
-            D3D12_BARRIER_LAYOUT_VIDEO_DECODE_READ, true};
-          enhanced_textures(native_command, cookie, 1, &video);
+          // A legacy barrier inside an enhanced split blocks until Reset.
+          const native_observer::enhanced_texture split{reinterpret_cast<ID3D12Resource *>(&depth),
+            D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ, true, D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ,
+            D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_SYNC_SPLIT};
+          enhanced_textures(native_command, cookie, 1, &split);
         }
         for (auto value : sequence) {
           value.Transition.pResource = reinterpret_cast<ID3D12Resource *>(&depth);

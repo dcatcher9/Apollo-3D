@@ -31,6 +31,82 @@ namespace sunshine_streamline::depth_capture::copy_state {
     return !(value & write_states) || ((value & (value - 1)) == 0);
   }
 
+  // Enhanced (CommandList7) layouts. The D3D12 Enhanced Barriers contract
+  // forbids a legacy barrier on a texture in an enhanced layout other than
+  // COMMON and defines legacy equivalents only for the generic layouts, so a
+  // texture whose latest barrier on the recording was an enhanced Barrier is
+  // copied with enhanced barriers from, and back to, its exact layout and
+  // access. Legacy states are compared with a layout only through the
+  // contract's equivalence table.
+  namespace layouts {
+    // Admissible for a copy on a direct command list (the only list type the
+    // capture records on): the generic read/write layouts a legacy copy
+    // admits, and the direct-queue forms. Compute- and video-queue, video,
+    // shading-rate, resolve-destination, undefined and unknown layouts are not.
+    constexpr bool admissible(std::uint32_t layout) {
+      switch (static_cast<D3D12_BARRIER_LAYOUT>(layout)) {
+        case D3D12_BARRIER_LAYOUT_COMMON: case D3D12_BARRIER_LAYOUT_GENERIC_READ:
+        case D3D12_BARRIER_LAYOUT_RENDER_TARGET: case D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS:
+        case D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE: case D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ:
+        case D3D12_BARRIER_LAYOUT_SHADER_RESOURCE: case D3D12_BARRIER_LAYOUT_COPY_SOURCE:
+        case D3D12_BARRIER_LAYOUT_COPY_DEST: case D3D12_BARRIER_LAYOUT_RESOLVE_SOURCE:
+        case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COMMON: case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_GENERIC_READ:
+        case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS: case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE:
+        case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COPY_SOURCE: case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COPY_DEST:
+          return true;
+        default: return false;
+      }
+    }
+    constexpr bool direct_queue(std::uint32_t layout) {
+      return layout >= D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COMMON && layout <= D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COPY_DEST;
+    }
+    // The generic layout a queue-specific layout specializes; itself otherwise.
+    constexpr std::uint32_t generic(std::uint32_t layout) {
+      switch (static_cast<D3D12_BARRIER_LAYOUT>(layout)) {
+        case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COMMON: case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_COMMON:
+          return D3D12_BARRIER_LAYOUT_COMMON;
+        case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_GENERIC_READ: case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_GENERIC_READ:
+          return D3D12_BARRIER_LAYOUT_GENERIC_READ;
+        case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS: case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_UNORDERED_ACCESS:
+          return D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS;
+        case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE: case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_SHADER_RESOURCE:
+          return D3D12_BARRIER_LAYOUT_SHADER_RESOURCE;
+        case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COPY_SOURCE: case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_COPY_SOURCE:
+          return D3D12_BARRIER_LAYOUT_COPY_SOURCE;
+        case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COPY_DEST: case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_COPY_DEST:
+          return D3D12_BARRIER_LAYOUT_COPY_DEST;
+        default: return layout;
+      }
+    }
+    // The contract's layout for a legacy state (its "equivalent layout" table),
+    // or UNDEFINED where it names none. Shader-resource bits with DEPTH_READ
+    // are the depth-read layout, which shaders may also read.
+    constexpr std::uint32_t equivalent(std::uint32_t state) {
+      constexpr std::uint32_t shader = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+      if (state == D3D12_RESOURCE_STATE_COMMON) return D3D12_BARRIER_LAYOUT_COMMON;
+      if (state == D3D12_RESOURCE_STATE_GENERIC_READ) return D3D12_BARRIER_LAYOUT_GENERIC_READ;
+      if ((state & ~shader) == D3D12_RESOURCE_STATE_DEPTH_READ) return D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ;
+      if (!(state & ~shader)) return D3D12_BARRIER_LAYOUT_SHADER_RESOURCE;
+      switch (state) {
+        case D3D12_RESOURCE_STATE_RENDER_TARGET: return D3D12_BARRIER_LAYOUT_RENDER_TARGET;
+        case D3D12_RESOURCE_STATE_UNORDERED_ACCESS: return D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS;
+        case D3D12_RESOURCE_STATE_DEPTH_WRITE: return D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE;
+        case D3D12_RESOURCE_STATE_COPY_SOURCE: return D3D12_BARRIER_LAYOUT_COPY_SOURCE;
+        case D3D12_RESOURCE_STATE_COPY_DEST: return D3D12_BARRIER_LAYOUT_COPY_DEST;
+        case D3D12_RESOURCE_STATE_RESOLVE_SOURCE: return D3D12_BARRIER_LAYOUT_RESOLVE_SOURCE;
+        default: return D3D12_BARRIER_LAYOUT_UNDEFINED;
+      }
+    }
+    // The copy's own source layout. A common layout already admits COPY_SOURCE
+    // access, so the copy changes only access (a simultaneous-access texture
+    // never changes layout); any other leaves for COPY_SOURCE, in its
+    // direct-queue form inside that family.
+    constexpr std::uint32_t copy_source(std::uint32_t layout) {
+      if (layout == D3D12_BARRIER_LAYOUT_COMMON || layout == D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COMMON) return layout;
+      return direct_queue(layout) ? D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COPY_SOURCE : D3D12_BARRIER_LAYOUT_COPY_SOURCE;
+    }
+  }
+
   enum class rule {
     none,                   // No usable state source.
     declared_must_match,    // The per-call declaration; an observed state must agree.
@@ -61,10 +137,13 @@ namespace sunshine_streamline::depth_capture::copy_state {
 
   // State evidence for the source on the exact recording that will carry the copy.
   // pending: a split barrier began and has not ended (the state is in transition).
+  // enhanced: the latest barrier was an enhanced Barrier into layout with
+  // access (known only when both are admissible); value is not used then.
   struct observation {
     bool present{}, known{}, blocked{};
     std::uint32_t value{};
-    bool pending{};
+    bool pending{}, enhanced{};
+    std::uint32_t layout{}, access{};
   };
   struct decision {
     bool admitted{};
@@ -72,6 +151,9 @@ namespace sunshine_streamline::depth_capture::copy_state {
     record_stage stage{record_stage::unsupported_proof};
     std::uint32_t state{}; // Transition and restore basis when admitted.
     bool used_observed{}, used_contract{};
+    // The copy leaves and restores this enhanced layout and access instead.
+    bool enhanced{};
+    std::uint32_t layout{}, access{};
   };
 
   constexpr decision reject(status result, record_stage stage) { return {false, result, stage}; }
@@ -87,6 +169,14 @@ namespace sunshine_streamline::depth_capture::copy_state {
         !(resource_flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL));
   }
 
+  // A declaration agrees with an observation: the same legacy state, or for
+  // an enhanced layout the contract's equivalent of the declared state.
+  constexpr bool agrees(std::uint32_t claimed, const observation &observed) {
+    if (!observed.enhanced) return observed.value == claimed;
+    const auto equivalent = layouts::equivalent(claimed);
+    return equivalent != std::uint32_t(D3D12_BARRIER_LAYOUT_UNDEFINED) && equivalent == layouts::generic(observed.layout);
+  }
+
   constexpr decision resolve(rule selected, std::uint32_t claimed, const observation &observed, std::uint32_t resource_flags) {
     if (selected == rule::none) return reject(status::unsupported_state, record_stage::unsupported_proof);
     // An in-progress split barrier or unrepresentable transition overrides every claim.
@@ -95,15 +185,18 @@ namespace sunshine_streamline::depth_capture::copy_state {
     decision out{true, status::recorded, record_stage::recorded, claimed};
     switch (selected) {
       case rule::declared_must_match:
-        if (observed.present && observed.value != claimed)
+        if (observed.present && !agrees(claimed, observed))
           return reject(status::conflicting_state, record_stage::conflicting_state);
         break;
       case rule::observed_only:
       case rule::observed_else_declared:
       case rule::observed_else_contract:
         if (observed.present || selected == rule::observed_only) {
-          // Observed COMMON/zero is evidence, not an absent entry.
-          if (!observed.present || observed.value == 0) return reject(status::missing_state, record_stage::missing_state);
+          // Observed legacy COMMON/zero is evidence, not an absent entry: it
+          // may be implicit promotion or decay. An enhanced COMMON layout is
+          // an explicit layout.
+          if (!observed.present || (!observed.enhanced && observed.value == 0))
+            return reject(status::missing_state, record_stage::missing_state);
           out.state = observed.value;
           out.used_observed = true;
         } else if (!usable_claim(claimed)) {
@@ -118,6 +211,10 @@ namespace sunshine_streamline::depth_capture::copy_state {
         }
         break;
       default: break;
+    }
+    if (observed.present && observed.enhanced) {
+      out.enhanced = true; out.layout = observed.layout; out.access = observed.access;
+      return out;
     }
     if (!supported(out.state)) return reject(status::unsupported_state, record_stage::unsupported_state);
     return out;

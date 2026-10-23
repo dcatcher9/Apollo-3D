@@ -148,6 +148,11 @@ namespace sunshine_streamline::depth_capture {
     bool recording_closed{}, recording_invalid{}, render_pass{}, observed{}, blocked{};
     // The observed entry is a split barrier that began and has not ended.
     bool pending_split{};
+    // The observed entry is an enhanced Barrier's layout and access (raw
+    // D3D12 values; observed_state is then that layout's legacy equivalent,
+    // 0xffffffff without one), and the copy used enhanced barriers.
+    bool observed_enhanced{}, enhanced_copy{};
+    std::uint32_t observed_layout{}, observed_access{};
     bool copy_state_known{}, used_observed_state{};
     // The copy used the SDK input contract because the recording had no entry.
     bool used_contract_state{};

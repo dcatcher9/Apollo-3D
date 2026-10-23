@@ -125,6 +125,58 @@ int main() try {
   const auto declared = copy_state::select(proof::declared, policy::source_contract);
   chosen = copy_state::resolve(declared, readable, {true, true, false, D3D12_RESOURCE_STATE_COPY_SOURCE}, 0);
   require(!chosen.admitted && chosen.result == capture::status::conflicting_state, "declaration overrode a different observation");
+  // Enhanced layouts (D3D12 Enhanced Barriers): the copy keeps the exact
+  // layout and access; a declaration agrees only through the contract's
+  // equivalent layout; COMMON is an explicit layout, not missing evidence.
+  namespace layouts = copy_state::layouts;
+  for (std::uint32_t layout = 0; layout != 0x20; ++layout) {
+    const bool direct = layout >= D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COMMON && layout <= D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COPY_DEST;
+    const bool generic = layout <= D3D12_BARRIER_LAYOUT_RESOLVE_SOURCE;
+    require(layouts::admissible(layout) == (direct || generic), "an enhanced layout's admission changed");
+  }
+  require(!layouts::admissible(D3D12_BARRIER_LAYOUT_UNDEFINED) && !layouts::admissible(D3D12_BARRIER_LAYOUT_RESOLVE_DEST) &&
+      !layouts::admissible(D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_SHADER_RESOURCE) &&
+      !layouts::admissible(D3D12_BARRIER_LAYOUT_VIDEO_DECODE_READ) && !layouts::admissible(D3D12_BARRIER_LAYOUT_VIDEO_QUEUE_COMMON),
+    "an undefined, resolve-destination, compute-queue or video layout was admitted");
+  require(layouts::copy_source(D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE) == D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COPY_SOURCE &&
+      layouts::copy_source(D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COMMON) == D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COMMON &&
+      layouts::copy_source(D3D12_BARRIER_LAYOUT_COMMON) == D3D12_BARRIER_LAYOUT_COMMON &&
+      layouts::copy_source(D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_GENERIC_READ) == D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COPY_SOURCE &&
+      layouts::copy_source(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE) == D3D12_BARRIER_LAYOUT_COPY_SOURCE &&
+      layouts::copy_source(D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ) == D3D12_BARRIER_LAYOUT_COPY_SOURCE,
+    "the copy's source layout left its queue family");
+  constexpr auto shader_states = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+  require(layouts::equivalent(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE) == D3D12_BARRIER_LAYOUT_SHADER_RESOURCE &&
+      layouts::equivalent(shader_states) == D3D12_BARRIER_LAYOUT_SHADER_RESOURCE &&
+      layouts::equivalent(D3D12_RESOURCE_STATE_DEPTH_READ | shader_states) == D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ &&
+      layouts::equivalent(D3D12_RESOURCE_STATE_GENERIC_READ) == D3D12_BARRIER_LAYOUT_GENERIC_READ &&
+      layouts::equivalent(0) == D3D12_BARRIER_LAYOUT_COMMON &&
+      layouts::equivalent(D3D12_RESOURCE_STATE_COPY_SOURCE | shader_states) == D3D12_BARRIER_LAYOUT_UNDEFINED &&
+      layouts::equivalent(UINT32_MAX) == D3D12_BARRIER_LAYOUT_UNDEFINED,
+    "a legacy state's equivalent layout changed");
+  const auto enhanced = [](std::uint32_t layout, bool known = true) {
+    copy_state::observation value{true, known, false, 0, false, true, layout, D3D12_BARRIER_ACCESS_SHADER_RESOURCE};
+    return value;
+  };
+  for (const auto layout : {D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_GENERIC_READ,
+      D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COMMON, D3D12_BARRIER_LAYOUT_COMMON, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE}) {
+    chosen = copy_state::resolve(rule::observed_only, UINT32_MAX, enhanced(layout), D3D12_RESOURCE_FLAG_NONE);
+    require(chosen.admitted && chosen.enhanced && chosen.layout == std::uint32_t(layout) &&
+        chosen.access == D3D12_BARRIER_ACCESS_SHADER_RESOURCE && chosen.used_observed,
+      "an admissible enhanced layout was not kept exactly for the copy");
+  }
+  chosen = copy_state::resolve(rule::observed_only, 0, enhanced(D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_SHADER_RESOURCE, false), 0);
+  require(!chosen.admitted && chosen.result == capture::status::incomplete_state, "an unknown enhanced layout was admitted");
+  chosen = copy_state::resolve(declared, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+    enhanced(D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE), 0);
+  require(chosen.admitted && chosen.enhanced && chosen.layout == D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE &&
+      !chosen.used_observed, "a declaration equivalent to the observed layout did not agree");
+  chosen = copy_state::resolve(declared, D3D12_RESOURCE_STATE_DEPTH_READ, enhanced(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE), 0);
+  require(!chosen.admitted && chosen.result == capture::status::conflicting_state, "a different declaration agreed with a layout");
+  chosen = copy_state::resolve(declared, D3D12_RESOURCE_STATE_COPY_SOURCE | shader_states,
+    enhanced(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE), 0);
+  require(!chosen.admitted && chosen.result == capture::status::conflicting_state,
+    "a declaration without an equivalent layout agreed with one");
   // A split barrier in transition rejects every rule, even beside a known value.
   for (const auto supplied : {proof::unavailable, proof::declared, proof::observed_nonzero, proof::sdk_contract}) {
     copy_state::observation pending{true, true, false, D3D12_RESOURCE_STATE_DEPTH_READ, true};

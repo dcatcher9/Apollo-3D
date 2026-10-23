@@ -69,7 +69,7 @@ namespace {
   unsigned enhanced_reports{}, original_bundles{}, original_enhanced{}, original_passes{};
   unsigned observed_texture_count{};
   ID3D12Resource *observed_texture{};
-  std::uint32_t observed_layout{};
+  std::uint32_t observed_layout{}, observed_access{}, observed_sync_before{}, observed_sync_after{};
   bool observed_first_subresource{};
   unsigned last_queue_target{};
   HRESULT native_result = S_OK;
@@ -282,6 +282,9 @@ namespace {
     observed_texture_count = count; observed_texture = count ? textures[0].resource : nullptr;
     observed_layout = count ? textures[0].layout_after : UINT32_MAX;
     observed_first_subresource = count && textures[0].first_subresource;
+    observed_access = count ? textures[0].access_after : UINT32_MAX;
+    observed_sync_before = count ? textures[0].sync_before : UINT32_MAX;
+    observed_sync_after = count ? textures[0].sync_after : UINT32_MAX;
     SetLastError(0xbadf00d);
   }
   void submit(object &queue, UINT count, void *const *commands) {
@@ -525,6 +528,8 @@ int main() {
     D3D12_TEXTURE_BARRIER texture_barrier{};
     texture_barrier.pResource = reinterpret_cast<ID3D12Resource *>(&named_texture_storage);
     texture_barrier.LayoutAfter = D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ;
+    texture_barrier.AccessAfter = D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ;
+    texture_barrier.SyncBefore = D3D12_BARRIER_SYNC_ALL; texture_barrier.SyncAfter = D3D12_BARRIER_SYNC_SPLIT;
     texture_barrier.Subresources.IndexOrFirstMipLevel = UINT32_MAX; // Every subresource.
     D3D12_GLOBAL_BARRIER global_barrier{};
     D3D12_BARRIER_GROUP groups[2]{};
@@ -534,8 +539,10 @@ int main() {
     enhanced(&commands[0], 2, groups);
     require(GetLastError() == outgoing_error && enhanced_reports == 1 && observed_texture_count == 1 &&
         observed_texture == texture_barrier.pResource && original_enhanced == 1 && observed_cookie == 9999 &&
-        observed_layout == D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ && observed_first_subresource,
-      "enhanced Barrier did not report exactly its named texture, layout and subresource range");
+        observed_layout == D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ && observed_first_subresource &&
+        observed_access == D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ && observed_sync_before == D3D12_BARRIER_SYNC_ALL &&
+        observed_sync_after == D3D12_BARRIER_SYNC_SPLIT,
+      "enhanced Barrier did not report exactly its named texture, layout, access, sync and subresource range");
     SetLastError(incoming_error);
     enhanced(&commands[0], 1, groups);
     require(enhanced_reports == 1 && original_enhanced == 2, "a global-only enhanced Barrier reported a texture");
