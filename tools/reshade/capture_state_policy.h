@@ -16,12 +16,17 @@ namespace sunshine_streamline::depth_capture::copy_state {
     D3D12_RESOURCE_STATE_UNORDERED_ACCESS | D3D12_RESOURCE_STATE_RENDER_TARGET;
 
   // Ordinary legacy texture states only; a write state cannot be combined.
-  // Enhanced, split and unknown states are never converted to a legacy state.
+  // Any combination of read-only legacy states is one: D3D12 permits it on a
+  // texture and a copy may transition from it to COPY_SOURCE and back. That
+  // includes GENERIC_READ (Assassin's Creed Shadows 10-22 kept its depth in
+  // it, so every capture refused the depth as an unknown state). Enhanced,
+  // split and unknown states are never converted to a legacy state.
   constexpr bool supported(std::uint32_t value) {
     constexpr std::uint32_t allowed = D3D12_RESOURCE_STATE_DEPTH_WRITE | D3D12_RESOURCE_STATE_DEPTH_READ |
       D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
       D3D12_RESOURCE_STATE_COPY_SOURCE | D3D12_RESOURCE_STATE_COPY_DEST |
-      D3D12_RESOURCE_STATE_UNORDERED_ACCESS | D3D12_RESOURCE_STATE_RENDER_TARGET;
+      D3D12_RESOURCE_STATE_UNORDERED_ACCESS | D3D12_RESOURCE_STATE_RENDER_TARGET |
+      D3D12_RESOURCE_STATE_GENERIC_READ | D3D12_RESOURCE_STATE_RESOLVE_SOURCE;
     if (value & ~allowed) return false;
     return !(value & write_states) || ((value & (value - 1)) == 0);
   }

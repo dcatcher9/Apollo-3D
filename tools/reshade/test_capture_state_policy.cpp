@@ -71,7 +71,7 @@ int main() try {
     D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_READ,
     D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
     D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RESOLVE_DEST,
-    D3D12_RESOURCE_STATE_RENDER_TARGET | D3D12_RESOURCE_STATE_DEPTH_WRITE};
+    D3D12_RESOURCE_STATE_RENDER_TARGET | D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_GENERIC_READ};
   constexpr std::uint32_t flag_sets[]{D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
     D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL,
     D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL | D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE,
@@ -123,6 +123,20 @@ int main() try {
   require(!chosen.admitted && chosen.result == capture::status::conflicting_state, "declaration overrode a different observation");
   chosen = copy_state::resolve(declared, 0, {}, 0);
   require(chosen.admitted && chosen.state == 0, "typed declared COMMON was not retained");
+  // Assassin's Creed Shadows 10-22: depth observed in GENERIC_READ (0xac3), a
+  // read-only legacy combination a copy can leave and restore.
+  const auto observed_only = copy_state::select(proof::observed_nonzero, policy::source_contract);
+  chosen = copy_state::resolve(observed_only, 0, {true, true, false, D3D12_RESOURCE_STATE_GENERIC_READ},
+    D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+  require(chosen.admitted && chosen.state == D3D12_RESOURCE_STATE_GENERIC_READ && chosen.used_observed,
+    "an observed GENERIC_READ depth was not admitted");
+  require(copy_state::supported(D3D12_RESOURCE_STATE_GENERIC_READ) &&
+      copy_state::supported(D3D12_RESOURCE_STATE_RESOLVE_SOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) &&
+      !copy_state::supported(D3D12_RESOURCE_STATE_GENERIC_READ | D3D12_RESOURCE_STATE_DEPTH_WRITE) &&
+      !copy_state::supported(D3D12_RESOURCE_STATE_GENERIC_READ | D3D12_RESOURCE_STATE_COPY_DEST) &&
+      !copy_state::supported(D3D12_RESOURCE_STATE_RESOLVE_DEST) &&
+      !copy_state::supported(D3D12_RESOURCE_STATE_VIDEO_DECODE_READ),
+    "read-only legacy combinations and write or non-texture states were classified wrongly");
   std::printf("PASS capture state table: %u proof/policy/claim/observation/flag combinations match the former decision; contract, observation, COMMON and flag rules\n", compared);
   return 0;
 } catch (const std::exception &error) {
