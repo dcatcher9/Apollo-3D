@@ -176,21 +176,72 @@ namespace reshade_bridge {
     return true;
   }
 
-  // How the authored eyes map onto a requested packed output. Both halves scale by the same
-  // factor, so a matching aspect ratio (within 0.5%) keeps each eye undistorted; a different
-  // aspect would stretch disparity and is never scaled.
-  enum class output_fit { exact, scaled, aspect_mismatch };
-  [[nodiscard]] constexpr output_fit fit_output(const metadata_t &m, std::uint32_t width, std::uint32_t height) {
-    if (m.packed_width == width && m.packed_height == height) {
-      return output_fit::exact;
+  // How the authored eyes map onto a requested packed output. Both eyes always use one uniform
+  // scale, so disparity is never stretched. A matching aspect ratio (within 0.5%) fills each
+  // output eye (`scaled`). Another aspect is `fitted`: each eye is scaled by
+  // min(output eye width / W, output height / H) and centred in its own half on even coordinates
+  // (whole 4:2:0 chroma blocks), surrounded by black; both eyes use the same rectangle. An eye
+  // that would cover less than half of its output half on either axis is `refused`, and so is an
+  // output that cannot hold even rectangles (an odd output eye width or height) or one so small
+  // that the even rounding would change the eye's aspect by more than 0.5%.
+  enum class output_fit { exact, scaled, fitted, refused };
+
+  // The pixels of each output eye that show the authored eye, relative to that eye's half:
+  // the left eye at (x, y), the right eye at (output eye width + x, y).
+  struct eye_rect_t {
+    std::uint32_t x = 0, y = 0, width = 0, height = 0;
+  };
+
+  struct output_placement_t {
+    output_fit fit = output_fit::refused;
+    eye_rect_t eye;
+  };
+
+  [[nodiscard]] constexpr output_placement_t place_output(std::uint32_t packed_width, std::uint32_t packed_height, std::uint32_t width, std::uint32_t height) {
+    if (packed_width == width && packed_height == height && width != 0 && height != 0) {
+      return {output_fit::exact, {0, 0, width / 2, height}};
     }
-    if (width < 2 || width % 2 || height == 0 || m.packed_width == 0 || m.packed_height == 0) {
-      return output_fit::aspect_mismatch;
+    if (width < 2 || width % 2 || height == 0 || packed_width < 2 || packed_width % 2 || packed_height == 0) {
+      return {};
     }
-    const std::uint64_t authored = std::uint64_t(m.packed_width) * height;
-    const std::uint64_t requested = std::uint64_t(width) * m.packed_height;
+    const std::uint64_t authored = std::uint64_t(packed_width) * height;
+    const std::uint64_t requested = std::uint64_t(width) * packed_height;
     const std::uint64_t difference = authored > requested ? authored - requested : requested - authored;
-    return difference * 200 <= (authored < requested ? authored : requested) ? output_fit::scaled : output_fit::aspect_mismatch;
+    const std::uint32_t eye_width = width / 2;
+    if (difference * 200 <= (authored < requested ? authored : requested)) {
+      return {output_fit::scaled, {0, 0, eye_width, height}};
+    }
+    if (eye_width % 2 || height % 2) {
+      return {};
+    }
+    // The axis whose ratio is smaller is filled; the other is rounded to the nearest even size
+    // (never beyond the half: it is at most the filled size, and both halves are even). Like
+    // `scaled`, the rounding may change the eye's aspect by at most 0.5%.
+    const std::uint64_t source_eye = packed_width / 2;
+    eye_rect_t eye;
+    std::uint64_t exact = 0, rounded = 0;  // The rounded side, both times the same denominator.
+    if (std::uint64_t(eye_width) * packed_height <= std::uint64_t(height) * source_eye) {
+      eye.width = eye_width;
+      eye.height = std::uint32_t(2 * ((std::uint64_t(packed_height) * eye_width + source_eye) / (2 * source_eye)));
+      exact = std::uint64_t(packed_height) * eye_width;
+      rounded = std::uint64_t(eye.height) * source_eye;
+    } else {
+      eye.height = height;
+      eye.width = std::uint32_t(2 * ((source_eye * height + packed_height) / (2 * std::uint64_t(packed_height))));
+      exact = source_eye * height;
+      rounded = std::uint64_t(eye.width) * packed_height;
+    }
+    if (eye.width == 0 || eye.height == 0 || eye.width > eye_width || eye.height > height || std::uint64_t(eye.width) * 2 < eye_width || std::uint64_t(eye.height) * 2 < height ||
+        (exact > rounded ? exact - rounded : rounded - exact) * 200 > exact) {
+      return {};
+    }
+    eye.x = ((eye_width - eye.width) / 2) & ~1u;
+    eye.y = ((height - eye.height) / 2) & ~1u;
+    return {output_fit::fitted, eye};
+  }
+
+  [[nodiscard]] constexpr output_fit fit_output(const metadata_t &m, std::uint32_t width, std::uint32_t height) {
+    return place_output(m.packed_width, m.packed_height, width, height).fit;
   }
 
   static_assert(std::is_standard_layout_v<shared_state_t> && std::is_trivially_copyable_v<shared_state_t>);

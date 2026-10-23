@@ -2204,7 +2204,8 @@ def host_checks(path: Path, start: datetime, end: datetime,
     link = f'ReShade SBS connected {connects} time(s)' if connects else 'the host never connected to Game 3D'
     checks.append(Check('PASS' if connects else 'WARN', 'Host link', link))
     for level, text in fits:
-        checks.append(Check('FAIL' if level == 'Warning' else 'WARN', 'Host size', text))
+        # Scaled or fitted eyes (Info) stream in 3D, softer or with black bars; refused eyes (Warning) stay 2D.
+        checks.append(Check('FAIL' if level == 'Warning' else 'INFO', 'Host size', text))
 
     def transition(at: float) -> str | None:
         """The game's GPU reconfiguration nearest a host time, within NVENC_TRANSITION_S (both seconds of a day)."""

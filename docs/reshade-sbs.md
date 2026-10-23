@@ -2662,15 +2662,35 @@ If the game renders its eyes at another size with the same aspect ratio as the s
 generation `ReShade SBS: game eyes WxH are scaled to the stream's W'xH' eyes`. Each output eye
 samples only its own source half, so linear filtering never mixes the eyes, and the exact-texel
 chroma conversion always reads an output-sized raster. Running the game at the stream resolution
-avoids that extra pass and its softening. Eyes with a different aspect ratio would distort
-disparity, so the host keeps the stream in 2D and logs a warning naming both sizes. The host
-decides that from the producer's published source, with or without a consumer, before it
-requests a ring: it writes no consumer nonce for such eyes, and withdraws its own nonce from a
+avoids that extra pass and its softening.
+
+Eyes with a different aspect ratio are fitted, never stretched (stretching would distort
+disparity). `reshade_bridge::place_output()` scales each eye by
+`min(stream eye width / W, stream height / H)`, rounds the other side to the nearest even size,
+and centres the rectangle in its half on even coordinates, so no 2x2 chroma block of the 4:2:0
+output straddles picture and bar; both eyes use the same rectangle. The host clears its FP16
+intermediate to black (zero is black for the sRGB code values and the linear scRGB it holds; a PQ
+export is decoded to scRGB per tap) and draws each eye through its own viewport, twice the fitted
+width and placed so that the eye's source half lands exactly on its rectangle, with the rectangle
+as scissor. The cursor patch re-runs the same eye viewport over its output region clamped to that
+scissor. The cursor and its UI-parallax plane are composed in source-eye coordinates before the
+resample, so they scale and move with the eye, and Local AR presents the fitted intermediate
+unchanged. The host logs once per generation and stream size `ReShade SBS: game eyes WxH are
+fitted into the stream's W'xH' eyes at FWxFH+X+Y (pillarboxed|letterboxed, different aspect
+ratio)`. Eyes whose fitted rectangle would cover less than half of a stream eye on either axis are
+refused, and so is a stream eye of odd width or height (it cannot hold even rectangles) or one so
+small that the even rounding would change the eye's aspect by more than 0.5%: the host keeps the
+stream in 2D and logs a warning naming both sizes. The receiver places the export for the
+converter's own packed raster (Game SBS: the stream; Local AR: its presentation target), so it
+never hands the converter a placement the resample could not draw.
+
+The host decides the fit from the producer's published source, with or without a consumer, before
+it requests a ring: it writes no consumer nonce for refused eyes, and withdraws its own nonce from a
 live generation that stops fitting (the producer then deactivates with `no_consumer` and frees
 its idle ring), so the game neither allocates the shared ring nor packs stereo for a stream that
 stays 2D. A fitting size requests a fresh ring under a new nonce. Until the 10-05 review the
 nonce was written first, and an aspect-mismatched stream kept the game packing and fencing
-every Present into a ring nobody read.
+every Present into a ring nobody read. Until 10-23 every aspect difference above 0.5% was refused.
 
 Normal installation omits `-ShaderDirectory` and uses the GPU renderer embedded in the add-on.
 For comparison testing only, the exporter also accepts annotated SuperDepth3D and independent

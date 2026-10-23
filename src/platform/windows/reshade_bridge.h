@@ -59,8 +59,9 @@ namespace platf::reshade_bridge {
     // the slot returns to the producer only after an event query issued after its last use has
     // completed. Pointers live until the next poll/destruction.
     // Foreground ownership must cover source_rect. The returned texture keeps the authored
-    // raster; its per-eye aspect must match output_width/output_height (within 0.5%) and the
-    // consumer scales it. Fullscreen display scaling can make these extents independent.
+    // raster; the consumer scales it, or fits eyes of another aspect into each output eye, as
+    // ::reshade_bridge::place_output() places them for output_width x output_height (a refused
+    // placement returns nothing). Fullscreen display scaling can make these extents independent.
     std::optional<frame_t> poll(RECT source_rect, int output_width, int output_height);
 
     // Status only, for a stream that does not show the export. Never attaches as the consumer, so

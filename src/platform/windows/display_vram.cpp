@@ -32,6 +32,7 @@
 #include "foreground_window_region.h"
 #include "host_sbs_v2_renderer.h"
 #include "misc.h"
+#include "packed_output_fit.h"
 #include "reshade_bridge.h"
 #include "game3d_setup.h"
 #include "sbs_debug_dump.h"
@@ -710,7 +711,20 @@ namespace platf::dxgi {
           const int export_width = ::video::is_game_mode(sbs_mode) ? game_source_width * 2 : display->width * 2;
           const int export_height = ::video::is_game_mode(sbs_mode) ? game_source_height : display->height;
           if (::video::is_packed_mode(sbs_mode)) {
-            external = reshade_receiver->poll(source_rect, export_width, export_height);
+            // The export is scaled or fitted into this converter's own packed raster, so the
+            // receiver places it for exactly that raster (Game SBS: the export size above; Local
+            // AR: its presentation target) and refuses what the resample below could not place.
+            const auto output_width = static_cast<std::uint32_t>(std::lround(sbs_viewport.Width));
+            const auto output_height = static_cast<std::uint32_t>(std::lround(sbs_viewport.Height));
+            external = reshade_receiver->poll(source_rect, static_cast<int>(output_width), static_cast<int>(output_height));
+            if (external) {
+              // The texture has the size poll() placed; never convert one it would refuse.
+              D3D11_TEXTURE2D_DESC desc {};
+              external->texture->GetDesc(&desc);
+              if (::reshade_bridge::place_output(desc.Width, desc.Height, output_width, output_height).fit == ::reshade_bridge::output_fit::refused) {
+                external.reset();
+              }
+            }
             if (external) {
               game_source = ::video::game_source_identity_t {external->producer_process_id, external->producer_creation_time, external->resource_generation};
             }
@@ -910,20 +924,25 @@ namespace platf::dxgi {
             packed_linear = external->linear;
             packed_pq = external->transfer == platf::reshade_bridge::transfer_e::pq;
             converted_content_timestamp = external->timestamp;
-            // The final conversion reads exact output-sized texels. Same-aspect eyes authored at
-            // another size are resampled first, each output eye from its own source half. FP16
+            // The final conversion reads exact output-sized texels. Eyes authored at another size
+            // are resampled first, each output eye from its own source half: scaled over the whole
+            // eye, or fitted into an even rectangle of it surrounded by black when the aspect
+            // differs (receiver_t::poll() refused every other placement for this raster). FP16
             // keeps linear and encoded values alike; the transfer stays tracked by packed_linear.
             D3D11_TEXTURE2D_DESC packed_desc {};
             packed_texture->GetDesc(&packed_desc);
-            const bool resample = packed_desc.Width != static_cast<UINT>(std::lround(sbs_viewport.Width)) ||
-                                  packed_desc.Height != static_cast<UINT>(std::lround(sbs_viewport.Height));
+            const auto output_width = static_cast<std::uint32_t>(std::lround(sbs_viewport.Width));
+            const auto output_height = static_cast<std::uint32_t>(std::lround(sbs_viewport.Height));
+            const auto placement = ::reshade_bridge::place_output(packed_desc.Width, packed_desc.Height, output_width, output_height);
+            const auto fit_passes = platf::packed_output::resample_passes(placement, output_width, output_height);
+            const bool resample = placement.fit != ::reshade_bridge::output_fit::exact;
             if (external_cursor) {
               // The patch must hold the footprint of the most minified pass that reads the
               // export: the resample, the Local AR presentation, or the half-size chroma plane.
               const auto scale = [&](const D3D11_VIEWPORT &viewport) {
                 return std::min(viewport.Width / float(packed_desc.Width), viewport.Height / float(packed_desc.Height));
               };
-              const float minimum_scale = resample           ? scale(sbs_viewport) :
+              const float minimum_scale = resample           ? platf::packed_output::minimum_scale(fit_passes, packed_desc.Width, packed_desc.Height) :
                                           rgb_present_target ? scale(rgb_present_viewport) :
                                                                std::min(scale(out_Y_or_YUV_viewport), scale(out_UV_viewport));
               auto transfer = packed_linear ? sbs_cursor::source_transfer_e::scrgb : sbs_cursor::source_transfer_e::srgb;
@@ -959,29 +978,43 @@ namespace platf::dxgi {
               if (!ensure_sbs_intermediate_storage(true)) {
                 return -1;
               }
-              const auto resample_from = [&](ID3D11ShaderResourceView *source, ID3D11PixelShader *shader) {
+              const auto resample_from = [&](const platf::packed_output::pass_t &pass, ID3D11ShaderResourceView *source, ID3D11PixelShader *shader) {
                 const host_sbs_v2_draw_command_t resample_draw {
                   .render_targets = {sbs_intermediate_rtv.get(), nullptr},
                   .vertex_shader = sbs_reprojection_vs.get(),
                   .pixel_shader = shader,
-                  .viewport = sbs_viewport,
+                  .viewport = pass.viewport,
                   .sampler = sampler_linear.get(),
                   .shader_resources = {source},
                   .geometry_constants = sbs_reprojection_cbuffer.get(),
                 };
                 return record_host_sbs_v2_draw(device_ctx.get(), resample_draw);
               };
-              // A PQ export is decoded per tap, so the intermediate is FP16 scRGB filtered in
-              // linear light. The cursor patch of a PQ export is already scRGB.
-              if (!resample_from(packed_view, packed_pq ? sbs_packed_resample_pq_ps.get() : sbs_packed_resample_ps.get())) {
-                return -1;
+              if (fit_passes.clear) {
+                // The black around fitted eyes: zero is black in sRGB code values and in linear
+                // scRGB, the two encodings this FP16 intermediate holds (PQ is decoded below).
+                constexpr float black[4] {0.0f, 0.0f, 0.0f, 1.0f};
+                device_ctx->ClearRenderTargetView(sbs_intermediate_rtv.get(), black);
               }
-              for (std::uint32_t i = 0; cursor_patch && i < cursor_patch->regions; ++i) {
-                const auto region = sbs_cursor::output_region(cursor_patch->changed[i], packed_desc.Width, packed_desc.Height, sbs_viewport);
-                if (region && !with_scissor(*region, [&]() {
-                      return resample_from(cursor_patch->view, sbs_packed_resample_ps.get());
-                    })) {
+              // A PQ export is decoded per tap, so the intermediate is FP16 scRGB filtered in
+              // linear light. The cursor patch of a PQ export is already scRGB. A fitted eye's
+              // pass and its cursor regions stay inside that eye's rectangle (its scissor).
+              auto *const resample_shader = packed_pq ? sbs_packed_resample_pq_ps.get() : sbs_packed_resample_ps.get();
+              for (std::uint32_t pass_index = 0; pass_index < fit_passes.count; ++pass_index) {
+                const auto &pass = fit_passes.passes[pass_index];
+                const auto draw_export = [&]() {
+                  return resample_from(pass, packed_view, resample_shader);
+                };
+                if (!(pass.scissor ? with_scissor(*pass.scissor, draw_export) : draw_export())) {
                   return -1;
+                }
+                for (std::uint32_t i = 0; cursor_patch && i < cursor_patch->regions; ++i) {
+                  const auto region = platf::packed_output::pass_region(pass, cursor_patch->changed[i], packed_desc.Width, packed_desc.Height);
+                  if (region && !with_scissor(*region, [&]() {
+                        return resample_from(pass, cursor_patch->view, sbs_packed_resample_ps.get());
+                      })) {
+                    return -1;
+                  }
                 }
               }
               packed_texture = sbs_intermediate_texture.get();

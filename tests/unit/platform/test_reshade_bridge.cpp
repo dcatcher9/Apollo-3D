@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "src/reshade_bridge_protocol.h"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <gtest/gtest.h>
@@ -210,17 +212,87 @@ TEST(ReShadeBridgeProtocol, CapabilitiesBindToTheNonceTheyWereWrittenWith) {
   EXPECT_EQ(answered_capabilities(0, 0, consumer_accepts_pq), 0u);
 }
 
-TEST(ReShadeBridgeProtocol, ScalesSameAspectEyesAndRejectsDistortingOutputs) {
+TEST(ReShadeBridgeProtocol, ScalesSameAspectEyesAndFitsOtherAspectsWithoutDistortion) {
   using namespace ::reshade_bridge;
   const auto metadata = valid_bridge_metadata(); // 1920x1080 eyes.
   EXPECT_EQ(fit_output(metadata, 3840, 1080), output_fit::exact);
   EXPECT_EQ(fit_output(metadata, 7680, 2160), output_fit::scaled);
   EXPECT_EQ(fit_output(metadata, 5120, 1440), output_fit::scaled);
   EXPECT_EQ(fit_output(metadata, 3838, 1080), output_fit::scaled); // Rounding-sized differences.
-  EXPECT_EQ(fit_output(metadata, 1920, 1080), output_fit::aspect_mismatch); // Half-width SBS.
-  EXPECT_EQ(fit_output(metadata, 6880, 1440), output_fit::aspect_mismatch); // 21:9 eyes.
-  EXPECT_EQ(fit_output(metadata, 3841, 1080), output_fit::aspect_mismatch); // Odd packed width.
-  EXPECT_EQ(fit_output(metadata, 3840, 0), output_fit::aspect_mismatch);
+  // Another aspect is fitted into each eye; exactly half of an eye still fits.
+  EXPECT_EQ(fit_output(metadata, 6880, 1440), output_fit::fitted); // 21:9 eyes: pillarboxed.
+  EXPECT_EQ(fit_output(metadata, 1920, 1080), output_fit::fitted); // Half-width SBS: 960x540.
+  // Under half of an eye on either axis, or an odd raster, is refused.
+  EXPECT_EQ(fit_output(metadata, 1920, 1084), output_fit::refused);
+  EXPECT_EQ(fit_output(metadata, 3840 * 3, 1080), output_fit::refused);
+  EXPECT_EQ(fit_output(metadata, 3841, 1080), output_fit::refused); // Odd packed width.
+  EXPECT_EQ(fit_output(metadata, 3840, 1201), output_fit::refused); // Odd fitted height.
+  EXPECT_EQ(fit_output(metadata, 3844, 1081), output_fit::scaled); // Within 0.5%: no even rule.
+  EXPECT_EQ(fit_output(metadata, 3846, 1200), output_fit::refused); // Odd fitted eye width.
+  EXPECT_EQ(fit_output(metadata, 3840, 0), output_fit::refused);
+  // Even rounding never changes the eye's aspect by more than 0.5%: 4x2 eyes in 2x2 output eyes
+  // would be 2x1 rows, rounded to 2x2.
+  EXPECT_EQ(place_output(8, 2, 4, 2).fit, output_fit::refused);
+  EXPECT_EQ(place_output(8, 2, 8, 4).fit, output_fit::fitted);
+  // 800x403 eyes in 400x400 eyes: 201.5 rows rounded to 202 (0.25%) is fitted. 800x199 eyes in
+  // 400x198 eyes: 99.5 rows rounded to 100 (0.5%) covers half of the eye but is refused.
+  EXPECT_EQ(place_output(2 * 800, 403, 2 * 400, 400).fit, output_fit::fitted);
+  EXPECT_EQ(place_output(2 * 800, 199, 2 * 400, 198).fit, output_fit::refused);
+  EXPECT_EQ(place_output(0, 0, 0, 0).fit, output_fit::refused);
+  EXPECT_EQ(place_output(0, 1080, 3840, 1080).fit, output_fit::refused);
+}
+
+TEST(ReShadeBridgeProtocol, FittedEyesAreCentredOnEvenRectangles) {
+  using namespace ::reshade_bridge;
+  const auto expect_rect = [](const output_placement_t &placement, output_fit fit, eye_rect_t eye) {
+    EXPECT_EQ(placement.fit, fit);
+    EXPECT_EQ(placement.eye.x, eye.x);
+    EXPECT_EQ(placement.eye.y, eye.y);
+    EXPECT_EQ(placement.eye.width, eye.width);
+    EXPECT_EQ(placement.eye.height, eye.height);
+  };
+  // 16:10 eyes into 16:9 stream eyes: s = 0.9, pillarboxed by 96 pixels on each side.
+  expect_rect(place_output(3840, 1200, 3840, 1080), output_fit::fitted, {96, 0, 1728, 1080});
+  // 64:27 eyes into 43:18 eyes: s = 4/3; 3413.3 rounds to 3414, centred on an even x (12 + 14).
+  expect_rect(place_output(5120, 1080, 6880, 1440), output_fit::fitted, {12, 0, 3414, 1440});
+  // 16:9 eyes into 16:10 eyes: letterboxed, 1080 * 1920 / 1920 = 1080 rows, 60 above and below.
+  expect_rect(place_output(3840, 1080, 3840, 1200), output_fit::fitted, {0, 60, 1920, 1080});
+  // 4:3 eyes into 16:9 eyes: 1440x1080, 240 each side.
+  expect_rect(place_output(2048, 768, 3840, 1080), output_fit::fitted, {240, 0, 1440, 1080});
+  // 21:9 eyes into 16:9 eyes: 2560x1080 into 1920x1080 is 1920x810 at y = 135, snapped to 134.
+  expect_rect(place_output(5120, 1080, 3840, 1080), output_fit::fitted, {0, 134, 1920, 810});
+  // Exact and scaled fill the whole eye.
+  expect_rect(place_output(3840, 1080, 3840, 1080), output_fit::exact, {0, 0, 1920, 1080});
+  expect_rect(place_output(3840, 1080, 7680, 2160), output_fit::scaled, {0, 0, 3840, 2160});
+  // Every fitted rectangle is even, inside its half, at least half of it, and uniformly scaled
+  // (each fitted side within one pixel of the exact scale applied to the source side).
+  for (const auto &[sw, sh] : std::array<std::pair<std::uint32_t, std::uint32_t>, 6> {{{1920, 1200}, {2560, 1080}, {1280, 1024}, {3840, 1600}, {1366, 768}, {800, 600}}}) {
+    for (const auto &[ow, oh] : std::array<std::pair<std::uint32_t, std::uint32_t>, 5> {{{1920, 1080}, {3440, 1440}, {2560, 1600}, {1280, 720}, {1600, 1200}}}) {
+      const auto placement = place_output(2 * sw, sh, 2 * ow, oh);
+      if (placement.fit != output_fit::fitted) {
+        continue;
+      }
+      SCOPED_TRACE(std::to_string(sw) + "x" + std::to_string(sh) + " into " + std::to_string(ow) + "x" + std::to_string(oh));
+      const auto &eye = placement.eye;
+      EXPECT_EQ(eye.x % 2, 0u);
+      EXPECT_EQ(eye.y % 2, 0u);
+      EXPECT_EQ(eye.width % 2, 0u);
+      EXPECT_EQ(eye.height % 2, 0u);
+      EXPECT_LE(eye.x + eye.width, ow);
+      EXPECT_LE(eye.y + eye.height, oh);
+      EXPECT_GE(2 * eye.width, ow);
+      EXPECT_GE(2 * eye.height, oh);
+      EXPECT_TRUE(eye.width == ow || eye.height == oh);
+      const double scale = std::min(double(ow) / sw, double(oh) / sh);
+      EXPECT_LE(std::abs(eye.width - scale * sw), 1.0);
+      EXPECT_LE(std::abs(eye.height - scale * sh), 1.0);
+      // Centred: the two bars differ by at most two pixels (one even snap).
+      EXPECT_LE(int(ow - eye.width - eye.x) - int(eye.x), 2);
+      EXPECT_GE(int(ow - eye.width - eye.x) - int(eye.x), 0);
+      EXPECT_LE(int(oh - eye.height - eye.y) - int(eye.y), 2);
+      EXPECT_GE(int(oh - eye.height - eye.y) - int(eye.y), 0);
+    }
+  }
 }
 
 TEST(ReShadeBridgeProtocol, FourSlotLayoutKeepsTheSharedHeaderAndRefusesThreeSlotProtocols) {
@@ -1027,9 +1099,11 @@ TEST_F(ReShadeBridgeGpu, StatusObservesTheForegroundSourceWithoutAttaching) {
   EXPECT_EQ(state->capability_nonce, 0u);
   EXPECT_EQ(state->consumer_capabilities, 0u);
 
-  // The eyes fit under poll()'s rules: same aspect scales, another aspect does not.
+  // The eyes fit under poll()'s rules: same aspect scales, another aspect is fitted into half of
+  // each eye, and a fit under half of an eye is refused.
   EXPECT_TRUE(bridge->status(source_rect, packed_width * 2, height * 2));
-  EXPECT_FALSE(bridge->status(source_rect, packed_width, height * 2));
+  EXPECT_TRUE(bridge->status(source_rect, packed_width, height * 2));
+  EXPECT_FALSE(bridge->status(source_rect, packed_width, height * 3));
 
   // Another adapter, another foreground window, or the bare identity of a stopped producer.
   auto elsewhere = source;
@@ -1050,9 +1124,10 @@ TEST_F(ReShadeBridgeGpu, StatusObservesTheForegroundSourceWithoutAttaching) {
   EXPECT_EQ(state->consumer_nonce, 0u);
 }
 
-TEST_F(ReShadeBridgeGpu, RequestsNoRingForEyesOfAnotherAspect) {
+TEST_F(ReShadeBridgeGpu, RequestsNoRingForEyesItCannotFit) {
   // A fresh receiver against a producer that describes only its source (generation zero): a stream
-  // of another aspect writes no nonce, so the producer allocates no ring and packs nothing.
+  // whose eyes would show less than half of each eye writes no nonce, so the producer allocates no
+  // ring and packs nothing.
   bridge = make_receiver();
   state->consumer_nonce = 0;
   state->capability_nonce = 0;
@@ -1066,20 +1141,30 @@ TEST_F(ReShadeBridgeGpu, RequestsNoRingForEyesOfAnotherAspect) {
   }
   write_metadata(source);
   for (int i = 0; i < 3; ++i) {
-    EXPECT_FALSE(bridge->poll(source_rect, packed_width, height * 2));
+    EXPECT_FALSE(bridge->poll(source_rect, packed_width, height * 3));
     EXPECT_FALSE(bridge->frame_pending());
   }
   EXPECT_EQ(state->consumer_nonce, 0u);
   EXPECT_EQ(state->capability_nonce, 0u);
-  // The same aspect requests a ring as before.
-  EXPECT_FALSE(poll());
+  // Another aspect that fits half of each eye requests a ring like the same aspect.
+  EXPECT_FALSE(bridge->poll(source_rect, packed_width, height * 2));
   const auto requested = state->consumer_nonce;
   EXPECT_NE(requested, 0u);
-  // A live generation that stops fitting is withdrawn once; fitting again asks under a new nonce.
   ASSERT_TRUE(new_generation());
   publish(1);
-  ASSERT_TRUE(await_frame());
-  EXPECT_FALSE(bridge->poll(source_rect, packed_width, height * 2));
+  // It receives the authored eyes; the converter fits them into the stream's eyes.
+  std::optional<receiver::frame_t> fitted;
+  for (const auto deadline = bridge_clock_t::now() + std::chrono::seconds(2); !fitted && bridge_clock_t::now() < deadline;) {
+    fitted = bridge->poll(source_rect, packed_width, height * 2);
+  }
+  ASSERT_TRUE(fitted);
+  D3D11_TEXTURE2D_DESC fitted_desc {};
+  fitted->texture->GetDesc(&fitted_desc);
+  EXPECT_EQ(fitted_desc.Width, UINT(packed_width));
+  EXPECT_EQ(fitted_desc.Height, UINT(height));
+  EXPECT_EQ(state->consumer_nonce, requested);
+  // A live generation that stops fitting is withdrawn once; fitting again asks under a new nonce.
+  EXPECT_FALSE(bridge->poll(source_rect, packed_width, height * 3));
   EXPECT_EQ(state->consumer_nonce, 0u);
   EXPECT_FALSE(bridge->frame_held());
   EXPECT_FALSE(poll());
@@ -1306,11 +1391,11 @@ TEST_F(ReShadeBridgeGpu, KeepsExactGameEyesAcrossFullscreenDisplayScalingAndGene
   }
   publish_pixels(1, authored_pixels.data(), authored_width * sizeof(std::uint32_t));
 
-  // Eyes with a different aspect ratio would distort disparity when scaled; they stay unavailable,
-  // and the receiver withdraws its request so the producer stops packing stereo for it.
-  EXPECT_FALSE(bridge->poll(capture, authored_width, render_height * 2));
+  // Eyes that would cover less than half of each stream eye, fitted without distortion, stay
+  // unavailable, and the receiver withdraws its request so the producer stops packing stereo.
+  EXPECT_FALSE(bridge->poll(capture, authored_width, render_height * 3));
   EXPECT_EQ(state->consumer_nonce, 0u);
-  EXPECT_FALSE(bridge->poll(capture, render_width, render_height));
+  EXPECT_FALSE(bridge->poll(capture, render_width, render_height * 2));
   EXPECT_EQ(state->consumer_nonce, 0u);
   // A fitting request asks again under a fresh nonce, which a new generation answers.
   EXPECT_FALSE(bridge->poll(capture, authored_width, render_height));
@@ -1362,8 +1447,9 @@ TEST_F(ReShadeBridgeGpu, KeepsExactGameEyesAcrossFullscreenDisplayScalingAndGene
   expect_native_eyes(scaled_fullscreen->texture);
 
   // A same-aspect stream of another size receives the native authored eyes; the consumer's
-  // linear sampling scales both halves identically. Rounding-sized differences also scale.
-  for (const auto &[width, height] : std::array<std::pair<int, int>, 3> {{{4800 * 2, 2700}, {authored_width - 2, render_height}, {authored_width, render_height - 2}}}) {
+  // linear sampling scales both halves identically. Rounding-sized differences also scale, and a
+  // stream of another aspect (16:10, 21:9, 4:3 eyes) receives the same eyes to fit.
+  for (const auto &[width, height] : std::array<std::pair<int, int>, 6> {{{4800 * 2, 2700}, {authored_width - 2, render_height}, {authored_width, render_height - 2}, {3840, 1200}, {6880, 1440}, {2880, 1080}}}) {
     const auto scaled = await_frame_for(width, height);
     ASSERT_TRUE(scaled);
     expect_native_eyes(scaled->texture);

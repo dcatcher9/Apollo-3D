@@ -176,9 +176,9 @@ namespace platf::reshade_bridge {
       if (!snapshot(*shared_, metadata) || !identity_matches(metadata) || !wire::valid_source_metadata(metadata) || metadata.adapter_luid != adapter_luid_) {
         return std::nullopt;
       }
-      const auto fit = wire::fit_output(metadata, static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height));
-      report_fit(metadata, fit, width, height);
-      if (fit == wire::output_fit::aspect_mismatch) {
+      const auto placement = wire::place_output(metadata.packed_width, metadata.packed_height, static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height));
+      report_fit(metadata, placement, width, height);
+      if (placement.fit == wire::output_fit::refused) {
         return std::nullopt;
       }
       return source_status_t {metadata.producer_pid, metadata.producer_creation_time, metadata.generation};
@@ -332,16 +332,17 @@ namespace platf::reshade_bridge {
         return std::nullopt;
       }
       // Fullscreen may scale the game's raster to a different desktop extent. Window coverage
-      // proves ownership above. Eyes authored at another size but the same aspect are scaled
-      // by the consumer's linear sampling; a different aspect stays unavailable. Whenever the
+      // proves ownership above. Eyes authored at another size are scaled by the consumer's
+      // linear sampling, and eyes of another aspect are fitted into each output eye
+      // (wire::place_output); only a fit too small to use stays unavailable. Whenever the
       // snapshot describes a source, with a consumer or not, that is decided before any ring is
       // requested: no nonce is written for it, and a live connection that stops fitting is
       // withdrawn, so the producer neither allocates a ring nor packs stereo for a stream that
       // stays in 2D.
       if (wire::valid_source_metadata(metadata) && metadata.adapter_luid == adapter_luid_) {
-        const auto fit = wire::fit_output(metadata, static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height));
-        report_fit(metadata, fit, width, height);
-        if (fit == wire::output_fit::aspect_mismatch) {
+        const auto placement = wire::place_output(metadata.packed_width, metadata.packed_height, static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height));
+        report_fit(metadata, placement, width, height);
+        if (placement.fit == wire::output_fit::refused) {
           withdraw();
           return std::nullopt;
         }
@@ -500,8 +501,8 @@ namespace platf::reshade_bridge {
   private:
     // Names a size mismatch once per generation and requested output. Without it an
     // incompatible game resolution silently leaves the stream waiting in 2D.
-    void report_fit(const wire::metadata_t &metadata, wire::output_fit fit, int width, int height) {
-      if (fit == wire::output_fit::exact || (metadata.generation == reported_generation_ &&
+    void report_fit(const wire::metadata_t &metadata, const wire::output_placement_t &placement, int width, int height) {
+      if (placement.fit == wire::output_fit::exact || (metadata.generation == reported_generation_ &&
             width == reported_width_ && height == reported_height_)) {
         return;
       }
@@ -509,14 +510,22 @@ namespace platf::reshade_bridge {
       reported_width_ = width;
       reported_height_ = height;
       const auto game_width = metadata.packed_width / 2, stream_width = static_cast<std::uint32_t>(width) / 2;
-      if (fit == wire::output_fit::scaled) {
+      if (placement.fit == wire::output_fit::scaled) {
         BOOST_LOG(info) << "ReShade SBS: game eyes " << game_width << 'x' << metadata.packed_height
                         << " are scaled to the stream's " << stream_width << 'x' << height
                         << " eyes. Run the game at " << stream_width << 'x' << height << " for native sharpness.";
+      } else if (placement.fit == wire::output_fit::fitted) {
+        const auto &eye = placement.eye;
+        BOOST_LOG(info) << "ReShade SBS: game eyes " << game_width << 'x' << metadata.packed_height
+                        << " are fitted into the stream's " << stream_width << 'x' << height << " eyes at "
+                        << eye.width << 'x' << eye.height << "+" << eye.x << "+" << eye.y
+                        << (eye.width < stream_width ? " (pillarboxed" : " (letterboxed")
+                        << ", different aspect ratio). Run the game at " << stream_width << 'x' << height
+                        << " to fill the stream.";
       } else {
         BOOST_LOG(warning) << "ReShade SBS: game eyes " << game_width << 'x' << metadata.packed_height
                            << " cannot fill the stream's " << stream_width << 'x' << height
-                           << " eyes without distortion (different aspect ratio); staying in 2D. Run the game at "
+                           << " eyes: an undistorted fit would cover less than half of each eye (or the raster is too small or odd); staying in 2D. Run the game at "
                            << stream_width << 'x' << height << " or set the stream resolution to "
                            << game_width << 'x' << metadata.packed_height << '.';
       }

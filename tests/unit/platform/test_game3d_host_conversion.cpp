@@ -5,6 +5,7 @@
  *        FP16 scRGB path, and the cursor patch against full-frame cursor composition.
  */
 #ifdef _WIN32
+  #include "src/platform/windows/packed_output_fit.h"
   #include "src/platform/windows/sbs_cursor.h"
 
   #include <algorithm>
@@ -93,6 +94,12 @@ namespace {
       code[row] = std::pow((c1 + c2 * lp) / (1.0 + c3 * lp), m2);
     }
     return code;
+  }
+
+  float half_value(std::uint16_t raw) {
+    const int exponent = (raw >> 10) & 31;
+    const float magnitude = exponent ? std::ldexp(1.0f + (raw & 1023) / 1024.0f, exponent - 15) : std::ldexp(float(raw & 1023), -24);
+    return (raw & 0x8000) ? -magnitude : magnitude;
   }
 
   std::uint32_t pack_r10g10b10a2(const std::array<double, 3> &code) {
@@ -481,6 +488,164 @@ TEST_F(Game3DHostConversion, PqResampleAndLocalPresentationFilterInLinearLight) 
   EXPECT_NEAR(value[0], 62.5f, 0.5f);
 }
 
+TEST_F(Game3DHostConversion, FittedEyesResampleIntoBlackBarsWithoutSeamBleed) {
+  struct fit_case_t {
+    UINT source_width, source_height, eye_width, eye_height;
+    ::reshade_bridge::eye_rect_t expected;
+  };
+
+  struct transfer_case_t {
+    DXGI_FORMAT format;
+    const char *resample, *luma;
+    bool pq;
+  };
+
+  // Per-eye texel colors in scRGB (multiples of 1/64, exact in FP16). The eyes differ strongly,
+  // so any texel of one eye in the other's rectangle exceeds the comparison tolerance.
+  const auto eye_color = [](UINT eye, UINT x, UINT y, UINT width, UINT height) {
+    const auto q = [](float v) {
+      return std::round(v * 64.0f) / 64.0f;
+    };
+    return eye == 0 ? std::array<float, 3> {q(0.25f + 0.5f * x / width), q(0.75f - 0.5f * y / height), 0.5f} :
+                      std::array<float, 3> {0.015625f, q(0.05f * (x % 3)), q(0.875f - 0.25f * y / height)};
+  };
+  const auto make_source = [&](const transfer_case_t &transfer, UINT width, UINT height, const std::array<int, 2> &eyes) {
+    // eyes[side]: which eye's colors fill that half (a duplicate of one eye is the reference).
+    if (transfer.format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
+      std::vector<std::array<std::uint16_t, 4>> texels(std::size_t(width) * 2 * height);
+      for (UINT y = 0; y < height; ++y) {
+        for (UINT x = 0; x < 2 * width; ++x) {
+          const auto rgb = eye_color(eyes[x / width], x % width, y, width, height);
+          texels[std::size_t(y) * 2 * width + x] = {exact_half(rgb[0]), exact_half(rgb[1]), exact_half(rgb[2]), 0x3c00};
+        }
+      }
+      return make_texture(2 * width, height, transfer.format, texels.data(), 2 * width * 8);
+    }
+    std::vector<std::uint32_t> texels(std::size_t(width) * 2 * height);
+    for (UINT y = 0; y < height; ++y) {
+      for (UINT x = 0; x < 2 * width; ++x) {
+        const auto rgb = eye_color(eyes[x / width], x % width, y, width, height);
+        auto &texel = texels[std::size_t(y) * 2 * width + x];
+        if (transfer.pq) {
+          texel = pack_r10g10b10a2(host_pq(rgb));
+        } else {
+          texel = 0xff000000u;
+          for (int c = 0; c < 3; ++c) {
+            texel |= std::uint32_t(std::lround(std::clamp(rgb[c], 0.0f, 1.0f) * 255.0f)) << (8 * c);
+          }
+        }
+      }
+    }
+    return make_texture(2 * width, height, transfer.format, texels.data(), 2 * width * 4);
+  };
+  const auto read_half = [&](ID3D11Texture2D *texture) {
+    const auto bytes = read(texture);
+    std::vector<float> values(bytes.size() / 2);
+    for (std::size_t i = 0; i < values.size(); ++i) {
+      std::uint16_t raw;
+      std::memcpy(&raw, bytes.data() + i * 2, 2);
+      values[i] = half_value(raw);
+    }
+    return values;
+  };
+
+  const auto color_matrix = constants(bt2020_full);
+  const auto gamma = constants(gamma_t {});
+  const auto rotation = constants(std::array<std::int32_t, 4> {});
+  for (const auto &fit : {
+         fit_case_t {24, 16, 28, 12, {4, 0, 18, 12}},  // Pillarboxed at 0.75.
+         fit_case_t {32, 16, 24, 16, {0, 2, 24, 12}},  // Letterboxed at 0.75.
+       }) {
+    const UINT width = 2 * fit.eye_width, height = fit.eye_height;
+    const auto placement = ::reshade_bridge::place_output(2 * fit.source_width, fit.source_height, width, height);
+    ASSERT_EQ(placement.fit, ::reshade_bridge::output_fit::fitted);
+    ASSERT_EQ(std::tie(placement.eye.x, placement.eye.y, placement.eye.width, placement.eye.height), std::tie(fit.expected.x, fit.expected.y, fit.expected.width, fit.expected.height));
+    const auto passes = platf::packed_output::resample_passes(placement, width, height);
+    ASSERT_EQ(passes.count, 2u);
+    ASSERT_TRUE(passes.clear);
+    const auto &eye = placement.eye;
+    for (const auto &transfer : {
+           transfer_case_t {DXGI_FORMAT_R8G8B8A8_UNORM, "sbs_packed_resample_ps.hlsl", "convert_yuv420_planar_y_ps.hlsl", false},
+           transfer_case_t {DXGI_FORMAT_R16G16B16A16_FLOAT, "sbs_packed_resample_ps.hlsl", "convert_yuv420_planar_y_ps_perceptual_quantizer.hlsl", false},
+           transfer_case_t {DXGI_FORMAT_R10G10B10A2_UNORM, "sbs_packed_resample_pq_input_ps.hlsl", "convert_yuv420_planar_y_ps_perceptual_quantizer.hlsl", true},
+         }) {
+      SCOPED_TRACE(std::to_string(fit.source_width) + "x" + std::to_string(fit.source_height) + " format " + std::to_string(int(transfer.format)));
+      const auto source = make_source(transfer, fit.source_width, fit.source_height, {0, 1});
+      // The production draws: black, then each eye's pass inside its scissor.
+      auto output = make_texture(width, height, DXGI_FORMAT_R16G16B16A16_FLOAT, nullptr, 0, true);
+      constexpr float black[4] {0.0f, 0.0f, 0.0f, 1.0f};
+      context->ClearRenderTargetView(output.target.Get(), black);
+      pass_t pass {vertex_shader("sbs_reprojection_vs.hlsl"), pixel_shader(transfer.resample), {}, {}, {}};
+      for (std::uint32_t i = 0; i < passes.count; ++i) {
+        pass.viewport = passes.passes[i].viewport;
+        draw(pass, output.target.Get(), source.view.Get(), &*passes.passes[i].scissor);
+      }
+      const auto actual = read_half(output.texture.Get());
+      // Each eye alone, scaled to the fitted size from a source holding only that eye.
+      std::array<std::vector<float>, 2> expected;
+      for (int side = 0; side < 2; ++side) {
+        const auto alone = make_source(transfer, fit.source_width, fit.source_height, {side, side});
+        auto reference = make_texture(2 * eye.width, eye.height, DXGI_FORMAT_R16G16B16A16_FLOAT, nullptr, 0, true);
+        pass.viewport = {0, 0, float(2 * eye.width), float(eye.height), 0, 1};
+        draw(pass, reference.target.Get(), alone.view.Get());
+        expected[side] = read_half(reference.texture.Get());
+      }
+      std::size_t inside = 0;
+      for (UINT y = 0; y < height; ++y) {
+        for (UINT x = 0; x < width; ++x) {
+          const UINT side = x / fit.eye_width, local = x % fit.eye_width;
+          const float *value = &actual[(std::size_t(y) * width + x) * 4];
+          if (local >= eye.x && local < eye.x + eye.width && y >= eye.y && y < eye.y + eye.height) {
+            ++inside;
+            const float *want = &expected[side][(std::size_t(y - eye.y) * 2 * eye.width + (local - eye.x)) * 4];
+            // Two steps of 8-bit subtexel filtering precision; a texel of the other eye at a
+            // weight above 1/32 differs by more.
+            for (int c = 0; c < 3; ++c) {
+              ASSERT_NEAR(value[c], want[c], 8e-3f * std::max(1.0f, std::abs(want[c]))) << "pixel " << x << ',' << y << " channel " << c;
+            }
+          } else {
+            // Black in every transfer, opaque.
+            ASSERT_EQ(value[0], 0.0f) << "pixel " << x << ',' << y;
+            ASSERT_EQ(value[1], 0.0f) << "pixel " << x << ',' << y;
+            ASSERT_EQ(value[2], 0.0f) << "pixel " << x << ',' << y;
+            ASSERT_EQ(value[3], 1.0f) << "pixel " << x << ',' << y;
+          }
+        }
+      }
+      EXPECT_EQ(inside, std::size_t(2) * eye.width * eye.height);
+
+      // The bars encode as black: luma code 0 in full range, for sRGB input and for linear input
+      // encoded as PQ.
+      sdr_transform_t transform;
+      transform.target_is_hdr = transfer.format != DXGI_FORMAT_R8G8B8A8_UNORM;
+      const auto sdr = constants(transform);
+      const auto chroma = constants(chroma_t {{1.0f / width, 1.0f / height}, width, height, fit.eye_width});
+      auto luma = make_texture(width, height, DXGI_FORMAT_R16_UNORM, nullptr, 0, true);
+      const pass_t y_pass {vertex_shader("convert_yuv420_planar_y_vs.hlsl"), pixel_shader(transfer.luma), {0, 0, float(width), float(height), 0, 1}, {nullptr, rotation}, {color_matrix, sdr, chroma, nullptr, gamma}};
+      draw(y_pass, luma.target.Get(), output.view.Get());
+      const auto codes = read(luma.texture.Get());
+      for (UINT y = 0; y < height; ++y) {
+        for (const UINT x : {0u, eye.x + eye.width, fit.eye_width + eye.x - 1u, width - 1u}) {
+          const UINT local = x % fit.eye_width;
+          if (local >= eye.x && local < eye.x + eye.width && y >= eye.y && y < eye.y + eye.height) {
+            continue;
+          }
+          std::uint16_t code;
+          std::memcpy(&code, codes.data() + (std::size_t(y) * width + x) * 2, 2);
+          EXPECT_EQ(code, 0u) << "luma at " << x << ',' << y;
+        }
+      }
+
+      // Local AR presents the fitted raster at its own size: the bars stay black and the eyes
+      // keep their rectangles.
+      auto presented = make_texture(width, height, DXGI_FORMAT_R16G16B16A16_FLOAT, nullptr, 0, true);
+      const pass_t present {vertex_shader("sbs_reprojection_vs.hlsl"), pixel_shader("cursor_ps.hlsl"), {0, 0, float(width), float(height), 0, 1}, {}, {}};
+      draw(present, presented.target.Get(), output.view.Get());
+      EXPECT_EQ(read(presented.texture.Get()), read(output.texture.Get()));
+    }
+  }
+}
+
 namespace {
   // The full production conversion shapes that read an export: Y and 4:2:0 UV planes at the
   // packed size, the same-aspect resample, and a scaled Local AR presentation.
@@ -551,8 +716,15 @@ TEST_F(Game3DHostConversion, CursorPatchConversionIsBitIdenticalToFullFrameCompo
       pass_t pass;
       UINT target_width, target_height;
       DXGI_FORMAT target_format;
+      // A fitted resample: these viewports and scissors replace pass.viewport, over black.
+      platf::packed_output::passes_t fit {};
     };
 
+    const auto fitted = [&](UINT eye_width, UINT eye_height) {
+      const auto placement = ::reshade_bridge::place_output(width, height, 2 * eye_width, eye_height);
+      EXPECT_EQ(placement.fit, ::reshade_bridge::output_fit::fitted);
+      return output_pass_t {{vertex_shader("sbs_reprojection_vs.hlsl"), pixel_shader("sbs_packed_resample_ps.hlsl"), {}, {}, {}}, 2 * eye_width, eye_height, DXGI_FORMAT_R16G16B16A16_FLOAT, platf::packed_output::resample_passes(placement, 2 * eye_width, eye_height)};
+    };
     std::vector<output_pass_t> passes {
       {{vertex_shader("convert_yuv420_planar_y_vs.hlsl"), pixel_shader(test.linear ? "convert_yuv420_planar_y_ps_perceptual_quantizer.hlsl" : "convert_yuv420_planar_y_ps.hlsl"), {0, 0, float(width), float(height), 0, 1}, {nullptr, rotation}, {color_matrix, sdr, chroma, nullptr, gamma}}, width, height, DXGI_FORMAT_R16_UNORM},
       {{vertex_shader("convert_yuv420_packed_uv_type0_vs.hlsl"), pixel_shader(test.linear ? "convert_yuv420_packed_uv_type0_ps_perceptual_quantizer.hlsl" : "convert_yuv420_packed_uv_type0_ps.hlsl"), {0, 0, float(width) / 2, float(height) / 2, 0, 1}, {chroma, rotation}, {color_matrix, sdr, chroma, nullptr, gamma}}, width / 2, height / 2, DXGI_FORMAT_R16G16_UNORM},
@@ -560,10 +732,17 @@ TEST_F(Game3DHostConversion, CursorPatchConversionIsBitIdenticalToFullFrameCompo
       {{vertex_shader("sbs_reprojection_vs.hlsl"), pixel_shader("sbs_packed_resample_ps.hlsl"), {0, 0, 72, 18, 0, 1}, {}, {}}, 72, 18, DXGI_FORMAT_R16G16B16A16_FLOAT},
       // Local AR presentation into a smaller swapchain (cursor_ps is rgb_present_ps).
       {{vertex_shader("sbs_reprojection_vs.hlsl"), pixel_shader("cursor_ps.hlsl"), {0, 0, 60, 15, 0, 1}, {}, {}}, 60, 15, test.linear ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM},
+      // Other aspects fitted into each eye through offset viewports: pillarboxed (each 2:1 eye
+      // 32x16 at x = 4 of 40x16) and letterboxed (36x18 at y = 4 of 36x26).
+      fitted(40, 16),
+      fitted(36, 26),
     };
+    ASSERT_EQ(passes[4].fit.count, 2u);
+    EXPECT_EQ(passes[4].fit.passes[1].scissor->left, 44);
+    EXPECT_EQ(passes[5].fit.passes[0].scissor->top, 4);
     float minimum_scale = 1.0f;
     for (const auto &output : passes) {
-      minimum_scale = std::min({minimum_scale, output.pass.viewport.Width / width, output.pass.viewport.Height / height});
+      minimum_scale = std::min(minimum_scale, output.fit.count ? platf::packed_output::minimum_scale(output.fit, width, height) : std::min(output.pass.viewport.Width / width, output.pass.viewport.Height / height));
     }
     const auto margin = cursor::patch_margin(minimum_scale);
     ASSERT_LT(margin, 64u);
@@ -590,12 +769,39 @@ TEST_F(Game3DHostConversion, CursorPatchConversionIsBitIdenticalToFullFrameCompo
       for (const auto &output : passes) {
         auto reference = make_texture(output.target_width, output.target_height, output.target_format, nullptr, 0, true);
         auto actual = make_texture(output.target_width, output.target_height, output.target_format, nullptr, 0, true);
-        draw(output.pass, reference.target.Get(), full->view);
-        draw(output.pass, actual.target.Get(), source.view.Get());
-        for (std::uint32_t i = 0; i < patch->regions; ++i) {
-          if (const auto region = cursor::output_region(patch->changed[i], width, height, output.pass.viewport)) {
-            draw(output.pass, actual.target.Get(), patch->view, &*region);
+        if (!output.fit.count) {
+          draw(output.pass, reference.target.Get(), full->view);
+          draw(output.pass, actual.target.Get(), source.view.Get());
+          for (std::uint32_t i = 0; i < patch->regions; ++i) {
+            if (const auto region = cursor::output_region(patch->changed[i], width, height, output.pass.viewport)) {
+              draw(output.pass, actual.target.Get(), patch->view, &*region);
+            }
           }
+        } else {
+          // The converter's fitted resample: black, then per eye the export inside its scissor
+          // and the patch over that eye's regions (pass_region keeps them inside the scissor).
+          constexpr float black[4] {0.0f, 0.0f, 0.0f, 1.0f};
+          context->ClearRenderTargetView(reference.target.Get(), black);
+          context->ClearRenderTargetView(actual.target.Get(), black);
+          std::uint32_t patched = 0;
+          for (std::uint32_t p = 0; p < output.fit.count; ++p) {
+            auto pass = output.pass;
+            pass.viewport = output.fit.passes[p].viewport;
+            const auto &scissor = *output.fit.passes[p].scissor;
+            draw(pass, reference.target.Get(), full->view, &scissor);
+            draw(pass, actual.target.Get(), source.view.Get(), &scissor);
+            for (std::uint32_t i = 0; i < patch->regions; ++i) {
+              if (const auto region = platf::packed_output::pass_region(output.fit.passes[p], patch->changed[i], width, height)) {
+                EXPECT_GE(region->left, scissor.left);
+                EXPECT_LE(region->right, scissor.right);
+                EXPECT_GE(region->top, scissor.top);
+                EXPECT_LE(region->bottom, scissor.bottom);
+                draw(pass, actual.target.Get(), patch->view, &*region);
+                ++patched;
+              }
+            }
+          }
+          EXPECT_GT(patched, 0u);
         }
         EXPECT_EQ(read(actual.texture.Get()), read(reference.texture.Get())) << "target " << output.target_width << 'x' << output.target_height;
       }

@@ -2048,6 +2048,24 @@ class ReadinessReport(unittest.TestCase):
             other = report.host_checks(host, datetime(2026, 9, 30, 23, 0), datetime(2026, 9, 30, 23, 5))
             self.assertEqual([c.name for c in other], ['Host log'])
 
+    def test_scaled_and_fitted_host_sizes_are_info_and_a_refused_one_fails(self):
+        with TemporaryDirectory() as folder:
+            host = Path(folder) / 'sunshine.log'
+            host.write_text(
+                '[2026-10-01 10:00:01.000]: Info: ReShade SBS connected: process 1, 3840x1080\n'
+                "[2026-10-01 10:00:02.000]: Info: ReShade SBS: game eyes 1920x1200 are fitted into the stream's "
+                '1920x1080 eyes at 1728x1080+96+0 (pillarboxed, different aspect ratio). Run the game at 1920x1080 to '
+                'fill the stream.\n'
+                "[2026-10-01 10:00:03.000]: Info: ReShade SBS: game eyes 2560x1440 are scaled to the stream's "
+                '1920x1080 eyes. Run the game at 1920x1080 for native sharpness.\n'
+                "[2026-10-01 10:00:04.000]: Warning: ReShade SBS: game eyes 1920x1080 cannot fill the stream's "
+                '1920x3240 eyes: an undistorted fit would cover less than half of each eye (or the raster is too '
+                'small or odd); staying in 2D.\n', encoding='utf-8')
+            sizes = [c for c in report.host_checks(host, datetime(2026, 10, 1, 10, 0, 0),
+                                                   datetime(2026, 10, 1, 10, 0, 20)) if c.name == 'Host size']
+            self.assertEqual([c.status for c in sizes], ['INFO', 'INFO', 'FAIL'])
+            self.assertIn('fitted into', sizes[0].detail)
+
     def test_an_nvenc_stall_counts_once_by_its_last_line(self):
         # E33 10-06: each stalled frame logged its warning and then its completion line, and the report counted 6
         # stalls for 3 frames. A stall is one per frame, classified by its last line; frame numbers far apart in time
