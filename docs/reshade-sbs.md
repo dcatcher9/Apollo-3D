@@ -3260,11 +3260,19 @@ PrecisionInfo, a PrecisionInfo with its own extension or an unknown formula, a l
 and resource types other than eTex2d/eUnknown. The `rejected depth tag` line names the cause
 (`refusal=header_version|unreadable|extension|precision|resource_type|lifecycle`), as does an FG
 tag boundary's refusal reason (`unsupported_<cause>`) and, for UI tags, the begin stage. A
-compatible DLL major does not make arbitrary structures or missing resources usable. Missing or contradictory version
-metadata and unknown ABI majors remain unsupported. Official 1.0.2–1.1.1 binaries have a resource
+compatible DLL major does not make arbitrary structures or missing resources usable. Missing
+version metadata, unreadable fixed information, conflicting translations, malformed strings, mixed
+majors and unknown ABI majors remain unsupported. Official 1.0.2–1.1.1 binaries have a resource
 script quirk: fixed file/product version 1.0.0.0 but matching strings containing the actual version.
-Official 2.0.1 and 2.1.0 have the equivalent fixed 2.0.0.0 quirk. These exceptions are limited to
-the surveyed legacy release range and those two exact 2.x releases, with complete, agreeing strings.
+That exception is limited to the surveyed legacy release range with complete, agreeing strings;
+1.x identities are otherwise exact, because the resource layout and the private-state adapter
+depend on them. A 2.x module whose identities disagree (fixed file, fixed product and, from a
+complete set of translations, its file and product strings, all of major 2; official 2.0.1 and
+2.1.0 keep a fixed 2.0.0.0) is the 2.x structure ABI with an inexact version (`result=v2 family,
+inexact version`). Its buffer contract knows a raw tag only where every candidate version's header
+gives it the same meaning, so a tag added or renumbered between candidates is unknown, and it is
+never surveyed, so UIAlpha stays manual. The `buffer contract` line then names the lowest candidate
+and lists `candidates=`.
 
 Constants, global tags and evaluation exports are required. `slSetTagForFrame`,
 `slGetNewFrameToken` and `slGetFeatureFunction` are optional capabilities. Frame tags first appear

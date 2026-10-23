@@ -78,14 +78,8 @@ namespace sunshine_streamline::versioning {
       value.reason = "validated 1.x resource-version quirk (fixed 1.0.0.0)";
       return true;
     }
-    // These two official releases have the same dotted-resource defect. Keep
-    // it bounded to their observed identity pairs, independently of ABI choice.
-    if (out == number{2, 0, 0, 0} && value.strings_complete && has_file && has_product &&
-        (file == number{2, 0, 1, 0} || file == number{2, 1, 0, 0})) {
-      out = file;
-      value.reason = "validated early 2.x resource-version quirk (fixed 2.0.0.0)";
-      return true;
-    }
+    // A 2.x module whose identities disagree (the 2.0.1/2.1.0 releases kept a
+    // dotted fixed 2.0.0.0) has no exact identity: see family().
     if ((has_file && !(file == out)) || (has_product && !(product == out))) {
       value.reason = "fixed and string versions disagree";
       return false;
@@ -93,9 +87,43 @@ namespace sunshine_streamline::versioning {
     value.reason = "consistent version identity";
     return true;
   }
+  // Every version a module's metadata names (fixed file, fixed product and,
+  // from a complete set of translations, its well-formed strings), distinct,
+  // when all of them name major 2; empty otherwise, including for unreadable
+  // fixed information and conflicting translations. More than one is a typed
+  // 2.x module whose structure ABI is known but whose exact header version is
+  // not (buffers::for_versions).
+  struct candidates {
+    std::array<number, 4> values{};
+    unsigned count{};
+  };
+  inline candidates family(const information &value) {
+    if (!value.fixed_valid || value.strings_conflict) return {};
+    std::array<number, 4> named{};
+    unsigned count = 0;
+    named[count++] = {HIWORD(value.file_ms), LOWORD(value.file_ms), HIWORD(value.file_ls), LOWORD(value.file_ls)};
+    named[count++] = {HIWORD(value.product_ms), LOWORD(value.product_ms), HIWORD(value.product_ls), LOWORD(value.product_ls)};
+    for (const auto *text : {value.file_text.data(), value.product_text.data()}) {
+      if (!text[0]) continue;
+      if (!value.strings_complete || !parse(text, named[count])) return {};
+      ++count;
+    }
+    candidates out;
+    for (unsigned i = 0; i != count; ++i) {
+      if (named[i].major != 2) return {};
+      bool seen = false;
+      for (unsigned j = 0; j != out.count; ++j) seen = seen || out.values[j] == named[i];
+      if (!seen) out.values[out.count++] = named[i];
+    }
+    return out;
+  }
   inline abi classify(information &value) {
     number version;
-    if (!identity(value, version)) return abi::unsupported;
+    if (!identity(value, version)) {
+      if (family(value).count < 2) return abi::unsupported;
+      value.reason = "v2 family, inexact version";
+      return abi::v2;
+    }
     if (version.major == 2) return abi::v2;
     if (version.major == 1) return version.minor == 0 && version.patch < 3 ? abi::legacy_no_state : abi::legacy;
     value.reason = "unsupported Streamline ABI major";

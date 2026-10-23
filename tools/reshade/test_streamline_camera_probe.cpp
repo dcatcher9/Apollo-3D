@@ -3195,6 +3195,36 @@ namespace {
     require(future.known && !future.surveyed && buffers::canonical(future, 69) == buffers::ui_alpha &&
         !buffers::ui_alpha_authenticated(future), "unsurveyed 2.x release was treated as authenticated");
     require(!buffers::for_version({3, 0, 0, 0}).known, "unknown Streamline major received a buffer contract");
+    // An inexact 2.x family: a raw tag is known only where every candidate's
+    // header agrees, and the contract is never surveyed (UI alpha stays manual).
+    const auto family = [](std::initializer_list<versioning::number> values) {
+      versioning::candidates out;
+      for (const auto &v : values) out.values[out.count++] = v;
+      return buffers::for_versions(out);
+    };
+    const auto uialpha = family({{2, 11, 1, 0}, {2, 12, 0, 0}});
+    require(uialpha.known && !uialpha.surveyed && !buffers::ui_alpha_authenticated(uialpha) &&
+        buffers::canonical(uialpha, 68) == buffers::unknown && buffers::canonical(uialpha, 69) == buffers::unknown &&
+        buffers::canonical(uialpha, 0) == 0 && buffers::canonical(uialpha, 53) == 53 && uialpha.raw_ui_alpha == buffers::unknown,
+      "candidates {2.11, 2.12} mapped a renumbered tag");
+    const auto depth = family({{2, 3, 0, 0}, {2, 5, 0, 0}});
+    require(depth.known && !depth.surveyed && buffers::canonical(depth, 48) == buffers::unknown &&
+        buffers::canonical(depth, 49) == buffers::unknown && buffers::canonical(depth, 0) == 0 &&
+        depth.version == versioning::number{2, 3, 0, 0} && depth.last_type == 37,
+      "candidates {2.3, 2.5} mapped a tag one candidate lacks");
+    const auto same = family({{2, 12, 0, 0}, {2, 13, 0, 0}});
+    require(buffers::canonical(same, 69) == buffers::ui_alpha && !buffers::ui_alpha_authenticated(same),
+      "agreeing candidates lost a shared tag or authenticated an inexact header");
+    require(!family({{2, 12, 0, 0}, {3, 0, 0, 0}}).known, "a candidate of an unknown major left the family known");
+    const auto single = family({{2, 12, 0, 0}});
+    require(single.surveyed && single.candidate_count == 0 && buffers::ui_alpha_authenticated(single),
+      "a single candidate was not its exact contract");
+    buffers::set_active_contract(depth);
+    const auto active = buffers::active();
+    require(active.candidate_count == 2 && buffers::canonical(active, 48) == buffers::unknown && !active.surveyed,
+      "the process-wide contract lost an inexact family's candidates");
+    buffers::clear_active();
+    require(!buffers::active().known, "a cleared contract stayed known");
     std::puts("PASS versioned Streamline buffer contract: 2.11.x tag68 and 2.12+ tag69 map to UIAlpha; undeclared/renumbered tags stay unavailable");
   }
 
@@ -4116,11 +4146,41 @@ namespace {
       require(versioning::classify(early_v2) == abi::unsupported,
         "partial translation enabled the early typed SDK resource-version quirk");
     }
-    for (const auto *text : {L"2.1.1.0", L"2.6.10.0", L"2.14.1.0", L"3.0.0.0"}) {
-      auto unknown_quirk = make(2, 0, 0, text, text);
-      require(versioning::classify(unknown_quirk) == abi::unsupported,
-        "early typed SDK quirk overrode an unverified fixed/string disagreement");
+    // Disagreeing identities of one typed family: the 2.x ABI, an inexact
+    // version whose candidates are every identity it names.
+    const auto inexact = [&](versioning::information value, std::initializer_list<versioning::number> expected) {
+      const auto family = versioning::family(value);
+      bool all = family.count == expected.size();
+      for (const auto &v : expected) {
+        bool found = false;
+        for (unsigned i = 0; i != family.count; ++i) found = found || family.values[i] == v;
+        all = all && found;
+      }
+      return versioning::classify(value) == abi::v2 && std::strcmp(value.reason, "v2 family, inexact version") == 0 &&
+        all && !versioning::private_state_v1_1_1(value);
+    };
+    require(inexact(make(2, 0, 0, L"2.0.1.0", L"2.0.1.0"), {{2, 0, 0, 0}, {2, 0, 1, 0}}),
+      "the fixed-2.0.0.0 release identity was not the family {2.0.0, strings}");
+    for (const auto *text : {L"2.1.1.0", L"2.6.10.0", L"2.14.1.0", L"2.5.0.0"}) {
+      versioning::number named{};
+      require(versioning::parse(text, named) && inexact(make(2, 0, 0, text, text), {{2, 0, 0, 0}, named}),
+        "a fixed 2.0.0.0 with other 2.x strings was not an inexact 2.x family");
     }
+    require(inexact(make(2, 3, 0, L"2.4.1.0", L"2.4.1.0"), {{2, 3, 0, 0}, {2, 4, 1, 0}}),
+      "fixed 2.3.0.0 with 2.4.1.0 strings was not an inexact 2.x family");
+    auto fixed_pair = make(2, 4, 0, L"", L"");
+    fixed_pair.product_ms = MAKELONG(5, 2);
+    require(inexact(fixed_pair, {{2, 4, 0, 0}, {2, 5, 0, 0}}), "disagreeing 2.x fixed file/product were not a family");
+    for (const auto *text : {L"3.0.0.0", L"1.1.1.0"}) {
+      auto mixed = make(2, 0, 0, text, text);
+      require(versioning::classify(mixed) == abi::unsupported && !versioning::family(mixed).count,
+        "mixed Streamline ABI majors were accepted as one family");
+    }
+    auto mixed_fixed = make(1, 1, 1, L"2.0.0.0", L"2.0.0.0");
+    require(versioning::classify(mixed_fixed) == abi::unsupported, "a 1.x fixed version with 2.x strings was accepted");
+    auto fixed_major = make(2, 4, 0, L"", L"");
+    fixed_major.product_ms = MAKELONG(0, 3);
+    require(versioning::classify(fixed_major) == abi::unsupported, "a 2.x/3.x fixed pair was accepted");
     for (const auto major : {0u, 3u, 65535u}) {
       auto future = make(major, 0, 0, L"", L"");
       require(versioning::classify(future) == abi::unsupported,
@@ -4151,7 +4211,7 @@ namespace {
     incomplete_translation.strings_complete = false;
     require(versioning::classify(incomplete_translation) == abi::unsupported, "partial translation fallback accepted");
     auto bad_known = make(2, 7, 30, L"2.7.31.0", L"2.7.31.0");
-    require(versioning::classify(bad_known) == abi::unsupported, "contradictory fixed/string identity accepted");
+    require(inexact(bad_known, {{2, 7, 30, 0}, {2, 7, 31, 0}}), "contradictory 2.x fixed/string identity was not inexact");
     for (const auto *text : {L"2.6.10", L"2,6.10,0", L"2.6.10.65536", L"2.6.10.4294967296",
         L"2.6.10.-1", L"2.6.10.0.0", L"2.6.10.0-beta"}) {
       auto malformed = make(2, 6, 10, text, text);

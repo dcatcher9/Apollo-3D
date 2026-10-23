@@ -4,6 +4,8 @@
 #include "streamline_buffer_types.h"
 #include "streamline_camera_version.h"
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdint>
 
@@ -19,6 +21,7 @@
 // surveyed releases except for the two changes above.
 namespace sunshine_streamline::buffers {
   struct contract {
+    // The exact version, or an inexact family's lowest candidate.
     versioning::number version;
     // Highest raw type declared by the governing header; later values are unknown.
     std::uint32_t last_type{};
@@ -30,6 +33,11 @@ namespace sunshine_streamline::buffers {
     // the latest surveyed numbering but are not treated as authenticated.
     bool surveyed{};
     bool known{};
+    // An inexact 2.x family's candidate versions (versioning::family; more
+    // than one): a raw tag is canonical only where every candidate's header
+    // gives it the same meaning, and the contract is never surveyed.
+    std::array<versioning::number, 4> candidates{};
+    unsigned candidate_count{};
   };
 
   inline bool at_least(const versioning::number &v, unsigned major, unsigned minor, unsigned patch = 0) {
@@ -61,9 +69,40 @@ namespace sunshine_streamline::buffers {
     return out;
   }
 
+  // The contract of an inexact 2.x family: every candidate's header must agree.
+  // Its fields are the agreed ones (the lowest last type; UIAlpha only when
+  // every candidate numbers it alike), for diagnostics.
+  inline contract for_versions(const versioning::candidates &family) {
+    if (family.count == 1) return for_version(family.values[0]);
+    contract out;
+    if (!family.count) return out;
+    out.known = out.ui_color_and_alpha = true;
+    for (unsigned i = 0; i != family.count; ++i) {
+      const auto &v = family.values[i];
+      const auto each = for_version(v);
+      out.known = out.known && each.known;
+      out.ui_color_and_alpha = out.ui_color_and_alpha && each.ui_color_and_alpha;
+      if (!i || !at_least(v, out.version.major, out.version.minor, out.version.patch)) out.version = v;
+      out.last_type = i ? std::min(out.last_type, each.last_type) : each.last_type;
+      if (i && out.raw_ui_alpha != each.raw_ui_alpha) out.raw_ui_alpha = unknown;
+      else if (!i) out.raw_ui_alpha = each.raw_ui_alpha;
+    }
+    out.surveyed = false;
+    out.candidates = family.values;
+    out.candidate_count = family.count;
+    return out;
+  }
+
   // Raw SDK tag -> canonical number, or unknown when this header did not declare
   // the raw value with a meaning Game 3D can consume.
   inline std::uint32_t canonical(const contract &c, std::uint32_t raw) {
+    if (c.candidate_count > 1) {
+      if (!c.known) return unknown;
+      const auto agreed = canonical(for_version(c.candidates[0]), raw);
+      for (unsigned i = 1; i != c.candidate_count; ++i)
+        if (canonical(for_version(c.candidates[i]), raw) != agreed) return unknown;
+      return agreed;
+    }
     if (!c.known || raw > c.last_type) return unknown;
     if (raw == ui_color_and_alpha && !c.ui_color_and_alpha) return unknown;
     if (c.raw_ui_alpha != unknown && raw == c.raw_ui_alpha) return ui_alpha;
@@ -77,24 +116,24 @@ namespace sunshine_streamline::buffers {
     return c.known && c.surveyed && c.raw_ui_alpha != unknown;
   }
 
-  // Process-wide contract of the hooked interposer. Written once when hooks are
-  // installed; readers on SDK threads take a relaxed snapshot of the packed value.
+  // Process-wide contract of the hooked interposer, written once when hooks
+  // are installed. Readers copy it under a shared lock (an inexact family's
+  // candidates do not fit one atomic word).
   namespace detail {
-    inline std::atomic<std::uint64_t> active_version{};
-    inline std::uint64_t pack(const versioning::number &v) {
-      return (std::uint64_t(v.major & 0x7fff) << 48) | (std::uint64_t(v.minor & 0xffff) << 32) |
-        (std::uint64_t(v.patch & 0xffff) << 16) | std::uint64_t(v.build & 0xffff);
-    }
+    inline SRWLOCK active_lock = SRWLOCK_INIT;
+    inline contract active_value;
   }
-  inline void set_active(const versioning::number &v) {
-    detail::active_version.store(detail::pack(v) | 1ull << 63, std::memory_order_release);
+  inline void set_active_contract(const contract &c) {
+    AcquireSRWLockExclusive(&detail::active_lock);
+    detail::active_value = c;
+    ReleaseSRWLockExclusive(&detail::active_lock);
   }
-  inline void clear_active() { detail::active_version.store(0, std::memory_order_release); }
+  inline void set_active(const versioning::number &v) { set_active_contract(for_version(v)); }
+  inline void clear_active() { set_active_contract(contract{}); }
   inline contract active() {
-    const auto packed = detail::active_version.load(std::memory_order_acquire);
-    if (!(packed >> 63)) return {};
-    const versioning::number v{unsigned(packed >> 48 & 0x7fff), unsigned(packed >> 32 & 0xffff),
-      unsigned(packed >> 16 & 0xffff), unsigned(packed & 0xffff)};
-    return for_version(v);
+    AcquireSRWLockShared(&detail::active_lock);
+    const auto out = detail::active_value;
+    ReleaseSRWLockShared(&detail::active_lock);
+    return out;
   }
 }

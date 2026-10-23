@@ -2282,9 +2282,8 @@ namespace sunshine_streamline {
       return result;
     }
 
-    bool install_hooks(abi version, const targets &functions, const versioning::number &number) {
+    bool install_hooks(abi version, const targets &functions, const buffers::contract &contract) {
       if (version == abi::unsupported || !functions.constants || !functions.tag || !functions.evaluate) return false;
-      const auto contract = buffers::for_version(number);
       if (!contract.known) return false;
       if (!minhook_initialized) {
         const auto status = MH_Initialize();
@@ -2317,7 +2316,7 @@ namespace sunshine_streamline {
       }
       // Detours canonicalize raw tags from their first call.
       installed_contract = contract;
-      buffers::set_active(number);
+      buffers::set_active_contract(contract);
       for (unsigned i = 0; i < count; ++i) {
         if (MH_QueueEnableHook(entries[i].target) != MH_OK) return false;
       }
@@ -2383,9 +2382,11 @@ namespace sunshine_streamline {
       }
       auto info = module_version(module);
       const abi version = versioning::classify(info);
+      // An exact identity's header, or every candidate of an inexact 2.x family.
       versioning::number number{};
-      if (version != abi::unsupported) versioning::identity(info, number);
-      const auto contract = buffers::for_version(number);
+      auto exact = info;
+      const auto contract = version == abi::unsupported ? buffers::contract{} :
+        versioning::identity(exact, number) ? buffers::for_version(number) : buffers::for_versions(versioning::family(info));
       dump_metadata::observe_module(module, "streamline", versioning::name(version));
       targets functions{
         reinterpret_cast<void *>(GetProcAddress(module, "slSetConstants")),
@@ -2432,7 +2433,7 @@ namespace sunshine_streamline {
         FreeLibrary(module);
         return;
       }
-      const bool installed = install_hooks(version, functions, number);
+      const bool installed = install_hooks(version, functions, contract);
       FreeLibrary(module);
       if (!installed) {
         observing.store(false, std::memory_order_release);
@@ -2444,10 +2445,18 @@ namespace sunshine_streamline {
       message(versioning::is_legacy(version) ?
         "Sunshine Streamline: observing 1.x constants, global depth tags and feature evaluation; direct depth capture enabled when supported" :
         "Sunshine Streamline: observing 2.x constants, global/local depth tags and feature evaluation; direct depth capture enabled when supported");
-      char buffers_text[320]{};
+      char candidates_text[128]{};
+      for (unsigned i = 0, at = 0; i != contract.candidate_count && at < sizeof(candidates_text); ++i) {
+        const auto &v = contract.candidates[i];
+        at += unsigned(std::snprintf(candidates_text + at, sizeof(candidates_text) - at, "%s%u.%u.%u.%u", i ? "," : " candidates=",
+          v.major, v.minor, v.patch, v.build));
+      }
+      char buffers_text[448]{};
       std::snprintf(buffers_text, sizeof(buffers_text),
-        "Sunshine Streamline: buffer contract %u.%u.%u last_type=%u ui_alpha_tag=%d ui_color_alpha_tag=%s surveyed=%u ui_alpha_auto=%u",
-        number.major, number.minor, number.patch, contract.last_type,
+        "Sunshine Streamline: buffer contract %u.%u.%u%s%s last_type=%u ui_alpha_tag=%d ui_color_alpha_tag=%s surveyed=%u ui_alpha_auto=%u",
+        contract.version.major, contract.version.minor, contract.version.patch,
+        contract.candidate_count > 1 ? " (v2 family, inexact version; a tag is known only where every candidate agrees)" : "",
+        candidates_text, contract.last_type,
         contract.raw_ui_alpha == buffers::unknown ? -1 : int(contract.raw_ui_alpha),
         contract.ui_color_and_alpha ? "23" : "none", contract.surveyed ? 1u : 0u,
         buffers::ui_alpha_authenticated(contract) ? 1u : 0u);
@@ -3399,7 +3408,7 @@ namespace sunshine_streamline {
         version == testing::abi::v1_0_0 ? versioning::number{1, 0, 0, 0} :
         version == testing::abi::v2_11_1 ? versioning::number{2, 11, 1, 0} :
         version == testing::abi::v2_12_0 ? versioning::number{2, 12, 0, 0} : versioning::number{2, 7, 30, 0};
-      const bool success = install_hooks(native_version, {functions.constants, functions.tag, functions.tag_for_frame, functions.evaluate, functions.new_frame_token, functions.get_feature_function}, number);
+      const bool success = install_hooks(native_version, {functions.constants, functions.tag, functions.tag_for_frame, functions.evaluate, functions.new_frame_token, functions.get_feature_function}, buffers::for_version(number));
       if (success) observing.store(middleware_requested(), std::memory_order_release);
       sunshine_upscaler_trace::set_streamline_coverage(success);
       return success;

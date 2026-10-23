@@ -475,11 +475,12 @@ namespace sunshine_game3d {
     if (const auto contract = buffers::active(); contract.known) {
       char text[128]{};
       const auto &v = contract.version;
+      const char *inexact = contract.candidate_count > 1 ? " (inexact version)" : "";
       if (contract.raw_ui_alpha != buffers::unknown)
-        std::snprintf(text, sizeof(text), "Streamline %u.%u.%u: UI alpha tag %u (%s)", v.major, v.minor, v.patch,
+        std::snprintf(text, sizeof(text), "Streamline %u.%u.%u%s: UI alpha tag %u (%s)", v.major, v.minor, v.patch, inexact,
           contract.raw_ui_alpha, buffers::ui_alpha_authenticated(contract) ? "automatic" : "manual only");
       else
-        std::snprintf(text, sizeof(text), "Streamline %u.%u.%u: this SDK has no UI alpha tag", v.major, v.minor, v.patch);
+        std::snprintf(text, sizeof(text), "Streamline %u.%u.%u%s: this SDK has no UI alpha tag", v.major, v.minor, v.patch, inexact);
       ImGui::TextUnformatted(text);
     }
 
