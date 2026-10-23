@@ -815,6 +815,14 @@ def parse(lines) -> Session:
         if s.streamed and s.streamed[-1][1] is None:
             s.streamed[-1][1] = t
         for episode in open_episodes.values():
+            if episode.reason == 'explicit_reuse_invalidation' and episode.start == t:
+                # The export stop's own reuse invalidation, which add-ons before 10-23 logged just before its pause
+                # line (since then it follows it): no publication lacked depth, so it is the pause, not a loss.
+                s.depth_episodes.remove(episode)
+                s.readiness[episode.reason] -= 1
+                if s.readiness[episode.reason] <= 0:
+                    del s.readiness[episode.reason]
+                continue
             episode.end, episode.ending = t, ending
         open_episodes.clear()
 

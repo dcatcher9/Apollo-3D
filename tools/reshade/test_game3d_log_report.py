@@ -1076,6 +1076,23 @@ class ReadinessReport(unittest.TestCase):
         self.assertEqual((paused.depth_episodes[0].end, paused.depth_episodes[0].ending),
                          (report.seconds('10', '00', '16', '000'), 'paused'))
 
+    def test_the_export_stops_own_invalidation_is_the_pause(self):
+        # Assassin's Creed Shadows 10-23: add-ons before then logged the export stop's one reuse invalidation in the
+        # millisecond of its pause line, just before it, and the report listed it as a depth gap 'until the export
+        # paused'. Since then it follows the pause line, which already excludes it.
+        def lost(t, reason):
+            return line(t, f'[Sunshine 3D] Sunshine depth readiness: lost reason={reason} runtime=0x1 '
+                           'unavailable_ms=0; provider=unknown prior_provider=Streamline selection=not_attempted')
+        inactive = line('10:00:16', '[Sunshine 3D] Sunshine SBS: export inactive (not_foreground, routine); waiting')
+        session = report.parse(BASE + [lost('10:00:16', 'explicit_reuse_invalidation'), inactive])
+        self.assertEqual(session.depth_episodes, [])
+        self.assertNotIn('explicit_reuse_invalidation', session.readiness)
+        # An earlier invalidation, or another loss in the pause's millisecond, still ends at the pause.
+        for loss in (lost('10:00:15', 'explicit_reuse_invalidation'), lost('10:00:16', 'no_retained_depth')):
+            session = report.parse(BASE + [loss, inactive])
+            self.assertEqual([(e.end, e.ending) for e in session.depth_episodes],
+                             [(report.seconds('10', '00', '16', '000'), 'paused')])
+
     def test_depth_episodes_pair_within_each_runtime(self):
         # Each runtime traces its own loss and recovery, so another runtime's recovery cannot close it, and a
         # session crossing midnight keeps its order.

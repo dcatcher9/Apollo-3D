@@ -1661,9 +1661,11 @@ namespace {
       const auto found = runtimes_.find(runtime);
       const bool foreground = published_runtime_ == runtime && owns_foreground_locked(runtime, reinterpret_cast<HWND>(published_metadata_.window));
       if (published_runtime_ == runtime && (!foreground || found == runtimes_.end() || !found->second.rendered_since_present)) {
-        sunshine_game3d::depth_input::invalidate_reuse(runtime);
-        deactivate(runtime, !foreground ? "not_foreground" :
-          found == runtimes_.end() ? "runtime_gone" : "present_without_render");
+        // The pause line first, then this stop's one reuse invalidation (see
+        // the not_foreground stop in frame()).
+        if (deactivate(runtime, !foreground ? "not_foreground" :
+            found == runtimes_.end() ? "runtime_gone" : "present_without_render"))
+          sunshine_game3d::depth_input::invalidate_reuse(runtime);
       }
       if (generation_ && generation_->owner_runtime == runtime && generation_->pending_slot != wire::slot_count) {
         if (generation_->pending_overlay) {
@@ -2199,8 +2201,13 @@ namespace {
       DWORD window_pid = 0;
       GetWindowThreadProcessId(window, &window_pid);
       if (!window || window_pid != identity_.producer_pid || !owns_foreground_locked(runtime, window, true)) {
-        sunshine_game3d::depth_input::invalidate_reuse(runtime);
-        deactivate(runtime, "not_foreground");
+        // A focus loss stops the export and ends the provider's bounded depth
+        // reuse once, after the pause line. While the export stays inactive
+        // the provider keeps its own bounded reuse (the renderer still runs):
+        // invalidating on every background Present cleared each real frame's
+        // copy before its generated frames could hold it, a readiness loss on
+        // every generated Present (Assassin's Creed Shadows with FG on, 10-23).
+        if (deactivate(runtime, "not_foreground")) sunshine_game3d::depth_input::invalidate_reuse(runtime);
         return;
       }
       const auto color = colors_.find(runtime->get_native());
@@ -2617,12 +2624,14 @@ namespace {
     }
 
     // One-shot invalidation also covers identity metadata published before a host connects.
-    // The reason is logged once, when the export actually stops.
-    void deactivate(api::effect_runtime *runtime, const char *reason = "stopped") {
+    // The reason is logged once, when the export actually stops; only then
+    // does this return true.
+    bool deactivate(api::effect_runtime *runtime, const char *reason = "stopped") {
       if (!runtime) {
-        return;
+        return false;
       }
-      if (published_runtime_ == runtime) {
+      const bool stopped = published_runtime_ == runtime;
+      if (stopped) {
         publish(identity_);
         char message[160];
         std::snprintf(message, sizeof(message), "Sunshine SBS: export inactive (%s, %s); waiting for a valid focused technique", reason,
@@ -2634,6 +2643,7 @@ namespace {
         generation_->runtime = nullptr;
         generation_->inactive_since = std::chrono::steady_clock::now();
       }
+      return stopped;
     }
 
     void log_output(api::effect_runtime *runtime, runtime_t &proof, std::uint64_t now) {

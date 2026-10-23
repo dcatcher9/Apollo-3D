@@ -707,7 +707,9 @@ player stayed there. A longer or unexplained run, or flat output while placement
 ready, stays a warning that names the controller's state. The add-on's diagnostic log gate can
 hold a controller line, so run ends are approximate and a cause may lead its run by that gate.
 From `Sunshine SBS: export inactive` until the next `Sunshine SBS: generation` nothing is
-streamed, and depth losses there are not counted.
+streamed, and depth losses there are not counted. The stop's own `explicit_reuse_invalidation`
+follows its pause line; add-ons before 10-23 logged it just before, in the same millisecond, and
+the report counts that one with the pause too.
 
 A failing check is a bug report: fix the rule at its root (see
 [the generalization rules](../../docs/reshade-sbs.md#rules-for-new-game-behaviour)), then add a
@@ -832,14 +834,19 @@ reshade_game3d_native_provider_runtime_test.exe <ReShade64.dll> <frozenShaders> 
 ```
 
 It exercises real GPU depth production, capture, sampling and matrix preparation, including
-padded/nonzero-offset rectangles, failed evaluation and recovery. The optional metadata-only
+padded/nonzero-offset rectangles, failed evaluation (the newest completed copy held within its
+age bound, then mono with the native scale held) and recovery. The optional metadata-only
 interposer enables the SL FG 2x case: retained real depth, generated presentations, a tagged
 extent changing every second real frame (dynamic resolution: fresh depth of each extent, held on
 the generated frame, the matrix scale active without recalibration, and a
 `Sunshine depth render size` line), FG-off
 rejection and fresh SL recovery. It also checks repeated holds against the original capture's
 expiry, camera reset, and FG off/on without a fresh capture; none may revive invalidated depth.
-Fresh copies must recover each interval. It injects no captured pixels, readiness or GPU completion.
+Fresh copies must recover each interval. With FG options on and every FG depth tag refused, the
+same viewport's SR depth takes over once the FG scope is silent; each generated presentation, at
+2x and 3x, holds its real frame's SR copy, also after the fixture's window leaves the foreground
+(the export stop invalidates reuse once) and back, with no readiness loss logged.
+It injects no captured pixels, readiness or GPU completion.
 To exercise an earlier 2.x export surface, build `reshade_legacy_v2_interposer` and pass
 `legacy_v2_interposer.dll` as the final argument in the same command, using a fresh output directory.
 That fixture reports version 2.6.10.0 and omits `slSetTagForFrame`; the test submits global tags

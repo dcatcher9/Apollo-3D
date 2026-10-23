@@ -188,15 +188,47 @@ namespace {
         require(active(s) && same_scale(s.scale, first_ready.scale), "FX reload reset native provider capture or scale");
       } while (observed.reloads == before_reload && GetTickCount64() < reload_until);
       require(observed.reloads > before_reload, "Native provider empty-FX reload did not complete");
-      log_status("SL-after-FX-reload", inspect());
+      const auto fresh = inspect();
+      log_status("SL-after-FX-reload", fresh);
+      require(active(fresh) && !fresh.source.reused_depth, "Native provider showed no fresh depth before the failed evaluations");
+      const auto fresh_tick = GetTickCount64();
 
+      // Failed evaluations hold the newest completed copy within its source
+      // age, like any failed or missing successor, then stay current-color
+      // mono: never another copy, never a hold after mono, never Generic, and
+      // the native scale is held throughout. (The fixture's window used to be
+      // in the background here, where every Present invalidated reuse.)
       valid_evaluation = false;
-      for (unsigned frame = 0; frame < 4; ++frame) {
+      unsigned mono{}, holds{};
+      for (const auto until = GetTickCount64() + 15000; mono < 4 && GetTickCount64() < until;) {
+        // The hold is decided after this tick, within the capture's age,
+        // and the capture is older than fresh_tick.
+        const auto presented = GetTickCount64();
         step(); no_effects(); const auto s = inspect();
-        require(!s.ready() && s.source.selected && !s.source.ready && !s.source.reused_depth &&
-          s.scale_state == unsigned(sunshine_game3d::automatic_scale_state::held) && same_scale(s.scale, first_ready.scale),
-          "Failed provider evaluation reused stale depth, fell back to Generic, or discarded native scale");
+        require(s.source.selected && same_scale(s.scale, first_ready.scale),
+          "Failed provider evaluation fell back to Generic or discarded native scale");
+        if (s.source.ready) {
+          const bool held = !mono && s.source.reused_depth && s.source.current.capture == fresh.source.current.capture &&
+            s.source.current.sequence == fresh.source.current.sequence &&
+            presented - fresh_tick < sunshine_scene_depth::maximum_source_age_ms;
+          if (!held) {
+            log_status("SL-failed-evaluation-unexpected-depth", s);
+            std::printf("MEASURE native-provider SL-failed-evaluation holds=%u mono=%u fresh_capture=%llu fresh_sequence=%llu age_ms=%llu\n",
+              holds, mono, static_cast<unsigned long long>(fresh.source.current.capture),
+              static_cast<unsigned long long>(fresh.source.current.sequence),
+              static_cast<unsigned long long>(presented - fresh_tick));
+          }
+          require(held, "Failed provider evaluation showed depth other than its newest completed copy, or after its age bound");
+          ++holds;
+          continue;
+        }
+        ++mono;
+        require(!s.ready() && !s.source.reused_depth &&
+          s.scale_state == unsigned(sunshine_game3d::automatic_scale_state::held),
+          "Failed provider evaluation reused stale depth after mono or did not hold the native scale");
       }
+      require(mono >= 4, "Failed provider evaluations kept showing depth past the held copy's age bound");
+      std::printf("MEASURE native-provider SL-failed-evaluation holds=%u mono=%u\n", holds, mono);
       log_status("SL-failed-evaluation-held", inspect());
       valid_evaluation = true;
       const auto recovered = settle("SL-recovered");
@@ -1481,8 +1513,8 @@ namespace {
         void (*set)(HWND);
         ~foreground_scope() { set(nullptr); }
       } foreground{set_foreground};
-      // Approximate FG history intentionally ends on focus loss. This selects
-      // our real hidden game HWND in the test observer without moving UI focus.
+      // The export stop at a focus loss ends FG reuse once. This selects our
+      // real hidden game HWND in the test observer without moving UI focus.
       set_foreground(window);
       struct options { base_structure base; std::uint32_t mode{}, generated_frames{}; };
       static_assert(sizeof(options) == 40);
@@ -1898,6 +1930,57 @@ namespace {
       require(reshade_log_contains({"Sunshine Streamline frame generation depth scope: silent viewport=0"}) &&
           reshade_log_contains({"Sunshine Streamline FG depth refused: reason=boundary_without_commands", "fg_scope=silent", "withdrawn=0"}),
         "The silent FG scope or its refused boundaries were not logged");
+      // Its generated Presents (no SL call, no depth draw) hold the real
+      // frame's SR copy exactly as FG depth is held, at 2x and 3x, also while
+      // the game window is in the background: the export stop invalidates
+      // reuse once, never on every Present. Assassin's Creed Shadows (10-23)
+      // logged a readiness loss on every generated Present for the 42 s its
+      // window was in the background (no_retained_depth).
+      const auto readiness_losses = [&] {
+        return reshade_log_count({"Sunshine depth readiness: lost"}) +
+          reshade_log_count({"Sunshine depth readiness:", "explicit_reuse_invalidation"});
+      };
+      const auto silent_cadence = [&](const char *label, unsigned generated_frames) {
+        for (unsigned round = 0; round < 8; ++round) {
+          render_tracked_depth = [&] { fallback_frame(false, true); };
+          step(); no_effects(); const auto real = inspect();
+          require(active(real) && !real.source.reused_depth && !real.source.frame_generation_input,
+            "A real Present of a silent FG scope lost its fresh SR depth");
+          render_tracked_depth = {};
+          for (unsigned generated = 0; generated < generated_frames; ++generated) {
+            step(); no_effects(); const auto value = inspect();
+            if (!round && !generated) log_status(label, value);
+            require(active(value) && value.source.reused_depth && !value.source.frame_generation_input &&
+              value.source.current.capture == real.source.current.capture &&
+              value.source.current.sequence == real.source.current.sequence && same_scale(value.scale, real.scale),
+              "A generated Present of a silent FG scope did not hold its real frame's SR depth");
+          }
+        }
+      };
+      const auto losses_before_cadence = readiness_losses();
+      silent_cadence("SLFG-silent-scope-SR-generated-2x", 1);
+      silent_cadence("SLFG-silent-scope-SR-generated-3x", 2);
+      // The window leaves the foreground: one real Present stops the export
+      // (its pause line, then one reuse invalidation of a fresh copy, which
+      // stays ready); the next real frame arms the hold again.
+      const auto pauses = reshade_log_count({"Sunshine SBS: export inactive (not_foreground"});
+      set_foreground(nullptr);
+      render_tracked_depth = [&] { fallback_frame(false, true); };
+      step(); no_effects();
+      require(active(inspect()), "The export stop withdrew a fresh SR copy");
+      for (const auto until = GetTickCount64() + 7000;
+          reshade_log_count({"Sunshine SBS: export inactive (not_foreground"}) == pauses && GetTickCount64() < until;) {
+        step(); no_effects();
+        require(active(inspect()), "A real Present in the background lost its fresh SR depth");
+      }
+      require(reshade_log_count({"Sunshine SBS: export inactive (not_foreground"}) == pauses + 1,
+        "The fixture's focus loss did not stop the export exactly once");
+      silent_cadence("SLFG-silent-scope-SR-background-2x", 1);
+      silent_cadence("SLFG-silent-scope-SR-background-3x", 2);
+      set_foreground(window);
+      silent_cadence("SLFG-silent-scope-SR-foreground-again-2x", 1);
+      require(readiness_losses() == losses_before_cadence,
+        "Silent-scope generated Presents logged a readiness loss or a reuse invalidation");
       render_tracked_depth = [&] { fallback_frame(true, true); };
       settle_route("SLFG-accepted-copy-owns-again", true);
       for (unsigned frame = 0; frame < 30; ++frame) {

@@ -3836,9 +3836,17 @@ less than 250 ms from the original depth capture timestamp, defined by
 queue and display allocation, unchanged color dimensions and any known depth storage, view and
 resource kind; under enabled FG the retained copy must belong to that FG scope. Failed consumer
 copies, loss of the source association (for example FG Off before an ordinary source exists),
-focus/technique/lifecycle changes and expiry invalidate reusable history until a fresh copy
-succeeds. A nomination gap cannot prove an as-yet unknown depth storage; its same-source reuse
-remains subject to the short bound and color dimensions. Placement calibration is keyed to the
+a disabled game technique, lifecycle resets and expiry invalidate reusable history until a fresh
+copy succeeds. An export stop (a focus loss, or a published Present the add-on did not render)
+invalidates it once, after its `export inactive` line. While the export stays inactive the
+provider keeps its bounded reuse, as the renderer keeps running: invalidating on every background
+Present cleared each real frame's copy before its generated presentations could hold it.
+Assassin's Creed Shadows with FG on (10-23) logged `lost reason=no_retained_depth
+selection=completed_already_consumed` for every generated Present during the 42 s its window was
+in the background; nothing was streamed then, and with the window in the foreground its generated
+presentations held their real frames' SR depth throughout. A nomination gap cannot prove an
+as-yet unknown depth storage; its same-source reuse remains subject to the short bound and color
+dimensions. Placement calibration is keyed to the
 logical source, never to a pixel size (below), so a render-size change neither resets nor moves it;
 its statistics are per-pixel means over each copy's own active rectangle. The provider counts
 render-size changes of one source on a `Sunshine depth render size` line (at most every 5 s while
@@ -3980,8 +3988,10 @@ the cache's final reason. Since 10-22 the line ends with the game's latest video
 (`vram_local_mib`, see the timing line in
 [Diagnostics switch and per-Present cost](#diagnostics-switch-and-per-present-cost)). A zero timestamp is unavailable (reported age `UINT64_MAX`), not fresh
 data. Explicit lifecycle/reuse invalidation clears
-are also identified. This is read-only evidence: it adds no GPU pass, readback, wait, or extension
-of depth freshness, and does not change source selection or stereo placement.
+are also identified (`explicit_reuse_invalidation`); an export stop's one invalidation follows its
+`export inactive` line, so the readiness report counts it with the pause, not as a depth gap.
+This is read-only evidence: it adds no GPU pass, readback, wait, or extension of depth freshness,
+and does not change source selection or stereo placement.
 
 Each admitted readiness episode also logs `Sunshine depth observation evidence`. Its
 `sampled_only` entry is a contemporaneous observation-revision sample; depth decisions never
