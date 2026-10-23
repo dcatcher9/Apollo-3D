@@ -129,7 +129,9 @@ namespace game3d_contract {
     five_rotating
   };
 
-  // sl_dlss_g.h:34-40 DLSSGMode; 4 is not declared.
+  // sl_dlss_g.h:34-40 DLSSGMode. Each release's header declares its own values
+  // (survey tables: eOff and eOn through 2.2.0, eAuto from 2.2.1, eDynamic from
+  // 2.11.1); 4 is never declared.
   enum class fg_mode : std::uint32_t {
     off,
     on,
@@ -439,10 +441,12 @@ namespace game3d_contract {
     }
   }
 
-  // Legacy states a COMPUTE list may record: no DEPTH_*, PIXEL_SHADER_RESOURCE
-  // or RENDER_TARGET (the legacy counterparts of the COMPUTE layouts above).
+  // Legacy states a COMPUTE list may record: no DEPTH_*, PIXEL_SHADER_RESOURCE,
+  // RENDER_TARGET or RESOLVE_* (the legacy counterparts of the COMPUTE layouts
+  // above, which hold no RESOLVE layout; MS Learn, Multi-engine
+  // synchronization: ResolveSubresource is not a compute-list method).
   constexpr bool compute_list_state(std::uint32_t state) {
-    return !(state & (D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_DEPTH_WRITE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_RENDER_TARGET));
+    return !(state & (D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_DEPTH_WRITE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_RENDER_TARGET | D3D12_RESOURCE_STATE_RESOLVE_SOURCE | D3D12_RESOURCE_STATE_RESOLVE_DEST));
   }
 
   // Who states the resource's state, and for which point.
@@ -455,7 +459,7 @@ namespace game3d_contract {
 
   enum class claim_scope {
     at_use,  // The copy is at the point the claim describes (SLT:357).
-    before_use  // The claim describes a later use (a ValidUntilPresent tag copied at its call).
+    before_use  // The claim describes a later use (a lifecycle 1 or 2 tag copied at its call).
   };
 
   // The pipeline input the copy feeds. A UI input is a colour buffer, so it
@@ -524,7 +528,8 @@ namespace game3d_contract {
     unknown = 60001
   };
 
-  // DLSS.Use.HW.Depth (nvsdk_ngx_defs.h:803-812).
+  // DLSS.Use.HW.Depth, as RR's create helpers write it
+  // (nvsdk_ngx_helpers_dlssd_d3d.h:242, 548).
   enum class ngx_hw_depth {
     absent,
     linear,  // 0
@@ -539,7 +544,8 @@ namespace game3d_contract {
     null
   };
 
-  // DLSS.Render.Subrect.Dimensions and DLSS.Input.Depth.Subrect.Base.
+  // DLSS.Render.Subrect.Dimensions and DLSS.Input.Depth.Subrect.Base
+  // (nvsdk_ngx_defs.h:803-812).
   enum class ngx_subrect {
     missing,
     zero,
@@ -571,6 +577,16 @@ namespace game3d_contract {
     resource_state depth {D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL};
   };
 
+  // What a clear boundary clears. MS Learn D3D12_RESOURCE_STATES: DEPTH_WRITE
+  // is the state for ClearDepthStencilView "when the flags (see
+  // D3D12_CLEAR_FLAGS) indicate a given subresource should be cleared
+  // (otherwise the subresource state doesn't matter)".
+  enum class clear_target {
+    depth_of_subresource_zero,  // D3D12_CLEAR_FLAG_DEPTH on a DSV of mip 0, or a render pass whose depth access is CLEAR.
+    stencil_only,  // D3D12_CLEAR_FLAG_STENCIL alone, or a render pass that clears only stencil.
+    other_subresource  // A DSV of another mip.
+  };
+
   // Generic path: the depth-stencil boundary where a copy is attempted.
   enum class generic_boundary {
     clear_before_draws,
@@ -587,6 +603,7 @@ namespace game3d_contract {
     bool depth_written {};  // A draw with depth writes enabled since the last transition, on this recording.
     resource_state depth {D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL};
     std::uint32_t transition_before {};  // transition_away: the barrier's StateBefore.
+    clear_target cleared {clear_target::depth_of_subresource_zero};  // The clear boundaries only.
   };
 
   // UI inputs: tags 2, 23, 68 or 69 (by release) and 53.
@@ -658,16 +675,21 @@ namespace game3d_contract {
     if (value.entry == tag_entry::set_tag_for_frame && value.version < first_frame_tag) {
       return false;
     }
-    // 1.x has no lifecycle field, no frame tags and no evaluate inputs.
-    if (value.version.major == 1 && (value.entry != tag_entry::set_tag || value.life != lifecycle::valid_until_present)) {
+    // 1.x slSetTag takes no command buffer and no lifecycle (v1.1.1 sl.h:347);
+    // its state need only be correct when the tag is used (sl.h:176), so a
+    // 1.x tag is valid until its evaluate. 1.x has no frame tags, evaluate
+    // inputs or DLSS-G, so no generated Presents either.
+    if (value.version.major == 1 && (value.entry != tag_entry::set_tag || value.life != lifecycle::valid_until_evaluate || value.commands != tag_commands::none || value.fg != fg_mode::off || value.generated_presents)) {
       return false;
     }
-    // A local tag is an evaluate input: it has no tag call of its own.
-    if ((value.entry == tag_entry::local_array || value.entry == tag_entry::local_chain_not_last) && value.at == copy_point::tag_call) {
+    // A local tag is an evaluate input: it has no tag call of its own, and
+    // the evaluate's command buffer is not optional (SLA:253).
+    const bool local = value.entry == tag_entry::local_array || value.entry == tag_entry::local_chain_not_last;
+    if (local && (value.at == copy_point::tag_call || value.commands == tag_commands::none)) {
       return false;
     }
     const bool untags = value.resource == resource_form::null_resource || value.resource == resource_form::null_native;
-    if (value.commands == tag_commands::none && !untags && value.life != lifecycle::valid_until_present) {
+    if (value.version.major != 1 && value.commands == tag_commands::none && !untags && value.life != lifecycle::valid_until_present) {
       return false;
     }
     if (value.declared_state != UINT32_MAX && !state_allowed(value.declared_state, value.depth.flags)) {
@@ -691,14 +713,24 @@ namespace game3d_contract {
     if (value.boundary == generic_boundary::transition_away && !state_allowed(value.transition_before, value.depth.flags)) {
       return false;
     }
+    const bool clears = value.boundary == generic_boundary::clear_before_draws || value.boundary == generic_boundary::clear_after_draws ||
+                        value.boundary == generic_boundary::render_pass_clear;
+    if (value.cleared != clear_target::depth_of_subresource_zero && !clears) {
+      return false;
+    }
+    if (value.cleared == clear_target::other_subresource && value.depth.shape != resource_shape::texture2d_mips) {
+      return false;
+    }
+    // MS Learn, Split Barriers: while a split barrier is pending "the
+    // (sub)resource cannot be read or written by the GPU", so no depth clear
+    // and no other transition may meet it.
+    const bool pending = value.depth.seen == evidence::split_open || value.depth.seen == evidence::enhanced_split_open;
+    if (pending && ((clears && value.cleared == clear_target::depth_of_subresource_zero) || value.boundary == generic_boundary::transition_away)) {
+      return false;
+    }
     return legal_evidence(value.depth, list_type::direct);
   }
 
-  constexpr bool legal(const ui_case &value) {
-    // Local inputs exist only from 2.0 (SLA:258-262); 1.x has no lifecycle field.
-    if (value.version.major < 2 && (value.how == ui_capture::local || value.life != lifecycle::only_valid_now)) {
-      return false;
-    }
-    return value.how != ui_capture::no_command_list || value.life == lifecycle::valid_until_present;
-  }
+  // legal(const ui_case &) reads each release's buffer-type declarations, so
+  // it follows them in test_game3d_api_contract_oracle.h.
 }  // namespace game3d_contract

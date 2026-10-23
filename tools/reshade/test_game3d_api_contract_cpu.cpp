@@ -38,7 +38,9 @@
 // counts the Presents a case puts between tag and copy, and admits DLSS-G's
 // inputs as observe_frame_generation_inputs nominates them (a state observed
 // on the evaluation's own list); the device and runtime layers replace these
-// repeats. L1 judges the kind, deferral and copy basis of each result;
+// repeats. A known gap these repeats decide (S7) closes only when its fix
+// changes the repeat too. L1 judges the kind, deferral and copy basis of each
+// result, and that a recorded gap still fails the way its row records;
 // refusal classes wait for the runtime layer's structured refusal query.
 //
 // Command line (test_contract_matrix_generator.h): --list, --case
@@ -796,6 +798,8 @@ namespace {
           return nullptr;
         case gaps::verdict::gap_closed:
           return closed++ < 8 ? "known gap now passes; remove or narrow its row" : nullptr;
+        case gaps::verdict::misattributed:
+          return unmet++ < 8 ? "known gap fails another way than its row records, or under another rule" : nullptr;
         default:
           return unmet++ < 8 ? "contract violated" : nullptr;
       }
@@ -1082,6 +1086,10 @@ namespace {
         return false;
       }
       if (assigned({commands, life, resource}) && value[commands] && value[life] && !untags()) {
+        return false;
+      }
+      // An evaluate's command buffer is not optional (SLA:253).
+      if (assigned({entry, commands}) && local(value) && value[commands]) {
         return false;
       }
       // A local input has no tag call to untag or to return a result, and a
@@ -1533,8 +1541,10 @@ namespace {
       const auto &frame = run.frame;
       const bool at_call = run.snapshot.tag_boundary;
       const bool forced = at_call && frame.valid_until == lifetime::at_call;
-      // record_impl: a command list, a lifetime it keeps, and
+      // Repeats of record_impl (streamline_depth_capture.cpp), which needs a
+      // device: a command list, a lifetime it keeps, and
       // source_lifetime_current: inside the tag call, or no Present since.
+      // A known gap these decide (S7) closes only with a change here.
       if (!run.snapshot.command_buffer) {
         return out;
       }
@@ -1622,7 +1632,7 @@ namespace {
       }
       // Illegal input must end in a refusal; its class is diagnostic.
       out.satisfied = out.legal ? hook_satisfies(out.expected, out.actual) && out.twin_same && out.continuous : out.actual.kind != matrix::outcome_kind::capture;
-      out.verdict = gaps::judge_each(gaps::sl_rows, out.value, out.satisfied, out.matched);
+      out.verdict = gaps::judge_each(gaps::sl_rows, out.value, out.satisfied, {out.actual, out.twin_same && out.continuous}, out.matched);
       return out;
     }
 
@@ -1862,6 +1872,8 @@ namespace {
       return judged(copy_state::resolve(copy_state::select(run.frame.proof, policy::source_contract), run.frame.native_state, observation_of(value.depth), value.depth.flags));
     }
 
+    constexpr unsigned row_count = std::size(gaps::ngx_rows);
+
     struct judgement {
       matrix::ngx_case value;
       matrix::outcome expected;
@@ -1869,9 +1881,9 @@ namespace {
       observation observed;
       bool satisfied {};
       gaps::verdict verdict {};
+      bool matched[row_count] {};
     };
 
-    // NGX has no known-gap row: every cell must meet the oracle.
     judgement judge(const generator::row &assignment) {
       judgement out;
       out.value = to_case(assignment);
@@ -1885,39 +1897,28 @@ namespace {
       // NGX records and offers nothing: the frame has one source (N9b).
       out.satisfied = out.value.lifetime == matrix::ngx_lifetime::nested_in_streamline ? !out.observed.recorded && !out.observed.offered :
                                                                                          hook_satisfies(out.expected, out.actual);
-      out.verdict = out.satisfied ? gaps::verdict::meets : gaps::verdict::violates;
+      out.verdict = gaps::judge_each(gaps::ngx_rows, out.value, out.satisfied, {out.actual}, out.matched);
       return out;
     }
 
     void describe(const char *what, const generator::family &owner, const generator::row &assignment, const judgement &value) {
+      std::string rows;
+      const char *ids[row_count] {};
+      for (unsigned i = 0; i != row_count; ++i) {
+        ids[i] = gaps::ngx_rows[i].id;
+      }
       std::fprintf(stderr, "%s: case ngx %s %s\n", what, generator::id_text(generator::case_id(owner, assignment)).c_str(), generator::describe(owner, assignment).c_str());
       describe_expected(value.expected);
       const auto &depth = value.observed.inputs.depth;
-      std::fprintf(stderr, "  adapter: recorded=%u finished=%u succeeded=%u proof=%u state=0x%x valid_until=%u; DLSS-G offered=%u depth=%u area_valid=%u completed=%u/%u; admission %s basis=0x%x; %s\n", value.observed.recorded, value.observed.finished, value.observed.succeeded, unsigned(value.observed.frame.proof), value.observed.frame.native_state, unsigned(value.observed.frame.valid_until), value.observed.offered, unsigned(depth.state), depth.area_valid, value.observed.completed, value.observed.completed_successfully, name(value.actual.kind), value.actual.basis.state, name(value.verdict));
+      std::fprintf(stderr, "  adapter: recorded=%u finished=%u succeeded=%u proof=%u state=0x%x valid_until=%u; DLSS-G offered=%u depth=%u area_valid=%u completed=%u/%u; admission %s basis=0x%x; rows %s; %s\n", value.observed.recorded, value.observed.finished, value.observed.succeeded, unsigned(value.observed.frame.proof), value.observed.frame.native_state, unsigned(value.observed.frame.valid_until), value.observed.offered, unsigned(depth.state), depth.area_valid, value.observed.completed, value.observed.completed_successfully, name(value.actual.kind), value.actual.basis.state, row_names(value.matched, ids, row_count, rows), name(value.verdict));
     }
   }  // namespace ngx_cells
-
-  // A family with no known-gap row: every cell must meet the oracle.
-  struct strict_tally {
-    unsigned cells {}, frame_generation {}, unmet {};
-
-    const char *add(bool satisfied) {
-      ++cells;
-      return !satisfied && unmet++ < 8 ? "contract violated" : nullptr;
-    }
-
-    void finish(const char *family) const {
-      if (unmet) {
-        std::fprintf(stderr, "%s: %u cells violate the contract (the family has no known-gap row)\n", family, unmet);
-        throw std::runtime_error("an adapter diverged from the API contract matrix");
-      }
-    }
-  };
 
   struct hook_counts {
     sl_cells::census census;
     each_tally<sl_cells::row_count> streamline;
-    strict_tally ngx;
+    each_tally<ngx_cells::row_count> ngx;
+    unsigned ngx_frame_generation {};
   };
 
   // Every selected case of both hook families.
@@ -1945,14 +1946,14 @@ namespace {
         continue;
       }
       const auto value = ngx_cells::judge(evaluations[i]);
-      counts.ngx.frame_generation += value.value.feature == matrix::ngx_feature::frame_generation;
-      if (const auto *what = counts.ngx.add(value.satisfied)) {
+      counts.ngx_frame_generation += value.value.feature == matrix::ngx_feature::frame_generation;
+      if (const auto *what = counts.ngx.add(value.verdict, value.matched, value.satisfied)) {
         ngx_cells::describe(what, ngx, evaluations[i], value);
       }
     }
     sunshine_ngx::shutdown();
     counts.streamline.finish(gaps::sl_rows, "Streamline hooks", !options.partial());
-    counts.ngx.finish("NGX hooks");
+    counts.ngx.finish(gaps::ngx_rows, "NGX hooks", !options.partial());
     return counts;
   }
 
@@ -2059,7 +2060,9 @@ int main(int argc, char **argv) try {
   const auto &census = hooks.census;
   std::printf("PASS API contract matrix L1%s: %u Streamline hook cells: the %u-row copy-point product (%u constructible, %u legal), %u seed rows, %u open-question rows, %u one-factor rows and %u pairwise rows covering all %zu legal value pairs; ", options.partial() ? " shard" : "", hooks.streamline.cells, census.product, census.constructible, census.legal_product, census.seeded, census.questions, census.one_factor, census.pairwise, census.pairs);
   hooks.streamline.print(gaps::sl_rows);
-  std::printf(". %u NGX evaluation cells (%u of DLSS-G's own evaluation) meet the oracle\n", hooks.ngx.cells, hooks.ngx.frame_generation);
+  std::printf(". %u NGX evaluation cells (%u of DLSS-G's own evaluation): ", hooks.ngx.cells, hooks.ngx_frame_generation);
+  hooks.ngx.print(gaps::ngx_rows);
+  std::printf("\n");
   return 0;
 } catch (const std::exception &error) {
   std::fprintf(stderr, "FAIL API contract matrix: %s\n", error.what());

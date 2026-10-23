@@ -1333,8 +1333,9 @@ API permits and filters illegal combinations;
 outcome from cited contract text and the owner rulings R1 to R6; and
 [`test_game3d_api_contract_known_gaps.h`](test_game3d_api_contract_known_gaps.h) records where the
 add-on falls short. A recorded gap that starts passing fails its test, so the fix that closes a gap
-also removes its row. Never change the oracle to match the add-on: a disagreement is either a gap
-row or a fix.
+also removes its row; in the hook families a recorded gap must also keep failing under its row's rule
+and the way the row records. Never change the oracle to match the add-on: a disagreement is either a
+gap row or a fix, and an open owner question is EITHER or a pending row.
 
 `ctest -L contract` runs the matrix. `reshade_contract_matrix_cpu` is built with the Streamline
 probe tests' sources and defines and holds two layers. The pure layer identifies every surveyed
@@ -1353,11 +1354,13 @@ sizes and must keep one logical source. NGX cases go through the evaluation adap
 combination of its dimensions, DLSS-G's own `DLSSG.*` inputs included. The admission checks the
 layer cannot run without a device (the copy's command list and present generation, and DLSS-G's
 observed-state nomination) are repeated from the capture owner; the device and runtime layers
-replace them. [`test_contract_matrix_generator.h`](test_contract_matrix_generator.h) builds the
-cases: a case id hashes its non-default assignment, so adding a value renames no case. The
-executable takes `--list`, `--case <id>` or `--case <sl|ngx>:<name=value,...>` (one case, described;
-an illegal Streamline assignment must be refused, as in the full run), and `--shard <i>/<N>`.
-Shard 0 also runs the pure layer; only an unsharded run reports a hook family's stale known-gap row.
+replace them. A known gap that such a repeat decides (S7, the present generation) closes only when
+its fix changes the repeat in the same commit.
+[`test_contract_matrix_generator.h`](test_contract_matrix_generator.h) builds the cases: a case id
+hashes its non-default assignment, so adding a value renames no case. The executable takes
+`--list`, `--case <id>` or `--case <sl|ngx>:<name=value,...>` (one case, described; an illegal
+Streamline assignment must be refused, as in the full run), and `--shard <i>/<N>`. Shard 0 also runs
+the pure layer; only an unsharded run reports a hook family's stale known-gap row.
 `reshade_contract_oracle_independence` refuses any add-on include or name in the oracle's headers and
 the generator, and compiles each on its own with the configured compiler, whatever the caller's
 `PATH`.

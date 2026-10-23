@@ -4382,7 +4382,10 @@ A render subrect reported as 0x0 means the whole creation-size input, exactly li
 NGX supplies no per-call resource state, but its SDK fixes one: NVIDIA's DLSS Programming Guide,
 section 3.4 "Resource States", requires every D3D12 input to be
 `D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE` at the evaluation call and states that DLSS
-restores it afterwards. The adapter therefore nominates with `state_proof::sdk_contract`. A known,
+restores it afterwards. The adapter therefore nominates every accepted feature with
+`state_proof::sdk_contract`. That guide covers Super Resolution only, so the
+[API contract matrix](../tools/reshade/README.md#api-contract-matrix) lists Ray Reconstruction and
+other features as known gaps until a cited guide states their input state. A known,
 unblocked state observed on the same recording takes precedence. An observed COMMON/zero,
 blocked, split or unknown state still rejects capture. Only a recording with no entry for the
 resource uses the contract state, and a resource created with `DENY_SHADER_RESOURCE` is rejected.

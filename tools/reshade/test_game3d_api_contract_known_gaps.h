@@ -4,13 +4,21 @@
 // the oracle rule it misses, a predicate over the matrix dimensions that
 // selects exactly the cells concerned, and an owner note.
 //
-// expected_failure: every matching cell must fail the oracle. A matching cell
-// that passes fails the run, so the fix that closes a gap also removes its
-// row (and updates any test that pinned the old behaviour). A row that
+// expected_failure: every matching cell must fail the oracle, under the rule
+// the row names and (in a hook family) the way the row records. A matching
+// cell that passes fails the run, so the fix that closes a gap also removes
+// its row (and updates any test that pinned the old behaviour). A row that
 // matches no failing cell fails the run as stale (in a family judged with
-// judge_each, no failing cell that it alone matches).
+// judge_each, no failing cell that it alone matches; only a complete run
+// shows that).
 // pending: the cell's verdict is not enforced (EITHER) until owner work
-// lands or an owner ruling decides it; the global invariants still apply.
+// lands or an owner ruling decides it; the global invariants still apply. Any
+// family may hold pending rows.
+//
+// Where a hook layer repeats a capture-owner check it cannot run without a
+// device (test_game3d_api_contract_cpu.cpp, admission), the row's verdict
+// comes from that repeat: the fix must change the repeat in the same commit,
+// or the gap cannot close there.
 //
 // Rows describe the add-on's current behaviour in the oracle's dimension
 // vocabulary; they never feed back into expect(). Like the oracle, this
@@ -27,6 +35,14 @@ namespace game3d_contract::known_gaps {
     pending
   };
 
+  // What the add-on did in a hook cell: its result at the copy point, and
+  // whether it agreed with that layer's cross-run checks (the newest-known
+  // twin, S13; one logical source across render sizes, R3).
+  struct behaviour {
+    result actual;
+    bool consistent {true};
+  };
+
   template<class Case>
   struct row {
     const char *id;
@@ -34,7 +50,30 @@ namespace game3d_contract::known_gaps {
     kind status;
     bool (*matches)(const Case &);
     const char *owner_note;
+    // Hook families: what the add-on does in the row's cells. A failing cell
+    // that no matching row records fails the run (misattributed).
+    bool (*records)(const behaviour &) = nullptr;
   };
+
+  // The ways a hook row records the add-on's failure.
+  namespace behaviours {
+    constexpr bool no_copy(const behaviour &value) {
+      return value.actual.kind != outcome_kind::capture;
+    }
+
+    constexpr bool copy(const behaviour &value) {
+      return value.actual.kind == outcome_kind::capture;
+    }
+
+    constexpr bool copy_at_call(const behaviour &value) {
+      return value.actual.kind == outcome_kind::capture && !value.actual.deferred;
+    }
+
+    // No copy, or one unlike the newest-known version's.
+    constexpr bool unlike_newest(const behaviour &value) {
+      return value.actual.kind != outcome_kind::capture || !value.consistent;
+    }
+  }  // namespace behaviours
 
   // The state a copy may start from (checked by test_game3d_api_contract_cpu.cpp).
   namespace state {
@@ -114,7 +153,8 @@ namespace game3d_contract::known_gaps {
   // layer). Its cells combine several dimensions, so one cell may match more
   // than one row (judge_each). Each expected-failure predicate names the
   // add-on's behaviour and keeps only cells where the oracle requires a
-  // capture, so a refusal the contract asks for never matches it.
+  // capture (or, for an add-on that copies, a refusal), so an outcome the
+  // contract leaves open never matches it.
   namespace streamline {
     constexpr bool local(tag_entry entry) {
       return entry == tag_entry::local_array || entry == tag_entry::local_chain_not_last;
@@ -135,8 +175,9 @@ namespace game3d_contract::known_gaps {
     // A same-frame evaluate copy is refused once any Present of the device
     // follows the tag: present() advances every source's present generation
     // (source_lifetime_current), so a generated Present of an earlier frame
-    // ends lifecycle 1 and 2 alike. The hook layer counts the case's generated
-    // Presents (it has no device).
+    // ends lifecycle 1 and 2 alike. The hook layer has no device: its
+    // admission repeats source_lifetime_current over the case's generated
+    // Presents, so this verdict comes from that repeat.
     constexpr bool generated_present_before_copy(const sl_case &value) {
       return value.generated_presents != 0 && value.at == copy_point::same_frame_evaluate && !local(value.entry) && capture_required(value);
     }
@@ -155,11 +196,22 @@ namespace game3d_contract::known_gaps {
              capture_required(value);
     }
 
-    // A longer-lived tag is copied at its frame-generation tag call from its
-    // declaration, which describes the state at its use, instead of later.
+    // A ValidUntilPresent tag is copied at its frame-generation tag call from
+    // its declaration, which describes the state at its Present, where the
+    // oracle permits only the copy deferred to the Present queue (also when a
+    // later untag leaves that copy open, S9).
     constexpr bool undeferred_frame_generation_tag(const sl_case &value) {
-      return value.at == copy_point::tag_call && value.life != lifecycle::only_valid_now && value.commands == tag_commands::game_list &&
-             unobserved(value.depth) && capture_required(value) && expect(value).deferred;
+      const auto expected = expect(value);
+      return legal(value) && value.at == copy_point::tag_call && value.life == lifecycle::valid_until_present &&
+             value.commands == tag_commands::game_list && unobserved(value.depth) && detail::frame_generation_scope(value) &&
+             (permits(expected, outcome_kind::capture) || permits(expected, outcome_kind::continuous)) && expected.deferred;
+    }
+
+    // A ValidUntilEvaluate tag is copied at its frame-generation tag call
+    // from its declaration, which describes the state at its evaluate.
+    constexpr bool until_evaluate_frame_generation_tag(const sl_case &value) {
+      return legal(value) && value.at == copy_point::tag_call && value.life == lifecycle::valid_until_evaluate &&
+             value.commands == tag_commands::game_list && unobserved(value.depth) && expect(value).by == &rules::S11c;
     }
 
     // At that tag call a declaration that disagrees with the recorded state
@@ -227,23 +279,46 @@ namespace game3d_contract::known_gaps {
   }  // namespace streamline
 
   inline constexpr row<sl_case> sl_rows[] {
-    {"S6", &rules::S6, kind::expected_failure, &streamline::commandless_frame_generation_tag, "Owner ruling R2 (decided): keep a commandless ValidUntilPresent tag pending and copy it at the same frame's evaluate, else on the Present queue before that frame's Present. Today source_rejection refuses it as boundary_without_commands (since a2563fa2 DLSS-G's own NGX evaluation supplies that frame's FG depth where it is seen, N4, and the refusal then withdraws nothing), and game3d_ui_mask.cpp refuses the UI equivalent (U2). Fix together with S7 and S11b; that commit inverts the pinned refusal, test_game3d_native_provider_runtime.cpp's 'native SLFG refusal' check (1795-1811 at c67e9cf9, 1925-1951 at a2563fa2), and revisits its boundary_without_commands log checks (2010 silent scope and 2162 live scope at a2563fa2)."},
-    {"S7", &rules::S7, kind::expected_failure, &streamline::generated_present_before_copy, "End a tag's lifetime at its own frame's Present (its frame token, or a present ordinal recorded at the tag), not at any Present of the device: streamline_depth_capture.cpp present() advances every source's present generation and source_lifetime_current then refuses the evaluate copy. Multi frame generation puts generated Presents of earlier frames there. 24bf1f4b and a2563fa2 hold a captured copy across generated Presents; neither lets this copy be made. Fix together with S6, whose deferred copy meets the same check."},
-    {"S11b", &rules::S11b, kind::expected_failure, &streamline::undeferred_frame_generation_tag, "Owner ruling R2 (decided): a ValidUntilPresent tag at its FG tag call with no observed state is copied on the Present queue, where its declaration is exact (an UntilEvaluate one at its same-frame evaluate), not at the call. Same deferral as S6."},
-    {"S11", &rules::S11, kind::expected_failure, &streamline::disagreeing_frame_generation_tag, "At an FG tag call of a longer-lived tag, take the state observed on the recording: its declaration describes the use point (SLT:357). Today copy_state's declared_must_match refuses it as conflicting (streamline_depth_capture.cpp record_impl, source_contract policy)."},
-    {"S4", &rules::S4, kind::expected_failure, &streamline::local_only_valid_now, "A local tag is current at its own evaluate (SLA:258-262): in tag_rejection (streamline_camera_probe.cpp) promote an OnlyValidNow evaluate input as the tag call's is, and copy it at that evaluate when it has a command list. Fix with S15 (both in read_local_inputs/tag_rejection)."},
-    {"S15", &rules::S15, kind::expected_failure, &streamline::chained_local, "In read_local_inputs, decode a chained tag with its next pointer cleared (as the viewport already is), treating a PrecisionInfo node as the preceding tag's; fix with S4. Chains of more than 32 nodes also fail S18."},
-    {"S13", &rules::S13, kind::expected_failure, &streamline::newer_struct, "Read the known prefix of any version >= 1 and keep refusing a chained next: decode_v2_constants (max 2) and decode_v2_viewport (max 1) in streamline_camera_data.cpp, and hook_fg_options (version <= 5). Update the pinned checks with it: test_streamline_camera_data.cpp:267-268 and 279-280 ('unknown version interpreted', 'unknown viewport version accepted') and test_streamline_camera_probe.cpp's 'unknown FG options version retained a known enabled state' (3891 at c67e9cf9)."},
-    {"S16", &rules::S16, kind::expected_failure, &streamline::zero_sided_extent, "Use Streamline's whole-resource rule !(width && height) (sl_consts.h:150) in match() (streamline_camera_data.cpp) and source_region (streamline_depth_capture.cpp)."},
-    {"S16d", &rules::S16d, kind::expected_failure, &streamline::declared_size, "Drop the declared Resource size check from match(); the capture already bounds the extent by the allocation (source_region)."},
-    {"S18", &rules::S18, kind::expected_failure, &streamline::beyond_tag_limit, "Read the type and lifecycle of each element of a longer tag array or input list in chunks with no fixed cap (read_tags, read_local_inputs; tag_limit and chain_limit are 32); at minimum keep the depth slot of a call with more tags."},
-    {"S2", &rules::S2, kind::expected_failure, &streamline::commandless_until_evaluate, "Illegal input and harmless, lowest priority: the copy happens inside the tag's lifetime on the evaluate's own list. Refuse it, or let the oracle accept it, when the commandless-tag work (S6) settles what a commandless tag may do."},
+    {"S6", &rules::S6, kind::expected_failure, &streamline::commandless_frame_generation_tag, "Owner ruling R2 (decided): keep a commandless ValidUntilPresent tag pending and copy it at the same frame's evaluate, else on the Present queue before that frame's Present. Today source_rejection refuses it as boundary_without_commands (since a2563fa2 DLSS-G's own NGX evaluation supplies that frame's FG depth where it is seen, N4, and the refusal then withdraws nothing), and game3d_ui_mask.cpp refuses the UI equivalent (U2). Fix together with S7 and S11b; that commit inverts the pinned refusal, test_game3d_native_provider_runtime.cpp's 'native SLFG refusal' check (1795-1811 at c67e9cf9, 1925-1951 at a2563fa2), and revisits its boundary_without_commands log checks (2010 silent scope and 2162 live scope at a2563fa2). Whether the deferred copy survives a later null untag (Assassin's Creed Shadows) awaits an owner ruling (S9: EITHER).", &behaviours::no_copy},
+    {"S7", &rules::S7, kind::expected_failure, &streamline::generated_present_before_copy, "End a tag's lifetime at its own frame's Present (its frame token, or a present ordinal recorded at the tag), not at any Present of the device: streamline_depth_capture.cpp present() advances every source's present generation and source_lifetime_current then refuses the evaluate copy. Multi frame generation puts generated Presents of earlier frames there. 24bf1f4b and a2563fa2 hold a captured copy across generated Presents; neither lets this copy be made. The hook layer's verdict comes from its repeat of source_lifetime_current (test_game3d_api_contract_cpu.cpp admission), so the fix changes that repeat in the same commit. Fix together with S6, whose deferred copy meets the same check.", &behaviours::no_copy},
+    {"S11b", &rules::S11b, kind::expected_failure, &streamline::undeferred_frame_generation_tag, "Owner ruling R2 (decided): a ValidUntilPresent tag at its FG tag call with no observed state is copied on the Present queue, where its declaration is exact, not at the call. Same deferral as S6.", &behaviours::copy_at_call},
+    {"S11c", &rules::S11c, kind::expected_failure, &streamline::until_evaluate_frame_generation_tag, "An UntilEvaluate tag at its FG tag call with no observed state is copied there from a declaration that describes its evaluate (R2 defers lifecycle 1 only). Refuse that copy and let the same-frame evaluate copy it (S5); fix with S11b, which changes the same tag-call admission in source_rejection/record_impl.", &behaviours::copy_at_call},
+    {"S11", &rules::S11, kind::expected_failure, &streamline::disagreeing_frame_generation_tag, "At an FG tag call of a longer-lived tag, take the state observed on the recording: its declaration describes the use point (SLT:357). Today copy_state's declared_must_match refuses it as conflicting (streamline_depth_capture.cpp record_impl, source_contract policy).", &behaviours::no_copy},
+    {"S4", &rules::S4, kind::expected_failure, &streamline::local_only_valid_now, "A local tag is current at its own evaluate (SLA:258-262): in tag_rejection (streamline_camera_probe.cpp) promote an OnlyValidNow evaluate input as the tag call's is, and copy it at that evaluate when it has a command list. Fix with S15 (both in read_local_inputs/tag_rejection).", &behaviours::no_copy},
+    {"S15", &rules::S15, kind::expected_failure, &streamline::chained_local, "In read_local_inputs, decode a chained tag with its next pointer cleared (as the viewport already is), treating a PrecisionInfo node as the preceding tag's; fix with S4. Chains of more than 32 nodes also fail S18.", &behaviours::no_copy},
+    {"S13", &rules::S13, kind::expected_failure, &streamline::newer_struct, "Read the known prefix of any version >= 1 and keep refusing a chained next: decode_v2_constants (max 2) and decode_v2_viewport (max 1) in streamline_camera_data.cpp, and hook_fg_options (version <= 5). Update the pinned checks with it: test_streamline_camera_data.cpp:267-268 and 279-280 ('unknown version interpreted', 'unknown viewport version accepted') and test_streamline_camera_probe.cpp's 'unknown FG options version retained a known enabled state' (3891 at c67e9cf9).", &behaviours::unlike_newest},
+    {"S16", &rules::S16, kind::expected_failure, &streamline::zero_sided_extent, "Use Streamline's whole-resource rule !(width && height) (sl_consts.h:150) in match() (streamline_camera_data.cpp) and source_region (streamline_depth_capture.cpp).", &behaviours::no_copy},
+    {"S16d", &rules::S16d, kind::expected_failure, &streamline::declared_size, "Drop the declared Resource size check from match(); the capture already bounds the extent by the allocation (source_region).", &behaviours::no_copy},
+    {"S18", &rules::S18, kind::expected_failure, &streamline::beyond_tag_limit, "Read the type and lifecycle of each element of a longer tag array or input list in chunks with no fixed cap (read_tags, read_local_inputs; tag_limit and chain_limit are 32); at minimum keep the depth slot of a call with more tags.", &behaviours::no_copy},
+    {"S2", &rules::S2, kind::expected_failure, &streamline::commandless_until_evaluate, "Illegal input and harmless, lowest priority: the copy happens inside the tag's lifetime on the evaluate's own list. Refuse it, or let the oracle accept it, when the commandless-tag work (S6) settles what a commandless tag may do.", &behaviours::copy},
     {"S24-pending", &rules::S24, kind::pending, &streamline::unsurveyed_tag_array, "Owner ruling needed: the add-on reads a multi-tag array from a release newer than the survey when its ResourceTag declares version 1, whose stride is known (sl_struct.h appends members with a version bump; S14 still refuses a later version in an array). The design's S24 refuses any such array. Either relax S24 to major 3 and above, or make read_tags refuse these arrays."},
     {"S14-pending", &rules::S14, kind::pending, &streamline::zero_header_declaration, "Owner ruling needed: the zero-header Resource layout (some 2.x integrations zero-initialise Resource's base) is accepted with its nonzero declared state as proof (streamline_camera_probe.cpp append_tag; pinned by test_streamline_camera_probe.cpp's 'nonzero compatibility resource state was discarded'). S14 accepts only a state recorded on the copy's list for a Resource that is not an SDK structure. Either rule the declaration usable and relax S14, or require an observed state as for its declared COMMON."},
   };
 
-  // NGX evaluations, DLSS-G's own (N4) included, are checked by the hook
-  // layer and meet the oracle: no rows yet.
+  // NGX evaluations, DLSS-G's own (N4) included (checked by the hook layer).
+  namespace ngx {
+    // A Depth otherwise valid, with no state observed on the recording, of a
+    // feature whose input state no cited guide states: the adapter nominates
+    // every feature with the SR contract's NON_PIXEL_SHADER_RESOURCE.
+    constexpr bool uncited_contract_state(const ngx_case &value, ngx_feature feature) {
+      return value.feature == feature && value.depth_set == ngx_depth_set::d3d12_resource && value.lifetime != ngx_lifetime::nested_in_streamline &&
+             value.depth.seen == evidence::none && !(value.depth.flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) && legal(value) &&
+             expect(value).by == &rules::N1b;
+    }
+
+    constexpr bool ray_reconstruction(const ngx_case &value) {
+      return uncited_contract_state(value, ngx_feature::ray_reconstruction);
+    }
+
+    constexpr bool unknown_feature(const ngx_case &value) {
+      return uncited_contract_state(value, ngx_feature::unknown);
+    }
+  }  // namespace ngx
+
+  inline constexpr row<ngx_case> ngx_rows[] {
+    {"N1b", &rules::N1b, kind::expected_failure, &ngx::unknown_feature, "A feature no cited guide covers is copied from the SR contract state: in ngx_depth_source.cpp nominate features other than SR (and RR once N1 covers it) with state_proof::observed_nonzero instead of sdk_contract, so only a recorded state proves them. Fail-safe for no shipping game known today.", &behaviours::copy},
+    {"N1b-pending", &rules::N1b, kind::pending, &ngx::ray_reconstruction, "Owner action needed: the DLSS-RR guide is not among the cited sources. If its resource-state section names NON_PIXEL_SHADER_RESOURCE as the SR guide does, cite it in N1 for feature 13 and drop this row; otherwise RR follows N1b like an unknown feature."},
+  };
 
   // One family's verdicts against its rows.
   enum class verdict {
@@ -292,19 +367,27 @@ namespace game3d_contract::known_gaps {
     return expected.by == gap.contract || expected.basis_by == gap.contract ? verdict::known_failure : verdict::misattributed;
   }
 
-  // A family whose cells combine several dimensions (the hook layer): matched
-  // receives every row that matches. Any pending row leaves the cell
-  // unenforced; otherwise a failing cell is a known failure of each matching
-  // row and a passing one closes them all. The caller also requires every
-  // expected-failure row to be the only row of some failing cell, so the fix
-  // that closes a gap turns its isolated cells into closed gaps.
+  // A family whose cells combine several dimensions (the hook layers):
+  // matched receives every row that matches. Any pending row leaves the cell
+  // unenforced, and a passing cell closes every matching row. A failing cell
+  // is a known failure only when the oracle applied each matching row's rule
+  // to it (applies: the deciding, basis, copy point or attributed rule) and
+  // some matching row records what the add-on did there; otherwise the gap
+  // changed shape and the cell is misattributed. The caller also requires
+  // every expected-failure row to be the only row of some failing cell, so
+  // the fix that closes a gap turns its isolated cells into closed gaps.
   template<class Case, unsigned N>
-  constexpr verdict judge_each(const row<Case> (&rows)[N], const Case &value, bool satisfied, bool (&matched)[N]) {
-    bool any {}, pending {};
+  constexpr verdict judge_each(const row<Case> (&rows)[N], const Case &value, bool satisfied, const behaviour &actual, bool (&matched)[N]) {
+    bool any {}, pending {}, applied {true}, recorded {};
     for (unsigned i = 0; i != N; ++i) {
       matched[i] = rows[i].matches(value);
-      any |= matched[i];
-      pending |= matched[i] && rows[i].status == kind::pending;
+      if (!matched[i]) {
+        continue;
+      }
+      any = true;
+      pending |= rows[i].status == kind::pending;
+      applied = applied && applies(value, *rows[i].contract);
+      recorded = recorded || !rows[i].records || rows[i].records(actual);
     }
     if (!any) {
       return satisfied ? verdict::meets : verdict::violates;
@@ -312,6 +395,9 @@ namespace game3d_contract::known_gaps {
     if (pending) {
       return verdict::pending;
     }
-    return satisfied ? verdict::gap_closed : verdict::known_failure;
+    if (satisfied) {
+      return verdict::gap_closed;
+    }
+    return applied && recorded ? verdict::known_failure : verdict::misattributed;
   }
 }  // namespace game3d_contract::known_gaps
