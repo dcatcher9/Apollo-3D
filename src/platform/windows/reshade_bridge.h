@@ -2,6 +2,7 @@
 #pragma once
 
 #include "foreground_window_region.h"
+#include "src/reshade_bridge_window.h"
 
 #include <chrono>
 #include <cstdint>
@@ -48,7 +49,10 @@ namespace platf::reshade_bridge {
   public:
     // Tests can supply foreground observations without moving real windows or displays.
     using observer_t = std::function<foreground_window::observation_t()>;
-    receiver_t(ID3D11Device *device, ID3D11DeviceContext *context, observer_t observe = foreground_window::sample);
+    // The window chain of a producer's swapchain window that is not the foreground window
+    // (::reshade_bridge::window_owner::query, in physical pixels). Tests supply their own.
+    using window_query_t = std::function<::reshade_bridge::window_owner::chain_t(std::uint64_t window)>;
+    receiver_t(ID3D11Device *device, ID3D11DeviceContext *context, observer_t observe = foreground_window::sample, window_query_t query_window = {});
     ~receiver_t();
     receiver_t(const receiver_t &) = delete;
     receiver_t &operator=(const receiver_t &) = delete;
@@ -58,8 +62,10 @@ namespace platf::reshade_bridge {
     // Callers only read it on this receiver's device context. Once a newer frame replaces it,
     // the slot returns to the producer only after an event query issued after its last use has
     // completed. Pointers live until the next poll/destruction.
-    // Foreground ownership must cover source_rect. The returned texture keeps the authored
-    // raster; the consumer scales it, or fits eyes of another aspect into each output eye, as
+    // Foreground ownership must cover source_rect: the producer's swapchain window is the
+    // foreground window, or a child of it that owns source_rect exactly
+    // (::reshade_bridge::window_owner), rechecked on every poll. The returned texture keeps the
+    // authored raster; the consumer scales it, or fits eyes of another aspect into each output eye, as
     // ::reshade_bridge::place_output() places them for output_width x output_height (a refused
     // placement returns nothing). Fullscreen display scaling can make these extents independent.
     std::optional<frame_t> poll(RECT source_rect, int output_width, int output_height);

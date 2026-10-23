@@ -69,8 +69,9 @@ depth sampler and shared gain/zero-plane policy serve both remaining paths.
 The implementation supports **64-bit Windows games, Direct3D 11 or Direct3D 12, SDR and HDR**, and
 ReShade **6.8.0 with full add-on support**. It requires native NT texture sharing and shared fences
 on the same GPU as Sunshine. OpenGL, Vulkan, 32-bit games and legacy VR exporter modes
-are not supported. A top-level game window must be the foreground window; child-window rendering
-is not supported by this exporter.
+are not supported. The game must present to the foreground window, or to a child window of it
+that covers the foreground window's client area exactly (see "Child swapchain windows" in
+[the Game 3D design](../../docs/reshade-sbs.md)).
 
 ## Build
 
@@ -1299,6 +1300,12 @@ Look in the game's `ReShade.log` for `Sunshine SBS:` messages:
 - `export inactive (reason)` means focus, technique execution or source proof stopped qualifying;
   the reason names the gate, for example `not_foreground`, `present_without_render`,
   `frame_not_prepared`, `no_consumer` or `overlay_capture_failed`.
+- `swapchain window W presents under the foreground window F: owner=V changes=N` names the verdict
+  for a game that presents to a child window W of the foreground window F (at most every 5 s, when
+  it changes): `owner`, or why not (`partial`, `overlapped`, `not_visible`, `other_process`,
+  `not_foreground`, `incomplete`), or `ambiguous` when another swapchain window of the game
+  qualifies too (then a top-level window reads `is the foreground window F: owner=ambiguous`). Any
+  verdict but `owner` keeps the export inactive with `not_foreground`.
 - HRESULT messages identify native sharing/fence failures. Repeated allocation failure retries
   are throttled; publication never falls back to CPU readback.
 

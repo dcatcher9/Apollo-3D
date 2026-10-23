@@ -192,7 +192,11 @@ technique SuperDepth3D {
   }
 
   struct fixture_t {
-    HWND window = nullptr;
+    // The swapchain window, and the foreground root (the same window unless child_window).
+    HWND window = nullptr, root = nullptr;
+    // SUNSHINE_RUNTIME_CHILD_WINDOW=1: the game presents to a WS_CHILD window covering a
+    // borderless root (controlled mode only).
+    bool child_window = false;
     HMODULE reshade_module = nullptr;
     HANDLE mapping = nullptr;
     wire::shared_state_t *shared = nullptr;
@@ -244,6 +248,9 @@ technique SuperDepth3D {
       if (window) {
         DestroyWindow(window);
       }
+      if (root && root != window) {
+        DestroyWindow(root);
+      }
       // Process exit unloads the official runtime after all COM resources are gone.
     }
 
@@ -256,6 +263,15 @@ technique SuperDepth3D {
         "SUNSHINE_GAME3D_NATIVE_ONLY must be 0 or 1");
       native_only = native_flag && !std::strcmp(native_flag, "1");
       require(!native_only || controlled, "The native D3D11 fixture requires the production-receiver facade");
+      const char *child_flag = std::getenv("SUNSHINE_RUNTIME_CHILD_WINDOW");
+      require(!child_flag || !*child_flag || !std::strcmp(child_flag, "0") || !std::strcmp(child_flag, "1"),
+        "SUNSHINE_RUNTIME_CHILD_WINDOW must be 0 or 1");
+      child_window = child_flag && !std::strcmp(child_flag, "1");
+      require(!child_window || controlled, "The child-window fixture requires the production-receiver facade");
+      if (child_window) {
+        // Physical pixels in the fixture's windows and source rectangle, as the receiver queries them.
+        require(SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) != nullptr, "Could not make the fixture thread per-monitor DPI aware");
+      }
       if (controlled) {
         receiver_module = LoadLibraryW(receiver_dll.c_str());
         require(receiver_module != nullptr, "Could not load production-receiver test facade");
@@ -305,9 +321,20 @@ technique SuperDepth3D {
       window_class.hInstance = GetModuleHandleW(nullptr);
       window_class.lpszClassName = L"SunshineReShadeIntegrationFixture";
       RegisterClassW(&window_class);
-      RECT bounds {0, 0, source_width, source_height};
-      AdjustWindowRect(&bounds, WS_OVERLAPPEDWINDOW, FALSE);
-      window = CreateWindowW(window_class.lpszClassName, L"Sunshine ReShade integration test (closes automatically)", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, bounds.right - bounds.left, bounds.bottom - bounds.top, nullptr, nullptr, window_class.hInstance, nullptr);
+      if (child_window) {
+        // A borderless root (off-screen, never activated) whose client area a WS_CHILD swapchain
+        // window covers exactly. The game presents to the child; the foreground is the root.
+        root = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, window_class.lpszClassName, L"Sunshine ReShade child-window test (closes automatically)", WS_POPUP, -20000, -20000, source_width, source_height, nullptr, nullptr, window_class.hInstance, nullptr);
+        require(root != nullptr, "Could not create fixture root window");
+        window = CreateWindowExW(0, window_class.lpszClassName, L"", WS_CHILD | WS_VISIBLE, 0, 0, source_width, source_height, root, nullptr, window_class.hInstance, nullptr);
+        require(window != nullptr, "Could not create fixture child window");
+        ShowWindow(root, SW_SHOWNOACTIVATE);
+        require(IsWindowVisible(window) != FALSE, "Fixture child window is not visible");
+      } else {
+        RECT bounds {0, 0, source_width, source_height};
+        AdjustWindowRect(&bounds, WS_OVERLAPPEDWINDOW, FALSE);
+        window = root = CreateWindowW(window_class.lpszClassName, L"Sunshine ReShade integration test (closes automatically)", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, bounds.right - bounds.left, bounds.bottom - bounds.top, nullptr, nullptr, window_class.hInstance, nullptr);
+      }
       require(window != nullptr, "Could not create fixture window");
       if (!controlled) {
         ShowWindow(window, SW_SHOW);
@@ -348,14 +375,17 @@ technique SuperDepth3D {
         set_overlay_patch = reinterpret_cast<void (*)(BOOL)>(GetProcAddress(test_addon, "SunshineSbsTestSetOverlayPatch"));
         require(set_exporter_foreground != nullptr, "Controlled mode requires the distinct SunshineSBSTest.addon64, never the production add-on");
         require(set_overlay_patch != nullptr, "Controlled mode requires the runtime-test overlay patch hook");
-        require(GetClientRect(window, &source_rect), "Could not query fixture client rectangle");
+        // The foreground root's client area is the captured source.
+        require(GetClientRect(root, &source_rect), "Could not query fixture client rectangle");
         POINT origin {};
-        require(ClientToScreen(window, &origin), "Could not query fixture client origin");
+        require(ClientToScreen(root, &origin), "Could not query fixture client origin");
         OffsetRect(&source_rect, origin.x, origin.y);
-        receiver_state = receiver_create(receiver.p, receiver_context.p, window, GetCurrentProcessId(), &source_rect);
+        receiver_state = receiver_create(receiver.p, receiver_context.p, root, GetCurrentProcessId(), &source_rect);
         require(receiver_state != nullptr, "Could not initialize production receiver");
-        set_exporter_foreground(window);
-        std::puts("CONTROLLED TEST OBSERVATIONS: hidden game window, test-only exporter, unchanged production receiver; Windows foreground is not changed");
+        set_exporter_foreground(root);
+        std::puts(child_window ?
+          "CONTROLLED TEST OBSERVATIONS: off-screen borderless root with a WS_CHILD swapchain window, test-only exporter, unchanged production receiver; Windows foreground is not changed" :
+          "CONTROLLED TEST OBSERVATIONS: hidden game window, test-only exporter, unchanged production receiver; Windows foreground is not changed");
         return;
       }
       // A consumer of this protocol without capabilities: its declaration, then its request.
@@ -541,7 +571,7 @@ technique SuperDepth3D {
       if (!set_exporter_foreground) {
         return false;
       }
-      set_exporter_foreground(focused ? window : nullptr);
+      set_exporter_foreground(focused ? root : nullptr);
       if (receiver_state) {
         receiver_focus(receiver_state, focused);
       }
@@ -718,7 +748,7 @@ technique SuperDepth3D {
       generation = wait_pixels(generation);
       const auto previous_nonce = read64(shared->consumer_nonce);
       receiver_destroy(receiver_state);
-      receiver_state = receiver_create(receiver.p, receiver_context.p, window, GetCurrentProcessId(), &source_rect);
+      receiver_state = receiver_create(receiver.p, receiver_context.p, root, GetCurrentProcessId(), &source_rect);
       require(receiver_state != nullptr, "Could not restart native D3D11 production receiver");
       wait_pixels(generation);
       require(read64(shared->consumer_nonce) != previous_nonce, "Native D3D11 receiver restart reused its old nonce");
@@ -820,10 +850,21 @@ technique SuperDepth3D {
       if (controlled) {
         const auto previous_nonce = read64(shared->consumer_nonce);
         receiver_destroy(receiver_state);
-        receiver_state = receiver_create(receiver.p, receiver_context.p, window, GetCurrentProcessId(), &source_rect);
+        receiver_state = receiver_create(receiver.p, receiver_context.p, root, GetCurrentProcessId(), &source_rect);
         require(receiver_state != nullptr, "Could not restart production receiver");
-        wait_pixels(generation);
+        generation = wait_pixels(generation);
         require(read64(shared->consumer_nonce) != previous_nonce, "Receiver restart reused the old consumer nonce");
+      }
+      if (child_window) {
+        // The child stops covering the root: the exporter and the receiver both withdraw.
+        // Covering it exactly again exports a new generation.
+        SetWindowPos(window, nullptr, 0, 0, source_width, source_height - 2, SWP_NOZORDER | SWP_NOACTIVATE);
+        for (int i = 0; i < 3; ++i) step();
+        require(snapshot(*shared, metadata) && metadata.generation == 0, "A partial child swapchain window kept its export");
+        require_receiver_inactive("Production receiver retained stereo from a partial child swapchain window");
+        SetWindowPos(window, nullptr, 0, 0, source_width, source_height, SWP_NOZORDER | SWP_NOACTIVATE);
+        generation = wait_pixels(generation);
+        std::puts("PASS WS_CHILD swapchain window covering a borderless root: exported while exact, withdrawn while partial");
       }
       std::printf("PASS actual ReShade6.8 DX11 color=%u: present=%u technique=%u finish=%u reload=%u; pixels, effect disable, overlay/reload/close%s\n", expected_color, observation.presents, observation.techniques, observation.finishes, observation.reloads, controlled ? "; controlled focus, production receiver and receiver restart" : "");
     }
@@ -833,7 +874,7 @@ technique SuperDepth3D {
 int main(int argc, char **argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   if (argc != 5 && argc != 6) {
-    std::fprintf(stderr, "usage: reshade_runtime_test <official-ReShade64.dll> <SunshineSBS.addon64> <isolated-output-directory> <srgb|scrgb|pq> [production-receiver-test.dll]\nThe optional receiver facade requires the distinct SunshineSBSTest.addon64 and supplies controlled foreground observations.\n");
+    std::fprintf(stderr, "usage: reshade_runtime_test <official-ReShade64.dll> <SunshineSBS.addon64> <isolated-output-directory> <srgb|scrgb|pq> [production-receiver-test.dll]\nThe optional receiver facade requires the distinct SunshineSBSTest.addon64 and supplies controlled foreground observations.\nWith it, SUNSHINE_RUNTIME_CHILD_WINDOW=1 presents to a WS_CHILD window covering an off-screen borderless root.\n");
     return 2;
   }
   // A broken presentation hook must never leave the synthetic window running indefinitely.

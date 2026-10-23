@@ -1355,6 +1355,108 @@ TEST_F(ReShadeBridgeGpu, PublisherIdentityStaysStableAcrossFramesAndTracksResour
   EXPECT_FALSE(poll());
 }
 
+TEST_F(ReShadeBridgeGpu, ExportsFromAChildWindowOnlyWhileItOwnsTheSource) {
+  namespace owner = ::reshade_bridge::window_owner;
+  constexpr std::uint64_t child = 0x2468;
+  const owner::rect_t source {source_rect.left, source_rect.top, source_rect.right, source_rect.bottom};
+  const auto pid = GetCurrentProcessId();
+  owner::chain_t chain;
+  chain.count = 2;
+  chain.complete = chain.visible = true;
+  chain.links[0] = {child, pid, source, true, false};
+  chain.links[1] = {observed.window, pid, source, true, false};
+  const auto exact = chain;
+  int queries = 0;
+  bridge = std::make_unique<receiver::receiver_t>(consumer.Get(), consumer_context.Get(), [this]() {
+    return observed;
+  }, [&](std::uint64_t window) {
+    ++queries;
+    return window == child ? chain : owner::chain_t {};
+  });
+  // The producer presents to `child`, a child of the foreground root observed.window.
+  const auto child_generation = [&]() {
+    ASSERT_TRUE(new_generation());
+    auto metadata = state->metadata;
+    metadata.window = child;
+    write_metadata(metadata);
+  };
+  auto identity = state->metadata;
+  identity.window = child;
+  identity.generation = identity.accepted_consumer_nonce = identity.ready_fence_handle = 0;
+  for (auto &handle : identity.texture_handles) {
+    handle = 0;
+  }
+  state->consumer_nonce = 0;
+  write_metadata(identity);
+  // Mono observes it as the foreground source.
+  ASSERT_TRUE(bridge->status(source_rect, packed_width, height));
+  EXPECT_GT(queries, 0);
+  EXPECT_FALSE(poll());
+  ASSERT_NE(state->consumer_nonce, 0u);
+  child_generation();
+  publish(1);
+  const auto frame = await_frame();
+  ASSERT_TRUE(frame);
+  EXPECT_EQ(frame->sequence, 1u);
+
+  // Every way the child stops owning the source withdraws the request between two polls.
+  struct change_t {
+    const char *name;
+    std::function<void(owner::chain_t &)> apply;
+  };
+
+  for (const auto &change : std::vector<change_t> {
+         {"resized", [](owner::chain_t &c) {
+            c.links[0].client.right -= 2;
+          }},
+         {"re-parented to another root", [](owner::chain_t &c) {
+            c.links[1].window = 0x999;
+          }},
+         {"a parent that clips it", [](owner::chain_t &c) {
+            c.links[2] = c.links[1];
+            c.links[1] = {0x777, c.links[0].process_id, c.links[0].client, true, false};
+            c.links[1].client.bottom -= 1;
+            c.count = 3;
+          }},
+         {"overlapped by another covering child", [](owner::chain_t &c) {
+            c.links[0].overlapped = true;
+          }},
+         {"another process", [](owner::chain_t &c) {
+            ++c.links[0].process_id;
+          }},
+         {"hidden", [](owner::chain_t &c) {
+            c.visible = false;
+          }},
+         {"incomplete", [](owner::chain_t &c) {
+            c.complete = false;
+          }},
+       }) {
+    SCOPED_TRACE(change.name);
+    chain = exact;
+    change.apply(chain);
+    EXPECT_FALSE(poll());
+    EXPECT_EQ(state->consumer_nonce, 0u);
+    EXPECT_FALSE(bridge->frame_held());
+    EXPECT_FALSE(bridge->status(source_rect, packed_width, height));
+    // Owning it again requests a new ring, which exports again.
+    chain = exact;
+    EXPECT_FALSE(poll());
+    ASSERT_NE(state->consumer_nonce, 0u);
+    child_generation();
+    publish(1);
+    ASSERT_TRUE(await_frame());
+  }
+
+  // A producer window that is no child of the root at all (another top-level window, or none)
+  // is a plain identity mismatch, as before: no frame, and the request stays.
+  const auto nonce = state->consumer_nonce;
+  auto other = state->metadata;
+  other.window = 0x4242;
+  write_metadata(other);
+  EXPECT_FALSE(poll());
+  EXPECT_EQ(state->consumer_nonce, nonce);
+}
+
 TEST_F(ReShadeBridgeGpu, RejectsFocusSizeAndProcessIdentityChanges) {
   publish(1);
   ASSERT_TRUE(await_frame());

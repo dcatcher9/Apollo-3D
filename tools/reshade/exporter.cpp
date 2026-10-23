@@ -21,6 +21,7 @@
 #include "streamline_camera_probe.h"
 #include "streamline_depth_capture.h"
 #include "src/reshade_bridge_protocol.h"
+#include "src/reshade_bridge_window.h"
 
 #include <algorithm>
 #include <array>
@@ -232,18 +233,33 @@ namespace {
   }
 #endif
 
-#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+#if defined(SUNSHINE_SBS_RUNTIME_TEST_ADDON) || defined(SUNSHINE_SBS_TEST)
   // Only the distinct test DLL can substitute this observation. Null fails closed
-  // until its fixture explicitly selects a real window owned by this process.
+  // until its fixture explicitly selects a real window owned by this process. The
+  // unit tests substitute it only while set, and otherwise observe Windows.
   std::atomic<HWND> test_foreground_window {nullptr};
 #endif
 
   HWND observed_foreground_window() {
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
     return test_foreground_window.load(std::memory_order_acquire);
+#elif defined(SUNSHINE_SBS_TEST)
+    const HWND window = test_foreground_window.load(std::memory_order_acquire);
+    return window ? window : GetForegroundWindow();
 #else
     return GetForegroundWindow();
 #endif
+  }
+
+  // Whether a swapchain window that is not the foreground window is a child of it that owns its
+  // client area (reshade_bridge::window_owner): compared with the root's own client area; the
+  // host compares it with the captured display and requires the root to cover that exactly.
+  reshade_bridge::window_owner::verdict child_window_verdict(HWND window, HWND foreground) {
+    namespace owner = reshade_bridge::window_owner;
+    if (!window || !foreground) return owner::verdict::not_foreground;
+    const auto chain = owner::query(window);
+    const auto root = chain.count ? chain.links[chain.count - 1].client : owner::rect_t {};
+    return owner::classify(chain, reinterpret_cast<std::uintptr_t>(foreground), GetCurrentProcessId(), root);
   }
 
   template<class T>
@@ -1036,6 +1052,20 @@ namespace {
       return true;
     }
 
+    // Whether `window`, the swapchain window of `runtime`, is the window the user sees in the
+    // foreground (owns_foreground_locked).
+    bool owns_foreground(api::effect_runtime *runtime, HWND window) {
+      std::lock_guard<std::mutex> lock(mutex_);
+      return owns_foreground_locked(runtime, window);
+    }
+
+    bool owns_foreground(api::swapchain *swapchain) {
+      std::lock_guard<std::mutex> lock(mutex_);
+      api::effect_runtime *runtime = nullptr;
+      for (const auto &entry : runtimes_) if (entry.second.swapchain == swapchain->get_native()) { runtime = entry.first; break; }
+      return owns_foreground_locked(runtime, static_cast<HWND>(swapchain->get_hwnd()));
+    }
+
     void track_runtime(api::effect_runtime *runtime) {
       std::lock_guard<std::mutex> lock(mutex_);
       auto &proof = runtimes_[runtime];
@@ -1156,7 +1186,7 @@ namespace {
     // Enabled Presents only: a disabled Present touches no window or device.
     void log_present_gap(api::effect_runtime *runtime, const present_gap_t &gap) {
       const sunshine_game3d::vram::latest_suffix memory;
-      const bool foreground = static_cast<HWND>(runtime->get_hwnd()) == observed_foreground_window();
+      const bool foreground = owns_foreground(runtime, static_cast<HWND>(runtime->get_hwnd()));
       char message[256];
       std::snprintf(message, sizeof(message),
         "Sunshine Game 3D present gap: %.0f ms since the previous Present; fg=%d foreground=%d suppressed=%u%s", gap.ms,
@@ -1234,7 +1264,7 @@ namespace {
       }
       if (!runtime) return;
       const bool diagnostic_owner = debug_dump_.awaiting_capture() &&
-        static_cast<HWND>(runtime->get_hwnd()) == observed_foreground_window();
+        owns_foreground(runtime, static_cast<HWND>(runtime->get_hwnd()));
       const auto settings = sunshine_game3d::query_render_settings(runtime);
       const auto presentation = sunshine_game3d::ui_input::observe();
       sunshine_game3d::source_alpha_ui_decision source_alpha;
@@ -1592,9 +1622,10 @@ namespace {
       // Disable stale metadata when focus moves, including when no technique executes.
       std::lock_guard<std::mutex> lock(mutex_);
       const auto found = runtimes_.find(runtime);
-      if (published_runtime_ == runtime && (observed_foreground_window() != reinterpret_cast<HWND>(published_metadata_.window) || found == runtimes_.end() || !found->second.rendered_since_present)) {
+      const bool foreground = published_runtime_ == runtime && owns_foreground_locked(runtime, reinterpret_cast<HWND>(published_metadata_.window));
+      if (published_runtime_ == runtime && (!foreground || found == runtimes_.end() || !found->second.rendered_since_present)) {
         sunshine_game3d::depth_input::invalidate_reuse(runtime);
-        deactivate(runtime, observed_foreground_window() != reinterpret_cast<HWND>(published_metadata_.window) ? "not_foreground" :
+        deactivate(runtime, !foreground ? "not_foreground" :
           found == runtimes_.end() ? "runtime_gone" : "present_without_render");
       }
       if (generation_ && generation_->owner_runtime == runtime && generation_->pending_slot != wire::slot_count) {
@@ -2060,7 +2091,7 @@ namespace {
           ++proof.presentation_ordinal;
           // A missed finish_present must not leave native rendering wedged.
           if (proof.renderer) proof.renderer->begin_present();
-          diagnostic_frame = awaiting_diagnostic && static_cast<HWND>(runtime->get_hwnd()) == observed_foreground_window();
+          diagnostic_frame = awaiting_diagnostic && owns_foreground_locked(runtime, static_cast<HWND>(runtime->get_hwnd()));
           break;
         }
       debug_dump_.poll(diagnostic_frame);
@@ -2130,7 +2161,7 @@ namespace {
       const HWND window = static_cast<HWND>(runtime->get_hwnd());
       DWORD window_pid = 0;
       GetWindowThreadProcessId(window, &window_pid);
-      if (!window || window_pid != identity_.producer_pid || observed_foreground_window() != window) {
+      if (!window || window_pid != identity_.producer_pid || !owns_foreground_locked(runtime, window, true)) {
         sunshine_game3d::depth_input::invalidate_reuse(runtime);
         deactivate(runtime, "not_foreground");
         return;
@@ -2490,6 +2521,57 @@ namespace {
       }
     }
 
+    // Requires mutex_. Whether `window`, the swapchain window of `runtime`, is the window the user
+    // sees in the foreground: the foreground window itself, or a child of it that owns its client
+    // area (reshade_bridge::window_owner). When another runtime's window qualifies too, the two
+    // are ambiguous and neither owns the foreground. `report` logs the verdict of a child window
+    // and an ambiguity; a top-level window that is not the foreground is not a child, not logged.
+    bool owns_foreground_locked(api::effect_runtime *runtime, HWND window, bool report = false) {
+      namespace owner = reshade_bridge::window_owner;
+      const HWND foreground = observed_foreground_window();
+      const char *reason = "owner";
+      bool owns = window == foreground, named = false;
+      if (!owns) {
+        const auto verdict = child_window_verdict(window, foreground);
+        owns = verdict == owner::verdict::owner;
+        named = verdict != owner::verdict::not_child;
+        reason = owner::verdict_name(verdict);
+      }
+      if (owns && runtimes_.size() > 1) {
+        for (const auto &entry : runtimes_) {
+          const HWND other = entry.first == runtime ? nullptr : static_cast<HWND>(entry.first->get_hwnd());
+          if (other && other != window && (other == foreground || child_window_verdict(other, foreground) == owner::verdict::owner)) {
+            owns = false;
+            named = true;
+            reason = "ambiguous";
+            break;
+          }
+        }
+      }
+      if (report && named) report_window_owner(window, foreground, reason);
+      return owns;
+    }
+
+    // Names a child (or ambiguous) swapchain window's verdict when it changes, at most every 5 s
+    // (a later call names the latest verdict); the line counts the changes it summarises.
+    void report_window_owner(HWND window, HWND foreground, const char *reason) {
+      if (window != window_report_.window || std::strcmp(reason, window_report_.reason) != 0) {
+        window_report_.window = window;
+        window_report_.reason = reason;
+        ++window_report_.changes;
+        window_report_.pending = true;
+      }
+      const auto now = GetTickCount64();
+      if (!window_report_.pending || now < window_report_.next_log) return;
+      window_report_.pending = false;
+      window_report_.next_log = now + 5000;
+      char message[256];
+      std::snprintf(message, sizeof(message), "Sunshine SBS: swapchain window %p %s foreground window %p: owner=%s changes=%u",
+        static_cast<void *>(window), window == foreground ? "is the" : "presents under the", static_cast<void *>(foreground), reason,
+        std::exchange(window_report_.changes, 0u));
+      log(std::strcmp(reason, "owner") == 0 ? reshade::log::level::info : reshade::log::level::warning, message);
+    }
+
     // One-shot invalidation also covers identity metadata published before a host connects.
     // The reason is logged once, when the export actually stops.
     void deactivate(api::effect_runtime *runtime, const char *reason = "stopped") {
@@ -2760,6 +2842,14 @@ namespace {
     // The last request refused for another export protocol, named once.
     std::uint64_t refused_nonce_ = 0;
     std::chrono::steady_clock::time_point retry_at_ {};
+    // The last child or ambiguous swapchain window verdict (report_window_owner).
+    struct {
+      HWND window = nullptr;
+      const char *reason = "";
+      unsigned changes = 0;
+      bool pending = false;
+      std::uint64_t next_log = 0;
+    } window_report_;
   };
 
   addon_session_t::addon_session_t() = default;
@@ -2881,7 +2971,7 @@ namespace {
     try {
       if (publisher) {
         publisher->begin_present(swapchain->get_native(), swapchain->get_color_space());
-        if (static_cast<HWND>(swapchain->get_hwnd()) == observed_foreground_window())
+        if (publisher->owns_foreground(swapchain))
           sunshine_game3d::ui_layer::observe_output(swapchain, queue);
         publisher->render_present(swapchain);
       }

@@ -5050,6 +5050,38 @@ It validates the process creation time, window identity, GPU adapter, output dim
 layout and color transfer. A fullscreen image alone does not prove that it is stereo; there is
 no visual SBS guessing heuristic.
 
+### Child swapchain windows
+
+Some games and embedding frameworks present to a child window of their top-level window. The
+published `metadata.window` is always the swapchain's own window. One predicate,
+`reshade_bridge::window_owner` (`src/reshade_bridge_window.h`), shared by the add-on and the host,
+decides whether such a child owns the foreground. Walking from the swapchain window up to
+`GetAncestor(window, GA_ROOT)` (at most eight windows), it requires: the root is the foreground
+root; every window of the chain belongs to the producer process; the swapchain window and its
+ancestors are visible; every window of the chain has exactly the expected client area in screen
+coordinates, so no ancestor clips the child; and no other visible window with the same parent as
+any of them (below the root) intersects that area. A chain that is incomplete (a failed query,
+more than eight windows or more than 256 siblings at one level) is refused. None of these USER32
+queries sends a window message, so the game's render thread never waits on its window thread.
+The exact-client-coverage proof is unchanged, applied to the child.
+
+The add-on compares the chain with the root's own client area. A runtime owns the foreground when
+its swapchain window is the foreground window or such a child, and no other runtime's swapchain
+window qualifies as well: two covering child swapchains overlap each other, and a root swapchain
+together with a covering child swapchain is ambiguous, so neither is exported
+(`export inactive (not_foreground)`). The add-on logs a child's verdict when it changes, at most
+every 5 s: `Sunshine SBS: swapchain window W presents under the foreground window F: owner=V
+changes=N` (V is `owner`, `partial`, `overlapped`, `not_visible`, `other_process`,
+`not_foreground`, `incomplete` or `ambiguous`). The host requires the foreground root's client
+area to equal the captured display, as for any game, and then the child chain to cover exactly
+that rectangle, measured in physical pixels. It rechecks the chain on every poll and status; a
+child that stops owning the display (re-parented, resized, hidden or overlapped) withdraws the
+host's request, so the game stops packing stereo for it. The host logs at most every 5 s when the
+verdict changes, either `ReShade SBS: process P presents to window 0xW, a child of the foreground
+window 0xF that covers the captured source exactly; using its export (changes=N).` or the warning
+`... which does not own the captured source (child=V, changes=N); staying in 2D.` A producer
+window that is not a child of the foreground root at all is an identity mismatch, as before.
+
 Before the first compatible export, streamed Game 3D remains an ordinary mono W × H stream.
 After stereo activation, Sunshine duplicates the current desktop into both eyes whenever the
 publisher becomes unavailable. Alt-Tab, game exit, disabling Game 3D and resolution changes
@@ -5598,7 +5630,11 @@ Controlled D3D11 and D3D12 applications also exercise the official ReShade 6.8 r
 and production Sunshine receiver together in SDR, scRGB and PQ. They verify the claimed
 shared-slot pixels, source timestamps, effect/reload/focus invalidation, recovery and receiver
 restart. Their separate test add-on supplies foreground observations for a hidden fixture window;
-the shipping add-on keeps the real Windows foreground check. Additional runs use a distinct
+the shipping add-on keeps the real Windows foreground check. With
+`SUNSHINE_RUNTIME_CHILD_WINDOW=1` the D3D11 application presents to a `WS_CHILD` window covering
+an off-screen borderless root instead: both the add-on and the production receiver accept it
+through the real window queries, and withdraw while the child is two rows short of the root
+(10-23). Additional runs use a distinct
 receiver process and exercise the real process-handle duplication, texture/fence import and
 direct read of the claimed shared slot, including slot hold and retirement. All six
 SDR/scRGB/PQ and D3D11/D3D12 cases passed again on 2026-10-05 with the direct-read receiver,

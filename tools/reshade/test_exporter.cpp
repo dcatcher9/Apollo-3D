@@ -985,6 +985,151 @@ namespace {
       return &runtime;
     }
 
+    // reshade_bridge::window_owner over hand-made chains: the fake window model.
+    static void window_owner_model() {
+      namespace owner = reshade_bridge::window_owner;
+      const owner::rect_t client {0, 0, 1920, 1080};
+      constexpr std::uint32_t pid = 7;
+      owner::chain_t exact;
+      exact.count = 2;
+      exact.complete = exact.visible = true;
+      exact.links[0] = {0x20, pid, client, true, false};
+      exact.links[1] = {0x10, pid, client, true, false};
+      const auto verdict = [&](const owner::chain_t &chain) {
+        return owner::classify(chain, 0x10, pid, client);
+      };
+      require(verdict(exact) == owner::verdict::owner, "An exact child of the foreground root does not own it");
+      auto chain = exact;
+      chain.links[0].client.right -= 1;
+      require(verdict(chain) == owner::verdict::partial, "A partial child owned the foreground");
+      chain = exact;
+      chain.links[0].process_id = pid + 1;
+      require(verdict(chain) == owner::verdict::other_process, "A child of another process owned the foreground");
+      chain = exact;
+      chain.links[1].process_id = pid + 1;
+      require(verdict(chain) == owner::verdict::other_process, "A child under a root of another process owned the foreground");
+      chain = exact;
+      chain.links[1].window = 0x11;
+      require(verdict(chain) == owner::verdict::not_foreground, "A child re-parented under another root owned the foreground");
+      chain = exact;
+      chain.visible = false;
+      require(verdict(chain) == owner::verdict::not_visible, "A hidden child owned the foreground");
+      chain = exact;
+      chain.links[0].overlapped = true;
+      require(verdict(chain) == owner::verdict::overlapped, "A child overlapped by a sibling (another covering swapchain) owned the foreground");
+      chain = exact;
+      chain.links[1].overlapped = true;
+      require(verdict(chain) == owner::verdict::owner, "Top-level siblings of the root changed the ownership of its child");
+      chain = exact;
+      chain.complete = false;
+      require(verdict(chain) == owner::verdict::incomplete, "An incomplete chain owned the foreground");
+      chain = exact;
+      chain.links[0].queried = false;
+      require(verdict(chain) == owner::verdict::incomplete, "A failed query owned the foreground");
+      require(owner::classify(exact, 0x10, pid, {}) == owner::verdict::partial, "An empty expected area was covered");
+      // A sibling popup is a top-level window of its own, never a child; nor is no window.
+      owner::chain_t popup;
+      popup.count = 1;
+      popup.complete = popup.visible = true;
+      popup.links[0] = {0x30, pid, client, true, false};
+      require(verdict(popup) == owner::verdict::not_child && verdict(owner::chain_t {}) == owner::verdict::not_child,
+        "A top-level popup or a missing window was judged as a child");
+      // A grandchild owns the root through an exact container, and not through one that clips it.
+      chain = exact;
+      chain.count = 3;
+      chain.links[2] = exact.links[1];
+      chain.links[1] = {0x15, pid, client, true, false};
+      require(verdict(chain) == owner::verdict::owner, "A grandchild through an exact container does not own the foreground");
+      chain.links[1].client.bottom -= 2;
+      require(verdict(chain) == owner::verdict::partial, "A grandchild through a clipping container owned the foreground");
+      std::puts("PASS: window owner model (exact, partial, other process, re-parented, hidden, overlapped, popup, nested)");
+    }
+
+    static HWND owner_test_window(DWORD style, DWORD extended, int x, int y, int width, int height, HWND parent) {
+      static const ATOM registered = [] {
+        WNDCLASSW window_class {};
+        window_class.lpfnWndProc = DefWindowProcW;
+        window_class.hInstance = GetModuleHandleW(nullptr);
+        window_class.lpszClassName = L"SunshineWindowOwnerTest";
+        return RegisterClassW(&window_class);
+      }();
+      require(registered != 0, "Window owner test class registration failed");
+      return CreateWindowExW(extended, L"SunshineWindowOwnerTest", L"", style, x, y, width, height, parent, nullptr, GetModuleHandleW(nullptr), nullptr);
+    }
+
+    // The same rule over real windows: off-screen, never activated, never in the taskbar.
+    static void window_owner_native() {
+      namespace owner = reshade_bridge::window_owner;
+      constexpr DWORD popup_style = WS_POPUP, popup_extended = WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+      const HWND root = owner_test_window(popup_style, popup_extended, -20000, -20000, 320, 180, nullptr);
+      const HWND other_root = owner_test_window(popup_style, popup_extended, -19000, -20000, 320, 180, nullptr);
+      require(root && other_root, "Window owner test roots were not created");
+      ShowWindow(root, SW_SHOWNOACTIVATE);
+      ShowWindow(other_root, SW_SHOWNOACTIVATE);
+      const HWND child = owner_test_window(WS_CHILD | WS_VISIBLE, 0, 0, 0, 320, 180, root);
+      require(child != nullptr, "Window owner test child was not created");
+      const auto verdict = [&](HWND window) {
+        RECT rect {};
+        GetClientRect(root, &rect);
+        MapWindowPoints(root, nullptr, reinterpret_cast<POINT *>(&rect), 2);
+        return owner::classify(owner::query(window), reinterpret_cast<std::uintptr_t>(root), GetCurrentProcessId(), {rect.left, rect.top, rect.right, rect.bottom});
+      };
+      require(verdict(child) == owner::verdict::owner, "A native child covering a borderless root does not own it");
+      require(verdict(root) == owner::verdict::not_child, "A native root was judged as a child");
+      // Two covering children (two child swapchains) overlap each other; a hidden one does not.
+      const HWND second = owner_test_window(WS_CHILD | WS_VISIBLE, 0, 0, 0, 320, 180, root);
+      require(verdict(child) == owner::verdict::overlapped && verdict(second) == owner::verdict::overlapped,
+        "Two covering native children were not ambiguous");
+      ShowWindow(second, SW_HIDE);
+      require(verdict(child) == owner::verdict::owner, "A hidden sibling made a native child ambiguous");
+      DestroyWindow(second);
+      SetWindowPos(child, nullptr, 0, 0, 320, 170, SWP_NOZORDER | SWP_NOACTIVATE);
+      require(verdict(child) == owner::verdict::partial, "A resized native child still owned the root");
+      SetWindowPos(child, nullptr, 0, 0, 320, 180, SWP_NOZORDER | SWP_NOACTIVATE);
+      ShowWindow(child, SW_HIDE);
+      require(verdict(child) == owner::verdict::not_visible, "A hidden native child owned the root");
+      ShowWindow(child, SW_SHOWNA);
+      SetParent(child, other_root);
+      require(verdict(child) == owner::verdict::not_foreground, "A native child re-parented under another root owned the first");
+      SetParent(child, root);
+      require(verdict(child) == owner::verdict::owner, "A native child returned to its root does not own it");
+      // An owned popup is a top-level window, not a sibling of the child.
+      const HWND popup = owner_test_window(popup_style, popup_extended, -20000, -20000, 320, 180, root);
+      ShowWindow(popup, SW_SHOWNOACTIVATE);
+      require(verdict(popup) == owner::verdict::not_child && verdict(child) == owner::verdict::owner,
+        "An owned popup was judged as a child or as a sibling of the child");
+
+      // The exporter: the runtime presenting to the child owns the foreground root; a second
+      // runtime presenting to the root itself makes both ambiguous.
+      struct window_runtime : runtime_fixture::empty_runtime {
+        HWND window = nullptr;
+        void *get_hwnd() const override { return window; }
+      };
+      window_runtime on_child, on_root;
+      on_child.window = child;
+      on_root.window = root;
+      {
+        publisher_t publisher;
+        test_foreground_window.store(root, std::memory_order_release);
+        std::lock_guard<std::mutex> lock(publisher.mutex_);
+        publisher.runtimes_[&on_child];
+        require(publisher.owns_foreground_locked(&on_child, child, true), "The exporter refused a child swapchain covering the foreground root");
+        publisher.runtimes_[&on_root];
+        require(!publisher.owns_foreground_locked(&on_child, child, true) && !publisher.owns_foreground_locked(&on_root, root, true),
+          "The exporter accepted a child swapchain and a root swapchain that both cover the foreground");
+        publisher.runtimes_.erase(&on_root);
+        SetWindowPos(child, nullptr, 0, 0, 160, 180, SWP_NOZORDER | SWP_NOACTIVATE);
+        require(!publisher.owns_foreground_locked(&on_child, child, true), "The exporter accepted a partial child swapchain");
+        test_foreground_window.store(nullptr, std::memory_order_release);
+        publisher.runtimes_.clear();
+      }
+      DestroyWindow(popup);
+      DestroyWindow(child);
+      DestroyWindow(other_root);
+      DestroyWindow(root);
+      std::puts("PASS: window owner on native windows (child, two children, resize, hide, re-parent, popup) and exporter ambiguity");
+    }
+
     static void seed_fx_proof(runtime_t &proof) {
       proof.texture = {101};
       proof.effect_name = "RetiredReference.fx";
@@ -2352,6 +2497,8 @@ int main(int argc, char **argv) {
     publisher_tests::session_teardown_ownership();
     publisher_tests::process_detach_lifetime();
     publisher_tests::present_invalidation();
+    publisher_tests::window_owner_model();
+    publisher_tests::window_owner_native();
     publisher_tests::contended_reload();
     publisher_tests::overlay_reload();
     publisher_tests::disabled_native_reload_lifetime();

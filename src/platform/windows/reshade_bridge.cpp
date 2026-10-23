@@ -93,6 +93,20 @@ namespace platf::reshade_bridge {
       return value ? value : counter.fetch_add(1);
     }
 
+    // The swapchain window's chain in physical pixels, the coordinates of
+    // foreground_window::sample(). Empty (refused) when the thread cannot become DPI aware.
+    ::reshade_bridge::window_owner::chain_t query_window_physical(std::uint64_t window) {
+      const auto previous = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+      ::reshade_bridge::window_owner::chain_t chain;
+      if (previous && AreDpiAwarenessContextsEqual(GetThreadDpiAwarenessContext(), DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) {
+        chain = ::reshade_bridge::window_owner::query(reinterpret_cast<HWND>(static_cast<std::uintptr_t>(window)));
+      }
+      if (previous) {
+        SetThreadDpiAwarenessContext(previous);
+      }
+      return chain;
+    }
+
     std::chrono::steady_clock::time_point frame_time(std::uint64_t qpc) {
       LARGE_INTEGER now {}, frequency {};
       const auto steady_now = std::chrono::steady_clock::now();
@@ -116,10 +130,11 @@ namespace platf::reshade_bridge {
     };
 
   public:
-    impl_t(ID3D11Device *device, ID3D11DeviceContext *context, observer_t observe):
+    impl_t(ID3D11Device *device, ID3D11DeviceContext *context, observer_t observe, window_query_t query_window):
         device_(device),
         context_(context),
-        observe_(std::move(observe)) {
+        observe_(std::move(observe)),
+        query_window_(query_window ? std::move(query_window) : window_query_t {query_window_physical}) {
       ComPtr<IDXGIDevice> dxgi_device;
       ComPtr<IDXGIAdapter> adapter;
       DXGI_ADAPTER_DESC desc {};
@@ -173,7 +188,7 @@ namespace platf::reshade_bridge {
       wire::metadata_t metadata;
       // Without a consumer the producer publishes its source (generation zero) while it renders
       // for the foreground window, and its bare identity once it stops.
-      if (!snapshot(*shared_, metadata) || !identity_matches(metadata) || !wire::valid_source_metadata(metadata) || metadata.adapter_luid != adapter_luid_) {
+      if (!snapshot(*shared_, metadata) || identify(metadata) != identity_e::matches || !wire::valid_source_metadata(metadata) || metadata.adapter_luid != adapter_luid_) {
         return std::nullopt;
       }
       const auto placement = wire::place_output(metadata.packed_width, metadata.packed_height, static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height));
@@ -294,6 +309,8 @@ namespace platf::reshade_bridge {
         detach();
         return false;
       }
+      // A child swapchain window must cover exactly this source (identify()).
+      source_ = {source.left, source.top, source.right, source.bottom};
       if (pid_ != observation.process_id || window_ != observation.window) {
         detach();
         pid_ = observation.process_id;
@@ -327,8 +344,14 @@ namespace platf::reshade_bridge {
         cached_.reset();
         return std::nullopt;
       }
-      if (!identity_matches(metadata)) {
-        cached_.reset();
+      if (const auto identity = identify(metadata); identity != identity_e::matches) {
+        // A child swapchain window that stops owning the source (re-parented, resized, hidden,
+        // overlapped) withdraws the request, so the producer stops packing stereo for it.
+        if (identity == identity_e::refused_child) {
+          withdraw();
+        } else {
+          cached_.reset();
+        }
         return std::nullopt;
       }
       // Fullscreen may scale the game's raster to a different desktop extent. Window coverage
@@ -531,10 +554,59 @@ namespace platf::reshade_bridge {
       }
     }
 
-    bool identity_matches(const wire::metadata_t &metadata) const {
-      return metadata.signature == wire::magic && metadata.protocol_version == wire::version &&
-             metadata.metadata_bytes == sizeof(wire::metadata_t) && metadata.producer_pid == pid_ &&
-             metadata.producer_creation_time == process_creation_ && metadata.window == window_;
+    // The foreground producer's identity, and its swapchain window: the foreground window itself,
+    // or a child of it that owns the captured source exactly (window_owner, rechecked on every
+    // call: re-parenting, resizing, hiding or an overlapping sibling refuses it). Another
+    // top-level window, or none, is a mismatch as before.
+    enum class identity_e {
+      matches,
+      mismatch,
+      refused_child,
+    };
+
+    identity_e identify(const wire::metadata_t &metadata) {
+      namespace owner = ::reshade_bridge::window_owner;
+      if (metadata.signature != wire::magic || metadata.protocol_version != wire::version ||
+          metadata.metadata_bytes != sizeof(wire::metadata_t) || metadata.producer_pid != pid_ ||
+          metadata.producer_creation_time != process_creation_ || metadata.window == 0) {
+        return identity_e::mismatch;
+      }
+      if (metadata.window == window_) {
+        return identity_e::matches;
+      }
+      const auto verdict = owner::classify(query_window_(metadata.window), window_, pid_, source_);
+      if (verdict == owner::verdict::not_child) {
+        return identity_e::mismatch;
+      }
+      report_child(metadata.window, verdict);
+      return verdict == owner::verdict::owner ? identity_e::matches : identity_e::refused_child;
+    }
+
+    // Names a child swapchain window's verdict when it changes, at most every 5 s (a later call
+    // names the latest verdict); the line counts the changes it summarises.
+    void report_child(std::uint64_t window, ::reshade_bridge::window_owner::verdict verdict) {
+      namespace owner = ::reshade_bridge::window_owner;
+      if (window != child_report_.window || verdict != child_report_.verdict) {
+        child_report_.window = window;
+        child_report_.verdict = verdict;
+        ++child_report_.changes;
+        child_report_.pending = true;
+      }
+      const auto now = std::chrono::steady_clock::now();
+      if (!child_report_.pending || now < child_report_.next_log) {
+        return;
+      }
+      child_report_.pending = false;
+      child_report_.next_log = now + std::chrono::seconds(5);
+      const auto changes = std::exchange(child_report_.changes, 0u);
+      if (verdict == owner::verdict::owner) {
+        BOOST_LOG(info) << "ReShade SBS: process " << pid_ << " presents to window 0x" << std::hex << window << ", a child of the foreground window 0x"
+                        << window_ << std::dec << " that covers the captured source exactly; using its export (changes=" << changes << ").";
+      } else {
+        BOOST_LOG(warning) << "ReShade SBS: process " << pid_ << " presents to window 0x" << std::hex << window << " under the foreground window 0x"
+                           << window_ << std::dec << ", which does not own the captured source (child=" << owner::verdict_name(verdict)
+                           << ", changes=" << changes << "); staying in 2D.";
+      }
     }
 
     bool attach() {
@@ -869,6 +941,19 @@ namespace platf::reshade_bridge {
     ComPtr<ID3D11Device5> device5_;
     ComPtr<ID3D11DeviceContext> context_;
     observer_t observe_;
+    window_query_t query_window_;
+    // The source rectangle of the last connect(), which a child swapchain window must cover.
+    ::reshade_bridge::window_owner::rect_t source_ {};
+
+    // The last child swapchain window verdict (report_child).
+    struct {
+      std::uint64_t window = 0;
+      ::reshade_bridge::window_owner::verdict verdict = ::reshade_bridge::window_owner::verdict::not_child;
+      unsigned changes = 0;
+      bool pending = false;
+      std::chrono::steady_clock::time_point next_log {};
+    } child_report_;
+
     bool supported_ = false;
     std::uint64_t adapter_luid_ = 0;
     DWORD pid_ = 0;
@@ -932,8 +1017,8 @@ namespace platf::reshade_bridge {
     std::size_t wake_history_next_ = 0;
   };
 
-  receiver_t::receiver_t(ID3D11Device *device, ID3D11DeviceContext *context, observer_t observe):
-      impl_(std::make_unique<impl_t>(device, context, std::move(observe))) {}
+  receiver_t::receiver_t(ID3D11Device *device, ID3D11DeviceContext *context, observer_t observe, window_query_t query_window):
+      impl_(std::make_unique<impl_t>(device, context, std::move(observe), std::move(query_window))) {}
 
   receiver_t::~receiver_t() = default;
 
