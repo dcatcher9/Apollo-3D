@@ -245,6 +245,8 @@ namespace sunshine_streamline::depth_capture {
 
   source_ref retain_source(std::uint64_t resource, record_diagnostic *diagnostic = nullptr);
   std::uint64_t source_present_generation(const source_ref &source);
+  // A retained source's allocation width and height (false without one).
+  bool source_extent(const source_ref &source, std::uint32_t &width, std::uint32_t &height);
   // BEGIN actual native Present: expires future uses of this device's old tags,
   // never an already-copied packet. No SL/native frame-number equivalence.
   void present(std::uint64_t queue);

@@ -1575,29 +1575,58 @@ namespace sunshine_streamline {
         const evaluated_depth_tag &tag) {
       if (!snapshot.frame_correlated || snapshot.decoded != decode_status::ok || !snapshot.camera.jitter_supplied)
         return {};
-      const auto dimensions = [&](const depth_tag &source) {
+      // The jitter denominator is the active region: the tag's extent when
+      // set, else the whole allocation (its declared size, or the retained
+      // allocation's own when undeclared). The allocation bounds the extent.
+      const auto dimensions = [&](const evaluated_depth_tag &input) {
+        const auto &source = input.value;
         sunshine_scene_depth::jitter_offset result;
         const auto &area = source.area;
         if (source.viewport != snapshot.viewport || !source.native_resource ||
             (area.width == 0) != (area.height == 0) || (!area.width && (area.left || area.top))) return result;
-        const auto width = area.width ? area.width : source.resource_width;
-        const auto height = area.height ? area.height : source.resource_height;
+        std::uint32_t full_width = source.resource_width, full_height = source.resource_height;
+        std::uint32_t allocated_width{}, allocated_height{};
+        if (depth_capture::source_extent(input.direct_source, allocated_width, allocated_height)) {
+          full_width = allocated_width; full_height = allocated_height;
+        }
+        const auto width = area.width ? area.width : full_width;
+        const auto height = area.height ? area.height : full_height;
         if (!width || !height || width > 16384 || height > 16384 ||
-            (source.resource_width && (area.left > source.resource_width || width > source.resource_width-area.left)) ||
-            (source.resource_height && (area.top > source.resource_height || height > source.resource_height-area.top))) return result;
+            (full_width && (area.left > full_width || width > full_width-area.left)) ||
+            (full_height && (area.top > full_height || height > full_height-area.top))) return result;
         return sunshine_scene_depth::jitter_offset{snapshot.camera.jitter_offset[0], snapshot.camera.jitter_offset[1], width, height, true};
       };
-      if (tag.value.type == buffers::depth || tag.value.type == buffers::linear_depth) return dimensions(tag.value);
+      if (tag.value.type == buffers::depth || tag.value.type == buffers::linear_depth) return dimensions(tag);
       // High-resolution depth is still jittered in render pixels. Its own
       // extent is not the denominator. Accept only a render input explicitly
       // frozen with this frame/batch; an older global tag may have another size.
       const auto &raw = snapshot.tags[0];
       const bool same_frame = raw.scope == tag_scope::explicit_frame || raw.scope == tag_scope::evaluation_local ||
         raw.observation_sequence == snapshot.sequence;
-      return same_frame && direct_tag_admissible(snapshot, raw) ? dimensions(raw.value) : sunshine_scene_depth::jitter_offset{};
+      return same_frame && direct_tag_admissible(snapshot, raw) ? dimensions(raw) : sunshine_scene_depth::jitter_offset{};
+    }
+    // A declared Resource size that disagrees with the allocation is ignored
+    // when the tag's extent defines the region (depth_capture::source_region);
+    // name it once per process.
+    void report_declared_size(const evaluated_depth_tag &tag) {
+      static std::atomic<bool> reported{};
+      const auto &value = tag.value;
+      std::uint32_t width{}, height{};
+      if (!value.area.width || reported.load(std::memory_order_relaxed) ||
+          !depth_capture::source_extent(tag.direct_source, width, height) ||
+          !((value.resource_width && value.resource_width != width) || (value.resource_height && value.resource_height != height)) ||
+          reported.exchange(true, std::memory_order_relaxed)) return;
+      char text[320]{};
+      std::snprintf(text, sizeof(text),
+        "Sunshine Streamline depth: declared resource size %ux%u differs from the %ux%u allocation; the tag extent %u,%u %ux%u "
+        "defines the region and the declared size is ignored (tag_type=%u viewport=%u; logged once)",
+        value.resource_width, value.resource_height, width, height, value.area.left, value.area.top, value.area.width,
+        value.area.height, value.type, value.viewport);
+      message(text);
     }
     sunshine_scene_depth::frame normalize_depth_frame(const evaluation_snapshot &snapshot,
         const evaluated_depth_tag &tag, bool version_one) {
+      report_declared_size(tag);
       sunshine_scene_depth::frame value;
       value.epoch = snapshot.epoch; value.sequence = snapshot.sequence; value.tick = GetTickCount64();
       value.observation_revision = snapshot.loss_revision;

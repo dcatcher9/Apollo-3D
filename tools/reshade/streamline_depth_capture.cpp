@@ -187,10 +187,14 @@ namespace sunshine_streamline::depth_capture {
       if (desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || !desc.Width || desc.Width > 16384 ||
           !desc.Height || desc.Height > 16384) return status::malformed;
       const auto area = resource.area;
+      // A nonzero extent inside the allocation alone defines the region; a
+      // declared size that disagrees with the allocation is then ignored
+      // (the adapter logs it). Without one, a declared size must be the
+      // allocation's own.
       if ((area.width == 0) != (area.height == 0) || (!area.width && (area.left || area.top)) ||
           (area.width && (area.left > desc.Width || area.top > desc.Height ||
             area.width > desc.Width - area.left || area.height > desc.Height - area.top)) ||
-          (resource.width && resource.width != desc.Width) || (resource.height && resource.height != desc.Height))
+          (!area.width && ((resource.width && resource.width != desc.Width) || (resource.height && resource.height != desc.Height))))
         return status::malformed;
       // Always retain the full allocation, including packed depth/stencil
       // plane zero. Statistics and the shader apply this same active rectangle;
@@ -1877,6 +1881,12 @@ namespace sunshine_streamline::depth_capture {
   std::uint64_t source_present_generation(const source_ref &source) {
     return source ? source->present_generation.load(std::memory_order_acquire) : 0;
   }
+  bool source_extent(const source_ref &source, std::uint32_t &width, std::uint32_t &height) {
+    width = height = 0;
+    if (!source || !source->desc.Width || source->desc.Width > UINT32_MAX) return false;
+    width = static_cast<std::uint32_t>(source->desc.Width); height = source->desc.Height;
+    return true;
+  }
   void present(std::uint64_t native) {
     if (!requested.load() || !native) return;
     std::lock_guard lock(mutex);
@@ -3203,6 +3213,19 @@ namespace sunshine_streamline::depth_capture {
       if (capture_region(desc, resource, region) != status::malformed) return false;
       resource.area = {}; resource.width = 2227;
       if (capture_region(desc, resource, region) != status::malformed) return false;
+      // An extent inside the allocation alone defines the region: a declared
+      // size that disagrees with the allocation (a render size) is ignored.
+      resource.area = {0, 0, 1920, 1080};
+      for (const auto declared : {std::array<std::uint32_t, 2>{1920, 1080}, std::array<std::uint32_t, 2>{2228, 1256},
+          std::array<std::uint32_t, 2>{2227, 0}}) {
+        resource.width = declared[0]; resource.height = declared[1];
+        if (capture_region(desc, resource, region) != status::ready || region.width != 2228 || region.height != 1256 ||
+            region.area.width != 1920 || region.area.height != 1080) return false;
+      }
+      resource.area = {}; resource.width = 0; resource.height = 1080;
+      if (capture_region(desc, resource, region) != status::malformed) return false;
+      resource.height = 0;
+      if (capture_region(desc, resource, region) != status::ready || region.area.width != 2228) return false;
       resource.width = 0;
       const auto ordinary = desc;
       for (const auto format : {DXGI_FORMAT_D32_FLOAT, DXGI_FORMAT_D32_FLOAT_S8X24_UINT,

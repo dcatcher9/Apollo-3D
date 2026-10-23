@@ -3873,7 +3873,12 @@ was removed.)
 
 The direct provider supports D3D12 full-resource, single-sample
 device depth and positive linear view distance with UntilEvaluate/UntilPresent lifetimes; it accepts bounded active rectangles while
-copying the full allocation's depth plane. Evaluation-bound native capture declines OnlyValidNow;
+copying the full allocation's depth plane. A tag extent inside the allocation alone defines the
+active rectangle and the jitter denominator: a declared Resource size that disagrees with the
+allocation (for example a render size inside a larger dynamic-resolution allocation) is then
+ignored, and the first one is logged (`declared resource size ... differs from the ... allocation`).
+Without an extent a declared size must be the allocation's own (`malformed` otherwise), and an
+undeclared size takes the retained allocation's for the jitter denominator. Evaluation-bound native capture declines OnlyValidNow;
 the synchronous v2 tag boundary supports it with or without FG. Native capture still declines
 unknown depth encodings, unknown resource states or layouts and ambiguous viewports. One rule
 ([`depth_view_format.h`](../tools/reshade/depth_view_format.h)), shared by the capture, the
