@@ -7,9 +7,10 @@
 //
 // The pure layer (L0) reads production tables exhaustively:
 // - Streamline buffer types: each surveyed release's interposer version
-//   resource, identified as the probe identifies it, and every raw tag 0-80
-//   read through the selected buffer contract, against that release's own
-//   header (test_sl_survey_tables.generated.h).
+//   resource, identified as the probe identifies it (identify() mirrors
+//   discover()'s selection), and every raw tag 0-80 read through the selected
+//   buffer contract, against that release's own header
+//   (test_sl_survey_tables.generated.h).
 // - Copy state: every legal allocation, adapter claim, consumer, declared
 //   state and recorded evidence the capture state table sees, plus
 //   deliberately illegal rows that must refuse.
@@ -41,7 +42,9 @@
 // refusal classes wait for the runtime layer's structured refusal query.
 //
 // Command line (test_contract_matrix_generator.h): --list, --case
-// <id|family:name=value,...>, --shard i/N. Without one, both layers run.
+// <id|family:name=value,...>, --shard i/N. Without one, both layers run;
+// shard 0 also runs the pure layer. Only an unsharded run finds a stale
+// known-gap row of a hook family.
 #include "capture_state_policy.h"
 #include "depth_view_format.h"
 #include "ngx_depth_source.h"
@@ -197,7 +200,7 @@ namespace {
   // cells per family are described.
   template<unsigned N>
   struct tally {
-    unsigned cells {}, met {}, unmet {}, closed {}, known[N] {};
+    unsigned cells {}, met {}, unmet {}, closed {}, pending {}, known[N] {};
 
     // The reason to describe a failing cell, or null.
     const char *add(gaps::verdict verdict, int index) {
@@ -208,6 +211,9 @@ namespace {
           return nullptr;
         case gaps::verdict::known_failure:
           ++known[index];
+          return nullptr;
+        case gaps::verdict::pending:
+          ++pending;
           return nullptr;
         case gaps::verdict::gap_closed:
           return closed++ < 8 ? "known gap now passes; remove its row" : nullptr;
@@ -236,11 +242,14 @@ namespace {
 
     template<class Case>
     void print(const gaps::row<Case> (&rows)[N]) const {
-      std::printf("%u meet the oracle, %u are recorded gaps (", met, cells - met);
+      std::printf("%u meet the oracle, %u are recorded gaps (", met, cells - met - pending);
       for (unsigned i = 0; i != N; ++i) {
         std::printf("%s%s %u", i ? ", " : "", rows[i].id, known[i]);
       }
       std::printf(")");
+      if (pending) {
+        std::printf(", %u are pending", pending);
+      }
     }
   };
 
@@ -262,9 +271,11 @@ namespace {
     return value;
   }
 
-  // The interposer as the probe identifies it (discover() in
-  // streamline_camera_probe.cpp): its ABI family, and the buffer contract of
-  // its exact header or of every candidate of an inexact 2.x family.
+  // The interposer as the probe identifies it: its ABI family, and the buffer
+  // contract of its exact header or of every candidate of an inexact 2.x
+  // family. A mirror of discover()'s selection (streamline_camera_probe.cpp),
+  // whose testing::install repeats only the exact branch: a change to that
+  // selection is repeated here until one shared helper replaces all three.
   struct identified {
     versioning::abi abi {};
     bool exact {};
@@ -594,7 +605,7 @@ namespace {
 
   // Deliberately illegal input the table can see (the rows the legality
   // filter drops): each must end in a safe refusal.
-  std::size_t illegal_cases(matrix::state_case *out) {
+  std::vector<matrix::state_case> illegal_cases() {
     using matrix::claim;
     using matrix::consumer;
     using matrix::evidence;
@@ -633,10 +644,7 @@ namespace {
       row(ds, claim::none, 0, evidence::enhanced, 0, D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_SHADER_RESOURCE, D3D12_BARRIER_ACCESS_SHADER_RESOURCE),
       row(none, claim::sl_undeclared, UINT32_MAX, evidence::enhanced, 0, D3D12_BARRIER_LAYOUT_VIDEO_DECODE_READ, D3D12_BARRIER_ACCESS_VIDEO_DECODE_READ),
     };
-    for (const auto &value : rows) {
-      *out++ = value;
-    }
-    return std::size(rows);
+    return {std::begin(rows), std::end(rows)};
   }
 
   void describe(const char *what, const matrix::state_case &value, const matrix::outcome &expected, const copy_state::decision &actual) {
@@ -695,10 +703,8 @@ namespace {
     each_legal_case([&](const matrix::state_case &value) {
       judge(value, true);
     });
-    matrix::state_case rows[32];
-    const auto count = illegal_cases(rows);
-    for (std::size_t i = 0; i != count; ++i) {
-      judge(rows[i], false);
+    for (const auto &value : illegal_cases()) {
+      judge(value, false);
     }
     counts.table.finish(gaps::state_rows, "copy state");
     return counts;
@@ -852,8 +858,10 @@ namespace {
     std::fprintf(stderr, "  expected: %s%s%s rule=%s basis_rule=%s deferred=%u basis=%s0x%x/0x%x/0x%x\n", name(expected.kind), matrix::either(expected) ? " or " : "", matrix::either(expected) ? name(expected.alternative) : "", expected.by ? expected.by->id : "?", expected.basis_by ? expected.basis_by->id : "-", expected.deferred, expected.exact_basis ? "" : "(any) ", expected.basis.enhanced ? expected.basis.layout : expected.basis.state, expected.basis.access, unsigned(expected.basis.enhanced));
   }
 
-  // The Streamline fixture SDK: noinline entry points the probe hooks, as in
-  // test_streamline_camera_probe.cpp.
+  // The Streamline fixture SDK: noinline entry points the probe hooks. The
+  // entry points, GUIDs, volatile dispatch and ReShade stubs repeat
+  // test_streamline_camera_probe.cpp's; the matrix's interposer-fixture phase
+  // (contract matrix design, P5) moves both into one test-only header.
   namespace sl_fixture {
     using namespace sunshine_streamline;
     constexpr DWORD outgoing_error = 0xabcdef01;
@@ -994,12 +1002,13 @@ namespace {
       observed
     };
 
+    // The typed values behind the dimensions that are not one enumeration in
+    // order; family() names them in the same order (check_sizes).
     constexpr matrix::sl_version versions[] {{2, 14, 1}, {2, 6, 10}, {2, 7, 30}, {2, 12, 0}, {2, 15, 0}, {3, 0, 0}};
     constexpr matrix::lifecycle lives[] {matrix::lifecycle::valid_until_present, matrix::lifecycle::only_valid_now, matrix::lifecycle::valid_until_evaluate, matrix::lifecycle::undeclared};
     constexpr matrix::copy_point points[] {matrix::copy_point::same_frame_evaluate, matrix::copy_point::tag_call, matrix::copy_point::after_present};
     constexpr matrix::struct_form tag_forms[] {matrix::struct_form::newest_known, matrix::struct_form::above_known, matrix::struct_form::unknown_chained};
     constexpr matrix::struct_form version_forms[] {matrix::struct_form::newest_known, matrix::struct_form::first, matrix::struct_form::above_known};
-    constexpr std::uint32_t frame_counts[] {1, 0, 3, 5};
     constexpr std::uint32_t states[] {D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, UINT32_MAX, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_DEPTH_READ, D3D12_RESOURCE_STATE_GENERIC_READ};
     constexpr int tag_call_point = 1, frame_generation_on = 1;
 
@@ -1026,7 +1035,7 @@ namespace {
       out.frame_generation_options = version_forms[value[fg_options]];
       out.views = value[views] ? matrix::viewports::five_rotating : matrix::viewports::one;
       out.fg = matrix::fg_mode(value[fg]);
-      out.frames_generated = frame_counts[value[frames]];
+      out.frames_generated = matrix::frames_generated[value[frames]];
       out.tag_result = matrix::sl_result(value[tag_result]);
       out.evaluate_result = matrix::sl_result(value[evaluate_result]);
       out.options_result = matrix::sl_result(value[options_result]);
@@ -1117,6 +1126,39 @@ namespace {
         },
         legal,
       };
+    }
+
+    // Each dimension's names against the values to_case gives them: a typed
+    // table's size, or an enumeration's count.
+    void check_sizes(const generator::family &owner) {
+      require(owner.dimensions.size() == observed + 1, "the Streamline hook family and its dimension enumeration differ");
+      const auto sized = [&](unsigned d, std::size_t count) {
+        require(owner.dimensions[d].values.size() == count, "a Streamline hook dimension's names and values differ in number");
+      };
+      sized(version, std::size(versions));
+      sized(entry, std::size_t(matrix::tag_entry::local_chain_not_last) + 1);
+      sized(life, std::size(lives));
+      sized(commands, std::size_t(matrix::tag_commands::none) + 1);
+      sized(at, std::size(points));
+      sized(generated, std::size(matrix::generated_presents));
+      sized(resource, std::size_t(matrix::resource_form::type_unknown) + 1);
+      sized(extent, std::size_t(matrix::extent_form::declared_size_differs) + 1);
+      sized(precision, std::size_t(matrix::precision_form::unknown_formula) + 1);
+      sized(tags, std::size(matrix::tags_per_call));
+      sized(tag_header, std::size(tag_forms));
+      sized(resource_header, std::size(tag_forms));
+      sized(constants, std::size(version_forms));
+      sized(viewport_handle, 2);
+      sized(fg_options, std::size(version_forms));
+      sized(views, 2);
+      sized(fg, std::size_t(matrix::fg_mode::undeclared) + 1);
+      sized(frames, std::size(matrix::frames_generated));
+      for (const auto d : {tag_result, evaluate_result, options_result}) {
+        sized(d, std::size_t(matrix::sl_result::error) + 1);
+      }
+      sized(untag, std::size_t(matrix::untag_pattern::before_tag) + 1);
+      sized(declared, std::size(states));
+      sized(observed, 4);
     }
 
     // Rows from games the add-on was tuned on (design 3.2); the oracle still
@@ -1324,18 +1366,19 @@ namespace {
       int list {}, native {}, other_native {};
       void *const game_list = &list;
       constexpr std::uint32_t id = 7;
-      auto view = fx::viewport(id, value.viewport_handle == matrix::struct_form::above_known ? 2 : 1);
-      // Every surveyed release declares Constants v2, ViewportHandle v1 and
-      // (from 2.4) DLSSGOptions v5 (sl_struct.h versions; survey tables).
-      const auto version_of = [](matrix::struct_form form, std::uint64_t newest) -> std::uint64_t {
+      // The newest structure versions a reader knows are the newest surveyed
+      // release's (survey tables); above_known sends one more.
+      const auto &newest = matrix::newest_known();
+      const auto version_of = [](matrix::struct_form form, std::uint64_t known) -> std::uint64_t {
         if (form == matrix::struct_form::first) {
           return 1;
         }
-        return form == matrix::struct_form::above_known ? newest + 1 : newest;
+        return form == matrix::struct_form::above_known ? known + 1 : known;
       };
-      const auto camera = fx::camera(version_of(value.constants, 2));
+      auto view = fx::viewport(id, version_of(value.viewport_handle, newest.viewport_handle));
+      const auto camera = fx::camera(version_of(value.constants, newest.constants));
       abi_v2::resource other {};
-      other.base = {nullptr, resource_guid, 1};
+      other.base = {nullptr, resource_guid, newest.resource};
       other.native = &other_native;
       other.state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
       other.width = 3840;
@@ -1343,10 +1386,10 @@ namespace {
       if (value.views == matrix::viewports::five_rotating) {
         fx::opaque_token rotating_token;
         for (std::uint32_t step = 1; step <= 4; ++step) {
-          auto rotating = fx::viewport(id + step, 1);
+          auto rotating = fx::viewport(id + step, newest.viewport_handle);
           mint(rotating_token);
-          forward(fx::call_constants(fx::camera(2), rotating_token.ref(), rotating), 0);
-          abi_v2::resource_tag tag {{nullptr, tag_guid, 1}, &other, 0, 1, {}};
+          forward(fx::call_constants(fx::camera(newest.constants), rotating_token.ref(), rotating), 0);
+          abi_v2::resource_tag tag {{nullptr, tag_guid, newest.resource_tag}, &other, 0, 1, {}};
           forward(fx::call_tag(rotating, &tag, 1, game_list), 0);
           const base_structure *inputs[] {&rotating.base};
           forward(fx::call_evaluate(0, rotating_token.ref(), inputs, 1, game_list), 0);
@@ -1359,7 +1402,7 @@ namespace {
         void *function {};
         forward(fx::call_feature_function(1000, "slDLSSGSetOptions", function), 0);
         fx::fg_options options;
-        options.base.version = version_of(value.frame_generation_options, 5);
+        options.base.version = version_of(value.frame_generation_options, newest.dlssg_options);
         options.mode = std::uint32_t(value.fg);
         options.generated_frames = value.frames_generated;
         if (function) {
@@ -1375,7 +1418,7 @@ namespace {
       // The depth Resource and its tag, then tags_in_call - 1 other tags.
       abi_v2::resource resource {};
       base_structure resource_extension {nullptr, fx::unknown_type, 1};
-      resource.base = {nullptr, resource_guid, value.resource_header == matrix::struct_form::above_known ? 2u : 1u};
+      resource.base = {nullptr, resource_guid, version_of(value.resource_header, newest.resource)};
       if (value.resource_header == matrix::struct_form::unknown_chained) {
         resource.base.next = &resource_extension;
       }
@@ -1391,7 +1434,7 @@ namespace {
       const bool declared_small = value.extent == matrix::extent_form::declared_size_differs;
       resource.width = declared_small ? 1920 : 3840;
       resource.height = declared_small ? 1080 : 2160;
-      const std::uint64_t tag_version = value.tag_header == matrix::struct_form::above_known ? 2 : 1;
+      const auto tag_version = version_of(value.tag_header, newest.resource_tag);
       std::vector<abi_v2::resource_tag> tags(value.tags_in_call);
       for (auto &tag : tags) {
         tag = {{nullptr, tag_guid, tag_version}, &other, 1, std::uint32_t(value.life), {}};  // Motion vectors.
@@ -1427,7 +1470,7 @@ namespace {
       for (std::size_t i = 0; i + 1 < links.size(); ++i) {
         links[i]->next = links[i + 1];
       }
-      const abi_v2::resource_tag untag {{nullptr, tag_guid, 1}, nullptr, 0, std::uint32_t(value.life), {}};
+      const abi_v2::resource_tag untag {{nullptr, tag_guid, newest.resource_tag}, nullptr, 0, std::uint32_t(value.life), {}};
       const bool local = matrix::known_gaps::streamline::local(value.entry);
       void *const tag_commands = value.commands == matrix::tag_commands::game_list ? game_list : nullptr;
       fx::opaque_token tokens[4];
@@ -1556,10 +1599,11 @@ namespace {
       bool matched[row_count] {};
     };
 
+    // Any complete assignment, legal or not: illegal input must be refused.
     judgement judge(const generator::row &assignment) {
       judgement out;
       out.value = to_case(assignment);
-      out.legal = matrix::legal(out.value);
+      out.legal = legal(assignment);
       out.expected = matrix::expect(out.value);
       require(out.expected.by != nullptr, "the oracle named no rule for a Streamline hook cell");
       out.observed = run(out.value, &out.previous);
@@ -1640,6 +1684,17 @@ namespace {
 
     // A subrect outside the allocation needs the allocation's size, which
     // only the capture owner reads (source_region): the device layer's.
+    generator::family family();
+
+    // Each dimension's names against the values to_case gives them.
+    void check_sizes(const generator::family &owner) {
+      const std::size_t counts[] {std::size(features), std::size_t(matrix::ngx_hw_depth::other) + 1, 2, std::size_t(matrix::ngx_depth_set::null) + 1, std::size_t(matrix::ngx_subrect::inside) + 1, std::size_t(matrix::ngx_result::failure) + 1, std::size_t(matrix::ngx_lifetime::nested_in_streamline) + 1, 3};
+      require(owner.dimensions.size() == std::size(counts), "the NGX hook family and its dimension enumeration differ");
+      for (unsigned d = 0; d != std::size(counts); ++d) {
+        require(owner.dimensions[d].values.size() == counts[d], "an NGX hook dimension's names and values differ in number");
+      }
+    }
+
     generator::family family() {
       return {
         "ngx",
@@ -1869,6 +1924,7 @@ namespace {
   hook_counts hook_layer(const generator::options &options) {
     hook_counts counts;
     const auto sl = sl_cells::family();
+    sl_cells::check_sizes(sl);
     const auto streamline = sl_cells::cells(sl, counts.census);
     require(counts.census.covered == counts.census.pairs && !counts.census.unfilled, "the Streamline covering array left a legal pair uncovered");
     for (std::size_t i = 0; i != streamline.size(); ++i) {
@@ -1882,6 +1938,7 @@ namespace {
     }
     sl_cells::uninstall();
     const auto ngx = ngx_cells::family();
+    ngx_cells::check_sizes(ngx);
     const auto evaluations = ngx_cells::cells(ngx);
     for (std::size_t i = 0; i != evaluations.size(); ++i) {
       if (!options.selected(i)) {
@@ -1954,18 +2011,23 @@ namespace {
     }
     gaps::verdict verdict;
     if (streamline) {
-      require(sl.legal(value) || !generator::complete(value), "--case: illegal Streamline assignment");
+      // An illegal assignment is judged as the full run judges it: it must
+      // end in a refusal.
       const auto judged_case = sl_cells::judge(value);
       sl_cells::describe("case", sl, value, judged_case);
       verdict = judged_case.verdict;
       sl_cells::uninstall();
     } else {
+      if (!ngx.legal(value)) {
+        std::fprintf(stderr, "--case: the NGX family holds no illegal cell\n");
+        return 2;
+      }
       const auto judged_case = ngx_cells::judge(value);
       ngx_cells::describe("case", ngx, value, judged_case);
       verdict = judged_case.verdict;
       sunshine_ngx::shutdown();
     }
-    return verdict == gaps::verdict::violates || verdict == gaps::verdict::gap_closed ? 1 : 0;
+    return verdict == gaps::verdict::violates || verdict == gaps::verdict::gap_closed || verdict == gaps::verdict::misattributed || verdict == gaps::verdict::overlapping ? 1 : 0;
   }
 }  // namespace
 
@@ -1982,7 +2044,8 @@ int main(int argc, char **argv) try {
   if (!options.single.empty()) {
     return run_case(options.single);
   }
-  if (!options.partial()) {
+  // The pure layer runs whole in an unsharded run and in shard 0.
+  if (!options.partial() || (options.shards != 1 && options.shard == 0)) {
     const auto streamline = buffer_types();
     const auto state = copy_states();
     const auto formats = depth_formats();

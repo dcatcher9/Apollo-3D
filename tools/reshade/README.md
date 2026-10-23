@@ -1338,10 +1338,10 @@ row or a fix.
 
 `ctest -L contract` runs the matrix. `reshade_contract_matrix_cpu` is built with the Streamline
 probe tests' sources and defines and holds two layers. The pure layer identifies every surveyed
-Streamline release's interposer DLL as the probe does and reads raw buffer types 0 to 80 through
-the selected contract; it judges the capture state table over every legal state cell and a set of
-deliberately illegal rows; and it reads every pair of DXGI allocation and declared formats through
-[`depth_view_format.h`](depth_view_format.h).
+Streamline release's interposer DLL as the probe's discovery does (the matrix mirrors that contract
+selection) and reads raw buffer types 0 to 80 through the selected contract; it judges the capture
+state table over every legal state cell and a set of deliberately illegal rows; and it reads every
+pair of DXGI allocation and declared formats through [`depth_view_format.h`](depth_view_format.h).
 
 The hook layer drives the real adapters without a device. Streamline cases go through the probe's
 own hooks on fixture entry points (`testing::install` takes the release's version number and selects
@@ -1355,19 +1355,24 @@ layer cannot run without a device (the copy's command list and present generatio
 observed-state nomination) are repeated from the capture owner; the device and runtime layers
 replace them. [`test_contract_matrix_generator.h`](test_contract_matrix_generator.h) builds the
 cases: a case id hashes its non-default assignment, so adding a value renames no case. The
-executable takes `--list`, `--case <id>` or `--case <sl|ngx>:<name=value,...>` (one case, described),
-and `--shard <i>/<N>`. `reshade_contract_oracle_independence` refuses any add-on include or name in
-the oracle's headers and the generator, and compiles each on its own.
+executable takes `--list`, `--case <id>` or `--case <sl|ngx>:<name=value,...>` (one case, described;
+an illegal Streamline assignment must be refused, as in the full run), and `--shard <i>/<N>`.
+Shard 0 also runs the pure layer; only an unsharded run reports a hook family's stale known-gap row.
+`reshade_contract_oracle_independence` refuses any add-on include or name in the oracle's headers and
+the generator, and compiles each on its own with the configured compiler, whatever the caller's
+`PATH`.
 
 Buffer-type meanings, and each release's `DLSSGMode` values, multi frame generation and
 `ResourceType` values, come from
 [`test_sl_survey_tables.generated.h`](test_sl_survey_tables.generated.h), never from the add-on's
 contract table. [`contract_sl_survey_tables.cmake`](contract_sl_survey_tables.cmake) generates it
 from the Streamline ABI survey: each release's own headers and its interposer DLL's version
-resource. `reshade_contract_sl_survey_tables` compares the checked-in copy with the survey. It
-exists only where `SUNSHINE_SL_ABI_SURVEY_DIR` names a survey; the default is the main checkout's
-`cmake-build-relwithdebinfo/sl-abi-survey`, also from a worktree. After the survey gains a release,
-regenerate the copy, review its diff and commit it with the matrix changes it causes:
+resource. The survey is a research artifact kept outside the repository, which cannot recreate it.
+`reshade_contract_sl_survey_tables` compares the checked-in copy with the survey. It exists only
+where `SUNSHINE_SL_ABI_SURVEY_DIR` names a survey (configure reports when it is skipped); the default
+is the main checkout's `cmake-build-relwithdebinfo/sl-abi-survey`, also from a worktree. After the
+survey gains a release, regenerate the copy, review its diff and commit it with the matrix changes it
+causes:
 
 ```bash
 cmake -DSURVEY_DIR=<sl-abi-survey> -DOUTPUT=tools/reshade/test_sl_survey_tables.generated.h -P tools/reshade/contract_sl_survey_tables.cmake

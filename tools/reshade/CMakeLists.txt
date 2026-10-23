@@ -280,8 +280,10 @@ if(BUILD_TESTING)
     "-DCOMPILER=${CMAKE_CXX_COMPILER}" "-DCOMPILER_FRONTEND=${CMAKE_CXX_COMPILER_FRONTEND_VARIANT}"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/test_game3d_api_contract_independence.cmake")
   set_tests_properties(reshade_contract_oracle_independence PROPERTIES TIMEOUT 60 LABELS "contract")
-  # The survey is a build output of the main checkout, which a worktree reaches
-  # through its common git directory.
+  # The survey is a research artifact kept under the main checkout's build tree
+  # (sl-abi-survey: downloaded release headers and their interposer DLLs'
+  # version resources); no target produces it and the repository cannot
+  # recreate it. A worktree reaches it through its common git directory.
   execute_process(COMMAND git rev-parse --path-format=absolute --git-common-dir WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
     OUTPUT_VARIABLE sunshine_git_common_dir OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
   set(sunshine_main_checkout "${CMAKE_CURRENT_SOURCE_DIR}/../..")
@@ -295,6 +297,8 @@ if(BUILD_TESTING)
       "-DCHECK=${CMAKE_CURRENT_SOURCE_DIR}/test_sl_survey_tables.generated.h"
       -P "${CMAKE_CURRENT_SOURCE_DIR}/contract_sl_survey_tables.cmake")
     set_tests_properties(reshade_contract_sl_survey_tables PROPERTIES TIMEOUT 60 LABELS "contract")
+  else()
+    message(STATUS "reshade_contract_sl_survey_tables skipped: no Streamline ABI survey at ${SUNSHINE_SL_ABI_SURVEY_DIR}")
   endif()
 
   add_executable(reshade_display_depth_cache_tests test_display_depth_cache.cpp)

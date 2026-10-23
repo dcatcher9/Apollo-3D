@@ -38,10 +38,9 @@ namespace game3d_contract {
     return a.major == b.major && a.minor == b.minor && a.patch == b.patch;
   }
 
-  // Representative releases (survey REPORT.md); the generated survey table
-  // sweeps every surveyed release. 2.15.0 is newer than the survey and 3.0.0 is
-  // an unknown major version: both are outside the contract.
-  inline constexpr sl_version sl_versions[] {{1, 0, 2}, {1, 1, 1}, {2, 2, 0}, {2, 2, 1}, {2, 4, 0}, {2, 6, 10}, {2, 7, 30}, {2, 11, 1}, {2, 12, 0}, {2, 14, 1}, {2, 15, 0}, {3, 0, 0}};
+  // The newest surveyed release (survey REPORT.md). The generated survey table
+  // holds every surveyed release's own declarations; a newer 2.x release and an
+  // unknown major version are outside the survey.
   inline constexpr sl_version newest_surveyed {2, 14, 1};
   // slSetTagForFrame first appears in 2.7.30 (SLA:136-152; absent through 2.7.2).
   inline constexpr sl_version first_frame_tag {2, 7, 30};
@@ -139,8 +138,10 @@ namespace game3d_contract {
     undeclared
   };
 
-  // sl_dlss_g.h:75-79 numFramesToGenerate (1 for 2x, 3 for 4x).
-  inline constexpr std::uint32_t frames_generated[] {0, 1, 3, 5};
+  // sl_dlss_g.h:75-79 numFramesToGenerate: 1 for 2x, 3 for 4x, 0 generates
+  // nothing; above 1 only where that release's header documents multi frame
+  // generation (from 2.7.2; before, "Must be 1"). The default comes first.
+  inline constexpr std::uint32_t frames_generated[] {1, 0, 3, 5};
 
   // sl_result.h:33-74: eOk = 0, 38 eError* values, eWarnOutOfVRAM = 39.
   enum class sl_result {
@@ -160,10 +161,8 @@ namespace game3d_contract {
     open
   };
 
-  // The tag value read against that release's own header (the generated survey
-  // table supplies the meaning). Values: 0, 2, 3, 4, 23, 48, 49, 53, 68, 69.
-  inline constexpr std::uint32_t buffer_type_values[] {0, 2, 3, 4, 23, 48, 49, 53, 68, 69};
-
+  // The meaning a tag value has in that release's own header (the generated
+  // survey table supplies it).
   enum class buffer_meaning {
     depth,
     high_resolution_depth,

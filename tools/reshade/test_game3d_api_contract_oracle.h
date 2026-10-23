@@ -799,6 +799,12 @@ namespace game3d_contract {
 
   static_assert(detail::survey_agrees(), "a surveyed version names two headers, or newest_surveyed is not the survey's newest release");
 
+  // The structure versions the newest surveyed release declares: the newest
+  // a game can send that a reader knows (S13).
+  constexpr const survey::release &newest_known() {
+    return *detail::surveyed(newest_surveyed);
+  }
+
   // The meaning a release's header gives a buffer-type name.
   constexpr buffer_meaning meaning_of(const char *name) {
     for (const auto &entry : detail::meanings) {
