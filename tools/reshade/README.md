@@ -1342,7 +1342,9 @@ Look in the game's `ReShade.log` for `Sunshine SBS:` messages:
   it changes): `owner`, or why not (`partial`, `overlapped`, `not_visible`, `other_process`,
   `not_foreground`, `incomplete`), or `ambiguous` when another swapchain window of the game
   qualifies too (then a top-level window reads `is the foreground window F: owner=ambiguous`). Any
-  verdict but `owner` keeps the export inactive with `not_foreground`.
+  verdict but `owner` keeps the export inactive with `not_foreground`. `owner`, `not_foreground`,
+  `not_visible` and `partial` (focus loss, a hidden or a resizing window) are info lines, as routine
+  as a top-level window's `not_foreground` pause; the others are warnings.
 - HRESULT messages identify native sharing/fence failures. Repeated allocation failure retries
   are throttled; publication never falls back to CPU readback.
 

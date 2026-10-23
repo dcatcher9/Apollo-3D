@@ -454,6 +454,19 @@ namespace {
   static_assert(std::string_view(export_pause_class("ring_replaced")) == "routine" &&
     std::string_view(export_pause_class("device_removed")) == "fault" && std::string_view(export_pause_class("")) == "fault");
 
+  // A child swapchain window's verdicts (report_window_owner) that the player
+  // or the game's own window changes explain, as a top-level window's
+  // not_foreground pause is routine: the owner, a root out of focus, a hidden
+  // child and one being resized. They are logged at info; a sibling overlap,
+  // another process's window in the chain, an incomplete query, two
+  // qualifying swapchains and any new verdict are warnings.
+  constexpr std::array<std::string_view, 4> routine_window_verdicts{"owner", "not_foreground", "not_visible", "partial"};
+  constexpr bool routine_window_verdict(std::string_view verdict) {
+    for (const auto routine : routine_window_verdicts)
+      if (routine == verdict) return true;
+    return false;
+  }
+
   // The colour space a transfer's export is encoded in (the overlay's target).
   api::color_space export_space(wire::transfer transfer) {
     return transfer == wire::transfer::srgb ? api::color_space::srgb :
@@ -2574,7 +2587,8 @@ namespace {
     }
 
     // Names a child (or ambiguous) swapchain window's verdict when it changes, at most every 5 s
-    // (a later call names the latest verdict); the line counts the changes it summarises.
+    // (a later call names the latest verdict); the line counts the changes it summarises. A
+    // routine verdict (routine_window_verdict) is info, any other a warning.
     void report_window_owner(HWND window, HWND foreground, const char *reason) {
       if (window != window_report_.window || std::strcmp(reason, window_report_.reason) != 0) {
         window_report_.window = window;
@@ -2590,7 +2604,7 @@ namespace {
       std::snprintf(message, sizeof(message), "Sunshine SBS: swapchain window %p %s foreground window %p: owner=%s changes=%u",
         static_cast<void *>(window), window == foreground ? "is the" : "presents under the", static_cast<void *>(foreground), reason,
         std::exchange(window_report_.changes, 0u));
-      log(std::strcmp(reason, "owner") == 0 ? reshade::log::level::info : reshade::log::level::warning, message);
+      log(routine_window_verdict(reason) ? reshade::log::level::info : reshade::log::level::warning, message);
     }
 
     // One-shot invalidation also covers identity metadata published before a host connects.

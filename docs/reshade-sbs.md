@@ -5074,7 +5074,9 @@ together with a covering child swapchain is ambiguous, so neither is exported
 (`export inactive (not_foreground, routine)`). The add-on logs a child's verdict when it changes, at most
 every 5 s: `Sunshine SBS: swapchain window W presents under the foreground window F: owner=V
 changes=N` (V is `owner`, `partial`, `overlapped`, `not_visible`, `other_process`,
-`not_foreground`, `incomplete` or `ambiguous`). The host requires the foreground root's client
+`not_foreground`, `incomplete` or `ambiguous`). The verdicts the player or the game's own window
+explains (`owner`, `not_foreground`, `not_visible` and `partial`, as while resizing) are logged at
+info, like a top-level window's routine `not_foreground` pause; the others are warnings. The host requires the foreground root's client
 area to equal the captured display, as for any game, and then the child chain to cover exactly
 that rectangle, measured in physical pixels. It rechecks the chain on every poll and status; a
 child that stops owning the display (re-parented, resized, hidden or overlapped) withdraws the

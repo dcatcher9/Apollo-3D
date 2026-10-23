@@ -1785,7 +1785,18 @@ namespace {
       for (const char *reason : {"device_removed", "ring_creation_failed", "fence_signal_failed", "renderer_unavailable",
              "consumer_protocol", "consumer_undeclared", "output_unavailable", "generation_limit", "a_future_reason"})
         require(std::strcmp(export_pause_class(reason), "fault") == 0, "a faulting export pause was classed routine");
-      std::puts("PASS export pause class: the routine pauses are named, every other reason is a fault");
+      // A child swapchain window's focus loss, hiding or resizing is as routine as a top-level
+      // window's not_foreground pause (info); the other verdicts and "ambiguous" warn.
+      namespace owner = reshade_bridge::window_owner;
+      for (const auto verdict : {owner::verdict::owner, owner::verdict::not_foreground, owner::verdict::not_visible,
+             owner::verdict::partial})
+        require(routine_window_verdict(owner::verdict_name(verdict)), "a routine child window verdict is logged as a warning");
+      for (const auto verdict : {owner::verdict::overlapped, owner::verdict::other_process, owner::verdict::incomplete,
+             owner::verdict::not_child})
+        require(!routine_window_verdict(owner::verdict_name(verdict)), "a refused child window verdict is logged at info");
+      require(!routine_window_verdict("ambiguous") && !routine_window_verdict("a_future_verdict"),
+        "an ambiguous or unknown window verdict is logged at info");
+      std::puts("PASS export pause class: the routine pauses are named, every other reason is a fault; routine child window verdicts are info");
     }
 
     // Only a host that declared this export protocol is answered
