@@ -521,6 +521,15 @@ namespace {
     require(bool(strict_after) && diagnostic.copy_state_known && diagnostic.copy_state == rt &&
       !diagnostic.used_observed_state, "auxiliary override changed later declared-state admission");
     capture::finish_diagnostic_texture(strict_after, true);
+    // An undeclared state (UINT_MAX) under the strict policy is no claim: the
+    // recording's observation supplies it.
+    auto undeclared = input; undeclared.native_state = UINT32_MAX;
+    undeclared.proof = sunshine_scene_depth::state_proof::unavailable;
+    auto observed_after = auxiliary_snapshot(gpu, shared, undeclared, &diagnostic, capture::texture_state_policy::source_contract);
+    require(bool(observed_after) && diagnostic.copy_state_known && diagnostic.copy_state == rt &&
+      diagnostic.used_observed_state && diagnostic.native_state == UINT32_MAX,
+      "an undeclared state was not taken from this recording's observation");
+    capture::finish_diagnostic_texture(observed_after, true);
     gpu.submit(); gpu.wait(); gpu.reset();
 
     auto first_target = destination(gpu.device.Get(), snapshot_format);
@@ -552,7 +561,8 @@ namespace {
     first_bytes.verify(image.width, image.height, image.bpp, 0);
     next_bytes.verify(image.width, image.height, image.bpp, 1);
     capture::release_diagnostic_texture(original); capture::release_diagnostic_texture(changed);
-    capture::release_diagnostic_texture(strict_after); original = {}; changed = {}; strict_after = {}; capture::poll();
+    capture::release_diagnostic_texture(strict_after); capture::release_diagnostic_texture(observed_after);
+    original = {}; changed = {}; strict_after = {}; observed_after = {}; capture::poll();
     host_snapshot.ownership = {};
     capture::poll();
     if (shared) {
@@ -632,7 +642,10 @@ namespace {
     }
     auto wrong = input; wrong.proof = sunshine_scene_depth::state_proof::observed_nonzero;
     reject(wrong, capture::status::missing_state, capture::record_stage::missing_state);
+    // An undeclared state needs this recording's observation, which is absent.
     wrong = input; wrong.proof = sunshine_scene_depth::state_proof::unavailable;
+    reject(wrong, capture::status::missing_state, capture::record_stage::missing_state);
+    wrong = input; wrong.proof = static_cast<sunshine_scene_depth::state_proof>(99);
     reject(wrong, capture::status::unsupported_state, capture::record_stage::unsupported_proof);
     for (const auto hint : {std::uint32_t(D3D12_RESOURCE_STATE_RESOLVE_DEST),
         std::uint32_t(D3D12_RESOURCE_STATE_RENDER_TARGET | uav)}) {

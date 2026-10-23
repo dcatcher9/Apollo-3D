@@ -2346,14 +2346,12 @@ namespace sunshine_streamline::depth_capture {
     collect_diagnostics();
   }
   std::uint64_t nominate(std::uint64_t command, const input &value, record_diagnostic *diagnostic) {
-    auto source = value;
     // An API identifies the contents at this call, not whichever partial pass
     // Generic later preserves from the same resource. Keep both adapters on
     // the shared immutable snapshot/retirement path; never substitute a
-    // clear-count heuristic for the middleware's capture boundary.
-    if (source.proof == sunshine_scene_depth::state_proof::unavailable)
-      source.proof = sunshine_scene_depth::state_proof::observed_nonzero;
-    return record_impl(command, source, diagnostic, false, nullptr, true);
+    // clear-count heuristic for the middleware's capture boundary. An
+    // undeclared state needs this recording's observation (copy_state::select).
+    return record_impl(command, value, diagnostic, false, nullptr, true);
   }
   std::uint64_t nominate_evaluation(std::uint64_t command, const input &value,
       std::uint64_t superseded_source_id, record_diagnostic *diagnostic) {
@@ -3106,6 +3104,9 @@ namespace sunshine_streamline::depth_capture {
       // The optional observer does not change the rejection or shared status.
       if (record(5, value) || last_status() != lifetime.result) return false;
       value.valid_until = sunshine_scene_depth::lifetime::until_evaluation;
+      // An undeclared state needs an observation (capture_state_policy.h);
+      // only an unknown proof value has no rule.
+      value.proof = static_cast<sunshine_scene_depth::state_proof>(99);
       record_diagnostic proof;
       if (record(5, value, &proof) || proof.result != status::unsupported_state ||
           proof.stage != record_stage::unsupported_proof) return false;

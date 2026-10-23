@@ -40,15 +40,19 @@ namespace sunshine_streamline::depth_capture::copy_state {
   };
 
   //                   | source_contract        | prefer_observed_recording
-  //  unavailable      | none                   | none
+  //  unavailable      | observed_only          | observed_only
   //  declared         | declared_must_match    | observed_else_declared
   //  observed_nonzero | observed_only          | observed_only
   //  sdk_contract     | observed_else_contract | observed_else_contract
+  // An undeclared state (Streamline's UINT_MAX default) claims nothing, so
+  // only a state observed on this recording can supply it, exactly as for a
+  // source that requires observation. An unknown proof value selects none.
   constexpr rule select(sunshine_scene_depth::state_proof proof, texture_state_policy policy) {
     using proof_kind = sunshine_scene_depth::state_proof;
     switch (proof) {
       case proof_kind::declared:
         return policy == texture_state_policy::prefer_observed_recording ? rule::observed_else_declared : rule::declared_must_match;
+      case proof_kind::unavailable:
       case proof_kind::observed_nonzero: return rule::observed_only;
       case proof_kind::sdk_contract: return rule::observed_else_contract;
       default: return rule::none;

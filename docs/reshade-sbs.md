@@ -2220,12 +2220,16 @@ The fallback therefore requires an explicitly supplied state rather than assumin
 The private copy transitions from and restores exactly the selected state, preserving whether
 that state came from an observation or the provider declaration.
 Depth copies, NGX and default local texture copies retain
-their existing declaration checks. Shared dump allocations remain immutable after host
+their existing declaration checks. An undeclared state (Streamline's `UINT_MAX` default) is no
+claim under either policy: like a source requiring `observed_nonzero` proof, only a supported,
+nonzero state observed on the same recording admits the copy, and without one the copy is refused
+as `missing_state`. Diagnostics keep `state=0xffffffff` as the declared value. Shared dump allocations remain immutable after host
 acknowledgement; local retired storage may be reused. This storage distinction does not select
 the resource-state policy. The declaration fallback still needs live game/headset acceptance.
 Every proof/policy combination above, including NGX's SDK input contract, resolves through the one
 table in [`capture_state_policy.h`](../tools/reshade/capture_state_policy.h): declared (must match an
-observation), observed only, observed-else-declared and observed-else-contract. Blocked or
+observation), observed only (also an undeclared state), observed-else-declared and
+observed-else-contract. Blocked or
 incomplete observations reject every rule. Its CPU test enumerates every proof, policy, claimed state,
 observation and resource-flag combination.
 

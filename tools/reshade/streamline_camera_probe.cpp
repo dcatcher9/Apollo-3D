@@ -1894,7 +1894,10 @@ namespace sunshine_streamline {
       input.resource.width = tag.value.resource_width; input.resource.height = tag.value.resource_height;
       input.resource.area = {tag.value.area.left, tag.value.area.top, tag.value.area.width, tag.value.area.height};
       input.native_state = tag.native_state;
+      // An undeclared state (UINT_MAX) is no claim: only this recording's
+      // observation can supply it, under either state policy.
       input.proof = tag.state_requires_observation ? sunshine_scene_depth::state_proof::observed_nonzero :
+        tag.native_state == UINT32_MAX ? sunshine_scene_depth::state_proof::unavailable :
         sunshine_scene_depth::state_proof::declared;
       input.valid_until = !tag.supported ? sunshine_scene_depth::lifetime::unsupported : tag.value.lifecycle == 0 ?
         sunshine_scene_depth::lifetime::at_call : tag.value.lifecycle == 1 ? sunshine_scene_depth::lifetime::until_present :

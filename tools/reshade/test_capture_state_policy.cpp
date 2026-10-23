@@ -13,9 +13,12 @@ namespace {
   using policy = capture::texture_state_policy;
   void require(bool value, const char *message) { if (!value) throw std::runtime_error(message); }
 
-  // Former record_impl logic, in its original order.
+  // Former record_impl logic, in its original order. An undeclared state
+  // (unavailable proof) has since been the observed-only rule, which
+  // nominations already applied by converting it to observed_nonzero.
   copy_state::decision reference(proof supplied, policy chosen, std::uint32_t claimed,
       const copy_state::observation &observed, std::uint32_t flags) {
+    if (supplied == proof::unavailable) supplied = proof::observed_nonzero;
     const bool prefer = chosen == policy::prefer_observed_recording;
     if (supplied != proof::declared && supplied != proof::observed_nonzero && supplied != proof::sdk_contract)
       return copy_state::reject(capture::status::unsupported_state, capture::record_stage::unsupported_proof);
@@ -56,8 +59,9 @@ namespace {
 
 int main() try {
   using copy_state::rule;
-  require(copy_state::select(proof::unavailable, policy::source_contract) == rule::none &&
-      copy_state::select(proof::unavailable, policy::prefer_observed_recording) == rule::none &&
+  require(copy_state::select(proof::unavailable, policy::source_contract) == rule::observed_only &&
+      copy_state::select(proof::unavailable, policy::prefer_observed_recording) == rule::observed_only &&
+      copy_state::select(static_cast<proof>(99), policy::source_contract) == rule::none &&
       copy_state::select(proof::declared, policy::source_contract) == rule::declared_must_match &&
       copy_state::select(proof::declared, policy::prefer_observed_recording) == rule::observed_else_declared &&
       copy_state::select(proof::observed_nonzero, policy::source_contract) == rule::observed_only &&
@@ -130,6 +134,22 @@ int main() try {
     D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
   require(chosen.admitted && chosen.state == D3D12_RESOURCE_STATE_GENERIC_READ && chosen.used_observed,
     "an observed GENERIC_READ depth was not admitted");
+  // An undeclared Streamline state (UINT_MAX) under either policy: only a
+  // supported nonzero state observed on this recording is a proof.
+  for (const auto chosen_policy : {policy::source_contract, policy::prefer_observed_recording}) {
+    const auto undeclared = copy_state::select(proof::unavailable, chosen_policy);
+    chosen = copy_state::resolve(undeclared, UINT32_MAX, {true, true, false, D3D12_RESOURCE_STATE_DEPTH_READ},
+      D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+    require(chosen.admitted && chosen.state == D3D12_RESOURCE_STATE_DEPTH_READ && chosen.used_observed,
+      "an undeclared state was not taken from this recording's observation");
+    chosen = copy_state::resolve(undeclared, UINT32_MAX, {}, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+    require(!chosen.admitted && chosen.result == capture::status::missing_state, "an undeclared state was admitted without an observation");
+    chosen = copy_state::resolve(undeclared, UINT32_MAX, {true, true, true, D3D12_RESOURCE_STATE_DEPTH_READ},
+      D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+    require(!chosen.admitted && chosen.result == capture::status::incomplete_state, "an undeclared state took a blocked observation");
+    chosen = copy_state::resolve(undeclared, UINT32_MAX, {true, true, false, 0}, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+    require(!chosen.admitted && chosen.result == capture::status::missing_state, "an undeclared state took an observed COMMON");
+  }
   require(copy_state::supported(D3D12_RESOURCE_STATE_GENERIC_READ) &&
       copy_state::supported(D3D12_RESOURCE_STATE_RESOLVE_SOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) &&
       !copy_state::supported(D3D12_RESOURCE_STATE_GENERIC_READ | D3D12_RESOURCE_STATE_DEPTH_WRITE) &&
