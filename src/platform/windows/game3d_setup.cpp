@@ -229,8 +229,7 @@ namespace platf::game3d {
                                   "ReShade is installed for this executable. Sunshine 3D can add its Game 3D add-on, which also disables ReShade's Generic Depth add-on and enables Game 3D in ReShade.ini. Nothing is written until you confirm this game.";
           return outcome;
         }
-        progress(fresh ? "Installing ReShade with full add-on support and the Sunshine 3D add-on beside the game executable. Keep playing; setup takes effect on the next launch." :
-                         "Installing the Sunshine 3D add-on for the next launch. Your current game can stay open.");
+        progress(fresh ? "Installing ReShade with full add-on support and the Sunshine 3D add-on beside the game executable. Keep playing; setup takes effect on the next launch." : "Installing the Sunshine 3D add-on for the next launch. Your current game can stay open.");
         status = fresh ? install_reshade_and_addon_for_next_launch(status.executable, bundle_directory) : install_addon_for_next_launch(status.executable, bundle_directory);
         // The confirmation covered this installation. A failure keeps it, so the next launch
         // retries; success consumes it, so a later removal is offered again.
