@@ -2471,6 +2471,16 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
   std::vector<std::uint32_t> locator_words;
   ASSERT_TRUE(read_words(baseline_completed.subtitle_locator_state.Get(), locator_words));
   ASSERT_EQ(locator_words.size(), v2::subtitle_plane_state_word_count);
+  EXPECT_EQ(models::host_sbs_subtitle_plane::join(locator_words.data() + v2::subtitle_plane_frame_offset),
+    baseline_frame_id);
+  EXPECT_EQ(models::host_sbs_subtitle_plane::join(locator_words.data() + v2::subtitle_plane_analysis_generation_offset),
+    conditional_region.analysis_generation);
+  EXPECT_EQ(models::host_sbs_subtitle_plane::join(locator_words.data() + v2::subtitle_plane_observation_timestamp_offset),
+    baseline_frame_id);
+  EXPECT_TRUE(std::equal(baseline_completed.publication.subtitle_domain.begin(),
+    baseline_completed.publication.subtitle_domain.end(),
+    locator_words.begin() + v2::subtitle_plane_source_extent_offset));
+  EXPECT_EQ(locator_words[v2::subtitle_plane_flags_word], 0u);
   EXPECT_EQ(locator_words[v2::subtitle_plane_current_slot_mask_word], 0u);
   for (auto *view : {
          baseline_completed.subtitle_contour_support.Get(),

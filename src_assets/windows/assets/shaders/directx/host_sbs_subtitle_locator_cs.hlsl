@@ -156,23 +156,27 @@ bool SubtitleTargetIsValid(float target) {
         target <= v2_direct_container_limit;
 }
 
-bool LocatorDomainGeometryValid() {
+bool LocatorSourceGeometryValid() {
     if (!AdaptivePolicyValid() ||
         any(locator_observation.zw != 0u) ||
         locator_source.x == 0u || locator_source.y == 0u || locator_source.z > 1u ||
         locator_source.x > ADAPTIVE_HOST_MAX_SOURCE_WIDTH ||
         locator_field.x == 0u || locator_field.y == 0u ||
         locator_field.x > 0xffffu || locator_field.y > 0xffffu ||
-        locator_field.z >= locator_field.w || locator_field.w > locator_field.y ||
         target_w != locator_field.x || target_h != locator_field.y ||
         locator_content.x >= locator_content.z || locator_content.y >= locator_content.w ||
         locator_content.z > locator_field.x || locator_content.w > locator_field.y ||
-        locator_field.z < locator_content.y || locator_field.w > locator_content.w ||
         any(locator_content != DepthAnalysisContentCells())) {
         return false;
     }
 
-    if (!V2SubtitleOcrFieldIsCalibrated(locator_field.x, locator_field.y)) return false;
+    return V2SubtitleOcrFieldIsCalibrated(locator_field.x, locator_field.y);
+}
+
+bool LocatorDomainGeometryValid() {
+    if (!LocatorSourceGeometryValid() ||
+        locator_field.z >= locator_field.w || locator_field.w > locator_field.y ||
+        locator_field.z < locator_content.y || locator_field.w > locator_content.w) return false;
 
     uint expected_roi_top;
     uint expected_roi_bottom;
@@ -386,7 +390,10 @@ void ResolveObservation() {
     LocatorState[1u] = V2_SUBTITLE_PLANE_STATE_TAG;
     LocatorState[V2_SUBTITLE_PLANE_FLAGS_WORD] = current_valid ? V2_SUBTITLE_PLANE_CURRENT_VALID_FLAG : 0u;
     LocatorState[V2_SUBTITLE_PLANE_CURRENT_SLOT_MASK_WORD] = SlotMask(AdaptiveCurrentCount);
-    if (domain_valid) {
+    // A calibrated depth source can have an unprojectable OCR crop. Preserve its exact
+    // observation identity for current abstention without granting any subtitle-domain
+    // authority: domain_valid still gates covers, controller state and conditioning.
+    if (LocatorSourceGeometryValid()) {
         [unroll]
         for (uint component = 0u; component < 2u; ++component) {
             LocatorState[V2_SUBTITLE_PLANE_FRAME_OFFSET + component] = locator_frame[component];

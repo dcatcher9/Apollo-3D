@@ -551,6 +551,46 @@ namespace {
     }
   }
 
+  TEST(HostSbsGpuCompletionReceipt, UnprojectableAbstentionRetainsExactInactiveSourceIdentity) {
+    auto expected = fixture::expected(graph::work_flag_e::subtitle_observation,
+      receipt::submission_class_e::force_infer);
+    expected.subtitle_domain = {1u,1080u,770u,434u,0u,0u,384u,0u,386u,434u};
+    const auto words = fixture::snapshot(expected,graph::branch_e::infer);
+    const auto decoded = receipt::decode(words,expected);
+    ASSERT_TRUE(decoded);
+    EXPECT_EQ(decoded->subtitle,receipt::subtitle_disposition_e::abstention);
+    EXPECT_TRUE(decoded->subtitle_is_current());
+    EXPECT_TRUE(decoded->depth_cache_authorized());
+    for (const auto offset : {
+           v2::subtitle_plane_frame_offset,
+           v2::subtitle_plane_analysis_generation_offset,
+           v2::subtitle_plane_observation_timestamp_offset,
+           v2::subtitle_plane_source_extent_offset,
+           v2::subtitle_plane_field_extent_offset,
+           v2::subtitle_plane_roi_offset,
+           v2::subtitle_plane_content_offset,
+         }) {
+      auto stale = words;
+      stale[receipt::subtitle_locator_begin + offset] ^= 1u;
+      EXPECT_FALSE(receipt::decode(stale,expected)) << offset;
+    }
+    for (const auto offset : {
+           v2::subtitle_plane_flags_word,
+           v2::subtitle_plane_current_slot_mask_word,
+           v2::subtitle_plane_history_reset_mask_word,
+           v2::subtitle_plane_warmup_word,
+           v2::subtitle_plane_adaptive_offset,
+         }) {
+      auto active = words;
+      active[receipt::subtitle_locator_begin + offset] = 1u;
+      EXPECT_FALSE(receipt::decode(active,expected)) << offset;
+    }
+    auto active_condition = words;
+    active_condition[receipt::subtitle_condition_begin + v2::subtitle_condition_param_active_word] =
+      v2::subtitle_condition_param_fully_active_value;
+    EXPECT_FALSE(receipt::decode(active_condition,expected));
+  }
+
   TEST(HostSbsGpuCompletionReceipt, InvalidProbeRetainsCurrentUnionWithoutConditioningAuthority) {
     const auto expected = fixture::expected();
     auto words = fixture::snapshot(expected, graph::branch_e::infer);

@@ -65,7 +65,7 @@ diagnostics that explain how the final field was produced.
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
 schema 115/tag `0x640A940C`, canonical SHA-256
-`a4a84a1af3f2dacd3df2f0d87254ad8f35d2724f81318a8ba634b6e165d21358`. It binds the
+`4527ef5a2ef2f8b15b0eb74dbec4057ca27f9d64770aeb26b709c91604c3c1f2`. It binds the
 complete policy below, including all subtitle field/ROI semantics. The generated named closure
 groups are the shared C++, Python, JSON, and documentation authority for every ordered shader set
 and source pin. The optional `parallax_v2_p010_y` group remains fail-open to the canonical
@@ -76,7 +76,7 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | Closure group | Ordered roots | Source-closure SHA-256 |
 | --- | ---: | --- |
 | `preprocess` | 1 | `943f3295e6cdb490d0833d981b153a5cda9a5153696eb5c9ca0042e474d8d744` |
-| `parallax_v2_producer` | 27 | `3faefa6450702bb819857c52b0d1684902ac1337c6e1294090eadbbb6012b1bd` |
+| `parallax_v2_producer` | 27 | `f899c1f6325de5a08e5de47f42c5495027e50e2e53ab089063f86ac8214964b5` |
 | `parallax_v2_coordinate_diagnostic` | 1 | `8d84dd68c42600b107ac392eb1b8727c5b325b3faf1ad43c0748ba23afb3f982` |
 | `near_identical_detector` | 4 | `12e429c6f617ebed9df2d267d41a4767b3a2b2508d76efe52b3ef43e0a6b7516` |
 | `gpu_trace` | 1 | `cd089deb118d2ae61a12c15531da1930317743b59352ada119e8744901e351b9` |
@@ -357,6 +357,14 @@ native USER32 suppression or hard context disable. Both ordinary dispositions pu
 inference; abstention keeps the optional OCR handle and `OOCR` marker zero. Neither work-`0` mode
 advances OCR8 or UIP4. Temporary suppression freezes same-context subtitle memory; hard disable
 also clears it on the admitted context transition.
+
+An ordinary ineligible observation retains exact frame, analysis generation, source time,
+source/field extent, content rectangle and attempted OCR ROI metadata in inactive UIP4 even when
+the bottom crop cannot project to distinct safe field rows. For that unprojectable crop,
+current-valid flags, covers, warmup, pixel-reset cues and the UI controller tail remain zero,
+and SCP4 is freshly inactive. This
+authenticates the current abstention without granting subtitle geometry or protection; Final is
+exact Base. A malformed source/field policy cannot acquire this identity publication.
 
 Every reuse leaves OCR crop/TensorRT/postprocess/plane/condition work dormant and holds the complete
 depth/cut/camera/OCR8/UIP4/contour/history/conditioned-final tuple byte-for-byte. Reprojection samples that atomic

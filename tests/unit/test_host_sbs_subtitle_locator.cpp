@@ -2790,11 +2790,51 @@ namespace {
       std::string error;
       ASSERT_TRUE(fixture.initialize(error)) << error;
       const line_box_t line {180u,360u,590u,370u};
-      ASSERT_TRUE(fixture.observe(1u,{line},false,true,false,!bad_roi));
-      EXPECT_EQ(fixture.state()[3u],0u);
-      EXPECT_EQ(fixture.condition_params()[2u],0u);
-      EXPECT_EQ(fixture.gaussian_control(),0u);
-      EXPECT_TRUE(fixture.output_is_exact_base());
+      constexpr std::uint64_t generation = 0x300000002ull;
+      fixture.set_analysis_generation(generation);
+      for (std::uint64_t observation = 0u; observation < 2u; ++observation) {
+        const auto frame = 0x100000001ull + observation;
+        const auto timestamp = 0x200000003ull + observation * 33333u;
+        ASSERT_TRUE(fixture.observe(frame,{line},false,true,false,!bad_roi,true,true,timestamp));
+        const auto &state = fixture.state();
+        EXPECT_EQ(state[v2::subtitle_plane_flags_word],0u);
+        EXPECT_EQ(state[v2::subtitle_plane_current_slot_mask_word],0u);
+        EXPECT_EQ(state[v2::subtitle_plane_history_reset_mask_word],0u);
+        EXPECT_EQ(state[v2::subtitle_plane_warmup_word],0u);
+        const auto identity = [&](const std::size_t offset) {
+          return state[offset] | (std::uint64_t(state[offset + 1u]) << 32u);
+        };
+        EXPECT_EQ(identity(v2::subtitle_plane_frame_offset),frame);
+        EXPECT_EQ(identity(v2::subtitle_plane_analysis_generation_offset),generation);
+        EXPECT_EQ(identity(v2::subtitle_plane_observation_timestamp_offset),timestamp);
+        const std::array<std::uint32_t,10u> domain {
+          1920u,1080u,field_width,field_height,bad_roi ? roi_top + 1u : roi_top,roi_bottom,
+          0u,0u,field_width,field_height
+        };
+        EXPECT_TRUE(std::equal(domain.begin(),domain.end(),
+          state.begin() + v2::subtitle_plane_source_extent_offset));
+        if (bad_roi) {
+          EXPECT_TRUE(std::all_of(state.begin() + v2::subtitle_plane_adaptive_offset,state.end(),
+            [](const auto word) { return word == 0u; }));
+        }
+        EXPECT_EQ(fixture.condition_params()[0u],v2::subtitle_condition_param_schema);
+        EXPECT_EQ(fixture.condition_params()[1u],v2::subtitle_condition_param_tag);
+        EXPECT_TRUE(std::all_of(fixture.condition_params().begin() + 2u,fixture.condition_params().end(),
+          [](const auto word) { return word == 0u; }));
+        EXPECT_EQ(fixture.gaussian_control(),0u);
+        EXPECT_TRUE(fixture.output_is_exact_base());
+      }
+      if (bad_roi) {
+        // Inactive attribution still requires the calibrated source policy. Invalid constants
+        // cannot manufacture current identity merely because no cover was granted.
+        fixture.set_adaptive_policy_words(v2::adaptive_policy_id,1u);
+        ASSERT_TRUE(fixture.observe_at(0x100000003ull,{},0x200010000ull,false,false));
+        EXPECT_EQ(fixture.state()[v2::subtitle_plane_frame_offset],0u);
+        EXPECT_EQ(fixture.state()[v2::subtitle_plane_frame_offset + 1u],0u);
+        EXPECT_EQ(fixture.state()[v2::subtitle_plane_observation_timestamp_offset],0u);
+        EXPECT_EQ(fixture.state()[v2::subtitle_plane_source_extent_offset],0u);
+        EXPECT_TRUE(fixture.output_is_exact_base());
+      }
     }
   }
 
