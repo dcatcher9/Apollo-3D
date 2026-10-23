@@ -213,7 +213,10 @@ namespace sunshine_streamline::depth_capture {
     }
     // enhanced: value is the legacy equivalent of an enhanced Barrier layout
     // (diagnostic provenance only; admission treats it like a legacy state).
-    struct source_state { std::uint64_t source{}; std::uint32_t value{}; bool known{}, blocked{}, enhanced{}; };
+    // pending_split: a BEGIN_ONLY split barrier's state is unknown until its
+    // END_ONLY or a later plain transition defines it. blocked is sticky
+    // until Reset and no later barrier clears it.
+    struct source_state { std::uint64_t source{}; std::uint32_t value{}; bool known{}, blocked{}, enhanced{}, pending_split{}; };
     struct command_state {
       std::uint64_t cookie{};
       std::uint64_t observation_generation{};
@@ -476,20 +479,28 @@ namespace sunshine_streamline::depth_capture {
         // and keeps its own alias rule (depth_addon.cpp).
         if (value.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION) {
           ++owner->native_transition_count;
-          // A split can precede the first tag/cookie. Preserve that source's
-          // rejection until Reset without poisoning unrelated captured depth.
-          if (value.Flags != D3D12_RESOURCE_BARRIER_FLAG_NONE) { block_source(*owner, value.Transition.pResource); continue; }
+          // Only subresource 0 (or all) defines the copied state; a split or
+          // transition of another subresource (a stencil plane) leaves it.
           if (value.Transition.Subresource != 0 && value.Transition.Subresource != D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES) continue;
+          const auto flags = value.Flags;
+          // Any other flag combination is no transition this owner can follow.
+          // Preserve that rejection until Reset without poisoning unrelated depth.
+          if (flags != D3D12_RESOURCE_BARRIER_FLAG_NONE && flags != D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY &&
+              flags != D3D12_RESOURCE_BARRIER_FLAG_END_ONLY) { block_source(*owner, value.Transition.pResource); continue; }
           // A resource can reach its first SDK nomination after all of its
           // transitions were recorded. Preserve that live object's identity
-          // now, just as split barriers already do. The observed state
-          // remains local to this exact recording; it is never a global hint.
+          // now, including a split that precedes the first tag/cookie. The
+          // observed state remains local to this exact recording; it is never
+          // a global hint.
           const auto identity = observed_source_cookie(value.Transition.pResource);
           if (!identity) { invalidate(*owner, recording_loss::source_identity_unavailable); continue; }
           auto *known = state(*owner, identity, true);
           if (!known) { invalidate(*owner, recording_loss::source_state_capacity); continue; }
           if (known->blocked) continue;
-          known->known = value.Flags == D3D12_RESOURCE_BARRIER_FLAG_NONE && copy_state::supported(value.Transition.StateAfter);
+          // BEGIN_ONLY leaves the state in transition; END_ONLY, like a
+          // plain transition, completes in StateAfter.
+          known->pending_split = flags == D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY;
+          known->known = !known->pending_split && copy_state::supported(value.Transition.StateAfter);
           known->value = value.Transition.StateAfter;
           known->enhanced = false;
         }
@@ -586,10 +597,17 @@ namespace sunshine_streamline::depth_capture {
         auto *known = state(*owner, identity, true);
         if (!known) { invalidate(*owner, recording_loss::source_state_capacity); continue; }
         if (known->blocked) continue;
+        // An enhanced barrier inside a legacy split is outside the D3D12 contract.
+        if (known->pending_split) { known->blocked = true; continue; }
         known->known = copy_state::supported(*legacy);
         known->value = *legacy;
         known->enhanced = true;
       }
+    }
+    // The capture's state evidence for a source from its entry on the recording.
+    copy_state::observation observation_of(const source_state *observed) {
+      return observed ? copy_state::observation{true, observed->known, observed->blocked, observed->value, observed->pending_split} :
+        copy_state::observation{};
     }
     // Diagnostic provenance (state_basis) of an admitted copy's pre-copy state: an entry on the
     // recording (the copy used or matched it), else the SDK contract or the
@@ -2088,9 +2106,9 @@ namespace sunshine_streamline::depth_capture {
       const auto *observed = states_observed ? state(*owner, value.source->cookie, false) : nullptr;
       if (diagnostic && observed) {
         diagnostic->observed = true; diagnostic->observed_state = observed->value; diagnostic->blocked = observed->blocked;
+        diagnostic->pending_split = observed->pending_split;
       }
-      const auto chosen = copy_state::resolve(state_rule, value.native_state, observed ?
-        copy_state::observation{true, observed->known, observed->blocked, observed->value} : copy_state::observation{}, desc.Flags);
+      const auto chosen = copy_state::resolve(state_rule, value.native_state, observation_of(observed), desc.Flags);
       if (!chosen.admitted) return reject(chosen.result, chosen.stage);
       const auto before = chosen.state;
       const auto basis = copy_basis(observed, chosen);
@@ -4559,7 +4577,7 @@ namespace sunshine_streamline::depth_capture {
           split.Transition.pResource = reinterpret_cast<ID3D12Resource *>(&unrelated[i]);
           barriers(native_command, cookie, 1, &split);
           const auto *stored = state(*recording, unrelated[i].cookie, false);
-          if (recording->invalid || !stored || !stored->blocked) return false;
+          if (recording->invalid || !stored || !stored->pending_split || stored->known || stored->blocked) return false;
         }
         return true;
       };
@@ -4569,15 +4587,18 @@ namespace sunshine_streamline::depth_capture {
       const auto *selected = state(*recording, target_id, false);
       if (recording->invalid || recording->closed || recording->render_pass || !selected ||
           !selected->known || selected->blocked || selected->value != transition.Transition.StateAfter) return false;
-      // A split barrier blocks the target until Reset, across a later ordinary
-      // transition and further storage growth.
+      // A split barrier leaves the target in transition across further storage
+      // growth, until a later ordinary transition defines its state.
       auto split = transition;
       split.Flags = D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY;
       barriers(native_command, cookie, 1, &split);
       if (!append_unrelated(80, unsigned(unrelated.size()))) return false;
+      selected = state(*recording, target_id, false);
+      if (recording->invalid || !selected || !selected->pending_split || selected->known) return false;
       barriers(native_command, cookie, 1, &transition);
       selected = state(*recording, target_id, false);
-      if (recording->invalid || !selected || !selected->blocked || recording->states.size() != 161) return false;
+      if (recording->invalid || !selected || selected->pending_split || !selected->known || selected->blocked ||
+          recording->states.size() != 161) return false;
       const auto capacity = recording->states.capacity();
       const auto *storage = recording->states.data();
       reset(native_command, cookie, S_OK, true);
@@ -4588,6 +4609,60 @@ namespace sunshine_streamline::depth_capture {
       selected = state(*recording, target_id, false);
       return selected && selected->known && !selected->blocked && !recording->invalid &&
         recording->states.capacity() == capacity && recording->states.data() == storage;
+    }
+    // The split matrix, through the production barrier callbacks and the
+    // capture's state table: a split in transition is refused, its END_ONLY
+    // or a later plain transition defines the state, a split of another
+    // subresource leaves subresource 0, and nothing clears a block.
+    bool split_barrier_regression() {
+      private_object command_object;
+      const auto native_command = native_object(command_object);
+      const auto cookie = ++serial;
+      auto recording = command(native_command, cookie, true);
+      if (!recording) return false;
+      constexpr auto read = D3D12_RESOURCE_STATE_DEPTH_READ;
+      const auto selected = copy_state::select(sunshine_scene_depth::state_proof::observed_nonzero,
+        texture_state_policy::source_contract);
+      const auto run = [&](std::initializer_list<D3D12_RESOURCE_BARRIER> sequence, bool enhanced_block = false) {
+        recording->restart(cookie, command_generation);
+        recording->reported = true;
+        recording.life()->cookie.store(cookie);
+        private_object depth;
+        if (enhanced_block) {
+          const native_observer::enhanced_texture video{reinterpret_cast<ID3D12Resource *>(&depth),
+            D3D12_BARRIER_LAYOUT_VIDEO_DECODE_READ, true};
+          enhanced_textures(native_command, cookie, 1, &video);
+        }
+        for (auto value : sequence) {
+          value.Transition.pResource = reinterpret_cast<ID3D12Resource *>(&depth);
+          barriers(native_command, cookie, 1, &value);
+        }
+        if (recording->invalid) return copy_state::reject(status::failed, record_stage::recording_invalid);
+        return copy_state::resolve(selected, 0, observation_of(state(*recording, depth.cookie, false)),
+          D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+      };
+      const auto barrier = [](D3D12_RESOURCE_BARRIER_FLAGS flags, D3D12_RESOURCE_STATES after,
+          UINT subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES) {
+        D3D12_RESOURCE_BARRIER value{};
+        value.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION; value.Flags = flags;
+        value.Transition.Subresource = subresource;
+        value.Transition.StateBefore = D3D12_RESOURCE_STATE_DEPTH_WRITE; value.Transition.StateAfter = after;
+        return value;
+      };
+      constexpr auto begin = D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY, end = D3D12_RESOURCE_BARRIER_FLAG_END_ONLY;
+      constexpr auto none = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+      const auto admitted = [](const copy_state::decision &d) { return d.admitted && d.state == read && d.used_observed; };
+      const auto in_transition = [](const copy_state::decision &d) {
+        return !d.admitted && d.result == status::incomplete_state && d.stage == record_stage::incomplete_state;
+      };
+      return in_transition(run({barrier(begin, read)})) &&
+        admitted(run({barrier(begin, read), barrier(end, read)})) &&
+        admitted(run({barrier(begin, D3D12_RESOURCE_STATE_COPY_SOURCE), barrier(none, read)})) &&
+        admitted(run({barrier(end, read)})) &&
+        admitted(run({barrier(none, read), barrier(begin, D3D12_RESOURCE_STATE_COPY_SOURCE, 1)})) &&
+        admitted(run({barrier(none, read, 0), barrier(begin, D3D12_RESOURCE_STATE_COPY_SOURCE, 1), barrier(end, D3D12_RESOURCE_STATE_COPY_SOURCE, 1)})) &&
+        in_transition(run({barrier(begin, read), barrier(end, read)}, true)) &&
+        in_transition(run({barrier(begin | end, read), barrier(end, read)}));
     }
     bool recording_state_loss_regression() {
       // Call the production observer callback before any source cookie exists.
@@ -4638,12 +4713,25 @@ namespace sunshine_streamline::depth_capture {
         value.Transition.pResource = reinterpret_cast<ID3D12Resource *>(&pretag);
         value.Flags = flags;
         barriers(native_command, cookie, 1, &value);
-        const auto *blocked = state(*recording, pretag.cookie, false);
-        if (recording->invalid || !pretag.cookie || !blocked || !blocked->blocked || capture->invalid) return false;
+        const auto *entry = state(*recording, pretag.cookie, false);
+        const bool begun = flags == D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY;
+        if (recording->invalid || !pretag.cookie || !entry || entry->blocked || entry->pending_split != begun ||
+            entry->known == begun || capture->invalid) return false;
         value.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
         barriers(native_command, cookie, 1, &value);
-        if (!blocked->blocked || recording->invalid || capture->invalid) return false;
+        if (entry->blocked || entry->pending_split || !entry->known || recording->invalid || capture->invalid) return false;
       }
+      // A flag combination no transition has blocks until Reset, across a
+      // later ordinary transition.
+      restart_case();
+      private_object both;
+      value.Transition.pResource = reinterpret_cast<ID3D12Resource *>(&both);
+      value.Flags = D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY | D3D12_RESOURCE_BARRIER_FLAG_END_ONLY;
+      barriers(native_command, cookie, 1, &value);
+      value.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+      barriers(native_command, cookie, 1, &value);
+      const auto *both_state = state(*recording, both.cookie, false);
+      if (recording->invalid || !both_state || !both_state->blocked || capture->invalid) return false;
       // Unrelated named exceptional barriers must leave selected depth usable.
       restart_case();
       const auto selected = retain_source_cookie(&native);
@@ -4655,7 +4743,7 @@ namespace sunshine_streamline::depth_capture {
       value.Transition.pResource = reinterpret_cast<ID3D12Resource *>(&unrelated);
       barriers(native_command, cookie, 1, &value);
       // An alias changes no resource state: it neither registers nor blocks
-      // its resources, and the unrelated split keeps its own block.
+      // its resources, and the unrelated split stays in transition.
       value = {}; value.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
       value.Aliasing.pResourceBefore = reinterpret_cast<ID3D12Resource *>(&unrelated);
       value.Aliasing.pResourceAfter = reinterpret_cast<ID3D12Resource *>(&alias_peer);
@@ -4663,7 +4751,7 @@ namespace sunshine_streamline::depth_capture {
       const auto *unrelated_state = state(*recording, unrelated.cookie, false);
       selected_state = state(*recording, selected, false);
       if (recording->invalid || selected_state->blocked || !selected_state->known || !unrelated_state ||
-          !unrelated_state->blocked || alias_peer.cookie || capture->invalid) return false;
+          !unrelated_state->pending_split || alias_peer.cookie || capture->invalid) return false;
       // Even a named alias of selected depth keeps its observed state: the SDK
       // consumes the source where it is copied, so the game keeps it active there.
       value.Aliasing.pResourceBefore = reinterpret_cast<ID3D12Resource *>(&native);
@@ -4723,7 +4811,7 @@ namespace sunshine_streamline::depth_capture {
       return new_cookie && new_cookie != cookie && recording->cookie == new_cookie &&
         recording.life()->cookie.load() == new_cookie && !recording->invalid && !capture->invalid && capture->command == 0 &&
         std::none_of(recording->states.begin(), recording->states.end(), [](const auto &v) { return v.blocked || v.source; }) &&
-        recording_state_growth_regression();
+        recording_state_growth_regression() && split_barrier_regression();
     }
     bool source_cookie_reentry_regression() {
       // Real production cookie allocation and command-state lookup, with only

@@ -3868,9 +3868,14 @@ recording. An observed conflicting or incomplete transition always rejects captu
 its new layout's legacy equivalent (COMMON, GENERIC_READ, RENDER_TARGET, UNORDERED_ACCESS,
 DEPTH_STENCIL_WRITE/READ, SHADER_RESOURCE as pixel and non-pixel shader resource, COPY_SOURCE/DEST,
 RESOLVE_SOURCE/DEST), exactly as a legacy transition does, so the capture's own legacy copy
-barriers start from it; other subresources keep subresource 0's state. A split barrier, or an
-enhanced barrier into a layout without a legacy equivalent (queue-specific and video layouts),
-blocks the affected resource for that recording until Reset (`incomplete_state`); unrelated
+barriers start from it; other subresources keep subresource 0's state. A legacy split barrier's
+BEGIN_ONLY on subresource 0 (or all) leaves the state in transition, refused as
+`incomplete_state` (`split=1` on the NGX rejection line), until its END_ONLY or a later plain
+transition defines it; a split of another subresource leaves subresource 0's state. An enhanced
+barrier into a layout without a legacy equivalent (queue-specific and video layouts), a barrier
+flag combination other than none, BEGIN_ONLY or END_ONLY, or an enhanced barrier during a pending
+legacy split blocks the affected resource for that recording until Reset (`incomplete_state`),
+and no later barrier clears that block; unrelated
 resources remain eligible, and enhanced global or buffer barriers change no texture state. Per-resource state
 storage grows with the actual command recording and reuses its allocation on Reset; unrelated
 resources cannot invalidate depth by exceeding a fixed entry count. An actual state-storage

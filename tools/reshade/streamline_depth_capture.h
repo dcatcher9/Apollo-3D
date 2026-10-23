@@ -146,6 +146,8 @@ namespace sunshine_streamline::depth_capture {
     std::uint32_t dimension{}, mip_levels{}, array_size{}, samples{};
     std::uint32_t command_type{0xffffffffu};
     bool recording_closed{}, recording_invalid{}, render_pass{}, observed{}, blocked{};
+    // The observed entry is a split barrier that began and has not ended.
+    bool pending_split{};
     bool copy_state_known{}, used_observed_state{};
     // The copy used the SDK input contract because the recording had no entry.
     bool used_contract_state{};

@@ -125,6 +125,14 @@ int main() try {
   const auto declared = copy_state::select(proof::declared, policy::source_contract);
   chosen = copy_state::resolve(declared, readable, {true, true, false, D3D12_RESOURCE_STATE_COPY_SOURCE}, 0);
   require(!chosen.admitted && chosen.result == capture::status::conflicting_state, "declaration overrode a different observation");
+  // A split barrier in transition rejects every rule, even beside a known value.
+  for (const auto supplied : {proof::unavailable, proof::declared, proof::observed_nonzero, proof::sdk_contract}) {
+    copy_state::observation pending{true, true, false, D3D12_RESOURCE_STATE_DEPTH_READ, true};
+    chosen = copy_state::resolve(copy_state::select(supplied, policy::source_contract), D3D12_RESOURCE_STATE_DEPTH_READ, pending,
+      D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+    require(!chosen.admitted && chosen.result == capture::status::incomplete_state &&
+      chosen.stage == capture::record_stage::incomplete_state, "a pending split barrier was admitted");
+  }
   chosen = copy_state::resolve(declared, 0, {}, 0);
   require(chosen.admitted && chosen.state == 0, "typed declared COMMON was not retained");
   // Assassin's Creed Shadows 10-22: depth observed in GENERIC_READ (0xac3), a

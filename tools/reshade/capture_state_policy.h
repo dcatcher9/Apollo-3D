@@ -60,9 +60,11 @@ namespace sunshine_streamline::depth_capture::copy_state {
   }
 
   // State evidence for the source on the exact recording that will carry the copy.
+  // pending: a split barrier began and has not ended (the state is in transition).
   struct observation {
     bool present{}, known{}, blocked{};
     std::uint32_t value{};
+    bool pending{};
   };
   struct decision {
     bool admitted{};
@@ -88,7 +90,7 @@ namespace sunshine_streamline::depth_capture::copy_state {
   constexpr decision resolve(rule selected, std::uint32_t claimed, const observation &observed, std::uint32_t resource_flags) {
     if (selected == rule::none) return reject(status::unsupported_state, record_stage::unsupported_proof);
     // An in-progress split barrier or unrepresentable transition overrides every claim.
-    if (observed.present && (observed.blocked || !observed.known))
+    if (observed.present && (observed.blocked || observed.pending || !observed.known))
       return reject(status::incomplete_state, record_stage::incomplete_state);
     decision out{true, status::recorded, record_stage::recorded, claimed};
     switch (selected) {

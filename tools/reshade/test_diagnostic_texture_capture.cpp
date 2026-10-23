@@ -594,10 +594,16 @@ namespace {
     split.Transition = {image.source.Get(), 0, rt, D3D12_RESOURCE_STATE_COPY_SOURCE};
     gpu.list->ResourceBarrier(1, &split);
     reject_state(capture::status::incomplete_state, capture::record_stage::incomplete_state);
-    require(diagnostic.blocked, "pending split did not retain its blocked state");
+    require(diagnostic.pending_split && !diagnostic.blocked, "a split in transition was not refused as pending");
     split.Flags = D3D12_RESOURCE_BARRIER_FLAG_END_ONLY; gpu.list->ResourceBarrier(1, &split);
-    reject_state(capture::status::incomplete_state, capture::record_stage::incomplete_state);
+    // Its END_ONLY completes the state: the copy leaves and restores COPY_SOURCE.
+    auto ended = auxiliary_snapshot(gpu, shared, input, &diagnostic, policy);
+    require(bool(ended) && diagnostic.copy_state_known && diagnostic.copy_state == D3D12_RESOURCE_STATE_COPY_SOURCE &&
+      diagnostic.used_observed_state && !diagnostic.pending_split && !diagnostic.blocked,
+      "an ended split barrier did not define the copied state");
+    capture::finish_diagnostic_texture(ended, true);
     gpu.submit(); gpu.wait(); gpu.reset();
+    capture::release_diagnostic_texture(ended); ended = {}; capture::poll();
     transition(gpu.list.Get(), image.source.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, rt);
     D3D12_RESOURCE_BARRIER alias{}; alias.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
     gpu.list->ResourceBarrier(1, &alias); // Legal wildcard alias: it changes no resource state.
