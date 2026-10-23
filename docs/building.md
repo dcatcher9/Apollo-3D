@@ -93,7 +93,7 @@ repository tooling uses it to distinguish generated artifacts.
 The host build also builds the matching production Game 3D add-on from `tools/reshade` and
 bundles it with its licenses and installer in `tools/reshade` beside `sunshine.exe`. The first
 build fetches the pinned ReShade SDK and ImGui headers. ReShade's runtime is downloaded and
-cached by [automatic game setup](reshade-sbs.md#setup), rather than redistributed in the host
+cached by [confirmed game setup](reshade-sbs.md#setup), rather than redistributed in the host
 package. Set `SUNSHINE_GAME3D_BUILD_DIR` to reuse an existing standalone add-on build.
 For offline builds, set `SUNSHINE_GAME3D_SDK_DIR` and `SUNSHINE_GAME3D_IMGUI_DIR` to the exact
 checkouts described in the [add-on build instructions](../tools/reshade/README.md#build).

@@ -160,7 +160,7 @@
       </article>
     </section>
 
-    <Game3dSetup :setup="game3dSetup"></Game3dSetup>
+    <Game3dSetup :setup="game3dSetup" @update="game3dSetup = $event"></Game3dSetup>
 
     <footer class="apollo-overview-footer">
       <span>{{ pairedClients.length }} {{ pairedClients.length === 1 ? 'device' : 'devices' }} paired</span>

@@ -1238,6 +1238,33 @@ namespace confighttp {
     send_response(response, platf::game3d::setup_status());
   }
 
+  /**
+   * @brief Record the user's install/never choice for the executable Game 3D setup offers.
+   *
+   * The host never writes into a game folder without this confirmation. The body names the
+   * offered executable and its identity exactly as the status reported them.
+   */
+  void decideGame3dSetup(resp_https_t response, req_https_t request) {
+    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+
+    try {
+      std::stringstream body;
+      body << request->content.rdbuf();
+      const auto input = nlohmann::json::parse(body);
+      const auto failure = platf::game3d::decide_setup(input.at("executable").get<std::string>(), input.at("identity").get<std::string>(), input.at("decision").get<std::string>());
+      if (failure) {
+        bad_request(response, request, *failure);
+        return;
+      }
+      send_response(response, nlohmann::json {{"status", true}, {"setup", platf::game3d::setup_status()}});
+    } catch (const std::exception &error) {
+      bad_request(response, request, error.what());
+    }
+  }
+
   void getArGlassDevices(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) {
       return;
@@ -2196,6 +2223,7 @@ namespace confighttp {
     server.resource["^/api/config$"]["POST"] = saveConfig;
 #ifdef _WIN32
     server.resource["^/api/game3d/setup$"]["GET"] = getGame3dSetup;
+    server.resource["^/api/game3d/setup/decision$"]["POST"] = decideGame3dSetup;
     server.resource["^/api/ar-glasses$"]["GET"] = getArGlassDevices;
     server.resource["^/api/ar-glasses$"]["POST"] = setArGlassDevice;
 #endif
