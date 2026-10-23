@@ -279,24 +279,43 @@ namespace game3d_contract {
     return false;
   }
 
-  // Any nonempty combination of read-only texture states, or GENERIC_READ (a
-  // fixed OR of read bits, MS Learn D3D12_RESOURCE_STATES) with the read bits
-  // it lacks.
+  // Any nonempty combination of read-only texture states, or GENERIC_READ
+  // itself (a fixed OR of read bits, MS Learn D3D12_RESOURCE_STATES). Its
+  // VERTEX_AND_CONSTANT_BUFFER, INDEX_BUFFER and INDIRECT_ARGUMENT bits are
+  // buffer states: the D3D12 runtime refuses a texture barrier into any other
+  // state holding one, GENERIC_READ with DEPTH_READ or RESOLVE_SOURCE
+  // included (ID3D12GraphicsCommandList::Close returns E_INVALIDARG; the
+  // device layer, test_game3d_api_contract_device.cpp, found it).
   constexpr bool read_only_texture_state(std::uint32_t state) {
-    if (!state) {
-      return false;
-    }
-    if (!(state & ~texture_read_states)) {
-      return true;
-    }
-    return (state & D3D12_RESOURCE_STATE_GENERIC_READ) == D3D12_RESOURCE_STATE_GENERIC_READ &&
-           !(state & ~(D3D12_RESOURCE_STATE_GENERIC_READ | texture_read_states));
+    return state == D3D12_RESOURCE_STATE_GENERIC_READ || (state && !(state & ~texture_read_states));
   }
 
   // The legacy states a texture can be in on a direct list: COMMON, one write
   // state, or a read-only combination (d3d12.h:1762-1788).
   constexpr bool texture_state(std::uint32_t state) {
     return state == D3D12_RESOURCE_STATE_COMMON || single_write_state(state) || read_only_texture_state(state);
+  }
+
+  // Visits each legacy state a texture can be in (the dimension's legal
+  // values): COMMON, each write state alone, every read-only combination and
+  // GENERIC_READ.
+  template<class Visit>
+  constexpr void each_texture_state(Visit &&visit) {
+    visit(std::uint32_t(D3D12_RESOURCE_STATE_COMMON));
+    for (const auto write : texture_write_states) {
+      visit(write);
+    }
+    constexpr std::uint32_t read[] {D3D12_RESOURCE_STATE_DEPTH_READ, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RESOLVE_SOURCE};
+    for (std::uint32_t bits = 1; bits != 0x20; ++bits) {
+      std::uint32_t state {};
+      for (unsigned bit = 0; bit != sizeof(read) / sizeof(read[0]); ++bit) {
+        if (bits & (1u << bit)) {
+          state |= read[bit];
+        }
+      }
+      visit(state);
+    }
+    visit(std::uint32_t(D3D12_RESOURCE_STATE_GENERIC_READ));
   }
 
   // D3D12_RESOURCE_FLAGS (MS Learn): ALLOW_DEPTH_STENCIL "Can't be used with"
@@ -630,6 +649,89 @@ namespace game3d_contract {
     ui_clear_boundary clear {ui_clear_boundary::none};
   };
 
+  // The device layer's copy points (test_game3d_api_contract_device.cpp),
+  // each recorded on a real list: an adapter's copy at its call, the Generic
+  // path's depth-stencil boundaries and the UI layer's clear boundary.
+  enum class device_point {
+    api,  // A Streamline, NGX or UI adapter's copy at its call; the state rules decide.
+    clear,  // The Generic path before ClearDepthStencilView of subresource 0's depth (D11).
+    end_of_frame,  // The Generic path's end-of-frame copy, on the runtime's own list (D10).
+    unbind_read_only_dsv,  // The Generic path where a read-only DSV is unbound (D11c).
+    ui_clear  // The UI layer before a full-frame ClearRenderTargetView (D12).
+  };
+
+  // One device cell: the source and the evidence on the copy's recording
+  // (state); the state an earlier, executed list left the source in (prior),
+  // which a claim must describe when the recording names nothing about
+  // subresource 0; and for the UI clear boundary, its target (clear).
+  struct device_case {
+    state_case state;
+    device_point point {device_point::api};
+    std::uint32_t prior {};
+    ui_clear_boundary clear {ui_clear_boundary::none};
+  };
+
+  // The generic layout a queue-specific layout specializes (Enhanced
+  // Barriers, Command Queue Layout Compatibility); itself otherwise.
+  constexpr std::uint32_t generic_layout(std::uint32_t layout) {
+    switch (layout) {
+      case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COMMON:
+      case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_COMMON:
+        return D3D12_BARRIER_LAYOUT_COMMON;
+      case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_GENERIC_READ:
+      case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_GENERIC_READ:
+        return D3D12_BARRIER_LAYOUT_GENERIC_READ;
+      case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS:
+      case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_UNORDERED_ACCESS:
+        return D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS;
+      case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE:
+      case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_SHADER_RESOURCE:
+        return D3D12_BARRIER_LAYOUT_SHADER_RESOURCE;
+      case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COPY_SOURCE:
+      case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_COPY_SOURCE:
+        return D3D12_BARRIER_LAYOUT_COPY_SOURCE;
+      case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COPY_DEST:
+      case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_COPY_DEST:
+        return D3D12_BARRIER_LAYOUT_COPY_DEST;
+      default:
+        return layout;
+    }
+  }
+
+  // Whether a legacy state describes a texture in an enhanced layout
+  // (Enhanced Barriers, the layout equivalent to each D3D12_RESOURCE_STATES
+  // value): DEPTH_STENCIL_READ is DEPTH_READ with any shader-resource bits,
+  // SHADER_RESOURCE is shader-resource bits alone, and every other layout has
+  // its one state.
+  constexpr bool describes_layout(std::uint32_t state, std::uint32_t layout) {
+    switch (generic_layout(layout)) {
+      case D3D12_BARRIER_LAYOUT_COMMON:
+        return state == D3D12_RESOURCE_STATE_COMMON;
+      case D3D12_BARRIER_LAYOUT_GENERIC_READ:
+        return state == D3D12_RESOURCE_STATE_GENERIC_READ;
+      case D3D12_BARRIER_LAYOUT_RENDER_TARGET:
+        return state == D3D12_RESOURCE_STATE_RENDER_TARGET;
+      case D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS:
+        return state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+      case D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE:
+        return state == D3D12_RESOURCE_STATE_DEPTH_WRITE;
+      case D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ:
+        return (state & ~shader_read_states) == D3D12_RESOURCE_STATE_DEPTH_READ;
+      case D3D12_BARRIER_LAYOUT_SHADER_RESOURCE:
+        return state && !(state & ~shader_read_states);
+      case D3D12_BARRIER_LAYOUT_COPY_SOURCE:
+        return state == D3D12_RESOURCE_STATE_COPY_SOURCE;
+      case D3D12_BARRIER_LAYOUT_COPY_DEST:
+        return state == D3D12_RESOURCE_STATE_COPY_DEST;
+      case D3D12_BARRIER_LAYOUT_RESOLVE_SOURCE:
+        return state == D3D12_RESOURCE_STATE_RESOLVE_SOURCE;
+      case D3D12_BARRIER_LAYOUT_RESOLVE_DEST:
+        return state == D3D12_RESOURCE_STATE_RESOLVE_DEST;
+      default:
+        return false;
+    }
+  }
+
   // Legality filter. The matrix enumerates only legal combinations; a
   // separate set of deliberately illegal rows must end in a safe refusal.
   constexpr bool legal_evidence(const resource_state &value, list_type list) {
@@ -729,6 +831,90 @@ namespace game3d_contract {
       return false;
     }
     return legal_evidence(value.depth, list_type::direct);
+  }
+
+  // A device cell is legal when its state case is, and when what the game
+  // did before and on the recording is legal D3D12 that its claims describe
+  // truthfully.
+  constexpr bool legal(const device_case &value) {
+    const auto &state = value.state;
+    const auto &source = state.resource;
+    const auto flags = source.flags;
+    const bool compute = state.list == list_type::compute;
+    const bool simultaneous = (flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS) != 0;
+    if (!legal(state) || (value.point == device_point::ui_clear) != (value.clear != ui_clear_boundary::none)) {
+      return false;
+    }
+    // The state the source starts the recording in: one the allocation and
+    // the recording's list type allow. A simultaneous-access texture decays to
+    // COMMON when the earlier list's ExecuteCommandLists completes (MS Learn,
+    // Implicit state transitions), so no split begun there spans the boundary.
+    if (!state_allowed(value.prior, flags) || (compute && !compute_list_state(value.prior)) || (simultaneous && (value.prior != D3D12_RESOURCE_STATE_COMMON || source.seen == evidence::end_without_begin))) {
+      return false;
+    }
+    if (value.point != device_point::api) {
+      // The boundaries copy on a direct list, with no claim, from a source
+      // whose recording names nothing (the runtime's own list at the end of
+      // frame holds no game barrier).
+      if (compute || state.source != claim::none || source.seen != evidence::none || source.shape != resource_shape::texture2d) {
+        return false;
+      }
+      switch (value.point) {
+        case device_point::clear:
+          // MS Learn D3D12_RESOURCE_STATES, DEPTH_WRITE: the state for
+          // ClearDepthStencilView of a subresource it clears.
+          return state.role == consumer::depth && depth_stencil(flags) && value.prior == D3D12_RESOURCE_STATE_DEPTH_WRITE;
+        case device_point::end_of_frame:
+          return state.role == consumer::depth && depth_stencil(flags);
+        case device_point::unbind_read_only_dsv:
+          // MS Learn D3D12_RESOURCE_STATES, DEPTH_READ: a read-only DSV's state.
+          return state.role == consumer::depth && depth_stencil(flags) && (value.prior & D3D12_RESOURCE_STATE_DEPTH_READ);
+        default:
+          // ClearRenderTargetView needs RENDER_TARGET (MS Learn
+          // D3D12_RESOURCE_STATES), the RENDER_TARGET layout, or a
+          // simultaneous-access target in COMMON that the clear promotes.
+          if (state.role != consumer::ui || !(flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)) {
+            return false;
+          }
+          switch (value.clear) {
+            case ui_clear_boundary::legacy_render_target:
+              return !simultaneous && value.prior == D3D12_RESOURCE_STATE_RENDER_TARGET;
+            case ui_clear_boundary::enhanced_render_target:
+              return !simultaneous && value.prior == D3D12_RESOURCE_STATE_COMMON;
+            default:
+              return simultaneous;
+          }
+      }
+    }
+    // A barrier on the recording starts from prior: a legacy one leaves it
+    // for another state, an enhanced one starts from COMMON (Enhanced
+    // Barriers, legacy interop).
+    const bool named_by_barrier = source.seen == evidence::transition || source.seen == evidence::end_without_begin ||
+                                  source.seen == evidence::split_open;
+    if (named_by_barrier && value.prior == source.observed) {
+      return false;
+    }
+    if ((source.seen == evidence::enhanced || source.seen == evidence::enhanced_split_open) && value.prior != D3D12_RESOURCE_STATE_COMMON) {
+      return false;
+    }
+    if (source.seen == evidence::earlier_list_enhanced) {
+      const resource_state earlier {flags, evidence::enhanced, 0, source.layout, source.access};
+      if (!legal_evidence(earlier, state.list) || source.layout == std::uint32_t(D3D12_BARRIER_LAYOUT_UNDEFINED)) {
+        return false;
+      }
+      return (state.source != claim::sl_declared || describes_layout(state.declared, source.layout)) &&
+             (state.source != claim::ngx_contract || describes_layout(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, source.layout));
+    }
+    // Where the recording names nothing about subresource 0, a claim names
+    // the state it is in: SLT:357 ('needs to be correct when tagged resources
+    // are actually used'); the DLSS guide's NON_PIXEL_SHADER_RESOURCE.
+    const bool unnamed = source.subresource == subresource_barrier::other_mip_only || source.subresource == subresource_barrier::stencil_plane_only ||
+                         source.seen == evidence::none || source.seen == evidence::alias_named || source.seen == evidence::alias_wildcard;
+    if (unnamed) {
+      return (state.source != claim::sl_declared || state.declared == value.prior) &&
+             (state.source != claim::ngx_contract || value.prior == D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    }
+    return true;
   }
 
   // legal(const ui_case &) reads each release's buffer-type declarations, so

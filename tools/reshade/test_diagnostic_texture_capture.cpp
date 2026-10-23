@@ -1676,6 +1676,9 @@ namespace {
     std::puts("PASS unlocked storage allocation: the capture lock is free during allocation, re-validation rejects a closed recording");
   }
 }
+// The API contract matrix's device layer (test_game3d_api_contract_device.cpp)
+// includes this file for its fixture.
+#ifndef SUNSHINE_DIAGNOSTIC_TEXTURE_FIXTURE_ONLY
 int main(int argc, char **argv) {
   try {
     if (argc > 1 && std::strcmp(argv[1], "--gpu-validation") == 0) {
@@ -1774,3 +1777,4 @@ int main(int argc, char **argv) {
     return 0;
   } catch (const std::exception &error) { std::fprintf(stderr, "FAIL: %s\n", error.what()); return 1; }
 }
+#endif

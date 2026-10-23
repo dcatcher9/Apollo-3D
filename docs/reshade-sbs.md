@@ -2334,7 +2334,7 @@ incomplete observations reject every rule. The
 [API contract matrix](../tools/reshade/README.md#api-contract-matrix) judges the table over every
 legal combination of allocation flags, adapter claim, consumer, declared state and recorded
 evidence, plus deliberately illegal rows; the cells where the table falls short of the contract are
-rows of its known-gap table.
+rows of its known-gap table. Its device layer records the same copies on real D3D12 lists.
 
 The FG decision is independent of depth-provider selection, including a manually pinned Generic
 buffer. The last confirmed mode survives transient observation loss and effects reloads; a new

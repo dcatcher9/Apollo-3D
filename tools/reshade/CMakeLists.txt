@@ -572,6 +572,20 @@ if(BUILD_TESTING)
     if(MINGW)
       target_link_options(reshade_diagnostic_texture_capture_test PRIVATE -static)
     endif()
+    # The API contract matrix's device layer (README, API contract matrix):
+    # real copies on the first hardware adapter through the diagnostic
+    # fixture. It skips (77) without a hardware adapter or the D3D12 debug
+    # layer, and holds the GPU against other device tests.
+    add_executable(reshade_contract_matrix_device_tests test_game3d_api_contract_device.cpp streamline_depth_capture.cpp streamline_native_observer.cpp)
+    target_compile_features(reshade_contract_matrix_device_tests PRIVATE cxx_std_17)
+    target_compile_definitions(reshade_contract_matrix_device_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX SUNSHINE_STREAMLINE_PROBE_TEST)
+    target_link_libraries(reshade_contract_matrix_device_tests PRIVATE sunshine_min_hook d3d11 d3d12 dxgi dxguid)
+    if(MINGW)
+      target_link_options(reshade_contract_matrix_device_tests PRIVATE -static)
+    endif()
+    add_test(NAME reshade_contract_matrix_device COMMAND reshade_contract_matrix_device_tests)
+    set_tests_properties(reshade_contract_matrix_device PROPERTIES TIMEOUT 180 LABELS "contract;device" RESOURCE_LOCK gpu
+      SKIP_RETURN_CODE 77)
     target_compile_features(reshade_depth_queue_cycle_test PRIVATE cxx_std_17)
     target_compile_definitions(reshade_depth_queue_cycle_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_link_libraries(reshade_depth_queue_cycle_test PRIVATE d3d12 dxgi dxguid)

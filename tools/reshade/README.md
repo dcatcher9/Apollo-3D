@@ -1367,6 +1367,29 @@ the pure layer; only an unsharded run reports a hook family's stale known-gap ro
 the generator, and compiles each on its own with the configured compiler, whatever the caller's
 `PATH`.
 
+The device layer, `reshade_contract_matrix_device`
+([`test_game3d_api_contract_device.cpp`](test_game3d_api_contract_device.cpp), built with
+`SUNSHINE_SBS_RUNTIME_TESTS`), records the capture owner's copies on real D3D12 lists of the first
+hardware adapter, through the diagnostic texture fixture (included under
+`SUNSHINE_DIAGNOSTIC_TEXTURE_FIXTURE_ONLY`). Each cell puts a fresh source in its state on an
+earlier, executed list. Its copy's recording then holds the game's barrier: a transition, a split
+ended there or still open, a wildcard alias, an enhanced barrier, or nothing after an enhanced layout
+set on the earlier list; on subresource 0, all subresources, another mip or the stencil plane. Then
+comes the copy at its point: an adapter's copy with the proof its claim selects, a Generic boundary
+(`record_preserved` from the `DEPTH_WRITE` that `depth_addon.cpp` declares at a clear, a DSV unbind
+and the end of frame), or the UI clear boundary (the barriers `game3d_ui_layer.cpp` records through
+ReShade; the runtime layer runs the layer itself). The cells cover every legal state of every
+allocation, each claim, each direct-list enhanced layout, every depth family typed and typeless with
+mips and planes, the shapes no input names, COMPUTE lists and UI tags. A cell meets the oracle by
+its kind, refusal class and copy basis; the basis must be the state the test put the source in, so
+the copy restores it exactly. Each copy executes alone: subresource 0's plane-0 bytes are read back
+through the capture owner's consumer copies, and a D3D12 debug-layer error fails the cell. A copy
+that a known-gap row says starts from an unproven state is recorded but never executed. The test
+exits 77 (skipped) without a hardware adapter, and also without the D3D12 debug layer (Windows
+Graphics Tools), though then only after every other check has run; `--gpu-validation` adds GPU-based
+validation and `--block <name>` runs one block. It holds ctest's `gpu` resource lock; outside
+ctest, run it as any other GPU fixture.
+
 The runtime layer reads refusal classes from the test add-on instead of waiting for rate-limited log
 lines. `SunshineDepthTestLastRefusal(runtime, out)` returns the newest depth refusal of the
 Streamline, NGX and DLSS-G adapters and the capture owner: the adapter, the gate that refused (the

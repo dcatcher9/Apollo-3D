@@ -60,7 +60,7 @@
 #include "streamline_camera_probe.h"
 #include "streamline_camera_version.h"
 #include "test_contract_matrix_generator.h"
-#include "test_game3d_api_contract_known_gaps.h"
+#include "test_game3d_api_contract_tally.h"
 
 #include <cstdio>
 #include <cstring>
@@ -192,74 +192,13 @@ namespace {
   namespace generator = matrix::generator;
   using proof = sunshine_scene_depth::state_proof;
   using policy = capture::texture_state_policy;
+  using namespace matrix::judging;
 
   void require(bool value, const char *message) {
     if (!value) {
       throw std::runtime_error(message);
     }
   }
-
-  const char *name(matrix::outcome_kind kind) {
-    constexpr const char *names[] {"capture", "refuse", "hold", "continuous", "offered", "ignored"};
-    return names[unsigned(kind)];
-  }
-
-  // One family's verdicts against its known-gap rows. Up to eight failing
-  // cells per family are described.
-  template<unsigned N>
-  struct tally {
-    unsigned cells {}, met {}, unmet {}, closed {}, pending {}, known[N] {};
-
-    // The reason to describe a failing cell, or null.
-    const char *add(gaps::verdict verdict, int index) {
-      ++cells;
-      switch (verdict) {
-        case gaps::verdict::meets:
-          ++met;
-          return nullptr;
-        case gaps::verdict::known_failure:
-          ++known[index];
-          return nullptr;
-        case gaps::verdict::pending:
-          ++pending;
-          return nullptr;
-        case gaps::verdict::gap_closed:
-          return closed++ < 8 ? "known gap now passes; remove its row" : nullptr;
-        case gaps::verdict::misattributed:
-          return unmet++ < 8 ? "known-gap row matched a cell another rule decides" : nullptr;
-        case gaps::verdict::overlapping:
-          return unmet++ < 8 ? "more than one known-gap row matches" : nullptr;
-        default:
-          return unmet++ < 8 ? "contract violated" : nullptr;
-      }
-    }
-
-    template<class Case>
-    void finish(const gaps::row<Case> (&rows)[N], const char *family) const {
-      if (unmet || closed) {
-        std::fprintf(stderr, "%s: %u cells violate the contract outside the known-gap table; %u recorded gaps now pass\n", family, unmet, closed);
-        throw std::runtime_error("a production table diverged from the API contract matrix");
-      }
-      for (unsigned i = 0; i != N; ++i) {
-        if (rows[i].status == gaps::kind::expected_failure && !known[i]) {
-          std::fprintf(stderr, "%s: known-gap row %s matches no failing cell\n", family, rows[i].id);
-          throw std::runtime_error("a stale known-gap row");
-        }
-      }
-    }
-
-    template<class Case>
-    void print(const gaps::row<Case> (&rows)[N]) const {
-      std::printf("%u meet the oracle, %u are recorded gaps (", met, cells - met - pending);
-      for (unsigned i = 0; i != N; ++i) {
-        std::printf("%s%s %u", i ? ", " : "", rows[i].id, known[i]);
-      }
-      std::printf(")");
-      if (pending) {
-        std::printf(", %u are pending", pending);
-      }
-    }
-  };
 
   // Streamline buffer types.
 
@@ -510,29 +449,7 @@ namespace {
     return out;
   }
 
-  // The legacy states a texture can be in (the dimension's legal values):
-  // COMMON, each write state alone, every read-only combination and the
-  // GENERIC_READ forms.
-  template<class Visit>
-  void each_texture_state(Visit &&visit) {
-    visit(std::uint32_t(D3D12_RESOURCE_STATE_COMMON));
-    for (const auto write : matrix::texture_write_states) {
-      visit(write);
-    }
-    for (std::uint32_t bits = 1; bits != 0x20; ++bits) {
-      std::uint32_t state {};
-      constexpr std::uint32_t read[] {D3D12_RESOURCE_STATE_DEPTH_READ, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RESOLVE_SOURCE};
-      for (unsigned bit = 0; bit != std::size(read); ++bit) {
-        if (bits & (1u << bit)) {
-          state |= read[bit];
-        }
-      }
-      visit(state);
-    }
-    for (const std::uint32_t extra : {0u, std::uint32_t(D3D12_RESOURCE_STATE_DEPTH_READ), std::uint32_t(D3D12_RESOURCE_STATE_RESOLVE_SOURCE), std::uint32_t(D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_RESOLVE_SOURCE)}) {
-      visit(D3D12_RESOURCE_STATE_GENERIC_READ | extra);
-    }
-  }
+  using matrix::each_texture_state;
 
   // Every legal cell of the state dimensions the table sees: allocation
   // flags, consumer, claim, declared state and the recording's evidence (none,
@@ -646,6 +563,13 @@ namespace {
       row(ds, claim::sl_declared, 0x4000, evidence::none),
       row(none, claim::none, 0, evidence::transition, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE),
       row(none, claim::none, 0, evidence::enhanced, 0, D3D12_BARRIER_LAYOUT_SHADING_RATE_SOURCE, D3D12_BARRIER_ACCESS_SHADING_RATE_SOURCE),
+      // Buffer read bits on a texture other than GENERIC_READ itself, which
+      // the D3D12 runtime refuses (X2).
+      row(ds, claim::sl_declared, D3D12_RESOURCE_STATE_GENERIC_READ | D3D12_RESOURCE_STATE_DEPTH_READ, evidence::none),
+      row(none, claim::sl_declared, D3D12_RESOURCE_STATE_GENERIC_READ | D3D12_RESOURCE_STATE_RESOLVE_SOURCE, evidence::none),
+      row(none, claim::sl_declared, D3D12_RESOURCE_STATE_INDEX_BUFFER, evidence::none),
+      row(none, claim::none, 0, evidence::transition, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
+      row(D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, claim::sl_declared, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, evidence::none, 0, 0, 0, consumer::ui),
       // Barriers outside the contract (D4, D5b).
       row(ds, claim::sl_declared, D3D12_RESOURCE_STATE_DEPTH_READ, evidence::begin_and_end, D3D12_RESOURCE_STATE_DEPTH_READ),
       row(ds, claim::ngx_contract, 0, evidence::mixed_split, D3D12_RESOURCE_STATE_DEPTH_READ),
@@ -933,100 +857,6 @@ namespace {
       return false;
     }
     return actual.deferred == expected.deferred && (!expected.exact_basis || matrix::same_basis(expected.basis, actual.basis));
-  }
-
-  // A family's verdicts against rows judged with judge_each.
-  template<unsigned N>
-  struct each_tally {
-    unsigned cells {}, met {}, unmet {}, closed {}, known {}, pending {};
-    unsigned matched[N] {}, alone[N] {}, failing[N] {};
-
-    const char *add(gaps::verdict verdict, const bool (&rows)[N], bool satisfied) {
-      ++cells;
-      unsigned count {}, last {};
-      for (unsigned i = 0; i != N; ++i) {
-        if (rows[i]) {
-          ++count;
-          last = i;
-          ++matched[i];
-          failing[i] += !satisfied;
-        }
-      }
-      switch (verdict) {
-        case gaps::verdict::meets:
-          ++met;
-          return nullptr;
-        case gaps::verdict::pending:
-          ++pending;
-          return nullptr;
-        case gaps::verdict::known_failure:
-          ++known;
-          alone[last] += count == 1;
-          return nullptr;
-        case gaps::verdict::gap_closed:
-          return closed++ < 8 ? "known gap now passes; remove or narrow its row" : nullptr;
-        case gaps::verdict::misattributed:
-          return unmet++ < 8 ? "known gap fails another way than its row records, or under another rule" : nullptr;
-        default:
-          return unmet++ < 8 ? "contract violated" : nullptr;
-      }
-    }
-
-    // A partial run (one case or one shard) cannot show a row stale.
-    template<class Case>
-    void finish(const gaps::row<Case> (&rows)[N], const char *family, bool complete) const {
-      if (unmet || closed) {
-        std::fprintf(stderr, "%s: %u cells violate the contract outside the known-gap table; %u recorded gaps now pass\n", family, unmet, closed);
-        throw std::runtime_error("an adapter diverged from the API contract matrix");
-      }
-      for (unsigned i = 0; complete && i != N; ++i) {
-        if (rows[i].status == gaps::kind::expected_failure && !alone[i]) {
-          std::fprintf(stderr, "%s: known-gap row %s is the only row of no failing cell\n", family, rows[i].id);
-          throw std::runtime_error("a stale known-gap row");
-        }
-      }
-    }
-
-    template<class Case>
-    void print(const gaps::row<Case> (&rows)[N]) const {
-      std::printf("%u meet the oracle, %u are recorded gaps (", met, known);
-      const char *separator = "";
-      for (unsigned i = 0; i != N; ++i) {
-        if (rows[i].status == gaps::kind::expected_failure) {
-          std::printf("%s%s %u", separator, rows[i].id, matched[i]);
-          separator = ", ";
-        }
-      }
-      std::printf("), %u are pending (", pending);
-      separator = "";
-      for (unsigned i = 0; i != N; ++i) {
-        if (rows[i].status == gaps::kind::pending) {
-          std::printf("%s%s %u, %u failing", separator, rows[i].id, matched[i], failing[i]);
-          separator = "; ";
-        }
-      }
-      std::printf(")");
-    }
-  };
-
-  const char *row_names(const bool *matched, const char *const *ids, unsigned count, std::string &out) {
-    out.clear();
-    for (unsigned i = 0; i != count; ++i) {
-      if (matched[i]) {
-        out += out.empty() ? "" : " ";
-        out += ids[i];
-      }
-    }
-    return out.empty() ? "none" : out.c_str();
-  }
-
-  const char *name(gaps::verdict value) {
-    constexpr const char *names[] {"meets the oracle", "violates the contract", "recorded gap", "recorded gap now passes", "misattributed", "pending", "overlapping rows"};
-    return names[unsigned(value)];
-  }
-
-  void describe_expected(const matrix::outcome &expected) {
-    std::fprintf(stderr, "  expected: %s%s%s rule=%s basis_rule=%s deferred=%u basis=%s0x%x/0x%x/0x%x\n", name(expected.kind), matrix::either(expected) ? " or " : "", matrix::either(expected) ? name(expected.alternative) : "", expected.by ? expected.by->id : "?", expected.basis_by ? expected.basis_by->id : "-", expected.deferred, expected.exact_basis ? "" : "(any) ", expected.basis.enhanced ? expected.basis.layout : expected.basis.state, expected.basis.access, unsigned(expected.basis.enhanced));
   }
 
   // The Streamline fixture SDK: noinline entry points the probe hooks. The

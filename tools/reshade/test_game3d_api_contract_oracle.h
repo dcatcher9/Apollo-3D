@@ -1049,6 +1049,52 @@ namespace game3d_contract {
     return out;
   }
 
+  // A copy recorded on a real list (the device layer): an adapter's copy
+  // follows the state rules; a Generic boundary follows expect(generic_case)
+  // with what the copy's own recording names; the UI clear boundary copies
+  // the target from the state its clear needs (D12), where expect(ui_case)
+  // judges whether that copy is offered.
+  constexpr outcome expect(const device_case &value) {
+    using namespace detail;
+    const auto &source = value.state.resource;
+    switch (value.point) {
+      case device_point::clear:
+        return expect(generic_case {generic_boundary::clear_before_draws, false, source});
+      case device_point::end_of_frame:
+        return expect(generic_case {generic_boundary::end_of_frame, false, source});
+      case device_point::unbind_read_only_dsv:
+        return expect(generic_case {generic_boundary::unbind_read_only_dsv, false, source});
+      case device_point::ui_clear:
+        switch (value.clear) {
+          case ui_clear_boundary::legacy_render_target:
+            return capture(rules::D12, legacy(D3D12_RESOURCE_STATE_RENDER_TARGET));
+          case ui_clear_boundary::enhanced_render_target:
+            return either(refuse(rules::D12, refusal::state_unprovable), capture(rules::D12, enhanced(D3D12_BARRIER_LAYOUT_RENDER_TARGET, D3D12_BARRIER_ACCESS_RENDER_TARGET)));
+          default:
+            return refuse(rules::D12, refusal::state_unprovable);
+        }
+      default:
+        return expect(value.state);
+    }
+  }
+
+  // Whether the oracle applied by to a device cell: the rule that decided or
+  // chose the basis, or, on a COMPUTE list, the rule that permits that list
+  // (as attributions() adds S22): N7 for NGX's copies (its contract claim,
+  // or none: DLSS-G and the features without one), S22 for Streamline's and
+  // for UI tags.
+  constexpr bool applies(const device_case &value, const rule &by) {
+    const auto expected = expect(value);
+    if (expected.by == &by || expected.basis_by == &by) {
+      return true;
+    }
+    if (value.point != device_point::api || value.state.list != list_type::compute) {
+      return false;
+    }
+    const bool ngx = value.state.role == consumer::depth && (value.state.source == claim::ngx_contract || value.state.source == claim::none);
+    return &by == (ngx ? &rules::N7 : &rules::S22);
+  }
+
   // The role a buffer meaning gives a tag: a depth source (S17), a UI input
   // (U1, U1c), or none (S17, U1b; the scaling colours feed neither).
   constexpr outcome buffer_role(buffer_meaning meaning) {

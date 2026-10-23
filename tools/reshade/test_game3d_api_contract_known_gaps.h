@@ -125,6 +125,25 @@ namespace game3d_contract::known_gaps {
       return source.seen == evidence::none && depth_declaration && texture_state(value.declared) &&
              !state_allowed(value.declared, source.flags);
     }
+
+    // copy_state::supported admits the buffer read bits (VERTEX_AND_CONSTANT_BUFFER,
+    // INDEX_BUFFER, INDIRECT_ARGUMENT) with read-only texture bits, which the
+    // D3D12 runtime refuses on a texture other than GENERIC_READ itself: a
+    // completed transition into one, or a declaration of one with nothing
+    // observed, becomes the copy's basis.
+    constexpr bool buffer_read_bits(const state_case &value) {
+      constexpr std::uint32_t buffer_bits = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_INDEX_BUFFER |
+                                            D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
+      const auto buffer_state = [](std::uint32_t state) {
+        return (state & buffer_bits) && state != D3D12_RESOURCE_STATE_GENERIC_READ &&
+               !(state & ~std::uint32_t(D3D12_RESOURCE_STATE_GENERIC_READ | texture_read_states));
+      };
+      const auto &source = value.resource;
+      if (source.seen == evidence::transition) {
+        return buffer_state(source.observed) && !(value.source == claim::sl_declared && value.declared != source.observed);
+      }
+      return source.seen == evidence::none && value.source == claim::sl_declared && buffer_state(value.declared);
+    }
   }  // namespace state
 
   inline constexpr row<state_case> state_rows[] {
@@ -132,6 +151,7 @@ namespace game3d_contract::known_gaps {
     {"D3b", &rules::D3b, kind::expected_failure, &state::declared_common_on_promotable, "A COMMON declaration on a colour or linear-depth texture may already be promoted; fix together with D3 (one COMMON rule keyed by depth-stencil allocation). Update the 'typed declared COMMON was not retained' check with it."},
     {"D2", &rules::D2, kind::expected_failure, &state::resolve_destination, "Fail-safe today (refusal is harmless), lowest priority: admit RESOLVE_DEST in copy_state::supported and layouts::admissible when a game is seen to need it."},
     {"X1", &rules::X1, kind::expected_failure, &state::basis_flags_unchecked, "Illegal game input only: check the allocation flags for every copy basis in copy_state::resolve (today only the at-call UI declaration fallback does), so an impossible state never reaches a barrier."},
+    {"X2", &rules::X2, kind::expected_failure, &state::buffer_read_bits, "Illegal game input, but not harmless: the copy's barrier from such a state makes the game's own ID3D12GraphicsCommandList::Close fail (E_INVALIDARG), as the device layer saw for GENERIC_READ | DEPTH_READ. Admit GENERIC_READ itself and no other state with a buffer read bit in copy_state::supported, and update test_capture_state_policy.cpp's supported() checks with it."},
   };
 
   // Raw Streamline buffer types at each surveyed release (checked by
@@ -318,6 +338,133 @@ namespace game3d_contract::known_gaps {
   inline constexpr row<ngx_case> ngx_rows[] {
     {"N1b", &rules::N1b, kind::expected_failure, &ngx::unknown_feature, "A feature no cited guide covers is copied from the SR contract state: in ngx_depth_source.cpp nominate features other than SR (and RR once N1 covers it) with state_proof::observed_nonzero instead of sdk_contract, so only a recorded state proves them. Fail-safe for no shipping game known today.", &behaviours::copy},
     {"N1b-pending", &rules::N1b, kind::pending, &ngx::ray_reconstruction, "Owner action needed: the DLSS-RR guide is not among the cited sources. If its resource-state section names NON_PIXEL_SHADER_RESOURCE as the SR guide does, cite it in N1 for feature 13 and drop this row; otherwise RR follows N1b like an unknown feature."},
+  };
+
+  // Copies recorded on real lists (checked by
+  // test_game3d_api_contract_device.cpp, judged with judge_each). A cell whose
+  // row records a copy is recorded but never executed: that copy starts from
+  // a state nothing proved.
+  namespace device {
+    constexpr bool api(const device_case &value) {
+      return value.point == device_point::api;
+    }
+
+    // The copy's recording completes a legacy barrier into state on
+    // subresource 0 (alone or with every subresource).
+    constexpr bool completes(const resource_state &source, std::uint32_t state) {
+      return (source.seen == evidence::transition || source.seen == evidence::end_without_begin) && source.observed == state &&
+             (source.subresource == subresource_barrier::zero || source.subresource == subresource_barrier::all);
+    }
+
+    // The recording names nothing about subresource 0.
+    constexpr bool unnamed(const resource_state &source) {
+      return source.subresource == subresource_barrier::other_mip_only || source.subresource == subresource_barrier::stencil_plane_only ||
+             source.seen == evidence::none || source.seen == evidence::alias_named || source.seen == evidence::alias_wildcard;
+    }
+
+    // A legacy COMMON completed on the recording of a depth-stencil
+    // allocation is refused as missing evidence (copy_state::resolve), unless
+    // a declaration is checked against it.
+    constexpr bool common_on_depth_stencil(const device_case &value) {
+      const auto &state = value.state;
+      return api(value) && depth_stencil(state.resource.flags) && completes(state.resource, D3D12_RESOURCE_STATE_COMMON) &&
+             state.source != claim::sl_declared;
+    }
+
+    // A depth declaration of COMMON on a promotable texture is copied from
+    // COMMON when the recording names nothing else.
+    constexpr bool declared_common_on_promotable(const device_case &value) {
+      const auto &state = value.state;
+      return api(value) && state.list == list_type::direct && !depth_stencil(state.resource.flags) && state.role == consumer::depth &&
+             state.source == claim::sl_declared && state.declared == D3D12_RESOURCE_STATE_COMMON &&
+             (unnamed(state.resource) || completes(state.resource, D3D12_RESOURCE_STATE_COMMON));
+    }
+
+    // RESOLVE_DEST, legacy or enhanced, is never a copy basis.
+    constexpr bool resolve_destination(const device_case &value) {
+      const auto &state = value.state;
+      const auto &source = state.resource;
+      if (!api(value) || state.list != list_type::direct) {
+        return false;
+      }
+      const bool declared = state.source == claim::sl_declared && state.declared == D3D12_RESOURCE_STATE_RESOLVE_DEST;
+      if (completes(source, D3D12_RESOURCE_STATE_RESOLVE_DEST)) {
+        return state.source != claim::sl_declared || declared;
+      }
+      if (source.seen == evidence::enhanced && source.layout == D3D12_BARRIER_LAYOUT_RESOLVE_DEST && source.access != D3D12_BARRIER_ACCESS_NO_ACCESS) {
+        return state.source != claim::sl_declared;
+      }
+      return unnamed(source) && declared;
+    }
+
+    // A layout an enhanced barrier set on an earlier list, described by a
+    // declaration (D6) or by NGX's contract state (N8): the copy uses a
+    // legacy barrier from the claim (copy_state::resolve sees no
+    // observation). A declared RESOLVE_DEST is refused (D2's table).
+    constexpr bool legacy_after_earlier_layout(const device_case &value, claim source) {
+      const auto &state = value.state;
+      return api(value) && state.list == list_type::direct && state.resource.seen == evidence::earlier_list_enhanced && state.source == source &&
+             !(source == claim::sl_declared && state.declared == D3D12_RESOURCE_STATE_RESOLVE_DEST);
+    }
+
+    constexpr bool declared_after_earlier_layout(const device_case &value) {
+      return legacy_after_earlier_layout(value, claim::sl_declared);
+    }
+
+    constexpr bool contract_after_earlier_layout(const device_case &value) {
+      return legacy_after_earlier_layout(value, claim::ngx_contract);
+    }
+
+    // The Generic path's end-of-frame copy declares DEPTH_WRITE for every
+    // depth-stencil allocation (depth_addon.cpp preserve_d3d12_at_effects,
+    // from the allocation's usage) and record_preserved copies from it.
+    constexpr bool end_of_frame(const device_case &value) {
+      return value.point == device_point::end_of_frame;
+    }
+
+    // Unbinding a read-only DSV declares DEPTH_WRITE (depth_addon.cpp
+    // on_bind_depth_stencil -> on_clear_depth_impl) and record_preserved copies
+    // from it when the recording names nothing.
+    constexpr bool read_only_unbind(const device_case &value) {
+      return value.point == device_point::unbind_read_only_dsv && unnamed(value.state.resource);
+    }
+
+    // The UI layer's clear-boundary copy records legacy RENDER_TARGET
+    // barriers (game3d_ui_layer.cpp record_into) whatever the target's layout
+    // or simultaneous access.
+    constexpr bool legacy_ui_clear(const device_case &value) {
+      return value.point == device_point::ui_clear && value.clear != ui_clear_boundary::legacy_render_target;
+    }
+
+    // The capture owner records copies on DIRECT lists only
+    // (streamline_depth_capture.cpp record_impl, record_stage::command_type):
+    // every COMPUTE cell is refused before its state is judged.
+    constexpr bool compute_list(const device_case &value, bool ngx) {
+      const auto &state = value.state;
+      const bool by_ngx = state.role == consumer::depth && (state.source == claim::ngx_contract || state.source == claim::none);
+      return api(value) && state.list == list_type::compute && by_ngx == ngx;
+    }
+
+    constexpr bool streamline_compute_list(const device_case &value) {
+      return compute_list(value, false);
+    }
+
+    constexpr bool ngx_compute_list(const device_case &value) {
+      return compute_list(value, true);
+    }
+  }  // namespace device
+
+  inline constexpr row<device_case> device_rows[] {
+    {"D3", &rules::D3, kind::expected_failure, &device::common_on_depth_stencil, "Owner ruling R1 (decided): as the state table's D3 row; on the device a COMMON transition on a depth-stencil allocation, then the copy, is legal D3D12.", &behaviours::no_copy},
+    {"D3b", &rules::D3b, kind::expected_failure, &device::declared_common_on_promotable, "As the state table's D3b row: fix with D3 (one COMMON rule keyed by depth-stencil allocation).", &behaviours::copy},
+    {"D2", &rules::D2, kind::expected_failure, &device::resolve_destination, "As the state table's D2 row: fail-safe, lowest priority.", &behaviours::no_copy},
+    {"D6", &rules::D6, kind::expected_failure, &device::declared_after_earlier_layout, "A texture whose layout an enhanced barrier set on an earlier list takes a legacy barrier from its declaration: illegal D3D12 (Enhanced Barriers, legacy interop). Latch 'this resource uses enhanced layouts' at device level from any texture barrier group naming it (streamline_depth_capture.cpp enhanced_textures); when latched and the recording names nothing, refuse, or copy with enhanced barriers from the layout the declaration describes (SHADER_RESOURCE for shader-resource states).", &behaviours::copy},
+    {"N8", &rules::N8, kind::expected_failure, &device::contract_after_earlier_layout, "As D6 for NGX's contract state (ngx_depth_source.cpp nominates NON_PIXEL_SHADER_RESOURCE with state_proof::sdk_contract): the same device-level latch fixes both.", &behaviours::copy},
+    {"D10", &rules::D10, kind::expected_failure, &device::end_of_frame, "Unsafe today, first in the fix order: depth_addon.cpp preserve_d3d12_at_effects declares DEPTH_WRITE from the allocation's usage and copies on ReShade's own list, where no game barrier is observed. Keep a per-resource fact for the last state proven on a game recording (set at ExecuteCommandLists) and copy only from it; otherwise refuse, or hold the earlier capture. Add a counter for how often an end-of-frame copy wins first, to measure the effect on generic-only games.", &behaviours::copy},
+    {"D11c", &rules::D11c, kind::expected_failure, &device::read_only_unbind, "depth_addon.cpp declares DEPTH_WRITE when a DSV is unbound (on_bind_depth_stencil -> on_clear_depth_impl). Read the bound DSV's read-only flags: a writable DSV keeps DEPTH_WRITE; a read-only one with no observation is refused (D10's per-resource proven state may supply it).", &behaviours::copy},
+    {"D12", &rules::D12, kind::expected_failure, &device::legacy_ui_clear, "game3d_ui_layer.cpp record_into records legacy RENDER_TARGET -> COPY_SOURCE barriers at every full-frame clear boundary: illegal on a target an enhanced barrier put in the RENDER_TARGET layout, and wrong for a simultaneous-access target still in COMMON. Refuse both (or copy an enhanced target with enhanced barriers) with the device-level layout latch D6 adds.", &behaviours::copy},
+    {"S22", &rules::S22, kind::expected_failure, &device::streamline_compute_list, "Allow COMPUTE in record_impl and the consumer (streamline_depth_capture.cpp command_type, consume_owned) when the starting state is one a compute list may use (NON_PIXEL_SHADER_RESOURCE, UNORDERED_ACCESS, COPY_SOURCE, COPY_DEST, COMMON on depth-stencil, or a COMPUTE_QUEUE_* layout), with a compute-legal resting state for the snapshot storage. Until then every compute cell is refused as no_copy_point, also where the oracle refuses for its state.", &behaviours::no_copy},
+    {"N7", &rules::N7, kind::expected_failure, &device::ngx_compute_list, "As S22 for NGX evaluations (dlssg-guide.txt:2321-2324: a non-copy queue); the same record_impl change fixes both.", &behaviours::no_copy},
   };
 
   // One family's verdicts against its rows.
