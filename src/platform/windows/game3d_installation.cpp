@@ -11,6 +11,7 @@
 
 #include <Windows.h>
 
+#include <ShlObj.h>
 #include <TlHelp32.h>
 
 namespace platf::game3d {
@@ -27,6 +28,11 @@ namespace platf::game3d {
         }
       }
     };
+
+    std::string utf8(const fs::path &path) {
+      const auto value = path.u8string();
+      return {value.begin(), value.end()};
+    }
 
     std::string trim(std::string value) {
       const auto first = value.find_first_not_of(" \t\r\n");
@@ -130,6 +136,88 @@ namespace platf::game3d {
 
     bool same_path(const fs::path &a, const fs::path &b) {
       return CompareStringOrdinal(a.c_str(), -1, b.c_str(), -1, TRUE) == CSTR_EQUAL;
+    }
+
+    bool starts_with_name(std::wstring_view name, std::wstring_view prefix) {
+      return name.size() >= prefix.size() && CompareStringOrdinal(name.data(), static_cast<int>(prefix.size()), prefix.data(), static_cast<int>(prefix.size()), TRUE) == CSTR_EQUAL;
+    }
+
+    bool ends_with_name(std::wstring_view name, std::wstring_view suffix) {
+      return name.size() >= suffix.size() && CompareStringOrdinal(name.data() + name.size() - suffix.size(), static_cast<int>(suffix.size()), suffix.data(), static_cast<int>(suffix.size()), TRUE) == CSTR_EQUAL;
+    }
+
+    // Files and folders that kernel-level anti-cheat systems install inside a game's folder.
+    // tools/reshade/install-runtime.ps1 applies the same markers and walk independently.
+    bool anti_cheat_marker(std::wstring_view name) {
+      for (const std::wstring_view prefix : {L"EasyAntiCheat", L"BattlEye", L"EAAntiCheat", L"XIGNCODE", L"AntiCheatExpert", L"HoYoKProtect", L"mhyprot"}) {
+        if (starts_with_name(name, prefix)) {
+          return true;
+        }
+      }
+      for (const std::wstring_view exact : {L"start_protected_game.exe", L"GameGuard", L"randgrid.sys"}) {
+        if (name.size() == exact.size() && starts_with_name(name, exact)) {
+          return true;
+        }
+      }
+      return ends_with_name(name, L"_BE.exe");
+    }
+
+    // Program Files and the Windows directory hold the anti-cheat services' own system-wide
+    // installations, and a volume root holds unrelated libraries; markers there do not
+    // identify the game, so the walk stops before them.
+    bool shared_root(const fs::path &directory) {
+      if (!directory.has_relative_path()) {
+        return true;
+      }
+      for (const auto &folder : {FOLDERID_ProgramFilesX64, FOLDERID_ProgramFilesX86, FOLDERID_Windows}) {
+        PWSTR known = nullptr;
+        const auto result = SHGetKnownFolderPath(folder, KF_FLAG_DEFAULT, nullptr, &known);
+        const bool same = SUCCEEDED(result) && known && same_path(fs::path(known).lexically_normal(), directory);
+        CoTaskMemFree(known);
+        if (same) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    enum class anti_cheat_e {
+      absent,
+      present,
+      unknown,
+    };
+
+    // Checks the executable's folder and up to four parents: the game root of Unreal-style
+    // <game>/<project>/Binaries/Win64 layouts, or at most its library folder. Sibling games'
+    // folders are never entered. A folder that cannot be listed completely is unknown.
+    anti_cheat_e find_anti_cheat(const fs::path &executable, fs::path &marker) {
+      auto directory = executable.parent_path();
+      for (int level = 0; level < 5 && !shared_root(directory); ++level) {
+        WIN32_FIND_DATAW entry {};
+        const auto pattern = directory / L"*";
+        const auto find = FindFirstFileExW(pattern.c_str(), FindExInfoBasic, &entry, FindExSearchNameMatch, nullptr, FIND_FIRST_EX_LARGE_FETCH);
+        if (find == INVALID_HANDLE_VALUE) {
+          return anti_cheat_e::unknown;
+        }
+        bool complete = false;
+        for (std::size_t entries = 0; entries < 65536; ++entries) {
+          if (anti_cheat_marker(entry.cFileName)) {
+            marker = directory / entry.cFileName;
+            FindClose(find);
+            return anti_cheat_e::present;
+          }
+          if (!FindNextFileW(find, &entry)) {
+            complete = GetLastError() == ERROR_NO_MORE_FILES;
+            break;
+          }
+        }
+        FindClose(find);
+        if (!complete) {
+          return anti_cheat_e::unknown;
+        }
+        directory = directory.parent_path();
+      }
+      return anti_cheat_e::absent;
     }
 
     bool reshade_runtime_present(const fs::path &directory) {
@@ -447,6 +535,17 @@ namespace platf::game3d {
       status.executable = fs::weakly_canonical(game_executable, error);
       if (error || !regular_file(status.executable) || !same_path(status.executable.extension(), L".exe")) {
         return unavailable(std::move(status), "The game executable is unavailable.");
+      }
+      fs::path marker;
+      switch (find_anti_cheat(status.executable, marker)) {
+        case anti_cheat_e::present:
+          status.state = installation_state_e::anti_cheat;
+          status.detail = "Anti-cheat detected (" + utf8(marker.filename()) + " in " + utf8(marker.parent_path()) + "), so Sunshine 3D does not offer or perform setup for this game.";
+          return status;
+        case anti_cheat_e::unknown:
+          return unavailable(std::move(status), "The game's folders could not be checked for anti-cheat, so Sunshine 3D does not offer setup for this game.");
+        case anti_cheat_e::absent:
+          break;
       }
       const auto ini = status.executable.parent_path() / "ReShade.ini";
       status.reshade_present = regular_file(ini) && reshade_runtime_present(status.executable.parent_path());

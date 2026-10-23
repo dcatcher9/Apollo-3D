@@ -13,14 +13,58 @@ if ((Get-FileHash -LiteralPath $script:officialArchive -Algorithm SHA256).Hash -
 
 Describe 'Fresh ReShade runtime installation' {
     function New-RuntimeFixture([string] $Name = 'Fixture Game.exe') {
-        $root = Join-Path $TestDrive ([guid]::NewGuid().ToString('N') + ' game with spaces')
+        # Three fixture parents keep the anti-cheat walk (game folder and four parents) inside
+        # TestDrive, whose own entries are other fixtures' library folders.
+        $library = Join-Path $TestDrive ([guid]::NewGuid().ToString('N') + ' library')
+        $root = Join-Path $library 'steamapps\common\game with spaces'
         [void][IO.Directory]::CreateDirectory($root)
         $game = Join-Path $root $Name
         Copy-Item -LiteralPath (Join-Path $env:SystemRoot 'System32\where.exe') -Destination $game
         $cache = Join-Path $root 'download cache'
         [void][IO.Directory]::CreateDirectory($cache)
         [IO.File]::WriteAllText((Join-Path $cache 'Compatibility.ini'), '[Other Game.exe]')
-        return @{Root=$root; Game=$game; Cache=$cache}
+        return @{Library=$library; Root=$root; Game=$game; Cache=$cache}
+    }
+
+    It 'refuses kernel anti-cheat games before downloading or writing' {
+        Mock Invoke-WebRequest { throw 'No download is allowed for an anti-cheat game.' }
+        foreach ($marker in @(@{Name='EasyAntiCheat'; Directory=$true}, @{Name='EasyAntiCheat_EOS_Setup.exe'},
+                @{Name='start_protected_game.exe'}, @{Name='BattlEye'; Directory=$true}, @{Name='DayZ_BE.exe'},
+                @{Name='EAAntiCheat.GameServiceLauncher.exe'})) {
+            # Unreal-style layout: the marker sits at the game root, three folders above the EXE.
+            $fixture = New-RuntimeFixture
+            $binaries = Join-Path $fixture.Root 'Project\Binaries\Win64'
+            [void][IO.Directory]::CreateDirectory($binaries)
+            $shipping = Join-Path $binaries 'Project-Win64-Shipping.exe'
+            Copy-Item -LiteralPath $fixture.Game -Destination $shipping
+            $path = Join-Path $fixture.Root $marker.Name
+            if ($marker.Directory) { [void][IO.Directory]::CreateDirectory($path) } else { [IO.File]::WriteAllText($path, 'MARKER') }
+            foreach ($game in @($fixture.Game, $shipping)) {
+                { & $script:runtimeInstaller -GameExecutable $game -SetupArchive $script:officialArchive -CacheDirectory $fixture.Cache } | Should Throw 'Anti-cheat detected'
+                (Test-Path -LiteralPath (Join-Path (Split-Path -Parent $game) 'dxgi.dll')) | Should Be $false
+                (Test-Path -LiteralPath (Join-Path (Split-Path -Parent $game) 'ReShade.ini')) | Should Be $false
+            }
+        }
+        Assert-MockCalled Invoke-WebRequest -Times 0 -Exactly -Scope It
+    }
+
+    It 'does not attribute a sibling game or a folder beyond four parents to this game' {
+        $fixture = New-RuntimeFixture
+        $deep = Join-Path $fixture.Root 'bin'
+        [void][IO.Directory]::CreateDirectory($deep)
+        $game = Join-Path $deep 'Fixture Game.exe'
+        Copy-Item -LiteralPath $fixture.Game -Destination $game
+        $sibling = Join-Path (Split-Path -Parent $fixture.Root) 'Online Game'
+        [void][IO.Directory]::CreateDirectory((Join-Path $sibling 'EasyAntiCheat'))
+        [IO.File]::WriteAllText((Join-Path $sibling 'start_protected_game.exe'), 'SIBLING')
+        # bin, game, common, steamapps and the library folder: TestDrive is the fifth parent.
+        [IO.File]::WriteAllText((Join-Path $fixture.Library 'Library Readme.txt'), 'NOT A MARKER')
+        & $script:runtimeInstaller -GameExecutable $game -SetupArchive $script:officialArchive -CacheDirectory $fixture.Cache
+        (Test-Path -LiteralPath (Join-Path $deep 'dxgi.dll') -PathType Leaf) | Should Be $true
+        $second = New-RuntimeFixture
+        [IO.File]::WriteAllText((Join-Path $second.Library 'Shooter_BE.exe'), 'MARKER IN THE LIBRARY FOLDER')
+        { & $script:runtimeInstaller -GameExecutable $second.Game -SetupArchive $script:officialArchive -CacheDirectory $second.Cache } | Should Throw 'Anti-cheat detected'
+        (Test-Path -LiteralPath (Join-Path $second.Root 'dxgi.dll')) | Should Be $false
     }
 
     It 'extracts the pinned official native x64 runtime without changing the game' {

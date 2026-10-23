@@ -35,6 +35,34 @@ function Assert-Native64Pe([string] $Path, [bool] $RequireDll) {
     }
 }
 
+function Assert-NoAntiCheat([string] $Directory) {
+    # Kernel anti-cheat files/folders inside the game's folder or up to four parents (the game
+    # root of Unreal-style Binaries\Win64 layouts, at most its library folder). The host's
+    # inspection applies the same markers and walk. Program Files, the Windows directory and a
+    # volume root hold the anti-cheat services' own installs and unrelated libraries; the walk
+    # stops before them and never enters sibling folders.
+    $markers = @('EasyAntiCheat*','BattlEye*','EAAntiCheat*','XIGNCODE*','AntiCheatExpert*','HoYoKProtect*','mhyprot*',
+        'start_protected_game.exe','GameGuard','randgrid.sys','*_BE.exe')
+    $sharedRoots = @([Environment]::GetFolderPath('ProgramFiles'), [Environment]::GetFolderPath('ProgramFilesX86'),
+        $env:ProgramW6432, [Environment]::GetFolderPath('Windows')) | Where-Object { $_ } |
+        ForEach-Object { [IO.Path]::GetFullPath($_).TrimEnd('\') }
+    $current = [IO.Path]::GetFullPath($Directory)
+    for ($level = 0; $level -lt 5 -and $current; ++$level) {
+        $current = $current.TrimEnd('\')
+        if ($current.Length -le [IO.Path]::GetPathRoot($current + '\').TrimEnd('\').Length -or $sharedRoots -icontains $current) { break }
+        try { $names = @([IO.Directory]::EnumerateFileSystemEntries($current + '\') | ForEach-Object { [IO.Path]::GetFileName($_) }) }
+        catch { throw "The game's folders could not be checked for anti-cheat ($current); automatic runtime installation is not offered." }
+        foreach ($name in $names) {
+            foreach ($marker in $markers) {
+                if ($name -like $marker) {
+                    throw "Anti-cheat detected ($name in $current); ReShade is not installed automatically for this game."
+                }
+            }
+        }
+        $current = [IO.Path]::GetDirectoryName($current)
+    }
+}
+
 function Assert-FreshTarget([string] $Directory) {
     foreach ($name in (@('ReShade.ini') + $proxyNames)) {
         $existing = Join-Path $Directory $name
@@ -195,6 +223,7 @@ $game = Get-Item -LiteralPath $GameExecutable -ErrorAction Stop
 if ($game.PSIsContainer -or $game.Extension -ine '.exe') { throw 'GameExecutable must name the actual game EXE.' }
 Assert-Native64Pe $game.FullName $false
 $gameDirectory = $game.DirectoryName
+Assert-NoAntiCheat $gameDirectory
 Assert-FreshTarget $gameDirectory
 Assert-CompatibleGame $game.Name
 $archive = Get-PinnedArchive

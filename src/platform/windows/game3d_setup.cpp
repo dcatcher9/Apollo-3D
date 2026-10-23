@@ -42,6 +42,8 @@ namespace platf::game3d {
           return "updated";
         case installation_state_e::installed:
           return "installed";
+        case installation_state_e::anti_cheat:
+          return "anti_cheat";
         case installation_state_e::unavailable:
           return "unavailable";
       }
@@ -130,7 +132,7 @@ namespace platf::game3d {
                         << "\" pid=" << game.process_id << " creation_time=" << game.creation_time
                         << ": " << installation.detail;
 #if defined(SUNSHINE_TRAY) && SUNSHINE_TRAY >= 1
-        if (installation.state != installation_state_e::current) {
+        if (installation.state != installation_state_e::current && installation.state != installation_state_e::anti_cheat) {
           const auto target_name = game.name + " (" + utf8(game.executable.parent_path().filename()) + ")";
           system_tray::update_tray_game3d_setup(target_name, installation.detail);
         }

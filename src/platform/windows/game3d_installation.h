@@ -13,6 +13,7 @@ namespace platf::game3d {
     update_pending,
     updated,
     installed,
+    anti_cheat,
     unavailable,
   };
 
@@ -33,6 +34,9 @@ namespace platf::game3d {
 
   // Disk evidence only: the proxy's ReShade product identity plus ReShade.ini do
   // not prove that the full-add-on runtime loaded into the running game.
+  // Kernel anti-cheat markers in the executable's folder or its parents up to the library
+  // (EasyAntiCheat, BattlEye, EA AntiCheat, ...) return anti_cheat, and a folder that cannot be
+  // checked returns unavailable; every writer below starts here, so neither ever writes.
   installation_status inspect_installation(
     const std::filesystem::path &game_executable,
     const std::filesystem::path &bundle_directory = bundled_addon_directory()

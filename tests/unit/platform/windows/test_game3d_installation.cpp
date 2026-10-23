@@ -32,7 +32,8 @@ namespace {
     void SetUp() override {
       static std::atomic<unsigned> serial {};
       root = fs::temp_directory_path() / ("sunshine-game3d-install-" + std::to_string(GetCurrentProcessId()) + "-" + std::to_string(serial++));
-      game = root / "game, with spaces" / "game.exe";
+      // Four parents inside the fixture: the anti-cheat walk never reaches the real temp folder.
+      game = root / "drive" / "library" / "common" / "game, with spaces" / "game.exe";
       bundle = root / "host package";
       fs::create_directories(game.parent_path());
       fs::create_directories(bundle);
@@ -55,7 +56,71 @@ namespace {
       configure();
       write(game.parent_path() / "SunshineSBS.addon64", content);
     }
+
+    // Stand-ins for the bundled installers: the runtime step publishes a ReShade-identity
+    // proxy and ReShade.ini like install-runtime.ps1; the add-on step runs `addon_body`.
+    void fake_installers(const std::string &addon_body) {
+      write(bundle / "install-runtime.ps1", "param([string] $GameExecutable)\n$directory = Split-Path -Parent $GameExecutable\nCopy-Item -LiteralPath '" + fs::path(SUNSHINE_TEST_RESHADE_DLL).string() + "' -Destination (Join-Path $directory 'dxgi.dll')\n[IO.File]::WriteAllText((Join-Path $directory 'ReShade.ini'), \"[ADDON]`r`nAddonPath=.`r`n\")\n");
+      write(bundle / "install.ps1", "param([string] $GameExecutable, [string] $AddonDirectory, [switch] $AllowRunningGame)\n$directory = Split-Path -Parent $GameExecutable\n" + addon_body + "\n");
+    }
+
   };
+
+  TEST_F(Game3DInstallation, AntiCheatMarkersInTheGameFolderOrItsParentsRefuseEveryWriter) {
+    const auto title = game.parent_path();
+    const auto unreal_game = title / "Project" / "Binaries" / "Win64" / "Project-Win64-Shipping.exe";
+    fs::create_directories(unreal_game.parent_path());
+    write(unreal_game, "unreal shipping executable");
+    fs::copy_file(SUNSHINE_TEST_RESHADE_DLL, unreal_game.parent_path() / "dxgi.dll");
+    fake_installers("[IO.File]::WriteAllText((Join-Path $directory 'SunshineSBS.addon64'), 'written')");
+    const std::vector<std::pair<std::string, bool>> markers {
+      {"EasyAntiCheat", true},
+      {"EasyAntiCheat_EOS_Setup.exe", false},
+      {"start_protected_game.exe", false},
+      {"BattlEye", true},
+      {"TslGame_BE.exe", false},
+      {"EAAntiCheat.GameServiceLauncher.exe", false},
+    };
+    for (const auto &[name, directory] : markers) {
+      SCOPED_TRACE(name);
+      const auto marker = title / name;
+      directory ? (void) fs::create_directory(marker) : write(marker, "marker");
+      for (const auto &executable : {game, unreal_game}) {
+        SCOPED_TRACE(executable.string());
+        const auto ini = executable.parent_path() / "ReShade.ini";
+        fs::remove(ini);
+        EXPECT_EQ(game3d::inspect_installation(executable, bundle).state, state::anti_cheat);
+        const auto status = game3d::inspect_installation(executable, bundle);
+        EXPECT_NE(status.detail.find(name), std::string::npos) << status.detail;
+        EXPECT_EQ(game3d::install_reshade_for_next_launch(executable, bundle).state, state::anti_cheat);
+        EXPECT_FALSE(fs::exists(ini));
+        write(ini, "[GENERAL]\n");
+        EXPECT_EQ(game3d::install_addon_for_next_launch(executable, bundle).state, state::anti_cheat);
+        EXPECT_FALSE(fs::exists(executable.parent_path() / "SunshineSBS.addon64"));
+        write(executable.parent_path() / "SunshineSBS.addon64", "old addon");
+        EXPECT_EQ(game3d::update_existing_addon(executable, bundle).state, state::anti_cheat);
+        EXPECT_EQ(read(executable.parent_path() / "SunshineSBS.addon64"), "old addon");
+        fs::remove(executable.parent_path() / "SunshineSBS.addon64");
+        fs::remove(ini);
+      }
+      fs::remove_all(marker);
+      EXPECT_EQ(game3d::inspect_installation(game, bundle).state, state::missing_reshade);
+    }
+  }
+
+  TEST_F(Game3DInstallation, AntiCheatWalkStopsAtFourParentsAndNeverEntersSiblingGames) {
+    // bin, then four parents: game, common, library and drive. The fixture root is fifth.
+    const auto executable = game.parent_path() / "bin" / "game.exe";
+    fs::create_directories(executable.parent_path());
+    write(executable, "test executable path");
+    // A sibling game's anti-cheat and a marker five levels up do not belong to this game.
+    fs::create_directories(game.parent_path().parent_path() / "Online Game" / "EasyAntiCheat");
+    write(game.parent_path().parent_path() / "Online Game" / "start_protected_game.exe", "sibling");
+    fs::create_directory(root / "BattlEye");
+    EXPECT_EQ(game3d::inspect_installation(executable, bundle).state, state::missing_reshade);
+    write(root / "drive" / "Shooter_BE.exe", "marker");
+    EXPECT_EQ(game3d::inspect_installation(executable, bundle).state, state::anti_cheat);
+  }
 
   TEST_F(Game3DInstallation, RequiresRuntimeIdentityAndConfiguration) {
     EXPECT_EQ(game3d::inspect_installation(game, bundle).state, state::missing_reshade);
