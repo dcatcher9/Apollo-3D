@@ -1262,12 +1262,26 @@ RWTexture2D<float> depth : register(u0);
       std::puts("PASS actual projection shader preserves zero-strength HDR color and responds proportionally to user strength");
 
       valid_evaluation=false;
+      const auto rejection_began=GetTickCount64();
       hold_begin();
       for(unsigned mono=0;mono<4;) {
         tick("failed-evaluation");
         mono+=require_held_mono("Failed API frame selected generic depth or reused stale projection depth");
       }
       check_exported_mono();
+      // Evaluations the API keeps rejecting release the association after
+      // the same timeout as silence (BF6 10-22 held 70 s of mono on them).
+      bool rejection_released=!query_provider_status;
+      do {
+        tick("failed-evaluation");
+        require(!current(),"A rejected evaluation exposed its capture as current");
+        if(!query_provider_status) continue;
+        if(GetTickCount64()-rejection_began<900)
+          require(provider.selected && !provider.ready && !ready(),"Rejected evaluations released the association before the timeout");
+        if(!provider.selected) rejection_released=true;
+        else require(!rejection_released,"A released SL association returned on a rejected evaluation");
+      } while(GetTickCount64()-rejection_began<1800);
+      require(rejection_released,"Rejected SL evaluations kept the queue mono past the association timeout");
       valid_evaluation=true;settle("successful-evaluation-recovery");
       emit=false;
       const auto silence_began=GetTickCount64();
@@ -1292,7 +1306,7 @@ RWTexture2D<float> depth : register(u0);
       } while(GetTickCount64()-silence_began<1800);
       require(association_released,"Silent SL provider kept the queue mono past the association timeout");
       emit=true;settle("missing-provider-frame-recovery");check_projection();
-      std::puts("PASS failed and missing active-provider frames hold only the newest completed copy within its age bound, then render current-color mono despite a useful generic DSV; one second of silence releases the association; recovery preserves projection scale");
+      std::puts("PASS failed and missing active-provider frames hold only the newest completed copy within its age bound, then render current-color mono despite a useful generic DSV; one second of silence or of rejected evaluations releases the association; recovery preserves projection scale");
 
       mode=capture_mode::v1_unknown_state;
       hold_begin();

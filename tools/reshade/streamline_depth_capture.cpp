@@ -326,6 +326,9 @@ namespace sunshine_streamline::depth_capture {
     struct evaluation_head {
       std::uint64_t epoch{}, sequence{}, tick{}, source_id{};
       std::uint32_t viewport{};
+      // Since when every finished evaluation of this view was rejected (zero
+      // after an accepted one); result_sequence orders late finishes.
+      std::uint64_t rejected_since{}, result_sequence{};
     };
     struct evaluation_namespace {
       std::array<evaluation_head, 4> views{};
@@ -1693,6 +1696,8 @@ namespace sunshine_streamline::depth_capture {
     // API still evaluates it. A game that stops calling the API without a
     // release (DLSS -> TAA, a cutscene without DLSS) loses the association
     // after this silence, and Generic takes over through its usual hysteresis.
+    // Evaluations the API rejects for as long count as silence: an API that
+    // fails every call delivers no depth (BF6 10-22 held 70 s of mono on one).
     constexpr std::uint64_t association_timeout_ms = 1000;
     // Requires mutex.
     void expire_association(queue_state &owner, std::uint64_t now) {
@@ -1701,9 +1706,10 @@ namespace sunshine_streamline::depth_capture {
       // The owner's own evaluations: its source and epoch, so the malformed-
       // input marker (epoch 0, source 0) never keeps a Streamline SR owner
       // (source 0) associated.
+      const auto within = [&](std::uint64_t tick) { return tick && now >= tick && now - tick <= association_timeout_ms; };
       const auto recent = [&](const evaluation_head &head) {
-        return head.source_id == owner.source_id && head.epoch == owner.nominated_epoch && head.tick && now >= head.tick &&
-          now - head.tick <= association_timeout_ms;
+        return head.source_id == owner.source_id && head.epoch == owner.nominated_epoch && within(head.tick) &&
+          (!head.rejected_since || within(head.rejected_since));
       };
       if (recent(current.pending_nomination) || std::any_of(current.views.begin(), current.views.end(), recent)) return;
       owner.provider_established = false;
@@ -1859,7 +1865,8 @@ namespace sunshine_streamline::depth_capture {
         if (value.epoch == epoch && value.viewport == viewport && value.source_id == superseded_source_id) value = {};
     const auto now = GetTickCount64();
     for (auto &value : current.views) if (value.epoch == epoch && value.viewport == viewport && value.source_id == source_id) {
-      value = {epoch, sequence, now, source_id, viewport}; return;
+      // A new call does not end a run of rejected ones; only its result can.
+      value.sequence = sequence; value.tick = now; return;
     }
     auto oldest = std::min_element(current.views.begin(), current.views.end(), [](const auto &a, const auto &b) { return a.sequence < b.sequence; });
     *oldest = {epoch, sequence, now, source_id, viewport};
@@ -2408,6 +2415,16 @@ namespace sunshine_streamline::depth_capture {
     for (auto &value : slots) if (value.id == ticket) {
       value.finished = true; value.success = successful;
       if (!successful) invalidate(value, failure == capture_failure::none ? capture_failure::evaluation_failed : failure);
+      // The view's run of rejected evaluations (expire_association).
+      const auto &m = value.metadata;
+      if (!value.preservation_only && valid_provider(m.provider))
+        for (auto &view : evaluations[provider_index(m.provider)].views)
+          if (view.epoch == m.epoch && view.viewport == m.viewport && view.source_id == m.source_id &&
+              m.sequence >= view.result_sequence) {
+            view.result_sequence = m.sequence;
+            if (successful) view.rejected_since = 0;
+            else if (!view.rejected_since) view.rejected_since = GetTickCount64();
+          }
       return;
     }
   }
@@ -3196,7 +3213,31 @@ namespace sunshine_streamline::depth_capture {
         sr.provider_established = true; sr.nominated_epoch = 5;
         expire_association(sr, GetTickCount64());
         if (!sr.provider_established) return false;
-        evaluations = {};
+        // Evaluations the API rejects keep the owner only as long as silence
+        // would (BF6 10-22: 70 s of mono while every DLSS call was rejected),
+        // whatever new calls arrive; an accepted one ends the rejected run,
+        // and a late older rejection does not restart it.
+        auto &view = evaluations[provider_index(provider_kind::streamline)].views[0];
+        const auto finished = [&](std::uint64_t id, std::uint64_t sequence, bool successful) {
+          slots[0] = {}; slots[0].id = id;
+          slots[0].metadata.provider = provider_kind::streamline; slots[0].metadata.epoch = 5;
+          slots[0].metadata.sequence = sequence; slots[0].metadata.viewport = 0; slots[0].metadata.source_id = 0;
+          finish(id, successful);
+          return slots[0].finished && slots[0].success == successful;
+        };
+        if (view.sequence != 3 || !finished(41, 3, false) || !view.rejected_since) return false;
+        expire_association(sr, GetTickCount64());
+        if (!sr.provider_established) return false; // A brief rejected run keeps the owner.
+        view.rejected_since -= association_timeout_ms + 1;
+        begin_evaluation(5, 4, 0, provider_kind::streamline);
+        if (view.sequence != 4 || !view.rejected_since) return false;
+        expire_association(sr, GetTickCount64());
+        if (sr.provider_established) return false;
+        if (!finished(42, 4, true) || view.rejected_since || !finished(43, 3, false) || view.rejected_since) return false;
+        sr.provider_established = true; sr.nominated_epoch = 5;
+        expire_association(sr, GetTickCount64());
+        if (!sr.provider_established) return false;
+        slots = {}; evaluations = {};
       }
       queue_state owner;
       constexpr std::uint64_t native = 77;
