@@ -3538,10 +3538,11 @@ teardown ends it, and so does one second without any evaluation of the establish
 game that switches DLSS to TAA, or a cutscene without DLSS, without releasing the feature), or one
 second in which the API rejected every evaluation of it (an API that fails every call delivers no
 depth; Battlefield 6 kept a source this way for 70 s). The queue then returns to Generic through
-its usual selection, and the next accepted evaluation establishes the source again. A silent or
-rejected owner never blocks another live API source. The same second bounds an enabled FG
-scope's ownership of its viewport (the FG scope rule below): without an accepted FG copy for a
-second, FG no longer holds the queue in mono.
+its usual selection, unless enabled FG holds it in mono (the FG scope rule below), and the next
+accepted evaluation establishes the source again. A silent or rejected owner never blocks another
+live API source. The same second bounds an enabled FG scope's ownership of its viewport: without
+an accepted FG copy for a second, the scope releases only the viewport's selection restriction;
+enabled FG still holds the queue in mono while no API source is established.
 
 One native D3D12 capture owner serves both API-selected and Generic-selected sources. It owns the
 snapshot pool, recording/submission identities, source and snapshot leases, consumer registration
@@ -3723,7 +3724,10 @@ scope is live (below) it withdraws the FG source until its next capture. A bound
 `Sunshine Streamline FG depth refused` line (at most every 5 s) names the first failing gate as
 `reason=`: a source gate such as `boundary_without_commands` (a legal `ValidUntilPresent` tag sent
 without a command list, which leaves no point to copy it at) or `untracked_frame`, a tag gate such
-as `lifecycle_outlives_boundary`, or `capture_<result>/<stage>` when the native copy was refused.
+as `not_depth`, `unsupported_<cause>`, `constants_call_frame` or a match status, `no_retained_source`
+when an admissible tag has no retained native source, or `capture_<result>/<stage>` when the native
+copy was refused. `lifecycle_outlives_boundary` gates only ordinary (non-FG) tag boundaries; a
+long-lived FG tag goes on to matching instead.
 It also gives the call's first depth tag (`tag_type`, `scope`, `lifecycle`, `native`), its
 `command`, the frame identity kind, the evidence `status`, `fg_scope=live|silent`, `withdrawn=1|0`
 and the running `refusals` count.
