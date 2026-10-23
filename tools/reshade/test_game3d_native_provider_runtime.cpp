@@ -1732,6 +1732,35 @@ namespace {
         settle(null_native ? untag_commands ? "SLFG-untag-null-native" : "SLFG-untag-null-native-without-commands" :
           untag_commands ? "SLFG-untag-null-resource" : "SLFG-untag-null-resource-without-commands");
       }
+      // DLSS-G integrations tag HUD-less color every frame, possibly in the
+      // same call as the depth untag. Only the call's depth tags make it an
+      // untag, so a real color tag beside them keeps fresh FG depth too.
+      com_ptr<ID3D12Resource> hudless;
+      {
+        D3D12_RESOURCE_DESC desc{};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D; desc.Width = width; desc.Height = height;
+        desc.DepthOrArraySize = desc.MipLevels = 1; desc.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
+        desc.SampleDesc.Count = 1; desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        const auto heap = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
+        checked(game->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+          D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(hudless.put())), "Create FG HUD-less input");
+      }
+      for (const bool untag_commands : {true, false}) {
+        render_tracked_depth = [&] {
+          real_frame();
+          abi_v2::resource color{}; color.base = {nullptr, resource_guid, 1};
+          color.native = hudless.p; color.state = D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE;
+          color.width = width; color.height = height; color.native_format = DXGI_FORMAT_R10G10B10A2_UNORM;
+          color.mip_levels = color.array_layers = 1;
+          const abi_v2::resource_tag tags[]{{{nullptr, tag_guid, 1}, nullptr, 0, 0, {}},
+            {{nullptr, tag_guid, 1}, &color, 2, 1, {0, 0, width, height}}};
+          require(global_tag_call(viewport, tags, 2, untag_commands ? reinterpret_cast<void *>(game_native_command) : nullptr) == 0,
+            "FG depth untag beside a HUD-less tag changed the SDK result");
+        };
+        settle(untag_commands ? "SLFG-untag-beside-hudless" : "SLFG-untag-beside-hudless-without-commands");
+      }
+      const abi_v2::resource_tag no_hudless{{nullptr, tag_guid, 1}, nullptr, 2, 0, {}};
+      require(global_tag_call(viewport, &no_hudless, 1, nullptr) == 0, "HUD-less untag changed the SDK result");
       // A malformed tag that names a native resource is no untag: it still
       // withdraws the FG source, so no presentation copies fresh depth.
       render_tracked_depth = [&] {
@@ -1751,7 +1780,7 @@ namespace {
       }
       render_tracked_depth = real_frame;
       settle("SLFG-recovered-after-malformed-tag");
-      std::puts("PASS native SLFG untag: a null Resource or null native after each FG tag, with or without commands, keeps fresh FG depth every presentation; a malformed tag still withdraws; no FX");
+      std::puts("PASS native SLFG untag: a null Resource or null native after each FG tag, with or without commands and beside a HUD-less tag, keeps fresh FG depth every presentation; a malformed tag still withdraws; no FX");
 
       // A ValidUntilPresent FG tag may legally arrive without a command list,
       // which leaves no point to copy it at: the boundary is withdrawn, and
