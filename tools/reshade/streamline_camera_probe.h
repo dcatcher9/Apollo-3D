@@ -193,6 +193,9 @@ namespace sunshine_streamline {
     std::uint64_t epoch{}, sequence{}, tick{}, loss_revision{};
     std::uint32_t viewport{}, mode{}, generated_frames{};
     bool known{}, enabled{}, automatic{};
+    // Enabled: the tick of the options call that turned FG on in this epoch,
+    // kept while later calls leave it on (depth_capture::frame_generation_scope_live).
+    std::uint64_t enabled_tick{};
   };
   // Successful, version-checked game options only. Enabled means requested by
   // the game; it does not identify any particular real/generated presentation.
@@ -241,6 +244,8 @@ namespace sunshine_streamline {
     void unlock_tokens();
     bool pin_tokens(unsigned index);
     void unpin_tokens();
+    // Moves every enabled FG scope's enabled tick ms into the past.
+    void age_frame_generation(std::uint64_t ms);
     // One explicitly armed fixture observation of the real pre-SDK policy.
     void arm_entry_policy();
     bool entry_policy(bool &selected, bool &admissible);

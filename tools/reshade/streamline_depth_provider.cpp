@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cstring>
 #include <cstdio>
+#include <utility>
 #include <vector>
 
 namespace sunshine_streamline::provider {
@@ -66,6 +67,8 @@ namespace sunshine_streamline::provider {
       std::uint64_t pending_id{}, pending_texture{}, next_sample{};
       bool owns_pass{}, open{}, have_latest{};
       frame_generation_policy source_policy;
+      // The required FG scope was silent at the last Present (logged on change).
+      bool fg_scope_silent{};
       api::resource display_texture{};
       api::resource_view display_view{}, bound_view{};
       sunshine_depth::ready_uniform_cache<api::effect_uniform_variable> depth_ready;
@@ -127,7 +130,7 @@ namespace sunshine_streamline::provider {
       display_status display{display_status::not_attempted};
       sunshine_scene_depth::provider_kind prior_provider{sunshine_scene_depth::provider_kind::streamline};
       std::uint64_t present{}, tick{}, prior_capture{};
-      bool prior_provider_known{}, prior_output_ready{}, available{}, copied{}, snapshot_ready{};
+      bool prior_provider_known{}, prior_output_ready{}, available{}, copied{}, snapshot_ready{}, fg_silent{};
       depth_capture::display_action action{depth_capture::display_action::invalidate};
       const char *source_reason{"not_checked"}, *cache_reason{"not_checked"};
     };
@@ -309,7 +312,7 @@ namespace sunshine_streamline::provider {
         "selection_tick_ms=%llu source_age_ms=%llu newest_view_age_ms=%llu active_views=%u "
         "finished=%u success=%u submitted=%u invalid=%u capture_pending=%u capture_repeated=%u "
         "fence=%llu completed=%llu completion_valid=%u producer_retired=%u; "
-        "FG_query=%u FG_known=%u FG_enabled=%u FG_mode=%u FG_generated=%u FG_epoch=%llu FG_viewport=%u require_FG=%u policy_epoch=%llu; "
+        "FG_query=%u FG_known=%u FG_enabled=%u FG_mode=%u FG_generated=%u FG_epoch=%llu FG_viewport=%u require_FG=%u FG_silent=%u policy_epoch=%llu; "
         "prior_output_ready=%u prior_retained=%u prior_age_ms=%llu prior_present=%llu prior_capture=%llu prior_sequence=%llu prior_epoch=%llu prior_source=%llu "
         "prior_viewport=%u prior_observation=%llu current_observation=%llu prior_feedback=%llu current_feedback=%llu "
         "prior_reset=%u current_reset=%u retained_clear=%s; "
@@ -326,7 +329,7 @@ namespace sunshine_streamline::provider {
         unsigned(c.pending_frame), unsigned(c.repeated_frame), u(c.producer_fence),
         u(c.producer_completed), unsigned(c.producer_completion_valid), unsigned(c.producer_recording_retired),
         unsigned(e.fg_query), unsigned(e.fg.known), unsigned(e.fg.enabled), e.fg.mode, e.fg.generated_frames,
-        u(e.fg.epoch), e.fg.viewport, unsigned(e.selection.require_frame_generation), u(e.selection.epoch),
+        u(e.fg.epoch), e.fg.viewport, unsigned(e.selection.require_frame_generation), unsigned(e.fg_silent), u(e.selection.epoch),
         unsigned(e.prior_output_ready), unsigned(e.prior.ready), age(p.tick), u(e.prior.frame_index), u(e.prior_capture), u(p.sequence), u(p.epoch),
         u(p.source_id), p.viewport, u(p.observation_revision), u(current.observation_revision),
         u(p.feedback.revision), u(current.feedback.revision), unsigned(p.feedback.reset), unsigned(current.feedback.reset),
@@ -443,6 +446,7 @@ namespace sunshine_streamline::provider {
       data->last_valid = {};
       data->source_metadata = {};
       data->source_policy = {};
+      data->fg_scope_silent = false;
       data->bound_view = {};
       data->effects_view = {};
       data->associated_tick = 0;
@@ -515,6 +519,7 @@ namespace sunshine_streamline::provider {
     data->frame = {}; data->output = {};
     if (!allowed || runtime->get_device()->get_api() != api::device_api::d3d12) {
       data->source_policy = {};
+      data->fg_scope_silent = false;
       data->cache.invalidate(!allowed ? "provider_disallowed" : "unsupported_API");
       data->presentations.reset();
       data->presentation_source = {};
@@ -548,10 +553,30 @@ namespace sunshine_streamline::provider {
       const sunshine_game3d::slow_step step("frame generation query");
       query_frame_generation(UINT32_MAX, fg_source, &fg_status);
     }
-    const auto selection = data->source_policy.update(fg_status, fg_source);
+    const auto policy = data->source_policy.update(fg_status, fg_source);
+    // Enabled FG owns its viewport's depth only while its scope is live
+    // (depth_capture::frame_generation_scope_live). A silent scope selects as
+    // without FG for this acquisition, so that viewport's ordinary SR/RR depth
+    // may supply depth, and the next accepted FG copy takes ownership back.
+    // The policy's own confirmed FG scope is left unchanged.
+    const bool fg_silent = policy.require_frame_generation &&
+      !depth_capture::frame_generation_scope_live(policy.epoch, policy.viewport, policy.enabled_tick);
+    const auto selection = fg_silent ? depth_capture::selection_policy{} : policy;
+    // Logged when a required scope turns silent, and when it is live again
+    // (FG Off ends a silent scope without a line of its own).
+    if (fg_silent != std::exchange(data->fg_scope_silent, fg_silent) && (fg_silent || policy.require_frame_generation)) {
+      char text[384]{};
+      std::snprintf(text, sizeof(text), fg_silent ?
+        "Sunshine Streamline frame generation depth scope: silent viewport=%u epoch=%llu; no FG depth copy was accepted for "
+        "1000 ms, so the viewport's ordinary SR/RR depth may supply depth until the next FG copy" :
+        "Sunshine Streamline frame generation depth scope: live viewport=%u epoch=%llu; FG owns the viewport's depth again",
+        policy.viewport, static_cast<unsigned long long>(policy.epoch));
+      sunshine_log::message(reshade::log::level::info, text);
+    }
     evidence.fg = fg_source;
     evidence.fg_query = fg_status;
     evidence.selection = selection;
+    evidence.fg_silent = fg_silent;
     if (selection.exclude_unconfirmed_fg && data->source_metadata.frame_generation_input) {
       data->source_metadata = {};
       data->cache.invalidate("FG_scope_unconfirmed");
@@ -759,9 +784,11 @@ namespace sunshine_streamline::provider {
     if (!evidence.tick) evidence.tick = reuse_tick;
     trace_readiness(runtime, *data, evidence, data->output.ready, readiness_reason);
     const auto &stats_source = data->output.provided;
-    data->output.frame_generation_active = selection.require_frame_generation && selection.epoch &&
-      stats_source.provider == sunshine_scene_depth::provider_kind::streamline && stats_source.frame_generation_input &&
-      selection.epoch == stats_source.epoch && selection.viewport == stats_source.viewport;
+    // FG stays active while a silent scope's viewport supplies ordinary depth.
+    data->output.frame_generation_active = policy.require_frame_generation && policy.epoch &&
+      stats_source.provider == sunshine_scene_depth::provider_kind::streamline &&
+      (stats_source.frame_generation_input || fg_silent) &&
+      policy.epoch == stats_source.epoch && policy.viewport == stats_source.viewport;
     const std::array<std::uint64_t, 5> identity{static_cast<std::uint64_t>(stats_source.provider),
       stats_source.epoch, stats_source.source_id, stats_source.viewport,
       data->output.frame_generation_active ? data->source_policy.generated_frames() : 0u};
@@ -943,6 +970,7 @@ namespace sunshine_streamline::provider {
       depth_capture::provider_identity(runtime->get_command_queue()->get_native(), out.provider, source);
     out.ready = out.selected && data->output.ready && data->output.frame_index == present;
     out.reused_depth = out.ready && data->output.reused_depth;
+    out.frame_generation_input = out.ready && data->output.provided.frame_generation_input;
     if (out.ready) out.current = data->output.reused_depth ? data->last_valid : describe_source(data->frame);
     return out;
   }

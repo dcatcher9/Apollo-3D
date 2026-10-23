@@ -3406,7 +3406,9 @@ game that switches DLSS to TAA, or a cutscene without DLSS, without releasing th
 second in which the API rejected every evaluation of it (an API that fails every call delivers no
 depth; Battlefield 6 kept a source this way for 70 s). The queue then returns to Generic through
 its usual selection, and the next accepted evaluation establishes the source again. A silent or
-rejected owner never blocks another live API source.
+rejected owner never blocks another live API source. The same second bounds an enabled FG
+scope's ownership of its viewport (the FG scope rule below): without an accepted FG copy for a
+second, FG no longer holds the queue in mono.
 
 One native D3D12 capture owner serves both API-selected and Generic-selected sources. It owns the
 snapshot pool, recording/submission identities, source and snapshot leases, consumer registration
@@ -3583,21 +3585,39 @@ Unknown or malformed extensions remain unavailable with a
 bounded rejection diagnostic. A supported enabled FG source has priority over NGX,
 including while its current capture is pending. Its depth and source-associated camera metadata
 stay together; missing usable FG pixels do not authorize an NGX substitution or cross-API
-projection borrowing. An FG tag call that names no capturable depth withdraws the FG source until
-its next capture. A bounded `Sunshine Streamline FG depth withdrawn` line (at most every 5 s)
-names the first failing gate as `reason=`: a source gate such as `boundary_without_commands` (a
-legal `ValidUntilPresent` tag sent without a command list, which leaves no point to copy it at)
-or `untracked_frame`, a tag gate such as `lifecycle_outlives_boundary`, or
-`capture_<result>/<stage>` when the native copy was refused. It also gives the call's first depth
-tag (`tag_type`, `scope`, `lifecycle`, `native`), its `command`, the frame identity kind, the
-evidence `status` and the running `withdrawals` count. An observed FG Off retires that source so independently captured ordinary
+projection borrowing. An FG tag call that names no capturable depth is refused, and while the FG
+scope is live (below) it withdraws the FG source until its next capture. A bounded
+`Sunshine Streamline FG depth refused` line (at most every 5 s) names the first failing gate as
+`reason=`: a source gate such as `boundary_without_commands` (a legal `ValidUntilPresent` tag sent
+without a command list, which leaves no point to copy it at) or `untracked_frame`, a tag gate such
+as `lifecycle_outlives_boundary`, or `capture_<result>/<stage>` when the native copy was refused.
+It also gives the call's first depth tag (`tag_type`, `scope`, `lifecycle`, `native`), its
+`command`, the frame identity kind, the evidence `status`, `fg_scope=live|silent`, `withdrawn=1|0`
+and the running `refusals` count.
+
+Enabled FG owns its viewport's depth only while its scope is live: FG was turned on less than a
+second ago (the options call that enabled it in this observation epoch; later calls that keep it
+on do not restart that second), or a recorded copy of the FG source of that epoch and viewport was
+accepted by the API (a successful SDK call, not a metadata-only nomination) within the last
+second. This is the same one-second rule that ends a silent or rejected API source's association.
+A silent FG scope owns nothing: its refused boundaries withdraw nothing, the same viewport's
+ordinary SR/RR evaluation nominates again (replacing any FG observation of that viewport), the
+provider selects as without FG for that Present (`require_FG=0 FG_silent=1` in readiness lines)
+and no longer holds the queue in mono for FG, and a direct NGX evaluation copies its depth again.
+The next accepted FG copy takes the viewport back at once. Assassin's Creed Shadows (10-22) kept FG
+on with no FG depth captured, which shut its working SR depth out for as long as FG stayed on. A
+game whose FG copies keep being accepted keeps FG ownership throughout. A
+`Sunshine Streamline frame generation depth scope`
+line reports a required scope turning `silent` and, later, `live` again; FG Off ends a silent
+scope without its own line. Generated presentations count as FG (`fg` on output lines) while a
+silent scope's viewport supplies the depth. An observed FG Off retires that source so independently captured ordinary
 SL tag/evaluation or NGX depth can resume with newly submitted pixels. A failed or ambiguous FG-options observation also revokes the old FG scope
 and its retained display pixels, but does not confirm that FG is Off. Selection excludes those
 unconfirmed FG inputs and permits independently validated ordinary SL or NGX depth, with the
 selected capture's own encoding and camera. A busy query preserves a confirmed policy or this
 revoked-scope fallback policy; it cannot restore the old FG scope. A subsequent successful enabled
 observation restores mandatory FG selection. Older captures from the
-previous ownership interval cannot be resurrected. While FG is enabled for a viewport, ordinary
+previous ownership interval cannot be resurrected. While a live FG scope owns a viewport, ordinary
 evaluation adapters do not also nominate that same viewport; FG's first attempt supersedes only
 its old ordinary evaluation observation. Other viewports remain independently ambiguous. No cross-API
 projection borrowing is needed.
@@ -4090,11 +4110,12 @@ Creating the identity supplies no resource state: capture still requires an actu
 nonzero transition, and a submission with no observed recording cannot establish ownership.
 
 Nested NGX capture is suppressed only when an enclosing SL or NGX evaluation has actually recorded
-a valid native copy, or when SL has confirmed enabled FG authority for that viewport. A direct
-(not nested) NGX evaluation applies the same FG rule: while SL reports FG enabled on its one
-viewport it begins its evaluation (live handoff evidence) but records no depth copy, since
-selection never considers NGX while FG is required and FG Off makes every snapshot taken meanwhile
-inadmissible; a busy or ambiguous FG read copies as before. The `Sunshine NGX depth` line counts
+a valid native copy, or when SL has confirmed enabled FG authority for that viewport and that FG
+scope is live (above). A direct (not nested) NGX evaluation applies the same FG rule: while SL
+reports FG enabled on its one viewport with a live scope it begins its evaluation (live handoff
+evidence) but records no depth copy, since selection never considers NGX while FG is required and
+FG Off makes every snapshot taken meanwhile inadmissible; a busy or ambiguous FG read, or a silent
+FG scope, copies as before. The `Sunshine NGX depth` line counts
 these evaluations as `fg_owned`. Before the final review a UE title with NVIDIA's DLSS plugin and
 the Streamline DLSS-G plugin copied its full depth plane on every real frame with FG on, for no
 consumer. A retained

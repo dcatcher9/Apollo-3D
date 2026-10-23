@@ -329,6 +329,9 @@ namespace sunshine_streamline::depth_capture {
       // Since when every finished evaluation of this view was rejected (zero
       // after an accepted one); result_sequence orders late finishes.
       std::uint64_t rejected_since{}, result_sequence{};
+      // Capture tick of this view's newest recorded copy the API accepted
+      // (frame_generation_scope_live).
+      std::uint64_t accepted_tick{};
     };
     struct evaluation_namespace {
       std::array<evaluation_head, 4> views{};
@@ -1740,6 +1743,20 @@ namespace sunshine_streamline::depth_capture {
     }
     return false;
   }
+  bool frame_generation_scope_live(std::uint64_t epoch, std::uint32_t viewport, std::uint64_t enabled_tick) {
+    // A tick slightly ahead of this read (another thread's) is fresh.
+    const auto within = [](std::uint64_t tick, std::uint64_t now) {
+      return tick && (now < tick || now - tick <= association_timeout_ms);
+    };
+    if (within(enabled_tick, GetTickCount64())) return true;
+    if (!requested.load() || !epoch) return false;
+    std::lock_guard lock(mutex);
+    const auto now = GetTickCount64();
+    const auto source = (1ull << 63) | viewport;
+    for (const auto &view : evaluations[provider_index(provider_kind::streamline)].views)
+      if (view.epoch == epoch && view.viewport == viewport && view.source_id == source && within(view.accepted_tick, now)) return true;
+    return false;
+  }
   bool provider_identity(std::uint64_t native, provider_kind &provider, std::uint64_t &source_id) {
     source_id = 0;
     if (!requested.load() || !native) return false;
@@ -2415,16 +2432,18 @@ namespace sunshine_streamline::depth_capture {
     for (auto &value : slots) if (value.id == ticket) {
       value.finished = true; value.success = successful;
       if (!successful) invalidate(value, failure == capture_failure::none ? capture_failure::evaluation_failed : failure);
-      // The view's run of rejected evaluations (expire_association).
+      // The view's run of rejected evaluations (expire_association) and its
+      // newest accepted copy (frame_generation_scope_live).
       const auto &m = value.metadata;
       if (!value.preservation_only && valid_provider(m.provider))
-        for (auto &view : evaluations[provider_index(m.provider)].views)
-          if (view.epoch == m.epoch && view.viewport == m.viewport && view.source_id == m.source_id &&
-              m.sequence >= view.result_sequence) {
-            view.result_sequence = m.sequence;
-            if (successful) view.rejected_since = 0;
-            else if (!view.rejected_since) view.rejected_since = GetTickCount64();
-          }
+        for (auto &view : evaluations[provider_index(m.provider)].views) {
+          if (view.epoch != m.epoch || view.viewport != m.viewport || view.source_id != m.source_id) continue;
+          if (successful && !value.nomination_only && !value.invalid) view.accepted_tick = std::max(view.accepted_tick, m.tick);
+          if (m.sequence < view.result_sequence) continue;
+          view.result_sequence = m.sequence;
+          if (successful) view.rejected_since = 0;
+          else if (!view.rejected_since) view.rejected_since = GetTickCount64();
+        }
       return;
     }
   }
@@ -3238,6 +3257,55 @@ namespace sunshine_streamline::depth_capture {
         expire_association(sr, GetTickCount64());
         if (!sr.provider_established) return false;
         slots = {}; evaluations = {};
+      }
+      {
+        // An enabled FG scope owns its viewport only while live: within a
+        // second of FG On, or of a recorded copy of its own source that the
+        // API accepted (Assassin's Creed Shadows 10-22 kept FG on with no FG
+        // depth captured, which locked the viewport's SR depth out).
+        constexpr std::uint64_t epoch = 7, fg = (1ull << 63) | 2;
+        const auto finished = [&](std::uint64_t id, std::uint64_t source, std::uint32_t viewport, std::uint64_t sequence,
+            bool successful, bool metadata_only = false) {
+          slots[0] = {}; slots[0].id = id; slots[0].nomination_only = metadata_only;
+          slots[0].metadata.provider = provider_kind::streamline; slots[0].metadata.epoch = epoch;
+          slots[0].metadata.sequence = sequence; slots[0].metadata.viewport = viewport; slots[0].metadata.source_id = source;
+          slots[0].metadata.tick = GetTickCount64();
+          finish(id, successful);
+          return slots[0].finished;
+        };
+        const auto silent_since = [] { return GetTickCount64() - association_timeout_ms - 1; };
+        if (!frame_generation_scope_live(epoch, 2, GetTickCount64()) || frame_generation_scope_live(epoch, 2, silent_since()) ||
+            frame_generation_scope_live(epoch, 2, 0)) return false;
+        // A refused FG boundary begins an evaluation but accepts no copy.
+        begin_evaluation(epoch, 10, 2, provider_kind::streamline, fg, 0);
+        if (frame_generation_scope_live(epoch, 2, silent_since())) return false;
+        // A failed evaluation or a metadata-only nomination is no accepted copy.
+        if (!finished(51, fg, 2, 10, false) || frame_generation_scope_live(epoch, 2, silent_since())) return false;
+        begin_evaluation(epoch, 11, 2, provider_kind::streamline, fg, 0);
+        if (!finished(52, fg, 2, 11, true, true) || frame_generation_scope_live(epoch, 2, silent_since())) return false;
+        // Ordinary depth of the viewport, or FG of another viewport or epoch,
+        // does not make this scope live.
+        begin_evaluation(epoch, 12, 2, provider_kind::streamline, 0, UINT64_MAX);
+        if (!finished(53, 0, 2, 12, true) || frame_generation_scope_live(epoch, 2, silent_since())) return false;
+        begin_evaluation(epoch, 13, 3, provider_kind::streamline, (1ull << 63) | 3, 0);
+        if (!finished(54, (1ull << 63) | 3, 3, 13, true) || frame_generation_scope_live(epoch, 2, silent_since()) ||
+            frame_generation_scope_live(epoch + 1, 3, silent_since()) || !frame_generation_scope_live(epoch, 3, silent_since()))
+          return false;
+        // An accepted copy of its own source makes it live for a second.
+        begin_evaluation(epoch, 14, 2, provider_kind::streamline, fg, 0);
+        if (!finished(55, fg, 2, 14, true) || !frame_generation_scope_live(epoch, 2, silent_since())) return false;
+        auto &current = evaluations[provider_index(provider_kind::streamline)];
+        const auto own = std::find_if(current.views.begin(), current.views.end(), [&](const evaluation_head &head) {
+          return head.epoch == epoch && head.viewport == 2 && head.source_id == fg;
+        });
+        if (own == current.views.end() || !own->accepted_tick) return false;
+        own->accepted_tick -= association_timeout_ms + 1;
+        if (frame_generation_scope_live(epoch, 2, silent_since())) return false;
+        // Without an active capture owner only the first second counts.
+        own->accepted_tick = GetTickCount64(); requested = false;
+        if (frame_generation_scope_live(epoch, 2, silent_since()) || !frame_generation_scope_live(epoch, 2, GetTickCount64()))
+          return false;
+        requested = true; slots = {}; evaluations = {};
       }
       queue_state owner;
       constexpr std::uint64_t native = 77;

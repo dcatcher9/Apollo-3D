@@ -21,7 +21,7 @@ namespace sunshine_streamline::provider {
     depth_capture::selection_policy update(frame_generation_query_status status,
         const frame_generation_snapshot &value) {
       if (status == frame_generation_query_status::observed) {
-        selected_ = value.enabled ? depth_capture::selection_policy{true, value.epoch, value.viewport} :
+        selected_ = value.enabled ? depth_capture::selection_policy{true, value.epoch, value.viewport, false, value.enabled_tick} :
           depth_capture::selection_policy{};
         generated_frames_ = value.enabled ? value.generated_frames : 0;
         confirmed_ = true;
@@ -54,6 +54,8 @@ namespace sunshine_streamline::provider {
   struct source_status {
     bool selected{}, ready{};
     bool reused_depth{};
+    // The ready depth is an FG scope's own input (not ordinary SR/RR depth).
+    bool frame_generation_input{};
     sunshine_scene_depth::provider_kind provider{sunshine_scene_depth::provider_kind::streamline};
     source_description current, last_valid;
     sunshine_depth_stats::presentation_statistics presentations;

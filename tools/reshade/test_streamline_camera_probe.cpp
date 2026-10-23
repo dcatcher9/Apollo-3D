@@ -1429,6 +1429,21 @@ namespace {
     auto set_options = reinterpret_cast<fg_function>(function); fg_options options; set_options(view, options);
     call_v2_evaluate(1001, token.ref(), local, 2, nullptr);
     require(!testing::normalized_source(view.value, 2, normalized), "RR competed with enabled same-viewport FG");
+    // Enabled FG owns the viewport only while live: a second after FG On
+    // with no accepted FG copy (this fixture's capture owner is inactive, so
+    // none is ever accepted) the scope is silent and RR of the same viewport
+    // supplies depth (Assassin's Creed Shadows 10-22). Options repeated while
+    // FG stays on keep that age; FG Off then On starts a new second.
+    constexpr std::uint64_t fg_scope_ms = 1000;
+    testing::age_frame_generation(fg_scope_ms + 1);
+    call_v2_evaluate(1001, token.ref(), local, 2, nullptr);
+    require(testing::normalized_source(view.value, 2, normalized) && !normalized.frame_generation_input,
+      "A silent FG scope kept blocking same-viewport RR depth");
+    set_options(view, options); call_v2_evaluate(1001, token.ref(), local, 2, nullptr);
+    require(testing::normalized_source(view.value, 2, normalized), "Repeated FG On options restarted the FG scope's second");
+    options.mode = 0; set_options(view, options); options.mode = 1; set_options(view, options);
+    call_v2_evaluate(1001, token.ref(), local, 2, nullptr);
+    require(!testing::normalized_source(view.value, 2, normalized), "A new FG On did not own its viewport for its first second");
     tag.lifecycle = 0;
     call_v2_framed_tag(token.ref(), view, &tag, 1, &commands);
     require(testing::normalized_source(view.value, 2, normalized) && normalized.frame_generation_input &&

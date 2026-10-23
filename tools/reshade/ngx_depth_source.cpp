@@ -544,8 +544,10 @@ namespace sunshine_ngx {
     // FG is required, and FG Off raises the admission watermark past every
     // snapshot taken meanwhile, so a copy now would have no consumer. The
     // evaluation above stays live for the handoff hold. A busy or ambiguous
-    // FG read copies as before (nested NGX's rule, owns_nested_depth_capture).
-    if (frame_generation_snapshot fg; query_frame_generation(UINT32_MAX, fg) && fg.enabled) {
+    // FG read copies as before (nested NGX's rule, owns_nested_depth_capture),
+    // and so does a silent FG scope, which owns nothing.
+    if (frame_generation_snapshot fg; query_frame_generation(UINT32_MAX, fg) && fg.enabled &&
+        depth_capture::frame_generation_scope_live(fg.epoch, fg.viewport, fg.enabled_tick)) {
       attempt.capture_suppressed_by_depth_owner = true;
       ++fg_owned;
       return attempt;

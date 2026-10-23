@@ -417,7 +417,7 @@ and dynamic resolution changes; provider/encoding changes start an independent c
 The panel identifies the actual NGX/Streamline/Generic path. Read the
 linked contract for supported crops, feature lifetime and early-discovery limitations.
 Nested SDK calls are deduplicated only after a valid native copy is recorded, or under confirmed
-same-viewport SL FG authority. Rejected native copies and metadata-only nominations allow a usable
+and live same-viewport SL FG authority. Rejected native copies and metadata-only nominations allow a usable
 nested NGX source to be captured.
 When a confirmed newer NGX capture is waiting only for GPU completion, the owned completed depth
 can bridge one native presentation. This holds its exact previous scene controls and never advances
@@ -429,7 +429,10 @@ data take priority over NGX, including while its current snapshot is pending. A 
 copy stays with that source and uses the documented bounded real-depth reuse or mono behavior;
 it does not borrow an NGX depth texture and attach unrelated SL constants. A depth untag (a null
 resource, which ends the tag) is not a capture attempt and never withdraws depth already captured
-at the frame's tag. Explicit FG Off retires that source and lets a fresh NGX submission resume. Motion-vector interpolation of two real depth
+at the frame's tag. FG keeps that priority only while its scope is live: FG was turned on less than
+a second ago, or one of its depth copies was accepted within the last second. Otherwise the same
+viewport's SR/RR depth (or NGX) may supply depth until the next accepted FG copy takes it back.
+Explicit FG Off retires that source and lets a fresh NGX submission resume. Motion-vector interpolation of two real depth
 frames for FG 2x is future work; the current implementation does not generate intermediate depth.
 Reused depth holds its applied gain and zero without learning. User strength reductions apply
 immediately, including zero; increases wait for fresh real depth and a new placement decision.

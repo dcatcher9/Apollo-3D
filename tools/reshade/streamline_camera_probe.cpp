@@ -191,9 +191,9 @@ namespace sunshine_streamline {
     // pointer, or a Resource whose native is null.
     std::atomic<std::uint64_t> depth_untags{};
     // FG tag boundaries that named no capturable depth.
-    std::atomic<std::uint64_t> fg_withdrawals{};
+    std::atomic<std::uint64_t> fg_refusals{};
     // Next tick each bounded tag line may be written (5 s apart).
-    std::atomic<std::uint64_t> next_compatibility_report{}, next_untag_report{}, next_fg_withdrawal_report{};
+    std::atomic<std::uint64_t> next_compatibility_report{}, next_untag_report{}, next_fg_refusal_report{};
     // SDK calls answered with eWarnOutOfVRAM: accepted, counted for the log.
     std::atomic<std::uint64_t> vram_warnings{};
     // One verdict per 2.x call (abi_v2::accepted): the warning is a success.
@@ -798,8 +798,14 @@ namespace sunshine_streamline {
               const bool known = valid && sdk_ok;
               changed = !state.sequence || state.known != known ||
                 (known && (state.mode != copy.mode || state.generated_frames != copy.generated_frames));
-              state = {update->epoch, serial, GetTickCount64(), options_loss, id, copy.mode, copy.generated_frames,
+              // Games repeat their options every frame: FG stays enabled since
+              // the call that turned it on in this epoch and options revision.
+              const auto enabled_since = state.known && state.enabled && state.epoch == update->epoch &&
+                state.loss_revision == options_loss ? state.enabled_tick : 0;
+              const auto now = GetTickCount64();
+              state = {update->epoch, serial, now, options_loss, id, copy.mode, copy.generated_frames,
                 known, known && copy.mode != 0, valid && copy.mode >= 2};
+              if (state.enabled) state.enabled_tick = enabled_since ? enabled_since : now;
               if (!known || copy.mode == 0) retired_epoch = update->epoch;
             }
           }
@@ -1605,26 +1611,44 @@ namespace sunshine_streamline {
         snapshot.tag_boundary && tag.value.lifecycle == 0 ? sunshine_scene_depth::lifetime::at_call : sunshine_scene_depth::lifetime::unsupported;
       return value;
     }
-    bool source_path_selected(const evaluation_snapshot &snapshot) {
-      if (snapshot.frame_generation_input) return true;
-      if (!fg_available.load(std::memory_order_acquire) || !current_fg_target.load(std::memory_order_acquire)) return true;
+    // A viewport's depth route under FG: none (FG not enabled), owned by its
+    // live FG scope, or silent (enabled, but no FG copy accepted within a
+    // second: depth_capture::frame_generation_scope_live). A busy metadata
+    // read keeps an existing publication's FG ownership.
+    enum class fg_route { none, owned, silent };
+    fg_route frame_generation_route(std::uint32_t viewport) {
+      if (!fg_available.load(std::memory_order_acquire) || !current_fg_target.load(std::memory_order_acquire)) return fg_route::none;
       auto pin = read_metadata();
-      if (!pin) return !metadata.has_publication();
-      bool selected = true;
-      for (const auto &record : pin->records) if (record.used && record.viewport == snapshot.viewport) {
+      if (!pin) return metadata.has_publication() ? fg_route::owned : fg_route::none;
+      bool enabled = false;
+      std::uint64_t scope_epoch{}, enabled_tick{};
+      for (const auto &record : pin->records) if (record.used && record.viewport == viewport) {
         const auto &fg = record.frame_generation;
-        selected = !(fg.known && fg.enabled && fg.epoch == pin->epoch &&
-          fg.loss_revision == fg_loss_revision.load(std::memory_order_acquire));
+        enabled = fg.known && fg.enabled && fg.epoch == pin->epoch &&
+          fg.loss_revision == fg_loss_revision.load(std::memory_order_acquire);
+        scope_epoch = fg.epoch; enabled_tick = fg.enabled_tick;
         break;
       }
-      return selected;
+      pin.reset();
+      if (!enabled) return fg_route::none;
+      return depth_capture::frame_generation_scope_live(scope_epoch, viewport, enabled_tick) ? fg_route::owned : fg_route::silent;
+    }
+    // FG has an explicit lifecycle for its rendered-frame inputs. While its
+    // scope is live the same viewport's SR/RR evaluations remain diagnostics
+    // and must not overwrite its newer FG source with a competing
+    // renderer-input watermark. A silent FG scope leaves them eligible
+    // (Assassin's Creed Shadows 10-22 had FG on and no FG depth captured).
+    bool source_path_selected(const evaluation_snapshot &snapshot) {
+      return snapshot.frame_generation_input || frame_generation_route(snapshot.viewport) != fg_route::owned;
     }
     bool owns_nested_depth_capture(const evaluation_snapshot &snapshot, bool copy_recorded) {
       if (!source_requested.load(std::memory_order_acquire) || !depth_capture::active()) return false;
       frame_generation_snapshot fg;
       // Confirmed same-viewport FG ownership also suppresses nested SR/RR work.
-      // A busy/ambiguous metadata read alone is never ownership evidence.
-      if (query_frame_generation(snapshot.viewport, fg) && fg.enabled) return true;
+      // A busy/ambiguous metadata read alone is never ownership evidence, and
+      // neither is a silent FG scope (frame_generation_route).
+      if (query_frame_generation(snapshot.viewport, fg) && fg.enabled &&
+          depth_capture::frame_generation_scope_live(fg.epoch, snapshot.viewport, fg.enabled_tick)) return true;
       // A retained resource or metadata-only nomination is not a depth copy.
       // Allow nested NGX to provide usable pixels when native SL admission fails.
       if (!copy_recorded || !source_path_selected(snapshot) || !direct_source_admissible(snapshot)) return false;
@@ -1643,42 +1667,55 @@ namespace sunshine_streamline {
     }
     // Why an FG tag boundary named no capturable depth, at most every 5 s.
     // The tag described is the call's first present depth tag in priority
-    // order; reason is its first failing gate. Diagnostic only.
-    void report_fg_withdrawal(const evaluation_snapshot &snapshot, const char *reason) {
-      const auto count = fg_withdrawals.fetch_add(1, std::memory_order_relaxed) + 1;
+    // order; reason is its first failing gate. A live FG scope is withdrawn;
+    // a silent one has no FG capture to withdraw. Diagnostic only.
+    void report_fg_refusal(const evaluation_snapshot &snapshot, const char *reason, bool withdrawn) {
+      const auto count = fg_refusals.fetch_add(1, std::memory_order_relaxed) + 1;
       const auto now = GetTickCount64();
-      auto next = next_fg_withdrawal_report.load(std::memory_order_relaxed);
-      if (now < next || !next_fg_withdrawal_report.compare_exchange_strong(next, now + 5000, std::memory_order_relaxed)) return;
+      auto next = next_fg_refusal_report.load(std::memory_order_relaxed);
+      if (now < next || !next_fg_refusal_report.compare_exchange_strong(next, now + 5000, std::memory_order_relaxed)) return;
       static const evaluated_depth_tag none;
       const auto *tag = &none;
       for (const unsigned index : depth_priority) if (snapshot.tags[index].present) { tag = &snapshot.tags[index]; break; }
-      char text[640]{};
+      char text[720]{};
       std::snprintf(text, sizeof(text),
-        "Sunshine Streamline FG depth withdrawn: reason=%s viewport=%u tag_type=%u scope=%s lifecycle=%u native=0x%llx "
-        "command=0x%llx frame=%s status=%s fg=%u withdrawals=%llu; this FG tag call names no capturable depth, so the "
-        "viewport's FG depth source is withdrawn until its next capture",
+        "Sunshine Streamline FG depth refused: reason=%s viewport=%u tag_type=%u scope=%s lifecycle=%u native=0x%llx "
+        "command=0x%llx frame=%s status=%s fg=%u fg_scope=%s withdrawn=%u refusals=%llu; this FG tag call names no capturable "
+        "depth; %s",
         reason, snapshot.viewport, tag->present ? tag->value.type : UINT32_MAX,
         !tag->present ? "absent" : tag->scope == tag_scope::active_global ? "global" :
           tag->scope == tag_scope::explicit_frame ? "frame" : "local",
         tag->present ? tag->value.lifecycle : UINT32_MAX, static_cast<unsigned long long>(tag->value.native_resource),
         static_cast<unsigned long long>(snapshot.command_buffer), name(snapshot.frame.kind), name(snapshot.status),
-        unsigned(snapshot.frame_generation_input), static_cast<unsigned long long>(count));
+        unsigned(snapshot.frame_generation_input), withdrawn ? "live" : "silent", unsigned(withdrawn),
+        static_cast<unsigned long long>(count),
+        withdrawn ? "the viewport's FG depth source is withdrawn until its next capture" :
+          "the FG scope is silent (no FG copy accepted for a second), so nothing is withdrawn and the viewport's "
+          "ordinary SR/RR depth stays eligible");
       message(text);
     }
     std::uint64_t nominate_depth_source(const evaluation_snapshot &snapshot, bool version_one, bool *copy_recorded = nullptr) {
       if (copy_recorded) *copy_recorded = false;
       if (!source_requested.load(std::memory_order_acquire) || !depth_capture::active()) return 0;
-      // FG has an explicit lifecycle for its rendered-frame inputs. The same
-      // game's SR/RR evaluations remain diagnostics and must not overwrite that
-      // viewport's newer FG source with a competing renderer-input watermark.
-      if (!source_path_selected(snapshot)) return 0;
+      const auto route = frame_generation_route(snapshot.viewport);
+      if (!snapshot.frame_generation_input && route == fg_route::owned) return 0; // source_path_selected
       // Observation discovers interfaces; only an accepted submitted capture
       // establishes ownership in the shared capture layer.
       depth_capture::observe_provider(snapshot.command_buffer);
+      // An ordinary tag boundary, and ordinary evaluation of a viewport whose
+      // FG scope is silent, replaces that viewport's FG observation; an FG
+      // nomination replaces its ordinary one (source 0).
+      const bool fg_silent = route == fg_route::silent;
+      const auto superseded = snapshot.frame_generation_input ? 0 :
+        snapshot.tag_boundary || fg_silent ? (1ull << 63) | snapshot.viewport : UINT64_MAX;
+      // A silent FG scope has no FG capture to revoke: its refused boundaries
+      // leave the ordinary source of the viewport in place.
+      const bool withdraws = !(snapshot.frame_generation_input && fg_silent);
       const auto withdraw_invalid_attempt = [&] {
+        if (!withdraws) return;
         depth_capture::begin_evaluation(snapshot.epoch, snapshot.sequence, snapshot.viewport,
           sunshine_scene_depth::provider_kind::streamline, snapshot.frame_generation_input ? (1ull << 63) | snapshot.viewport : 0,
-          snapshot.frame_generation_input ? 0 : snapshot.tag_boundary ? (1ull << 63) | snapshot.viewport : UINT64_MAX);
+          superseded);
       };
       // Pixels already copied stay bounded by the source age and the consumed
       // watermark; the probe metadata still reports no current depth tag.
@@ -1687,7 +1724,7 @@ namespace sunshine_streamline {
       if (snapshot.tag_boundary && depth_untag(snapshot)) return 0;
       const bool fg_boundary = snapshot.tag_boundary && snapshot.frame_generation_input;
       if (const auto rejected = source_rejection(snapshot)) {
-        if (fg_boundary) report_fg_withdrawal(snapshot, rejected);
+        if (fg_boundary) report_fg_refusal(snapshot, rejected, withdraws);
         withdraw_invalid_attempt();
         return 0;
       }
@@ -1732,8 +1769,7 @@ namespace sunshine_streamline {
       }
       depth_capture::record_diagnostic diagnostic;
       if (count) if (const auto ticket = depth_capture::nominate_evaluation(snapshot.command_buffer,
-          candidates.data(), count, snapshot.frame_generation_input ? 0 :
-            snapshot.tag_boundary ? (1ull << 63) | snapshot.viewport : UINT64_MAX, &diagnostic)) {
+          candidates.data(), count, superseded, &diagnostic)) {
         if (copy_recorded) *copy_recorded = diagnostic.result == depth_capture::status::recorded;
         return ticket;
       }
@@ -1746,7 +1782,7 @@ namespace sunshine_streamline {
           std::snprintf(reason, sizeof(reason), "%s", rejected ? rejected : "no_retained_source");
           break;
         }
-        report_fg_withdrawal(snapshot, reason[0] ? reason : "absent");
+        report_fg_refusal(snapshot, reason[0] ? reason : "absent", withdraws);
       }
       withdraw_invalid_attempt();
       return 0;
@@ -3296,6 +3332,15 @@ namespace sunshine_streamline {
       return bool(held_token_readers[index]);
     }
     void unpin_tokens() { for (auto &pin : held_token_readers) pin.reset(); }
+    void age_frame_generation(std::uint64_t ms) {
+      auto update = metadata.try_write();
+      while (!update) { SwitchToThread(); update = metadata.try_write(); }
+      for (auto &record : update->records) {
+        auto &tick = record.frame_generation.enabled_tick;
+        if (tick) tick = tick > ms ? tick - ms : 1;
+      }
+      update.commit();
+    }
     void arm_entry_policy() { entry_policy_armed = true; entry_policy_observed = false; }
     bool entry_policy(bool &selected, bool &admissible) {
       selected = entry_path_selected; admissible = entry_source_admitted;
@@ -3369,8 +3414,8 @@ namespace sunshine_streamline {
       v1_private_state_checked = false;
       installed_abi = sunshine_streamline::abi::unsupported;
       installed_targets = {};
-      constant_calls = tag_calls = evaluation_calls = dropped = invalid = vram_warnings = depth_untags = fg_withdrawals = 0;
-      next_compatibility_report = next_untag_report = next_fg_withdrawal_report = 0;
+      constant_calls = tag_calls = evaluation_calls = dropped = invalid = vram_warnings = depth_untags = fg_refusals = 0;
+      next_compatibility_report = next_untag_report = next_fg_refusal_report = 0;
       initialize(nullptr);
     }
   }

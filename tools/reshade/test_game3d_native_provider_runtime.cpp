@@ -1672,12 +1672,82 @@ namespace {
         require(global_tag_call(viewport, &tag, 1, nullptr) == 0, "Command-less FG tag changed the SDK result");
       };
       render_tracked_depth = commandless_fg_frame;
-      require(reshade_log_contains({"Sunshine Streamline FG depth withdrawn: reason=boundary_without_commands", "tag_type=0",
+      require(reshade_log_contains({"Sunshine Streamline FG depth refused: reason=boundary_without_commands", "tag_type=0",
           "scope=global", "lifecycle=1", "command=0x0 ", "fg=1"}),
-        "A command-less FG tag boundary was withdrawn without naming its reason");
+        "A command-less FG tag boundary was refused without naming its reason");
       render_tracked_depth = real_frame;
       settle("SLFG-recovered-after-commandless-tag");
-      std::puts("PASS native SLFG withdrawal: a command-less ValidUntilPresent FG tag is withdrawn and logged as boundary_without_commands; no FX");
+      std::puts("PASS native SLFG refusal: a command-less ValidUntilPresent FG tag is refused and logged as boundary_without_commands; no FX");
+
+      // Assassin's Creed Shadows with FG on (10-22): FG options stay on, but
+      // every FG depth tag is refused (here: sent without a command list)
+      // and then untagged, while the same viewport's SR evaluation tags its
+      // own depth with commands. FG owns that viewport's depth only while an
+      // FG copy was accepted within a second; after that its scope is silent
+      // and SR supplies depth. An accepted FG copy takes ownership back at
+      // once, and SR stays shut out while FG copies keep arriving.
+      const auto sr_evaluate = [&](const abi_v2::frame_token &token) {
+        const auto resource = depth_resource();
+        const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, 1, active_area};
+        const base_structure *inputs[]{&viewport.base, &tag.base};
+        require(evaluate(0, token, inputs, 2, reinterpret_cast<void *>(game_native_command)) == 0,
+          "SR evaluation with its own depth changed the SDK result");
+      };
+      const auto fallback_frame = [&](bool fg_commands) {
+        draw(*decoy); write_depth_pixels();
+        abi_v2::frame_token *token{}; const auto frame = ++fg_frame;
+        require(new_token(token, &frame) == 0 && token, "FG fallback SDK did not supply a frame token");
+        last_token = token;
+        require(constants_call(camera_constants(false), *token, viewport) == 0, "FG fallback constants changed the SDK result");
+        sr_evaluate(*token);
+        const auto resource = depth_resource();
+        const auto command = reinterpret_cast<void *>(game_native_command);
+        if (fg_commands) {
+          const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, 0, active_area};
+          require((tag_call ? tag_call(*token, viewport, &tag, 1, command) : global_tag_call(viewport, &tag, 1, command)) == 0,
+            "Accepted FG tag changed the SDK result");
+          return;
+        }
+        const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, 1, active_area};
+        const abi_v2::resource_tag untag{{nullptr, tag_guid, 1}, nullptr, 0, 0, {}};
+        require(global_tag_call(viewport, &tag, 1, nullptr) == 0 && global_tag_call(viewport, &untag, 1, command) == 0,
+          "Refused FG tag or its untag changed the SDK result");
+      };
+      const auto settle_route = [&](const char *label, bool frame_generation_input) {
+        const auto until = GetTickCount64() + 15000;
+        unsigned consecutive{};
+        status s;
+        do {
+          step(); no_effects(); s = inspect();
+          consecutive = active(s) && !s.source.reused_depth && s.source.frame_generation_input == frame_generation_input ?
+            consecutive + 1 : 0;
+        } while (consecutive < 12 && GetTickCount64() < until);
+        log_status(label, s);
+        require(consecutive >= 12, frame_generation_input ? "An accepted FG copy did not take its viewport's depth back" :
+          "A silent FG scope did not let the same viewport's SR depth through");
+      };
+      render_tracked_depth = [&] { fallback_frame(false); };
+      const auto silent_start = GetTickCount64();
+      for (std::uint64_t now = silent_start; now - silent_start < 700; now = GetTickCount64()) {
+        step(); no_effects(); const auto s = inspect();
+        require(!(s.ready() && s.source.ready && !s.source.frame_generation_input && !s.source.reused_depth),
+          "SR depth replaced FG within a second of its last accepted FG copy");
+      }
+      settle_route("SLFG-silent-scope-SR-depth", false);
+      require(GetTickCount64() - silent_start >= 1000, "SR took the viewport's depth before the FG scope fell silent");
+      require(reshade_log_contains({"Sunshine Streamline frame generation depth scope: silent viewport=0"}) &&
+          reshade_log_contains({"Sunshine Streamline FG depth refused: reason=boundary_without_commands", "fg_scope=silent", "withdrawn=0"}),
+        "The silent FG scope or its refused boundaries were not logged");
+      render_tracked_depth = [&] { fallback_frame(true); };
+      settle_route("SLFG-accepted-copy-owns-again", true);
+      for (unsigned frame = 0; frame < 30; ++frame) {
+        step(); no_effects(); const auto s = inspect();
+        require(active(s) && s.source.frame_generation_input,
+          "SR depth competed with a viewport whose FG copies keep being accepted");
+      }
+      require(reshade_log_contains({"Sunshine Streamline frame generation depth scope: live viewport=0"}),
+        "The FG scope's return to live was not logged");
+      std::puts("PASS native SLFG scope: refused FG tags let the same viewport's SR depth through after a second, never before; an accepted FG copy owns the viewport again and SR stays out; no FX");
 
       // Use the same public SDK boundary for linear RR depth with no usable
       // camera. The native copy, provider acquisition and GPU moment readback
