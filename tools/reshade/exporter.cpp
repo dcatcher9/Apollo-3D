@@ -2585,7 +2585,13 @@ namespace {
           }
         }
       }
-      if (report && named) report_window_owner(window, foreground, reason);
+      if (report && named) {
+        report_window_owner(window, foreground, reason);
+      } else if (report && window == window_report_.window) {
+        // A top-level window that is no longer named (its ambiguity cleared) forgets its last
+        // verdict without a line, so a recurring ambiguity is a change and is logged again.
+        window_report_.reason = "";
+      }
       return owns;
     }
 

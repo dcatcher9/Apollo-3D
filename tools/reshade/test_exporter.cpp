@@ -1122,6 +1122,17 @@ namespace {
         publisher.runtimes_[&on_root];
         require(!publisher.owns_foreground_locked(&on_child, child, true) && !publisher.owns_foreground_locked(&on_root, root, true),
           "The exporter accepted a child swapchain and a root swapchain that both cover the foreground");
+        // The root's ambiguity clears when the child's runtime goes, and a recurrence is a new
+        // change that is reported again.
+        require(publisher.window_report_.window == root && std::string_view(publisher.window_report_.reason) == "ambiguous",
+          "The exporter did not report a top-level swapchain window's ambiguity");
+        publisher.runtimes_.erase(&on_child);
+        require(publisher.owns_foreground_locked(&on_root, root, true), "The exporter refused the foreground root once it was unambiguous");
+        publisher.runtimes_[&on_child];
+        publisher.window_report_.next_log = ~0ull;  // Keep the change pending, not logged.
+        const auto changes = publisher.window_report_.changes;
+        require(!publisher.owns_foreground_locked(&on_root, root, true) && publisher.window_report_.changes == changes + 1 &&
+          publisher.window_report_.pending, "A recurring ambiguity of a top-level swapchain window was not reported again");
         publisher.runtimes_.erase(&on_root);
         SetWindowPos(child, nullptr, 0, 0, 160, 180, SWP_NOZORDER | SWP_NOACTIVATE);
         require(!publisher.owns_foreground_locked(&on_child, child, true), "The exporter accepted a partial child swapchain");

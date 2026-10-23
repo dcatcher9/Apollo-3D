@@ -1346,7 +1346,8 @@ Look in the game's `ReShade.log` for `Sunshine SBS:` messages:
   for a game that presents to a child window W of the foreground window F (at most every 5 s, when
   it changes): `owner`, or why not (`partial`, `overlapped`, `not_visible`, `other_process`,
   `not_foreground`, `incomplete`), or `ambiguous` when another swapchain window of the game
-  qualifies too (then a top-level window reads `is the foreground window F: owner=ambiguous`). Any
+  qualifies too (then a top-level window reads `is the foreground window F: owner=ambiguous`, once
+  for each episode: the ambiguity clearing is not logged, but a recurrence is a change again). Any
   verdict but `owner` keeps the export inactive with `not_foreground`. `owner`, `not_foreground`,
   `not_visible` and `partial` (focus loss, a hidden or a resizing window) are info lines, as routine
   as a top-level window's `not_foreground` pause; the others are warnings.
