@@ -214,8 +214,10 @@ namespace sunshine_streamline {
   // (depth_capture::frame_generation_scope_live). A refusal while the scope is
   // silent changes nothing; while it is live it withdraws the FG source, as a
   // refused FG tag boundary does. The UI inputs are offered to the live UI
-  // request as one exact batch (ui_mask::same_batch). Every returned attempt
-  // must finish after the original evaluation.
+  // request as one exact batch (ui_mask::same_batch). A Streamline FG depth tag,
+  // and per kind a Streamline UI tag, that recorded its copy within the source
+  // age keeps precedence: that input adds no second copy (tag_copied). Every
+  // returned attempt must finish after the original evaluation.
   frame_generation::attempt observe_frame_generation_inputs(const frame_generation::inputs &value);
   void finish_frame_generation_inputs(const frame_generation::attempt &value, bool successful);
 

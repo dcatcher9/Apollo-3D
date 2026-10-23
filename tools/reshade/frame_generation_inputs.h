@@ -66,9 +66,22 @@ namespace sunshine_streamline::frame_generation {
   }
   // One UI input: absent (nothing changes), null (revokes this origin's
   // snapshots of the kind), a malformed subrect (refused unseen), no FG scope,
-  // no live UI request for the viewport, or offered to ui_mask::begin (the
-  // attempt names its refusal or record stage).
-  enum class ui_outcome : std::uint8_t { absent, null_resource, subrect, no_fg_scope, no_request, offered };
+  // no live UI request for the viewport, tag_copied (the newest Streamline tag
+  // of that kind for the viewport recorded a copy within the source age: the
+  // tag keeps precedence per kind, as for depth, and nothing changes), or
+  // offered to ui_mask::begin (the attempt names its refusal or record stage).
+  enum class ui_outcome : std::uint8_t { absent, null_resource, subrect, no_fg_scope, no_request, tag_copied, offered };
+  constexpr const char *name(ui_outcome value) {
+    switch (value) {
+      case ui_outcome::null_resource: return "null";
+      case ui_outcome::subrect: return "subrect";
+      case ui_outcome::no_fg_scope: return "no_fg_scope";
+      case ui_outcome::no_request: return "no_request";
+      case ui_outcome::tag_copied: return "tag_copied";
+      case ui_outcome::offered: return "offered";
+      default: return "absent";
+    }
+  }
   struct attempt {
     std::uint64_t observation{}, loss{}, depth_ticket{};
     depth_outcome depth{depth_outcome::not_offered};

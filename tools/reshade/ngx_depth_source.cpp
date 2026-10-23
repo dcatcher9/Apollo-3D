@@ -88,7 +88,7 @@ namespace sunshine_ngx {
     std::atomic<std::uint64_t> dlssg_inner_frames{}, dlssg_ui_offered{}, dlssg_ui_captured{};
     std::array<std::atomic<std::uint64_t>, 10> dlssg_depth{};
     std::array<std::atomic<std::uint64_t>, record_stage_slots> dlssg_depth_stage{};
-    std::array<std::atomic<std::uint64_t>, 6> dlssg_ui{};
+    std::array<std::atomic<std::uint64_t>, std::size_t(fg_inputs::ui_outcome::offered) + 1> dlssg_ui{};
     std::array<std::atomic<std::uint64_t>, std::size_t(sunshine_game3d::ui_mask::begin_stage::count)> dlssg_ui_begin{};
     std::array<std::atomic<std::uint64_t>, record_stage_slots> dlssg_ui_record{};
     void reset_frame_generation_counters() {
@@ -148,10 +148,11 @@ namespace sunshine_ngx {
       }
       for (std::size_t i = 0; i != record_stage_slots; ++i)
         if (const auto count = dlssg_depth_stage[i].load(std::memory_order_relaxed)) append_stage(depth, record_stage(i), count);
-      // ui_outcome order; absent and offered are no refusals.
-      constexpr const char *ui_names[]{"absent", "null", "subrect", "no_fg_scope", "no_request", "offered"};
+      // ui_outcome order; absent and offered are no refusals (offered ones
+      // are counted by their begin or record stage below).
       for (std::size_t i = 1; i + 1 < dlssg_ui.size(); ++i)
-        if (const auto count = dlssg_ui[i].load(std::memory_order_relaxed)) append_count(ui, ui_names[i], count);
+        if (const auto count = dlssg_ui[i].load(std::memory_order_relaxed))
+          append_count(ui, fg_inputs::name(fg_inputs::ui_outcome(i)), count);
       for (std::size_t i = 1; i != dlssg_ui_begin.size(); ++i)
         if (const auto count = dlssg_ui_begin[i].load(std::memory_order_relaxed))
           append_count(ui, sunshine_game3d::ui_mask::begin_stage_names[i].data(), count);

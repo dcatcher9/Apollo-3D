@@ -1538,7 +1538,9 @@ namespace {
     parameters.dlssg_depth_partial_rect = true;
     fg_attempt_reply = {}; fg_attempt_reply.observation = 6; fg_attempt_reply.depth = fg::depth_outcome::capture;
     fg_attempt_reply.depth_stage = sunshine_streamline::depth_capture::record_stage::missing_state;
-    fg_attempt_reply.ui_result = {fg::ui_outcome::absent, fg::ui_outcome::absent, fg::ui_outcome::offered, fg::ui_outcome::absent};
+    // Its HUDLess was copied by the game's own Streamline tag first (tag_copied).
+    fg_attempt_reply.ui_result = {fg::ui_outcome::absent, fg::ui_outcome::absent, fg::ui_outcome::offered,
+      fg::ui_outcome::tag_copied};
     fg_attempt_reply.ui[2].refusal = sunshine_game3d::ui_mask::begin_stage::shape;
     evaluate();
     require(fg_inputs_calls == 3 && !fg_inputs_seen.depth.area_valid, "A partial DLSSG.Depth subrect was accepted");
@@ -1546,7 +1548,7 @@ namespace {
     messages.clear();
     sunshine_ngx::poll();
     require(logged("fg_feature=4 dlssg_depth={copied=1 inner_frames=1 refused=no_fg_scope:1,stage18:1} "
-        "dlssg_ui={offered=2 captured=1 refused=null:1,no_request:1,shape:1} failed="),
+        "dlssg_ui={offered=2 captured=1 refused=null:1,no_request:1,tag_copied:1,shape:1} failed="),
       "The NGX line did not report DLSS-G copies, inner frames and refusals by reason");
     require(release_entry(handle) == ngx_success, "Release DLSS-G input fixture");
     shutdown(); sunshine_ngx::testing::set_callbacks({});

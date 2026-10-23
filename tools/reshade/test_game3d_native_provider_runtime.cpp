@@ -14,6 +14,7 @@
 #include <functional>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace {
   // SUNSHINE_GAME3D_TEST_DIAGNOSTICS_OFF: the run keeps the Diagnostics switch
@@ -189,6 +190,27 @@ namespace {
         if (std::all_of(parts.begin(), parts.end(), [&](const char *part) { return line.find(part) != std::string::npos; }))
           ++count;
       return count;
+    }
+    // Those lines themselves, oldest first (no wait).
+    std::vector<std::string> reshade_log_lines(std::initializer_list<const char *> parts) {
+      std::vector<std::string> lines;
+      std::ifstream file(runtime_directory / "ReShade.log", std::ios::binary);
+      for (std::string line; std::getline(file, line);)
+        if (std::all_of(parts.begin(), parts.end(), [&](const char *part) { return line.find(part) != std::string::npos; }))
+          lines.push_back(line);
+      return lines;
+    }
+    // The number right after field in line, searched from the end of after
+    // when given; zero when either is missing.
+    static std::uint64_t number_after(const std::string &line, const char *field, const char *after = nullptr) {
+      std::size_t from = 0;
+      if (after) {
+        from = line.find(after);
+        if (from == std::string::npos) return 0;
+        from += std::strlen(after);
+      }
+      const auto at = line.find(field, from);
+      return at == std::string::npos ? 0 : std::strtoull(line.c_str() + at + std::strlen(field), nullptr, 10);
     }
     // Whether a line of the isolated runtime's ReShade.log containing
     // line_part has a number above minimum right after field, presenting the
@@ -2071,8 +2093,8 @@ namespace {
         "The FG scope's return to live was not logged");
 
       // DLSS-G's own NGX evaluation (feature 11) of each real frame, as in
-      // Assassin's Creed Shadows (10-23): the game tags FG depth and HUD-less
-      // without a command list (refused), its SR evaluation tags its own
+      // Assassin's Creed Shadows (10-23): the game tags FG depth, HUD-less and
+      // Backbuffer without a command list (refused), its SR evaluation tags its own
       // depth, and DLSS-G evaluates DLSSG.Depth (with DLSSG.DepthInverted and
       // DLSSG.DepthSubrect*), DLSSG.HUDLess and DLSSG.Backbuffer on its own
       // command list. Copies are made only in a state observed on that list.
@@ -2101,18 +2123,26 @@ namespace {
         dlssg_fixture::parameters inputs;
         inputs.depth = selected->resource.p; inputs.hudless = hudless.p; inputs.backbuffer = backbuffer.p;
         void *feature{};
-        bool observed_state = false, tag_commands = false;
+        bool observed_state = false, tag_commands = false, ui_tag_commands = false;
         const auto evaluations_before = dlssg_fixture::evaluated;
         const auto dlssg_frame = [&] {
           fallback_frame(tag_commands, true);
           auto *list = reinterpret_cast<ID3D12GraphicsCommandList *>(game_native_command);
-          abi_v2::resource hudless_resource{}; hudless_resource.base = {nullptr, resource_guid, 1};
-          hudless_resource.type = 8; hudless_resource.native = hudless.p;
-          hudless_resource.state = unsigned(D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
-          hudless_resource.width = width; hudless_resource.height = height;
-          hudless_resource.native_format = unsigned(color.Format); hudless_resource.mip_levels = hudless_resource.array_layers = 1;
-          const abi_v2::resource_tag hudless_tag{{nullptr, tag_guid, 1}, &hudless_resource, 2, 1, {0, 0, width, height}};
-          require(global_tag_call(viewport, &hudless_tag, 1, nullptr) == 0, "Command-less HUD-less tag changed the SDK result");
+          // The game's own HUD-less (2) and Backbuffer (53) tags, in their
+          // declared state: command-less as in Shadows, or on the game's list.
+          const auto color_resource = [&](ID3D12Resource *native) {
+            abi_v2::resource value{}; value.base = {nullptr, resource_guid, 1};
+            value.type = 8; value.native = native;
+            value.state = unsigned(D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+            value.width = width; value.height = height;
+            value.native_format = unsigned(color.Format); value.mip_levels = value.array_layers = 1;
+            return value;
+          };
+          const auto hudless_resource = color_resource(hudless.p), backbuffer_resource = color_resource(backbuffer.p);
+          const abi_v2::resource_tag ui_tags[]{{{nullptr, tag_guid, 1}, &hudless_resource, 2, 1, {0, 0, width, height}},
+            {{nullptr, tag_guid, 1}, &backbuffer_resource, 53, 1, {0, 0, width, height}}};
+          require(global_tag_call(viewport, ui_tags, 2, ui_tag_commands ? reinterpret_cast<void *>(game_native_command) : nullptr) == 0,
+            "The HUD-less and Backbuffer tags changed the SDK result");
           if (!feature)
             require(ngx_create(list, 11, &inputs, &feature) == dlssg_fixture::success && feature, "DLSS-G feature creation failed");
           require(selected->state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "DLSS-G fixture depth left its UAV state");
@@ -2169,12 +2199,49 @@ namespace {
           "DLSS-G's HUD-less and Backbuffer were not captured for UI detection");
         require(reshade_log_number_above("Sunshine UI capture gate:", "hudless_presents={batch=", 0, 12000),
           "DLSS-G's HUD-less image did not reach UI detection with its same-evaluation Backbuffer as an exact pair");
+        // The game's own HUD-less and Backbuffer tags copy on its command list
+        // (as in a game whose Streamline UI tags already work with FG on): per
+        // kind the tag keeps precedence, as for depth. The evaluation offers
+        // neither input again (dlssg_ui tag_copied), so no second full-size
+        // copy competes for the kind's two snapshots, and UI detection keeps
+        // the tags' own same-batch pair.
+        ui_tag_commands = true;
+        for (const auto settled = GetTickCount64() + 300; GetTickCount64() < settled;) { step(); no_effects(); }
+        const auto ngx_lines = [&] { return reshade_log_lines({"Sunshine NGX depth:", "dlssg_ui={offered="}); };
+        const auto gate_lines = [&] { return reshade_log_lines({"Sunshine UI capture gate:", "hudless_presents={batch="}); };
+        const auto wait_lines = [&](const auto &lines, std::size_t count) {
+          for (const auto until = GetTickCount64() + 16000; lines().size() < count && GetTickCount64() < until;) {
+            step(); no_effects();
+          }
+          auto found = lines();
+          require(found.size() >= count, "The bounded NGX or UI capture gate line stopped while Streamline tags copied UI");
+          return found;
+        };
+        const auto ngx_start = ngx_lines().size(), gate_start = gate_lines().size();
+        // Every frame between two NGX lines written after the switch had the tags' copies.
+        const auto ngx = wait_lines(ngx_lines, ngx_start + 2);
+        const auto &first_line = ngx[ngx_start], &second_line = ngx[ngx_start + 1];
+        const auto ui_field = [](const std::string &line, const char *field) { return number_after(line, field, "dlssg_ui={"); };
+        require(ui_field(second_line, "offered=") == ui_field(first_line, "offered=") &&
+            ui_field(second_line, " captured=") == ui_field(first_line, " captured=") &&
+            ui_field(second_line, "tag_copied:") > ui_field(first_line, "tag_copied:"),
+          "DLSS-G's evaluation offered a HUD-less or Backbuffer input the game's own Streamline tags had copied");
+        // A gate window wholly after the switch: the tags' exact pairs.
+        const auto gate = wait_lines(gate_lines, gate_start + 2);
+        require(number_after(gate[gate_start + 1], "hudless_presents={batch=") > 0,
+          "The Streamline tags' HUD-less image did not reach UI detection with its same-batch Backbuffer");
+        const auto captured_behind_tags = ui_field(second_line, " captured=");
+        ui_tag_commands = false;
         // An FG tag with a command list copies the frame first and keeps
-        // precedence: the evaluation adds no second copy (tag_copied).
+        // precedence: the evaluation adds no second copy (tag_copied). The
+        // UI tags are command-less again (refused): DLSS-G's UI inputs are
+        // captured again at once.
         tag_commands = true;
         settle_route("DLSSG-evaluation-behind-FG-tag-copies", true);
         require(reshade_log_contains({"Sunshine NGX depth:", "dlssg_depth={copied=", "tag_copied:"}),
           "DLSS-G's evaluation copied a frame its Streamline FG tag had already copied");
+        require(reshade_log_number_above("Sunshine NGX depth:", " captured=", captured_behind_tags),
+          "Refused Streamline UI tags did not hand their kinds back to DLSS-G's evaluation");
         tag_commands = false;
         // Refused again: the scope falls silent and SR depth returns.
         observed_state = false;
@@ -2184,8 +2251,8 @@ namespace {
         // Accepted FG tag copies own the viewport again, as before this case.
         render_tracked_depth = [&] { fallback_frame(true, true); };
         settle_route("DLSSG-case-done-FG-tags-own-again", true);
-        evidence << "dlssg-evaluation unobserved=SR observed=FG-owned generated=held ui=exact-batch\n";
-        std::puts("PASS native DLSS-G evaluation: DLSSG.Depth without an observed state is refused and counted with SR depth unchanged; in an observed state it owns the FG scope, generated Presents hold it, the command-less FG tag withdraws nothing, its HUD-less/Backbuffer pair reaches UI detection exactly, and an FG tag that copies keeps precedence; no FX");
+        evidence << "dlssg-evaluation unobserved=SR observed=FG-owned generated=held ui=exact-batch ui-tags-with-commands=tag-copied\n";
+        std::puts("PASS native DLSS-G evaluation: DLSSG.Depth without an observed state is refused and counted with SR depth unchanged; in an observed state it owns the FG scope, generated Presents hold it, the command-less FG tag withdraws nothing, its HUD-less/Backbuffer pair reaches UI detection exactly, and FG depth and HUD-less/Backbuffer tags that copy keep precedence per kind; no FX");
       }
       // The same refused FG tags with no SR evaluation (DLSS-G without DLSS
       // SR/RR): a silent scope only lets an API source of the viewport

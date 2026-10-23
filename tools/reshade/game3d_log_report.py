@@ -184,7 +184,8 @@ NGX = re.compile(r'Sunshine NGX depth: .*?evaluations=(\d+) nominations=(\d+) co
 # DLSS-G's own NGX evaluation (feature 11) since 10-23: copies of DLSSG.Depth made as FG-scope depth on its own command
 # list, inner frames of multi frame generation skipped, and refusals as reason:count (capture stages such as
 # missing_state: the list observed no state for the depth); its HUD-less/Backbuffer/UI inputs offered to the live UI
-# request and captured. Cumulative over the runtime, like the rest of the line.
+# request and captured (tag_copied: a Streamline tag of that kind copied the frame first and keeps precedence).
+# Cumulative over the runtime, like the rest of the line.
 DLSSG = re.compile(r'Sunshine NGX depth: .*?fg_feature=(\d+) dlssg_depth=\{copied=(\d+) inner_frames=(\d+) '
                    r'refused=([^}]*)\} dlssg_ui=\{offered=(\d+) captured=(\d+) refused=([^}]*)\}')
 # What the most common DLSSG.Depth refusals mean (ngx_depth_source.cpp, frame_generation_inputs.h).
@@ -1420,10 +1421,14 @@ def dlssg_checks(s: Session, add) -> None:
         return
     evaluations, copied, inner, depth_text, offered, captured, ui_text = s.dlssg
     refused, ui_refused = refusal_counts(depth_text), refusal_counts(ui_text)
+    # Per kind, a Streamline UI tag that copied its frame first keeps precedence: that input adds nothing.
+    ui_tagged = ui_refused.pop('tag_copied', 0)
     real = evaluations - inner
     ui = (f'; UI inputs captured {captured} of {offered}'
           + (f' (refused {", ".join(f"{k} {v}" for k, v in ui_refused.most_common())})' if ui_refused else '')
-          if offered or ui_refused else '; no UI input offered')
+          if offered or ui_refused else '' if ui_tagged else '; no UI input offered')
+    if ui_tagged:
+        ui += f'; Streamline UI tags copied {ui_tagged} of its UI inputs first'
     if copied:
         add(Check('INFO', 'DLSS-G inputs', f'DLSSG.Depth supplied {copied} FG-scope depth copies in {real} real-frame '
                   f'DLSS-G evaluations' + (f' (refused {", ".join(f"{k} {v}" for k, v in refused.most_common())})'

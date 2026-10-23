@@ -235,6 +235,39 @@ namespace sunshine_streamline {
       return copy.tick && copy.epoch == scope_epoch && copy.viewport == viewport &&
         (now < copy.tick || now - copy.tick < sunshine_scene_depth::maximum_source_age_ms);
     }
+    // The same precedence per UI kind (ui_mask::capture_slot): the tick the
+    // newest Streamline UI tag of that kind for the scope recorded a copy, or
+    // zero when it was refused or its SDK call failed. DLSS-G's input of a kind
+    // the game's own tags copy adds no second copy (observe_frame_generation_inputs),
+    // so one origin feeds UI detection, its exact pairs included; a kind the
+    // tags leave out or cannot copy (Shadows' command-less HUD-less and
+    // Backbuffer) is DLSS-G's.
+    struct { std::uint64_t epoch{}; std::uint32_t viewport{}; std::array<std::uint64_t, 4> tick{}; } ui_tag_copy;
+    void remember_ui_tag_copy(std::uint64_t scope_epoch, std::uint32_t viewport, unsigned slot, bool recorded) {
+      if (slot >= ui_tag_copy.tick.size()) return;
+      AcquireSRWLockExclusive(&evaluation_supply_lock);
+      if (recorded && (ui_tag_copy.epoch != scope_epoch || ui_tag_copy.viewport != viewport))
+        ui_tag_copy = {scope_epoch, viewport, {}};
+      if (ui_tag_copy.epoch == scope_epoch && ui_tag_copy.viewport == viewport)
+        ui_tag_copy.tick[slot] = recorded ? GetTickCount64() : 0;
+      ReleaseSRWLockExclusive(&evaluation_supply_lock);
+    }
+    // A kept copy's SDK call failed: its kind no longer has precedence.
+    void forget_ui_tag_copy(unsigned slot) {
+      if (slot >= ui_tag_copy.tick.size()) return;
+      AcquireSRWLockExclusive(&evaluation_supply_lock);
+      ui_tag_copy.tick[slot] = 0;
+      ReleaseSRWLockExclusive(&evaluation_supply_lock);
+    }
+    bool ui_tag_copy_recent(std::uint64_t scope_epoch, std::uint32_t viewport, unsigned slot) {
+      if (slot >= ui_tag_copy.tick.size()) return false;
+      AcquireSRWLockShared(&evaluation_supply_lock);
+      const bool scope = ui_tag_copy.epoch == scope_epoch && ui_tag_copy.viewport == viewport;
+      const auto tick = ui_tag_copy.tick[slot];
+      ReleaseSRWLockShared(&evaluation_supply_lock);
+      const auto now = GetTickCount64();
+      return scope && tick && (now < tick || now - tick < sunshine_scene_depth::maximum_source_age_ms);
+    }
     // SDK calls answered with eWarnOutOfVRAM: accepted, counted for the log.
     std::atomic<std::uint64_t> vram_warnings{};
     // One verdict per 2.x call (abi_v2::accepted): the warning is a success.
@@ -2037,7 +2070,12 @@ namespace sunshine_streamline {
       where.source_present_generation = input.source_present_generation;
       where.format = input.source ? retained.format : 0;
       where.refusal = tag.value.refusal;
-      return mask::begin(where, input);
+      auto attempt = mask::begin(where, input);
+      // A recorded copy keeps its kind's precedence over DLSS-G's input of
+      // the same kind (ui_tag_copy); a refusal hands that kind over at once.
+      if (mask::source_mask(where.kind))
+        remember_ui_tag_copy(source_epoch, out.viewport, mask::capture_slot(where.kind), static_cast<bool>(attempt.ticket));
+      return attempt;
     }
     using alpha_attempts = std::array<sunshine_game3d::ui_mask::attempt, 4>;
     alpha_attempts capture_ui_inputs(const batch &out, void *commands) {
@@ -2160,8 +2198,12 @@ namespace sunshine_streamline {
       else if (sample && (!sdk_ok || !out.valid_viewport) && current(ticket))
         lose(!sdk_ok ? loss_diagnostics::reason::sdk_failure : loss_diagnostics::reason::invalid_input, __func__, __LINE__);
       if (snapshot.tag_boundary) finish_evaluation(snapshot, sdk_ok, ticket);
-      for (const auto &attempt : alpha) sunshine_game3d::ui_mask::finish(attempt,
-        sdk_ok && current(ticket) && loss == loss_revision.load(std::memory_order_acquire));
+      const bool ui_kept = sdk_ok && current(ticket) && loss == loss_revision.load(std::memory_order_acquire);
+      for (const auto &attempt : alpha) {
+        sunshine_game3d::ui_mask::finish(attempt, ui_kept);
+        // A revoked copy no longer keeps its kind's precedence (ui_tag_copy).
+        if (!ui_kept && attempt.ticket) forget_ui_tag_copy(sunshine_game3d::ui_mask::capture_slot(attempt.kind));
+      }
       SetLastError(outgoing);
       return result;
     }
@@ -3098,6 +3140,9 @@ namespace sunshine_streamline {
         if (item.state == parameter::absent) continue;
         if (!interested) { result = ui_outcome::no_request; continue; }
         if (!item.area_valid) { result = ui_outcome::subrect; continue; }
+        // The game's own tag of this kind copied it first: no second copy,
+        // and its exact pairs stay the tags' own (ui_tag_copy).
+        if (ui_tag_copy_recent(source_epoch, fg.viewport, i)) { result = ui_outcome::tag_copied; continue; }
         depth_capture::input input;
         input.epoch = source_epoch; input.sequence = serial; input.tick = tick;
         input.viewport = fg.viewport; input.observation_revision = loss;

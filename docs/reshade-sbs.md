@@ -3809,16 +3809,22 @@ its own subrectangle, read the same way) are offered to the live UI request of t
 batch (`tag_scope=2`, `boundary::frame_generation_evaluation`), under the same observed-state rule.
 An absent key changes nothing; an explicit null revokes that kind's snapshots of DLSS-G's
 evaluation only. The two origins never revoke each other's snapshots, so Shadows' command-less
-HUD-less and Backbuffer tags, refused as `shape`, no longer erase the evaluation's copies. The
-named `DLSSG.UIAlpha` needs no Streamline header range to be validated automatically.
+HUD-less and Backbuffer tags, refused as `shape`, no longer erase the evaluation's copies. As for
+depth, a Streamline tag keeps precedence per kind: when the newest tag of a kind for that viewport
+recorded a copy that its SDK call kept, within the source age, the evaluation's input of that kind
+is skipped (`tag_copied`), so a game whose UI tags already copy keeps one origin per kind, its own
+same-batch pairs and no second full-size copy competing for the kind's two snapshots. The tag's
+refusal or failed call hands that kind to the evaluation at once; a kind the tags leave out stays
+the evaluation's. The named `DLSSG.UIAlpha` needs no Streamline header range to be validated
+automatically.
 The `Sunshine NGX depth` line reports `dlssg_depth={copied=<n> inner_frames=<n>
 refused=<reason>:<n>,...}` (reasons `no_fg_scope`, `absent`, `null`, `subrect`, `scope_changed`,
 `inactive`, `tag_copied`, or the capture owner's refusal stage such as `missing_state` when the
 recording observed no state for the depth, or `observer_coverage` when ReShade does not cover
 DLSS-G's list) and `dlssg_ui={offered=<n> captured=<n> refused=<reason>:<n>,...}` (`null`,
-`subrect`, `no_fg_scope`, `no_request`, a UI begin stage such as `shape` or `not_newer`, or a
-capture stage); `none` when nothing was refused. Absent UI keys are optional in DLSS-G and are
-not refusals.
+`subrect`, `no_fg_scope`, `no_request`, `tag_copied` (not offered), a UI begin stage such as
+`shape` or `not_newer`, or a capture stage); `none` when nothing was refused. Absent UI keys are
+optional in DLSS-G and are not refusals.
 
 Enabled FG owns its viewport's depth only while its scope is live: FG was turned on less than a
 second ago (the options call that enabled it in this observation epoch; later calls that keep it

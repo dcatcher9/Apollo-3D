@@ -937,6 +937,17 @@ class ReadinessReport(unittest.TestCase):
                                  'offered=0 captured=0 refused=none')])
         self.assertEqual(tagged['DLSS-G inputs'].status, 'INFO')
         self.assertIn('Streamline FG tags supplied the depth; no UI input offered', tagged['DLSS-G inputs'].detail)
+        # Per kind, Streamline UI tags that copy keep precedence too: not a refusal of the inputs offered.
+        ui_tagged = run(BASE + [ngx('copied=0 inner_frames=0 refused=tag_copied:300',
+                                    'offered=0 captured=0 refused=tag_copied:600')])
+        self.assertEqual(ui_tagged['DLSS-G inputs'].status, 'INFO')
+        self.assertIn('Streamline FG tags supplied the depth; Streamline UI tags copied 600 of its UI inputs first',
+                      ui_tagged['DLSS-G inputs'].detail)
+        self.assertNotIn('no UI input offered', ui_tagged['DLSS-G inputs'].detail)
+        ui_partly = run(BASE + [ngx('copied=100 inner_frames=0 refused=none',
+                                    'offered=100 captured=100 refused=tag_copied:100')])
+        self.assertIn('UI inputs captured 100 of 100; Streamline UI tags copied 100 of its UI inputs first',
+                      ui_partly['DLSS-G inputs'].detail)
         # Mostly tag copies with a few refused evaluations between them stays INFO; mostly refusals warns.
         mixed = run(BASE + [ngx('copied=0 inner_frames=0 refused=tag_copied:290,missing_state:10',
                                 'offered=0 captured=0 refused=none')])
