@@ -99,9 +99,10 @@ namespace {
   }
   // A tag of the tagged resource's format record_format, with the request
   // refreshed at its tick.
-  mask::attempt begin(const capture::input &value, mask::source_kind kind = mask::source_kind::backbuffer) {
+  mask::attempt begin(const capture::input &value, mask::source_kind kind = mask::source_kind::backbuffer,
+      sunshine_streamline::tag_refusal refusal = sunshine_streamline::tag_refusal::none) {
     mask::set_request(current, value.tick);
-    return mask::begin({value, 0x300, 1, kind, 0, record_format}, value);
+    return mask::begin({value, 0x300, 1, kind, 0, record_format, refusal}, value);
   }
   mask::attempt capture_one(std::uint64_t sequence, std::uint64_t tick = 1000) {
     auto value = begin(input(sequence, tick)); mask::finish(value, true); return value;
@@ -493,9 +494,10 @@ namespace {
       require(mask::query_diagnostic(runtime, value), "No diagnostic for the request");
       return value;
     };
-    const auto refused = [&](const capture::input &value, mask::source_kind kind, stage expected, bool named) {
+    const auto refused = [&](const capture::input &value, mask::source_kind kind, stage expected, bool named,
+        sunshine_streamline::tag_refusal refusal = sunshine_streamline::tag_refusal::none) {
       const auto before = counts();
-      const auto attempt = begin(value, kind);
+      const auto attempt = begin(value, kind, refusal);
       const auto after = counts();
       require(!attempt.reservation && after.begin_refusals[std::size_t(expected)] == before.begin_refusals[std::size_t(expected)] + 1 &&
           (!named || after.begin_refusal == expected), "A begin() without an attempt did not name its stage");
@@ -506,6 +508,18 @@ namespace {
     refused(bad_shape, mask::source_kind::backbuffer, stage::shape, true);
     auto unsupported = input(2); unsupported.valid_until = scene::lifetime::unsupported;
     refused(unsupported, mask::source_kind::backbuffer, stage::unsupported_lifetime, true);
+    // An unsupported tag names its cause, for UI kinds as for depth.
+    using sunshine_streamline::tag_refusal;
+    unsupported = input(2);
+    unsupported.valid_until = scene::lifetime::unsupported;
+    for (const auto &[cause, expected] : std::initializer_list<std::pair<tag_refusal, stage>>{
+        {tag_refusal::header_version, stage::header_version}, {tag_refusal::unreadable, stage::header_version},
+        {tag_refusal::extension, stage::extension}, {tag_refusal::precision, stage::extension},
+        {tag_refusal::resource_type, stage::resource_type}, {tag_refusal::lifecycle, stage::unsupported_lifetime}}) {
+      reset();
+      refused(unsupported, mask::source_kind::hudless, expected, true, cause);
+    }
+    reset();
     auto first = begin(input(3), mask::source_kind::backbuffer); mask::finish(first, true);
     auto second = begin(input(4), mask::source_kind::backbuffer); mask::finish(second, true);
     refused(input(5), mask::source_kind::backbuffer, stage::no_reservation, true);
@@ -882,7 +896,7 @@ int main() {
     source_filter_change_revokes_ready_pending_and_inflight_attempts(); std::puts("PASS source-filter changes revoke completed, pending and in-flight old reservations");
     hudless_pairs_with_the_next_present_only(); std::puts("PASS HUD-less pairs with the Present after its tag, late captures within retained history, later offers with their own Present, never stale or reversed generations");
     declared_lifetimes_preserve_state_policy(); std::puts("PASS UI tag lifetimes preserve provenance and choose observed-at-call or strict longer-lived state policy");
-    begin_refusals_name_their_stage(); std::puts("PASS UI capture begin refusals: no or ambiguous request, filtered kind, not newer, shape, unsupported lifetime, no reservation, no reader and format each name their stage");
+    begin_refusals_name_their_stage(); std::puts("PASS UI capture begin refusals: no or ambiguous request, filtered kind, not newer, shape, unsupported lifetime, header version, extension, resource type, no reservation, no reader and format each name their stage");
     tags_without_a_reader_are_not_copied(); std::puts("PASS UI tags are copied only while their runtime read its captures within the reader window");
     stale_requests_expire(); std::puts("PASS UI capture requests match tags only while refreshed; an expired entry goes to a new runtime, never a live one");
     one_scan_per_present(); std::puts("PASS one capture read per Present returns every kind polling each snapshot once; tags scan only a full kind");

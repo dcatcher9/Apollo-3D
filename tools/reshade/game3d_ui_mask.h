@@ -2,6 +2,7 @@
 #pragma once
 
 #include "streamline_buffer_types.h"
+#include "streamline_camera_data.h"
 #include "streamline_depth_capture.h"
 
 #include <array>
@@ -70,6 +71,8 @@ namespace sunshine_game3d::ui_mask {
     // unknown). begin() refuses a format the kind cannot be read from (format)
     // before any copy.
     std::uint32_t format{};
+    // An unsupported tag's cause, which names begin()'s refusal stage.
+    sunshine_streamline::tag_refusal refusal{};
   };
   // The presented color a HUD-less image is compared with when no same-batch
   // Backbuffer was tagged with it. Without frame generation every offer of a
@@ -206,8 +209,11 @@ namespace sunshine_game3d::ui_mask {
   // matches, more than one does, the request's kinds exclude the tag, the
   // tag is not newer than the request's latest, its shape or declared
   // lifetime is unsupported, both of its kind's reservations are taken, its
-  // runtime has not read UI captures within reader_window_ms, or its format
-  // cannot be read as its kind (supported_format).
+  // runtime has not read UI captures within reader_window_ms, its format
+  // cannot be read as its kind (supported_format), or the tag itself was
+  // unsupported: a structure GUID or version or an unreadable tag
+  // (header_version), an unknown chained structure or PrecisionInfo
+  // (extension), or a resource type other than eTex2d/eUnknown.
   // The capture gate line counts them per stage.
   enum class begin_stage : std::uint8_t {
     none,
@@ -220,11 +226,14 @@ namespace sunshine_game3d::ui_mask {
     no_reservation,
     no_reader,
     format,
+    header_version,
+    extension,
+    resource_type,
     count
   };
   inline constexpr std::array<std::string_view, std::size_t(begin_stage::count)> begin_stage_names{"none", "no_request",
     "ambiguous_request", "kind_filtered", "not_newer", "shape", "unsupported_lifetime", "no_reservation", "no_reader",
-    "format"};
+    "format", "header_version", "extension", "resource_type"};
   constexpr std::string_view name(begin_stage value) {
     return value < begin_stage::count ? begin_stage_names[std::size_t(value)] : std::string_view("none");
   }

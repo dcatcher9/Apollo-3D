@@ -2477,7 +2477,9 @@ recent snapshot polled once, each filtered kind's newest ready one returned), an
 owner, its own kind only, only when both of its kind's reservations are taken. The gate line's
 `begin_refused` counts, per stage and since start, the tags whose `begin()` stopped without a
 capture attempt: `no_request`, `ambiguous_request`, `kind_filtered`, `not_newer`, `shape`,
-`unsupported_lifetime`, `no_reservation`, `no_reader` (the reader rule above) and `format` (the
+`unsupported_lifetime`, `header_version`, `extension` and `resource_type` (an unsupported tag's
+cause: a structure GUID or version or an unreadable tag, an unknown chained structure or
+PrecisionInfo, a non-texture resource), `no_reservation`, `no_reader` (the reader rule above) and `format` (the
 tagged resource's format, stored as its snapshot would be, cannot be read as its kind:
 `ui_mask::supported_format`, checked before any copy; such a tag revokes the kind's older
 snapshots like any invalid tag); `begin_last` names the request's latest. `no_reader` and `format`
@@ -3246,9 +3248,19 @@ Windows x64 boundaries are:
 | 2.x | Typed/versioned structures; the consumed core function signatures and field offsets remain compatible across the surveyed releases. Constants are 456 bytes, Resource 112, ResourceTag 64 and ViewportHandle 40. | [2.0.0](https://github.com/NVIDIA-RTX/Streamline/blob/f36f47cffef53c59e7da54288689f1525049aa7d/include/sl.h), [2.14.1](https://github.com/NVIDIA-RTX/Streamline/blob/2122257e0fce486f91b385aa63b9a09b0a34b363/include/sl_core_types.h) |
 
 NVIDIA's [versioned-structure contract](https://github.com/NVIDIA-RTX/Streamline/blob/2122257e0fce486f91b385aa63b9a09b0a34b363/include/sl_struct.h#L49-L106)
-requires appended fields and a version increment. The observer still validates the structure GUID,
-supported structure version, readable prefix and extension interpretation; a compatible DLL major
-does not make arbitrary structures or missing resources usable. Missing or contradictory version
+requires appended fields and a version increment (its option 1), so the observer reads a
+ResourceTag, Resource or PrecisionInfo with the expected GUID and version 1 or later by its
+version-1 fields only, never past them. A ResourceTag above version 1 may be larger, so an array
+of more than one such tag in one `slSetTag`/`slSetTagForFrame` call has an unknown stride and is
+read as unreadable; a single tag and tags chained in evaluate inputs are read. A typed Resource's
+`nativeFormat` (declared in every 2.x Resource) is read and carried with the depth source; the
+zero-header Resource variant and 1.x resources read it as 0. The observer still refuses a wrong
+GUID, version 0 outside the zero-header Resource variant, a chained structure other than
+PrecisionInfo, a PrecisionInfo with its own extension or an unknown formula, a lifecycle above 2,
+and resource types other than eTex2d/eUnknown. The `rejected depth tag` line names the cause
+(`refusal=header_version|unreadable|extension|precision|resource_type|lifecycle`), as does an FG
+tag boundary's refusal reason (`unsupported_<cause>`) and, for UI tags, the begin stage. A
+compatible DLL major does not make arbitrary structures or missing resources usable. Missing or contradictory version
 metadata and unknown ABI majors remain unsupported. Official 1.0.2–1.1.1 binaries have a resource
 script quirk: fixed file/product version 1.0.0.0 but matching strings containing the actual version.
 Official 2.0.1 and 2.1.0 have the equivalent fixed 2.0.0.0 quirk. These exceptions are limited to

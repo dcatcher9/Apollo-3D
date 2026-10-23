@@ -361,8 +361,13 @@ namespace sunshine_game3d::ui_mask {
       } else if (!where.command || !source.resource.native || !input.source || !shape ||
           source.valid_until == sunshine_scene_depth::lifetime::unsupported) {
         revoke();
-        stage = source.valid_until == sunshine_scene_depth::lifetime::unsupported ? begin_stage::unsupported_lifetime :
-          begin_stage::shape;
+        // An unsupported tag names its cause.
+        using sunshine_streamline::tag_refusal;
+        const auto refusal = where.refusal;
+        stage = source.valid_until != sunshine_scene_depth::lifetime::unsupported ? begin_stage::shape :
+          refusal == tag_refusal::unreadable || refusal == tag_refusal::header_version ? begin_stage::header_version :
+          refusal == tag_refusal::extension || refusal == tag_refusal::precision ? begin_stage::extension :
+          refusal == tag_refusal::resource_type ? begin_stage::resource_type : begin_stage::unsupported_lifetime;
       } else if (!supported_format(where.kind, capture::auxiliary_snapshot_format(where.format))) {
         // The snapshot could never be read as this kind: no copy is made.
         revoke();

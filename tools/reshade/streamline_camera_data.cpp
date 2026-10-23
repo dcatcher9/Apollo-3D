@@ -175,6 +175,18 @@ namespace sunshine_streamline {
     return camera.explicit_frame && tag.explicit_frame ? match_status::exact_frame : match_status::same_epoch_only;
   }
 
+  const char *name(tag_refusal v) {
+    switch (v) {
+      case tag_refusal::none: return "none";
+      case tag_refusal::unreadable: return "unreadable";
+      case tag_refusal::header_version: return "header_version";
+      case tag_refusal::extension: return "extension";
+      case tag_refusal::precision: return "precision";
+      case tag_refusal::resource_type: return "resource_type";
+      case tag_refusal::lifecycle: return "lifecycle";
+    }
+    return "unknown";
+  }
   const char *name(decode_status v) {
     switch (v) {
       case decode_status::ok: return "ok";

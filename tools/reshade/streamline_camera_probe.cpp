@@ -1238,32 +1238,46 @@ namespace sunshine_streamline {
       constexpr auto prefix = offsetof(abi_v2::viewport, value) + sizeof(copy.value);
       return read_bytes(&value, &copy, prefix) && decode_v2_viewport(&copy, prefix, output) == decode_status::ok;
     }
-    bool decode_precision(const void *extension, double &scale, double &bias) {
+    // Streamline structures follow sl_struct.h's versioning rule: a newer
+    // version only appends fields, so a structure with the expected GUID and
+    // version 1 or later is read by its version-1 fields alone, never past them.
+    // The only extension a tag may chain is PrecisionInfo, which chains none.
+    tag_refusal decode_precision(const void *extension, double &scale, double &bias) {
       scale = 1; bias = 0;
-      if (!extension) return true;
+      if (!extension) return tag_refusal::none;
       precision_info precision{};
-      if (!read_bytes(extension, &precision, sizeof(precision)) ||
-          !same(precision.base.type, precision_guid) || precision.base.version != 1 || precision.base.next) return false;
-      if (precision.formula == 0) return true;
-      if (precision.formula != 1 || !std::isfinite(precision.scale) || !std::isfinite(precision.bias) || precision.scale == 0) return false;
+      constexpr auto prefix = offsetof(precision_info, scale) + sizeof(precision.scale);
+      if (!read_bytes(extension, &precision, prefix)) return tag_refusal::unreadable;
+      if (!same(precision.base.type, precision_guid)) return tag_refusal::extension;
+      if (precision.base.version < 1) return tag_refusal::header_version;
+      if (precision.base.next) return tag_refusal::extension;
+      if (precision.formula == 0) return tag_refusal::none;
+      if (precision.formula != 1 || !std::isfinite(precision.scale) || !std::isfinite(precision.bias) || precision.scale == 0)
+        return tag_refusal::precision;
       scale = precision.scale; bias = precision.bias;
-      return true;
+      return tag_refusal::none;
     }
     void append_tag(batch &out, const abi_v2::resource_tag &tag, origin source, std::uintptr_t token, bool report_invalid = true) {
       const auto type = buffers::canonical(installed_contract, tag.type);
       const unsigned index = tag_index(type);
       if (index == observed_tag_types.size()) return;
       abi_v2::resource resource{};
-      const bool header_ok = same(tag.base.type, tag_guid) && tag.base.version == 1;
+      const bool header_ok = same(tag.base.type, tag_guid) && tag.base.version >= 1;
       constexpr auto resource_prefix = offsetof(abi_v2::resource, height) + sizeof(resource.height);
-      const bool resource_ok = header_ok && (!tag.resource_ptr || read_bytes(tag.resource_ptr, &resource, resource_prefix));
+      bool resource_ok = header_ok && (!tag.resource_ptr || read_bytes(tag.resource_ptr, &resource, resource_prefix));
+      // nativeFormat follows height in every typed 2.x Resource; the
+      // zero-header variant below declares no layout, so it reads as 0.
+      if (resource_ok && tag.resource_ptr && resource.base.next == nullptr && same(resource.base.type, resource_guid) &&
+          resource.base.version >= 1)
+        resource_ok = read_bytes(&tag.resource_ptr->native_format, &resource.native_format, sizeof(resource.native_format));
       if (!resource_ok) {
         if (report_invalid) invalid_observation(loss_diagnostics::reason::invalid_input, __func__, __LINE__);
         resource = {};
       }
       tag_record value{};
       value.present = true;
-      const bool precision_ok = decode_precision(tag.base.next, value.precision_scale, value.precision_bias);
+      const auto precision = decode_precision(tag.base.next, value.precision_scale, value.precision_bias);
+      const bool precision_ok = precision == tag_refusal::none;
       // Some 2.x integrations zero-initialize Resource's base
       // while constructing a correctly typed ResourceTag. Accept that one
       // known layout variant, not arbitrary GUIDs/versions or extensions. The
@@ -1272,10 +1286,15 @@ namespace sunshine_streamline {
       const bool zero_resource_header = installed_abi == abi::v2 && resource.base.next == nullptr &&
         same(resource.base.type, empty_guid) && resource.base.version == 0;
       const bool resource_header = resource.base.next == nullptr &&
-        ((same(resource.base.type, resource_guid) && resource.base.version == 1) ||
+        ((same(resource.base.type, resource_guid) && resource.base.version >= 1) ||
           zero_resource_header);
       value.supported = resource_ok && precision_ok && tag.lifecycle <= 2 && (!tag.resource_ptr ||
         (resource_header && (resource.type == 0 || resource.type == 8)));
+      value.value.refusal = value.supported ? tag_refusal::none : !header_ok ? tag_refusal::header_version :
+        !resource_ok ? tag_refusal::unreadable : !precision_ok ? precision : tag.lifecycle > 2 ? tag_refusal::lifecycle :
+        !resource_header ? (resource.base.next ? tag_refusal::extension : tag_refusal::header_version) :
+        tag_refusal::resource_type;
+      value.value.native_format = value.supported ? resource.native_format : 0;
       value.source = source;
       value.token = token;
       value.value.native_resource = value.supported ? reinterpret_cast<std::uintptr_t>(resource.native) : 0;
@@ -1333,10 +1352,10 @@ namespace sunshine_streamline {
         const auto now = GetTickCount64();
         auto next = next_tag_report.load(std::memory_order_relaxed);
         if (now >= next && next_tag_report.compare_exchange_strong(next, now + 5000, std::memory_order_relaxed)) {
-          char text[640]{};
+          char text[700]{};
           std::snprintf(text, sizeof(text),
-            "Sunshine Streamline rejected depth tag: tag_type=%u viewport=%u tag_guid=%08x tag_version=%llu tag_extension=0x%llx precision_supported=%u lifecycle=%u resource_read=%u resource_guid=%08x resource_version=%llu resource_type=%u resource_extension=0x%llx declared_native=0x%llx state=0x%x declared_extent=%ux%u",
-            tag.type, out.viewport, tag.base.type.a, static_cast<unsigned long long>(tag.base.version),
+            "Sunshine Streamline rejected depth tag: refusal=%s tag_type=%u viewport=%u tag_guid=%08x tag_version=%llu tag_extension=0x%llx precision_supported=%u lifecycle=%u resource_read=%u resource_guid=%08x resource_version=%llu resource_type=%u resource_extension=0x%llx declared_native=0x%llx state=0x%x declared_extent=%ux%u",
+            name(value.value.refusal), tag.type, out.viewport, tag.base.type.a, static_cast<unsigned long long>(tag.base.version),
             static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(tag.base.next)), precision_ok, tag.lifecycle, resource_ok,
             resource.base.type.a, static_cast<unsigned long long>(resource.base.version), resource.type,
             static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(resource.base.next)),
@@ -1356,7 +1375,13 @@ namespace sunshine_streamline {
       }
       loss_context.viewport = out.viewport;
       std::array<abi_v2::resource_tag, tag_limit> copy{};
-      if (count > tag_limit || (count && !read_bytes(tags, copy.data(), count * sizeof(copy[0])))) {
+      // A ResourceTag above version 1 may append fields, so past its first
+      // element the array's stride is unknown: such a multi-tag call is read
+      // as unreadable. One tag, and tags chained in evaluate inputs, are read.
+      const auto stride_unknown = [&] {
+        return count > 1 && same(copy[0].base.type, tag_guid) && copy[0].base.version > 1;
+      };
+      if (count > tag_limit || (count && !read_bytes(tags, copy.data(), count * sizeof(copy[0]))) || stride_unknown()) {
         invalid_observation(loss_diagnostics::reason::invalid_input, __func__, __LINE__);
         // A successful call with an unreadable/unsupported tag array must not
         // leave an older resource looking current for this known viewport.
@@ -1428,6 +1453,7 @@ namespace sunshine_streamline {
             auto &tag = out.tags[index];
             tag.present = true;
             tag.supported = copy.ext == nullptr && copy.type == 0;
+            tag.value.refusal = copy.ext ? tag_refusal::extension : copy.type ? tag_refusal::resource_type : tag_refusal::none;
             tag.value.native_resource = tag.supported ? reinterpret_cast<std::uintptr_t>(copy.native) : 0;
             tag.value.type = canonical_type;
             tag.value.viewport = viewport;
@@ -1505,7 +1531,17 @@ namespace sunshine_streamline {
     // The first failing tag gate, or nullptr when the tag can supply this observation's depth.
     const char *tag_rejection(const evaluation_snapshot &snapshot, const evaluated_depth_tag &tag) {
       if (!tag.present) return "absent";
-      if (!tag.supported) return "unsupported";
+      if (!tag.supported) {
+        switch (tag.value.refusal) {
+          case tag_refusal::unreadable: return "unsupported_unreadable";
+          case tag_refusal::header_version: return "unsupported_header_version";
+          case tag_refusal::extension: return "unsupported_extension";
+          case tag_refusal::precision: return "unsupported_precision";
+          case tag_refusal::resource_type: return "unsupported_resource_type";
+          case tag_refusal::lifecycle: return "unsupported_lifecycle";
+          default: return "unsupported";
+        }
+      }
       if (!buffers::is_depth(tag.value.type)) return "not_depth";
       if (snapshot.tag_boundary && !snapshot.frame_generation_input && tag.value.lifecycle != 0)
         return "lifecycle_outlives_boundary";
@@ -1602,7 +1638,7 @@ namespace sunshine_streamline {
       value.resource = {tag.value.native_resource, tag.value.resource_width, tag.value.resource_height,
         {tag.value.area.left, tag.value.area.top, tag.value.area.width, tag.value.area.height},
         tag.value.type == buffers::high_resolution_depth ? sunshine_scene_depth::resource_kind::display_depth :
-          sunshine_scene_depth::resource_kind::raw_depth};
+          sunshine_scene_depth::resource_kind::raw_depth, tag.value.native_format};
       value.native_state = tag.native_state;
       value.proof = (version_one && tag.native_state == 0) || tag.state_requires_observation ? sunshine_scene_depth::state_proof::observed_nonzero :
         tag.native_state != UINT32_MAX ? sunshine_scene_depth::state_proof::declared : sunshine_scene_depth::state_proof::unavailable;
@@ -1892,6 +1928,7 @@ namespace sunshine_streamline {
       input.source_frame_explicit = tag.source == origin::frame;
       input.resource.native = tag.supported ? tag.value.native_resource : 0;
       input.resource.width = tag.value.resource_width; input.resource.height = tag.value.resource_height;
+      input.resource.native_format = tag.value.native_format;
       input.resource.area = {tag.value.area.left, tag.value.area.top, tag.value.area.width, tag.value.area.height};
       input.native_state = tag.native_state;
       // An undeclared state (UINT_MAX) is no claim: only this recording's
@@ -1915,6 +1952,7 @@ namespace sunshine_streamline {
       where.kind = static_cast<mask::source_kind>(tag.value.type);
       where.source_present_generation = input.source_present_generation;
       where.format = input.source ? retained.format : 0;
+      where.refusal = tag.value.refusal;
       return mask::begin(where, input);
     }
     using alpha_attempts = std::array<sunshine_game3d::ui_mask::attempt, 4>;

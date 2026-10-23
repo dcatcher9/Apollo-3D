@@ -1363,6 +1363,85 @@ namespace {
     require(query_depth_source(snapshot) == evidence_status::untracked_frame, "token reuse retained source nomination");
   }
 
+  // sl_struct.h Option 1: a later structure version only appends fields, so
+  // a ResourceTag, Resource and PrecisionInfo of version 1 or later decode by
+  // their version-1 fields; nativeFormat is read only from a typed Resource.
+  void test_struct_versions() {
+    fixture cleanup;
+    probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+    require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "struct-version install failed");
+    auto view = viewport(5); auto constants = modern_camera(); opaque_token token;
+    int native{};
+    constexpr std::uint64_t poison = ~0ull;
+    struct resource_v2 { abi_v2::resource v1; std::uint64_t tail[4]{poison, poison, poison, poison}; } resource;
+    resource.v1 = modern_resource(&native); resource.v1.native_format = 41; // DXGI_FORMAT_R32_FLOAT
+    struct precision_v2 { tag_precision v1; std::uint64_t tail[2]{poison, poison}; } precision;
+    precision.v1.scale = -.5f; precision.v1.bias = 8.f;
+    struct tag_v2 { abi_v2::resource_tag v1; std::uint64_t tail[2]{poison, poison}; } tag;
+    tag.v1 = depth_tag_for(resource.v1); tag.v1.base.next = &precision.v1;
+    const base_structure *global[]{&view.base};
+    sunshine_scene_depth::frame normalized;
+    evaluation_snapshot snapshot;
+    const auto evaluate = [&] {
+      mint(token, nullptr);
+      call_v2_constants(constants, token.ref(), view);
+      call_v2_tag(view, &tag.v1, 1, nullptr);
+      call_v2_evaluate(0, token.ref(), global, 1, nullptr);
+      return testing::latest_snapshot(view.value, snapshot) && testing::normalized_source(view.value, 0, normalized);
+    };
+    for (const std::uint64_t version : {1ull, 2ull, 7ull}) {
+      resource.v1.base.version = precision.v1.base.version = tag.v1.base.version = version;
+      require(evaluate() && normalized.resource.native == reinterpret_cast<std::uintptr_t>(&native) &&
+          normalized.resource.native_format == 41 && normalized.resource.width == 1920 &&
+          normalized.projection.raw_scale == -.5 && normalized.projection.raw_bias == 8 &&
+          snapshot.tags[0].value.refusal == tag_refusal::none,
+        "a later ResourceTag/Resource/PrecisionInfo version did not decode exactly as version 1");
+    }
+    resource.v1.base.version = precision.v1.base.version = tag.v1.base.version = 1;
+    // The zero-header Resource declares no layout: its nativeFormat reads as 0.
+    resource.v1.base = {nullptr, {}, 0};
+    require(evaluate() && normalized.resource.native_format == 0, "a zero-header Resource's nativeFormat was read");
+    resource.v1.base = {nullptr, resource_guid, 1};
+    const auto refused = [&](tag_refusal expected, const char *message) {
+      require(!evaluate() && snapshot.tags[0].present && !snapshot.tags[0].supported &&
+        snapshot.tags[0].value.refusal == expected && snapshot.tags[0].value.native_format == 0, message);
+    };
+    resource.v1.base.version = 0; refused(tag_refusal::header_version, "a typed Resource of version 0 was accepted");
+    resource.v1.base.version = 1; tag.v1.base.version = 0;
+    refused(tag_refusal::header_version, "a ResourceTag of version 0 was accepted");
+    tag.v1.base.version = 1; precision.v1.base.version = 0;
+    refused(tag_refusal::header_version, "a PrecisionInfo of version 0 was accepted");
+    precision.v1.base.version = 2; precision.v1.formula = 2;
+    refused(tag_refusal::precision, "a PrecisionInfo v2 with an unknown formula was accepted");
+    precision.v1.formula = 1;
+    base_structure unknown{nullptr, {0x12345678, 1, 2, {3, 4, 5, 6, 7, 8, 9, 10}}, 1};
+    tag.v1.base.next = &unknown; refused(tag_refusal::extension, "an unknown chained structure was accepted");
+    tag.v1.base.next = &precision.v1; precision.v1.base.next = &unknown;
+    refused(tag_refusal::extension, "a PrecisionInfo with its own extension was accepted");
+    precision.v1.base.next = nullptr; resource.v1.base.next = &unknown;
+    refused(tag_refusal::extension, "a Resource with an extension was accepted");
+    resource.v1.base.next = nullptr; resource.v1.type = 3;
+    refused(tag_refusal::resource_type, "a buffer resource was accepted as a texture tag");
+    resource.v1.type = 0; tag.v1.lifecycle = 3;
+    refused(tag_refusal::lifecycle, "an unknown lifecycle was accepted");
+    tag.v1.lifecycle = 1;
+    require(evaluate(), "valid versioned tags did not recover");
+    // Past its first element, a later ResourceTag version's array stride is unknown.
+    abi_v2::resource_tag pair[]{tag.v1, tag.v1};
+    pair[1].type = 1; // Motion vectors: a second, unobserved tag.
+    const auto tag_pair = [&](std::uint64_t version) {
+      for (auto &value : pair) value.base.version = version;
+      mint(token, nullptr);
+      call_v2_constants(constants, token.ref(), view);
+      call_v2_tag(view, pair, 2, nullptr);
+      call_v2_evaluate(0, token.ref(), global, 1, nullptr);
+      return testing::latest_snapshot(view.value, snapshot) && testing::normalized_source(view.value, 0, normalized);
+    };
+    require(tag_pair(1), "a version-1 multi-tag array was refused");
+    require(!tag_pair(2) && !snapshot.tags[0].supported,
+      "a multi-tag array of a later ResourceTag version was read at the version-1 stride");
+  }
+
   void test_rr_and_linear_depth_source() {
     fixture cleanup;
     probe_setting = "0"; source_setting = "1"; initialize(nullptr);
@@ -3885,7 +3964,7 @@ namespace {
     };
     resource.base.version = 1; rejected_header(); // Empty GUID with nonzero version.
     resource.base.type.a = 1; rejected_header();
-    resource.base.type = resource_guid; resource.base.version = 2; rejected_header();
+    resource.base.type = resource_guid; resource.base.version = 0; rejected_header();
     resource.base.next = &native; rejected_header();
     resource.type = 3; rejected_header();
     call_v2_constants(constants, token.ref(), view); tag_now();
@@ -4220,6 +4299,8 @@ int main(int argc, char **argv) {
     test_rr_and_linear_depth_source();
     test_mixed_clear_and_linear_depth();
     std::puts("PASS SR/RR linear depth encoding, precision, camera-independent input, lifecycle, FG priority and token reuse");
+    test_struct_versions();
+    std::puts("PASS ResourceTag/Resource/PrecisionInfo of version 1 or later decode by their v1 fields with nativeFormat; refusals name header_version, extension, precision, resource_type and lifecycle; a later tag version's array stride is refused");
     test_source_without_frame_tag_export();
     std::puts("PASS optional frame-tag export preserves global-only production depth, token safety, failure and recovery");
     test_jitter_frame_and_render_domain(false);

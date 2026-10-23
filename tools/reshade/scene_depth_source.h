@@ -52,6 +52,9 @@ namespace sunshine_scene_depth {
     std::uint32_t width{}, height{};
     extent area;
     resource_kind kind{resource_kind::raw_depth};
+    // The provider's declared typed DXGI format of the resource (Streamline
+    // Resource.nativeFormat), or 0 when it declared none.
+    std::uint32_t native_format{};
   };
   struct frame {
     // An adapter observation sequence is not a native presentation number.

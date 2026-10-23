@@ -151,6 +151,12 @@ namespace sunshine_streamline {
   camera_validation validate(const camera_data &value);
   const char *name(validation_status value);
 
+  // Why a Streamline tag was not supported: an unreadable tag or resource, a
+  // structure GUID or version (header_version), an unknown chained structure
+  // (extension), an unsupported PrecisionInfo formula or value, a resource
+  // type other than eTex2d/eUnknown, or a lifecycle above 2.
+  enum class tag_refusal : std::uint8_t { none, unreadable, header_version, extension, precision, resource_type, lifecycle };
+  const char *name(tag_refusal value);
   struct depth_tag {
     std::uintptr_t native_resource{};
     std::uint32_t viewport{}, type{}, lifecycle{0xffffffffu};
@@ -158,6 +164,10 @@ namespace sunshine_streamline {
     std::uint32_t resource_width{}, resource_height{};
     std::uint64_t observation_epoch{}, frame_key{};
     bool explicit_frame{}; // v1 numeric frame, or observer-owned numeric frame mapping; never an opaque address.
+    // Resource.nativeFormat (a DXGI format) of a typed 2.x Resource, whose
+    // every version declares it; 0 for 1.x and a zero-header Resource.
+    std::uint32_t native_format{};
+    tag_refusal refusal{};
   };
   struct camera_key { std::uint32_t viewport{}; std::uint64_t observation_epoch{}, frame_key{}; bool explicit_frame{}; };
   enum class match_status { exact_frame, same_epoch_only, missing_resource, not_depth, wrong_viewport, stale_epoch, wrong_frame, invalid_extent, unsupported_lifecycle };
