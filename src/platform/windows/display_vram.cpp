@@ -714,17 +714,10 @@ namespace platf::dxgi {
             // The export is scaled or fitted into this converter's own packed raster, so the
             // receiver places it for exactly that raster (Game SBS: the export size above; Local
             // AR: its presentation target) and refuses what the resample below could not place.
+            // A returned frame's texture always has the packed size poll() placed for this raster.
             const auto output_width = static_cast<std::uint32_t>(std::lround(sbs_viewport.Width));
             const auto output_height = static_cast<std::uint32_t>(std::lround(sbs_viewport.Height));
             external = reshade_receiver->poll(source_rect, static_cast<int>(output_width), static_cast<int>(output_height));
-            if (external) {
-              // The texture has the size poll() placed; never convert one it would refuse.
-              D3D11_TEXTURE2D_DESC desc {};
-              external->texture->GetDesc(&desc);
-              if (::reshade_bridge::place_output(desc.Width, desc.Height, output_width, output_height).fit == ::reshade_bridge::output_fit::refused) {
-                external.reset();
-              }
-            }
             if (external) {
               game_source = ::video::game_source_identity_t {external->producer_process_id, external->producer_creation_time, external->resource_generation};
             }
