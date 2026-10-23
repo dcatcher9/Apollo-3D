@@ -22,6 +22,11 @@ namespace sunshine_streamline::depth_capture {
     // generation presents earlier frames on another thread meanwhile; such a
     // Present cannot end this call's own lifetime (see source_lifetime_current).
     bool at_tag_call{};
+    // A nomination whose copy is refused is no nomination: no metadata-only
+    // ticket is published, so the source's latest observation is unchanged.
+    // DLSS-G's own evaluation (frame_generation_inputs.h) supplies FG depth
+    // only through recorded copies; a refusal must change nothing.
+    bool pixels_required{};
   };
   struct packet {
     input metadata;

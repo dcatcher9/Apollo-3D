@@ -118,7 +118,8 @@ namespace sunshine_game3d::ui_input {
       base.mask_width = selected.texture.width; base.mask_height = selected.texture.height; base.mask_format = selected.texture.format;
       base.left = selected.texture.area.left; base.top = selected.texture.area.top;
       base.width = selected.texture.area.width; base.height = selected.texture.area.height;
-      base.semantic_contract = origin.kind != ui_mask::source_kind::alpha ||
+      // DLSS-G's named DLSSG.UIAlpha needs no Streamline header range.
+      base.semantic_contract = origin.kind != ui_mask::source_kind::alpha || origin.frame_generation_evaluation ||
         sunshine_streamline::buffers::ui_alpha_authenticated(sunshine_streamline::buffers::active()) ? 1 : 0;
       return base;
     }
@@ -142,6 +143,7 @@ namespace sunshine_game3d::ui_input {
         {"format", copy.format},
         {"available_for_detection", admitted}, {"current_present_pair", paired},
         {"association", origin.kind == ui_mask::source_kind::hudless ? "present_after_tag_inexact" : "latest_submitted_input_approximation"},
+        {"origin", origin.frame_generation_evaluation ? "dlssg_evaluation" : "streamline_tag"},
         {"epoch", source.epoch}, {"observation_revision", source.observation_revision},
         {"sequence", source.sequence}, {"tick_ms", source.tick}, {"age_ms", now >= source.tick ? now - source.tick : 0},
         {"viewport", source.viewport}, {"source_native", source.resource.native}, {"source_command", origin.command},
@@ -288,8 +290,10 @@ namespace sunshine_game3d::ui_input {
       sunshine_streamline::buffers::ui_alpha_authenticated(sunshine_streamline::buffers::active());
     auto hudless_result = hudless_none;
     // The tagged Backbuffer is the game's own final color. Captured in the same
-    // tag batch as HUD-less, it is that image's exact pair on any Present.
-    struct { api::resource_view view{}; std::uint64_t tagged{}, current{}; } backbuffer;
+    // tag batch as HUD-less (ui_mask::same_batch: one Present interval of
+    // Streamline tags, or one DLSS-G evaluation), it is that image's exact
+    // pair on any Present.
+    struct { api::resource_view view{}; std::uint64_t current{}; const ui_mask::boundary *origin{}; } backbuffer;
     const bool capturing = capture_needed(status, runtime->get_device()->get_api());
     // Direct binding (C4): with no dump armed, a candidate is read where it
     // lies (a leased Streamline snapshot, the live layer copy) instead of
@@ -323,7 +327,7 @@ namespace sunshine_game3d::ui_input {
     bool hudless_reoffered_now = false;
     // The tag intervals of the offered UIAlpha and UI color tags (slots 0 and
     // 1), compared with an exact pair's after the loop (A2).
-    struct tag_interval { std::uint64_t tagged{}, current{}; };
+    struct tag_interval { std::uint64_t current{}; const ui_mask::boundary *origin{}; };
     std::array<tag_interval, 2> declared_intervals{};
     const bool fg_active = status.fg_active();
     // One scan of the capture owner per Present: the newest ready snapshot of
@@ -349,7 +353,7 @@ namespace sunshine_game3d::ui_input {
       const auto pairing = ui_mask::pair_hudless_offer(tagged, current, offered_before, fg_active);
       using ui_mask::hudless_present;
       const bool batch = hudless && backbuffer.view.handle &&
-        ui_mask::same_tag_interval(tagged, current, backbuffer.tagged, backbuffer.current);
+        ui_mask::same_batch(selected.origin, current, *backbuffer.origin, backbuffer.current);
       const bool paired = batch || pairing.kind != hudless_present::unpaired;
       if (hudless) hudless_result = batch ? hudless_batch : pairing.kind == hudless_present::next_present ? hudless_real :
         pairing.kind == hudless_present::unpaired ?
@@ -357,8 +361,9 @@ namespace sunshine_game3d::ui_input {
         offered_before ? hudless_reoffered : hudless_late;
       // An unauthenticated UIAlpha tag cannot hide independently usable
       // lower-priority candidates in Auto; an authenticated one is validated on
-      // the GPU. A manual choice may use it.
-      const bool admissible = (manual || kind != ui_mask::source_kind::alpha || alpha_authenticated) && (!hudless || paired);
+      // the GPU, as is DLSS-G's named DLSSG.UIAlpha. A manual choice may use it.
+      const bool admissible = (manual || kind != ui_mask::source_kind::alpha || alpha_authenticated ||
+        selected.origin.frame_generation_evaluation) && (!hudless || paired);
       api::resource_view view{};
       // Direct binding: the leased snapshot itself, at the output's extent
       // (the renderer's slot copy has that extent too), else the copy. A
@@ -391,8 +396,8 @@ namespace sunshine_game3d::ui_input {
         }
       }
       if (!view.handle) continue;
-      if (kind == ui_mask::source_kind::backbuffer) backbuffer = {view, tagged, current};
-      if (slot < declared_intervals.size()) declared_intervals[slot] = {tagged, current};
+      if (kind == ui_mask::source_kind::backbuffer) backbuffer = {view, current, &selected.origin};
+      if (slot < declared_intervals.size()) declared_intervals[slot] = {current, &selected.origin};
       // A manual HUD-less choice captures the Backbuffer only as its pair.
       if (manual && wanted_source == choice::sl_hudless && !hudless) continue;
       if (hudless) {
@@ -421,13 +426,15 @@ namespace sunshine_game3d::ui_input {
     }
     // A2: an exact pair judges a declared tag one way only when that tag was
     // captured in the pair's tag batch (the same-batch Backbuffer's Present
-    // interval). Each kind is the newest ready snapshot of its own, so a tag
-    // of another frame would read moved UI against the pair as contradicted
-    // (E2); the detection pushes the others as unaligned, never judged.
+    // interval, or its DLSS-G evaluation). Each kind is the newest ready
+    // snapshot of its own, so a tag of another frame would read moved UI
+    // against the pair as contradicted (E2); the detection pushes the others
+    // as unaligned, never judged.
     if (result.detection.hudless_exact)
       for (unsigned slot = 0; slot != declared_intervals.size(); ++slot)
-        if (result.detection.masks[slot].handle && !ui_mask::same_tag_interval(declared_intervals[slot].tagged,
-              declared_intervals[slot].current, backbuffer.tagged, backbuffer.current))
+        if (result.detection.masks[slot].handle && (!declared_intervals[slot].origin ||
+              !ui_mask::same_batch(*declared_intervals[slot].origin, declared_intervals[slot].current,
+                *backbuffer.origin, backbuffer.current)))
           result.detection.unaligned_declared |= slot ? ui_detection::candidate::ui_color : ui_detection::candidate::ui_alpha;
     // The game's offscreen UI layer (game3d_ui_layer.h) is a candidate of its
     // own beside any tagged UIColorAndAlpha (E1), in renderer slot 4. Its copy

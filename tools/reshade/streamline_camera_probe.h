@@ -10,6 +10,7 @@
 #include "streamline_depth_content.h"
 #include "native_discard_observer.h"
 #include "streamline_depth_capture.h"
+#include "frame_generation_inputs.h"
 #include "observation_loss_journal.h"
 
 namespace sunshine_streamline {
@@ -202,6 +203,21 @@ namespace sunshine_streamline {
   enum class frame_generation_query_status { unavailable, busy, ambiguous, observed };
   bool query_frame_generation(std::uint32_t viewport, frame_generation_snapshot &output,
     frame_generation_query_status *status = nullptr);
+
+  // DLSS-G's own NGX evaluation of one real frame (frame_generation_inputs.h).
+  // Its inputs belong to the one viewport whose FG options were observed
+  // enabled in the current epoch, under one fresh observation sequence ordered
+  // with every Streamline call. DLSSG.Depth becomes that viewport's FG source
+  // ((1 << 63) | viewport) only through a copy recorded on the evaluation's own
+  // command list in a state observed there; its accepted copies keep the FG
+  // scope live exactly as accepted FG tag copies do
+  // (depth_capture::frame_generation_scope_live). A refusal while the scope is
+  // silent changes nothing; while it is live it withdraws the FG source, as a
+  // refused FG tag boundary does. The UI inputs are offered to the live UI
+  // request as one exact batch (ui_mask::same_batch). Every returned attempt
+  // must finish after the original evaluation.
+  frame_generation::attempt observe_frame_generation_inputs(const frame_generation::inputs &value);
+  void finish_frame_generation_inputs(const frame_generation::attempt &value, bool successful);
 
   struct ui_observation_scope {
     std::uint64_t epoch{}, revision{}, sequence{}, tick{};

@@ -181,6 +181,20 @@ GPU_PROFILE = re.compile(r'\bgpu_profile=(\w+)')
 # fg_owned (since the final add-on review): evaluations that copied nothing while Streamline FG owned depth.
 NGX = re.compile(r'Sunshine NGX depth: .*?evaluations=(\d+) nominations=(\d+) copy_recorded=(\d+) '
                  r'metadata_only=(\d+)(?: fg_owned=(\d+))?')
+# DLSS-G's own NGX evaluation (feature 11) since 10-23: copies of DLSSG.Depth made as FG-scope depth on its own command
+# list, inner frames of multi frame generation skipped, and refusals as reason:count (capture stages such as
+# missing_state: the list observed no state for the depth); its HUD-less/Backbuffer/UI inputs offered to the live UI
+# request and captured. Cumulative over the runtime, like the rest of the line.
+DLSSG = re.compile(r'Sunshine NGX depth: .*?fg_feature=(\d+) dlssg_depth=\{copied=(\d+) inner_frames=(\d+) '
+                   r'refused=([^}]*)\} dlssg_ui=\{offered=(\d+) captured=(\d+) refused=([^}]*)\}')
+# What the most common DLSSG.Depth refusals mean (ngx_depth_source.cpp, frame_generation_inputs.h).
+DLSSG_REFUSAL = {
+    'missing_state': "DLSS-G's command list observed no state for its depth, so no copy is made (fail-safe)",
+    'observer_coverage': "ReShade does not cover DLSS-G's command list",
+    'no_fg_scope': 'Streamline FG options were not observed enabled for one viewport',
+    'absent': 'neither NGX getter read DLSSG.Depth',
+    'tag_copied': 'the Streamline FG tag copied that frame first',
+}
 TIMING = re.compile(r'Sunshine Game 3D timing: presents=(\d+) cpu_ms=\{mean=([0-9.]+) max=([0-9.]+)\}'
                     r'.*?gpu_frames=(\d+)'
                     r' gpu_ms mean/max=\{total=([0-9.]+)/([0-9.]+)')
@@ -798,6 +812,9 @@ class Session:
     teardown: float | None = None  # The last runtime teardown line.
     diagnostics: list[tuple[float, bool]] = field(default_factory=list)  # Each Diagnostics switch line.
     ngx: tuple[int, ...] | None = None
+    # The newest DLSS-G input fields of the NGX line: fg_feature, copied, inner_frames, depth refusals, UI offered,
+    # UI captured, UI refusals.
+    dlssg: tuple[int, int, int, str, int, int, str] | None = None
     display_scaling: list[tuple[float, tuple[int, ...]]] = field(default_factory=list)
     warnings: list[tuple[float, str]] = field(default_factory=list)  # The add-on's own unexpected WARN/ERROR lines.
     other_warnings: list[tuple[float, str]] = field(default_factory=list)  # Everyone else's (OWNED, CORE_ABOUT_ADDON).
@@ -985,6 +1002,9 @@ def parse(lines) -> Session:
             s.statuses.append((t, found.group(2), found.group(1)))
         if found := NGX.search(text):
             s.ngx = tuple(int(v or 0) for v in found.groups())
+        if found := DLSSG.search(text):
+            g = found.groups()
+            s.dlssg = (int(g[0]), int(g[1]), int(g[2]), g[3], int(g[4]), int(g[5]), g[6])
         if found := HITCH.search(text):
             s.hitches.append((t, found.group(1), float(found.group(2))))
         if found := PRESENT_GAP.search(text):
@@ -1283,6 +1303,7 @@ def evaluate(s: Session) -> list[Check]:
         add(Check('WARN', 'NGX depth', f'{s.ngx[0] - s.ngx[4]} DLSS evaluations recorded no depth copy'))
     if s.readiness:
         add(Check('INFO', 'Depth losses', ', '.join(f'{k} {v}' for k, v in s.readiness.most_common())))
+    dlssg_checks(s, add)
     if s.render_sizes:
         # Dynamic resolution keeps depth (since 10-23): a render-size change of one source is no depth gap. Before,
         # each change was a 'depth_shape_changed' loss (Assassin's Creed Shadows with FG on: 125-438 ms, six in 6 s).
@@ -1381,6 +1402,44 @@ def bursts(times: list[float], count: int, span_s: float) -> list[tuple[float, f
         else:
             found.append([a, b])
     return [(a, b, sum(1 for t in times if a <= t <= b)) for a, b in found]
+
+
+def refusal_counts(text: str) -> Counter:
+    """reason:count,... as logged by the NGX line ('none' is empty)."""
+    counts: Counter = Counter()
+    for part in text.split(','):
+        reason, _, count = part.partition(':')
+        if reason and reason != 'none' and count.isdigit():
+            counts[reason] += int(count)
+    return counts
+
+
+def dlssg_checks(s: Session, add) -> None:
+    """DLSS-G's own inputs (10-23): FG-scope depth copies of DLSSG.Depth and its UI inputs, or why there were none."""
+    if not s.dlssg or not s.dlssg[0]:
+        return
+    evaluations, copied, inner, depth_text, offered, captured, ui_text = s.dlssg
+    refused, ui_refused = refusal_counts(depth_text), refusal_counts(ui_text)
+    real = evaluations - inner
+    ui = (f'; UI inputs captured {captured} of {offered}'
+          + (f' (refused {", ".join(f"{k} {v}" for k, v in ui_refused.most_common())})' if ui_refused else '')
+          if offered or ui_refused else '; no UI input offered')
+    if copied:
+        add(Check('INFO', 'DLSS-G inputs', f'DLSSG.Depth supplied {copied} FG-scope depth copies in {real} real-frame '
+                  f'DLSS-G evaluations' + (f' (refused {", ".join(f"{k} {v}" for k, v in refused.most_common())})'
+                                           if refused else '') + ui))
+        return
+    # A Streamline FG tag that copied its frame first keeps precedence: the evaluation then adds nothing.
+    other = Counter({k: v for k, v in refused.items() if k != 'tag_copied'})
+    if refused['tag_copied'] >= sum(other.values()):
+        add(Check('INFO', 'DLSS-G inputs', f'{real} real-frame DLSS-G evaluations; Streamline FG tags supplied the '
+                  'depth' + (f' (refused {", ".join(f"{k} {v}" for k, v in other.most_common())})' if other else '')
+                  + ui))
+        return
+    reason = other.most_common(1)[0][0]
+    add(Check('WARN', 'DLSS-G inputs', f'no DLSSG.Depth copy in {real} real-frame DLSS-G evaluations: '
+              + ', '.join(f'{k} {v}' for k, v in refused.most_common())
+              + (f' ({DLSSG_REFUSAL[reason]})' if reason in DLSSG_REFUSAL else '') + ui))
 
 
 def export_checks(s: Session, add) -> None:

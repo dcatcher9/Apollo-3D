@@ -1989,8 +1989,8 @@ namespace sunshine_streamline::depth_capture {
     }
     const auto reject = [&](status result, record_stage stage) -> std::uint64_t {
       if (diagnostic) { diagnostic->result = result; diagnostic->stage = stage; }
-      if (!preservation_only) set_attempt(value.provider, result);
-      if (nominate_source && valid_nomination) {
+      if (!preservation_only && !value.pixels_required) set_attempt(value.provider, result);
+      if (nominate_source && valid_nomination && !value.pixels_required) {
         // Pixel capability must not determine source authority. This carries
         // the validated source through original evaluation completion and real
         // submission without fabricating an owned copy or another source.

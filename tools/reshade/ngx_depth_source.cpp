@@ -9,11 +9,13 @@
 #endif
 #include <reshade.hpp>
 #include "async_log.h"
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <string>
 
 namespace sunshine_ngx {
   namespace {
@@ -77,6 +79,97 @@ namespace sunshine_ngx {
     };
     std::array<feature_count, 4> missing_by_feature;
     std::atomic<std::uint64_t> missing_other_feature{};
+    // DLSS-G's own inputs (frame_generation_inputs.h): inner frames of multi
+    // frame generation skipped, DLSSG.Depth outcomes (capture refusals by the
+    // capture owner's stage), and the UI inputs offered, captured and refused
+    // (by outcome, ui_mask begin stage or native record stage).
+    namespace fg_inputs = sunshine_streamline::frame_generation;
+    constexpr std::size_t record_stage_slots = 40;
+    std::atomic<std::uint64_t> dlssg_inner_frames{}, dlssg_ui_offered{}, dlssg_ui_captured{};
+    std::array<std::atomic<std::uint64_t>, 10> dlssg_depth{};
+    std::array<std::atomic<std::uint64_t>, record_stage_slots> dlssg_depth_stage{};
+    std::array<std::atomic<std::uint64_t>, 6> dlssg_ui{};
+    std::array<std::atomic<std::uint64_t>, std::size_t(sunshine_game3d::ui_mask::begin_stage::count)> dlssg_ui_begin{};
+    std::array<std::atomic<std::uint64_t>, record_stage_slots> dlssg_ui_record{};
+    void reset_frame_generation_counters() {
+      dlssg_inner_frames = dlssg_ui_offered = dlssg_ui_captured = 0;
+      for (auto &value : dlssg_depth) value = 0;
+      for (auto &value : dlssg_depth_stage) value = 0;
+      for (auto &value : dlssg_ui) value = 0;
+      for (auto &value : dlssg_ui_begin) value = 0;
+      for (auto &value : dlssg_ui_record) value = 0;
+    }
+    void count_frame_generation(const fg_inputs::attempt &value) {
+      using sunshine_game3d::ui_mask::begin_stage;
+      ++dlssg_depth[std::min<std::size_t>(std::size_t(value.depth), dlssg_depth.size() - 1)];
+      if (value.depth == fg_inputs::depth_outcome::capture)
+        ++dlssg_depth_stage[std::min<std::size_t>(std::size_t(value.depth_stage), record_stage_slots - 1)];
+      for (unsigned i = 0; i != value.ui.size(); ++i) {
+        const auto result = value.ui_result[i];
+        ++dlssg_ui[std::min<std::size_t>(std::size_t(result), dlssg_ui.size() - 1)];
+        if (result != fg_inputs::ui_outcome::offered) continue;
+        const auto &attempt = value.ui[i];
+        ++dlssg_ui_offered;
+        if (attempt.ticket) ++dlssg_ui_captured;
+        else if (attempt.refusal != begin_stage::none)
+          ++dlssg_ui_begin[std::min<std::size_t>(std::size_t(attempt.refusal), dlssg_ui_begin.size() - 1)];
+        else ++dlssg_ui_record[std::min<std::size_t>(std::size_t(attempt.record), record_stage_slots - 1)];
+      }
+    }
+    void append_stage(std::string &out, sunshine_streamline::depth_capture::record_stage stage, std::uint64_t count) {
+      char text[96]{};
+#ifdef SUNSHINE_UPSCALER_TRACE_TEST
+      // The call-trace build links no capture owner (and so no stage names).
+      std::snprintf(text, sizeof(text), "%sstage%u:%llu", out.empty() ? "" : ",", unsigned(stage),
+        static_cast<unsigned long long>(count));
+#else
+      std::snprintf(text, sizeof(text), "%s%s:%llu", out.empty() ? "" : ",",
+        sunshine_streamline::depth_capture::name(stage), static_cast<unsigned long long>(count));
+#endif
+      out += text;
+    }
+    void append_count(std::string &out, const char *name, std::uint64_t count) {
+      char text[96]{};
+      std::snprintf(text, sizeof(text), "%s%s:%llu", out.empty() ? "" : ",", name, static_cast<unsigned long long>(count));
+      out += text;
+    }
+    // dlssg_depth={copied=N inner_frames=N refused=<reason:count,...|none>}
+    // dlssg_ui={offered=N captured=N refused=<reason:count,...|none>}. Absent
+    // UI keys (optional in DLSS-G) are not refusals; an absent DLSSG.Depth is.
+    std::string frame_generation_fields() {
+      using sunshine_streamline::depth_capture::record_stage;
+      std::string depth, ui;
+      for (std::size_t i = 0; i != dlssg_depth.size(); ++i) {
+        const auto outcome = fg_inputs::depth_outcome(i);
+        const auto count = dlssg_depth[i].load(std::memory_order_relaxed);
+        if (!count || outcome == fg_inputs::depth_outcome::copied || outcome == fg_inputs::depth_outcome::not_offered ||
+            outcome == fg_inputs::depth_outcome::capture) continue;
+        append_count(depth, fg_inputs::name(outcome), count);
+      }
+      for (std::size_t i = 0; i != record_stage_slots; ++i)
+        if (const auto count = dlssg_depth_stage[i].load(std::memory_order_relaxed)) append_stage(depth, record_stage(i), count);
+      // ui_outcome order; absent and offered are no refusals.
+      constexpr const char *ui_names[]{"absent", "null", "subrect", "no_fg_scope", "no_request", "offered"};
+      for (std::size_t i = 1; i + 1 < dlssg_ui.size(); ++i)
+        if (const auto count = dlssg_ui[i].load(std::memory_order_relaxed)) append_count(ui, ui_names[i], count);
+      for (std::size_t i = 1; i != dlssg_ui_begin.size(); ++i)
+        if (const auto count = dlssg_ui_begin[i].load(std::memory_order_relaxed))
+          append_count(ui, sunshine_game3d::ui_mask::begin_stage_names[i].data(), count);
+      for (std::size_t i = 0; i != record_stage_slots; ++i)
+        if (const auto count = dlssg_ui_record[i].load(std::memory_order_relaxed)) append_stage(ui, record_stage(i), count);
+      char text[256]{};
+      std::snprintf(text, sizeof(text), "dlssg_depth={copied=%llu inner_frames=%llu refused=",
+        static_cast<unsigned long long>(dlssg_depth[std::size_t(fg_inputs::depth_outcome::copied)].load()),
+        static_cast<unsigned long long>(dlssg_inner_frames.load()));
+      std::string out = text;
+      out += depth.empty() ? "none" : depth;
+      std::snprintf(text, sizeof(text), "} dlssg_ui={offered=%llu captured=%llu refused=",
+        static_cast<unsigned long long>(dlssg_ui_offered.load()), static_cast<unsigned long long>(dlssg_ui_captured.load()));
+      out += text;
+      out += ui.empty() ? "none" : ui;
+      out += "}";
+      return out;
+    }
     void count_missing_parameters(std::uint32_t feature) {
       ++missing_parameters;
       for (auto &entry : missing_by_feature) {
@@ -275,6 +368,41 @@ namespace sunshine_ngx {
       if ((!have_x && !have_y) || (zero_unset && have_x && have_y && !x && !y)) { x = default_x; y = default_y; return true; }
       return have_x && have_y;
     }
+    // One DLSS-G resource input: the D3D12 resource getter, then the
+    // void-pointer getter (DLSS-G may store its inputs as void *), with its own
+    // subrectangle (prefix + BaseX/BaseY/Width/Height). Every subrect key absent,
+    // or all four zero, is the whole allocation; a partial or malformed one is
+    // invalid. A pointer is an identity only until the capture owner retains it.
+    fg_inputs::resource_input read_frame_generation_resource(const parameter_api &api, const void *parameters,
+        const char *key, const char *subrect) {
+      fg_inputs::resource_input out;
+      void *pointer{};
+      bool read = api.resource && success(api.resource(const_cast<void *>(parameters), key, &pointer));
+      if (!read) {
+        pointer = nullptr;
+        read = api.void_pointer && success(api.void_pointer(const_cast<void *>(parameters), key, &pointer));
+      }
+      if (!read) return out;
+      out.state = pointer ? fg_inputs::parameter::present : fg_inputs::parameter::null;
+      out.native = reinterpret_cast<std::uint64_t>(pointer);
+      std::array<unsigned, 4> values{};
+      unsigned present = 0;
+      const char *suffixes[]{"BaseX", "BaseY", "Width", "Height"};
+      for (unsigned i = 0; i != values.size(); ++i) {
+        char name[96]{};
+        std::snprintf(name, sizeof(name), "%s%s", subrect, suffixes[i]);
+        if (get_uint(api, parameters, name, values[i])) ++present;
+        else values[i] = 0;
+      }
+      if (!present || (present == 4 && !values[0] && !values[1] && !values[2] && !values[3])) return out;
+      if (present != 4 || !valid_dimension(values[2]) || !valid_dimension(values[3]) ||
+          values[0] >= 16384 || values[1] >= 16384) {
+        out.area_valid = false;
+        return out;
+      }
+      out.area = {values[0], values[1], values[2], values[3]};
+      return out;
+    }
     feature *find_feature(HMODULE owner, const void *handle, bool create) {
       feature *empty = nullptr;
       for (auto &value : features) {
@@ -320,6 +448,7 @@ namespace sunshine_ngx {
     ReleaseSRWLockExclusive(&calibration_lock);
     evaluations = nominations = copy_recorded = metadata_only = unknown = missing_parameters = failed = feature_overflow = recovered = 0;
     fg_owned = fg_feature = missing_other_feature = 0;
+    reset_frame_generation_counters();
     for (auto &entry : missing_by_feature) { entry.feature = UINT32_MAX; entry.count = 0; }
     next_report = 0;
     rejected_captures = 0;
@@ -469,12 +598,36 @@ namespace sunshine_ngx {
     }
     if (!selected.handle || selected.parameters.epoch != attempt.epoch)
       selected = recover_feature(owner, handle, api, parameters, attempt.epoch, selected_slot);
-    // DLSS-G is a known feature with no SR Depth input to miss: its depth is
-    // DLSSG.Depth, which an armed dump probes (diagnostic only; no source).
+    // DLSS-G is a known feature with no SR Depth input to miss. Its own
+    // inputs (DLSSG.Depth, Backbuffer, HUDLess, UI, UIAlpha) supply its
+    // Streamline FG scope, once per real frame (frame_generation_inputs.h).
     if (selected.handle && selected.parameters.epoch == attempt.epoch &&
         selected.parameters.feature == frame_generation_feature) {
       ++fg_feature;
       if (diagnostic_session) observe_without_capture(selected, false);
+      // MultiFrameIndex is 1-based (1..MultiFrameCount, nvsdk_ngx_defs_dlssg.h):
+      // a later inner frame of multi frame generation evaluates the same real
+      // frame's inputs again. An absent index is one evaluation per frame.
+      unsigned inner{};
+      if (get_uint(api, parameters, "DLSSG.MultiFrameIndex", inner) && inner > 1) {
+        ++dlssg_inner_frames;
+        return attempt;
+      }
+      fg_inputs::inputs inputs;
+      inputs.command = command;
+      inputs.depth = read_frame_generation_resource(api, parameters, "DLSSG.Depth", "DLSSG.DepthSubrect");
+      unsigned inverted{};
+      if (get_uint(api, parameters, "DLSSG.DepthInverted", inverted) && inverted <= 1) {
+        inputs.inverted_known = true; inputs.inverted = inverted != 0;
+      }
+      for (unsigned i = 0; i != inputs.ui.size(); ++i)
+        inputs.ui[i] = read_frame_generation_resource(api, parameters, fg_inputs::ui_keys[i], fg_inputs::ui_subrects[i]);
+#ifdef SUNSHINE_UPSCALER_TRACE_TEST
+      if (backend.frame_generation) attempt.frame_generation = backend.frame_generation(inputs);
+#else
+      attempt.frame_generation = sunshine_streamline::observe_frame_generation_inputs(inputs);
+#endif
+      count_frame_generation(attempt.frame_generation);
       return attempt;
     }
     if (!selected.handle || selected.parameters.epoch != attempt.epoch || !selected.parameters.valid) {
@@ -641,6 +794,11 @@ namespace sunshine_ngx {
     if (value.diagnostic_observation.session)
       sunshine_game3d::diagnostic::finish_ngx(value.diagnostic_observation, value.source_id, successful,
         value.capture_suppressed_by_depth_owner);
+#ifdef SUNSHINE_UPSCALER_TRACE_TEST
+    if (backend.finish_frame_generation) backend.finish_frame_generation(value.frame_generation, successful);
+#else
+    sunshine_streamline::finish_frame_generation_inputs(value.frame_generation, successful);
+#endif
     if (!value.observed) return;
     bool current = false;
     // Blocking: a try-lock would fail under another thread's evaluation
@@ -703,16 +861,17 @@ namespace sunshine_ngx {
     }
     if (const auto other = missing_other_feature.load(); other && used < sizeof(by_feature))
       std::snprintf(by_feature + used, sizeof(by_feature) - used, "%sother:%llu", used ? "," : "", static_cast<unsigned long long>(other));
-    char message[640]{};
+    const auto fg_fields = frame_generation_fields();
+    char message[1600]{};
     std::snprintf(message, sizeof(message),
-      "Sunshine NGX depth: confirmed_features=%u capture_eligible=%u recovered_features=%llu evaluations=%llu nominations=%llu copy_recorded=%llu metadata_only=%llu fg_owned=%llu unknown_feature=%llu missing_parameters=%llu missing_by_feature=%s fg_feature=%llu failed=%llu feature_capacity_loss=%llu; D3D12 NGX, named parameter exports, shared copy owner; fg_owned evaluations copied nothing while Streamline FG owned depth; fg_feature counts DLSS-G (feature 11) evaluations, whose depth is DLSSG.Depth and never a source; recorded work is not completed pixels",
+      "Sunshine NGX depth: confirmed_features=%u capture_eligible=%u recovered_features=%llu evaluations=%llu nominations=%llu copy_recorded=%llu metadata_only=%llu fg_owned=%llu unknown_feature=%llu missing_parameters=%llu missing_by_feature=%s fg_feature=%llu %s failed=%llu feature_capacity_loss=%llu; D3D12 NGX, named parameter exports, shared copy owner; fg_owned evaluations copied nothing while Streamline FG owned depth; fg_feature counts DLSS-G (feature 11) evaluations, whose DLSSG.Depth supplies the Streamline FG scope only through copies made on the evaluation's own command list in a state observed there; recorded work is not completed pixels",
       count, capture_eligible, static_cast<unsigned long long>(recovered.load()),
       static_cast<unsigned long long>(evaluations.load()), static_cast<unsigned long long>(nominations.load()),
       static_cast<unsigned long long>(copy_recorded.load()), static_cast<unsigned long long>(metadata_only.load()),
       static_cast<unsigned long long>(fg_owned.load()),
       static_cast<unsigned long long>(unknown.load()), static_cast<unsigned long long>(missing_parameters.load()),
       used || missing_other_feature.load() ? by_feature : "none", static_cast<unsigned long long>(fg_feature.load()),
-      static_cast<unsigned long long>(failed.load()), static_cast<unsigned long long>(feature_overflow.load()));
+      fg_fields.c_str(), static_cast<unsigned long long>(failed.load()), static_cast<unsigned long long>(feature_overflow.load()));
     sunshine_log::message(reshade::log::level::info, message);
 #ifndef SUNSHINE_UPSCALER_TRACE_TEST
     const auto rejected_count = rejected_captures.load(std::memory_order_relaxed);

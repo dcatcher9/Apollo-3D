@@ -108,7 +108,9 @@ namespace sunshine_game3d::ui_mask {
   struct boundary {
     sunshine_scene_depth::frame source;
     std::uint64_t command{};
-    std::uint32_t tag_scope{}; // 0 global, 1 explicit frame; never inferred from Present.
+    // 0 global, 1 explicit frame, 2 DLSS-G's own NGX evaluation; never
+    // inferred from Present.
+    std::uint32_t tag_scope{};
     source_kind kind = source_kind::backbuffer;
     std::uint64_t source_present_generation{}; // Captured at this exact tag entry.
     // The tagged resource's DXGI format (depth_capture::retain_source; 0
@@ -119,6 +121,13 @@ namespace sunshine_game3d::ui_mask {
     std::uint32_t format{};
     // An unsupported tag's cause, which names begin()'s refusal stage.
     sunshine_streamline::tag_refusal refusal{};
+    // Read from DLSS-G's own NGX evaluation (feature 11: DLSSG.Backbuffer,
+    // HUDLess, UI, UIAlpha), not from a Streamline tag. Its sequence is that
+    // evaluation's, shared by all of its inputs. Each origin revokes only its
+    // own snapshots: Assassin's Creed Shadows (10-23) tags its HUD-less and
+    // Backbuffer without a command list on every frame, refused as shape,
+    // which must not erase the copies DLSS-G's evaluation recorded.
+    bool frame_generation_evaluation{};
   };
   // The presented color a HUD-less image is compared with when no same-batch
   // Backbuffer was tagged with it. Without frame generation every offer of a
@@ -223,6 +232,17 @@ namespace sunshine_game3d::ui_mask {
       return tagged && tagged != UINT64_MAX && current >= tagged;
     };
     return valid(tagged_a, current_a) && valid(tagged_b, current_b) && current_a - tagged_a == current_b - tagged_b;
+  }
+  // An exact pair (UI framework E2): two snapshots of one tag batch, Streamline
+  // tags of one Present interval (same_tag_interval), or DLSS-G inputs of one
+  // NGX evaluation (its single sequence and epoch, captured at one call). An
+  // input of DLSS-G's evaluation never pairs exactly with a Streamline tag.
+  inline bool same_batch(const boundary &a, std::uint64_t current_a, const boundary &b, std::uint64_t current_b) {
+    if (a.frame_generation_evaluation != b.frame_generation_evaluation) return false;
+    if (a.frame_generation_evaluation &&
+        (!a.source.sequence || a.source.sequence != b.source.sequence || a.source.epoch != b.source.epoch))
+      return false;
+    return same_tag_interval(a.source_present_generation, current_a, b.source_present_generation, current_b);
   }
   struct selection {
     sunshine_streamline::depth_capture::diagnostic_ticket ticket;
@@ -334,7 +354,8 @@ namespace sunshine_game3d::ui_mask {
   // Streamline adapter boundary. No source reference is obtained when no live
   // request matches. Every begin attempt must finish after the original SDK call,
   // even if native recording had no free slot. Null/invalid tags (a resource of
-  // another shape or an unreadable format included) revoke that kind;
+  // another shape or an unreadable format included) revoke that kind's
+  // snapshots of the same origin (a Streamline tag or DLSS-G's evaluation);
   // dedicated alpha, UI color and backbuffer remain distinct semantic sources.
   // now_ms is the tag's entry tick; only requests refreshed within
   // maximum_source_age_ms of it count.
@@ -345,6 +366,14 @@ namespace sunshine_game3d::ui_mask {
     std::uint64_t runtime{}, generation{}, sequence{}, reservation{};
     sunshine_streamline::depth_capture::diagnostic_ticket ticket;
     source_kind kind = source_kind::backbuffer;
+    // Where begin() stopped without a copy attempt (none when it attempted
+    // one), and, for an attempt, the native record's stage (recorded when it
+    // returned a ticket). Diagnostics only.
+    begin_stage refusal{};
+    sunshine_streamline::depth_capture::record_stage record{};
+    // The snapshot's origin (boundary::frame_generation_evaluation): a failed
+    // SDK call revokes only its own origin's inputs.
+    bool frame_generation_evaluation{};
   };
   attempt begin(const boundary &where, const sunshine_streamline::depth_capture::input &input);
   void finish(const attempt &value, bool successful);

@@ -42,6 +42,67 @@ namespace {
   }
 }
 
+// DLSS-G's NGX entry points (feature 11 only), exported by this game process
+// as a game-side SDK snippet exports them, so production module discovery
+// hooks them. They report the named DLSSG.* inputs only; no capture, state,
+// readiness or pixels are injected.
+namespace dlssg_fixture {
+  constexpr std::uint32_t success = 1, failure = 0xbad00001u;
+  struct parameters {
+    ID3D12Resource *depth{}, *hudless{}, *backbuffer{};
+    sunshine_streamline::extent depth_area;
+    unsigned inverted{1};
+  };
+  std::array<unsigned, 4> handles{};
+  unsigned created{}, evaluated{}, released{};
+}
+#if defined(_MSC_VER)
+#define DLSSG_FIXTURE_EXPORT extern "C" __declspec(dllexport) __declspec(noinline)
+#else
+#define DLSSG_FIXTURE_EXPORT extern "C" __declspec(dllexport) __attribute__((noinline,noipa))
+#endif
+DLSSG_FIXTURE_EXPORT std::uint32_t __cdecl NVSDK_NGX_D3D12_CreateFeature(
+    void *commands, std::uint32_t feature, void *parameters, void **handle) {
+  if (!commands || feature != 11 || !parameters || !handle || dlssg_fixture::created >= dlssg_fixture::handles.size())
+    return dlssg_fixture::failure;
+  *handle = &dlssg_fixture::handles[dlssg_fixture::created++];
+  return dlssg_fixture::success;
+}
+DLSSG_FIXTURE_EXPORT std::uint32_t __cdecl NVSDK_NGX_D3D12_EvaluateFeature(
+    void *commands, const void *handle, const void *parameters, void (__cdecl *)(float, bool &)) {
+  ++dlssg_fixture::evaluated;
+  return commands && handle && parameters ? dlssg_fixture::success : dlssg_fixture::failure;
+}
+DLSSG_FIXTURE_EXPORT std::uint32_t __cdecl NVSDK_NGX_D3D12_ReleaseFeature(void *handle) {
+  ++dlssg_fixture::released;
+  return handle ? dlssg_fixture::success : dlssg_fixture::failure;
+}
+DLSSG_FIXTURE_EXPORT std::uint32_t __cdecl NVSDK_NGX_Parameter_GetI(const void *, const char *, int *) {
+  return dlssg_fixture::failure;
+}
+DLSSG_FIXTURE_EXPORT std::uint32_t __cdecl NVSDK_NGX_Parameter_GetUI(const void *parameters, const char *name, unsigned *out) {
+  if (!parameters || !name || !out) return dlssg_fixture::failure;
+  const auto &value = *static_cast<const dlssg_fixture::parameters *>(parameters);
+  if (!std::strcmp(name, "DLSSG.DepthInverted")) *out = value.inverted;
+  else if (!std::strcmp(name, "DLSSG.MultiFrameIndex") || !std::strcmp(name, "DLSSG.MultiFrameCount")) *out = 1;
+  else if (!std::strcmp(name, "DLSSG.DepthSubrectBaseX")) *out = value.depth_area.left;
+  else if (!std::strcmp(name, "DLSSG.DepthSubrectBaseY")) *out = value.depth_area.top;
+  else if (!std::strcmp(name, "DLSSG.DepthSubrectWidth")) *out = value.depth_area.width;
+  else if (!std::strcmp(name, "DLSSG.DepthSubrectHeight")) *out = value.depth_area.height;
+  else return dlssg_fixture::failure;
+  return dlssg_fixture::success;
+}
+DLSSG_FIXTURE_EXPORT std::uint32_t __cdecl NVSDK_NGX_Parameter_GetD3d12Resource(
+    const void *parameters, const char *name, ID3D12Resource **out) {
+  if (!parameters || !name || !out) return dlssg_fixture::failure;
+  const auto &value = *static_cast<const dlssg_fixture::parameters *>(parameters);
+  if (!std::strcmp(name, "DLSSG.Depth")) *out = value.depth;
+  else if (!std::strcmp(name, "DLSSG.HUDLess")) *out = value.hudless;
+  else if (!std::strcmp(name, "DLSSG.Backbuffer")) *out = value.backbuffer;
+  else return dlssg_fixture::failure;
+  return dlssg_fixture::success;
+}
+
 namespace {
   struct native_provider_fixture : direct_fixture {
     using automatic_t = BOOL (*)(api::effect_runtime *, unsigned *);
@@ -128,6 +189,24 @@ namespace {
         if (std::all_of(parts.begin(), parts.end(), [&](const char *part) { return line.find(part) != std::string::npos; }))
           ++count;
       return count;
+    }
+    // Whether a line of the isolated runtime's ReShade.log containing
+    // line_part has a number above minimum right after field, presenting the
+    // current scenario for at most wait_ms while waiting (bounded lines).
+    bool reshade_log_number_above(const char *line_part, const char *field, std::uint64_t minimum,
+        std::uint64_t wait_ms = 7000) {
+      const auto until = GetTickCount64() + wait_ms;
+      do {
+        std::ifstream file(runtime_directory / "ReShade.log", std::ios::binary);
+        for (std::string line; std::getline(file, line);) {
+          if (line.find(line_part) == std::string::npos) continue;
+          const auto at = line.find(field);
+          if (at != std::string::npos && std::strtoull(line.c_str() + at + std::strlen(field), nullptr, 10) > minimum)
+            return true;
+        }
+        step(); no_effects();
+      } while (GetTickCount64() < until);
+      return false;
     }
     static bool same_scale(float a, float b) {
       return std::isfinite(a) && std::isfinite(b) && std::abs(a-b) <= std::max(1.f,std::abs(b))*1e-5f;
@@ -1990,6 +2069,124 @@ namespace {
       }
       require(reshade_log_contains({"Sunshine Streamline frame generation depth scope: live viewport=0"}),
         "The FG scope's return to live was not logged");
+
+      // DLSS-G's own NGX evaluation (feature 11) of each real frame, as in
+      // Assassin's Creed Shadows (10-23): the game tags FG depth and HUD-less
+      // without a command list (refused), its SR evaluation tags its own
+      // depth, and DLSS-G evaluates DLSSG.Depth (with DLSSG.DepthInverted and
+      // DLSSG.DepthSubrect*), DLSSG.HUDLess and DLSSG.Backbuffer on its own
+      // command list. Copies are made only in a state observed on that list.
+      // Without one every copy is refused, counted, and nothing changes: the
+      // silent scope keeps SR depth. With one, DLSSG.Depth is the FG source
+      // (its accepted copies keep the scope live, so SR stays out and the
+      // command-less tag withdraws nothing), generated Presents hold it, and
+      // its HUD-less/Backbuffer pair reaches UI detection as one exact batch.
+      {
+        const auto exe = GetModuleHandleW(nullptr);
+        const auto ngx_create = reinterpret_cast<decltype(&NVSDK_NGX_D3D12_CreateFeature)>(
+          GetProcAddress(exe, "NVSDK_NGX_D3D12_CreateFeature"));
+        const auto ngx_evaluate = reinterpret_cast<decltype(&NVSDK_NGX_D3D12_EvaluateFeature)>(
+          GetProcAddress(exe, "NVSDK_NGX_D3D12_EvaluateFeature"));
+        const auto ngx_release = reinterpret_cast<decltype(&NVSDK_NGX_D3D12_ReleaseFeature)>(
+          GetProcAddress(exe, "NVSDK_NGX_D3D12_ReleaseFeature"));
+        require(ngx_create && ngx_evaluate && ngx_release, "DLSS-G fixture lacks its exported NGX entry points");
+        auto color = backbuffers[0]->GetDesc();
+        color.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        const auto heap = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
+        com_ptr<ID3D12Resource> hudless, backbuffer;
+        checked(game->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &color, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE,
+          nullptr, IID_PPV_ARGS(hudless.put())), "Create the DLSS-G HUD-less input");
+        checked(game->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &color, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE,
+          nullptr, IID_PPV_ARGS(backbuffer.put())), "Create the DLSS-G Backbuffer input");
+        dlssg_fixture::parameters inputs;
+        inputs.depth = selected->resource.p; inputs.hudless = hudless.p; inputs.backbuffer = backbuffer.p;
+        void *feature{};
+        bool observed_state = false, tag_commands = false;
+        const auto evaluations_before = dlssg_fixture::evaluated;
+        const auto dlssg_frame = [&] {
+          fallback_frame(tag_commands, true);
+          auto *list = reinterpret_cast<ID3D12GraphicsCommandList *>(game_native_command);
+          abi_v2::resource hudless_resource{}; hudless_resource.base = {nullptr, resource_guid, 1};
+          hudless_resource.type = 8; hudless_resource.native = hudless.p;
+          hudless_resource.state = unsigned(D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+          hudless_resource.width = width; hudless_resource.height = height;
+          hudless_resource.native_format = unsigned(color.Format); hudless_resource.mip_levels = hudless_resource.array_layers = 1;
+          const abi_v2::resource_tag hudless_tag{{nullptr, tag_guid, 1}, &hudless_resource, 2, 1, {0, 0, width, height}};
+          require(global_tag_call(viewport, &hudless_tag, 1, nullptr) == 0, "Command-less HUD-less tag changed the SDK result");
+          if (!feature)
+            require(ngx_create(list, 11, &inputs, &feature) == dlssg_fixture::success && feature, "DLSS-G feature creation failed");
+          require(selected->state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "DLSS-G fixture depth left its UAV state");
+          inputs.depth_area = active_area;
+          // DLSS-G's recording transitions its inputs, as Streamline's DLSS-G
+          // plugin does; without that no state is observed on it.
+          constexpr auto read = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+          if (observed_state) {
+            transition(list, selected->resource.p, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, read);
+            transition(list, hudless.p, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, read);
+            transition(list, backbuffer.p, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, read);
+          }
+          require(ngx_evaluate(list, feature, &inputs, nullptr) == dlssg_fixture::success,
+            "DLSS-G evaluation observation changed the SDK result");
+          if (observed_state) {
+            transition(list, selected->resource.p, read, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            transition(list, hudless.p, read, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+            transition(list, backbuffer.p, read, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+          }
+        };
+        render_tracked_depth = dlssg_frame;
+        settle_route("DLSSG-unobserved-state-SR-depth", false);
+        for (unsigned frame = 0; frame < 30; ++frame) {
+          step(); no_effects(); const auto s = inspect();
+          require(active(s) && !s.source.reused_depth && !s.source.frame_generation_input,
+            "DLSS-G depth without an observed state changed the viewport's SR depth");
+        }
+        require(reshade_log_contains({"Sunshine NGX depth:", "dlssg_depth={copied=0 inner_frames=0 refused=missing_state:"}),
+          "Refused DLSS-G depth copies were not counted by their missing_state reason");
+        require(!reshade_log_number_above("Sunshine UI capture gate:", "hudless_presents={batch=", 0, 0),
+          "A same-batch HUD-less pair was counted before DLSS-G's inputs were observed");
+        observed_state = true;
+        settle_route("DLSSG-evaluation-owns-FG-depth", true);
+        for (unsigned pair = 0; pair < 6; ++pair) {
+          render_tracked_depth = dlssg_frame;
+          step(); no_effects(); const auto real = inspect();
+          require(active(real) && !real.source.reused_depth && real.source.frame_generation_input,
+            "A real Present lost DLSS-G's FG depth or let SR depth compete with it");
+          render_tracked_depth = {};
+          step(); no_effects(); const auto generated = inspect();
+          if (!pair) log_status("DLSSG-evaluation-generated-hold", generated);
+          require(active(generated) && generated.source.reused_depth && generated.source.frame_generation_input &&
+              generated.source.current.capture == real.source.current.capture && same_scale(generated.scale, real.scale),
+            "A generated Present did not hold its real frame's DLSS-G depth");
+        }
+        render_tracked_depth = dlssg_frame;
+        require(reshade_log_contains({"Sunshine Streamline FG depth refused: reason=boundary_without_commands", "fg_scope=live",
+            "withdrawn=0", "dlssg_supplied=1"}),
+          "A command-less FG tag withdrew the FG source DLSS-G's evaluation supplies");
+        require(reshade_log_number_above("Sunshine NGX depth:", "dlssg_depth={copied=", 0),
+          "Accepted DLSS-G depth copies were not counted");
+        require(reshade_log_number_above("Sunshine NGX depth:", "dlssg_ui={offered=", 0) &&
+            reshade_log_number_above("Sunshine NGX depth:", " captured=", 0),
+          "DLSS-G's HUD-less and Backbuffer were not captured for UI detection");
+        require(reshade_log_number_above("Sunshine UI capture gate:", "hudless_presents={batch=", 0, 12000),
+          "DLSS-G's HUD-less image did not reach UI detection with its same-evaluation Backbuffer as an exact pair");
+        // An FG tag with a command list copies the frame first and keeps
+        // precedence: the evaluation adds no second copy (tag_copied).
+        tag_commands = true;
+        settle_route("DLSSG-evaluation-behind-FG-tag-copies", true);
+        require(reshade_log_contains({"Sunshine NGX depth:", "dlssg_depth={copied=", "tag_copied:"}),
+          "DLSS-G's evaluation copied a frame its Streamline FG tag had already copied");
+        tag_commands = false;
+        // Refused again: the scope falls silent and SR depth returns.
+        observed_state = false;
+        settle_route("DLSSG-refused-again-SR-depth", false);
+        require(ngx_release(feature) == dlssg_fixture::success && dlssg_fixture::evaluated > evaluations_before,
+          "DLSS-G fixture release failed or its evaluations never ran");
+        // Accepted FG tag copies own the viewport again, as before this case.
+        render_tracked_depth = [&] { fallback_frame(true, true); };
+        settle_route("DLSSG-case-done-FG-tags-own-again", true);
+        evidence << "dlssg-evaluation unobserved=SR observed=FG-owned generated=held ui=exact-batch\n";
+        std::puts("PASS native DLSS-G evaluation: DLSSG.Depth without an observed state is refused and counted with SR depth unchanged; in an observed state it owns the FG scope, generated Presents hold it, the command-less FG tag withdraws nothing, its HUD-less/Backbuffer pair reaches UI detection exactly, and an FG tag that copies keeps precedence; no FX");
+      }
       // The same refused FG tags with no SR evaluation (DLSS-G without DLSS
       // SR/RR): a silent scope only lets an API source of the viewport
       // through. With none, enabled FG still holds the queue in mono, so the

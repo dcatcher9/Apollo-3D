@@ -518,6 +518,79 @@ namespace {
   }
 
   // Every begin() that makes no attempt names its stage.
+  // DLSS-G's own evaluation (boundary::frame_generation_evaluation) and
+  // Streamline tags revoke only their own snapshots: Assassin's Creed Shadows
+  // (10-23) tags HUD-less and Backbuffer without a command list every frame
+  // (refused as shape), which must not erase the copies DLSS-G's evaluation
+  // recorded, nor may an SL SDK failure; an explicit null of the evaluation
+  // still revokes its own. Its inputs are an exact batch only with inputs of
+  // the same evaluation, never with a Streamline tag. Attempts name their
+  // refusal or record stage.
+  void frame_generation_origin_is_isolated() {
+    using stage = mask::begin_stage;
+    const auto begin_from = [&](const capture::input &value, mask::source_kind kind, bool evaluation,
+        std::uint64_t command = 0x300) {
+      mask::set_request(current, value.tick);
+      mask::boundary where{value, command, evaluation ? 2u : 0u, kind, value.source_present_generation, record_format};
+      where.frame_generation_evaluation = evaluation;
+      return mask::begin(where, value);
+    };
+    const auto evaluation_input = [&](std::uint64_t sequence, std::uint64_t tick = 1000) {
+      auto value = input(sequence, tick);
+      value.native_state = UINT32_MAX; value.proof = scene::state_proof::observed_nonzero;
+      value.valid_until = scene::lifetime::until_evaluation; value.at_tag_call = true;
+      return value;
+    };
+    reset();
+    auto dlssg = begin_from(evaluation_input(1), mask::source_kind::backbuffer, true);
+    require(dlssg.ticket && dlssg.frame_generation_evaluation && dlssg.refusal == stage::none &&
+        dlssg.record == capture::record_stage::recorded, "A DLSS-G input attempt lost its origin or record stage");
+    mask::finish(dlssg, true); complete(dlssg);
+    mask::selection held;
+    require(kind_of(mask::source_kind::backbuffer, held, 1001) && held.origin.frame_generation_evaluation &&
+        held.origin.tag_scope == 2, "A DLSS-G Backbuffer copy was not offered with its origin");
+    // A command-less Streamline tag of the same kind: refused as shape, and
+    // the evaluation's copy stays.
+    auto commandless = begin_from(input(2, 1005), mask::source_kind::backbuffer, false, 0);
+    require(!commandless.reservation && commandless.refusal == stage::shape && !commandless.frame_generation_evaluation,
+      "A command-less Streamline tag was not refused as shape");
+    mask::finish(commandless, true);
+    require(kind_of(mask::source_kind::backbuffer, held, 1006) && held.origin.source.sequence == 1 &&
+        !snapshots.at(dlssg.ticket.id).released, "A refused Streamline tag revoked the DLSS-G evaluation's copy");
+    // A failed Streamline SDK call revokes only its own origin.
+    auto sl = begin_from(input(3, 1007), mask::source_kind::hudless, false);
+    auto failed_sl = begin_from(input(4, 1008), mask::source_kind::backbuffer, false);
+    mask::finish(failed_sl, false);
+    require(kind_of(mask::source_kind::backbuffer, held, 1009) && held.origin.frame_generation_evaluation &&
+        !snapshots.at(dlssg.ticket.id).released, "A failed Streamline call revoked the DLSS-G evaluation's copy");
+    mask::finish(sl, true); complete(sl);
+    // An explicit null of DLSS-G's evaluation revokes its own copy, not the
+    // Streamline HUD-less of the same request.
+    auto null_input = evaluation_input(5, 1010); null_input.resource.native = 0; null_input.source = {};
+    auto revoked = begin_from(null_input, mask::source_kind::backbuffer, true);
+    require(!revoked.reservation && revoked.refusal == stage::shape, "An explicit DLSS-G null was not refused as shape");
+    mask::finish(revoked, true);
+    require(!kind_of(mask::source_kind::backbuffer, held, 1011) && snapshots.at(dlssg.ticket.id).released &&
+        kind_of(mask::source_kind::hudless, held, 1011) && !held.origin.frame_generation_evaluation,
+      "An explicit DLSS-G null kept its old copy or revoked a Streamline input");
+    // Exactness: one evaluation's inputs pair; another evaluation, or a
+    // Streamline tag of the same Present interval, does not.
+    mask::boundary a{evaluation_input(7), 0x300, 2, mask::source_kind::hudless, 4};
+    a.frame_generation_evaluation = true;
+    auto b = a; b.kind = mask::source_kind::backbuffer;
+    require(mask::same_batch(a, 5, b, 5), "Inputs of one DLSS-G evaluation were not an exact batch");
+    auto later = b; later.source.sequence = 8;
+    require(!mask::same_batch(a, 5, later, 5), "Inputs of two DLSS-G evaluations were an exact batch");
+    auto other_epoch = b; ++other_epoch.source.epoch;
+    require(!mask::same_batch(a, 5, other_epoch, 5), "DLSS-G inputs of two epochs were an exact batch");
+    auto tag = b; tag.frame_generation_evaluation = false; tag.tag_scope = 0;
+    require(!mask::same_batch(a, 5, tag, 5) && !mask::same_batch(tag, 5, a, 5),
+      "A DLSS-G input paired exactly with a Streamline tag");
+    auto tag_hudless = tag; tag_hudless.kind = mask::source_kind::hudless; tag_hudless.source.sequence = 6;
+    require(mask::same_batch(tag_hudless, 5, tag, 5) && !mask::same_batch(tag_hudless, 6, tag, 5),
+      "Streamline tags lost their Present-interval exactness");
+    require(!mask::same_batch(a, 6, b, 5), "DLSS-G inputs offered with different Present intervals were exact");
+  }
   void begin_refusals_name_their_stage() {
     reset();
     using stage = mask::begin_stage;
@@ -930,6 +1003,7 @@ int main() {
     source_filter_change_revokes_ready_pending_and_inflight_attempts(); std::puts("PASS source-filter changes revoke completed, pending and in-flight old reservations");
     hudless_pairs_with_the_next_present_only(); std::puts("PASS HUD-less pairs with the Present after its tag, late captures within retained history, later offers with their own Present, never stale or reversed generations");
     declared_lifetimes_preserve_state_policy(); std::puts("PASS UI tag lifetimes preserve provenance and choose observed-at-call or strict longer-lived state policy");
+    frame_generation_origin_is_isolated(); std::puts("PASS DLSS-G evaluation and Streamline tag inputs revoke only their own snapshots; one evaluation's inputs are an exact batch, never with a tag; attempts name their stage");
     begin_refusals_name_their_stage(); std::puts("PASS UI capture begin refusals: no or ambiguous request, filtered kind, not newer, shape, unsupported lifetime, header version, extension, resource type, no reservation, no reader and format each name their stage");
     tags_without_a_reader_are_not_copied(); std::puts("PASS UI tags are copied only while their runtime read its captures within the reader window");
     stale_requests_expire(); std::puts("PASS UI capture requests match tags only while refreshed; an expired entry goes to a new runtime, never a live one");

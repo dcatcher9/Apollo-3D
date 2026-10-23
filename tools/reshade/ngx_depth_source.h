@@ -2,6 +2,7 @@
 #pragma once
 #include "scene_depth_source.h"
 #include "game3d_diagnostic_metadata.h"
+#include "frame_generation_inputs.h"
 #include <Windows.h>
 #include <cstdint>
 
@@ -45,6 +46,9 @@ namespace sunshine_ngx {
     // Preserve the entire API-call identity through the original evaluation;
     // rebuilding only session/sequence loses the producing command list.
     sunshine_game3d::diagnostic::stamp diagnostic_observation {};
+    // DLSS-G's (feature 11) own inputs of this real frame, supplied to the
+    // Streamline FG scope (frame_generation_inputs.h); finished with the call.
+    sunshine_streamline::frame_generation::attempt frame_generation;
   };
   // A depth-owned call may observe armed dump parameters without nominating
   // depth or copying UI. Nested SDK wrappers can separately suppress repeated
@@ -65,6 +69,11 @@ namespace sunshine_ngx {
       // Describe native admission without invoking D3D. This runs through the
       // production result accounting and metadata-only rejection retention.
       void (*describe_record)(std::uint64_t ticket, sunshine_streamline::depth_capture::record_diagnostic &out){};
+      // DLSS-G's inputs as read from its evaluation, in place of the
+      // Streamline FG scope (sunshine_streamline::observe_frame_generation_inputs).
+      sunshine_streamline::frame_generation::attempt (*frame_generation)(
+        const sunshine_streamline::frame_generation::inputs &value){};
+      void (*finish_frame_generation)(const sunshine_streamline::frame_generation::attempt &value, bool successful){};
     };
     void set_callbacks(callbacks value);
     bool last_capture_rejection(sunshine_streamline::depth_capture::record_diagnostic &out,

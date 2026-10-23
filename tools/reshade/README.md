@@ -693,7 +693,12 @@ and starts at most 0.25 s before the switch line is the switch's own handover. R
 of one depth source (dynamic resolution) keep depth since 10-23 and are no gap: INFO
 `Depth render size` sums the `Sunshine depth render size` lines (changes, Presents held across a
 pending size, the smallest and largest active extent). Before, each change was a
-`depth_shape_changed` loss (Assassin's Creed Shadows with FG on: 125-438 ms, six in 6 s). A flat
+`depth_shape_changed` loss (Assassin's Creed Shadows with FG on: 125-438 ms, six in 6 s). DLSS-G's
+own inputs (10-23) are judged from the `Sunshine NGX depth` line's `dlssg_depth`/`dlssg_ui` fields:
+INFO `DLSS-G inputs` counts `DLSSG.Depth` FG-scope copies per real-frame DLSS-G evaluation and the
+UI inputs captured, or says that Streamline FG tags supplied the depth (`tag_copied`); WARN names
+the refusals when DLSS-G evaluated with no copy (`missing_state`: DLSS-G's command list observed no
+state for its depth; `observer_coverage`: ReShade does not cover that list). A flat
 window is reported as INFO `Placement calibration` only when every placement-controller run
 without placement inside it (raw automation other than `ready`/`holding_reference`, or
 Streamline scale other than `ready`) followed a cause the log names (a depth-provider or frame
@@ -846,6 +851,15 @@ Fresh copies must recover each interval. With FG options on and every FG depth t
 same viewport's SR depth takes over once the FG scope is silent; each generated presentation, at
 2x and 3x, holds its real frame's SR copy, also after the fixture's window leaves the foreground
 (the export stop invalidates reuse once) and back, with no readiness loss logged.
+The test executable also exports DLSS-G's NGX entry points (feature 11 only, named `DLSSG.*`
+inputs, no capture). With its FG depth and HUD-less tags command-less, as in Assassin's Creed
+Shadows, a DLSS-G evaluation whose list observes no state for `DLSSG.Depth`, `DLSSG.HUDLess` and
+`DLSSG.Backbuffer` is refused and counted (`dlssg_depth={copied=0 ... refused=missing_state:<n>}`)
+with the SR depth unchanged; once its list transitions them, `DLSSG.Depth` with its subrect and
+`DLSSG.DepthInverted` owns the FG scope, generated Presents hold it, the command-less FG tag
+withdraws nothing (`dlssg_supplied=1`) and its HUD-less/Backbuffer pair reaches UI detection as a
+same-batch pair (`hudless_presents={batch=<n>`); an FG tag sent with a command list copies the
+frame first and keeps precedence (`tag_copied`); refused again, SR depth returns.
 It injects no captured pixels, readiness or GPU completion.
 To exercise an earlier 2.x export surface, build `reshade_legacy_v2_interposer` and pass
 `legacy_v2_interposer.dll` as the final argument in the same command, using a fresh output directory.

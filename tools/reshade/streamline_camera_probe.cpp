@@ -194,6 +194,47 @@ namespace sunshine_streamline {
     std::atomic<std::uint64_t> fg_refusals{};
     // Next tick each bounded tag line may be written (5 s apart).
     std::atomic<std::uint64_t> next_compatibility_report{}, next_untag_report{}, next_fg_refusal_report{};
+    // The newest FG copy DLSS-G's own NGX evaluation recorded: its scope (the
+    // observation epoch and viewport) and tick (observe_frame_generation_inputs).
+    // Within the FG scope's second a refused command-less FG tag boundary of
+    // that scope withdraws nothing: the evaluation, not the tag, is where its
+    // depth is copied (Assassin's Creed Shadows 10-23 tags its FG depth without
+    // a command list on every frame).
+    SRWLOCK evaluation_supply_lock = SRWLOCK_INIT;
+    struct { std::uint64_t epoch{}, tick{}; std::uint32_t viewport{}; } evaluation_supply;
+    void remember_evaluation_supply(std::uint64_t scope_epoch, std::uint32_t viewport, std::uint64_t tick) {
+      AcquireSRWLockExclusive(&evaluation_supply_lock);
+      if (tick >= evaluation_supply.tick || scope_epoch != evaluation_supply.epoch || viewport != evaluation_supply.viewport)
+        evaluation_supply = {scope_epoch, tick, viewport};
+      ReleaseSRWLockExclusive(&evaluation_supply_lock);
+    }
+    bool evaluation_supplies(std::uint64_t scope_epoch, std::uint32_t viewport) {
+      if (!TryAcquireSRWLockShared(&evaluation_supply_lock)) return false; // Busy: withdraw as before.
+      const auto supply = evaluation_supply;
+      ReleaseSRWLockShared(&evaluation_supply_lock);
+      const auto now = GetTickCount64();
+      return supply.tick && supply.epoch == scope_epoch && supply.viewport == viewport &&
+        (now < supply.tick || now - supply.tick <= 1000);
+    }
+    // The newest FG tag boundary's outcome per scope: when it recorded a copy
+    // (tick), or zero when it was refused. A Streamline FG tag that copies
+    // keeps precedence over DLSS-G's evaluation of the same frame, which then
+    // adds no second copy (observe_frame_generation_inputs).
+    struct { std::uint64_t epoch{}, tick{}; std::uint32_t viewport{}; } tag_copy;
+    void remember_tag_copy(std::uint64_t scope_epoch, std::uint32_t viewport, bool recorded) {
+      AcquireSRWLockExclusive(&evaluation_supply_lock);
+      if (recorded) tag_copy = {scope_epoch, GetTickCount64(), viewport};
+      else if (tag_copy.epoch == scope_epoch && tag_copy.viewport == viewport) tag_copy.tick = 0;
+      ReleaseSRWLockExclusive(&evaluation_supply_lock);
+    }
+    bool tag_copy_recent(std::uint64_t scope_epoch, std::uint32_t viewport) {
+      AcquireSRWLockShared(&evaluation_supply_lock);
+      const auto copy = tag_copy;
+      ReleaseSRWLockShared(&evaluation_supply_lock);
+      const auto now = GetTickCount64();
+      return copy.tick && copy.epoch == scope_epoch && copy.viewport == viewport &&
+        (now < copy.tick || now - copy.tick < sunshine_scene_depth::maximum_source_age_ms);
+    }
     // SDK calls answered with eWarnOutOfVRAM: accepted, counted for the log.
     std::atomic<std::uint64_t> vram_warnings{};
     // One verdict per 2.x call (abi_v2::accepted): the warning is a success.
@@ -1732,9 +1773,11 @@ namespace sunshine_streamline {
     }
     // Why an FG tag boundary named no capturable depth, at most every 5 s.
     // The tag described is the call's first present depth tag in priority
-    // order; reason is its first failing gate. A live FG scope is withdrawn;
-    // a silent one has no FG capture to withdraw. Diagnostic only.
-    void report_fg_refusal(const evaluation_snapshot &snapshot, const char *reason, bool withdrawn) {
+    // order; reason is its first failing gate. A live FG scope is withdrawn,
+    // unless DLSS-G's own evaluation supplies its copies (dlssg_supplied); a
+    // silent one has no FG capture to withdraw. Diagnostic only.
+    void report_fg_refusal(const evaluation_snapshot &snapshot, const char *reason, bool withdrawn, bool live,
+        bool supplied = false) {
       const auto count = fg_refusals.fetch_add(1, std::memory_order_relaxed) + 1;
       const auto now = GetTickCount64();
       auto next = next_fg_refusal_report.load(std::memory_order_relaxed);
@@ -1745,16 +1788,17 @@ namespace sunshine_streamline {
       char text[720]{};
       std::snprintf(text, sizeof(text),
         "Sunshine Streamline FG depth refused: reason=%s viewport=%u tag_type=%u scope=%s lifecycle=%u native=0x%llx "
-        "command=0x%llx frame=%s status=%s fg=%u fg_scope=%s withdrawn=%u refusals=%llu; this FG tag call names no capturable "
-        "depth; %s",
+        "command=0x%llx frame=%s status=%s fg=%u fg_scope=%s withdrawn=%u dlssg_supplied=%u refusals=%llu; this FG tag call "
+        "names no capturable depth; %s",
         reason, snapshot.viewport, tag->present ? tag->value.type : UINT32_MAX,
         !tag->present ? "absent" : tag->scope == tag_scope::active_global ? "global" :
           tag->scope == tag_scope::explicit_frame ? "frame" : "local",
         tag->present ? tag->value.lifecycle : UINT32_MAX, static_cast<unsigned long long>(tag->value.native_resource),
         static_cast<unsigned long long>(snapshot.command_buffer), name(snapshot.frame.kind), name(snapshot.status),
-        unsigned(snapshot.frame_generation_input), withdrawn ? "live" : "silent", unsigned(withdrawn),
+        unsigned(snapshot.frame_generation_input), live ? "live" : "silent", unsigned(withdrawn), unsigned(supplied),
         static_cast<unsigned long long>(count),
         withdrawn ? "the viewport's FG depth source is withdrawn until its next capture" :
+          supplied ? "DLSS-G's own NGX evaluation copies this FG scope's depth (DLSSG.Depth), so nothing is withdrawn" :
           "the FG scope is silent (no FG copy accepted for a second), so nothing is withdrawn and the viewport's "
           "ordinary SR/RR depth stays eligible");
       message(text);
@@ -1789,8 +1833,17 @@ namespace sunshine_streamline {
       if (snapshot.tag_boundary && depth_untag(snapshot)) return 0;
       const bool fg_boundary = snapshot.tag_boundary && snapshot.frame_generation_input;
       if (const auto rejected = source_rejection(snapshot)) {
-        if (fg_boundary) report_fg_refusal(snapshot, rejected, withdraws);
-        withdraw_invalid_attempt();
+        // A command-less FG tag offers no copy of its own. While DLSS-G's own
+        // evaluation supplies this live scope's copies (observe_frame_generation_inputs)
+        // it withdraws nothing; withdrawing would leave every Present between
+        // the tag and that evaluation without a current FG nomination.
+        const bool supplied = fg_boundary && withdraws && !std::strcmp(rejected, "boundary_without_commands") &&
+          evaluation_supplies(snapshot.epoch, snapshot.viewport);
+        if (fg_boundary) {
+          report_fg_refusal(snapshot, rejected, withdraws && !supplied, route == fg_route::owned, supplied);
+          remember_tag_copy(snapshot.epoch, snapshot.viewport, false);
+        }
+        if (!supplied) withdraw_invalid_attempt();
         return 0;
       }
       // The adapter defines semantic priority; the capture owner tries this
@@ -1836,9 +1889,11 @@ namespace sunshine_streamline {
       if (count) if (const auto ticket = depth_capture::nominate_evaluation(snapshot.command_buffer,
           candidates.data(), count, superseded, &diagnostic)) {
         if (copy_recorded) *copy_recorded = diagnostic.result == depth_capture::status::recorded;
+        if (fg_boundary) remember_tag_copy(snapshot.epoch, snapshot.viewport, diagnostic.result == depth_capture::status::recorded);
         return ticket;
       }
       if (fg_boundary) {
+        remember_tag_copy(snapshot.epoch, snapshot.viewport, false);
         char reason[96]{};
         if (count) std::snprintf(reason, sizeof(reason), "capture_%s/%s",
           depth_capture::name(diagnostic.result), depth_capture::name(diagnostic.stage));
@@ -1847,7 +1902,7 @@ namespace sunshine_streamline {
           std::snprintf(reason, sizeof(reason), "%s", rejected ? rejected : "no_retained_source");
           break;
         }
-        report_fg_refusal(snapshot, reason[0] ? reason : "absent", withdraws);
+        report_fg_refusal(snapshot, reason[0] ? reason : "absent", withdraws, route == fg_route::owned);
       }
       withdraw_invalid_attempt();
       return 0;
@@ -2927,6 +2982,160 @@ namespace sunshine_streamline {
     }
     if (status) *status = frame_generation_query_status::observed;
     return true;
+  }
+
+  frame_generation::attempt observe_frame_generation_inputs(const frame_generation::inputs &value) {
+    namespace mask = sunshine_game3d::ui_mask;
+    using frame_generation::depth_outcome;
+    using frame_generation::parameter;
+    using frame_generation::ui_outcome;
+    const DWORD incoming = GetLastError();
+    frame_generation::attempt out;
+    // An absent key changes nothing and is reported as absent in any scope.
+    out.depth = value.depth.state == parameter::absent ? depth_outcome::absent :
+      value.depth.state == parameter::null ? depth_outcome::null_resource : depth_outcome::not_offered;
+    for (unsigned i = 0; i != value.ui.size(); ++i)
+      out.ui_result[i] = value.ui[i].state == parameter::absent ? ui_outcome::absent : ui_outcome::no_fg_scope;
+    // The scope: the one viewport whose FG options were observed enabled in
+    // this epoch. Without it no input belongs to any Streamline FG scope.
+    const auto ticket = observation_ticket();
+    frame_generation_snapshot fg;
+    if (!ticket || !query_frame_generation(UINT32_MAX, fg) || !fg.enabled) {
+      if (out.depth == depth_outcome::not_offered) out.depth = depth_outcome::no_fg_scope;
+      SetLastError(incoming);
+      return out;
+    }
+    const auto loss = loss_revision.load(std::memory_order_acquire);
+    const auto source_epoch = epoch.load(std::memory_order_acquire);
+    if (fg.epoch != source_epoch || !current(ticket)) {
+      if (out.depth == depth_outcome::not_offered) out.depth = depth_outcome::scope_changed;
+      SetLastError(incoming);
+      return out;
+    }
+    out.observation = ticket; out.loss = loss;
+    // One observation sequence for every input of this evaluation, ordered
+    // with every Streamline call (the capture owner's FG view and the UI
+    // request's newest boundary compare it with tag sequences).
+    const auto serial = ++call_sequence;
+    const auto tick = GetTickCount64();
+    const auto source_id = (1ull << 63) | fg.viewport;
+    if (out.depth == depth_outcome::not_offered) {
+      if (!value.depth.area_valid) out.depth = depth_outcome::subrect;
+      else if (!source_requested.load(std::memory_order_acquire) || !depth_capture::active()) out.depth = depth_outcome::inactive;
+      else if (tag_copy_recent(fg.epoch, fg.viewport)) out.depth = depth_outcome::tag_copied;
+      // The viewport's own camera evidence, exactly as for an unframed FG tag
+      // (normalize_depth_frame): its history revision, its recent camera's
+      // depth direction and its steady depth coefficients. No frame
+      // correlation, jitter or reset pulse is claimed. Busy or lost metadata
+      // refuses, as a tag boundary does.
+      else if (const auto viewport = capture_evaluation(fg.viewport, 1000, frame_identity{},
+                 reinterpret_cast<void *>(value.command), ticket, serial, loss, nullptr, nullptr, false, false);
+               viewport.status == evidence_status::busy || viewport.status == evidence_status::inactive ||
+               viewport.epoch != fg.epoch)
+        out.depth = depth_outcome::scope_changed;
+      else {
+        depth_capture::observe_provider(value.command);
+        depth_capture::input input;
+        input.provider = sunshine_scene_depth::provider_kind::streamline;
+        input.epoch = fg.epoch; input.sequence = serial; input.tick = tick; input.viewport = fg.viewport;
+        input.observation_revision = loss; input.feedback = viewport.feedback;
+        input.frame_generation_input = true; input.source_id = source_id;
+        // Device depth (DLSS-G linearizes 1/(1-d), or 1/d when inverted).
+        // DLSSG.DepthInverted names its direction; without it the viewport
+        // camera's does. The steady coefficients apply only when both agree
+        // (or only the camera names it): DLSSG.CameraNear/Far are not used.
+        input.projection.encoding = sunshine_scene_depth::depth_encoding::device;
+        const bool camera_inverted = viewport.viewport_inverted != 0;
+        const bool agree = !value.inverted_known || !viewport.viewport_direction || value.inverted == camera_inverted;
+        input.projection.direction_supplied = value.inverted_known || viewport.viewport_direction;
+        input.projection.reversed = value.inverted_known ? value.inverted : viewport.viewport_direction && camera_inverted;
+        if (agree && viewport.viewport_direction && viewport.viewport_projection_ready) {
+          input.projection.depth_offset = viewport.viewport_projection.depth_offset;
+          input.projection.depth_scale = viewport.viewport_projection.depth_scale;
+          input.projection.supplied = true;
+        }
+        input.resource.native = value.depth.native;
+        input.resource.area = value.depth.area;
+        input.resource.kind = sunshine_scene_depth::resource_kind::raw_depth;
+        // No API states this resource's state at the call: only a state
+        // observed on the evaluation's own recording is acceptable.
+        input.native_state = UINT32_MAX;
+        input.proof = sunshine_scene_depth::state_proof::observed_nonzero;
+        input.valid_until = sunshine_scene_depth::lifetime::until_evaluation;
+        input.at_tag_call = true; // Copied inside the call that supplied it.
+        input.pixels_required = true;
+        depth_capture::record_diagnostic diagnostic;
+        input.source = depth_capture::retain_source(input.resource.native, &diagnostic);
+        if (!input.source) {
+          out.depth = depth_outcome::capture; out.depth_stage = diagnostic.stage;
+        } else {
+          input.source_present_generation = depth_capture::source_present_generation(input.source);
+          // A live scope's attempt replaces its FG observation first, exactly
+          // as an FG tag boundary does, so a refusal withdraws the old copy. A
+          // silent scope's refusal changes nothing: only a recorded copy
+          // becomes the viewport's FG observation (replacing its ordinary one).
+          const bool live = depth_capture::frame_generation_scope_live(fg.epoch, fg.viewport, fg.enabled_tick);
+          if (live) depth_capture::begin_evaluation(fg.epoch, serial, fg.viewport,
+            sunshine_scene_depth::provider_kind::streamline, source_id, 0);
+          const auto captured = depth_capture::nominate(value.command, input, &diagnostic);
+          if (captured && diagnostic.result == depth_capture::status::recorded) {
+            if (!live) depth_capture::begin_evaluation(fg.epoch, serial, fg.viewport,
+              sunshine_scene_depth::provider_kind::streamline, source_id, 0);
+            remember_evaluation_supply(fg.epoch, fg.viewport, tick);
+            out.depth_ticket = captured; out.depth = depth_outcome::copied;
+          } else {
+            if (captured) depth_capture::finish(captured, false);
+            out.depth = depth_outcome::capture; out.depth_stage = diagnostic.stage;
+          }
+        }
+      }
+    }
+    if (std::any_of(value.ui.begin(), value.ui.end(), [](const auto &item) { return item.state != parameter::absent; })) {
+      const bool interested = mask::interested(source_epoch, loss, fg.viewport, tick);
+      for (unsigned i = 0; i != value.ui.size(); ++i) {
+        const auto &item = value.ui[i];
+        auto &result = out.ui_result[i];
+        if (item.state == parameter::absent) continue;
+        if (!interested) { result = ui_outcome::no_request; continue; }
+        if (!item.area_valid) { result = ui_outcome::subrect; continue; }
+        depth_capture::input input;
+        input.epoch = source_epoch; input.sequence = serial; input.tick = tick;
+        input.viewport = fg.viewport; input.observation_revision = loss;
+        input.source_id = source_id; input.frame_generation_input = true;
+        input.resource.native = item.state == parameter::present ? item.native : 0;
+        input.resource.area = item.area;
+        input.native_state = UINT32_MAX;
+        input.proof = sunshine_scene_depth::state_proof::observed_nonzero;
+        input.valid_until = sunshine_scene_depth::lifetime::until_evaluation;
+        input.force_snapshot = true; input.at_tag_call = true;
+        depth_capture::record_diagnostic retained;
+        input.source = depth_capture::retain_source(input.resource.native, &retained);
+        input.source_present_generation = depth_capture::source_present_generation(input.source);
+        if (input.source) { input.resource.width = retained.width; input.resource.height = retained.height; }
+        mask::boundary where;
+        where.source = input; where.command = value.command; where.tag_scope = 2;
+        where.kind = mask::capture_order[i];
+        where.source_present_generation = input.source_present_generation;
+        where.format = input.source ? retained.format : 0;
+        where.frame_generation_evaluation = true;
+        out.ui[i] = mask::begin(where, input);
+        result = item.state == parameter::present ? ui_outcome::offered : ui_outcome::null_resource;
+      }
+    }
+    SetLastError(incoming);
+    return out;
+  }
+  void finish_frame_generation_inputs(const frame_generation::attempt &value, bool successful) {
+    if (!value.observation) return;
+    const DWORD incoming = GetLastError();
+    // A copy survives a successful SDK call; the UI inputs also need the
+    // observation they were admitted under, as Streamline tags do.
+    const bool still_current = current(value.observation);
+    if (value.depth_ticket)
+      depth_capture::finish(value.depth_ticket, successful && still_current, depth_capture::capture_failure::evaluation_failed);
+    const bool ui_current = successful && still_current && value.loss == loss_revision.load(std::memory_order_acquire);
+    for (const auto &attempt : value.ui) sunshine_game3d::ui_mask::finish(attempt, ui_current);
+    SetLastError(incoming);
   }
 
   presentation_status query_current_presentation(presentation_snapshot &output, std::uint32_t max_age_ms) {

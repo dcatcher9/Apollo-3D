@@ -297,7 +297,9 @@ namespace sunshine_game3d::ui_mask {
         break;
       }
       ReleaseSRWLockExclusive(&state.lock);
-      return attempt{};
+      attempt refused;
+      refused.refusal = stage; refused.frame_generation_evaluation = where.frame_generation_evaluation;
+      return refused;
     };
     const auto rank = priority(where.kind);
     if (!rank) return refuse(begin_stage::kind_filtered);
@@ -346,13 +348,17 @@ namespace sunshine_game3d::ui_mask {
       item.last_attempt = where;
 #endif
       result.runtime = runtime; result.generation = item.generation; result.sequence = source.sequence;
-      result.kind = where.kind;
+      result.kind = where.kind; result.frame_generation_evaluation = where.frame_generation_evaluation;
       const auto &area = source.resource.area;
       const bool shape = (!source.resource.width || source.resource.width == item.wanted.width) &&
         (!source.resource.height || source.resource.height == item.wanted.height) && !area.left && !area.top &&
         (!area.width || area.width == item.wanted.width) && (!area.height || area.height == item.wanted.height);
+      // Only this origin's snapshots of the kind (boundary::frame_generation_evaluation).
       const auto revoke = [&] {
-        for (auto &snapshot : item.snapshots) if (snapshot.origin.kind == where.kind) retire(snapshot, old, count);
+        for (auto &snapshot : item.snapshots)
+          if (snapshot.origin.kind == where.kind &&
+              snapshot.origin.frame_generation_evaluation == where.frame_generation_evaluation)
+            retire(snapshot, old, count);
       };
       if (!reading(item, source.tick)) {
         // Nobody reads the copy: none is recorded, and the next read finds
@@ -398,11 +404,16 @@ namespace sunshine_game3d::ui_mask {
     if (stage != begin_stage::none) ++state.begin_refusals[std::size_t(stage)];
     ReleaseSRWLockExclusive(&state.lock);
     release(old);
-    if (!result.reservation) return result;
+    if (!result.reservation) {
+      result.refusal = stage;
+      result.frame_generation_evaluation = where.frame_generation_evaluation;
+      return result;
+    }
     capture::record_diagnostic record;
     // OnlyValidNow can use current recording evidence over a stale hint.
     // Longer-lived tags retain their declared lifetime and strict state contract.
     auto ticket = capture::record_local_texture(where.command, input, &record, capture::auxiliary_state_policy(input));
+    result.record = record.stage;
     bool retained = false;
     AcquireSRWLockExclusive(&state.lock);
     for (auto &item : state.entries) if (item.wanted.runtime == runtime && item.generation == result.generation) {
@@ -438,11 +449,14 @@ namespace sunshine_game3d::ui_mask {
         item.diagnostic.sdk_result_known = true;
         item.diagnostic.sdk_successful = successful;
       }
-      // A failed SDK call revokes this and older real inputs, but cannot erase
-      // a newer successful call that completed on another application thread.
+      // A failed SDK call revokes this and older real inputs of its own origin,
+      // but cannot erase a newer successful call that completed on another
+      // application thread.
       if (!successful) {
         for (auto &snapshot : item.snapshots)
-          if (snapshot.origin.kind == value.kind && snapshot.origin.source.sequence <= value.sequence) retire(snapshot, old, count);
+          if (snapshot.origin.kind == value.kind && snapshot.origin.source.sequence <= value.sequence &&
+              snapshot.origin.frame_generation_evaluation == value.frame_generation_evaluation)
+            retire(snapshot, old, count);
       } else {
         for (const auto &snapshot : item.snapshots)
           if (snapshot.reservation == value.reservation && snapshot.ticket.id == value.ticket.id) current = true;

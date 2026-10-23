@@ -79,6 +79,9 @@ namespace {
     bool dlssg_rect_available{};
     // DLSS-G's own depth input, answered by the void-pointer getter only.
     void *dlssg_depth{};
+    // Its 1-based inner frame index, and a depth subrect missing its height.
+    unsigned dlssg_multi_frame_index{1};
+    bool dlssg_depth_partial_rect{};
   };
   sunshine_scene_depth::frame captured_frame;
   std::uint64_t captured_command{};
@@ -208,9 +211,11 @@ extern "C" __declspec(dllexport) FIXTURE_NOINLINE result __cdecl NVSDK_NGX_Param
     return value.dlssg_rect_available ? ngx_success : ngx_failure;
   }
   if (value.dlssg_depth) {
+    if (!std::strcmp(key, "DLSSG.MultiFrameIndex")) { *output = value.dlssg_multi_frame_index; return ngx_success; }
+    if (value.dlssg_depth_partial_rect && !std::strcmp(key, "DLSSG.DepthSubrectHeight")) { *output = 0xdeadbeef; return ngx_failure; }
     constexpr std::pair<const char *, unsigned> depth_keys[]{{"DLSSG.DepthInverted", 1}, {"DLSSG.DepthSubrectBaseX", 5},
       {"DLSSG.DepthSubrectBaseY", 6}, {"DLSSG.DepthSubrectWidth", 640}, {"DLSSG.DepthSubrectHeight", 360},
-      {"DLSSG.MultiFrameIndex", 1}, {"DLSSG.MultiFrameCount", 3}};
+      {"DLSSG.MultiFrameCount", 3}};
     for (const auto &[name, number] : depth_keys) if (!std::strcmp(key, name)) { *output = number; return ngx_success; }
   }
   if (std::strcmp(key, "Width") == 0) *output = value.width;
@@ -1461,6 +1466,91 @@ namespace {
     d::set_resource_callbacks(nullptr);
     release_entry(handle); shutdown(); sunshine_ngx::testing::set_callbacks({});
   }
+  // DLSS-G's (feature 11) own inputs of a real frame are read once per real
+  // frame and handed to the Streamline FG scope: DLSSG.Depth through the
+  // void-pointer getter after the D3D12 getter fails, with its convention and
+  // crop; DLSSG.UIAlpha/UI/Backbuffer/HUDLess with their getter result
+  // (absent, explicit null, present) and whole-allocation subrects. A later
+  // inner frame of multi frame generation (MultiFrameIndex > 1) offers
+  // nothing, a partial depth subrect is invalid, every offered attempt is
+  // finished with the evaluation's result, the SR depth owner is never
+  // called, and the poll line reports copies and refusals by reason.
+  // (Assassin's Creed Shadows 10-23 read DLSSG.Depth in dumps only.)
+  sunshine_streamline::frame_generation::inputs fg_inputs_seen;
+  sunshine_streamline::frame_generation::attempt fg_attempt_reply;
+  unsigned fg_inputs_calls{}, fg_finish_calls{};
+  std::uint64_t fg_finished_ticket{};
+  bool fg_finished_success{};
+  void dlssg_frame_generation_inputs_test() {
+    namespace fg = sunshine_streamline::frame_generation;
+    initialize(GetModuleHandleW(nullptr), false, true);
+    captures = finishes = 0; fg_inputs_calls = fg_finish_calls = 0;
+    sunshine_ngx::testing::callbacks hooks{
+      [](std::uint64_t, const sunshine_scene_depth::frame &) -> std::uint64_t { ++captures; return 94; },
+      [](std::uint64_t, bool) { ++finishes; }, nullptr};
+    hooks.frame_generation = [](const fg::inputs &value) { fg_inputs_seen = value; ++fg_inputs_calls; return fg_attempt_reply; };
+    hooks.finish_frame_generation = [](const fg::attempt &value, bool successful) {
+      ++fg_finish_calls; fg_finished_ticket = value.depth_ticket; fg_finished_success = successful;
+    };
+    sunshine_ngx::testing::set_callbacks(hooks);
+    fixture_parameters parameters;
+    parameters.dlssg_depth = reinterpret_cast<void *>(0xd1550000);
+    // dlssg_keys order: HUDLess, UI, UIAlpha, Backbuffer.
+    parameters.dlssg_values = {probe_reply::present, probe_reply::null_value, probe_reply::failed, probe_reply::present};
+    void *handle{};
+    return_result = ngx_success;
+    const auto evaluate = [&] {
+      SetLastError(input_error);
+      require(evaluate_entry(reinterpret_cast<void *>(0x123), handle, &parameters, &callback) == return_result &&
+          GetLastError() == output_error, "DLSS-G input reading changed the SDK result or LastError");
+    };
+    require(create_entry(reinterpret_cast<void *>(0x123), 11, &parameters, &handle) == ngx_success, "DLSS-G fixture create failed");
+    fg_attempt_reply = {}; fg_attempt_reply.observation = 5; fg_attempt_reply.depth_ticket = 77;
+    fg_attempt_reply.depth = fg::depth_outcome::copied;
+    fg_attempt_reply.ui_result = {fg::ui_outcome::absent, fg::ui_outcome::null_resource, fg::ui_outcome::offered,
+      fg::ui_outcome::no_request};
+    fg_attempt_reply.ui[2].ticket = {41, std::shared_ptr<const sunshine_streamline::depth_capture::texture_reference>(
+      reinterpret_cast<const sunshine_streamline::depth_capture::texture_reference *>(0x41), [](auto *) {})};
+    evaluate();
+    const auto &seen = fg_inputs_seen;
+    require(fg_inputs_calls == 1 && seen.command == 0x123 && seen.depth.state == fg::parameter::present &&
+        seen.depth.native == 0xd1550000 && seen.depth.area_valid && seen.depth.area.left == 5 && seen.depth.area.top == 6 &&
+        seen.depth.area.width == 640 && seen.depth.area.height == 360 && seen.inverted_known && seen.inverted,
+      "DLSSG.Depth was not read through the void-pointer getter with its convention and crop");
+    // capture_order: UIAlpha (getter failed), UI (null), Backbuffer and HUDLess (present).
+    require(seen.ui[0].state == fg::parameter::absent && seen.ui[1].state == fg::parameter::null &&
+        seen.ui[2].state == fg::parameter::present && seen.ui[3].state == fg::parameter::present &&
+        seen.ui[2].native == 1 && seen.ui[3].native == 1 && seen.ui[2].area_valid && !seen.ui[2].area.width &&
+        !seen.ui[3].area.width, "DLSS-G UI inputs lost their getter result, slot order or whole-allocation subrect");
+    require(fg_finish_calls == 1 && fg_finished_ticket == 77 && fg_finished_success && !captures && !finishes,
+      "A DLSS-G attempt was not finished with its evaluation, or DLSS-G inputs reached the SR depth owner");
+    // A failed evaluation finishes its attempt as failed.
+    fg_attempt_reply = {}; fg_attempt_reply.depth = fg::depth_outcome::no_fg_scope;
+    return_result = ngx_failure; evaluate(); return_result = ngx_success;
+    require(fg_inputs_calls == 2 && fg_finish_calls == 2 && !fg_finished_success && !fg_finished_ticket,
+      "A failed DLSS-G evaluation finished as accepted");
+    // A later inner frame repeats the real frame's inputs: nothing is offered.
+    parameters.dlssg_multi_frame_index = 2;
+    evaluate();
+    require(fg_inputs_calls == 2, "A later inner frame of multi frame generation offered DLSS-G inputs again");
+    parameters.dlssg_multi_frame_index = 1;
+    // A partial depth subrect is invalid.
+    parameters.dlssg_depth_partial_rect = true;
+    fg_attempt_reply = {}; fg_attempt_reply.observation = 6; fg_attempt_reply.depth = fg::depth_outcome::capture;
+    fg_attempt_reply.depth_stage = sunshine_streamline::depth_capture::record_stage::missing_state;
+    fg_attempt_reply.ui_result = {fg::ui_outcome::absent, fg::ui_outcome::absent, fg::ui_outcome::offered, fg::ui_outcome::absent};
+    fg_attempt_reply.ui[2].refusal = sunshine_game3d::ui_mask::begin_stage::shape;
+    evaluate();
+    require(fg_inputs_calls == 3 && !fg_inputs_seen.depth.area_valid, "A partial DLSSG.Depth subrect was accepted");
+    parameters.dlssg_depth_partial_rect = false;
+    messages.clear();
+    sunshine_ngx::poll();
+    require(logged("fg_feature=4 dlssg_depth={copied=1 inner_frames=1 refused=no_fg_scope:1,stage18:1} "
+        "dlssg_ui={offered=2 captured=1 refused=null:1,no_request:1,shape:1} failed="),
+      "The NGX line did not report DLSS-G copies, inner frames and refusals by reason");
+    require(release_entry(handle) == ngx_success, "Release DLSS-G input fixture");
+    shutdown(); sunshine_ngx::testing::set_callbacks({});
+  }
   void diagnostic_completion_identity_test() {
     initialize(GetModuleHandleW(nullptr), true, true);
     sunshine_ngx::testing::set_callbacks({
@@ -1594,6 +1684,8 @@ int main() {
     std::puts("PASS exact DLSSG UI resource/subrect queries across SR, FG, RR, arbitrary/unknown features");
     dlssg_feature_accounting_test();
     std::puts("PASS DLSS-G evaluations count as fg_feature, missing parameters split by feature, armed DLSSG.Depth/convention/crop/frame/camera probes with void-pointer retry; no capture");
+    dlssg_frame_generation_inputs_test();
+    std::puts("PASS DLSS-G inputs read once per real frame (void-pointer depth, convention, crop, UI getter results), finished with the evaluation and counted by reason");
     depth_owned_ui_diagnostics_test();
     std::puts("PASS SL-owned depth retains dump-only NGX UI evidence, deduplicates wrappers and preserves depth/reset ordering");
     diagnostic_completion_identity_test();

@@ -123,7 +123,7 @@ the presentation path consumes completed snapshots rather than fetching every SD
 | Depth | Prefer usable SL captures, then usable NGX captures. Generic ReShade depth is the fallback when the API provider does not own the pass. Within an SL batch, try HighResDepth (48), Depth (0), then LinearDepth (49). |
 | Camera / encoding / jitter | Use metadata paired with the selected depth capture. Linear-distance depth can work without camera matrices; device depth without a paired projection uses the existing relative-depth calibration when eligible. Never borrow another provider's camera. |
 | UI with FG off or no observed FG | Automatically validate captured SL UIAlpha (R; tag 68 in 2.11.x, 69 from 2.12.0, see [buffer contract](#streamline-buffer-type-contract)), UIColorAndAlpha (23, A), the game's offscreen UI layer (A), Backbuffer (53, A), current color alpha, then paired HUDLessColor (2) difference. |
-| UI with FG on | Use the same captured-source order and HUD-less fallback; presented alpha is excluded. HUD-less pairs exactly with its same-batch tagged Backbuffer, else inexactly: a snapshot's first offer on the Present after its tag with that Present's colour, and a later first offer and every later offer of the same snapshot with its own Present's colour, so the real frame's own Present is compared wherever DLSS-G's generated-first order places it; only V2's pixel test validates these pairs, and a mispaired re-offer keeps the held decision (T1). UIAlpha stays manual-only when the loaded interposer is outside the surveyed header range. |
+| UI with FG on | Use the same captured-source order and HUD-less fallback; presented alpha is excluded. HUD-less pairs exactly with its same-batch tagged Backbuffer (or, for DLSS-G's own `DLSSG.HUDLess`, with the same NGX evaluation's `DLSSG.Backbuffer`), else inexactly: a snapshot's first offer on the Present after its tag with that Present's colour, and a later first offer and every later offer of the same snapshot with its own Present's colour, so the real frame's own Present is compared wherever DLSS-G's generated-first order places it; only V2's pixel test validates these pairs, and a mispaired re-offer keeps the held decision (T1). UIAlpha stays manual-only when the loaded interposer is outside the surveyed header range. |
 
 Depth order preserves source continuity: a brief pending copy can retain an admitted
 source and its authorized prior pixels. Known FG requirements restrict selection to
@@ -2801,7 +2801,7 @@ acceptance and selection, hidden-scene guard, hold, pin weight. Diagnostics only
 | Rule | Requires |
 | --- | --- |
 | E1 Proof and identity (M1) | A candidate exists only as a snapshot with proven state, boundary, real-frame identity, encoding (typed format and swapchain colour space) and signature; otherwise there is no candidate and a recorded reason. Each cleared target or declared resource is its own signature in its own slot. Over budget, a spare slot rotates across unseen signatures and records a budget refusal. |
-| E2 Exactness (M1) | Only same-batch Streamline tags, with the same-batch Backbuffer tag as the final-image reference, with frame generation on or off; the one-way test also requires the presented frame to show the HUD-less scene unchanged, so UI composited after the tagged Backbuffer never contradicts its tag. Present counting only proposes a pair (a snapshot's first offer with the Present after the tag; under frame generation a late first offer and every later offer of it with its own Present, without it with the retained Present after the tag): it is inexact, validated by V2's pixel test alone, never full-frame UI and never a judge. Frame tokens and FG interposers do not make a pair exact (S3's frame identity was removed). The one-frame-late layer copy is inexact opacity evidence: it may draw, but never judges or pairs. |
+| E2 Exactness (M1) | Only same-batch Streamline tags, with the same-batch Backbuffer tag as the final-image reference, with frame generation on or off, or DLSS-G's own inputs of one NGX evaluation (`DLSSG.HUDLess` with the same evaluation's `DLSSG.Backbuffer`, and its `DLSSG.UI`/`DLSSG.UIAlpha` as that pair's batch), captured at that one call under its one sequence (`ui_mask::same_batch`; since 10-23). A DLSS-G input never pairs exactly with a Streamline tag. The one-way test also requires the presented frame to show the HUD-less scene unchanged, so UI composited after the tagged Backbuffer never contradicts its tag. Present counting only proposes a pair (a snapshot's first offer with the Present after the tag; under frame generation a late first offer and every later offer of it with its own Present, without it with the retained Present after the tag): it is inexact, validated by V2's pixel test alone, never full-frame UI and never a judge. Frame tokens and FG interposers do not make a pair exact (S3's frame identity was removed). The one-frame-late layer copy is inexact opacity evidence: it may draw, but never judges or pairs. |
 | V1 Opacity validity (M2) | Finite, in-range alpha with at most 1% invalid pixels, at any bit depth; a cleared layer must also pass the premultiplied bound: its pixels beyond it are uncovered, and invalidate the layer when they lie on more than 1% of the frame unless they lie on at most 5% of it and its opaque pixels outnumber them. Presented and Backbuffer alpha are checked for range only. The tolerance does not depend on trust. |
 | V2 Change-set validity (M2) | A difference is evidence only with the threshold from the two snapshots' own encodings, and only a valid change set is: the changed set passes the tile test above when partial, changes no pixel of a lit HUD-less image in clean tiles (empty, since revision 8, which an accepted pair decides as an empty mask of its own), or, from an exact pair whose HUD-less image is lit, is nearly the whole frame. The middle band (a pair mispaired with interpolated or another frame's colour) and noisy pairs are invalid. |
 | A1 Earning (M3) | Acceptance is keyed by game and source signature (with the swapchain colour space), not by FG mode. A declared source (UI alpha or color tag, or a HUD-less pair, exact or not, by its partial change set) is accepted by its first valid selective sample; an inferred source needs the steady selective run above, consecutive and bounded (a selective sample more than 2 s after the run's last one restarts it). A source that is never selective is never accepted. A selective layer sample whose colour without coverage (its lit pixels beyond its covered ones) outnumbers its opaque pixels earns nothing and restarts the run: V1's comparison without its 1% allowance. A sample does not count while a declared alpha is offered but invalid. Holds and manual inputs never earn. An offered layer without coverage earns its signature's pre-UI proof (ledger key `pre_ui:<format>:<space>`) like an inferred source: three samples over 2 s in which it equals the presented frame at eight times their pair threshold on at least 90% of pixels and is lit on at least half; a mismatch neither withdraws it nor restarts the run, and no judge revokes it. |
@@ -2955,11 +2955,13 @@ the three optional UI inputs need not be supplied. Successful capture produces
 Each input's own complete subrectangle is retained; all-zero or entirely unavailable
 subrectangle fields use the full allocation, while partial or malformed rectangles reject
 that optional copy. `DLSSG.ColorBuffersHDR` is recorded but does not alone identify a transfer
-function. DLSS-G's own depth input is recorded as evidence only, never copied: `DLSSG.Depth`
+function. A dump records DLSS-G's own depth input as evidence: `DLSSG.Depth`
 through the D3D12 resource getter and, when that fails, the void-pointer getter (DLSS-G may store
 it as a `void *`), with `DLSSG.DepthInverted`, `DLSSG.DepthSubrectBaseX`/`BaseY`/`Width`/`Height`,
 `DLSSG.MultiFrameIndex`, `DLSSG.MultiFrameCount`, `DLSSG.CameraNear` and `DLSSG.CameraFar`, all
-defined by the same pinned header. A dump keeps up to 96 named parameters per evaluation. Copies require observed native resource-state evidence and successful evaluation.
+defined by the same pinned header. Live, the same DLSS-G evaluation's depth and its HUD-less,
+Backbuffer, UI and UIAlpha inputs supply the Streamline FG scope and the live UI request (DLSS-G's
+own NGX evaluation, in the frame generation section); these dump copies are separate. A dump keeps up to 96 named parameters per evaluation. Copies require observed native resource-state evidence and successful evaluation.
 The existing SL-first depth ownership gate remains in force: a successfully admitted SL
 capture suppresses nested NGX resource copies. During an armed dump, the outer supported
 NGX evaluation still records bounded named-parameter observations, including UI inputs,
@@ -3770,8 +3772,53 @@ when an admissible tag has no retained native source, or `capture_<result>/<stag
 copy was refused. `lifecycle_outlives_boundary` gates only ordinary (non-FG) tag boundaries; a
 long-lived FG tag goes on to matching instead.
 It also gives the call's first depth tag (`tag_type`, `scope`, `lifecycle`, `native`), its
-`command`, the frame identity kind, the evidence `status`, `fg_scope=live|silent`, `withdrawn=1|0`
-and the running `refusals` count.
+`command`, the frame identity kind, the evidence `status`, `fg_scope=live|silent`, `withdrawn=1|0`,
+`dlssg_supplied=1|0` and the running `refusals` count. `dlssg_supplied=1` marks a command-less
+boundary of a live scope whose copies DLSS-G's own evaluation records (below): it withdraws nothing,
+since that evaluation, not the tag, is where the frame's depth is copied, and a withdrawal would
+leave every Present between the tag and the evaluation without a current FG nomination.
+
+DLSS-G's own NGX evaluation (feature 11, created by Streamline's DLSS-G plugin through the NGX
+exports the add-on already hooks; no new hook and no patch of the DLSS-G module) supplies the FG
+scope's depth when the game's FG depth tag cannot be copied (since 10-23). Assassin's Creed Shadows
+tags its FG depth without a command list on every frame, so its FG scope stayed silent and its
+SR evaluation's depth supplied the viewport. Once per real frame (`DLSSG.MultiFrameIndex` is 1-based
+in the pinned `nvsdk_ngx_defs_dlssg.h`; an index above 1 is a later inner frame of multi frame
+generation with the same inputs, skipped and counted as `inner_frames`; an absent index is one
+evaluation per frame) the adapter reads `DLSSG.Depth` through the D3D12 resource getter and then
+the void-pointer getter, `DLSSG.DepthInverted` and `DLSSG.DepthSubrectBaseX`/`BaseY`/`Width`/`Height`
+(every key absent or all four zero is the whole allocation; a partial or malformed rectangle
+refuses the copy as `subrect`). Its scope is the one viewport whose FG options were observed enabled
+in the current observation epoch; the evaluation takes one fresh observation sequence, ordered with
+every Streamline call. The depth becomes that viewport's FG source (`(1 << 63) | viewport`,
+`frame_generation_input`) only through a copy recorded on the evaluation's own command list in a
+state observed on that recording (`state_proof::observed_nonzero`: no API states the resource's
+state at this call, so none is assumed), with no metadata-only nomination (`pixels_required`). Its
+accepted copies keep the FG scope live exactly as accepted FG tag copies do, so FG owns the viewport
+(the same viewport's SR/RR evaluations and direct NGX copies stand aside), and generated Presents
+hold the real frame's copy. A refusal while the scope is silent changes nothing (the ordinary SR/RR
+source stays); while it is live the attempt first replaces the FG observation, so a refusal withdraws
+the previous copy as a refused FG tag boundary does. A Streamline FG tag boundary that recorded a copy
+within the source age keeps precedence: the evaluation then adds no second copy (`tag_copied`). The
+depth carries the viewport's own camera evidence as an unframed FG tag does: its history revision,
+the recent camera's depth direction where `DLSSG.DepthInverted` is absent, and the camera's steady
+depth coefficients when both directions agree; `DLSSG.CameraNear`/`CameraFar` are not used, and no
+jitter or frame correlation is claimed. Busy or lost metadata refuses it (`scope_changed`).
+The same evaluation's `DLSSG.HUDLess`, `DLSSG.Backbuffer`, `DLSSG.UI` and `DLSSG.UIAlpha` (each with
+its own subrectangle, read the same way) are offered to the live UI request of that viewport as one
+batch (`tag_scope=2`, `boundary::frame_generation_evaluation`), under the same observed-state rule.
+An absent key changes nothing; an explicit null revokes that kind's snapshots of DLSS-G's
+evaluation only. The two origins never revoke each other's snapshots, so Shadows' command-less
+HUD-less and Backbuffer tags, refused as `shape`, no longer erase the evaluation's copies. The
+named `DLSSG.UIAlpha` needs no Streamline header range to be validated automatically.
+The `Sunshine NGX depth` line reports `dlssg_depth={copied=<n> inner_frames=<n>
+refused=<reason>:<n>,...}` (reasons `no_fg_scope`, `absent`, `null`, `subrect`, `scope_changed`,
+`inactive`, `tag_copied`, or the capture owner's refusal stage such as `missing_state` when the
+recording observed no state for the depth, or `observer_coverage` when ReShade does not cover
+DLSS-G's list) and `dlssg_ui={offered=<n> captured=<n> refused=<reason>:<n>,...}` (`null`,
+`subrect`, `no_fg_scope`, `no_request`, a UI begin stage such as `shape` or `not_newer`, or a
+capture stage); `none` when nothing was refused. Absent UI keys are optional in DLSS-G and are
+not refusals.
 
 Enabled FG owns its viewport's depth only while its scope is live: FG was turned on less than a
 second ago (the options call that enabled it in this observation epoch; later calls that keep it
@@ -4355,7 +4402,9 @@ the Streamline DLSS-G plugin copied its full depth plane on every real frame wit
 consumer. DLSS-G itself (NGX feature 11, `NVSDK_NGX_Feature_FrameGeneration` in the pinned
 `nvsdk_ngx_defs.h`) is a known FG feature with no Super Resolution `Depth` input: its evaluations
 are counted as `fg_feature` and never as `missing_parameters` (Assassin's Creed Shadows counted
-about 42 DLSS-G evaluations a second there), and never become a depth source. The line splits
+about 42 DLSS-G evaluations a second there), and never become an NGX depth source: their own
+`DLSSG.*` inputs supply the Streamline FG scope instead (DLSS-G's own NGX evaluation, above). The
+line splits
 `missing_parameters` by feature ID as `missing_by_feature=<id>:<count>,...` (the first four IDs
 seen, then `other`; `none` when nothing was missing). A retained
 resource, metadata-only ticket or rejected native attempt does not block a usable inner NGX input.

@@ -912,6 +912,49 @@ class ReadinessReport(unittest.TestCase):
                              'fg_owned=40 unknown_feature=0')])
         self.assertNotIn('NGX depth', owned)
 
+    def test_dlssg_inputs_name_copies_and_refusals(self):
+        def ngx(depth, ui, evaluations=300):
+            return line('10:00:07', '[Sunshine 3D] Sunshine NGX depth: confirmed_features=2 capture_eligible=1 '
+                                    'recovered_features=0 evaluations=40 nominations=40 copy_recorded=40 '
+                                    'metadata_only=0 fg_owned=0 unknown_feature=0 missing_parameters=0 '
+                                    f'missing_by_feature=none fg_feature={evaluations} dlssg_depth={{{depth}}} '
+                                    f'dlssg_ui={{{ui}}} failed=0 feature_capacity_loss=0; D3D12 NGX')
+        # Assassin's Creed Shadows if DLSS-G's list observes no state for its depth: a WARN naming the reason.
+        refused = run(BASE + [ngx('copied=0 inner_frames=0 refused=missing_state:300',
+                                  'offered=600 captured=0 refused=missing_state:600')])
+        self.assertEqual(refused['DLSS-G inputs'].status, 'WARN')
+        self.assertIn('missing_state 300', refused['DLSS-G inputs'].detail)
+        self.assertIn('observed no state', refused['DLSS-G inputs'].detail)
+        self.assertIn('captured 0 of 600', refused['DLSS-G inputs'].detail)
+        # Accepted copies (MFG 3x: two inner frames per real frame skipped).
+        copied = run(BASE + [ngx('copied=98 inner_frames=200 refused=missing_state:2',
+                                 'offered=200 captured=196 refused=no_request:4')])
+        self.assertEqual(copied['DLSS-G inputs'].status, 'INFO')
+        self.assertIn('supplied 98 FG-scope depth copies in 100 real-frame', copied['DLSS-G inputs'].detail)
+        self.assertIn('captured 196 of 200 (refused no_request 4)', copied['DLSS-G inputs'].detail)
+        # A Streamline FG tag that copies keeps precedence: no warning.
+        tagged = run(BASE + [ngx('copied=0 inner_frames=0 refused=tag_copied:300',
+                                 'offered=0 captured=0 refused=none')])
+        self.assertEqual(tagged['DLSS-G inputs'].status, 'INFO')
+        self.assertIn('Streamline FG tags supplied the depth; no UI input offered', tagged['DLSS-G inputs'].detail)
+        # Mostly tag copies with a few refused evaluations between them stays INFO; mostly refusals warns.
+        mixed = run(BASE + [ngx('copied=0 inner_frames=0 refused=tag_copied:290,missing_state:10',
+                                'offered=0 captured=0 refused=none')])
+        self.assertEqual(mixed['DLSS-G inputs'].status, 'INFO')
+        self.assertIn('(refused missing_state 10)', mixed['DLSS-G inputs'].detail)
+        mostly_refused = run(BASE + [ngx('copied=0 inner_frames=0 refused=tag_copied:10,observer_coverage:290',
+                                         'offered=0 captured=0 refused=none')])
+        self.assertEqual(mostly_refused['DLSS-G inputs'].status, 'WARN')
+        self.assertIn('does not cover', mostly_refused['DLSS-G inputs'].detail)
+        # No DLSS-G evaluation, or an add-on before 10-23: no check.
+        self.assertNotIn('DLSS-G inputs', run(BASE + [ngx('copied=0 inner_frames=0 refused=none',
+                                                          'offered=0 captured=0 refused=none', 0)]))
+        self.assertNotIn('DLSS-G inputs', run(BASE + [
+            line('10:00:07', '[Sunshine 3D] Sunshine NGX depth: confirmed_features=1 capture_eligible=1 '
+                             'recovered_features=0 evaluations=40 nominations=40 copy_recorded=40 metadata_only=0 '
+                             'fg_owned=0 unknown_feature=0 missing_parameters=0 missing_by_feature=none '
+                             'fg_feature=12 failed=0')]))
+
     def test_fg_switch_settles_before_flat_counts(self):
         checks = run(BASE + [line('10:00:16', '[Sunshine 3D] Sunshine Streamline frame generation: viewport=0 mode=1'),
                              output('10:00:18', 900, 200, 150, 900, 0)])
