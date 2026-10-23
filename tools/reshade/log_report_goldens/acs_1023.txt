@@ -7,7 +7,6 @@ Game 3D readiness: ACShadows.exe  08:23:00 to 08:25:37 (2m36s, ended without exi
          08:24:49.082-08:24:49.362 (281 ms) depth_shape_changed, Streamline selection=completed_before_gap
          08:24:49.433-08:24:49.788 (360 ms) depth_shape_changed, Streamline selection=layout_changed
          08:24:49.888-08:24:50.251 (438 ms) depth_shape_changed, Streamline selection=layout_changed
-         08:24:53.181-08:24:53.181 explicit_reuse_invalidation, unknown selection=not_attempted, until the export paused
 [INFO] Depth paused by the game: 1 depth loss in which the game ran no DLSS (no active depth view: a menu or loading screen) and resumed it with its own scene reset; those frames were flat
          08:23:52.599-08:23:53.816 (1219 ms) retained_depth_expired, Streamline selection=inactive_views (the game supplied no depth)
 [PASS] Placement flat: 10.5% of publications showed the colour frame with depth
@@ -33,7 +32,7 @@ Game 3D readiness: ACShadows.exe  08:23:00 to 08:25:37 (2m36s, ended without exi
          08:24:36-08:24:53 (17 s) FG on: UI layer rejected (8.2% covered, 55% invalid) (reason trusted invalid: UI layer)
 [INFO] Hidden scene: H1 hidden scene (8) in 3 samples (pre-UI image: hudless 0, layer 0), entered 2, released 1, refuted 0; 9 of 38 samples measured
 [PASS] Observation losses: lifecycle 1
-[INFO] Depth losses: depth_shape_changed 7, retained_depth_expired 4, no_retained_depth 1, source_changed 1, explicit_reuse_invalidation 1
+[INFO] Depth losses: depth_shape_changed 7, retained_depth_expired 4, no_retained_depth 1, source_changed 1
 [PASS] Export: runtime_reset 2, not_foreground 1
 [PASS] Present hitches: 1 at resets, FG switches or overlay opening
          08:23:16 export section (no step named; the slowest Present of 08:23:06-08:23:16) 8.1 ms
