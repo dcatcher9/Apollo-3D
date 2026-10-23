@@ -112,6 +112,12 @@ and obsolete files left in an existing build directory are not part of that pack
 
 ## Install and enable
 
+The host now bundles its matching add-on and automatically prepares supported detected games
+while Game 3D is active. ReShade downloads are verified and cached for reuse, fresh installations
+take effect on the next game launch, and existing add-on updates wait for the game to exit.
+See [automatic setup and its discovery limits](../../docs/reshade-sbs.md#setup).
+The instructions below also cover manual setup and standalone add-on development.
+
 For a troubleshooting capture, use the client's **Dump 3D** action while in Game 3D. See the
 [Game dump contract](../../docs/reshade-sbs.md#dump-3d-diagnostics) for the lossless artifacts,
 SL/NGX observations, missing-data reporting and output location.
@@ -1562,3 +1568,23 @@ The add-on source is GPL-3.0-only, as is the host. ReShade's SDK headers retain 
 BSD-3-Clause OR MIT licensing; its adapted GUI shaders retain their BSD notice. The generated
 `SunshineSBS-LICENSES.txt` also includes the ImGui license and accompanies binary distributions.
 No third-party VR exporter implementation or Depth3D shader is copied into this add-on.
+
+## Runtime installer fixture tests
+
+Run these checks from the repository root in **Windows PowerShell 5.1** with the already
+available Pester 3 or 4. Supply an existing copy of the official ReShade 6.8.0 full-add-on
+setup; the suite verifies its pinned SHA-256 before using it. The tests use temporary game
+directories and mocked downloads, and never execute a game, installer or runtime DLL.
+
+```powershell
+Import-Module Pester
+$suite = @{
+    Path = '.\tools\reshade\test_install_runtime.ps1'
+    Parameters = @{ SetupArchive = '.\cmake-build-relwithdebinfo\ReShade_Setup_6.8.0_Addon.exe' }
+}
+$result = Invoke-Pester -Script $suite -PassThru
+if ($result.FailedCount -gt 0 -or $result.TotalCount -eq 0) { throw 'Runtime installer tests failed.' }
+```
+
+The suite covers fresh installation, persistent download-cache reuse, corrupt-cache recovery,
+archive substitution, existing-file preservation, official compatibility restrictions and rollback.

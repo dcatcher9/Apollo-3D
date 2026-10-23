@@ -46,6 +46,7 @@
 
 #ifdef _WIN32
   #include "platform/windows/ar_glasses.h"
+  #include "platform/windows/game3d_setup.h"
   #include "platform/windows/utils.h"
 #endif
 
@@ -1229,6 +1230,14 @@ namespace confighttp {
   }
 
 #ifdef _WIN32
+  void getGame3dSetup(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+    send_response(response, platf::game3d::setup_status());
+  }
+
   void getArGlassDevices(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) {
       return;
@@ -2186,6 +2195,7 @@ namespace confighttp {
     server.resource["^/api/config$"]["GET"] = getConfig;
     server.resource["^/api/config$"]["POST"] = saveConfig;
 #ifdef _WIN32
+    server.resource["^/api/game3d/setup$"]["GET"] = getGame3dSetup;
     server.resource["^/api/ar-glasses$"]["GET"] = getArGlassDevices;
     server.resource["^/api/ar-glasses$"]["POST"] = setArGlassDevice;
 #endif

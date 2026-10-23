@@ -141,7 +141,7 @@ function setOnOff(key, event) {
         </label>
       </div>
       <p v-if="isEnabled('sbs_reshade')" class="card-note">
-        Install ReShade with full add-on support and the Sunshine 3D add-on in your game. No separate shader installation is needed.
+        Install ReShade with full add-on support and the Sunshine 3D add-on for local AR. No separate shader installation is needed.
         Keep the game fullscreen on the virtual display at its normal resolution. Supports SDR and native HDR games.
         Adjust stereo strength in ReShade's Sunshine 3D add-on panel. Restart Sunshine after changing this local AR setting.
         For a streamed headset, select Game 3D in Moonlight 3D; no host provider toggle or restart is needed.

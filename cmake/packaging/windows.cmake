@@ -1,6 +1,12 @@
 # windows specific packaging
 install(TARGETS sunshine RUNTIME DESTINATION "." COMPONENT application)
 install(FILES "${PROJECT_SOURCE_DIR}/NOTICE" DESTINATION "." COMPONENT application)
+install(FILES
+        "${SUNSHINE_GAME3D_BUILD_DIR}/package/SunshineSBS.addon64"
+        "${SUNSHINE_GAME3D_BUILD_DIR}/package/SunshineSBS-LICENSES.txt"
+        "${SUNSHINE_GAME3D_BUILD_DIR}/package/install.ps1"
+        "${SUNSHINE_GAME3D_BUILD_DIR}/package/install-runtime.ps1"
+        DESTINATION "tools/reshade" COMPONENT application)
 
 include("${CMAKE_CURRENT_LIST_DIR}/windows_tensorrt_archive.cmake")
 

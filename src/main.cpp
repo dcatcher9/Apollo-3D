@@ -37,6 +37,7 @@
 #include "video_depth_estimator.h"
 #ifdef _WIN32
   #include "platform/windows/ar_glasses.h"
+  #include "platform/windows/game3d_setup.h"
   #include "platform/windows/exclusive_display_reconcile_retry.h"
   #include "platform/windows/misc.h"
   #include "platform/windows/primary_display.h"
@@ -939,6 +940,9 @@ int main(int argc, char *argv[]) {
 #ifdef _WIN32
   // An approved AR-display hotplug owns a local virtual desktop and local D3D presenter. The guard is
   // created after platform/shader and encoder initialization, and is destroyed before either.
+  auto game_setup_shutdown_guard = util::fail_guard([]() {
+    platf::game3d::shutdown_setup();
+  });
   auto ar_glasses_deinit_guard = ar_glasses::init();
 #endif
 
@@ -1038,6 +1042,8 @@ int main(int argc, char *argv[]) {
 #ifdef _WIN32
   // Stop/join the local presenter before draining its estimator build/retire workers.
   ar_glasses_deinit_guard.reset();
+  platf::game3d::shutdown_setup();
+  game_setup_shutdown_guard.disable();
 
   // The hidden monitor still owns Win32 and logging state. Join it under the live watchdog before
   // process-wide workers and the task pool that carries the watchdog are drained.

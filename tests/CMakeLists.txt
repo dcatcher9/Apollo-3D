@@ -98,6 +98,10 @@ target_link_libraries(${PROJECT_NAME}
         gtest
         ${PLATFORM_LIBRARIES})
 target_compile_definitions(${PROJECT_NAME} PUBLIC ${SUNSHINE_DEFINITIONS} ${TEST_DEFINITIONS})
+add_library(game3d_reshade_version_fixture SHARED fixtures/game3d_reshade_version.rc)
+set_target_properties(game3d_reshade_version_fixture PROPERTIES LINKER_LANGUAGE CXX)
+add_dependencies(${PROJECT_NAME} game3d_reshade_version_fixture)
+target_compile_definitions(${PROJECT_NAME} PRIVATE SUNSHINE_TEST_RESHADE_DLL="$<TARGET_FILE:game3d_reshade_version_fixture>")
 target_compile_options(${PROJECT_NAME} PRIVATE ${SUNSHINE_COMPILE_OPTIONS})
 target_link_options(${PROJECT_NAME} PRIVATE)
 

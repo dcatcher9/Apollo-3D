@@ -579,9 +579,48 @@ release`, `generic depth rebinding`, `depth capture acquisition` and `depth disp
 
 ## Setup
 
+While **Game 3D** is active, Sunshine checks the foreground game on
+the selected display about every two seconds, away from capture and rendering. It resolves the
+running process's actual executable, rather than its launcher, and requires a native x64 process
+with Direct3D 11/12 loaded. A foreground client that exactly fills the selected display qualifies
+without a known engine or store SDK. That generic route requires the same executable, process
+lifetime, window and display across observations at least two seconds apart; missing candidates,
+display/watch changes and stale observations reset confirmation. Known game runtimes and Unreal
+Shipping layouts retain discovery for ordinary windowed games. Browser, launcher and editor
+windows are excluded. This remains a heuristic: unknown windowed games need fullscreen or manual
+setup, and an unknown fullscreen Direct3D application can qualify while Game 3D is selected.
+Stereo export still requires the fullscreen ownership described below.
+
+For a fresh game installation, Sunshine downloads the pinned official ReShade 6.8.0 build with
+full add-on support, verifies its SHA-256, and prepares its x64 DXGI runtime and the bundled
+Sunshine add-on beside the detected executable. The verified download is cached on disk and
+reused for other games and later host runs under
+`%LOCALAPPDATA%\Sunshine3D\cache\ReShade`. A missing or damaged cached installer is downloaded
+again and verified before use. Existing graphics proxies, linked installation paths,
+ambiguous configuration and incompatible official ReShade compatibility entries stop automatic
+runtime installation and leave a setup message. A leftover preset without a runtime or
+`ReShade.ini` can be retained during setup; the add-on installer backs it up and applies its
+ordinary settings migration. Existing ReShade installations retain their
+configuration and add-on search path. Runtime presence does not prove that full add-on support
+is active; the ReShade panel remains the authority when an installed game stays 2D.
+
+Fresh files can be installed while the game stays open and load on its next launch. An existing
+Sunshine add-on that differs from this host's bundled DLL is queued for replacement after the
+game exits, with the previous DLL retained as a backup. The worker continues pending work after
+leaving Game 3D or disconnecting, while Sunshine remains running. It never hot-loads ReShade or
+replaces an in-use DLL. The host's **Game 3D setup** overview card and desktop tray notification
+show the detected executable, progress, next-launch readiness or an actionable failure. Setup
+logs include the full executable path and process lifetime, so games with identically named
+executables in separate directories remain distinguishable.
+
+Manual setup and presentation requirements:
+
 1. Build and install the [Sunshine SBS ReShade add-on](../tools/reshade/README.md) for the game.
    Use the ReShade version with full add-on support and a supported DirectX API.
 2. Run the package's `install.ps1` with `-GameExecutable <game.exe>`.
+   For a missing native add-on, `-AllowRunningGame` permits preparing the next launch without
+   closing the game; it refuses existing Sunshine add-on DLLs. Close the game for manual updates
+   or migration of an existing installation.
    `SunshineSBS.addon64` contains the GPU renderer, controls, depth capture and export; no FX shader
    or external Depth3D checkout is required. The installer migrates saved strength and depth-view
    settings into `[SUNSHINE_GAME3D]` in ReShade.ini, preserving existing native preferences.

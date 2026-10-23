@@ -181,11 +181,13 @@ endforeach()
 
 # One production DLL owns scene-depth selection, stereo sharing and the overlay.
 configure_file(install.ps1 "${CMAKE_CURRENT_BINARY_DIR}/install.ps1" COPYONLY)
+configure_file(install-runtime.ps1 "${CMAKE_CURRENT_BINARY_DIR}/install-runtime.ps1" COPYONLY)
 add_custom_target(Sunshine3DPackage ALL
   COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/package"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:SunshineSBS>" "${CMAKE_CURRENT_BINARY_DIR}/package/SunshineSBS.addon64"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_BINARY_DIR}/SunshineSBS-LICENSES.txt" "${CMAKE_CURRENT_BINARY_DIR}/package/SunshineSBS-LICENSES.txt"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/install.ps1" "${CMAKE_CURRENT_BINARY_DIR}/package/install.ps1"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/install-runtime.ps1" "${CMAKE_CURRENT_BINARY_DIR}/package/install-runtime.ps1"
   COMMAND ${CMAKE_COMMAND} -E rm -f "${CMAKE_CURRENT_BINARY_DIR}/package/Shaders/SunshineDepth3D.fx"
   COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/Shaders"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/Shaders/SunshineDepth3D.fx" "${CMAKE_CURRENT_BINARY_DIR}/Shaders/SunshineDepth3D.fx"

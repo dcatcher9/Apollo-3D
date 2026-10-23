@@ -59,6 +59,12 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display_vram.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/reshade_bridge.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/reshade_bridge.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/game3d_installation.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/game3d_installation.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/game3d_detection.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/game3d_detection.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/game3d_setup.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/game3d_setup.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/sbs_cursor.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/sbs_cursor.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/game3d_debug_dump.h"
@@ -122,6 +128,7 @@ list(PREPEND PLATFORM_LIBRARIES
         shlwapi
         synchronization.lib
         userenv
+        version
         windowscodecs
         ws2_32
         wsock32

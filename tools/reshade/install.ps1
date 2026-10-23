@@ -3,10 +3,15 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string] $GameExecutable,
-    [string] $AddonDirectory = $PSScriptRoot,
-    [string] $ShaderDirectory
+    [string] $AddonDirectory,
+    [string] $ShaderDirectory,
+    [switch] $AllowRunningGame
 )
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+# Windows PowerShell 5.1 does not populate $PSScriptRoot while binding -File
+# parameter defaults. Resolve the co-located package only after binding.
+if (-not $AddonDirectory) { $AddonDirectory = $PSScriptRoot }
 
 function Assert-UnambiguousIni([string] $Text, [string] $Path) {
     $sections = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
@@ -160,7 +165,7 @@ $gameDirectory = Split-Path -Parent $gameExe
 $runningGame = Get-CimInstance Win32_Process | Where-Object {
     $_.ExecutablePath -ieq $gameExe -or (-not $_.ExecutablePath -and $_.Name -ieq [IO.Path]::GetFileName($gameExe))
 }
-if ($runningGame) { throw 'Close the game before installing Sunshine 3D, then run this command again.' }
+if ($runningGame -and -not $AllowRunningGame) { throw 'Close the game before installing Sunshine 3D, then run this command again.' }
 $iniPath = Join-Path $gameDirectory 'ReShade.ini'
 if (-not (Test-Path -LiteralPath $iniPath -PathType Leaf)) { throw 'Install ReShade 6.8 with full add-on support for this game first.' }
 $iniBefore = [IO.File]::ReadAllText($iniPath)
@@ -168,6 +173,14 @@ Assert-UnambiguousIni $iniBefore $iniPath
 $addonSearch = Get-IniScalarValue $iniBefore 'ADDON' 'AddonPath'
 if (-not $addonSearch) { $addonSearch = '.' }
 $addonDestination = Resolve-GamePath $addonSearch
+if ($AllowRunningGame) {
+    if ($ShaderDirectory) { throw 'AllowRunningGame supports only a fresh native Game 3D installation.' }
+    foreach ($existingName in @('SunshineSBS.addon64','SunshineDepth.addon64','SunshineDepthProbe.addon64')) {
+        if (Test-Path -LiteralPath (Join-Path $addonDestination $existingName)) {
+            throw 'An existing Sunshine add-on must be updated while the game is closed.'
+        }
+    }
+}
 $addonSource = (Get-Item -LiteralPath (Join-Path $AddonDirectory 'SunshineSBS.addon64')).FullName
 $licenseSource = (Get-Item -LiteralPath (Join-Path $AddonDirectory 'SunshineSBS-LICENSES.txt')).FullName
 if ([IO.Path]::GetFullPath((Join-Path $addonDestination 'SunshineSBS.addon64')) -ieq $addonSource) {
@@ -374,5 +387,6 @@ try {
     throw $installationFailure
 }
 Write-Output "Installed Sunshine 3D for $([IO.Path]::GetFileName($gameExe)) using $effectName."
-Write-Output 'Start the game, open ReShade > Add-ons > Sunshine 3D, then choose Game 3D in Moonlight.'
+if ($runningGame) { Write-Output 'Installation is ready for the next game launch; the current game has not loaded the new add-on.' }
+Write-Output 'On the next game launch, open ReShade > Add-ons > Sunshine 3D, then choose Game 3D in Moonlight.'
 Write-Output "Backup: $backupDirectory"

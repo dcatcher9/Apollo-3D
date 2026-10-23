@@ -364,6 +364,30 @@ namespace system_tray {
     return true;
   }
 
+  bool update_tray_game3d_setup(std::string game_name, std::string detail) {
+    auto lock = std::lock_guard(tray_lifecycle_mutex);
+    if (!tray_initialized) {
+      return false;
+    }
+
+    tray.notification_title = nullptr;
+    tray.notification_text = nullptr;
+    tray.notification_cb = nullptr;
+    tray.notification_icon = nullptr;
+    tray_update(&tray);
+    char msg[256];
+    snprintf(msg, std::size(msg), "%s: %s Click to view setup.", game_name.c_str(), detail.c_str());
+    tray.notification_title = "Game 3D Setup";
+    tray.notification_text = msg;
+    tray.notification_icon = TRAY_ICON;
+    tray.tooltip = product_display_name;
+    tray.notification_cb = []() {
+      launch_ui("/#game3d-setup");
+    };
+    tray_update(&tray);
+    return true;
+  }
+
   void
     update_tray_paired(std::string device_name) {
     auto lock = std::lock_guard(tray_lifecycle_mutex);

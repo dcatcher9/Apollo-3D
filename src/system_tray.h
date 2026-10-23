@@ -69,6 +69,9 @@ namespace system_tray {
   /** Notify the user that a newly seen monitor needs an AR-display decision. */
   bool update_tray_ar_display_decision(std::string display_name);
 
+  /** Notify the user about setup for a detected Game 3D application. */
+  bool update_tray_game3d_setup(std::string game_name, std::string detail);
+
   void update_tray_paired(std::string device_name);
 
   void update_tray_client_connected(std::string client_name);

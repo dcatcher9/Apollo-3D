@@ -33,6 +33,7 @@
 #include "host_sbs_v2_renderer.h"
 #include "misc.h"
 #include "reshade_bridge.h"
+#include "game3d_setup.h"
 #include "sbs_debug_dump.h"
 #include "game3d_debug_dump.h"
 #include "src/config.h"
@@ -487,6 +488,7 @@ namespace platf::dxgi {
       // Encoder teardown may remain blocked inside the NVIDIA driver. The shared capture-display
       // owner is not a D3D/NVENC operand, so release it before derived member destruction to let
       // Desktop Duplication reinitialize while device/context resources remain alive.
+      game_setup_watch.reset();
       display.reset();
     }
 
@@ -5416,6 +5418,9 @@ namespace platf::dxgi {
       game_source_supported = game_transport_supported &&
                               (display->display_rotation == DXGI_MODE_ROTATION_UNSPECIFIED ||
                                display->display_rotation == DXGI_MODE_ROTATION_IDENTITY);
+      game_setup_watch = ::video::is_game_mode(sbs_mode) ?
+                           platf::game3d::watch_game_setup({display->offset_x, display->offset_y, display->offset_x + display->width, display->offset_y + display->height}) :
+                           nullptr;
       // This converter is used by live local/remote presentation only. The offline worker and
       // benchmark own their independent AI renderer and never instantiate this receiver.
       // A fullscreen game may render at the negotiated resolution while Windows presents it at
@@ -6245,6 +6250,7 @@ namespace platf::dxgi {
     int sbs_mode = ::video::SBS_OFF;  ///< Host SBS mode for this encode device (set in init_output).
     config::video_t::sbs_t sbs_config {};  ///< Immutable Host SBS settings for this device.
     std::unique_ptr<platf::reshade_bridge::receiver_t> reshade_receiver;
+    std::shared_ptr<void> game_setup_watch;
     std::function<void()> external_frame_wake;  ///< See set_external_frame_wake().
     std::uint64_t capture_pixels_token = 0;  ///< This encoder's display->external_pixels_owner value.
     bool conversion_kept_input_ = false;  ///< See platf::encode_device_t::conversion_kept_input().

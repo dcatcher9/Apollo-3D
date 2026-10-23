@@ -160,6 +160,8 @@
       </article>
     </section>
 
+    <Game3dSetup :setup="game3dSetup"></Game3dSetup>
+
     <footer class="apollo-overview-footer">
       <span>{{ pairedClients.length }} {{ pairedClients.length === 1 ? 'device' : 'devices' }} paired</span>
       <span aria-hidden="true">•</span>
@@ -176,15 +178,17 @@
   import { createApp } from 'vue'
   import { initApp } from './init'
   import Navbar from './Navbar.vue'
+  import Game3dSetup from './Game3dSetup.vue'
 
   const app = createApp({
-    components: { Navbar },
+    components: { Navbar, Game3dSetup },
     data() {
       return {
         config: null,
         apps: [],
         currentApp: '',
         pairedClients: [],
+        game3dSetup: null,
         logs: '',
         loading: true,
         refreshing: false,
@@ -381,16 +385,17 @@
         if (this.refreshing) return
         this.refreshing = true
         try {
-          const requests = [this.fetchJson('./api/config'), this.fetchJson('./api/clients/list'), this.fetchJson('./api/apps')]
+          const requests = [this.fetchJson('./api/config'), this.fetchJson('./api/clients/list'), this.fetchJson('./api/apps'), this.fetchJson('./api/game3d/setup').catch(() => ({ state: 'unavailable' }))]
           if (includeDiagnostics) requests.push(fetch('./api/logs', { credentials: 'include' }).then(response => {
             if (!response.ok) throw new Error(`Sunshine 3D returned HTTP ${response.status}`)
             return response.text()
           }))
-          const [config, clients, apps, logs] = await Promise.all(requests)
+          const [config, clients, apps, game3dSetup, logs] = await Promise.all(requests)
           this.config = config
           this.pairedClients = Array.isArray(clients.named_certs) ? clients.named_certs : []
           this.apps = Array.isArray(apps.apps) ? apps.apps : []
           this.currentApp = apps.current_app || ''
+          this.game3dSetup = game3dSetup
           if (typeof logs === 'string') this.logs = logs
           this.apiError = ''
         } catch (error) {

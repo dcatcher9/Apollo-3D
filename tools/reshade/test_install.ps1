@@ -393,3 +393,46 @@ foreach ($invalid in @(
     Require-Unchanged $before
 }
 Write-Output 'PASS external technique ownership and export markers reject incomplete or commented declarations.'
+
+foreach ($existingName in @('SunshineSBS.addon64','SunshineDepth.addon64','SunshineDepthProbe.addon64')) {
+    $guardGame = New-Fixture ('running fresh guard ' + $existingName) $config $nativePreset $false
+    [IO.File]::WriteAllText((Join-Path $guardGame "custom addons\$existingName"), 'EXISTING ADDON')
+    $before = File-Hashes $guardGame
+    $rejected = $false
+    try { & $installer -GameExecutable (Join-Path $guardGame 'Test Game.exe') -AddonDirectory $fixturePackage -AllowRunningGame }
+    catch { $rejected = $_.Exception.Message.Contains('must be updated while the game is closed') }
+    Require $rejected ('AllowRunningGame replaced an existing add-on: ' + $existingName)
+    Require-Unchanged $before
+}
+$freshGame = New-Fixture 'running fresh allowed' $config $nativePreset $false
+& $installer -GameExecutable (Join-Path $freshGame 'Test Game.exe') -AddonDirectory $fixturePackage -AllowRunningGame
+Require (Test-Path -LiteralPath (Join-Path $freshGame 'custom addons\SunshineSBS.addon64') -PathType Leaf) 'Fresh installation with AllowRunningGame did not install the add-on.'
+Write-Output 'PASS AllowRunningGame only permits a missing native add-on and preserves existing add-ons.'
+
+# Windows PowerShell 5.1 initializes $PSScriptRoot after binding -File parameters.
+# Exercise the actual packaged CLI without -AddonDirectory, as documented for users.
+$standalonePackage = Join-Path $OutputDirectory 'Windows PowerShell File package with spaces'
+New-Item -ItemType Directory -Path $standalonePackage | Out-Null
+$standaloneInstaller = Join-Path $standalonePackage 'install.ps1'
+Copy-Item -LiteralPath $installer -Destination $standaloneInstaller
+foreach ($name in @('SunshineSBS.addon64','SunshineSBS-LICENSES.txt')) {
+    [IO.File]::WriteAllText((Join-Path $standalonePackage $name), 'UNEXECUTED CLI FIXTURE ' + $name)
+}
+$standaloneGame = New-Fixture 'Windows PowerShell File default addon directory' "[GENERAL]`n" '' $false
+$standaloneExecutable = Join-Path $standaloneGame 'Test Game.exe'
+$standaloneGameHash = (Get-FileHash -LiteralPath $standaloneExecutable).Hash
+$windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$previousErrorAction = $ErrorActionPreference
+try {
+    $ErrorActionPreference = 'Continue'
+    $standaloneOutput = & $windowsPowerShell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $standaloneInstaller -GameExecutable $standaloneExecutable -AllowRunningGame 2>&1
+    $standaloneExit = $LASTEXITCODE
+} finally { $ErrorActionPreference = $previousErrorAction }
+Require ($standaloneExit -eq 0) ('Windows PowerShell -File setup without AddonDirectory failed: ' + ($standaloneOutput -join [Environment]::NewLine))
+foreach ($name in @('SunshineSBS.addon64','SunshineSBS-LICENSES.txt')) {
+    Require ((Get-FileHash -LiteralPath (Join-Path $standaloneGame $name)).Hash -eq
+        (Get-FileHash -LiteralPath (Join-Path $standalonePackage $name)).Hash) ('Packaged CLI did not use its co-located file: ' + $name)
+}
+Require ([IO.File]::ReadAllText((Join-Path $standaloneGame 'ReShade.ini')) -match '(?m)^Enabled=1\r?$') 'Packaged CLI did not enable native Game 3D.'
+Require ((Get-FileHash -LiteralPath $standaloneExecutable).Hash -eq $standaloneGameHash) 'Packaged CLI changed the game executable.'
+Write-Output 'PASS Windows PowerShell 5.1 -File uses co-located addon files when AddonDirectory is omitted.'
