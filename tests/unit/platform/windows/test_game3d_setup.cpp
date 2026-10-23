@@ -243,4 +243,49 @@ namespace {
     EXPECT_EQ(apply(corrupt).state, "ready_to_install");
     EXPECT_EQ(game_files(), before);
   }
+
+  TEST_F(Game3DSetup, UnreadableChoicesAreReadAgainAndNeverOverwritten) {
+    const auto identity = game3d::file_identity(game);
+    const auto other = game.parent_path() / "Other.exe";
+    {
+      game3d::detail::setup_decisions decisions {choices};
+      ASSERT_TRUE(decisions.record(other, "other identity", decision::never));
+    }
+    const auto saved = read(choices);
+    {
+      // Another program holds the file open without sharing it, for example a backup tool.
+      game3d::detail::setup_decisions decisions {choices};
+      const auto locked = CreateFileW(choices.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+      ASSERT_NE(locked, INVALID_HANDLE_VALUE);
+      EXPECT_EQ(decisions.lookup(other, {}), decision::none);
+      // A new choice cannot replace the file it could not read.
+      EXPECT_FALSE(decisions.record(game, identity, decision::install));
+      CloseHandle(locked);
+      EXPECT_EQ(read(choices), saved);
+      // Read again once it is available: the earlier choice is still there.
+      EXPECT_EQ(decisions.lookup(other, {}), decision::never);
+      ASSERT_TRUE(decisions.record(game, identity, decision::install));
+      EXPECT_EQ(decisions.lookup(other, {}), decision::never);
+    }
+    // A torn or damaged file is kept aside for recovery before the next choice is saved.
+    const std::string torn = "{\"version\": 1, \"executables\": [{\"path\": ";
+    write(choices, torn);
+    {
+      game3d::detail::setup_decisions decisions {choices};
+      EXPECT_EQ(decisions.lookup(other, {}), decision::none);
+      ASSERT_TRUE(decisions.record(game, identity, decision::never));
+    }
+    std::vector<fs::path> aside;
+    for (const auto &entry : fs::directory_iterator(choices.parent_path())) {
+      if (entry.path().filename().string().starts_with("game3d_setup.json.bad-")) {
+        aside.push_back(entry.path());
+      }
+    }
+    ASSERT_EQ(aside.size(), 1U);
+    EXPECT_EQ(read(aside.front()), torn);
+    game3d::detail::setup_decisions restarted {choices};
+    EXPECT_EQ(restarted.lookup(game, identity), decision::never);
+    EXPECT_EQ(restarted.lookup(other, {}), decision::none);
+    EXPECT_FALSE(fs::exists(choices.parent_path() / "game3d_setup.json.tmp"));
+  }
 }  // namespace

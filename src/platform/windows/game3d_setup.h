@@ -43,7 +43,9 @@ namespace platf::game3d {
     // The user's explicit per-executable choices, in one JSON file in the host's config
     // directory. "never" applies to the executable path; "install" applies only while the
     // executable's file identity matches the one confirmed. An unreadable file holds no
-    // choices, so it can only cause a new offer, never a write.
+    // choices, so it can only cause a new offer, never a write. It is read again on the next
+    // use, and the next choice saved first moves it aside (game3d_setup.json.bad-<time>)
+    // instead of replacing it; when it cannot be moved, that choice is not saved.
     class setup_decisions {
     public:
       explicit setup_decisions(std::filesystem::path file);
@@ -60,11 +62,13 @@ namespace platf::game3d {
       };
 
       void load_locked();
+      [[nodiscard]] bool set_aside_locked();
       [[nodiscard]] bool save_locked(const std::vector<entry_t> &entries) const;
 
       std::mutex mutex_;
       std::filesystem::path file_;
       bool loaded_ {};
+      bool unreadable_ {};
       std::vector<entry_t> entries_;
     };
 

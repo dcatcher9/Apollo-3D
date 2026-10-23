@@ -596,19 +596,21 @@ export stereo until it covers the display anyway. Detection is a heuristic, so a
 fullscreen Direct3D application (a media center or slideshow, for example) can be detected; it is
 only offered, never written. Stereo export still requires the fullscreen ownership described below.
 
-Sunshine never writes into a game folder without consent. A detected executable without the
-Sunshine add-on, whether or not its folder already has ReShade, is shown as **Ready to set up** on
-the host's **Game 3D setup** overview card, with its name and full path, and nothing is written. **Install for this game** confirms that exact
-executable: the Web UI sends its path and file identity (volume, file ID, size and last write
-time) to the authenticated `POST /api/game3d/setup/decision`, which accepts only the executable
-the host currently offers. **Never for this game** declines it. Choices persist across host
-restarts in `game3d_setup.json` in the host's configuration directory. A declined path is not
-offered or written again, also after a game update, until **Set up this game** is chosen. An
-install confirmation applies only while the executable file is unchanged; a game update makes
-setup ask again. A failed confirmed installation retries on the game's next launch, and a
-completed one consumes the confirmation, so a later removal of ReShade or the add-on is offered
-again rather than reinstalled. The desktop tray notification only opens the overview card; clicking it never
-installs.
+Sunshine never writes into a game folder without consent. A detected executable without the Sunshine
+add-on, whether or not its folder already has ReShade, is shown as **Ready to set up** on the host's
+**Game 3D setup** overview card, with its name and full path, and nothing is written. **Install for
+this game** confirms that exact executable: the Web UI sends its path and file identity (volume,
+file ID, size and last write time) to the authenticated `POST /api/game3d/setup/decision`, which
+accepts only the executable the host currently offers. **Never for this game** declines it. Choices
+persist across host restarts in `game3d_setup.json` in the host's configuration directory. A file
+that cannot be read holds no choices, so it can only cause an offer, and is read again on its next
+use; the next choice saved first moves it aside as `game3d_setup.json.bad-<time>` instead of
+replacing it, and is not saved while it cannot be moved. A declined path is not offered or written
+again, also after a game update, until **Set up this game** is chosen. An install confirmation
+applies only while the executable file is unchanged; a game update makes setup ask again. A failed
+confirmed installation retries on the game's next launch, and a completed one consumes the
+confirmation, so a later removal of ReShade or the add-on is offered again rather than reinstalled.
+The desktop tray notification only opens the overview card; clicking it never installs.
 
 Confirmed setup downloads the pinned official ReShade 6.8.0 build with full add-on support,
 verifies its SHA-256, and prepares its x64 DXGI runtime and the bundled Sunshine add-on beside

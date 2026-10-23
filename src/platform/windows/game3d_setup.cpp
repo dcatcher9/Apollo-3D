@@ -7,6 +7,7 @@
 #include "src/system_tray.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <fstream>
@@ -44,22 +45,35 @@ namespace platf::game3d {
       if (loaded_) {
         return;
       }
-      loaded_ = true;
       entries_.clear();
       std::error_code error;
-      if (file_.empty() || !std::filesystem::exists(file_, error)) {
+      const bool present = !file_.empty() && std::filesystem::exists(file_, error);
+      if (!error && !present) {
+        loaded_ = true;
+        unreadable_ = false;
         return;
       }
       try {
+        if (error) {
+          throw std::runtime_error(error.message());
+        }
         const auto size = std::filesystem::file_size(file_, error);
         if (error || size > 1024 * 1024) {
           throw std::runtime_error("unexpected size");
         }
         std::ifstream input(file_, std::ios::binary);
-        const auto document = nlohmann::json::parse(std::string {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()});
+        if (!input) {
+          throw std::runtime_error("the file cannot be opened");
+        }
+        const std::string text {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+        if (input.bad()) {
+          throw std::runtime_error("the file cannot be read");
+        }
+        const auto document = nlohmann::json::parse(text);
         if (document.at("version").get<int>() != 1) {
           throw std::runtime_error("unsupported version");
         }
+        std::vector<entry_t> entries;
         for (const auto &item : document.at("executables")) {
           const auto decision = item.at("decision").get<std::string>();
           entry_t entry {from_utf8(item.at("path").get<std::string>()), item.value("identity", std::string {})};
@@ -68,17 +82,43 @@ namespace platf::game3d {
           } else if (decision == "never") {
             entry.decision = setup_decision_e::never;
           }
-          if (entry.decision == setup_decision_e::none || !entry.executable.is_absolute() || (entry.decision == setup_decision_e::install && entry.identity.empty()) || entries_.size() >= max_decisions) {
+          if (entry.decision == setup_decision_e::none || !entry.executable.is_absolute() || (entry.decision == setup_decision_e::install && entry.identity.empty()) || entries.size() >= max_decisions) {
             throw std::runtime_error("invalid entry");
           }
-          entries_.push_back(std::move(entry));
+          entries.push_back(std::move(entry));
         }
+        entries_ = std::move(entries);
+        loaded_ = true;
+        unreadable_ = false;
       } catch (const std::exception &failure) {
         // No choice is safer than a partial one: the executable is offered again and nothing
-        // is written until the user confirms it again.
-        entries_.clear();
-        BOOST_LOG(warning) << "Game 3D setup: ignoring unreadable setup choices in \"" << utf8(file_) << "\": " << failure.what();
+        // is written until the user confirms it again. The file is read again on the next use,
+        // since another program may only hold it open for a moment.
+        if (!unreadable_) {
+          BOOST_LOG(warning) << "Game 3D setup: ignoring unreadable setup choices in \"" << utf8(file_) << "\": " << failure.what();
+        }
+        unreadable_ = true;
       }
+    }
+
+    bool setup_decisions::set_aside_locked() {
+      SYSTEMTIME now {};
+      GetLocalTime(&now);
+      std::array<wchar_t, 64> suffix {};
+      swprintf(suffix.data(), suffix.size(), L".bad-%04u%02u%02u-%02u%02u%02u-%03u", now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond, now.wMilliseconds);
+      auto aside = file_;
+      aside += suffix.data();
+      // No replacement: a file this cannot move, for example one another program holds open,
+      // keeps its choices and refuses the new one.
+      if (MoveFileExW(file_.c_str(), aside.c_str(), MOVEFILE_WRITE_THROUGH)) {
+        BOOST_LOG(warning) << "Game 3D setup: kept the unreadable setup choices as \"" << utf8(aside) << "\" and started a new file";
+      } else if (GetLastError() != ERROR_FILE_NOT_FOUND) {
+        return false;
+      }
+      entries_.clear();
+      loaded_ = true;
+      unreadable_ = false;
+      return true;
     }
 
     bool setup_decisions::save_locked(const std::vector<entry_t> &entries) const {
@@ -90,22 +130,19 @@ namespace platf::game3d {
           {"decision", entry.decision == setup_decision_e::install ? "install" : "never"},
         });
       }
+      const auto text = document.dump(2);
       auto temporary = file_;
       temporary += L".tmp";
-      {
-        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
-        output << document.dump(2);
-        output.flush();
-        if (!output) {
-          output.close();
-          std::error_code ignored;
-          std::filesystem::remove(temporary, ignored);
-          return false;
-        }
+      const auto output = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+      if (output == INVALID_HANDLE_VALUE) {
+        return false;
       }
-      if (!MoveFileExW(temporary.c_str(), file_.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        std::error_code ignored;
-        std::filesystem::remove(temporary, ignored);
+      // Durable before the rename: a power loss must not leave a replaced file without content.
+      DWORD written = 0;
+      const bool complete = WriteFile(output, text.data(), static_cast<DWORD>(text.size()), &written, nullptr) && written == text.size() && FlushFileBuffers(output);
+      CloseHandle(output);
+      if (!complete || !MoveFileExW(temporary.c_str(), file_.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DeleteFileW(temporary.c_str());
         return false;
       }
       return true;
@@ -131,6 +168,10 @@ namespace platf::game3d {
       std::lock_guard lock(mutex_);
       load_locked();
       if (!executable.is_absolute() || (decision == setup_decision_e::install && identity.empty())) {
+        return false;
+      }
+      // Never replace choices that could not be read with only this one.
+      if (unreadable_ && !set_aside_locked()) {
         return false;
       }
       auto entries = entries_;
