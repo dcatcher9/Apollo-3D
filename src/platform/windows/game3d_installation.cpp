@@ -6,6 +6,7 @@
 #include <atomic>
 #include <fstream>
 #include <optional>
+#include <span>
 #include <string_view>
 #include <vector>
 
@@ -524,6 +525,29 @@ namespace platf::game3d {
     installation_cancelled.store(true);
   }
 
+  std::string file_identity(const fs::path &path) {
+    handle_t file {CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
+    FILE_ID_INFO id {};
+    FILE_BASIC_INFO basic {};
+    FILE_STANDARD_INFO standard {};
+    if (file.value == INVALID_HANDLE_VALUE || !GetFileInformationByHandleEx(file.value, FileIdInfo, &id, sizeof(id)) || !GetFileInformationByHandleEx(file.value, FileBasicInfo, &basic, sizeof(basic)) || !GetFileInformationByHandleEx(file.value, FileStandardInfo, &standard, sizeof(standard)) || standard.Directory) {
+      return {};
+    }
+    std::string result;
+    const auto append = [&result](const void *data, std::size_t bytes) {
+      constexpr char digits[] = "0123456789abcdef";
+      for (const auto byte : std::span {static_cast<const unsigned char *>(data), bytes}) {
+        result.push_back(digits[byte >> 4]);
+        result.push_back(digits[byte & 15]);
+      }
+    };
+    append(&id.VolumeSerialNumber, sizeof(id.VolumeSerialNumber));
+    append(id.FileId.Identifier, sizeof(id.FileId.Identifier));
+    append(&standard.EndOfFile.QuadPart, sizeof(standard.EndOfFile.QuadPart));
+    append(&basic.LastWriteTime.QuadPart, sizeof(basic.LastWriteTime.QuadPart));
+    return result;
+  }
+
   installation_status inspect_installation(const fs::path &game_executable, const fs::path &bundle_directory) {
     installation_status status;
     try {
@@ -687,5 +711,64 @@ namespace platf::game3d {
     } catch (const std::exception &) {
       return unavailable(std::move(status), "ReShade could not be installed. Run the bundled installer manually.");
     }
+  }
+
+  installation_status install_reshade_and_addon_for_next_launch(const fs::path &game_executable, const fs::path &bundle_directory) {
+    auto status = inspect_installation(game_executable, bundle_directory);
+    if (status.state != installation_state_e::missing_reshade) {
+      return status;
+    }
+    const auto directory = status.executable.parent_path();
+    const auto proxy = directory / "dxgi.dll";
+    const auto configuration = directory / "ReShade.ini";
+    const bool proxy_existed = GetFileAttributesW(proxy.c_str()) != INVALID_FILE_ATTRIBUTES;
+    const bool configuration_existed = GetFileAttributesW(configuration.c_str()) != INVALID_FILE_ATTRIBUTES;
+    status = install_reshade_for_next_launch(status.executable, bundle_directory);
+    if (status.state != installation_state_e::installed) {
+      return status;
+    }
+    // The add-on installer never touches the proxy, but it edits ReShade.ini and restores it
+    // from its own backup on failure; compare the proxy by file identity, the INI by content.
+    const auto created_proxy = proxy_existed ? std::string {} : file_identity(proxy);
+    std::optional<std::string> created_configuration;
+    if (!configuration_existed) {
+      std::ifstream input(configuration, std::ios::binary);
+      created_configuration.emplace(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+    }
+    status = install_addon_for_next_launch(status.executable, bundle_directory);
+    if (status.state == installation_state_e::installed) {
+      status.detail = "ReShade and the Sunshine 3D add-on are installed beside the game executable. Keep playing; Game 3D takes effect on the next launch.";
+      return status;
+    }
+    // A bare runtime would show ReShade's own overlay in the game without Game 3D. Remove only
+    // the files this call created and nobody changed since, proxy first; the folder is then
+    // fresh again for a retry.
+    std::string kept;
+    const auto keep = [&kept](const fs::path &path) {
+      kept += (kept.empty() ? "" : ", ") + utf8(path);
+    };
+    const auto exists = [](const fs::path &path) {
+      return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+    };
+    if (!proxy_existed && exists(proxy) && (created_proxy.empty() || file_identity(proxy) != created_proxy || !DeleteFileW(proxy.c_str()))) {
+      keep(proxy);
+    }
+    if (created_configuration && exists(configuration)) {
+      std::string current;
+      bool read = false;
+      if (std::ifstream input {configuration, std::ios::binary}) {
+        current.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+        read = !input.bad();
+      }
+      if (!read || current != *created_configuration || !DeleteFileW(configuration.c_str())) {
+        keep(configuration);
+      }
+    }
+    const auto failure = status.detail;
+    status = inspect_installation(status.executable, bundle_directory);
+    if (!kept.empty()) {
+      return unavailable(std::move(status), "The Sunshine 3D add-on could not be installed, and the new ReShade files could not be removed again: " + kept + ". Remove them or finish setup manually. " + failure);
+    }
+    return unavailable(std::move(status), "The Sunshine 3D add-on could not be installed, so the new ReShade runtime was removed again; setup retries on the next game launch. " + failure);
   }
 }  // namespace platf::game3d

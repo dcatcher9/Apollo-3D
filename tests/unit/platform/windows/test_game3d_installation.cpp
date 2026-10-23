@@ -100,8 +100,10 @@ namespace {
         const auto ini = executable.parent_path() / "ReShade.ini";
         fs::remove(ini);
         EXPECT_EQ(game3d::inspect_installation(executable, bundle).state, state::anti_cheat);
-        const auto status = game3d::inspect_installation(executable, bundle);
+        auto status = game3d::install_reshade_and_addon_for_next_launch(executable, bundle);
+        EXPECT_EQ(status.state, state::anti_cheat);
         EXPECT_NE(status.detail.find(name), std::string::npos) << status.detail;
+        EXPECT_FALSE(fs::exists(ini));
         EXPECT_EQ(game3d::install_reshade_for_next_launch(executable, bundle).state, state::anti_cheat);
         EXPECT_FALSE(fs::exists(ini));
         write(ini, "[GENERAL]\n");
@@ -143,6 +145,52 @@ namespace {
     EXPECT_EQ(files(), before);
     configure("[ADDON]\nAddonPath=" + (root / "absolute addons").string() + "\n");
     EXPECT_EQ(game3d::inspect_installation(game, bundle).state, state::missing_addon);
+  }
+
+  TEST_F(Game3DInstallation, FileIdentityFollowsTheExecutableFile) {
+    const auto identity = game3d::file_identity(game);
+    EXPECT_FALSE(identity.empty());
+    EXPECT_EQ(game3d::file_identity(game), identity);
+    write(game, "updated test executable");
+    EXPECT_NE(game3d::file_identity(game), identity);
+    EXPECT_TRUE(game3d::file_identity(game.parent_path()).empty());
+    EXPECT_TRUE(game3d::file_identity(game.parent_path() / "missing.exe").empty());
+  }
+
+  TEST_F(Game3DInstallation, FailedAddonStepRemovesTheRuntimeItCreated) {
+    fs::remove(game.parent_path() / "dxgi.dll");
+    write(game.parent_path() / "ReShadePreset.ini", "Techniques=Curves@Curves.fx\n");
+    fake_installers("Write-Error 'addon-step-failure'\nexit 1");
+    const auto status = game3d::install_reshade_and_addon_for_next_launch(game, bundle);
+    EXPECT_EQ(status.state, state::unavailable);
+    EXPECT_NE(status.detail.find("removed again"), std::string::npos) << status.detail;
+    EXPECT_NE(status.detail.find("addon-step-failure"), std::string::npos) << status.detail;
+    EXPECT_FALSE(fs::exists(game.parent_path() / "dxgi.dll"));
+    EXPECT_FALSE(fs::exists(game.parent_path() / "ReShade.ini"));
+    EXPECT_EQ(read(game.parent_path() / "ReShadePreset.ini"), "Techniques=Curves@Curves.fx\n");
+    // The folder is fresh again, so a later confirmed attempt can retry.
+    EXPECT_EQ(game3d::inspect_installation(game, bundle).state, state::missing_reshade);
+  }
+
+  TEST_F(Game3DInstallation, RollbackKeepsRuntimeFilesChangedSinceTheRuntimeStep) {
+    fs::remove(game.parent_path() / "dxgi.dll");
+    fake_installers("[IO.File]::AppendAllText((Join-Path $directory 'ReShade.ini'), 'UserEdit=1')\nexit 1");
+    const auto status = game3d::install_reshade_and_addon_for_next_launch(game, bundle);
+    EXPECT_EQ(status.state, state::unavailable);
+    EXPECT_NE(status.detail.find("could not be removed"), std::string::npos) << status.detail;
+    // The proxy is removed first, so no runtime loads; the edited configuration is preserved.
+    EXPECT_FALSE(fs::exists(game.parent_path() / "dxgi.dll"));
+    EXPECT_NE(read(game.parent_path() / "ReShade.ini").find("UserEdit=1"), std::string::npos);
+  }
+
+  TEST_F(Game3DInstallation, CombinedInstallLeavesExistingFilesAndFinishesBothSteps) {
+    fs::remove(game.parent_path() / "dxgi.dll");
+    fake_installers("Copy-Item -LiteralPath (Join-Path $AddonDirectory 'SunshineSBS.addon64') -Destination (Join-Path $directory 'SunshineSBS.addon64')");
+    const auto status = game3d::install_reshade_and_addon_for_next_launch(game, bundle);
+    EXPECT_EQ(status.state, state::installed) << status.detail;
+    EXPECT_TRUE(fs::exists(game.parent_path() / "dxgi.dll"));
+    EXPECT_EQ(read(game.parent_path() / "SunshineSBS.addon64"), "matching bundled addon");
+    EXPECT_EQ(game3d::inspect_installation(game, bundle).state, state::current);
   }
 
   TEST_F(Game3DInstallation, RequiresRuntimeIdentityAndConfiguration) {

@@ -147,15 +147,8 @@ namespace platf::game3d {
           if (publish_progress) {
             publish(game, installing, "installing");
           }
-          result = install_reshade_for_next_launch(game.executable);
-          if (result.state != installation_state_e::installed) {
-            return result;
-          }
-          result = install_addon_for_next_launch(game.executable);
-          if (result.state == installation_state_e::installed) {
-            result.detail = "ReShade and the Sunshine 3D add-on are installed beside the game executable. Keep playing; Game 3D takes effect on the next launch.";
-          }
-          return result;
+          // A failed add-on step removes the runtime it just created, so no bare ReShade remains.
+          return install_reshade_and_addon_for_next_launch(game.executable);
         }
         if (result.state == installation_state_e::missing_addon) {
           auto installing = result;
