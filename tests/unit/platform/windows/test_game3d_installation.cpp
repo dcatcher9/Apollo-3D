@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "src/platform/windows/game3d_installation.h"
 
+#include <algorithm>
 #include <atomic>
 #include <filesystem>
 #include <fstream>
@@ -64,6 +65,15 @@ namespace {
       write(bundle / "install.ps1", "param([string] $GameExecutable, [string] $AddonDirectory, [switch] $AllowRunningGame)\n$directory = Split-Path -Parent $GameExecutable\n" + addon_body + "\n");
     }
 
+    // Every file below the fixture root, so a test can prove that nothing was written.
+    std::vector<fs::path> files() const {
+      std::vector<fs::path> result;
+      for (const auto &entry : fs::recursive_directory_iterator(root)) {
+        result.push_back(entry.path());
+      }
+      std::sort(result.begin(), result.end());
+      return result;
+    }
   };
 
   TEST_F(Game3DInstallation, AntiCheatMarkersInTheGameFolderOrItsParentsRefuseEveryWriter) {
@@ -120,6 +130,19 @@ namespace {
     EXPECT_EQ(game3d::inspect_installation(executable, bundle).state, state::missing_reshade);
     write(root / "drive" / "Shooter_BE.exe", "marker");
     EXPECT_EQ(game3d::inspect_installation(executable, bundle).state, state::anti_cheat);
+  }
+
+  TEST_F(Game3DInstallation, EnvironmentVariableAddonPathNeedsManualSetup) {
+    // The game expands %LOCALAPPDATA% for its own user; the service would resolve SYSTEM's.
+    configure("[ADDON]\nAddonPath=%LOCALAPPDATA%\\ReShade\\Addons\n");
+    fs::copy_file(fs::path(SUNSHINE_SOURCE_DIR) / "tools/reshade/install.ps1", bundle / "install.ps1");
+    const auto before = files();
+    EXPECT_EQ(game3d::inspect_installation(game, bundle).state, state::unavailable);
+    EXPECT_EQ(game3d::install_addon_for_next_launch(game, bundle).state, state::unavailable);
+    EXPECT_EQ(game3d::update_existing_addon(game, bundle).state, state::unavailable);
+    EXPECT_EQ(files(), before);
+    configure("[ADDON]\nAddonPath=" + (root / "absolute addons").string() + "\n");
+    EXPECT_EQ(game3d::inspect_installation(game, bundle).state, state::missing_addon);
   }
 
   TEST_F(Game3DInstallation, RequiresRuntimeIdentityAndConfiguration) {

@@ -112,6 +112,11 @@ function Set-IniValue([string] $Text, [string] $Section, [string] $Key, [string]
 }
 
 function Resolve-GamePath([string] $Path) {
+    # The game expands environment variables for its own user. The automatic path runs as the
+    # host's account (SYSTEM for the service), where %LOCALAPPDATA% names another profile.
+    if ($AllowRunningGame -and $Path.Contains('%')) {
+        throw "ReShade.ini path '$Path' uses environment variables and needs manual setup: close the game and run this installer without -AllowRunningGame from your own account."
+    }
     $expanded = [Environment]::ExpandEnvironmentVariables($Path)
     if ([IO.Path]::IsPathRooted($expanded)) { return [IO.Path]::GetFullPath($expanded) }
     return [IO.Path]::GetFullPath((Join-Path $gameDirectory $expanded))

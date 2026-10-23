@@ -103,17 +103,13 @@ namespace platf::game3d {
       if (!input.eof()) {
         return std::nullopt;
       }
-      auto path = fs::path(std::u8string(value.begin(), value.end()));
-      const auto length = ExpandEnvironmentStringsW(path.c_str(), nullptr, 0);
-      if (length == 0 || length > 32768) {
+      // The game expands environment variables in its own user's environment. The setup worker
+      // runs as the host's account (SYSTEM for the service), where %LOCALAPPDATA% and similar
+      // resolve to another profile; such a path needs manual setup rather than a guess.
+      if (value.find('%') != std::string::npos) {
         return std::nullopt;
       }
-      std::wstring expanded(length, L'\0');
-      if (ExpandEnvironmentStringsW(path.c_str(), expanded.data(), length) != length) {
-        return std::nullopt;
-      }
-      expanded.pop_back();
-      path = fs::path(expanded);
+      const auto path = fs::path(std::u8string(value.begin(), value.end()));
       return (path.is_absolute() ? path : ini.parent_path() / path).lexically_normal();
     }
 

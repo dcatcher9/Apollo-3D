@@ -409,6 +409,24 @@ $freshGame = New-Fixture 'running fresh allowed' $config $nativePreset $false
 Require (Test-Path -LiteralPath (Join-Path $freshGame 'custom addons\SunshineSBS.addon64') -PathType Leaf) 'Fresh installation with AllowRunningGame did not install the add-on.'
 Write-Output 'PASS AllowRunningGame only permits a missing native add-on and preserves existing add-ons.'
 
+# The automatic host path runs as another account (SYSTEM for the service), where the game
+# user's %LOCALAPPDATA% or %USERPROFILE% would name a different profile.
+$environmentSettings = @(
+    "[ADDON]`nAddonPath=%LOCALAPPDATA%\ReShade\Addons`n",
+    "[GENERAL]`nPresetPath=%USERPROFILE%\ReShadePreset.ini`n"
+)
+for ($index = 0; $index -lt $environmentSettings.Count; ++$index) {
+    $environmentGame = New-Fixture ('running environment path ' + $index) $environmentSettings[$index] $nativePreset $false
+    $before = File-Hashes $environmentGame
+    $rejected = $false
+    try { & $installer -GameExecutable (Join-Path $environmentGame 'Test Game.exe') -AddonDirectory $fixturePackage -AllowRunningGame }
+    catch { $rejected = $_.Exception.Message.Contains('needs manual setup') }
+    Require $rejected ('AllowRunningGame resolved an environment-variable path in the host account: ' + $environmentSettings[$index])
+    Require-Unchanged $before
+    Require (@(Get-ChildItem -LiteralPath $environmentGame -Recurse -File).Count -eq $before.Count) 'A refused environment-variable path still created files.'
+}
+Write-Output 'PASS AllowRunningGame refuses environment-variable ReShade paths before writing anything.'
+
 # Windows PowerShell 5.1 initializes $PSScriptRoot after binding -File parameters.
 # Exercise the actual packaged CLI without -AddonDirectory, as documented for users.
 $standalonePackage = Join-Path $OutputDirectory 'Windows PowerShell File package with spaces'
