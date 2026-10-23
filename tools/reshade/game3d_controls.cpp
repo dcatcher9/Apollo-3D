@@ -400,14 +400,24 @@ namespace sunshine_game3d {
     const auto &fg = source_alpha.fg;
     const auto source = ui_input::source_status(runtime);
     ImGui::TextWrapped("%s", output_status_text(automatic, data->values));
+    const bool too_large = data->values.enabled && automatic.phase == automatic_phase::unsupported_resolution;
+    if (too_large) {
+      uint32_t width = 0, height = 0;
+      runtime->get_screenshot_width_and_height(&width, &height);
+      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.25f, 1.0f));
+      ImGui::TextWrapped("%s", unsupported_resolution_warning(width, height).c_str());
+      ImGui::PopStyleColor();
+    }
     if (!data->values.enabled)
       ImGui::TextUnformatted("UI protection: inactive while Game 3D is disabled");
     else if (data->values.ui_protection == source_alpha_mode::off)
       ImGui::TextUnformatted("UI protection: off");
+    else if (too_large)
+      ImGui::TextUnformatted((std::string("UI protection: ") + unsupported_resolution_ui_text).c_str());
     const bool dedicated_ui = source_alpha.dedicated_ui_active(data->values.ui_protection, data->values.enabled);
-    if (data->values.enabled && data->values.ui_protection == source_alpha_mode::automatic)
+    if (data->values.enabled && !too_large && data->values.ui_protection == source_alpha_mode::automatic)
       ImGui::TextWrapped("UI protection: %s", source_alpha_detection_text(source, source_alpha).c_str());
-    else if (data->values.enabled && data->values.ui_protection == source_alpha_mode::on)
+    else if (data->values.enabled && !too_large && data->values.ui_protection == source_alpha_mode::on)
       if (const auto blocked = source_alpha_capture_block_text(source_alpha_capture_block_for(source.selected, fg)))
         ImGui::TextWrapped("UI protection: %s", blocked);
     // Auto without a usable UI mask for a while: say what the user sees, and

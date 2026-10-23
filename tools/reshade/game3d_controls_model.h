@@ -197,6 +197,18 @@ namespace sunshine_game3d {
   inline constexpr const char *ui_protection_warning_text = "No UI mask in this game mode: HUD and menus take the scene's depth.";
   inline constexpr const char *ui_protection_hdr_hint = "Try HDR output: some games draw their UI on a separate layer only in HDR.";
   inline constexpr const char *ui_protection_fg_hint = "Try Frame Generation: some games provide their UI buffers only while it is on.";
+  // A source wider or taller than 3840 stays 2D (automatic_phase::
+  // unsupported_resolution): the stereo warp, UI detection and the depth
+  // preview support at most 3840 x 3840 (game3d_renderer.cpp). The panel
+  // says what is off and how to fix it (Battlefield 6 10-22 at 4800x2700,
+  // its 125% resolution scale over 3840x2160).
+  inline constexpr const char *unsupported_resolution_ui_text = "inactive above 3840 x 3840";
+  inline std::string unsupported_resolution_warning(std::uint32_t width, std::uint32_t height) {
+    char text[320];
+    std::snprintf(text, sizeof(text), "The game renders at %ux%u, above Game 3D's 3840 x 3840 limit, so 3D, UI protection "
+      "and the depth preview are off. Set the game to 3840x2160 with a 100%% resolution scale (and no DSR).", width, height);
+    return text;
+  }
   // The tooltip states the span from alpha_trust_span_ms, its one owner.
   inline const char *ui_protection_warning_tooltip() {
     static const std::string text = [] {

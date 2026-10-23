@@ -586,6 +586,15 @@ namespace {
         check(label().substr(0, 3) == "2D:", "Unavailable depth reported active stereo or a usable preview");
       }
     }
+    // A source above 3840 x 3840 stays 2D; the panel warning names the game's
+    // size, what is off and the fix (Battlefield 6 10-22 at 4800x2700).
+    const auto warning = unsupported_resolution_warning(4800, 2700);
+    check(warning.find("4800x2700") != std::string::npos && warning.find("3840 x 3840 limit") != std::string::npos &&
+        warning.find("UI protection") != std::string::npos && warning.find("3840x2160") != std::string::npos &&
+        warning.find("100% resolution scale") != std::string::npos,
+      "The unsupported-resolution warning did not name the size, what is off and the fix");
+    check(std::string_view(unsupported_resolution_ui_text) == "inactive above 3840 x 3840",
+      "UI protection above 3840 x 3840 did not read inactive");
   }
 
   void automatic_scale_tracks_applied_basis() {
