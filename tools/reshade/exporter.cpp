@@ -40,6 +40,7 @@
 #include "async_log.h"
 #include "depth_content_sampler.h"
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <optional>
 #include <utility>
@@ -432,6 +433,26 @@ namespace {
   bool transfer_current(bool native_render, bool pq_requested, wire::transfer output, bool consumer_pq) {
     return native_render ? consumer_pq == pq_requested : output != wire::transfer::pq || consumer_pq;
   }
+
+  // The export pauses whose origin is the host, the game or the player rather
+  // than a fault (tools/reshade/README.md, the readiness report): a host that
+  // is absent, attached, replaced or without PQ, a game out of focus, reset,
+  // presenting without a render or changing its colour space, and a
+  // swapchain or frame not yet prepared. Each pause is logged as
+  // "export inactive (reason, routine|fault)"; every other reason, a new one
+  // included, is a fault. game3d_log_report.py reads the class and mirrors
+  // this list for logs without it; its test reads the list from here.
+  constexpr std::array<std::string_view, 11> routine_export_pauses{
+    "no_consumer", "ring_replaced", "consumer_transfer_changed", "consumer_without_pq", "not_foreground",
+    "runtime_reset", "runtime_gone", "present_without_render", "color_space_changed", "swapchain_unknown",
+    "frame_not_prepared"};
+  constexpr const char *export_pause_class(std::string_view reason) {
+    for (const auto routine : routine_export_pauses)
+      if (routine == reason) return "routine";
+    return "fault";
+  }
+  static_assert(std::string_view(export_pause_class("ring_replaced")) == "routine" &&
+    std::string_view(export_pause_class("device_removed")) == "fault" && std::string_view(export_pause_class("")) == "fault");
 
   // The colour space a transfer's export is encoded in (the overlay's target).
   api::color_space export_space(wire::transfer transfer) {
@@ -2581,7 +2602,8 @@ namespace {
       if (published_runtime_ == runtime) {
         publish(identity_);
         char message[160];
-        std::snprintf(message, sizeof(message), "Sunshine SBS: export inactive (%s); waiting for a valid focused technique", reason);
+        std::snprintf(message, sizeof(message), "Sunshine SBS: export inactive (%s, %s); waiting for a valid focused technique", reason,
+          export_pause_class(reason));
         log(reshade::log::level::info, message);
       }
       if (generation_ && generation_->runtime == runtime) {

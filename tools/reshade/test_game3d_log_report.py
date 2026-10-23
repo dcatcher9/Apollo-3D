@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Unit tests for game3d_log_report: python -m unittest tools/reshade/test_game3d_log_report.py"""
 
+import re
 import sys
 import unittest
 from datetime import datetime
@@ -785,12 +786,94 @@ class ReadinessReport(unittest.TestCase):
         self.assertEqual(expected['Present hitches'].status, 'PASS')
         self.assertEqual(run(BASE + [line('10:00:12', hitch, 'WARN')])['Present hitches'].status, 'WARN')
 
-    def test_a_consumer_transfer_change_is_a_routine_export_pause(self):
-        pause = ('[Sunshine 3D] Sunshine SBS: export inactive (consumer_transfer_changed); waiting for a valid '
-                 'focused technique')
-        self.assertEqual(run(BASE + [line('10:00:06', pause)])['Export'].status, 'PASS')
-        odd = '[Sunshine 3D] Sunshine SBS: export inactive (consumer_without_pq); waiting for a valid focused technique'
-        self.assertEqual(run(BASE + [line('10:00:06', odd)])['Export'].status, 'WARN')
+    def test_export_pauses_are_judged_by_their_class(self):
+        def pause(t, reason, kind=None):
+            return line(t, f'[Sunshine 3D] Sunshine SBS: export inactive ({reason}' + (f', {kind}' if kind else '')
+                        + '); waiting for a valid focused technique')
+        # The host's and the game's own pauses are routine: a host that reconnects replaces the ring, an HDR toggle
+        # changes the colour space, a host attaching between a render and its export changes the transfer.
+        for reason in ('ring_replaced', 'color_space_changed', 'consumer_transfer_changed'):
+            self.assertEqual(run(BASE + [pause('10:00:06', reason, 'routine')])['Export'].status, 'PASS', reason)
+        # Lines before the class tag: the same reasons by the report's copy of the routine list, the rest faults.
+        for reason in ('ring_replaced', 'color_space_changed', 'consumer_without_pq', 'swapchain_unknown'):
+            self.assertEqual(run(BASE + [pause('10:00:06', reason)])['Export'].status, 'PASS', reason)
+        old = run(BASE + [pause('10:00:06', 'generation_limit')])['Export']
+        self.assertEqual((old.status, old.times), ('WARN', ['10:00:06 generation_limit']))
+        # The add-on's class decides for a reason this report does not know.
+        new = run(BASE + [pause('10:00:06', 'future_reason', 'fault')])['Export']
+        self.assertEqual((new.status, new.detail), ('WARN', 'future_reason 1; faults: future_reason'))
+        self.assertEqual(run(BASE + [pause('10:00:06', 'future_pause', 'routine')])['Export'].status, 'PASS')
+        self.assertEqual(run(BASE + [pause('10:00:06', 'device_removed', 'fault')])['Export'].status, 'FAIL')
+        # Routine pauses more often than once per 10 s for a minute are a storm: seven within 60 s warn, six do not,
+        # and neither do seven spread over 66 s.
+        times = ['10:00:20', '10:00:29', '10:00:38', '10:00:47', '10:00:56', '10:01:05', '10:01:14']
+        storm = run(BASE + [pause(t, 'ring_replaced', 'routine') for t in times])['Export']
+        self.assertEqual((storm.status, storm.times), ('WARN', ['10:00:20-10:01:14 7 routine pauses']))
+        self.assertIn('more often than once per 10 s for a minute', storm.detail)
+        six = run(BASE + [pause(t, 'not_foreground', 'routine') for t in times[:6]])['Export']
+        self.assertEqual(six.status, 'PASS')
+        spread = ['10:00:20', '10:00:31', '10:00:42', '10:00:53', '10:01:04', '10:01:15', '10:01:26']
+        self.assertEqual(run(BASE + [pause(t, 'no_consumer') for t in spread])['Export'].status, 'PASS')
+
+    def test_every_capture_status_but_the_settled_ones_fails(self):
+        def status(t, name):
+            return line(t, f'[Sunshine 3D] Sunshine Streamline depth: {name}; source_selected=0 provider_held=1')
+        # A queue the capture cannot serve, a malformed tag and an exhausted table fail like the state failures, and so
+        # do 'unknown' (an out-of-range status) and a status this report does not know; inside the settle time after
+        # the export start each is INFO.
+        for name in ('unsupported_queue', 'malformed', 'exhausted', 'unknown', 'future_status'):
+            later = run(BASE + [status('10:00:12', name)])['Capture status']
+            self.assertEqual((later.status, later.times), ('WARN', [f'10:00:12 Streamline {name}']), name)
+            self.assertEqual(run(BASE + [status('10:00:03', name)])['Capture status'].status, 'INFO', name)
+        for name in report.CAPTURE_OK:
+            self.assertNotIn('Capture status', run(BASE + [status('10:00:12', name)]), name)
+
+    def test_observation_losses_warn_by_origin_and_rate(self):
+        def loss(t, revision, cause):
+            return line(t, '[Sunshine 3D] Sunshine depth observation evidence: lost runtime=0x1; '
+                           f'sampled_only={{revision={revision} found=1 cause={cause}}}')
+        end = [line('10:20:00', '[Sunshine 3D] Sunshine SBS: still running')]  # A 20-minute session.
+        # One capacity loss (a full bounded table) passes, also in a short session; five within a minute warn.
+        self.assertEqual(run(BASE + [loss('10:00:10', 1, 'records_busy')])['Observation losses'].status, 'PASS')
+        burst = run(BASE + [loss(f'10:00:{10 + 5 * i}', i + 1, 'records_busy') for i in range(5)] + end)
+        self.assertEqual(burst['Observation losses'].status, 'WARN')
+        self.assertIn('records_busy more than 3 times within 60 s', burst['Observation losses'].detail)
+        # Three of one cause within a minute, or one of each capacity cause, stay below the rate of a long session.
+        three = run(BASE + [loss(f'10:00:{10 + 5 * i}', i + 1, 'tokens_busy') for i in range(3)] + end)
+        self.assertEqual(three['Observation losses'].status, 'PASS')
+        each = run(BASE + [loss(f'10:0{i}:10', i + 1, c) for i, c in enumerate(report.LOSS_CAPACITY)] + end)
+        self.assertEqual(each['Observation losses'].status, 'PASS')
+        # More than one capacity loss per two minutes over the session warns.
+        often = run(BASE + [loss(f'10:{i:02}:10', i + 1, 'commands_busy') for i in range(11)] + end)
+        self.assertEqual(often['Observation losses'].status, 'WARN')
+        self.assertIn('11 capacity losses over 20.0 min', often['Observation losses'].detail)
+        # The game's own lifecycle and a reused token are routine; a fault and an unknown cause warn at any count.
+        routine = run(BASE + [loss('10:00:10', 1, 'lifecycle'), loss('10:00:11', 2, 'token_replaced')])
+        self.assertEqual((routine['Observation losses'].status, routine['Observation losses'].times), ('PASS', []))
+        for cause in ('sdk_failure', 'invalid_input', 'future_cause'):
+            fault = run(BASE + [loss('10:00:10', 1, 'records_busy'), loss('10:00:12', 2, cause)] + end)
+            self.assertEqual((fault['Observation losses'].status, fault['Observation losses'].times),
+                             ('WARN', [f'10:00:12 {cause}', '10:00:10 records_busy']), cause)
+
+    def test_log_warnings_are_judged_by_origin(self):
+        compile_error = line('10:00:06', "Failed to compile 'D:\\G\\reshade-shaders\\Shaders\\SMAA.fx':", 'ERROR')
+        refcount = line('10:00:07', 'Reference count for ID3D12CommandQueue1 object 0000020B (0000020A) is '
+                                    'inconsistent (3).', 'WARN')
+        checks = run(BASE + [compile_error, refcount])
+        self.assertNotIn('Log warnings', checks)
+        other = checks['Other log warnings']
+        self.assertEqual((other.status, len(other.times)), ('INFO', 2))
+        self.assertTrue(other.times[0].startswith("10:00:06 ERROR Failed to compile 'D:"))
+        # The add-on's own lines warn, a known phrase in them included; its hitches belong to Present hitches.
+        owned = line('10:00:08', '[Sunshine 3D] Sunshine SBS: the depth state is inconsistent with its tag', 'WARN')
+        self.assertEqual(run(BASE + [owned])['Log warnings'].status, 'WARN')
+        hitch = line('10:00:08', '[Sunshine 3D] Sunshine Game 3D hitch: stereo export took 9.1 ms', 'WARN')
+        self.assertNotIn('Log warnings', run(BASE + [hitch]))
+        # ReShade's lines about the add-on: one naming it, a failed add-on load and a failed effect runtime.
+        for text in ('Add-on "Sunshine 3D" was not unregistered!',
+                     "Failed to load add-on from 'D:\\G\\Other.addon64' with error code 126!",
+                     'Failed to create back buffer render targets!'):
+            self.assertEqual(run(BASE + [line('10:00:09', text, 'ERROR')])['Log warnings'].status, 'WARN', text)
 
     def test_depth_flip_hitches_are_named(self):
         hitch = '[Sunshine 3D] Sunshine Game 3D hitch: generic challenger release took 21.5 ms on the present thread'
@@ -916,7 +999,7 @@ class ReadinessReport(unittest.TestCase):
         self.assertEqual((cause, site), ('records_busy', 'finish_evaluation'))
         checks = run(BASE + [sampled])
         self.assertEqual((checks['Observation losses'].status, checks['Observation losses'].times),
-                         ('WARN', ['10:00:09 records_busy at finish_evaluation']))
+                         ('PASS', ['10:00:09 records_busy at finish_evaluation']))
         # An older line without the site or tick keeps the line's own time.
         old = line('10:00:17', '[Sunshine 3D] Sunshine depth observation evidence: lost runtime=0x1; '
                                'sampled_only={revision=5 found=1 cause=tokens_busy}')
@@ -1442,6 +1525,17 @@ class ReadinessReport(unittest.TestCase):
                           'detection frames)'))
         self.assertNotIn('UI inferred alpha', checks)
         self.assertEqual((checks['UI counters'].status, checks['UI protection'].status), ('PASS', 'PASS'))
+
+    def test_every_inactive_counter_reason_counts(self):
+        # A later add-on may add a reason for frames without detection: it reconciles and is listed after the known
+        # ones, the new ones by name.
+        groups = tuple((key, inner + ('zeta', 'future') if key == 'inactive' else inner)
+                       for key, inner in UNCOVERED_COUNTER_GROUPS)
+        values = {**CLEAN_COUNTERS, 'auto_frames': 112, 'inactive.zeta': 7, 'inactive.future': 5}
+        checks = run(BASE + [counters('10:00:12', values, groups=groups)])
+        self.assertEqual(checks['UI counters'].status, 'PASS', checks['UI counters'].detail)
+        self.assertIn('17 without detection', checks['UI counters'].detail)
+        self.assertIn('without detection: no candidates 4.5%, future 4.5%, zeta 6.2%', checks['UI no mask'].detail)
 
     def test_s2b_lines_parse_the_pre_ui_scene_and_the_scene_guard(self):
         # Stellar Blade SDR settings with FG suspended: the cleared output target holds the pre-UI scene (colour
@@ -2363,6 +2457,69 @@ class ReadinessReport(unittest.TestCase):
         checks = stalls(slow, gaps)['Encoder stalls']
         self.assertEqual((checks.status, checks.times),
                          ('WARN', ['14:35:58 upstream GPU + encoder-side 229 ms']))
+
+
+def source(name):
+    """An add-on source file beside this test."""
+    return (Path(__file__).resolve().parent / name).read_text(encoding='utf-8')
+
+
+def enum_names(text, enum):
+    """The enumerators of `enum class <enum> { ... }`, in order."""
+    body = re.search(rf'enum class {enum} \{{([^}}]*)\}}', text).group(1)
+    return tuple(name.strip() for name in body.split(',') if name.strip())
+
+
+class SchemaMirrors(unittest.TestCase):
+    """The report's copies of the add-on's names, checked against the C++ that owns them: a name added, renamed or
+    removed there fails here until the report classifies it."""
+
+    def test_export_pauses(self):
+        text = source('exporter.cpp')
+        routine = re.search(r'routine_export_pauses\{([^}]*)\}', text).group(1)
+        self.assertEqual(report.ROUTINE_INACTIVE, frozenset(re.findall(r'"(\w+)"', routine)))
+        # Every routine reason is one the exporter pauses with.
+        paused = set(re.findall(r'"(\w+)"', ' '.join(re.findall(r'\bdeactivate\([^;]*\);', text))))
+        self.assertLessEqual(report.ROUTINE_INACTIVE, paused)
+        # The pause line's format, filled in, is the line the report reads.
+        line_format = re.search(r'"(Sunshine SBS: export inactive [^"]*)"', text).group(1)
+        found = report.INACTIVE.search(line_format.replace('%s', 'ring_replaced', 1).replace('%s', 'routine', 1))
+        self.assertEqual(found.groups(), ('ring_replaced', 'routine'))
+
+    def test_capture_statuses(self):
+        names = enum_names(source('streamline_depth_capture.h'), 'status')
+        self.assertLessEqual(report.CAPTURE_OK, set(names))
+        self.assertLessEqual({'unsupported_queue', 'malformed', 'exhausted', 'failed'}, set(names) - report.CAPTURE_OK)
+
+    def test_observation_loss_causes(self):
+        text = source('observation_loss_journal.h')
+        names = enum_names(text, 'reason')
+        classified = report.LOSS_CAPACITY + report.LOSS_ROUTINE + report.LOSS_FAULT
+        self.assertEqual(sorted(classified), sorted(names))
+        self.assertEqual(len(set(classified)), len(classified))
+        self.assertEqual(sorted(re.findall(r'SUNSHINE_LOSS_NAME\((\w+)\);', text)), sorted(names))
+
+    def test_ui_counter_line(self):
+        # format_ui_counters (game3d_ui_counters.h) field by field: the fixture of today's counter line, and the
+        # report's reasons, hold kinds and decided sources.
+        text = source('game3d_ui_counters.h')
+        body = text[text.index('inline std::string format_ui_counters'):]
+        body = body[:body.index('return text;')]
+        no_mask = tuple(re.findall(r'"(\w+)"', re.search(r'names\{([^}]*)\}', text).group(1)))
+        decided = tuple(re.search(r'decided_sources\{([^}]*)\}', text).group(1).replace(' ', '').split(','))
+        groups = []
+        for found in re.finditer(r'group\("(\w+)", \[&\] \{(.*?)\}\);|field\("(\w+)", ', body, re.S):
+            key, inner, plain = found.groups()
+            if plain:
+                groups.append((plain, None))
+            else:
+                groups.append((key, {'decided': decided, 'none': no_mask}.get(
+                    key, tuple(re.findall(r'field\("(\w+)", ', inner)))))
+        self.assertEqual(tuple(groups), UNCOVERED_COUNTER_GROUPS)
+        self.assertEqual(dict(groups)['inactive'], report.INACTIVE_REASONS)
+        self.assertEqual(dict(groups)['held'], report.HOLD_KINDS)
+        self.assertEqual(no_mask, report.NO_MASK_REASONS)
+        self.assertLessEqual({int(v) for v in decided}, set(report.S2B_SOURCE_NAMES))
 
 
 if __name__ == '__main__':

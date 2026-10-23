@@ -1776,6 +1776,18 @@ namespace {
           transfer_current(false, false, wire::transfer::pq, true), "the reference export's PQ check changed");
     }
 
+    // Each export pause is logged with its class (export_pause_class): the
+    // routine reasons are the host's, the game's or the player's; every other
+    // reason, a new one included, is a fault the readiness report warns on.
+    static void export_pause_classes() {
+      for (const auto reason : routine_export_pauses)
+        require(std::strcmp(export_pause_class(reason), "routine") == 0, "a routine export pause was classed a fault");
+      for (const char *reason : {"device_removed", "ring_creation_failed", "fence_signal_failed", "renderer_unavailable",
+             "consumer_protocol", "consumer_undeclared", "output_unavailable", "generation_limit", "a_future_reason"})
+        require(std::strcmp(export_pause_class(reason), "fault") == 0, "a faulting export pause was classed routine");
+      std::puts("PASS export pause class: the routine pauses are named, every other reason is a fault");
+    }
+
     // Only a host that declared this export protocol is answered
     // (consumer_speaks_protocol): another release's is refused by name, once
     // per request, and gets no ring; neither does an undeclared request.
@@ -2507,6 +2519,7 @@ int main(int argc, char **argv) {
     publisher_tests::timing_window_length();
     publisher_tests::present_gap_measurement();
     publisher_tests::color_contract();
+    publisher_tests::export_pause_classes();
     publisher_tests::consumer_protocol_refusal();
     publisher_tests::bounded_retirement();
     publisher_tests::d3d12_deferred_signal(false);

@@ -501,10 +501,8 @@ warning when the removed first-run shadow measured the presented frame hidden, n
 least 500 ms while no UI source decided (`shadow_hidden_ms`, listed once per run by its start); in
 logs since fix 1, `Pre-UI proof` for each layer proof key (`pre_ui:<format>:<space>`) restored,
 earned, lapsed or forgotten ([hidden-scene evidence](../../docs/reshade-sbs.md#setup) defines it);
-observation losses by cause; capture statuses of every API depth provider (Streamline, NGX and the
-API fallback, each listed time naming its provider) outside the settle time after an export start,
-FG switch or reset (those inside it are INFO); unusual export pauses; present-thread hitches, named
-by their step, and, from each timing line, a window whose slowest Present took the hitch threshold
+observation losses, capture statuses and export pauses, each judged by its origin (below);
+present-thread hitches, named by their step, and, from each timing line, a window whose slowest Present took the hitch threshold
 (8 ms) or more with no hitch line in it, named by its slowest section (no step named; before 10-22 the
 render section had none): its time within the window is unknown, so it is expected, and listed with
 the PASS, when a reset, FG switch, export start or overlay opening lies in that window or within the
@@ -553,6 +551,42 @@ work. Host logs since 10-22 add `Host video memory`, INFO: the host process's la
 headroom on its stall and 20 s encode-loop lines. A log whose game process ended right
 after ReShade tore its runtimes down (Unreal games often end before ReShade logs its exit) counts
 as a normal exit.
+
+Since 10-23 these checks judge each event by its origin rather than warning at any count:
+
+- `Export`: each `export inactive (reason, class)` line names its class (`export_pause_class` in
+  `exporter.cpp`). A `routine` pause comes from the host, the game or the player (`no_consumer`,
+  `ring_replaced`, `consumer_transfer_changed`, `consumer_without_pq`, `not_foreground`,
+  `runtime_reset`, `runtime_gone`, `present_without_render`, `color_space_changed`,
+  `swapchain_unknown`, `frame_not_prepared`) and warns only as a storm: 7 or more within 60 s, more
+  than one per 10 s for a minute. Every other reason, a new one included, is a `fault` and warns;
+  `device_removed` fails. Lines from before the class tag are classed by the report's copy of that
+  list.
+- `Capture status`: every status of a depth provider fails except `inactive`, `unavailable`,
+  `recorded`, `submitted`, `ready`, `stale` and `ambiguous`, so `unsupported_queue`, `malformed`,
+  `exhausted`, `unknown` and a status added later fail by default. A failing status within the
+  settle time after an export start, FG switch or reset is INFO, as before.
+- `Observation losses` (sampled on `Sunshine depth observation evidence` lines): a capacity loss
+  (`tokens_busy`, `records_busy`, `commands_busy`, `resource_table_full`, `metadata_storage_busy`: a
+  full bounded table, which a burst of game work explains) warns only by rate: all of them more than
+  once per 2 minutes of the session (counted as at least 2 minutes), or one cause more than 3 times
+  within 60 s. `lifecycle` and `token_replaced` are the game's own and never warn. `invalid_input`,
+  `sdk_failure`, `test_injected` and a cause the report does not know warn at any count. The depth a
+  loss cost is the `Depth` check's to judge.
+- `Log warnings`: only WARN and ERROR lines the add-on owns warn: its own `[Sunshine 3D] ` (or
+  `[Sunshine SBS TEST ONLY] `) lines, except its hitch, display-scaling and full-ring lines that
+  their own checks report, and ReShade's lines about it: one naming the add-on or its module, a
+  failed add-on load, or a failed effect-runtime creation. Every other WARN or ERROR line (shader
+  compile warnings, reference-count notes, DirectInput, another add-on) is counted as INFO
+  `Other log warnings`, with one example per kind of line.
+- `Host size`: game eyes scaled to the stream's (the same aspect) or fitted into it (letterboxed or
+  pillarboxed) are INFO; eyes the host refuses, which stay 2D, fail.
+
+The test's `SchemaMirrors` reads these names from the C++ that owns them (`routine_export_pauses`,
+`depth_capture::status`, `loss_diagnostics::reason` and `format_ui_counters`), so a reason, status,
+cause or counter added there fails the test until the report classifies it. A `Sunshine UI
+counters` reason for frames without detection that the report does not know still counts in the
+accounting and is listed after the known ones.
 
 Logs that contain `Sunshine UI counters` lines carry the add-on's exact per-frame
 [UI counters](../../docs/reshade-sbs.md#setup). For these logs the report decides the UI
@@ -1297,9 +1331,11 @@ Look in the game's `ReShade.log` for `Sunshine SBS:` messages:
   is of the same release: hosts of protocols 1-3 ignore this mapping without a log line.
 - `no compatible export annotations` means the current shader definition or color annotations are absent.
 - `generation ..., ... full SBS, DXGI ..., D3D...` means resources were created for a consumer.
-- `export inactive (reason)` means focus, technique execution or source proof stopped qualifying;
+- `export inactive (reason, class)` means focus, technique execution or source proof stopped qualifying;
   the reason names the gate, for example `not_foreground`, `present_without_render`,
-  `frame_not_prepared`, `no_consumer` or `overlay_capture_failed`.
+  `frame_not_prepared`, `no_consumer` or `overlay_capture_failed`. The class (since 10-23) is
+  `routine` for a pause the host, the game or the player caused and `fault` for every other reason
+  (the [readiness report](#first-run-of-a-new-game) lists them).
 - `swapchain window W presents under the foreground window F: owner=V changes=N` names the verdict
   for a game that presents to a child window W of the foreground window F (at most every 5 s, when
   it changes): `owner`, or why not (`partial`, `overlapped`, `not_visible`, `other_process`,

@@ -5069,7 +5069,7 @@ The add-on compares the chain with the root's own client area. A runtime owns th
 its swapchain window is the foreground window or such a child, and no other runtime's swapchain
 window qualifies as well: two covering child swapchains overlap each other, and a root swapchain
 together with a covering child swapchain is ambiguous, so neither is exported
-(`export inactive (not_foreground)`). The add-on logs a child's verdict when it changes, at most
+(`export inactive (not_foreground, routine)`). The add-on logs a child's verdict when it changes, at most
 every 5 s: `Sunshine SBS: swapchain window W presents under the foreground window F: owner=V
 changes=N` (V is `owner`, `partial`, `overlapped`, `not_visible`, `other_process`,
 `not_foreground`, `incomplete` or `ambiguous`). The host requires the foreground root's client
@@ -5133,7 +5133,7 @@ declares its protocol with its capabilities (`consumer_protocol`, offset 156, be
 producer answers only a request that declared protocol 4: another is refused with `Sunshine SBS:
 refusing a host that speaks export protocol N; this add-on speaks protocol 4 (4 export slots)...`
 once per request and gets no ring, and a request that declared nothing gets none either
-(`export inactive (consumer_undeclared)`). Hosts of protocols 1-3 already refused a mapping whose
+(`export inactive (consumer_undeclared, fault)`). Hosts of protocols 1-3 already refused a mapping whose
 `shared_bytes` differs from their 384 bytes, so they never write into a protocol 4 mapping, and
 neither side logs that pairing: the add-on's `exporter ready (export protocol 4, 4 export slots)`
 line is then followed by no generation. The add-on's named refusal guards a later host that

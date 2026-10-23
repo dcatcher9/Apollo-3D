@@ -43,7 +43,9 @@ COVERAGE = re.compile(
     r'Sunshine list lifecycle: admissions covered=(\d+) \(states observed=(\d+) declared=(\d+)\) '
     r'not_open=\{unknown=(\d+) closed=(\d+) pass=(\d+)')
 GENERATION = re.compile(r'Sunshine SBS: generation (\d+), (\d+)x(\d+) full SBS, DXGI (\d+), (\w+), (\w+)')
-INACTIVE = re.compile(r'Sunshine SBS: export inactive \((\w+)\)')
+# Since 10-23 each export pause names its class after its reason (routine or fault, export_pause_class in
+# exporter.cpp); older lines name the reason only.
+INACTIVE = re.compile(r'Sunshine SBS: export inactive \((\w+)(?:, (\w+))?\)')
 FG_MODE = re.compile(r'Sunshine Streamline frame generation: viewport=\d+ mode=(\d+)')
 SCALE = re.compile(r'Sunshine 3D Streamline scale: (\w+);')
 RAW = re.compile(r'Sunshine 3D raw automation: (\w+);.*?stereo_scale=([0-9.e+-]+)')
@@ -221,15 +223,44 @@ NVENC_ENCODER_TAIL_MS = 50
 NVENC_TRANSITION_S = 2.0
 NVENC_TRANSITION_MAX_MS = 250
 
-# ReShade and game noise that says nothing about Game 3D.
-BENIGN = (
-    'Successfully compiled', 'IDirectInput8W::CreateDevice failed', 'is inconsistent',
-    'Add-ons are still loaded', 'Game 3D hitch', 'display scaling limits the game', LAYER_SATURATED,
-)
-# Export pauses that are part of normal play rather than faults (consumer_transfer_changed: a host attached or
-# left between a Present's render and its export, which the next Present renders for).
-ROUTINE_INACTIVE = {'not_foreground', 'runtime_reset', 'no_consumer', 'present_without_render', 'runtime_gone',
-                    'consumer_transfer_changed'}
+# WARN and ERROR lines by origin. The add-on owns its own lines, which ReShade prefixes with the add-on's name (the
+# test add-on's too), and the ReShade core lines about it (ReShade 6.8 addon_manager.cpp and runtime.cpp): a line
+# naming it or its module, a failed add-on load, or a failed effect-runtime creation. Every other line is ReShade's,
+# the game's or another add-on's (shader compile warnings, reference-count notes, DirectInput), counted as INFO.
+OWNED = ('[Sunshine 3D] ', '[Sunshine SBS TEST ONLY] ')
+CORE_ABOUT_ADDON = re.compile(
+    r'Sunshine 3D|SunshineSBS|Sunshine SBS TEST ONLY|^(?:Failed to load add-on|> Add-on failed to initialize|'
+    r'No add-on was registered by|Skipped loading add-on|Failed to create (?:back buffer render targets|resolve '
+    r'texture|resolve shader resource view|copy pipeline|empty texture|ImGui))')
+# The add-on's own warnings that another check reports: its hitches (Present hitches), display scaling and the UI
+# layer's full ring (UI layer copies).
+OWNED_BENIGN = ('Game 3D hitch', 'display scaling limits the game', LAYER_SATURATED)
+# What tells two lines of one kind apart: quoted names (files, objects) and numbers (addresses, times, counts).
+LINE_KIND = re.compile(r"'[^']*'|\"[^\"]*\"|\b(?:0x)?[0-9A-Fa-f]*\d[0-9A-Fa-f]*\b")
+# Export pauses whose origin is the host, the game or the player rather than a fault (routine_export_pauses in
+# exporter.cpp): a host that is absent, attached, replaced or without PQ (consumer_transfer_changed: between a
+# Present's render and its export, which the next Present renders for), a game out of focus, reset, presenting
+# without a render or changing its colour space, and a swapchain or frame not yet prepared. Since 10-23 each line
+# names its class; this set classes the pauses of older lines.
+ROUTINE_INACTIVE = frozenset((
+    'no_consumer', 'ring_replaced', 'consumer_transfer_changed', 'consumer_without_pq', 'not_foreground',
+    'runtime_reset', 'runtime_gone', 'present_without_render', 'color_space_changed', 'swapchain_unknown',
+    'frame_not_prepared'))
+# Routine pauses more often than once per 10 s for a minute (this many within ROUTINE_STORM_S) are a storm: the host
+# or the game restarting the export over and over.
+ROUTINE_STORM, ROUTINE_STORM_S = 7, 60.0
+# Capture statuses (depth_capture::status, streamline_depth_capture.h) that are no failure: no source or no capture,
+# one in flight or delivered, and an older or ambiguous selection. Every other status fails, a new one by default.
+CAPTURE_OK = frozenset(('inactive', 'unavailable', 'recorded', 'submitted', 'ready', 'stale', 'ambiguous'))
+# Observation-loss causes (loss_diagnostics::reason, observation_loss_journal.h) by origin. Capacity: one of the
+# add-on's bounded tables was full, which a burst of game work explains, so it warns by rate: all of them more than
+# once per two minutes, or one more than LOSS_BURST times within LOSS_BURST_S. Routine: the game ended a resource's
+# lifecycle or reused an address for a new token. Faults (input the SDK contract refuses, an SDK failure, a test
+# injection) and unknown causes warn at any count.
+LOSS_CAPACITY = ('tokens_busy', 'records_busy', 'commands_busy', 'resource_table_full', 'metadata_storage_busy')
+LOSS_ROUTINE = ('lifecycle', 'token_replaced')
+LOSS_FAULT = ('invalid_input', 'sdk_failure', 'test_injected')
+LOSS_BURST, LOSS_BURST_S = 3, 60.0
 SETTLE_S = 3.0  # Recalibration and holds after an FG switch or runtime reset.
 SWITCH_LEAD_S = 0.25  # A switch's own depth loss may be logged this long before the switch line (async log order).
 CALIBRATION_MIN_S = 0.1  # A run without placement that had less depth than this calibrated nothing.
@@ -707,7 +738,7 @@ class Session:
     fg_switches: list[tuple[float, int]] = field(default_factory=list)
     resets: list[float] = field(default_factory=list)  # Each runtime_reset export pause.
     inactive: Counter = field(default_factory=Counter)
-    inactive_first: dict[str, float] = field(default_factory=dict)
+    pauses: list[tuple[float, str, bool]] = field(default_factory=list)  # Each export pause: time, reason, routine.
     coverage: tuple[int, ...] | None = None
     projection_ready: int = 0
     raw_ready: int = 0
@@ -762,7 +793,8 @@ class Session:
     diagnostics: list[tuple[float, bool]] = field(default_factory=list)  # Each Diagnostics switch line.
     ngx: tuple[int, ...] | None = None
     display_scaling: list[tuple[float, tuple[int, ...]]] = field(default_factory=list)
-    warnings: list[tuple[float, str]] = field(default_factory=list)
+    warnings: list[tuple[float, str]] = field(default_factory=list)  # The add-on's own unexpected WARN/ERROR lines.
+    other_warnings: list[tuple[float, str]] = field(default_factory=list)  # Everyone else's (OWNED, CORE_ABOUT_ADDON).
 
 
 def parse(lines) -> Session:
@@ -792,8 +824,11 @@ def parse(lines) -> Session:
         level, text = m.group(5), m.group(6)
         s.first = t if s.first is None else s.first
         s.last = t
-        if level in ('WARN', 'ERROR') and not any(b in text for b in BENIGN):
-            s.warnings.append((t, f'{level} {text[:160]}'))
+        if level in ('WARN', 'ERROR'):
+            if not (text.startswith(OWNED) or CORE_ABOUT_ADDON.search(text)):
+                s.other_warnings.append((t, f'{level} {text}'))
+            elif not any(b in text for b in OWNED_BENIGN):
+                s.warnings.append((t, f'{level} {text[:160]}'))
         if found := DISPLAY_SCALING.search(text):
             s.display_scaling.append((t, tuple(int(v) for v in found.groups())))
         if (found := LOADED.search(text)) and not s.exe:
@@ -816,9 +851,9 @@ def parse(lines) -> Session:
                 s.streamed.append([t, None])
         if found := INACTIVE.search(text):
             pause(t, 'paused')  # Nothing is streamed from here until the next generation.
-            reason = found.group(1)
+            reason, kind = found.groups()
             s.inactive[reason] += 1
-            s.inactive_first.setdefault(reason, t)
+            s.pauses.append((t, reason, kind == 'routine' if kind else reason in ROUTINE_INACTIVE))
             if reason == 'runtime_reset':
                 s.settle.append(t)
                 s.resets.append(t)
@@ -1208,23 +1243,13 @@ def evaluate(s: Session) -> list[Check]:
 
     ui_checks(s, add)
 
-    tokens = sum(1 for _, cause, _ in s.losses.values() if cause == 'tokens_busy')
-    causes = Counter(cause for _, cause, _ in s.losses.values())
-    minutes = max((s.last - s.first) / 60.0, 1.0) if s.first is not None else 1.0
-    bad = {c: n for c, n in causes.items() if c != 'lifecycle'}
-    add(Check('WARN' if tokens > minutes / 2 or any(c != 'tokens_busy' for c in bad) else 'PASS',
-              'Observation losses', ', '.join(f'{c} {n}' for c, n in sorted(causes.items())) or 'none',
-              [f'{clock(t)} {c}' + (f' at {site}' if site else '') + sdk_note(s.loss_sdk.get(r))
-               for r, (t, c, site) in sorted(s.losses.items()) if c != 'lifecycle'][:6]))
+    loss_checks(s, add)
 
     # A capture status during the settle time after an export start, FG switch or reset is the source settling.
-    failing = ('conflicting_state', 'incomplete_state', 'missing_state', 'failed', 'unsupported_state',
-               'unsupported_resource', 'unsupported_lifetime')
-
     def settles(t: float) -> bool:
         return any(0 <= t - m <= SETTLE_S for m in s.settle)
-    outside = [(t, k, p) for t, k, p in s.statuses if k in failing and not settles(t)]
-    settling = Counter(k for t, k, _ in s.statuses if k in failing and settles(t))
+    outside = [(t, k, p) for t, k, p in s.statuses if k not in CAPTURE_OK and not settles(t)]
+    settling = Counter(k for t, k, _ in s.statuses if k not in CAPTURE_OK and settles(t))
     conflicts = Counter(k for _, k, _ in outside)
     if conflicts:
         named = ', '.join(f'{k} {v}' for k, v in sorted(conflicts.items()))
@@ -1242,10 +1267,7 @@ def evaluate(s: Session) -> list[Check]:
     if s.readiness:
         add(Check('INFO', 'Depth losses', ', '.join(f'{k} {v}' for k, v in s.readiness.most_common())))
 
-    unusual = {k: v for k, v in s.inactive.items() if k not in ROUTINE_INACTIVE}
-    add(Check('FAIL' if 'device_removed' in unusual else 'WARN' if unusual else 'PASS', 'Export',
-              ', '.join(f'{k} {v}' for k, v in s.inactive.most_common()) or 'never paused',
-              [f'{clock(s.inactive_first[k])} {k}' for k in unusual]))
+    export_checks(s, add)
 
     # A runtime reset or FG switch rebuilds the export ring and opening the
     # ReShade overlay prepares its compositor: one slow present each is expected.
@@ -1302,7 +1324,84 @@ def evaluate(s: Session) -> list[Check]:
     if s.warnings:
         add(Check('WARN', 'Log warnings', f'{len(s.warnings)} unexpected WARN/ERROR lines',
                   [f'{clock(t)} {w}' for t, w in s.warnings[:5]]))
+    if s.other_warnings:
+        # One example per kind of line (quoted names and numbers aside), with how many lines were of its kind.
+        kinds: dict[str, list] = {}
+        for t, w in s.other_warnings:
+            kinds.setdefault(LINE_KIND.sub('#', w), [t, w, 0])[2] += 1
+        n = len(s.other_warnings)
+        add(Check('INFO', 'Other log warnings', f'{n} WARN/ERROR line{"s" if n > 1 else ""} from ReShade, the game or '
+                  'another add-on, none about the Sunshine 3D add-on',
+                  [f'{clock(t)} {w[:160]}' + (f' ({k} such lines)' if k > 1 else '')
+                   for t, w, k in kinds.values()][:6]))
     return checks
+
+
+def bursts(times: list[float], count: int, span_s: float) -> list[tuple[float, float, int]]:
+    """The windows in which at least `count` of the times fall within span_s, overlapping ones merged, each with its
+    first and last time and how many times it holds."""
+    times = sorted(times)
+    found: list[list[float]] = []
+    for i in range(count - 1, len(times)):
+        a, b = times[i - count + 1], times[i]
+        if b - a > span_s:
+            continue
+        if found and a <= found[-1][1]:
+            found[-1][1] = b
+        else:
+            found.append([a, b])
+    return [(a, b, sum(1 for t in times if a <= t <= b)) for a, b in found]
+
+
+def export_checks(s: Session, add) -> None:
+    """'Export': each pause by the class its line names (or ROUTINE_INACTIVE on older lines). A fault warns, a removed
+    device fails; routine pauses warn only as a storm, more often than once per 10 s for a minute."""
+    faults: dict[str, float] = {}
+    for t, reason, routine in s.pauses:
+        if not routine:
+            faults.setdefault(reason, t)
+    storms = bursts([t for t, _, routine in s.pauses if routine], ROUTINE_STORM, ROUTINE_STORM_S)
+    detail = ', '.join(f'{k} {v}' for k, v in s.inactive.most_common()) or 'never paused'
+    if faults:
+        detail += f'; faults: {", ".join(faults)}'
+    if storms:
+        detail += (f'; routine pauses (the host, the game or the player) came more often than once per '
+                   f'{ROUTINE_STORM_S / (ROUTINE_STORM - 1):.0f} s for a minute')
+    add(Check('FAIL' if 'device_removed' in faults else 'WARN' if faults or storms else 'PASS', 'Export', detail,
+              ([f'{clock(t)} {reason}' for reason, t in faults.items()]
+               + [f'{span(a, b)} {n} routine pauses' for a, b, n in storms])[:6]))
+
+
+def loss_checks(s: Session, add) -> None:
+    """'Observation losses' by the origin of each sampled loss's cause: capacity losses warn by rate, routine ones
+    never, faults and unknown causes at any count. The rate counts the session as at least two minutes, so a single
+    capacity loss never warns by itself."""
+    losses = sorted(s.losses.items())
+    causes = Counter(cause for _, (_, cause, _) in losses)
+    minutes = max((s.last - s.first) / 60.0, 2.0) if s.first is not None else 2.0
+    capacity = [(t, cause) for _, (t, cause, _) in losses if cause in LOSS_CAPACITY]
+    faults = sorted(c for c in causes if c not in LOSS_CAPACITY + LOSS_ROUTINE)
+    rate = len(capacity) > minutes / 2
+    burst = {}
+    for c in LOSS_CAPACITY:
+        if found := bursts([t for t, k in capacity if k == c], LOSS_BURST + 1, LOSS_BURST_S):
+            burst[c] = found
+    parts = [', '.join(f'{c} {n}' for c, n in sorted(causes.items())) or 'none']
+    if faults:
+        parts.append(f'{", ".join(faults)} warn at any count (input the SDK contract refuses, an SDK failure or a '
+                     'cause this report does not know)')
+    if rate:
+        parts.append(f'{len(capacity)} capacity losses over {minutes:.1f} min, more than one per 2 min')
+    parts += [f'{c} more than {LOSS_BURST} times within {LOSS_BURST_S:.0f} s' for c in burst]
+    if capacity and not rate and not burst:
+        parts.append('capacity losses (a full bounded table) below their warning rate')
+
+    def flagged(t: float, cause: str) -> bool:
+        return cause in faults or rate or any(a <= t <= b for a, b, _ in burst.get(cause, ()))
+    rows = [(not flagged(t, c), r, t, c, site) for r, (t, c, site) in losses if c not in LOSS_ROUTINE]
+    add(Check('WARN' if faults or rate or burst else 'PASS', 'Observation losses', '; '.join(parts),
+              [f'{clock(t)} {c}' + (f' at {site}' if site else '') + sdk_note(s.loss_sdk.get(r))
+               for _, r, t, c, site in sorted(rows)][:6]))
 
 
 def ui_checks(s: Session, add) -> None:
@@ -1508,7 +1607,10 @@ def counter_checks(c: dict[str, int], add, overrides_sampled: list[str], flatten
     s2a, s2b = 'held.none' in c, 'scene.entered' in c
     auto, detected = get('auto_frames'), get('detection_frames')
     held = sum(get(f'held.{k}') for k in (HOLD_KINDS if s2a else S1_HOLD_KINDS))
-    inactive = sum(get(f'inactive.{k}') for k in INACTIVE_REASONS)
+    # Every reason of the inactive group counts, one a later add-on adds too: the known ones first, the rest by name.
+    later = (key.split('.', 1)[1] for key in c if key.startswith('inactive.'))
+    inactive_reasons = INACTIVE_REASONS + tuple(sorted(k for k in later if k not in INACTIVE_REASONS))
+    inactive = sum(get(f'inactive.{k}') for k in inactive_reasons)
     reconciled = auto == detected + held + inactive
     add(Check('PASS' if reconciled else 'FAIL', 'UI counters',
               f'{auto} Auto frames through the last of {get("samples")} committed samples: {detected} detected, '
@@ -1651,7 +1753,7 @@ def counter_checks(c: dict[str, int], add, overrides_sampled: list[str], flatten
                   ', '.join(f'{k.replace("_", " ")} {get(f"held.{k}")}' for k in S1_HOLD_KINDS)
                   + f' ({percent(held, auto)} of Auto frames); {get("held.cap")} frames wanted a hold past the cap'))
     none = [(reason.replace('_', ' '), get(f'none.{reason}')) for reason in NO_MASK_REASONS]
-    skipped = [(reason.replace('_', ' '), get(f'inactive.{reason}')) for reason in INACTIVE_REASONS]
+    skipped = [(reason.replace('_', ' '), get(f'inactive.{reason}')) for reason in inactive_reasons]
     unheld = [('generated Presents without a decision', get('held.none'))] if s2a else []
 
     def shares(parts: list[tuple[str, int]]) -> str:
