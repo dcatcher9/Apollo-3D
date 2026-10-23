@@ -3698,8 +3698,10 @@ accepted by the API (a successful SDK call, not a metadata-only nomination) with
 second. This is the same one-second rule that ends a silent or rejected API source's association.
 A silent FG scope owns nothing: its refused boundaries withdraw nothing, the same viewport's
 ordinary SR/RR evaluation nominates again (replacing any FG observation of that viewport), the
-provider selects as without FG for that Present (`require_FG=0 FG_silent=1` in readiness lines)
-and no longer holds the queue in mono for FG, and a direct NGX evaluation copies its depth again.
+provider selects as without FG for that Present (`require_FG=0 FG_silent=1` in readiness lines),
+and a direct NGX evaluation copies its depth again. Enabled FG still holds the queue in mono while
+no API source is available: a game with FG on and no SR/RR or NGX depth stays 2D and never hands
+its real or generated presentations to the generic depth selector.
 The next accepted FG copy takes the viewport back at once. Assassin's Creed Shadows (10-22) kept FG
 on with no FG depth captured, which shut its working SR depth out for as long as FG stayed on. A
 game whose FG copies keep being accepted keeps FG ownership throughout. A

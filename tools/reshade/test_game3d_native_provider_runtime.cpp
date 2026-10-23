@@ -119,6 +119,16 @@ namespace {
       } while (GetTickCount64() < until);
       return false;
     }
+    // How many lines of the isolated runtime's ReShade.log contain every part
+    // now (no wait: add-on lines may still be in the asynchronous writer).
+    std::size_t reshade_log_count(std::initializer_list<const char *> parts) {
+      std::size_t count{};
+      std::ifstream file(runtime_directory / "ReShade.log", std::ios::binary);
+      for (std::string line; std::getline(file, line);)
+        if (std::all_of(parts.begin(), parts.end(), [&](const char *part) { return line.find(part) != std::string::npos; }))
+          ++count;
+      return count;
+    }
     static bool same_scale(float a, float b) {
       return std::isfinite(a) && std::isfinite(b) && std::abs(a-b) <= std::max(1.f,std::abs(b))*1e-5f;
     }
@@ -1785,13 +1795,13 @@ namespace {
         require(evaluate(0, token, inputs, 2, reinterpret_cast<void *>(game_native_command)) == 0,
           "SR evaluation with its own depth changed the SDK result");
       };
-      const auto fallback_frame = [&](bool fg_commands) {
+      const auto fallback_frame = [&](bool fg_commands, bool sr) {
         draw(*decoy); write_depth_pixels();
         abi_v2::frame_token *token{}; const auto frame = ++fg_frame;
         require(new_token(token, &frame) == 0 && token, "FG fallback SDK did not supply a frame token");
         last_token = token;
         require(constants_call(camera_constants(false), *token, viewport) == 0, "FG fallback constants changed the SDK result");
-        sr_evaluate(*token);
+        if (sr) sr_evaluate(*token);
         const auto resource = depth_resource();
         const auto command = reinterpret_cast<void *>(game_native_command);
         if (fg_commands) {
@@ -1818,7 +1828,7 @@ namespace {
         require(consecutive >= 12, frame_generation_input ? "An accepted FG copy did not take its viewport's depth back" :
           "A silent FG scope did not let the same viewport's SR depth through");
       };
-      render_tracked_depth = [&] { fallback_frame(false); };
+      render_tracked_depth = [&] { fallback_frame(false, true); };
       const auto silent_start = GetTickCount64();
       for (std::uint64_t now = silent_start; now - silent_start < 700; now = GetTickCount64()) {
         step(); no_effects(); const auto s = inspect();
@@ -1830,7 +1840,7 @@ namespace {
       require(reshade_log_contains({"Sunshine Streamline frame generation depth scope: silent viewport=0"}) &&
           reshade_log_contains({"Sunshine Streamline FG depth refused: reason=boundary_without_commands", "fg_scope=silent", "withdrawn=0"}),
         "The silent FG scope or its refused boundaries were not logged");
-      render_tracked_depth = [&] { fallback_frame(true); };
+      render_tracked_depth = [&] { fallback_frame(true, true); };
       settle_route("SLFG-accepted-copy-owns-again", true);
       for (unsigned frame = 0; frame < 30; ++frame) {
         step(); no_effects(); const auto s = inspect();
@@ -1839,7 +1849,29 @@ namespace {
       }
       require(reshade_log_contains({"Sunshine Streamline frame generation depth scope: live viewport=0"}),
         "The FG scope's return to live was not logged");
-      std::puts("PASS native SLFG scope: refused FG tags let the same viewport's SR depth through after a second, never before; an accepted FG copy owns the viewport again and SR stays out; no FX");
+      // The same refused FG tags with no SR evaluation (DLSS-G without DLSS
+      // SR/RR): a silent scope only lets an API source of the viewport
+      // through. With none, enabled FG still holds the queue in mono, so the
+      // generic selector never takes real or generated FG presentations.
+      const auto silent_lines = [&] {
+        return reshade_log_count({"Sunshine Streamline frame generation depth scope: silent viewport=0"});
+      };
+      const auto generic_lines = [&] { return reshade_log_count({"using generic depth fallback"}); };
+      const auto silent_before = silent_lines(), generic_before = generic_lines();
+      const auto held_frame = [&] {
+        step(); no_effects(); const auto s = inspect();
+        require(s.source.selected, "A silent FG scope with no API source handed the queue to the generic depth selector");
+        return s;
+      };
+      render_tracked_depth = [&] { fallback_frame(false, false); };
+      for (const auto until = GetTickCount64() + 7000; silent_lines() == silent_before && GetTickCount64() < until;) held_frame();
+      require(silent_lines() > silent_before, "Refused FG tags without SR did not turn the FG scope silent");
+      status mono;
+      for (const auto start = GetTickCount64(); GetTickCount64() - start < 1500;) mono = held_frame();
+      log_status("SLFG-silent-scope-no-API-source", mono);
+      require(!mono.source.ready && generic_lines() == generic_before,
+        "A silent FG scope with no API source supplied depth or used the generic depth fallback");
+      std::puts("PASS native SLFG scope: refused FG tags let the same viewport's SR depth through after a second, never before; an accepted FG copy owns the viewport again and SR stays out; with no SR the silent scope stays mono, never generic; no FX");
 
       // Use the same public SDK boundary for linear RR depth with no usable
       // camera. The native copy, provider acquisition and GPU moment readback

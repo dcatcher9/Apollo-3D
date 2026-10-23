@@ -561,7 +561,8 @@ namespace sunshine_streamline::provider {
     // (depth_capture::frame_generation_scope_live). A silent scope selects as
     // without FG for this acquisition, so that viewport's ordinary SR/RR depth
     // may supply depth, and the next accepted FG copy takes ownership back.
-    // The policy's own confirmed FG scope is left unchanged.
+    // The policy's own confirmed FG scope is left unchanged, and it still
+    // holds the queue in mono when no API source is available (associated).
     const bool fg_silent = policy.require_frame_generation &&
       !depth_capture::frame_generation_scope_live(policy.epoch, policy.viewport, policy.enabled_tick);
     const auto selection = fg_silent ? depth_capture::selection_policy{} : policy;
@@ -627,7 +628,11 @@ namespace sunshine_streamline::provider {
     // Session ownership and current pixel readiness are different facts. Once
     // a supported API has identified a valid source on this queue, a missing frame stays
     // mono; it cannot silently select another encoding and recalibrate its gain.
-    const bool associated = selection.require_frame_generation || depth_capture::provider_active(runtime->get_command_queue()->get_native());
+    // Enabled FG holds the queue from its policy, not from this Present's
+    // selection: a silent scope releases only the selection restriction, so
+    // without an API source the game stays mono instead of handing real and
+    // generated presentations to the generic selector.
+    const bool associated = policy.require_frame_generation || depth_capture::provider_active(runtime->get_command_queue()->get_native());
     std::uint32_t frame_width{}, frame_height{};
     runtime->get_screenshot_width_and_height(&frame_width, &frame_height);
     const auto handoff_tick = GetTickCount64();

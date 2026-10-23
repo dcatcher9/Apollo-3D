@@ -433,6 +433,7 @@ resource, which ends the tag) is not a capture attempt and never withdraws depth
 at the frame's tag. FG keeps that priority only while its scope is live: FG was turned on less than
 a second ago, or one of its depth copies was accepted within the last second. Otherwise the same
 viewport's SR/RR depth (or NGX) may supply depth until the next accepted FG copy takes it back.
+Without such a source enabled FG still keeps the game in mono; it never falls back to generic depth.
 Explicit FG Off retires that source and lets a fresh NGX submission resume. Motion-vector interpolation of two real depth
 frames for FG 2x is future work; the current implementation does not generate intermediate depth.
 Reused depth holds its applied gain and zero without learning. User strength reductions apply
