@@ -77,7 +77,8 @@ namespace {
 
   // What the reduce sums from the tiles, exactly as it does: the one-way
   // counts on a sample frame only (per_frame_sample), the pre-UI counts on a
-  // sample frame with an offered layer and a pre-UI threshold, and the
+  // sample frame with an offered layer (the matching ones only with a pre-UI
+  // threshold; the lit ones are the layer's own), and the
   // layer's pixels beyond the bound as invalid when they lie on more than 1%
   // of the frame and on more than 5% of it or more than its opaque ones.
   selection::counts sums(const tiles &t, std::uint32_t offered = 0, std::uint32_t flags = 0, float pre_ui_threshold = 0.f) {
@@ -117,8 +118,8 @@ namespace {
     c.opaque_layer = layer[2];
     c.opaque_backbuffer = lit[3];
     c.opaque_current = layer[3];
-    const bool counted = sample && (offered & candidate::layer) && pre_ui_threshold > 0.f;
-    c.pre_ui_match = counted ? pre_ui[0] : 0u;
+    const bool counted = sample && (offered & candidate::layer);
+    c.pre_ui_match = counted && pre_ui_threshold > 0.f ? pre_ui[0] : 0u;
     c.pre_ui_lit = counted ? pre_ui[1] : 0u;
     return c;
   }
@@ -1124,9 +1125,10 @@ namespace {
   // layer copy is never judged, E2); the difference and lit counts only
   // with an offered HUD-less image (t0 is read only then); and rows 128-143, the layer's
   // colour against the presented colour (t6) at 8 times pre_ui_threshold
-  // (b2 word 4; zero compares nothing): matching and lit layer pixels,
-  // relative above one in scRGB (H1 d); a frame that is not a sample writes
-  // those rows as zero.
+  // (b2 word 4; zero compares nothing), relative above one in scRGB, and its
+  // own lit pixels at 8 times its own step (.005 with the stored HDR-headroom
+  // bit, else 2/255), counted without a pre-UI threshold too (H1 d); a frame
+  // that is not a sample, or offers no layer, writes those rows as zero.
   void check_tiles(gpu_t &gpu, ID3D11ComputeShader *tiles, std::uint32_t flags, std::uint32_t offered, const char *space,
       unsigned color, float pre_ui_threshold) {
     const bool sample = (flags & detection::per_frame_sample) != 0u;
@@ -1228,17 +1230,22 @@ namespace {
           strong_counts[tile][k] += judging && judged[k] && strong(a[k]);
           contradicted[tile][k] += judging && judged[k] && strong(a[k]) && shown;
         }
-        // H1 (d): the layer's colour against the presented colour.
+        // H1 (d): the layer's own lit pixels (8 times its own step: .005 for
+        // a float layer, else 2/255) and its colour against the presented
+        // colour, on a sample frame with an offered layer.
         const auto &presented = images[6][i];
-        const bool compared = sample && coarse > 0.f && std::isfinite(presented[0]) && std::isfinite(presented[1]) &&
-          std::isfinite(presented[2]) && std::isfinite(l[0]) && std::isfinite(l[1]) && std::isfinite(l[2]);
+        const bool layer_counted = sample && (offered & candidate::layer) && std::isfinite(l[0]) && std::isfinite(l[1]) &&
+          std::isfinite(l[2]);
+        const float own_step = (flags & detection::stored_hdr_headroom) ? .005f : 2.f / 255.f;
+        // .z and .w stay zero.
+        if (layer_counted) pre_ui[tile][1] += peak(l) > own_step * 8.f;
+        const bool compared = layer_counted && coarse > 0.f && std::isfinite(presented[0]) && std::isfinite(presented[1]) &&
+          std::isfinite(presented[2]);
         if (compared) {
           const float scale = color == 2 ? std::max(1.f, peak(presented)) : 1.f;
           const float apart = std::max({std::abs(presented[0] - l[0]), std::abs(presented[1] - l[1]),
             std::abs(presented[2] - l[2])}) / scale;
-          // .z and .w stay zero.
           pre_ui[tile][0] += apart <= coarse;
-          pre_ui[tile][1] += peak(l) > coarse;
         }
       }
     std::array<ComPtr<ID3D11ShaderResourceView>, 7> views;
@@ -1282,8 +1289,11 @@ namespace {
     require(!judging || total_contradicted, "check_tiles: the images exercise no contradicted pixel");
     require(!(offered & candidate::layer) || !(flags & detection::stored_premultiplied) || total_beyond,
       "check_tiles: the images exercise no layer pixel beyond the premultiplied bound");
-    require(sample && pre_ui_threshold > 0.f ? total_pre_ui[0] && total_pre_ui[1] && !total_pre_ui[2] && !total_pre_ui[3] &&
-        total_pre_ui[0] < 256u * 144u :
+    // A layer not comparable with the presented colour (no pre-UI threshold)
+    // still counts its own lit pixels on a sample frame.
+    const bool layer_sample = sample && (offered & candidate::layer);
+    require(layer_sample ? (pre_ui_threshold > 0.f ? total_pre_ui[0] && total_pre_ui[0] < 256u * 144u : !total_pre_ui[0]) &&
+        total_pre_ui[1] && !total_pre_ui[2] && !total_pre_ui[3] :
       total_pre_ui == texel{}, "check_tiles: the pre-UI pixel counts are degenerate");
   }
 }
@@ -1735,8 +1745,9 @@ int main() {
       const auto reduce = compile_pass(gpu, source, color);
       const char *space = color == 1 ? "sRGB" : "PQ";
       const auto tiles = compile_pass(gpu, source, color, "SunshineUIDetectionTilesCS");
-      // A status sample with and without a comparable layer, and a frame that
-      // is not a sample (no one-way or pre-UI counts, no threshold pushed).
+      // A status sample with and without a comparable layer (lit pixels are
+      // counted either way), and a frame that is not a sample (no one-way or
+      // pre-UI counts, no threshold pushed).
       for (const std::uint32_t flags : {0u, detection::layer_detection_flags(false), detection::layer_detection_flags(true)})
         for (const std::uint32_t offered : {0x5fu, 0x7fu})
           for (const float pre_ui_threshold : {2.f / 255.f, 0.f})

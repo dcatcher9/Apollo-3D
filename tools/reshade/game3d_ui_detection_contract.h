@@ -76,7 +76,9 @@ namespace sunshine_game3d::ui_detection {
   // mask passes read them; they key no decision, no status (F1) and no
   // hidden-scene state, and nothing on the CPU reads them back.
   inline constexpr std::uint32_t stored_premultiplied = 0x1u; // The layer must pass the premultiplied bound (V1).
-  inline constexpr std::uint32_t stored_hdr_headroom = 0x2u;  // With a float layer's HDR headroom.
+  // A float layer: the bound's HDR headroom, and (since 10-23) the float
+  // step .005 of its own lit test in the tiles pass (texel 11), else 2/255.
+  inline constexpr std::uint32_t stored_hdr_headroom = 0x2u;
   // The offered UIAlpha (t11) is an A8_UNORM image (ui_mask::
   // ui_alpha_in_alpha): its opacity is read from alpha, not red.
   inline constexpr std::uint32_t stored_ui_alpha_in_alpha = 0x10u;

@@ -828,7 +828,8 @@ in a transparent target) never earns acceptance.
 An offscreen UI layer's selective sample earns only when its colour without coverage does not
 outnumber its opaque pixels: V1's comparison of the pixels beyond the premultiplied bound with the
 opaque ones, without V1's allowance of 1% of the frame. Its lit pixels (counted at eight times the
-layer's pair threshold with the presented frame, more than the bound allows at zero alpha) in excess
+layer's own encoding step, `.005` for a float layer and `2/255` otherwise, more than the bound allows
+at zero alpha) in excess
 of its covered pixels lie beyond the bound, since UI over transparent black has no colour without
 alpha. A sample that fails earns nothing and restarts the run, as a full-frame sample does, and is
 testable for a restored entry (A3), so a remembered layer that only such samples meet lapses.
@@ -836,8 +837,11 @@ Battlefield 6 earned its R8G8B8A8 layer on 10-22 from near-black frames of a sce
 cleared target (5 covered pixels, 538 lit, none opaque; its gameplay copies are lit on every pixel
 and fail V1), while every valid selective layer sample logged or dumped from Stellar Blade, The
 Witcher 3, Resident Evil Requiem and Assassin's Creed Shadows has fewer lit than covered pixels.
-Without a pre-UI threshold (a layer not comparable with the presented colour, such as a float layer
-under PQ) nothing is refused. A source that is never selective is never accepted: an empty or nearly full-scene source
+The lit count is the layer's own, so a layer that is not comparable with the presented colour is
+refused the same way: a float layer under PQ, a UNORM layer under scRGB, or an `*_SRGB` view over a
+UNORM swap chain (since 8bb9a890 a typeless RGBA8 or BGRA8 target cleared through an SRGB view is
+copied as SRGB). Before 10-23 the lit pixels were counted at the layer's pair threshold with the
+presented frame, so such a layer counted none and nothing was refused. A source that is never selective is never accepted: an empty or nearly full-scene source
 is ambiguous, because an opaque channel can carry no UI at all (Hogwarts Legacy's UIColorAndAlpha,
 and Stellar Blade's in HDR, are the opaque final image during play). A sample in which an offered
 UIAlpha or UI color tag is invalid is void for Backbuffer and current alpha, the sources whose
@@ -1013,7 +1017,12 @@ R16G16B16A16 FLOAT or UNORM, R32G32B32A32 FLOAT). An SRGB view stays SRGB, so de
 linear values the game blended, which the premultiplied bound is defined on. A typeless resource
 without a view format, an integer or SNORM view, or a view outside the resource's family is not a
 layer; before C12 a typeless RGBA16 target was always read as FLOAT and an integer RGBA target was
-tracked. HDR headroom follows the view: FLOAT views only.
+tracked. HDR headroom follows the view: FLOAT views only. A layer's signature follows its copy's
+format too, so a typeless RGBA8 or BGRA8 target cleared through an SRGB view, copied as UNORM
+(`ui_layer:28` or `ui_layer:87`) before C12, is a new `ui_layer:29` or `ui_layer:91` signature
+that earns its acceptance again (a remembered entry of the old key does not carry over). It is not
+comparable with a UNORM presented frame, so it is never pre-UI proven, while its own lit pixels keep
+A1's uncovered-colour refusal.
 
 A target cleared in at least three frames with gaps under 250 ms is a confirmed layer; of several,
 the one cleared last in the frame is active, since UI draws last. The tracker holds 32 targets
@@ -1474,8 +1483,13 @@ its pixels, and the proof is a ledger entry, not guard state: the acceptance led
 tiles pass compares the offered layer's RGB (`t7`) with the presented colour (`t6`) at eight times
 their pair threshold, the coarse bound of the lit tests (`b2` word 4, `ui_selection::comparable` of
 the layer signature's encoding and the presented one; 0 without a layer or a comparable pair, which
-counts nothing), with scRGB differences relative above one as for the HUD-less difference. Decision
-texel 11 sums the pixels that match and the lit layer pixels (above the same bound). A sample
+matches nothing), with scRGB differences relative above one as for the HUD-less difference. Decision
+texel 11 sums the pixels that match and the lit layer pixels. Since 10-23 the lit pixels are the
+layer's own, above eight times its own encoding step (`.005` for a float layer, the stored flag
+`0x2`, else `2/255`), counted on every sample frame that offers a layer, comparable or not; for
+every comparable pair that step equals the pair threshold (no layer format is 10-bit), so a
+comparable layer counts what it did before. A layer that is not comparable therefore has lit pixels
+but never matching ones, and is never proven. A sample
 matches when the layer is offered without coverage, matches on at least 90% of the pixels
 (`ui_selection::full`) and is lit on at least half (`ui_selection::pre_ui_match`): the half-frame
 rule of a lit HUD-less image (`change_set_full`), without which a transparent black UI layer over a
@@ -1786,7 +1800,8 @@ took the layer in the UI color slot).
 fix 1 `b2` has five words (a 32-byte constant buffer): `Sunshine_UIPreUIThreshold` (word 4, float) is the
 pair threshold of the offscreen UI layer and the presented colour (`ui_selection::comparable` of the
 layer signature's format and colour space against the presented encoding), 0 without a layer or
-when they are not comparable, at eight times which the tiles pass counts texel 11. The renderer
+when they are not comparable, at eight times which the tiles pass counts texel 11's matching pixels
+(since 10-23 its lit pixels use the layer's own step instead, **The layer's pre-UI proof**). The renderer
 pushes it only on a detection sample frame (at most one every 100 ms, the frames whose decision
 texels the CPU reads); every other frame pushes 0, so the tiles pass skips the presented-colour
 loads and both passes skip the second sum and write texel 11 as zero. The decision never reads
@@ -1794,13 +1809,14 @@ texel 11. `b2` has those five words (`ui_detection::b2_words`, a 32-byte constan
 `Sunshine_UIReserved`, carried H2's flag `0x1` (fix 2) and fix 3 and fix 4's bits `0x2`-`0x200`;
 after those were removed it was pushed as zero through be7788bf, and older shaders read it as zero
 from the padding. S3's words 6-9 (the proposed labels and `Sunshine_UIIdentity`, 48 bytes in all)
-were removed with S3. A layer seen through an `*_SRGB` view is not comparable with a UNORM presented frame, so it is never proven.
+were removed with S3. A layer seen through an `*_SRGB` view is not comparable with a UNORM presented frame, so it is never proven;
+its lit pixels still count for A1's uncovered-colour refusal.
 `Sunshine_UIDetectionFlags` (`b2` word 3) has stored and per-frame bits:
 
 | Value | Kind | Meaning |
 | --- | --- | --- |
 | `0x1` | stored | The offscreen UI layer must pass the premultiplied bound (V1). |
-| `0x2` | stored | With a float layer's HDR headroom. |
+| `0x2` | stored | A float layer: the bound's HDR headroom, and since 10-23 the step `.005` of the layer's own lit pixels in texel 11 (`2/255` without it). |
 | `0x4` | stored | Reserved and never reused; the shader defines nothing for it. Through 180f1842 every layer copy carried it, marking the one-frame-late copy, which is never judged (A2, E2); selection revisions 2-9 read it, and `ui_detection_replay` pushes it to a shader that still defines `SUNSHINE_UI_STORED_LATE_LAYER`, so those revisions replay as before. |
 | `0x8` | stored | Reserved and never reused; the shader defines nothing for it. Since selection revision 10 stored bits end at `0x800` (`0x20`-`0x800` never used) and per-frame bits start at `0x1000`. |
 | `0x10` | stored | `SUNSHINE_UI_STORED_UI_ALPHA_IN_ALPHA`: the offered UIAlpha (`t11`) is an `A8_UNORM` image, so the tiles and mask passes read its opacity from alpha instead of red. Pushed with an offered UIAlpha of that format only; `ui_detection_replay` derives it from the UIAlpha artifact's format. |

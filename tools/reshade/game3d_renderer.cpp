@@ -1997,9 +1997,10 @@ namespace sunshine_game3d {
     if (arbitration.adopt) d.temporal.adopt(bits, accepted);
     d.difference_threshold = pair_threshold ? *pair_threshold : ui_selection::comparable(presented, presented).value_or(2.f / 255.f);
     // H1 (d): the offscreen UI layer's pair threshold with the presented
-    // color, from the layer signature's format; zero (no pre-UI pixel counts)
-    // without a layer or when the two are not comparable. detect_ui pushes it
-    // on sample frames only.
+    // color, from the layer signature's format; zero (no matching pre-UI
+    // pixels) without a layer or when the two are not comparable. The tiles
+    // pass counts the layer's own lit pixels without it (its stored flags
+    // name a float layer). detect_ui pushes it on sample frames only.
     d.pre_ui_threshold = (bits & candidate::layer) ?
       ui_selection::comparable({signatures.format[std::size_t(kind::ui_layer)], d.color}, presented).value_or(0.f) : 0.f;
     const bool needs_detection = auto_mode || manual_detection || ui.kind == ui_input_kind::hudless_difference;

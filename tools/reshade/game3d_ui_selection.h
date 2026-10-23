@@ -281,15 +281,16 @@ namespace sunshine_game3d::ui_selection {
   // the premultiplied bound with the opaque ones, without V1's allowance of 1%
   // of the frame (which keeps a decision through an additive glow beside the
   // UI). lit is the layer's lit pixels (texel 11: colour above 8 times its
-  // pair threshold with the presented frame, more than the 4/255 the bound
-  // allows at zero alpha), so a lit pixel within the bound is covered, and at
-  // least lit - covered pixels lie beyond it (or, in a float layer, carry
-  // negative colour or alpha out of range: no UI either). A sample that
-  // passes V1's comparison passes this one, which refuses only what the
-  // allowance admitted, such as near-black frames of a scene image in the
-  // cleared target (Battlefield 6: 5 covered pixels, 538 lit, none opaque).
-  // Without a pre-UI threshold (a layer not comparable with the presented
-  // colour) lit is zero and nothing is refused.
+  // own encoding's step, .005 for a float layer, else 2/255, more than the
+  // 4/255 the bound allows at zero alpha), so a lit pixel within the bound is
+  // covered, and at least lit - covered pixels lie beyond it (or, in a float
+  // layer, carry negative colour or alpha out of range: no UI either). A
+  // sample that passes V1's comparison passes this one, which refuses only
+  // what the allowance admitted, such as near-black frames of a scene image
+  // in the cleared target (Battlefield 6: 5 covered pixels, 538 lit, none
+  // opaque). lit is the layer's own, so this holds for a layer that is not
+  // comparable with the presented colour too (an *_SRGB view over a UNORM
+  // swap chain, a float layer under PQ); it was zero there before 10-23.
   constexpr bool layer_uncovered_color(std::uint32_t lit, std::uint32_t covered, std::uint32_t opaque) {
     return lit > covered && lit - covered > opaque;
   }

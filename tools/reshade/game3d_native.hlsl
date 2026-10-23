@@ -259,7 +259,8 @@ cbuffer SunshineUIDetectionConstants : register(b2)
     // The pair threshold of the offscreen UI layer (t7) and the presented
     // color (t6) from their own encodings; zero without a layer, when the
     // two are not comparable or on a frame that is not a detection sample
-    // (H1 d, the pre-UI pixel counts, which the CPU reads from samples only).
+    // (H1 d, the matching pre-UI pixels, which the CPU reads from samples
+    // only). The layer's lit pixels do not depend on it.
     float Sunshine_UIPreUIThreshold;
 };
 RWTexture2D<float> SunshineHostCandidateStore : register(u0);
@@ -323,24 +324,34 @@ float SunshineHUDlessDifference(uint2 xy, out bool valid)
     return SunshineHUDlessDifferenceOf(SunshineSourceSampler.Load(int3(xy, 0)).rgb, SunshineHUDless.Load(int3(xy, 0)).rgb,
         valid);
 }
-// The pre-UI pixel counts of one pixel (H1 d): the offscreen UI layer's
-// colour against the presented colour at a coarse threshold, eight times
-// their pair threshold as the lit test of a HUD-less image: {matching, lit
-// layer, 0, 0}, all zero when the pair is not comparable (threshold zero) or
-// either colour is not finite. scRGB is compared with the same relative
-// tolerance above one as SunshineHUDlessDifference.
+// The pre-UI pixel counts of one pixel (H1 d) of an offered layer on a
+// status sample, {matching, lit layer, 0, 0}; zero on any other frame or
+// for a layer colour that is not finite. lit is the layer's own: its colour
+// above eight times its own encoding's step (.005 for a float layer, the
+// stored HDR-headroom bit, else 2/255; the coarse bound of the lit tests),
+// whether or not the layer is comparable with the presented colour, so A1's
+// uncovered-colour gate reads it for every layer. matching compares the
+// layer's colour with the presented colour at eight times their pair
+// threshold, and is zero when the pair is not comparable (threshold zero) or
+// the presented colour is not finite. scRGB is compared with the same
+// relative tolerance above one as SunshineHUDlessDifference. For every
+// comparable pair the two steps are equal (no layer format is 10-bit UNORM).
 uint4 SunshinePreUIPixel(uint2 xy, float3 layer)
 {
-    const float coarse = Sunshine_UIPreUIThreshold * 8.0;
-    if (!(coarse > 0.0)) return 0u;
-    float3 presented = SunshinePresentedColor.Load(int3(xy, 0)).rgb;
-    if (!all(isfinite(presented)) || !all(isfinite(layer))) return 0u;
-    float presentedPeak = max(max(abs(presented.r), abs(presented.g)), abs(presented.b));
+    if (!(Sunshine_UIDetectionFlags & SUNSHINE_UI_PER_FRAME_SAMPLE) ||
+        !(Sunshine_UICandidates & SUNSHINE_UI_CANDIDATE_LAYER) || !all(isfinite(layer))) return 0u;
+    const float layerStep = (Sunshine_UIDetectionFlags & SUNSHINE_UI_STORED_HDR_HEADROOM) != 0u ? 0.005f : 2.0f / 255.0f;
     float layerPeak = max(max(abs(layer.r), abs(layer.g)), abs(layer.b));
+    const uint lit = layerPeak > layerStep * 8.0 ? 1u : 0u;
+    const float coarse = Sunshine_UIPreUIThreshold * 8.0;
+    if (!(coarse > 0.0)) return uint4(0u, lit, 0u, 0u);
+    float3 presented = SunshinePresentedColor.Load(int3(xy, 0)).rgb;
+    if (!all(isfinite(presented))) return uint4(0u, lit, 0u, 0u);
+    float presentedPeak = max(max(abs(presented.r), abs(presented.g)), abs(presented.b));
     float scale = BUFFER_COLOR_SPACE == 2 ? max(1.0, presentedPeak) : 1.0;
     float3 difference = abs(presented - layer);
     float delta = max(max(difference.r, difference.g), difference.b) / scale;
-    return uint4(delta <= coarse ? 1u : 0u, layerPeak > coarse ? 1u : 0u, 0u, 0u);
+    return uint4(delta <= coarse ? 1u : 0u, lit, 0u, 0u);
 }
 // Each of the 16x16 tiles is counted by SUNSHINE_UI_DETECTION_TILE_PARTS
 // groups of 256 threads (group z: part k takes the tile's runs of 16 rows
@@ -465,8 +476,8 @@ void SunshineUIDetectionTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_Grou
             const bool shownUnchanged = shownFinite && shownDelta <= Sunshine_UIDifferenceThreshold * .5;
             contradicted += litPixel && unchanged && shownUnchanged ? strongPixel : uint4(0u, 0u, 0u, 0u);
         }
-        // H1 (d): the layer's colour against the presented colour (zero
-        // without a pre-UI threshold, which only a sample frame pushes).
+        // H1 (d): the layer's lit pixels and its colour against the presented
+        // colour, on a sample frame only (matching needs a pre-UI threshold).
         preUI += SunshinePreUIPixel(uint2(x, y), layer.rgb);
     }
     uint lane = thread.y * 16u + thread.x;
@@ -623,9 +634,10 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     const bool scene_like = beyond * 100u > pixels && (beyond * 20u > pixels || beyond > layer_sum.z);
     const uint3 layer = uint3(layer_sum.x, layer_sum.y + (scene_like ? beyond : 0u), layer_sum.z);
     // The layer against the presented frame (H1 d): {matching, lit layer};
-    // zero without an offered layer or a pre-UI threshold.
-    const uint2 pre_ui_pixels = (Sunshine_UICandidates & SUNSHINE_UI_CANDIDATE_LAYER) && Sunshine_UIPreUIThreshold > 0.0 ?
-        pre_ui_sum.xy : 0u;
+    // zero without an offered layer, and matching zero without a pre-UI
+    // threshold. Both are zero on a frame that is not a sample.
+    const uint2 pre_ui_pixels = (Sunshine_UICandidates & SUNSHINE_UI_CANDIDATE_LAYER) ?
+        uint2(Sunshine_UIPreUIThreshold > 0.0 ? pre_ui_sum.x : 0u, pre_ui_sum.y) : 0u;
     const uint offered = Sunshine_UICandidates, accepted = Sunshine_UIAcceptedCandidates;
     const uint alpha_bits = SUNSHINE_UI_CANDIDATE_UI_ALPHA | SUNSHINE_UI_CANDIDATE_UI_COLOR |
         SUNSHINE_UI_CANDIDATE_BACKBUFFER | SUNSHINE_UI_CANDIDATE_CURRENT | SUNSHINE_UI_CANDIDATE_LAYER;

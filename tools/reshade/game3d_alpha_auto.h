@@ -120,10 +120,11 @@ namespace sunshine_game3d {
       std::uint32_t refused{}, frame_reason = ui_detection::frame_reason_decided;
       bool reused{};
       // H1 (d), texel 11 (selection revision 4): the offscreen UI layer
-      // against the presented frame at 8 times their pair threshold: pixels
-      // whose colours match and lit layer pixels, which prove the layer the
-      // pre-UI scene image (ui_selection::pre_ui_match). Both zero without a
-      // layer or a comparable pair.
+      // against the presented frame at 8 times their pair threshold, pixels
+      // whose colours match, and the layer's own lit pixels (8 times its own
+      // step), which prove the layer the pre-UI scene image
+      // (ui_selection::pre_ui_match). Both zero without a layer; matching
+      // zero without a comparable pair (lit is counted there since 10-23).
       std::uint32_t pre_ui_match{}, pre_ui_image_lit{};
     } evidence;
     // This render's state, not the sample's: the hidden-scene guard's
