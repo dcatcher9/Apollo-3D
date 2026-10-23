@@ -729,9 +729,11 @@ a report change moves a golden on purpose, rewrite the goldens with
 commit. The repository is public, so a new game's log enters only through
 `scrub_game3d_log.py <name> "<game>" <ReShade.log> [--host-log sunshine.log]`, run on the saved
 log with its original modification time. It replaces install, user and other drive paths, names
-and addresses with placeholders and keeps only the session's host lines. The golden test fails on
-anything left to scrub; the raw logs are not kept, so a new scrub rule reaches the committed
-fixtures through `scrub_game3d_log.py --rescrub`, and their goldens should not move.
+and addresses with placeholders and keeps only the session's host lines. The machine's own user and
+computer names are replaced only in that scrub, so the golden test and `--rescrub` give the same
+result on any machine. The golden test fails on anything left to scrub; the raw logs are not
+kept, so a new scrub rule reaches the committed fixtures through `scrub_game3d_log.py --rescrub`,
+and their goldens should not move.
 
 UI decision changes have two offline gates; [UI protection](../../docs/reshade-sbs.md#setup)
 owns their contracts. The first is the single-frame replay of the labelled dumps. Run it from

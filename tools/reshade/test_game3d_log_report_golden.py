@@ -28,23 +28,17 @@ import scrub_game3d_log as scrub  # noqa: E402
 UPDATE = False
 
 
-def logs(fixture):
-    """The fixture's gzipped logs as (game log, host log or None) paths."""
-    host = scrub.GOLDENS / f'{fixture["name"]}.sunshine.log.gz'
-    return scrub.GOLDENS / f'{fixture["name"]}.ReShade.log.gz', host if fixture['host_log'] else None
-
-
 def run_report(fixture, directory: Path) -> str:
     """The report's output on the fixture and then its exit code, from a ReShade.log with the saved log's modification
     time (the report dates the host log and tells a running game from it)."""
-    game, host = logs(fixture)
+    game, *host = scrub.fixture_logs(fixture)
     log = directory / 'ReShade.log'
     log.write_bytes(gzip.decompress(game.read_bytes()))
     written = datetime.fromisoformat(fixture['mtime']).timestamp()
     os.utime(log, (written, written))
     argv = [str(log)]
     if host:
-        (directory / 'sunshine.log').write_bytes(gzip.decompress(host.read_bytes()))
+        (directory / 'sunshine.log').write_bytes(gzip.decompress(host[0].read_bytes()))
         argv += ['--host-log', str(directory / 'sunshine.log')]
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
@@ -71,14 +65,21 @@ class GoldenReports(unittest.TestCase):
                 self.assertEqual(golden.read_text(encoding='utf-8'), text)
 
     def test_fixtures_are_scrubbed(self):
-        # The repository is public: a fixture holds nothing that scrubbing would still replace, nor this machine's
-        # user or computer name.
-        names = scrub.local_names()
+        # The repository is public: a fixture holds nothing that the line rules would still replace. The check is the
+        # same on every machine, whatever its user and computer names.
         for fixture in self.fixtures:
-            for path in filter(None, logs(fixture)):
+            for path in scrub.fixture_logs(fixture):
                 with self.subTest(path.name):
-                    text = gzip.decompress(path.read_bytes()).decode('utf-8')
-                    self.assertEqual(scrub.leftovers(text, names)[:5], [])
+                    self.assertEqual(scrub.leftovers(scrub.read_gzip(path))[:5], [])
+
+    def test_local_names_keep_words_of_the_logs(self):
+        # A full scrub replaces the user and computer names of the machine that wrote the log, but not a word the logs
+        # already use: an account named Owner keeps the add-on's 'shared copy owner', one named dev 'gyan.dev'.
+        with mock.patch.dict(os.environ, {'USERNAME': 'Owner', 'USER': 'dev', 'COMPUTERNAME': 'Q7-WORKSTATION'}):
+            names = scrub.local_names()
+        self.assertEqual(names, (('Q7-WORKSTATION', '<MACHINE>'),))
+        self.assertEqual(scrub.scrub_line(r'share \\q7-workstation\games owner', None, names),
+                         r'share \\<MACHINE>\games owner')
 
     def test_fixtures_scrub_again_unchanged(self):
         # The raw logs are not kept, so a new rule reaches the fixtures by scrubbing them again. A fixture's <GAME> is
@@ -88,13 +89,13 @@ class GoldenReports(unittest.TestCase):
             shutil.copytree(scrub.GOLDENS, copy)
             manifest = copy / 'manifest.json'
             with mock.patch.object(scrub, 'GOLDENS', copy), mock.patch.object(scrub, 'MANIFEST', manifest):
-                for path in (path for fixture in self.fixtures for path in filter(None, logs(fixture))):
+                for path in (path for fixture in self.fixtures for path in scrub.fixture_logs(fixture)):
                     with self.subTest(path.name):
-                        lines = gzip.decompress(path.read_bytes()).decode('utf-8').splitlines()
+                        lines = scrub.read_gzip(path).splitlines()
                         self.assertIsNone(scrub.install_folder(lines))
                         self.assertEqual([line for line in lines if scrub.scrub_line(line, '<GAME>') != line][:5], [])
                 log = Path(directory) / 'ReShade.log'
-                log.write_bytes(gzip.decompress(logs(self.fixtures[0])[0].read_bytes()))
+                log.write_bytes(gzip.decompress(scrub.fixture_logs(self.fixtures[0])[0].read_bytes()))
                 with contextlib.redirect_stdout(io.StringIO()):
                     self.assertEqual(scrub.main(['probe', 'Probe', str(log)]), 2)
                     self.assertEqual(scrub.rescrub(), 0)
@@ -110,7 +111,7 @@ class GoldenReports(unittest.TestCase):
         self.assertEqual(len(set(names)), len(names))
         expected = {'manifest.json', '.gitattributes'}
         for fixture in self.fixtures:
-            expected |= {path.name for path in filter(None, logs(fixture))} | {f'{fixture["name"]}.txt'}
+            expected |= {path.name for path in scrub.fixture_logs(fixture)} | {f'{fixture["name"]}.txt'}
         self.assertEqual(sorted(path.name for path in scrub.GOLDENS.iterdir()), sorted(expected))
 
 

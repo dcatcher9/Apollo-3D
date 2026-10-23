@@ -2,11 +2,11 @@
 """Turns a game's saved ReShade.log (and the host log of its session) into a public report fixture.
 
 The fixtures in log_report_goldens/ are committed to a public repository. This replaces the game's install folder, any
-other drive path but the Windows folder, user-profile paths, the user and machine names, IP and MAC addresses,
-adapter LUIDs, device instance paths, DirectInput device GUIDs, audio endpoint ids, client names and the host's display
-list with stable placeholders. It keeps only the host log lines the report can read for the session (its window, dated
-as game3d_log_report.py dates it, and the stream rates set before it) and stores both logs gzipped, then records the
-fixture in manifest.json. Record its report afterwards with
+other drive path but the Windows folder, user-profile paths, this machine's user and computer names (unless the logs
+already use them as words), IP and MAC addresses, adapter LUIDs, device instance paths, DirectInput device GUIDs, audio
+endpoint ids, client names and the host's display list with stable placeholders. It keeps only the host log lines the
+report can read for the session (its window, dated as game3d_log_report.py dates it, and the stream rates set before
+it) and stores both logs gzipped, then records the fixture in manifest.json. Record its report afterwards with
 `python tools/reshade/test_game3d_log_report_golden.py --update`.
 
     python tools/reshade/scrub_game3d_log.py <name> "<game>" <ReShade.log> [--host-log sunshine.log]
@@ -88,11 +88,20 @@ def install_folder(lines: list[str]) -> str | None:
     return None
 
 
+def name_word(name: str) -> re.Pattern:
+    """A user or computer name as a whole word, in any case."""
+    return re.compile(rf'(?<!\w){re.escape(name)}(?!\w)', re.I)
+
+
 def local_names() -> tuple[tuple[str, str], ...]:
-    """This machine's user and computer names, which no fixture may contain, with their placeholders."""
+    """This machine's user and computer names with their placeholders, for the full scrub of a log it wrote. A name the
+    committed fixtures already hold as a word is a word of the logs, not this machine's (an account named Owner meets
+    the add-on's 'shared copy owner', one named dev the FFmpeg banner's 'gyan.dev'): it stays, and no log text moves."""
     names = ((os.environ.get('USERNAME'), '<USER>'), (os.environ.get('USER'), '<USER>'),
              (os.environ.get('COMPUTERNAME'), '<MACHINE>'))
-    return tuple(dict((name, placeholder) for name, placeholder in names if name and len(name) >= 3).items())
+    public = '\n'.join(read_gzip(path) for fixture in load_manifest() for path in fixture_logs(fixture))
+    return tuple(dict((name, placeholder) for name, placeholder in names
+                      if name and len(name) >= 3 and not name_word(name).search(public)).items())
 
 
 def drive_path(path: str) -> str:
@@ -134,7 +143,7 @@ def scrub_line(line: str, install: str | None = None, names: tuple[tuple[str, st
     line = QUOTED_PATH.sub(lambda m: m.group(1) + drive_path(m.group(2)) + m.group(1), line)
     line = BARE_PATH.sub(lambda m: drive_path(m.group(0)), line)
     for name, placeholder in names:
-        line = re.sub(rf'(?<!\w){re.escape(name)}(?!\w)', placeholder, line, flags=re.I)
+        line = name_word(name).sub(placeholder, line)
     line = HOST_SETTING.sub(lambda m: m.group(1) + HOST_SETTINGS.get(m.group(2), m.group(3)), line)
     line = AUDIO_ENDPOINT.sub('<ENDPOINT>', line)
     line = DEVICE_GUID.sub('<DEVICE_GUID>', line)
@@ -146,9 +155,10 @@ def scrub_line(line: str, install: str | None = None, names: tuple[tuple[str, st
     return IPV6.sub(ipv6, line)
 
 
-def leftovers(text: str, names: tuple[tuple[str, str], ...] = ()) -> list[str]:
-    """The lines of a fixture that scrubbing would still change: a committed fixture has none."""
-    return [line for line in text.splitlines() if scrub_line(line, None, names) != line]
+def leftovers(text: str) -> list[str]:
+    """The lines of a fixture that the line rules would still change: a committed fixture has none. The rules are the
+    same on every machine; the names of the machine that wrote a log are replaced only in its full scrub."""
+    return [line for line in text.splitlines() if scrub_line(line) != line]
 
 
 def session_window(lines: list[str], written: datetime) -> tuple[datetime, datetime]:
@@ -181,21 +191,30 @@ def write_gzip(path: Path, lines: list[str]) -> None:
     path.write_bytes(gzip.compress(''.join(f'{line}\n' for line in lines).encode('utf-8'), 9, mtime=0))
 
 
+def read_gzip(path: Path) -> str:
+    return gzip.decompress(path.read_bytes()).decode('utf-8')
+
+
 def load_manifest() -> list[dict]:
     return json.loads(MANIFEST.read_text(encoding='utf-8')) if MANIFEST.exists() else []
 
 
+def fixture_logs(fixture: dict) -> list[Path]:
+    """A fixture's gzipped game log, then its host log when it has one."""
+    paths = [GOLDENS / f'{fixture["name"]}.ReShade.log.gz']
+    if fixture['host_log']:
+        paths.append(GOLDENS / f'{fixture["name"]}.sunshine.log.gz')
+    return paths
+
+
 def rescrub() -> int:
-    """Applies the current rules to the committed fixtures in place. The raw logs are not kept; a fixture's install
-    folder is already <GAME> and its host lines are already the session's, so only the line rules run again."""
-    names = local_names()
+    """Applies the current line rules to the committed fixtures in place. The raw logs are not kept; a fixture's install
+    folder is already <GAME>, its host lines are already the session's and the names of the machine that wrote it were
+    replaced then, so only the line rules run again, with the same result on any machine."""
     for fixture in load_manifest():
-        paths = [GOLDENS / f'{fixture["name"]}.ReShade.log.gz']
-        if fixture['host_log']:
-            paths.append(GOLDENS / f'{fixture["name"]}.sunshine.log.gz')
-        for path in paths:
-            lines = gzip.decompress(path.read_bytes()).decode('utf-8').splitlines()
-            scrubbed = [scrub_line(line, None, names) for line in lines]
+        for path in fixture_logs(fixture):
+            lines = read_gzip(path).splitlines()
+            scrubbed = [scrub_line(line) for line in lines]
             if scrubbed != lines:
                 write_gzip(path, scrubbed)
                 print(f'{path.name}: {sum(a != b for a, b in zip(lines, scrubbed))} lines scrubbed')
