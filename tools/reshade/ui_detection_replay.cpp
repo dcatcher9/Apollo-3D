@@ -405,6 +405,25 @@ namespace {
     // every layer copy carried through 180f1842 (now reserved): a shader that
     // still defines it gets it with the layer's flags, so it replays as before.
     const bool late_layer_bit = shader_source.find("#define SUNSHINE_UI_STORED_LATE_LAYER ") != std::string::npos;
+    // The live layer's stored bits as the package recorded them
+    // (contract::recorded_layer_flags) replay for the census candidate the
+    // live tracker chose (active), so a layer whose format rule changed since
+    // (C12) replays what ran. Any other census candidate, and a package
+    // without that record, takes the bits its own format has today.
+    std::string recorded_layer;
+    std::optional<std::uint32_t> recorded_layer_flags;
+    if (const auto replay = metadata.find("replay"); replay != metadata.end() && replay->contains("ui_detection")) {
+      const auto &run = replay->at("ui_detection");
+      recorded_layer_flags = contract::recorded_layer_flags(run.value("candidate_layout", 0u), run.value("candidates", 0u),
+        run.value("flags", 0u));
+      if (const auto census = metadata.find("ui_layer_census"); recorded_layer_flags && census != metadata.end() &&
+          census->contains("candidates"))
+        for (const auto &entry : census->at("candidates"))
+          if (entry.value("active", false)) {
+            recorded_layer = entry.value("kind", std::string());
+            break;
+          }
+    }
     for (const auto &kind : label.at("candidates")) {
       const auto name = kind.get<std::string>();
       const bool layer = ui_layer_kind(name);
@@ -422,7 +441,8 @@ namespace {
           flags |= contract::stored_ui_alpha_in_alpha;
       }
       if (layer) {
-        flags |= contract::layer_detection_flags(contract::float_layer_format(artifacts.at(name).at("dxgi_format").get<unsigned>())) |
+        flags |= (!recorded_layer.empty() && name == recorded_layer ? *recorded_layer_flags :
+          contract::layer_detection_flags(contract::float_layer_format(artifacts.at(name).at("dxgi_format").get<unsigned>()))) |
           (late_layer_bit ? 0x4u : 0u);
       }
     }
@@ -855,7 +875,8 @@ int main(int argc, char **argv) {
         "\"pre_ui_scene\": {\"image\", \"verdict\", \"d_min\", \"d_max\"}, \"pre_ui_match\": bool}, "
         "\"xfail\": {\"stage\", \"reason\", \"today\": {expect fields}}, \"needs_dump\": text}]}\n"
         "Binds each dump's candidates (t0 paired color, t11-t14, and a census ui_layer_candidate_N at t7 with the layer\n"
-        "flags), raw depth (t1; a 1x1 placeholder without it), presented color (t6) and its exact 80-byte b0, and runs the\n"
+        "flags: the recorded ones for the live layer, else its format's), raw depth (t1; a 1x1 placeholder without it),\n"
+        "presented color (t6) and its exact 80-byte b0, and runs the\n"
         "shader's scene evidence passes as on a sample frame. Only shaders of candidate layout 2 (since S1) replay.\n"
         "accepted names the candidate kinds the game session accepts (A1); the retired trusted key fails\n"
         "its case. The hidden-scene guard's per-frame bits (H1): scene_hold true pushes its held hidden verdict,\n"

@@ -2082,7 +2082,10 @@ Detection rule changes are checked offline before a live test. `ui_detection_rep
 the add-on) compiles the three detection passes and the three scene-evidence passes from a shader
 file of candidate layout 2 (since S1), binds each Dump 3D package's
 captured candidates by artifact kind (presented color, Backbuffer, UIColorAndAlpha, UIAlpha,
-HUD-less, or a census `ui_layer_candidate_N` in the layer slot `t7` with the layer's stored flags;
+HUD-less, or a census `ui_layer_candidate_N` in the layer slot `t7` with the layer's stored flags:
+for the `active` candidate those the package recorded (`ui_detection.flags` of a candidate layout 2
+detection that offered a layer, `ui_detection::recorded_layer_flags`), so a pre-C12
+R16G16B16A16_UNORM layer keeps the HDR headroom it ran with, else those of its own format;
 a census with `ordering` carries such an artifact only
 for a copy proven complete, and a label naming an omitted one fails its case, while an older
 census's artifacts were read unordered ([census ordering](#dump-3d-diagnostics))), sets the candidate

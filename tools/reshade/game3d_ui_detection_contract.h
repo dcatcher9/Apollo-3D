@@ -16,6 +16,7 @@
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -223,6 +224,23 @@ namespace sunshine_game3d::ui_detection {
   constexpr bool float_layer_format(std::uint32_t dxgi_format) { return dxgi_format == 2u || dxgi_format == 10u; }
   static_assert(float_layer_format(10u) && !float_layer_format(11u) && float_layer_format(2u) &&
     !float_layer_format(28u) && !float_layer_format(87u) && !float_layer_format(24u) && !float_layer_format(9u));
+  // The live layer's stored bits as a Dump 3D package recorded them (its
+  // ui_detection candidate_layout, candidates and pushed flags word): those
+  // of the detection whose mask the render consumed when it offered a layer
+  // in this candidate layout, else none. ui_detection_replay replays them for
+  // the census candidate the live tracker chose, since the format rule above
+  // changed with C12 (8bb9a890): before it a layer copy of the whole
+  // R16G16B16A16 or R32G32B32A32 family, UNORM included, had HDR headroom.
+  constexpr std::optional<std::uint32_t> recorded_layer_flags(std::uint32_t layout, std::uint32_t candidates,
+      std::uint32_t flags) {
+    if (layout != candidate_layout || !(candidates & candidate::layer)) return std::nullopt;
+    return flags & (stored_premultiplied | stored_hdr_headroom);
+  }
+  // A pre-C12 R16G16B16A16_UNORM layer (flags 3 with the late bit and a
+  // sample) replays with headroom, which its format (11) no longer has.
+  static_assert(*recorded_layer_flags(2u, 0x48u, 0x4007u) == layer_detection_flags(true) &&
+    layer_detection_flags(float_layer_format(11u)) == 1u && *recorded_layer_flags(2u, 0x48u, 0x4005u) == 1u &&
+    !recorded_layer_flags(2u, 0x08u, 3u) && !recorded_layer_flags(1u, 0x48u, 3u));
 
   // Shader markers sizing the detection resources. The renderer and the
   // live decoders (ui_selection::counts_from_words,
