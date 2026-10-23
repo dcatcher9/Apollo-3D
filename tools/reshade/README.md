@@ -1323,6 +1323,24 @@ readbacks restore resource state and must not advance the shader clock. Compare
 all 40 texture files and 20 layout records as well as the final images when
 claiming an exact preparation-preserving change.
 
+### API contract matrix
+
+The [rules for new game behaviour](../../docs/reshade-sbs.md#rules-for-new-game-behaviour) gate
+admission on what Streamline, D3D12 and NGX require. The contract matrix checks that rule without a
+game. [`test_game3d_api_contract_dimensions.h`](test_game3d_api_contract_dimensions.h) lists what each
+API permits and filters illegal combinations;
+[`test_game3d_api_contract_oracle.h`](test_game3d_api_contract_oracle.h) derives each required
+outcome from cited contract text and the owner rulings R1 to R6; and
+[`test_game3d_api_contract_known_gaps.h`](test_game3d_api_contract_known_gaps.h) records where the
+add-on falls short. A recorded gap that starts passing fails its test, so the fix that closes a gap
+also removes its row. Never change the oracle to match the add-on: a disagreement is either a gap
+row or a fix.
+
+`ctest -L contract` runs the matrix. `reshade_capture_state_policy` judges the capture state table
+over every legal state cell and a set of deliberately illegal rows.
+`reshade_contract_oracle_independence` refuses any add-on include or name in the three headers and
+compiles each on its own.
+
 ### Independent renderer reference tests
 
 The independent shader's opt-in runtime tests remain regression references. They load the official

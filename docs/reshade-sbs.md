@@ -2330,8 +2330,10 @@ Every proof/policy combination above, including NGX's SDK input contract, resolv
 table in [`capture_state_policy.h`](../tools/reshade/capture_state_policy.h): declared (must match an
 observation), observed only (also an undeclared state), observed-else-declared and
 observed-else-contract. Blocked or
-incomplete observations reject every rule. Its CPU test enumerates every proof, policy, claimed state,
-observation and resource-flag combination.
+incomplete observations reject every rule. Its CPU test judges every legal combination of allocation
+flags, adapter claim, consumer, declared state and recorded evidence, plus deliberately illegal rows,
+against the [API contract matrix](../tools/reshade/README.md#api-contract-matrix); the cells where the
+table falls short of the contract are rows of its known-gap table.
 
 The FG decision is independent of depth-provider selection, including a manually pinned Generic
 buffer. The last confirmed mode survives transient observation loss and effects reloads; a new

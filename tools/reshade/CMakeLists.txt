@@ -272,6 +272,16 @@ if(BUILD_TESTING)
     message(STATUS "No Python 3.9 interpreter: the Game 3D log report tests are not registered")
   endif()
 
+  # The API contract matrix (README, API contract matrix): the capture state
+  # table is judged by the contract oracle, whose headers must stay free of
+  # the add-on.
+  set_tests_properties(reshade_capture_state_policy PROPERTIES LABELS "contract;cpu")
+  add_test(NAME reshade_contract_oracle_independence COMMAND "${CMAKE_COMMAND}"
+    "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}" "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/contract_oracle_independence"
+    "-DCOMPILER=${CMAKE_CXX_COMPILER}" "-DCOMPILER_FRONTEND=${CMAKE_CXX_COMPILER_FRONTEND_VARIANT}"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/test_game3d_api_contract_independence.cmake")
+  set_tests_properties(reshade_contract_oracle_independence PROPERTIES TIMEOUT 60 LABELS "contract")
+
   add_executable(reshade_display_depth_cache_tests test_display_depth_cache.cpp)
   target_compile_features(reshade_display_depth_cache_tests PRIVATE cxx_std_17)
   target_compile_definitions(reshade_display_depth_cache_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
