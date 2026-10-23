@@ -7,6 +7,9 @@
 #include "streamline_camera_probe.h"
 #include "streamline_native_observer.h"
 #endif
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+#include "depth_refusal.h"
+#endif
 #include <reshade.hpp>
 #include "async_log.h"
 #include <algorithm>
@@ -203,9 +206,30 @@ namespace sunshine_ngx {
 #ifndef SUNSHINE_UPSCALER_TRACE_TEST
     std::uint64_t reported_rejections{};
 #endif
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+    // The TEST add-on's structured refusal (depth_refusal.h): the parameters
+    // an evaluation names (input), its feature registration (source) or the
+    // capture owner's admission of its copy.
+    void remember_refusal(sunshine_depth_refusal::gate where, const char *reason, const sunshine_scene_depth::frame &value,
+        const sunshine_streamline::depth_capture::record_diagnostic *capture = nullptr) {
+      namespace refusal = sunshine_depth_refusal;
+      refusal::record out;
+      out.provider = refusal::adapter::ngx; out.where = where;
+      out.epoch = value.epoch; out.sequence = value.sequence; out.viewport = value.viewport;
+      if (capture) {
+        out.stage = capture->stage; out.status = capture->result;
+        reason = sunshine_streamline::depth_capture::name(capture->stage);
+        out.reason = refusal::classify(capture->stage);
+      } else out.reason = refusal::classify(reason);
+      refusal::remember(out, reason);
+    }
+#endif
     void remember_rejection(const sunshine_scene_depth::frame &value,
         const sunshine_streamline::depth_capture::record_diagnostic &diagnostic, bool retaining,
         std::uint64_t nomination_ticket) {
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+      remember_refusal(sunshine_depth_refusal::gate::capture, nullptr, value, &diagnostic);
+#endif
       if (value.epoch != active_epoch.load(std::memory_order_acquire)) return;
       ++rejected_captures;
       if (!TryAcquireSRWLockExclusive(&rejection_lock)) return;
@@ -634,6 +658,12 @@ namespace sunshine_ngx {
     if (!selected.handle || selected.parameters.epoch != attempt.epoch || !selected.parameters.valid) {
       if (!selected.handle || selected.parameters.epoch != attempt.epoch) { ++unknown; selected = {}; }
       else count_missing_parameters(selected.parameters.feature);
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+      sunshine_scene_depth::frame refused;
+      refused.epoch = attempt.epoch;
+      if (selected.handle) remember_refusal(sunshine_depth_refusal::gate::input, "missing_parameters", refused);
+      else remember_refusal(sunshine_depth_refusal::gate::source, "unregistered_feature", refused);
+#endif
       // An unrecoverable or incomplete feature still reports its named parameters.
       if (diagnostic_session) observe_without_capture(selected, false);
       return attempt;
@@ -689,7 +719,13 @@ namespace sunshine_ngx {
         area.width, area.height, selected.parameters.width, selected.parameters.height, true) &&
       read_pair(api, parameters, "DLSS.Input.Depth.Subrect.Base.X", "DLSS.Input.Depth.Subrect.Base.Y", area.left, area.top, 0, 0) &&
       valid_dimension(area.width) && valid_dimension(area.height) && area.left < 16384 && area.top < 16384;
-    if (!valid) { count_missing_parameters(selected.parameters.feature); return attempt; }
+    if (!valid) {
+      count_missing_parameters(selected.parameters.feature);
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+      remember_refusal(sunshine_depth_refusal::gate::input, "missing_parameters", value);
+#endif
+      return attempt;
+    }
     value.resource.native = reinterpret_cast<std::uint64_t>(resource);
     if (api.floating) {
       float jitter_x{}, jitter_y{};

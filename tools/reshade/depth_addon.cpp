@@ -35,6 +35,7 @@
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
 #include <chrono>
 #include <stdexcept>
+#include "depth_refusal.h"
 #include "depth_selection_snapshot_test.h"
 #endif
 #include "depth_addon.h"
@@ -4981,6 +4982,18 @@ extern "C" __declspec(dllexport) BOOL SunshineDepthTestProviderStatus(effect_run
 {
 	if (!s_registered || runtime == nullptr || output == nullptr) return FALSE;
 	*output = describe_streamline_source(runtime);
+	return TRUE;
+}
+
+// The newest depth refusal of the Streamline, NGX or DLSS-G adapters or the
+// capture owner, with its contract class (depth_refusal.h). It is recorded
+// where the refusal is decided, before any log rate limit, so a runtime case
+// reads its reason at once instead of waiting for a log line. The adapters
+// are process-wide; serial tells a new refusal from an earlier one.
+extern "C" __declspec(dllexport) BOOL SunshineDepthTestLastRefusal(effect_runtime *runtime, sunshine_depth_refusal::record *output)
+{
+	if (!s_registered || runtime == nullptr || output == nullptr) return FALSE;
+	*output = sunshine_depth_refusal::latest();
 	return TRUE;
 }
 

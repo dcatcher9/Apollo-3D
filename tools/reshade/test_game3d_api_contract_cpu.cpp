@@ -16,6 +16,9 @@
 //   deliberately illegal rows that must refuse.
 // - Depth formats: every DXGI format as allocation and as declared format,
 //   for hardware and linear depth, through depth_view_format.h.
+// - Refusal classes: every reason the adapters and the capture owner name
+//   classifies (depth_refusal.h), and a reason produced by an input the
+//   oracle has a case for carries that case's REFUSE class (or HOLD).
 //
 // The hook layer (L1) drives the real adapters without a device:
 // - Streamline: the probe's MinHook hooks on fixture entry points
@@ -41,13 +44,15 @@
 // repeats. A known gap these repeats decide (S7) closes only when its fix
 // changes the repeat too. L1 judges the kind, deferral and copy basis of each
 // result, and that a recorded gap still fails the way its row records;
-// refusal classes wait for the runtime layer's structured refusal query.
+// refusal classes wait for the runtime layer, which reads them from the test
+// add-on's SunshineDepthTestLastRefusal.
 //
 // Command line (test_contract_matrix_generator.h): --list, --case
 // <id|family:name=value,...>, --shard i/N. Without one, both layers run;
 // shard 0 also runs the pure layer. Only an unsharded run finds a stale
 // known-gap row of a hook family.
 #include "capture_state_policy.h"
+#include "depth_refusal.h"
 #include "depth_view_format.h"
 #include "ngx_depth_source.h"
 #include "streamline_buffer_contract.h"
@@ -63,6 +68,7 @@
 #include <reshade.hpp>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #if defined(__GNUC__) && !defined(__clang__)
@@ -747,6 +753,167 @@ namespace {
     if (unmet) {
       std::fprintf(stderr, "depth formats: %u cells violate the contract\n", unmet);
       throw std::runtime_error("depth_view_format.h diverged from the API contract matrix");
+    }
+    return counts;
+  }
+
+  // Refusal classes.
+
+  namespace refusal = sunshine_depth_refusal;
+
+  constexpr bool oracle_classes() {
+    using contract = matrix::refusal;
+    using production = refusal::reason_class;
+    constexpr std::pair<contract, production> same[] {{contract::none, production::none}, {contract::state_unprovable, production::state_unprovable}, {contract::no_copy_point, production::no_copy_point}, {contract::lifetime, production::lifetime}, {contract::not_depth, production::not_depth}, {contract::malformed, production::malformed}, {contract::unknown_abi, production::unknown_abi}, {contract::ambiguous_view, production::ambiguous_view}, {contract::fg_scope, production::fg_scope}};
+    for (const auto &[oracle, reported] : same) {
+      if (unsigned(oracle) != unsigned(reported)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  static_assert(oracle_classes(), "depth_refusal.h's first classes are not the oracle's REFUSE classes in its order");
+
+  // A reported class meets the oracle's outcome for the input that produces
+  // it: its REFUSE class (a branch of an EITHER included), or its HOLD.
+  bool agrees(refusal::reason_class reported, const matrix::outcome &expected) {
+    if (reported == refusal::reason_class::hold) {
+      return matrix::permits(expected, matrix::outcome_kind::hold);
+    }
+    return unsigned(reported) <= unsigned(refusal::reason_class::fg_scope) && matrix::permits(expected, matrix::outcome_kind::refuse) && unsigned(expected.why) == unsigned(reported);
+  }
+
+  struct refusal_counts {
+    unsigned named {}, stages {}, outcomes {}, paired {};
+  };
+
+  // Every reason the adapters name classifies. A reason that an input the
+  // oracle has a case for produces is checked against that case; the others
+  // are outside the contract (internal, absent) or illegal input the
+  // dimensions do not hold (an unreadable tag).
+  refusal_counts refusal_classes() {
+    using namespace matrix::pinned;
+    using capture::record_stage;
+    using matrix::claim;
+    using matrix::copy_point;
+    using matrix::evidence;
+    using matrix::extent_form;
+    using matrix::fg_mode;
+    using matrix::lifecycle;
+    using matrix::ngx_case;
+    using matrix::ngx_depth_set;
+    using matrix::ngx_feature;
+    using matrix::ngx_hw_depth;
+    using matrix::ngx_subrect;
+    using matrix::precision_form;
+    using matrix::render_pass;
+    using matrix::resource_form;
+    using matrix::resource_shape;
+    using matrix::sl_case;
+    using matrix::sl_result;
+    using matrix::struct_form;
+    using matrix::subresource_barrier;
+    using matrix::tag_commands;
+    using matrix::viewports;
+    using depth_outcome = sunshine_streamline::frame_generation::depth_outcome;
+    refusal_counts counts;
+    for (const auto &entry : refusal::named_reasons) {
+      require(entry.reason != refusal::reason_class::none && entry.reason != refusal::reason_class::unclassified, "a named refusal reason has no class");
+      unsigned repeats {};
+      for (const auto &other : refusal::named_reasons) {
+        repeats += !std::strcmp(entry.name, other.name);
+      }
+      require(repeats == 1 && refusal::classify(entry.name) == entry.reason, "a named refusal reason is listed twice");
+      ++counts.named;
+    }
+    require(refusal::classify("") == refusal::reason_class::unclassified && refusal::classify(nullptr) == refusal::reason_class::unclassified, "an unknown reason was classified");
+    // The source gate returns these evidence statuses' names; the rest
+    // admit the call.
+    using sunshine_streamline::evidence_status;
+    for (auto status = unsigned(evidence_status::inactive); status <= unsigned(evidence_status::tracked_content_evaluation); ++status) {
+      const auto value = evidence_status(status);
+      const bool admitted = value == evidence_status::source_associated_evaluation || value == evidence_status::missing_constants || value == evidence_status::rejected_constants || value == evidence_status::invalid_camera || value == evidence_status::camera_reset || value == evidence_status::untracked_frame;
+      require(admitted || refusal::classify(sunshine_streamline::name(value)) != refusal::reason_class::unclassified, "an evidence status the source gate names has no refusal class");
+    }
+    // The tag gate returns these match statuses' names; same_epoch_only admits.
+    using sunshine_streamline::match_status;
+    for (auto status = unsigned(match_status::exact_frame); status <= unsigned(match_status::unsupported_lifecycle); ++status) {
+      const auto value = match_status(status);
+      require(value == match_status::same_epoch_only || value == match_status::exact_frame || refusal::classify(sunshine_streamline::name(value)) != refusal::reason_class::unclassified, "a match status the tag gate names has no refusal class");
+    }
+    for (auto stage = unsigned(record_stage::not_attempted); stage <= unsigned(record_stage::retained); ++stage) {
+      const auto value = record_stage(stage);
+      const auto reported = refusal::classify(value);
+      const bool admitted = value == record_stage::not_attempted || value == record_stage::recorded || value == record_stage::retained;
+      require(reported != refusal::reason_class::unclassified && (reported == refusal::reason_class::none) == admitted, "a capture record stage has no refusal class");
+      ++counts.stages;
+    }
+    for (auto value = unsigned(depth_outcome::not_offered); value <= unsigned(depth_outcome::capture); ++value) {
+      const auto depth = depth_outcome(value);
+      const auto reported = refusal::classify(depth, record_stage::missing_state);
+      require(reported != refusal::reason_class::unclassified && (reported == refusal::reason_class::none) == (refusal::gate_of(depth) == refusal::gate::none), "a DLSSG.Depth outcome has no refusal class or gate");
+      ++counts.outcomes;
+    }
+
+    const auto fg = with(ngx_case {}, &ngx_case::feature, ngx_feature::frame_generation);
+    const auto at_evaluate = tag(present, evaluate);
+    const auto msaa = on_subresource(subresource_barrier::all, resource_shape::msaa);
+    const auto outside = with(at_evaluate, &sl_case::extent, extent_form::outside_allocation);
+    const auto after_present = tag(present, copy_point::after_present);
+    const std::pair<const char *, matrix::outcome> named[] {
+      {"boundary_without_commands", expect(tag(now, copy_point::tag_call, tag_commands::none))},
+      {"unsupported_extension", expect(with(at_evaluate, &sl_case::tag_header, struct_form::unknown_chained))},
+      {"unsupported_precision", expect(with(at_evaluate, &sl_case::precision, precision_form::zero_scale))},
+      {"unsupported_precision", expect(with(at_evaluate, &sl_case::precision, precision_form::unknown_formula))},
+      {"unsupported_resource_type", expect(with(at_evaluate, &sl_case::resource, resource_form::type_buffer))},
+      {"unsupported_lifecycle", expect(tag(lifecycle::undeclared, evaluate))},
+      {"lifecycle_outlives_boundary", expect(with(tag(until_evaluate, copy_point::tag_call), &sl_case::fg, fg_mode::off))},
+      {"invalid-extent", expect(outside)},
+      {"not-valid-until-present", expect(tag(now, evaluate))},
+      {"missing-resource", expect(with(at_evaluate, &sl_case::resource, resource_form::null_native))},
+      {"evaluation-failed", expect(with(at_evaluate, &sl_case::evaluate_result, sl_result::error))},
+      {"ambiguous-viewport", expect(with(at_evaluate, &sl_case::views, viewports::two_active))},
+      {"no_retained_source", expect(msaa)},
+      {"missing_parameters", expect(with(ngx_case {}, &ngx_case::hw_depth, ngx_hw_depth::other))},
+      {"missing_parameters", expect(with(ngx_case {}, &ngx_case::subrect, ngx_subrect::outside))},
+      {"missing_parameters", expect(with(ngx_case {}, &ngx_case::depth_set, ngx_depth_set::missing))},
+    };
+    const std::pair<record_stage, matrix::outcome> stages[] {
+      {record_stage::missing_state, expect(state(recorded(ds, evidence::none)))},
+      {record_stage::missing_state, expect(fg)},
+      {record_stage::incomplete_state, expect(state(recorded(ds, evidence::split_open, depth_read)))},
+      {record_stage::conflicting_state, expect(state(recorded(ds, evidence::transition, depth_read), claim::sl_declared, nps))},
+      {record_stage::unsupported_state, expect(state(recorded(ds, evidence::enhanced, 0, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, D3D12_BARRIER_ACCESS_NO_ACCESS)))},
+      {record_stage::unsupported_state, expect(state(recorded(0, evidence::transition, D3D12_RESOURCE_STATE_COMMON)))},
+      {record_stage::unsupported_proof, expect(state(recorded(ds, evidence::none), claim::sl_undeclared, UINT32_MAX))},
+      {record_stage::unsupported_lifetime, expect(after_present)},
+      {record_stage::source_lifetime, expect(after_present)},
+      {record_stage::resource_region, expect(outside)},
+      {record_stage::source_description, expect(msaa)},
+      {record_stage::recording_render_pass, expect(with(at_evaluate, &sl_case::pass, render_pass::open))},
+    };
+    const std::pair<depth_outcome, matrix::outcome> outcomes[] {
+      {depth_outcome::absent, expect(with(fg, &ngx_case::depth_set, ngx_depth_set::missing))},
+      {depth_outcome::null_resource, expect(with(fg, &ngx_case::depth_set, ngx_depth_set::null))},
+      {depth_outcome::subrect, expect(with(fg, &ngx_case::subrect, ngx_subrect::one_side))},
+      {depth_outcome::capture, expect(fg)},  // No state recorded on DLSS-G's list: missing_state.
+    };
+    const auto check = [&](bool agreed, const char *what, const matrix::outcome &expected) {
+      if (!agreed) {
+        std::fprintf(stderr, "refusal class of %s disagrees with the oracle: expected %s%s%s rule=%s refusal=%u\n", what, name(expected.kind), matrix::either(expected) ? " or " : "", matrix::either(expected) ? name(expected.alternative) : "", expected.by ? expected.by->id : "?", unsigned(expected.why));
+        throw std::runtime_error("depth_refusal.h diverged from the API contract matrix");
+      }
+      ++counts.paired;
+    };
+    for (const auto &[name, expected] : named) {
+      check(agrees(refusal::classify(name), expected), name, expected);
+    }
+    for (const auto &[stage, expected] : stages) {
+      check(agrees(refusal::classify(stage), expected), capture::name(stage), expected);
+    }
+    for (const auto &[depth, expected] : outcomes) {
+      check(agrees(refusal::classify(depth, record_stage::missing_state), expected), sunshine_streamline::frame_generation::name(depth), expected);
     }
     return counts;
   }
@@ -2050,11 +2217,12 @@ int main(int argc, char **argv) try {
     const auto streamline = buffer_types();
     const auto state = copy_states();
     const auto formats = depth_formats();
+    const auto refusals = refusal_classes();
     std::printf("PASS API contract matrix L0: %u buffer-type cells over %u release identities; ", streamline.tags.cells, streamline.identities);
     streamline.tags.print(gaps::buffer_rows);
     std::printf("; %u canonical numbers. %u copy-state cells (%u legal, %u illegal); ", streamline.canonical, state.table.cells, state.legal, state.illegal);
     state.table.print(gaps::state_rows);
-    std::printf(". %u depth-format cells (%u captured, %u EITHER) meet the oracle\n", formats.cells, formats.captured, formats.either);
+    std::printf(". %u depth-format cells (%u captured, %u EITHER) meet the oracle. %u named refusal reasons, %u capture stages and %u DLSSG.Depth outcomes classify; %u meet the oracle's class for the input that produces them\n", formats.cells, formats.captured, formats.either, refusals.named, refusals.stages, refusals.outcomes, refusals.paired);
   }
   const auto hooks = hook_layer(options);
   const auto &census = hooks.census;

@@ -869,7 +869,9 @@ The test executable also exports DLSS-G's NGX entry points (feature 11 only, nam
 inputs, no capture). With its FG depth, HUD-less and Backbuffer tags command-less, as in Assassin's Creed
 Shadows, a DLSS-G evaluation whose list observes no state for `DLSSG.Depth`, `DLSSG.HUDLess` and
 `DLSSG.Backbuffer` is refused and counted (`dlssg_depth={copied=0 ... refused=missing_state:<n>}`)
-with the SR depth unchanged; once its list transitions them, `DLSSG.Depth` with its subrect and
+with the SR depth unchanged, and the test add-on's refusal query (API contract matrix) reports it
+as a `state_unprovable` capture refusal, as it reports a command-less FG tag as a `no_copy_point`
+source refusal; once its list transitions them, `DLSSG.Depth` with its subrect and
 `DLSSG.DepthInverted` owns the FG scope, generated Presents hold it, the command-less FG tag
 withdraws nothing (`dlssg_supplied=1`) and its HUD-less/Backbuffer pair reaches UI detection as a
 same-batch pair (`hudless_presents={batch=<n>`). HUD-less and Backbuffer tags sent with the game's
@@ -1365,6 +1367,19 @@ the pure layer; only an unsharded run reports a hook family's stale known-gap ro
 the generator, and compiles each on its own with the configured compiler, whatever the caller's
 `PATH`.
 
+The runtime layer reads refusal classes from the test add-on instead of waiting for rate-limited log
+lines. `SunshineDepthTestLastRefusal(runtime, out)` returns the newest depth refusal of the
+Streamline, NGX and DLSS-G adapters and the capture owner: the adapter, the gate that refused (the
+call's source, its depth input or the capture of its copy), the production reason, the capture
+stage and status, the call's epoch, sequence and viewport, and a serial that tells a new refusal
+from an earlier one. It is recorded where the refusal is decided, before the 5 s limit on its log
+line. [`depth_refusal.h`](depth_refusal.h) maps each reason to the oracle's REFUSE class for the
+input that produces it, or outside the contract to `hold`, `absent` or `internal`; the pure layer
+requires every reason to classify and each one an oracle case produces to carry that case's class.
+Only `SunshineSBSTest.addon64` records or exports refusals: `reshade_addon_exports` reads both
+export tables without running either add-on and requires the shipping add-on to export exactly
+ReShade's add-on entry points.
+
 Buffer-type meanings, and each release's `DLSSGMode` values, multi frame generation and
 `ResourceType` values, come from
 [`test_sl_survey_tables.generated.h`](test_sl_survey_tables.generated.h), never from the add-on's
@@ -1573,7 +1588,8 @@ twelve helper instances.
 
 `SUNSHINE_SBS_RUNTIME_TESTS` defaults to **OFF**. Its `SunshineSBSTest.addon64` is for these isolated
 fixtures only. The shipping `SunshineSBS.addon64` retains the real Windows foreground check and
-does not export the test observation setter. Do not install the test add-on into a game.
+does not export the test observation setter; `reshade_addon_exports` checks that it exports only
+ReShade's add-on entry points. Do not install the test add-on into a game.
 
 ### Isolated comparison with the current Host warp
 

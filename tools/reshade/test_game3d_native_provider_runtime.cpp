@@ -4,6 +4,7 @@
 // capture and injects no depth binding, readiness, sampler result or fence.
 #define SUNSHINE_DIRECT_RUNTIME_FIXTURE_ONLY
 #include "test_streamline_direct_runtime.cpp"
+#include "depth_refusal.h"
 #include "game3d_controls.h"
 #include "game3d_ui_detection_contract.h"
 #include "game3d_ui_layer.h"
@@ -108,8 +109,10 @@ namespace {
   struct native_provider_fixture : direct_fixture {
     using automatic_t = BOOL (*)(api::effect_runtime *, unsigned *);
     using scale_t = BOOL (*)(api::effect_runtime *, unsigned *, unsigned *, float *);
+    using refusal_t = BOOL (*)(api::effect_runtime *, sunshine_depth_refusal::record *);
     automatic_t query_automatic{};
     scale_t query_scale{};
+    refusal_t query_refusal{};
     unsigned fx_renders{};
     std::ofstream evidence;
     sunshine_streamline::extent active_area;
@@ -230,6 +233,23 @@ namespace {
       } while (GetTickCount64() < until);
       return false;
     }
+    // The test add-on's newest depth refusal (SunshineDepthTestLastRefusal).
+    sunshine_depth_refusal::record last_refusal() {
+      sunshine_depth_refusal::record value;
+      require(query_refusal(observed.runtime, &value), "Test add-on refusal query failed");
+      return value;
+    }
+    // The newest refusal once one after serial is recorded, presenting the
+    // current scenario for at most wait_ms. No log line is awaited.
+    sunshine_depth_refusal::record refusal_after(std::uint64_t serial, std::uint64_t wait_ms = 2000) {
+      const auto until = GetTickCount64() + wait_ms;
+      auto value = last_refusal();
+      while (value.serial <= serial && GetTickCount64() < until) {
+        step(); no_effects();
+        value = last_refusal();
+      }
+      return value;
+    }
     static bool same_scale(float a, float b) {
       return std::isfinite(a) && std::isfinite(b) && std::abs(a-b) <= std::max(1.f,std::abs(b))*1e-5f;
     }
@@ -245,8 +265,9 @@ namespace {
       query_provider_status = reinterpret_cast<provider_status_t>(GetProcAddress(module, "SunshineDepthTestProviderStatus"));
       query_automatic = reinterpret_cast<automatic_t>(GetProcAddress(module, "SunshineGame3DTestQueryAutomatic"));
       query_scale = reinterpret_cast<scale_t>(GetProcAddress(module, "SunshineGame3DTestQueryScale"));
-      require(capture && query_provider_status && query_automatic && query_scale,
-        "Test add-on lacks native provider metadata adapter or passive UI observations");
+      query_refusal = reinterpret_cast<refusal_t>(GetProcAddress(module, "SunshineDepthTestLastRefusal"));
+      require(capture && query_provider_status && query_automatic && query_scale && query_refusal,
+        "Test add-on lacks native provider metadata adapter, passive UI observations or the refusal query");
       // The Diagnostics switch on, as the panel sets it, unless
       // SUNSHINE_GAME3D_TEST_DIAGNOSTICS_OFF keeps it off: it adds per-pass
       // GPU timing only, so candidates stay bound directly either way.
@@ -1946,7 +1967,8 @@ namespace {
 
       // A ValidUntilPresent FG tag may legally arrive without a command list,
       // which leaves no point to copy it at: the boundary is withdrawn, and
-      // the bounded withdrawal line names that reason and the tag.
+      // the bounded withdrawal line names that reason and the tag. The test
+      // add-on's refusal query reports it at once, with its contract class.
       const auto depth_resource = [&] {
         abi_v2::resource resource{}; resource.base = {nullptr, resource_guid, 1};
         resource.type = 8; resource.native = selected->resource.p; resource.state = unsigned(selected->state);
@@ -1964,7 +1986,19 @@ namespace {
         const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, 1, active_area};
         require(global_tag_call(viewport, &tag, 1, nullptr) == 0, "Command-less FG tag changed the SDK result");
       };
+      const auto before_commandless = last_refusal().serial;
       render_tracked_depth = commandless_fg_frame;
+      {
+        namespace refusal = sunshine_depth_refusal;
+        const auto refused = refusal_after(before_commandless);
+        std::printf("MEASURE native-provider SLFG-commandless-refusal provider=%u gate=%u class=%u name=%s viewport=%u fg=%u sequence=%llu serial=%llu\n",
+          unsigned(refused.provider), unsigned(refused.where), unsigned(refused.reason), refused.name, refused.viewport,
+          unsigned(refused.frame_generation), static_cast<unsigned long long>(refused.sequence), static_cast<unsigned long long>(refused.serial));
+        require(refused.serial > before_commandless && refused.provider == refusal::adapter::streamline &&
+            refused.where == refusal::gate::source && refused.reason == refusal::reason_class::no_copy_point &&
+            !std::strcmp(refused.name, "boundary_without_commands") && refused.frame_generation && refused.viewport == viewport.value,
+          "The refusal query did not report the command-less FG tag as a no_copy_point source refusal");
+      }
       require(reshade_log_contains({"Sunshine Streamline FG depth refused: reason=boundary_without_commands", "tag_type=0",
           "scope=global", "lifecycle=1", "command=0x0 ", "fg=1"}),
         "A command-less FG tag boundary was refused without naming its reason");
@@ -2163,12 +2197,25 @@ namespace {
             transition(list, backbuffer.p, read, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
           }
         };
+        const auto before_dlssg = last_refusal().serial;
         render_tracked_depth = dlssg_frame;
         settle_route("DLSSG-unobserved-state-SR-depth", false);
         for (unsigned frame = 0; frame < 30; ++frame) {
           step(); no_effects(); const auto s = inspect();
           require(active(s) && !s.source.reused_depth && !s.source.frame_generation_input,
             "DLSS-G depth without an observed state changed the viewport's SR depth");
+        }
+        {
+          // DLSS-G's evaluation is each frame's last call: its refusal is the newest.
+          namespace refusal = sunshine_depth_refusal;
+          const auto refused = last_refusal();
+          std::printf("MEASURE native-provider DLSSG-unobserved-refusal provider=%u gate=%u class=%u name=%s stage=%u status=%u fg=%u serial=%llu\n",
+            unsigned(refused.provider), unsigned(refused.where), unsigned(refused.reason), refused.name, unsigned(refused.stage),
+            unsigned(refused.status), unsigned(refused.frame_generation), static_cast<unsigned long long>(refused.serial));
+          require(refused.serial > before_dlssg && refused.provider == refusal::adapter::dlss_g &&
+              refused.where == refusal::gate::capture && refused.stage == sunshine_streamline::depth_capture::record_stage::missing_state &&
+              refused.reason == refusal::reason_class::state_unprovable && refused.frame_generation,
+            "The refusal query did not report DLSS-G's unobserved depth as a state_unprovable capture refusal");
         }
         require(reshade_log_contains({"Sunshine NGX depth:", "dlssg_depth={copied=0 inner_frames=0 refused=missing_state:"}),
           "Refused DLSS-G depth copies were not counted by their missing_state reason");

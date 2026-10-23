@@ -10,6 +10,9 @@
 #include "game3d_diagnostics.h"
 #include "game3d_ui_mask.h"
 #include "observer_snapshot.h"
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+#include "depth_refusal.h"
+#endif
 
 #include <MinHook.h>
 #include <reshade.hpp>
@@ -1836,6 +1839,34 @@ namespace sunshine_streamline {
           "ordinary SR/RR depth stays eligible");
       message(text);
     }
+    // Why no tag of this observation offered a candidate: the first present
+    // depth tag's failing gate in priority order, no_retained_source when it
+    // passed every gate with no retained resource, or absent.
+    const char *candidate_rejection(const evaluation_snapshot &snapshot) {
+      for (const unsigned index : depth_priority) if (snapshot.tags[index].present) {
+        const auto *rejected = tag_rejection(snapshot, snapshot.tags[index]);
+        return rejected ? rejected : "no_retained_source";
+      }
+      return "absent";
+    }
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+    // The TEST add-on's structured refusal (depth_refusal.h), recorded where
+    // the matching log line is formatted but before its 5 s limit.
+    void remember_refusal(const evaluation_snapshot &snapshot, sunshine_depth_refusal::gate where, const char *reason,
+        const depth_capture::record_diagnostic *capture = nullptr) {
+      namespace refusal = sunshine_depth_refusal;
+      refusal::record value;
+      value.provider = refusal::adapter::streamline; value.where = where;
+      value.epoch = snapshot.epoch; value.sequence = snapshot.sequence; value.viewport = snapshot.viewport;
+      value.frame_generation = snapshot.frame_generation_input;
+      if (capture) {
+        value.stage = capture->stage; value.status = capture->result;
+        reason = depth_capture::name(capture->stage);
+        value.reason = refusal::classify(capture->stage);
+      } else value.reason = refusal::classify(reason);
+      refusal::remember(value, reason);
+    }
+#endif
     std::uint64_t nominate_depth_source(const evaluation_snapshot &snapshot, bool version_one, bool *copy_recorded = nullptr) {
       if (copy_recorded) *copy_recorded = false;
       if (!source_requested.load(std::memory_order_acquire) || !depth_capture::active()) return 0;
@@ -1876,6 +1907,9 @@ namespace sunshine_streamline {
           report_fg_refusal(snapshot, rejected, withdraws && !supplied, route == fg_route::owned, supplied);
           remember_tag_copy(snapshot.epoch, snapshot.viewport, false);
         }
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+        remember_refusal(snapshot, sunshine_depth_refusal::gate::source, rejected);
+#endif
         if (!supplied) withdraw_invalid_attempt();
         return 0;
       }
@@ -1923,6 +1957,11 @@ namespace sunshine_streamline {
           candidates.data(), count, superseded, &diagnostic)) {
         if (copy_recorded) *copy_recorded = diagnostic.result == depth_capture::status::recorded;
         if (fg_boundary) remember_tag_copy(snapshot.epoch, snapshot.viewport, diagnostic.result == depth_capture::status::recorded);
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+        // A metadata-only nomination keeps the source; its copy was refused.
+        if (diagnostic.result != depth_capture::status::recorded)
+          remember_refusal(snapshot, sunshine_depth_refusal::gate::capture, nullptr, &diagnostic);
+#endif
         return ticket;
       }
       if (fg_boundary) {
@@ -1930,13 +1969,13 @@ namespace sunshine_streamline {
         char reason[96]{};
         if (count) std::snprintf(reason, sizeof(reason), "capture_%s/%s",
           depth_capture::name(diagnostic.result), depth_capture::name(diagnostic.stage));
-        else for (const unsigned index : depth_priority) if (snapshot.tags[index].present) {
-          const auto *rejected = tag_rejection(snapshot, snapshot.tags[index]);
-          std::snprintf(reason, sizeof(reason), "%s", rejected ? rejected : "no_retained_source");
-          break;
-        }
-        report_fg_refusal(snapshot, reason[0] ? reason : "absent", withdraws, route == fg_route::owned);
+        else std::snprintf(reason, sizeof(reason), "%s", candidate_rejection(snapshot));
+        report_fg_refusal(snapshot, reason, withdraws, route == fg_route::owned);
       }
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+      if (count) remember_refusal(snapshot, sunshine_depth_refusal::gate::capture, nullptr, &diagnostic);
+      else remember_refusal(snapshot, sunshine_depth_refusal::gate::input, candidate_rejection(snapshot));
+#endif
       withdraw_invalid_attempt();
       return 0;
     }
@@ -3026,6 +3065,25 @@ namespace sunshine_streamline {
     return true;
   }
 
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+  namespace {
+    // DLSSG.Depth's refusal for the TEST add-on (depth_refusal.h); nothing
+    // when it copied, the tag copied first or no key was offered.
+    void remember_frame_generation_refusal(const frame_generation::attempt &out, std::uint64_t epoch, std::uint64_t sequence,
+        std::uint32_t viewport, depth_capture::status status = depth_capture::status::unavailable) {
+      namespace refusal = sunshine_depth_refusal;
+      const auto where = refusal::gate_of(out.depth);
+      if (where == refusal::gate::none) return;
+      refusal::record value;
+      value.provider = refusal::adapter::dlss_g; value.where = where;
+      value.reason = refusal::classify(out.depth, out.depth_stage);
+      value.epoch = epoch; value.sequence = sequence; value.viewport = viewport; value.frame_generation = true;
+      if (where == refusal::gate::capture) { value.stage = out.depth_stage; value.status = status; }
+      refusal::remember(value, where == refusal::gate::capture ? depth_capture::name(out.depth_stage) : frame_generation::name(out.depth));
+    }
+  }
+#endif
+
   frame_generation::attempt observe_frame_generation_inputs(const frame_generation::inputs &value) {
     namespace mask = sunshine_game3d::ui_mask;
     using frame_generation::depth_outcome;
@@ -3044,6 +3102,9 @@ namespace sunshine_streamline {
     frame_generation_snapshot fg;
     if (!ticket || !query_frame_generation(UINT32_MAX, fg) || !fg.enabled) {
       if (out.depth == depth_outcome::not_offered) out.depth = depth_outcome::no_fg_scope;
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+      remember_frame_generation_refusal(out, 0, 0, UINT32_MAX);
+#endif
       SetLastError(incoming);
       return out;
     }
@@ -3051,6 +3112,9 @@ namespace sunshine_streamline {
     const auto source_epoch = epoch.load(std::memory_order_acquire);
     if (fg.epoch != source_epoch || !current(ticket)) {
       if (out.depth == depth_outcome::not_offered) out.depth = depth_outcome::scope_changed;
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+      remember_frame_generation_refusal(out, fg.epoch, 0, fg.viewport);
+#endif
       SetLastError(incoming);
       return out;
     }
@@ -3130,8 +3194,14 @@ namespace sunshine_streamline {
             out.depth = depth_outcome::capture; out.depth_stage = diagnostic.stage;
           }
         }
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+        remember_frame_generation_refusal(out, fg.epoch, serial, fg.viewport, diagnostic.result);
+#endif
       }
     }
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+    if (out.depth != depth_outcome::capture) remember_frame_generation_refusal(out, fg.epoch, serial, fg.viewport);
+#endif
     if (std::any_of(value.ui.begin(), value.ui.end(), [](const auto &item) { return item.state != parameter::absent; })) {
       const bool interested = mask::interested(source_epoch, loss, fg.viewport, tick);
       for (unsigned i = 0; i != value.ui.size(); ++i) {
