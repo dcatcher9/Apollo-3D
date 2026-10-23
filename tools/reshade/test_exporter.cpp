@@ -1098,6 +1098,11 @@ namespace {
       ShowWindow(popup, SW_SHOWNOACTIVATE);
       require(verdict(popup) == owner::verdict::not_child && verdict(child) == owner::verdict::owner,
         "An owned popup was judged as a child or as a sibling of the child");
+      // No foreground window (the secure desktop): a top-level swapchain window is still not a
+      // child, so the exporter never names it as presenting under foreground window 0.
+      require(child_window_verdict(root, nullptr) == owner::verdict::not_child &&
+        child_window_verdict(child, nullptr) == owner::verdict::not_foreground,
+        "Without a foreground window a top-level swapchain window was judged as a child");
 
       // The exporter: the runtime presenting to the child owns the foreground root; a second
       // runtime presenting to the root itself makes both ambiguous.

@@ -257,7 +257,10 @@ namespace {
   // host compares it with the captured display and requires the root to cover that exactly.
   reshade_bridge::window_owner::verdict child_window_verdict(HWND window, HWND foreground) {
     namespace owner = reshade_bridge::window_owner;
-    if (!window || !foreground) return owner::verdict::not_foreground;
+    if (!window) return owner::verdict::not_foreground;
+    // No foreground window (the secure desktop, or briefly while another window activates): a
+    // top-level swapchain window is still not a child, so the caller's top-level rule applies.
+    if (!foreground) return GetAncestor(window, GA_ROOT) == window ? owner::verdict::not_child : owner::verdict::not_foreground;
     const auto chain = owner::query(window);
     const auto root = chain.count ? chain.links[chain.count - 1].client : owner::rect_t {};
     return owner::classify(chain, reinterpret_cast<std::uintptr_t>(foreground), GetCurrentProcessId(), root);
