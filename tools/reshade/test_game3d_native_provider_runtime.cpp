@@ -9,6 +9,8 @@
 #include "game3d_ui_layer.h"
 #include "../../src/game3d_debug_protocol.h"
 #include <nlohmann/json.hpp>
+#include <algorithm>
+#include <fstream>
 #include <functional>
 #include <string>
 #include <thread>
@@ -101,6 +103,21 @@ namespace {
       } while (GetTickCount64() < until);
       log_status(label, s);
       throw std::runtime_error("Native provider did not establish ready projection scale and the actual supplied depth source");
+    }
+    // A line of the isolated runtime's ReShade.log containing every part.
+    // Add-on lines reach it through the asynchronous log writer, and bounded
+    // lines are written at most every 5 s, so keep presenting the current
+    // scenario for at most wait_ms while waiting.
+    bool reshade_log_contains(std::initializer_list<const char *> parts, std::uint64_t wait_ms = 7000) {
+      const auto until = GetTickCount64() + wait_ms;
+      do {
+        std::ifstream file(runtime_directory / "ReShade.log", std::ios::binary);
+        for (std::string line; std::getline(file, line);)
+          if (std::all_of(parts.begin(), parts.end(), [&](const char *part) { return line.find(part) != std::string::npos; }))
+            return true;
+        step(); no_effects();
+      } while (GetTickCount64() < until);
+      return false;
     }
     static bool same_scale(float a, float b) {
       return std::isfinite(a) && std::isfinite(b) && std::abs(a-b) <= std::max(1.f,std::abs(b))*1e-5f;
@@ -1633,6 +1650,34 @@ namespace {
       render_tracked_depth = real_frame;
       settle("SLFG-recovered-after-malformed-tag");
       std::puts("PASS native SLFG untag: a null Resource or null native after each FG tag, with or without commands, keeps fresh FG depth every presentation; a malformed tag still withdraws; no FX");
+
+      // A ValidUntilPresent FG tag may legally arrive without a command list,
+      // which leaves no point to copy it at: the boundary is withdrawn, and
+      // the bounded withdrawal line names that reason and the tag.
+      const auto depth_resource = [&] {
+        abi_v2::resource resource{}; resource.base = {nullptr, resource_guid, 1};
+        resource.type = 8; resource.native = selected->resource.p; resource.state = unsigned(selected->state);
+        resource.width = selected->width; resource.height = selected->height;
+        resource.native_format = DXGI_FORMAT_R32_FLOAT; resource.mip_levels = resource.array_layers = 1;
+        return resource;
+      };
+      const auto commandless_fg_frame = [&] {
+        draw(*decoy); write_depth_pixels();
+        abi_v2::frame_token *token{}; const auto frame = ++fg_frame;
+        require(new_token(token, &frame) == 0 && token, "Command-less FG SDK did not supply a frame token");
+        last_token = token;
+        require(constants_call(camera_constants(false), *token, viewport) == 0, "Command-less FG constants changed the SDK result");
+        const auto resource = depth_resource();
+        const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, 1, active_area};
+        require(global_tag_call(viewport, &tag, 1, nullptr) == 0, "Command-less FG tag changed the SDK result");
+      };
+      render_tracked_depth = commandless_fg_frame;
+      require(reshade_log_contains({"Sunshine Streamline FG depth withdrawn: reason=boundary_without_commands", "tag_type=0",
+          "scope=global", "lifecycle=1", "command=0x0 ", "fg=1"}),
+        "A command-less FG tag boundary was withdrawn without naming its reason");
+      render_tracked_depth = real_frame;
+      settle("SLFG-recovered-after-commandless-tag");
+      std::puts("PASS native SLFG withdrawal: a command-less ValidUntilPresent FG tag is withdrawn and logged as boundary_without_commands; no FX");
 
       // Use the same public SDK boundary for linear RR depth with no usable
       // camera. The native copy, provider acquisition and GPU moment readback

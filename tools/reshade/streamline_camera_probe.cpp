@@ -190,8 +190,10 @@ namespace sunshine_streamline {
     // Depth tags naming no resource (Streamline's untag): a null Resource
     // pointer, or a Resource whose native is null.
     std::atomic<std::uint64_t> depth_untags{};
+    // FG tag boundaries that named no capturable depth.
+    std::atomic<std::uint64_t> fg_withdrawals{};
     // Next tick each bounded tag line may be written (5 s apart).
-    std::atomic<std::uint64_t> next_compatibility_report{}, next_untag_report{};
+    std::atomic<std::uint64_t> next_compatibility_report{}, next_untag_report{}, next_fg_withdrawal_report{};
     // SDK calls answered with eWarnOutOfVRAM: accepted, counted for the log.
     std::atomic<std::uint64_t> vram_warnings{};
     // One verdict per 2.x call (abi_v2::accepted): the warning is a success.
@@ -1630,6 +1632,39 @@ namespace sunshine_streamline {
         return tag.direct_source && direct_tag_admissible(snapshot, tag);
       });
     }
+    const char *name(frame_identity_kind value) {
+      switch (value) {
+        case frame_identity_kind::unavailable: return "unavailable";
+        case frame_identity_kind::v1_numeric: return "v1_numeric";
+        case frame_identity_kind::v2_observed_token: return "v2_observed_token";
+        case frame_identity_kind::v2_constants_call: return "v2_constants_call";
+      }
+      return "unknown";
+    }
+    // Why an FG tag boundary named no capturable depth, at most every 5 s.
+    // The tag described is the call's first present depth tag in priority
+    // order; reason is its first failing gate. Diagnostic only.
+    void report_fg_withdrawal(const evaluation_snapshot &snapshot, const char *reason) {
+      const auto count = fg_withdrawals.fetch_add(1, std::memory_order_relaxed) + 1;
+      const auto now = GetTickCount64();
+      auto next = next_fg_withdrawal_report.load(std::memory_order_relaxed);
+      if (now < next || !next_fg_withdrawal_report.compare_exchange_strong(next, now + 5000, std::memory_order_relaxed)) return;
+      static const evaluated_depth_tag none;
+      const auto *tag = &none;
+      for (const unsigned index : depth_priority) if (snapshot.tags[index].present) { tag = &snapshot.tags[index]; break; }
+      char text[640]{};
+      std::snprintf(text, sizeof(text),
+        "Sunshine Streamline FG depth withdrawn: reason=%s viewport=%u tag_type=%u scope=%s lifecycle=%u native=0x%llx "
+        "command=0x%llx frame=%s status=%s fg=%u withdrawals=%llu; this FG tag call names no capturable depth, so the "
+        "viewport's FG depth source is withdrawn until its next capture",
+        reason, snapshot.viewport, tag->present ? tag->value.type : UINT32_MAX,
+        !tag->present ? "absent" : tag->scope == tag_scope::active_global ? "global" :
+          tag->scope == tag_scope::explicit_frame ? "frame" : "local",
+        tag->present ? tag->value.lifecycle : UINT32_MAX, static_cast<unsigned long long>(tag->value.native_resource),
+        static_cast<unsigned long long>(snapshot.command_buffer), name(snapshot.frame.kind), name(snapshot.status),
+        unsigned(snapshot.frame_generation_input), static_cast<unsigned long long>(count));
+      message(text);
+    }
     std::uint64_t nominate_depth_source(const evaluation_snapshot &snapshot, bool version_one, bool *copy_recorded = nullptr) {
       if (copy_recorded) *copy_recorded = false;
       if (!source_requested.load(std::memory_order_acquire) || !depth_capture::active()) return 0;
@@ -1650,7 +1685,12 @@ namespace sunshine_streamline {
       // Assassin's Creed Shadows (10-22) sends a null FG depth tag every
       // frame, which used to withdraw its FG source each time.
       if (snapshot.tag_boundary && depth_untag(snapshot)) return 0;
-      if (!direct_source_admissible(snapshot)) { withdraw_invalid_attempt(); return 0; }
+      const bool fg_boundary = snapshot.tag_boundary && snapshot.frame_generation_input;
+      if (const auto rejected = source_rejection(snapshot)) {
+        if (fg_boundary) report_fg_withdrawal(snapshot, rejected);
+        withdraw_invalid_attempt();
+        return 0;
+      }
       // The adapter defines semantic priority; the capture owner tries this
       // ordered set as one evaluation, including its in-progress lifetime.
       std::array<depth_capture::input, depth_priority.size()> candidates;
@@ -1696,6 +1736,17 @@ namespace sunshine_streamline {
             snapshot.tag_boundary ? (1ull << 63) | snapshot.viewport : UINT64_MAX, &diagnostic)) {
         if (copy_recorded) *copy_recorded = diagnostic.result == depth_capture::status::recorded;
         return ticket;
+      }
+      if (fg_boundary) {
+        char reason[96]{};
+        if (count) std::snprintf(reason, sizeof(reason), "capture_%s/%s",
+          depth_capture::name(diagnostic.result), depth_capture::name(diagnostic.stage));
+        else for (const unsigned index : depth_priority) if (snapshot.tags[index].present) {
+          const auto *rejected = tag_rejection(snapshot, snapshot.tags[index]);
+          std::snprintf(reason, sizeof(reason), "%s", rejected ? rejected : "no_retained_source");
+          break;
+        }
+        report_fg_withdrawal(snapshot, reason[0] ? reason : "absent");
       }
       withdraw_invalid_attempt();
       return 0;
@@ -3318,8 +3369,8 @@ namespace sunshine_streamline {
       v1_private_state_checked = false;
       installed_abi = sunshine_streamline::abi::unsupported;
       installed_targets = {};
-      constant_calls = tag_calls = evaluation_calls = dropped = invalid = vram_warnings = depth_untags = 0;
-      next_compatibility_report = next_untag_report = 0;
+      constant_calls = tag_calls = evaluation_calls = dropped = invalid = vram_warnings = depth_untags = fg_withdrawals = 0;
+      next_compatibility_report = next_untag_report = next_fg_withdrawal_report = 0;
       initialize(nullptr);
     }
   }

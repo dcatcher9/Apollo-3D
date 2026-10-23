@@ -3583,7 +3583,14 @@ Unknown or malformed extensions remain unavailable with a
 bounded rejection diagnostic. A supported enabled FG source has priority over NGX,
 including while its current capture is pending. Its depth and source-associated camera metadata
 stay together; missing usable FG pixels do not authorize an NGX substitution or cross-API
-projection borrowing. An observed FG Off retires that source so independently captured ordinary
+projection borrowing. An FG tag call that names no capturable depth withdraws the FG source until
+its next capture. A bounded `Sunshine Streamline FG depth withdrawn` line (at most every 5 s)
+names the first failing gate as `reason=`: a source gate such as `boundary_without_commands` (a
+legal `ValidUntilPresent` tag sent without a command list, which leaves no point to copy it at)
+or `untracked_frame`, a tag gate such as `lifecycle_outlives_boundary`, or
+`capture_<result>/<stage>` when the native copy was refused. It also gives the call's first depth
+tag (`tag_type`, `scope`, `lifecycle`, `native`), its `command`, the frame identity kind, the
+evidence `status` and the running `withdrawals` count. An observed FG Off retires that source so independently captured ordinary
 SL tag/evaluation or NGX depth can resume with newly submitted pixels. A failed or ambiguous FG-options observation also revokes the old FG scope
 and its retained display pixels, but does not confirm that FG is Off. Selection excludes those
 unconfirmed FG inputs and permits independently validated ordinary SL or NGX depth, with the
