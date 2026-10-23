@@ -65,7 +65,7 @@ diagnostics that explain how the final field was produced.
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
 schema 115/tag `0x640A940C`, canonical SHA-256
-`38004b65bf37d9a1a385d6534dbe3eb68672bf9936d905a9fa4df4607b67abb5`. It binds the
+`a4a84a1af3f2dacd3df2f0d87254ad8f35d2724f81318a8ba634b6e165d21358`. It binds the
 complete policy below, including all subtitle field/ROI semantics. The generated named closure
 groups are the shared C++, Python, JSON, and documentation authority for every ordered shader set
 and source pin. The optional `parallax_v2_p010_y` group remains fail-open to the canonical
@@ -76,7 +76,7 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | Closure group | Ordered roots | Source-closure SHA-256 |
 | --- | ---: | --- |
 | `preprocess` | 1 | `943f3295e6cdb490d0833d981b153a5cda9a5153696eb5c9ca0042e474d8d744` |
-| `parallax_v2_producer` | 27 | `559867900c8014c700ad5482a5580cbd673e74c86a4032d9e89af20eb422d754` |
+| `parallax_v2_producer` | 27 | `3faefa6450702bb819857c52b0d1684902ac1337c6e1294090eadbbb6012b1bd` |
 | `parallax_v2_coordinate_diagnostic` | 1 | `8d84dd68c42600b107ac392eb1b8727c5b325b3faf1ad43c0748ba23afb3f982` |
 | `near_identical_detector` | 4 | `12e429c6f617ebed9df2d267d41a4767b3a2b2508d76efe52b3ef43e0a6b7516` |
 | `gpu_trace` | 1 | `cd089deb118d2ae61a12c15531da1930317743b59352ada119e8744901e351b9` |
@@ -381,7 +381,8 @@ ROI obtained by projecting detector rows `[24,155)` through the exact bottom-6:1
 16:9 source and `770x434` field this remains `[325,430)`; ultrawide and portrait fields have different
 row intervals. Detector-pixel box edges map into the integer tensor-content rectangle by exact
 integer rationals, columns directly and rows through that crop: left and top edges floor, right and
-bottom edges ceil, and rows clamp to the ROI. A ribbon cover maps only its top this way; its sides
+bottom edges ceil, columns clamp to the detector width before mapping (so no product leaves
+`uint32`), and rows clamp to the ROI. A ribbon cover maps only its top this way; its sides
 and bottom are the content edges described below. Schema/tag,
 authoritative flag, exact matched-frame and analysis-generation identity, source dimensions, field,
 ROI, finite score, paired containment and metadata, topology, counts, and all unused words must

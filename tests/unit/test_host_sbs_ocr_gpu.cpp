@@ -1390,6 +1390,73 @@ namespace {
     }
   }
 
+  // MapXFloor and MapXCeil clamp their own column to OCR_WIDTH, so a caller passing a column
+  // beyond it maps to the content's right edge instead of a uint32 product that wrapped to a
+  // narrow column (5577880 * 770 wraps to 304, which used to map to field columns 0 and 1).
+  TEST(HostSbsOcrGpuTest, ColumnMappingClampsAnyColumnToTheOcrWidth) {
+    ComPtr<ID3D11Device> device;
+    ComPtr<ID3D11DeviceContext> context;
+    constexpr D3D_FEATURE_LEVEL requested[] = {D3D_FEATURE_LEVEL_11_0};
+    D3D_FEATURE_LEVEL actual {};
+    ASSERT_TRUE(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0u, requested,
+      static_cast<UINT>(std::size(requested)), D3D11_SDK_VERSION, &device, &actual, &context)));
+    static constexpr char probe[] =
+      "#include \"host_sbs_ocr_boxes_cs.hlsl\"\n"
+      "StructuredBuffer<uint> MapXProbeColumns : register(t2);\n"
+      "RWStructuredBuffer<uint> MapXProbeMapped : register(u2);\n"
+      "[numthreads(1, 1, 1)]\n"
+      "void map_x_probe_main(uint3 id : SV_DispatchThreadID) {\n"
+      "    MapXProbeMapped[2u * id.x] = MapXFloor(MapXProbeColumns[id.x]);\n"
+      "    MapXProbeMapped[2u * id.x + 1u] = MapXCeil(MapXProbeColumns[id.x]);\n"
+      "}\n";
+    // The probe compiles as if it sat beside the shader, so its includes resolve there.
+    const auto probe_path = (std::filesystem::path(SUNSHINE_SHADERS_DIR) / "host_sbs_ocr_map_x_probe.hlsl").string();
+    ComPtr<ID3DBlob> bytecode;
+    ComPtr<ID3DBlob> diagnostics;
+    const auto compiled = D3DCompile(probe, sizeof(probe) - 1u, probe_path.c_str(), nullptr,
+      D3D_COMPILE_STANDARD_FILE_INCLUDE, "map_x_probe_main", "cs_5_0",
+      D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3, 0u, &bytecode, &diagnostics);
+    ASSERT_TRUE(SUCCEEDED(compiled)) << (diagnostics ?
+      std::string(static_cast<const char *>(diagnostics->GetBufferPointer()), diagnostics->GetBufferSize()) : std::string());
+    ComPtr<ID3D11ComputeShader> shader;
+    ASSERT_TRUE(SUCCEEDED(device->CreateComputeShader(bytecode->GetBufferPointer(), bytecode->GetBufferSize(), nullptr, &shader)));
+
+    // Content columns 3..773 of the field (770 wide); only tensor_content is read.
+    constexpr std::array<std::uint32_t, 4u> content {3u, 0u, 773u, field_height};
+    constexpr std::uint32_t content_width = content[2u] - content[0u];
+    const ocr_resolve_constants_t constants {0u, 0u, 0u, 0u, source_width, source_height, field_width, field_height,
+      0u, 1u, 0u, 1u, content, 0, source_width, 0, 0u};
+    ComPtr<ID3D11Buffer> constant_buffer;
+    ASSERT_TRUE(create_constant_buffer(device.Get(), &constants, sizeof(constants), constant_buffer));
+    const std::vector<std::uint32_t> columns {0u, 1u, 576u, ocr_width - 1u, ocr_width, ocr_width + 1u, 5577880u,
+      0x80000000u, 0xffffffffu};
+    ComPtr<ID3D11Buffer> column_buffer, mapped_buffer;
+    ComPtr<ID3D11ShaderResourceView> column_srv;
+    ComPtr<ID3D11UnorderedAccessView> mapped_uav;
+    ASSERT_TRUE(create_structured_buffer(device.Get(), columns.data(), columns.size() * sizeof(std::uint32_t),
+      sizeof(std::uint32_t), D3D11_BIND_SHADER_RESOURCE, column_buffer, &column_srv, nullptr));
+    const std::vector<std::uint32_t> zeros(2u * columns.size(), 0u);
+    ASSERT_TRUE(create_structured_buffer(device.Get(), zeros.data(), zeros.size() * sizeof(std::uint32_t),
+      sizeof(std::uint32_t), D3D11_BIND_UNORDERED_ACCESS, mapped_buffer, nullptr, &mapped_uav));
+    context->CSSetShader(shader.Get(), nullptr, 0u);
+    context->CSSetConstantBuffers(0u, 1u, constant_buffer.GetAddressOf());
+    context->CSSetShaderResources(2u, 1u, column_srv.GetAddressOf());
+    context->CSSetUnorderedAccessViews(2u, 1u, mapped_uav.GetAddressOf(), nullptr);
+    context->Dispatch(static_cast<UINT>(columns.size()), 1u, 1u);
+    std::vector<std::uint32_t> mapped;
+    ASSERT_TRUE(read_buffer(device.Get(), context.Get(), mapped_buffer.Get(), mapped));
+    ASSERT_EQ(mapped.size(), 2u * columns.size());
+    for (std::size_t i = 0; i != columns.size(); ++i) {
+      SCOPED_TRACE(std::to_string(columns[i]));
+      const std::uint64_t x = std::min(columns[i], ocr_width);
+      EXPECT_EQ(mapped[2u * i], content[0u] + x * content_width / ocr_width);
+      EXPECT_EQ(mapped[2u * i + 1u], content[0u] + (x * content_width + ocr_width - 1u) / ocr_width);
+      EXPECT_LE(mapped[2u * i + 1u], content[2u]);
+    }
+    EXPECT_EQ(mapped[2u * 6u], content[2u]);
+    EXPECT_EQ(mapped[2u * 6u + 1u], content[2u]);
+  }
+
   TEST(HostSbsOcrGpuTest, OrdinaryHorizontalGuardIncludesModelMissedLeadingGlyph) {
     ocr_warp_fixture_t fixture;
     std::string error;

@@ -140,17 +140,17 @@ bool BandColumnActive(uint x, uint4 active) {
 
 // Exact rational column mapping, matching MapYRational. FXC compiles a float division by the
 // constant OCR_WIDTH as a multiply by its rounded-up float reciprocal, which can lift an exact
-// integer quotient above itself and make the ceil one field column too wide. ResolveGeometryValid
-// bounds x <= OCR_WIDTH and content_width <= field_width <= 0xffff, so x * content_width fits uint32.
+// integer quotient above itself and make the ceil one field column too wide. x is clamped to
+// OCR_WIDTH here and ResolveGeometryValid bounds content_width <= field_width <= 0xffff, so
+// x * content_width fits uint32 and the mapped column never passes the content's right edge.
 uint MapXFloor(uint x) {
     uint content_width = tensor_content.z - tensor_content.x;
-    return tensor_content.x + min(x * content_width / OCR_WIDTH, content_width);
+    return tensor_content.x + min(x, OCR_WIDTH) * content_width / OCR_WIDTH;
 }
 
 uint MapXCeil(uint x) {
     uint content_width = tensor_content.z - tensor_content.x;
-    return tensor_content.x + min(
-        (x * content_width + OCR_WIDTH - 1u) / OCR_WIDTH, content_width);
+    return tensor_content.x + (min(x, OCR_WIDTH) * content_width + OCR_WIDTH - 1u) / OCR_WIDTH;
 }
 
 uint MapYRational(uint y, bool round_up) {
