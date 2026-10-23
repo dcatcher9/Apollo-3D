@@ -2330,10 +2330,11 @@ Every proof/policy combination above, including NGX's SDK input contract, resolv
 table in [`capture_state_policy.h`](../tools/reshade/capture_state_policy.h): declared (must match an
 observation), observed only (also an undeclared state), observed-else-declared and
 observed-else-contract. Blocked or
-incomplete observations reject every rule. Its CPU test judges every legal combination of allocation
-flags, adapter claim, consumer, declared state and recorded evidence, plus deliberately illegal rows,
-against the [API contract matrix](../tools/reshade/README.md#api-contract-matrix); the cells where the
-table falls short of the contract are rows of its known-gap table.
+incomplete observations reject every rule. The
+[API contract matrix](../tools/reshade/README.md#api-contract-matrix) judges the table over every
+legal combination of allocation flags, adapter claim, consumer, declared state and recorded
+evidence, plus deliberately illegal rows; the cells where the table falls short of the contract are
+rows of its known-gap table.
 
 The FG decision is independent of depth-provider selection, including a manually pinned Generic
 buffer. The last confirmed mode survives transient observation loss and effects reloads; a new
@@ -3466,7 +3467,9 @@ numbering but is not treated as surveyed, so its UIAlpha stays manual-only until
 extended. The version identifies the header the loaded interposer interprets; a game whose DLLs
 were downgraded below its compile-time headers can still send a number with a different meaning.
 The UI candidate's GPU content checks remain in force for that case. The log line
-`Sunshine Streamline: buffer contract` records the selected contract at hook installation.
+`Sunshine Streamline: buffer contract` records the selected contract at hook installation. The
+[API contract matrix](../tools/reshade/README.md#api-contract-matrix) checks this table against each
+surveyed release's own header; its known-gap table lists where they differ.
 
 ### Streamline depth selection
 

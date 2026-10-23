@@ -20,7 +20,9 @@
 //
 // Only <d3d12.h>, <cstdint>, the dimensions header and generated SDK
 // constant tables may be included (reshade_contract_oracle_independence).
+// Buffer-type meanings come from the generated Streamline survey tables.
 #include "test_game3d_api_contract_dimensions.h"
+#include "test_sl_survey_tables.generated.h"
 
 #include <cstdint>
 #include <d3d12.h>
@@ -57,6 +59,7 @@ namespace game3d_contract {
     inline constexpr rule S16d {"S16d", "Declared Resource size differs from the allocation, extent valid: CAPTURE", "SLT:334-336, 360-363: width and height are not among the mandatory Resource fields"};
     inline constexpr rule S16e {"S16e", "Extent changing every frame inside the allocation: CONTINUOUS (R3)", "sl_dlss_g.h:46, 82-90 eDynamicResolutionEnabled and per-frame resolution; owner ruling R3"};
     inline constexpr rule S17 {"S17", "Buffer type B at release V: a depth source exactly when V's own header declares B as depth", "each release's BufferType declarations (sl-abi-survey headers)"};
+    inline constexpr rule S17b {"S17b", "An official release's interposer version resource selects that release's header (its exact version, or an inexact family that includes it) and the structure ABI its Resource defines", "sl-abi-survey all-release-dll-results.json (each release DLL's version resource); each release's sl.h Resource (a state word from 1.0.3) and sl_struct.h (versioned 2.x structures)"};
     inline constexpr rule S18 {"S18", "33 to 73 tags in one call with depth among them: CAPTURE; other slots are not wiped", "SLA:143-173: numTags is a uint32_t with no stated limit"};
     inline constexpr rule S19 {"S19", "Two SR viewports active together: the viewport bound to frame generation CAPTUREs, any other REFUSE ambiguous_view (R5)", "SLT:614-621 ViewportHandle (any number); owner ruling R5"};
     inline constexpr rule S19b {"S19b", "Viewports rotating, one active at a time: CAPTURE", "SLT:614-621 ViewportHandle"};
@@ -82,6 +85,8 @@ namespace game3d_contract {
     inline constexpr rule D7 {"D7", "Subresource 0 transitioned separately from other mips or the stencil plane: CAPTURE", "d3d12.h D3D12_RESOURCE_TRANSITION_BARRIER.Subresource: each subresource has its own state; the copy reads subresource 0"};
     inline constexpr rule D8 {"D8", "MSAA, array or 3D resource: REFUSE", "SLT:412-429 and the NGX depth parameters name no slice or sample"};
     inline constexpr rule D9 {"D9", "Every depth family and typeless view: CAPTURE, plane 0 byte-exact", "D3D12_RESOURCE_FLAGS ALLOW_DEPTH_STENCIL: 'CopyTextureRegion must copy a whole subresource'"};
+    inline constexpr rule D9b {"D9b", "R16_TYPELESS with no typed format of its family declared: linear depth REFUSE; hardware depth EITHER R16_UNORM (D16_UNORM is the family's only depth format) or REFUSE", "SLT:331-389 Resource.nativeFormat is optional; MS Learn, DXGI_FORMAT: the R16 family holds UNORM (D16_UNORM, R16_UNORM) or FLOAT (R16_FLOAT) data; docs/reshade-sbs.md, Rules for new game behaviour 3 (fail safe)"};
+    inline constexpr rule D9c {"D9c", "A format outside the four depth families, or one of their stencil-plane, integer or SNORM formats: REFUSE", "MS Learn, DXGI_FORMAT: D32_FLOAT, D32_FLOAT_S8X24_UINT, D24_UNORM_S8_UINT and D16_UNORM are the depth formats; X32_TYPELESS_G8X24_UINT and X24_TYPELESS_G8_UINT read the stencil plane"};
     inline constexpr rule D10 {"D10", "Generic end of frame with no proven state: REFUSE, or HOLD the earlier frame", "docs/reshade-sbs.md, Rules for new game behaviour 3 (fail safe); nothing names the state at Present"};
     inline constexpr rule D11 {"D11", "ClearDepthStencilView, or BeginRenderPass with a depth CLEAR: CAPTURE from DEPTH_WRITE", "MS Learn D3D12_RESOURCE_STATES: DEPTH_WRITE is used for ClearDepthStencilView"};
     inline constexpr rule D11b {"D11b", "Unbinding a writable DSV after a depth write on the recording: CAPTURE from DEPTH_WRITE; without one: REFUSE", "MS Learn D3D12_RESOURCE_STATES: DEPTH_WRITE with a writable DSV 'when the PSO has depth write enabled', DEPTH_READ when it is disabled"};
@@ -136,6 +141,7 @@ namespace game3d_contract {
     &rules::S16d,
     &rules::S16e,
     &rules::S17,
+    &rules::S17b,
     &rules::S18,
     &rules::S19,
     &rules::S19b,
@@ -160,6 +166,8 @@ namespace game3d_contract {
     &rules::D7,
     &rules::D8,
     &rules::D9,
+    &rules::D9b,
+    &rules::D9c,
     &rules::D10,
     &rules::D11,
     &rules::D11b,
@@ -707,6 +715,215 @@ namespace game3d_contract {
     return out;
   }
 
+  namespace detail {
+    struct named_meaning {
+      const char *name;
+      buffer_meaning meaning;
+    };
+
+    // The buffer-type names Game 3D gives a role, as the survey headers spell
+    // them. 1.0.0 and 1.0.1 named the scaling colours DLSSInputColor and
+    // DLSSOutputColor; 1.x value 23 is UIHint (v1.x sl.h).
+    inline constexpr named_meaning meanings[] {
+      {"Depth", buffer_meaning::depth},
+      {"HiResDepth", buffer_meaning::high_resolution_depth},
+      {"LinearDepth", buffer_meaning::linear_depth},
+      {"HUDLessColor", buffer_meaning::hudless_color},
+      {"UIColorAndAlpha", buffer_meaning::ui_color_and_alpha},
+      {"UIAlpha", buffer_meaning::ui_alpha},
+      {"UIHint", buffer_meaning::ui_hint},
+      {"Backbuffer", buffer_meaning::backbuffer},
+      {"ScalingInputColor", buffer_meaning::scaling_input},
+      {"DLSSInputColor", buffer_meaning::scaling_input},
+      {"ScalingOutputColor", buffer_meaning::scaling_output},
+      {"DLSSOutputColor", buffer_meaning::scaling_output},
+    };
+
+    constexpr sl_version version_of(const survey::release &release) {
+      return {release.major, release.minor, release.patch};
+    }
+
+    // The surveyed release with this version, or null. Tags that share a
+    // version (v2.0.0 and v2.0.0a) declare the same buffer types.
+    constexpr const survey::release *surveyed(const sl_version &version) {
+      for (const auto &release : survey::releases) {
+        if (version_of(release) == version) {
+          return &release;
+        }
+      }
+      return nullptr;
+    }
+
+    constexpr bool same_types(const survey::release &a, const survey::release &b) {
+      if (a.type_count != b.type_count) {
+        return false;
+      }
+      for (std::uint32_t i = 0; i != a.type_count; ++i) {
+        if (a.types[i].value != b.types[i].value || !same_text(a.types[i].name, b.types[i].name)) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    // One header per version, and newest_surveyed is the survey's newest.
+    constexpr bool survey_agrees() {
+      sl_version newest {};
+      for (const auto &release : survey::releases) {
+        if (!same_types(*surveyed(version_of(release)), release)) {
+          return false;
+        }
+        if (newest < version_of(release)) {
+          newest = version_of(release);
+        }
+      }
+      return newest == newest_surveyed;
+    }
+  }  // namespace detail
+
+  static_assert(detail::survey_agrees(), "a surveyed version names two headers, or newest_surveyed is not the survey's newest release");
+
+  // The meaning a release's header gives a buffer-type name.
+  constexpr buffer_meaning meaning_of(const char *name) {
+    for (const auto &entry : detail::meanings) {
+      if (detail::same_text(entry.name, name)) {
+        return entry.meaning;
+      }
+    }
+    return buffer_meaning::other;
+  }
+
+  // The meaning that value.version's own header gives value.raw (S17), or
+  // undeclared where the survey holds no such release.
+  constexpr buffer_meaning declared_meaning(const buffer_case &value) {
+    if (const auto *release = detail::surveyed(value.version)) {
+      for (std::uint32_t i = 0; i != release->type_count; ++i) {
+        if (release->types[i].value == value.raw) {
+          return meaning_of(release->types[i].name);
+        }
+      }
+    }
+    return buffer_meaning::undeclared;
+  }
+
+  // The role a buffer meaning gives a tag: a depth source (S17), a UI input
+  // (U1, U1c), or none (S17, U1b; the scaling colours feed neither).
+  constexpr outcome buffer_role(buffer_meaning meaning) {
+    using namespace detail;
+    switch (meaning) {
+      case buffer_meaning::depth:
+      case buffer_meaning::high_resolution_depth:
+      case buffer_meaning::linear_depth:
+        return plain(rules::S17, outcome_kind::capture);
+      case buffer_meaning::hudless_color:
+      case buffer_meaning::ui_color_and_alpha:
+      case buffer_meaning::backbuffer:
+        return plain(rules::U1, outcome_kind::offered);
+      case buffer_meaning::ui_alpha:
+        return plain(rules::U1c, outcome_kind::offered);
+      case buffer_meaning::ui_hint:
+        return plain(rules::U1b, outcome_kind::ignored);
+      default:
+        return plain(rules::S17, outcome_kind::ignored);
+    }
+  }
+
+  // A raw buffer type at the release the interposer identifies (S17, S24):
+  // the role that release's own header gives it. The survey holds no header
+  // for an unpublished build (2.6.10) or a newer release, so its value may or
+  // may not keep the newest surveyed meaning; UI alpha newer than the survey
+  // stays manual (U4).
+  constexpr outcome expect(const buffer_case &value) {
+    using namespace detail;
+    if (value.version.major < 1 || value.version.major > 2) {
+      return refuse(rules::S24, refusal::unknown_abi);
+    }
+    if (!surveyed(value.version)) {
+      const auto newest = buffer_role(declared_meaning({newest_surveyed, value.raw}));
+      if (newest.by == &rules::U1c && newest_surveyed < value.version) {
+        return plain(rules::U4, outcome_kind::ignored);
+      }
+      return newest.kind == outcome_kind::ignored ? newest : either(newest, plain(rules::S17, outcome_kind::ignored));
+    }
+    return buffer_role(declared_meaning(value));
+  }
+
+  // Whether a dedicated UI-alpha tag may be used automatically (U1c, U4):
+  // only where a surveyed header declares UIAlpha.
+  constexpr bool ui_alpha_automatic(const sl_version &version) {
+    if (const auto *release = detail::surveyed(version)) {
+      for (std::uint32_t i = 0; i != release->type_count; ++i) {
+        if (meaning_of(release->types[i].name) == buffer_meaning::ui_alpha) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  // The structure ABI a surveyed release's headers define (S17b).
+  constexpr sl_abi declared_abi(const survey::release &release) {
+    return release.resource_tag ? sl_abi::typed : release.resource_state ? sl_abi::legacy :
+                                                                           sl_abi::legacy_no_state;
+  }
+
+  // The typeless storage a depth copy keeps and the view that reads the depth
+  // plane (D9, D9b, D9c). kind is capture or refuse; alternative differs for
+  // EITHER.
+  struct format_reading {
+    outcome_kind kind {outcome_kind::refuse};
+    outcome_kind alternative {outcome_kind::refuse};
+    std::uint32_t storage {}, view {};
+    const rule *by {};
+  };
+
+  namespace detail {
+    constexpr format_reading reading(std::uint32_t storage, std::uint32_t view) {
+      return {outcome_kind::capture, outcome_kind::capture, storage, view, &rules::D9};
+    }
+  }  // namespace detail
+
+  // A depth input's formats (D9, D9b, D9c), from DXGI's format families (MS
+  // Learn, Format casting): every format of a depth family shares its
+  // typeless storage, and the depth plane reads through one view.
+  constexpr format_reading expect(const format_case &value) {
+    using detail::reading;
+    switch (value.allocation) {
+      case DXGI_FORMAT_D32_FLOAT:
+      case DXGI_FORMAT_R32_TYPELESS:
+      case DXGI_FORMAT_R32_FLOAT:
+        return reading(DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_R32_FLOAT);
+      case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
+      case DXGI_FORMAT_R32G8X24_TYPELESS:
+      case DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS:
+        return reading(DXGI_FORMAT_R32G8X24_TYPELESS, DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS);
+      case DXGI_FORMAT_D24_UNORM_S8_UINT:
+      case DXGI_FORMAT_R24G8_TYPELESS:
+      case DXGI_FORMAT_R24_UNORM_X8_TYPELESS:
+        return reading(DXGI_FORMAT_R24G8_TYPELESS, DXGI_FORMAT_R24_UNORM_X8_TYPELESS);
+      case DXGI_FORMAT_D16_UNORM:
+      case DXGI_FORMAT_R16_UNORM:
+        return reading(DXGI_FORMAT_R16_TYPELESS, DXGI_FORMAT_R16_UNORM);
+      case DXGI_FORMAT_R16_FLOAT:
+        return reading(DXGI_FORMAT_R16_TYPELESS, DXGI_FORMAT_R16_FLOAT);
+      case DXGI_FORMAT_R16_TYPELESS:
+        // A typed allocation reads as itself; a typeless R16 one needs the
+        // declared typed format of its family.
+        if (value.declared == DXGI_FORMAT_R16_FLOAT) {
+          return reading(DXGI_FORMAT_R16_TYPELESS, DXGI_FORMAT_R16_FLOAT);
+        }
+        if (value.declared == DXGI_FORMAT_R16_UNORM || value.declared == DXGI_FORMAT_D16_UNORM) {
+          return reading(DXGI_FORMAT_R16_TYPELESS, DXGI_FORMAT_R16_UNORM);
+        }
+        if (value.device_depth) {
+          return {outcome_kind::capture, outcome_kind::refuse, DXGI_FORMAT_R16_TYPELESS, DXGI_FORMAT_R16_UNORM, &rules::D9b};
+        }
+        return {outcome_kind::refuse, outcome_kind::refuse, 0, 0, &rules::D9b};
+      default:
+        return {outcome_kind::refuse, outcome_kind::refuse, 0, 0, &rules::D9c};
+    }
+  }
+
   // Pinned rows: one case per rule an expect() decides, written from the rule
   // texts above. They keep every such rule reachable and its outcome fixed
   // as the oracle grows.
@@ -874,5 +1091,28 @@ namespace game3d_contract {
     static_assert(decides(expect(with(ui_case {}, &ui_case::clear, ui_clear_boundary::legacy_render_target)), rules::D12, outcome_kind::offered));
     static_assert(undecided(expect(with(ui_case {}, &ui_case::clear, ui_clear_boundary::enhanced_render_target)), rules::D12));
     static_assert(refuses(expect(with(ui_case {}, &ui_case::clear, ui_clear_boundary::simultaneous_common)), rules::D12, refusal::state_unprovable));
+
+    static_assert(decides(expect(buffer_case {{2, 2, 1}, 48}), rules::S17, outcome_kind::capture) && declared_meaning({{2, 2, 1}, 49}) == buffer_meaning::linear_depth);
+    static_assert(decides(expect(buffer_case {{2, 2, 0}, 48}), rules::S17, outcome_kind::ignored) && declared_meaning({{2, 2, 0}, 48}) == buffer_meaning::undeclared);
+    static_assert(decides(expect(buffer_case {{1, 1, 1}, 23}), rules::U1b, outcome_kind::ignored));
+    static_assert(decides(expect(buffer_case {{1, 0, 0}, 3}), rules::S17, outcome_kind::ignored) && declared_meaning({{1, 0, 0}, 3}) == buffer_meaning::scaling_input);
+    static_assert(decides(expect(buffer_case {{2, 11, 1}, 68}), rules::U1c, outcome_kind::offered));
+    static_assert(decides(expect(buffer_case {{2, 12, 0}, 68}), rules::S17, outcome_kind::ignored) && declared_meaning({{2, 12, 0}, 68}) == buffer_meaning::other);
+    static_assert(decides(expect(buffer_case {{2, 14, 1}, 69}), rules::U1c, outcome_kind::offered));
+    static_assert(refuses(expect(buffer_case {{3, 0, 0}, 0}), rules::S24, refusal::unknown_abi));
+    static_assert(decides(expect(buffer_case {{2, 15, 0}, 69}), rules::U4, outcome_kind::ignored));
+    static_assert(undecided(expect(buffer_case {{2, 6, 10}, 0}), rules::S17));
+    static_assert(ui_alpha_automatic({2, 11, 1}) && ui_alpha_automatic({2, 12, 0}) && !ui_alpha_automatic({2, 10, 3}) && !ui_alpha_automatic({2, 15, 0}));
+    static_assert(declared_abi(*detail::surveyed({1, 0, 2})) == sl_abi::legacy_no_state && declared_abi(*detail::surveyed({1, 0, 3})) == sl_abi::legacy && declared_abi(*detail::surveyed({2, 0, 0})) == sl_abi::typed);
+
+    constexpr bool reads(const format_reading &value, const rule &by, std::uint32_t storage, std::uint32_t view) {
+      return value.by == &by && value.kind == outcome_kind::capture && value.alternative == outcome_kind::capture && value.storage == storage && value.view == view;
+    }
+
+    static_assert(reads(expect(format_case {DXGI_FORMAT_D24_UNORM_S8_UINT}), rules::D9, DXGI_FORMAT_R24G8_TYPELESS, DXGI_FORMAT_R24_UNORM_X8_TYPELESS));
+    static_assert(reads(expect(format_case {DXGI_FORMAT_R16_TYPELESS, DXGI_FORMAT_R16_FLOAT, false}), rules::D9, DXGI_FORMAT_R16_TYPELESS, DXGI_FORMAT_R16_FLOAT));
+    static_assert(expect(format_case {DXGI_FORMAT_R16_TYPELESS}).by == &rules::D9b && expect(format_case {DXGI_FORMAT_R16_TYPELESS}).alternative == outcome_kind::refuse);
+    static_assert(expect(format_case {DXGI_FORMAT_R16_TYPELESS, DXGI_FORMAT_UNKNOWN, false}).kind == outcome_kind::refuse);
+    static_assert(expect(format_case {DXGI_FORMAT_X24_TYPELESS_G8_UINT}).by == &rules::D9c && expect(format_case {DXGI_FORMAT_X24_TYPELESS_G8_UINT}).kind == outcome_kind::refuse);
   }  // namespace pinned
 }  // namespace game3d_contract

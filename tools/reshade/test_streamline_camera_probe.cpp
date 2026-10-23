@@ -3184,6 +3184,8 @@ namespace {
     require(buffers::canonical(v1, 23) == buffers::unknown && buffers::canonical(v1, 0) == 0 &&
         buffers::canonical(v1, 48) == buffers::unknown && buffers::canonical(v1, 2) == 2,
       "1.x buffer contract changed depth/HUD-less or accepted UIHint/unknown tags");
+    // Current behaviour for 48 at 2.2.1, a recorded contract gap (S17): the
+    // 2.2.1 header already declares HiResDepth 48 and LinearDepth 49.
     const auto v2_2 = buffers::for_version({2, 2, 1, 0});
     require(buffers::canonical(v2_2, 23) == 23 && buffers::canonical(v2_2, 48) == buffers::unknown &&
         buffers::canonical(v2_2, 53) == buffers::unknown, "2.2 contract accepted post-2.4 tags");

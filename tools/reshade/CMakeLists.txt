@@ -272,15 +272,30 @@ if(BUILD_TESTING)
     message(STATUS "No Python 3.9 interpreter: the Game 3D log report tests are not registered")
   endif()
 
-  # The API contract matrix (README, API contract matrix): the capture state
-  # table is judged by the contract oracle, whose headers must stay free of
-  # the add-on.
-  set_tests_properties(reshade_capture_state_policy PROPERTIES LABELS "contract;cpu")
+  # The API contract matrix (README, API contract matrix): the oracle's
+  # headers must stay free of the add-on, and its generated Streamline survey
+  # tables must match the survey wherever one is present.
   add_test(NAME reshade_contract_oracle_independence COMMAND "${CMAKE_COMMAND}"
     "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}" "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/contract_oracle_independence"
     "-DCOMPILER=${CMAKE_CXX_COMPILER}" "-DCOMPILER_FRONTEND=${CMAKE_CXX_COMPILER_FRONTEND_VARIANT}"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/test_game3d_api_contract_independence.cmake")
   set_tests_properties(reshade_contract_oracle_independence PROPERTIES TIMEOUT 60 LABELS "contract")
+  # The survey is a build output of the main checkout, which a worktree reaches
+  # through its common git directory.
+  execute_process(COMMAND git rev-parse --path-format=absolute --git-common-dir WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    OUTPUT_VARIABLE sunshine_git_common_dir OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+  set(sunshine_main_checkout "${CMAKE_CURRENT_SOURCE_DIR}/../..")
+  if(sunshine_git_common_dir MATCHES "/\\.git$")
+    get_filename_component(sunshine_main_checkout "${sunshine_git_common_dir}" DIRECTORY)
+  endif()
+  set(SUNSHINE_SL_ABI_SURVEY_DIR "${sunshine_main_checkout}/cmake-build-relwithdebinfo/sl-abi-survey" CACHE PATH
+    "Streamline ABI survey that reshade_contract_sl_survey_tables compares test_sl_survey_tables.generated.h with")
+  if(IS_DIRECTORY "${SUNSHINE_SL_ABI_SURVEY_DIR}")
+    add_test(NAME reshade_contract_sl_survey_tables COMMAND "${CMAKE_COMMAND}" "-DSURVEY_DIR=${SUNSHINE_SL_ABI_SURVEY_DIR}"
+      "-DCHECK=${CMAKE_CURRENT_SOURCE_DIR}/test_sl_survey_tables.generated.h"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/contract_sl_survey_tables.cmake")
+    set_tests_properties(reshade_contract_sl_survey_tables PROPERTIES TIMEOUT 60 LABELS "contract")
+  endif()
 
   add_executable(reshade_display_depth_cache_tests test_display_depth_cache.cpp)
   target_compile_features(reshade_display_depth_cache_tests PRIVATE cxx_std_17)
@@ -384,17 +399,25 @@ if(BUILD_TESTING)
   add_test(NAME reshade_streamline_camera_data COMMAND reshade_streamline_camera_data_tests)
   set_tests_properties(reshade_streamline_camera_data PROPERTIES TIMEOUT 15)
 
-  add_executable(reshade_streamline_camera_probe_tests test_streamline_camera_probe.cpp streamline_camera_probe.cpp game3d_ui_mask.cpp streamline_camera_data.cpp native_discard_observer.cpp streamline_depth_capture.cpp streamline_native_observer.cpp upscaler_call_trace.cpp ngx_depth_source.cpp)
-  target_compile_features(reshade_streamline_camera_probe_tests PRIVATE cxx_std_17)
-  target_include_directories(reshade_streamline_camera_probe_tests SYSTEM PRIVATE "${SUNSHINE_RESHADE_INCLUDE_DIR}")
-  target_compile_definitions(reshade_streamline_camera_probe_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX SUNSHINE_STREAMLINE_PROBE_TEST SUNSHINE_UPSCALER_TRACE_TEST
-    SUNSHINE_SYNCHRONOUS_LOG)
-  target_link_libraries(reshade_streamline_camera_probe_tests PRIVATE sunshine_min_hook version d3d12 dxgi dxguid sunshine_game3d_diagnostics)
-  if(MINGW)
-    target_link_options(reshade_streamline_camera_probe_tests PRIVATE -static)
-  endif()
+  # The API contract matrix's pure and hook layers build with exactly the
+  # probe tests' sources and defines (README, API contract matrix).
+  set(streamline_probe_test_sources streamline_camera_probe.cpp game3d_ui_mask.cpp streamline_camera_data.cpp native_discard_observer.cpp streamline_depth_capture.cpp streamline_native_observer.cpp upscaler_call_trace.cpp ngx_depth_source.cpp)
+  add_executable(reshade_streamline_camera_probe_tests test_streamline_camera_probe.cpp ${streamline_probe_test_sources})
+  add_executable(reshade_contract_matrix_cpu_tests test_game3d_api_contract_cpu.cpp ${streamline_probe_test_sources})
+  foreach(probe_target IN ITEMS reshade_streamline_camera_probe_tests reshade_contract_matrix_cpu_tests)
+    target_compile_features(${probe_target} PRIVATE cxx_std_17)
+    target_include_directories(${probe_target} SYSTEM PRIVATE "${SUNSHINE_RESHADE_INCLUDE_DIR}")
+    target_compile_definitions(${probe_target} PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX SUNSHINE_STREAMLINE_PROBE_TEST SUNSHINE_UPSCALER_TRACE_TEST
+      SUNSHINE_SYNCHRONOUS_LOG)
+    target_link_libraries(${probe_target} PRIVATE sunshine_min_hook version d3d12 dxgi dxguid sunshine_game3d_diagnostics)
+    if(MINGW)
+      target_link_options(${probe_target} PRIVATE -static)
+    endif()
+  endforeach()
   add_test(NAME reshade_streamline_camera_probe COMMAND reshade_streamline_camera_probe_tests)
   set_tests_properties(reshade_streamline_camera_probe PROPERTIES TIMEOUT 20)
+  add_test(NAME reshade_contract_matrix_cpu COMMAND reshade_contract_matrix_cpu_tests)
+  set_tests_properties(reshade_contract_matrix_cpu PROPERTIES TIMEOUT 60 LABELS "contract;cpu")
 
   add_executable(reshade_upscaler_call_trace_tests test_upscaler_call_trace.cpp upscaler_call_trace.cpp ngx_depth_source.cpp)
   target_compile_features(reshade_upscaler_call_trace_tests PRIVATE cxx_std_17)

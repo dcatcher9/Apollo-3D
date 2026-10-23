@@ -179,6 +179,24 @@ namespace game3d_contract {
     undeclared  // Not declared by that release's header.
   };
 
+  // A raw buffer-type value read against the release the game's interposer
+  // identifies. The surveyed releases' headers are
+  // test_sl_survey_tables.generated.h.
+  struct buffer_case {
+    sl_version version {newest_surveyed};
+    std::uint32_t raw {};
+  };
+
+  // The structure ABI a release's headers define (survey REPORT.md): a 1.x
+  // Resource without a state word (1.0.0-1.0.2) or with one (1.0.3-1.1.1),
+  // or the typed, versioned 2.x structures (sl_struct.h).
+  enum class sl_abi {
+    none,
+    legacy_no_state,
+    legacy,
+    typed
+  };
+
   // D3D12.
   enum class list_type : std::uint32_t {
     direct = D3D12_COMMAND_LIST_TYPE_DIRECT,
@@ -220,6 +238,15 @@ namespace game3d_contract {
     d16,  // D16_UNORM / R16_TYPELESS
     r32_float,  // Linear distance or a colour-format depth copy.
     r16_float
+  };
+
+  // A depth input's DXGI formats: the allocation's format, the typed format
+  // Streamline's optional Resource.nativeFormat declares (DXGI_FORMAT_UNKNOWN
+  // when absent; SLT:331-389), and whether the input holds hardware depth (a
+  // depth tag or NGX depth) rather than linear depth.
+  struct format_case {
+    std::uint32_t allocation {}, declared {};
+    bool device_depth {true};
   };
 
   enum class resource_shape {

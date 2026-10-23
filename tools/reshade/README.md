@@ -1336,10 +1336,26 @@ add-on falls short. A recorded gap that starts passing fails its test, so the fi
 also removes its row. Never change the oracle to match the add-on: a disagreement is either a gap
 row or a fix.
 
-`ctest -L contract` runs the matrix. `reshade_capture_state_policy` judges the capture state table
-over every legal state cell and a set of deliberately illegal rows.
-`reshade_contract_oracle_independence` refuses any add-on include or name in the three headers and
-compiles each on its own.
+`ctest -L contract` runs the matrix. Its pure layer, `reshade_contract_matrix_cpu`, is built with
+the Streamline probe tests' sources and defines. It identifies every surveyed Streamline release's
+interposer DLL as the probe does and reads raw buffer types 0 to 80 through the selected contract;
+it judges the capture state table over every legal state cell and a set of deliberately illegal
+rows; and it reads every pair of DXGI allocation and declared formats through
+[`depth_view_format.h`](depth_view_format.h). `reshade_contract_oracle_independence` refuses any
+add-on include or name in the oracle's headers and compiles each on its own.
+
+Buffer-type meanings come from
+[`test_sl_survey_tables.generated.h`](test_sl_survey_tables.generated.h), never from the add-on's
+contract table. [`contract_sl_survey_tables.cmake`](contract_sl_survey_tables.cmake) generates it
+from the Streamline ABI survey: each release's own headers and its interposer DLL's version
+resource. `reshade_contract_sl_survey_tables` compares the checked-in copy with the survey. It
+exists only where `SUNSHINE_SL_ABI_SURVEY_DIR` names a survey; the default is the main checkout's
+`cmake-build-relwithdebinfo/sl-abi-survey`, also from a worktree. After the survey gains a release,
+regenerate the copy, review its diff and commit it with the matrix changes it causes:
+
+```bash
+cmake -DSURVEY_DIR=<sl-abi-survey> -DOUTPUT=tools/reshade/test_sl_survey_tables.generated.h -P tools/reshade/contract_sl_survey_tables.cmake
+```
 
 ### Independent renderer reference tests
 

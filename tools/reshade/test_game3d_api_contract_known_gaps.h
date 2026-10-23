@@ -35,7 +35,7 @@ namespace game3d_contract::known_gaps {
     const char *owner_note;
   };
 
-  // The state a copy may start from (checked by test_capture_state_policy.cpp).
+  // The state a copy may start from (checked by test_game3d_api_contract_cpu.cpp).
   namespace state {
     // An observed legacy COMMON on a depth-stencil allocation is refused as
     // missing evidence, unless an equal COMMON declaration is checked against it.
@@ -92,6 +92,21 @@ namespace game3d_contract::known_gaps {
     {"D3b", &rules::D3b, kind::expected_failure, &state::declared_common_on_promotable, "A COMMON declaration on a colour or linear-depth texture may already be promoted; fix together with D3 (one COMMON rule keyed by depth-stencil allocation). Update the 'typed declared COMMON was not retained' check with it."},
     {"D2", &rules::D2, kind::expected_failure, &state::resolve_destination, "Fail-safe today (refusal is harmless), lowest priority: admit RESOLVE_DEST in copy_state::supported and layouts::admissible when a game is seen to need it."},
     {"X1", &rules::X1, kind::expected_failure, &state::basis_flags_unchecked, "Illegal game input only: check the allocation flags for every copy basis in copy_state::resolve (today only the at-call UI declaration fallback does), so an impossible state never reaches a barrier."},
+  };
+
+  // Raw Streamline buffer types at each surveyed release (checked by
+  // test_game3d_api_contract_cpu.cpp).
+  namespace buffer_types {
+    // 2.2.1 already declares HiResDepth 48 and LinearDepth 49 (v2.2.1 sl.h),
+    // but the contract table gives every release below 2.4 the 2.0 range
+    // (0-37), so a 2.2.1-2.3.x game's display or linear depth is ignored.
+    constexpr bool depth_kinds_before_2_4(const buffer_case &value) {
+      return !(value.version < sl_version {2, 2, 1}) && value.version < sl_version {2, 4, 0} && (value.raw == 48 || value.raw == 49);
+    }
+  }  // namespace buffer_types
+
+  inline constexpr row<buffer_case> buffer_rows[] {
+    {"S17", &rules::S17, kind::expected_failure, &buffer_types::depth_kinds_before_2_4, "Few games pair 2.2.1-2.3.x with these tags: add a 2.2.1 tier (last type 52) to buffers::for_version, keep 37 below it, and update test_streamline_camera_probe.cpp's '2.2 contract accepted post-2.4 tags' check and the docs/reshade-sbs.md buffer-type table's 2.0-2.2 row with it."},
   };
 
   // Streamline tags. No matrix runs these cells yet; rows that touch the
