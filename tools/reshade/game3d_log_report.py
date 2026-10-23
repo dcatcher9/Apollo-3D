@@ -1665,7 +1665,11 @@ def counter_checks(c: dict[str, int], add, overrides_sampled: list[str], flatten
                   f'earned {get("trust.earned")}, revoked one way by an exact pair {get("trust.revoked_exact")}, '
                   f'revoked by a declared alpha\'s coverage {get("trust.revoked_declared")}, lapsed '
                   f'{get("trust.lapsed")}, restored {get("trust.restored")}, legacy entries discarded '
-                  f'{get("trust.discarded")}, forgotten {get("trust.forgotten")}'))
+                  f'{get("trust.discarded")}, forgotten {get("trust.forgotten")}'
+                  # Since 10-22: selective layer samples that earned nothing because their colour without coverage
+                  # outnumbered their opaque pixels (ui_selection::layer_uncovered_color).
+                  + (f'; {get("trust.uncovered_color")} selective layer samples earned nothing for colour without '
+                     'coverage (A1)' if 'trust.uncovered_color' in c else '')))
     else:
         add(Check('INFO', 'UI trust events',
                   f'earned {get("trust.earned")}, revoked by a full claim over the scene {get("trust.revoked_full")}, '

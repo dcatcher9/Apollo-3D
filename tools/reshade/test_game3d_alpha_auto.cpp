@@ -197,6 +197,96 @@ namespace {
     require(!accepts(effects, kind::ui_layer), "Fluctuating coverage was accepted");
   }
 
+  // A1: a selective layer sample whose colour without coverage outnumbers its
+  // opaque pixels (ui_selection::layer_uncovered_color, V1's comparison
+  // without its 1% allowance) earns nothing and restarts the layer's run.
+  // Battlefield 6 (10-22) earned its R8G8B8A8 layer copy, colour on nearly
+  // every pixel in gameplay, from near-black frames of 5 covered pixels, 538
+  // lit and none opaque. The logged valid selective layer samples of every
+  // other game of 10-22, and Battlefield 6's settings menu, still earn.
+  void a_layer_earns_only_where_its_colour_is_covered() {
+    namespace n = ui_counter;
+    constexpr std::uint32_t uhd = 3840u * 2160u;
+    candidate_signatures pq;
+    pq.color_space = 3;
+    pq.set(kind::ui_layer, 28).set(kind::current, 24);
+    const auto layer = pq.of(kind::ui_layer);
+    struct layer_counts {
+      std::uint32_t covered, lit, opaque;
+    };
+    // The layer beside current alpha opaque everywhere (never selective), as
+    // Battlefield 6 offered them with frame generation off.
+    const auto observe = [&](alpha_auto_policy &policy, layer_counts s, std::uint64_t tick) {
+      alpha_auto_decision::detection_evidence e;
+      e.candidates = candidate::layer | candidate::current;
+      e.alpha_covered[3] = uhd;
+      e.layer_covered = s.covered;
+      e.layer_opaque = s.opaque;
+      e.pre_ui_image_lit = s.lit;
+      e.valid_bits = candidate::layer | candidate::current;
+      policy.observe(e, uhd, tick, pq);
+    };
+    // A steady run of one sample every 100 ms over 2 s.
+    const auto earns = [&](layer_counts s) {
+      alpha_auto_policy policy;
+      for (std::uint64_t tick = 1000; tick <= 3000; tick += 100) observe(policy, s, tick);
+      return policy.accepts(layer) && policy.stored() == "ui_layer:28:pq" && !policy.counters()[n::trust_uncovered_color];
+    };
+
+    alpha_auto_policy dark;
+    for (std::uint64_t tick = 1000; tick <= 3000; tick += 100) observe(dark, {5, 538, 0}, tick);
+    require(!dark.accepts(layer) && dark.stored().empty() && !dark.counters()[n::trust_earned] &&
+        dark.counters()[n::trust_uncovered_color] == 21, "Battlefield 6's near-black scene image earned the layer");
+    // Logged samples of 10-22 (sampled_layer and sampled_pre_ui_pixels).
+    for (const auto &s : std::initializer_list<layer_counts>{
+           {418673, 258050, 70995}, {1610831, 120007, 89782}, {403192, 23678, 9548},  // The Witcher 3.
+           {201870, 101416, 26559}, {58191, 16243, 4165},  // Stellar Blade.
+           {12353, 7017, 3204},  // Resident Evil Requiem.
+           {1493825, 943304, 850848}, {1494369, 1313871, 553160},  // Assassin's Creed Shadows.
+           {6220800, 6220800, 6220800},  // Battlefield 6's settings menu.
+           // Without a pre-UI threshold (a float layer on a PQ swap chain) lit
+           // is zero: no evidence, so no refusal (Assassin's Creed Shadows).
+           {100, 0, 0}, {5, 0, 0},
+           // V1 admits an additive glow beside an opaque HUD: a 2.0% glow
+           // beside 2.7% opaque UI, all lit.
+           {224000, 390000, 224000}})
+      require(earns(s), "A logged UI layer sample, or a glow beside an opaque HUD, no longer earns");
+    // Below V1's 1% allowance the same comparison holds: colour without
+    // coverage on more pixels than the opaque ones refuses.
+    require(!earns({20000, 40000, 10000}) && earns({20000, 30000, 10000}),
+      "Colour without coverage below 1% of the frame was not judged against the opaque pixels");
+
+    // A refused sample restarts the run.
+    alpha_auto_policy restart;
+    observe(restart, {300, 200, 50}, 1000);
+    observe(restart, {300, 200, 50}, 2000);
+    observe(restart, {300, 600, 0}, 2500);
+    observe(restart, {300, 200, 50}, 3000);
+    require(!restart.accepts(layer) && restart.counters()[n::trust_uncovered_color] == 1,
+      "A sample of colour without coverage did not restart the layer's run");
+    observe(restart, {300, 200, 50}, 4000);
+    observe(restart, {300, 200, 50}, 5000);
+    require(restart.accepts(layer), "The restarted run did not earn the layer");
+
+    // A3: a refused sample is testable, so an acceptance restored from an
+    // earlier session lapses after 60 s of them (Battlefield 6's remembered
+    // ui_layer:28:pq), while a menu that earns it confirms it.
+    alpha_auto_policy restored;
+    require(restored.restore("ui_layer:28:pq").restored == 1 && restored.accepts(layer), "The layer was not restored");
+    std::uint64_t tick = 1000;
+    for (; tick < 1000 + alpha_trust_reconfirm_ms; tick += 100) observe(restored, {5, 538, 0}, tick);
+    require(restored.accepts(layer), "A restored layer lapsed before 60 s of testable time");
+    observe(restored, {5, 538, 0}, tick);
+    require(!restored.accepts(layer) && restored.stored().empty() && restored.counters()[n::trust_lapsed] == 1,
+      "A restored layer kept by colour without coverage did not lapse");
+    alpha_auto_policy menu;
+    menu.restore("ui_layer:28:pq");
+    for (tick = 1000; tick <= 3000; tick += 100) observe(menu, {6220800, 6220800, 6220800}, tick);
+    for (; tick <= 200000; tick += 100) observe(menu, {5, 538, 0}, tick);
+    require(menu.accepts(layer) && menu.counters()[n::trust_earned] == 1 && !menu.counters()[n::trust_lapsed],
+      "A menu did not confirm the restored layer, or a confirmed layer lapsed");
+  }
+
   // A1 void: while an offered declared alpha is V1-invalid, the earning of
   // Backbuffer and current alpha, whose declared-coverage judge is missing,
   // neither advances nor restarts (Resident Evil Requiem's rejected-tag
@@ -1337,6 +1427,7 @@ namespace {
     c[n::none + ui_no_mask::unaccepted] = 2;
     c[n::depth_not_current] = 1; c[n::full_d_hidden] = 1; c[n::inexact_difference] = 3; c[n::trust_earned] = 1;
     c[n::trust_discarded] = 2; c[n::trust_revoked_exact] = 1; c[n::trust_forgotten] = 3; c[n::contradicted] = 2;
+    c[n::trust_uncovered_color] = 5;
     c[n::full_alpha] = 2;
     c[n::scene_entered] = 1; c[n::scene_released] = 1; c[n::scene_refuted] = 2;
     c[n::samples] = 4; c.through_ms = 12345;
@@ -1352,7 +1443,7 @@ namespace {
         "none={layer_aside=0 trusted_invalid=0 presented_blocked=0 ambiguous=0 difference_failed=1 gate_no_hold=1 "
         "no_candidate=0 other=0 unaccepted=2} full={6=1 8=0 depth_not_current=1} full_d={hidden=1 ambiguous=0 visible=0 invalid=0} "
         "scene={entered=1 released=1 refuted=2} inexact_difference=3 contradicted=2 full_alpha=2 trust={earned=1 revoked_exact=1 "
-        "revoked_declared=0 lapsed=0 restored=0 discarded=2 forgotten=3} samples=4 through_ms=12345",
+        "revoked_declared=0 lapsed=0 restored=0 discarded=2 forgotten=3 uncovered_color=5} samples=4 through_ms=12345",
       "The UI counters log text changed");
     ++c[n::auto_frames];
     require(!c.reconciled(), "An unaccounted frame reconciled");
@@ -1528,6 +1619,7 @@ int main() {
     mode_is_auto_until_a_manual_edit_and_auto_again_after_it();
     declared_sources_are_accepted_by_one_selective_sample();
     inferred_sources_need_a_steady_run();
+    a_layer_earns_only_where_its_colour_is_covered();
     an_invalid_declared_alpha_voids_earning();
     acceptance_is_per_signature();
     restore_is_provisional_and_legacy_entries_are_discarded();
@@ -1542,7 +1634,7 @@ int main() {
     pre_ui_proof_is_earned_by_pixels();
     ui_counters_are_formatted_and_trust_events_counted();
     sample_decode_and_commit_are_shared();
-    std::puts("Source alpha session: 17 policy groups passed");
+    std::puts("Source alpha session: 18 policy groups passed");
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "Source alpha session failed: %s\n", error.what());

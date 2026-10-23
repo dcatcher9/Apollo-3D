@@ -276,6 +276,26 @@ namespace sunshine_game3d::ui_selection {
   }
   static_assert(pre_ui_match(90u, 50u, 100u) && !pre_ui_match(89u, 100u, 100u) && !pre_ui_match(100u, 49u, 100u) &&
     !pre_ui_match(0u, 0u, 0u));
+  // A1, an offscreen layer's earning sample: its colour without coverage
+  // outnumbers its opaque pixels. That is V1's comparison of the pixels beyond
+  // the premultiplied bound with the opaque ones, without V1's allowance of 1%
+  // of the frame (which keeps a decision through an additive glow beside the
+  // UI). lit is the layer's lit pixels (texel 11: colour above 8 times its
+  // pair threshold with the presented frame, more than the 4/255 the bound
+  // allows at zero alpha), so a lit pixel within the bound is covered, and at
+  // least lit - covered pixels lie beyond it (or, in a float layer, carry
+  // negative colour or alpha out of range: no UI either). A sample that
+  // passes V1's comparison passes this one, which refuses only what the
+  // allowance admitted, such as near-black frames of a scene image in the
+  // cleared target (Battlefield 6: 5 covered pixels, 538 lit, none opaque).
+  // Without a pre-UI threshold (a layer not comparable with the presented
+  // colour) lit is zero and nothing is refused.
+  constexpr bool layer_uncovered_color(std::uint32_t lit, std::uint32_t covered, std::uint32_t opaque) {
+    return lit > covered && lit - covered > opaque;
+  }
+  static_assert(layer_uncovered_color(538u, 5u, 0u) && !layer_uncovered_color(6220800u, 6220800u, 6220800u) &&
+    !layer_uncovered_color(258050u, 418673u, 70995u) && !layer_uncovered_color(0u, 5u, 0u) &&
+    !layer_uncovered_color(47u, 27u, 20u) && layer_uncovered_color(48u, 27u, 20u));
   // V2, a partial change set: changed pixels within broad unchanged scene
   // evidence in clean tiles (decides as source 5).
   constexpr bool change_set_selective(const counts &c) {

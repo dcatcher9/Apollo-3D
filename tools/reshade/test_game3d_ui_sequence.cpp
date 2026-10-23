@@ -3283,6 +3283,41 @@ namespace {
       check_counters(s, "void earning");
     }
     {
+      // Battlefield 6 (10-22): the copy of its R8G8B8A8 target cleared to
+      // transparent black holds a scene image. Its near-black frames are
+      // valid and selective (5 covered pixels of 3840x2160: colour beyond the
+      // premultiplied bound stays inside V1's 1% allowance) yet lit on 538
+      // pixels with none opaque. Colour without coverage outnumbers its
+      // opaque pixels, so they never earn the layer (A1) and it never
+      // decides; its settings menu, an opaque panel on 75% of the frame lit
+      // only there, earns it.
+      constexpr std::uint32_t uhd = 3840u * 2160u;
+      alpha_auto_policy session;
+      sequence s(session, phased({{20000, [](const gpu_inputs &in) {
+        synthetic f;
+        f.c.pixels = uhd;
+        f.alpha(kind::ui_layer, 5).alpha(kind::current, uhd).pre_ui_pixels(524729, 538);
+        return f.words(in);
+      }}, {30000, [](const gpu_inputs &in) {
+        synthetic f;
+        f.c.pixels = uhd;
+        f.alpha(kind::ui_layer, 6220800).opaque(kind::ui_layer, 6220800).alpha(kind::current, uhd).pre_ui_pixels(89541, 6220800);
+        return f.words(in);
+      }}}));
+      present p;
+      p.offered = candidate::layer | candidate::current;
+      p.layer_flags = ui_detection::layer_detection_flags(false);
+      p.signatures = signatures_in(pq);
+      run(s, p, 10000, 20000);
+      require(session.stored().empty() && !session.counters()[ui_counter::trust_earned] && session.counters()[ui_counter::trust_uncovered_color] != 0, "Battlefield 6's near-black scene image earned the layer");
+      for (const auto &f : s.frames) {
+        require(!f.source, "Battlefield 6's unaccepted layer decided");
+      }
+      run(s, p, 20000, 30000);
+      require(session.stored() == key(kind::ui_layer, pq), "Battlefield 6's settings menu did not earn the layer");
+      check_counters(s, "Battlefield 6 layer");
+    }
+    {
       // A restored tag and presented alpha, the tag invalid in every other
       // half second: the accepted declared tag blocks the presented alpha
       // (S1), so it never decides, whether the tag is valid (the tag decides)
@@ -3947,13 +3982,15 @@ namespace {
       check_counters(s, "black frames over a transparent layer");
     }
     {
-      // A layer with coverage (a selective HUD), equal to the presented frame
-      // elsewhere: its own run accepts it as UI coverage (A1); it is never
-      // the pre-UI scene image.
+      // A layer with coverage (an opaque panel on 60% of the frame, lit only
+      // where covered), equal to the presented frame (black elsewhere) and lit
+      // on more than half of it: its own run accepts it as UI coverage (A1);
+      // it is never the pre-UI scene image. A layer lit where it has no
+      // coverage is not UI coverage either (layer_uncovered_color).
       alpha_auto_policy session;
       sequence s(session, [](const gpu_inputs &in) {
         synthetic f;
-        f.alpha(kind::ui_layer, 50).alpha(kind::current, 1000).opaque(kind::current, 1000).pre_ui_pixels(990, 900);
+        f.alpha(kind::ui_layer, 600).opaque(kind::ui_layer, 600).alpha(kind::current, 1000).opaque(kind::current, 1000).pre_ui_pixels(990, 600);
         return f.words(in);
       });
       run(s, sb_sdr_present(candidate::layer | candidate::current), 10000, 14000);

@@ -260,7 +260,11 @@ namespace sunshine_game3d {
     // 90%) sample, or a gap of more than alpha_trust_span_ms since the run's
     // last selective sample, restarts the run, while empty samples within
     // that bound stay neutral. Alpha with more than 1% invalid pixels (V1,
-    // the GPU's valid bits) is no evidence. A sample in which an offered
+    // the GPU's valid bits) is no evidence, and a selective layer sample
+    // whose colour without coverage outnumbers its opaque pixels
+    // (ui_selection::layer_uncovered_color: V1's comparison without its 1%
+    // allowance) earns nothing and restarts the layer's run, as a full sample
+    // does; it is testable (A3). A sample in which an offered
     // declared alpha is V1-invalid is void for Backbuffer and current alpha,
     // the kinds whose declared-coverage judge it lacks: their runs neither
     // advance nor restart, and it is not testable for them (Resident Evil
@@ -597,7 +601,14 @@ namespace sunshine_game3d {
             continue;
           }
         }
-        if (ui_selection::selective(covered, pixels)) {
+        if (k == kind::ui_layer && ui_selection::selective(covered, pixels) &&
+            ui_selection::layer_uncovered_color(evidence.pre_ui_image_lit, covered, evidence.layer_opaque)) {
+          // A layer whose colour without coverage outnumbers its opaque
+          // pixels is a scene image in the cleared target, not UI: it earns
+          // nothing and restarts the run, as a full sample does.
+          e.earned = {};
+          ++counters_[ui_counter::trust_uncovered_color];
+        } else if (ui_selection::selective(covered, pixels)) {
           // An inferred run is consecutive and bounded: a selective sample
           // more than alpha_trust_span_ms after the run's last one restarts it.
           // A declared alpha the one-way test revoked earns again only from a

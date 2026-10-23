@@ -161,11 +161,15 @@ S2B_COUNTER_GROUPS = tuple(
     group for key, inner in COUNTER_GROUPS
     for group in ((key, tuple(k for k in inner if k != '9') if key in ('decided', 'full') else inner),)
     + ((('scene', ('entered', 'released', 'refuted')),) if key == 'full_d' else ()))
-# The same after dc7e3c77 (format_ui_counters today): without the counters that only ever logged 0 there
-# (untrusted_inferred, presented_over_dedicated and full_alpha_d).
+# The same after dc7e3c77: without the counters that only ever logged 0 there (untrusted_inferred,
+# presented_over_dedicated and full_alpha_d).
 CURRENT_COUNTER_GROUPS = tuple(
     (key, inner) for key, inner in S2B_COUNTER_GROUPS
     if key not in ('untrusted_inferred', 'presented_over_dedicated', 'full_alpha_d'))
+# The same since 10-22 (format_ui_counters today): trust adds uncovered_color, the selective layer samples that
+# earned nothing for colour without coverage.
+UNCOVERED_COUNTER_GROUPS = tuple(
+    (key, inner + ('uncovered_color',) if key == 'trust' else inner) for key, inner in CURRENT_COUNTER_GROUPS)
 # The same since fix 2: decided adds 11 (H2's still screen), and H2's group follows the scene guard's.
 FIX2_COUNTER_GROUPS = tuple(
     group for key, inner in S2B_COUNTER_GROUPS
@@ -1332,6 +1336,14 @@ class ReadinessReport(unittest.TestCase):
         self.assertNotIn('UI first-run shadow', run(lines))
         checks = run(BASE + [counters('10:00:12', {**CLEAN_COUNTERS, 'trust.forgotten': 2})])
         self.assertTrue(checks['UI trust events'].detail.endswith('forgotten 2'))
+        # Since 10-22 the line counts the selective layer samples refused for colour without coverage (A1).
+        uncovered = {**CLEAN_COUNTERS, 'trust.forgotten': 2, 'trust.uncovered_color': 21}
+        text = report.COUNTERS.search(counters('10:00:12', uncovered, groups=UNCOVERED_COUNTER_GROUPS)).group(1)
+        self.assertEqual(report.counter_fields(text)['trust.uncovered_color'], 21)
+        checks = run(BASE + [counters('10:00:12', uncovered, groups=UNCOVERED_COUNTER_GROUPS)])
+        self.assertTrue(checks['UI trust events'].detail.endswith(
+            'forgotten 2; 21 selective layer samples earned nothing for colour without coverage (A1)'))
+        self.assertEqual(checks['UI counters'].status, 'PASS')
 
     def test_counted_full_frame_over_a_visible_scene_warns(self):
         full = {**CLEAN_COUNTERS, 'decided.10': 50, 'decided.8': 10, 'full_d.hidden': 3}
