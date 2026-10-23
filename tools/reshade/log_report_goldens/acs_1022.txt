@@ -44,3 +44,4 @@ Game 3D readiness: ACShadows.exe  21:58:54 to 22:01:51 (2m56s, ended without exi
 [INFO] Host video memory: host local usage peaked at 1878 MiB; its headroom was as low as 2668 MiB (1236/3904 MiB at 22:00:01)
 [WARN] Session: the log ends without ReShade exiting or tearing its runtimes down
 Overall: FAIL (1 fail, 6 warn)
+Exit code: 1

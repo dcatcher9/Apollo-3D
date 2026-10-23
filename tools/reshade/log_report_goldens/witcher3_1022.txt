@@ -32,3 +32,4 @@ Game 3D readiness: witcher3.exe  14:45:27 to 14:48:43 (3m15s, exited (the proces
 [PASS] Host link: ReShade SBS connected 1 time(s)
 [PASS] Encoder stalls: none
 Overall: PASS (0 fail, 0 warn)
+Exit code: 0

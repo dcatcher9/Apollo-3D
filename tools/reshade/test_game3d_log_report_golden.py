@@ -2,8 +2,9 @@
 """Golden outputs of game3d_log_report over saved first-launch logs of real games.
 
 Each fixture in log_report_goldens/manifest.json is a game's scrubbed ReShade.log, with the host log of its session
-when it was saved, made by scrub_game3d_log.py. Its golden is the report's exact output on it. A report change that
-moves a golden fails here; when the change is intended, rewrite the goldens and review their diff:
+when it was saved, made by scrub_game3d_log.py. Its golden is the report's exact output on it and then its exit code.
+A report change that moves a golden fails here; when the change is intended, rewrite the goldens and review their
+diff:
 
     python tools/reshade/test_game3d_log_report_golden.py --update
 """
@@ -33,9 +34,9 @@ def logs(fixture):
     return scrub.GOLDENS / f'{fixture["name"]}.ReShade.log.gz', host if fixture['host_log'] else None
 
 
-def run_report(fixture, directory: Path) -> tuple[str, int]:
-    """The report's output and exit code on the fixture, from a ReShade.log with the saved log's modification time
-    (the report dates the host log and tells a running game from it)."""
+def run_report(fixture, directory: Path) -> str:
+    """The report's output on the fixture and then its exit code, from a ReShade.log with the saved log's modification
+    time (the report dates the host log and tells a running game from it)."""
     game, host = logs(fixture)
     log = directory / 'ReShade.log'
     log.write_bytes(gzip.decompress(game.read_bytes()))
@@ -48,7 +49,7 @@ def run_report(fixture, directory: Path) -> tuple[str, int]:
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
         code = report.main(argv)
-    return output.getvalue(), code
+    return f'{output.getvalue()}Exit code: {code}\n'
 
 
 class GoldenReports(unittest.TestCase):
@@ -62,8 +63,7 @@ class GoldenReports(unittest.TestCase):
         for fixture in self.fixtures:
             golden = scrub.GOLDENS / f'{fixture["name"]}.txt'
             with self.subTest(fixture['name'], game=fixture['game']), TemporaryDirectory() as directory:
-                text, code = run_report(fixture, Path(directory))
-                self.assertEqual(code, 1 if '\nOverall: FAIL' in text else 0)
+                text = run_report(fixture, Path(directory))
                 if UPDATE:
                     golden.write_text(text, encoding='utf-8')
                     continue

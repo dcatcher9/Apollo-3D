@@ -36,3 +36,4 @@ Game 3D readiness: re9.exe  14:49:27 to 14:51:27 (2m00s, exited (the process end
 [PASS] Host link: ReShade SBS connected 2 time(s)
 [PASS] Encoder stalls: none
 Overall: PASS (0 fail, 0 warn)
+Exit code: 0

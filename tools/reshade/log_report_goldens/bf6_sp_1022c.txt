@@ -58,3 +58,4 @@ Game 3D readiness: bf6.exe  21:21:59 to 21:26:51 (4m51s, ended without exiting (
 [INFO] Host video memory: host local usage peaked at 1751 MiB; its headroom was as low as 1279 MiB (1364/2643 MiB at 21:26:01)
 [WARN] Session: the log ends without ReShade exiting or tearing its runtimes down
 Overall: WARN (0 fail, 8 warn)
+Exit code: 0

@@ -38,3 +38,4 @@ Game 3D readiness: SB-Win64-Shipping.exe  14:41:20 to 14:43:28 (2m08s, exited)
 [PASS] Host link: ReShade SBS connected 3 time(s)
 [PASS] Encoder stalls: none
 Overall: WARN (0 fail, 1 warn)
+Exit code: 0

@@ -34,3 +34,4 @@ Game 3D readiness: Dead Space.exe  22:51:05 to 22:52:13 (1m07s, exited)
          22:51:11 WARN Successfully compiled '<GAME>\reshade-shaders\Shaders\SweetFX\Nostalgia.fx' in 0.042000 s with warnings: (4 such lines)
          22:52:12 WARN Add-ons are still loaded! Application may crash on exit.
 Overall: WARN (0 fail, 3 warn)
+Exit code: 0

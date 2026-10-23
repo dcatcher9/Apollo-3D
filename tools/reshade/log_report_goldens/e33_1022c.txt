@@ -37,3 +37,4 @@ Game 3D readiness: SandFall-Win64-Shipping.exe  15:42:55 to 15:44:17 (1m21s, exi
 [PASS] Encoder stalls: none
 [INFO] Host video memory: host local usage peaked at 1364 MiB; its headroom was as low as 2552 MiB (1236/3788 MiB at 15:43:45)
 Overall: WARN (0 fail, 1 warn)
+Exit code: 0

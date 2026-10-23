@@ -35,3 +35,4 @@ Game 3D readiness: bf6.exe  21:09:45 to 21:10:06 (0m20s, exited)
 [PASS] Encoder stalls: none
 [INFO] Host video memory: host local usage peaked at 1442 MiB; its headroom was as low as 1899 MiB (1442/3341 MiB at 21:10:33)
 Overall: FAIL (1 fail, 0 warn)
+Exit code: 1

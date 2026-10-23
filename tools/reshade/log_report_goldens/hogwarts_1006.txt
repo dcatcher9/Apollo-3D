@@ -40,3 +40,4 @@ Game 3D readiness: HogwartsLegacy.exe  23:00:56 to 23:02:56 (1m59s, exited)
          23:02:37 WARN Reference count for ID3D11Device5 object 00000002194EF1F0 (0000000207707C00) is inconsistent (2).
          23:02:55 WARN Add-ons are still loaded! Application may crash on exit.
 Overall: WARN (0 fail, 1 warn)
+Exit code: 0

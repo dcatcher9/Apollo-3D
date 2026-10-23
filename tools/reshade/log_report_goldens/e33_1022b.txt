@@ -42,3 +42,4 @@ Game 3D readiness: SandFall-Win64-Shipping.exe  14:35:02 to 14:37:04 (2m02s, exi
          14:35:58 upstream GPU 229 ms
          14:36:30 upstream GPU 341 ms at FG off 14:36:30
 Overall: WARN (0 fail, 1 warn)
+Exit code: 0
