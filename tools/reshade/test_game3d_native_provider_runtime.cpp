@@ -202,8 +202,9 @@ namespace {
     // process as its consumer, nonce naming the scenario: request() asks the
     // loaded add-on for one dump while the scenario keeps presenting and
     // returns its metadata. The response stays valid until release(), the
-    // next request or the mailbox's end. (The UI hook scenarios above keep
-    // their own copies of this protocol.)
+    // next request or the mailbox's end. (The UI hook scenarios below keep
+    // their own copies of this protocol, unchanged so that those scenarios
+    // stay as they were validated.)
     struct dump_mailbox {
       native_provider_fixture &fixture;
       HANDLE handle{};
@@ -1661,6 +1662,17 @@ namespace {
       sunshine_streamline::abi_v2::evaluate_feature evaluate{};
       set_options_t volatile set_options{};
     } sl;
+    // Binds sl to the SDK's public entry points (slSetTagForFrame may be
+    // absent) and returns its slGetFeatureFunction, which fetches the options.
+    sunshine_streamline::abi_v2::get_feature_function bind_streamline(HMODULE sdk) {
+      using namespace sunshine_streamline;
+      sl.new_token = reinterpret_cast<abi_v2::get_new_frame_token>(GetProcAddress(sdk, "slGetNewFrameToken"));
+      sl.constants = reinterpret_cast<abi_v2::set_constants>(GetProcAddress(sdk, "slSetConstants"));
+      sl.frame_tag = reinterpret_cast<abi_v2::set_tag_for_frame>(GetProcAddress(sdk, "slSetTagForFrame"));
+      sl.global_tag = reinterpret_cast<abi_v2::set_tag>(GetProcAddress(sdk, "slSetTag"));
+      sl.evaluate = reinterpret_cast<abi_v2::evaluate_feature>(GetProcAddress(sdk, "slEvaluateFeature"));
+      return reinterpret_cast<abi_v2::get_feature_function>(GetProcAddress(sdk, "slGetFeatureFunction"));
+    }
     void (*set_foreground)(HWND){};
     const sunshine_streamline::abi_v2::viewport fg_viewport{{nullptr, sunshine_streamline::viewport_guid, 1}, 0};
     // The newest FG frame's explicit index and token, and when its depth tag
@@ -1837,12 +1849,7 @@ namespace {
       // The export stop at a focus loss ends FG reuse once. This selects our
       // real hidden game HWND in the test observer without moving UI focus.
       set_foreground(window);
-      const auto getter = reinterpret_cast<abi_v2::get_feature_function>(GetProcAddress(sdk, "slGetFeatureFunction"));
-      sl.new_token = reinterpret_cast<abi_v2::get_new_frame_token>(GetProcAddress(sdk, "slGetNewFrameToken"));
-      sl.constants = reinterpret_cast<abi_v2::set_constants>(GetProcAddress(sdk, "slSetConstants"));
-      sl.frame_tag = reinterpret_cast<abi_v2::set_tag_for_frame>(GetProcAddress(sdk, "slSetTagForFrame"));
-      sl.global_tag = reinterpret_cast<abi_v2::set_tag>(GetProcAddress(sdk, "slSetTag"));
-      sl.evaluate = reinterpret_cast<abi_v2::evaluate_feature>(GetProcAddress(sdk, "slEvaluateFeature"));
+      const auto getter = bind_streamline(sdk);
       require(getter && sl.new_token && sl.constants && sl.global_tag && sl.evaluate, "FG metadata fixture lacks public SL exports");
       std::printf("MEASURE SL SDK capability frame_tags=%u; using %s tags\n", unsigned(sl.frame_tag != nullptr), sl.frame_tag ? "frame" : "global");
       void *function{};

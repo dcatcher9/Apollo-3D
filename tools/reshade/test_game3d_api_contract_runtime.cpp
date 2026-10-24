@@ -985,12 +985,7 @@ namespace {
       require(nominated, "Create the nomination gate event");
       streamline = sdk != nullptr;
       if (streamline) {
-        const auto getter = reinterpret_cast<abi_v2::get_feature_function>(GetProcAddress(sdk, "slGetFeatureFunction"));
-        sl.new_token = reinterpret_cast<abi_v2::get_new_frame_token>(GetProcAddress(sdk, "slGetNewFrameToken"));
-        sl.constants = reinterpret_cast<abi_v2::set_constants>(GetProcAddress(sdk, "slSetConstants"));
-        sl.frame_tag = reinterpret_cast<abi_v2::set_tag_for_frame>(GetProcAddress(sdk, "slSetTagForFrame"));
-        sl.global_tag = reinterpret_cast<abi_v2::set_tag>(GetProcAddress(sdk, "slSetTag"));
-        sl.evaluate = reinterpret_cast<abi_v2::evaluate_feature>(GetProcAddress(sdk, "slEvaluateFeature"));
+        const auto getter = bind_streamline(sdk);
         set_results = reinterpret_cast<results_t>(GetProcAddress(sdk, "SunshineFixtureSetResults"));
         require(getter && sl.new_token && sl.constants && sl.global_tag && sl.evaluate && set_results, "Contract interposer lacks public SL exports or settable results");
         require(!(version < matrix::first_frame_tag) == (sl.frame_tag != nullptr), "Contract interposer's frame-tag export differs from its release");
