@@ -892,7 +892,7 @@ namespace sunshine_streamline {
       // SDK call was in flight. A concurrent new On may lose one capture;
       // a fresh tag restores it without resurrecting pre-loss pixels.
       if (retired_epoch) depth_capture::retire_source(sunshine_scene_depth::provider_kind::streamline,
-        retired_epoch, (1ull << 63) | id);
+        retired_epoch, sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(id)));
       // Only an actual FG-mode/knowledge transition revokes UI scope. Games
       // can call unsupported Off options after every successful HUDless tag;
       // repeated failure is not a new failure of those independent input tags.
@@ -1713,7 +1713,8 @@ namespace sunshine_streamline {
       value.source_frame_explicit = snapshot.frame.kind != frame_identity_kind::unavailable &&
         (!snapshot.tag_boundary || tag.scope == tag_scope::explicit_frame);
       value.frame_generation_input = snapshot.frame_generation_input;
-      value.source_id = snapshot.frame_generation_input ? (1ull << 63) | snapshot.viewport : 0;
+      value.source_id = snapshot.frame_generation_input ?
+        sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(snapshot.viewport)) : 0;
       const bool valid = (snapshot.status == evidence_status::source_associated_evaluation ||
           snapshot.status == evidence_status::camera_reset) &&
         snapshot.projection.valid() && snapshot.camera.reset <= 1 && tag.present && tag.supported &&
@@ -1858,15 +1859,16 @@ namespace sunshine_streamline {
       // FG scope is silent, replaces that viewport's FG observation; an FG
       // nomination replaces its ordinary one (source 0).
       const bool fg_silent = route == fg_route::silent;
+      const auto fg_source = sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(snapshot.viewport));
       const auto superseded = snapshot.frame_generation_input ? 0 :
-        snapshot.tag_boundary || fg_silent ? (1ull << 63) | snapshot.viewport : UINT64_MAX;
+        snapshot.tag_boundary || fg_silent ? fg_source : UINT64_MAX;
       // A silent FG scope has no FG capture to revoke: its refused boundaries
       // leave the ordinary source of the viewport in place.
       const bool withdraws = !(snapshot.frame_generation_input && fg_silent);
       const auto withdraw_invalid_attempt = [&] {
         if (!withdraws) return;
         depth_capture::begin_evaluation(snapshot.epoch, snapshot.sequence, snapshot.viewport,
-          sunshine_scene_depth::provider_kind::streamline, snapshot.frame_generation_input ? (1ull << 63) | snapshot.viewport : 0,
+          sunshine_scene_depth::provider_kind::streamline, snapshot.frame_generation_input ? fg_source : 0,
           superseded);
       };
       // Pixels already copied stay bounded by the source age and the consumed
@@ -2054,7 +2056,7 @@ namespace sunshine_streamline {
       depth_capture::input input;
       input.epoch = source_epoch; input.sequence = out.serial; input.tick = out.tick;
       input.viewport = out.viewport; input.observation_revision = out.loss;
-      input.source_id = (1ull << 63) | out.viewport;
+      input.source_id = sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(out.viewport));
       input.frame_generation_input = fg_enabled;
       input.source_frame_generation = out.frame.generation;
       input.source_frame_token = tag.token;
@@ -3084,7 +3086,7 @@ namespace sunshine_streamline {
     // request's newest boundary compare it with tag sequences).
     const auto serial = ++call_sequence;
     const auto tick = GetTickCount64();
-    const auto source_id = (1ull << 63) | fg.viewport;
+    const auto source_id = sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(fg.viewport));
     if (out.depth == depth_outcome::not_offered) {
       if (!value.depth.area_valid) out.depth = depth_outcome::subrect;
       else if (!source_requested.load(std::memory_order_acquire) || !depth_capture::active()) out.depth = depth_outcome::inactive;

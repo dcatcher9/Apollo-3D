@@ -587,11 +587,12 @@ says what each depth rung and UI candidate did, and why. Its rows are the depth 
 scope's own depth: a Streamline FG tag or DLSS-G's evaluation), D2 (scene depth: Streamline or
 NGX SR/RR), H (API ownership kept in mono) and D3 (Generic), then the UI candidates (UIAlpha, the
 UI color tag, Backbuffer, HUD-less, the UI layer and the presented color). Each row has a key (API,
-viewport and logical source; an FG scope is named by its row and viewport), a state (`inactive`,
-`absent`, `refused`, `pending`, `ready`, `held` or `mono`), a reason (a static token, mostly the
-matching log, cache or enum name), an epoch, the row the Present fell back to, and when that key
-and epoch were first ready. `depth_owner` names the rung that decided the Present's depth: D1 or
-D2 with fresh or held pixels, H in mono under API ownership, or D3 when the Generic selector ran.
+viewport and logical source, as a depth source's `source_key` names them; an FG scope is named by
+its row and viewport), a state (`inactive`, `absent`, `refused`, `pending`, `ready`, `held` or
+`mono`), a reason (a static token, mostly the matching log, cache or enum name), an epoch, the row
+the Present fell back to, and when that key and epoch were first ready. `depth_owner` names the
+rung that decided the Present's depth: D1 or D2 with fresh or held pixels, H in mono under API
+ownership, or D3 when the Generic selector ran.
 
 The present thread writes the record where the decisions are made: the API provider's `begin`
 writes D1, D2 and H from its acquisition, FG scope, association, handoff and display decision
@@ -3826,7 +3827,7 @@ the void-pointer getter, `DLSSG.DepthInverted` and `DLSSG.DepthSubrectBaseX`/`Ba
 (every key absent or all four zero is the whole allocation; a partial or malformed rectangle
 refuses the copy as `subrect`). Its scope is the one viewport whose FG options were observed enabled
 in the current observation epoch; the evaluation takes one fresh observation sequence, ordered with
-every Streamline call. The depth becomes that viewport's FG source (`(1 << 63) | viewport`,
+every Streamline call. The depth becomes that viewport's FG source (`fg_depth_key(viewport)`,
 `frame_generation_input`) only through a copy recorded on the evaluation's own command list in a
 state observed on that recording (`state_proof::observed_nonzero`: no API states the resource's
 state at this call, so none is assumed), with no metadata-only nomination (`pixels_required`). Its
@@ -4121,7 +4122,11 @@ None of these fixtures establishes a real game's FG intermediate-color correspon
 
 Version-specific adapters translate to one plain scene-depth contract: provider and logical source
 identity, optional validated projection, depth direction, resource extent, optional state hints and
-capture lifetime. The capture owner resolves missing hints from its actual observed command state;
+capture lifetime. The identity is a `source_key`
+([`scene_depth_source.h`](../tools/reshade/scene_depth_source.h)): the role the source plays (FG
+depth, scene depth or Generic), the API that reports it, its viewport and its id within them. A
+frame, the logs and Dump 3D packages carry its legacy `source_id` encoding, which is unchanged.
+The capture owner resolves missing hints from its actual observed command state;
 an adapter need not claim that a usable state was observed. A future AMD adapter should emit this
 same contract; no AMD integration is implemented. The shared scale controller consumes admitted
 frames and immutable samples, independently of source-selection and allocation decisions.

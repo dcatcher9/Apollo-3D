@@ -12,6 +12,52 @@ namespace sunshine_scene_depth {
   // generation can present while two real frames are still in flight.
   inline constexpr std::uint64_t maximum_source_age_ms = 250;
   enum class provider_kind { streamline, ngx };
+  // The API that reports a source. Depth sources come from Streamline, NGX
+  // and Generic; the frame record's UI rows (game3d_frame_record.h) also
+  // name the UI layer and the Present's own color. A later API (FFX, XeSS)
+  // reports an existing role; it is not a new role.
+  enum class source_api : std::uint8_t { none, streamline, ngx, generic, ui_layer, present };
+  // What a depth source is, whichever API reports it: a frame-generation
+  // input (one per viewport), scene (upscaler) depth, or the Generic
+  // depth-stencil choice. The frame record's rungs D1, D2 and D3.
+  enum class source_role : std::uint8_t { fg_depth, scene_depth, generic };
+  // One logical depth source, independent of rotating resources.
+  struct source_key {
+    source_role role{source_role::scene_depth};
+    source_api api{source_api::none};
+    std::uint32_t viewport{};
+    // The source within its role, API and viewport: NGX's feature
+    // generation, Generic's resource identity; 0 for Streamline scene depth
+    // and FG depth.
+    std::uint64_t id{};
+  };
+  constexpr bool operator==(const source_key &a, const source_key &b) {
+    return a.role == b.role && a.api == b.api && a.viewport == b.viewport && a.id == b.id;
+  }
+  constexpr bool operator!=(const source_key &a, const source_key &b) { return !(a == b); }
+  // The API of a frame's provider.
+  constexpr source_api reporting_api(provider_kind provider) {
+    return provider == provider_kind::ngx ? source_api::ngx : source_api::streamline;
+  }
+  // A viewport's FG depth. Streamline's FG options scope it; DLSS-G's own
+  // NGX evaluation supplies the same source.
+  constexpr source_key fg_depth_key(std::uint32_t viewport) {
+    return {source_role::fg_depth, source_api::streamline, viewport};
+  }
+  // frame::source_id, the legacy value that logs and Dump 3D packages carry,
+  // unchanged: FG depth is (1 << 63) | viewport, any other key its id. A
+  // value names one source only together with its provider and viewport.
+  constexpr std::uint64_t encode_source_id(const source_key &key) {
+    return key.role == source_role::fg_depth ? (std::uint64_t{1} << 63) | key.viewport : key.id;
+  }
+  // The key of a frame's provider, viewport and source_id, which re-encodes
+  // to that source_id. It inverts encode_source_id for every key a frame
+  // carries; a frame is never Generic's.
+  constexpr source_key decode_source_id(provider_kind provider, std::uint32_t viewport, std::uint64_t id) {
+    if (provider == provider_kind::streamline && id == encode_source_id(fg_depth_key(viewport)))
+      return fg_depth_key(viewport);
+    return {source_role::scene_depth, reporting_api(provider), viewport, id};
+  }
   enum class resource_kind { raw_depth, display_depth };
   // declared: the caller stated this resource's state for this call.
   // observed_nonzero: only a state observed on the recording is acceptable.
@@ -67,18 +113,20 @@ namespace sunshine_scene_depth {
     state_proof proof{state_proof::unavailable};
     lifetime valid_until{lifetime::unsupported};
     provider_kind provider{provider_kind::streamline};
-    // Stable logical feature generation, independent of rotating resources.
-    // Streamline SR uses viewport/epoch with zero here; FG uses its own
-    // viewport-scoped identity so disabling FG can release only that source.
+    // The source's key, encoded (encode_source_id). Streamline SR is zero
+    // here (its viewport and epoch name it); FG is fg_depth_key(viewport), so
+    // disabling FG can release only that source; NGX is its feature generation.
     std::uint64_t source_id{};
     // Middleware identity only; never a native Present number. Explicit frame
     // tags/markers can associate camera data without guessing from cadence.
     std::uint64_t source_frame_generation{}, source_frame_token{}, source_frame_numeric{};
     bool source_frame_has_numeric{}, source_frame_explicit{};
     bool frame_generation_input{};
-    // Source-adapter observation generation captured with this frame. Streamline
-    // uses its existing loss counter so a known camera reset/drop immediately
-    // revokes approximate reuse, even before the next depth tag is submitted.
+    // Source-adapter observation generation captured with this frame:
+    // Streamline's observation loss counter (NGX leaves it zero). Display
+    // reuse never consults it (decide_display, depth_cache_update.h); the UI
+    // qualification scope and the UI mask's capture matching compare it, and
+    // the provider's status lines report it.
     std::uint64_t observation_revision{};
     sunshine_scene_feedback::sample feedback;
   };

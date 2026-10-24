@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
+#include "scene_depth_source.h"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -34,14 +36,7 @@ namespace sunshine_game3d {
   };
   inline constexpr std::size_t source_slot_count = static_cast<std::size_t>(source_slot::none);
   inline constexpr std::size_t ui_slot_count = source_slot_count - static_cast<std::size_t>(source_slot::ui_alpha);
-  enum class source_api : std::uint8_t {
-    none,
-    streamline,
-    ngx,
-    generic,
-    ui_layer,
-    present
-  };
+  using source_api = sunshine_scene_depth::source_api;
   // inactive: out of scope this Present. absent: in scope, nothing reported.
   // refused: reported, not usable (the reason says why). pending: selected,
   // its pixels not ready. ready: current pixels, or a UI input offered to

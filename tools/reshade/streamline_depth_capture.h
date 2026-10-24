@@ -265,11 +265,11 @@ namespace sunshine_streamline::depth_capture {
   bool evaluation_live(std::uint64_t now_ms, std::uint64_t window_ms);
   // An enabled Streamline FG scope (its observation epoch and viewport) owns
   // that viewport's depth only while it is live: FG was turned on less than
-  // a second ago (enabled_tick), or a copy of its own source ((1 << 63) |
-  // viewport) was recorded and accepted by the API within the last second,
-  // the same second after which a silent or rejected source loses its
-  // association. Otherwise the viewport's ordinary SR/RR depth may supply
-  // depth, and the next accepted FG copy takes ownership back.
+  // a second ago (enabled_tick), or a copy of its own source
+  // (fg_depth_key(viewport)) was recorded and accepted by the API within the
+  // last second, the same second after which a silent or rejected source
+  // loses its association. Otherwise the viewport's ordinary SR/RR depth may
+  // supply depth, and the next accepted FG copy takes ownership back.
   bool frame_generation_scope_live(std::uint64_t epoch, std::uint32_t viewport, std::uint64_t enabled_tick);
   bool provider_identity(std::uint64_t queue, sunshine_scene_depth::provider_kind &provider,
     std::uint64_t &source_id);

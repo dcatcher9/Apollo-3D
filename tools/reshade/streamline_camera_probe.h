@@ -208,7 +208,7 @@ namespace sunshine_streamline {
   // Its inputs belong to the one viewport whose FG options were observed
   // enabled in the current epoch, under one fresh observation sequence ordered
   // with every Streamline call. DLSSG.Depth becomes that viewport's FG source
-  // ((1 << 63) | viewport) only through a copy recorded on the evaluation's own
+  // (fg_depth_key(viewport)) only through a copy recorded on the evaluation's own
   // command list in a state observed there; its accepted copies keep the FG
   // scope live exactly as accepted FG tag copies do
   // (depth_capture::frame_generation_scope_live). A refusal while the scope is

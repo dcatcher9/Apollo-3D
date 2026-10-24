@@ -576,8 +576,7 @@ namespace sunshine_streamline::provider {
   }
   namespace {
     sunshine_game3d::record_key recorded_source(const sunshine_scene_depth::frame &value) {
-      return {value.provider == sunshine_scene_depth::provider_kind::ngx ? sunshine_game3d::source_api::ngx :
-        sunshine_game3d::source_api::streamline, value.viewport, value.source_id};
+      return {sunshine_scene_depth::reporting_api(value.provider), value.viewport, value.source_id};
     }
   }
   sunshine_game3d::api_depth_decision describe_acquisition(const depth_capture::selection_policy &policy,
@@ -596,8 +595,7 @@ namespace sunshine_streamline::provider {
       out.source = recorded_source(*selected_metadata);
       out.epoch = selected_metadata->epoch; out.frame_generation_input = selected_metadata->frame_generation_input;
     } else if (out.reported) {
-      out.source = {capture.provider == sunshine_scene_depth::provider_kind::ngx ? sunshine_game3d::source_api::ngx :
-        sunshine_game3d::source_api::streamline, capture.viewport, capture.source_id};
+      out.source = {sunshine_scene_depth::reporting_api(capture.provider), capture.viewport, capture.source_id};
       out.epoch = capture.epoch; out.frame_generation_input = capture.frame_generation_input;
     }
     return out;
@@ -888,8 +886,7 @@ namespace sunshine_streamline::provider {
       depth_capture::provider_identity(runtime->get_command_queue()->get_native(), kind, established_source);
     if (!available && !recorded.reported) {
       // Nothing reported this Present: the source H holds the queue for.
-      recorded.source = {kind == sunshine_scene_depth::provider_kind::ngx ? sunshine_game3d::source_api::ngx :
-        sunshine_game3d::source_api::streamline, data->source_metadata.viewport,
+      recorded.source = {sunshine_scene_depth::reporting_api(kind), data->source_metadata.viewport,
         selection.require_frame_generation ? 0 : established_source};
       recorded.epoch = data->source_metadata.epoch;
     }

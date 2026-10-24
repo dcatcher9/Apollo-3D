@@ -665,7 +665,7 @@ namespace sunshine_streamline::depth_capture {
       }
       else if (policy.require_frame_generation) {
         out.epoch = policy.epoch; out.viewport = policy.viewport;
-        out.source_id = (1ull << 63) | policy.viewport;
+        out.source_id = sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(policy.viewport));
       }
       return out;
     }
@@ -783,7 +783,7 @@ namespace sunshine_streamline::depth_capture {
         if (policy.exclude_unconfirmed_fg &&
             ((source && source->metadata.frame_generation_input) ||
               (chosen.pending_nomination && chosen.pending_nomination->source_id ==
-                ((1ull << 63) | chosen.pending_nomination->viewport)))) {
+                sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(chosen.pending_nomination->viewport))))) {
           chosen = {};
           chosen.result = status::stale;
           chosen.selection = selection_reason::fg_scope_missing;
@@ -796,15 +796,16 @@ namespace sunshine_streamline::depth_capture {
         // FG owns the source choice before pixels are ready. Do not silently
         // substitute SR depth while its matching camera belongs to SL FG.
         auto fg = select_sl();
+        const auto fg_source = sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(policy.viewport));
         const auto matches = [&](const sunshine_scene_depth::frame &value) {
           return value.provider == provider_kind::streamline && value.frame_generation_input &&
             value.epoch == policy.epoch && value.viewport == policy.viewport &&
-            value.source_id == ((1ull << 63) | policy.viewport);
+            value.source_id == fg_source;
         };
         if ((fg.value && !matches(fg.value->metadata)) || (fg.latest && !matches(fg.latest->metadata)) ||
             (fg.pending_nomination && (fg.pending_nomination->epoch != policy.epoch ||
               fg.pending_nomination->viewport != policy.viewport ||
-              fg.pending_nomination->source_id != ((1ull << 63) | policy.viewport)))) {
+              fg.pending_nomination->source_id != fg_source))) {
           capture_pick mismatch; mismatch.selection = selection_reason::fg_scope_mismatch; return mismatch;
         }
         return fg;
@@ -1599,7 +1600,7 @@ namespace sunshine_streamline::depth_capture {
     if (!requested.load() || !epoch) return false;
     std::lock_guard lock(mutex);
     const auto now = scope_now();
-    const auto source = (1ull << 63) | viewport;
+    const auto source = sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(viewport));
     for (const auto &view : evaluations[provider_index(provider_kind::streamline)].views)
       if (view.epoch == epoch && view.viewport == viewport && view.source_id == source && within(view.accepted_tick, now)) return true;
     return false;
@@ -2352,7 +2353,7 @@ namespace sunshine_streamline::depth_capture {
     decision = {};
     if (policy.require_frame_generation) {
       decision.epoch = policy.epoch; decision.viewport = policy.viewport;
-      decision.source_id = (1ull << 63) | policy.viewport;
+      decision.source_id = sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(policy.viewport));
     }
     if (diagnostic) {
       *diagnostic = {}; diagnostic->requested_queue = native;
