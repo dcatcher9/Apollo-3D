@@ -8,6 +8,7 @@
 //
 // Usage: reshade_sl_fixture_interposer_tests (<dll> <a,b,c,d> <FRAME_TAG|NO_FRAME_TAG>)...
 #include "streamline_camera_data.h"
+#include "test_sl_fixture_sdk.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -67,7 +68,7 @@ namespace {
     {{{3, 0, 0, 0}}, 4, 5},
   };
 
-  constexpr guid options_type {0xfac5f1cb, 0x2dfd, 0x4f36, {0xa1, 0xe6, 0x3a, 0x9e, 0x86, 0x52, 0x56, 0xc5}};
+  constexpr const guid &options_type = fixture_sdk::fg_options_type;
   constexpr std::int32_t refused = 1;
 
   version file_version(const wchar_t *path, std::string &text, std::string &product_text) {

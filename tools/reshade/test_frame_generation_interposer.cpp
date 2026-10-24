@@ -6,6 +6,7 @@
 // SUNSHINE_SL_FIXTURE_VERSION is the release its version resource names, and
 // SUNSHINE_SL_FIXTURE_NO_FRAME_TAG omits slSetTagForFrame, as before 2.7.
 #include "streamline_camera_data.h"
+#include "test_sl_fixture_sdk.h"
 #include "test_sl_survey_tables.generated.h"
 #include <atomic>
 #include <cstring>
@@ -24,7 +25,7 @@ namespace {
   // sl_dlss_g.h DLSSGOptions: mode and numFramesToGenerate are its first fields
   // from version 1 on, and later versions only append (sl_struct.h), so a
   // version above this release's is read by its known prefix.
-  constexpr guid options_type{0xfac5f1cb,0x2dfd,0x4f36,{0xa1,0xe6,0x3a,0x9e,0x86,0x52,0x56,0xc5}};
+  constexpr const guid &options_type = fixture_sdk::fg_options_type;
   // eErrorIO, what this fixture returns for options its release refuses.
   constexpr std::int32_t refused = 1;
   constexpr std::uint32_t version[]{SUNSHINE_SL_FIXTURE_VERSION};

@@ -64,6 +64,7 @@
 #include "test_contract_matrix_generator.h"
 #include "test_game3d_api_contract_jsonl.h"
 #include "test_game3d_api_contract_tally.h"
+#include "test_sl_fixture_sdk.h"
 
 #include <cstdio>
 #include <cstring>
@@ -73,12 +74,6 @@
 #include <string>
 #include <utility>
 #include <vector>
-
-#if defined(__GNUC__) && !defined(__clang__)
-  #define FIXTURE_NOINLINE __attribute__((noinline, noipa))
-#else
-  #define FIXTURE_NOINLINE __declspec(noinline)
-#endif
 
 // The probe finds ReShade's log and configuration through these exports
 // (reshade.hpp). Lines are written synchronously (SUNSHINE_SYNCHRONOUS_LOG)
@@ -801,15 +796,14 @@ namespace {
   }
 
   // The Streamline fixture SDK: noinline entry points the probe hooks, with
-  // the volatile dispatch and ReShade stubs test_streamline_camera_probe.cpp
-  // also defines. Its entry points only return each boundary's set result;
-  // the probe tests' also record every call's arguments and can block or
-  // lose observation inside the call, so each executable keeps its own.
+  // volatile dispatch. Its entry points only return each boundary's set
+  // result; test_sl_fixture_sdk.h says what the probe tests' do instead and
+  // what both share.
   namespace sl_fixture {
     using namespace sunshine_streamline;
+    using fixture_sdk::fg_options_type;
+    using fixture_sdk::precision_type;
     constexpr DWORD outgoing_error = 0xabcdef01;
-    constexpr guid fg_options_type {0xfac5f1cb, 0x2dfd, 0x4f36, {0xa1, 0xe6, 0x3a, 0x9e, 0x86, 0x52, 0x56, 0xc5}};
-    constexpr guid precision_type {0x98f6e9ba, 0x8d16, 0x4831, {0xa8, 0x02, 0x4d, 0x3b, 0x52, 0xff, 0x26, 0xbf}};
     constexpr guid unknown_type {0x12345678, 1, 2, {3, 4, 5, 6, 7, 8, 9, 10}};
 
     struct fg_options {

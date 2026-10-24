@@ -8,6 +8,7 @@
 #include "game3d_controls.h"
 #include "game3d_ui_detection_contract.h"
 #include "game3d_ui_layer.h"
+#include "test_sl_fixture_sdk.h"
 #include "../../src/game3d_debug_protocol.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
@@ -1648,7 +1649,7 @@ namespace {
 
     // The FG cases (run_fg) on the synthetic Streamline SDK's public entry
     // points, which the production hooks observe: one frame script each.
-    static constexpr sunshine_streamline::guid fg_options_type{0xfac5f1cb,0x2dfd,0x4f36,{0xa1,0xe6,0x3a,0x9e,0x86,0x52,0x56,0xc5}};
+    static constexpr const sunshine_streamline::guid &fg_options_type = sunshine_streamline::fixture_sdk::fg_options_type;
     using fg_options = sunshine_streamline::abi_v2::fg_options_prefix;
     static_assert(sizeof(fg_options) == 40);
     using set_options_t = std::int32_t (*)(const sunshine_streamline::abi_v2::viewport &, const fg_options &);

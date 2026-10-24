@@ -10,6 +10,7 @@
 #include "upscaler_call_trace.h"
 #include "game3d_diagnostics.h"
 #include "game3d_ui_mask.h"
+#include "test_sl_fixture_sdk.h"
 #include <reshade.hpp>
 
 #include <algorithm>
@@ -27,12 +28,6 @@
 #include <thread>
 #include <tuple>
 #include <vector>
-
-#if defined(__GNUC__) && !defined(__clang__)
-  #define FIXTURE_NOINLINE __attribute__((noinline, noipa))
-#else
-  #define FIXTURE_NOINLINE __declspec(noinline)
-#endif
 
 // ReShade's header-only logging API locates these exports. Supply only a log
 // sink/discovery identity, never a graphics runtime, for the real no-DLL poll.
@@ -228,8 +223,8 @@ namespace {
     function = returned_feature_function;
     SetLastError(outgoing_error); return result_v2;
   }
-  constexpr guid fg_options_type{0xfac5f1cb,0x2dfd,0x4f36,{0xa1,0xe6,0x3a,0x9e,0x86,0x52,0x56,0xc5}};
-  constexpr guid precision_type{0x98f6e9ba,0x8d16,0x4831,{0xa8,0x02,0x4d,0x3b,0x52,0xff,0x26,0xbf}};
+  using fixture_sdk::fg_options_type;
+  using fixture_sdk::precision_type;
   struct fg_options { base_structure base{nullptr, fg_options_type, 3}; std::uint32_t mode{1}, generated_frames{1}; };
   struct tag_precision { base_structure base{nullptr, precision_type, 1}; std::uint32_t formula{1}; float bias{.25f}, scale{.5f}; };
   using fg_function = std::int32_t (*)(const abi_v2::viewport &, const fg_options &);
