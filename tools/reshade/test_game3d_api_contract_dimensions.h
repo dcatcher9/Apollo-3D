@@ -154,7 +154,7 @@ namespace game3d_contract {
 
   enum class untag_pattern {
     none,
-    null_after_each,  // A null untag after every tag (Assassin's Creed Shadows).
+    null_after_each,  // A null untag after every tag, in its frame through its entry (Assassin's Creed Shadows).
     before_tag
   };
 

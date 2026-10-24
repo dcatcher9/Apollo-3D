@@ -218,10 +218,13 @@ namespace game3d_contract::known_gaps {
 
     // A ValidUntilPresent tag is copied at its frame-generation tag call from
     // its declaration, which describes the state at its Present, where the
-    // oracle permits only the copy deferred to the Present queue (also when a
-    // later untag leaves that copy open, S9).
+    // oracle permits only the copy deferred to the Present queue. An untag of
+    // the same frame after the call cancels that copy (R7, S9 HOLD); the copy
+    // at the call honours neither.
     constexpr bool undeferred_frame_generation_tag(const sl_case &value) {
-      const auto expected = expect(value);
+      auto kept = value;
+      kept.untag = untag_pattern::none;
+      const auto expected = expect(kept);
       return legal(value) && value.at == copy_point::tag_call && value.life == lifecycle::valid_until_present &&
              value.commands == tag_commands::game_list && unobserved(value.depth) && detail::frame_generation_scope(value) &&
              (permits(expected, outcome_kind::capture) || permits(expected, outcome_kind::continuous)) && expected.deferred;
@@ -299,7 +302,7 @@ namespace game3d_contract::known_gaps {
   }  // namespace streamline
 
   inline constexpr row<sl_case> sl_rows[] {
-    {"S6", &rules::S6, kind::expected_failure, &streamline::commandless_frame_generation_tag, "Owner ruling R2 (decided): keep a commandless ValidUntilPresent tag pending and copy it at the same frame's evaluate, else on the Present queue before that frame's Present. Today source_rejection refuses it as boundary_without_commands (since a2563fa2 DLSS-G's own NGX evaluation supplies that frame's FG depth where it is seen, N4, and the refusal then withdraws nothing), and game3d_ui_mask.cpp refuses the UI equivalent (U2). Fix together with S7 and S11b; that commit inverts the pinned refusal, test_game3d_native_provider_runtime.cpp's 'native SLFG refusal' check (1795-1811 at c67e9cf9, 1925-1951 at a2563fa2), and revisits its boundary_without_commands log checks (2010 silent scope and 2162 live scope at a2563fa2). Whether the deferred copy survives a later null untag (Assassin's Creed Shadows) awaits an owner ruling (S9: EITHER).", &behaviours::no_copy},
+    {"S6", &rules::S6, kind::expected_failure, &streamline::commandless_frame_generation_tag, "Owner ruling R2 (decided): keep a commandless ValidUntilPresent tag pending and copy it at the same frame's evaluate, else on the Present queue before that frame's Present. Today source_rejection refuses it as boundary_without_commands (since a2563fa2 DLSS-G's own NGX evaluation supplies that frame's FG depth where it is seen, N4, and the refusal then withdraws nothing), and game3d_ui_mask.cpp refuses the UI equivalent (U2). Fix together with S7 and S11b; that commit inverts the pinned refusal, test_game3d_native_provider_runtime.cpp's 'native SLFG refusal' check (1795-1811 at c67e9cf9, 1925-1951 at a2563fa2), and revisits its boundary_without_commands log checks (2010 silent scope and 2162 live scope at a2563fa2). Owner ruling R7 (decided): a null untag of the same frame (frame token and viewport), or one with no frame token, cancels that deferred copy (S9 HOLD); a later frame's untag leaves it.", &behaviours::no_copy},
     {"S7", &rules::S7, kind::expected_failure, &streamline::generated_present_before_copy, "End a tag's lifetime at its own frame's Present (its frame token, or a present ordinal recorded at the tag), not at any Present of the device: streamline_depth_capture.cpp present() advances every source's present generation and source_lifetime_current then refuses the evaluate copy. Multi frame generation puts generated Presents of earlier frames there. 24bf1f4b and a2563fa2 hold a captured copy across generated Presents; neither lets this copy be made. The hook layer's verdict comes from its repeat of source_lifetime_current (test_game3d_api_contract_cpu.cpp admission), so the fix changes that repeat in the same commit. Fix together with S6, whose deferred copy meets the same check.", &behaviours::no_copy},
     {"S11b", &rules::S11b, kind::expected_failure, &streamline::undeferred_frame_generation_tag, "Owner ruling R2 (decided): a ValidUntilPresent tag at its FG tag call with no observed state is copied on the Present queue, where its declaration is exact, not at the call. Same deferral as S6.", &behaviours::copy_at_call},
     {"S11c", &rules::S11c, kind::expected_failure, &streamline::until_evaluate_frame_generation_tag, "An UntilEvaluate tag at its FG tag call with no observed state is copied there from a declaration that describes its evaluate (R2 defers lifecycle 1 only). Refuse that copy and let the same-frame evaluate copy it (S5); fix with S11b, which changes the same tag-call admission in source_rejection/record_impl.", &behaviours::copy_at_call},
