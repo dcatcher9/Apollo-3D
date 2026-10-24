@@ -1409,7 +1409,8 @@ through the capture owner's consumer copies, and a D3D12 debug-layer error fails
 that a known-gap row says starts from an unproven state is recorded but never executed. The test
 exits 77 (skipped) without a hardware adapter, and also without the D3D12 debug layer (Windows
 Graphics Tools), though then only after every other check has run; `--gpu-validation` adds GPU-based
-validation and `--block <name>` runs one block. It holds ctest's `gpu` resource lock; outside
+validation, `--block <name>` runs one block and `--batch <cells>` sets how many sources are prepared
+together (16; at most 26, which the capture owner's pool and the debug layer were validated with). It holds ctest's `gpu` resource lock; outside
 ctest, run it as any other GPU fixture.
 
 The runtime layer drives the native provider fixture through the synthetic SDKs its documentation
@@ -1477,9 +1478,9 @@ directory. It is registered only where `SUNSHINE_GAME3D_RESHADE_RUNTIME` (the of
 `ReShade64.dll`) and `SUNSHINE_GAME3D_FROZEN_SHADERS` (a directory with the frozen
 `SunshineGame3D.fx`) are configured: one test per family, labelled `contract;gpu`, `RUN_SERIAL` with
 the `gpu` resource lock and a 240 s timeout, after `reshade_contract_matrix_runtime_output` removes
-the families' output directory. At 1280x720 the seven families run 288 cells in about 5 minutes:
-`sl27` 118 cells and 13 controls in 102 s, `sl26` 43 in 56 s, `sl212_214` 42 in 53 s, `sl215_30` 26
-in 27 s, `ngx` 34 in 33 s, `generic` 12 in 17 s and `ui` 13 in 17 s. A capture takes 0.4 s, a
+the families' output directory. At 1280x720 the seven families run 309 cells in about 5.5 minutes:
+`sl27` 122 cells and 13 controls in 107 s, `sl26` 48 in 61 s, `sl212_214` 46 in 58 s, `sl215_30` 34
+in 33 s, `ngx` 34 in 32 s, `generic` 12 in 17 s and `ui` 13 in 18 s. A capture takes 0.4 s, a
 refusal or hold 0.9 s (its 600 ms window and the isolation), an FG case copied at an evaluate up to
 1.9 s (FG owns its viewport's depth for a second after it is enabled), and a UI case its Dump3D.
 Repeated runs give the same result for every cell.
