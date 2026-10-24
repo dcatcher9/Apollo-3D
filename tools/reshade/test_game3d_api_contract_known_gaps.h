@@ -568,17 +568,16 @@ namespace game3d_contract::known_gaps {
   }  // namespace behaviours
 
   // Generic depth-stencil boundaries judged at Present by the runtime layer
-  // (family generic).
+  // (family generic). The add-on meets every one; C++ has no empty array, so
+  // one pending row that matches no cell stands in for the table.
   namespace generic {
-    // A BeginRenderPass whose depth access clears subresource 0's depth (D11).
-    constexpr bool render_pass_clear(const generic_case &value) {
-      const auto expected = expect(value);
-      return legal(value) && value.boundary == generic_boundary::render_pass_clear && expected.by == &rules::D11 && expected.kind == outcome_kind::capture && !either(expected);
+    constexpr bool no_cell(const generic_case &) {
+      return false;
     }
   }  // namespace generic
 
   inline constexpr row<generic_case> generic_runtime_rows[] {
-    {"D11-render-pass", &rules::D11, kind::expected_failure, &generic::render_pass_clear, "Outside the Stage 3 order, which predates this finding of the runtime layer; it fits beside fix 1 (D10), which reworks the Generic copies. A render pass that clears depth after the depth was drawn is never captured: depth_addon.cpp on_begin_render_pass_with_depth_stencil reports pass_begin to the capture owner before it synthesizes the clear, so record_preserved refuses the before-clear copy as recording_render_pass although ReShade runs the event before the native BeginRenderPass, and that clear's preservation boundary also stops the end-of-frame copy. Synthesize the clear before reporting pass_begin.", &behaviours::no_copy},
+    {"none", &rules::D11, kind::pending, &generic::no_cell, "No Generic runtime gap remains: Stage 3 fix 1 closed D10 and the render-pass clear (D11). This row matches no cell."},
   };
 
   // UI inputs judged by the runtime layer (family ui): whether UI detection

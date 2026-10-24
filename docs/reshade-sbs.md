@@ -3669,7 +3669,9 @@ Generic's D3D12 copies take their source's pre-copy state from the boundary's co
 (`generic` in [`api_contract.h`](../tools/reshade/api_contract.h)). A depth clear
 (`ClearDepthStencilView` with the depth flag, or a render pass that clears depth) needs
 `DEPTH_WRITE` by the D3D12 clear contract (`clear_contract`). A DSV unbind or switch and a
-clear-like draw still declare `DEPTH_WRITE` (the contract matrix's D11c). The end-of-frame copy
+clear-like draw still declare `DEPTH_WRITE` (the contract matrix's D11c). ReShade reports a render
+pass before the native `BeginRenderPass`, so a render pass that clears depth is copied there, outside
+the pass: the capture owner learns that the pass began only after that copy. The end-of-frame copy
 runs on ReShade's own list, where nothing names the state: it copies only from the source's last
 proven state on that list's queue, and refuses otherwise. The earlier capture then holds within the
 source age, then the view is mono.

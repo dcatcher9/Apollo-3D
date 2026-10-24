@@ -1834,7 +1834,6 @@ static bool on_clear_depth_stencil(command_list *cmd_list, resource_view dsv, co
 }
 static bool on_begin_render_pass_with_depth_stencil(command_list *cmd_list, uint32_t, const render_pass_render_target_desc *, const render_pass_depth_stencil_desc *depth_stencil_desc, render_pass_flags)
 {
-	list_event(cmd_list, sunshine_streamline::depth_capture::list_event::pass_begin);
 	auto &render_state = *cmd_list->get_private_data<state_tracking>();
 	// Load/store actions do not expose a safe ordinary OM binding boundary.
 	// Mark this before synthesizing the clear/bind notifications below.
@@ -1860,6 +1859,10 @@ static bool on_begin_render_pass_with_depth_stencil(command_list *cmd_list, uint
 		auto &state = *cmd_list->get_private_data<state_tracking>();
 		state.current_depth_stencil = { 0 };
 	}
+	// ReShade runs this event before the native BeginRenderPass, so the
+	// clear's copy above is recorded outside the pass. The capture owner sees
+	// the pass from here on, before the synthesized binding below.
+	list_event(cmd_list, sunshine_streamline::depth_capture::list_event::pass_begin);
 
 	// If render pass has depth store operation set to 'discard', any copy performed after the render pass will likely contain broken data, so can only hope that the depth buffer can be copied before that ...
 
