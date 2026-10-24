@@ -21,8 +21,12 @@ The runtime layer is registered only when -ReShadeRuntime and -FrozenShaders are
 build is already configured with them). It and the device layer open GPU work in a hidden
 window: run them alone, with no game running, or pass -SkipGpu.
 
-Exit codes: 0 every contract test passed and every case is accounted for; 1 a test failed or a
-case or row is not accounted for; 2 setup failed.
+A contract test that ctest reports as skipped (the device layer exits 77 without a hardware
+adapter or without the D3D12 debug layer) is listed in summary.json and on the console, and fails
+the run unless -AllowSkip is given.
+
+Exit codes: 0 every contract test passed (or, with -AllowSkip, was skipped) and every case is
+accounted for; 1 a test failed or was skipped, or a case or row is not accounted for; 2 setup failed.
 #>
 [CmdletBinding()]
 param(
@@ -33,7 +37,8 @@ param(
   [string] $FrozenShaders = '',
   [string] $Toolchain = 'C:\msys64\ucrt64\bin',
   [switch] $SkipBuild,
-  [switch] $SkipGpu
+  [switch] $SkipGpu,
+  [switch] $AllowSkip
 )
 
 Set-StrictMode -Version Latest
@@ -111,6 +116,7 @@ try {
 
   $lines = [Collections.Generic.List[string]]::new()
   $problems = [Collections.Generic.List[string]]::new()
+  $skipped = [Collections.Generic.List[string]]::new()
   $families = [ordered]@{}
   # The runtime layer's Streamline families share sl_runtime_rows.
   $gapTables = @{ 'L1 sl' = (Read-GapRows 'sl_rows'); 'L1 ngx' = (Read-GapRows 'ngx_rows'); 'L3' = (Read-GapRows 'sl_runtime_rows');
@@ -157,6 +163,13 @@ try {
     $status = if ($case.SelectSingleNode('failure')) { 'fail' } elseif ($case.SelectSingleNode('skipped')) { 'skipped' } else { 'pass' }
     $output = if ($case.SelectSingleNode('system-out')) { [string]$case.'system-out' } else { '' }
     if ($status -eq 'fail') { $problems.Add("ctest $name failed") }
+    if ($status -eq 'skipped') {
+      # The test's own SKIP line says why; ctest's message names only the code.
+      $reason = @($output -split "`r?`n" | Where-Object { $_ -match '^SKIP ' }) | Select-Object -First 1
+      if (-not $reason) { $reason = $case.SelectSingleNode('skipped').GetAttribute('message') }
+      $skipped.Add("$name ($reason)")
+      if (-not $AllowSkip) { $problems.Add("ctest $name was skipped ($reason); pass -AllowSkip to accept it") }
+    }
     $layer = switch -Regex ($name) {
       '^reshade_contract_matrix_cpu$' { 'L0+L1'; break }
       '^reshade_contract_matrix_device$' { 'L2'; break }
@@ -182,7 +195,7 @@ try {
   $utf8 = New-Object Text.UTF8Encoding $false
   [IO.File]::WriteAllLines((Join-Path $results 'contract-matrix.jsonl'), $lines, $utf8)
   $commit = & git -C $repositoryRoot rev-parse HEAD
-  $summaryJson = [ordered]@{ commit = $commit; ctest_exit = $ctestCode; skipped_gpu = [bool]$SkipGpu; families = $families; problems = $problems } | ConvertTo-Json -Depth 6
+  $summaryJson = [ordered]@{ commit = $commit; ctest_exit = $ctestCode; skipped_gpu = [bool]$SkipGpu; skipped = $skipped; families = $families; problems = $problems } | ConvertTo-Json -Depth 6
   [IO.File]::WriteAllText((Join-Path $results 'summary.json'), $summaryJson, $utf8)
   if (-not @($families.Keys | Where-Object { $_ -like 'L3 *' }).Count -and -not $SkipGpu) {
     Write-Host 'The runtime layer is not registered: configure with -ReShadeRuntime and -FrozenShaders to run it.'
@@ -191,6 +204,7 @@ try {
     $counts = $families[$family]
     Write-Host ("{0}: {1} cases, {2} meet the oracle, {3} recorded gaps, {4} pending" -f $family, $counts.cases, [int]$counts['meets'], [int]$counts['known_failure'], [int]$counts['pending'])
   }
+  foreach ($test in $skipped) { Write-Host "SKIPPED $test" }
   foreach ($problem in $problems) { Write-Host "PROBLEM $problem" }
   Write-Host "Results: $results"
   if ($ctestCode -ne 0 -or $problems.Count) { exit 1 }

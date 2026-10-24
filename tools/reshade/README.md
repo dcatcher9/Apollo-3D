@@ -1490,7 +1490,9 @@ line per contract test with its ctest result. The runner checks those cases agai
 table itself: a case may only meet the oracle, fail as a recorded gap or sit in a pending row, and
 each expected-failure row of a family that ran whole (and, at runtime, whose scope is whole) must be
 the only row of a failing case.
-`-SkipGpu` leaves out the device and runtime layers; run them only with no game running.
+`-SkipGpu` leaves out the device and runtime layers; run them only with no game running. A contract
+test that ctest reports as skipped (the device layer without a hardware adapter or the D3D12 debug
+layer) is listed as `skipped` in `summary.json` and fails the run unless `-AllowSkip` is given.
 
 The runtime layer reads refusal classes from the test add-on instead of waiting for rate-limited log
 lines. `SunshineDepthTestLastRefusal(runtime, out)` returns the newest depth refusal of the
