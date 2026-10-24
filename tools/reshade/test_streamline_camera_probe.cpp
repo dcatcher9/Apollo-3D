@@ -10,6 +10,7 @@
 #include "upscaler_call_trace.h"
 #include "game3d_diagnostics.h"
 #include "game3d_ui_mask.h"
+#include "test_minhook_ledger.h"
 #include <reshade.hpp>
 
 #include <algorithm>
@@ -367,6 +368,12 @@ namespace {
     bool found {}, camera {}, exact {}, same_token {};
   };
 
+  // The MinHook hooks one family created since a mark, in order: the
+  // installed hook set the refactor (plan P4) must keep (test_minhook_ledger.h).
+  void require_hooks(std::size_t from, std::initializer_list<void *> targets, const char *message) {
+    if (minhook_ledger::available()) require(minhook_ledger::created_since(from) == std::vector<void *>(targets), message);
+  }
+
   observed latest(std::uint32_t id) {
     observed value;
     value.found = testing::latest(id, value.resource, value.camera, value.exact, value.same_token);
@@ -375,7 +382,10 @@ namespace {
 
   void test_v1_forwarding() {
     fixture cleanup;
+    const auto hooks = minhook_ledger::mark();
     require(testing::install(testing::abi::v1_1_1, v1_targets), "v1 real MinHook install failed");
+    require_hooks(hooks, {v1_targets.constants, v1_targets.tag, v1_targets.evaluate},
+      "v1 did not hook exactly its constants, tag and evaluate exports");
     auto constants = old_camera();
     const auto original_constants = constants;
     int native {}, commands {};
@@ -450,7 +460,12 @@ namespace {
     fixture cleanup;
     auto exports = v2_targets;
     if (!frame_tags) exports.tag_for_frame = nullptr;
+    const auto hooks = minhook_ledger::mark();
     require(testing::install(testing::abi::v2_7_30, exports), "v2 real MinHook install failed");
+    if (frame_tags) require_hooks(hooks, {exports.constants, exports.tag, exports.tag_for_frame, exports.evaluate},
+      "v2 did not hook exactly its constants, tag, frame tag and evaluate exports");
+    else require_hooks(hooks, {exports.constants, exports.tag, exports.evaluate},
+      "v2 without a frame tag export did not hook exactly its constants, tag and evaluate exports");
     auto constants = modern_camera();
     const auto original_constants = constants;
     auto view = viewport(27);
@@ -3076,7 +3091,9 @@ namespace {
     require(query_current_presentation(value) == presentation_status::missing_marker_function, "failed getter enabled markers");
     result_v2 = 0; retrieve(4, name);
     require(query_current_presentation(value) == presentation_status::missing_marker_function, "getter installed hook inside callback");
+    const auto hooks = minhook_ledger::mark();
     require(testing::install_presentation_hooks(), "deferred PCL hook installation failed");
+    require_hooks(hooks, {function}, "PCL did not hook exactly its marker entry");
     auto call = reinterpret_cast<abi_v2::pcl_set_marker>(function);
     auto marker = [&](unsigned type, opaque_token &token) {
       const auto before = pcl_call.calls;
@@ -3933,8 +3950,13 @@ namespace {
     auto cached_options = reinterpret_cast<fg_function>(cached_entry);
     auto view = viewport(11); fg_options options;
     cached_options(view, options); // A past On cannot be invented by discovery.
+    const auto hooks = minhook_ledger::mark();
     require(testing::install(testing::abi::v2_7_30, presentation_v2_targets) &&
         testing::discover_frame_generation_hooks(), "cached FG target discovery/detour failed");
+    require_hooks(hooks, {presentation_v2_targets.constants, presentation_v2_targets.tag,
+        presentation_v2_targets.tag_for_frame, presentation_v2_targets.evaluate, presentation_v2_targets.new_frame_token,
+        presentation_v2_targets.get_feature_function, cached_entry},
+      "v2 with every optional export and its FG options entry did not hook exactly those seven entries");
     frame_generation_snapshot fg;
     require(!query_frame_generation(view.value, fg), "target discovery invented a prior FG options call");
     const auto calls = fg_call.calls;
@@ -3951,7 +3973,9 @@ namespace {
     wrapped_options(view, options);
     require(fg_call.calls == calls + 2 && query_frame_generation(view.value, fg) && fg.sequence == sequence + 1,
       "wrapper plus native detour observed or invoked one options call twice");
+    const auto repeat = minhook_ledger::mark();
     require(testing::discover_frame_generation_hooks(), "repeat FG discovery attempted a duplicate hook");
+    require_hooks(repeat, {}, "repeat FG discovery created another hook");
     result_v2 = -7; cached_options(view, options);
     require(!query_frame_generation(view.value, fg), "failed cached options call retained known enabled state");
     result_v2 = 0; options.mode = 0; cached_options(view, options);

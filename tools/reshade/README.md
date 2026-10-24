@@ -1461,6 +1461,15 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   states whether a live FG scope owns depth through a callback that only the call-trace build has
   (`sunshine_ngx::testing::callbacks`), in place of the Streamline FG query; the seam
   characterization pins the production rule.
+- [`test_game3d_hook_set.cpp`](test_game3d_hook_set.cpp) (`reshade_game3d_hook_set`) pins the
+  shipping add-on's installed hook set, which hook host moves must keep: the binary is its own
+  process's ReShade, runs `AddonInit` and `AddonUninit`, and compares the ReShade events each
+  registers and unregisters, in order, with its tables, checks the one overlay, and requires that no
+  MinHook hook is created without Streamline or NGX. Each MinHook family's hooks on fixture exports
+  are pinned where they are installed, through
+  [`test_minhook_ledger.h`](test_minhook_ledger.h) (MinGW links those tests with
+  `-Wl,--wrap=MH_CreateHook`): the Streamline probe test (v1, v2 with and without its optional
+  exports, the FG options entry and the PCL marker) and the call trace (the four NGX exports).
 - `reshade_game3d_alpha_auto` pins the acceptance ledger's edges that its policy groups leave
   unexercised: a sample over no pixels, a contradiction older than the newest one, and a
   testable sample older than the previous one

@@ -5,6 +5,7 @@
 #include "streamline_depth_capture.h"
 #include "addon_lifetime.h"
 #include "game3d_diagnostic_metadata.h"
+#include "test_minhook_ledger.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <array>
@@ -337,6 +338,7 @@ namespace {
     // The process image enumerates first; 1100 entries ahead of it put its NGX
     // exports past the former 1024-module cap.
     testing::set_synthetic_modules(1100);
+    const auto hooks = minhook_ledger::mark();
     initialize(self, true);
     SetLastError(input_error);
     poll();
@@ -347,6 +349,16 @@ namespace {
     auto counts = testing::counts();
     require(counts.installed == 4 && counts.ngx_evaluate == 0 && counts.reports == 1,
       "real export discovery or no-call coverage failed");
+    // The installed hook set (refactor plan P4, test_minhook_ledger.h): one
+    // hook on each NGX export, in discovery's order.
+    if (minhook_ledger::available()) {
+      auto created = minhook_ledger::created_since(hooks);
+      std::vector<void *> expected{reinterpret_cast<void *>(create_entry), reinterpret_cast<void *>(evaluate_entry),
+        reinterpret_cast<void *>(evaluate_c_entry), reinterpret_cast<void *>(release_entry)};
+      std::sort(created.begin(), created.end());
+      std::sort(expected.begin(), expected.end());
+      require(created == expected, "NGX discovery did not hook exactly the four NGX exports");
+    }
     require(counts.modules >= 1 && !counts.truncated && counts.truncations == 0 && logged("truncated=0 truncations=0"),
       "discovery past 1024 enumerated modules was truncated or not counted");
     require(logged("NGX_evaluate=0") && logged("not API absence") && logged("SL_hook=0"),
