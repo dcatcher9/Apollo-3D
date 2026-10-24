@@ -887,6 +887,19 @@ as fixture members. Every frame of a script begins before the script's own deadl
 stops making progress fails by name, and a `MEASURE native-provider case=<name> elapsed_ms=` line
 reports each case's time.
 
+Both runtime tests also check the
+[frame record](../../docs/reshade-sbs.md#frame-record). Each queue-cycle acquisition's
+`depth_choice` must repeat what `acquire` returned. In the provider test every provider status
+line must name, in order, a Present whose record states that selection (D1 or D2 with fresh or
+held pixels, H in mono, the handoff hold, or Generic), and the record's rows are checked at the
+settled, failed-evaluation, FG pair, silent-scope, SR-through-a-silent-scope and DLSS-G exact-pair
+points. The contract matrix's runtime layer, which includes this fixture, ends each family with
+the same line-by-line check. `reshade_exporter_lifecycle` maps the provider's display and FG-policy
+timelines to the record on the CPU through the provider's own mapping
+(`provider::describe_acquisition` and `describe_display`, which `begin` calls), and the capture
+owner's provider admission regression (run by the Streamline probe tests) checks `depth_choice`
+against its selection timeline.
+
 The interposer DLLs are one synthetic Streamline release each, built from one source by a CMake list
 (`sunshine_sl_fixture_interposers`): the release its version resource names, which production
 discovery reads, and whether it exports `slSetTagForFrame`. `frame_generation_interposer.dll` is
@@ -1346,6 +1359,44 @@ readbacks restore resource state and must not advance the shader clock. Compare
 all 40 texture files and 20 layout records as well as the final images when
 claiming an exact preparation-preserving change.
 
+### Test builds
+
+[`CMakeLists.txt`](CMakeLists.txt) lists the add-on's production sources once
+(`sunshine_game3d_core_sources`). Each set of test seam defines compiles them once, as a view: an
+OBJECT library that an add-on DLL links whole, and `<view>_archive`, the same objects as a static
+library from which a test executable links only what it uses. A view's seam defines are public, so
+every file of a binary sees the same declarations; a binary links one view.
+
+| View | Seam defines | Linked by |
+|---|---|---|
+| `sunshine_game3d_core` | none | `SunshineSBS`, `replay_game3d_dump`, and the tests without a seam (UI mask, UI capture, UI layer, camera data, queue-cycle and source-alpha) |
+| `sunshine_game3d_core_runtime_test` | `SUNSHINE_SBS_RUNTIME_TEST_ADDON` | `SunshineSBSTest` |
+| `sunshine_game3d_core_sbs_test` | `SUNSHINE_SBS_TEST` | `reshade_exporter_tests`, whose test file compiles `exporter.cpp` itself |
+| `sunshine_game3d_core_probe_test` | Streamline probe, NGX call trace, native observers, synchronous log | the probe, contract matrix (pure, hook and device layers), seam characterization, call trace, native observer and diagnostic-texture tests |
+| `sunshine_game3d_core_renderer_test` | `SUNSHINE_GAME3D_RENDERER_TEST` | the native runtime tests |
+
+Production files hold no tests. A white-box test reaches a file's internals through that file's
+`*_test_access.h`: the capture owner's regressions are in
+[`test_streamline_depth_capture.cpp`](test_streamline_depth_capture.cpp), and the test add-on's
+exports of the depth add-on and the Streamline probe are in
+[`test_depth_addon_exports.cpp`](test_depth_addon_exports.cpp) and
+[`test_streamline_camera_probe_exports.cpp`](test_streamline_camera_probe_exports.cpp). In the
+shipping build such a header changes nothing: the internals keep internal linkage. In the view that
+builds the tests they get external linkage (an inline namespace, or `inline` for the depth add-on's
+shared state) and the header declares the ones the tests use. The test add-on's refusal record for
+the [API contract matrix](#api-contract-matrix) follows the same split: where an adapter decides a
+refusal, its production file only calls a recorder, under `SUNSHINE_SBS_RUNTIME_TEST_ADDON`. The
+probe's recorders are defined in its exports file and declared in its test-access header; the NGX
+adapter, which has no test-access header, keeps its one recorder under the same define; and the
+query, `SunshineDepthTestLastRefusal`, is one of the depth add-on's exports.
+
+Two test binaries compile a production file outside every view: `reshade_exporter_tests`
+compiles `exporter.cpp` inside [`test_exporter.cpp`](test_exporter.cpp) (its view excludes that
+file), and the opt-in D3D11 sampler fixture `reshade_depth_sampler_d3d11_test`, which no `ctest`
+runs, compiles `depth_content_sampler.cpp` inside
+[`test_depth_content_sampler_d3d11.cpp`](test_depth_content_sampler_d3d11.cpp) to reach the
+sampler's internal pipeline cache and private command list. Neither links a view.
+
 ### API contract matrix
 
 The [rules for new game behaviour](../../docs/reshade-sbs.md#rules-for-new-game-behaviour) gate
@@ -1360,8 +1411,8 @@ also removes its row; in the hook families a recorded gap must also keep failing
 and the way the row records. Never change the oracle to match the add-on: a disagreement is either a
 gap row or a fix, and an open owner question is EITHER or a pending row.
 
-`ctest -L contract` runs the matrix. `reshade_contract_matrix_cpu` is built with the Streamline
-probe tests' sources and defines and holds two layers. The pure layer identifies every surveyed
+`ctest -L contract` runs the matrix. `reshade_contract_matrix_cpu` links the Streamline probe
+tests' view of the production sources ([Test builds](#test-builds)) and holds two layers. The pure layer identifies every surveyed
 Streamline release's interposer DLL as the probe's discovery does (the matrix mirrors that contract
 selection) and reads raw buffer types 0 to 80 through the selected contract; it judges the capture
 state table over every legal state cell and a set of deliberately illegal rows; and it reads every
@@ -1527,6 +1578,68 @@ causes:
 ```bash
 cmake -DSURVEY_DIR=<sl-abi-survey> -DOUTPUT=tools/reshade/test_sl_survey_tables.generated.h -P tools/reshade/contract_sl_survey_tables.cmake
 ```
+
+### Characterization tests
+
+The contract matrix judges what an API permits. Characterization tests instead pin what the add-on
+does today at the seams the matrix does not reach, so that a structural move which must not change
+behaviour is checked row by row. They are not an oracle: a row changes only in the commit that
+changes that behaviour on purpose, and a disagreement with an API contract belongs in the matrix as
+a known gap. Each table names the behaviour of every row and the refactor phase it protects.
+`ctest -L characterization` runs them; each also runs in the default `ctest`.
+
+- [`test_game3d_seam_characterization.cpp`](test_game3d_seam_characterization.cpp)
+  (`reshade_seam_characterization`) links the Streamline probe tests' view
+  ([Test builds](#test-builds)) and drives the capture owner without a device: the frame
+  generation policy's query timelines, the FG scope's liveness (accepted copies from a Streamline
+  FG tag or from DLSS-G's own evaluation) and the selection the provider derives from it
+  (`provider::select_frame_generation_scope`), NGX's copy rule under FG
+  (`sunshine_ngx::frame_generation_owns_depth`), `select_provider` with a protected owner,
+  readable and pending sources and required or excluded FG, per-queue ownership and
+  `establish_provider`'s watermark, and every reason of `decide_display`. Its freshness table
+  pins each age limit one millisecond either side against an explicit clock: the source age at
+  every selection site, the association timeout of `expire_association` and `evaluation_live`, and
+  an FG scope's enabled and accepted ticks, which also admit a tick ahead of the clock (the
+  capture owner's `scope_clock` fixes `frame_generation_scope_live`'s clock in this view only). Its
+  UI table pins the UI adapter's admission of each ready UI snapshot (`ui_mask::admit_candidate`)
+  and of the Present's own color (`ui_input::current_color_refusal`). Their contracts are in
+  [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection) and the
+  [UI decision framework](../../docs/reshade-sbs.md#ui-decision-framework). It shares the capture
+  owner's slot and evaluation fixtures with that owner's regressions
+  ([`test_streamline_depth_capture_fixture.h`](test_streamline_depth_capture_fixture.h)).
+- `reshade_upscaler_call_trace` holds the NGX nesting table
+  ([`test_upscaler_call_trace.cpp`](test_upscaler_call_trace.cpp)): each outcome of an outer
+  evaluation against a nested SR or DLSS-G call, including an outer copy the capture owner
+  rejected (the inner call supplies depth) and an outer recorded copy (the inner call is
+  deduplicated), a live FG scope and a claimed Streamline evaluation
+  ([Direct NGX depth selection](../../docs/reshade-sbs.md#direct-ngx-depth-selection)). The test
+  states whether a live FG scope owns depth through a callback that only the call-trace build has
+  (`sunshine_ngx::testing::callbacks`), in place of the Streamline FG query; the seam
+  characterization pins the production rule.
+- [`test_game3d_hook_set.cpp`](test_game3d_hook_set.cpp) (`reshade_game3d_hook_set`) pins the
+  shipping add-on's installed hook set, which hook host moves must keep: the binary is its own
+  process's ReShade, runs `AddonInit` and `AddonUninit`, and compares the ReShade events each
+  registers and unregisters, in order, with its tables, checks the one overlay, and requires that no
+  MinHook hook is created without Streamline or NGX. Each MinHook family's hooks on fixture exports
+  are pinned where they are installed, through
+  [`test_minhook_ledger.h`](test_minhook_ledger.h) (MinGW links those tests with
+  `-Wl,--wrap=MH_CreateHook`): the Streamline probe test (v1, v2 with and without its optional
+  exports, the FG options entry and the PCL marker) and the call trace (the four NGX exports).
+- [`test_provider_log_lines.cpp`](test_provider_log_lines.cpp) (`reshade_provider_log_lines`)
+  renders the API depth provider's status lines from fixed values for representative Presents
+  (a settled fresh copy, a held pending successor, the release to Generic and the handoff hold, an
+  FG scope turning silent and live, a readiness loss and recovery with their observation evidence,
+  and dynamic resolution) and compares them byte for byte with
+  [`provider_log_goldens/status_lines.txt`](provider_log_goldens/status_lines.txt). The provider
+  gathers each line's values where it decides and renders them through
+  [`streamline_depth_provider_log.h`](streamline_depth_provider_log.h), so a move of how the values
+  are gathered keeps every line. A commit that changes a line on purpose regenerates the goldens
+  with `reshade_provider_log_lines_tests <goldens> --update`.
+- `reshade_game3d_alpha_auto` pins the acceptance ledger's edges that its policy groups leave
+  unexercised: a sample over no pixels, a contradiction older than the newest one, and a
+  testable sample older than the previous one
+  ([UI decision framework](../../docs/reshade-sbs.md#ui-decision-framework)).
+  `ui_selection::decide` itself is covered in full by the selection contract and sequence tests.
 
 ### Independent renderer reference tests
 

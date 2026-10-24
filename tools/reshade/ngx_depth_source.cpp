@@ -489,6 +489,9 @@ namespace sunshine_ngx {
   void shutdown() { active_epoch.store(0, std::memory_order_release); }
   bool enabled() { return !sunshine_addon_lifetime::stopping() && active_epoch.load(std::memory_order_acquire) != 0; }
   std::uint64_t epoch() { return sunshine_addon_lifetime::stopping() ? 0 : active_epoch.load(std::memory_order_acquire); }
+  bool frame_generation_owns_depth(bool enabled, std::uint64_t epoch, std::uint32_t viewport, std::uint64_t enabled_tick) {
+    return enabled && sunshine_streamline::depth_capture::frame_generation_scope_live(epoch, viewport, enabled_tick);
+  }
   namespace {
     // device_default: the feature's documented depth input is device depth when
     // DLSS.Use.HW.Depth is absent. That holds for Super Resolution/DLAA only;
@@ -770,14 +773,17 @@ namespace sunshine_ngx {
       }
     }
 #ifndef SUNSHINE_UPSCALER_TRACE_TEST
-    // Confirmed Streamline FG owns depth: selection never considers NGX while
-    // FG is required, and FG Off raises the admission watermark past every
-    // snapshot taken meanwhile, so a copy now would have no consumer. The
-    // evaluation above stays live for the handoff hold. A busy or ambiguous
-    // FG read copies as before (nested NGX's rule, owns_nested_depth_capture),
-    // and so does a silent FG scope, which owns nothing.
-    if (frame_generation_snapshot fg; query_frame_generation(UINT32_MAX, fg) && fg.enabled &&
-        depth_capture::frame_generation_scope_live(fg.epoch, fg.viewport, fg.enabled_tick)) {
+    // Confirmed Streamline FG owns depth (frame_generation_owns_depth). The
+    // evaluation above stays live for the handoff hold.
+    if (frame_generation_snapshot fg; query_frame_generation(UINT32_MAX, fg) &&
+        frame_generation_owns_depth(fg.enabled, fg.epoch, fg.viewport, fg.enabled_tick)) {
+      attempt.capture_suppressed_by_depth_owner = true;
+      ++fg_owned;
+      return attempt;
+    }
+#else
+    // The call-trace tests decide whether a live FG scope owns depth.
+    if (backend.frame_generation_owns_depth && backend.frame_generation_owns_depth()) {
       attempt.capture_suppressed_by_depth_owner = true;
       ++fg_owned;
       return attempt;

@@ -41,6 +41,35 @@ namespace sunshine_streamline::provider {
     std::uint32_t generated_frames_{};
     bool confirmed_{};
   };
+  // Enabled FG owns its viewport's depth only while its scope is live
+  // (depth_capture::frame_generation_scope_live). A silent scope selects as
+  // without FG for this acquisition, so that viewport's ordinary SR/RR depth
+  // may supply depth, and the next accepted FG copy takes ownership back.
+  // Any other policy selects as it is.
+  struct frame_generation_selection {
+    depth_capture::selection_policy selection;
+    bool silent{};
+  };
+  inline frame_generation_selection select_frame_generation_scope(const depth_capture::selection_policy &policy) {
+    const bool silent = policy.require_frame_generation &&
+      !depth_capture::frame_generation_scope_live(policy.epoch, policy.viewport, policy.enabled_tick);
+    return {silent ? depth_capture::selection_policy{} : policy, silent};
+  }
+  // provider::begin's frame record row (game3d_frame_record.h), in two steps.
+  // The acquisition: the FG policy and the scope's selection, the queue's
+  // association, the handoff hold and the capture owner's diagnostic. A
+  // selected source names the frame selected_metadata describes; otherwise a
+  // reported capture names itself.
+  sunshine_game3d::api_depth_decision describe_acquisition(const depth_capture::selection_policy &policy,
+    const frame_generation_selection &scope, bool associated, bool handoff_hold,
+    const depth_capture::capture_diagnostic &capture, const sunshine_scene_depth::frame *selected_metadata);
+  // The display that followed: what begin's output holds. Without a selected
+  // source or an association there is none (the handoff hold or the release
+  // to Generic says why). A fresh copy, else a ready output, which holds an
+  // earlier copy that names its own source (held), else the display cache's
+  // reason.
+  void describe_display(sunshine_game3d::api_depth_decision &decision, bool copied, bool output_ready,
+    const char *cache_reason, const sunshine_scene_depth::frame &held);
   // The completed sample contract is owned by the neutral presentation input.
   // Keep the adapter's existing internal/test spelling without a second layout.
   using center_sample = sunshine_game3d::depth_input::sample;

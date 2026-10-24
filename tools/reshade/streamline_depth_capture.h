@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
+#include "game3d_frame_record.h"
 #include "scene_depth_source.h"
 #include <cstddef>
 #include <cstdint>
@@ -115,6 +116,32 @@ namespace sunshine_streamline::depth_capture {
     std::uint64_t source_id{};
     std::uint32_t viewport{};
     sunshine_scene_depth::provider_kind provider{sunshine_scene_depth::provider_kind::streamline};
+    // The reported source is an FG scope's own input; without one, an FG
+    // scope the policy requires.
+    bool frame_generation_input{};
+  };
+  // What acquire chose for one consumer queue at its newest acquisition, and
+  // why (docs/reshade-sbs.md, Frame record): the selection's own outcome,
+  // frozen under the capture lock with the decision acquire returned. Nothing
+  // decides from it, and it never authorizes pixels.
+  struct depth_choice {
+    std::uint64_t present{}, tick_ms{};
+    // The reported source's role: fg_depth (an FG scope's own input, or the
+    // required FG scope before one, a nomination still in progress
+    // included), scene_depth, or none without a source or a required scope.
+    sunshine_game3d::source_slot rung{sunshine_game3d::source_slot::none};
+    acquisition_decision decision;
+    status result{status::unavailable};
+    selection_reason selection{selection_reason::not_attempted};
+    capture_failure failure{capture_failure::none};
+    bool pixel_ready{};
+    // The policy it selected under.
+    bool fg_required{}, fg_excluded{};
+    // The queue's provider after this acquisition: ownership outlives one
+    // Present (protected owner, association).
+    bool owner_established{};
+    sunshine_scene_depth::provider_kind owner{sunshine_scene_depth::provider_kind::streamline};
+    std::uint64_t owner_source{};
   };
   enum class consumer_status {
     not_attempted, ready, missing_input, unsupported_interface, observer_not_ready,
@@ -513,6 +540,9 @@ namespace sunshine_streamline::depth_capture {
   // Commit only after the selected snapshot was successfully copied for this
   // effects pass. Nomination/acquisition alone must not consume a frame.
   void complete_frame(const packet &value, std::uint64_t present);
+  // The newest depth_choice of this consumer queue; false before its first
+  // acquisition that reached the selection.
+  bool choice(std::uint64_t queue, depth_choice &out);
 #ifdef SUNSHINE_STREAMLINE_PROBE_TEST
   // Test only. Register BEFORE recording any reads into this exact command list. Failure
   // means the caller must not issue a read. The native post-Execute hook retires

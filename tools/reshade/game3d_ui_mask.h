@@ -223,6 +223,19 @@ namespace sunshine_game3d::ui_mask {
     !same_snapshot_inputs({0, 0, 8, 0, 9}, {0, 0, 7, 0, 9}, true, false) &&
     !same_snapshot_inputs({0, 0, 7, 0, 0}, {0, 0, 7, 0, 9}, true, false) &&
     !same_snapshot_inputs({}, {}, true, false));
+  // Whether a ready snapshot of this kind may be offered to detection
+  // (ui_input::acquire). An unauthenticated UIAlpha tag cannot hide
+  // independently usable lower-priority candidates in Auto; an authenticated
+  // one is validated on the GPU, as is DLSS-G's named DLSSG.UIAlpha
+  // (frame_generation_evaluation). A manual choice may use it. A HUD-less
+  // image needs a color to pair with (paired).
+  enum class candidate_refusal { none, ui_alpha_unauthenticated, hudless_unpaired };
+  constexpr candidate_refusal admit_candidate(source_kind kind, bool manual, bool alpha_authenticated,
+      bool frame_generation_evaluation, bool paired) {
+    if (kind == source_kind::hudless && !paired) return candidate_refusal::hudless_unpaired;
+    return manual || kind != source_kind::alpha || alpha_authenticated || frame_generation_evaluation ?
+      candidate_refusal::none : candidate_refusal::ui_alpha_unauthenticated;
+  }
   // Two captures belong to one tag batch (one game frame) when both were made
   // in the same Present interval. Each source keeps its own Present counter, so
   // compare Presents since each tag rather than the raw counter values.

@@ -3,6 +3,7 @@
 #include "game3d_ui_mask.h"
 #include "game3d_ui_layer.h"
 #include "game3d_capture_diagnostic.h"
+#include "game3d_frame_record.h"
 #include "streamline_camera_probe.h"
 #include "streamline_buffer_contract.h"
 #include <d3d12.h>
@@ -33,6 +34,9 @@ namespace sunshine_game3d::ui_input {
     // since no HUD-less pairing holds.
     enum hudless_outcome : unsigned { hudless_batch, hudless_real, hudless_late, hudless_reoffered, hudless_stale,
       hudless_other, hudless_none, hudless_outcome_count };
+    // The gate line's names of these outcomes (the frame record's reasons).
+    constexpr std::array<const char *, hudless_outcome_count> hudless_outcome_names{
+      "batch", "real", "late", "reoffered", "stale", "other", "none"};
     // The HUD-less snapshot a render offered: its ticket, epoch and viewport,
     // and that render's frame_sequence (zero ticket: none yet).
     struct offered_snapshot {
@@ -247,6 +251,12 @@ namespace sunshine_game3d::ui_input {
       observed.epoch, observed.revision, observed.viewport, desc.texture.width, desc.texture.height, true, filter},
       GetTickCount64());
   }
+  const char *current_color_refusal(const source_alpha_ui_decision &status, std::uint32_t output_format, choice wanted) {
+    if (!status.requested) return "not_requested";
+    if (status.fg_active()) return "FG_active";
+    if (!present_has_alpha(output_format)) return "no_present_alpha";
+    return wanted == choice::automatic || wanted == choice::current_color ? nullptr : "not_selected";
+  }
   frame acquire(api::effect_runtime *runtime, renderer &renderer, source_alpha_ui_decision status,
       alpha_auto_policy &session, bool diagnostic) {
     frame result;
@@ -320,6 +330,20 @@ namespace sunshine_game3d::ui_input {
     };
     constexpr ui_selection::kind slot_kinds[]{ui_selection::kind::ui_alpha, ui_selection::kind::ui_color,
       ui_selection::kind::backbuffer, ui_selection::kind::hudless};
+    // The frame record's UI rows (game3d_frame_record.h): what each candidate
+    // did in this render, in capture-slot order, then the UI layer and the
+    // presented color. Nothing reads them.
+    using record_state = sunshine_game3d::source_state;
+    std::array<sunshine_game3d::source_status, sunshine_game3d::ui_slot_count> recorded{};
+    constexpr auto ui_index = [](sunshine_game3d::source_slot row) {
+      return std::size_t(row) - std::size_t(sunshine_game3d::source_slot::ui_alpha);
+    };
+    static_assert(ui_index(sunshine_game3d::source_slot::hudless) == ui_mask::capture_slot(ui_mask::source_kind::hudless) &&
+      ui_index(sunshine_game3d::source_slot::backbuffer) == ui_mask::capture_slot(ui_mask::source_kind::backbuffer),
+      "The UI rows follow the capture-slot order");
+    constexpr auto recorded_layer = ui_index(sunshine_game3d::source_slot::ui_layer),
+      recorded_current = ui_index(sunshine_game3d::source_slot::current_color);
+    const char *const unrequested = status.requested ? "unsupported_API" : "not_requested";
     const bool hudless_wanted = capturing && (source_filter(wanted_source) & ui_mask::source_mask(ui_mask::source_kind::hudless));
     // The HUD-less snapshot this render offers, and whether the render before
     // it offered the same one, inexactly (a re-offer for the T1 grace).
@@ -338,8 +362,15 @@ namespace sunshine_game3d::ui_input {
         queue->get_native());
     for (unsigned slot = 0; slot != kinds.size(); ++slot) {
       const auto kind = kinds[slot];
+      auto &row = recorded[slot];
+      const bool filtered = capturing && (source_filter(wanted_source) & ui_mask::source_mask(kind));
+      row.state = filtered ? record_state::absent : record_state::inactive;
+      row.reason = !capturing ? unrequested : filtered ? "no_ready_snapshot" : "not_selected";
       if (!(snapshots.found & ui_mask::source_mask(kind))) continue;
       const auto &selected = snapshots.by[slot];
+      row.key = {selected.origin.frame_generation_evaluation ? sunshine_game3d::source_api::ngx :
+        sunshine_game3d::source_api::streamline, selected.origin.source.viewport};
+      row.epoch = selected.origin.source.epoch;
       const bool hudless = kind == ui_mask::source_kind::hudless;
       // Without a same-batch Backbuffer, counting proposes the presented color
       // after the tag for a snapshot's first offer, or retained color for a
@@ -359,11 +390,12 @@ namespace sunshine_game3d::ui_input {
         pairing.kind == hudless_present::unpaired ?
           (tagged && tagged != UINT64_MAX && current > tagged ? hudless_stale : hudless_other) :
         offered_before ? hudless_reoffered : hudless_late;
-      // An unauthenticated UIAlpha tag cannot hide independently usable
-      // lower-priority candidates in Auto; an authenticated one is validated on
-      // the GPU, as is DLSS-G's named DLSSG.UIAlpha. A manual choice may use it.
-      const bool admissible = (manual || kind != ui_mask::source_kind::alpha || alpha_authenticated ||
-        selected.origin.frame_generation_evaluation) && (!hudless || paired);
+      const auto refusal = ui_mask::admit_candidate(kind, manual, alpha_authenticated,
+        selected.origin.frame_generation_evaluation, paired);
+      const bool admissible = refusal == ui_mask::candidate_refusal::none;
+      row.state = record_state::refused;
+      row.reason = admissible ? "copy_failed" : refusal == ui_mask::candidate_refusal::hudless_unpaired ?
+        hudless_outcome_names[hudless_result] : "UIAlpha_unauthenticated";
       api::resource_view view{};
       // Direct binding: the leased snapshot itself, at the output's extent
       // (the renderer's slot copy has that extent too), else the copy. A
@@ -396,6 +428,8 @@ namespace sunshine_game3d::ui_input {
         }
       }
       if (!view.handle) continue;
+      row.state = record_state::ready;
+      row.reason = hudless ? hudless_outcome_names[hudless_result] : "offered";
       if (kind == ui_mask::source_kind::backbuffer) backbuffer = {view, current, &selected.origin};
       if (slot < declared_intervals.size()) declared_intervals[slot] = {current, &selected.origin};
       // A manual HUD-less choice captures the Backbuffer only as its pair.
@@ -443,6 +477,9 @@ namespace sunshine_game3d::ui_input {
     ui_layer::live_capture layer;
     const bool layer_wanted = status.requested &&
       (source_filter(wanted_source) & ui_mask::source_mask(ui_mask::source_kind::color_and_alpha));
+    auto &layer_row = recorded[recorded_layer];
+    layer_row = {{sunshine_game3d::source_api::ui_layer}, layer_wanted ? record_state::absent : record_state::inactive,
+      layer_wanted ? "no_live_copy" : status.requested ? "not_selected" : "not_requested"};
     if (layer_wanted && ui_layer::latest(runtime->get_device(), now, layer)) {
       constexpr std::uint64_t layer_capture = std::uint64_t(1) << 62; // Never a Streamline ticket id.
       // Direct binding reads the live copy where it lies when queue order, or
@@ -472,6 +509,8 @@ namespace sunshine_game3d::ui_input {
         {"executed_queue", layer.executed_queue}, {"presenting_queue_order", layer.order == ui_layer::read_order::queue},
         {"read_order", ui_layer::name(layer.order)},
         {"fence_value", layer.fence_value}});
+      layer_row.state = view.handle ? record_state::ready : record_state::refused;
+      layer_row.reason = view.handle ? "offered" : "copy_failed";
       if (view.handle) {
         offered_inputs[4] = layer_capture | layer.capture_id;
         result.detection.layer = view;
@@ -499,9 +538,14 @@ namespace sunshine_game3d::ui_input {
       result.status.retained_alpha_ready = true;
       result.detection.hold_previous = true;
       available = true;
+      // A generated Present: the previous real frame's decision stands in.
+      for (auto &row : recorded)
+        if (row.state == record_state::absent) { row.state = record_state::held; row.reason = "generated_present"; }
     }
-    const bool current_allowed = status.requested && !status.fg_active() && present_has_alpha(base.output_format) &&
-      (wanted_source == choice::automatic || wanted_source == choice::current_color);
+    const char *const current_refused = current_color_refusal(status, base.output_format, wanted_source);
+    const bool current_allowed = !current_refused;
+    recorded[recorded_current] = {{sunshine_game3d::source_api::present},
+      current_allowed ? record_state::ready : record_state::inactive, current_allowed ? "offered" : current_refused};
     if (current_allowed) {
       if (diagnostic) candidates.push_back({{"source", "current_color"}, {"candidate_bit", ui_detection::candidate::current},
         {"available_for_detection", true}, {"association", "current_color_allocation"}, {"format", base.output_format}});
@@ -521,6 +565,8 @@ namespace sunshine_game3d::ui_input {
       if (diagnostic) candidates.push_back({{"source", "none"}, {"held_for_generated_present", true},
         {"association", "same_snapshot_identities_as_last_detection"}});
       result.detection.hold_previous = true;
+      for (auto &row : recorded)
+        if (row.state == record_state::ready) { row.state = record_state::held; row.reason = "same_snapshot_inputs"; }
     }
     // A manual choice observes its selected capture's own provenance.
     const auto observe_origin = [&](const ui_mask::selection &selected) {
@@ -530,6 +576,12 @@ namespace sunshine_game3d::ui_input {
       origin.epoch = source.epoch; origin.revision = source.observation_revision;
       origin.viewport = source.viewport; origin.sequence = source.sequence; origin.tick_ms = source.tick;
       result.explicit_origin = origin;
+    };
+    // A manual choice's explicit pick decides instead of the other rows; Auto
+    // detection validates every offered candidate on the GPU.
+    auto manual_pick = sunshine_game3d::source_slot::none;
+    const auto ui_row = [](std::size_t index) {
+      return static_cast<sunshine_game3d::source_slot>(std::size_t(sunshine_game3d::source_slot::ui_alpha) + index);
     };
     if (manual) {
       // The explicit first filtered candidate in draw order: UIAlpha, UI color
@@ -548,9 +600,11 @@ namespace sunshine_game3d::ui_input {
         result.source_metadata = pick.metadata;
         observe_origin(pick.selected);
         chosen = true;
+        manual_pick = ui_row(slot);
       }
       if (!chosen && current_allowed) {
         candidate.source = choice::current_color; chosen = true;
+        manual_pick = sunshine_game3d::source_slot::current_color;
         result.kind = ui_input_kind::current_color_alpha; result.status.input = source_alpha_input::present_alpha;
       }
       if (!chosen && explicit_captures[3].set) {
@@ -561,6 +615,7 @@ namespace sunshine_game3d::ui_input {
         result.source_metadata = pick.metadata;
         observe_origin(pick.selected);
         chosen = true;
+        manual_pick = sunshine_game3d::source_slot::hudless;
       }
       if (!chosen) result.status.input = source_alpha_input::none;
     } else {
@@ -611,7 +666,18 @@ namespace sunshine_game3d::ui_input {
       result.kind = ui_input_kind::unavailable; result.view = {}; result.explicit_origin.reset();
       result.detection = {}; result.detection.current_color = false;
       result.status.retained_alpha_ready = false; result.status.input = source_alpha_input::none;
+      // The session's scope or qualification withdrew what was offered.
+      for (auto &row : recorded)
+        if (row.state == record_state::ready || row.state == record_state::held) {
+          row.state = record_state::refused; row.reason = "qualification_unavailable";
+        }
     }
+    for (std::size_t i = 0; i != recorded.size(); ++i)
+      if ((recorded[i].state == record_state::absent || recorded[i].state == record_state::refused) &&
+          manual_pick != ui_row(i))
+        recorded[i].fallback_to = manual_pick;
+    if (auto *record = sunshine_game3d::frame_record_store::writable(runtime))
+      sunshine_game3d::record_ui(*record, recorded, frame_sequence, now);
     if (log_gate) {
       const auto &gate = latest.hook_gate;
       // Where tag begin() calls stopped without an attempt (process counts per

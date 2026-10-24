@@ -1614,6 +1614,50 @@ namespace {
   }
 } // namespace
 
+namespace {
+  // Characterization (refactor plan P0a) of the ledger's edges that the
+  // groups above leave unexercised, pinned as they are today for P11, which
+  // moves the ledger's persistence out of ui_input::acquire.
+  void ledger_edges_are_pinned() {
+    // A sample over no pixels is no evidence: nothing earns, counts or is reported.
+    alpha_auto_policy empty;
+    unsigned reports = 0;
+    empty.on_change([&](const std::string &) { ++reports; });
+    auto evidence = sample().alpha(kind::ui_color, 26).e;
+    evidence.valid_bits = valid_bits_of(evidence);
+    for (std::uint64_t tick = 1000; tick <= 5000; tick += 1000) empty.observe(evidence, 0, tick, signatures());
+    require(!accepts(empty, kind::ui_color) && !empty.counters()[ui_counter::trust_earned] && !reports,
+      "A sample over no pixels earned acceptance");
+    // A contradiction older than the newest one restarts the doubt window:
+    // after 1000 and 1500, the one at 1200 starts again, so 1300 is only the
+    // second contradiction and 1400 the third.
+    alpha_auto_policy doubt;
+    doubt.restore("backbuffer:24:srgb");
+    const auto contradicted = sample().alpha(kind::backbuffer, 1000).pair(100, 900).one_way(kind::backbuffer, 1000, 800);
+    for (const std::uint64_t tick : {1000u, 1500u, 1200u, 1300u}) feed(doubt, contradicted, tick);
+    require(accepts(doubt, kind::backbuffer) && !doubt.counters()[ui_counter::trust_revoked_exact],
+      "A contradiction older than the newest kept the earlier ones in the doubt window");
+    feed(doubt, contradicted, 1400);
+    require(!accepts(doubt, kind::backbuffer) && doubt.counters()[ui_counter::trust_revoked_exact] == 1,
+      "Three contradictions after the restart did not revoke");
+    // A testable sample older than the previous one adds no reconfirm time
+    // (A3): 240 samples running back from 999 ms leave the restored entry its
+    // whole minute, which then counts from the oldest of them (760 ms).
+    alpha_auto_policy clock;
+    clock.restore("current:24:srgb");
+    feed(clock, sample().alpha(kind::current, 50), 1000);
+    for (std::uint64_t tick = 999; tick >= 760; --tick) feed(clock, sample().alpha(kind::current, tick % 2 ? 500u : 50u), tick);
+    require(accepts(clock, kind::current) && !clock.counters()[ui_counter::trust_lapsed],
+      "Testable samples running back in time counted reconfirm time");
+    for (std::uint64_t tick = 1000; tick <= 60700; tick += 100)
+      feed(clock, sample().alpha(kind::current, (tick / 100) % 2 ? 500u : 50u), tick);
+    require(accepts(clock, kind::current), "The restored entry lapsed before its minute from 760 ms");
+    feed(clock, sample().alpha(kind::current, 50), 60800);
+    require(!accepts(clock, kind::current) && clock.counters()[ui_counter::trust_lapsed] == 1,
+      "The restored entry did not lapse a minute after 760 ms");
+  }
+}
+
 int main() {
   try {
     mode_is_auto_until_a_manual_edit_and_auto_again_after_it();
@@ -1634,7 +1678,8 @@ int main() {
     pre_ui_proof_is_earned_by_pixels();
     ui_counters_are_formatted_and_trust_events_counted();
     sample_decode_and_commit_are_shared();
-    std::puts("Source alpha session: 18 policy groups passed");
+    ledger_edges_are_pinned();
+    std::puts("Source alpha session: 19 policy groups passed");
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "Source alpha session failed: %s\n", error.what());

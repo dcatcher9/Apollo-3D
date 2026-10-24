@@ -6,6 +6,7 @@
 #include "test_streamline_direct_runtime.cpp"
 #include "depth_refusal.h"
 #include "game3d_controls.h"
+#include "game3d_frame_record.h"
 #include "game3d_ui_detection_contract.h"
 #include "game3d_ui_layer.h"
 #include "test_sl_fixture_sdk.h"
@@ -42,6 +43,20 @@ namespace {
     if (!execute_probe.armed || execute_probe.probed) return;
     if (execute_probe.list && (!commands || commands->get_native() != execute_probe.list)) return;
     execute_probe.probed = execute_probe.query && execute_probe.query(&execute_probe.seen);
+  }
+
+  // The frame record of every Present (docs/reshade-sbs.md, Frame record),
+  // copied in ReShade's reshade_present event, after the add-on wrote it in
+  // that Present's present event; one entry per depth Present.
+  struct record_history_t {
+    BOOL (*query)(api::effect_runtime *, sunshine_game3d::frame_record *){};
+    std::vector<sunshine_game3d::frame_record> records;
+  } record_history;
+  void record_present(api::effect_runtime *runtime) {
+    sunshine_game3d::frame_record value;
+    if (record_history.query && record_history.query(runtime, &value) && value.present &&
+        (record_history.records.empty() || record_history.records.back().present != value.present))
+      record_history.records.push_back(value);
   }
 }
 
@@ -195,6 +210,96 @@ namespace {
       }
       return value;
     }
+    // The provider's status lines: an API source's ("Sunshine Streamline|NGX
+    // depth: <status>; source_selected=...") and its fallback or handoff
+    // ("Sunshine API depth:").
+    std::vector<std::string> provider_lines() {
+      std::vector<std::string> lines;
+      std::ifstream file(runtime_directory / "ReShade.log", std::ios::binary);
+      for (std::string line; std::getline(file, line);)
+        if (line.find("source_selected=") != std::string::npos || line.find("Sunshine API depth: ") != std::string::npos)
+          lines.push_back(line);
+      return lines;
+    }
+    // Whether a Present's frame record states the selection one provider
+    // status line logged: Generic or the handoff hold, else the API rung with
+    // pixels (fresh or held as the line's display says) or H in mono.
+    static bool record_logs(const sunshine_game3d::frame_record &r, const std::string &line) {
+      using sunshine_game3d::source_slot;
+      using sunshine_game3d::source_state;
+      const auto has = [&](const char *part) { return line.find(part) != std::string::npos; };
+      const auto &hold = r[source_slot::hold];
+      if (has("Sunshine API depth: ")) {
+        if (has("holding API ownership (mono)"))
+          return r.depth_owner == source_slot::hold && hold.state == source_state::mono &&
+            !std::strcmp(hold.reason, "source_handoff");
+        return has("using generic depth fallback") && r.depth_owner == source_slot::generic &&
+          hold.state == source_state::absent;
+      }
+      if (has("source_selected=1") && r.present != number_after(line, " present=")) return false;
+      const auto api = has("Sunshine NGX depth: ") ? sunshine_game3d::source_api::ngx :
+        sunshine_game3d::source_api::streamline;
+      if (!has("final_ready=1"))
+        return r.depth_owner == source_slot::hold && hold.state == source_state::mono && hold.key.api == api;
+      if (r.depth_owner != source_slot::fg_depth && r.depth_owner != source_slot::scene_depth) return false;
+      const auto &row = r[r.depth_owner];
+      return row.state == (has("display=reused_depth") ? source_state::held : source_state::ready) && row.key.api == api;
+    }
+    // Every provider status line since the last check names the selection of
+    // a Present's frame record, in order, each after the previous one's. The
+    // record is written but read by nothing else (P0b); this is its runtime
+    // contract with the log.
+    std::size_t matched_lines{};
+    std::uint64_t matched_present{};
+    void require_records_match_log(const char *label) {
+      // The asynchronous writer flushes this scenario's lines meanwhile.
+      for (const auto until = GetTickCount64() + 300; GetTickCount64() < until;) present_frame();
+      const auto lines = provider_lines();
+      auto &records = record_history.records;
+      std::size_t next{}, matched{};
+      for (; matched_lines < lines.size(); ++matched_lines, ++matched) {
+        const auto &line = lines[matched_lines];
+        auto at = next;
+        while (at < records.size() && (records[at].present <= matched_present || !record_logs(records[at], line))) ++at;
+        if (at == records.size()) {
+          std::printf("MEASURE native-provider record-log %s unmatched after %zu records: %s\n", label, next, line.c_str());
+          for (auto i = next; i < records.size() && i < next + 8; ++i) log_record("record-log-candidate", records[i]);
+          throw std::runtime_error(std::string("A provider status line names no frame record's selection: ") + label);
+        }
+        next = at + 1; matched_present = records[at].present;
+      }
+      std::printf("MEASURE native-provider record-log %s lines=%zu records=%zu\n", label, matched, records.size());
+      // A later line names a later Present than the last matched one. The
+      // newest record stays for require_record.
+      if (records.size() > 1)
+        records.erase(records.begin(), records.begin() + std::ptrdiff_t(std::min(next, records.size() - 1)));
+    }
+    void log_record(const char *label, const sunshine_game3d::frame_record &r) {
+      using sunshine_game3d::source_slot;
+      std::printf("MEASURE native-provider record %s present=%llu owner=%s", label,
+        static_cast<unsigned long long>(r.present), sunshine_game3d::name(r.depth_owner));
+      for (const auto slot : {source_slot::fg_depth, source_slot::scene_depth, source_slot::hold, source_slot::generic,
+          source_slot::backbuffer, source_slot::hudless}) {
+        const auto &row = r[slot];
+        std::printf(" %s={%s %s api=%s fallback=%s first_ready=%llu}", sunshine_game3d::name(slot),
+          sunshine_game3d::name(row.state), row.reason, sunshine_game3d::name(row.key.api),
+          sunshine_game3d::name(row.fallback_to), static_cast<unsigned long long>(row.first_ready_ms));
+      }
+      std::printf("\n");
+    }
+    const sunshine_game3d::frame_record &newest_record() {
+      require(!record_history.records.empty(), "No frame record was written for a Present");
+      return record_history.records.back();
+    }
+    // The newest Present's depth owner, and one row's state and reason.
+    void require_record(const char *label, sunshine_game3d::source_slot owner, sunshine_game3d::source_slot slot,
+        sunshine_game3d::source_state state, const char *reason = nullptr) {
+      const auto &r = newest_record();
+      const auto &row = r[slot];
+      if (r.depth_owner == owner && row.state == state && (!reason || !std::strcmp(row.reason, reason))) return;
+      log_record(label, r);
+      throw std::runtime_error(std::string("The frame record does not state the provider's selection: ") + label);
+    }
     static bool same_scale(float a, float b) {
       return std::isfinite(a) && std::isfinite(b) && std::abs(a-b) <= std::max(1.f,std::abs(b))*1e-5f;
     }
@@ -294,6 +399,9 @@ namespace {
       query_refusal = reinterpret_cast<refusal_t>(GetProcAddress(module, "SunshineDepthTestLastRefusal"));
       require(capture && query_provider_status && query_automatic && query_scale && query_refusal,
         "Test add-on lacks native provider metadata adapter, passive UI observations or the refusal query");
+      record_history.query = reinterpret_cast<decltype(record_history.query)>(
+        GetProcAddress(module, "SunshineGame3DTestFrameRecord"));
+      require(record_history.query, "Test add-on lacks the frame record");
       // The Diagnostics switch on, as the panel sets it, unless
       // SUNSHINE_GAME3D_TEST_DIAGNOSTICS_OFF keeps it off: it adds per-pass
       // GPU timing only, so candidates stay bound directly either way.
@@ -322,12 +430,28 @@ namespace {
       active_area = {0, 0, selected->width, selected->height};
       decoy = target(width, height, 1, 9, false, true);
       reshade::register_event<reshade::addon_event::reset_command_list>(observe_reset);
+      // Every provider status line from here on must name a recorded Present.
+      reshade::register_event<reshade::addon_event::reshade_present>(record_present);
+      for (const auto until = GetTickCount64() + 300; GetTickCount64() < until;) { step(); no_effects(); }
+      matched_lines = provider_lines().size();
     }
 
     void run_streamline() {
       render_tracked_depth = [&] { draw_frame(); };
       const auto first_ready = settle("SL-UAV-over-native-DSV");
       require(ticket && v2_capture_calls, "Native provider fixture never nominated actual produced UAV depth");
+      {
+        using sunshine_game3d::source_slot;
+        using sunshine_game3d::source_state;
+        require_record("SL-UAV-over-native-DSV", source_slot::scene_depth, source_slot::scene_depth, source_state::ready,
+          "fresh_copy");
+        require_record("SL-UAV-over-native-DSV", source_slot::scene_depth, source_slot::fg_depth, source_state::inactive,
+          "FG_off");
+        require_record("SL-UAV-over-native-DSV", source_slot::scene_depth, source_slot::generic, source_state::inactive,
+          "API_depth_owner");
+        require(newest_record()[source_slot::scene_depth].key.api == sunshine_game3d::source_api::streamline &&
+          newest_record()[source_slot::scene_depth].first_ready_ms, "The frame record named another scene depth source");
+      }
       const auto before_reload = observed.reloads;
       observed.runtime->reload_effect_next_frame(nullptr);
       const auto reload_until = GetTickCount64() + 15000;
@@ -367,6 +491,8 @@ namespace {
               static_cast<unsigned long long>(presented - fresh_tick));
           }
           require(held, "Failed provider evaluation showed depth other than its newest completed copy, or after its age bound");
+          require_record("SL-failed-evaluation-held", sunshine_game3d::source_slot::scene_depth,
+            sunshine_game3d::source_slot::scene_depth, sunshine_game3d::source_state::held, "retained_copy");
           ++holds;
           continue;
         }
@@ -374,6 +500,8 @@ namespace {
         require(!s.ready() && !s.source.reused_depth &&
           s.scale_state == unsigned(sunshine_game3d::automatic_scale_state::held),
           "Failed provider evaluation reused stale depth after mono or did not hold the native scale");
+        require_record("SL-failed-evaluation-mono", sunshine_game3d::source_slot::hold, sunshine_game3d::source_slot::hold,
+          sunshine_game3d::source_state::mono, "provider_associated");
       }
       require(mono >= 4, "Failed provider evaluations kept showing depth past the held copy's age bound");
       std::printf("MEASURE native-provider SL-failed-evaluation holds=%u mono=%u\n", holds, mono);
@@ -1812,6 +1940,12 @@ namespace {
       log_status(label, s);
       require(consecutive >= 12, frame_generation_input ? "An accepted FG copy did not take its viewport's depth back" :
         "A silent FG scope did not let the same viewport's SR depth through");
+      using sunshine_game3d::source_slot;
+      const auto rung = frame_generation_input ? source_slot::fg_depth : source_slot::scene_depth;
+      require_record(label, rung, rung, sunshine_game3d::source_state::ready, "fresh_copy");
+      // SR depth gets through only while the scope is silent, as logged.
+      if (!frame_generation_input)
+        require_record(label, rung, source_slot::fg_depth, sunshine_game3d::source_state::refused, "FG_scope_silent");
     }
     std::size_t readiness_losses() {
       return reshade_log_count({"Sunshine depth readiness: lost"}) +
@@ -1901,6 +2035,10 @@ namespace {
             present_frame(); const auto real = inspect();
             log_status("SLFG-pair-real-depth", real);
             require(active(real) && !real.source.reused_depth, "Fresh FG source did not produce current native depth");
+            require_record("SLFG-pair-real-depth", sunshine_game3d::source_slot::fg_depth, sunshine_game3d::source_slot::fg_depth,
+              sunshine_game3d::source_state::ready, "fresh_copy");
+            require_record("SLFG-pair-real-depth", sunshine_game3d::source_slot::fg_depth,
+              sunshine_game3d::source_slot::scene_depth, sunshine_game3d::source_state::inactive, "FG_scope_required");
             // One generated presentation has current color but no new provider call
             // or game depth draw. Observe production retention without modifying it.
             render_tracked_depth = {};
@@ -1915,7 +2053,10 @@ namespace {
               generated.source.current.capture == real.source.current.capture &&
               generated.source.current.sequence == real.source.current.sequence && same_scale(generated.scale, real.scale),
               "Generated presentation failed to retain completed real depth and its native matrix scale");
+            require_record("SLFG-generated-previous-depth", sunshine_game3d::source_slot::fg_depth,
+              sunshine_game3d::source_slot::fg_depth, sunshine_game3d::source_state::held, "retained_copy");
           }
+          require_records_match_log("SLFG-pairs");
         }, {}});
       // Dynamic resolution (Assassin's Creed Shadows with FG on, 10-23): the
       // tagged extent of the same source changes every second real frame.
@@ -2401,6 +2542,25 @@ namespace {
             "DLSS-G's HUD-less and Backbuffer were not captured for UI detection");
           require(reshade_log_number_above("Sunshine UI capture gate:", "hudless_presents={batch=", 0, 12000),
             "DLSS-G's HUD-less image did not reach UI detection with its same-evaluation Backbuffer as an exact pair");
+          {
+            // The frame record's UI rows name that exact pair: DLSS-G's own
+            // HUD-less offered as a same-batch pair, with its Backbuffer.
+            using sunshine_game3d::source_slot;
+            const auto exact_pair = [&] {
+              const auto &r = newest_record();
+              const auto &hudless_row = r[source_slot::hudless], &backbuffer_row = r[source_slot::backbuffer];
+              return hudless_row.state == sunshine_game3d::source_state::ready && !std::strcmp(hudless_row.reason, "batch") &&
+                hudless_row.key.api == sunshine_game3d::source_api::ngx &&
+                backbuffer_row.state == sunshine_game3d::source_state::ready &&
+                backbuffer_row.key.api == sunshine_game3d::source_api::ngx;
+            };
+            bool paired = false;
+            for (const auto until = GetTickCount64() + 3000; !paired && GetTickCount64() < until;) {
+              present_frame(); paired = exact_pair();
+            }
+            if (!paired) log_record("DLSSG-exact-pair", newest_record());
+            require(paired, "The frame record did not name DLSS-G's same-batch HUD-less pair the gate line counted");
+          }
           // The game's own HUD-less and Backbuffer tags copy on its command list
           // (as in a game whose Streamline UI tags already work with FG on): per
           // kind the tag keeps precedence, as for depth. The evaluation offers
@@ -2483,6 +2643,21 @@ namespace {
           log_status("SLFG-silent-scope-no-API-source", mono);
           require(!mono.source.ready && generic_lines() == generic_before,
             "A silent FG scope with no API source supplied depth or used the generic depth fallback");
+          {
+            // The record holds the queue in mono for the FG scope (H), never
+            // Generic, with neither API rung delivering.
+            using sunshine_game3d::source_slot;
+            using sunshine_game3d::source_state;
+            require_record("SLFG-silent-scope-no-API-source", source_slot::hold, source_slot::hold, source_state::mono,
+              "FG_scope_required");
+            require_record("SLFG-silent-scope-no-API-source", source_slot::hold, source_slot::generic, source_state::inactive,
+              "API_depth_owner");
+            const auto &r = newest_record();
+            for (const auto slot : {source_slot::fg_depth, source_slot::scene_depth})
+              require(r[slot].state != source_state::ready && r[slot].state != source_state::held &&
+                r[slot].fallback_to == source_slot::hold, "The frame record named an API rung delivering for a silent scope");
+          }
+          require_records_match_log("SLFG-silent-scope");
           std::puts("PASS native SLFG scope: refused FG tags let the same viewport's SR depth through after a second, never before; an accepted FG copy owns the viewport again and SR stays out; with no SR the silent scope stays mono, never generic; no FX");
         }, {}});
     }
@@ -2582,6 +2757,8 @@ namespace {
 
     void finish() {
       render_tracked_depth = {};
+      require_records_match_log("finish");
+      reshade::unregister_event<reshade::addon_event::reshade_present>(record_present);
       reshade::unregister_event<reshade::addon_event::reset_command_list>(observe_reset);
       no_effects(); require(evidence.good(), "Could not write native provider evidence");
     }

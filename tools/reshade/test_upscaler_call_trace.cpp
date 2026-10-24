@@ -5,6 +5,7 @@
 #include "streamline_depth_capture.h"
 #include "addon_lifetime.h"
 #include "game3d_diagnostic_metadata.h"
+#include "test_minhook_ledger.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <array>
@@ -57,8 +58,11 @@ namespace {
   std::atomic<bool> feedback_getter_entered{}, release_feedback_getter{};
   std::atomic<result> return_result{ngx_success};
   std::atomic<bool> write_output{true};
+  // The handle CreateFeature returns, so that two features can coexist.
+  std::atomic<std::uintptr_t> created_handle{handle_bits};
   bool nested_evaluation{};
   const void *nested_parameters{};
+  const void *nested_handle{}; // The nested call's feature (default: the outer call's).
   bool release_in_original{};
   bool release_in_probe{};
   struct fixture_parameters {
@@ -153,7 +157,7 @@ extern "C" __declspec(dllexport) FIXTURE_NOINLINE result __cdecl NVSDK_NGX_D3D12
     void *commands, std::uint32_t feature, void *parameters, void **output) {
   observed = {commands, nullptr, parameters, output, nullptr, feature, GetLastError()};
   ++actual_creates;
-  if (write_output.load() && output) *output = reinterpret_cast<void *>(handle_bits);
+  if (write_output.load() && output) *output = reinterpret_cast<void *>(created_handle.load());
   SetLastError(output_error);
   return return_result.load();
 }
@@ -161,7 +165,8 @@ extern "C" __declspec(dllexport) FIXTURE_NOINLINE result __cdecl NVSDK_NGX_D3D12
     void *commands, const void *handle, const void *parameters, callback_type progress) {
   observed = {commands, handle, parameters, nullptr, progress, 0, GetLastError()};
   ++actual_evaluations;
-  if (nested_evaluation) evaluate_c_entry(commands, handle, nested_parameters ? nested_parameters : parameters, progress);
+  if (nested_evaluation)
+    evaluate_c_entry(commands, nested_handle ? nested_handle : handle, nested_parameters ? nested_parameters : parameters, progress);
   if (release_in_original) release_entry(const_cast<void *>(handle));
   if (block_original.load()) {
     original_entered.store(true);
@@ -333,6 +338,7 @@ namespace {
     // The process image enumerates first; 1100 entries ahead of it put its NGX
     // exports past the former 1024-module cap.
     testing::set_synthetic_modules(1100);
+    const auto hooks = minhook_ledger::mark();
     initialize(self, true);
     SetLastError(input_error);
     poll();
@@ -343,6 +349,16 @@ namespace {
     auto counts = testing::counts();
     require(counts.installed == 4 && counts.ngx_evaluate == 0 && counts.reports == 1,
       "real export discovery or no-call coverage failed");
+    // The installed hook set (refactor plan P4, test_minhook_ledger.h): one
+    // hook on each NGX export, in discovery's order.
+    if (minhook_ledger::available()) {
+      auto created = minhook_ledger::created_since(hooks);
+      std::vector<void *> expected{reinterpret_cast<void *>(create_entry), reinterpret_cast<void *>(evaluate_entry),
+        reinterpret_cast<void *>(evaluate_c_entry), reinterpret_cast<void *>(release_entry)};
+      std::sort(created.begin(), created.end());
+      std::sort(expected.begin(), expected.end());
+      require(created == expected, "NGX discovery did not hook exactly the four NGX exports");
+    }
     require(counts.modules >= 1 && !counts.truncated && counts.truncations == 0 && logged("truncated=0 truncations=0"),
       "discovery past 1024 enumerated modules was truncated or not counted");
     require(logged("NGX_evaluate=0") && logged("not API absence") && logged("SL_hook=0"),
@@ -640,6 +656,139 @@ namespace {
     nested_evaluation = false; nested_parameters = nullptr;
     release_entry(handle); shutdown(); sunshine_ngx::testing::set_callbacks({});
     attempt_counter = nullptr; reject = nullptr; metadata_only = nullptr;
+  }
+
+  // Characterization (refactor plan P0a, correction 1): how a wrapper's
+  // nested NGX evaluation shares depth with its enclosing call today. The
+  // inner call is deduplicated only while the outer one holds capture
+  // authority (a recorded copy) or an enclosing Streamline evaluation claimed
+  // it; any other outcome of the outer call leaves the inner one to supply
+  // depth. A live Streamline FG scope owns depth for both, while DLSS-G's own
+  // evaluation offers its inputs to that scope unless an outer authority
+  // skips the call. These rows protect the nesting rule through P6
+  // (depth_selection's nested_in) and P14 (NGX DLSS-G as an FG depth reporter).
+  void nesting_characterization_test() {
+    enum class outer_call { recorded, missing_depth, invalid_subrect, rejected, metadata_only, failed_call, fg_owned,
+      streamline_claimed, dlssg };
+    struct row {
+      const char *pins;
+      outer_call outer;
+      bool inner_dlssg; // The nested call evaluates DLSS-G instead of an SR feature.
+      unsigned copies;
+      char copied; // Whose depth the copy is: O outer, I inner, - none.
+      unsigned attempts, finishes, offers; // record() calls, ticket completions, DLSS-G input offers.
+      const char *counters; // The NGX line's counts.
+    };
+    using o = outer_call;
+    const row rows[]{
+      {"An outer recorded copy holds authority: the inner SR call is deduplicated", o::recorded, false, 1, 'O', 1, 1, 0,
+        "evaluations=1 nominations=1 copy_recorded=1 metadata_only=0 fg_owned=0"},
+      {"An outer call without Depth leaves the inner call to supply it", o::missing_depth, false, 1, 'I', 1, 1, 0,
+        "evaluations=2 nominations=1 copy_recorded=1 metadata_only=0 fg_owned=0"},
+      {"An outer call with an invalid depth subrect leaves the inner call to supply it", o::invalid_subrect, false, 1, 'I',
+        1, 1, 0, "evaluations=2 nominations=1 copy_recorded=1 metadata_only=0 fg_owned=0"},
+      {"An outer copy the capture owner rejected leaves the inner call to supply depth", o::rejected, false, 1, 'I', 2, 1, 0,
+        "evaluations=2 nominations=1 copy_recorded=1 metadata_only=0 fg_owned=0"},
+      {"An outer metadata-only nomination leaves the inner call to supply depth; both tickets finish", o::metadata_only,
+        false, 1, 'I', 2, 2, 0, "evaluations=2 nominations=2 copy_recorded=1 metadata_only=1 fg_owned=0"},
+      {"Authority is taken at the call: a failing outer call still deduplicates the inner one", o::failed_call, false, 1,
+        'O', 1, 1, 0, "evaluations=1 nominations=1 copy_recorded=1 metadata_only=0 fg_owned=0"},
+      {"A live Streamline FG scope owns depth for both calls", o::fg_owned, false, 0, '-', 0, 0, 0,
+        "evaluations=2 nominations=0 copy_recorded=0 metadata_only=0 fg_owned=2"},
+      {"An enclosing Streamline evaluation that claimed depth suppresses both calls", o::streamline_claimed, false, 0, '-',
+        0, 0, 0, "evaluations=0 nominations=0 copy_recorded=0 metadata_only=0 fg_owned=0"},
+      {"An outer DLSS-G call offers its inputs and holds no authority over a nested SR call", o::dlssg, false, 1, 'I', 1, 1,
+        1, "evaluations=1 nominations=1 copy_recorded=1 metadata_only=0 fg_owned=0"},
+      {"A nested DLSS-G call under an outer recorded copy is skipped and offers nothing", o::recorded, true, 1, 'O', 1, 1, 0,
+        "evaluations=1 nominations=1 copy_recorded=1 metadata_only=0 fg_owned=0"},
+      {"A nested DLSS-G call offers its inputs while a live FG scope owns the outer call's depth", o::fg_owned, true, 0, '-',
+        0, 0, 1, "evaluations=1 nominations=0 copy_recorded=0 metadata_only=0 fg_owned=1"},
+      {"An enclosing claimed Streamline evaluation also stops DLSS-G's inputs", o::streamline_claimed, true, 0, '-', 0, 0, 0,
+        "evaluations=0 nominations=0 copy_recorded=0 metadata_only=0 fg_owned=0"},
+    };
+    constexpr std::uint64_t outer_depth = 0xface1000, inner_depth = 0xface2000;
+    constexpr std::uintptr_t inner_handle = handle_bits + 0x1000;
+    static unsigned attempts, offers;
+    static outer_call current;
+    std::string failures;
+    for (const auto &r : rows) {
+      initialize(GetModuleHandleW(nullptr), false, true);
+      captures = finishes = attempts = offers = 0;
+      captured_frame = {};
+      current = r.outer;
+      sunshine_ngx::testing::callbacks hooks{
+        [](std::uint64_t, const sunshine_scene_depth::frame &value) -> std::uint64_t {
+          ++attempts;
+          if (value.resource.native == outer_depth && current == o::rejected) return 0;
+          if (value.resource.native == outer_depth && current == o::metadata_only) return 94;
+          captured_frame = value; ++captures; return 93;
+        },
+        [](std::uint64_t, bool successful) { ++finishes; last_finish = successful; }, nullptr,
+        [](std::uint64_t ticket) { return ticket != 94; }};
+      hooks.frame_generation = [](const sunshine_streamline::frame_generation::inputs &) {
+        ++offers;
+        return sunshine_streamline::frame_generation::attempt{};
+      };
+      hooks.frame_generation_owns_depth = [] { return current == o::fg_owned; };
+      sunshine_ngx::testing::set_callbacks(hooks);
+      fixture_parameters outer, inner;
+      outer.depth = reinterpret_cast<void *>(outer_depth); inner.depth = reinterpret_cast<void *>(inner_depth);
+      outer.missing_hardware_depth = inner.missing_hardware_depth = false; // An explicit depth contract.
+      outer.missing_depth = r.outer == o::missing_depth;
+      outer.missing_y = r.outer == o::invalid_subrect;
+      outer.dlssg_depth = r.outer == o::dlssg ? reinterpret_cast<void *>(0xd1550000) : nullptr;
+      inner.dlssg_depth = r.inner_dlssg ? reinterpret_cast<void *>(0xd1560000) : nullptr;
+      void *outer_handle{}, *created_inner{};
+      return_result = ngx_success;
+      created_handle = handle_bits;
+      require(create_entry(reinterpret_cast<void *>(0x123), r.outer == o::dlssg ? 11 : 60001, &outer, &outer_handle) ==
+        ngx_success, "Nesting fixture failed to create its outer feature");
+      created_handle = inner_handle;
+      require(create_entry(reinterpret_cast<void *>(0x123), r.inner_dlssg ? 11 : 60001, &inner, &created_inner) ==
+        ngx_success && created_inner == reinterpret_cast<void *>(inner_handle), "Nesting fixture failed to create its inner feature");
+      created_handle = handle_bits;
+      nested_evaluation = true; nested_parameters = &inner; nested_handle = created_inner;
+      const auto calls = actual_evaluations.load();
+      return_result = r.outer == o::failed_call ? ngx_failure : ngx_success;
+      SetLastError(input_error);
+      {
+        streamline_scope scope(0, 0x123);
+        scope.claim_depth_capture(r.outer == o::streamline_claimed);
+        require(evaluate_entry(reinterpret_cast<void *>(0x123), outer_handle, &outer, &callback) == return_result &&
+            GetLastError() == output_error && actual_evaluations == calls + 2,
+          "Nested evaluation changed the original calls, result or LastError");
+        scope.finish(true);
+      }
+      return_result = ngx_success;
+      nested_evaluation = false; nested_parameters = nullptr; nested_handle = nullptr;
+      messages.clear();
+      sunshine_ngx::poll();
+      const char copied = !captures ? '-' : captured_frame.resource.native == outer_depth ? 'O' :
+        captured_frame.resource.native == inner_depth ? 'I' : '?';
+      const unsigned copies = captures, attempted = attempts, finished = finishes;
+      const bool counted = logged(r.counters);
+      // Capture authority never outlives its evaluation: the inner SR
+      // feature, evaluated on its own afterwards, copies its depth.
+      bool released = true;
+      if (!r.inner_dlssg && r.outer != o::fg_owned) {
+        require(evaluate_entry(reinterpret_cast<void *>(0x123), created_inner, &inner, &callback) == ngx_success,
+          "The unnested follow-up evaluation failed");
+        released = captures == copies + 1;
+      }
+      if (copies != r.copies || copied != r.copied || attempted != r.attempts || finished != r.finishes ||
+          offers != r.offers || !counted || !released) {
+        char text[512];
+        std::snprintf(text, sizeof(text), "\n  %s: copies %u copied %c attempts %u finishes %u offers %u counters %s "
+          "released %d", r.pins, copies, copied, attempted, finished, offers, counted ? "match" : "differ", released);
+        failures += text;
+        for (const auto &message : messages) if (message.find("Sunshine NGX depth:") != std::string::npos)
+          failures += "\n    " + message.substr(0, message.find(" unknown_feature="));
+      }
+      release_entry(created_inner); release_entry(outer_handle);
+      shutdown(); sunshine_ngx::testing::set_callbacks({});
+    }
+    require(failures.empty(), ("NGX nesting characterization changed:" + failures).c_str());
+    std::printf("PASS NGX nesting characterization: %zu rows (outer outcome x inner SR or DLSS-G call)\n", std::size(rows));
   }
 
   void metadata_nomination_diagnostic_test() {
@@ -1668,6 +1817,7 @@ int main() {
     std::puts("PASS default-off trace with independent NGX capture, named getters, crop/orientation, feature lifetime, nested and SL deduplication");
     nested_capture_authority_test();
     std::puts("PASS nested NGX capture requires a validated nomination, not feature metadata, depth presence or a rejected native attempt");
+    nesting_characterization_test();
     metadata_nomination_diagnostic_test();
     std::puts("PASS metadata-only NGX nominations preserve missing-state diagnostics, ticket completion and truthful copy counters");
     ray_reconstruction_test();
