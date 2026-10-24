@@ -2597,7 +2597,8 @@ the consumed-alpha artifact and its provenance remain authoritative when a mask 
 Its `hook_gate` records the latest public tag callback's scope, observed UI kinds, matching
 request count and admission result; `request_generation` identifies the retained live request.
 A request matches a tag only while its runtime refreshed it (on every Present that wants UI
-captures) within 250 ms (`maximum_source_age_ms`) of the tag's entry, so a swapchain that stopped
+captures) within 250 ms (the source age, `source_age_ms` in
+[`freshness.h`](../tools/reshade/freshness.h)) of the tag's entry, so a swapchain that stopped
 presenting (a launcher, an old swapchain beside its replacement) no longer makes every tag of the
 live one `ambiguous_request`, and a new runtime takes the entry of the one refreshed longest ago
 once it expired. A tag is copied only while its runtime read its UI captures within 1 s
@@ -3921,8 +3922,8 @@ Interpolating depth for FG 2x from motion vectors and two real depth frames is f
 The current implementation does not synthesize depth for generated frames.
 
 Nomination, admission of completed snapshots and display-depth reuse share one freshness limit:
-less than 250 ms from the original depth capture timestamp, defined by
-`sunshine_scene_depth::maximum_source_age_ms`. Display-depth reuse also requires the same runtime
+less than 250 ms from the original depth capture timestamp, defined by `source_age_ms` in
+[`freshness.h`](../tools/reshade/freshness.h). Display-depth reuse also requires the same runtime
 queue and display allocation, unchanged color dimensions and any known depth storage, view and
 resource kind; under enabled FG the retained copy must belong to that FG scope. Failed consumer
 copies, loss of the source association (for example FG Off before an ordinary source exists),

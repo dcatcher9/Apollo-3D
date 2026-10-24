@@ -339,7 +339,7 @@ namespace sunshine_streamline::depth_capture {
         if (view.sequence != 3 || !finished(41, 3, false) || !view.rejected_since) return false;
         expire_association(sr, GetTickCount64());
         if (!sr.provider_established) return false; // A brief rejected run keeps the owner.
-        view.rejected_since -= association_timeout_ms + 1;
+        view.rejected_since -= sunshine_freshness::association_ms + 1;
         begin_evaluation(5, 4, 0, provider_kind::streamline);
         if (view.sequence != 4 || !view.rejected_since) return false;
         expire_association(sr, GetTickCount64());
@@ -365,7 +365,7 @@ namespace sunshine_streamline::depth_capture {
           finish(id, successful);
           return slots[0].finished;
         };
-        const auto silent_since = [] { return GetTickCount64() - association_timeout_ms - 1; };
+        const auto silent_since = [] { return GetTickCount64() - sunshine_freshness::fg_silent_ms - 1; };
         if (!frame_generation_scope_live(epoch, 2, GetTickCount64()) || frame_generation_scope_live(epoch, 2, silent_since()) ||
             frame_generation_scope_live(epoch, 2, 0)) return false;
         // A refused FG boundary begins an evaluation but accepts no copy.
@@ -391,7 +391,7 @@ namespace sunshine_streamline::depth_capture {
           return head.epoch == epoch && head.viewport == 2 && head.source_id == fg;
         });
         if (own == current.views.end() || !own->accepted_tick) return false;
-        own->accepted_tick -= association_timeout_ms + 1;
+        own->accepted_tick -= sunshine_freshness::fg_silent_ms + 1;
         if (frame_generation_scope_live(epoch, 2, silent_since())) return false;
         // Without an active capture owner only the first second counts.
         own->accepted_tick = GetTickCount64(); requested = false;
@@ -591,7 +591,7 @@ namespace sunshine_streamline::depth_capture {
         make(2, provider_kind::ngx, 60, 2, 500).finished = false;
         if (pick(2).value == &preferred) return false;
         // An owner without a recently copied frame holds nothing.
-        preferred_owner.last_source_tick = GetTickCount64() - sunshine_scene_depth::maximum_source_age_ms - 1;
+        preferred_owner.last_source_tick = GetTickCount64() - sunshine_freshness::source_age_ms - 1;
         if (pick(2).value != &preferred) return false;
         // Metadata observed after the copy (camera reset, tag change, loss)
         // never makes a readable SL copy yield to a ready NGX source.
@@ -606,7 +606,7 @@ namespace sunshine_streamline::depth_capture {
         auto &pending = make(3, provider_kind::streamline, 70, 2, 0); pending.finished = false;
         auto held = pick(3);
         if (held.value || held.latest != &pending || held.result != status::recorded) return false;
-        preferred_owner.last_source_tick = GetTickCount64() - sunshine_scene_depth::maximum_source_age_ms - 1;
+        preferred_owner.last_source_tick = GetTickCount64() - sunshine_freshness::source_age_ms - 1;
         if (pick(3).value != &next_fallback) return false;
         preferred_owner.last_source_tick = GetTickCount64();
         pending.finished = true; pending.success = false;
@@ -1121,7 +1121,7 @@ namespace sunshine_streamline::depth_capture {
       // Time passes for a source that stopped evaluating, including the last
       // frame the queue copied from it.
       const auto expire = [&](const pipeline &p, queue_state &queue) {
-        constexpr auto age = sunshine_scene_depth::maximum_source_age_ms + 1;
+        constexpr auto age = sunshine_freshness::source_age_ms + 1;
         for (auto &view : evaluations[provider_index(p.provider)].views)
           if (view.source_id == p.source_id && view.tick > age) view.tick -= age;
         for (auto &value : slots)
@@ -1317,7 +1317,7 @@ namespace sunshine_streamline::depth_capture {
         auto own = ngx(); auto other = streamline();
         if (!deliver(owner, own, present)) return false;
         present_frame(owner, ++present); // Consumes nothing new: the pipeline did not advance.
-        owner.last_source_tick -= sunshine_scene_depth::maximum_source_age_ms + 1;
+        owner.last_source_tick -= sunshine_freshness::source_age_ms + 1;
         advance(other); finish_gpu(other);
         const auto takeover = present_frame(owner, ++present);
         if (takeover.value != other.pending || takeover.result != status::ready ||
@@ -1334,7 +1334,7 @@ namespace sunshine_streamline::depth_capture {
         auto &uncopied = *own.pending;
         advance(own);
         if (!completed_pick(present_frame(owner, ++present, {}, false), &uncopied)) return false;
-        owner.last_source_tick -= sunshine_scene_depth::maximum_source_age_ms + 1;
+        owner.last_source_tick -= sunshine_freshness::source_age_ms + 1;
         advance(own); advance(other); finish_gpu(other);
         const auto revoked = present_frame(owner, ++present);
         if (revoked.value != other.pending || revoked.result != status::ready ||
@@ -1444,7 +1444,7 @@ namespace sunshine_streamline::depth_capture {
               owner.provider != owner_kind || !owner.admission_after) return false;
         }
         // No owner frame was copied within the source age.
-        owner.last_source_tick -= sunshine_scene_depth::maximum_source_age_ms + 1;
+        owner.last_source_tick -= sunshine_freshness::source_age_ms + 1;
         const auto gap = owner.admission_after;
         fail(); advance(other);
         const auto handover = present_frame(owner, ++present);

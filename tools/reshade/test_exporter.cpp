@@ -721,8 +721,15 @@ namespace {
       refused([](auto &, auto &, auto &d) { d.projection.supplied = true; }, 1100, "A capture with its own camera was held");
       refused([](auto &, auto &, auto &d) { d.projection.encoding = sunshine_scene_depth::depth_encoding::linear_distance; }, 1100,
         "Linear depth needs no camera but was held");
-      refused([](auto &, auto &, auto &) {}, 1000 + sunshine_scene_depth::maximum_source_age_ms + 1,
+      refused([](auto &, auto &, auto &) {}, 1000 + sunshine_freshness::source_age_ms + 1,
         "A projection scene older than the source age was held");
+      {
+        // The hold admits its limit (<=, freshness.h).
+        auto f = frame;
+        f.scene = {};
+        require(hold_projection_scene(f, previous, depth, 1000 + sunshine_freshness::source_age_ms) && f.scene.ready,
+          "A projection scene exactly the source age old was not held");
+      }
       refused([](auto &, auto &p, auto &) { p.scene.projection_ms = 0; }, 1100, "A raw-placed scene was held");
       refused([](auto &, auto &p, auto &) { p.depth_ready = false; }, 1100, "A scene was held across a depth gap");
       refused([](auto &f, auto &, auto &) { ++f.scene_source[1]; }, 1100, "Another source's scene was held");

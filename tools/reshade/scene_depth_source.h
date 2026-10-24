@@ -8,9 +8,6 @@
 // Provider adapters validate their own ABI/frame/camera evidence before emitting
 // this small value snapshot. It contains no vendor structures or pixel owner.
 namespace sunshine_scene_depth {
-  // Nomination and completed pixels share one freshness limit. Multi-frame
-  // generation can present while two real frames are still in flight.
-  inline constexpr std::uint64_t maximum_source_age_ms = 250;
   enum class provider_kind { streamline, ngx };
   // The API that reports a source. Depth sources come from Streamline, NGX
   // and Generic; the frame record's UI rows (game3d_frame_record.h) also

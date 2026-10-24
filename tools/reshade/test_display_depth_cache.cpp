@@ -165,7 +165,7 @@ namespace {
         case 8: local.view = 0; break;
         case 9: value.provided.tick = 0; break;
         case 10: local.now = value.provided.tick - 1; break;
-        case 11: local.now = value.provided.tick + sunshine_scene_depth::maximum_source_age_ms; break;
+        case 11: local.now = value.provided.tick + sunshine_freshness::source_age_ms; break;
       }
       arm(cache, value);
       require(!cache.reuse(hold(), local, 72, out), "invalid local hold was accepted");
@@ -177,7 +177,7 @@ namespace {
     display_depth_cache cache;
     const auto value = fresh(); auto local = context(); frame_depth out;
     arm(cache, value);
-    local.now = value.provided.tick + sunshine_scene_depth::maximum_source_age_ms - 1;
+    local.now = value.provided.tick + sunshine_freshness::source_age_ms - 1;
     require(cache.reuse(hold(), local, 72, out), "last fresh millisecond was rejected");
     same_image(out, value);
     local.now++;

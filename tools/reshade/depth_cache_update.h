@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
+#include "freshness.h"
 #include "streamline_depth_capture.h"
 
 namespace sunshine_streamline::depth_capture {
@@ -47,7 +48,7 @@ namespace sunshine_streamline::depth_capture {
   // Source policy only. copy_fresh authorizes an attempt, never a successful
   // copy: failure must invalidate, not re-enter this policy to hold old pixels.
   // Otherwise the newest successful private copy is held while it is younger
-  // than maximum_source_age_ms and the provider still names the same source.
+  // than the source age (freshness.h) and the provider still names the same source.
   // A pending, failed or missing newer frame, a new render size of the same
   // source, a camera reset and tag or observation bookkeeping never discard
   // it; a changed source, storage format, view or resource kind, encoding and
@@ -91,7 +92,7 @@ namespace sunshine_streamline::depth_capture {
       out.reason = "depth_encoding_changed";
       return out;
     }
-    if (!before.tick || now < before.tick || now - before.tick >= sunshine_scene_depth::maximum_source_age_ms) {
+    if (!sunshine_freshness::within_source_age(before.tick, now)) {
       out.reason = "retained_depth_expired";
       return out;
     }

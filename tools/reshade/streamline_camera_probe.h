@@ -11,6 +11,7 @@
 #include "native_discard_observer.h"
 #include "streamline_depth_capture.h"
 #include "frame_generation_inputs.h"
+#include "freshness.h"
 #include "observation_loss_journal.h"
 
 namespace sunshine_streamline {
@@ -152,7 +153,7 @@ namespace sunshine_streamline {
   // native coverage and final-color registration remain unverified. A newer invalid/drop event,
   // failed evaluation, token reuse, unsupported inputs, or age limit fails closed.
   evidence_status query_evaluation(const selected_depth &selected, evaluation_snapshot &output,
-    std::uint32_t max_age_ms = 250);
+    std::uint32_t max_age_ms = sunshine_freshness::evidence_age_ms);
   const char *name(evidence_status value);
 
   struct depth_source_tag {
@@ -171,7 +172,8 @@ namespace sunshine_streamline {
   // proof. The owner must consume a fresh sequence once per native present and
   // match the frozen lifetime/device/extent to a valid current captured source.
   // Streamline frame identity is never a ReShade presentation frame identity.
-  evidence_status query_depth_source(depth_source_snapshot &output, std::uint32_t max_age_ms = 250);
+  evidence_status query_depth_source(depth_source_snapshot &output,
+    std::uint32_t max_age_ms = sunshine_freshness::evidence_age_ms);
 
   enum class presentation_status {
     inactive, missing_marker_function, missing_bracket, pending_marker, open_bracket,
@@ -187,7 +189,8 @@ namespace sunshine_streamline {
   };
   // Current calling thread only. This identifies an explicit successful marker
   // bracket, never swapchain identity, final-color content or GPU completion.
-  presentation_status query_current_presentation(presentation_snapshot &output, std::uint32_t max_age_ms = 250);
+  presentation_status query_current_presentation(presentation_snapshot &output,
+    std::uint32_t max_age_ms = sunshine_freshness::evidence_age_ms);
   const char *name(presentation_status value);
 
   struct frame_generation_snapshot {
@@ -229,7 +232,7 @@ namespace sunshine_streamline {
   // of FG mode or camera validity. This admits capture, never authorizes a mask
   // or claims correspondence to a ReShade presentation. UINT32_MAX searches all.
   bool query_ui_scope(std::uint32_t viewport, ui_observation_scope &output,
-    std::uint32_t max_age_ms = 250);
+    std::uint32_t max_age_ms = sunshine_freshness::evidence_age_ms);
 
 #ifdef SUNSHINE_STREAMLINE_PROBE_TEST
   namespace versioning { struct number; }

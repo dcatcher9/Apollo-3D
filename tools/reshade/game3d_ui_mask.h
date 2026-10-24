@@ -89,7 +89,7 @@ namespace sunshine_game3d::ui_mask {
   }());
   // A request is live while its runtime refreshes it (set_request on every
   // Present that wants UI captures): only requests refreshed within
-  // maximum_source_age_ms of a tag match it, so a swapchain that stopped
+  // the source age (freshness.h) of a tag match it, so a swapchain that stopped
   // presenting (a launcher, an old swapchain beside its replacement) never
   // makes the tags of the live one ambiguous.
   struct request {
@@ -347,7 +347,7 @@ namespace sunshine_game3d::ui_mask {
     std::array<selection, 4> by{};
     std::uint32_t found{};
   };
-  // One scan per Present: every snapshot within maximum_source_age_ms is
+  // One scan per Present: every snapshot within the source age is
   // polled once, older and failed ones retire, and each allowed kind's newest
   // ready snapshot is returned; a kind's availability or priority cannot hide
   // another kind from automatic validation. A nonzero consumer_queue opts
@@ -370,8 +370,8 @@ namespace sunshine_game3d::ui_mask {
   // another shape or an unreadable format included) revoke that kind's
   // snapshots of the same origin (a Streamline tag or DLSS-G's evaluation);
   // dedicated alpha, UI color and backbuffer remain distinct semantic sources.
-  // now_ms is the tag's entry tick; only requests refreshed within
-  // maximum_source_age_ms of it count.
+  // now_ms is the tag's entry tick; only requests refreshed within the
+  // source age of it count.
   bool interested(std::uint64_t epoch, std::uint64_t revision, std::uint32_t viewport, std::uint64_t now_ms,
     std::uint32_t *matching_requests = nullptr);
   void observe_gate(const capture_gate_observation &value);

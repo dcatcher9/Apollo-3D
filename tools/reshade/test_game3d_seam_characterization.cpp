@@ -18,6 +18,7 @@
   #error "Built only into the Streamline probe tests' view of the production sources"
 #endif
 #include "depth_cache_update.h"
+#include "freshness.h"
 #include "game3d_ui_input_provider.h"
 #include "game3d_ui_mask.h"
 #include "ngx_depth_source.h"
@@ -45,7 +46,7 @@ namespace sunshine_streamline::depth_capture {
 
     constexpr std::uint64_t native = 77;
     constexpr std::uint64_t fg_source = 1ull << 63;  // Viewport 0's FG input.
-    constexpr auto source_age = sunshine_scene_depth::maximum_source_age_ms;
+    constexpr auto source_age = sunshine_freshness::source_age_ms;
 
     // The capture owner's globals, emptied before each row.
     void reset() {
@@ -239,7 +240,7 @@ namespace sunshine_streamline::depth_capture {
           fg = &value;
         }
         const auto now = GetTickCount64();
-        const selection_policy policy {true, epoch, 0, false, r.just_enabled ? now : now - association_timeout_ms - 1};
+        const selection_policy policy {true, epoch, 0, false, r.just_enabled ? now : now - sunshine_freshness::fg_silent_ms - 1};
         // provider::begin's selection for this Present.
         const auto scope = provider::select_frame_generation_scope(policy);
         const bool live = !scope.silent;
@@ -301,7 +302,8 @@ namespace sunshine_streamline::depth_capture {
           finish(value.id, true);
         }
         const auto now = GetTickCount64();
-        const bool suppressed = sunshine_ngx::frame_generation_owns_depth(r.enabled, epoch, 0, r.just_enabled ? now : now - association_timeout_ms - 1);
+        const bool suppressed = sunshine_ngx::frame_generation_owns_depth(r.enabled, epoch, 0,
+          r.just_enabled ? now : now - sunshine_freshness::fg_silent_ms - 1);
         if (suppressed != r.suppressed) {
           char text[512];
           std::snprintf(text, sizeof(text), "P5 NGX under FG, %s: suppressed %d", r.pins, suppressed);
@@ -548,7 +550,9 @@ namespace sunshine_streamline::depth_capture {
     // limit (<=): expire_association's evaluations and the handoff window of
     // evaluation_live, neither of which admits a tick ahead of the clock; an
     // FG scope's enabled and accepted ticks admit both
-    // (frame_generation_scope_live).
+    // (frame_generation_scope_live). The handoff limit (250 ms) admits its
+    // limit (<=) in the provider's handoff_hold and in the evaluation_live
+    // window the provider passes it. Each limit is named in freshness.h.
     enum class edge_site {
       capture_tick,
       view_tick,
@@ -561,7 +565,9 @@ namespace sunshine_streamline::depth_capture {
       association_pending,
       evaluation_window,
       scope_enabled,
-      scope_accepted
+      scope_accepted,
+      handoff_association,
+      handoff_evaluation
     };
 
     std::string pick_outcome(const capture_pick &pick, const slot *first, char first_label, const slot *second, char second_label) {
@@ -696,7 +702,7 @@ namespace sunshine_streamline::depth_capture {
             scope_clock = now;
             std::uint64_t enabled_tick = now - age;
             if (site == edge_site::scope_accepted) {
-              enabled_tick = now - association_timeout_ms - 1;
+              enabled_tick = now - sunshine_freshness::fg_silent_ms - 1;
               auto &view = views[0];
               view = {epoch, 1, now, fg_source, 0};
               view.accepted_tick = now - age;
@@ -705,12 +711,33 @@ namespace sunshine_streamline::depth_capture {
             scope_clock = 0;
             return live ? "live" : "silent";
           }
+        case edge_site::handoff_association:
+          {
+            // The provider owned the previous Present, the size is unchanged
+            // and an evaluation is live; the last associated Present was age
+            // ms ago.
+            const auto now = GetTickCount64();
+            const provider::handoff_evidence evidence {true, true, now, now - age, 1920, 1080, 1920, 1080};
+            return provider::handoff_hold(evidence, sunshine_freshness::handoff_ms) ? "hold" : "release";
+          }
+        case edge_site::handoff_evaluation:
+          {
+            make(0, provider_kind::streamline, epoch, 1, 0);
+            const auto now = GetTickCount64();
+            for (auto &view : views) {
+              if (view.sequence) {
+                view.tick = now - age;
+              }
+            }
+            return evaluation_live(now, sunshine_freshness::handoff_ms) ? "live" : "silent";
+          }
       }
       return "?";
     }
 
     void freshness_edges() {
-      constexpr std::int64_t limit = source_age, timeout = association_timeout_ms;
+      constexpr std::int64_t limit = source_age, timeout = sunshine_freshness::association_ms;
+      constexpr std::int64_t handoff = sunshine_freshness::handoff_ms;
       using e = edge_site;
 
       struct row {
@@ -756,6 +783,11 @@ namespace sunshine_streamline::depth_capture {
         {"An FG copy accepted exactly the association timeout ago is live", e::scope_accepted, timeout, "live"},
         {"An FG copy accepted past the association timeout is silent", e::scope_accepted, timeout + 1, "silent"},
         {"An FG copy accepted on another thread ahead of this read is live", e::scope_accepted, -1, "live"},
+        {"A Present associated exactly the handoff limit ago holds the handoff", e::handoff_association, handoff, "hold"},
+        {"A Present associated past the handoff limit releases it", e::handoff_association, handoff + 1, "release"},
+        {"A Present associated ahead of the clock releases it", e::handoff_association, -1, "release"},
+        {"An evaluation exactly the handoff limit old keeps a handoff live", e::handoff_evaluation, handoff, "live"},
+        {"An evaluation past the handoff limit does not", e::handoff_evaluation, handoff + 1, "silent"},
       };
       for (const auto &r : rows) {
         const auto got = edge_outcome(r.site, r.age);

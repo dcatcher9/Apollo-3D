@@ -408,7 +408,7 @@ RWTexture2D<float> depth : register(u0);
     // source age bound; a failed, missing or pending newer frame never replaces it.
     bool retained_copy() const {
       return provider.selected && provider.ready && provider.reused_depth && provider.current.sequence==fresh_sequence &&
-        present_started<fresh_ended+sunshine_scene_depth::maximum_source_age_ms;
+        present_started<fresh_ended+sunshine_freshness::source_age_ms;
     }
     // Failed, missing or refused input holds the newest completed copy until
     // its source age expires, then renders current-color mono. Calibration and
@@ -429,7 +429,7 @@ RWTexture2D<float> depth : register(u0);
       } while(mono<4);
       check_exported_mono();
       std::printf("MEASURE %s held_presents=%u mono_presents=%u age_bound_ms=%llu\n",phase,held,mono,
-        static_cast<unsigned long long>(sunshine_scene_depth::maximum_source_age_ms));
+        static_cast<unsigned long long>(sunshine_freshness::source_age_ms));
     }
     void require_established(const native_render &frame,const char *message) {
       require(frame.source_id==logical_source && status.scale==reference_scale && frame.depth_scale==reference_scale,message);

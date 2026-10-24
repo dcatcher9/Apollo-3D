@@ -435,7 +435,7 @@ RWTexture2D<float> depth : register(u0);
       if(captured_ready || ready()) {
         require(!hold_saw_mono && captured_ready && captured.reused_depth && ready() &&
           captured.source_resource.handle==fresh_source &&
-          present_started<fresh_ended+sunshine_scene_depth::maximum_source_age_ms,message);
+          present_started<fresh_ended+sunshine_freshness::source_age_ms,message);
         if(query_provider_status)
           require(provider.selected && provider.ready && provider.reused_depth &&
             provider.provider==sunshine_scene_depth::provider_kind::streamline && provider.current.sequence==fresh_sequence,

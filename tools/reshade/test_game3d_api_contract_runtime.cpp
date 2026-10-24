@@ -47,7 +47,7 @@
 // Isolation: every case has its own viewport and fresh resources.
 // Afterwards frame generation is turned off, the depth untagged (an NGX
 // feature released) and the case's viewport retired, the fixture presents
-// past maximum_source_age_ms with no SDK call or draw, the case's depth must
+// past the source age (freshness.h) with no SDK call or draw, the case's depth must
 // be gone, and SunshineGame3DTestRecalibrate resets calibration. A
 // known-good control case runs first and after every ten cases and must
 // capture (be offered); 3.0.0 has none, since nothing it tags may be shown.
@@ -912,11 +912,11 @@ namespace {
     static constexpr unsigned steady_presents = 6;
     // How long a case waits for its first fresh capture; frame generation
     // owns its viewport's depth for a second after it is enabled
-    // (association_timeout_ms), so an evaluate copy of an FG case waits past
+    // (freshness.h, fg_silent_ms), so an evaluate copy of an FG case waits past
     // it, and the Generic selector settles on a new view first.
     static constexpr std::uint64_t window_ms = 600, frame_generation_window_ms = 1600, generic_window_ms = 2500;
-    // Isolation: past maximum_source_age_ms with no SDK call.
-    static constexpr std::uint64_t isolation_ms = sunshine_scene_depth::maximum_source_age_ms + 10;
+    // Isolation: past the source age with no SDK call.
+    static constexpr std::uint64_t isolation_ms = sunshine_freshness::source_age_ms + 10;
     static constexpr unsigned retired_viewports = 4;
     // UI: how long the renderer's UI request has to take the case's input
     // before Dump3D lists what detection is offered.

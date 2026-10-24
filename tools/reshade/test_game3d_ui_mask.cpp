@@ -2,6 +2,7 @@
 // Exercises the live UI-alpha owner with deterministic native snapshot states.
 // Real D3D resource/command/fence retirement is tested by the shared capture suite.
 #include "game3d_ui_mask.h"
+#include "freshness.h"
 
 #include <cstdio>
 #include <atomic>
@@ -674,14 +675,14 @@ namespace {
   // its entry goes to a new runtime once expired.
   void stale_requests_expire() {
     reset();
-    constexpr auto age = scene::maximum_source_age_ms;
+    constexpr auto age = sunshine_freshness::source_age_ms;
     auto other = request(); other.runtime = runtime + 1;
     mask::set_request(other, 1000);
     std::uint32_t matches{};
     require(!mask::interested(7, 3, 11, 1000, &matches) && matches == 2, "Two live requests were not ambiguous");
     require(!begin(input(1, 1000 + age - 1)).runtime, "A tag guessed one of two live requests");
     require(mask::interested(7, 3, 11, 1000 + age, &matches) && matches == 1,
-      "A request not refreshed for maximum_source_age_ms still matched a tag");
+      "A request not refreshed for the source age still matched a tag");
     const auto captured = capture_one(2, 1000 + age);
     require(captured.reservation && records == 1, "A stale request made the live request's tag ambiguous");
     // A request refreshed after a tag's entry tick (on another thread) is live for it.

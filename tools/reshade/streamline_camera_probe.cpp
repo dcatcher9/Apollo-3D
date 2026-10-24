@@ -214,7 +214,7 @@ namespace sunshine_streamline {
       ReleaseSRWLockShared(&evaluation_supply_lock);
       const auto now = GetTickCount64();
       return supply.tick && supply.epoch == scope_epoch && supply.viewport == viewport &&
-        (now < supply.tick || now - supply.tick <= 1000);
+        sunshine_freshness::ahead_tolerant_le(supply.tick, now, sunshine_freshness::fg_silent_ms);
     }
     // The newest FG tag boundary's outcome per scope: when it recorded a copy
     // (tick), or zero when it was refused. A Streamline FG tag that copies
@@ -233,7 +233,7 @@ namespace sunshine_streamline {
       ReleaseSRWLockShared(&evaluation_supply_lock);
       const auto now = GetTickCount64();
       return copy.tick && copy.epoch == scope_epoch && copy.viewport == viewport &&
-        (now < copy.tick || now - copy.tick < sunshine_scene_depth::maximum_source_age_ms);
+        sunshine_freshness::ahead_tolerant_lt(copy.tick, now, sunshine_freshness::source_age_ms);
     }
     // The same precedence per UI kind (ui_mask::capture_slot): the tick the
     // newest Streamline UI tag of that kind for the scope recorded a copy, or
@@ -266,7 +266,7 @@ namespace sunshine_streamline {
       const auto tick = ui_tag_copy.tick[slot];
       ReleaseSRWLockShared(&evaluation_supply_lock);
       const auto now = GetTickCount64();
-      return scope && tick && (now < tick || now - tick < sunshine_scene_depth::maximum_source_age_ms);
+      return scope && tick && sunshine_freshness::ahead_tolerant_lt(tick, now, sunshine_freshness::source_age_ms);
     }
     // SDK calls answered with eWarnOutOfVRAM: accepted, counted for the log.
     std::atomic<std::uint64_t> vram_warnings{};
@@ -1171,7 +1171,7 @@ namespace sunshine_streamline {
       if (record.has_camera && record.decoded == decode_status::ok && record.camera.depth_inverted <= 1 &&
           record.camera.reset <= 1 && validate(record.camera).valid()) {
         const auto now = GetTickCount64();
-        if (now >= record.camera_tick && now - record.camera_tick < sunshine_scene_depth::maximum_source_age_ms) {
+        if (sunshine_freshness::fresh_lt(record.camera_tick, now, sunshine_freshness::source_age_ms)) {
           out.viewport_direction = true;
           out.viewport_inverted = record.camera.depth_inverted;
           if (record.steady_frames >= steady_projection_frames && record.steady_projection.valid()) {
@@ -2147,7 +2147,7 @@ namespace sunshine_streamline {
         const auto *camera_frame = find_frame(*pin, out.viewport, record.camera_frame);
         if (identity.kind == frame_identity_kind::unavailable && first_tag.source == origin::global &&
             (record.camera_frame.kind != frame_identity_kind::v2_constants_call || synchronous_global_depth) &&
-            record.has_camera && record.camera_tick <= out.tick && out.tick - record.camera_tick <= 250 &&
+            record.has_camera && sunshine_freshness::fresh_le(record.camera_tick, out.tick, sunshine_freshness::camera_age_ms) &&
             camera_frame && camera_frame->camera_serial < out.serial && camera_frame->loss == out.loss &&
             token_current(*pin, record.camera_frame))
           identity = record.camera_frame;
@@ -2160,8 +2160,8 @@ namespace sunshine_streamline {
         out.observation, out.serial, out.loss, &out, pin ? &*pin : nullptr, true);
       snapshot.tag_boundary = true;
       snapshot.frame_generation_input = enabled;
-      if (snapshot.frame_correlated && (snapshot.camera_sequence >= out.serial || snapshot.camera_tick > out.tick ||
-          out.tick - snapshot.camera_tick > 250)) {
+      if (snapshot.frame_correlated && (snapshot.camera_sequence >= out.serial ||
+          !sunshine_freshness::fresh_le(snapshot.camera_tick, out.tick, sunshine_freshness::camera_age_ms))) {
         snapshot.status = evidence_status::stale;
         snapshot.frame_correlated = false;
         if (!enabled) {
@@ -2836,7 +2836,7 @@ namespace sunshine_streamline {
       const auto &value = record.evaluation;
       if (!value.sequence) continue;
       if (!chosen || value.sequence > chosen->evaluation.sequence) chosen = &record;
-      if (now >= value.tick && now - value.tick <= max_age_ms) ++recent_viewports;
+      if (sunshine_freshness::fresh_le(value.tick, now, max_age_ms)) ++recent_viewports;
     }
     auto status = evidence_status::missing_evaluation;
     if (chosen) {
@@ -2851,8 +2851,8 @@ namespace sunshine_streamline {
         else if (value.loss_revision != loss) status = evidence_status::observation_lost;
         else if (!token_current(*pin, value.frame)) status = evidence_status::untracked_frame;
         else if (!frame || frame->camera_serial != value.camera_sequence) status = evidence_status::stale;
-        else if (now < value.tick || now - value.tick > max_age_ms ||
-            now < value.camera_tick || now - value.camera_tick > max_age_ms) status = evidence_status::stale;
+        else if (!sunshine_freshness::fresh_le(value.tick, now, max_age_ms) ||
+            !sunshine_freshness::fresh_le(value.camera_tick, now, max_age_ms)) status = evidence_status::stale;
       }
       if (status == evidence_status::source_associated_evaluation) {
         bool available = false;
@@ -2966,8 +2966,8 @@ namespace sunshine_streamline {
         else if (candidate.loss_revision != loss) status = evidence_status::observation_lost;
         else if (!token_current(*pin, candidate.frame)) status = evidence_status::untracked_frame;
         else if (!frame_state || frame_state->camera_serial != candidate.camera_sequence) status = evidence_status::stale;
-        else if (now < candidate.tick || now - candidate.tick > max_age_ms ||
-            now < candidate.camera_tick || now - candidate.camera_tick > max_age_ms) status = evidence_status::stale;
+        else if (!sunshine_freshness::fresh_le(candidate.tick, now, max_age_ms) ||
+            !sunshine_freshness::fresh_le(candidate.camera_tick, now, max_age_ms)) status = evidence_status::stale;
       }
       output.status = status;
     }
@@ -3002,7 +3002,7 @@ namespace sunshine_streamline {
       for (const auto index : {3u, 6u, 7u, 8u}) {
         const auto &tag = record.global_tags[index];
         if (!tag.present || !tag.supported || !tag.serial || tag.loss != loss ||
-            tag.value.observation_epoch != pin->epoch || !tag.tick || now < tag.tick || now - tag.tick >= max_age_ms) continue;
+            tag.value.observation_epoch != pin->epoch || !tag.tick || !sunshine_freshness::fresh_lt(tag.tick, now, max_age_ms)) continue;
         if (!newest || tag.serial > newest->serial) newest = &tag;
       }
       if (!newest) continue;
@@ -3234,7 +3234,7 @@ namespace sunshine_streamline {
       else if (output.status == presentation_status::open_bracket && !presentation_token_current(output.frame)) fail(presentation_status::untracked_frame);
       else if (output.status == presentation_status::open_bracket) {
         const auto now = GetTickCount64();
-        if (now < output.start_tick || now - output.start_tick > max_age_ms) fail(presentation_status::stale);
+        if (!sunshine_freshness::fresh_le(output.start_tick, now, max_age_ms)) fail(presentation_status::stale);
       }
     }
     ReleaseSRWLockExclusive(&presentations_lock);
@@ -3311,7 +3311,7 @@ namespace sunshine_streamline {
         for (const auto &record : camera_pin->records) if (record.used && record.has_camera) {
           ++cameras;
           const auto checked = validate(record.camera);
-          valid_recent += record.camera_tick <= now && now - record.camera_tick <= 250 &&
+          valid_recent += sunshine_freshness::fresh_le(record.camera_tick, now, sunshine_freshness::camera_age_ms) &&
             record.decoded == decode_status::ok && checked.valid();
           if (record.decoded == decode_status::ok && record.camera_tick >= camera_sample_tick) {
             camera_sample = record.camera;

@@ -7,6 +7,7 @@
 #include "game3d_depth_input.h"
 #include "streamline_depth_capture.h"
 #include "depth_cache_update.h"
+#include "freshness.h"
 #include <array>
 
 namespace sunshine_depth { struct sample_result; }
@@ -95,14 +96,15 @@ namespace sunshine_streamline::provider {
   // provider owned the previous Present, the last associated Present is at
   // most hold_ms old, the swapchain size is unchanged since then, and some
   // API provider began an evaluation within hold_ms (another source is about
-  // to establish). Reload resets the association.
+  // to establish). Reload resets the association. The provider passes
+  // freshness.h's handoff_ms.
   struct handoff_evidence {
     bool previously_owned{}, evaluation_live{};
     std::uint64_t now_ms{}, associated_ms{};
     std::uint32_t width{}, height{}, associated_width{}, associated_height{};
   };
   constexpr bool handoff_hold(const handoff_evidence &e, std::uint64_t hold_ms) {
-    return e.previously_owned && e.associated_ms && e.now_ms >= e.associated_ms && e.now_ms - e.associated_ms <= hold_ms &&
+    return e.previously_owned && e.associated_ms && sunshine_freshness::fresh_le(e.associated_ms, e.now_ms, hold_ms) &&
       e.width == e.associated_width && e.height == e.associated_height && e.evaluation_live;
   }
   void initialize(reshade::api::effect_runtime *runtime);

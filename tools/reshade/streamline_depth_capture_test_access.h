@@ -236,13 +236,6 @@ namespace sunshine_streamline::depth_capture {
       for (const auto &point : value.retirements) if (point.queue && (!point.value || !complete(point))) return false;
       return true;
     }
-    // An established source keeps its queue mono through gaps only while its
-    // API still evaluates it. A game that stops calling the API without a
-    // release (DLSS -> TAA, a cutscene without DLSS) loses the association
-    // after this silence, and Generic takes over through its usual hysteresis.
-    // Evaluations the API rejects for as long count as silence: an API that
-    // fails every call delivers no depth (BF6 10-22 held 70 s of mono on one).
-    constexpr std::uint64_t association_timeout_ms = 1000;
 #ifdef SUNSHINE_STREAMLINE_PROBE_TEST
     // Defined in streamline_depth_capture.cpp. Default arguments stay with the
     // definitions there; the regressions pass every argument.

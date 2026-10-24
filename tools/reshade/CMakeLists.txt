@@ -303,7 +303,7 @@ if(BUILD_TESTING)
   if(MINGW)
     target_link_options(reshade_game3d_native_shader_test PRIVATE -static)
   endif()
-  foreach(policy IN ITEMS depth_jitter scene_gain contrast_zero provided_raw_scene camera_sample_binding raw_scene_policy raw_scene_pool depth_capture_policy depth_probe_policy automatic_scene_transition raw_reference_statistics matched_disparity diagnostic_log_gate observation_loss_journal observer_snapshot projection_depth_scale projection_depth_controller depth_ready_uniform_cache depth_presentation_stats game3d_alpha_auto game3d_ui_sequence game3d_ui_adaptive game3d_ui_qualification capture_state_policy game3d_vram scene_depth_source)
+  foreach(policy IN ITEMS depth_jitter scene_gain contrast_zero provided_raw_scene camera_sample_binding raw_scene_policy raw_scene_pool depth_capture_policy depth_probe_policy automatic_scene_transition raw_reference_statistics matched_disparity diagnostic_log_gate observation_loss_journal observer_snapshot projection_depth_scale projection_depth_controller depth_ready_uniform_cache depth_presentation_stats game3d_alpha_auto game3d_ui_sequence game3d_ui_adaptive game3d_ui_qualification capture_state_policy game3d_vram scene_depth_source freshness)
     add_executable(reshade_${policy}_tests test_${policy}.cpp)
     target_compile_features(reshade_${policy}_tests PRIVATE cxx_std_17)
     if(MINGW)
@@ -314,6 +314,8 @@ if(BUILD_TESTING)
   endforeach()
   # It also pins the acceptance ledger's unexercised edges (README, Characterization tests).
   set_tests_properties(reshade_game3d_alpha_auto PROPERTIES LABELS "characterization")
+  # Each named time limit's value and edges (README, Characterization tests).
+  set_tests_properties(reshade_freshness PROPERTIES LABELS "characterization")
   # The first-run report's checks and its goldens over saved game logs (log_report_goldens). They need
   # only a Python 3 interpreter and are not registered without one.
   find_package(Python3 3.9 COMPONENTS Interpreter)

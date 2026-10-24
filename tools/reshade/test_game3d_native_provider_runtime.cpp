@@ -482,7 +482,7 @@ namespace {
         if (s.source.ready) {
           const bool held = !mono && s.source.reused_depth && s.source.current.capture == fresh.source.current.capture &&
             s.source.current.sequence == fresh.source.current.sequence &&
-            presented - fresh_tick < sunshine_scene_depth::maximum_source_age_ms;
+            presented - fresh_tick < sunshine_freshness::source_age_ms;
           if (!held) {
             log_status("SL-failed-evaluation-unexpected-depth", s);
             std::printf("MEASURE native-provider SL-failed-evaluation holds=%u mono=%u fresh_capture=%llu fresh_sequence=%llu age_ms=%llu\n",
@@ -2128,20 +2128,20 @@ namespace {
             held_fg(expiry_seed, holds ? nullptr : "SLFG-cache-expiry-first-hold");
             last_held = GetTickCount64(); ++holds;
           } while (holds < 2 || last_held < seed_returned + 140);
-          require(last_held >= seed_started && last_held - seed_started < sunshine_scene_depth::maximum_source_age_ms,
+          require(last_held >= seed_started && last_held - seed_started < sunshine_freshness::source_age_ms,
             "Native expiry fixture exhausted its source-age window before exercising repeated holds");
           log_status("SLFG-cache-expiry-last-hold", inspect());
           // The public passive status exposes identity, not the private capture tick.
           // Bracket the actual SDK tag instead: expiry after its upper time bound,
           // while the most recent successful hold is still young, distinguishes the
           // original capture lifetime from a TTL accidentally renewed on each hold.
-          const auto expiry_at = seed_returned + sunshine_scene_depth::maximum_source_age_ms + 20;
+          const auto expiry_at = seed_returned + sunshine_freshness::source_age_ms + 20;
           const auto before_expiry_wait = GetTickCount64();
           if (before_expiry_wait < expiry_at) Sleep(DWORD(expiry_at - before_expiry_wait));
           missing_fg("SLFG-cache-expired-after-repeated-holds");
           const auto expired = GetTickCount64();
           require(expired >= expiry_at && expired >= last_held &&
-            expired - last_held < sunshine_scene_depth::maximum_source_age_ms && fg_frame == seed_frame &&
+            expired - last_held < sunshine_freshness::source_age_ms && fg_frame == seed_frame &&
             tag_started == seed_started && tag_returned == seed_returned,
             "Native expiry fixture did not distinguish the original capture age from renewed hold age");
           missing_fg("SLFG-cache-expired-no-revival");
@@ -2176,7 +2176,7 @@ namespace {
             require(sl.constants(constants, *last_token, fg_viewport) == 0, "Camera recovery changed the SDK result");
           };
           held_fg(reset_seed, "SLFG-cache-camera-valid-without-depth");
-          require(GetTickCount64() - reset_seed_started < sunshine_scene_depth::maximum_source_age_ms,
+          require(GetTickCount64() - reset_seed_started < sunshine_freshness::source_age_ms,
             "Native camera-reset fixture expired before its holds were observed");
           render_tracked_depth = {};
           require(fg_frame == reset_seed_frame, "Camera-reset hold case accidentally produced a new real frame");

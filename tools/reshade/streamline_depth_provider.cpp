@@ -9,6 +9,7 @@
 #include "depth_content_sampler.h"
 #include "depth_ready_uniform_cache.h"
 #include "diagnostic_log_gate.h"
+#include "freshness.h"
 #include "projection_depth_scale.h"
 #include <reshade.hpp>
 #include "async_log.h"
@@ -25,7 +26,7 @@ namespace sunshine_streamline::provider {
   // A provider handoff (one API source released, another about to establish
   // on the same queue) keeps API ownership in mono at most this long instead
   // of starting the generic selector (docs/reshade-sbs.md, depth handoff).
-  constexpr std::uint64_t handoff_hold_ms = 250;
+  using sunshine_freshness::handoff_ms;
   namespace handoff_contract {
     constexpr handoff_evidence base{true, true, 1200, 1000, 1920, 1080, 1920, 1080};
     constexpr handoff_evidence with(handoff_evidence e, int field) {
@@ -40,10 +41,10 @@ namespace sunshine_streamline::provider {
       }
       return e;
     }
-    static_assert(handoff_hold(base, handoff_hold_ms) && handoff_hold(with(base, 6), handoff_hold_ms));
-    static_assert(!handoff_hold(with(base, 0), handoff_hold_ms) && !handoff_hold(with(base, 1), handoff_hold_ms) &&
-      !handoff_hold(with(base, 2), handoff_hold_ms) && !handoff_hold(with(base, 3), handoff_hold_ms) &&
-      !handoff_hold(with(base, 4), handoff_hold_ms) && !handoff_hold(with(base, 5), handoff_hold_ms));
+    static_assert(handoff_hold(base, handoff_ms) && handoff_hold(with(base, 6), handoff_ms));
+    static_assert(!handoff_hold(with(base, 0), handoff_ms) && !handoff_hold(with(base, 1), handoff_ms) &&
+      !handoff_hold(with(base, 2), handoff_ms) && !handoff_hold(with(base, 3), handoff_ms) &&
+      !handoff_hold(with(base, 4), handoff_ms) && !handoff_hold(with(base, 5), handoff_ms));
   }
     struct __declspec(uuid("e82eab46-4d62-4e80-9e02-0e60b7059f36")) state {
       depth_capture::packet frame;
@@ -495,6 +496,8 @@ namespace sunshine_streamline::provider {
       static_cast<unsigned long long>(value.source[1]), static_cast<unsigned long long>(value.source[2]),
       static_cast<unsigned long long>(value.source[3]));
   }
+  // The silent line names the FG scope's silence (freshness.h) in its text.
+  static_assert(sunshine_freshness::fg_silent_ms == 1000);
   void format_frame_generation_scope(char *text, std::size_t size, bool silent, std::uint32_t viewport,
       std::uint64_t epoch) {
     std::snprintf(text, size, silent ?
@@ -828,7 +831,7 @@ namespace sunshine_streamline::provider {
     // NGX, or the other way round, is evaluating and about to establish on
     // this queue) keeps API ownership in mono instead of enabling the generic
     // selector, its challenger and two effect rebinds for a few Presents.
-    // Bounded by handoff_hold_ms after the last associated Present, the same
+    // Bounded by handoff_ms after the last associated Present, the same
     // runtime (reload resets it) and swapchain size, and live evidence of an
     // API evaluation. An explicit release with no other evaluation falls back
     // at once, as before.
@@ -840,8 +843,8 @@ namespace sunshine_streamline::provider {
       e.associated_width = data->associated_width; e.associated_height = data->associated_height;
       // Queried last: the capture lock only when everything else holds.
       e.evaluation_live = handoff_hold({e.previously_owned, true, e.now_ms, e.associated_ms, e.width, e.height,
-        e.associated_width, e.associated_height}, handoff_hold_ms) && depth_capture::evaluation_live(handoff_tick, handoff_hold_ms);
-      return handoff_hold(e, handoff_hold_ms);
+        e.associated_width, e.associated_height}, handoff_ms) && depth_capture::evaluation_live(handoff_tick, handoff_ms);
+      return handoff_hold(e, handoff_ms);
     }();
     auto recorded = describe_acquisition(policy, scope, associated, hold, capture_info,
       available ? &data->frame.metadata : nullptr);
@@ -855,7 +858,7 @@ namespace sunshine_streamline::provider {
         // provider. Otherwise a valid captured depth rejected on another queue
         // looks indistinguishable from an absent API or an unknown queue.
         char text[768]{};
-        format_unassociated(text, sizeof(text), status, capture_info, hold, handoff_hold_ms);
+        format_unassociated(text, sizeof(text), status, capture_info, hold, handoff_ms);
         sunshine_log::message(reshade::log::level::info, text);
         data->last_status = status;
       }

@@ -3,6 +3,7 @@
 
 #include "depth_addon.h"
 #include "depth_cache_update.h"
+#include "freshness.h"
 
 namespace sunshine_streamline::provider {
   struct display_cache_context {
@@ -80,8 +81,7 @@ namespace sunshine_streamline::provider {
       if (!context.texture || !context.view || context.texture != depth_.resource.handle ||
           context.view != depth_.shader_resource.handle)
         return reject("display_storage_changed");
-      if (!depth_.provided.tick || context.now < depth_.provided.tick ||
-          context.now - depth_.provided.tick >= sunshine_scene_depth::maximum_source_age_ms)
+      if (!sunshine_freshness::within_source_age(depth_.provided.tick, context.now))
         return reject("retained_depth_expired");
       out = depth_;
       out.frame_index = present;

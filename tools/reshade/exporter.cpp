@@ -18,6 +18,7 @@
 #include "game3d_debug_dump.h"
 #include "game3d_test_render.h"
 #include "diagnostic_log_gate.h"
+#include "freshness.h"
 #include "streamline_camera_probe.h"
 #include "streamline_depth_capture.h"
 #include "src/reshade_bridge_protocol.h"
@@ -876,8 +877,8 @@ namespace {
   }
 
   // A fresh API capture that arrived without its own camera renders with the
-  // placement the projection controller resolved for the same source within
-  // maximum_source_age_ms, without advancing calibration. Projection
+  // placement the projection controller resolved for the same source at most
+  // the source age earlier (freshness.h), without advancing calibration. Projection
   // coefficients are camera constants; switching this one frame to the raw
   // controller instead rendered it mono (raw calibration never completed) and
   // restarted the 500 ms strength ramp. The Witcher 3 misses the camera of a
@@ -900,8 +901,8 @@ namespace {
     const bool own_camera = depth.projection.supplied ||
       depth.projection.encoding == sunshine_scene_depth::depth_encoding::linear_distance;
     const auto held = previous.scene.projection_ms;
-    if (own_camera || !depth.ready || !previous.depth_ready || !held || now < held ||
-        now - held > sunshine_scene_depth::maximum_source_age_ms || !frame.scene_source[0] ||
+    if (own_camera || !depth.ready || !previous.depth_ready || !held ||
+        !sunshine_freshness::fresh_le(held, now, sunshine_freshness::source_age_ms) || !frame.scene_source[0] ||
         previous.scene_source[0] != frame.scene_source[0] || previous.scene_source[1] != frame.scene_source[1] ||
         previous.scene_source[3] != frame.scene_source[3]) return false;
     frame.scene = previous.scene;

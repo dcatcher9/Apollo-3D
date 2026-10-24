@@ -243,7 +243,7 @@ namespace game3d_contract {
   enum class outcome_kind {
     capture,  // Fresh depth from the tagged resource and extent; bytes and state restored exactly.
     refuse,  // No Present uses this source; mono or a permitted hold; no barrier or copy recorded.
-    hold,  // The same capture for at most maximum_source_age_ms (scene_depth_source.h), then mono.
+    hold,  // The same capture for at most the source age (freshness.h), then mono.
     continuous,  // Every frame captured with the same logical source while the extent changes.
     offered,  // A UI input reaches UI selection.
     ignored  // Not a candidate for this role; nothing recorded.

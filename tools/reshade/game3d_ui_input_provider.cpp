@@ -4,6 +4,7 @@
 #include "game3d_ui_layer.h"
 #include "game3d_capture_diagnostic.h"
 #include "game3d_frame_record.h"
+#include "freshness.h"
 #include "streamline_camera_probe.h"
 #include "streamline_buffer_contract.h"
 #include <d3d12.h>
@@ -82,8 +83,7 @@ namespace sunshine_game3d::ui_input {
       return found->second;
     }
     void expire_available(source_entry &entry, std::uint64_t now) {
-      if (!entry.last_observe_tick || now < entry.last_observe_tick ||
-          now - entry.last_observe_tick >= sunshine_scene_depth::maximum_source_age_ms)
+      if (!sunshine_freshness::within_source_age(entry.last_observe_tick, now))
         entry.selection.unavailable();
     }
     bool present_has_alpha(std::uint32_t format) {

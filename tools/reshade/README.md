@@ -1502,11 +1502,12 @@ only as the capture the last real Present showed (a hold). Every SDK call must r
 interposer's result. Each case has its own viewport and allocation; afterwards FG is turned off,
 the depth untagged, the case's viewport retired (constants on four scratch viewports evict its
 record: a viewport whose FG is Off still counts toward FG authority) and the fixture presents past
-`maximum_source_age_ms` with no SDK call (the depth must be gone) and recalibrates; a known-good
-control, an OnlyValidNow tag at its FG tag call, runs first and after every ten cases. Their gaps
-are the known-gap table's `sl_runtime_rows`, whose cells pair the case with the copy point that
-decides; a gap at a copy point the frame reaches before the deciding check also shows its refusal
-class there. Only `sl27` can show a row stale: the others sample their release's cells.
+the source age ([`freshness.h`](freshness.h)) with no SDK call (the depth must be gone) and
+recalibrates; a known-good control, an OnlyValidNow tag at its FG tag call, runs first and after
+every ten cases. Their gaps are the known-gap table's `sl_runtime_rows`, whose cells pair the case
+with the copy point that decides; a gap at a copy point the frame reaches before the deciding check
+also shows its refusal class there. Only `sl27` can show a row stale: the others sample their
+release's cells.
 
 Family `ngx` drives Super Resolution, Ray Reconstruction and an unknown feature through `Depth`
 and the DLSS keys, and DLSS-G's own evaluation through `DLSSG.*` on a viewport whose FG the 2.7.30
@@ -1600,9 +1601,11 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   readable and pending sources and required or excluded FG, per-queue ownership and
   `establish_provider`'s watermark, and every reason of `decide_display`. Its freshness table
   pins each age limit one millisecond either side against an explicit clock: the source age at
-  every selection site, the association timeout of `expire_association` and `evaluation_live`, and
-  an FG scope's enabled and accepted ticks, which also admit a tick ahead of the clock (the
-  capture owner's `scope_clock` fixes `frame_generation_scope_live`'s clock in this view only). Its
+  every selection site, the association timeout of `expire_association` and `evaluation_live`, an
+  FG scope's enabled and accepted ticks, which also admit a tick ahead of the clock (the capture
+  owner's `scope_clock` fixes `frame_generation_scope_live`'s clock in this view only), and the
+  provider's handoff limit in `provider::handoff_hold` and the `evaluation_live` window it passes.
+  Each limit is named once in [`freshness.h`](freshness.h). Its
   UI table pins the UI adapter's admission of each ready UI snapshot (`ui_mask::admit_candidate`)
   and of the Present's own color (`ui_input::current_color_refusal`). Their contracts are in
   [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection) and the
@@ -1642,6 +1645,11 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   testable sample older than the previous one
   ([UI decision framework](../../docs/reshade-sbs.md#ui-decision-framework)).
   `ui_selection::decide` itself is covered in full by the selection contract and sequence tests.
+- [`test_freshness.cpp`](test_freshness.cpp) (`reshade_freshness`) pins each named time limit of
+  [`freshness.h`](freshness.h): its value and, for each edge its call sites keep (below or at most
+  the limit, with or without a tick ahead of the clock, a zero tick unavailable), the outcome one
+  millisecond either side of it. It is the only pin of the Streamline probe's camera, query and
+  tag-precedence limits, whose sites read their own clock.
 
 ### Independent renderer reference tests
 

@@ -5,6 +5,7 @@
 #include "native_command_storage.h"
 #include "native_resource_identity.h"
 #include "depth_view_format.h"
+#include "freshness.h"
 #include "streamline_depth_capture_test_access.h"
 #include "../../src/game3d_debug_formats.h"
 #include <d3d12.h>
@@ -550,10 +551,8 @@ namespace sunshine_streamline::depth_capture {
           (!value.consumer_queue || value.consumer_queue == consumer)) value.consumer_queue = consumer;
     }
     // The shared source age bounds nomination, completed-snapshot admission and
-    // liveness alike. A zero tick is unavailable, never age zero.
-    bool within_source_age(std::uint64_t tick, std::uint64_t now) {
-      return tick && now >= tick && now - tick < sunshine_scene_depth::maximum_source_age_ms;
-    }
+    // liveness alike (freshness.h).
+    using sunshine_freshness::within_source_age;
     capture_pick select_latest_capture(const queue_state &owner, std::uint64_t native,
         std::uint64_t present, provider_kind provider, std::uint64_t now) {
       capture_pick out;
@@ -567,7 +566,8 @@ namespace sunshine_streamline::depth_capture {
       if (out.latest && out.latest->queue != native) out.progress = producer_progress(*out.latest);
       unsigned active_views = 0;
       for (const auto &value : current.views)
-        if (value.epoch == current.epoch && value.sequence && now >= value.tick && now - value.tick < sunshine_scene_depth::maximum_source_age_ms) ++active_views;
+        if (value.epoch == current.epoch && value.sequence &&
+            sunshine_freshness::fresh_lt(value.tick, now, sunshine_freshness::source_age_ms)) ++active_views;
       if (active_views != 1) {
         out.result = active_views ? status::ambiguous : status::stale;
         out.selection = active_views ? selection_reason::ambiguous_views : selection_reason::inactive_views;
@@ -575,7 +575,7 @@ namespace sunshine_streamline::depth_capture {
       }
       const auto &pending = current.pending_nomination;
       if (pending.sequence && pending.epoch == current.epoch && pending.sequence == current.sequence &&
-          pending.source_id == current.source_id && now >= pending.tick && now - pending.tick < sunshine_scene_depth::maximum_source_age_ms &&
+          pending.source_id == current.source_id && sunshine_freshness::fresh_lt(pending.tick, now, sunshine_freshness::source_age_ms) &&
           owner.provider_established && owner.provider == provider && owner.source_id == pending.source_id &&
           owner.viewport == pending.viewport && owner.last_epoch == pending.epoch && pending.sequence > owner.last_sequence)
         out.pending_nomination = &pending;
@@ -620,7 +620,7 @@ namespace sunshine_streamline::depth_capture {
         }
         return out;
       }
-      if (now < out.value->metadata.tick || now - out.value->metadata.tick >= sunshine_scene_depth::maximum_source_age_ms) {
+      if (!sunshine_freshness::fresh_lt(out.value->metadata.tick, now, sunshine_freshness::source_age_ms)) {
         out.latest = out.value; out.value = nullptr; out.result = status::stale;
         return out;
       }
@@ -707,7 +707,7 @@ namespace sunshine_streamline::depth_capture {
             metadata.provider != current.provider || metadata.frame_generation_input != current.frame_generation_input ||
             metadata.epoch != current.epoch || metadata.source_id != current.source_id || metadata.viewport != current.viewport ||
             metadata.sequence > current.sequence ||
-            !metadata.tick || now < metadata.tick || now - metadata.tick >= sunshine_scene_depth::maximum_source_age_ms) continue;
+            !within_source_age(metadata.tick, now)) continue;
         if (!consumer || value.queue != consumer) {
           if (!producer_recording_retired(value)) continue;
           const auto progress = producer_progress(value);
@@ -1538,7 +1538,7 @@ namespace sunshine_streamline::depth_capture {
     observe_command(native);
   }
   SUNSHINE_CAPTURE_INTERNAL {
-    // After association_timeout_ms of silence (streamline_depth_capture_test_access.h).
+    // After the association's silence (freshness.h, association_ms).
     // Requires mutex.
     void expire_association(queue_state &owner, std::uint64_t now) {
       if (!owner.provider_established || !valid_provider(owner.provider)) return;
@@ -1546,7 +1546,9 @@ namespace sunshine_streamline::depth_capture {
       // The owner's own evaluations: its source and epoch, so the malformed-
       // input marker (epoch 0, source 0) never keeps a Streamline SR owner
       // (source 0) associated.
-      const auto within = [&](std::uint64_t tick) { return tick && now >= tick && now - tick <= association_timeout_ms; };
+      const auto within = [&](std::uint64_t tick) {
+        return tick && sunshine_freshness::fresh_le(tick, now, sunshine_freshness::association_ms);
+      };
       const auto recent = [&](const evaluation_head &head) {
         return head.source_id == owner.source_id && head.epoch == owner.nominated_epoch && within(head.tick) &&
           (!head.rejected_since || within(head.rejected_since));
@@ -1583,7 +1585,7 @@ namespace sunshine_streamline::depth_capture {
     // Any real evaluation: Streamline SR uses source 0 by design, and only the
     // malformed-input marker begins one with epoch 0.
     const auto recent = [&](const evaluation_head &head) {
-      return head.epoch && head.tick && now_ms >= head.tick && now_ms - head.tick <= window_ms;
+      return head.epoch && head.tick && sunshine_freshness::fresh_le(head.tick, now_ms, window_ms);
     };
     for (const auto &space : evaluations) {
       if (recent(space.pending_nomination)) return true;
@@ -1594,7 +1596,7 @@ namespace sunshine_streamline::depth_capture {
   bool frame_generation_scope_live(std::uint64_t epoch, std::uint32_t viewport, std::uint64_t enabled_tick) {
     // A tick slightly ahead of this read (another thread's) is fresh.
     const auto within = [](std::uint64_t tick, std::uint64_t now) {
-      return tick && (now < tick || now - tick <= association_timeout_ms);
+      return tick && sunshine_freshness::ahead_tolerant_le(tick, now, sunshine_freshness::fg_silent_ms);
     };
     if (within(enabled_tick, scope_now())) return true;
     if (!requested.load() || !epoch) return false;
@@ -2413,7 +2415,7 @@ namespace sunshine_streamline::depth_capture {
         const auto &current = evaluations[provider_index(provider)];
         for (const auto &view : current.views) if (view.epoch == current.epoch && view.sequence) {
           diagnostic->newest_view_tick_ms = std::max(diagnostic->newest_view_tick_ms, view.tick);
-          if (selection_tick >= view.tick && selection_tick - view.tick < sunshine_scene_depth::maximum_source_age_ms)
+          if (sunshine_freshness::fresh_lt(view.tick, selection_tick, sunshine_freshness::source_age_ms))
             ++diagnostic->active_view_count;
         }
       }

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "game3d_ui_mask.h"
+#include "freshness.h"
 
 #include <windows.h>
 #include <array>
@@ -81,7 +82,7 @@ namespace sunshine_game3d::ui_mask {
     }
     // A request its runtime refreshed recently (game3d_ui_mask.h, request).
     bool live(const entry &item, std::uint64_t now) {
-      return item.wanted.enabled && within(item.refreshed, now, sunshine_scene_depth::maximum_source_age_ms);
+      return item.wanted.enabled && within(item.refreshed, now, sunshine_freshness::source_age_ms);
     }
     bool matches(const entry &item, std::uint64_t epoch, std::uint64_t revision, std::uint32_t viewport, std::uint64_t now) {
       const auto &a = item.wanted;
@@ -92,7 +93,7 @@ namespace sunshine_game3d::ui_mask {
       return within(item.acquired, now, reader_window_ms + 1);
     }
     bool recent(std::uint64_t tick, std::uint64_t now) {
-      return tick && now >= tick && now - tick < sunshine_scene_depth::maximum_source_age_ms;
+      return sunshine_freshness::within_source_age(tick, now);
     }
     unsigned priority(source_kind kind) {
       return kind == source_kind::alpha ? 4u : kind == source_kind::color_and_alpha ? 3u :
