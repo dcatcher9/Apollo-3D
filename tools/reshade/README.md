@@ -1410,8 +1410,8 @@ that a known-gap row says starts from an unproven state is recorded but never ex
 exits 77 (skipped) without a hardware adapter, and also without the D3D12 debug layer (Windows
 Graphics Tools), though then only after every other check has run; `--gpu-validation` adds GPU-based
 validation, `--block <name>` runs one block and `--batch <cells>` sets how many sources are prepared
-together (16; at most 26, which the capture owner's pool and the debug layer were validated with). It holds ctest's `gpu` resource lock; outside
-ctest, run it as any other GPU fixture.
+together (16; at most 26, which the capture owner's pool and the debug layer were validated with).
+It holds ctest's `gpu` resource lock; outside ctest, run it as any other GPU fixture.
 
 The runtime layer drives the native provider fixture through the synthetic SDKs its documentation
 above describes: an interposer DLL per Streamline release with settable results and the options its
