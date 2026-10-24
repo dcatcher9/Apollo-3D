@@ -600,12 +600,16 @@ if(BUILD_TESTING)
     # name; the release its version resource names, which production discovery
     # reads, as FILEVERSION and as text; and FRAME_TAG, or NO_FRAME_TAG where
     # the release has the same core ABI but no slSetTagForFrame export (before
-    # 2.7: its global tags exercise production discovery and capture).
+    # 2.7: its global tags exercise production discovery and capture). 2.15.0
+    # is newer than the survey and 3.0.0 has a major no header defines; both
+    # declare what 2.14.1 does (the API contract matrix's family sl215_30).
     enable_language(RC)
     set(sunshine_sl_fixture_interposers
       "frame_generation_interposer|2,7,30,0|2.7.30.0|FRAME_TAG"
       "legacy_v2_interposer|2,6,10,0|2,6,10,0|NO_FRAME_TAG"
-      "sl_v2_14_1_interposer|2,14,1,0|2,14,1,0|FRAME_TAG")
+      "sl_v2_14_1_interposer|2,14,1,0|2,14,1,0|FRAME_TAG"
+      "sl_v2_15_0_interposer|2,15,0,0|2,15,0,0|FRAME_TAG"
+      "sl_v3_0_0_interposer|3,0,0,0|3,0,0,0|FRAME_TAG")
     set(sunshine_sl_fixture_interposer_targets)
     set(sunshine_sl_fixture_interposer_checks)
     foreach(fixture IN LISTS sunshine_sl_fixture_interposers)
@@ -741,14 +745,25 @@ if(BUILD_TESTING)
       set(contract_runtime_output "${CMAKE_CURRENT_BINARY_DIR}/contract_runtime")
       add_test(NAME reshade_contract_matrix_runtime_output COMMAND "${CMAKE_COMMAND}" -E rm -rf "${contract_runtime_output}")
       set_tests_properties(reshade_contract_matrix_runtime_output PROPERTIES FIXTURES_SETUP contract_runtime_output LABELS "contract;gpu")
-      # family|interposer target
-      foreach(family IN ITEMS "sl27|frame_generation_interposer")
+      # family|interposer targets, one per release ('+' between; ngx needs the
+      # 2.7.30 interposer for DLSS-G's frame-generation scope, generic none).
+      foreach(family IN ITEMS "sl26|legacy_v2_interposer" "sl27|frame_generation_interposer"
+          "sl212_214|sl_v2_14_1_interposer" "sl215_30|sl_v2_15_0_interposer+sl_v3_0_0_interposer"
+          "ngx|frame_generation_interposer" "generic|" "ui|sl_v2_14_1_interposer")
         string(REPLACE "|" ";" family "${family}")
         list(GET family 0 family_name)
-        list(GET family 1 family_interposer)
+        list(LENGTH family family_fields)
+        set(family_interposers)
+        if(family_fields GREATER 1)
+          list(GET family 1 family_interposer_names)
+          string(REPLACE "+" ";" family_interposer_names "${family_interposer_names}")
+          foreach(family_interposer IN LISTS family_interposer_names)
+            list(APPEND family_interposers "$<TARGET_FILE:reshade_${family_interposer}>")
+          endforeach()
+        endif()
         add_test(NAME reshade_contract_matrix_runtime_${family_name} COMMAND reshade_contract_matrix_runtime_tests --family ${family_name}
           "${SUNSHINE_GAME3D_RESHADE_RUNTIME}" "${SUNSHINE_GAME3D_FROZEN_SHADERS}" "$<TARGET_FILE:SunshineSBSTest>"
-          "${contract_runtime_output}/${family_name}" "$<TARGET_FILE:reshade_${family_interposer}>")
+          "${contract_runtime_output}/${family_name}" ${family_interposers})
         set_tests_properties(reshade_contract_matrix_runtime_${family_name} PROPERTIES LABELS "contract;gpu" RUN_SERIAL TRUE
           RESOURCE_LOCK gpu TIMEOUT 240 FIXTURES_REQUIRED contract_runtime_output)
       endforeach()

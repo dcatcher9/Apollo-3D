@@ -112,11 +112,14 @@ try {
   $lines = [Collections.Generic.List[string]]::new()
   $problems = [Collections.Generic.List[string]]::new()
   $families = [ordered]@{}
-  $gapTables = @{ 'L1 sl' = (Read-GapRows 'sl_rows'); 'L1 ngx' = (Read-GapRows 'ngx_rows'); 'L3' = (Read-GapRows 'sl_runtime_rows') }
+  # The runtime layer's Streamline families share sl_runtime_rows.
+  $gapTables = @{ 'L1 sl' = (Read-GapRows 'sl_rows'); 'L1 ngx' = (Read-GapRows 'ngx_rows'); 'L3' = (Read-GapRows 'sl_runtime_rows');
+    'L3 ngx' = (Read-GapRows 'ngx_runtime_rows'); 'L3 generic' = (Read-GapRows 'generic_runtime_rows'); 'L3 ui' = (Read-GapRows 'ui_runtime_rows') }
 
   # A layer's case lines: counted per family, each verdict accounted for, and
   # (for a family that ran whole) each expected-failure row the only row of
-  # some failing case.
+  # some failing case. A runtime family whose scope is not whole samples its
+  # release's cells, so it cannot show a row stale.
   function Add-CaseLines([string] $File, [bool] $Complete) {
     $seen = [ordered]@{}
     foreach ($text in Get-Content -LiteralPath $File) {
@@ -124,7 +127,8 @@ try {
       $lines.Add($text)
       $line = $text | ConvertFrom-Json
       $key = "$($line.layer) $($line.family)"
-      if (-not $seen.Contains($key)) { $seen[$key] = [ordered]@{ cases = 0; complete = $Complete; rows = @{}; alone = @{} } }
+      $whole = $Complete -and (-not ($line.PSObject.Properties.Name -contains 'scope') -or $line.scope -eq 'whole')
+      if (-not $seen.Contains($key)) { $seen[$key] = [ordered]@{ cases = 0; complete = $whole; rows = @{}; alone = @{} } }
       $counts = $seen[$key]
       $counts.cases += 1
       $verdict = [string]$line.verdict

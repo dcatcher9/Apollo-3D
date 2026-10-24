@@ -52,7 +52,8 @@ namespace {
   // 2.11.1), and the largest numFramesToGenerate (1 before multi frame
   // generation, documented from 2.7.2; the fixture's device reports 5, the
   // largest any surveyed header documents). 2.6.10 lies between the surveyed
-  // 2.4.15 and 2.7.2 and declares what 2.4.15 does.
+  // 2.4.15 and 2.7.2 and declares what 2.4.15 does; 2.15.0 and 3.0.0, newer
+  // than the survey, declare what 2.14.1 does.
   struct declaration {
     version release;
     std::uint32_t modes, frames;
@@ -62,6 +63,8 @@ namespace {
     {{{2, 6, 10, 0}}, 3, 1},
     {{{2, 7, 30, 0}}, 3, 5},
     {{{2, 14, 1, 0}}, 4, 5},
+    {{{2, 15, 0, 0}}, 4, 5},
+    {{{3, 0, 0, 0}}, 4, 5},
   };
 
   constexpr guid options_type {0xfac5f1cb, 0x2dfd, 0x4f36, {0xa1, 0xe6, 0x3a, 0x9e, 0x86, 0x52, 0x56, 0xc5}};

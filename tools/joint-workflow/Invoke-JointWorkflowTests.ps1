@@ -9,7 +9,11 @@ param(
   [string] $BuildDirectory = 'cmake-build-relwithdebinfo',
   [string] $SbsbenchPython = 'E:\ApolloDev\modelopt-py312\Scripts\python.exe',
   [string] $JavaHome = $env:JAVA_HOME,
-  [switch] $SkipBuild
+  [switch] $SkipBuild,
+  # Also run the Game 3D API contract matrix's pure and hook layers
+  # (tools/reshade/README.md, API contract matrix) in their own add-on build.
+  [switch] $Game3DContract,
+  [string] $Game3DContractBuildDirectory = 'cmake-build-reshade'
 )
 
 Set-StrictMode -Version Latest
@@ -95,6 +99,13 @@ try {
   Invoke-GateStage 'host' $testExecutable @("--gtest_filter=$nativeFilter", "--gtest_output=xml:$nativeXml") $BuildDirectory
   [xml] $nativeResult = Get-Content -LiteralPath $nativeXml -Raw
   if ([int] $nativeResult.testsuites.tests -eq 0) { throw 'The native gate selected no tests.' }
+  if ($Game3DContract) {
+    # Its device and runtime layers open GPU windows: run them alone, not here.
+    Invoke-GateStage 'game3d-contract' 'powershell.exe' @(
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $HostRoot 'tools/reshade/Invoke-Game3DContractMatrix.ps1'),
+      '-BuildDirectory', $Game3DContractBuildDirectory, '-SkipGpu'
+    ) $HostRoot
+  }
   Invoke-GateStage 'evaluator' $SbsbenchPython @(
     '-m', 'unittest', 'test_adaptive_state_contract', 'test_host_sbs_shader_manifest',
     'test_depth_coordinate_v2_contract', 'test_compare_runs', 'test_eval_parallel', 'test_report_parallel'

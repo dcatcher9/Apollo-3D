@@ -104,13 +104,15 @@ namespace ngx_fixture {
   };
 
   // Each created feature's ID, while live (CreateFeature to ReleaseFeature).
-  // A handle is the address of its record.
+  // A handle is the address of its record; records are never reused, so a
+  // process creates at most this many features (the API contract matrix's
+  // NGX family creates one or two a case).
   struct feature_record {
     std::uint32_t id {};
     bool live {};
   };
 
-  inline std::array<feature_record, 16> features {};
+  inline std::array<feature_record, 64> features {};
   inline unsigned created {}, evaluated {}, released {}, getters {};
 
   // What a well-formed call returns (a null argument or an unknown or released

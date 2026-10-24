@@ -992,6 +992,13 @@ namespace game3d_contract {
     }
   }
 
+  // Whether the oracle applied by to a Generic cell: the rule that decided or
+  // the one that chose the basis.
+  constexpr bool applies(const generic_case &value, const rule &by) {
+    const auto expected = expect(value);
+    return expected.by == &by || expected.basis_by == &by;
+  }
+
   // UI inputs: a meaning that release's own header declares; a 1.x tag has
   // no command buffer and lasts until its evaluate (as legal(sl_case)).
   constexpr bool legal(const ui_case &value) {
@@ -1053,6 +1060,11 @@ namespace game3d_contract {
       out = either(out, plain(rules::U1, outcome_kind::ignored));
     }
     return out;
+  }
+
+  // Whether the oracle applied by to a UI cell: the rule that decided.
+  constexpr bool applies(const ui_case &value, const rule &by) {
+    return expect(value).by == &by;
   }
 
   // A copy recorded on a real list (the device layer): an adapter's copy

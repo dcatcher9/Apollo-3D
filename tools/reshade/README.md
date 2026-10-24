@@ -1412,41 +1412,70 @@ Graphics Tools), though then only after every other check has run; `--gpu-valida
 validation and `--block <name>` runs one block. It holds ctest's `gpu` resource lock; outside
 ctest, run it as any other GPU fixture.
 
-The runtime layer drives the native provider and NGX fixtures through the synthetic SDKs their
-documentation above describes: an interposer DLL per Streamline release with settable results and the
-options its header declares, the NGX stand-in, and FG cases as frame scripts with their own deadlines.
-`reshade_contract_matrix_runtime_<family>`
+The runtime layer drives the native provider fixture through the synthetic SDKs its documentation
+above describes: an interposer DLL per Streamline release with settable results and the options its
+header declares, the NGX stand-in the executable exports, and cases as frame scripts with their own
+deadlines. `reshade_contract_matrix_runtime_<family>`
 ([`test_game3d_api_contract_runtime.cpp`](test_game3d_api_contract_runtime.cpp), which includes the
 native provider fixture under `SUNSHINE_NATIVE_PROVIDER_FIXTURE_ONLY`) runs one family in its own
-process: the add-on's own discovery hooks the family's interposer, never the
-`SunshineStreamlineTestCapture` bypass. Family `sl27` (the 2.7.30 interposer) puts the tagged R32
-allocation, on the game's own list, in one of five state classes (a read state its recording proves,
-`GENERIC_READ` likewise, the producer's UAV write state, an undeclared state, an enhanced
-`SHADER_RESOURCE` layout) and combines the product of state class, lifecycle and command list (at a
-same-frame evaluate and at an FG tag call) with seed rows, each value alone, and a pairwise covering
-array over entry point, copy point, generated Presents (real Presents while the game records), FG,
-extent, untag and the three SDK results. Each case is a frame script judged at its Presents: a capture is the case's
-allocation shown fresh, with its tagged extent, at six judged Presents from the first; a case that
-shows nothing refuses or holds, and a refusal class the test add-on records must be one its copy
-points give. A frame's tag call and evaluate are both copy points that a Present cannot tell apart,
-so a case is judged at the earliest one whose outcome requires a capture. A capture at an FG tag call
-is deferred (R2) when the add-on's nomination gate saw no nomination inside that call. Every SDK call
-must return the interposer's result. Each case has its own viewport and allocation; afterwards FG is
-turned off, the depth untagged, the case's viewport retired (constants on four scratch viewports
-evict its record: a viewport whose FG is Off still counts toward FG authority) and the fixture
-presents past `maximum_source_age_ms` with no SDK call (the depth must be gone) and recalibrates; a
-known-good control, an OnlyValidNow frame tag at its FG tag call, runs first and after every ten
-cases. Its gaps are the known-gap table's `sl_runtime_rows`, whose cells pair the case with the copy
-point that decides. The executable takes `--family` and the generator's `--list`, `--case` and
-`--shard`, and appends one JSON line per case to `contract-<family>.jsonl` in its output directory.
-It is registered only where `SUNSHINE_GAME3D_RESHADE_RUNTIME` (the official `ReShade64.dll`) and
-`SUNSHINE_GAME3D_FROZEN_SHADERS` (a directory with the frozen `SunshineGame3D.fx`) are configured:
-one test per family, labelled `contract;gpu`, `RUN_SERIAL` with the `gpu` resource lock and a 240 s
-timeout, after `reshade_contract_matrix_runtime_output` removes the families' output directory.
-At 1280x720 `sl27` runs 104 cells and 12 controls in about 85 s: 0.75 s a case on average (the
-design estimated 1.3 s), 0.4 s for a capture, 0.9 s for a refusal or hold (its 600 ms window and the
-isolation) and up to 1.9 s for an FG case copied at an evaluate (FG owns its viewport's depth for a
-second after it is enabled). Repeated runs give the same result for every cell.
+process: the add-on's own discovery hooks the release's interposer and the NGX exports, never the
+`SunshineStreamlineTestCapture` bypass. The NGX runtime fixture is not included: both fixtures
+build on the direct runtime fixture, and the native provider fixture already carries the stand-in.
+
+The Streamline families put the tagged R32 allocation, on the game's own list, in one of five state
+classes (a read state its recording proves, `GENERIC_READ` likewise, the producer's UAV write state,
+an undeclared state, an enhanced `SHADER_RESOURCE` layout) and vary entry point, lifecycle, command
+list, copy point, generated Presents (real Presents while the game records), FG mode (Off, On, Auto,
+Dynamic) and frame count (2x, 4x), extent (a changing one is dynamic resolution, R3), untag, a
+two-tag array and the three SDK results. `sl27` (2.7.30) runs every cell: the product of state
+class, lifecycle and command list (at a same-frame evaluate and at an FG tag call), seed rows, each
+value alone and a pairwise array. `sl26` (2.6.10, no frame tags) and `sl212_214` (2.14.1, the
+newest surveyed release) run their seed rows and a pairwise array; `sl215_30` runs the seed rows of
+2.15.0 (newer than the survey: tag arrays, S24) and of 3.0.0 (a major no header defines, which
+discovery refuses, so nothing it tags may be shown) in a process each. Each case is judged at its
+Presents: a capture is the case's allocation shown fresh, with its tagged extent and one identity,
+at six judged Presents from the first; a case that shows nothing refuses or holds, and a refusal
+class the test add-on records must be one its copy points give. A frame's tag call and evaluate are
+both copy points that a Present cannot tell apart, so a case is judged at the earliest one whose
+outcome requires a capture. A capture at an FG tag call is deferred (R2) when the add-on's
+nomination gate saw no nomination inside that call. A generated Present may show the case's source
+only as the capture the last real Present showed (a hold). Every SDK call must return the
+interposer's result. Each case has its own viewport and allocation; afterwards FG is turned off,
+the depth untagged, the case's viewport retired (constants on four scratch viewports evict its
+record: a viewport whose FG is Off still counts toward FG authority) and the fixture presents past
+`maximum_source_age_ms` with no SDK call (the depth must be gone) and recalibrates; a known-good
+control, an OnlyValidNow tag at its FG tag call, runs first and after every ten cases. Their gaps
+are the known-gap table's `sl_runtime_rows`, whose cells pair the case with the copy point that
+decides; a gap at a copy point the frame reaches before the deciding check also shows its refusal
+class there. Only `sl27` can show a row stale: the others sample their release's cells.
+
+Family `ngx` drives Super Resolution, Ray Reconstruction and an unknown feature through `Depth`
+and the DLSS keys, and DLSS-G's own evaluation through `DLSSG.*` on a viewport whose FG the 2.7.30
+interposer's options enabled, over feature, `DLSS.Use.HW.Depth`, how the depth is set, subrect,
+result, a recorded or unrecorded state and a recreated feature (seed rows and a pairwise array).
+Family `generic` turns the Streamline and NGX sources off and draws a depth-stencil view of the
+swapchain's size: a clear after or before the draws (depth or stencil only), a render-pass depth
+clear, an unbind and the end of frame, D32 and D32S8, judged by the depth the last native render
+consumed. Copies from a state the recording does not prove (D10 after a transition away, D11c, D12)
+are the device layer's, which records them without executing them. Family `ui` (2.14.1) tags a
+captured depth and a full-size UI input (UI colour and alpha, HUD-less colour, Backbuffer, UI alpha)
+at a tag call with the game's list, without a command list or as a local evaluate input, or draws
+an offscreen UI layer cleared every frame; a case is offered when Dump3D lists its input as
+available to UI detection. Their gaps are `ngx_runtime_rows`, `generic_runtime_rows` and
+`ui_runtime_rows`.
+
+The executable takes `--family` and the generator's `--list`, `--case` and `--shard`, and appends
+one JSON line per case (with the family's scope) to `contract-<family>.jsonl` in its output
+directory. It is registered only where `SUNSHINE_GAME3D_RESHADE_RUNTIME` (the official
+`ReShade64.dll`) and `SUNSHINE_GAME3D_FROZEN_SHADERS` (a directory with the frozen
+`SunshineGame3D.fx`) are configured: one test per family, labelled `contract;gpu`, `RUN_SERIAL` with
+the `gpu` resource lock and a 240 s timeout, after `reshade_contract_matrix_runtime_output` removes
+the families' output directory. At 1280x720 the seven families run 288 cells in about 5 minutes:
+`sl27` 118 cells and 13 controls in 102 s, `sl26` 43 in 56 s, `sl212_214` 42 in 53 s, `sl215_30` 26
+in 27 s, `ngx` 34 in 33 s, `generic` 12 in 17 s and `ui` 13 in 17 s. A capture takes 0.4 s, a
+refusal or hold 0.9 s (its 600 ms window and the isolation), an FG case copied at an evaluate up to
+1.9 s (FG owns its viewport's depth for a second after it is enabled), and a UI case its Dump3D.
+Repeated runs give the same result for every cell.
 
 [`Invoke-Game3DContractMatrix.ps1`](Invoke-Game3DContractMatrix.ps1) configures and builds this
 directory on its own (the Sunshine build forces the add-on's tests off), runs `ctest -L contract`
@@ -1456,7 +1485,8 @@ verdict, gap rows and evidence ([`test_game3d_api_contract_jsonl.h`](test_game3d
 `reshade_contract_matrix_cpu` writes its lines where `SUNSHINE_CONTRACT_MATRIX_JSONL` names), and one
 line per contract test with its ctest result. The runner checks those cases against the known-gap
 table itself: a case may only meet the oracle, fail as a recorded gap or sit in a pending row, and
-each expected-failure row of a family that ran whole must be the only row of a failing case.
+each expected-failure row of a family that ran whole (and, at runtime, whose scope is whole) must be
+the only row of a failing case.
 `-SkipGpu` leaves out the device and runtime layers; run them only with no game running.
 
 The runtime layer reads refusal classes from the test add-on instead of waiting for rate-limited log

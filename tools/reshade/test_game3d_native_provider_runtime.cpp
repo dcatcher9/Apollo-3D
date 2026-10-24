@@ -197,6 +197,53 @@ namespace {
     static bool same_scale(float a, float b) {
       return std::isfinite(a) && std::isfinite(b) && std::abs(a-b) <= std::max(1.f,std::abs(b))*1e-5f;
     }
+    // The production Dump3D mailbox (src/game3d_debug_protocol.h) with this
+    // process as its consumer, nonce naming the scenario: request() asks the
+    // loaded add-on for one dump while the scenario keeps presenting and
+    // returns its metadata. The response stays valid until release(), the
+    // next request or the mailbox's end. (The UI hook scenarios above keep
+    // their own copies of this protocol.)
+    struct dump_mailbox {
+      native_provider_fixture &fixture;
+      HANDLE handle{};
+      game3d_debug::shared_state_t *state{};
+      std::uint64_t request_id{};
+      dump_mailbox(native_provider_fixture &owner, std::uint64_t nonce) : fixture(owner) {
+        namespace dump = ::game3d_debug;
+        const auto name = std::wstring(dump::mapping_prefix) + std::to_wstring(GetCurrentProcessId());
+        handle = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, name.c_str());
+        require(handle != nullptr, "Loaded add-on did not publish its production Dump3D mailbox");
+        state = static_cast<dump::shared_state_t *>(MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(dump::shared_state_t)));
+        require(state && state->signature == dump::magic && state->protocol_version == dump::version,
+          "Production Dump3D mailbox is incompatible");
+        FILETIME created{}, exited{}, kernel{}, user{};
+        require(GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user), "Identify the Dump3D consumer");
+        state->consumer_pid = GetCurrentProcessId();
+        state->consumer_creation_time = (std::uint64_t(created.dwHighDateTime) << 32) | created.dwLowDateTime;
+        state->consumer_nonce = nonce;
+      }
+      dump_mailbox(const dump_mailbox &) = delete;
+      dump_mailbox &operator=(const dump_mailbox &) = delete;
+      ~dump_mailbox() {
+        if (state) { release(); UnmapViewOfFile(state); }
+        if (handle) CloseHandle(handle);
+      }
+      void release() {
+        if (request_id) InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&state->released_id), request_id);
+      }
+      nlohmann::json request(const char *incomplete) {
+        namespace dump = ::game3d_debug;
+        request_id = state->request_id + 1;
+        InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&state->request_id), request_id);
+        const auto until = GetTickCount64() + 10000;
+        while (std::uint64_t(InterlockedCompareExchange64(reinterpret_cast<volatile LONG64 *>(&state->response_id), 0, 0)) != request_id &&
+            GetTickCount64() < until)
+          fixture.present_frame();
+        require(state->response_id == request_id && state->response.result == dump::status::complete &&
+            state->response.json_bytes <= dump::max_json_bytes && state->response.texture_count <= dump::max_textures, incomplete);
+        return nlohmann::json::parse(std::string(state->json, state->response.json_bytes));
+      }
+    };
 
     // One case as a frame script (README, native provider fixture): warm_up
     // presents until the case's starting state holds, stimulus presents the
