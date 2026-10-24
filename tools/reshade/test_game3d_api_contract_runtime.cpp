@@ -150,6 +150,9 @@ namespace {
   struct expectation {
     matrix::outcome expected;
     bool at_tag_call {}, nomination {};
+    // A gate judges the case's input: the add-on hooks its release, and no
+    // SDK call of the case failed (S21b discards that copy unread).
+    bool gated {true};
     matrix::refusal accepted[2] {};
     unsigned classes {};
 
@@ -425,6 +428,7 @@ namespace {
     constexpr seed gap_seeds[] {
       {"local-now-undeclared", "state=unprovable,life=only_valid_now,entry=local_array"},  // S4-refusal.
       {"local-now", "life=only_valid_now,entry=local_array"},  // S4.
+      {"chained-undeclared", "state=unprovable,entry=local_chain_not_last"},  // S15-refusal.
       {"generated-undeclared", "state=unprovable,commands=none,generated=3"},  // S7-refusal.
       {"declared-size-undeclared", "state=unprovable,entry=local_array,extent=declared_size_differs"},  // S16d-refusal.
     };
@@ -851,13 +855,23 @@ namespace {
     return out;
   }
 
+  // A refusal the oracle requires alone, of a class that a copy point the
+  // case reaches decides, where a gate judges the input: that gate must
+  // record the class. fg_scope and no_copy_point name a call that is no copy
+  // point, where no gate decides anything.
+  bool recorded_refusal(const expectation &decided) {
+    const auto &expected = decided.expected;
+    return decided.gated && expected.kind == matrix::outcome_kind::refuse && !matrix::either(expected) && expected.why != matrix::refusal::fg_scope &&
+           expected.why != matrix::refusal::no_copy_point;
+  }
+
   // Illegal input must show nothing. A capture must be steady, with its
   // extent, one logical source, no copy after its tag's Present and the
   // expected deferral. A Present that shows nothing meets a refusal or a
   // hold; a recorded contract class must be one a copy point gives, unless
   // a hold is permitted (a hold with no earlier capture shows nothing
-  // either). No generated Present may show a capture its real Present did
-  // not.
+  // either), and a recorded_refusal needs one. No generated Present may
+  // show a capture its real Present did not.
   bool satisfies(const expectation &decided, const matrix::result &actual, const presented &value, bool legal) {
     if (value.generated_new) {
       return false;
@@ -871,6 +885,9 @@ namespace {
     }
     if (value.late || !(matrix::permits(expected, matrix::outcome_kind::refuse) || matrix::permits(expected, matrix::outcome_kind::hold) || matrix::permits(expected, matrix::outcome_kind::ignored))) {
       return false;
+    }
+    if (recorded_refusal(decided)) {
+      return actual.kind == matrix::outcome_kind::refuse && decided.accepts(actual.why);
     }
     return matrix::permits(expected, matrix::outcome_kind::hold) || actual.kind != matrix::outcome_kind::refuse || decided.accepts(actual.why);
   }
@@ -1717,6 +1734,8 @@ namespace {
       out.legal = owner.legal(assignment);
       const auto decided = sl_runtime::at_present(value);
       out.decided = decided.shown;
+      // Discovery refuses a major no header defines (S24).
+      out.decided.gated = version.major == 2 && value.tag_result != matrix::sl_result::error && value.evaluate_result != matrix::sl_result::error;
       require(out.decided.expected.by != nullptr, "the oracle named no rule for a Streamline runtime cell");
       const auto state = sl_runtime::state_class(assignment[sl_runtime::state]);
       // A copy at an evaluate waits past frame generation's first second.

@@ -1438,7 +1438,11 @@ major no header defines, which discovery refuses, so nothing it tags may be show
 each. Each case is judged at its
 Presents: a capture is the case's allocation shown fresh, with its tagged extent and one identity,
 at six judged Presents from the first; a case that shows nothing refuses or holds, and a refusal
-class the test add-on records must be one its copy points give. A frame's tag call and evaluate are
+class the test add-on records must be one its copy points give. Where the oracle requires a
+refusal alone, the test add-on must record its class, unless discovery refused the release, an SDK
+call of the case failed (S21b discards that copy unread) or the class is `fg_scope` or
+`no_copy_point`, which name a call that is no copy point, where no gate decides anything. A frame's
+tag call and evaluate are
 both copy points that a Present cannot tell apart, so a case is judged at the earliest one whose
 outcome requires a capture. A capture at an FG tag call is deferred (R2) when the add-on's
 nomination gate saw no nomination inside that call. A generated Present may show the case's source

@@ -407,17 +407,29 @@ namespace game3d_contract::known_gaps {
       return streamline::local_only_valid_now(value.decided);
     }
 
+    // A refusal the runtime layer requires the add-on to record: the oracle
+    // refuses alone, for a class a reached copy point decides, and no SDK
+    // call of the case failed (S21b discards that copy unread).
+    constexpr bool recorded_refusal(const sl_case &cell) {
+      const auto expected = expect(cell);
+      return legal(cell) && cell.version.major == 2 && expected.kind == outcome_kind::refuse && !either(expected) && expected.why != refusal::fg_scope &&
+             expected.why != refusal::no_copy_point && cell.tag_result != sl_result::error && cell.evaluate_result != sl_result::error;
+    }
+
+    // A chained input that is not last (S15) is not read: a cell the oracle
+    // refuses for its state or extent records only missing-depth (absent).
+    constexpr bool chained_local_refused(const present_case &value) {
+      return value.decided.entry == tag_entry::local_chain_not_last && recorded_refusal(value.decided);
+    }
+
     // A same-frame evaluate after generated Presents (S7) outside
-    // frame-generation scope, of a release the add-on hooks, that the oracle
-    // refuses alone for its state is refused at the capture gate for its
-    // lifetime (source_lifetime) first.
+    // frame-generation scope that the oracle refuses for its state is
+    // refused at the capture gate for its lifetime (source_lifetime) first.
     constexpr bool generated_present_refused(const present_case &value) {
       const auto &cell = value.decided;
-      const auto expected = expect(cell);
       const bool extent_read = cell.extent == extent_form::null || cell.extent == extent_form::padded || cell.extent == extent_form::offset;
-      return legal(cell) && cell.version.major == 2 && cell.at == copy_point::same_frame_evaluate && !streamline::local(cell.entry) && cell.generated_presents != 0 &&
-             extent_read && !detail::frame_generation_scope(cell) && cell.untag == untag_pattern::none && cell.tag_result != sl_result::error &&
-             cell.evaluate_result != sl_result::error && expected.kind == outcome_kind::refuse && !either(expected) && expected.why == refusal::state_unprovable;
+      return cell.at == copy_point::same_frame_evaluate && !streamline::local(cell.entry) && cell.generated_presents != 0 && extent_read &&
+             !detail::frame_generation_scope(cell) && cell.untag == untag_pattern::none && recorded_refusal(cell) && expect(cell).why == refusal::state_unprovable;
     }
 
     // An OnlyValidNow tag outside frame-generation scope that its call
@@ -500,6 +512,7 @@ namespace game3d_contract::known_gaps {
     {"S4-refusal", &rules::S4, kind::expected_failure, &present::local_only_valid_now_refused, "Stage 3 fix 8 (S4/S15). With the hook table's S4 row: an OnlyValidNow evaluate input that the oracle refuses, or may refuse, for another class (its state, its extent) is refused first as not-valid-until-present (lifetime). Promoting the input at its own evaluate closes this row.", &behaviours::refused_as<refusal::lifetime>},
     {"S4", &rules::S4, kind::expected_failure, &present::local_only_valid_now, "Stage 3 fix 8 (S4/S15). As the hook table's S4 row: the evaluate input is refused as not valid until present (lifetime).", &behaviours::refused_as<refusal::lifetime>},
     {"S15", &rules::S15, kind::expected_failure, &present::chained_local, "Stage 3 fix 8 (S4/S15). As the hook table's S15 row.", &behaviours::no_copy},
+    {"S15-refusal", &rules::S15, kind::expected_failure, &present::chained_local_refused, "Stage 3 fix 8 (S4/S15). With S15: the chained input is not read, so a cell the oracle refuses for its state or extent records only missing-depth (absent), no contract class.", &behaviours::no_copy},
     {"S16", &rules::S16, kind::expected_failure, &present::zero_sided_extent, "Stage 3 fix 12 (S16). As the hook table's S16 row.", &behaviours::no_copy},
     {"S16-refusal", &rules::S16, kind::expected_failure, &present::zero_sided_extent_refused, "Stage 3 fix 12 (S16). With S16: a zero-sided extent on a cell the oracle refuses, or may refuse, for another class (its state) is refused as invalid-extent (malformed) before that is judged, so its refusal class differs. The S16 fix closes this row.", &behaviours::refused_as<refusal::malformed>},
     {"S16d", &rules::S16d, kind::expected_failure, &present::declared_size, "Stage 3 fix 12 (S16). As the hook table's S16d row.", &behaviours::no_copy},
