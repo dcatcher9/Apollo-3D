@@ -521,8 +521,17 @@ namespace {
           out.shown.accept(out.shown.expected);
           if (!requires_capture(out.shown.expected) && permits_capture(at_tag) && !permits_capture(out.shown.expected)) {
             // The tag call may copy; otherwise the case's own point decides.
-            out.shown.expected = matrix::detail::either(at_tag, out.shown.expected);
+            // Its copy comes first: an open question there (a deferred copy
+            // of an enhanced layout, D6) names a refusal first and the copy
+            // as its alternative, which either() would drop.
+            auto copy = at_tag;
+            if (copy.kind != matrix::outcome_kind::capture && copy.kind != matrix::outcome_kind::continuous) {
+              copy.kind = copy.alternative;
+            }
+            out.shown.expected = matrix::detail::either(copy, out.shown.expected);
             out.shown.accept(at_tag);
+            // That copy's deferral is judged as at the tag call.
+            out.shown.nomination = matrix::detail::frame_generation_scope(tag);
           }
           return out;
         }

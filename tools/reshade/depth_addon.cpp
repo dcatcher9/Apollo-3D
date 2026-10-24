@@ -1361,6 +1361,8 @@ static void on_init_device(device *device)
 	{
 		auto *data = device->get_private_data<generic_depth_device_data>();
 		data->native_identity = sunshine_native_identity::device_cookie(reinterpret_cast<ID3D12Device *>(device->get_native()), true);
+		if (!device->create_query_heap(query_type::timestamp, 1, &data->deferred_copy_marker))
+			data->deferred_copy_marker = {};
 	}
 	// Before the first DLSS feature is created, outside DLL loader lock. This
 	// catches the game's linked NGX exports even if the runtime DLL loads later.
@@ -1402,6 +1404,8 @@ static void on_destroy_device(device *device)
 	if (s_streamline_probe_events && device->get_api() == device_api::d3d12)
 		for (const auto &[value, info] : device_data->depth_stencil_resources)
 			sunshine_streamline::depth_resource_destroyed(value.handle, info.identity);
+	if (device_data->deferred_copy_marker != 0)
+		device->destroy_query_heap(device_data->deferred_copy_marker);
 
 	device->destroy_private_data<generic_depth_device_data>();
 }
@@ -2070,13 +2074,34 @@ static void on_execute_secondary(command_list *cmd_list, command_list *secondary
 	}
 }
 
+// Submits the copies present_deferred recorded natively on the queue's
+// immediate list before this Present's effects read them. ReShade submits its
+// immediate list only after a command recorded through its own API
+// (d3d12::command_list_immediate_impl::flush), so one timestamp query, written
+// and never read, marks it first: without it the list would be submitted
+// with the effects, after this Present's depth was chosen, so no copy is
+// made (on_present) and the deferred tags lapse.
+static void submit_deferred_copies(command_queue *queue, command_list *immediate, query_heap marker)
+{
+	immediate->end_query(marker, query_type::timestamp, 0);
+	queue->flush_immediate_command_list();
+}
+
 static void on_present(command_queue *presenting_queue, swapchain *swapchain, const rect *, const rect *, uint32_t, const rect *)
 {
 	// The native tag's UntilPresent lifetime ends here. Already copied packets
 	// remain owned and usable by effects; tags supplied after this boundary keep
-	// their new authority, including concurrent next-frame tagging.
+	// their new authority, including concurrent next-frame tagging. First, the
+	// copies a tag call deferred to its frame's Present (owner ruling R2) are
+	// recorded on this queue's immediate list and submitted ahead of it.
 	if (presenting_queue->get_device()->get_api() == device_api::d3d12)
+	{
+		const query_heap marker = presenting_queue->get_device()->get_private_data<generic_depth_device_data>()->deferred_copy_marker;
+		if (command_list *const immediate = presenting_queue->get_immediate_command_list();
+			immediate != nullptr && marker != 0 && sunshine_streamline::present_deferred(presenting_queue->get_native(), immediate->get_native()))
+			submit_deferred_copies(presenting_queue, immediate, marker);
 		sunshine_streamline::depth_capture::present(presenting_queue->get_native());
+	}
 	sunshine_depth::begin_present(swapchain);
 	device *const device = swapchain->get_device();
 	generic_depth_device_data *const device_data = device->get_private_data<generic_depth_device_data>();

@@ -1500,8 +1500,13 @@ namespace {
         normalized.projection.encoding == sunshine_scene_depth::depth_encoding::linear_distance &&
         normalized.projection.direction_supplied && !normalized.projection.reversed,
       "explicit linear-distance input incorrectly required projection constants");
+    // An UntilEvaluate tag needs its call's command list (sl_core_api.h; a
+    // command-less one has no copy point, the matrix's S2).
     tag.lifecycle = 2;
     call_v2_tag(view, &tag, 1, nullptr); call_v2_evaluate(1001, token.ref(), global, 1, nullptr);
+    require(!testing::normalized_source(view.value, 2, normalized),
+      "a command-less linear UntilEvaluate tag was copied at its evaluate");
+    call_v2_tag(view, &tag, 1, &commands); call_v2_evaluate(1001, token.ref(), global, 1, nullptr);
     require(testing::normalized_source(view.value, 2, normalized) &&
         normalized.valid_until == sunshine_scene_depth::lifetime::until_evaluation,
       "linear UntilEvaluate was not available at its synchronous boundary");
@@ -1878,7 +1883,8 @@ namespace {
     probe_setting = "0"; source_setting = "1"; initialize(nullptr);
     require(testing::install(testing::abi::v2_7_30, tracked_v2_targets), "UntilEvaluate hook install failed");
     auto view = viewport(8); auto constants = modern_camera(); opaque_token token;
-    int native{}; auto resource = modern_resource(&native); auto tag = depth_tag_for(resource);
+    // An UntilEvaluate tag call needs a command list (sl_core_api.h; S2).
+    int native{}, commands{}; auto resource = modern_resource(&native); auto tag = depth_tag_for(resource);
     tag.lifecycle = 2;
     depth_resource_initialized(reinterpret_cast<std::uintptr_t>(&native), 80, 10, true);
     const base_structure *inputs[]{&view.base};
@@ -1898,14 +1904,14 @@ namespace {
         "UntilEvaluate lifetime was upgraded to post-return nomination");
     };
     mint(token, nullptr);
-    call_v2_constants(constants, token.ref(), view); call_v2_tag(view, &tag, 1, nullptr);
+    call_v2_constants(constants, token.ref(), view); call_v2_tag(view, &tag, 1, &commands);
     call_v2_evaluate(0, token.ref(), inputs, 1, nullptr); evaluated();
     call_v2_evaluate(0, token.ref(), inputs, 1, nullptr);
     require(testing::latest_snapshot(view.value, observed) && observed.status == evidence_status::missing_depth,
       "global UntilEvaluate tag was reused after its evaluation returned");
     // A fresh exact-frame tag authorizes this evaluation only, independently of
     // the consumed global tag and without inventing native-present correlation.
-    call_v2_framed_tag(token.ref(), view, &tag, 1, nullptr);
+    call_v2_framed_tag(token.ref(), view, &tag, 1, &commands);
     call_v2_evaluate(0, token.ref(), inputs, 1, nullptr); evaluated();
     call_v2_evaluate(0, token.ref(), inputs, 1, nullptr);
     require(testing::latest_snapshot(view.value, observed) && observed.status == evidence_status::missing_depth,
@@ -1915,7 +1921,7 @@ namespace {
     require(testing::latest_snapshot(view.value, observed) && observed.status == evidence_status::missing_depth,
       "local UntilEvaluate tag leaked to a later call");
     tag.area.width = 1921;
-    call_v2_framed_tag(token.ref(), view, &tag, 1, nullptr);
+    call_v2_framed_tag(token.ref(), view, &tag, 1, &commands);
     call_v2_evaluate(0, token.ref(), inputs, 1, nullptr);
     {
       sunshine_scene_depth::frame normalized;
@@ -1923,7 +1929,7 @@ namespace {
         "UntilEvaluate admission bypassed malformed extent rejection");
     }
     tag.area.width = 1920;
-    call_v2_constants(constants, token.ref(), view); call_v2_framed_tag(token.ref(), view, &tag, 1, nullptr);
+    call_v2_constants(constants, token.ref(), view); call_v2_framed_tag(token.ref(), view, &tag, 1, &commands);
     call_v2_evaluate(0, token.ref(), inputs, 1, nullptr); evaluated();
   }
 

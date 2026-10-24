@@ -2000,7 +2000,7 @@ namespace {
         run_script({type ? "public-ui-hook-type-8" : "public-ui-hook-type-0", 150000, {}, [&, type] { run_ui_hook(type); }, {}});
       fg_until_present_clear();
       fg_untag();
-      fg_commandless_refusal();
+      fg_commandless_deferred();
       fg_silent_scope();
       fg_dlssg_evaluation();
       fg_silent_scope_without_api_source();
@@ -2309,39 +2309,43 @@ namespace {
         }});
     }
 
-    // A ValidUntilPresent FG tag may legally arrive without a command list,
-    // which leaves no point to copy it at: the boundary is withdrawn, and
-    // the bounded withdrawal line names that reason and the tag. The test
-    // add-on's refusal query reports it at once, with its contract class.
-    void fg_commandless_refusal() {
-      run_script({"commandless-refusal", 30000, {},
+    // A ValidUntilPresent FG tag may legally arrive without a command list
+    // (sl_core_api.h). Its declaration describes its state at its frame's
+    // Present (owner ruling R2), so its copy is made on the Present queue
+    // right before that Present (present_deferred): every Present shows its
+    // own frame's fresh FG depth, nothing is refused, and the bounded
+    // deferral line counts the copies. The matrix's S6 (until Stage 3 fix 2
+    // the boundary was refused as boundary_without_commands).
+    void fg_commandless_deferred() {
+      run_script({"commandless-deferred", 30000, {},
         [&] {
           const auto before_commandless = last_refusal().serial;
           render_tracked_depth = [this] { commandless_fg_frame(); };
-          {
-            namespace refusal = sunshine_depth_refusal;
-            const auto refused = refusal_after(before_commandless);
-            std::printf("MEASURE native-provider SLFG-commandless-refusal provider=%u gate=%u class=%u name=%s viewport=%u fg=%u sequence=%llu serial=%llu\n",
-              unsigned(refused.provider), unsigned(refused.where), unsigned(refused.reason), refused.name, refused.viewport,
-              unsigned(refused.frame_generation), static_cast<unsigned long long>(refused.sequence), static_cast<unsigned long long>(refused.serial));
-            require(refused.serial > before_commandless && refused.provider == refusal::adapter::streamline &&
-                refused.where == refusal::gate::source && refused.reason == refusal::reason_class::no_copy_point &&
-                !std::strcmp(refused.name, "boundary_without_commands") && refused.frame_generation && refused.viewport == fg_viewport.value,
-              "The refusal query did not report the command-less FG tag as a no_copy_point source refusal");
+          const auto value = settle("SLFG-commandless-deferred");
+          require(value.source.frame_generation_input && value.source.current.resource == native(*selected),
+            "A command-less ValidUntilPresent FG tag was not copied before its frame's Present as FG depth");
+          for (unsigned frame = 0; frame < 12; ++frame) {
+            present_frame(); const auto s = inspect();
+            require(active(s) && !s.source.reused_depth && s.source.frame_generation_input,
+              "A Present of a command-less FG tag's frame did not show that frame's fresh FG depth");
           }
-          require(reshade_log_contains({"Sunshine Streamline FG depth refused: reason=boundary_without_commands", "tag_type=0",
-              "scope=global", "lifecycle=1", "command=0x0 ", "fg=1"}),
-            "A command-less FG tag boundary was refused without naming its reason");
+          const auto refused = last_refusal();
+          require(refused.serial == before_commandless || refused.viewport != fg_viewport.value,
+            "A command-less ValidUntilPresent FG tag was refused");
+          require(reshade_log_number_above("Sunshine Streamline deferred tag copies:", "depth={deferred=", 0) &&
+              reshade_log_number_above("Sunshine Streamline deferred tag copies:", " copied=", 0),
+            "The deferred copies of a command-less FG tag were not counted");
         },
         [&] {
           render_tracked_depth = [this] { real_fg_frame(); };
           settle("SLFG-recovered-after-commandless-tag");
-          std::puts("PASS native SLFG refusal: a command-less ValidUntilPresent FG tag is refused and logged as boundary_without_commands; no FX");
+          std::puts("PASS native SLFG command-less tag: a ValidUntilPresent FG tag without a command list is copied before its frame's Present and every Present shows its fresh FG depth; no FX");
         }});
     }
 
     // Assassin's Creed Shadows with FG on (10-22): FG options stay on, but
-    // every FG depth tag is refused (here: sent without a command list)
+    // no FG depth tag is copied (here: sent without a command list, whose
+    // copy before the frame's Present the same frame's untag cancels, R7)
     // and then untagged, while the same viewport's SR evaluation tags its
     // own depth with commands. FG owns that viewport's depth only while an
     // FG copy was accepted within a second; after that its scope is silent
@@ -2360,8 +2364,8 @@ namespace {
           settle_route("SLFG-silent-scope-SR-depth", false);
           require(GetTickCount64() - silent_start >= 1000, "SR took the viewport's depth before the FG scope fell silent");
           require(reshade_log_contains({"Sunshine Streamline frame generation depth scope: silent viewport=0"}) &&
-              reshade_log_contains({"Sunshine Streamline FG depth refused: reason=boundary_without_commands", "fg_scope=silent", "withdrawn=0"}),
-            "The silent FG scope or its refused boundaries were not logged");
+              reshade_log_number_above("Sunshine Streamline deferred tag copies:", "cancelled_by_untag=", 0),
+            "The silent FG scope or its untag-cancelled deferred copies were not logged");
           // Its generated Presents (no SL call, no depth draw) hold the real
           // frame's SR copy exactly as FG depth is held, at 2x and 3x, also while
           // the game window is in the background: the export stop invalidates
@@ -2407,16 +2411,21 @@ namespace {
     }
 
     // DLSS-G's own NGX evaluation (feature 11) of each real frame, as in
-    // Assassin's Creed Shadows (10-23): the game tags FG depth, HUD-less and
-    // Backbuffer without a command list (refused), its SR evaluation tags its own
-    // depth, and DLSS-G evaluates DLSSG.Depth (with DLSSG.DepthInverted and
-    // DLSSG.DepthSubrect*), DLSSG.HUDLess and DLSSG.Backbuffer on its own
-    // command list. Copies are made only in a state observed on that list.
-    // Without one every copy is refused, counted, and nothing changes: the
-    // silent scope keeps SR depth. With one, DLSSG.Depth is the FG source
-    // (its accepted copies keep the scope live, so SR stays out and the
-    // command-less tag withdraws nothing), generated Presents hold it, and
-    // its HUD-less/Backbuffer pair reaches UI detection as one exact batch.
+    // Assassin's Creed Shadows (10-23): the game tags FG depth without a
+    // command list and untags it (the untag cancels the copy deferred to the
+    // frame's Present, R7), tags HUD-less and Backbuffer without a command
+    // list (copied before the frame's Present, R2), its SR evaluation tags
+    // its own depth, and DLSS-G evaluates DLSSG.Depth (with
+    // DLSSG.DepthInverted and DLSSG.DepthSubrect*), DLSSG.HUDLess and
+    // DLSSG.Backbuffer on its own command list. DLSS-G's copies are made only
+    // in a state observed on that list. Without one its depth is refused,
+    // counted, and nothing changes: the silent scope keeps SR depth, and the
+    // game's own HUD-less/Backbuffer tags still reach UI detection as one
+    // exact batch. With one, DLSSG.Depth is the FG source (its accepted
+    // copies keep the scope live, so SR stays out and the command-less tag
+    // withdraws nothing), generated Presents hold it, and once the same
+    // frame untags the game's UI tags its own HUD-less/Backbuffer pair
+    // reaches UI detection as one exact batch.
     void fg_dlssg_evaluation() {
       using namespace sunshine_streamline;
       const auto exe = GetModuleHandleW(nullptr);
@@ -2445,7 +2454,12 @@ namespace {
       inputs.set_ui("DLSSG.MultiFrameIndex", 1);
       inputs.set_ui("DLSSG.MultiFrameCount", 1);
       void *feature{};
-      bool observed_state = false, tag_commands = false, ui_tag_commands = false;
+      bool observed_state = false, tag_commands = false;
+      // The game's HUD-less and Backbuffer tags: without a command list (as in
+      // Shadows), the same followed by the same frame's null untag of both
+      // kinds (which cancels their copies deferred to the frame's Present,
+      // R7), or on its list.
+      enum class ui_tags_form { commandless, untagged, listed } ui_tags = ui_tags_form::commandless;
       const auto evaluations_before = ngx_fixture::evaluated;
       const auto dlssg_frame = [&] {
         fallback_frame(tag_commands, true);
@@ -2461,10 +2475,15 @@ namespace {
           return value;
         };
         const auto hudless_resource = color_resource(hudless.p), backbuffer_resource = color_resource(backbuffer.p);
-        const abi_v2::resource_tag ui_tags[]{{{nullptr, tag_guid, 1}, &hudless_resource, 2, 1, {0, 0, width, height}},
+        const abi_v2::resource_tag tags[]{{{nullptr, tag_guid, 1}, &hudless_resource, 2, 1, {0, 0, width, height}},
           {{nullptr, tag_guid, 1}, &backbuffer_resource, 53, 1, {0, 0, width, height}}};
-        require(sl.global_tag(fg_viewport, ui_tags, 2, ui_tag_commands ? reinterpret_cast<void *>(game_native_command) : nullptr) == 0,
+        require(sl.global_tag(fg_viewport, tags, 2,
+            ui_tags == ui_tags_form::listed ? reinterpret_cast<void *>(game_native_command) : nullptr) == 0,
           "The HUD-less and Backbuffer tags changed the SDK result");
+        if (ui_tags == ui_tags_form::untagged) {
+          const abi_v2::resource_tag untags[]{{{nullptr, tag_guid, 1}, nullptr, 2, 1, {}}, {{nullptr, tag_guid, 1}, nullptr, 53, 1, {}}};
+          require(sl.global_tag(fg_viewport, untags, 2, nullptr) == 0, "The HUD-less and Backbuffer untags changed the SDK result");
+        }
         if (!feature)
           require(ngx_create(list, 11, &inputs, &feature) == ngx_fixture::success && feature, "DLSS-G feature creation failed");
         require(selected->state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "DLSS-G fixture depth left its UAV state");
@@ -2515,8 +2534,15 @@ namespace {
           }
           require(reshade_log_contains({"Sunshine NGX depth:", "dlssg_depth={copied=0 inner_frames=0 refused=missing_state:"}),
             "Refused DLSS-G depth copies were not counted by their missing_state reason");
-          require(!reshade_log_number_above("Sunshine UI capture gate:", "hudless_presents={batch=", 0, 0),
-            "A same-batch HUD-less pair was counted before DLSS-G's inputs were observed");
+          // The game's command-less HUD-less and Backbuffer tags, copied before
+          // their frame's Present, reach UI detection as one exact batch
+          // although DLSS-G's own copies are refused (U2), and keep their
+          // kinds' precedence over DLSS-G's inputs.
+          require(reshade_log_number_above("Sunshine UI capture gate:", "hudless_presents={batch=", 0, 12000),
+            "The game's command-less HUD-less tag did not reach UI detection with its same-batch Backbuffer");
+          require(reshade_log_number_above("Sunshine Streamline deferred tag copies:", "ui={deferred=", 0) &&
+              reshade_log_number_above("Sunshine Streamline deferred tag copies:", "cancelled_by_untag=", 0),
+            "The command-less UI tags' deferred copies, or the FG depth tag's cancelled one, were not counted");
           observed_state = true;
           settle_route("DLSSG-evaluation-owns-FG-depth", true);
           for (unsigned pair = 0; pair < 6; ++pair) {
@@ -2532,11 +2558,12 @@ namespace {
               "A generated Present did not hold its real frame's DLSS-G depth");
           }
           render_tracked_depth = dlssg_frame;
-          require(reshade_log_contains({"Sunshine Streamline FG depth refused: reason=boundary_without_commands", "fg_scope=live",
-              "withdrawn=0", "dlssg_supplied=1"}),
-            "A command-less FG tag withdrew the FG source DLSS-G's evaluation supplies");
           require(reshade_log_number_above("Sunshine NGX depth:", "dlssg_depth={copied=", 0),
             "Accepted DLSS-G depth copies were not counted");
+          // When the same frame untags the game's own UI tags, their deferred
+          // copies are cancelled and DLSS-G's HUD-less and Backbuffer are its UI
+          // inputs.
+          ui_tags = ui_tags_form::untagged;
           require(reshade_log_number_above("Sunshine NGX depth:", "dlssg_ui={offered=", 0) &&
               reshade_log_number_above("Sunshine NGX depth:", " captured=", 0),
             "DLSS-G's HUD-less and Backbuffer were not captured for UI detection");
@@ -2567,7 +2594,7 @@ namespace {
           // neither input again (dlssg_ui tag_copied), so no second full-size
           // copy competes for the kind's two snapshots, and UI detection keeps
           // the tags' own same-batch pair.
-          ui_tag_commands = true;
+          ui_tags = ui_tags_form::listed;
           for (const auto settled = GetTickCount64() + 300; GetTickCount64() < settled;) present_frame();
           const auto ngx_lines = [&] { return reshade_log_lines({"Sunshine NGX depth:", "dlssg_ui={offered="}); };
           const auto gate_lines = [&] { return reshade_log_lines({"Sunshine UI capture gate:", "hudless_presents={batch="}); };
@@ -2591,18 +2618,19 @@ namespace {
           require(number_after(gate[gate_start + 1], "hudless_presents={batch=") > 0,
             "The Streamline tags' HUD-less image did not reach UI detection with its same-batch Backbuffer");
           const auto captured_behind_tags = ui_field(second_line, " captured=");
-          ui_tag_commands = false;
+          ui_tags = ui_tags_form::untagged;
           // An FG tag with a command list copies the frame first and keeps
           // precedence: the evaluation adds no second copy (tag_copied). The
-          // UI tags are command-less again (refused): DLSS-G's UI inputs are
+          // UI tags are untagged again in their frame: DLSS-G's UI inputs are
           // captured again at once.
           tag_commands = true;
           settle_route("DLSSG-evaluation-behind-FG-tag-copies", true);
           require(reshade_log_contains({"Sunshine NGX depth:", "dlssg_depth={copied=", "tag_copied:"}),
             "DLSS-G's evaluation copied a frame its Streamline FG tag had already copied");
           require(reshade_log_number_above("Sunshine NGX depth:", " captured=", captured_behind_tags),
-            "Refused Streamline UI tags did not hand their kinds back to DLSS-G's evaluation");
+            "Untagged Streamline UI tags did not hand their kinds back to DLSS-G's evaluation");
           tag_commands = false;
+          ui_tags = ui_tags_form::commandless;
           // Refused again: the scope falls silent and SR depth returns.
           observed_state = false;
           settle_route("DLSSG-refused-again-SR-depth", false);
@@ -2613,8 +2641,8 @@ namespace {
           // Accepted FG tag copies own the viewport again, as before this case.
           render_tracked_depth = [this] { fallback_frame(true, true); };
           settle_route("DLSSG-case-done-FG-tags-own-again", true);
-          evidence << "dlssg-evaluation unobserved=SR observed=FG-owned generated=held ui=exact-batch ui-tags-with-commands=tag-copied\n";
-          std::puts("PASS native DLSS-G evaluation: DLSSG.Depth without an observed state is refused and counted with SR depth unchanged; in an observed state it owns the FG scope, generated Presents hold it, the command-less FG tag withdraws nothing, its HUD-less/Backbuffer pair reaches UI detection exactly, and FG depth and HUD-less/Backbuffer tags that copy keep precedence per kind; no FX");
+          evidence << "dlssg-evaluation unobserved=SR commandless-ui-tags=exact-batch observed=FG-owned generated=held untagged-ui-tags=dlssg-exact-batch ui-tags-with-commands=tag-copied\n";
+          std::puts("PASS native DLSS-G evaluation: DLSSG.Depth without an observed state is refused and counted with SR depth unchanged while the game's command-less HUD-less/Backbuffer tags reach UI detection exactly; in an observed state it owns the FG scope, generated Presents hold it, the command-less FG tag withdraws nothing, once its frame untags the game's UI tags its HUD-less/Backbuffer pair reaches UI detection exactly, and FG depth and HUD-less/Backbuffer tags that copy keep precedence per kind; no FX");
         }});
     }
 
@@ -2645,7 +2673,11 @@ namespace {
             "A silent FG scope with no API source supplied depth or used the generic depth fallback");
           {
             // The record holds the queue in mono for the FG scope (H), never
-            // Generic, with neither API rung delivering.
+            // Generic, with neither API rung delivering. Nothing withdraws
+            // the earlier FG copy (an untag cancels only the copy deferred to
+            // its frame's Present, R7/S9), so that stale source may still be
+            // the newest Streamline one: its rung falls back to the hold, and
+            // scene depth is then not considered (inactive).
             using sunshine_game3d::source_slot;
             using sunshine_game3d::source_state;
             require_record("SLFG-silent-scope-no-API-source", source_slot::hold, source_slot::hold, source_state::mono,
@@ -2653,9 +2685,11 @@ namespace {
             require_record("SLFG-silent-scope-no-API-source", source_slot::hold, source_slot::generic, source_state::inactive,
               "API_depth_owner");
             const auto &r = newest_record();
+            log_record("SLFG-silent-scope-no-API-source", r);
             for (const auto slot : {source_slot::fg_depth, source_slot::scene_depth})
               require(r[slot].state != source_state::ready && r[slot].state != source_state::held &&
-                r[slot].fallback_to == source_slot::hold, "The frame record named an API rung delivering for a silent scope");
+                (r[slot].state == source_state::inactive || r[slot].fallback_to == source_slot::hold),
+                "The frame record named an API rung delivering for a silent scope");
           }
           require_records_match_log("SLFG-silent-scope");
           std::puts("PASS native SLFG scope: refused FG tags let the same viewport's SR depth through after a second, never before; an accepted FG copy owns the viewport again and SR stays out; with no SR the silent scope stays mono, never generic; no FX");

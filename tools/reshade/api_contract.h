@@ -56,11 +56,12 @@ namespace sunshine_api_contract {
       return lifecycle <= valid_until_evaluate;
     }
     // Where the copy is made. OnlyValidNow holds only inside the tag call that
-    // supplied it, and this is the one difference between the depth and UI
-    // readings of a tag: a UI tag is copied only there (tag_call), while depth
-    // is also copied at a later evaluate (evaluate), where an OnlyValidNow
-    // resource is gone.
-    enum class copy_point : std::uint8_t { tag_call, evaluate };
+    // supplied it: a UI tag is copied there (tag_call), while depth is also
+    // copied at a later evaluate (evaluate), where an OnlyValidNow resource is
+    // gone. A ValidUntilPresent tag may also be copied on the Present queue
+    // right before its frame's Present (present, deferred_copy below), where
+    // its declared state is exact.
+    enum class copy_point : std::uint8_t { tag_call, evaluate, present };
 
     // A tag as the probe read it.
     struct tag_declaration {
@@ -94,6 +95,34 @@ namespace sunshine_api_contract {
     }
     constexpr contract map(const tag_declaration &tag, copy_point at) {
       return {tag.state, proof(tag), valid_until(tag, at)};
+    }
+    // Where a 2.x tag call copies a tag it supplies with no later evaluate of
+    // its own in view: a frame-generation input (DLSS-G reads it at its
+    // frame's Present), or a UI input (copied only at its tag call or, here,
+    // its Present). Owner ruling R2, the matrix's S5, S6, S11b, S11c and U2.
+    // Resource::state "needs to be correct when tagged resources are actually
+    // used" (sl_core_types.h): a ValidUntilPresent declaration describes the
+    // state at its frame's Present, not at the call. So a ValidUntilPresent
+    // tag is copied inside the call only when the call's command list
+    // records its state there (recorded), else on the Present queue right
+    // before its frame's Present (present); its command list may be null
+    // (sl_core_api.h: only ValidUntilPresent tags may come without one). An
+    // OnlyValidNow tag is copied inside the call, which needs a command list.
+    // A ValidUntilEvaluate tag is copied inside the call only from a recorded
+    // state; its declaration describes its evaluate, which copies it (none).
+    enum class tag_call_copy : std::uint8_t { at_call, present, none };
+    constexpr tag_call_copy deferred_copy(std::uint32_t lifecycle, bool command_list, bool recorded) {
+      if (lifecycle == valid_until_present) return command_list && recorded ? tag_call_copy::at_call : tag_call_copy::present;
+      if (!command_list || (lifecycle != only_valid_now && !recorded)) return tag_call_copy::none;
+      return tag_call_copy::at_call;
+    }
+    // Owner ruling R7: a null untag (a null Resource or native) of a viewport
+    // cancels that viewport's copy deferred to its Present when it names the
+    // deferred tag's frame, and whenever the two frames cannot be told apart
+    // (the untag names no frame token, slSetTag, or the deferred tag has no
+    // frame); an untag of another frame leaves it.
+    constexpr bool untag_cancels(bool untag_framed, bool tag_framed, bool same_frame) {
+      return !untag_framed || !tag_framed || same_frame;
     }
     // The lifecycle match() (streamline_camera_data.cpp) judges at a copy
     // point. It admits a lifetime that lasts until Present (and a 1.x tag's

@@ -51,6 +51,10 @@ namespace {
      streamline::only_valid_now, copy_point::tag_call, lifetime::at_call},
     {"OnlyValidNow is gone at a later evaluate", false, true, streamline::only_valid_now, copy_point::evaluate,
      lifetime::unsupported},
+    {"ValidUntilPresent holds until Present on the Present queue (R2)", false, true, streamline::valid_until_present,
+     copy_point::present, lifetime::until_present},
+    {"OnlyValidNow is gone at its frame's Present", false, true, streamline::only_valid_now, copy_point::present,
+     lifetime::unsupported},
     {"A lifecycle above ValidUntilEvaluate is unsupported", false, true, 3, copy_point::tag_call, lifetime::unsupported},
     {"A 2.x tag without a lifecycle is unsupported", false, true, streamline::no_lifecycle, copy_point::tag_call,
      lifetime::unsupported},
@@ -138,6 +142,49 @@ namespace {
      state_proof::observed_nonzero, lifetime::at_call},
   };
 
+  // Where a frame-generation or UI tag call copies a tag (R2): inside the
+  // call from a state its command list records, a ValidUntilPresent tag else
+  // on the Present queue before its frame's Present, an UntilEvaluate tag
+  // else at its evaluate (none here).
+  struct tag_call_copy_row {
+    const char *pins;
+    std::uint32_t lifecycle;
+    bool command_list, recorded;
+    streamline::tag_call_copy expected;
+  };
+
+  constexpr tag_call_copy_row tag_call_copies[] {
+    {"A ValidUntilPresent tag without a command list is copied before its Present (S6)", streamline::valid_until_present,
+     false, false, streamline::tag_call_copy::present},
+    {"A ValidUntilPresent tag whose list records no state is copied before its Present (S11b)",
+     streamline::valid_until_present, true, false, streamline::tag_call_copy::present},
+    {"A ValidUntilPresent tag whose list records its state is copied at the call (S5)", streamline::valid_until_present,
+     true, true, streamline::tag_call_copy::at_call},
+    {"An OnlyValidNow tag is copied at its call (S1)", streamline::only_valid_now, true, false,
+     streamline::tag_call_copy::at_call},
+    {"An OnlyValidNow tag without a command list has no copy point (S2)", streamline::only_valid_now, false, false,
+     streamline::tag_call_copy::none},
+    {"An UntilEvaluate tag whose list records no state waits for its evaluate (S11c)", streamline::valid_until_evaluate,
+     true, false, streamline::tag_call_copy::none},
+    {"An UntilEvaluate tag whose list records its state is copied at the call (S5)", streamline::valid_until_evaluate,
+     true, true, streamline::tag_call_copy::at_call},
+    {"An UntilEvaluate tag without a command list has no copy point (S2)", streamline::valid_until_evaluate, false, false,
+     streamline::tag_call_copy::none},
+  };
+
+  // Whether a null untag cancels a copy deferred to its Present (R7).
+  struct untag_row {
+    const char *pins;
+    bool untag_framed, tag_framed, same_frame, cancels;
+  };
+
+  constexpr untag_row untags[] {
+    {"The same frame's untag cancels the deferred copy", true, true, true, true},
+    {"Another frame's untag leaves it", true, true, false, false},
+    {"An untag without a frame token cancels it", false, true, false, true},
+    {"Any untag cancels a deferred tag that has no frame", true, false, false, true},
+  };
+
   // Streamline's sl::Extent orders top before left.
   struct top_first_extent {
     std::uint32_t top {}, left {}, width {}, height {};
@@ -160,6 +207,10 @@ int main() {
     require(streamline::proof(tag) == row.expected, row.pins);
   }
   for (const auto &row : matched) require(streamline::lifecycle_at(row.lifecycle, row.at) == row.expected, row.pins);
+  for (const auto &row : tag_call_copies)
+    require(streamline::deferred_copy(row.lifecycle, row.command_list, row.recorded) == row.expected, row.pins);
+  for (const auto &row : untags)
+    require(streamline::untag_cancels(row.untag_framed, row.tag_framed, row.same_frame) == row.cancels, row.pins);
   require(streamline::defined_lifecycle(streamline::only_valid_now) &&
             streamline::defined_lifecycle(streamline::valid_until_present) &&
             streamline::defined_lifecycle(streamline::valid_until_evaluate) && !streamline::defined_lifecycle(3) &&
@@ -223,8 +274,8 @@ int main() {
     std::fprintf(stderr, "API contract: %u cells changed\n", failures);
     return 1;
   }
-  std::printf("PASS API contract: %zu lifetime, %zu proof, %zu matched-lifecycle and %zu Dump 3D rows, the defined "
-    "lifecycles, each API's contract and the whole-allocation extent\n", std::size(lifetimes), std::size(proofs),
-    std::size(matched), std::size(dumps));
+  std::printf("PASS API contract: %zu lifetime, %zu proof, %zu matched-lifecycle, %zu tag-call copy, %zu untag and %zu "
+    "Dump 3D rows, the defined lifecycles, each API's contract and the whole-allocation extent\n", std::size(lifetimes),
+    std::size(proofs), std::size(matched), std::size(tag_call_copies), std::size(untags), std::size(dumps));
   return 0;
 }

@@ -32,6 +32,12 @@ namespace sunshine_streamline::depth_capture {
     // Presents of earlier frames since the tag, which multi frame generation
     // shows meanwhile, leave it current.
     bool own_frame{};
+    // A copy deferred to its frame's Present (api_contract.h deferred_copy,
+    // owner ruling R2): the queue whose Present it precedes, which executes
+    // the copy on ReShade's immediate list. Its declaration describes the
+    // state there; the source's last proven state on this queue
+    // (last_proven_state), where there is one, must agree with it.
+    std::uint64_t present_queue{};
     // A nomination whose copy is refused is no nomination: no metadata-only
     // ticket is published, so the source's latest observation is unchanged.
     // DLSS-G's own evaluation (frame_generation_inputs.h) supplies FG depth
@@ -296,6 +302,19 @@ namespace sunshine_streamline::depth_capture {
 
   source_ref retain_source(std::uint64_t resource, record_diagnostic *diagnostic = nullptr);
   std::uint64_t source_present_generation(const source_ref &source);
+  // Whether the barrier hooks recorded a state of source on command's current
+  // recording (what a copy recorded there would start from). False when they
+  // do not observe command, or it names nothing of source. Call on the thread
+  // recording command.
+  bool recorded_state(std::uint64_t command, const source_ref &source);
+  // Executions of game lists observed so far, on any queue: each
+  // ExecuteCommandLists that submitted a list with a recording other than
+  // ReShade's own immediate lists (DXGI's internal Present list has none). A
+  // copy deferred to its frame's Present needs one since its tag call: the
+  // game submits a frame's work before presenting it, and a Present with
+  // none since is an earlier frame's (multi frame generation presents them
+  // while the game records).
+  std::uint64_t game_executions();
   // A retained source's allocation width and height (false without one).
   bool source_extent(const source_ref &source, std::uint32_t &width, std::uint32_t &height);
   // BEGIN actual native Present: expires future uses of this device's old tags,
@@ -487,6 +506,14 @@ namespace sunshine_streamline::depth_capture {
   // uses the texture, unless enhanced barriers were seen).
   using proven_state = sunshine_proven_state::state;
   void resource_created(std::uint64_t resource, std::uint32_t initial_state);
+  // A source whose copy a tag call deferred to its frame's Present
+  // (input::present_queue) is tracked from then on, unproven until an
+  // executed list proves it, so that copy starts from the state the game's
+  // work left it in on that queue (an enhanced layout included) or is refused
+  // when that state disagrees with the declaration. A texture tracked already
+  // (a depth-stencil one, from its creation) keeps its state; buffers and
+  // simultaneous-access textures are not tracked.
+  void track_deferred_source(const source_ref &source);
   // A depth clear of resource's subresource 0 recorded on command, a list
   // ReShade's lifecycle reports (ClearDepthStencilView with the depth flag, or
   // a render pass that clears depth): D3D12 requires DEPTH_WRITE there, so

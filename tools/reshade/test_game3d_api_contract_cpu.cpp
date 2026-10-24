@@ -1474,6 +1474,31 @@ namespace {
       const auto &frame = run.frame;
       const bool at_call = run.snapshot.tag_boundary;
       const bool forced = at_call && frame.valid_until == lifetime::at_call;
+      if (at_call && frame.frame_generation_input) {
+        // Where a frame-generation tag call copies its tag (R2,
+        // nominate_depth_source through api_contract.h deferred_copy, with
+        // depth_capture::recorded_state for the case's own recording): a
+        // state recorded there copies it at the call; a ValidUntilPresent tag
+        // is otherwise copied on the Present queue before its frame's Present
+        // (present_deferred), where nothing on ReShade's list names its state
+        // and its declaration applies. The case's untag names the tag's own
+        // frame, or no frame token, so it cancels that copy (R7,
+        // untag_cancels); the runtime layer runs the cancellation itself.
+        namespace sl_contract = sunshine_api_contract::streamline;
+        const auto point = sl_contract::deferred_copy(run.snapshot.tags[0].value.lifecycle, run.snapshot.command_buffer != 0,
+          observation_of(value.depth).present);
+        if (point == sl_contract::tag_call_copy::none) {
+          return out;
+        }
+        if (point == sl_contract::tag_call_copy::present) {
+          if (value.untag == matrix::untag_pattern::null_after_each) {
+            return out;
+          }
+          out = judged(copy_state::resolve(copy_state::select(frame.proof, policy::source_contract), frame.native_state, {}, value.depth.flags));
+          out.deferred = out.kind == matrix::outcome_kind::capture;
+          return out;
+        }
+      }
       // Repeats of record_impl (streamline_depth_capture.cpp), which needs a
       // device: a command list, a lifetime it keeps, and
       // source_lifetime_current: inside the tag call, at an evaluation of the

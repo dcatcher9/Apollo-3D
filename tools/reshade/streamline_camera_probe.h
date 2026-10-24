@@ -62,6 +62,14 @@ namespace sunshine_streamline {
   void queue_initialized(std::uint64_t native, std::uint64_t device, std::uint64_t cookie = 0);
   void queue_destroyed(std::uint64_t native);
   void command_executed(std::uint64_t queue, std::uint64_t command);
+  // ReShade's present event on queue, before that Present (and before
+  // depth_capture::present ends the tags' lifetimes): makes the copies a tag
+  // call deferred to its frame's Present (owner ruling R2,
+  // api_contract.h deferred_copy) on immediate, ReShade's immediate list of
+  // queue, once a game list executed after the tag (an earlier Present is an
+  // earlier frame's); drops those whose frame ended. True when it recorded a
+  // copy: the caller submits immediate before the Present.
+  bool present_deferred(std::uint64_t queue, std::uint64_t immediate);
   void command_secondary_executed(std::uint64_t primary, std::uint64_t secondary);
   commands::recording_marker capture_command_marker(std::uint64_t native);
   // Valid native D3D12 COM object only: queue standard DiscardResource target
@@ -96,6 +104,9 @@ namespace sunshine_streamline {
     std::uint64_t resource_lifetime{}, resource_device{};
     std::uint32_t native_state{0xffffffffu};
     bool state_requires_observation{};
+    // Its tag call supplied a command list (an evaluate input's evaluation
+    // always does).
+    bool commanded{};
     depth_capture::source_ref direct_source;
     std::uint64_t source_present_generation{};
     // An evaluation of the frame this stored tag was set for (the matrix's

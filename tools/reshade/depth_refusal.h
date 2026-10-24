@@ -87,7 +87,7 @@ namespace sunshine_depth_refusal {
   // match_status names; NGX names its own.
   inline constexpr named_reason named_reasons[] {
     // Source gate literals.
-    {"boundary_without_commands", reason_class::no_copy_point},  // A tag call with no command list (S2; S6 until R2 lands).
+    {"boundary_without_commands", reason_class::no_copy_point},  // A tag without a command list other than ValidUntilPresent (S2).
     {"no_observation", reason_class::internal},
     {"observation_lost", reason_class::internal},
     {"camera_reset", reason_class::internal},  // A reset without a usable camera (the add-on's camera policy).

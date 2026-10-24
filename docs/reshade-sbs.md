@@ -3855,8 +3855,54 @@ later use, a tag without such a frame and a preservation copy still expire at th
 Other lifetime rules, recording retirement and the shared consumer-ordering checks above still
 apply. The [API contract matrix](../tools/reshade/README.md#api-contract-matrix) drives these
 lifetimes through the probe's hooks and through real Presents of the runtime fixture; its known-gap
-table lists where they fall short of Streamline's contract (a `ValidUntilPresent` tag may arrive
-without a command list).
+table lists where they still fall short of Streamline's contract.
+
+**Copies before the frame's Present (owner ruling R2, since Stage 3 fix 2).** `Resource::state`
+"needs to be correct when tagged resources are actually used" (`sl_core_types.h`), and a
+`ValidUntilPresent` tag is used at its frame's Present, so its declaration describes that point,
+not its tag call; and a call whose tags are all `ValidUntilPresent` may pass no command list
+(`sl_core_api.h`). Where a frame-generation tag call copies each depth tag, and where any 2.x tag
+call copies a UI tag (HUD-less, Backbuffer, UI colour and alpha, UIAlpha), is
+`deferred_copy` in [`api_contract.h`](../tools/reshade/api_contract.h):
+
+- inside the call, on its command list, when the barrier hooks recorded the tag's state on that
+  recording (`depth_capture::recorded_state`), for an `OnlyValidNow` tag, and for any UI tag that
+  comes with a command list (S1, S5, U1);
+- for a `ValidUntilPresent` tag otherwise (a frame-generation depth tag whose list records no state
+  of it, S11b; any such tag without a command list, S6 and U2), on the Present queue right before
+  its frame's Present: the probe keeps the tag (`deferred_frame`, one per viewport) and
+  `present_deferred` records the copy from ReShade's `present` event, before
+  `depth_capture::present` ends the tags' lifetimes, on that queue's immediate list, which is then
+  submitted ahead of the Present (ReShade submits that list early only after a command recorded
+  through its own API, so one timestamp query, written and never read, marks it first). The copy
+  starts from the declaration (`depth_capture::input::present_queue`); where the capture owner
+  proved the source's state on that queue (the per-resource last-proven state of the generic path:
+  a deferred source is tracked from its first deferral, `track_deferred_source`, besides every
+  depth-stencil texture from its creation), that state must agree, as an observation would, or the
+  copy is refused (`conflicting_state`); an agreeing enhanced layout is left and restored with
+  enhanced barriers. A refusal changes nothing: the
+  earlier capture holds within the source age, then mono. An accepted depth copy becomes the
+  viewport's FG source as a tag-call copy would (it keeps the FG scope live and keeps precedence
+  over DLSS-G's own evaluation of the next frame, `tag_copied`), and an accepted UI copy is offered
+  to UI detection with its tag call's other kinds as one batch (exact HUD-less pairs);
+- a `ValidUntilEvaluate` frame-generation depth tag whose list records no state of it is refused
+  at the call (`missing_state`): its declaration describes its evaluate, which copies it (S11c).
+  Any other tag without a command list has no point to copy at (`boundary_without_commands`, S2),
+  at its call and at a later evaluate.
+
+A frame's Present is the first one after a game list executed following the tag call (any queue:
+`depth_capture::game_executions`; ReShade's own immediate lists and DXGI's internal Present list do
+not count). A Present with none since is an earlier frame's (multi frame generation presents them
+while the game records), so it neither copies nor ends the deferral (S7). A deferral lapses
+(`lapsed`) when the source age passes, the observation changes, the viewport's constants name a
+later frame, or another frame's tag call of the viewport replaces it. A null untag of the viewport
+(a null Resource or native) cancels it (`cancelled_by_untag`, owner ruling R7, `untag_cancels`):
+an untag that names the deferred tag's frame token, or that names no frame token (`slSetTag`) or
+whose tag had no frame, cancels it; an untag of another frame leaves it. A cancelled or lapsed
+deferral hands its kinds back to DLSS-G's own evaluation at once. The bounded line
+`Sunshine Streamline deferred tag copies: depth={deferred=<n> copied=<n> refused=<n>
+last_refusal=<stage>} ui={deferred=<n> copied=<n> refused=<n>} cancelled_by_untag=<n> lapsed=<n>
+pending=<n>` (at most every 5 s, after its totals changed) counts them since start.
 Known affine `PrecisionInfo` extensions are decoded. For device depth their scale/bias are reflected
 in the texture-space projection coefficients and valid stored-depth range. For tag49 they recover
 positive view distance before reciprocal-depth reconstruction. Changing only the storage encoding
@@ -3866,18 +3912,21 @@ bounded rejection diagnostic. A supported enabled FG source has priority over NG
 including while its current capture is pending. Its depth and source-associated camera metadata
 stay together; missing usable FG pixels do not authorize an NGX substitution or cross-API
 projection borrowing. An FG tag call that names no capturable depth is refused, and while the FG
-scope is live (below) it withdraws the FG source until its next capture. A bounded
+scope is live (below) it withdraws the FG source until its next capture; one whose copy is deferred
+to its frame's Present (above) is neither refused nor withdrawn at the call. A bounded
 `Sunshine Streamline FG depth refused` line (at most every 5 s) names the first failing gate as
-`reason=`: a source gate such as `boundary_without_commands` (a legal `ValidUntilPresent` tag sent
-without a command list, which leaves no point to copy it at) or `untracked_frame`, a tag gate such
-as `not_depth`, `unsupported_<cause>`, `constants_call_frame` or a match status, `no_retained_source`
-when an admissible tag has no retained native source, or `capture_<result>/<stage>` when the native
-copy was refused. `lifecycle_outlives_boundary` gates only ordinary (non-FG) tag boundaries; a
+`reason=`: a source gate such as `untracked_frame`, a tag gate such as `not_depth`,
+`boundary_without_commands` (a tag other than `ValidUntilPresent` sent without a command list),
+`unsupported_<cause>`, `constants_call_frame` or a match status, `no_retained_source` when an
+admissible tag has no retained native source, or `capture_<result>/<stage>` when the native copy
+was refused (`capture_missing_state/missing_state` for a `ValidUntilEvaluate` tag whose list
+records no state). `lifecycle_outlives_boundary` gates only ordinary (non-FG) tag boundaries; a
 long-lived FG tag goes on to matching instead.
 It also gives the call's first depth tag (`tag_type`, `scope`, `lifecycle`, `native`), its
 `command`, the frame identity kind, the evidence `status`, `fg_scope=live|silent`, `withdrawn=1|0`,
 `dlssg_supplied=1|0` and the running `refusals` count. `dlssg_supplied=1` marks a command-less
-boundary of a live scope whose copies DLSS-G's own evaluation records (below): it withdraws nothing,
+boundary with no copy point of a live scope whose copies DLSS-G's own evaluation records (below):
+it withdraws nothing,
 since that evaluation, not the tag, is where the frame's depth is copied, and a withdrawal would
 leave every Present between the tag and the evaluation without a current FG nomination.
 
@@ -3885,7 +3934,8 @@ DLSS-G's own NGX evaluation (feature 11, created by Streamline's DLSS-G plugin t
 exports the add-on already hooks; no new hook and no patch of the DLSS-G module) supplies the FG
 scope's depth when the game's FG depth tag cannot be copied (since 10-23). Assassin's Creed Shadows
 tags its FG depth without a command list on every frame, so its FG scope stayed silent and its
-SR evaluation's depth supplied the viewport. Once per real frame (`DLSSG.MultiFrameIndex` is 1-based
+SR evaluation's depth supplied the viewport (10-23; since Stage 3 fix 2 that tag's copy is deferred
+to its frame's Present, above, unless the same frame's untag cancels it). Once per real frame (`DLSSG.MultiFrameIndex` is 1-based
 in the pinned `nvsdk_ngx_defs_dlssg.h`; an index above 1 is a later inner frame of multi frame
 generation with the same inputs, skipped and counted as `inner_frames`; an absent index is one
 evaluation per frame) the adapter reads `DLSSG.Depth` through the D3D12 resource getter and then
@@ -3913,7 +3963,8 @@ its own subrectangle, read the same way) are offered to the live UI request of t
 batch (`tag_scope=2`, `boundary::frame_generation_evaluation`), under the same observed-state rule.
 An absent key changes nothing; an explicit null revokes that kind's snapshots of DLSS-G's
 evaluation only. The two origins never revoke each other's snapshots, so Shadows' command-less
-HUD-less and Backbuffer tags, refused as `shape`, no longer erase the evaluation's copies. As for
+HUD-less and Backbuffer tags (refused as `shape` until Stage 3 fix 2, copied before their frame's
+Present since) never erase the evaluation's copies. As for
 depth, a Streamline tag keeps precedence per kind: when the newest tag of a kind for that viewport
 recorded a copy that its SDK call kept, within the source age, the evaluation's input of that kind
 is skipped (`tag_copied`), so a game whose UI tags already copy keeps one origin per kind, its own

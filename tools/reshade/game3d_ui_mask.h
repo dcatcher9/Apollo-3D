@@ -125,8 +125,9 @@ namespace sunshine_game3d::ui_mask {
     // HUDLess, UI, UIAlpha), not from a Streamline tag. Its sequence is that
     // evaluation's, shared by all of its inputs. Each origin revokes only its
     // own snapshots: Assassin's Creed Shadows (10-23) tags its HUD-less and
-    // Backbuffer without a command list on every frame, refused as shape,
-    // which must not erase the copies DLSS-G's evaluation recorded.
+    // Backbuffer without a command list on every frame (copied before the
+    // frame's Present since Stage 3 fix 2; before, refused as shape), which
+    // must not erase the copies DLSS-G's evaluation recorded.
     bool frame_generation_evaluation{};
   };
   // The presented color a HUD-less image is compared with when no same-batch

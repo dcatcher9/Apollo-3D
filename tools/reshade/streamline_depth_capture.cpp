@@ -1464,13 +1464,18 @@ namespace sunshine_streamline::depth_capture {
         default: break;
       }
     }
+    std::atomic<std::uint64_t> game_execution_count{};
     void observed_submission(std::uint64_t queue, std::uint32_t count, const native_observer::command_identity *values) {
       submitted(queue, count, values);
       // ReShade resets its own list right after submitting it: the submitted
-      // recording ends and the next one begins.
+      // recording ends and the next one begins. Any other list with a
+      // recording is the game's (game_executions).
+      bool game = false;
       for (std::uint32_t i = 0; i != count; ++i)
         if (runtime_list(values[i].native_command))
           try { lifecycle_recording(values[i].native_command, list_event::reset); } catch (...) {}
+        else if (values[i].recording_cookie) game = true;
+      if (game) game_execution_count.fetch_add(1, std::memory_order_acq_rel);
     }
   }
   void observe_list_event(std::uint64_t native, list_event event) {
@@ -1839,6 +1844,18 @@ namespace sunshine_streamline::depth_capture {
   std::uint64_t source_present_generation(const source_ref &source) {
     return source ? source->present_generation.load(std::memory_order_acquire) : 0;
   }
+  bool recorded_state(std::uint64_t native_command, const source_ref &source) {
+    if (!requested.load() || !native_command || !source) return false;
+    com_ptr<ID3D12GraphicsCommandList> checked;
+    if (!query_native(native_command, IID_ID3D12GraphicsCommandList, checked)) return false;
+    const auto native = reinterpret_cast<std::uint64_t>(checked.p);
+    if (!native_observer::states_ready(native)) return false;
+    const auto cookie = native_observer::get_recording_cookie(native);
+    std::lock_guard lock(mutex);
+    auto owner = command(native, cookie, false);
+    return owner && !owner->invalid && state(*owner, source->cookie, false);
+  }
+  std::uint64_t game_executions() { return game_execution_count.load(std::memory_order_acquire); }
   bool source_extent(const source_ref &source, std::uint32_t &width, std::uint32_t &height) {
     width = height = 0;
     if (!source || !source->desc.Width || source->desc.Width > UINT32_MAX) return false;
@@ -2015,8 +2032,15 @@ namespace sunshine_streamline::depth_capture {
     observe_command(native);
     // The barrier hooks supply the list's resource states only when they see it.
     const bool states_observed = native_observer::states_ready(native);
-    // A proven state holds for a queue whose executions the hooks report.
-    const bool proven_basis_allowed = value.proof == sunshine_scene_depth::state_proof::last_proven && states_observed &&
+    // A proven state holds for a queue whose executions the hooks report. It
+    // supplies a last_proven proof, and checks the declaration of a copy
+    // deferred to its frame's Present (input::present_queue) as an
+    // observation would: one that disagrees refuses the copy.
+    com_ptr<ID3D12CommandQueue> present_queue;
+    if (!proven_queue && query_native(value.present_queue, IID_ID3D12CommandQueue, present_queue))
+      proven_queue = reinterpret_cast<std::uint64_t>(present_queue.p); // As the submission hook reports it.
+    const bool proven_basis_allowed = (value.proof == sunshine_scene_depth::state_proof::last_proven ||
+        (value.present_queue && value.proof == sunshine_scene_depth::state_proof::declared)) && states_observed &&
       proven_queue && native_observer::queue_ready(proven_queue);
     auto *list = checked.p;
     const auto command_type = list->GetType();
@@ -2501,6 +2525,12 @@ namespace sunshine_streamline::depth_capture {
     if (!identity) return;
     std::lock_guard lock(mutex);
     proven.track(identity, initial_state != UINT32_MAX, initial_state);
+  }
+  void track_deferred_source(const source_ref &source) {
+    if (!requested.load() || !source || !source->cookie || source->desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER ||
+        (source->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS)) return;
+    std::lock_guard lock(mutex);
+    if (!proven.tracked(source->cookie)) proven.track(source->cookie, false, 0);
   }
   void observe_depth_clear(std::uint64_t native, std::uint64_t resource) {
     if (!requested.load() || !native || !resource) return;

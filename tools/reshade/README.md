@@ -861,23 +861,29 @@ the generated frame, the matrix scale active without recalibration, and a
 `Sunshine depth render size` line), FG-off
 rejection and fresh SL recovery. It also checks repeated holds against the original capture's
 expiry, camera reset, and FG off/on without a fresh capture; none may revive invalidated depth.
-Fresh copies must recover each interval. With FG options on and every FG depth tag refused, the
+Fresh copies must recover each interval. A `ValidUntilPresent` FG depth tag sent without a command
+list is copied before its frame's Present, and every Present shows that frame's fresh FG depth (R2;
+the bounded `Sunshine Streamline deferred tag copies` line counts the copies). With FG options on
+and every FG depth tag's copy cancelled by the same frame's untag (R7), the
 same viewport's SR depth takes over once the FG scope is silent; each generated presentation, at
 2x and 3x, holds its real frame's SR copy, also after the fixture's window leaves the foreground
 (the export stop invalidates reuse once) and back, with no readiness loss logged.
 The test executable also exports the NGX stand-in's entry points (below); its DLSS-G case creates
-feature 11 and sets only the named `DLSSG.*` inputs (no capture). With its FG depth, HUD-less and
-Backbuffer tags command-less, as in Assassin's Creed Shadows, a DLSS-G evaluation whose list observes no state for `DLSSG.Depth`, `DLSSG.HUDLess` and
-`DLSSG.Backbuffer` is refused and counted (`dlssg_depth={copied=0 ... refused=missing_state:<n>}`)
-with the SR depth unchanged, and the test add-on's refusal query (API contract matrix) reports it
-as a `state_unprovable` capture refusal, as it reports a command-less FG tag as a `no_copy_point`
-source refusal; once its list transitions them, `DLSSG.Depth` with its subrect and
-`DLSSG.DepthInverted` owns the FG scope, generated Presents hold it, the command-less FG tag
-withdraws nothing (`dlssg_supplied=1`) and its HUD-less/Backbuffer pair reaches UI detection as a
-same-batch pair (`hudless_presents={batch=<n>`). HUD-less and Backbuffer tags sent with the game's
-command list keep precedence per kind: across two NGX lines `dlssg_ui` offers and captures nothing
-more while its `tag_copied` grows, and a later UI capture gate window still counts the tags' own
-same-batch pairs; command-less again, DLSS-G's inputs are captured again. An FG tag sent with a
+feature 11 and sets only the named `DLSSG.*` inputs (no capture). With its FG depth tag command-less
+and untagged in the same frame (its deferred copy cancelled, R7) and its HUD-less and Backbuffer
+tags command-less, as in Assassin's Creed Shadows, a DLSS-G evaluation whose list observes no state
+for `DLSSG.Depth`, `DLSSG.HUDLess` and `DLSSG.Backbuffer` is refused and counted
+(`dlssg_depth={copied=0 ... refused=missing_state:<n>}`) with the SR depth unchanged, and the test
+add-on's refusal query (API contract matrix) reports it as a `state_unprovable` capture refusal;
+meanwhile the game's command-less HUD-less and Backbuffer tags, copied before their frame's Present
+(R2), reach UI detection as a same-batch pair (`hudless_presents={batch=<n>`). Once its list
+transitions them, `DLSSG.Depth` with its subrect and `DLSSG.DepthInverted` owns the FG scope,
+generated Presents hold it, the command-less FG tag withdraws nothing, and once the same frame also
+untags the HUD-less and Backbuffer tags (cancelling their deferred copies) DLSS-G's own
+HUD-less/Backbuffer pair reaches UI detection as a same-batch pair. HUD-less and Backbuffer tags sent
+with the game's command list keep precedence per kind: across two NGX lines `dlssg_ui` offers and
+captures nothing more while its `tag_copied` grows, and a later UI capture gate window still counts
+the tags' own same-batch pairs; untagged in their frame again, DLSS-G's inputs are captured again. An FG tag sent with a
 command list copies the frame first and keeps precedence (`tag_copied`); refused again, SR depth
 returns.
 It injects no captured pixels, readiness or GPU completion.
@@ -1427,7 +1433,9 @@ the add-on was tuned on; and one row per open owner question. A changing extent 
 sizes and must keep one logical source. NGX cases go through the evaluation adapter over every
 combination of its dimensions, DLSS-G's own `DLSSG.*` inputs included. The admission checks the
 layer cannot run without a device (the copy's command list and its lifetime: inside the tag call,
-at an evaluation of the tag's own frame as the probe reports it, or with no Present since; and
+at an evaluation of the tag's own frame as the probe reports it, or with no Present since; where an
+FG tag call copies its tag, `deferred_copy` in [`api_contract.h`](api_contract.h) over the case's
+recorded state, and the frame's untag that cancels a copy deferred to its Present, R2 and R7; and
 DLSS-G's observed-state nomination) are repeated from the capture owner; the device and runtime
 layers replace them. A known gap that such a repeat decides closes only when its fix changes the
 repeat in the same commit, as S7's (the lifetime at the tag's own frame's Present) did.
@@ -1501,7 +1509,9 @@ call of the case failed (S21b discards that copy unread) or the class is `fg_sco
 tag call and evaluate are
 both copy points that a Present cannot tell apart, so a case is judged at the earliest one whose
 outcome requires a capture. A capture at an FG tag call is deferred (R2) when the add-on's
-nomination gate saw no nomination inside that call. A generated Present may show the case's source
+nomination gate saw no nomination inside that call. Where the tag call permits a copy that the
+case's own point does not (an open question there names a refusal first and the copy as its
+alternative), the expectation keeps that copy, judged as at the tag call. A generated Present may show the case's source
 only as the capture the last real Present showed (a hold). Every SDK call must return the
 interposer's result. Each case has its own viewport and allocation; afterwards FG is turned off,
 the depth untagged, the case's viewport retired (constants on four scratch viewports evict its

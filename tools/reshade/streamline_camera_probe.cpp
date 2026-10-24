@@ -71,6 +71,8 @@ namespace sunshine_streamline {
       std::uint64_t resource_lifetime{}, resource_device{};
       std::uint32_t native_state{0xffffffffu};
       bool state_requires_observation{};
+      // Its call supplied a command list (an evaluate input's evaluation always does).
+      bool commanded{};
       depth_capture::source_ref direct_source;
       std::uint64_t source_present_generation{};
       double precision_scale{1.0}, precision_bias{};
@@ -200,10 +202,11 @@ namespace sunshine_streamline {
     std::atomic<std::uint64_t> next_compatibility_report{}, next_untag_report{}, next_fg_refusal_report{};
     // The newest FG copy DLSS-G's own NGX evaluation recorded: its scope (the
     // observation epoch and viewport) and tick (observe_frame_generation_inputs).
-    // Within the FG scope's second a refused command-less FG tag boundary of
-    // that scope withdraws nothing: the evaluation, not the tag, is where its
-    // depth is copied (Assassin's Creed Shadows 10-23 tags its FG depth without
-    // a command list on every frame).
+    // Within the FG scope's second a command-less FG tag boundary of that
+    // scope whose tags offer no copy point withdraws nothing: the evaluation,
+    // not the tag, is where its depth is copied (Assassin's Creed Shadows
+    // 10-23 tags its FG depth without a command list and untags it on every
+    // frame; the untag cancels the copy deferred to the frame's Present, R7).
     SRWLOCK evaluation_supply_lock = SRWLOCK_INIT;
     struct { std::uint64_t epoch{}, tick{}; std::uint32_t viewport{}; } evaluation_supply;
     void remember_evaluation_supply(std::uint64_t scope_epoch, std::uint32_t viewport, std::uint64_t tick) {
@@ -244,8 +247,9 @@ namespace sunshine_streamline {
     // zero when it was refused or its SDK call failed. DLSS-G's input of a kind
     // the game's own tags copy adds no second copy (observe_frame_generation_inputs),
     // so one origin feeds UI detection, its exact pairs included; a kind the
-    // tags leave out or cannot copy (Shadows' command-less HUD-less and
-    // Backbuffer) is DLSS-G's.
+    // tags leave out or cannot copy is DLSS-G's. A command-less tag's copy
+    // deferred to its frame's Present (present_deferred) sets the tick when it
+    // is made, so DLSS-G's evaluation of the next frame stands aside.
     struct { std::uint64_t epoch{}; std::uint32_t viewport{}; std::array<std::uint64_t, 4> tick{}; } ui_tag_copy;
     void remember_ui_tag_copy(std::uint64_t scope_epoch, std::uint32_t viewport, unsigned slot, bool recorded) {
       if (slot >= ui_tag_copy.tick.size()) return;
@@ -271,6 +275,47 @@ namespace sunshine_streamline {
       ReleaseSRWLockShared(&evaluation_supply_lock);
       const auto now = GetTickCount64();
       return scope && tick && sunshine_freshness::ahead_tolerant_lt(tick, now, sunshine_freshness::source_age_ms);
+    }
+    // Copies deferred to their frame's Present (owner ruling R2,
+    // api_contract.h deferred_copy; the matrix's S6, S11b and U2): per
+    // viewport, the newest frame's frame-generation depth candidates (in
+    // priority order) and UI tags that their tag call could not copy.
+    // present_deferred makes them at the first Present after that frame's
+    // work was submitted (depth_capture::game_executions), or drops them.
+    // Guarded by evaluation_supply_lock; deferral_pending counts used entries.
+    struct deferred_depth {
+      std::array<depth_capture::input, depth_priority.size()> candidates;
+      std::size_t count{};
+      std::uint64_t superseded{};
+    };
+    struct deferred_ui {
+      bool used{};
+      sunshine_game3d::ui_mask::boundary where;
+      depth_capture::input input; // Its sequence is its tag call's.
+    };
+    struct deferred_frame {
+      bool used{};
+      std::uint64_t observation{}, epoch{}, serial{}, tick{}, executions{};
+      std::uint32_t viewport{};
+      // The frame the tag call named (tag_frame); unavailable when none.
+      frame_identity frame;
+      deferred_depth depth;
+      std::array<deferred_ui, 4> ui{}; // By ui_mask::capture_slot.
+    };
+    std::array<deferred_frame, slot_count> deferred_frames{};
+    std::atomic<unsigned> deferral_pending{};
+    // Totals for the bounded deferral line (report_deferrals).
+    struct {
+      std::atomic<std::uint64_t> depth{}, ui{}, depth_copied{}, ui_copied{}, depth_refused{}, ui_refused{}, cancelled{},
+        lapsed{};
+      std::atomic<unsigned> refusal{}; // The newest refused depth copy's record_stage.
+    } deferrals;
+    std::atomic<std::uint64_t> next_deferral_report{}, reported_deferrals{};
+    void drop_deferred() {
+      AcquireSRWLockExclusive(&evaluation_supply_lock);
+      for (auto &entry : deferred_frames) entry = {};
+      deferral_pending.store(0, std::memory_order_release);
+      ReleaseSRWLockExclusive(&evaluation_supply_lock);
     }
     // SDK calls answered with eWarnOutOfVRAM: accepted, counted for the log.
     std::atomic<std::uint64_t> vram_warnings{};
@@ -344,6 +389,7 @@ namespace sunshine_streamline {
       // Lifecycle only: callbacks are already closed. Readers never delay this
       // clear; retired source leases are released outside mutation ownership.
       while (!metadata.clear()) SwitchToThread();
+      drop_deferred();
     }
 
     bool same(const guid &a, const guid &b) { return std::memcmp(&a, &b, sizeof(guid)) == 0; }
@@ -682,6 +728,19 @@ namespace sunshine_streamline {
         return false;
       }
       return true;
+    }
+    // The frame a tag call's tags were set for: its frame token's, or for a
+    // global tag (slSetTag names no frame) the viewport's newest constants
+    // when they came first on a minted frame token; otherwise none. An
+    // evaluation of that frame may use the tag after Presents of earlier
+    // frames (evaluated_depth_tag::own_frame), and a copy deferred to that
+    // frame's Present is cancelled by its untag (R7).
+    frame_identity tag_frame(const metadata_state &state, const viewport_record &record, const frame_identity &call,
+        bool global, std::uint64_t serial) {
+      if (!global || call.kind != frame_identity_kind::unavailable) return call;
+      if (record.camera_frame.kind == frame_identity_kind::v2_observed_token && record.camera_serial < serial &&
+          token_current(state, record.camera_frame)) return record.camera_frame;
+      return {};
     }
     bool presentation_token_current(const frame_identity &frame) {
       // Presentation markers carry minted/numeric identities, never the
@@ -1114,15 +1173,7 @@ namespace sunshine_streamline {
         value.tick = values.tick;
         value.serial = values.serial;
         value.loss = values.loss;
-        value.frame = values.frame;
-        // A global tag names no frame: it was set for the viewport's newest
-        // constants when they came first on a minted frame token (an
-        // evaluation of that frame may then use it after Presents of earlier
-        // frames, evaluated_depth_tag::own_frame); otherwise for none.
-        if (value.source == origin::global && value.frame.kind == frame_identity_kind::unavailable &&
-            record.camera_frame.kind == frame_identity_kind::v2_observed_token && record.camera_serial < values.serial &&
-            token_current(state, record.camera_frame))
-          value.frame = record.camera_frame;
+        value.frame = tag_frame(state, record, values.frame, value.source == origin::global, values.serial);
         auto &destination = value.source == origin::local ? record.local_tags : record.global_tags;
         destination[i] = value;
         if (value.source == origin::global && value.serial >= record.active_tags[i].serial) record.active_tags[i] = value;
@@ -1217,6 +1268,7 @@ namespace sunshine_streamline {
         value.observation_sequence = at_boundary ? serial : tag->serial;
         value.native_state = tag->native_state;
         value.state_requires_observation = tag->state_requires_observation;
+        value.commanded = tag->commanded;
         value.direct_source = tag->direct_source;
         value.source_present_generation = tag->source_present_generation;
         // S7: this evaluation names the frame its stored tag was set for.
@@ -1599,7 +1651,11 @@ namespace sunshine_streamline {
         default: return name(snapshot.status);
       }
       if (!snapshot.epoch || !snapshot.sequence) return "no_observation";
-      if (snapshot.tag_boundary && !snapshot.command_buffer) return "boundary_without_commands";
+      // A frame-generation tag call may come without a command list when its
+      // tags are ValidUntilPresent (sl_core_api.h); tag_rejection judges each
+      // tag, and nominate_depth_source copies them before the frame's Present.
+      if (snapshot.tag_boundary && !snapshot.command_buffer && !snapshot.frame_generation_input)
+        return "boundary_without_commands";
       if (snapshot.loss_revision != loss_revision.load(std::memory_order_acquire)) return "observation_lost";
       if (snapshot.frame_correlated && snapshot.decoded == decode_status::ok) {
         const bool current_reset = snapshot.camera.reset == 1 && snapshot.projection.valid() &&
@@ -1648,6 +1704,13 @@ namespace sunshine_streamline {
         }
       }
       if (!buffers::is_depth(tag.value.type)) return "not_depth";
+      // Only a ValidUntilPresent tag may come without a command list
+      // (sl_core_api.h). Another tag of a frame-generation tag call without
+      // one, and a stored UntilEvaluate tag whose call had none (illegal
+      // input), have no point to copy at (the matrix's S2).
+      if (snapshot.tag_boundary ? !snapshot.command_buffer && tag.value.lifecycle != sl_contract::valid_until_present :
+          tag.scope != tag_scope::evaluation_local && !tag.commanded && tag.value.lifecycle == sl_contract::valid_until_evaluate)
+        return "boundary_without_commands";
       if (snapshot.tag_boundary && !snapshot.frame_generation_input && tag.value.lifecycle != sl_contract::only_valid_now)
         return "lifecycle_outlives_boundary";
       if (snapshot.frame.kind == frame_identity_kind::v2_constants_call &&
@@ -1873,8 +1936,13 @@ namespace sunshine_streamline {
       }
       return "absent";
     }
-    std::uint64_t nominate_depth_source(const evaluation_snapshot &snapshot, bool version_one, bool *copy_recorded = nullptr) {
+    // deferred: a frame-generation tag call's depth that is copied before its
+    // frame's Present instead (R2, deferred_copy); observe_tag_call keeps it
+    // once the SDK accepted the call.
+    std::uint64_t nominate_depth_source(const evaluation_snapshot &snapshot, bool version_one, bool *copy_recorded = nullptr,
+        deferred_depth *deferred = nullptr) {
       if (copy_recorded) *copy_recorded = false;
+      if (deferred) *deferred = {};
       if (!source_requested.load(std::memory_order_acquire) || !depth_capture::active()) return 0;
       const auto route = frame_generation_route(snapshot.viewport);
       if (!snapshot.frame_generation_input && route == fg_route::owned) return 0; // source_path_selected
@@ -1904,26 +1972,23 @@ namespace sunshine_streamline {
       if (snapshot.tag_boundary && depth_untag(snapshot)) return 0;
       const bool fg_boundary = snapshot.tag_boundary && snapshot.frame_generation_input;
       if (const auto rejected = source_rejection(snapshot)) {
-        // A command-less FG tag offers no copy of its own. While DLSS-G's own
-        // evaluation supplies this live scope's copies (observe_frame_generation_inputs)
-        // it withdraws nothing; withdrawing would leave every Present between
-        // the tag and that evaluation without a current FG nomination.
-        const bool supplied = fg_boundary && withdraws && !std::strcmp(rejected, "boundary_without_commands") &&
-          evaluation_supplies(snapshot.epoch, snapshot.viewport);
         if (fg_boundary) {
-          report_fg_refusal(snapshot, rejected, withdraws && !supplied, route == fg_route::owned, supplied);
+          report_fg_refusal(snapshot, rejected, withdraws, route == fg_route::owned);
           remember_tag_copy(snapshot.epoch, snapshot.viewport, false);
         }
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
         remember_refusal(snapshot, sunshine_depth_refusal::gate::source, rejected);
 #endif
-        if (!supplied) withdraw_invalid_attempt();
+        withdraw_invalid_attempt();
         return 0;
       }
       // The adapter defines semantic priority; the capture owner tries this
       // ordered set as one evaluation, including its in-progress lifetime.
       std::array<depth_capture::input, depth_priority.size()> candidates;
       std::size_t count = 0;
+      // A frame-generation tag call's UntilEvaluate tag whose list records no
+      // state: its evaluate copies it, not this call (S11c).
+      bool awaits_evaluate = false;
       for (const unsigned index : depth_priority) {
         const auto &tag = snapshot.tags[index];
         if (!direct_tag_admissible(snapshot, tag) || !tag.direct_source) continue;
@@ -1958,9 +2023,34 @@ namespace sunshine_streamline {
         }
         value.native_state = state.native;
         if (!tag.state_requires_observation) value.proof = state.proof;
+        if (fg_boundary) {
+          // Where this call copies the tag (R2): its declaration describes
+          // the tag's use, so only a state its list records proves it here.
+          const bool recorded = snapshot.command_buffer &&
+            depth_capture::recorded_state(snapshot.command_buffer, tag.direct_source);
+          const auto point = sl_contract::deferred_copy(tag.value.lifecycle, snapshot.command_buffer != 0, recorded);
+          if (point != sl_contract::tag_call_copy::at_call) {
+            if (point == sl_contract::tag_call_copy::present && deferred)
+              deferred->candidates[deferred->count++] = std::move(value);
+            else awaits_evaluate = true;
+            value = {};
+            continue;
+          }
+        }
         ++count;
       }
+      if (count && deferred) *deferred = {};
+      if (deferred && deferred->count) {
+        // Nothing is nominated, withdrawn or refused at this call: the copy
+        // before the frame's Present decides (present_deferred).
+        deferred->superseded = superseded;
+        return 0;
+      }
       depth_capture::record_diagnostic diagnostic;
+      if (!count && awaits_evaluate) {
+        diagnostic.result = depth_capture::status::missing_state;
+        diagnostic.stage = depth_capture::record_stage::missing_state;
+      }
       if (count) if (const auto ticket = depth_capture::nominate_evaluation(snapshot.command_buffer,
           candidates.data(), count, superseded, &diagnostic)) {
         if (copy_recorded) *copy_recorded = diagnostic.result == depth_capture::status::recorded;
@@ -1972,19 +2062,28 @@ namespace sunshine_streamline {
 #endif
         return ticket;
       }
+      const bool attempted = count || awaits_evaluate;
+      // A command-less FG tag call whose tags offer no copy point withdraws
+      // nothing while DLSS-G's own evaluation supplies this live scope's
+      // copies (observe_frame_generation_inputs): withdrawing would leave
+      // every Present between the tag and that evaluation without a current
+      // FG nomination.
+      const bool supplied = fg_boundary && !attempted && withdraws &&
+        !std::strcmp(candidate_rejection(snapshot), "boundary_without_commands") &&
+        evaluation_supplies(snapshot.epoch, snapshot.viewport);
       if (fg_boundary) {
         remember_tag_copy(snapshot.epoch, snapshot.viewport, false);
         char reason[96]{};
-        if (count) std::snprintf(reason, sizeof(reason), "capture_%s/%s",
+        if (attempted) std::snprintf(reason, sizeof(reason), "capture_%s/%s",
           depth_capture::name(diagnostic.result), depth_capture::name(diagnostic.stage));
         else std::snprintf(reason, sizeof(reason), "%s", candidate_rejection(snapshot));
-        report_fg_refusal(snapshot, reason, withdraws, route == fg_route::owned);
+        report_fg_refusal(snapshot, reason, withdraws && !supplied, route == fg_route::owned, supplied);
       }
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-      if (count) remember_refusal(snapshot, sunshine_depth_refusal::gate::capture, nullptr, &diagnostic);
+      if (attempted) remember_refusal(snapshot, sunshine_depth_refusal::gate::capture, nullptr, &diagnostic);
       else remember_refusal(snapshot, sunshine_depth_refusal::gate::input, candidate_rejection(snapshot));
 #endif
-      withdraw_invalid_attempt();
+      if (!supplied) withdraw_invalid_attempt();
       return 0;
     }
     // A copy survives a successful SDK call. Unrelated metadata observed or
@@ -2077,8 +2176,10 @@ namespace sunshine_streamline {
       SetLastError(outgoing);
       return result;
     }
+    // later: where a ValidUntilPresent UI tag without a command list is kept
+    // to be copied before its frame's Present (R2, the matrix's U2).
     sunshine_game3d::ui_mask::attempt capture_ui_tag(const batch &out, void *commands,
-        const tag_record &tag, std::uint64_t source_epoch, bool fg_enabled) {
+        const tag_record &tag, std::uint64_t source_epoch, bool fg_enabled, deferred_ui *later = nullptr) {
       namespace mask = sunshine_game3d::ui_mask;
       depth_capture::input input;
       input.epoch = source_epoch; input.sequence = out.serial; input.tick = out.tick;
@@ -2112,6 +2213,13 @@ namespace sunshine_streamline {
       where.source_present_generation = input.source_present_generation;
       where.format = input.source ? retained.format : 0;
       where.refusal = tag.value.refusal;
+      if (later && !commands && input.source && tag.supported &&
+          sl_contract::deferred_copy(tag.value.lifecycle, false, false) == sl_contract::tag_call_copy::present) {
+        // Its kind's precedence over DLSS-G's input stays as it is until the
+        // copy is made or dropped (present_deferred).
+        later->used = true; later->where = where; later->input = input;
+        return {};
+      }
       auto attempt = mask::begin(where, input);
       // A recorded copy keeps its kind's precedence over DLSS-G's input of
       // the same kind (ui_tag_copy); a refusal hands that kind over at once.
@@ -2120,7 +2228,8 @@ namespace sunshine_streamline {
       return attempt;
     }
     using alpha_attempts = std::array<sunshine_game3d::ui_mask::attempt, 4>;
-    alpha_attempts capture_ui_inputs(const batch &out, void *commands) {
+    using deferred_uis = std::array<deferred_ui, 4>;
+    alpha_attempts capture_ui_inputs(const batch &out, void *commands, deferred_uis *later = nullptr) {
       namespace mask = sunshine_game3d::ui_mask;
       const auto source_epoch = epoch.load(std::memory_order_acquire);
       constexpr std::array<unsigned, 4> priority{slot_of(buffers::hudless_color), slot_of(buffers::ui_alpha),
@@ -2146,7 +2255,8 @@ namespace sunshine_streamline {
       alpha_attempts attempts;
       for (unsigned i = 0; i != priority.size(); ++i) {
         const auto &tag = out.tags[priority[i]];
-        if (tag.present) attempts[i] = capture_ui_tag(out, commands, tag, source_epoch, fg_enabled);
+        if (tag.present) attempts[i] = capture_ui_tag(out, commands, tag, source_epoch, fg_enabled,
+          later ? &(*later)[mask::capture_slot(static_cast<mask::source_kind>(tag.value.type))] : nullptr);
       }
       return attempts;
     }
@@ -2200,6 +2310,149 @@ namespace sunshine_streamline {
       }
       return snapshot;
     }
+    // The bounded deferral line, at most every 5 s and only after its totals
+    // changed: what the copies deferred to their frame's Present (R2) became.
+    void report_deferrals() {
+      const auto activity = deferrals.depth.load(std::memory_order_relaxed) + deferrals.ui.load(std::memory_order_relaxed) +
+        deferrals.cancelled.load(std::memory_order_relaxed) + deferrals.lapsed.load(std::memory_order_relaxed);
+      const auto now = GetTickCount64();
+      auto next = next_deferral_report.load(std::memory_order_relaxed);
+      if (activity == reported_deferrals.load(std::memory_order_relaxed) || now < next ||
+          !next_deferral_report.compare_exchange_strong(next, now + 5000, std::memory_order_relaxed)) return;
+      reported_deferrals.store(activity, std::memory_order_relaxed);
+      char text[640]{};
+      std::snprintf(text, sizeof(text),
+        "Sunshine Streamline deferred tag copies: depth={deferred=%llu copied=%llu refused=%llu last_refusal=%s} "
+        "ui={deferred=%llu copied=%llu refused=%llu} cancelled_by_untag=%llu lapsed=%llu pending=%u; a ValidUntilPresent "
+        "tag whose call has no command list, or a frame-generation input whose call's list records no state of it, is "
+        "copied on the Present queue right before its frame's Present",
+        static_cast<unsigned long long>(deferrals.depth.load(std::memory_order_relaxed)),
+        static_cast<unsigned long long>(deferrals.depth_copied.load(std::memory_order_relaxed)),
+        static_cast<unsigned long long>(deferrals.depth_refused.load(std::memory_order_relaxed)),
+        depth_capture::name(static_cast<depth_capture::record_stage>(deferrals.refusal.load(std::memory_order_relaxed))),
+        static_cast<unsigned long long>(deferrals.ui.load(std::memory_order_relaxed)),
+        static_cast<unsigned long long>(deferrals.ui_copied.load(std::memory_order_relaxed)),
+        static_cast<unsigned long long>(deferrals.ui_refused.load(std::memory_order_relaxed)),
+        static_cast<unsigned long long>(deferrals.cancelled.load(std::memory_order_relaxed)),
+        static_cast<unsigned long long>(deferrals.lapsed.load(std::memory_order_relaxed)),
+        deferral_pending.load(std::memory_order_relaxed));
+      message(text);
+    }
+    // Requires evaluation_supply_lock. Recounts the used deferral entries.
+    void count_deferred() {
+      unsigned used = 0;
+      for (const auto &entry : deferred_frames) used += entry.used;
+      deferral_pending.store(used, std::memory_order_release);
+    }
+    // The kinds a deferral entry holds, for the precedence handed back when
+    // they are dropped: its depth (bit 0) and its UI capture slots (bit 1 +
+    // slot).
+    unsigned deferred_kinds(const deferred_frame &entry) {
+      unsigned kinds = entry.depth.count ? 1u : 0u;
+      for (unsigned slot = 0; slot != entry.ui.size(); ++slot) if (entry.ui[slot].used) kinds |= 2u << slot;
+      return kinds;
+    }
+    unsigned kind_count(unsigned kinds) {
+      unsigned count = 0;
+      for (; kinds; kinds &= kinds - 1) ++count;
+      return count;
+    }
+    // A dropped deferral no longer keeps its kinds' precedence over DLSS-G's
+    // own inputs (tag_copy, ui_tag_copy): this frame has no tag copy.
+    void hand_over(std::uint64_t scope_epoch, std::uint32_t viewport, unsigned kinds) {
+      if (kinds & 1u) remember_tag_copy(scope_epoch, viewport, false);
+      for (unsigned slot = 0; slot != 4; ++slot)
+        if (kinds & (2u << slot)) remember_ui_tag_copy(scope_epoch, viewport, slot, false);
+    }
+    // After a 2.x tag call the SDK accepted: keep its copies deferred to its
+    // frame's Present (R2), and let its untags cancel the viewport's deferred
+    // copies of their frame (R7, api_contract.h untag_cancels). tokened: the
+    // call named a frame token (slSetTagForFrame). ui_current: its UI inputs
+    // were admitted under the current observation.
+    void defer_tag_call(const batch &out, bool tokened, deferred_depth &depth, deferred_uis &ui, bool ui_current) {
+      namespace mask = sunshine_game3d::ui_mask;
+      if (!ui_current) for (auto &value : ui) value = {};
+      const bool keeps_ui = std::any_of(ui.begin(), ui.end(), [](const deferred_ui &value) { return value.used; });
+      // An untag: the call's depth tags all name no native (as depth_untag), or
+      // a UI kind's tag names none.
+      bool untags_depth = false, depth_named = false;
+      for (unsigned i = 0; i != 3; ++i) if (out.tags[i].present) {
+        if (out.tags[i].supported && !out.tags[i].value.native_resource) untags_depth = true;
+        else depth_named = true;
+      }
+      untags_depth = untags_depth && !depth_named;
+      unsigned ui_untags = 0;
+      for (unsigned i = 3; i != out.tags.size(); ++i) {
+        const auto &tag = out.tags[i];
+        const auto kind = static_cast<mask::source_kind>(tag.value.type);
+        if (tag.present && tag.supported && !tag.value.native_resource && mask::source_mask(kind))
+          ui_untags |= 2u << mask::capture_slot(kind);
+      }
+      if (!depth.count && !keeps_ui && !untags_depth && !ui_untags) return;
+      // The game's work executed before the frame's Present proves the
+      // sources' states there (the declaration must agree).
+      for (std::size_t i = 0; i != depth.count; ++i) depth_capture::track_deferred_source(depth.candidates[i].source);
+      for (const auto &item : ui) if (item.used) depth_capture::track_deferred_source(item.input.source);
+      frame_identity frame;
+      if (auto pin = read_metadata()) for (const auto &record : pin->records)
+        if (record.used && record.viewport == out.viewport) { frame = tag_frame(*pin, record, out.frame, !tokened, out.serial); break; }
+      const bool framed = frame.kind != frame_identity_kind::unavailable;
+      const auto source_epoch = epoch.load(std::memory_order_acquire);
+      const auto executions = depth_capture::game_executions();
+      unsigned cancelled = 0, dropped = 0;
+      std::uint64_t dropped_epoch{};
+      std::uint32_t dropped_viewport{};
+      AcquireSRWLockExclusive(&evaluation_supply_lock);
+      deferred_frame *entry = nullptr;
+      for (auto &value : deferred_frames) if (value.used && value.viewport == out.viewport) { entry = &value; break; }
+      if (entry && (untags_depth || ui_untags) &&
+          sl_contract::untag_cancels(tokened && framed, entry->frame.kind != frame_identity_kind::unavailable,
+            same_frame(frame, entry->frame))) {
+        cancelled = deferred_kinds(*entry) & ((untags_depth ? 1u : 0u) | ui_untags);
+        if (cancelled & 1u) entry->depth = {};
+        for (unsigned slot = 0; slot != entry->ui.size(); ++slot) if (cancelled & (2u << slot)) entry->ui[slot] = {};
+      }
+      if (depth.count || keeps_ui) {
+        // Another frame's deferral of the viewport lapses: its Present is past.
+        if (entry && (entry->epoch != source_epoch || entry->observation != out.observation ||
+            !(same_frame(entry->frame, frame) || (!framed && entry->frame.kind == frame_identity_kind::unavailable)))) {
+          dropped = deferred_kinds(*entry); dropped_epoch = entry->epoch; dropped_viewport = entry->viewport;
+          *entry = {};
+          entry = nullptr;
+        }
+        if (!entry) {
+          // A free entry, or the viewport entry tagged longest ago (lapsed).
+          for (auto &value : deferred_frames) if (!value.used) { entry = &value; break; }
+          if (!entry) {
+            entry = &deferred_frames[0];
+            for (auto &value : deferred_frames) if (value.serial < entry->serial) entry = &value;
+            dropped |= deferred_kinds(*entry); dropped_epoch = entry->epoch; dropped_viewport = entry->viewport;
+            *entry = {};
+          }
+          entry->used = true; entry->observation = out.observation; entry->epoch = source_epoch;
+          entry->viewport = out.viewport; entry->frame = frame;
+        }
+        // The frame's newest tag call: its submitted work must follow it.
+        entry->serial = out.serial; entry->tick = out.tick; entry->executions = executions;
+        if (depth.count) { entry->depth = std::move(depth); deferrals.depth.fetch_add(1, std::memory_order_relaxed); }
+        for (unsigned slot = 0; slot != ui.size(); ++slot) if (ui[slot].used) {
+          entry->ui[slot] = std::move(ui[slot]);
+          deferrals.ui.fetch_add(1, std::memory_order_relaxed);
+        }
+      }
+      if (entry && !deferred_kinds(*entry)) *entry = {};
+      count_deferred();
+      ReleaseSRWLockExclusive(&evaluation_supply_lock);
+      if (cancelled) {
+        deferrals.cancelled.fetch_add(kind_count(cancelled), std::memory_order_relaxed);
+        hand_over(source_epoch, out.viewport, cancelled);
+      }
+      if (dropped) {
+        deferrals.lapsed.fetch_add(kind_count(dropped), std::memory_order_relaxed);
+        hand_over(dropped_epoch, dropped_viewport, dropped);
+      }
+      report_deferrals();
+    }
     // slSetTag and slSetTagForFrame differ only in their frame token and tag
     // scope. Capture, UI admission, loss accounting and completion are shared.
     template<class Forward>
@@ -2219,16 +2472,21 @@ namespace sunshine_streamline {
       if (sample && diagnostic.session) dump_metadata::observe_sl_tags_v2(diagnostic, viewport, tags, count,
         frame ? dump_metadata::tag_scope::frame : dump_metadata::tag_scope::global);
       batch out;
-      if (sample) { ++tag_calls; out = read_tags(viewport, tags, count, frame ? origin::frame : origin::global, token); }
+      if (sample) {
+        ++tag_calls; out = read_tags(viewport, tags, count, frame ? origin::frame : origin::global, token);
+        for (auto &tag : out.tags) tag.commanded = commands != nullptr;
+      }
       out.observation = ticket;
       out.serial = serial;
       out.loss = loss;
       out.frame = identity;
       out.tick = entry_tick;
-      const auto alpha = sample ? capture_ui_inputs(out, commands) : alpha_attempts{};
+      deferred_uis ui_later;
+      const auto alpha = sample ? capture_ui_inputs(out, commands, &ui_later) : alpha_attempts{};
       const auto snapshot = sample ? capture_depth_tag(out, commands) : evaluation_snapshot{};
       if (snapshot.tag_boundary) loss_context.feature = snapshot.feature;
-      const auto captured = snapshot.tag_boundary ? nominate_depth_source(snapshot, false) : 0;
+      deferred_depth depth_later;
+      const auto captured = snapshot.tag_boundary ? nominate_depth_source(snapshot, false, nullptr, &depth_later) : 0;
       SetLastError(incoming);
       const std::int32_t result = forward();
       const DWORD outgoing = GetLastError();
@@ -2246,6 +2504,7 @@ namespace sunshine_streamline {
         // A revoked copy no longer keeps its kind's precedence (ui_tag_copy).
         if (!ui_kept && attempt.ticket) forget_ui_tag_copy(sunshine_game3d::ui_mask::capture_slot(attempt.kind));
       }
+      if (sample && sdk_ok && current(ticket) && out.valid_viewport) defer_tag_call(out, frame != nullptr, depth_later, ui_later, ui_kept);
       SetLastError(outgoing);
       return result;
     }
@@ -2760,6 +3019,118 @@ namespace sunshine_streamline {
     // The shared capture owner retains GPU completion/retirement leases.
     sunshine_game3d::ui_mask::invalidate_all();
     release_camera_records();
+  }
+
+  bool present_deferred(std::uint64_t queue, std::uint64_t immediate) {
+    if (!deferral_pending.load(std::memory_order_acquire) || !queue || !immediate) return false;
+    namespace mask = sunshine_game3d::ui_mask;
+    const DWORD incoming = GetLastError();
+    const auto ticket = observation_ticket();
+    const auto executions = depth_capture::game_executions();
+    const auto now = GetTickCount64();
+    const auto source_epoch = epoch.load(std::memory_order_acquire);
+    std::array<deferred_frame, slot_count> due;
+    unsigned due_count = 0;
+    struct ended_frame { std::uint64_t epoch{}; std::uint32_t viewport{}; unsigned kinds{}; };
+    std::array<ended_frame, slot_count> ended;
+    unsigned ended_count = 0;
+    auto pin = read_metadata();
+    AcquireSRWLockExclusive(&evaluation_supply_lock);
+    for (auto &entry : deferred_frames) {
+      if (!entry.used) continue;
+      // Its frame's Present is past once the observation changed, the source
+      // age passed, or the viewport's constants named a later frame.
+      bool past = !ticket || entry.observation != ticket || entry.epoch != source_epoch ||
+        !sunshine_freshness::fresh_lt(entry.tick, now, sunshine_freshness::source_age_ms);
+      if (!past && pin) for (const auto &record : pin->records) if (record.used && record.viewport == entry.viewport) {
+        past = record.camera_serial > entry.serial && !same_frame(record.camera_frame, entry.frame);
+        break;
+      }
+      // No game work submitted since the tag: an earlier frame's Present
+      // (multi frame generation presents them while the game records).
+      if (!past && entry.executions == executions) continue;
+      if (past) ended[ended_count++] = {entry.epoch, entry.viewport, deferred_kinds(entry)};
+      else due[due_count++] = std::move(entry);
+      entry = {};
+    }
+    count_deferred();
+    ReleaseSRWLockExclusive(&evaluation_supply_lock);
+    pin.reset();
+    for (unsigned n = 0; n != ended_count; ++n) {
+      deferrals.lapsed.fetch_add(kind_count(ended[n].kinds), std::memory_order_relaxed);
+      hand_over(ended[n].epoch, ended[n].viewport, ended[n].kinds);
+    }
+    bool recorded = false;
+    // ReShade's own list records these copies; its list events never report it.
+    if (due_count) depth_capture::observe_runtime_list(immediate, queue);
+    for (unsigned n = 0; n != due_count; ++n) {
+      auto &entry = due[n];
+      const auto sequence = ++call_sequence;
+      if (entry.depth.count) {
+        // A refusal changes nothing: the earlier capture holds (S6), and the
+        // FG observation stays as it was (pixels_required).
+        depth_capture::record_diagnostic diagnostic;
+        bool copied = false;
+        for (std::size_t i = 0; i != entry.depth.count && !copied; ++i) {
+          auto value = entry.depth.candidates[i];
+          value.sequence = sequence; value.present_queue = queue;
+          value.own_frame = true; value.at_tag_call = false; value.pixels_required = true;
+          const auto captured = depth_capture::nominate(immediate, value, &diagnostic);
+          if (captured && diagnostic.result == depth_capture::status::recorded) {
+            depth_capture::begin_evaluation(value.epoch, sequence, value.viewport, value.provider, value.source_id,
+              entry.depth.superseded);
+            depth_capture::finish(captured, true);
+            copied = true;
+          } else if (captured) depth_capture::finish(captured, false);
+        }
+        remember_tag_copy(entry.epoch, entry.viewport, copied);
+        if (copied) {
+          recorded = true;
+          deferrals.depth_copied.fetch_add(1, std::memory_order_relaxed);
+        } else {
+          deferrals.depth_refused.fetch_add(1, std::memory_order_relaxed);
+          deferrals.refusal.store(unsigned(diagnostic.stage), std::memory_order_relaxed);
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+          evaluation_snapshot refused;
+          refused.epoch = entry.epoch; refused.sequence = sequence; refused.viewport = entry.viewport;
+          refused.frame_generation_input = true;
+          remember_refusal(refused, sunshine_depth_refusal::gate::capture, nullptr, &diagnostic);
+#endif
+        }
+      }
+      // One new observation sequence per tag call, in call order, so a call's
+      // UI kinds stay one batch (exact HUD-less pairs) and no two calls merge.
+      std::array<std::uint64_t, 4> calls{}, renumbered{};
+      unsigned call_count = 0;
+      for (const auto &item : entry.ui) if (item.used) {
+        unsigned at = 0;
+        while (at != call_count && calls[at] < item.input.sequence) ++at;
+        if (at != call_count && calls[at] == item.input.sequence) continue;
+        for (unsigned i = call_count; i != at; --i) calls[i] = calls[i - 1];
+        calls[at] = item.input.sequence; ++call_count;
+      }
+      for (unsigned i = 0; i != call_count; ++i) renumbered[i] = i ? ++call_sequence : sequence;
+      for (unsigned slot = 0; slot != entry.ui.size(); ++slot) {
+        auto &item = entry.ui[slot];
+        if (!item.used) continue;
+        unsigned call = 0;
+        while (calls[call] != item.input.sequence) ++call;
+        item.input.sequence = renumbered[call];
+        item.input.present_queue = queue; item.input.own_frame = true;
+        item.where.source = item.input;
+        item.where.command = immediate;
+        const auto attempt = mask::begin(item.where, item.input);
+        mask::finish(attempt, true);
+        remember_ui_tag_copy(entry.epoch, entry.viewport, slot, static_cast<bool>(attempt.ticket));
+        if (attempt.ticket) {
+          recorded = true;
+          deferrals.ui_copied.fetch_add(1, std::memory_order_relaxed);
+        } else deferrals.ui_refused.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+    report_deferrals();
+    SetLastError(incoming);
+    return recorded;
   }
 
   void command_initialized(std::uint64_t native, std::uint64_t device, std::uint64_t cookie) {

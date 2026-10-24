@@ -576,6 +576,9 @@ SUNSHINE_DEPTH_ADDON_SHARED auto find_depth_selection(const depth_selection_snap
 struct __declspec(uuid("94e283ef-6714-4d50-b936-71d6308a4be4")) generic_depth_device_data
 {
     uint64_t native_identity{};
+    // D3D12: one timestamp query, written and never read, that makes ReShade
+    // submit its immediate list (submit_deferred_copies); 0 without one.
+    query_heap deferred_copy_marker{};
     const uint64_t device_epoch = s_next_sample_scope.fetch_add(1, std::memory_order_relaxed);
 	// Draw/clear recording can run on other threads. A shared backup is still
 	// needed if any effect runtime on this device uses generic/manual capture.
