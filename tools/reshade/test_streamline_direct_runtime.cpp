@@ -217,7 +217,9 @@ RWTexture2D<float> depth : register(u0);
         LONG(18*selected->width/32),LONG(11*selected->height/18)};
       commands->ClearDepthStencilView(dsv,D3D12_CLEAR_FLAG_DEPTH,center_raw,0,1,&center);
     }
-    void write_depth_pixels() {
+    // uav_barrier false leaves the write's synchronization to the caller (an
+    // enhanced barrier).
+    void write_depth_pixels(bool uav_barrier = true) {
       ID3D12DescriptorHeap *heaps[]{selected->descriptors.p};
       commands->SetDescriptorHeaps(1,heaps);
       commands->SetComputeRootSignature(compute_root.p);
@@ -226,6 +228,7 @@ RWTexture2D<float> depth : register(u0);
       commands->SetComputeRoot32BitConstants(0,4,&constants,0);
       commands->SetComputeRootDescriptorTable(1,selected->descriptors->GetGPUDescriptorHandleForHeapStart());
       commands->Dispatch((selected->width+7)/8,(selected->height+7)/8,1);
+      if(!uav_barrier) return;
       D3D12_RESOURCE_BARRIER barrier{}; barrier.Type=D3D12_RESOURCE_BARRIER_TYPE_UAV;
       barrier.UAV.pResource=selected->resource.p; commands->ResourceBarrier(1,&barrier);
     }

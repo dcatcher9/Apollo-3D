@@ -50,7 +50,9 @@
 // Command line (test_contract_matrix_generator.h): --list, --case
 // <id|family:name=value,...>, --shard i/N. Without one, both layers run;
 // shard 0 also runs the pure layer. Only an unsharded run finds a stale
-// known-gap row of a hook family.
+// known-gap row of a hook family. Where SUNSHINE_CONTRACT_MATRIX_JSONL names
+// a file, each judged hook case appends its JSON line there
+// (test_game3d_api_contract_jsonl.h, Invoke-Game3DContractMatrix.ps1).
 #include "capture_state_policy.h"
 #include "depth_refusal.h"
 #include "depth_view_format.h"
@@ -60,6 +62,7 @@
 #include "streamline_camera_probe.h"
 #include "streamline_camera_version.h"
 #include "test_contract_matrix_generator.h"
+#include "test_game3d_api_contract_jsonl.h"
 #include "test_game3d_api_contract_tally.h"
 
 #include <cstdio>
@@ -1857,9 +1860,11 @@ namespace {
     unsigned ngx_frame_generation {};
   };
 
-  // Every selected case of both hook families.
+  // Every selected case of both hook families, each also a JSON line in the
+  // file SUNSHINE_CONTRACT_MATRIX_JSONL names (Invoke-Game3DContractMatrix.ps1).
   hook_counts hook_layer(const generator::options &options) {
     hook_counts counts;
+    auto lines = game3d_contract::jsonl::from_environment();
     const auto sl = sl_cells::family();
     sl_cells::check_sizes(sl);
     const auto streamline = sl_cells::cells(sl, counts.census);
@@ -1869,6 +1874,9 @@ namespace {
         continue;
       }
       const auto value = sl_cells::judge(streamline[i]);
+      if (lines.is_open()) {
+        lines << game3d_contract::jsonl::line("L1", sl, streamline[i], sl_cells::seed_name(sl, streamline[i]), value.legal, value.expected, value.actual, value.verdict, gaps::sl_rows, value.matched).dump() << '\n';
+      }
       if (const auto *what = counts.streamline.add(value.verdict, value.matched, value.satisfied)) {
         sl_cells::describe(what, sl, streamline[i], value);
       }
@@ -1877,11 +1885,17 @@ namespace {
     const auto ngx = ngx_cells::family();
     ngx_cells::check_sizes(ngx);
     const auto evaluations = ngx_cells::cells(ngx);
+    generator::row hogwarts;
+    std::string error;
+    require(generator::parse(ngx, ngx_cells::hogwarts, hogwarts, error), "the NGX seed row is malformed");
     for (std::size_t i = 0; i != evaluations.size(); ++i) {
       if (!options.selected(i)) {
         continue;
       }
       const auto value = ngx_cells::judge(evaluations[i]);
+      if (lines.is_open()) {
+        lines << game3d_contract::jsonl::line("L1", ngx, evaluations[i], evaluations[i] == hogwarts ? "hogwarts" : nullptr, true, value.expected, value.actual, value.verdict, gaps::ngx_rows, value.matched).dump() << '\n';
+      }
       counts.ngx_frame_generation += value.value.feature == matrix::ngx_feature::frame_generation;
       if (const auto *what = counts.ngx.add(value.verdict, value.matched, value.satisfied)) {
         ngx_cells::describe(what, ngx, evaluations[i], value);
@@ -1890,6 +1904,7 @@ namespace {
     sunshine_ngx::shutdown();
     counts.streamline.finish(gaps::sl_rows, "Streamline hooks", !options.partial());
     counts.ngx.finish(gaps::ngx_rows, "NGX hooks", !options.partial());
+    require(!lines.is_open() || lines.good(), "Could not write the hook layer's JSON lines");
     return counts;
   }
 

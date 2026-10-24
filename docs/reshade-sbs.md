@@ -3760,7 +3760,8 @@ fraction of real frames with multi frame generation. A tag copied later, at an e
 preservation copy, still expires at the next Present. Other lifetime rules, recording retirement
 and the shared consumer-ordering checks above still apply. The
 [API contract matrix](../tools/reshade/README.md#api-contract-matrix) drives these lifetimes through
-the probe's hooks; its known-gap table lists where they fall short of Streamline's contract (a
+the probe's hooks and through real Presents of the runtime fixture; its known-gap table lists where
+they fall short of Streamline's contract (a
 `ValidUntilPresent` tag lives until its own frame's Present, and may arrive without a command list).
 Known affine `PrecisionInfo` extensions are decoded. For device depth their scale/bias are reflected
 in the texture-space projection coefficients and valid stored-depth range. For tag49 they recover

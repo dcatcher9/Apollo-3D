@@ -279,10 +279,12 @@ namespace game3d_contract::known_gaps {
 
     // Illegal input: a global or frame UntilEvaluate tag without a command
     // list is copied at its evaluate, on that evaluate's own list, when no
-    // Present came between (S7 refuses it otherwise).
+    // Present came between (S7 refuses it otherwise) and it declares a state
+    // to copy from.
     constexpr bool commandless_until_evaluate(const sl_case &value) {
       return !legal(value) && value.commands == tag_commands::none && value.life == lifecycle::valid_until_evaluate && !local(value.entry) &&
-             value.at == copy_point::same_frame_evaluate && value.resource == resource_form::native && !value.generated_presents;
+             value.at == copy_point::same_frame_evaluate && value.resource == resource_form::native && !value.generated_presents &&
+             value.declared_state != UINT32_MAX;
     }
 
     // A multi-tag array from a release newer than the survey whose tags
@@ -316,6 +318,107 @@ namespace game3d_contract::known_gaps {
     {"S2", &rules::S2, kind::expected_failure, &streamline::commandless_until_evaluate, "Illegal input and harmless, lowest priority: the copy happens inside the tag's lifetime on the evaluate's own list. Refuse it, or let the oracle accept it, when the commandless-tag work (S6) settles what a commandless tag may do.", &behaviours::copy},
     {"S24-pending", &rules::S24, kind::pending, &streamline::unsurveyed_tag_array, "Owner ruling needed: the add-on reads a multi-tag array from a release newer than the survey when its ResourceTag declares version 1, whose stride is known (sl_struct.h appends members with a version bump; S14 still refuses a later version in an array). The design's S24 refuses any such array. Either relax S24 to major 3 and above, or make read_tags refuse these arrays."},
     {"S14-pending", &rules::S14, kind::pending, &streamline::zero_header_declaration, "Owner ruling needed: the zero-header Resource layout (some 2.x integrations zero-initialise Resource's base) is accepted with its nonzero declared state as proof (streamline_camera_probe.cpp append_tag; pinned by test_streamline_camera_probe.cpp's 'nonzero compatibility resource state was discarded'). S14 accepts only a state recorded on the copy's list for a Resource that is not an SDK structure. Either rule the declaration usable and relax S14, or require an observed state as for its declared COMMON."},
+  };
+
+  // A Streamline frame judged at its Present by the runtime layer
+  // (test_game3d_api_contract_runtime.cpp): the case, and the case at the
+  // copy point that decides what the Present shows (the frame's tag call
+  // where its outcome requires a capture, else the case's own point).
+  struct present_case {
+    sl_case value, decided;
+  };
+
+  // Whether the oracle applied by at the deciding copy point.
+  constexpr bool applies(const present_case &value, const rule &by) {
+    return game3d_contract::applies(value.decided, by);
+  }
+
+  namespace behaviours {
+    // Refused with class why (the runtime layer reads it from the add-on).
+    template<refusal why>
+    constexpr bool refused_as(const behaviour &value) {
+      return value.actual.kind == outcome_kind::refuse && value.actual.why == why;
+    }
+  }  // namespace behaviours
+
+  // The runtime layer's cells (judged at Present).
+  namespace present {
+    constexpr bool commandless_frame_generation_tag(const present_case &value) {
+      return streamline::commandless_frame_generation_tag(value.decided);
+    }
+
+    // A commandless ValidUntilPresent FG tag call that the oracle refuses
+    // (or may refuse) for its state at the deferred copy (R2) is refused
+    // first as having no command list.
+    constexpr bool commandless_refused_for_state(const present_case &value) {
+      const auto &tag = value.decided;
+      const auto expected = expect(tag);
+      return legal(tag) && tag.at == copy_point::tag_call && tag.life == lifecycle::valid_until_present && tag.commands == tag_commands::none &&
+             detail::frame_generation_scope(tag) && expected.point_by == &rules::S6 && permits(expected, outcome_kind::refuse) &&
+             expected.why != refusal::no_copy_point;
+    }
+
+    // An OnlyValidNow tag outside frame-generation scope that its call
+    // copies (S1), followed by the same frame's evaluate, which refuses the
+    // tag as not valid until present (S3): that Present shows no depth.
+    constexpr bool only_valid_now_then_evaluate(const present_case &value) {
+      return value.value.at == copy_point::same_frame_evaluate && !streamline::local(value.value.entry) && value.decided.at == copy_point::tag_call &&
+             value.decided.life == lifecycle::only_valid_now && !detail::frame_generation_scope(value.value) && streamline::capture_required(value.decided);
+    }
+
+    constexpr bool generated_present_before_copy(const present_case &value) {
+      return streamline::generated_present_before_copy(value.decided);
+    }
+
+    constexpr bool undeferred_frame_generation_tag(const present_case &value) {
+      return streamline::undeferred_frame_generation_tag(value.decided);
+    }
+
+    constexpr bool until_evaluate_frame_generation_tag(const present_case &value) {
+      return streamline::until_evaluate_frame_generation_tag(value.decided);
+    }
+
+    constexpr bool chained_local(const present_case &value) {
+      return streamline::chained_local(value.decided);
+    }
+
+    constexpr bool zero_sided_extent(const present_case &value) {
+      return streamline::zero_sided_extent(value.decided);
+    }
+
+    // A zero-sided extent (the whole resource, S16) on a cell the oracle
+    // refuses for its state is refused first as an invalid extent.
+    constexpr bool zero_sided_extent_refused(const present_case &value) {
+      const auto &cell = value.decided;
+      const auto expected = expect(cell);
+      return legal(cell) && cell.extent == extent_form::one_dimension_zero && permits(expected, outcome_kind::refuse) &&
+             !permits(expected, outcome_kind::capture) && expected.why == refusal::state_unprovable;
+    }
+
+    constexpr bool declared_size(const present_case &value) {
+      return streamline::declared_size(value.decided);
+    }
+
+    constexpr bool commandless_until_evaluate(const present_case &value) {
+      return streamline::commandless_until_evaluate(value.decided);
+    }
+  }  // namespace present
+
+  // Streamline cells run through the native provider fixture (judged with
+  // judge_each). A row that shares an id with the hook table's names the
+  // same gap; that row's note holds the fix.
+  inline constexpr row<present_case> sl_runtime_rows[] {
+    {"S6", &rules::S6, kind::expected_failure, &present::commandless_frame_generation_tag, "As the hook table's S6 row: the Present shows no depth of a commandless ValidUntilPresent FG tag.", &behaviours::no_copy},
+    {"S6-refusal", &rules::S6, kind::expected_failure, &present::commandless_refused_for_state, "With S6: a commandless ValidUntilPresent FG tag whose deferred copy (R2) the oracle refuses for its state (undeclared, or an enhanced layout) is refused by source_rejection as boundary_without_commands before its state is judged, so its refusal class is no_copy_point. The S6 fix judges the deferred copy's state and closes this row.", &behaviours::refused_as<refusal::no_copy_point>},
+    {"S1-evaluate", &rules::S1, kind::expected_failure, &present::only_valid_now_then_evaluate, "Found by the runtime layer: an OnlyValidNow global tag outside FG scope is copied at its call, but the same frame's evaluate refuses the tag (match(): not-valid-until-present, S3) and that frame's Present then shows no depth (mono), or only between generated Presents. S3 is right that the evaluate may not use the tag; it must not cost the frame the copy its tag call made (S1). Today the refused evaluate begins a new evaluation of the viewport with no copy (streamline_camera_probe.cpp nominate_depth_source, withdraw_invalid_attempt -> depth_capture::begin_evaluation), which supersedes the tag call's. Keep a tag-call copy when a later point of its frame refuses the same tag for its lifetime. The hook layer judges one copy point per cell, so only a Present shows this.", &behaviours::no_copy},
+    {"S7", &rules::S7, kind::expected_failure, &present::generated_present_before_copy, "As the hook table's S7 row, without its repeat: the device's own generated Presents (real Presents while the game records) end the tag's lifetime before its same-frame evaluate.", &behaviours::no_copy},
+    {"S11b", &rules::S11b, kind::expected_failure, &present::undeferred_frame_generation_tag, "As the hook table's S11b row: the add-on's nomination gate sees the copy nominated inside the tag call.", &behaviours::copy_at_call},
+    {"S11c", &rules::S11c, kind::expected_failure, &present::until_evaluate_frame_generation_tag, "As the hook table's S11c row.", &behaviours::copy_at_call},
+    {"S15", &rules::S15, kind::expected_failure, &present::chained_local, "As the hook table's S15 row.", &behaviours::no_copy},
+    {"S16", &rules::S16, kind::expected_failure, &present::zero_sided_extent, "As the hook table's S16 row.", &behaviours::no_copy},
+    {"S16-refusal", &rules::S16, kind::expected_failure, &present::zero_sided_extent_refused, "With S16: a zero-sided extent on a cell the oracle refuses for its state (undeclared) is refused as invalid-extent (malformed) before the state is judged, so its refusal class differs. The S16 fix closes this row.", &behaviours::refused_as<refusal::malformed>},
+    {"S16d", &rules::S16d, kind::expected_failure, &present::declared_size, "As the hook table's S16d row.", &behaviours::no_copy},
+    {"S2", &rules::S2, kind::expected_failure, &present::commandless_until_evaluate, "As the hook table's S2 row: the evaluate's own list copies the commandless UntilEvaluate tag.", &behaviours::copy},
   };
 
   // NGX evaluations, DLSS-G's own (N4) included (checked by the hook layer).

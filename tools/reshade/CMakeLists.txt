@@ -722,6 +722,39 @@ if(BUILD_TESTING)
     if(MINGW)
       target_link_options(reshade_game3d_native_provider_runtime_test PRIVATE -static)
     endif()
+    # The API contract matrix's runtime layer (README, API contract matrix):
+    # the native provider fixture judged by the oracle, one ctest per family.
+    # Registered only where both the official runtime and the frozen shaders
+    # are configured, so it never runs by default; each family opens a hidden
+    # window on the GPU and runs alone.
+    add_executable(reshade_contract_matrix_runtime_tests test_game3d_api_contract_runtime.cpp)
+    target_compile_features(reshade_contract_matrix_runtime_tests PRIVATE cxx_std_17)
+    target_include_directories(reshade_contract_matrix_runtime_tests SYSTEM PRIVATE "${SUNSHINE_RESHADE_INCLUDE_DIR}")
+    target_link_libraries(reshade_contract_matrix_runtime_tests PRIVATE nlohmann_json::nlohmann_json d3d12 dxgi dxguid d3dcompiler user32)
+    add_dependencies(reshade_contract_matrix_runtime_tests SunshineSBSTest ${sunshine_sl_fixture_interposer_targets})
+    if(MINGW)
+      target_link_options(reshade_contract_matrix_runtime_tests PRIVATE -static)
+    endif()
+    set(SUNSHINE_GAME3D_RESHADE_RUNTIME "" CACHE FILEPATH "Official ReShade64.dll for the API contract matrix's runtime layer")
+    set(SUNSHINE_GAME3D_FROZEN_SHADERS "" CACHE PATH "Shader directory holding the frozen SunshineGame3D.fx boot effect for the API contract matrix's runtime layer")
+    if(SUNSHINE_GAME3D_RESHADE_RUNTIME AND SUNSHINE_GAME3D_FROZEN_SHADERS)
+      set(contract_runtime_output "${CMAKE_CURRENT_BINARY_DIR}/contract_runtime")
+      add_test(NAME reshade_contract_matrix_runtime_output COMMAND "${CMAKE_COMMAND}" -E rm -rf "${contract_runtime_output}")
+      set_tests_properties(reshade_contract_matrix_runtime_output PROPERTIES FIXTURES_SETUP contract_runtime_output LABELS "contract;gpu")
+      # family|interposer target
+      foreach(family IN ITEMS "sl27|frame_generation_interposer")
+        string(REPLACE "|" ";" family "${family}")
+        list(GET family 0 family_name)
+        list(GET family 1 family_interposer)
+        add_test(NAME reshade_contract_matrix_runtime_${family_name} COMMAND reshade_contract_matrix_runtime_tests --family ${family_name}
+          "${SUNSHINE_GAME3D_RESHADE_RUNTIME}" "${SUNSHINE_GAME3D_FROZEN_SHADERS}" "$<TARGET_FILE:SunshineSBSTest>"
+          "${contract_runtime_output}/${family_name}" "$<TARGET_FILE:reshade_${family_interposer}>")
+        set_tests_properties(reshade_contract_matrix_runtime_${family_name} PROPERTIES LABELS "contract;gpu" RUN_SERIAL TRUE
+          RESOURCE_LOCK gpu TIMEOUT 240 FIXTURES_REQUIRED contract_runtime_output)
+      endforeach()
+    else()
+      message(STATUS "reshade_contract_matrix_runtime_* skipped: set SUNSHINE_GAME3D_RESHADE_RUNTIME and SUNSHINE_GAME3D_FROZEN_SHADERS to register them")
+    endif()
     add_executable(reshade_game3d_native_runtime_d3d11_test test_game3d_native_runtime_d3d11.cpp game3d_renderer.cpp game3d_debug_dump.cpp game3d_ui_layer.cpp game3d_ui_capture.cpp streamline_depth_capture.cpp streamline_native_observer.cpp)
     add_executable(reshade_game3d_source_alpha_runtime_test test_game3d_source_alpha_runtime.cpp game3d_renderer.cpp game3d_debug_dump.cpp game3d_ui_layer.cpp game3d_ui_capture.cpp streamline_depth_capture.cpp streamline_native_observer.cpp)
     target_compile_features(reshade_game3d_source_alpha_runtime_test PRIVATE cxx_std_17)

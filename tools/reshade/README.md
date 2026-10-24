@@ -1415,7 +1415,51 @@ ctest, run it as any other GPU fixture.
 The runtime layer drives the native provider and NGX fixtures through the synthetic SDKs their
 documentation above describes: an interposer DLL per Streamline release with settable results and the
 options its header declares, the NGX stand-in, and FG cases as frame scripts with their own deadlines.
-It reads refusal classes from the test add-on instead of waiting for rate-limited log
+`reshade_contract_matrix_runtime_<family>`
+([`test_game3d_api_contract_runtime.cpp`](test_game3d_api_contract_runtime.cpp), which includes the
+native provider fixture under `SUNSHINE_NATIVE_PROVIDER_FIXTURE_ONLY`) runs one family in its own
+process: the add-on's own discovery hooks the family's interposer, never the
+`SunshineStreamlineTestCapture` bypass. Family `sl27` (the 2.7.30 interposer) puts the tagged R32
+allocation, on the game's own list, in one of five state classes (a read state its recording proves,
+`GENERIC_READ` likewise, the producer's UAV write state, an undeclared state, an enhanced
+`SHADER_RESOURCE` layout) and combines the product of state class, lifecycle and command list (at a
+same-frame evaluate and at an FG tag call) with seed rows, each value alone, and a pairwise covering
+array over entry point, copy point, generated Presents (real Presents while the game records), FG,
+extent, untag and the three SDK results. Each case is a frame script judged at its Presents: a capture is the case's
+allocation shown fresh, with its tagged extent, at six judged Presents from the first; a case that
+shows nothing refuses or holds, and a refusal class the test add-on records must be one its copy
+points give. A frame's tag call and evaluate are both copy points that a Present cannot tell apart,
+so a case is judged at the earliest one whose outcome requires a capture. A capture at an FG tag call
+is deferred (R2) when the add-on's nomination gate saw no nomination inside that call. Every SDK call
+must return the interposer's result. Each case has its own viewport and allocation; afterwards FG is
+turned off, the depth untagged, the case's viewport retired (constants on four scratch viewports
+evict its record: a viewport whose FG is Off still counts toward FG authority) and the fixture
+presents past `maximum_source_age_ms` with no SDK call (the depth must be gone) and recalibrates; a
+known-good control, an OnlyValidNow frame tag at its FG tag call, runs first and after every ten
+cases. Its gaps are the known-gap table's `sl_runtime_rows`, whose cells pair the case with the copy
+point that decides. The executable takes `--family` and the generator's `--list`, `--case` and
+`--shard`, and appends one JSON line per case to `contract-<family>.jsonl` in its output directory.
+It is registered only where `SUNSHINE_GAME3D_RESHADE_RUNTIME` (the official `ReShade64.dll`) and
+`SUNSHINE_GAME3D_FROZEN_SHADERS` (a directory with the frozen `SunshineGame3D.fx`) are configured:
+one test per family, labelled `contract;gpu`, `RUN_SERIAL` with the `gpu` resource lock and a 240 s
+timeout, after `reshade_contract_matrix_runtime_output` removes the families' output directory.
+At 1280x720 `sl27` runs 104 cells and 12 controls in about 85 s: 0.75 s a case on average (the
+design estimated 1.3 s), 0.4 s for a capture, 0.9 s for a refusal or hold (its 600 ms window and the
+isolation) and up to 1.9 s for an FG case copied at an evaluate (FG owns its viewport's depth for a
+second after it is enabled). Repeated runs give the same result for every cell.
+
+[`Invoke-Game3DContractMatrix.ps1`](Invoke-Game3DContractMatrix.ps1) configures and builds this
+directory on its own (the Sunshine build forces the add-on's tests off), runs `ctest -L contract`
+and writes `contract-matrix.jsonl` and `summary.json` under `<build>/contract-matrix-<time>`. The
+JSON lines hold each hook and runtime case's id, dimensions, rule, expected and observed outcome,
+verdict, gap rows and evidence ([`test_game3d_api_contract_jsonl.h`](test_game3d_api_contract_jsonl.h);
+`reshade_contract_matrix_cpu` writes its lines where `SUNSHINE_CONTRACT_MATRIX_JSONL` names), and one
+line per contract test with its ctest result. The runner checks those cases against the known-gap
+table itself: a case may only meet the oracle, fail as a recorded gap or sit in a pending row, and
+each expected-failure row of a family that ran whole must be the only row of a failing case.
+`-SkipGpu` leaves out the device and runtime layers; run them only with no game running.
+
+The runtime layer reads refusal classes from the test add-on instead of waiting for rate-limited log
 lines. `SunshineDepthTestLastRefusal(runtime, out)` returns the newest depth refusal of the
 Streamline, NGX and DLSS-G adapters and the capture owner: the adapter, the gate that refused (the
 call's source, its depth input or the capture of its copy), the production reason, the capture

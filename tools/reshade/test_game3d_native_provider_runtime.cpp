@@ -2533,6 +2533,9 @@ namespace {
   };
 }
 
+// The API contract matrix's runtime layer (test_game3d_api_contract_runtime.cpp)
+// includes the fixture alone.
+#ifndef SUNSHINE_NATIVE_PROVIDER_FIXTURE_ONLY
 int main(int argc, char **argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   if (argc != 5 && argc != 7 && argc != 8) {
@@ -2575,3 +2578,4 @@ int main(int argc, char **argv) {
     std::fprintf(stderr, "FAIL %s\n", error.what()); return 1;
   }
 }
+#endif
