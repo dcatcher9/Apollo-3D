@@ -221,7 +221,8 @@ namespace {
     constexpr matrix::extent_form extents[] {matrix::extent_form::null, matrix::extent_form::padded, matrix::extent_form::offset, matrix::extent_form::one_dimension_zero, matrix::extent_form::outside_allocation, matrix::extent_form::declared_size_differs, matrix::extent_form::changing};
     // A tag array: the depth tag alone, or beside a second tag.
     constexpr std::uint32_t tag_counts[] {1, 2};
-    constexpr int tag_call_point = 1, frame_generation_on = 1;
+    constexpr int tag_call_point = 1, after_present_point = 2, frame_generation_on = 1;
+    static_assert(points[tag_call_point] == matrix::copy_point::tag_call && points[after_present_point] == matrix::copy_point::after_present);
 
     bool local(const generator::row &value) {
       return value[entry] >= int(matrix::tag_entry::local_array);
@@ -304,7 +305,11 @@ namespace {
 
     // What the fixture can carry (partial rows): nothing comes between a tag
     // call and itself, a tag-call copy point has no evaluate, and a local
-    // input has no tag call to untag or to return a result.
+    // input has no tag call to untag or to return a result. Nor has a local
+    // input a copy point after its frame's Present here: its own evaluate
+    // may copy it (S4, S5), and that copy shows at the same Present a later
+    // evaluate would be judged at. The hook layer carries that point (a
+    // later evaluate without the input).
     bool constructible(const generator::row &value) {
       const auto assigned = [&](std::initializer_list<unsigned> dimensions) {
         for (const auto d : dimensions) {
@@ -314,7 +319,7 @@ namespace {
         }
         return true;
       };
-      if (assigned({entry, at}) && local(value) && value[at] == tag_call_point) {
+      if (assigned({entry, at}) && local(value) && (value[at] == tag_call_point || value[at] == after_present_point)) {
         return false;
       }
       if ((assigned({at, generated}) && value[at] == tag_call_point && value[generated]) || (assigned({at, evaluate_result}) && value[at] == tag_call_point && value[evaluate_result])) {
@@ -419,6 +424,8 @@ namespace {
     // added after the pairwise array, which it leaves unchanged.
     constexpr seed gap_seeds[] {
       {"local-now-undeclared", "state=unprovable,life=only_valid_now,entry=local_array"},  // S4-refusal.
+      {"local-now", "life=only_valid_now,entry=local_array"},  // S4.
+      {"generated-undeclared", "state=unprovable,commands=none,generated=3"},  // S7-refusal.
     };
 
     // The rows that seed the pairwise array, and with gaps the gap seeds.

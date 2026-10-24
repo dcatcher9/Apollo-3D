@@ -1427,12 +1427,15 @@ classes (a read state its recording proves, `GENERIC_READ` likewise, the produce
 an undeclared state, an enhanced `SHADER_RESOURCE` layout) and vary entry point, lifecycle, command
 list, copy point, generated Presents (real Presents while the game records), FG mode (Off, On, Auto,
 Dynamic) and frame count (2x, 4x), extent (a changing one is dynamic resolution, R3), untag, a
-two-tag array and the three SDK results. `sl27` (2.7.30) runs every cell: the product of state
-class, lifecycle and command list (at a same-frame evaluate and at an FG tag call), seed rows, each
-value alone and a pairwise array. `sl26` (2.6.10, no frame tags) and `sl212_214` (2.14.1, the
-newest surveyed release) run their seed rows and a pairwise array; `sl215_30` runs the seed rows of
-2.15.0 (newer than the survey: tag arrays, S24) and of 3.0.0 (a major no header defines, which
-discovery refuses, so nothing it tags may be shown) in a process each. Each case is judged at its
+two-tag array and the three SDK results. A local evaluate input has no copy point after its
+frame's Present here, since its own evaluate's copy would show at the Present that judges that
+point; the hook layer runs it as a later evaluate without the input. `sl27` (2.7.30) runs every
+cell: the product of state class, lifecycle and command list (at a same-frame evaluate and at an FG
+tag call), seed rows, each value alone and a pairwise array. `sl26` (2.6.10, no frame tags) and
+`sl212_214` (2.14.1, the newest surveyed release) run their seed rows and a pairwise array;
+`sl215_30` runs the seed rows of 2.15.0 (newer than the survey: tag arrays, S24) and of 3.0.0 (a
+major no header defines, which discovery refuses, so nothing it tags may be shown) in a process
+each. Each case is judged at its
 Presents: a capture is the case's allocation shown fresh, with its tagged extent and one identity,
 at six judged Presents from the first; a case that shows nothing refuses or holds, and a refusal
 class the test add-on records must be one its copy points give. A frame's tag call and evaluate are

@@ -394,6 +394,23 @@ namespace game3d_contract::known_gaps {
              cell.at == copy_point::same_frame_evaluate && permits(expected, outcome_kind::refuse) && expected.why != refusal::lifetime;
     }
 
+    constexpr bool local_only_valid_now(const present_case &value) {
+      return streamline::local_only_valid_now(value.decided);
+    }
+
+    // A same-frame evaluate after generated Presents (S7) outside
+    // frame-generation scope, of a release the add-on hooks, that the oracle
+    // refuses alone for its state is refused at the capture gate for its
+    // lifetime (source_lifetime) first.
+    constexpr bool generated_present_refused(const present_case &value) {
+      const auto &cell = value.decided;
+      const auto expected = expect(cell);
+      const bool extent_read = cell.extent == extent_form::null || cell.extent == extent_form::padded || cell.extent == extent_form::offset;
+      return legal(cell) && cell.version.major == 2 && cell.at == copy_point::same_frame_evaluate && !streamline::local(cell.entry) && cell.generated_presents != 0 &&
+             extent_read && !detail::frame_generation_scope(cell) && cell.untag == untag_pattern::none && cell.tag_result != sl_result::error &&
+             cell.evaluate_result != sl_result::error && expected.kind == outcome_kind::refuse && !either(expected) && expected.why == refusal::state_unprovable;
+    }
+
     // An OnlyValidNow tag outside frame-generation scope that its call
     // copies (S1), followed by the same frame's evaluate, which refuses the
     // tag as not valid until present (S3): that Present shows no depth.
@@ -425,12 +442,16 @@ namespace game3d_contract::known_gaps {
     // An extent the add-on calls invalid on a cell whose tag match() reads
     // (at its tag call or same-frame evaluate, a chained input aside: S15
     // refuses that first) and the oracle refuses, or may refuse, for its
-    // state is refused first as an invalid extent.
+    // state, or after the frame's Present for its lifetime (the tag call
+    // reads it first, outside frame generation too), is refused first as an
+    // invalid extent.
     constexpr bool extent_refused(const present_case &value, extent_form form) {
       const auto &cell = value.decided;
       const auto expected = expect(cell);
-      return legal(cell) && cell.extent == form && cell.entry != tag_entry::local_chain_not_last && cell.at != copy_point::after_present &&
-             permits(expected, outcome_kind::refuse) && expected.why == refusal::state_unprovable;
+      const bool after_present = cell.at == copy_point::after_present && !streamline::local(cell.entry) && cell.untag == untag_pattern::none &&
+                                 cell.tag_result != sl_result::error && expected.why == refusal::lifetime;
+      return legal(cell) && cell.extent == form && cell.entry != tag_entry::local_chain_not_last && permits(expected, outcome_kind::refuse) &&
+             ((cell.at != copy_point::after_present && expected.why == refusal::state_unprovable) || after_present);
     }
 
     // A zero-sided extent: the whole resource (S16).
@@ -464,9 +485,11 @@ namespace game3d_contract::known_gaps {
     {"S6-refusal", &rules::S6, kind::expected_failure, &present::commandless_refused_otherwise, "Stage 3 fix 2 (S6 + S7). With S6: a commandless ValidUntilPresent FG tag whose deferred copy (R2) or later copy point the oracle refuses, or may refuse, for another class (its state, its extent) is refused by source_rejection at the tag call as boundary_without_commands before that is judged, so its refusal class is no_copy_point. The S6 fix judges the deferred copy and closes this row; where generated Presents come before the evaluate, S7's lifetime refusal must go too.", &behaviours::refused_as<refusal::no_copy_point>},
     {"S1-evaluate", &rules::S1, kind::expected_failure, &present::only_valid_now_then_evaluate, "Outside the Stage 3 order, which predates this finding: it reworks the tag-to-evaluate path fix 2 (S6 + S7) changes, so it fits beside it. Found by the runtime layer: an OnlyValidNow global tag outside FG scope is copied at its call, but the same frame's evaluate refuses the tag (match(): not-valid-until-present, S3) and that frame's Present then shows no depth (mono), or only between generated Presents. S3 is right that the evaluate may not use the tag; it must not cost the frame the copy its tag call made (S1). Today the refused evaluate begins a new evaluation of the viewport with no copy (streamline_camera_probe.cpp nominate_depth_source, withdraw_invalid_attempt -> depth_capture::begin_evaluation), which supersedes the tag call's. Keep a tag-call copy when a later point of its frame refuses the same tag for its lifetime. The hook layer judges one copy point per cell, so only a Present shows this.", &behaviours::no_copy},
     {"S7", &rules::S7, kind::expected_failure, &present::generated_present_before_copy, "Stage 3 fix 2 (S6 + S7). As the hook table's S7 row, without its repeat: the device's own generated Presents (real Presents while the game records) end the tag's lifetime before its same-frame evaluate.", &behaviours::no_copy},
+    {"S7-refusal", &rules::S7, kind::expected_failure, &present::generated_present_refused, "Stage 3 fix 2 (S6 + S7). With S7: a same-frame evaluate after generated Presents that the oracle refuses for its state is refused at the capture gate as source_lifetime (lifetime) before its state is judged.", &behaviours::refused_as<refusal::lifetime>},
     {"S11b", &rules::S11b, kind::expected_failure, &present::undeferred_frame_generation_tag, "Stage 3 fix 2 (S6 + S7). As the hook table's S11b row: the add-on's nomination gate sees the copy nominated inside the tag call.", &behaviours::copy_at_call},
     {"S11c", &rules::S11c, kind::expected_failure, &present::until_evaluate_frame_generation_tag, "Stage 3 fix 2 (S6 + S7). As the hook table's S11c row.", &behaviours::copy_at_call},
     {"S4-refusal", &rules::S4, kind::expected_failure, &present::local_only_valid_now_refused, "Stage 3 fix 8 (S4/S15). With the hook table's S4 row: an OnlyValidNow evaluate input that the oracle refuses, or may refuse, for another class (its state, its extent) is refused first as not-valid-until-present (lifetime). Promoting the input at its own evaluate closes this row.", &behaviours::refused_as<refusal::lifetime>},
+    {"S4", &rules::S4, kind::expected_failure, &present::local_only_valid_now, "Stage 3 fix 8 (S4/S15). As the hook table's S4 row: the evaluate input is refused as not valid until present (lifetime).", &behaviours::refused_as<refusal::lifetime>},
     {"S15", &rules::S15, kind::expected_failure, &present::chained_local, "Stage 3 fix 8 (S4/S15). As the hook table's S15 row.", &behaviours::no_copy},
     {"S16", &rules::S16, kind::expected_failure, &present::zero_sided_extent, "Stage 3 fix 12 (S16). As the hook table's S16 row.", &behaviours::no_copy},
     {"S16-refusal", &rules::S16, kind::expected_failure, &present::zero_sided_extent_refused, "Stage 3 fix 12 (S16). With S16: a zero-sided extent on a cell the oracle refuses, or may refuse, for another class (its state) is refused as invalid-extent (malformed) before that is judged, so its refusal class differs. The S16 fix closes this row.", &behaviours::refused_as<refusal::malformed>},
