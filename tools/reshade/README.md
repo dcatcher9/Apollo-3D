@@ -1365,7 +1365,7 @@ admission on what Streamline, D3D12 and NGX require. The contract matrix checks 
 game. [`test_game3d_api_contract_dimensions.h`](test_game3d_api_contract_dimensions.h) lists what each
 API permits and filters illegal combinations;
 [`test_game3d_api_contract_oracle.h`](test_game3d_api_contract_oracle.h) derives each required
-outcome from cited contract text and the owner rulings R1 to R6; and
+outcome from cited contract text and the owner rulings R1 to R7 and N4; and
 [`test_game3d_api_contract_known_gaps.h`](test_game3d_api_contract_known_gaps.h) records where the
 add-on falls short. A recorded gap that starts passing fails its test, so the fix that closes a gap
 also removes its row; in the hook families a recorded gap must also keep failing under its row's rule
