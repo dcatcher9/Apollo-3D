@@ -90,7 +90,7 @@ namespace game3d_contract {
     inline constexpr rule D4c {"D4c", "END_ONLY whose StateAfter differs from its begin's: REFUSE (illegal input)", "MS Learn, Split Barriers: the only legal barrier on a pending (sub)resource has 'the same before and after states'"};
     inline constexpr rule D5 {"D5", "An enhanced layout a direct list may use, with access: CAPTURE with enhanced barriers from exactly that layout and access", "d3d12.h:19273-19306; Enhanced Barriers: a texture in an enhanced layout takes a legacy barrier only from LAYOUT_COMMON; Command Queue Layout Compatibility (DIRECT)"};
     inline constexpr rule D5b {"D5b", "Enhanced NO_ACCESS, UNDEFINED, or a layout the recording's queue type cannot use: REFUSE", "Enhanced Barriers: 'Queue type specific layouts may only be used within a compatible command queue'; NO_ACCESS deactivates a subresource; an UNDEFINED layout holds no meaningful data"};
-    inline constexpr rule D6 {"D6", "Layout set by an enhanced barrier on an earlier list, nothing on this recording: REFUSE, or an enhanced copy from the claim's equivalent layout", "Enhanced Barriers, legacy interop: an enhanced-layout texture must reach LAYOUT_COMMON before a legacy barrier references it"};
+    inline constexpr rule D6 {"D6", "Layout set by an enhanced barrier on an earlier list, nothing on this recording: REFUSE, or, where that layout is the claim's equivalent layout itself, an enhanced copy from it", "Enhanced Barriers, legacy interop: an enhanced-layout texture must reach LAYOUT_COMMON before a legacy barrier references it; Barrier validation: LayoutBefore must match the subresource's layout"};
     inline constexpr rule D7 {"D7", "Subresource 0 transitioned separately from other mips or the stencil plane: CAPTURE", "d3d12.h D3D12_RESOURCE_TRANSITION_BARRIER.Subresource: each subresource has its own state; the copy reads subresource 0"};
     inline constexpr rule D8 {"D8", "MSAA, array or 3D resource: REFUSE", "SLT:412-429 and the NGX depth parameters name no slice or sample"};
     inline constexpr rule D9 {"D9", "Every depth family and typeless view: CAPTURE, plane 0 byte-exact", "D3D12_RESOURCE_FLAGS ALLOW_DEPTH_STENCIL: 'CopyTextureRegion must copy a whole subresource'"};
@@ -435,14 +435,18 @@ namespace game3d_contract {
       case evidence::earlier_list_enhanced:
         {
           // A legacy barrier is illegal here; only a shader-read claim names
-          // an enhanced equivalent (SHADER_RESOURCE layout and access). A
+          // an enhanced equivalent (SHADER_RESOURCE layout and access), and
+          // a copy from it is right only where the earlier list set that
+          // layout itself: a queue-specific one (DIRECT_QUEUE_SHADER_RESOURCE)
+          // is another layout, which no claim names (Enhanced Barriers: a
+          // barrier's LayoutBefore must match the subresource's layout). A
           // declaration made for a later use is no basis at the tag call:
           // that copy is deferred to the use (S11b, R2).
           const auto claimed = value.source == claim::ngx_contract ? std::uint32_t(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE) :
                                value.source == claim::sl_declared  ? value.declared :
                                                                      0u;
           const auto &by = value.source == claim::ngx_contract ? rules::N8 : rules::D6;
-          if (claimed && !(claimed & ~shader_read_states) && !(flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE)) {
+          if (claimed && !(claimed & ~shader_read_states) && !(flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) && source.layout == D3D12_BARRIER_LAYOUT_SHADER_RESOURCE) {
             auto copy = capture(by, enhanced(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, D3D12_BARRIER_ACCESS_SHADER_RESOURCE));
             copy.deferred = value.scope == claim_scope::before_use;
             return either(refuse(by, refusal::state_unprovable), copy);
@@ -1268,6 +1272,9 @@ namespace game3d_contract {
     constexpr auto depth_write = std::uint32_t(D3D12_RESOURCE_STATE_DEPTH_WRITE);
     constexpr auto nps = std::uint32_t(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     constexpr auto resolve_dest = std::uint32_t(D3D12_RESOURCE_STATE_RESOLVE_DEST);
+    // A SHADER_RESOURCE layout, and its direct-queue form, an earlier list set.
+    constexpr auto earlier_shader_resource = recorded(ds, evidence::earlier_list_enhanced, 0, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, D3D12_BARRIER_ACCESS_SHADER_RESOURCE);
+    constexpr auto earlier_direct_queue = recorded(ds, evidence::earlier_list_enhanced, 0, D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE, D3D12_BARRIER_ACCESS_SHADER_RESOURCE);
 
     static_assert(refuses(expect(state(recorded(ds, evidence::none))), rules::D0, refusal::state_unprovable));
     static_assert(captures(expect(state(recorded(ds, evidence::transition, depth_read))), rules::D1, depth_read));
@@ -1282,8 +1289,8 @@ namespace game3d_contract {
     static_assert(decides(expect(state(recorded(ds, evidence::enhanced, 0, D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ, D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ))), rules::D5, outcome_kind::capture));
     static_assert(refuses(expect(state(recorded(ds, evidence::enhanced, 0, D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_SHADER_RESOURCE, D3D12_BARRIER_ACCESS_SHADER_RESOURCE))), rules::D5b, refusal::state_unprovable));
     static_assert(refuses(expect(state(recorded(ds, evidence::enhanced, 0, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, D3D12_BARRIER_ACCESS_NO_ACCESS))), rules::D5b, refusal::state_unprovable));
-    static_assert(undecided(expect(state(recorded(ds, evidence::earlier_list_enhanced), claim::sl_declared, nps)), rules::D6));
-    static_assert(undecided(expect(state(recorded(ds, evidence::earlier_list_enhanced), claim::sl_declared, nps, claim_scope::before_use)), rules::D6) && expect(state(recorded(ds, evidence::earlier_list_enhanced), claim::sl_declared, nps, claim_scope::before_use)).deferred);
+    static_assert(undecided(expect(state(earlier_shader_resource, claim::sl_declared, nps)), rules::D6));
+    static_assert(undecided(expect(state(earlier_shader_resource, claim::sl_declared, nps, claim_scope::before_use)), rules::D6) && expect(state(earlier_shader_resource, claim::sl_declared, nps, claim_scope::before_use)).deferred);
     static_assert(with(state(recorded(ds, evidence::transition, depth_read)), &state_case::list, list_type::compute).list == list_type::compute);
     static_assert(refuses(expect(with(state(recorded(ds, evidence::transition, depth_read)), &state_case::list, list_type::compute)), rules::S22b, refusal::state_unprovable));
     static_assert(refuses(expect(with(state(recorded(0, evidence::transition, resolve_dest)), &state_case::list, list_type::compute)), rules::S22b, refusal::state_unprovable));
@@ -1294,7 +1301,9 @@ namespace game3d_contract {
     static_assert(captures(expect(state(recorded(ds, evidence::none), claim::sl_declared, nps, claim_scope::before_use)), rules::S11b, nps) && expect(state(recorded(ds, evidence::none), claim::sl_declared, nps, claim_scope::before_use)).deferred);
     static_assert(captures(expect(state(recorded(ds, evidence::none), claim::ngx_contract)), rules::N1, nps));
     static_assert(refuses(expect(state(recorded(ds | D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE, evidence::none), claim::ngx_contract)), rules::N6, refusal::state_unprovable));
-    static_assert(undecided(expect(state(recorded(ds, evidence::earlier_list_enhanced), claim::ngx_contract)), rules::N8));
+    static_assert(undecided(expect(state(earlier_shader_resource, claim::ngx_contract)), rules::N8));
+    static_assert(refuses(expect(state(earlier_direct_queue, claim::sl_declared, nps)), rules::D6, refusal::state_unprovable));
+    static_assert(refuses(expect(state(earlier_direct_queue, claim::ngx_contract)), rules::N8, refusal::state_unprovable));
     static_assert(refuses(expect(state(recorded(0, evidence::transition, depth_write))), rules::X1, refusal::state_unprovable));
     static_assert(refuses(expect(state(recorded(ds, evidence::transition, depth_write | depth_read))), rules::X2, refusal::state_unprovable));
 
@@ -1341,9 +1350,9 @@ namespace game3d_contract {
     static_assert(captures(expect(tag(present, copy_point::tag_call)), rules::S11b, nps) && expect(tag(present, copy_point::tag_call)).deferred);
     static_assert(refuses(expect(tag(until_evaluate, copy_point::tag_call)), rules::S11c, refusal::state_unprovable));
     static_assert(captures(expect(with(tag(until_evaluate, copy_point::tag_call), &sl_case::depth, recorded(ds, evidence::transition, depth_read))), rules::S5, depth_read));
-    static_assert(undecided(expect(with(tag(present, copy_point::tag_call), &sl_case::depth, recorded(ds, evidence::earlier_list_enhanced))), rules::D6) && expect(with(tag(present, copy_point::tag_call), &sl_case::depth, recorded(ds, evidence::earlier_list_enhanced))).deferred);
-    static_assert(refuses(expect(with(tag(until_evaluate, copy_point::tag_call), &sl_case::depth, recorded(ds, evidence::earlier_list_enhanced))), rules::S11c, refusal::state_unprovable));
-    static_assert(undecided(expect(with(tag(present, copy_point::tag_call, tag_commands::none), &sl_case::depth, recorded(ds, evidence::earlier_list_enhanced))), rules::D6) && expect(with(tag(present, copy_point::tag_call, tag_commands::none), &sl_case::depth, recorded(ds, evidence::earlier_list_enhanced))).deferred);
+    static_assert(undecided(expect(with(tag(present, copy_point::tag_call), &sl_case::depth, earlier_shader_resource)), rules::D6) && expect(with(tag(present, copy_point::tag_call), &sl_case::depth, earlier_shader_resource)).deferred);
+    static_assert(refuses(expect(with(tag(until_evaluate, copy_point::tag_call), &sl_case::depth, earlier_shader_resource)), rules::S11c, refusal::state_unprovable));
+    static_assert(undecided(expect(with(tag(present, copy_point::tag_call, tag_commands::none), &sl_case::depth, earlier_shader_resource)), rules::D6) && expect(with(tag(present, copy_point::tag_call, tag_commands::none), &sl_case::depth, earlier_shader_resource)).deferred);
     static_assert(undecided(expect(with(tag(present, copy_point::tag_call, tag_commands::none), &sl_case::depth, recorded(ds, evidence::enhanced, 0, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, D3D12_BARRIER_ACCESS_SHADER_RESOURCE))), rules::D6));
     static_assert(legal(legacy_tag(evaluate)) && captures(expect(legacy_tag(evaluate)), rules::S5, nps));
     static_assert(refuses(expect(legacy_tag(copy_point::tag_call)), rules::S2, refusal::no_copy_point));
