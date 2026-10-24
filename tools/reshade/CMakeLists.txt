@@ -566,7 +566,9 @@ if(BUILD_TESTING)
     if(MINGW)
       target_link_options(reshade_native_stereo_runtime_test PRIVATE -static)
     endif()
-    # Native sampler validation is opt-in GPU execution, never an automatic CTest.
+    # Native sampler validation is opt-in GPU execution, never an automatic CTest. Like
+    # reshade_exporter_tests, it compiles its production file (depth_content_sampler.cpp)
+    # itself, outside every view (README, Test builds).
     add_executable(reshade_depth_sampler_d3d11_test test_depth_content_sampler_d3d11.cpp)
     target_compile_features(reshade_depth_sampler_d3d11_test PRIVATE cxx_std_17)
     target_include_directories(reshade_depth_sampler_d3d11_test SYSTEM PRIVATE "${SUNSHINE_RESHADE_INCLUDE_DIR}")

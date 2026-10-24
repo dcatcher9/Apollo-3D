@@ -1359,6 +1359,13 @@ shipping build such a header changes nothing: the internals keep internal linkag
 builds the tests they get external linkage (an inline namespace, or `inline` for the depth add-on's
 shared state) and the header declares the ones the tests use.
 
+Two test binaries compile a production file outside every view: `reshade_exporter_tests`
+compiles `exporter.cpp` inside [`test_exporter.cpp`](test_exporter.cpp) (its view excludes that
+file), and the opt-in D3D11 sampler fixture `reshade_depth_sampler_d3d11_test`, which no `ctest`
+runs, compiles `depth_content_sampler.cpp` inside
+[`test_depth_content_sampler_d3d11.cpp`](test_depth_content_sampler_d3d11.cpp) to reach the
+sampler's internal pipeline cache and private command list. Neither links a view.
+
 ### API contract matrix
 
 The [rules for new game behaviour](../../docs/reshade-sbs.md#rules-for-new-game-behaviour) gate
