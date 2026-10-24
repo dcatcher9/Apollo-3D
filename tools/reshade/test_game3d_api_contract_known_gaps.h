@@ -107,7 +107,7 @@ namespace game3d_contract::known_gaps {
         return value.source != claim::sl_declared || declared;
       }
       if (source.seen == evidence::enhanced && source.layout == D3D12_BARRIER_LAYOUT_RESOLVE_DEST && source.access != D3D12_BARRIER_ACCESS_NO_ACCESS) {
-        return value.source != claim::sl_declared;
+        return value.source != claim::sl_declared || declared;
       }
       return source.seen == evidence::none && declared;
     }
@@ -636,7 +636,7 @@ namespace game3d_contract::known_gaps {
         return state.source != claim::sl_declared || declared;
       }
       if (source.seen == evidence::enhanced && source.layout == D3D12_BARRIER_LAYOUT_RESOLVE_DEST && source.access != D3D12_BARRIER_ACCESS_NO_ACCESS) {
-        return state.source != claim::sl_declared;
+        return state.source != claim::sl_declared || declared;
       }
       return unnamed(source) && declared;
     }

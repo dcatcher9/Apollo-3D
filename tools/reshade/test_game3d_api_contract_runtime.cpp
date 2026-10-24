@@ -426,6 +426,7 @@ namespace {
       {"local-now-undeclared", "state=unprovable,life=only_valid_now,entry=local_array"},  // S4-refusal.
       {"local-now", "life=only_valid_now,entry=local_array"},  // S4.
       {"generated-undeclared", "state=unprovable,commands=none,generated=3"},  // S7-refusal.
+      {"declared-size-undeclared", "state=unprovable,entry=local_array,extent=declared_size_differs"},  // S16d-refusal.
     };
 
     // The rows that seed the pairwise array, and with gaps the gap seeds.

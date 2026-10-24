@@ -421,8 +421,10 @@ namespace game3d_contract {
             return refuse(rules::X1, refusal::state_unprovable);
           }
           const auto &by = source.layout == D3D12_BARRIER_LAYOUT_RESOLVE_DEST ? rules::D2 : rules::D5;
-          // A legacy declaration names no enhanced layout, so it never agrees.
-          return against_declaration(capture(by, enhanced(source.layout, source.access)), value, false);
+          // A legacy declaration agrees with the layout equivalent to it
+          // (Enhanced Barriers: SHADER_RESOURCE matches the shader-resource
+          // states, DEPTH_STENCIL_READ DEPTH_READ with them).
+          return against_declaration(capture(by, enhanced(source.layout, source.access)), value, describes_layout(value.declared, source.layout));
         }
       case evidence::transition:
       case evidence::end_without_begin:
@@ -1287,6 +1289,10 @@ namespace game3d_contract {
     static_assert(captures(expect(state(recorded(ds, evidence::end_without_begin, depth_read))), rules::D4b, depth_read));
     static_assert(refuses(expect(state(recorded(ds, evidence::end_mismatched, depth_read))), rules::D4c, refusal::state_unprovable));
     static_assert(decides(expect(state(recorded(ds, evidence::enhanced, 0, D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ, D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ))), rules::D5, outcome_kind::capture));
+    // A declaration of the layout's equivalent state agrees with it; another does not (S11a).
+    static_assert(decides(expect(state(recorded(ds, evidence::enhanced, 0, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, D3D12_BARRIER_ACCESS_SHADER_RESOURCE), claim::sl_declared, nps)), rules::D5, outcome_kind::capture) && !either(expect(state(recorded(ds, evidence::enhanced, 0, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, D3D12_BARRIER_ACCESS_SHADER_RESOURCE), claim::sl_declared, nps))));
+    static_assert(decides(expect(state(recorded(ds, evidence::enhanced, 0, D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ, D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ), claim::sl_declared, depth_read | nps)), rules::D5, outcome_kind::capture) && !either(expect(state(recorded(ds, evidence::enhanced, 0, D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ, D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ), claim::sl_declared, depth_read | nps))));
+    static_assert(undecided(expect(state(recorded(ds, evidence::enhanced, 0, D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ, D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ), claim::sl_declared, nps)), rules::S11a));
     static_assert(refuses(expect(state(recorded(ds, evidence::enhanced, 0, D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_SHADER_RESOURCE, D3D12_BARRIER_ACCESS_SHADER_RESOURCE))), rules::D5b, refusal::state_unprovable));
     static_assert(refuses(expect(state(recorded(ds, evidence::enhanced, 0, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, D3D12_BARRIER_ACCESS_NO_ACCESS))), rules::D5b, refusal::state_unprovable));
     static_assert(undecided(expect(state(earlier_shader_resource, claim::sl_declared, nps)), rules::D6));
