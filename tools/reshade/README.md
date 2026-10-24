@@ -1394,11 +1394,12 @@ The device layer, `reshade_contract_matrix_device`
 hardware adapter, through the diagnostic texture fixture (included under
 `SUNSHINE_DIAGNOSTIC_TEXTURE_FIXTURE_ONLY`). Each cell puts a fresh source in its state on an
 earlier, executed list. Its copy's recording then holds the game's barrier: a transition, a split
-ended there or still open, a wildcard alias, an enhanced barrier, or nothing after an enhanced layout
-set on the earlier list; on subresource 0, all subresources, another mip or the stencil plane. Then
-comes the copy at its point: an adapter's copy with the proof its claim selects, a Generic boundary
-(`record_preserved` from the `DEPTH_WRITE` that `depth_addon.cpp` declares at a clear, a DSV unbind
-and the end of frame), or the UI clear boundary (the barriers `game3d_ui_layer.cpp` records through
+ended there (begun on an earlier list of the same `ExecuteCommandLists` call, the only place D3D12
+completes a split) or still open, a wildcard alias, an enhanced barrier, or nothing after an
+enhanced layout set on the earlier list; on subresource 0, all subresources, another mip or the
+stencil plane. Then comes the copy at its point: an adapter's copy with the proof its claim selects,
+a Generic boundary (`record_preserved` from the `DEPTH_WRITE` that `depth_addon.cpp` declares at a
+clear, a DSV unbind and the end of frame), or the UI clear boundary (the barriers `game3d_ui_layer.cpp` records through
 ReShade; the runtime layer runs the layer itself). The cells cover every legal state of every
 allocation, each claim, each direct-list enhanced layout, every depth family typed and typeless with
 mips and planes, the shapes no input names, COMPUTE lists and UI tags. A cell meets the oracle by

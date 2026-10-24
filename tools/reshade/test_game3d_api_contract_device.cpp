@@ -6,7 +6,9 @@
 // Each cell takes a fresh source and puts it in its prior state on an
 // earlier, executed list. The copy's recording then holds the game's barrier
 // (legacy, split, aliasing or enhanced; on subresource 0, all subresources,
-// another mip or the stencil plane), then the copy at its point:
+// another mip or the stencil plane; a split it ends began on an earlier list
+// of the same ExecuteCommandLists call, the only place D3D12 completes one),
+// then the copy at its point:
 // - an adapter's copy at its call: capture::record for a depth input with
 //   the proof its claim selects, record_local_texture with the UI policy
 //   for a UI tag;
@@ -326,8 +328,8 @@ namespace {
     };
 
     // Every legal legacy state of every allocation, completed, ended (its
-    // split begun on the earlier list) or begun on the recording, and named
-    // only by a declaration.
+    // split begun on an earlier list of the same call) or begun on the
+    // recording, and named only by a declaration.
     for (const auto &allocation : allocations) {
       each_allowed(allocation.flags, [&](std::uint32_t state) {
         for (const auto seen : {evidence::transition, evidence::end_without_begin, evidence::split_open}) {
@@ -578,10 +580,12 @@ namespace {
   }
 
   // From the legacy COMMON state into layout with access (NO_ACCESS syncs
-  // nothing).
+  // nothing). The legacy state is the COMMON layout with ACCESS_COMMON, and
+  // a barrier on a list may follow other access in its ExecuteCommandLists
+  // call, which SyncBefore NONE would deny (the debug layer's 1417).
   void enter_layout(ID3D12GraphicsCommandList *list, ID3D12Resource *resource, bool whole, std::uint32_t layout, std::uint32_t access) {
     const auto sync = access == D3D12_BARRIER_ACCESS_NO_ACCESS ? D3D12_BARRIER_SYNC_NONE : D3D12_BARRIER_SYNC_ALL;
-    texture_barrier(list, resource, whole, D3D12_BARRIER_SYNC_NONE, sync, D3D12_BARRIER_ACCESS_NO_ACCESS, access, D3D12_BARRIER_LAYOUT_COMMON, layout);
+    texture_barrier(list, resource, whole, D3D12_BARRIER_SYNC_ALL, sync, D3D12_BARRIER_ACCESS_COMMON, access, D3D12_BARRIER_LAYOUT_COMMON, layout);
   }
 
   // A split into layout with access, begun from a copy layout: the runtime
@@ -595,7 +599,7 @@ namespace {
         via_access(via == D3D12_BARRIER_LAYOUT_COPY_DEST ? D3D12_BARRIER_ACCESS_COPY_DEST : D3D12_BARRIER_ACCESS_COPY_SOURCE) {}
 
     void begin(ID3D12GraphicsCommandList *list, ID3D12Resource *resource, bool whole, std::uint32_t layout, std::uint32_t access) const {
-      texture_barrier(list, resource, whole, D3D12_BARRIER_SYNC_NONE, D3D12_BARRIER_SYNC_COPY, D3D12_BARRIER_ACCESS_NO_ACCESS, via_access, D3D12_BARRIER_LAYOUT_COMMON, via);
+      texture_barrier(list, resource, whole, D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_SYNC_COPY, D3D12_BARRIER_ACCESS_COMMON, via_access, D3D12_BARRIER_LAYOUT_COMMON, via);
       texture_barrier(list, resource, whole, D3D12_BARRIER_SYNC_COPY, D3D12_BARRIER_SYNC_SPLIT, via_access, access, via, layout);
     }
 
@@ -673,6 +677,39 @@ namespace {
     }
   };
 
+  // The earlier list of a cell's own ExecuteCommandLists call, on its queue
+  // type: where the game begins the split barrier the cell's recording ends
+  // (D4b). D3D12 completes a split only within one ExecuteCommandLists call
+  // (the debug layer refuses a BEGIN_ONLY with no END_ONLY in the same call),
+  // so this list executes with the cell's, in ReShade's list lifecycle.
+  struct earlier_list {
+    ComPtr<ID3D12CommandAllocator> allocator, spare;
+    ComPtr<ID3D12GraphicsCommandList> list;
+
+    earlier_list(fixture &gpu, D3D12_COMMAND_LIST_TYPE type) {
+      check(gpu.device->CreateCommandAllocator(type, IID_PPV_ARGS(&allocator)), "earlier allocator");
+      check(gpu.device->CreateCommandAllocator(type, IID_PPV_ARGS(&spare)), "earlier spare allocator");
+      check(gpu.device->CreateCommandList(0, type, allocator.Get(), nullptr, IID_PPV_ARGS(&list)), "earlier list");
+      created(list.Get());
+      capture::observe_command(native(list.Get()));
+      capture::poll();
+      check(close_list(list.Get()), "earlier initial close");
+      reset();
+    }
+
+    ~earlier_list() {
+      destroyed(list.Get());
+      capture::command_destroyed(native(list.Get()));
+    }
+
+    void reset() {
+      check(spare->Reset(), "earlier allocator reset");
+      check(reset_list(list.Get(), spare.Get()), "earlier list reset");
+      std::swap(allocator, spare);
+      capture::poll();
+    }
+  };
+
   // The D3D12 debug layer's errors since the last call, which it clears.
   std::string debug_errors(fixture &gpu) {
     std::string out;
@@ -698,13 +735,16 @@ namespace {
     fixture &gpu;
     compute_lane compute;
     consumer_fixture consumer;
+    earlier_list earlier_direct, earlier_compute;
     ComPtr<ID3D12DescriptorHeap> depth_views;
     std::uint64_t sequence {};
 
     explicit device_matrix(fixture &value):
         gpu(value),
         compute(value),
-        consumer(value) {
+        consumer(value),
+        earlier_direct(value, D3D12_COMMAND_LIST_TYPE_DIRECT),
+        earlier_compute(value, D3D12_COMMAND_LIST_TYPE_COMPUTE) {
       D3D12_DESCRIPTOR_HEAP_DESC desc {};
       desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
       desc.NumDescriptors = 1;
@@ -834,9 +874,8 @@ namespace {
         if (!(source.flags & simultaneous) && value.prior != sources[i].initial) {
           transition_barrier(list, resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, sources[i].initial, value.prior);
         }
-        if (source.seen == evidence::end_without_begin) {
-          transition_barrier(list, resource, subresource_of(*batch[i], descs[i]), value.prior, source.observed, D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY);
-        } else if (source.seen == evidence::earlier_list_enhanced) {
+        // A split the cell ends begins on its earlier_list (record).
+        if (source.seen == evidence::earlier_list_enhanced) {
           enter_layout(list, resource, true, source.layout, source.access);
         }
       }
@@ -927,8 +966,16 @@ namespace {
       // recording names, which there is nothing, so it is recorded here on a
       // game list that names nothing either and can be discarded.
       auto *list = on_compute ? compute.list.Get() : gpu.list.Get();
+      auto &earlier = on_compute ? earlier_compute : earlier_direct;
+      const bool split_ended = evidence_on.seen == evidence::end_without_begin;
       out.quarantined = unsafe(value);
       debug_errors(gpu);  // Drop what an earlier discarded recording produced.
+
+      // A split the copy's recording ends began on an earlier list of the
+      // same ExecuteCommandLists call.
+      if (split_ended) {
+        transition_barrier(earlier.list.Get(), resource, subresource, value.value.prior, evidence_on.observed, D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY);
+      }
 
       // The game's barrier on the copy's recording.
       switch (evidence_on.seen) {
@@ -1036,21 +1083,29 @@ namespace {
         list->ClearDepthStencilView(handle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
       }
 
-      // Execute alone, or discard a copy from an unproven state.
-      if (on_compute) {
-        check(close_list(list), "compute close");
-        if (!out.quarantined) {
-          execute(compute.queue.Get(), list);
+      // Execute alone (after its earlier list, in one call), or discard a
+      // copy from an unproven state.
+      check(close_list(list), on_compute ? "compute close" : "copy close");
+      if (split_ended) {
+        check(close_list(earlier.list.Get()), "earlier close");
+      }
+      if (!out.quarantined) {
+        ID3D12CommandList *lists[] {earlier.list.Get(), list};
+        auto &queue = on_compute ? compute.queue : gpu.queue;
+        queue->ExecuteCommandLists(split_ended ? 2 : 1, split_ended ? lists : lists + 1);
+        if (on_compute) {
           compute.wait();
-        }
-        compute.reset();
-      } else {
-        check(close_list(list), "copy close");
-        if (!out.quarantined) {
-          execute(gpu.queue.Get(), list);
+        } else {
           gpu.wait();
         }
+      }
+      if (on_compute) {
+        compute.reset();
+      } else {
         gpu.reset();
+      }
+      if (split_ended) {
+        earlier.reset();
       }
       if (!out.quarantined) {
         const auto errors = debug_errors(gpu);
