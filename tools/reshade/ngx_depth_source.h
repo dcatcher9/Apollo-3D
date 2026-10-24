@@ -74,6 +74,9 @@ namespace sunshine_ngx {
       sunshine_streamline::frame_generation::attempt (*frame_generation)(
         const sunshine_streamline::frame_generation::inputs &value){};
       void (*finish_frame_generation)(const sunshine_streamline::frame_generation::attempt &value, bool successful){};
+      // Whether a live Streamline FG scope owns depth, in place of the
+      // probe's frame generation query and the capture owner's scope check.
+      bool (*frame_generation_owns_depth)(){};
     };
     void set_callbacks(callbacks value);
     bool last_capture_rejection(sunshine_streamline::depth_capture::record_diagnostic &out,

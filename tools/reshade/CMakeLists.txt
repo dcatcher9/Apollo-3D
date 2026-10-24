@@ -304,6 +304,8 @@ if(BUILD_TESTING)
     add_test(NAME reshade_${policy} COMMAND reshade_${policy}_tests)
     set_tests_properties(reshade_${policy} PROPERTIES TIMEOUT 15)
   endforeach()
+  # It also pins the acceptance ledger's unexercised edges (README, Characterization tests).
+  set_tests_properties(reshade_game3d_alpha_auto PROPERTIES LABELS "characterization")
   # The first-run report's checks and its goldens over saved game logs (log_report_goldens). They need
   # only a Python 3 interpreter and are not registered without one.
   find_package(Python3 3.9 COMPONENTS Interpreter)
@@ -468,7 +470,18 @@ if(BUILD_TESTING)
     target_link_options(reshade_upscaler_call_trace_tests PRIVATE -static)
   endif()
   add_test(NAME reshade_upscaler_call_trace COMMAND reshade_upscaler_call_trace_tests)
-  set_tests_properties(reshade_upscaler_call_trace PROPERTIES TIMEOUT 30)
+  set_tests_properties(reshade_upscaler_call_trace PROPERTIES TIMEOUT 30 LABELS "characterization")
+
+  # Today's behaviour of the selection seams the contract matrix does not
+  # cover (README, Characterization tests).
+  add_executable(reshade_seam_characterization_tests test_game3d_seam_characterization.cpp)
+  target_compile_definitions(reshade_seam_characterization_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_link_libraries(reshade_seam_characterization_tests PRIVATE sunshine_game3d_core_probe_test_archive)
+  if(MINGW)
+    target_link_options(reshade_seam_characterization_tests PRIVATE -static)
+  endif()
+  add_test(NAME reshade_seam_characterization COMMAND reshade_seam_characterization_tests)
+  set_tests_properties(reshade_seam_characterization PROPERTIES TIMEOUT 30 LABELS "characterization")
 
   add_executable(reshade_native_depth_calibration_tests test_native_depth_calibration.cpp)
   target_compile_features(reshade_native_depth_calibration_tests PRIVATE cxx_std_17)

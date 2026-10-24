@@ -746,6 +746,13 @@ namespace sunshine_ngx {
       ++fg_owned;
       return attempt;
     }
+#else
+    // The call-trace tests decide whether a live FG scope owns depth.
+    if (backend.frame_generation_owns_depth && backend.frame_generation_owns_depth()) {
+      attempt.capture_suppressed_by_depth_owner = true;
+      ++fg_owned;
+      return attempt;
+    }
 #endif
     sunshine_streamline::depth_capture::record_diagnostic diagnostic;
     bool retaining = false;

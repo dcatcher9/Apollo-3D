@@ -3,7 +3,8 @@
 // streamline_depth_capture.cpp's internal types, constants and the templates
 // its white-box regressions (test_streamline_depth_capture.cpp) instantiate,
 // and in a test build the declarations of the other internals they reach.
-// Only those two files include this header.
+// Only the capture file, those regressions and the seam characterization
+// (test_game3d_seam_characterization.cpp) include this header.
 //
 // The shipping build keeps all of them internal, in anonymous namespaces. A
 // SUNSHINE_STREAMLINE_PROBE_TEST build gives the same definitions external

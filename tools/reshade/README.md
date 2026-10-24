@@ -1345,7 +1345,7 @@ every file of a binary sees the same declarations; a binary links one view.
 | `sunshine_game3d_core` | none | `SunshineSBS`, `replay_game3d_dump`, and the tests without a seam (UI mask, UI capture, UI layer, camera data, queue-cycle and source-alpha) |
 | `sunshine_game3d_core_runtime_test` | `SUNSHINE_SBS_RUNTIME_TEST_ADDON` | `SunshineSBSTest` |
 | `sunshine_game3d_core_sbs_test` | `SUNSHINE_SBS_TEST` | `reshade_exporter_tests`, whose test file compiles `exporter.cpp` itself |
-| `sunshine_game3d_core_probe_test` | Streamline probe, NGX call trace, native observers, synchronous log | the probe, contract matrix, call trace, native observer and diagnostic-texture tests |
+| `sunshine_game3d_core_probe_test` | Streamline probe, NGX call trace, native observers, synchronous log | the probe, contract matrix, seam characterization, call trace, native observer and diagnostic-texture tests |
 | `sunshine_game3d_core_renderer_test` | `SUNSHINE_GAME3D_RENDERER_TEST` | the native runtime tests |
 
 Production files hold no tests. A white-box test reaches a file's internals through that file's
@@ -1415,6 +1415,37 @@ causes:
 ```bash
 cmake -DSURVEY_DIR=<sl-abi-survey> -DOUTPUT=tools/reshade/test_sl_survey_tables.generated.h -P tools/reshade/contract_sl_survey_tables.cmake
 ```
+
+### Characterization tests
+
+The contract matrix judges what an API permits. Characterization tests instead pin what the add-on
+does today at the seams the matrix does not reach, so that a structural move which must not change
+behaviour is checked row by row. They are not an oracle: a row changes only in the commit that
+changes that behaviour on purpose, and a disagreement with an API contract belongs in the matrix as
+a known gap. Each table names the behaviour of every row and the refactor phase it protects.
+`ctest -L characterization` runs them; each also runs in the default `ctest`.
+
+- [`test_game3d_seam_characterization.cpp`](test_game3d_seam_characterization.cpp)
+  (`reshade_seam_characterization`) links the Streamline probe tests' view
+  ([Test builds](#test-builds)) and drives the capture owner without a device: the frame
+  generation policy's query timelines, the FG scope's liveness (accepted copies from a Streamline
+  FG tag or from DLSS-G's own evaluation) and the selection it yields, `select_provider` with a
+  protected owner, readable and pending sources and required or excluded FG, per-queue ownership
+  and `establish_provider`'s watermark, and every reason of `decide_display`. Their contracts are
+  in [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
+- `reshade_upscaler_call_trace` holds the NGX nesting table
+  ([`test_upscaler_call_trace.cpp`](test_upscaler_call_trace.cpp)): each outcome of an outer
+  evaluation against a nested SR or DLSS-G call, including an outer copy the capture owner
+  rejected (the inner call supplies depth) and an outer recorded copy (the inner call is
+  deduplicated), a live FG scope and a claimed Streamline evaluation
+  ([Direct NGX depth selection](../../docs/reshade-sbs.md#direct-ngx-depth-selection)). The test
+  states whether a live FG scope owns depth through a callback that only the call-trace build has
+  (`sunshine_ngx::testing::callbacks`), in place of the Streamline FG query.
+- `reshade_game3d_alpha_auto` pins the acceptance ledger's edges that its policy groups leave
+  unexercised: a sample over no pixels, a contradiction older than the newest one, and a
+  testable sample older than the previous one
+  ([UI decision framework](../../docs/reshade-sbs.md#ui-decision-framework)).
+  `ui_selection::decide` itself is covered in full by the selection contract and sequence tests.
 
 ### Independent renderer reference tests
 
