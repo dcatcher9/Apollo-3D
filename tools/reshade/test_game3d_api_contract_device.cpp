@@ -33,7 +33,10 @@
 // Graphics Tools) to prove the recorded barriers. Without the debug layer
 // every other check still runs and a failure still fails the test.
 #define SUNSHINE_DIAGNOSTIC_TEXTURE_FIXTURE_ONLY
+// The fixture's headers come before the add-on's and the standard ones.
+// clang-format off
 #include "test_diagnostic_texture_capture.cpp"
+// clang-format on
 
 #include "depth_refusal.h"
 #include "test_game3d_api_contract_tally.h"
