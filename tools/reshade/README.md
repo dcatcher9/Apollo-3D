@@ -865,9 +865,9 @@ Fresh copies must recover each interval. With FG options on and every FG depth t
 same viewport's SR depth takes over once the FG scope is silent; each generated presentation, at
 2x and 3x, holds its real frame's SR copy, also after the fixture's window leaves the foreground
 (the export stop invalidates reuse once) and back, with no readiness loss logged.
-The test executable also exports DLSS-G's NGX entry points (feature 11 only, named `DLSSG.*`
-inputs, no capture). With its FG depth, HUD-less and Backbuffer tags command-less, as in Assassin's Creed
-Shadows, a DLSS-G evaluation whose list observes no state for `DLSSG.Depth`, `DLSSG.HUDLess` and
+The test executable also exports the NGX stand-in's entry points (below); its DLSS-G case creates
+feature 11 and sets only the named `DLSSG.*` inputs (no capture). With its FG depth, HUD-less and
+Backbuffer tags command-less, as in Assassin's Creed Shadows, a DLSS-G evaluation whose list observes no state for `DLSSG.Depth`, `DLSSG.HUDLess` and
 `DLSSG.Backbuffer` is refused and counted (`dlssg_depth={copied=0 ... refused=missing_state:<n>}`)
 with the SR depth unchanged, and the test add-on's refusal query (API contract matrix) reports it
 as a `state_unprovable` capture refusal, as it reports a command-less FG tag as a `no_copy_point`
@@ -881,12 +881,27 @@ same-batch pairs; command-less again, DLSS-G's inputs are captured again. An FG 
 command list copies the frame first and keeps precedence (`tag_copied`); refused again, SR depth
 returns.
 It injects no captured pixels, readiness or GPU completion.
-To exercise an earlier 2.x export surface, build `reshade_legacy_v2_interposer` and pass
-`legacy_v2_interposer.dll` as the final argument in the same command, using a fresh output directory.
-That fixture reports version 2.6.10.0 and omits `slSetTagForFrame`; the test submits global tags
-through the production hooks and requires the same capture, hold, failure and recovery behavior.
-The existing `frame_generation_interposer.dll` retains its 2.7.30 frame-tag coverage. Both are
-synthetic metadata providers, not copies of a game SDK or proof of Hogwarts Legacy's live behavior.
+Each FG case is a frame script: a warm-up that presents until the case's starting state holds, the
+stimulus whose frames it judges, and a recovery to the fixture's control, with the per-frame SDK calls
+as fixture members. Every frame of a script begins before the script's own deadline, so a case that
+stops making progress fails by name, and a `MEASURE native-provider case=<name> elapsed_ms=` line
+reports each case's time.
+
+The interposer DLLs are one synthetic Streamline release each, built from one source by a CMake list
+(`sunshine_sl_fixture_interposers`): the release its version resource names, which production
+discovery reads, and whether it exports `slSetTagForFrame`. `frame_generation_interposer.dll` is
+2.7.30 with frame tags; `legacy_v2_interposer.dll` reports 2.6.10.0 and omits `slSetTagForFrame`, so
+the test submits global tags through the production hooks and requires the same capture, hold,
+failure and recovery behavior (pass it as the final argument in the same command, with a fresh output
+directory); `sl_v2_14_1_interposer.dll` is 2.14.1, the first of them whose header declares Dynamic
+mode. Each accepts the frame generation options its release's header declares (the `DLSSGMode`
+values, and `numFramesToGenerate` of 1, or up to 5 where the release documents multi frame
+generation, as the [survey tables](#api-contract-matrix) record), reads a newer options version by its
+known prefix, and refuses the rest. `SunshineFixtureSetResults(constants, tag, evaluate, options,
+feature)` sets the `sl::Result` each boundary returns for a call it accepts.
+`reshade_sl_fixture_interposers` (CTest, no device) checks every listed DLL's version resource,
+exports, accepted options and results. They are synthetic metadata providers, not copies of a game SDK
+or proof of Hogwarts Legacy's live behavior.
 With `frame_generation_interposer.dll`, set `SUNSHINE_GAME3D_UI_PUBLIC_TAG_TEST=1` to exercise
 automatic depth and HUD-less UI capture through the public hooks without SL evaluation or
 confirmed FG. The viewport-zero mixed depth/motion/HUD-less batch uses zero resource headers
@@ -956,6 +971,12 @@ snapshot and checks current, missing/last-valid and manual-override source repor
 flag an older control DLL lacking the getter can still run the GPU capture comparison.
 
 `reshade_ngx_depth_runtime_test` exercises named NGX entry points through the native lifecycle.
+Its game-side SDK is the NGX stand-in in [`test_ngx_stand_in.h`](test_ngx_stand_in.h), which the native
+provider fixture and the contract matrix's CPU layer also export: it creates any feature ID, returns a
+settable result from each entry point, and answers a parameter map only for the keys a case set, each
+through the getter of the type it was set with (`Depth` set as a void pointer is absent to
+`GetD3d12Resource`). Evaluation accepts any command list; the fixture's separate producer can use a
+COMPUTE queue (`producer_type`), which records only UAV depth and the evaluation.
 Like the native provider fixture, it loads the supplied shaders only to initialize the runtime and
 then removes every FX technique. Each present is observed through the test add-on's provider
 status and Automatic/scale queries. Current output is read from the production export ring.
@@ -1390,7 +1411,10 @@ Graphics Tools), though then only after every other check has run; `--gpu-valida
 validation and `--block <name>` runs one block. It holds ctest's `gpu` resource lock; outside
 ctest, run it as any other GPU fixture.
 
-The runtime layer reads refusal classes from the test add-on instead of waiting for rate-limited log
+The runtime layer drives the native provider and NGX fixtures through the synthetic SDKs their
+documentation above describes: an interposer DLL per Streamline release with settable results and the
+options its header declares, the NGX stand-in, and FG cases as frame scripts with their own deadlines.
+It reads refusal classes from the test add-on instead of waiting for rate-limited log
 lines. `SunshineDepthTestLastRefusal(runtime, out)` returns the newest depth refusal of the
 Streamline, NGX and DLSS-G adapters and the capture owner: the adapter, the gate that refused (the
 call's source, its depth input or the capture of its copy), the production reason, the capture

@@ -9,81 +9,9 @@
 #include <atomic>
 #include <d3d12sdklayers.h>
 
-namespace ngx_fixture {
-  constexpr std::uint32_t success=1, failure=0xbad00001u;
-  struct parameters {
-    ID3D12Resource *depth{};
-    unsigned width{},height{},left{},top{},active_width{},active_height{};
-    int flags=8,reset=0;
-    bool evaluation_success{},provide_depth=true,provide_extent=true;
-  };
-  std::array<unsigned,16> handle_storage{};
-  unsigned created{},evaluated{},released{},getters{},next_handle{};
-  const void *expected_handle{};
-}
-
-#if defined(_MSC_VER)
-#define NGX_FIXTURE_EXPORT extern "C" __declspec(dllexport) __declspec(noinline)
-#else
-#define NGX_FIXTURE_EXPORT extern "C" __declspec(dllexport) __attribute__((noinline,noipa))
-#endif
-
-// Export the real C names and signatures. Runtime module discovery and MinHook
-// must find these ordinary game-side SDK entry points without any test adapter.
-NGX_FIXTURE_EXPORT std::uint32_t __cdecl NVSDK_NGX_D3D12_CreateFeature(
-    void *commands,std::uint32_t feature,void *parameters,void **handle) {
-  if(!commands || feature!=1 || !parameters || !handle || ngx_fixture::next_handle>=ngx_fixture::handle_storage.size())
-    return ngx_fixture::failure;
-  *handle=&ngx_fixture::handle_storage[ngx_fixture::next_handle++];
-  ngx_fixture::expected_handle=*handle;
-  ++ngx_fixture::created;
-  return ngx_fixture::success;
-}
-NGX_FIXTURE_EXPORT std::uint32_t __cdecl NVSDK_NGX_D3D12_EvaluateFeature(
-    void *commands,const void *handle,const void *parameters,void (__cdecl *)(float,bool &)) {
-  ++ngx_fixture::evaluated;
-  if(!commands || handle!=ngx_fixture::expected_handle || !parameters) return ngx_fixture::failure;
-  return static_cast<const ngx_fixture::parameters *>(parameters)->evaluation_success ? ngx_fixture::success : ngx_fixture::failure;
-}
-NGX_FIXTURE_EXPORT std::uint32_t __cdecl NVSDK_NGX_D3D12_ReleaseFeature(void *handle) {
-  if(handle!=ngx_fixture::expected_handle) return ngx_fixture::failure;
-  ngx_fixture::expected_handle=nullptr;
-  ++ngx_fixture::released;
-  return ngx_fixture::success;
-}
-NGX_FIXTURE_EXPORT std::uint32_t __cdecl NVSDK_NGX_Parameter_GetI(
-    const void *parameters,const char *name,int *out) {
-  ++ngx_fixture::getters;
-  if(!parameters || !name || !out) return ngx_fixture::failure;
-  const auto &value=*static_cast<const ngx_fixture::parameters *>(parameters);
-  if(!std::strcmp(name,"DLSS.Feature.Create.Flags")) *out=value.flags;
-  else if(!std::strcmp(name,"Reset")) *out=value.reset;
-  else return ngx_fixture::failure;
-  return ngx_fixture::success;
-}
-NGX_FIXTURE_EXPORT std::uint32_t __cdecl NVSDK_NGX_Parameter_GetUI(
-    const void *parameters,const char *name,unsigned *out) {
-  ++ngx_fixture::getters;
-  if(!parameters || !name || !out) return ngx_fixture::failure;
-  const auto &value=*static_cast<const ngx_fixture::parameters *>(parameters);
-  if(!std::strcmp(name,"Width")) *out=value.width;
-  else if(!std::strcmp(name,"Height")) *out=value.height;
-  else if(!std::strcmp(name,"DLSS.Render.Subrect.Dimensions.Width") && value.provide_extent) *out=value.active_width;
-  else if(!std::strcmp(name,"DLSS.Render.Subrect.Dimensions.Height") && value.provide_extent) *out=value.active_height;
-  else if(!std::strcmp(name,"DLSS.Input.Depth.Subrect.Base.X")) *out=value.left;
-  else if(!std::strcmp(name,"DLSS.Input.Depth.Subrect.Base.Y")) *out=value.top;
-  else return ngx_fixture::failure;
-  return ngx_fixture::success;
-}
-NGX_FIXTURE_EXPORT std::uint32_t __cdecl NVSDK_NGX_Parameter_GetD3d12Resource(
-    const void *parameters,const char *name,ID3D12Resource **out) {
-  ++ngx_fixture::getters;
-  if(!parameters || !name || !out || std::strcmp(name,"Depth")) return ngx_fixture::failure;
-  const auto &value=*static_cast<const ngx_fixture::parameters *>(parameters);
-  if(!value.provide_depth) return ngx_fixture::failure;
-  *out=value.depth;
-  return ngx_fixture::success;
-}
+// The game's NGX SDK: the shared stand-in's exported entry points and
+// parameter getters (feature 1 here), hooked by production module discovery.
+#include "test_ngx_stand_in.h"
 
 namespace {
   // Runs inside the game's Present, after native Game 3D acquired this frame's
@@ -98,11 +26,17 @@ namespace {
     void *feature{};
     unsigned active_width{},active_height{},left{},top{};
     bool armed{},reversed=true,invalid_extent{},use_depth_stencil_crop{},auto_create=true,evaluate_without_source_state{};
+    // Whether each evaluation sets its Depth parameter.
+    bool provide_depth=true;
     std::unique_ptr<uav_target> depth_stencil_crop;
     std::vector<std::unique_ptr<uav_target>> pressure_resources;
     bool state_pressure{};
     unsigned pressure_recordings{};
     bool cross_queue{},complete_producer{},producer_gated{},retire_producer_recording=true;
+    // The separate producer's queue and list type. A COMPUTE producer records
+    // only the UAV depth, its transitions and the evaluation (NGX needs a
+    // non-copy queue); the decoy's draw stays on the presentation list.
+    D3D12_COMMAND_LIST_TYPE producer_type=D3D12_COMMAND_LIST_TYPE_DIRECT;
     com_ptr<ID3D12CommandQueue> producer_queue;
     com_ptr<ID3D12CommandAllocator> producer_allocator;
     com_ptr<ID3D12GraphicsCommandList> producer_commands;
@@ -150,7 +84,7 @@ namespace {
       producer_commands.reset();producer_allocator.reset();
       producer_completion.reset();producer_queue.reset();
       producer_fence_value=0;
-      D3D12_COMMAND_QUEUE_DESC desc{};desc.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;
+      D3D12_COMMAND_QUEUE_DESC desc{};desc.Type=producer_type;
       checked(game->CreateCommandQueue(&desc,IID_PPV_ARGS(producer_queue.put())),"Create distinct NGX producer queue");
       checked(game->CreateCommandAllocator(desc.Type,IID_PPV_ARGS(producer_allocator.put())),"Create NGX producer allocator");
       checked(game->CreateCommandList(0,desc.Type,producer_allocator.p,nullptr,IID_PPV_ARGS(producer_commands.put())),
@@ -174,13 +108,16 @@ namespace {
       // identity while the actual SDK runs on another real recording. Reuse the
       // depth producer without substituting its public metadata or capture path.
       const auto presentation_command=game_native_command;
+      const bool compute=producer_type==D3D12_COMMAND_LIST_TYPE_COMPUTE;
+      require(!compute || !use_depth_stencil_crop,"A COMPUTE NGX producer cannot write depth-stencil depth");
+      if(compute) draw(*decoy);
       checked(producer_allocator->Reset(),"Reset completed NGX producer allocator");
       checked(producer_commands->Reset(producer_allocator.p,nullptr),"Reset NGX producer command list");
       require(game_native_command && game_native_command!=presentation_command,
         "NGX producer reset did not expose a distinct native command list");
       std::swap(commands.p,producer_commands.p);
       try {
-        draw_ngx_frame();
+        draw_ngx_frame(!compute);
         checked(commands->Close(),"Close actual NGX producer recording");
         ID3D12CommandList *lists[]{commands.p};
         producer_queue->ExecuteCommandLists(1,lists);
@@ -253,9 +190,12 @@ RWTexture2D<float> depth : register(u0);
       pipeline.CS={shader->GetBufferPointer(),shader->GetBufferSize()};
       checked(game->CreateComputePipelineState(&pipeline,IID_PPV_ARGS(compute_pipeline.put())),"Create NGX native depth pipeline");
     }
+    // The creation keys the SR helpers set (nvsdk_ngx_helpers_d3d.h), with
+    // no DLSS.Use.HW.Depth: SR's documented input is device depth.
     void create_feature() {
-      parameters.width=active_width;parameters.height=active_height;
-      parameters.flags=reversed ? 8 : 0;
+      parameters.set_ui("Width",active_width);parameters.set_ui("Height",active_height);
+      parameters.set_i("DLSS.Feature.Create.Flags",reversed ? 8 : 0);
+      parameters.set_i("Reset",0);
       require(call_create(reinterpret_cast<void *>(game_native_command),1,&parameters,&feature)==ngx_fixture::success,
         "Synthetic game NGX feature creation failed");
     }
@@ -279,9 +219,9 @@ RWTexture2D<float> depth : register(u0);
       }
       ++pressure_recordings;
     }
-    void draw_ngx_frame() {
+    void draw_ngx_frame(bool with_decoy=true) {
       if(rotate) selected=(++rotation_index&1u) ? first.get() : second.get();
-      draw(*decoy);
+      if(with_decoy) draw(*decoy);
       record_state_pressure();
       if(selected->state!=D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
         transition(commands.p,selected->resource.p,selected->state,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -327,11 +267,14 @@ RWTexture2D<float> depth : register(u0);
       require(game_native_command,"NGX fixture lost the real native command-list identity");
       if(!feature && auto_create) create_feature();
       if(!feature || !emit) return;
-      parameters.depth=use_depth_stencil_crop ? depth_stencil_crop->resource.p : selected->resource.p;
-      parameters.left=left;parameters.top=top;
-      parameters.active_width=invalid_extent ? selected->width+1 : active_width;
-      parameters.active_height=active_height;
-      parameters.evaluation_success=valid_evaluation;
+      // The evaluation keys (nvsdk_ngx_helpers_d3d.h) and its result.
+      if(provide_depth)
+        parameters.set_resource("Depth",use_depth_stencil_crop ? depth_stencil_crop->resource.p : selected->resource.p);
+      else parameters.erase("Depth");
+      parameters.set_ui("DLSS.Input.Depth.Subrect.Base.X",left);parameters.set_ui("DLSS.Input.Depth.Subrect.Base.Y",top);
+      parameters.set_ui("DLSS.Render.Subrect.Dimensions.Width",invalid_extent ? selected->width+1 : active_width);
+      parameters.set_ui("DLSS.Render.Subrect.Dimensions.Height",active_height);
+      ngx_fixture::results.evaluate=valid_evaluation ? ngx_fixture::success : ngx_fixture::failure;
       ++sequence;
       const auto result=call_evaluate(reinterpret_cast<void *>(game_native_command),feature,&parameters,nullptr);
       require(result==(valid_evaluation ? ngx_fixture::success : ngx_fixture::failure),"NGX hook changed the original evaluation result");
@@ -837,9 +780,9 @@ RWTexture2D<float> depth : register(u0);
       valid_evaluation=false;
       hold_then_mono("failed-established-evaluation","Failed NGX frames replaced or outlived the retained depth");
       valid_evaluation=true;ngx_settle("failed-evaluation-recovery");
-      parameters.provide_depth=false;
+      provide_depth=false;
       hold_then_mono("missing-established-depth","NGX without depth fell back to an unrelated Generic scene or outlived the retained depth");
-      parameters.provide_depth=true;ngx_settle("missing-depth-recovery");
+      provide_depth=true;ngx_settle("missing-depth-recovery");
       emit=false;
       const auto silence_began=GetTickCount64();
       hold_then_mono("silent-established-provider","Silent NGX provider exposed stale depth or Generic fallback");

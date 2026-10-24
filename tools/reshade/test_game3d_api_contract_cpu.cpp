@@ -111,75 +111,9 @@ extern "C" __declspec(dllexport) bool ReShadeGetConfigValue(void *, reshade::api
   return true;
 }
 
-namespace ngx_stand_in {
-  // One NGX parameter map, answered through the named C getters an NGX SDK
-  // owner exports (ngx_depth_source.h resolve_parameter_api).
-  struct parameters {
-    struct number {
-      const char *key;
-      unsigned value;
-    };
-
-    int flags {};
-    const char *depth_key {"Depth"};  // DLSS-G's evaluation names DLSSG.Depth.
-    bool depth_resource {}, depth_pointer {};  // The getter that answers depth_key.
-    void *depth {};
-    number numbers[8] {};  // Keys set through SetUI, after Width and Height.
-    unsigned number_count {};
-
-    void set(const char *key, unsigned value) {
-      numbers[number_count++] = {key, value};
-    }
-  };
-
-  constexpr std::uint32_t success = 1, failure = 0xbad00005;
-  constexpr unsigned width = 1920, height = 1080;
-}  // namespace ngx_stand_in
-
-extern "C" __declspec(dllexport) FIXTURE_NOINLINE std::uint32_t __cdecl NVSDK_NGX_Parameter_GetI(void *opaque, const char *key, int *out) {
-  if (std::strcmp(key, "DLSS.Feature.Create.Flags") != 0) {
-    return ngx_stand_in::failure;
-  }
-  *out = static_cast<const ngx_stand_in::parameters *>(opaque)->flags;
-  return ngx_stand_in::success;
-}
-
-extern "C" __declspec(dllexport) FIXTURE_NOINLINE std::uint32_t __cdecl NVSDK_NGX_Parameter_GetUI(void *opaque, const char *key, unsigned *out) {
-  const auto &value = *static_cast<const ngx_stand_in::parameters *>(opaque);
-  if (std::strcmp(key, "Width") == 0 || std::strcmp(key, "Height") == 0) {
-    *out = key[0] == 'W' ? ngx_stand_in::width : ngx_stand_in::height;
-    return ngx_stand_in::success;
-  }
-  for (unsigned i = 0; i != value.number_count; ++i) {
-    if (std::strcmp(key, value.numbers[i].key) == 0) {
-      *out = value.numbers[i].value;
-      return ngx_stand_in::success;
-    }
-  }
-  return ngx_stand_in::failure;
-}
-
-extern "C" __declspec(dllexport) FIXTURE_NOINLINE std::uint32_t __cdecl NVSDK_NGX_Parameter_GetD3d12Resource(void *opaque, const char *key, void **out) {
-  const auto &value = *static_cast<const ngx_stand_in::parameters *>(opaque);
-  if (std::strcmp(key, value.depth_key) != 0 || !value.depth_resource) {
-    return ngx_stand_in::failure;
-  }
-  *out = value.depth;
-  return ngx_stand_in::success;
-}
-
-extern "C" __declspec(dllexport) FIXTURE_NOINLINE std::uint32_t __cdecl NVSDK_NGX_Parameter_GetVoidPointer(void *opaque, const char *key, void **out) {
-  const auto &value = *static_cast<const ngx_stand_in::parameters *>(opaque);
-  if (std::strcmp(key, value.depth_key) != 0 || !value.depth_pointer) {
-    return ngx_stand_in::failure;
-  }
-  *out = value.depth;
-  return ngx_stand_in::success;
-}
-
-extern "C" __declspec(dllexport) FIXTURE_NOINLINE std::uint32_t __cdecl NVSDK_NGX_Parameter_GetF(void *, const char *, float *) {
-  return ngx_stand_in::failure;
-}
+// One NGX parameter map per case, answered through the named C getters an
+// NGX SDK owner exports (ngx_depth_source.h resolve_parameter_api).
+#include "test_ngx_stand_in.h"
 
 namespace {
   namespace buffers = sunshine_streamline::buffers;
@@ -859,10 +793,11 @@ namespace {
     return actual.deferred == expected.deferred && (!expected.exact_basis || matrix::same_basis(expected.basis, actual.basis));
   }
 
-  // The Streamline fixture SDK: noinline entry points the probe hooks. The
-  // entry points, GUIDs, volatile dispatch and ReShade stubs repeat
-  // test_streamline_camera_probe.cpp's; the matrix's interposer-fixture phase
-  // (contract matrix design, P5) moves both into one test-only header.
+  // The Streamline fixture SDK: noinline entry points the probe hooks, with
+  // the volatile dispatch and ReShade stubs test_streamline_camera_probe.cpp
+  // also defines. Its entry points only return each boundary's set result;
+  // the probe tests' also record every call's arguments and can block or
+  // lose observation inside the call, so each executable keeps its own.
   namespace sl_fixture {
     using namespace sunshine_streamline;
     constexpr DWORD outgoing_error = 0xabcdef01;
@@ -1752,42 +1687,46 @@ namespace {
     // The parameter map as the SDK helpers fill it: SR's keys
     // (nvsdk_ngx_helpers_d3d.h), or DLSS-G's (nvsdk_ngx_helpers_dlssg_d3d.h)
     // for feature 11. A subrect with one side leaves its height unset.
-    ngx_stand_in::parameters parameters_of(const matrix::ngx_case &value, void *depth) {
-      ngx_stand_in::parameters out;
+    ngx_fixture::parameters parameters_of(const matrix::ngx_case &value, void *depth) {
+      ngx_fixture::parameters out;
       const bool frame_generation = value.feature == matrix::ngx_feature::frame_generation;
-      out.flags = value.depth_inverted ? 8 : 0;  // NVSDK_NGX_DLSS_Feature_Flags_DepthInverted.
-      out.depth_key = frame_generation ? "DLSSG.Depth" : "Depth";
-      out.depth_resource = value.depth_set == matrix::ngx_depth_set::d3d12_resource || value.depth_set == matrix::ngx_depth_set::null;
-      out.depth_pointer = value.depth_set == matrix::ngx_depth_set::void_pointer;
-      out.depth = value.depth_set == matrix::ngx_depth_set::null ? nullptr : depth;
+      out.set_i("DLSS.Feature.Create.Flags", value.depth_inverted ? 8 : 0);  // NVSDK_NGX_DLSS_Feature_Flags_DepthInverted.
+      out.set_ui("Width", 1920);
+      out.set_ui("Height", 1080);
+      const char *depth_key = frame_generation ? "DLSSG.Depth" : "Depth";
+      if (value.depth_set == matrix::ngx_depth_set::void_pointer) {
+        out.set_pointer(depth_key, depth);
+      } else if (value.depth_set == matrix::ngx_depth_set::d3d12_resource || value.depth_set == matrix::ngx_depth_set::null) {
+        out.set_resource(depth_key, value.depth_set == matrix::ngx_depth_set::null ? nullptr : depth);
+      }
       const bool zero = value.subrect == matrix::ngx_subrect::zero, inside = value.subrect == matrix::ngx_subrect::inside;
       const unsigned width = zero ? 0 : 1280, height = zero ? 0 : 720;
       if (frame_generation) {
-        out.set("DLSSG.DepthInverted", value.depth_inverted);
+        out.set_ui("DLSSG.DepthInverted", value.depth_inverted);
         if (value.subrect != matrix::ngx_subrect::missing) {
-          out.set("DLSSG.DepthSubrectBaseX", zero ? 0 : 3);
-          out.set("DLSSG.DepthSubrectBaseY", zero ? 0 : 2);
-          out.set("DLSSG.DepthSubrectWidth", width);
+          out.set_ui("DLSSG.DepthSubrectBaseX", zero ? 0 : 3);
+          out.set_ui("DLSSG.DepthSubrectBaseY", zero ? 0 : 2);
+          out.set_ui("DLSSG.DepthSubrectWidth", width);
           if (zero || inside) {
-            out.set("DLSSG.DepthSubrectHeight", height);
+            out.set_ui("DLSSG.DepthSubrectHeight", height);
           }
         }
         return out;
       }
       if (value.hw_depth != matrix::ngx_hw_depth::absent) {
         const bool device = value.hw_depth == matrix::ngx_hw_depth::device;
-        out.set("DLSS.Use.HW.Depth", value.hw_depth == matrix::ngx_hw_depth::other ? 2 : device ? 1 :
-                                                                                                  0);
+        out.set_ui("DLSS.Use.HW.Depth", value.hw_depth == matrix::ngx_hw_depth::other ? 2 : device ? 1 :
+                                                                                                     0);
       }
       if (value.subrect != matrix::ngx_subrect::missing) {
-        out.set("DLSS.Render.Subrect.Dimensions.Width", width);
+        out.set_ui("DLSS.Render.Subrect.Dimensions.Width", width);
         if (zero || inside) {
-          out.set("DLSS.Render.Subrect.Dimensions.Height", height);
+          out.set_ui("DLSS.Render.Subrect.Dimensions.Height", height);
         }
       }
       if (inside) {
-        out.set("DLSS.Input.Depth.Subrect.Base.X", 3);
-        out.set("DLSS.Input.Depth.Subrect.Base.Y", 2);
+        out.set_ui("DLSS.Input.Depth.Subrect.Base.X", 3);
+        out.set_ui("DLSS.Input.Depth.Subrect.Base.Y", 2);
       }
       return out;
     }

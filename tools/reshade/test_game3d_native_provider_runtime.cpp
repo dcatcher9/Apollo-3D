@@ -44,66 +44,10 @@ namespace {
   }
 }
 
-// DLSS-G's NGX entry points (feature 11 only), exported by this game process
-// as a game-side SDK snippet exports them, so production module discovery
-// hooks them. They report the named DLSSG.* inputs only; no capture, state,
-// readiness or pixels are injected.
-namespace dlssg_fixture {
-  constexpr std::uint32_t success = 1, failure = 0xbad00001u;
-  struct parameters {
-    ID3D12Resource *depth{}, *hudless{}, *backbuffer{};
-    sunshine_streamline::extent depth_area;
-    unsigned inverted{1};
-  };
-  std::array<unsigned, 4> handles{};
-  unsigned created{}, evaluated{}, released{};
-}
-#if defined(_MSC_VER)
-#define DLSSG_FIXTURE_EXPORT extern "C" __declspec(dllexport) __declspec(noinline)
-#else
-#define DLSSG_FIXTURE_EXPORT extern "C" __declspec(dllexport) __attribute__((noinline,noipa))
-#endif
-DLSSG_FIXTURE_EXPORT std::uint32_t __cdecl NVSDK_NGX_D3D12_CreateFeature(
-    void *commands, std::uint32_t feature, void *parameters, void **handle) {
-  if (!commands || feature != 11 || !parameters || !handle || dlssg_fixture::created >= dlssg_fixture::handles.size())
-    return dlssg_fixture::failure;
-  *handle = &dlssg_fixture::handles[dlssg_fixture::created++];
-  return dlssg_fixture::success;
-}
-DLSSG_FIXTURE_EXPORT std::uint32_t __cdecl NVSDK_NGX_D3D12_EvaluateFeature(
-    void *commands, const void *handle, const void *parameters, void (__cdecl *)(float, bool &)) {
-  ++dlssg_fixture::evaluated;
-  return commands && handle && parameters ? dlssg_fixture::success : dlssg_fixture::failure;
-}
-DLSSG_FIXTURE_EXPORT std::uint32_t __cdecl NVSDK_NGX_D3D12_ReleaseFeature(void *handle) {
-  ++dlssg_fixture::released;
-  return handle ? dlssg_fixture::success : dlssg_fixture::failure;
-}
-DLSSG_FIXTURE_EXPORT std::uint32_t __cdecl NVSDK_NGX_Parameter_GetI(const void *, const char *, int *) {
-  return dlssg_fixture::failure;
-}
-DLSSG_FIXTURE_EXPORT std::uint32_t __cdecl NVSDK_NGX_Parameter_GetUI(const void *parameters, const char *name, unsigned *out) {
-  if (!parameters || !name || !out) return dlssg_fixture::failure;
-  const auto &value = *static_cast<const dlssg_fixture::parameters *>(parameters);
-  if (!std::strcmp(name, "DLSSG.DepthInverted")) *out = value.inverted;
-  else if (!std::strcmp(name, "DLSSG.MultiFrameIndex") || !std::strcmp(name, "DLSSG.MultiFrameCount")) *out = 1;
-  else if (!std::strcmp(name, "DLSSG.DepthSubrectBaseX")) *out = value.depth_area.left;
-  else if (!std::strcmp(name, "DLSSG.DepthSubrectBaseY")) *out = value.depth_area.top;
-  else if (!std::strcmp(name, "DLSSG.DepthSubrectWidth")) *out = value.depth_area.width;
-  else if (!std::strcmp(name, "DLSSG.DepthSubrectHeight")) *out = value.depth_area.height;
-  else return dlssg_fixture::failure;
-  return dlssg_fixture::success;
-}
-DLSSG_FIXTURE_EXPORT std::uint32_t __cdecl NVSDK_NGX_Parameter_GetD3d12Resource(
-    const void *parameters, const char *name, ID3D12Resource **out) {
-  if (!parameters || !name || !out) return dlssg_fixture::failure;
-  const auto &value = *static_cast<const dlssg_fixture::parameters *>(parameters);
-  if (!std::strcmp(name, "DLSSG.Depth")) *out = value.depth;
-  else if (!std::strcmp(name, "DLSSG.HUDLess")) *out = value.hudless;
-  else if (!std::strcmp(name, "DLSSG.Backbuffer")) *out = value.backbuffer;
-  else return dlssg_fixture::failure;
-  return dlssg_fixture::success;
-}
+// The game's NGX SDK: the shared stand-in's exported entry points and
+// parameter getters, hooked by production module discovery. The DLSS-G case
+// creates feature 11 and sets only its named DLSSG.* inputs.
+#include "test_ngx_stand_in.h"
 
 namespace {
   struct native_provider_fixture : direct_fixture {
@@ -162,7 +106,7 @@ namespace {
       unsigned consecutive{};
       status s;
       do {
-        step(); no_effects(); s = inspect();
+        present_frame(); s = inspect();
         consecutive = active(s) && !s.source.reused_depth ? consecutive + 1 : 0;
         if (consecutive >= 12) { log_status(label, s); return s; }
       } while (GetTickCount64() < until);
@@ -180,7 +124,7 @@ namespace {
         for (std::string line; std::getline(file, line);)
           if (std::all_of(parts.begin(), parts.end(), [&](const char *part) { return line.find(part) != std::string::npos; }))
             return true;
-        step(); no_effects();
+        present_frame();
       } while (GetTickCount64() < until);
       return false;
     }
@@ -229,7 +173,7 @@ namespace {
           if (at != std::string::npos && std::strtoull(line.c_str() + at + std::strlen(field), nullptr, 10) > minimum)
             return true;
         }
-        step(); no_effects();
+        present_frame();
       } while (GetTickCount64() < until);
       return false;
     }
@@ -245,13 +189,46 @@ namespace {
       const auto until = GetTickCount64() + wait_ms;
       auto value = last_refusal();
       while (value.serial <= serial && GetTickCount64() < until) {
-        step(); no_effects();
+        present_frame();
         value = last_refusal();
       }
       return value;
     }
     static bool same_scale(float a, float b) {
       return std::isfinite(a) && std::isfinite(b) && std::abs(a-b) <= std::max(1.f,std::abs(b))*1e-5f;
+    }
+
+    // One case as a frame script (README, native provider fixture): warm_up
+    // presents until the case's starting state holds, stimulus presents the
+    // frames under test and judges them, and recovery restores the fixture's
+    // control. Every frame of a script begins before its deadline, the sum of
+    // the bounds its own waits allow, so a case that stops making progress
+    // fails by name; MEASURE reports each case's time.
+    struct frame_script {
+      const char *name;
+      std::uint64_t deadline_ms;
+      std::function<void()> warm_up, stimulus, recovery;
+    };
+    const char *script_name{};
+    std::uint64_t script_deadline{};
+    // One game frame and its Present, observed without FX.
+    void present_frame() {
+      if (script_deadline && GetTickCount64() >= script_deadline)
+        throw std::runtime_error(std::string("Native provider case ") + script_name + " passed its frame deadline");
+      step(); no_effects();
+    }
+    void run_script(const frame_script &script) {
+      const auto started = GetTickCount64();
+      script_name = script.name; script_deadline = started + script.deadline_ms;
+      struct end_script {
+        native_provider_fixture &fixture;
+        ~end_script() { fixture.script_name = nullptr; fixture.script_deadline = 0; }
+      } scope{*this};
+      if (script.warm_up) script.warm_up();
+      script.stimulus();
+      if (script.recovery) script.recovery();
+      std::printf("MEASURE native-provider case=%s elapsed_ms=%llu deadline_ms=%llu\n", script.name,
+        static_cast<unsigned long long>(GetTickCount64() - started), static_cast<unsigned long long>(script.deadline_ms));
     }
 
     void load_native(const fs::path &directory) {
@@ -306,7 +283,7 @@ namespace {
       observed.runtime->reload_effect_next_frame(nullptr);
       const auto reload_until = GetTickCount64() + 15000;
       do {
-        step(); no_effects(); const auto s = inspect();
+        present_frame(); const auto s = inspect();
         require(active(s) && same_scale(s.scale, first_ready.scale), "FX reload reset native provider capture or scale");
       } while (observed.reloads == before_reload && GetTickCount64() < reload_until);
       require(observed.reloads > before_reload, "Native provider empty-FX reload did not complete");
@@ -326,7 +303,7 @@ namespace {
         // The hold is decided after this tick, within the capture's age,
         // and the capture is older than fresh_tick.
         const auto presented = GetTickCount64();
-        step(); no_effects(); const auto s = inspect();
+        present_frame(); const auto s = inspect();
         require(s.source.selected && same_scale(s.scale, first_ready.scale),
           "Failed provider evaluation fell back to Generic or discarded native scale");
         if (s.source.ready) {
@@ -358,14 +335,11 @@ namespace {
       std::puts("PASS native SL provider: real lower-resolution UAV/copy/fences/sampling over full-resolution Generic decoy, matrix scale, FX reload, failed evaluation and recovery; no FX");
     }
 
-    void run_ui_hook(const std::function<void()> &real_frame,
-        sunshine_streamline::abi_v2::frame_token *&token,
-        const sunshine_streamline::abi_v2::viewport &viewport,
-        sunshine_streamline::abi_v2::set_tag_for_frame frame_tag,
-        sunshine_streamline::abi_v2::set_tag global_tag,
-        std::uint32_t resource_type,
-        const std::function<void(bool)> &configure_fg) {
+    // The public tag 23 UI hook with one Resource type, then the offscreen UI
+    // layer, over the FG cases' real frames.
+    void run_ui_hook(std::uint32_t resource_type) {
       using namespace sunshine_streamline;
+      const auto real_frame = [this] { real_fg_frame(); };
       namespace dump = ::game3d_debug;
       const auto hook_directory = runtime_directory / ("ui-hook-type-" + std::to_string(resource_type));
       std::filesystem::create_directories(hook_directory);
@@ -479,15 +453,16 @@ namespace {
         resource.width = width; resource.height = height; resource.native_format = DXGI_FORMAT_B8G8R8A8_TYPELESS;
         resource.mip_levels = resource.array_layers = 1;
         const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 23, 0, {0, 0, width, height}};
-        require(token && (frame_tag ? frame_tag(*token, viewport, &tag, 1, list) : global_tag(viewport, &tag, 1, list)) == 0,
+        require(last_token && (sl.frame_tag ? sl.frame_tag(*last_token, fg_viewport, &tag, 1, list) :
+            sl.global_tag(fg_viewport, &tag, 1, list)) == 0,
           "Public UI tag changed the synthetic SDK result");
         copy(list, after_upload.p, after_footprint);
       };
-      for (unsigned i = 0; i < 8; ++i) { step(); no_effects(); }
+      for (unsigned i = 0; i < 8; ++i) { present_frame(); }
       // The tag is a declared source: its first valid selective sample accepts
       // it (A1), from the render after that sample is read. A few sample
       // intervals pass before the dump.
-      for (const auto until = GetTickCount64() + 500; GetTickCount64() < until;) { step(); no_effects(); }
+      for (const auto until = GetTickCount64() + 500; GetTickCount64() < until;) { present_frame(); }
 
       struct mailbox {
         HANDLE handle{};
@@ -516,7 +491,7 @@ namespace {
       InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->request_id), box.request);
       const auto until = GetTickCount64() + 10000;
       while (std::uint64_t(InterlockedCompareExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->response_id), 0, 0)) != box.request && GetTickCount64() < until) {
-        step(); no_effects();
+        present_frame();
       }
       require(box.state->response_id == box.request && box.state->response.result == dump::status::complete &&
           box.state->response.json_bytes <= dump::max_json_bytes && box.state->response.texture_count <= dump::max_textures,
@@ -642,7 +617,7 @@ namespace {
       require(consumed && tagged && read(mask.p) == overwritten,
         "Hook regression lacks both snapshots or the game allocation was not overwritten after the tag");
       InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->released_id), box.request);
-      step(); no_effects();
+      present_frame();
       for (unsigned i = 0; i != retained_count; ++i)
         require(read(retained[i].p, D3D12_RESOURCE_STATE_COMMON) == retained_bytes[i],
           "Host acknowledgement or later game write changed UI snapshot");
@@ -650,12 +625,12 @@ namespace {
       // Draws for a while (a second by default), then dumps; the caller
       // releases the dump.
       const auto dump_after_layer_frames = [&](std::uint64_t draw_ms = 1000) {
-        for (const auto until = GetTickCount64() + draw_ms; GetTickCount64() < until;) { step(); no_effects(); }
+        for (const auto until = GetTickCount64() + draw_ms; GetTickCount64() < until;) { present_frame(); }
         box.request = box.state->request_id + 1;
         InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->request_id), box.request);
         for (const auto until = GetTickCount64() + 10000;
              std::uint64_t(InterlockedCompareExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->response_id), 0, 0)) != box.request &&
-             GetTickCount64() < until;) { step(); no_effects(); }
+             GetTickCount64() < until;) { present_frame(); }
         require(box.state->response_id == box.request && box.state->response.result == dump::status::complete &&
             box.state->response.json_bytes <= dump::max_json_bytes && box.state->response.texture_count <= dump::max_textures,
           "Production Dump3D did not complete the offscreen UI layer capture");
@@ -670,7 +645,7 @@ namespace {
         for (size_t offset = 3; offset < expected.size(); offset += 4) opaque += expected[offset] == 255;
         const auto tagged_metadata = dump_after_layer_frames();
         InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->released_id), box.request);
-        step(); no_effects();
+        present_frame();
         const auto &automatic = tagged_metadata.at("replay").at("source_alpha_auto");
         const auto &sampled = automatic.at("sampled_evidence");
         const auto &scene = sampled.at("scene");
@@ -741,7 +716,7 @@ namespace {
           }
         }
         InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->released_id), box.request);
-        step(); no_effects();
+        present_frame();
         // An accepted layer (earned by its selective frames, here or in an
         // earlier pass of this hook) is the S1 winner, flat at any coverage
         // (source 10), which H1 relabels 8 under a held hidden verdict
@@ -835,7 +810,7 @@ namespace {
       evidence << "late-layer-raw-alpha masked=" << masked << " layer_texels=" << rectangle << " ui_off_plane=" << off_plane <<
         " scene_adjacent=" << scene_adjacent << '\n';
       InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->released_id), box.request);
-      step(); no_effects();
+      present_frame();
 
       // A layer with straight alpha is still offered but V1-invalid: it
       // neither decides nor blocks.
@@ -843,7 +818,7 @@ namespace {
       const auto straight_metadata = dump_after_layer_frames();
       InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->released_id), box.request);
       straight_layer = false;
-      step(); no_effects();
+      present_frame();
       const auto &sampled = straight_metadata.at("replay").at("source_alpha_auto").at("sampled_evidence");
       if (!(sampled.at("candidates").get<unsigned>() & candidate::layer) || !sampled.at("layer").at("invalid").get<unsigned>() ||
           (sampled.at("valid_bits").get<unsigned>() & candidate::layer) ||
@@ -884,7 +859,7 @@ namespace {
           real_frame();
           if (!skip_layer) draw_layer();
         };
-        for (unsigned i = 0; i != 4; ++i) { step(); no_effects(); }
+        for (unsigned i = 0; i != 4; ++i) { present_frame(); }
         // The copy ran in the frame's own list on the presenting queue before
         // its Present: same queue, and the count names the Present before it.
         auto live = query();
@@ -913,7 +888,7 @@ namespace {
               }
             } scope;
             execute_probe.armed = true;
-            step(); no_effects();
+            present_frame();
           }
           const auto &window = execute_probe.seen;
           require(execute_probe.probed && window.capture_id == before_same.capture_id + 1 && window.owing == 1 &&
@@ -979,12 +954,12 @@ namespace {
         // layer again after a long Present; the next frame skips its own clear.
         const auto confirm = [&] {
           skip_layer = false;
-          for (unsigned i = 0; i != 4; ++i) { step(); no_effects(); }
+          for (unsigned i = 0; i != 4; ++i) { present_frame(); }
           skip_layer = true;
         };
         const auto timed_step = [&] {
           const auto start = GetTickCount64();
-          step(); no_effects();
+          present_frame();
           return GetTickCount64() - start;
         };
         // A fence the test signals from the CPU at open(), or after the limit
@@ -1080,7 +1055,7 @@ namespace {
           gate.open();
         }
         wait(second.p);
-        step(); no_effects();
+        present_frame();
         live = query();
         held_fence_value = live.fence_value;
         require(!live.awaiting && live.offered_id == before_held.capture_id + 1 && live.in_order &&
@@ -1121,7 +1096,7 @@ namespace {
           };
           const auto start = GetTickCount64();
           defer_completion = true;
-          step(); no_effects();
+          present_frame();
           defer_completion = false;
           // Present N ran latest() before its own GPU work, so frame N's copy,
           // gated behind it, was held and the copy before it was offered.
@@ -1137,7 +1112,7 @@ namespace {
           after_present = [&, gate = presented.fence.p] {
             checked(queue->Signal(gate, 2), "Open the second queue's gate after Present N+1");
           };
-          step(); no_effects();
+          present_frame();
           cycle_elapsed = GetTickCount64() - start;
           before_frame = {};
           after_present = {};
@@ -1154,7 +1129,7 @@ namespace {
         }
         // Both fences reached: the next Present offers frame N+1's copy, in
         // fence order (no queue is ever revoked).
-        step(); no_effects();
+        present_frame();
         live = query();
         require(!live.awaiting && live.offered_id == live.capture_id && live.in_order &&
             live.order == unsigned(order::fence_passed) && live.fence_value > held_fence_value &&
@@ -1162,7 +1137,7 @@ namespace {
           "Once their fences reached them, the schedule's second-queue layer copies were not offered in fence order");
         skip_layer = false;
         render_tracked_depth = [&] { real_frame(); draw_layer(); };
-        step(); no_effects();
+        present_frame();
         live = query();
         require(live.in_order && live.order == unsigned(order::queue) && live.executed_queue == live.presenting_queue,
           "The next layer copy run on the presenting queue was not in queue order again");
@@ -1210,17 +1185,17 @@ namespace {
           };
           // Expire the layer: no clear for longer than max_clear_gap_ms.
           render_tracked_depth = [&] { real_frame(); };
-          step(); no_effects();
+          present_frame();
           Sleep(DWORD(sunshine_game3d::ui_layer::max_clear_gap_ms + 50));
-          step(); no_effects();
+          present_frame();
           const auto expired = query().capture_id;
           render_tracked_depth = [&] { real_frame(); pass_layer(); };
           for (unsigned i = 0; i != sunshine_game3d::ui_layer::confirm_clears; ++i) {
-            step(); no_effects();
+            present_frame();
             require(query().capture_id == expired, "A render-pass clear copied the layer before it was confirmed again");
           }
-          step(); no_effects();
-          step(); no_effects();
+          present_frame();
+          present_frame();
           live = query();
           require(live.capture_id > expired && live.offered_id == live.capture_id && live.offered_copy && live.in_order &&
               live.order == unsigned(order::queue) && live.format == unsigned(DXGI_FORMAT_R8G8B8A8_UNORM),
@@ -1259,10 +1234,10 @@ namespace {
           // A CLEAR to alpha 1 is no layer clear: no copy.
           const auto before_opaque = query().capture_id;
           pass_clear[3] = 1.f;
-          for (unsigned i = 0; i != 3; ++i) { step(); no_effects(); }
+          for (unsigned i = 0; i != 3; ++i) { present_frame(); }
           require(query().capture_id == before_opaque, "A render-pass CLEAR to alpha 1 copied the layer");
           render_tracked_depth = [&] { real_frame(); draw_layer(); };
-          for (unsigned i = 0; i != 2; ++i) { step(); no_effects(); }
+          for (unsigned i = 0; i != 2; ++i) { present_frame(); }
           evidence << "layer-render-pass confirmed_by_pass_clears=1 copy_before_native_pass=1 opaque_clear_ignored=1\n";
           std::puts("PASS D3D12 layer render-pass clear: a pass beginning with a CLEAR to (0, 0, 0, 0) confirms the layer "
             "on its own and its copy, recorded before the native BeginRenderPass, holds the previous frame's layer alpha "
@@ -1292,11 +1267,11 @@ namespace {
           const auto request_census = [&] {
             box.request = box.state->request_id + 1;
             InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->request_id), box.request);
-            step(); no_effects();
+            present_frame();
             require(!responded(), "A census dump completed at the Present that armed it");
           };
           const auto await_census = [&](std::uint64_t limit_ms) {
-            for (const auto until = GetTickCount64() + limit_ms; !responded() && GetTickCount64() < until;) { step(); no_effects(); }
+            for (const auto until = GetTickCount64() + limit_ms; !responded() && GetTickCount64() < until;) { present_frame(); }
             require(responded() && box.state->response.result == dump::status::complete &&
                 box.state->response.json_bytes <= dump::max_json_bytes && box.state->response.texture_count <= dump::max_textures,
               "Production Dump3D did not complete a census capture");
@@ -1304,7 +1279,7 @@ namespace {
           };
           const auto release_census = [&] {
             InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->released_id), box.request);
-            step(); no_effects();
+            present_frame();
           };
           const auto layer_row = [&](const nlohmann::json &metadata) {
             for (const auto &entry : metadata.at("ui_layer_census").at("candidates"))
@@ -1437,7 +1412,7 @@ namespace {
         }
       }
       evidence << "public-ui-hook descriptor_type=" << resource_type << " source_format=90 captured_format=87 tag=23 covered=" << covered <<
-        " exact_consumed_and_optional=1 post_tag_opaque_overwrite=1 host_ack_immutable=1 offscreen_ui_layer=1 live_ui_layer_mask=1 frame_tags=" << bool(frame_tag) << '\n';
+        " exact_consumed_and_optional=1 post_tag_opaque_overwrite=1 host_ack_immutable=1 offscreen_ui_layer=1 live_ui_layer_mask=1 frame_tags=" << bool(sl.frame_tag) << '\n';
       std::puts("PASS actual public SL tag23 hook: typeless90 to typed87, automatic GPU mask equals pre-overwrite alpha and optional dump exact before opaque overwrite; host lease immutable");
       std::puts("PASS live offscreen UI layer: offered in its own slot beside tag 23 from the first frame; without tag 23 and once accepted, the layer copied before its clear is the automatic UI mask exactly as its raw alpha, tint within twice its alpha included, the UI on the plane and the scene rows beside it off it; straight alpha is V1-invalid; opaque everywhere over a flat presented frame it is full-frame UI (by the layer route 8 before acceptance, by itself after)");
     }
@@ -1449,16 +1424,14 @@ namespace {
       const auto new_token = reinterpret_cast<abi_v2::get_new_frame_token>(GetProcAddress(sdk, "slGetNewFrameToken"));
       const auto constants_call = reinterpret_cast<abi_v2::set_constants>(GetProcAddress(sdk, "slSetConstants"));
       const bool failed_off = sunshine_camera_fixture::flag("SUNSHINE_GAME3D_UI_FAILED_OFF_TEST");
-      struct options { base_structure base; std::uint32_t mode{}, generated_frames{}; };
-      using options_t = std::int32_t (*)(const abi_v2::viewport &, const options &);
-      options_t options_call{};
+      set_options_t options_call{};
       if (failed_off) {
         const auto getter = reinterpret_cast<abi_v2::get_feature_function>(GetProcAddress(sdk, "slGetFeatureFunction"));
         const auto set_result = reinterpret_cast<void (*)(std::int32_t)>(GetProcAddress(sdk, "SunshineFixtureSetOptionsResult"));
         void *function{};
         require(getter && set_result && getter(1000, "slDLSSGSetOptions", function) == 0 && function,
           "Failed-Off regression requires the controllable public SDK options result");
-        set_result(1); options_call = reinterpret_cast<options_t>(function);
+        set_result(1); options_call = reinterpret_cast<set_options_t>(function);
       }
       const auto set_foreground = reinterpret_cast<void (*)(HWND)>(GetProcAddress(
         GetModuleHandleW(L"SunshineSBSTest.addon64"), "SunshineSbsTestSetForeground"));
@@ -1522,7 +1495,7 @@ namespace {
           {{nullptr, tag_guid, 1}, &resources[2], 2, 0, {0, 0, width, height}}};
         require(tag_call(viewport, tags, 3, list) == 0, "Public mixed UI tags changed the SDK result");
         if (options_call) {
-          const options off{{nullptr, {0xfac5f1cb,0x2dfd,0x4f36,{0xa1,0xe6,0x3a,0x9e,0x86,0x52,0x56,0xc5}}, 3}, 0, 0};
+          const fg_options off{{nullptr, fg_options_type, 3}, 0, 0};
           require(options_call(viewport, off) == 1, "Repeated failed Off call changed the SDK result");
         }
       };
@@ -1530,7 +1503,7 @@ namespace {
       // unsupported FG Off immediately after each tag, matching the live game.
       // No evaluation or private capture export is used.
       const auto warm_until = GetTickCount64() + 750;
-      do { step(); no_effects(); } while (GetTickCount64() < warm_until);
+      do { present_frame(); } while (GetTickCount64() < warm_until);
       settle("public-SL-global-tags-no-FG-no-evaluate");
       struct mailbox {
         HANDLE handle{}; dump::shared_state_t *state{}; std::uint64_t request{};
@@ -1555,12 +1528,12 @@ namespace {
       box.state->consumer_nonce = 0x55494155544fULL;
       std::uint64_t request_generation{};
       for (unsigned round = 0; round != 2; ++round) {
-        for (unsigned i = 0; i != 20; ++i) { step(); no_effects(); }
+        for (unsigned i = 0; i != 20; ++i) { present_frame(); }
         box.request = box.state->request_id + 1;
         InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->request_id), box.request);
         const auto until = GetTickCount64() + 10000;
         while (std::uint64_t(InterlockedCompareExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->response_id), 0, 0)) != box.request && GetTickCount64() < until) {
-          step(); no_effects();
+          present_frame();
         }
         require(box.state->response_id == box.request && box.state->response.result == dump::status::complete &&
             box.state->response.json_bytes <= dump::max_json_bytes && box.state->response.texture_count <= dump::max_textures,
@@ -1626,9 +1599,187 @@ namespace {
       std::puts("PASS actual public mixed SL tags -> persistent UI request -> same-present HUDless comparison -> exact automatic mask, FG unknown and no SL evaluation");
     }
 
+    // The FG cases (run_fg) on the synthetic Streamline SDK's public entry
+    // points, which the production hooks observe: one frame script each.
+    static constexpr sunshine_streamline::guid fg_options_type{0xfac5f1cb,0x2dfd,0x4f36,{0xa1,0xe6,0x3a,0x9e,0x86,0x52,0x56,0xc5}};
+    using fg_options = sunshine_streamline::abi_v2::fg_options_prefix;
+    static_assert(sizeof(fg_options) == 40);
+    using set_options_t = std::int32_t (*)(const sunshine_streamline::abi_v2::viewport &, const fg_options &);
+    struct sl_entry_points {
+      sunshine_streamline::abi_v2::get_new_frame_token new_token{};
+      sunshine_streamline::abi_v2::set_constants constants{};
+      sunshine_streamline::abi_v2::set_tag_for_frame frame_tag{}; // Absent before 2.7: global tags only.
+      sunshine_streamline::abi_v2::set_tag global_tag{};
+      sunshine_streamline::abi_v2::evaluate_feature evaluate{};
+      set_options_t volatile set_options{};
+    } sl;
+    void (*set_foreground)(HWND){};
+    const sunshine_streamline::abi_v2::viewport fg_viewport{{nullptr, sunshine_streamline::viewport_guid, 1}, 0};
+    // The newest FG frame's explicit index and token, and when its depth tag
+    // call began and returned.
+    unsigned fg_frame{};
+    sunshine_streamline::abi_v2::frame_token *last_token{};
+    std::uint64_t tag_started{}, tag_returned{};
+
+    void configure_fg(bool enabled) {
+      const fg_options value{{nullptr, fg_options_type, 3}, enabled ? 1u : 0u, enabled ? 1u : 0u};
+      require(sl.set_options(fg_viewport, value) == 0, "Observed FG options changed the public SDK return value");
+    }
+    sunshine_streamline::abi_v2::constants camera_constants(bool reset) const {
+      sunshine_streamline::abi_v2::constants constants{}; constants.base = {nullptr, sunshine_streamline::constants_guid, 1};
+      constants.common.camera_view_to_clip = camera.projection;
+      constants.common.clip_to_camera_view = camera.inverse_projection;
+      constants.common.camera_near = camera.near_plane; constants.common.camera_far = camera.far_plane;
+      constants.common.camera_fov = camera.fov; constants.common.camera_aspect = camera.aspect;
+      constants.common.camera_right[0] = constants.common.camera_up[1] = constants.common.camera_forward[2] = 1;
+      constants.depth_inverted = 1;
+      constants.reset = reset ? 1u : 0u;
+      return constants;
+    }
+    // The tagged depth as every FG frame describes it: the selected R32 UAV.
+    sunshine_streamline::abi_v2::resource depth_resource() const {
+      sunshine_streamline::abi_v2::resource resource{}; resource.base = {nullptr, sunshine_streamline::resource_guid, 1};
+      resource.type = 8; resource.native = selected->resource.p; resource.state = unsigned(selected->state);
+      resource.width = selected->width; resource.height = selected->height;
+      resource.native_format = DXGI_FORMAT_R32_FLOAT; resource.mip_levels = resource.array_layers = 1;
+      return resource;
+    }
+    // Each FG frame begins as the game's: the decoy and the tracked depth
+    // drawn, then the frame's own explicit token (message: its case's).
+    sunshine_streamline::abi_v2::frame_token &begin_fg_frame(const char *message) {
+      draw(*decoy); write_depth_pixels();
+      sunshine_streamline::abi_v2::frame_token *token{}; const auto frame = ++fg_frame;
+      require(sl.new_token(token, &frame) == 0 && token, message);
+      last_token = token;
+      return *token;
+    }
+    // A real FG frame: constants, an OnlyValidNow depth tag on the game's list
+    // (a frame tag where the SDK has one), and its same-frame SR evaluation.
+    void real_fg_frame() {
+      using namespace sunshine_streamline;
+      auto &token = begin_fg_frame("FG SDK did not supply an explicit frame token");
+      const auto constants = camera_constants(false);
+      require(sl.constants(constants, token, fg_viewport) == 0, "FG constants observation changed the SDK result");
+      const auto resource = depth_resource();
+      const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, 0, active_area};
+      tag_started = GetTickCount64();
+      const auto tagged = sl.frame_tag ? sl.frame_tag(token, fg_viewport, &tag, 1, reinterpret_cast<void *>(game_native_command)) :
+        sl.global_tag(fg_viewport, &tag, 1, reinterpret_cast<void *>(game_native_command));
+      require(tagged == 0,
+        "FG tag observation changed the SDK result");
+      tag_returned = GetTickCount64();
+      const base_structure *inputs[]{&fg_viewport.base};
+      require(sl.evaluate(0, token, inputs, 1, reinterpret_cast<void *>(game_native_command)) == 0,
+        "FG same-frame SR observation changed the SDK result");
+    }
+    // An FG frame whose ValidUntilPresent depth tag has no command list.
+    void commandless_fg_frame() {
+      using namespace sunshine_streamline;
+      auto &token = begin_fg_frame("Command-less FG SDK did not supply a frame token");
+      require(sl.constants(camera_constants(false), token, fg_viewport) == 0, "Command-less FG constants changed the SDK result");
+      const auto resource = depth_resource();
+      const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, 1, active_area};
+      require(sl.global_tag(fg_viewport, &tag, 1, nullptr) == 0, "Command-less FG tag changed the SDK result");
+    }
+    // The same viewport's SR evaluation with its own depth input.
+    void sr_evaluate(const sunshine_streamline::abi_v2::frame_token &token) {
+      using namespace sunshine_streamline;
+      const auto resource = depth_resource();
+      const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, 1, active_area};
+      const base_structure *inputs[]{&fg_viewport.base, &tag.base};
+      require(sl.evaluate(0, token, inputs, 2, reinterpret_cast<void *>(game_native_command)) == 0,
+        "SR evaluation with its own depth changed the SDK result");
+    }
+    // Assassin's Creed Shadows with FG on (10-22): an SR evaluation (sr), then
+    // either an accepted FG tag on the game's list (fg_commands) or a refused
+    // command-less one followed by its untag.
+    void fallback_frame(bool fg_commands, bool sr) {
+      using namespace sunshine_streamline;
+      auto &token = begin_fg_frame("FG fallback SDK did not supply a frame token");
+      require(sl.constants(camera_constants(false), token, fg_viewport) == 0, "FG fallback constants changed the SDK result");
+      if (sr) sr_evaluate(token);
+      const auto resource = depth_resource();
+      const auto command = reinterpret_cast<void *>(game_native_command);
+      if (fg_commands) {
+        const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, 0, active_area};
+        require((sl.frame_tag ? sl.frame_tag(token, fg_viewport, &tag, 1, command) : sl.global_tag(fg_viewport, &tag, 1, command)) == 0,
+          "Accepted FG tag changed the SDK result");
+        return;
+      }
+      const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, 1, active_area};
+      const abi_v2::resource_tag untag{{nullptr, tag_guid, 1}, nullptr, 0, 0, {}};
+      require(sl.global_tag(fg_viewport, &tag, 1, nullptr) == 0 && sl.global_tag(fg_viewport, &untag, 1, command) == 0,
+        "Refused FG tag or its untag changed the SDK result");
+    }
+
+    // An FG gap after its cache was invalidated: no depth and no identity.
+    void missing_fg(const char *label) {
+      present_frame(); const auto value = inspect(); log_status(label, value);
+      require(!value.ready() && !value.source.ready && !value.source.reused_depth &&
+        !value.source.current.capture && !value.source.current.sequence,
+        "Invalidated native FG cache supplied previous depth without a fresh successful copy");
+    }
+    // An FG gap that holds seed's admitted real depth and scale unchanged.
+    status held_fg(const status &seed, const char *label) {
+      present_frame(); const auto value = inspect();
+      require(active(value) && value.source.reused_depth &&
+        value.source.current.capture == seed.source.current.capture &&
+        value.source.current.sequence == seed.source.current.sequence &&
+        value.source.current.resource == seed.source.current.resource && same_scale(value.scale, seed.scale),
+        "Native FG hold changed the admitted real depth identity or scale");
+      if (label) log_status(label, value);
+      return value;
+    }
+    status recovered_fresh(const status &before, const char *label) {
+      render_tracked_depth = [this] { real_fg_frame(); };
+      const auto value = settle(label);
+      require(!value.source.reused_depth && value.source.current.capture != before.source.current.capture &&
+        value.source.current.sequence > before.source.current.sequence,
+        "Native FG cache recovered without a newly completed real capture");
+      return value;
+    }
+    // Presents until twelve consecutive Presents have fresh depth from the FG
+    // input (frame_generation_input) or from the viewport's SR evaluation.
+    void settle_route(const char *label, bool frame_generation_input) {
+      const auto until = GetTickCount64() + 15000;
+      unsigned consecutive{};
+      status s;
+      do {
+        present_frame(); s = inspect();
+        consecutive = active(s) && !s.source.reused_depth && s.source.frame_generation_input == frame_generation_input ?
+          consecutive + 1 : 0;
+      } while (consecutive < 12 && GetTickCount64() < until);
+      log_status(label, s);
+      require(consecutive >= 12, frame_generation_input ? "An accepted FG copy did not take its viewport's depth back" :
+        "A silent FG scope did not let the same viewport's SR depth through");
+    }
+    std::size_t readiness_losses() {
+      return reshade_log_count({"Sunshine depth readiness: lost"}) +
+        reshade_log_count({"Sunshine depth readiness:", "explicit_reuse_invalidation"});
+    }
+    // Eight rounds of a real Present of a silent FG scope (fresh SR depth)
+    // and its generated Presents, each holding the real frame's SR copy.
+    void silent_cadence(const char *label, unsigned generated_frames) {
+      for (unsigned round = 0; round < 8; ++round) {
+        render_tracked_depth = [this] { fallback_frame(false, true); };
+        present_frame(); const auto real = inspect();
+        require(active(real) && !real.source.reused_depth && !real.source.frame_generation_input,
+          "A real Present of a silent FG scope lost its fresh SR depth");
+        render_tracked_depth = {};
+        for (unsigned generated = 0; generated < generated_frames; ++generated) {
+          present_frame(); const auto value = inspect();
+          if (!round && !generated) log_status(label, value);
+          require(active(value) && value.source.reused_depth && !value.source.frame_generation_input &&
+            value.source.current.capture == real.source.current.capture &&
+            value.source.current.sequence == real.source.current.sequence && same_scale(value.scale, real.scale),
+            "A generated Present of a silent FG scope did not hold its real frame's SR depth");
+        }
+      }
+    }
+
     void run_fg(HMODULE sdk) {
       using namespace sunshine_streamline;
-      const auto set_foreground = reinterpret_cast<void (*)(HWND)>(GetProcAddress(
+      set_foreground = reinterpret_cast<void (*)(HWND)>(GetProcAddress(
         GetModuleHandleW(L"SunshineSBSTest.addon64"), "SunshineSbsTestSetForeground"));
       require(set_foreground, "FG reuse fixture needs the existing controlled foreground observer");
       struct foreground_scope {
@@ -1638,99 +1789,79 @@ namespace {
       // The export stop at a focus loss ends FG reuse once. This selects our
       // real hidden game HWND in the test observer without moving UI focus.
       set_foreground(window);
-      struct options { base_structure base; std::uint32_t mode{}, generated_frames{}; };
-      static_assert(sizeof(options) == 40);
-      using set_options_t = std::int32_t (*)(const abi_v2::viewport &, const options &);
       const auto getter = reinterpret_cast<abi_v2::get_feature_function>(GetProcAddress(sdk, "slGetFeatureFunction"));
-      const auto new_token = reinterpret_cast<abi_v2::get_new_frame_token>(GetProcAddress(sdk, "slGetNewFrameToken"));
-      const auto constants_call = reinterpret_cast<abi_v2::set_constants>(GetProcAddress(sdk, "slSetConstants"));
-      const auto tag_call = reinterpret_cast<abi_v2::set_tag_for_frame>(GetProcAddress(sdk, "slSetTagForFrame"));
-      const auto global_tag_call = reinterpret_cast<abi_v2::set_tag>(GetProcAddress(sdk, "slSetTag"));
-      const auto evaluate = reinterpret_cast<abi_v2::evaluate_feature>(GetProcAddress(sdk, "slEvaluateFeature"));
-      require(getter && new_token && constants_call && global_tag_call && evaluate, "FG metadata fixture lacks public SL exports");
-      std::printf("MEASURE SL SDK capability frame_tags=%u; using %s tags\n", unsigned(tag_call != nullptr), tag_call ? "frame" : "global");
+      sl.new_token = reinterpret_cast<abi_v2::get_new_frame_token>(GetProcAddress(sdk, "slGetNewFrameToken"));
+      sl.constants = reinterpret_cast<abi_v2::set_constants>(GetProcAddress(sdk, "slSetConstants"));
+      sl.frame_tag = reinterpret_cast<abi_v2::set_tag_for_frame>(GetProcAddress(sdk, "slSetTagForFrame"));
+      sl.global_tag = reinterpret_cast<abi_v2::set_tag>(GetProcAddress(sdk, "slSetTag"));
+      sl.evaluate = reinterpret_cast<abi_v2::evaluate_feature>(GetProcAddress(sdk, "slEvaluateFeature"));
+      require(getter && sl.new_token && sl.constants && sl.global_tag && sl.evaluate, "FG metadata fixture lacks public SL exports");
+      std::printf("MEASURE SL SDK capability frame_tags=%u; using %s tags\n", unsigned(sl.frame_tag != nullptr), sl.frame_tag ? "frame" : "global");
       void *function{};
       require(getter(1000, "slDLSSGSetOptions", function) == 0 && function, "Public SDK did not expose FG options");
-      set_options_t volatile set_options = reinterpret_cast<set_options_t>(function);
+      sl.set_options = reinterpret_cast<set_options_t>(function);
       for (unsigned frame = 0; frame < 4; ++frame) step();
-      const abi_v2::viewport viewport{{nullptr, viewport_guid, 1}, 0};
-      const auto configure = [&](bool enabled) {
-        const options value{{nullptr, {0xfac5f1cb,0x2dfd,0x4f36,{0xa1,0xe6,0x3a,0x9e,0x86,0x52,0x56,0xc5}}, 3},
-          enabled ? 1u : 0u, enabled ? 1u : 0u};
-        require(set_options(viewport, value) == 0, "Observed FG options changed the public SDK return value");
-      };
       // This metadata-only SDK exposes the FG tag boundary. Keep its already
       // validated FG nomination path for crop tests; direct SL coverage above
       // separately exercises successful/failed evaluation while FG is off.
-      configure(true);
-      unsigned fg_frame{};
-      abi_v2::frame_token *last_token{};
-      std::uint64_t tag_started{}, tag_returned{};
-      const auto camera_constants = [&](bool reset) {
-        abi_v2::constants constants{}; constants.base = {nullptr, constants_guid, 1};
-        constants.common.camera_view_to_clip = camera.projection;
-        constants.common.clip_to_camera_view = camera.inverse_projection;
-        constants.common.camera_near = camera.near_plane; constants.common.camera_far = camera.far_plane;
-        constants.common.camera_fov = camera.fov; constants.common.camera_aspect = camera.aspect;
-        constants.common.camera_right[0] = constants.common.camera_up[1] = constants.common.camera_forward[2] = 1;
-        constants.depth_inverted = 1;
-        constants.reset = reset ? 1u : 0u;
-        return constants;
-      };
-      const auto real_frame = [&] {
-        draw(*decoy); write_depth_pixels();
-        abi_v2::frame_token *token{}; const auto frame = ++fg_frame;
-        require(new_token(token, &frame) == 0 && token, "FG SDK did not supply an explicit frame token");
-        last_token = token;
-        const auto constants = camera_constants(false);
-        require(constants_call(constants, *token, viewport) == 0, "FG constants observation changed the SDK result");
-        abi_v2::resource resource{}; resource.base = {nullptr, resource_guid, 1};
-        resource.type = 8; resource.native = selected->resource.p; resource.state = unsigned(selected->state);
-        resource.width = selected->width; resource.height = selected->height;
-        resource.native_format = DXGI_FORMAT_R32_FLOAT; resource.mip_levels = resource.array_layers = 1;
-        const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, 0, active_area};
-        tag_started = GetTickCount64();
-        const auto tagged = tag_call ? tag_call(*token, viewport, &tag, 1, reinterpret_cast<void *>(game_native_command)) :
-          global_tag_call(viewport, &tag, 1, reinterpret_cast<void *>(game_native_command));
-        require(tagged == 0,
-          "FG tag observation changed the SDK result");
-        tag_returned = GetTickCount64();
-        const base_structure *inputs[]{&viewport.base};
-        require(evaluate(0, *token, inputs, 1, reinterpret_cast<void *>(game_native_command)) == 0,
-          "FG same-frame SR observation changed the SDK result");
-      };
-      render_tracked_depth = real_frame;
-      settle("SLFG-SDK-full-allocation");
-      // These are public SDK extents, not injected shader coordinates. Native
-      // rendering must accept the same crop even though no FX uniform exists.
-      active_area = {0, 0, selected->width, selected->height-3};
-      settle("SLFG-SDK-padded-three-rows");
-      active_area = {8, 16, selected->width-32, selected->height-16};
-      settle("SLFG-SDK-nonzero-offset-crop");
-      std::puts("PASS native SL camera depth accepts padded and nonzero-offset active rectangles with zero installed FX");
-      active_area = {0, 0, selected->width, selected->height-3};
-      settle("SLFG-padded-real-depth");
-      for (unsigned pair = 0; pair < 8; ++pair) {
-        const auto pair_start = GetTickCount64();
-        render_tracked_depth = real_frame;
-        step(); no_effects(); const auto real = inspect();
-        log_status("SLFG-pair-real-depth", real);
-        require(active(real) && !real.source.reused_depth, "Fresh FG source did not produce current native depth");
-        // One generated presentation has current color but no new provider call
-        // or game depth draw. Observe production retention without modifying it.
-        render_tracked_depth = {};
-        step(); no_effects(); const auto generated = inspect();
-        log_status("SLFG-generated-previous-depth", generated);
-        std::printf("MEASURE native FG pair=%u elapsed_ms=%llu real_resource=0x%llx generated_resource=0x%llx expected_resource=0x%llx\n",
-          pair, static_cast<unsigned long long>(GetTickCount64()-pair_start),
-          static_cast<unsigned long long>(real.source.current.resource),
-          static_cast<unsigned long long>(generated.source.current.resource),
-          static_cast<unsigned long long>(native(*selected)));
-        require(active(generated) && generated.source.reused_depth &&
-          generated.source.current.capture == real.source.current.capture &&
-          generated.source.current.sequence == real.source.current.sequence && same_scale(generated.scale, real.scale),
-          "Generated presentation failed to retain completed real depth and its native matrix scale");
-      }
+      configure_fg(true);
+      fg_crop_pairs_and_off();
+      fg_cache();
+      for (const std::uint32_t type : {0u, 8u})
+        run_script({type ? "public-ui-hook-type-8" : "public-ui-hook-type-0", 150000, {}, [&, type] { run_ui_hook(type); }, {}});
+      fg_until_present_clear();
+      fg_untag();
+      fg_commandless_refusal();
+      fg_silent_scope();
+      fg_dlssg_evaluation();
+      fg_silent_scope_without_api_source();
+      fg_linear_rr();
+    }
+
+    // Public SDK crops, real/generated pairs, dynamic resolution and FG off.
+    void fg_crop_pairs_and_off() {
+      run_script({"sdk-crops", 45000,
+        [&] {
+          render_tracked_depth = [this] { real_fg_frame(); };
+          settle("SLFG-SDK-full-allocation");
+        },
+        [&] {
+          // These are public SDK extents, not injected shader coordinates. Native
+          // rendering must accept the same crop even though no FX uniform exists.
+          active_area = {0, 0, selected->width, selected->height-3};
+          settle("SLFG-SDK-padded-three-rows");
+          active_area = {8, 16, selected->width-32, selected->height-16};
+          settle("SLFG-SDK-nonzero-offset-crop");
+          std::puts("PASS native SL camera depth accepts padded and nonzero-offset active rectangles with zero installed FX");
+        }, {}});
+      run_script({"generated-pairs", 30000,
+        [&] {
+          active_area = {0, 0, selected->width, selected->height-3};
+          settle("SLFG-padded-real-depth");
+        },
+        [&] {
+          for (unsigned pair = 0; pair < 8; ++pair) {
+            const auto pair_start = GetTickCount64();
+            render_tracked_depth = [this] { real_fg_frame(); };
+            present_frame(); const auto real = inspect();
+            log_status("SLFG-pair-real-depth", real);
+            require(active(real) && !real.source.reused_depth, "Fresh FG source did not produce current native depth");
+            // One generated presentation has current color but no new provider call
+            // or game depth draw. Observe production retention without modifying it.
+            render_tracked_depth = {};
+            present_frame(); const auto generated = inspect();
+            log_status("SLFG-generated-previous-depth", generated);
+            std::printf("MEASURE native FG pair=%u elapsed_ms=%llu real_resource=0x%llx generated_resource=0x%llx expected_resource=0x%llx\n",
+              pair, static_cast<unsigned long long>(GetTickCount64()-pair_start),
+              static_cast<unsigned long long>(real.source.current.resource),
+              static_cast<unsigned long long>(generated.source.current.resource),
+              static_cast<unsigned long long>(native(*selected)));
+            require(active(generated) && generated.source.reused_depth &&
+              generated.source.current.capture == real.source.current.capture &&
+              generated.source.current.sequence == real.source.current.sequence && same_scale(generated.scale, real.scale),
+              "Generated presentation failed to retain completed real depth and its native matrix scale");
+          }
+        }, {}});
       // Dynamic resolution (Assassin's Creed Shadows with FG on, 10-23): the
       // tagged extent of the same source changes every second real frame.
       // Each real Present has fresh depth of its own extent and each
@@ -1739,676 +1870,659 @@ namespace {
       // scene, so a smaller extent shows other content and the scale may
       // adapt to it within its rate bound. The provider reports the changes
       // on its render size line.
-      const sunshine_streamline::extent drs[] = {{0, 0, selected->width, selected->height-3},
-        {0, 0, selected->width*7/8, selected->height*7/8}, {0, 0, selected->width*3/4, selected->height*3/4}};
-      for (unsigned pair = 0; pair < 12; ++pair) {
-        active_area = drs[pair / 2 % 3];
-        render_tracked_depth = real_frame;
-        step(); no_effects(); const auto real = inspect();
-        render_tracked_depth = {};
-        step(); no_effects(); const auto generated = inspect();
-        if (pair % 2 == 0) log_status("SLFG-dynamic-resolution-generated", generated);
-        require(active(real) && !real.source.reused_depth && active(generated) && generated.source.reused_depth &&
-          generated.source.current.capture == real.source.current.capture && same_scale(generated.scale, real.scale),
-          "A dynamic render size of the same FG source lost depth or reset its scale");
-      }
-      active_area = {0, 0, selected->width, selected->height-3};
-      render_tracked_depth = real_frame;
-      // Its line (at most every 5 s) names the smallest extent of this run.
-      const auto smallest = "active=" + std::to_string(drs[2].width) + 'x' + std::to_string(drs[2].height) + "..";
-      require(reshade_log_contains({"Sunshine depth render size: changed=", smallest.c_str(), "provider=Streamline",
-          "depth stays ready"}),
-        "Dynamic render sizes produced no render size line");
-      render_tracked_depth = {};
-      configure(false);
-      step(); no_effects();
-      const auto off = inspect(); log_status("FG-off-without-new-depth", off);
-      require(!off.ready() && !off.source.ready && !off.source.reused_depth,
-        "Disabling FG retained previous-frame depth for a color-only presentation");
-      active_area = {0, 0, selected->width, selected->height};
-      render_tracked_depth = [&] { draw_frame(); };
-      settle("SL-recovered-after-FG-off");
-      std::puts("PASS native SLFG 2x: actual cropped SDK depth, eight real/generated pairs with retained completed depth, FG-off rejection and fresh SL recovery; no FX");
-
-      // Keep the original measured trajectory above unchanged. These additional
-      // native presentations exercise the lifetime of the private display copy,
-      // without an FX callback, injected readiness or synthetic GPU completion.
-      const auto missing = [&](const char *label) {
-        step(); no_effects(); const auto value = inspect(); log_status(label, value);
-        require(!value.ready() && !value.source.ready && !value.source.reused_depth &&
-          !value.source.current.capture && !value.source.current.sequence,
-          "Invalidated native FG cache supplied previous depth without a fresh successful copy");
-      };
-      const auto held = [&](const status &seed, const char *label) {
-        step(); no_effects(); const auto value = inspect();
-        require(active(value) && value.source.reused_depth &&
-          value.source.current.capture == seed.source.current.capture &&
-          value.source.current.sequence == seed.source.current.sequence &&
-          value.source.current.resource == seed.source.current.resource && same_scale(value.scale, seed.scale),
-          "Native FG hold changed the admitted real depth identity or scale");
-        if (label) log_status(label, value);
-        return value;
-      };
-      const auto recovered_fresh = [&](const status &before, const char *label) {
-        render_tracked_depth = real_frame;
-        const auto value = settle(label);
-        require(!value.source.reused_depth && value.source.current.capture != before.source.current.capture &&
-          value.source.current.sequence > before.source.current.sequence,
-          "Native FG cache recovered without a newly completed real capture");
-        return value;
-      };
-
-      configure(true); render_tracked_depth = real_frame;
-      const auto expiry_seed = settle("SLFG-cache-expiry-seed");
-      const auto seed_started = tag_started, seed_returned = tag_returned;
-      const auto seed_frame = fg_frame;
-      render_tracked_depth = {};
-      unsigned holds{};
-      std::uint64_t last_held{};
-      do {
-        held(expiry_seed, holds ? nullptr : "SLFG-cache-expiry-first-hold");
-        last_held = GetTickCount64(); ++holds;
-      } while (holds < 2 || last_held < seed_returned + 140);
-      require(last_held >= seed_started && last_held - seed_started < sunshine_scene_depth::maximum_source_age_ms,
-        "Native expiry fixture exhausted its source-age window before exercising repeated holds");
-      log_status("SLFG-cache-expiry-last-hold", inspect());
-      // The public passive status exposes identity, not the private capture tick.
-      // Bracket the actual SDK tag instead: expiry after its upper time bound,
-      // while the most recent successful hold is still young, distinguishes the
-      // original capture lifetime from a TTL accidentally renewed on each hold.
-      const auto expiry_at = seed_returned + sunshine_scene_depth::maximum_source_age_ms + 20;
-      const auto before_expiry_wait = GetTickCount64();
-      if (before_expiry_wait < expiry_at) Sleep(DWORD(expiry_at - before_expiry_wait));
-      missing("SLFG-cache-expired-after-repeated-holds");
-      const auto expired = GetTickCount64();
-      require(expired >= expiry_at && expired >= last_held &&
-        expired - last_held < sunshine_scene_depth::maximum_source_age_ms && fg_frame == seed_frame &&
-        tag_started == seed_started && tag_returned == seed_returned,
-        "Native expiry fixture did not distinguish the original capture age from renewed hold age");
-      missing("SLFG-cache-expired-no-revival");
-      std::printf("MEASURE native FG cache expiry holds=%u tag_begin_ms=%llu tag_end_ms=%llu last_hold_ms=%llu expired_ms=%llu\n",
-        holds, static_cast<unsigned long long>(seed_started), static_cast<unsigned long long>(seed_returned),
-        static_cast<unsigned long long>(last_held), static_cast<unsigned long long>(expired));
-      recovered_fresh(expiry_seed, "SLFG-cache-expiry-fresh-recovery");
-
-      const auto reset_seed = settle("SLFG-cache-reset-seed");
-      const auto reset_seed_started = tag_started;
-      const auto reset_seed_frame = fg_frame;
-      render_tracked_depth = {};
-      held(reset_seed, "SLFG-cache-reset-before-hold");
-      // A reset ends temporal history, not the finished copy of an earlier
-      // frame: like any gap, the copy is held only within its own source age.
-      render_tracked_depth = [&] {
-        require(last_token, "Native camera-reset fixture has no existing frame token");
-        const auto constants = camera_constants(true);
-        require(constants_call(constants, *last_token, viewport) == 0, "Camera reset changed the SDK result");
-      };
-      held(reset_seed, "SLFG-cache-camera-reset-hold");
-      render_tracked_depth = [&] {
-        const auto constants = camera_constants(false);
-        require(constants_call(constants, *last_token, viewport) == 0, "Camera recovery changed the SDK result");
-      };
-      held(reset_seed, "SLFG-cache-camera-valid-without-depth");
-      require(GetTickCount64() - reset_seed_started < sunshine_scene_depth::maximum_source_age_ms,
-        "Native camera-reset fixture expired before its holds were observed");
-      render_tracked_depth = {};
-      require(fg_frame == reset_seed_frame, "Camera-reset hold case accidentally produced a new real frame");
-      recovered_fresh(reset_seed, "SLFG-cache-camera-reset-fresh-recovery");
-
-      const auto mode_seed = settle("SLFG-cache-mode-seed");
-      const auto mode_seed_frame = fg_frame;
-      render_tracked_depth = {};
-      held(mode_seed, "SLFG-cache-mode-before-hold");
-      configure(false); missing("SLFG-cache-mode-off");
-      configure(true); missing("SLFG-cache-mode-on-without-depth");
-      missing("SLFG-cache-mode-on-no-revival");
-      require(fg_frame == mode_seed_frame, "FG mode no-revival case accidentally produced a new real frame");
-      recovered_fresh(mode_seed, "SLFG-cache-mode-fresh-recovery");
-      std::puts("PASS native FG cache: repeated holds cannot renew capture age; camera reset keeps the finished copy within its age; FG off/on cannot revive old depth; fresh copies recover all three intervals; no FX");
-      for (const std::uint32_t type : {0u, 8u})
-        run_ui_hook(real_frame, last_token, viewport, tag_call, global_tag_call, type, configure);
-
-      // The Witcher 3 pattern with FG off: each frame tags depth valid until
-      // present, evaluates, then clears the tag before present, while another
-      // viewport sends reset constants every frame. Neither the clear nor the
-      // foreign reset is lost evidence, so every presentation has fresh depth.
-      configure(false);
-      const abi_v2::viewport foreign_viewport{{nullptr, viewport_guid, 1}, 7};
-      render_tracked_depth = [&] {
-        draw(*decoy); write_depth_pixels();
-        abi_v2::frame_token *token{}; const auto frame = ++fg_frame;
-        require(new_token(token, &frame) == 0 && token, "Until-present SDK did not supply a frame token");
-        last_token = token;
-        require(constants_call(camera_constants(true), *token, foreign_viewport) == 0 &&
-            constants_call(camera_constants(false), *token, viewport) == 0,
-          "Until-present constants observation changed the SDK result");
-        abi_v2::resource resource{}; resource.base = {nullptr, resource_guid, 1};
-        resource.type = 8; resource.native = selected->resource.p; resource.state = unsigned(selected->state);
-        resource.width = selected->width; resource.height = selected->height;
-        resource.native_format = DXGI_FORMAT_R32_FLOAT; resource.mip_levels = resource.array_layers = 1;
-        const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, 1, active_area};
-        const auto command = reinterpret_cast<void *>(game_native_command);
-        require(global_tag_call(viewport, &tag, 1, command) == 0, "Until-present tag observation changed the SDK result");
-        const base_structure *inputs[]{&viewport.base};
-        require(evaluate(0, *token, inputs, 1, command) == 0, "Until-present evaluation changed the SDK result");
-        const abi_v2::resource_tag cleared{{nullptr, tag_guid, 1}, nullptr, 0, 1, {}};
-        require(global_tag_call(viewport, &cleared, 1, command) == 0, "Until-present clear changed the SDK result");
-      };
-      settle("SL-until-present-clear-foreign-reset");
-      std::puts("PASS native SL provider: depth cleared after evaluation and another viewport's per-frame camera reset keep fresh depth every presentation; no FX");
-
-      // Assassin's Creed Shadows with FG on (10-22): after its FG depth tag
-      // each frame sends a global depth untag, a null Resource or one whose
-      // native is null, with or without a command list (sl_core_api.h: a null
-      // resource removes the tag). An untag is not a capture attempt: the FG
-      // depth captured at the tag stays the viewport's source, so every
-      // presentation keeps fresh FG depth.
-      configure(true);
-      for (const bool null_native : {false, true}) for (const bool untag_commands : {true, false}) {
-        render_tracked_depth = [&] {
-          real_frame();
-          abi_v2::resource empty{};
-          const abi_v2::resource_tag untag{{nullptr, tag_guid, 1}, null_native ? &empty : nullptr, 0, 0, {}};
-          require(global_tag_call(viewport, &untag, 1, untag_commands ? reinterpret_cast<void *>(game_native_command) : nullptr) == 0,
-            "FG depth untag changed the SDK result");
-        };
-        settle(null_native ? untag_commands ? "SLFG-untag-null-native" : "SLFG-untag-null-native-without-commands" :
-          untag_commands ? "SLFG-untag-null-resource" : "SLFG-untag-null-resource-without-commands");
-      }
-      // DLSS-G integrations tag HUD-less color every frame, possibly in the
-      // same call as the depth untag. Only the call's depth tags make it an
-      // untag, so a real color tag beside them keeps fresh FG depth too.
-      com_ptr<ID3D12Resource> hudless;
-      {
-        D3D12_RESOURCE_DESC desc{};
-        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D; desc.Width = width; desc.Height = height;
-        desc.DepthOrArraySize = desc.MipLevels = 1; desc.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
-        desc.SampleDesc.Count = 1; desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
-        const auto heap = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
-        checked(game->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
-          D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(hudless.put())), "Create FG HUD-less input");
-      }
-      for (const bool untag_commands : {true, false}) {
-        render_tracked_depth = [&] {
-          real_frame();
-          abi_v2::resource color{}; color.base = {nullptr, resource_guid, 1};
-          color.native = hudless.p; color.state = D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE;
-          color.width = width; color.height = height; color.native_format = DXGI_FORMAT_R10G10B10A2_UNORM;
-          color.mip_levels = color.array_layers = 1;
-          const abi_v2::resource_tag tags[]{{{nullptr, tag_guid, 1}, nullptr, 0, 0, {}},
-            {{nullptr, tag_guid, 1}, &color, 2, 1, {0, 0, width, height}}};
-          require(global_tag_call(viewport, tags, 2, untag_commands ? reinterpret_cast<void *>(game_native_command) : nullptr) == 0,
-            "FG depth untag beside a HUD-less tag changed the SDK result");
-        };
-        settle(untag_commands ? "SLFG-untag-beside-hudless" : "SLFG-untag-beside-hudless-without-commands");
-      }
-      const abi_v2::resource_tag no_hudless{{nullptr, tag_guid, 1}, nullptr, 2, 0, {}};
-      require(global_tag_call(viewport, &no_hudless, 1, nullptr) == 0, "HUD-less untag changed the SDK result");
-      // A malformed tag that names a native resource is no untag: it still
-      // withdraws the FG source, so no presentation copies fresh depth.
-      render_tracked_depth = [&] {
-        real_frame();
-        // A typed Resource of version 0 (a later version is read by its v1 fields).
-        abi_v2::resource malformed{}; malformed.base = {nullptr, resource_guid, 0};
-        malformed.type = 8; malformed.native = selected->resource.p; malformed.state = unsigned(selected->state);
-        malformed.width = selected->width; malformed.height = selected->height;
-        const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &malformed, 0, 0, active_area};
-        require(global_tag_call(viewport, &tag, 1, reinterpret_cast<void *>(game_native_command)) == 0,
-          "Malformed FG depth tag changed the SDK result");
-      };
-      for (unsigned frame = 0; frame < 12; ++frame) {
-        step(); no_effects(); const auto s = inspect();
-        if (!frame) log_status("SLFG-malformed-tag-after-depth", s);
-        require(!(active(s) && !s.source.reused_depth), "A malformed FG tag naming a native was treated as an untag");
-      }
-      render_tracked_depth = real_frame;
-      settle("SLFG-recovered-after-malformed-tag");
-      std::puts("PASS native SLFG untag: a null Resource or null native after each FG tag, with or without commands and beside a HUD-less tag, keeps fresh FG depth every presentation; a malformed tag still withdraws; no FX");
-
-      // A ValidUntilPresent FG tag may legally arrive without a command list,
-      // which leaves no point to copy it at: the boundary is withdrawn, and
-      // the bounded withdrawal line names that reason and the tag. The test
-      // add-on's refusal query reports it at once, with its contract class.
-      const auto depth_resource = [&] {
-        abi_v2::resource resource{}; resource.base = {nullptr, resource_guid, 1};
-        resource.type = 8; resource.native = selected->resource.p; resource.state = unsigned(selected->state);
-        resource.width = selected->width; resource.height = selected->height;
-        resource.native_format = DXGI_FORMAT_R32_FLOAT; resource.mip_levels = resource.array_layers = 1;
-        return resource;
-      };
-      const auto commandless_fg_frame = [&] {
-        draw(*decoy); write_depth_pixels();
-        abi_v2::frame_token *token{}; const auto frame = ++fg_frame;
-        require(new_token(token, &frame) == 0 && token, "Command-less FG SDK did not supply a frame token");
-        last_token = token;
-        require(constants_call(camera_constants(false), *token, viewport) == 0, "Command-less FG constants changed the SDK result");
-        const auto resource = depth_resource();
-        const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, 1, active_area};
-        require(global_tag_call(viewport, &tag, 1, nullptr) == 0, "Command-less FG tag changed the SDK result");
-      };
-      const auto before_commandless = last_refusal().serial;
-      render_tracked_depth = commandless_fg_frame;
-      {
-        namespace refusal = sunshine_depth_refusal;
-        const auto refused = refusal_after(before_commandless);
-        std::printf("MEASURE native-provider SLFG-commandless-refusal provider=%u gate=%u class=%u name=%s viewport=%u fg=%u sequence=%llu serial=%llu\n",
-          unsigned(refused.provider), unsigned(refused.where), unsigned(refused.reason), refused.name, refused.viewport,
-          unsigned(refused.frame_generation), static_cast<unsigned long long>(refused.sequence), static_cast<unsigned long long>(refused.serial));
-        require(refused.serial > before_commandless && refused.provider == refusal::adapter::streamline &&
-            refused.where == refusal::gate::source && refused.reason == refusal::reason_class::no_copy_point &&
-            !std::strcmp(refused.name, "boundary_without_commands") && refused.frame_generation && refused.viewport == viewport.value,
-          "The refusal query did not report the command-less FG tag as a no_copy_point source refusal");
-      }
-      require(reshade_log_contains({"Sunshine Streamline FG depth refused: reason=boundary_without_commands", "tag_type=0",
-          "scope=global", "lifecycle=1", "command=0x0 ", "fg=1"}),
-        "A command-less FG tag boundary was refused without naming its reason");
-      render_tracked_depth = real_frame;
-      settle("SLFG-recovered-after-commandless-tag");
-      std::puts("PASS native SLFG refusal: a command-less ValidUntilPresent FG tag is refused and logged as boundary_without_commands; no FX");
-
-      // Assassin's Creed Shadows with FG on (10-22): FG options stay on, but
-      // every FG depth tag is refused (here: sent without a command list)
-      // and then untagged, while the same viewport's SR evaluation tags its
-      // own depth with commands. FG owns that viewport's depth only while an
-      // FG copy was accepted within a second; after that its scope is silent
-      // and SR supplies depth. An accepted FG copy takes ownership back at
-      // once, and SR stays shut out while FG copies keep arriving.
-      const auto sr_evaluate = [&](const abi_v2::frame_token &token) {
-        const auto resource = depth_resource();
-        const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, 1, active_area};
-        const base_structure *inputs[]{&viewport.base, &tag.base};
-        require(evaluate(0, token, inputs, 2, reinterpret_cast<void *>(game_native_command)) == 0,
-          "SR evaluation with its own depth changed the SDK result");
-      };
-      const auto fallback_frame = [&](bool fg_commands, bool sr) {
-        draw(*decoy); write_depth_pixels();
-        abi_v2::frame_token *token{}; const auto frame = ++fg_frame;
-        require(new_token(token, &frame) == 0 && token, "FG fallback SDK did not supply a frame token");
-        last_token = token;
-        require(constants_call(camera_constants(false), *token, viewport) == 0, "FG fallback constants changed the SDK result");
-        if (sr) sr_evaluate(*token);
-        const auto resource = depth_resource();
-        const auto command = reinterpret_cast<void *>(game_native_command);
-        if (fg_commands) {
-          const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, 0, active_area};
-          require((tag_call ? tag_call(*token, viewport, &tag, 1, command) : global_tag_call(viewport, &tag, 1, command)) == 0,
-            "Accepted FG tag changed the SDK result");
-          return;
-        }
-        const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, 1, active_area};
-        const abi_v2::resource_tag untag{{nullptr, tag_guid, 1}, nullptr, 0, 0, {}};
-        require(global_tag_call(viewport, &tag, 1, nullptr) == 0 && global_tag_call(viewport, &untag, 1, command) == 0,
-          "Refused FG tag or its untag changed the SDK result");
-      };
-      const auto settle_route = [&](const char *label, bool frame_generation_input) {
-        const auto until = GetTickCount64() + 15000;
-        unsigned consecutive{};
-        status s;
-        do {
-          step(); no_effects(); s = inspect();
-          consecutive = active(s) && !s.source.reused_depth && s.source.frame_generation_input == frame_generation_input ?
-            consecutive + 1 : 0;
-        } while (consecutive < 12 && GetTickCount64() < until);
-        log_status(label, s);
-        require(consecutive >= 12, frame_generation_input ? "An accepted FG copy did not take its viewport's depth back" :
-          "A silent FG scope did not let the same viewport's SR depth through");
-      };
-      render_tracked_depth = [&] { fallback_frame(false, true); };
-      const auto silent_start = GetTickCount64();
-      for (std::uint64_t now = silent_start; now - silent_start < 700; now = GetTickCount64()) {
-        step(); no_effects(); const auto s = inspect();
-        require(!(s.ready() && s.source.ready && !s.source.frame_generation_input && !s.source.reused_depth),
-          "SR depth replaced FG within a second of its last accepted FG copy");
-      }
-      settle_route("SLFG-silent-scope-SR-depth", false);
-      require(GetTickCount64() - silent_start >= 1000, "SR took the viewport's depth before the FG scope fell silent");
-      require(reshade_log_contains({"Sunshine Streamline frame generation depth scope: silent viewport=0"}) &&
-          reshade_log_contains({"Sunshine Streamline FG depth refused: reason=boundary_without_commands", "fg_scope=silent", "withdrawn=0"}),
-        "The silent FG scope or its refused boundaries were not logged");
-      // Its generated Presents (no SL call, no depth draw) hold the real
-      // frame's SR copy exactly as FG depth is held, at 2x and 3x, also while
-      // the game window is in the background: the export stop invalidates
-      // reuse once, never on every Present. Assassin's Creed Shadows (10-23)
-      // logged a readiness loss on every generated Present for the 42 s its
-      // window was in the background (no_retained_depth).
-      const auto readiness_losses = [&] {
-        return reshade_log_count({"Sunshine depth readiness: lost"}) +
-          reshade_log_count({"Sunshine depth readiness:", "explicit_reuse_invalidation"});
-      };
-      const auto silent_cadence = [&](const char *label, unsigned generated_frames) {
-        for (unsigned round = 0; round < 8; ++round) {
-          render_tracked_depth = [&] { fallback_frame(false, true); };
-          step(); no_effects(); const auto real = inspect();
-          require(active(real) && !real.source.reused_depth && !real.source.frame_generation_input,
-            "A real Present of a silent FG scope lost its fresh SR depth");
-          render_tracked_depth = {};
-          for (unsigned generated = 0; generated < generated_frames; ++generated) {
-            step(); no_effects(); const auto value = inspect();
-            if (!round && !generated) log_status(label, value);
-            require(active(value) && value.source.reused_depth && !value.source.frame_generation_input &&
-              value.source.current.capture == real.source.current.capture &&
-              value.source.current.sequence == real.source.current.sequence && same_scale(value.scale, real.scale),
-              "A generated Present of a silent FG scope did not hold its real frame's SR depth");
-          }
-        }
-      };
-      const auto losses_before_cadence = readiness_losses();
-      silent_cadence("SLFG-silent-scope-SR-generated-2x", 1);
-      silent_cadence("SLFG-silent-scope-SR-generated-3x", 2);
-      // The window leaves the foreground: one real Present stops the export
-      // (its pause line, then one reuse invalidation of a fresh copy, which
-      // stays ready); the next real frame arms the hold again.
-      const auto pauses = reshade_log_count({"Sunshine SBS: export inactive (not_foreground"});
-      set_foreground(nullptr);
-      render_tracked_depth = [&] { fallback_frame(false, true); };
-      step(); no_effects();
-      require(active(inspect()), "The export stop withdrew a fresh SR copy");
-      for (const auto until = GetTickCount64() + 7000;
-          reshade_log_count({"Sunshine SBS: export inactive (not_foreground"}) == pauses && GetTickCount64() < until;) {
-        step(); no_effects();
-        require(active(inspect()), "A real Present in the background lost its fresh SR depth");
-      }
-      require(reshade_log_count({"Sunshine SBS: export inactive (not_foreground"}) == pauses + 1,
-        "The fixture's focus loss did not stop the export exactly once");
-      silent_cadence("SLFG-silent-scope-SR-background-2x", 1);
-      silent_cadence("SLFG-silent-scope-SR-background-3x", 2);
-      set_foreground(window);
-      silent_cadence("SLFG-silent-scope-SR-foreground-again-2x", 1);
-      require(readiness_losses() == losses_before_cadence,
-        "Silent-scope generated Presents logged a readiness loss or a reuse invalidation");
-      render_tracked_depth = [&] { fallback_frame(true, true); };
-      settle_route("SLFG-accepted-copy-owns-again", true);
-      for (unsigned frame = 0; frame < 30; ++frame) {
-        step(); no_effects(); const auto s = inspect();
-        require(active(s) && s.source.frame_generation_input,
-          "SR depth competed with a viewport whose FG copies keep being accepted");
-      }
-      require(reshade_log_contains({"Sunshine Streamline frame generation depth scope: live viewport=0"}),
-        "The FG scope's return to live was not logged");
-
-      // DLSS-G's own NGX evaluation (feature 11) of each real frame, as in
-      // Assassin's Creed Shadows (10-23): the game tags FG depth, HUD-less and
-      // Backbuffer without a command list (refused), its SR evaluation tags its own
-      // depth, and DLSS-G evaluates DLSSG.Depth (with DLSSG.DepthInverted and
-      // DLSSG.DepthSubrect*), DLSSG.HUDLess and DLSSG.Backbuffer on its own
-      // command list. Copies are made only in a state observed on that list.
-      // Without one every copy is refused, counted, and nothing changes: the
-      // silent scope keeps SR depth. With one, DLSSG.Depth is the FG source
-      // (its accepted copies keep the scope live, so SR stays out and the
-      // command-less tag withdraws nothing), generated Presents hold it, and
-      // its HUD-less/Backbuffer pair reaches UI detection as one exact batch.
-      {
-        const auto exe = GetModuleHandleW(nullptr);
-        const auto ngx_create = reinterpret_cast<decltype(&NVSDK_NGX_D3D12_CreateFeature)>(
-          GetProcAddress(exe, "NVSDK_NGX_D3D12_CreateFeature"));
-        const auto ngx_evaluate = reinterpret_cast<decltype(&NVSDK_NGX_D3D12_EvaluateFeature)>(
-          GetProcAddress(exe, "NVSDK_NGX_D3D12_EvaluateFeature"));
-        const auto ngx_release = reinterpret_cast<decltype(&NVSDK_NGX_D3D12_ReleaseFeature)>(
-          GetProcAddress(exe, "NVSDK_NGX_D3D12_ReleaseFeature"));
-        require(ngx_create && ngx_evaluate && ngx_release, "DLSS-G fixture lacks its exported NGX entry points");
-        auto color = backbuffers[0]->GetDesc();
-        color.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
-        const auto heap = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
-        com_ptr<ID3D12Resource> hudless, backbuffer;
-        checked(game->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &color, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE,
-          nullptr, IID_PPV_ARGS(hudless.put())), "Create the DLSS-G HUD-less input");
-        checked(game->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &color, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE,
-          nullptr, IID_PPV_ARGS(backbuffer.put())), "Create the DLSS-G Backbuffer input");
-        dlssg_fixture::parameters inputs;
-        inputs.depth = selected->resource.p; inputs.hudless = hudless.p; inputs.backbuffer = backbuffer.p;
-        void *feature{};
-        bool observed_state = false, tag_commands = false, ui_tag_commands = false;
-        const auto evaluations_before = dlssg_fixture::evaluated;
-        const auto dlssg_frame = [&] {
-          fallback_frame(tag_commands, true);
-          auto *list = reinterpret_cast<ID3D12GraphicsCommandList *>(game_native_command);
-          // The game's own HUD-less (2) and Backbuffer (53) tags, in their
-          // declared state: command-less as in Shadows, or on the game's list.
-          const auto color_resource = [&](ID3D12Resource *native) {
-            abi_v2::resource value{}; value.base = {nullptr, resource_guid, 1};
-            value.type = 8; value.native = native;
-            value.state = unsigned(D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
-            value.width = width; value.height = height;
-            value.native_format = unsigned(color.Format); value.mip_levels = value.array_layers = 1;
-            return value;
-          };
-          const auto hudless_resource = color_resource(hudless.p), backbuffer_resource = color_resource(backbuffer.p);
-          const abi_v2::resource_tag ui_tags[]{{{nullptr, tag_guid, 1}, &hudless_resource, 2, 1, {0, 0, width, height}},
-            {{nullptr, tag_guid, 1}, &backbuffer_resource, 53, 1, {0, 0, width, height}}};
-          require(global_tag_call(viewport, ui_tags, 2, ui_tag_commands ? reinterpret_cast<void *>(game_native_command) : nullptr) == 0,
-            "The HUD-less and Backbuffer tags changed the SDK result");
-          if (!feature)
-            require(ngx_create(list, 11, &inputs, &feature) == dlssg_fixture::success && feature, "DLSS-G feature creation failed");
-          require(selected->state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "DLSS-G fixture depth left its UAV state");
-          inputs.depth_area = active_area;
-          // DLSS-G's recording transitions its inputs, as Streamline's DLSS-G
-          // plugin does; without that no state is observed on it.
-          constexpr auto read = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-          if (observed_state) {
-            transition(list, selected->resource.p, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, read);
-            transition(list, hudless.p, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, read);
-            transition(list, backbuffer.p, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, read);
-          }
-          require(ngx_evaluate(list, feature, &inputs, nullptr) == dlssg_fixture::success,
-            "DLSS-G evaluation observation changed the SDK result");
-          if (observed_state) {
-            transition(list, selected->resource.p, read, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            transition(list, hudless.p, read, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
-            transition(list, backbuffer.p, read, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
-          }
-        };
-        const auto before_dlssg = last_refusal().serial;
-        render_tracked_depth = dlssg_frame;
-        settle_route("DLSSG-unobserved-state-SR-depth", false);
-        for (unsigned frame = 0; frame < 30; ++frame) {
-          step(); no_effects(); const auto s = inspect();
-          require(active(s) && !s.source.reused_depth && !s.source.frame_generation_input,
-            "DLSS-G depth without an observed state changed the viewport's SR depth");
-        }
-        {
-          // DLSS-G's evaluation is each frame's last call: its refusal is the newest.
-          namespace refusal = sunshine_depth_refusal;
-          const auto refused = last_refusal();
-          std::printf("MEASURE native-provider DLSSG-unobserved-refusal provider=%u gate=%u class=%u name=%s stage=%u status=%u fg=%u serial=%llu\n",
-            unsigned(refused.provider), unsigned(refused.where), unsigned(refused.reason), refused.name, unsigned(refused.stage),
-            unsigned(refused.status), unsigned(refused.frame_generation), static_cast<unsigned long long>(refused.serial));
-          require(refused.serial > before_dlssg && refused.provider == refusal::adapter::dlss_g &&
-              refused.where == refusal::gate::capture && refused.stage == sunshine_streamline::depth_capture::record_stage::missing_state &&
-              refused.reason == refusal::reason_class::state_unprovable && refused.frame_generation,
-            "The refusal query did not report DLSS-G's unobserved depth as a state_unprovable capture refusal");
-        }
-        require(reshade_log_contains({"Sunshine NGX depth:", "dlssg_depth={copied=0 inner_frames=0 refused=missing_state:"}),
-          "Refused DLSS-G depth copies were not counted by their missing_state reason");
-        require(!reshade_log_number_above("Sunshine UI capture gate:", "hudless_presents={batch=", 0, 0),
-          "A same-batch HUD-less pair was counted before DLSS-G's inputs were observed");
-        observed_state = true;
-        settle_route("DLSSG-evaluation-owns-FG-depth", true);
-        for (unsigned pair = 0; pair < 6; ++pair) {
-          render_tracked_depth = dlssg_frame;
-          step(); no_effects(); const auto real = inspect();
-          require(active(real) && !real.source.reused_depth && real.source.frame_generation_input,
-            "A real Present lost DLSS-G's FG depth or let SR depth compete with it");
-          render_tracked_depth = {};
-          step(); no_effects(); const auto generated = inspect();
-          if (!pair) log_status("DLSSG-evaluation-generated-hold", generated);
-          require(active(generated) && generated.source.reused_depth && generated.source.frame_generation_input &&
+      run_script({"dynamic-resolution", 30000, {},
+        [&] {
+          const sunshine_streamline::extent drs[] = {{0, 0, selected->width, selected->height-3},
+            {0, 0, selected->width*7/8, selected->height*7/8}, {0, 0, selected->width*3/4, selected->height*3/4}};
+          for (unsigned pair = 0; pair < 12; ++pair) {
+            active_area = drs[pair / 2 % 3];
+            render_tracked_depth = [this] { real_fg_frame(); };
+            present_frame(); const auto real = inspect();
+            render_tracked_depth = {};
+            present_frame(); const auto generated = inspect();
+            if (pair % 2 == 0) log_status("SLFG-dynamic-resolution-generated", generated);
+            require(active(real) && !real.source.reused_depth && active(generated) && generated.source.reused_depth &&
               generated.source.current.capture == real.source.current.capture && same_scale(generated.scale, real.scale),
-            "A generated Present did not hold its real frame's DLSS-G depth");
-        }
-        render_tracked_depth = dlssg_frame;
-        require(reshade_log_contains({"Sunshine Streamline FG depth refused: reason=boundary_without_commands", "fg_scope=live",
-            "withdrawn=0", "dlssg_supplied=1"}),
-          "A command-less FG tag withdrew the FG source DLSS-G's evaluation supplies");
-        require(reshade_log_number_above("Sunshine NGX depth:", "dlssg_depth={copied=", 0),
-          "Accepted DLSS-G depth copies were not counted");
-        require(reshade_log_number_above("Sunshine NGX depth:", "dlssg_ui={offered=", 0) &&
-            reshade_log_number_above("Sunshine NGX depth:", " captured=", 0),
-          "DLSS-G's HUD-less and Backbuffer were not captured for UI detection");
-        require(reshade_log_number_above("Sunshine UI capture gate:", "hudless_presents={batch=", 0, 12000),
-          "DLSS-G's HUD-less image did not reach UI detection with its same-evaluation Backbuffer as an exact pair");
-        // The game's own HUD-less and Backbuffer tags copy on its command list
-        // (as in a game whose Streamline UI tags already work with FG on): per
-        // kind the tag keeps precedence, as for depth. The evaluation offers
-        // neither input again (dlssg_ui tag_copied), so no second full-size
-        // copy competes for the kind's two snapshots, and UI detection keeps
-        // the tags' own same-batch pair.
-        ui_tag_commands = true;
-        for (const auto settled = GetTickCount64() + 300; GetTickCount64() < settled;) { step(); no_effects(); }
-        const auto ngx_lines = [&] { return reshade_log_lines({"Sunshine NGX depth:", "dlssg_ui={offered="}); };
-        const auto gate_lines = [&] { return reshade_log_lines({"Sunshine UI capture gate:", "hudless_presents={batch="}); };
-        const auto wait_lines = [&](const auto &lines, std::size_t count) {
-          for (const auto until = GetTickCount64() + 16000; lines().size() < count && GetTickCount64() < until;) {
-            step(); no_effects();
+              "A dynamic render size of the same FG source lost depth or reset its scale");
           }
-          auto found = lines();
-          require(found.size() >= count, "The bounded NGX or UI capture gate line stopped while Streamline tags copied UI");
-          return found;
-        };
-        const auto ngx_start = ngx_lines().size(), gate_start = gate_lines().size();
-        // Every frame between two NGX lines written after the switch had the tags' copies.
-        const auto ngx = wait_lines(ngx_lines, ngx_start + 2);
-        const auto &first_line = ngx[ngx_start], &second_line = ngx[ngx_start + 1];
-        const auto ui_field = [](const std::string &line, const char *field) { return number_after(line, field, "dlssg_ui={"); };
-        require(ui_field(second_line, "offered=") == ui_field(first_line, "offered=") &&
-            ui_field(second_line, " captured=") == ui_field(first_line, " captured=") &&
-            ui_field(second_line, "tag_copied:") > ui_field(first_line, "tag_copied:"),
-          "DLSS-G's evaluation offered a HUD-less or Backbuffer input the game's own Streamline tags had copied");
-        // A gate window wholly after the switch: the tags' exact pairs.
-        const auto gate = wait_lines(gate_lines, gate_start + 2);
-        require(number_after(gate[gate_start + 1], "hudless_presents={batch=") > 0,
-          "The Streamline tags' HUD-less image did not reach UI detection with its same-batch Backbuffer");
-        const auto captured_behind_tags = ui_field(second_line, " captured=");
-        ui_tag_commands = false;
-        // An FG tag with a command list copies the frame first and keeps
-        // precedence: the evaluation adds no second copy (tag_copied). The
-        // UI tags are command-less again (refused): DLSS-G's UI inputs are
-        // captured again at once.
-        tag_commands = true;
-        settle_route("DLSSG-evaluation-behind-FG-tag-copies", true);
-        require(reshade_log_contains({"Sunshine NGX depth:", "dlssg_depth={copied=", "tag_copied:"}),
-          "DLSS-G's evaluation copied a frame its Streamline FG tag had already copied");
-        require(reshade_log_number_above("Sunshine NGX depth:", " captured=", captured_behind_tags),
-          "Refused Streamline UI tags did not hand their kinds back to DLSS-G's evaluation");
-        tag_commands = false;
-        // Refused again: the scope falls silent and SR depth returns.
-        observed_state = false;
-        settle_route("DLSSG-refused-again-SR-depth", false);
-        require(ngx_release(feature) == dlssg_fixture::success && dlssg_fixture::evaluated > evaluations_before,
-          "DLSS-G fixture release failed or its evaluations never ran");
-        // Accepted FG tag copies own the viewport again, as before this case.
-        render_tracked_depth = [&] { fallback_frame(true, true); };
-        settle_route("DLSSG-case-done-FG-tags-own-again", true);
-        evidence << "dlssg-evaluation unobserved=SR observed=FG-owned generated=held ui=exact-batch ui-tags-with-commands=tag-copied\n";
-        std::puts("PASS native DLSS-G evaluation: DLSSG.Depth without an observed state is refused and counted with SR depth unchanged; in an observed state it owns the FG scope, generated Presents hold it, the command-less FG tag withdraws nothing, its HUD-less/Backbuffer pair reaches UI detection exactly, and FG depth and HUD-less/Backbuffer tags that copy keep precedence per kind; no FX");
-      }
-      // The same refused FG tags with no SR evaluation (DLSS-G without DLSS
-      // SR/RR): a silent scope only lets an API source of the viewport
-      // through. With none, enabled FG still holds the queue in mono, so the
-      // generic selector never takes real or generated FG presentations.
-      const auto silent_lines = [&] {
-        return reshade_log_count({"Sunshine Streamline frame generation depth scope: silent viewport=0"});
-      };
-      const auto generic_lines = [&] { return reshade_log_count({"using generic depth fallback"}); };
-      const auto silent_before = silent_lines(), generic_before = generic_lines();
-      const auto held_frame = [&] {
-        step(); no_effects(); const auto s = inspect();
-        require(s.source.selected, "A silent FG scope with no API source handed the queue to the generic depth selector");
-        return s;
-      };
-      render_tracked_depth = [&] { fallback_frame(false, false); };
-      for (const auto until = GetTickCount64() + 7000; silent_lines() == silent_before && GetTickCount64() < until;) held_frame();
-      require(silent_lines() > silent_before, "Refused FG tags without SR did not turn the FG scope silent");
-      status mono;
-      for (const auto start = GetTickCount64(); GetTickCount64() - start < 1500;) mono = held_frame();
-      log_status("SLFG-silent-scope-no-API-source", mono);
-      require(!mono.source.ready && generic_lines() == generic_before,
-        "A silent FG scope with no API source supplied depth or used the generic depth fallback");
-      std::puts("PASS native SLFG scope: refused FG tags let the same viewport's SR depth through after a second, never before; an accepted FG copy owns the viewport again and SR stays out; with no SR the silent scope stays mono, never generic; no FX");
+          active_area = {0, 0, selected->width, selected->height-3};
+          render_tracked_depth = [this] { real_fg_frame(); };
+          // Its line (at most every 5 s) names the smallest extent of this run.
+          const auto smallest = "active=" + std::to_string(drs[2].width) + 'x' + std::to_string(drs[2].height) + "..";
+          require(reshade_log_contains({"Sunshine depth render size: changed=", smallest.c_str(), "provider=Streamline",
+              "depth stays ready"}),
+            "Dynamic render sizes produced no render size line");
+        }, {}});
+      run_script({"fg-off", 30000, {},
+        [&] {
+          render_tracked_depth = {};
+          configure_fg(false);
+          present_frame();
+          const auto off = inspect(); log_status("FG-off-without-new-depth", off);
+          require(!off.ready() && !off.source.ready && !off.source.reused_depth,
+            "Disabling FG retained previous-frame depth for a color-only presentation");
+        },
+        [&] {
+          active_area = {0, 0, selected->width, selected->height};
+          render_tracked_depth = [this] { draw_frame(); };
+          settle("SL-recovered-after-FG-off");
+          std::puts("PASS native SLFG 2x: actual cropped SDK depth, eight real/generated pairs with retained completed depth, FG-off rejection and fresh SL recovery; no FX");
+        }});
+    }
 
-      // Use the same public SDK boundary for linear RR depth with no usable
-      // camera. The native copy, provider acquisition and GPU moment readback
-      // remain production paths; only the game-authored input is synthetic.
-      configure(false);
-      using center_t = bool (*)(api::effect_runtime *, provider::center_sample *);
-      const auto query_center = reinterpret_cast<center_t>(GetProcAddress(
-        GetModuleHandleW(L"SunshineSBSTest.addon64"), "SunshineStreamlineTestCenter"));
-      require(query_center, "Linear provider fixture lacks passive moment observation");
-      const float original_center = center_raw;
-      const auto original_area = active_area;
-      active_area = {0, 0, selected->width, selected->height};
-      render_tracked_depth = [&] {
-        draw(*decoy); write_depth_pixels();
-        abi_v2::frame_token *token{}; const auto frame = ++fg_frame;
-        require(new_token(token, &frame) == 0 && token, "Linear RR SDK did not supply a frame token");
-        // This frame has no camera metadata. Publishing malformed matrices
-        // instead would intentionally invalidate the observation revision and
-        // test a different contract from linear depth without a camera.
-        abi_v2::resource resource{}; resource.base = {nullptr, resource_guid, 1};
-        resource.type = 8; resource.native = selected->resource.p; resource.state = unsigned(selected->state);
-        resource.width = selected->width; resource.height = selected->height;
-        resource.native_format = DXGI_FORMAT_R32_FLOAT; resource.mip_levels = resource.array_layers = 1;
-        // Clear the preceding hardware-depth tag so it cannot hide tag49.
-        const abi_v2::resource_tag tags[]{
-          {{nullptr, tag_guid, 1}, nullptr, 0, 1, {}},
-          {{nullptr, tag_guid, 1}, &resource, 49, 1, active_area}};
-        const auto tagged = tag_call ? tag_call(*token, viewport, tags, 2, reinterpret_cast<void *>(game_native_command)) :
-          global_tag_call(viewport, tags, 2, reinterpret_cast<void *>(game_native_command));
-        require(tagged == 0, "Linear RR tag observation changed the SDK result");
-        const base_structure *inputs[]{&viewport.base};
-        require(evaluate(1001, *token, inputs, 1, reinterpret_cast<void *>(game_native_command)) == 0,
-          "Linear RR evaluation changed the SDK result");
-      };
-      for (const float center_value : {original_center, 0.f, -1.f,
-          std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity()}) {
-        const auto preceding = inspect().source.current.sequence;
-        center_raw = center_value;
-        provider::center_sample sampled;
-        status s;
-        unsigned consecutive{};
-        const auto until = GetTickCount64() + 15000;
-        do {
-          step(); no_effects(); s = inspect();
-          const bool complete = query_center(observed.runtime, &sampled) && sampled.metadata.sequence > preceding &&
-            sampled.metadata.resource.native == native(*selected) && !sampled.metadata.projection.supplied &&
-            sampled.metadata.projection.encoding == sunshine_scene_depth::depth_encoding::linear_distance &&
-            sampled.moments.supplied && sampled.moments.valid &&
-            sampled.moments.encoding == sunshine_scene_depth::depth_encoding::linear_distance;
-          const bool selected_linear = s.ready() && s.source.selected && s.source.ready && !s.source.reused_depth &&
-            s.source.provider == sunshine_scene_depth::provider_kind::streamline &&
-            s.source.current.resource == native(*selected) && s.source.current.capture &&
-            s.basis == unsigned(sunshine_game3d::automatic_scale_basis::linear_distance) &&
-            s.scale_state == unsigned(sunshine_game3d::automatic_scale_state::active) && std::isfinite(s.scale) && s.scale > 0;
-          consecutive = complete && selected_linear ? consecutive + 1 : 0;
-        } while (consecutive < 8 && GetTickCount64() < until);
-        log_status("SL-RR-linear-no-camera", s);
-        require(consecutive >= 8, "Linear RR input failed native capture/acquisition/calibration without camera matrices");
-        const auto raw = read(selected->resource.p, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        require(raw.size() == size_t(selected->width) * selected->height * sizeof(float),
-          "Linear provider source readback has the wrong extent");
-        std::uint64_t count{};
-        double sum{}, squared{};
-        for (size_t offset = 0; offset < raw.size(); offset += sizeof(float)) {
-          float distance{}; std::memcpy(&distance, raw.data() + offset, sizeof(distance));
-          if (!std::isfinite(distance) || distance <= 0.f) continue;
-          const double inverse = 1. / distance;
-          ++count; sum += inverse; squared += inverse * inverse;
+    // Keep the original measured trajectory above unchanged. These additional
+    // native presentations exercise the lifetime of the private display copy,
+    // without an FX callback, injected readiness or synthetic GPU completion.
+    void fg_cache() {
+      status expiry_seed;
+      std::uint64_t seed_started{}, seed_returned{};
+      unsigned seed_frame{};
+      run_script({"cache-expiry", 45000,
+        [&] {
+          configure_fg(true); render_tracked_depth = [this] { real_fg_frame(); };
+          expiry_seed = settle("SLFG-cache-expiry-seed");
+          seed_started = tag_started; seed_returned = tag_returned;
+          seed_frame = fg_frame;
+        },
+        [&] {
+          render_tracked_depth = {};
+          unsigned holds{};
+          std::uint64_t last_held{};
+          do {
+            held_fg(expiry_seed, holds ? nullptr : "SLFG-cache-expiry-first-hold");
+            last_held = GetTickCount64(); ++holds;
+          } while (holds < 2 || last_held < seed_returned + 140);
+          require(last_held >= seed_started && last_held - seed_started < sunshine_scene_depth::maximum_source_age_ms,
+            "Native expiry fixture exhausted its source-age window before exercising repeated holds");
+          log_status("SLFG-cache-expiry-last-hold", inspect());
+          // The public passive status exposes identity, not the private capture tick.
+          // Bracket the actual SDK tag instead: expiry after its upper time bound,
+          // while the most recent successful hold is still young, distinguishes the
+          // original capture lifetime from a TTL accidentally renewed on each hold.
+          const auto expiry_at = seed_returned + sunshine_scene_depth::maximum_source_age_ms + 20;
+          const auto before_expiry_wait = GetTickCount64();
+          if (before_expiry_wait < expiry_at) Sleep(DWORD(expiry_at - before_expiry_wait));
+          missing_fg("SLFG-cache-expired-after-repeated-holds");
+          const auto expired = GetTickCount64();
+          require(expired >= expiry_at && expired >= last_held &&
+            expired - last_held < sunshine_scene_depth::maximum_source_age_ms && fg_frame == seed_frame &&
+            tag_started == seed_started && tag_returned == seed_returned,
+            "Native expiry fixture did not distinguish the original capture age from renewed hold age");
+          missing_fg("SLFG-cache-expired-no-revival");
+          std::printf("MEASURE native FG cache expiry holds=%u tag_begin_ms=%llu tag_end_ms=%llu last_hold_ms=%llu expired_ms=%llu\n",
+            holds, static_cast<unsigned long long>(seed_started), static_cast<unsigned long long>(seed_returned),
+            static_cast<unsigned long long>(last_held), static_cast<unsigned long long>(expired));
+        },
+        [&] { recovered_fresh(expiry_seed, "SLFG-cache-expiry-fresh-recovery"); }});
+
+      status reset_seed;
+      std::uint64_t reset_seed_started{};
+      unsigned reset_seed_frame{};
+      run_script({"camera-reset", 45000,
+        [&] {
+          reset_seed = settle("SLFG-cache-reset-seed");
+          reset_seed_started = tag_started;
+          reset_seed_frame = fg_frame;
+        },
+        [&] {
+          render_tracked_depth = {};
+          held_fg(reset_seed, "SLFG-cache-reset-before-hold");
+          // A reset ends temporal history, not the finished copy of an earlier
+          // frame: like any gap, the copy is held only within its own source age.
+          render_tracked_depth = [this] {
+            require(last_token, "Native camera-reset fixture has no existing frame token");
+            const auto constants = camera_constants(true);
+            require(sl.constants(constants, *last_token, fg_viewport) == 0, "Camera reset changed the SDK result");
+          };
+          held_fg(reset_seed, "SLFG-cache-camera-reset-hold");
+          render_tracked_depth = [this] {
+            const auto constants = camera_constants(false);
+            require(sl.constants(constants, *last_token, fg_viewport) == 0, "Camera recovery changed the SDK result");
+          };
+          held_fg(reset_seed, "SLFG-cache-camera-valid-without-depth");
+          require(GetTickCount64() - reset_seed_started < sunshine_scene_depth::maximum_source_age_ms,
+            "Native camera-reset fixture expired before its holds were observed");
+          render_tracked_depth = {};
+          require(fg_frame == reset_seed_frame, "Camera-reset hold case accidentally produced a new real frame");
+        },
+        [&] { recovered_fresh(reset_seed, "SLFG-cache-camera-reset-fresh-recovery"); }});
+
+      status mode_seed;
+      unsigned mode_seed_frame{};
+      run_script({"mode-off-on", 45000,
+        [&] {
+          mode_seed = settle("SLFG-cache-mode-seed");
+          mode_seed_frame = fg_frame;
+        },
+        [&] {
+          render_tracked_depth = {};
+          held_fg(mode_seed, "SLFG-cache-mode-before-hold");
+          configure_fg(false); missing_fg("SLFG-cache-mode-off");
+          configure_fg(true); missing_fg("SLFG-cache-mode-on-without-depth");
+          missing_fg("SLFG-cache-mode-on-no-revival");
+          require(fg_frame == mode_seed_frame, "FG mode no-revival case accidentally produced a new real frame");
+        },
+        [&] {
+          recovered_fresh(mode_seed, "SLFG-cache-mode-fresh-recovery");
+          std::puts("PASS native FG cache: repeated holds cannot renew capture age; camera reset keeps the finished copy within its age; FG off/on cannot revive old depth; fresh copies recover all three intervals; no FX");
+        }});
+    }
+
+    // The Witcher 3 pattern with FG off: each frame tags depth valid until
+    // present, evaluates, then clears the tag before present, while another
+    // viewport sends reset constants every frame. Neither the clear nor the
+    // foreign reset is lost evidence, so every presentation has fresh depth.
+    void fg_until_present_clear() {
+      run_script({"until-present-clear-foreign-reset", 20000,
+        [&] { configure_fg(false); },
+        [&] {
+          render_tracked_depth = [this] {
+            using namespace sunshine_streamline;
+            const abi_v2::viewport foreign_viewport{{nullptr, viewport_guid, 1}, 7};
+            auto &token = begin_fg_frame("Until-present SDK did not supply a frame token");
+            require(sl.constants(camera_constants(true), token, foreign_viewport) == 0 &&
+                sl.constants(camera_constants(false), token, fg_viewport) == 0,
+              "Until-present constants observation changed the SDK result");
+            const auto resource = depth_resource();
+            const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, 1, active_area};
+            const auto command = reinterpret_cast<void *>(game_native_command);
+            require(sl.global_tag(fg_viewport, &tag, 1, command) == 0, "Until-present tag observation changed the SDK result");
+            const base_structure *inputs[]{&fg_viewport.base};
+            require(sl.evaluate(0, token, inputs, 1, command) == 0, "Until-present evaluation changed the SDK result");
+            const abi_v2::resource_tag cleared{{nullptr, tag_guid, 1}, nullptr, 0, 1, {}};
+            require(sl.global_tag(fg_viewport, &cleared, 1, command) == 0, "Until-present clear changed the SDK result");
+          };
+          settle("SL-until-present-clear-foreign-reset");
+          std::puts("PASS native SL provider: depth cleared after evaluation and another viewport's per-frame camera reset keep fresh depth every presentation; no FX");
+        }, {}});
+    }
+
+    // Assassin's Creed Shadows with FG on (10-22): after its FG depth tag
+    // each frame sends a global depth untag, a null Resource or one whose
+    // native is null, with or without a command list (sl_core_api.h: a null
+    // resource removes the tag). An untag is not a capture attempt: the FG
+    // depth captured at the tag stays the viewport's source, so every
+    // presentation keeps fresh FG depth.
+    void fg_untag() {
+      using namespace sunshine_streamline;
+      com_ptr<ID3D12Resource> hudless;
+      run_script({"untag", 110000,
+        [&] { configure_fg(true); },
+        [&] {
+          for (const bool null_native : {false, true}) for (const bool untag_commands : {true, false}) {
+            render_tracked_depth = [&] {
+              real_fg_frame();
+              abi_v2::resource empty{};
+              const abi_v2::resource_tag untag{{nullptr, tag_guid, 1}, null_native ? &empty : nullptr, 0, 0, {}};
+              require(sl.global_tag(fg_viewport, &untag, 1, untag_commands ? reinterpret_cast<void *>(game_native_command) : nullptr) == 0,
+                "FG depth untag changed the SDK result");
+            };
+            settle(null_native ? untag_commands ? "SLFG-untag-null-native" : "SLFG-untag-null-native-without-commands" :
+              untag_commands ? "SLFG-untag-null-resource" : "SLFG-untag-null-resource-without-commands");
+          }
+          // DLSS-G integrations tag HUD-less color every frame, possibly in the
+          // same call as the depth untag. Only the call's depth tags make it an
+          // untag, so a real color tag beside them keeps fresh FG depth too.
+          {
+            D3D12_RESOURCE_DESC desc{};
+            desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D; desc.Width = width; desc.Height = height;
+            desc.DepthOrArraySize = desc.MipLevels = 1; desc.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
+            desc.SampleDesc.Count = 1; desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+            const auto heap = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
+            checked(game->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+              D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(hudless.put())), "Create FG HUD-less input");
+          }
+          for (const bool untag_commands : {true, false}) {
+            render_tracked_depth = [&] {
+              real_fg_frame();
+              abi_v2::resource color{}; color.base = {nullptr, resource_guid, 1};
+              color.native = hudless.p; color.state = D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE;
+              color.width = width; color.height = height; color.native_format = DXGI_FORMAT_R10G10B10A2_UNORM;
+              color.mip_levels = color.array_layers = 1;
+              const abi_v2::resource_tag tags[]{{{nullptr, tag_guid, 1}, nullptr, 0, 0, {}},
+                {{nullptr, tag_guid, 1}, &color, 2, 1, {0, 0, width, height}}};
+              require(sl.global_tag(fg_viewport, tags, 2, untag_commands ? reinterpret_cast<void *>(game_native_command) : nullptr) == 0,
+                "FG depth untag beside a HUD-less tag changed the SDK result");
+            };
+            settle(untag_commands ? "SLFG-untag-beside-hudless" : "SLFG-untag-beside-hudless-without-commands");
+          }
+          const abi_v2::resource_tag no_hudless{{nullptr, tag_guid, 1}, nullptr, 2, 0, {}};
+          require(sl.global_tag(fg_viewport, &no_hudless, 1, nullptr) == 0, "HUD-less untag changed the SDK result");
+          // A malformed tag that names a native resource is no untag: it still
+          // withdraws the FG source, so no presentation copies fresh depth.
+          render_tracked_depth = [this] {
+            real_fg_frame();
+            // A typed Resource of version 0 (a later version is read by its v1 fields).
+            abi_v2::resource malformed{}; malformed.base = {nullptr, resource_guid, 0};
+            malformed.type = 8; malformed.native = selected->resource.p; malformed.state = unsigned(selected->state);
+            malformed.width = selected->width; malformed.height = selected->height;
+            const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &malformed, 0, 0, active_area};
+            require(sl.global_tag(fg_viewport, &tag, 1, reinterpret_cast<void *>(game_native_command)) == 0,
+              "Malformed FG depth tag changed the SDK result");
+          };
+          for (unsigned frame = 0; frame < 12; ++frame) {
+            present_frame(); const auto s = inspect();
+            if (!frame) log_status("SLFG-malformed-tag-after-depth", s);
+            require(!(active(s) && !s.source.reused_depth), "A malformed FG tag naming a native was treated as an untag");
+          }
+        },
+        [&] {
+          render_tracked_depth = [this] { real_fg_frame(); };
+          settle("SLFG-recovered-after-malformed-tag");
+          std::puts("PASS native SLFG untag: a null Resource or null native after each FG tag, with or without commands and beside a HUD-less tag, keeps fresh FG depth every presentation; a malformed tag still withdraws; no FX");
+        }});
+    }
+
+    // A ValidUntilPresent FG tag may legally arrive without a command list,
+    // which leaves no point to copy it at: the boundary is withdrawn, and
+    // the bounded withdrawal line names that reason and the tag. The test
+    // add-on's refusal query reports it at once, with its contract class.
+    void fg_commandless_refusal() {
+      run_script({"commandless-refusal", 30000, {},
+        [&] {
+          const auto before_commandless = last_refusal().serial;
+          render_tracked_depth = [this] { commandless_fg_frame(); };
+          {
+            namespace refusal = sunshine_depth_refusal;
+            const auto refused = refusal_after(before_commandless);
+            std::printf("MEASURE native-provider SLFG-commandless-refusal provider=%u gate=%u class=%u name=%s viewport=%u fg=%u sequence=%llu serial=%llu\n",
+              unsigned(refused.provider), unsigned(refused.where), unsigned(refused.reason), refused.name, refused.viewport,
+              unsigned(refused.frame_generation), static_cast<unsigned long long>(refused.sequence), static_cast<unsigned long long>(refused.serial));
+            require(refused.serial > before_commandless && refused.provider == refusal::adapter::streamline &&
+                refused.where == refusal::gate::source && refused.reason == refusal::reason_class::no_copy_point &&
+                !std::strcmp(refused.name, "boundary_without_commands") && refused.frame_generation && refused.viewport == fg_viewport.value,
+              "The refusal query did not report the command-less FG tag as a no_copy_point source refusal");
+          }
+          require(reshade_log_contains({"Sunshine Streamline FG depth refused: reason=boundary_without_commands", "tag_type=0",
+              "scope=global", "lifecycle=1", "command=0x0 ", "fg=1"}),
+            "A command-less FG tag boundary was refused without naming its reason");
+        },
+        [&] {
+          render_tracked_depth = [this] { real_fg_frame(); };
+          settle("SLFG-recovered-after-commandless-tag");
+          std::puts("PASS native SLFG refusal: a command-less ValidUntilPresent FG tag is refused and logged as boundary_without_commands; no FX");
+        }});
+    }
+
+    // Assassin's Creed Shadows with FG on (10-22): FG options stay on, but
+    // every FG depth tag is refused (here: sent without a command list)
+    // and then untagged, while the same viewport's SR evaluation tags its
+    // own depth with commands. FG owns that viewport's depth only while an
+    // FG copy was accepted within a second; after that its scope is silent
+    // and SR supplies depth. An accepted FG copy takes ownership back at
+    // once, and SR stays shut out while FG copies keep arriving.
+    void fg_silent_scope() {
+      run_script({"silent-scope", 80000, {},
+        [&] {
+          render_tracked_depth = [this] { fallback_frame(false, true); };
+          const auto silent_start = GetTickCount64();
+          for (std::uint64_t now = silent_start; now - silent_start < 700; now = GetTickCount64()) {
+            present_frame(); const auto s = inspect();
+            require(!(s.ready() && s.source.ready && !s.source.frame_generation_input && !s.source.reused_depth),
+              "SR depth replaced FG within a second of its last accepted FG copy");
+          }
+          settle_route("SLFG-silent-scope-SR-depth", false);
+          require(GetTickCount64() - silent_start >= 1000, "SR took the viewport's depth before the FG scope fell silent");
+          require(reshade_log_contains({"Sunshine Streamline frame generation depth scope: silent viewport=0"}) &&
+              reshade_log_contains({"Sunshine Streamline FG depth refused: reason=boundary_without_commands", "fg_scope=silent", "withdrawn=0"}),
+            "The silent FG scope or its refused boundaries were not logged");
+          // Its generated Presents (no SL call, no depth draw) hold the real
+          // frame's SR copy exactly as FG depth is held, at 2x and 3x, also while
+          // the game window is in the background: the export stop invalidates
+          // reuse once, never on every Present. Assassin's Creed Shadows (10-23)
+          // logged a readiness loss on every generated Present for the 42 s its
+          // window was in the background (no_retained_depth).
+          const auto losses_before_cadence = readiness_losses();
+          silent_cadence("SLFG-silent-scope-SR-generated-2x", 1);
+          silent_cadence("SLFG-silent-scope-SR-generated-3x", 2);
+          // The window leaves the foreground: one real Present stops the export
+          // (its pause line, then one reuse invalidation of a fresh copy, which
+          // stays ready); the next real frame arms the hold again.
+          const auto pauses = reshade_log_count({"Sunshine SBS: export inactive (not_foreground"});
+          set_foreground(nullptr);
+          render_tracked_depth = [this] { fallback_frame(false, true); };
+          present_frame();
+          require(active(inspect()), "The export stop withdrew a fresh SR copy");
+          for (const auto until = GetTickCount64() + 7000;
+              reshade_log_count({"Sunshine SBS: export inactive (not_foreground"}) == pauses && GetTickCount64() < until;) {
+            present_frame();
+            require(active(inspect()), "A real Present in the background lost its fresh SR depth");
+          }
+          require(reshade_log_count({"Sunshine SBS: export inactive (not_foreground"}) == pauses + 1,
+            "The fixture's focus loss did not stop the export exactly once");
+          silent_cadence("SLFG-silent-scope-SR-background-2x", 1);
+          silent_cadence("SLFG-silent-scope-SR-background-3x", 2);
+          set_foreground(window);
+          silent_cadence("SLFG-silent-scope-SR-foreground-again-2x", 1);
+          require(readiness_losses() == losses_before_cadence,
+            "Silent-scope generated Presents logged a readiness loss or a reuse invalidation");
+        },
+        [&] {
+          render_tracked_depth = [this] { fallback_frame(true, true); };
+          settle_route("SLFG-accepted-copy-owns-again", true);
+          for (unsigned frame = 0; frame < 30; ++frame) {
+            present_frame(); const auto s = inspect();
+            require(active(s) && s.source.frame_generation_input,
+              "SR depth competed with a viewport whose FG copies keep being accepted");
+          }
+          require(reshade_log_contains({"Sunshine Streamline frame generation depth scope: live viewport=0"}),
+            "The FG scope's return to live was not logged");
+        }});
+    }
+
+    // DLSS-G's own NGX evaluation (feature 11) of each real frame, as in
+    // Assassin's Creed Shadows (10-23): the game tags FG depth, HUD-less and
+    // Backbuffer without a command list (refused), its SR evaluation tags its own
+    // depth, and DLSS-G evaluates DLSSG.Depth (with DLSSG.DepthInverted and
+    // DLSSG.DepthSubrect*), DLSSG.HUDLess and DLSSG.Backbuffer on its own
+    // command list. Copies are made only in a state observed on that list.
+    // Without one every copy is refused, counted, and nothing changes: the
+    // silent scope keeps SR depth. With one, DLSSG.Depth is the FG source
+    // (its accepted copies keep the scope live, so SR stays out and the
+    // command-less tag withdraws nothing), generated Presents hold it, and
+    // its HUD-less/Backbuffer pair reaches UI detection as one exact batch.
+    void fg_dlssg_evaluation() {
+      using namespace sunshine_streamline;
+      const auto exe = GetModuleHandleW(nullptr);
+      const auto ngx_create = reinterpret_cast<decltype(&NVSDK_NGX_D3D12_CreateFeature)>(
+        GetProcAddress(exe, "NVSDK_NGX_D3D12_CreateFeature"));
+      const auto ngx_evaluate = reinterpret_cast<decltype(&NVSDK_NGX_D3D12_EvaluateFeature)>(
+        GetProcAddress(exe, "NVSDK_NGX_D3D12_EvaluateFeature"));
+      const auto ngx_release = reinterpret_cast<decltype(&NVSDK_NGX_D3D12_ReleaseFeature)>(
+        GetProcAddress(exe, "NVSDK_NGX_D3D12_ReleaseFeature"));
+      require(ngx_create && ngx_evaluate && ngx_release, "DLSS-G fixture lacks its exported NGX entry points");
+      auto color = backbuffers[0]->GetDesc();
+      color.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+      const auto heap = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
+      com_ptr<ID3D12Resource> hudless, backbuffer;
+      checked(game->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &color, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE,
+        nullptr, IID_PPV_ARGS(hudless.put())), "Create the DLSS-G HUD-less input");
+      checked(game->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &color, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE,
+        nullptr, IID_PPV_ARGS(backbuffer.put())), "Create the DLSS-G Backbuffer input");
+      // The DLSSG.* keys the DLSS-G helpers set (nvsdk_ngx_helpers_dlssg_d3d.h):
+      // one real frame per evaluation, inverted depth, and its subrect each frame.
+      ngx_fixture::parameters inputs;
+      inputs.set_resource("DLSSG.Depth", selected->resource.p);
+      inputs.set_resource("DLSSG.HUDLess", hudless.p);
+      inputs.set_resource("DLSSG.Backbuffer", backbuffer.p);
+      inputs.set_ui("DLSSG.DepthInverted", 1);
+      inputs.set_ui("DLSSG.MultiFrameIndex", 1);
+      inputs.set_ui("DLSSG.MultiFrameCount", 1);
+      void *feature{};
+      bool observed_state = false, tag_commands = false, ui_tag_commands = false;
+      const auto evaluations_before = ngx_fixture::evaluated;
+      const auto dlssg_frame = [&] {
+        fallback_frame(tag_commands, true);
+        auto *list = reinterpret_cast<ID3D12GraphicsCommandList *>(game_native_command);
+        // The game's own HUD-less (2) and Backbuffer (53) tags, in their
+        // declared state: command-less as in Shadows, or on the game's list.
+        const auto color_resource = [&](ID3D12Resource *native) {
+          abi_v2::resource value{}; value.base = {nullptr, resource_guid, 1};
+          value.type = 8; value.native = native;
+          value.state = unsigned(D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+          value.width = width; value.height = height;
+          value.native_format = unsigned(color.Format); value.mip_levels = value.array_layers = 1;
+          return value;
+        };
+        const auto hudless_resource = color_resource(hudless.p), backbuffer_resource = color_resource(backbuffer.p);
+        const abi_v2::resource_tag ui_tags[]{{{nullptr, tag_guid, 1}, &hudless_resource, 2, 1, {0, 0, width, height}},
+          {{nullptr, tag_guid, 1}, &backbuffer_resource, 53, 1, {0, 0, width, height}}};
+        require(sl.global_tag(fg_viewport, ui_tags, 2, ui_tag_commands ? reinterpret_cast<void *>(game_native_command) : nullptr) == 0,
+          "The HUD-less and Backbuffer tags changed the SDK result");
+        if (!feature)
+          require(ngx_create(list, 11, &inputs, &feature) == ngx_fixture::success && feature, "DLSS-G feature creation failed");
+        require(selected->state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "DLSS-G fixture depth left its UAV state");
+        inputs.set_ui("DLSSG.DepthSubrectBaseX", active_area.left);
+        inputs.set_ui("DLSSG.DepthSubrectBaseY", active_area.top);
+        inputs.set_ui("DLSSG.DepthSubrectWidth", active_area.width);
+        inputs.set_ui("DLSSG.DepthSubrectHeight", active_area.height);
+        // DLSS-G's recording transitions its inputs, as Streamline's DLSS-G
+        // plugin does; without that no state is observed on it.
+        constexpr auto read = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        if (observed_state) {
+          transition(list, selected->resource.p, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, read);
+          transition(list, hudless.p, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, read);
+          transition(list, backbuffer.p, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, read);
         }
-        const auto &moments = sampled.moments;
-        require(moments.count == count && std::abs(moments.sum - sum) <= sum * 2e-5 &&
-            std::abs(moments.sum_squares - squared) <= squared * 2e-5,
-          "Native provider linear moments included invalid distances or decoded device depth");
-        require(count && (std::isfinite(center_value) && center_value > 0.f ?
-            count == std::uint64_t(selected->width) * selected->height :
-            count < std::uint64_t(selected->width) * selected->height),
-          "Linear provider invalid-pixel fixture did not exercise rejection");
-        evidence << "linear-no-camera center=" << center_value << " count=" << count << " sum=" << moments.sum
-          << " sum_squares=" << moments.sum_squares << " capture=" << sampled.id
-          << " sequence=" << sampled.metadata.sequence << '\n';
-      }
-      center_raw = original_center; active_area = original_area;
-      render_tracked_depth = [&] { draw_frame(); };
-      settle("SL-recovered-after-linear-RR");
-      std::puts("PASS native linear RR provider: public tag49 and feature1001, no camera matrix, actual capture/acquire/calibration and reciprocal moments excluding zero/negative/NaN/Inf; no FX");
+        require(ngx_evaluate(list, feature, &inputs, nullptr) == ngx_fixture::success,
+          "DLSS-G evaluation observation changed the SDK result");
+        if (observed_state) {
+          transition(list, selected->resource.p, read, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+          transition(list, hudless.p, read, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+          transition(list, backbuffer.p, read, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+        }
+      };
+      std::uint64_t before_dlssg{};
+      run_script({"dlssg-evaluation", 160000,
+        [&] {
+          before_dlssg = last_refusal().serial;
+          render_tracked_depth = dlssg_frame;
+          settle_route("DLSSG-unobserved-state-SR-depth", false);
+        },
+        [&] {
+          for (unsigned frame = 0; frame < 30; ++frame) {
+            present_frame(); const auto s = inspect();
+            require(active(s) && !s.source.reused_depth && !s.source.frame_generation_input,
+              "DLSS-G depth without an observed state changed the viewport's SR depth");
+          }
+          {
+            // DLSS-G's evaluation is each frame's last call: its refusal is the newest.
+            namespace refusal = sunshine_depth_refusal;
+            const auto refused = last_refusal();
+            std::printf("MEASURE native-provider DLSSG-unobserved-refusal provider=%u gate=%u class=%u name=%s stage=%u status=%u fg=%u serial=%llu\n",
+              unsigned(refused.provider), unsigned(refused.where), unsigned(refused.reason), refused.name, unsigned(refused.stage),
+              unsigned(refused.status), unsigned(refused.frame_generation), static_cast<unsigned long long>(refused.serial));
+            require(refused.serial > before_dlssg && refused.provider == refusal::adapter::dlss_g &&
+                refused.where == refusal::gate::capture && refused.stage == sunshine_streamline::depth_capture::record_stage::missing_state &&
+                refused.reason == refusal::reason_class::state_unprovable && refused.frame_generation,
+              "The refusal query did not report DLSS-G's unobserved depth as a state_unprovable capture refusal");
+          }
+          require(reshade_log_contains({"Sunshine NGX depth:", "dlssg_depth={copied=0 inner_frames=0 refused=missing_state:"}),
+            "Refused DLSS-G depth copies were not counted by their missing_state reason");
+          require(!reshade_log_number_above("Sunshine UI capture gate:", "hudless_presents={batch=", 0, 0),
+            "A same-batch HUD-less pair was counted before DLSS-G's inputs were observed");
+          observed_state = true;
+          settle_route("DLSSG-evaluation-owns-FG-depth", true);
+          for (unsigned pair = 0; pair < 6; ++pair) {
+            render_tracked_depth = dlssg_frame;
+            present_frame(); const auto real = inspect();
+            require(active(real) && !real.source.reused_depth && real.source.frame_generation_input,
+              "A real Present lost DLSS-G's FG depth or let SR depth compete with it");
+            render_tracked_depth = {};
+            present_frame(); const auto generated = inspect();
+            if (!pair) log_status("DLSSG-evaluation-generated-hold", generated);
+            require(active(generated) && generated.source.reused_depth && generated.source.frame_generation_input &&
+                generated.source.current.capture == real.source.current.capture && same_scale(generated.scale, real.scale),
+              "A generated Present did not hold its real frame's DLSS-G depth");
+          }
+          render_tracked_depth = dlssg_frame;
+          require(reshade_log_contains({"Sunshine Streamline FG depth refused: reason=boundary_without_commands", "fg_scope=live",
+              "withdrawn=0", "dlssg_supplied=1"}),
+            "A command-less FG tag withdrew the FG source DLSS-G's evaluation supplies");
+          require(reshade_log_number_above("Sunshine NGX depth:", "dlssg_depth={copied=", 0),
+            "Accepted DLSS-G depth copies were not counted");
+          require(reshade_log_number_above("Sunshine NGX depth:", "dlssg_ui={offered=", 0) &&
+              reshade_log_number_above("Sunshine NGX depth:", " captured=", 0),
+            "DLSS-G's HUD-less and Backbuffer were not captured for UI detection");
+          require(reshade_log_number_above("Sunshine UI capture gate:", "hudless_presents={batch=", 0, 12000),
+            "DLSS-G's HUD-less image did not reach UI detection with its same-evaluation Backbuffer as an exact pair");
+          // The game's own HUD-less and Backbuffer tags copy on its command list
+          // (as in a game whose Streamline UI tags already work with FG on): per
+          // kind the tag keeps precedence, as for depth. The evaluation offers
+          // neither input again (dlssg_ui tag_copied), so no second full-size
+          // copy competes for the kind's two snapshots, and UI detection keeps
+          // the tags' own same-batch pair.
+          ui_tag_commands = true;
+          for (const auto settled = GetTickCount64() + 300; GetTickCount64() < settled;) present_frame();
+          const auto ngx_lines = [&] { return reshade_log_lines({"Sunshine NGX depth:", "dlssg_ui={offered="}); };
+          const auto gate_lines = [&] { return reshade_log_lines({"Sunshine UI capture gate:", "hudless_presents={batch="}); };
+          const auto wait_lines = [&](const auto &lines, std::size_t count) {
+            for (const auto until = GetTickCount64() + 16000; lines().size() < count && GetTickCount64() < until;) present_frame();
+            auto found = lines();
+            require(found.size() >= count, "The bounded NGX or UI capture gate line stopped while Streamline tags copied UI");
+            return found;
+          };
+          const auto ngx_start = ngx_lines().size(), gate_start = gate_lines().size();
+          // Every frame between two NGX lines written after the switch had the tags' copies.
+          const auto ngx = wait_lines(ngx_lines, ngx_start + 2);
+          const auto &first_line = ngx[ngx_start], &second_line = ngx[ngx_start + 1];
+          const auto ui_field = [](const std::string &line, const char *field) { return number_after(line, field, "dlssg_ui={"); };
+          require(ui_field(second_line, "offered=") == ui_field(first_line, "offered=") &&
+              ui_field(second_line, " captured=") == ui_field(first_line, " captured=") &&
+              ui_field(second_line, "tag_copied:") > ui_field(first_line, "tag_copied:"),
+            "DLSS-G's evaluation offered a HUD-less or Backbuffer input the game's own Streamline tags had copied");
+          // A gate window wholly after the switch: the tags' exact pairs.
+          const auto gate = wait_lines(gate_lines, gate_start + 2);
+          require(number_after(gate[gate_start + 1], "hudless_presents={batch=") > 0,
+            "The Streamline tags' HUD-less image did not reach UI detection with its same-batch Backbuffer");
+          const auto captured_behind_tags = ui_field(second_line, " captured=");
+          ui_tag_commands = false;
+          // An FG tag with a command list copies the frame first and keeps
+          // precedence: the evaluation adds no second copy (tag_copied). The
+          // UI tags are command-less again (refused): DLSS-G's UI inputs are
+          // captured again at once.
+          tag_commands = true;
+          settle_route("DLSSG-evaluation-behind-FG-tag-copies", true);
+          require(reshade_log_contains({"Sunshine NGX depth:", "dlssg_depth={copied=", "tag_copied:"}),
+            "DLSS-G's evaluation copied a frame its Streamline FG tag had already copied");
+          require(reshade_log_number_above("Sunshine NGX depth:", " captured=", captured_behind_tags),
+            "Refused Streamline UI tags did not hand their kinds back to DLSS-G's evaluation");
+          tag_commands = false;
+          // Refused again: the scope falls silent and SR depth returns.
+          observed_state = false;
+          settle_route("DLSSG-refused-again-SR-depth", false);
+        },
+        [&] {
+          require(ngx_release(feature) == ngx_fixture::success && ngx_fixture::evaluated > evaluations_before,
+            "DLSS-G fixture release failed or its evaluations never ran");
+          // Accepted FG tag copies own the viewport again, as before this case.
+          render_tracked_depth = [this] { fallback_frame(true, true); };
+          settle_route("DLSSG-case-done-FG-tags-own-again", true);
+          evidence << "dlssg-evaluation unobserved=SR observed=FG-owned generated=held ui=exact-batch ui-tags-with-commands=tag-copied\n";
+          std::puts("PASS native DLSS-G evaluation: DLSSG.Depth without an observed state is refused and counted with SR depth unchanged; in an observed state it owns the FG scope, generated Presents hold it, the command-less FG tag withdraws nothing, its HUD-less/Backbuffer pair reaches UI detection exactly, and FG depth and HUD-less/Backbuffer tags that copy keep precedence per kind; no FX");
+        }});
+    }
+
+    // The same refused FG tags with no SR evaluation (DLSS-G without DLSS
+    // SR/RR): a silent scope only lets an API source of the viewport
+    // through. With none, enabled FG still holds the queue in mono, so the
+    // generic selector never takes real or generated FG presentations.
+    void fg_silent_scope_without_api_source() {
+      run_script({"silent-scope-without-api-source", 15000, {},
+        [&] {
+          const auto silent_lines = [&] {
+            return reshade_log_count({"Sunshine Streamline frame generation depth scope: silent viewport=0"});
+          };
+          const auto generic_lines = [&] { return reshade_log_count({"using generic depth fallback"}); };
+          const auto silent_before = silent_lines(), generic_before = generic_lines();
+          const auto held_frame = [&] {
+            present_frame(); const auto s = inspect();
+            require(s.source.selected, "A silent FG scope with no API source handed the queue to the generic depth selector");
+            return s;
+          };
+          render_tracked_depth = [this] { fallback_frame(false, false); };
+          for (const auto until = GetTickCount64() + 7000; silent_lines() == silent_before && GetTickCount64() < until;) held_frame();
+          require(silent_lines() > silent_before, "Refused FG tags without SR did not turn the FG scope silent");
+          status mono;
+          for (const auto start = GetTickCount64(); GetTickCount64() - start < 1500;) mono = held_frame();
+          log_status("SLFG-silent-scope-no-API-source", mono);
+          require(!mono.source.ready && generic_lines() == generic_before,
+            "A silent FG scope with no API source supplied depth or used the generic depth fallback");
+          std::puts("PASS native SLFG scope: refused FG tags let the same viewport's SR depth through after a second, never before; an accepted FG copy owns the viewport again and SR stays out; with no SR the silent scope stays mono, never generic; no FX");
+        }, {}});
+    }
+
+    // Use the same public SDK boundary for linear RR depth with no usable
+    // camera. The native copy, provider acquisition and GPU moment readback
+    // remain production paths; only the game-authored input is synthetic.
+    void fg_linear_rr() {
+      using namespace sunshine_streamline;
+      using center_t = bool (*)(api::effect_runtime *, provider::center_sample *);
+      center_t query_center{};
+      const float original_center = center_raw;
+      sunshine_streamline::extent original_area;
+      run_script({"linear-rr-without-camera", 95000,
+        [&] {
+          configure_fg(false);
+          query_center = reinterpret_cast<center_t>(GetProcAddress(
+            GetModuleHandleW(L"SunshineSBSTest.addon64"), "SunshineStreamlineTestCenter"));
+          require(query_center, "Linear provider fixture lacks passive moment observation");
+          original_area = active_area;
+          active_area = {0, 0, selected->width, selected->height};
+          render_tracked_depth = [this] {
+            using namespace sunshine_streamline;
+            auto &token = begin_fg_frame("Linear RR SDK did not supply a frame token");
+            // This frame has no camera metadata. Publishing malformed matrices
+            // instead would intentionally invalidate the observation revision and
+            // test a different contract from linear depth without a camera.
+            const auto resource = depth_resource();
+            // Clear the preceding hardware-depth tag so it cannot hide tag49.
+            const abi_v2::resource_tag tags[]{
+              {{nullptr, tag_guid, 1}, nullptr, 0, 1, {}},
+              {{nullptr, tag_guid, 1}, &resource, 49, 1, active_area}};
+            const auto tagged = sl.frame_tag ? sl.frame_tag(token, fg_viewport, tags, 2, reinterpret_cast<void *>(game_native_command)) :
+              sl.global_tag(fg_viewport, tags, 2, reinterpret_cast<void *>(game_native_command));
+            require(tagged == 0, "Linear RR tag observation changed the SDK result");
+            const base_structure *inputs[]{&fg_viewport.base};
+            require(sl.evaluate(1001, token, inputs, 1, reinterpret_cast<void *>(game_native_command)) == 0,
+              "Linear RR evaluation changed the SDK result");
+          };
+        },
+        [&] {
+          for (const float center_value : {original_center, 0.f, -1.f,
+              std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity()}) {
+            const auto preceding = inspect().source.current.sequence;
+            center_raw = center_value;
+            provider::center_sample sampled;
+            status s;
+            unsigned consecutive{};
+            const auto until = GetTickCount64() + 15000;
+            do {
+              present_frame(); s = inspect();
+              const bool complete = query_center(observed.runtime, &sampled) && sampled.metadata.sequence > preceding &&
+                sampled.metadata.resource.native == native(*selected) && !sampled.metadata.projection.supplied &&
+                sampled.metadata.projection.encoding == sunshine_scene_depth::depth_encoding::linear_distance &&
+                sampled.moments.supplied && sampled.moments.valid &&
+                sampled.moments.encoding == sunshine_scene_depth::depth_encoding::linear_distance;
+              const bool selected_linear = s.ready() && s.source.selected && s.source.ready && !s.source.reused_depth &&
+                s.source.provider == sunshine_scene_depth::provider_kind::streamline &&
+                s.source.current.resource == native(*selected) && s.source.current.capture &&
+                s.basis == unsigned(sunshine_game3d::automatic_scale_basis::linear_distance) &&
+                s.scale_state == unsigned(sunshine_game3d::automatic_scale_state::active) && std::isfinite(s.scale) && s.scale > 0;
+              consecutive = complete && selected_linear ? consecutive + 1 : 0;
+            } while (consecutive < 8 && GetTickCount64() < until);
+            log_status("SL-RR-linear-no-camera", s);
+            require(consecutive >= 8, "Linear RR input failed native capture/acquisition/calibration without camera matrices");
+            const auto raw = read(selected->resource.p, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            require(raw.size() == size_t(selected->width) * selected->height * sizeof(float),
+              "Linear provider source readback has the wrong extent");
+            std::uint64_t count{};
+            double sum{}, squared{};
+            for (size_t offset = 0; offset < raw.size(); offset += sizeof(float)) {
+              float distance{}; std::memcpy(&distance, raw.data() + offset, sizeof(distance));
+              if (!std::isfinite(distance) || distance <= 0.f) continue;
+              const double inverse = 1. / distance;
+              ++count; sum += inverse; squared += inverse * inverse;
+            }
+            const auto &moments = sampled.moments;
+            require(moments.count == count && std::abs(moments.sum - sum) <= sum * 2e-5 &&
+                std::abs(moments.sum_squares - squared) <= squared * 2e-5,
+              "Native provider linear moments included invalid distances or decoded device depth");
+            require(count && (std::isfinite(center_value) && center_value > 0.f ?
+                count == std::uint64_t(selected->width) * selected->height :
+                count < std::uint64_t(selected->width) * selected->height),
+              "Linear provider invalid-pixel fixture did not exercise rejection");
+            evidence << "linear-no-camera center=" << center_value << " count=" << count << " sum=" << moments.sum
+              << " sum_squares=" << moments.sum_squares << " capture=" << sampled.id
+              << " sequence=" << sampled.metadata.sequence << '\n';
+          }
+        },
+        [&] {
+          center_raw = original_center; active_area = original_area;
+          render_tracked_depth = [this] { draw_frame(); };
+          settle("SL-recovered-after-linear-RR");
+          std::puts("PASS native linear RR provider: public tag49 and feature1001, no camera matrix, actual capture/acquire/calibration and reciprocal moments excluding zero/negative/NaN/Inf; no FX");
+        }});
     }
 
     void finish() {

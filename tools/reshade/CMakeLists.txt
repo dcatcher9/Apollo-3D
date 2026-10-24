@@ -594,26 +594,53 @@ if(BUILD_TESTING)
     endif()
 
     add_executable(reshade_ngx_depth_runtime_test test_ngx_depth_runtime.cpp)
-    # Loaded only by the native provider's opt-in frame-generation scenarios,
-    # under its isolated output directory. The version resource exercises
-    # normal SDK discovery.
+    # Synthetic Streamline interposers, one per release (README, interposer
+    # fixtures), loaded only by the native provider's opt-in frame-generation
+    # scenarios under their isolated output directory. Each entry is the DLL's
+    # name; the release its version resource names, which production discovery
+    # reads, as FILEVERSION and as text; and FRAME_TAG, or NO_FRAME_TAG where
+    # the release has the same core ABI but no slSetTagForFrame export (before
+    # 2.7: its global tags exercise production discovery and capture).
     enable_language(RC)
-    add_library(reshade_frame_generation_interposer SHARED test_frame_generation_interposer.cpp test_frame_generation_interposer.rc)
-    target_compile_features(reshade_frame_generation_interposer PRIVATE cxx_std_17)
-    set_target_properties(reshade_frame_generation_interposer PROPERTIES PREFIX "" OUTPUT_NAME "frame_generation_interposer")
-    # Older 2.x has the same core ABI but no slSetTagForFrame export. Its real
-    # version resource and global tags exercise production discovery/capture.
-    add_library(reshade_legacy_v2_interposer SHARED test_frame_generation_interposer.cpp test_frame_generation_interposer.rc)
-    target_compile_features(reshade_legacy_v2_interposer PRIVATE cxx_std_17)
-    target_compile_definitions(reshade_legacy_v2_interposer PRIVATE SUNSHINE_SL_LEGACY_V2_FIXTURE)
-    set_target_properties(reshade_legacy_v2_interposer PROPERTIES PREFIX "" OUTPUT_NAME "legacy_v2_interposer")
+    set(sunshine_sl_fixture_interposers
+      "frame_generation_interposer|2,7,30,0|2.7.30.0|FRAME_TAG"
+      "legacy_v2_interposer|2,6,10,0|2,6,10,0|NO_FRAME_TAG"
+      "sl_v2_14_1_interposer|2,14,1,0|2,14,1,0|FRAME_TAG")
+    set(sunshine_sl_fixture_interposer_targets)
+    set(sunshine_sl_fixture_interposer_checks)
+    foreach(fixture IN LISTS sunshine_sl_fixture_interposers)
+      string(REPLACE "|" ";" fixture "${fixture}")
+      list(GET fixture 0 fixture_name)
+      list(GET fixture 1 fixture_version)
+      list(GET fixture 2 fixture_version_text)
+      list(GET fixture 3 fixture_frame_tag)
+      configure_file(test_frame_generation_interposer.rc.in "${CMAKE_CURRENT_BINARY_DIR}/${fixture_name}.rc" @ONLY)
+      add_library(reshade_${fixture_name} SHARED test_frame_generation_interposer.cpp "${CMAKE_CURRENT_BINARY_DIR}/${fixture_name}.rc")
+      target_compile_features(reshade_${fixture_name} PRIVATE cxx_std_17)
+      target_compile_definitions(reshade_${fixture_name} PRIVATE "SUNSHINE_SL_FIXTURE_VERSION=${fixture_version}")
+      if(fixture_frame_tag STREQUAL "NO_FRAME_TAG")
+        target_compile_definitions(reshade_${fixture_name} PRIVATE SUNSHINE_SL_FIXTURE_NO_FRAME_TAG)
+      endif()
+      set_target_properties(reshade_${fixture_name} PROPERTIES PREFIX "" OUTPUT_NAME "${fixture_name}")
+      if(MINGW)
+        target_link_options(reshade_${fixture_name} PRIVATE -static)
+      endif()
+      list(APPEND sunshine_sl_fixture_interposer_targets reshade_${fixture_name})
+      list(APPEND sunshine_sl_fixture_interposer_checks "$<TARGET_FILE:reshade_${fixture_name}>" "${fixture_version}" "${fixture_frame_tag}")
+    endforeach()
+    # The interposers themselves, without a device: version resource, exports,
+    # the options each release accepts and the settable results.
+    add_executable(reshade_sl_fixture_interposer_tests test_sl_fixture_interposers.cpp)
+    target_compile_features(reshade_sl_fixture_interposer_tests PRIVATE cxx_std_17)
+    target_link_libraries(reshade_sl_fixture_interposer_tests PRIVATE version)
+    add_test(NAME reshade_sl_fixture_interposers COMMAND reshade_sl_fixture_interposer_tests ${sunshine_sl_fixture_interposer_checks})
+    set_tests_properties(reshade_sl_fixture_interposers PROPERTIES TIMEOUT 30)
     target_compile_features(reshade_ngx_depth_runtime_test PRIVATE cxx_std_17)
     target_include_directories(reshade_ngx_depth_runtime_test SYSTEM PRIVATE "${SUNSHINE_RESHADE_INCLUDE_DIR}")
     target_link_libraries(reshade_ngx_depth_runtime_test PRIVATE nlohmann_json::nlohmann_json d3d12 dxgi dxguid d3dcompiler user32)
     if(MINGW)
       target_link_options(reshade_ngx_depth_runtime_test PRIVATE -static)
-      target_link_options(reshade_frame_generation_interposer PRIVATE -static)
-      target_link_options(reshade_legacy_v2_interposer PRIVATE -static)
+      target_link_options(reshade_sl_fixture_interposer_tests PRIVATE -static)
     endif()
     add_executable(reshade_adaptive_raw_runtime_test test_adaptive_raw_runtime.cpp)
     target_compile_features(reshade_adaptive_raw_runtime_test PRIVATE cxx_std_17)
@@ -691,7 +718,7 @@ if(BUILD_TESTING)
     target_compile_features(reshade_game3d_native_provider_runtime_test PRIVATE cxx_std_17)
     target_include_directories(reshade_game3d_native_provider_runtime_test SYSTEM PRIVATE "${SUNSHINE_RESHADE_INCLUDE_DIR}")
     target_link_libraries(reshade_game3d_native_provider_runtime_test PRIVATE nlohmann_json::nlohmann_json d3d12 dxgi dxguid d3dcompiler user32)
-    add_dependencies(reshade_game3d_native_provider_runtime_test reshade_frame_generation_interposer)
+    add_dependencies(reshade_game3d_native_provider_runtime_test ${sunshine_sl_fixture_interposer_targets})
     if(MINGW)
       target_link_options(reshade_game3d_native_provider_runtime_test PRIVATE -static)
     endif()
