@@ -2354,6 +2354,10 @@ nonzero state observed on the same recording admits the copy, and without one th
 as `missing_state`. Diagnostics keep `state=0xffffffff` as the declared value. Shared dump allocations remain immutable after host
 acknowledgement; local retired storage may be reused. This storage distinction does not select
 the resource-state policy. The declaration fallback still needs live game/headset acceptance.
+Each adapter's state, proof and lifetime come from its API's one mapper in
+[`api_contract.h`](../tools/reshade/api_contract.h): Streamline tags (depth and UI alike; an
+`OnlyValidNow` tag holds only at its own tag call, the one difference between the two readings),
+NGX evaluation inputs, DLSS-G's own inputs and the Generic copy.
 Every proof/policy combination above, including NGX's SDK input contract, resolves through the one
 table in [`capture_state_policy.h`](../tools/reshade/capture_state_policy.h): declared (must match an
 observation), observed only (also an undeclared state), observed-else-declared and
@@ -2625,7 +2629,8 @@ admits every colour format it knows (`R32G32B32A32_FLOAT`, `R16G16B16A16_FLOAT` 
 colour space); the Backbuffer and UIColorAndAlpha tags only those with alpha. UIAlpha is a
 single-channel opacity image: `R32_FLOAT`, `R16_FLOAT`, `R16_UNORM` and `R8_UNORM` read red,
 `A8_UNORM` reads alpha (stored flag `0x10`, the dump's `channel` names it). A typeless allocation
-is judged by the typed snapshot format it resolves to (`depth_capture::auxiliary_snapshot_format`):
+is judged by the typed snapshot format it resolves to (`auxiliary_snapshot_format` in
+[`api_contract.h`](../tools/reshade/api_contract.h)):
 its Streamline `Resource.nativeFormat` when that declares a view of the allocation's family (an
 `*_SRGB` declaration as its UNORM copy); otherwise the families whose every colour view reads the
 same bits as UNORM (`R10G10B10A2`, `R8G8B8A8`, `B8G8R8A8`, `B8G8R8X8`) as that UNORM format; any
@@ -3028,7 +3033,8 @@ Optional copies preserve the full allocation's native bytes and its own rectangl
 the selected depth crop or jitter. Typeless color allocations are copied into typed snapshots
 without changing their bytes, including alpha: as their declared Streamline `nativeFormat` view
 when it belongs to their family, else `R10G10B10A2`, `R8G8B8A8`, `B8G8R8A8` and `B8G8R8X8` as
-UNORM (`depth_capture::auxiliary_snapshot_format`). This normalization is shared by live UI
+UNORM (`auxiliary_snapshot_format` in [`api_contract.h`](../tools/reshade/api_contract.h)).
+This normalization is shared by live UI
 capture and diagnostics; source diagnostics retain the original allocation format while captured
 artifacts report their actual typed format. Other typeless families remain unsupported without a
 declaration because their numeric interpretation cannot be inferred from storage alone. Unsupported formats, expired resources, readback failures and
@@ -3830,7 +3836,8 @@ refuses the copy as `subrect`). Its scope is the one viewport whose FG options w
 in the current observation epoch; the evaluation takes one fresh observation sequence, ordered with
 every Streamline call. The depth becomes that viewport's FG source (`fg_depth_key(viewport)`,
 `frame_generation_input`) only through a copy recorded on the evaluation's own command list in a
-state observed on that recording (`state_proof::observed_nonzero`: no API states the resource's
+state observed on that recording (`state_proof::observed_nonzero`, `ngx::frame_generation_input`
+in [`api_contract.h`](../tools/reshade/api_contract.h): no API states the resource's
 state at this call, so none is assumed), with no metadata-only nomination (`pixels_required`). Its
 accepted copies keep the FG scope live exactly as accepted FG tag copies do, so FG owns the viewport
 (the same viewport's SR/RR evaluations and direct NGX copies stand aside), and generated Presents
@@ -4145,7 +4152,9 @@ active rectangle and the jitter denominator: a declared Resource size that disag
 allocation (for example a render size inside a larger dynamic-resolution allocation) is then
 ignored, and the first one is logged (`declared resource size ... differs from the ... allocation`).
 Without an extent a declared size must be the allocation's own (`malformed` otherwise), and an
-undeclared size takes the retained allocation's for the jitter denominator. Evaluation-bound native capture declines OnlyValidNow;
+undeclared size takes the retained allocation's for the jitter denominator (an absent extent is the
+whole allocation: `normalized_extent` in [`api_contract.h`](../tools/reshade/api_contract.h)).
+Evaluation-bound native capture declines OnlyValidNow;
 the synchronous v2 tag boundary supports it with or without FG. Native capture still declines
 unknown depth encodings, unknown resource states or layouts and ambiguous viewports. One rule
 ([`depth_view_format.h`](../tools/reshade/depth_view_format.h)), shared by the capture, the
@@ -4417,7 +4426,8 @@ NGX supplies no per-call resource state, but its SDK fixes one: NVIDIA's DLSS Pr
 section 3.4 "Resource States", requires every D3D12 input to be
 `D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE` at the evaluation call and states that DLSS
 restores it afterwards. The adapter therefore nominates every accepted feature with
-`state_proof::sdk_contract`. That guide covers Super Resolution only, so the
+`state_proof::sdk_contract` (`ngx::evaluation_input` in
+[`api_contract.h`](../tools/reshade/api_contract.h)). That guide covers Super Resolution only, so the
 [API contract matrix](../tools/reshade/README.md#api-contract-matrix) lists Ray Reconstruction and
 other features as known gaps until a cited guide states their input state. A known,
 unblocked state observed on the same recording takes precedence. An observed COMMON/zero,

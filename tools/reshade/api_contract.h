@@ -1,0 +1,191 @@
+// SPDX-License-Identifier: GPL-3.0-only
+#pragma once
+
+#include "scene_depth_source.h"
+
+#include <cstdint>
+
+// How an API's declaration of an input becomes the capture input's contract:
+// the state it names and the proof behind it (state_proof), how long the
+// resource stays valid (lifetime), its active extent and the typed format a
+// colour snapshot of it is read as. One pure mapper per API, shared by depth
+// and UI. Admission stays with the capture owner: copy_state
+// (capture_state_policy.h) decides a copy from the proof and the recording's
+// own state, and a depth snapshot's view format is depth_view_format.h's.
+namespace sunshine_api_contract {
+  using sunshine_scene_depth::extent;
+  using sunshine_scene_depth::lifetime;
+  using sunshine_scene_depth::state_proof;
+
+  // What a declaration gives a capture input: the native state it names
+  // (UINT32_MAX none), the proof behind that state, and its lifetime.
+  struct contract {
+    std::uint32_t native_state{UINT32_MAX};
+    state_proof proof{state_proof::unavailable};
+    lifetime valid_until{lifetime::unsupported};
+  };
+  inline void apply(const contract &value, sunshine_scene_depth::frame &out) {
+    out.native_state = value.native_state;
+    out.proof = value.proof;
+    out.valid_until = value.valid_until;
+  }
+
+  // An absent extent (zero width) is the whole allocation. Only the width
+  // decides: each reader has already refused a partial or malformed extent.
+  // Extent: the capture's extent or Streamline's sl::Extent (top first).
+  template<class Extent>
+  constexpr Extent normalized_extent(const Extent &area, std::uint32_t width, std::uint32_t height) {
+    if (area.width) return area;
+    Extent whole{};
+    whole.width = width; whole.height = height;
+    return whole;
+  }
+
+  // Streamline (sl_core_types.h): a tag's Resource and its lifecycle.
+  namespace streamline {
+    // sl::ResourceLifecycle, a 2.x tag's lifecycle.
+    inline constexpr std::uint32_t only_valid_now = 0, valid_until_present = 1, valid_until_evaluate = 2;
+    // A 1.x Resource has no lifecycle field: its tags carry this and hold
+    // until Present.
+    inline constexpr std::uint32_t no_lifecycle = UINT32_MAX;
+    // Where the copy is made. OnlyValidNow holds only inside the tag call that
+    // supplied it, and this is the one difference between the depth and UI
+    // readings of a tag: a UI tag is copied only there (tag_call), while depth
+    // is also copied at a later evaluate (evaluate), where an OnlyValidNow
+    // resource is gone.
+    enum class copy_point : std::uint8_t { tag_call, evaluate };
+
+    // A tag as the probe read it.
+    struct tag_declaration {
+      std::uint32_t lifecycle{no_lifecycle};
+      // Resource::state: a native D3D12 state, UINT32_MAX undeclared. A 1.x
+      // Resource's 0 is chi eUnknown (streamline_v1_resource_state.h), not
+      // COMMON.
+      std::uint32_t state{UINT32_MAX};
+      bool version_one{};
+      // false: unreadable or of an unsupported layout (tag_refusal).
+      bool supported{true};
+      // The zero-header compatibility layout's 0 proves nothing.
+      bool state_requires_observation{};
+    };
+
+    // The proof behind Resource::state. A 1.x 0, and the compatibility
+    // layout's 0, need a state observed on the recording (or, for exactly
+    // 1.1.1, its private property); UINT32_MAX claims nothing.
+    constexpr state_proof proof(const tag_declaration &tag) {
+      if ((tag.version_one && tag.state == 0) || tag.state_requires_observation) return state_proof::observed_nonzero;
+      return tag.state != UINT32_MAX ? state_proof::declared : state_proof::unavailable;
+    }
+    // ValidUntilPresent (and a 1.x tag) until Present, ValidUntilEvaluate
+    // until its evaluation, OnlyValidNow at its own tag call only; anything
+    // else, and an unsupported tag, is unsupported.
+    constexpr lifetime valid_until(const tag_declaration &tag, copy_point at) {
+      if (!tag.supported) return lifetime::unsupported;
+      if (tag.version_one || tag.lifecycle == valid_until_present) return lifetime::until_present;
+      if (tag.lifecycle == valid_until_evaluate) return lifetime::until_evaluation;
+      return tag.lifecycle == only_valid_now && at == copy_point::tag_call ? lifetime::at_call : lifetime::unsupported;
+    }
+    constexpr contract map(const tag_declaration &tag, copy_point at) {
+      return {tag.state, proof(tag), valid_until(tag, at)};
+    }
+    // The lifecycle match() (streamline_camera_data.cpp) judges at a copy
+    // point. It admits a lifetime that lasts until Present (and a 1.x tag's
+    // none), so a 2.x lifetime that holds only at this copy point (UntilEvaluate,
+    // or OnlyValidNow at its tag call) reads as ValidUntilPresent; any other
+    // is unchanged, and match() refuses it. The published lifetime is never
+    // promoted.
+    constexpr std::uint32_t lifecycle_at(std::uint32_t lifecycle, copy_point at) {
+      tag_declaration tag;
+      tag.lifecycle = lifecycle;
+      const auto held = valid_until(tag, at);
+      return held == lifetime::until_evaluation || held == lifetime::at_call ? valid_until_present : lifecycle;
+    }
+  }
+
+  // NGX (nvsdk_ngx_defs.h): an evaluation names its inputs but no state.
+  namespace ngx {
+    // D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE. NVIDIA's DLSS Programming
+    // Guide, section 3.4 "Resource States": every D3D12 input must be in this
+    // state at the evaluation call, and DLSS always restores it afterwards.
+    inline constexpr std::uint32_t evaluation_input_state = 0x40;
+    // An accepted evaluation's input: the SDK contract fixes its state at this
+    // boundary (a state observed on the same recording still takes
+    // precedence), and it holds for the evaluation. The guide covers Super
+    // Resolution only; the contract matrix lists the other features as gaps.
+    inline constexpr contract evaluation_input{evaluation_input_state, state_proof::sdk_contract, lifetime::until_evaluation};
+    // DLSS-G's own inputs (frame_generation_inputs.h): no API states their
+    // state at this call, so only a state observed on the evaluation's own
+    // recording proves it.
+    inline constexpr contract frame_generation_input{UINT32_MAX, state_proof::observed_nonzero, lifetime::until_evaluation};
+  }
+
+  // Generic: the depth-stencil copy depth_addon.cpp records before a clear,
+  // a clear-like draw, an unbind or a switch, or at the end of the frame
+  // (depth_capture::record_preserved), from the state its caller declares,
+  // held until Present. Only a real depth clear has a D3D12 contract for its
+  // DEPTH_WRITE; the others share this declaration (the matrix's D10, D11c).
+  namespace generic {
+    constexpr contract preserved(std::uint32_t declared_state) {
+      return {declared_state, state_proof::declared, lifetime::until_present};
+    }
+  }
+
+  // The storage family of a colour format whose views are plain casts of one
+  // another: its typeless DXGI format (R11G11B10_FLOAT and A8_UNORM are their
+  // own), or 0 for none. Only UNORM, FLOAT and SRGB views belong; integer,
+  // SNORM and depth views are never read as colour.
+  constexpr std::uint32_t color_family(std::uint32_t format) {
+    switch (format) {
+      case 27: case 28: case 29: return 27; // R8G8B8A8
+      case 90: case 87: case 91: return 90; // B8G8R8A8
+      case 92: case 88: case 93: return 92; // B8G8R8X8
+      case 23: case 24: return 23;          // R10G10B10A2
+      case 9: case 10: case 11: return 9;   // R16G16B16A16
+      case 1: case 2: return 1;             // R32G32B32A32
+      case 26: return 26;                   // R11G11B10_FLOAT
+      case 60: case 61: return 60;          // R8
+      case 65: return 65;                   // A8_UNORM
+      case 53: case 54: case 56: return 53; // R16
+      case 39: case 41: return 39;          // R32
+      default: return 0;
+    }
+  }
+  constexpr bool typeless_color(std::uint32_t format) {
+    return format == 27 || format == 90 || format == 92 || format == 23 || format == 9 || format == 1 || format == 60 ||
+      format == 53 || format == 39;
+  }
+  // A legal view format of the storage without relaxed format casting: the
+  // storage's own typed format, or a typed member of a typeless storage's
+  // family. (An sRGB storage read through UNORM is not.)
+  constexpr bool same_color_family(std::uint32_t storage, std::uint32_t view) {
+    if (typeless_color(view) || !color_family(view)) return false;
+    return view == storage || (typeless_color(storage) && color_family(view) == color_family(storage));
+  }
+  // The typed DXGI format an auxiliary (UI) snapshot of a source allocation
+  // of this format is stored and read as, 0 for none. A typed allocation as
+  // is. A typeless one as declared (Streamline Resource.nativeFormat) when
+  // the declaration is a view of its family (same_color_family), an sRGB
+  // declaration as its UNORM copy, since UI views read the stored bits and
+  // an sRGB RGB view leaves alpha alone; else, for the families whose every
+  // colour view reads the same bits as UNORM, that UNORM format (R10G10B10A2,
+  // R8G8B8A8, B8G8R8A8, B8G8R8X8). R16G16B16A16 (FLOAT or UNORM),
+  // R32G32B32A32 and the single-channel families are never guessed, and a
+  // declaration outside the family is ignored.
+  constexpr std::uint32_t auxiliary_snapshot_format(std::uint32_t format, std::uint32_t declared = 0) {
+    if (!typeless_color(format)) return format;
+    if (declared && same_color_family(format, declared))
+      return declared == 29 ? 28u : declared == 91 ? 87u : declared == 93 ? 88u : declared;
+    return format == 23 ? 24u : format == 27 ? 28u : format == 90 ? 87u : format == 92 ? 88u : 0u;
+  }
+  static_assert(auxiliary_snapshot_format(27) == 28 && auxiliary_snapshot_format(90) == 87 &&
+    auxiliary_snapshot_format(23) == 24 && auxiliary_snapshot_format(92) == 88 && !auxiliary_snapshot_format(9) &&
+    !auxiliary_snapshot_format(1) && !auxiliary_snapshot_format(39) && !auxiliary_snapshot_format(53) &&
+    !auxiliary_snapshot_format(60) && auxiliary_snapshot_format(9, 10) == 10 && auxiliary_snapshot_format(9, 11) == 11 &&
+    !auxiliary_snapshot_format(9, 13) && auxiliary_snapshot_format(1, 2) == 2 && auxiliary_snapshot_format(27, 29) == 28 &&
+    auxiliary_snapshot_format(90, 91) == 87 && auxiliary_snapshot_format(92, 93) == 88 &&
+    auxiliary_snapshot_format(23, 28) == 24 && auxiliary_snapshot_format(39, 41) == 41 &&
+    !auxiliary_snapshot_format(39, 40) && auxiliary_snapshot_format(53, 54) == 54 &&
+    auxiliary_snapshot_format(53, 56) == 56 && !auxiliary_snapshot_format(53, 55) &&
+    auxiliary_snapshot_format(60, 61) == 61 && !auxiliary_snapshot_format(60, 65) &&
+    auxiliary_snapshot_format(28, 87) == 28 && auxiliary_snapshot_format(65) == 65);
+}

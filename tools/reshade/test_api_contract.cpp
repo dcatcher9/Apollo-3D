@@ -1,0 +1,174 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// The API contract mappers of api_contract.h (refactor plan P3): the state
+// proof, lifetime and native state each API's declaration gives a capture
+// input, the lifecycle Streamline's match() judges at each copy point, and an
+// absent extent as the whole allocation. The Streamline probe's depth and UI
+// adapters, tag_rejection, the 1.x state resolver, the dump's UI capture, the
+// NGX adapter, DLSS-G's own inputs and the Generic copy read these; the rows
+// pin today's mapping for every declaration those callers pass.
+#include "api_contract.h"
+
+#include <cstdint>
+#include <cstdio>
+#include <iterator>
+
+namespace {
+  using namespace sunshine_api_contract;
+  using streamline::copy_point;
+
+  unsigned failures {};
+
+  void require(bool condition, const char *pins) {
+    if (!condition) {
+      std::fprintf(stderr, "FAIL %s\n", pins);
+      ++failures;
+    }
+  }
+
+  // A tag's lifecycle at a copy point. A UI tag is always copied at its tag
+  // call; depth also at a later evaluate.
+  struct lifetime_row {
+    const char *pins;
+    bool version_one, supported;
+    std::uint32_t lifecycle;
+    copy_point at;
+    lifetime expected;
+  };
+
+  constexpr lifetime_row lifetimes[] {
+    {"A 1.x tag has no lifecycle and holds until Present", true, true, streamline::no_lifecycle, copy_point::evaluate,
+     lifetime::until_present},
+    {"ValidUntilPresent holds until Present at its tag call", false, true, streamline::valid_until_present,
+     copy_point::tag_call, lifetime::until_present},
+    {"ValidUntilPresent holds until Present at a later evaluate", false, true, streamline::valid_until_present,
+     copy_point::evaluate, lifetime::until_present},
+    {"ValidUntilEvaluate holds until its evaluation at its tag call", false, true, streamline::valid_until_evaluate,
+     copy_point::tag_call, lifetime::until_evaluation},
+    {"ValidUntilEvaluate holds until its evaluation at the evaluate", false, true, streamline::valid_until_evaluate,
+     copy_point::evaluate, lifetime::until_evaluation},
+    {"OnlyValidNow holds at its own tag call (depth at a tag boundary, every UI tag)", false, true,
+     streamline::only_valid_now, copy_point::tag_call, lifetime::at_call},
+    {"OnlyValidNow is gone at a later evaluate", false, true, streamline::only_valid_now, copy_point::evaluate,
+     lifetime::unsupported},
+    {"A lifecycle above ValidUntilEvaluate is unsupported", false, true, 3, copy_point::tag_call, lifetime::unsupported},
+    {"A 2.x tag without a lifecycle is unsupported", false, true, streamline::no_lifecycle, copy_point::tag_call,
+     lifetime::unsupported},
+    {"An unsupported tag (tag_refusal) has no lifetime", false, false, streamline::valid_until_present,
+     copy_point::tag_call, lifetime::unsupported},
+    {"An unsupported 1.x tag has no lifetime", true, false, streamline::no_lifecycle, copy_point::evaluate,
+     lifetime::unsupported},
+  };
+
+  // Resource::state and what proves it.
+  struct proof_row {
+    const char *pins;
+    bool version_one, requires_observation;
+    std::uint32_t state;
+    state_proof expected;
+  };
+
+  constexpr proof_row proofs[] {
+    {"A 2.x COMMON (0) is declared", false, false, 0, state_proof::declared},
+    {"A 2.x DEPTH_READ is declared", false, false, 0x20, state_proof::declared},
+    {"An undeclared 2.x state (UINT32_MAX) claims nothing", false, false, UINT32_MAX, state_proof::unavailable},
+    {"The zero-header compatibility layout's 0 needs an observed state", false, true, 0, state_proof::observed_nonzero},
+    {"A 1.x 0 is chi eUnknown and needs an observed state", true, false, 0, state_proof::observed_nonzero},
+    {"A 1.x DEPTH_WRITE is declared", true, false, 0x10, state_proof::declared},
+    {"An undeclared 1.x state claims nothing", true, false, UINT32_MAX, state_proof::unavailable},
+  };
+
+  // The lifecycle match() judges: one that holds at the copy point reads as
+  // ValidUntilPresent; any other is unchanged.
+  struct matched_row {
+    const char *pins;
+    std::uint32_t lifecycle;
+    copy_point at;
+    std::uint32_t expected;
+  };
+
+  constexpr matched_row matched[] {
+    {"ValidUntilPresent is judged as itself at its tag call", streamline::valid_until_present, copy_point::tag_call,
+     streamline::valid_until_present},
+    {"ValidUntilPresent is judged as itself at an evaluate", streamline::valid_until_present, copy_point::evaluate,
+     streamline::valid_until_present},
+    {"ValidUntilEvaluate is judged as ValidUntilPresent at its tag call", streamline::valid_until_evaluate,
+     copy_point::tag_call, streamline::valid_until_present},
+    {"ValidUntilEvaluate is judged as ValidUntilPresent at the evaluate", streamline::valid_until_evaluate,
+     copy_point::evaluate, streamline::valid_until_present},
+    {"OnlyValidNow is judged as ValidUntilPresent at its tag call", streamline::only_valid_now, copy_point::tag_call,
+     streamline::valid_until_present},
+    {"OnlyValidNow stays OnlyValidNow at an evaluate (match refuses it)", streamline::only_valid_now,
+     copy_point::evaluate, streamline::only_valid_now},
+    {"A 1.x tag's missing lifecycle stays (match admits it)", streamline::no_lifecycle, copy_point::evaluate,
+     streamline::no_lifecycle},
+    {"An unknown lifecycle stays (match refuses it)", 3, copy_point::tag_call, 3},
+  };
+
+  // Streamline's sl::Extent orders top before left.
+  struct top_first_extent {
+    std::uint32_t top {}, left {}, width {}, height {};
+  };
+}
+
+int main() {
+  for (const auto &row : lifetimes) {
+    streamline::tag_declaration tag;
+    tag.version_one = row.version_one;
+    tag.supported = row.supported;
+    tag.lifecycle = row.lifecycle;
+    require(streamline::valid_until(tag, row.at) == row.expected, row.pins);
+  }
+  for (const auto &row : proofs) {
+    streamline::tag_declaration tag;
+    tag.version_one = row.version_one;
+    tag.state_requires_observation = row.requires_observation;
+    tag.state = row.state;
+    require(streamline::proof(tag) == row.expected, row.pins);
+  }
+  for (const auto &row : matched) require(streamline::lifecycle_at(row.lifecycle, row.at) == row.expected, row.pins);
+  {
+    streamline::tag_declaration tag;
+    tag.lifecycle = streamline::only_valid_now;
+    tag.state = 0x40;
+    const auto value = streamline::map(tag, copy_point::tag_call);
+    require(value.native_state == 0x40 && value.proof == state_proof::declared && value.valid_until == lifetime::at_call,
+      "A Streamline tag's contract names its declared state, its proof and its lifetime");
+  }
+  require(ngx::evaluation_input.native_state == 0x40 && ngx::evaluation_input.proof == state_proof::sdk_contract &&
+            ngx::evaluation_input.valid_until == lifetime::until_evaluation,
+    "An NGX evaluation's input is in NON_PIXEL_SHADER_RESOURCE by the SDK contract for the evaluation");
+  require(ngx::frame_generation_input.native_state == UINT32_MAX &&
+            ngx::frame_generation_input.proof == state_proof::observed_nonzero &&
+            ngx::frame_generation_input.valid_until == lifetime::until_evaluation,
+    "DLSS-G's own inputs name no state: only an observed state proves them, for the evaluation");
+  {
+    const auto value = generic::preserved(0x10);
+    require(value.native_state == 0x10 && value.proof == state_proof::declared && value.valid_until == lifetime::until_present,
+      "The Generic copy's state is its caller's declaration, held until Present");
+  }
+  {
+    sunshine_scene_depth::frame input;
+    apply(ngx::evaluation_input, input);
+    require(input.native_state == 0x40 && input.proof == state_proof::sdk_contract &&
+              input.valid_until == lifetime::until_evaluation,
+      "A contract is written into a capture input whole");
+  }
+  {
+    const auto whole = normalized_extent(extent {}, 1920, 1080);
+    require(!whole.left && !whole.top && whole.width == 1920 && whole.height == 1080,
+      "An absent extent is the whole allocation");
+    const auto active = normalized_extent(extent {8, 4, 1280, 720}, 1920, 1080);
+    require(active.left == 8 && active.top == 4 && active.width == 1280 && active.height == 720,
+      "A nonzero extent is its own rectangle");
+    const auto tagged = normalized_extent(top_first_extent {}, 1920, 1080);
+    require(!tagged.top && !tagged.left && tagged.width == 1920 && tagged.height == 1080,
+      "Streamline's absent extent is the whole allocation in its own field order");
+  }
+  if (failures) {
+    std::fprintf(stderr, "API contract: %u cells changed\n", failures);
+    return 1;
+  }
+  std::printf("PASS API contract: %zu lifetime, %zu proof and %zu matched-lifecycle rows, each API's contract and the "
+    "whole-allocation extent\n", std::size(lifetimes), std::size(proofs), std::size(matched));
+  return 0;
+}

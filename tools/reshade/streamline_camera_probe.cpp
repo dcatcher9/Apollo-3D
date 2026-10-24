@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "streamline_camera_probe.h"
 #include "addon_lifetime.h"
+#include "api_contract.h"
 #include "streamline_camera_data.h"
 #include "streamline_camera_version.h"
 #include "streamline_buffer_contract.h"
@@ -30,6 +31,9 @@
 #endif
 
 namespace sunshine_streamline {
+  // A Streamline tag's contract: its state proof, lifetime and the lifecycle
+  // match() judges (api_contract.h).
+  namespace sl_contract = sunshine_api_contract::streamline;
   SUNSHINE_PROBE_INTERNAL {
     namespace dump_metadata = sunshine_game3d::diagnostic;
     dump_metadata::stamp dump_stamp(std::uint64_t epoch, std::uint64_t sequence, std::uint64_t tick,
@@ -1287,7 +1291,8 @@ namespace sunshine_streamline {
           // mixed batch may carry that tag beside the OnlyValidNow copy.
           if (value.tag_boundary && !value.frame_generation_input) break;
           const auto &used = value.tags[i];
-          if (!used.present || used.value.lifecycle != 2 || used.scope == tag_scope::evaluation_local) continue;
+          if (!used.present || used.value.lifecycle != sl_contract::valid_until_evaluate ||
+              used.scope == tag_scope::evaluation_local) continue;
           tag_record *original = nullptr;
           if (used.scope == tag_scope::active_global) original = &record.active_tags[i];
           else if (auto *saved = frame_slot(state, value.viewport, value.frame, 0, false)) original = &saved->tags[i];
@@ -1362,10 +1367,11 @@ namespace sunshine_streamline {
       const bool resource_header = resource.base.next == nullptr &&
         ((same(resource.base.type, resource_guid) && resource.base.version >= 1) ||
           zero_resource_header);
-      value.supported = resource_ok && precision_ok && tag.lifecycle <= 2 && (!tag.resource_ptr ||
+      value.supported = resource_ok && precision_ok && tag.lifecycle <= sl_contract::valid_until_evaluate && (!tag.resource_ptr ||
         (resource_header && (resource.type == 0 || resource.type == 8)));
       value.value.refusal = value.supported ? tag_refusal::none : !header_ok ? tag_refusal::header_version :
-        !resource_ok ? tag_refusal::unreadable : !precision_ok ? precision : tag.lifecycle > 2 ? tag_refusal::lifecycle :
+        !resource_ok ? tag_refusal::unreadable : !precision_ok ? precision :
+        tag.lifecycle > sl_contract::valid_until_evaluate ? tag_refusal::lifecycle :
         !resource_header ? (resource.base.next ? tag_refusal::extension : tag_refusal::header_version) :
         tag_refusal::resource_type;
       value.value.native_format = value.supported ? resource.native_format : 0;
@@ -1602,6 +1608,19 @@ namespace sunshine_streamline {
       return snapshot.loss_revision == loss_revision.load(std::memory_order_acquire) ? nullptr : "observation_lost";
     }
     bool direct_source_admissible(const evaluation_snapshot &snapshot) { return !source_rejection(snapshot); }
+    // Where this observation copies a depth tag: inside the tag call itself (a
+    // tag boundary) or at a later evaluate.
+    sl_contract::copy_point copy_point(const evaluation_snapshot &snapshot) {
+      return snapshot.tag_boundary ? sl_contract::copy_point::tag_call : sl_contract::copy_point::evaluate;
+    }
+    // A tag's declaration as api_contract.h reads it. version_one: a 1.x
+    // evaluate's tag, whose state 0 is chi eUnknown.
+    template<class Tag> sl_contract::tag_declaration declaration(const Tag &tag, bool version_one) {
+      sl_contract::tag_declaration out;
+      out.lifecycle = tag.value.lifecycle; out.state = tag.native_state; out.version_one = version_one;
+      out.supported = tag.supported; out.state_requires_observation = tag.state_requires_observation;
+      return out;
+    }
     // The first failing tag gate, or nullptr when the tag can supply this observation's depth.
     const char *tag_rejection(const evaluation_snapshot &snapshot, const evaluated_depth_tag &tag) {
       if (!tag.present) return "absent";
@@ -1617,15 +1636,15 @@ namespace sunshine_streamline {
         }
       }
       if (!buffers::is_depth(tag.value.type)) return "not_depth";
-      if (snapshot.tag_boundary && !snapshot.frame_generation_input && tag.value.lifecycle != 0)
+      if (snapshot.tag_boundary && !snapshot.frame_generation_input && tag.value.lifecycle != sl_contract::only_valid_now)
         return "lifecycle_outlives_boundary";
       if (snapshot.frame.kind == frame_identity_kind::v2_constants_call &&
-          (!snapshot.tag_boundary || tag.scope != tag_scope::active_global || tag.value.lifecycle != 0))
+          (!snapshot.tag_boundary || tag.scope != tag_scope::active_global || tag.value.lifecycle != sl_contract::only_valid_now))
         return "constants_call_frame";
+      // UntilEvaluate is usable at this synchronous boundary only, and
+      // OnlyValidNow at its tag boundary only (sl_contract::lifecycle_at).
       auto at_evaluation = tag.value;
-      // UntilEvaluate is usable at this synchronous boundary only; never
-      // promote the published lifetime. OnlyValidNow requires the tag boundary.
-      if (at_evaluation.lifecycle == 2 || (snapshot.tag_boundary && at_evaluation.lifecycle == 0)) at_evaluation.lifecycle = 1;
+      at_evaluation.lifecycle = sl_contract::lifecycle_at(tag.value.lifecycle, copy_point(snapshot));
       const auto matched = match({snapshot.viewport, snapshot.epoch, 0, false}, at_evaluation);
       return matched == match_status::same_epoch_only ? nullptr : name(matched);
     }
@@ -1663,8 +1682,8 @@ namespace sunshine_streamline {
         if (depth_capture::source_extent(input.direct_source, allocated_width, allocated_height)) {
           full_width = allocated_width; full_height = allocated_height;
         }
-        const auto width = area.width ? area.width : full_width;
-        const auto height = area.height ? area.height : full_height;
+        const auto active = sunshine_api_contract::normalized_extent(area, full_width, full_height);
+        const auto width = active.width, height = active.height;
         if (!width || !height || width > 16384 || height > 16384 ||
             (full_width && (area.left > full_width || width > full_width-area.left)) ||
             (full_height && (area.top > full_height || height > full_height-area.top))) return result;
@@ -1743,12 +1762,7 @@ namespace sunshine_streamline {
         {tag.value.area.left, tag.value.area.top, tag.value.area.width, tag.value.area.height},
         tag.value.type == buffers::high_resolution_depth ? sunshine_scene_depth::resource_kind::display_depth :
           sunshine_scene_depth::resource_kind::raw_depth, tag.value.native_format};
-      value.native_state = tag.native_state;
-      value.proof = (version_one && tag.native_state == 0) || tag.state_requires_observation ? sunshine_scene_depth::state_proof::observed_nonzero :
-        tag.native_state != UINT32_MAX ? sunshine_scene_depth::state_proof::declared : sunshine_scene_depth::state_proof::unavailable;
-      value.valid_until = version_one || tag.value.lifecycle == 1 ? sunshine_scene_depth::lifetime::until_present :
-        tag.value.lifecycle == 2 ? sunshine_scene_depth::lifetime::until_evaluation :
-        snapshot.tag_boundary && tag.value.lifecycle == 0 ? sunshine_scene_depth::lifetime::at_call : sunshine_scene_depth::lifetime::unsupported;
+      sunshine_api_contract::apply(sl_contract::map(declaration(tag, version_one), copy_point(snapshot)), value);
       return value;
     }
     // A viewport's depth route under FG: none (FG not enabled), owned by its
@@ -1905,7 +1919,7 @@ namespace sunshine_streamline {
         static_cast<sunshine_scene_depth::frame &>(value) = normalize_depth_frame(snapshot, tag, version_one);
         value.source = tag.direct_source;
         value.source_present_generation = tag.source_present_generation;
-        value.force_snapshot = snapshot.tag_boundary && tag.value.lifecycle == 0;
+        value.force_snapshot = value.valid_until == sunshine_scene_depth::lifetime::at_call;
         value.at_tag_call = snapshot.tag_boundary;
         v1_resource_state::read_details state_details;
         const auto state = v1_resource_state::resolve(value.native_state, version_one,
@@ -2067,15 +2081,10 @@ namespace sunshine_streamline {
       input.resource.width = tag.value.resource_width; input.resource.height = tag.value.resource_height;
       input.resource.native_format = tag.value.native_format;
       input.resource.area = {tag.value.area.left, tag.value.area.top, tag.value.area.width, tag.value.area.height};
-      input.native_state = tag.native_state;
       // An undeclared state (UINT_MAX) is no claim: only this recording's
-      // observation can supply it, under either state policy.
-      input.proof = tag.state_requires_observation ? sunshine_scene_depth::state_proof::observed_nonzero :
-        tag.native_state == UINT32_MAX ? sunshine_scene_depth::state_proof::unavailable :
-        sunshine_scene_depth::state_proof::declared;
-      input.valid_until = !tag.supported ? sunshine_scene_depth::lifetime::unsupported : tag.value.lifecycle == 0 ?
-        sunshine_scene_depth::lifetime::at_call : tag.value.lifecycle == 1 ? sunshine_scene_depth::lifetime::until_present :
-        sunshine_scene_depth::lifetime::until_evaluation;
+      // observation can supply it, under either state policy. A UI tag is a
+      // 2.x tag, copied inside its own tag call.
+      sunshine_api_contract::apply(sl_contract::map(declaration(tag, false), sl_contract::copy_point::tag_call), input);
       input.force_snapshot = true;
       depth_capture::record_diagnostic retained;
       input.source = depth_capture::retain_source(input.resource.native, &retained);
@@ -2142,7 +2151,7 @@ namespace sunshine_streamline {
           record.frame_generation.loss_revision == fg_loss_revision.load(std::memory_order_acquire);
         const auto &first_tag = out.tags[0].present ? out.tags[0] : out.tags[1].present ? out.tags[1] : out.tags[2];
         const bool synchronous_global_depth = std::any_of(out.tags.begin(), out.tags.begin() + 3, [](const tag_record &tag) {
-          return tag.present && tag.source == origin::global && tag.value.lifecycle == 0;
+          return tag.present && tag.source == origin::global && tag.value.lifecycle == sl_contract::only_valid_now;
         });
         const auto *camera_frame = find_frame(*pin, out.viewport, record.camera_frame);
         if (identity.kind == frame_identity_kind::unavailable && first_tag.source == origin::global &&
@@ -2154,7 +2163,7 @@ namespace sunshine_streamline {
         break;
       }
       if (!enabled && std::none_of(out.tags.begin(), out.tags.begin() + 3, [](const tag_record &tag) {
-          return tag.present && tag.value.lifecycle == 0;
+          return tag.present && tag.value.lifecycle == sl_contract::only_valid_now;
         })) return snapshot;
       snapshot = capture_evaluation(out.viewport, enabled ? 1000 : UINT32_MAX, identity, commands,
         out.observation, out.serial, out.loss, &out, pin ? &*pin : nullptr, true);
@@ -2929,12 +2938,12 @@ namespace sunshine_streamline {
           if (candidate.status == evidence_status::source_associated_evaluation) status = evidence_status::unsupported_depth;
           continue;
         }
-        const auto &area = tag.value.area;
-        const bool whole = !area.top && !area.left && !area.width && !area.height;
+        // match() admitted the extent: all four zero (the whole allocation) or nonzero.
+        const auto area = sunshine_api_contract::normalized_extent(tag.value.area, selected.width, selected.height);
         if ((tag.value.resource_width && tag.value.resource_width != selected.width) ||
             (tag.value.resource_height && tag.value.resource_height != selected.height) ||
-            (whole ? selected.x || selected.y || selected.active_width != selected.width || selected.active_height != selected.height :
-              area.left != selected.x || area.top != selected.y || area.width != selected.active_width || area.height != selected.active_height)) {
+            area.left != selected.x || area.top != selected.y || area.width != selected.active_width ||
+            area.height != selected.active_height) {
           if (candidate.status == evidence_status::source_associated_evaluation) status = evidence_status::extent_mismatch;
           continue;
         }
@@ -3127,9 +3136,7 @@ namespace sunshine_streamline {
         input.resource.kind = sunshine_scene_depth::resource_kind::raw_depth;
         // No API states this resource's state at the call: only a state
         // observed on the evaluation's own recording is acceptable.
-        input.native_state = UINT32_MAX;
-        input.proof = sunshine_scene_depth::state_proof::observed_nonzero;
-        input.valid_until = sunshine_scene_depth::lifetime::until_evaluation;
+        sunshine_api_contract::apply(sunshine_api_contract::ngx::frame_generation_input, input);
         input.at_tag_call = true; // Copied inside the call that supplied it.
         input.pixels_required = true;
         depth_capture::record_diagnostic diagnostic;
@@ -3181,9 +3188,7 @@ namespace sunshine_streamline {
         input.source_id = source_id; input.frame_generation_input = true;
         input.resource.native = item.state == parameter::present ? item.native : 0;
         input.resource.area = item.area;
-        input.native_state = UINT32_MAX;
-        input.proof = sunshine_scene_depth::state_proof::observed_nonzero;
-        input.valid_until = sunshine_scene_depth::lifetime::until_evaluation;
+        sunshine_api_contract::apply(sunshine_api_contract::ngx::frame_generation_input, input);
         input.force_snapshot = true; input.at_tag_call = true;
         depth_capture::record_diagnostic retained;
         input.source = depth_capture::retain_source(input.resource.native, &retained);

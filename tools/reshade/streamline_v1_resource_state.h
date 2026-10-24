@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
+#include "api_contract.h"
 #include "scene_depth_source.h"
 #include "depth_view_format.h"
 #include <d3d12.h>
@@ -109,13 +110,16 @@ namespace sunshine_streamline::v1_resource_state {
 
   // The caller supplies a validated exact-1.1.1 ABI identity. Query runs only
   // after retaining the actual resource at evaluation entry; no COM access
-  // belongs in the metadata-only normalization/diagnostic path.
+  // belongs in the metadata-only normalization/diagnostic path. The tagged
+  // state's own proof is the Streamline contract's (api_contract.h): only a
+  // 1.x eUnknown (0), which needs an observed state, is queried.
   template<class Query>
   inline resolved resolve_with(std::uint32_t tagged, bool pinned_v1_1_1, Query &&query) {
     using proof = sunshine_scene_depth::state_proof;
-    resolved out{tagged, tagged != UINT32_MAX ? proof::declared : proof::unavailable};
-    if (!pinned_v1_1_1 || tagged != 0) return out;
-    out.proof = proof::observed_nonzero;
+    sunshine_api_contract::streamline::tag_declaration tag;
+    tag.state = tagged; tag.version_one = pinned_v1_1_1;
+    resolved out{tagged, sunshine_api_contract::streamline::proof(tag)};
+    if (out.proof != proof::observed_nonzero) return out;
     std::uint32_t native{};
     if (query(native)) out = {native, proof::declared};
     return out;

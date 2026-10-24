@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "ngx_depth_source.h"
 #include "addon_lifetime.h"
+#include "api_contract.h"
 #include "game3d_diagnostic_metadata.h"
 #include "streamline_depth_capture.h"
 #ifndef SUNSHINE_UPSCALER_TRACE_TEST
@@ -30,10 +31,6 @@ namespace sunshine_ngx {
     // NVSDK_NGX_Feature_FrameGeneration (DLSS-G), nvsdk_ngx_defs.h. Its inputs
     // are the DLSSG.* parameters of nvsdk_ngx_defs_dlssg.h, not SR's Depth.
     constexpr std::uint32_t frame_generation_feature = 11;
-    // D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE. NVIDIA's DLSS Programming
-    // Guide, section 3.4 "Resource States": every D3D12 input must be in this
-    // state at the evaluation call, and DLSS always restores it afterwards.
-    constexpr std::uint32_t evaluation_input_state = 0x40;
     // Feature ID for a registration recovered at evaluation: CreateFeature ran
     // before these hooks or before the add-on's current epoch.
     constexpr std::uint32_t recovered_feature = 0xfffffffeu;
@@ -705,12 +702,11 @@ namespace sunshine_ngx {
       (selected.parameters.flags & inverted_depth) != 0;
     value.projection.direction_supplied = true;
     // NGX names the resource but no per-call state. Its SDK contract fixes the
-    // input state at this boundary; a state observed on the same recording
-    // still takes precedence in the shared copy owner. Engines commonly record
-    // that transition on an earlier command list, where it cannot be observed.
-    value.native_state = evaluation_input_state;
-    value.proof = sunshine_scene_depth::state_proof::sdk_contract;
-    value.valid_until = sunshine_scene_depth::lifetime::until_evaluation;
+    // input state at this boundary (api_contract.h); a state observed on the
+    // same recording still takes precedence in the shared copy owner. Engines
+    // commonly record that transition on an earlier command list, where it
+    // cannot be observed.
+    sunshine_api_contract::apply(sunshine_api_contract::ngx::evaluation_input, value);
 #ifndef SUNSHINE_UPSCALER_TRACE_TEST
     using namespace sunshine_streamline;
     depth_capture::begin_evaluation(value.epoch, value.sequence, value.viewport, value.provider, value.source_id);

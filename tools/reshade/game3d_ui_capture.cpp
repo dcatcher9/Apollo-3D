@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "game3d_ui_capture.h"
+#include "api_contract.h"
 #include "game3d_capture_diagnostic.h"
 #include "game3d_diagnostic_metadata.h"
 #include "streamline_depth_capture.h"
@@ -14,6 +15,7 @@
 namespace sunshine_game3d {
   namespace capture = sunshine_streamline::depth_capture;
   namespace scene = sunshine_scene_depth;
+  namespace sl_contract = sunshine_api_contract::streamline;
   namespace wire = game3d_debug;
   namespace {
     constexpr unsigned resource_count = sizeof(ui_resources::catalog) / sizeof(ui_resources::catalog[0]);
@@ -58,10 +60,15 @@ namespace sunshine_game3d {
         e.observed = observation;
         if (!observation.readable) { e.status = "unreadable_or_query_failed"; return; }
         if (!observation.descriptor_supported) { e.status = "unsupported_descriptor"; return; }
+        // SL v2 keeps the supplied lifetime, read as the live UI adapter reads
+        // it at its tag call (api_contract.h). SL v1 has no lifecycle field and
+        // NGX names none: both keep their existing synchronous copy.
         const bool sl_input = description->source == ui_resources::provider::streamline;
-        if (sl_input && !observation.version_one && observation.lifecycle > 2) {
-          e.status = "unsupported_lifetime"; return;
-        }
+        sl_contract::tag_declaration declared;
+        declared.lifecycle = observation.lifecycle;
+        const auto valid_until = sl_input && !observation.version_one ?
+          sl_contract::valid_until(declared, sl_contract::copy_point::tag_call) : scene::lifetime::at_call;
+        if (valid_until == scene::lifetime::unsupported) { e.status = "unsupported_lifetime"; return; }
         if (!observation.native) { e.status = "explicit_null"; return; }
         if (!observation.area_valid) { e.status = "invalid_active_rect"; return; }
         if (!observation.observation.command) { e.status = "no_command_at_observation"; return; }
@@ -80,13 +87,11 @@ namespace sunshine_game3d {
         input.source_frame_has_numeric = at.numeric_frame;
         input.resource.native = observation.native;
         input.resource.area = {observation.area.left, observation.area.top, observation.area.width, observation.area.height};
+        // The dump's own proof: a 0 needs an observed state for every SL version
+        // (game3d_diagnostic_metadata.cpp), unlike a live 2.x tag's COMMON.
         input.native_state = observation.state_declared ? observation.native_state : UINT32_MAX;
         input.proof = observation.state_declared ? scene::state_proof::declared : scene::state_proof::observed_nonzero;
-        // SL v1 has no lifecycle field; retain its existing synchronous copy.
-        // SL v2 keeps the supplied lifetime, exactly like the live UI adapter.
-        input.valid_until = sl_input && !observation.version_one ?
-          (observation.lifecycle == 0 ? scene::lifetime::at_call : observation.lifecycle == 1 ?
-            scene::lifetime::until_present : scene::lifetime::until_evaluation) : scene::lifetime::at_call;
+        input.valid_until = valid_until;
         input.force_snapshot = true;
         input.source_present_generation = capture::source_present_generation(input.source);
         // State policy follows the source lifetime, not tag semantics or storage.

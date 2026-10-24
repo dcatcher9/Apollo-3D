@@ -1650,6 +1650,12 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   the limit, with or without a tick ahead of the clock, a zero tick unavailable), the outcome one
   millisecond either side of it. It is the only pin of the Streamline probe's camera, query and
   tag-precedence limits, whose sites read their own clock.
+- [`test_api_contract.cpp`](test_api_contract.cpp) (`reshade_api_contract`) pins each API's mapper
+  in [`api_contract.h`](api_contract.h): a Streamline tag's lifetime by version, lifecycle and copy
+  point (its tag call or a later evaluate, the one difference between the depth and UI readings),
+  its state proof, the lifecycle `match()` judges, the NGX, DLSS-G and Generic contracts and an
+  absent extent as the whole allocation. The matrix's L1 hook cells drive the same mappers through
+  the probe.
 
 ### Independent renderer reference tests
 

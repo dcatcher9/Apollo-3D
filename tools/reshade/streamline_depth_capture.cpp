@@ -128,7 +128,7 @@ namespace sunshine_streamline::depth_capture {
       }
     }
     // Colour view families: color_family, typeless_color and same_color_family
-    // (streamline_depth_capture.h), shared with the UI capture gate.
+    // (api_contract.h), shared with the UI capture gate.
     static_assert(color_family(DXGI_FORMAT_R16G16B16A16_UNORM) == DXGI_FORMAT_R16G16B16A16_TYPELESS &&
       color_family(DXGI_FORMAT_A8_UNORM) == DXGI_FORMAT_A8_UNORM && !color_family(DXGI_FORMAT_R8G8B8A8_UINT) &&
       same_color_family(DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB) &&
@@ -154,7 +154,7 @@ namespace sunshine_streamline::depth_capture {
       // no boxed depth/stencil GPU copy or conversion pass is introduced.
       out.width = static_cast<std::uint32_t>(desc.Width);
       out.height = desc.Height;
-      out.area = area.width ? area : sunshine_scene_depth::extent{0, 0, out.width, out.height};
+      out.area = sunshine_api_contract::normalized_extent(area, out.width, out.height);
       return status::ready;
     }
     status capture_region(const D3D12_RESOURCE_DESC &desc,
@@ -1182,8 +1182,7 @@ namespace sunshine_streamline::depth_capture {
       }
       out.queue = consumer; out.producer_queue = value.queue; out.capture_id = value.id; out.producer_fence = value.producer_fence;
       out.width = static_cast<std::uint32_t>(desc.Width); out.height = desc.Height;
-      out.area = value.metadata.resource.area.width ? value.metadata.resource.area :
-        sunshine_scene_depth::extent{0, 0, out.width, out.height};
+      out.area = sunshine_api_contract::normalized_extent(value.metadata.resource.area, out.width, out.height);
       out.format = typeless(desc.Format);
       // The snapshot's view was resolved at capture (depth_view); a
       // metadata-only nomination resolves its source's the same way.
@@ -2219,8 +2218,7 @@ namespace sunshine_streamline::depth_capture {
       out.device_identity = texture->device_identity;
       out.resource_id = entry.metadata.source ? entry.metadata.source->cookie : 0;
       out.width = static_cast<std::uint32_t>(desc.Width); out.height = desc.Height; out.format = desc.Format;
-      out.area = entry.metadata.resource.area.width ? entry.metadata.resource.area :
-        sunshine_scene_depth::extent{0, 0, out.width, out.height};
+      out.area = sunshine_api_contract::normalized_extent(entry.metadata.resource.area, out.width, out.height);
       return result(status::ready);
     }
     return result(status::unavailable);
@@ -2306,9 +2304,7 @@ namespace sunshine_streamline::depth_capture {
       value.source = retain_source(source, diagnostic);
       if (!value.source) return {};
       value.resource.native = source;
-      value.native_state = native_state;
-      value.proof = sunshine_scene_depth::state_proof::declared;
-      value.valid_until = sunshine_scene_depth::lifetime::until_present;
+      sunshine_api_contract::apply(sunshine_api_contract::generic::preserved(native_state), value);
       value.source_present_generation = source_present_generation(value.source);
       preservation_ticket ticket;
       record_impl(command, value, diagnostic, true, &ticket);
