@@ -75,22 +75,21 @@ namespace sunshine_game3d::ui_mask {
         a.viewport == b.viewport && a.width == b.width && a.height == b.height && a.enabled == b.enabled &&
         a.allowed_kinds == b.allowed_kinds;
     }
-    // A nonzero tick less than window before now; a tick after now (stamped
-    // by another thread meanwhile) counts as now.
-    bool within(std::uint64_t tick, std::uint64_t now, std::uint64_t window) {
-      return tick && (now <= tick || now - tick < window);
-    }
-    // A request its runtime refreshed recently (game3d_ui_mask.h, request).
+    // A request its runtime refreshed below the source age ago
+    // (game3d_ui_mask.h, request). A zero tick was never refreshed; a tick
+    // after now (stamped by another thread meanwhile) counts as now.
     bool live(const entry &item, std::uint64_t now) {
-      return item.wanted.enabled && within(item.refreshed, now, sunshine_freshness::source_age_ms);
+      return item.wanted.enabled && item.refreshed &&
+        sunshine_freshness::ahead_tolerant_lt(item.refreshed, now, sunshine_freshness::source_age_ms);
     }
     bool matches(const entry &item, std::uint64_t epoch, std::uint64_t revision, std::uint32_t viewport, std::uint64_t now) {
       const auto &a = item.wanted;
       return live(item, now) && a.epoch == epoch && a.revision == revision && a.viewport == viewport;
     }
-    // Its runtime read UI captures at most reader_window_ms before now.
+    // Its runtime read UI captures at most reader_window_ms before now (or
+    // after it, on another thread meanwhile); a zero tick never read.
     bool reading(const entry &item, std::uint64_t now) {
-      return within(item.acquired, now, reader_window_ms + 1);
+      return item.acquired && sunshine_freshness::ahead_tolerant_le(item.acquired, now, reader_window_ms);
     }
     bool recent(std::uint64_t tick, std::uint64_t now) {
       return sunshine_freshness::within_source_age(tick, now);

@@ -10,7 +10,12 @@
 // differ by site and are not unified here. Ticks are GetTickCount64
 // milliseconds, and a tick's age at now is now - tick. Cadences, log
 // throttles, the capture pool's leases, calibration and UI detection keep
-// their constants with their owners.
+// their constants with their owners, since none ages API depth evidence:
+// among them UI detection's status sample freshness
+// (ui_temporal::sample_fresh_ms, 500 ms at most) and adaptive target age
+// (ui_adaptive::max_age_ms), and calibration's camera sample age
+// (sunshine_camera_binding::maximum_age_ms, 1500 ms). The UI mask's request
+// and reader windows are read through the comparators below.
 namespace sunshine_freshness {
   // A source's nomination, its completed snapshots, a held display copy and
   // the projection held for a capture without its own camera. Multi-frame
