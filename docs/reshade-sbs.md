@@ -3665,6 +3665,11 @@ meaningful-work/clear-or-unbind-or-fullscreen boundary. An end-of-frame copy can
 observed boundary that was missed: the original may already be cleared or reused. That presentation
 remains mono until a fresh valid snapshot exists.
 
+The Generic status line (`Sunshine 3D depth:`) ends with `ready_copies boundary=N end_of_frame=M`:
+the Presents whose ready capture was a boundary's copy (a clear, an unbind or a clear-like draw) and
+those whose ready capture was the end-of-frame copy, since the runtime started. While these counts
+change, the line repeats at most every 10 s.
+
 Preservation statistics retain a strong snapshot ticket with its allocation identity. Publishing
 it requires the current, active, unambiguous presentation record and a matching live ticket.
 Before-clear snapshots require actual producer submission. An end-of-frame snapshot can instead

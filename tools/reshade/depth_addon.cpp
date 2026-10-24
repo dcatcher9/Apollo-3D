@@ -444,6 +444,7 @@ struct captured_depth
 {
 	sunshine_depth_capture::capture_record record;
 	sunshine_depth::frame_depth metadata;
+	bool end_of_frame = false; // The frame's copy is the end-of-frame one (counted only).
 };
 
 // One authority for callback-scoped current-copy facts. Source/backup ownership
@@ -491,6 +492,7 @@ static captured_depth capture_record(effect_runtime *runtime, const generic_dept
 	out.preserved = info.last_frame_stats.copied_during_frame && published;
 	out.ambiguous = info.last_frame_stats.copy_provenance_ambiguous;
 	out.direct = !using_backup;
+	result.end_of_frame = info.last_frame_stats.end_of_frame_copy;
 	auto &depth = result.metadata;
 	depth.source_resource = source; depth.resource = sampled; depth.shader_resource = view;
 	depth.width = out.shape.width; depth.height = out.shape.height;
@@ -619,6 +621,7 @@ static void preserve_d3d12_at_effects(effect_runtime *runtime, command_list *com
 			stats.capture_ticket = std::move(ticket);
 			stats.depth_copy = copied; stats.capture_marker = copied.recording;
 			stats.copied_during_frame = true; stats.copied_viewport = copied_viewport;
+			stats.end_of_frame_copy = true;
 			observe_preserved_layout(found->second, stats);
 		}
 	}
@@ -698,6 +701,7 @@ static void preserve_depth_at_effects(effect_runtime *runtime, command_list *cmd
 	stats.copied_during_frame = true;
 	stats.copied_viewport = copied_viewport;
 	stats.copy_provenance_ambiguous = false;
+	stats.end_of_frame_copy = true;
 	observe_preserved_layout(found->second, stats);
 	stats.depth_copy = {};
 	if (s_streamline_probe_events && api == device_api::d3d12)
@@ -2994,6 +2998,8 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 		data.selected_record = captured.record;
 		data.selected_capture = captured.metadata;
 		data.capture_ready = captured.record.renderable(device_data->native_present_index, device_data->frame_index, data.runtime_epoch);
+		if (data.capture_ready)
+			++(captured.end_of_frame ? data.end_of_frame_copy_frames : data.boundary_copy_frames);
 		if (data.rotating && effects_may_read_depth && data.using_backup_texture && data.capture_ready)
 		{
 			// Only a new ready capture is copied. A renderable record's sampled
@@ -3043,19 +3049,24 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 	// The game may alternate its tagged allocation every present. Ordinary
 	// source changes share the status rate limit; manual handovers/errors remain
 	// immediate. Logging must never turn physical rotation into per-frame I/O.
+	// The copy counts alone repeat the line at most every 10 s.
+	const uint64_t copy_frames = data.boundary_copy_frames + data.end_of_frame_copy_frames;
 	if (data.status_log.due(GetTickCount64(), selection_changed || binding_changed,
-		data.last_logged_manual != manual || (binding_changed && data.binding_state == depth_binding_state::binding_failed)))
+		data.last_logged_manual != manual || (binding_changed && data.binding_state == depth_binding_state::binding_failed),
+		copy_frames != data.logged_copy_frames))
 	{
-		char message[512];
+		char message[640];
 		std::snprintf(message, std::size(message),
-			"Sunshine 3D depth: %s; source=%llu %ux%u %s; %s; %s; %s",
+			"Sunshine 3D depth: %s; source=%llu %ux%u %s; %s; %s; %s; ready_copies boundary=%llu end_of_frame=%llu",
 			binding_state_name(data.binding_state), static_cast<unsigned long long>(data.selected_identity),
 			data.selected_desc.texture.width, data.selected_desc.texture.height, format_to_string(data.selected_desc.texture.format), manual ? "manual" : "auto",
-			data.selection_reason, data.binding_detail);
+			data.selection_reason, data.binding_detail, static_cast<unsigned long long>(data.boundary_copy_frames),
+			static_cast<unsigned long long>(data.end_of_frame_copy_frames));
 		sunshine_log::message(data.binding_state == depth_binding_state::binding_failed ? reshade::log::level::error : reshade::log::level::info, message);
 		data.last_logged_id = data.anchor_identity;
 		data.last_logged_manual = manual;
 		data.last_logged_state = data.binding_state;
+		data.logged_copy_frames = copy_frames;
 	}
 	prepare_probe_target(runtime, cmd_list, data, *device_data, frame_width, frame_height);
 	data.native_access_present = native_present_index;

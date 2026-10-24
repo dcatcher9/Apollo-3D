@@ -193,6 +193,9 @@ struct depth_stencil_frame_stats
 	// Passive transport capability: a real scene was followed by a boundary
 	// where this preservation mode can copy. This is never pixel-readiness proof.
 	bool preservation_boundary = false;
+	// This frame's copy is the end-of-frame one (preserve_depth_at_effects),
+	// not a boundary's. Counted for the status line only.
+	bool end_of_frame_copy = false;
 
 	void limit_tracking(depth_tracking_demand demand)
 	{
@@ -448,6 +451,10 @@ struct __declspec(uuid("c072221d-786d-4b6d-8f0b-52e0f325903e")) generic_depth_da
 	bool last_logged_manual = false;
 	depth_binding_state last_logged_state = depth_binding_state::waiting_game;
 	sunshine_diagnostics::log_gate status_log;
+	// Observation only: Presents whose ready capture was a boundary's copy or
+	// the end-of-frame copy, reported on the status line (every 10 s at most
+	// while they change).
+	uint64_t boundary_copy_frames = 0, end_of_frame_copy_frames = 0, logged_copy_frames = 0;
 	// Observation only: these fields never participate in routing or readiness.
 	const char *capture_wait_detail = nullptr;
 	struct capture_trace_record
