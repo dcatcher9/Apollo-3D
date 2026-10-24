@@ -307,6 +307,7 @@ namespace {
     switch (source.seen) {
       case matrix::evidence::transition:
       case matrix::evidence::end_without_begin:
+      case matrix::evidence::end_mismatched:  // The recorder takes an END_ONLY's StateAfter without its BEGIN_ONLY's.
         observed = {true, copy_state::supported(source.observed), false, source.observed};
         break;
       case matrix::evidence::split_open:
@@ -507,9 +508,12 @@ namespace {
       row(none, claim::sl_declared, D3D12_RESOURCE_STATE_INDEX_BUFFER, evidence::none),
       row(none, claim::none, 0, evidence::transition, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
       row(D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, claim::sl_declared, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, evidence::none, 0, 0, 0, consumer::ui),
-      // Barriers outside the contract (D4, D5b).
+      // Barriers outside the contract (D4, D4c, D5b). D4c: a BEGIN_ONLY,
+      // then an END_ONLY to DEPTH_READ that the begin did not name.
       row(ds, claim::sl_declared, D3D12_RESOURCE_STATE_DEPTH_READ, evidence::begin_and_end, D3D12_RESOURCE_STATE_DEPTH_READ),
       row(ds, claim::ngx_contract, 0, evidence::mixed_split, D3D12_RESOURCE_STATE_DEPTH_READ),
+      row(ds, claim::none, 0, evidence::end_mismatched, D3D12_RESOURCE_STATE_DEPTH_READ),
+      row(ds, claim::sl_declared, D3D12_RESOURCE_STATE_DEPTH_READ, evidence::end_mismatched, D3D12_RESOURCE_STATE_DEPTH_READ),
       row(ds, claim::none, 0, evidence::enhanced, 0, D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_SHADER_RESOURCE, D3D12_BARRIER_ACCESS_SHADER_RESOURCE),
       row(none, claim::sl_undeclared, UINT32_MAX, evidence::enhanced, 0, D3D12_BARRIER_LAYOUT_VIDEO_DECODE_READ, D3D12_BARRIER_ACCESS_VIDEO_DECODE_READ),
     };

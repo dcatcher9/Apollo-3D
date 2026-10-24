@@ -150,6 +150,14 @@ namespace game3d_contract::known_gaps {
       }
       return source.seen == evidence::none && value.source == claim::sl_declared && buffer_state(value.declared);
     }
+
+    // An END_ONLY whose StateAfter differs from its BEGIN_ONLY's is taken as
+    // a completed transition into the END's state (the recorder keeps no
+    // begin state), so it is copied from unless a declaration disagrees.
+    constexpr bool mismatched_split_end(const state_case &value) {
+      const auto &source = value.resource;
+      return source.seen == evidence::end_mismatched && (value.source != claim::sl_declared || value.declared == source.observed);
+    }
   }  // namespace state
 
   inline constexpr row<state_case> state_rows[] {
@@ -158,6 +166,7 @@ namespace game3d_contract::known_gaps {
     {"D2", &rules::D2, kind::expected_failure, &state::resolve_destination, "Outside the Stage 3 order. Fail-safe today (refusal is harmless), lowest priority: admit RESOLVE_DEST in copy_state::supported and layouts::admissible when a game is seen to need it."},
     {"X1", &rules::X1, kind::expected_failure, &state::basis_flags_unchecked, "Outside the Stage 3 order. Illegal game input only: check the allocation flags for every copy basis in copy_state::resolve (today only the at-call UI declaration fallback does), so an impossible state never reaches a barrier."},
     {"X2", &rules::X2, kind::expected_failure, &state::buffer_read_bits, "Outside the Stage 3 order. Illegal game input, but not harmless: the copy's barrier from such a state makes the game's own ID3D12GraphicsCommandList::Close fail (E_INVALIDARG), as the device layer saw for GENERIC_READ | DEPTH_READ. Admit GENERIC_READ itself and no other state with a buffer read bit in copy_state::supported, and update test_capture_state_policy.cpp's supported() checks with it."},
+    {"D4c", &rules::D4c, kind::expected_failure, &state::mismatched_split_end, "Stage 3 fix 13 (D4c). Illegal game input: streamline_depth_capture.cpp's barrier recorder ends a split at any END_ONLY and takes its StateAfter, never comparing it with the BEGIN_ONLY's. Keep the begin's StateAfter while the split is pending and block the source when its END_ONLY names another state. The device layer cannot run this row (the debug layer refuses the barrier), so this table is its only check."},
   };
 
   // Raw Streamline buffer types at each surveyed release (checked by
