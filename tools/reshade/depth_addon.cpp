@@ -45,6 +45,7 @@
 #include "native_resource_identity.h"
 #include "camera_sample_observation.h"
 #include "game3d_slow_step.h"
+#include "game3d_frame_record.h"
 #include "depth_addon_test_access.h"
 
 using namespace reshade::api;
@@ -1466,6 +1467,7 @@ static void on_init_effect_runtime(effect_runtime *runtime)
 {
 	runtime->create_private_data<generic_depth_data>();
 	set_generic_capture_enabled(runtime, *runtime->get_private_data<generic_depth_data>(), true);
+	sunshine_game3d::frame_record_store::initialize(runtime);
 	sunshine_streamline::provider::initialize(runtime);
 }
 static void on_destroy_effect_runtime(effect_runtime *runtime)
@@ -1499,6 +1501,7 @@ static void on_destroy_effect_runtime(effect_runtime *runtime)
 
 	runtime->destroy_private_data<generic_depth_data>();
 	sunshine_streamline::provider::destroy(runtime);
+	sunshine_game3d::frame_record_store::destroy(runtime);
 }
 
 static bool on_create_resource(device *device, resource_desc &desc, subresource_data *, resource_usage)
@@ -2541,6 +2544,32 @@ static void sample_probe_target(effect_runtime *runtime, command_list *cmd_list,
 	}
 }
 
+// The frame record's Generic row (game3d_frame_record.h), as this Present's
+// selection left it; nothing reads it.
+static void record_generic_row(effect_runtime *runtime, const generic_depth_data &data, uint64_t present, bool api_owner)
+{
+	auto *const record = sunshine_game3d::frame_record_store::writable(runtime);
+	if (record == nullptr)
+		return;
+	using sunshine_game3d::source_state;
+	sunshine_game3d::generic_depth_decision decision;
+	decision.api_owner = api_owner;
+	if (!api_owner)
+	{
+		switch (data.binding_state)
+		{
+		case depth_binding_state::ready: decision.state = source_state::ready; break;
+		case depth_binding_state::waiting_capture: decision.state = source_state::pending; break;
+		case depth_binding_state::binding_failed:
+		case depth_binding_state::filtered: decision.state = source_state::refused; break;
+		default: decision.state = source_state::absent; break;
+		}
+		decision.reason = binding_state_name(data.binding_state);
+		decision.identity = data.selected_identity;
+	}
+	sunshine_game3d::record_generic_depth(*record, decision, present, GetTickCount64());
+}
+
 static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 {
 	device *const device = runtime->get_device();
@@ -2608,6 +2637,7 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 		data.effects_bound = false; // The API provider owns the DEPTH binding.
 		data.native_access_present = device_data->native_present_index;
 		data.native_access_open = true;
+		record_generic_row(runtime, data, device_data->native_present_index, true);
 		return;
 	}
 	if (was_streamline)
@@ -3030,6 +3060,7 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 	prepare_probe_target(runtime, cmd_list, data, *device_data, frame_width, frame_height);
 	data.native_access_present = native_present_index;
 	data.native_access_open = true;
+	record_generic_row(runtime, data, native_present_index, false);
 	if (s_frame_activity_trace)
 		trace_activity_effect(runtime, data, *device_data, false, data.binding_detail);
 }

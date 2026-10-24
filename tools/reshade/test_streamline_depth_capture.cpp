@@ -779,6 +779,73 @@ namespace sunshine_streamline::depth_capture {
         if (fresh.id <= established.admission_after ||
             select_provider(established, native, 6, GetTickCount64(), {}).value != &fresh) return false;
       }
+      {
+        // depth_choice (docs/reshade-sbs.md, Frame record) repeats what each
+        // pick of this timeline chose and why: its decision, selection reason,
+        // status and failure, the role of its source, the policy, and the
+        // queue's owner after it. It decides nothing.
+        slots = {}; evaluations = {};
+        using sunshine_game3d::source_slot;
+        queue_state chooser;
+        const auto chosen = [&](std::uint64_t present, selection_policy policy = {}) {
+          const auto pick = select_provider(chooser, native, present, GetTickCount64(), policy);
+          const auto decision = classify_acquisition(pick, chooser, policy);
+          const auto out = describe_choice(pick, decision, chooser, policy, present, 1234, pick.result == status::ready);
+          const auto *source = pick.value ? pick.value : pick.latest;
+          const bool mirrors = out.present == present && out.tick_ms == 1234 && out.result == pick.result &&
+            out.selection == pick.selection && out.pixel_ready == (pick.result == status::ready) &&
+            out.failure == (source ? source->failure : capture_failure::none) &&
+            out.decision.source_selected == decision.source_selected && out.decision.provider == decision.provider &&
+            out.decision.epoch == decision.epoch && out.decision.sequence == decision.sequence &&
+            out.decision.source_id == decision.source_id && out.decision.capture_id == decision.capture_id &&
+            out.decision.viewport == decision.viewport && out.decision.pending_frame == decision.pending_frame &&
+            out.decision.repeated_frame == decision.repeated_frame &&
+            out.fg_required == policy.require_frame_generation && out.fg_excluded == policy.exclude_unconfirmed_fg &&
+            out.owner_established == chooser.provider_established && out.owner == chooser.provider &&
+            out.owner_source == chooser.source_id;
+          return std::pair{out, mirrors};
+        };
+        constexpr std::uint64_t fg_epoch = 50, fg_id = 1ull << 63;
+        // No API reported anything: no rung.
+        const auto [nothing, nothing_mirrors] = chosen(40);
+        if (!nothing_mirrors || nothing.rung != source_slot::none || nothing.decision.source_selected) return false;
+        // Readable NGX depth is scene depth (D2), and then the queue's owner.
+        auto &scene_source = make(0, provider_kind::ngx, 60, 1, 500);
+        const auto [scene, scene_mirrors] = chosen(41);
+        if (!scene_mirrors || scene.rung != source_slot::scene_depth || !scene.decision.source_selected ||
+            scene.decision.capture_id != scene_source.id || scene.result != status::ready || !scene.pixel_ready ||
+            scene.owner_established) return false;
+        establish_provider(chooser, scene_source, 41);
+        const auto [owned, owned_mirrors] = chosen(42);
+        if (!owned_mirrors || !owned.owner_established || owned.owner != provider_kind::ngx || owned.owner_source != 500)
+          return false;
+        // Required FG before its scope is known: the FG rung, no source.
+        const auto [missing, missing_mirrors] = chosen(43, {true, 0, 0});
+        if (!missing_mirrors || missing.rung != source_slot::fg_depth ||
+            missing.selection != selection_reason::fg_scope_missing || missing.decision.source_selected) return false;
+        // Required FG with its own input still recording: the FG rung, pending.
+        auto &fg_source = make(1, provider_kind::streamline, fg_epoch, 2, fg_id);
+        fg_source.metadata.frame_generation_input = true; fg_source.finished = false;
+        const auto [pending_fg, pending_mirrors] = chosen(44, {true, fg_epoch, 0});
+        if (!pending_mirrors || pending_fg.rung != source_slot::fg_depth || pending_fg.decision.source_selected ||
+            pending_fg.result != status::recorded || pending_fg.pixel_ready || !pending_fg.fg_required) return false;
+        // Another viewport's scope does not match its input.
+        const auto [mismatch, mismatch_mirrors] = chosen(44, {true, fg_epoch, 1});
+        if (!mismatch_mirrors || mismatch.rung != source_slot::fg_depth ||
+            mismatch.selection != selection_reason::fg_scope_mismatch || mismatch.decision.source_selected) return false;
+        // An unconfirmed scope excludes FG input; scene depth still supplies.
+        selection_policy excluded;
+        excluded.exclude_unconfirmed_fg = true;
+        const auto [unconfirmed, unconfirmed_mirrors] = chosen(45, excluded);
+        if (!unconfirmed_mirrors || unconfirmed.rung != source_slot::scene_depth || !unconfirmed.fg_excluded ||
+            unconfirmed.decision.capture_id != scene_source.id) return false;
+        // Its finished input is FG depth (D1), ready.
+        fg_source.finished = true;
+        const auto [fg_ready, fg_mirrors] = chosen(46, {true, fg_epoch, 0});
+        if (!fg_mirrors || fg_ready.rung != source_slot::fg_depth || !fg_ready.decision.source_selected ||
+            fg_ready.decision.capture_id != fg_source.id || !fg_ready.pixel_ready) return false;
+        slots = {}; evaluations = {};
+      }
       // SR and FG use distinct logical sources for the same viewport. The
       // explicit role transition removes only the superseded SR view, rather
       // than waiting for its normal age window or ignoring true multi-view.

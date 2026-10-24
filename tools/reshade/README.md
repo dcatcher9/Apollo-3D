@@ -879,6 +879,15 @@ same-batch pairs; command-less again, DLSS-G's inputs are captured again. An FG 
 command list copies the frame first and keeps precedence (`tag_copied`); refused again, SR depth
 returns.
 It injects no captured pixels, readiness or GPU completion.
+Both runtime tests also check the
+[frame record](../../docs/reshade-sbs.md#frame-record). Each queue-cycle acquisition's
+`depth_choice` must repeat what `acquire` returned. In the provider test every provider status
+line must name, in order, a Present whose record states that selection (D1 or D2 with fresh or
+held pixels, H in mono, the handoff hold, or Generic), and the record's rows are checked at the
+settled, failed-evaluation, FG pair, silent-scope, SR-through-a-silent-scope and DLSS-G exact-pair
+points. `reshade_exporter_lifecycle` maps the provider's display and FG-policy timelines to the
+record on the CPU, and the capture owner's provider admission regression (run by the Streamline
+probe tests) checks `depth_choice` against its selection timeline.
 To exercise an earlier 2.x export surface, build `reshade_legacy_v2_interposer` and pass
 `legacy_v2_interposer.dll` as the final argument in the same command, using a fresh output directory.
 That fixture reports version 2.6.10.0 and omits `slSetTagForFrame`; the test submits global tags

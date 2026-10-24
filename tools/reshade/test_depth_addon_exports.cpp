@@ -11,6 +11,7 @@
 #error "Built only into the test add-on (SunshineSBSTest)"
 #endif
 #include "depth_addon_test_access.h"
+#include "game3d_frame_record.h"
 #include <chrono>
 #include <stdexcept>
 #include "depth_selection_snapshot_test.h"
@@ -329,6 +330,18 @@ extern "C" __declspec(dllexport) BOOL SunshineDepthTestProviderStatus(effect_run
 {
 	if (!s_registered || runtime == nullptr || output == nullptr) return FALSE;
 	*output = describe_streamline_source(runtime);
+	return TRUE;
+}
+
+// A copy of the frame record as the present thread left it. Nothing in the
+// add-on reads the record; the provider runtime test compares it with the log.
+extern "C" __declspec(dllexport) BOOL SunshineGame3DTestFrameRecord(effect_runtime *runtime,
+	sunshine_game3d::frame_record *output)
+{
+	if (!s_registered || runtime == nullptr || output == nullptr) return FALSE;
+	const auto *record = sunshine_game3d::frame_record_store::writable(runtime);
+	if (record == nullptr) return FALSE;
+	*output = *record;
 	return TRUE;
 }
 

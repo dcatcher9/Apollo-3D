@@ -669,6 +669,24 @@ namespace sunshine_streamline::depth_capture {
       }
       return out;
     }
+    // The selection's outcome as depth_choice records it. Describes, never decides.
+    depth_choice describe_choice(const capture_pick &chosen, const acquisition_decision &decision,
+        const queue_state &owner, selection_policy policy, std::uint64_t present, std::uint64_t tick, bool pixel_ready) {
+      depth_choice out;
+      out.present = present; out.tick_ms = tick;
+      out.decision = decision;
+      out.result = chosen.result; out.selection = chosen.selection;
+      const auto *source = chosen.value ? chosen.value : chosen.latest;
+      if (source) out.failure = source->failure;
+      const bool fg = source ? source->metadata.frame_generation_input : policy.require_frame_generation;
+      if (source || chosen.pending_nomination || policy.require_frame_generation)
+        out.rung = fg ? sunshine_game3d::source_slot::fg_depth : sunshine_game3d::source_slot::scene_depth;
+      out.pixel_ready = pixel_ready;
+      out.fg_required = policy.require_frame_generation; out.fg_excluded = policy.exclude_unconfirmed_fg;
+      out.owner_established = owner.provider_established;
+      out.owner = owner.provider; out.owner_source = owner.source_id;
+      return out;
+    }
     // Keep one completed API snapshot while the CPU records its successor.
     // Completion and nomination advance independently for SR as well as FG.
     // Requiring the latest nomination to finish can starve a pipelined game.
@@ -2330,9 +2348,12 @@ namespace sunshine_streamline::depth_capture {
     }
     queue_progress progress;
     bool recording_retired = false;
-    const auto result = [diagnostic, &decision, &progress, &recording_retired](status why, const slot *value = nullptr) {
+    const auto result = [diagnostic, &decision, &progress, &recording_retired, &policy](status why,
+        const slot *value = nullptr) {
       if (diagnostic) {
         diagnostic->result = why;
+        diagnostic->frame_generation_input = value ? value->metadata.frame_generation_input :
+          policy.require_frame_generation;
         diagnostic->capture_id = decision.capture_id; diagnostic->sequence = decision.sequence;
         diagnostic->epoch = decision.epoch; diagnostic->source_id = decision.source_id;
         diagnostic->viewport = decision.viewport; diagnostic->provider = decision.provider;
@@ -2396,7 +2417,11 @@ namespace sunshine_streamline::depth_capture {
       const auto &pending = *chosen.pending_nomination;
       diagnostic->source_tick_ms = pending.tick;
     }
-    if (!chosen.value) return result(chosen.result, chosen.latest);
+    if (!chosen.value) {
+      owner->choice = describe_choice(chosen, decision, *owner, policy, present, selection_tick, false);
+      owner->chosen = true;
+      return result(chosen.result, chosen.latest);
+    }
     auto *best = chosen.value;
     // Borrowed CPU ownership alone does not imply a GPU consumer. Only a
     // successful pre-read mark_consumer establishes that retirement obligation.
@@ -2404,8 +2429,19 @@ namespace sunshine_streamline::depth_capture {
     establish_provider(*owner, *best, present);
     describe_packet(*best, native, out);
     out.pixel_ready = out.pixel_ready && chosen.result == status::ready;
+    owner->choice = describe_choice(chosen, decision, *owner, policy, present, selection_tick, out.pixel_ready);
+    owner->chosen = true;
     result(chosen.result, best);
     return true; // Source authority and current pixels are separate outcomes.
+  }
+  bool choice(std::uint64_t native, depth_choice &out) {
+    out = {};
+    if (!native) return false;
+    std::lock_guard lock(mutex);
+    const auto *owner = queue(native);
+    if (!owner || !owner->chosen) return false;
+    out = owner->choice;
+    return true;
   }
   void complete_frame(const packet &value, std::uint64_t present) {
     std::lock_guard lock(mutex);

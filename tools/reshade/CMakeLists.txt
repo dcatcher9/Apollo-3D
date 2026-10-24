@@ -164,7 +164,7 @@ configure_file(game3d_shader_source.h.in "${CMAKE_CURRENT_BINARY_DIR}/game3d_sha
 # library from which an executable links only what it uses. The seam defines
 # are public, so that every file of a binary sees the same view.
 set(sunshine_game3d_core_libraries d3d11 d3d12 dxgi dxguid d3dcompiler sunshine_min_hook version sunshine_game3d_diagnostics)
-set(sunshine_game3d_core_sources exporter.cpp game3d_depth_input.cpp game3d_ui_input_provider.cpp game3d_debug_dump.cpp game3d_ui_layer.cpp game3d_ui_capture.cpp game3d_renderer.cpp overlay_compositor.cpp depth_addon.cpp game3d_controls.cpp depth_content_sampler.cpp streamline_camera_probe.cpp game3d_ui_mask.cpp streamline_camera_data.cpp native_discard_observer.cpp streamline_depth_capture.cpp streamline_native_observer.cpp streamline_depth_provider.cpp upscaler_call_trace.cpp ngx_depth_source.cpp)
+set(sunshine_game3d_core_sources exporter.cpp game3d_depth_input.cpp game3d_frame_record.cpp game3d_ui_input_provider.cpp game3d_debug_dump.cpp game3d_ui_layer.cpp game3d_ui_capture.cpp game3d_renderer.cpp overlay_compositor.cpp depth_addon.cpp game3d_controls.cpp depth_content_sampler.cpp streamline_camera_probe.cpp game3d_ui_mask.cpp streamline_camera_data.cpp native_discard_observer.cpp streamline_depth_capture.cpp streamline_native_observer.cpp streamline_depth_provider.cpp upscaler_call_trace.cpp ngx_depth_source.cpp)
 function(sunshine_game3d_core_view view)
   cmake_parse_arguments(PARSE_ARGV 1 sunshine_view "" "" "SEAMS;EXCLUDE")
   set(view_sources ${sunshine_game3d_core_sources})

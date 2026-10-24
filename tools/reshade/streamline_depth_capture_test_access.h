@@ -103,6 +103,9 @@ namespace sunshine_streamline::depth_capture {
       provider_kind provider{provider_kind::streamline};
       std::uint64_t source_id{};
       std::uint32_t viewport{};
+      // The newest acquisition's choice (depth_choice), when chosen.
+      depth_choice choice;
+      bool chosen{};
     };
   }
 
@@ -290,6 +293,8 @@ namespace sunshine_streamline::depth_capture {
     bool pending_frame(const capture_pick &chosen, const queue_state &owner);
     acquisition_decision classify_acquisition(const capture_pick &chosen, const queue_state &owner,
       selection_policy policy);
+    depth_choice describe_choice(const capture_pick &chosen, const acquisition_decision &decision,
+      const queue_state &owner, selection_policy policy, std::uint64_t present, std::uint64_t tick, bool pixel_ready);
     selection_reason completed_fallback_reason(const queue_state &owner, std::uint64_t present,
       const slot &latest, const slot &completed);
     capture_pick select_capture(const queue_state &owner, std::uint64_t native,

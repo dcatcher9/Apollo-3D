@@ -2,6 +2,7 @@
 #include "streamline_depth_provider.h"
 #include "streamline_camera_probe.h"
 #include "display_depth_cache.h"
+#include "game3d_frame_record.h"
 #include "streamline_depth_capture.h"
 #include "streamline_native_observer.h"
 #include "depth_content_sampler.h"
@@ -267,6 +268,13 @@ namespace sunshine_streamline::provider {
         case depth_capture::display_action::invalidate: return "invalidate";
       }
       return "unknown";
+    }
+    // The frame record's API rows (game3d_frame_record.h): this Present's
+    // decision as begin() made it. Nothing reads them.
+    void record_depth(api::effect_runtime *runtime, const sunshine_game3d::api_depth_decision &decision,
+        std::uint64_t present) {
+      if (auto *record = sunshine_game3d::frame_record_store::writable(runtime))
+        sunshine_game3d::record_api_depth(*record, decision, present, GetTickCount64());
     }
     void trace_readiness(api::effect_runtime *runtime, state &data, const readiness_evidence &e,
         bool ready, const char *why) {
@@ -603,6 +611,9 @@ namespace sunshine_streamline::provider {
       data->bound_view = {};
       data->associated_tick = 0;
       trace_readiness(runtime, *data, evidence, false, data->cache.reason());
+      sunshine_game3d::api_depth_decision recorded;
+      recorded.refusal = data->cache.reason();
+      record_depth(runtime, recorded, present);
       return false;
     }
     {
@@ -733,6 +744,27 @@ namespace sunshine_streamline::provider {
         e.associated_width, e.associated_height}, handoff_hold_ms) && depth_capture::evaluation_live(handoff_tick, handoff_hold_ms);
       return handoff_hold(e, handoff_hold_ms);
     }();
+    sunshine_game3d::api_depth_decision recorded;
+    recorded.allowed = true;
+    recorded.fg_required = policy.require_frame_generation; recorded.fg_silent = fg_silent;
+    recorded.fg_excluded = selection.exclude_unconfirmed_fg;
+    recorded.fg_epoch = policy.epoch; recorded.fg_viewport = policy.viewport;
+    recorded.selected = available; recorded.associated = associated; recorded.handoff_hold = hold;
+    recorded.reported = capture_info.capture_id || capture_info.sequence;
+    recorded.capture_reason = capture_info.selection != depth_capture::selection_reason::not_attempted ?
+      depth_capture::name(capture_info.selection) : depth_capture::name(status);
+    const auto recorded_provider = [](sunshine_scene_depth::provider_kind provider) {
+      return provider == sunshine_scene_depth::provider_kind::ngx ? sunshine_game3d::source_api::ngx :
+        sunshine_game3d::source_api::streamline;
+    };
+    if (available) {
+      const auto &m = data->frame.metadata;
+      recorded.source = {recorded_provider(m.provider), m.viewport, m.source_id};
+      recorded.epoch = m.epoch; recorded.frame_generation_input = m.frame_generation_input;
+    } else if (recorded.reported) {
+      recorded.source = {recorded_provider(capture_info.provider), capture_info.viewport, capture_info.source_id};
+      recorded.epoch = capture_info.epoch; recorded.frame_generation_input = capture_info.frame_generation_input;
+    }
     if (!available && !associated) {
       data->cache.invalidate(hold ? "source_handoff" : "source_not_associated");
       data->presentations.reset();
@@ -769,10 +801,14 @@ namespace sunshine_streamline::provider {
         // The stable descriptor stays bound; readiness is withdrawn.
         bind(runtime, *data, data->display_view, false);
         trace_readiness(runtime, *data, evidence, false, "source_handoff");
+        recorded.display_reason = "source_handoff";
+        record_depth(runtime, recorded, present);
         return true;
       }
       data->bound_view = {};
       trace_readiness(runtime, *data, evidence, false, "source_not_associated");
+      recorded.display_reason = "source_not_associated";
+      record_depth(runtime, recorded, present);
       return false;
     }
     auto kind = available ? data->frame.metadata.provider : data->source_metadata.provider;
@@ -783,6 +819,12 @@ namespace sunshine_streamline::provider {
     if (!available && (capture_info.capture_id || capture_info.sequence)) kind = capture_info.provider;
     else if (!available && !selection.require_frame_generation)
       depth_capture::provider_identity(runtime->get_command_queue()->get_native(), kind, established_source);
+    if (!available && !recorded.reported) {
+      // Nothing reported this Present: the source H holds the queue for.
+      recorded.source = {recorded_provider(kind), data->source_metadata.viewport,
+        selection.require_frame_generation ? 0 : established_source};
+      recorded.epoch = data->source_metadata.epoch;
+    }
     const char *path_name = kind == sunshine_scene_depth::provider_kind::ngx ? "NGX" : "Streamline";
     data->owns_pass = data->open = true;
     if (selection.require_frame_generation && !available)
@@ -860,6 +902,15 @@ namespace sunshine_streamline::provider {
     }
     track_render_size(*data, copied, display == display_status::reused_depth, available);
     const char *readiness_reason = copied ? "fresh_copy" : data->output.ready ? "retained_copy" : data->cache.reason();
+    recorded.copied = copied; recorded.reused = !copied && data->output.ready;
+    recorded.display_reason = readiness_reason;
+    if (recorded.reused) {
+      // The held copy names its own source.
+      const auto &m = data->output.provided;
+      recorded.source = {recorded_provider(m.provider), m.viewport, m.source_id};
+      recorded.epoch = m.epoch; recorded.frame_generation_input = m.frame_generation_input;
+    }
+    record_depth(runtime, recorded, present);
     evidence.cache_reason = data->cache.reason();
     evidence.copied = copied;
     evidence.display = display;
