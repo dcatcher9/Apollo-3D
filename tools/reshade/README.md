@@ -865,11 +865,13 @@ Fresh copies must recover each interval. With FG options on and every FG depth t
 same viewport's SR depth takes over once the FG scope is silent; each generated presentation, at
 2x and 3x, holds its real frame's SR copy, also after the fixture's window leaves the foreground
 (the export stop invalidates reuse once) and back, with no readiness loss logged.
-The test executable also exports DLSS-G's NGX entry points (feature 11 only, named `DLSSG.*`
-inputs, no capture). With its FG depth, HUD-less and Backbuffer tags command-less, as in Assassin's Creed
-Shadows, a DLSS-G evaluation whose list observes no state for `DLSSG.Depth`, `DLSSG.HUDLess` and
+The test executable also exports the NGX stand-in's entry points (below); its DLSS-G case creates
+feature 11 and sets only the named `DLSSG.*` inputs (no capture). With its FG depth, HUD-less and
+Backbuffer tags command-less, as in Assassin's Creed Shadows, a DLSS-G evaluation whose list observes no state for `DLSSG.Depth`, `DLSSG.HUDLess` and
 `DLSSG.Backbuffer` is refused and counted (`dlssg_depth={copied=0 ... refused=missing_state:<n>}`)
-with the SR depth unchanged; once its list transitions them, `DLSSG.Depth` with its subrect and
+with the SR depth unchanged, and the test add-on's refusal query (API contract matrix) reports it
+as a `state_unprovable` capture refusal, as it reports a command-less FG tag as a `no_copy_point`
+source refusal; once its list transitions them, `DLSSG.Depth` with its subrect and
 `DLSSG.DepthInverted` owns the FG scope, generated Presents hold it, the command-less FG tag
 withdraws nothing (`dlssg_supplied=1`) and its HUD-less/Backbuffer pair reaches UI detection as a
 same-batch pair (`hudless_presents={batch=<n>`). HUD-less and Backbuffer tags sent with the game's
@@ -879,12 +881,40 @@ same-batch pairs; command-less again, DLSS-G's inputs are captured again. An FG 
 command list copies the frame first and keeps precedence (`tag_copied`); refused again, SR depth
 returns.
 It injects no captured pixels, readiness or GPU completion.
-To exercise an earlier 2.x export surface, build `reshade_legacy_v2_interposer` and pass
-`legacy_v2_interposer.dll` as the final argument in the same command, using a fresh output directory.
-That fixture reports version 2.6.10.0 and omits `slSetTagForFrame`; the test submits global tags
-through the production hooks and requires the same capture, hold, failure and recovery behavior.
-The existing `frame_generation_interposer.dll` retains its 2.7.30 frame-tag coverage. Both are
-synthetic metadata providers, not copies of a game SDK or proof of Hogwarts Legacy's live behavior.
+Each FG case is a frame script: a warm-up that presents until the case's starting state holds, the
+stimulus whose frames it judges, and a recovery to the fixture's control, with the per-frame SDK calls
+as fixture members. Every frame of a script begins before the script's own deadline, so a case that
+stops making progress fails by name, and a `MEASURE native-provider case=<name> elapsed_ms=` line
+reports each case's time.
+
+Both runtime tests also check the
+[frame record](../../docs/reshade-sbs.md#frame-record). Each queue-cycle acquisition's
+`depth_choice` must repeat what `acquire` returned. In the provider test every provider status
+line must name, in order, a Present whose record states that selection (D1 or D2 with fresh or
+held pixels, H in mono, the handoff hold, or Generic), and the record's rows are checked at the
+settled, failed-evaluation, FG pair, silent-scope, SR-through-a-silent-scope and DLSS-G exact-pair
+points. The contract matrix's runtime layer, which includes this fixture, ends each family with
+the same line-by-line check. `reshade_exporter_lifecycle` maps the provider's display and FG-policy
+timelines to the record on the CPU through the provider's own mapping
+(`provider::describe_acquisition` and `describe_display`, which `begin` calls), and the capture
+owner's provider admission regression (run by the Streamline probe tests) checks `depth_choice`
+against its selection timeline.
+
+The interposer DLLs are one synthetic Streamline release each, built from one source by a CMake list
+(`sunshine_sl_fixture_interposers`): the release its version resource names, which production
+discovery reads, and whether it exports `slSetTagForFrame`. `frame_generation_interposer.dll` is
+2.7.30 with frame tags; `legacy_v2_interposer.dll` reports 2.6.10.0 and omits `slSetTagForFrame`, so
+the test submits global tags through the production hooks and requires the same capture, hold,
+failure and recovery behavior (pass it as the final argument in the same command, with a fresh output
+directory); `sl_v2_14_1_interposer.dll` is 2.14.1, the first of them whose header declares Dynamic
+mode. Each accepts the frame generation options its release's header declares (the `DLSSGMode`
+values, and `numFramesToGenerate` of 1, or up to 5 where the release documents multi frame
+generation, as the [survey tables](#api-contract-matrix) record), reads a newer options version by its
+known prefix, and refuses the rest. `SunshineFixtureSetResults(constants, tag, evaluate, options,
+feature)` sets the `sl::Result` each boundary returns for a call it accepts.
+`reshade_sl_fixture_interposers` (CTest, no device) checks every listed DLL's version resource,
+exports, accepted options and results. They are synthetic metadata providers, not copies of a game SDK
+or proof of Hogwarts Legacy's live behavior.
 With `frame_generation_interposer.dll`, set `SUNSHINE_GAME3D_UI_PUBLIC_TAG_TEST=1` to exercise
 automatic depth and HUD-less UI capture through the public hooks without SL evaluation or
 confirmed FG. The viewport-zero mixed depth/motion/HUD-less batch uses zero resource headers
@@ -954,6 +984,12 @@ snapshot and checks current, missing/last-valid and manual-override source repor
 flag an older control DLL lacking the getter can still run the GPU capture comparison.
 
 `reshade_ngx_depth_runtime_test` exercises named NGX entry points through the native lifecycle.
+Its game-side SDK is the NGX stand-in in [`test_ngx_stand_in.h`](test_ngx_stand_in.h), which the native
+provider fixture and the contract matrix's CPU layer also export: it creates any feature ID, returns a
+settable result from each entry point, and answers a parameter map only for the keys a case set, each
+through the getter of the type it was set with (`Depth` set as a void pointer is absent to
+`GetD3d12Resource`). Evaluation accepts any command list; the fixture's separate producer can use a
+COMPUTE queue (`producer_type`), which records only UAV depth and the evaluation.
 Like the native provider fixture, it loads the supplied shaders only to initialize the runtime and
 then removes every FX technique. Each present is observed through the test add-on's provider
 status and Automatic/scale queries. Current output is read from the production export ring.
@@ -1323,6 +1359,44 @@ readbacks restore resource state and must not advance the shader clock. Compare
 all 40 texture files and 20 layout records as well as the final images when
 claiming an exact preparation-preserving change.
 
+### Test builds
+
+[`CMakeLists.txt`](CMakeLists.txt) lists the add-on's production sources once
+(`sunshine_game3d_core_sources`). Each set of test seam defines compiles them once, as a view: an
+OBJECT library that an add-on DLL links whole, and `<view>_archive`, the same objects as a static
+library from which a test executable links only what it uses. A view's seam defines are public, so
+every file of a binary sees the same declarations; a binary links one view.
+
+| View | Seam defines | Linked by |
+|---|---|---|
+| `sunshine_game3d_core` | none | `SunshineSBS`, `replay_game3d_dump`, and the tests without a seam (UI mask, UI capture, UI layer, camera data, queue-cycle and source-alpha) |
+| `sunshine_game3d_core_runtime_test` | `SUNSHINE_SBS_RUNTIME_TEST_ADDON` | `SunshineSBSTest` |
+| `sunshine_game3d_core_sbs_test` | `SUNSHINE_SBS_TEST` | `reshade_exporter_tests`, whose test file compiles `exporter.cpp` itself |
+| `sunshine_game3d_core_probe_test` | Streamline probe, NGX call trace, native observers, synchronous log | the probe, contract matrix (pure, hook and device layers), seam characterization, call trace, native observer and diagnostic-texture tests |
+| `sunshine_game3d_core_renderer_test` | `SUNSHINE_GAME3D_RENDERER_TEST` | the native runtime tests |
+
+Production files hold no tests. A white-box test reaches a file's internals through that file's
+`*_test_access.h`: the capture owner's regressions are in
+[`test_streamline_depth_capture.cpp`](test_streamline_depth_capture.cpp), and the test add-on's
+exports of the depth add-on and the Streamline probe are in
+[`test_depth_addon_exports.cpp`](test_depth_addon_exports.cpp) and
+[`test_streamline_camera_probe_exports.cpp`](test_streamline_camera_probe_exports.cpp). In the
+shipping build such a header changes nothing: the internals keep internal linkage. In the view that
+builds the tests they get external linkage (an inline namespace, or `inline` for the depth add-on's
+shared state) and the header declares the ones the tests use. The test add-on's refusal record for
+the [API contract matrix](#api-contract-matrix) follows the same split: where an adapter decides a
+refusal, its production file only calls a recorder, under `SUNSHINE_SBS_RUNTIME_TEST_ADDON`. The
+probe's recorders are defined in its exports file and declared in its test-access header; the NGX
+adapter, which has no test-access header, keeps its one recorder under the same define; and the
+query, `SunshineDepthTestLastRefusal`, is one of the depth add-on's exports.
+
+Two test binaries compile a production file outside every view: `reshade_exporter_tests`
+compiles `exporter.cpp` inside [`test_exporter.cpp`](test_exporter.cpp) (its view excludes that
+file), and the opt-in D3D11 sampler fixture `reshade_depth_sampler_d3d11_test`, which no `ctest`
+runs, compiles `depth_content_sampler.cpp` inside
+[`test_depth_content_sampler_d3d11.cpp`](test_depth_content_sampler_d3d11.cpp) to reach the
+sampler's internal pipeline cache and private command list. Neither links a view.
+
 ### API contract matrix
 
 The [rules for new game behaviour](../../docs/reshade-sbs.md#rules-for-new-game-behaviour) gate
@@ -1330,15 +1404,15 @@ admission on what Streamline, D3D12 and NGX require. The contract matrix checks 
 game. [`test_game3d_api_contract_dimensions.h`](test_game3d_api_contract_dimensions.h) lists what each
 API permits and filters illegal combinations;
 [`test_game3d_api_contract_oracle.h`](test_game3d_api_contract_oracle.h) derives each required
-outcome from cited contract text and the owner rulings R1 to R6; and
+outcome from cited contract text and the owner rulings R1 to R7 and N4 (its header lists them); and
 [`test_game3d_api_contract_known_gaps.h`](test_game3d_api_contract_known_gaps.h) records where the
 add-on falls short. A recorded gap that starts passing fails its test, so the fix that closes a gap
 also removes its row; in the hook families a recorded gap must also keep failing under its row's rule
 and the way the row records. Never change the oracle to match the add-on: a disagreement is either a
 gap row or a fix, and an open owner question is EITHER or a pending row.
 
-`ctest -L contract` runs the matrix. `reshade_contract_matrix_cpu` is built with the Streamline
-probe tests' sources and defines and holds two layers. The pure layer identifies every surveyed
+`ctest -L contract` runs the matrix. `reshade_contract_matrix_cpu` links the Streamline probe
+tests' view of the production sources ([Test builds](#test-builds)) and holds two layers. The pure layer identifies every surveyed
 Streamline release's interposer DLL as the probe's discovery does (the matrix mirrors that contract
 selection) and reads raw buffer types 0 to 80 through the selected contract; it judges the capture
 state table over every legal state cell and a set of deliberately illegal rows; and it reads every
@@ -1365,6 +1439,132 @@ the pure layer; only an unsharded run reports a hook family's stale known-gap ro
 the generator, and compiles each on its own with the configured compiler, whatever the caller's
 `PATH`.
 
+The device layer, `reshade_contract_matrix_device`
+([`test_game3d_api_contract_device.cpp`](test_game3d_api_contract_device.cpp), built with
+`SUNSHINE_SBS_RUNTIME_TESTS`), records the capture owner's copies on real D3D12 lists of the first
+hardware adapter, through the diagnostic texture fixture (included under
+`SUNSHINE_DIAGNOSTIC_TEXTURE_FIXTURE_ONLY`). Each cell puts a fresh source in its state on an
+earlier, executed list. Its copy's recording then holds the game's barrier: a transition, a split
+ended there (begun on an earlier list of the same `ExecuteCommandLists` call, the only place D3D12
+completes a split) or still open, a wildcard alias, an enhanced barrier, or nothing after an
+enhanced layout set on the earlier list; on subresource 0, all subresources, another mip or the
+stencil plane. Then comes the copy at its point: an adapter's copy with the proof its claim selects,
+a Generic boundary (`record_preserved` from the `DEPTH_WRITE` that `depth_addon.cpp` declares at a
+clear, a DSV unbind and the end of frame), or the UI clear boundary (the barriers `game3d_ui_layer.cpp` records through
+ReShade; the runtime layer runs the layer itself). The cells cover every legal state of every
+allocation, each claim, each direct-list enhanced layout, every depth family typed and typeless with
+mips and planes, the shapes no input names, COMPUTE lists and UI tags. A cell meets the oracle by
+its kind, refusal class and copy basis; the basis must be the state the test put the source in, so
+the copy restores it exactly. Each copy executes alone: subresource 0's plane-0 bytes are read back
+through the capture owner's consumer copies, and a D3D12 debug-layer error fails the cell. A copy
+that a known-gap row says starts from an unproven state is recorded but never executed. The test
+exits 77 (skipped) without a hardware adapter, and also without the D3D12 debug layer (Windows
+Graphics Tools), though then only after every other check has run; `--gpu-validation` adds GPU-based
+validation, `--block <name>` runs one block and `--batch <cells>` sets how many sources are prepared
+together (16; at most 26, which the capture owner's pool and the debug layer were validated with).
+It holds ctest's `gpu` resource lock; outside ctest, run it as any other GPU fixture.
+
+The runtime layer drives the native provider fixture through the synthetic SDKs its documentation
+above describes: an interposer DLL per Streamline release with settable results and the options its
+header declares, the NGX stand-in the executable exports, and cases as frame scripts with their own
+deadlines. `reshade_contract_matrix_runtime_<family>`
+([`test_game3d_api_contract_runtime.cpp`](test_game3d_api_contract_runtime.cpp), which includes the
+native provider fixture under `SUNSHINE_NATIVE_PROVIDER_FIXTURE_ONLY`) runs one family in its own
+process: the add-on's own discovery hooks the release's interposer and the NGX exports, never the
+`SunshineStreamlineTestCapture` bypass. The NGX runtime fixture is not included: both fixtures
+build on the direct runtime fixture, and the native provider fixture already carries the stand-in.
+
+The Streamline families put the tagged R32 allocation, on the game's own list, in one of five state
+classes (a read state its recording proves, `GENERIC_READ` likewise, the producer's UAV write state,
+an undeclared state, an enhanced `SHADER_RESOURCE` layout) and vary entry point, lifecycle, command
+list, copy point, generated Presents (real Presents while the game records), FG mode (Off, On, Auto,
+Dynamic) and frame count (2x, 4x), extent (a changing one is dynamic resolution, R3), untag, a
+two-tag array and the three SDK results. A local evaluate input has no copy point after its
+frame's Present here, since its own evaluate's copy would show at the Present that judges that
+point; the hook layer runs it as a later evaluate without the input. `sl27` (2.7.30) runs every
+cell: the product of state class, lifecycle and command list (at a same-frame evaluate and at an FG
+tag call), seed rows, each value alone and a pairwise array. `sl26` (2.6.10, no frame tags) and
+`sl212_214` (2.14.1, the newest surveyed release) run their seed rows and a pairwise array;
+`sl215_30` runs the seed rows of 2.15.0 (newer than the survey: tag arrays, S24) and of 3.0.0 (a
+major no header defines, which discovery refuses, so nothing it tags may be shown) in a process
+each. Each case is judged at its
+Presents: a capture is the case's allocation shown fresh, with its tagged extent and one identity,
+at six judged Presents from the first; a case that shows nothing refuses or holds, and a refusal
+class the test add-on records must be one its copy points give. Where the oracle requires a
+refusal alone, the test add-on must record its class, unless discovery refused the release, an SDK
+call of the case failed (S21b discards that copy unread) or the class is `fg_scope` or
+`no_copy_point`, which name a call that is no copy point, where no gate decides anything. A frame's
+tag call and evaluate are
+both copy points that a Present cannot tell apart, so a case is judged at the earliest one whose
+outcome requires a capture. A capture at an FG tag call is deferred (R2) when the add-on's
+nomination gate saw no nomination inside that call. A generated Present may show the case's source
+only as the capture the last real Present showed (a hold). Every SDK call must return the
+interposer's result. Each case has its own viewport and allocation; afterwards FG is turned off,
+the depth untagged, the case's viewport retired (constants on four scratch viewports evict its
+record: a viewport whose FG is Off still counts toward FG authority) and the fixture presents past
+`maximum_source_age_ms` with no SDK call (the depth must be gone) and recalibrates; a known-good
+control, an OnlyValidNow tag at its FG tag call, runs first and after every ten cases. Their gaps
+are the known-gap table's `sl_runtime_rows`, whose cells pair the case with the copy point that
+decides; a gap at a copy point the frame reaches before the deciding check also shows its refusal
+class there. Only `sl27` can show a row stale: the others sample their release's cells.
+
+Family `ngx` drives Super Resolution, Ray Reconstruction and an unknown feature through `Depth`
+and the DLSS keys, and DLSS-G's own evaluation through `DLSSG.*` on a viewport whose FG the 2.7.30
+interposer's options enabled, over feature, `DLSS.Use.HW.Depth`, how the depth is set, subrect,
+result, a recorded or unrecorded state and a recreated feature (seed rows and a pairwise array).
+Family `generic` turns the Streamline and NGX sources off and draws a depth-stencil view of the
+swapchain's size: a clear after or before the draws (depth or stencil only), a render-pass depth
+clear, an unbind and the end of frame, D32 and D32S8, judged by the depth the last native render
+consumed. Copies from a state the recording does not prove (D10 after a transition away, D11c, D12)
+are the device layer's, which records them without executing them. Family `ui` (2.14.1) tags a
+captured depth and a full-size UI input (UI colour and alpha, HUD-less colour, Backbuffer, UI alpha)
+at a tag call with the game's list, without a command list or as a local evaluate input, or draws
+an offscreen UI layer cleared every frame; a case is offered when Dump3D lists its input as
+available to UI detection. Their gaps are `ngx_runtime_rows`, `generic_runtime_rows` and
+`ui_runtime_rows`.
+
+The executable takes `--family` and the generator's `--list`, `--case` and `--shard`, and appends
+one JSON line per case (with the family's scope) to `contract-<family>.jsonl` in its output
+directory. It is registered only where `SUNSHINE_GAME3D_RESHADE_RUNTIME` (the official
+`ReShade64.dll`) and `SUNSHINE_GAME3D_FROZEN_SHADERS` (a directory with the frozen
+`SunshineGame3D.fx`) are configured: one test per family, labelled `contract;gpu`, `RUN_SERIAL` with
+the `gpu` resource lock and a 240 s timeout, after `reshade_contract_matrix_runtime_output` removes
+the families' output directory. At 1280x720 the seven families run 309 cells in about 5.5 minutes:
+`sl27` 122 cells and 13 controls in 107 s, `sl26` 48 in 61 s, `sl212_214` 46 in 58 s, `sl215_30` 34
+in 33 s, `ngx` 34 in 32 s, `generic` 12 in 17 s and `ui` 13 in 18 s. A capture takes 0.4 s, a
+refusal or hold 0.9 s (its 600 ms window and the isolation), an FG case copied at an evaluate up to
+1.9 s (FG owns its viewport's depth for a second after it is enabled), and a UI case its Dump3D.
+Repeated runs give the same result for every cell.
+
+[`Invoke-Game3DContractMatrix.ps1`](Invoke-Game3DContractMatrix.ps1) configures and builds this
+directory on its own (the Sunshine build forces the add-on's tests off), runs `ctest -L contract`
+and writes `contract-matrix.jsonl` and `summary.json` under `<build>/contract-matrix-<time>`. The
+JSON lines hold each hook and runtime case's id, dimensions, rule, expected and observed outcome,
+verdict, gap rows and evidence ([`test_game3d_api_contract_jsonl.h`](test_game3d_api_contract_jsonl.h);
+`reshade_contract_matrix_cpu` writes its lines where `SUNSHINE_CONTRACT_MATRIX_JSONL` names), and one
+line per contract test with its ctest result. The runner checks those cases against the known-gap
+table itself: a case may only meet the oracle, fail as a recorded gap or sit in a pending row, and
+each expected-failure row of a family that ran whole (and, at runtime, whose scope is whole) must be
+the only row of a failing case. `summary.json` names the commit the run started from and lists under
+`uncommitted` the tracked files that differed from it (the console says how many), so results from
+a merge in progress or a local edit do not pass as evidence for that commit: run it after the commit.
+`-SkipGpu` leaves out the device and runtime layers; run them only with no game running. A contract
+test that ctest reports as skipped (the device layer without a hardware adapter or the D3D12 debug
+layer) is listed as `skipped` in `summary.json` and fails the run unless `-AllowSkip` is given.
+
+The runtime layer reads refusal classes from the test add-on instead of waiting for rate-limited log
+lines. `SunshineDepthTestLastRefusal(runtime, out)` returns the newest depth refusal of the
+Streamline, NGX and DLSS-G adapters and the capture owner: the adapter, the gate that refused (the
+call's source, its depth input or the capture of its copy), the production reason, the capture
+stage and status, the call's epoch, sequence and viewport, and a serial that tells a new refusal
+from an earlier one. It is recorded where the refusal is decided, before the 5 s limit on its log
+line. [`depth_refusal.h`](depth_refusal.h) maps each reason to the oracle's REFUSE class for the
+input that produces it, or outside the contract to `hold`, `absent` or `internal`; the pure layer
+requires every reason to classify and each one an oracle case produces to carry that case's class.
+Only `SunshineSBSTest.addon64` records or exports refusals: `reshade_addon_exports` reads both
+export tables without running either add-on and requires the shipping add-on to export exactly
+ReShade's add-on entry points.
+
 Buffer-type meanings, and each release's `DLSSGMode` values, multi frame generation and
 `ResourceType` values, come from
 [`test_sl_survey_tables.generated.h`](test_sl_survey_tables.generated.h), never from the add-on's
@@ -1380,6 +1580,68 @@ causes:
 ```bash
 cmake -DSURVEY_DIR=<sl-abi-survey> -DOUTPUT=tools/reshade/test_sl_survey_tables.generated.h -P tools/reshade/contract_sl_survey_tables.cmake
 ```
+
+### Characterization tests
+
+The contract matrix judges what an API permits. Characterization tests instead pin what the add-on
+does today at the seams the matrix does not reach, so that a structural move which must not change
+behaviour is checked row by row. They are not an oracle: a row changes only in the commit that
+changes that behaviour on purpose, and a disagreement with an API contract belongs in the matrix as
+a known gap. Each table names the behaviour of every row and the refactor phase it protects.
+`ctest -L characterization` runs them; each also runs in the default `ctest`.
+
+- [`test_game3d_seam_characterization.cpp`](test_game3d_seam_characterization.cpp)
+  (`reshade_seam_characterization`) links the Streamline probe tests' view
+  ([Test builds](#test-builds)) and drives the capture owner without a device: the frame
+  generation policy's query timelines, the FG scope's liveness (accepted copies from a Streamline
+  FG tag or from DLSS-G's own evaluation) and the selection the provider derives from it
+  (`provider::select_frame_generation_scope`), NGX's copy rule under FG
+  (`sunshine_ngx::frame_generation_owns_depth`), `select_provider` with a protected owner,
+  readable and pending sources and required or excluded FG, per-queue ownership and
+  `establish_provider`'s watermark, and every reason of `decide_display`. Its freshness table
+  pins each age limit one millisecond either side against an explicit clock: the source age at
+  every selection site, the association timeout of `expire_association` and `evaluation_live`, and
+  an FG scope's enabled and accepted ticks, which also admit a tick ahead of the clock (the
+  capture owner's `scope_clock` fixes `frame_generation_scope_live`'s clock in this view only). Its
+  UI table pins the UI adapter's admission of each ready UI snapshot (`ui_mask::admit_candidate`)
+  and of the Present's own color (`ui_input::current_color_refusal`). Their contracts are in
+  [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection) and the
+  [UI decision framework](../../docs/reshade-sbs.md#ui-decision-framework). It shares the capture
+  owner's slot and evaluation fixtures with that owner's regressions
+  ([`test_streamline_depth_capture_fixture.h`](test_streamline_depth_capture_fixture.h)).
+- `reshade_upscaler_call_trace` holds the NGX nesting table
+  ([`test_upscaler_call_trace.cpp`](test_upscaler_call_trace.cpp)): each outcome of an outer
+  evaluation against a nested SR or DLSS-G call, including an outer copy the capture owner
+  rejected (the inner call supplies depth) and an outer recorded copy (the inner call is
+  deduplicated), a live FG scope and a claimed Streamline evaluation
+  ([Direct NGX depth selection](../../docs/reshade-sbs.md#direct-ngx-depth-selection)). The test
+  states whether a live FG scope owns depth through a callback that only the call-trace build has
+  (`sunshine_ngx::testing::callbacks`), in place of the Streamline FG query; the seam
+  characterization pins the production rule.
+- [`test_game3d_hook_set.cpp`](test_game3d_hook_set.cpp) (`reshade_game3d_hook_set`) pins the
+  shipping add-on's installed hook set, which hook host moves must keep: the binary is its own
+  process's ReShade, runs `AddonInit` and `AddonUninit`, and compares the ReShade events each
+  registers and unregisters, in order, with its tables, checks the one overlay, and requires that no
+  MinHook hook is created without Streamline or NGX. Each MinHook family's hooks on fixture exports
+  are pinned where they are installed, through
+  [`test_minhook_ledger.h`](test_minhook_ledger.h) (MinGW links those tests with
+  `-Wl,--wrap=MH_CreateHook`): the Streamline probe test (v1, v2 with and without its optional
+  exports, the FG options entry and the PCL marker) and the call trace (the four NGX exports).
+- [`test_provider_log_lines.cpp`](test_provider_log_lines.cpp) (`reshade_provider_log_lines`)
+  renders the API depth provider's status lines from fixed values for representative Presents
+  (a settled fresh copy, a held pending successor, the release to Generic and the handoff hold, an
+  FG scope turning silent and live, a readiness loss and recovery with their observation evidence,
+  and dynamic resolution) and compares them byte for byte with
+  [`provider_log_goldens/status_lines.txt`](provider_log_goldens/status_lines.txt). The provider
+  gathers each line's values where it decides and renders them through
+  [`streamline_depth_provider_log.h`](streamline_depth_provider_log.h), so a move of how the values
+  are gathered keeps every line. A commit that changes a line on purpose regenerates the goldens
+  with `reshade_provider_log_lines_tests <goldens> --update`.
+- `reshade_game3d_alpha_auto` pins the acceptance ledger's edges that its policy groups leave
+  unexercised: a sample over no pixels, a contradiction older than the newest one, and a
+  testable sample older than the previous one
+  ([UI decision framework](../../docs/reshade-sbs.md#ui-decision-framework)).
+  `ui_selection::decide` itself is covered in full by the selection contract and sequence tests.
 
 ### Independent renderer reference tests
 
@@ -1573,7 +1835,8 @@ twelve helper instances.
 
 `SUNSHINE_SBS_RUNTIME_TESTS` defaults to **OFF**. Its `SunshineSBSTest.addon64` is for these isolated
 fixtures only. The shipping `SunshineSBS.addon64` retains the real Windows foreground check and
-does not export the test observation setter. Do not install the test add-on into a game.
+does not export the test observation setter; `reshade_addon_exports` checks that it exports only
+ReShade's add-on entry points. Do not install the test add-on into a game.
 
 ### Isolated comparison with the current Host warp
 

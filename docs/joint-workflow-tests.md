@@ -49,6 +49,10 @@ and producer replacement. `ReShadeBridgeGpu` uses hardware D3D11 and D3D12 share
 These functional checks do not require closing Sunshine or games; keep GPU tests that share
 resources or fixtures serial. Performance measurements require an otherwise idle GPU. Unsupported
 hardware or interfaces produce explicit skips in `host.xml`, not proof that those paths passed.
+`-Game3DContract` adds a stage that runs the ReShade add-on's
+[API contract matrix](../tools/reshade/README.md#api-contract-matrix) runner with `-SkipGpu` in
+its own add-on build (`-Game3DContractBuildDirectory`, by default `cmake-build-reshade`): the pure
+and hook layers only, since its device and runtime layers open GPU windows and run alone.
 The existing chroma tests still use software WARP. The JVM gate also includes Game transport reconnect
 policy, authored Movie/Game presentation, and Game provider mode/readiness integration.
 

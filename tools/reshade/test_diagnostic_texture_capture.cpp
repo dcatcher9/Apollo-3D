@@ -1271,9 +1271,11 @@ namespace {
         D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COMMON, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_COMMON}) {
       const bool direct = layout >= D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COMMON;
       texture_case image(gpu, DXGI_FORMAT_R8G8B8A8_UNORM, 4); // Left in NON_PIXEL_SHADER_RESOURCE by a legacy barrier.
-      // The contract: a legacy state returns to COMMON before an enhanced barrier.
+      // The contract: a legacy state returns to COMMON before an enhanced
+      // barrier, which then begins from the COMMON layout with ACCESS_COMMON
+      // after that access on the same list (SyncBefore NONE would deny it).
       transition(gpu.list.Get(), image.source.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
-      barrier(image.source.Get(), D3D12_BARRIER_SYNC_NONE, D3D12_BARRIER_ACCESS_NO_ACCESS, D3D12_BARRIER_LAYOUT_COMMON,
+      barrier(image.source.Get(), D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_ACCESS_COMMON, D3D12_BARRIER_LAYOUT_COMMON,
         D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_ACCESS_SHADER_RESOURCE, layout);
       auto input = image.input; input.proof = sunshine_scene_depth::state_proof::observed_nonzero; input.native_state = 0;
       capture::record_diagnostic diagnostic;
@@ -1676,6 +1678,9 @@ namespace {
     std::puts("PASS unlocked storage allocation: the capture lock is free during allocation, re-validation rejects a closed recording");
   }
 }
+// The API contract matrix's device layer (test_game3d_api_contract_device.cpp)
+// includes this file for its fixture.
+#ifndef SUNSHINE_DIAGNOSTIC_TEXTURE_FIXTURE_ONLY
 int main(int argc, char **argv) {
   try {
     if (argc > 1 && std::strcmp(argv[1], "--gpu-validation") == 0) {
@@ -1774,3 +1779,4 @@ int main(int argc, char **argv) {
     return 0;
   } catch (const std::exception &error) { std::fprintf(stderr, "FAIL: %s\n", error.what()); return 1; }
 }
+#endif

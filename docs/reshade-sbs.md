@@ -580,6 +580,33 @@ retirement`, `depth present observation`, `depth list coverage report`, `frame g
 `depth readiness trace`, `API depth binding`, `generic capture switch`, `generic challenger
 release`, `generic depth rebinding`, `depth capture acquisition` and `depth display preparation`.
 
+### Frame record
+
+One typed record per Present ([`game3d_frame_record.h`](../tools/reshade/game3d_frame_record.h))
+says what each depth rung and UI candidate did, and why. Its rows are the depth ladder, D1 (an FG
+scope's own depth: a Streamline FG tag or DLSS-G's evaluation), D2 (scene depth: Streamline or
+NGX SR/RR), H (API ownership kept in mono) and D3 (Generic), then the UI candidates (UIAlpha, the
+UI color tag, Backbuffer, HUD-less, the UI layer and the presented color). Each row has a key (API,
+viewport and logical source; an FG scope is named by its row and viewport), a state (`inactive`,
+`absent`, `refused`, `pending`, `ready`, `held` or `mono`), a reason (a static token, mostly the
+matching log, cache or enum name), an epoch, the row the Present fell back to, and when that key
+and epoch were first ready. `depth_owner` names the rung that decided the Present's depth: D1 or
+D2 with fresh or held pixels, H in mono under API ownership, or D3 when the Generic selector ran.
+
+The present thread writes the record where the decisions are made: the API provider's `begin`
+writes D1, D2 and H from its acquisition, FG scope, association, handoff and display decision
+(`provider::describe_acquisition` and `describe_display`); the
+depth add-on writes D3 from its binding state; and the UI adapter writes the candidate rows as it
+offers them (a generated Present's hold is `held`, a candidate the session's scope or
+qualification withdrew is `refused`). The capture owner also keeps one `depth_choice` per consumer
+queue, frozen under its lock with each acquisition: the selection's decision, reason, status and
+failure, the role of its source, the policy it ran under and the queue's owner after it.
+
+Nothing reads either yet: no log line, decision, wire byte, report or replay changes with them.
+Writing them takes no lock beyond the capture owner's existing one and allocates nothing per
+Present. Their tests are listed under
+[source and submission validation](../tools/reshade/README.md#source-and-submission-validation).
+
 ## Setup
 
 While **Game 3D** is active, Sunshine checks the foreground application on the selected display
@@ -2334,7 +2361,7 @@ incomplete observations reject every rule. The
 [API contract matrix](../tools/reshade/README.md#api-contract-matrix) judges the table over every
 legal combination of allocation flags, adapter claim, consumer, declared state and recorded
 evidence, plus deliberately illegal rows; the cells where the table falls short of the contract are
-rows of its known-gap table.
+rows of its known-gap table. Its device layer records the same copies on real D3D12 lists.
 
 The FG decision is independent of depth-provider selection, including a manually pinned Generic
 buffer. The last confirmed mode survives transient observation loss and effects reloads; a new
@@ -3760,7 +3787,8 @@ fraction of real frames with multi frame generation. A tag copied later, at an e
 preservation copy, still expires at the next Present. Other lifetime rules, recording retirement
 and the shared consumer-ordering checks above still apply. The
 [API contract matrix](../tools/reshade/README.md#api-contract-matrix) drives these lifetimes through
-the probe's hooks; its known-gap table lists where they fall short of Streamline's contract (a
+the probe's hooks and through real Presents of the runtime fixture; its known-gap table lists where
+they fall short of Streamline's contract (a
 `ValidUntilPresent` tag lives until its own frame's Present, and may arrive without a command list).
 Known affine `PrecisionInfo` extensions are decoded. For device depth their scale/bias are reflected
 in the texture-space projection coefficients and valid stored-depth range. For tag49 they recover

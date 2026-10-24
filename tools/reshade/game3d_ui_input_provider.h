@@ -61,4 +61,10 @@ namespace sunshine_game3d::ui_input {
   };
   frame acquire(reshade::api::effect_runtime *runtime, renderer &renderer,
     source_alpha_ui_decision status, alpha_auto_policy &session, bool diagnostic);
+  // Whether acquire offers the Present's own color (output_format) as a UI
+  // candidate: nullptr when it does, else the first reason it does not. UI
+  // protection must be requested, frame generation inactive, the format must
+  // carry alpha, and Auto or an explicit current-color choice must want it.
+  const char *current_color_refusal(const source_alpha_ui_decision &status, std::uint32_t output_format,
+    ui_qualification::choice wanted);
 }

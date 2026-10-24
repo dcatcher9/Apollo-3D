@@ -10,7 +10,7 @@
 #include "game3d_diagnostics.h"
 #include "game3d_ui_mask.h"
 #include "observer_snapshot.h"
-
+#include "streamline_camera_probe_test_access.h"
 #include <MinHook.h>
 #include <reshade.hpp>
 #include "async_log.h"
@@ -30,7 +30,7 @@
 #endif
 
 namespace sunshine_streamline {
-  namespace {
+  SUNSHINE_PROBE_INTERNAL {
     namespace dump_metadata = sunshine_game3d::diagnostic;
     dump_metadata::stamp dump_stamp(std::uint64_t epoch, std::uint64_t sequence, std::uint64_t tick,
         std::uint32_t viewport = UINT32_MAX, std::uint64_t token = 0, std::uint64_t frame = 0,
@@ -1836,6 +1836,16 @@ namespace sunshine_streamline {
           "ordinary SR/RR depth stays eligible");
       message(text);
     }
+    // Why no tag of this observation offered a candidate: the first present
+    // depth tag's failing gate in priority order, no_retained_source when it
+    // passed every gate with no retained resource, or absent.
+    const char *candidate_rejection(const evaluation_snapshot &snapshot) {
+      for (const unsigned index : depth_priority) if (snapshot.tags[index].present) {
+        const auto *rejected = tag_rejection(snapshot, snapshot.tags[index]);
+        return rejected ? rejected : "no_retained_source";
+      }
+      return "absent";
+    }
     std::uint64_t nominate_depth_source(const evaluation_snapshot &snapshot, bool version_one, bool *copy_recorded = nullptr) {
       if (copy_recorded) *copy_recorded = false;
       if (!source_requested.load(std::memory_order_acquire) || !depth_capture::active()) return 0;
@@ -1876,6 +1886,9 @@ namespace sunshine_streamline {
           report_fg_refusal(snapshot, rejected, withdraws && !supplied, route == fg_route::owned, supplied);
           remember_tag_copy(snapshot.epoch, snapshot.viewport, false);
         }
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+        remember_refusal(snapshot, sunshine_depth_refusal::gate::source, rejected);
+#endif
         if (!supplied) withdraw_invalid_attempt();
         return 0;
       }
@@ -1923,6 +1936,11 @@ namespace sunshine_streamline {
           candidates.data(), count, superseded, &diagnostic)) {
         if (copy_recorded) *copy_recorded = diagnostic.result == depth_capture::status::recorded;
         if (fg_boundary) remember_tag_copy(snapshot.epoch, snapshot.viewport, diagnostic.result == depth_capture::status::recorded);
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+        // A metadata-only nomination keeps the source; its copy was refused.
+        if (diagnostic.result != depth_capture::status::recorded)
+          remember_refusal(snapshot, sunshine_depth_refusal::gate::capture, nullptr, &diagnostic);
+#endif
         return ticket;
       }
       if (fg_boundary) {
@@ -1930,13 +1948,13 @@ namespace sunshine_streamline {
         char reason[96]{};
         if (count) std::snprintf(reason, sizeof(reason), "capture_%s/%s",
           depth_capture::name(diagnostic.result), depth_capture::name(diagnostic.stage));
-        else for (const unsigned index : depth_priority) if (snapshot.tags[index].present) {
-          const auto *rejected = tag_rejection(snapshot, snapshot.tags[index]);
-          std::snprintf(reason, sizeof(reason), "%s", rejected ? rejected : "no_retained_source");
-          break;
-        }
-        report_fg_refusal(snapshot, reason[0] ? reason : "absent", withdraws, route == fg_route::owned);
+        else std::snprintf(reason, sizeof(reason), "%s", candidate_rejection(snapshot));
+        report_fg_refusal(snapshot, reason, withdraws, route == fg_route::owned);
       }
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+      if (count) remember_refusal(snapshot, sunshine_depth_refusal::gate::capture, nullptr, &diagnostic);
+      else remember_refusal(snapshot, sunshine_depth_refusal::gate::input, candidate_rejection(snapshot));
+#endif
       withdraw_invalid_attempt();
       return 0;
     }
@@ -3044,6 +3062,9 @@ namespace sunshine_streamline {
     frame_generation_snapshot fg;
     if (!ticket || !query_frame_generation(UINT32_MAX, fg) || !fg.enabled) {
       if (out.depth == depth_outcome::not_offered) out.depth = depth_outcome::no_fg_scope;
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+      remember_frame_generation_refusal(out, 0, 0, UINT32_MAX);
+#endif
       SetLastError(incoming);
       return out;
     }
@@ -3051,6 +3072,9 @@ namespace sunshine_streamline {
     const auto source_epoch = epoch.load(std::memory_order_acquire);
     if (fg.epoch != source_epoch || !current(ticket)) {
       if (out.depth == depth_outcome::not_offered) out.depth = depth_outcome::scope_changed;
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+      remember_frame_generation_refusal(out, fg.epoch, 0, fg.viewport);
+#endif
       SetLastError(incoming);
       return out;
     }
@@ -3130,8 +3154,14 @@ namespace sunshine_streamline {
             out.depth = depth_outcome::capture; out.depth_stage = diagnostic.stage;
           }
         }
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+        remember_frame_generation_refusal(out, fg.epoch, serial, fg.viewport, diagnostic.result);
+#endif
       }
     }
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+    if (out.depth != depth_outcome::capture) remember_frame_generation_refusal(out, fg.epoch, serial, fg.viewport);
+#endif
     if (std::any_of(value.ui.begin(), value.ui.end(), [](const auto &item) { return item.state != parameter::absent; })) {
       const bool interested = mask::interested(source_epoch, loss, fg.viewport, tick);
       for (unsigned i = 0; i != value.ui.size(); ++i) {
@@ -3524,105 +3554,11 @@ namespace sunshine_streamline {
   }
 
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-  static std::uint64_t test_capture(std::uint64_t command,
-      std::uint64_t resource, std::uint32_t native_state, const camera_data *camera,
-      std::uint64_t sequence, bool successful, bool version_one, bool defer_finish = false) {
-    // Exercise the real capture boundary using actual native resources/CLs.
-    // This seam never supplies readiness, selected depth, fences or uniforms.
-    test_capture_requested.store(true, std::memory_order_release);
-    depth_capture::observe_provider(command);
-    camera_data copied;
-    if (!camera || !read(camera, copied) || !sequence) return 0;
-    depth_capture::input value;
-    value.epoch = 0x53554e534c544553ull; value.sequence = sequence; value.tick = GetTickCount64();
-    value.observation_revision = depth_observation_revision();
-    const auto projection = validate(copied);
-    value.projection = {projection.depth_offset, projection.depth_scale,
-      projection.valid() && copied.reset == 0, projection.reversed};
-    value.native_state = native_state;
-    value.proof = version_one && native_state == 0 ? sunshine_scene_depth::state_proof::observed_nonzero :
-      sunshine_scene_depth::state_proof::declared;
-    value.resource.native = resource;
-    value.valid_until = sunshine_scene_depth::lifetime::until_present;
-    value.source = depth_capture::retain_source(resource);
-    value.source_present_generation = depth_capture::source_present_generation(value.source);
-    if (value.source) {
-      const auto state = v1_resource_state::resolve(native_state, version_one,
-        reinterpret_cast<IUnknown *>(resource));
-      value.native_state = state.native;
-      value.proof = state.proof;
-    }
-    depth_capture::begin_evaluation(value.epoch, sequence, 0);
-    const auto ticket = depth_capture::nominate(command, value);
-    if (ticket && !defer_finish) depth_capture::finish(ticket, successful);
-    return ticket;
-  }
-  extern "C" __declspec(dllexport) std::uint64_t SunshineStreamlineTestCapture(std::uint64_t command,
-      std::uint64_t resource, std::uint32_t native_state, const camera_data *camera, std::uint64_t sequence, bool successful) {
-    return test_capture(command, resource, native_state, camera, sequence, successful, false);
-  }
-  extern "C" __declspec(dllexport) std::uint64_t SunshineStreamlineTestCaptureV1(std::uint64_t command,
-      std::uint64_t resource, std::uint32_t native_state, const camera_data *camera, std::uint64_t sequence, bool successful) {
-    return test_capture(command, resource, native_state, camera, sequence, successful, true);
-  }
-  extern "C" __declspec(dllexport) std::uint64_t SunshineStreamlineTestBeginCaptureV1(std::uint64_t command,
-      std::uint64_t resource, std::uint32_t native_state, const camera_data *camera, std::uint64_t sequence, bool) {
-    return test_capture(command, resource, native_state, camera, sequence, false, true, true);
-  }
-  extern "C" __declspec(dllexport) void SunshineStreamlineTestFinishCapture(std::uint64_t ticket, bool successful) {
-    if (ticket) depth_capture::finish(ticket, successful);
-  }
-  extern "C" __declspec(dllexport) BOOL SunshinePresentationTestQuery(presentation_snapshot *out) {
-    if (!out) return FALSE;
-    query_current_presentation(*out);
-    return TRUE;
-  }
-  extern "C" __declspec(dllexport) BOOL SunshineDiscardTestInstallPending() {
-    if (!TryAcquireSRWLockExclusive(&poll_lock)) return FALSE;
-    const bool result = install_discard_observations();
-    ReleaseSRWLockExclusive(&poll_lock);
-    return result ? TRUE : FALSE;
-  }
-  extern "C" __declspec(dllexport) BOOL SunshineDiscardTestCounts(native_discard::counters *out) {
-    if (!out) return FALSE;
-    *out = native_discard::counts();
-    return TRUE;
-  }
-  extern "C" __declspec(dllexport) void SunshineContentTestEnable(BOOL enabled) {
-    test_content_requested.store(enabled != FALSE, std::memory_order_release);
-    command_event([](commands::tracker &) {}); // Serialize epoch transition.
-  }
-  extern "C" __declspec(dllexport) void SunshineCommandTestLoseLifecycle() {
-    command_observation_lost.store(true, std::memory_order_release);
-    dropped_observation(loss_diagnostics::reason::test_injected, __func__, __LINE__, {});
-  }
-  extern "C" __declspec(dllexport) BOOL SunshineCommandTestCapture(std::uint64_t command, commands::recording_marker *out) {
-    if (!out) return FALSE;
-    *out = capture_command_marker(command);
-    return *out ? TRUE : FALSE;
-  }
-  extern "C" __declspec(dllexport) BOOL SunshineCommandTestAssociate(const commands::recording_marker *evaluation,
-      const commands::recording_marker *copy, std::uint64_t queue, commands::association *out) {
-    if (!evaluation || !copy || !out) return FALSE;
-    *out = associate_commands(*evaluation, *copy, queue);
-    return TRUE;
-  }
-  extern "C" __declspec(dllexport) BOOL SunshineContentTestUse(std::uint64_t command,
-      std::uint64_t source, std::uint64_t lifetime, content::use_snapshot *out) {
-    if (!out) return FALSE;
-    *out = {};
-    command_event([&](commands::tracker &tracker) {
-      const auto marker = tracker.mark(command, loss_revision.load(std::memory_order_acquire));
-      if (content_observing) *out = content_ledger.use(marker, source, tracker.recording_device(marker));
-      if (out->valid() && (!lifetime || out->resource.lifetime != lifetime)) out->state = content::status::lifetime_mismatch;
-    });
-    return TRUE;
-  }
-  extern "C" __declspec(dllexport) BOOL SunshineContentTestAssociate(const content::use_snapshot *use,
-      const content::copy_snapshot *copy, std::uint64_t backup, std::uint64_t lifetime, content::association *out) {
-    if (!use || !copy || !out) return FALSE;
-    *out = associate_content(*use, *copy, use->resource, {backup, lifetime});
-    return TRUE;
+  // The test add-on's exports (test_streamline_camera_probe_exports.cpp) read
+  // camera data and run command events through these instantiations.
+  SUNSHINE_PROBE_INTERNAL {
+    template bool read(const camera_data *, camera_data &);
+    template void command_event(command_function &&);
   }
 #endif
 

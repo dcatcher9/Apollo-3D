@@ -16,6 +16,9 @@
 //   deliberately illegal rows that must refuse.
 // - Depth formats: every DXGI format as allocation and as declared format,
 //   for hardware and linear depth, through depth_view_format.h.
+// - Refusal classes: every reason the adapters and the capture owner name
+//   classifies (depth_refusal.h), and a reason produced by an input the
+//   oracle has a case for carries that case's REFUSE class (or HOLD).
 //
 // The hook layer (L1) drives the real adapters without a device:
 // - Streamline: the probe's MinHook hooks on fixture entry points
@@ -41,13 +44,17 @@
 // repeats. A known gap these repeats decide (S7) closes only when its fix
 // changes the repeat too. L1 judges the kind, deferral and copy basis of each
 // result, and that a recorded gap still fails the way its row records;
-// refusal classes wait for the runtime layer's structured refusal query.
+// refusal classes wait for the runtime layer, which reads them from the test
+// add-on's SunshineDepthTestLastRefusal.
 //
 // Command line (test_contract_matrix_generator.h): --list, --case
 // <id|family:name=value,...>, --shard i/N. Without one, both layers run;
 // shard 0 also runs the pure layer. Only an unsharded run finds a stale
-// known-gap row of a hook family.
+// known-gap row of a hook family. Where SUNSHINE_CONTRACT_MATRIX_JSONL names
+// a file, each judged hook case appends its JSON line there
+// (test_game3d_api_contract_jsonl.h, Invoke-Game3DContractMatrix.ps1).
 #include "capture_state_policy.h"
+#include "depth_refusal.h"
 #include "depth_view_format.h"
 #include "ngx_depth_source.h"
 #include "streamline_buffer_contract.h"
@@ -55,7 +62,9 @@
 #include "streamline_camera_probe.h"
 #include "streamline_camera_version.h"
 #include "test_contract_matrix_generator.h"
-#include "test_game3d_api_contract_known_gaps.h"
+#include "test_game3d_api_contract_jsonl.h"
+#include "test_game3d_api_contract_tally.h"
+#include "test_sl_fixture_sdk.h"
 
 #include <cstdio>
 #include <cstring>
@@ -63,13 +72,8 @@
 #include <reshade.hpp>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
-
-#if defined(__GNUC__) && !defined(__clang__)
-  #define FIXTURE_NOINLINE __attribute__((noinline, noipa))
-#else
-  #define FIXTURE_NOINLINE __declspec(noinline)
-#endif
 
 // The probe finds ReShade's log and configuration through these exports
 // (reshade.hpp). Lines are written synchronously (SUNSHINE_SYNCHRONOUS_LOG)
@@ -105,75 +109,9 @@ extern "C" __declspec(dllexport) bool ReShadeGetConfigValue(void *, reshade::api
   return true;
 }
 
-namespace ngx_stand_in {
-  // One NGX parameter map, answered through the named C getters an NGX SDK
-  // owner exports (ngx_depth_source.h resolve_parameter_api).
-  struct parameters {
-    struct number {
-      const char *key;
-      unsigned value;
-    };
-
-    int flags {};
-    const char *depth_key {"Depth"};  // DLSS-G's evaluation names DLSSG.Depth.
-    bool depth_resource {}, depth_pointer {};  // The getter that answers depth_key.
-    void *depth {};
-    number numbers[8] {};  // Keys set through SetUI, after Width and Height.
-    unsigned number_count {};
-
-    void set(const char *key, unsigned value) {
-      numbers[number_count++] = {key, value};
-    }
-  };
-
-  constexpr std::uint32_t success = 1, failure = 0xbad00005;
-  constexpr unsigned width = 1920, height = 1080;
-}  // namespace ngx_stand_in
-
-extern "C" __declspec(dllexport) FIXTURE_NOINLINE std::uint32_t __cdecl NVSDK_NGX_Parameter_GetI(void *opaque, const char *key, int *out) {
-  if (std::strcmp(key, "DLSS.Feature.Create.Flags") != 0) {
-    return ngx_stand_in::failure;
-  }
-  *out = static_cast<const ngx_stand_in::parameters *>(opaque)->flags;
-  return ngx_stand_in::success;
-}
-
-extern "C" __declspec(dllexport) FIXTURE_NOINLINE std::uint32_t __cdecl NVSDK_NGX_Parameter_GetUI(void *opaque, const char *key, unsigned *out) {
-  const auto &value = *static_cast<const ngx_stand_in::parameters *>(opaque);
-  if (std::strcmp(key, "Width") == 0 || std::strcmp(key, "Height") == 0) {
-    *out = key[0] == 'W' ? ngx_stand_in::width : ngx_stand_in::height;
-    return ngx_stand_in::success;
-  }
-  for (unsigned i = 0; i != value.number_count; ++i) {
-    if (std::strcmp(key, value.numbers[i].key) == 0) {
-      *out = value.numbers[i].value;
-      return ngx_stand_in::success;
-    }
-  }
-  return ngx_stand_in::failure;
-}
-
-extern "C" __declspec(dllexport) FIXTURE_NOINLINE std::uint32_t __cdecl NVSDK_NGX_Parameter_GetD3d12Resource(void *opaque, const char *key, void **out) {
-  const auto &value = *static_cast<const ngx_stand_in::parameters *>(opaque);
-  if (std::strcmp(key, value.depth_key) != 0 || !value.depth_resource) {
-    return ngx_stand_in::failure;
-  }
-  *out = value.depth;
-  return ngx_stand_in::success;
-}
-
-extern "C" __declspec(dllexport) FIXTURE_NOINLINE std::uint32_t __cdecl NVSDK_NGX_Parameter_GetVoidPointer(void *opaque, const char *key, void **out) {
-  const auto &value = *static_cast<const ngx_stand_in::parameters *>(opaque);
-  if (std::strcmp(key, value.depth_key) != 0 || !value.depth_pointer) {
-    return ngx_stand_in::failure;
-  }
-  *out = value.depth;
-  return ngx_stand_in::success;
-}
-
-extern "C" __declspec(dllexport) FIXTURE_NOINLINE std::uint32_t __cdecl NVSDK_NGX_Parameter_GetF(void *, const char *, float *) {
-  return ngx_stand_in::failure;
-}
+// One NGX parameter map per case, answered through the named C getters an
+// NGX SDK owner exports (ngx_depth_source.h resolve_parameter_api).
+#include "test_ngx_stand_in.h"
 
 namespace {
   namespace buffers = sunshine_streamline::buffers;
@@ -186,74 +124,13 @@ namespace {
   namespace generator = matrix::generator;
   using proof = sunshine_scene_depth::state_proof;
   using policy = capture::texture_state_policy;
+  using namespace matrix::judging;
 
   void require(bool value, const char *message) {
     if (!value) {
       throw std::runtime_error(message);
     }
   }
-
-  const char *name(matrix::outcome_kind kind) {
-    constexpr const char *names[] {"capture", "refuse", "hold", "continuous", "offered", "ignored"};
-    return names[unsigned(kind)];
-  }
-
-  // One family's verdicts against its known-gap rows. Up to eight failing
-  // cells per family are described.
-  template<unsigned N>
-  struct tally {
-    unsigned cells {}, met {}, unmet {}, closed {}, pending {}, known[N] {};
-
-    // The reason to describe a failing cell, or null.
-    const char *add(gaps::verdict verdict, int index) {
-      ++cells;
-      switch (verdict) {
-        case gaps::verdict::meets:
-          ++met;
-          return nullptr;
-        case gaps::verdict::known_failure:
-          ++known[index];
-          return nullptr;
-        case gaps::verdict::pending:
-          ++pending;
-          return nullptr;
-        case gaps::verdict::gap_closed:
-          return closed++ < 8 ? "known gap now passes; remove its row" : nullptr;
-        case gaps::verdict::misattributed:
-          return unmet++ < 8 ? "known-gap row matched a cell another rule decides" : nullptr;
-        case gaps::verdict::overlapping:
-          return unmet++ < 8 ? "more than one known-gap row matches" : nullptr;
-        default:
-          return unmet++ < 8 ? "contract violated" : nullptr;
-      }
-    }
-
-    template<class Case>
-    void finish(const gaps::row<Case> (&rows)[N], const char *family) const {
-      if (unmet || closed) {
-        std::fprintf(stderr, "%s: %u cells violate the contract outside the known-gap table; %u recorded gaps now pass\n", family, unmet, closed);
-        throw std::runtime_error("a production table diverged from the API contract matrix");
-      }
-      for (unsigned i = 0; i != N; ++i) {
-        if (rows[i].status == gaps::kind::expected_failure && !known[i]) {
-          std::fprintf(stderr, "%s: known-gap row %s matches no failing cell\n", family, rows[i].id);
-          throw std::runtime_error("a stale known-gap row");
-        }
-      }
-    }
-
-    template<class Case>
-    void print(const gaps::row<Case> (&rows)[N]) const {
-      std::printf("%u meet the oracle, %u are recorded gaps (", met, cells - met - pending);
-      for (unsigned i = 0; i != N; ++i) {
-        std::printf("%s%s %u", i ? ", " : "", rows[i].id, known[i]);
-      }
-      std::printf(")");
-      if (pending) {
-        std::printf(", %u are pending", pending);
-      }
-    }
-  };
 
   // Streamline buffer types.
 
@@ -425,6 +302,7 @@ namespace {
     switch (source.seen) {
       case matrix::evidence::transition:
       case matrix::evidence::end_without_begin:
+      case matrix::evidence::end_mismatched:  // The recorder takes an END_ONLY's StateAfter without its BEGIN_ONLY's.
         observed = {true, copy_state::supported(source.observed), false, source.observed};
         break;
       case matrix::evidence::split_open:
@@ -504,29 +382,7 @@ namespace {
     return out;
   }
 
-  // The legacy states a texture can be in (the dimension's legal values):
-  // COMMON, each write state alone, every read-only combination and the
-  // GENERIC_READ forms.
-  template<class Visit>
-  void each_texture_state(Visit &&visit) {
-    visit(std::uint32_t(D3D12_RESOURCE_STATE_COMMON));
-    for (const auto write : matrix::texture_write_states) {
-      visit(write);
-    }
-    for (std::uint32_t bits = 1; bits != 0x20; ++bits) {
-      std::uint32_t state {};
-      constexpr std::uint32_t read[] {D3D12_RESOURCE_STATE_DEPTH_READ, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RESOLVE_SOURCE};
-      for (unsigned bit = 0; bit != std::size(read); ++bit) {
-        if (bits & (1u << bit)) {
-          state |= read[bit];
-        }
-      }
-      visit(state);
-    }
-    for (const std::uint32_t extra : {0u, std::uint32_t(D3D12_RESOURCE_STATE_DEPTH_READ), std::uint32_t(D3D12_RESOURCE_STATE_RESOLVE_SOURCE), std::uint32_t(D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_RESOLVE_SOURCE)}) {
-      visit(D3D12_RESOURCE_STATE_GENERIC_READ | extra);
-    }
-  }
+  using matrix::each_texture_state;
 
   // Every legal cell of the state dimensions the table sees: allocation
   // flags, consumer, claim, declared state and the recording's evidence (none,
@@ -640,9 +496,19 @@ namespace {
       row(ds, claim::sl_declared, 0x4000, evidence::none),
       row(none, claim::none, 0, evidence::transition, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE),
       row(none, claim::none, 0, evidence::enhanced, 0, D3D12_BARRIER_LAYOUT_SHADING_RATE_SOURCE, D3D12_BARRIER_ACCESS_SHADING_RATE_SOURCE),
-      // Barriers outside the contract (D4, D5b).
+      // Buffer read bits on a texture other than GENERIC_READ itself, which
+      // the D3D12 runtime refuses (X2).
+      row(ds, claim::sl_declared, D3D12_RESOURCE_STATE_GENERIC_READ | D3D12_RESOURCE_STATE_DEPTH_READ, evidence::none),
+      row(none, claim::sl_declared, D3D12_RESOURCE_STATE_GENERIC_READ | D3D12_RESOURCE_STATE_RESOLVE_SOURCE, evidence::none),
+      row(none, claim::sl_declared, D3D12_RESOURCE_STATE_INDEX_BUFFER, evidence::none),
+      row(none, claim::none, 0, evidence::transition, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
+      row(D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, claim::sl_declared, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, evidence::none, 0, 0, 0, consumer::ui),
+      // Barriers outside the contract (D4, D4c, D5b). D4c: a BEGIN_ONLY,
+      // then an END_ONLY to DEPTH_READ that the begin did not name.
       row(ds, claim::sl_declared, D3D12_RESOURCE_STATE_DEPTH_READ, evidence::begin_and_end, D3D12_RESOURCE_STATE_DEPTH_READ),
       row(ds, claim::ngx_contract, 0, evidence::mixed_split, D3D12_RESOURCE_STATE_DEPTH_READ),
+      row(ds, claim::none, 0, evidence::end_mismatched, D3D12_RESOURCE_STATE_DEPTH_READ),
+      row(ds, claim::sl_declared, D3D12_RESOURCE_STATE_DEPTH_READ, evidence::end_mismatched, D3D12_RESOURCE_STATE_DEPTH_READ),
       row(ds, claim::none, 0, evidence::enhanced, 0, D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_SHADER_RESOURCE, D3D12_BARRIER_ACCESS_SHADER_RESOURCE),
       row(none, claim::sl_undeclared, UINT32_MAX, evidence::enhanced, 0, D3D12_BARRIER_LAYOUT_VIDEO_DECODE_READ, D3D12_BARRIER_ACCESS_VIDEO_DECODE_READ),
     };
@@ -751,6 +617,167 @@ namespace {
     return counts;
   }
 
+  // Refusal classes.
+
+  namespace refusal = sunshine_depth_refusal;
+
+  constexpr bool oracle_classes() {
+    using contract = matrix::refusal;
+    using production = refusal::reason_class;
+    constexpr std::pair<contract, production> same[] {{contract::none, production::none}, {contract::state_unprovable, production::state_unprovable}, {contract::no_copy_point, production::no_copy_point}, {contract::lifetime, production::lifetime}, {contract::not_depth, production::not_depth}, {contract::malformed, production::malformed}, {contract::unknown_abi, production::unknown_abi}, {contract::ambiguous_view, production::ambiguous_view}, {contract::fg_scope, production::fg_scope}};
+    for (const auto &[oracle, reported] : same) {
+      if (unsigned(oracle) != unsigned(reported)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  static_assert(oracle_classes(), "depth_refusal.h's first classes are not the oracle's REFUSE classes in its order");
+
+  // A reported class meets the oracle's outcome for the input that produces
+  // it: its REFUSE class (a branch of an EITHER included), or its HOLD.
+  bool agrees(refusal::reason_class reported, const matrix::outcome &expected) {
+    if (reported == refusal::reason_class::hold) {
+      return matrix::permits(expected, matrix::outcome_kind::hold);
+    }
+    return unsigned(reported) <= unsigned(refusal::reason_class::fg_scope) && matrix::permits(expected, matrix::outcome_kind::refuse) && unsigned(expected.why) == unsigned(reported);
+  }
+
+  struct refusal_counts {
+    unsigned named {}, stages {}, outcomes {}, paired {};
+  };
+
+  // Every reason the adapters name classifies. A reason that an input the
+  // oracle has a case for produces is checked against that case; the others
+  // are outside the contract (internal, absent) or illegal input the
+  // dimensions do not hold (an unreadable tag).
+  refusal_counts refusal_classes() {
+    using namespace matrix::pinned;
+    using capture::record_stage;
+    using matrix::claim;
+    using matrix::copy_point;
+    using matrix::evidence;
+    using matrix::extent_form;
+    using matrix::fg_mode;
+    using matrix::lifecycle;
+    using matrix::ngx_case;
+    using matrix::ngx_depth_set;
+    using matrix::ngx_feature;
+    using matrix::ngx_hw_depth;
+    using matrix::ngx_subrect;
+    using matrix::precision_form;
+    using matrix::render_pass;
+    using matrix::resource_form;
+    using matrix::resource_shape;
+    using matrix::sl_case;
+    using matrix::sl_result;
+    using matrix::struct_form;
+    using matrix::subresource_barrier;
+    using matrix::tag_commands;
+    using matrix::viewports;
+    using depth_outcome = sunshine_streamline::frame_generation::depth_outcome;
+    refusal_counts counts;
+    for (const auto &entry : refusal::named_reasons) {
+      require(entry.reason != refusal::reason_class::none && entry.reason != refusal::reason_class::unclassified, "a named refusal reason has no class");
+      unsigned repeats {};
+      for (const auto &other : refusal::named_reasons) {
+        repeats += !std::strcmp(entry.name, other.name);
+      }
+      require(repeats == 1 && refusal::classify(entry.name) == entry.reason, "a named refusal reason is listed twice");
+      ++counts.named;
+    }
+    require(refusal::classify("") == refusal::reason_class::unclassified && refusal::classify(nullptr) == refusal::reason_class::unclassified, "an unknown reason was classified");
+    // The source gate returns these evidence statuses' names; the rest
+    // admit the call.
+    using sunshine_streamline::evidence_status;
+    for (auto status = unsigned(evidence_status::inactive); status <= unsigned(evidence_status::tracked_content_evaluation); ++status) {
+      const auto value = evidence_status(status);
+      const bool admitted = value == evidence_status::source_associated_evaluation || value == evidence_status::missing_constants || value == evidence_status::rejected_constants || value == evidence_status::invalid_camera || value == evidence_status::camera_reset || value == evidence_status::untracked_frame;
+      require(admitted || refusal::classify(sunshine_streamline::name(value)) != refusal::reason_class::unclassified, "an evidence status the source gate names has no refusal class");
+    }
+    // The tag gate returns these match statuses' names; same_epoch_only admits.
+    using sunshine_streamline::match_status;
+    for (auto status = unsigned(match_status::exact_frame); status <= unsigned(match_status::unsupported_lifecycle); ++status) {
+      const auto value = match_status(status);
+      require(value == match_status::same_epoch_only || value == match_status::exact_frame || refusal::classify(sunshine_streamline::name(value)) != refusal::reason_class::unclassified, "a match status the tag gate names has no refusal class");
+    }
+    for (auto stage = unsigned(record_stage::not_attempted); stage <= unsigned(record_stage::retained); ++stage) {
+      const auto value = record_stage(stage);
+      const auto reported = refusal::classify(value);
+      const bool admitted = value == record_stage::not_attempted || value == record_stage::recorded || value == record_stage::retained;
+      require(reported != refusal::reason_class::unclassified && (reported == refusal::reason_class::none) == admitted, "a capture record stage has no refusal class");
+      ++counts.stages;
+    }
+    for (auto value = unsigned(depth_outcome::not_offered); value <= unsigned(depth_outcome::capture); ++value) {
+      const auto depth = depth_outcome(value);
+      const auto reported = refusal::classify(depth, record_stage::missing_state);
+      require(reported != refusal::reason_class::unclassified && (reported == refusal::reason_class::none) == (refusal::gate_of(depth) == refusal::gate::none), "a DLSSG.Depth outcome has no refusal class or gate");
+      ++counts.outcomes;
+    }
+
+    const auto fg = with(ngx_case {}, &ngx_case::feature, ngx_feature::frame_generation);
+    const auto at_evaluate = tag(present, evaluate);
+    const auto msaa = on_subresource(subresource_barrier::all, resource_shape::msaa);
+    const auto outside = with(at_evaluate, &sl_case::extent, extent_form::outside_allocation);
+    const auto after_present = tag(present, copy_point::after_present);
+    const std::pair<const char *, matrix::outcome> named[] {
+      {"boundary_without_commands", expect(tag(now, copy_point::tag_call, tag_commands::none))},
+      {"unsupported_extension", expect(with(at_evaluate, &sl_case::tag_header, struct_form::unknown_chained))},
+      {"unsupported_precision", expect(with(at_evaluate, &sl_case::precision, precision_form::zero_scale))},
+      {"unsupported_precision", expect(with(at_evaluate, &sl_case::precision, precision_form::unknown_formula))},
+      {"unsupported_resource_type", expect(with(at_evaluate, &sl_case::resource, resource_form::type_buffer))},
+      {"unsupported_lifecycle", expect(tag(lifecycle::undeclared, evaluate))},
+      {"lifecycle_outlives_boundary", expect(with(tag(until_evaluate, copy_point::tag_call), &sl_case::fg, fg_mode::off))},
+      {"invalid-extent", expect(outside)},
+      {"not-valid-until-present", expect(tag(now, evaluate))},
+      {"missing-resource", expect(with(at_evaluate, &sl_case::resource, resource_form::null_native))},
+      {"evaluation-failed", expect(with(at_evaluate, &sl_case::evaluate_result, sl_result::error))},
+      {"ambiguous-viewport", expect(with(at_evaluate, &sl_case::views, viewports::two_active))},
+      {"no_retained_source", expect(msaa)},
+      {"missing_parameters", expect(with(ngx_case {}, &ngx_case::hw_depth, ngx_hw_depth::other))},
+      {"missing_parameters", expect(with(ngx_case {}, &ngx_case::subrect, ngx_subrect::outside))},
+      {"missing_parameters", expect(with(ngx_case {}, &ngx_case::depth_set, ngx_depth_set::missing))},
+    };
+    const std::pair<record_stage, matrix::outcome> stages[] {
+      {record_stage::missing_state, expect(state(recorded(ds, evidence::none)))},
+      {record_stage::missing_state, expect(fg)},
+      {record_stage::incomplete_state, expect(state(recorded(ds, evidence::split_open, depth_read)))},
+      {record_stage::conflicting_state, expect(state(recorded(ds, evidence::transition, depth_read), claim::sl_declared, nps))},
+      {record_stage::unsupported_state, expect(state(recorded(ds, evidence::enhanced, 0, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, D3D12_BARRIER_ACCESS_NO_ACCESS)))},
+      {record_stage::unsupported_state, expect(state(recorded(0, evidence::transition, D3D12_RESOURCE_STATE_COMMON)))},
+      {record_stage::unsupported_proof, expect(state(recorded(ds, evidence::none), claim::sl_undeclared, UINT32_MAX))},
+      {record_stage::unsupported_lifetime, expect(after_present)},
+      {record_stage::source_lifetime, expect(after_present)},
+      {record_stage::resource_region, expect(outside)},
+      {record_stage::source_description, expect(msaa)},
+      {record_stage::recording_render_pass, expect(with(at_evaluate, &sl_case::pass, render_pass::open))},
+    };
+    const std::pair<depth_outcome, matrix::outcome> outcomes[] {
+      {depth_outcome::absent, expect(with(fg, &ngx_case::depth_set, ngx_depth_set::missing))},
+      {depth_outcome::null_resource, expect(with(fg, &ngx_case::depth_set, ngx_depth_set::null))},
+      {depth_outcome::subrect, expect(with(fg, &ngx_case::subrect, ngx_subrect::one_side))},
+      {depth_outcome::capture, expect(fg)},  // No state recorded on DLSS-G's list: missing_state.
+    };
+    const auto check = [&](bool agreed, const char *what, const matrix::outcome &expected) {
+      if (!agreed) {
+        std::fprintf(stderr, "refusal class of %s disagrees with the oracle: expected %s%s%s rule=%s refusal=%u\n", what, name(expected.kind), matrix::either(expected) ? " or " : "", matrix::either(expected) ? name(expected.alternative) : "", expected.by ? expected.by->id : "?", unsigned(expected.why));
+        throw std::runtime_error("depth_refusal.h diverged from the API contract matrix");
+      }
+      ++counts.paired;
+    };
+    for (const auto &[name, expected] : named) {
+      check(agrees(refusal::classify(name), expected), name, expected);
+    }
+    for (const auto &[stage, expected] : stages) {
+      check(agrees(refusal::classify(stage), expected), capture::name(stage), expected);
+    }
+    for (const auto &[depth, expected] : outcomes) {
+      check(agrees(refusal::classify(depth, record_stage::missing_state), expected), sunshine_streamline::frame_generation::name(depth), expected);
+    }
+    return counts;
+  }
+
   // The hook layer (L1).
 
   // A hook cell meets the oracle by its kind, deferral and copy basis.
@@ -768,109 +795,15 @@ namespace {
     return actual.deferred == expected.deferred && (!expected.exact_basis || matrix::same_basis(expected.basis, actual.basis));
   }
 
-  // A family's verdicts against rows judged with judge_each.
-  template<unsigned N>
-  struct each_tally {
-    unsigned cells {}, met {}, unmet {}, closed {}, known {}, pending {};
-    unsigned matched[N] {}, alone[N] {}, failing[N] {};
-
-    const char *add(gaps::verdict verdict, const bool (&rows)[N], bool satisfied) {
-      ++cells;
-      unsigned count {}, last {};
-      for (unsigned i = 0; i != N; ++i) {
-        if (rows[i]) {
-          ++count;
-          last = i;
-          ++matched[i];
-          failing[i] += !satisfied;
-        }
-      }
-      switch (verdict) {
-        case gaps::verdict::meets:
-          ++met;
-          return nullptr;
-        case gaps::verdict::pending:
-          ++pending;
-          return nullptr;
-        case gaps::verdict::known_failure:
-          ++known;
-          alone[last] += count == 1;
-          return nullptr;
-        case gaps::verdict::gap_closed:
-          return closed++ < 8 ? "known gap now passes; remove or narrow its row" : nullptr;
-        case gaps::verdict::misattributed:
-          return unmet++ < 8 ? "known gap fails another way than its row records, or under another rule" : nullptr;
-        default:
-          return unmet++ < 8 ? "contract violated" : nullptr;
-      }
-    }
-
-    // A partial run (one case or one shard) cannot show a row stale.
-    template<class Case>
-    void finish(const gaps::row<Case> (&rows)[N], const char *family, bool complete) const {
-      if (unmet || closed) {
-        std::fprintf(stderr, "%s: %u cells violate the contract outside the known-gap table; %u recorded gaps now pass\n", family, unmet, closed);
-        throw std::runtime_error("an adapter diverged from the API contract matrix");
-      }
-      for (unsigned i = 0; complete && i != N; ++i) {
-        if (rows[i].status == gaps::kind::expected_failure && !alone[i]) {
-          std::fprintf(stderr, "%s: known-gap row %s is the only row of no failing cell\n", family, rows[i].id);
-          throw std::runtime_error("a stale known-gap row");
-        }
-      }
-    }
-
-    template<class Case>
-    void print(const gaps::row<Case> (&rows)[N]) const {
-      std::printf("%u meet the oracle, %u are recorded gaps (", met, known);
-      const char *separator = "";
-      for (unsigned i = 0; i != N; ++i) {
-        if (rows[i].status == gaps::kind::expected_failure) {
-          std::printf("%s%s %u", separator, rows[i].id, matched[i]);
-          separator = ", ";
-        }
-      }
-      std::printf("), %u are pending (", pending);
-      separator = "";
-      for (unsigned i = 0; i != N; ++i) {
-        if (rows[i].status == gaps::kind::pending) {
-          std::printf("%s%s %u, %u failing", separator, rows[i].id, matched[i], failing[i]);
-          separator = "; ";
-        }
-      }
-      std::printf(")");
-    }
-  };
-
-  const char *row_names(const bool *matched, const char *const *ids, unsigned count, std::string &out) {
-    out.clear();
-    for (unsigned i = 0; i != count; ++i) {
-      if (matched[i]) {
-        out += out.empty() ? "" : " ";
-        out += ids[i];
-      }
-    }
-    return out.empty() ? "none" : out.c_str();
-  }
-
-  const char *name(gaps::verdict value) {
-    constexpr const char *names[] {"meets the oracle", "violates the contract", "recorded gap", "recorded gap now passes", "misattributed", "pending", "overlapping rows"};
-    return names[unsigned(value)];
-  }
-
-  void describe_expected(const matrix::outcome &expected) {
-    std::fprintf(stderr, "  expected: %s%s%s rule=%s basis_rule=%s deferred=%u basis=%s0x%x/0x%x/0x%x\n", name(expected.kind), matrix::either(expected) ? " or " : "", matrix::either(expected) ? name(expected.alternative) : "", expected.by ? expected.by->id : "?", expected.basis_by ? expected.basis_by->id : "-", expected.deferred, expected.exact_basis ? "" : "(any) ", expected.basis.enhanced ? expected.basis.layout : expected.basis.state, expected.basis.access, unsigned(expected.basis.enhanced));
-  }
-
-  // The Streamline fixture SDK: noinline entry points the probe hooks. The
-  // entry points, GUIDs, volatile dispatch and ReShade stubs repeat
-  // test_streamline_camera_probe.cpp's; the matrix's interposer-fixture phase
-  // (contract matrix design, P5) moves both into one test-only header.
+  // The Streamline fixture SDK: noinline entry points the probe hooks, with
+  // volatile dispatch. Its entry points only return each boundary's set
+  // result; test_sl_fixture_sdk.h says what the probe tests' do instead and
+  // what both share.
   namespace sl_fixture {
     using namespace sunshine_streamline;
+    using fixture_sdk::fg_options_type;
+    using fixture_sdk::precision_type;
     constexpr DWORD outgoing_error = 0xabcdef01;
-    constexpr guid fg_options_type {0xfac5f1cb, 0x2dfd, 0x4f36, {0xa1, 0xe6, 0x3a, 0x9e, 0x86, 0x52, 0x56, 0xc5}};
-    constexpr guid precision_type {0x98f6e9ba, 0x8d16, 0x4831, {0xa8, 0x02, 0x4d, 0x3b, 0x52, 0xff, 0x26, 0xbf}};
     constexpr guid unknown_type {0x12345678, 1, 2, {3, 4, 5, 6, 7, 8, 9, 10}};
 
     struct fg_options {
@@ -1755,42 +1688,46 @@ namespace {
     // The parameter map as the SDK helpers fill it: SR's keys
     // (nvsdk_ngx_helpers_d3d.h), or DLSS-G's (nvsdk_ngx_helpers_dlssg_d3d.h)
     // for feature 11. A subrect with one side leaves its height unset.
-    ngx_stand_in::parameters parameters_of(const matrix::ngx_case &value, void *depth) {
-      ngx_stand_in::parameters out;
+    ngx_fixture::parameters parameters_of(const matrix::ngx_case &value, void *depth) {
+      ngx_fixture::parameters out;
       const bool frame_generation = value.feature == matrix::ngx_feature::frame_generation;
-      out.flags = value.depth_inverted ? 8 : 0;  // NVSDK_NGX_DLSS_Feature_Flags_DepthInverted.
-      out.depth_key = frame_generation ? "DLSSG.Depth" : "Depth";
-      out.depth_resource = value.depth_set == matrix::ngx_depth_set::d3d12_resource || value.depth_set == matrix::ngx_depth_set::null;
-      out.depth_pointer = value.depth_set == matrix::ngx_depth_set::void_pointer;
-      out.depth = value.depth_set == matrix::ngx_depth_set::null ? nullptr : depth;
+      out.set_i("DLSS.Feature.Create.Flags", value.depth_inverted ? 8 : 0);  // NVSDK_NGX_DLSS_Feature_Flags_DepthInverted.
+      out.set_ui("Width", 1920);
+      out.set_ui("Height", 1080);
+      const char *depth_key = frame_generation ? "DLSSG.Depth" : "Depth";
+      if (value.depth_set == matrix::ngx_depth_set::void_pointer) {
+        out.set_pointer(depth_key, depth);
+      } else if (value.depth_set == matrix::ngx_depth_set::d3d12_resource || value.depth_set == matrix::ngx_depth_set::null) {
+        out.set_resource(depth_key, value.depth_set == matrix::ngx_depth_set::null ? nullptr : depth);
+      }
       const bool zero = value.subrect == matrix::ngx_subrect::zero, inside = value.subrect == matrix::ngx_subrect::inside;
       const unsigned width = zero ? 0 : 1280, height = zero ? 0 : 720;
       if (frame_generation) {
-        out.set("DLSSG.DepthInverted", value.depth_inverted);
+        out.set_ui("DLSSG.DepthInverted", value.depth_inverted);
         if (value.subrect != matrix::ngx_subrect::missing) {
-          out.set("DLSSG.DepthSubrectBaseX", zero ? 0 : 3);
-          out.set("DLSSG.DepthSubrectBaseY", zero ? 0 : 2);
-          out.set("DLSSG.DepthSubrectWidth", width);
+          out.set_ui("DLSSG.DepthSubrectBaseX", zero ? 0 : 3);
+          out.set_ui("DLSSG.DepthSubrectBaseY", zero ? 0 : 2);
+          out.set_ui("DLSSG.DepthSubrectWidth", width);
           if (zero || inside) {
-            out.set("DLSSG.DepthSubrectHeight", height);
+            out.set_ui("DLSSG.DepthSubrectHeight", height);
           }
         }
         return out;
       }
       if (value.hw_depth != matrix::ngx_hw_depth::absent) {
         const bool device = value.hw_depth == matrix::ngx_hw_depth::device;
-        out.set("DLSS.Use.HW.Depth", value.hw_depth == matrix::ngx_hw_depth::other ? 2 : device ? 1 :
-                                                                                                  0);
+        out.set_ui("DLSS.Use.HW.Depth", value.hw_depth == matrix::ngx_hw_depth::other ? 2 : device ? 1 :
+                                                                                                     0);
       }
       if (value.subrect != matrix::ngx_subrect::missing) {
-        out.set("DLSS.Render.Subrect.Dimensions.Width", width);
+        out.set_ui("DLSS.Render.Subrect.Dimensions.Width", width);
         if (zero || inside) {
-          out.set("DLSS.Render.Subrect.Dimensions.Height", height);
+          out.set_ui("DLSS.Render.Subrect.Dimensions.Height", height);
         }
       }
       if (inside) {
-        out.set("DLSS.Input.Depth.Subrect.Base.X", 3);
-        out.set("DLSS.Input.Depth.Subrect.Base.Y", 2);
+        out.set_ui("DLSS.Input.Depth.Subrect.Base.X", 3);
+        out.set_ui("DLSS.Input.Depth.Subrect.Base.Y", 2);
       }
       return out;
     }
@@ -1921,9 +1858,11 @@ namespace {
     unsigned ngx_frame_generation {};
   };
 
-  // Every selected case of both hook families.
+  // Every selected case of both hook families, each also a JSON line in the
+  // file SUNSHINE_CONTRACT_MATRIX_JSONL names (Invoke-Game3DContractMatrix.ps1).
   hook_counts hook_layer(const generator::options &options) {
     hook_counts counts;
+    auto lines = game3d_contract::jsonl::from_environment();
     const auto sl = sl_cells::family();
     sl_cells::check_sizes(sl);
     const auto streamline = sl_cells::cells(sl, counts.census);
@@ -1933,6 +1872,9 @@ namespace {
         continue;
       }
       const auto value = sl_cells::judge(streamline[i]);
+      if (lines.is_open()) {
+        lines << game3d_contract::jsonl::line("L1", sl, streamline[i], sl_cells::seed_name(sl, streamline[i]), value.legal, value.expected, value.actual, value.verdict, gaps::sl_rows, value.matched).dump() << '\n';
+      }
       if (const auto *what = counts.streamline.add(value.verdict, value.matched, value.satisfied)) {
         sl_cells::describe(what, sl, streamline[i], value);
       }
@@ -1941,11 +1883,17 @@ namespace {
     const auto ngx = ngx_cells::family();
     ngx_cells::check_sizes(ngx);
     const auto evaluations = ngx_cells::cells(ngx);
+    generator::row hogwarts;
+    std::string error;
+    require(generator::parse(ngx, ngx_cells::hogwarts, hogwarts, error), "the NGX seed row is malformed");
     for (std::size_t i = 0; i != evaluations.size(); ++i) {
       if (!options.selected(i)) {
         continue;
       }
       const auto value = ngx_cells::judge(evaluations[i]);
+      if (lines.is_open()) {
+        lines << game3d_contract::jsonl::line("L1", ngx, evaluations[i], evaluations[i] == hogwarts ? "hogwarts" : nullptr, true, value.expected, value.actual, value.verdict, gaps::ngx_rows, value.matched).dump() << '\n';
+      }
       counts.ngx_frame_generation += value.value.feature == matrix::ngx_feature::frame_generation;
       if (const auto *what = counts.ngx.add(value.verdict, value.matched, value.satisfied)) {
         ngx_cells::describe(what, ngx, evaluations[i], value);
@@ -1954,6 +1902,7 @@ namespace {
     sunshine_ngx::shutdown();
     counts.streamline.finish(gaps::sl_rows, "Streamline hooks", !options.partial());
     counts.ngx.finish(gaps::ngx_rows, "NGX hooks", !options.partial());
+    require(!lines.is_open() || lines.good(), "Could not write the hook layer's JSON lines");
     return counts;
   }
 
@@ -2050,11 +1999,12 @@ int main(int argc, char **argv) try {
     const auto streamline = buffer_types();
     const auto state = copy_states();
     const auto formats = depth_formats();
+    const auto refusals = refusal_classes();
     std::printf("PASS API contract matrix L0: %u buffer-type cells over %u release identities; ", streamline.tags.cells, streamline.identities);
     streamline.tags.print(gaps::buffer_rows);
     std::printf("; %u canonical numbers. %u copy-state cells (%u legal, %u illegal); ", streamline.canonical, state.table.cells, state.legal, state.illegal);
     state.table.print(gaps::state_rows);
-    std::printf(". %u depth-format cells (%u captured, %u EITHER) meet the oracle\n", formats.cells, formats.captured, formats.either);
+    std::printf(". %u depth-format cells (%u captured, %u EITHER) meet the oracle. %u named refusal reasons, %u capture stages and %u DLSSG.Depth outcomes classify; %u meet the oracle's class for the input that produces them\n", formats.cells, formats.captured, formats.either, refusals.named, refusals.stages, refusals.outcomes, refusals.paired);
   }
   const auto hooks = hook_layer(options);
   const auto &census = hooks.census;

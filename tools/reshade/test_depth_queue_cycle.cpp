@@ -49,6 +49,39 @@ namespace {
       throw std::runtime_error(text);
     }
   }
+  // The capture owner's depth_choice for an acquisition (docs/reshade-sbs.md,
+  // Frame record) repeats what that acquisition returned, and names the role
+  // of its source: fg_depth under a required FG scope, else scene_depth
+  // whenever it reported a source (none without one).
+  void require_choice(std::uint64_t queue, std::uint64_t present, bool acquired, const capture::packet &packet,
+      const capture::capture_diagnostic &diagnostic, bool frame_generation) {
+    capture::depth_choice choice;
+    require(capture::choice(queue, choice), "The capture owner kept no depth choice for its acquisition");
+    const auto rung = frame_generation ? sunshine_game3d::source_slot::fg_depth :
+      diagnostic.capture_id || diagnostic.sequence ? sunshine_game3d::source_slot::scene_depth :
+      sunshine_game3d::source_slot::none;
+    if (!(choice.present == present && choice.tick_ms == diagnostic.selection_tick_ms &&
+        choice.decision.source_selected == acquired && choice.pixel_ready == packet.pixel_ready &&
+        choice.result == diagnostic.result && choice.selection == diagnostic.selection &&
+        choice.failure == diagnostic.failure && choice.decision.provider == diagnostic.provider &&
+        choice.decision.epoch == diagnostic.epoch && choice.decision.sequence == diagnostic.sequence &&
+        choice.decision.source_id == diagnostic.source_id && choice.decision.viewport == diagnostic.viewport &&
+        choice.decision.capture_id == diagnostic.capture_id && choice.decision.pending_frame == diagnostic.pending_frame &&
+        choice.decision.repeated_frame == diagnostic.repeated_frame && choice.rung == rung)) {
+      std::printf("choice: present=%llu/%llu selected=%d/%d ready=%d/%d status=%s/%s selection=%s/%s capture=%llu/%llu "
+        "sequence=%llu/%llu rung=%s/%s\n", static_cast<unsigned long long>(choice.present),
+        static_cast<unsigned long long>(present), int(choice.decision.source_selected), int(acquired),
+        int(choice.pixel_ready), int(packet.pixel_ready), capture::name(choice.result), capture::name(diagnostic.result),
+        capture::name(choice.selection), capture::name(diagnostic.selection),
+        static_cast<unsigned long long>(choice.decision.capture_id), static_cast<unsigned long long>(diagnostic.capture_id),
+        static_cast<unsigned long long>(choice.decision.sequence), static_cast<unsigned long long>(diagnostic.sequence),
+        sunshine_game3d::name(choice.rung), sunshine_game3d::name(rung));
+      throw std::runtime_error("The capture owner's depth choice differs from the acquisition it returned");
+    }
+    if (acquired)
+      require(choice.owner_established && choice.owner == packet.metadata.provider &&
+        choice.owner_source == packet.metadata.source_id, "A selected source did not own its queue in the depth choice");
+  }
   bool wait_until(ID3D12Fence *fence, UINT64 value, DWORD milliseconds) {
     const auto start = GetTickCount64();
     do {
@@ -200,6 +233,7 @@ namespace {
     capture::packet packet;
     capture::capture_diagnostic acquired;
     const bool metadata = capture::acquire(gpu.consumer.native(), 1, packet, &acquired);
+    require_choice(gpu.consumer.native(), 1, metadata, packet, acquired, false);
     require(acquired.source_tick_ms == input.tick && acquired.selection_tick_ms >= input.tick &&
       acquired.newest_view_tick_ms >= input.tick && acquired.newest_view_tick_ms <= acquired.selection_tick_ms &&
       acquired.active_view_count == 1,
@@ -249,6 +283,7 @@ namespace {
       require(capture::acquire(gpu.consumer.native(), 2, recovered, &recovered_status) && recovered.pixel_ready &&
         recovered.capture_id == ticket && recovered.metadata.sequence == input.sequence,
         "Exact deferred capture did not recover after natural producer completion");
+      require_choice(gpu.consumer.native(), 2, true, recovered, recovered_status, false);
       capture::consumer_diagnostic recovered_copy;
       require(capture::copy_current(gpu.consumer_commands.native(), recovered, gpu.destination.native(),
         D3D12_RESOURCE_STATE_COPY_DEST, &recovered_copy), "Completed foreign-queue copy was rejected");
@@ -280,6 +315,7 @@ namespace {
       require(capture::acquire(gpu.producer.native(), 3, same_queue, &same_status) && same_queue.pixel_ready &&
         same_queue.capture_id == same_ticket && same_status.producer_completed < same_status.producer_fence,
         "Same-queue capture unnecessarily required CPU-visible producer completion");
+      require_choice(gpu.producer.native(), 3, true, same_queue, same_status, false);
       checked(gpu.consumer_allocator->Reset(), "Reset completed consumer allocator for same-queue read");
       checked(reset_list(gpu.consumer_commands, gpu.consumer_allocator.value, nullptr), "Start same-queue consumer recording");
       require(capture::copy_current(gpu.consumer_commands.native(), same_queue, gpu.destination.native(),
@@ -377,6 +413,7 @@ namespace {
     capture::packet first;
     capture::capture_diagnostic first_diagnostic;
     const bool first_acquired = capture::acquire(gpu.consumer.native(), 1, first, &first_diagnostic);
+    require_choice(gpu.consumer.native(), 1, first_acquired, first, first_diagnostic, false);
     std::printf("pipeline %s seed: selected=%llu ready=%d status=%s failure=%s\n", name(scenario),
       static_cast<unsigned long long>(first.metadata.sequence), int(first.pixel_ready),
       capture::name(first_diagnostic.result), capture::name(first_diagnostic.failure));
@@ -429,6 +466,7 @@ namespace {
     capture::packet selected;
     capture::capture_diagnostic diagnostic;
     const bool acquired = capture::acquire(gpu.consumer.native(), 2, selected, &diagnostic);
+    require_choice(gpu.consumer.native(), 2, acquired, selected, diagnostic, false);
     // Selection does not consult observation or feedback revisions or the
     // reset flag: they are bookkeeping, not evidence against finished depth.
     // A reset starts a new scene-history segment; the depth stays valid. A
@@ -721,6 +759,7 @@ namespace {
     capture::packet selected;
     capture::capture_diagnostic diagnostic;
     const bool acquired = capture::acquire(gpu.consumer.native(), 2, selected, &diagnostic, fg);
+    require_choice(gpu.consumer.native(), 2, acquired, selected, diagnostic, true);
     std::printf("foreign reclamation %s / %s: available=%d ready=%d selection=%s capture=%llu expected=%llu repeated=%d\n",
       name(allocation), name(scenario), int(acquired), int(selected.pixel_ready),
       capture::name(diagnostic.selection), static_cast<unsigned long long>(diagnostic.capture_id),
@@ -738,7 +777,8 @@ namespace {
       allocate_foreign();
       capture::packet after_gap;
       capture::capture_diagnostic after_gap_diagnostic;
-      capture::acquire(gpu.consumer.native(), 3, after_gap, &after_gap_diagnostic, fg);
+      const bool after_gap_acquired = capture::acquire(gpu.consumer.native(), 3, after_gap, &after_gap_diagnostic, fg);
+      require_choice(gpu.consumer.native(), 3, after_gap_acquired, after_gap, after_gap_diagnostic, true);
       require(!after_gap.pixel_ready && after_gap.capture_id != expected_ticket &&
         !after_gap_diagnostic.repeated_frame && !after_gap_diagnostic.consumed_completed_capture &&
         after_gap_diagnostic.provider == input.provider && after_gap_diagnostic.epoch == input.epoch &&
@@ -843,6 +883,7 @@ namespace {
     require(capture::acquire(gpu.consumer.native(), 1, packet, &acquired) && packet.pixel_ready &&
       packet.capture_id == ticket && packet.texture != gpu.source.native(),
       "NGX capture did not return an independent API-boundary snapshot");
+    require_choice(gpu.consumer.native(), 1, true, packet, acquired, false);
     gpu.consumer_commands->ClearDepthStencilView(destination_dsv,
       D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 0.f, 203, 0, nullptr);
     transition(gpu.consumer_commands.value, gpu.destination.value, D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_COPY_DEST);
