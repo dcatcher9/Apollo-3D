@@ -11,7 +11,8 @@ the results under <BuildDirectory>/contract-matrix-<time>:
   {layer, family, id, seed, dimensions, legal, rule, expected, observed, verdict, rows, evidence}
   as its executable judged it against the oracle and the known-gap table, and one line per contract
   test with its ctest result and PASS summary (the pure and device layers report there);
-- summary.json: verdict counts per family, the cases of each known-gap row, and any problem.
+- summary.json: the commit the run started from and the tracked files that differed from it,
+  verdict counts per family, the cases of each known-gap row, and any problem.
 
 The runner then checks those cases against test_game3d_api_contract_known_gaps.h itself: a case
 may only meet the oracle, fail as a recorded gap or sit in a pending row, and each expected-failure
@@ -106,6 +107,10 @@ try {
   # The hook layer writes its case lines where this names; the runtime
   # families write theirs into their own output directories.
   $hookLines = Join-Path $results 'contract-hooks.jsonl'
+  # The results are evidence for the commit only when no tracked file differs from it (a merge in
+  # progress or a local edit would otherwise pass for the commit it started from).
+  $commit = & git -C $repositoryRoot rev-parse HEAD
+  $uncommitted = @(& git --no-optional-locks -C $repositoryRoot status --porcelain --untracked-files=no)
   $env:SUNSHINE_CONTRACT_MATRIX_JSONL = $hookLines
   try {
     $ctestCode = Invoke-Native 'ctest -L contract' $ctest $arguments (Join-Path $results 'ctest.log')
@@ -194,8 +199,7 @@ try {
   # UTF-8 without a byte-order mark, which would corrupt the first JSON line.
   $utf8 = New-Object Text.UTF8Encoding $false
   [IO.File]::WriteAllLines((Join-Path $results 'contract-matrix.jsonl'), $lines, $utf8)
-  $commit = & git -C $repositoryRoot rev-parse HEAD
-  $summaryJson = [ordered]@{ commit = $commit; ctest_exit = $ctestCode; skipped_gpu = [bool]$SkipGpu; skipped = $skipped; families = $families; problems = $problems } | ConvertTo-Json -Depth 6
+  $summaryJson = [ordered]@{ commit = $commit; uncommitted = $uncommitted; ctest_exit = $ctestCode; skipped_gpu = [bool]$SkipGpu; skipped = $skipped; families = $families; problems = $problems } | ConvertTo-Json -Depth 6
   [IO.File]::WriteAllText((Join-Path $results 'summary.json'), $summaryJson, $utf8)
   if (-not @($families.Keys | Where-Object { $_ -like 'L3 *' }).Count -and -not $SkipGpu) {
     Write-Host 'The runtime layer is not registered: configure with -ReShadeRuntime and -FrozenShaders to run it.'
@@ -204,6 +208,7 @@ try {
     $counts = $families[$family]
     Write-Host ("{0}: {1} cases, {2} meet the oracle, {3} recorded gaps, {4} pending" -f $family, $counts.cases, [int]$counts['meets'], [int]$counts['known_failure'], [int]$counts['pending'])
   }
+  if ($uncommitted.Count) { Write-Host "UNCOMMITTED $($uncommitted.Count) tracked files differ from $commit; summary.json lists them." }
   foreach ($test in $skipped) { Write-Host "SKIPPED $test" }
   foreach ($problem in $problems) { Write-Host "PROBLEM $problem" }
   Write-Host "Results: $results"

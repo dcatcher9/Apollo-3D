@@ -1545,7 +1545,9 @@ verdict, gap rows and evidence ([`test_game3d_api_contract_jsonl.h`](test_game3d
 line per contract test with its ctest result. The runner checks those cases against the known-gap
 table itself: a case may only meet the oracle, fail as a recorded gap or sit in a pending row, and
 each expected-failure row of a family that ran whole (and, at runtime, whose scope is whole) must be
-the only row of a failing case.
+the only row of a failing case. `summary.json` names the commit the run started from and lists under
+`uncommitted` the tracked files that differed from it (the console says how many), so results from
+a merge in progress or a local edit do not pass as evidence for that commit: run it after the commit.
 `-SkipGpu` leaves out the device and runtime layers; run them only with no game running. A contract
 test that ctest reports as skipped (the device layer without a hardware adapter or the D3D12 debug
 layer) is listed as `skipped` in `summary.json` and fails the run unless `-AllowSkip` is given.
