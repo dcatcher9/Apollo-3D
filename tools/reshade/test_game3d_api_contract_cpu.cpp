@@ -36,16 +36,16 @@
 // A cell's result is what the adapter nominates at the copy point, admitted
 // by the capture layer's rules: copy_state::select and resolve, the
 // production predicates, and two record_impl checks repeated here (a copy
-// needs a command list; a copy outside its tag call needs no device Present
-// since the tag, source_lifetime_current). Without a device the harness
-// counts the Presents a case puts between tag and copy, and admits DLSS-G's
-// inputs as observe_frame_generation_inputs nominates them (a state observed
-// on the evaluation's own list); the device and runtime layers replace these
-// repeats. A known gap these repeats decide (S7) closes only when its fix
-// changes the repeat too. L1 judges the kind, deferral and copy basis of each
-// result, and that a recorded gap still fails the way its row records;
-// refusal classes wait for the runtime layer, which reads them from the test
-// add-on's SunshineDepthTestLastRefusal.
+// needs a command list; a copy outside its tag call and its tag's own frame
+// needs no device Present since the tag, source_lifetime_current). Without a
+// device the harness counts the Presents a case puts between tag and copy,
+// and admits DLSS-G's inputs as observe_frame_generation_inputs nominates
+// them (a state observed on the evaluation's own list); the device and
+// runtime layers replace these repeats. A known gap these repeats decide
+// closes only when its fix changes the repeat too (S7 did). L1 judges the
+// kind, deferral and copy basis of each result, and that a recorded gap
+// still fails the way its row records; refusal classes wait for the runtime
+// layer, which reads them from the test add-on's SunshineDepthTestLastRefusal.
 //
 // Command line (test_contract_matrix_generator.h): --list, --case
 // <id|family:name=value,...>, --shard i/N. Without one, both layers run;
@@ -1476,15 +1476,15 @@ namespace {
       const bool forced = at_call && frame.valid_until == lifetime::at_call;
       // Repeats of record_impl (streamline_depth_capture.cpp), which needs a
       // device: a command list, a lifetime it keeps, and
-      // source_lifetime_current: inside the tag call, or no Present since.
-      // A known gap these decide (S7) closes only with a change here.
+      // source_lifetime_current: inside the tag call, at an evaluation of the
+      // tag's own frame (the probe's own_frame, S7), or no Present since.
       if (!run.snapshot.command_buffer) {
         return out;
       }
       if (frame.valid_until != lifetime::until_present && frame.valid_until != lifetime::until_evaluation && !forced) {
         return out;
       }
-      if (!at_call && !forced && run.presents) {
+      if (!at_call && !forced && !run.snapshot.tags[0].own_frame && run.presents) {
         return out;
       }
       return judged(copy_state::resolve(copy_state::select(frame.proof, policy::source_contract), frame.native_state, observation_of(value.depth), value.depth.flags));

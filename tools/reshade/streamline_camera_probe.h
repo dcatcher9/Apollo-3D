@@ -98,6 +98,13 @@ namespace sunshine_streamline {
     bool state_requires_observation{};
     depth_capture::source_ref direct_source;
     std::uint64_t source_present_generation{};
+    // An evaluation of the frame this stored tag was set for (the matrix's
+    // S7): a frame tag kept in this frame's record, or a global tag set after
+    // this frame's constants, both on a minted frame token. The game has not
+    // presented that frame yet, so Presents since the tag were earlier
+    // frames' (generated ones under frame generation) and leave its lifetime
+    // (depth_capture::input::own_frame).
+    bool own_frame{};
     // PrecisionInfo maps stored texels to the depth consumed by Streamline.
     double precision_scale{1.0}, precision_bias{};
   };

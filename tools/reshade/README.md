@@ -1426,10 +1426,11 @@ other value alone; a pairwise covering array over all dimensions, seeded with ro
 the add-on was tuned on; and one row per open owner question. A changing extent runs two render
 sizes and must keep one logical source. NGX cases go through the evaluation adapter over every
 combination of its dimensions, DLSS-G's own `DLSSG.*` inputs included. The admission checks the
-layer cannot run without a device (the copy's command list and present generation, and DLSS-G's
-observed-state nomination) are repeated from the capture owner; the device and runtime layers
-replace them. A known gap that such a repeat decides (S7, the present generation) closes only when
-its fix changes the repeat in the same commit.
+layer cannot run without a device (the copy's command list and its lifetime: inside the tag call,
+at an evaluation of the tag's own frame as the probe reports it, or with no Present since; and
+DLSS-G's observed-state nomination) are repeated from the capture owner; the device and runtime
+layers replace them. A known gap that such a repeat decides closes only when its fix changes the
+repeat in the same commit, as S7's (the lifetime at the tag's own frame's Present) did.
 [`test_contract_matrix_generator.h`](test_contract_matrix_generator.h) builds the cases: a case id
 hashes its non-default assignment, so adding a value renames no case. The executable takes
 `--list`, `--case <id>` or `--case <sl|ngx>:<name=value,...>` (one case, described; an illegal

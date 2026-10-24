@@ -423,13 +423,14 @@ namespace {
       {"tag-array-fg", "life=only_valid_now,at=tag_call,fg=on,tags=2"},
     };
 
-    // A cell that keeps a recorded gap's own failing cell in every release:
-    // added after the pairwise array, which it leaves unchanged.
+    // A cell that keeps a recorded gap's own failing cell in every release,
+    // or a closed gap's cell as its regression: added after the pairwise
+    // array, which it leaves unchanged.
     constexpr seed gap_seeds[] {
       {"local-now-undeclared", "state=unprovable,life=only_valid_now,entry=local_array"},  // S4-refusal.
       {"local-now", "life=only_valid_now,entry=local_array"},  // S4.
       {"chained-undeclared", "state=unprovable,entry=local_chain_not_last"},  // S15-refusal.
-      {"generated-undeclared", "state=unprovable,commands=none,generated=3"},  // S7-refusal.
+      {"generated-undeclared", "state=unprovable,commands=none,generated=3"},  // S7-refusal until Stage 3 fix 2: now refused for its state.
       {"declared-size-undeclared", "state=unprovable,entry=local_array,extent=declared_size_differs"},  // S16d-refusal.
     };
 

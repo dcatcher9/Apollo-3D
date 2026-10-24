@@ -161,6 +161,14 @@ namespace sunshine_streamline::depth_capture {
       if (!source_lifetime_current(value, 8)) return false;
       value.at_tag_call = false;
       if (source_lifetime_current(value, 8)) return false;
+      // An evaluation of the tag's own frame keeps both longer lifecycles
+      // across Presents of earlier frames (generated under frame generation).
+      value.own_frame = true;
+      for (const auto lifetime : {sunshine_scene_depth::lifetime::until_present,
+          sunshine_scene_depth::lifetime::until_evaluation}) {
+        value.valid_until = lifetime;
+        if (!source_lifetime_current(value, 7) || !source_lifetime_current(value, 10)) return false;
+      }
       value = {};
       value.epoch = value.sequence = 1;
       value.resource.native = 7;

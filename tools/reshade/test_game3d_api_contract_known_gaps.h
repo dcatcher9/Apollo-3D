@@ -207,16 +207,6 @@ namespace game3d_contract::known_gaps {
       return value.seen == evidence::none || value.seen == evidence::alias_named || value.seen == evidence::alias_wildcard;
     }
 
-    // A same-frame evaluate copy is refused once any Present of the device
-    // follows the tag: present() advances every source's present generation
-    // (source_lifetime_current), so a generated Present of an earlier frame
-    // ends lifecycle 1 and 2 alike. The hook layer has no device: its
-    // admission repeats source_lifetime_current over the case's generated
-    // Presents, so this verdict comes from that repeat.
-    constexpr bool generated_present_before_copy(const sl_case &value) {
-      return value.generated_presents != 0 && value.at == copy_point::same_frame_evaluate && !local(value.entry) && capture_required(value);
-    }
-
     // The probe promotes lifecycle 0 to its tag call only; an OnlyValidNow
     // evaluate input fails match() as not-valid-until-present.
     constexpr bool local_only_valid_now(const sl_case &value) {
@@ -297,13 +287,12 @@ namespace game3d_contract::known_gaps {
     }
 
     // Illegal input: a global or frame UntilEvaluate tag without a command
-    // list is copied at its evaluate, on that evaluate's own list, when no
-    // Present came between (S7 refuses it otherwise) and it declares a state
-    // to copy from.
+    // list is copied at its evaluate, on that evaluate's own list (after
+    // Presents of earlier frames too, S7), when it declares a state to copy
+    // from.
     constexpr bool commandless_until_evaluate(const sl_case &value) {
       return !legal(value) && value.commands == tag_commands::none && value.life == lifecycle::valid_until_evaluate && !local(value.entry) &&
-             value.at == copy_point::same_frame_evaluate && value.resource == resource_form::native && !value.generated_presents &&
-             value.declared_state != UINT32_MAX;
+             value.at == copy_point::same_frame_evaluate && value.resource == resource_form::native && value.declared_state != UINT32_MAX;
     }
 
     // A multi-tag array from a release newer than the survey whose tags
@@ -323,8 +312,7 @@ namespace game3d_contract::known_gaps {
   }  // namespace streamline
 
   inline constexpr row<sl_case> sl_rows[] {
-    {"S6", &rules::S6, kind::expected_failure, &streamline::commandless_frame_generation_tag, "Stage 3 fix 2 (S6 + S7). Owner ruling R2 (decided): keep a commandless ValidUntilPresent tag pending and copy it at the same frame's evaluate, else on the Present queue before that frame's Present. Today source_rejection refuses it as boundary_without_commands (since a2563fa2 DLSS-G's own NGX evaluation supplies that frame's FG depth where it is seen, N4, and the refusal then withdraws nothing), and game3d_ui_mask.cpp refuses the UI equivalent (U2). Fix together with S7 and S11b; that commit inverts the pinned refusal, test_game3d_native_provider_runtime.cpp's 'native SLFG refusal' check (1795-1811 at c67e9cf9, 1925-1951 at a2563fa2), and revisits its boundary_without_commands log checks (2010 silent scope and 2162 live scope at a2563fa2). Owner ruling R7 (decided): a null untag of the same frame (frame token and viewport), or one with no frame token, cancels that deferred copy (S9: HOLD, its own row; Assassin's Creed Shadows untags after every tag); a later frame's untag leaves it.", &behaviours::no_copy},
-    {"S7", &rules::S7, kind::expected_failure, &streamline::generated_present_before_copy, "Stage 3 fix 2 (S6 + S7). End a tag's lifetime at its own frame's Present (its frame token, or a present ordinal recorded at the tag), not at any Present of the device: streamline_depth_capture.cpp present() advances every source's present generation and source_lifetime_current then refuses the evaluate copy. Multi frame generation puts generated Presents of earlier frames there. 24bf1f4b and a2563fa2 hold a captured copy across generated Presents; neither lets this copy be made. The hook layer's verdict comes from its repeat of source_lifetime_current (test_game3d_api_contract_cpu.cpp admission), so the fix changes that repeat in the same commit. Fix together with S6, whose deferred copy meets the same check.", &behaviours::no_copy},
+    {"S6", &rules::S6, kind::expected_failure, &streamline::commandless_frame_generation_tag, "Stage 3 fix 2 (S6 + S7). Owner ruling R2 (decided): keep a commandless ValidUntilPresent tag pending and copy it at the same frame's evaluate, else on the Present queue before that frame's Present. Today source_rejection refuses it as boundary_without_commands (since a2563fa2 DLSS-G's own NGX evaluation supplies that frame's FG depth where it is seen, N4, and the refusal then withdraws nothing), and game3d_ui_mask.cpp refuses the UI equivalent (U2). Fix together with S11b (the lifetime at its own frame's Present, S7, is fixed); that commit inverts the pinned refusal, test_game3d_native_provider_runtime.cpp's 'native SLFG refusal' check (1795-1811 at c67e9cf9, 1925-1951 at a2563fa2), and revisits its boundary_without_commands log checks (2010 silent scope and 2162 live scope at a2563fa2). Owner ruling R7 (decided): a null untag of the same frame (frame token and viewport), or one with no frame token, cancels that deferred copy (S9: HOLD, its own row; Assassin's Creed Shadows untags after every tag); a later frame's untag leaves it.", &behaviours::no_copy},
     {"S11b", &rules::S11b, kind::expected_failure, &streamline::undeferred_frame_generation_tag, "Stage 3 fix 2 (S6 + S7). Owner ruling R2 (decided): a ValidUntilPresent tag at its FG tag call with no observed state is copied on the Present queue, where its declaration is exact, not at the call. Same deferral as S6.", &behaviours::copy_at_call},
     {"S9", &rules::S9, kind::expected_failure, &streamline::untagged_frame_generation_tag, "Stage 3 fix 2 (S6 + S7). Owner ruling R7 (decided 10-23): the same frame's null untag after its ValidUntilPresent tag call cancels the copy R2 defers to the Present queue. Today the tag call copies the tag from its declaration (as S11b), before the untag it cannot see. Fix with S11b and S6: keep the deferred copy pending under the tag's frame token and viewport, cancel it on an untag of that frame or one with no frame token, and keep it on an untag of another frame.", &behaviours::copy_at_call},
     {"S11c", &rules::S11c, kind::expected_failure, &streamline::until_evaluate_frame_generation_tag, "Stage 3 fix 2 (S6 + S7). An UntilEvaluate tag at its FG tag call with no observed state is copied there from a declaration that describes its evaluate (R2 defers lifecycle 1 only). Refuse that copy and let the same-frame evaluate copy it (S5); fix with S11b, which changes the same tag-call admission in source_rejection/record_impl.", &behaviours::copy_at_call},
@@ -427,26 +415,12 @@ namespace game3d_contract::known_gaps {
       return value.decided.entry == tag_entry::local_chain_not_last && recorded_refusal(value.decided);
     }
 
-    // A same-frame evaluate after generated Presents (S7) outside
-    // frame-generation scope that the oracle refuses for its state is
-    // refused at the capture gate for its lifetime (source_lifetime) first.
-    constexpr bool generated_present_refused(const present_case &value) {
-      const auto &cell = value.decided;
-      const bool extent_read = cell.extent == extent_form::null || cell.extent == extent_form::padded || cell.extent == extent_form::offset;
-      return cell.at == copy_point::same_frame_evaluate && !streamline::local(cell.entry) && cell.generated_presents != 0 && extent_read &&
-             !detail::frame_generation_scope(cell) && cell.untag == untag_pattern::none && recorded_refusal(cell) && expect(cell).why == refusal::state_unprovable;
-    }
-
     // An OnlyValidNow tag outside frame-generation scope that its call
     // copies (S1), followed by the same frame's evaluate, which refuses the
     // tag as not valid until present (S3): that Present shows no depth.
     constexpr bool only_valid_now_then_evaluate(const present_case &value) {
       return value.value.at == copy_point::same_frame_evaluate && !streamline::local(value.value.entry) && value.decided.at == copy_point::tag_call &&
              value.decided.life == lifecycle::only_valid_now && !detail::frame_generation_scope(value.value) && streamline::capture_required(value.decided);
-    }
-
-    constexpr bool generated_present_before_copy(const present_case &value) {
-      return streamline::generated_present_before_copy(value.decided);
     }
 
     constexpr bool undeferred_frame_generation_tag(const present_case &value) {
@@ -508,10 +482,8 @@ namespace game3d_contract::known_gaps {
   // same gap; that row's note holds the fix.
   inline constexpr row<present_case> sl_runtime_rows[] {
     {"S6", &rules::S6, kind::expected_failure, &present::commandless_frame_generation_tag, "Stage 3 fix 2 (S6 + S7). As the hook table's S6 row: the Present shows no depth of a commandless ValidUntilPresent FG tag.", &behaviours::no_copy},
-    {"S6-refusal", &rules::S6, kind::expected_failure, &present::commandless_refused_otherwise, "Stage 3 fix 2 (S6 + S7). With S6: a commandless ValidUntilPresent FG tag whose deferred copy (R2) or later copy point the oracle refuses, or may refuse, for another class (its state, its extent) is refused by source_rejection at the tag call as boundary_without_commands before that is judged, so its refusal class is no_copy_point. The S6 fix judges the deferred copy and closes this row; where generated Presents come before the evaluate, S7's lifetime refusal must go too.", &behaviours::refused_as<refusal::no_copy_point>},
+    {"S6-refusal", &rules::S6, kind::expected_failure, &present::commandless_refused_otherwise, "Stage 3 fix 2 (S6 + S7). With S6: a commandless ValidUntilPresent FG tag whose deferred copy (R2) or later copy point the oracle refuses, or may refuse, for another class (its state, its extent) is refused by source_rejection at the tag call as boundary_without_commands before that is judged, so its refusal class is no_copy_point. The S6 fix judges the deferred copy and closes this row.", &behaviours::refused_as<refusal::no_copy_point>},
     {"S1-evaluate", &rules::S1, kind::expected_failure, &present::only_valid_now_then_evaluate, "Outside the Stage 3 order, which predates this finding: it reworks the tag-to-evaluate path fix 2 (S6 + S7) changes, so it fits beside it. Found by the runtime layer: an OnlyValidNow global tag outside FG scope is copied at its call, but the same frame's evaluate refuses the tag (match(): not-valid-until-present, S3) and that frame's Present then shows no depth (mono), or only between generated Presents. S3 is right that the evaluate may not use the tag; it must not cost the frame the copy its tag call made (S1). Today the refused evaluate begins a new evaluation of the viewport with no copy (streamline_camera_probe.cpp nominate_depth_source, withdraw_invalid_attempt -> depth_capture::begin_evaluation), which supersedes the tag call's. Keep a tag-call copy when a later point of its frame refuses the same tag for its lifetime. The hook layer judges one copy point per cell, so only a Present shows this.", &behaviours::no_copy},
-    {"S7", &rules::S7, kind::expected_failure, &present::generated_present_before_copy, "Stage 3 fix 2 (S6 + S7). As the hook table's S7 row, without its repeat: the device's own generated Presents (real Presents while the game records) end the tag's lifetime before its same-frame evaluate.", &behaviours::no_copy},
-    {"S7-refusal", &rules::S7, kind::expected_failure, &present::generated_present_refused, "Stage 3 fix 2 (S6 + S7). With S7: a same-frame evaluate after generated Presents that the oracle refuses for its state is refused at the capture gate as source_lifetime (lifetime) before its state is judged.", &behaviours::refused_as<refusal::lifetime>},
     {"S11b", &rules::S11b, kind::expected_failure, &present::undeferred_frame_generation_tag, "Stage 3 fix 2 (S6 + S7). As the hook table's S11b row: the add-on's nomination gate sees the copy nominated inside the tag call.", &behaviours::copy_at_call},
     {"S11c", &rules::S11c, kind::expected_failure, &present::until_evaluate_frame_generation_tag, "Stage 3 fix 2 (S6 + S7). As the hook table's S11c row.", &behaviours::copy_at_call},
     {"S4-refusal", &rules::S4, kind::expected_failure, &present::local_only_valid_now_refused, "Stage 3 fix 8 (S4/S15). With the hook table's S4 row: an OnlyValidNow evaluate input that the oracle refuses, or may refuse, for another class (its state, its extent) is refused first as not-valid-until-present (lifetime). Promoting the input at its own evaluate closes this row.", &behaviours::refused_as<refusal::lifetime>},

@@ -1933,9 +1933,12 @@ namespace sunshine_streamline::depth_capture {
     // UntilPresent alike: an independent FG Present of an earlier frame cannot
     // end this call's lifetime. With multi frame generation such Presents land
     // between reading the tag and recording its copy on a fraction of real
-    // frames. This does not extend a tag to a later evaluation or authorize a
-    // delayed preservation copy; those still require an unchanged generation.
-    if (value.at_tag_call || (value.valid_until == sunshine_scene_depth::lifetime::at_call && value.force_snapshot))
+    // frames. A later use of the tag's own frame (own_frame) is current for
+    // the same reason: a Present since the tag was an earlier frame's (the
+    // matrix's S7). Any other later use, and a delayed preservation copy,
+    // still require an unchanged generation.
+    if (value.at_tag_call || value.own_frame ||
+        (value.valid_until == sunshine_scene_depth::lifetime::at_call && value.force_snapshot))
       return true;
     return value.source_present_generation && value.source_present_generation == current_generation;
   }

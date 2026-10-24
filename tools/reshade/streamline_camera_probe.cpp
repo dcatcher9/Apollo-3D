@@ -1115,6 +1115,14 @@ namespace sunshine_streamline {
         value.serial = values.serial;
         value.loss = values.loss;
         value.frame = values.frame;
+        // A global tag names no frame: it was set for the viewport's newest
+        // constants when they came first on a minted frame token (an
+        // evaluation of that frame may then use it after Presents of earlier
+        // frames, evaluated_depth_tag::own_frame); otherwise for none.
+        if (value.source == origin::global && value.frame.kind == frame_identity_kind::unavailable &&
+            record.camera_frame.kind == frame_identity_kind::v2_observed_token && record.camera_serial < values.serial &&
+            token_current(state, record.camera_frame))
+          value.frame = record.camera_frame;
         auto &destination = value.source == origin::local ? record.local_tags : record.global_tags;
         destination[i] = value;
         if (value.source == origin::global && value.serial >= record.active_tags[i].serial) record.active_tags[i] = value;
@@ -1211,6 +1219,10 @@ namespace sunshine_streamline {
         value.state_requires_observation = tag->state_requires_observation;
         value.direct_source = tag->direct_source;
         value.source_present_generation = tag->source_present_generation;
+        // S7: this evaluation names the frame its stored tag was set for.
+        value.own_frame = !at_boundary && identity.kind == frame_identity_kind::v2_observed_token &&
+          (tag->source == origin::frame ? saved && tag == &saved->tags[i] :
+            tag->source == origin::global && same_frame(tag->frame, identity));
         value.precision_scale = tag->precision_scale;
         value.precision_bias = tag->precision_bias;
         const auto identity = source_identity(value.value.native_resource);
@@ -1921,6 +1933,7 @@ namespace sunshine_streamline {
         value.source_present_generation = tag.source_present_generation;
         value.force_snapshot = value.valid_until == sunshine_scene_depth::lifetime::at_call;
         value.at_tag_call = snapshot.tag_boundary;
+        value.own_frame = tag.own_frame;
         v1_resource_state::read_details state_details;
         const auto state = v1_resource_state::resolve(value.native_state, version_one,
           v1_private_state_ready.load(std::memory_order_acquire) ? reinterpret_cast<IUnknown *>(tag.value.native_resource) : nullptr,

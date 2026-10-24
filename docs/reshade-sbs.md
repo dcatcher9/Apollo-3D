@@ -3844,13 +3844,19 @@ An independent FG Present cannot expire this synchronous tag-call lifetime. The 
 FG input `ValidUntilPresent` depth tag copied inside its own tag call: Frame Generation presents
 earlier frames on another thread, and a Present landing between reading the tag and recording its
 copy used to refuse that real frame's depth as `unsupported_lifetime`. The Witcher 3 hit this on a
-fraction of real frames with multi frame generation. A tag copied later, at an evaluation or as a
-preservation copy, still expires at the next Present. Other lifetime rules, recording retirement
-and the shared consumer-ordering checks above still apply. The
-[API contract matrix](../tools/reshade/README.md#api-contract-matrix) drives these lifetimes through
-the probe's hooks and through real Presents of the runtime fixture; its known-gap table lists where
-they fall short of Streamline's contract (a
-`ValidUntilPresent` tag lives until its own frame's Present, and may arrive without a command list).
+fraction of real frames with multi frame generation. A `ValidUntilPresent` or `ValidUntilEvaluate`
+tag lives until its own frame's Present (`sl_core_types.h`), so a tag copied later at an evaluation
+of that frame is current too, whatever Presents came between: those were earlier frames' (multi
+frame generation presents them while the game records the next frame; the contract matrix's S7).
+The evaluation names the tag's frame when both are on one minted frame token: a frame tag kept in
+that frame's record, or a global tag (`slSetTag` names no frame) set after that frame's
+`slSetConstants` (`evaluated_depth_tag::own_frame`, `depth_capture::input::own_frame`). Any other
+later use, a tag without such a frame and a preservation copy still expire at the next Present.
+Other lifetime rules, recording retirement and the shared consumer-ordering checks above still
+apply. The [API contract matrix](../tools/reshade/README.md#api-contract-matrix) drives these
+lifetimes through the probe's hooks and through real Presents of the runtime fixture; its known-gap
+table lists where they fall short of Streamline's contract (a `ValidUntilPresent` tag may arrive
+without a command list).
 Known affine `PrecisionInfo` extensions are decoded. For device depth their scale/bias are reflected
 in the texture-space projection coefficients and valid stored-depth range. For tag49 they recover
 positive view distance before reciprocal-depth reconstruction. Changing only the storage encoding
