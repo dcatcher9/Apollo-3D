@@ -9,9 +9,10 @@
 // the state it names and the proof behind it (state_proof), how long the
 // resource stays valid (lifetime), its active extent and the typed format a
 // colour snapshot of it is read as. One pure mapper per API, shared by depth
-// and UI. Admission stays with the capture owner: copy_state
-// (capture_state_policy.h) decides a copy from the proof and the recording's
-// own state, and a depth snapshot's view format is depth_view_format.h's.
+// and UI, and Dump 3D's own for its optional UI copies. Admission stays with
+// the capture owner: copy_state (capture_state_policy.h) decides a copy from
+// the proof and the recording's own state, and a depth snapshot's view
+// format is depth_view_format.h's.
 namespace sunshine_api_contract {
   using sunshine_scene_depth::extent;
   using sunshine_scene_depth::lifetime;
@@ -48,6 +49,12 @@ namespace sunshine_api_contract {
     // A 1.x Resource has no lifecycle field: its tags carry this and hold
     // until Present.
     inline constexpr std::uint32_t no_lifecycle = UINT32_MAX;
+    // A lifecycle sl::ResourceLifecycle defines. The probe refuses a 2.x tag
+    // with any other as it reads it (tag_refusal::lifecycle); valid_until
+    // judges a defined one at its copy point.
+    constexpr bool defined_lifecycle(std::uint32_t lifecycle) {
+      return lifecycle <= valid_until_evaluate;
+    }
     // Where the copy is made. OnlyValidNow holds only inside the tag call that
     // supplied it, and this is the one difference between the depth and UI
     // readings of a tag: a UI tag is copied only there (tag_call), while depth
@@ -127,6 +134,30 @@ namespace sunshine_api_contract {
   namespace generic {
     constexpr contract preserved(std::uint32_t declared_state) {
       return {declared_state, state_proof::declared, lifetime::until_present};
+    }
+  }
+
+  // Dump 3D: the optional UI copy (game3d_ui_capture.cpp) of a Streamline tag
+  // or an NGX input, made inside the call that supplied it. Its proof is
+  // stricter than the live readings': a state is declared only when it is
+  // neither 0 nor UINT32_MAX (game3d_diagnostic_metadata.cpp), so a 0 needs
+  // an observed state for every Streamline version (a live 2.x tag's 0 is
+  // COMMON), and so does an NGX input, which names none (a live one has its
+  // SDK contract). A 2.x tag keeps its lifetime at its tag call; a 1.x tag
+  // and an NGX input are copied at the call.
+  namespace dump {
+    struct ui_declaration {
+      bool streamline_v2{};
+      std::uint32_t lifecycle{streamline::no_lifecycle};
+      bool state_declared{};
+      std::uint32_t state{UINT32_MAX};
+    };
+    constexpr contract ui_copy(const ui_declaration &input) {
+      streamline::tag_declaration tag;
+      tag.lifecycle = input.lifecycle;
+      return {input.state_declared ? input.state : UINT32_MAX,
+        input.state_declared ? state_proof::declared : state_proof::observed_nonzero,
+        input.streamline_v2 ? streamline::valid_until(tag, streamline::copy_point::tag_call) : lifetime::at_call};
     }
   }
 

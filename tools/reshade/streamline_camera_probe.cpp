@@ -1367,11 +1367,11 @@ namespace sunshine_streamline {
       const bool resource_header = resource.base.next == nullptr &&
         ((same(resource.base.type, resource_guid) && resource.base.version >= 1) ||
           zero_resource_header);
-      value.supported = resource_ok && precision_ok && tag.lifecycle <= sl_contract::valid_until_evaluate && (!tag.resource_ptr ||
+      value.supported = resource_ok && precision_ok && sl_contract::defined_lifecycle(tag.lifecycle) && (!tag.resource_ptr ||
         (resource_header && (resource.type == 0 || resource.type == 8)));
       value.value.refusal = value.supported ? tag_refusal::none : !header_ok ? tag_refusal::header_version :
         !resource_ok ? tag_refusal::unreadable : !precision_ok ? precision :
-        tag.lifecycle > sl_contract::valid_until_evaluate ? tag_refusal::lifecycle :
+        !sl_contract::defined_lifecycle(tag.lifecycle) ? tag_refusal::lifecycle :
         !resource_header ? (resource.base.next ? tag_refusal::extension : tag_refusal::header_version) :
         tag_refusal::resource_type;
       value.value.native_format = value.supported ? resource.native_format : 0;

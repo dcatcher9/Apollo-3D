@@ -2357,7 +2357,10 @@ the resource-state policy. The declaration fallback still needs live game/headse
 Each adapter's state, proof and lifetime come from its API's one mapper in
 [`api_contract.h`](../tools/reshade/api_contract.h): Streamline tags (depth and UI alike; an
 `OnlyValidNow` tag holds only at its own tag call, the one difference between the two readings),
-NGX evaluation inputs, DLSS-G's own inputs and the Generic copy.
+NGX evaluation inputs, DLSS-G's own inputs and the Generic copy. Dump 3D's optional UI copies
+have their own, stricter mapper there (`dump::ui_copy`): a declared 0 needs an observed state for
+every Streamline version, as an NGX input (which declares none) does, and a 1.x tag or an NGX input
+is copied at its call.
 Every proof/policy combination above, including NGX's SDK input contract, resolves through the one
 table in [`capture_state_policy.h`](../tools/reshade/capture_state_policy.h): declared (must match an
 observation), observed only (also an undeclared state), observed-else-declared and

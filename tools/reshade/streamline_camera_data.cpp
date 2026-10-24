@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "streamline_camera_data.h"
+#include "api_contract.h"
 
 #include <algorithm>
 #include <cmath>
@@ -7,6 +8,7 @@
 #include <limits>
 
 namespace sunshine_streamline {
+  namespace sl_contract = sunshine_api_contract::streamline;
   namespace {
     bool same_type(const guid &a, const guid &b) { return std::memcmp(&a, &b, sizeof(guid)) == 0; }
     bool ordinary(float v) { return std::isfinite(v) && std::abs(v) < 1e30f; }
@@ -162,7 +164,10 @@ namespace sunshine_streamline {
       return match_status::stale_epoch;
     if (camera.explicit_frame && tag.explicit_frame && camera.frame_key != tag.frame_key)
       return match_status::wrong_frame;
-    if (tag.lifecycle != 1 && tag.lifecycle != 0xffffffffu) return match_status::unsupported_lifecycle;
+    // Until Present, or a 1.x tag's none (sl_contract::lifecycle_at reads a
+    // lifetime that holds at the copy point as ValidUntilPresent).
+    if (tag.lifecycle != sl_contract::valid_until_present && tag.lifecycle != sl_contract::no_lifecycle)
+      return match_status::unsupported_lifecycle;
     const auto &a = tag.area;
     const bool whole_resource = a.top == 0 && a.left == 0 && a.width == 0 && a.height == 0;
     if (!whole_resource) {

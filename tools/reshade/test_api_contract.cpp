@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // The API contract mappers of api_contract.h (refactor plan P3): the state
 // proof, lifetime and native state each API's declaration gives a capture
-// input, the lifecycle Streamline's match() judges at each copy point, and an
-// absent extent as the whole allocation. The Streamline probe's depth and UI
+// input, the lifecycles the probe reads and match() judges at each copy point,
+// Dump 3D's own contract for its UI copies, and an absent extent as the whole
+// allocation. The Streamline probe's depth and UI
 // adapters, tag_rejection, the 1.x state resolver, the dump's UI capture, the
 // NGX adapter, DLSS-G's own inputs and the Generic copy read these; the rows
 // pin today's mapping for every declaration those callers pass.
@@ -104,6 +105,39 @@ namespace {
     {"An unknown lifecycle stays (match refuses it)", 3, copy_point::tag_call, 3},
   };
 
+  // Dump 3D's optional UI copy: a Streamline 2.x tag's lifetime at its tag
+  // call, a 1.x tag or an NGX input at the call, and only a declared state
+  // other than 0 or UINT32_MAX (state_declared) declared.
+  struct dump_row {
+    const char *pins;
+    bool streamline_v2;
+    std::uint32_t lifecycle;
+    bool state_declared;
+    std::uint32_t state;
+    std::uint32_t native_state;
+    state_proof proof;
+    lifetime expected;
+  };
+
+  constexpr dump_row dumps[] {
+    {"A dumped 2.x OnlyValidNow tag is copied at its tag call", true, streamline::only_valid_now, true, 0x80, 0x80,
+     state_proof::declared, lifetime::at_call},
+    {"A dumped 2.x ValidUntilPresent tag holds until Present", true, streamline::valid_until_present, true, 0x80, 0x80,
+     state_proof::declared, lifetime::until_present},
+    {"A dumped 2.x ValidUntilEvaluate tag holds until its evaluation", true, streamline::valid_until_evaluate, true, 0x80,
+     0x80, state_proof::declared, lifetime::until_evaluation},
+    {"A dumped 2.x tag of an unknown lifecycle is unsupported", true, 3, true, 0x80, 0x80, state_proof::declared,
+     lifetime::unsupported},
+    {"A dumped 2.x COMMON (0) needs an observed state", true, streamline::valid_until_present, false, 0, UINT32_MAX,
+     state_proof::observed_nonzero, lifetime::until_present},
+    {"A dumped 1.x tag is copied at the call", false, streamline::no_lifecycle, true, 0x10, 0x10, state_proof::declared,
+     lifetime::at_call},
+    {"A dumped 1.x 0 needs an observed state", false, streamline::no_lifecycle, false, 0, UINT32_MAX,
+     state_proof::observed_nonzero, lifetime::at_call},
+    {"A dumped NGX input names no state and is copied at the call", false, streamline::no_lifecycle, false, 0, UINT32_MAX,
+     state_proof::observed_nonzero, lifetime::at_call},
+  };
+
   // Streamline's sl::Extent orders top before left.
   struct top_first_extent {
     std::uint32_t top {}, left {}, width {}, height {};
@@ -126,6 +160,21 @@ int main() {
     require(streamline::proof(tag) == row.expected, row.pins);
   }
   for (const auto &row : matched) require(streamline::lifecycle_at(row.lifecycle, row.at) == row.expected, row.pins);
+  require(streamline::defined_lifecycle(streamline::only_valid_now) &&
+            streamline::defined_lifecycle(streamline::valid_until_present) &&
+            streamline::defined_lifecycle(streamline::valid_until_evaluate) && !streamline::defined_lifecycle(3) &&
+            !streamline::defined_lifecycle(streamline::no_lifecycle),
+    "The probe reads only a lifecycle sl::ResourceLifecycle defines");
+  for (const auto &row : dumps) {
+    dump::ui_declaration input;
+    input.streamline_v2 = row.streamline_v2;
+    input.lifecycle = row.lifecycle;
+    input.state_declared = row.state_declared;
+    input.state = row.state;
+    const auto value = dump::ui_copy(input);
+    require(value.native_state == row.native_state && value.proof == row.proof && value.valid_until == row.expected,
+      row.pins);
+  }
   {
     streamline::tag_declaration tag;
     tag.lifecycle = streamline::only_valid_now;
@@ -168,7 +217,8 @@ int main() {
     std::fprintf(stderr, "API contract: %u cells changed\n", failures);
     return 1;
   }
-  std::printf("PASS API contract: %zu lifetime, %zu proof and %zu matched-lifecycle rows, each API's contract and the "
-    "whole-allocation extent\n", std::size(lifetimes), std::size(proofs), std::size(matched));
+  std::printf("PASS API contract: %zu lifetime, %zu proof, %zu matched-lifecycle and %zu Dump 3D rows, the defined "
+    "lifecycles, each API's contract and the whole-allocation extent\n", std::size(lifetimes), std::size(proofs),
+    std::size(matched), std::size(dumps));
   return 0;
 }
