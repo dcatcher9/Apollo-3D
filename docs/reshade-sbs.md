@@ -3665,10 +3665,53 @@ meaningful-work/clear-or-unbind-or-fullscreen boundary. An end-of-frame copy can
 observed boundary that was missed: the original may already be cleared or reused. That presentation
 remains mono until a fresh valid snapshot exists.
 
-The Generic status line (`Sunshine 3D depth:`) ends with `ready_copies boundary=N end_of_frame=M`:
-the Presents whose ready capture was a boundary's copy (a clear, an unbind or a clear-like draw) and
-those whose ready capture was the end-of-frame copy, since the runtime started. While these counts
-change, the line repeats at most every 10 s.
+Generic's D3D12 copies take their source's pre-copy state from the boundary's contract
+(`generic` in [`api_contract.h`](../tools/reshade/api_contract.h)). A depth clear
+(`ClearDepthStencilView` with the depth flag, or a render pass that clears depth) needs
+`DEPTH_WRITE` by the D3D12 clear contract (`clear_contract`). A DSV unbind or switch and a
+clear-like draw still declare `DEPTH_WRITE` (the contract matrix's D11c). The end-of-frame copy
+runs on ReShade's own list, where nothing names the state: it copies only from the source's last
+proven state on that list's queue, and refuses otherwise. The earlier capture then holds within the
+source age, then the view is mono.
+
+The last proven state ([`proven_state.h`](../tools/reshade/proven_state.h)) is a per-resource fact
+that the capture owner keeps for at most 128 textures, each depth-stencil texture from its creation
+state (ReShade's `init_resource`; the least recently used is forgotten first). After each
+`ExecuteCommandLists` returns, in submission order, each list that the barrier hooks observed in
+full proves the state its last transition or enhanced barrier left a tracked texture in, for that
+queue only. A depth clear of the texture's subresource 0 after that barrier (`ClearDepthStencilView`
+with the depth flag, or a render pass that clears depth, which `depth_addon.cpp` reports) proves
+`DEPTH_WRITE` by the clear contract, so a game that clears its depth every frame re-proves it every
+frame. Some events leave every texture unproven: a list the hooks did not observe in full (not
+reported by ReShade's lifecycle, Reset without it, invalidated, or with a method table the hooks do
+not cover), and observer loss. A list that never had a recording state while the hooks cover its
+method table recorded no barrier through them, so it changes nothing: DXGI's internal Present list
+is one. The add-on's own content-sampler list is submitted in the observer's suppression scope, so
+it is not a game execution. Others leave one texture unproven: an aliasing barrier naming it (or naming nothing:
+any placed or reserved resource) after its last barrier, a split still open, or a blocked barrier.
+Either way, a later barrier proves the texture again. A creation state holds on every queue until a
+list uses the texture, and not at all once an enhanced barrier was seen, because ReShade reports a
+texture created in an initial layout like one created in a state. The copy is checked again when
+its list is executed: if the proof changed meanwhile or another queue executes it, the copy is
+discarded (`proven_state_changed`). Ordering across queues is not observed, so a proof never
+crosses queues. `DiscardResource` is not hooked (the hook set stays frozen until the new reporters),
+so a discard after the last barrier goes unseen; that is a content hazard, as it was before. Later
+copies whose own recording lacks a state can query the same fact
+(`depth_capture::last_proven_state`).
+
+The Generic status line (`Sunshine 3D depth:`) ends with three groups of counts since the runtime
+started:
+- `ready_copies boundary=N end_of_frame=M`: the Presents whose ready capture was a boundary's copy
+  (a clear, an unbind or a clear-like draw), and those whose ready capture was the end-of-frame copy.
+- `end_of_frame_refused=R last=<stage>`: end-of-frame copies the capture owner refused, with the
+  latest refusal's stage (`missing_state` when nothing proves the state).
+- `proven tracked=T unobserved={unrecorded=.. unreported=.. invalidated=.. missed_reset=..
+  uncovered=..} changed_copies=C`: the textures with a tracked state, the executed lists that left
+  every texture unproven by why the hooks did not observe them (no recording state, not reported by
+  ReShade's lifecycle, invalidated, Reset without that lifecycle, method table not covered), and the
+  copies discarded at execution.
+
+While these counts change, the line repeats at most every 10 s.
 
 Preservation statistics retain a strong snapshot ticket with its allocation identity. Publishing
 it requires the current, active, unambiguous presentation record and a matching live ticket.
@@ -4273,7 +4316,10 @@ CommandList7 Barrier: they supply observed resource states when they see the lis
 `barrier` event cannot replace these hooks: it reports a transition for the whole resource without
 its subresource (Dead Space transitions the stencil plane of its R32G8X24 depth separately), drops
 split flags, and reports an aliasing barrier as a completed transition of its "after" resource.
-The queue's ExecuteCommandLists hook stays and reports submissions. A list's observed states live
+The queue's ExecuteCommandLists hook stays and reports submissions; after each one returns, the
+executed lists' observed states update the per-resource last proven state that the Generic
+end-of-frame copy uses, and the aliasing barriers the hooks note (which change no state on the
+recording, so captures at an API call ignore them) revoke it. A list's observed states live
 in its own recording state and are read and written only by the thread recording it (its lifecycle
 events, its captures and these hooks), so a barrier takes no capture lock; a list ReShade never
 reported is not tracked at all, since it cannot admit a capture. A consumer copy is recorded after

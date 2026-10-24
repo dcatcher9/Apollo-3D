@@ -382,6 +382,144 @@ namespace {
       gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
   }
 
+  // The Generic end-of-frame copy (record_preserved with generic::end_of_frame)
+  // on real lists: a depth-stencil texture tracked from its creation state is
+  // proven by each executed list's last barrier on that list's queue (or a
+  // depth clear after it), and copied from that state on a recording that
+  // names nothing about it. It is unproven on another queue, after a list the
+  // hooks did not observe, and after a wildcard aliasing barrier that no later
+  // barrier or clear on the same list follows. A copy whose proof changed
+  // before its list executed, or that another queue executes, is discarded
+  // (proven_state_changed).
+  void proven_state_end_of_frame(fixture &gpu) {
+    namespace generic = sunshine_api_contract::generic;
+    if (gpu.debug_messages) gpu.debug_messages->ClearStoredMessages();
+    D3D12_RESOURCE_DESC desc{}; desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Width = 64; desc.Height = 48; desc.DepthOrArraySize = desc.MipLevels = desc.SampleDesc.Count = 1;
+    desc.Format = DXGI_FORMAT_R32_TYPELESS; desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+    const auto properties = heap(D3D12_HEAP_TYPE_DEFAULT);
+    ComPtr<ID3D12Resource> depth;
+    check(gpu.device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_DEPTH_WRITE,
+      nullptr, IID_PPV_ARGS(&depth)), "proven-state depth");
+    const auto source = native(depth.Get()), queue = native(gpu.queue.Get()), other = native(gpu.foreign_queue.Get());
+    capture::resource_created(source, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    capture::proven_state proven;
+    require(capture::last_proven_state(source, queue, proven) && proven.value == D3D12_RESOURCE_STATE_DEPTH_WRITE &&
+        !proven.queue && capture::last_proven_state(source, other, proven),
+      "a creation state did not hold on every queue before any list used the texture");
+
+    // A recording that names nothing copies from the proven state; a
+    // copy on another queue finds the proof on this one unproven.
+    transition(gpu.list.Get(), depth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_DEPTH_READ);
+    gpu.submit(); gpu.wait(); gpu.reset();
+    require(capture::last_proven_state(source, queue, proven) && proven.value == D3D12_RESOURCE_STATE_DEPTH_READ &&
+        proven.queue == queue && !capture::last_proven_state(source, other, proven),
+      "an executed list's barrier did not prove its state on that queue alone");
+    capture::record_diagnostic diagnostic;
+    auto ticket = capture::record_preserved(native(gpu.list.Get()), source, generic::end_of_frame, queue, &diagnostic);
+    require(ticket && diagnostic.used_proven_state && diagnostic.copy_state == D3D12_RESOURCE_STATE_DEPTH_READ,
+      "the end-of-frame copy did not use the proven state");
+    gpu.submit(); gpu.wait(); gpu.reset();
+    ticket = {};
+    require(!capture::record_preserved(native(gpu.list.Get()), source, generic::end_of_frame, other, &diagnostic) &&
+        diagnostic.stage == capture::record_stage::missing_state && !diagnostic.used_proven_state,
+      "an end-of-frame copy for another queue used this queue's proof");
+    require(!capture::record_preserved(native(gpu.list.Get()), source, generic::end_of_frame, 0, &diagnostic) &&
+        diagnostic.stage == capture::record_stage::missing_state, "an end-of-frame copy without its queue used a proof");
+
+    // A second reported list on the same queue changes the proof between
+    // the copy's recording and its execution: the copy is discarded. It
+    // returns to DEPTH_READ, so the recorded barrier stays legal.
+    ComPtr<ID3D12CommandAllocator> other_allocator;
+    ComPtr<ID3D12GraphicsCommandList> other_list;
+    check(gpu.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&other_allocator)), "proven-state allocator");
+    check(gpu.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, other_allocator.Get(), nullptr, IID_PPV_ARGS(&other_list)),
+      "proven-state list");
+    created(other_list.Get());
+    auto changed = capture::proven_counts().changed_copies;
+    ticket = capture::record_preserved(native(gpu.list.Get()), source, generic::end_of_frame, queue, &diagnostic);
+    require(ticket && diagnostic.used_proven_state, "the end-of-frame copy was refused before the proof changed");
+    transition(other_list.Get(), depth.Get(), D3D12_RESOURCE_STATE_DEPTH_READ, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    transition(other_list.Get(), depth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_DEPTH_READ);
+    check(close_list(other_list.Get()), "proven-state list close");
+    execute(gpu.queue.Get(), other_list.Get());
+    gpu.submit(); gpu.wait(); gpu.reset();
+    require(capture::proven_counts().changed_copies == changed + 1, "a copy whose proof changed before its execution was kept");
+    ticket = {};
+
+    // Another queue executes a copy recorded for this one: discarded.
+    ticket = capture::record_preserved(native(gpu.list.Get()), source, generic::end_of_frame, queue, &diagnostic);
+    require(ticket && diagnostic.used_proven_state, "the end-of-frame copy was refused on its own queue");
+    check(close_list(gpu.list.Get()), "proven-state foreign close");
+    execute(gpu.foreign_queue.Get(), gpu.list.Get());
+    {
+      ComPtr<ID3D12Fence> fence;
+      check(gpu.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)), "proven-state foreign fence");
+      check(gpu.foreign_queue->Signal(fence.Get(), 1), "proven-state foreign signal");
+      HANDLE event = CreateEventW(nullptr, false, false, nullptr); require(event != nullptr, "proven-state foreign event");
+      const auto hr = fence->SetEventOnCompletion(1, event);
+      const auto outcome = SUCCEEDED(hr) ? WaitForSingleObject(event, 10000) : WAIT_FAILED;
+      CloseHandle(event); require(outcome == WAIT_OBJECT_0, "proven-state foreign completion timeout");
+    }
+    gpu.reset();
+    require(capture::proven_counts().changed_copies == changed + 2, "a copy another queue executed was kept");
+    ticket = {};
+
+    // A list the barrier hooks did not observe (Reset without ReShade's
+    // lifecycle) leaves every texture unproven until an observed barrier
+    // proves it.
+    check(other_allocator->Reset(), "proven-state allocator reset");
+    check(other_list->Reset(other_allocator.Get(), nullptr), "unreported recording");
+    transition(other_list.Get(), depth.Get(), D3D12_RESOURCE_STATE_DEPTH_READ, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    check(other_list->Close(), "unreported close");
+    const auto unobserved = capture::proven_counts().missed_reset;
+    execute(gpu.queue.Get(), other_list.Get()); gpu.wait();
+    require(capture::proven_counts().missed_reset > unobserved && !capture::last_proven_state(source, queue, proven) &&
+        !capture::record_preserved(native(gpu.list.Get()), source, generic::end_of_frame, queue, &diagnostic) &&
+        diagnostic.stage == capture::record_stage::missing_state,
+      "a list the hooks did not observe left the texture proven");
+    transition(gpu.list.Get(), depth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_DEPTH_READ);
+    gpu.submit(); gpu.wait(); gpu.reset();
+    require(capture::last_proven_state(source, queue, proven) && proven.value == D3D12_RESOURCE_STATE_DEPTH_READ,
+      "an observed barrier did not prove the texture again");
+
+    // A wildcard aliasing barrier unproves every texture unless a later
+    // barrier on the same list proves it.
+    D3D12_RESOURCE_BARRIER alias{}; alias.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
+    gpu.list->ResourceBarrier(1, &alias);
+    gpu.submit(); gpu.wait(); gpu.reset();
+    require(!capture::last_proven_state(source, queue, proven), "a wildcard aliasing barrier left the texture proven");
+    gpu.list->ResourceBarrier(1, &alias);
+    transition(gpu.list.Get(), depth.Get(), D3D12_RESOURCE_STATE_DEPTH_READ, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    gpu.submit(); gpu.wait(); gpu.reset();
+    require(capture::last_proven_state(source, queue, proven) && proven.value == D3D12_RESOURCE_STATE_DEPTH_WRITE,
+      "a barrier after the aliasing barrier did not prove the texture");
+
+    // A depth clear of subresource 0 needs DEPTH_WRITE (the D3D12 clear
+    // contract): after a wildcard alias left it unproven, the clear on a list
+    // with no barrier proves it again (depth_addon.cpp reports the clear).
+    ComPtr<ID3D12DescriptorHeap> views;
+    D3D12_DESCRIPTOR_HEAP_DESC heap_desc{}; heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV; heap_desc.NumDescriptors = 1;
+    check(gpu.device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&views)), "proven-state DSV heap");
+    D3D12_DEPTH_STENCIL_VIEW_DESC view{}; view.Format = DXGI_FORMAT_D32_FLOAT; view.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+    gpu.device->CreateDepthStencilView(depth.Get(), &view, views->GetCPUDescriptorHandleForHeapStart());
+    gpu.list->ResourceBarrier(1, &alias);
+    gpu.submit(); gpu.wait(); gpu.reset();
+    require(!capture::last_proven_state(source, queue, proven), "a wildcard aliasing barrier left the texture proven");
+    capture::observe_depth_clear(native(gpu.list.Get()), source);
+    gpu.list->ClearDepthStencilView(views->GetCPUDescriptorHandleForHeapStart(), D3D12_CLEAR_FLAG_DEPTH, 1.f, 0, 0, nullptr);
+    gpu.submit(); gpu.wait(); gpu.reset();
+    require(capture::last_proven_state(source, queue, proven) && proven.value == D3D12_RESOURCE_STATE_DEPTH_WRITE && proven.queue == queue,
+      "an executed depth clear did not prove DEPTH_WRITE");
+    destroyed(other_list.Get()); capture::command_destroyed(native(other_list.Get()));
+    capture::poll();
+    gpu.check_debug_errors();
+    std::printf("PASS Generic end-of-frame copy from the last proven state: creation and executed-list proofs per queue, "
+      "discarded when the proof changed or another queue ran it, unproven after an unobserved list or a wildcard alias, "
+      "proven again by a later barrier or a depth clear%s\n",
+      gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
+  }
+
   // Depth formats and shapes (depth_view_format.h): a float-16 depth, a
   // typeless one with or without a declared format, a mip chain and an array.
   // The snapshot keeps subresource 0's exact bytes and names the view the
@@ -1702,6 +1840,7 @@ int main(int argc, char **argv) {
     unlocked_allocation(gpu);
     local_view_lease(gpu);
     first_recording_depth_capture(gpu);
+    proven_state_end_of_frame(gpu);
     ngx_contract_depth_capture(gpu);
     depth_format_and_mips(gpu);
     local_same_queue_ordered_capture(gpu);

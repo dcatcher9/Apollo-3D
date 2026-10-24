@@ -42,6 +42,7 @@
 #include "streamline_camera_probe.h"
 #include "streamline_depth_capture.h"
 #include "streamline_depth_provider.h"
+#include "streamline_native_observer.h"
 #include "native_resource_identity.h"
 #include "camera_sample_observation.h"
 #include "game3d_slow_step.h"
@@ -567,7 +568,6 @@ static void preserve_d3d12_at_effects(effect_runtime *runtime, command_list *com
 {
 	const auto frame = device_data.frame_index, present = device_data.native_present_index;
 	viewport copied_viewport{};
-	resource_usage before{};
 	bool capture = false;
 	uint64_t reservation = 0;
 	{
@@ -586,21 +586,23 @@ static void preserve_d3d12_at_effects(effect_runtime *runtime, command_list *com
 			info.last_frame_stats.preservation_reservation = reservation;
 			info.last_frame_stats.copy_provenance_ambiguous = true;
 		}
-		before = info.desc.usage & (resource_usage::depth_stencil | resource_usage::shader_resource);
 		copied_viewport = info.last_frame_stats.total.last_viewport;
 	}
 	if (capture)
 	{
 		// A missed before-clear boundary is never recoverable at end of frame.
-		uint32_t native_before = 0;
-		if ((before & resource_usage::depth_stencil_write) != 0) native_before = D3D12_RESOURCE_STATE_DEPTH_WRITE;
-		else
+		// Nothing names the source's state here: only the state the game's
+		// executed work proved on this queue (or a state ReShade's own list
+		// observed) admits the copy; otherwise the earlier capture holds.
+		sunshine_streamline::depth_capture::record_diagnostic refusal;
+		auto ticket = sunshine_streamline::depth_capture::record_preserved(commands->get_native(), source.handle,
+			sunshine_api_contract::generic::end_of_frame, runtime->get_command_queue()->get_native(), &refusal);
+		auto *data = runtime->get_private_data<generic_depth_data>();
+		if (!ticket && data)
 		{
-			if ((before & resource_usage::depth_stencil_read) != 0) native_before |= D3D12_RESOURCE_STATE_DEPTH_READ;
-			if ((before & resource_usage::shader_resource_pixel) != 0) native_before |= D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-			if ((before & resource_usage::shader_resource_non_pixel) != 0) native_before |= D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+			++data->end_of_frame_refused;
+			data->end_of_frame_refusal = refusal.stage;
 		}
-		auto ticket = sunshine_streamline::depth_capture::record_preserved(commands->get_native(), source.handle, native_before);
 		sunshine_streamline::content::copy_snapshot copied;
 		if (ticket && s_streamline_probe_events) {
 			sunshine_streamline::depth_resource_initialized(ticket.texture, ticket.resource_id, runtime->get_device()->get_native(), true);
@@ -1166,8 +1168,9 @@ SUNSHINE_DEPTH_ADDON_INTERNAL void on_clear_depth_impl(command_list *cmd_list, s
 			if (device->get_api() == device_api::d3d12)
 			{
 				if (state.is_queue) lock.unlock();
-				auto ticket = sunshine_streamline::depth_capture::record_preserved(cmd_list->get_native(),
-					depth_stencil.handle, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+				namespace generic = sunshine_api_contract::generic;
+				auto ticket = sunshine_streamline::depth_capture::record_preserved(cmd_list->get_native(), depth_stencil.handle,
+					op == clear_op::clear_depth_stencil_view ? generic::clear : generic::preserved(D3D12_RESOURCE_STATE_DEPTH_WRITE));
 				if (state.is_queue) lock.lock();
 				stats.capture_ticket = std::move(ticket);
 				stats.copied_during_frame = bool(stats.capture_ticket);
@@ -1587,13 +1590,27 @@ static bool on_create_resource_view(device *device, resource resource, resource_
 
 	return true;
 }
-static void on_init_resource(device *device, const resource_desc &desc, const subresource_data *, resource_usage, resource resource)
+// ReShade reports a D3D12 creation state as its usage: the native state's
+// bits, with COMMON as general. undefined (an UNDEFINED initial layout) and
+// any other value with general's bit name no legacy state.
+static uint32_t creation_state(resource_usage usage)
+{
+	if (usage == resource_usage::general) return D3D12_RESOURCE_STATE_COMMON;
+	const auto value = static_cast<uint32_t>(usage);
+	return usage == resource_usage::undefined || (value & static_cast<uint32_t>(resource_usage::general)) ? UINT32_MAX : value;
+}
+static void on_init_resource(device *device, const resource_desc &desc, const subresource_data *, resource_usage initial_state, resource resource)
 {
 	if (desc.type != resource_type::surface && desc.type != resource_type::texture_2d && (desc.type != resource_type::texture_3d || desc.texture.depth_or_layers > 1))
 		return;
 
 	if ((desc.usage & resource_usage::depth_stencil) == 0)
 		return;
+
+	// The end-of-frame copy needs its state proven (record_preserved); the
+	// capture owner tracks it from this creation state.
+	if (device->get_api() == device_api::d3d12)
+		sunshine_streamline::depth_capture::resource_created(resource.handle, creation_state(initial_state));
 
 	generic_depth_device_data *const device_data = device->get_private_data<generic_depth_device_data>();
 
@@ -1788,6 +1805,14 @@ static bool on_clear_depth_stencil(command_list *cmd_list, resource_view dsv, co
 		// Note: This does not work when called from 'vkCmdClearAttachments', since it is invalid to copy a resource inside an active render pass
 		if (s_preserve_depth_buffers)
 			on_clear_depth_impl(cmd_list, state, depth_stencil, clear_op::clear_depth_stencil_view);
+		// The clear needs DEPTH_WRITE (the D3D12 clear contract): it proves the
+		// state of subresource 0 when its list executes (proven_state.h).
+		if (cmd_list->get_device()->get_api() == device_api::d3d12)
+		{
+			const auto view = cmd_list->get_device()->get_resource_view_desc(dsv);
+			if (view.texture.first_level == 0 && view.texture.first_layer == 0)
+				sunshine_streamline::depth_capture::observe_depth_clear(cmd_list->get_native(), depth_stencil.handle);
+		}
 		// The preserved snapshot precedes the game clear, which changes the source.
 		if (s_streamline_probe_events && cmd_list->get_device()->get_api() == device_api::d3d12)
 			sunshine_streamline::depth_content_write(cmd_list->get_native(), depth_stencil.handle);
@@ -3050,18 +3075,25 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 	// source changes share the status rate limit; manual handovers/errors remain
 	// immediate. Logging must never turn physical rotation into per-frame I/O.
 	// The copy counts alone repeat the line at most every 10 s.
-	const uint64_t copy_frames = data.boundary_copy_frames + data.end_of_frame_copy_frames;
+	const uint64_t copy_frames = data.boundary_copy_frames + data.end_of_frame_copy_frames + data.end_of_frame_refused;
 	if (data.status_log.due(GetTickCount64(), selection_changed || binding_changed,
 		data.last_logged_manual != manual || (binding_changed && data.binding_state == depth_binding_state::binding_failed),
 		copy_frames != data.logged_copy_frames))
 	{
-		char message[640];
+		char message[768];
+		const auto proven = sunshine_streamline::depth_capture::proven_counts();
 		std::snprintf(message, std::size(message),
-			"Sunshine 3D depth: %s; source=%llu %ux%u %s; %s; %s; %s; ready_copies boundary=%llu end_of_frame=%llu",
+			"Sunshine 3D depth: %s; source=%llu %ux%u %s; %s; %s; %s; ready_copies boundary=%llu end_of_frame=%llu; "
+			"end_of_frame_refused=%llu last=%s; proven tracked=%llu unobserved={unrecorded=%llu unreported=%llu invalidated=%llu "
+			"missed_reset=%llu uncovered=%llu} changed_copies=%llu",
 			binding_state_name(data.binding_state), static_cast<unsigned long long>(data.selected_identity),
 			data.selected_desc.texture.width, data.selected_desc.texture.height, format_to_string(data.selected_desc.texture.format), manual ? "manual" : "auto",
 			data.selection_reason, data.binding_detail, static_cast<unsigned long long>(data.boundary_copy_frames),
-			static_cast<unsigned long long>(data.end_of_frame_copy_frames));
+			static_cast<unsigned long long>(data.end_of_frame_copy_frames), static_cast<unsigned long long>(data.end_of_frame_refused),
+			sunshine_streamline::depth_capture::name(data.end_of_frame_refusal), static_cast<unsigned long long>(proven.tracked),
+			static_cast<unsigned long long>(proven.unrecorded), static_cast<unsigned long long>(proven.unreported),
+			static_cast<unsigned long long>(proven.invalidated), static_cast<unsigned long long>(proven.missed_reset),
+			static_cast<unsigned long long>(proven.uncovered), static_cast<unsigned long long>(proven.changed_copies));
 		sunshine_log::message(data.binding_state == depth_binding_state::binding_failed ? reshade::log::level::error : reshade::log::level::info, message);
 		data.last_logged_id = data.anchor_identity;
 		data.last_logged_manual = manual;
@@ -3704,6 +3736,15 @@ void sunshine_game3d_test_draw_production_panel(effect_runtime *runtime, unsigne
 }
 #endif
 
+// The content sampler's private list holds only the add-on's own copies, so
+// its submission is not the game's work: the submission hook does not report
+// it (it would leave every proven state unproven, proven_state.h).
+static void finish_sampler_present(command_queue *queue, swapchain *swapchain)
+{
+	const sunshine_streamline::native_observer::suppression_scope add_on_work;
+	sunshine_depth::finish_present(queue, swapchain);
+}
+
 static void register_depth_events()
 {
 	s_streamline_probe_events = sunshine_streamline::enabled();
@@ -3746,7 +3787,7 @@ static void register_depth_events()
 	reshade::register_event<reshade::addon_event::execute_secondary_command_list>(sunshine_addon_lifetime::guarded<on_execute_secondary>);
 
 	reshade::register_event<reshade::addon_event::present>(sunshine_addon_lifetime::guarded<on_present>);
-	reshade::register_event<reshade::addon_event::finish_present>(sunshine_addon_lifetime::guarded<sunshine_depth::finish_present>);
+	reshade::register_event<reshade::addon_event::finish_present>(sunshine_addon_lifetime::guarded<finish_sampler_present>);
 
 	reshade::register_event<reshade::addon_event::reshade_begin_effects>(sunshine_addon_lifetime::guarded<on_begin_render_effects>);
 	reshade::register_event<reshade::addon_event::reshade_finish_effects>(sunshine_addon_lifetime::guarded<on_finish_render_effects>);
@@ -3791,7 +3832,7 @@ static void unregister_depth_events()
 	reshade::unregister_event<reshade::addon_event::execute_secondary_command_list>(sunshine_addon_lifetime::guarded<on_execute_secondary>);
 
 	reshade::unregister_event<reshade::addon_event::present>(sunshine_addon_lifetime::guarded<on_present>);
-	reshade::unregister_event<reshade::addon_event::finish_present>(sunshine_addon_lifetime::guarded<sunshine_depth::finish_present>);
+	reshade::unregister_event<reshade::addon_event::finish_present>(sunshine_addon_lifetime::guarded<finish_sampler_present>);
 
 	reshade::unregister_event<reshade::addon_event::reshade_begin_effects>(sunshine_addon_lifetime::guarded<on_begin_render_effects>);
 	reshade::unregister_event<reshade::addon_event::reshade_finish_effects>(sunshine_addon_lifetime::guarded<on_finish_render_effects>);

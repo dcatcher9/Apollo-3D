@@ -33,7 +33,11 @@ int main() try {
       copy_state::select(proof::observed_nonzero, policy::source_contract) == rule::observed_only &&
       copy_state::select(proof::observed_nonzero, policy::prefer_observed_recording) == rule::observed_only &&
       copy_state::select(proof::sdk_contract, policy::source_contract) == rule::observed_else_contract &&
-      copy_state::select(proof::sdk_contract, policy::prefer_observed_recording) == rule::observed_else_contract,
+      copy_state::select(proof::sdk_contract, policy::prefer_observed_recording) == rule::observed_else_contract &&
+      copy_state::select(proof::clear_contract, policy::source_contract) == rule::declared_must_match &&
+      copy_state::select(proof::clear_contract, policy::prefer_observed_recording) == rule::declared_must_match &&
+      copy_state::select(proof::last_proven, policy::source_contract) == rule::observed_only &&
+      copy_state::select(proof::last_proven, policy::prefer_observed_recording) == rule::observed_only,
     "proof/policy table changed");
 
   // Named behaviors: pinned examples and how the copy builds its layouts

@@ -641,10 +641,11 @@ namespace {
   // The Generic family: one depth-stencil view of the swapchain's size on
   // the game's list, its boundary, then the end of frame. Clears clear the
   // whole view; the view stays bound to the end of frame unless the boundary
-  // unbinds it, so no boundary but the case's comes first. A clear or
-  // transition the add-on would copy from a state the recording does not
-  // prove (D10: the end of frame after a transition away, or a read-only
-  // DSV) is the device layer's: it records that copy without executing it.
+  // unbinds it, so no boundary but the case's comes first. The view is
+  // created in DEPTH_WRITE and never transitioned, so its creation proves
+  // that state at every boundary (D10b). The other states an executed list
+  // proves at the end of frame, and a read-only DSV's unbind, are the device
+  // layer's.
   namespace generic_runtime {
     enum dimension : unsigned {
       boundary,
@@ -662,6 +663,7 @@ namespace {
       out.depth_written = true;
       out.depth.format = formats[value[format]];
       out.cleared = clears[value[cleared]];
+      out.proven = D3D12_RESOURCE_STATE_DEPTH_WRITE;
       return out;
     }
 

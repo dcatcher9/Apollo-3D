@@ -128,10 +128,17 @@ namespace sunshine_api_contract {
 
   // Generic: the depth-stencil copy depth_addon.cpp records before a clear,
   // a clear-like draw, an unbind or a switch, or at the end of the frame
-  // (depth_capture::record_preserved), from the state its caller declares,
-  // held until Present. Only a real depth clear has a D3D12 contract for its
-  // DEPTH_WRITE; the others share this declaration (the matrix's D10, D11c).
+  // (depth_capture::record_preserved), held until Present. A depth clear's
+  // DEPTH_WRITE is its D3D12 contract (MS Learn D3D12_RESOURCE_STATES: the
+  // state ClearDepthStencilView needs when its flags clear the subresource;
+  // a render pass that clears depth is reported as that clear). The end of
+  // the frame names no state: the source's last proven state on the copy's
+  // queue supplies it (the matrix's D10). The other boundaries declare the
+  // state their caller passes (the matrix's D11c).
   namespace generic {
+    inline constexpr std::uint32_t depth_write = 0x10; // D3D12_RESOURCE_STATE_DEPTH_WRITE
+    inline constexpr contract clear{depth_write, state_proof::clear_contract, lifetime::until_present};
+    inline constexpr contract end_of_frame{UINT32_MAX, state_proof::last_proven, lifetime::until_present};
     constexpr contract preserved(std::uint32_t declared_state) {
       return {declared_state, state_proof::declared, lifetime::until_present};
     }

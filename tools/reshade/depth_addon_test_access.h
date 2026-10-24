@@ -452,9 +452,12 @@ struct __declspec(uuid("c072221d-786d-4b6d-8f0b-52e0f325903e")) generic_depth_da
 	depth_binding_state last_logged_state = depth_binding_state::waiting_game;
 	sunshine_diagnostics::log_gate status_log;
 	// Observation only: Presents whose ready capture was a boundary's copy or
-	// the end-of-frame copy, reported on the status line (every 10 s at most
-	// while they change).
+	// the end-of-frame copy, and end-of-frame copies the capture owner refused
+	// (the latest one's stage), reported on the status line (every 10 s at
+	// most while they change).
 	uint64_t boundary_copy_frames = 0, end_of_frame_copy_frames = 0, logged_copy_frames = 0;
+	uint64_t end_of_frame_refused = 0;
+	sunshine_streamline::depth_capture::record_stage end_of_frame_refusal = sunshine_streamline::depth_capture::record_stage::not_attempted;
 	// Observation only: these fields never participate in routing or readiness.
 	const char *capture_wait_detail = nullptr;
 	struct capture_trace_record

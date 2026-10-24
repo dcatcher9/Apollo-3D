@@ -287,10 +287,23 @@ namespace sunshine_streamline::depth_capture {
       if (!value) { invalidate(owner, identity ? recording_loss::source_state_capacity : recording_loss::source_identity_unavailable); return; }
       value->blocked = true;
     }
+    // The per-resource last-proven state (proven_state.h), under mutex: at
+    // most proven_limit textures, the least recently used forgotten first.
+    constexpr unsigned proven_limit = 128;
+    sunshine_proven_state::table<proven_limit> proven;
+    // A creation state stops proving a texture once enhanced barriers were
+    // seen: ReShade reports a texture created in an initial layout like one
+    // created in a legacy state. Set without the lock.
+    std::atomic<bool> enhanced_barriers_seen{};
+    struct {
+      std::atomic<std::uint64_t> unrecorded{}, unreported{}, invalidated{}, missed_reset{}, uncovered{}, changed_copies{};
+    } proven_counters;
     void invalidate_all() {
       std::lock_guard lock(mutex);
       for_each_capture([](auto &value) { invalidate(value, capture_failure::observer_loss); });
       ++command_generation;
+      // Lists executed meanwhile may have gone unobserved.
+      proven.unprove_all();
       reason = status::unavailable;
     }
     // Every game ResourceBarrier/Barrier arrives here. A recording's payload is
@@ -301,7 +314,10 @@ namespace sunshine_streamline::depth_capture {
     // for it and its states cannot grow without a Reset.
     void barriers(std::uint64_t native, std::uint64_t cookie, std::uint32_t count, const D3D12_RESOURCE_BARRIER *values) {
       auto owner = command(native, cookie, true);
-      if (!owner || owner->closed || !owner->reported) return;
+      if (!owner) return;
+      // A closed recording records nothing: the list was Reset unreported.
+      if (owner->closed) { owner->missed_reset = true; return; }
+      if (!owner->reported) return;
       ++owner->native_barrier_calls;
       owner->last_barrier_command = native;
       for (unsigned n = 0; n != count; ++n) {
@@ -313,7 +329,25 @@ namespace sunshine_streamline::depth_capture {
         // must have that source active and initialized there. Transient-memory
         // engines (RE Engine) alias every frame; blocking on them refused all
         // depth. The generic bind-switch preservation copies at no such point
-        // and keeps its own alias rule (depth_addon.cpp).
+        // and keeps its own alias rule (depth_addon.cpp). The end-of-frame
+        // copy copies at no such point either: an aliasing barrier is marked
+        // for the per-resource proven state alone, which it revokes
+        // (proven_state.h). A resource without an identity cannot be tracked
+        // there, so none is created for it.
+        if (value.Type == D3D12_RESOURCE_BARRIER_TYPE_ALIASING) {
+          const auto order = ++owner->barrier_order;
+          const auto &alias = value.Aliasing;
+          if (!alias.pResourceBefore && !alias.pResourceAfter) { owner->wildcard_alias = order; continue; }
+          for (auto *named : {alias.pResourceBefore, alias.pResourceAfter}) {
+            const auto identity = named ? source_cookie(named) : 0;
+            if (!identity) continue;
+            try {
+              if (owner->aliases.capacity() == 0) owner->aliases.reserve(8);
+              owner->aliases.push_back({identity, order});
+            } catch (...) { invalidate(*owner, recording_loss::source_state_capacity); }
+          }
+          continue;
+        }
         if (value.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION) {
           ++owner->native_transition_count;
           // Only subresource 0 (or all) defines the copied state; a split or
@@ -342,6 +376,7 @@ namespace sunshine_streamline::depth_capture {
           known->known = !known->pending_split && copy_state::supported(value.Transition.StateAfter);
           known->value = value.Transition.StateAfter;
           known->enhanced = false;
+          known->order = ++owner->barrier_order;
         }
       }
     }
@@ -425,9 +460,13 @@ namespace sunshine_streamline::depth_capture {
     // leaves the layout in transition until the split's end barrier.
     void enhanced_textures(std::uint64_t native, std::uint64_t cookie, unsigned count,
         const native_observer::enhanced_texture *textures) {
+      if (count && !enhanced_barriers_seen.load(std::memory_order_relaxed))
+        enhanced_barriers_seen.store(true, std::memory_order_relaxed);
       // No capture lock, exactly as barriers().
       auto owner = command(native, cookie, true);
-      if (!owner || owner->closed || !owner->reported) return;
+      if (!owner) return;
+      if (owner->closed) { owner->missed_reset = true; return; }
+      if (!owner->reported) return;
       for (unsigned i = 0; i != count; ++i) {
         const auto &texture = textures[i];
         if (!texture.resource || !texture.first_subresource) continue;
@@ -445,6 +484,7 @@ namespace sunshine_streamline::depth_capture {
         known->pending_split = texture.sync_after == D3D12_BARRIER_SYNC_SPLIT;
         known->known = !known->pending_split && copy_state::layouts::admissible(layout) &&
           texture.access_after != D3D12_BARRIER_ACCESS_NO_ACCESS;
+        known->order = ++owner->barrier_order;
       }
     }
     // The capture's state evidence for a source from its entry on the recording.
@@ -928,8 +968,105 @@ namespace sunshine_streamline::depth_capture {
         if ((!slots[i].nomination_only && producers[i]) || consumers[i]) return true;
       return false;
     }
+    // Requires mutex. An aliasing barrier on the recording named source after
+    // its barrier order (0: anywhere on the recording).
+    bool aliased_after(const command_state &owner, std::uint64_t source, std::uint32_t order) {
+      for (const auto &mark : owner.aliases) if (mark.source == source && mark.order > order) return true;
+      return false;
+    }
+    // Requires mutex. Whether the barrier hooks saw every barrier the list
+    // recorded: its method table is hooked (states_ready). A list being
+    // executed is alive, so its table pointer is a plain read; the answer is
+    // remembered per table until coverage changes (command_generation), and
+    // at most 16 new tables a second are checked (beyond that a list counts
+    // as unobserved). Inside the submission callback, where a lost hook's
+    // invalidation is suppressed like any nested notification.
+    struct covered_table { std::uintptr_t table{}; std::uint64_t generation{}; bool covered{}; };
+    std::array<covered_table, 8> covered_tables{};
+    unsigned covered_next{}, coverage_checks{};
+    std::uint64_t coverage_window{};
+    bool states_covered(std::uint64_t native) {
+      const auto table = *reinterpret_cast<const std::uintptr_t *>(native);
+      const auto generation = command_generation.load();
+      for (const auto &entry : covered_tables)
+        if (entry.table == table && entry.generation == generation) return entry.covered;
+      const auto now = GetTickCount64();
+      if (now - coverage_window >= 1000) { coverage_window = now; coverage_checks = 0; }
+      if (++coverage_checks > 16) return false;
+      const bool covered = native_observer::states_ready(native);
+      covered_tables[covered_next++ % covered_tables.size()] = {table, generation, covered};
+      return covered;
+    }
+    // Requires mutex. A copy recorded from its source's proven state
+    // (record_impl) is checked when its recording is executed: the proof must
+    // be unchanged and the queue the one it was proven for, or the copy is
+    // discarded (held, then mono). A replay is invalidated as such.
+    void verify_proven_copies(std::uint64_t queue, std::uint64_t cookie) {
+      if (!cookie) return;
+      for (auto &value : slots) {
+        if (!value.id || !value.proven_version || value.command != cookie) continue;
+        if (value.proven_queue != queue || proven.version(value.proven_source) != value.proven_version) {
+          invalidate(value, capture_failure::proven_state_changed);
+          proven_counters.changed_copies.fetch_add(1, std::memory_order_relaxed);
+        }
+        value.proven_version = 0;
+      }
+    }
+    // Requires mutex. The lists of one ExecuteCommandLists call on queue, in
+    // submission order (proven_state.h): copies from a proven state are
+    // checked before their list's own barriers apply. A list the barrier
+    // hooks did not fully observe (not reported by ReShade's lifecycle, Reset
+    // without it, invalidated, or of an unhooked method table) may have
+    // changed any texture: none stays proven. Otherwise every tracked texture
+    // its barriers named takes the state its last barrier left it in, on this
+    // queue, unless an aliasing barrier followed (any placed or reserved
+    // resource for one naming neither), a split is still open or a barrier
+    // was blocked; a depth clear after its last barrier proves DEPTH_WRITE.
+    void apply_executed(std::uint64_t queue, std::uint32_t count, const native_observer::command_identity *values) {
+      for (std::uint32_t n = 0; n != count; ++n) {
+        verify_proven_copies(queue, values[n].recording_cookie);
+        if (!proven.size()) continue;
+        const auto native = values[n].native_command;
+        // A list that never had a recording state, while the hooks cover its
+        // method table, recorded no barrier through them (the first would
+        // have given it one): DXGI's internal Present list. It changes no
+        // texture's state.
+        if (!values[n].recording_cookie && native && native_observer::recording_cookie_absent(native) && states_covered(native))
+          continue;
+        auto owner = command(native, values[n].recording_cookie, false);
+        auto &c = proven_counters;
+        auto *unobserved = !owner ? &c.unrecorded : !owner->reported ? &c.unreported : owner->invalid ? &c.invalidated :
+          owner->missed_reset ? &c.missed_reset : !states_covered(native) ? &c.uncovered : nullptr;
+        if (unobserved) {
+          proven.unprove_all();
+          unobserved->fetch_add(1, std::memory_order_relaxed);
+          continue;
+        }
+        if (owner->wildcard_alias) proven.unprove_all();
+        for (const auto &mark : owner->aliases) proven.unprove(mark.source);
+        for (const auto &entry : owner->states) {
+          if (!proven.tracked(entry.source)) continue;
+          if (!entry.known || entry.blocked || entry.pending_split || owner->wildcard_alias > entry.order ||
+              aliased_after(*owner, entry.source, entry.order))
+            proven.unprove(entry.source);
+          else if (entry.enhanced) proven.prove_layout(entry.source, queue, entry.layout, entry.access);
+          else proven.prove(entry.source, queue, entry.value);
+        }
+        // A depth clear after a texture's last barrier proves DEPTH_WRITE (the
+        // D3D12 clear contract), in recording order, unless aliased after it.
+        for (const auto &mark : owner->clears) {
+          if (!proven.tracked(mark.source)) continue;
+          const auto entry = std::find_if(owner->states.begin(), owner->states.end(),
+            [&](const source_state &value) { return value.source == mark.source; });
+          if (entry != owner->states.end() && entry->order > mark.order) continue;
+          if (owner->wildcard_alias > mark.order || aliased_after(*owner, mark.source, mark.order)) proven.unprove(mark.source);
+          else proven.prove(mark.source, queue, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        }
+      }
+    }
     void submitted(std::uint64_t native, std::uint32_t count, const native_observer::command_identity *values) {
       std::lock_guard lock(mutex);
+      apply_executed(native, count, values);
       auto *owner = queue(native);
       if (!owner) return;
       native = reinterpret_cast<std::uint64_t>(owner->queue.p);
@@ -1803,10 +1940,11 @@ namespace sunshine_streamline::depth_capture {
     return value.source_present_generation && value.source_present_generation == current_generation;
   }
 
+  // proven_queue: the queue that executes native, for a last_proven proof.
   static std::uint64_t record_impl(std::uint64_t native, const input &value, record_diagnostic *diagnostic,
       bool preservation_only, preservation_ticket *preserved = nullptr, bool nominate_source = false,
       bool diagnostic_copy = false, bool reusable_storage = false,
-      texture_state_policy state_policy = texture_state_policy::source_contract) {
+      texture_state_policy state_policy = texture_state_policy::source_contract, std::uint64_t proven_queue = 0) {
     bool valid_nomination = false;
     std::uint64_t nomination_command{}, nomination_source{};
     recording_ref nomination_recording;
@@ -1874,6 +2012,9 @@ namespace sunshine_streamline::depth_capture {
     observe_command(native);
     // The barrier hooks supply the list's resource states only when they see it.
     const bool states_observed = native_observer::states_ready(native);
+    // A proven state holds for a queue whose executions the hooks report.
+    const bool proven_basis_allowed = value.proof == sunshine_scene_depth::state_proof::last_proven && states_observed &&
+      proven_queue && native_observer::queue_ready(proven_queue);
     auto *list = checked.p;
     const auto command_type = list->GetType();
     if (diagnostic) diagnostic->command_type = command_type;
@@ -1953,7 +2094,20 @@ namespace sunshine_streamline::depth_capture {
         diagnostic->observed_enhanced = observed->enhanced;
         diagnostic->observed_layout = observed->layout; diagnostic->observed_access = observed->access;
       }
-      const auto chosen = copy_state::resolve(state_rule, value.native_state, observation_of(observed), desc.Flags);
+      // A last proven state stands in for the observation this recording
+      // lacks: the source's state proven on the copy's queue, unless this
+      // recording aliased it before the copy (proven_state.h).
+      sunshine_proven_state::state proven_basis;
+      if (proven_basis_allowed && !observed && !owner->wildcard_alias && !aliased_after(*owner, value.source->cookie, 0))
+        proven_basis = proven.query(value.source->cookie, proven_queue, !enhanced_barriers_seen.load(std::memory_order_relaxed));
+      if (diagnostic && proven_basis) {
+        diagnostic->used_proven_state = true; diagnostic->observed_state = proven_basis.value;
+        diagnostic->observed_enhanced = proven_basis.enhanced;
+        diagnostic->observed_layout = proven_basis.layout; diagnostic->observed_access = proven_basis.access;
+      }
+      const auto evidence = proven_basis ? copy_state::observation{true, true, false, proven_basis.value, false,
+        proven_basis.enhanced, proven_basis.layout, proven_basis.access} : observation_of(observed);
+      const auto chosen = copy_state::resolve(state_rule, value.native_state, evidence, desc.Flags);
       if (!chosen.admitted) return reject(chosen.result, chosen.stage);
       // The D3D12 contract forbids a legacy barrier on a texture in an
       // enhanced layout: that copy needs this list's CommandList7 Barrier.
@@ -1962,7 +2116,7 @@ namespace sunshine_streamline::depth_capture {
         return reject(status::unsupported_queue, record_stage::command_interface);
       if (diagnostic) diagnostic->enhanced_copy = chosen.enhanced;
       const auto before = chosen.state;
-      const auto basis = copy_basis(observed, chosen);
+      const auto basis = proven_basis ? state_basis::proven : copy_basis(observed, chosen);
       if (diagnostic) {
         diagnostic->copy_state = before; diagnostic->copy_state_known = true;
         diagnostic->used_observed_state = chosen.used_observed;
@@ -2082,6 +2236,10 @@ namespace sunshine_streamline::depth_capture {
       found->texture = std::move(texture); found->metadata = value; found->metadata.native_state = before;
       found->id = ++serial; found->command = cookie; found->producer_recording = owner.life();
       found->basis = basis;
+      if (proven_basis) {
+        found->proven_source = value.source->cookie; found->proven_version = proven_basis.version;
+        found->proven_queue = proven_queue;
+      }
       found->preservation_only = preservation_only;
       found->diagnostic_only = diagnostic_copy;
       found->diagnostic_reusable = reusable_storage;
@@ -2298,16 +2456,20 @@ namespace sunshine_streamline::depth_capture {
     return fallback.release();
   }
   preservation_ticket record_preserved(std::uint64_t command, std::uint64_t source,
-      std::uint32_t native_state, record_diagnostic *diagnostic) {
+      const sunshine_api_contract::contract &boundary, std::uint64_t queue, record_diagnostic *diagnostic) {
     try {
       input value;
       value.source = retain_source(source, diagnostic);
       if (!value.source) return {};
       value.resource.native = source;
-      sunshine_api_contract::apply(sunshine_api_contract::generic::preserved(native_state), value);
+      sunshine_api_contract::apply(boundary, value);
       value.source_present_generation = source_present_generation(value.source);
+      // The same queue pointer the submission hook reports.
+      com_ptr<ID3D12CommandQueue> checked_queue;
+      queue = queue && query_native(queue, IID_ID3D12CommandQueue, checked_queue) ?
+        reinterpret_cast<std::uint64_t>(checked_queue.p) : 0;
       preservation_ticket ticket;
-      record_impl(command, value, diagnostic, true, &ticket);
+      record_impl(command, value, diagnostic, true, &ticket, false, false, false, texture_state_policy::source_contract, queue);
       return ticket;
     } catch (...) {
       // Allocation failure must not escape a ReShade recording callback. All
@@ -2318,6 +2480,63 @@ namespace sunshine_streamline::depth_capture {
       }
       return {};
     }
+  }
+  preservation_ticket record_preserved(std::uint64_t command, std::uint64_t source,
+      std::uint32_t native_state, record_diagnostic *diagnostic) {
+    return record_preserved(command, source, sunshine_api_contract::generic::preserved(native_state), 0, diagnostic);
+  }
+  void resource_created(std::uint64_t resource, std::uint32_t initial_state) {
+    if (!requested.load() || !resource) return;
+    com_ptr<ID3D12Resource> checked;
+    if (!query_native(resource, IID_ID3D12Resource, checked)) return;
+    // Buffers and simultaneous-access textures decay to COMMON when each
+    // execution completes (MS Learn, Implicit State Transitions): no barrier
+    // proves their state between executions.
+    const auto desc = checked->GetDesc();
+    if (desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER || (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS)) return;
+    const auto identity = retain_source_cookie(checked.p);
+    if (!identity) return;
+    std::lock_guard lock(mutex);
+    proven.track(identity, initial_state != UINT32_MAX, initial_state);
+  }
+  void observe_depth_clear(std::uint64_t native, std::uint64_t resource) {
+    if (!requested.load() || !native || !resource) return;
+    // No capture lock, exactly as barriers(): the recording thread owns it.
+    auto owner = command(native, native_observer::get_recording_cookie(native), false);
+    if (!owner || owner->closed || !owner->reported) return;
+    // A tracked texture already has its identity.
+    const auto identity = source_cookie(reinterpret_cast<ID3D12Object *>(resource));
+    if (!identity) return;
+    try {
+      if (owner->clears.capacity() == 0) owner->clears.reserve(4);
+      owner->clears.push_back({identity, ++owner->barrier_order});
+    } catch (...) { invalidate(*owner, recording_loss::source_state_capacity); }
+  }
+  bool last_proven_state(std::uint64_t resource, std::uint64_t queue, proven_state &out) {
+    out = {};
+    com_ptr<ID3D12Resource> checked;
+    com_ptr<ID3D12CommandQueue> checked_queue;
+    if (!requested.load() || !query_native(resource, IID_ID3D12Resource, checked) ||
+        !query_native(queue, IID_ID3D12CommandQueue, checked_queue)) return false;
+    queue = reinterpret_cast<std::uint64_t>(checked_queue.p);
+    const auto identity = source_cookie(checked.p);
+    if (!identity || !native_observer::queue_ready(queue)) return false;
+    std::lock_guard lock(mutex);
+    out = proven.query(identity, queue, !enhanced_barriers_seen.load(std::memory_order_relaxed));
+    return bool(out);
+  }
+  proven_state_counts proven_counts() {
+    proven_state_counts out;
+    {
+      std::lock_guard lock(mutex);
+      out.tracked = proven.size();
+    }
+    const auto &c = proven_counters;
+    constexpr auto relaxed = std::memory_order_relaxed;
+    out.unrecorded = c.unrecorded.load(relaxed); out.unreported = c.unreported.load(relaxed);
+    out.invalidated = c.invalidated.load(relaxed); out.missed_reset = c.missed_reset.load(relaxed);
+    out.uncovered = c.uncovered.load(relaxed); out.changed_copies = c.changed_copies.load(relaxed);
+    return out;
   }
   void finish(std::uint64_t ticket, bool successful, capture_failure failure) {
     std::lock_guard lock(mutex);
@@ -2818,6 +3037,7 @@ namespace sunshine_streamline::depth_capture {
     CASE(none); CASE(observer_loss); CASE(discarded_recording); CASE(close_failed); CASE(replay);
     CASE(producer_signal_failed); CASE(producer_queue_changed); CASE(consumer_signal_failed); CASE(consumer_queue_changed);
     CASE(evaluation_failed); CASE(queue_retired); CASE(consumer_capacity); CASE(source_retired);
+    CASE(proven_state_changed);
 #undef CASE
     }
     return "unknown";
@@ -2837,7 +3057,7 @@ namespace sunshine_streamline::depth_capture {
   const char *name(state_basis value) {
     switch (value) {
 #define CASE(x) case state_basis::x: return #x
-    CASE(unknown); CASE(observed_legacy); CASE(observed_enhanced); CASE(declared); CASE(contract);
+    CASE(unknown); CASE(observed_legacy); CASE(observed_enhanced); CASE(declared); CASE(contract); CASE(proven);
 #undef CASE
     }
     return "unknown";

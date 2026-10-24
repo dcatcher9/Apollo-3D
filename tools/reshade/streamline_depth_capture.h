@@ -3,6 +3,7 @@
 
 #include "api_contract.h"
 #include "game3d_frame_record.h"
+#include "proven_state.h"
 #include "scene_depth_source.h"
 #include <cstddef>
 #include <cstdint>
@@ -69,7 +70,11 @@ namespace sunshine_streamline::depth_capture {
     none, observer_loss, discarded_recording, close_failed, replay,
     producer_signal_failed, producer_queue_changed, consumer_signal_failed,
     consumer_queue_changed, evaluation_failed,
-    queue_retired, consumer_capacity, source_retired
+    queue_retired, consumer_capacity, source_retired,
+    // A copy from a proven state (record_preserved at the end of the frame)
+    // whose state changed before its list was executed, or which another
+    // queue executed.
+    proven_state_changed
   };
   // Selection evidence only; never grants GPU access to a pending snapshot.
   // format_changed: the completed snapshot's storage family, view or resource
@@ -192,11 +197,14 @@ namespace sunshine_streamline::depth_capture {
     bool copy_state_known{}, used_observed_state{};
     // The copy used the SDK input contract because the recording had no entry.
     bool used_contract_state{};
+    // The copy used the source's last proven state (last_proven_state)
+    // because the recording had no entry.
+    bool used_proven_state{};
   };
   // Where an auxiliary copy's pre-copy state came from (diagnostic
   // provenance; it changes no admission). The values are fixed: dumps record
   // them by name (name(state_basis)).
-  enum class state_basis : std::uint8_t { unknown, observed_legacy, observed_enhanced, declared, contract };
+  enum class state_basis : std::uint8_t { unknown, observed_legacy, observed_enhanced, declared, contract, proven };
   struct consumer_diagnostic {
     consumer_status result{consumer_status::not_attempted};
     recording_loss invalidation{recording_loss::none};
@@ -443,10 +451,55 @@ namespace sunshine_streamline::depth_capture {
   void release_diagnostic_texture(const diagnostic_ticket &ticket);
   // A legal ReShade before-clear/end-of-frame opportunity records into the same
   // snapshot pool as API opportunities. It never selects a provider or advances
-  // middleware evaluation watermarks. The caller supplies the actual source
-  // state at this boundary; the owner still checks command/device/shape safety.
+  // middleware evaluation watermarks. The caller supplies the boundary's
+  // contract (api_contract.h generic): a depth clear's DEPTH_WRITE (clear),
+  // another boundary's declared state (preserved), or at the end of the frame
+  // the source's last proven state on queue, the queue that executes command
+  // (end_of_frame, last_proven_state); a state observed on command's own
+  // recording takes precedence. The owner still checks command/device/shape
+  // safety, and a copy from a proven state is discarded at submission when
+  // the state changed meanwhile or command runs on another queue.
+  preservation_ticket record_preserved(std::uint64_t command, std::uint64_t source,
+    const sunshine_api_contract::contract &boundary, std::uint64_t queue = 0, record_diagnostic *diagnostic = nullptr);
+  // A declared state (generic::preserved).
   preservation_ticket record_preserved(std::uint64_t command, std::uint64_t source,
     std::uint32_t native_state, record_diagnostic *diagnostic = nullptr);
+
+  // The per-resource last-proven state (proven_state.h): the state a texture
+  // is proven to be in after the work executed on its device. A texture is
+  // tracked from its creation (ReShade's init_resource): initial_state is its
+  // native creation state, UINT32_MAX when ReShade names none. Buffers and
+  // simultaneous-access textures decay to COMMON after each execution and
+  // are not tracked. Then each executed list whose recording the barrier
+  // hooks fully observed proves the state its last transition or enhanced
+  // barrier left a tracked texture in, in submission order; an unobserved
+  // execution, observer loss, an aliasing barrier naming the texture (or
+  // none: any placed resource) or a split or blocked barrier leaves it
+  // unproven until a later barrier proves it again. A proof holds only for
+  // the queue that executed it (a creation state for every queue until a list
+  // uses the texture, unless enhanced barriers were seen).
+  using proven_state = sunshine_proven_state::state;
+  void resource_created(std::uint64_t resource, std::uint32_t initial_state);
+  // A depth clear of resource's subresource 0 recorded on command, a list
+  // ReShade's lifecycle reports (ClearDepthStencilView with the depth flag, or
+  // a render pass that clears depth): D3D12 requires DEPTH_WRITE there, so
+  // when command executes it proves that state unless a later barrier on it
+  // decides. Call on the thread recording command, before the native clear.
+  void observe_depth_clear(std::uint64_t command, std::uint64_t resource);
+  // The texture's proven state for a copy that queue executes; false (and an
+  // empty out) when it is unproven there.
+  bool last_proven_state(std::uint64_t resource, std::uint64_t queue, proven_state &out);
+  struct proven_state_counts {
+    std::uint64_t tracked{};
+    // Executed lists that left every texture unproven, by why the hooks did
+    // not observe them: no recording state (never reported or associated),
+    // not reported by ReShade's lifecycle, invalidated, Reset without that
+    // lifecycle, or a method table the barrier hooks do not cover.
+    std::uint64_t unrecorded{}, unreported{}, invalidated{}, missed_reset{}, uncovered{};
+    std::uint64_t changed_copies{};
+    std::uint64_t unobserved() const { return unrecorded + unreported + invalidated + missed_reset + uncovered; }
+  };
+  proven_state_counts proven_counts();
   // Caller must first prove this ticket is the current, unambiguous preserved
   // copy for its presentation. That existing game/ReShade ordering contract is
   // distinct from native independent-queue completion. The owner checks actual

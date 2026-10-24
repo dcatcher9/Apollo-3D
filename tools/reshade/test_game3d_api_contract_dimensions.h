@@ -617,12 +617,20 @@ namespace game3d_contract {
     end_of_frame
   };
 
+  // No state is proven before the copy's recording (generic_case::proven).
+  inline constexpr std::uint32_t unproven = UINT32_MAX;
+
   struct generic_case {
     generic_boundary boundary {generic_boundary::clear_before_draws};
     bool depth_written {};  // A draw with depth writes enabled since the last transition, on this recording.
     resource_state depth {D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL};
     std::uint32_t transition_before {};  // transition_away: the barrier's StateBefore.
     clear_target cleared {clear_target::depth_of_subresource_zero};  // The clear boundaries only.
+    // The state the source's creation, or the last barrier (or a depth clear
+    // after it) of a list executed on the copy's queue before the copy's
+    // recording, left it in, which nothing since may have changed; unproven
+    // when none did.
+    std::uint32_t proven {unproven};
   };
 
   // UI inputs: tags 2, 23, 68 or 69 (by release) and 53.

@@ -570,13 +570,6 @@ namespace game3d_contract::known_gaps {
   // Generic depth-stencil boundaries judged at Present by the runtime layer
   // (family generic).
   namespace generic {
-    // A boundary with no proven state (D10): the end of frame, or a clear
-    // that clears no depth. The add-on copies at the end of frame from the
-    // DEPTH_WRITE it declares for every depth-stencil allocation.
-    constexpr bool unproven_boundary(const generic_case &value) {
-      return legal(value) && expect(value).by == &rules::D10;
-    }
-
     // A BeginRenderPass whose depth access clears subresource 0's depth (D11).
     constexpr bool render_pass_clear(const generic_case &value) {
       const auto expected = expect(value);
@@ -585,7 +578,6 @@ namespace game3d_contract::known_gaps {
   }  // namespace generic
 
   inline constexpr row<generic_case> generic_runtime_rows[] {
-    {"D10", &rules::D10, kind::expected_failure, &generic::unproven_boundary, "Stage 3 fix 1 (D10). As the device table's D10 row: the Present shows the end-of-frame copy preserve_d3d12_at_effects records on ReShade's own list from the DEPTH_WRITE it declares, where nothing proved the state. Here the view happens to be in DEPTH_WRITE; the device layer records the same copy from every other state without executing it.", &behaviours::copy},
     {"D11-render-pass", &rules::D11, kind::expected_failure, &generic::render_pass_clear, "Outside the Stage 3 order, which predates this finding of the runtime layer; it fits beside fix 1 (D10), which reworks the Generic copies. A render pass that clears depth after the depth was drawn is never captured: depth_addon.cpp on_begin_render_pass_with_depth_stencil reports pass_begin to the capture owner before it synthesizes the clear, so record_preserved refuses the before-clear copy as recording_render_pass although ReShade runs the event before the native BeginRenderPass, and that clear's preservation boundary also stops the end-of-frame copy. Synthesize the clear before reporting pass_begin.", &behaviours::no_copy},
   };
 
@@ -686,13 +678,6 @@ namespace game3d_contract::known_gaps {
       return legacy_after_earlier_layout(value, claim::ngx_contract);
     }
 
-    // The Generic path's end-of-frame copy declares DEPTH_WRITE for every
-    // depth-stencil allocation (depth_addon.cpp preserve_d3d12_at_effects,
-    // from the allocation's usage) and record_preserved copies from it.
-    constexpr bool end_of_frame(const device_case &value) {
-      return value.point == device_point::end_of_frame;
-    }
-
     // Unbinding a read-only DSV declares DEPTH_WRITE (depth_addon.cpp
     // on_bind_depth_stencil -> on_clear_depth_impl) and record_preserved copies
     // from it when the recording names nothing.
@@ -731,7 +716,6 @@ namespace game3d_contract::known_gaps {
     {"D2", &rules::D2, kind::expected_failure, &device::resolve_destination, "Outside the Stage 3 order. As the state table's D2 row: fail-safe, lowest priority.", &behaviours::no_copy},
     {"D6", &rules::D6, kind::expected_failure, &device::declared_after_earlier_layout, "Stage 3 fix 3 (D6). A texture whose layout an enhanced barrier set on an earlier list takes a legacy barrier from its declaration: illegal D3D12 (Enhanced Barriers, legacy interop). Latch 'this resource uses enhanced layouts' at device level from any texture barrier group naming it (streamline_depth_capture.cpp enhanced_textures); when latched and the recording names nothing, refuse. A copy with enhanced barriers from SHADER_RESOURCE is right only where the latch also knows the earlier list set that generic layout: the queue-specific DIRECT_QUEUE_SHADER_RESOURCE a shader-read declaration also describes is another layout, which no declaration names, so those cells must be refused.", &behaviours::copy},
     {"N8", &rules::N8, kind::expected_failure, &device::contract_after_earlier_layout, "Stage 3 fix 3 (D6). As D6 for NGX's contract state (ngx_depth_source.cpp nominates NON_PIXEL_SHADER_RESOURCE with state_proof::sdk_contract): the same device-level latch fixes both.", &behaviours::copy},
-    {"D10", &rules::D10, kind::expected_failure, &device::end_of_frame, "Stage 3 fix 1 (D10). Unsafe today, first in the fix order: depth_addon.cpp preserve_d3d12_at_effects declares DEPTH_WRITE from the allocation's usage and copies on ReShade's own list, where no game barrier is observed. Keep a per-resource fact for the last state proven on a game recording (set at ExecuteCommandLists) and copy only from it; otherwise refuse, or hold the earlier capture. Add a counter for how often an end-of-frame copy wins first, to measure the effect on generic-only games.", &behaviours::copy},
     {"D11c", &rules::D11c, kind::expected_failure, &device::read_only_unbind, "Stage 3 fix 7 (D11c). depth_addon.cpp declares DEPTH_WRITE when a DSV is unbound (on_bind_depth_stencil -> on_clear_depth_impl). Read the bound DSV's read-only flags: a writable DSV keeps DEPTH_WRITE; a read-only one with no observation is refused (D10's per-resource proven state may supply it).", &behaviours::copy},
     {"D12", &rules::D12, kind::expected_failure, &device::legacy_ui_clear, "Stage 3 fix 3 (D6). game3d_ui_layer.cpp record_into records legacy RENDER_TARGET -> COPY_SOURCE barriers at every full-frame clear boundary: illegal on a target an enhanced barrier put in the RENDER_TARGET layout, and wrong for a simultaneous-access target still in COMMON. Refuse both (or copy an enhanced target with enhanced barriers) with the device-level layout latch D6 adds.", &behaviours::copy},
     {"S22", &rules::S22, kind::expected_failure, &device::streamline_compute_list, "Stage 3 fix 9 (S22). Allow COMPUTE in record_impl and the consumer (streamline_depth_capture.cpp command_type, consume_owned) when the starting state is one a compute list may use (NON_PIXEL_SHADER_RESOURCE, UNORDERED_ACCESS, COPY_SOURCE, COPY_DEST, COMMON on depth-stencil, or a COMPUTE_QUEUE_* layout), with a compute-legal resting state for the snapshot storage. Until then every compute cell is refused as no_copy_point, also where the oracle refuses for its state.", &behaviours::no_copy},

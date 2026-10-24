@@ -67,9 +67,20 @@ namespace sunshine_streamline::depth_capture {
     // pending_split: a split barrier's state is unknown until its end or a
     // later plain barrier defines it. blocked is sticky until Reset and no
     // later barrier clears it.
+    // order: the recording's barrier order (command_state::barrier_order) of
+    // the latest barrier that set this entry.
     struct source_state {
       std::uint64_t source{}; std::uint32_t value{}; bool known{}, blocked{}, enhanced{}, pending_split{};
       std::uint32_t layout{}, access{};
+      std::uint32_t order{};
+    };
+    // A texture named at a barrier order by an aliasing barrier (before or
+    // after) or by a depth clear of its subresource 0. Neither changes a state
+    // entry, so captures at an API call ignore them; only the per-resource
+    // proven state (proven_state.h) reads them: an aliasing barrier revokes
+    // it, a depth clear proves DEPTH_WRITE (the D3D12 clear contract).
+    struct resource_mark {
+      std::uint64_t source{}; std::uint32_t order{};
     };
     struct command_state {
       std::uint64_t cookie{};
@@ -78,16 +89,27 @@ namespace sunshine_streamline::depth_capture {
       // The number of alias/split resources in a game recording is not bounded
       // by the number of depth sources we capture. Reuse this storage on Reset.
       std::vector<source_state> states;
+      std::vector<resource_mark> aliases, clears;
+      // Each state change and aliasing barrier takes the next order; the
+      // latest aliasing barrier with neither resource (any placed or reserved
+      // resource) is at wildcard_alias (0 none).
+      std::uint32_t barrier_order{}, wildcard_alias{};
       bool closed{}, invalid{}, render_pass{};
       // ReShade's lifecycle (or a registered runtime list's observed
       // submissions) drives this recording.
       bool reported{};
+      // A barrier arrived after Close: the list was Reset without ReShade's
+      // lifecycle, so these states are not what its next execution does.
+      bool missed_reset{};
       recording_loss invalidation{recording_loss::none};
       void restart(std::uint64_t next_cookie, std::uint64_t generation) noexcept {
         states.clear();
+        aliases.clear();
+        clears.clear();
         cookie = next_cookie; observation_generation = generation;
         native_barrier_calls = native_transition_count = last_barrier_command = 0;
-        closed = invalid = render_pass = reported = false;
+        barrier_order = wildcard_alias = 0;
+        closed = invalid = render_pass = reported = missed_reset = false;
         invalidation = recording_loss::none;
       }
     };
@@ -179,6 +201,10 @@ namespace sunshine_streamline::depth_capture {
       // which this snapshot sits in the shader-resource state until
       // end_local_views returns it to COMMON.
       std::uint64_t lease_list{}, lease_cookie{};
+      // A copy from its source's last proven state (record_preserved at the
+      // end of the frame): that proof's source, version and queue, checked
+      // when its recording is executed (0 none).
+      std::uint64_t proven_source{}, proven_version{}, proven_queue{};
     };
     struct evaluation_head {
       std::uint64_t epoch{}, sequence{}, tick{}, source_id{};

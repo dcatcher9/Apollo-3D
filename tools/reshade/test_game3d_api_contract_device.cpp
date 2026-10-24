@@ -12,9 +12,13 @@
 // - an adapter's copy at its call: capture::record for a depth input with
 //   the proof its claim selects, record_local_texture with the UI policy
 //   for a UI tag;
-// - a Generic boundary: record_preserved with the DEPTH_WRITE depth_addon.cpp
-//   declares at a clear, a DSV unbind and the end of frame (on a recording
-//   that names nothing about the source, as the runtime's own list does);
+// - a Generic boundary: record_preserved with the contract depth_addon.cpp
+//   passes (on a recording that names nothing about the source, as the
+//   runtime's own list does at the end of the frame): a clear's DEPTH_WRITE,
+//   the DEPTH_WRITE it declares at a DSV unbind, and at the end of the frame
+//   the source's last proven state on the copy's queue, which the earlier
+//   list proved (each source is tracked from its creation, as ReShade's
+//   init_resource reports a depth-stencil texture);
 // - the UI clear boundary: the three barriers game3d_ui_layer.cpp
 //   record_into records through ReShade's D3D12 backend. The layer itself
 //   runs only through ReShade, in the runtime layer's UI family.
@@ -831,6 +835,11 @@ namespace {
                                                                                              render_target;
         const auto properties = heap(D3D12_HEAP_TYPE_DEFAULT);
         check(gpu.device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &descs[i], D3D12_RESOURCE_STATES(source.initial), nullptr, IID_PPV_ARGS(&source.resource)), "cell source");
+        // depth_addon.cpp on_init_resource tracks a depth-stencil texture's
+        // state from its creation.
+        if (descs[i].Flags & ds) {
+          capture::resource_created(native(source.resource.Get()), source.initial);
+        }
         source.retained = capture::retain_source(native(source.resource.Get()));
         if (source.uploaded) {
           UINT64 size {};
@@ -1061,12 +1070,19 @@ namespace {
             break;
           }
         default:
-          // The DEPTH_WRITE depth_addon.cpp declares at a clear (on_clear_depth_impl),
-          // where a DSV is unbound (on_bind_depth_stencil) and at the end of
-          // the frame (preserve_d3d12_at_effects, from the allocation's usage).
-          out.preserved = capture::record_preserved(native(list), native(resource), depth_write, &out.diagnostic);
-          admitted = bool(out.preserved) && out.diagnostic.result == capture::status::recorded;
-          break;
+          {
+            // depth_addon.cpp's contracts: a clear's (on_clear_depth_impl),
+            // the end of the frame's on the queue that executes the copy
+            // (preserve_d3d12_at_effects), and the DEPTH_WRITE it declares
+            // where a DSV is unbound (on_bind_depth_stencil).
+            namespace generic = sunshine_api_contract::generic;
+            const auto point = value.value.point;
+            out.preserved = point == device_point::unbind_read_only_dsv ?
+                              capture::record_preserved(native(list), native(resource), depth_write, &out.diagnostic) :
+                              capture::record_preserved(native(list), native(resource), point == device_point::clear ? generic::clear : generic::end_of_frame, native(gpu.queue.Get()), &out.diagnostic);
+            admitted = bool(out.preserved) && out.diagnostic.result == capture::status::recorded;
+            break;
+          }
       }
       out.actual = judged(admitted, out.diagnostic);
       require_capacity(out.diagnostic);

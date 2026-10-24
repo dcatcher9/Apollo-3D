@@ -1449,9 +1449,12 @@ ended there (begun on an earlier list of the same `ExecuteCommandLists` call, th
 completes a split) or still open, a wildcard alias, an enhanced barrier, or nothing after an
 enhanced layout set on the earlier list; on subresource 0, all subresources, another mip or the
 stencil plane. Then comes the copy at its point: an adapter's copy with the proof its claim selects,
-a Generic boundary (`record_preserved` from the `DEPTH_WRITE` that `depth_addon.cpp` declares at a
-clear, a DSV unbind and the end of frame), or the UI clear boundary (the barriers `game3d_ui_layer.cpp` records through
-ReShade; the runtime layer runs the layer itself). The cells cover every legal state of every
+a Generic boundary (`record_preserved` with the contract `depth_addon.cpp` passes: a clear's
+`DEPTH_WRITE`, the `DEPTH_WRITE` it declares at a DSV unbind, and at the end of the frame the
+source's last proven state on the copy's queue, which the earlier list proved; each depth-stencil
+source is tracked from its creation, as ReShade's `init_resource` reports it), or the UI clear
+boundary (the barriers `game3d_ui_layer.cpp` records through ReShade; the runtime layer runs the
+layer itself). The cells cover every legal state of every
 allocation, each claim, each direct-list enhanced layout, every depth family typed and typeless with
 mips and planes, the shapes no input names, COMPUTE lists and UI tags. A cell meets the oracle by
 its kind, refusal class and copy basis; the basis must be the state the test put the source in, so
@@ -1516,8 +1519,10 @@ result, a recorded or unrecorded state and a recreated feature (seed rows and a 
 Family `generic` turns the Streamline and NGX sources off and draws a depth-stencil view of the
 swapchain's size: a clear after or before the draws (depth or stencil only), a render-pass depth
 clear, an unbind and the end of frame, D32 and D32S8, judged by the depth the last native render
-consumed. Copies from a state the recording does not prove (D10 after a transition away, D11c, D12)
-are the device layer's, which records them without executing them. Family `ui` (2.14.1) tags a
+consumed. The view is created in `DEPTH_WRITE` and never transitioned, so its creation proves that
+state at the end of the frame and at a stencil-only clear (D10b). The states an earlier executed
+list proves at the end of the frame are the device layer's, and so are copies from a state nothing
+proves (D11c, D12), which it records without executing them. Family `ui` (2.14.1) tags a
 captured depth and a full-size UI input (UI colour and alpha, HUD-less colour, Backbuffer, UI alpha)
 at a tag call with the game's list, without a command list or as a local evaluate input, or draws
 an offscreen UI layer cleared every frame; a case is offered when Dump3D lists its input as
@@ -1660,8 +1665,19 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   in [`api_contract.h`](api_contract.h): a Streamline tag's lifetime by version, lifecycle and copy
   point (its tag call or a later evaluate, the one difference between the depth and UI readings),
   its state proof, the lifecycles the probe reads and `match()` judges, the NGX, DLSS-G and Generic
-  contracts, Dump 3D's stricter contract for its optional UI copies and an absent extent as the
-  whole allocation. The matrix's L1 hook cells drive the same mappers through the probe.
+  contracts (a depth clear's contract state, the end of the frame's last proven state and the other
+  boundaries' declaration), Dump 3D's stricter contract for its optional UI copies and an absent
+  extent as the whole allocation. The matrix's L1 hook cells drive the same mappers through the
+  probe.
+- [`test_proven_state.cpp`](test_proven_state.cpp) (`reshade_proven_state`) pins the per-resource
+  last-proven state of [`proven_state.h`](proven_state.h), which admits the Generic end-of-frame
+  copy: a creation state holds on every queue until a list uses the texture and not once enhanced
+  barriers were seen, an executed list's proof holds only on its own queue, every update takes a
+  new version, unseen changes leave a texture unproven, and a full table forgets its least recently
+  used texture. The capture owner's feeding of it is proven on real lists by the device layer's
+  end-of-frame cells and by `reshade_diagnostic_texture_capture_test`'s `proven_state_end_of_frame`
+  (executed barriers and depth clears per queue, a copy discarded when its proof changed or another
+  queue ran it, unproven after an unobserved list or a wildcard alias).
 
 ### Independent renderer reference tests
 

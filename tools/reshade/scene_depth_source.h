@@ -54,7 +54,12 @@ namespace sunshine_scene_depth {
   // sdk_contract: the SDK requires this state at the capture boundary for every
   // input (NGX: NON_PIXEL_SHADER_RESOURCE). A known state observed on the same
   // recording takes precedence; the contract applies only when none was observed.
-  enum class state_proof { unavailable, declared, observed_nonzero, sdk_contract };
+  // clear_contract: D3D12 requires this state of a depth clear's subresource
+  // (DEPTH_WRITE); an observed state must agree, as with a declaration.
+  // last_proven: the state the source was last proven to be in by the work
+  // executed on the copy's queue (the capture owner's last_proven_state),
+  // which stands in for an observation the recording lacks.
+  enum class state_proof { unavailable, declared, observed_nonzero, sdk_contract, clear_contract, last_proven };
   enum class lifetime { unsupported, until_present, until_evaluation, at_call };
   struct extent { std::uint32_t left{}, top{}, width{}, height{}; };
   struct jitter_offset {

@@ -98,6 +98,7 @@ namespace game3d_contract {
     inline constexpr rule D9b {"D9b", "R16_TYPELESS with no typed format of its family declared: linear depth REFUSE; hardware depth EITHER R16_UNORM (D16_UNORM is the family's only depth format) or REFUSE", "SLT:331-389 Resource.nativeFormat is optional; MS Learn, DXGI_FORMAT: the R16 family holds UNORM (D16_UNORM, R16_UNORM) or FLOAT (R16_FLOAT) data; docs/reshade-sbs.md, Rules for new game behaviour 3 (fail safe)"};
     inline constexpr rule D9c {"D9c", "A format outside the four depth families, or one of their stencil-plane, integer or SNORM formats: REFUSE", "MS Learn, DXGI_FORMAT: D32_FLOAT, D32_FLOAT_S8X24_UINT, D24_UNORM_S8_UINT and D16_UNORM are the depth formats; X32_TYPELESS_G8X24_UINT and X24_TYPELESS_G8_UINT read the stencil plane"};
     inline constexpr rule D10 {"D10", "A Generic boundary with no proven state (end of frame, or a clear that does not clear subresource 0's depth): REFUSE, or HOLD the earlier frame", "docs/reshade-sbs.md, Rules for new game behaviour 3 (fail safe); nothing names the state at Present, and a clear names none for a subresource its flags do not clear"};
+    inline constexpr rule D10b {"D10b", "The same boundary with nothing on the copy's recording, after the source's creation, the last barrier of an executed list on the copy's queue, or a depth clear (D11) after that barrier put it in a state nothing since may have changed: CAPTURE from that state", "MS Learn, Using Resource Barriers to Synchronize Resource States: a resource keeps the state its creation or its latest transition barrier gave it, and only command lists executed on a queue are ordered on it; Implicit State Transitions: a depth-stencil texture is never promoted or decayed; D3D12_RESOURCE_STATES DEPTH_WRITE (D11's citation) for a clear"};
     inline constexpr rule D11 {"D11", "ClearDepthStencilView with D3D12_CLEAR_FLAG_DEPTH on a DSV of subresource 0, or BeginRenderPass with a depth CLEAR, after no enhanced or pending barrier on the recording (D4, D5 and D6 decide those first): CAPTURE from DEPTH_WRITE", "MS Learn D3D12_RESOURCE_STATES, DEPTH_WRITE: 'You should use it for ClearDepthStencilView when the flags (see D3D12_CLEAR_FLAGS) indicate a given subresource should be cleared (otherwise the subresource state doesn't matter)'"};
     inline constexpr rule D11b {"D11b", "Unbinding a writable DSV after a depth write on the recording: CAPTURE from DEPTH_WRITE; without one: REFUSE", "MS Learn D3D12_RESOURCE_STATES: DEPTH_WRITE with a writable DSV 'when the PSO has depth write enabled', DEPTH_READ when it is disabled"};
     inline constexpr rule D11c {"D11c", "Unbinding a read-only DSV with no observation: REFUSE", "MS Learn D3D12_RESOURCE_STATES: DEPTH_READ 'can be combined with other read states'"};
@@ -181,6 +182,7 @@ namespace game3d_contract {
     &rules::D9b,
     &rules::D9c,
     &rules::D10,
+    &rules::D10b,
     &rules::D11,
     &rules::D11b,
     &rules::D11c,
@@ -997,6 +999,10 @@ namespace game3d_contract {
       case generic_boundary::unbind_read_only_dsv:
         return refuse(rules::D11c, refusal::state_unprovable);
       default:
+        // An aliasing barrier on the recording may have deactivated it.
+        if (value.proven != unproven && seen != evidence::alias_named && seen != evidence::alias_wildcard) {
+          return legacy_basis(value.proven, value.depth.flags, list_type::direct, rules::D10b);
+        }
         return either(refuse(rules::D10, refusal::state_unprovable), plain(rules::D10, outcome_kind::hold));
     }
   }
@@ -1088,7 +1094,7 @@ namespace game3d_contract {
       case device_point::clear:
         return expect(generic_case {generic_boundary::clear_before_draws, false, source});
       case device_point::end_of_frame:
-        return expect(generic_case {generic_boundary::end_of_frame, false, source});
+        return expect(generic_case {generic_boundary::end_of_frame, false, source, 0, clear_target::depth_of_subresource_zero, value.prior});
       case device_point::unbind_read_only_dsv:
         return expect(generic_case {generic_boundary::unbind_read_only_dsv, false, source});
       case device_point::ui_clear:
@@ -1446,6 +1452,9 @@ namespace game3d_contract {
     static_assert(refuses(expect(with(generic_case {}, &generic_case::boundary, generic_boundary::unbind_read_only_dsv)), rules::D11c, refusal::state_unprovable));
     static_assert(captures(expect(with(with(generic_case {}, &generic_case::boundary, generic_boundary::transition_away), &generic_case::transition_before, depth_read)), rules::D11d, depth_read));
     static_assert(undecided(expect(with(generic_case {}, &generic_case::boundary, generic_boundary::end_of_frame)), rules::D10));
+    static_assert(captures(expect(with(with(generic_case {}, &generic_case::boundary, generic_boundary::end_of_frame), &generic_case::proven, depth_read)), rules::D10b, depth_read));
+    static_assert(captures(expect(with(with(generic_case {}, &generic_case::cleared, clear_target::stencil_only), &generic_case::proven, depth_write)), rules::D10b, depth_write));
+    static_assert(refuses(expect(with(with(generic_case {}, &generic_case::boundary, generic_boundary::unbind_read_only_dsv), &generic_case::proven, depth_read)), rules::D11c, refusal::state_unprovable));
     static_assert(undecided(expect(with(generic_case {}, &generic_case::cleared, clear_target::stencil_only)), rules::D10));
     static_assert(!legal(with(generic_case {}, &generic_case::cleared, clear_target::other_subresource)));
     static_assert(decides(expect(with(generic_case {}, &generic_case::depth, recorded(ds, evidence::enhanced, 0, D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE, D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE))), rules::D5, outcome_kind::capture) && expect(with(generic_case {}, &generic_case::depth, recorded(ds, evidence::enhanced, 0, D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE, D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE))).basis.enhanced);
