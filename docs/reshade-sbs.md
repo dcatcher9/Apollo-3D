@@ -594,7 +594,8 @@ and epoch were first ready. `depth_owner` names the rung that decided the Presen
 D2 with fresh or held pixels, H in mono under API ownership, or D3 when the Generic selector ran.
 
 The present thread writes the record where the decisions are made: the API provider's `begin`
-writes D1, D2 and H from its acquisition, FG scope, association, handoff and display decision; the
+writes D1, D2 and H from its acquisition, FG scope, association, handoff and display decision
+(`provider::describe_acquisition` and `describe_display`); the
 depth add-on writes D3 from its binding state; and the UI adapter writes the candidate rows as it
 offers them (a generated Present's hold is `held`, a candidate the session's scope or
 qualification withdrew is `refused`). The capture owner also keeps one `depth_choice` per consumer

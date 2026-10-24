@@ -9,15 +9,22 @@
 //
 // It drives the production functions through the capture owner's
 // test-access header, with no device: the frame generation policy, the FG
-// scope's liveness, select_provider and establish_provider, and the display
-// policy decide_display.
+// scope's liveness and the selection the provider derives from it, NGX's
+// copy rule under frame generation, select_provider and establish_provider,
+// the exact freshness edges of selection, association and the FG scope, the
+// display policy decide_display, and the UI adapter's admission of each UI
+// candidate (P11).
 #ifndef SUNSHINE_STREAMLINE_PROBE_TEST
   #error "Built only into the Streamline probe tests' view of the production sources"
 #endif
 #include "depth_cache_update.h"
+#include "game3d_ui_input_provider.h"
+#include "game3d_ui_mask.h"
+#include "ngx_depth_source.h"
 #include "streamline_depth_capture.h"
 #include "streamline_depth_capture_test_access.h"
 #include "streamline_depth_provider.h"
+#include "test_streamline_depth_capture_fixture.h"
 
 #include <array>
 #include <cstdint>
@@ -42,34 +49,14 @@ namespace sunshine_streamline::depth_capture {
 
     // The capture owner's globals, emptied before each row.
     void reset() {
-      slots = {};
-      evaluations = {};
-      for (auto &value : attempt_status) {
-        value = status::unavailable;
-      }
-      for (auto &entry : queues) {
-        entry.reset();
-      }
-      requested = true;
+      fixture::reset_owner();
     }
 
-    // One submitted, successful capture on this queue, and the API evaluation
-    // that nominated it.
+    // One submitted, successful capture on the native queue (an FG input when
+    // its source is an FG source), and the API evaluation that nominated it.
     slot &make(unsigned index, provider_kind provider, std::uint64_t epoch, std::uint64_t sequence, std::uint64_t source, std::uint32_t viewport = 0, std::uint64_t superseded = UINT64_MAX) {
-      auto &value = slots[index];
-      value = {};
-      value.id = ++serial;
-      value.queue = native;
-      value.producer_fence = 1;
-      value.finished = value.success = value.producer_submitted = true;
-      value.metadata.provider = provider;
-      value.metadata.source_id = source;
-      value.metadata.viewport = viewport;
-      value.metadata.epoch = epoch;
-      value.metadata.sequence = sequence;
+      auto &value = fixture::make_capture(index, native, provider, epoch, sequence, source, viewport, superseded);
       value.metadata.frame_generation_input = (source >> 63) != 0;
-      value.metadata.tick = GetTickCount64();
-      begin_evaluation(epoch, sequence, viewport, provider, source, superseded);
       return value;
     }
 
@@ -253,11 +240,11 @@ namespace sunshine_streamline::depth_capture {
         }
         const auto now = GetTickCount64();
         const selection_policy policy {true, epoch, 0, false, r.just_enabled ? now : now - association_timeout_ms - 1};
-        const bool live = frame_generation_scope_live(policy.epoch, policy.viewport, policy.enabled_tick);
-        // provider::begin: a silent required scope selects as without FG.
-        const auto selection = policy.require_frame_generation && !live ? selection_policy {} : policy;
+        // provider::begin's selection for this Present.
+        const auto scope = provider::select_frame_generation_scope(policy);
+        const bool live = !scope.silent;
         queue_state owner;
-        const auto pick = select_provider(owner, native, 1, GetTickCount64(), selection);
+        const auto pick = select_provider(owner, native, 1, GetTickCount64(), scope.selection);
         const char picked = label(pick, sr, 'S', fg, 'F');
         if (live != r.live || picked != r.picked || pick.result != r.result || pick.selection != r.selection) {
           char text[512];
@@ -265,7 +252,63 @@ namespace sunshine_streamline::depth_capture {
           fail(text);
         }
       }
+      // Only a required scope can be silent; any other policy selects as it is.
+      selection_policy excluded;
+      excluded.exclude_unconfirmed_fg = true;
+      const auto none = provider::select_frame_generation_scope({});
+      const auto kept = provider::select_frame_generation_scope(excluded);
+      if (none.silent || none.selection.require_frame_generation || none.selection.exclude_unconfirmed_fg || kept.silent || !kept.selection.exclude_unconfirmed_fg) {
+        fail("P5 FG scope: a policy without a required scope changed its selection");
+      }
       std::printf("PASS P5/P6 FG scope liveness and selection: %zu rows\n", std::size(rows));
+    }
+
+    // P5: NGX's copy rule under frame generation
+    // (sunshine_ngx::frame_generation_owns_depth). Confirmed FG options whose
+    // scope is live suppress an NGX evaluation's copy; FG Off, a busy or
+    // ambiguous read (which observes no options) and a silent scope copy.
+    void ngx_frame_generation_rows() {
+      enum class fg_copy {
+        none,
+        accepted,
+        other_viewport,
+        other_epoch
+      };
+
+      struct row {
+        const char *pins;
+        bool enabled;  // The FG options query observed FG on (false: Off, busy or ambiguous).
+        bool just_enabled;  // FG options turned FG on less than a second ago.
+        fg_copy copy;
+        bool suppressed;
+      };
+
+      const row rows[] {
+        {"FG just turned on owns depth: NGX records no copy", true, true, fg_copy::none, true},
+        {"A live scope (an accepted FG copy within a second) owns depth", true, false, fg_copy::accepted, true},
+        {"A silent scope owns nothing: NGX copies", true, false, fg_copy::none, false},
+        {"Another viewport's accepted FG copy leaves this scope silent", true, false, fg_copy::other_viewport, false},
+        {"Another epoch's accepted FG copy leaves this scope silent", true, false, fg_copy::other_epoch, false},
+        {"FG Off, a busy or an ambiguous read copies, even beside a live FG copy", false, false, fg_copy::accepted, false},
+        {"FG Off copies just after FG was on", false, true, fg_copy::none, false},
+      };
+      constexpr std::uint64_t epoch = 7;
+      for (const auto &r : rows) {
+        reset();
+        if (r.copy != fg_copy::none) {
+          const bool viewport = r.copy == fg_copy::other_viewport;
+          auto &value = make(1, provider_kind::streamline, r.copy == fg_copy::other_epoch ? epoch + 1 : epoch, 2, viewport ? fg_source | 1 : fg_source, viewport ? 1 : 0, 0);
+          finish(value.id, true);
+        }
+        const auto now = GetTickCount64();
+        const bool suppressed = sunshine_ngx::frame_generation_owns_depth(r.enabled, epoch, 0, r.just_enabled ? now : now - association_timeout_ms - 1);
+        if (suppressed != r.suppressed) {
+          char text[512];
+          std::snprintf(text, sizeof(text), "P5 NGX under FG, %s: suppressed %d", r.pins, suppressed);
+          fail(text);
+        }
+      }
+      std::printf("PASS P5 NGX copy rule under frame generation: %zu rows\n", std::size(rows));
     }
 
     // P6: select_provider at one Present. Each row builds the queue's owner
@@ -495,6 +538,234 @@ namespace sunshine_streamline::depth_capture {
         check_pick(timeline, 2, select_provider(owner, native, 3, GetTickCount64(), {}), 'S', sl, ngx);
       }
       std::puts("PASS P6 ownership: per-queue owners, establish_provider watermarks and repeated presentations");
+    }
+
+    // P2 and P6: the exact freshness edges, against an explicit clock, one ms
+    // either side of each limit. The source age (250 ms) admits only an age
+    // below it (<): a capture's own tick, its evaluation's view, a pending FG
+    // nomination, a completed snapshot, a pending latest capture and the
+    // owner's last delivery. The association timeout (1000 ms) admits its
+    // limit (<=): expire_association's evaluations and the handoff window of
+    // evaluation_live, neither of which admits a tick ahead of the clock; an
+    // FG scope's enabled and accepted ticks admit both
+    // (frame_generation_scope_live).
+    enum class edge_site {
+      capture_tick,
+      view_tick,
+      pending_nomination,
+      completed_snapshot,
+      pending_latest,
+      owner_delivery,
+      association_view,
+      association_rejected,
+      association_pending,
+      evaluation_window,
+      scope_enabled,
+      scope_accepted
+    };
+
+    std::string pick_outcome(const capture_pick &pick, const slot *first, char first_label, const slot *second, char second_label) {
+      return std::string(1, label(pick, first, first_label, second, second_label)) + ' ' + name(pick.result) + ' ' + name(pick.selection);
+    }
+
+    // The outcome at one site for a tick age ms before now (a negative age is
+    // ahead of the clock).
+    std::string edge_outcome(edge_site site, std::int64_t age) {
+      constexpr std::uint64_t epoch = 5, ngx_epoch = 6, ngx_source = 99;
+      constexpr std::uint64_t window = 1000;
+      reset();
+      queue_state owner;
+      auto &views = evaluations[provider_index(provider_kind::streamline)].views;
+      switch (site) {
+        case edge_site::capture_tick:
+          {
+            auto &sl = make(0, provider_kind::streamline, epoch, 1, 0);
+            const auto now = GetTickCount64();
+            sl.metadata.tick = now - age;
+            return pick_outcome(select_provider(owner, native, 1, now, {}), &sl, 'S', nullptr, '?');
+          }
+        case edge_site::view_tick:
+          {
+            auto &sl = make(0, provider_kind::streamline, epoch, 1, 0);
+            const auto now = GetTickCount64();
+            sl.metadata.tick = now;
+            for (auto &view : views) {
+              if (view.sequence) {
+                view.tick = now - age;
+              }
+            }
+            return pick_outcome(select_provider(owner, native, 1, now, {}), &sl, 'S', nullptr, '?');
+          }
+        case edge_site::pending_nomination:
+          {
+            // The owner's FG source has delivered sequence 1; sequence 2 is
+            // nominated, its capture slot not yet recorded.
+            auto &previous = make(0, provider_kind::streamline, epoch, 1, fg_source);
+            establish_provider(owner, previous, 1);
+            deliver(owner, previous);
+            begin_evaluation(epoch, 2, 0, provider_kind::streamline, fg_source);
+            const auto now = GetTickCount64();
+            evaluations[provider_index(provider_kind::streamline)].pending_nomination = {epoch, 2, now - age, fg_source, 0};
+            return pick_outcome(select_provider(owner, native, 2, now, {}), &previous, 'P', nullptr, '?');
+          }
+        case edge_site::completed_snapshot:
+          {
+            // The newest capture is still on the GPU; its completed predecessor
+            // of the same storage may stand in.
+            const auto storage = std::make_shared<source_reference>();
+            auto &completed = make(0, provider_kind::streamline, epoch, 1, 0);
+            completed.texture = std::make_shared<texture_reference>();
+            completed.source_nominated = true;
+            completed.metadata.source = storage;
+            auto &latest = make(1, provider_kind::streamline, epoch, 2, 0);
+            latest.finished = false;
+            latest.metadata.source = storage;
+            const auto now = GetTickCount64();
+            completed.metadata.tick = now - age;
+            latest.metadata.tick = now;
+            return pick_outcome(select_provider(owner, native, 1, now, {}), &completed, 'C', &latest, 'L');
+          }
+        case edge_site::pending_latest:
+          {
+            // A pending Streamline capture ranks above NGX's failed one while
+            // it is within the source age.
+            auto &latest = make(0, provider_kind::streamline, epoch, 1, 0);
+            latest.finished = false;
+            auto &failed = make(1, provider_kind::ngx, ngx_epoch, 1, ngx_source);
+            failed.success = false;
+            const auto now = GetTickCount64();
+            latest.metadata.tick = now - age;
+            failed.metadata.tick = now;
+            return pick_outcome(select_provider(owner, native, 1, now, {}), &latest, 'S', &failed, 'N');
+          }
+        case edge_site::owner_delivery:
+          {
+            // A delivering NGX owner keeps its readable source against readable SL.
+            auto &previous = make(1, provider_kind::ngx, ngx_epoch, 1, ngx_source);
+            establish_provider(owner, previous, 1);
+            deliver(owner, previous);
+            const auto *sl = &make(2, provider_kind::streamline, epoch, 2, 0);
+            const auto *ngx = &make(3, provider_kind::ngx, ngx_epoch, 2, ngx_source);
+            const auto now = GetTickCount64();
+            owner.last_source_tick = now - age;
+            return pick_outcome(select_provider(owner, native, 2, now, {}), sl, 'S', ngx, 'N');
+          }
+        case edge_site::association_view:
+        case edge_site::association_rejected:
+        case edge_site::association_pending:
+          {
+            // An established Streamline SR owner (source 0) and its own view.
+            auto &previous = make(0, provider_kind::streamline, epoch, 1, 0);
+            establish_provider(owner, previous, 1);
+            const auto now = GetTickCount64();
+            for (auto &view : views) {
+              if (!view.sequence) {
+                continue;
+              }
+              if (site == edge_site::association_view) {
+                view.tick = now - age;
+              } else if (site == edge_site::association_rejected) {
+                view.tick = now;
+                view.rejected_since = now - age;
+              } else {
+                view.tick = now - window - 1;
+              }
+            }
+            if (site == edge_site::association_pending) {
+              evaluations[provider_index(provider_kind::streamline)].pending_nomination = {epoch, 2, now - age, 0, 0};
+            }
+            expire_association(owner, now);
+            return owner.provider_established ? "kept" : "expired";
+          }
+        case edge_site::evaluation_window:
+          {
+            make(0, provider_kind::streamline, epoch, 1, 0);
+            const auto now = GetTickCount64();
+            for (auto &view : views) {
+              if (view.sequence) {
+                view.tick = now - age;
+              }
+            }
+            return evaluation_live(now, window) ? "live" : "silent";
+          }
+        case edge_site::scope_enabled:
+        case edge_site::scope_accepted:
+          {
+            // Viewport 0's FG scope, on the fixed clock.
+            const auto now = GetTickCount64();
+            scope_clock = now;
+            std::uint64_t enabled_tick = now - age;
+            if (site == edge_site::scope_accepted) {
+              enabled_tick = now - association_timeout_ms - 1;
+              auto &view = views[0];
+              view = {epoch, 1, now, fg_source, 0};
+              view.accepted_tick = now - age;
+            }
+            const bool live = frame_generation_scope_live(epoch, 0, enabled_tick);
+            scope_clock = 0;
+            return live ? "live" : "silent";
+          }
+      }
+      return "?";
+    }
+
+    void freshness_edges() {
+      constexpr std::int64_t limit = source_age, timeout = association_timeout_ms;
+      using e = edge_site;
+
+      struct row {
+        const char *pins;
+        edge_site site;
+        std::int64_t age;
+        const char *outcome;
+      };
+
+      const row rows[] {
+        {"A readable capture just under the source age", e::capture_tick, limit - 1, "S ready current_capture"},
+        {"A readable capture exactly the source age old is stale", e::capture_tick, limit, "- stale no_admissible_capture"},
+        {"A readable capture past the source age is stale", e::capture_tick, limit + 1, "- stale no_admissible_capture"},
+        {"An evaluation view just under the source age is active", e::view_tick, limit - 1, "S ready current_capture"},
+        {"An evaluation view exactly the source age old is inactive", e::view_tick, limit, "- stale inactive_views"},
+        {"An evaluation view past the source age is inactive", e::view_tick, limit + 1, "- stale inactive_views"},
+        {"A pending FG nomination just under the source age holds", e::pending_nomination, limit - 1, "- recorded pending_nomination"},
+        {"A pending FG nomination exactly the source age old lapses", e::pending_nomination, limit, "- unavailable no_current_nomination"},
+        {"A pending FG nomination past the source age lapses", e::pending_nomination, limit + 1, "- unavailable no_current_nomination"},
+        {"A completed snapshot just under the source age stands in", e::completed_snapshot, limit - 1, "C ready completed_snapshot"},
+        {"A completed snapshot exactly the source age old does not", e::completed_snapshot, limit, "- recorded no_completed_snapshot"},
+        {"A completed snapshot past the source age does not", e::completed_snapshot, limit + 1, "- recorded no_completed_snapshot"},
+        {"A pending capture just under the source age is live and ranks above a failed one", e::pending_latest, limit - 1, "- recorded no_completed_snapshot"},
+        {"A pending capture exactly the source age old is expired", e::pending_latest, limit, "- failed no_admissible_capture"},
+        {"A pending capture past the source age is expired", e::pending_latest, limit + 1, "- failed no_admissible_capture"},
+        {"An owner that delivered just under the source age ago is protected", e::owner_delivery, limit - 1, "N ready current_capture"},
+        {"An owner that delivered exactly the source age ago is not", e::owner_delivery, limit, "S ready current_capture"},
+        {"An owner that delivered past the source age ago is not", e::owner_delivery, limit + 1, "S ready current_capture"},
+        {"An owner's view exactly the association timeout old keeps it", e::association_view, timeout, "kept"},
+        {"An owner's view past the association timeout expires it", e::association_view, timeout + 1, "expired"},
+        {"An owner's view ahead of the clock does not keep it", e::association_view, -1, "expired"},
+        {"A run of rejections exactly the association timeout long keeps it", e::association_rejected, timeout, "kept"},
+        {"A run of rejections past the association timeout expires it", e::association_rejected, timeout + 1, "expired"},
+        {"An owner's pending nomination exactly the association timeout old keeps it", e::association_pending, timeout, "kept"},
+        {"An owner's pending nomination past the association timeout expires it", e::association_pending, timeout + 1, "expired"},
+        {"An evaluation exactly the handoff window old is live", e::evaluation_window, 1000, "live"},
+        {"An evaluation past the handoff window is not", e::evaluation_window, 1001, "silent"},
+        {"An evaluation ahead of the clock is not", e::evaluation_window, -1, "silent"},
+        {"FG turned on exactly the association timeout ago is live", e::scope_enabled, timeout, "live"},
+        {"FG turned on past the association timeout is silent", e::scope_enabled, timeout + 1, "silent"},
+        {"FG turned on by another thread just ahead of this read is live", e::scope_enabled, -1, "live"},
+        {"FG turned on by another thread well ahead of this read is live", e::scope_enabled, -5000, "live"},
+        {"An FG copy accepted exactly the association timeout ago is live", e::scope_accepted, timeout, "live"},
+        {"An FG copy accepted past the association timeout is silent", e::scope_accepted, timeout + 1, "silent"},
+        {"An FG copy accepted on another thread ahead of this read is live", e::scope_accepted, -1, "live"},
+      };
+      for (const auto &r : rows) {
+        const auto got = edge_outcome(r.site, r.age);
+        if (got != r.outcome) {
+          char text[512];
+          std::snprintf(text, sizeof(text), "P2 freshness edge, %s: %s", r.pins, got.c_str());
+          fail(text);
+        }
+      }
+      std::printf("PASS P2/P6 freshness edges: %zu rows\n", std::size(rows));
     }
 
     struct display_case {
@@ -742,6 +1013,86 @@ namespace sunshine_streamline::depth_capture {
       }
       std::printf("PASS P5/P7 decide_display: %zu rows\n", std::size(rows));
     }
+
+    // P11: ui_input::acquire's admission of each ready UI snapshot
+    // (ui_mask::admit_candidate) and of the Present's own color
+    // (ui_input::current_color_refusal). Owner ruling R4: UIAlpha is used in
+    // Auto only when its tag number is authenticated or DLSS-G names it.
+    void ui_admission_rows() {
+      using kind = sunshine_game3d::ui_mask::source_kind;
+      using refusal = sunshine_game3d::ui_mask::candidate_refusal;
+
+      struct candidate_row {
+        const char *pins;
+        kind source;
+        bool manual, authenticated, frame_generation_evaluation, paired;
+        refusal expected;
+      };
+
+      const candidate_row candidates[] {
+        {"Auto refuses an unauthenticated UIAlpha tag", kind::alpha, false, false, false, false, refusal::ui_alpha_unauthenticated},
+        {"Auto admits an authenticated UIAlpha tag", kind::alpha, false, true, false, false, refusal::none},
+        {"Auto admits DLSS-G's own DLSSG.UIAlpha", kind::alpha, false, false, true, false, refusal::none},
+        {"A manual choice admits an unauthenticated UIAlpha tag", kind::alpha, true, false, false, false, refusal::none},
+        {"Auto admits an unauthenticated UI color tag", kind::color_and_alpha, false, false, false, false, refusal::none},
+        {"Auto admits the tagged Backbuffer", kind::backbuffer, false, false, false, false, refusal::none},
+        {"An unpaired HUD-less image is refused in Auto", kind::hudless, false, true, false, false, refusal::hudless_unpaired},
+        {"An unpaired HUD-less image is refused to a manual choice", kind::hudless, true, true, false, false, refusal::hudless_unpaired},
+        {"A paired HUD-less image is admitted", kind::hudless, false, false, false, true, refusal::none},
+        {"DLSS-G's paired HUD-less image is admitted", kind::hudless, false, false, true, true, refusal::none},
+      };
+      for (const auto &r : candidates) {
+        const auto got = sunshine_game3d::ui_mask::admit_candidate(r.source, r.manual, r.authenticated, r.frame_generation_evaluation, r.paired);
+        if (got != r.expected) {
+          char text[512];
+          std::snprintf(text, sizeof(text), "P11 UI candidate, %s: refusal %d", r.pins, int(got));
+          fail(text);
+        }
+      }
+
+      using choice = sunshine_game3d::ui_qualification::choice;
+      constexpr std::uint32_t rgba8 = 28, rgba8_typeless = 27, bgra8 = 87, bgrx8 = 88, rgb10a2 = 24, rgba16f = 10;
+
+      struct current_row {
+        const char *pins;
+        bool requested, fg_known, fg_enabled;
+        std::uint32_t format;
+        choice wanted;
+        const char *refused;  // nullptr: offered.
+      };
+
+      const current_row presented[] {
+        {"Auto offers the presented color", true, false, false, rgba8, choice::automatic, nullptr},
+        {"An explicit current-color choice offers it", true, false, false, bgra8, choice::current_color, nullptr},
+        {"A typeless format with alpha is judged by its typed format", true, false, false, rgba8_typeless, choice::automatic, nullptr},
+        {"A 10-bit format with alpha", true, false, false, rgb10a2, choice::automatic, nullptr},
+        {"A float format with alpha", true, false, false, rgba16f, choice::automatic, nullptr},
+        {"Confirmed FG Off offers it", true, true, false, rgba8, choice::automatic, nullptr},
+        {"Active FG excludes it", true, true, true, rgba8, choice::automatic, "FG_active"},
+        {"Active FG excludes an explicit current-color choice", true, true, true, rgba8, choice::current_color, "FG_active"},
+        {"FG enabled before it is known does not exclude it", true, false, true, rgba8, choice::automatic, nullptr},
+        {"A format without alpha", true, false, false, bgrx8, choice::automatic, "no_present_alpha"},
+        {"Another explicit choice", true, false, false, rgba8, choice::sl_ui_alpha, "not_selected"},
+        {"Another explicit choice: HUD-less", true, false, false, rgba8, choice::sl_hudless, "not_selected"},
+        {"Without a request", false, false, false, rgba8, choice::automatic, "not_requested"},
+        {"A missing request outranks active FG", false, true, true, bgrx8, choice::sl_backbuffer, "not_requested"},
+        {"Active FG outranks a format without alpha", true, true, true, bgrx8, choice::sl_backbuffer, "FG_active"},
+        {"A format without alpha outranks another choice", true, false, false, bgrx8, choice::sl_backbuffer, "no_present_alpha"},
+      };
+      for (const auto &r : presented) {
+        sunshine_game3d::source_alpha_ui_decision status;
+        status.requested = r.requested;
+        status.fg.known = r.fg_known;
+        status.fg.enabled = r.fg_enabled;
+        const char *got = sunshine_game3d::ui_input::current_color_refusal(status, r.format, r.wanted);
+        if ((got == nullptr) != (r.refused == nullptr) || (got && std::strcmp(got, r.refused) != 0)) {
+          char text[512];
+          std::snprintf(text, sizeof(text), "P11 presented color, %s: %s", r.pins, got ? got : "offered");
+          fail(text);
+        }
+      }
+      std::printf("PASS P11 UI admission: %zu candidates, %zu presented colors\n", std::size(candidates), std::size(presented));
+    }
   }  // namespace
 }  // namespace sunshine_streamline::depth_capture
 
@@ -749,9 +1100,12 @@ int main() {
   using namespace sunshine_streamline::depth_capture;
   frame_generation_policy_timelines();
   frame_generation_scope_rows();
+  ngx_frame_generation_rows();
   select_provider_rows();
   ownership_timelines();
+  freshness_edges();
   decide_display_rows();
+  ui_admission_rows();
   reset();
   if (failures) {
     std::fprintf(stderr, "Seam characterization: %u rows changed\n", failures);

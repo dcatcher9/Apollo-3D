@@ -886,8 +886,9 @@ line must name, in order, a Present whose record states that selection (D1 or D2
 held pixels, H in mono, the handoff hold, or Generic), and the record's rows are checked at the
 settled, failed-evaluation, FG pair, silent-scope, SR-through-a-silent-scope and DLSS-G exact-pair
 points. `reshade_exporter_lifecycle` maps the provider's display and FG-policy timelines to the
-record on the CPU, and the capture owner's provider admission regression (run by the Streamline
-probe tests) checks `depth_choice` against its selection timeline.
+record on the CPU through the provider's own mapping (`provider::describe_acquisition` and
+`describe_display`, which `begin` calls), and the capture owner's provider admission regression
+(run by the Streamline probe tests) checks `depth_choice` against its selection timeline.
 To exercise an earlier 2.x export surface, build `reshade_legacy_v2_interposer` and pass
 `legacy_v2_interposer.dll` as the final argument in the same command, using a fresh output directory.
 That fixture reports version 2.6.10.0 and omits `slSetTagForFrame`; the test submits global tags
@@ -1429,10 +1430,21 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   (`reshade_seam_characterization`) links the Streamline probe tests' view
   ([Test builds](#test-builds)) and drives the capture owner without a device: the frame
   generation policy's query timelines, the FG scope's liveness (accepted copies from a Streamline
-  FG tag or from DLSS-G's own evaluation) and the selection it yields, `select_provider` with a
-  protected owner, readable and pending sources and required or excluded FG, per-queue ownership
-  and `establish_provider`'s watermark, and every reason of `decide_display`. Their contracts are
-  in [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
+  FG tag or from DLSS-G's own evaluation) and the selection the provider derives from it
+  (`provider::select_frame_generation_scope`), NGX's copy rule under FG
+  (`sunshine_ngx::frame_generation_owns_depth`), `select_provider` with a protected owner,
+  readable and pending sources and required or excluded FG, per-queue ownership and
+  `establish_provider`'s watermark, and every reason of `decide_display`. Its freshness table
+  pins each age limit one millisecond either side against an explicit clock: the source age at
+  every selection site, the association timeout of `expire_association` and `evaluation_live`, and
+  an FG scope's enabled and accepted ticks, which also admit a tick ahead of the clock (the
+  capture owner's `scope_clock` fixes `frame_generation_scope_live`'s clock in this view only). Its
+  UI table pins the UI adapter's admission of each ready UI snapshot (`ui_mask::admit_candidate`)
+  and of the Present's own color (`ui_input::current_color_refusal`). Their contracts are in
+  [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection) and the
+  [UI decision framework](../../docs/reshade-sbs.md#ui-decision-framework). It shares the capture
+  owner's slot and evaluation fixtures with that owner's regressions
+  ([`test_streamline_depth_capture_fixture.h`](test_streamline_depth_capture_fixture.h)).
 - `reshade_upscaler_call_trace` holds the NGX nesting table
   ([`test_upscaler_call_trace.cpp`](test_upscaler_call_trace.cpp)): each outcome of an outer
   evaluation against a nested SR or DLSS-G call, including an outer copy the capture owner
@@ -1440,7 +1452,8 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   deduplicated), a live FG scope and a claimed Streamline evaluation
   ([Direct NGX depth selection](../../docs/reshade-sbs.md#direct-ngx-depth-selection)). The test
   states whether a live FG scope owns depth through a callback that only the call-trace build has
-  (`sunshine_ngx::testing::callbacks`), in place of the Streamline FG query.
+  (`sunshine_ngx::testing::callbacks`), in place of the Streamline FG query; the seam
+  characterization pins the production rule.
 - `reshade_game3d_alpha_auto` pins the acceptance ledger's edges that its policy groups leave
   unexercised: a sample over no pixels, a contradiction older than the newest one, and a
   testable sample older than the previous one

@@ -1556,6 +1556,17 @@ namespace sunshine_streamline::depth_capture {
       // Snapshots from before the silence never re-establish it.
       owner.admission_after = std::max(owner.admission_after, serial.load(std::memory_order_relaxed));
     }
+    // frame_generation_scope_live's clock. The seam characterization fixes it
+    // to pin the scope's exact edges (streamline_depth_capture_test_access.h).
+#ifdef SUNSHINE_STREAMLINE_PROBE_TEST
+    std::atomic<std::uint64_t> scope_clock{};
+    std::uint64_t scope_now() {
+      const auto fixed = scope_clock.load(std::memory_order_relaxed);
+      return fixed ? fixed : GetTickCount64();
+    }
+#else
+    std::uint64_t scope_now() { return GetTickCount64(); }
+#endif
   }
   bool provider_active(std::uint64_t native) {
     if (!requested.load() || !native) return false;
@@ -1584,10 +1595,10 @@ namespace sunshine_streamline::depth_capture {
     const auto within = [](std::uint64_t tick, std::uint64_t now) {
       return tick && (now < tick || now - tick <= association_timeout_ms);
     };
-    if (within(enabled_tick, GetTickCount64())) return true;
+    if (within(enabled_tick, scope_now())) return true;
     if (!requested.load() || !epoch) return false;
     std::lock_guard lock(mutex);
-    const auto now = GetTickCount64();
+    const auto now = scope_now();
     const auto source = (1ull << 63) | viewport;
     for (const auto &view : evaluations[provider_index(provider_kind::streamline)].views)
       if (view.epoch == epoch && view.viewport == viewport && view.source_id == source && within(view.accepted_tick, now)) return true;

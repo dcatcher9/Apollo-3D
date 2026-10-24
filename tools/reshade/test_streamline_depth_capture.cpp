@@ -6,6 +6,7 @@
 #error "Built only into the Streamline probe tests' view of the production sources"
 #endif
 #include "streamline_depth_capture_test_access.h"
+#include "test_streamline_depth_capture_fixture.h"
 #include "streamline_depth_capture.h"
 #include "capture_state_policy.h"
 #include "streamline_native_observer.h"
@@ -301,7 +302,7 @@ namespace sunshine_streamline::depth_capture {
           requested = saved_requested; reason = saved_reason; serial = saved_serial;
         }
       } restore;
-      slots = {}; evaluations = {}; requested = true;
+      fixture::clear_captures(); requested = true;
       {
         // Handoff evidence (evaluation_live): any real evaluation, Streamline
         // SR's source 0 included (FG Off in a Streamline-only game holds the
@@ -347,7 +348,7 @@ namespace sunshine_streamline::depth_capture {
         sr.provider_established = true; sr.nominated_epoch = 5;
         expire_association(sr, GetTickCount64());
         if (!sr.provider_established) return false;
-        slots = {}; evaluations = {};
+        fixture::clear_captures();
       }
       {
         // An enabled FG scope owns its viewport only while live: within a
@@ -396,7 +397,7 @@ namespace sunshine_streamline::depth_capture {
         own->accepted_tick = GetTickCount64(); requested = false;
         if (frame_generation_scope_live(epoch, 2, silent_since()) || !frame_generation_scope_live(epoch, 2, GetTickCount64()))
           return false;
-        requested = true; slots = {}; evaluations = {};
+        requested = true; fixture::clear_captures();
       }
       queue_state owner;
       constexpr std::uint64_t native = 77;
@@ -496,14 +497,7 @@ namespace sunshine_streamline::depth_capture {
       }
       const auto make = [&](unsigned index, provider_kind provider,
           std::uint64_t epoch, std::uint64_t sequence, std::uint64_t source) -> slot & {
-        auto &value = slots[index]; value = {};
-        value.id = ++serial; value.queue = native; value.producer_fence = 1;
-        value.finished = value.success = value.producer_submitted = true;
-        value.metadata.provider = provider; value.metadata.source_id = source;
-        value.metadata.epoch = epoch; value.metadata.sequence = sequence;
-        value.metadata.tick = GetTickCount64();
-        begin_evaluation(epoch, sequence, 0, provider, source);
-        return value;
+        return fixture::make_capture(index, native, provider, epoch, sequence, source);
       };
       const auto select = [&](std::uint64_t present) { return select_provider(owner, native, present, GetTickCount64(), {}); };
       // An observed API with no usable capture cannot suppress another source.
@@ -558,7 +552,7 @@ namespace sunshine_streamline::depth_capture {
       establish_provider(owner, recreated, 3);
       if (owner.source_id != 100 || owner.provider != provider_kind::ngx) return false;
       // Fresh queues prefer ready SL even when NGX captured first.
-      slots = {}; evaluations = {};
+      fixture::clear_captures();
       owner.provider_established = false; owner.present_capture = owner.last_sequence = owner.last_epoch = 0;
       make(0, provider_kind::ngx, 3, 1, 123);
       auto &preferred = make(1, provider_kind::streamline, 3, 1, 0);
@@ -569,7 +563,7 @@ namespace sunshine_streamline::depth_capture {
       if (ambiguous.value || ambiguous.result != status::ambiguous ||
           ambiguous.selection != selection_reason::ambiguous_views) return false;
       {
-        slots = {}; evaluations = {};
+        fixture::clear_captures();
         queue_state preferred_owner;
         auto &fallback = make(0, provider_kind::ngx, 60, 1, 500);
         auto &preferred = make(1, provider_kind::streamline, 70, 1, 0);
@@ -631,7 +625,7 @@ namespace sunshine_streamline::depth_capture {
         // An observed FG mode is source authority even before SL has usable
         // pixels. Older NGX, ordinary SL SR, and a different viewport/epoch
         // must not sneak through that gap or supply its camera separately.
-        slots = {}; evaluations = {};
+        fixture::clear_captures();
         constexpr std::uint64_t fg_epoch = 42, fg_id = 1ull << 63;
         const selection_policy fg_policy{true, fg_epoch, 0};
         const auto pick = [&](std::uint64_t present, selection_policy policy = {}) {
@@ -687,7 +681,7 @@ namespace sunshine_streamline::depth_capture {
       {
         // A failed/ambiguous FG option revokes FG authority without starving
         // independent ordinary depth on subsequent presentations.
-        slots = {}; evaluations = {};
+        fixture::clear_captures();
         queue_state revoked_owner;
         constexpr std::uint64_t fg_epoch = 42, fg_id = 1ull << 63;
         selection_policy excluded;
@@ -733,7 +727,7 @@ namespace sunshine_streamline::depth_capture {
         // A failed options call revokes all captures in its exact FG scope,
         // including tags observed while the SDK call was in flight. A racing
         // newer capture may be discarded once; only a fresh tag restores FG.
-        slots = {}; evaluations = {};
+        fixture::clear_captures();
         constexpr std::uint64_t fg_epoch = 80, fg_id = 1ull << 63;
         auto &old_fg = make(0, provider_kind::streamline, fg_epoch, 10, fg_id);
         old_fg.metadata.frame_generation_input = true;
@@ -754,7 +748,7 @@ namespace sunshine_streamline::depth_capture {
         if (select_provider(established, native, 103, GetTickCount64(), {true, fg_epoch, 0}).value != &renewed_fg) return false;
       }
       for (const bool complete_before_release : {false, true}) {
-        slots = {}; evaluations = {};
+        fixture::clear_captures();
         auto &retired = make(0, provider_kind::ngx, 4, 1, 200);
         auto &other = make(1, provider_kind::streamline, 4, 1, 0);
         retired.command = 888; retired.retirements[0] = {native, 9};
@@ -784,7 +778,7 @@ namespace sunshine_streamline::depth_capture {
         // pick of this timeline chose and why: its decision, selection reason,
         // status and failure, the role of its source, the policy, and the
         // queue's owner after it. It decides nothing.
-        slots = {}; evaluations = {};
+        fixture::clear_captures();
         using sunshine_game3d::source_slot;
         queue_state chooser;
         const auto chosen = [&](std::uint64_t present, selection_policy policy = {}) {
@@ -844,12 +838,12 @@ namespace sunshine_streamline::depth_capture {
         const auto [fg_ready, fg_mirrors] = chosen(46, {true, fg_epoch, 0});
         if (!fg_mirrors || fg_ready.rung != source_slot::fg_depth || !fg_ready.decision.source_selected ||
             fg_ready.decision.capture_id != fg_source.id || !fg_ready.pixel_ready) return false;
-        slots = {}; evaluations = {};
+        fixture::clear_captures();
       }
       // SR and FG use distinct logical sources for the same viewport. The
       // explicit role transition removes only the superseded SR view, rather
       // than waiting for its normal age window or ignoring true multi-view.
-      slots = {}; evaluations = {};
+      fixture::clear_captures();
       queue_state role_owner;
       constexpr std::uint64_t fg_source = 1ull << 63;
       make(0, provider_kind::streamline, 8, 1, 0);
@@ -869,7 +863,7 @@ namespace sunshine_streamline::depth_capture {
       // select the previous depth or establish authority on a fresh queue.
       queue_state pending_owner;
       const auto prepare_pending = [&] {
-        slots = {}; evaluations = {};
+        fixture::clear_captures();
         pending_owner.provider_established = false;
         pending_owner.last_epoch = pending_owner.last_sequence = pending_owner.present = pending_owner.present_capture = 0;
         auto &previous = make(0, provider_kind::streamline, 20, 1, fg_source);
@@ -987,7 +981,7 @@ namespace sunshine_streamline::depth_capture {
 
       // Preferred metadata must use its reserved capacity before taking a
       // pixel-capable slot needed by a lower-priority tag's actual capture.
-      slots = {}; evaluations = {};
+      fixture::clear_captures();
       begin_evaluation(candidate.epoch, candidate.sequence, candidate.viewport, candidate.provider, candidate.source_id);
       for (unsigned i = 0; i + 1 < pixel_slot_limit; ++i) {
         slots[i].id = ++serial;
@@ -1192,7 +1186,7 @@ namespace sunshine_streamline::depth_capture {
         return pipeline{provider_kind::ngx, epoch, source_id, source ? source : render, &producers[1], 8, 4686};
       };
       const auto restart = [&] {
-        slots = {}; evaluations = {}; decided = {}; retained = {};
+        fixture::clear_captures(); decided = {}; retained = {};
         for (auto &value : producers) { value.fence.completed = value.signaled = 0; }
       };
       // Establish a pipelined source as the delivering owner.
@@ -2256,7 +2250,7 @@ namespace sunshine_streamline::depth_capture {
           for (unsigned i = 0; i != provider_count; ++i) attempt_status[i] = attempts[i];
         }
       } restore;
-      slots = {}; evaluations = {}; requested = true;
+      fixture::clear_captures(); requested = true;
       auto source = std::make_shared<source_reference>();
       source->cookie = 31; source->device_identity = 41;
       source->desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -2337,7 +2331,7 @@ namespace sunshine_streamline::depth_capture {
           for (unsigned i = 0; i != provider_count; ++i) attempt_status[i] = attempts[i];
         }
       } restore;
-      slots = {}; evaluations = {};
+      fixture::clear_captures();
       constexpr std::uint64_t device = 11, source_id = 12, producer = 17, consumer = 19, recording = 21;
       auto source = std::make_shared<source_reference>(); source->cookie = source_id; source->device_identity = device;
       auto &value = slots[0];

@@ -56,6 +56,16 @@ namespace sunshine_ngx {
   evaluation before_evaluate(HMODULE owner, const parameter_api &api, std::uint64_t command,
     const void *handle, const void *parameters, bool capture_depth = true, bool observe_diagnostics = true);
   void after_evaluate(const evaluation &value, bool successful);
+  // Whether confirmed Streamline FG owns depth, so that an NGX evaluation
+  // records no copy: FG options observed enabled (the probe's
+  // frame_generation_snapshot: enabled, epoch, viewport, enabled_tick) whose
+  // scope is live (depth_capture::frame_generation_scope_live). Selection
+  // never considers NGX while FG is required, and FG Off raises the admission
+  // watermark past every snapshot taken meanwhile, so a copy would have no
+  // consumer. FG Off, a busy or ambiguous FG read, which observes no options
+  // (nested NGX's rule, owns_nested_depth_capture), and a silent scope, which
+  // owns nothing, copy.
+  bool frame_generation_owns_depth(bool enabled, std::uint64_t epoch, std::uint32_t viewport, std::uint64_t enabled_tick);
 
 #ifdef SUNSHINE_UPSCALER_TRACE_TEST
   namespace testing {
@@ -75,7 +85,8 @@ namespace sunshine_ngx {
         const sunshine_streamline::frame_generation::inputs &value){};
       void (*finish_frame_generation)(const sunshine_streamline::frame_generation::attempt &value, bool successful){};
       // Whether a live Streamline FG scope owns depth, in place of the
-      // probe's frame generation query and the capture owner's scope check.
+      // probe's frame generation query and frame_generation_owns_depth, which
+      // the seam characterization pins.
       bool (*frame_generation_owns_depth)(){};
     };
     void set_callbacks(callbacks value);

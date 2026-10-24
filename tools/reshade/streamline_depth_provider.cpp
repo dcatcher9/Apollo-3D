@@ -508,6 +508,48 @@ namespace sunshine_streamline::provider {
     describe_copied_depth(out, packet, captured, display_texture, display_view, present);
   }
 #endif
+  namespace {
+    sunshine_game3d::record_key recorded_source(const sunshine_scene_depth::frame &value) {
+      return {value.provider == sunshine_scene_depth::provider_kind::ngx ? sunshine_game3d::source_api::ngx :
+        sunshine_game3d::source_api::streamline, value.viewport, value.source_id};
+    }
+  }
+  sunshine_game3d::api_depth_decision describe_acquisition(const depth_capture::selection_policy &policy,
+      const frame_generation_selection &scope, bool associated, bool handoff_hold,
+      const depth_capture::capture_diagnostic &capture, const sunshine_scene_depth::frame *selected_metadata) {
+    sunshine_game3d::api_depth_decision out;
+    out.allowed = true;
+    out.fg_required = policy.require_frame_generation; out.fg_silent = scope.silent;
+    out.fg_excluded = scope.selection.exclude_unconfirmed_fg;
+    out.fg_epoch = policy.epoch; out.fg_viewport = policy.viewport;
+    out.selected = selected_metadata != nullptr; out.associated = associated; out.handoff_hold = handoff_hold;
+    out.reported = capture.capture_id || capture.sequence;
+    out.capture_reason = capture.selection != depth_capture::selection_reason::not_attempted ?
+      depth_capture::name(capture.selection) : depth_capture::name(capture.result);
+    if (selected_metadata) {
+      out.source = recorded_source(*selected_metadata);
+      out.epoch = selected_metadata->epoch; out.frame_generation_input = selected_metadata->frame_generation_input;
+    } else if (out.reported) {
+      out.source = {capture.provider == sunshine_scene_depth::provider_kind::ngx ? sunshine_game3d::source_api::ngx :
+        sunshine_game3d::source_api::streamline, capture.viewport, capture.source_id};
+      out.epoch = capture.epoch; out.frame_generation_input = capture.frame_generation_input;
+    }
+    return out;
+  }
+  void describe_display(sunshine_game3d::api_depth_decision &decision, bool copied, bool output_ready,
+      const char *cache_reason, const sunshine_scene_depth::frame &held) {
+    if (!decision.selected && !decision.associated) {
+      decision.display_reason = decision.handoff_hold ? "source_handoff" : "source_not_associated";
+      return;
+    }
+    decision.copied = copied; decision.reused = !copied && output_ready;
+    decision.display_reason = copied ? "fresh_copy" : output_ready ? "retained_copy" : cache_reason;
+    if (decision.reused) {
+      // The held copy names its own source.
+      decision.source = recorded_source(held);
+      decision.epoch = held.epoch; decision.frame_generation_input = held.frame_generation_input;
+    }
+  }
   void initialize(api::effect_runtime *runtime) { runtime->create_private_data<state>(); }
   void destroy(api::effect_runtime *runtime) {
     if (auto *data = runtime->get_private_data<state>()) {
@@ -642,15 +684,12 @@ namespace sunshine_streamline::provider {
       query_frame_generation(UINT32_MAX, fg_source, &fg_status);
     }
     const auto policy = data->source_policy.update(fg_status, fg_source);
-    // Enabled FG owns its viewport's depth only while its scope is live
-    // (depth_capture::frame_generation_scope_live). A silent scope selects as
-    // without FG for this acquisition, so that viewport's ordinary SR/RR depth
-    // may supply depth, and the next accepted FG copy takes ownership back.
+    // A silent FG scope selects as without FG (select_frame_generation_scope).
     // The policy's own confirmed FG scope is left unchanged, and it still
     // holds the queue in mono when no API source is available (associated).
-    const bool fg_silent = policy.require_frame_generation &&
-      !depth_capture::frame_generation_scope_live(policy.epoch, policy.viewport, policy.enabled_tick);
-    const auto selection = fg_silent ? depth_capture::selection_policy{} : policy;
+    const auto scope = select_frame_generation_scope(policy);
+    const bool fg_silent = scope.silent;
+    const auto &selection = scope.selection;
     // Logged when a required scope turns silent, and when it is live again
     // (FG Off ends a silent scope without a line of its own).
     if (fg_silent != std::exchange(data->fg_scope_silent, fg_silent) && (fg_silent || policy.require_frame_generation)) {
@@ -744,27 +783,8 @@ namespace sunshine_streamline::provider {
         e.associated_width, e.associated_height}, handoff_hold_ms) && depth_capture::evaluation_live(handoff_tick, handoff_hold_ms);
       return handoff_hold(e, handoff_hold_ms);
     }();
-    sunshine_game3d::api_depth_decision recorded;
-    recorded.allowed = true;
-    recorded.fg_required = policy.require_frame_generation; recorded.fg_silent = fg_silent;
-    recorded.fg_excluded = selection.exclude_unconfirmed_fg;
-    recorded.fg_epoch = policy.epoch; recorded.fg_viewport = policy.viewport;
-    recorded.selected = available; recorded.associated = associated; recorded.handoff_hold = hold;
-    recorded.reported = capture_info.capture_id || capture_info.sequence;
-    recorded.capture_reason = capture_info.selection != depth_capture::selection_reason::not_attempted ?
-      depth_capture::name(capture_info.selection) : depth_capture::name(status);
-    const auto recorded_provider = [](sunshine_scene_depth::provider_kind provider) {
-      return provider == sunshine_scene_depth::provider_kind::ngx ? sunshine_game3d::source_api::ngx :
-        sunshine_game3d::source_api::streamline;
-    };
-    if (available) {
-      const auto &m = data->frame.metadata;
-      recorded.source = {recorded_provider(m.provider), m.viewport, m.source_id};
-      recorded.epoch = m.epoch; recorded.frame_generation_input = m.frame_generation_input;
-    } else if (recorded.reported) {
-      recorded.source = {recorded_provider(capture_info.provider), capture_info.viewport, capture_info.source_id};
-      recorded.epoch = capture_info.epoch; recorded.frame_generation_input = capture_info.frame_generation_input;
-    }
+    auto recorded = describe_acquisition(policy, scope, associated, hold, capture_info,
+      available ? &data->frame.metadata : nullptr);
     if (!available && !associated) {
       data->cache.invalidate(hold ? "source_handoff" : "source_not_associated");
       data->presentations.reset();
@@ -801,13 +821,13 @@ namespace sunshine_streamline::provider {
         // The stable descriptor stays bound; readiness is withdrawn.
         bind(runtime, *data, data->display_view, false);
         trace_readiness(runtime, *data, evidence, false, "source_handoff");
-        recorded.display_reason = "source_handoff";
+        describe_display(recorded, false, false, nullptr, {});
         record_depth(runtime, recorded, present);
         return true;
       }
       data->bound_view = {};
       trace_readiness(runtime, *data, evidence, false, "source_not_associated");
-      recorded.display_reason = "source_not_associated";
+      describe_display(recorded, false, false, nullptr, {});
       record_depth(runtime, recorded, present);
       return false;
     }
@@ -821,7 +841,8 @@ namespace sunshine_streamline::provider {
       depth_capture::provider_identity(runtime->get_command_queue()->get_native(), kind, established_source);
     if (!available && !recorded.reported) {
       // Nothing reported this Present: the source H holds the queue for.
-      recorded.source = {recorded_provider(kind), data->source_metadata.viewport,
+      recorded.source = {kind == sunshine_scene_depth::provider_kind::ngx ? sunshine_game3d::source_api::ngx :
+        sunshine_game3d::source_api::streamline, data->source_metadata.viewport,
         selection.require_frame_generation ? 0 : established_source};
       recorded.epoch = data->source_metadata.epoch;
     }
@@ -901,15 +922,8 @@ namespace sunshine_streamline::provider {
         "display_copy_failed" : update.reason);
     }
     track_render_size(*data, copied, display == display_status::reused_depth, available);
-    const char *readiness_reason = copied ? "fresh_copy" : data->output.ready ? "retained_copy" : data->cache.reason();
-    recorded.copied = copied; recorded.reused = !copied && data->output.ready;
-    recorded.display_reason = readiness_reason;
-    if (recorded.reused) {
-      // The held copy names its own source.
-      const auto &m = data->output.provided;
-      recorded.source = {recorded_provider(m.provider), m.viewport, m.source_id};
-      recorded.epoch = m.epoch; recorded.frame_generation_input = m.frame_generation_input;
-    }
+    describe_display(recorded, copied, data->output.ready, data->cache.reason(), data->output.provided);
+    const char *readiness_reason = recorded.display_reason;
     record_depth(runtime, recorded, present);
     evidence.cache_reason = data->cache.reason();
     evidence.copied = copied;

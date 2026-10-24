@@ -350,29 +350,38 @@ namespace {
     }
 
     // The frame record (game3d_frame_record.h) names each depth decision of
-    // these timelines as provider::begin and Generic hand it over: the
-    // acquisition, the FG policy and its live scope, association, handoff and
-    // the display decision. It decides nothing (P0b).
+    // these timelines as provider::begin and Generic hand it over. The
+    // provider's row comes from its own mapping (provider::describe_acquisition
+    // and describe_display) of what the fixture states the runtime did: the
+    // acquisition as the capture owner reports it (the copied frame when it
+    // selected one), the scope's selection for a live or silent FG scope (as
+    // select_frame_generation_scope returns it, which the seam
+    // characterization pins), association, handoff, and a display whose fresh
+    // copy or hold of held succeeds. It decides nothing (P0b).
     static sunshine_game3d::api_depth_decision provider_decision(
         const sunshine_streamline::depth_capture::acquisition_decision &proof,
         const sunshine_streamline::depth_capture::selection_policy &policy, bool fg_silent, bool associated, bool handoff,
         const sunshine_streamline::depth_capture::display_decision &shown, bool frame_generation_input,
-        const char *capture_reason) {
-      using sunshine_streamline::depth_capture::display_action;
-      sunshine_game3d::api_depth_decision out;
-      out.allowed = true;
-      out.fg_required = policy.require_frame_generation; out.fg_silent = fg_silent;
-      out.fg_excluded = policy.exclude_unconfirmed_fg;
-      out.fg_epoch = policy.epoch; out.fg_viewport = policy.viewport;
-      out.selected = proof.source_selected; out.associated = associated; out.handoff_hold = handoff;
-      out.reported = proof.capture_id || proof.sequence;
-      out.source = {proof.provider == sunshine_scene_depth::provider_kind::ngx ? sunshine_game3d::source_api::ngx :
-        sunshine_game3d::source_api::streamline, proof.viewport, proof.source_id};
-      out.epoch = proof.epoch; out.frame_generation_input = frame_generation_input;
-      out.capture_reason = capture_reason;
-      out.copied = shown.action == display_action::copy_fresh;
-      out.reused = shown.action == display_action::hold;
-      out.display_reason = out.copied ? "fresh_copy" : out.reused ? "retained_copy" : shown.reason;
+        sunshine_streamline::depth_capture::selection_reason selection,
+        sunshine_streamline::depth_capture::status result = sunshine_streamline::depth_capture::status::ready,
+        const sunshine_scene_depth::frame &held = {}) {
+      namespace depth_capture = sunshine_streamline::depth_capture;
+      namespace provider = sunshine_streamline::provider;
+      depth_capture::capture_diagnostic capture;
+      capture.capture_id = proof.capture_id; capture.sequence = proof.sequence; capture.epoch = proof.epoch;
+      capture.provider = proof.provider; capture.viewport = proof.viewport; capture.source_id = proof.source_id;
+      capture.frame_generation_input = frame_generation_input;
+      capture.selection = selection; capture.result = result;
+      sunshine_scene_depth::frame copied;
+      copied.provider = proof.provider; copied.epoch = proof.epoch; copied.viewport = proof.viewport;
+      copied.source_id = proof.source_id; copied.sequence = proof.sequence;
+      copied.frame_generation_input = frame_generation_input;
+      const provider::frame_generation_selection scope{fg_silent ? depth_capture::selection_policy{} : policy, fg_silent};
+      auto out = provider::describe_acquisition(policy, scope, associated, handoff, capture,
+        proof.source_selected ? &copied : nullptr);
+      const bool fresh = shown.action == depth_capture::display_action::copy_fresh;
+      provider::describe_display(out, fresh, fresh || shown.action == depth_capture::display_action::hold, shown.reason,
+        held);
       return out;
     }
     static void frame_record_mirrors_depth_decisions() {
@@ -381,6 +390,7 @@ namespace {
       using sunshine_game3d::source_state;
       using sunshine_scene_depth::provider_kind;
       using action = depth_capture::display_action;
+      using reason = depth_capture::selection_reason;
       const auto row_is = [](const sunshine_game3d::source_status &row, source_state state, const char *reason,
           source_slot fallback = source_slot::none) {
         return row.state == state && std::strcmp(row.reason, reason) == 0 && row.fallback_to == fallback;
@@ -408,7 +418,7 @@ namespace {
       const auto fresh = depth_capture::decide_display(selected, candidate, {}, {}, 1032);
       require(fresh.action == action::copy_fresh, "Frame record fixture lost its fresh copy");
       sunshine_game3d::record_api_depth(record, provider_decision(selected, {}, false, true, false, fresh, false,
-        "current_capture"), 1, 1032);
+        reason::current_capture), 1, 1032);
       const auto &fg = record[source_slot::fg_depth];
       const auto &scene = record[source_slot::scene_depth];
       const auto &hold = record[source_slot::hold];
@@ -426,23 +436,32 @@ namespace {
       const auto held = depth_capture::decide_display(pending, {}, previous, {}, 1100);
       require(held.action == action::hold, "Frame record fixture lost its retained copy");
       sunshine_game3d::record_api_depth(record, provider_decision(pending, {}, false, true, false, held, false,
-        "no_completed_snapshot"), 2, 1100);
+        reason::no_completed_snapshot, depth_capture::status::recorded, previous.metadata), 2, 1100);
       require(record.depth_owner == source_slot::scene_depth && row_is(scene, source_state::held, "retained_copy") &&
           scene.first_ready_ms == 1032 && row_is(hold, source_state::inactive, "API_depth_ready"),
         "The frame record did not name the held copy, or restarted its first ready time");
+      // The held copy names its own source, not a pending capture of another
+      // provider that the acquisition reported in front of it.
+      auto other = pending; other.provider = provider_kind::ngx; other.source_id = 7; other.epoch = 9;
+      const auto held_other = provider_decision(other, {}, false, true, false, held, false,
+        reason::no_completed_snapshot, depth_capture::status::recorded, previous.metadata);
+      require(held_other.reused && held_other.reported && held_other.source.api == sunshine_game3d::source_api::streamline &&
+          held_other.source.viewport == 2 && !held_other.source.id && held_other.epoch == 8 &&
+          std::strcmp(held_other.display_reason, "retained_copy") == 0,
+        "A held copy named the other provider's pending capture");
       // The copy outlived the source age: mono under the queue's association.
       auto failed = pending; failed.pending_frame = false; failed.source_valid = false;
       const auto expired = depth_capture::decide_display(failed, {}, previous, {}, 1250);
       require(expired.action == action::invalidate, "Frame record fixture kept an expired copy");
       sunshine_game3d::record_api_depth(record, provider_decision(failed, {}, false, true, false, expired, false,
-        "failed"), 3, 1250);
+        reason::not_attempted, depth_capture::status::failed), 3, 1250);
       require(record.depth_owner == source_slot::hold &&
           row_is(scene, source_state::refused, "failed", source_slot::hold) && scene.first_ready_ms == 1032 &&
           row_is(hold, source_state::mono, "provider_associated"),
         "The frame record did not name API ownership held in mono");
       // The association expired: Generic decides.
       sunshine_game3d::record_api_depth(record, provider_decision(failed, {}, false, false, false, expired, false,
-        "failed"), 4, 1400);
+        reason::not_attempted, depth_capture::status::failed), 4, 1400);
       sunshine_game3d::record_generic_depth(record, {false, source_state::ready, "ready", 77}, 4, 1400);
       const auto &generic = record[source_slot::generic];
       require(record.depth_owner == source_slot::generic &&
@@ -452,7 +471,7 @@ namespace {
         "The frame record did not name the Generic fallback");
       // A provider handoff holds API ownership in mono instead.
       sunshine_game3d::record_api_depth(record, provider_decision({}, {}, false, false, true, {}, false,
-        "no_current_nomination"), 5, 1450);
+        reason::no_current_nomination), 5, 1450);
       sunshine_game3d::record_generic_depth(record, {true}, 5, 1450);
       require(record.depth_owner == source_slot::hold && row_is(hold, source_state::mono, "source_handoff") &&
           row_is(scene, source_state::absent, "no_current_nomination", source_slot::hold),
@@ -460,7 +479,7 @@ namespace {
       // Another provider is another key: its first ready time is its own.
       auto ngx = selected; ngx.provider = provider_kind::ngx; ngx.source_id = 7;
       sunshine_game3d::record_api_depth(record, provider_decision(ngx, {}, false, true, false, fresh, false,
-        "current_capture"), 6, 1500);
+        reason::current_capture), 6, 1500);
       require(scene.key.api == sunshine_game3d::source_api::ngx && scene.key.id == 7 && scene.first_ready_ms == 1500,
         "The frame record carried a first ready time across sources");
       // Without the API path (a manual pin), every API row says why.
@@ -489,7 +508,7 @@ namespace {
       const auto fg_fresh = depth_capture::decide_display(fg_selected, fg_candidate, fg_retained, fg_policy, 1600);
       require(fg_fresh.action == action::copy_fresh, "Frame record fixture lost its fresh FG copy");
       sunshine_game3d::record_api_depth(record, provider_decision(fg_selected, fg_policy, false, true, false, fg_fresh,
-        true, "current_capture"), 8, 1600);
+        true, reason::current_capture), 8, 1600);
       require(record.depth_owner == source_slot::fg_depth && row_is(fg, source_state::ready, "fresh_copy") &&
           !fg.key.id && fg.key.viewport == 2 && fg.first_ready_ms == 1600 &&
           row_is(scene, source_state::inactive, "FG_scope_required"),
@@ -502,7 +521,7 @@ namespace {
       const auto fg_held = depth_capture::decide_display(fg_gap, {}, fg_retained, fg_policy, 1610);
       require(fg_held.action == action::hold, "Frame record fixture lost its generated-Present hold");
       sunshine_game3d::record_api_depth(record, provider_decision(fg_gap, fg_policy, false, true, false, fg_held, true,
-        "fg_scope_missing"), 9, 1610);
+        reason::fg_scope_missing, depth_capture::status::unavailable, fg_retained.metadata), 9, 1610);
       require(record.depth_owner == source_slot::fg_depth && row_is(fg, source_state::held, "retained_copy") &&
           fg.first_ready_ms == 1600, "The frame record did not name a generated Present's FG hold");
       // A busy query keeps the confirmed scope.
@@ -511,13 +530,13 @@ namespace {
       // Silent: the selection runs without FG, and SR depth supplies the viewport.
       const auto sr_fresh = depth_capture::decide_display(selected, candidate, {}, {}, 2700);
       sunshine_game3d::record_api_depth(record, provider_decision(selected, busy, true, true, false, sr_fresh, false,
-        "current_capture"), 10, 2700);
+        reason::current_capture), 10, 2700);
       require(record.depth_owner == source_slot::scene_depth && row_is(scene, source_state::ready, "fresh_copy") &&
           row_is(fg, source_state::refused, "FG_scope_silent", source_slot::scene_depth) && fg.epoch == busy.epoch,
         "The frame record did not name a silent FG scope's SR fallback");
       // Silent with no API source: FG keeps the queue in mono, never Generic.
       sunshine_game3d::record_api_depth(record, provider_decision({}, busy, true, true, false, {}, false,
-        "no_current_nomination"), 11, 2710);
+        reason::no_current_nomination), 11, 2710);
       require(record.depth_owner == source_slot::hold && row_is(hold, source_state::mono, "FG_scope_required") &&
           row_is(fg, source_state::refused, "FG_scope_silent", source_slot::hold) &&
           row_is(scene, source_state::absent, "no_current_nomination", source_slot::hold),
@@ -528,14 +547,14 @@ namespace {
       require(refused.action == action::invalidate && std::strcmp(refused.reason, "FG_scope_unconfirmed") == 0,
         "Frame record fixture reused unconfirmed FG input");
       sunshine_game3d::record_api_depth(record, provider_decision(fg_selected, excluded, false, true, false, refused,
-        true, "current_capture"), 12, 2720);
+        true, reason::current_capture), 12, 2720);
       require(record.depth_owner == source_slot::hold &&
           row_is(fg, source_state::pending, "current_capture", source_slot::hold) &&
           row_is(hold, source_state::mono, "FG_scope_unconfirmed") &&
           row_is(scene, source_state::inactive, "FG_input_selected"),
         "The frame record did not name revoked FG input");
       sunshine_game3d::record_api_depth(record, provider_decision(selected, excluded, false, true, false, sr_fresh,
-        false, "current_capture"), 13, 2730);
+        false, reason::current_capture), 13, 2730);
       require(record.depth_owner == source_slot::scene_depth && row_is(fg, source_state::inactive, "FG_scope_unconfirmed"),
         "The frame record did not name the FG scope revoked as unconfirmed");
     }
