@@ -945,6 +945,15 @@ namespace {
       return out;
     }
 
+    // The capture owner's pool must hold the batch: each admitted depth cell
+    // keeps its byte check's copy until the batch reads back. A copy refused
+    // for capacity is a setup failure, never a cell's verdict.
+    static void require_capacity(const capture::record_diagnostic &diagnostic) {
+      if (diagnostic.stage == capture::record_stage::capacity || diagnostic.result == capture::status::exhausted) {
+        throw std::runtime_error("the device layer's batch exceeds the capture owner's pool; run it with a smaller --batch");
+      }
+    }
+
     // A known-gap row says this cell copies from a state nothing proved.
     static bool unsafe(const cell &value) {
       for (const auto &row : gaps::device_rows) {
@@ -1060,12 +1069,14 @@ namespace {
           break;
       }
       out.actual = judged(admitted, out.diagnostic);
+      require_capacity(out.diagnostic);
 
       // A repeat by record_preserved from the same basis reads an admitted
       // depth copy's bytes.
       if (admitted && !out.quarantined && value.value.point == device_point::api && state.role == consumer::depth) {
         capture::record_diagnostic repeat;
         out.preserved = capture::record_preserved(native(list), native(resource), declaration_for(out.actual.basis), &repeat);
+        require_capacity(repeat);
         if (!out.preserved || repeat.result != capture::status::recorded || repeat.enhanced_copy != out.actual.basis.enhanced) {
           out.bytes_exact = false;
           out.trouble += " the byte check's repeat copy was refused;";
@@ -1272,7 +1283,15 @@ int main(int argc, char **argv) {
     // known-gap row stale). --trace: each batch and cell before it records.
     bool gpu_validation {}, trace {};
     const char *only {};
-    unsigned batch_size = 16;  // Sources prepared together; each cell still executes alone.
+    // Sources prepared together; each cell still executes alone. Each
+    // admitted depth cell holds one of the capture owner's 28 pixel slots
+    // (streamline_depth_capture.cpp pixel_slot_limit) until the batch reads
+    // back, so a batch must fit the pool beside the slots the owner keeps
+    // (require_capacity: 32 does not). The largest batch validated clean is
+    // 26 (27 to 29 also meet D3D12 errors reading back the UI blocks), so
+    // larger ones are refused.
+    constexpr unsigned batch_limit = 26;
+    unsigned batch_size = 16;
     for (int i = 1; i < argc; ++i) {
       if (std::strcmp(argv[i], "--gpu-validation") == 0) {
         gpu_validation = true;
@@ -1282,6 +1301,10 @@ int main(int argc, char **argv) {
         only = argv[++i];
       } else if (std::strcmp(argv[i], "--batch") == 0 && i + 1 < argc) {
         batch_size = unsigned(std::max(1, std::atoi(argv[++i])));
+        if (batch_size > batch_limit) {
+          std::fprintf(stderr, "--batch %u exceeds %u, the largest batch the capture owner's pool and the debug layer were validated with\n", batch_size, batch_limit);
+          return 2;
+        }
       } else {
         std::fputs("usage: reshade_contract_matrix_device_tests [--gpu-validation] [--trace] [--block <name>] [--batch <cells>]\n", stderr);
         return 2;
