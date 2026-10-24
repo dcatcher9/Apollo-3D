@@ -314,6 +314,8 @@ if(BUILD_TESTING)
   endforeach()
   # It also pins the acceptance ledger's unexercised edges (README, Characterization tests).
   set_tests_properties(reshade_game3d_alpha_auto PROPERTIES LABELS "characterization")
+  # The legacy source id of each source key (README, Characterization tests).
+  set_tests_properties(reshade_scene_depth_source PROPERTIES LABELS "characterization")
   # Each named time limit's value and edges (README, Characterization tests).
   set_tests_properties(reshade_freshness PROPERTIES LABELS "characterization")
   # Each API's declaration-to-contract mapping (README, Characterization tests).

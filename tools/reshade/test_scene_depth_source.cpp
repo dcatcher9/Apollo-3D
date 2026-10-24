@@ -22,6 +22,13 @@ namespace {
     provider_kind provider;
     source_key key;
   };
+  // The test's inverse of encode_source_id: the key of a frame's provider,
+  // viewport and source_id. A frame is never Generic's. No production code
+  // decodes a source_id.
+  constexpr source_key decode_source_id(provider_kind provider, std::uint32_t viewport, std::uint64_t id) {
+    if (provider == provider_kind::streamline && id == legacy_fg(viewport)) return fg_depth_key(viewport);
+    return {source_role::scene_depth, reporting_api(provider), viewport, id};
+  }
 }
 
 int main() {

@@ -1645,6 +1645,12 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   testable sample older than the previous one
   ([UI decision framework](../../docs/reshade-sbs.md#ui-decision-framework)).
   `ui_selection::decide` itself is covered in full by the selection contract and sequence tests.
+- [`test_scene_depth_source.cpp`](test_scene_depth_source.cpp) (`reshade_scene_depth_source`) pins
+  the legacy `source_id` that logs and Dump 3D packages carry for each `source_key` of
+  [`scene_depth_source.h`](scene_depth_source.h): FG depth `(1 << 63) | viewport` from
+  `fg_depth_key`, Streamline scene depth 0 and NGX its feature generation. Through its own inverse
+  it checks the round trip and that no two keys a frame carries share a provider, viewport and
+  `source_id`.
 - [`test_freshness.cpp`](test_freshness.cpp) (`reshade_freshness`) pins each named time limit of
   [`freshness.h`](freshness.h): its value and, for each edge its call sites keep (below or at most
   the limit, with or without a tick ahead of the clock, a zero tick unavailable), the outcome one

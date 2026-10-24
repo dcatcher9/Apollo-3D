@@ -43,17 +43,10 @@ namespace sunshine_scene_depth {
   }
   // frame::source_id, the legacy value that logs and Dump 3D packages carry,
   // unchanged: FG depth is (1 << 63) | viewport, any other key its id. A
-  // value names one source only together with its provider and viewport.
+  // value names one source only together with its provider and viewport
+  // (test_scene_depth_source.cpp inverts it for every key a frame carries).
   constexpr std::uint64_t encode_source_id(const source_key &key) {
     return key.role == source_role::fg_depth ? (std::uint64_t{1} << 63) | key.viewport : key.id;
-  }
-  // The key of a frame's provider, viewport and source_id, which re-encodes
-  // to that source_id. It inverts encode_source_id for every key a frame
-  // carries; a frame is never Generic's.
-  constexpr source_key decode_source_id(provider_kind provider, std::uint32_t viewport, std::uint64_t id) {
-    if (provider == provider_kind::streamline && id == encode_source_id(fg_depth_key(viewport)))
-      return fg_depth_key(viewport);
-    return {source_role::scene_depth, reporting_api(provider), viewport, id};
   }
   enum class resource_kind { raw_depth, display_depth };
   // declared: the caller stated this resource's state for this call.

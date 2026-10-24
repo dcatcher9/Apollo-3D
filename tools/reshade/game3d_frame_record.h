@@ -52,6 +52,10 @@ namespace sunshine_game3d {
     mono
   };
 
+  // A row's source: a source_key (scene_depth_source.h) without its role,
+  // which the row names. It is to become source_key when the record and
+  // depth selection share one source status, so that one key type names a
+  // source.
   struct record_key {
     source_api api {source_api::none};
     std::uint32_t viewport {};
