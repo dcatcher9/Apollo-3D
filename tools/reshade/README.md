@@ -1470,6 +1470,16 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   [`test_minhook_ledger.h`](test_minhook_ledger.h) (MinGW links those tests with
   `-Wl,--wrap=MH_CreateHook`): the Streamline probe test (v1, v2 with and without its optional
   exports, the FG options entry and the PCL marker) and the call trace (the four NGX exports).
+- [`test_provider_log_lines.cpp`](test_provider_log_lines.cpp) (`reshade_provider_log_lines`)
+  renders the API depth provider's status lines from fixed values for representative Presents
+  (a settled fresh copy, a held pending successor, the release to Generic and the handoff hold, an
+  FG scope turning silent and live, a readiness loss and recovery with their observation evidence,
+  and dynamic resolution) and compares them byte for byte with
+  [`provider_log_goldens/status_lines.txt`](provider_log_goldens/status_lines.txt). The provider
+  gathers each line's values where it decides and renders them through
+  [`streamline_depth_provider_log.h`](streamline_depth_provider_log.h), so a move of how the values
+  are gathered keeps every line. A commit that changes a line on purpose regenerates the goldens
+  with `reshade_provider_log_lines_tests <goldens> --update`.
 - `reshade_game3d_alpha_auto` pins the acceptance ledger's edges that its policy groups leave
   unexercised: a sample over no pixels, a contradiction older than the newest one, and a
   testable sample older than the previous one

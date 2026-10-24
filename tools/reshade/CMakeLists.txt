@@ -503,6 +503,17 @@ if(BUILD_TESTING)
   endif()
   add_test(NAME reshade_game3d_hook_set COMMAND reshade_game3d_hook_set_tests)
   set_tests_properties(reshade_game3d_hook_set PROPERTIES TIMEOUT 30 LABELS "characterization")
+  # The API depth provider's status lines against their goldens (README,
+  # Characterization tests).
+  add_executable(reshade_provider_log_lines_tests test_provider_log_lines.cpp)
+  target_compile_definitions(reshade_provider_log_lines_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_link_libraries(reshade_provider_log_lines_tests PRIVATE sunshine_game3d_core_archive)
+  if(MINGW)
+    target_link_options(reshade_provider_log_lines_tests PRIVATE -static)
+  endif()
+  add_test(NAME reshade_provider_log_lines COMMAND reshade_provider_log_lines_tests
+    "${CMAKE_CURRENT_SOURCE_DIR}/provider_log_goldens/status_lines.txt")
+  set_tests_properties(reshade_provider_log_lines PROPERTIES TIMEOUT 15 LABELS "characterization")
 
   add_executable(reshade_native_depth_calibration_tests test_native_depth_calibration.cpp)
   target_compile_features(reshade_native_depth_calibration_tests PRIVATE cxx_std_17)
