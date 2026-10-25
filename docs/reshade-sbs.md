@@ -3724,9 +3724,21 @@ that alias transient memory every frame record hundreds of them per list. A crea
 list uses the texture, and not at all once an enhanced barrier was seen, because ReShade reports a
 texture created in an initial layout like one created in a state. The copy is checked again when
 its list is executed: if the proof changed meanwhile or another queue executes it, the copy is
-discarded (`proven_state_changed`). Ordering across queues is not observed, so a proof never
-crosses queues. `DiscardResource` is not hooked (the hook set stays frozen until the new reporters),
-so a discard after the last barrier goes unseen; that is a content hazard, as it was before. Later
+discarded (`proven_state_changed`). Ordering across queues is not observed, so a proof never crosses
+queues. A game that renders on another queue than the one ReShade presents on therefore gets no
+end-of-frame copy: its barriers and clears prove states on its render queue only. With Streamline's
+DLSS-G plugin loaded, the swapchain presents on DLSS-G's own queue, even with frame generation off.
+In the logs of 10-06 to 10-23, BF6 (multiplayer and campaign), Clair Obscur, RE9, Stellar Blade, The
+Witcher 3 and Hogwarts render and present on different queues, and so does Shadows once its DLSS-G
+swapchain is in use; Dead Space presents on its render queue. There every end-of-frame copy is
+refused (`end_of_frame_refused` grows with `last=missing_state`), so Generic depth comes only from
+boundary copies on the game's own lists, and otherwise holds, then goes mono. The Present-queue
+copies of deferred tags find no proof there either and start from their declaration (R2). Accepting
+a proof from another queue needs one of two things. The presenting queue's work must be shown to be
+ordered after the proving list (a fence wait the frozen hook set does not observe), or the copy must
+be recorded on the proving queue. Both are open owner decisions. `DiscardResource` is not hooked
+(the hook set stays frozen until the new reporters), so a discard after the last barrier goes
+unseen; that is a content hazard, as it was before. Later
 copies whose own recording lacks a state can query the same fact
 (`depth_capture::last_proven_state`).
 
