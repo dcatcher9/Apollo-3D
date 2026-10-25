@@ -1053,9 +1053,11 @@ the layer first asks the capture owner (`depth_capture::legacy_render_target_cop
 matrix's D12). A target that allows simultaneous access (it may still be in `COMMON` there) is not
 a layer. Neither is one in an enhanced layout: by its latest barrier on the clear's recording (a
 legacy one must leave `RENDER_TARGET`) or, where that names nothing, by the enhanced-layout latch;
-the target is watched for the latch from its first clear. The layer logs `Sunshine UI layer: a
-cleared target is in an enhanced-barrier layout or allows simultaneous access; its clear-boundary
-copy is refused` once.
+the target is watched for the latch from its first clear. The layer asks outside its own lock,
+between its check that the clear qualifies and its copy (which checks again), because the capture
+owner may take its lock to answer: a recording thread never holds the layer's lock while it waits
+for the capture owner's. The layer logs `Sunshine UI layer: a cleared target is in an
+enhanced-barrier layout or allows simultaneous access; its clear-boundary copy is refused` once.
 Since C12 a clear is `ClearRenderTargetView` or, on D3D12, a render pass whose render-target entry
 begins with a CLEAR to exactly (0, 0, 0, 0): ReShade reports `begin_render_pass` before the native
 `BeginRenderPass`, outside any pass, where that target is in the render-target state the pass

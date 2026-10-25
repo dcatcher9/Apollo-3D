@@ -822,25 +822,36 @@ namespace sunshine_game3d::ui_layer {
         if (format == api::format::unknown) return;
         live_allocation live;
         census_allocation dump;
+        const auto layer_target = [&] {
+          return device == s.device &&
+            std::find(s.back_buffers.begin(), s.back_buffers.end(), resource.handle) == s.back_buffers.end() &&
+            qualifies(desc, color, s.width, s.height, rect_count, rects);
+        };
         {
           std::lock_guard<std::mutex> lock(s.mutex);
-          if (device != s.device ||
-              std::find(s.back_buffers.begin(), s.back_buffers.end(), resource.handle) != s.back_buffers.end()) return;
-          if (!qualifies(desc, color, s.width, s.height, rect_count, rects)) return;
-          // Clearing requires the render-target state on every API, so the
-          // previous frame's layer can be copied here before the clear erases it.
-          // On D3D12 the copy's legacy RENDER_TARGET barriers need that legacy
-          // state: a target in an enhanced layout or with simultaneous access
-          // is no layer (the contract matrix's D12). The capture owner never
-          // calls the layer, so its lock nests safely inside this one.
-          if (device->get_api() == api::device_api::d3d12 &&
-              !sunshine_streamline::depth_capture::legacy_render_target_copy(commands->get_native(), resource.handle)) {
-            if (first(s, log_layout_refused))
-              sunshine_log::message(reshade::log::level::info,
-                "Sunshine UI layer: a cleared target is in an enhanced-barrier layout or allows simultaneous access; "
-                "its clear-boundary copy is refused (logged once)");
-            return;
-          }
+          if (!layer_target()) return;
+        }
+        // Clearing requires the render-target state on every API, so the
+        // previous frame's layer can be copied here before the clear erases it.
+        // On D3D12 the copy's legacy RENDER_TARGET barriers need that legacy
+        // state: a target in an enhanced layout or with simultaneous access
+        // is no layer (the contract matrix's D12). The capture owner may take
+        // its own lock to decide, so this runs outside the layer's: a recording
+        // thread never waits for it while the Present thread waits for this
+        // one.
+        if (device->get_api() == api::device_api::d3d12 &&
+            !sunshine_streamline::depth_capture::legacy_render_target_copy(commands->get_native(), resource.handle)) {
+          std::lock_guard<std::mutex> lock(s.mutex);
+          if (first(s, log_layout_refused))
+            sunshine_log::message(reshade::log::level::info,
+              "Sunshine UI layer: a cleared target is in an enhanced-barrier layout or allows simultaneous access; "
+              "its clear-boundary copy is refused (logged once)");
+          return;
+        }
+        {
+          std::lock_guard<std::mutex> lock(s.mutex);
+          // The scope may have moved on meanwhile.
+          if (!layer_target()) return;
           const auto now = GetTickCount64();
           const auto dropped = s.live.tracker.dropped();
           if (s.live.tracker.clear(resource.handle, now) && demanded(s, now))
