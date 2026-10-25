@@ -2,6 +2,7 @@
 #include "game3d_ui_layer.h"
 #include "addon_lifetime.h"
 #include "game3d_ui_detection_contract.h"
+#include "streamline_depth_capture.h"
 #include "async_log.h"
 
 #include <d3d11_4.h>
@@ -222,6 +223,7 @@ namespace sunshine_game3d::ui_layer {
       log_fenced = 1u << 0, log_unobserved = 1u << 1, log_mixed = 1u << 2, log_no_fence = 1u << 3,
       log_create_failed = 1u << 4, log_signal_failed = 1u << 5, log_fence_capacity = 1u << 6, log_census = 1u << 7,
       log_dropped = 1u << 15, // After log_census's eight bits.
+      log_layout_refused = 1u << 16,
     };
 
     struct state_t {
@@ -827,6 +829,18 @@ namespace sunshine_game3d::ui_layer {
           if (!qualifies(desc, color, s.width, s.height, rect_count, rects)) return;
           // Clearing requires the render-target state on every API, so the
           // previous frame's layer can be copied here before the clear erases it.
+          // On D3D12 the copy's legacy RENDER_TARGET barriers need that legacy
+          // state: a target in an enhanced layout or with simultaneous access
+          // is no layer (the contract matrix's D12). The capture owner never
+          // calls the layer, so its lock nests safely inside this one.
+          if (device->get_api() == api::device_api::d3d12 &&
+              !sunshine_streamline::depth_capture::legacy_render_target_copy(commands->get_native(), resource.handle)) {
+            if (first(s, log_layout_refused))
+              sunshine_log::message(reshade::log::level::info,
+                "Sunshine UI layer: a cleared target is in an enhanced-barrier layout or allows simultaneous access; "
+                "its clear-boundary copy is refused (logged once)");
+            return;
+          }
           const auto now = GetTickCount64();
           const auto dropped = s.live.tracker.dropped();
           if (s.live.tracker.clear(resource.handle, now) && demanded(s, now))

@@ -313,6 +313,17 @@ namespace sunshine_streamline::depth_capture {
   // do not observe command, or it names nothing of source. Call on the thread
   // recording command.
   bool recorded_state(std::uint64_t command, const source_ref &source);
+  // Whether the UI layer's clear-boundary copy (game3d_ui_layer.cpp
+  // record_into), which leaves and restores a render target's RENDER_TARGET
+  // state with legacy barriers, may run on command for resource (the
+  // contract matrix's D12). Not for a simultaneous-access target, which may
+  // still be in COMMON there, nor for one in an enhanced layout: the latest
+  // barrier on command's recording, or, when that names nothing, the
+  // enhanced-layout latch (proven_state.h; the target is watched from its
+  // first query). A legacy state on the recording must be RENDER_TARGET. With
+  // the capture owner inactive only the access flag decides. Call on the
+  // thread recording command.
+  bool legacy_render_target_copy(std::uint64_t command, std::uint64_t resource);
   // Executions of game lists observed so far, on any queue: each
   // ExecuteCommandLists that submitted a list with a recording other than
   // ReShade's own immediate lists (DXGI's internal Present list has none). A

@@ -2579,6 +2579,28 @@ namespace sunshine_streamline::depth_capture {
       owner->clears.push_back({identity, ++owner->barrier_order});
     } catch (...) { invalidate(*owner, recording_loss::source_state_capacity); }
   }
+  bool legacy_render_target_copy(std::uint64_t native, std::uint64_t resource) {
+    com_ptr<ID3D12Resource> checked;
+    if (!query_native(resource, IID_ID3D12Resource, checked) ||
+        (checked->GetDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS)) return false;
+    if (!requested.load()) return true;
+    const auto identity = retain_source_cookie(checked.p);
+    if (!identity) return false;
+    // No capture lock for the recording, exactly as barriers().
+    com_ptr<ID3D12GraphicsCommandList> list;
+    if (query_native(native, IID_ID3D12GraphicsCommandList, list)) {
+      native = reinterpret_cast<std::uint64_t>(list.p);
+      auto owner = native_observer::states_ready(native) ?
+        command(native, native_observer::get_recording_cookie(native), false) : command_storage::handle{};
+      if (owner && owner->reported && !owner->closed && !owner->invalid)
+        if (const auto *entry = state(*owner, identity, false))
+          return !entry->enhanced && entry->known && !entry->blocked && !entry->pending_split &&
+            entry->value == D3D12_RESOURCE_STATE_RENDER_TARGET;
+    }
+    std::lock_guard lock(mutex);
+    proven.watch(identity);
+    return !proven.latched(identity).latched;
+  }
   bool last_proven_state(std::uint64_t resource, std::uint64_t queue, proven_state &out) {
     out = {};
     com_ptr<ID3D12Resource> checked;

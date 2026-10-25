@@ -1466,8 +1466,9 @@ a Generic boundary (`record_preserved` with the contract `depth_addon.cpp` passe
 `DEPTH_WRITE`, the `DEPTH_WRITE` it declares at a DSV unbind, and at the end of the frame the
 source's last proven state on the copy's queue, which the earlier list proved; each depth-stencil
 source is tracked from its creation, as ReShade's `init_resource` reports it), or the UI clear
-boundary (the barriers `game3d_ui_layer.cpp` records through ReShade; the runtime layer runs the
-layer itself). The cells cover every legal state of every
+boundary (the barriers `game3d_ui_layer.cpp` records through ReShade where the capture owner's
+`legacy_render_target_copy` admits them, as the layer asks; the runtime layer runs the layer
+itself). The cells cover every legal state of every
 allocation, each claim, each direct-list enhanced layout, every depth family typed and typeless with
 mips and planes, the shapes no input names, COMPUTE lists and UI tags. A cell meets the oracle by
 its kind, refusal class and copy basis; the basis must be the state the test put the source in, so
@@ -1537,10 +1538,12 @@ clear, an unbind and the end of frame, D32 and D32S8, judged by the depth the la
 consumed. The view is created in `DEPTH_WRITE` and never transitioned, so its creation proves that
 state at the end of the frame and at a stencil-only clear (D10b). The states an earlier executed
 list proves at the end of the frame are the device layer's, and so are copies from a state nothing
-proves (D11c, D12), which it records without executing them. Family `ui` (2.14.1) tags a
+proves (D11c), which it records without executing them, and the UI layer's clear boundary on an
+enhanced or simultaneous-access target (D12). Family `ui` (2.14.1) tags a
 captured depth and a full-size UI input (UI colour and alpha, HUD-less colour, Backbuffer, UI alpha)
 at a tag call with the game's list, without a command list or as a local evaluate input, or draws
-an offscreen UI layer cleared every frame; a case is offered when Dump3D lists its input as
+an offscreen UI layer cleared every frame (a render target in `RENDER_TARGET`, or a
+simultaneous-access one whose copy the layer refuses, D12); a case is offered when Dump3D lists its input as
 available to UI detection. Their gaps are `ngx_runtime_rows`, `generic_runtime_rows` and
 `ui_runtime_rows`.
 
@@ -1550,9 +1553,9 @@ directory. It is registered only where `SUNSHINE_GAME3D_RESHADE_RUNTIME` (the of
 `ReShade64.dll`) and `SUNSHINE_GAME3D_FROZEN_SHADERS` (a directory with the frozen
 `SunshineGame3D.fx`) are configured: one test per family, labelled `contract;gpu`, `RUN_SERIAL` with
 the `gpu` resource lock and a 240 s timeout, after `reshade_contract_matrix_runtime_output` removes
-the families' output directory. At 1280x720 the seven families run 309 cells in about 5.5 minutes:
+the families' output directory. At 1280x720 the seven families run 310 cells in about 5.5 minutes:
 `sl27` 122 cells and 13 controls in 107 s, `sl26` 48 in 61 s, `sl212_214` 46 in 58 s, `sl215_30` 34
-in 33 s, `ngx` 34 in 32 s, `generic` 12 in 17 s and `ui` 13 in 18 s. A capture takes 0.4 s, a
+in 33 s, `ngx` 34 in 32 s, `generic` 12 in 17 s and `ui` 14 in 19 s. A capture takes 0.4 s, a
 refusal or hold 0.9 s (its 600 ms window and the isolation), an FG case copied at an evaluate up to
 1.9 s (FG owns its viewport's depth for a second after it is enabled), and a UI case its Dump3D.
 Repeated runs give the same result for every cell.

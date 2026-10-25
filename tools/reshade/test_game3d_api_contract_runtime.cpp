@@ -722,9 +722,10 @@ namespace {
   // viewport, and the case's UI input: a full-size tag of its kind at a tag
   // call with the game's list, without a command list (ValidUntilPresent),
   // or as a local evaluate input; or an offscreen UI layer cleared to
-  // transparent every frame (D12, legacy RENDER_TARGET). The layer cleared
-  // in an enhanced layout or as a simultaneous-access target is the device
-  // layer's: the add-on records legacy barriers there, which must not run.
+  // transparent every frame (D12): a render target in its legacy
+  // RENDER_TARGET state, or a simultaneous-access one that its clear promotes
+  // from COMMON, whose copy the layer refuses. The layer cleared in an
+  // enhanced layout is the device layer's.
   namespace ui_runtime {
     enum dimension : unsigned {
       kind,
@@ -743,8 +744,9 @@ namespace {
       {"backbuffer", matrix::buffer_meaning::backbuffer, 53},
       {"ui_alpha", matrix::buffer_meaning::ui_alpha, 69},
       {"layer", matrix::buffer_meaning::other, 0},
+      {"simultaneous_layer", matrix::buffer_meaning::other, 0},
     };
-    constexpr int layer = 4;
+    constexpr int layer = 4, simultaneous_layer = 5;
     constexpr matrix::ui_capture captures[] {matrix::ui_capture::tag_call, matrix::ui_capture::no_command_list, matrix::ui_capture::local};
     constexpr matrix::sl_version version {2, 14, 1};
 
@@ -752,8 +754,8 @@ namespace {
       matrix::ui_case out;
       out.version = version;
       out.how = captures[value[how]];
-      if (value[kind] == layer) {
-        out.clear = matrix::ui_clear_boundary::legacy_render_target;
+      if (value[kind] == layer || value[kind] == simultaneous_layer) {
+        out.clear = value[kind] == layer ? matrix::ui_clear_boundary::legacy_render_target : matrix::ui_clear_boundary::simultaneous_common;
         return out;
       }
       out.meaning = kinds[value[kind]].meaning;
@@ -763,7 +765,7 @@ namespace {
 
     // The layer is no tag: its one cell is the clear boundary.
     bool legal(const generator::row &value) {
-      if (value[kind] == layer && value[how] > 0) {
+      if ((value[kind] == layer || value[kind] == simultaneous_layer) && value[how] > 0) {
         return false;
       }
       return !generator::complete(value) || matrix::legal(to_case(value));
@@ -1648,8 +1650,13 @@ namespace {
       desc.Format = layer ? DXGI_FORMAT_R8G8B8A8_UNORM : value.meaning == matrix::buffer_meaning::ui_alpha         ? DXGI_FORMAT_R8_UNORM :
                                                        value.meaning == matrix::buffer_meaning::ui_color_and_alpha ? DXGI_FORMAT_B8G8R8A8_UNORM :
                                                                                                                      backbuffers[0]->GetDesc().Format;
-      desc.Flags = layer ? D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET : D3D12_RESOURCE_FLAG_NONE;
-      current.ui_state = layer ? D3D12_RESOURCE_STATE_RENDER_TARGET : D3D12_RESOURCE_STATE_COPY_DEST;
+      // A simultaneous-access layer starts each ExecuteCommandLists in COMMON.
+      const bool simultaneous = value.clear == matrix::ui_clear_boundary::simultaneous_common;
+      desc.Flags = !layer       ? D3D12_RESOURCE_FLAG_NONE :
+                   simultaneous ? D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS :
+                                  D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+      current.ui_state = !layer ? D3D12_RESOURCE_STATE_COPY_DEST : simultaneous ? D3D12_RESOURCE_STATE_COMMON :
+                                                                                  D3D12_RESOURCE_STATE_RENDER_TARGET;
       checked(game->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, current.ui_state, nullptr, IID_PPV_ARGS(ui_input.put())), "Create the case's UI input");
       // UI over a fifth of the frame: translucent marks on transparent black.
       const auto pixel_bytes = bytes_per_pixel(desc.Format);
@@ -1696,7 +1703,8 @@ namespace {
       to.pResource = ui_input.p;
       to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
       if (value.clear != matrix::ui_clear_boundary::none) {
-        // Through ReShade's command-list proxy, so its clear event fires.
+        // Through ReShade's command-list proxy, so its clear event fires. A
+        // simultaneous-access layer is promoted to RENDER_TARGET by the clear.
         const float transparent[4] {};
         commands->ClearRenderTargetView(ui_heap->GetCPUDescriptorHandleForHeapStart(), transparent, 0, nullptr);
         transition(commands.p, ui_input.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -1868,7 +1876,10 @@ namespace {
                   }});
       out.elapsed_ms = GetTickCount64() - started;
       out.observed = seen;
-      out.actual.kind = seen.offered ? matrix::outcome_kind::offered : matrix::outcome_kind::ignored;
+      // The layer's refusal (D12) shows as no candidate, as an ignored input does.
+      const bool refused_layer = value.clear != matrix::ui_clear_boundary::none && matrix::permits(out.decided.expected, matrix::outcome_kind::refuse);
+      out.actual.kind = seen.offered ? matrix::outcome_kind::offered : refused_layer ? matrix::outcome_kind::refuse :
+                                                                                       matrix::outcome_kind::ignored;
       out.satisfied = matrix::permits(out.decided.expected, out.actual.kind);
       out.verdict = gaps::judge_each(gaps::ui_runtime_rows, value, out.satisfied, {out.actual}, out.matched);
       return out;

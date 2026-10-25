@@ -20,8 +20,10 @@
 //   list proved (each source is tracked from its creation, as ReShade's
 //   init_resource reports a depth-stencil texture);
 // - the UI clear boundary: the three barriers game3d_ui_layer.cpp
-//   record_into records through ReShade's D3D12 backend. The layer itself
-//   runs only through ReShade, in the runtime layer's UI family.
+//   record_into records through ReShade's D3D12 backend, where the capture
+//   owner's legacy_render_target_copy admits them, as the layer asks. The
+//   layer itself runs only through ReShade, in the runtime layer's UI
+//   family.
 // Every cell is executed alone, so a D3D12 debug-layer error names it.
 //
 // A cell meets the oracle by its kind, refusal class (depth_refusal.h's class
@@ -1056,6 +1058,12 @@ namespace {
             // RENDER_TARGET layout.
             if (value.value.clear == ui_clear_boundary::enhanced_render_target) {
               enter_layout(list, resource, true, D3D12_BARRIER_LAYOUT_RENDER_TARGET, D3D12_BARRIER_ACCESS_RENDER_TARGET);
+            }
+            // The layer first asks the capture owner (D12).
+            if (!capture::legacy_render_target_copy(native(list), native(resource))) {
+              out.diagnostic.result = capture::status::unsupported_state;
+              out.diagnostic.stage = capture::record_stage::unsupported_state;
+              break;
             }
             out.ui_copy = destination(gpu.device.Get(), value.format, source_width, source_height);
             transition_barrier(list, out.ui_copy.Get(), 0, ps, copy_dest);

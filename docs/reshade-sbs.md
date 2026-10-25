@@ -1048,6 +1048,14 @@ layer clear; before WP1b any rectangle qualified. A 2-bit alpha
 (R10G10B10A2) cannot hold blended coverage; with FG on The Witcher 3 also clears such a scene
 target, which otherwise became the active layer and claimed the whole frame. Clearing requires the render-target state on
 every API, so a target can be copied just before its clear: the copy shows the previous frame.
+On D3D12 that copy leaves and restores `RENDER_TARGET` with legacy barriers, so since Stage 3 fix 3
+the layer first asks the capture owner (`depth_capture::legacy_render_target_copy`, the contract
+matrix's D12). A target that allows simultaneous access (it may still be in `COMMON` there) is not
+a layer. Neither is one in an enhanced layout: by its latest barrier on the clear's recording (a
+legacy one must leave `RENDER_TARGET`) or, where that names nothing, by the enhanced-layout latch;
+the target is watched for the latch from its first clear. The layer logs `Sunshine UI layer: a
+cleared target is in an enhanced-barrier layout or allows simultaneous access; its clear-boundary
+copy is refused` once.
 Since C12 a clear is `ClearRenderTargetView` or, on D3D12, a render pass whose render-target entry
 begins with a CLEAR to exactly (0, 0, 0, 0): ReShade reports `begin_render_pass` before the native
 `BeginRenderPass`, outside any pass, where that target is in the render-target state the pass
@@ -3708,8 +3716,9 @@ copies whose own recording lacks a state can query the same fact
 subresource 0 in a list that executes latches its texture's layout to enhanced barriers for good,
 whatever state the list leaves it in. The latch lives in the same table, which holds the
 depth-stencil textures tracked from their creation and every texture an adapter retains (a
-Streamline tag, an NGX input, a UI input), watched from its retention; buffers and
-simultaneous-access textures are neither. A watched texture's proofs serve the latch alone: the
+Streamline tag, an NGX input, a UI input), watched from its retention, as well as each target the
+UI layer clears (watched from its first clear); buffers and simultaneous-access textures are
+neither. A watched texture's proofs serve the latch alone: the
 end-of-frame copy and the Present-queue copy still use tracked textures only. A copy whose own
 recording names nothing about a latched source, and which no proof above admits, takes no legacy
 barrier from its claim, because the [Enhanced Barriers](https://microsoft.github.io/DirectX-Specs/d3d/D3D12EnhancedBarriers.html)
