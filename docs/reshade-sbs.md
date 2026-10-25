@@ -3746,8 +3746,12 @@ proof changed or another queue runs it. Everything else is refused (`unsupported
 - a recording the hooks do not see, or one that aliased the source before the copy.
 
 The earlier capture then holds within the source age, then the view is mono. A full table that
-forgets a latched texture counts every texture it does not hold as latched from then on
-(`latch_lost`). Two cases stay open, as before this rule: a texture that was neither tracked nor
+forgets a latched texture records its identity (at most 128): queried while not held, or held again
+(an adapter retains it again, the UI layer clears it again, or a deferred copy tracks it), it is
+latched. Only a texture created afterwards, which ReShade's `init_resource` reports, is new and
+starts unlatched. When that record is full, forgetting another latched texture loses a latch: from
+then on every texture not held, and every texture held again, counts as latched (`latch_lost`).
+Two cases stay open, as before this rule: a texture that was neither tracked nor
 watched when its enhanced barrier executed (an adapter's source first retained after it) is latched
 only once a later executed list names it, and a copy recorded before the latching list executed
 still used its claim.
@@ -3764,8 +3768,9 @@ started:
   not reported by ReShade's lifecycle, invalidated, Reset without that lifecycle, method table not
   covered), and the copies discarded at execution.
 - `latched=L[ latch_lost] earlier_layout={copied=A refused=B}`: the held textures latched to
-  enhanced layouts (`latch_lost` once a full table forgot one), and the copies of a latched source
-  whose recording named nothing, copied from its `SHADER_RESOURCE` proof or refused.
+  enhanced layouts (`latch_lost` once the record of forgotten latched textures overflowed), and the
+  copies of a latched source whose recording named nothing, copied from its `SHADER_RESOURCE` proof
+  or refused.
 
 While these counts change, the line repeats at most every 10 s.
 

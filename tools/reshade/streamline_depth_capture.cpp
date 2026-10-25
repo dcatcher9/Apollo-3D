@@ -2575,7 +2575,7 @@ namespace sunshine_streamline::depth_capture {
     if (!requested.load() || !source || !source->cookie || source->desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER ||
         (source->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS)) return;
     std::lock_guard lock(mutex);
-    if (!proven.tracked(source->cookie)) proven.track(source->cookie, false, 0);
+    proven.adopt(source->cookie);
   }
   void observe_depth_clear(std::uint64_t native, std::uint64_t resource) {
     if (!requested.load() || !native || !resource) return;

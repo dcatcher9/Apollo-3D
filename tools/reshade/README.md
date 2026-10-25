@@ -1699,8 +1699,9 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   copy: a creation state holds on every queue until a list uses the texture and not once enhanced
   barriers were seen, an executed list's proof holds only on its own queue, every update takes a
   new version, unseen changes leave a texture unproven, a full table forgets its least recently
-  used texture, and a depth clear keeps the regime of the texture's proof (an enhanced layout stays
-  enhanced; a latched texture without a proof has none). The capture owner's feeding of it is
+  used texture (one forgotten latched stays latched when held again, until its record overflows),
+  and a depth clear keeps the regime of the texture's proof (an enhanced layout stays enhanced; a
+  latched texture without a proof has none). The capture owner's feeding of it is
   proven on real lists by the device layer's end-of-frame cells and by
   `reshade_diagnostic_texture_capture_test`'s `proven_state_end_of_frame` (executed barriers and
   depth clears per queue, a copy discarded when its proof changed or another queue ran it, unproven

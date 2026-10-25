@@ -31,9 +31,12 @@
 // unseen work or another queue leave it set. A texture is held tracked (its
 // proofs serve the queries above) or only watched: an adapter's source,
 // followed from its retention for the latch and for a copy the latch decides,
-// never for the queries that admit a copy from a proof alone. Forgetting a
-// latched texture (a full table) loses its latch, so from then on a texture
-// that is not held counts as latched (latch_lost).
+// never for the queries that admit a copy from a proof alone. A full table
+// that forgets a latched texture keeps its identity in a bounded record:
+// queried while not held, or held again (watched or adopted), it is latched.
+// Once that record drops one, every texture that is not held or is held again
+// counts as latched (latch_lost). A texture tracked from its creation is new
+// and starts unlatched.
 namespace sunshine_proven_state {
   struct state {
     std::uint64_t version {};  // Nonzero while proven; every update takes a new one.
@@ -75,7 +78,7 @@ namespace sunshine_proven_state {
       }
       auto *found = find(resource);
       if (!found) {
-        found = insert(resource);
+        found = insert(resource, false);
       }
       found->tracked = true;
       found->value = {};
@@ -86,11 +89,31 @@ namespace sunshine_proven_state {
       found->used = ++serial;
     }
 
-    // A texture followed from now on, unproven, for its latch only; a texture
-    // already held is unchanged.
+    // A live texture tracked from now on, not from its creation: unproven
+    // until a later barrier proves it. A watched texture becomes tracked and
+    // keeps its latch; one not held is latched when it was forgotten latched
+    // (or a latch was lost). A tracked texture is unchanged.
+    void adopt(std::uint64_t resource) {
+      if (!resource) {
+        return;
+      }
+      auto *found = find(resource);
+      if (found && found->tracked) {
+        return;
+      }
+      if (!found) {
+        found = insert(resource, true);
+      }
+      found->tracked = true;
+      found->value = {};
+      found->used = ++serial;
+    }
+
+    // A live texture followed from now on, unproven, for its latch only (as
+    // adopt latches it); a texture already held is unchanged.
     void watch(std::uint64_t resource) {
       if (resource && !find(resource)) {
-        insert(resource)->used = ++serial;
+        insert(resource, true)->used = ++serial;
       }
     }
 
@@ -151,11 +174,12 @@ namespace sunshine_proven_state {
     }
 
     // The held texture's latch and, when latched, its proof on whatever
-    // queue made it. A texture not held is latched once a latch was lost.
+    // queue made it. A texture not held is latched when it was forgotten
+    // latched, or once a latch was lost.
     latch latched(std::uint64_t resource) {
       auto *found = find(resource);
       if (!found) {
-        return {lost, {}};
+        return {forgotten_latched(resource), {}};
       }
       latch out {found->latched, {}};
       if (found->latched && found->value && found->value.queue) {
@@ -174,7 +198,7 @@ namespace sunshine_proven_state {
       if (found && found->value && found->value.queue) {
         return found->value.enhanced ? regime::enhanced : regime::legacy;
       }
-      return (found ? found->latched : lost) ? regime::unknown : regime::legacy;
+      return (found ? found->latched : forgotten_latched(resource)) ? regime::unknown : regime::legacy;
     }
 
     // The version a proof still has (0: unproven or not held).
@@ -208,7 +232,15 @@ namespace sunshine_proven_state {
     std::array<entry, Capacity> entries {};  // Sorted by resource.
     unsigned count {};
     std::uint64_t serial {};
+    // Latched textures a full table forgot (0: a free slot); when none is
+    // free, one is overwritten in turn and the latch is lost.
+    std::array<std::uint64_t, Capacity> forgotten {};
+    unsigned forgotten_next {};
     bool lost {};
+
+    bool forgotten_latched(std::uint64_t resource) const {
+      return lost || std::find(forgotten.begin(), forgotten.end(), resource) != forgotten.end();
+    }
 
     const entry *find(std::uint64_t resource) const {
       const auto end = entries.begin() + count;
@@ -222,15 +254,33 @@ namespace sunshine_proven_state {
       return const_cast<entry *>(static_cast<const table *>(this)->find(resource));
     }
 
-    // A full table forgets its least recently used texture first.
-    entry *insert(std::uint64_t resource) {
+    // A full table forgets its least recently used texture first, and
+    // records it when latched. A live texture held again (alive) takes its
+    // latch from that record; a created one starts unlatched.
+    entry *insert(std::uint64_t resource, bool alive) {
       if (count == Capacity) {
         const auto oldest = std::min_element(entries.begin(), entries.end(), [](const entry &a, const entry &b) {
           return a.used < b.used;
         });
-        lost = lost || oldest->latched;
+        if (oldest->latched) {
+          auto slot = std::find(forgotten.begin(), forgotten.end(), std::uint64_t {});
+          if (slot == forgotten.end()) {
+            slot = forgotten.begin() + forgotten_next++ % Capacity;
+            lost = true;
+          }
+          *slot = oldest->resource;
+        }
         std::move(oldest + 1, entries.end(), oldest);
         --count;
+      }
+      bool latched = false;
+      if (alive) {
+        // The entry carries a remembered latch again, freeing its record.
+        const auto remembered = std::find(forgotten.begin(), forgotten.end(), resource);
+        if (remembered != forgotten.end()) {
+          *remembered = 0;
+        }
+        latched = lost || remembered != forgotten.end();
       }
       const auto end = entries.begin() + count;
       const auto at = std::lower_bound(entries.begin(), end, resource, [](const entry &value, std::uint64_t key) {
@@ -239,6 +289,7 @@ namespace sunshine_proven_state {
       std::move_backward(at, end, end + 1);
       *at = entry {};
       at->resource = resource;
+      at->latched = latched;
       ++count;
       return &*at;
     }

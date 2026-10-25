@@ -8,10 +8,11 @@
 // unseen leaves it unproven; and a full table forgets its least recently used
 // texture. The enhanced-layout latch (D6, N8) of a tracked or watched texture
 // survives unseen work and later proofs, a watched texture's proof serves the
-// latch alone, and forgetting a latched texture latches every texture not
-// held. The capture owner's feeding of it is proven on real lists by the
-// contract matrix's device layer (end_of_frame and earlier enhanced layout
-// cells).
+// latch alone, a forgotten latched texture is latched again when held again,
+// and overflowing that record latches every texture not held or held again
+// (a created one excepted). The capture owner's feeding of it is proven on
+// real lists by the contract matrix's device layer (end_of_frame and earlier
+// enhanced layout cells).
 #include "proven_state.h"
 
 #include <cstdint>
@@ -108,15 +109,40 @@ int main() {
     owner.set_latch(2);
     owner.prove_layout(2, other, 3, 0x40);
     check(owner.latched(2).proven.queue == other && !owner.query(2, other, true), "A watched texture latches and keeps its proof for the latch alone");
-    owner.track(2, false, 0);
+    owner.adopt(2);
     check(owner.tracked(2) && owner.latched(2).latched && !owner.query(2, other, true), "A watched texture becomes tracked, unproven, latch kept");
+    owner.prove(2, other, depth_read);
+    owner.adopt(2);
+    check(proven(owner.query(2, other, true), depth_read), "Adopting a tracked texture leaves its proof");
     owner.watch(1);
     check(owner.tracked(1), "Watching a tracked texture leaves it tracked");
     check(!owner.latch_lost() && !owner.latched(9).latched && owner.latched_count() == 2, "A texture never held is unlatched until a latch is lost");
     owner.watch(3);
     owner.watch(4);
     owner.watch(5);  // Forgets 1, the least recently used.
-    check(!owner.held(1) && owner.latch_lost() && owner.latched(1).latched && owner.latched(9).latched && !owner.latched(3).latched, "Forgetting a latched texture latches every texture not held");
+    check(!owner.held(1) && !owner.latch_lost() && owner.latched(1).latched && !owner.latched(9).latched && !owner.latched(3).latched, "A forgotten latched texture stays latched; one never latched does not");
+    owner.watch(1);  // Forgets 2.
+    check(owner.held(1) && owner.latched(1).latched && !owner.held(2) && owner.latched(2).latched, "A forgotten latched texture watched again is latched");
+    owner.adopt(2);  // Forgets 3.
+    check(owner.tracked(2) && owner.latched(2).latched, "A forgotten latched texture tracked again is latched");
+    owner.track(7, true, depth_write);  // Forgets 4.
+    check(!owner.latched(7).latched && !owner.latch_lost(), "A texture tracked from its creation starts unlatched");
+  }
+  {
+    // A full record of forgotten latched textures loses a latch: every
+    // texture not held, or held again, counts as latched; a created one does
+    // not.
+    table owner;
+    for (std::uint64_t resource = 1; resource <= 8; ++resource) {
+      owner.watch(resource);
+      owner.set_latch(resource);
+    }
+    check(!owner.latch_lost() && owner.latched(1).latched && !owner.latched(100).latched, "The record holds as many forgotten latched textures as the table");
+    owner.watch(9);  // Forgets 5 with the record full.
+    owner.watch(10);
+    check(owner.latch_lost() && owner.latched(100).latched && owner.latched(10).latched, "Overflowing the record latches every texture not held and every one held again");
+    owner.track(11, true, depth_write);
+    check(!owner.latched(11).latched, "A texture tracked from its creation starts unlatched after a latch was lost");
   }
   {
     // A depth clear on a list that names the texture in no barrier keeps the

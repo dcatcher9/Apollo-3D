@@ -550,7 +550,8 @@ namespace sunshine_streamline::depth_capture {
   struct proven_state_counts {
     // The textures held: tracked, or watched from an adapter's retention
     // (retain_source); of those, latched by an executed enhanced barrier, and
-    // whether a full table forgot a latched one (proven_state.h).
+    // whether a latch was lost: a full table forgot a latched one while its
+    // record of forgotten latched textures was full (proven_state.h).
     std::uint64_t tracked{}, latched{};
     bool latch_lost{};
     // Executed lists that left every texture unproven, by why the hooks did
