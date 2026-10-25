@@ -21,9 +21,10 @@ namespace sunshine_streamline::depth_capture {
     std::uint64_t source_present_generation{}; // Frozen separately at each tag entry.
     // Volatile API tags must copy at this call, even for a tracked ReShade DSV.
     bool force_snapshot{};
-    // The copy is recorded inside the tag call that supplied the resource. Frame
-    // generation presents earlier frames on another thread meanwhile; such a
-    // Present cannot end this call's own lifetime (see source_lifetime_current).
+    // The copy is recorded inside the call that supplied the resource: a tag
+    // call, or an evaluation whose own local inputs name it. Frame generation
+    // presents earlier frames on another thread meanwhile; such a Present
+    // cannot end this call's own lifetime (see source_lifetime_current).
     bool at_tag_call{};
     // The copy is made for the frame the tag was set for, before that frame's
     // Present: an evaluation that names the tag's own frame
@@ -290,13 +291,21 @@ namespace sunshine_streamline::depth_capture {
   // malformed-input marker's epoch 0 not) within window_ms. Grants nothing.
   bool evaluation_live(std::uint64_t now_ms, std::uint64_t window_ms);
   // An enabled Streamline FG scope (its observation epoch and viewport) owns
-  // that viewport's depth only while it is live: FG was turned on less than
-  // a second ago (enabled_tick), or a copy of its own source
-  // (fg_depth_key(viewport)) was recorded and accepted by the API within the
-  // last second, the same second after which a silent or rejected source
-  // loses its association. Otherwise the viewport's ordinary SR/RR depth may
-  // supply depth, and the next accepted FG copy takes ownership back.
+  // that viewport's depth only for the frames FG supplied: it is live while
+  // its newest frame outcome is a copy of its own source
+  // (fg_depth_key(viewport)) that was recorded and accepted by the API since
+  // FG was turned on (enabled_tick), within the last second (the same second
+  // after which a silent or rejected source loses its association). Turning
+  // FG on, or a single copy, grants nothing more. Otherwise the viewport's
+  // ordinary SR/RR depth may supply depth, and the next accepted FG copy
+  // takes ownership back.
   bool frame_generation_scope_live(std::uint64_t epoch, std::uint32_t viewport, std::uint64_t enabled_tick);
+  // A frame of that FG scope ended without a copy (its FG tag refused, its
+  // copy deferred to its Present cancelled by an untag, refused or lapsed,
+  // or DLSS-G's own evaluation of it refused). sequence is the frame's
+  // observation sequence (its tag call's, or the evaluation's): an accepted
+  // copy of a newer frame keeps the scope live, one of an older frame does not.
+  void frame_generation_missed(std::uint64_t epoch, std::uint32_t viewport, std::uint64_t sequence);
   bool provider_identity(std::uint64_t queue, sunshine_scene_depth::provider_kind &provider,
     std::uint64_t &source_id);
   // An explicit feature release or authority revocation differs from a missing frame.

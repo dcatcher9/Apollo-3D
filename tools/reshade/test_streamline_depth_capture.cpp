@@ -363,10 +363,12 @@ namespace sunshine_streamline::depth_capture {
         fixture::clear_captures();
       }
       {
-        // An enabled FG scope owns its viewport only while live: within a
-        // second of FG On, or of a recorded copy of its own source that the
-        // API accepted (Assassin's Creed Shadows 10-22 kept FG on with no FG
-        // depth captured, which locked the viewport's SR depth out).
+        // An enabled FG scope owns its viewport only for the frames FG
+        // supplied: while its newest frame outcome is a recorded copy of its
+        // own source that the API accepted since FG On, within a second
+        // (Assassin's Creed Shadows 10-22 kept FG on with no FG depth
+        // captured, which locked the viewport's SR depth out; 10-24 a single
+        // FG copy, or FG On alone, locked it out for a second).
         constexpr std::uint64_t epoch = 7, fg = (1ull << 63) | 2;
         const auto finished = [&](std::uint64_t id, std::uint64_t source, std::uint32_t viewport, std::uint64_t sequence,
             bool successful, bool metadata_only = false) {
@@ -378,7 +380,8 @@ namespace sunshine_streamline::depth_capture {
           return slots[0].finished;
         };
         const auto silent_since = [] { return GetTickCount64() - sunshine_freshness::fg_silent_ms - 1; };
-        if (!frame_generation_scope_live(epoch, 2, GetTickCount64()) || frame_generation_scope_live(epoch, 2, silent_since()) ||
+        // FG On alone owns nothing.
+        if (frame_generation_scope_live(epoch, 2, GetTickCount64()) || frame_generation_scope_live(epoch, 2, silent_since()) ||
             frame_generation_scope_live(epoch, 2, 0)) return false;
         // A refused FG boundary begins an evaluation but accepts no copy.
         begin_evaluation(epoch, 10, 2, provider_kind::streamline, fg, 0);
@@ -398,6 +401,20 @@ namespace sunshine_streamline::depth_capture {
         // An accepted copy of its own source makes it live for a second.
         begin_evaluation(epoch, 14, 2, provider_kind::streamline, fg, 0);
         if (!finished(55, fg, 2, 14, true) || !frame_generation_scope_live(epoch, 2, silent_since())) return false;
+        // A copy accepted before this FG On belongs to an earlier scope.
+        if (frame_generation_scope_live(epoch, 2, GetTickCount64() + 1)) return false;
+        // A newer frame without an FG copy turns it silent at once; another
+        // viewport's miss, or one of an older frame, changes nothing.
+        frame_generation_missed(epoch, 3, 99);
+        frame_generation_missed(epoch, 2, 13);
+        if (!frame_generation_scope_live(epoch, 2, silent_since())) return false;
+        frame_generation_missed(epoch, 2, 15);
+        if (frame_generation_scope_live(epoch, 2, silent_since())) return false;
+        // An accepted copy of a newer frame owns it again; a late miss of an
+        // older frame does not end that.
+        if (!finished(56, fg, 2, 16, true) || !frame_generation_scope_live(epoch, 2, silent_since())) return false;
+        frame_generation_missed(epoch, 2, 15);
+        if (!frame_generation_scope_live(epoch, 2, silent_since())) return false;
         auto &current = evaluations[provider_index(provider_kind::streamline)];
         const auto own = std::find_if(current.views.begin(), current.views.end(), [&](const evaluation_head &head) {
           return head.epoch == epoch && head.viewport == 2 && head.source_id == fg;
@@ -405,21 +422,24 @@ namespace sunshine_streamline::depth_capture {
         if (own == current.views.end() || !own->accepted_tick) return false;
         own->accepted_tick -= sunshine_freshness::fg_silent_ms + 1;
         if (frame_generation_scope_live(epoch, 2, silent_since())) return false;
-        // Without an active capture owner only the first second counts.
+        // Without an active capture owner nothing is live.
         own->accepted_tick = GetTickCount64(); requested = false;
-        if (frame_generation_scope_live(epoch, 2, silent_since()) || !frame_generation_scope_live(epoch, 2, GetTickCount64()))
+        if (frame_generation_scope_live(epoch, 2, silent_since()) || frame_generation_scope_live(epoch, 2, GetTickCount64()))
           return false;
         requested = true; fixture::clear_captures();
       }
       {
-        // A depth copy recorded on a COMPUTE list (S22, N7) is its FG scope's
-        // accepted copy only once the Present queue can read it: its SDK call
-        // succeeded, its submission carries the capture owner's fence, its
-        // recording was reset and that fence passed, in any order. One never
-        // submitted (its queue had no place), or submitted but not yet reset
-        // or complete, keeps the scope silent. A compute copy that nominates
-        // no depth (an auxiliary input) is never accepted; a direct-list copy
-        // still is at its call.
+        // A depth copy recorded on a COMPUTE list (S22, N7) is its FG
+        // scope's accepted copy only once the Present queue can read it:
+        // its SDK call succeeded, its submission carries the capture owner's
+        // fence, its recording was reset and that fence passed, in any order.
+        // One never submitted (its queue had no place), or submitted but not
+        // yet reset or complete, keeps the scope silent, so a handover from
+        // SR depth never waits on FG pixels still in flight. An accepted one
+        // whose producer fails later (a replay, its recording discarded, its
+        // queue gone) leaves its frame missed; a consumer's failure does not,
+        // and a direct-list copy's failure changes nothing. A compute copy
+        // that nominates no depth (an auxiliary input) is never accepted.
         constexpr std::uint64_t epoch = 8, fg = (1ull << 63) | 2;
         struct completion_fence final : ID3D12Fence {
           UINT64 completed{};
@@ -447,9 +467,9 @@ namespace sunshine_streamline::depth_capture {
         } release{*entry};
         const auto compute_queue = reinterpret_cast<std::uint64_t>(&fence);
         const auto silent_since = [] { return GetTickCount64() - sunshine_freshness::fg_silent_ms - 1; };
-        const auto copy = [&](std::uint64_t id, std::uint64_t sequence, bool compute, bool submitted, bool nominated = true) {
+        const auto copy = [&](std::uint64_t id, std::uint64_t sequence, bool compute, bool submitted) {
           begin_evaluation(epoch, sequence, 2, provider_kind::streamline, fg, 0);
-          slots[0] = {}; slots[0].id = id; slots[0].compute_list = compute; slots[0].source_nominated = nominated;
+          slots[0] = {}; slots[0].id = id; slots[0].compute_list = compute; slots[0].source_nominated = true;
           slots[0].metadata.provider = provider_kind::streamline; slots[0].metadata.epoch = epoch;
           slots[0].metadata.sequence = sequence; slots[0].metadata.viewport = 2; slots[0].metadata.source_id = fg;
           slots[0].metadata.frame_generation_input = true; slots[0].metadata.tick = GetTickCount64();
@@ -465,6 +485,11 @@ namespace sunshine_streamline::depth_capture {
           ~recorded_flag() { compute_copies_recorded = saved; }
         } restore_flag;
         compute_copies_recorded = true; // As record_impl sets it at a compute-list copy.
+        const auto accepted = [&] {
+          for (const auto &view : evaluations[provider_index(provider_kind::streamline)].views)
+            if (view.epoch == epoch && view.viewport == 2 && view.source_id == fg) return view.accepted_sequence;
+          return std::uint64_t{};
+        };
         copy(61, 20, true, false); finish(61, true);
         if (!slots[0].finished || live()) return false;
         slots[0].producer_submitted = true; slots[0].producer_fence = 20; slots[0].queue = compute_queue;
@@ -475,19 +500,24 @@ namespace sunshine_streamline::depth_capture {
         fence.completed = 20;
         if (!live()) return false;
         // Submitted, reset and complete before its call finished.
-        for (auto &view : evaluations[provider_index(provider_kind::streamline)].views)
-          if (view.epoch == epoch && view.viewport == 2 && view.source_id == fg) view.accepted_tick = 0;
         copy(62, 21, true, true); reset(); fence.completed = 21;
-        if (live()) return false;
+        if (!live() || accepted() != 20) return false;
         finish(62, true);
-        if (!live()) return false;
-        // An auxiliary compute copy (no depth nomination) is never accepted.
-        for (auto &view : evaluations[provider_index(provider_kind::streamline)].views)
-          if (view.epoch == epoch && view.viewport == 2 && view.source_id == fg) view.accepted_tick = 0;
-        copy(63, 22, true, true, false); reset(); fence.completed = 22; finish(63, true);
+        if (!live() || accepted() != 21) return false;
+        invalidate(slots[0], capture_failure::replay);
         if (live()) return false;
-        // A direct-list copy is accepted at its call, before its submission.
-        copy(64, 23, false, false); finish(64, true);
+        copy(63, 22, true, true); finish(63, true); reset(); fence.completed = 22;
+        if (!live()) return false;
+        invalidate(slots[0], capture_failure::consumer_capacity);
+        if (!live()) return false;
+        copy(64, 23, true, true); slots[0].producer_fence = 0; finish(64, true);
+        invalidate(slots[0], capture_failure::discarded_recording);
+        if (live()) return false;
+        // An auxiliary compute copy (no nominated depth) is never accepted.
+        copy(66, 25, true, true); slots[0].source_nominated = false; finish(66, true); reset(); fence.completed = 25;
+        if (live()) return false;
+        copy(65, 24, false, false); finish(65, true);
+        invalidate(slots[0], capture_failure::replay);
         if (!live()) return false;
         fixture::clear_captures();
       }

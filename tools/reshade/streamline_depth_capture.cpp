@@ -195,6 +195,20 @@ namespace sunshine_streamline::depth_capture {
       if (why != capture_failure::producer_signal_failed && why != capture_failure::consumer_signal_failed &&
           why != capture_failure::consumer_capacity && why != capture_failure::consumer_queue_changed)
         value.nomination_invalid = true;
+      // An FG copy recorded on a COMPUTE list (DLSS-G's own input, or an FG
+      // tag's: S22, N7) whose producer can no longer supply its frame (its
+      // recording discarded unsubmitted, as when its queue has no place,
+      // replayed, or its queue gone) leaves that frame without an FG copy,
+      // exactly as frame_generation_missed records: an accepted copy that
+      // never reaches a consumer keeps no SR depth out.
+      const auto &m = value.metadata;
+      if (value.compute_list && value.source_nominated && m.frame_generation_input &&
+          m.provider == provider_kind::streamline && m.epoch && m.sequence &&
+          why != capture_failure::consumer_signal_failed && why != capture_failure::consumer_capacity &&
+          why != capture_failure::consumer_queue_changed)
+        for (auto &view : evaluations[provider_index(m.provider)].views)
+          if (view.epoch == m.epoch && view.viewport == m.viewport && view.source_id == m.source_id)
+            view.missed_sequence = std::max(view.missed_sequence, m.sequence);
     }
 
     command_storage::handle command(std::uint64_t native, std::uint64_t cookie, bool create = false) {
@@ -1186,10 +1200,13 @@ namespace sunshine_streamline::depth_capture {
     // scope's accepted copy (frame_generation_scope_live) only once the
     // Present queue can read it: its SDK call succeeded, its submission
     // carries the capture owner's fence, its recording was reset and that
-    // fence passed (completed_snapshot's rule for another queue's copy). One
-    // never submitted, as when its queue has no place, or never reset keeps
-    // no other depth out of its viewport. Called at the copy's call, its
-    // submission and each liveness query (frame_generation_scope_live).
+    // fence passed (completed_snapshot's rule for another queue's copy).
+    // The scope then turns live with readable FG pixels, so its handover
+    // drops no SR depth for a copy still in flight; Streamline resets its
+    // DLSS-G recording frames later. One never submitted, as when its queue
+    // has no place, or never reset keeps no other depth out of its viewport.
+    // Called at the copy's call, its submission and each liveness query
+    // (frame_generation_scope_live).
     void accept_compute_copy(const slot &value) {
       const auto &m = value.metadata;
       if (!value.compute_list || !value.source_nominated || !value.finished || !value.success || value.invalid ||
@@ -1201,13 +1218,16 @@ namespace sunshine_streamline::depth_capture {
         return view.epoch == m.epoch && view.viewport == m.viewport && view.source_id == m.source_id;
       };
       if (std::none_of(views.begin(), views.end(), [&](const auto &view) {
-            return owned(view) && view.accepted_tick < m.tick; }) ||
+            return owned(view) && view.accepted_sequence < m.sequence; }) ||
           !producer_recording_retired(value))
         return;
       const auto progress = producer_progress(value);
       if (!progress.valid() || progress.completed < value.producer_fence) return;
       for (auto &view : views)
-        if (owned(view)) view.accepted_tick = std::max(view.accepted_tick, m.tick);
+        if (owned(view)) {
+          view.accepted_tick = std::max(view.accepted_tick, m.tick);
+          view.accepted_sequence = std::max(view.accepted_sequence, m.sequence);
+        }
     }
     void submitted(std::uint64_t native, std::uint32_t count, const native_observer::command_identity *values) {
       std::lock_guard lock(mutex);
@@ -1888,11 +1908,6 @@ namespace sunshine_streamline::depth_capture {
     return false;
   }
   bool frame_generation_scope_live(std::uint64_t epoch, std::uint32_t viewport, std::uint64_t enabled_tick) {
-    // A tick slightly ahead of this read (another thread's) is fresh.
-    const auto within = [](std::uint64_t tick, std::uint64_t now) {
-      return tick && sunshine_freshness::ahead_tolerant_le(tick, now, sunshine_freshness::fg_silent_ms);
-    };
-    if (within(enabled_tick, scope_now())) return true;
     if (!requested.load() || !epoch) return false;
     std::lock_guard lock(mutex);
     const auto now = scope_now();
@@ -1903,9 +1918,21 @@ namespace sunshine_streamline::depth_capture {
         if (value.id && value.compute_list && value.metadata.epoch == epoch && value.metadata.viewport == viewport &&
             value.metadata.source_id == source)
           accept_compute_copy(value);
+    // A tick slightly ahead of this read (another thread's) is fresh.
     for (const auto &view : evaluations[provider_index(provider_kind::streamline)].views)
-      if (view.epoch == epoch && view.viewport == viewport && view.source_id == source && within(view.accepted_tick, now)) return true;
+      if (view.epoch == epoch && view.viewport == viewport && view.source_id == source && view.accepted_tick &&
+          view.accepted_tick >= enabled_tick && view.accepted_sequence > view.missed_sequence &&
+          sunshine_freshness::ahead_tolerant_le(view.accepted_tick, now, sunshine_freshness::fg_silent_ms))
+        return true;
     return false;
+  }
+  void frame_generation_missed(std::uint64_t epoch, std::uint32_t viewport, std::uint64_t sequence) {
+    if (!requested.load() || !epoch || !sequence) return;
+    std::lock_guard lock(mutex);
+    const auto source = sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(viewport));
+    for (auto &view : evaluations[provider_index(provider_kind::streamline)].views)
+      if (view.epoch == epoch && view.viewport == viewport && view.source_id == source)
+        view.missed_sequence = std::max(view.missed_sequence, sequence);
   }
   bool provider_identity(std::uint64_t native, provider_kind &provider, std::uint64_t &source_id) {
     source_id = 0;
@@ -2097,6 +2124,14 @@ namespace sunshine_streamline::depth_capture {
 
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
   namespace {
+    // One Present of an earlier frame landing inside the next nominated copy's
+    // call, between its input's read and the copy (record_impl).
+    std::atomic<bool> present_before_next_copy{};
+  }
+  extern "C" __declspec(dllexport) void SunshineStreamlineTestPresentBeforeNextCopy() {
+    present_before_next_copy.store(true, std::memory_order_release);
+  }
+  namespace {
     std::atomic<HANDLE> nomination_gate_entered{}, nomination_gate_release{};
     void wait_nomination_gate() {
       if (const auto entered = nomination_gate_entered.exchange(nullptr, std::memory_order_acq_rel)) {
@@ -2123,12 +2158,15 @@ namespace sunshine_streamline::depth_capture {
   }
 #endif
   SUNSHINE_CAPTURE_STATIC bool source_lifetime_current(const input &value, std::uint64_t current_generation) {
-    // A copy recorded synchronously inside the authenticated tag call that
-    // supplied the resource is current by construction, for OnlyValidNow and
-    // UntilPresent alike: an independent FG Present of an earlier frame cannot
-    // end this call's lifetime. With multi frame generation such Presents land
-    // between reading the tag and recording its copy on a fraction of real
-    // frames. A later use of the tag's own frame (own_frame) is current for
+    // A copy recorded synchronously inside the authenticated call that
+    // supplied the resource (a tag call, or an evaluation's own local input)
+    // is current by construction, for OnlyValidNow and UntilPresent alike: an
+    // independent FG Present of an earlier frame cannot end this call's
+    // lifetime. With frame generation such Presents land between reading the
+    // input and recording its copy on a fraction of real frames, more often
+    // while new storage is allocated without the lock (Assassin's Creed
+    // Shadows 10-24: its SR evaluation's local depth input, each dynamic
+    // resolution change). A later use of the tag's own frame (own_frame) is current for
     // the same reason: a Present since the tag was an earlier frame's (the
     // matrix's S7). Any other later use, and a delayed preservation copy,
     // still require an unchanged generation.
@@ -2262,6 +2300,11 @@ namespace sunshine_streamline::depth_capture {
       // queue holding one, no GPU copy is recorded that could never be read.
       if (on_compute && compute_unplaced && !compute_producer_placed())
         return reject(status::exhausted, record_stage::capacity);
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+      if (nominate_source && !preservation_only && !diagnostic_copy &&
+          present_before_next_copy.exchange(false, std::memory_order_acq_rel))
+        ++value.source->present_generation;
+#endif
       const auto current_generation = source_present_generation(value.source);
       if (diagnostic) diagnostic->current_generation = current_generation;
       if (!source_lifetime_current(value, current_generation))
@@ -2844,8 +2887,10 @@ namespace sunshine_streamline::depth_capture {
         for (auto &view : evaluations[provider_index(m.provider)].views) {
           if (view.epoch != m.epoch || view.viewport != m.viewport || view.source_id != m.source_id) continue;
           // A compute-list copy is accepted once readable (accept_compute_copy).
-          if (successful && !value.nomination_only && !value.invalid && !value.compute_list)
+          if (successful && !value.nomination_only && !value.invalid && !value.compute_list) {
             view.accepted_tick = std::max(view.accepted_tick, m.tick);
+            view.accepted_sequence = std::max(view.accepted_sequence, m.sequence);
+          }
           if (m.sequence < view.result_sequence) continue;
           view.result_sequence = m.sequence;
           if (successful) view.rejected_since = 0;

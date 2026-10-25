@@ -2911,7 +2911,7 @@ namespace {
   addon_session_t::addon_session_t() = default;
   addon_session_t::~addon_session_t() = default;
   addon_session_t &addon_session() {
-    // Native hooks pin this module and ReShade can notify unload after our CRT
+    // AddonInit pins this module and ReShade can notify unload after our CRT
     // detach. One explicit session owner, not a second CRT destructor, releases
     // publisher/UI resources on normal unload. The empty session remains valid
     // for reinitialization; final process reclamation belongs to Windows.
@@ -3110,6 +3110,16 @@ extern "C" {
 
   __declspec(dllexport) bool AddonInit(HMODULE addon, HMODULE reshade) {
     if (sunshine_addon_lifetime::stopping()) return false;
+    // Pin this module before anything below can start pool work, install a
+    // hook or register a callback. ReShade unloads add-ons whenever a game
+    // destroys its last device (Assassin's Creed Shadows does at startup),
+    // while module discovery and shader compiles this add-on started on pool
+    // threads may still be running its code and its imports (D3DCompiler).
+    // Pinned, it stays mapped until process exit, and the next device
+    // initializes it again through AddonInit.
+    HMODULE self{};
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+        reinterpret_cast<LPCWSTR>(&AddonInit), &self)) return false;
     if (!addon_session().begin()) return false;
     if (!reshade::register_addon(addon, reshade)) {
       addon_session().lifecycle.store(addon_session_t::phase::inactive, std::memory_order_release);

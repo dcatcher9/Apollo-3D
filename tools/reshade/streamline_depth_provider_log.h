@@ -73,9 +73,10 @@ namespace sunshine_streamline::provider {
   // "Sunshine depth render size": the size changes of one source.
   void format_render_size(char *text, std::size_t size, const render_size_state &value);
   // "Sunshine Streamline frame generation depth scope": a required scope
-  // turned silent or live again.
+  // turned silent or live again; changes counts its turns so far (the line
+  // comes at most every 5 s, so turns between lines are counted only).
   void format_frame_generation_scope(char *text, std::size_t size, bool silent, std::uint32_t viewport,
-    std::uint64_t epoch);
+    std::uint64_t epoch, std::uint64_t changes);
   // "Sunshine API depth": no API source is associated with the queue; with
   // hold, ownership is held in mono for a provider handoff of at most hold_ms.
   void format_unassociated(char *text, std::size_t size, depth_capture::status status,

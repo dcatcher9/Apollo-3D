@@ -436,9 +436,12 @@ data take priority over NGX, including while its current snapshot is pending. A 
 copy stays with that source and uses the documented bounded real-depth reuse or mono behavior;
 it does not borrow an NGX depth texture and attach unrelated SL constants. A depth untag (a null
 resource, which ends the tag) is not a capture attempt and never withdraws depth already captured
-at the frame's tag. FG keeps that priority only while its scope is live: FG was turned on less than
-a second ago, or one of its depth copies was accepted within the last second. Otherwise the same
-viewport's SR/RR depth (or NGX) may supply depth until the next accepted FG copy takes it back.
+at the frame's tag. FG keeps that priority only for the frames it supplied: while its newest frame
+outcome is an accepted depth copy, made since FG On and within the last second. A frame without
+one (its FG tag refused, its deferred copy cancelled, refused or lapsed, or DLSS-G's own evaluation
+of it refused) lets the same viewport's SR/RR evaluations nominate again, and their depth (or NGX)
+replaces FG's once FG's last copy can no longer be held (the source age), until the next accepted
+FG copy takes it back; FG On alone, or a single copy, grants nothing more.
 Without such a source enabled FG still keeps the game in mono; it never falls back to generic depth.
 Explicit FG Off retires that source and lets a fresh NGX submission resume. Motion-vector interpolation of two real depth
 frames for FG 2x is future work; the current implementation does not generate intermediate depth.
@@ -699,7 +702,17 @@ INFO `DLSS-G inputs` counts `DLSSG.Depth` FG-scope copies per real-frame DLSS-G 
 UI inputs captured, or says that Streamline FG tags supplied the depth (`tag_copied`) and how many
 UI inputs the game's own Streamline UI tags copied first (`dlssg_ui` `tag_copied`, per kind); WARN names
 the refusals when DLSS-G evaluated with no copy (`missing_state`: DLSS-G's command list observed no
-state for its depth; `observer_coverage`: ReShade does not cover that list). A flat
+state for its depth; `observer_coverage`: ReShade does not cover that list), and when it copied but
+refused more evaluations than it copied (other than for a tag's copy): each refused frame turns the
+FG scope silent, so FG depth came and went. INFO `Depth losses` counts every loss episode while the
+export streamed, whatever the 5 s interval gate above: the logged ones plus those the add-on
+counted without logging them (`suppressed_episodes`; it logs at most four a second), their rate
+per streamed minute, the logged ones' time without depth, and their reasons. Compare sessions by
+these counts: a fix can bring `Depth` to PASS while short losses remain (Assassin's Creed Shadows
+10-24: 66 episodes, about 29 a minute). `Placement flat` counts the re-entry fade with the flat
+output (`scene_fading`, 500 ms after every placement interruption of more than 250 ms; Shadows
+10-24: 15% flat and 19% fading): a window is an interval of which a quarter was flat or fading, and
+the summary gives both shares. A flat
 window is reported as INFO `Placement calibration` only when every placement-controller run
 without placement inside it (raw automation other than `ready`/`holding_reference`, or
 Streamline scale other than `ready`) followed a cause the log names (a depth-provider or frame
@@ -871,10 +884,24 @@ recorded state, nothing is refused, and every Present shows fresh FG depth (S11;
 records `UNORDERED_ACCESS`, a write state, a `ValidUntilPresent` tag is copied before its frame's
 Present instead (counted on the deferred line) and a `ValidUntilEvaluate` one still at its call;
 every Present shows fresh FG depth. With FG options on
-and every FG depth tag's copy cancelled by the same frame's untag (R7), the
-same viewport's SR depth takes over once the FG scope is silent; each generated presentation, at
+and every FG depth tag's copy cancelled by the same frame's untag (R7), the FG scope owns no depth
+for those frames: their Presents hold the last FG copy while it is younger than the source age,
+from the second one on over a fresh SR copy, and then show the same viewport's fresh SR depth, with
+no readiness loss logged (until 10-24 the scope stayed live, with neither FG nor SR depth, for a
+second after its last copy). Each generated presentation, at
 2x and 3x, holds its real frame's SR copy, also after the fixture's window leaves the foreground
-(the export stop invalidates reuse once) and back, with no readiness loss logged.
+(the export stop invalidates reuse once) and back, with no readiness loss logged. A single accepted
+FG copy amid such frames (Assassin's Creed Shadows, 10-24) shows at its Present and is held while it
+is younger than the source age, and SR depth returns then, four times, with no readiness loss; a
+`MEASURE native-provider SLFG-stray-FG-copy` line counts the Presents not rendered while the placement
+controller settles on the other logical source, as at any FG/SR switch. Then the test add-on's
+`SunshineStreamlineTestPresentBeforeNextCopy` makes a Present of an earlier frame land inside the SR
+evaluation, between the read of its own local depth input and the copy (as DLSS-G's Presents on its
+own thread do in Assassin's Creed Shadows); four such real frames keep their fresh SR depth with no
+readiness loss. Once accepted FG copies own the viewport again, six rounds of two FG copies and two
+frames without one (the second one's SR copy fresh, its evaluation having come while the scope was
+silent) hold the last FG copy at every frame without one, with every Present rendered at the same
+scale and no readiness loss (`PASS native SLFG occasional miss`).
 The test executable also exports the NGX stand-in's entry points (below); its DLSS-G case creates
 feature 11 and sets only the named `DLSSG.*` inputs (no capture). With its FG depth tag command-less
 and untagged in the same frame (its deferred copy cancelled, R7) and its HUD-less and Backbuffer
@@ -891,7 +918,15 @@ HUD-less/Backbuffer pair reaches UI detection as a same-batch pair. HUD-less and
 with the game's command list keep precedence per kind: across two NGX lines `dlssg_ui` offers and
 captures nothing more while its `tag_copied` grows, and a later UI capture gate window still counts
 the tags' own same-batch pairs; untagged in their frame again, DLSS-G's inputs are captured again. An FG tag sent with a
-command list copies the frame first and keeps precedence (`tag_copied`); refused again, SR depth
+command list copies the frame first and keeps precedence (`tag_copied`). DLSS-G evaluating on its
+own COMPUTE list on its own compute queue (as Streamline does in Assassin's Creed Shadows, after the
+game's work ran) owns the FG scope the same way from depth observed there, with no `command_type`
+refusal (N7: the compute queue takes its fence at the copy's submission). DLSS-G cycles three
+recordings and resets each only when it records into it again, so a frame's copy is readable three
+frames later. The case starts with that depth unobserved (refused, SR depth owns the viewport), and
+the handover to DLSS-G's first readable copy, the real/generated pairs after it and two NGX lines
+show no readiness loss; a scope that turned live at the copy's submission lost depth until the
+reset. Refused again, SR depth
 returns. Last, with the FG depth tag command-less and not untagged, a frame whose Present comes
 after the game's work but before DLSS-G evaluated it (an earlier frame's paced or generated Present)
 keeps its copy deferred (the Present holds the previous depth, `waited_for_frame` counts it); the
@@ -1326,6 +1361,20 @@ Every checked present inspects current depth and source-color pixels, including 
 missing/unsupported depth. Run one frozen executable against both control and treatment;
 these checks deliberately exercise the capture/selection/calibration boundaries.
 
+`reshade_addon_unload_runtime_test` uses the same four arguments as the probe-round fixture and
+checks the add-on across ReShade's add-on unload
+([its session lifetime](../../docs/reshade-sbs.md#streamline-depth-selection)). Before the game's
+device it creates and destroys a startup device with no queue, swapchain or frame, as Assassin's
+Creed Shadows does. Its initialization starts the add-on's module discovery and content-sampler
+compile on pool threads, and the test add-on's `SunshineSbsTestHoldPoolWork` adds one pool callback
+of the add-on's own code that waits until after the unload, then compiles through the add-on's
+D3DCompiler import. ReShade must uninitialize the add-on with that device and leave the module
+mapped; the held callback must then compile and return, and the game's device must initialize the
+same module again and render native Game 3D from its drawn depth. Without AddonInit's pin the
+module is unmapped and the fixture fails at that check. Where the official runtime and frozen
+shaders are configured it is registered as `reshade_addon_unload_runtime`, labelled `contract;gpu`
+and `RUN_SERIAL` with the `gpu` resource lock, so the contract runner runs it.
+
 Shared native-depth, uniform and HDR mono observations of the depth fixtures live in
 `test_raw_runtime_fixture.h`. The shared shader/transport fixtures retain their own contracts.
 
@@ -1649,7 +1698,9 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   (`provider::select_frame_generation_scope`), NGX's copy rule under FG
   (`sunshine_ngx::frame_generation_owns_depth`), `select_provider` with a protected owner,
   readable and pending sources and required or excluded FG, per-queue ownership and
-  `establish_provider`'s watermark, and every reason of `decide_display`. Its freshness table
+  `establish_provider`'s watermark, a single FG copy's handover to SR snapshots that are readable
+  only frames later (the held FG copy, `frame_generation_holds`, and the shared watermark), and
+  every reason of `decide_display`. Its freshness table
   pins each age limit one millisecond either side against an explicit clock: the source age at
   every selection site, the association timeout of `expire_association` and `evaluation_live`, an
   FG scope's enabled and accepted ticks, which also admit a tick ahead of the clock (the capture
@@ -1734,6 +1785,12 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   Generic's copy) and `enhanced_layout_latch` (a depth clear after an enhanced barrier, and a later
   clear-only list, prove the `DEPTH_STENCIL_WRITE` layout, so the end-of-frame copy uses enhanced
   barriers under the debug layer; a destroyed latched texture is forgotten with its latch).
+  Its `dlssg_compute_list_capture` checks DLSS-G's copy on its own COMPUTE list under the debug
+  layer (N7): a depth-stencil depth observed in `NON_PIXEL_SHADER_RESOURCE` there is copied there
+  with exact bytes into storage resting in COMMON, unobserved it is refused as `missing_state`, a
+  Streamline FG tag input there is copied as well (S22, never refused as `command_type`), the
+  compute queue takes a fence at its first submission of the copy, and the direct consumer reads it
+  only once the compute recording was reset.
 - [`test_read_only_dsv.cpp`](test_read_only_dsv.cpp) (`reshade_read_only_dsv`) pins the read-only
   depth-stencil view table of [`read_only_dsv.h`](read_only_dsv.h), which decides the Generic
   path's unbind and clear-like draw of a bound view (D11c): a view created read-only stays so until
@@ -1754,7 +1811,8 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   that submission), lets an observed state win there and refuses a direct-only declared state for
   its state; and the capture-owner self-test (`reshade_streamline_camera_probe`) accepts a
   compute-list FG copy for its scope only once readable (submitted with the fence, reset, fence
-  passed), never an auxiliary one, and a direct-list copy at its call.
+  passed), never an auxiliary one, and a direct-list copy at its call; an accepted compute-list copy
+  whose producer fails later leaves its frame missed, a consumer's failure does not.
 
 ### Independent renderer reference tests
 

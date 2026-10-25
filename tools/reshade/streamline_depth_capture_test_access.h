@@ -232,6 +232,10 @@ namespace sunshine_streamline::depth_capture {
       // Capture tick of this view's newest recorded copy the API accepted
       // (frame_generation_scope_live).
       std::uint64_t accepted_tick{};
+      // The FG scope's newest frame outcomes by observation sequence: the
+      // newest accepted copy's, and the newest frame without one
+      // (frame_generation_missed). The newer of the two decides the scope.
+      std::uint64_t accepted_sequence{}, missed_sequence{};
     };
     struct evaluation_namespace {
       std::array<evaluation_head, 4> views{};

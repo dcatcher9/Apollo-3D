@@ -16,9 +16,9 @@ def line(t, text, level='INFO'):
     return f'{t}:000 [ 1234] | {level:5} | {text}'
 
 
-def output(t, published, fg, flat, fresh, missing, runtime='0x1'):
+def output(t, published, fg, flat, fresh, missing, runtime='0x1', fading=0):
     return line(t, f'[Sunshine 3D] Sunshine SBS output: published={published} fg={fg} scene_flat={flat} '
-                   f'scene_fading=0 published_fresh_depth={fresh} published_reused_depth=0 '
+                   f'scene_fading={fading} published_fresh_depth={fresh} published_reused_depth=0 '
                    f'published_depth_missing={missing} (unavailable={missing} reuse_after_gap=0 reuse_other_source=0) '
                    f'runtime={runtime} generation=1; cumulative')
 
@@ -957,6 +957,12 @@ class ReadinessReport(unittest.TestCase):
                                          'offered=0 captured=0 refused=none')])
         self.assertEqual(mostly_refused['DLSS-G inputs'].status, 'WARN')
         self.assertIn('does not cover', mostly_refused['DLSS-G inputs'].detail)
+        # Copies in only a few evaluations, most refused: FG depth came and went, a warning.
+        intermittent = run(BASE + [ngx('copied=10 inner_frames=0 refused=missing_state:290',
+                                       'offered=0 captured=0 refused=none')])
+        self.assertEqual(intermittent['DLSS-G inputs'].status, 'WARN')
+        self.assertIn('supplied 10 FG-scope depth copies in 300 real-frame', intermittent['DLSS-G inputs'].detail)
+        self.assertIn('more were refused than copied', intermittent['DLSS-G inputs'].detail)
         # No DLSS-G evaluation, or an add-on before 10-23: no check.
         self.assertNotIn('DLSS-G inputs', run(BASE + [ngx('copied=0 inner_frames=0 refused=none',
                                                           'offered=0 captured=0 refused=none', 0)]))
@@ -986,7 +992,15 @@ class ReadinessReport(unittest.TestCase):
         self.assertEqual(checks['Depth'].times, [
             '10:00:17.000-10:00:18.000 (1859 ms) retained_depth_expired, NGX selection=inactive_views '
             '(the game supplied no depth)'])
-        self.assertEqual(checks['Depth losses'].detail, 'retained_depth_expired 1')
+        self.assertEqual(checks['Depth losses'].detail,
+                         '1 episode, 3.3 per streamed minute, 1.9 s without depth in the logged ones; '
+                         'retained_depth_expired 1')
+        # Episodes the add-on counted without logging them (at most four are logged a second) count too.
+        counted = run(BASE + [lost, recovered.replace('suppressed_episodes=0', 'suppressed_episodes=2'),
+                              output('10:00:20', 1000, 0, 0, 750, 250)])
+        self.assertEqual(counted['Depth losses'].detail,
+                         '3 episodes (2 counted but not logged), 10.0 per streamed minute, 1.9 s without depth in the '
+                         'logged ones; retained_depth_expired 1')
         # A loss inside a clean interval is counted but names no window; one never recovered says so.
         quiet = run(BASE + [lost, recovered])
         self.assertEqual((quiet['Depth'].status, quiet['Depth'].times), ('PASS', []))
@@ -1220,6 +1234,13 @@ class ReadinessReport(unittest.TestCase):
         placed = run(BASE + switch[:3] + [output('10:00:20', 1000, 0, 150, 1000, 0)])
         self.assertEqual((placed['Placement flat'].status, placed['Placement flat'].times),
                          ('WARN', ['10:00:15-10:00:20']))
+        # The re-entry fade after flat output counts with it (Assassin's Creed Shadows 10-24: 15% flat and 19%
+        # fading, each brief loss followed by a 500 ms fade): a quarter of an interval flat or fading is a window.
+        faded = run(BASE + switch[:3] + [output('10:00:20', 1000, 0, 100, 1000, 0, fading=200)])
+        self.assertEqual((faded['Placement flat'].status, faded['Placement flat'].times),
+                         ('WARN', ['10:00:15-10:00:20']))
+        self.assertIn('11.1% of publications showed the colour frame with depth, 22.2% faded stereo back in',
+                      faded['Placement flat'].detail)
 
     def test_counter_line_is_parsed_and_the_last_one_counts(self):
         # An S2a counter line, as format_ui_counters wrote it before S2b.

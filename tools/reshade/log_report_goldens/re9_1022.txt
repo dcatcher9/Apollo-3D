@@ -1,7 +1,8 @@
 Game 3D readiness: re9.exe  14:49:27 to 14:51:27 (2m00s, exited (the process ended before ReShade logged its exit))
 [PASS] Add-on: loaded; output 7680x2160 PQ D3D12 (generation 2)
 [PASS] Depth: fresh from 14:49:37; 0.1% of later publications without depth
-[PASS] Placement flat: 5.5% of publications showed the colour frame with depth
+[WARN] Placement flat: 5.5% of publications showed the colour frame with depth, 0.8% faded stereo back in; flat or fading windows outside FG switches and resets
+         14:49:42-14:49:47, projection waiting_for_depth 14:49:36-14:49:43 (6.8 s with depth)
 [PASS] Capture coverage: 11438 covered (11436 observed, 2 declared states); not open: unknown 0, closed 0, render pass 0
 [PASS] Placement: camera projection drives placement
 [INFO] UI trust: 14:49:31 restored accepted UI sources ui_color:28:pq,ui_layer:28:pq,hudless:24:pq
@@ -19,7 +20,7 @@ Game 3D readiness: re9.exe  14:49:27 to 14:51:27 (2m00s, exited (the process end
 [INFO] Hidden scene: H1 hidden scene (8) in 4 samples (pre-UI image: hudless 1, layer 0), entered 2, released 0, refuted 0; 11 of 31 samples measured
 [PASS] Observation losses: records_busy 1; capacity losses (a full bounded table) below their warning rate
          14:49:46 records_busy at finish_evaluation
-[INFO] Depth losses: no_retained_depth 1, source_changed 1
+[INFO] Depth losses: 2 episodes, 1.1 per streamed minute, 0.1 s without depth in the logged ones; no_retained_depth 1, source_changed 1
 [PASS] Export: runtime_reset 2, consumer_transfer_changed 1
 [PASS] Present hitches: 2 at resets, FG switches or overlay opening
          14:49:37 export section (no step named; the slowest Present of 14:49:36-14:49:37) 14.6 ms
@@ -35,5 +36,5 @@ Game 3D readiness: re9.exe  14:49:27 to 14:51:27 (2m00s, exited (the process end
          14:51:27 WARN Reference count for ID3D12CommandQueue0 object 0000002412F0D7E0 (000000244B9FCA50) is inconsistent (7). (2 such lines)
 [PASS] Host link: ReShade SBS connected 2 time(s)
 [PASS] Encoder stalls: none
-Overall: PASS (0 fail, 0 warn)
+Overall: WARN (0 fail, 1 warn)
 Exit code: 0

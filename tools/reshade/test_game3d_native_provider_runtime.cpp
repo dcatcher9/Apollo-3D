@@ -2443,22 +2443,53 @@ namespace {
     // no FG depth tag is copied (here: sent without a command list, whose
     // copy before the frame's Present the same frame's untag cancels, R7)
     // and then untagged, while the same viewport's SR evaluation tags its
-    // own depth with commands. FG owns that viewport's depth only while an
-    // FG copy was accepted within a second; after that its scope is silent
-    // and SR supplies depth. An accepted FG copy takes ownership back at
-    // once, and SR stays shut out while FG copies keep arriving.
+    // own depth with commands. FG owns that viewport's depth only for the
+    // frames it supplied: a frame without an FG copy turns its scope silent,
+    // so the same viewport's SR evaluations are nominated again, and FG keeps
+    // the viewport only while its last copy can be held (the source age);
+    // then SR supplies depth (until 10-24 the scope stayed live for a second
+    // after its last copy, with neither FG nor SR depth). An accepted FG copy
+    // takes ownership back at once, and SR stays shut out while FG copies
+    // keep arriving.
     void fg_silent_scope() {
       run_script({"silent-scope", 80000, {},
         [&] {
           render_tracked_depth = [this] { fallback_frame(false, true); };
-          const auto silent_start = GetTickCount64();
-          for (std::uint64_t now = silent_start; now - silent_start < 700; now = GetTickCount64()) {
-            present_frame(); const auto s = inspect();
-            require(!(s.ready() && s.source.ready && !s.source.frame_generation_input && !s.source.reused_depth),
-              "SR depth replaced FG within a second of its last accepted FG copy");
+          const auto losses_before_takeover = readiness_losses();
+          // The first frame's SR evaluation still came while the previous
+          // frame's FG copy owned the viewport; the next ones' SR copies are
+          // fresh, yet every Present holds the last FG copy until it is older
+          // than the source age, and SR's fresh depth follows. The placement
+          // controller keys its calibration by logical source (projection
+          // domain), so it settles on SR's after the switch, as at any FG/SR
+          // switch; the provider's depth never lapses meanwhile.
+          {
+            const auto started = GetTickCount64();
+            status first;
+            unsigned held = 0;
+            for (;; ++held) {
+              present_frame(); const auto s = inspect();
+              if (!held) {
+                log_status("SLFG-silent-scope-first-frame", s);
+                first = s;
+              }
+              require(s.source.selected && s.source.ready, "A frame without an FG copy lost depth");
+              if (!s.source.frame_generation_input) {
+                log_status("SLFG-silent-scope-SR-takeover", s);
+                require(!s.source.reused_depth, "SR's takeover did not show its fresh depth");
+                break;
+              }
+              require(s.source.reused_depth && s.source.current.capture == first.source.current.capture,
+                "A frame without an FG copy did not hold the last FG copy");
+              require(GetTickCount64() - started < 2 * sunshine_freshness::source_age_ms,
+                "FG's last copy kept SR depth out past the source age");
+            }
+            require(held >= 2, "SR took over at the first frame whose SR copy was fresh, while FG's last copy could be held");
+            std::printf("MEASURE native-provider SLFG-silent-scope-FG-held presents=%u ms=%llu\n", held,
+              static_cast<unsigned long long>(GetTickCount64() - started));
           }
           settle_route("SLFG-silent-scope-SR-depth", false);
-          require(GetTickCount64() - silent_start >= 1000, "SR took the viewport's depth before the FG scope fell silent");
+          require(readiness_losses() == losses_before_takeover, "SR's takeover of a viewport without FG copies lost depth");
           require(reshade_log_contains({"Sunshine Streamline frame generation depth scope: silent viewport=0"}) &&
               reshade_log_number_above("Sunshine Streamline deferred tag copies:", "cancelled_by_untag=", 0),
             "The silent FG scope or its untag-cancelled deferred copies were not logged");
@@ -2492,17 +2523,109 @@ namespace {
           silent_cadence("SLFG-silent-scope-SR-foreground-again-2x", 1);
           require(readiness_losses() == losses_before_cadence,
             "Silent-scope generated Presents logged a readiness loss or a reuse invalidation");
+          // Assassin's Creed Shadows (10-24): a single accepted FG copy amid
+          // frames without one. Its frame shows it, and FG keeps the viewport
+          // while that copy can be held: the next frames hold it (their SR
+          // copies wait) until it is older than the source age, and SR depth
+          // returns then, without a readiness loss. A single copy grants no
+          // second of FG ownership, which then had neither FG nor SR depth.
+          const auto losses_before_stray = readiness_losses();
+          unsigned unrendered = 0, presents = 0;
+          for (unsigned round = 0; round != 4; ++round) {
+            render_tracked_depth = [this] { fallback_frame(true, true); };
+            present_frame(); const auto stray = inspect();
+            if (!round) log_status("SLFG-stray-FG-copy", stray);
+            require(stray.source.selected && stray.source.ready && !stray.source.reused_depth &&
+                stray.source.frame_generation_input, "A frame's accepted FG copy did not show at its Present");
+            unrendered += unsigned(!stray.ready()); ++presents;
+            render_tracked_depth = [this] { fallback_frame(false, true); };
+            const auto started = GetTickCount64();
+            unsigned held = 0;
+            for (;; ++held) {
+              present_frame(); const auto s = inspect();
+              unrendered += unsigned(!s.ready()); ++presents;
+              require(s.source.selected && s.source.ready, "A frame after a single FG copy lost depth");
+              if (!s.source.frame_generation_input) {
+                if (!round) log_status("SLFG-stray-FG-copy-SR-again", s);
+                require(!s.source.reused_depth, "SR's return after a single FG copy did not show its fresh depth");
+                break;
+              }
+              require(s.source.reused_depth && s.source.current.capture == stray.source.current.capture,
+                "The frames after a single FG copy did not hold it");
+              require(GetTickCount64() - started < 2 * sunshine_freshness::source_age_ms,
+                "A single FG copy kept SR depth out past the source age");
+            }
+            require(held >= 2, "SR returned at the first frame whose SR copy was fresh, while the FG copy could be held");
+          }
+          require(readiness_losses() == losses_before_stray, "A single FG copy amid frames without one lost depth");
+          // Each switch restarts the placement controller's calibration of the
+          // other logical source (projection domain), as any FG/SR switch
+          // does; it settles on SR again.
+          std::printf("MEASURE native-provider SLFG-stray-FG-copy presents=%u unrendered_while_placement_settles=%u\n",
+            presents, unrendered);
+          settle_route("SLFG-stray-FG-copy-settled", false);
+          // Assassin's Creed Shadows (10-24): DLSS-G presents earlier frames on
+          // its own thread while the game's SR evaluation records the copy of
+          // its own local depth input; with dynamic resolution that recording
+          // allocates new storage without the lock, so such a Present often
+          // lands in between. The evaluation supplied that input, so the
+          // Present cannot end its lifetime: every such real frame keeps its
+          // fresh SR depth (until 10-24 its copy was refused as
+          // unsupported_lifetime, which also raised the source gap mark).
+          const auto present_before_copy = reinterpret_cast<void (*)()>(GetProcAddress(
+            GetModuleHandleW(L"SunshineSBSTest.addon64"), "SunshineStreamlineTestPresentBeforeNextCopy"));
+          require(present_before_copy, "The test add-on lacks its Present-before-copy hook");
+          const auto losses_before_landing = readiness_losses();
+          for (unsigned round = 0; round != 4; ++round) {
+            render_tracked_depth = [this] { fallback_frame(false, true); };
+            present_before_copy();
+            present_frame(); const auto s = inspect();
+            if (!round) log_status("SLFG-silent-scope-Present-during-SR-copy", s);
+            require(active(s) && !s.source.reused_depth && !s.source.frame_generation_input,
+              "A Present landing while an SR evaluation copied its own local depth input refused that copy");
+          }
+          require(readiness_losses() == losses_before_landing,
+            "A Present landing while an SR evaluation copied its own local depth input lost depth");
+          std::puts("PASS native SL local input: a Present of an earlier frame landing while an SR evaluation records "
+            "the copy of its own local depth input leaves that copy current; every such real frame shows its fresh SR "
+            "depth; no FX");
+          std::puts("PASS native SLFG single copy: one accepted FG copy amid frames without one shows at its Present, is held "
+            "while it is younger than the source age and SR depth returns then; no readiness loss; no FX");
         },
         [&] {
           render_tracked_depth = [this] { fallback_frame(true, true); };
           settle_route("SLFG-accepted-copy-owns-again", true);
+          status owned;
           for (unsigned frame = 0; frame < 30; ++frame) {
-            present_frame(); const auto s = inspect();
-            require(active(s) && s.source.frame_generation_input,
+            present_frame(); owned = inspect();
+            require(active(owned) && owned.source.frame_generation_input,
               "SR depth competed with a viewport whose FG copies keep being accepted");
           }
           require(reshade_log_contains({"Sunshine Streamline frame generation depth scope: live viewport=0"}),
             "The FG scope's return to live was not logged");
+          // FG copies keep arriving, with an occasional frame without one (here
+          // two in a row, so the second one's SR evaluation comes while the
+          // scope is silent and its SR copy is fresh). FG keeps its viewport:
+          // each such frame holds the last FG copy, every Present renders, and
+          // the placement keeps its scale. Until 10-25 the second such frame
+          // switched to SR depth and the next FG copy switched back, each
+          // switch restarting the placement calibration.
+          const auto losses_before_misses = readiness_losses();
+          for (unsigned round = 0; round != 6; ++round)
+            for (unsigned frame = 0; frame != 4; ++frame) {
+              const bool copy = frame < 2;
+              if (copy) render_tracked_depth = [this] { fallback_frame(true, true); };
+              else render_tracked_depth = [this] { fallback_frame(false, true); };
+              present_frame(); const auto s = inspect();
+              if (!round) log_status(copy ? "SLFG-occasional-miss-copy" : "SLFG-occasional-miss-held", s);
+              require(active(s) && s.source.frame_generation_input && s.source.reused_depth == !copy &&
+                  same_scale(s.scale, owned.scale),
+                "A frame without an FG copy amid accepted ones switched its viewport's depth or restarted its placement");
+            }
+          require(readiness_losses() == losses_before_misses, "Occasional frames without an FG copy lost depth");
+          render_tracked_depth = [this] { fallback_frame(true, true); };
+          std::puts("PASS native SLFG occasional miss: two frames without an FG copy amid accepted ones hold the last FG "
+            "copy, six times, with every Present rendered at the same scale; no readiness loss; no FX");
         }});
     }
 
@@ -2551,6 +2674,55 @@ namespace {
       inputs.set_ui("DLSSG.MultiFrameCount", 1);
       void *feature{};
       bool observed_state = false, tag_commands = false;
+      // DLSS-G's own COMPUTE recordings on its own compute queue, as Streamline
+      // runs them in Assassin's Creed Shadows (10-24: every DLSSG.Depth copy
+      // refused as command_type). The game's work runs first. Like
+      // Streamline, DLSS-G cycles a ring of recordings and resets each one
+      // only when it records into it again, frames after its work completed,
+      // so the Present queue can read a frame's copy only then.
+      bool on_compute = false;
+      constexpr unsigned compute_ring = 3;
+      com_ptr<ID3D12CommandQueue> compute_queue;
+      std::array<com_ptr<ID3D12CommandAllocator>, compute_ring> compute_allocators;
+      std::array<com_ptr<ID3D12GraphicsCommandList>, compute_ring> compute_lists;
+      std::array<std::uint64_t, compute_ring> compute_values{};
+      com_ptr<ID3D12Fence> compute_done;
+      std::uint64_t compute_value{};
+      unsigned compute_at = 0;
+      {
+        D3D12_COMMAND_QUEUE_DESC desc{}; desc.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+        checked(game->CreateCommandQueue(&desc, IID_PPV_ARGS(compute_queue.put())), "Create DLSS-G's compute queue");
+        for (unsigned n = 0; n != compute_ring; ++n) {
+          checked(game->CreateCommandAllocator(desc.Type, IID_PPV_ARGS(compute_allocators[n].put())),
+            "Create DLSS-G's compute allocator");
+          const auto direct = game_native_command;
+          checked(game->CreateCommandList(0, desc.Type, compute_allocators[n].p, nullptr, IID_PPV_ARGS(compute_lists[n].put())),
+            "Create DLSS-G's compute list");
+          game_native_command = direct;
+          checked(compute_lists[n]->Close(), "Close DLSS-G's initial compute recording");
+        }
+        checked(game->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(compute_done.put())), "Create DLSS-G's compute fence");
+      }
+      // Waits for a ring entry's last work and resets it (through ReShade,
+      // which names its native list): the Reset retires its earlier
+      // recording. Returns the native list, open for recording.
+      const auto reset_compute = [&](unsigned n) {
+        checked(compute_done->SetEventOnCompletion(compute_values[n], nullptr), "Wait for DLSS-G's compute work");
+        const auto direct = game_native_command;
+        checked(compute_allocators[n]->Reset(), "Reset DLSS-G's completed compute allocator");
+        checked(compute_lists[n]->Reset(compute_allocators[n].p, nullptr), "Reset DLSS-G's compute recording");
+        const auto native = game_native_command; game_native_command = direct;
+        require(native && native != direct, "DLSS-G's compute Reset did not name its native list");
+        return native;
+      };
+      // Resets every ring entry once its work completed: no recording stays
+      // unretired after the compute case.
+      const auto drain_compute = [&] {
+        for (unsigned n = 0; n != compute_ring; ++n) {
+          reset_compute(n);
+          checked(compute_lists[n]->Close(), "Close DLSS-G's drained compute recording");
+        }
+      };
       // The game's HUD-less and Backbuffer tags: without a command list (as in
       // Shadows), the same followed by the same frame's null untag of both
       // kinds (which cancels their copies deferred to the frame's Present,
@@ -2590,6 +2762,22 @@ namespace {
         // DLSS-G's recording transitions its inputs, as Streamline's DLSS-G
         // plugin does; without that no state is observed on it.
         constexpr auto read = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        if (on_compute) {
+          // Only the depth: the UI inputs' shader-resource state names the
+          // pixel-shader state, which a compute list cannot.
+          submit(false); begin_commands();
+          const auto n = compute_at; compute_at = (compute_at + 1) % compute_ring;
+          auto *compute = reinterpret_cast<ID3D12GraphicsCommandList *>(reset_compute(n));
+          if (observed_state) transition(compute, selected->resource.p, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, read);
+          require(ngx_evaluate(compute, feature, &inputs, nullptr) == ngx_fixture::success,
+            "DLSS-G's compute evaluation observation changed the SDK result");
+          if (observed_state) transition(compute, selected->resource.p, read, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+          checked(compute_lists[n]->Close(), "Close DLSS-G's compute recording");
+          ID3D12CommandList *lists[]{compute_lists[n].p};
+          compute_queue->ExecuteCommandLists(1, lists);
+          checked(compute_queue->Signal(compute_done.p, compute_values[n] = ++compute_value), "Signal DLSS-G's compute work");
+          return;
+        }
         if (observed_state) {
           transition(list, selected->resource.p, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, read);
           transition(list, hudless.p, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, read);
@@ -2727,6 +2915,57 @@ namespace {
             "Untagged Streamline UI tags did not hand their kinds back to DLSS-G's evaluation");
           tag_commands = false;
           ui_tags = ui_tags_form::commandless;
+          // DLSS-G evaluates on its own COMPUTE list (N7). Its depth observed
+          // there in a state a compute list may use is copied on that list:
+          // its own compute queue takes a fence at the copy's submission, and
+          // the Present queue reads the copy once DLSS-G reset the recording
+          // (here when it records into that ring entry again, three frames
+          // later). DLSSG.Depth owns the FG scope from it as from a direct
+          // list once its first copy is readable, so SR depth stays until
+          // then and the handover loses no depth. Every real Present shows the
+          // newest readable copy, and generated Presents hold it. With the copy
+          // refused as command_type (before N7) the scope stays silent and SR
+          // depth stays.
+          {
+            // SR owns the viewport first: DLSS-G's depth, unobserved on its
+            // compute list, is refused.
+            observed_state = false; on_compute = true;
+            settle_route("DLSSG-compute-list-unobserved-SR-depth", false);
+            const auto losses = readiness_losses();
+            const auto copied_lines = reshade_log_lines({"Sunshine NGX depth:", "dlssg_depth={copied="}).size();
+            observed_state = true;
+            settle_route("DLSSG-compute-list-owns-FG-depth", true);
+            for (unsigned pair = 0; pair < 6; ++pair) {
+              render_tracked_depth = dlssg_frame;
+              present_frame(); const auto real = inspect();
+              require(active(real) && !real.source.reused_depth && real.source.frame_generation_input,
+                "A real Present lost DLSS-G's compute-list FG depth or let SR depth compete with it");
+              render_tracked_depth = {};
+              present_frame(); const auto generated = inspect();
+              require(active(generated) && generated.source.reused_depth && generated.source.frame_generation_input &&
+                  generated.source.current.capture == real.source.current.capture && same_scale(generated.scale, real.scale),
+                "A generated Present did not hold its real frame's compute-list DLSS-G depth");
+            }
+            render_tracked_depth = dlssg_frame;
+            // A whole NGX line written after the switch: no command_type refusal in it.
+            const auto copied = [&] { return reshade_log_lines({"Sunshine NGX depth:", "dlssg_depth={copied="}); };
+            for (const auto until = GetTickCount64() + 16000; copied().size() < copied_lines + 2 && GetTickCount64() < until;)
+              present_frame();
+            const auto lines = copied();
+            require(lines.size() >= copied_lines + 2, "The bounded NGX line stopped during DLSS-G's compute evaluations");
+            const auto depth_part = [](const std::string &line) {
+              const auto at = line.find("dlssg_depth={");
+              return line.substr(at, line.find('}', at) - at);
+            };
+            const auto first_part = depth_part(lines[copied_lines]), second_part = depth_part(lines[copied_lines + 1]);
+            require(number_after(second_part, "copied=") > number_after(first_part, "copied=") &&
+                second_part.find("command_type") == std::string::npos,
+              "DLSS-G's compute-list depth was refused for its list type or not counted as copied");
+            require(readiness_losses() == losses,
+              "DLSS-G's compute-list depth lost depth readiness, also at its handover from SR depth");
+            on_compute = false;
+            drain_compute();
+          }
           // Refused again: the scope falls silent and SR depth returns.
           observed_state = false;
           settle_route("DLSSG-refused-again-SR-depth", false);
@@ -2767,7 +3006,7 @@ namespace {
           render_tracked_depth = [this] { fallback_frame(true, true); };
           settle_route("DLSSG-case-done-FG-tags-own-again", true);
           evidence << "dlssg-evaluation unobserved=SR commandless-ui-tags=exact-batch observed=FG-owned generated=held untagged-ui-tags=dlssg-exact-batch ui-tags-with-commands=tag-copied\n";
-          std::puts("PASS native DLSS-G evaluation: DLSSG.Depth without an observed state is refused and counted with SR depth unchanged while the game's command-less HUD-less/Backbuffer tags reach UI detection exactly; in an observed state it owns the FG scope, generated Presents hold it, the command-less FG tag withdraws nothing, once its frame untags the game's UI tags its HUD-less/Backbuffer pair reaches UI detection exactly, and FG depth and HUD-less/Backbuffer tags that copy keep precedence per kind; no FX");
+          std::puts("PASS native DLSS-G evaluation: DLSSG.Depth without an observed state is refused and counted with SR depth unchanged while the game's command-less HUD-less/Backbuffer tags reach UI detection exactly; in an observed state it owns the FG scope, generated Presents hold it, the command-less FG tag withdraws nothing, once its frame untags the game's UI tags its HUD-less/Backbuffer pair reaches UI detection exactly, FG depth and HUD-less/Backbuffer tags that copy keep precedence per kind, and on DLSS-G's own compute list (its own compute queue) its observed depth owns the FG scope the same way with no readiness loss; no FX");
         }});
     }
 
@@ -2817,7 +3056,7 @@ namespace {
                 "The frame record named an API rung delivering for a silent scope");
           }
           require_records_match_log("SLFG-silent-scope");
-          std::puts("PASS native SLFG scope: refused FG tags let the same viewport's SR depth through after a second, never before; an accepted FG copy owns the viewport again and SR stays out; with no SR the silent scope stays mono, never generic; no FX");
+          std::puts("PASS native SLFG scope: frames without an FG copy hold its last copy while it is younger than the source age, then let the same viewport's SR depth through without a readiness loss; an accepted FG copy owns the viewport again and SR stays out; with no SR the silent scope stays mono, never generic; no FX");
         }, {}});
     }
 

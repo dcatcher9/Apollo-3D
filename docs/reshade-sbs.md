@@ -3955,7 +3955,11 @@ before cleanup so duplicate or reentrant unload cannot dispose the publisher twi
 remains blocked until that cleanup and publisher destruction finish. Adapter source
 leases are detached under their metadata lock and released after unlocking. GPU snapshot leases
 remain subject to the existing completion/recording-retirement rules.
-Retained middleware hooks can keep the module loaded until process exit. The session storage is
+AddonInit pins the module before it starts any pool work, hook or callback, so it stays loaded until
+process exit: ReShade unloads add-ons whenever a game destroys its last device (Assassin's Creed
+Shadows does at startup), possibly while module discovery or a shader compile the add-on started is
+still running on a pool thread, and the next device initializes the same module again through
+AddonInit. A failed pin fails AddonInit. The session storage is
 process-persistent, preventing a second implicit CRT cleanup owner. A shared detach fence stops
 callback observation before other C++ owners are destroyed; vendor calls still forward normally.
 Ordinary add-on unload continues to unregister callbacks and release its active session resources.
@@ -4016,7 +4020,16 @@ An independent FG Present cannot expire this synchronous tag-call lifetime. The 
 FG input `ValidUntilPresent` depth tag copied inside its own tag call: Frame Generation presents
 earlier frames on another thread, and a Present landing between reading the tag and recording its
 copy used to refuse that real frame's depth as `unsupported_lifetime`. The Witcher 3 hit this on a
-fraction of real frames with multi frame generation. A `ValidUntilPresent` or `ValidUntilEvaluate`
+fraction of real frames with multi frame generation. An evaluation's own local inputs (the tags in
+its `slEvaluateFeature` inputs) are copied inside the call that supplied them too, so the same
+holds for them (since 10-24). Assassin's Creed Shadows tags its SR depth as a local
+`ValidUntilPresent` input; with FG on, DLSS-G's Presents on its own thread landed between that read
+and the copy, most often while dynamic resolution made the copy allocate new storage without the
+lock. Each refusal withdrew the SR attempt, which marks a gap in the source's admission (its
+completed snapshots from before are not admitted). The SR copies run on another queue and are
+admitted only once the game resets their list, 110-235 ms later in that game, so the held depth
+(already that old) expired first: about a 100 ms loss every second or two (`completed_before_gap`).
+A `ValidUntilPresent` or `ValidUntilEvaluate`
 tag lives until its own frame's Present (`sl_core_types.h`), so a tag copied later at an evaluation
 of that frame is current too, whatever Presents came between: those were earlier frames' (multi
 frame generation presents them while the game records the next frame; the contract matrix's S7).
@@ -4146,7 +4159,8 @@ records no state). `lifecycle_outlives_boundary` gates only ordinary (non-FG) ta
 long-lived FG tag goes on to matching instead.
 It also gives the call's first depth tag (`tag_type`, `scope`, `lifecycle`, `native`), its
 `command`, the frame identity kind, the evidence `status`, `fg_scope=live|silent`, `withdrawn=1|0`,
-`dlssg_supplied=1|0` and the running `refusals` count. `dlssg_supplied=1` marks a command-less
+`dlssg_supplied=1|0` and the running `refusals` count. Either way the frame has no FG copy, so the
+scope owns no depth for it and turns silent (below). `dlssg_supplied=1` marks a command-less
 boundary with no copy point of a live scope whose copies DLSS-G's own evaluation records (below):
 it withdraws nothing,
 since that evaluation, not the tag, is where the frame's depth is copied, and a withdrawal would
@@ -4169,12 +4183,33 @@ every Streamline call. The depth becomes that viewport's FG source (`fg_depth_ke
 `frame_generation_input`) only through a copy recorded on the evaluation's own command list in a
 state observed on that recording (`state_proof::observed_nonzero`, `ngx::frame_generation_input`
 in [`api_contract.h`](../tools/reshade/api_contract.h): no API states the resource's
-state at this call, so none is assumed), with no metadata-only nomination (`pixels_required`). Its
+state at this call, so none is assumed), with no metadata-only nomination (`pixels_required`).
+NGX evaluates on any non-copy queue (`dlssg-guide.txt` 2321-2324, the contract matrix's N7), and
+Streamline runs DLSS-G on its own COMPUTE list and compute queue (Assassin's Creed Shadows 10-24
+refused every `DLSSG.Depth` copy and every UI input as `command_type`). So DLSS-G's inputs are
+copied on that COMPUTE list, as every input is copied on the list its call supplied (the
+compute-list rule below, the matrix's S22 and N7), from an observed state or layout a compute list
+may name (`copy_state::list_basis`), into snapshot storage that rests in COMMON
+(`texture_reference::rest`). The 10-24 hotfix admitted DLSS-G's inputs only
+(`input::ngx_evaluation`, legacy compute-list states); Stage 3 batch B made it the general rule, of
+which DLSS-G's inputs are one case. A compute queue takes its place and fence at its first
+submission of such a copy. The Present queue reads the copy as any other queue's: once
+that recording was reset and the fence passed. A compute-list copy keeps the FG scope live only once
+the Present queue can read it: its submission carries that fence, Streamline reset the recording and
+the fence passed. Streamline resets its DLSS-G recordings only frames later. Until then the silent
+scope's display holds the viewport's SR copy, of the same epoch and younger than the source age,
+while the acquisition names only the FG copy in flight (`source_reason=FG_copy_pending`; DLSS-G's
+nomination replaces the viewport's SR observation), so the handover loses no depth; until 10-25 the
+scope turned live at the submission and the SR depth it replaced was dropped for a copy still in
+flight. One never submitted (as when its queue has no place) or never reset turns the scope live
+for nothing; one whose producer fails later (a
+replay, its queue gone) counts as a missed frame (below). DLSS-G's
 accepted copies keep the FG scope live exactly as accepted FG tag copies do, so FG owns the viewport
 (the same viewport's SR/RR evaluations and direct NGX copies stand aside), and generated Presents
 hold the real frame's copy. A refusal while the scope is silent changes nothing (the ordinary SR/RR
 source stays); while it is live the attempt first replaces the FG observation, so a refusal withdraws
-the previous copy as a refused FG tag boundary does. A Streamline FG tag boundary that recorded a copy
+the previous copy as a refused FG tag boundary does. Either way the refused frame has no FG copy, so
+the scope turns silent. A Streamline FG tag boundary that recorded a copy
 within the source age keeps precedence: the evaluation then adds no second copy (`tag_copied`). The
 depth carries the viewport's own camera evidence as an unframed FG tag does: its history revision,
 the recent camera's depth direction where `DLSSG.DepthInverted` is absent, and the camera's steady
@@ -4203,22 +4238,52 @@ DLSS-G's list) and `dlssg_ui={offered=<n> captured=<n> refused=<reason>:<n>,...}
 `shape` or `not_newer`, or a capture stage); `none` when nothing was refused. Absent UI keys are
 optional in DLSS-G and are not refusals.
 
-Enabled FG owns its viewport's depth only while its scope is live: FG was turned on less than a
-second ago (the options call that enabled it in this observation epoch; later calls that keep it
-on do not restart that second), or a recorded copy of the FG source of that epoch and viewport was
-accepted by the API (a successful SDK call, not a metadata-only nomination) within the last
-second. This is the same one-second rule that ends a silent or rejected API source's association.
+Enabled FG owns its viewport's depth only for the frames FG supplied: its scope is live while its
+newest frame outcome is a recorded copy of the FG source of that epoch and viewport that the API
+accepted (a successful SDK call, not a metadata-only nomination), made since FG was turned on (the
+options call that enabled it in this observation epoch) and within the last second. This is the same
+one-second rule that ends a silent or rejected API source's association. Turning FG on grants
+nothing by itself, and neither does a single copy: a frame of the scope without an FG copy (its FG
+depth tag refused, its copy deferred to the frame's Present cancelled by an untag, refused there or
+lapsed, or DLSS-G's own evaluation of it refused) newer than the newest accepted copy turns the scope
+silent at once (`depth_capture::frame_generation_missed`, ordered by the frame's observation
+sequence, so a late outcome of an older frame changes nothing). While DLSS-G's own evaluation
+supplies the scope's copies, that evaluation, not the game's FG tag, decides the frame. Assassin's
+Creed Shadows (10-24) untags its FG depth in every frame and so cancels almost every deferred copy;
+the rare copy that survived kept the scope live for a second with no further FG copy, and FG On did
+the same, so that viewport showed neither FG nor SR depth for about a second each time.
 A silent FG scope owns nothing: its refused boundaries withdraw nothing, the same viewport's
 ordinary SR/RR evaluation nominates again (replacing any FG observation of that viewport), the
 provider selects as without FG for that Present (`require_FG=0 FG_silent=1` in readiness lines),
-and a direct NGX evaluation copies its depth again. Enabled FG still holds the queue in mono while
+and a direct NGX evaluation copies its depth again. FG still keeps its viewport while it can
+supply (`depth_capture::frame_generation_holds`): while the display holds that scope's own newest
+copy, made since FG On and younger than the source age, a silent scope's ordinary candidate, fresh
+or pending, does not replace it (readiness lines show `source_action=hold
+source_reason=FG_copy_held`), and SR/RR depth takes over only once that copy expires. A frame
+without an FG copy is thus held as any missing frame of a source is: a game whose FG copies keep
+arriving with an occasional frame without one keeps FG depth and its placement throughout, and
+the SR/RR evaluations nominated meanwhile are ready when the copy expires. Enabled FG still holds
+the queue in mono while
 no API source is available: a game with FG on and no SR/RR or NGX depth stays 2D and never hands
 its real or generated presentations to the generic depth selector.
 The next accepted FG copy takes the viewport back at once. Assassin's Creed Shadows (10-22) kept FG
 on with no FG depth captured, which shut its working SR depth out for as long as FG stayed on. A
-game whose FG copies keep being accepted keeps FG ownership throughout. A
+game whose FG copies keep being accepted keeps FG ownership throughout. A switch between FG and SR
+depth restarts the placement controller's calibration of the other logical source (its projection
+domain includes the source id; the raw controller keeps a bounded history per source), as it did
+before. A single FG copy amid frames without one (Shadows, 10-24) still switches twice: it is
+shown at its Present and held while younger than the source age, then SR/RR depth returns. Until
+10-25 the second frame without an FG copy switched to SR depth (and the next FG copy back), and a
+silent scope whose SR copy was not yet readable dropped the held FG copy as a changed source. The
+queue owner's consumed watermark is shared by the viewport's sources, so after the FG copy SR
+returns with the first snapshot evaluated after it; SR snapshots evaluated before it are never
+picked. When SR copies are readable only frames later (Shadows: another queue, 110-235 ms) the
+hold bridges that delay while it is shorter than the source age, and a longer delay is a loss until
+that snapshot is readable. A per-source watermark would not shorten it: an SR snapshot evaluated
+before the FG copy is past the source age once the FG copy is. A
 `Sunshine Streamline frame generation depth scope`
-line reports a required scope turning `silent` and, later, `live` again; FG Off ends a silent
+line reports a required scope turning `silent` and, later, `live` again, at most every 5 s
+(`changes=` counts the turns so far; the line names the newest state); FG Off ends a silent
 scope without its own line. Generated presentations count as FG (`fg` on output lines) while a
 silent scope's viewport supplies the depth. An observed FG Off retires that source so independently captured ordinary
 SL tag/evaluation or NGX depth can resume with newly submitted pixels. A failed or ambiguous FG-options observation also revokes the old FG scope
@@ -4520,8 +4585,9 @@ place (since the Stage 3 batch B review; before, such a copy was recorded on eve
 discarded at its recording's Reset, and every submission retried the registration under the capture
 lock). Such a copy is its FG scope's accepted
 copy (`frame_generation_scope_live`) only once the Present queue can read it, so a copy never
-submitted or never reset keeps no other depth out of its viewport; a direct-list copy is accepted
-at its call's success. The consumer's own list stays the Present queue's DIRECT list.
+submitted or never reset keeps no other depth out of its viewport, and an FG copy whose producer
+fails later leaves its frame missed (`frame_generation_missed`); a direct-list copy is accepted at
+its call's success. The consumer's own list stays the Present queue's DIRECT list.
 Native capture copies an `OnlyValidNow` tag only inside the call that supplied it: the synchronous
 v2 tag boundary, with or without FG, or the evaluate a local input came with, where `sl_core_api.h`
 makes local tags current ("they are considered to be a 'local' tags and do NOT interact with same
@@ -5390,7 +5456,11 @@ with useful input and has no five-second timeout/retry wrapper. An unusable new 
 observation invalidates that source's incomplete evidence. A missing current copy does not break
 the window or move its asynchronous capture-admission floor. Authoritative source facts are
 applied first, all available completed packets are observed, and current geometry then ticks once.
-Sample and current-frame order are checked separately.
+Sample and current-frame order are checked separately. Only a current copy that can render sets the
+current-frame order. An API Present can name its newest capture while that capture's pixels are still
+in flight on another queue; the next Present may show an older readable copy, still newer than every
+copy shown before, and that copy renders at once (until 10-25 the unshown capture kept such copies flat
+until it was itself readable).
 
 A source outside the retained capture set supplies its own fresh initialization window. Lifetime,
 crop/layout, orientation or reported convention changes invalidate that member's numeric state.

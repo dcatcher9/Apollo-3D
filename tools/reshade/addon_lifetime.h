@@ -6,7 +6,8 @@
 
 namespace sunshine_addon_lifetime {
   // DllMain sets this before the CRT destroys any C++ owners. Vendor detours
-  // and ReShade callbacks can outlive those owners because the add-on is pinned.
+  // and ReShade callbacks can outlive those owners because the add-on is pinned
+  // (AddonInit pins it first, so DllMain detaches only at process exit).
   // The fence itself is constant-initialized and trivially destructible.
   inline std::atomic<bool> detaching{};
   static_assert(std::atomic<bool>::is_always_lock_free);

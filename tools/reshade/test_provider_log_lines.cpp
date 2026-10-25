@@ -146,9 +146,9 @@ namespace {
 
   void frame_generation_scope() {
     char text[384] {};
-    provider::format_frame_generation_scope(text, sizeof(text), true, 0, 3);
+    provider::format_frame_generation_scope(text, sizeof(text), true, 0, 3, 1);
     emit("FG scope silent", text);
-    provider::format_frame_generation_scope(text, sizeof(text), false, 0, 3);
+    provider::format_frame_generation_scope(text, sizeof(text), false, 0, 3, 2);
     emit("FG scope live again", text);
   }
 

@@ -223,7 +223,7 @@ add_custom_target(Sunshine3DPackage ALL
 if(SUNSHINE_SBS_RUNTIME_TESTS)
   # The test add-on's exports, which reach depth_addon.cpp's and the probe's
   # internals through their test-access headers.
-  target_sources(SunshineSBSTest PRIVATE test_depth_addon_exports.cpp test_streamline_camera_probe_exports.cpp)
+  target_sources(SunshineSBSTest PRIVATE test_depth_addon_exports.cpp test_streamline_camera_probe_exports.cpp test_addon_lifetime_exports.cpp)
   target_compile_definitions(SunshineSBSTest PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
   if(MINGW)
     target_compile_options(SunshineSBSTest PRIVATE -Wall -Wextra -Wno-attributes)
@@ -873,5 +873,27 @@ if(BUILD_TESTING)
     endforeach()
     target_compile_definitions(reshade_native_present_d3d12_test PRIVATE SUNSHINE_NATIVE_EXPORT_FIXTURE)
     target_compile_definitions(reshade_game_present_d3d12_test PRIVATE SUNSHINE_GAME_EXPORT_FIXTURE)
+
+    # ReShade's add-on unload with a short-lived startup device while the
+    # add-on's pool work still runs, and its reinitialization for the next
+    # device (README, Diagnostics and validation). A GPU check run with the contract
+    # tests, where the official runtime and the frozen shaders are configured.
+    add_executable(reshade_addon_unload_runtime_test test_addon_unload_runtime.cpp)
+    target_compile_features(reshade_addon_unload_runtime_test PRIVATE cxx_std_17)
+    target_include_directories(reshade_addon_unload_runtime_test SYSTEM PRIVATE "${SUNSHINE_RESHADE_INCLUDE_DIR}")
+    target_link_libraries(reshade_addon_unload_runtime_test PRIVATE d3d12 dxgi dxguid d3dcompiler user32)
+    add_dependencies(reshade_addon_unload_runtime_test SunshineSBSTest)
+    if(MINGW)
+      target_link_options(reshade_addon_unload_runtime_test PRIVATE -static)
+    endif()
+    if(SUNSHINE_GAME3D_RESHADE_RUNTIME AND SUNSHINE_GAME3D_FROZEN_SHADERS)
+      set(addon_unload_output "${CMAKE_CURRENT_BINARY_DIR}/addon_unload_runtime")
+      add_test(NAME reshade_addon_unload_runtime_output COMMAND "${CMAKE_COMMAND}" -E rm -rf "${addon_unload_output}")
+      set_tests_properties(reshade_addon_unload_runtime_output PROPERTIES FIXTURES_SETUP addon_unload_output LABELS "contract;gpu")
+      add_test(NAME reshade_addon_unload_runtime COMMAND reshade_addon_unload_runtime_test
+        "${SUNSHINE_GAME3D_RESHADE_RUNTIME}" "${SUNSHINE_GAME3D_FROZEN_SHADERS}" "$<TARGET_FILE:SunshineSBSTest>" "${addon_unload_output}")
+      set_tests_properties(reshade_addon_unload_runtime PROPERTIES LABELS "contract;gpu" RUN_SERIAL TRUE
+        RESOURCE_LOCK gpu TIMEOUT 150 FIXTURES_REQUIRED addon_unload_output)
+    endif()
   endif()
 endif()

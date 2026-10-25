@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Functional GPU regression for the actual dump snapshot owner. No timing claim.
 #include "streamline_depth_capture.h"
+#include "api_contract.h"
 #include "streamline_native_observer.h"
 #include "native_resource_identity.h"
 #include "depth_view_format.h"
@@ -929,6 +930,200 @@ namespace {
     gpu.check_debug_errors();
     std::printf("PASS compute queue without a place: its first copy's submission found every place taken, later compute-list "
       "copies were refused at their call (exhausted), and a freed place let the next copy and its queue in%s\n",
+      gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
+  }
+
+  // DLSS-G evaluates on its own COMPUTE list, which its own compute queue
+  // executes (Assassin's Creed Shadows 10-24: every DLSSG.Depth copy was
+  // refused as command_type). Its input is copied on that list from a state
+  // observed there that a compute list may use (N7), into storage resting in
+  // COMMON; the compute queue takes a place and a fence at its first
+  // submission of such a copy; a direct consumer reads the copy once that
+  // recording was reset and the fence passed. Streamline's own FG tag input
+  // is copied on a compute list as well (S22): no input is refused for its
+  // list type. The debug layer checks every barrier.
+  void dlssg_compute_list_capture(fixture &gpu) {
+    if (gpu.debug_messages) gpu.debug_messages->ClearStoredMessages();
+    consumer_fixture consumer(gpu);
+    D3D12_COMMAND_QUEUE_DESC queue_desc{}; queue_desc.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+    ComPtr<ID3D12CommandQueue> compute;
+    ComPtr<ID3D12CommandAllocator> allocator, spare;
+    ComPtr<ID3D12GraphicsCommandList> list;
+    ComPtr<ID3D12Fence> done;
+    check(gpu.device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&compute)), "DLSS-G compute queue");
+    check(gpu.device->CreateCommandAllocator(queue_desc.Type, IID_PPV_ARGS(&allocator)), "DLSS-G compute allocator");
+    check(gpu.device->CreateCommandAllocator(queue_desc.Type, IID_PPV_ARGS(&spare)), "DLSS-G compute spare allocator");
+    check(gpu.device->CreateCommandList(0, queue_desc.Type, allocator.Get(), nullptr, IID_PPV_ARGS(&list)), "DLSS-G compute list");
+    check(gpu.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&done)), "DLSS-G compute fence");
+    std::uint64_t completion{};
+    created(list.Get());
+    capture::observe_command(native(list.Get())); capture::poll();
+    const auto reset_compute = [&] {
+      check(spare->Reset(), "DLSS-G compute allocator reset");
+      check(reset_list(list.Get(), spare.Get()), "DLSS-G compute recording reset");
+      std::swap(allocator, spare); capture::poll();
+    };
+    const auto run_compute = [&] {
+      check(close_list(list.Get()), "DLSS-G compute close");
+      execute(compute.Get(), list.Get());
+      check(compute->Signal(done.Get(), ++completion), "DLSS-G compute signal");
+      HANDLE event = CreateEventW(nullptr, false, false, nullptr); require(event != nullptr, "DLSS-G compute event");
+      const auto hr = done->SetEventOnCompletion(completion, event);
+      const auto outcome = SUCCEEDED(hr) ? WaitForSingleObject(event, 10000) : WAIT_FAILED;
+      CloseHandle(event); require(outcome == WAIT_OBJECT_0, "DLSS-G compute completion timeout");
+    };
+    check(close_list(list.Get()), "DLSS-G compute initial close");
+    reset_compute();
+
+    // The game's depth-stencil depth, cleared to a known value and left in
+    // COPY_SOURCE on the game's direct queue.
+    D3D12_RESOURCE_DESC desc{}; desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Width = 64; desc.Height = 48; desc.DepthOrArraySize = desc.MipLevels = desc.SampleDesc.Count = 1;
+    desc.Format = DXGI_FORMAT_R32_TYPELESS; desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+    D3D12_CLEAR_VALUE clear{}; clear.Format = DXGI_FORMAT_D32_FLOAT; clear.DepthStencil.Depth = 0.25f;
+    const auto properties = heap(D3D12_HEAP_TYPE_DEFAULT);
+    ComPtr<ID3D12Resource> depth;
+    check(gpu.device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_DEPTH_WRITE,
+      &clear, IID_PPV_ARGS(&depth)), "DLSS-G depth-stencil depth");
+    ComPtr<ID3D12DescriptorHeap> views;
+    D3D12_DESCRIPTOR_HEAP_DESC heap_desc{}; heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV; heap_desc.NumDescriptors = 1;
+    check(gpu.device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&views)), "DLSS-G depth view heap");
+    D3D12_DEPTH_STENCIL_VIEW_DESC view{}; view.Format = DXGI_FORMAT_D32_FLOAT; view.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+    gpu.device->CreateDepthStencilView(depth.Get(), &view, views->GetCPUDescriptorHandleForHeapStart());
+    auto source = capture::retain_source(native(depth.Get()));
+    require(bool(source), "retain DLSS-G depth");
+    gpu.list->ClearDepthStencilView(views->GetCPUDescriptorHandleForHeapStart(), D3D12_CLEAR_FLAG_DEPTH, 0.25f, 0, 0, nullptr);
+    transition(gpu.list.Get(), depth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    gpu.submit(); gpu.wait(); gpu.reset();
+
+    // DLSS-G's input as observe_frame_generation_inputs builds it.
+    constexpr std::uint64_t epoch = 81;
+    const auto source_id = sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(0));
+    std::uint64_t sequence = 900, present = 900;
+    const auto dlssg_input = [&] {
+      capture::input input;
+      input.provider = sunshine_scene_depth::provider_kind::streamline;
+      input.epoch = epoch; input.sequence = ++sequence; input.tick = GetTickCount64(); input.viewport = 0;
+      input.frame_generation_input = true; input.source_id = source_id;
+      input.projection.encoding = sunshine_scene_depth::depth_encoding::device;
+      input.resource.native = native(depth.Get()); input.resource.area = {0, 0, 64, 48};
+      input.resource.kind = sunshine_scene_depth::resource_kind::raw_depth;
+      sunshine_api_contract::apply(sunshine_api_contract::ngx::frame_generation_input, input);
+      input.at_tag_call = true; input.pixels_required = true;
+      input.source = source; input.source_present_generation = capture::source_present_generation(source);
+      return input;
+    };
+    capture::record_diagnostic diagnostic;
+    const auto evaluate = [&](const capture::input &input) {
+      capture::begin_evaluation(input.epoch, input.sequence, input.viewport, input.provider, input.source_id, 0);
+      return capture::nominate(native(list.Get()), input, &diagnostic);
+    };
+
+    // No state recorded on the compute list: refused for its state, as on a
+    // direct list (N4), never for the list type.
+    auto unobserved = evaluate(dlssg_input());
+    if (unobserved) capture::finish(unobserved, false);
+    require(!unobserved && diagnostic.result == capture::status::missing_state &&
+        diagnostic.stage == capture::record_stage::missing_state && diagnostic.command_type == D3D12_COMMAND_LIST_TYPE_COMPUTE,
+      "DLSS-G depth without a state recorded on its compute list was not refused for its state");
+    // DLSS-G's list puts its input in its evaluation state there.
+    transition(list.Get(), depth.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    // Streamline's own FG tag input there (a tag call's: its pixels are not
+    // required) is copied like DLSS-G's (S22), never refused for the list.
+    auto streamline = dlssg_input(); streamline.pixels_required = false;
+    const auto tag_copy = evaluate(streamline);
+    require(tag_copy && diagnostic.result == capture::status::recorded && diagnostic.used_observed_state &&
+        diagnostic.command_type == D3D12_COMMAND_LIST_TYPE_COMPUTE,
+      "a Streamline FG tag input on a compute list was not copied there");
+    capture::finish(tag_copy, true);
+    const auto ticket = evaluate(dlssg_input());
+    require(ticket && diagnostic.result == capture::status::recorded && diagnostic.observed &&
+        diagnostic.copy_state == D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE && diagnostic.used_observed_state,
+      "DLSS-G depth observed in NON_PIXEL_SHADER_RESOURCE on its compute list was not copied there");
+    capture::finish(ticket, true);
+    transition(list.Get(), depth.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    run_compute();
+
+    // The closed recording may legally run again: submitted, not readable.
+    capture::packet packet;
+    capture::capture_diagnostic acquired;
+    capture::acquire(native(gpu.foreign_queue.Get()), ++present, packet, &acquired);
+    require(!packet.pixel_ready && acquired.capture_id == ticket && acquired.result == capture::status::submitted &&
+        acquired.submitted && !acquired.producer_recording_retired && acquired.queue == native(compute.Get()),
+      "the compute queue took no fence at its copy's submission, or a still-closed compute recording was readable");
+    reset_compute();
+    packet = {};
+    require(capture::acquire(native(gpu.foreign_queue.Get()), ++present, packet, &acquired) && packet.pixel_ready &&
+        packet.capture_id == ticket && packet.metadata.frame_generation_input && packet.producer_queue == native(compute.Get()),
+      "a reset compute recording's completed DLSS-G copy was not readable on the direct consumer queue");
+    auto target = destination(gpu.device.Get(), DXGI_FORMAT_R32_FLOAT);
+    readback actual(gpu, target.Get());
+    require(capture::copy_current(native(consumer.list.Get()), packet, native(target.Get()),
+      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE), "the direct consumer could not copy the compute queue's DLSS-G copy");
+    actual.record(consumer.list.Get(), target.Get());
+    capture::complete_frame(packet, present);
+    consumer.submit(); consumer.wait(); consumer.reset();
+    {
+      unsigned char *mapped{}; check(actual.bytes->Map(0, nullptr, reinterpret_cast<void **>(&mapped)), "DLSS-G readback map");
+      bool exact = true;
+      for (unsigned y = 0; y != 48; ++y) for (unsigned x = 0; x != 64; ++x) {
+        float value{}; std::memcpy(&value, mapped + y * actual.footprint.Footprint.RowPitch + x * 4, 4);
+        exact &= value == 0.25f;
+      }
+      D3D12_RANGE no_write{}; actual.bytes->Unmap(0, &no_write);
+      require(exact, "the compute list's DLSS-G copy lost the cleared depth");
+    }
+    packet = {};
+
+    // DLSS-G's UI input (DLSSG.HUDLess) on its compute list: a local
+    // snapshot (auxiliary storage rests in COMMON), read on the direct queue
+    // once the compute recording was reset.
+    texture_case color(gpu, DXGI_FORMAT_R8G8B8A8_UNORM, 4);
+    transition(gpu.list.Get(), color.source.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+      D3D12_RESOURCE_STATE_COPY_SOURCE);
+    gpu.submit(); gpu.wait(); gpu.reset();
+    auto ui = color.input;
+    ui.provider = sunshine_scene_depth::provider_kind::streamline;
+    ui.epoch = epoch; ui.sequence = ++sequence; ui.tick = GetTickCount64(); ui.viewport = 0;
+    ui.source_id = source_id; ui.frame_generation_input = true;
+    sunshine_api_contract::apply(sunshine_api_contract::ngx::frame_generation_input, ui);
+    ui.force_snapshot = true; ui.at_tag_call = true;
+    ui.source_present_generation = capture::source_present_generation(ui.source);
+    ui.resource.width = color.width; ui.resource.height = color.height;
+    transition(list.Get(), color.source.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    auto snapshot = capture::record_local_texture(native(list.Get()), ui, &diagnostic, capture::auxiliary_state_policy(ui));
+    require(snapshot && diagnostic.result == capture::status::recorded && diagnostic.used_observed_state &&
+        diagnostic.copy_state == D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+      "DLSS-G's UI input observed on its compute list was not copied there");
+    capture::finish_diagnostic_texture(snapshot, true);
+    transition(list.Get(), color.source.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    run_compute();
+    capture::diagnostic_texture pixels;
+    require(capture::acquire_local_texture(snapshot, native(gpu.foreign_queue.Get()), pixels) == capture::status::submitted,
+      "a still-closed compute recording's UI snapshot was readable");
+    reset_compute();
+    require(capture::acquire_local_texture(snapshot, native(gpu.foreign_queue.Get()), pixels) == capture::status::ready &&
+        pixels.producer_queue == native(compute.Get()),
+      "a reset compute recording's DLSS-G UI snapshot was not readable on the direct queue");
+    auto ui_target = destination(gpu.device.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
+    readback ui_actual(gpu, ui_target.Get());
+    require(capture::copy_local_texture(native(consumer.list.Get()), native(gpu.foreign_queue.Get()), snapshot,
+        native(ui_target.Get()), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+      "the direct consumer could not copy the compute queue's DLSS-G UI snapshot");
+    ui_actual.record(consumer.list.Get(), ui_target.Get());
+    consumer.submit(); consumer.wait(); consumer.reset();
+    ui_actual.verify(color.width, color.height, 4);
+    pixels = {};
+    capture::release_diagnostic_texture(snapshot); snapshot = {};
+    capture::retire_source(sunshine_scene_depth::provider_kind::streamline, epoch, source_id);
+    destroyed(list.Get());
+    capture::command_destroyed(native(list.Get()));
+    capture::poll();
+    gpu.check_debug_errors();
+    std::printf("PASS DLSS-G compute list: depth-stencil depth observed in NON_PIXEL_SHADER_RESOURCE on DLSS-G's own compute list "
+      "copied there with exact bytes; unobserved refused for its state; a Streamline FG tag input copied there too; the "
+      "compute queue took its fence at submission; readable on the direct queue only after its recording was reset; its UI input likewise as a "
+      "local snapshot with exact bytes%s\n",
       gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
   }
 
@@ -2357,6 +2552,7 @@ int main(int argc, char **argv) {
     // Before compute_list_capture, whose compute queue keeps its place.
     compute_queue_without_place(gpu);
     compute_list_capture(gpu);
+    dlssg_compute_list_capture(gpu);
     depth_format_and_mips(gpu);
     local_same_queue_ordered_capture(gpu);
     immediate_consumer_without_list_hooks(gpu);

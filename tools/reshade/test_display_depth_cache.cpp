@@ -353,6 +353,73 @@ namespace {
     require(placed.ready && placed.calibrated && std::abs(placed.H - calibrated.H) <= std::abs(calibrated.H) * 1e-3f,
       "a storage format change of the same source reset the placement calibration");
   }
+
+  // FG keeps its viewport while it can supply (frame_generation_holds): a
+  // silent scope's own newest copy, made since FG On and younger than the
+  // source age, is held over the same viewport's ordinary depth. An expired
+  // copy, one from before FG On, an ordinary copy, another scope's copy and
+  // a policy without FG grant nothing.
+  void frame_generation_hold() {
+    display_depth_cache cache;
+    auto value = fresh();
+    value.provided.provider = sunshine_scene_depth::provider_kind::streamline;
+    arm(cache, value);
+    depth_capture::selection_policy policy;
+    policy.require_frame_generation = true; policy.epoch = 11; policy.viewport = 3; policy.enabled_tick = 900;
+    const auto holds = [&](const depth_capture::retained_depth &retained, const depth_capture::selection_policy &p,
+        std::uint64_t now) { return depth_capture::frame_generation_holds(retained, p, now); };
+    const auto held = cache.reference();
+    require(holds(held, policy, 1000) && holds(held, policy, 1000 + sunshine_freshness::source_age_ms - 1),
+      "A silent scope's own copy within the source age was not held over ordinary depth");
+    require(!holds(held, policy, 1000 + sunshine_freshness::source_age_ms),
+      "A silent scope's expired copy kept ordinary depth out");
+    auto later = policy; later.enabled_tick = 1001;
+    require(!holds(held, later, 1000), "A copy from before FG On kept ordinary depth out");
+    auto other = policy; other.viewport = 4;
+    require(!holds(held, other, 1000), "Another viewport's FG copy kept ordinary depth out");
+    other = policy; other.epoch = 12;
+    require(!holds(held, other, 1000), "Another epoch's FG copy kept ordinary depth out");
+    require(!holds(held, {}, 1000), "A copy was held over ordinary depth without required FG");
+    auto ordinary = held; ordinary.metadata.frame_generation_input = false;
+    require(!holds(ordinary, policy, 1000), "An ordinary copy was held as FG's");
+    auto ngx = held; ngx.metadata.provider = sunshine_scene_depth::provider_kind::ngx;
+    require(!holds(ngx, policy, 1000), "An NGX copy was held as Streamline FG's");
+    require(!holds({}, policy, 1000), "An empty display held FG");
+
+    // An FG copy in flight takes nothing before it is readable
+    // (frame_generation_pending): while the silent scope's acquisition names
+    // only its own capture without pixels, also one selected for its
+    // nomination's authority with pixels pending, the viewport's ordinary copy
+    // of the same epoch within the source age is held. A readable candidate,
+    // another source, another viewport, an FG copy on display, an expired copy
+    // and a policy without FG hold nothing.
+    auto sr = held; sr.metadata.frame_generation_input = false; sr.metadata.source_id = 0;
+    depth_capture::acquisition_decision pending;
+    pending.provider = sunshine_scene_depth::provider_kind::streamline; pending.epoch = 11; pending.viewport = 3;
+    pending.source_id = sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(3));
+    pending.sequence = 18; pending.capture_id = 140;
+    depth_capture::packet candidate;
+    const auto waits = [&](const depth_capture::retained_depth &retained, const depth_capture::acquisition_decision &current,
+        const depth_capture::selection_policy &p, std::uint64_t now) {
+      return depth_capture::frame_generation_pending(retained, current, candidate, p, now);
+    };
+    require(waits(sr, pending, policy, 1000) && waits(sr, pending, policy, 1000 + sunshine_freshness::source_age_ms - 1),
+      "A silent scope's FG copy in flight dropped the viewport's ordinary copy");
+    require(!waits(sr, pending, policy, 1000 + sunshine_freshness::source_age_ms), "An expired ordinary copy was held");
+    auto selected = pending; selected.source_selected = true;
+    require(waits(sr, selected, policy, 1000), "A selected FG capture with pending pixels dropped the ordinary copy");
+    candidate.pixel_ready = true;
+    require(!waits(sr, selected, policy, 1000), "A readable FG candidate was held off");
+    candidate.pixel_ready = false;
+    auto ordinary_candidate = pending; ordinary_candidate.source_id = 0;
+    require(!waits(sr, ordinary_candidate, policy, 1000), "An ordinary candidate counted as FG's copy in flight");
+    auto elsewhere = pending; elsewhere.viewport = 4;
+    elsewhere.source_id = sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(4));
+    require(!waits(sr, elsewhere, policy, 1000), "Another viewport's FG copy in flight held this viewport's copy");
+    require(!waits(held, pending, policy, 1000), "An FG copy on display was held as the ordinary copy");
+    require(!waits(sr, pending, {}, 1000), "An ordinary copy was held without required FG");
+    require(!waits({}, pending, policy, 1000), "An empty display held an ordinary copy");
+  }
 }
 
 int main() {
@@ -361,6 +428,7 @@ int main() {
     local_rejections();
     source_actions_and_commit();
     dynamic_resolution_sequence();
+    frame_generation_hold();
     std::puts("display depth cache tests passed");
     return 0;
   } catch (const std::exception &error) {

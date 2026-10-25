@@ -45,7 +45,9 @@ namespace sunshine_streamline::provider {
   // Enabled FG owns its viewport's depth only while its scope is live
   // (depth_capture::frame_generation_scope_live). A silent scope selects as
   // without FG for this acquisition, so that viewport's ordinary SR/RR depth
-  // may supply depth, and the next accepted FG copy takes ownership back.
+  // may supply depth once FG's own newest copy can no longer be held
+  // (depth_capture::frame_generation_holds), and the next accepted FG copy
+  // takes ownership back.
   // Any other policy selects as it is.
   struct frame_generation_selection {
     depth_capture::selection_policy selection;

@@ -240,6 +240,21 @@ namespace sunshine_streamline {
       else if (tag_copy.epoch == scope_epoch && tag_copy.viewport == viewport) tag_copy.tick = 0;
       ReleaseSRWLockExclusive(&evaluation_supply_lock);
     }
+    // A frame whose FG tag left it without a copy (refused, or its copy
+    // deferred to the frame's Present cancelled, refused or lapsed): the FG
+    // scope owns no depth for it (depth_capture::frame_generation_missed), so
+    // the viewport's ordinary SR/RR depth may supply it. sequence is the
+    // frame's tag call. While DLSS-G's own evaluation supplies the scope's
+    // copies (remember_evaluation_supply), that evaluation, not the tag,
+    // decides the frame.
+    void miss_frame_generation(std::uint64_t scope_epoch, std::uint32_t viewport, std::uint64_t sequence) {
+      AcquireSRWLockShared(&evaluation_supply_lock);
+      const auto supply = evaluation_supply;
+      ReleaseSRWLockShared(&evaluation_supply_lock);
+      if (supply.tick && supply.epoch == scope_epoch && supply.viewport == viewport &&
+          sunshine_freshness::ahead_tolerant_le(supply.tick, GetTickCount64(), sunshine_freshness::fg_silent_ms)) return;
+      depth_capture::frame_generation_missed(scope_epoch, viewport, sequence);
+    }
     bool tag_copy_recent(std::uint64_t scope_epoch, std::uint32_t viewport) {
       AcquireSRWLockShared(&evaluation_supply_lock);
       const auto copy = tag_copy;
@@ -1976,7 +1991,9 @@ namespace sunshine_streamline {
     // The tag described is the call's first present depth tag in priority
     // order; reason is its first failing gate. A live FG scope is withdrawn,
     // unless DLSS-G's own evaluation supplies its copies (dlssg_supplied); a
-    // silent one has no FG capture to withdraw. Diagnostic only.
+    // silent one has no FG capture to withdraw. Either way the frame has no
+    // FG copy, so the scope owns no depth for it (miss_frame_generation).
+    // Diagnostic only.
     void report_fg_refusal(const evaluation_snapshot &snapshot, const char *reason, bool withdrawn, bool live,
         bool supplied = false) {
       const auto count = fg_refusals.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -1998,10 +2015,11 @@ namespace sunshine_streamline {
         static_cast<unsigned long long>(snapshot.command_buffer), name(snapshot.frame.kind), name(snapshot.status),
         unsigned(snapshot.frame_generation_input), live ? "live" : "silent", unsigned(withdrawn), unsigned(supplied),
         static_cast<unsigned long long>(count),
-        withdrawn ? "the viewport's FG depth source is withdrawn until its next capture" :
+        withdrawn ? "the viewport's FG depth source is withdrawn, and the FG scope owns no depth for this frame, so the "
+          "viewport's ordinary SR/RR depth may supply it" :
           supplied ? "DLSS-G's own NGX evaluation copies this FG scope's depth (DLSSG.Depth), so nothing is withdrawn" :
-          "the FG scope is silent (no FG copy accepted for a second), so nothing is withdrawn and the viewport's "
-          "ordinary SR/RR depth stays eligible");
+          "the FG scope owns no depth for this frame, so nothing is withdrawn and the viewport's ordinary SR/RR depth "
+          "may supply it");
       message(text);
     }
     // A depth copy recorded inside a frame-generation tag call (diagnostic:
@@ -2061,7 +2079,9 @@ namespace sunshine_streamline {
       const auto superseded = snapshot.frame_generation_input ? 0 :
         snapshot.tag_boundary || fg_silent ? fg_source : UINT64_MAX;
       // A silent FG scope has no FG capture to revoke: its refused boundaries
-      // leave the ordinary source of the viewport in place.
+      // leave the ordinary source of the viewport in place. A refused FG
+      // boundary also leaves its frame without an FG copy
+      // (miss_frame_generation), which makes a live scope silent.
       const bool withdraws = !(snapshot.frame_generation_input && fg_silent);
       const auto withdraw_invalid_attempt = [&] {
         if (!withdraws) return;
@@ -2079,6 +2099,7 @@ namespace sunshine_streamline {
         if (fg_boundary) {
           report_fg_refusal(snapshot, rejected, withdraws, route == fg_route::owned);
           remember_tag_copy(snapshot.epoch, snapshot.viewport, false);
+          miss_frame_generation(snapshot.epoch, snapshot.viewport, snapshot.sequence);
         }
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
         remember_refusal(snapshot, sunshine_depth_refusal::gate::source, rejected);
@@ -2168,6 +2189,7 @@ namespace sunshine_streamline {
         if (fg_boundary) remember_tag_copy(snapshot.epoch, snapshot.viewport, diagnostic.result == depth_capture::status::recorded);
         if (fg_boundary && diagnostic.result == depth_capture::status::recorded)
           count_tag_call_copy(candidates.data(), count, diagnostic);
+        else if (fg_boundary) miss_frame_generation(snapshot.epoch, snapshot.viewport, snapshot.sequence);
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
         // A metadata-only nomination keeps the source; its copy was refused.
         if (diagnostic.result != depth_capture::status::recorded)
@@ -2180,12 +2202,14 @@ namespace sunshine_streamline {
       // nothing while DLSS-G's own evaluation supplies this live scope's
       // copies (observe_frame_generation_inputs): withdrawing would leave
       // every Present between the tag and that evaluation without a current
-      // FG nomination.
+      // FG nomination. That evaluation, not the tag, then decides the frame
+      // (miss_frame_generation changes nothing).
       const bool supplied = fg_boundary && !attempted && withdraws &&
         !std::strcmp(candidate_rejection(snapshot), "boundary_without_commands") &&
         evaluation_supplies(snapshot.epoch, snapshot.viewport);
       if (fg_boundary) {
         remember_tag_copy(snapshot.epoch, snapshot.viewport, false);
+        miss_frame_generation(snapshot.epoch, snapshot.viewport, snapshot.sequence);
         char reason[96]{};
         if (attempted) std::snprintf(reason, sizeof(reason), "capture_%s/%s",
           depth_capture::name(diagnostic.result), depth_capture::name(diagnostic.stage));
@@ -2506,9 +2530,14 @@ namespace sunshine_streamline {
       return count;
     }
     // A dropped deferral no longer keeps its kinds' precedence over DLSS-G's
-    // own inputs (tag_copy, ui_tag_copy): this frame has no tag copy.
-    void hand_over(std::uint64_t scope_epoch, std::uint32_t viewport, unsigned kinds) {
-      if (kinds & 1u) remember_tag_copy(scope_epoch, viewport, false);
+    // own inputs (tag_copy, ui_tag_copy): this frame has no tag copy, so its
+    // FG scope owns no depth for it either (miss_frame_generation). sequence:
+    // the frame's newest tag call.
+    void hand_over(std::uint64_t scope_epoch, std::uint32_t viewport, unsigned kinds, std::uint64_t sequence) {
+      if (kinds & 1u) {
+        remember_tag_copy(scope_epoch, viewport, false);
+        miss_frame_generation(scope_epoch, viewport, sequence);
+      }
       for (unsigned slot = 0; slot != 4; ++slot)
         if (kinds & (2u << slot)) remember_ui_tag_copy(scope_epoch, viewport, slot, false);
     }
@@ -2548,7 +2577,7 @@ namespace sunshine_streamline {
       const auto source_epoch = epoch.load(std::memory_order_acquire);
       const auto executions = depth_capture::game_executions();
       unsigned cancelled = 0, dropped = 0;
-      std::uint64_t dropped_epoch{};
+      std::uint64_t dropped_epoch{}, cancelled_serial{}, dropped_serial{};
       std::uint32_t dropped_viewport{};
       AcquireSRWLockExclusive(&evaluation_supply_lock);
       deferred_frame *entry = nullptr;
@@ -2557,6 +2586,7 @@ namespace sunshine_streamline {
           sl_contract::untag_cancels(tokened && framed, entry->frame.kind != frame_identity_kind::unavailable,
             same_frame(frame, entry->frame))) {
         cancelled = deferred_kinds(*entry) & ((untags_depth ? 1u : 0u) | ui_untags);
+        cancelled_serial = entry->serial;
         if (cancelled & 1u) entry->depth = {};
         for (unsigned slot = 0; slot != entry->ui.size(); ++slot) if (cancelled & (2u << slot)) entry->ui[slot] = {};
       }
@@ -2565,6 +2595,7 @@ namespace sunshine_streamline {
         if (entry && (entry->epoch != source_epoch || entry->observation != out.observation ||
             !(same_frame(entry->frame, frame) || (!framed && entry->frame.kind == frame_identity_kind::unavailable)))) {
           dropped = deferred_kinds(*entry); dropped_epoch = entry->epoch; dropped_viewport = entry->viewport;
+          dropped_serial = entry->serial;
           *entry = {};
           entry = nullptr;
         }
@@ -2575,6 +2606,7 @@ namespace sunshine_streamline {
             entry = &deferred_frames[0];
             for (auto &value : deferred_frames) if (value.serial < entry->serial) entry = &value;
             dropped |= deferred_kinds(*entry); dropped_epoch = entry->epoch; dropped_viewport = entry->viewport;
+            dropped_serial = entry->serial;
             *entry = {};
           }
           entry->used = true; entry->observation = out.observation; entry->epoch = source_epoch;
@@ -2595,11 +2627,11 @@ namespace sunshine_streamline {
       ReleaseSRWLockExclusive(&evaluation_supply_lock);
       if (cancelled) {
         deferrals.cancelled.fetch_add(kind_count(cancelled), std::memory_order_relaxed);
-        hand_over(source_epoch, out.viewport, cancelled);
+        hand_over(source_epoch, out.viewport, cancelled, cancelled_serial);
       }
       if (dropped) {
         deferrals.lapsed.fetch_add(kind_count(dropped), std::memory_order_relaxed);
-        hand_over(dropped_epoch, dropped_viewport, dropped);
+        hand_over(dropped_epoch, dropped_viewport, dropped, dropped_serial);
       }
       report_deferrals();
     }
@@ -3214,7 +3246,7 @@ namespace sunshine_streamline {
     std::array<deferred_frame, slot_count> due;
     unsigned waited = 0;
     unsigned due_count = 0;
-    struct ended_frame { std::uint64_t epoch{}; std::uint32_t viewport{}; unsigned kinds{}; };
+    struct ended_frame { std::uint64_t epoch{}, serial{}; std::uint32_t viewport{}; unsigned kinds{}; };
     std::array<ended_frame, slot_count> ended;
     unsigned ended_count = 0;
     auto pin = read_metadata();
@@ -3249,7 +3281,7 @@ namespace sunshine_streamline {
         waited += generating;
         continue;
       }
-      if (past) ended[ended_count++] = {entry.epoch, entry.viewport, deferred_kinds(entry)};
+      if (past) ended[ended_count++] = {entry.epoch, entry.serial, entry.viewport, deferred_kinds(entry)};
       else due[due_count++] = std::move(entry);
       entry = {};
     }
@@ -3259,7 +3291,7 @@ namespace sunshine_streamline {
     if (waited) deferrals.waited.fetch_add(waited, std::memory_order_relaxed);
     for (unsigned n = 0; n != ended_count; ++n) {
       deferrals.lapsed.fetch_add(kind_count(ended[n].kinds), std::memory_order_relaxed);
-      hand_over(ended[n].epoch, ended[n].viewport, ended[n].kinds);
+      hand_over(ended[n].epoch, ended[n].viewport, ended[n].kinds, ended[n].serial);
     }
     bool recorded = false;
     // ReShade's own list records these copies; its list events never report it.
@@ -3285,6 +3317,7 @@ namespace sunshine_streamline {
           } else if (captured) depth_capture::finish(captured, false);
         }
         remember_tag_copy(entry.epoch, entry.viewport, copied);
+        if (!copied) miss_frame_generation(entry.epoch, entry.viewport, entry.serial);
         if (copied) {
           recorded = true;
           deferrals.depth_copied.fetch_add(1, std::memory_order_relaxed);
@@ -3739,6 +3772,8 @@ namespace sunshine_streamline {
           // as an FG tag boundary does, so a refusal withdraws the old copy. A
           // silent scope's refusal changes nothing: only a recorded copy
           // becomes the viewport's FG observation (replacing its ordinary one).
+          // Either way a refused frame has no FG copy, so the scope owns no
+          // depth for it (frame_generation_missed).
           const bool live = depth_capture::frame_generation_scope_live(fg.epoch, fg.viewport, fg.enabled_tick);
           if (live) depth_capture::begin_evaluation(fg.epoch, serial, fg.viewport,
             sunshine_scene_depth::provider_kind::streamline, source_id, 0);
@@ -3750,6 +3785,7 @@ namespace sunshine_streamline {
             out.depth_ticket = captured; out.depth = depth_outcome::copied;
           } else {
             if (captured) depth_capture::finish(captured, false);
+            depth_capture::frame_generation_missed(fg.epoch, fg.viewport, serial);
             out.depth = depth_outcome::capture; out.depth_stage = diagnostic.stage;
           }
         }
