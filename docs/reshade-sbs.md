@@ -3877,7 +3877,11 @@ before cleanup so duplicate or reentrant unload cannot dispose the publisher twi
 remains blocked until that cleanup and publisher destruction finish. Adapter source
 leases are detached under their metadata lock and released after unlocking. GPU snapshot leases
 remain subject to the existing completion/recording-retirement rules.
-Retained middleware hooks can keep the module loaded until process exit. The session storage is
+AddonInit pins the module before it starts any pool work, hook or callback, so it stays loaded until
+process exit: ReShade unloads add-ons whenever a game destroys its last device (Assassin's Creed
+Shadows does at startup), possibly while module discovery or a shader compile the add-on started is
+still running on a pool thread, and the next device initializes the same module again through
+AddonInit. A failed pin fails AddonInit. The session storage is
 process-persistent, preventing a second implicit CRT cleanup owner. A shared detach fence stops
 callback observation before other C++ owners are destroyed; vendor calls still forward normally.
 Ordinary add-on unload continues to unregister callbacks and release its active session resources.

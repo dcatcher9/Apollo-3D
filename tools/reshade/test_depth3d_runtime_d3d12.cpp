@@ -204,6 +204,9 @@ namespace {
     // caller records it with another allocator; the next waiting submit
     // covers both).
     bool defer_completion = false;
+    // Runs once the official runtime is loaded, before the fixture creates its
+    // game device: devices a game creates and destroys before that one.
+    std::function<void()> before_game_device;
 
     ~fixture_t() {
       observed.capture = observed.inject = false;
@@ -434,6 +437,7 @@ namespace {
       require(AdjustWindowRectEx(&bounds, WS_OVERLAPPEDWINDOW, FALSE, WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW), "Could not size hidden fixture window");
       window = CreateWindowExW(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, wc.lpszClassName, L"Hidden Depth3D D3D12 depth probe", WS_OVERLAPPEDWINDOW, 0, 0, bounds.right - bounds.left, bounds.bottom - bounds.top, nullptr, nullptr, wc.hInstance, nullptr);
       require(window && !IsWindowVisible(window), "Could not create hidden fixture window");
+      if (before_game_device) before_game_device();
       const auto create = reinterpret_cast<decltype(&D3D12CreateDevice)>(GetProcAddress(runtime_module, "D3D12CreateDevice"));
       const auto create_factory = reinterpret_cast<decltype(&CreateDXGIFactory2)>(GetProcAddress(runtime_module, "CreateDXGIFactory2"));
       require(create && create_factory, "Official runtime lacks D3D12 proxy exports");

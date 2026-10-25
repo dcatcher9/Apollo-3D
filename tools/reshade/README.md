@@ -1322,6 +1322,20 @@ Every checked present inspects current depth and source-color pixels, including 
 missing/unsupported depth. Run one frozen executable against both control and treatment;
 these checks deliberately exercise the capture/selection/calibration boundaries.
 
+`reshade_addon_unload_runtime_test` uses the same four arguments as the probe-round fixture and
+checks the add-on across ReShade's add-on unload
+([its session lifetime](../../docs/reshade-sbs.md#streamline-depth-selection)). Before the game's
+device it creates and destroys a startup device with no queue, swapchain or frame, as Assassin's
+Creed Shadows does. Its initialization starts the add-on's module discovery and content-sampler
+compile on pool threads, and the test add-on's `SunshineSbsTestHoldPoolWork` adds one pool callback
+of the add-on's own code that waits until after the unload, then compiles through the add-on's
+D3DCompiler import. ReShade must uninitialize the add-on with that device and leave the module
+mapped; the held callback must then compile and return, and the game's device must initialize the
+same module again and render native Game 3D from its drawn depth. Without AddonInit's pin the
+module is unmapped and the fixture fails at that check. Where the official runtime and frozen
+shaders are configured it is registered as `reshade_addon_unload_runtime`, labelled `contract;gpu`
+and `RUN_SERIAL` with the `gpu` resource lock, so the contract runner runs it.
+
 Shared native-depth, uniform and HDR mono observations of the depth fixtures live in
 `test_raw_runtime_fixture.h`. The shared shader/transport fixtures retain their own contracts.
 
