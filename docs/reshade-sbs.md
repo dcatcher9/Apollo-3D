@@ -3737,14 +3737,17 @@ recording observes proves that copy and otherwise it is refused as `missing_stat
 matrix's D11c, since Stage 3 batch B; before, every unbind and clear-like draw declared
 `DEPTH_WRITE`). ReShade keeps no DSV flags with a view and reports them only as the usage of its
 creation (`depth_stencil_read` for either flag), so the add-on records each D3D12 depth-stencil
-view's read-only-ness from `init_resource_view` in a lock-free table of 1024 handles per device
+view's read-only-ness from `init_resource_view` in a lock-free table of 4096 handles per device
 ([`read_only_dsv.h`](../tools/reshade/read_only_dsv.h)) and reads it where a list binds the view,
-since D3D12 reads the descriptor there and the game may reuse the handle before the unbind. Once a
-read-only view finds no slot, every handle the table does not hold counts as read-only. A view with
-only `READ_ONLY_STENCIL` counts as read-only too (ReShade does not tell the flags apart), which only
-refuses a copy. A descriptor the game copies into a DSV heap (`CopyDescriptors`) is not reported
-and keeps what was last created at its handle. A DSV switch after the list's own depth clear still
-declares the clear's `DEPTH_WRITE`. ReShade reports a render
+since D3D12 reads the descriptor there and the game may reuse the handle before the unbind. Every
+view takes a slot, and a handle the table does not hold counts as read-only (fail closed): a
+descriptor the game copies into a DSV heap (`CopyDescriptors`), which ReShade does not report and
+the add-on does not hook, or a view that found no slot. Before the Stage 3 batch B review only
+read-only views took a slot, so a read-only descriptor copied into an unreported handle read as
+writable and its unbind declared `DEPTH_WRITE`. A descriptor copied over a handle whose own view was
+reported still keeps that view's answer. A view with only `READ_ONLY_STENCIL` counts as read-only
+too (ReShade does not tell the flags apart), which only refuses a copy. A DSV switch after the
+list's own depth clear still declares the clear's `DEPTH_WRITE`. ReShade reports a render
 pass before the native `BeginRenderPass`, so a render pass that clears depth is copied there, outside
 the pass: the capture owner learns that the pass began only after that copy. The end-of-frame copy
 runs on ReShade's own list, where nothing names the state: it copies only from the source's last

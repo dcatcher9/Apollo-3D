@@ -15,35 +15,30 @@
 // depth_addon.cpp records each depth-stencil view it is told of here.
 //
 // Lock-free: views are created on any thread while lists record on others.
-// Bounded: a read-only view takes a slot for its handle, which keeps it; a
-// writable view created over that handle marks the slot writable, and a
-// handle never read-only takes no slot. A read-only view that finds no slot
-// within its probes sets overflow: from then on a handle the table does not
-// hold may be read-only, so read_only answers true for it, which only refuses
-// copies. A slot whose flag is not stored yet reads as read-only too. A
-// descriptor copied into a DSV heap (CopyDescriptors) is not reported by
-// ReShade; its handle keeps what was last created there.
+// Bounded: each view takes a slot for its handle, which keeps it; a later
+// view created at that handle replaces its flag. A handle the table does not
+// hold reads as read-only, which only refuses copies: its creation was never
+// reported (a descriptor copied into a DSV heap with CopyDescriptors, which
+// ReShade does not report and the add-on does not hook), or it found no slot
+// within its probes. A slot whose flag is not stored yet reads as read-only
+// too. A descriptor copied over a handle whose own view was reported keeps
+// that view's answer.
 namespace sunshine_read_only_dsv {
   template<unsigned Capacity, unsigned Probes = 16>
   class table {
     static_assert(Capacity && Probes && Probes <= Capacity);
 
   public:
-    // A depth-stencil view was created at handle view.
+    // A depth-stencil view was created at handle view. A view that finds no
+    // slot is not held, so its handle reads as read-only.
     void created(std::uint64_t view, bool read_only) {
       if (!view) {
         return;
       }
       for (unsigned n = 0, i = start(view); n != Probes; ++n, i = (i + 1) % Capacity) {
         auto key = keys[i].load(std::memory_order_acquire);
-        if (!key) {
-          // Slots are never emptied, so the handle is in no later slot.
-          if (!read_only) {
-            return;
-          }
-          if (!keys[i].compare_exchange_strong(key, view, std::memory_order_acq_rel) && key != view) {
-            continue;
-          }
+        // Slots are never emptied, so the handle is in no later slot.
+        if (!key && keys[i].compare_exchange_strong(key, view, std::memory_order_acq_rel)) {
           key = view;
         }
         if (key == view) {
@@ -51,12 +46,10 @@ namespace sunshine_read_only_dsv {
           return;
         }
       }
-      if (read_only) {
-        overflow.store(true, std::memory_order_release);
-      }
     }
 
-    // Whether the view at handle view may be read-only.
+    // Whether the view at handle view may be read-only: true unless the table
+    // holds a writable view's creation at that handle.
     bool read_only(std::uint64_t view) const {
       for (unsigned n = 0, i = start(view); n != Probes; ++n, i = (i + 1) % Capacity) {
         const auto key = keys[i].load(std::memory_order_acquire);
@@ -67,11 +60,7 @@ namespace sunshine_read_only_dsv {
           break;
         }
       }
-      return overflow.load(std::memory_order_acquire);
-    }
-
-    bool overflowed() const {
-      return overflow.load(std::memory_order_acquire);
+      return true;
     }
 
   private:
@@ -84,6 +73,5 @@ namespace sunshine_read_only_dsv {
 
     std::array<std::atomic<std::uint64_t>, Capacity> keys {};
     std::array<std::atomic<std::uint8_t>, Capacity> flags {};
-    std::atomic<bool> overflow {};
   };
 }  // namespace sunshine_read_only_dsv

@@ -609,8 +609,10 @@ struct __declspec(uuid("94e283ef-6714-4d50-b936-71d6308a4be4")) generic_depth_de
 	std::vector<command_queue *> queues;
 
 	// D3D12: which depth-stencil views are read-only (on_init_resource_view).
-	// Lock-free; read by recording threads where they bind a view.
-	sunshine_read_only_dsv::table<1024> read_only_views;
+	// Lock-free; read by recording threads where they bind a view. Every
+	// view takes a slot (36 KiB for 4096 handles), since a handle it does not
+	// hold counts as read-only.
+	sunshine_read_only_dsv::table<4096> read_only_views;
 
 	// List of all encountered depth-stencils of the last frame
 	std::unordered_map<resource, depth_stencil_resource, resource_hash> depth_stencil_resources;

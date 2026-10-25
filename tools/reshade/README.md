@@ -1737,12 +1737,13 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
 - [`test_read_only_dsv.cpp`](test_read_only_dsv.cpp) (`reshade_read_only_dsv`) pins the read-only
   depth-stencil view table of [`read_only_dsv.h`](read_only_dsv.h), which decides the Generic
   path's unbind and clear-like draw of a bound view (D11c): a view created read-only stays so until
-  a writable view is created at its handle, a handle never created read-only is writable, and once a
-  read-only view finds no slot every handle the table does not hold counts as read-only. The
-  capture owner's refusal of such a copy is the device layer's `unbind_read_only_dsv` cells, and the
-  direct Streamline fixture checks the wiring under ReShade: a DSV created with `READ_ONLY_DEPTH`
-  reads as read-only in the table and where a list binds it, a writable one does not, and a writable
-  view created again at the read-only view's handle replaces it
+  a writable view is created at its handle, a writable view is writable, and a handle the table
+  does not hold (never reported, or with no slot left) counts as read-only. The capture owner's
+  refusal of such a copy is the device layer's `unbind_read_only_dsv` cells, and the direct
+  Streamline fixture checks the wiring under ReShade: a DSV created with `READ_ONLY_DEPTH` reads as
+  read-only in the table and where a list binds it, a writable one does not, a read-only one copied
+  with `CopyDescriptorsSimple` into a handle no view was created at reads as read-only, and a
+  writable view created again at the read-only view's handle replaces it
   (`SunshineDepthTestReadOnlyView`).
 - Compute lists (S22, N7): [`test_capture_state_policy.cpp`](test_capture_state_policy.cpp) pins
   `copy_state::list_basis` (the states and layouts a COMPUTE list may name, none of a compute
