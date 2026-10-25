@@ -921,6 +921,49 @@ namespace {
     static_assert(!mask::same_tag_interval(0, 2, 1, 3) && !mask::same_tag_interval(5, 4, 1, 0));
     static_assert(!mask::same_tag_interval(UINT64_MAX, 2, 1, 3));
   }
+
+  // The game's tags' precedence over DLSS-G's inputs per UI kind
+  // (tag_precedence; the matrix's U2 and U5), frame by frame as the probe
+  // asks it: a tag defers its copy unless deferral_refused, and DLSS-G's
+  // evaluation copies the kind unless tags_supply. One refused deferred copy
+  // hands the kind to DLSS-G's input, and while that refusal is within the
+  // source age no tag defers the kind, so nothing refused refreshes it every
+  // frame (the loop that kept the kind with DLSS-G for good). Once it ages a
+  // tag defers again, DLSS-G stands aside, and the copy made takes the kind
+  // back. A refusal belongs to its scope (epoch and viewport).
+  void tag_precedence_after_a_refused_deferral() {
+    constexpr std::uint64_t epoch = 7;
+    constexpr std::uint32_t viewport = 1;
+    constexpr unsigned slot = 3;
+    mask::tag_precedence value;
+    std::uint64_t now = 5000;
+    require(!value.deferral_refused(epoch, viewport, slot, now) && value.tags_supply(epoch, viewport, slot, true, now) &&
+        !value.tags_supply(epoch, viewport, slot, false, now), "A pending deferral did not keep its kind, or none did");
+    value.remember(epoch, viewport, slot, false, true, now);
+    unsigned deferred = 0, frames = 0;
+    for (; now < 5000 + sunshine_freshness::source_age_ms; now += 16, ++frames) {
+      const bool defers = !value.deferral_refused(epoch, viewport, slot, now);
+      deferred += defers;
+      require(!value.tags_supply(epoch, viewport, slot, defers, now), "DLSS-G's input stood aside after a refused deferral");
+    }
+    require(frames > 1 && !deferred, "A tag deferred a copy of its kind while the kind's last deferral was refused");
+    require(!value.deferral_refused(epoch, viewport, slot, now) && value.tags_supply(epoch, viewport, slot, true, now),
+      "An aged refusal kept the kind with DLSS-G's input");
+    value.remember(epoch, viewport, slot, true, true, now);
+    require(value.tags_supply(epoch, viewport, slot, false, now + 16), "A made deferred copy did not take its kind back");
+    // A tag copy refused at its call hands the kind over but stops no deferral.
+    value.remember(epoch, viewport, slot, false, false, now + 16);
+    require(!value.tags_supply(epoch, viewport, slot, false, now + 16) && !value.deferral_refused(epoch, viewport, slot, now + 16),
+      "A copy refused at its tag call was taken for a refused deferral");
+    // Another viewport's refused deferral starts its own scope: this
+    // viewport's pending deferral still keeps its kind.
+    value.remember(epoch, viewport + 1, slot, false, true, now + 32);
+    require(value.deferral_refused(epoch, viewport + 1, slot, now + 32) && !value.deferral_refused(epoch, viewport, slot, now + 32) &&
+        value.tags_supply(epoch, viewport, slot, true, now + 32) && !value.tags_supply(epoch, viewport + 1, slot, true, now + 32),
+      "A refused deferral of one viewport decided another's");
+    value.forget(slot);
+    require(!value.tags_supply(epoch, viewport + 1, slot, false, now + 32), "A forgotten copy kept its kind");
+  }
 }
 
 namespace sunshine_streamline::depth_capture {
@@ -1009,6 +1052,7 @@ int main() {
     tags_without_a_reader_are_not_copied(); std::puts("PASS UI tags are copied only while their runtime read its captures within the reader window");
     stale_requests_expire(); std::puts("PASS UI capture requests match tags only while refreshed; an expired entry goes to a new runtime, never a live one");
     one_scan_per_present(); std::puts("PASS one capture read per Present returns every kind polling each snapshot once; tags scan only a full kind");
+    tag_precedence_after_a_refused_deferral(); std::puts("PASS a refused deferred UI copy hands its kind to DLSS-G's input and defers none of it until the refusal ages, per scope; a made copy takes it back");
     mask::invalidate_all();
     return 0;
   } catch (const std::exception &error) {

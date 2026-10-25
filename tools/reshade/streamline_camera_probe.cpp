@@ -248,40 +248,37 @@ namespace sunshine_streamline {
       return copy.tick && copy.epoch == scope_epoch && copy.viewport == viewport &&
         sunshine_freshness::ahead_tolerant_lt(copy.tick, now, sunshine_freshness::source_age_ms);
     }
-    // The same precedence per UI kind (ui_mask::capture_slot): the tick the
-    // newest Streamline UI tag of that kind for the scope recorded a copy, or
-    // zero when it was refused or its SDK call failed. DLSS-G's input of a kind
-    // the game's own tags copy adds no second copy (observe_frame_generation_inputs),
-    // so one origin feeds UI detection, its exact pairs included; a kind the
-    // tags leave out or cannot copy is DLSS-G's. A tag's copy deferred to its
-    // frame's Present (present_deferred) sets the tick when it is made, so
-    // DLSS-G's evaluation of the next frame stands aside; while it is pending,
-    // DLSS-G's evaluation of its own frame stands aside too (ui_tag_deferred).
-    struct { std::uint64_t epoch{}; std::uint32_t viewport{}; std::array<std::uint64_t, 4> tick{}; } ui_tag_copy;
-    void remember_ui_tag_copy(std::uint64_t scope_epoch, std::uint32_t viewport, unsigned slot, bool recorded) {
-      if (slot >= ui_tag_copy.tick.size()) return;
-      AcquireSRWLockExclusive(&evaluation_supply_lock);
-      if (recorded && (ui_tag_copy.epoch != scope_epoch || ui_tag_copy.viewport != viewport))
-        ui_tag_copy = {scope_epoch, viewport, {}};
-      if (ui_tag_copy.epoch == scope_epoch && ui_tag_copy.viewport == viewport)
-        ui_tag_copy.tick[slot] = recorded ? GetTickCount64() : 0;
-      ReleaseSRWLockExclusive(&evaluation_supply_lock);
-    }
-    // A kept copy's SDK call failed: its kind no longer has precedence.
-    void forget_ui_tag_copy(unsigned slot) {
-      if (slot >= ui_tag_copy.tick.size()) return;
-      AcquireSRWLockExclusive(&evaluation_supply_lock);
-      ui_tag_copy.tick[slot] = 0;
-      ReleaseSRWLockExclusive(&evaluation_supply_lock);
-    }
-    bool ui_tag_copy_recent(std::uint64_t scope_epoch, std::uint32_t viewport, unsigned slot) {
-      if (slot >= ui_tag_copy.tick.size()) return false;
-      AcquireSRWLockShared(&evaluation_supply_lock);
-      const bool scope = ui_tag_copy.epoch == scope_epoch && ui_tag_copy.viewport == viewport;
-      const auto tick = ui_tag_copy.tick[slot];
-      ReleaseSRWLockShared(&evaluation_supply_lock);
+    // The same precedence per UI kind (ui_mask::capture_slot,
+    // ui_mask::tag_precedence): the newest Streamline UI tag copy of that kind
+    // for the scope, and the newest refusal of one deferred to its frame's
+    // Present. DLSS-G's input of a kind the game's own tags copy adds no second
+    // copy (observe_frame_generation_inputs), so one origin feeds UI detection,
+    // its exact pairs included; a kind the tags leave out or cannot copy is
+    // DLSS-G's. A tag's copy deferred to its frame's Present (present_deferred)
+    // counts when it is made, so DLSS-G's evaluation of the next frame stands
+    // aside; while it is pending, DLSS-G's evaluation of its own frame stands
+    // aside too (ui_tags_supply), unless the kind's last deferred copy was
+    // refused within the source age: then the tags defer none of the kind
+    // (capture_ui_tag) and DLSS-G's input supplies it until that refusal ages.
+    sunshine_game3d::ui_mask::tag_precedence ui_tag_copy;
+    void remember_ui_tag_copy(std::uint64_t scope_epoch, std::uint32_t viewport, unsigned slot, bool recorded,
+        bool deferred = false) {
       const auto now = GetTickCount64();
-      return scope && tick && sunshine_freshness::ahead_tolerant_lt(tick, now, sunshine_freshness::source_age_ms);
+      AcquireSRWLockExclusive(&evaluation_supply_lock);
+      ui_tag_copy.remember(scope_epoch, viewport, slot, recorded, deferred, now);
+      ReleaseSRWLockExclusive(&evaluation_supply_lock);
+    }
+    void forget_ui_tag_copy(unsigned slot) {
+      AcquireSRWLockExclusive(&evaluation_supply_lock);
+      ui_tag_copy.forget(slot);
+      ReleaseSRWLockExclusive(&evaluation_supply_lock);
+    }
+    bool ui_deferral_refused(std::uint64_t scope_epoch, std::uint32_t viewport, unsigned slot) {
+      const auto now = GetTickCount64();
+      AcquireSRWLockShared(&evaluation_supply_lock);
+      const bool refused = ui_tag_copy.deferral_refused(scope_epoch, viewport, slot, now);
+      ReleaseSRWLockShared(&evaluation_supply_lock);
+      return refused;
     }
     // Copies deferred to their frame's Present (owner ruling R2,
     // api_contract.h deferred_copy; the matrix's S6, S11b and U2): per
@@ -314,34 +311,25 @@ namespace sunshine_streamline {
     };
     std::array<deferred_frame, slot_count> deferred_frames{};
     std::atomic<unsigned> deferral_pending{};
-    // The tick each kind's (ui_mask::capture_slot) newest copy deferred to its
-    // frame's Present was refused, zero once one is made. Guarded by
-    // evaluation_supply_lock.
-    std::array<std::uint64_t, 4> ui_deferral_refused{};
-    void remember_ui_deferral(unsigned slot, bool copied) {
-      if (slot >= ui_deferral_refused.size()) return;
-      AcquireSRWLockExclusive(&evaluation_supply_lock);
-      ui_deferral_refused[slot] = copied ? 0 : GetTickCount64();
-      ReleaseSRWLockExclusive(&evaluation_supply_lock);
-    }
-    // A UI tag of this kind whose copy waits for the scope's frame Present
-    // (U2, U5) is that frame's tag copy: DLSS-G's evaluation of the same
-    // frame stands aside for it as for one made. Otherwise both copy the
-    // kind, and at that Present DLSS-G's copy of the frame (still pending)
-    // and its previous one hold the kind's two snapshots, so the deferred
-    // copy finds no reservation and DLSS-G keeps the kind for good. Not
-    // once the kind's last deferred copy was refused within the source age:
-    // DLSS-G's input supplies the kind then.
-    bool ui_tag_deferred(std::uint64_t scope_epoch, std::uint32_t viewport, unsigned slot) {
-      if (slot >= ui_deferral_refused.size() || !deferral_pending.load(std::memory_order_acquire)) return false;
+    // Whether DLSS-G's input of this UI kind stands aside for the game's tags
+    // (ui_tag_copy): their copy was made within the source age, or one waits
+    // for the scope's frame Present (U2, U5), which is that frame's tag copy.
+    // Otherwise both would copy the kind, and at that Present DLSS-G's copy of
+    // the frame (still pending) and its previous one hold the kind's two
+    // snapshots, so the deferred copy finds no reservation and DLSS-G keeps
+    // the kind for good. One shared acquisition per kind.
+    bool ui_tags_supply(std::uint64_t scope_epoch, std::uint32_t viewport, unsigned slot) {
+      if (slot >= ui_tag_copy.copied.size()) return false;
+      const bool deferrals = deferral_pending.load(std::memory_order_acquire) != 0;
+      const auto now = GetTickCount64();
       AcquireSRWLockShared(&evaluation_supply_lock);
       bool pending = false;
-      for (const auto &entry : deferred_frames)
-        pending = pending || (entry.used && entry.epoch == scope_epoch && entry.viewport == viewport && entry.ui[slot].used);
-      const auto refused = ui_deferral_refused[slot];
+      if (deferrals)
+        for (const auto &entry : deferred_frames)
+          pending = pending || (entry.used && entry.epoch == scope_epoch && entry.viewport == viewport && entry.ui[slot].used);
+      const bool supply = ui_tag_copy.tags_supply(scope_epoch, viewport, slot, pending, now);
       ReleaseSRWLockShared(&evaluation_supply_lock);
-      return pending && !(refused &&
-        sunshine_freshness::ahead_tolerant_lt(refused, GetTickCount64(), sunshine_freshness::source_age_ms));
+      return supply;
     }
     // DLSS-G's NGX evaluations of a real frame (observe_frame_generation_inputs
     // with an FG scope): their count, and the newest one's scope and tick.
@@ -2353,8 +2341,13 @@ namespace sunshine_streamline {
         if (sl_contract::deferred_copy(tag.value.lifecycle, commands != nullptr, recorded, writing) ==
             sl_contract::tag_call_copy::present) {
           // Its kind's precedence over DLSS-G's input stays as it is until the
-          // copy is made or dropped (present_deferred).
-          later->used = true; later->where = where; later->input = input;
+          // copy is made or dropped (present_deferred). While the kind's last
+          // deferred copy was refused within the source age, DLSS-G's input
+          // supplies it and no copy is deferred: one would only be refused
+          // again, refreshing that refusal every frame.
+          if (!ui_deferral_refused(source_epoch, out.viewport, mask::capture_slot(where.kind))) {
+            later->used = true; later->where = where; later->input = input;
+          }
           return {};
         }
         input.proof = sl_contract::tag_call_proof(tag.value.lifecycle, input.proof);
@@ -3329,8 +3322,7 @@ namespace sunshine_streamline {
         item.where.command = immediate;
         const auto attempt = mask::begin(item.where, item.input);
         mask::finish(attempt, true);
-        remember_ui_tag_copy(entry.epoch, entry.viewport, slot, static_cast<bool>(attempt.ticket));
-        remember_ui_deferral(slot, static_cast<bool>(attempt.ticket));
+        remember_ui_tag_copy(entry.epoch, entry.viewport, slot, static_cast<bool>(attempt.ticket), true);
         if (attempt.ticket) {
           recorded = true;
           deferrals.ui_copied.fetch_add(1, std::memory_order_relaxed);
@@ -3779,8 +3771,8 @@ namespace sunshine_streamline {
         if (!item.area_valid) { result = ui_outcome::subrect; continue; }
         // The game's own tag of this kind copied it first, or its copy waits
         // for this frame's Present: no second copy, and its exact pairs stay
-        // the tags' own (ui_tag_copy, ui_tag_deferred).
-        if (ui_tag_copy_recent(source_epoch, fg.viewport, i) || ui_tag_deferred(source_epoch, fg.viewport, i)) {
+        // the tags' own (ui_tags_supply).
+        if (ui_tags_supply(source_epoch, fg.viewport, i)) {
           result = ui_outcome::tag_copied;
           continue;
         }

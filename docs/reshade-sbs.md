@@ -4080,9 +4080,15 @@ from its declaration):
   over DLSS-G's own evaluation of the next frame, `tag_copied`), and an accepted UI copy is offered
   to UI detection with its tag call's other kinds as one batch (exact HUD-less pairs). While a UI
   tag's copy is pending, DLSS-G's evaluation of the same frame stands aside for its kind as well
-  (`tag_copied`), unless that kind's last deferred copy was refused within the source age:
-  otherwise DLSS-G's copy of the frame, still pending at that Present, and its previous one hold
-  the kind's two snapshots, and the deferred copy finds no reservation (`no_reservation`);
+  (`tag_copied`): otherwise DLSS-G's copy of the frame, still pending at that Present, and its
+  previous one hold the kind's two snapshots, and the deferred copy finds no reservation
+  (`no_reservation`). Once a kind's deferred copy is refused, DLSS-G's input supplies that kind
+  and its tags defer no copy of it until that refusal is older than the source age; then a tag
+  defers again, DLSS-G stands aside, and the copy made takes the kind back. The refusal belongs to
+  its scope (epoch and viewport; `ui_mask::tag_precedence`). Before the Stage 3 batch B review the
+  tags kept deferring meanwhile, and each such copy, refused `no_reservation` against DLSS-G's own
+  snapshots, refreshed the refusal, so the kind stayed DLSS-G's for good and the deferral line's
+  `ui={refused=}` grew every frame;
 - a `ValidUntilEvaluate` frame-generation depth tag whose list records no state of it is refused
   at the call (`missing_state`): its declaration describes its evaluate, which copies it (S11c). A
   `ValidUntilEvaluate` UI tag is refused the same way (U5), though no evaluate copies a UI tag.

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
+#include "freshness.h"
 #include "streamline_buffer_types.h"
 #include "streamline_camera_data.h"
 #include "streamline_depth_capture.h"
@@ -37,6 +38,58 @@ namespace sunshine_game3d::ui_mask {
     return kind == source_kind::alpha ? 0u : kind == source_kind::color_and_alpha ? 1u :
       kind == source_kind::backbuffer ? 2u : 3u;
   }
+  // Which origin supplies each capture slot of one frame-generation scope
+  // (epoch, viewport): the game's Streamline UI tags or DLSS-G's own inputs of
+  // the same kind (streamline_camera_probe.cpp, which guards it). copied: the
+  // tick the scope's newest tag copy of the kind was recorded, zero once one
+  // was refused or its SDK call failed. refused: the tick the kind's newest
+  // copy deferred to its frame's Present (R2, the matrix's U2 and U5) was
+  // refused, zero once one is made. A recorded copy or a deferred one of
+  // another scope starts that scope's entry. Ticks are GetTickCount64 ms.
+  struct tag_precedence {
+    std::uint64_t epoch{};
+    std::uint32_t viewport{};
+    std::array<std::uint64_t, 4> copied{}, refused{};
+
+    // A tag copy of slot recorded or refused at now; deferred: one made at
+    // its frame's Present.
+    void remember(std::uint64_t scope_epoch, std::uint32_t scope_viewport, unsigned slot, bool recorded, bool deferred,
+        std::uint64_t now) {
+      if (slot >= copied.size()) return;
+      if ((recorded || deferred) && !scope(scope_epoch, scope_viewport)) *this = {scope_epoch, scope_viewport, {}, {}};
+      if (!scope(scope_epoch, scope_viewport)) return;
+      copied[slot] = recorded ? now : 0;
+      if (deferred) refused[slot] = recorded ? 0 : now;
+    }
+    // A kept copy's SDK call failed: its kind no longer has precedence.
+    void forget(unsigned slot) {
+      if (slot < copied.size()) copied[slot] = 0;
+    }
+    // The kind's newest deferred copy was refused within the source age: its
+    // tags defer no copy of it (one would only be refused again while DLSS-G's
+    // own copies hold its snapshots) and DLSS-G's input supplies it, until
+    // the refusal ages and a tag defers again.
+    bool deferral_refused(std::uint64_t scope_epoch, std::uint32_t scope_viewport, unsigned slot, std::uint64_t now) const {
+      return slot < refused.size() && scope(scope_epoch, scope_viewport) && refused[slot] &&
+        sunshine_freshness::ahead_tolerant_lt(refused[slot], now, sunshine_freshness::source_age_ms);
+    }
+    // Whether DLSS-G's input of the kind stands aside for the tags': their
+    // copy was recorded within the source age, or one waits for this frame's
+    // Present (pending) and the kind's deferrals are not refused.
+    bool tags_supply(std::uint64_t scope_epoch, std::uint32_t scope_viewport, unsigned slot, bool pending,
+        std::uint64_t now) const {
+      if (slot >= copied.size()) return false;
+      if (scope(scope_epoch, scope_viewport) && copied[slot] &&
+          sunshine_freshness::ahead_tolerant_lt(copied[slot], now, sunshine_freshness::source_age_ms))
+        return true;
+      return pending && !deferral_refused(scope_epoch, scope_viewport, slot, now);
+    }
+
+  private:
+    bool scope(std::uint64_t scope_epoch, std::uint32_t scope_viewport) const {
+      return epoch == scope_epoch && viewport == scope_viewport;
+    }
+  };
   // UIAlpha is a single-channel image of the UI's opacity (the DLSS-G guide):
   // R32_FLOAT, R16_FLOAT, R16_UNORM and R8_UNORM carry it in red, A8_UNORM in
   // alpha (ui_alpha_in_alpha; the detection reads it there through
