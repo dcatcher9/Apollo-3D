@@ -43,7 +43,10 @@ namespace sunshine_streamline {
     }
     using abi = versioning::abi;
     enum class origin { global, frame, local };
-    constexpr unsigned slot_count = 4, tag_limit = 32, chain_limit = 32, frame_count = 32;
+    // sl_core_api.h sets no limit on numTags or numInputs (the contract
+    // matrix's S18): a tag array or input list is read tag_chunk elements at
+    // a time, on the stack.
+    constexpr unsigned slot_count = 4, tag_chunk = 32, frame_count = 32;
     // Canonical buffer types this observer keeps, depth kinds first. Every
     // tag array below is indexed by position in this list.
     constexpr std::array<std::uint32_t, 9> observed_tag_types{buffers::depth, buffers::high_resolution_depth,
@@ -1539,27 +1542,30 @@ namespace sunshine_streamline {
         invalid_observation(loss_diagnostics::reason::invalid_input, __func__, __LINE__); return out;
       }
       loss_context.viewport = out.viewport;
-      std::array<abi_v2::resource_tag, tag_limit> copy{};
-      // A ResourceTag above version 1 may append fields, so past its first
-      // element the array's stride is unknown: such a multi-tag call is read
-      // as unreadable. One tag, and tags chained in evaluate inputs, are read.
-      const auto stride_unknown = [&] {
-        return count > 1 && same(copy[0].base.type, tag_guid) && copy[0].base.version > 1;
-      };
-      if (count > tag_limit || (count && !read_bytes(tags, copy.data(), count * sizeof(copy[0]))) || stride_unknown()) {
-        invalid_observation(loss_diagnostics::reason::invalid_input, __func__, __LINE__);
-        // A successful call with an unreadable/unsupported tag array must not
-        // leave an older resource looking current for this known viewport.
-        out.count = static_cast<unsigned>(out.tags.size());
-        for (unsigned i = 0; i < out.count; ++i) {
-          out.tags[i].present = true;
-          out.tags[i].source = source;
-          out.tags[i].value.viewport = out.viewport;
-          out.tags[i].value.type = observed_tag_types[i];
+      std::array<abi_v2::resource_tag, tag_chunk> copy{};
+      for (std::uint32_t first = 0; first < count; first += tag_chunk) {
+        const auto size = std::min<std::uint32_t>(count - first, tag_chunk);
+        // A ResourceTag above version 1 may append fields, so past its first
+        // element the array's stride is unknown: such a multi-tag call is read
+        // as unreadable. One tag, and tags chained in evaluate inputs, are read.
+        if (!read_bytes(tags + first, copy.data(), size * sizeof(copy[0])) ||
+            (!first && count > 1 && same(copy[0].base.type, tag_guid) && copy[0].base.version > 1)) {
+          invalid_observation(loss_diagnostics::reason::invalid_input, __func__, __LINE__);
+          // A successful call with an unreadable/unsupported tag array must not
+          // leave an older resource, or a tag of this call read before the
+          // unreadable element, looking current for this known viewport.
+          out.count = static_cast<unsigned>(out.tags.size());
+          for (unsigned i = 0; i < out.count; ++i) {
+            out.tags[i] = {};
+            out.tags[i].present = true;
+            out.tags[i].source = source;
+            out.tags[i].value.viewport = out.viewport;
+            out.tags[i].value.type = observed_tag_types[i];
+          }
+          return out;
         }
-        return out;
+        for (unsigned i = 0; i < size; ++i) append_tag(out, copy[i], source, token);
       }
-      for (unsigned i = 0; i < count; ++i) append_tag(out, copy[i], source, token);
       return out;
     }
 
@@ -2577,53 +2583,78 @@ namespace sunshine_streamline {
         out.valid_viewport = false;
         if (report_invalid) invalid_observation(loss_diagnostics::reason::invalid_input, __func__, __LINE__);
       };
-      if (count > tag_limit) { reject(); return out; }
-      std::array<const base_structure *, tag_limit> roots{};
-      if (count && !read_bytes(inputs, roots.data(), count * sizeof(roots[0]))) {
-        reject(); return out;
-      }
-      std::array<abi_v2::resource_tag, tag_limit> tags{};
-      unsigned tag_count = 0, visited = 0;
-      for (unsigned i = 0; i < count; ++i) {
-        const auto *current = roots[i];
-        while (current && visited++ < chain_limit) {
-          base_structure base;
-          if (!read(current, base)) { reject(); return out; }
-          if (same(base.type, viewport_guid)) {
-            abi_v2::viewport viewport{};
-            std::uint32_t id{};
-            constexpr auto prefix = offsetof(abi_v2::viewport, value) + sizeof(viewport.value);
-            if (!read_bytes(current, &viewport, prefix)) {
-              loss_context.viewport = UINT32_MAX;
-              reject(); out.valid_viewport = false; return out;
-            }
-            // In an evaluate input list 'next' is the documented input chain,
-            // which this loop independently traverses under a global cap. It
-            // does not change the viewport identifier's known prefix layout.
-            viewport.base.next = nullptr;
-            if (
-                decode_v2_viewport(&viewport, sizeof(viewport), id) != decode_status::ok ||
-                (out.valid_viewport && out.viewport != id)) {
-              loss_context.viewport = UINT32_MAX;
-              reject(); out.valid_viewport = false; return out;
-            }
-            out.viewport = id;
-            out.valid_viewport = true;
-            loss_context.viewport = id;
-          } else if (same(base.type, tag_guid) && tag_count < tags.size()) {
-            if (!read_bytes(current, &tags[tag_count++], sizeof(tags[0]))) {
-              reject(); return out;
+      // Visits every node of every input, in order: the inputs a chunk at a
+      // time, each chain to its end (numInputs and a chain have no limit,
+      // S18). A chain that returns to a node it passed is malformed (Brent's
+      // cycle check, with no length cap). failed: a read or the visitor
+      // refused a node.
+      enum class walked { all, failed, cyclic };
+      const auto walk = [&](auto &&visit) {
+        std::array<const base_structure *, tag_chunk> roots{};
+        for (std::uint32_t first = 0; first < count; first += tag_chunk) {
+          const auto size = std::min<std::uint32_t>(count - first, tag_chunk);
+          if (!read_bytes(inputs + first, roots.data(), size * sizeof(roots[0]))) return walked::failed;
+          for (unsigned i = 0; i < size; ++i) {
+            const void *mark{};
+            std::uint64_t steps{}, span{1};
+            for (const auto *current = roots[i]; current;) {
+              base_structure base;
+              if (!read(current, base) || !visit(current, base)) return walked::failed;
+              current = static_cast<const base_structure *>(base.next);
+              if (current && current == mark) return walked::cyclic;
+              if (++steps == span) { mark = current; steps = 0; span *= 2; }
             }
           }
-          current = static_cast<const base_structure *>(base.next);
         }
-        if (current) {
-          loss_context.viewport = UINT32_MAX;
-          reject(); out.valid_viewport = false; return out;
+        return walked::all;
+      };
+      // The first walk finds the viewport and keeps the first tag_chunk tags;
+      // a later walk appends the rest, once the viewport is known.
+      std::array<abi_v2::resource_tag, tag_chunk> tags{};
+      std::uint64_t tag_count = 0;
+      bool viewport_refused = false;
+      const auto first_walk = walk([&](const base_structure *current, const base_structure &base) {
+        if (same(base.type, viewport_guid)) {
+          abi_v2::viewport viewport{};
+          std::uint32_t id{};
+          constexpr auto prefix = offsetof(abi_v2::viewport, value) + sizeof(viewport.value);
+          // In an evaluate input list 'next' is the documented input chain,
+          // which the walk traverses. It does not change the viewport
+          // identifier's known prefix layout.
+          viewport_refused = !read_bytes(current, &viewport, prefix);
+          viewport.base.next = nullptr;
+          viewport_refused = viewport_refused || decode_v2_viewport(&viewport, sizeof(viewport), id) != decode_status::ok ||
+            (out.valid_viewport && out.viewport != id);
+          if (viewport_refused) return false;
+          out.viewport = id;
+          out.valid_viewport = true;
+          loss_context.viewport = id;
+        } else if (same(base.type, tag_guid)) {
+          abi_v2::resource_tag later{};
+          if (!read_bytes(current, tag_count < tags.size() ? &tags[tag_count] : &later, sizeof(later))) return false;
+          ++tag_count;
         }
+        return true;
+      });
+      if (first_walk != walked::all) {
+        if (viewport_refused || first_walk == walked::cyclic) loss_context.viewport = UINT32_MAX;
+        reject(); return out;
       }
-      if (out.valid_viewport)
-        for (unsigned i = 0; i < tag_count; ++i) append_tag(out, tags[i], origin::local, token, report_invalid);
+      if (!out.valid_viewport) return out;
+      for (std::uint64_t i = 0; i < std::min<std::uint64_t>(tag_count, tags.size()); ++i)
+        append_tag(out, tags[i], origin::local, token, report_invalid);
+      if (tag_count > tags.size()) {
+        std::uint64_t seen = 0;
+        const auto later_walk = walk([&](const base_structure *current, const base_structure &base) {
+          if (!same(base.type, tag_guid) || seen++ < tags.size()) return true;
+          abi_v2::resource_tag later{};
+          if (!read_bytes(current, &later, sizeof(later))) return false;
+          append_tag(out, later, origin::local, token, report_invalid);
+          return true;
+        });
+        // The game changed its inputs during its own call.
+        if (later_walk != walked::all) reject();
+      }
       return out;
     }
     std::int32_t hook_evaluate_v2(std::uint32_t feature, const abi_v2::frame_token &frame,

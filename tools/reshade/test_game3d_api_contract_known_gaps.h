@@ -147,13 +147,6 @@ namespace game3d_contract::known_gaps {
       return value.extent == extent_form::declared_size_differs && capture_required(value);
     }
 
-    // More than 32 tags in a call, or more than 32 evaluate inputs or chain
-    // nodes (a local tag shares the evaluate's inputs with its viewport),
-    // make the whole call invalid.
-    constexpr bool beyond_tag_limit(const sl_case &value) {
-      return (value.tags_in_call > 32 || (local(value.entry) && value.tags_in_call + 1 > 32)) && capture_required(value);
-    }
-
     // A multi-tag array from a release newer than the survey whose tags
     // declare ResourceTag v1, which S24 refuses.
     constexpr bool unsurveyed_tag_array(const sl_case &value) {
@@ -172,10 +165,9 @@ namespace game3d_contract::known_gaps {
 
   inline constexpr row<sl_case> sl_rows[] {
     {"S4", &rules::S4, kind::expected_failure, &streamline::local_only_valid_now, "Stage 3 fix 8 (S4/S15). A local tag is current at its own evaluate (SLA:258-262): in tag_rejection (streamline_camera_probe.cpp) promote an OnlyValidNow evaluate input as the tag call's is, and copy it at that evaluate when it has a command list. Fix with S15 (both in read_local_inputs/tag_rejection).", &behaviours::no_copy},
-    {"S15", &rules::S15, kind::expected_failure, &streamline::chained_local, "Stage 3 fix 8 (S4/S15). In read_local_inputs, decode a chained tag with its next pointer cleared (as the viewport already is), treating a PrecisionInfo node as the preceding tag's; fix with S4. Chains of more than 32 nodes also fail S18.", &behaviours::no_copy},
+    {"S15", &rules::S15, kind::expected_failure, &streamline::chained_local, "Stage 3 fix 8 (S4/S15). In read_local_inputs, decode a chained tag with its next pointer cleared (as the viewport already is), treating a PrecisionInfo node as the preceding tag's; fix with S4.", &behaviours::no_copy},
     {"S16", &rules::S16, kind::expected_failure, &streamline::zero_sided_extent, "Stage 3 fix 12 (S16). Use Streamline's whole-resource rule !(width && height) (sl_consts.h:150) in match() (streamline_camera_data.cpp) and source_region (streamline_depth_capture.cpp).", &behaviours::no_copy},
     {"S16d", &rules::S16d, kind::expected_failure, &streamline::declared_size, "Stage 3 fix 12 (S16). Drop the declared Resource size check from match(); the capture already bounds the extent by the allocation (source_region).", &behaviours::no_copy},
-    {"S18", &rules::S18, kind::expected_failure, &streamline::beyond_tag_limit, "Stage 3 fix 10 (S18). Read the type and lifecycle of each element of a longer tag array or input list in chunks with no fixed cap (read_tags, read_local_inputs; tag_limit and chain_limit are 32); at minimum keep the depth slot of a call with more tags.", &behaviours::no_copy},
     {"S24-pending", &rules::S24, kind::pending, &streamline::unsurveyed_tag_array, "Owner ruling needed: the add-on reads a multi-tag array from a release newer than the survey when its ResourceTag declares version 1, whose stride is known (sl_struct.h appends members with a version bump; S14 still refuses a later version in an array). The design's S24 refuses any such array. Either relax S24 to major 3 and above, or make read_tags refuse these arrays."},
     {"S14-pending", &rules::S14, kind::pending, &streamline::zero_header_declaration, "Owner ruling needed: the zero-header Resource layout (some 2.x integrations zero-initialise Resource's base) is accepted with its nonzero declared state as proof (streamline_camera_probe.cpp append_tag; pinned by test_streamline_camera_probe.cpp's 'nonzero compatibility resource state was discarded'). S14 accepts only a state recorded on the copy's list for a Resource that is not an SDK structure. Either rule the declaration usable and relax S14, or require an observed state as for its declared COMMON."},
   };

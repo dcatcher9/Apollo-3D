@@ -3468,7 +3468,12 @@ version from 1 by the prefix it consumes (the API contract matrix's S13, since S
 before, a version above 2.14.1's, Constants 2, ViewportHandle 1 and DLSSGOptions 5, was unknown,
 which dropped the camera, every tag of the call or the frame-generation mode). A ResourceTag above version 1 may be larger, so an array
 of more than one such tag in one `slSetTag`/`slSetTagForFrame` call has an unknown stride and is
-read as unreadable; a single tag and tags chained in evaluate inputs are read. A typed Resource's
+read as unreadable; a single tag and tags chained in evaluate inputs are read. `sl_core_api.h`
+sets no limit on `numTags` or `numInputs`, so a tag array, an input list and an input chain are
+read 32 elements at a time to their end (the API contract matrix's S18, since Stage 3 batch B;
+before, an array of more than 32 tags was read as unreadable, which cleared every tag of its
+viewport, and an evaluate with more than 32 inputs or chain nodes was refused); an input chain
+that returns to a node it passed is malformed. A typed Resource's
 `nativeFormat` (declared in every 2.x Resource) is read and carried with the depth source; the
 zero-header Resource variant and 1.x resources read it as 0. The observer still refuses a wrong
 GUID, version 0 outside the zero-header Resource variant, a chained structure other than

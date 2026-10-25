@@ -795,11 +795,62 @@ namespace {
     require(std::memcmp(&local_view, &original_view, sizeof(local_view)) == 0, "v2 observer mutated input-chain links");
     require(evaluate_call.second == chain && evaluate_call.b == 1, "v2 chain array/count changed");
 
-    // The original accepts an oversized array in this synthetic test. Observation
-    // must bound its reads and invalidate its own cache, while forwarding as-is.
-    require(call_v2_tag(view, &raw_tag, 33, nullptr) == 0, "v2 oversized-array result changed");
-    require(tag_call.second == &raw_tag && tag_call.a == 33, "v2 oversized-array arguments changed");
-    require(latest(view.value).found && latest(view.value).resource == 0 && testing::counts().invalid > 0, "v2 unsupported tag array left old resource looking current");
+    // numTags and numInputs have no limit (S18): a longer tag array, input
+    // list or input chain is read a chunk at a time, past its first 32
+    // elements, and forwarded as-is.
+    auto motion = raw_tag; motion.type = 1; // Motion vectors: unobserved tags.
+    auto wide = viewport(74);
+    std::vector<abi_v2::resource_tag> many(73, motion);
+    many[40] = linear_tag;
+    require(call_v2_tag(wide, many.data(), 73, nullptr) == 0 && tag_call.second == many.data() && tag_call.a == 73,
+      "v2 73-tag array forwarding changed");
+    require(latest(wide.value).found && latest(wide.value).resource == reinterpret_cast<std::uintptr_t>(&native_linear),
+      "v2 depth tag past the first 32 of an array was not read");
+    // An array unreadable past its first chunk leaves neither an older
+    // resource nor a tag of the call read before it looking current.
+    auto *pages = static_cast<unsigned char *>(VirtualAlloc(nullptr, 2 * 4096, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    DWORD protection{};
+    require(pages && VirtualProtect(pages + 4096, 4096, PAGE_NOACCESS, &protection), "guard page setup failed");
+    auto *edge = reinterpret_cast<abi_v2::resource_tag *>(pages + 4096) - 32;
+    for (unsigned i = 0; i < 32; ++i) edge[i] = motion;
+    edge[0] = high_tag;
+    const auto invalid_before = testing::counts().invalid;
+    require(call_v2_tag(wide, edge, 33, nullptr) == 0 && tag_call.second == edge && tag_call.a == 33,
+      "v2 partly unreadable array forwarding changed");
+    require(latest(wide.value).found && latest(wide.value).resource == 0 && testing::counts().invalid > invalid_before,
+      "v2 array unreadable past its first chunk left a tag looking current");
+    VirtualFree(pages, 0, MEM_RELEASE);
+    // 41 evaluate inputs, the viewport last: the depth input past the first
+    // 32 is read once the viewport is known.
+    auto inputs_view = viewport(75);
+    std::vector<abi_v2::resource_tag> local_tags(40, motion);
+    local_tags[35] = high_tag;
+    std::vector<const base_structure *> local_inputs;
+    for (const auto &value : local_tags) local_inputs.push_back(&value.base);
+    local_inputs.push_back(&inputs_view.base);
+    require(call_v2_constants(constants, token.ref(), inputs_view) == 0 &&
+        call_v2_evaluate(0, token.ref(), local_inputs.data(), 41, nullptr) == 0 && evaluate_call.b == 41,
+      "v2 41-input evaluation forwarding changed");
+    require(latest(inputs_view.value).found && latest(inputs_view.value).resource == reinterpret_cast<std::uintptr_t>(&native_hires),
+      "v2 evaluate input past the first 32 was not read");
+    // A chain of 41 nodes: the viewport, 39 unobserved tags and the depth tag last.
+    auto chain_view = viewport(76);
+    std::vector<abi_v2::resource_tag> chained(40, motion);
+    chained[39] = linear_tag;
+    chain_view.base.next = &chained[0].base;
+    for (unsigned i = 0; i + 1 < chained.size(); ++i) chained[i].base.next = &chained[i + 1].base;
+    const base_structure *long_chain[]{&chain_view.base};
+    auto chain_constants = viewport(chain_view.value);
+    require(call_v2_constants(constants, token.ref(), chain_constants) == 0 &&
+        call_v2_evaluate(0, token.ref(), long_chain, 1, nullptr) == 0, "v2 long-chain evaluation forwarding changed");
+    require(latest(chain_view.value).found && latest(chain_view.value).resource == reinterpret_cast<std::uintptr_t>(&native_linear),
+      "v2 depth tag at the end of a 41-node input chain was not read");
+    // A chain that returns to a node it passed is malformed, whatever its length.
+    chained[39].base.next = &chained[3].base;
+    const auto cycle_before = testing::counts().invalid;
+    require(call_v2_evaluate(0, token.ref(), long_chain, 1, nullptr) == 0 && testing::counts().invalid > cycle_before,
+      "v2 cyclic input chain was read or changed forwarding");
+    chained[39].base.next = nullptr;
   }
   selected_depth selection(void *resource) {
     selected_depth value;
