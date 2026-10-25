@@ -3691,7 +3691,10 @@ source age, then the view is mono.
 
 The last proven state ([`proven_state.h`](../tools/reshade/proven_state.h)) is a per-resource fact
 that the capture owner keeps for at most 128 textures, each depth-stencil texture from its creation
-state (ReShade's `init_resource`; the least recently used is forgotten first). Each texture an
+state (ReShade's `init_resource`). A destroyed depth-stencil texture (ReShade's `destroy_resource`) is
+forgotten with its latch before the table next holds a texture; when the table is full, the least
+recently used texture is forgotten. Generic's copy tracks its depth-stencil source again when a full
+table forgot it, so the source's next barrier or clear proves it again. Each texture an
 adapter retains is also watched from its retention, for the enhanced-layout latch below. After each
 `ExecuteCommandLists` returns, in submission order, each list that the barrier hooks observed in
 full proves the state its last transition or enhanced barrier left a tracked texture in, for that

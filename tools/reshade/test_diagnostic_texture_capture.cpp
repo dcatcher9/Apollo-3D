@@ -511,12 +511,30 @@ namespace {
     gpu.submit(); gpu.wait(); gpu.reset();
     require(capture::last_proven_state(source, queue, proven) && proven.value == D3D12_RESOURCE_STATE_DEPTH_WRITE && proven.queue == queue,
       "an executed depth clear did not prove DEPTH_WRITE");
+
+    // A depth-stencil source the table does not track (a full table forgot
+    // it; here it was never reported) is tracked again by Generic's copy: that
+    // copy is refused, the next executed barrier proves it, and the copy after
+    // it uses the proof.
+    ComPtr<ID3D12Resource> forgotten;
+    check(gpu.device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_DEPTH_WRITE,
+      nullptr, IID_PPV_ARGS(&forgotten)), "untracked proven-state depth");
+    const auto untracked = native(forgotten.Get());
+    require(!capture::record_preserved(native(gpu.list.Get()), untracked, generic::end_of_frame, queue, &diagnostic) &&
+        diagnostic.stage == capture::record_stage::missing_state, "an untracked depth-stencil source was copied without a proof");
+    transition(gpu.list.Get(), forgotten.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_DEPTH_READ);
+    gpu.submit(); gpu.wait(); gpu.reset();
+    ticket = capture::record_preserved(native(gpu.list.Get()), untracked, generic::end_of_frame, queue, &diagnostic);
+    require(ticket && diagnostic.used_proven_state && diagnostic.copy_state == D3D12_RESOURCE_STATE_DEPTH_READ,
+      "Generic's copy did not track its forgotten depth-stencil source again");
+    gpu.submit(); gpu.wait(); gpu.reset();
+    ticket = {};
     destroyed(other_list.Get()); capture::command_destroyed(native(other_list.Get()));
     capture::poll();
     gpu.check_debug_errors();
     std::printf("PASS Generic end-of-frame copy from the last proven state: creation and executed-list proofs per queue, "
       "discarded when the proof changed or another queue ran it, unproven after an unobserved list or a wildcard alias, "
-      "proven again by a later barrier or a depth clear%s\n",
+      "proven again by a later barrier or a depth clear; an untracked depth-stencil source tracked again by Generic's copy%s\n",
       gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
   }
 
@@ -1617,6 +1635,28 @@ namespace {
     clear();
     gpu.submit(); gpu.wait(); gpu.reset();
     copied_enhanced("a later clear-only list did not keep the enhanced layout of the texture's proof");
+
+    // A destroyed latched texture (depth_addon's destroy_resource) is
+    // forgotten with its latch before the table next holds a texture, so it
+    // takes no place and never loses a latch.
+    {
+      ComPtr<ID3D12Resource> doomed, next;
+      check(gpu.device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_DEPTH_WRITE,
+        nullptr, IID_PPV_ARGS(&doomed)), "destroyed latched depth");
+      capture::resource_created(native(doomed.Get()), D3D12_RESOURCE_STATE_DEPTH_WRITE);
+      transition(gpu.list.Get(), doomed.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_COMMON);
+      barrier(gpu.list.Get(), doomed.Get(), D3D12_BARRIER_ACCESS_COMMON, D3D12_BARRIER_LAYOUT_COMMON,
+        D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ, D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ);
+      gpu.submit(); gpu.wait(); gpu.reset();
+      const auto latched = capture::proven_counts();
+      capture::resource_destroyed(sunshine_native_identity::resource_cookie(doomed.Get()));
+      check(gpu.device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_DEPTH_WRITE,
+        nullptr, IID_PPV_ARGS(&next)), "depth created after a destruction");
+      capture::resource_created(native(next.Get()), D3D12_RESOURCE_STATE_DEPTH_WRITE);
+      const auto forgotten = capture::proven_counts();
+      require(forgotten.latched + 1 == latched.latched && forgotten.tracked == latched.tracked && !forgotten.latch_lost,
+        "a destroyed latched texture was not forgotten with its latch before the next one was tracked");
+    }
 
     const auto after = capture::proven_counts();
     require(after.earlier_copied >= counts.earlier_copied + 3 && after.earlier_refused >= counts.earlier_refused + 6 && !after.latch_lost,

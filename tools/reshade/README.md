@@ -1700,15 +1700,16 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   barriers were seen, an executed list's proof holds only on its own queue, every update takes a
   new version, unseen changes leave a texture unproven, a full table forgets its least recently
   used texture (one forgotten latched stays latched when held again while its record keeps it; an
-  overflowing record latches every texture not held),
+  overflowing record latches every texture not held; a destroyed one is forgotten with its latch),
   and a depth clear keeps the regime of the texture's proof (an enhanced layout stays enhanced; a
   latched texture without a proof has none). The capture owner's feeding of it is
   proven on real lists by the device layer's end-of-frame cells and by
   `reshade_diagnostic_texture_capture_test`'s `proven_state_end_of_frame` (executed barriers and
   depth clears per queue, a copy discarded when its proof changed or another queue ran it, unproven
-  after an unobserved list or a wildcard alias) and `enhanced_layout_latch` (a depth clear after an
-  enhanced barrier, and a later clear-only list, prove the `DEPTH_STENCIL_WRITE` layout, so the
-  end-of-frame copy uses enhanced barriers under the debug layer).
+  after an unobserved list or a wildcard alias, an untracked depth-stencil source tracked again by
+  Generic's copy) and `enhanced_layout_latch` (a depth clear after an enhanced barrier, and a later
+  clear-only list, prove the `DEPTH_STENCIL_WRITE` layout, so the end-of-frame copy uses enhanced
+  barriers under the debug layer; a destroyed latched texture is forgotten with its latch).
 
 ### Independent renderer reference tests
 

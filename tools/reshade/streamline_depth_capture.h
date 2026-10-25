@@ -530,13 +530,21 @@ namespace sunshine_streamline::depth_capture {
   // anything else is refused (the contract matrix's D6 and N8).
   using proven_state = sunshine_proven_state::state;
   void resource_created(std::uint64_t resource, std::uint32_t initial_state);
+  // A depth-stencil texture ReShade destroyed, by the identity
+  // resource_created tracked it under (depth_addon's native identity): the
+  // table forgets it and its latch before it next holds a texture, so
+  // destroyed textures take no place and lose no latch. Takes no lock and
+  // never touches the dying object.
+  void resource_destroyed(std::uint64_t identity);
   // A source whose copy a tag call deferred to its frame's Present
   // (input::present_queue) is tracked from then on, unproven until an
   // executed list proves it, so that copy starts from the state the game's
   // work left it in on that queue (an enhanced layout included) or is refused
   // when that state disagrees with the declaration. A texture tracked already
   // (a depth-stencil one, from its creation) keeps its state; buffers and
-  // simultaneous-access textures are not tracked.
+  // simultaneous-access textures are not tracked. Generic's depth-stencil
+  // source (record_preserved) is tracked again the same way after a full
+  // table forgot it.
   void track_deferred_source(const source_ref &source);
   // A depth clear of resource's subresource 0 recorded on command, a list
   // ReShade's lifecycle reports (ClearDepthStencilView with the depth flag, or

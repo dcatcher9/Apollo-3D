@@ -149,6 +149,26 @@ int main() {
     check(!owner.latched(11).latched, "A texture tracked from its creation starts unlatched after a latch was lost");
   }
   {
+    // A destroyed texture is forgotten with its latch: never recorded, and
+    // its record freed when a full table had forgotten it latched before.
+    table owner;
+    owner.watch(1);
+    owner.set_latch(1);
+    owner.forget(1);
+    check(!owner.held(1) && !owner.latched(1).latched && !owner.latch_lost() && owner.size() == 0, "A destroyed latched texture is forgotten without a record");
+    for (std::uint64_t resource = 2; resource <= 9; ++resource) {
+      owner.watch(resource);
+      owner.set_latch(resource);
+    }
+    check(!owner.latch_lost() && owner.latched(2).latched, "A full record of forgotten latched textures");
+    owner.forget(2);
+    owner.forget(9);
+    check(!owner.latched(2).latched && !owner.held(9) && owner.size() == 3, "Destroyed textures leave the record and the table");
+    owner.watch(10);
+    owner.watch(11);  // Forgets 6 into the freed record.
+    check(!owner.latch_lost() && owner.latched(6).latched, "A record freed by destroyed textures takes the next forgotten latched texture");
+  }
+  {
     // A depth clear on a list that names the texture in no barrier keeps the
     // regime of its proof: an enhanced layout stays enhanced (D6), so no
     // legacy proof replaces it.

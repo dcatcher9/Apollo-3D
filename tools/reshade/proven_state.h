@@ -20,8 +20,9 @@
 // creation state holds on every queue until a list uses the texture, except
 // once enhanced barriers were seen (creation_trusted): ReShade reports a
 // texture created with an initial layout in the same form as one created in a
-// legacy state. Bounded: the least recently used texture is forgotten first,
-// and a texture that is not tracked is unproven. Pure; the caller locks.
+// legacy state. Bounded: a destroyed texture is forgotten, then the least
+// recently used one when the table is full, and a texture that is not
+// tracked is unproven. Pure; the caller locks.
 //
 // The enhanced-layout latch (the contract matrix's D6 and N8): once an
 // executed list's enhanced barrier named a texture, its layout belongs to
@@ -150,6 +151,16 @@ namespace sunshine_proven_state {
         found->value = {++serial, queue, 0, true, layout, access};
         found->used = serial;
       }
+    }
+
+    // A destroyed texture is forgotten with its latch (never recorded), so
+    // it neither takes a place nor loses a latch when the table is full.
+    void forget(std::uint64_t resource) {
+      if (auto *found = find(resource)) {
+        std::move(found + 1, entries.begin() + count, found);
+        --count;
+      }
+      std::replace(forgotten.begin(), forgotten.end(), resource, std::uint64_t {});
     }
 
     // Something may have changed it unseen.

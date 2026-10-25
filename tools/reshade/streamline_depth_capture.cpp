@@ -291,6 +291,19 @@ namespace sunshine_streamline::depth_capture {
     // most proven_limit textures, the least recently used forgotten first.
     constexpr unsigned proven_limit = 128;
     sunshine_proven_state::table<proven_limit> proven;
+    // Depth-stencil textures ReShade destroyed (resource_destroyed), queued
+    // without a lock (destroy_resource may run where this owner's lock is
+    // held) and forgotten before the table next holds a texture (0: a free
+    // slot). A full queue drops one: the table then forgets it as least
+    // recently used.
+    std::array<std::atomic<std::uint64_t>, proven_limit> destroyed{};
+    std::atomic<bool> destroyed_pending{};
+    // Requires mutex.
+    void forget_destroyed() {
+      if (!destroyed_pending.load(std::memory_order_acquire) || !destroyed_pending.exchange(false, std::memory_order_acq_rel)) return;
+      for (auto &slot : destroyed)
+        if (const auto identity = slot.exchange(0, std::memory_order_acq_rel)) proven.forget(identity);
+    }
     // A creation state stops proving a texture once enhanced barriers were
     // seen: ReShade reports a texture created in an initial layout like one
     // created in a legacy state. Set without the lock.
@@ -1859,8 +1872,10 @@ namespace sunshine_streamline::depth_capture {
     // on (proven_state.h); buffers and simultaneous-access textures keep no
     // layout between executions.
     if (value->desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER &&
-        !(value->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS))
+        !(value->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS)) {
+      forget_destroyed();
       proven.watch(value->cookie);
+    }
     *entry = value;
     return result(value, status::ready, record_stage::retained);
   }
@@ -2533,6 +2548,10 @@ namespace sunshine_streamline::depth_capture {
       input value;
       value.source = retain_source(source, diagnostic);
       if (!value.source) return {};
+      // A depth-stencil source is tracked from its creation; one a full
+      // table forgot is tracked again, unproven until its next barrier or
+      // clear proves it.
+      if (value.source->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) track_deferred_source(value.source);
       value.resource.native = source;
       sunshine_api_contract::apply(boundary, value);
       value.source_present_generation = source_present_generation(value.source);
@@ -2569,12 +2588,24 @@ namespace sunshine_streamline::depth_capture {
     const auto identity = retain_source_cookie(checked.p);
     if (!identity) return;
     std::lock_guard lock(mutex);
+    forget_destroyed();
     proven.track(identity, initial_state != UINT32_MAX, initial_state);
+  }
+  void resource_destroyed(std::uint64_t identity) {
+    if (!identity || !requested.load()) return;
+    for (auto &slot : destroyed) {
+      std::uint64_t free{};
+      if (slot.compare_exchange_strong(free, identity, std::memory_order_acq_rel)) {
+        destroyed_pending.store(true, std::memory_order_release);
+        return;
+      }
+    }
   }
   void track_deferred_source(const source_ref &source) {
     if (!requested.load() || !source || !source->cookie || source->desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER ||
         (source->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS)) return;
     std::lock_guard lock(mutex);
+    forget_destroyed();
     proven.adopt(source->cookie);
   }
   void observe_depth_clear(std::uint64_t native, std::uint64_t resource) {
@@ -2609,6 +2640,7 @@ namespace sunshine_streamline::depth_capture {
             entry->value == D3D12_RESOURCE_STATE_RENDER_TARGET;
     }
     std::lock_guard lock(mutex);
+    forget_destroyed();
     proven.watch(identity);
     return !proven.latched(identity).latched;
   }

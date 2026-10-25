@@ -1651,6 +1651,10 @@ static void on_destroy_resource(device *device, resource resource)
 	{
 		if (s_streamline_probe_events && device->get_api() == device_api::d3d12)
 			sunshine_streamline::depth_resource_destroyed(resource.handle, it->second.identity);
+		// The capture owner's proven-state table forgets it (resource_created
+		// tracked it under this native identity).
+		if (it->second.api_identity)
+			sunshine_streamline::depth_capture::resource_destroyed(it->second.identity);
 		device_data->depth_stencil_resources.erase(it);
 
 		// A backup resource is always created in D3D12 and Vulkan, so to find out if an effect runtime references this depth-stencil resource, can simply check if a backup resource was created for it
