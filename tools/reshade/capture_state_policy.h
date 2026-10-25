@@ -113,11 +113,13 @@ namespace sunshine_streamline::depth_capture::copy_state {
     observed_only,          // A nonzero state observed on this recording.
     observed_else_declared, // Observed wins; no entry permits a flag-compatible declaration.
     observed_else_contract, // Observed wins; no entry permits the SDK's input contract.
+    observed_over_declared, // A declaration of a later use: an observed state is required and wins.
   };
 
   //                   | source_contract        | prefer_observed_recording
   //  unavailable      | observed_only          | observed_only
   //  declared         | declared_must_match    | observed_else_declared
+  //  declared_for_use | observed_over_declared | observed_over_declared
   //  observed_nonzero | observed_only          | observed_only
   //  sdk_contract     | observed_else_contract | observed_else_contract
   //  clear_contract   | declared_must_match    | declared_must_match
@@ -125,8 +127,12 @@ namespace sunshine_streamline::depth_capture::copy_state {
   // An undeclared state (Streamline's UINT_MAX default) claims nothing, so
   // only a state observed on this recording can supply it, exactly as for a
   // source that requires observation. A clear's contract state is checked
-  // against an observation like a declaration. A last proven state is an
-  // observation the capture owner supplies when the recording has none
+  // against an observation like a declaration. A declaration made for a later
+  // use describes another point than this copy (the contract matrix's S11), so
+  // only this recording's observation proves the copy: a declaration that
+  // agrees with it stands as declared_must_match's does, and one that
+  // disagrees gives way to it under the observation rules. A last proven state
+  // is an observation the capture owner supplies when the recording has none
   // (record_impl), so it follows the observation rules. An unknown proof
   // value selects none.
   constexpr rule select(sunshine_scene_depth::state_proof proof, texture_state_policy policy) {
@@ -134,6 +140,7 @@ namespace sunshine_streamline::depth_capture::copy_state {
     switch (proof) {
       case proof_kind::declared:
         return policy == texture_state_policy::prefer_observed_recording ? rule::observed_else_declared : rule::declared_must_match;
+      case proof_kind::declared_for_use: return rule::observed_over_declared;
       case proof_kind::unavailable:
       case proof_kind::observed_nonzero:
       case proof_kind::last_proven: return rule::observed_only;
@@ -198,9 +205,10 @@ namespace sunshine_streamline::depth_capture::copy_state {
   // NGX's contract name, as its proof from that list states it, on a texture
   // shaders may read. A queue-specific layout (DIRECT_QUEUE_SHADER_RESOURCE)
   // is another layout no claim names; any other layout, an unproven latched
-  // texture and a source that needs an observation are refused.
+  // texture and a source that needs an observation (a declaration of a later
+  // use included) are refused.
   constexpr bool earlier_layout_copy(rule selected, std::uint32_t claimed, const observation &observed, std::uint32_t resource_flags) {
-    return selected != rule::observed_only && usable_claim(claimed) &&
+    return selected != rule::observed_only && selected != rule::observed_over_declared && usable_claim(claimed) &&
       layouts::equivalent(claimed) == std::uint32_t(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE) && observed.present && observed.known &&
       !observed.blocked && !observed.pending && observed.enhanced &&
       observed.layout == std::uint32_t(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE) &&
@@ -224,6 +232,16 @@ namespace sunshine_streamline::depth_capture::copy_state {
       case rule::declared_must_match:
         if (observed.present && !agrees(claimed, observed))
           return reject(status::conflicting_state, record_stage::conflicting_state);
+        break;
+      case rule::observed_over_declared:
+        // The declaration describes a later use, so this recording must name
+        // the state: where the two agree the declaration stands, otherwise
+        // the observation does, by observed_only's rules.
+        if (!observed.present) return reject(status::missing_state, record_stage::missing_state);
+        if (agrees(claimed, observed)) break;
+        if (!observed.enhanced && observed.value == 0) return reject(status::missing_state, record_stage::missing_state);
+        out.state = observed.value;
+        out.used_observed = true;
         break;
       case rule::observed_only:
       case rule::observed_else_declared:

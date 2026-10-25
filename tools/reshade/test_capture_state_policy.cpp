@@ -38,7 +38,9 @@ int main() try {
       copy_state::select(proof::clear_contract, policy::source_contract) == rule::declared_must_match &&
       copy_state::select(proof::clear_contract, policy::prefer_observed_recording) == rule::declared_must_match &&
       copy_state::select(proof::last_proven, policy::source_contract) == rule::observed_only &&
-      copy_state::select(proof::last_proven, policy::prefer_observed_recording) == rule::observed_only,
+      copy_state::select(proof::last_proven, policy::prefer_observed_recording) == rule::observed_only &&
+      copy_state::select(proof::declared_for_use, policy::source_contract) == rule::observed_over_declared &&
+      copy_state::select(proof::declared_for_use, policy::prefer_observed_recording) == rule::observed_over_declared,
     "proof/policy table changed");
 
   // Named behaviors: pinned examples and how the copy builds its layouts
@@ -60,6 +62,30 @@ int main() try {
   const auto declared = copy_state::select(proof::declared, policy::source_contract);
   chosen = copy_state::resolve(declared, readable, {true, true, false, D3D12_RESOURCE_STATE_COPY_SOURCE}, 0);
   require(!chosen.admitted && chosen.result == capture::status::conflicting_state, "declaration overrode a different observation");
+  // A declaration of a later use (a longer-lived tag at its frame-generation
+  // tag call, the matrix's S11): this recording's state is required and wins
+  // over it; one that agrees stands; the observation rules still apply.
+  const auto for_use = copy_state::select(proof::declared_for_use, policy::source_contract);
+  chosen = copy_state::resolve(for_use, readable, {true, true, false, D3D12_RESOURCE_STATE_COPY_SOURCE}, 0);
+  require(chosen.admitted && chosen.state == D3D12_RESOURCE_STATE_COPY_SOURCE && chosen.used_observed && !chosen.enhanced,
+    "a declaration of a later use refused the state its recording observed");
+  chosen = copy_state::resolve(for_use, readable, {true, true, false, D3D12_RESOURCE_STATE_DEPTH_WRITE},
+    D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+  require(chosen.admitted && chosen.state == D3D12_RESOURCE_STATE_DEPTH_WRITE && chosen.used_observed,
+    "a declaration of a later use refused the observed write state");
+  chosen = copy_state::resolve(for_use, readable, {true, true, false, readable}, 0);
+  require(chosen.admitted && chosen.state == readable && !chosen.used_observed, "an agreeing declaration of a later use did not stand");
+  chosen = copy_state::resolve(for_use, 0, {true, true, false, 0}, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+  require(chosen.admitted && chosen.state == 0, "an agreeing COMMON declaration of a later use did not stand");
+  chosen = copy_state::resolve(for_use, readable, {}, 0);
+  require(!chosen.admitted && chosen.result == capture::status::missing_state, "a declaration of a later use proved an unrecorded state");
+  // A recorded COMMON stays missing evidence there (S11-common, until D3).
+  chosen = copy_state::resolve(for_use, readable, {true, true, false, 0}, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+  require(!chosen.admitted && chosen.result == capture::status::missing_state, "an observed COMMON overrode a declaration of a later use");
+  chosen = copy_state::resolve(for_use, readable, {true, true, false, D3D12_RESOURCE_STATE_RESOLVE_DEST}, 0);
+  require(!chosen.admitted && chosen.result == capture::status::unsupported_state, "an observed RESOLVE_DEST was copied from");
+  chosen = copy_state::resolve(for_use, readable, {true, true, true, D3D12_RESOURCE_STATE_COPY_SOURCE}, 0);
+  require(!chosen.admitted && chosen.result == capture::status::incomplete_state, "a declaration of a later use took a blocked observation");
   // Enhanced layouts (D3D12 Enhanced Barriers): the copy keeps the exact
   // layout and access; a declaration agrees only through the contract's
   // equivalent layout; COMMON is an explicit layout, not missing evidence.
@@ -108,6 +134,10 @@ int main() try {
       !chosen.used_observed, "a declaration equivalent to the observed layout did not agree");
   chosen = copy_state::resolve(declared, D3D12_RESOURCE_STATE_DEPTH_READ, enhanced(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE), 0);
   require(!chosen.admitted && chosen.result == capture::status::conflicting_state, "a different declaration agreed with a layout");
+  chosen = copy_state::resolve(for_use, D3D12_RESOURCE_STATE_DEPTH_READ, enhanced(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE), 0);
+  require(chosen.admitted && chosen.enhanced && chosen.layout == D3D12_BARRIER_LAYOUT_SHADER_RESOURCE &&
+      chosen.access == D3D12_BARRIER_ACCESS_SHADER_RESOURCE && chosen.used_observed,
+    "a declaration of a later use refused the layout its recording observed");
   chosen = copy_state::resolve(declared, D3D12_RESOURCE_STATE_COPY_SOURCE | shader_states,
     enhanced(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE), 0);
   require(!chosen.admitted && chosen.result == capture::status::conflicting_state,
@@ -150,13 +180,17 @@ int main() try {
     require(!chosen.admitted && chosen.result == capture::status::unsupported_state && chosen.stage == capture::record_stage::unsupported_state,
       (std::string(value.what) + " was copied from a claim").c_str());
   }
-  for (const auto supplied : {proof::unavailable, proof::observed_nonzero, proof::last_proven, proof::clear_contract}) {
+  for (const auto supplied : {proof::unavailable, proof::observed_nonzero, proof::last_proven, proof::clear_contract, proof::declared_for_use}) {
     chosen = copy_state::resolve(copy_state::select(supplied, policy::source_contract), D3D12_RESOURCE_STATE_DEPTH_WRITE,
       earlier(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE), D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
     require(!chosen.admitted, "a source needing an observation, or a clear's contract, was copied from an earlier layout");
   }
+  chosen = copy_state::resolve(for_use, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, earlier(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE),
+    D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+  require(!chosen.admitted && chosen.result == capture::status::unsupported_state,
+    "a declaration of a later use was copied from an earlier layout");
   // A split barrier in transition rejects every rule, even beside a known value.
-  for (const auto supplied : {proof::unavailable, proof::declared, proof::observed_nonzero, proof::sdk_contract}) {
+  for (const auto supplied : {proof::unavailable, proof::declared, proof::observed_nonzero, proof::sdk_contract, proof::declared_for_use}) {
     copy_state::observation pending{true, true, false, D3D12_RESOURCE_STATE_DEPTH_READ, true};
     chosen = copy_state::resolve(copy_state::select(supplied, policy::source_contract), D3D12_RESOURCE_STATE_DEPTH_READ, pending,
       D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);

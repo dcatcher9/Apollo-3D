@@ -1869,6 +1869,23 @@ namespace {
       const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, 1, active_area};
       require(sl.global_tag(fg_viewport, &tag, 1, nullptr) == 0, "Command-less FG tag changed the SDK result");
     }
+    // An FG frame whose longer-lived depth tag (lifecycle 1 or 2) declares
+    // NON_PIXEL_SHADER_RESOURCE, its state at the tag's later use, while the
+    // tag call's own list records PIXEL_SHADER_RESOURCE there.
+    void recorded_state_fg_frame(std::uint32_t lifecycle) {
+      using namespace sunshine_streamline;
+      auto &token = begin_fg_frame("Recorded-state FG SDK did not supply a frame token");
+      require(sl.constants(camera_constants(false), token, fg_viewport) == 0, "Recorded-state FG constants changed the SDK result");
+      auto *list = reinterpret_cast<ID3D12GraphicsCommandList *>(game_native_command);
+      transition(list, selected->resource.p, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+      auto resource = depth_resource();
+      resource.state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+      const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, lifecycle, active_area};
+      const auto command = reinterpret_cast<void *>(game_native_command);
+      require((sl.frame_tag ? sl.frame_tag(token, fg_viewport, &tag, 1, command) : sl.global_tag(fg_viewport, &tag, 1, command)) == 0,
+        "Recorded-state FG tag changed the SDK result");
+      transition(list, selected->resource.p, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    }
     // The same viewport's SR evaluation with its own depth input.
     void sr_evaluate(const sunshine_streamline::abi_v2::frame_token &token) {
       using namespace sunshine_streamline;
@@ -2001,6 +2018,7 @@ namespace {
       fg_until_present_clear();
       fg_untag();
       fg_commandless_deferred();
+      fg_tag_call_recorded_state();
       fg_silent_scope();
       fg_dlssg_evaluation();
       fg_silent_scope_without_api_source();
@@ -2340,6 +2358,42 @@ namespace {
           render_tracked_depth = [this] { real_fg_frame(); };
           settle("SLFG-recovered-after-commandless-tag");
           std::puts("PASS native SLFG command-less tag: a ValidUntilPresent FG tag without a command list is copied before its frame's Present and every Present shows its fresh FG depth; no FX");
+        }});
+    }
+
+    // A ValidUntilPresent or ValidUntilEvaluate declaration describes the
+    // tag's later use (its frame's Present, its evaluate: sl_core_types.h),
+    // not its tag call, so where the call's own list records another state
+    // the tag call copies the tag from that state (api_contract.h
+    // tag_call_proof): every Present shows its frame's fresh FG depth, nothing
+    // is refused, and the bounded tag-call line counts the copies. The
+    // matrix's S11 (until Stage 3 fix 4 the copy was refused as
+    // conflicting_state and the FG source withdrawn).
+    void fg_tag_call_recorded_state() {
+      run_script({"tag-call-recorded-state", 60000, {},
+        [&] {
+          for (const std::uint32_t lifecycle : {1u, 2u}) {
+            const auto before = last_refusal().serial;
+            render_tracked_depth = [this, lifecycle] { recorded_state_fg_frame(lifecycle); };
+            const auto value = settle(lifecycle == 1 ? "SLFG-tag-call-recorded-state" : "SLFG-tag-call-recorded-state-until-evaluate");
+            require(value.source.frame_generation_input && value.source.current.resource == native(*selected),
+              "A longer-lived FG tag was not copied at its call from the state its list recorded");
+            for (unsigned frame = 0; frame < 12; ++frame) {
+              present_frame(); const auto s = inspect();
+              require(active(s) && !s.source.reused_depth && s.source.frame_generation_input,
+                "A Present of an FG tag copied from its recorded state did not show that frame's fresh FG depth");
+            }
+            const auto refused = last_refusal();
+            require(refused.serial == before || refused.viewport != fg_viewport.value,
+              "An FG tag whose list recorded another state than its declaration of the later use was refused");
+          }
+          require(reshade_log_number_above("Sunshine Streamline FG tag-call copies:", "recorded_over_declared=", 0),
+            "The FG tag-call copies made from a recorded state over the declaration were not counted");
+        },
+        [&] {
+          render_tracked_depth = [this] { real_fg_frame(); };
+          settle("SLFG-recovered-after-recorded-state");
+          std::puts("PASS native SLFG tag-call state: a ValidUntilPresent or ValidUntilEvaluate FG tag whose list records another state than its declaration of the later use is copied at its call from the recorded state and every Present shows its fresh FG depth; no FX");
         }});
     }
 

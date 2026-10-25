@@ -172,6 +172,28 @@ namespace {
      streamline::tag_call_copy::none},
   };
 
+  // The proof behind a declaration where a frame-generation tag call copies
+  // its depth tag (S11): a longer-lived tag's declaration describes its later
+  // use, so the state the call's list records proves the copy.
+  struct tag_call_proof_row {
+    const char *pins;
+    std::uint32_t lifecycle;
+    state_proof supplied, expected;
+  };
+
+  constexpr tag_call_proof_row tag_call_proofs[] {
+    {"A ValidUntilPresent declaration describes its frame's Present, not its tag call (S11)", streamline::valid_until_present,
+     state_proof::declared, state_proof::declared_for_use},
+    {"An UntilEvaluate declaration describes its evaluate, not its tag call (S11)", streamline::valid_until_evaluate,
+     state_proof::declared, state_proof::declared_for_use},
+    {"An OnlyValidNow declaration describes its tag call itself (S11a)", streamline::only_valid_now, state_proof::declared,
+     state_proof::declared},
+    {"An undeclared state stays a claim of nothing", streamline::valid_until_present, state_proof::unavailable,
+     state_proof::unavailable},
+    {"A state that needs an observation keeps needing it", streamline::valid_until_present, state_proof::observed_nonzero,
+     state_proof::observed_nonzero},
+  };
+
   // Whether a null untag cancels a copy deferred to its Present (R7).
   struct untag_row {
     const char *pins;
@@ -209,6 +231,8 @@ int main() {
   for (const auto &row : matched) require(streamline::lifecycle_at(row.lifecycle, row.at) == row.expected, row.pins);
   for (const auto &row : tag_call_copies)
     require(streamline::deferred_copy(row.lifecycle, row.command_list, row.recorded) == row.expected, row.pins);
+  for (const auto &row : tag_call_proofs)
+    require(streamline::tag_call_proof(row.lifecycle, row.supplied) == row.expected, row.pins);
   for (const auto &row : untags)
     require(streamline::untag_cancels(row.untag_framed, row.tag_framed, row.same_frame) == row.cancels, row.pins);
   require(streamline::defined_lifecycle(streamline::only_valid_now) &&

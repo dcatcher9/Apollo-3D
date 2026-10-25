@@ -50,6 +50,10 @@ namespace sunshine_scene_depth {
   }
   enum class resource_kind { raw_depth, display_depth };
   // declared: the caller stated this resource's state for this call.
+  // declared_for_use: the caller stated the state at a later use of the
+  // resource, not at this copy point (a longer-lived Streamline tag copied
+  // inside its tag call): the state observed on the recording proves the copy
+  // there, and a declaration that disagrees with it does not refuse it.
   // observed_nonzero: only a state observed on the recording is acceptable.
   // sdk_contract: the SDK requires this state at the capture boundary for every
   // input (NGX: NON_PIXEL_SHADER_RESOURCE). A known state observed on the same
@@ -59,7 +63,7 @@ namespace sunshine_scene_depth {
   // last_proven: the state the source was last proven to be in by the work
   // executed on the copy's queue (the capture owner's last_proven_state),
   // which stands in for an observation the recording lacks.
-  enum class state_proof { unavailable, declared, observed_nonzero, sdk_contract, clear_contract, last_proven };
+  enum class state_proof { unavailable, declared, observed_nonzero, sdk_contract, clear_contract, last_proven, declared_for_use };
   enum class lifetime { unsupported, until_present, until_evaluation, at_call };
   struct extent { std::uint32_t left{}, top{}, width{}, height{}; };
   struct jitter_offset {

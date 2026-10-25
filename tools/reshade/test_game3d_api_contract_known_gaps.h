@@ -158,6 +158,29 @@ namespace game3d_contract::known_gaps {
       const auto &source = value.resource;
       return source.seen == evidence::end_mismatched && (value.source != claim::sl_declared || value.declared == source.observed);
     }
+
+    // A declaration of a later use that another recorded state overrides
+    // (S11): the recorded state is then judged by the observation rules.
+    constexpr bool overridden_declaration(const state_case &value) {
+      return value.source == claim::sl_declared && value.scope == claim_scope::before_use;
+    }
+
+    // An observed legacy COMMON on a depth-stencil allocation is refused as
+    // missing evidence there too.
+    constexpr bool common_over_declaration(const state_case &value) {
+      const auto &source = value.resource;
+      return overridden_declaration(value) && depth_stencil(source.flags) && source.seen == evidence::transition &&
+             source.observed == D3D12_RESOURCE_STATE_COMMON && value.declared != source.observed;
+    }
+
+    // So is RESOLVE_DEST, legacy or enhanced.
+    constexpr bool resolve_destination_over_declaration(const state_case &value) {
+      const auto &source = value.resource;
+      const bool legacy = source.seen == evidence::transition && source.observed == D3D12_RESOURCE_STATE_RESOLVE_DEST;
+      const bool enhanced = source.seen == evidence::enhanced && source.layout == D3D12_BARRIER_LAYOUT_RESOLVE_DEST &&
+                            source.access != D3D12_BARRIER_ACCESS_NO_ACCESS;
+      return overridden_declaration(value) && (legacy || enhanced) && value.declared != D3D12_RESOURCE_STATE_RESOLVE_DEST;
+    }
   }  // namespace state
 
   inline constexpr row<state_case> state_rows[] {
@@ -167,6 +190,8 @@ namespace game3d_contract::known_gaps {
     {"X1", &rules::X1, kind::expected_failure, &state::basis_flags_unchecked, "Outside the Stage 3 order. Illegal game input only: check the allocation flags for every copy basis in copy_state::resolve (today only the at-call UI declaration fallback does), so an impossible state never reaches a barrier."},
     {"X2", &rules::X2, kind::expected_failure, &state::buffer_read_bits, "Outside the Stage 3 order. Illegal game input, but not harmless: the copy's barrier from such a state makes the game's own ID3D12GraphicsCommandList::Close fail (E_INVALIDARG), as the device layer saw for GENERIC_READ | DEPTH_READ. Admit GENERIC_READ itself and no other state with a buffer read bit in copy_state::supported, and update test_capture_state_policy.cpp's supported() checks with it."},
     {"D4c", &rules::D4c, kind::expected_failure, &state::mismatched_split_end, "Stage 3 fix 13 (D4c). Illegal game input: streamline_depth_capture.cpp's barrier recorder ends a split at any END_ONLY and takes its StateAfter, never comparing it with the BEGIN_ONLY's. Keep the begin's StateAfter while the split is pending and block the source when its END_ONLY names another state. The device layer cannot run this row (the debug layer refuses the barrier), so this table is its only check."},
+    {"S11-common", &rules::S11, kind::expected_failure, &state::common_over_declaration, "Stage 3 fix 5 (D3). Since Stage 3 fix 4 a longer-lived tag copied at its frame-generation tag call starts from the state its list records, whatever its declaration of the later use names (declared_for_use, copy_state's observed_over_declared), but that rule judges the recorded state as observed_only does, which refuses a legacy COMMON as missing evidence. D3's COMMON proof on a non-simultaneous depth-stencil allocation closes this row with the D3 row."},
+    {"S11-resolve", &rules::S11, kind::expected_failure, &state::resolve_destination_over_declaration, "Outside the Stage 3 order, with D2. As S11-common for a recorded RESOLVE_DEST, legacy or enhanced, which copy_state::supported and layouts::admissible refuse: fail-safe (the earlier capture holds, then mono). Admitting RESOLVE_DEST for D2 closes this row with D2's."},
   };
 
   // Raw Streamline buffer types at each surveyed release (checked by
@@ -211,14 +236,6 @@ namespace game3d_contract::known_gaps {
     // evaluate input fails match() as not-valid-until-present.
     constexpr bool local_only_valid_now(const sl_case &value) {
       return value.entry == tag_entry::local_array && value.life == lifecycle::only_valid_now && value.at == copy_point::same_frame_evaluate &&
-             capture_required(value);
-    }
-
-    // At that tag call a declaration that disagrees with the recorded state
-    // is refused as conflicting (declared_must_match).
-    constexpr bool disagreeing_frame_generation_tag(const sl_case &value) {
-      return value.at == copy_point::tag_call && value.life != lifecycle::only_valid_now && value.commands == tag_commands::game_list &&
-             value.depth.seen == evidence::transition && value.declared_state != UINT32_MAX && value.depth.observed != value.declared_state &&
              capture_required(value);
     }
 
@@ -271,7 +288,6 @@ namespace game3d_contract::known_gaps {
   }  // namespace streamline
 
   inline constexpr row<sl_case> sl_rows[] {
-    {"S11", &rules::S11, kind::expected_failure, &streamline::disagreeing_frame_generation_tag, "Stage 3 fix 4 (S11). At an FG tag call of a longer-lived tag, take the state observed on the recording: its declaration describes the use point (SLT:357). Today copy_state's declared_must_match refuses it as conflicting (streamline_depth_capture.cpp record_impl, source_contract policy).", &behaviours::no_copy},
     {"S4", &rules::S4, kind::expected_failure, &streamline::local_only_valid_now, "Stage 3 fix 8 (S4/S15). A local tag is current at its own evaluate (SLA:258-262): in tag_rejection (streamline_camera_probe.cpp) promote an OnlyValidNow evaluate input as the tag call's is, and copy it at that evaluate when it has a command list. Fix with S15 (both in read_local_inputs/tag_rejection).", &behaviours::no_copy},
     {"S15", &rules::S15, kind::expected_failure, &streamline::chained_local, "Stage 3 fix 8 (S4/S15). In read_local_inputs, decode a chained tag with its next pointer cleared (as the viewport already is), treating a PrecisionInfo node as the preceding tag's; fix with S4. Chains of more than 32 nodes also fail S18.", &behaviours::no_copy},
     {"S13", &rules::S13, kind::expected_failure, &streamline::newer_struct, "Stage 3 fix 6 (S13). Read the known prefix of any version >= 1 and keep refusing a chained next: decode_v2_constants (max 2) and decode_v2_viewport (max 1) in streamline_camera_data.cpp, and hook_fg_options (version <= 5). Update the pinned checks with it: test_streamline_camera_data.cpp:267-268 and 279-280 ('unknown version interpreted', 'unknown viewport version accepted') and test_streamline_camera_probe.cpp's 'unknown FG options version retained a known enabled state' (3891 at c67e9cf9).", &behaviours::unlike_newest},

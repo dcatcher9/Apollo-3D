@@ -116,6 +116,19 @@ namespace sunshine_api_contract {
       if (!command_list || (lifecycle != only_valid_now && !recorded)) return tag_call_copy::none;
       return tag_call_copy::at_call;
     }
+    // The proof behind a depth tag's declaration where deferred_copy copies
+    // it inside its frame-generation tag call (at_call). A ValidUntilPresent or
+    // ValidUntilEvaluate declaration describes the tag's later use (its
+    // frame's Present, its evaluate), not the call, so the state the call's
+    // list records proves that copy, and a declaration that disagrees with it
+    // does not refuse it (declared_for_use; the matrix's S11). An OnlyValidNow
+    // declaration describes the call itself, and the copies on the Present
+    // queue and at an evaluate are made at the use the declaration describes:
+    // each keeps its proof, which an observation must match (S11a).
+    constexpr state_proof tag_call_proof(std::uint32_t lifecycle, state_proof proof) {
+      return proof == state_proof::declared && (lifecycle == valid_until_present || lifecycle == valid_until_evaluate) ?
+        state_proof::declared_for_use : proof;
+    }
     // Owner ruling R7: a null untag (a null Resource or native) of a viewport
     // cancels that viewport's copy deferred to its Present when it names the
     // deferred tag's frame, and whenever the two frames cannot be told apart

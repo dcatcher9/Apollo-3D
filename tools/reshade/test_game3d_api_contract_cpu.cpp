@@ -12,8 +12,10 @@
 //   buffer contract, against that release's own header
 //   (test_sl_survey_tables.generated.h).
 // - Copy state: every legal allocation, adapter claim, consumer, declared
-//   state and recorded evidence the capture state table sees, plus
-//   deliberately illegal rows that must refuse.
+//   state and recorded evidence the capture state table sees (a depth
+//   declaration of a later use, at a frame-generation tag call, with each
+//   state its recording names), plus deliberately illegal rows that must
+//   refuse.
 // - Depth formats: every DXGI format as allocation and as declared format,
 //   for hardware and linear depth, through depth_view_format.h.
 // - Refusal classes: every reason the adapters and the capture owner name
@@ -37,12 +39,13 @@
 // by the capture layer's rules: copy_state::select and resolve, the
 // production predicates, and two record_impl checks repeated here (a copy
 // needs a command list; a copy outside its tag call and its tag's own frame
-// needs no device Present since the tag, source_lifetime_current). Without a
+// needs no device Present since the tag, source_lifetime_current), with the
+// proof a frame-generation tag call gives its copy (tag_call_proof). Without a
 // device the harness counts the Presents a case puts between tag and copy,
 // and admits DLSS-G's inputs as observe_frame_generation_inputs nominates
 // them (a state observed on the evaluation's own list); the device and
 // runtime layers replace these repeats. A known gap these repeats decide
-// closes only when its fix changes the repeat too (S7 did). L1 judges the
+// closes only when its fix changes the repeat too (S7 and S11 did). L1 judges the
 // kind, deferral and copy basis of each result, and that a recorded gap
 // still fails the way its row records; refusal classes wait for the runtime
 // layer, which reads them from the test add-on's SunshineDepthTestLastRefusal.
@@ -338,13 +341,16 @@ namespace {
   // The copy-state table's view of one case: the proof and policy the adapters
   // choose (streamline_camera_probe.cpp, ngx_depth_source.cpp and
   // auxiliary_state_policy for an at-call UI copy) and the recording's entry
-  // for the source.
+  // for the source. A declaration of a later use is a longer-lived depth tag
+  // copied at its frame-generation tag call (api_contract.h tag_call_proof).
   copy_state::decision production(const matrix::state_case &value) {
     auto supplied = proof::observed_nonzero;
     std::uint32_t claimed {};
     switch (value.source) {
       case matrix::claim::sl_declared:
-        supplied = proof::declared;
+        supplied = value.scope == matrix::claim_scope::before_use ?
+                     sunshine_api_contract::streamline::tag_call_proof(sunshine_api_contract::streamline::valid_until_present, proof::declared) :
+                     proof::declared;
         claimed = value.declared;
         break;
       case matrix::claim::sl_undeclared:
@@ -435,9 +441,15 @@ namespace {
         if (role == matrix::consumer::ui && matrix::depth_stencil(flags)) {
           continue;
         }
-        const auto with_evidence = [&](matrix::state_case value) {
-          value.resource = {flags, matrix::evidence::none};
-          visit(value);
+        // recorded_only: the evidence on the copy's own recording, the only
+        // evidence a frame-generation tag call copies a longer-lived tag from
+        // (deferred_copy defers or refuses the rest, which the hook and
+        // runtime layers judge).
+        const auto with_evidence = [&](matrix::state_case value, bool recorded_only = false) {
+          if (!recorded_only) {
+            value.resource = {flags, matrix::evidence::none};
+            visit(value);
+          }
           for (const auto seen : {matrix::evidence::transition, matrix::evidence::split_open}) {
             for (unsigned i = 0; i != allowed_count; ++i) {
               value.resource = {flags, seen, allowed[i]};
@@ -445,6 +457,9 @@ namespace {
             }
           }
           for (const auto seen : {matrix::evidence::enhanced, matrix::evidence::enhanced_split_open, matrix::evidence::earlier_list_enhanced}) {
+            if (recorded_only && seen == matrix::evidence::earlier_list_enhanced) {
+              continue;
+            }
             for (unsigned i = 0; i != layout_count; ++i) {
               value.resource = {flags, seen, 0, layouts[i], accesses[i]};
               visit(value);
@@ -466,6 +481,15 @@ namespace {
           for (unsigned i = 0; i != allowed_count; ++i) {
             value.declared = allowed[i];
             with_evidence(value);
+          }
+          // A depth declaration of a later use, copied at the tag call (S11).
+          if (role == matrix::consumer::depth) {
+            value.scope = matrix::claim_scope::before_use;
+            for (unsigned i = 0; i != allowed_count; ++i) {
+              value.declared = allowed[i];
+              with_evidence(value, true);
+            }
+            value.scope = matrix::claim_scope::at_use;
           }
         }
       }
@@ -529,13 +553,14 @@ namespace {
   void describe(const char *what, const matrix::state_case &value, const matrix::outcome &expected, const copy_state::decision &actual) {
     const auto &source = value.resource;
     std::fprintf(stderr,
-                 "%s: flags=0x%x role=%u claim=%u declared=0x%x evidence=%u observed=0x%x layout=0x%x access=0x%x -> "
+                 "%s: flags=0x%x role=%u claim=%u declared=0x%x scope=%u evidence=%u observed=0x%x layout=0x%x access=0x%x -> "
                  "expected %s%s%s rule=%s refusal=%u basis=%u/0x%x/0x%x/0x%x; table admitted=%u status=%u stage=%u state=0x%x enhanced=%u/0x%x/0x%x\n",
                  what,
                  source.flags,
                  unsigned(value.role),
                  unsigned(value.source),
                  value.declared,
+                 unsigned(value.scope),
                  unsigned(source.seen),
                  source.observed,
                  source.layout,
@@ -1485,19 +1510,22 @@ namespace {
       const auto &frame = run.frame;
       const bool at_call = run.snapshot.tag_boundary;
       const bool forced = at_call && frame.valid_until == lifetime::at_call;
+      auto proof = frame.proof;
       if (at_call && frame.frame_generation_input) {
         // Where a frame-generation tag call copies its tag (R2,
         // nominate_depth_source through api_contract.h deferred_copy, with
         // depth_capture::recorded_state for the case's own recording): a
-        // state recorded there copies it at the call; a ValidUntilPresent tag
-        // is otherwise copied on the Present queue before its frame's Present
-        // (present_deferred), where nothing on ReShade's list names its state
-        // and its declaration applies. The case's untag names the tag's own
-        // frame, or no frame token, so it cancels that copy (R7,
-        // untag_cancels); the runtime layer runs the cancellation itself.
+        // state recorded there copies it at the call, whatever a longer-lived
+        // tag's declaration of its later use names (tag_call_proof, S11); a
+        // ValidUntilPresent tag is otherwise copied on the Present queue
+        // before its frame's Present (present_deferred), where nothing on
+        // ReShade's list names its state and its declaration applies. The
+        // case's untag names the tag's own frame, or no frame token, so it
+        // cancels that copy (R7, untag_cancels); the runtime layer runs the
+        // cancellation itself.
         namespace sl_contract = sunshine_api_contract::streamline;
-        const auto point = sl_contract::deferred_copy(run.snapshot.tags[0].value.lifecycle, run.snapshot.command_buffer != 0,
-          observation_of(value.depth).present);
+        const auto lifecycle = run.snapshot.tags[0].value.lifecycle;
+        const auto point = sl_contract::deferred_copy(lifecycle, run.snapshot.command_buffer != 0, observation_of(value.depth).present);
         if (point == sl_contract::tag_call_copy::none) {
           return out;
         }
@@ -1509,6 +1537,7 @@ namespace {
           out.deferred = out.kind == matrix::outcome_kind::capture;
           return out;
         }
+        proof = sl_contract::tag_call_proof(lifecycle, proof);
       }
       // Repeats of record_impl (streamline_depth_capture.cpp), which needs a
       // device: a command list, a lifetime it keeps, and
@@ -1523,7 +1552,7 @@ namespace {
       if (!at_call && !forced && !run.snapshot.tags[0].own_frame && run.presents) {
         return out;
       }
-      return judged(copy_state::resolve(copy_state::select(frame.proof, policy::source_contract), frame.native_state, observation_of(value.depth), value.depth.flags));
+      return judged(copy_state::resolve(copy_state::select(proof, policy::source_contract), frame.native_state, observation_of(value.depth), value.depth.flags));
     }
 
     bool newer_struct(const matrix::sl_case &value) {

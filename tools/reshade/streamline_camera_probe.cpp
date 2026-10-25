@@ -311,6 +311,14 @@ namespace sunshine_streamline {
       std::atomic<unsigned> refusal{}; // The newest refused depth copy's record_stage.
     } deferrals;
     std::atomic<std::uint64_t> next_deferral_report{}, reported_deferrals{};
+    // Totals for the bounded tag-call copy line (count_tag_call_copy): depth
+    // copies recorded inside a frame-generation tag call, and those
+    // made from the state the call's list recorded where the declaration of
+    // the tag's later use named another (S11).
+    struct {
+      std::atomic<std::uint64_t> copied{}, recorded_over_declared{};
+    } tag_call_copies;
+    std::atomic<std::uint64_t> next_tag_call_report{};
     void drop_deferred() {
       AcquireSRWLockExclusive(&evaluation_supply_lock);
       for (auto &entry : deferred_frames) entry = {};
@@ -1926,6 +1934,32 @@ namespace sunshine_streamline {
           "ordinary SR/RR depth stays eligible");
       message(text);
     }
+    // A depth copy recorded inside a frame-generation tag call (diagnostic:
+    // the recorded candidate's): counted, and with it a copy made from the
+    // state the call's list recorded over a declaration of the tag's later
+    // use that named another (S11). The bounded line comes at most every 5 s,
+    // only after such a copy.
+    void count_tag_call_copy(const depth_capture::input *candidates, std::size_t count,
+        const depth_capture::record_diagnostic &diagnostic) {
+      tag_call_copies.copied.fetch_add(1, std::memory_order_relaxed);
+      bool over = false;
+      for (std::size_t i = 0; i != count && !over; ++i)
+        over = candidates[i].resource.native == diagnostic.resource &&
+          candidates[i].proof == sunshine_scene_depth::state_proof::declared_for_use && diagnostic.used_observed_state;
+      if (!over) return;
+      const auto over_total = tag_call_copies.recorded_over_declared.fetch_add(1, std::memory_order_relaxed) + 1;
+      const auto now = GetTickCount64();
+      auto next = next_tag_call_report.load(std::memory_order_relaxed);
+      if (now < next || !next_tag_call_report.compare_exchange_strong(next, now + 5000, std::memory_order_relaxed)) return;
+      char text[480]{};
+      std::snprintf(text, sizeof(text),
+        "Sunshine Streamline FG tag-call copies: copied=%llu recorded_over_declared=%llu state=0x%x declared=0x%x; a "
+        "ValidUntilPresent or ValidUntilEvaluate declaration describes the tag's later use, so a tag call copies its "
+        "tag from the state the call's list records",
+        static_cast<unsigned long long>(tag_call_copies.copied.load(std::memory_order_relaxed)),
+        static_cast<unsigned long long>(over_total), diagnostic.copy_state, diagnostic.native_state);
+      message(text);
+    }
     // Why no tag of this observation offered a candidate: the first present
     // depth tag's failing gate in priority order, no_retained_source when it
     // passed every gate with no retained resource, or absent.
@@ -2025,7 +2059,8 @@ namespace sunshine_streamline {
         if (!tag.state_requires_observation) value.proof = state.proof;
         if (fg_boundary) {
           // Where this call copies the tag (R2): its declaration describes
-          // the tag's use, so only a state its list records proves it here.
+          // the tag's use, so only a state its list records proves it here,
+          // whatever the declaration names (S11).
           const bool recorded = snapshot.command_buffer &&
             depth_capture::recorded_state(snapshot.command_buffer, tag.direct_source);
           const auto point = sl_contract::deferred_copy(tag.value.lifecycle, snapshot.command_buffer != 0, recorded);
@@ -2036,6 +2071,7 @@ namespace sunshine_streamline {
             value = {};
             continue;
           }
+          value.proof = sl_contract::tag_call_proof(tag.value.lifecycle, value.proof);
         }
         ++count;
       }
@@ -2055,6 +2091,8 @@ namespace sunshine_streamline {
           candidates.data(), count, superseded, &diagnostic)) {
         if (copy_recorded) *copy_recorded = diagnostic.result == depth_capture::status::recorded;
         if (fg_boundary) remember_tag_copy(snapshot.epoch, snapshot.viewport, diagnostic.result == depth_capture::status::recorded);
+        if (fg_boundary && diagnostic.result == depth_capture::status::recorded)
+          count_tag_call_copy(candidates.data(), count, diagnostic);
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
         // A metadata-only nomination keeps the source; its copy was refused.
         if (diagnostic.result != depth_capture::status::recorded)

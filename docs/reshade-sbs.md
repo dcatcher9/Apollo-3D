@@ -2371,14 +2371,17 @@ every Streamline version, as an NGX input (which declares none) does, and a 1.x 
 is copied at its call.
 Every proof/policy combination above, including NGX's SDK input contract, resolves through the one
 table in [`capture_state_policy.h`](../tools/reshade/capture_state_policy.h): declared (must match an
-observation), observed only (also an undeclared state), observed-else-declared and
-observed-else-contract. Blocked or
+observation), observed only (also an undeclared state), observed-else-declared,
+observed-else-contract and observed-over-declared (a declaration of a later use: a longer-lived
+Streamline depth tag copied inside its frame-generation tag call, which only the recorded state
+proves; one that agrees stands, S11). Blocked or
 incomplete observations reject every rule. A source an enhanced barrier on an earlier executed list
 latched, whose recording names nothing, is copied only from a shader-read claim's `SHADER_RESOURCE`
 proof (the enhanced-layout latch, since Stage 3 fix 3). The
 [API contract matrix](../tools/reshade/README.md#api-contract-matrix) judges the table over every
 legal combination of allocation flags, adapter claim, consumer, declared state and recorded
-evidence (a layout set on an earlier list included), plus deliberately illegal rows; the cells where the table falls short of the contract are
+evidence (a layout set on an earlier list included, and a depth declaration of a later use with
+each state its recording can name), plus deliberately illegal rows; the cells where the table falls short of the contract are
 rows of its known-gap table. Its device layer records the same copies on real D3D12 lists.
 
 The FG decision is independent of depth-provider selection, including a manually pinned Generic
@@ -3910,7 +3913,20 @@ call copies a UI tag (HUD-less, Backbuffer, UI colour and alpha, UIAlpha), is
 
 - inside the call, on its command list, when the barrier hooks recorded the tag's state on that
   recording (`depth_capture::recorded_state`), for an `OnlyValidNow` tag, and for any UI tag that
-  comes with a command list (S1, S5, U1);
+  comes with a command list (S1, S5, U1). A depth tag that outlives the call (`ValidUntilPresent` or
+  `ValidUntilEvaluate`) is copied there from the recorded state: its declaration describes its
+  later use, so a declaration that names another state does not refuse the copy (`tag_call_proof`
+  in `api_contract.h` gives it the proof `declared_for_use`, which `copy_state` resolves as
+  `observed_over_declared`; the matrix's S11, since Stage 3 fix 4, before which the copy was
+  refused as `conflicting_state` and the viewport's FG source withdrawn). The recorded state is
+  judged as any observation is (a legacy COMMON or a RESOLVE_DEST is still refused, the matrix's
+  S11-common and S11-resolve rows), and one that agrees with the declaration is copied as before.
+  An `OnlyValidNow` declaration describes the call itself and must agree with the recorded state,
+  as a declaration must at an evaluate and on the Present queue (S11a). The bounded line
+  `Sunshine Streamline FG tag-call copies: copied=<n> recorded_over_declared=<n> state=<recorded>
+  declared=<declared>` (at most every 5 s, only after such a copy) counts the copies made at an FG
+  tag call and those made from a recorded state over the declaration, with the newest pair; UI tags
+  keep their declaration's proof at the call;
 - for a `ValidUntilPresent` tag otherwise (a frame-generation depth tag whose list records no state
   of it, S11b; any such tag without a command list, S6 and U2), on the Present queue right before
   its frame's Present: the probe keeps the tag (`deferred_frame`, one per viewport) and
@@ -4327,7 +4343,9 @@ It supports depth-only and packed depth/stencil textures: the pinned DLSS implem
 its cached input state for all subresources, and capture uses that same provider contract while
 transitioning, copying and restoring only depth plane 0. Stencil is neither copied nor modified;
 malformed or missing metadata still requires observed nonzero state on the actual command
-recording. An observed conflicting or incomplete transition always rejects capture. An enhanced
+recording. An observed transition that conflicts with a declaration rejects capture, except where a
+frame-generation tag call copies a longer-lived tag, whose declaration describes its later use (the
+recorded state is copied there, S11, above); an incomplete transition always does. An enhanced
 (CommandList7) texture barrier that includes subresource 0 sets that texture's layout and access
 on the recording; other subresources keep subresource 0's. Once one has executed, a later copy
 whose recording names nothing never takes a legacy barrier on that texture (the enhanced-layout

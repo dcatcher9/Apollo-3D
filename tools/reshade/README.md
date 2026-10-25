@@ -863,7 +863,11 @@ rejection and fresh SL recovery. It also checks repeated holds against the origi
 expiry, camera reset, and FG off/on without a fresh capture; none may revive invalidated depth.
 Fresh copies must recover each interval. A `ValidUntilPresent` FG depth tag sent without a command
 list is copied before its frame's Present, and every Present shows that frame's fresh FG depth (R2;
-the bounded `Sunshine Streamline deferred tag copies` line counts the copies). With FG options on
+the bounded `Sunshine Streamline deferred tag copies` line counts the copies). A `ValidUntilPresent`
+or `ValidUntilEvaluate` FG depth tag that declares `NON_PIXEL_SHADER_RESOURCE` (its state at the
+later use) while the call's own list records `PIXEL_SHADER_RESOURCE` is copied at the call from the
+recorded state, nothing is refused, and every Present shows fresh FG depth (S11; the bounded
+`Sunshine Streamline FG tag-call copies` line counts `recorded_over_declared`). With FG options on
 and every FG depth tag's copy cancelled by the same frame's untag (R7), the
 same viewport's SR depth takes over once the FG scope is silent; each generated presentation, at
 2x and 3x, holds its real frame's SR copy, also after the fixture's window leaves the foreground
@@ -1423,7 +1427,9 @@ Streamline release's interposer DLL as the probe's discovery does (the matrix mi
 selection) and reads raw buffer types 0 to 80 through the selected contract; it judges the capture
 state table over every legal state cell and a set of deliberately illegal rows (a layout set by an
 enhanced barrier on an earlier list reaches the table as the capture owner's latch and that list's
-proof, D6 and N8); and it reads every pair of DXGI allocation and declared formats through
+proof, D6 and N8; a depth declaration of a later use, which a frame-generation tag call copies from
+a state its own recording names, as `tag_call_proof`'s `declared_for_use`, S11); and it reads every
+pair of DXGI allocation and declared formats through
 [`depth_view_format.h`](depth_view_format.h).
 
 The hook layer drives the real adapters without a device. Streamline cases go through the probe's
@@ -1437,10 +1443,11 @@ combination of its dimensions, DLSS-G's own `DLSSG.*` inputs included. The admis
 layer cannot run without a device (the copy's command list and its lifetime: inside the tag call,
 at an evaluation of the tag's own frame as the probe reports it, or with no Present since; where an
 FG tag call copies its tag, `deferred_copy` in [`api_contract.h`](api_contract.h) over the case's
-recorded state, and the frame's untag that cancels a copy deferred to its Present, R2 and R7; and
-DLSS-G's observed-state nomination) are repeated from the capture owner; the device and runtime
-layers replace them. A known gap that such a repeat decides closes only when its fix changes the
-repeat in the same commit, as S7's (the lifetime at the tag's own frame's Present) did.
+recorded state with `tag_call_proof` for the copy made there, and the frame's untag that cancels a
+copy deferred to its Present, R2, S11 and R7; and DLSS-G's observed-state nomination) are repeated
+from the capture owner; the device and runtime layers replace them. A known gap that such a repeat
+decides closes only when its fix changes the repeat in the same commit, as S7's (the lifetime at
+the tag's own frame's Present) and S11's (the proof at the tag call) did.
 [`test_contract_matrix_generator.h`](test_contract_matrix_generator.h) builds the cases: a case id
 hashes its non-default assignment, so adding a value renames no case. The executable takes
 `--list`, `--case <id>` or `--case <sl|ngx>:<name=value,...>` (one case, described; an illegal
