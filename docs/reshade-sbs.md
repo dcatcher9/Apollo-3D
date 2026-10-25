@@ -4140,7 +4140,15 @@ the same, so that viewport showed neither FG nor SR depth for about a second eac
 A silent FG scope owns nothing: its refused boundaries withdraw nothing, the same viewport's
 ordinary SR/RR evaluation nominates again (replacing any FG observation of that viewport), the
 provider selects as without FG for that Present (`require_FG=0 FG_silent=1` in readiness lines),
-and a direct NGX evaluation copies its depth again. Enabled FG still holds the queue in mono while
+and a direct NGX evaluation copies its depth again. FG still keeps its viewport while it can
+supply (`depth_capture::frame_generation_holds`): while the display holds that scope's own newest
+copy, made since FG On and younger than the source age, a silent scope's ordinary candidate, fresh
+or pending, does not replace it (readiness lines show `source_action=hold
+source_reason=FG_copy_held`), and SR/RR depth takes over only once that copy expires. A frame
+without an FG copy is thus held as any missing frame of a source is: a game whose FG copies keep
+arriving with an occasional frame without one keeps FG depth and its placement throughout, and
+the SR/RR evaluations nominated meanwhile are ready when the copy expires. Enabled FG still holds
+the queue in mono while
 no API source is available: a game with FG on and no SR/RR or NGX depth stays 2D and never hands
 its real or generated presentations to the generic depth selector.
 The next accepted FG copy takes the viewport back at once. Assassin's Creed Shadows (10-22) kept FG
@@ -4148,7 +4156,10 @@ on with no FG depth captured, which shut its working SR depth out for as long as
 game whose FG copies keep being accepted keeps FG ownership throughout. A switch between FG and SR
 depth restarts the placement controller's calibration of the other logical source (its projection
 domain includes the source id; the raw controller keeps a bounded history per source), as it did
-before, so a game whose FG frames come and go switches as often as that, not more. A
+before. A single FG copy amid frames without one (Shadows, 10-24) still switches twice: it is
+shown at its Present and held while younger than the source age, then SR/RR depth returns. Until
+10-25 the second frame without an FG copy switched to SR depth (and the next FG copy back), and a
+silent scope whose SR copy was not yet readable dropped the held FG copy as a changed source. A
 `Sunshine Streamline frame generation depth scope`
 line reports a required scope turning `silent` and, later, `live` again, at most every 5 s
 (`changes=` counts the turns so far; the line names the newest state); FG Off ends a silent

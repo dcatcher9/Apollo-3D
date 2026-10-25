@@ -100,4 +100,22 @@ namespace sunshine_streamline::depth_capture {
     out.reason = "retained_copy";
     return out;
   }
+
+  // FG keeps its viewport while it can supply. An enabled FG scope that is
+  // silent at this Present (its newest frame had no FG copy) lets the same
+  // viewport's ordinary SR/RR depth stand in only once its own newest copy
+  // can no longer be held: while the display holds a copy of that scope made
+  // since FG On (policy.enabled_tick), younger than the source age, that copy
+  // is held over a fresh or pending ordinary candidate. A frame without an FG
+  // copy is then held as any missing frame of a source is, instead of
+  // switching the viewport's source (which restarts the placement
+  // calibration) to SR and back. policy: the confirmed FG policy, not the
+  // silent scope's selection.
+  inline bool frame_generation_holds(const retained_depth &previous, selection_policy policy, std::uint64_t now) {
+    const auto &before = previous.metadata;
+    return policy.require_frame_generation && policy.epoch && previous.capture_id && before.frame_generation_input &&
+      before.provider == sunshine_scene_depth::provider_kind::streamline && before.epoch == policy.epoch &&
+      before.viewport == policy.viewport && before.tick >= policy.enabled_tick &&
+      sunshine_freshness::within_source_age(before.tick, now);
+  }
 }

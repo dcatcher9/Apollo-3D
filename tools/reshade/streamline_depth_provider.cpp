@@ -816,7 +816,13 @@ namespace sunshine_streamline::provider {
       const sunshine_game3d::slow_step step("depth capture acquisition");
       depth_capture::acquire(runtime->get_command_queue()->get_native(), present, data->frame, acquisition, &capture_info, selection);
     }
-    const bool available = acquisition.source_selected;
+    // FG keeps its viewport while it can supply (frame_generation_holds): a
+    // silent scope's ordinary candidate, fresh or pending, stands in only once
+    // the scope's own newest copy can no longer be held, so a frame without an
+    // FG copy holds as any missing frame of a source does.
+    const bool fg_holds = fg_silent && !(acquisition.source_selected && data->frame.metadata.frame_generation_input) &&
+      depth_capture::frame_generation_holds(data->cache.reference(), policy, GetTickCount64());
+    const bool available = acquisition.source_selected && !fg_holds;
     evidence.capture = capture_info;
     evidence.available = available;
     evidence.snapshot_ready = data->frame.pixel_ready;
@@ -927,8 +933,8 @@ namespace sunshine_streamline::provider {
     const auto &cached = data->cache.depth();
     const auto prior_depth_age = cached.ready && reuse_tick >= cached.provided.tick ?
       reuse_tick - cached.provided.tick : UINT64_MAX;
-    const auto update = depth_capture::decide_display(acquisition, data->frame, data->cache.reference(),
-      selection, reuse_tick);
+    const auto update = fg_holds ? depth_capture::display_decision{depth_capture::display_action::hold, "FG_copy_held"} :
+      depth_capture::decide_display(acquisition, data->frame, data->cache.reference(), selection, reuse_tick);
     evidence.action = update.action;
     evidence.source_reason = update.reason;
     if (available) display = display_status::waiting_capture;
