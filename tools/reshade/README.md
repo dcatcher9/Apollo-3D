@@ -1434,8 +1434,8 @@ Streamline release's interposer DLL as the probe's discovery does (the matrix mi
 selection) and reads raw buffer types 0 to 80 through the selected contract; it judges the capture
 state table over every legal state cell and a set of deliberately illegal rows (a layout set by an
 enhanced barrier on an earlier list reaches the table as the capture owner's latch and that list's
-proof, D6 and N8; a depth declaration of a later use, which a frame-generation tag call copies from
-a state its own recording names, as `tag_call_proof`'s `declared_for_use`, S11); and it reads every
+proof, D6 and N8; a depth or UI declaration of a later use, which a tag call copies from a state
+its own recording names, as `tag_call_proof`'s `declared_for_use`, S11 and U5); and it reads every
 pair of DXGI allocation and declared formats through
 [`depth_view_format.h`](depth_view_format.h).
 
@@ -1565,7 +1565,9 @@ list proves at the end of the frame are the device layer's, and so are a read-on
 (D11c) and the UI layer's clear boundary on an enhanced or simultaneous-access target (D12). Family
 `ui` (2.14.1) tags a
 captured depth and a full-size UI input (UI colour and alpha, HUD-less colour, Backbuffer, UI alpha)
-at a tag call with the game's list, without a command list or as a local evaluate input, or draws
+at a tag call with the game's list, without a command list or as a local evaluate input (at a tag
+call also `ValidUntilPresent` and `ValidUntilEvaluate`, with its list recording a read state, a write
+state or none, U5), or draws
 an offscreen UI layer cleared every frame (a render target in `RENDER_TARGET`, or a
 simultaneous-access one whose copy the layer refuses, D12); a case is offered when Dump3D lists its input as
 available to UI detection. Their gaps are `ngx_runtime_rows`, `generic_runtime_rows` and

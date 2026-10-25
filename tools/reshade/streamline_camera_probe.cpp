@@ -253,9 +253,10 @@ namespace sunshine_streamline {
     // zero when it was refused or its SDK call failed. DLSS-G's input of a kind
     // the game's own tags copy adds no second copy (observe_frame_generation_inputs),
     // so one origin feeds UI detection, its exact pairs included; a kind the
-    // tags leave out or cannot copy is DLSS-G's. A command-less tag's copy
-    // deferred to its frame's Present (present_deferred) sets the tick when it
-    // is made, so DLSS-G's evaluation of the next frame stands aside.
+    // tags leave out or cannot copy is DLSS-G's. A tag's copy deferred to its
+    // frame's Present (present_deferred) sets the tick when it is made, so
+    // DLSS-G's evaluation of the next frame stands aside; while it is pending,
+    // DLSS-G's evaluation of its own frame stands aside too (ui_tag_deferred).
     struct { std::uint64_t epoch{}; std::uint32_t viewport{}; std::array<std::uint64_t, 4> tick{}; } ui_tag_copy;
     void remember_ui_tag_copy(std::uint64_t scope_epoch, std::uint32_t viewport, unsigned slot, bool recorded) {
       if (slot >= ui_tag_copy.tick.size()) return;
@@ -313,6 +314,35 @@ namespace sunshine_streamline {
     };
     std::array<deferred_frame, slot_count> deferred_frames{};
     std::atomic<unsigned> deferral_pending{};
+    // The tick each kind's (ui_mask::capture_slot) newest copy deferred to its
+    // frame's Present was refused, zero once one is made. Guarded by
+    // evaluation_supply_lock.
+    std::array<std::uint64_t, 4> ui_deferral_refused{};
+    void remember_ui_deferral(unsigned slot, bool copied) {
+      if (slot >= ui_deferral_refused.size()) return;
+      AcquireSRWLockExclusive(&evaluation_supply_lock);
+      ui_deferral_refused[slot] = copied ? 0 : GetTickCount64();
+      ReleaseSRWLockExclusive(&evaluation_supply_lock);
+    }
+    // A UI tag of this kind whose copy waits for the scope's frame Present
+    // (U2, U5) is that frame's tag copy: DLSS-G's evaluation of the same
+    // frame stands aside for it as for one made. Otherwise both copy the
+    // kind, and at that Present DLSS-G's copy of the frame (still pending)
+    // and its previous one hold the kind's two snapshots, so the deferred
+    // copy finds no reservation and DLSS-G keeps the kind for good. Not
+    // once the kind's last deferred copy was refused within the source age:
+    // DLSS-G's input supplies the kind then.
+    bool ui_tag_deferred(std::uint64_t scope_epoch, std::uint32_t viewport, unsigned slot) {
+      if (slot >= ui_deferral_refused.size() || !deferral_pending.load(std::memory_order_acquire)) return false;
+      AcquireSRWLockShared(&evaluation_supply_lock);
+      bool pending = false;
+      for (const auto &entry : deferred_frames)
+        pending = pending || (entry.used && entry.epoch == scope_epoch && entry.viewport == viewport && entry.ui[slot].used);
+      const auto refused = ui_deferral_refused[slot];
+      ReleaseSRWLockShared(&evaluation_supply_lock);
+      return pending && !(refused &&
+        sunshine_freshness::ahead_tolerant_lt(refused, GetTickCount64(), sunshine_freshness::source_age_ms));
+    }
     // DLSS-G's NGX evaluations of a real frame (observe_frame_generation_inputs
     // with an FG scope): their count, and the newest one's scope and tick.
     // DLSS-G evaluates a frame in that frame's Present, so under frame
@@ -2271,8 +2301,8 @@ namespace sunshine_streamline {
       SetLastError(outgoing);
       return result;
     }
-    // later: where a ValidUntilPresent UI tag without a command list is kept
-    // to be copied before its frame's Present (R2, the matrix's U2).
+    // later: where a ValidUntilPresent UI tag is kept to be copied before its
+    // frame's Present (R2, the matrix's U2 and U5).
     sunshine_game3d::ui_mask::attempt capture_ui_tag(const batch &out, void *commands,
         const tag_record &tag, std::uint64_t source_epoch, bool fg_enabled, deferred_ui *later = nullptr) {
       namespace mask = sunshine_game3d::ui_mask;
@@ -2308,12 +2338,27 @@ namespace sunshine_streamline {
       where.source_present_generation = input.source_present_generation;
       where.format = input.source ? retained.format : 0;
       where.refusal = tag.value.refusal;
-      if (later && !commands && input.source && tag.supported &&
-          sl_contract::deferred_copy(tag.value.lifecycle, false, false, false) == sl_contract::tag_call_copy::present) {
-        // Its kind's precedence over DLSS-G's input stays as it is until the
-        // copy is made or dropped (present_deferred).
-        later->used = true; later->where = where; later->input = input;
-        return {};
+      if (later && input.source && tag.supported) {
+        // A tag call copies its UI tag where it copies a frame-generation
+        // depth tag (deferred_copy, the matrix's U5 and U2): inside the call
+        // from the state its list records, which a declaration of the tag's
+        // later use does not refuse (tag_call_proof, S11), else a
+        // ValidUntilPresent tag (no list, no recorded state, or a write
+        // state) before its frame's Present; an UntilEvaluate tag whose list
+        // records none is refused at the call (missing_state), since no
+        // evaluate copies a UI tag.
+        bool writing = false;
+        const bool recorded = commands &&
+          depth_capture::recorded_state(reinterpret_cast<std::uint64_t>(commands), input.source, &writing);
+        if (sl_contract::deferred_copy(tag.value.lifecycle, commands != nullptr, recorded, writing) ==
+            sl_contract::tag_call_copy::present) {
+          // Its kind's precedence over DLSS-G's input stays as it is until the
+          // copy is made or dropped (present_deferred).
+          later->used = true; later->where = where; later->input = input;
+          return {};
+        }
+        input.proof = sl_contract::tag_call_proof(tag.value.lifecycle, input.proof);
+        where.source = input;
       }
       auto attempt = mask::begin(where, input);
       // A recorded copy keeps its kind's precedence over DLSS-G's input of
@@ -2432,8 +2477,9 @@ namespace sunshine_streamline {
       std::snprintf(text, sizeof(text),
         "Sunshine Streamline deferred tag copies: depth={deferred=%llu copied=%llu refused=%llu last_refusal=%s} "
         "ui={deferred=%llu copied=%llu refused=%llu} cancelled_by_untag=%llu lapsed=%llu waited_for_frame=%llu "
-        "pending=%u; a ValidUntilPresent tag whose call has no command list, or a frame-generation input whose call's "
-        "list records no state of it or a write state, is copied on the Present queue right before its frame's Present",
+        "pending=%u; a ValidUntilPresent tag whose call has no command list, or a frame-generation or UI input whose "
+        "call's list records no state of it or a write state, is copied on the Present queue right before its frame's "
+        "Present",
         static_cast<unsigned long long>(deferrals.depth.load(std::memory_order_relaxed)),
         static_cast<unsigned long long>(deferrals.depth_copied.load(std::memory_order_relaxed)),
         static_cast<unsigned long long>(deferrals.depth_refused.load(std::memory_order_relaxed)),
@@ -3284,6 +3330,7 @@ namespace sunshine_streamline {
         const auto attempt = mask::begin(item.where, item.input);
         mask::finish(attempt, true);
         remember_ui_tag_copy(entry.epoch, entry.viewport, slot, static_cast<bool>(attempt.ticket));
+        remember_ui_deferral(slot, static_cast<bool>(attempt.ticket));
         if (attempt.ticket) {
           recorded = true;
           deferrals.ui_copied.fetch_add(1, std::memory_order_relaxed);
@@ -3730,9 +3777,13 @@ namespace sunshine_streamline {
         if (item.state == parameter::absent) continue;
         if (!interested) { result = ui_outcome::no_request; continue; }
         if (!item.area_valid) { result = ui_outcome::subrect; continue; }
-        // The game's own tag of this kind copied it first: no second copy,
-        // and its exact pairs stay the tags' own (ui_tag_copy).
-        if (ui_tag_copy_recent(source_epoch, fg.viewport, i)) { result = ui_outcome::tag_copied; continue; }
+        // The game's own tag of this kind copied it first, or its copy waits
+        // for this frame's Present: no second copy, and its exact pairs stay
+        // the tags' own (ui_tag_copy, ui_tag_deferred).
+        if (ui_tag_copy_recent(source_epoch, fg.viewport, i) || ui_tag_deferred(source_epoch, fg.viewport, i)) {
+          result = ui_outcome::tag_copied;
+          continue;
+        }
         depth_capture::input input;
         input.epoch = source_epoch; input.sequence = serial; input.tick = tick;
         input.viewport = fg.viewport; input.observation_revision = loss;

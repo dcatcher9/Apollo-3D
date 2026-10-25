@@ -647,6 +647,14 @@ namespace game3d_contract {
     simultaneous_common
   };
 
+  // What a UI tag call's own list records of its input before the call
+  // (tag_call only): a read state, a write state, or nothing.
+  enum class ui_recorded {
+    read_state,
+    write_state,
+    none
+  };
+
   struct ui_case {
     sl_version version {newest_surveyed};
     buffer_meaning meaning {buffer_meaning::ui_color_and_alpha};
@@ -655,6 +663,7 @@ namespace game3d_contract {
     bool fg_on {};
     bool full_size {true};
     ui_clear_boundary clear {ui_clear_boundary::none};
+    ui_recorded recorded {ui_recorded::read_state};
   };
 
   // The device layer's copy points (test_game3d_api_contract_device.cpp),

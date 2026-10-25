@@ -725,11 +725,16 @@ namespace {
   // transparent every frame (D12): a render target in its legacy
   // RENDER_TARGET state, or a simultaneous-access one that its clear promotes
   // from COMMON, whose copy the layer refuses. The layer cleared in an
-  // enhanced layout is the device layer's.
+  // enhanced layout is the device layer's. A tag call's input has a
+  // lifecycle and what its list records of it before the call (U5): the
+  // shader-read state it declares, COPY_DEST (a write state) after a
+  // transition there, or nothing (it stays in COPY_DEST, which it declares).
   namespace ui_runtime {
     enum dimension : unsigned {
       kind,
-      how
+      how,
+      life,
+      recorded
     };
 
     struct input_kind {
@@ -748,6 +753,8 @@ namespace {
     };
     constexpr int layer = 4, simultaneous_layer = 5;
     constexpr matrix::ui_capture captures[] {matrix::ui_capture::tag_call, matrix::ui_capture::no_command_list, matrix::ui_capture::local};
+    constexpr matrix::lifecycle lives[] {matrix::lifecycle::only_valid_now, matrix::lifecycle::valid_until_present, matrix::lifecycle::valid_until_evaluate};
+    constexpr matrix::ui_recorded recordings[] {matrix::ui_recorded::read_state, matrix::ui_recorded::write_state, matrix::ui_recorded::none};
     constexpr matrix::sl_version version {2, 14, 1};
 
     matrix::ui_case to_case(const generator::row &value) {
@@ -759,13 +766,18 @@ namespace {
         return out;
       }
       out.meaning = kinds[value[kind]].meaning;
-      out.life = out.how == matrix::ui_capture::no_command_list ? matrix::lifecycle::valid_until_present : matrix::lifecycle::only_valid_now;
+      out.life = out.how == matrix::ui_capture::no_command_list ? matrix::lifecycle::valid_until_present : lives[value[life]];
+      out.recorded = recordings[value[recorded]];
       return out;
     }
 
-    // The layer is no tag: its one cell is the clear boundary.
+    // The layer is no tag: its one cell is the clear boundary. Only a tag
+    // call's input has its own lifecycle and recording.
     bool legal(const generator::row &value) {
-      if ((value[kind] == layer || value[kind] == simultaneous_layer) && value[how] > 0) {
+      if ((value[kind] == layer || value[kind] == simultaneous_layer) && (value[how] > 0 || value[life] > 0 || value[recorded] > 0)) {
+        return false;
+      }
+      if (value[how] > 0 && value[life] > 0) {
         return false;
       }
       return !generator::complete(value) || matrix::legal(to_case(value));
@@ -781,6 +793,8 @@ namespace {
         {
           {"kind", names},
           {"how", {"tag_call", "no_command_list", "local"}},
+          {"life", {"only_valid_now", "valid_until_present", "valid_until_evaluate"}},
+          {"recorded", {"read_state", "write_state", "none"}},
         },
         [](const generator::row &row) {
           return ui_runtime::legal(row);
@@ -793,6 +807,18 @@ namespace {
     std::vector<generator::row> cells(const generator::family &owner, census &out) {
       std::vector<generator::row> rows;
       for (const auto &row : generator::product(owner, {kind, how}, generator::defaults(owner))) {
+        ++out.product;
+        if (owner.legal(row)) {
+          ++out.legal_product;
+          rows.push_back(row);
+        }
+      }
+      // A tag call's lifecycle against what its list records (U5), of the
+      // default kind; the default pair is already a row above.
+      for (const auto &row : generator::product(owner, {life, recorded}, generator::defaults(owner))) {
+        if (!row[life] && !row[recorded]) {
+          continue;
+        }
         ++out.product;
         if (owner.legal(row)) {
           ++out.legal_product;
@@ -1680,7 +1706,8 @@ namespace {
       auto &resource = current.ui_resource;
       resource.base = {nullptr, sunshine_streamline::resource_guid, 1};
       resource.native = ui_input.p;
-      resource.state = D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE;
+      // A tag left in COPY_DEST (written, or never transitioned) declares it.
+      resource.state = value.recorded == matrix::ui_recorded::read_state ? D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE : D3D12_RESOURCE_STATE_COPY_DEST;
       resource.width = width;
       resource.height = height;
       resource.native_format = desc.Format;
@@ -1716,8 +1743,20 @@ namespace {
         transition(commands.p, ui_input.p, current.ui_state, D3D12_RESOURCE_STATE_COPY_DEST);
       }
       commands->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
-      transition(commands.p, ui_input.p, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
-      current.ui_state = D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE;
+      switch (value.recorded) {
+        case matrix::ui_recorded::read_state:
+          transition(commands.p, ui_input.p, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+          current.ui_state = D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE;
+          break;
+        case matrix::ui_recorded::write_state:
+          // The list's last barrier of the input leaves it in COPY_DEST.
+          transition(commands.p, ui_input.p, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+          transition(commands.p, ui_input.p, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+          current.ui_state = D3D12_RESOURCE_STATE_COPY_DEST;
+          break;
+        default:
+          break;  // Created in COPY_DEST and never transitioned: no barrier names it.
+      }
       if (value.how == matrix::ui_capture::local) {
         inputs.push_back(&current.ui_tag.base);
         return;
@@ -1876,10 +1915,11 @@ namespace {
                   }});
       out.elapsed_ms = GetTickCount64() - started;
       out.observed = seen;
-      // The layer's refusal (D12) shows as no candidate, as an ignored input does.
-      const bool refused_layer = value.clear != matrix::ui_clear_boundary::none && matrix::permits(out.decided.expected, matrix::outcome_kind::refuse);
-      out.actual.kind = seen.offered ? matrix::outcome_kind::offered : refused_layer ? matrix::outcome_kind::refuse :
-                                                                                       matrix::outcome_kind::ignored;
+      // A refusal (the layer's, D12; a tag's, U5) shows as no candidate, as
+      // an ignored input does.
+      const bool refused = matrix::permits(out.decided.expected, matrix::outcome_kind::refuse);
+      out.actual.kind = seen.offered ? matrix::outcome_kind::offered : refused ? matrix::outcome_kind::refuse :
+                                                                                 matrix::outcome_kind::ignored;
       out.satisfied = matrix::permits(out.decided.expected, out.actual.kind);
       out.verdict = gaps::judge_each(gaps::ui_runtime_rows, value, out.satisfied, {out.actual}, out.matched);
       return out;

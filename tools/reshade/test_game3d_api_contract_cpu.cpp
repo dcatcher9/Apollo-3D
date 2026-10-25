@@ -353,8 +353,8 @@ namespace {
   // The copy-state table's view of one case: the proof and policy the adapters
   // choose (streamline_camera_probe.cpp, ngx_depth_source.cpp and
   // auxiliary_state_policy for an at-call UI copy) and the recording's entry
-  // for the source. A declaration of a later use is a longer-lived depth tag
-  // copied at its frame-generation tag call (api_contract.h tag_call_proof).
+  // for the source. A declaration of a later use is a longer-lived depth or
+  // UI tag copied at its tag call (api_contract.h tag_call_proof).
   // record_impl's admission after copy_state's decision: the recording's
   // list type (copy_state::list_basis).
   copy_state::decision on_list(const copy_state::decision &decided, matrix::list_type list) {
@@ -511,15 +511,14 @@ namespace {
             value.declared = allowed[i];
             with_evidence(value);
           }
-          // A depth declaration of a later use, copied at the tag call (S11).
-          if (role == matrix::consumer::depth) {
-            value.scope = matrix::claim_scope::before_use;
-            for (unsigned i = 0; i != allowed_count; ++i) {
-              value.declared = allowed[i];
-              with_evidence(value, true);
-            }
-            value.scope = matrix::claim_scope::at_use;
+          // A depth or UI declaration of a later use, copied at the tag call
+          // (S11, U5).
+          value.scope = matrix::claim_scope::before_use;
+          for (unsigned i = 0; i != allowed_count; ++i) {
+            value.declared = allowed[i];
+            with_evidence(value, true);
           }
+          value.scope = matrix::claim_scope::at_use;
         }
       }
     }

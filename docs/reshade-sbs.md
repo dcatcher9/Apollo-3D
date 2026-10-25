@@ -2399,8 +2399,8 @@ proved, whichever it is, beside a claim the proof agrees with (the enhanced-layo
 3 fix 3; any proven layout since D6-relax). The
 [API contract matrix](../tools/reshade/README.md#api-contract-matrix) judges the table over every
 legal combination of allocation flags, adapter claim, consumer, declared state and recorded
-evidence (a layout set on an earlier list included, and a depth declaration of a later use with
-each state its recording can name), plus deliberately illegal rows; the cells where the table falls short of the contract are
+evidence (a layout set on an earlier list included, and a depth or UI declaration of a later use
+with each state its recording can name), plus deliberately illegal rows; the cells where the table falls short of the contract are
 rows of its known-gap table. Its device layer records the same copies on real D3D12 lists.
 
 The FG decision is independent of depth-provider selection, including a manually pinned Generic
@@ -4023,11 +4023,13 @@ table lists where they still fall short of Streamline's contract.
 not its tag call; and a call whose tags are all `ValidUntilPresent` may pass no command list
 (`sl_core_api.h`). Where a frame-generation tag call copies each depth tag, and where any 2.x tag
 call copies a UI tag (HUD-less, Backbuffer, UI colour and alpha, UIAlpha), is
-`deferred_copy` in [`api_contract.h`](../tools/reshade/api_contract.h):
+`deferred_copy` in [`api_contract.h`](../tools/reshade/api_contract.h), the same for both (a UI
+tag with a command list since Stage 3 batch B, the matrix's U5; before, it was copied at its call
+from its declaration):
 
 - inside the call, on its command list, when the barrier hooks recorded the tag's state on that
-  recording (`depth_capture::recorded_state`), for an `OnlyValidNow` tag, and for any UI tag that
-  comes with a command list (S1, S5, U1). A depth tag that outlives the call (`ValidUntilPresent` or
+  recording (`depth_capture::recorded_state`), and for an `OnlyValidNow` tag (S1, S5, U1, U5). A
+  tag that outlives the call (`ValidUntilPresent` or
   `ValidUntilEvaluate`) is copied there from the recorded state: its declaration describes its
   later use, so a declaration that names another state does not refuse the copy (`tag_call_proof`
   in `api_contract.h` gives it the proof `declared_for_use`, which `copy_state` resolves as
@@ -4045,11 +4047,11 @@ call copies a UI tag (HUD-less, Backbuffer, UI colour and alpha, UIAlpha), is
   as a declaration must at an evaluate and on the Present queue (S11a). The bounded line
   `Sunshine Streamline FG tag-call copies: copied=<n> recorded_over_declared=<n> state=<recorded>
   declared=<declared>` (at most every 5 s, only after such a copy) counts the copies made at an FG
-  tag call and those made from a recorded state over the declaration, with the newest pair; UI tags
-  keep their declaration's proof at the call;
-- for a `ValidUntilPresent` tag otherwise (a frame-generation depth tag whose list records no state
-  of it, S11b, or a write state, S11; any such tag without a command list, S6 and U2), on the
-  Present queue right before
+  tag call and those made from a recorded state over the declaration, with the newest pair (UI
+  tags' copies are not counted there);
+- for a `ValidUntilPresent` tag otherwise (a frame-generation depth or UI tag whose list records no
+  state of it, S11b and U5, or a write state, S11 and U5; any such tag without a command list, S6
+  and U2), on the Present queue right before
   its frame's Present: the probe keeps the tag (`deferred_frame`, one per viewport) and
   `present_deferred` records the copy from ReShade's `present` event, before
   `depth_capture::present` ends the tags' lifetimes, on that queue's immediate list, which is then
@@ -4064,9 +4066,14 @@ call copies a UI tag (HUD-less, Backbuffer, UI colour and alpha, UIAlpha), is
   earlier capture holds within the source age, then mono. An accepted depth copy becomes the
   viewport's FG source as a tag-call copy would (it keeps the FG scope live and keeps precedence
   over DLSS-G's own evaluation of the next frame, `tag_copied`), and an accepted UI copy is offered
-  to UI detection with its tag call's other kinds as one batch (exact HUD-less pairs);
+  to UI detection with its tag call's other kinds as one batch (exact HUD-less pairs). While a UI
+  tag's copy is pending, DLSS-G's evaluation of the same frame stands aside for its kind as well
+  (`tag_copied`), unless that kind's last deferred copy was refused within the source age:
+  otherwise DLSS-G's copy of the frame, still pending at that Present, and its previous one hold
+  the kind's two snapshots, and the deferred copy finds no reservation (`no_reservation`);
 - a `ValidUntilEvaluate` frame-generation depth tag whose list records no state of it is refused
-  at the call (`missing_state`): its declaration describes its evaluate, which copies it (S11c).
+  at the call (`missing_state`): its declaration describes its evaluate, which copies it (S11c). A
+  `ValidUntilEvaluate` UI tag is refused the same way (U5), though no evaluate copies a UI tag.
   Any other tag without a command list has no point to copy at (`boundary_without_commands`, S2),
   at its call and at a later evaluate.
 

@@ -121,11 +121,12 @@ namespace game3d_contract {
     inline constexpr rule N9 {"N9", "Release and recreate: CAPTURE resumes", "NGX ReleaseFeature/CreateFeature: a new handle is a new feature"};
     inline constexpr rule N9b {"N9b", "NGX nested inside a Streamline evaluate: one source only", "the nested evaluation consumes the same frame's depth"};
 
-    inline constexpr rule U1 {"U1", "Full-size UI tag at its tag call with a command list: offered; another size: EITHER", "SLT:64-215 BufferType (HUDLessColor, UIColorAndAlpha, Backbuffer); SLA:145"};
+    inline constexpr rule U1 {"U1", "Full-size UI tag at its tag call with a command list: offered (a longer-lived one as U5); another size: EITHER", "SLT:64-215 BufferType (HUDLessColor, UIColorAndAlpha, Backbuffer); SLA:145"};
     inline constexpr rule U1b {"U1b", "Tag 23 on 1.x (UIHint): ignored", "v1.x sl.h: value 23 is UIHint"};
     inline constexpr rule U1c {"U1c", "68 on 2.11.x, or 69 on 2.12 and later: UI alpha", "v2.11.1 sl_core_types.h UIAlpha = 68; v2.12.0 UIAlpha = 69 and 68 is ResponsivityMask"};
     inline constexpr rule U2 {"U2", "UI tag with no command list: lifecycle 1 offered through a copy before that frame's Present, as S6; a 1.x tag (valid until its evaluate) through a copy at that evaluate", "SLA:145, 162; owner ruling R2; v1.1.1 sl.h:176, 347"};
     inline constexpr rule U3 {"U3", "Local UI inputs: offered under the same contract (R4)", "SLA:258-262 local tags; owner ruling R4"};
+    inline constexpr rule U5 {"U5", "A ValidUntilPresent or ValidUntilEvaluate UI tag at its tag call with a command list, as a frame-generation depth tag there: offered from the state that list records, whatever its declaration of the later use names (as S11); a ValidUntilPresent one whose list records no state of it, or a write state, offered through the copy on the Present queue before that frame's Present (as S11b and S11, R2); a ValidUntilEvaluate one whose list records none: REFUSE state_unprovable (as S11c; no evaluate copies a UI tag)", "SLT:357: the declaration describes the state at the tag's use, not at the tag call; SLT:402, 404 (the lifecycles); owner ruling R2; Stage 3 batch B: UI tags take the depth tags' tag-call proof and deferral"};
     inline constexpr rule U4 {"U4", "UI alpha on a release the survey does not hold: manual-only (ignored automatically, R4) when newer than the survey, EITHER between surveyed releases that declare it", "release newer than the survey; owner ruling R4; only a surveyed header authenticates the UIAlpha value (U1c)"};
 
     inline constexpr rule X1 {"X1", "A state or layout the allocation's flags do not allow: REFUSE state_unprovable (illegal input)", "D3D12_RESOURCE_FLAGS: ALLOW_RENDER_TARGET, ALLOW_DEPTH_STENCIL and ALLOW_UNORDERED_ACCESS each 'enables the resource to transition into' its state; DENY_SHADER_RESOURCE disables the shader-resource states"};
@@ -209,6 +210,7 @@ namespace game3d_contract {
     &rules::U2,
     &rules::U3,
     &rules::U4,
+    &rules::U5,
     &rules::X1,
     &rules::X2
   };
@@ -1081,6 +1083,9 @@ namespace game3d_contract {
     } else if (value.how == ui_capture::no_command_list && value.life != lifecycle::valid_until_present) {
       return false;
     }
+    if (value.how != ui_capture::tag_call && value.recorded != ui_recorded::read_state) {
+      return false;
+    }
     return value.clear != ui_clear_boundary::none || declares(value.version, value.meaning) != declaration::undeclared;
   }
 
@@ -1121,6 +1126,15 @@ namespace game3d_contract {
     auto out = plain(value.meaning == buffer_meaning::ui_alpha ? rules::U1c : rules::U1, outcome_kind::offered);
     if (value.how == ui_capture::local) {
       out.by = &rules::U3;
+    }
+    // A longer-lived 2.x tag at its tag call, as a frame-generation depth
+    // tag there (U5: S11, S11b, S11c).
+    if (value.how == ui_capture::tag_call && value.version.major != 1 && value.life != lifecycle::only_valid_now) {
+      if (value.life == lifecycle::valid_until_evaluate && value.recorded == ui_recorded::none) {
+        return refuse(rules::U5, refusal::state_unprovable);
+      }
+      out.by = &rules::U5;
+      out.deferred = value.life == lifecycle::valid_until_present && value.recorded != ui_recorded::read_state;
     }
     if (value.how == ui_capture::no_command_list) {
       out.by = &rules::U2;
@@ -1571,6 +1585,13 @@ namespace game3d_contract {
     static_assert(decides(expect(with(ui_case {}, &ui_case::meaning, buffer_meaning::ui_alpha)), rules::U1c, outcome_kind::offered));
     static_assert(decides(expect(with(with(ui_case {}, &ui_case::how, ui_capture::no_command_list), &ui_case::life, present)), rules::U2, outcome_kind::offered));
     static_assert(decides(expect(with(ui_case {}, &ui_case::how, ui_capture::local)), rules::U3, outcome_kind::offered));
+    // U5: a longer-lived UI tag at a listed tag call, as an FG depth tag.
+    static_assert(decides(expect(with(ui_case {}, &ui_case::life, present)), rules::U5, outcome_kind::offered) && !expect(with(ui_case {}, &ui_case::life, present)).deferred);
+    static_assert(decides(expect(with(with(ui_case {}, &ui_case::life, present), &ui_case::recorded, ui_recorded::none)), rules::U5, outcome_kind::offered) && expect(with(with(ui_case {}, &ui_case::life, present), &ui_case::recorded, ui_recorded::none)).deferred);
+    static_assert(decides(expect(with(with(ui_case {}, &ui_case::life, present), &ui_case::recorded, ui_recorded::write_state)), rules::U5, outcome_kind::offered) && expect(with(with(ui_case {}, &ui_case::life, present), &ui_case::recorded, ui_recorded::write_state)).deferred);
+    static_assert(decides(expect(with(with(ui_case {}, &ui_case::life, until_evaluate), &ui_case::recorded, ui_recorded::write_state)), rules::U5, outcome_kind::offered) && !expect(with(with(ui_case {}, &ui_case::life, until_evaluate), &ui_case::recorded, ui_recorded::write_state)).deferred);
+    static_assert(refuses(expect(with(with(ui_case {}, &ui_case::life, until_evaluate), &ui_case::recorded, ui_recorded::none)), rules::U5, refusal::state_unprovable));
+    static_assert(decides(expect(with(ui_case {}, &ui_case::recorded, ui_recorded::none)), rules::U1, outcome_kind::offered) && !legal(with(with(ui_case {}, &ui_case::how, ui_capture::local), &ui_case::recorded, ui_recorded::none)));
     static_assert(decides(expect(with(with(ui_case {}, &ui_case::meaning, buffer_meaning::ui_alpha), &ui_case::version, sl_version {2, 15, 0})), rules::U4, outcome_kind::ignored));
     static_assert(undecided(expect(with(with(ui_case {}, &ui_case::meaning, buffer_meaning::ui_alpha), &ui_case::version, sl_version {2, 13, 0})), rules::U1c));
     static_assert(!legal(with(with(ui_case {}, &ui_case::meaning, buffer_meaning::ui_alpha), &ui_case::version, v2_6_10)) && !legal(with(with(ui_case {}, &ui_case::meaning, buffer_meaning::backbuffer), &ui_case::version, sl_version {2, 2, 0})));
