@@ -1868,7 +1868,8 @@ namespace sunshine_streamline::depth_capture {
     }
     // The split matrix, through the production barrier callbacks and the
     // capture's state table: a split in transition is refused, its END_ONLY
-    // or a later plain transition defines the state, a split of another
+    // or a later plain transition defines the state, an END_ONLY naming
+    // another state than its BEGIN_ONLY blocks it (D4c), a split of another
     // subresource leaves subresource 0, and nothing clears a block.
     bool split_barrier_regression() {
       private_object command_object;
@@ -1915,6 +1916,8 @@ namespace sunshine_streamline::depth_capture {
       };
       return in_transition(run({barrier(begin, read)})) &&
         admitted(run({barrier(begin, read), barrier(end, read)})) &&
+        in_transition(run({barrier(begin, D3D12_RESOURCE_STATE_COPY_SOURCE), barrier(end, read)})) &&
+        in_transition(run({barrier(begin, D3D12_RESOURCE_STATE_COPY_SOURCE), barrier(end, read), barrier(none, read)})) &&
         admitted(run({barrier(begin, D3D12_RESOURCE_STATE_COPY_SOURCE), barrier(none, read)})) &&
         admitted(run({barrier(end, read)})) &&
         admitted(run({barrier(none, read), barrier(begin, D3D12_RESOURCE_STATE_COPY_SOURCE, 1)})) &&

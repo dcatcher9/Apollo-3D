@@ -66,11 +66,17 @@ namespace game3d_contract::judging {
       }
     }
 
+    // Recorded gaps name the expected-failure rows (a pending row may only
+    // stand in for an empty table).
     template<class Case>
     void print(const known_gaps::row<Case> (&rows)[N]) const {
       std::printf("%u meet the oracle, %u are recorded gaps (", met, cells - met - pending);
+      const char *separator = "";
       for (unsigned i = 0; i != N; ++i) {
-        std::printf("%s%s %u", i ? ", " : "", rows[i].id, known[i]);
+        if (rows[i].status == known_gaps::kind::expected_failure) {
+          std::printf("%s%s %u", separator, rows[i].id, known[i]);
+          separator = ", ";
+        }
       }
       std::printf(")");
       if (pending) {

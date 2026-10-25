@@ -386,6 +386,12 @@ namespace sunshine_streamline::depth_capture {
           if (known->blocked) continue;
           // A legacy barrier inside an enhanced split is outside the D3D12 contract.
           if (known->pending_split && known->enhanced) { known->blocked = true; continue; }
+          // So is an END_ONLY whose StateAfter is not its BEGIN_ONLY's, which
+          // pending_split keeps (MS Learn, Split Barriers: the barrier that
+          // ends a split has the same before and after states; the contract
+          // matrix's D4c): the state is unknown.
+          if (known->pending_split && flags == D3D12_RESOURCE_BARRIER_FLAG_END_ONLY &&
+              value.Transition.StateAfter != known->value) { known->blocked = true; continue; }
           // BEGIN_ONLY leaves the state in transition; END_ONLY, like a
           // plain transition, completes in StateAfter.
           known->pending_split = flags == D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY;

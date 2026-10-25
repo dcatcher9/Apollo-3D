@@ -4443,8 +4443,10 @@ reports `enhanced=1 layout=<D3D12_BARRIER_LAYOUT> access=0x<D3D12_BARRIER_ACCESS
 BEGIN_ONLY on subresource 0 (or all) leaves the state in transition, refused as
 `incomplete_state` (`split=1` on the NGX rejection line), until its END_ONLY or a later plain
 transition defines it; a split of another subresource leaves subresource 0's state. A barrier
-flag combination other than none, BEGIN_ONLY or END_ONLY, or a legacy and an enhanced barrier
-inside each other's pending split blocks the affected resource for that recording until Reset
+flag combination other than none, BEGIN_ONLY or END_ONLY, an END_ONLY whose `StateAfter` is not
+its BEGIN_ONLY's (Split Barriers: the barrier that ends a split has the same states; the matrix's
+D4c, since Stage 3 batch B, before which the END's state was taken), or a legacy and an enhanced
+barrier inside each other's pending split blocks the affected resource for that recording until Reset
 (`incomplete_state`), and no later barrier clears that block; unrelated
 resources remain eligible, and enhanced global or buffer barriers change no texture state. Per-resource state
 storage grows with the actual command recording and reuses its allocation on Reset; unrelated

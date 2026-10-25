@@ -305,8 +305,10 @@ namespace {
     switch (source.seen) {
       case matrix::evidence::transition:
       case matrix::evidence::end_without_begin:
-      case matrix::evidence::end_mismatched:  // The recorder takes an END_ONLY's StateAfter without its BEGIN_ONLY's.
         observed = {true, copy_state::supported(source.observed), false, source.observed};
+        break;
+      case matrix::evidence::end_mismatched:  // The recorder blocks an END_ONLY whose StateAfter is not its BEGIN_ONLY's.
+        observed = {true, false, true, source.observed, true};
         break;
       case matrix::evidence::split_open:
         observed = {true, false, false, source.observed, true};

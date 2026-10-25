@@ -82,18 +82,16 @@ namespace game3d_contract::known_gaps {
   }  // namespace behaviours
 
   // The state a copy may start from (checked by test_game3d_api_contract_cpu.cpp).
+  // The add-on meets every cell; C++ has no empty array, so one pending row
+  // that matches no cell stands in for the table.
   namespace state {
-    // An END_ONLY whose StateAfter differs from its BEGIN_ONLY's is taken as
-    // a completed transition into the END's state (the recorder keeps no
-    // begin state), so it is copied from unless a declaration disagrees.
-    constexpr bool mismatched_split_end(const state_case &value) {
-      const auto &source = value.resource;
-      return source.seen == evidence::end_mismatched && (value.source != claim::sl_declared || value.declared == source.observed);
+    constexpr bool no_cell(const state_case &) {
+      return false;
     }
   }  // namespace state
 
   inline constexpr row<state_case> state_rows[] {
-    {"D4c", &rules::D4c, kind::expected_failure, &state::mismatched_split_end, "Stage 3 fix 13 (D4c). Illegal game input: streamline_depth_capture.cpp's barrier recorder ends a split at any END_ONLY and takes its StateAfter, never comparing it with the BEGIN_ONLY's. Keep the begin's StateAfter while the split is pending and block the source when its END_ONLY names another state. The device layer cannot run this row (the debug layer refuses the barrier), so this table is its only check."},
+    {"none", &rules::D1, kind::pending, &state::no_cell, "No copy-state gap remains: Stage 3 batch B closed D3, D3b (with S11-common), D2 (with S11-resolve), X1, X2 and D4c. This row matches no cell."},
   };
 
   // Raw Streamline buffer types at each surveyed release (checked by
