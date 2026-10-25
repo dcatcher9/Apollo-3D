@@ -1579,6 +1579,45 @@ namespace {
     require(!capture::record_local_texture(native(gpu.list.Get()), input, &diagnostic, capture::auxiliary_state_policy(input)) &&
         diagnostic.earlier_layout && diagnostic.stage == capture::record_stage::unsupported_state,
       "another claim of a watched latched source was copied");
+
+    // A depth clear after an enhanced barrier on its list proves the
+    // DEPTH_STENCIL_WRITE layout, never a legacy DEPTH_WRITE: the end-of-frame
+    // copy then records enhanced barriers on it (the debug layer checks the
+    // legacy interop). A later list that only clears it keeps that layout.
+    ComPtr<ID3D12Resource> cleared;
+    check(gpu.device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_DEPTH_WRITE,
+      nullptr, IID_PPV_ARGS(&cleared)), "cleared latched depth");
+    const auto cleared_source = native(cleared.Get());
+    capture::resource_created(cleared_source, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    ComPtr<ID3D12DescriptorHeap> views;
+    D3D12_DESCRIPTOR_HEAP_DESC heap_desc{}; heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV; heap_desc.NumDescriptors = 1;
+    check(gpu.device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&views)), "latched clear DSV heap");
+    D3D12_DEPTH_STENCIL_VIEW_DESC view{}; view.Format = DXGI_FORMAT_D32_FLOAT; view.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+    gpu.device->CreateDepthStencilView(cleared.Get(), &view, views->GetCPUDescriptorHandleForHeapStart());
+    const auto clear = [&] {
+      capture::observe_depth_clear(native(gpu.list.Get()), cleared_source);
+      gpu.list->ClearDepthStencilView(views->GetCPUDescriptorHandleForHeapStart(), D3D12_CLEAR_FLAG_DEPTH, 1.f, 0, 0, nullptr);
+    };
+    const auto copied_enhanced = [&](const char *what) {
+      capture::proven_state proven;
+      require(capture::last_proven_state(cleared_source, queue, proven) && proven.enhanced &&
+          proven.layout == D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE && proven.access == D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE, what);
+      ticket = capture::record_preserved(native(gpu.list.Get()), cleared_source, generic::end_of_frame, queue, &diagnostic);
+      require(ticket && diagnostic.used_proven_state && diagnostic.enhanced_copy &&
+          diagnostic.observed_layout == D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE, what);
+      gpu.submit(); gpu.wait(); gpu.reset();
+      ticket = {};
+    };
+    transition(gpu.list.Get(), cleared.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_COMMON);
+    barrier(gpu.list.Get(), cleared.Get(), D3D12_BARRIER_ACCESS_COMMON, D3D12_BARRIER_LAYOUT_COMMON,
+      D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE, D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE);
+    clear();
+    gpu.submit(); gpu.wait(); gpu.reset();
+    copied_enhanced("a depth clear after an enhanced barrier did not keep the enhanced DEPTH_STENCIL_WRITE layout for the end-of-frame copy");
+    clear();
+    gpu.submit(); gpu.wait(); gpu.reset();
+    copied_enhanced("a later clear-only list did not keep the enhanced layout of the texture's proof");
+
     const auto after = capture::proven_counts();
     require(after.earlier_copied >= counts.earlier_copied + 3 && after.earlier_refused >= counts.earlier_refused + 6 && !after.latch_lost,
       "the latch's copies and refusals were not counted");
@@ -1586,7 +1625,8 @@ namespace {
     capture::poll();
     gpu.check_debug_errors();
     std::printf("PASS enhanced-layout latch: executed enhanced barriers latch a tracked depth texture and a watched source; their "
-      "claims are copied only from a SHADER_RESOURCE proof with enhanced barriers (discarded when it changed), others refused%s\n",
+      "claims are copied only from a SHADER_RESOURCE proof with enhanced barriers (discarded when it changed), others refused; "
+      "a depth clear keeps an enhanced layout for the end-of-frame copy%s\n",
       gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
   }
 

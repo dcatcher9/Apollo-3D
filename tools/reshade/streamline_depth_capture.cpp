@@ -1024,8 +1024,9 @@ namespace sunshine_streamline::depth_capture {
     // its barriers named takes the state its last barrier left it in, on this
     // queue, unless an aliasing barrier followed (any placed or reserved
     // resource for one naming neither), a split is still open or a barrier
-    // was blocked; a depth clear after its last barrier proves DEPTH_WRITE.
-    // An enhanced barrier naming it latches its layout (proven_state.h).
+    // was blocked; a depth clear after its last barrier proves DEPTH_WRITE,
+    // or the DEPTH_STENCIL_WRITE layout where enhanced barriers own it. An
+    // enhanced barrier naming it latches its layout (proven_state.h).
     void apply_executed(std::uint64_t queue, std::uint32_t count, const native_observer::command_identity *values) {
       for (std::uint32_t n = 0; n != count; ++n) {
         verify_proven_copies(queue, values[n].recording_cookie);
@@ -1059,14 +1060,24 @@ namespace sunshine_streamline::depth_capture {
           else if (entry.enhanced) proven.prove_layout(entry.source, queue, entry.layout, entry.access);
           else proven.prove(entry.source, queue, entry.value);
         }
-        // A depth clear after a texture's last barrier proves DEPTH_WRITE (the
-        // D3D12 clear contract), in recording order, unless aliased after it.
+        // A depth clear after a texture's last barrier proves what the D3D12
+        // clear contract requires, in recording order, unless aliased after
+        // it: DEPTH_WRITE, or the DEPTH_STENCIL_WRITE layout where enhanced
+        // barriers own the layout (that last barrier on this list, else the
+        // texture's proof; proven_state.h clear_regime). A legacy proof there
+        // would let a copy record legacy barriers on an enhanced layout (D6).
         for (const auto &mark : owner->clears) {
           if (!proven.held(mark.source)) continue;
           const auto entry = std::find_if(owner->states.begin(), owner->states.end(),
             [&](const source_state &value) { return value.source == mark.source; });
           if (entry != owner->states.end() && entry->order > mark.order) continue;
-          if (owner->wildcard_alias > mark.order || aliased_after(*owner, mark.source, mark.order)) proven.unprove(mark.source);
+          using sunshine_proven_state::regime;
+          const auto kind = entry == owner->states.end() ? proven.clear_regime(mark.source) :
+            entry->enhanced ? regime::enhanced : regime::legacy;
+          if (kind == regime::unknown || owner->wildcard_alias > mark.order || aliased_after(*owner, mark.source, mark.order))
+            proven.unprove(mark.source);
+          else if (kind == regime::enhanced)
+            proven.prove_layout(mark.source, queue, D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE, D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE);
           else proven.prove(mark.source, queue, D3D12_RESOURCE_STATE_DEPTH_WRITE);
         }
       }

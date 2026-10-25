@@ -54,6 +54,15 @@ namespace sunshine_proven_state {
     state proven;
   };
 
+  // The barriers a texture's layout belongs to, for a proof that names no
+  // barrier of its own (a depth clear): legacy states or enhanced layouts,
+  // or unknown.
+  enum class regime {
+    legacy,
+    enhanced,
+    unknown
+  };
+
   template<unsigned Capacity>
   class table {
   public:
@@ -154,6 +163,18 @@ namespace sunshine_proven_state {
         out.proven = found->value;
       }
       return out;
+    }
+
+    // The regime of a held texture that an executed list cleared after
+    // naming it in no barrier: its proof's, made by an executed list; else
+    // legacy, unless an enhanced barrier latched it (then unknown, so the
+    // clear proves nothing).
+    regime clear_regime(std::uint64_t resource) const {
+      const auto *found = find(resource);
+      if (found && found->value && found->value.queue) {
+        return found->value.enhanced ? regime::enhanced : regime::legacy;
+      }
+      return (found ? found->latched : lost) ? regime::unknown : regime::legacy;
     }
 
     // The version a proof still has (0: unproven or not held).

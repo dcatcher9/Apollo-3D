@@ -3697,8 +3697,16 @@ adapter retains is also watched from its retention, for the enhanced-layout latc
 full proves the state its last transition or enhanced barrier left a tracked texture in, for that
 queue only. A depth clear of the texture's subresource 0 after that barrier (`ClearDepthStencilView`
 with the depth flag, or a render pass that clears depth, which `depth_addon.cpp` reports) proves
-`DEPTH_WRITE` by the clear contract, so a game that clears its depth every frame re-proves it every
-frame. Some events leave every texture unproven: a list the hooks did not observe in full (not
+what the clear contract requires, so a game that clears its depth every frame re-proves it every
+frame. That is `DEPTH_WRITE`, or the `DEPTH_STENCIL_WRITE` layout (with its write access) where
+enhanced barriers own the texture's layout: the last barrier before the clear on that list was an
+enhanced one, or, with none there, the texture's proof is an enhanced layout. A latched texture
+(below) with no proof is left unproven by a clear, because its layout may belong to either kind of
+barrier. A legacy proof there would let the end-of-frame copy record legacy barriers on an enhanced
+layout, which the legacy interop forbids. A texture created in an initial layout that no barrier
+has named yet is indistinguishable from one created in a state (ReShade reports both alike, and
+`CreateCommittedResource3` is not hooked), so its clear still proves `DEPTH_WRITE`. Some events
+leave every texture unproven: a list the hooks did not observe in full (not
 reported by ReShade's lifecycle, Reset without it, invalidated, or with a method table the hooks do
 not cover), and observer loss. A list that never had a recording state while the hooks cover its
 method table recorded no barrier through them, so it changes nothing: DXGI's internal Present list

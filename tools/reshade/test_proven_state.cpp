@@ -118,6 +118,24 @@ int main() {
     owner.watch(5);  // Forgets 1, the least recently used.
     check(!owner.held(1) && owner.latch_lost() && owner.latched(1).latched && owner.latched(9).latched && !owner.latched(3).latched, "Forgetting a latched texture latches every texture not held");
   }
+  {
+    // A depth clear on a list that names the texture in no barrier keeps the
+    // regime of its proof: an enhanced layout stays enhanced (D6), so no
+    // legacy proof replaces it.
+    using sunshine_proven_state::regime;
+    table owner;
+    owner.track(1, true, depth_write);
+    check(owner.clear_regime(1) == regime::legacy, "A creation state's texture is cleared in legacy states");
+    owner.prove_layout(1, direct, 3, 0x40);
+    check(owner.clear_regime(1) == regime::enhanced, "An enhanced proof keeps a clear in its layout");
+    owner.set_latch(1);
+    owner.prove(1, other, depth_read);
+    check(owner.clear_regime(1) == regime::legacy, "A later legacy proof, from the game's own barrier, keeps a latched texture's clear legacy");
+    owner.unprove(1);
+    check(owner.clear_regime(1) == regime::unknown, "A latched texture without a proof has no regime: the clear proves nothing");
+    owner.track(2, false, 0);
+    check(owner.clear_regime(2) == regime::legacy, "An unlatched texture without a proof is cleared in legacy states");
+  }
   if (failures) {
     std::fprintf(stderr, "%u proven-state check(s) failed\n", failures);
     return EXIT_FAILURE;
