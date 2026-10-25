@@ -3914,8 +3914,14 @@ namespace {
     options.mode = 1; set_options(view, options);
     require(!query_frame_generation(view.value, fg), "fixed FG On admitted a zero generated-frame count");
     options.mode = 2; options.generated_frames = 3;
+    // S13: a newer options version keeps its known mode/count prefix; a
+    // chained structure is still refused.
     options.base.version = 6; set_options(view, options);
-    require(!query_frame_generation(view.value, fg), "unknown FG options version retained a known enabled state");
+    require(query_frame_generation(view.value, fg) && fg.enabled && fg.mode == 2 && fg.generated_frames == 3,
+      "a newer FG options version lost its known prefix");
+    options.base.next = &options.base; set_options(view, options);
+    require(!query_frame_generation(view.value, fg), "a newer FG options version with a chained structure retained a known state");
+    options.base.next = nullptr;
     options.base.version = 3; set_options(view, options);
     auto second_view = viewport(12); set_options(second_view, options);
     frame_generation_query_status ambiguous_status;

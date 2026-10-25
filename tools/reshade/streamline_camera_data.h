@@ -69,7 +69,8 @@ namespace sunshine_streamline {
     };
     struct resource_tag { base_structure base; const resource *resource_ptr{}; std::uint32_t type{}, lifecycle{}; extent area; };
     struct viewport { base_structure base; std::uint32_t value{}; };
-    // Options versions 1-5 share this prefix. Dynamic mode requests an
+    // Every options version shares this prefix (sl_struct.h appends members
+    // with a version bump; v2.14.1 declares version 5). Dynamic mode requests an
     // adaptive multiplier; this count is never proof of generated presents.
     struct fg_options_prefix { base_structure base; std::uint32_t mode{}, generated_frames{}; };
     using fg_set_options = std::int32_t (*)(const viewport &, const fg_options_prefix &);

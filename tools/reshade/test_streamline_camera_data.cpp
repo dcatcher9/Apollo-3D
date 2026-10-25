@@ -264,8 +264,13 @@ namespace {
     constexpr auto prefix_size = offsetof(abi_v2::constants, motion_vectors_jittered) + 1;
     require(decode_v2_constants(&modern, prefix_size, decoded) == decode_status::ok, "v2 historical V1 prefix requires V2 tail");
     require(decode_v2_constants(&modern, prefix_size - 1, decoded) == decode_status::short_buffer, "truncated v2 flags accepted");
+    // S13: a later version keeps the known prefix (sl_struct.h appends
+    // members with a version bump); version 0 names no structure.
     modern.base.version = 99;
-    require(decode_v2_constants(&modern, sizeof(base_structure), decoded) == decode_status::unknown_version, "unknown version interpreted");
+    require(decode_v2_constants(&modern, prefix_size, decoded) == decode_status::ok && decoded.depth_inverted == 1 &&
+        validate(decoded).valid(), "a newer Constants version lost its known prefix");
+    modern.base.version = 0;
+    require(decode_v2_constants(&modern, sizeof(modern), decoded) == decode_status::unknown_version, "Constants version 0 interpreted");
     modern.base.version = 2;
     modern.base.type = resource_guid;
     require(decode_v2_constants(&modern, sizeof(modern), decoded) == decode_status::wrong_type, "wrong typed structure accepted");
@@ -277,7 +282,12 @@ namespace {
     std::uint32_t id = 0;
     require(decode_v2_viewport(&port, sizeof(port), id) == decode_status::ok && id == 123, "viewport layout decode failed");
     port.base.version = 3;
-    require(decode_v2_viewport(&port, sizeof(port), id) == decode_status::unknown_version && id == 0xffffffffu, "unknown viewport version accepted");
+    require(decode_v2_viewport(&port, sizeof(port), id) == decode_status::ok && id == 123, "a newer viewport version lost its known prefix");
+    port.base.version = 0;
+    require(decode_v2_viewport(&port, sizeof(port), id) == decode_status::unknown_version && id == 0xffffffffu, "viewport version 0 accepted");
+    port.base.version = 3; port.base.next = &port;
+    require(decode_v2_viewport(&port, sizeof(port), id) == decode_status::extension_present && id == 0xffffffffu,
+      "a newer viewport version with a chained structure accepted");
   }
 
   void test_tag_matching() {

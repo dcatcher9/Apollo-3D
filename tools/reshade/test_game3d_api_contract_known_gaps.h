@@ -74,11 +74,6 @@ namespace game3d_contract::known_gaps {
     constexpr bool copy_at_call(const behaviour &value) {
       return value.actual.kind == outcome_kind::capture && !value.actual.deferred;
     }
-
-    // No copy, or one unlike the newest-known version's.
-    constexpr bool unlike_newest(const behaviour &value) {
-      return value.actual.kind != outcome_kind::capture || !value.consistent;
-    }
   }  // namespace behaviours
 
   // The state a copy may start from (checked by test_game3d_api_contract_cpu.cpp).
@@ -139,16 +134,6 @@ namespace game3d_contract::known_gaps {
              capture_required(value);
     }
 
-    // Constants above v2 lose the camera, a ViewportHandle above v1 makes the
-    // whole call invalid, and DLSSGOptions above v5 leave frame generation
-    // unknown (decode caps, not the known prefix).
-    constexpr bool newer_struct(const sl_case &value) {
-      const bool options = value.frame_generation_options == struct_form::above_known && value.at == copy_point::tag_call &&
-                           detail::frame_generation_scope(value);
-      return (value.constants == struct_form::above_known || value.viewport_handle == struct_form::above_known || options) &&
-             capture_required(value);
-    }
-
     // A tag whose next pointer continues the input chain is read as carrying
     // an unknown extension.
     constexpr bool chained_local(const sl_case &value) {
@@ -190,7 +175,6 @@ namespace game3d_contract::known_gaps {
   inline constexpr row<sl_case> sl_rows[] {
     {"S4", &rules::S4, kind::expected_failure, &streamline::local_only_valid_now, "Stage 3 fix 8 (S4/S15). A local tag is current at its own evaluate (SLA:258-262): in tag_rejection (streamline_camera_probe.cpp) promote an OnlyValidNow evaluate input as the tag call's is, and copy it at that evaluate when it has a command list. Fix with S15 (both in read_local_inputs/tag_rejection).", &behaviours::no_copy},
     {"S15", &rules::S15, kind::expected_failure, &streamline::chained_local, "Stage 3 fix 8 (S4/S15). In read_local_inputs, decode a chained tag with its next pointer cleared (as the viewport already is), treating a PrecisionInfo node as the preceding tag's; fix with S4. Chains of more than 32 nodes also fail S18.", &behaviours::no_copy},
-    {"S13", &rules::S13, kind::expected_failure, &streamline::newer_struct, "Stage 3 fix 6 (S13). Read the known prefix of any version >= 1 and keep refusing a chained next: decode_v2_constants (max 2) and decode_v2_viewport (max 1) in streamline_camera_data.cpp, and hook_fg_options (version <= 5). Update the pinned checks with it: test_streamline_camera_data.cpp:267-268 and 279-280 ('unknown version interpreted', 'unknown viewport version accepted') and test_streamline_camera_probe.cpp's 'unknown FG options version retained a known enabled state' (3891 at c67e9cf9).", &behaviours::unlike_newest},
     {"S16", &rules::S16, kind::expected_failure, &streamline::zero_sided_extent, "Stage 3 fix 12 (S16). Use Streamline's whole-resource rule !(width && height) (sl_consts.h:150) in match() (streamline_camera_data.cpp) and source_region (streamline_depth_capture.cpp).", &behaviours::no_copy},
     {"S16d", &rules::S16d, kind::expected_failure, &streamline::declared_size, "Stage 3 fix 12 (S16). Drop the declared Resource size check from match(); the capture already bounds the extent by the allocation (source_region).", &behaviours::no_copy},
     {"S18", &rules::S18, kind::expected_failure, &streamline::beyond_tag_limit, "Stage 3 fix 10 (S18). Read the type and lifecycle of each element of a longer tag array or input list in chunks with no fixed cap (read_tags, read_local_inputs; tag_limit and chain_limit are 32); at minimum keep the depth slot of a call with more tags.", &behaviours::no_copy},

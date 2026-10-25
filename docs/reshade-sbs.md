@@ -3463,7 +3463,10 @@ Windows x64 boundaries are:
 NVIDIA's [versioned-structure contract](https://github.com/NVIDIA-RTX/Streamline/blob/2122257e0fce486f91b385aa63b9a09b0a34b363/include/sl_struct.h#L49-L106)
 requires appended fields and a version increment (its option 1), so the observer reads a
 ResourceTag, Resource or PrecisionInfo with the expected GUID and version 1 or later by its
-version-1 fields only, never past them. A ResourceTag above version 1 may be larger, so an array
+version-1 fields only, never past them, and Constants, ViewportHandle and DLSSGOptions of any
+version from 1 by the prefix it consumes (the API contract matrix's S13, since Stage 3 batch B;
+before, a version above 2.14.1's, Constants 2, ViewportHandle 1 and DLSSGOptions 5, was unknown,
+which dropped the camera, every tag of the call or the frame-generation mode). A ResourceTag above version 1 may be larger, so an array
 of more than one such tag in one `slSetTag`/`slSetTagForFrame` call has an unknown stride and is
 read as unreadable; a single tag and tags chained in evaluate inputs are read. A typed Resource's
 `nativeFormat` (declared in every 2.x Resource) is read and carried with the depth source; the
@@ -3910,7 +3913,8 @@ every hook and for the add-on's own options lookup: sl.common raises it while th
 video-memory budget and still runs the call. Battlefield 6 got it on every DLSS evaluation while SR
 and DLSS-G kept running. Warned game calls are counted as `vram_warnings` on the `Streamline camera
 availability` line, and the `Streamline frame generation` options line logs `sdk_result`.
-The consumed `DLSSGOptions` mode/count prefix is validated for structure versions 1–5. Off, On,
+The consumed `DLSSGOptions` mode/count prefix is read for any structure version from 1 (S13); a
+chained structure is still refused. Off, On,
 Auto and Dynamic modes are recognized; Auto/Dynamic describe an enabled policy, not proof that
 a particular presentation was generated. The requested count is diagnostic metadata, not an
 observed fixed frame-generation multiplier.

@@ -25,9 +25,12 @@ namespace sunshine_streamline {
         out.jitter_offset[1] = in.jitter_offset[1];
       }
     }
-    decode_status check_base(const base_structure &base, const guid &expected, std::uint64_t max_version) {
+    // sl_struct.h (option 1): a later version only appends members, with a
+    // version bump, so every version from 1 keeps the prefix a reader knows
+    // (the contract matrix's S13). Version 0 names no structure.
+    decode_status check_base(const base_structure &base, const guid &expected) {
       if (!same_type(base.type, expected)) return decode_status::wrong_type;
-      if (base.version < 1 || base.version > max_version) return decode_status::unknown_version;
+      if (base.version < 1) return decode_status::unknown_version;
       // Extensions can change resource precision or interpretation. Never chase in-game pointers.
       if (base.next) return decode_status::extension_present;
       return decode_status::ok;
@@ -53,9 +56,9 @@ namespace sunshine_streamline {
     if (!bytes || size < sizeof(base_structure)) return decode_status::short_buffer;
     base_structure base{};
     std::memcpy(&base, bytes, sizeof(base));
-    auto status = check_base(base, constants_guid, 2);
+    auto status = check_base(base, constants_guid);
     if (status != decode_status::ok) return status;
-    // V1 and V2 share this prefix. Do not read the optional V2 tail from a V1 allocation.
+    // Every version shares the V1 prefix. Do not read the optional V2 tail from a V1 allocation.
     constexpr auto prefix_size = offsetof(abi_v2::constants, motion_vectors_jittered) + 1;
     if (size < prefix_size) return decode_status::short_buffer;
     abi_v2::constants data{};
@@ -73,7 +76,7 @@ namespace sunshine_streamline {
     if (!bytes || size < prefix_size) return decode_status::short_buffer;
     abi_v2::viewport data{};
     std::memcpy(static_cast<void *>(&data), bytes, prefix_size);
-    auto status = check_base(data.base, viewport_guid, 1);
+    auto status = check_base(data.base, viewport_guid);
     if (status == decode_status::ok) out = data.value;
     return status;
   }

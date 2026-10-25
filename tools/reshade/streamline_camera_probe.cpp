@@ -927,7 +927,7 @@ namespace sunshine_streamline {
       std::uint32_t id{};
       const bool valid_viewport = sample && viewport_value(viewport, id);
       const bool valid = valid_viewport && read(&options, copy) &&
-        same(copy.base.type, fg_options_guid) && copy.base.version >= 1 && copy.base.version <= 5 &&
+        same(copy.base.type, fg_options_guid) && copy.base.version >= 1 &&
         !copy.base.next && copy.mode <= 3 && (!copy.mode || copy.mode == 3 || copy.generated_frames != 0);
       SetLastError(incoming);
       const auto options_loss = fg_loss_revision.load(std::memory_order_acquire);
@@ -2208,7 +2208,7 @@ namespace sunshine_streamline {
         loss_context.viewport = valid_viewport ? id : UINT32_MAX;
         diagnostic.viewport = valid_viewport ? id : UINT32_MAX;
         if (diagnostic.session) {
-          const bool tail_read = decoded == decode_status::ok && copy.base.version == 2 &&
+          const bool tail_read = decoded == decode_status::ok && copy.base.version >= 2 &&
             read_bytes(reinterpret_cast<const unsigned char *>(&values) + offsetof(abi_v2::constants, min_relative_linear_depth_object_separation),
               &copy.min_relative_linear_depth_object_separation, sizeof(copy.min_relative_linear_depth_object_separation));
           dump_metadata::observe_sl_constants(diagnostic, copy, readable, decoded, tail_read);
