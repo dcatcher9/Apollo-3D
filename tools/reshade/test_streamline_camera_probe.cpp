@@ -1459,9 +1459,11 @@ namespace {
     call_v2_tag(view, &raw, 1, nullptr); call_v2_framed_tag(token.ref(), view, &high, 1, nullptr);
     call_v2_evaluate(0, token.ref(), inputs, 1, nullptr);
     require(query_depth_source(snapshot) == evidence_status::source_associated_evaluation, "v2 lifecycle recovery failed");
-    high.area.width = 1921; call_v2_framed_tag(token.ref(), view, &high, 1, nullptr);
+    // An extent that wraps is malformed (the allocation bounds any other in
+    // the capture, S16d).
+    high.area.left = UINT32_MAX; call_v2_framed_tag(token.ref(), view, &high, 1, nullptr);
     require(query_depth_source(snapshot) != evidence_status::source_associated_evaluation, "malformed extent left old nomination active");
-    high.area.width = 1920; call_v2_constants(constants, token.ref(), view);
+    high.area.left = 0; call_v2_constants(constants, token.ref(), view);
     call_v2_tag(view, &raw, 1, nullptr); call_v2_framed_tag(token.ref(), view, &high, 1, nullptr);
     call_v2_evaluate(0, token.ref(), inputs, 1, nullptr);
     require(query_depth_source(snapshot) == evidence_status::source_associated_evaluation, "valid v2 source did not recover");
@@ -1986,10 +1988,10 @@ namespace {
 
     tag.lifecycle = 0; call_v2_tag(view, &tag, 1, nullptr); evaluate();
     require(!testing::normalized_source(view.value, 0, normalized), "OnlyValidNow source survived until a later evaluation");
-    tag.lifecycle = 1; tag.area.width = resource.width + 1;
+    tag.lifecycle = 1; tag.area.left = UINT32_MAX;
     call_v2_tag(view, &tag, 1, nullptr); evaluate();
     require(!testing::normalized_source(view.value, 0, normalized), "invalid depth extent acquired source authority");
-    tag.area.width = resource.width;
+    tag.area.left = 0;
     constants = modern_camera(); constants.reset = 1;
     call_v2_constants(constants, token.ref(), view); call_v2_tag(view, &tag, 1, nullptr); evaluate();
     require(testing::normalized_source(view.value, 0, normalized) && normalized.feedback.reset && normalized.projection.supplied,
@@ -2045,7 +2047,7 @@ namespace {
     call_v2_evaluate(0, token.ref(), inputs, 1, nullptr);
     require(testing::latest_snapshot(view.value, observed) && observed.status == evidence_status::missing_depth,
       "local UntilEvaluate tag leaked to a later call");
-    tag.area.width = 1921;
+    tag.area.left = UINT32_MAX;
     call_v2_framed_tag(token.ref(), view, &tag, 1, &commands);
     call_v2_evaluate(0, token.ref(), inputs, 1, nullptr);
     {
@@ -2053,7 +2055,7 @@ namespace {
       require(!testing::normalized_source(view.value, 0, normalized),
         "UntilEvaluate admission bypassed malformed extent rejection");
     }
-    tag.area.width = 1920;
+    tag.area.left = 0;
     call_v2_constants(constants, token.ref(), view); call_v2_framed_tag(token.ref(), view, &tag, 1, &commands);
     call_v2_evaluate(0, token.ref(), inputs, 1, nullptr); evaluated();
   }

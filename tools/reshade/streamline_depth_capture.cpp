@@ -140,14 +140,11 @@ namespace sunshine_streamline::depth_capture {
       if (desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || !desc.Width || desc.Width > 16384 ||
           !desc.Height || desc.Height > 16384) return status::malformed;
       const auto area = resource.area;
-      // A nonzero extent inside the allocation alone defines the region; a
-      // declared size that disagrees with the allocation is then ignored
-      // (the adapter logs it). Without one, a declared size must be the
-      // allocation's own.
-      if ((area.width == 0) != (area.height == 0) || (!area.width && (area.left || area.top)) ||
-          (area.width && (area.left > desc.Width || area.top > desc.Height ||
-            area.width > desc.Width - area.left || area.height > desc.Height - area.top)) ||
-          (!area.width && ((resource.width && resource.width != desc.Width) || (resource.height && resource.height != desc.Height))))
+      // An extent inside the allocation alone defines the region; a declared
+      // size that disagrees with the allocation is then ignored (the adapter
+      // logs it). A null extent, !(width && height), is the whole allocation,
+      // which a declared size must then name (extent_in_allocation).
+      if (!sunshine_api_contract::extent_in_allocation(area, desc.Width, desc.Height, resource.width, resource.height))
         return status::malformed;
       // Always retain the full allocation, including packed depth/stencil
       // plane zero. Statistics and the shader apply this same active rectangle;

@@ -315,6 +315,22 @@ int main() {
     const auto tagged = normalized_extent(top_first_extent {}, 1920, 1080);
     require(!tagged.top && !tagged.left && tagged.width == 1920 && tagged.height == 1080,
       "Streamline's absent extent is the whole allocation in its own field order");
+    for (const extent zero_sided : {extent {0, 0, 1280, 0}, extent {0, 0, 0, 720}, extent {8, 4, 0, 0}}) {
+      const auto value = normalized_extent(zero_sided, 1920, 1080);
+      require(null_extent(zero_sided) && !value.left && !value.top && value.width == 1920 && value.height == 1080,
+        "An extent with a zero side is null, the whole allocation, whatever its top and left (S16)");
+    }
+    require(extent_in_allocation(extent {0, 0, 2228, 1256}, 3840, 2160, 1920, 1080),
+      "A declared Resource size bounds no extent: the allocation does (S16d)");
+    require(extent_in_allocation(extent {200, 120, 3640, 2040}, 3840, 2160, 0, 0) &&
+              !extent_in_allocation(extent {201, 120, 3640, 2040}, 3840, 2160, 0, 0) &&
+              !extent_in_allocation(extent {0, 0, 3968, 2160}, 3840, 2160, 3840, 2160) &&
+              !extent_in_allocation(extent {UINT32_MAX, 0, 2, 2}, 3840, 2160, 0, 0),
+      "An extent must lie inside the allocation (S16b, S16c)");
+    require(extent_in_allocation(extent {}, 3840, 2160, 3840, 2160) && extent_in_allocation(extent {}, 3840, 2160, 0, 2160) &&
+              !extent_in_allocation(extent {}, 3840, 2160, 1920, 1080) &&
+              !extent_in_allocation(extent {0, 0, 1280, 0}, 3840, 2160, 3840, 1080),
+      "A null extent is the whole allocation, which a declared size must then name");
   }
   if (failures) {
     std::fprintf(stderr, "API contract: %u cells changed\n", failures);

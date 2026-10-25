@@ -4427,13 +4427,22 @@ was removed.)
 
 The direct provider supports D3D12 full-resource, single-sample
 device depth and positive linear view distance with UntilEvaluate/UntilPresent lifetimes; it accepts bounded active rectangles while
-copying the full allocation's depth plane. A tag extent inside the allocation alone defines the
-active rectangle and the jitter denominator: a declared Resource size that disagrees with the
+copying the full allocation's depth plane. A Streamline extent is null when `!(width && height)`
+(`sl_consts.h`, its `operator bool`), whatever its top and left, and a null extent is the whole
+allocation (`null_extent` and `normalized_extent` in
+[`api_contract.h`](../tools/reshade/api_contract.h); the API contract matrix's S16, since Stage 3
+batch B; before, an extent with one zero side, or a top or left without a size, was refused as
+`malformed`). Any other tag extent inside the allocation alone defines the active rectangle and the
+jitter denominator: a declared Resource size, which is optional, that disagrees with the
 allocation (for example a render size inside a larger dynamic-resolution allocation) is then
-ignored, and the first one is logged (`declared resource size ... differs from the ... allocation`).
-Without an extent a declared size must be the allocation's own (`malformed` otherwise), and an
-undeclared size takes the retained allocation's for the jitter denominator (an absent extent is the
-whole allocation: `normalized_extent` in [`api_contract.h`](../tools/reshade/api_contract.h)).
+ignored by the probe and the capture alike (S16d, since Stage 3 batch B; before, the probe's
+`match()` refused an extent past the declared size as `invalid-extent`), and the first one is
+logged (`declared resource size ... differs from the ... allocation`). An extent outside the
+allocation is refused (`extent_in_allocation`): as `invalid-extent` where the probe holds the
+allocation, and by the capture (`resource_region`), both `malformed`. With a null
+extent a declared size must be the allocation's own (`malformed` otherwise), and an undeclared size
+takes the retained allocation's for the jitter denominator. UI tags follow the same extent rule
+(a null extent is the full-size input the UI request wants).
 Native capture copies an `OnlyValidNow` tag only inside the call that supplied it: the synchronous
 v2 tag boundary, with or without FG, or the evaluate a local input came with, where `sl_core_api.h`
 makes local tags current ("they are considered to be a 'local' tags and do NOT interact with same

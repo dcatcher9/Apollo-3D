@@ -1291,6 +1291,7 @@ namespace {
     }
 
     // Extents {top, left, width, height} of a 3840x2160 allocation.
+    constexpr std::uint32_t allocation_width = 3840, allocation_height = 2160;
     sunshine_streamline::extent area(matrix::extent_form form) {
       switch (form) {
         case matrix::extent_form::whole:
@@ -1514,6 +1515,13 @@ namespace {
         return out;
       }
       const auto &frame = run.frame;
+      // source_region (streamline_depth_capture.cpp), which needs the
+      // allocation: the extent names a region of the case's allocation,
+      // whatever its declared size (S16-S16d).
+      if (!sunshine_api_contract::extent_in_allocation(frame.resource.area, allocation_width, allocation_height, frame.resource.width, frame.resource.height)) {
+        out.why = matrix::refusal::malformed;
+        return out;
+      }
       const bool at_call = run.snapshot.tag_boundary;
       // force_snapshot (nominate_depth_source): an OnlyValidNow tag inside the
       // call that supplied it, its tag call or the evaluate it is a local

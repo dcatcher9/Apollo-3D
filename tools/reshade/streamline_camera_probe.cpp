@@ -1774,7 +1774,15 @@ namespace sunshine_streamline {
       auto at_evaluation = tag.value;
       at_evaluation.lifecycle = sl_contract::lifecycle_at(tag.value.lifecycle, copy_point(snapshot, tag));
       const auto matched = match({snapshot.viewport, snapshot.epoch, 0, false}, at_evaluation);
-      return matched == match_status::same_epoch_only ? nullptr : name(matched);
+      if (matched != match_status::same_epoch_only) return name(matched);
+      // match() reads no allocation, and the Resource's declared size bounds
+      // no extent (S16d): where the tag's allocation is retained, an extent
+      // outside it is refused here (the capture checks it again,
+      // depth_capture::source_region).
+      std::uint32_t width{}, height{};
+      return depth_capture::source_extent(tag.direct_source, width, height) &&
+          !sunshine_api_contract::extent_in_allocation(tag.value.area, width, height, 0, 0) ?
+        name(match_status::invalid_extent) : nullptr;
     }
     bool direct_tag_admissible(const evaluation_snapshot &snapshot, const evaluated_depth_tag &tag) {
       return !tag_rejection(snapshot, tag);
@@ -1797,24 +1805,23 @@ namespace sunshine_streamline {
       if (!snapshot.frame_correlated || snapshot.decoded != decode_status::ok || !snapshot.camera.jitter_supplied)
         return {};
       // The jitter denominator is the active region: the tag's extent when
-      // set, else the whole allocation (its declared size, or the retained
-      // allocation's own when undeclared). The allocation bounds the extent.
+      // set, else (a null extent) the whole allocation (its declared size, or
+      // the retained allocation's own when undeclared). The allocation bounds
+      // the extent.
       const auto dimensions = [&](const evaluated_depth_tag &input) {
         const auto &source = input.value;
         sunshine_scene_depth::jitter_offset result;
-        const auto &area = source.area;
-        if (source.viewport != snapshot.viewport || !source.native_resource ||
-            (area.width == 0) != (area.height == 0) || (!area.width && (area.left || area.top))) return result;
+        if (source.viewport != snapshot.viewport || !source.native_resource) return result;
         std::uint32_t full_width = source.resource_width, full_height = source.resource_height;
         std::uint32_t allocated_width{}, allocated_height{};
         if (depth_capture::source_extent(input.direct_source, allocated_width, allocated_height)) {
           full_width = allocated_width; full_height = allocated_height;
         }
-        const auto active = sunshine_api_contract::normalized_extent(area, full_width, full_height);
+        const auto active = sunshine_api_contract::normalized_extent(source.area, full_width, full_height);
         const auto width = active.width, height = active.height;
         if (!width || !height || width > 16384 || height > 16384 ||
-            (full_width && (area.left > full_width || width > full_width-area.left)) ||
-            (full_height && (area.top > full_height || height > full_height-area.top))) return result;
+            (full_width && (active.left > full_width || width > full_width-active.left)) ||
+            (full_height && (active.top > full_height || height > full_height-active.top))) return result;
         return sunshine_scene_depth::jitter_offset{snapshot.camera.jitter_offset[0], snapshot.camera.jitter_offset[1], width, height, true};
       };
       if (tag.value.type == buffers::depth || tag.value.type == buffers::linear_depth) return dimensions(tag);
@@ -1833,7 +1840,7 @@ namespace sunshine_streamline {
       static std::atomic<bool> reported{};
       const auto &value = tag.value;
       std::uint32_t width{}, height{};
-      if (!value.area.width || reported.load(std::memory_order_relaxed) ||
+      if (sunshine_api_contract::null_extent(value.area) || reported.load(std::memory_order_relaxed) ||
           !depth_capture::source_extent(tag.direct_source, width, height) ||
           !((value.resource_width && value.resource_width != width) || (value.resource_height && value.resource_height != height)) ||
           reported.exchange(true, std::memory_order_relaxed)) return;
@@ -3474,7 +3481,7 @@ namespace sunshine_streamline {
           if (candidate.status == evidence_status::source_associated_evaluation) status = evidence_status::unsupported_depth;
           continue;
         }
-        // match() admitted the extent: all four zero (the whole allocation) or nonzero.
+        // A null extent is the whole allocation (normalized_extent, S16).
         const auto area = sunshine_api_contract::normalized_extent(tag.value.area, selected.width, selected.height);
         if ((tag.value.resource_width && tag.value.resource_width != selected.width) ||
             (tag.value.resource_height && tag.value.resource_height != selected.height) ||

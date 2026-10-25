@@ -171,15 +171,13 @@ namespace sunshine_streamline {
     // lifetime that holds at the copy point as ValidUntilPresent).
     if (tag.lifecycle != sl_contract::valid_until_present && tag.lifecycle != sl_contract::no_lifecycle)
       return match_status::unsupported_lifecycle;
+    // A null extent, !(width && height), is the whole resource (S16); any
+    // other must not wrap. The Resource's declared width and height are
+    // optional (SLT:334-336) and bound no extent: the capture bounds it by
+    // the allocation (depth_capture::source_region, S16d).
     const auto &a = tag.area;
-    const bool whole_resource = a.top == 0 && a.left == 0 && a.width == 0 && a.height == 0;
-    if (!whole_resource) {
-      const auto right = static_cast<std::uint64_t>(a.left) + a.width;
-      const auto bottom = static_cast<std::uint64_t>(a.top) + a.height;
-      if (!a.width || !a.height || right > 0xffffffffu || bottom > 0xffffffffu ||
-          (tag.resource_width && right > tag.resource_width) ||
-          (tag.resource_height && bottom > tag.resource_height)) return match_status::invalid_extent;
-    }
+    if (!sunshine_api_contract::null_extent(a) && (static_cast<std::uint64_t>(a.left) + a.width > 0xffffffffu ||
+        static_cast<std::uint64_t>(a.top) + a.height > 0xffffffffu)) return match_status::invalid_extent;
     return camera.explicit_frame && tag.explicit_frame ? match_status::exact_frame : match_status::same_epoch_only;
   }
 

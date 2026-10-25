@@ -315,12 +315,20 @@ namespace {
     depth.viewport = 6;
     require(match(camera, depth) == match_status::wrong_viewport, "another viewport accepted");
     depth.viewport = 5;
+    // The declared Resource size is optional and bounds no extent: the
+    // capture bounds it by the allocation (S16d).
     depth.area.left = 1000;
-    require(match(camera, depth) == match_status::invalid_extent, "out of bounds extent accepted");
+    require(match(camera, depth) == match_status::exact_frame, "an extent past the declared Resource size was refused");
     depth.area = {0, 0xffffffffu, 1, 1};
     require(match(camera, depth) == match_status::invalid_extent, "integer overflow extent accepted");
     depth.area = {};
     require(match(camera, depth) == match_status::exact_frame, "whole-resource extent rejected");
+    // A null extent, !(width && height), is the whole resource (S16).
+    depth.area = {0, 0, 1280, 0};
+    require(match(camera, depth) == match_status::exact_frame, "a zero-sided extent was not the whole resource");
+    depth.area = {4, 8, 0, 0};
+    require(match(camera, depth) == match_status::exact_frame, "a null extent with a top and left was not the whole resource");
+    depth.area = {};
     depth.lifecycle = 0;
     require(match(camera, depth) == match_status::unsupported_lifecycle, "valid-now resource claimed safe at present");
     depth.lifecycle = 1;

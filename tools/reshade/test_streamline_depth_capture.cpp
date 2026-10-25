@@ -217,10 +217,14 @@ namespace sunshine_streamline::depth_capture {
           region.width != 2228 || region.height != 1256) return false;
       resource.area.left = UINT32_MAX;
       if (capture_region(desc, resource, region) != status::malformed) return false;
-      resource.area = {0, 0, 2228, 0};
-      if (capture_region(desc, resource, region) != status::malformed) return false;
-      resource.area = {1, 0, 0, 0};
-      if (capture_region(desc, resource, region) != status::malformed) return false;
+      // A null extent, !(width && height), whatever its top and left, is the
+      // whole allocation (S16).
+      for (const sunshine_scene_depth::extent zero_sided : {sunshine_scene_depth::extent{0, 0, 2228, 0}, sunshine_scene_depth::extent{1, 0, 0, 0},
+          sunshine_scene_depth::extent{0, 0, 0, 1256}}) {
+        resource.area = zero_sided;
+        if (capture_region(desc, resource, region) != status::ready || region.area.left || region.area.top ||
+            region.area.width != 2228 || region.area.height != 1256) return false;
+      }
       resource.area = {}; resource.width = 2227;
       if (capture_region(desc, resource, region) != status::malformed) return false;
       // An extent inside the allocation alone defines the region: a declared

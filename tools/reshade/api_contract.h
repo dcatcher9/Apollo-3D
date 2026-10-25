@@ -31,15 +31,33 @@ namespace sunshine_api_contract {
     out.valid_until = value.valid_until;
   }
 
-  // An absent extent (zero width) is the whole allocation. Only the width
-  // decides: each reader has already refused a partial or malformed extent.
+  // Streamline's sl::Extent is null when !(width && height) (sl_consts.h,
+  // its operator bool): the whole resource, whatever its top and left ("if
+  // using the entire resource leave as null"; the matrix's S16).
   // Extent: the capture's extent or Streamline's sl::Extent (top first).
   template<class Extent>
+  constexpr bool null_extent(const Extent &area) {
+    return !(area.width && area.height);
+  }
+  // A null extent is the whole allocation; any other is its own rectangle.
+  template<class Extent>
   constexpr Extent normalized_extent(const Extent &area, std::uint32_t width, std::uint32_t height) {
-    if (area.width) return area;
+    if (!null_extent(area)) return area;
     Extent whole{};
     whole.width = width; whole.height = height;
     return whole;
+  }
+  // Whether a tag's extent names a region of its width x height allocation:
+  // a rectangle inside it (S16b; one outside it is malformed, S16c), whatever
+  // the Resource's declared size, which is optional (SLT:334-336, 360-363;
+  // S16d), or the null extent, the whole allocation, which a declared size (0
+  // none) must then name.
+  template<class Extent>
+  constexpr bool extent_in_allocation(const Extent &area, std::uint64_t width, std::uint32_t height,
+      std::uint32_t declared_width, std::uint32_t declared_height) {
+    if (null_extent(area))
+      return (!declared_width || declared_width == width) && (!declared_height || declared_height == height);
+    return area.left <= width && area.top <= height && area.width <= width - area.left && area.height <= height - area.top;
   }
 
   // Streamline (sl_core_types.h): a tag's Resource and its lifecycle.

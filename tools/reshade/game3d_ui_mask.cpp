@@ -349,10 +349,12 @@ namespace sunshine_game3d::ui_mask {
 #endif
       result.runtime = runtime; result.generation = item.generation; result.sequence = source.sequence;
       result.kind = where.kind; result.frame_generation_evaluation = where.frame_generation_evaluation;
-      const auto &area = source.resource.area;
+      // A null Streamline extent, !(width && height), is the whole
+      // allocation (normalized_extent, the matrix's S16).
+      const auto area = sunshine_api_contract::normalized_extent(source.resource.area, item.wanted.width, item.wanted.height);
       const bool shape = (!source.resource.width || source.resource.width == item.wanted.width) &&
         (!source.resource.height || source.resource.height == item.wanted.height) && !area.left && !area.top &&
-        (!area.width || area.width == item.wanted.width) && (!area.height || area.height == item.wanted.height);
+        area.width == item.wanted.width && area.height == item.wanted.height;
       // Only this origin's snapshots of the kind (boundary::frame_generation_evaluation).
       const auto revoke = [&] {
         for (auto &snapshot : item.snapshots)
