@@ -4104,9 +4104,11 @@ namespace {
     require(testing::latest_snapshot(view.value, snapshot) && snapshot.camera_sequence > first_camera_sequence &&
         testing::normalized_source(view.value, 0, normalized), "new successful constants did not establish a new camera-call tuple");
     const auto valid_resource = resource;
+    // S14: the zero header's members are version 1's, so its nonzero state
+    // is a declaration, as a typed Resource's; only its 0 needs observation.
     resource.state = 0x20; call_v2_constants(constants, token.ref(), view); tag_now();
     require(testing::normalized_source(view.value, 0, normalized) && normalized.native_state == 0x20 &&
-        normalized.proof == sunshine_scene_depth::state_proof::declared, "nonzero compatibility resource state was discarded");
+        normalized.proof == sunshine_scene_depth::state_proof::declared, "nonzero compatibility resource state was discarded (S14)");
     resource = valid_resource; resource.base = {nullptr, resource_guid, 1};
     call_v2_constants(constants, token.ref(), view); tag_now();
     require(testing::normalized_source(view.value, 0, normalized) && normalized.native_state == 0 &&

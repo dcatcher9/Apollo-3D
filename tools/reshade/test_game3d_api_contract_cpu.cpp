@@ -1158,8 +1158,9 @@ namespace {
       {"e33", "extent=padded"},  // A 2228x1256 crop of a 3840x2160 allocation.
     };
 
-    // One row per open owner question (a pending known-gap row), so the run
-    // shows what the add-on does there today.
+    // One row per owner question the known-gap table held pending (S24 is
+    // open; S14 was decided from the SDK headers), so the run keeps showing
+    // what the add-on does there.
     constexpr seed questions[] {
       {"S24-question", "version=2.15.0,tags=32"},
       {"S14-question", "resource=zero_header,declared=depth_read"},

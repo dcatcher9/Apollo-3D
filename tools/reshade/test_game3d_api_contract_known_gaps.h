@@ -120,11 +120,6 @@ namespace game3d_contract::known_gaps {
       return legal(value) && (expected.kind == outcome_kind::capture || expected.kind == outcome_kind::continuous) && !either(expected);
     }
 
-    // No barrier on the copy's recording names the source's state.
-    constexpr bool unobserved(const resource_state &value) {
-      return value.seen == evidence::none || value.seen == evidence::alias_named || value.seen == evidence::alias_wildcard;
-    }
-
     // The probe promotes lifecycle 0 to its tag call only; an OnlyValidNow
     // evaluate input fails match() as not-valid-until-present.
     constexpr bool local_only_valid_now(const sl_case &value) {
@@ -154,13 +149,6 @@ namespace game3d_contract::known_gaps {
              value.tag_header == struct_form::newest_known;
     }
 
-    // The zero-header Resource layout (a typed ResourceTag whose Resource
-    // base was zero-initialised) with a nonzero declaration and no recorded
-    // state, which S14 refuses.
-    constexpr bool zero_header_declaration(const sl_case &value) {
-      return legal(value) && expect(value).by == &rules::S14 && value.resource == resource_form::zero_header && value.declared_state != 0 &&
-             value.declared_state != UINT32_MAX && unobserved(value.depth);
-    }
   }  // namespace streamline
 
   inline constexpr row<sl_case> sl_rows[] {
@@ -169,7 +157,6 @@ namespace game3d_contract::known_gaps {
     {"S16", &rules::S16, kind::expected_failure, &streamline::zero_sided_extent, "Stage 3 fix 12 (S16). Use Streamline's whole-resource rule !(width && height) (sl_consts.h:150) in match() (streamline_camera_data.cpp) and source_region (streamline_depth_capture.cpp).", &behaviours::no_copy},
     {"S16d", &rules::S16d, kind::expected_failure, &streamline::declared_size, "Stage 3 fix 12 (S16). Drop the declared Resource size check from match(); the capture already bounds the extent by the allocation (source_region).", &behaviours::no_copy},
     {"S24-pending", &rules::S24, kind::pending, &streamline::unsurveyed_tag_array, "Owner ruling needed: the add-on reads a multi-tag array from a release newer than the survey when its ResourceTag declares version 1, whose stride is known (sl_struct.h appends members with a version bump; S14 still refuses a later version in an array). The design's S24 refuses any such array. Either relax S24 to major 3 and above, or make read_tags refuse these arrays."},
-    {"S14-pending", &rules::S14, kind::pending, &streamline::zero_header_declaration, "Owner ruling needed: the zero-header Resource layout (some 2.x integrations zero-initialise Resource's base) is accepted with its nonzero declared state as proof (streamline_camera_probe.cpp append_tag; pinned by test_streamline_camera_probe.cpp's 'nonzero compatibility resource state was discarded'). S14 accepts only a state recorded on the copy's list for a Resource that is not an SDK structure. Either rule the declaration usable and relax S14, or require an observed state as for its declared COMMON."},
   };
 
   // A Streamline frame judged at its Present by the runtime layer

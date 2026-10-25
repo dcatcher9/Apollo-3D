@@ -1445,10 +1445,13 @@ namespace sunshine_streamline {
       value.present = true;
       const auto precision = decode_precision(tag.base.next, value.precision_scale, value.precision_bias);
       const bool precision_ok = precision == tag_refusal::none;
-      // Some 2.x integrations zero-initialize Resource's base
-      // while constructing a correctly typed ResourceTag. Accept that one
-      // known layout variant, not arbitrary GUIDs/versions or extensions. The
-      // native IID/device/description checks still belong to the shared owner.
+      // Some 2.x integrations zero the whole Resource, header included, then
+      // set its fields, while constructing a correctly typed ResourceTag. No
+      // SDK constructor leaves that header (sl_struct.h), and a later version
+      // only appends members, so the fields are read by version 1's layout
+      // (the contract matrix's S14). Accept that one layout variant, not
+      // arbitrary GUIDs/versions or extensions. The native
+      // IID/device/description checks still belong to the shared owner.
       const guid empty_guid{};
       const bool zero_resource_header = installed_abi == abi::v2 && resource.base.next == nullptr &&
         same(resource.base.type, empty_guid) && resource.base.version == 0;
@@ -1474,9 +1477,9 @@ namespace sunshine_streamline {
       value.value.resource_width = resource.width;
       value.value.resource_height = resource.height;
       value.native_state = resource.state;
-      // A partly zero-initialized compatibility descriptor does not prove
-      // COMMON. Reuse the shared observed-state path; a normal typed Resource
-      // retains the SDK's declared-zero COMMON semantics.
+      // Its nonzero state is a declaration, as a typed Resource's (S14); a 0
+      // there may be the zeroing rather than COMMON, so it takes the shared
+      // observed-state path. A typed Resource's 0 declares COMMON.
       value.state_requires_observation = zero_resource_header && resource.state == 0;
       if (value.supported && index < 3)
         value.direct_source = depth_capture::retain_source(value.value.native_resource);

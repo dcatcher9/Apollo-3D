@@ -61,7 +61,7 @@ namespace game3d_contract {
     inline constexpr rule S11c {"S11c", "At a ValidUntilEvaluate tag call, no observation: REFUSE state_unprovable there; its same-frame evaluate, the use its declaration describes, copies it (S5)", "SLT:357; SLT:404 eValidUntilEvaluate: unchanged 'until after the slEvaluateFeature call has returned'; owner ruling R2 covers lifecycle 1 only"};
     inline constexpr rule S12 {"S12", "Resource type 0, or 8 (eUnknown) where that release's header declares it: normal; type 1 (buffer): REFUSE not_depth; type 8 where the header ends ResourceType before it, or on an unsurveyed release no surveyed header decides (fail safe): REFUSE malformed", "SLT:280-292 ResourceType: eTex2d 0, eBuffer 1, eUnknown 8 ('the only thing we know for sure about this resource is that it's castable to IUnknown'); eUnknown first appears in v2.7.2 sl_core_types.h:257-258 (v2.4.15 sl.h:228-239 ends at eHostFence, eCount = 8; survey tables); docs/reshade-sbs.md, Rules for new game behaviour 3 (fail safe)"};
     inline constexpr rule S13 {"S13", "Constants, ViewportHandle, DLSSGOptions, Resource or a single ResourceTag above the newest known version: as at the newest known version", "sl_struct.h:43-106: new members go at the end with a version bump, so the known prefix keeps its meaning"};
-    inline constexpr rule S14 {"S14", "Unknown chained struct on a tag or Resource, a ResourceTag above v1 in an array of more than one, a zero Resource header, PrecisionInfo formula 2+ or scale 0: REFUSE unknown_abi / malformed", "sl_struct.h:83-99 (optional data is a chained struct with its own GUID; the array stride is the known size); SLT:437-475 (formulas 0 and 1; scale 0 has no inverse)"};
+    inline constexpr rule S14 {"S14", "Unknown chained struct on a tag or Resource, a ResourceTag above v1 in an array of more than one, PrecisionInfo formula 2+ or scale 0: REFUSE unknown_abi / malformed. A zero Resource header (no GUID, version 0, no chain) is read by version 1's members: a nonzero state is a declaration, as a typed Resource's; a 0, which may be the zeroing rather than COMMON, needs a state recorded on the copy's list, else REFUSE state_unprovable", "sl_struct.h:83-99 (optional data is a chained struct with its own GUID; the array stride is the known size); sl_struct.h:43-76, 98-121 (BaseStructure has no default constructor: every structure is built with its GUID and a version from kStructVersion1, and a later version only appends members, so version 1's keep their place and meaning) and SLT:331-338 (Resource's constructors set its GUID and kStructVersion1): no SDK constructor leaves a zero header, so it is a Resource whose header was cleared after construction (Expedition 33, Stellar Blade and Hogwarts Legacy tag depth so, with state 0x60), and every version keeps version 1's members; SLT:357 (state 'needs to be correct when tagged resources are actually used'; SLT:400, an OnlyValidNow tag is used at its call); SLT:437-475 (formulas 0 and 1; scale 0 has no inverse)"};
     inline constexpr rule S15 {"S15", "A tag that is not last in an evaluate input chain: CAPTURE, as in an array", "SLA:250-262: inputs are an array or a chain of BaseStructures"};
     inline constexpr rule S16 {"S16", "Extent null or with a zero side: CAPTURE of the whole resource", "sl_consts.h:150 Extent::operator bool is width != 0 && height != 0; SLT:425 'if using the entire resource leave as null'"};
     inline constexpr rule S16b {"S16b", "Extent inside the allocation (padded or offset): CAPTURE of that region", "sl_consts.h:143-169 Extent {top, left, width, height}; SLT:425 the area of the tagged resource to use"};
@@ -769,11 +769,16 @@ namespace game3d_contract {
         // a layout an enhanced barrier set stays enhanced there (D6).
         state.resource.seen = enhanced_layout(state.resource.seen) ? evidence::earlier_list_enhanced : evidence::none;
       }
-      if (value.resource == resource_form::zero_header) {
-        // Not an SDK struct: only a state recorded on this list could prove it.
+      if (value.resource == resource_form::zero_header && value.declared_state == 0) {
+        // A zero header's Resource is read by version 1's members and its
+        // nonzero state is a declaration (S14), but its 0 may be the zeroing
+        // rather than COMMON: only a state recorded on this list proves the
+        // copy.
         state.source = claim::none;
         const auto proven = expect(state);
-        return at(proven.kind == outcome_kind::capture && !either(proven) ? either(refuse(rules::S14, refusal::malformed), proven) : refuse(rules::S14, refusal::malformed));
+        if (proven.kind != outcome_kind::capture || either(proven)) {
+          return at(refuse(rules::S14, refusal::state_unprovable));
+        }
       }
       auto out = expect(state);
       if (deferred && (permits(out, outcome_kind::capture) || permits(out, outcome_kind::continuous))) {
@@ -1387,6 +1392,15 @@ namespace game3d_contract {
     static_assert(captures(expect(with(tag(present, evaluate), &sl_case::constants, struct_form::above_known)), rules::S13, nps));
     static_assert(refuses(expect(with(tag(present, evaluate), &sl_case::tag_header, struct_form::unknown_chained)), rules::S14, refusal::unknown_abi));
     static_assert(refuses(expect(with(tag(present, evaluate), &sl_case::precision, precision_form::zero_scale)), rules::S14, refusal::malformed));
+    // S14: a zero header's nonzero state is declared, as a typed Resource's
+    // (an OnlyValidNow 0x60 at its FG tag call, as Unreal Engine games tag
+    // depth); its 0 needs a state recorded on the copy's list.
+    static_assert(captures(expect(with(with(tag(now, copy_point::tag_call), &sl_case::resource, resource_form::zero_header), &sl_case::declared_state, depth_read | nps)), rules::S1, depth_read | nps));
+    static_assert(captures(expect(with(tag(present, evaluate), &sl_case::resource, resource_form::zero_header)), rules::S5, nps));
+    static_assert(captures(expect(with(tag(present, copy_point::tag_call, tag_commands::none), &sl_case::resource, resource_form::zero_header)), rules::S6, nps) && expect(with(tag(present, copy_point::tag_call, tag_commands::none), &sl_case::resource, resource_form::zero_header)).deferred);
+    static_assert(refuses(expect(with(with(tag(present, evaluate), &sl_case::resource, resource_form::zero_header), &sl_case::declared_state, 0u)), rules::S14, refusal::state_unprovable));
+    static_assert(captures(expect(with(with(with(tag(present, evaluate), &sl_case::resource, resource_form::zero_header), &sl_case::declared_state, 0u), &sl_case::depth, recorded(ds, evidence::transition, depth_read))), rules::S5, depth_read));
+    static_assert(refuses(expect(with(with(tag(present, copy_point::tag_call, tag_commands::none), &sl_case::resource, resource_form::zero_header), &sl_case::declared_state, 0u)), rules::S14, refusal::state_unprovable));
     static_assert(captures(expect(tag(now, evaluate, tag_commands::game_list, tag_entry::local_chain_not_last)), rules::S15, nps));
     static_assert(captures(expect(with(tag(present, evaluate), &sl_case::extent, extent_form::one_dimension_zero)), rules::S16, nps));
     static_assert(captures(expect(with(tag(present, evaluate), &sl_case::extent, extent_form::offset)), rules::S16b, nps));

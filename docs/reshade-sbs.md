@@ -3942,8 +3942,17 @@ retain their original evaluation/presentation lifetimes. Known enabled FG retain
 frame/camera association and mandatory source priority.
 Within the compatible 2.x Resource layout, the observed all-zero nested Resource header is also supported.
 Unknown nonzero headers and extensions remain rejected; actual native resource/device/description
-validation still applies. A zero state in this uninitialized header form requires observed native
-state rather than being assumed to declare COMMON.
+validation still applies. `sl_struct.h` builds every structure with its GUID and a version from
+`kStructVersion1` (`BaseStructure` has no default constructor), so no SDK constructor leaves this
+header: it is a Resource whose header was cleared after construction, and since a later version
+only appends members, its members are read by version 1's layout. Its nonzero state is therefore a
+declaration like a typed Resource's, which an observed state must agree with; `sl_core_types.h`
+requires the state to be correct where the tag is used, which for `OnlyValidNow` is the tag call
+that copies it. Only a 0 there, which may be the zeroing rather than COMMON, requires an observed
+native state (the API contract matrix's S14, decided from the SDK headers in Stage 3 batch B; the
+add-on already behaved so). Expedition 33, Stellar Blade (10-22) and Hogwarts Legacy (10-06) tag
+their depth this way, `OnlyValidNow` with a declared `0x60`
+(`Sunshine Streamline zero-base resource compatibility: ... state=0x60 state_proof=declared`).
 For volatile `OnlyValidNow` depth, a copy is recorded on the supplied command list during the tag
 call, through the same snapshot owner as all other sources. Normal GPU ordering completes it;
 there is no CPU wait. It cannot use a later Generic preservation opportunity.

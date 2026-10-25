@@ -73,7 +73,8 @@ namespace sunshine_api_contract {
       bool version_one{};
       // false: unreadable or of an unsupported layout (tag_refusal).
       bool supported{true};
-      // The zero-header compatibility layout's 0 proves nothing.
+      // The zero-header compatibility layout's 0 proves nothing: it may be
+      // the zeroing (S14). Its nonzero state is declared.
       bool state_requires_observation{};
     };
 

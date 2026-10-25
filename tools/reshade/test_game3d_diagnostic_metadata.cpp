@@ -295,6 +295,15 @@ int main() try {
   resource.state = 0;
   d::observe_sl_tags_v2(stamp(7, 3), view, &tag, 1, d::tag_scope::frame);
   require(!last_resource.state_declared, "SL zero state invented declared GPU state");
+  // A zero-header Resource is read by version 1's members: its nonzero state
+  // is declared, as a typed Resource's (S14).
+  resource.state = 0x60;
+  const auto typed_header = resource.base;
+  resource.base = {};
+  d::observe_sl_tags_v2(stamp(7, 3), view, &tag, 1, d::tag_scope::frame);
+  require(last_resource.descriptor_supported && last_resource.state_declared && last_resource.native_state == 0x60,
+          "a zero-header SL Resource's nonzero state was not taken as declared");
+  resource.base = typed_header;
   tag.base.version = 99;
   tag.resource_ptr = reinterpret_cast<sl::abi_v2::resource *>(1);
   d::observe_sl_tags_v2(stamp(7, 4), view, &tag, 1, d::tag_scope::frame);
