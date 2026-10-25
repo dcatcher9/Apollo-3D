@@ -907,9 +907,13 @@ captures nothing more while its `tag_copied` grows, and a later UI capture gate 
 the tags' own same-batch pairs; untagged in their frame again, DLSS-G's inputs are captured again. An FG tag sent with a
 command list copies the frame first and keeps precedence (`tag_copied`). DLSS-G evaluating on its
 own COMPUTE list on its own compute queue (as Streamline does in Assassin's Creed Shadows, after the
-game's work ran) owns the FG scope the same way from depth observed there, with no readiness loss
-and no `command_type` refusal (N7: the compute queue takes its fence at the copy's submission, and
-DLSS-G resets the recording once its work completed). Refused again, SR depth
+game's work ran) owns the FG scope the same way from depth observed there, with no `command_type`
+refusal (N7: the compute queue takes its fence at the copy's submission). DLSS-G cycles three
+recordings and resets each only when it records into it again, so a frame's copy is readable three
+frames later. The case starts with that depth unobserved (refused, SR depth owns the viewport), and
+the handover to DLSS-G's first readable copy, the real/generated pairs after it and two NGX lines
+show no readiness loss; a scope that turned live at the copy's submission lost depth until the
+reset. Refused again, SR depth
 returns. Last, with the FG depth tag command-less and not untagged, a frame whose Present comes
 after the game's work but before DLSS-G evaluated it (an earlier frame's paced or generated Present)
 keeps its copy deferred (the Present holds the previous depth, `waited_for_frame` counts it); the

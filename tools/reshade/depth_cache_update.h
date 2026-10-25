@@ -118,4 +118,27 @@ namespace sunshine_streamline::depth_capture {
       before.viewport == policy.viewport && before.tick >= policy.enabled_tick &&
       sunshine_freshness::within_source_age(before.tick, now);
   }
+
+  // An FG copy still in flight has not yet earned its viewport. While an
+  // enabled FG scope is silent and the acquisition names only that scope's
+  // own capture, without readable pixels (Streamline resets DLSS-G's compute
+  // recording frames after the copy, and DLSS-G's nomination replaces the
+  // viewport's SR observation), the display holds the viewport's ordinary
+  // copy of the same epoch, younger than the source age, instead of dropping
+  // it as a changed source. The scope turns live once that FG copy is
+  // readable (frame_generation_scope_live) and takes the viewport then.
+  // The capture may be selected (its nomination's authority) with its pixels
+  // pending (candidate.pixel_ready). policy: the confirmed FG policy, not the
+  // silent scope's selection.
+  inline bool frame_generation_pending(const retained_depth &previous, const acquisition_decision &current,
+      const packet &candidate, selection_policy policy, std::uint64_t now) {
+    const auto &before = previous.metadata;
+    return policy.require_frame_generation && policy.epoch && !(current.source_selected && candidate.pixel_ready) &&
+      current.provider == sunshine_scene_depth::provider_kind::streamline && current.epoch == policy.epoch &&
+      current.viewport == policy.viewport &&
+      current.source_id == sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(policy.viewport)) &&
+      previous.capture_id && !before.frame_generation_input &&
+      before.provider == sunshine_scene_depth::provider_kind::streamline && before.epoch == policy.epoch &&
+      before.viewport == policy.viewport && sunshine_freshness::within_source_age(before.tick, now);
+  }
 }

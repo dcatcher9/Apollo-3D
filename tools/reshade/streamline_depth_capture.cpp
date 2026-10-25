@@ -204,8 +204,9 @@ namespace sunshine_streamline::depth_capture {
       // without an FG copy, exactly as frame_generation_missed records: an
       // accepted copy that never reaches a consumer keeps no SR depth out.
       const auto &m = value.metadata;
-      if (value.compute_list && m.frame_generation_input && m.provider == provider_kind::streamline && m.epoch &&
-          m.sequence && why != capture_failure::consumer_signal_failed && why != capture_failure::consumer_capacity &&
+      if (value.compute_list && value.source_nominated && m.frame_generation_input &&
+          m.provider == provider_kind::streamline && m.epoch && m.sequence &&
+          why != capture_failure::consumer_signal_failed && why != capture_failure::consumer_capacity &&
           why != capture_failure::consumer_queue_changed)
         for (auto &view : evaluations[provider_index(m.provider)].views)
           if (view.epoch == m.epoch && view.viewport == m.viewport && view.source_id == m.source_id)
@@ -1176,19 +1177,35 @@ namespace sunshine_streamline::depth_capture {
       if (!query_native(native, IID_ID3D12CommandQueue, checked)) return nullptr;
       return register_queue(checked.p, true);
     }
-    // Requires mutex. A copy recorded on a COMPUTE list is its FG scope's
-    // accepted copy (frame_generation_scope_live) only once its SDK call
-    // succeeded and its submission carries the capture owner's fence (in
-    // either order). One never submitted, as when its queue has no place,
-    // keeps no SR depth out, also in the frames before its recording's
-    // Reset discards it.
+    // Requires mutex. A depth copy recorded on a COMPUTE list is its FG
+    // scope's accepted copy (frame_generation_scope_live) only once the
+    // Present queue can read it: its SDK call succeeded, its submission
+    // carries the capture owner's fence, its recording was reset and that
+    // fence passed (completed_snapshot's rule for another queue's copy).
+    // The scope then turns live with readable FG pixels, so its handover
+    // drops no SR depth for a copy still in flight; Streamline resets its
+    // DLSS-G recording frames later. One never submitted, as when its queue
+    // has no place, or never reset keeps no SR depth out. Called at the
+    // copy's call, its submission and each liveness query
+    // (frame_generation_scope_live).
     void accept_compute_copy(const slot &value) {
       const auto &m = value.metadata;
-      if (!value.compute_list || !value.finished || !value.success || value.invalid || value.nomination_only ||
-          value.preservation_only || !value.producer_submitted || !value.producer_fence || !valid_provider(m.provider))
+      if (!value.compute_list || !value.source_nominated || !value.finished || !value.success || value.invalid ||
+          value.nomination_only || value.preservation_only || !value.producer_submitted || !value.producer_fence ||
+          !valid_provider(m.provider))
         return;
-      for (auto &view : evaluations[provider_index(m.provider)].views)
-        if (view.epoch == m.epoch && view.viewport == m.viewport && view.source_id == m.source_id) {
+      auto &views = evaluations[provider_index(m.provider)].views;
+      const auto owned = [&](const auto &view) {
+        return view.epoch == m.epoch && view.viewport == m.viewport && view.source_id == m.source_id;
+      };
+      if (std::none_of(views.begin(), views.end(), [&](const auto &view) {
+            return owned(view) && view.accepted_sequence < m.sequence; }) ||
+          !producer_recording_retired(value))
+        return;
+      const auto progress = producer_progress(value);
+      if (!progress.valid() || progress.completed < value.producer_fence) return;
+      for (auto &view : views)
+        if (owned(view)) {
           view.accepted_tick = std::max(view.accepted_tick, m.tick);
           view.accepted_sequence = std::max(view.accepted_sequence, m.sequence);
         }
@@ -1873,6 +1890,12 @@ namespace sunshine_streamline::depth_capture {
     std::lock_guard lock(mutex);
     const auto now = scope_now();
     const auto source = sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(viewport));
+    // A compute-list copy of this scope counts once readable (accept_compute_copy).
+    if (compute_copies_recorded)
+      for (const auto &value : slots)
+        if (value.id && value.compute_list && value.metadata.epoch == epoch && value.metadata.viewport == viewport &&
+            value.metadata.source_id == source)
+          accept_compute_copy(value);
     // A tick slightly ahead of this read (another thread's) is fresh.
     for (const auto &view : evaluations[provider_index(provider_kind::streamline)].views)
       if (view.epoch == epoch && view.viewport == viewport && view.source_id == source && view.accepted_tick &&

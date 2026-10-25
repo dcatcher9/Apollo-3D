@@ -425,38 +425,92 @@ namespace sunshine_streamline::depth_capture {
         requested = true; fixture::clear_captures();
       }
       {
-        // A copy recorded on a COMPUTE list (DLSS-G's own, N7) is its FG
-        // scope's accepted copy only once its SDK call succeeded and its
-        // submission carries the capture owner's fence, in either order: one
-        // never submitted (its queue had no place) keeps the scope silent. An
-        // accepted one whose producer fails later (a replay, its recording
-        // discarded, its queue gone) leaves its frame missed; a consumer's
-        // failure does not, and a direct-list copy's failure changes nothing.
+        // A depth copy recorded on a COMPUTE list (DLSS-G's own, N7) is its
+        // FG scope's accepted copy only once the Present queue can read it:
+        // its SDK call succeeded, its submission carries the capture owner's
+        // fence, its recording was reset and that fence passed, in any order.
+        // One never submitted (its queue had no place), or submitted but not
+        // yet reset or complete, keeps the scope silent, so a handover from
+        // SR depth never waits on FG pixels still in flight. An accepted one
+        // whose producer fails later (a replay, its recording discarded, its
+        // queue gone) leaves its frame missed; a consumer's failure does not,
+        // and a direct-list copy's failure changes nothing. A compute copy
+        // that nominates no depth (an auxiliary input) is never accepted.
         constexpr std::uint64_t epoch = 8, fg = (1ull << 63) | 2;
+        struct completion_fence final : ID3D12Fence {
+          UINT64 completed{};
+          HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void **out) override { if (out) *out = nullptr; return E_NOINTERFACE; }
+          ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
+          ULONG STDMETHODCALLTYPE Release() override { return 1; }
+          HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID, UINT *, void *) override { return E_NOTIMPL; }
+          HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID, UINT, const void *) override { return E_NOTIMPL; }
+          HRESULT STDMETHODCALLTYPE SetPrivateDataInterface(REFGUID, const IUnknown *) override { return E_NOTIMPL; }
+          HRESULT STDMETHODCALLTYPE SetName(LPCWSTR) override { return E_NOTIMPL; }
+          HRESULT STDMETHODCALLTYPE GetDevice(REFIID, void **out) override { if (out) *out = nullptr; return E_NOINTERFACE; }
+          UINT64 STDMETHODCALLTYPE GetCompletedValue() override { return completed; }
+          HRESULT STDMETHODCALLTYPE SetEventOnCompletion(UINT64, HANDLE) override { return E_NOTIMPL; }
+          HRESULT STDMETHODCALLTYPE Signal(UINT64) override { return E_NOTIMPL; }
+        } fence;
+        // The compute queue's place: selection reads only its private fence.
+        const auto entry = std::find_if(queues.begin(), queues.end(), [](const auto &item) { return !item; });
+        if (entry == queues.end()) return false;
+        *entry = std::make_unique<queue_state>();
+        (*entry)->queue.p = reinterpret_cast<ID3D12CommandQueue *>(&fence);
+        (*entry)->fence.p = &fence;
+        struct release_queue {
+          std::unique_ptr<queue_state> &entry;
+          ~release_queue() { entry->queue.p = nullptr; entry->fence.p = nullptr; entry.reset(); }
+        } release{*entry};
+        const auto compute_queue = reinterpret_cast<std::uint64_t>(&fence);
         const auto silent_since = [] { return GetTickCount64() - sunshine_freshness::fg_silent_ms - 1; };
         const auto copy = [&](std::uint64_t id, std::uint64_t sequence, bool compute, bool submitted) {
           begin_evaluation(epoch, sequence, 2, provider_kind::streamline, fg, 0);
-          slots[0] = {}; slots[0].id = id; slots[0].compute_list = compute;
+          slots[0] = {}; slots[0].id = id; slots[0].compute_list = compute; slots[0].source_nominated = true;
           slots[0].metadata.provider = provider_kind::streamline; slots[0].metadata.epoch = epoch;
           slots[0].metadata.sequence = sequence; slots[0].metadata.viewport = 2; slots[0].metadata.source_id = fg;
           slots[0].metadata.frame_generation_input = true; slots[0].metadata.tick = GetTickCount64();
-          if (submitted) { slots[0].producer_submitted = true; slots[0].producer_fence = sequence; slots[0].queue = 5; }
+          slots[0].command = id; slots[0].producer_recording = std::make_shared<sunshine_native_command::recording_lifetime>();
+          slots[0].producer_recording->cookie = id;
+          if (submitted) { slots[0].producer_submitted = true; slots[0].producer_fence = sequence; slots[0].queue = compute_queue; }
         };
+        // Its recording's Reset starts another recording on the list.
+        const auto reset = [&] { slots[0].producer_recording->cookie = slots[0].command + 1000; };
         const auto live = [&] { return frame_generation_scope_live(epoch, 2, silent_since()); };
+        struct recorded_flag {
+          bool saved{compute_copies_recorded};
+          ~recorded_flag() { compute_copies_recorded = saved; }
+        } restore_flag;
+        compute_copies_recorded = true; // As record_impl sets it at a compute-list copy.
+        const auto accepted = [&] {
+          for (const auto &view : evaluations[provider_index(provider_kind::streamline)].views)
+            if (view.epoch == epoch && view.viewport == 2 && view.source_id == fg) return view.accepted_sequence;
+          return std::uint64_t{};
+        };
         copy(61, 20, true, false); finish(61, true);
         if (!slots[0].finished || live()) return false;
-        slots[0].producer_submitted = true; slots[0].producer_fence = 3; slots[0].queue = 5;
+        slots[0].producer_submitted = true; slots[0].producer_fence = 20; slots[0].queue = compute_queue;
         accept_compute_copy(slots[0]);
+        if (live()) return false; // Submitted, but its recording is not reset.
+        reset();
+        if (live()) return false; // Reset, but its fence has not passed.
+        fence.completed = 20;
         if (!live()) return false;
-        copy(62, 21, true, true); finish(62, true);
-        if (!live()) return false;
+        // Submitted, reset and complete before its call finished.
+        copy(62, 21, true, true); reset(); fence.completed = 21;
+        if (!live() || accepted() != 20) return false;
+        finish(62, true);
+        if (!live() || accepted() != 21) return false;
         invalidate(slots[0], capture_failure::replay);
         if (live()) return false;
-        copy(63, 22, true, true); finish(63, true);
+        copy(63, 22, true, true); finish(63, true); reset(); fence.completed = 22;
+        if (!live()) return false;
         invalidate(slots[0], capture_failure::consumer_capacity);
         if (!live()) return false;
         copy(64, 23, true, true); slots[0].producer_fence = 0; finish(64, true);
         invalidate(slots[0], capture_failure::discarded_recording);
+        if (live()) return false;
+        // An auxiliary compute copy (no nominated depth) is never accepted.
+        copy(66, 25, true, true); slots[0].source_nominated = false; finish(66, true); reset(); fence.completed = 25;
         if (live()) return false;
         copy(65, 24, false, false); finish(65, true);
         invalidate(slots[0], capture_failure::replay);

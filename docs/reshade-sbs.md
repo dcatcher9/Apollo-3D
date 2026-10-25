@@ -4085,8 +4085,14 @@ storage that rests in COMMON (`texture_reference::rest`; a direct list's depth s
 shader-read states, and a direct list may reuse either). A compute queue takes its place and fence
 at its first submission of such a copy. The Present queue reads the copy as any other queue's: once
 that recording was reset and the fence passed. A compute-list copy keeps the FG scope live only once
-its submission carries that fence, so one never submitted (as when its queue has no place) keeps no
-SR depth out, even before its recording's Reset discards it; one whose producer fails later (a
+the Present queue can read it: its submission carries that fence, Streamline reset the recording and
+the fence passed. Streamline resets its DLSS-G recordings only frames later. Until then the silent
+scope's display holds the viewport's SR copy, of the same epoch and younger than the source age,
+while the acquisition names only the FG copy in flight (`source_reason=FG_copy_pending`; DLSS-G's
+nomination replaces the viewport's SR observation), so the handover loses no depth; until 10-25 the
+scope turned live at the submission and the SR depth it replaced was dropped for a copy still in
+flight. One never submitted (as when its queue has no place) or never reset turns the scope live
+for nothing; one whose producer fails later (a
 replay, its queue gone) counts as a missed frame (below). Streamline's evaluate and tag lists stay
 DIRECT only (the matrix's S22, Stage 3 batch B). DLSS-G's
 accepted copies keep the FG scope live exactly as accepted FG tag copies do, so FG owns the viewport

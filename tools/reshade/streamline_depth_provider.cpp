@@ -816,13 +816,24 @@ namespace sunshine_streamline::provider {
       const sunshine_game3d::slow_step step("depth capture acquisition");
       depth_capture::acquire(runtime->get_command_queue()->get_native(), present, data->frame, acquisition, &capture_info, selection);
     }
-    // FG keeps its viewport while it can supply (frame_generation_holds): a
-    // silent scope's ordinary candidate, fresh or pending, stands in only once
+    // A silent FG scope's handovers hold the displayed copy within the source
+    // age. FG keeps its viewport while it can supply (frame_generation_holds):
+    // the scope's ordinary candidate, fresh or pending, stands in only once
     // the scope's own newest copy can no longer be held, so a frame without an
-    // FG copy holds as any missing frame of a source does.
-    const bool fg_holds = fg_silent && !(acquisition.source_selected && data->frame.metadata.frame_generation_input) &&
-      depth_capture::frame_generation_holds(data->cache.reference(), policy, GetTickCount64());
-    const bool available = acquisition.source_selected && !fg_holds;
+    // FG copy holds as any missing frame of a source does. And an FG copy in
+    // flight takes nothing before it is readable (frame_generation_pending):
+    // the viewport's ordinary copy is held meanwhile.
+    const char *fg_hold = nullptr;
+    if (fg_silent) {
+      const auto retained = data->cache.reference();
+      const auto now = GetTickCount64();
+      if (!(acquisition.source_selected && data->frame.metadata.frame_generation_input) &&
+          depth_capture::frame_generation_holds(retained, policy, now))
+        fg_hold = "FG_copy_held";
+      else if (depth_capture::frame_generation_pending(retained, acquisition, data->frame, policy, now))
+        fg_hold = "FG_copy_pending";
+    }
+    const bool available = acquisition.source_selected && !fg_hold;
     evidence.capture = capture_info;
     evidence.available = available;
     evidence.snapshot_ready = data->frame.pixel_ready;
@@ -933,7 +944,7 @@ namespace sunshine_streamline::provider {
     const auto &cached = data->cache.depth();
     const auto prior_depth_age = cached.ready && reuse_tick >= cached.provided.tick ?
       reuse_tick - cached.provided.tick : UINT64_MAX;
-    const auto update = fg_holds ? depth_capture::display_decision{depth_capture::display_action::hold, "FG_copy_held"} :
+    const auto update = fg_hold ? depth_capture::display_decision{depth_capture::display_action::hold, fg_hold} :
       depth_capture::decide_display(acquisition, data->frame, data->cache.reference(), selection, reuse_tick);
     evidence.action = update.action;
     evidence.source_reason = update.reason;

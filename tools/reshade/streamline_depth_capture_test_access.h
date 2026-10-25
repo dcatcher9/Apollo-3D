@@ -304,6 +304,9 @@ namespace sunshine_streamline::depth_capture {
     extern std::array<slot, diagnostic_slot_limit> diagnostic_slots;
     extern std::array<std::unique_ptr<queue_state>, queue_limit> queues;
     extern std::array<evaluation_namespace, provider_count> evaluations;
+    // A copy was ever recorded on a COMPUTE list (record_impl); liveness
+    // queries look for readable compute-list copies only then.
+    extern bool compute_copies_recorded;
     bool matching_evaluation(const evaluation_head &head, const input &value);
     void end_nomination(const input &value);
     void invalidate(slot &value, capture_failure why);

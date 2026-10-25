@@ -2632,38 +2632,55 @@ namespace {
       inputs.set_ui("DLSSG.MultiFrameCount", 1);
       void *feature{};
       bool observed_state = false, tag_commands = false;
-      // DLSS-G's own COMPUTE recording on its own compute queue, as Streamline
-      // runs it in Assassin's Creed Shadows (10-24: every DLSSG.Depth copy
-      // refused as command_type). The game's work runs first; DLSS-G resets
-      // its recording once its work completed.
+      // DLSS-G's own COMPUTE recordings on its own compute queue, as Streamline
+      // runs them in Assassin's Creed Shadows (10-24: every DLSSG.Depth copy
+      // refused as command_type). The game's work runs first. Like
+      // Streamline, DLSS-G cycles a ring of recordings and resets each one
+      // only when it records into it again, frames after its work completed,
+      // so the Present queue can read a frame's copy only then.
       bool on_compute = false;
+      constexpr unsigned compute_ring = 3;
       com_ptr<ID3D12CommandQueue> compute_queue;
-      com_ptr<ID3D12CommandAllocator> compute_allocator;
-      com_ptr<ID3D12GraphicsCommandList> compute_list;
+      std::array<com_ptr<ID3D12CommandAllocator>, compute_ring> compute_allocators;
+      std::array<com_ptr<ID3D12GraphicsCommandList>, compute_ring> compute_lists;
+      std::array<std::uint64_t, compute_ring> compute_values{};
       com_ptr<ID3D12Fence> compute_done;
       std::uint64_t compute_value{};
+      unsigned compute_at = 0;
       {
         D3D12_COMMAND_QUEUE_DESC desc{}; desc.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
         checked(game->CreateCommandQueue(&desc, IID_PPV_ARGS(compute_queue.put())), "Create DLSS-G's compute queue");
-        checked(game->CreateCommandAllocator(desc.Type, IID_PPV_ARGS(compute_allocator.put())), "Create DLSS-G's compute allocator");
-        const auto direct = game_native_command;
-        checked(game->CreateCommandList(0, desc.Type, compute_allocator.p, nullptr, IID_PPV_ARGS(compute_list.put())),
-          "Create DLSS-G's compute list");
-        game_native_command = direct;
+        for (unsigned n = 0; n != compute_ring; ++n) {
+          checked(game->CreateCommandAllocator(desc.Type, IID_PPV_ARGS(compute_allocators[n].put())),
+            "Create DLSS-G's compute allocator");
+          const auto direct = game_native_command;
+          checked(game->CreateCommandList(0, desc.Type, compute_allocators[n].p, nullptr, IID_PPV_ARGS(compute_lists[n].put())),
+            "Create DLSS-G's compute list");
+          game_native_command = direct;
+          checked(compute_lists[n]->Close(), "Close DLSS-G's initial compute recording");
+        }
         checked(game->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(compute_done.put())), "Create DLSS-G's compute fence");
       }
-      // The compute list stays open between frames; its Reset (through
-      // ReShade) names its native list.
-      std::uint64_t compute_native{};
-      const auto reset_compute = [&] {
+      // Waits for a ring entry's last work and resets it (through ReShade,
+      // which names its native list): the Reset retires its earlier
+      // recording. Returns the native list, open for recording.
+      const auto reset_compute = [&](unsigned n) {
+        checked(compute_done->SetEventOnCompletion(compute_values[n], nullptr), "Wait for DLSS-G's compute work");
         const auto direct = game_native_command;
-        checked(compute_allocator->Reset(), "Reset DLSS-G's completed compute allocator");
-        checked(compute_list->Reset(compute_allocator.p, nullptr), "Reset DLSS-G's compute recording");
-        compute_native = game_native_command; game_native_command = direct;
-        require(compute_native && compute_native != direct, "DLSS-G's compute Reset did not name its native list");
+        checked(compute_allocators[n]->Reset(), "Reset DLSS-G's completed compute allocator");
+        checked(compute_lists[n]->Reset(compute_allocators[n].p, nullptr), "Reset DLSS-G's compute recording");
+        const auto native = game_native_command; game_native_command = direct;
+        require(native && native != direct, "DLSS-G's compute Reset did not name its native list");
+        return native;
       };
-      checked(compute_list->Close(), "Close DLSS-G's initial compute recording");
-      reset_compute();
+      // Resets every ring entry once its work completed: no recording stays
+      // unretired after the compute case.
+      const auto drain_compute = [&] {
+        for (unsigned n = 0; n != compute_ring; ++n) {
+          reset_compute(n);
+          checked(compute_lists[n]->Close(), "Close DLSS-G's drained compute recording");
+        }
+      };
       // The game's HUD-less and Backbuffer tags: without a command list (as in
       // Shadows), the same followed by the same frame's null untag of both
       // kinds (which cancels their copies deferred to the frame's Present,
@@ -2707,17 +2724,16 @@ namespace {
           // Only the depth: the UI inputs' shader-resource state names the
           // pixel-shader state, which a compute list cannot.
           submit(false); begin_commands();
-          auto *compute = reinterpret_cast<ID3D12GraphicsCommandList *>(compute_native);
+          const auto n = compute_at; compute_at = (compute_at + 1) % compute_ring;
+          auto *compute = reinterpret_cast<ID3D12GraphicsCommandList *>(reset_compute(n));
           if (observed_state) transition(compute, selected->resource.p, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, read);
           require(ngx_evaluate(compute, feature, &inputs, nullptr) == ngx_fixture::success,
             "DLSS-G's compute evaluation observation changed the SDK result");
           if (observed_state) transition(compute, selected->resource.p, read, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-          checked(compute_list->Close(), "Close DLSS-G's compute recording");
-          ID3D12CommandList *lists[]{compute_list.p};
+          checked(compute_lists[n]->Close(), "Close DLSS-G's compute recording");
+          ID3D12CommandList *lists[]{compute_lists[n].p};
           compute_queue->ExecuteCommandLists(1, lists);
-          checked(compute_queue->Signal(compute_done.p, ++compute_value), "Signal DLSS-G's compute work");
-          checked(compute_done->SetEventOnCompletion(compute_value, nullptr), "Wait for DLSS-G's compute work");
-          reset_compute();
+          checked(compute_queue->Signal(compute_done.p, compute_values[n] = ++compute_value), "Signal DLSS-G's compute work");
           return;
         }
         if (observed_state) {
@@ -2860,15 +2876,22 @@ namespace {
           // DLSS-G evaluates on its own COMPUTE list (N7). Its depth observed
           // there in a state a compute list may use is copied on that list:
           // its own compute queue takes a fence at the copy's submission, and
-          // the Present queue reads the copy once DLSS-G reset the recording.
-          // DLSSG.Depth owns the FG scope from it exactly as from a direct
-          // list: every real Present shows its own frame's copy, and
-          // generated Presents hold it. With the copy refused as command_type
-          // (before N7) the scope stays silent and SR depth stays.
+          // the Present queue reads the copy once DLSS-G reset the recording
+          // (here when it records into that ring entry again, three frames
+          // later). DLSSG.Depth owns the FG scope from it as from a direct
+          // list once its first copy is readable, so SR depth stays until
+          // then and the handover loses no depth. Every real Present shows the
+          // newest readable copy, and generated Presents hold it. With the copy
+          // refused as command_type (before N7) the scope stays silent and SR
+          // depth stays.
           {
+            // SR owns the viewport first: DLSS-G's depth, unobserved on its
+            // compute list, is refused.
+            observed_state = false; on_compute = true;
+            settle_route("DLSSG-compute-list-unobserved-SR-depth", false);
             const auto losses = readiness_losses();
             const auto copied_lines = reshade_log_lines({"Sunshine NGX depth:", "dlssg_depth={copied="}).size();
-            on_compute = true;
+            observed_state = true;
             settle_route("DLSSG-compute-list-owns-FG-depth", true);
             for (unsigned pair = 0; pair < 6; ++pair) {
               render_tracked_depth = dlssg_frame;
@@ -2896,8 +2919,10 @@ namespace {
             require(number_after(second_part, "copied=") > number_after(first_part, "copied=") &&
                 second_part.find("command_type") == std::string::npos,
               "DLSS-G's compute-list depth was refused for its list type or not counted as copied");
-            require(readiness_losses() == losses, "DLSS-G's compute-list depth lost depth readiness");
+            require(readiness_losses() == losses,
+              "DLSS-G's compute-list depth lost depth readiness, also at its handover from SR depth");
             on_compute = false;
+            drain_compute();
           }
           // Refused again: the scope falls silent and SR depth returns.
           observed_state = false;
