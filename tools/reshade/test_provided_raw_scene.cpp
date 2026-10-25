@@ -623,6 +623,55 @@ static void retained_provider_switch_keeps_reference(bool ngx_first) {
     "Switching again lost the second provider's reference");
 }
 
+// Assassin's Creed Shadows (10-24): the game's SR copies run on another queue
+// and are readable 110-235 ms after their evaluation. When the held copy
+// expires, the provider keeps the encoding's identity and names its newest
+// capture, still in flight, at a Present without pixels; the next Present
+// shows an older readable copy, newer than every copy shown before. That copy
+// renders with the encoding's calibration at once. Until 10-25 the unshown
+// capture set the current-frame order, so every readable copy stayed at
+// frame_mismatch (flat) until that capture itself was readable, and the gap
+// then restarted the 500 ms fade: each 0-60 ms loss showed 0.35-0.7 s of flat
+// or fading output.
+static void pending_capture_does_not_order_readable_copies() {
+  retained_policy policy;
+  start(policy);
+  provided_source sr;
+  sr.frame.provider = sunshine_scene_depth::provider_kind::streamline;
+  sr.frame.epoch = 2; // SR: the viewport and epoch name the encoding (source_id 0).
+  sr.frame.sequence = 103600;
+  sr.frame.projection.reversed = sr.frame.projection.direction_supplied = true;
+  const auto calibrated = calibrate(policy, sr, .25f, 1000);
+  const auto shown = sr.frame.sequence;
+  auto pending = sr.frame;
+  pending.sequence = shown + 40;
+  pending.tick = 2000;
+  auto current = sunshine_provided_raw::selected(pending, 1, false);
+  policy.bind(current, pending.tick);
+  auto out = policy.evaluate(current, pending.tick);
+  require(!out.ready && out.reason == raw_status::depth_unavailable,
+    "A Present without pixels rendered or did not report missing depth");
+  for (unsigned i = 0; i != 3; ++i) {
+    auto readable = sr.frame;
+    readable.sequence = shown + 5 + i * 5;
+    readable.tick = 2016 + i * 16;
+    current = sunshine_provided_raw::selected(readable, 1, true);
+    policy.bind(current, readable.tick);
+    out = policy.evaluate(current, readable.tick);
+    require(out.ready && out.reason == raw_status::ready && out.H == calibrated.H && out.t0 == calibrated.t0,
+      "An older readable copy after a Present that named a capture in flight did not render at once "
+      "with the encoding's calibration (the unshown capture ordered the current frames)");
+  }
+  // Order among shown copies still holds: an older copy than one shown is refused.
+  auto older = sr.frame;
+  older.sequence = shown + 6;
+  older.tick = 2100;
+  current = sunshine_provided_raw::selected(older, 1, true);
+  policy.bind(current, older.tick);
+  require(policy.evaluate(current, older.tick).reason == raw_status::frame_mismatch,
+    "A copy older than one already shown rendered");
+}
+
 int main() {
   for (const auto provider : {sunshine_scene_depth::provider_kind::streamline, sunshine_scene_depth::provider_kind::ngx}) {
     history_reset_preserves_the_current_shader_domain(provider, 1e-8f, true);
@@ -642,6 +691,7 @@ int main() {
   retained_reference_invalidation();
   retained_provider_switch_keeps_reference(true);
   retained_provider_switch_keeps_reference(false);
+  pending_capture_does_not_order_readable_copies();
   sunshine_raw_scene::policy policy;
   policy.reset(1, 1000);
   policy.configure(test_budget);

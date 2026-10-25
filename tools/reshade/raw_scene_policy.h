@@ -183,13 +183,19 @@ namespace sunshine_raw_scene {
         suspend();
         return result(status::frame_mismatch);
       }
-      current_frame_ = current.frame;
-      have_current_ = true;
       const auto admitted = admission(current);
       if (admitted != status::ready) {
         suspend();
         return result(admitted);
       }
+      // Only an admitted pair sets the current-frame order. An API Present
+      // can name its newest capture while that capture's pixels are still in
+      // flight (another queue's copy); the next Present may then show an older
+      // readable copy, still newer than any pair shown before. Ordering by the
+      // unshown capture kept every such copy at frame_mismatch until that
+      // capture itself was readable.
+      current_frame_ = current.frame;
+      have_current_ = true;
       if (!have_basis_ || !same_basis(current, basis_)) {
         suspend();
         return result(status::source_mismatch);

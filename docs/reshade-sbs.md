@@ -5283,7 +5283,11 @@ with useful input and has no five-second timeout/retry wrapper. An unusable new 
 observation invalidates that source's incomplete evidence. A missing current copy does not break
 the window or move its asynchronous capture-admission floor. Authoritative source facts are
 applied first, all available completed packets are observed, and current geometry then ticks once.
-Sample and current-frame order are checked separately.
+Sample and current-frame order are checked separately. Only a current copy that can render sets the
+current-frame order. An API Present can name its newest capture while that capture's pixels are still
+in flight on another queue; the next Present may show an older readable copy, still newer than every
+copy shown before, and that copy renders at once (until 10-25 the unshown capture kept such copies flat
+until it was itself readable).
 
 A source outside the retained capture set supplies its own fresh initialization window. Lifetime,
 crop/layout, orientation or reported convention changes invalidate that member's numeric state.
