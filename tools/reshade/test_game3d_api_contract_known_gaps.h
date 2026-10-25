@@ -142,13 +142,6 @@ namespace game3d_contract::known_gaps {
       return value.extent == extent_form::declared_size_differs && capture_required(value);
     }
 
-    // A multi-tag array from a release newer than the survey whose tags
-    // declare ResourceTag v1, which S24 refuses.
-    constexpr bool unsurveyed_tag_array(const sl_case &value) {
-      return expect(value).by == &rules::S24 && value.version.major == 2 && value.tags_in_call > 1 && value.tags_in_call <= 32 &&
-             value.tag_header == struct_form::newest_known;
-    }
-
   }  // namespace streamline
 
   inline constexpr row<sl_case> sl_rows[] {
@@ -156,7 +149,6 @@ namespace game3d_contract::known_gaps {
     {"S15", &rules::S15, kind::expected_failure, &streamline::chained_local, "Stage 3 fix 8 (S4/S15). In read_local_inputs, decode a chained tag with its next pointer cleared (as the viewport already is), treating a PrecisionInfo node as the preceding tag's; fix with S4.", &behaviours::no_copy},
     {"S16", &rules::S16, kind::expected_failure, &streamline::zero_sided_extent, "Stage 3 fix 12 (S16). Use Streamline's whole-resource rule !(width && height) (sl_consts.h:150) in match() (streamline_camera_data.cpp) and source_region (streamline_depth_capture.cpp).", &behaviours::no_copy},
     {"S16d", &rules::S16d, kind::expected_failure, &streamline::declared_size, "Stage 3 fix 12 (S16). Drop the declared Resource size check from match(); the capture already bounds the extent by the allocation (source_region).", &behaviours::no_copy},
-    {"S24-pending", &rules::S24, kind::pending, &streamline::unsurveyed_tag_array, "Owner ruling needed: the add-on reads a multi-tag array from a release newer than the survey when its ResourceTag declares version 1, whose stride is known (sl_struct.h appends members with a version bump; S14 still refuses a later version in an array). The design's S24 refuses any such array. Either relax S24 to major 3 and above, or make read_tags refuse these arrays."},
   };
 
   // A Streamline frame judged at its Present by the runtime layer
@@ -274,10 +266,6 @@ namespace game3d_contract::known_gaps {
     constexpr bool declared_size_refused(const present_case &value) {
       return extent_refused(value, extent_form::declared_size_differs);
     }
-
-    constexpr bool unsurveyed_tag_array(const present_case &value) {
-      return streamline::unsurveyed_tag_array(value.decided);
-    }
   }  // namespace present
 
   // Streamline cells run through the native provider fixture (judged with
@@ -293,7 +281,6 @@ namespace game3d_contract::known_gaps {
     {"S16-refusal", &rules::S16, kind::expected_failure, &present::zero_sided_extent_refused, "Stage 3 fix 12 (S16). With S16: a zero-sided extent on a cell the oracle refuses, or may refuse, for another class (its state) is refused as invalid-extent (malformed) before that is judged, so its refusal class differs. The S16 fix closes this row.", &behaviours::refused_as<refusal::malformed>},
     {"S16d", &rules::S16d, kind::expected_failure, &present::declared_size, "Stage 3 fix 12 (S16). As the hook table's S16d row.", &behaviours::no_copy},
     {"S16d-refusal", &rules::S16d, kind::expected_failure, &present::declared_size_refused, "Stage 3 fix 12 (S16). With S16d: a declared Resource size other than the allocation's, on a cell the oracle refuses or may refuse for another class (an enhanced layout's state), is refused as invalid-extent (malformed) by match() first. Dropping that check closes this row.", &behaviours::refused_as<refusal::malformed>},
-    {"S24-pending", &rules::S24, kind::pending, &present::unsurveyed_tag_array, "As the hook table's S24-pending row: through 2.15.0's interposer the add-on reads and copies the array's depth tag."},
   };
 
   // NGX evaluations, DLSS-G's own (N4) included (checked by the hook layer).

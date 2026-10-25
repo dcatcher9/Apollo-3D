@@ -1441,7 +1441,8 @@ own hooks on fixture entry points (`testing::install` takes the release's versio
 the ABI and buffer contract as discovery does for that version resource). They cover the full
 product of tag entry point, lifecycle, command list, copy point and generated Presents; every
 other value alone; a pairwise covering array over all dimensions, seeded with rows from the games
-the add-on was tuned on; and one row per open owner question. A changing extent runs two render
+the add-on was tuned on; and one row per owner question the known-gap table held pending (S14 and
+S24, since decided from the SDK headers). A changing extent runs two render
 sizes and must keep one logical source. NGX cases go through the evaluation adapter over every
 combination of its dimensions, DLSS-G's own `DLSSG.*` inputs included. The admission checks the
 layer cannot run without a device (the copy's command list and its lifetime: inside the tag call,
@@ -1513,7 +1514,8 @@ point; the hook layer runs it as a later evaluate without the input. `sl27` (2.7
 cell: the product of state class, lifecycle and command list (at a same-frame evaluate and at an FG
 tag call), seed rows, each value alone and a pairwise array. `sl26` (2.6.10, no frame tags) and
 `sl212_214` (2.14.1, the newest surveyed release) run their seed rows and a pairwise array;
-`sl215_30` runs the seed rows of 2.15.0 (newer than the survey: tag arrays, S24) and of 3.0.0 (a
+`sl215_30` runs the seed rows of 2.15.0 (newer than the survey: its arrays of version-1 tags are
+read as a surveyed release's, S24) and of 3.0.0 (a
 major no header defines, which discovery refuses, so nothing it tags may be shown) in a process
 each. Each case is judged at its
 Presents: a capture is the case's allocation shown fresh, with its tagged extent and one identity,

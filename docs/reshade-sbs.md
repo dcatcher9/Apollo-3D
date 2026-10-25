@@ -3468,7 +3468,11 @@ version from 1 by the prefix it consumes (the API contract matrix's S13, since S
 before, a version above 2.14.1's, Constants 2, ViewportHandle 1 and DLSSGOptions 5, was unknown,
 which dropped the camera, every tag of the call or the frame-generation mode). A ResourceTag above version 1 may be larger, so an array
 of more than one such tag in one `slSetTag`/`slSetTagForFrame` call has an unknown stride and is
-read as unreadable; a single tag and tags chained in evaluate inputs are read. `sl_core_api.h`
+read as unreadable; a single tag and tags chained in evaluate inputs are read. An array of
+version-1 tags from a release newer than the survey (2.15 and later) is read the same way: a
+structure gains members only with a version bump, so version 1 names its stride (the API contract
+matrix's S24, decided from the SDK headers in Stage 3 batch B; S24 refuses only a major other than
+1 and 2, which discovery already refuses). `sl_core_api.h`
 sets no limit on `numTags` or `numInputs`, so a tag array, an input list and an input chain are
 read 32 elements at a time to their end (the API contract matrix's S18, since Stage 3 batch B;
 before, an array of more than 32 tags was read as unreadable, which cleared every tag of its

@@ -1158,8 +1158,8 @@ namespace {
       {"e33", "extent=padded"},  // A 2228x1256 crop of a 3840x2160 allocation.
     };
 
-    // One row per owner question the known-gap table held pending (S24 is
-    // open; S14 was decided from the SDK headers), so the run keeps showing
+    // One row per owner question the known-gap table held pending, both
+    // since decided from the SDK headers (S24, S14), so the run keeps showing
     // what the add-on does there.
     constexpr seed questions[] {
       {"S24-question", "version=2.15.0,tags=32"},
@@ -2079,7 +2079,7 @@ int main(int argc, char **argv) try {
   }
   const auto hooks = hook_layer(options);
   const auto &census = hooks.census;
-  std::printf("PASS API contract matrix L1%s: %u Streamline hook cells: the %u-row copy-point product (%u constructible, %u legal), %u seed rows, %u open-question rows, %u one-factor rows and %u pairwise rows covering all %zu legal value pairs; ", options.partial() ? " shard" : "", hooks.streamline.cells, census.product, census.constructible, census.legal_product, census.seeded, census.questions, census.one_factor, census.pairwise, census.pairs);
+  std::printf("PASS API contract matrix L1%s: %u Streamline hook cells: the %u-row copy-point product (%u constructible, %u legal), %u seed rows, %u owner-question rows, %u one-factor rows and %u pairwise rows covering all %zu legal value pairs; ", options.partial() ? " shard" : "", hooks.streamline.cells, census.product, census.constructible, census.legal_product, census.seeded, census.questions, census.one_factor, census.pairwise, census.pairs);
   hooks.streamline.print(gaps::sl_rows);
   std::printf(". %u NGX evaluation cells (%u of DLSS-G's own evaluation): ", hooks.ngx.cells, hooks.ngx_frame_generation);
   hooks.ngx.print(gaps::ngx_rows);

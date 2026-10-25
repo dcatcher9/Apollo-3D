@@ -79,7 +79,7 @@ namespace game3d_contract {
     inline constexpr rule S22 {"S22", "COMPUTE evaluate list with a compute-legal state: CAPTURE", "SLA:253: the command buffer must be created on a device where the feature is supported (no list type is required)"};
     inline constexpr rule S22b {"S22b", "COMPUTE list with a DEPTH_*, PIXEL_SHADER_RESOURCE or RENDER_TARGET state: REFUSE", "Enhanced Barriers, Command Queue Layout Compatibility (COMPUTE has no depth, render-target or pixel-shader layouts)"};
     inline constexpr rule S23 {"S23", "Render pass open at the copy point: HOLD", "D3D12 render passes (BeginRenderPass..EndRenderPass) admit no copy in the pass; fail-safe hold"};
-    inline constexpr rule S24 {"S24", "Major version 3 or above, or a multi-tag array on a release newer than the survey: REFUSE unknown_abi; the game is unaffected", "sl-abi-survey REPORT.md (surveyed through 2.14.1); sl_struct.h:43-106 (array stride needs the known size)"};
+    inline constexpr rule S24 {"S24", "A major other than 1 or 2: REFUSE unknown_abi; the game is unaffected. A 2.x release newer than the survey is read as a surveyed one: an array of ResourceTag version 1 has version 1's stride (an array of a later version is S14's)", "sl-abi-survey REPORT.md (every release of majors 1 and 2 through 2.14.1); sl_struct.h:43-76, 98 (new members go at the end with a version bump, so a structure at version 1 has version 1's members and size); SLA:143-173 (slSetTag and slSetTagForFrame take an array of ResourceTag); v2.14.1 SLT:412 (ResourceTag is kStructVersion1)"};
 
     inline constexpr rule D0 {"D0", "No state evidence on the recording and no state claim: REFUSE state_unprovable", "MS Learn, Using Resource Barriers: a subresource's state is 'determined by the set of D3D12_RESOURCE_STATES flags supplied to ResourceBarrier'; nothing named it"};
     inline constexpr rule D1 {"D1", "A legal read-only combination, or DEPTH_WRITE, RENDER_TARGET, UNORDERED_ACCESS or COPY_DEST alone, proven on the recording: CAPTURE, restored exactly", "d3d12.h:1762-1788; MS Learn, Read/write resource state restrictions: one write bit alone, or any number of read bits"};
@@ -815,7 +815,7 @@ namespace game3d_contract {
   // A Streamline depth tag (S-rules); its copy state comes from expect(state_case).
   constexpr outcome expect(const sl_case &value) {
     using namespace detail;
-    if (value.version.major < 1 || value.version.major > 2 || (newest_surveyed < value.version && value.tags_in_call > 1)) {
+    if (value.version.major < 1 || value.version.major > 2) {
       return refuse(rules::S24, refusal::unknown_abi);
     }
     if (value.resource == resource_form::null_resource || value.resource == resource_form::null_native) {
@@ -1431,7 +1431,11 @@ namespace game3d_contract {
     static_assert(captures(expect(with(tag(present, evaluate), &sl_case::list, list_type::compute)), rules::S22, nps));
     static_assert(decides(expect(with(tag(present, evaluate), &sl_case::pass, render_pass::open)), rules::S23, outcome_kind::hold));
     static_assert(refuses(expect(with(tag(present, evaluate), &sl_case::version, sl_version {3, 0, 0})), rules::S24, refusal::unknown_abi));
-    static_assert(refuses(expect(with(with(tag(present, evaluate), &sl_case::version, sl_version {2, 15, 0}), &sl_case::tags_in_call, 2u)), rules::S24, refusal::unknown_abi));
+    // S24: 2.15's array of version-1 tags has version 1's stride; a later
+    // version in an array is S14's.
+    static_assert(captures(expect(with(with(tag(present, evaluate), &sl_case::version, sl_version {2, 15, 0}), &sl_case::tags_in_call, 2u)), rules::S5, nps));
+    static_assert(captures(expect(with(with(tag(present, evaluate), &sl_case::version, sl_version {2, 15, 0}), &sl_case::tags_in_call, 73u)), rules::S18, nps));
+    static_assert(refuses(expect(with(with(with(tag(present, evaluate), &sl_case::version, sl_version {2, 15, 0}), &sl_case::tags_in_call, 2u), &sl_case::tag_header, struct_form::above_known)), rules::S14, refusal::unknown_abi));
 
     static_assert(captures(expect(ngx_case {}), rules::N1, nps));
     static_assert(refuses(expect(with(ngx_case {}, &ngx_case::hw_depth, ngx_hw_depth::other)), rules::N2, refusal::malformed));
