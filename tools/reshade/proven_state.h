@@ -34,9 +34,11 @@
 // never for the queries that admit a copy from a proof alone. A full table
 // that forgets a latched texture keeps its identity in a bounded record:
 // queried while not held, or held again (watched or adopted), it is latched.
-// Once that record drops one, every texture that is not held or is held again
-// counts as latched (latch_lost). A texture tracked from its creation is new
-// and starts unlatched.
+// Once that record drops one, every texture that is not held counts as
+// latched (latch_lost); a texture held again takes its latch from the record
+// alone, since one first held then cannot be told from one forgotten long
+// ago, and latching every such texture would refuse every new source's claim.
+// A texture tracked from its creation is new and starts unlatched.
 namespace sunshine_proven_state {
   struct state {
     std::uint64_t version {};  // Nonzero while proven; every update takes a new one.
@@ -91,8 +93,8 @@ namespace sunshine_proven_state {
 
     // A live texture tracked from now on, not from its creation: unproven
     // until a later barrier proves it. A watched texture becomes tracked and
-    // keeps its latch; one not held is latched when it was forgotten latched
-    // (or a latch was lost). A tracked texture is unchanged.
+    // keeps its latch; one not held is latched when the record holds it as
+    // forgotten latched. A tracked texture is unchanged.
     void adopt(std::uint64_t resource) {
       if (!resource) {
         return;
@@ -258,6 +260,16 @@ namespace sunshine_proven_state {
     // records it when latched. A live texture held again (alive) takes its
     // latch from that record; a created one starts unlatched.
     entry *insert(std::uint64_t resource, bool alive) {
+      bool latched = false;
+      if (alive) {
+        // The entry carries a remembered latch again, freeing its record
+        // before an eviction below needs one.
+        const auto remembered = std::find(forgotten.begin(), forgotten.end(), resource);
+        latched = remembered != forgotten.end();
+        if (latched) {
+          *remembered = 0;
+        }
+      }
       if (count == Capacity) {
         const auto oldest = std::min_element(entries.begin(), entries.end(), [](const entry &a, const entry &b) {
           return a.used < b.used;
@@ -272,15 +284,6 @@ namespace sunshine_proven_state {
         }
         std::move(oldest + 1, entries.end(), oldest);
         --count;
-      }
-      bool latched = false;
-      if (alive) {
-        // The entry carries a remembered latch again, freeing its record.
-        const auto remembered = std::find(forgotten.begin(), forgotten.end(), resource);
-        if (remembered != forgotten.end()) {
-          *remembered = 0;
-        }
-        latched = lost || remembered != forgotten.end();
       }
       const auto end = entries.begin() + count;
       const auto at = std::lower_bound(entries.begin(), end, resource, [](const entry &value, std::uint64_t key) {

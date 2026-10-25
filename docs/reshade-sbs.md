@@ -3749,8 +3749,13 @@ The earlier capture then holds within the source age, then the view is mono. A f
 forgets a latched texture records its identity (at most 128): queried while not held, or held again
 (an adapter retains it again, the UI layer clears it again, or a deferred copy tracks it), it is
 latched. Only a texture created afterwards, which ReShade's `init_resource` reports, is new and
-starts unlatched. When that record is full, forgetting another latched texture loses a latch: from
-then on every texture not held, and every texture held again, counts as latched (`latch_lost`).
+starts unlatched. When that record is full, forgetting another latched texture drops the oldest
+identity from it and loses a latch (`latch_lost`): from then on every texture not held counts as
+latched. A texture held again still takes its latch from the record alone: one first held then
+cannot be told from one dropped from the record, and latching each of them would refuse every new
+source's claim (the contract matrix's device layer, whose thousands of short-lived sources overflow
+the record, showed exactly that). A latched texture dropped from the record and held again later is
+therefore unlatched; `latch_lost` on the status line names that this can have happened.
 Two cases stay open, as before this rule: a texture that was neither tracked nor
 watched when its enhanced barrier executed (an adapter's source first retained after it) is latched
 only once a later executed list names it, and a copy recorded before the latching list executed

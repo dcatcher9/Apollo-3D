@@ -9,8 +9,8 @@
 // texture. The enhanced-layout latch (D6, N8) of a tracked or watched texture
 // survives unseen work and later proofs, a watched texture's proof serves the
 // latch alone, a forgotten latched texture is latched again when held again,
-// and overflowing that record latches every texture not held or held again
-// (a created one excepted). The capture owner's feeding of it is proven on
+// and overflowing that record latches every texture not held (one held again
+// keeps the record's answer). The capture owner's feeding of it is proven on
 // real lists by the contract matrix's device layer (end_of_frame and earlier
 // enhanced layout cells).
 #include "proven_state.h"
@@ -130,17 +130,21 @@ int main() {
   }
   {
     // A full record of forgotten latched textures loses a latch: every
-    // texture not held, or held again, counts as latched; a created one does
-    // not.
+    // texture not held counts as latched, while one held again still takes
+    // its latch from the record alone (a new source is not refused).
     table owner;
     for (std::uint64_t resource = 1; resource <= 8; ++resource) {
       owner.watch(resource);
       owner.set_latch(resource);
     }
     check(!owner.latch_lost() && owner.latched(1).latched && !owner.latched(100).latched, "The record holds as many forgotten latched textures as the table");
-    owner.watch(9);  // Forgets 5 with the record full.
-    owner.watch(10);
-    check(owner.latch_lost() && owner.latched(100).latched && owner.latched(10).latched, "Overflowing the record latches every texture not held and every one held again");
+    owner.watch(9);  // Forgets 5 with the record full: 1 drops out of it.
+    owner.watch(10);  // Forgets 6: 2 drops out.
+    check(owner.latch_lost() && owner.latched(100).latched && !owner.latched(10).latched, "Overflowing the record latches every texture not held, not a new one held");
+    owner.watch(3);
+    check(owner.latched(3).latched, "A texture the record still holds is latched when held again");
+    owner.adopt(1);
+    check(!owner.latched(1).latched, "One the record dropped is held again unlatched (latch_lost names the loss)");
     owner.track(11, true, depth_write);
     check(!owner.latched(11).latched, "A texture tracked from its creation starts unlatched after a latch was lost");
   }
