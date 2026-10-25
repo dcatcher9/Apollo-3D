@@ -516,6 +516,17 @@ namespace {
       require(result == return_result.load() && GetLastError() == output_error,
         "capture changed evaluation result/LastError");
     };
+    // A missed CreateFeature recovered from a map with the explicit encoding
+    // key may be Ray Reconstruction's, whose guide states no input state: only
+    // an observed state proves its Depth (N1b).
+    handle = reinterpret_cast<void *>(handle_bits + 64);
+    parameters.missing_hardware_depth = false;
+    evaluate_feature();
+    require(captures == 1 && captured_frame.proof == sunshine_scene_depth::state_proof::observed_nonzero &&
+        captured_frame.native_state == UINT32_MAX, "a recovered feature with an explicit encoding took Super Resolution's contract state");
+    require(release_entry(handle) == return_result.load(), "releasing the recovered explicit-encoding feature failed");
+    parameters.missing_hardware_depth = true;
+    captures = finishes = retirements = 0; retired_id = 0;
     handle = reinterpret_cast<void *>(handle_bits);
     // A missed CreateFeature (late attach or add-on reinitialization) stays
     // unknown unless the evaluation map still carries its creation values.
@@ -881,6 +892,10 @@ namespace {
     require(captures == 1 && finishes == 1 && last_finish && captured_frame.projection.encoding == encoding::device &&
       captured_frame.projection.reversed && captured_frame.resource.native == reinterpret_cast<std::uint64_t>(parameters.depth),
       "RR hardware depth did not share exact-resource capture");
+    // No cited guide states RR's input state: only an observed one proves it (N1b).
+    require(captured_frame.proof == sunshine_scene_depth::state_proof::observed_nonzero && captured_frame.native_state == UINT32_MAX &&
+      captured_frame.valid_until == sunshine_scene_depth::lifetime::until_evaluation,
+      "RR depth was nominated with Super Resolution's contract state");
     const auto hardware_source = captured_frame.source_id;
     parameters.hardware_depth = 0;
     create_rr(); evaluate_rr();

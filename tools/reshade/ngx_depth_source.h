@@ -32,6 +32,9 @@ namespace sunshine_ngx {
     int flags{};
     bool valid{};
     sunshine_scene_depth::depth_encoding encoding{sunshine_scene_depth::depth_encoding::device};
+    // The encoding is Super Resolution's default: the map has no
+    // DLSS.Use.HW.Depth key, which only SR/DLAA's create helpers omit.
+    bool super_resolution_default{};
   };
   creation before_create(const parameter_api &api, std::uint32_t feature, const void *parameters);
   void after_create(HMODULE owner, const void *handle, const creation &value, bool successful);

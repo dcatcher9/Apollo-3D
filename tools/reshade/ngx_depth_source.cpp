@@ -27,7 +27,8 @@ namespace sunshine_ngx {
     // 374959484e79a640feaba44c93ac8cfb0a03f5b5, include/nvsdk_ngx_params.h,
     // nvsdk_ngx_defs.h and nvsdk_ngx_helpers_d3d.h. The public C Get* wrappers
     // dispatch through the owning SDK's own C++ ABI. We never decode that ABI.
-    constexpr std::uint32_t super_sampling = 1, inverted_depth = 1u << 3;
+    using sunshine_api_contract::ngx::super_sampling;
+    constexpr std::uint32_t inverted_depth = 1u << 3;
     // NVSDK_NGX_Feature_FrameGeneration (DLSS-G), nvsdk_ngx_defs.h. Its inputs
     // are the DLSSG.* parameters of nvsdk_ngx_defs_dlssg.h, not SR's Depth.
     constexpr std::uint32_t frame_generation_feature = 11;
@@ -508,6 +509,8 @@ namespace sunshine_ngx {
         // Every feature is registered. SR's documented input is device depth;
         // other features need an explicit encoding before pixels can be used.
         return value;
+      } else {
+        value.super_resolution_default = true;
       }
       value.valid = success(api.integer(const_cast<void *>(parameters), "DLSS.Feature.Create.Flags", &value.flags)) &&
         get_uint(api, parameters, "Width", value.width) && get_uint(api, parameters, "Height", value.height) &&
@@ -701,12 +704,17 @@ namespace sunshine_ngx {
     value.projection.reversed = value.projection.encoding == sunshine_scene_depth::depth_encoding::device &&
       (selected.parameters.flags & inverted_depth) != 0;
     value.projection.direction_supplied = true;
-    // NGX names the resource but no per-call state. Its SDK contract fixes the
-    // input state at this boundary (api_contract.h); a state observed on the
-    // same recording still takes precedence in the shared copy owner. Engines
-    // commonly record that transition on an earlier command list, where it
-    // cannot be observed.
-    sunshine_api_contract::apply(sunshine_api_contract::ngx::evaluation_input, value);
+    // NGX names the resource but no per-call state. Super Resolution's SDK
+    // contract fixes the input state at this boundary (api_contract.h); a
+    // state observed on the same recording still takes precedence in the
+    // shared copy owner. Engines commonly record that transition on an
+    // earlier command list, where it cannot be observed. No other feature's
+    // guide states its input state, so only an observed state proves it (N1b).
+    // A registration recovered from a map without the explicit encoding key
+    // is Super Resolution's (recover_feature).
+    const auto feature = selected.parameters.feature == recovered_feature && selected.parameters.super_resolution_default ?
+      super_sampling : selected.parameters.feature;
+    sunshine_api_contract::apply(sunshine_api_contract::ngx::evaluation_input_of(feature), value);
 #ifndef SUNSHINE_UPSCALER_TRACE_TEST
     using namespace sunshine_streamline;
     depth_capture::begin_evaluation(value.epoch, value.sequence, value.viewport, value.provider, value.source_id);

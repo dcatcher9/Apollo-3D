@@ -4742,11 +4742,18 @@ A render subrect reported as 0x0 means the whole creation-size input, exactly li
 NGX supplies no per-call resource state, but its SDK fixes one: NVIDIA's DLSS Programming Guide,
 section 3.4 "Resource States", requires every D3D12 input to be
 `D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE` at the evaluation call and states that DLSS
-restores it afterwards. The adapter therefore nominates every accepted feature with
-`state_proof::sdk_contract` (`ngx::evaluation_input` in
-[`api_contract.h`](../tools/reshade/api_contract.h)). That guide covers Super Resolution only, so the
-[API contract matrix](../tools/reshade/README.md#api-contract-matrix) lists Ray Reconstruction and
-other features as known gaps until a cited guide states their input state. A known,
+restores it afterwards. The adapter therefore nominates a Super Resolution feature with
+`state_proof::sdk_contract` (`ngx::evaluation_input_of` in
+[`api_contract.h`](../tools/reshade/api_contract.h)), and so a registration recovered at its
+evaluation from a map without `DLSS.Use.HW.Depth`, which only SR's create helpers omit. That guide
+covers Super Resolution only. The DLSS-RR Integration Guide is an addendum to it with no
+resource-state section (it extends only the evaluation call, section 5.4), and RR's helpers set no
+state, so Ray Reconstruction (feature 13), any other feature and a recovered registration with the
+explicit key are nominated with `state_proof::observed_nonzero`: only a state observed on the
+evaluation's own recording proves their `Depth`, as for DLSS-G's own inputs, and with none the copy
+is refused as `missing_state` (the
+[API contract matrix](../tools/reshade/README.md#api-contract-matrix)'s N1b, since Stage 3 batch B;
+before, every feature took Super Resolution's contract state). A known,
 unblocked state observed on the same recording takes precedence. An observed COMMON on a texture
 that is not depth-stencil (on depth-stencil it is the state, D3), or a blocked, split or unknown
 state still rejects capture. Only a recording with no entry for the

@@ -185,15 +185,28 @@ namespace sunshine_api_contract {
     // Guide, section 3.4 "Resource States": every D3D12 input must be in this
     // state at the evaluation call, and DLSS always restores it afterwards.
     inline constexpr std::uint32_t evaluation_input_state = 0x40;
-    // An accepted evaluation's input: the SDK contract fixes its state at this
-    // boundary (a state observed on the same recording still takes
-    // precedence), and it holds for the evaluation. The guide covers Super
-    // Resolution only; the contract matrix lists the other features as gaps.
+    // NVSDK_NGX_Feature_SuperSampling (nvsdk_ngx_defs.h), the feature that
+    // guide covers.
+    inline constexpr std::uint32_t super_sampling = 1;
+    // An accepted Super Resolution evaluation's input: the SDK contract fixes
+    // its state at this boundary (a state observed on the same recording
+    // still takes precedence), and it holds for the evaluation.
     inline constexpr contract evaluation_input{evaluation_input_state, state_proof::sdk_contract, lifetime::until_evaluation};
     // DLSS-G's own inputs (frame_generation_inputs.h): no API states their
     // state at this call, so only a state observed on the evaluation's own
     // recording proves it.
     inline constexpr contract frame_generation_input{UINT32_MAX, state_proof::observed_nonzero, lifetime::until_evaluation};
+    // A Depth input by its evaluation's feature: Super Resolution's SDK
+    // contract. No other feature's guide states one: the DLSS-RR Integration
+    // Guide, an addendum to the DLSS guide, names no resource state and
+    // extends only its evaluation call (section 5.4, not 3.4), and
+    // nvsdk_ngx_helpers_dlssd_d3d.h sets none. So Ray Reconstruction (13) and
+    // any other feature are proven only by a state observed on the
+    // evaluation's own recording, for the evaluation (the matrix's N1b).
+    constexpr contract evaluation_input_of(std::uint32_t feature) {
+      return feature == super_sampling ? evaluation_input :
+        contract{UINT32_MAX, state_proof::observed_nonzero, lifetime::until_evaluation};
+    }
   }
 
   // Generic: the depth-stencil copy depth_addon.cpp records before a clear,

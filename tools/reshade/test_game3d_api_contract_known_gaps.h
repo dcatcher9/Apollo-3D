@@ -182,37 +182,24 @@ namespace game3d_contract::known_gaps {
   };
 
   // NGX evaluations, DLSS-G's own (N4) included (checked by the hook layer).
+  // The add-on meets every cell; one pending row that matches no cell stands
+  // in for the table.
   namespace ngx {
-    // A Depth otherwise valid, with no state observed on the recording, of a
-    // feature whose input state no cited guide states: the adapter nominates
-    // every feature with the SR contract's NON_PIXEL_SHADER_RESOURCE.
-    constexpr bool uncited_contract_state(const ngx_case &value, ngx_feature feature) {
-      return value.feature == feature && value.depth_set == ngx_depth_set::d3d12_resource && value.lifetime != ngx_lifetime::nested_in_streamline &&
-             value.depth.seen == evidence::none && !(value.depth.flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) && legal(value) &&
-             expect(value).by == &rules::N1b;
-    }
-
-    constexpr bool ray_reconstruction(const ngx_case &value) {
-      return uncited_contract_state(value, ngx_feature::ray_reconstruction);
-    }
-
-    constexpr bool unknown_feature(const ngx_case &value) {
-      return uncited_contract_state(value, ngx_feature::unknown);
+    constexpr bool no_cell(const ngx_case &) {
+      return false;
     }
   }  // namespace ngx
 
   inline constexpr row<ngx_case> ngx_rows[] {
-    {"N1b", &rules::N1b, kind::expected_failure, &ngx::unknown_feature, "Outside the Stage 3 order. A feature no cited guide covers is copied from the SR contract state: in ngx_depth_source.cpp nominate features other than SR (and RR once N1 covers it) with state_proof::observed_nonzero instead of sdk_contract, so only a recorded state proves them. Fail-safe for no shipping game known today.", &behaviours::copy},
-    {"N1b-pending", &rules::N1b, kind::pending, &ngx::ray_reconstruction, "Owner action needed: the DLSS-RR guide is not among the cited sources. If its resource-state section names NON_PIXEL_SHADER_RESOURCE as the SR guide does, cite it in N1 for feature 13 and drop this row; otherwise RR follows N1b like an unknown feature."},
+    {"none", &rules::N1, kind::pending, &ngx::no_cell, "No NGX hook gap remains: Stage 3 batch B closed N1b (Ray Reconstruction and any feature but Super Resolution are proven only by an observed state; the DLSS-RR Integration Guide states no input state). This row matches no cell."},
   };
 
   // NGX evaluations judged at Present by the runtime layer
   // (test_game3d_api_contract_runtime.cpp, family ngx, judged with
-  // judge_each). A row that shares an id with the hook table's names the same
-  // gap; that row's note holds the fix.
+  // judge_each). The add-on meets every cell; one pending row that matches no
+  // cell stands in for the table.
   inline constexpr row<ngx_case> ngx_runtime_rows[] {
-    {"N1b", &rules::N1b, kind::expected_failure, &ngx::unknown_feature, "Outside the Stage 3 order. As the hook table's N1b row: the Present shows the unknown feature's depth, copied from the SR contract state with nothing recorded on its list.", &behaviours::copy},
-    {"N1b-pending", &rules::N1b, kind::pending, &ngx::ray_reconstruction, "As the hook table's N1b-pending row."},
+    {"none", &rules::N1, kind::pending, &ngx::no_cell, "No NGX runtime gap remains: Stage 3 batch B closed N1b. This row matches no cell."},
   };
 
   // Generic depth-stencil boundaries judged at Present by the runtime layer

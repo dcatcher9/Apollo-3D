@@ -288,6 +288,17 @@ int main() {
             ngx::frame_generation_input.valid_until == lifetime::until_evaluation,
     "DLSS-G's own inputs name no state: only an observed state proves them, for the evaluation");
   {
+    const auto sr = ngx::evaluation_input_of(1);
+    require(sr.native_state == 0x40 && sr.proof == state_proof::sdk_contract && sr.valid_until == lifetime::until_evaluation,
+      "A Super Resolution Depth has the SDK contract's state (N1)");
+    for (const std::uint32_t feature : {0u, 13u, 2u, 0xfffffffeu}) {
+      const auto value = ngx::evaluation_input_of(feature);
+      require(value.native_state == UINT32_MAX && value.proof == state_proof::observed_nonzero &&
+                value.valid_until == lifetime::until_evaluation,
+        "Ray Reconstruction's and any other feature's Depth names no state: only an observed state proves it (N1b)");
+    }
+  }
+  {
     const auto value = generic::preserved(0x10);
     require(value.native_state == 0x10 && value.proof == state_proof::declared && value.valid_until == lifetime::until_present,
       "A Generic boundary other than a clear declares its caller's state, held until Present");

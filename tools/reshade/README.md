@@ -1661,7 +1661,10 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   ([Direct NGX depth selection](../../docs/reshade-sbs.md#direct-ngx-depth-selection)). The test
   states whether a live FG scope owns depth through a callback that only the call-trace build has
   (`sunshine_ngx::testing::callbacks`), in place of the Streamline FG query; the seam
-  characterization pins the production rule.
+  characterization pins the production rule. It also pins each nomination's state proof: Super
+  Resolution's contract state for SR and for a registration recovered from a map without
+  `DLSS.Use.HW.Depth`, and only an observed state for Ray Reconstruction and for a recovered
+  registration with that key (N1b).
 - [`test_game3d_hook_set.cpp`](test_game3d_hook_set.cpp) (`reshade_game3d_hook_set`) pins the
   shipping add-on's installed hook set, which hook host moves must keep: the binary is its own
   process's ReShade, runs `AddonInit` and `AddonUninit`, and compares the ReShade events each
