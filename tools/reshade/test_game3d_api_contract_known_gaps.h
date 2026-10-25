@@ -83,19 +83,6 @@ namespace game3d_contract::known_gaps {
 
   // The state a copy may start from (checked by test_game3d_api_contract_cpu.cpp).
   namespace state {
-    // RESOLVE_DEST, legacy or enhanced, is never a copy basis.
-    constexpr bool resolve_destination(const state_case &value) {
-      const auto &source = value.resource;
-      const bool declared = value.source == claim::sl_declared && value.declared == D3D12_RESOURCE_STATE_RESOLVE_DEST;
-      if (source.seen == evidence::transition && source.observed == D3D12_RESOURCE_STATE_RESOLVE_DEST) {
-        return value.source != claim::sl_declared || declared;
-      }
-      if (source.seen == evidence::enhanced && source.layout == D3D12_BARRIER_LAYOUT_RESOLVE_DEST && source.access != D3D12_BARRIER_ACCESS_NO_ACCESS) {
-        return value.source != claim::sl_declared || declared;
-      }
-      return source.seen == evidence::none && declared;
-    }
-
     // The resource flags are not checked against the copy basis: an observed
     // state or layout, or a depth declaration, that the allocation cannot be
     // in is copied from. (A UI declaration is checked for render-target, UAV
@@ -142,30 +129,12 @@ namespace game3d_contract::known_gaps {
       const auto &source = value.resource;
       return source.seen == evidence::end_mismatched && (value.source != claim::sl_declared || value.declared == source.observed);
     }
-
-    // A declaration of a later use that another recorded state overrides
-    // (S11): the recorded state is then judged by the observation rules.
-    constexpr bool overridden_declaration(const state_case &value) {
-      return value.source == claim::sl_declared && value.scope == claim_scope::before_use;
-    }
-
-    // A RESOLVE_DEST recorded there, legacy or enhanced, is refused as an
-    // unsupported state.
-    constexpr bool resolve_destination_over_declaration(const state_case &value) {
-      const auto &source = value.resource;
-      const bool legacy = source.seen == evidence::transition && source.observed == D3D12_RESOURCE_STATE_RESOLVE_DEST;
-      const bool enhanced = source.seen == evidence::enhanced && source.layout == D3D12_BARRIER_LAYOUT_RESOLVE_DEST &&
-                            source.access != D3D12_BARRIER_ACCESS_NO_ACCESS;
-      return overridden_declaration(value) && (legacy || enhanced) && value.declared != D3D12_RESOURCE_STATE_RESOLVE_DEST;
-    }
   }  // namespace state
 
   inline constexpr row<state_case> state_rows[] {
-    {"D2", &rules::D2, kind::expected_failure, &state::resolve_destination, "Outside the Stage 3 order. Fail-safe today (refusal is harmless), lowest priority: admit RESOLVE_DEST in copy_state::supported and layouts::admissible when a game is seen to need it."},
     {"X1", &rules::X1, kind::expected_failure, &state::basis_flags_unchecked, "Outside the Stage 3 order. Illegal game input only: check the allocation flags for every copy basis in copy_state::resolve (today only the at-call UI declaration fallback does), so an impossible state never reaches a barrier."},
     {"X2", &rules::X2, kind::expected_failure, &state::buffer_read_bits, "Outside the Stage 3 order. Illegal game input, but not harmless: the copy's barrier from such a state makes the game's own ID3D12GraphicsCommandList::Close fail (E_INVALIDARG), as the device layer saw for GENERIC_READ | DEPTH_READ. Admit GENERIC_READ itself and no other state with a buffer read bit in copy_state::supported, and update test_capture_state_policy.cpp's supported() checks with it."},
     {"D4c", &rules::D4c, kind::expected_failure, &state::mismatched_split_end, "Stage 3 fix 13 (D4c). Illegal game input: streamline_depth_capture.cpp's barrier recorder ends a split at any END_ONLY and takes its StateAfter, never comparing it with the BEGIN_ONLY's. Keep the begin's StateAfter while the split is pending and block the source when its END_ONLY names another state. The device layer cannot run this row (the debug layer refuses the barrier), so this table is its only check."},
-    {"S11-resolve", &rules::S11, kind::expected_failure, &state::resolve_destination_over_declaration, "Outside the Stage 3 order, with D2. Since Stage 3 fix 4 a longer-lived tag copied at its frame-generation tag call starts from the state its list records, whatever its declaration of the later use names (declared_for_use, copy_state's observed_over_declared), but a recorded RESOLVE_DEST, legacy or enhanced, is refused by copy_state::supported and layouts::admissible: fail-safe (the earlier capture holds, then mono). Admitting RESOLVE_DEST for D2 closes this row with D2's."},
   };
 
   // Raw Streamline buffer types at each surveyed release (checked by
@@ -486,34 +455,10 @@ namespace game3d_contract::known_gaps {
       return value.point == device_point::api;
     }
 
-    // The copy's recording completes a legacy barrier into state on
-    // subresource 0 (alone or with every subresource).
-    constexpr bool completes(const resource_state &source, std::uint32_t state) {
-      return (source.seen == evidence::transition || source.seen == evidence::end_without_begin) && source.observed == state &&
-             (source.subresource == subresource_barrier::zero || source.subresource == subresource_barrier::all);
-    }
-
     // The recording names nothing about subresource 0.
     constexpr bool unnamed(const resource_state &source) {
       return source.subresource == subresource_barrier::other_mip_only || source.subresource == subresource_barrier::stencil_plane_only ||
              source.seen == evidence::none || source.seen == evidence::alias_named || source.seen == evidence::alias_wildcard;
-    }
-
-    // RESOLVE_DEST, legacy or enhanced, is never a copy basis.
-    constexpr bool resolve_destination(const device_case &value) {
-      const auto &state = value.state;
-      const auto &source = state.resource;
-      if (!api(value) || state.list != list_type::direct) {
-        return false;
-      }
-      const bool declared = state.source == claim::sl_declared && state.declared == D3D12_RESOURCE_STATE_RESOLVE_DEST;
-      if (completes(source, D3D12_RESOURCE_STATE_RESOLVE_DEST)) {
-        return state.source != claim::sl_declared || declared;
-      }
-      if (source.seen == evidence::enhanced && source.layout == D3D12_BARRIER_LAYOUT_RESOLVE_DEST && source.access != D3D12_BARRIER_ACCESS_NO_ACCESS) {
-        return state.source != claim::sl_declared || declared;
-      }
-      return unnamed(source) && declared;
     }
 
     // Unbinding a read-only DSV declares DEPTH_WRITE (depth_addon.cpp
@@ -542,7 +487,6 @@ namespace game3d_contract::known_gaps {
   }  // namespace device
 
   inline constexpr row<device_case> device_rows[] {
-    {"D2", &rules::D2, kind::expected_failure, &device::resolve_destination, "Outside the Stage 3 order. As the state table's D2 row: fail-safe, lowest priority.", &behaviours::no_copy},
     {"D11c", &rules::D11c, kind::expected_failure, &device::read_only_unbind, "Stage 3 fix 7 (D11c). depth_addon.cpp declares DEPTH_WRITE when a DSV is unbound (on_bind_depth_stencil -> on_clear_depth_impl). Read the bound DSV's read-only flags: a writable DSV keeps DEPTH_WRITE; a read-only one with no observation is refused (D10's per-resource proven state may supply it).", &behaviours::copy},
     {"S22", &rules::S22, kind::expected_failure, &device::streamline_compute_list, "Stage 3 fix 9 (S22). Allow COMPUTE in record_impl and the consumer (streamline_depth_capture.cpp command_type, consume_owned) when the starting state is one a compute list may use (NON_PIXEL_SHADER_RESOURCE, UNORDERED_ACCESS, COPY_SOURCE, COPY_DEST, COMMON on depth-stencil, or a COMPUTE_QUEUE_* layout), with a compute-legal resting state for the snapshot storage. Until then every compute cell is refused as no_copy_point, also where the oracle refuses for its state.", &behaviours::no_copy},
     {"N7", &rules::N7, kind::expected_failure, &device::ngx_compute_list, "Stage 3 fix 9 (S22). As S22 for NGX evaluations (dlssg-guide.txt:2321-2324: a non-copy queue); the same record_impl change fixes both.", &behaviours::no_copy},

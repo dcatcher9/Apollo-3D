@@ -248,6 +248,8 @@ namespace {
         return copy_dest;
       case D3D12_BARRIER_LAYOUT_RESOLVE_SOURCE:
         return D3D12_RESOURCE_STATE_RESOLVE_SOURCE;
+      case D3D12_BARRIER_LAYOUT_RESOLVE_DEST:
+        return D3D12_RESOURCE_STATE_RESOLVE_DEST;
       default:
         return UINT32_MAX;
     }

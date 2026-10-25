@@ -1728,10 +1728,16 @@ namespace sunshine_streamline::depth_capture {
       const auto *enhanced = state(*owner, source_cookie(&resource), false);
       if (owner->render_pass || owner->invalid || !enhanced || enhanced->blocked || !enhanced->known ||
           enhanced->layout != D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE) return false;
+      // A resolve destination is a direct-queue layout the copy may leave (D2).
+      const native_observer::enhanced_texture resolve_destination{reinterpret_cast<ID3D12Resource *>(&resource),
+        D3D12_BARRIER_LAYOUT_RESOLVE_DEST, true, D3D12_BARRIER_ACCESS_RESOLVE_DEST};
+      enhanced_textures(address, next_cookie, 1, &resolve_destination);
+      if (enhanced->blocked || !enhanced->known || enhanced->layout != D3D12_BARRIER_LAYOUT_RESOLVE_DEST ||
+          enhanced->value != D3D12_RESOURCE_STATE_RESOLVE_DEST) return false;
       // Layouts the copy cannot use refuse it until a later barrier names an
       // admissible one; they never block the texture for the recording.
       for (const auto layout : {D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_UNDEFINED,
-          D3D12_BARRIER_LAYOUT_VIDEO_DECODE_READ, D3D12_BARRIER_LAYOUT_RESOLVE_DEST, D3D12_BARRIER_LAYOUT_VIDEO_QUEUE_COMMON}) {
+          D3D12_BARRIER_LAYOUT_VIDEO_DECODE_READ, D3D12_BARRIER_LAYOUT_SHADING_RATE_SOURCE, D3D12_BARRIER_LAYOUT_VIDEO_QUEUE_COMMON}) {
         const native_observer::enhanced_texture refused_layout{reinterpret_cast<ID3D12Resource *>(&resource), layout, true};
         enhanced_textures(address, next_cookie, 1, &refused_layout);
         if (owner->invalid || enhanced->blocked || enhanced->known || enhanced->layout != std::uint32_t(layout)) return false;

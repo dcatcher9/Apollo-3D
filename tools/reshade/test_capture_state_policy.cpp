@@ -91,8 +91,13 @@ int main() try {
   chosen = copy_state::resolve(for_use, readable, {true, true, false, 0}, D3D12_RESOURCE_FLAG_NONE);
   require(!chosen.admitted && chosen.result == capture::status::missing_state,
     "an observed COMMON on a promotable texture overrode a declaration of a later use");
+  // RESOLVE_DEST is a write state a direct list's copy may leave (D2, S11).
   chosen = copy_state::resolve(for_use, readable, {true, true, false, D3D12_RESOURCE_STATE_RESOLVE_DEST}, 0);
-  require(!chosen.admitted && chosen.result == capture::status::unsupported_state, "an observed RESOLVE_DEST was copied from");
+  require(chosen.admitted && chosen.state == D3D12_RESOURCE_STATE_RESOLVE_DEST && chosen.used_observed,
+    "an observed RESOLVE_DEST did not override a declaration of a later use");
+  chosen = copy_state::resolve(declared, D3D12_RESOURCE_STATE_RESOLVE_DEST, {}, 0);
+  require(chosen.admitted && chosen.state == D3D12_RESOURCE_STATE_RESOLVE_DEST && !chosen.used_observed,
+    "a declared RESOLVE_DEST was refused");
   chosen = copy_state::resolve(for_use, readable, {true, true, true, D3D12_RESOURCE_STATE_COPY_SOURCE}, 0);
   require(!chosen.admitted && chosen.result == capture::status::incomplete_state, "a declaration of a later use took a blocked observation");
   // Enhanced layouts (D3D12 Enhanced Barriers): the copy keeps the exact
@@ -101,18 +106,20 @@ int main() try {
   namespace layouts = copy_state::layouts;
   for (std::uint32_t layout = 0; layout != 0x20; ++layout) {
     const bool direct = layout >= D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COMMON && layout <= D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COPY_DEST;
-    const bool generic = layout <= D3D12_BARRIER_LAYOUT_RESOLVE_SOURCE;
+    const bool generic = layout <= D3D12_BARRIER_LAYOUT_RESOLVE_DEST;
     require(layouts::admissible(layout) == (direct || generic), "an enhanced layout's admission changed");
   }
-  require(!layouts::admissible(D3D12_BARRIER_LAYOUT_UNDEFINED) && !layouts::admissible(D3D12_BARRIER_LAYOUT_RESOLVE_DEST) &&
+  require(!layouts::admissible(D3D12_BARRIER_LAYOUT_UNDEFINED) && layouts::admissible(D3D12_BARRIER_LAYOUT_RESOLVE_DEST) &&
+      !layouts::admissible(D3D12_BARRIER_LAYOUT_SHADING_RATE_SOURCE) &&
       !layouts::admissible(D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_SHADER_RESOURCE) &&
       !layouts::admissible(D3D12_BARRIER_LAYOUT_VIDEO_DECODE_READ) && !layouts::admissible(D3D12_BARRIER_LAYOUT_VIDEO_QUEUE_COMMON),
-    "an undefined, resolve-destination, compute-queue or video layout was admitted");
+    "an undefined, shading-rate, compute-queue or video layout was admitted, or resolve-destination refused");
   require(layouts::copy_source(D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE) == D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COPY_SOURCE &&
       layouts::copy_source(D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COMMON) == D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COMMON &&
       layouts::copy_source(D3D12_BARRIER_LAYOUT_COMMON) == D3D12_BARRIER_LAYOUT_COMMON &&
       layouts::copy_source(D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_GENERIC_READ) == D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COPY_SOURCE &&
       layouts::copy_source(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE) == D3D12_BARRIER_LAYOUT_COPY_SOURCE &&
+      layouts::copy_source(D3D12_BARRIER_LAYOUT_RESOLVE_DEST) == D3D12_BARRIER_LAYOUT_COPY_SOURCE &&
       layouts::copy_source(D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ) == D3D12_BARRIER_LAYOUT_COPY_SOURCE,
     "the copy's source layout left its queue family");
   constexpr auto shader_states = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
@@ -120,6 +127,7 @@ int main() try {
       layouts::equivalent(shader_states) == D3D12_BARRIER_LAYOUT_SHADER_RESOURCE &&
       layouts::equivalent(D3D12_RESOURCE_STATE_DEPTH_READ | shader_states) == D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ &&
       layouts::equivalent(D3D12_RESOURCE_STATE_GENERIC_READ) == D3D12_BARRIER_LAYOUT_GENERIC_READ &&
+      layouts::equivalent(D3D12_RESOURCE_STATE_RESOLVE_DEST) == D3D12_BARRIER_LAYOUT_RESOLVE_DEST &&
       layouts::equivalent(0) == D3D12_BARRIER_LAYOUT_COMMON &&
       layouts::equivalent(D3D12_RESOURCE_STATE_COPY_SOURCE | shader_states) == D3D12_BARRIER_LAYOUT_UNDEFINED &&
       layouts::equivalent(UINT32_MAX) == D3D12_BARRIER_LAYOUT_UNDEFINED,
@@ -246,12 +254,13 @@ int main() try {
     chosen = copy_state::resolve(undeclared, UINT32_MAX, {true, true, false, 0}, D3D12_RESOURCE_FLAG_NONE);
     require(!chosen.admitted && chosen.result == capture::status::missing_state, "an undeclared state took an observed COMMON on a promotable texture");
   }
-  // RESOLVE_DEST's refusal is a recorded contract gap (D2).
+  // RESOLVE_DEST is a write state like the others (D2).
   require(copy_state::supported(D3D12_RESOURCE_STATE_GENERIC_READ) &&
       copy_state::supported(D3D12_RESOURCE_STATE_RESOLVE_SOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) &&
       !copy_state::supported(D3D12_RESOURCE_STATE_GENERIC_READ | D3D12_RESOURCE_STATE_DEPTH_WRITE) &&
       !copy_state::supported(D3D12_RESOURCE_STATE_GENERIC_READ | D3D12_RESOURCE_STATE_COPY_DEST) &&
-      !copy_state::supported(D3D12_RESOURCE_STATE_RESOLVE_DEST) &&
+      copy_state::supported(D3D12_RESOURCE_STATE_RESOLVE_DEST) &&
+      !copy_state::supported(D3D12_RESOURCE_STATE_RESOLVE_DEST | D3D12_RESOURCE_STATE_COPY_SOURCE) &&
       !copy_state::supported(D3D12_RESOURCE_STATE_VIDEO_DECODE_READ),
     "read-only legacy combinations and write or non-texture states were classified wrongly");
   std::printf("PASS capture state table: proof/policy table, copy layouts and named rules\n");

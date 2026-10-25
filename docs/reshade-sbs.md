@@ -3964,8 +3964,8 @@ call copies a UI tag (HUD-less, Backbuffer, UI colour and alpha, UIAlpha), is
   `observed_over_declared`; the matrix's S11, since Stage 3 fix 4, before which the copy was
   refused as `conflicting_state` and the viewport's FG source withdrawn). The recorded state is
   judged as any observation is (a legacy COMMON is a basis only on a depth-stencil texture, D3; a
-  RESOLVE_DEST is still refused, the matrix's S11-resolve row), and one that agrees with the
-  declaration is copied as before.
+  RESOLVE_DEST, legacy or enhanced, is one like any other write state, D2), and one that agrees
+  with the declaration is copied as before.
   An `OnlyValidNow` declaration describes the call itself and must agree with the recorded state,
   as a declaration must at an evaluate and on the Present queue (S11a). The bounded line
   `Sunshine Streamline FG tag-call copies: copied=<n> recorded_over_declared=<n> state=<recorded>
@@ -4421,8 +4421,9 @@ direct-queue form for a direct-queue layout (a COMMON layout already admits copy
 the access changes), and restores both with `SyncAfter=ALL`, so every later command waits for the
 copy. Admissible layouts are those a direct list can copy from: COMMON, GENERIC_READ,
 RENDER_TARGET, UNORDERED_ACCESS, DEPTH_STENCIL_WRITE/READ, SHADER_RESOURCE, COPY_SOURCE/DEST,
-RESOLVE_SOURCE and their direct-queue forms. A compute- or video-queue, video, shading-rate,
-resolve-destination or undefined layout, `NO_ACCESS`, or a split begun with `SyncAfter=SPLIT`
+RESOLVE_SOURCE, RESOLVE_DEST (since Stage 3 batch B, the matrix's D2; before, it and the legacy
+RESOLVE_DEST state were refused) and their direct-queue forms. A compute- or video-queue, video,
+shading-rate or undefined layout, `NO_ACCESS`, or a split begun with `SyncAfter=SPLIT`
 refuses the copy (`incomplete_state`) until a later barrier (the split's end) names an admissible
 layout. An enhanced COMMON layout is an explicit layout, not missing evidence. A declared legacy
 state agrees with an observed layout only through the contract's equivalent-layout table (pixel or

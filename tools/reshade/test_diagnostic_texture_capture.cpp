@@ -838,9 +838,13 @@ namespace {
     reject_state(capture::status::missing_state, capture::record_stage::missing_state);
     require(diagnostic.observed && !diagnostic.blocked && diagnostic.observed_state == 0,
       "observed COMMON rejection was mistaken for absent evidence");
+    // RESOLVE_DEST is a write state the copy leaves and restores (D2).
     transition(gpu.list.Get(), image.source.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RESOLVE_DEST);
-    reject_state(capture::status::incomplete_state, capture::record_stage::incomplete_state);
-    require(diagnostic.observed_state == D3D12_RESOURCE_STATE_RESOLVE_DEST, "unsupported legacy state evidence was lost");
+    auto resolved = auxiliary_snapshot(gpu, shared, input, &diagnostic, policy);
+    require(bool(resolved) && diagnostic.copy_state_known && diagnostic.copy_state == D3D12_RESOURCE_STATE_RESOLVE_DEST &&
+      diagnostic.used_observed_state && diagnostic.observed_state == D3D12_RESOURCE_STATE_RESOLVE_DEST,
+      "an observed RESOLVE_DEST did not define the copied state");
+    capture::finish_diagnostic_texture(resolved, true);
     transition(gpu.list.Get(), image.source.Get(), D3D12_RESOURCE_STATE_RESOLVE_DEST, rt);
     D3D12_RESOURCE_BARRIER split{}; split.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     split.Flags = D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY;
@@ -856,7 +860,8 @@ namespace {
       "an ended split barrier did not define the copied state");
     capture::finish_diagnostic_texture(ended, true);
     gpu.submit(); gpu.wait(); gpu.reset();
-    capture::release_diagnostic_texture(ended); ended = {}; capture::poll();
+    capture::release_diagnostic_texture(ended); ended = {};
+    capture::release_diagnostic_texture(resolved); resolved = {}; capture::poll();
     transition(gpu.list.Get(), image.source.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, rt);
     D3D12_RESOURCE_BARRIER alias{}; alias.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
     gpu.list->ResourceBarrier(1, &alias); // Legal wildcard alias: it changes no resource state.
@@ -906,7 +911,7 @@ namespace {
     reject(wrong, capture::status::missing_state, capture::record_stage::missing_state);
     wrong = input; wrong.proof = static_cast<sunshine_scene_depth::state_proof>(99);
     reject(wrong, capture::status::unsupported_state, capture::record_stage::unsupported_proof);
-    for (const auto hint : {std::uint32_t(D3D12_RESOURCE_STATE_RESOLVE_DEST),
+    for (const auto hint : {std::uint32_t(D3D12_RESOURCE_STATE_VIDEO_DECODE_READ),
         std::uint32_t(D3D12_RESOURCE_STATE_RENDER_TARGET | uav)}) {
       wrong = input; wrong.native_state = hint;
       reject(wrong, capture::status::unsupported_state, capture::record_stage::unsupported_state);

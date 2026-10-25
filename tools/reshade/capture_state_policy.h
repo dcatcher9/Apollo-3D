@@ -13,20 +13,20 @@
 // observations. Nothing here guesses a state from texture type or format.
 namespace sunshine_streamline::depth_capture::copy_state {
   inline constexpr std::uint32_t write_states = D3D12_RESOURCE_STATE_DEPTH_WRITE | D3D12_RESOURCE_STATE_COPY_DEST |
-    D3D12_RESOURCE_STATE_UNORDERED_ACCESS | D3D12_RESOURCE_STATE_RENDER_TARGET;
+    D3D12_RESOURCE_STATE_UNORDERED_ACCESS | D3D12_RESOURCE_STATE_RENDER_TARGET | D3D12_RESOURCE_STATE_RESOLVE_DEST;
 
   // Ordinary legacy texture states only; a write state cannot be combined.
   // Any combination of read-only legacy states is one: D3D12 permits it on a
   // texture and a copy may transition from it to COPY_SOURCE and back. That
   // includes GENERIC_READ (Assassin's Creed Shadows 10-22 kept its depth in
-  // it, so every capture refused the depth as an unknown state). Enhanced,
-  // split and unknown states are never converted to a legacy state.
+  // it, so every capture refused the depth as an unknown state). Each write
+  // state alone is one too, RESOLVE_DEST included (a direct list's resolve
+  // target; the contract matrix's D2). Enhanced, split and unknown states are
+  // never converted to a legacy state.
   constexpr bool supported(std::uint32_t value) {
-    constexpr std::uint32_t allowed = D3D12_RESOURCE_STATE_DEPTH_WRITE | D3D12_RESOURCE_STATE_DEPTH_READ |
+    constexpr std::uint32_t allowed = write_states | D3D12_RESOURCE_STATE_DEPTH_READ |
       D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
-      D3D12_RESOURCE_STATE_COPY_SOURCE | D3D12_RESOURCE_STATE_COPY_DEST |
-      D3D12_RESOURCE_STATE_UNORDERED_ACCESS | D3D12_RESOURCE_STATE_RENDER_TARGET |
-      D3D12_RESOURCE_STATE_GENERIC_READ | D3D12_RESOURCE_STATE_RESOLVE_SOURCE;
+      D3D12_RESOURCE_STATE_COPY_SOURCE | D3D12_RESOURCE_STATE_GENERIC_READ | D3D12_RESOURCE_STATE_RESOLVE_SOURCE;
     if (value & ~allowed) return false;
     return !(value & write_states) || ((value & (value - 1)) == 0);
   }
@@ -41,8 +41,10 @@ namespace sunshine_streamline::depth_capture::copy_state {
   namespace layouts {
     // Admissible for a copy on a direct command list (the only list type the
     // capture records on): the generic read/write layouts a legacy copy
-    // admits, and the direct-queue forms. Compute- and video-queue, video,
-    // shading-rate, resolve-destination, undefined and unknown layouts are not.
+    // admits, resolve destination among them (Enhanced Barriers, Command
+    // Queue Layout Compatibility, lists it for DIRECT; D2), and the
+    // direct-queue forms. Compute- and video-queue, video, shading-rate,
+    // undefined and unknown layouts are not.
     constexpr bool admissible(std::uint32_t layout) {
       switch (static_cast<D3D12_BARRIER_LAYOUT>(layout)) {
         case D3D12_BARRIER_LAYOUT_COMMON: case D3D12_BARRIER_LAYOUT_GENERIC_READ:
@@ -50,6 +52,7 @@ namespace sunshine_streamline::depth_capture::copy_state {
         case D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE: case D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ:
         case D3D12_BARRIER_LAYOUT_SHADER_RESOURCE: case D3D12_BARRIER_LAYOUT_COPY_SOURCE:
         case D3D12_BARRIER_LAYOUT_COPY_DEST: case D3D12_BARRIER_LAYOUT_RESOLVE_SOURCE:
+        case D3D12_BARRIER_LAYOUT_RESOLVE_DEST:
         case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COMMON: case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_GENERIC_READ:
         case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS: case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE:
         case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COPY_SOURCE: case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COPY_DEST:
@@ -94,6 +97,7 @@ namespace sunshine_streamline::depth_capture::copy_state {
         case D3D12_RESOURCE_STATE_COPY_SOURCE: return D3D12_BARRIER_LAYOUT_COPY_SOURCE;
         case D3D12_RESOURCE_STATE_COPY_DEST: return D3D12_BARRIER_LAYOUT_COPY_DEST;
         case D3D12_RESOURCE_STATE_RESOLVE_SOURCE: return D3D12_BARRIER_LAYOUT_RESOLVE_SOURCE;
+        case D3D12_RESOURCE_STATE_RESOLVE_DEST: return D3D12_BARRIER_LAYOUT_RESOLVE_DEST;
         default: return D3D12_BARRIER_LAYOUT_UNDEFINED;
       }
     }
