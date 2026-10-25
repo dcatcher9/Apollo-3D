@@ -65,6 +65,10 @@ namespace sunshine_streamline::buffers {
     else if (at_least(v, 2, 7, 30)) out.last_type = 67;
     else if (at_least(v, 2, 7)) out.last_type = 66;
     else if (at_least(v, 2, 4)) out.last_type = 53;
+    // 2.2.1 declares ReflectedAlbedo 38 through TransparencyLayerOpacity 52,
+    // HiResDepth 48 and LinearDepth 49 among them (v2.2.1 sl.h:140-169);
+    // 2.0.0-2.2.0 end at TransparencyAndCompositionMaskHint 37.
+    else if (at_least(v, 2, 2, 1)) out.last_type = 52;
     else out.last_type = 37;
     return out;
   }

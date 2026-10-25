@@ -90,18 +90,16 @@ namespace game3d_contract::known_gaps {
   };
 
   // Raw Streamline buffer types at each surveyed release (checked by
-  // test_game3d_api_contract_cpu.cpp).
+  // test_game3d_api_contract_cpu.cpp). The add-on meets every cell; one
+  // pending row that matches no cell stands in for the table.
   namespace buffer_types {
-    // 2.2.1 already declares HiResDepth 48 and LinearDepth 49 (v2.2.1 sl.h),
-    // but the contract table gives every release below 2.4 the 2.0 range
-    // (0-37), so a 2.2.1-2.3.x game's display or linear depth is ignored.
-    constexpr bool depth_kinds_before_2_4(const buffer_case &value) {
-      return !(value.version < sl_version {2, 2, 1}) && value.version < sl_version {2, 4, 0} && (value.raw == 48 || value.raw == 49);
+    constexpr bool no_cell(const buffer_case &) {
+      return false;
     }
   }  // namespace buffer_types
 
   inline constexpr row<buffer_case> buffer_rows[] {
-    {"S17", &rules::S17, kind::expected_failure, &buffer_types::depth_kinds_before_2_4, "Stage 3 fix 11 (S17). Few games pair 2.2.1-2.3.x with these tags: add a 2.2.1 tier (last type 52) to buffers::for_version, keep 37 below it, and update test_streamline_camera_probe.cpp's '2.2 contract accepted post-2.4 tags' check (3187-3189 at c67e9cf9) and the docs/reshade-sbs.md buffer-type table's 2.0-2.2 row with it."},
+    {"none", &rules::S17, kind::pending, &buffer_types::no_cell, "No buffer-type gap remains: Stage 3 batch B closed S17 (a 2.2.1 tier with last type 52). This row matches no cell."},
   };
 
   // Streamline depth tags (checked by test_game3d_api_contract_cpu.cpp's hook

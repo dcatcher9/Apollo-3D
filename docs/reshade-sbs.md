@@ -3524,8 +3524,9 @@ each raw tag once, at the hook boundary, using the hooked interposer's validated
 | Interposer header | Declared range | Consumed differences |
 | --- | --- | --- |
 | 1.0.x / 1.1.x | 0–32 / 0–33 | Tag 23 is `UIHint`, not UIColorAndAlpha; it is not consumed. |
-| 2.0–2.2 | 0–37 | No HighResDepth, LinearDepth or Backbuffer. |
-| 2.4–2.6 | 0–53 | Adds HighResDepth 48, LinearDepth 49, Backbuffer 53. |
+| 2.0–2.2.0 | 0–37 | No HighResDepth, LinearDepth or Backbuffer. |
+| 2.2.1–2.3 | 0–52 | Adds HighResDepth 48 and LinearDepth 49 (since Stage 3 batch B, the API contract matrix's S17; before, these releases read as 0–37). |
+| 2.4–2.6 | 0–53 | Adds Backbuffer 53. |
 | 2.7–2.10 | 0–66 (0–67 from 2.7.30) | No UIAlpha. |
 | 2.11.x | 0–68 | UIAlpha is **68**. |
 | 2.12.0 and later | 0–72 | ResponsivityMask is 68; UIAlpha is **69**. |
@@ -3541,7 +3542,7 @@ were downgraded below its compile-time headers can still send a number with a di
 The UI candidate's GPU content checks remain in force for that case. The log line
 `Sunshine Streamline: buffer contract` records the selected contract at hook installation. The
 [API contract matrix](../tools/reshade/README.md#api-contract-matrix) checks this table against each
-surveyed release's own header; its known-gap table lists where they differ.
+surveyed release's own header; every surveyed release agrees with it.
 
 ### Streamline depth selection
 

@@ -3208,11 +3208,15 @@ namespace {
     require(buffers::canonical(v1, 23) == buffers::unknown && buffers::canonical(v1, 0) == 0 &&
         buffers::canonical(v1, 48) == buffers::unknown && buffers::canonical(v1, 2) == 2,
       "1.x buffer contract changed depth/HUD-less or accepted UIHint/unknown tags");
-    // Current behaviour for 48 at 2.2.1, a recorded contract gap (S17): the
-    // 2.2.1 header already declares HiResDepth 48 and LinearDepth 49.
+    // The 2.2.1 header already declares HiResDepth 48 and LinearDepth 49 and
+    // ends at 52 (S17); 2.2.0 ends at 37.
     const auto v2_2 = buffers::for_version({2, 2, 1, 0});
-    require(buffers::canonical(v2_2, 23) == 23 && buffers::canonical(v2_2, 48) == buffers::unknown &&
-        buffers::canonical(v2_2, 53) == buffers::unknown, "2.2 contract accepted post-2.4 tags");
+    require(buffers::canonical(v2_2, 23) == 23 && buffers::canonical(v2_2, 48) == 48 && buffers::canonical(v2_2, 49) == 49 &&
+        buffers::canonical(v2_2, 52) == 52 && buffers::canonical(v2_2, 53) == buffers::unknown,
+      "2.2.1 contract lost its depth kinds or accepted post-2.4 tags");
+    const auto v2_2_0 = buffers::for_version({2, 2, 0, 0});
+    require(buffers::canonical(v2_2_0, 37) == 37 && buffers::canonical(v2_2_0, 38) == buffers::unknown &&
+        buffers::canonical(v2_2_0, 48) == buffers::unknown, "2.2.0 contract accepted tags its header lacks");
     const auto v2_6 = buffers::for_version({2, 6, 10, 0});
     require(buffers::canonical(v2_6, 48) == 48 && buffers::canonical(v2_6, 53) == 53 &&
         buffers::canonical(v2_6, 68) == buffers::unknown && !buffers::ui_alpha_authenticated(v2_6),
@@ -3233,11 +3237,11 @@ namespace {
         buffers::canonical(uialpha, 68) == buffers::unknown && buffers::canonical(uialpha, 69) == buffers::unknown &&
         buffers::canonical(uialpha, 0) == 0 && buffers::canonical(uialpha, 53) == 53 && uialpha.raw_ui_alpha == buffers::unknown,
       "candidates {2.11, 2.12} mapped a renumbered tag");
-    const auto depth = family({{2, 3, 0, 0}, {2, 5, 0, 0}});
+    const auto depth = family({{2, 2, 0, 0}, {2, 5, 0, 0}});
     require(depth.known && !depth.surveyed && buffers::canonical(depth, 48) == buffers::unknown &&
         buffers::canonical(depth, 49) == buffers::unknown && buffers::canonical(depth, 0) == 0 &&
-        depth.version == versioning::number{2, 3, 0, 0} && depth.last_type == 37,
-      "candidates {2.3, 2.5} mapped a tag one candidate lacks");
+        depth.version == versioning::number{2, 2, 0, 0} && depth.last_type == 37,
+      "candidates {2.2.0, 2.5} mapped a tag one candidate lacks");
     const auto same = family({{2, 12, 0, 0}, {2, 13, 0, 0}});
     require(buffers::canonical(same, 69) == buffers::ui_alpha && !buffers::ui_alpha_authenticated(same),
       "agreeing candidates lost a shared tag or authenticated an inexact header");
