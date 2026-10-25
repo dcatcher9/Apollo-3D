@@ -15,20 +15,38 @@ namespace sunshine_streamline::depth_capture::copy_state {
   inline constexpr std::uint32_t write_states = D3D12_RESOURCE_STATE_DEPTH_WRITE | D3D12_RESOURCE_STATE_COPY_DEST |
     D3D12_RESOURCE_STATE_UNORDERED_ACCESS | D3D12_RESOURCE_STATE_RENDER_TARGET | D3D12_RESOURCE_STATE_RESOLVE_DEST;
 
-  // Ordinary legacy texture states only; a write state cannot be combined.
-  // Any combination of read-only legacy states is one: D3D12 permits it on a
-  // texture and a copy may transition from it to COPY_SOURCE and back. That
-  // includes GENERIC_READ (Assassin's Creed Shadows 10-22 kept its depth in
-  // it, so every capture refused the depth as an unknown state). Each write
-  // state alone is one too, RESOLVE_DEST included (a direct list's resolve
-  // target; the contract matrix's D2). Enhanced, split and unknown states are
-  // never converted to a legacy state.
+  // Ordinary legacy texture states only: D3D12 permits each on a texture and
+  // a copy may transition from it to COPY_SOURCE and back. Any combination of
+  // the texture read states is one, and so is GENERIC_READ itself (Assassin's
+  // Creed Shadows 10-22 kept its depth in it, so every capture refused the
+  // depth as an unknown state). GENERIC_READ's other bits are buffer states
+  // (VERTEX_AND_CONSTANT_BUFFER, INDEX_BUFFER, INDIRECT_ARGUMENT): the D3D12
+  // runtime refuses a texture barrier into any other state that holds one,
+  // and a copy's barrier from it makes the game's own Close fail
+  // (E_INVALIDARG; the contract matrix's X2). Each write state alone is one
+  // too, RESOLVE_DEST included (a direct list's resolve target; D2). Enhanced,
+  // split and unknown states are never converted to a legacy state.
   constexpr bool supported(std::uint32_t value) {
-    constexpr std::uint32_t allowed = write_states | D3D12_RESOURCE_STATE_DEPTH_READ |
-      D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
-      D3D12_RESOURCE_STATE_COPY_SOURCE | D3D12_RESOURCE_STATE_GENERIC_READ | D3D12_RESOURCE_STATE_RESOLVE_SOURCE;
-    if (value & ~allowed) return false;
+    constexpr std::uint32_t texture_reads = D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
+      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_COPY_SOURCE | D3D12_RESOURCE_STATE_RESOLVE_SOURCE;
+    if (value == D3D12_RESOURCE_STATE_GENERIC_READ) return true;
+    if (value & ~(write_states | texture_reads)) return false;
     return !(value & write_states) || ((value & (value - 1)) == 0);
+  }
+
+  // Whether the allocation's flags let a texture be in a legacy state (the
+  // contract matrix's X1; D3D12_RESOURCE_FLAGS): ALLOW_RENDER_TARGET,
+  // ALLOW_UNORDERED_ACCESS and ALLOW_DEPTH_STENCIL each enable the resource
+  // to transition into their states, and DENY_SHADER_RESOURCE disables the
+  // shader-resource ones. A state the allocation cannot be in is illegal
+  // input, never a copy's basis.
+  constexpr bool allowed(std::uint32_t state, std::uint32_t resource_flags) {
+    constexpr std::uint32_t shader = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    return !((state & D3D12_RESOURCE_STATE_RENDER_TARGET) && !(resource_flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)) &&
+      !((state & D3D12_RESOURCE_STATE_UNORDERED_ACCESS) && !(resource_flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)) &&
+      !((state & (D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_DEPTH_WRITE)) &&
+        !(resource_flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)) &&
+      !((state & shader) && (resource_flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE));
   }
 
   // Enhanced (CommandList7) layouts. The D3D12 Enhanced Barriers contract
@@ -99,6 +117,18 @@ namespace sunshine_streamline::depth_capture::copy_state {
         case D3D12_RESOURCE_STATE_RESOLVE_SOURCE: return D3D12_BARRIER_LAYOUT_RESOLVE_SOURCE;
         case D3D12_RESOURCE_STATE_RESOLVE_DEST: return D3D12_BARRIER_LAYOUT_RESOLVE_DEST;
         default: return D3D12_BARRIER_LAYOUT_UNDEFINED;
+      }
+    }
+    // Whether the allocation's flags let a texture be in a layout: those its
+    // legacy equivalent needs (allowed above; X1).
+    constexpr bool allowed(std::uint32_t layout, std::uint32_t resource_flags) {
+      switch (static_cast<D3D12_BARRIER_LAYOUT>(generic(layout))) {
+        case D3D12_BARRIER_LAYOUT_RENDER_TARGET: return resource_flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        case D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS: return resource_flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        case D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE: case D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ:
+          return resource_flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+        case D3D12_BARRIER_LAYOUT_SHADER_RESOURCE: return !(resource_flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE);
+        default: return true;
       }
     }
     // The copy's own source layout. A common layout already admits COPY_SOURCE
@@ -196,15 +226,6 @@ namespace sunshine_streamline::depth_capture::copy_state {
       !(resource_flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS);
   }
 
-  // A declaration naming a bind state the allocation cannot have is not a claim
-  // about this resource, so it cannot stand in for missing evidence.
-  constexpr bool compatible_with(std::uint32_t state, std::uint32_t resource_flags) {
-    return !((state & D3D12_RESOURCE_STATE_RENDER_TARGET) && !(resource_flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)) &&
-      !((state & D3D12_RESOURCE_STATE_UNORDERED_ACCESS) && !(resource_flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)) &&
-      !((state & (D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_DEPTH_WRITE)) &&
-        !(resource_flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL));
-  }
-
   // A declaration agrees with an observation: the same legacy state, or for
   // an enhanced layout the contract's equivalent of the declared state.
   constexpr bool agrees(std::uint32_t claimed, const observation &observed) {
@@ -228,7 +249,7 @@ namespace sunshine_streamline::depth_capture::copy_state {
       layouts::equivalent(claimed) == std::uint32_t(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE) && observed.present && observed.known &&
       !observed.blocked && !observed.pending && observed.enhanced &&
       observed.layout == std::uint32_t(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE) &&
-      observed.access != std::uint32_t(D3D12_BARRIER_ACCESS_NO_ACCESS) && !(resource_flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE);
+      observed.access != std::uint32_t(D3D12_BARRIER_ACCESS_NO_ACCESS) && layouts::allowed(observed.layout, resource_flags);
   }
 
   constexpr decision resolve(rule selected, std::uint32_t claimed, const observation &observed, std::uint32_t resource_flags) {
@@ -270,9 +291,7 @@ namespace sunshine_streamline::depth_capture::copy_state {
           out.used_observed = true;
         } else if (!usable_claim(claimed)) {
           return reject(status::missing_state, record_stage::missing_state);
-        } else if (selected == rule::observed_else_declared) {
-          if (!compatible_with(claimed, resource_flags)) return reject(status::unsupported_state, record_stage::unsupported_state);
-        } else {
+        } else if (selected != rule::observed_else_declared) {
           // The SDK contract describes a shader-readable input.
           if (resource_flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE)
             return reject(status::missing_state, record_stage::missing_state);
@@ -281,7 +300,11 @@ namespace sunshine_streamline::depth_capture::copy_state {
         break;
       default: break;
     }
+    // Every basis, observed, claimed or contracted, must be one the
+    // allocation's flags allow (X1).
     if (observed.present && observed.enhanced) {
+      if (!layouts::allowed(observed.layout, resource_flags))
+        return reject(status::unsupported_state, record_stage::unsupported_state);
       out.enhanced = true; out.layout = observed.layout; out.access = observed.access;
       return out;
     }
@@ -289,7 +312,8 @@ namespace sunshine_streamline::depth_capture::copy_state {
     // source's state (common_is_state).
     if (out.state == D3D12_RESOURCE_STATE_COMMON && !common_is_state(resource_flags))
       return reject(status::missing_state, record_stage::missing_state);
-    if (!supported(out.state)) return reject(status::unsupported_state, record_stage::unsupported_state);
+    if (!supported(out.state) || !allowed(out.state, resource_flags))
+      return reject(status::unsupported_state, record_stage::unsupported_state);
     return out;
   }
 }

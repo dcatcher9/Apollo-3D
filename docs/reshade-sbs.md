@@ -2383,7 +2383,16 @@ never implicitly promoted out of COMMON (owner ruling R1; the matrix's D3, since
 On any other texture an earlier access on the same execution may have promoted it to a read state
 or `COPY_DEST`, so COMMON names nothing there and the copy is refused as `missing_state` (D3b;
 before, a declared COMMON was copied from on such a texture and an observed COMMON on depth-stencil
-was refused). A source an enhanced barrier on an earlier executed list
+was refused). Every basis, observed, last proven, declared or contracted, legacy state or enhanced
+layout, must be one the allocation's flags allow (render target, unordered access and depth states
+need their `ALLOW_*` flag; shader-resource states and layouts are refused with
+`DENY_SHADER_RESOURCE`), and a legacy state holds a buffer read bit
+(`VERTEX_AND_CONSTANT_BUFFER`, `INDEX_BUFFER`, `INDIRECT_ARGUMENT`) only as `GENERIC_READ` itself,
+whose barrier the D3D12 runtime accepts on a texture; anything else is illegal input, refused as
+`unsupported_state` (an unknown observed state, as `incomplete_state`) before a barrier is
+recorded (the matrix's X1 and X2, since Stage 3 batch B; before, only the at-call UI declaration
+was checked against the flags, and a copy's barrier from `GENERIC_READ | DEPTH_READ` made the
+game's own `Close` fail). A source an enhanced barrier on an earlier executed list
 latched, whose recording names nothing, is copied only from a shader-read claim's `SHADER_RESOURCE`
 proof (the enhanced-layout latch, since Stage 3 fix 3). The
 [API contract matrix](../tools/reshade/README.md#api-contract-matrix) judges the table over every

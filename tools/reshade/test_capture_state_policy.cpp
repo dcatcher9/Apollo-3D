@@ -254,8 +254,14 @@ int main() try {
     chosen = copy_state::resolve(undeclared, UINT32_MAX, {true, true, false, 0}, D3D12_RESOURCE_FLAG_NONE);
     require(!chosen.admitted && chosen.result == capture::status::missing_state, "an undeclared state took an observed COMMON on a promotable texture");
   }
-  // RESOLVE_DEST is a write state like the others (D2).
+  // RESOLVE_DEST is a write state like the others (D2). A buffer read bit is
+  // a texture state only as part of GENERIC_READ itself (X2).
   require(copy_state::supported(D3D12_RESOURCE_STATE_GENERIC_READ) &&
+      !copy_state::supported(D3D12_RESOURCE_STATE_GENERIC_READ | D3D12_RESOURCE_STATE_DEPTH_READ) &&
+      !copy_state::supported(D3D12_RESOURCE_STATE_GENERIC_READ | D3D12_RESOURCE_STATE_RESOLVE_SOURCE) &&
+      !copy_state::supported(D3D12_RESOURCE_STATE_INDEX_BUFFER) &&
+      !copy_state::supported(D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT | D3D12_RESOURCE_STATE_COPY_SOURCE) &&
+      !copy_state::supported(D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE) &&
       copy_state::supported(D3D12_RESOURCE_STATE_RESOLVE_SOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) &&
       !copy_state::supported(D3D12_RESOURCE_STATE_GENERIC_READ | D3D12_RESOURCE_STATE_DEPTH_WRITE) &&
       !copy_state::supported(D3D12_RESOURCE_STATE_GENERIC_READ | D3D12_RESOURCE_STATE_COPY_DEST) &&
@@ -263,6 +269,40 @@ int main() try {
       !copy_state::supported(D3D12_RESOURCE_STATE_RESOLVE_DEST | D3D12_RESOURCE_STATE_COPY_SOURCE) &&
       !copy_state::supported(D3D12_RESOURCE_STATE_VIDEO_DECODE_READ),
     "read-only legacy combinations and write or non-texture states were classified wrongly");
+  // Every basis must be one the allocation's flags allow (X1): an observed
+  // state or layout, a declaration or a recorded state over a declaration
+  // of a later use, whatever the rule.
+  constexpr std::uint32_t ds = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+  constexpr std::uint32_t unreadable = ds | std::uint32_t(D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE);
+  struct flags_case {
+    rule selected;
+    std::uint32_t claim;
+    copy_state::observation observed;
+    std::uint32_t flags;
+    const char *what;
+  };
+  for (const auto &value : {
+         flags_case{observed_only, 0, {true, true, false, D3D12_RESOURCE_STATE_DEPTH_WRITE}, 0, "an observed DEPTH_WRITE without ALLOW_DEPTH_STENCIL"},
+         flags_case{observed_only, 0, {true, true, false, D3D12_RESOURCE_STATE_RENDER_TARGET}, ds, "an observed RENDER_TARGET without ALLOW_RENDER_TARGET"},
+         flags_case{observed_only, 0, {true, true, false, D3D12_RESOURCE_STATE_UNORDERED_ACCESS}, 0, "an observed UNORDERED_ACCESS without ALLOW_UNORDERED_ACCESS"},
+         flags_case{declared, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, {}, unreadable, "a declared shader read with DENY_SHADER_RESOURCE"},
+         flags_case{declared, D3D12_RESOURCE_STATE_GENERIC_READ, {}, unreadable, "a declared GENERIC_READ with DENY_SHADER_RESOURCE"},
+         flags_case{declared, D3D12_RESOURCE_STATE_DEPTH_WRITE, {true, true, false, D3D12_RESOURCE_STATE_DEPTH_WRITE}, 0, "an agreeing DEPTH_WRITE without ALLOW_DEPTH_STENCIL"},
+         flags_case{for_use, readable, {true, true, false, D3D12_RESOURCE_STATE_RENDER_TARGET}, 0, "a recorded RENDER_TARGET without ALLOW_RENDER_TARGET"},
+         flags_case{at_call_ui, D3D12_RESOURCE_STATE_RENDER_TARGET, {}, 0, "a UI declaration of RENDER_TARGET without ALLOW_RENDER_TARGET"},
+         flags_case{observed_only, 0, enhanced(D3D12_BARRIER_LAYOUT_RENDER_TARGET), ds, "an observed RENDER_TARGET layout without ALLOW_RENDER_TARGET"},
+         flags_case{observed_only, 0, enhanced(D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS), 0, "an observed direct-queue UAV layout without ALLOW_UNORDERED_ACCESS"},
+         flags_case{observed_only, 0, enhanced(D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ), 0, "an observed depth-read layout without ALLOW_DEPTH_STENCIL"},
+         flags_case{contract, readable, enhanced(D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE), unreadable, "an observed shader-resource layout with DENY_SHADER_RESOURCE"},
+       }) {
+    chosen = copy_state::resolve(value.selected, value.claim, value.observed, value.flags);
+    require(!chosen.admitted && chosen.result == capture::status::unsupported_state && chosen.stage == capture::record_stage::unsupported_state,
+      (std::string(value.what) + " was copied from").c_str());
+  }
+  // The flags the contract leaves free: GENERIC_READ's layout needs none.
+  chosen = copy_state::resolve(observed_only, 0, enhanced(D3D12_BARRIER_LAYOUT_GENERIC_READ), unreadable);
+  require(chosen.admitted && chosen.enhanced && chosen.layout == D3D12_BARRIER_LAYOUT_GENERIC_READ,
+    "a GENERIC_READ layout was refused on a texture shaders may not read");
   std::printf("PASS capture state table: proof/policy table, copy layouts and named rules\n");
   return 0;
 } catch (const std::exception &error) {

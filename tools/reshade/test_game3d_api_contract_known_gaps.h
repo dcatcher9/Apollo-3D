@@ -83,45 +83,6 @@ namespace game3d_contract::known_gaps {
 
   // The state a copy may start from (checked by test_game3d_api_contract_cpu.cpp).
   namespace state {
-    // The resource flags are not checked against the copy basis: an observed
-    // state or layout, or a depth declaration, that the allocation cannot be
-    // in is copied from. (A UI declaration is checked for render-target, UAV
-    // and depth flags; a depth declaration that names another observed state
-    // is refused as conflicting first.)
-    constexpr bool basis_flags_unchecked(const state_case &value) {
-      const auto &source = value.resource;
-      const bool depth_declaration = value.role == consumer::depth && value.source == claim::sl_declared;
-      if (source.seen == evidence::transition) {
-        return texture_state(source.observed) && !state_allowed(source.observed, source.flags) &&
-               !(depth_declaration && value.declared != source.observed);
-      }
-      if (source.seen == evidence::enhanced) {
-        return direct_queue_layout(source.layout) && source.layout != D3D12_BARRIER_LAYOUT_SHADING_RATE_SOURCE &&
-               !layout_allowed(source.layout, source.flags) && source.access != D3D12_BARRIER_ACCESS_NO_ACCESS && !depth_declaration;
-      }
-      return source.seen == evidence::none && depth_declaration && texture_state(value.declared) &&
-             !state_allowed(value.declared, source.flags);
-    }
-
-    // copy_state::supported admits the buffer read bits (VERTEX_AND_CONSTANT_BUFFER,
-    // INDEX_BUFFER, INDIRECT_ARGUMENT) with read-only texture bits, which the
-    // D3D12 runtime refuses on a texture other than GENERIC_READ itself: a
-    // completed transition into one, or a declaration of one with nothing
-    // observed, becomes the copy's basis.
-    constexpr bool buffer_read_bits(const state_case &value) {
-      constexpr std::uint32_t buffer_bits = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_INDEX_BUFFER |
-                                            D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
-      const auto buffer_state = [](std::uint32_t state) {
-        return (state & buffer_bits) && state != D3D12_RESOURCE_STATE_GENERIC_READ &&
-               !(state & ~std::uint32_t(D3D12_RESOURCE_STATE_GENERIC_READ | texture_read_states));
-      };
-      const auto &source = value.resource;
-      if (source.seen == evidence::transition) {
-        return buffer_state(source.observed) && !(value.source == claim::sl_declared && value.declared != source.observed);
-      }
-      return source.seen == evidence::none && value.source == claim::sl_declared && buffer_state(value.declared);
-    }
-
     // An END_ONLY whose StateAfter differs from its BEGIN_ONLY's is taken as
     // a completed transition into the END's state (the recorder keeps no
     // begin state), so it is copied from unless a declaration disagrees.
@@ -132,8 +93,6 @@ namespace game3d_contract::known_gaps {
   }  // namespace state
 
   inline constexpr row<state_case> state_rows[] {
-    {"X1", &rules::X1, kind::expected_failure, &state::basis_flags_unchecked, "Outside the Stage 3 order. Illegal game input only: check the allocation flags for every copy basis in copy_state::resolve (today only the at-call UI declaration fallback does), so an impossible state never reaches a barrier."},
-    {"X2", &rules::X2, kind::expected_failure, &state::buffer_read_bits, "Outside the Stage 3 order. Illegal game input, but not harmless: the copy's barrier from such a state makes the game's own ID3D12GraphicsCommandList::Close fail (E_INVALIDARG), as the device layer saw for GENERIC_READ | DEPTH_READ. Admit GENERIC_READ itself and no other state with a buffer read bit in copy_state::supported, and update test_capture_state_policy.cpp's supported() checks with it."},
     {"D4c", &rules::D4c, kind::expected_failure, &state::mismatched_split_end, "Stage 3 fix 13 (D4c). Illegal game input: streamline_depth_capture.cpp's barrier recorder ends a split at any END_ONLY and takes its StateAfter, never comparing it with the BEGIN_ONLY's. Keep the begin's StateAfter while the split is pending and block the source when its END_ONLY names another state. The device layer cannot run this row (the debug layer refuses the barrier), so this table is its only check."},
   };
 
