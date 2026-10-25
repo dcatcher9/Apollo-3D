@@ -2377,7 +2377,13 @@ observation), observed only (also an undeclared state), observed-else-declared,
 observed-else-contract and observed-over-declared (a declaration of a later use: a longer-lived
 Streamline depth tag copied inside its frame-generation tag call, which only the recorded state
 proves; one that agrees stands, S11). Blocked or
-incomplete observations reject every rule. A source an enhanced barrier on an earlier executed list
+incomplete observations reject every rule. A legacy COMMON, observed, last proven or declared, is
+the copy's basis only on a depth-stencil texture, which cannot allow simultaneous access and so is
+never implicitly promoted out of COMMON (owner ruling R1; the matrix's D3, since Stage 3 batch B).
+On any other texture an earlier access on the same execution may have promoted it to a read state
+or `COPY_DEST`, so COMMON names nothing there and the copy is refused as `missing_state` (D3b;
+before, a declared COMMON was copied from on such a texture and an observed COMMON on depth-stencil
+was refused). A source an enhanced barrier on an earlier executed list
 latched, whose recording names nothing, is copied only from a shader-read claim's `SHADER_RESOURCE`
 proof (the enhanced-layout latch, since Stage 3 fix 3). The
 [API contract matrix](../tools/reshade/README.md#api-contract-matrix) judges the table over every
@@ -3484,7 +3490,8 @@ An ABI match is separate from a capturable depth source. Early 1.x resources hav
 they require state established by the native command-recording observer. Later legacy resources
 can declare a nonzero state. The private resource-state encoding is still enabled only for an
 exactly identified **sl.common 1.1.1.0**, independently of the public interposer family.
-Unknown, incomplete or conflicting state remains unavailable.
+Unknown, incomplete or conflicting state remains unavailable, and so does its Present state
+(COMMON) on a texture that is not depth-stencil (the matrix's D3b).
 
 ABI changes are checked with the `reshade_streamline_camera_data`,
 `reshade_streamline_camera_probe` and `reshade_streamline_v1_resource_state` CTest cases. The probe
@@ -3956,8 +3963,9 @@ call copies a UI tag (HUD-less, Backbuffer, UI colour and alpha, UIAlpha), is
   in `api_contract.h` gives it the proof `declared_for_use`, which `copy_state` resolves as
   `observed_over_declared`; the matrix's S11, since Stage 3 fix 4, before which the copy was
   refused as `conflicting_state` and the viewport's FG source withdrawn). The recorded state is
-  judged as any observation is (a legacy COMMON or a RESOLVE_DEST is still refused, the matrix's
-  S11-common and S11-resolve rows), and one that agrees with the declaration is copied as before.
+  judged as any observation is (a legacy COMMON is a basis only on a depth-stencil texture, D3; a
+  RESOLVE_DEST is still refused, the matrix's S11-resolve row), and one that agrees with the
+  declaration is copied as before.
   An `OnlyValidNow` declaration describes the call itself and must agree with the recorded state,
   as a declaration must at an evaluate and on the Present queue (S11a). The bounded line
   `Sunshine Streamline FG tag-call copies: copied=<n> recorded_over_declared=<n> state=<recorded>
@@ -4660,8 +4668,9 @@ restores it afterwards. The adapter therefore nominates every accepted feature w
 [`api_contract.h`](../tools/reshade/api_contract.h)). That guide covers Super Resolution only, so the
 [API contract matrix](../tools/reshade/README.md#api-contract-matrix) lists Ray Reconstruction and
 other features as known gaps until a cited guide states their input state. A known,
-unblocked state observed on the same recording takes precedence. An observed COMMON/zero,
-blocked, split or unknown state still rejects capture. Only a recording with no entry for the
+unblocked state observed on the same recording takes precedence. An observed COMMON on a texture
+that is not depth-stencil (on depth-stencil it is the state, D3), or a blocked, split or unknown
+state still rejects capture. Only a recording with no entry for the
 resource uses the contract state, and a resource created with `DENY_SHADER_RESOURCE` is rejected.
 Engines commonly record that transition on an earlier command list. Hogwarts Legacy logged
 `missing_state` for all 27,290 NGX nominations under the former observed-only rule. Capture

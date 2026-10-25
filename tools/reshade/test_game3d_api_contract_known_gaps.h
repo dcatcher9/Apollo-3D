@@ -83,22 +83,6 @@ namespace game3d_contract::known_gaps {
 
   // The state a copy may start from (checked by test_game3d_api_contract_cpu.cpp).
   namespace state {
-    // An observed legacy COMMON on a depth-stencil allocation is refused as
-    // missing evidence, unless an equal COMMON declaration is checked against it.
-    constexpr bool common_on_depth_stencil(const state_case &value) {
-      return depth_stencil(value.resource.flags) && value.resource.seen == evidence::transition &&
-             value.resource.observed == D3D12_RESOURCE_STATE_COMMON && value.source != claim::sl_declared;
-    }
-
-    // A depth declaration of COMMON on a promotable texture is copied from
-    // COMMON when the recording names nothing else.
-    constexpr bool declared_common_on_promotable(const state_case &value) {
-      const auto &source = value.resource;
-      return !depth_stencil(source.flags) && value.role == consumer::depth && value.source == claim::sl_declared &&
-             value.declared == D3D12_RESOURCE_STATE_COMMON &&
-             (source.seen == evidence::none || (source.seen == evidence::transition && source.observed == D3D12_RESOURCE_STATE_COMMON));
-    }
-
     // RESOLVE_DEST, legacy or enhanced, is never a copy basis.
     constexpr bool resolve_destination(const state_case &value) {
       const auto &source = value.resource;
@@ -165,15 +149,8 @@ namespace game3d_contract::known_gaps {
       return value.source == claim::sl_declared && value.scope == claim_scope::before_use;
     }
 
-    // An observed legacy COMMON on a depth-stencil allocation is refused as
-    // missing evidence there too.
-    constexpr bool common_over_declaration(const state_case &value) {
-      const auto &source = value.resource;
-      return overridden_declaration(value) && depth_stencil(source.flags) && source.seen == evidence::transition &&
-             source.observed == D3D12_RESOURCE_STATE_COMMON && value.declared != source.observed;
-    }
-
-    // So is RESOLVE_DEST, legacy or enhanced.
+    // A RESOLVE_DEST recorded there, legacy or enhanced, is refused as an
+    // unsupported state.
     constexpr bool resolve_destination_over_declaration(const state_case &value) {
       const auto &source = value.resource;
       const bool legacy = source.seen == evidence::transition && source.observed == D3D12_RESOURCE_STATE_RESOLVE_DEST;
@@ -184,14 +161,11 @@ namespace game3d_contract::known_gaps {
   }  // namespace state
 
   inline constexpr row<state_case> state_rows[] {
-    {"D3", &rules::D3, kind::expected_failure, &state::common_on_depth_stencil, "Stage 3 fix 5 (D3). Owner ruling R1 (decided): fix copy_state so COMMON on a non-simultaneous depth-stencil allocation is a proof, whether declared or observed. Update test_capture_state_policy.cpp's 'undeclared state took an observed COMMON' check with it."},
-    {"D3b", &rules::D3b, kind::expected_failure, &state::declared_common_on_promotable, "Stage 3 fix 5 (D3). A COMMON declaration on a colour or linear-depth texture may already be promoted; fix together with D3 (one COMMON rule keyed by depth-stencil allocation). Update the 'typed declared COMMON was not retained' check with it."},
     {"D2", &rules::D2, kind::expected_failure, &state::resolve_destination, "Outside the Stage 3 order. Fail-safe today (refusal is harmless), lowest priority: admit RESOLVE_DEST in copy_state::supported and layouts::admissible when a game is seen to need it."},
     {"X1", &rules::X1, kind::expected_failure, &state::basis_flags_unchecked, "Outside the Stage 3 order. Illegal game input only: check the allocation flags for every copy basis in copy_state::resolve (today only the at-call UI declaration fallback does), so an impossible state never reaches a barrier."},
     {"X2", &rules::X2, kind::expected_failure, &state::buffer_read_bits, "Outside the Stage 3 order. Illegal game input, but not harmless: the copy's barrier from such a state makes the game's own ID3D12GraphicsCommandList::Close fail (E_INVALIDARG), as the device layer saw for GENERIC_READ | DEPTH_READ. Admit GENERIC_READ itself and no other state with a buffer read bit in copy_state::supported, and update test_capture_state_policy.cpp's supported() checks with it."},
     {"D4c", &rules::D4c, kind::expected_failure, &state::mismatched_split_end, "Stage 3 fix 13 (D4c). Illegal game input: streamline_depth_capture.cpp's barrier recorder ends a split at any END_ONLY and takes its StateAfter, never comparing it with the BEGIN_ONLY's. Keep the begin's StateAfter while the split is pending and block the source when its END_ONLY names another state. The device layer cannot run this row (the debug layer refuses the barrier), so this table is its only check."},
-    {"S11-common", &rules::S11, kind::expected_failure, &state::common_over_declaration, "Stage 3 fix 5 (D3). Since Stage 3 fix 4 a longer-lived tag copied at its frame-generation tag call starts from the state its list records, whatever its declaration of the later use names (declared_for_use, copy_state's observed_over_declared), but that rule judges the recorded state as observed_only does, which refuses a legacy COMMON as missing evidence. D3's COMMON proof on a non-simultaneous depth-stencil allocation closes this row with the D3 row."},
-    {"S11-resolve", &rules::S11, kind::expected_failure, &state::resolve_destination_over_declaration, "Outside the Stage 3 order, with D2. As S11-common for a recorded RESOLVE_DEST, legacy or enhanced, which copy_state::supported and layouts::admissible refuse: fail-safe (the earlier capture holds, then mono). Admitting RESOLVE_DEST for D2 closes this row with D2's."},
+    {"S11-resolve", &rules::S11, kind::expected_failure, &state::resolve_destination_over_declaration, "Outside the Stage 3 order, with D2. Since Stage 3 fix 4 a longer-lived tag copied at its frame-generation tag call starts from the state its list records, whatever its declaration of the later use names (declared_for_use, copy_state's observed_over_declared), but a recorded RESOLVE_DEST, legacy or enhanced, is refused by copy_state::supported and layouts::admissible: fail-safe (the earlier capture holds, then mono). Admitting RESOLVE_DEST for D2 closes this row with D2's."},
   };
 
   // Raw Streamline buffer types at each surveyed release (checked by
@@ -525,24 +499,6 @@ namespace game3d_contract::known_gaps {
              source.seen == evidence::none || source.seen == evidence::alias_named || source.seen == evidence::alias_wildcard;
     }
 
-    // A legacy COMMON completed on the recording of a depth-stencil
-    // allocation is refused as missing evidence (copy_state::resolve), unless
-    // a declaration is checked against it.
-    constexpr bool common_on_depth_stencil(const device_case &value) {
-      const auto &state = value.state;
-      return api(value) && depth_stencil(state.resource.flags) && completes(state.resource, D3D12_RESOURCE_STATE_COMMON) &&
-             state.source != claim::sl_declared;
-    }
-
-    // A depth declaration of COMMON on a promotable texture is copied from
-    // COMMON when the recording names nothing else.
-    constexpr bool declared_common_on_promotable(const device_case &value) {
-      const auto &state = value.state;
-      return api(value) && state.list == list_type::direct && !depth_stencil(state.resource.flags) && state.role == consumer::depth &&
-             state.source == claim::sl_declared && state.declared == D3D12_RESOURCE_STATE_COMMON &&
-             (unnamed(state.resource) || completes(state.resource, D3D12_RESOURCE_STATE_COMMON));
-    }
-
     // RESOLVE_DEST, legacy or enhanced, is never a copy basis.
     constexpr bool resolve_destination(const device_case &value) {
       const auto &state = value.state;
@@ -586,8 +542,6 @@ namespace game3d_contract::known_gaps {
   }  // namespace device
 
   inline constexpr row<device_case> device_rows[] {
-    {"D3", &rules::D3, kind::expected_failure, &device::common_on_depth_stencil, "Stage 3 fix 5 (D3). Owner ruling R1 (decided): as the state table's D3 row; on the device a COMMON transition on a depth-stencil allocation, then the copy, is legal D3D12.", &behaviours::no_copy},
-    {"D3b", &rules::D3b, kind::expected_failure, &device::declared_common_on_promotable, "Stage 3 fix 5 (D3). As the state table's D3b row: fix with D3 (one COMMON rule keyed by depth-stencil allocation).", &behaviours::copy},
     {"D2", &rules::D2, kind::expected_failure, &device::resolve_destination, "Outside the Stage 3 order. As the state table's D2 row: fail-safe, lowest priority.", &behaviours::no_copy},
     {"D11c", &rules::D11c, kind::expected_failure, &device::read_only_unbind, "Stage 3 fix 7 (D11c). depth_addon.cpp declares DEPTH_WRITE when a DSV is unbound (on_bind_depth_stencil -> on_clear_depth_impl). Read the bound DSV's read-only flags: a writable DSV keeps DEPTH_WRITE; a read-only one with no observation is refused (D10's per-resource proven state may supply it).", &behaviours::copy},
     {"S22", &rules::S22, kind::expected_failure, &device::streamline_compute_list, "Stage 3 fix 9 (S22). Allow COMPUTE in record_impl and the consumer (streamline_depth_capture.cpp command_type, consume_owned) when the starting state is one a compute list may use (NON_PIXEL_SHADER_RESOURCE, UNORDERED_ACCESS, COPY_SOURCE, COPY_DEST, COMMON on depth-stencil, or a COMPUTE_QUEUE_* layout), with a compute-legal resting state for the snapshot storage. Until then every compute cell is refused as no_copy_point, also where the oracle refuses for its state.", &behaviours::no_copy},

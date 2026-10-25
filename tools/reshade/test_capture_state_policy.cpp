@@ -54,8 +54,13 @@ int main() try {
     D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
   require(chosen.admitted && chosen.state == (D3D12_RESOURCE_STATE_DEPTH_READ | readable) && chosen.used_observed &&
     !chosen.used_contract, "observed state did not override the SDK contract");
+  // An observed COMMON is the state of a depth-stencil texture, which is never
+  // promoted (D3, owner ruling R1); elsewhere it proves nothing (D3b).
   chosen = copy_state::resolve(contract, readable, {true, true, false, 0}, D3D12_RESOURCE_FLAG_NONE);
   require(!chosen.admitted && chosen.result == capture::status::missing_state, "observed COMMON satisfied the contract");
+  chosen = copy_state::resolve(contract, readable, {true, true, false, 0}, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+  require(chosen.admitted && chosen.state == 0 && chosen.used_observed && !chosen.used_contract,
+    "an observed COMMON on a depth-stencil texture did not override the contract");
   chosen = copy_state::resolve(contract, readable, {},
     D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL | D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE);
   require(!chosen.admitted && chosen.result == capture::status::missing_state, "contract accepted an unreadable allocation");
@@ -79,9 +84,13 @@ int main() try {
   require(chosen.admitted && chosen.state == 0, "an agreeing COMMON declaration of a later use did not stand");
   chosen = copy_state::resolve(for_use, readable, {}, 0);
   require(!chosen.admitted && chosen.result == capture::status::missing_state, "a declaration of a later use proved an unrecorded state");
-  // A recorded COMMON stays missing evidence there (S11-common, until D3).
+  // A recorded COMMON wins there only on a depth-stencil texture (D3, S11).
   chosen = copy_state::resolve(for_use, readable, {true, true, false, 0}, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
-  require(!chosen.admitted && chosen.result == capture::status::missing_state, "an observed COMMON overrode a declaration of a later use");
+  require(chosen.admitted && chosen.state == 0 && chosen.used_observed,
+    "an observed COMMON on a depth-stencil texture did not override a declaration of a later use");
+  chosen = copy_state::resolve(for_use, readable, {true, true, false, 0}, D3D12_RESOURCE_FLAG_NONE);
+  require(!chosen.admitted && chosen.result == capture::status::missing_state,
+    "an observed COMMON on a promotable texture overrode a declaration of a later use");
   chosen = copy_state::resolve(for_use, readable, {true, true, false, D3D12_RESOURCE_STATE_RESOLVE_DEST}, 0);
   require(!chosen.admitted && chosen.result == capture::status::unsupported_state, "an observed RESOLVE_DEST was copied from");
   chosen = copy_state::resolve(for_use, readable, {true, true, true, D3D12_RESOURCE_STATE_COPY_SOURCE}, 0);
@@ -197,10 +206,19 @@ int main() try {
     require(!chosen.admitted && chosen.result == capture::status::incomplete_state &&
       chosen.stage == capture::record_stage::incomplete_state, "a pending split barrier was admitted");
   }
-  // Current behaviour, a recorded contract gap (D3b): a declared COMMON on a
-  // promotable texture is admitted.
-  chosen = copy_state::resolve(declared, 0, {}, 0);
-  require(chosen.admitted && chosen.state == 0, "typed declared COMMON was not retained");
+  // A declared COMMON is the state of a depth-stencil texture (D3) and of no
+  // texture that COMMON may have been promoted out of (D3b): a colour or
+  // linear-depth texture, simultaneous-access or not.
+  chosen = copy_state::resolve(declared, 0, {}, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+  require(chosen.admitted && chosen.state == 0 && !chosen.used_observed, "a declared COMMON on a depth-stencil texture was refused");
+  for (const std::uint32_t flags : {std::uint32_t(D3D12_RESOURCE_FLAG_NONE), std::uint32_t(D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS),
+         std::uint32_t(D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS | D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)}) {
+    for (const auto &observed : {copy_state::observation{}, copy_state::observation{true, true, false, 0}}) {
+      chosen = copy_state::resolve(declared, 0, observed, flags);
+      require(!chosen.admitted && chosen.result == capture::status::missing_state && chosen.stage == capture::record_stage::missing_state,
+        "a declared COMMON on a promotable texture was copied from");
+    }
+  }
   // Assassin's Creed Shadows 10-22: depth observed in GENERIC_READ (0xac3), a
   // read-only legacy combination a copy can leave and restore.
   const auto observed_only = copy_state::select(proof::observed_nonzero, policy::source_contract);
@@ -221,9 +239,12 @@ int main() try {
     chosen = copy_state::resolve(undeclared, UINT32_MAX, {true, true, true, D3D12_RESOURCE_STATE_DEPTH_READ},
       D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
     require(!chosen.admitted && chosen.result == capture::status::incomplete_state, "an undeclared state took a blocked observation");
-    // Current behaviour, a recorded contract gap (D3, owner ruling R1).
+    // An observed COMMON proves a depth-stencil texture's state (D3) and
+    // nothing else's (D3b).
     chosen = copy_state::resolve(undeclared, UINT32_MAX, {true, true, false, 0}, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
-    require(!chosen.admitted && chosen.result == capture::status::missing_state, "an undeclared state took an observed COMMON");
+    require(chosen.admitted && chosen.state == 0 && chosen.used_observed, "an undeclared state refused an observed COMMON on depth-stencil");
+    chosen = copy_state::resolve(undeclared, UINT32_MAX, {true, true, false, 0}, D3D12_RESOURCE_FLAG_NONE);
+    require(!chosen.admitted && chosen.result == capture::status::missing_state, "an undeclared state took an observed COMMON on a promotable texture");
   }
   // RESOLVE_DEST's refusal is a recorded contract gap (D2).
   require(copy_state::supported(D3D12_RESOURCE_STATE_GENERIC_READ) &&

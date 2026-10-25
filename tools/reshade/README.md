@@ -971,8 +971,9 @@ Like the modes below, it is exclusive. A source nomination ticket is not a pixel
 assertion: negative capture cases verify held API ownership and current-color mono separately.
 Set `SUNSHINE_STREAMLINE_COLD_V1_TEST=1` for V1-only rotation without successful V2 warmup.
 Alternatively, `SUNSHINE_STREAMLINE_PRIVATE_STATE_TEST=1` checks the pinned V1 provider's
-resource-state metadata on a fresh evaluation recording, including COMMON and missing,
-malformed, conflicting or split-transition rejection. These modes are mutually exclusive and
+resource-state metadata on a fresh evaluation recording, including the rejection of its Present
+state (COMMON) on that colour source (D3b) and of missing, malformed, conflicting or
+split-transition metadata. These modes are mutually exclusive and
 use the same real GPU capture and shader path.
 `SUNSHINE_STREAMLINE_PACKED_V1_TEST=1` is a third exclusive mode for the packed
 `R32G8X24_TYPELESS` depth/stencil format observed in Dead Space. It checks rotating sources,

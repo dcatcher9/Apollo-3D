@@ -798,8 +798,7 @@ RWTexture2D<float> depth : register(u0);
       struct private_phase { private_case value; const char *name; };
       for(const auto &phase : {
           private_phase{private_case::shader_read,"private-state-shader-read"},
-          private_phase{private_case::shader_read_present,"private-state-shader-read-present-marker"},
-          private_phase{private_case::common,"private-state-common-present-marker"}}) {
+          private_phase{private_case::shader_read_present,"private-state-shader-read-present-marker"}}) {
         private_input=phase.value;
         settle(phase.name);
         unsigned seen=0,verified=0;
@@ -813,8 +812,11 @@ RWTexture2D<float> depth : register(u0);
         }
         require(seen==3,"Provider-private state did not cover both real rotating sources");
       }
-      std::puts("PASS provider-private chi PS|NPS with/without Present and Present-only COMMON drive correct native pixels from an earlier submitted recording");
+      std::puts("PASS provider-private chi PS|NPS with/without Present drive correct native pixels from an earlier submitted recording");
+      // Present-only is COMMON, which this colour UAV source may have been
+      // promoted out of: no proof (the contract matrix's D3b).
       for(const auto &phase : {
+          private_phase{private_case::common,"private-state-common-present-marker"},
           private_phase{private_case::missing,"private-state-missing"},
           private_phase{private_case::short_value,"private-state-malformed-size"},
           private_phase{private_case::unsupported,"private-state-unsupported-bits"},
@@ -832,7 +834,7 @@ RWTexture2D<float> depth : register(u0);
       private_input=private_case::shader_read_present;
       settle("private-state-recovery");verify_depth();
       require(!v2_capture_calls && v1_capture_calls,"Provider-private regression invoked a V2 warming path");
-      std::puts("PASS missing/malformed/unsupported metadata, conflicting native state and incomplete split barriers remain current-color mono; completed barriers recover with valid provider state");
+      std::puts("PASS Present-only COMMON on a colour source, missing/malformed/unsupported metadata, conflicting native state and incomplete split barriers remain current-color mono; completed barriers recover with valid provider state");
     }
     void packed_state_cases() {
       require(packed_state_mode && rotate && !v1_capture_calls && !v2_capture_calls,

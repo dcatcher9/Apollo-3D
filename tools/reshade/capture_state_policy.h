@@ -180,6 +180,18 @@ namespace sunshine_streamline::depth_capture::copy_state {
 
   constexpr bool usable_claim(std::uint32_t value) { return value != 0 && value != UINT32_MAX; }
 
+  // Whether a legacy COMMON, observed or declared, is the source's state (the
+  // contract matrix's D3 and D3b, owner ruling R1). A depth-stencil texture
+  // cannot allow simultaneous access, so it is never implicitly promoted out
+  // of COMMON (MS Learn, Using Resource Barriers, Common state promotion):
+  // COMMON there is its state. Any other texture may have been promoted to a
+  // read state or COPY_DEST by an earlier access on the same execution, so
+  // COMMON names nothing about it there.
+  constexpr bool common_is_state(std::uint32_t resource_flags) {
+    return (resource_flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) &&
+      !(resource_flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS);
+  }
+
   // A declaration naming a bind state the allocation cannot have is not a claim
   // about this resource, so it cannot stand in for missing evidence.
   constexpr bool compatible_with(std::uint32_t state, std::uint32_t resource_flags) {
@@ -239,7 +251,6 @@ namespace sunshine_streamline::depth_capture::copy_state {
         // the observation does, by observed_only's rules.
         if (!observed.present) return reject(status::missing_state, record_stage::missing_state);
         if (agrees(claimed, observed)) break;
-        if (!observed.enhanced && observed.value == 0) return reject(status::missing_state, record_stage::missing_state);
         out.state = observed.value;
         out.used_observed = true;
         break;
@@ -247,11 +258,10 @@ namespace sunshine_streamline::depth_capture::copy_state {
       case rule::observed_else_declared:
       case rule::observed_else_contract:
         if (observed.present || selected == rule::observed_only) {
-          // Observed legacy COMMON/zero is evidence, not an absent entry: it
-          // may be implicit promotion or decay. An enhanced COMMON layout is
-          // an explicit layout.
-          if (!observed.present || (!observed.enhanced && observed.value == 0))
-            return reject(status::missing_state, record_stage::missing_state);
+          // An observed legacy COMMON is evidence, not an absent entry: no
+          // claim stands in for it, and it is the basis only where COMMON is
+          // the state (below). An enhanced COMMON layout is an explicit layout.
+          if (!observed.present) return reject(status::missing_state, record_stage::missing_state);
           out.state = observed.value;
           out.used_observed = true;
         } else if (!usable_claim(claimed)) {
@@ -271,6 +281,10 @@ namespace sunshine_streamline::depth_capture::copy_state {
       out.enhanced = true; out.layout = observed.layout; out.access = observed.access;
       return out;
     }
+    // A legacy COMMON, observed or claimed, is a basis only where it is the
+    // source's state (common_is_state).
+    if (out.state == D3D12_RESOURCE_STATE_COMMON && !common_is_state(resource_flags))
+      return reject(status::missing_state, record_stage::missing_state);
     if (!supported(out.state)) return reject(status::unsupported_state, record_stage::unsupported_state);
     return out;
   }

@@ -54,7 +54,9 @@ namespace sunshine_scene_depth {
   // resource, not at this copy point (a longer-lived Streamline tag copied
   // inside its tag call): the state observed on the recording proves the copy
   // there, and a declaration that disagrees with it does not refuse it.
-  // observed_nonzero: only a state observed on the recording is acceptable.
+  // observed_nonzero: only a state observed on the recording is acceptable (a
+  // COMMON only on a depth-stencil texture: capture_state_policy.h
+  // common_is_state).
   // sdk_contract: the SDK requires this state at the capture boundary for every
   // input (NGX: NON_PIXEL_SHADER_RESOURCE). A known state observed on the same
   // recording takes precedence; the contract applies only when none was observed.
