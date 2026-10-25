@@ -424,6 +424,45 @@ namespace sunshine_streamline::depth_capture {
           return false;
         requested = true; fixture::clear_captures();
       }
+      {
+        // A copy recorded on a COMPUTE list (DLSS-G's own, N7) is its FG
+        // scope's accepted copy only once its SDK call succeeded and its
+        // submission carries the capture owner's fence, in either order: one
+        // never submitted (its queue had no place) keeps the scope silent. An
+        // accepted one whose producer fails later (a replay, its recording
+        // discarded, its queue gone) leaves its frame missed; a consumer's
+        // failure does not, and a direct-list copy's failure changes nothing.
+        constexpr std::uint64_t epoch = 8, fg = (1ull << 63) | 2;
+        const auto silent_since = [] { return GetTickCount64() - sunshine_freshness::fg_silent_ms - 1; };
+        const auto copy = [&](std::uint64_t id, std::uint64_t sequence, bool compute, bool submitted) {
+          begin_evaluation(epoch, sequence, 2, provider_kind::streamline, fg, 0);
+          slots[0] = {}; slots[0].id = id; slots[0].compute_list = compute;
+          slots[0].metadata.provider = provider_kind::streamline; slots[0].metadata.epoch = epoch;
+          slots[0].metadata.sequence = sequence; slots[0].metadata.viewport = 2; slots[0].metadata.source_id = fg;
+          slots[0].metadata.frame_generation_input = true; slots[0].metadata.tick = GetTickCount64();
+          if (submitted) { slots[0].producer_submitted = true; slots[0].producer_fence = sequence; slots[0].queue = 5; }
+        };
+        const auto live = [&] { return frame_generation_scope_live(epoch, 2, silent_since()); };
+        copy(61, 20, true, false); finish(61, true);
+        if (!slots[0].finished || live()) return false;
+        slots[0].producer_submitted = true; slots[0].producer_fence = 3; slots[0].queue = 5;
+        accept_compute_copy(slots[0]);
+        if (!live()) return false;
+        copy(62, 21, true, true); finish(62, true);
+        if (!live()) return false;
+        invalidate(slots[0], capture_failure::replay);
+        if (live()) return false;
+        copy(63, 22, true, true); finish(63, true);
+        invalidate(slots[0], capture_failure::consumer_capacity);
+        if (!live()) return false;
+        copy(64, 23, true, true); slots[0].producer_fence = 0; finish(64, true);
+        invalidate(slots[0], capture_failure::discarded_recording);
+        if (live()) return false;
+        copy(65, 24, false, false); finish(65, true);
+        invalidate(slots[0], capture_failure::replay);
+        if (!live()) return false;
+        fixture::clear_captures();
+      }
       queue_state owner;
       constexpr std::uint64_t native = 77;
       {

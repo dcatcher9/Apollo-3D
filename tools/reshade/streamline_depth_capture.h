@@ -44,6 +44,13 @@ namespace sunshine_streamline::depth_capture {
     // DLSS-G's own evaluation (frame_generation_inputs.h) supplies FG depth
     // only through recorded copies; a refusal must change nothing.
     bool pixels_required{};
+    // An input of an NGX evaluation call: DLSS-G's own inputs
+    // (frame_generation_inputs.h). NGX evaluates on any non-copy queue
+    // (dlssg-guide.txt 2321-2324, the matrix's N7), so the copy may be
+    // recorded on the evaluation's COMPUTE list, from a state observed there
+    // that a compute list may use (copy_state::compute_list_state). Every
+    // other input keeps to DIRECT lists (Streamline's evaluate, S22).
+    bool ngx_evaluation{};
   };
   struct packet {
     input metadata;

@@ -3636,6 +3636,7 @@ namespace sunshine_streamline {
         sunshine_api_contract::apply(sunshine_api_contract::ngx::frame_generation_input, input);
         input.at_tag_call = true; // Copied inside the call that supplied it.
         input.pixels_required = true;
+        input.ngx_evaluation = true; // Its list may be COMPUTE (N7).
         depth_capture::record_diagnostic diagnostic;
         input.source = depth_capture::retain_source(input.resource.native, &diagnostic);
         if (!input.source) {
@@ -3689,7 +3690,7 @@ namespace sunshine_streamline {
         input.resource.native = item.state == parameter::present ? item.native : 0;
         input.resource.area = item.area;
         sunshine_api_contract::apply(sunshine_api_contract::ngx::frame_generation_input, input);
-        input.force_snapshot = true; input.at_tag_call = true;
+        input.force_snapshot = true; input.at_tag_call = true; input.ngx_evaluation = true;
         depth_capture::record_diagnostic retained;
         input.source = depth_capture::retain_source(input.resource.native, &retained);
         input.source_present_generation = depth_capture::source_present_generation(input.source);

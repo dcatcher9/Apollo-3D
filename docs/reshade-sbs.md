@@ -4074,7 +4074,21 @@ every Streamline call. The depth becomes that viewport's FG source (`fg_depth_ke
 `frame_generation_input`) only through a copy recorded on the evaluation's own command list in a
 state observed on that recording (`state_proof::observed_nonzero`, `ngx::frame_generation_input`
 in [`api_contract.h`](../tools/reshade/api_contract.h): no API states the resource's
-state at this call, so none is assumed), with no metadata-only nomination (`pixels_required`). Its
+state at this call, so none is assumed), with no metadata-only nomination (`pixels_required`).
+NGX evaluates on any non-copy queue (`dlssg-guide.txt` 2321-2324, the contract matrix's N7), and
+Streamline runs DLSS-G on its own COMPUTE list and compute queue (Assassin's Creed Shadows 10-24
+refused every `DLSSG.Depth` copy and every UI input as `command_type`). So DLSS-G's inputs
+(`input::ngx_evaluation`), and only they, may be copied on a COMPUTE list, from an observed state a
+compute list may name (`copy_state::compute_list_state`: not the depth, pixel-shader,
+render-target or resolve states; legacy barriers only, no compute-queue layout), into snapshot
+storage that rests in COMMON (`texture_reference::rest`; a direct list's depth snapshot rests in the
+shader-read states, and a direct list may reuse either). A compute queue takes its place and fence
+at its first submission of such a copy. The Present queue reads the copy as any other queue's: once
+that recording was reset and the fence passed. A compute-list copy keeps the FG scope live only once
+its submission carries that fence, so one never submitted (as when its queue has no place) keeps no
+SR depth out, even before its recording's Reset discards it; one whose producer fails later (a
+replay, its queue gone) counts as a missed frame (below). Streamline's evaluate and tag lists stay
+DIRECT only (the matrix's S22, Stage 3 batch B). DLSS-G's
 accepted copies keep the FG scope live exactly as accepted FG tag copies do, so FG owns the viewport
 (the same viewport's SR/RR evaluations and direct NGX copies stand aside), and generated Presents
 hold the real frame's copy. A refusal while the scope is silent changes nothing (the ordinary SR/RR

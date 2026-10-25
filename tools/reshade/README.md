@@ -901,7 +901,11 @@ HUD-less/Backbuffer pair reaches UI detection as a same-batch pair. HUD-less and
 with the game's command list keep precedence per kind: across two NGX lines `dlssg_ui` offers and
 captures nothing more while its `tag_copied` grows, and a later UI capture gate window still counts
 the tags' own same-batch pairs; untagged in their frame again, DLSS-G's inputs are captured again. An FG tag sent with a
-command list copies the frame first and keeps precedence (`tag_copied`); refused again, SR depth
+command list copies the frame first and keeps precedence (`tag_copied`). DLSS-G evaluating on its
+own COMPUTE list on its own compute queue (as Streamline does in Assassin's Creed Shadows, after the
+game's work ran) owns the FG scope the same way from depth observed there, with no readiness loss
+and no `command_type` refusal (N7: the compute queue takes its fence at the copy's submission, and
+DLSS-G resets the recording once its work completed). Refused again, SR depth
 returns. Last, with the FG depth tag command-less and not untagged, a frame whose Present comes
 after the game's work but before DLSS-G evaluated it (an earlier frame's paced or generated Present)
 keeps its copy deferred (the Present holds the previous depth, `waited_for_frame` counts it); the
@@ -1740,6 +1744,12 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   Generic's copy) and `enhanced_layout_latch` (a depth clear after an enhanced barrier, and a later
   clear-only list, prove the `DEPTH_STENCIL_WRITE` layout, so the end-of-frame copy uses enhanced
   barriers under the debug layer; a destroyed latched texture is forgotten with its latch).
+  Its `dlssg_compute_list_capture` checks DLSS-G's copy on its own COMPUTE list under the debug
+  layer (N7): a depth-stencil depth observed in `NON_PIXEL_SHADER_RESOURCE` there is copied there
+  with exact bytes into storage resting in COMMON, unobserved it is refused as `missing_state`, a
+  Streamline input on a compute list stays refused as `command_type` (S22), the compute queue takes
+  a fence at its first submission of the copy, and the direct consumer reads it only once the
+  compute recording was reset.
 
 ### Independent renderer reference tests
 

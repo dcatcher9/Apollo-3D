@@ -198,6 +198,18 @@ namespace sunshine_streamline::depth_capture {
       if (why != capture_failure::producer_signal_failed && why != capture_failure::consumer_signal_failed &&
           why != capture_failure::consumer_capacity && why != capture_failure::consumer_queue_changed)
         value.nomination_invalid = true;
+      // A DLSS-G copy recorded on a COMPUTE list whose producer can no longer
+      // supply its frame (its recording discarded unsubmitted, as when its
+      // queue has no place, replayed, or its queue gone) leaves that frame
+      // without an FG copy, exactly as frame_generation_missed records: an
+      // accepted copy that never reaches a consumer keeps no SR depth out.
+      const auto &m = value.metadata;
+      if (value.compute_list && m.frame_generation_input && m.provider == provider_kind::streamline && m.epoch &&
+          m.sequence && why != capture_failure::consumer_signal_failed && why != capture_failure::consumer_capacity &&
+          why != capture_failure::consumer_queue_changed)
+        for (auto &view : evaluations[provider_index(m.provider)].views)
+          if (view.epoch == m.epoch && view.viewport == m.viewport && view.source_id == m.source_id)
+            view.missed_sequence = std::max(view.missed_sequence, m.sequence);
     }
 
     command_storage::handle command(std::uint64_t native, std::uint64_t cookie, bool create = false) {
@@ -1116,10 +1128,76 @@ namespace sunshine_streamline::depth_capture {
         }
       }
     }
+    // Requires mutex. A queue's place: its device and the fence the capture
+    // owner signals after the queue's submissions that carry a copy. DIRECT
+    // queues register as ReShade reports them (observe_queue);
+    // compute_producer also admits a COMPUTE queue, which only ever produces
+    // (an NGX evaluation's copy, N7).
+    queue_state *register_queue(ID3D12CommandQueue *value, bool compute_producer) {
+      const auto type = value->GetDesc().Type;
+      if (type != D3D12_COMMAND_LIST_TYPE_DIRECT && !(compute_producer && type == D3D12_COMMAND_LIST_TYPE_COMPUTE)) {
+        reason = status::unsupported_queue; return nullptr;
+      }
+      for (auto &entry : queues) if (!entry) {
+        auto next = std::make_unique<queue_state>();
+        if (FAILED(value->GetDevice(__uuidof(ID3D12Device), reinterpret_cast<void **>(next->device.put()))) ||
+            FAILED(next->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, __uuidof(ID3D12Fence), reinterpret_cast<void **>(next->fence.put())))) {
+          reason = status::unsupported_queue; return nullptr;
+        }
+        next->device_identity = device_cookie(next->device.p, true);
+        if (!next->device_identity) { reason = status::unsupported_queue; return nullptr; }
+        value->AddRef(); next->queue.p = value;
+        next->cookie = ++serial;
+        if (FAILED(value->SetPrivateData(queue_guid, sizeof(next->cookie), &next->cookie))) { reason = status::unsupported_queue; return nullptr; }
+        entry = std::move(next); return entry.get();
+      }
+      reason = status::exhausted;
+      return nullptr;
+    }
+    // Requires mutex. A COMPUTE queue that ReShade reported (or not) takes a
+    // place at its first submission of a copy awaiting its producer: a copy
+    // recorded on a compute list (record_impl). Without one, such a copy is
+    // never submitted, and its recording's Reset discards it.
+    bool compute_copies_recorded{}; // Protected by mutex: a copy was ever recorded on a COMPUTE list.
+    queue_state *register_compute_producer(std::uint64_t native, std::uint32_t count,
+        const native_observer::command_identity *values) {
+      const auto awaits = [&](const auto &captures) {
+        for (std::uint32_t n = 0; n != count; ++n) {
+          const auto cookie = values[n].recording_cookie;
+          if (!cookie) continue;
+          for (const auto &value : captures)
+            if (value.id && !value.producer_submitted && value.command == cookie) return true;
+        }
+        return false;
+      };
+      if (!compute_copies_recorded || (!awaits(slots) && !(diagnostic_slots_active && awaits(diagnostic_slots))))
+        return nullptr;
+      com_ptr<ID3D12CommandQueue> checked;
+      if (!query_native(native, IID_ID3D12CommandQueue, checked)) return nullptr;
+      return register_queue(checked.p, true);
+    }
+    // Requires mutex. A copy recorded on a COMPUTE list is its FG scope's
+    // accepted copy (frame_generation_scope_live) only once its SDK call
+    // succeeded and its submission carries the capture owner's fence (in
+    // either order). One never submitted, as when its queue has no place,
+    // keeps no SR depth out, also in the frames before its recording's
+    // Reset discards it.
+    void accept_compute_copy(const slot &value) {
+      const auto &m = value.metadata;
+      if (!value.compute_list || !value.finished || !value.success || value.invalid || value.nomination_only ||
+          value.preservation_only || !value.producer_submitted || !value.producer_fence || !valid_provider(m.provider))
+        return;
+      for (auto &view : evaluations[provider_index(m.provider)].views)
+        if (view.epoch == m.epoch && view.viewport == m.viewport && view.source_id == m.source_id) {
+          view.accepted_tick = std::max(view.accepted_tick, m.tick);
+          view.accepted_sequence = std::max(view.accepted_sequence, m.sequence);
+        }
+    }
     void submitted(std::uint64_t native, std::uint32_t count, const native_observer::command_identity *values) {
       std::lock_guard lock(mutex);
       apply_executed(native, count, values);
       auto *owner = queue(native);
+      if (!owner) owner = register_compute_producer(native, count, values);
       if (!owner) return;
       native = reinterpret_cast<std::uint64_t>(owner->queue.p);
       std::array<bool, slot_limit> producers{}, consumers{};
@@ -1138,8 +1216,10 @@ namespace sunshine_streamline::depth_capture {
       const bool signaled = !needs_fence || SUCCEEDED(owner->queue->Signal(owner->fence.p, fence));
       for (unsigned i = 0; i != slots.size(); ++i) {
         auto &value = slots[i];
-        if (producers[i]) producer_submitted(value, native, value.nomination_only ? 0 : fence,
-          value.nomination_only || signaled);
+        if (producers[i]) {
+          producer_submitted(value, native, value.nomination_only ? 0 : fence, value.nomination_only || signaled);
+          accept_compute_copy(value);
+        }
         if (consumers[i]) {
           consumer_submitted(value, native, fence, signaled);
           // Keep the recording reference until Reset/destroy. A legal replay of
@@ -1303,6 +1383,7 @@ namespace sunshine_streamline::depth_capture {
         plan.device->AddRef(); texture->device.p = plan.device;
         texture->device_identity = plan.device_identity;
         texture->allocation_bytes = plan.allocation_bytes;
+        texture->rest = plan.state;
         D3D12_HEAP_PROPERTIES heap{}; heap.Type = D3D12_HEAP_TYPE_DEFAULT;
         native_observer::suppression_scope suppress;
         if (FAILED(plan.device->CreateCommittedResource(&heap, plan.shared ? D3D12_HEAP_FLAG_SHARED : D3D12_HEAP_FLAG_NONE,
@@ -1655,22 +1736,7 @@ namespace sunshine_streamline::depth_capture {
     std::lock_guard lock(mutex);
     collect_retired();
     if (queue(native)) return;
-    for (auto &entry : queues) if (!entry) {
-      auto next = std::make_unique<queue_state>();
-      auto *value = reinterpret_cast<ID3D12CommandQueue *>(native);
-      if (value->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT ||
-          FAILED(value->GetDevice(__uuidof(ID3D12Device), reinterpret_cast<void **>(next->device.put()))) ||
-          FAILED(next->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, __uuidof(ID3D12Fence), reinterpret_cast<void **>(next->fence.put())))) {
-        reason = status::unsupported_queue; return;
-      }
-      next->device_identity = device_cookie(next->device.p, true);
-      if (!next->device_identity) { reason = status::unsupported_queue; return; }
-      value->AddRef(); next->queue.p = value;
-      next->cookie = ++serial;
-      if (FAILED(value->SetPrivateData(queue_guid, sizeof(next->cookie), &next->cookie))) { reason = status::unsupported_queue; return; }
-      entry = std::move(next); return;
-    }
-    reason = status::exhausted;
+    register_queue(reinterpret_cast<ID3D12CommandQueue *>(native), false);
   }
   void retire_queue(std::uint64_t native) {
     std::lock_guard lock(mutex);
@@ -2147,7 +2213,12 @@ namespace sunshine_streamline::depth_capture {
     auto *list = checked.p;
     const auto command_type = list->GetType();
     if (diagnostic) diagnostic->command_type = command_type;
-    if (command_type != D3D12_COMMAND_LIST_TYPE_DIRECT) return reject(status::unsupported_queue, record_stage::command_type);
+    // An NGX evaluation's input (DLSS-G's, value.ngx_evaluation) may be
+    // copied on the evaluation's COMPUTE list (N7); everything else on a
+    // DIRECT list only (S22).
+    const bool on_compute = command_type == D3D12_COMMAND_LIST_TYPE_COMPUTE && value.ngx_evaluation;
+    if (command_type != D3D12_COMMAND_LIST_TYPE_DIRECT && !on_compute)
+      return reject(status::unsupported_queue, record_stage::command_type);
     com_ptr<ID3D12Device> list_device;
     if (FAILED(list->GetDevice(__uuidof(ID3D12Device), reinterpret_cast<void **>(list_device.put()))))
       return reject(status::unsupported_queue, record_stage::command_device);
@@ -2263,6 +2334,11 @@ namespace sunshine_streamline::depth_capture {
         if (earlier.latched) proven_counters.earlier_refused.fetch_add(1, std::memory_order_relaxed);
         return reject(chosen.result, chosen.stage);
       }
+      // A compute list's copy uses legacy barriers between states a compute
+      // list may name: its start, COPY_SOURCE and COPY_DEST. Its
+      // compute-queue layouts are not admitted here (S22, N7).
+      if (on_compute && (chosen.enhanced || !copy_state::compute_list_state(chosen.state)))
+        return reject(status::unsupported_state, record_stage::unsupported_state);
       // The D3D12 contract forbids a legacy barrier on a texture in an
       // enhanced layout: that copy needs this list's CommandList7 Barrier.
       com_ptr<ID3D12GraphicsCommandList7> enhanced_list;
@@ -2290,6 +2366,9 @@ namespace sunshine_streamline::depth_capture {
       const auto compatible_storage = [&](const auto &texture) {
         if (!texture || texture->device_identity != value.source->device_identity) return false;
         if (diagnostic_copy && bool(texture->shared_handle) == reusable_storage) return false;
+        // A compute list cannot leave the pixel-shader state a depth
+        // snapshot rests in; a direct list may use storage of either rest.
+        if (on_compute && texture->rest != D3D12_RESOURCE_STATE_COMMON) return false;
         const auto existing = texture->resource->GetDesc();
         return existing.Width == region.width && existing.Height == region.height && existing.Format == texture_format &&
           (diagnostic_copy || texture->view_format == snapshot_view);
@@ -2319,7 +2398,8 @@ namespace sunshine_streamline::depth_capture {
       });
       if (found == pixel_end) return reject(status::exhausted, record_stage::capacity);
       auto texture = found->texture;
-      const auto resting_state = diagnostic_copy ? D3D12_RESOURCE_STATE_COMMON : sampled_state;
+      // New storage's rest (texture_reference::rest).
+      const auto resting_state = diagnostic_copy || on_compute ? D3D12_RESOURCE_STATE_COMMON : sampled_state;
       if (!compatible_storage(texture)) {
         if (prepared && compatible_storage(prepared)) {
           // Storage allocated by an earlier attempt. Its budget was reserved on
@@ -2389,7 +2469,8 @@ namespace sunshine_streamline::depth_capture {
       if (reservation) clear_reservation(std::exchange(reservation, 0));
       found->texture = std::move(texture); found->metadata = value; found->metadata.native_state = before;
       found->id = ++serial; found->command = cookie; found->producer_recording = owner.life();
-      found->basis = basis;
+      found->basis = basis; found->compute_list = on_compute;
+      compute_copies_recorded |= on_compute;
       if (proof) {
         found->proven_source = value.source->cookie; found->proven_version = proof.version;
         found->proven_queue = proven_basis ? proven_queue : proof.queue;
@@ -2405,7 +2486,7 @@ namespace sunshine_streamline::depth_capture {
       D3D12_RESOURCE_BARRIER transitions[2]{};
       transitions[0].Type = transitions[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
       transitions[0].Transition = {value.source->resource.p, 0, static_cast<D3D12_RESOURCE_STATES>(before), D3D12_RESOURCE_STATE_COPY_SOURCE};
-      transitions[1].Transition = {found->texture->resource.p, 0, resting_state, D3D12_RESOURCE_STATE_COPY_DEST};
+      transitions[1].Transition = {found->texture->resource.p, 0, found->texture->rest, D3D12_RESOURCE_STATE_COPY_DEST};
       // An enhanced source leaves its exact layout and access for the copy
       // after all prior work (subresource 0: the zero range is index form).
       D3D12_TEXTURE_BARRIER source_layout{};
@@ -2752,7 +2833,7 @@ namespace sunshine_streamline::depth_capture {
       if (!value.preservation_only && valid_provider(m.provider))
         for (auto &view : evaluations[provider_index(m.provider)].views) {
           if (view.epoch != m.epoch || view.viewport != m.viewport || view.source_id != m.source_id) continue;
-          if (successful && !value.nomination_only && !value.invalid) {
+          if (successful && !value.nomination_only && !value.invalid && !value.compute_list) {
             view.accepted_tick = std::max(view.accepted_tick, m.tick);
             view.accepted_sequence = std::max(view.accepted_sequence, m.sequence);
           }
@@ -2761,6 +2842,7 @@ namespace sunshine_streamline::depth_capture {
           if (successful) view.rejected_since = 0;
           else if (!view.rejected_since) view.rejected_since = GetTickCount64();
         }
+      accept_compute_copy(value);
       return;
     }
   }
@@ -3030,7 +3112,7 @@ namespace sunshine_streamline::depth_capture {
           D3D12_RESOURCE_BARRIER transitions[2]{};
           transitions[0].Type = transitions[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
           transitions[0].Transition = {source, 0,
-            auxiliary ? D3D12_RESOURCE_STATE_COMMON : sampled_state, D3D12_RESOURCE_STATE_COPY_SOURCE};
+            auxiliary ? D3D12_RESOURCE_STATE_COMMON : value.ownership->rest, D3D12_RESOURCE_STATE_COPY_SOURCE};
           transitions[1].Transition = {target.p, 0, static_cast<D3D12_RESOURCE_STATES>(destination_state), D3D12_RESOURCE_STATE_COPY_DEST};
           list->ResourceBarrier(destination_state == D3D12_RESOURCE_STATE_COPY_DEST ? 1 : 2, transitions);
           D3D12_TEXTURE_COPY_LOCATION source_location{}, target_location{};

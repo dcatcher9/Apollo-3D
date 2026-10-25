@@ -30,6 +30,17 @@ namespace sunshine_streamline::depth_capture::copy_state {
     if (value & ~allowed) return false;
     return !(value & write_states) || ((value & (value - 1)) == 0);
   }
+  // A supported state a COMPUTE list may name in a barrier: the depth,
+  // pixel-shader, render-target and resolve states belong to the direct
+  // queue (D3D12_RESOURCE_STATES), and GENERIC_READ includes the
+  // pixel-shader one. The only starting states of a copy recorded on a
+  // compute list (record_impl, the matrix's N7 and S22b).
+  constexpr bool compute_list_state(std::uint32_t value) {
+    constexpr std::uint32_t direct_only = D3D12_RESOURCE_STATE_DEPTH_WRITE | D3D12_RESOURCE_STATE_DEPTH_READ |
+      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_RENDER_TARGET |
+      D3D12_RESOURCE_STATE_RESOLVE_SOURCE | D3D12_RESOURCE_STATE_RESOLVE_DEST;
+    return supported(value) && !(value & direct_only);
+  }
 
   // Enhanced (CommandList7) layouts. The D3D12 Enhanced Barriers contract
   // forbids a legacy barrier on a texture in an enhanced layout other than

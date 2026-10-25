@@ -2577,6 +2577,38 @@ namespace {
       inputs.set_ui("DLSSG.MultiFrameCount", 1);
       void *feature{};
       bool observed_state = false, tag_commands = false;
+      // DLSS-G's own COMPUTE recording on its own compute queue, as Streamline
+      // runs it in Assassin's Creed Shadows (10-24: every DLSSG.Depth copy
+      // refused as command_type). The game's work runs first; DLSS-G resets
+      // its recording once its work completed.
+      bool on_compute = false;
+      com_ptr<ID3D12CommandQueue> compute_queue;
+      com_ptr<ID3D12CommandAllocator> compute_allocator;
+      com_ptr<ID3D12GraphicsCommandList> compute_list;
+      com_ptr<ID3D12Fence> compute_done;
+      std::uint64_t compute_value{};
+      {
+        D3D12_COMMAND_QUEUE_DESC desc{}; desc.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+        checked(game->CreateCommandQueue(&desc, IID_PPV_ARGS(compute_queue.put())), "Create DLSS-G's compute queue");
+        checked(game->CreateCommandAllocator(desc.Type, IID_PPV_ARGS(compute_allocator.put())), "Create DLSS-G's compute allocator");
+        const auto direct = game_native_command;
+        checked(game->CreateCommandList(0, desc.Type, compute_allocator.p, nullptr, IID_PPV_ARGS(compute_list.put())),
+          "Create DLSS-G's compute list");
+        game_native_command = direct;
+        checked(game->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(compute_done.put())), "Create DLSS-G's compute fence");
+      }
+      // The compute list stays open between frames; its Reset (through
+      // ReShade) names its native list.
+      std::uint64_t compute_native{};
+      const auto reset_compute = [&] {
+        const auto direct = game_native_command;
+        checked(compute_allocator->Reset(), "Reset DLSS-G's completed compute allocator");
+        checked(compute_list->Reset(compute_allocator.p, nullptr), "Reset DLSS-G's compute recording");
+        compute_native = game_native_command; game_native_command = direct;
+        require(compute_native && compute_native != direct, "DLSS-G's compute Reset did not name its native list");
+      };
+      checked(compute_list->Close(), "Close DLSS-G's initial compute recording");
+      reset_compute();
       // The game's HUD-less and Backbuffer tags: without a command list (as in
       // Shadows), the same followed by the same frame's null untag of both
       // kinds (which cancels their copies deferred to the frame's Present,
@@ -2616,6 +2648,23 @@ namespace {
         // DLSS-G's recording transitions its inputs, as Streamline's DLSS-G
         // plugin does; without that no state is observed on it.
         constexpr auto read = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        if (on_compute) {
+          // Only the depth: the UI inputs' shader-resource state names the
+          // pixel-shader state, which a compute list cannot.
+          submit(false); begin_commands();
+          auto *compute = reinterpret_cast<ID3D12GraphicsCommandList *>(compute_native);
+          if (observed_state) transition(compute, selected->resource.p, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, read);
+          require(ngx_evaluate(compute, feature, &inputs, nullptr) == ngx_fixture::success,
+            "DLSS-G's compute evaluation observation changed the SDK result");
+          if (observed_state) transition(compute, selected->resource.p, read, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+          checked(compute_list->Close(), "Close DLSS-G's compute recording");
+          ID3D12CommandList *lists[]{compute_list.p};
+          compute_queue->ExecuteCommandLists(1, lists);
+          checked(compute_queue->Signal(compute_done.p, ++compute_value), "Signal DLSS-G's compute work");
+          checked(compute_done->SetEventOnCompletion(compute_value, nullptr), "Wait for DLSS-G's compute work");
+          reset_compute();
+          return;
+        }
         if (observed_state) {
           transition(list, selected->resource.p, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, read);
           transition(list, hudless.p, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, read);
@@ -2753,6 +2802,48 @@ namespace {
             "Untagged Streamline UI tags did not hand their kinds back to DLSS-G's evaluation");
           tag_commands = false;
           ui_tags = ui_tags_form::commandless;
+          // DLSS-G evaluates on its own COMPUTE list (N7). Its depth observed
+          // there in a state a compute list may use is copied on that list:
+          // its own compute queue takes a fence at the copy's submission, and
+          // the Present queue reads the copy once DLSS-G reset the recording.
+          // DLSSG.Depth owns the FG scope from it exactly as from a direct
+          // list: every real Present shows its own frame's copy, and
+          // generated Presents hold it. With the copy refused as command_type
+          // (before N7) the scope stays silent and SR depth stays.
+          {
+            const auto losses = readiness_losses();
+            const auto copied_lines = reshade_log_lines({"Sunshine NGX depth:", "dlssg_depth={copied="}).size();
+            on_compute = true;
+            settle_route("DLSSG-compute-list-owns-FG-depth", true);
+            for (unsigned pair = 0; pair < 6; ++pair) {
+              render_tracked_depth = dlssg_frame;
+              present_frame(); const auto real = inspect();
+              require(active(real) && !real.source.reused_depth && real.source.frame_generation_input,
+                "A real Present lost DLSS-G's compute-list FG depth or let SR depth compete with it");
+              render_tracked_depth = {};
+              present_frame(); const auto generated = inspect();
+              require(active(generated) && generated.source.reused_depth && generated.source.frame_generation_input &&
+                  generated.source.current.capture == real.source.current.capture && same_scale(generated.scale, real.scale),
+                "A generated Present did not hold its real frame's compute-list DLSS-G depth");
+            }
+            render_tracked_depth = dlssg_frame;
+            // A whole NGX line written after the switch: no command_type refusal in it.
+            const auto copied = [&] { return reshade_log_lines({"Sunshine NGX depth:", "dlssg_depth={copied="}); };
+            for (const auto until = GetTickCount64() + 16000; copied().size() < copied_lines + 2 && GetTickCount64() < until;)
+              present_frame();
+            const auto lines = copied();
+            require(lines.size() >= copied_lines + 2, "The bounded NGX line stopped during DLSS-G's compute evaluations");
+            const auto depth_part = [](const std::string &line) {
+              const auto at = line.find("dlssg_depth={");
+              return line.substr(at, line.find('}', at) - at);
+            };
+            const auto first_part = depth_part(lines[copied_lines]), second_part = depth_part(lines[copied_lines + 1]);
+            require(number_after(second_part, "copied=") > number_after(first_part, "copied=") &&
+                second_part.find("command_type") == std::string::npos,
+              "DLSS-G's compute-list depth was refused for its list type or not counted as copied");
+            require(readiness_losses() == losses, "DLSS-G's compute-list depth lost depth readiness");
+            on_compute = false;
+          }
           // Refused again: the scope falls silent and SR depth returns.
           observed_state = false;
           settle_route("DLSSG-refused-again-SR-depth", false);
@@ -2793,7 +2884,7 @@ namespace {
           render_tracked_depth = [this] { fallback_frame(true, true); };
           settle_route("DLSSG-case-done-FG-tags-own-again", true);
           evidence << "dlssg-evaluation unobserved=SR commandless-ui-tags=exact-batch observed=FG-owned generated=held untagged-ui-tags=dlssg-exact-batch ui-tags-with-commands=tag-copied\n";
-          std::puts("PASS native DLSS-G evaluation: DLSSG.Depth without an observed state is refused and counted with SR depth unchanged while the game's command-less HUD-less/Backbuffer tags reach UI detection exactly; in an observed state it owns the FG scope, generated Presents hold it, the command-less FG tag withdraws nothing, once its frame untags the game's UI tags its HUD-less/Backbuffer pair reaches UI detection exactly, and FG depth and HUD-less/Backbuffer tags that copy keep precedence per kind; no FX");
+          std::puts("PASS native DLSS-G evaluation: DLSSG.Depth without an observed state is refused and counted with SR depth unchanged while the game's command-less HUD-less/Backbuffer tags reach UI detection exactly; in an observed state it owns the FG scope, generated Presents hold it, the command-less FG tag withdraws nothing, once its frame untags the game's UI tags its HUD-less/Backbuffer pair reaches UI detection exactly, FG depth and HUD-less/Backbuffer tags that copy keep precedence per kind, and on DLSS-G's own compute list (its own compute queue) its observed depth owns the FG scope the same way with no readiness loss; no FX");
         }});
     }
 
