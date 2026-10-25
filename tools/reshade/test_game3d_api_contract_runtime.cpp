@@ -859,6 +859,9 @@ namespace {
     std::vector<refusals::record> refused;  // Distinct reasons for the case, oldest first.
     sample last;
     nlohmann::json candidates = nlohmann::json::array();  // UI: the Dump3D candidates.
+    // The continuity invariant's violations over the case's frame script
+    // (test_game3d_continuity.h): its warm-up, stimulus and isolation.
+    std::vector<game3d_continuity::violation> continuity;
   };
 
   template<unsigned N>
@@ -994,6 +997,12 @@ namespace {
       std::int32_t tag_result {}, evaluate_result {}, options_result {};
       bool entered_layout {};  // enhanced: the allocation left legacy COMMON.
       bool frame_generation {};  // Options enabled on the viewport.
+      // The continuity supply of the case's frames: the legal sources where
+      // the oracle requires a capture, else permitted where it allows one,
+      // supplied at the deciding copy point (the tag call or the evaluate).
+      std::uint8_t supply_legal {};
+      std::uint8_t supply_permitted {};
+      bool supply_at_tag_call {};
       // NGX.
       matrix::ngx_case ngx;
       ngx_fixture::parameters parameters;
@@ -1012,6 +1021,10 @@ namespace {
 
     presented seen;
     std::uint64_t refusal_serial {};
+
+    contract_fixture() {
+      continuity_per_script = false;  // Each case judges its own violations.
+    }
 
     ~contract_fixture() {
       if (nominated) {
@@ -1193,6 +1206,14 @@ namespace {
     // one (multi frame generation presents on its own). It may show the
     // case's source only as the capture the last real Present showed.
     void present_generated() {
+      continuity_log.generated = true;
+
+      struct end_generated {
+        ~end_generated() {
+          continuity_log.generated = false;
+        }
+      } generated;
+
       checked(swapchain->Present(0, 0), "Generated Present between the tag and its copy point");
       ++seen.presents;
       ++seen.generated;
@@ -1253,6 +1274,9 @@ namespace {
       if (!local && tag_frame) {
         ResetEvent(nominated);
         nomination_gate(nominated, nullptr);
+        if (current.supply_at_tag_call) {
+          supply_case();
+        }
         tag_call(tags, count);
         nomination_gate(nullptr, nullptr);
         seen.nominated_at_call = seen.nominated_at_call || WaitForSingleObject(nominated, 0) == WAIT_OBJECT_0;
@@ -1282,6 +1306,9 @@ namespace {
       if (extra_inputs) {
         extra_inputs(token, inputs);
       }
+      if (!current.supply_at_tag_call) {
+        supply_case();
+      }
       returned(sl.evaluate(0, token, inputs.data(), std::uint32_t(inputs.size()), command), current.evaluate_result, "slEvaluateFeature");
       collect_refusals();
     }
@@ -1300,6 +1327,23 @@ namespace {
       current.view = {{nullptr, sunshine_streamline::viewport_guid, 1}, next_viewport++};
       seen = {};
       refusal_serial = last_refusal().serial;
+    }
+
+    // The case's frames supply (supply_case) by the outcome the oracle names
+    // for them: sources where it requires a capture, a permitted source where
+    // it only allows one, else none (illegal input supplies nothing).
+    void plan_supply(const matrix::outcome &expected, bool legal, std::uint8_t sources, bool at_tag_call = false) {
+      current.supply_legal = legal && requires_capture(expected) ? sources : 0;
+      current.supply_permitted = legal && !current.supply_legal && permits_capture(expected) ? sources : 0;
+      current.supply_at_tag_call = at_tag_call;
+    }
+
+    void supply_case() const {
+      if (current.supply_legal) {
+        supplied(current.supply_legal);
+      } else if (current.supply_permitted) {
+        permitted_supply(current.supply_permitted);
+      }
     }
 
     // Warm-up of a Streamline case: the case's own viewport, allocation,
@@ -1579,6 +1623,7 @@ namespace {
         create();
       }
       ++current.ngx_frames;
+      supply_case();
       returned(std::int32_t(ngx_evaluate(list, current.feature, &current.parameters, nullptr)), std::int32_t(current.ngx_result), "NVSDK_NGX_D3D12_EvaluateFeature");
       collect_refusals();
     }
@@ -1599,6 +1644,7 @@ namespace {
     // One frame of a Generic case: the view bound, drawn and cleared around
     // the case's boundary.
     void generic_frame() {
+      supply_case();
       auto &view = *depth_stencil;
       const auto dsv = view.heap->GetCPUDescriptorHandleForHeapStart();
       const auto &value = current.generic;
@@ -1661,6 +1707,8 @@ namespace {
     // capture, and the case's UI input.
     void prepare_ui(const matrix::ui_case &value, std::uint32_t type) {
       prepare(matrix::sl_case {ui_runtime::version}, sl_runtime::state_class::proven_read);
+      // Its depth must capture (judge_ui): a legal source at each evaluate.
+      current.supply_legal = game3d_continuity::sr_evaluate;
       current.kind = family_kind::ui;
       current.ui = value;
       current.ui_type = type;
@@ -1779,9 +1827,10 @@ namespace {
 
     template<unsigned N, class Case>
     void judge_rows(judged_case<N> &out, const gaps::row<Case> (&rows)[N], const Case &value) {
+      seen.continuity = script_violations;
       out.observed = seen;
       out.actual = result_of(out.decided, out.observed);
-      out.satisfied = satisfies(out.decided, out.actual, out.observed, out.legal);
+      out.satisfied = satisfies(out.decided, out.actual, out.observed, out.legal) && seen.continuity.empty();
       out.verdict = gaps::judge_each(rows, value, out.satisfied, {out.actual}, out.matched);
     }
 
@@ -1803,6 +1852,8 @@ namespace {
       const auto started = GetTickCount64();
       run_script({name, 8000, [&] {
                     prepare(value, state);
+                    const bool at_tag_call = decided.shown.at_tag_call;
+                    plan_supply(out.decided.expected, out.legal, at_tag_call ? game3d_continuity::tag_copy : game3d_continuity::sr_evaluate, at_tag_call);
                   },
                   [&] {
                     observe(
@@ -1817,9 +1868,10 @@ namespace {
                     isolate();
                   }});
       out.elapsed_ms = GetTickCount64() - started;
+      seen.continuity = script_violations;
       out.observed = seen;
       out.actual = result_of(out.decided, out.observed);
-      out.satisfied = satisfies(out.decided, out.actual, out.observed, out.legal);
+      out.satisfied = satisfies(out.decided, out.actual, out.observed, out.legal) && seen.continuity.empty();
       out.verdict = gaps::judge_each(gaps::sl_runtime_rows, gaps::present_case {value, decided.value}, out.satisfied, {out.actual}, out.matched);
       return out;
     }
@@ -1835,6 +1887,7 @@ namespace {
       const auto started = GetTickCount64();
       run_script({name, 8000, [&] {
                     prepare_ngx(value);
+                    plan_supply(out.decided.expected, out.legal, frame_generation ? game3d_continuity::dlssg_input : game3d_continuity::sr_evaluate);
                   },
                   [&] {
                     observe(
@@ -1863,6 +1916,7 @@ namespace {
       const auto started = GetTickCount64();
       run_script({name, 10000, [&] {
                     prepare_generic(value);
+                    plan_supply(out.decided.expected, out.legal, game3d_continuity::generic_boundary);
                   },
                   [&] {
                     observe(
@@ -1914,13 +1968,14 @@ namespace {
                     isolate();
                   }});
       out.elapsed_ms = GetTickCount64() - started;
+      seen.continuity = script_violations;
       out.observed = seen;
       // A refusal (the layer's, D12; a tag's, U5) shows as no candidate, as
       // an ignored input does.
       const bool refused = matrix::permits(out.decided.expected, matrix::outcome_kind::refuse);
       out.actual.kind = seen.offered ? matrix::outcome_kind::offered : refused ? matrix::outcome_kind::refuse :
                                                                                  matrix::outcome_kind::ignored;
-      out.satisfied = matrix::permits(out.decided.expected, out.actual.kind);
+      out.satisfied = matrix::permits(out.decided.expected, out.actual.kind) && seen.continuity.empty();
       out.verdict = gaps::judge_each(gaps::ui_runtime_rows, value, out.satisfied, {out.actual}, out.matched);
       return out;
     }
@@ -1943,6 +1998,9 @@ namespace {
     if (!seen.candidates.empty()) {
       std::fprintf(stderr, "  UI candidates: %s\n", seen.candidates.dump().c_str());
     }
+    for (const auto &violation : seen.continuity) {
+      std::fprintf(stderr, "  continuity: %s\n", game3d_continuity::describe(violation).c_str());
+    }
     std::fprintf(stderr, "  result: %s why=%s deferred=%u; rows %s; %s\n", judging::name(value.actual.kind), game3d_contract::jsonl::name(value.actual.why), value.actual.deferred, judging::row_names(value.matched, ids, N, names), judging::name(value.verdict));
   }
 
@@ -1964,9 +2022,13 @@ namespace {
     observed["generated_new"] = seen.generated_new;
     observed["offered"] = seen.offered;
     observed["refused"] = refused;
+    observed["continuity_violations"] = seen.continuity.size();
     line["evidence"] = {{"elapsed_ms", value.elapsed_ms}, {"presents", seen.presents}, {"judged", seen.judged}, {"fresh", seen.fresh}, {"generated", seen.generated}, {"held", seen.held}, {"first_fresh_ms", seen.first_fresh_ms}, {"nominated_at_call", seen.nominated_at_call}, {"shown", {{"width", seen.last.width}, {"height", seen.last.height}, {"reused", seen.last.reused}, {"fg_input", seen.last.frame_generation_input}}}};
     if (!seen.candidates.empty()) {
       line["evidence"]["ui_candidates"] = seen.candidates;
+    }
+    if (!seen.continuity.empty()) {
+      line["evidence"]["continuity"] = game3d_continuity::describe(seen.continuity.front());
     }
     return line;
   }

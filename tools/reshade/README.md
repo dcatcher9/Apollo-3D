@@ -936,7 +936,9 @@ Each FG case is a frame script: a warm-up that presents until the case's startin
 stimulus whose frames it judges, and a recovery to the fixture's control, with the per-frame SDK calls
 as fixture members. Every frame of a script begins before the script's own deadline, so a case that
 stops making progress fails by name, and a `MEASURE native-provider case=<name> elapsed_ms=` line
-reports each case's time.
+reports each case's time. Every Present of the run, in its scripts and between them, is also
+judged by the continuity invariant ([Session-level tests](#session-level-tests)); its last two
+scripts move SR and Generic depth onto the game's own direct queue for the invariant's known gaps.
 
 Both runtime tests also check the
 [frame record](../../docs/reshade-sbs.md#frame-record). Each queue-cycle acquisition's
@@ -1580,7 +1582,9 @@ read as a surveyed release's, S24) and of 3.0.0 (a
 major no header defines, which discovery refuses, so nothing it tags may be shown) in a process
 each. Each case is judged at its
 Presents: a capture is the case's allocation shown fresh, with its tagged extent and one identity,
-at six judged Presents from the first; a case that shows nothing refuses or holds, and a refusal
+at six judged Presents from the first, and every case (its warm-up, stimulus and isolation) meets
+the continuity invariant ([Session-level tests](#session-level-tests)); a case that shows nothing
+refuses or holds, and a refusal
 class the test add-on records must be one its copy points give. Where the oracle requires a
 refusal alone, the test add-on must record its class, unless discovery refused the release, an SDK
 call of the case failed (S21b discards that copy unread) or the class is `fg_scope` or
@@ -1680,6 +1684,91 @@ causes:
 ```bash
 cmake -DSURVEY_DIR=<sl-abi-survey> -DOUTPUT=tools/reshade/test_sl_survey_tables.generated.h -P tools/reshade/contract_sl_survey_tables.cmake
 ```
+
+### Session-level tests
+
+The contract matrix judges single decisions. Assassin's Creed Shadows showed defects that only a
+session shows: depth flicker from correct decisions composed over frames (fixed by 9146a468,
+88b45edf, 64d6d06c, 46a4510e, ad66b1c8, 77d48255 and d8c52e3b). The continuity invariant, defined
+once in [`test_game3d_continuity.h`](test_game3d_continuity.h) for the native provider fixture and
+the runtime layer that includes it, judges every Present:
+
+> After warm-up, a Present whose frame had at least one legal source shows depth from some source,
+> or holds earlier depth within the source age ([`freshness.h`](freshness.h)). A Present whose
+> frame had no legal source may hold within the source age, then go mono.
+
+The judge reads each Present's [frame record](../../docs/reshade-sbs.md#frame-record)
+(`SunshineGame3DTestFrameRecord`, copied in ReShade's `reshade_present` event) and the fixture's
+own supply log. Each frame function names, at the call that supplies it, what the frame supplies as
+the fixture knows it, never as the add-on reports it: an SR or RR evaluation whose input state is
+provable (`sr_evaluate`), a depth tag the contract lets the add-on copy at its call or before its
+frame's Present (`tag_copy`), DLSS-G's `DLSSG.Depth` in a state its recording names
+(`dlssg_input`), or a Generic boundary with a proof (`generic_boundary`). A source the add-on may
+show but need not is permitted, not legal: the oracle's EITHER outcome, and the full-size decoy
+view each provider frame draws, which API ownership leaves aside (H). A frame whose later call
+withdraws its source supplies nothing (the untag script's malformed tag, and a command-less tag's
+frame presented before DLSS-G evaluated it, whose copy belongs to the next Present), nor does a
+generated Present, which the game makes while it records a later frame.
+
+A Present shows depth when the rung that decided it has pixels: D1 or D2 ready or held, or
+Generic's binding ready; H in mono shows none. The judge is armed by a Present that shows depth. A
+Present that shows none disarms it when its frame had no legal source (the mono the invariant
+permits) or when it is a violation, so one loss counts once; a Present at least the source age
+after the previous one disarms it first (a stall expires every hold, and a pipelined source such
+as DLSS-G's ring has nothing readable until it refills). While disarmed, legal sources have
+`establish_ms`, `fg_silent_ms` plus `association_ms` (2 s), to show depth, counted from the first one
+after the last Present that showed depth or after a source-age gap in legal sources. A violation is
+a gap (armed, a legal source, no depth), an unestablished source (no depth within `establish_ms`)
+or a stale one (a rung's pixels at least the source age, plus 40 ms for two steps of
+`GetTickCount64`, after the newest legal or permitted source of its kind: API for D1 and D2,
+Generic for D3).
+
+The native provider fixture judges every Present of its run: each frame script reports its
+violations (`MEASURE native-provider continuity <script> violations=<n> unknown=<n>`), any one no
+known gap records fails the run with its frame and record, and the run ends with the session's
+counts (`continuity-session presents= legal= shown= generic= unrecorded= stalls=` and each known
+gap's supplied frames and violations). The runtime layer judges each case's frame script with the
+case's supply: the outcome the oracle names at the deciding copy point, legal where it requires a
+capture, permitted where it only allows one and nothing for illegal input, supplied at the tag call
+or the evaluate that decides. A violation fails the case as an oracle disagreement does; its JSON
+line counts `observed.continuity_violations` and `evidence.continuity` describes the first. No case
+violates it today; the `S1-evaluate` cells never establish depth inside their window, so their
+oracle row alone records them.
+
+The known gaps are the header's `known_gaps` rows, under the matrix's known-gap discipline with
+their own key: each names a limitation that the fixture tags on the frames that meet it. A
+violation of a tagged frame is its row's; any other fails the run, and so does a row whose
+limitation was supplied in a run without a violation (the gap closed, and the fix removes the
+row). Each provider run with an interposer exercises all three:
+
+- C1, SR depth on another queue (until Step 4's fence observation): `sr-other-queue` warms up with
+  the viewport's SR evaluation on the presenting queue (FG off), then records it on the game's own
+  direct queue, a ring of 16 recordings each reset only when recorded into again and paced 20 ms
+  apart, which the presenting queue waits for. Such a copy is readable only once its recording
+  retired and its fence completed, after the source age here, so the Present loses depth once the
+  presenting queue's last copy ages out (in Assassin's Creed Shadows 110-235 ms, about 30
+  `no_completed_snapshot` losses a session). The recovery on the presenting queue settles again.
+- C2, Generic on another queue (until Step 4's fence hooks): `generic-other-queue` lets the API
+  association lapse, then draws one view of the swapchain's size on the game's queue with no
+  boundary but the end of the frame; each frame's list moves it through `DEPTH_READ` back to
+  `DEPTH_WRITE`, so its end-of-frame state is that queue's proof, and the presenting queue's copy
+  is refused (`end_of_frame_refused` grows with `last=missing_state`). A view that only its creation
+  proves (D10b) is copied at the end of the frame from either queue. The same view on the
+  presenting queue settles as ready Generic depth.
+- C3, a command queue created mid-session, found by the invariant: installing the native
+  observer's hook for the new queue invalidates every capture as an observer loss, the next fresh
+  copy fails its display copy (`consumer=recording_invalid loss=global_observation_loss`) and a
+  failed fresh copy invalidates the display cache instead of holding, so that Present is mono while
+  a copy younger than the source age is retained. The fixture tags the frame after each queue it creates (the UI hook's
+  second queue, DLSS-G's compute queue and the other-queue scripts' game queue); only the first
+  new queue loses depth. Its owner note gives the fixes that close it.
+
+`reshade_native_provider_continuity` runs the provider fixture at 1280x720 with the 2.7.30
+interposer, every frame script under the invariant, in about 115 s. Like
+`reshade_addon_unload_runtime` it is labelled `contract;gpu`, runs serially with the `gpu` resource
+lock and is registered only where `SUNSHINE_GAME3D_RESHADE_RUNTIME` and
+`SUNSHINE_GAME3D_FROZEN_SHADERS` are configured, so `ctest -L contract` and the contract runner run
+it. The two other-queue scripts add about 6 s to each provider run.
 
 ### Characterization tests
 

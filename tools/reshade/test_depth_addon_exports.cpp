@@ -335,7 +335,8 @@ extern "C" __declspec(dllexport) BOOL SunshineDepthTestProviderStatus(effect_run
 }
 
 // A copy of the frame record as the present thread left it. Nothing in the
-// add-on reads the record; the provider runtime test compares it with the log.
+// add-on reads the record; the provider runtime test compares it with the log
+// and judges the continuity invariant with it (test_game3d_continuity.h).
 extern "C" __declspec(dllexport) BOOL SunshineGame3DTestFrameRecord(effect_runtime *runtime,
 	sunshine_game3d::frame_record *output)
 {

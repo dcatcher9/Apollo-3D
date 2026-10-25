@@ -800,7 +800,7 @@ if(BUILD_TESTING)
     target_compile_features(reshade_game3d_native_provider_runtime_test PRIVATE cxx_std_17)
     target_include_directories(reshade_game3d_native_provider_runtime_test SYSTEM PRIVATE "${SUNSHINE_RESHADE_INCLUDE_DIR}")
     target_link_libraries(reshade_game3d_native_provider_runtime_test PRIVATE nlohmann_json::nlohmann_json d3d12 dxgi dxguid d3dcompiler user32)
-    add_dependencies(reshade_game3d_native_provider_runtime_test ${sunshine_sl_fixture_interposer_targets})
+    add_dependencies(reshade_game3d_native_provider_runtime_test SunshineSBSTest ${sunshine_sl_fixture_interposer_targets})
     if(MINGW)
       target_link_options(reshade_game3d_native_provider_runtime_test PRIVATE -static)
     endif()
@@ -847,6 +847,21 @@ if(BUILD_TESTING)
       endforeach()
     else()
       message(STATUS "reshade_contract_matrix_runtime_* skipped: set SUNSHINE_GAME3D_RESHADE_RUNTIME and SUNSHINE_GAME3D_FROZEN_SHADERS to register them")
+    endif()
+    # The native provider fixture's frame scripts through the 2.7.30
+    # interposer, every Present judged by the continuity invariant (README,
+    # Session-level tests) and its known gaps C1-C3. A GPU check run with the
+    # contract tests, where the official runtime and the frozen shaders are
+    # configured.
+    if(SUNSHINE_GAME3D_RESHADE_RUNTIME AND SUNSHINE_GAME3D_FROZEN_SHADERS)
+      set(native_provider_output "${CMAKE_CURRENT_BINARY_DIR}/native_provider_continuity")
+      add_test(NAME reshade_native_provider_continuity_output COMMAND "${CMAKE_COMMAND}" -E rm -rf "${native_provider_output}")
+      set_tests_properties(reshade_native_provider_continuity_output PROPERTIES FIXTURES_SETUP native_provider_output LABELS "contract;gpu")
+      add_test(NAME reshade_native_provider_continuity COMMAND reshade_game3d_native_provider_runtime_test
+        "${SUNSHINE_GAME3D_RESHADE_RUNTIME}" "${SUNSHINE_GAME3D_FROZEN_SHADERS}" "$<TARGET_FILE:SunshineSBSTest>" "${native_provider_output}"
+        1280 720 "$<TARGET_FILE:reshade_frame_generation_interposer>")
+      set_tests_properties(reshade_native_provider_continuity PROPERTIES LABELS "contract;gpu" RUN_SERIAL TRUE
+        RESOURCE_LOCK gpu TIMEOUT 240 FIXTURES_REQUIRED native_provider_output)
     endif()
     add_executable(reshade_game3d_native_runtime_d3d11_test test_game3d_native_runtime_d3d11.cpp)
     add_executable(reshade_game3d_source_alpha_runtime_test test_game3d_source_alpha_runtime.cpp)

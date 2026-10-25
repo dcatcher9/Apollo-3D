@@ -606,7 +606,9 @@ failure, the role of its source, the policy it ran under and the queue's owner a
 Nothing reads either yet: no log line, decision, wire byte, report or replay changes with them.
 Writing them takes no lock beyond the capture owner's existing one and allocates nothing per
 Present. Their tests are listed under
-[source and submission validation](../tools/reshade/README.md#source-and-submission-validation).
+[source and submission validation](../tools/reshade/README.md#source-and-submission-validation);
+the [continuity invariant](../tools/reshade/README.md#session-level-tests) judges every test
+Present from the record.
 
 ## Setup
 

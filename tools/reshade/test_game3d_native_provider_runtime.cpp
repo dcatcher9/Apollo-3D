@@ -9,6 +9,7 @@
 #include "game3d_frame_record.h"
 #include "game3d_ui_detection_contract.h"
 #include "game3d_ui_layer.h"
+#include "test_game3d_continuity.h"
 #include "test_sl_fixture_sdk.h"
 #include "../../src/game3d_debug_protocol.h"
 #include <nlohmann/json.hpp>
@@ -52,11 +53,33 @@ namespace {
     BOOL (*query)(api::effect_runtime *, sunshine_game3d::frame_record *){};
     std::vector<sunshine_game3d::frame_record> records;
   } record_history;
+  // The continuity invariant (test_game3d_continuity.h): the supply of the
+  // frame being recorded, which the frame's own Present takes, and the judge
+  // every Present's record feeds. A Present made while generated is set (one
+  // the game makes inside a later frame's recording) presents no frame of
+  // its own and leaves the supply to that frame's Present. queue_created: the
+  // game created a command queue since the previous Present, which tags the
+  // next frame's supply (known gap C3).
+  struct continuity_log_t {
+    game3d_continuity::supply pending;
+    bool generated{}, queue_created{};
+    const char *where{"session"};
+    game3d_continuity::judge judge;
+  } continuity_log;
   void record_present(api::effect_runtime *runtime) {
+    game3d_continuity::supply frame;
+    if (!continuity_log.generated) {
+      frame = continuity_log.pending; continuity_log.pending = {};
+      if (continuity_log.queue_created && frame.limit == game3d_continuity::limitation::none)
+        frame.limit = game3d_continuity::limitation::queue_created;
+      continuity_log.queue_created = false;
+    }
     sunshine_game3d::frame_record value;
     if (record_history.query && record_history.query(runtime, &value) && value.present &&
-        (record_history.records.empty() || record_history.records.back().present != value.present))
+        (record_history.records.empty() || record_history.records.back().present != value.present)) {
       record_history.records.push_back(value);
+      continuity_log.judge.present(value, frame, continuity_log.where);
+    } else continuity_log.judge.unrecorded();
   }
 }
 
@@ -372,17 +395,78 @@ namespace {
       step(); no_effects();
     }
     void run_script(const frame_script &script) {
+      // Frames outside any script are judged as the session's.
+      require_continuity("session", continuity_log.judge.take());
       const auto started = GetTickCount64();
       script_name = script.name; script_deadline = started + script.deadline_ms;
+      continuity_log.where = script.name;
       struct end_script {
         native_provider_fixture &fixture;
-        ~end_script() { fixture.script_name = nullptr; fixture.script_deadline = 0; }
+        ~end_script() { fixture.script_name = nullptr; fixture.script_deadline = 0; continuity_log.where = "session"; }
       } scope{*this};
       if (script.warm_up) script.warm_up();
       script.stimulus();
       if (script.recovery) script.recovery();
       std::printf("MEASURE native-provider case=%s elapsed_ms=%llu deadline_ms=%llu\n", script.name,
         static_cast<unsigned long long>(GetTickCount64() - started), static_cast<unsigned long long>(script.deadline_ms));
+      script_violations = continuity_log.judge.take();
+      if (continuity_per_script) require_continuity(script.name, script_violations);
+    }
+
+    // The continuity invariant's supply log (test_game3d_continuity.h): each
+    // frame function names the legal sources it supplies at the call that
+    // supplies them, as this fixture knows them (never as the add-on reports
+    // them). A frame that names none supplies none. The runtime layer judges
+    // each case's violations itself (continuity_per_script false).
+    bool continuity_per_script{true};
+    std::vector<game3d_continuity::violation> script_violations;
+    static void supplied(std::uint8_t sources, game3d_continuity::limitation meets = game3d_continuity::limitation::none) {
+      continuity_log.pending.add(sources, GetTickCount64(), meets);
+    }
+    // A source the add-on may show but need not: an EITHER outcome, or the
+    // full-size decoy view every game frame draws (a Generic boundary, its
+    // clear after the draws, that API ownership leaves aside, H).
+    static void permitted_supply(std::uint8_t sources) { continuity_log.pending.allow(sources, GetTickCount64()); }
+    // The game created a command queue: the next frame meets C3.
+    static void queue_created() { continuity_log.queue_created = true; }
+    // A later call of the same frame withdrew what it supplied.
+    static void withdraw_supply() { continuity_log.pending = {}; }
+    // Every violation must be a known gap's (each row's count is reported);
+    // any other fails the run with its record.
+    void require_continuity(const char *label, const std::vector<game3d_continuity::violation> &violations) {
+      std::array<unsigned, game3d_continuity::gap_count> known{};
+      std::size_t unknown{};
+      for (const auto &value : violations) {
+        const auto row = game3d_continuity::known(value);
+        if (row >= 0) { ++known[std::size_t(row)]; continue; }
+        if (++unknown <= 8) std::printf("MEASURE native-provider continuity-violation %s\n", game3d_continuity::describe(value).c_str());
+      }
+      if (violations.empty() && !std::strcmp(label, "session")) return;
+      std::printf("MEASURE native-provider continuity %s violations=%zu unknown=%zu", label, violations.size(), unknown);
+      for (std::size_t i = 0; i != known.size(); ++i)
+        if (known[i]) std::printf(" %s=%u", game3d_continuity::known_gaps[i].id, known[i]);
+      std::printf("\n");
+      if (unknown)
+        throw std::runtime_error(std::string("A Present lost depth while a legal source supplied it, or held depth past its source age: ") +
+          label + " (" + game3d_continuity::describe(violations.front()) + ")");
+    }
+    // At the end of a run: the violations outside any script, and each known
+    // gap whose limitation was supplied must have been violated (otherwise
+    // the gap closed and its row must go).
+    void require_continuity_rows() {
+      require_continuity("session", continuity_log.judge.take());
+      const auto &judge = continuity_log.judge;
+      std::printf("MEASURE native-provider continuity-session presents=%u legal=%u shown=%u generic=%u unrecorded=%u stalls=%u",
+        judge.presents(), judge.legal_presents(), judge.shown(), judge.shown_generic(), judge.unrecorded_presents(),
+        judge.stalls());
+      for (std::size_t i = 0; i != game3d_continuity::gap_count; ++i)
+        std::printf(" %s={supplied=%u violations=%u}", game3d_continuity::known_gaps[i].id, judge.rows()[i].exercised,
+          judge.rows()[i].violations);
+      std::printf("\n");
+      for (std::size_t i = 0; i != game3d_continuity::gap_count; ++i)
+        if (judge.rows()[i].exercised && !judge.rows()[i].violations)
+          throw std::runtime_error(std::string("Continuity known gap ") + game3d_continuity::known_gaps[i].id +
+            " was supplied without a violation: the gap closed, so remove its row");
     }
 
     void load_native(const fs::path &directory) {
@@ -436,8 +520,19 @@ namespace {
       matched_lines = provider_lines().size();
     }
 
+    // A frame of the direct fixture's SR evaluation through its capture
+    // adapter, in the UAV state its recording names: a legal source while the
+    // evaluation succeeds.
+    void evaluated_frame() {
+      draw_frame();
+      permitted_supply(game3d_continuity::generic_boundary);
+      if (capture && emit && valid_evaluation && mode == capture_mode::version_two) supplied(game3d_continuity::sr_evaluate);
+    }
+
     void run_streamline() {
-      render_tracked_depth = [&] { draw_frame(); };
+      continuity_log.where = "streamline";
+      struct end_phase { ~end_phase() { continuity_log.where = "session"; } } phase;
+      render_tracked_depth = [&] { evaluated_frame(); };
       const auto first_ready = settle("SL-UAV-over-native-DSV");
       require(ticket && v2_capture_calls, "Native provider fixture never nominated actual produced UAV depth");
       {
@@ -1088,6 +1183,7 @@ namespace {
         D3D12_COMMAND_QUEUE_DESC second_desc{};
         second_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
         checked(game->CreateCommandQueue(&second_desc, IID_PPV_ARGS(second.put())), "Second direct queue");
+        queue_created();
         // The list also executes a bundle after its clear, as bundle-heavy
         // engines do for their UI draws: the list keeps its own copy.
         com_ptr<ID3D12CommandAllocator> bundle_allocator;
@@ -1642,7 +1738,7 @@ namespace {
       fill_upload(upload, desc, hudless_bytes.data(), footprint);
       unsigned frame_number{};
       render_tracked_depth = [&] {
-        draw(*decoy); write_depth_pixels();
+        draw(*decoy); permitted_supply(game3d_continuity::generic_boundary); write_depth_pixels();
         auto *list = reinterpret_cast<ID3D12GraphicsCommandList *>(game_native_command);
         abi_v2::frame_token *token{}; const auto frame = ++frame_number;
         require(new_token(token, &frame) == 0 && token, "Public tag regression could not obtain frame token");
@@ -1670,6 +1766,7 @@ namespace {
           {{nullptr, tag_guid, 1}, &resources[0], 0, 0, active_area},
           {{nullptr, tag_guid, 1}, &resources[1], 1, 0, active_area},
           {{nullptr, tag_guid, 1}, &resources[2], 2, 0, {0, 0, width, height}}};
+        supplied(game3d_continuity::tag_copy);  // The OnlyValidNow depth tag at its call (S1).
         require(tag_call(viewport, tags, 3, list) == 0, "Public mixed UI tags changed the SDK result");
         if (options_call) {
           const fg_options off{{nullptr, fg_options_type, 3}, 0, 0};
@@ -1840,7 +1937,7 @@ namespace {
     // Each FG frame begins as the game's: the decoy and the tracked depth
     // drawn, then the frame's own explicit token (message: its case's).
     sunshine_streamline::abi_v2::frame_token &begin_fg_frame(const char *message) {
-      draw(*decoy); write_depth_pixels();
+      draw(*decoy); permitted_supply(game3d_continuity::generic_boundary); write_depth_pixels();
       sunshine_streamline::abi_v2::frame_token *token{}; const auto frame = ++fg_frame;
       require(sl.new_token(token, &frame) == 0 && token, message);
       last_token = token;
@@ -1855,6 +1952,8 @@ namespace {
       require(sl.constants(constants, token, fg_viewport) == 0, "FG constants observation changed the SDK result");
       const auto resource = depth_resource();
       const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, 0, active_area};
+      // FG is on wherever a script uses this frame: its tag call copies (S1).
+      supplied(game3d_continuity::tag_copy);
       tag_started = GetTickCount64();
       const auto tagged = sl.frame_tag ? sl.frame_tag(token, fg_viewport, &tag, 1, reinterpret_cast<void *>(game_native_command)) :
         sl.global_tag(fg_viewport, &tag, 1, reinterpret_cast<void *>(game_native_command));
@@ -1872,6 +1971,7 @@ namespace {
       require(sl.constants(camera_constants(false), token, fg_viewport) == 0, "Command-less FG constants changed the SDK result");
       const auto resource = depth_resource();
       const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, 1, active_area};
+      supplied(game3d_continuity::tag_copy);  // Copied before its frame's Present (R2).
       require(sl.global_tag(fg_viewport, &tag, 1, nullptr) == 0, "Command-less FG tag changed the SDK result");
     }
     // An FG frame whose longer-lived depth tag (lifecycle 1 or 2) declares
@@ -1890,6 +1990,7 @@ namespace {
       resource.state = write ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
       const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, lifecycle, active_area};
       const auto command = reinterpret_cast<void *>(game_native_command);
+      supplied(game3d_continuity::tag_copy);  // At its call from the recorded state, or before its Present (S11).
       require((sl.frame_tag ? sl.frame_tag(token, fg_viewport, &tag, 1, command) : sl.global_tag(fg_viewport, &tag, 1, command)) == 0,
         "Recorded-state FG tag changed the SDK result");
       if (!write) transition(list, selected->resource.p, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -1900,6 +2001,7 @@ namespace {
       const auto resource = depth_resource();
       const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, 1, active_area};
       const base_structure *inputs[]{&fg_viewport.base, &tag.base};
+      supplied(game3d_continuity::sr_evaluate);
       require(sl.evaluate(0, token, inputs, 2, reinterpret_cast<void *>(game_native_command)) == 0,
         "SR evaluation with its own depth changed the SDK result");
     }
@@ -1915,6 +2017,7 @@ namespace {
       const auto command = reinterpret_cast<void *>(game_native_command);
       if (fg_commands) {
         const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, 0, active_area};
+        supplied(game3d_continuity::tag_copy);
         require((sl.frame_tag ? sl.frame_tag(token, fg_viewport, &tag, 1, command) : sl.global_tag(fg_viewport, &tag, 1, command)) == 0,
           "Accepted FG tag changed the SDK result");
         return;
@@ -2033,6 +2136,7 @@ namespace {
       fg_dlssg_evaluation();
       fg_silent_scope_without_api_source();
       fg_linear_rr();
+      fg_other_queue();
     }
 
     // Public SDK crops, real/generated pairs, dynamic resolution and FG off.
@@ -2128,7 +2232,7 @@ namespace {
         },
         [&] {
           active_area = {0, 0, selected->width, selected->height};
-          render_tracked_depth = [this] { draw_frame(); };
+          render_tracked_depth = [this] { evaluated_frame(); };
           settle("SL-recovered-after-FG-off");
           std::puts("PASS native SLFG 2x: actual cropped SDK depth, eight real/generated pairs with retained completed depth, FG-off rejection and fresh SL recovery; no FX");
         }});
@@ -2252,6 +2356,7 @@ namespace {
             const auto command = reinterpret_cast<void *>(game_native_command);
             require(sl.global_tag(fg_viewport, &tag, 1, command) == 0, "Until-present tag observation changed the SDK result");
             const base_structure *inputs[]{&fg_viewport.base};
+            supplied(game3d_continuity::sr_evaluate);
             require(sl.evaluate(0, token, inputs, 1, command) == 0, "Until-present evaluation changed the SDK result");
             const abi_v2::resource_tag cleared{{nullptr, tag_guid, 1}, nullptr, 0, 1, {}};
             require(sl.global_tag(fg_viewport, &cleared, 1, command) == 0, "Until-present clear changed the SDK result");
@@ -2323,6 +2428,7 @@ namespace {
             const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &malformed, 0, 0, active_area};
             require(sl.global_tag(fg_viewport, &tag, 1, reinterpret_cast<void *>(game_native_command)) == 0,
               "Malformed FG depth tag changed the SDK result");
+            withdraw_supply();  // It withdraws the frame's FG source: no legal source remains.
           };
           for (unsigned frame = 0; frame < 12; ++frame) {
             present_frame(); const auto s = inspect();
@@ -2692,6 +2798,7 @@ namespace {
       {
         D3D12_COMMAND_QUEUE_DESC desc{}; desc.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
         checked(game->CreateCommandQueue(&desc, IID_PPV_ARGS(compute_queue.put())), "Create DLSS-G's compute queue");
+        queue_created();
         for (unsigned n = 0; n != compute_ring; ++n) {
           checked(game->CreateCommandAllocator(desc.Type, IID_PPV_ARGS(compute_allocators[n].put())),
             "Create DLSS-G's compute allocator");
@@ -2769,6 +2876,7 @@ namespace {
           const auto n = compute_at; compute_at = (compute_at + 1) % compute_ring;
           auto *compute = reinterpret_cast<ID3D12GraphicsCommandList *>(reset_compute(n));
           if (observed_state) transition(compute, selected->resource.p, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, read);
+          if (observed_state) supplied(game3d_continuity::dlssg_input);
           require(ngx_evaluate(compute, feature, &inputs, nullptr) == ngx_fixture::success,
             "DLSS-G's compute evaluation observation changed the SDK result");
           if (observed_state) transition(compute, selected->resource.p, read, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -2782,6 +2890,7 @@ namespace {
           transition(list, selected->resource.p, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, read);
           transition(list, hudless.p, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, read);
           transition(list, backbuffer.p, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, read);
+          supplied(game3d_continuity::dlssg_input);
         }
         require(ngx_evaluate(list, feature, &inputs, nullptr) == ngx_fixture::success,
           "DLSS-G evaluation observation changed the SDK result");
@@ -2984,12 +3093,14 @@ namespace {
           render_tracked_depth = own_frames;
           settle("DLSSG-commandless-own-Present");
           for (unsigned frame = 0; frame < 6; ++frame) {
-            render_tracked_depth = [this] { commandless_fg_frame(); };
+            // The tag's copy belongs to the Present after DLSS-G evaluated its
+            // frame (R2): the Present before it is an earlier frame's.
+            render_tracked_depth = [this] { commandless_fg_frame(); withdraw_supply(); };
             present_frame(); const auto early = inspect();
             if (!frame) log_status("DLSSG-commandless-earlier-Present", early);
             require(early.source.reused_depth,
               "A Present before DLSS-G evaluated a command-less FG tag's frame made that frame's deferred copy");
-            render_tracked_depth = evaluate_only;
+            render_tracked_depth = [&] { evaluate_only(); supplied(game3d_continuity::tag_copy); };
             present_frame(); const auto own = inspect();
             require(active(own) && !own.source.reused_depth && own.source.frame_generation_input &&
                 own.source.current.capture != early.source.current.capture,
@@ -3092,6 +3203,7 @@ namespace {
               sl.global_tag(fg_viewport, tags, 2, reinterpret_cast<void *>(game_native_command));
             require(tagged == 0, "Linear RR tag observation changed the SDK result");
             const base_structure *inputs[]{&fg_viewport.base};
+            supplied(game3d_continuity::sr_evaluate);
             require(sl.evaluate(1001, token, inputs, 1, reinterpret_cast<void *>(game_native_command)) == 0,
               "Linear RR evaluation changed the SDK result");
           };
@@ -3147,15 +3259,203 @@ namespace {
         },
         [&] {
           center_raw = original_center; active_area = original_area;
-          render_tracked_depth = [this] { draw_frame(); };
+          render_tracked_depth = [this] { evaluated_frame(); };
           settle("SL-recovered-after-linear-RR");
           std::puts("PASS native linear RR provider: public tag49 and feature1001, no camera matrix, actual capture/acquire/calibration and reciprocal moments excluding zero/negative/NaN/Inf; no FX");
+        }});
+    }
+
+    // The continuity invariant's known limitations (test_game3d_continuity.h,
+    // C1 and C2): the game renders on a second direct queue and the
+    // presenting queue waits for it, as in seven of the eight games of the
+    // 10-06 to 10-23 logs. SR warms up on the presenting queue and moves to
+    // the game's queue; Generic starts there. Each case recovers on the
+    // presenting queue. The judge records each loss as its row's; a row whose
+    // stimulus loses no depth fails the run as a closed gap.
+    void fg_other_queue() {
+      com_ptr<ID3D12CommandQueue> game_queue;
+      {
+        D3D12_COMMAND_QUEUE_DESC desc{}; desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+        checked(game->CreateCommandQueue(&desc, IID_PPV_ARGS(game_queue.put())), "Create the game's own direct queue");
+        queue_created();
+      }
+      // The game's ring of recordings, each reset only when recorded into
+      // again ring frames later (as Streamline's DLSS-G ring is), at least
+      // ring_pace_ms apart: a recording retires after the source age, so no
+      // copy on it is readable within that age.
+      constexpr unsigned ring = 16;
+      constexpr DWORD ring_pace_ms = 20;
+      static_assert(ring * ring_pace_ms > sunshine_freshness::source_age_ms + 50);
+      std::array<com_ptr<ID3D12CommandAllocator>, ring> allocators;
+      std::array<com_ptr<ID3D12GraphicsCommandList>, ring> lists;
+      std::array<std::uint64_t, ring> values{};
+      com_ptr<ID3D12Fence> done;
+      std::uint64_t value{};
+      unsigned at = 0;
+      for (unsigned n = 0; n != ring; ++n) {
+        checked(game->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(allocators[n].put())),
+          "Create the game queue's allocator");
+        const auto direct = game_native_command;
+        checked(game->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocators[n].p, nullptr, IID_PPV_ARGS(lists[n].put())),
+          "Create the game queue's list");
+        game_native_command = direct;
+        checked(lists[n]->Close(), "Close the game queue's initial recording");
+      }
+      checked(game->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(done.put())), "Create the game queue's fence");
+      // The next ring entry, reset (through ReShade, which names its native
+      // list) once its last work completed. Returns it open.
+      const auto open_next = [&](std::uint64_t &native) {
+        const auto n = at; at = (at + 1) % ring;
+        checked(done->SetEventOnCompletion(values[n], nullptr), "Wait for the game queue's recording");
+        const auto direct = game_native_command;
+        checked(allocators[n]->Reset(), "Reset the game queue's allocator");
+        checked(lists[n]->Reset(allocators[n].p, nullptr), "Reset the game queue's recording");
+        native = game_native_command; game_native_command = direct;
+        require(native && native != direct, "The game queue's Reset did not name its native list");
+        return n;
+      };
+      // Executes ring entry n on the game's queue; the presenting queue waits
+      // for it before the frame's own list.
+      const auto execute = [&](unsigned n) {
+        checked(lists[n]->Close(), "Close the game queue's recording");
+        ID3D12CommandList *submitted[]{lists[n].p};
+        game_queue->ExecuteCommandLists(1, submitted);
+        checked(game_queue->Signal(done.p, values[n] = ++value), "Signal the game queue's frame");
+        checked(queue->Wait(done.p, value), "Order the presenting queue after the game queue");
+      };
+      // Retires every recording (as the game does at the end): no copy stays
+      // unreadable after the case.
+      const auto drain = [&] {
+        for (unsigned n = 0; n != ring; ++n) {
+          checked(done->SetEventOnCompletion(values[n], nullptr), "Wait for the game queue's last recording");
+          const auto direct = game_native_command;
+          checked(allocators[n]->Reset(), "Reset the game queue's drained allocator");
+          checked(lists[n]->Reset(allocators[n].p, nullptr), "Reset the game queue's drained recording");
+          game_native_command = direct;
+          checked(lists[n]->Close(), "Close the game queue's drained recording");
+        }
+      };
+      // FG off: the viewport's SR evaluation with its own depth input, on
+      // the presenting queue's list (sr_evaluate) or the game queue's.
+      const auto present_queue_sr = [this] {
+        auto &token = begin_fg_frame("Present-queue SR did not supply a frame token");
+        require(sl.constants(camera_constants(false), token, fg_viewport) == 0, "SR constants changed the SDK result");
+        sr_evaluate(token);
+      };
+      const auto game_queue_sr = [&] {
+        using namespace sunshine_streamline;
+        Sleep(ring_pace_ms);
+        abi_v2::frame_token *token{}; const auto frame = ++fg_frame;
+        require(sl.new_token(token, &frame) == 0 && token, "Game-queue SR did not supply a frame token");
+        last_token = token;
+        require(sl.constants(camera_constants(false), *token, fg_viewport) == 0, "Game-queue SR constants changed the SDK result");
+        std::uint64_t native{};
+        const auto n = open_next(native);
+        write_depth_pixels(true, lists[n].p);
+        const auto resource = depth_resource();
+        const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, 1, active_area};
+        const base_structure *inputs[]{&fg_viewport.base, &tag.base};
+        supplied(game3d_continuity::sr_evaluate, game3d_continuity::limitation::cross_queue_sr);
+        require(sl.evaluate(0, *token, inputs, 2, reinterpret_cast<void *>(native)) == 0,
+          "Game-queue SR evaluation changed the SDK result");
+        execute(n);
+      };
+      run_script({"sr-other-queue", 30000,
+        [&] {
+          configure_fg(false);
+          active_area = {0, 0, selected->width, selected->height};
+          render_tracked_depth = present_queue_sr;
+          settle("SR-presenting-queue");
+        },
+        [&] {
+          render_tracked_depth = game_queue_sr;
+          for (const auto until = GetTickCount64() + sunshine_freshness::source_age_ms + 600; GetTickCount64() < until;)
+            present_frame();
+          log_status("SR-game-queue", inspect());
+        },
+        [&] {
+          render_tracked_depth = present_queue_sr;
+          settle("SR-presenting-queue-again");
+          drain();
+        }});
+
+      // Generic: no API source (FG off, no SDK call past the association
+      // window), and one depth-stencil view of the swapchain's size drawn
+      // with no boundary but the end of the frame, on the game queue's list
+      // or the presenting queue's. Each frame's list first moves it through
+      // DEPTH_READ (the previous frame's shading read it) back to
+      // DEPTH_WRITE, so the state at the end of the frame is that list's
+      // proof, of that list's queue. (A view only its creation proves, D10b,
+      // is copied at the end of the frame from either queue.)
+      const auto view = target(width, height, 4, 5);
+      const auto draw_view = [&](ID3D12GraphicsCommandList *list) {
+        transition(list, view->texture.p, D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_DEPTH_READ);
+        transition(list, view->texture.p, D3D12_RESOURCE_STATE_DEPTH_READ, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        const auto dsv = view->heap->GetCPUDescriptorHandleForHeapStart();
+        list->OMSetRenderTargets(0, nullptr, FALSE, &dsv);
+        list->SetGraphicsRootSignature(root.p);
+        list->SetPipelineState(depth32_pipeline.p);
+        list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        const D3D12_VIEWPORT area{0, 0, float(view->width), float(view->height), 0, 1};
+        const D3D12_RECT scissor{0, 0, LONG(view->width), LONG(view->height)};
+        list->RSSetViewports(1, &area);
+        list->RSSetScissorRects(1, &scissor);
+        struct { float w, h; unsigned pattern; } constants{float(view->width), float(view->height), view->pattern};
+        list->SetGraphicsRoot32BitConstants(0, 3, &constants, 0);
+        for (unsigned i = 0; i < view->draws; ++i) list->DrawInstanced(3, 1, 0, 0);
+      };
+      const auto generic_ready = [&] {
+        const auto &r = newest_record();
+        return r.depth_owner == sunshine_game3d::source_slot::generic &&
+          r[sunshine_game3d::source_slot::generic].state == sunshine_game3d::source_state::ready;
+      };
+      const auto settle_generic = [&](const char *label) {
+        unsigned consecutive{};
+        for (const auto until = GetTickCount64() + 8000; consecutive < 12 && GetTickCount64() < until;) {
+          present_frame();
+          consecutive = generic_ready() ? consecutive + 1 : 0;
+        }
+        if (consecutive < 12) log_record(label, newest_record());
+        require(consecutive >= 12, "Generic depth of the presenting queue's view did not settle");
+      };
+      const auto present_queue_view = [&] {
+        supplied(game3d_continuity::generic_boundary);
+        draw_view(commands.p);
+      };
+      const auto game_queue_view = [&] {
+        std::uint64_t native{};
+        const auto n = open_next(native);
+        supplied(game3d_continuity::generic_boundary, game3d_continuity::limitation::cross_queue_generic);
+        draw_view(lists[n].p);
+        execute(n);
+      };
+      // The view starts on the game's queue, so no proof of the presenting
+      // queue's precedes it: legal Generic depth that never establishes.
+      run_script({"generic-other-queue", 30000,
+        [&] {
+          render_tracked_depth = {};
+          for (const auto until = GetTickCount64() + sunshine_freshness::association_ms + 200; GetTickCount64() < until;)
+            present_frame();
+        },
+        [&] {
+          render_tracked_depth = game_queue_view;
+          for (const auto until = GetTickCount64() + game3d_continuity::establish_ms + 300; GetTickCount64() < until;)
+            present_frame();
+          log_record("Generic-game-queue", newest_record());
+        },
+        [&] {
+          render_tracked_depth = present_queue_view;
+          settle_generic("Generic-presenting-queue-again");
+          render_tracked_depth = {};
+          drain();
+          std::puts("PASS native other-queue sources: SR and Generic depth on the game's own direct queue, judged by the continuity invariant (known gaps C1, C2); no FX");
         }});
     }
 
     void finish() {
       render_tracked_depth = {};
       require_records_match_log("finish");
+      require_continuity_rows();
       reshade::unregister_event<reshade::addon_event::reshade_present>(record_present);
       reshade::unregister_event<reshade::addon_event::reset_command_list>(observe_reset);
       no_effects(); require(evidence.good(), "Could not write native provider evidence");

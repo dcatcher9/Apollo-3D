@@ -218,19 +218,20 @@ RWTexture2D<float> depth : register(u0);
       commands->ClearDepthStencilView(dsv,D3D12_CLEAR_FLAG_DEPTH,center_raw,0,1,&center);
     }
     // uav_barrier false leaves the write's synchronization to the caller (an
-    // enhanced barrier).
-    void write_depth_pixels(bool uav_barrier = true) {
+    // enhanced barrier). list: another game list than the fixture's own.
+    void write_depth_pixels(bool uav_barrier = true, ID3D12GraphicsCommandList *list = nullptr) {
+      auto *on = list ? list : commands.p;
       ID3D12DescriptorHeap *heaps[]{selected->descriptors.p};
-      commands->SetDescriptorHeaps(1,heaps);
-      commands->SetComputeRootSignature(compute_root.p);
-      commands->SetPipelineState(compute_pipeline.p);
+      on->SetDescriptorHeaps(1,heaps);
+      on->SetComputeRootSignature(compute_root.p);
+      on->SetPipelineState(compute_pipeline.p);
       struct { unsigned w,h,pattern; float center; } constants{selected->width,selected->height,selected->pattern,center_raw};
-      commands->SetComputeRoot32BitConstants(0,4,&constants,0);
-      commands->SetComputeRootDescriptorTable(1,selected->descriptors->GetGPUDescriptorHandleForHeapStart());
-      commands->Dispatch((selected->width+7)/8,(selected->height+7)/8,1);
+      on->SetComputeRoot32BitConstants(0,4,&constants,0);
+      on->SetComputeRootDescriptorTable(1,selected->descriptors->GetGPUDescriptorHandleForHeapStart());
+      on->Dispatch((selected->width+7)/8,(selected->height+7)/8,1);
       if(!uav_barrier) return;
       D3D12_RESOURCE_BARRIER barrier{}; barrier.Type=D3D12_RESOURCE_BARRIER_TYPE_UAV;
-      barrier.UAV.pResource=selected->resource.p; commands->ResourceBarrier(1,&barrier);
+      barrier.UAV.pResource=selected->resource.p; on->ResourceBarrier(1,&barrier);
     }
     void draw_private_frame() {
       if (rotate) selected = (++rotation_index&1u) ? first.get() : second.get();
