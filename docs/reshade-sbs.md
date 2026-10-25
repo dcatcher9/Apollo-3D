@@ -3478,7 +3478,12 @@ sets no limit on `numTags` or `numInputs`, so a tag array, an input list and an 
 read 32 elements at a time to their end (the API contract matrix's S18, since Stage 3 batch B;
 before, an array of more than 32 tags was read as unreadable, which cleared every tag of its
 viewport, and an evaluate with more than 32 inputs or chain nodes was refused); an input chain
-that returns to a node it passed is malformed. A typed Resource's
+that returns to a node it passed is malformed. In an input chain (`sl_core_api.h`: "the chained
+structures providing the input data (viewport, tags, constants etc)") a tag's next, or its
+PrecisionInfo's, may be the next input, a viewport, tag or Constants, which is no extension: a tag
+that is not last in the chain is read, and a PrecisionInfo right after it is its own (the API
+contract matrix's S15, since Stage 3 batch B; before, such a tag was refused as `extension`). Any
+other structure there is still the tag's extension, and a tag call's tags form no chain. A typed Resource's
 `nativeFormat` (declared in every 2.x Resource) is read and carried with the depth source; the
 zero-header Resource variant and 1.x resources read it as 0. The observer still refuses a wrong
 GUID, version 0 outside the zero-header Resource variant, a chained structure other than

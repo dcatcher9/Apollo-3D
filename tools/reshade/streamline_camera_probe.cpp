@@ -1405,11 +1405,23 @@ namespace sunshine_streamline {
       constexpr auto prefix = offsetof(abi_v2::viewport, value) + sizeof(copy.value);
       return read_bytes(&value, &copy, prefix) && decode_v2_viewport(&copy, prefix, output) == decode_status::ok;
     }
+    // An evaluate's inputs may form one chain ("the chained structures
+    // providing the input data (viewport, tags, constants etc)",
+    // sl_core_api.h slEvaluateFeature; SLA:250-262). There a node's next may
+    // be the next input, which is never an extension of the node: a
+    // viewport, a tag or constants (the matrix's S15).
+    bool evaluate_input(const void *node) {
+      base_structure base;
+      return node && read(static_cast<const base_structure *>(node), base) &&
+        (same(base.type, viewport_guid) || same(base.type, tag_guid) || same(base.type, constants_guid));
+    }
     // Streamline structures follow sl_struct.h's versioning rule: a newer
     // version only appends fields, so a structure with the expected GUID and
     // version 1 or later is read by its version-1 fields alone, never past them.
-    // The only extension a tag may chain is PrecisionInfo, which chains none.
-    tag_refusal decode_precision(const void *extension, double &scale, double &bias) {
+    // The only extension a tag may chain is PrecisionInfo, which chains none;
+    // in an evaluate's input chain (input_chain) its next may be the next
+    // input.
+    tag_refusal decode_precision(const void *extension, double &scale, double &bias, bool input_chain) {
       scale = 1; bias = 0;
       if (!extension) return tag_refusal::none;
       precision_info precision{};
@@ -1417,7 +1429,7 @@ namespace sunshine_streamline {
       if (!read_bytes(extension, &precision, prefix)) return tag_refusal::unreadable;
       if (!same(precision.base.type, precision_guid)) return tag_refusal::extension;
       if (precision.base.version < 1) return tag_refusal::header_version;
-      if (precision.base.next) return tag_refusal::extension;
+      if (precision.base.next && !(input_chain && evaluate_input(precision.base.next))) return tag_refusal::extension;
       if (precision.formula == 0) return tag_refusal::none;
       if (precision.formula != 1 || !std::isfinite(precision.scale) || !std::isfinite(precision.bias) || precision.scale == 0)
         return tag_refusal::precision;
@@ -1443,7 +1455,12 @@ namespace sunshine_streamline {
       }
       tag_record value{};
       value.present = true;
-      const auto precision = decode_precision(tag.base.next, value.precision_scale, value.precision_bias);
+      // An evaluate's input (origin::local) may be chained: as for the
+      // viewport (read_local_inputs), a next that is the next input is no
+      // extension of the tag, and a PrecisionInfo there is the tag's own (S15).
+      const bool input_chain = source == origin::local;
+      const auto precision = decode_precision(input_chain && evaluate_input(tag.base.next) ? nullptr : tag.base.next,
+        value.precision_scale, value.precision_bias, input_chain);
       const bool precision_ok = precision == tag_refusal::none;
       // Some 2.x integrations zero the whole Resource, header included, then
       // set its fields, while constructing a correctly typed ResourceTag. No

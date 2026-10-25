@@ -120,12 +120,6 @@ namespace game3d_contract::known_gaps {
       return legal(value) && (expected.kind == outcome_kind::capture || expected.kind == outcome_kind::continuous) && !either(expected);
     }
 
-    // A tag whose next pointer continues the input chain is read as carrying
-    // an unknown extension.
-    constexpr bool chained_local(const sl_case &value) {
-      return value.entry == tag_entry::local_chain_not_last && capture_required(value);
-    }
-
     constexpr bool zero_sided_extent(const sl_case &value) {
       return value.extent == extent_form::one_dimension_zero && capture_required(value);
     }
@@ -138,7 +132,6 @@ namespace game3d_contract::known_gaps {
   }  // namespace streamline
 
   inline constexpr row<sl_case> sl_rows[] {
-    {"S15", &rules::S15, kind::expected_failure, &streamline::chained_local, "Stage 3 fix 8 (S4/S15). In read_local_inputs, decode a chained tag with its next pointer cleared (as the viewport already is), treating a PrecisionInfo node as the preceding tag's.", &behaviours::no_copy},
     {"S16", &rules::S16, kind::expected_failure, &streamline::zero_sided_extent, "Stage 3 fix 12 (S16). Use Streamline's whole-resource rule !(width && height) (sl_consts.h:150) in match() (streamline_camera_data.cpp) and source_region (streamline_depth_capture.cpp).", &behaviours::no_copy},
     {"S16d", &rules::S16d, kind::expected_failure, &streamline::declared_size, "Stage 3 fix 12 (S16). Drop the declared Resource size check from match(); the capture already bounds the extent by the allocation (source_region).", &behaviours::no_copy},
   };
@@ -185,21 +178,6 @@ namespace game3d_contract::known_gaps {
 
   // The runtime layer's cells (judged at Present).
   namespace present {
-    // A refusal the runtime layer requires the add-on to record: the oracle
-    // refuses alone, for a class a reached copy point decides, and no SDK
-    // call of the case failed (S21b discards that copy unread).
-    constexpr bool recorded_refusal(const sl_case &cell) {
-      const auto expected = expect(cell);
-      return legal(cell) && cell.version.major == 2 && expected.kind == outcome_kind::refuse && !either(expected) && expected.why != refusal::fg_scope &&
-             expected.why != refusal::no_copy_point && cell.tag_result != sl_result::error && cell.evaluate_result != sl_result::error;
-    }
-
-    // A chained input that is not last (S15) is not read: a cell the oracle
-    // refuses for its state or extent records only missing-depth (absent).
-    constexpr bool chained_local_refused(const present_case &value) {
-      return value.decided.entry == tag_entry::local_chain_not_last && recorded_refusal(value.decided);
-    }
-
     // An OnlyValidNow tag outside frame-generation scope that its call
     // copies (S1), followed by the same frame's evaluate, which refuses the
     // tag as not valid until present (S3): that Present shows no depth.
@@ -208,26 +186,21 @@ namespace game3d_contract::known_gaps {
              value.decided.life == lifecycle::only_valid_now && !detail::frame_generation_scope(value.value) && streamline::capture_required(value.decided);
     }
 
-    constexpr bool chained_local(const present_case &value) {
-      return streamline::chained_local(value.decided);
-    }
-
     constexpr bool zero_sided_extent(const present_case &value) {
       return streamline::zero_sided_extent(value.decided);
     }
 
     // An extent the add-on calls invalid on a cell whose tag match() reads
-    // (at its tag call or same-frame evaluate, a chained input aside: S15
-    // refuses that first) and the oracle refuses, or may refuse, for its
-    // state, or after the frame's Present for its lifetime (the tag call
-    // reads it first, outside frame generation too), is refused first as an
-    // invalid extent.
+    // (at its tag call or same-frame evaluate) and the oracle refuses, or may
+    // refuse, for its state, or after the frame's Present for its lifetime
+    // (the tag call reads it first, outside frame generation too), is refused
+    // first as an invalid extent.
     constexpr bool extent_refused(const present_case &value, extent_form form) {
       const auto &cell = value.decided;
       const auto expected = expect(cell);
       const bool after_present = cell.at == copy_point::after_present && !streamline::local(cell.entry) && cell.untag == untag_pattern::none &&
                                  cell.tag_result != sl_result::error && expected.why == refusal::lifetime;
-      return legal(cell) && cell.extent == form && cell.entry != tag_entry::local_chain_not_last && permits(expected, outcome_kind::refuse) &&
+      return legal(cell) && cell.extent == form && permits(expected, outcome_kind::refuse) &&
              ((cell.at != copy_point::after_present && expected.why == refusal::state_unprovable) || after_present);
     }
 
@@ -251,8 +224,6 @@ namespace game3d_contract::known_gaps {
   // same gap; that row's note holds the fix.
   inline constexpr row<present_case> sl_runtime_rows[] {
     {"S1-evaluate", &rules::S1, kind::expected_failure, &present::only_valid_now_then_evaluate, "Outside the Stage 3 order, which predates this finding: it reworks the tag-to-evaluate path fix 2 (S6 + S7) changes, so it fits beside it. Found by the runtime layer: an OnlyValidNow global tag outside FG scope is copied at its call, but the same frame's evaluate refuses the tag (match(): not-valid-until-present, S3) and that frame's Present then shows no depth (mono), or only between generated Presents. S3 is right that the evaluate may not use the tag; it must not cost the frame the copy its tag call made (S1). Today the refused evaluate begins a new evaluation of the viewport with no copy (streamline_camera_probe.cpp nominate_depth_source, withdraw_invalid_attempt -> depth_capture::begin_evaluation), which supersedes the tag call's. Keep a tag-call copy when a later point of its frame refuses the same tag for its lifetime. The hook layer judges one copy point per cell, so only a Present shows this.", &behaviours::no_copy},
-    {"S15", &rules::S15, kind::expected_failure, &present::chained_local, "Stage 3 fix 8 (S4/S15). As the hook table's S15 row.", &behaviours::no_copy},
-    {"S15-refusal", &rules::S15, kind::expected_failure, &present::chained_local_refused, "Stage 3 fix 8 (S4/S15). With S15: the chained input is not read, so a cell the oracle refuses for its state or extent records only missing-depth (absent), no contract class.", &behaviours::no_copy},
     {"S16", &rules::S16, kind::expected_failure, &present::zero_sided_extent, "Stage 3 fix 12 (S16). As the hook table's S16 row.", &behaviours::no_copy},
     {"S16-refusal", &rules::S16, kind::expected_failure, &present::zero_sided_extent_refused, "Stage 3 fix 12 (S16). With S16: a zero-sided extent on a cell the oracle refuses, or may refuse, for another class (its state) is refused as invalid-extent (malformed) before that is judged, so its refusal class differs. The S16 fix closes this row.", &behaviours::refused_as<refusal::malformed>},
     {"S16d", &rules::S16d, kind::expected_failure, &present::declared_size, "Stage 3 fix 12 (S16). As the hook table's S16d row.", &behaviours::no_copy},

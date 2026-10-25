@@ -851,6 +851,45 @@ namespace {
     require(call_v2_evaluate(0, token.ref(), long_chain, 1, nullptr) == 0 && testing::counts().invalid > cycle_before,
       "v2 cyclic input chain was read or changed forwarding");
     chained[39].base.next = nullptr;
+    // There a tag's next may be the next input (the matrix's S15), as the
+    // viewport's is: a depth tag that is not last is read, with a
+    // PrecisionInfo after it as its own, whose next continues the chain. An
+    // unknown structure after the tag or its PrecisionInfo is still an
+    // extension (S14), and a tag call's tag is never part of a chain.
+    auto order_view = viewport(77);
+    tag_precision order_precision; order_precision.scale = -.5f; order_precision.bias = 8.f;
+    auto first = raw_tag, second = motion;
+    order_view.base.next = &first.base; first.base.next = &order_precision.base; order_precision.base.next = &second.base;
+    const base_structure *ordered[]{&order_view.base};
+    auto order_constants = viewport(order_view.value);
+    evaluation_snapshot ordered_snapshot;
+    const auto evaluate_ordered = [&] {
+      return call_v2_constants(constants, token.ref(), order_constants) == 0 &&
+        call_v2_evaluate(0, token.ref(), ordered, 1, nullptr) == 0 &&
+        testing::latest_snapshot(order_view.value, ordered_snapshot) && ordered_snapshot.tags[0].present;
+    };
+    require(evaluate_ordered() && ordered_snapshot.tags[0].supported &&
+        ordered_snapshot.tags[0].value.native_resource == reinterpret_cast<std::uintptr_t>(&native_raw) &&
+        ordered_snapshot.tags[0].precision_scale == -.5 &&
+        ordered_snapshot.tags[0].precision_bias == 8 && first.base.next == &order_precision.base &&
+        order_precision.base.next == &second.base,
+      "a chained depth input that is not last, or its PrecisionInfo, was not read");
+    first.base.next = &second.base;
+    require(evaluate_ordered() && ordered_snapshot.tags[0].supported && ordered_snapshot.tags[0].precision_scale == 1,
+      "a chained depth input followed by another input was not read");
+    base_structure chained_unknown{&second.base, {0x12345678, 1, 2, {3, 4, 5, 6, 7, 8, 9, 10}}, 1};
+    first.base.next = &chained_unknown;
+    require(evaluate_ordered() && !ordered_snapshot.tags[0].supported &&
+        ordered_snapshot.tags[0].value.refusal == tag_refusal::extension,
+      "an unknown structure after a chained depth input was not refused as its extension");
+    first.base.next = &order_precision.base; order_precision.base.next = &chained_unknown;
+    require(evaluate_ordered() && !ordered_snapshot.tags[0].supported &&
+        ordered_snapshot.tags[0].value.refusal == tag_refusal::extension,
+      "an unknown structure after a chained PrecisionInfo was not refused as its extension");
+    first.base.next = &second.base; order_view.base.next = nullptr;
+    require(call_v2_tag(order_view, &first, 1, nullptr) == 0 && evaluate_ordered() && !ordered_snapshot.tags[0].supported &&
+        ordered_snapshot.tags[0].value.refusal == tag_refusal::extension,
+      "a tag call's tag with another tag as its next was read as an input chain");
   }
   selected_depth selection(void *resource) {
     selected_depth value;

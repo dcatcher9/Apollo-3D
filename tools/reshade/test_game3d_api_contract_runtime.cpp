@@ -429,7 +429,7 @@ namespace {
     constexpr seed gap_seeds[] {
       {"local-now-undeclared", "state=unprovable,life=only_valid_now,entry=local_array"},  // S4-refusal until Stage 3 fix 8: now refused for its state.
       {"local-now", "life=only_valid_now,entry=local_array"},  // S4 until Stage 3 fix 8: now copied at its own evaluate.
-      {"chained-undeclared", "state=unprovable,entry=local_chain_not_last"},  // S15-refusal.
+      {"chained-undeclared", "state=unprovable,entry=local_chain_not_last"},  // S15-refusal until Stage 3 fix 8: now refused for its state.
       {"generated-undeclared", "state=unprovable,commands=none,generated=3"},  // S7-refusal until Stage 3 fix 2: now refused for its state.
       {"declared-size-undeclared", "state=unprovable,entry=local_array,extent=declared_size_differs"},  // S16d-refusal.
     };
