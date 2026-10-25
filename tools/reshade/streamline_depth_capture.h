@@ -21,9 +21,10 @@ namespace sunshine_streamline::depth_capture {
     std::uint64_t source_present_generation{}; // Frozen separately at each tag entry.
     // Volatile API tags must copy at this call, even for a tracked ReShade DSV.
     bool force_snapshot{};
-    // The copy is recorded inside the tag call that supplied the resource. Frame
-    // generation presents earlier frames on another thread meanwhile; such a
-    // Present cannot end this call's own lifetime (see source_lifetime_current).
+    // The copy is recorded inside the call that supplied the resource: a tag
+    // call, or an evaluation whose own local inputs name it. Frame generation
+    // presents earlier frames on another thread meanwhile; such a Present
+    // cannot end this call's own lifetime (see source_lifetime_current).
     bool at_tag_call{};
     // The copy is made for the frame the tag was set for, before that frame's
     // Present: an evaluation that names the tag's own frame

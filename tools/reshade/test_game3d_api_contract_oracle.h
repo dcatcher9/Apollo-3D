@@ -747,8 +747,9 @@ namespace game3d_contract {
             point = &rules::S4;
             break;
           }
-          // A local input is tagged at its own evaluate: no Present can come
-          // between. Generated Presents test the lifecycle first (S7).
+          // A local input is copied inside its own evaluate, so a Present of
+          // an earlier frame landing there cannot end its lifetime (S5).
+          // Generated Presents test the other tags' lifecycle first (S7).
           point = value.generated_presents && !local(value.entry)       ? &rules::S7 :
                   value.commands == tag_commands::none && until_present ? &rules::S6 :
                                                                           &rules::S5;

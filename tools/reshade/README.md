@@ -880,7 +880,11 @@ after its last copy). Each generated presentation, at
 FG copy amid such frames (Assassin's Creed Shadows, 10-24) shows at its Present, is held by the next
 one and SR depth returns at the one after, four times, with no readiness loss; a `MEASURE
 native-provider SLFG-stray-FG-copy` line counts the Presents not rendered while the placement
-controller settles on the other logical source, as at any FG/SR switch.
+controller settles on the other logical source, as at any FG/SR switch. Then the test add-on's
+`SunshineStreamlineTestPresentBeforeNextCopy` makes a Present of an earlier frame land inside the SR
+evaluation, between the read of its own local depth input and the copy (as DLSS-G's Presents on its
+own thread do in Assassin's Creed Shadows); four such real frames keep their fresh SR depth with no
+readiness loss.
 The test executable also exports the NGX stand-in's entry points (below); its DLSS-G case creates
 feature 11 and sets only the named `DLSSG.*` inputs (no capture). With its FG depth tag command-less
 and untagged in the same frame (its deferred copy cancelled, R7) and its HUD-less and Backbuffer

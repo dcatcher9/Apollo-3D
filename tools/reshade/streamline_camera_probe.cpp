@@ -2065,7 +2065,9 @@ namespace sunshine_streamline {
         value.source = tag.direct_source;
         value.source_present_generation = tag.source_present_generation;
         value.force_snapshot = value.valid_until == sunshine_scene_depth::lifetime::at_call;
-        value.at_tag_call = snapshot.tag_boundary;
+        // A tag call's tags, and an evaluation's own local inputs, are copied
+        // inside the call that supplied them (source_lifetime_current).
+        value.at_tag_call = snapshot.tag_boundary || tag.scope == tag_scope::evaluation_local;
         value.own_frame = tag.own_frame;
         v1_resource_state::read_details state_details;
         const auto state = v1_resource_state::resolve(value.native_state, version_one,

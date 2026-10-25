@@ -1479,8 +1479,10 @@ namespace {
         auto before = latest_sequence(id);
         forward(fx::call_evaluate(0, token[0].ref(), inputs.data(), std::uint32_t(inputs.size()), local ? tag_commands : game_list), fx::evaluate_result);
         if (value.at == matrix::copy_point::same_frame_evaluate) {
-          // A local input is tagged at this evaluate: no Present comes between.
-          seen.presents = local ? 0 : value.generated_presents;
+          // A local input is tagged at this evaluate. Presents of earlier
+          // frames (DLSS-G's own thread) may land inside it, between the read
+          // of the input and its copy; they cannot end its lifetime.
+          seen.presents = value.generated_presents;
           observe(seen, id, before);
           return;
         }
@@ -1541,15 +1543,17 @@ namespace {
       }
       // Repeats of record_impl (streamline_depth_capture.cpp), which needs a
       // device: a command list, a lifetime it keeps, and
-      // source_lifetime_current: inside the tag call, at an evaluation of the
-      // tag's own frame (the probe's own_frame, S7), or no Present since.
+      // source_lifetime_current: inside the call that supplied it (a tag call,
+      // or an evaluation's own local input), at an evaluation of the tag's own
+      // frame (the probe's own_frame, S7), or no Present since.
       if (!run.snapshot.command_buffer) {
         return out;
       }
       if (frame.valid_until != lifetime::until_present && frame.valid_until != lifetime::until_evaluation && !forced) {
         return out;
       }
-      if (!at_call && !forced && !run.snapshot.tags[0].own_frame && run.presents) {
+      const bool local_input = run.snapshot.tags[0].scope == sunshine_streamline::tag_scope::evaluation_local;
+      if (!at_call && !local_input && !forced && !run.snapshot.tags[0].own_frame && run.presents) {
         return out;
       }
       return judged(copy_state::resolve(copy_state::select(proof, policy::source_contract), frame.native_state, observation_of(value.depth), value.depth.flags));

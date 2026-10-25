@@ -3931,7 +3931,16 @@ An independent FG Present cannot expire this synchronous tag-call lifetime. The 
 FG input `ValidUntilPresent` depth tag copied inside its own tag call: Frame Generation presents
 earlier frames on another thread, and a Present landing between reading the tag and recording its
 copy used to refuse that real frame's depth as `unsupported_lifetime`. The Witcher 3 hit this on a
-fraction of real frames with multi frame generation. A `ValidUntilPresent` or `ValidUntilEvaluate`
+fraction of real frames with multi frame generation. An evaluation's own local inputs (the tags in
+its `slEvaluateFeature` inputs) are copied inside the call that supplied them too, so the same
+holds for them (since 10-24). Assassin's Creed Shadows tags its SR depth as a local
+`ValidUntilPresent` input; with FG on, DLSS-G's Presents on its own thread landed between that read
+and the copy, most often while dynamic resolution made the copy allocate new storage without the
+lock. Each refusal withdrew the SR attempt, which marks a gap in the source's admission (its
+completed snapshots from before are not admitted). The SR copies run on another queue and are
+admitted only once the game resets their list, 110-235 ms later in that game, so the held depth
+(already that old) expired first: about a 100 ms loss every second or two (`completed_before_gap`).
+A `ValidUntilPresent` or `ValidUntilEvaluate`
 tag lives until its own frame's Present (`sl_core_types.h`), so a tag copied later at an evaluation
 of that frame is current too, whatever Presents came between: those were earlier frames' (multi
 frame generation presents them while the game records the next frame; the contract matrix's S7).

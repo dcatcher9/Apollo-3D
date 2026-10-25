@@ -2010,6 +2010,14 @@ namespace sunshine_streamline::depth_capture {
 
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
   namespace {
+    // One Present of an earlier frame landing inside the next nominated copy's
+    // call, between its input's read and the copy (record_impl).
+    std::atomic<bool> present_before_next_copy{};
+  }
+  extern "C" __declspec(dllexport) void SunshineStreamlineTestPresentBeforeNextCopy() {
+    present_before_next_copy.store(true, std::memory_order_release);
+  }
+  namespace {
     std::atomic<HANDLE> nomination_gate_entered{}, nomination_gate_release{};
     void wait_nomination_gate() {
       if (const auto entered = nomination_gate_entered.exchange(nullptr, std::memory_order_acq_rel)) {
@@ -2036,12 +2044,15 @@ namespace sunshine_streamline::depth_capture {
   }
 #endif
   SUNSHINE_CAPTURE_STATIC bool source_lifetime_current(const input &value, std::uint64_t current_generation) {
-    // A copy recorded synchronously inside the authenticated tag call that
-    // supplied the resource is current by construction, for OnlyValidNow and
-    // UntilPresent alike: an independent FG Present of an earlier frame cannot
-    // end this call's lifetime. With multi frame generation such Presents land
-    // between reading the tag and recording its copy on a fraction of real
-    // frames. A later use of the tag's own frame (own_frame) is current for
+    // A copy recorded synchronously inside the authenticated call that
+    // supplied the resource (a tag call, or an evaluation's own local input)
+    // is current by construction, for OnlyValidNow and UntilPresent alike: an
+    // independent FG Present of an earlier frame cannot end this call's
+    // lifetime. With frame generation such Presents land between reading the
+    // input and recording its copy on a fraction of real frames, more often
+    // while new storage is allocated without the lock (Assassin's Creed
+    // Shadows 10-24: its SR evaluation's local depth input, each dynamic
+    // resolution change). A later use of the tag's own frame (own_frame) is current for
     // the same reason: a Present since the tag was an earlier frame's (the
     // matrix's S7). Any other later use, and a delayed preservation copy,
     // still require an unchanged generation.
@@ -2165,6 +2176,11 @@ namespace sunshine_streamline::depth_capture {
         bool keep{};
         ~reservation_release() { if (token && !keep) clear_reservation(std::exchange(token, 0)); }
       } release_on_exit{reservation};
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+      if (nominate_source && !preservation_only && !diagnostic_copy &&
+          present_before_next_copy.exchange(false, std::memory_order_acq_rel))
+        ++value.source->present_generation;
+#endif
       const auto current_generation = source_present_generation(value.source);
       if (diagnostic) diagnostic->current_generation = current_generation;
       if (!source_lifetime_current(value, current_generation))

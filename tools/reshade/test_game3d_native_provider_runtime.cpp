@@ -2491,6 +2491,31 @@ namespace {
           // does; it settles on SR again.
           std::printf("MEASURE native-provider SLFG-stray-FG-copy presents=12 unrendered_while_placement_settles=%u\n", unrendered);
           settle_route("SLFG-stray-FG-copy-settled", false);
+          // Assassin's Creed Shadows (10-24): DLSS-G presents earlier frames on
+          // its own thread while the game's SR evaluation records the copy of
+          // its own local depth input; with dynamic resolution that recording
+          // allocates new storage without the lock, so such a Present often
+          // lands in between. The evaluation supplied that input, so the
+          // Present cannot end its lifetime: every such real frame keeps its
+          // fresh SR depth (until 10-24 its copy was refused as
+          // unsupported_lifetime, which also raised the source gap mark).
+          const auto present_before_copy = reinterpret_cast<void (*)()>(GetProcAddress(
+            GetModuleHandleW(L"SunshineSBSTest.addon64"), "SunshineStreamlineTestPresentBeforeNextCopy"));
+          require(present_before_copy, "The test add-on lacks its Present-before-copy hook");
+          const auto losses_before_landing = readiness_losses();
+          for (unsigned round = 0; round != 4; ++round) {
+            render_tracked_depth = [this] { fallback_frame(false, true); };
+            present_before_copy();
+            present_frame(); const auto s = inspect();
+            if (!round) log_status("SLFG-silent-scope-Present-during-SR-copy", s);
+            require(active(s) && !s.source.reused_depth && !s.source.frame_generation_input,
+              "A Present landing while an SR evaluation copied its own local depth input refused that copy");
+          }
+          require(readiness_losses() == losses_before_landing,
+            "A Present landing while an SR evaluation copied its own local depth input lost depth");
+          std::puts("PASS native SL local input: a Present of an earlier frame landing while an SR evaluation records "
+            "the copy of its own local depth input leaves that copy current; every such real frame shows its fresh SR "
+            "depth; no FX");
           std::puts("PASS native SLFG single copy: one accepted FG copy amid frames without one shows at its Present, is held "
             "one frame and SR depth returns at the next; no readiness loss; no FX");
         },
