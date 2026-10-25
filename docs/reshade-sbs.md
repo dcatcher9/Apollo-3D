@@ -4041,7 +4041,8 @@ records no state). `lifecycle_outlives_boundary` gates only ordinary (non-FG) ta
 long-lived FG tag goes on to matching instead.
 It also gives the call's first depth tag (`tag_type`, `scope`, `lifecycle`, `native`), its
 `command`, the frame identity kind, the evidence `status`, `fg_scope=live|silent`, `withdrawn=1|0`,
-`dlssg_supplied=1|0` and the running `refusals` count. `dlssg_supplied=1` marks a command-less
+`dlssg_supplied=1|0` and the running `refusals` count. Either way the frame has no FG copy, so the
+scope owns no depth for it and turns silent (below). `dlssg_supplied=1` marks a command-less
 boundary with no copy point of a live scope whose copies DLSS-G's own evaluation records (below):
 it withdraws nothing,
 since that evaluation, not the tag, is where the frame's depth is copied, and a withdrawal would
@@ -4069,7 +4070,8 @@ accepted copies keep the FG scope live exactly as accepted FG tag copies do, so 
 (the same viewport's SR/RR evaluations and direct NGX copies stand aside), and generated Presents
 hold the real frame's copy. A refusal while the scope is silent changes nothing (the ordinary SR/RR
 source stays); while it is live the attempt first replaces the FG observation, so a refusal withdraws
-the previous copy as a refused FG tag boundary does. A Streamline FG tag boundary that recorded a copy
+the previous copy as a refused FG tag boundary does. Either way the refused frame has no FG copy, so
+the scope turns silent. A Streamline FG tag boundary that recorded a copy
 within the source age keeps precedence: the evaluation then adds no second copy (`tag_copied`). The
 depth carries the viewport's own camera evidence as an unframed FG tag does: its history revision,
 the recent camera's depth direction where `DLSSG.DepthInverted` is absent, and the camera's steady
@@ -4098,11 +4100,20 @@ DLSS-G's list) and `dlssg_ui={offered=<n> captured=<n> refused=<reason>:<n>,...}
 `shape` or `not_newer`, or a capture stage); `none` when nothing was refused. Absent UI keys are
 optional in DLSS-G and are not refusals.
 
-Enabled FG owns its viewport's depth only while its scope is live: FG was turned on less than a
-second ago (the options call that enabled it in this observation epoch; later calls that keep it
-on do not restart that second), or a recorded copy of the FG source of that epoch and viewport was
-accepted by the API (a successful SDK call, not a metadata-only nomination) within the last
-second. This is the same one-second rule that ends a silent or rejected API source's association.
+Enabled FG owns its viewport's depth only for the frames FG supplied: its scope is live while its
+newest frame outcome is a recorded copy of the FG source of that epoch and viewport that the API
+accepted (a successful SDK call, not a metadata-only nomination), made since FG was turned on (the
+options call that enabled it in this observation epoch) and within the last second. This is the same
+one-second rule that ends a silent or rejected API source's association. Turning FG on grants
+nothing by itself, and neither does a single copy: a frame of the scope without an FG copy (its FG
+depth tag refused, its copy deferred to the frame's Present cancelled by an untag, refused there or
+lapsed, or DLSS-G's own evaluation of it refused) newer than the newest accepted copy turns the scope
+silent at once (`depth_capture::frame_generation_missed`, ordered by the frame's observation
+sequence, so a late outcome of an older frame changes nothing). While DLSS-G's own evaluation
+supplies the scope's copies, that evaluation, not the game's FG tag, decides the frame. Assassin's
+Creed Shadows (10-24) untags its FG depth in every frame and so cancels almost every deferred copy;
+the rare copy that survived kept the scope live for a second with no further FG copy, and FG On did
+the same, so that viewport showed neither FG nor SR depth for about a second each time.
 A silent FG scope owns nothing: its refused boundaries withdraw nothing, the same viewport's
 ordinary SR/RR evaluation nominates again (replacing any FG observation of that viewport), the
 provider selects as without FG for that Present (`require_FG=0 FG_silent=1` in readiness lines),
@@ -4111,9 +4122,13 @@ no API source is available: a game with FG on and no SR/RR or NGX depth stays 2D
 its real or generated presentations to the generic depth selector.
 The next accepted FG copy takes the viewport back at once. Assassin's Creed Shadows (10-22) kept FG
 on with no FG depth captured, which shut its working SR depth out for as long as FG stayed on. A
-game whose FG copies keep being accepted keeps FG ownership throughout. A
+game whose FG copies keep being accepted keeps FG ownership throughout. A switch between FG and SR
+depth restarts the placement controller's calibration of the other logical source (its projection
+domain includes the source id; the raw controller keeps a bounded history per source), as it did
+before, so a game whose FG frames come and go switches as often as that, not more. A
 `Sunshine Streamline frame generation depth scope`
-line reports a required scope turning `silent` and, later, `live` again; FG Off ends a silent
+line reports a required scope turning `silent` and, later, `live` again, at most every 5 s
+(`changes=` counts the turns so far; the line names the newest state); FG Off ends a silent
 scope without its own line. Generated presentations count as FG (`fg` on output lines) while a
 silent scope's viewport supplies the depth. An observed FG Off retires that source so independently captured ordinary
 SL tag/evaluation or NGX depth can resume with newly submitted pixels. A failed or ambiguous FG-options observation also revokes the old FG scope

@@ -436,9 +436,11 @@ data take priority over NGX, including while its current snapshot is pending. A 
 copy stays with that source and uses the documented bounded real-depth reuse or mono behavior;
 it does not borrow an NGX depth texture and attach unrelated SL constants. A depth untag (a null
 resource, which ends the tag) is not a capture attempt and never withdraws depth already captured
-at the frame's tag. FG keeps that priority only while its scope is live: FG was turned on less than
-a second ago, or one of its depth copies was accepted within the last second. Otherwise the same
-viewport's SR/RR depth (or NGX) may supply depth until the next accepted FG copy takes it back.
+at the frame's tag. FG keeps that priority only for the frames it supplied: while its newest frame
+outcome is an accepted depth copy, made since FG On and within the last second. A frame without
+one (its FG tag refused, its deferred copy cancelled, refused or lapsed, or DLSS-G's own evaluation
+of it refused) lets the same viewport's SR/RR depth (or NGX) supply depth until the next accepted
+FG copy takes it back; FG On alone, or a single copy, grants nothing more.
 Without such a source enabled FG still keeps the game in mono; it never falls back to generic depth.
 Explicit FG Off retires that source and lets a fresh NGX submission resume. Motion-vector interpolation of two real depth
 frames for FG 2x is future work; the current implementation does not generate intermediate depth.
@@ -868,10 +870,17 @@ or `ValidUntilEvaluate` FG depth tag that declares `NON_PIXEL_SHADER_RESOURCE` (
 later use) while the call's own list records `PIXEL_SHADER_RESOURCE` is copied at the call from the
 recorded state, nothing is refused, and every Present shows fresh FG depth (S11; the bounded
 `Sunshine Streamline FG tag-call copies` line counts `recorded_over_declared`). With FG options on
-and every FG depth tag's copy cancelled by the same frame's untag (R7), the
-same viewport's SR depth takes over once the FG scope is silent; each generated presentation, at
+and every FG depth tag's copy cancelled by the same frame's untag (R7), the FG scope owns no depth
+for those frames: the first such frame's Present holds the last FG copy (its SR evaluation came while
+that copy owned the viewport) and the second shows the same viewport's fresh SR depth, with no
+readiness loss logged (until 10-24 the scope stayed live, with neither FG nor SR depth, for a second
+after its last copy). Each generated presentation, at
 2x and 3x, holds its real frame's SR copy, also after the fixture's window leaves the foreground
-(the export stop invalidates reuse once) and back, with no readiness loss logged.
+(the export stop invalidates reuse once) and back, with no readiness loss logged. A single accepted
+FG copy amid such frames (Assassin's Creed Shadows, 10-24) shows at its Present, is held by the next
+one and SR depth returns at the one after, four times, with no readiness loss; a `MEASURE
+native-provider SLFG-stray-FG-copy` line counts the Presents not rendered while the placement
+controller settles on the other logical source, as at any FG/SR switch.
 The test executable also exports the NGX stand-in's entry points (below); its DLSS-G case creates
 feature 11 and sets only the named `DLSSG.*` inputs (no capture). With its FG depth tag command-less
 and untagged in the same frame (its deferred copy cancelled, R7) and its HUD-less and Backbuffer

@@ -1527,23 +1527,25 @@ namespace {
     void *function{}; call_feature_function(1000, "slDLSSGSetOptions", function);
     require(function != nullptr, "RR/linear FG options missing");
     auto set_options = reinterpret_cast<fg_function>(function); fg_options options; set_options(view, options);
+    // Enabled FG owns the viewport only for the frames FG supplied
+    // (depth_capture::frame_generation_scope_live): this fixture's capture
+    // owner is inactive, so no FG copy is ever accepted, and RR of the same
+    // viewport supplies depth right after FG On, a second later, with
+    // repeated options and after FG Off then On (Assassin's Creed Shadows
+    // 10-22 and 10-24).
     call_v2_evaluate(1001, token.ref(), local, 2, nullptr);
-    require(!testing::normalized_source(view.value, 2, normalized), "RR competed with enabled same-viewport FG");
-    // Enabled FG owns the viewport only while live: a second after FG On
-    // with no accepted FG copy (this fixture's capture owner is inactive, so
-    // none is ever accepted) the scope is silent and RR of the same viewport
-    // supplies depth (Assassin's Creed Shadows 10-22). Options repeated while
-    // FG stays on keep that age; FG Off then On starts a new second.
+    require(testing::normalized_source(view.value, 2, normalized) && !normalized.frame_generation_input,
+      "FG On without an FG copy blocked same-viewport RR depth");
     constexpr std::uint64_t fg_scope_ms = 1000;
     testing::age_frame_generation(fg_scope_ms + 1);
     call_v2_evaluate(1001, token.ref(), local, 2, nullptr);
     require(testing::normalized_source(view.value, 2, normalized) && !normalized.frame_generation_input,
       "A silent FG scope kept blocking same-viewport RR depth");
     set_options(view, options); call_v2_evaluate(1001, token.ref(), local, 2, nullptr);
-    require(testing::normalized_source(view.value, 2, normalized), "Repeated FG On options restarted the FG scope's second");
+    require(testing::normalized_source(view.value, 2, normalized), "Repeated FG On options blocked same-viewport RR depth");
     options.mode = 0; set_options(view, options); options.mode = 1; set_options(view, options);
     call_v2_evaluate(1001, token.ref(), local, 2, nullptr);
-    require(!testing::normalized_source(view.value, 2, normalized), "A new FG On did not own its viewport for its first second");
+    require(testing::normalized_source(view.value, 2, normalized), "A new FG On without an FG copy owned its viewport");
     tag.lifecycle = 0;
     call_v2_framed_tag(token.ref(), view, &tag, 1, &commands);
     require(testing::normalized_source(view.value, 2, normalized) && normalized.frame_generation_input &&
@@ -3785,12 +3787,15 @@ namespace {
     };
     require(inverse_distance(normalized, .5) == 1.0, "FG transformed sample lost its original matrix depth units");
     require(testing::counts().evaluations == before_evaluations, "FG tags invented Super Resolution evaluation calls");
+    // Enabled FG owns the viewport only for frames whose FG copy the capture
+    // owner accepted (frame_generation_scope_live); this fixture's owner is
+    // inactive, so the same viewport's SR evaluation supplies its own depth.
     auto sr_tag = tag; sr_tag.lifecycle = 1;
     const base_structure *sr_inputs[]{&view.base, &sr_tag.base};
     call_v2_evaluate(0, token.ref(), sr_inputs, 2, &commands);
     require(testing::latest_snapshot(view.value, snapshot) && snapshot.feature == 0 && snapshot.tags[0].supported &&
-        !testing::normalized_source(view.value, 0, normalized),
-      "same-viewport SR evaluation competed with enabled FG source");
+        testing::normalized_source(view.value, 0, normalized) && !normalized.frame_generation_input,
+      "same-viewport SR evaluation of an FG scope without an FG copy did not supply its own depth");
     auto unrelated_view = viewport(12);
     call_v2_constants(constants, token.ref(), unrelated_view);
     const base_structure *other_sr_inputs[]{&unrelated_view.base, &sr_tag.base};

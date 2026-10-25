@@ -1803,18 +1803,25 @@ namespace sunshine_streamline::depth_capture {
     return false;
   }
   bool frame_generation_scope_live(std::uint64_t epoch, std::uint32_t viewport, std::uint64_t enabled_tick) {
-    // A tick slightly ahead of this read (another thread's) is fresh.
-    const auto within = [](std::uint64_t tick, std::uint64_t now) {
-      return tick && sunshine_freshness::ahead_tolerant_le(tick, now, sunshine_freshness::fg_silent_ms);
-    };
-    if (within(enabled_tick, scope_now())) return true;
     if (!requested.load() || !epoch) return false;
     std::lock_guard lock(mutex);
     const auto now = scope_now();
     const auto source = sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(viewport));
+    // A tick slightly ahead of this read (another thread's) is fresh.
     for (const auto &view : evaluations[provider_index(provider_kind::streamline)].views)
-      if (view.epoch == epoch && view.viewport == viewport && view.source_id == source && within(view.accepted_tick, now)) return true;
+      if (view.epoch == epoch && view.viewport == viewport && view.source_id == source && view.accepted_tick &&
+          view.accepted_tick >= enabled_tick && view.accepted_sequence > view.missed_sequence &&
+          sunshine_freshness::ahead_tolerant_le(view.accepted_tick, now, sunshine_freshness::fg_silent_ms))
+        return true;
     return false;
+  }
+  void frame_generation_missed(std::uint64_t epoch, std::uint32_t viewport, std::uint64_t sequence) {
+    if (!requested.load() || !epoch || !sequence) return;
+    std::lock_guard lock(mutex);
+    const auto source = sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(viewport));
+    for (auto &view : evaluations[provider_index(provider_kind::streamline)].views)
+      if (view.epoch == epoch && view.viewport == viewport && view.source_id == source)
+        view.missed_sequence = std::max(view.missed_sequence, sequence);
   }
   bool provider_identity(std::uint64_t native, provider_kind &provider, std::uint64_t &source_id) {
     source_id = 0;
@@ -2729,7 +2736,10 @@ namespace sunshine_streamline::depth_capture {
       if (!value.preservation_only && valid_provider(m.provider))
         for (auto &view : evaluations[provider_index(m.provider)].views) {
           if (view.epoch != m.epoch || view.viewport != m.viewport || view.source_id != m.source_id) continue;
-          if (successful && !value.nomination_only && !value.invalid) view.accepted_tick = std::max(view.accepted_tick, m.tick);
+          if (successful && !value.nomination_only && !value.invalid) {
+            view.accepted_tick = std::max(view.accepted_tick, m.tick);
+            view.accepted_sequence = std::max(view.accepted_sequence, m.sequence);
+          }
           if (m.sequence < view.result_sequence) continue;
           view.result_sequence = m.sequence;
           if (successful) view.rejected_since = 0;

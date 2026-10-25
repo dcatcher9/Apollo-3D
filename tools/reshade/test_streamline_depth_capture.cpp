@@ -359,10 +359,12 @@ namespace sunshine_streamline::depth_capture {
         fixture::clear_captures();
       }
       {
-        // An enabled FG scope owns its viewport only while live: within a
-        // second of FG On, or of a recorded copy of its own source that the
-        // API accepted (Assassin's Creed Shadows 10-22 kept FG on with no FG
-        // depth captured, which locked the viewport's SR depth out).
+        // An enabled FG scope owns its viewport only for the frames FG
+        // supplied: while its newest frame outcome is a recorded copy of its
+        // own source that the API accepted since FG On, within a second
+        // (Assassin's Creed Shadows 10-22 kept FG on with no FG depth
+        // captured, which locked the viewport's SR depth out; 10-24 a single
+        // FG copy, or FG On alone, locked it out for a second).
         constexpr std::uint64_t epoch = 7, fg = (1ull << 63) | 2;
         const auto finished = [&](std::uint64_t id, std::uint64_t source, std::uint32_t viewport, std::uint64_t sequence,
             bool successful, bool metadata_only = false) {
@@ -374,7 +376,8 @@ namespace sunshine_streamline::depth_capture {
           return slots[0].finished;
         };
         const auto silent_since = [] { return GetTickCount64() - sunshine_freshness::fg_silent_ms - 1; };
-        if (!frame_generation_scope_live(epoch, 2, GetTickCount64()) || frame_generation_scope_live(epoch, 2, silent_since()) ||
+        // FG On alone owns nothing.
+        if (frame_generation_scope_live(epoch, 2, GetTickCount64()) || frame_generation_scope_live(epoch, 2, silent_since()) ||
             frame_generation_scope_live(epoch, 2, 0)) return false;
         // A refused FG boundary begins an evaluation but accepts no copy.
         begin_evaluation(epoch, 10, 2, provider_kind::streamline, fg, 0);
@@ -394,6 +397,20 @@ namespace sunshine_streamline::depth_capture {
         // An accepted copy of its own source makes it live for a second.
         begin_evaluation(epoch, 14, 2, provider_kind::streamline, fg, 0);
         if (!finished(55, fg, 2, 14, true) || !frame_generation_scope_live(epoch, 2, silent_since())) return false;
+        // A copy accepted before this FG On belongs to an earlier scope.
+        if (frame_generation_scope_live(epoch, 2, GetTickCount64() + 1)) return false;
+        // A newer frame without an FG copy turns it silent at once; another
+        // viewport's miss, or one of an older frame, changes nothing.
+        frame_generation_missed(epoch, 3, 99);
+        frame_generation_missed(epoch, 2, 13);
+        if (!frame_generation_scope_live(epoch, 2, silent_since())) return false;
+        frame_generation_missed(epoch, 2, 15);
+        if (frame_generation_scope_live(epoch, 2, silent_since())) return false;
+        // An accepted copy of a newer frame owns it again; a late miss of an
+        // older frame does not end that.
+        if (!finished(56, fg, 2, 16, true) || !frame_generation_scope_live(epoch, 2, silent_since())) return false;
+        frame_generation_missed(epoch, 2, 15);
+        if (!frame_generation_scope_live(epoch, 2, silent_since())) return false;
         auto &current = evaluations[provider_index(provider_kind::streamline)];
         const auto own = std::find_if(current.views.begin(), current.views.end(), [&](const evaluation_head &head) {
           return head.epoch == epoch && head.viewport == 2 && head.source_id == fg;
@@ -401,9 +418,9 @@ namespace sunshine_streamline::depth_capture {
         if (own == current.views.end() || !own->accepted_tick) return false;
         own->accepted_tick -= sunshine_freshness::fg_silent_ms + 1;
         if (frame_generation_scope_live(epoch, 2, silent_since())) return false;
-        // Without an active capture owner only the first second counts.
+        // Without an active capture owner nothing is live.
         own->accepted_tick = GetTickCount64(); requested = false;
-        if (frame_generation_scope_live(epoch, 2, silent_since()) || !frame_generation_scope_live(epoch, 2, GetTickCount64()))
+        if (frame_generation_scope_live(epoch, 2, silent_since()) || frame_generation_scope_live(epoch, 2, GetTickCount64()))
           return false;
         requested = true; fixture::clear_captures();
       }

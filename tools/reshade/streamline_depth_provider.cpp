@@ -60,8 +60,10 @@ namespace sunshine_streamline::provider {
       std::uint64_t pending_id{}, pending_texture{}, next_sample{};
       bool owns_pass{}, open{}, have_latest{};
       frame_generation_policy source_policy;
-      // The required FG scope was silent at the last Present (logged on change).
+      // The required FG scope was silent at the last Present. Its turns are
+      // counted; the line comes at most every 5 s, naming the newest state.
       bool fg_scope_silent{};
+      std::uint64_t fg_scope_changes{}, fg_scope_logged_changes{}, fg_scope_line_tick{};
       api::resource display_texture{};
       api::resource_view display_view{}, bound_view{};
       sunshine_depth::ready_uniform_cache<api::effect_uniform_variable> depth_ready;
@@ -499,12 +501,14 @@ namespace sunshine_streamline::provider {
   // The silent line names the FG scope's silence (freshness.h) in its text.
   static_assert(sunshine_freshness::fg_silent_ms == 1000);
   void format_frame_generation_scope(char *text, std::size_t size, bool silent, std::uint32_t viewport,
-      std::uint64_t epoch) {
+      std::uint64_t epoch, std::uint64_t changes) {
     std::snprintf(text, size, silent ?
-      "Sunshine Streamline frame generation depth scope: silent viewport=%u epoch=%llu; no FG depth copy was accepted for "
-      "1000 ms, so the viewport's ordinary SR/RR depth may supply depth until the next FG copy" :
-      "Sunshine Streamline frame generation depth scope: live viewport=%u epoch=%llu; FG owns the viewport's depth again",
-      viewport, static_cast<unsigned long long>(epoch));
+      "Sunshine Streamline frame generation depth scope: silent viewport=%u epoch=%llu changes=%llu; its newest frame has "
+      "no accepted FG depth copy (or none came for 1000 ms), so the viewport's ordinary SR/RR depth may supply depth until "
+      "the next FG copy" :
+      "Sunshine Streamline frame generation depth scope: live viewport=%u epoch=%llu changes=%llu; an accepted FG copy "
+      "owns the viewport's depth again",
+      viewport, static_cast<unsigned long long>(epoch), static_cast<unsigned long long>(changes));
   }
   void format_unassociated(char *text, std::size_t size, depth_capture::status status,
       const depth_capture::capture_diagnostic &capture, bool hold, std::uint64_t hold_ms) {
@@ -758,11 +762,21 @@ namespace sunshine_streamline::provider {
     const bool fg_silent = scope.silent;
     const auto &selection = scope.selection;
     // Logged when a required scope turns silent, and when it is live again
-    // (FG Off ends a silent scope without a line of its own).
-    if (fg_silent != std::exchange(data->fg_scope_silent, fg_silent) && (fg_silent || policy.require_frame_generation)) {
-      char text[384]{};
-      format_frame_generation_scope(text, sizeof(text), fg_silent, policy.viewport, policy.epoch);
-      sunshine_log::message(reshade::log::level::info, text);
+    // (FG Off ends a silent scope without a line of its own). A scope turns
+    // at each frame FG supplies or misses, so the line comes at most every
+    // 5 s, naming the newest state and the turns counted so far.
+    if (fg_silent != std::exchange(data->fg_scope_silent, fg_silent) && (fg_silent || policy.require_frame_generation))
+      ++data->fg_scope_changes;
+    if (!policy.require_frame_generation) data->fg_scope_logged_changes = data->fg_scope_changes;
+    if (data->fg_scope_changes != data->fg_scope_logged_changes) {
+      const auto now = GetTickCount64();
+      if (!data->fg_scope_line_tick || now - data->fg_scope_line_tick >= 5000) {
+        char text[384]{};
+        format_frame_generation_scope(text, sizeof(text), fg_silent, policy.viewport, policy.epoch, data->fg_scope_changes);
+        sunshine_log::message(reshade::log::level::info, text);
+        data->fg_scope_logged_changes = data->fg_scope_changes;
+        data->fg_scope_line_tick = now;
+      }
     }
     evidence.fg = fg_source;
     evidence.fg_query = fg_status;

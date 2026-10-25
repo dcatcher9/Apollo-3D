@@ -191,13 +191,15 @@ namespace sunshine_streamline::depth_capture {
     // with the policy provider::begin derives from it (a silent scope selects
     // as without FG). Accepted copies count alike whether a Streamline FG tag
     // or DLSS-G's own NGX evaluation (DLSSG.Depth) supplied them: both are the
-    // viewport's FG source, and the probe begins a live scope's DLSS-G
-    // attempt before its copy, so a refusal withdraws the old one.
+    // viewport's FG source. The scope owns only frames FG supplied: a frame
+    // without an FG copy (frame_generation_missed) newer than the newest
+    // accepted copy makes it silent, and withdraws nothing.
     void frame_generation_scope_rows() {
       enum class fg_copy {
         none,
         accepted,
-        refused_while_live,
+        missed_after_copy,
+        copied_after_miss,
         failed,
         metadata_only,
         other_viewport
@@ -215,11 +217,12 @@ namespace sunshine_streamline::depth_capture {
       };
 
       const row rows[] {
-        {"FG just turned on before its first copy refuses the viewport's SR depth", true, fg_copy::none, true, true, '-', status::unavailable, selection_reason::fg_scope_mismatch},
+        {"FG just turned on before its first copy lets the viewport's SR depth through", true, fg_copy::none, true, false, 'S', status::ready, selection_reason::current_capture},
         {"A silent scope (on for over a second, no accepted FG copy) lets the viewport's SR depth through", false, fg_copy::none, true, false, 'S', status::ready, selection_reason::current_capture},
         {"A silent scope without any API depth supplies nothing", false, fg_copy::none, false, false, '-', status::stale, selection_reason::inactive_views},
         {"An accepted FG copy (tag or DLSS-G) makes the scope live and supplies its depth", false, fg_copy::accepted, true, true, 'F', status::ready, selection_reason::current_capture},
-        {"A live scope's refused attempt withdraws its copy and keeps the scope", false, fg_copy::refused_while_live, true, true, '-', status::unavailable, selection_reason::no_current_nomination},
+        {"A frame missed after the newest accepted copy turns the scope silent and withdraws nothing", false, fg_copy::missed_after_copy, true, false, 'F', status::ready, selection_reason::current_capture},
+        {"An accepted copy of a frame newer than the missed one keeps the scope live", false, fg_copy::copied_after_miss, true, true, 'F', status::ready, selection_reason::current_capture},
         {"A failed FG evaluation is no accepted copy; its attempt still replaced the SR view", false, fg_copy::failed, true, false, '-', status::failed, selection_reason::no_admissible_capture},
         {"A metadata-only FG nomination is no accepted copy", false, fg_copy::metadata_only, true, false, '-', status::unavailable, selection_reason::no_admissible_capture},
         {"Another viewport's accepted FG copy leaves this scope silent and makes Streamline ambiguous", false, fg_copy::other_viewport, true, false, '-', status::ambiguous, selection_reason::ambiguous_views},
@@ -234,8 +237,12 @@ namespace sunshine_streamline::depth_capture {
           auto &value = make(1, provider_kind::streamline, epoch, 2, other ? fg_source | 1 : fg_source, other ? 1 : 0, 0);
           value.nomination_only = r.copy == fg_copy::metadata_only;
           finish(value.id, r.copy != fg_copy::failed);
-          if (r.copy == fg_copy::refused_while_live) {
-            begin_evaluation(epoch, 3, 0, provider_kind::streamline, fg_source, 0);
+          // The copy's frame is sequence 2.
+          if (r.copy == fg_copy::missed_after_copy) {
+            frame_generation_missed(epoch, 0, 3);
+          }
+          if (r.copy == fg_copy::copied_after_miss) {
+            frame_generation_missed(epoch, 0, 1);
           }
           fg = &value;
         }
@@ -285,7 +292,7 @@ namespace sunshine_streamline::depth_capture {
       };
 
       const row rows[] {
-        {"FG just turned on owns depth: NGX records no copy", true, true, fg_copy::none, true},
+        {"FG just turned on before its first copy owns nothing: NGX copies", true, true, fg_copy::none, false},
         {"A live scope (an accepted FG copy within a second) owns depth", true, false, fg_copy::accepted, true},
         {"A silent scope owns nothing: NGX copies", true, false, fg_copy::none, false},
         {"Another viewport's accepted FG copy leaves this scope silent", true, false, fg_copy::other_viewport, false},
@@ -564,6 +571,7 @@ namespace sunshine_streamline::depth_capture {
       association_rejected,
       association_pending,
       evaluation_window,
+      scope_enabled_alone,
       scope_enabled,
       scope_accepted,
       handoff_association,
@@ -694,18 +702,24 @@ namespace sunshine_streamline::depth_capture {
             }
             return evaluation_live(now, window) ? "live" : "silent";
           }
+        case edge_site::scope_enabled_alone:
         case edge_site::scope_enabled:
         case edge_site::scope_accepted:
           {
-            // Viewport 0's FG scope, on the fixed clock.
+            // Viewport 0's FG scope, on the fixed clock: FG turned on age ms
+            // ago, with no copy (alone) or one accepted now; or turned on long
+            // ago with a copy accepted age ms ago.
             const auto now = GetTickCount64();
             scope_clock = now;
             std::uint64_t enabled_tick = now - age;
-            if (site == edge_site::scope_accepted) {
-              enabled_tick = now - sunshine_freshness::fg_silent_ms - 1;
+            if (site != edge_site::scope_enabled_alone) {
               auto &view = views[0];
               view = {epoch, 1, now, fg_source, 0};
-              view.accepted_tick = now - age;
+              view.accepted_tick = now; view.accepted_sequence = 1;
+            }
+            if (site == edge_site::scope_accepted) {
+              enabled_tick = now - sunshine_freshness::fg_silent_ms - 1;
+              views[0].accepted_tick = now - age;
             }
             const bool live = frame_generation_scope_live(epoch, 0, enabled_tick);
             scope_clock = 0;
@@ -776,10 +790,11 @@ namespace sunshine_streamline::depth_capture {
         {"An evaluation exactly the handoff window old is live", e::evaluation_window, 1000, "live"},
         {"An evaluation past the handoff window is not", e::evaluation_window, 1001, "silent"},
         {"An evaluation ahead of the clock is not", e::evaluation_window, -1, "silent"},
-        {"FG turned on exactly the association timeout ago is live", e::scope_enabled, timeout, "live"},
-        {"FG turned on past the association timeout is silent", e::scope_enabled, timeout + 1, "silent"},
-        {"FG turned on by another thread just ahead of this read is live", e::scope_enabled, -1, "live"},
-        {"FG turned on by another thread well ahead of this read is live", e::scope_enabled, -5000, "live"},
+        {"FG turned on just now with no accepted copy is silent", e::scope_enabled_alone, 0, "silent"},
+        {"FG turned on by another thread ahead of this read with no accepted copy is silent", e::scope_enabled_alone, -1, "silent"},
+        {"An FG copy accepted in the tick FG was turned on is live", e::scope_enabled, 0, "live"},
+        {"An FG copy accepted past the association timeout after FG On is live", e::scope_enabled, timeout + 1, "live"},
+        {"An FG copy accepted before FG was turned on (another thread's) is silent", e::scope_enabled, -1, "silent"},
         {"An FG copy accepted exactly the association timeout ago is live", e::scope_accepted, timeout, "live"},
         {"An FG copy accepted past the association timeout is silent", e::scope_accepted, timeout + 1, "silent"},
         {"An FG copy accepted on another thread ahead of this read is live", e::scope_accepted, -1, "live"},

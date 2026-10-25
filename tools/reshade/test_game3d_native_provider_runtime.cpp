@@ -2401,22 +2401,34 @@ namespace {
     // no FG depth tag is copied (here: sent without a command list, whose
     // copy before the frame's Present the same frame's untag cancels, R7)
     // and then untagged, while the same viewport's SR evaluation tags its
-    // own depth with commands. FG owns that viewport's depth only while an
-    // FG copy was accepted within a second; after that its scope is silent
-    // and SR supplies depth. An accepted FG copy takes ownership back at
-    // once, and SR stays shut out while FG copies keep arriving.
+    // own depth with commands. FG owns that viewport's depth only for the
+    // frames it supplied: the first frame without an FG copy turns its scope
+    // silent and SR supplies depth from the next frame, the last FG copy
+    // held meanwhile (until 10-24 the scope stayed live for a second after
+    // its last copy, with neither FG nor SR depth). An accepted FG copy
+    // takes ownership back at once, and SR stays shut out while FG copies
+    // keep arriving.
     void fg_silent_scope() {
       run_script({"silent-scope", 80000, {},
         [&] {
           render_tracked_depth = [this] { fallback_frame(false, true); };
-          const auto silent_start = GetTickCount64();
-          for (std::uint64_t now = silent_start; now - silent_start < 700; now = GetTickCount64()) {
+          const auto losses_before_takeover = readiness_losses();
+          // The first frame's SR evaluation still came while the previous
+          // frame's FG copy owned the viewport, so that Present holds the FG
+          // copy; the second frame's SR copy is that Present's fresh depth.
+          // The placement controller keys its calibration by logical source
+          // (projection domain), so it settles on SR's after the switch, as at
+          // any FG/SR switch; the provider's depth never lapses meanwhile.
+          for (unsigned frame = 0; frame != 2; ++frame) {
             present_frame(); const auto s = inspect();
-            require(!(s.ready() && s.source.ready && !s.source.frame_generation_input && !s.source.reused_depth),
-              "SR depth replaced FG within a second of its last accepted FG copy");
+            log_status(frame ? "SLFG-silent-scope-second-frame" : "SLFG-silent-scope-first-frame", s);
+            require(s.source.selected && s.source.ready && s.source.reused_depth == !frame &&
+                s.source.frame_generation_input == !frame,
+              frame ? "SR did not supply the second frame without an FG copy" :
+                "The first frame without an FG copy did not hold the last FG copy");
           }
           settle_route("SLFG-silent-scope-SR-depth", false);
-          require(GetTickCount64() - silent_start >= 1000, "SR took the viewport's depth before the FG scope fell silent");
+          require(readiness_losses() == losses_before_takeover, "SR's takeover of a viewport without FG copies lost depth");
           require(reshade_log_contains({"Sunshine Streamline frame generation depth scope: silent viewport=0"}) &&
               reshade_log_number_above("Sunshine Streamline deferred tag copies:", "cancelled_by_untag=", 0),
             "The silent FG scope or its untag-cancelled deferred copies were not logged");
@@ -2450,6 +2462,37 @@ namespace {
           silent_cadence("SLFG-silent-scope-SR-foreground-again-2x", 1);
           require(readiness_losses() == losses_before_cadence,
             "Silent-scope generated Presents logged a readiness loss or a reuse invalidation");
+          // Assassin's Creed Shadows (10-24): a single accepted FG copy amid
+          // frames without one. Its frame shows it; the next frame (its SR
+          // evaluation came while that copy owned the viewport) holds it, and
+          // the one after shows SR depth again. A single copy grants no
+          // second of FG ownership, which then had neither FG nor SR depth.
+          const auto losses_before_stray = readiness_losses();
+          unsigned unrendered = 0;
+          for (unsigned round = 0; round != 4; ++round) {
+            render_tracked_depth = [this] { fallback_frame(true, true); };
+            present_frame(); const auto stray = inspect();
+            if (!round) log_status("SLFG-stray-FG-copy", stray);
+            require(stray.source.selected && stray.source.ready && !stray.source.reused_depth &&
+                stray.source.frame_generation_input, "A frame's accepted FG copy did not show at its Present");
+            render_tracked_depth = [this] { fallback_frame(false, true); };
+            present_frame(); const auto held = inspect();
+            require(held.source.ready && held.source.reused_depth && held.source.current.capture == stray.source.current.capture,
+              "The frame after a single FG copy did not hold it");
+            present_frame(); const auto back = inspect();
+            if (!round) log_status("SLFG-stray-FG-copy-SR-again", back);
+            require(back.source.selected && back.source.ready && !back.source.reused_depth && !back.source.frame_generation_input,
+              "SR did not supply the second frame after a single FG copy");
+            unrendered += unsigned(!stray.ready()) + unsigned(!held.ready()) + unsigned(!back.ready());
+          }
+          require(readiness_losses() == losses_before_stray, "A single FG copy amid frames without one lost depth");
+          // Each switch restarts the placement controller's calibration of the
+          // other logical source (projection domain), as any FG/SR switch
+          // does; it settles on SR again.
+          std::printf("MEASURE native-provider SLFG-stray-FG-copy presents=12 unrendered_while_placement_settles=%u\n", unrendered);
+          settle_route("SLFG-stray-FG-copy-settled", false);
+          std::puts("PASS native SLFG single copy: one accepted FG copy amid frames without one shows at its Present, is held "
+            "one frame and SR depth returns at the next; no readiness loss; no FX");
         },
         [&] {
           render_tracked_depth = [this] { fallback_frame(true, true); };
@@ -2775,7 +2818,7 @@ namespace {
                 "The frame record named an API rung delivering for a silent scope");
           }
           require_records_match_log("SLFG-silent-scope");
-          std::puts("PASS native SLFG scope: refused FG tags let the same viewport's SR depth through after a second, never before; an accepted FG copy owns the viewport again and SR stays out; with no SR the silent scope stays mono, never generic; no FX");
+          std::puts("PASS native SLFG scope: a frame without an FG copy lets the same viewport's SR depth through from the next frame without a readiness loss; an accepted FG copy owns the viewport again and SR stays out; with no SR the silent scope stays mono, never generic; no FX");
         }, {}});
     }
 
