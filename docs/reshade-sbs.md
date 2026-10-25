@@ -2366,7 +2366,8 @@ acknowledgement; local retired storage may be reused. This storage distinction d
 the resource-state policy. The declaration fallback still needs live game/headset acceptance.
 Each adapter's state, proof and lifetime come from its API's one mapper in
 [`api_contract.h`](../tools/reshade/api_contract.h): Streamline tags (depth and UI alike; an
-`OnlyValidNow` tag holds only at its own tag call, the one difference between the two readings),
+`OnlyValidNow` tag holds only inside the call that supplied it, its tag call or, for a local input,
+its evaluate (`copied_at`), the one difference between the two readings),
 NGX evaluation inputs, DLSS-G's own inputs and the Generic copy. Dump 3D's optional UI copies
 have their own, stricter mapper there (`dump::ui_copy`): a declared 0 needs an observed state for
 every Streamline version, as an NGX input (which declares none) does, and a 1.x tag or an NGX input
@@ -3958,7 +3959,8 @@ add-on already behaved so). Expedition 33, Stellar Blade (10-22) and Hogwarts Le
 their depth this way, `OnlyValidNow` with a declared `0x60`
 (`Sunshine Streamline zero-base resource compatibility: ... state=0x60 state_proof=declared`).
 For volatile `OnlyValidNow` depth, a copy is recorded on the supplied command list during the tag
-call, through the same snapshot owner as all other sources. Normal GPU ordering completes it;
+call, or, for a local input (a tag passed in `slEvaluateFeature`'s inputs), on the evaluate's
+command list during that evaluate, through the same snapshot owner as all other sources. Normal GPU ordering completes it;
 there is no CPU wait. It cannot use a later Generic preservation opportunity.
 The shared snapshot owner also orders its injected source read before restoring a shader-read or
 COMMON state: it transitions through COPY_DEST and then restores the exact original state,
@@ -4421,8 +4423,12 @@ ignored, and the first one is logged (`declared resource size ... differs from t
 Without an extent a declared size must be the allocation's own (`malformed` otherwise), and an
 undeclared size takes the retained allocation's for the jitter denominator (an absent extent is the
 whole allocation: `normalized_extent` in [`api_contract.h`](../tools/reshade/api_contract.h)).
-Evaluation-bound native capture declines OnlyValidNow;
-the synchronous v2 tag boundary supports it with or without FG. Native capture still declines
+Native capture copies an `OnlyValidNow` tag only inside the call that supplied it: the synchronous
+v2 tag boundary, with or without FG, or the evaluate a local input came with, where `sl_core_api.h`
+makes local tags current ("they are considered to be a 'local' tags and do NOT interact with same
+tags sent in the global scope"; `copied_at` in [`api_contract.h`](../tools/reshade/api_contract.h),
+the API contract matrix's S4, since Stage 3 batch B; before, a local `OnlyValidNow` input was
+refused as `not-valid-until-present`). A later evaluation declines a tagged `OnlyValidNow` resource. Native capture still declines
 unknown depth encodings, unknown resource states or layouts and ambiguous viewports. One rule
 ([`depth_view_format.h`](../tools/reshade/depth_view_format.h)), shared by the capture, the
 content sampler and the V1.1.1 adapter, stores a depth input in its typeless family and names the

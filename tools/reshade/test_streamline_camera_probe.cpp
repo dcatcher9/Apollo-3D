@@ -1591,7 +1591,14 @@ namespace {
       "linear UntilEvaluate was not available at its synchronous boundary");
     call_v2_evaluate(1001, token.ref(), global, 1, nullptr);
     require(!testing::normalized_source(view.value, 2, normalized), "linear UntilEvaluate survived its SDK return");
+    // A local OnlyValidNow input is current at its own evaluate (sl_core_api.h
+    // slEvaluateFeature, the matrix's S4); a tagged one is gone at a later
+    // evaluate (S3).
     tag.lifecycle = 0; call_v2_evaluate(1001, token.ref(), local, 2, nullptr);
+    require(testing::normalized_source(view.value, 2, normalized) &&
+        normalized.valid_until == sunshine_scene_depth::lifetime::at_call,
+      "a linear OnlyValidNow local input was not current at its own evaluate");
+    call_v2_tag(view, &tag, 1, &commands); call_v2_evaluate(1001, token.ref(), global, 1, nullptr);
     require(!testing::normalized_source(view.value, 2, normalized), "linear OnlyValidNow was consumed at a later evaluation");
     tag.lifecycle = 1; tag.base.next = &precision; precision.scale = 0;
     call_v2_evaluate(1001, token.ref(), local, 2, nullptr);

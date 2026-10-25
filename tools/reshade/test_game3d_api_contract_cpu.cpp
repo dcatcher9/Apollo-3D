@@ -1515,7 +1515,10 @@ namespace {
       }
       const auto &frame = run.frame;
       const bool at_call = run.snapshot.tag_boundary;
-      const bool forced = at_call && frame.valid_until == lifetime::at_call;
+      // force_snapshot (nominate_depth_source): an OnlyValidNow tag inside the
+      // call that supplied it, its tag call or the evaluate it is a local
+      // input of (S4).
+      const bool forced = frame.valid_until == lifetime::at_call;
       auto proof = frame.proof;
       if (at_call && frame.frame_generation_input) {
         // Where a frame-generation tag call copies its tag (R2,

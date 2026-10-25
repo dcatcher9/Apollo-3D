@@ -64,6 +64,20 @@ namespace {
      lifetime::unsupported},
   };
 
+  // Where an observation that reads a tag copies it: inside the call that
+  // supplied it, which for a local input is its evaluate (S4).
+  struct copied_at_row {
+    const char *pins;
+    bool tag_call, local;
+    copy_point expected;
+  };
+
+  constexpr copied_at_row copied_ats[] {
+    {"A tag call copies its tags inside the call", true, false, copy_point::tag_call},
+    {"An evaluate copies a local input inside the call that supplied it (S4)", false, true, copy_point::tag_call},
+    {"An evaluate copies a global or frame tag at a later evaluate", false, false, copy_point::evaluate},
+  };
+
   // Resource::state and what proves it.
   struct proof_row {
     const char *pins;
@@ -229,6 +243,14 @@ int main() {
     require(streamline::proof(tag) == row.expected, row.pins);
   }
   for (const auto &row : matched) require(streamline::lifecycle_at(row.lifecycle, row.at) == row.expected, row.pins);
+  for (const auto &row : copied_ats) require(streamline::copied_at(row.tag_call, row.local) == row.expected, row.pins);
+  {
+    streamline::tag_declaration tag;
+    tag.lifecycle = streamline::only_valid_now;
+    require(streamline::valid_until(tag, streamline::copied_at(false, true)) == lifetime::at_call &&
+              streamline::lifecycle_at(tag.lifecycle, streamline::copied_at(false, true)) == streamline::valid_until_present,
+      "An OnlyValidNow local input holds inside its own evaluate, where match() admits it (S4)");
+  }
   for (const auto &row : tag_call_copies)
     require(streamline::deferred_copy(row.lifecycle, row.command_list, row.recorded) == row.expected, row.pins);
   for (const auto &row : tag_call_proofs)
@@ -298,8 +320,9 @@ int main() {
     std::fprintf(stderr, "API contract: %u cells changed\n", failures);
     return 1;
   }
-  std::printf("PASS API contract: %zu lifetime, %zu proof, %zu matched-lifecycle, %zu tag-call copy, %zu untag and %zu "
-    "Dump 3D rows, the defined lifecycles, each API's contract and the whole-allocation extent\n", std::size(lifetimes),
-    std::size(proofs), std::size(matched), std::size(tag_call_copies), std::size(untags), std::size(dumps));
+  std::printf("PASS API contract: %zu lifetime, %zu proof, %zu matched-lifecycle, %zu copy-point, %zu tag-call copy, %zu "
+    "untag and %zu Dump 3D rows, the defined lifecycles, each API's contract and the whole-allocation extent\n",
+    std::size(lifetimes), std::size(proofs), std::size(matched), std::size(copied_ats), std::size(tag_call_copies),
+    std::size(untags), std::size(dumps));
   return 0;
 }

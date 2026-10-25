@@ -1445,14 +1445,16 @@ the add-on was tuned on; and one row per owner question the known-gap table held
 S24, since decided from the SDK headers). A changing extent runs two render
 sizes and must keep one logical source. NGX cases go through the evaluation adapter over every
 combination of its dimensions, DLSS-G's own `DLSSG.*` inputs included. The admission checks the
-layer cannot run without a device (the copy's command list and its lifetime: inside the tag call,
-at an evaluation of the tag's own frame as the probe reports it, or with no Present since; where an
+layer cannot run without a device (the copy's command list and its lifetime: inside the call that
+supplied the tag, a tag call or the evaluate a local input came with, at an evaluation of the tag's
+own frame as the probe reports it, or with no Present since; where an
 FG tag call copies its tag, `deferred_copy` in [`api_contract.h`](api_contract.h) over the case's
 recorded state with `tag_call_proof` for the copy made there, and the frame's untag that cancels a
 copy deferred to its Present, R2, S11 and R7; and DLSS-G's observed-state nomination) are repeated
 from the capture owner; the device and runtime layers replace them. A known gap that such a repeat
 decides closes only when its fix changes the repeat in the same commit, as S7's (the lifetime at
-the tag's own frame's Present) and S11's (the proof at the tag call) did.
+the tag's own frame's Present), S11's (the proof at the tag call) and S4's (an `OnlyValidNow` local
+input inside its own evaluate) did.
 [`test_contract_matrix_generator.h`](test_contract_matrix_generator.h) builds the cases: a case id
 hashes its non-default assignment, so adding a value renames no case. The executable takes
 `--list`, `--case <id>` or `--case <sl|ngx>:<name=value,...>` (one case, described; an illegal

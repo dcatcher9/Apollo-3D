@@ -120,13 +120,6 @@ namespace game3d_contract::known_gaps {
       return legal(value) && (expected.kind == outcome_kind::capture || expected.kind == outcome_kind::continuous) && !either(expected);
     }
 
-    // The probe promotes lifecycle 0 to its tag call only; an OnlyValidNow
-    // evaluate input fails match() as not-valid-until-present.
-    constexpr bool local_only_valid_now(const sl_case &value) {
-      return value.entry == tag_entry::local_array && value.life == lifecycle::only_valid_now && value.at == copy_point::same_frame_evaluate &&
-             capture_required(value);
-    }
-
     // A tag whose next pointer continues the input chain is read as carrying
     // an unknown extension.
     constexpr bool chained_local(const sl_case &value) {
@@ -145,8 +138,7 @@ namespace game3d_contract::known_gaps {
   }  // namespace streamline
 
   inline constexpr row<sl_case> sl_rows[] {
-    {"S4", &rules::S4, kind::expected_failure, &streamline::local_only_valid_now, "Stage 3 fix 8 (S4/S15). A local tag is current at its own evaluate (SLA:258-262): in tag_rejection (streamline_camera_probe.cpp) promote an OnlyValidNow evaluate input as the tag call's is, and copy it at that evaluate when it has a command list. Fix with S15 (both in read_local_inputs/tag_rejection).", &behaviours::no_copy},
-    {"S15", &rules::S15, kind::expected_failure, &streamline::chained_local, "Stage 3 fix 8 (S4/S15). In read_local_inputs, decode a chained tag with its next pointer cleared (as the viewport already is), treating a PrecisionInfo node as the preceding tag's; fix with S4.", &behaviours::no_copy},
+    {"S15", &rules::S15, kind::expected_failure, &streamline::chained_local, "Stage 3 fix 8 (S4/S15). In read_local_inputs, decode a chained tag with its next pointer cleared (as the viewport already is), treating a PrecisionInfo node as the preceding tag's.", &behaviours::no_copy},
     {"S16", &rules::S16, kind::expected_failure, &streamline::zero_sided_extent, "Stage 3 fix 12 (S16). Use Streamline's whole-resource rule !(width && height) (sl_consts.h:150) in match() (streamline_camera_data.cpp) and source_region (streamline_depth_capture.cpp).", &behaviours::no_copy},
     {"S16d", &rules::S16d, kind::expected_failure, &streamline::declared_size, "Stage 3 fix 12 (S16). Drop the declared Resource size check from match(); the capture already bounds the extent by the allocation (source_region).", &behaviours::no_copy},
   };
@@ -193,20 +185,6 @@ namespace game3d_contract::known_gaps {
 
   // The runtime layer's cells (judged at Present).
   namespace present {
-    // An OnlyValidNow evaluate input (S4) of a release the add-on hooks that
-    // the oracle refuses (or may refuse) for another class is refused first
-    // for its lifecycle.
-    constexpr bool local_only_valid_now_refused(const present_case &value) {
-      const auto &cell = value.decided;
-      const auto expected = expect(cell);
-      return legal(cell) && cell.version.major == 2 && cell.entry == tag_entry::local_array && cell.life == lifecycle::only_valid_now &&
-             cell.at == copy_point::same_frame_evaluate && permits(expected, outcome_kind::refuse) && expected.why != refusal::lifetime;
-    }
-
-    constexpr bool local_only_valid_now(const present_case &value) {
-      return streamline::local_only_valid_now(value.decided);
-    }
-
     // A refusal the runtime layer requires the add-on to record: the oracle
     // refuses alone, for a class a reached copy point decides, and no SDK
     // call of the case failed (S21b discards that copy unread).
@@ -273,8 +251,6 @@ namespace game3d_contract::known_gaps {
   // same gap; that row's note holds the fix.
   inline constexpr row<present_case> sl_runtime_rows[] {
     {"S1-evaluate", &rules::S1, kind::expected_failure, &present::only_valid_now_then_evaluate, "Outside the Stage 3 order, which predates this finding: it reworks the tag-to-evaluate path fix 2 (S6 + S7) changes, so it fits beside it. Found by the runtime layer: an OnlyValidNow global tag outside FG scope is copied at its call, but the same frame's evaluate refuses the tag (match(): not-valid-until-present, S3) and that frame's Present then shows no depth (mono), or only between generated Presents. S3 is right that the evaluate may not use the tag; it must not cost the frame the copy its tag call made (S1). Today the refused evaluate begins a new evaluation of the viewport with no copy (streamline_camera_probe.cpp nominate_depth_source, withdraw_invalid_attempt -> depth_capture::begin_evaluation), which supersedes the tag call's. Keep a tag-call copy when a later point of its frame refuses the same tag for its lifetime. The hook layer judges one copy point per cell, so only a Present shows this.", &behaviours::no_copy},
-    {"S4-refusal", &rules::S4, kind::expected_failure, &present::local_only_valid_now_refused, "Stage 3 fix 8 (S4/S15). With the hook table's S4 row: an OnlyValidNow evaluate input that the oracle refuses, or may refuse, for another class (its state, its extent) is refused first as not-valid-until-present (lifetime). Promoting the input at its own evaluate closes this row.", &behaviours::refused_as<refusal::lifetime>},
-    {"S4", &rules::S4, kind::expected_failure, &present::local_only_valid_now, "Stage 3 fix 8 (S4/S15). As the hook table's S4 row: the evaluate input is refused as not valid until present (lifetime).", &behaviours::refused_as<refusal::lifetime>},
     {"S15", &rules::S15, kind::expected_failure, &present::chained_local, "Stage 3 fix 8 (S4/S15). As the hook table's S15 row.", &behaviours::no_copy},
     {"S15-refusal", &rules::S15, kind::expected_failure, &present::chained_local_refused, "Stage 3 fix 8 (S4/S15). With S15: the chained input is not read, so a cell the oracle refuses for its state or extent records only missing-depth (absent), no contract class.", &behaviours::no_copy},
     {"S16", &rules::S16, kind::expected_failure, &present::zero_sided_extent, "Stage 3 fix 12 (S16). As the hook table's S16 row.", &behaviours::no_copy},

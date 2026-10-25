@@ -55,13 +55,22 @@ namespace sunshine_api_contract {
     constexpr bool defined_lifecycle(std::uint32_t lifecycle) {
       return lifecycle <= valid_until_evaluate;
     }
-    // Where the copy is made. OnlyValidNow holds only inside the tag call that
-    // supplied it: a UI tag is copied there (tag_call), while depth is also
-    // copied at a later evaluate (evaluate), where an OnlyValidNow resource is
-    // gone. A ValidUntilPresent tag may also be copied on the Present queue
-    // right before its frame's Present (present, deferred_copy below), where
-    // its declared state is exact.
+    // Where the copy is made. OnlyValidNow holds only inside the call that
+    // supplied the tag (tag_call): its tag call, or for a local tag the
+    // evaluate it is an input of. A UI tag is copied there, while depth is
+    // also copied at a later evaluate (evaluate), where an OnlyValidNow
+    // resource is gone. A ValidUntilPresent tag may also be copied on the
+    // Present queue right before its frame's Present (present, deferred_copy
+    // below), where its declared state is exact.
     enum class copy_point : std::uint8_t { tag_call, evaluate, present };
+    // Where an observation that reads a tag copies it: inside a tag call, and
+    // inside the evaluate a local tag came with, since local tags "do NOT
+    // interact with" global ones and are current at that evaluate
+    // (sl_core_api.h slEvaluateFeature, SLA:258-262; the matrix's S4); a
+    // global tag at an evaluate is copied at a later evaluate.
+    constexpr copy_point copied_at(bool tag_call, bool local) {
+      return tag_call || local ? copy_point::tag_call : copy_point::evaluate;
+    }
 
     // A tag as the probe read it.
     struct tag_declaration {
@@ -86,8 +95,8 @@ namespace sunshine_api_contract {
       return tag.state != UINT32_MAX ? state_proof::declared : state_proof::unavailable;
     }
     // ValidUntilPresent (and a 1.x tag) until Present, ValidUntilEvaluate
-    // until its evaluation, OnlyValidNow at its own tag call only; anything
-    // else, and an unsupported tag, is unsupported.
+    // until its evaluation, OnlyValidNow inside the call that supplied it
+    // only (tag_call); anything else, and an unsupported tag, is unsupported.
     constexpr lifetime valid_until(const tag_declaration &tag, copy_point at) {
       if (!tag.supported) return lifetime::unsupported;
       if (tag.version_one || tag.lifecycle == valid_until_present) return lifetime::until_present;
@@ -141,7 +150,7 @@ namespace sunshine_api_contract {
     // The lifecycle match() (streamline_camera_data.cpp) judges at a copy
     // point. It admits a lifetime that lasts until Present (and a 1.x tag's
     // none), so a 2.x lifetime that holds only at this copy point (UntilEvaluate,
-    // or OnlyValidNow at its tag call) reads as ValidUntilPresent; any other
+    // or OnlyValidNow inside its call) reads as ValidUntilPresent; any other
     // is unchanged, and match() refuses it. The published lifetime is never
     // promoted.
     constexpr std::uint32_t lifecycle_at(std::uint32_t lifecycle, copy_point at) {

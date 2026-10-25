@@ -1707,10 +1707,11 @@ namespace sunshine_streamline {
       return snapshot.loss_revision == loss_revision.load(std::memory_order_acquire) ? nullptr : "observation_lost";
     }
     bool direct_source_admissible(const evaluation_snapshot &snapshot) { return !source_rejection(snapshot); }
-    // Where this observation copies a depth tag: inside the tag call itself (a
-    // tag boundary) or at a later evaluate.
-    sl_contract::copy_point copy_point(const evaluation_snapshot &snapshot) {
-      return snapshot.tag_boundary ? sl_contract::copy_point::tag_call : sl_contract::copy_point::evaluate;
+    // Where this observation copies a depth tag (sl_contract::copied_at):
+    // inside the call that supplied it (a tag boundary, or the evaluate a
+    // local input came with) or at a later evaluate.
+    sl_contract::copy_point copy_point(const evaluation_snapshot &snapshot, const evaluated_depth_tag &tag) {
+      return sl_contract::copied_at(snapshot.tag_boundary, tag.scope == tag_scope::evaluation_local);
     }
     // A tag's declaration as api_contract.h reads it. version_one: a 1.x
     // evaluate's tag, whose state 0 is chi eUnknown.
@@ -1748,9 +1749,10 @@ namespace sunshine_streamline {
           (!snapshot.tag_boundary || tag.scope != tag_scope::active_global || tag.value.lifecycle != sl_contract::only_valid_now))
         return "constants_call_frame";
       // UntilEvaluate is usable at this synchronous boundary only, and
-      // OnlyValidNow at its tag boundary only (sl_contract::lifecycle_at).
+      // OnlyValidNow inside the call that supplied it only: its tag boundary,
+      // or the evaluate it is a local input of (sl_contract::lifecycle_at).
       auto at_evaluation = tag.value;
-      at_evaluation.lifecycle = sl_contract::lifecycle_at(tag.value.lifecycle, copy_point(snapshot));
+      at_evaluation.lifecycle = sl_contract::lifecycle_at(tag.value.lifecycle, copy_point(snapshot, tag));
       const auto matched = match({snapshot.viewport, snapshot.epoch, 0, false}, at_evaluation);
       return matched == match_status::same_epoch_only ? nullptr : name(matched);
     }
@@ -1868,7 +1870,7 @@ namespace sunshine_streamline {
         {tag.value.area.left, tag.value.area.top, tag.value.area.width, tag.value.area.height},
         tag.value.type == buffers::high_resolution_depth ? sunshine_scene_depth::resource_kind::display_depth :
           sunshine_scene_depth::resource_kind::raw_depth, tag.value.native_format};
-      sunshine_api_contract::apply(sl_contract::map(declaration(tag, version_one), copy_point(snapshot)), value);
+      sunshine_api_contract::apply(sl_contract::map(declaration(tag, version_one), copy_point(snapshot, tag)), value);
       return value;
     }
     // A viewport's depth route under FG: none (FG not enabled), owned by its
@@ -2054,7 +2056,9 @@ namespace sunshine_streamline {
         value.source = tag.direct_source;
         value.source_present_generation = tag.source_present_generation;
         value.force_snapshot = value.valid_until == sunshine_scene_depth::lifetime::at_call;
-        value.at_tag_call = snapshot.tag_boundary;
+        // Inside the call that supplied the tag, a local input's evaluate
+        // included: no Present can come between (source_lifetime_current).
+        value.at_tag_call = copy_point(snapshot, tag) == sl_contract::copy_point::tag_call;
         value.own_frame = tag.own_frame;
         v1_resource_state::read_details state_details;
         const auto state = v1_resource_state::resolve(value.native_state, version_one,
