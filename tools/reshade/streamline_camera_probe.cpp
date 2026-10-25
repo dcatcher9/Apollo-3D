@@ -280,9 +280,10 @@ namespace sunshine_streamline {
     // api_contract.h deferred_copy; the matrix's S6, S11b and U2): per
     // viewport, the newest frame's frame-generation depth candidates (in
     // priority order) and UI tags that their tag call could not copy.
-    // present_deferred makes them at the first Present after that frame's
-    // work was submitted (depth_capture::game_executions), or drops them.
-    // Guarded by evaluation_supply_lock; deferral_pending counts used entries.
+    // present_deferred makes them at that frame's Present (the first after its
+    // work was submitted, or under frame generation after DLSS-G evaluated
+    // it), or drops them. Guarded by evaluation_supply_lock; deferral_pending
+    // counts used entries.
     struct deferred_depth {
       std::array<depth_capture::input, depth_priority.size()> candidates;
       std::size_t count{};
@@ -295,7 +296,9 @@ namespace sunshine_streamline {
     };
     struct deferred_frame {
       bool used{};
-      std::uint64_t observation{}, epoch{}, serial{}, tick{}, executions{};
+      // executions and evaluations: the game executions and DLSS-G
+      // evaluations (fg_evaluation) counted at the frame's newest tag call.
+      std::uint64_t observation{}, epoch{}, serial{}, tick{}, executions{}, evaluations{};
       std::uint32_t viewport{};
       // The frame the tag call named (tag_frame); unavailable when none.
       frame_identity frame;
@@ -304,10 +307,20 @@ namespace sunshine_streamline {
     };
     std::array<deferred_frame, slot_count> deferred_frames{};
     std::atomic<unsigned> deferral_pending{};
+    // DLSS-G's NGX evaluations of a real frame (observe_frame_generation_inputs
+    // with an FG scope): their count, and the newest one's scope and tick.
+    // DLSS-G evaluates a frame in that frame's Present, so under frame
+    // generation a Present after an evaluation that followed a tag call is
+    // the tag's frame's (or a later one's); a Present before it is an earlier
+    // frame's, paced or generated. Guarded by evaluation_supply_lock.
+    struct { std::uint64_t count{}, epoch{}, tick{}; std::uint32_t viewport{}; } fg_evaluation;
     // Totals for the bounded deferral line (report_deferrals).
     struct {
       std::atomic<std::uint64_t> depth{}, ui{}, depth_copied{}, ui_copied{}, depth_refused{}, ui_refused{}, cancelled{},
         lapsed{};
+      // Presents at which a pending deferral of a frame-generating viewport
+      // was not yet its frame's (an earlier frame's Present).
+      std::atomic<std::uint64_t> waited{};
       std::atomic<unsigned> refusal{}; // The newest refused depth copy's record_stage.
     } deferrals;
     std::atomic<std::uint64_t> next_deferral_report{}, reported_deferrals{};
@@ -2361,9 +2374,9 @@ namespace sunshine_streamline {
       char text[640]{};
       std::snprintf(text, sizeof(text),
         "Sunshine Streamline deferred tag copies: depth={deferred=%llu copied=%llu refused=%llu last_refusal=%s} "
-        "ui={deferred=%llu copied=%llu refused=%llu} cancelled_by_untag=%llu lapsed=%llu pending=%u; a ValidUntilPresent "
-        "tag whose call has no command list, or a frame-generation input whose call's list records no state of it, is "
-        "copied on the Present queue right before its frame's Present",
+        "ui={deferred=%llu copied=%llu refused=%llu} cancelled_by_untag=%llu lapsed=%llu waited_for_frame=%llu "
+        "pending=%u; a ValidUntilPresent tag whose call has no command list, or a frame-generation input whose call's "
+        "list records no state of it, is copied on the Present queue right before its frame's Present",
         static_cast<unsigned long long>(deferrals.depth.load(std::memory_order_relaxed)),
         static_cast<unsigned long long>(deferrals.depth_copied.load(std::memory_order_relaxed)),
         static_cast<unsigned long long>(deferrals.depth_refused.load(std::memory_order_relaxed)),
@@ -2373,6 +2386,7 @@ namespace sunshine_streamline {
         static_cast<unsigned long long>(deferrals.ui_refused.load(std::memory_order_relaxed)),
         static_cast<unsigned long long>(deferrals.cancelled.load(std::memory_order_relaxed)),
         static_cast<unsigned long long>(deferrals.lapsed.load(std::memory_order_relaxed)),
+        static_cast<unsigned long long>(deferrals.waited.load(std::memory_order_relaxed)),
         deferral_pending.load(std::memory_order_relaxed));
       message(text);
     }
@@ -2470,8 +2484,10 @@ namespace sunshine_streamline {
           entry->used = true; entry->observation = out.observation; entry->epoch = source_epoch;
           entry->viewport = out.viewport; entry->frame = frame;
         }
-        // The frame's newest tag call: its submitted work must follow it.
+        // The frame's newest tag call: its submitted work (and under frame
+        // generation DLSS-G's evaluation of it) must follow it.
         entry->serial = out.serial; entry->tick = out.tick; entry->executions = executions;
+        entry->evaluations = fg_evaluation.count;
         if (depth.count) { entry->depth = std::move(depth); deferrals.depth.fetch_add(1, std::memory_order_relaxed); }
         for (unsigned slot = 0; slot != ui.size(); ++slot) if (ui[slot].used) {
           entry->ui[slot] = std::move(ui[slot]);
@@ -3065,9 +3081,11 @@ namespace sunshine_streamline {
     const DWORD incoming = GetLastError();
     const auto ticket = observation_ticket();
     const auto executions = depth_capture::game_executions();
+    const auto queue_executions = depth_capture::game_executions_on(queue);
     const auto now = GetTickCount64();
     const auto source_epoch = epoch.load(std::memory_order_acquire);
     std::array<deferred_frame, slot_count> due;
+    unsigned waited = 0;
     unsigned due_count = 0;
     struct ended_frame { std::uint64_t epoch{}; std::uint32_t viewport{}; unsigned kinds{}; };
     std::array<ended_frame, slot_count> ended;
@@ -3080,13 +3098,30 @@ namespace sunshine_streamline {
       // age passed, or the viewport's constants named a later frame.
       bool past = !ticket || entry.observation != ticket || entry.epoch != source_epoch ||
         !sunshine_freshness::fresh_lt(entry.tick, now, sunshine_freshness::source_age_ms);
+      // Without the viewport's metadata, frame generation counts as on.
+      bool generating = !pin;
       if (!past && pin) for (const auto &record : pin->records) if (record.used && record.viewport == entry.viewport) {
         past = record.camera_serial > entry.serial && !same_frame(record.camera_frame, entry.frame);
+        generating = record.frame_generation.known && record.frame_generation.enabled;
         break;
       }
-      // No game work submitted since the tag: an earlier frame's Present
-      // (multi frame generation presents them while the game records).
-      if (!past && entry.executions == executions) continue;
+      // Its frame's Present. Without frame generation the game's Present
+      // reaches this one directly, so the first after a game list executed
+      // following the tag (one with none since is an earlier frame's). With
+      // it, earlier frames' Presents (paced or generated) come while the game
+      // submits this frame's work on any queue: the first after DLSS-G
+      // evaluated a frame following the tag, where its evaluations are seen
+      // in this scope; else the first after a game list executed on this
+      // presenting queue since the tag.
+      const bool evaluated = fg_evaluation.tick && fg_evaluation.epoch == entry.epoch &&
+        fg_evaluation.viewport == entry.viewport &&
+        sunshine_freshness::fresh_lt(fg_evaluation.tick, now, sunshine_freshness::source_age_ms);
+      const bool reached = !generating ? entry.executions != executions :
+        evaluated ? entry.evaluations != fg_evaluation.count : queue_executions > entry.executions;
+      if (!past && !reached) {
+        waited += generating;
+        continue;
+      }
       if (past) ended[ended_count++] = {entry.epoch, entry.viewport, deferred_kinds(entry)};
       else due[due_count++] = std::move(entry);
       entry = {};
@@ -3094,6 +3129,7 @@ namespace sunshine_streamline {
     count_deferred();
     ReleaseSRWLockExclusive(&evaluation_supply_lock);
     pin.reset();
+    if (waited) deferrals.waited.fetch_add(waited, std::memory_order_relaxed);
     for (unsigned n = 0; n != ended_count; ++n) {
       deferrals.lapsed.fetch_add(kind_count(ended[n].kinds), std::memory_order_relaxed);
       hand_over(ended[n].epoch, ended[n].viewport, ended[n].kinds);
@@ -3517,6 +3553,10 @@ namespace sunshine_streamline {
     // request's newest boundary compare it with tag sequences).
     const auto serial = ++call_sequence;
     const auto tick = GetTickCount64();
+    // This frame's Present comes next (present_deferred).
+    AcquireSRWLockExclusive(&evaluation_supply_lock);
+    ++fg_evaluation.count; fg_evaluation.epoch = fg.epoch; fg_evaluation.viewport = fg.viewport; fg_evaluation.tick = tick;
+    ReleaseSRWLockExclusive(&evaluation_supply_lock);
     const auto source_id = sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(fg.viewport));
     if (out.depth == depth_outcome::not_offered) {
       if (!value.depth.area_valid) out.depth = depth_outcome::subrect;

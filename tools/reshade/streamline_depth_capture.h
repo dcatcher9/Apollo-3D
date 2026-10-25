@@ -332,6 +332,11 @@ namespace sunshine_streamline::depth_capture {
   // none since is an earlier frame's (multi frame generation presents them
   // while the game records).
   std::uint64_t game_executions();
+  // The newest of those executions (its game_executions() count) on queue,
+  // as the submission hook reports it; 0 when none was recorded there (at
+  // most 8 queues are recorded). Under frame generation a deferred copy
+  // without DLSS-G's evaluations needs one on its presenting queue.
+  std::uint64_t game_executions_on(std::uint64_t queue);
   // A retained source's allocation width and height (false without one).
   bool source_extent(const source_ref &source, std::uint32_t &width, std::uint32_t &height);
   // BEGIN actual native Present: expires future uses of this device's old tags,

@@ -2690,6 +2690,35 @@ namespace {
           settle_route("DLSSG-refused-again-SR-depth", false);
         },
         [&] {
+          // Under frame generation a command-less ValidUntilPresent FG tag
+          // waits for its frame's Present, the first after DLSS-G evaluated
+          // that frame. A Present after the game's work but before that
+          // evaluation (an earlier frame's paced or generated Present, while
+          // the game submits the next frame) does not take its copy.
+          const auto evaluate_only = [&] {
+            require(ngx_evaluate(reinterpret_cast<ID3D12GraphicsCommandList *>(game_native_command), feature, &inputs,
+                nullptr) == ngx_fixture::success, "DLSS-G evaluation observation changed the SDK result");
+          };
+          const auto own_frames = [&] { commandless_fg_frame(); evaluate_only(); };
+          render_tracked_depth = own_frames;
+          settle("DLSSG-commandless-own-Present");
+          for (unsigned frame = 0; frame < 6; ++frame) {
+            render_tracked_depth = [this] { commandless_fg_frame(); };
+            present_frame(); const auto early = inspect();
+            if (!frame) log_status("DLSSG-commandless-earlier-Present", early);
+            require(early.source.reused_depth,
+              "A Present before DLSS-G evaluated a command-less FG tag's frame made that frame's deferred copy");
+            render_tracked_depth = evaluate_only;
+            present_frame(); const auto own = inspect();
+            require(active(own) && !own.source.reused_depth && own.source.frame_generation_input &&
+                own.source.current.capture != early.source.current.capture,
+              "The Present after DLSS-G evaluated a command-less FG tag's frame did not show its deferred copy");
+          }
+          render_tracked_depth = own_frames;
+          require(reshade_log_number_above("Sunshine Streamline deferred tag copies:", "waited_for_frame=", 0),
+            "Presents before a frame's DLSS-G evaluation were not counted as waiting for its Present");
+          std::puts("PASS native DLSS-G frame Present: a command-less FG tag's deferred copy waits through a Present before "
+            "DLSS-G evaluated its frame and is made at the next one; no FX");
           require(ngx_release(feature) == ngx_fixture::success && ngx_fixture::evaluated > evaluations_before,
             "DLSS-G fixture release failed or its evaluations never ran");
           // Accepted FG tag copies own the viewport again, as before this case.

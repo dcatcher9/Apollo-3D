@@ -464,6 +464,11 @@ namespace {
     gpu.reset();
     require(capture::proven_counts().changed_copies == changed + 2, "a copy another queue executed was kept");
     ticket = {};
+    // Each queue records its newest game execution (a copy deferred to its
+    // frame's Present under frame generation needs one on its own queue).
+    require(capture::game_executions_on(other) == capture::game_executions() &&
+        capture::game_executions_on(queue) && capture::game_executions_on(queue) < capture::game_executions(),
+      "the newest game execution per queue was not recorded");
 
     // A list the barrier hooks did not observe (Reset without ReShade's
     // lifecycle) leaves every texture unproven until an observed barrier

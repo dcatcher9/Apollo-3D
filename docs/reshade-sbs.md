@@ -3974,10 +3974,26 @@ call copies a UI tag (HUD-less, Backbuffer, UI colour and alpha, UIAlpha), is
   Any other tag without a command list has no point to copy at (`boundary_without_commands`, S2),
   at its call and at a later evaluate.
 
-A frame's Present is the first one after a game list executed following the tag call (any queue:
-`depth_capture::game_executions`; ReShade's own immediate lists and DXGI's internal Present list do
-not count). A Present with none since is an earlier frame's (multi frame generation presents them
-while the game records), so it neither copies nor ends the deferral (S7). A deferral lapses
+A frame's Present depends on whether the viewport's frame generation is on (its observed
+`slDLSSGSetOptions` mode; without the viewport's metadata it counts as on):
+- Off: the game's Present reaches ReShade's directly, so it is the first Present after a game list
+  executed following the tag call (any queue: `depth_capture::game_executions`; ReShade's own
+  immediate lists and DXGI's internal Present list do not count). A Present with none since is an
+  earlier frame's.
+- On: DLSS-G presents earlier frames (paced real frames and generated ones) on its own queue while
+  the game submits the next frame's work, so a game execution proves nothing. DLSS-G evaluates a
+  frame inside that frame's Present: where its NGX evaluations are observed in the deferral's scope
+  (one within the source age), the frame's Present is the first after an evaluation that followed
+  the tag call. Without them it is the first after a game list executed on the presenting queue
+  itself since the tag call (`depth_capture::game_executions_on`, at most 8 queues recorded), which
+  a game presenting on another queue never satisfies, so its deferrals lapse.
+
+An earlier frame's Present neither copies nor ends the deferral (S7); under frame generation it is
+counted (`waited_for_frame`). Without a frame token the frame a global tag names is the viewport's
+newest constants when they came first; a game that sets its constants after the tag therefore gets
+the previous frame's (or none), and its deferral lapses at the frame's constants: the candidate's
+camera evidence was taken at the tag call, before that frame's constants, so copying it at the
+frame's Present would pair one frame's depth with the previous frame's camera. A deferral lapses
 (`lapsed`) when the source age passes, the observation changes, the viewport's constants name a
 later frame, or another frame's tag call of the viewport replaces it. A null untag of the viewport
 (a null Resource or native) cancels it (`cancelled_by_untag`, owner ruling R7, `untag_cancels`):
@@ -3986,7 +4002,8 @@ whose tag had no frame, cancels it; an untag of another frame leaves it. A cance
 deferral hands its kinds back to DLSS-G's own evaluation at once. The bounded line
 `Sunshine Streamline deferred tag copies: depth={deferred=<n> copied=<n> refused=<n>
 last_refusal=<stage>} ui={deferred=<n> copied=<n> refused=<n>} cancelled_by_untag=<n> lapsed=<n>
-pending=<n>` (at most every 5 s, after its totals changed) counts them since start.
+waited_for_frame=<n> pending=<n>` (at most every 5 s, after its totals changed) counts them since
+start.
 Known affine `PrecisionInfo` extensions are decoded. For device depth their scale/bias are reflected
 in the texture-space projection coefficients and valid stored-depth range. For tag49 they recover
 positive view distance before reciprocal-depth reconstruction. Changing only the storage encoding

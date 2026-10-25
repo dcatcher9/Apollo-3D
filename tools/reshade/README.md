@@ -889,7 +889,10 @@ with the game's command list keep precedence per kind: across two NGX lines `dls
 captures nothing more while its `tag_copied` grows, and a later UI capture gate window still counts
 the tags' own same-batch pairs; untagged in their frame again, DLSS-G's inputs are captured again. An FG tag sent with a
 command list copies the frame first and keeps precedence (`tag_copied`); refused again, SR depth
-returns.
+returns. Last, with the FG depth tag command-less and not untagged, a frame whose Present comes
+after the game's work but before DLSS-G evaluated it (an earlier frame's paced or generated Present)
+keeps its copy deferred (the Present holds the previous depth, `waited_for_frame` counts it); the
+next Present, after that evaluation, shows the frame's own copy.
 It injects no captured pixels, readiness or GPU completion.
 Each FG case is a frame script: a warm-up that presents until the case's starting state holds, the
 stimulus whose frames it judges, and a recovery to the fixture's control, with the per-frame SDK calls

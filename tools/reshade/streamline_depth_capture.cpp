@@ -1517,6 +1517,22 @@ namespace sunshine_streamline::depth_capture {
       }
     }
     std::atomic<std::uint64_t> game_execution_count{};
+    // The newest game execution (its game_execution_count) per queue, as the
+    // submission hook reports it. Bounded and lock-free: a queue beyond these
+    // records none, so a deferred copy that needs it waits for DLSS-G's
+    // evaluation or lapses.
+    struct queue_execution { std::atomic<std::uint64_t> queue{}, newest{}; };
+    std::array<queue_execution, 8> queue_executions{};
+    void note_queue_execution(std::uint64_t queue, std::uint64_t newest) {
+      for (auto &slot : queue_executions) {
+        auto current = slot.queue.load(std::memory_order_acquire);
+        if (!current && slot.queue.compare_exchange_strong(current, queue, std::memory_order_acq_rel)) current = queue;
+        if (current != queue) continue;
+        auto value = slot.newest.load(std::memory_order_relaxed);
+        while (value < newest && !slot.newest.compare_exchange_weak(value, newest, std::memory_order_acq_rel)) {}
+        return;
+      }
+    }
     void observed_submission(std::uint64_t queue, std::uint32_t count, const native_observer::command_identity *values) {
       submitted(queue, count, values);
       // ReShade resets its own list right after submitting it: the submitted
@@ -1527,7 +1543,7 @@ namespace sunshine_streamline::depth_capture {
         if (runtime_list(values[i].native_command))
           try { lifecycle_recording(values[i].native_command, list_event::reset); } catch (...) {}
         else if (values[i].recording_cookie) game = true;
-      if (game) game_execution_count.fetch_add(1, std::memory_order_acq_rel);
+      if (game) note_queue_execution(queue, game_execution_count.fetch_add(1, std::memory_order_acq_rel) + 1);
     }
   }
   void observe_list_event(std::uint64_t native, list_event event) {
@@ -1916,6 +1932,14 @@ namespace sunshine_streamline::depth_capture {
     return owner && !owner->invalid && state(*owner, source->cookie, false);
   }
   std::uint64_t game_executions() { return game_execution_count.load(std::memory_order_acquire); }
+  std::uint64_t game_executions_on(std::uint64_t queue) {
+    com_ptr<ID3D12CommandQueue> checked;
+    if (!queue || !query_native(queue, IID_ID3D12CommandQueue, checked)) return 0;
+    queue = reinterpret_cast<std::uint64_t>(checked.p); // As the submission hook reports it.
+    for (const auto &slot : queue_executions)
+      if (slot.queue.load(std::memory_order_acquire) == queue) return slot.newest.load(std::memory_order_acquire);
+    return 0;
+  }
   bool source_extent(const source_ref &source, std::uint32_t &width, std::uint32_t &height) {
     width = height = 0;
     if (!source || !source->desc.Width || source->desc.Width > UINT32_MAX) return false;
