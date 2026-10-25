@@ -4512,7 +4512,13 @@ starts and ends at its own rest, so a direct list may reuse COMMON storage and a
 only COMMON storage. A COMPUTE queue, which ReShade does not report, takes a place and its own
 fence at its first submission of a copy awaiting its producer (`register_compute_producer`, only
 after a compute-list copy was ever recorded), and the Present queue reads that copy as any other
-queue's: once its recording was reset and the fence passed. Such a copy is its FG scope's accepted
+queue's: once its recording was reset and the fence passed. The capture owner has four queue
+places. Once a compute queue finds them all taken, no later submission tries again, and while no
+compute queue holds a place a compute-list copy is refused at its call (`exhausted`, stage
+`capacity`) rather than recorded as a GPU copy nothing could read, until a retired queue frees a
+place (since the Stage 3 batch B review; before, such a copy was recorded on every evaluate and
+discarded at its recording's Reset, and every submission retried the registration under the capture
+lock). Such a copy is its FG scope's accepted
 copy (`frame_generation_scope_live`) only once the Present queue can read it, so a copy never
 submitted or never reset keeps no other depth out of its viewport; a direct-list copy is accepted
 at its call's success. The consumer's own list stays the Present queue's DIRECT list.

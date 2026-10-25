@@ -130,7 +130,8 @@ namespace sunshine_streamline::depth_capture {
       std::uint64_t cookie{}, next_fence{}, last_epoch{}, last_sequence{}, nominated_epoch{}, present{}, present_capture{};
       std::uint64_t admission_after{}, last_source_tick{};
       std::uint64_t device_identity{};
-      bool retiring{}, provider_established{};
+      // compute_producer: a COMPUTE queue (register_compute_producer).
+      bool retiring{}, provider_established{}, compute_producer{};
       provider_kind provider{provider_kind::streamline};
       std::uint64_t source_id{};
       std::uint32_t viewport{};
@@ -302,7 +303,7 @@ namespace sunshine_streamline::depth_capture {
     extern std::array<evaluation_namespace, provider_count> evaluations;
     // A copy was ever recorded on a COMPUTE list (record_impl); liveness
     // queries look for readable compute-list copies only then.
-    extern bool compute_copies_recorded;
+    extern bool compute_copies_recorded, compute_unplaced;
     bool matching_evaluation(const evaluation_head &head, const input &value);
     void end_nomination(const input &value);
     void invalidate(slot &value, capture_failure why);

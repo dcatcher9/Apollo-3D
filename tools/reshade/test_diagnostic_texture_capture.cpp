@@ -10,6 +10,7 @@
 #include <dxgi1_4.h>
 #include <wrl/client.h>
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -825,6 +826,109 @@ namespace {
       "bytes, an observed state winning there; a direct-only declared state refused for its state, an unobserved input "
       "for its missing state; the compute queue took its fence at submission; readable on the direct queue only after its "
       "recording was reset%s\n",
+      gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
+  }
+
+  // A COMPUTE queue whose first submission of a copy finds every queue place
+  // taken (DIRECT queues ReShade reported) can never have that copy read.
+  // From then on, while no compute queue holds a place, a compute-list copy
+  // is refused at its call (exhausted, capacity) instead of recorded, and no
+  // later submission retries the registration; a retired queue's freed place
+  // lets the next copy through, and its queue takes the place.
+  void compute_queue_without_place(fixture &gpu) {
+    if (gpu.debug_messages) gpu.debug_messages->ClearStoredMessages();
+    D3D12_COMMAND_QUEUE_DESC direct_desc{}; direct_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    std::array<ComPtr<ID3D12CommandQueue>, 4> fillers;
+    for (auto &filler : fillers) {
+      check(gpu.device->CreateCommandQueue(&direct_desc, IID_PPV_ARGS(&filler)), "place-filling direct queue");
+      capture::observe_queue(native(filler.Get()));
+    }
+    D3D12_COMMAND_QUEUE_DESC queue_desc{}; queue_desc.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+    ComPtr<ID3D12CommandQueue> compute;
+    ComPtr<ID3D12CommandAllocator> allocator, spare;
+    ComPtr<ID3D12GraphicsCommandList> list;
+    ComPtr<ID3D12Fence> done;
+    check(gpu.device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&compute)), "unplaced compute queue");
+    check(gpu.device->CreateCommandAllocator(queue_desc.Type, IID_PPV_ARGS(&allocator)), "unplaced compute allocator");
+    check(gpu.device->CreateCommandAllocator(queue_desc.Type, IID_PPV_ARGS(&spare)), "unplaced compute spare allocator");
+    check(gpu.device->CreateCommandList(0, queue_desc.Type, allocator.Get(), nullptr, IID_PPV_ARGS(&list)), "unplaced compute list");
+    check(gpu.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&done)), "unplaced compute fence");
+    std::uint64_t completion{};
+    created(list.Get());
+    capture::observe_command(native(list.Get())); capture::poll();
+    const auto reset_compute = [&] {
+      check(spare->Reset(), "unplaced compute allocator reset");
+      check(reset_list(list.Get(), spare.Get()), "unplaced compute recording reset");
+      std::swap(allocator, spare); capture::poll();
+    };
+    const auto run_compute = [&] {
+      check(close_list(list.Get()), "unplaced compute close");
+      execute(compute.Get(), list.Get());
+      check(compute->Signal(done.Get(), ++completion), "unplaced compute signal");
+      HANDLE event = CreateEventW(nullptr, false, false, nullptr); require(event != nullptr, "unplaced compute event");
+      const auto hr = done->SetEventOnCompletion(completion, event);
+      const auto outcome = SUCCEEDED(hr) ? WaitForSingleObject(event, 10000) : WAIT_FAILED;
+      CloseHandle(event); require(outcome == WAIT_OBJECT_0, "unplaced compute completion timeout");
+    };
+    check(close_list(list.Get()), "unplaced compute initial close");
+    reset_compute();
+
+    texture_case depth(gpu, DXGI_FORMAT_R32_FLOAT, 4);
+    gpu.submit(); gpu.wait(); gpu.reset();
+    auto input = depth.input;
+    input.provider = sunshine_scene_depth::provider_kind::ngx;
+    input.epoch = 76; input.source_id = 94; input.viewport = 0;
+    input.valid_until = sunshine_scene_depth::lifetime::until_evaluation; input.force_snapshot = false;
+    input.source_present_generation = capture::source_present_generation(input.source);
+    std::uint64_t sequence{};
+    capture::record_diagnostic diagnostic;
+    const auto nominate = [&] {
+      auto value = input;
+      value.proof = sunshine_scene_depth::state_proof::sdk_contract;
+      value.native_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+      value.sequence = ++sequence; value.tick = GetTickCount64();
+      return capture::nominate_evaluation(native(list.Get()), value, UINT64_MAX, &diagnostic);
+    };
+    // Recorded: nothing has yet found the places taken. Its submission finds
+    // no place for the compute queue, so the copy is never read.
+    auto ticket = nominate();
+    require(ticket && diagnostic.result == capture::status::recorded, "the first compute-list copy was not recorded");
+    capture::finish(ticket, true);
+    run_compute();
+    reset_compute();
+    // Refused at its call from then on: no GPU copy that could never be read.
+    for (unsigned attempt = 0; attempt != 2; ++attempt) {
+      ticket = nominate();
+      if (ticket) capture::finish(ticket, false);
+      require(!ticket && diagnostic.result == capture::status::exhausted && diagnostic.stage == capture::record_stage::capacity &&
+          diagnostic.command_type == D3D12_COMMAND_LIST_TYPE_COMPUTE,
+        "a compute-list copy was recorded while its queue could take no place");
+      run_compute();
+      reset_compute();
+    }
+    // A retired queue frees a place: the next copy is recorded, and its
+    // submission gives the compute queue a place and a fence.
+    for (auto &filler : fillers) capture::retire_queue(native(filler.Get()));
+    capture::poll();
+    ticket = nominate();
+    require(ticket && diagnostic.result == capture::status::recorded, "a compute-list copy was refused after a queue place freed");
+    capture::finish(ticket, true);
+    run_compute();
+    capture::packet packet;
+    capture::capture_diagnostic acquired;
+    capture::acquire(native(gpu.foreign_queue.Get()), 1, packet, &acquired);
+    require(acquired.capture_id == ticket && acquired.submitted && acquired.queue == native(compute.Get()),
+      "the compute queue took no place at its copy's submission once one was free");
+    packet = {};
+    reset_compute();
+    capture::retire_source(input.provider, input.epoch, input.source_id);
+    capture::retire_queue(native(compute.Get()));
+    destroyed(list.Get());
+    capture::command_destroyed(native(list.Get()));
+    capture::poll();
+    gpu.check_debug_errors();
+    std::printf("PASS compute queue without a place: its first copy's submission found every place taken, later compute-list "
+      "copies were refused at their call (exhausted), and a freed place let the next copy and its queue in%s\n",
       gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
   }
 
@@ -2250,6 +2354,8 @@ int main(int argc, char **argv) {
     first_recording_depth_capture(gpu);
     proven_state_end_of_frame(gpu);
     ngx_contract_depth_capture(gpu);
+    // Before compute_list_capture, whose compute queue keeps its place.
+    compute_queue_without_place(gpu);
     compute_list_capture(gpu);
     depth_format_and_mips(gpu);
     local_same_queue_ordered_capture(gpu);

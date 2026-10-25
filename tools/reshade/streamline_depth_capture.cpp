@@ -1141,6 +1141,7 @@ namespace sunshine_streamline::depth_capture {
         next->device_identity = device_cookie(next->device.p, true);
         if (!next->device_identity) { reason = status::unsupported_queue; return nullptr; }
         value->AddRef(); next->queue.p = value;
+        next->compute_producer = type == D3D12_COMMAND_LIST_TYPE_COMPUTE;
         next->cookie = ++serial;
         if (FAILED(value->SetPrivateData(queue_guid, sizeof(next->cookie), &next->cookie))) { reason = status::unsupported_queue; return nullptr; }
         entry = std::move(next); return entry.get();
@@ -1151,10 +1152,19 @@ namespace sunshine_streamline::depth_capture {
     // Requires mutex. A COMPUTE queue that ReShade reported (or not) takes a
     // place at its first submission of a copy awaiting its producer: a copy
     // recorded on a compute list (record_impl). Without one, such a copy is
-    // never submitted, and its recording's Reset discards it.
+    // never submitted, and its recording's Reset discards it. Once a compute
+    // queue found every place taken (compute_unplaced), no submission tries
+    // again, and record_impl refuses compute-list copies while no compute
+    // queue holds a place, until collect_retired frees one.
     bool compute_copies_recorded{}; // Protected by mutex: a copy was ever recorded on a COMPUTE list.
+    bool compute_unplaced{}; // Protected by mutex.
+    bool compute_producer_placed() {
+      return std::any_of(queues.begin(), queues.end(),
+        [](const auto &value) { return value && !value->retiring && value->compute_producer; });
+    }
     queue_state *register_compute_producer(std::uint64_t native, std::uint32_t count,
         const native_observer::command_identity *values) {
+      if (compute_unplaced) return nullptr;
       const auto awaits = [&](const auto &captures) {
         for (std::uint32_t n = 0; n != count; ++n) {
           const auto cookie = values[n].recording_cookie;
@@ -1168,7 +1178,9 @@ namespace sunshine_streamline::depth_capture {
         return nullptr;
       com_ptr<ID3D12CommandQueue> checked;
       if (!query_native(native, IID_ID3D12CommandQueue, checked)) return nullptr;
-      return register_queue(checked.p, true);
+      auto *owner = register_queue(checked.p, true);
+      if (!owner && reason == status::exhausted) compute_unplaced = true;
+      return owner;
     }
     // Requires mutex. A depth copy recorded on a COMPUTE list is its FG
     // scope's accepted copy (frame_generation_scope_live) only once the
@@ -1475,7 +1487,10 @@ namespace sunshine_streamline::depth_capture {
             else retained = true;
           }
         });
-        if (!retained) owner.reset();
+        if (!retained) {
+          owner.reset();
+          compute_unplaced = false;
+        }
       }
       collect_diagnostics();
     }
@@ -2242,6 +2257,11 @@ namespace sunshine_streamline::depth_capture {
         bool keep{};
         ~reservation_release() { if (token && !keep) clear_reservation(std::exchange(token, 0)); }
       } release_on_exit{reservation};
+      // A compute list's copy is accepted only once its queue holds a place
+      // (register_compute_producer): with none left for it and no compute
+      // queue holding one, no GPU copy is recorded that could never be read.
+      if (on_compute && compute_unplaced && !compute_producer_placed())
+        return reject(status::exhausted, record_stage::capacity);
       const auto current_generation = source_present_generation(value.source);
       if (diagnostic) diagnostic->current_generation = current_generation;
       if (!source_lifetime_current(value, current_generation))
