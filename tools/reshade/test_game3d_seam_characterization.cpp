@@ -815,6 +815,73 @@ namespace sunshine_streamline::depth_capture {
       std::printf("PASS P2/P6 freshness edges: %zu rows\n", std::size(rows));
     }
 
+    // P5 and P6: a single FG copy amid frames without one while the
+    // viewport's SR copies are readable only frames after their evaluation
+    // (Assassin's Creed Shadows 10-24: another queue, 110-235 ms). The FG
+    // copy's delivery moves the queue owner's consumed watermark past every
+    // SR snapshot evaluated before it, so none of those is picked (the newer
+    // one in flight is reported: no_completed_snapshot), and the provider
+    // holds the FG copy (frame_generation_holds) while it is
+    // within the source age, also once the SR snapshot evaluated after it is
+    // readable. Past the source age that SR snapshot supplies; while it is
+    // still in flight the Present has no depth. That loss is the cross-queue
+    // delay, not the shared watermark: an SR snapshot evaluated before the FG
+    // copy is older than the FG copy, so it is past the source age as well.
+    void stray_frame_generation_copy_steps() {
+      struct step {
+        const char *pins;
+        bool fg_fresh;  // The delivered FG copy is within the source age.
+        bool sr_retired;  // The SR snapshot evaluated after it is readable.
+        bool held;  // frame_generation_holds keeps the FG copy on display.
+        char picked;  // O the older SR snapshot, S the newer one, - none.
+        status result;
+        selection_reason selection;
+      };
+
+      const step steps[] {
+        {"The newer SR snapshot in flight: the older one is consumed and the FG copy is held", true, false, true, '-', status::recorded, selection_reason::no_completed_snapshot},
+        {"The newer SR snapshot readable within the FG copy's source age: the FG copy is still held", true, true, true, 'S', status::ready, selection_reason::current_capture},
+        {"The FG copy past the source age: the newer SR snapshot supplies", false, true, false, 'S', status::ready, selection_reason::current_capture},
+        {"The FG copy past the source age, the newer SR snapshot still in flight: no depth until it is readable", false, false, false, '-', status::recorded, selection_reason::no_completed_snapshot},
+      };
+      constexpr std::uint64_t epoch = 7;
+      for (const auto &s : steps) {
+        reset();
+        const auto now = GetTickCount64();
+        const auto fg_tick = s.fg_fresh ? now - 16 : now - source_age - 1;
+        // The older SR snapshot (sequence 2), evaluated a frame before the FG copy.
+        auto &older = make(0, provider_kind::streamline, epoch, 2, 0, 0, fg_source);
+        older.metadata.tick = fg_tick - 16;
+        // The stray FG copy (sequence 3), accepted and delivered at its Present.
+        auto &fg = make(1, provider_kind::streamline, epoch, 3, fg_source, 0, 0);
+        fg.metadata.tick = fg_tick;
+        finish(fg.id, true);
+        queue_state owner;
+        establish_provider(owner, fg, 3);
+        deliver(owner, fg, s.fg_fresh);
+        owner.last_source_tick = fg_tick;
+        // The next frame has no FG copy; its SR evaluation replaced the FG view.
+        frame_generation_missed(epoch, 0, 4);
+        auto &newer = make(2, provider_kind::streamline, epoch, 4, 0, 0, fg_source);
+        newer.metadata.tick = fg_tick + 16;
+        newer.finished = s.sr_retired;
+        const selection_policy policy {true, epoch, 0, false, now - sunshine_freshness::fg_silent_ms - 1};
+        const auto scope = provider::select_frame_generation_scope(policy);
+        const auto pick = select_provider(owner, native, 4, now, scope.selection);
+        retained_depth shown;
+        shown.metadata = fg.metadata;
+        shown.capture_id = fg.id;
+        const bool held = frame_generation_holds(shown, policy, now);
+        const char picked = label(pick, &older, 'O', &newer, 'S');
+        if (!scope.silent || held != s.held || picked != s.picked || pick.result != s.result || pick.selection != s.selection) {
+          char text[512];
+          std::snprintf(text, sizeof(text), "P5/P6 stray FG copy, %s: silent %d held %d picked %c result %s selection %s", s.pins, scope.silent, held, picked, name(pick.result), name(pick.selection));
+          fail(text);
+        }
+      }
+      std::printf("PASS P5/P6 stray FG copy with late SR snapshots: %zu steps\n", std::size(steps));
+    }
+
     struct display_case {
       acquisition_decision current;
       packet candidate;
@@ -1151,6 +1218,7 @@ int main() {
   select_provider_rows();
   ownership_timelines();
   freshness_edges();
+  stray_frame_generation_copy_steps();
   decide_display_rows();
   ui_admission_rows();
   reset();

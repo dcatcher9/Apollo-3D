@@ -1681,7 +1681,9 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   (`provider::select_frame_generation_scope`), NGX's copy rule under FG
   (`sunshine_ngx::frame_generation_owns_depth`), `select_provider` with a protected owner,
   readable and pending sources and required or excluded FG, per-queue ownership and
-  `establish_provider`'s watermark, and every reason of `decide_display`. Its freshness table
+  `establish_provider`'s watermark, a single FG copy's handover to SR snapshots that are readable
+  only frames later (the held FG copy, `frame_generation_holds`, and the shared watermark), and
+  every reason of `decide_display`. Its freshness table
   pins each age limit one millisecond either side against an explicit clock: the source age at
   every selection site, the association timeout of `expire_association` and `evaluation_live`, an
   FG scope's enabled and accepted ticks, which also admit a tick ahead of the clock (the capture

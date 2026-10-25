@@ -4165,7 +4165,13 @@ domain includes the source id; the raw controller keeps a bounded history per so
 before. A single FG copy amid frames without one (Shadows, 10-24) still switches twice: it is
 shown at its Present and held while younger than the source age, then SR/RR depth returns. Until
 10-25 the second frame without an FG copy switched to SR depth (and the next FG copy back), and a
-silent scope whose SR copy was not yet readable dropped the held FG copy as a changed source. A
+silent scope whose SR copy was not yet readable dropped the held FG copy as a changed source. The
+queue owner's consumed watermark is shared by the viewport's sources, so after the FG copy SR
+returns with the first snapshot evaluated after it; SR snapshots evaluated before it are never
+picked. When SR copies are readable only frames later (Shadows: another queue, 110-235 ms) the
+hold bridges that delay while it is shorter than the source age, and a longer delay is a loss until
+that snapshot is readable. A per-source watermark would not shorten it: an SR snapshot evaluated
+before the FG copy is past the source age once the FG copy is. A
 `Sunshine Streamline frame generation depth scope`
 line reports a required scope turning `silent` and, later, `live` again, at most every 5 s
 (`changes=` counts the turns so far; the line names the newest state); FG Off ends a silent
