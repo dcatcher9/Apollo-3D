@@ -134,6 +134,7 @@ READINESS = re.compile(r'Sunshine depth readiness: (lost|recovered) reason=(\w+)
 RENDER_SIZE = re.compile(r'Sunshine depth render size: changed=(\d+) held=(\d+) total=\d+ '
                          r'active=(\d+)x(\d+)\.\.(\d+)x(\d+) .*?provider=(\w+)')
 UNAVAILABLE_MS = re.compile(r'\bunavailable_ms=(\d+)')
+SUPPRESSED_EPISODES = re.compile(r'\bsuppressed_episodes=(\d+)')
 PROVIDER = re.compile(r'\bprovider=(\w+)')
 SELECTION = re.compile(r'\bselection=(\w+)')
 RUNTIME = re.compile(r'\bruntime=(0x[0-9a-fA-F]+)')
@@ -661,6 +662,7 @@ class Interval:
     missing: int
     fresh: int
     reused: int = 0  # Publications with bounded reused depth (frame generation shows a real frame's depth).
+    fading: int = 0  # Publications with depth while stereo faded back in after placement was not ready (scene_fading).
 
 
 @dataclass
@@ -778,6 +780,9 @@ class Session:
     loss_sdk: dict[int, int] = field(default_factory=dict)  # Per loss revision: the SDK result it carried.
     sl_vram_warnings: int = 0  # Since 10-22: Streamline calls answered eWarnOutOfVRAM (cumulative).
     readiness: Counter = field(default_factory=Counter)  # Losses while the export streamed.
+    # Loss episodes the add-on did not log while the export streamed (its readiness trace logs at most four a second
+    # and counts the rest on its next line as suppressed_episodes).
+    suppressed_episodes: int = 0
     depth_episodes: list[DepthEpisode] = field(default_factory=list)
     # Each render size line: time, changes, Presents held across a pending size, smallest and largest active extent,
     # provider.
@@ -904,7 +909,7 @@ def parse(lines) -> Session:
             if before and values[0] >= before[1][0]:
                 d = [a - b for a, b in zip(values, before[1])]
                 if d[0]:
-                    s.intervals.append(Interval(before[0], t, d[0], d[1], d[2], d[6], d[4], d[5]))
+                    s.intervals.append(Interval(before[0], t, d[0], d[1], d[2], d[6], d[4], d[5], d[3]))
             previous_output[runtime] = (t, values)
             generation = GENERATION_FIELD.search(text)
             s.output_counts.append(OutputCount(t, runtime.lower(), generation.group(1) if generation else '',
@@ -978,6 +983,8 @@ def parse(lines) -> Session:
             reset = bool(reset and reset.group(1) == '1')
             if reset:
                 s.game_resets.append(t)
+            if (suppressed := SUPPRESSED_EPISODES.search(text)) and s.streamed and s.streamed[-1][1] is None:
+                s.suppressed_episodes += int(suppressed.group(1))
             if found.group(1) == 'lost' and s.streamed and s.streamed[-1][1] is None:
                 s.readiness[found.group(2)] += 1
                 selection = SELECTION.search(text)
@@ -1164,6 +1171,25 @@ def depth_gaps(s: Session, ranges: list[list[float]]) -> list[str]:
     return times
 
 
+def depth_losses(s: Session) -> str:
+    """Every depth loss while the export streamed, by episode count and rate whatever the Depth check's interval gate:
+    the logged episodes, the ones the add-on counted without logging them (suppressed_episodes: it logs at most four a
+    second), the logged episodes' time without depth, and their causes. Compare sessions by these counts: a fix can
+    drop the Depth check to PASS (no 5 s interval over 10% without depth) while short losses remain, each followed by a
+    re-entry fade (Placement flat)."""
+    logged = len(s.depth_episodes)
+    total = logged + s.suppressed_episodes
+    minutes = max(sum((b if b is not None else s.last) - a for a, b in s.streamed) / 60.0, 1 / 60.0) \
+        if s.streamed and s.last is not None else None
+    missing_ms = sum(e.unavailable_ms or 0 for e in s.depth_episodes)
+    parts = [f'{total} episode{"s" if total != 1 else ""}'
+             + (f' ({s.suppressed_episodes} counted but not logged)' if s.suppressed_episodes else '')
+             + (f', {total / minutes:.1f} per streamed minute' if minutes else '')
+             + f', {missing_ms / 1000:.1f} s without depth in the logged ones',
+             ', '.join(f'{k} {v}' for k, v in s.readiness.most_common())]
+    return '; '.join(parts)
+
+
 def game_froze(s: Session, start: float, end: float) -> str:
     """The game's own Present gaps (100 ms or more) within a loss (each logged when it ended, by the async log at most
     SWITCH_LEAD_S late): '; the game froze N ms' names the longest, so a loss at a game hitch reads apart from one the
@@ -1223,8 +1249,10 @@ def evaluate(s: Session) -> list[Check]:
             found = [r for r in runs if r.start < i.end and r.end > i.start]
             return bool(found) and all(r.calibration() or r.waited_for_scene() for r in found)
 
+        # Flat output and the re-entry fade that follows it (scene_fading, 500 ms after every placement
+        # interruption longer than 250 ms) both show the scene without its full stereo.
         def flagged(i: Interval) -> bool:
-            return i.start >= depth_start.start and i.flat * 4 > i.published
+            return i.start >= depth_start.start and (i.flat + i.fading) * 4 > i.published
 
         def why(r: Unplaced) -> str:
             unexplained = '' if r.cause else ', no switch, depth loss or export start before it'
@@ -1233,9 +1261,11 @@ def evaluate(s: Session) -> list[Check]:
         flats = windows(s, lambda i: flagged(i) and not calibrating(i))
         calibrations = windows(s, lambda i: flagged(i) and calibrating(i))
         flat = sum(i.flat for i in after)
+        fading = sum(i.fading for i in after)
         add(Check('WARN' if flats else 'PASS', 'Placement flat',
-                  f'{100 * flat / pub:.1f}% of publications showed the colour frame with depth'
-                  + ('; flat windows outside FG switches and resets' if flats else ''),
+                  f'{100 * flat / pub:.1f}% of publications showed the colour frame with depth, '
+                  f'{100 * fading / pub:.1f}% faded stereo back in'
+                  + ('; flat or fading windows outside FG switches and resets' if flats else ''),
                   [span(a, b) + ''.join(f', {why(r)}' for r in runs
                                         if not (r.calibration() or r.waited_for_scene()) and r.start < b and r.end > a)
                    for a, b in flats]))
@@ -1303,7 +1333,7 @@ def evaluate(s: Session) -> list[Check]:
     if s.ngx and s.ngx[0] > s.ngx[4] and not s.ngx[2] and not s.ngx[3]:
         add(Check('WARN', 'NGX depth', f'{s.ngx[0] - s.ngx[4]} DLSS evaluations recorded no depth copy'))
     if s.readiness:
-        add(Check('INFO', 'Depth losses', ', '.join(f'{k} {v}' for k, v in s.readiness.most_common())))
+        add(Check('INFO', 'Depth losses', depth_losses(s)))
     dlssg_checks(s, add)
     if s.render_sizes:
         # Dynamic resolution keeps depth (since 10-23): a render-size change of one source is no depth gap. Before,
@@ -1429,13 +1459,17 @@ def dlssg_checks(s: Session, add) -> None:
           if offered or ui_refused else '' if ui_tagged else '; no UI input offered')
     if ui_tagged:
         ui += f'; Streamline UI tags copied {ui_tagged} of its UI inputs first'
-    if copied:
-        add(Check('INFO', 'DLSS-G inputs', f'DLSSG.Depth supplied {copied} FG-scope depth copies in {real} real-frame '
-                  f'DLSS-G evaluations' + (f' (refused {", ".join(f"{k} {v}" for k, v in refused.most_common())})'
-                                           if refused else '') + ui))
-        return
     # A Streamline FG tag that copied its frame first keeps precedence: the evaluation then adds nothing.
     other = Counter({k: v for k, v in refused.items() if k != 'tag_copied'})
+    if copied:
+        # More of its evaluations refused (other than for a tag's copy) than copied: the FG scope turns silent at each
+        # refused frame, so FG depth comes and goes.
+        most_refused = sum(other.values()) > copied
+        add(Check('WARN' if most_refused else 'INFO', 'DLSS-G inputs',
+                  f'DLSSG.Depth supplied {copied} FG-scope depth copies in {real} real-frame DLSS-G evaluations'
+                  + (f' (refused {", ".join(f"{k} {v}" for k, v in refused.most_common())})' if refused else '')
+                  + ('; more were refused than copied, so FG depth came and went' if most_refused else '') + ui))
+        return
     if refused['tag_copied'] >= sum(other.values()):
         add(Check('INFO', 'DLSS-G inputs', f'{real} real-frame DLSS-G evaluations; Streamline FG tags supplied the '
                   'depth' + (f' (refused {", ".join(f"{k} {v}" for k, v in other.most_common())})' if other else '')

@@ -5,7 +5,8 @@ Game 3D readiness: bf6.exe  21:21:59 to 21:26:51 (4m51s, ended without exiting (
          21:25:02.159-21:25:03.396 (1250 ms) source_not_associated, unknown selection=inactive_views (the game supplied no depth)
          21:25:03.607-21:26:14.316 (70704 ms) retained_depth_expired, unknown selection=no_current_nomination; the game froze 240 ms
          21:26:14.538-21:26:51.246 retained_depth_expired, unknown selection=no_current_nomination, until the log ended
-[PASS] Placement flat: 3.5% of publications showed the colour frame with depth
+[WARN] Placement flat: 3.5% of publications showed the colour frame with depth, 0.7% faded stereo back in; flat or fading windows outside FG switches and resets
+         21:22:11-21:22:16, projection waiting_for_depth 21:22:04-21:22:15 (5.7 s with depth)
 [PASS] Capture coverage: 26757 covered (26756 observed, 1 declared states); not open: unknown 0, closed 0, render pass 0
 [PASS] Placement: camera projection drives placement
 [INFO] UI trust: 21:23:54 accepted UI sources are now ui_layer:28:pq
@@ -34,7 +35,7 @@ Game 3D readiness: bf6.exe  21:21:59 to 21:26:51 (4m51s, ended without exiting (
 [WARN] Observation losses: lifecycle 1, sdk_failure 2; sdk_failure warn at any count (input the SDK contract refuses, an SDK failure or a cause this report does not know)
          21:25:03 sdk_failure at finish_evaluation sdk_result=39 (eWarnOutOfVRAM)
          21:26:14 sdk_failure at finish_evaluation sdk_result=39 (eWarnOutOfVRAM)
-[INFO] Depth losses: retained_depth_expired 3, depth_shape_changed 2, no_retained_depth 1, source_not_associated 1
+[INFO] Depth losses: 7 episodes, 1.5 per streamed minute, 74.7 s without depth in the logged ones; retained_depth_expired 3, depth_shape_changed 2, no_retained_depth 1, source_not_associated 1
 [PASS] Export: runtime_reset 2
 [WARN] Present hitches: 1 outside resets, FG switches and overlay opening, worst 8.1 ms
          21:25:11 depth section (no step named; the slowest Present of 21:25:01-21:25:11) 8.1 ms
@@ -57,5 +58,5 @@ Game 3D readiness: bf6.exe  21:21:59 to 21:26:51 (4m51s, ended without exiting (
 [PASS] Encoder stalls: none
 [INFO] Host video memory: host local usage peaked at 1751 MiB; its headroom was as low as 1279 MiB (1364/2643 MiB at 21:26:01)
 [WARN] Session: the log ends without ReShade exiting or tearing its runtimes down
-Overall: WARN (0 fail, 8 warn)
+Overall: WARN (0 fail, 9 warn)
 Exit code: 0

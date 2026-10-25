@@ -2,7 +2,7 @@ Game 3D readiness: SB-Win64-Shipping.exe  14:41:20 to 14:43:28 (2m08s, exited)
 [PASS] Add-on: loaded; output 7680x2160 PQ D3D12 (generation 3)
 [WARN] Depth: fresh from 14:41:31; 1.0% of later publications without depth; gaps outside FG switches and resets
          14:41:45.607-14:41:48.065 (2453 ms) retained_depth_expired, NGX selection=inactive_views (the game supplied no depth)
-[PASS] Placement flat: 3.4% of publications showed the colour frame with depth
+[PASS] Placement flat: 3.4% of publications showed the colour frame with depth, 3.0% faded stereo back in
 [INFO] Placement calibration: 1 flat run was a calibration with depth for at most 3 s
          14:41:50.359-14:41:51.479 after provider switch (NGX to Streamline)
 [PASS] Capture coverage: 14793 covered (14790 observed, 3 declared states); not open: unknown 0, closed 0, render pass 0
@@ -22,7 +22,7 @@ Game 3D readiness: SB-Win64-Shipping.exe  14:41:20 to 14:43:28 (2m08s, exited)
 [PASS] UI protection gaps: every streamed Auto frame had a UI mask or a UI channel showing no UI
 [INFO] Hidden scene: H1 hidden scene (8) in 13 samples (pre-UI image: hudless 0, layer 8), entered 10, released 5, refuted 1; 26 of 40 samples measured
 [PASS] Observation losses: lifecycle 1
-[INFO] Depth losses: retained_depth_expired 5, source_handoff 1
+[INFO] Depth losses: 6 episodes, 3.5 per streamed minute, 3.5 s without depth in the logged ones; retained_depth_expired 5, source_handoff 1
 [PASS] Export: runtime_reset 3
 [PASS] Present hitches: 1 at resets, FG switches or overlay opening
 [INFO] Diagnostics: Diagnostics=0: no per-pass GPU timing (its lines are absent by design)

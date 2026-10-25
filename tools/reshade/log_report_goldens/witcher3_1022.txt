@@ -1,7 +1,7 @@
 Game 3D readiness: witcher3.exe  14:45:27 to 14:48:43 (3m15s, exited (the process ended before ReShade logged its exit))
 [PASS] Add-on: loaded; output 7680x2160 PQ D3D12 (generation 1)
 [PASS] Depth: fresh from 14:45:51; 0.3% of later publications without depth
-[PASS] Placement flat: 2.2% of publications showed the colour frame with depth
+[PASS] Placement flat: 2.2% of publications showed the colour frame with depth, 1.2% faded stereo back in
 [PASS] Capture coverage: 15231 covered (11498 observed, 3733 declared states); not open: unknown 0, closed 0, render pass 0
 [PASS] Placement: camera projection drives placement
 [INFO] UI trust: 14:45:28 restored accepted UI sources ui_alpha:61:pq,ui_layer:28:pq
@@ -18,7 +18,7 @@ Game 3D readiness: witcher3.exe  14:45:27 to 14:48:43 (3m15s, exited (the proces
 [PASS] UI protection gaps: every streamed Auto frame had a UI mask or a UI channel showing no UI
 [INFO] Hidden scene: H1 hidden scene (8) in 6 samples (pre-UI image: hudless 0, layer 0), entered 4, released 3, refuted 2; 16 of 39 samples measured
 [PASS] Observation losses: lifecycle 1
-[INFO] Depth losses: source_changed 1, no_retained_depth 1, source_not_associated 1, retained_depth_expired 1
+[INFO] Depth losses: 4 episodes, 1.3 per streamed minute, 0.4 s without depth in the logged ones; source_changed 1, no_retained_depth 1, source_not_associated 1, retained_depth_expired 1
 [PASS] Export: runtime_reset 1
 [PASS] Present hitches: none
 [INFO] Diagnostics: Diagnostics=0: no per-pass GPU timing (its lines are absent by design)

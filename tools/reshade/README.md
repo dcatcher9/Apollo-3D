@@ -702,7 +702,17 @@ INFO `DLSS-G inputs` counts `DLSSG.Depth` FG-scope copies per real-frame DLSS-G 
 UI inputs captured, or says that Streamline FG tags supplied the depth (`tag_copied`) and how many
 UI inputs the game's own Streamline UI tags copied first (`dlssg_ui` `tag_copied`, per kind); WARN names
 the refusals when DLSS-G evaluated with no copy (`missing_state`: DLSS-G's command list observed no
-state for its depth; `observer_coverage`: ReShade does not cover that list). A flat
+state for its depth; `observer_coverage`: ReShade does not cover that list), and when it copied but
+refused more evaluations than it copied (other than for a tag's copy): each refused frame turns the
+FG scope silent, so FG depth came and went. INFO `Depth losses` counts every loss episode while the
+export streamed, whatever the 5 s interval gate above: the logged ones plus those the add-on
+counted without logging them (`suppressed_episodes`; it logs at most four a second), their rate
+per streamed minute, the logged ones' time without depth, and their reasons. Compare sessions by
+these counts: a fix can bring `Depth` to PASS while short losses remain (Assassin's Creed Shadows
+10-24: 66 episodes, about 29 a minute). `Placement flat` counts the re-entry fade with the flat
+output (`scene_fading`, 500 ms after every placement interruption of more than 250 ms; Shadows
+10-24: 15% flat and 19% fading): a window is an interval of which a quarter was flat or fading, and
+the summary gives both shares. A flat
 window is reported as INFO `Placement calibration` only when every placement-controller run
 without placement inside it (raw automation other than `ready`/`holding_reference`, or
 Streamline scale other than `ready`) followed a cause the log names (a depth-provider or frame
