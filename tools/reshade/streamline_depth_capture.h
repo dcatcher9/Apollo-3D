@@ -213,6 +213,10 @@ namespace sunshine_streamline::depth_capture {
     // The copy used the source's last proven state (last_proven_state)
     // because the recording had no entry.
     bool used_proven_state{};
+    // The recording had no entry and an executed enhanced barrier latched the
+    // source's layout (proven_state.h): its claim was checked against that
+    // proof (used_proven_state) or the copy refused (the matrix's D6, N8).
+    bool earlier_layout{};
   };
   // Where an auxiliary copy's pre-copy state came from (diagnostic
   // provenance; it changes no admission). The values are fixed: dumps record
@@ -300,6 +304,8 @@ namespace sunshine_streamline::depth_capture {
   // until their existing fence/recording retirement conditions are satisfied.
   void retire_source(sunshine_scene_depth::provider_kind provider, std::uint64_t epoch, std::uint64_t source_id);
 
+  // A newly retained texture (not a buffer or simultaneous-access one) is
+  // watched from then on for the enhanced-layout latch (proven_state_counts).
   source_ref retain_source(std::uint64_t resource, record_diagnostic *diagnostic = nullptr);
   std::uint64_t source_present_generation(const source_ref &source);
   // Whether the barrier hooks recorded a state of source on command's current
@@ -504,6 +510,13 @@ namespace sunshine_streamline::depth_capture {
   // unproven until a later barrier proves it again. A proof holds only for
   // the queue that executed it (a creation state for every queue until a list
   // uses the texture, unless enhanced barriers were seen).
+  // Any enhanced barrier of an executed list that names a texture held
+  // (tracked, or an adapter's source watched from its retention) latches its
+  // layout for good: a copy of it whose recording names nothing takes no
+  // legacy barrier from a claim. It copies only from a shader-read claim's
+  // SHADER_RESOURCE layout as the texture's proof from that list states it,
+  // with enhanced barriers and checked at execution as a proven copy is;
+  // anything else is refused (the contract matrix's D6 and N8).
   using proven_state = sunshine_proven_state::state;
   void resource_created(std::uint64_t resource, std::uint32_t initial_state);
   // A source whose copy a tag call deferred to its frame's Present
@@ -524,13 +537,20 @@ namespace sunshine_streamline::depth_capture {
   // empty out) when it is unproven there.
   bool last_proven_state(std::uint64_t resource, std::uint64_t queue, proven_state &out);
   struct proven_state_counts {
-    std::uint64_t tracked{};
+    // The textures held: tracked, or watched from an adapter's retention
+    // (retain_source); of those, latched by an executed enhanced barrier, and
+    // whether a full table forgot a latched one (proven_state.h).
+    std::uint64_t tracked{}, latched{};
+    bool latch_lost{};
     // Executed lists that left every texture unproven, by why the hooks did
     // not observe them: no recording state (never reported or associated),
     // not reported by ReShade's lifecycle, invalidated, Reset without that
     // lifecycle, or a method table the barrier hooks do not cover.
     std::uint64_t unrecorded{}, unreported{}, invalidated{}, missed_reset{}, uncovered{};
     std::uint64_t changed_copies{};
+    // Copies of a latched source whose recording named nothing: recorded
+    // with enhanced barriers from its proof, or refused (the matrix's D6, N8).
+    std::uint64_t earlier_copied{}, earlier_refused{};
     std::uint64_t unobserved() const { return unrecorded + unreported + invalidated + missed_reset + uncovered; }
   };
   proven_state_counts proven_counts();

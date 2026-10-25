@@ -6,8 +6,12 @@
 // every update takes a new version, so a copy recorded from a proof can tell
 // that it changed before its list ran; whatever may have changed a texture
 // unseen leaves it unproven; and a full table forgets its least recently used
-// texture. The capture owner's feeding of it is proven on real lists by the
-// contract matrix's device layer (end_of_frame cells).
+// texture. The enhanced-layout latch (D6, N8) of a tracked or watched texture
+// survives unseen work and later proofs, a watched texture's proof serves the
+// latch alone, and forgetting a latched texture latches every texture not
+// held. The capture owner's feeding of it is proven on real lists by the
+// contract matrix's device layer (end_of_frame and earlier enhanced layout
+// cells).
 #include "proven_state.h"
 
 #include <cstdint>
@@ -83,6 +87,36 @@ int main() {
     check(owner.size() == 4 && !owner.tracked(30) && owner.tracked(10) && owner.tracked(20) && owner.tracked(40) && owner.tracked(50), "A full table forgets its least recently used texture first");
     owner.track(5, true, depth_read);
     check(!owner.tracked(40) && proven(owner.query(5, direct, true), depth_read) && proven(owner.query(50, direct, true), depth_write) && proven(owner.query(20, direct, true), depth_read), "Lookups stay exact after insertions before and after the others");
+  }
+  {
+    table owner;
+    owner.track(1, true, depth_write);
+    owner.watch(2);
+    check(owner.held(2) && !owner.tracked(2) && !owner.latched(2).latched, "A watched texture is held, not tracked, and starts unlatched");
+    owner.prove(2, direct, shader_read);
+    check(!owner.query(2, direct, true), "A watched texture's proof never serves a query");
+    owner.prove_layout(1, direct, 3, 0x40);
+    check(!owner.latched(1).latched, "A proof alone does not latch");
+    owner.set_latch(1);
+    const auto latched = owner.latched(1);
+    check(latched.latched && latched.proven.enhanced && latched.proven.layout == 3 && latched.proven.queue == direct, "A latched texture reports its proof on the queue that made it");
+    owner.prove(1, other, depth_read);
+    owner.unprove_all();
+    check(owner.latched(1).latched && !owner.latched(1).proven, "The latch survives a later legacy proof and unseen work; the proof does not");
+    owner.track(1, true, depth_write);
+    check(owner.latched(1).latched && !owner.latched(1).proven, "Tracking again keeps the latch; a creation state is no latched proof");
+    owner.set_latch(2);
+    owner.prove_layout(2, other, 3, 0x40);
+    check(owner.latched(2).proven.queue == other && !owner.query(2, other, true), "A watched texture latches and keeps its proof for the latch alone");
+    owner.track(2, false, 0);
+    check(owner.tracked(2) && owner.latched(2).latched && !owner.query(2, other, true), "A watched texture becomes tracked, unproven, latch kept");
+    owner.watch(1);
+    check(owner.tracked(1), "Watching a tracked texture leaves it tracked");
+    check(!owner.latch_lost() && !owner.latched(9).latched && owner.latched_count() == 2, "A texture never held is unlatched until a latch is lost");
+    owner.watch(3);
+    owner.watch(4);
+    owner.watch(5);  // Forgets 1, the least recently used.
+    check(!owner.held(1) && owner.latch_lost() && owner.latched(1).latched && owner.latched(9).latched && !owner.latched(3).latched, "Forgetting a latched texture latches every texture not held");
   }
   if (failures) {
     std::fprintf(stderr, "%u proven-state check(s) failed\n", failures);

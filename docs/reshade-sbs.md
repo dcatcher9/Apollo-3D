@@ -2365,10 +2365,12 @@ Every proof/policy combination above, including NGX's SDK input contract, resolv
 table in [`capture_state_policy.h`](../tools/reshade/capture_state_policy.h): declared (must match an
 observation), observed only (also an undeclared state), observed-else-declared and
 observed-else-contract. Blocked or
-incomplete observations reject every rule. The
+incomplete observations reject every rule. A source an enhanced barrier on an earlier executed list
+latched, whose recording names nothing, is copied only from a shader-read claim's `SHADER_RESOURCE`
+proof (the enhanced-layout latch, since Stage 3 fix 3). The
 [API contract matrix](../tools/reshade/README.md#api-contract-matrix) judges the table over every
 legal combination of allocation flags, adapter claim, consumer, declared state and recorded
-evidence, plus deliberately illegal rows; the cells where the table falls short of the contract are
+evidence (a layout set on an earlier list included), plus deliberately illegal rows; the cells where the table falls short of the contract are
 rows of its known-gap table. Its device layer records the same copies on real D3D12 lists.
 
 The FG decision is independent of depth-provider selection, including a manually pinned Generic
@@ -3678,7 +3680,8 @@ source age, then the view is mono.
 
 The last proven state ([`proven_state.h`](../tools/reshade/proven_state.h)) is a per-resource fact
 that the capture owner keeps for at most 128 textures, each depth-stencil texture from its creation
-state (ReShade's `init_resource`; the least recently used is forgotten first). After each
+state (ReShade's `init_resource`; the least recently used is forgotten first). Each texture an
+adapter retains is also watched from its retention, for the enhanced-layout latch below. After each
 `ExecuteCommandLists` returns, in submission order, each list that the barrier hooks observed in
 full proves the state its last transition or enhanced barrier left a tracked texture in, for that
 queue only. A depth clear of the texture's subresource 0 after that barrier (`ClearDepthStencilView`
@@ -3701,17 +3704,48 @@ so a discard after the last barrier goes unseen; that is a content hazard, as it
 copies whose own recording lacks a state can query the same fact
 (`depth_capture::last_proven_state`).
 
-The Generic status line (`Sunshine 3D depth:`) ends with three groups of counts since the runtime
+**Enhanced-layout latch (the contract matrix's D6 and N8).** Any enhanced texture barrier on
+subresource 0 in a list that executes latches its texture's layout to enhanced barriers for good,
+whatever state the list leaves it in. The latch lives in the same table, which holds the
+depth-stencil textures tracked from their creation and every texture an adapter retains (a
+Streamline tag, an NGX input, a UI input), watched from its retention; buffers and
+simultaneous-access textures are neither. A watched texture's proofs serve the latch alone: the
+end-of-frame copy and the Present-queue copy still use tracked textures only. A copy whose own
+recording names nothing about a latched source, and which no proof above admits, takes no legacy
+barrier from its claim, because the [Enhanced Barriers](https://microsoft.github.io/DirectX-Specs/d3d/D3D12EnhancedBarriers.html)
+legacy interop forbids one on that layout. The claim is checked against the source's proof from the
+earlier list instead. Only a shader-read claim (a declared pixel or non-pixel shader-resource state,
+or NGX's `NON_PIXEL_SHADER_RESOURCE` contract) is copied, and only where that list left the texture
+in exactly `SHADER_RESOURCE` with access and shaders may read it. That copy uses enhanced barriers
+from that layout and access, and is checked at execution like a proven copy: it is discarded when the
+proof changed or another queue runs it. Everything else is refused (`unsupported_state`):
+- a queue-specific layout (`DIRECT_QUEUE_SHADER_RESOURCE`, a layout no claim names);
+- any other claim or layout, including a clear's contract;
+- a source that needs an observation;
+- a latched source with no proof, or whose proof is from another queue than the copy's known one;
+- a recording the hooks do not see, or one that aliased the source before the copy.
+
+The earlier capture then holds within the source age, then the view is mono. A full table that
+forgets a latched texture counts every texture it does not hold as latched from then on
+(`latch_lost`). Two cases stay open, as before this rule: a texture that was neither tracked nor
+watched when its enhanced barrier executed (an adapter's source first retained after it) is latched
+only once a later executed list names it, and a copy recorded before the latching list executed
+still used its claim.
+
+The Generic status line (`Sunshine 3D depth:`) ends with four groups of counts since the runtime
 started:
 - `ready_copies boundary=N end_of_frame=M`: the Presents whose ready capture was a boundary's copy
   (a clear, an unbind or a clear-like draw), and those whose ready capture was the end-of-frame copy.
 - `end_of_frame_refused=R last=<stage>`: end-of-frame copies the capture owner refused, with the
   latest refusal's stage (`missing_state` when nothing proves the state).
 - `proven tracked=T unobserved={unrecorded=.. unreported=.. invalidated=.. missed_reset=..
-  uncovered=..} changed_copies=C`: the textures with a tracked state, the executed lists that left
-  every texture unproven by why the hooks did not observe them (no recording state, not reported by
-  ReShade's lifecycle, invalidated, Reset without that lifecycle, method table not covered), and the
-  copies discarded at execution.
+  uncovered=..} changed_copies=C`: the textures the table holds (tracked or watched), the executed
+  lists that left every texture unproven by why the hooks did not observe them (no recording state,
+  not reported by ReShade's lifecycle, invalidated, Reset without that lifecycle, method table not
+  covered), and the copies discarded at execution.
+- `latched=L[ latch_lost] earlier_layout={copied=A refused=B}`: the held textures latched to
+  enhanced layouts (`latch_lost` once a full table forgot one), and the copies of a latched source
+  whose recording named nothing, copied from its `SHADER_RESOURCE` proof or refused.
 
 While these counts change, the line repeats at most every 10 s.
 
@@ -4286,7 +4320,9 @@ transitioning, copying and restoring only depth plane 0. Stencil is neither copi
 malformed or missing metadata still requires observed nonzero state on the actual command
 recording. An observed conflicting or incomplete transition always rejects capture. An enhanced
 (CommandList7) texture barrier that includes subresource 0 sets that texture's layout and access
-on the recording; other subresources keep subresource 0's. The
+on the recording; other subresources keep subresource 0's. Once one has executed, a later copy
+whose recording names nothing never takes a legacy barrier on that texture (the enhanced-layout
+latch above). The
 [D3D12 Enhanced Barriers](https://microsoft.github.io/DirectX-Specs/d3d/D3D12EnhancedBarriers.html)
 contract forbids a legacy barrier on a texture in an enhanced layout other than COMMON and defines
 no legacy equivalent for queue-specific layouts, so such a copy uses the list's CommandList7

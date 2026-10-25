@@ -9,6 +9,7 @@
 
 #include <cstdio>
 #include <stdexcept>
+#include <string>
 
 namespace {
   namespace capture = sunshine_streamline::depth_capture;
@@ -111,6 +112,49 @@ int main() try {
     enhanced(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE), 0);
   require(!chosen.admitted && chosen.result == capture::status::conflicting_state,
     "a declaration without an equivalent layout agreed with one");
+  // A layout an enhanced barrier set on an earlier list (D6, N8): only a
+  // shader-read claim, from that list's SHADER_RESOURCE proof, is copied, with
+  // enhanced barriers; never a legacy barrier from the claim.
+  const auto earlier = [&](std::uint32_t layout, bool proven = true, std::uint32_t access = D3D12_BARRIER_ACCESS_SHADER_RESOURCE) {
+    auto value = enhanced(layout);
+    value.present = value.known = value.enhanced = proven;
+    value.access = access;
+    value.earlier = true;
+    return value;
+  };
+  const auto at_call_ui = copy_state::select(proof::declared, policy::prefer_observed_recording);
+  for (const auto selected : {declared, contract, at_call_ui}) {
+    for (const auto claim : {std::uint32_t(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE), std::uint32_t(shader_states)}) {
+      chosen = copy_state::resolve(selected, claim, earlier(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE), D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+      require(chosen.admitted && chosen.enhanced && chosen.layout == D3D12_BARRIER_LAYOUT_SHADER_RESOURCE &&
+          chosen.access == D3D12_BARRIER_ACCESS_SHADER_RESOURCE, "a shader-read claim was not copied from its earlier SHADER_RESOURCE proof");
+    }
+    chosen = copy_state::resolve(selected, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, earlier(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE),
+      D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL | D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE);
+    require(!chosen.admitted && chosen.result == capture::status::unsupported_state, "an earlier layout of a texture shaders may not read was copied");
+  }
+  struct earlier_case {
+    std::uint32_t claim;
+    copy_state::observation observed;
+    const char *what;
+  };
+  for (const auto &value : {
+         earlier_case{D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, earlier(D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE), "a queue-specific earlier layout"},
+         earlier_case{D3D12_RESOURCE_STATE_DEPTH_READ, earlier(D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ, true, D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ), "an earlier depth-read layout"},
+         earlier_case{D3D12_RESOURCE_STATE_COPY_SOURCE, earlier(D3D12_BARRIER_LAYOUT_COPY_SOURCE, true, D3D12_BARRIER_ACCESS_COPY_SOURCE), "an earlier copy-source layout"},
+         earlier_case{D3D12_RESOURCE_STATE_DEPTH_WRITE, earlier(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE), "a claim that names another layout"},
+         earlier_case{D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, earlier(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, false), "an unproven latched texture"},
+         earlier_case{D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, earlier(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, true, D3D12_BARRIER_ACCESS_NO_ACCESS), "an earlier layout without access"},
+       }) {
+    chosen = copy_state::resolve(declared, value.claim, value.observed, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+    require(!chosen.admitted && chosen.result == capture::status::unsupported_state && chosen.stage == capture::record_stage::unsupported_state,
+      (std::string(value.what) + " was copied from a claim").c_str());
+  }
+  for (const auto supplied : {proof::unavailable, proof::observed_nonzero, proof::last_proven, proof::clear_contract}) {
+    chosen = copy_state::resolve(copy_state::select(supplied, policy::source_contract), D3D12_RESOURCE_STATE_DEPTH_WRITE,
+      earlier(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE), D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+    require(!chosen.admitted, "a source needing an observation, or a clear's contract, was copied from an earlier layout");
+  }
   // A split barrier in transition rejects every rule, even beside a known value.
   for (const auto supplied : {proof::unavailable, proof::declared, proof::observed_nonzero, proof::sdk_contract}) {
     copy_state::observation pending{true, true, false, D3D12_RESOURCE_STATE_DEPTH_READ, true};

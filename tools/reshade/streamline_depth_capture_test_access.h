@@ -69,10 +69,14 @@ namespace sunshine_streamline::depth_capture {
     // later barrier clears it.
     // order: the recording's barrier order (command_state::barrier_order) of
     // the latest barrier that set this entry.
+    // enhanced_named: any enhanced barrier on the recording named its
+    // subresource 0, whatever followed (the enhanced-layout latch,
+    // proven_state.h).
     struct source_state {
       std::uint64_t source{}; std::uint32_t value{}; bool known{}, blocked{}, enhanced{}, pending_split{};
       std::uint32_t layout{}, access{};
       std::uint32_t order{};
+      bool enhanced_named{};
     };
     // A texture named at a barrier order by an aliasing barrier (before or
     // after) or by a depth clear of its subresource 0. Neither changes a state

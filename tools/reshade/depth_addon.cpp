@@ -3108,12 +3108,12 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 		data.last_logged_manual != manual || (binding_changed && data.binding_state == depth_binding_state::binding_failed),
 		copy_frames != data.logged_copy_frames))
 	{
-		char message[768];
+		char message[1024];
 		const auto proven = sunshine_streamline::depth_capture::proven_counts();
 		std::snprintf(message, std::size(message),
 			"Sunshine 3D depth: %s; source=%llu %ux%u %s; %s; %s; %s; ready_copies boundary=%llu end_of_frame=%llu; "
 			"end_of_frame_refused=%llu last=%s; proven tracked=%llu unobserved={unrecorded=%llu unreported=%llu invalidated=%llu "
-			"missed_reset=%llu uncovered=%llu} changed_copies=%llu",
+			"missed_reset=%llu uncovered=%llu} changed_copies=%llu latched=%llu%s earlier_layout={copied=%llu refused=%llu}",
 			binding_state_name(data.binding_state), static_cast<unsigned long long>(data.selected_identity),
 			data.selected_desc.texture.width, data.selected_desc.texture.height, format_to_string(data.selected_desc.texture.format), manual ? "manual" : "auto",
 			data.selection_reason, data.binding_detail, static_cast<unsigned long long>(data.boundary_copy_frames),
@@ -3121,7 +3121,9 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 			sunshine_streamline::depth_capture::name(data.end_of_frame_refusal), static_cast<unsigned long long>(proven.tracked),
 			static_cast<unsigned long long>(proven.unrecorded), static_cast<unsigned long long>(proven.unreported),
 			static_cast<unsigned long long>(proven.invalidated), static_cast<unsigned long long>(proven.missed_reset),
-			static_cast<unsigned long long>(proven.uncovered), static_cast<unsigned long long>(proven.changed_copies));
+			static_cast<unsigned long long>(proven.uncovered), static_cast<unsigned long long>(proven.changed_copies),
+			static_cast<unsigned long long>(proven.latched), proven.latch_lost ? " latch_lost" : "",
+			static_cast<unsigned long long>(proven.earlier_copied), static_cast<unsigned long long>(proven.earlier_refused));
 		sunshine_log::message(data.binding_state == depth_binding_state::binding_failed ? reshade::log::level::error : reshade::log::level::info, message);
 		data.last_logged_id = data.anchor_identity;
 		data.last_logged_manual = manual;

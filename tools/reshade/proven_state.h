@@ -22,6 +22,18 @@
 // texture created with an initial layout in the same form as one created in a
 // legacy state. Bounded: the least recently used texture is forgotten first,
 // and a texture that is not tracked is unproven. Pure; the caller locks.
+//
+// The enhanced-layout latch (the contract matrix's D6 and N8): once an
+// executed list's enhanced barrier named a texture, its layout belongs to
+// enhanced barriers, and a legacy barrier from a claim (a declared state, an
+// SDK contract) is illegal on it (Enhanced Barriers, legacy interop). The
+// latch never clears while the texture is held: a later legacy barrier,
+// unseen work or another queue leave it set. A texture is held tracked (its
+// proofs serve the queries above) or only watched: an adapter's source,
+// followed from its retention for the latch and for a copy the latch decides,
+// never for the queries that admit a copy from a proof alone. Forgetting a
+// latched texture (a full table) loses its latch, so from then on a texture
+// that is not held counts as latched (latch_lost).
 namespace sunshine_proven_state {
   struct state {
     std::uint64_t version {};  // Nonzero while proven; every update takes a new one.
@@ -35,11 +47,19 @@ namespace sunshine_proven_state {
     }
   };
 
+  // A texture's enhanced-layout latch, and its proof on the queue that made
+  // it (never a creation state; empty while unproven).
+  struct latch {
+    bool latched {};
+    state proven;
+  };
+
   template<unsigned Capacity>
   class table {
   public:
     // A texture tracked from its creation, in initial (a legacy state) when
-    // known. Tracking it again restarts it.
+    // known. Tracking it again restarts it; a watched texture becomes
+    // tracked, unproven until a later barrier proves it. The latch stays.
     void track(std::uint64_t resource, bool known, std::uint32_t initial) {
       if (!resource) {
         return;
@@ -48,6 +68,7 @@ namespace sunshine_proven_state {
       if (!found) {
         found = insert(resource);
       }
+      found->tracked = true;
       found->value = {};
       if (known) {
         found->value.version = ++serial;
@@ -56,8 +77,29 @@ namespace sunshine_proven_state {
       found->used = ++serial;
     }
 
+    // A texture followed from now on, unproven, for its latch only; a texture
+    // already held is unchanged.
+    void watch(std::uint64_t resource) {
+      if (resource && !find(resource)) {
+        insert(resource)->used = ++serial;
+      }
+    }
+
     bool tracked(std::uint64_t resource) const {
+      const auto *found = find(resource);
+      return found && found->tracked;
+    }
+
+    // Tracked or watched: executed lists update it.
+    bool held(std::uint64_t resource) const {
       return find(resource) != nullptr;
+    }
+
+    // An executed enhanced barrier named the texture.
+    void set_latch(std::uint64_t resource) {
+      if (auto *found = find(resource)) {
+        found->latched = true;
+      }
     }
 
     // An executed list on queue left the texture in a legacy state, or in an
@@ -89,35 +131,63 @@ namespace sunshine_proven_state {
       }
     }
 
-    // The texture's proven state for a copy executed on queue.
+    // The tracked texture's proven state for a copy executed on queue.
     state query(std::uint64_t resource, std::uint64_t queue, bool creation_trusted) {
       auto *found = find(resource);
-      if (!found || !found->value || (found->value.queue ? found->value.queue != queue : !creation_trusted)) {
+      if (!found || !found->tracked || !found->value || (found->value.queue ? found->value.queue != queue : !creation_trusted)) {
         return {};
       }
       found->used = ++serial;
       return found->value;
     }
 
-    // The version a proof still has (0: unproven or untracked).
+    // The held texture's latch and, when latched, its proof on whatever
+    // queue made it. A texture not held is latched once a latch was lost.
+    latch latched(std::uint64_t resource) {
+      auto *found = find(resource);
+      if (!found) {
+        return {lost, {}};
+      }
+      latch out {found->latched, {}};
+      if (found->latched && found->value && found->value.queue) {
+        found->used = ++serial;
+        out.proven = found->value;
+      }
+      return out;
+    }
+
+    // The version a proof still has (0: unproven or not held).
     std::uint64_t version(std::uint64_t resource) const {
       const auto *found = find(resource);
       return found ? found->value.version : 0;
     }
 
+    // Held textures, tracked or watched.
     unsigned size() const {
       return count;
+    }
+
+    unsigned latched_count() const {
+      return unsigned(std::count_if(entries.begin(), entries.begin() + count, [](const entry &value) {
+        return value.latched;
+      }));
+    }
+
+    bool latch_lost() const {
+      return lost;
     }
 
   private:
     struct entry {
       std::uint64_t resource {}, used {};
       state value;
+      bool tracked {}, latched {};
     };
 
     std::array<entry, Capacity> entries {};  // Sorted by resource.
     unsigned count {};
     std::uint64_t serial {};
+    bool lost {};
 
     const entry *find(std::uint64_t resource) const {
       const auto end = entries.begin() + count;
@@ -137,6 +207,7 @@ namespace sunshine_proven_state {
         const auto oldest = std::min_element(entries.begin(), entries.end(), [](const entry &a, const entry &b) {
           return a.used < b.used;
         });
+        lost = lost || oldest->latched;
         std::move(oldest + 1, entries.end(), oldest);
         --count;
       }

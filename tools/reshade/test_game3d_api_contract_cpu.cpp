@@ -319,6 +319,16 @@ namespace {
           observed = {true, !pending && copy_state::layouts::admissible(source.layout) && source.access != D3D12_BARRIER_ACCESS_NO_ACCESS, false, UINT32_MAX, pending, true, source.layout, source.access};
           break;
         }
+      case matrix::evidence::earlier_list_enhanced:
+        {
+          // The capture owner's latch (proven_state.h) and the earlier list's
+          // proof on the copy's queue (record_impl): that list proves only a
+          // layout and access its entry knows, else the latched texture is
+          // unproven.
+          const bool proven = copy_state::layouts::admissible(source.layout) && source.access != D3D12_BARRIER_ACCESS_NO_ACCESS;
+          observed = {proven, proven, false, 0, false, proven, source.layout, source.access, true};
+          break;
+        }
       default:
         break;
     }
@@ -387,7 +397,8 @@ namespace {
   // Every legal cell of the state dimensions the table sees: allocation
   // flags, consumer, claim, declared state and the recording's evidence (none,
   // a completed or pending legacy transition, a completed or pending enhanced
-  // barrier into each layout with a compatible access or NO_ACCESS).
+  // barrier into each layout with a compatible access or NO_ACCESS, or such a
+  // layout an enhanced barrier set on an earlier list).
   template<class Visit>
   void each_legal_case(Visit &&visit) {
     for (std::uint32_t flags = 0; flags <= matrix::allocation_flag_bits; ++flags) {
@@ -433,7 +444,7 @@ namespace {
               visit(value);
             }
           }
-          for (const auto seen : {matrix::evidence::enhanced, matrix::evidence::enhanced_split_open}) {
+          for (const auto seen : {matrix::evidence::enhanced, matrix::evidence::enhanced_split_open, matrix::evidence::earlier_list_enhanced}) {
             for (unsigned i = 0; i != layout_count; ++i) {
               value.resource = {flags, seen, 0, layouts[i], accesses[i]};
               visit(value);

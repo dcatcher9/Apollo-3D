@@ -297,6 +297,8 @@ namespace sunshine_streamline::depth_capture {
     std::atomic<bool> enhanced_barriers_seen{};
     struct {
       std::atomic<std::uint64_t> unrecorded{}, unreported{}, invalidated{}, missed_reset{}, uncovered{}, changed_copies{};
+      // Copies of a latched source with nothing on their recording (D6, N8).
+      std::atomic<std::uint64_t> earlier_copied{}, earlier_refused{};
     } proven_counters;
     void invalidate_all() {
       std::lock_guard lock(mutex);
@@ -474,6 +476,7 @@ namespace sunshine_streamline::depth_capture {
         if (!identity) { invalidate(*owner, recording_loss::source_identity_unavailable); continue; }
         auto *known = state(*owner, identity, true);
         if (!known) { invalidate(*owner, recording_loss::source_state_capacity); continue; }
+        known->enhanced_named = true;
         if (known->blocked) continue;
         // An enhanced barrier inside a legacy split is outside the D3D12 contract.
         if (known->pending_split && !known->enhanced) { known->blocked = true; continue; }
@@ -1003,25 +1006,26 @@ namespace sunshine_streamline::depth_capture {
     // discarded (held, then mono). A replay is invalidated as such.
     void verify_proven_copies(std::uint64_t queue, std::uint64_t cookie) {
       if (!cookie) return;
-      for (auto &value : slots) {
-        if (!value.id || !value.proven_version || value.command != cookie) continue;
+      for_each_capture([&](slot &value) {
+        if (!value.id || !value.proven_version || value.command != cookie) return;
         if (value.proven_queue != queue || proven.version(value.proven_source) != value.proven_version) {
           invalidate(value, capture_failure::proven_state_changed);
           proven_counters.changed_copies.fetch_add(1, std::memory_order_relaxed);
         }
         value.proven_version = 0;
-      }
+      });
     }
     // Requires mutex. The lists of one ExecuteCommandLists call on queue, in
     // submission order (proven_state.h): copies from a proven state are
     // checked before their list's own barriers apply. A list the barrier
     // hooks did not fully observe (not reported by ReShade's lifecycle, Reset
     // without it, invalidated, or of an unhooked method table) may have
-    // changed any texture: none stays proven. Otherwise every tracked texture
+    // changed any texture: none stays proven. Otherwise every held texture
     // its barriers named takes the state its last barrier left it in, on this
     // queue, unless an aliasing barrier followed (any placed or reserved
     // resource for one naming neither), a split is still open or a barrier
     // was blocked; a depth clear after its last barrier proves DEPTH_WRITE.
+    // An enhanced barrier naming it latches its layout (proven_state.h).
     void apply_executed(std::uint64_t queue, std::uint32_t count, const native_observer::command_identity *values) {
       for (std::uint32_t n = 0; n != count; ++n) {
         verify_proven_copies(queue, values[n].recording_cookie);
@@ -1045,7 +1049,10 @@ namespace sunshine_streamline::depth_capture {
         if (owner->wildcard_alias) proven.unprove_all();
         for (const auto &mark : owner->aliases) proven.unprove(mark.source);
         for (const auto &entry : owner->states) {
-          if (!proven.tracked(entry.source)) continue;
+          if (!proven.held(entry.source)) continue;
+          // Any enhanced barrier naming it latches its layout (D6), whatever
+          // state the list left it in.
+          if (entry.enhanced_named) proven.set_latch(entry.source);
           if (!entry.known || entry.blocked || entry.pending_split || owner->wildcard_alias > entry.order ||
               aliased_after(*owner, entry.source, entry.order))
             proven.unprove(entry.source);
@@ -1055,7 +1062,7 @@ namespace sunshine_streamline::depth_capture {
         // A depth clear after a texture's last barrier proves DEPTH_WRITE (the
         // D3D12 clear contract), in recording order, unless aliased after it.
         for (const auto &mark : owner->clears) {
-          if (!proven.tracked(mark.source)) continue;
+          if (!proven.held(mark.source)) continue;
           const auto entry = std::find_if(owner->states.begin(), owner->states.end(),
             [&](const source_state &value) { return value.source == mark.source; });
           if (entry != owner->states.end() && entry->order > mark.order) continue;
@@ -1837,6 +1844,12 @@ namespace sunshine_streamline::depth_capture {
     // common opportunity recorder validates the actual copy description.
     value->cookie = retain_source_cookie(resource);
     if (!value->cookie) return result({}, status::unsupported_resource, record_stage::source_cookie);
+    // An adapter's source is watched for the enhanced-layout latch from now
+    // on (proven_state.h); buffers and simultaneous-access textures keep no
+    // layout between executions.
+    if (value->desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER &&
+        !(value->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS))
+      proven.watch(value->cookie);
     *entry = value;
     return result(value, status::ready, record_stage::retained);
   }
@@ -2127,15 +2140,35 @@ namespace sunshine_streamline::depth_capture {
       sunshine_proven_state::state proven_basis;
       if (proven_basis_allowed && !observed && !owner->wildcard_alias && !aliased_after(*owner, value.source->cookie, 0))
         proven_basis = proven.query(value.source->cookie, proven_queue, !enhanced_barriers_seen.load(std::memory_order_relaxed));
-      if (diagnostic && proven_basis) {
-        diagnostic->used_proven_state = true; diagnostic->observed_state = proven_basis.value;
-        diagnostic->observed_enhanced = proven_basis.enhanced;
-        diagnostic->observed_layout = proven_basis.layout; diagnostic->observed_access = proven_basis.access;
+      // Otherwise a source an enhanced barrier on an earlier executed list
+      // latched (proven_state.h) takes no legacy barrier from its claim: the
+      // claim is checked against its proof from that list (copy_state's
+      // earlier observation, the matrix's D6 and N8). That proof stands only
+      // as one above would: the hooks see this recording, which did not alias
+      // it before the copy, and it was made on the copy's queue when that is
+      // known; else the copy is refused.
+      sunshine_proven_state::latch earlier;
+      if (!observed && !proven_basis) {
+        earlier = proven.latched(value.source->cookie);
+        if (!states_observed || owner->wildcard_alias || aliased_after(*owner, value.source->cookie, 0) ||
+            (proven_queue && earlier.proven.queue != proven_queue))
+          earlier.proven = {};
       }
-      const auto evidence = proven_basis ? copy_state::observation{true, true, false, proven_basis.value, false,
-        proven_basis.enhanced, proven_basis.layout, proven_basis.access} : observation_of(observed);
+      const auto &proof = proven_basis ? proven_basis : earlier.proven;
+      if (diagnostic) diagnostic->earlier_layout = earlier.latched;
+      if (diagnostic && proof) {
+        diagnostic->used_proven_state = true; diagnostic->observed_state = proof.value;
+        diagnostic->observed_enhanced = proof.enhanced;
+        diagnostic->observed_layout = proof.layout; diagnostic->observed_access = proof.access;
+      }
+      auto evidence = proof ? copy_state::observation{true, true, false, proof.value, false,
+        proof.enhanced, proof.layout, proof.access} : observation_of(observed);
+      evidence.earlier = earlier.latched;
       const auto chosen = copy_state::resolve(state_rule, value.native_state, evidence, desc.Flags);
-      if (!chosen.admitted) return reject(chosen.result, chosen.stage);
+      if (!chosen.admitted) {
+        if (earlier.latched) proven_counters.earlier_refused.fetch_add(1, std::memory_order_relaxed);
+        return reject(chosen.result, chosen.stage);
+      }
       // The D3D12 contract forbids a legacy barrier on a texture in an
       // enhanced layout: that copy needs this list's CommandList7 Barrier.
       com_ptr<ID3D12GraphicsCommandList7> enhanced_list;
@@ -2143,7 +2176,7 @@ namespace sunshine_streamline::depth_capture {
         return reject(status::unsupported_queue, record_stage::command_interface);
       if (diagnostic) diagnostic->enhanced_copy = chosen.enhanced;
       const auto before = chosen.state;
-      const auto basis = proven_basis ? state_basis::proven : copy_basis(observed, chosen);
+      const auto basis = proof ? state_basis::proven : copy_basis(observed, chosen);
       if (diagnostic) {
         diagnostic->copy_state = before; diagnostic->copy_state_known = true;
         diagnostic->used_observed_state = chosen.used_observed;
@@ -2263,10 +2296,11 @@ namespace sunshine_streamline::depth_capture {
       found->texture = std::move(texture); found->metadata = value; found->metadata.native_state = before;
       found->id = ++serial; found->command = cookie; found->producer_recording = owner.life();
       found->basis = basis;
-      if (proven_basis) {
-        found->proven_source = value.source->cookie; found->proven_version = proven_basis.version;
-        found->proven_queue = proven_queue;
+      if (proof) {
+        found->proven_source = value.source->cookie; found->proven_version = proof.version;
+        found->proven_queue = proven_basis ? proven_queue : proof.queue;
       }
+      if (earlier.latched) proven_counters.earlier_copied.fetch_add(1, std::memory_order_relaxed);
       found->preservation_only = preservation_only;
       found->diagnostic_only = diagnostic_copy;
       found->diagnostic_reusable = reusable_storage;
@@ -2563,12 +2597,15 @@ namespace sunshine_streamline::depth_capture {
     {
       std::lock_guard lock(mutex);
       out.tracked = proven.size();
+      out.latched = proven.latched_count();
+      out.latch_lost = proven.latch_lost();
     }
     const auto &c = proven_counters;
     constexpr auto relaxed = std::memory_order_relaxed;
     out.unrecorded = c.unrecorded.load(relaxed); out.unreported = c.unreported.load(relaxed);
     out.invalidated = c.invalidated.load(relaxed); out.missed_reset = c.missed_reset.load(relaxed);
     out.uncovered = c.uncovered.load(relaxed); out.changed_copies = c.changed_copies.load(relaxed);
+    out.earlier_copied = c.earlier_copied.load(relaxed); out.earlier_refused = c.earlier_refused.load(relaxed);
     return out;
   }
   void finish(std::uint64_t ticket, bool successful, capture_failure failure) {

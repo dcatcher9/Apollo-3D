@@ -147,11 +147,16 @@ namespace sunshine_streamline::depth_capture::copy_state {
   // pending: a split barrier began and has not ended (the state is in transition).
   // enhanced: the latest barrier was an enhanced Barrier into layout with
   // access (known only when both are admissible); value is not used then.
+  // earlier: the recording names nothing, and an enhanced barrier on an
+  // earlier executed list latched the source's layout (proven_state.h); the
+  // other fields are then its proof from that list's queue, present only
+  // while one stands.
   struct observation {
     bool present{}, known{}, blocked{};
     std::uint32_t value{};
     bool pending{}, enhanced{};
     std::uint32_t layout{}, access{};
+    bool earlier{};
   };
   struct decision {
     bool admitted{};
@@ -185,8 +190,32 @@ namespace sunshine_streamline::depth_capture::copy_state {
     return equivalent != std::uint32_t(D3D12_BARRIER_LAYOUT_UNDEFINED) && equivalent == layouts::generic(observed.layout);
   }
 
+  // A claim against a layout an enhanced barrier set on an earlier list (the
+  // contract matrix's D6 and N8): a legacy barrier from the claim is illegal
+  // there (Enhanced Barriers, legacy interop), and the claim describes the
+  // layout only through the equivalence table. The matrix admits one such
+  // basis: the shader-resource layout that a shader-read declaration and
+  // NGX's contract name, as its proof from that list states it, on a texture
+  // shaders may read. A queue-specific layout (DIRECT_QUEUE_SHADER_RESOURCE)
+  // is another layout no claim names; any other layout, an unproven latched
+  // texture and a source that needs an observation are refused.
+  constexpr bool earlier_layout_copy(rule selected, std::uint32_t claimed, const observation &observed, std::uint32_t resource_flags) {
+    return selected != rule::observed_only && usable_claim(claimed) &&
+      layouts::equivalent(claimed) == std::uint32_t(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE) && observed.present && observed.known &&
+      !observed.blocked && !observed.pending && observed.enhanced &&
+      observed.layout == std::uint32_t(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE) &&
+      observed.access != std::uint32_t(D3D12_BARRIER_ACCESS_NO_ACCESS) && !(resource_flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE);
+  }
+
   constexpr decision resolve(rule selected, std::uint32_t claimed, const observation &observed, std::uint32_t resource_flags) {
     if (selected == rule::none) return reject(status::unsupported_state, record_stage::unsupported_proof);
+    if (observed.earlier) {
+      if (!earlier_layout_copy(selected, claimed, observed, resource_flags))
+        return reject(status::unsupported_state, record_stage::unsupported_state);
+      decision out{true, status::recorded, record_stage::recorded, claimed};
+      out.enhanced = true; out.layout = observed.layout; out.access = observed.access;
+      return out;
+    }
     // An in-progress split barrier or unrepresentable transition overrides every claim.
     if (observed.present && (observed.blocked || observed.pending || !observed.known))
       return reject(status::incomplete_state, record_stage::incomplete_state);

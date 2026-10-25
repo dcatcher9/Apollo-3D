@@ -544,24 +544,6 @@ namespace game3d_contract::known_gaps {
       return unnamed(source) && declared;
     }
 
-    // A layout an enhanced barrier set on an earlier list, described by a
-    // declaration (D6) or by NGX's contract state (N8): the copy uses a
-    // legacy barrier from the claim (copy_state::resolve sees no
-    // observation). A declared RESOLVE_DEST is refused (D2's table).
-    constexpr bool legacy_after_earlier_layout(const device_case &value, claim source) {
-      const auto &state = value.state;
-      return api(value) && state.list == list_type::direct && state.resource.seen == evidence::earlier_list_enhanced && state.source == source &&
-             !(source == claim::sl_declared && state.declared == D3D12_RESOURCE_STATE_RESOLVE_DEST);
-    }
-
-    constexpr bool declared_after_earlier_layout(const device_case &value) {
-      return legacy_after_earlier_layout(value, claim::sl_declared);
-    }
-
-    constexpr bool contract_after_earlier_layout(const device_case &value) {
-      return legacy_after_earlier_layout(value, claim::ngx_contract);
-    }
-
     // Unbinding a read-only DSV declares DEPTH_WRITE (depth_addon.cpp
     // on_bind_depth_stencil -> on_clear_depth_impl) and record_preserved copies
     // from it when the recording names nothing.
@@ -598,8 +580,6 @@ namespace game3d_contract::known_gaps {
     {"D3", &rules::D3, kind::expected_failure, &device::common_on_depth_stencil, "Stage 3 fix 5 (D3). Owner ruling R1 (decided): as the state table's D3 row; on the device a COMMON transition on a depth-stencil allocation, then the copy, is legal D3D12.", &behaviours::no_copy},
     {"D3b", &rules::D3b, kind::expected_failure, &device::declared_common_on_promotable, "Stage 3 fix 5 (D3). As the state table's D3b row: fix with D3 (one COMMON rule keyed by depth-stencil allocation).", &behaviours::copy},
     {"D2", &rules::D2, kind::expected_failure, &device::resolve_destination, "Outside the Stage 3 order. As the state table's D2 row: fail-safe, lowest priority.", &behaviours::no_copy},
-    {"D6", &rules::D6, kind::expected_failure, &device::declared_after_earlier_layout, "Stage 3 fix 3 (D6). A texture whose layout an enhanced barrier set on an earlier list takes a legacy barrier from its declaration: illegal D3D12 (Enhanced Barriers, legacy interop). Latch 'this resource uses enhanced layouts' at device level from any texture barrier group naming it (streamline_depth_capture.cpp enhanced_textures); when latched and the recording names nothing, refuse. A copy with enhanced barriers from SHADER_RESOURCE is right only where the latch also knows the earlier list set that generic layout: the queue-specific DIRECT_QUEUE_SHADER_RESOURCE a shader-read declaration also describes is another layout, which no declaration names, so those cells must be refused.", &behaviours::copy},
-    {"N8", &rules::N8, kind::expected_failure, &device::contract_after_earlier_layout, "Stage 3 fix 3 (D6). As D6 for NGX's contract state (ngx_depth_source.cpp nominates NON_PIXEL_SHADER_RESOURCE with state_proof::sdk_contract): the same device-level latch fixes both.", &behaviours::copy},
     {"D11c", &rules::D11c, kind::expected_failure, &device::read_only_unbind, "Stage 3 fix 7 (D11c). depth_addon.cpp declares DEPTH_WRITE when a DSV is unbound (on_bind_depth_stencil -> on_clear_depth_impl). Read the bound DSV's read-only flags: a writable DSV keeps DEPTH_WRITE; a read-only one with no observation is refused (D10's per-resource proven state may supply it).", &behaviours::copy},
     {"D12", &rules::D12, kind::expected_failure, &device::legacy_ui_clear, "Stage 3 fix 3 (D6). game3d_ui_layer.cpp record_into records legacy RENDER_TARGET -> COPY_SOURCE barriers at every full-frame clear boundary: illegal on a target an enhanced barrier put in the RENDER_TARGET layout, and wrong for a simultaneous-access target still in COMMON. Refuse both (or copy an enhanced target with enhanced barriers) with the device-level layout latch D6 adds.", &behaviours::copy},
     {"S22", &rules::S22, kind::expected_failure, &device::streamline_compute_list, "Stage 3 fix 9 (S22). Allow COMPUTE in record_impl and the consumer (streamline_depth_capture.cpp command_type, consume_owned) when the starting state is one a compute list may use (NON_PIXEL_SHADER_RESOURCE, UNORDERED_ACCESS, COPY_SOURCE, COPY_DEST, COMMON on depth-stencil, or a COMPUTE_QUEUE_* layout), with a compute-legal resting state for the snapshot storage. Until then every compute cell is refused as no_copy_point, also where the oracle refuses for its state.", &behaviours::no_copy},

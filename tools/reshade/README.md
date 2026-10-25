@@ -1421,8 +1421,10 @@ gap row or a fix, and an open owner question is EITHER or a pending row.
 tests' view of the production sources ([Test builds](#test-builds)) and holds two layers. The pure layer identifies every surveyed
 Streamline release's interposer DLL as the probe's discovery does (the matrix mirrors that contract
 selection) and reads raw buffer types 0 to 80 through the selected contract; it judges the capture
-state table over every legal state cell and a set of deliberately illegal rows; and it reads every
-pair of DXGI allocation and declared formats through [`depth_view_format.h`](depth_view_format.h).
+state table over every legal state cell and a set of deliberately illegal rows (a layout set by an
+enhanced barrier on an earlier list reaches the table as the capture owner's latch and that list's
+proof, D6 and N8); and it reads every pair of DXGI allocation and declared formats through
+[`depth_view_format.h`](depth_view_format.h).
 
 The hook layer drives the real adapters without a device. Streamline cases go through the probe's
 own hooks on fixture entry points (`testing::install` takes the release's version number and selects
@@ -1457,7 +1459,9 @@ earlier, executed list. Its copy's recording then holds the game's barrier: a tr
 ended there (begun on an earlier list of the same `ExecuteCommandLists` call, the only place D3D12
 completes a split) or still open, a wildcard alias, an enhanced barrier, or nothing after an
 enhanced layout set on the earlier list; on subresource 0, all subresources, another mip or the
-stencil plane. Then comes the copy at its point: an adapter's copy with the proof its claim selects,
+stencil plane. Each source is retained before its earlier list executes, so the capture owner
+watches it for the enhanced-layout latch as an adapter's retention does. Then comes the copy at its
+point: an adapter's copy with the proof its claim selects,
 a Generic boundary (`record_preserved` with the contract `depth_addon.cpp` passes: a clear's
 `DEPTH_WRITE`, the `DEPTH_WRITE` it declares at a DSV unbind, and at the end of the frame the
 source's last proven state on the copy's queue, which the earlier list proved; each depth-stencil
