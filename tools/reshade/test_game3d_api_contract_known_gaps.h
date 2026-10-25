@@ -250,19 +250,6 @@ namespace game3d_contract::known_gaps {
       return value.point == device_point::api;
     }
 
-    // The recording names nothing about subresource 0.
-    constexpr bool unnamed(const resource_state &source) {
-      return source.subresource == subresource_barrier::other_mip_only || source.subresource == subresource_barrier::stencil_plane_only ||
-             source.seen == evidence::none || source.seen == evidence::alias_named || source.seen == evidence::alias_wildcard;
-    }
-
-    // Unbinding a read-only DSV declares DEPTH_WRITE (depth_addon.cpp
-    // on_bind_depth_stencil -> on_clear_depth_impl) and record_preserved copies
-    // from it when the recording names nothing.
-    constexpr bool read_only_unbind(const device_case &value) {
-      return value.point == device_point::unbind_read_only_dsv && unnamed(value.state.resource);
-    }
-
     // The capture owner records copies on DIRECT lists only
     // (streamline_depth_capture.cpp record_impl, record_stage::command_type):
     // every COMPUTE cell is refused before its state is judged.
@@ -282,7 +269,6 @@ namespace game3d_contract::known_gaps {
   }  // namespace device
 
   inline constexpr row<device_case> device_rows[] {
-    {"D11c", &rules::D11c, kind::expected_failure, &device::read_only_unbind, "Stage 3 fix 7 (D11c). depth_addon.cpp declares DEPTH_WRITE when a DSV is unbound (on_bind_depth_stencil -> on_clear_depth_impl). Read the bound DSV's read-only flags: a writable DSV keeps DEPTH_WRITE; a read-only one with no observation is refused (D10's per-resource proven state may supply it).", &behaviours::copy},
     {"S22", &rules::S22, kind::expected_failure, &device::streamline_compute_list, "Stage 3 fix 9 (S22). Allow COMPUTE in record_impl and the consumer (streamline_depth_capture.cpp command_type, consume_owned) when the starting state is one a compute list may use (NON_PIXEL_SHADER_RESOURCE, UNORDERED_ACCESS, COPY_SOURCE, COPY_DEST, COMMON on depth-stencil, or a COMPUTE_QUEUE_* layout), with a compute-legal resting state for the snapshot storage. Until then every compute cell is refused as no_copy_point, also where the oracle refuses for its state.", &behaviours::no_copy},
     {"N7", &rules::N7, kind::expected_failure, &device::ngx_compute_list, "Stage 3 fix 9 (S22). As S22 for NGX evaluations (dlssg-guide.txt:2321-2324: a non-copy queue); the same record_impl change fixes both.", &behaviours::no_copy},
   };

@@ -1214,6 +1214,36 @@ RWTexture2D<float> depth : register(u0);
       require(manual(observed.runtime,0),"Cannot release explicit DSV pin");
       settle("manual-release-to-native");check_projection();
       std::puts("PASS explicit generic-depth pin takes priority; Auto resumes the direct tagged source and its projection scale");
+      {
+        // D11c: the add-on keeps a D3D12 DSV's read-only flags from its
+        // creation (ReShade's init_resource_view) and reads them where a list
+        // binds it; a view created again at a handle replaces them.
+        using read_only_view_t=BOOL(*)(api::effect_runtime *,std::uint64_t,BOOL *,BOOL *);
+        const auto read_only_view=reinterpret_cast<read_only_view_t>(GetProcAddress(module,"SunshineDepthTestReadOnlyView"));
+        require(read_only_view,"Direct fixture requires the TEST ONLY read-only DSV adapter");
+        com_ptr<ID3D12DescriptorHeap> views;
+        D3D12_DESCRIPTOR_HEAP_DESC descriptors{};
+        descriptors.Type=D3D12_DESCRIPTOR_HEAP_TYPE_DSV; descriptors.NumDescriptors=2;
+        checked(game->CreateDescriptorHeap(&descriptors,IID_PPV_ARGS(views.put())),"Create the read-only DSV heap");
+        const auto writable=views->GetCPUDescriptorHandleForHeapStart();
+        auto read_only=writable; read_only.ptr+=game->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+        D3D12_DEPTH_STENCIL_VIEW_DESC view{};
+        view.Format=decoy->format; view.ViewDimension=D3D12_DSV_DIMENSION_TEXTURE2D;
+        game->CreateDepthStencilView(decoy->texture.p,&view,writable);
+        // D32 has no stencil plane, so only its depth can be read-only.
+        view.Flags=D3D12_DSV_FLAG_READ_ONLY_DEPTH;
+        game->CreateDepthStencilView(decoy->texture.p,&view,read_only);
+        const auto expect_view=[&](D3D12_CPU_DESCRIPTOR_HANDLE handle,bool expected,const char *what) {
+          BOOL recorded=!expected, bound=!expected;
+          require(read_only_view(observed.runtime,handle.ptr,&recorded,&bound) && bool(recorded)==expected && bool(bound)==expected,what);
+        };
+        expect_view(writable,false,"A writable DSV was read as read-only");
+        expect_view(read_only,true,"A read-only DSV was read as writable at its creation or its binding");
+        view.Flags=D3D12_DSV_FLAG_NONE;
+        game->CreateDepthStencilView(decoy->texture.p,&view,read_only);
+        expect_view(read_only,false,"A writable DSV created over a read-only one kept the read-only flags");
+        std::puts("PASS a D3D12 DSV's read-only flags reach the Generic path from its creation and stay with its binding (D11c)");
+      }
 
       rotate=true;
       settle("native-rotation-warmup");

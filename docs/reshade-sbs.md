@@ -3728,8 +3728,22 @@ remains mono until a fresh valid snapshot exists.
 Generic's D3D12 copies take their source's pre-copy state from the boundary's contract
 (`generic` in [`api_contract.h`](../tools/reshade/api_contract.h)). A depth clear
 (`ClearDepthStencilView` with the depth flag, or a render pass that clears depth) needs
-`DEPTH_WRITE` by the D3D12 clear contract (`clear_contract`). A DSV unbind or switch and a
-clear-like draw still declare `DEPTH_WRITE` (the contract matrix's D11c). ReShade reports a render
+`DEPTH_WRITE` by the D3D12 clear contract (`clear_contract`). A DSV unbind and a clear-like draw
+name the state of the view bound there (`generic::bound_view`): a writable DSV's `DEPTH_WRITE`,
+which they declare, while a read-only DSV (`D3D12_DSV_FLAG_READ_ONLY_DEPTH` or `_STENCIL`) leaves
+its texture in `DEPTH_READ` with read bits D3D12 does not name, so only a state the copy's own
+recording observes proves that copy and otherwise it is refused as `missing_state` (the contract
+matrix's D11c, since Stage 3 batch B; before, every unbind and clear-like draw declared
+`DEPTH_WRITE`). ReShade keeps no DSV flags with a view and reports them only as the usage of its
+creation (`depth_stencil_read` for either flag), so the add-on records each D3D12 depth-stencil
+view's read-only-ness from `init_resource_view` in a lock-free table of 1024 handles per device
+([`read_only_dsv.h`](../tools/reshade/read_only_dsv.h)) and reads it where a list binds the view,
+since D3D12 reads the descriptor there and the game may reuse the handle before the unbind. Once a
+read-only view finds no slot, every handle the table does not hold counts as read-only. A view with
+only `READ_ONLY_STENCIL` counts as read-only too (ReShade does not tell the flags apart), which only
+refuses a copy. A descriptor the game copies into a DSV heap (`CopyDescriptors`) is not reported
+and keeps what was last created at its handle. A DSV switch after the list's own depth clear still
+declares the clear's `DEPTH_WRITE`. ReShade reports a render
 pass before the native `BeginRenderPass`, so a render pass that clears depth is copied there, outside
 the pass: the capture owner learns that the pass began only after that copy. The end-of-frame copy
 runs on ReShade's own list, where nothing names the state: it copies only from the source's last

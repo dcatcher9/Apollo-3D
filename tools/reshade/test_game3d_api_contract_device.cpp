@@ -15,7 +15,8 @@
 // - a Generic boundary: record_preserved with the contract depth_addon.cpp
 //   passes (on a recording that names nothing about the source, as the
 //   runtime's own list does at the end of the frame): a clear's DEPTH_WRITE,
-//   the DEPTH_WRITE it declares at a DSV unbind, and at the end of the frame
+//   a read-only DSV's unbind, which names no state (generic::bound_view),
+//   and at the end of the frame
 //   the source's last proven state on the copy's queue, which the earlier
 //   list proved (each source is tracked from its creation, as ReShade's
 //   init_resource reports a depth-stencil texture);
@@ -1083,12 +1084,12 @@ namespace {
           {
             // depth_addon.cpp's contracts: a clear's (on_clear_depth_impl),
             // the end of the frame's on the queue that executes the copy
-            // (preserve_d3d12_at_effects), and the DEPTH_WRITE it declares
-            // where a DSV is unbound (on_bind_depth_stencil).
+            // (preserve_d3d12_at_effects), and a read-only view's where it
+            // is unbound (on_bind_depth_stencil, generic::bound_view).
             namespace generic = sunshine_api_contract::generic;
             const auto point = value.value.point;
             out.preserved = point == device_point::unbind_read_only_dsv ?
-                              capture::record_preserved(native(list), native(resource), depth_write, &out.diagnostic) :
+                              capture::record_preserved(native(list), native(resource), generic::bound_view(true), 0, &out.diagnostic) :
                               capture::record_preserved(native(list), native(resource), point == device_point::clear ? generic::clear : generic::end_of_frame, native(gpu.queue.Get()), &out.diagnostic);
             admitted = bool(out.preserved) && out.diagnostic.result == capture::status::recorded;
             break;

@@ -522,6 +522,43 @@ extern "C" __declspec(dllexport) BOOL SunshineDepthTestActivityAccounting(effect
 	return ok ? TRUE : FALSE;
 }
 
+// D11c: whether the D3D12 depth-stencil view at a CPU descriptor handle is
+// read-only as the add-on recorded it from ReShade's init_resource_view, and
+// as a binding of it keeps that (on_bind_depth_stencil_impl, on scratch
+// command state with nothing bound before, so no boundary is reached and no
+// command is recorded).
+extern "C" __declspec(dllexport) BOOL SunshineDepthTestReadOnlyView(effect_runtime *runtime, uint64_t view, BOOL *recorded, BOOL *bound)
+{
+	if (!s_registered || runtime == nullptr || view == 0 || recorded == nullptr || bound == nullptr) return FALSE;
+	auto *const device = runtime->get_device();
+	const auto *const device_data = device->get_private_data<generic_depth_device_data>();
+	auto *const queue = runtime->get_command_queue();
+	if (device->get_api() != device_api::d3d12 || device_data == nullptr || queue == nullptr) return FALSE;
+	*recorded = device_data->read_only_views.read_only(view) ? TRUE : FALSE;
+	auto *const cmd = queue->get_immediate_command_list();
+	const bool temporary_tracking = cmd->get_private_data<state_tracking>() == nullptr;
+	if (temporary_tracking) cmd->create_private_data<state_tracking>(false);
+	struct release_tracking {
+		command_list *cmd;
+		bool owned;
+		~release_tracking() { if (owned) cmd->destroy_private_data<state_tracking>(); }
+	} tracking {cmd, temporary_tracking};
+	auto *const ptr = cmd->get_private_data<state_tracking>();
+	if (ptr == nullptr) return FALSE;
+	auto &state = *ptr;
+	const std::unique_lock<std::shared_mutex> lock(s_mutex);
+	const auto depth = state.current_depth_stencil;
+	const auto read_only = state.current_depth_read_only;
+	const auto lifetime = state.current_depth_lifetime;
+	const auto first = state.first_draw_since_bind;
+	state.current_depth_stencil = {};
+	on_bind_depth_stencil_impl(cmd, resource_view {view}, true);
+	*bound = state.current_depth_read_only ? TRUE : FALSE;
+	state.current_depth_stencil = depth; state.current_depth_read_only = read_only;
+	state.current_depth_lifetime = lifetime; state.first_draw_since_bind = first;
+	return TRUE;
+}
+
 extern "C" __declspec(dllexport) BOOL SunshineDepthTestCaptureDemand(effect_runtime *runtime,
 	BOOL *enabled, unsigned *users, uint64_t *transitions)
 {

@@ -53,6 +53,7 @@
 #include "streamline_depth_capture.h"
 #include "streamline_depth_provider.h"
 #include "native_resource_identity.h"
+#include "read_only_dsv.h"
 #include "camera_sample_observation.h"
 #include "game3d_slow_step.h"
 
@@ -224,6 +225,11 @@ struct __declspec(uuid("806c3b54-baf6-46a7-a72a-28c629143d84")) state_tracking
 	const uint64_t command_identity = s_next_command_identity.fetch_add(1, std::memory_order_relaxed);
 	viewport current_viewport = {};
 	resource current_depth_stencil = { 0 };
+	// D3D12: current_depth_stencil is bound through a read-only view, as its
+	// handle was when bound (D3D12 reads a DSV descriptor at the binding, so
+	// the game may reuse the handle before the unbind). It decides the state
+	// of the bound view's boundaries (generic::bound_view, D11c).
+	bool current_depth_read_only = false;
 	uint64_t current_depth_lifetime = 0;
 	resource render_pass_depth = {};
 	bool render_pass_depth_uncertain = false;
@@ -240,6 +246,7 @@ struct __declspec(uuid("806c3b54-baf6-46a7-a72a-28c629143d84")) state_tracking
 	{
 		stats_per_used_depth_stencil.clear();
 		current_depth_stencil = { 0 };
+		current_depth_read_only = false;
 		current_depth_lifetime = 0;
 		render_pass_depth = {};
 		render_pass_depth_uncertain = false;
@@ -260,6 +267,7 @@ struct __declspec(uuid("806c3b54-baf6-46a7-a72a-28c629143d84")) state_tracking
 	{
 		// Executing a command list in a different command list inherits state
 		current_depth_stencil = source.current_depth_stencil;
+		current_depth_read_only = source.current_depth_read_only;
 		current_depth_lifetime = source.current_depth_lifetime;
 
 		if (source.stats_per_used_depth_stencil.empty())
@@ -600,6 +608,10 @@ struct __declspec(uuid("94e283ef-6714-4d50-b936-71d6308a4be4")) generic_depth_de
 	// List of queues created for this device
 	std::vector<command_queue *> queues;
 
+	// D3D12: which depth-stencil views are read-only (on_init_resource_view).
+	// Lock-free; read by recording threads where they bind a view.
+	sunshine_read_only_dsv::table<1024> read_only_views;
+
 	// List of all encountered depth-stencils of the last frame
 	std::unordered_map<resource, depth_stencil_resource, resource_hash> depth_stencil_resources;
 
@@ -800,6 +812,7 @@ bool candidate_matches_shape(const DepthInfo &info, uint32_t width, uint32_t hei
 bool validate_capture_record(effect_runtime *runtime, const generic_depth_data &data,
 	const generic_depth_device_data &device_data, const sunshine_depth_capture::capture_record &record);
 void on_clear_depth_impl(command_list *cmd_list, state_tracking &state, resource depth_stencil, clear_op op);
+void on_bind_depth_stencil_impl(command_list *cmd_list, resource_view depth_stencil_view, bool direct_binding);
 bool on_draw(command_list *cmd_list, uint32_t vertices, uint32_t instances, uint32_t, uint32_t);
 bool on_draw_indexed(command_list *cmd_list, uint32_t indices, uint32_t instances, uint32_t, int32_t, uint32_t);
 bool on_draw_indirect(command_list *cmd_list, indirect_command type, resource, uint64_t, uint32_t draw_count, uint32_t);

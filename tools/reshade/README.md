@@ -1479,8 +1479,9 @@ stencil plane. Each source is retained before its earlier list executes, so the 
 watches it for the enhanced-layout latch as an adapter's retention does. Then comes the copy at its
 point: an adapter's copy with the proof its claim selects,
 a Generic boundary (`record_preserved` with the contract `depth_addon.cpp` passes: a clear's
-`DEPTH_WRITE`, the `DEPTH_WRITE` it declares at a DSV unbind, and at the end of the frame the
-source's last proven state on the copy's queue, which the earlier list proved; each depth-stencil
+`DEPTH_WRITE`, a read-only DSV's unbind, which names no state (`generic::bound_view`, D11c), and at
+the end of the frame the source's last proven state on the copy's queue, which the earlier list
+proved; each depth-stencil
 source is tracked from its creation, as ReShade's `init_resource` reports it), or the UI clear
 boundary (the barriers `game3d_ui_layer.cpp` records through ReShade where the capture owner's
 `legacy_render_target_copy` admits them, as the layer asks; the runtime layer runs the layer
@@ -1554,9 +1555,9 @@ swapchain's size: a clear after or before the draws (depth or stencil only), a r
 clear, an unbind and the end of frame, D32 and D32S8, judged by the depth the last native render
 consumed. The view is created in `DEPTH_WRITE` and never transitioned, so its creation proves that
 state at the end of the frame and at a stencil-only clear (D10b). The states an earlier executed
-list proves at the end of the frame are the device layer's, and so are copies from a state nothing
-proves (D11c), which it records without executing them, and the UI layer's clear boundary on an
-enhanced or simultaneous-access target (D12). Family `ui` (2.14.1) tags a
+list proves at the end of the frame are the device layer's, and so are a read-only DSV's unbind
+(D11c) and the UI layer's clear boundary on an enhanced or simultaneous-access target (D12). Family
+`ui` (2.14.1) tags a
 captured depth and a full-size UI input (UI colour and alpha, HUD-less colour, Backbuffer, UI alpha)
 at a tag call with the game's list, without a command list or as a local evaluate input, or draws
 an offscreen UI layer cleared every frame (a render target in `RENDER_TARGET`, or a
@@ -1700,9 +1701,10 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   in [`api_contract.h`](api_contract.h): a Streamline tag's lifetime by version, lifecycle and copy
   point (its tag call or a later evaluate, the one difference between the depth and UI readings),
   its state proof, the lifecycles the probe reads and `match()` judges, the NGX, DLSS-G and Generic
-  contracts (a depth clear's contract state, the end of the frame's last proven state and the other
-  boundaries' declaration), Dump 3D's stricter contract for its optional UI copies and an absent
-  extent as the whole allocation. The matrix's L1 hook cells drive the same mappers through the
+  contracts (a depth clear's contract state, the end of the frame's last proven state, a bound
+  view's `DEPTH_WRITE` or, read-only, no state, and the other boundaries' declaration), Dump 3D's
+  stricter contract for its optional UI copies and an absent extent as the whole allocation. The
+  matrix's L1 hook cells drive the same mappers through the
   probe.
 - [`test_proven_state.cpp`](test_proven_state.cpp) (`reshade_proven_state`) pins the per-resource
   last-proven state of [`proven_state.h`](proven_state.h), which admits the Generic end-of-frame
@@ -1720,6 +1722,16 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   Generic's copy) and `enhanced_layout_latch` (a depth clear after an enhanced barrier, and a later
   clear-only list, prove the `DEPTH_STENCIL_WRITE` layout, so the end-of-frame copy uses enhanced
   barriers under the debug layer; a destroyed latched texture is forgotten with its latch).
+- [`test_read_only_dsv.cpp`](test_read_only_dsv.cpp) (`reshade_read_only_dsv`) pins the read-only
+  depth-stencil view table of [`read_only_dsv.h`](read_only_dsv.h), which decides the Generic
+  path's unbind and clear-like draw of a bound view (D11c): a view created read-only stays so until
+  a writable view is created at its handle, a handle never created read-only is writable, and once a
+  read-only view finds no slot every handle the table does not hold counts as read-only. The
+  capture owner's refusal of such a copy is the device layer's `unbind_read_only_dsv` cells, and the
+  direct Streamline fixture checks the wiring under ReShade: a DSV created with `READ_ONLY_DEPTH`
+  reads as read-only in the table and where a list binds it, a writable one does not, and a writable
+  view created again at the read-only view's handle replaces it
+  (`SunshineDepthTestReadOnlyView`).
 
 ### Independent renderer reference tests
 

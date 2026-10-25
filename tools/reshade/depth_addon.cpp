@@ -1169,8 +1169,13 @@ SUNSHINE_DEPTH_ADDON_INTERNAL void on_clear_depth_impl(command_list *cmd_list, s
 			{
 				if (state.is_queue) lock.unlock();
 				namespace generic = sunshine_api_contract::generic;
-				auto ticket = sunshine_streamline::depth_capture::record_preserved(cmd_list->get_native(), depth_stencil.handle,
-					op == clear_op::clear_depth_stencil_view ? generic::clear : generic::preserved(D3D12_RESOURCE_STATE_DEPTH_WRITE));
+				// A clear needs DEPTH_WRITE; an unbind and a clear-like draw name
+				// the bound view's state, which a read-only view leaves unnamed
+				// (D11c); a switch after this list's own clear declares its state.
+				const auto boundary = op == clear_op::clear_depth_stencil_view ? generic::clear :
+					op == clear_op::direct_depth_switch ? generic::preserved(D3D12_RESOURCE_STATE_DEPTH_WRITE) :
+					generic::bound_view(state.current_depth_read_only);
+				auto ticket = sunshine_streamline::depth_capture::record_preserved(cmd_list->get_native(), depth_stencil.handle, boundary);
 				if (state.is_queue) lock.lock();
 				stats.capture_ticket = std::move(ticket);
 				stats.copied_during_frame = bool(stats.capture_ticket);
@@ -1594,6 +1599,18 @@ static bool on_create_resource_view(device *device, resource resource, resource_
 
 	return true;
 }
+// ReShade keeps no D3D12_DSV_FLAGS with a view: it reports them only as the
+// usage of the view's creation, depth_stencil_read when any flag makes the
+// view read-only. The Generic path's boundaries of a bound view need them
+// (generic::bound_view, the contract matrix's D11c).
+static void on_init_resource_view(device *device, resource, resource_usage usage_type, const resource_view_desc &, resource_view view)
+{
+	if (device->get_api() != device_api::d3d12 ||
+		(usage_type != resource_usage::depth_stencil && usage_type != resource_usage::depth_stencil_read))
+		return;
+	if (auto *const device_data = device->get_private_data<generic_depth_device_data>())
+		device_data->read_only_views.created(view.handle, usage_type == resource_usage::depth_stencil_read);
+}
 // ReShade reports a D3D12 creation state as its usage: the native state's
 // bits, with COMMON as general. undefined (an UNDEFINED initial layout) and
 // any other value with general's bit name no legacy state.
@@ -1765,7 +1782,7 @@ static void on_bind_viewport(command_list *cmd_list, uint32_t first, uint32_t co
 	auto &state = *cmd_list->get_private_data<state_tracking>();
 	state.current_viewport = viewport[0];
 }
-static void on_bind_depth_stencil_impl(command_list *cmd_list, resource_view depth_stencil_view, bool direct_binding)
+SUNSHINE_DEPTH_ADDON_INTERNAL void on_bind_depth_stencil_impl(command_list *cmd_list, resource_view depth_stencil_view, bool direct_binding)
 {
 	auto &state = *cmd_list->get_private_data<state_tracking>();
 
@@ -1794,6 +1811,10 @@ static void on_bind_depth_stencil_impl(command_list *cmd_list, resource_view dep
 	}
 
 	state.current_depth_stencil = depth_stencil;
+	state.current_depth_read_only = false;
+	if (depth_stencil != 0 && cmd_list->get_device()->get_api() == device_api::d3d12)
+		if (const auto *const device_data = cmd_list->get_device()->get_private_data<generic_depth_device_data>())
+			state.current_depth_read_only = device_data->read_only_views.read_only(depth_stencil_view.handle);
 	if (cmd_list->get_device()->get_api() == device_api::d3d12)
 		state.current_depth_lifetime = s_streamline_probe_events ? depth_lifetime(cmd_list->get_device(), depth_stencil) : 0;
 }
@@ -3797,6 +3818,7 @@ static void register_depth_events()
 
 	reshade::register_event<reshade::addon_event::create_resource>(sunshine_addon_lifetime::guarded<on_create_resource>);
 	reshade::register_event<reshade::addon_event::create_resource_view>(sunshine_addon_lifetime::guarded<on_create_resource_view>);
+	reshade::register_event<reshade::addon_event::init_resource_view>(sunshine_addon_lifetime::guarded<on_init_resource_view>);
 	reshade::register_event<reshade::addon_event::init_resource>(sunshine_addon_lifetime::guarded<on_init_resource>);
 	reshade::register_event<reshade::addon_event::destroy_resource>(sunshine_addon_lifetime::guarded<on_destroy_resource>);
 
@@ -3842,6 +3864,7 @@ static void unregister_depth_events()
 
 	reshade::unregister_event<reshade::addon_event::create_resource>(sunshine_addon_lifetime::guarded<on_create_resource>);
 	reshade::unregister_event<reshade::addon_event::create_resource_view>(sunshine_addon_lifetime::guarded<on_create_resource_view>);
+	reshade::unregister_event<reshade::addon_event::init_resource_view>(sunshine_addon_lifetime::guarded<on_init_resource_view>);
 	reshade::unregister_event<reshade::addon_event::init_resource>(sunshine_addon_lifetime::guarded<on_init_resource>);
 	reshade::unregister_event<reshade::addon_event::destroy_resource>(sunshine_addon_lifetime::guarded<on_destroy_resource>);
 

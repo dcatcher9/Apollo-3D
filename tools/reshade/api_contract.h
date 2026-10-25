@@ -203,14 +203,25 @@ namespace sunshine_api_contract {
   // state ClearDepthStencilView needs when its flags clear the subresource;
   // a render pass that clears depth is reported as that clear). The end of
   // the frame names no state: the source's last proven state on the copy's
-  // queue supplies it (the matrix's D10). The other boundaries declare the
-  // state their caller passes (the matrix's D11c).
+  // queue supplies it (the matrix's D10). A boundary of the bound view (its
+  // unbind, a clear-like draw) names the view's state (bound_view), and a
+  // switch after this list's own clear declares the clear's state.
   namespace generic {
     inline constexpr std::uint32_t depth_write = 0x10; // D3D12_RESOURCE_STATE_DEPTH_WRITE
     inline constexpr contract clear{depth_write, state_proof::clear_contract, lifetime::until_present};
     inline constexpr contract end_of_frame{UINT32_MAX, state_proof::last_proven, lifetime::until_present};
     constexpr contract preserved(std::uint32_t declared_state) {
       return {declared_state, state_proof::declared, lifetime::until_present};
+    }
+    // The bound depth-stencil view's state (MS Learn D3D12_RESOURCE_STATES):
+    // a writable view's texture is in DEPTH_WRITE, which is declared. A
+    // read-only one (D3D12_DSV_FLAG_READ_ONLY_DEPTH or _STENCIL) leaves it
+    // in DEPTH_READ, which "can be combined with other read states" the API
+    // does not name, so only a state its recording observes proves the copy;
+    // with none the copy is refused (the matrix's D11c).
+    constexpr contract bound_view(bool read_only) {
+      return read_only ? contract{UINT32_MAX, state_proof::observed_nonzero, lifetime::until_present} :
+        preserved(depth_write);
     }
   }
 
