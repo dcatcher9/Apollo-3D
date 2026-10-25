@@ -1487,7 +1487,9 @@ boundary (the barriers `game3d_ui_layer.cpp` records through ReShade where the c
 `legacy_render_target_copy` admits them, as the layer asks; the runtime layer runs the layer
 itself). The cells cover every legal state of every
 allocation, each claim, each direct-list enhanced layout, every depth family typed and typeless with
-mips and planes, the shapes no input names, COMPUTE lists and UI tags. A cell meets the oracle by
+mips and planes, the shapes no input names, COMPUTE lists (each state and claim a compute list may
+use, and the compute-queue layouts, copied on that list and executed on a compute queue; S22, N7)
+and UI tags. A cell meets the oracle by
 its kind, refusal class and copy basis; the basis must be the state the test put the source in, so
 the copy restores it exactly. Each copy executes alone: subresource 0's plane-0 bytes are read back
 through the capture owner's consumer copies, and a D3D12 debug-layer error fails the cell. A copy
@@ -1735,6 +1737,16 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   reads as read-only in the table and where a list binds it, a writable one does not, and a writable
   view created again at the read-only view's handle replaces it
   (`SunshineDepthTestReadOnlyView`).
+- Compute lists (S22, N7): [`test_capture_state_policy.cpp`](test_capture_state_policy.cpp) pins
+  `copy_state::list_basis` (the states and layouts a COMPUTE list may name, none of a compute
+  queue's own layouts on a DIRECT list) and the copy's compute-queue source layout;
+  `reshade_diagnostic_texture_capture_test`'s `compute_list_capture`, under the debug layer, copies
+  NGX's contract state on an evaluation's own compute list and reads it back exact on a direct
+  consumer queue only after the compute recording was reset (the compute queue takes its fence at
+  that submission), lets an observed state win there and refuses a direct-only declared state for
+  its state; and the capture-owner self-test (`reshade_streamline_camera_probe`) accepts a
+  compute-list FG copy for its scope only once readable (submitted with the fence, reset, fence
+  passed), never an auxiliary one, and a direct-list copy at its call.
 
 ### Independent renderer reference tests
 

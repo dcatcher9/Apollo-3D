@@ -4457,6 +4457,27 @@ allocation, and by the capture (`resource_region`), both `malformed`. With a nul
 extent a declared size must be the allocation's own (`malformed` otherwise), and an undeclared size
 takes the retained allocation's for the jitter denominator. UI tags follow the same extent rule
 (a null extent is the full-size input the UI request wants).
+A copy is recorded on the list its API call supplied, DIRECT or COMPUTE: NGX evaluates on any
+non-copy queue (DLSS-G's guide: "executed on a non-copy command queue"; the SR guide's inputs are
+"read by a compute shader"), and Streamline's evaluate and tag calls require only a command buffer
+of a device that supports the feature (the API contract matrix's S22 and N7, since Stage 3 batch
+B; before, every compute list was refused as `command_type`). A compute list's copy starts only
+from a state or layout that list may name (`copy_state::list_basis` in
+[`capture_state_policy.h`](../tools/reshade/capture_state_policy.h)): NON_PIXEL_SHADER_RESOURCE,
+UNORDERED_ACCESS, COPY_SOURCE, COPY_DEST, read combinations of these, COMMON where it is the state
+(a depth-stencil texture, D3) and the layouts below; a declared or contracted state with a depth,
+pixel-shader, render-target or resolve bit (GENERIC_READ among them) is refused as
+`unsupported_state` (S22b), whatever its proof. Such a copy's snapshot storage rests in COMMON
+(`texture_reference::rest`, fixed at allocation), since a compute list cannot name the
+pixel-shader state a direct list's depth snapshot rests in; every copy into or out of storage
+starts and ends at its own rest, so a direct list may reuse COMMON storage and a compute list takes
+only COMMON storage. A COMPUTE queue, which ReShade does not report, takes a place and its own
+fence at its first submission of a copy awaiting its producer (`register_compute_producer`, only
+after a compute-list copy was ever recorded), and the Present queue reads that copy as any other
+queue's: once its recording was reset and the fence passed. Such a copy is its FG scope's accepted
+copy (`frame_generation_scope_live`) only once the Present queue can read it, so a copy never
+submitted or never reset keeps no other depth out of its viewport; a direct-list copy is accepted
+at its call's success. The consumer's own list stays the Present queue's DIRECT list.
 Native capture copies an `OnlyValidNow` tag only inside the call that supplied it: the synchronous
 v2 tag boundary, with or without FG, or the evaluate a local input came with, where `sl_core_api.h`
 makes local tags current ("they are considered to be a 'local' tags and do NOT interact with same
@@ -4498,12 +4519,17 @@ the access changes), and restores both with `SyncAfter=ALL`, so every later comm
 copy. Admissible layouts are those a direct list can copy from: COMMON, GENERIC_READ,
 RENDER_TARGET, UNORDERED_ACCESS, DEPTH_STENCIL_WRITE/READ, SHADER_RESOURCE, COPY_SOURCE/DEST,
 RESOLVE_SOURCE, RESOLVE_DEST (since Stage 3 batch B, the matrix's D2; before, it and the legacy
-RESOLVE_DEST state were refused) and their direct-queue forms. A compute- or video-queue, video,
-shading-rate or undefined layout, `NO_ACCESS`, or a split begun with `SyncAfter=SPLIT`
-refuses the copy (`incomplete_state`) until a later barrier (the split's end) names an admissible
-layout. An enhanced COMMON layout is an explicit layout, not missing evidence. A declared legacy
-state agrees with an observed layout only through the contract's equivalent-layout table (pixel or
-non-pixel shader resource is SHADER_RESOURCE, DEPTH_READ with or without them DEPTH_STENCIL_READ,
+RESOLVE_DEST state were refused) and their direct-queue forms, and on a COMPUTE list those its
+queue supports (Command Queue Layout Compatibility: COMMON, GENERIC_READ, UNORDERED_ACCESS,
+SHADER_RESOURCE, COPY_SOURCE/DEST) and their compute-queue forms, left for
+`COMPUTE_QUEUE_COPY_SOURCE`. A video-queue, video, shading-rate or undefined layout, `NO_ACCESS`,
+or a split begun with `SyncAfter=SPLIT` refuses the copy (`incomplete_state`) until a later
+barrier (the split's end) names an admissible layout; a layout outside the recording's list type
+(a compute queue's own on a direct list, a depth-stencil, render-target or resolve layout or a
+direct queue's own on a compute list) refuses it as `unsupported_state`. An enhanced COMMON layout
+is an explicit layout, not missing evidence. A declared legacy state agrees with an observed layout
+only through the contract's equivalent-layout table (pixel or non-pixel shader resource is
+SHADER_RESOURCE, DEPTH_READ with or without them DEPTH_STENCIL_READ,
 GENERIC_READ, COPY_SOURCE and so on); any other declaration conflicts. The NGX rejection line
 reports `enhanced=1 layout=<D3D12_BARRIER_LAYOUT> access=0x<D3D12_BARRIER_ACCESS>`, with
 `observed_state` the layout's legacy equivalent (`0xffffffff` without one). A legacy split barrier's

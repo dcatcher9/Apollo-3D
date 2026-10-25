@@ -33,6 +33,17 @@ namespace sunshine_streamline::depth_capture::copy_state {
     if (value & ~(write_states | texture_reads)) return false;
     return !(value & write_states) || ((value & (value - 1)) == 0);
   }
+  // A supported state a COMPUTE list may name in a barrier: the depth,
+  // pixel-shader, render-target and resolve states belong to the direct
+  // queue (D3D12_RESOURCE_STATES), and GENERIC_READ includes the
+  // pixel-shader one. The only starting states of a copy recorded on a
+  // compute list (record_impl, the matrix's N7 and S22b).
+  constexpr bool compute_list_state(std::uint32_t value) {
+    constexpr std::uint32_t direct_only = D3D12_RESOURCE_STATE_DEPTH_WRITE | D3D12_RESOURCE_STATE_DEPTH_READ |
+      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_RENDER_TARGET |
+      D3D12_RESOURCE_STATE_RESOLVE_SOURCE | D3D12_RESOURCE_STATE_RESOLVE_DEST;
+    return supported(value) && !(value & direct_only);
+  }
 
   // Whether the allocation's flags let a texture be in a legacy state (the
   // contract matrix's X1; D3D12_RESOURCE_FLAGS): ALLOW_RENDER_TARGET,
@@ -57,12 +68,12 @@ namespace sunshine_streamline::depth_capture::copy_state {
   // access. Legacy states are compared with a layout only through the
   // contract's equivalence table.
   namespace layouts {
-    // Admissible for a copy on a direct command list (the only list type the
-    // capture records on): the generic read/write layouts a legacy copy
-    // admits, resolve destination among them (Enhanced Barriers, Command
-    // Queue Layout Compatibility, lists it for DIRECT; D2), and the
-    // direct-queue forms. Compute- and video-queue, video, shading-rate,
-    // undefined and unknown layouts are not.
+    // Admissible for a copy on a direct command list: the generic read/write
+    // layouts a legacy copy admits, resolve destination among them (Enhanced
+    // Barriers, Command Queue Layout Compatibility, lists it for DIRECT; D2),
+    // and the direct-queue forms. Compute- and video-queue, video,
+    // shading-rate, undefined and unknown layouts are not; a compute list's
+    // are compute_list's below.
     constexpr bool admissible(std::uint32_t layout) {
       switch (static_cast<D3D12_BARRIER_LAYOUT>(layout)) {
         case D3D12_BARRIER_LAYOUT_COMMON: case D3D12_BARRIER_LAYOUT_GENERIC_READ:
@@ -80,6 +91,22 @@ namespace sunshine_streamline::depth_capture::copy_state {
     }
     constexpr bool direct_queue(std::uint32_t layout) {
       return layout >= D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COMMON && layout <= D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COPY_DEST;
+    }
+    constexpr bool compute_queue(std::uint32_t layout) {
+      return layout >= D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_COMMON && layout <= D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_COPY_DEST;
+    }
+    // Admissible for a copy on a COMPUTE command list (the matrix's S22 and
+    // N7): the generic layouts Command Queue Layout Compatibility lists for
+    // COMPUTE and the compute-queue forms. Depth-stencil, render-target,
+    // resolve and the direct queue's own layouts are not.
+    constexpr bool compute_list(std::uint32_t layout) {
+      switch (static_cast<D3D12_BARRIER_LAYOUT>(layout)) {
+        case D3D12_BARRIER_LAYOUT_COMMON: case D3D12_BARRIER_LAYOUT_GENERIC_READ:
+        case D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS: case D3D12_BARRIER_LAYOUT_SHADER_RESOURCE:
+        case D3D12_BARRIER_LAYOUT_COPY_SOURCE: case D3D12_BARRIER_LAYOUT_COPY_DEST:
+          return true;
+        default: return compute_queue(layout);
+      }
     }
     // The generic layout a queue-specific layout specializes; itself otherwise.
     constexpr std::uint32_t generic(std::uint32_t layout) {
@@ -134,10 +161,12 @@ namespace sunshine_streamline::depth_capture::copy_state {
     // The copy's own source layout. A common layout already admits COPY_SOURCE
     // access, so the copy changes only access (a simultaneous-access texture
     // never changes layout); any other leaves for COPY_SOURCE, in its
-    // direct-queue form inside that family.
+    // queue-specific form inside that family.
     constexpr std::uint32_t copy_source(std::uint32_t layout) {
-      if (layout == D3D12_BARRIER_LAYOUT_COMMON || layout == D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COMMON) return layout;
-      return direct_queue(layout) ? D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COPY_SOURCE : D3D12_BARRIER_LAYOUT_COPY_SOURCE;
+      if (layout == D3D12_BARRIER_LAYOUT_COMMON || layout == D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COMMON ||
+          layout == D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_COMMON) return layout;
+      return direct_queue(layout) ? D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COPY_SOURCE :
+        compute_queue(layout) ? D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_COPY_SOURCE : D3D12_BARRIER_LAYOUT_COPY_SOURCE;
     }
   }
 
@@ -211,6 +240,17 @@ namespace sunshine_streamline::depth_capture::copy_state {
   };
 
   constexpr decision reject(status result, record_stage stage) { return {false, result, stage}; }
+
+  // Whether an admitted basis may start a copy on the recording's list type
+  // (the matrix's S22, S22b and N7): a COMPUTE list names only a state
+  // (compute_list_state) or layout (layouts::compute_list) its queue
+  // supports, and a DIRECT list none of a compute queue's own layouts. NGX
+  // and Streamline evaluate on any non-copy queue, so this is the only
+  // difference between the two list types.
+  constexpr bool list_basis(const decision &chosen, bool compute) {
+    if (chosen.enhanced) return compute ? layouts::compute_list(chosen.layout) : !layouts::compute_queue(chosen.layout);
+    return !compute || compute_list_state(chosen.state);
+  }
 
   constexpr bool usable_claim(std::uint32_t value) { return value != 0 && value != UINT32_MAX; }
 

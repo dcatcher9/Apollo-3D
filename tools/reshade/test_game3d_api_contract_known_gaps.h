@@ -231,33 +231,16 @@ namespace game3d_contract::known_gaps {
   // Copies recorded on real lists (checked by
   // test_game3d_api_contract_device.cpp, judged with judge_each). A cell whose
   // row records a copy is recorded but never executed: that copy starts from
-  // a state nothing proved.
+  // a state nothing proved. The add-on meets every cell; one pending row that
+  // matches no cell stands in for the table.
   namespace device {
-    constexpr bool api(const device_case &value) {
-      return value.point == device_point::api;
-    }
-
-    // The capture owner records copies on DIRECT lists only
-    // (streamline_depth_capture.cpp record_impl, record_stage::command_type):
-    // every COMPUTE cell is refused before its state is judged.
-    constexpr bool compute_list(const device_case &value, bool ngx) {
-      const auto &state = value.state;
-      const bool by_ngx = state.role == consumer::depth && (state.source == claim::ngx_contract || state.source == claim::none);
-      return api(value) && state.list == list_type::compute && by_ngx == ngx;
-    }
-
-    constexpr bool streamline_compute_list(const device_case &value) {
-      return compute_list(value, false);
-    }
-
-    constexpr bool ngx_compute_list(const device_case &value) {
-      return compute_list(value, true);
+    constexpr bool no_cell(const device_case &) {
+      return false;
     }
   }  // namespace device
 
   inline constexpr row<device_case> device_rows[] {
-    {"S22", &rules::S22, kind::expected_failure, &device::streamline_compute_list, "Stage 3 fix 9 (S22). Allow COMPUTE in record_impl and the consumer (streamline_depth_capture.cpp command_type, consume_owned) when the starting state is one a compute list may use (NON_PIXEL_SHADER_RESOURCE, UNORDERED_ACCESS, COPY_SOURCE, COPY_DEST, COMMON on depth-stencil, or a COMPUTE_QUEUE_* layout), with a compute-legal resting state for the snapshot storage. Until then every compute cell is refused as no_copy_point, also where the oracle refuses for its state.", &behaviours::no_copy},
-    {"N7", &rules::N7, kind::expected_failure, &device::ngx_compute_list, "Stage 3 fix 9 (S22). As S22 for NGX evaluations (dlssg-guide.txt:2321-2324: a non-copy queue); the same record_impl change fixes both.", &behaviours::no_copy},
+    {"none", &rules::S22, kind::pending, &device::no_cell, "No device gap remains: Stage 3 batch B closed D11c (a read-only DSV's unbind names no state) and S22 with N7 (copies on a COMPUTE list from a state or layout that list may name). This row matches no cell."},
   };
 
   // One family's verdicts against its rows.

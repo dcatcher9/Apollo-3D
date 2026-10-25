@@ -703,6 +703,131 @@ namespace {
       gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
   }
 
+  // NGX and Streamline evaluate on any non-copy queue (the matrix's S22 and
+  // N7), so an input is copied on its evaluation's COMPUTE list too, from a
+  // state that list may name, into storage resting in COMMON. The compute
+  // queue, never reported, takes a place and a fence at its first submission
+  // of such a copy; a direct consumer reads the copy once that recording was
+  // reset and the fence passed. A state only a direct list may name is
+  // refused for its state (S22b), never for the list type. The debug layer
+  // checks every barrier.
+  void compute_list_capture(fixture &gpu) {
+    if (gpu.debug_messages) gpu.debug_messages->ClearStoredMessages();
+    consumer_fixture consumer(gpu);
+    D3D12_COMMAND_QUEUE_DESC queue_desc{}; queue_desc.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+    ComPtr<ID3D12CommandQueue> compute;
+    ComPtr<ID3D12CommandAllocator> allocator, spare;
+    ComPtr<ID3D12GraphicsCommandList> list;
+    ComPtr<ID3D12Fence> done;
+    check(gpu.device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&compute)), "evaluation compute queue");
+    check(gpu.device->CreateCommandAllocator(queue_desc.Type, IID_PPV_ARGS(&allocator)), "evaluation compute allocator");
+    check(gpu.device->CreateCommandAllocator(queue_desc.Type, IID_PPV_ARGS(&spare)), "evaluation compute spare allocator");
+    check(gpu.device->CreateCommandList(0, queue_desc.Type, allocator.Get(), nullptr, IID_PPV_ARGS(&list)), "evaluation compute list");
+    check(gpu.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&done)), "evaluation compute fence");
+    std::uint64_t completion{};
+    created(list.Get());
+    capture::observe_command(native(list.Get())); capture::poll();
+    const auto reset_compute = [&] {
+      check(spare->Reset(), "evaluation compute allocator reset");
+      check(reset_list(list.Get(), spare.Get()), "evaluation compute recording reset");
+      std::swap(allocator, spare); capture::poll();
+    };
+    const auto run_compute = [&] {
+      check(close_list(list.Get()), "evaluation compute close");
+      execute(compute.Get(), list.Get());
+      check(compute->Signal(done.Get(), ++completion), "evaluation compute signal");
+      HANDLE event = CreateEventW(nullptr, false, false, nullptr); require(event != nullptr, "evaluation compute event");
+      const auto hr = done->SetEventOnCompletion(completion, event);
+      const auto outcome = SUCCEEDED(hr) ? WaitForSingleObject(event, 10000) : WAIT_FAILED;
+      CloseHandle(event); require(outcome == WAIT_OBJECT_0, "evaluation compute completion timeout");
+    };
+    check(close_list(list.Get()), "evaluation compute initial close");
+    reset_compute();
+
+    // The input reaches NON_PIXEL_SHADER_RESOURCE on the game's direct queue.
+    texture_case depth(gpu, DXGI_FORMAT_R32_FLOAT, 4);
+    gpu.submit(); gpu.wait(); gpu.reset();
+    auto input = depth.input;
+    input.provider = sunshine_scene_depth::provider_kind::ngx;
+    input.epoch = 75; input.source_id = 93; input.viewport = 0;
+    input.valid_until = sunshine_scene_depth::lifetime::until_evaluation; input.force_snapshot = false;
+    input.source_present_generation = capture::source_present_generation(input.source);
+    std::uint64_t sequence{}, present = 20;
+    capture::record_diagnostic diagnostic;
+    const auto nominate = [&](sunshine_scene_depth::state_proof proof, std::uint32_t state) {
+      auto value = input;
+      value.proof = proof; value.native_state = state; value.sequence = ++sequence; value.tick = GetTickCount64();
+      return capture::nominate_evaluation(native(list.Get()), value, UINT64_MAX, &diagnostic);
+    };
+
+    // A declared pixel-shader state belongs to the direct queue (S22b).
+    const auto direct_only = nominate(sunshine_scene_depth::state_proof::declared,
+      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    if (direct_only) capture::finish(direct_only, false);
+    require(diagnostic.result == capture::status::unsupported_state && diagnostic.stage == capture::record_stage::unsupported_state &&
+        diagnostic.command_type == D3D12_COMMAND_LIST_TYPE_COMPUTE,
+      "a compute list's copy from a state only a direct list may name was not refused for its state");
+    // An input proven only by an observation has none on this list.
+    const auto unobserved = nominate(sunshine_scene_depth::state_proof::observed_nonzero, UINT32_MAX);
+    if (unobserved) capture::finish(unobserved, false);
+    require(diagnostic.result == capture::status::missing_state && diagnostic.command_type == D3D12_COMMAND_LIST_TYPE_COMPUTE,
+      "an input with no state recorded on its compute list was not refused for its state");
+    // NGX's SDK contract names NON_PIXEL_SHADER_RESOURCE, which a compute list
+    // may name (N7).
+    const auto ticket = nominate(sunshine_scene_depth::state_proof::sdk_contract, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    require(ticket && diagnostic.result == capture::status::recorded && !diagnostic.observed &&
+        diagnostic.copy_state == D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE && diagnostic.used_contract_state &&
+        diagnostic.command_type == D3D12_COMMAND_LIST_TYPE_COMPUTE,
+      "NGX contract-state depth was not copied on its compute list");
+    capture::finish(ticket, true);
+    run_compute();
+
+    // The closed recording may legally run again: submitted, not readable.
+    capture::packet packet;
+    capture::capture_diagnostic acquired;
+    capture::acquire(native(gpu.foreign_queue.Get()), ++present, packet, &acquired);
+    require(!packet.pixel_ready && acquired.capture_id == ticket && acquired.result == capture::status::submitted &&
+        acquired.submitted && !acquired.producer_recording_retired && acquired.queue == native(compute.Get()),
+      "the compute queue took no fence at its copy's submission, or a still-closed compute recording was readable");
+    reset_compute();
+    packet = {};
+    require(capture::acquire(native(gpu.foreign_queue.Get()), ++present, packet, &acquired) && packet.pixel_ready &&
+        packet.capture_id == ticket && packet.producer_queue == native(compute.Get()),
+      "a reset compute recording's completed copy was not readable on the direct consumer queue");
+    auto target = destination(gpu.device.Get(), DXGI_FORMAT_R32_FLOAT);
+    readback actual(gpu, target.Get());
+    require(capture::copy_current(native(consumer.list.Get()), packet, native(target.Get()),
+      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE), "the direct consumer could not copy the compute queue's copy");
+    actual.record(consumer.list.Get(), target.Get());
+    capture::complete_frame(packet, present);
+    consumer.submit(); consumer.wait(); consumer.reset();
+    actual.verify(depth.width, depth.height, depth.bpp);
+    packet = {};
+
+    // A state observed on the compute list wins over the contract (S22).
+    transition(list.Get(), depth.source.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+      D3D12_RESOURCE_STATE_COPY_SOURCE);
+    const auto observed = nominate(sunshine_scene_depth::state_proof::sdk_contract, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    require(observed && diagnostic.result == capture::status::recorded && diagnostic.observed &&
+        diagnostic.copy_state == D3D12_RESOURCE_STATE_COPY_SOURCE && diagnostic.used_observed_state,
+      "a state observed on the compute list did not decide its copy");
+    capture::finish(observed, true);
+    transition(list.Get(), depth.source.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE,
+      D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    run_compute();
+    reset_compute();
+    capture::retire_source(input.provider, input.epoch, input.source_id);
+    destroyed(list.Get());
+    capture::command_destroyed(native(list.Get()));
+    capture::poll();
+    gpu.check_debug_errors();
+    std::printf("PASS compute-list copies (S22, N7): NGX's contract state copied on the evaluation's compute list with exact "
+      "bytes, an observed state winning there; a direct-only declared state refused for its state, an unobserved input "
+      "for its missing state; the compute queue took its fence at submission; readable on the direct queue only after its "
+      "recording was reset%s\n",
+      gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
+  }
+
   void observed_recording_color_capture(fixture &gpu, DXGI_FORMAT format, bool shared,
       D3D12_RESOURCE_STATES observed_state = D3D12_RESOURCE_STATE_RENDER_TARGET,
       DXGI_FORMAT snapshot_format = DXGI_FORMAT_UNKNOWN,
@@ -2068,6 +2193,7 @@ int main(int argc, char **argv) {
     first_recording_depth_capture(gpu);
     proven_state_end_of_frame(gpu);
     ngx_contract_depth_capture(gpu);
+    compute_list_capture(gpu);
     depth_format_and_mips(gpu);
     local_same_queue_ordered_capture(gpu);
     immediate_consumer_without_list_hooks(gpu);

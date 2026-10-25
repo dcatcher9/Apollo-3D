@@ -120,8 +120,44 @@ int main() try {
       layouts::copy_source(D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_GENERIC_READ) == D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COPY_SOURCE &&
       layouts::copy_source(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE) == D3D12_BARRIER_LAYOUT_COPY_SOURCE &&
       layouts::copy_source(D3D12_BARRIER_LAYOUT_RESOLVE_DEST) == D3D12_BARRIER_LAYOUT_COPY_SOURCE &&
-      layouts::copy_source(D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ) == D3D12_BARRIER_LAYOUT_COPY_SOURCE,
+      layouts::copy_source(D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ) == D3D12_BARRIER_LAYOUT_COPY_SOURCE &&
+      layouts::copy_source(D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_SHADER_RESOURCE) == D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_COPY_SOURCE &&
+      layouts::copy_source(D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_COMMON) == D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_COMMON,
     "the copy's source layout left its queue family");
+  // A COMPUTE list (S22, S22b, N7): the states and layouts its queue
+  // supports, and nothing a direct list alone may name.
+  for (std::uint32_t layout = 0; layout != 0x20; ++layout) {
+    const bool compute = layout >= D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_COMMON && layout <= D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_COPY_DEST;
+    require(layouts::compute_queue(layout) == compute, "a compute queue's own layout changed");
+    const bool generic = layout == D3D12_BARRIER_LAYOUT_COMMON || layout == D3D12_BARRIER_LAYOUT_GENERIC_READ ||
+      layout == D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS || layout == D3D12_BARRIER_LAYOUT_SHADER_RESOURCE ||
+      layout == D3D12_BARRIER_LAYOUT_COPY_SOURCE || layout == D3D12_BARRIER_LAYOUT_COPY_DEST;
+    require(layouts::compute_list(layout) == (compute || generic), "a compute list's layouts changed");
+  }
+  require(!layouts::compute_list(D3D12_BARRIER_LAYOUT_UNDEFINED), "a compute list admitted an undefined layout");
+  for (const std::uint32_t state : {0u, 0x8u, 0x40u, 0x400u, 0x800u, 0x40u | 0x800u}) {
+    require(copy_state::compute_list_state(state), "a compute list refused a state its queue supports");
+  }
+  for (const std::uint32_t state : {0x10u, 0x20u, 0x80u, 0x4u, 0x1000u, 0x2000u, 0x40u | 0x80u, 0x20u | 0x40u,
+                                    static_cast<std::uint32_t>(D3D12_RESOURCE_STATE_GENERIC_READ)}) {
+    require(!copy_state::compute_list_state(state), "a compute list admitted a direct queue's state");
+  }
+  {
+    copy_state::decision legacy{true, capture::status::recorded, capture::record_stage::recorded, 0x40};
+    copy_state::decision depth{true, capture::status::recorded, capture::record_stage::recorded, 0x20 | 0x40};
+    copy_state::decision compute_layout{true, capture::status::recorded, capture::record_stage::recorded, 0};
+    compute_layout.enhanced = true; compute_layout.layout = D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_SHADER_RESOURCE;
+    copy_state::decision direct_layout = compute_layout;
+    direct_layout.layout = D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE;
+    copy_state::decision depth_layout = compute_layout;
+    depth_layout.layout = D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ;
+    require(copy_state::list_basis(legacy, true) && copy_state::list_basis(legacy, false) &&
+        !copy_state::list_basis(depth, true) && copy_state::list_basis(depth, false) &&
+        copy_state::list_basis(compute_layout, true) && !copy_state::list_basis(compute_layout, false) &&
+        !copy_state::list_basis(direct_layout, true) && copy_state::list_basis(direct_layout, false) &&
+        !copy_state::list_basis(depth_layout, true) && copy_state::list_basis(depth_layout, false),
+      "a copy basis was judged against the wrong list type");
+  }
   constexpr auto shader_states = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
   require(layouts::equivalent(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE) == D3D12_BARRIER_LAYOUT_SHADER_RESOURCE &&
       layouts::equivalent(shader_states) == D3D12_BARRIER_LAYOUT_SHADER_RESOURCE &&

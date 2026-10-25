@@ -411,6 +411,86 @@ namespace sunshine_streamline::depth_capture {
           return false;
         requested = true; fixture::clear_captures();
       }
+      {
+        // A depth copy recorded on a COMPUTE list (S22, N7) is its FG scope's
+        // accepted copy only once the Present queue can read it: its SDK call
+        // succeeded, its submission carries the capture owner's fence, its
+        // recording was reset and that fence passed, in any order. One never
+        // submitted (its queue had no place), or submitted but not yet reset
+        // or complete, keeps the scope silent. A compute copy that nominates
+        // no depth (an auxiliary input) is never accepted; a direct-list copy
+        // still is at its call.
+        constexpr std::uint64_t epoch = 8, fg = (1ull << 63) | 2;
+        struct completion_fence final : ID3D12Fence {
+          UINT64 completed{};
+          HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void **out) override { if (out) *out = nullptr; return E_NOINTERFACE; }
+          ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
+          ULONG STDMETHODCALLTYPE Release() override { return 1; }
+          HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID, UINT *, void *) override { return E_NOTIMPL; }
+          HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID, UINT, const void *) override { return E_NOTIMPL; }
+          HRESULT STDMETHODCALLTYPE SetPrivateDataInterface(REFGUID, const IUnknown *) override { return E_NOTIMPL; }
+          HRESULT STDMETHODCALLTYPE SetName(LPCWSTR) override { return E_NOTIMPL; }
+          HRESULT STDMETHODCALLTYPE GetDevice(REFIID, void **out) override { if (out) *out = nullptr; return E_NOINTERFACE; }
+          UINT64 STDMETHODCALLTYPE GetCompletedValue() override { return completed; }
+          HRESULT STDMETHODCALLTYPE SetEventOnCompletion(UINT64, HANDLE) override { return E_NOTIMPL; }
+          HRESULT STDMETHODCALLTYPE Signal(UINT64) override { return E_NOTIMPL; }
+        } fence;
+        // The compute queue's place: selection reads only its private fence.
+        const auto entry = std::find_if(queues.begin(), queues.end(), [](const auto &item) { return !item; });
+        if (entry == queues.end()) return false;
+        *entry = std::make_unique<queue_state>();
+        (*entry)->queue.p = reinterpret_cast<ID3D12CommandQueue *>(&fence);
+        (*entry)->fence.p = &fence;
+        struct release_queue {
+          std::unique_ptr<queue_state> &entry;
+          ~release_queue() { entry->queue.p = nullptr; entry->fence.p = nullptr; entry.reset(); }
+        } release{*entry};
+        const auto compute_queue = reinterpret_cast<std::uint64_t>(&fence);
+        const auto silent_since = [] { return GetTickCount64() - sunshine_freshness::fg_silent_ms - 1; };
+        const auto copy = [&](std::uint64_t id, std::uint64_t sequence, bool compute, bool submitted, bool nominated = true) {
+          begin_evaluation(epoch, sequence, 2, provider_kind::streamline, fg, 0);
+          slots[0] = {}; slots[0].id = id; slots[0].compute_list = compute; slots[0].source_nominated = nominated;
+          slots[0].metadata.provider = provider_kind::streamline; slots[0].metadata.epoch = epoch;
+          slots[0].metadata.sequence = sequence; slots[0].metadata.viewport = 2; slots[0].metadata.source_id = fg;
+          slots[0].metadata.frame_generation_input = true; slots[0].metadata.tick = GetTickCount64();
+          slots[0].command = id; slots[0].producer_recording = std::make_shared<sunshine_native_command::recording_lifetime>();
+          slots[0].producer_recording->cookie = id;
+          if (submitted) { slots[0].producer_submitted = true; slots[0].producer_fence = sequence; slots[0].queue = compute_queue; }
+        };
+        // Its recording's Reset starts another recording on the list.
+        const auto reset = [&] { slots[0].producer_recording->cookie = slots[0].command + 1000; };
+        const auto live = [&] { return frame_generation_scope_live(epoch, 2, silent_since()); };
+        struct recorded_flag {
+          bool saved{compute_copies_recorded};
+          ~recorded_flag() { compute_copies_recorded = saved; }
+        } restore_flag;
+        compute_copies_recorded = true; // As record_impl sets it at a compute-list copy.
+        copy(61, 20, true, false); finish(61, true);
+        if (!slots[0].finished || live()) return false;
+        slots[0].producer_submitted = true; slots[0].producer_fence = 20; slots[0].queue = compute_queue;
+        accept_compute_copy(slots[0]);
+        if (live()) return false; // Submitted, but its recording is not reset.
+        reset();
+        if (live()) return false; // Reset, but its fence has not passed.
+        fence.completed = 20;
+        if (!live()) return false;
+        // Submitted, reset and complete before its call finished.
+        for (auto &view : evaluations[provider_index(provider_kind::streamline)].views)
+          if (view.epoch == epoch && view.viewport == 2 && view.source_id == fg) view.accepted_tick = 0;
+        copy(62, 21, true, true); reset(); fence.completed = 21;
+        if (live()) return false;
+        finish(62, true);
+        if (!live()) return false;
+        // An auxiliary compute copy (no depth nomination) is never accepted.
+        for (auto &view : evaluations[provider_index(provider_kind::streamline)].views)
+          if (view.epoch == epoch && view.viewport == 2 && view.source_id == fg) view.accepted_tick = 0;
+        copy(63, 22, true, true, false); reset(); fence.completed = 22; finish(63, true);
+        if (live()) return false;
+        // A direct-list copy is accepted at its call, before its submission.
+        copy(64, 23, false, false); finish(64, true);
+        if (!live()) return false;
+        fixture::clear_captures();
+      }
       queue_state owner;
       constexpr std::uint64_t native = 77;
       {
@@ -1738,10 +1818,18 @@ namespace sunshine_streamline::depth_capture {
       enhanced_textures(address, next_cookie, 1, &resolve_destination);
       if (enhanced->blocked || !enhanced->known || enhanced->layout != D3D12_BARRIER_LAYOUT_RESOLVE_DEST ||
           enhanced->value != D3D12_RESOURCE_STATE_RESOLVE_DEST) return false;
-      // Layouts the copy cannot use refuse it until a later barrier names an
+      // A compute queue's own layout is known: a compute list's copy leaves
+      // and restores it, and on a direct list copy_state::list_basis refuses
+      // the copy (S22, S22b).
+      const native_observer::enhanced_texture compute_layout{reinterpret_cast<ID3D12Resource *>(&resource),
+        D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_SHADER_RESOURCE, true, D3D12_BARRIER_ACCESS_SHADER_RESOURCE};
+      enhanced_textures(address, next_cookie, 1, &compute_layout);
+      if (enhanced->blocked || !enhanced->known || enhanced->layout != D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_SHADER_RESOURCE ||
+          enhanced->value != (D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)) return false;
+      // Layouts no copy can use refuse it until a later barrier names an
       // admissible one; they never block the texture for the recording.
-      for (const auto layout : {D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_UNDEFINED,
-          D3D12_BARRIER_LAYOUT_VIDEO_DECODE_READ, D3D12_BARRIER_LAYOUT_SHADING_RATE_SOURCE, D3D12_BARRIER_LAYOUT_VIDEO_QUEUE_COMMON}) {
+      for (const auto layout : {D3D12_BARRIER_LAYOUT_UNDEFINED, D3D12_BARRIER_LAYOUT_VIDEO_DECODE_READ,
+          D3D12_BARRIER_LAYOUT_SHADING_RATE_SOURCE, D3D12_BARRIER_LAYOUT_VIDEO_QUEUE_COMMON}) {
         const native_observer::enhanced_texture refused_layout{reinterpret_cast<ID3D12Resource *>(&resource), layout, true};
         enhanced_textures(address, next_cookie, 1, &refused_layout);
         if (owner->invalid || enhanced->blocked || enhanced->known || enhanced->layout != std::uint32_t(layout)) return false;

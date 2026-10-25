@@ -164,6 +164,12 @@ namespace sunshine_streamline::depth_capture {
     // Local auxiliary snapshots: the format of the SRV at shader_resource,
     // created on the first lease (lease_local_view); protected by mutex.
     DXGI_FORMAT view_format{DXGI_FORMAT_UNKNOWN};
+    // The state the storage rests in between copies, fixed at allocation:
+    // sampled_state for a depth snapshot, COMMON for auxiliary storage and
+    // for a depth snapshot first recorded on a COMPUTE list (which cannot
+    // name the pixel-shader state). Every copy into or out of it starts and
+    // ends there.
+    D3D12_RESOURCE_STATES rest{D3D12_RESOURCE_STATE_COMMON};
     ~texture_reference() { if (shared_handle) CloseHandle(shared_handle); }
   };
 #if defined(__GNUC__) && !defined(__clang__) && !defined(SUNSHINE_STREAMLINE_PROBE_TEST)
@@ -191,6 +197,8 @@ namespace sunshine_streamline::depth_capture {
       bool preservation_only{};
       bool diagnostic_only{}, diagnostic_released{}, diagnostic_reusable{};
       bool source_nominated{}, nomination_only{}, nomination_invalid{};
+      // Recorded on a COMPUTE list (record_impl; S22, N7).
+      bool compute_list{};
       status pixel_failure{status::unavailable};
       capture_failure failure{capture_failure::none};
       // The pre-copy state's provenance of an auxiliary snapshot (diagnostic;
@@ -292,6 +300,9 @@ namespace sunshine_streamline::depth_capture {
     extern std::array<slot, diagnostic_slot_limit> diagnostic_slots;
     extern std::array<std::unique_ptr<queue_state>, queue_limit> queues;
     extern std::array<evaluation_namespace, provider_count> evaluations;
+    // A copy was ever recorded on a COMPUTE list (record_impl); liveness
+    // queries look for readable compute-list copies only then.
+    extern bool compute_copies_recorded;
     bool matching_evaluation(const evaluation_head &head, const input &value);
     void end_nomination(const input &value);
     void invalidate(slot &value, capture_failure why);
@@ -314,6 +325,7 @@ namespace sunshine_streamline::depth_capture {
     state_basis copy_basis(const source_state *observed, const copy_state::decision &chosen);
     void render_pass(std::uint64_t native, std::uint64_t cookie, bool inside);
     void producer_submitted(slot &value, std::uint64_t native, std::uint64_t fence, bool signaled);
+    void accept_compute_copy(const slot &value);
     bool submitted_success(const slot &value, std::uint64_t native);
     status diagnostic_admission(const slot &value, const queue_progress &progress);
     status submission_status(const slot &value, std::uint64_t native,

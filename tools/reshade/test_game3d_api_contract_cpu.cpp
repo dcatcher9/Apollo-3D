@@ -299,6 +299,13 @@ namespace {
 
   // Copy state.
 
+  // A layout the barrier hooks know (enhanced_textures()): one a direct
+  // list's copy admits or a compute queue's own; record_impl then checks it
+  // against the recording's list type (copy_state::list_basis).
+  constexpr bool known_layout(std::uint32_t layout) {
+    return copy_state::layouts::admissible(layout) || copy_state::layouts::compute_queue(layout);
+  }
+
   // The recording's entry for the source. It mirrors the barrier hooks
   // (streamline_depth_capture.cpp barriers() and enhanced_textures()), which
   // classify a recorded state with these same copy_state predicates; the
@@ -324,7 +331,7 @@ namespace {
       case matrix::evidence::enhanced_split_open:
         {
           const bool pending = source.seen == matrix::evidence::enhanced_split_open;
-          observed = {true, !pending && copy_state::layouts::admissible(source.layout) && source.access != D3D12_BARRIER_ACCESS_NO_ACCESS, false, UINT32_MAX, pending, true, source.layout, source.access};
+          observed = {true, !pending && known_layout(source.layout) && source.access != D3D12_BARRIER_ACCESS_NO_ACCESS, false, UINT32_MAX, pending, true, source.layout, source.access};
           break;
         }
       case matrix::evidence::earlier_list_enhanced:
@@ -333,7 +340,7 @@ namespace {
           // proof on the copy's queue (record_impl): that list proves only a
           // layout and access its entry knows, else the latched texture is
           // unproven.
-          const bool proven = copy_state::layouts::admissible(source.layout) && source.access != D3D12_BARRIER_ACCESS_NO_ACCESS;
+          const bool proven = known_layout(source.layout) && source.access != D3D12_BARRIER_ACCESS_NO_ACCESS;
           observed = {proven, proven, false, 0, false, proven, source.layout, source.access, true};
           break;
         }
@@ -348,6 +355,15 @@ namespace {
   // auxiliary_state_policy for an at-call UI copy) and the recording's entry
   // for the source. A declaration of a later use is a longer-lived depth tag
   // copied at its frame-generation tag call (api_contract.h tag_call_proof).
+  // record_impl's admission after copy_state's decision: the recording's
+  // list type (copy_state::list_basis).
+  copy_state::decision on_list(const copy_state::decision &decided, matrix::list_type list) {
+    if (decided.admitted && !copy_state::list_basis(decided, list == matrix::list_type::compute)) {
+      return copy_state::reject(capture::status::unsupported_state, capture::record_stage::unsupported_state);
+    }
+    return decided;
+  }
+
   copy_state::decision production(const matrix::state_case &value) {
     auto supplied = proof::observed_nonzero;
     std::uint32_t claimed {};
@@ -376,7 +392,7 @@ namespace {
       input.valid_until = sunshine_scene_depth::lifetime::at_call;
       chosen = capture::auxiliary_state_policy(input);
     }
-    return copy_state::resolve(copy_state::select(supplied, chosen), claimed, observation_of(value.resource), value.resource.flags);
+    return on_list(copy_state::resolve(copy_state::select(supplied, chosen), claimed, observation_of(value.resource), value.resource.flags), value.list);
   }
 
   matrix::result judged(const copy_state::decision &decision) {
@@ -1569,7 +1585,7 @@ namespace {
       if (!at_call && !forced && !run.snapshot.tags[0].own_frame && run.presents) {
         return out;
       }
-      return judged(copy_state::resolve(copy_state::select(proof, policy::source_contract), frame.native_state, observation_of(value.depth), value.depth.flags));
+      return judged(on_list(copy_state::resolve(copy_state::select(proof, policy::source_contract), frame.native_state, observation_of(value.depth), value.depth.flags), value.list));
     }
 
     bool newer_struct(const matrix::sl_case &value) {
@@ -1882,13 +1898,13 @@ namespace {
         if (!run.offered || depth.state != dlssg::parameter::present || !depth.area_valid || run.inputs.command != command || !run.completed || !run.completed_successfully) {
           return out;
         }
-        return judged(copy_state::resolve(copy_state::select(proof::observed_nonzero, policy::source_contract), UINT32_MAX, observation_of(value.depth), value.depth.flags));
+        return judged(on_list(copy_state::resolve(copy_state::select(proof::observed_nonzero, policy::source_contract), UINT32_MAX, observation_of(value.depth), value.depth.flags), value.list));
       }
       // Nothing recorded, or the copy discarded with its failed evaluation.
       if (!run.recorded || !run.finished || !run.succeeded) {
         return out;
       }
-      return judged(copy_state::resolve(copy_state::select(run.frame.proof, policy::source_contract), run.frame.native_state, observation_of(value.depth), value.depth.flags));
+      return judged(on_list(copy_state::resolve(copy_state::select(run.frame.proof, policy::source_contract), run.frame.native_state, observation_of(value.depth), value.depth.flags), value.list));
     }
 
     constexpr unsigned row_count = std::size(gaps::ngx_rows);
