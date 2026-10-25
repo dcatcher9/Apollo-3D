@@ -486,6 +486,14 @@ namespace {
               visit(value);
             }
           }
+          // A compute queue's own layouts an earlier compute list set: no
+          // LayoutBefore on this direct list (D6).
+          for (std::uint32_t layout = D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_COMMON; !recorded_only && layout <= D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_COPY_DEST; ++layout) {
+            if (matrix::layout_allowed(layout, flags)) {
+              value.resource = {flags, matrix::evidence::earlier_list_enhanced, 0, layout, matrix::compatible_access(layout)};
+              visit(value);
+            }
+          }
         };
         matrix::state_case value;
         value.role = role;

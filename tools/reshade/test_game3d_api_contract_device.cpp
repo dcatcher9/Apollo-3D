@@ -398,7 +398,11 @@ namespace {
       }
 
       // A layout an enhanced barrier set on an earlier list, then nothing on
-      // the recording (D6, N8).
+      // the recording (D6, N8): a claim's copy leaves and restores that
+      // layout, whichever it is (D6-relax). The earlier list runs on the
+      // direct queue, so the copy is on a direct list: a copy executed on
+      // another queue than its proof's is discarded (a proof never crosses
+      // queues).
       for (const auto &allocation : {allocations[0], allocations[2], allocations[5]}) {
         for (const std::uint32_t layout : {D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_GENERIC_READ, D3D12_BARRIER_LAYOUT_COPY_SOURCE, D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ, D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE, D3D12_BARRIER_LAYOUT_RENDER_TARGET, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, D3D12_BARRIER_LAYOUT_RESOLVE_SOURCE}) {
           const matrix::resource_state source {allocation.flags, evidence::earlier_list_enhanced, 0, layout, matrix::compatible_access(layout)};

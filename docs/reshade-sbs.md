@@ -2394,8 +2394,9 @@ whose barrier the D3D12 runtime accepts on a texture; anything else is illegal i
 recorded (the matrix's X1 and X2, since Stage 3 batch B; before, only the at-call UI declaration
 was checked against the flags, and a copy's barrier from `GENERIC_READ | DEPTH_READ` made the
 game's own `Close` fail). A source an enhanced barrier on an earlier executed list
-latched, whose recording names nothing, is copied only from a shader-read claim's `SHADER_RESOURCE`
-proof (the enhanced-layout latch, since Stage 3 fix 3). The
+latched, whose recording names nothing, is copied with enhanced barriers from the layout that list
+proved, whichever it is, beside a claim the proof agrees with (the enhanced-layout latch, since Stage
+3 fix 3; any proven layout since D6-relax). The
 [API contract matrix](../tools/reshade/README.md#api-contract-matrix) judges the table over every
 legal combination of allocation flags, adapter claim, consumer, declared state and recorded
 evidence (a layout set on an earlier list included, and a depth declaration of a later use with
@@ -3811,15 +3812,21 @@ neither. A watched texture's proofs serve the latch alone: the
 end-of-frame copy and the Present-queue copy still use tracked textures only. A copy whose own
 recording names nothing about a latched source, and which no proof above admits, takes no legacy
 barrier from its claim, because the [Enhanced Barriers](https://microsoft.github.io/DirectX-Specs/d3d/D3D12EnhancedBarriers.html)
-legacy interop forbids one on that layout. The claim is checked against the source's proof from the
-earlier list instead. Only a shader-read claim (a declared pixel or non-pixel shader-resource state,
-or NGX's `NON_PIXEL_SHADER_RESOURCE` contract) is copied, and only where that list left the texture
-in exactly `SHADER_RESOURCE` with access and shaders may read it. That copy uses enhanced barriers
-from that layout and access, and is checked at execution like a proven copy: it is discarded when the
-proof changed or another queue runs it. Everything else is refused (`unsupported_state`):
-- a queue-specific layout (`DIRECT_QUEUE_SHADER_RESOURCE`, a layout no claim names);
-- any other claim or layout, including a clear's contract;
-- a source that needs an observation;
+legacy interop forbids one on that layout. The copy instead leaves and restores exactly the layout
+and access the source's proof from the earlier list names, whatever layout that is (owner ruling
+D6-relax, 10-24): the Enhanced Barriers barrier validation needs only that a barrier's
+`LayoutBefore` match the subresource's layout. That proof stands as an observation on the copy's
+recording would. The claim's rule decides against it: a declaration, or a clear's or a writable
+view's `DEPTH_WRITE`, must name the proven layout's equivalent state, or the copy is refused
+(`conflicting_state`); NGX's `NON_PIXEL_SHADER_RESOURCE` contract and an at-call UI declaration give
+way to it. The allocation's flags must allow the layout, and the copy's list type must be able to
+name it as `LayoutBefore` (a COMPUTE list a generic or compute-queue layout, a direct list no
+compute-queue one; S22, N7). The copy is checked at execution like a proven copy: it is discarded
+when the proof changed or another queue runs it. Everything else is refused (`unsupported_state`):
+- a layout of another queue type than the copy's list;
+- a source that needs a state recorded on its own list (no claim, an undeclared state, DLSS-G's own
+  inputs, a read-only view, a declaration of a later use), whose proof a watched texture never
+  supplies alone;
 - a latched source with no proof, or whose proof is from another queue than the copy's known one;
 - a recording the hooks do not see, or one that aliased the source before the copy.
 

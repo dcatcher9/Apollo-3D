@@ -276,31 +276,28 @@ namespace sunshine_streamline::depth_capture::copy_state {
 
   // A claim against a layout an enhanced barrier set on an earlier list (the
   // contract matrix's D6 and N8): a legacy barrier from the claim is illegal
-  // there (Enhanced Barriers, legacy interop), and the claim describes the
-  // layout only through the equivalence table. The matrix admits one such
-  // basis: the shader-resource layout that a shader-read declaration and
-  // NGX's contract name, as its proof from that list states it, on a texture
-  // shaders may read. A queue-specific layout (DIRECT_QUEUE_SHADER_RESOURCE)
-  // is another layout no claim names; any other layout, an unproven latched
-  // texture and a source that needs an observation (a declaration of a later
-  // use included) are refused.
-  constexpr bool earlier_layout_copy(rule selected, std::uint32_t claimed, const observation &observed, std::uint32_t resource_flags) {
-    return selected != rule::observed_only && selected != rule::observed_over_declared && usable_claim(claimed) &&
-      layouts::equivalent(claimed) == std::uint32_t(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE) && observed.present && observed.known &&
-      !observed.blocked && !observed.pending && observed.enhanced &&
-      observed.layout == std::uint32_t(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE) &&
-      observed.access != std::uint32_t(D3D12_BARRIER_ACCESS_NO_ACCESS) && layouts::allowed(observed.layout, resource_flags);
+  // there (Enhanced Barriers, legacy interop), so the copy leaves and
+  // restores the layout and access that list's proof names, whatever layout
+  // it is (owner ruling D6-relax, 10-24): Barrier validation needs only that
+  // LayoutBefore match the subresource's layout. The proof then stands as an
+  // observation on the recording does: the claim's rule decides against it
+  // (a declaration that disagrees refuses under declared_must_match), the
+  // allocation's flags must allow it (X1), and the recording's list type
+  // must be able to name it (list_basis: no layout of another queue type).
+  // An unproven latched texture is refused, and so is a source that needs a
+  // state recorded on its own list (observed_only, and a declaration of a
+  // later use): a watched texture's proof never admits a copy alone
+  // (proven_state.h).
+  constexpr bool earlier_layout_copy(rule selected, const observation &observed) {
+    return selected != rule::observed_only && selected != rule::observed_over_declared && observed.present &&
+      observed.known && !observed.blocked && !observed.pending && observed.enhanced &&
+      observed.access != std::uint32_t(D3D12_BARRIER_ACCESS_NO_ACCESS);
   }
 
   constexpr decision resolve(rule selected, std::uint32_t claimed, const observation &observed, std::uint32_t resource_flags) {
     if (selected == rule::none) return reject(status::unsupported_state, record_stage::unsupported_proof);
-    if (observed.earlier) {
-      if (!earlier_layout_copy(selected, claimed, observed, resource_flags))
-        return reject(status::unsupported_state, record_stage::unsupported_state);
-      decision out{true, status::recorded, record_stage::recorded, claimed};
-      out.enhanced = true; out.layout = observed.layout; out.access = observed.access;
-      return out;
-    }
+    if (observed.earlier && !earlier_layout_copy(selected, observed))
+      return reject(status::unsupported_state, record_stage::unsupported_state);
     // An in-progress split barrier or unrepresentable transition overrides every claim.
     if (observed.present && (observed.blocked || observed.pending || !observed.known))
       return reject(status::incomplete_state, record_stage::incomplete_state);

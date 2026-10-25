@@ -1666,13 +1666,14 @@ namespace {
       "a shader-read declaration of a latched texture was not copied from its SHADER_RESOURCE proof");
     gpu.submit(); gpu.wait(); gpu.reset();
     ticket = {};
-    // Any other claim, a clear's contract: refused, no barrier recorded.
+    // A claim that names another layout than the proof, a clear's contract
+    // included: refused as conflicting, no barrier recorded.
     for (const auto claim : {D3D12_RESOURCE_STATE_DEPTH_READ, D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_COPY_SOURCE}) {
       require(!capture::record_preserved(native(gpu.list.Get()), source, claim, &diagnostic) && diagnostic.earlier_layout &&
-          diagnostic.stage == capture::record_stage::unsupported_state, "another claim of a latched texture was copied");
+          diagnostic.stage == capture::record_stage::conflicting_state, "another claim of a latched texture was copied");
     }
     require(!capture::record_preserved(native(gpu.list.Get()), source, generic::clear, 0, &diagnostic) && diagnostic.earlier_layout &&
-        diagnostic.stage == capture::record_stage::unsupported_state, "a clear's contract was copied on a latched texture");
+        diagnostic.stage == capture::record_stage::conflicting_state, "a clear's contract was copied from another latched layout");
     // The end-of-frame copy uses the proof on its own queue (D10b).
     ticket = capture::record_preserved(native(gpu.list.Get()), source, generic::end_of_frame, queue, &diagnostic);
     require(ticket && !diagnostic.earlier_layout && diagnostic.used_proven_state && diagnostic.enhanced_copy &&
@@ -1702,12 +1703,32 @@ namespace {
     require(capture::proven_counts().changed_copies == changed + 1, "a latched copy whose proof changed before its execution was kept");
     ticket = {};
 
-    // A queue-specific layout is another layout no claim names: refused.
-    barrier(gpu.list.Get(), depth.Get(), D3D12_BARRIER_ACCESS_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE,
-      D3D12_BARRIER_ACCESS_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE);
-    gpu.submit(); gpu.wait(); gpu.reset();
-    require(!capture::record_preserved(native(gpu.list.Get()), source, shader, &diagnostic) && diagnostic.earlier_layout &&
-        diagnostic.stage == capture::record_stage::unsupported_state, "a declaration was copied from a queue-specific earlier layout");
+    // Any proven layout a direct list may name is the copy's (owner ruling
+    // D6-relax): the direct queue's SHADER_RESOURCE, DEPTH_STENCIL_READ for a
+    // depth-read declaration, and DEPTH_STENCIL_WRITE for a clear's contract,
+    // each copied with enhanced barriers from exactly that layout and access.
+    const auto copied_from = [&](D3D12_BARRIER_ACCESS access_before, D3D12_BARRIER_LAYOUT before, D3D12_BARRIER_ACCESS access,
+        D3D12_BARRIER_LAYOUT layout, auto &&record, const char *what) {
+      barrier(gpu.list.Get(), depth.Get(), access_before, before, access, layout);
+      gpu.submit(); gpu.wait(); gpu.reset();
+      ticket = record();
+      require(ticket && diagnostic.earlier_layout && diagnostic.used_proven_state && diagnostic.enhanced_copy &&
+          diagnostic.observed_layout == std::uint32_t(layout) && diagnostic.observed_access == std::uint32_t(access), what);
+      gpu.submit(); gpu.wait(); gpu.reset();
+      ticket = {};
+    };
+    copied_from(D3D12_BARRIER_ACCESS_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+      D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE,
+      [&] { return capture::record_preserved(native(gpu.list.Get()), source, shader, &diagnostic); },
+      "a shader-read declaration was not copied from a direct queue's SHADER_RESOURCE proof");
+    copied_from(D3D12_BARRIER_ACCESS_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE,
+      D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ, D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ,
+      [&] { return capture::record_preserved(native(gpu.list.Get()), source, D3D12_RESOURCE_STATE_DEPTH_READ, &diagnostic); },
+      "a depth-read declaration was not copied from its DEPTH_STENCIL_READ proof");
+    copied_from(D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ, D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ,
+      D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE, D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE,
+      [&] { return capture::record_preserved(native(gpu.list.Get()), source, generic::clear, 0, &diagnostic); },
+      "a clear's contract was not copied from its DEPTH_STENCIL_WRITE proof");
 
     // A colour source watched from its retention latches the same way, and
     // its at-call UI copy (the auxiliary policy) follows the same rule.
@@ -1728,10 +1749,16 @@ namespace {
     pixels = {};
     capture::release_diagnostic_texture(local); local = {};
     gpu.reset();
+    // An at-call UI declaration that names another state gives way to the
+    // proof, as to an observation on its recording (prefer_observed_recording).
     input.native_state = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    require(!capture::record_local_texture(native(gpu.list.Get()), input, &diagnostic, capture::auxiliary_state_policy(input)) &&
-        diagnostic.earlier_layout && diagnostic.stage == capture::record_stage::unsupported_state,
-      "another claim of a watched latched source was copied");
+    local = capture::record_local_texture(native(gpu.list.Get()), input, &diagnostic, capture::auxiliary_state_policy(input));
+    require(bool(local) && diagnostic.earlier_layout && diagnostic.enhanced_copy && diagnostic.used_observed_state &&
+        diagnostic.observed_layout == D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, "a stale at-call UI declaration did not give way to its proof");
+    capture::finish_diagnostic_texture(local, true);
+    gpu.submit(); gpu.wait();
+    capture::release_diagnostic_texture(local); local = {};
+    gpu.reset();
 
     // A depth clear after an enhanced barrier on its list proves the
     // DEPTH_STENCIL_WRITE layout, never a legacy DEPTH_WRITE: the end-of-frame
@@ -1794,14 +1821,14 @@ namespace {
     }
 
     const auto after = capture::proven_counts();
-    require(after.earlier_copied >= counts.earlier_copied + 3 && after.earlier_refused >= counts.earlier_refused + 6 && !after.latch_lost,
+    require(after.earlier_copied >= counts.earlier_copied + 7 && after.earlier_refused >= counts.earlier_refused + 4 && !after.latch_lost,
       "the latch's copies and refusals were not counted");
     destroyed(other_list.Get()); capture::command_destroyed(native(other_list.Get()));
     capture::poll();
     gpu.check_debug_errors();
     std::printf("PASS enhanced-layout latch: executed enhanced barriers latch a tracked depth texture and a watched source; their "
-      "claims are copied only from a SHADER_RESOURCE proof with enhanced barriers (discarded when it changed), others refused; "
-      "a depth clear keeps an enhanced layout for the end-of-frame copy%s\n",
+      "claims are copied with enhanced barriers from whichever layout the proof names (discarded when it changed), a declaration "
+      "that names another refused; a depth clear keeps an enhanced layout for the end-of-frame copy%s\n",
       gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
   }
 

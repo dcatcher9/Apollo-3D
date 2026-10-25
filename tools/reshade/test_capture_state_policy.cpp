@@ -195,9 +195,11 @@ int main() try {
     enhanced(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE), 0);
   require(!chosen.admitted && chosen.result == capture::status::conflicting_state,
     "a declaration without an equivalent layout agreed with one");
-  // A layout an enhanced barrier set on an earlier list (D6, N8): only a
-  // shader-read claim, from that list's SHADER_RESOURCE proof, is copied, with
-  // enhanced barriers; never a legacy barrier from the claim.
+  // A layout an enhanced barrier set on an earlier list (D6, N8; owner ruling
+  // D6-relax): whatever layout that list proved is the copy's, with enhanced
+  // barriers, never a legacy barrier from the claim; the claim's rule decides
+  // against it as against an observation, and the recording's list type must
+  // name it (list_basis).
   const auto earlier = [&](std::uint32_t layout, bool proven = true, std::uint32_t access = D3D12_BARRIER_ACCESS_SHADER_RESOURCE) {
     auto value = enhanced(layout);
     value.present = value.known = value.enhanced = proven;
@@ -206,15 +208,47 @@ int main() try {
     return value;
   };
   const auto at_call_ui = copy_state::select(proof::declared, policy::prefer_observed_recording);
+  struct earlier_copy {
+    std::uint32_t claim, layout, access;
+  };
   for (const auto selected : {declared, contract, at_call_ui}) {
-    for (const auto claim : {std::uint32_t(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE), std::uint32_t(shader_states)}) {
-      chosen = copy_state::resolve(selected, claim, earlier(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE), D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
-      require(chosen.admitted && chosen.enhanced && chosen.layout == D3D12_BARRIER_LAYOUT_SHADER_RESOURCE &&
-          chosen.access == D3D12_BARRIER_ACCESS_SHADER_RESOURCE, "a shader-read claim was not copied from its earlier SHADER_RESOURCE proof");
+    for (const auto &value : {
+           earlier_copy{D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, D3D12_BARRIER_ACCESS_SHADER_RESOURCE},
+           earlier_copy{shader_states, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, D3D12_BARRIER_ACCESS_SHADER_RESOURCE},
+           earlier_copy{D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE, D3D12_BARRIER_ACCESS_SHADER_RESOURCE},
+           earlier_copy{D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_SHADER_RESOURCE, D3D12_BARRIER_ACCESS_SHADER_RESOURCE},
+           earlier_copy{D3D12_RESOURCE_STATE_DEPTH_READ | shader_states, D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ, D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ},
+           earlier_copy{D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE, D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE},
+           earlier_copy{D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_BARRIER_LAYOUT_COPY_SOURCE, D3D12_BARRIER_ACCESS_COPY_SOURCE},
+         }) {
+      chosen = copy_state::resolve(selected, value.claim, earlier(value.layout, true, value.access), D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+      require(chosen.admitted && chosen.enhanced && chosen.layout == value.layout && chosen.access == value.access,
+        "a claim that agrees with its earlier proof was not copied from the proven layout");
     }
     chosen = copy_state::resolve(selected, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, earlier(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE),
       D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL | D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE);
     require(!chosen.admitted && chosen.result == capture::status::unsupported_state, "an earlier layout of a texture shaders may not read was copied");
+  }
+  // A layout of one queue type is no LayoutBefore on another's list.
+  chosen = copy_state::resolve(declared, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+    earlier(D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_SHADER_RESOURCE), D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+  require(chosen.admitted && !copy_state::list_basis(chosen, false) && copy_state::list_basis(chosen, true),
+    "a compute queue's earlier layout was not refused on a direct list, or not admitted on a compute list");
+  chosen = copy_state::resolve(declared, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+    earlier(D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE), D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+  require(chosen.admitted && copy_state::list_basis(chosen, false) && !copy_state::list_basis(chosen, true),
+    "a direct queue's earlier layout was not refused on a compute list, or not admitted on a direct list");
+  // A claim that names another layout than the proof: a declaration must
+  // agree, while an SDK contract and an at-call UI declaration give way to it
+  // as to an observation.
+  chosen = copy_state::resolve(declared, D3D12_RESOURCE_STATE_DEPTH_WRITE, earlier(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE),
+    D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+  require(!chosen.admitted && chosen.result == capture::status::conflicting_state, "a declaration that names another layout than its earlier proof was copied");
+  for (const auto selected : {contract, at_call_ui}) {
+    chosen = copy_state::resolve(selected, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+      earlier(D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ, true, D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ), D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+    require(chosen.admitted && chosen.enhanced && chosen.layout == D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ && chosen.used_observed,
+      "an earlier proof did not stand over a claim that gives way to an observation");
   }
   struct earlier_case {
     std::uint32_t claim;
@@ -222,10 +256,6 @@ int main() try {
     const char *what;
   };
   for (const auto &value : {
-         earlier_case{D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, earlier(D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE), "a queue-specific earlier layout"},
-         earlier_case{D3D12_RESOURCE_STATE_DEPTH_READ, earlier(D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ, true, D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ), "an earlier depth-read layout"},
-         earlier_case{D3D12_RESOURCE_STATE_COPY_SOURCE, earlier(D3D12_BARRIER_LAYOUT_COPY_SOURCE, true, D3D12_BARRIER_ACCESS_COPY_SOURCE), "an earlier copy-source layout"},
-         earlier_case{D3D12_RESOURCE_STATE_DEPTH_WRITE, earlier(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE), "a claim that names another layout"},
          earlier_case{D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, earlier(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, false), "an unproven latched texture"},
          earlier_case{D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, earlier(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, true, D3D12_BARRIER_ACCESS_NO_ACCESS), "an earlier layout without access"},
        }) {
@@ -233,15 +263,21 @@ int main() try {
     require(!chosen.admitted && chosen.result == capture::status::unsupported_state && chosen.stage == capture::record_stage::unsupported_state,
       (std::string(value.what) + " was copied from a claim").c_str());
   }
-  for (const auto supplied : {proof::unavailable, proof::observed_nonzero, proof::last_proven, proof::clear_contract, proof::declared_for_use}) {
+  // A source that needs a state recorded on its own list takes none from an
+  // earlier one; a clear's contract is checked against it like a declaration.
+  for (const auto supplied : {proof::unavailable, proof::observed_nonzero, proof::last_proven, proof::declared_for_use}) {
     chosen = copy_state::resolve(copy_state::select(supplied, policy::source_contract), D3D12_RESOURCE_STATE_DEPTH_WRITE,
-      earlier(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE), D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
-    require(!chosen.admitted, "a source needing an observation, or a clear's contract, was copied from an earlier layout");
+      earlier(D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE, true, D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE), D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+    require(!chosen.admitted && chosen.result == capture::status::unsupported_state,
+      "a source needing an observation of its own was copied from an earlier layout");
   }
-  chosen = copy_state::resolve(for_use, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, earlier(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE),
-    D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
-  require(!chosen.admitted && chosen.result == capture::status::unsupported_state,
-    "a declaration of a later use was copied from an earlier layout");
+  chosen = copy_state::resolve(copy_state::select(proof::clear_contract, policy::source_contract), D3D12_RESOURCE_STATE_DEPTH_WRITE,
+    earlier(D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE, true, D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE), D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+  require(chosen.admitted && chosen.enhanced && chosen.layout == D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE,
+    "a clear's DEPTH_WRITE was not copied from the depth-stencil-write layout an earlier list proved");
+  chosen = copy_state::resolve(copy_state::select(proof::clear_contract, policy::source_contract), D3D12_RESOURCE_STATE_DEPTH_WRITE,
+    earlier(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE), D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+  require(!chosen.admitted && chosen.result == capture::status::conflicting_state, "a clear's DEPTH_WRITE agreed with another earlier layout");
   // A split barrier in transition rejects every rule, even beside a known value.
   for (const auto supplied : {proof::unavailable, proof::declared, proof::observed_nonzero, proof::sdk_contract, proof::declared_for_use}) {
     copy_state::observation pending{true, true, false, D3D12_RESOURCE_STATE_DEPTH_READ, true};

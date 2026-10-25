@@ -1474,10 +1474,11 @@ hardware adapter, through the diagnostic texture fixture (included under
 earlier, executed list. Its copy's recording then holds the game's barrier: a transition, a split
 ended there (begun on an earlier list of the same `ExecuteCommandLists` call, the only place D3D12
 completes a split) or still open, a wildcard alias, an enhanced barrier, or nothing after an
-enhanced layout set on the earlier list; on subresource 0, all subresources, another mip or the
-stencil plane. Each source is retained before its earlier list executes, so the capture owner
-watches it for the enhanced-layout latch as an adapter's retention does. Then comes the copy at its
-point: an adapter's copy with the proof its claim selects,
+enhanced layout set on the earlier list (each claim's copy from that layout, whichever it is,
+D6); on subresource 0, all subresources, another mip or the stencil plane. Each source is
+retained before its earlier list executes, so the capture owner watches it for the enhanced-layout
+latch as an adapter's retention does. Then comes the copy at its point: an adapter's copy with the
+proof its claim selects,
 a Generic boundary (`record_preserved` with the contract `depth_addon.cpp` passes: a clear's
 `DEPTH_WRITE`, a read-only DSV's unbind, which names no state (`generic::bound_view`, D11c), and at
 the end of the frame the source's last proven state on the copy's queue, which the earlier list
