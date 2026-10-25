@@ -310,9 +310,10 @@ namespace sunshine_streamline::depth_capture {
   std::uint64_t source_present_generation(const source_ref &source);
   // Whether the barrier hooks recorded a state of source on command's current
   // recording (what a copy recorded there would start from). False when they
-  // do not observe command, or it names nothing of source. Call on the thread
-  // recording command.
-  bool recorded_state(std::uint64_t command, const source_ref &source);
+  // do not observe command, or it names nothing of source. writing, when
+  // given, says whether that state lets the recording write source
+  // (copy_state::writes). Call on the thread recording command.
+  bool recorded_state(std::uint64_t command, const source_ref &source, bool *writing = nullptr);
   // Whether the UI layer's clear-boundary copy (game3d_ui_layer.cpp
   // record_into), which leaves and restores a render target's RENDER_TARGET
   // state with legacy barriers, may run on command for resource (the

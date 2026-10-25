@@ -274,6 +274,27 @@ namespace sunshine_streamline::depth_capture::copy_state {
     return equivalent != std::uint32_t(D3D12_BARRIER_LAYOUT_UNDEFINED) && equivalent == layouts::generic(observed.layout);
   }
 
+  // Whether a state or layout the recording names lets its list write the
+  // texture: one of the write states, or a layout whose generic form is one
+  // (render target, unordered access, depth-stencil write, copy or resolve
+  // destination) or whose access writes. A tag call that records one may be
+  // followed by more of the frame's writes (api_contract.h deferred_copy, the
+  // contract matrix's S11). An unknown, blocked or pending entry names no
+  // state, so it writes nothing here.
+  constexpr bool writes(const observation &value) {
+    constexpr std::uint32_t write_access = D3D12_BARRIER_ACCESS_RENDER_TARGET | D3D12_BARRIER_ACCESS_UNORDERED_ACCESS |
+      D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE | D3D12_BARRIER_ACCESS_COPY_DEST | D3D12_BARRIER_ACCESS_RESOLVE_DEST;
+    if (!value.present || !value.known || value.blocked || value.pending) return false;
+    if (!value.enhanced) return (value.value & write_states) != 0;
+    switch (static_cast<D3D12_BARRIER_LAYOUT>(layouts::generic(value.layout))) {
+      case D3D12_BARRIER_LAYOUT_RENDER_TARGET: case D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS:
+      case D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE: case D3D12_BARRIER_LAYOUT_COPY_DEST:
+      case D3D12_BARRIER_LAYOUT_RESOLVE_DEST:
+        return true;
+      default: return (value.access & write_access) != 0;
+    }
+  }
+
   // A claim against a layout an enhanced barrier set on an earlier list (the
   // contract matrix's D6 and N8): a legacy barrier from the claim is illegal
   // there (Enhanced Barriers, legacy interop), so the copy leaves and

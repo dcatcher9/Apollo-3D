@@ -2114,10 +2114,13 @@ namespace sunshine_streamline {
         if (fg_boundary) {
           // Where this call copies the tag (R2): its declaration describes
           // the tag's use, so only a state its list records proves it here,
-          // whatever the declaration names (S11).
+          // whatever the declaration names, and a ValidUntilPresent tag its
+          // list records in a write state is copied before its frame's
+          // Present instead (S11).
+          bool writing = false;
           const bool recorded = snapshot.command_buffer &&
-            depth_capture::recorded_state(snapshot.command_buffer, tag.direct_source);
-          const auto point = sl_contract::deferred_copy(tag.value.lifecycle, snapshot.command_buffer != 0, recorded);
+            depth_capture::recorded_state(snapshot.command_buffer, tag.direct_source, &writing);
+          const auto point = sl_contract::deferred_copy(tag.value.lifecycle, snapshot.command_buffer != 0, recorded, writing);
           if (point != sl_contract::tag_call_copy::at_call) {
             if (point == sl_contract::tag_call_copy::present && deferred)
               deferred->candidates[deferred->count++] = std::move(value);
@@ -2306,7 +2309,7 @@ namespace sunshine_streamline {
       where.format = input.source ? retained.format : 0;
       where.refusal = tag.value.refusal;
       if (later && !commands && input.source && tag.supported &&
-          sl_contract::deferred_copy(tag.value.lifecycle, false, false) == sl_contract::tag_call_copy::present) {
+          sl_contract::deferred_copy(tag.value.lifecycle, false, false, false) == sl_contract::tag_call_copy::present) {
         // Its kind's precedence over DLSS-G's input stays as it is until the
         // copy is made or dropped (present_deferred).
         later->used = true; later->where = where; later->input = input;
@@ -2430,7 +2433,7 @@ namespace sunshine_streamline {
         "Sunshine Streamline deferred tag copies: depth={deferred=%llu copied=%llu refused=%llu last_refusal=%s} "
         "ui={deferred=%llu copied=%llu refused=%llu} cancelled_by_untag=%llu lapsed=%llu waited_for_frame=%llu "
         "pending=%u; a ValidUntilPresent tag whose call has no command list, or a frame-generation input whose call's "
-        "list records no state of it, is copied on the Present queue right before its frame's Present",
+        "list records no state of it or a write state, is copied on the Present queue right before its frame's Present",
         static_cast<unsigned long long>(deferrals.depth.load(std::memory_order_relaxed)),
         static_cast<unsigned long long>(deferrals.depth_copied.load(std::memory_order_relaxed)),
         static_cast<unsigned long long>(deferrals.depth_refused.load(std::memory_order_relaxed)),

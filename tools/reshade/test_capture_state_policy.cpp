@@ -278,6 +278,28 @@ int main() try {
   chosen = copy_state::resolve(copy_state::select(proof::clear_contract, policy::source_contract), D3D12_RESOURCE_STATE_DEPTH_WRITE,
     earlier(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE), D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
   require(!chosen.admitted && chosen.result == capture::status::conflicting_state, "a clear's DEPTH_WRITE agreed with another earlier layout");
+  // Whether a recorded state or layout writes the texture (S11's deferral).
+  for (const std::uint32_t state : {D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+         D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RESOLVE_DEST})
+    require(copy_state::writes({true, true, false, state}), "a recorded write state did not write");
+  for (const std::uint32_t state : {std::uint32_t(D3D12_RESOURCE_STATE_COMMON), std::uint32_t(D3D12_RESOURCE_STATE_DEPTH_READ),
+         std::uint32_t(shader_states), std::uint32_t(D3D12_RESOURCE_STATE_GENERIC_READ), std::uint32_t(D3D12_RESOURCE_STATE_COPY_SOURCE)})
+    require(!copy_state::writes({true, true, false, state}), "a recorded read state wrote");
+  require(!copy_state::writes({}) && !copy_state::writes({true, false, false, D3D12_RESOURCE_STATE_DEPTH_WRITE}) &&
+      !copy_state::writes({true, true, true, D3D12_RESOURCE_STATE_DEPTH_WRITE}) &&
+      !copy_state::writes({true, true, false, D3D12_RESOURCE_STATE_DEPTH_WRITE, true}),
+    "an absent, unknown, blocked or pending entry wrote");
+  require(copy_state::writes(enhanced(D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE)) &&
+      copy_state::writes(enhanced(D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS)) &&
+      copy_state::writes(enhanced(D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_COPY_DEST)) &&
+      !copy_state::writes(enhanced(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE)) &&
+      !copy_state::writes(enhanced(D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ)),
+    "a write layout did not write, or a read layout wrote");
+  {
+    auto common = enhanced(D3D12_BARRIER_LAYOUT_COMMON);
+    common.access = D3D12_BARRIER_ACCESS_UNORDERED_ACCESS;
+    require(copy_state::writes(common), "a common layout with unordered access did not write");
+  }
   // A split barrier in transition rejects every rule, even beside a known value.
   for (const auto supplied : {proof::unavailable, proof::declared, proof::observed_nonzero, proof::sdk_contract, proof::declared_for_use}) {
     copy_state::observation pending{true, true, false, D3D12_RESOURCE_STATE_DEPTH_READ, true};

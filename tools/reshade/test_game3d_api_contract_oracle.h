@@ -59,7 +59,7 @@ namespace game3d_contract {
     inline constexpr rule S9 {"S9", "Untag (null Resource or null native), or a later copy point of a tag the game untagged after setting it: HOLD the earlier capture, then mono; the frame-generation source is not withdrawn. A copy deferred to the Present queue (R2) of a tag untagged after its call by the same frame (its frame token and viewport), or by an untag with no frame token: HOLD, the copy is cancelled whatever its basis (R7); an untag of another frame leaves it", "SLA:143, 160: 'set to null to remove the specified tag'; SLT:423 the lifecycle belongs to the tag; owner ruling R7 (10-23): an untag cancels the deferred copy of its own frame only, and without a frame token it holds"};
     inline constexpr rule S10 {"S10", "Declared state UINT_MAX and no observation: REFUSE state_unprovable", "SLT:335, 357-359: state is MANDATORY; its UINT_MAX default declares nothing"};
     inline constexpr rule S10a {"S10a", "A declared state at the point it describes, with no observation: CAPTURE from the declaration", "SLT:357: 'State is MANDATORY and needs to be correct when tagged resources are actually used'"};
-    inline constexpr rule S11 {"S11", "At a tag call before the declared use (lifecycle 1 or 2), an observed state: CAPTURE from the observation", "SLT:357: the declaration describes the state at use (Present or evaluate), not at the tag call"};
+    inline constexpr rule S11 {"S11", "At a tag call before the declared use (lifecycle 1 or 2), an observed state: CAPTURE from the observation. An observed write state (or a layout equivalent to one) of a ValidUntilPresent tag: the frame may write it again before its Present, whose content the declaration promises, so CAPTURE through the copy on the Present queue before that Present, as S11b (R2); a ValidUntilEvaluate tag keeps the call's copy, which its evaluate repeats", "SLT:357: the declaration describes the state at use (Present or evaluate), not at the tag call; MS Learn D3D12_RESOURCE_STATES: a write state lets the list write the resource; owner refinement of S11 (Stage 3 batch B, 10-24): the content at Present is what a ValidUntilPresent declaration promises"};
     inline constexpr rule S11a {"S11a", "A declaration that disagrees with the state recorded at the point it describes: EITHER CAPTURE from the observation or REFUSE state_unprovable", "SLT:357 (the declaration is incorrect input); MS Learn, Using Resource Barriers: 'At any given time, a subresource is in exactly one state'"};
     inline constexpr rule S11b {"S11b", "At a ValidUntilPresent tag call before the declared use, no observation: CAPTURE from the declaration through a copy on the Present queue (R2)", "SLT:357; owner ruling R2 (lifecycle 1)"};
     inline constexpr rule S11c {"S11c", "At a ValidUntilEvaluate tag call, no observation: REFUSE state_unprovable there; its same-frame evaluate, the use its declaration describes, copies it (S5)", "SLT:357; SLT:404 eValidUntilEvaluate: unchanged 'until after the slEvaluateFeature call has returned'; owner ruling R2 covers lifecycle 1 only"};
@@ -689,6 +689,33 @@ namespace game3d_contract {
       return seen == evidence::enhanced || seen == evidence::enhanced_split_open || seen == evidence::mixed_split || seen == evidence::earlier_list_enhanced;
     }
 
+    // The tag call's recording leaves subresource 0 in a write state (one
+    // write bit alone, MS Learn D3D12_RESOURCE_STATES) or a layout equivalent
+    // to one, with access: the frame may write it again after the call (S11).
+    constexpr bool written(const resource_state &value) {
+      if (value.subresource == subresource_barrier::other_mip_only || value.subresource == subresource_barrier::stencil_plane_only) {
+        return false;
+      }
+      switch (value.seen) {
+        case evidence::transition:
+        case evidence::end_without_begin:
+          return single_write_state(value.observed);
+        case evidence::enhanced:
+          switch (generic_layout(value.layout)) {
+            case D3D12_BARRIER_LAYOUT_RENDER_TARGET:
+            case D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS:
+            case D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE:
+            case D3D12_BARRIER_LAYOUT_COPY_DEST:
+            case D3D12_BARRIER_LAYOUT_RESOLVE_DEST:
+              return value.access != D3D12_BARRIER_ACCESS_NO_ACCESS;
+            default:
+              return false;
+          }
+        default:
+          return false;
+      }
+    }
+
     // The rules non-default dimensions contribute to a capture they do not
     // change, in increasing precedence: the last one names the capture.
     struct contributions {
@@ -730,7 +757,7 @@ namespace game3d_contract {
       const auto until_present = value.life == lifecycle::valid_until_present;
       const rule *point {};
       auto scope = claim_scope::at_use;
-      bool deferred {};
+      bool deferred {}, writing {};
       switch (value.at) {
         case copy_point::tag_call:
           if (value.life == lifecycle::only_valid_now) {
@@ -750,6 +777,13 @@ namespace game3d_contract {
             break;
           }
           point = &rules::S5;
+          // A ValidUntilPresent tag its call's list records in a write state
+          // may be written again before its frame's Present, whose content
+          // its declaration promises: R2's copy on the Present queue (S11).
+          if (until_present && written(value.depth)) {
+            deferred = writing = true;
+            break;
+          }
           scope = claim_scope::before_use;
           break;
         case copy_point::same_frame_evaluate:
@@ -821,8 +855,11 @@ namespace game3d_contract {
       const auto *by = attribution(value, point);
       // A tag-call copy with no observed state is the R2 deferral itself,
       // whatever its basis (a declaration, or a layout an earlier list
-      // proved, D6).
-      out.by = by == point && scope == claim_scope::before_use && out.deferred ? &rules::S11b : by;
+      // proved, D6); one deferred past a recorded write state is S11's.
+      out.by = by != point                                               ? by :
+               scope == claim_scope::before_use && out.deferred ? &rules::S11b :
+               writing                                                   ? &rules::S11 :
+                                                                           by;
       if (value.extent == extent_form::changing) {
         out.kind = out.alternative = outcome_kind::continuous;
         out.by = &rules::S16e;
@@ -1404,6 +1441,15 @@ namespace game3d_contract {
     static_assert(captures(expect(tag(present, copy_point::tag_call)), rules::S11b, nps) && expect(tag(present, copy_point::tag_call)).deferred);
     static_assert(refuses(expect(tag(until_evaluate, copy_point::tag_call)), rules::S11c, refusal::state_unprovable));
     static_assert(captures(expect(with(tag(until_evaluate, copy_point::tag_call), &sl_case::depth, recorded(ds, evidence::transition, depth_read))), rules::S5, depth_read));
+    // S11: a ValidUntilPresent tag its call's list records in a write state
+    // is copied before its frame's Present, from its declaration there (no
+    // declaration names nothing to copy from, S10); an UntilEvaluate one
+    // keeps the call's copy from the write state.
+    static_assert(captures(expect(with(tag(present, copy_point::tag_call), &sl_case::depth, recorded(ds, evidence::transition, depth_write))), rules::S11, nps) && expect(with(tag(present, copy_point::tag_call), &sl_case::depth, recorded(ds, evidence::transition, depth_write))).deferred);
+    static_assert(captures_layout(expect(with(with(tag(present, copy_point::tag_call), &sl_case::declared_state, depth_write), &sl_case::depth, recorded(ds, evidence::enhanced, 0, D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE, D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE))), rules::S11, D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE, D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE) && expect(with(with(tag(present, copy_point::tag_call), &sl_case::declared_state, depth_write), &sl_case::depth, recorded(ds, evidence::enhanced, 0, D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE, D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE))).deferred);
+    static_assert(refuses(expect(with(with(tag(present, copy_point::tag_call), &sl_case::declared_state, UINT32_MAX), &sl_case::depth, recorded(ds, evidence::transition, depth_write))), rules::S10, refusal::state_unprovable));
+    static_assert(decides(expect(with(with(tag(present, copy_point::tag_call), &sl_case::untag, untag_pattern::null_after_each), &sl_case::depth, recorded(ds, evidence::transition, depth_write))), rules::S9, outcome_kind::hold));
+    static_assert(captures(expect(with(tag(until_evaluate, copy_point::tag_call), &sl_case::depth, recorded(ds, evidence::transition, depth_write))), rules::S5, depth_write));
     // The deferred copy of a latched texture: the layout its earlier list
     // proved, at the tag's frame's Present (S11b at a listed tag call, S6
     // without a list; D6 chose the basis).

@@ -158,32 +158,38 @@ namespace {
 
   // Where a frame-generation or UI tag call copies a tag (R2): inside the
   // call from a state its command list records, a ValidUntilPresent tag else
-  // on the Present queue before its frame's Present, an UntilEvaluate tag
-  // else at its evaluate (none here).
+  // (and where that state writes it, S11) on the Present queue before its
+  // frame's Present, an UntilEvaluate tag else at its evaluate (none here).
   struct tag_call_copy_row {
     const char *pins;
     std::uint32_t lifecycle;
-    bool command_list, recorded;
+    bool command_list, recorded, writing;
     streamline::tag_call_copy expected;
   };
 
   constexpr tag_call_copy_row tag_call_copies[] {
     {"A ValidUntilPresent tag without a command list is copied before its Present (S6)", streamline::valid_until_present,
-     false, false, streamline::tag_call_copy::present},
+     false, false, false, streamline::tag_call_copy::present},
     {"A ValidUntilPresent tag whose list records no state is copied before its Present (S11b)",
-     streamline::valid_until_present, true, false, streamline::tag_call_copy::present},
+     streamline::valid_until_present, true, false, false, streamline::tag_call_copy::present},
     {"A ValidUntilPresent tag whose list records its state is copied at the call (S5)", streamline::valid_until_present,
-     true, true, streamline::tag_call_copy::at_call},
-    {"An OnlyValidNow tag is copied at its call (S1)", streamline::only_valid_now, true, false,
+     true, true, false, streamline::tag_call_copy::at_call},
+    {"A ValidUntilPresent tag whose list records a write state is copied before its Present (S11)",
+     streamline::valid_until_present, true, true, true, streamline::tag_call_copy::present},
+    {"An OnlyValidNow tag is copied at its call (S1)", streamline::only_valid_now, true, false, false,
      streamline::tag_call_copy::at_call},
-    {"An OnlyValidNow tag without a command list has no copy point (S2)", streamline::only_valid_now, false, false,
+    {"An OnlyValidNow tag in a write state is copied at its call (S1)", streamline::only_valid_now, true, true, true,
+     streamline::tag_call_copy::at_call},
+    {"An OnlyValidNow tag without a command list has no copy point (S2)", streamline::only_valid_now, false, false, false,
      streamline::tag_call_copy::none},
     {"An UntilEvaluate tag whose list records no state waits for its evaluate (S11c)", streamline::valid_until_evaluate,
-     true, false, streamline::tag_call_copy::none},
+     true, false, false, streamline::tag_call_copy::none},
     {"An UntilEvaluate tag whose list records its state is copied at the call (S5)", streamline::valid_until_evaluate,
-     true, true, streamline::tag_call_copy::at_call},
+     true, true, false, streamline::tag_call_copy::at_call},
+    {"An UntilEvaluate tag whose list records a write state is copied at the call, which its evaluate repeats (S11)",
+     streamline::valid_until_evaluate, true, true, true, streamline::tag_call_copy::at_call},
     {"An UntilEvaluate tag without a command list has no copy point (S2)", streamline::valid_until_evaluate, false, false,
-     streamline::tag_call_copy::none},
+     false, streamline::tag_call_copy::none},
   };
 
   // The proof behind a declaration where a frame-generation tag call copies
@@ -252,7 +258,7 @@ int main() {
       "An OnlyValidNow local input holds inside its own evaluate, where match() admits it (S4)");
   }
   for (const auto &row : tag_call_copies)
-    require(streamline::deferred_copy(row.lifecycle, row.command_list, row.recorded) == row.expected, row.pins);
+    require(streamline::deferred_copy(row.lifecycle, row.command_list, row.recorded, row.writing) == row.expected, row.pins);
   for (const auto &row : tag_call_proofs)
     require(streamline::tag_call_proof(row.lifecycle, row.supplied) == row.expected, row.pins);
   for (const auto &row : untags)

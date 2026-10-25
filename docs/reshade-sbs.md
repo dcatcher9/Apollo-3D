@@ -4035,7 +4035,12 @@ call copies a UI tag (HUD-less, Backbuffer, UI colour and alpha, UIAlpha), is
   refused as `conflicting_state` and the viewport's FG source withdrawn). The recorded state is
   judged as any observation is (a legacy COMMON is a basis only on a depth-stencil texture, D3; a
   RESOLVE_DEST, legacy or enhanced, is one like any other write state, D2), and one that agrees
-  with the declaration is copied as before.
+  with the declaration is copied as before. A `ValidUntilPresent` tag whose list records a write
+  state there (`DEPTH_WRITE`, `RENDER_TARGET`, `UNORDERED_ACCESS`, `COPY_DEST` or `RESOLVE_DEST`, or
+  a layout equivalent to one or with write access: `copy_state::writes`) is not copied at the call:
+  the frame may still write it before its Present, and the content at that Present is what its
+  declaration promises, so it takes the Present-queue copy below (the refinement of S11, Stage 3
+  batch B). A `ValidUntilEvaluate` tag keeps the call's copy, since its evaluate copies it again.
   An `OnlyValidNow` declaration describes the call itself and must agree with the recorded state,
   as a declaration must at an evaluate and on the Present queue (S11a). The bounded line
   `Sunshine Streamline FG tag-call copies: copied=<n> recorded_over_declared=<n> state=<recorded>
@@ -4043,7 +4048,8 @@ call copies a UI tag (HUD-less, Backbuffer, UI colour and alpha, UIAlpha), is
   tag call and those made from a recorded state over the declaration, with the newest pair; UI tags
   keep their declaration's proof at the call;
 - for a `ValidUntilPresent` tag otherwise (a frame-generation depth tag whose list records no state
-  of it, S11b; any such tag without a command list, S6 and U2), on the Present queue right before
+  of it, S11b, or a write state, S11; any such tag without a command list, S6 and U2), on the
+  Present queue right before
   its frame's Present: the probe keeps the tag (`deferred_frame`, one per viewport) and
   `present_deferred` records the copy from ReShade's `present` event, before
   `depth_capture::present` ends the tags' lifetimes, on that queue's immediate list, which is then

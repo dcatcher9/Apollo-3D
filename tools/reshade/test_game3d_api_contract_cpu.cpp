@@ -1555,18 +1555,21 @@ namespace {
       if (at_call && frame.frame_generation_input) {
         // Where a frame-generation tag call copies its tag (R2,
         // nominate_depth_source through api_contract.h deferred_copy, with
-        // depth_capture::recorded_state for the case's own recording): a
-        // state recorded there copies it at the call, whatever a longer-lived
-        // tag's declaration of its later use names (tag_call_proof, S11); a
-        // ValidUntilPresent tag is otherwise copied on the Present queue
-        // before its frame's Present (present_deferred), where nothing on
-        // ReShade's list names its state and its declaration applies. The
-        // case's untag names the tag's own frame, or no frame token, so it
-        // cancels that copy (R7, untag_cancels); the runtime layer runs the
-        // cancellation itself.
+        // depth_capture::recorded_state for the case's own recording, never
+        // a layout an earlier list latched): a state recorded there copies
+        // it at the call, whatever a longer-lived tag's declaration of its
+        // later use names (tag_call_proof, S11); a ValidUntilPresent tag is
+        // otherwise, or where that state writes it (copy_state::writes, S11),
+        // copied on the Present queue before its frame's Present
+        // (present_deferred), where nothing on ReShade's list names its state
+        // and its declaration applies. The case's untag names the tag's own
+        // frame, or no frame token, so it cancels that copy (R7,
+        // untag_cancels); the runtime layer runs the cancellation itself.
         namespace sl_contract = sunshine_api_contract::streamline;
         const auto lifecycle = run.snapshot.tags[0].value.lifecycle;
-        const auto point = sl_contract::deferred_copy(lifecycle, run.snapshot.command_buffer != 0, observation_of(value.depth).present);
+        const auto recorded = observation_of(value.depth);
+        const bool own = recorded.present && !recorded.earlier;
+        const auto point = sl_contract::deferred_copy(lifecycle, run.snapshot.command_buffer != 0, own, own && copy_state::writes(recorded));
         if (point == sl_contract::tag_call_copy::none) {
           return out;
         }

@@ -1996,7 +1996,8 @@ namespace sunshine_streamline::depth_capture {
   std::uint64_t source_present_generation(const source_ref &source) {
     return source ? source->present_generation.load(std::memory_order_acquire) : 0;
   }
-  bool recorded_state(std::uint64_t native_command, const source_ref &source) {
+  bool recorded_state(std::uint64_t native_command, const source_ref &source, bool *writing) {
+    if (writing) *writing = false;
     if (!requested.load() || !native_command || !source) return false;
     com_ptr<ID3D12GraphicsCommandList> checked;
     if (!query_native(native_command, IID_ID3D12GraphicsCommandList, checked)) return false;
@@ -2005,7 +2006,9 @@ namespace sunshine_streamline::depth_capture {
     const auto cookie = native_observer::get_recording_cookie(native);
     std::lock_guard lock(mutex);
     auto owner = command(native, cookie, false);
-    return owner && !owner->invalid && state(*owner, source->cookie, false);
+    const auto *entry = owner && !owner->invalid ? state(*owner, source->cookie, false) : nullptr;
+    if (entry && writing) *writing = copy_state::writes(observation_of(entry));
+    return entry != nullptr;
   }
   std::uint64_t game_executions() { return game_execution_count.load(std::memory_order_acquire); }
   std::uint64_t game_executions_on(std::uint64_t queue) {

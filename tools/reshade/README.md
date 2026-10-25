@@ -867,7 +867,10 @@ the bounded `Sunshine Streamline deferred tag copies` line counts the copies). A
 or `ValidUntilEvaluate` FG depth tag that declares `NON_PIXEL_SHADER_RESOURCE` (its state at the
 later use) while the call's own list records `PIXEL_SHADER_RESOURCE` is copied at the call from the
 recorded state, nothing is refused, and every Present shows fresh FG depth (S11; the bounded
-`Sunshine Streamline FG tag-call copies` line counts `recorded_over_declared`). With FG options on
+`Sunshine Streamline FG tag-call copies` line counts `recorded_over_declared`). Where the list
+records `UNORDERED_ACCESS`, a write state, a `ValidUntilPresent` tag is copied before its frame's
+Present instead (counted on the deferred line) and a `ValidUntilEvaluate` one still at its call;
+every Present shows fresh FG depth. With FG options on
 and every FG depth tag's copy cancelled by the same frame's untag (R7), the
 same viewport's SR depth takes over once the FG scope is silent; each generated presentation, at
 2x and 3x, holds its real frame's SR copy, also after the fixture's window leaves the foreground

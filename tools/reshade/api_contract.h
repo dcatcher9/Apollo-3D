@@ -132,15 +132,21 @@ namespace sunshine_api_contract {
     // used" (sl_core_types.h): a ValidUntilPresent declaration describes the
     // state at its frame's Present, not at the call. So a ValidUntilPresent
     // tag is copied inside the call only when the call's command list
-    // records its state there (recorded), else on the Present queue right
-    // before its frame's Present (present); its command list may be null
-    // (sl_core_api.h: only ValidUntilPresent tags may come without one). An
-    // OnlyValidNow tag is copied inside the call, which needs a command list.
-    // A ValidUntilEvaluate tag is copied inside the call only from a recorded
-    // state; its declaration describes its evaluate, which copies it (none).
+    // records its state there (recorded) and that state does not let the
+    // list write it (writing: a write state or layout, after which the frame
+    // may write it again before that Present, whose content the declaration
+    // promises; the matrix's S11), else on the Present queue right before its
+    // frame's Present (present); its command list may be null (sl_core_api.h:
+    // only ValidUntilPresent tags may come without one). An OnlyValidNow tag
+    // is copied inside the call, which needs a command list. A
+    // ValidUntilEvaluate tag is copied inside the call only from a recorded
+    // state, a write state included, since its evaluate copies it again;
+    // without one its declaration describes its evaluate, which copies it
+    // (none).
     enum class tag_call_copy : std::uint8_t { at_call, present, none };
-    constexpr tag_call_copy deferred_copy(std::uint32_t lifecycle, bool command_list, bool recorded) {
-      if (lifecycle == valid_until_present) return command_list && recorded ? tag_call_copy::at_call : tag_call_copy::present;
+    constexpr tag_call_copy deferred_copy(std::uint32_t lifecycle, bool command_list, bool recorded, bool writing) {
+      if (lifecycle == valid_until_present)
+        return command_list && recorded && !writing ? tag_call_copy::at_call : tag_call_copy::present;
       if (!command_list || (lifecycle != only_valid_now && !recorded)) return tag_call_copy::none;
       return tag_call_copy::at_call;
     }
