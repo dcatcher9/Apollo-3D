@@ -289,19 +289,23 @@ int main() {
   require(ngx::evaluation_input.native_state == 0x40 && ngx::evaluation_input.proof == state_proof::sdk_contract &&
             ngx::evaluation_input.valid_until == lifetime::until_evaluation,
     "An NGX evaluation's input is in NON_PIXEL_SHADER_RESOURCE by the SDK contract for the evaluation");
-  require(ngx::frame_generation_input.native_state == UINT32_MAX &&
-            ngx::frame_generation_input.proof == state_proof::observed_nonzero &&
-            ngx::frame_generation_input.valid_until == lifetime::until_evaluation,
-    "DLSS-G's own inputs name no state: only an observed state proves them, for the evaluation");
+  require(ngx::observed_input.native_state == UINT32_MAX && ngx::observed_input.proof == state_proof::observed_nonzero &&
+            ngx::observed_input.valid_until == lifetime::until_evaluation,
+    "An NGX input no guide states names no state: only an observed state proves it, for the evaluation");
+  // One mapper entry per proof: DLSS-G's own inputs and every feature but
+  // Super Resolution take that same contract, never a copy of it.
+  static_assert(&ngx::frame_generation_input == &ngx::observed_input, "DLSS-G's inputs have their own copy of observed_input");
+  static_assert(&ngx::evaluation_input_of(13) == &ngx::observed_input && &ngx::evaluation_input_of(1) == &ngx::evaluation_input,
+    "A feature's Depth contract is not the named mapper entry");
   {
     const auto sr = ngx::evaluation_input_of(1);
     require(sr.native_state == 0x40 && sr.proof == state_proof::sdk_contract && sr.valid_until == lifetime::until_evaluation,
       "A Super Resolution Depth has the SDK contract's state (N1)");
     for (const std::uint32_t feature : {0u, 13u, 2u, 0xfffffffeu}) {
       const auto value = ngx::evaluation_input_of(feature);
-      require(value.native_state == UINT32_MAX && value.proof == state_proof::observed_nonzero &&
-                value.valid_until == lifetime::until_evaluation,
-        "Ray Reconstruction's and any other feature's Depth names no state: only an observed state proves it (N1b)");
+      require(value.native_state == ngx::observed_input.native_state && value.proof == ngx::observed_input.proof &&
+                value.valid_until == ngx::observed_input.valid_until,
+        "Ray Reconstruction's and any other feature's Depth is not observed_input (N1b)");
     }
   }
   {

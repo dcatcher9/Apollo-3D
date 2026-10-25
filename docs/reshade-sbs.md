@@ -4820,7 +4820,8 @@ covers Super Resolution only. The DLSS-RR Integration Guide is an addendum to it
 resource-state section (it extends only the evaluation call, section 5.4), and RR's helpers set no
 state, so Ray Reconstruction (feature 13), any other feature and a recovered registration with the
 explicit key are nominated with `state_proof::observed_nonzero`: only a state observed on the
-evaluation's own recording proves their `Depth`, as for DLSS-G's own inputs, and with none the copy
+evaluation's own recording proves their `Depth`, as for DLSS-G's own inputs (both take the one
+mapper entry `ngx::observed_input`), and with none the copy
 is refused as `missing_state` (the
 [API contract matrix](../tools/reshade/README.md#api-contract-matrix)'s N1b, since Stage 3 batch B;
 before, every feature took Super Resolution's contract state). A known,

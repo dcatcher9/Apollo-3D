@@ -198,20 +198,21 @@ namespace sunshine_api_contract {
     // its state at this boundary (a state observed on the same recording
     // still takes precedence), and it holds for the evaluation.
     inline constexpr contract evaluation_input{evaluation_input_state, state_proof::sdk_contract, lifetime::until_evaluation};
+    // An input whose guide states no state at this call: only a state
+    // observed on the evaluation's own recording proves it, for the
+    // evaluation.
+    inline constexpr contract observed_input{UINT32_MAX, state_proof::observed_nonzero, lifetime::until_evaluation};
     // DLSS-G's own inputs (frame_generation_inputs.h): no API states their
-    // state at this call, so only a state observed on the evaluation's own
-    // recording proves it.
-    inline constexpr contract frame_generation_input{UINT32_MAX, state_proof::observed_nonzero, lifetime::until_evaluation};
+    // state at this call (observed_input).
+    inline constexpr const contract &frame_generation_input = observed_input;
     // A Depth input by its evaluation's feature: Super Resolution's SDK
     // contract. No other feature's guide states one: the DLSS-RR Integration
     // Guide, an addendum to the DLSS guide, names no resource state and
     // extends only its evaluation call (section 5.4, not 3.4), and
     // nvsdk_ngx_helpers_dlssd_d3d.h sets none. So Ray Reconstruction (13) and
-    // any other feature are proven only by a state observed on the
-    // evaluation's own recording, for the evaluation (the matrix's N1b).
-    constexpr contract evaluation_input_of(std::uint32_t feature) {
-      return feature == super_sampling ? evaluation_input :
-        contract{UINT32_MAX, state_proof::observed_nonzero, lifetime::until_evaluation};
+    // any other feature take observed_input (the matrix's N1b).
+    constexpr const contract &evaluation_input_of(std::uint32_t feature) {
+      return feature == super_sampling ? evaluation_input : observed_input;
     }
   }
 
