@@ -3716,7 +3716,9 @@ method table recorded no barrier through them, so it changes nothing: DXGI's int
 is one. The add-on's own content-sampler list is submitted in the observer's suppression scope, so
 it is not a game execution. Others leave one texture unproven: an aliasing barrier naming it (or naming nothing:
 any placed or reserved resource) after its last barrier, a split still open, or a blocked barrier.
-Either way, a later barrier proves the texture again. A creation state holds on every queue until a
+Either way, a later barrier proves the texture again. An executed list's aliasing barriers are
+sorted by texture once, under the capture lock, so each texture's check is a binary search: engines
+that alias transient memory every frame record hundreds of them per list. A creation state holds on every queue until a
 list uses the texture, and not at all once an enhanced barrier was seen, because ReShade reports a
 texture created in an initial layout like one created in a state. The copy is checked again when
 its list is executed: if the proof changed meanwhile or another queue executes it, the copy is

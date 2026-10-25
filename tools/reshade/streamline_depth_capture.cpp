@@ -359,6 +359,7 @@ namespace sunshine_streamline::depth_capture {
             try {
               if (owner->aliases.capacity() == 0) owner->aliases.reserve(8);
               owner->aliases.push_back({identity, order});
+              owner->aliases_sorted = false;
             } catch (...) { invalidate(*owner, recording_loss::source_state_capacity); }
           }
           continue;
@@ -985,10 +986,27 @@ namespace sunshine_streamline::depth_capture {
       return false;
     }
     // Requires mutex. An aliasing barrier on the recording named source after
-    // its barrier order (0: anywhere on the recording).
+    // its barrier order (0: anywhere on the recording). On an executed
+    // recording (sort_aliases) a binary search finds the source's last mark.
     bool aliased_after(const command_state &owner, std::uint64_t source, std::uint32_t order) {
+      if (owner.aliases_sorted) {
+        const auto end = std::upper_bound(owner.aliases.begin(), owner.aliases.end(), source,
+          [](std::uint64_t key, const resource_mark &mark) { return key < mark.source; });
+        return end != owner.aliases.begin() && std::prev(end)->source == source && std::prev(end)->order > order;
+      }
       for (const auto &mark : owner.aliases) if (mark.source == source && mark.order > order) return true;
       return false;
+    }
+    // Requires mutex, on a recording being executed (closed, so nothing
+    // appends to it until its Reset): its aliasing marks sorted once, so each
+    // held texture's lookup in apply_executed costs a binary search, not a
+    // scan of every mark (transient-memory engines alias every frame).
+    void sort_aliases(command_state &owner) {
+      if (owner.aliases_sorted) return;
+      std::sort(owner.aliases.begin(), owner.aliases.end(), [](const resource_mark &a, const resource_mark &b) {
+        return a.source != b.source ? a.source < b.source : a.order < b.order;
+      });
+      owner.aliases_sorted = true;
     }
     // Requires mutex. Whether the barrier hooks saw every barrier the list
     // recorded: its method table is hooked (states_ready). A list being
@@ -1061,7 +1079,10 @@ namespace sunshine_streamline::depth_capture {
           continue;
         }
         if (owner->wildcard_alias) proven.unprove_all();
-        for (const auto &mark : owner->aliases) proven.unprove(mark.source);
+        sort_aliases(*owner);
+        // Each aliased texture once (the marks are sorted by source).
+        for (std::size_t i = 0; i != owner->aliases.size(); ++i)
+          if (!i || owner->aliases[i].source != owner->aliases[i - 1].source) proven.unprove(owner->aliases[i].source);
         for (const auto &entry : owner->states) {
           if (!proven.held(entry.source)) continue;
           // Any enhanced barrier naming it latches its layout (D6), whatever

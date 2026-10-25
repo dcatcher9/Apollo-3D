@@ -4382,6 +4382,7 @@ int main(int argc, char **argv) {
     require(depth_capture::testing::recording_recovery_regression(), "native command ownership, reset, capacity or retirement contract failed");
     std::puts("PASS 160 live native command owners, destruction/recreation, global invalidation and Reset preserve exact recording identity without assuming GPU completion");
     require(depth_capture::testing::recording_state_loss_regression(), "declared state could bypass alias/split history loss");
+    require(depth_capture::testing::alias_lookup_regression(), "sorted aliasing marks answered a lookup differently");
     std::puts("PASS 162 source states preserve unrelated depth and named alias/split blocks; Reset reuses storage; wildcard/identity/allocation loss rejects without retiring owned copies");
     test_version_identity();
     std::puts("PASS ABI families, optional version strings, exact private-state scope and unknown/conflicting rejection");

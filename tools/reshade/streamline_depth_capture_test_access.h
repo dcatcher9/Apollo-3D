@@ -82,7 +82,7 @@ namespace sunshine_streamline::depth_capture {
     // after) or by a depth clear of its subresource 0. Neither changes a state
     // entry, so captures at an API call ignore them; only the per-resource
     // proven state (proven_state.h) reads them: an aliasing barrier revokes
-    // it, a depth clear proves DEPTH_WRITE (the D3D12 clear contract).
+    // it, a depth clear proves what the D3D12 clear contract requires.
     struct resource_mark {
       std::uint64_t source{}; std::uint32_t order{};
     };
@@ -98,6 +98,9 @@ namespace sunshine_streamline::depth_capture {
       // latest aliasing barrier with neither resource (any placed or reserved
       // resource) is at wildcard_alias (0 none).
       std::uint32_t barrier_order{}, wildcard_alias{};
+      // aliases is sorted by source, then order (an executed recording,
+      // which nothing appends to until its Reset).
+      bool aliases_sorted{};
       bool closed{}, invalid{}, render_pass{};
       // ReShade's lifecycle (or a registered runtime list's observed
       // submissions) drives this recording.
@@ -109,6 +112,7 @@ namespace sunshine_streamline::depth_capture {
       void restart(std::uint64_t next_cookie, std::uint64_t generation) noexcept {
         states.clear();
         aliases.clear();
+        aliases_sorted = false;
         clears.clear();
         cookie = next_cookie; observation_generation = generation;
         native_barrier_calls = native_transition_count = last_barrier_command = 0;
@@ -298,6 +302,8 @@ namespace sunshine_streamline::depth_capture {
     source_state *state(command_state &owner, std::uint64_t identity, bool create);
     void invalidate_all();
     void barriers(std::uint64_t native, std::uint64_t cookie, std::uint32_t count, const D3D12_RESOURCE_BARRIER *values);
+    bool aliased_after(const command_state &owner, std::uint64_t source, std::uint32_t order);
+    void sort_aliases(command_state &owner);
     void retire_recording(slot &value, std::uint64_t old);
     void retire_dead_recordings(slot &value);
     void reset(std::uint64_t native, std::uint64_t old, HRESULT result, bool reported);

@@ -2452,6 +2452,24 @@ namespace sunshine_streamline::depth_capture {
         value.failure == capture_failure::producer_queue_changed && cross_queue_completion_regression() &&
         preservation_owner_regression() && source_authority_regression();
     }
+    bool alias_lookup_regression() {
+      // Marks as a transient-memory engine records them: a few sources
+      // aliased many times, interleaved, the same source more than once.
+      command_state owner;
+      std::uint32_t order = 0;
+      for (unsigned i = 0; i != 300; ++i) owner.aliases.push_back({1 + (i * 7) % 13, order += 1 + i % 3});
+      std::vector<bool> expected;
+      for (std::uint64_t source = 0; source != 16; ++source)
+        for (std::uint32_t at = 0; at <= order + 1; at += 5) expected.push_back(aliased_after(owner, source, at));
+      sort_aliases(owner);
+      if (!owner.aliases_sorted) return false;
+      sort_aliases(owner); // Executed again: unchanged.
+      std::size_t n = 0;
+      for (std::uint64_t source = 0; source != 16; ++source)
+        for (std::uint32_t at = 0; at <= order + 1; at += 5) if (aliased_after(owner, source, at) != expected[n++]) return false;
+      owner.restart(2, 0);
+      return !owner.aliases_sorted && owner.aliases.empty() && !aliased_after(owner, 1, 0);
+    }
     bool snapshot_basis_regression() {
       // Provenance: admission still uses the mapped legacy state of an
       // enhanced layout, while the basis records where it came from.

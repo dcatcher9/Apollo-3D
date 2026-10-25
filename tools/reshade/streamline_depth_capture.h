@@ -646,6 +646,9 @@ namespace sunshine_streamline::depth_capture {
   namespace testing { bool live_source_admission_regression(); }
   // The state-basis provenance of an auxiliary snapshot copy.
   namespace testing { bool snapshot_basis_regression(); }
+  // An executed recording's sorted aliasing marks answer aliased_after
+  // exactly as the unsorted ones did.
+  namespace testing { bool alias_lookup_regression(); }
   // Called once (then cleared) on the recording thread while a record call
   // allocates new storage without the capture lock.
   namespace testing { void set_allocation_hook(void (*hook)(void *), void *context); }
