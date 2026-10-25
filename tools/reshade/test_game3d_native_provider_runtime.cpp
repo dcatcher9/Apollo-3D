@@ -1824,10 +1824,15 @@ namespace {
       constants.reset = reset ? 1u : 0u;
       return constants;
     }
+    // A tagged texture's sl::ResourceType: eUnknown (8) where the release's
+    // header declares it, from 2.7.2 (the contract matrix's S12). The
+    // interposers with frame tags (2.7.30 and later) declare it; the 2.6.10
+    // one, which has none, is not known to, so it gets eTex2d (0).
+    std::uint8_t texture_type() const { return sl.frame_tag ? 8 : 0; }
     // The tagged depth as every FG frame describes it: the selected R32 UAV.
     sunshine_streamline::abi_v2::resource depth_resource() const {
       sunshine_streamline::abi_v2::resource resource{}; resource.base = {nullptr, sunshine_streamline::resource_guid, 1};
-      resource.type = 8; resource.native = selected->resource.p; resource.state = unsigned(selected->state);
+      resource.type = texture_type(); resource.native = selected->resource.p; resource.state = unsigned(selected->state);
       resource.width = selected->width; resource.height = selected->height;
       resource.native_format = DXGI_FORMAT_R32_FLOAT; resource.mip_levels = resource.array_layers = 1;
       return resource;
@@ -2013,8 +2018,10 @@ namespace {
       configure_fg(true);
       fg_crop_pairs_and_off();
       fg_cache();
+      // eUnknown only where the release declares it (texture_type).
       for (const std::uint32_t type : {0u, 8u})
-        run_script({type ? "public-ui-hook-type-8" : "public-ui-hook-type-0", 150000, {}, [&, type] { run_ui_hook(type); }, {}});
+        if (!type || texture_type())
+          run_script({type ? "public-ui-hook-type-8" : "public-ui-hook-type-0", 150000, {}, [&, type] { run_ui_hook(type); }, {}});
       fg_until_present_clear();
       fg_untag();
       fg_commandless_deferred();
@@ -2308,7 +2315,7 @@ namespace {
             real_fg_frame();
             // A typed Resource of version 0 (a later version is read by its v1 fields).
             abi_v2::resource malformed{}; malformed.base = {nullptr, resource_guid, 0};
-            malformed.type = 8; malformed.native = selected->resource.p; malformed.state = unsigned(selected->state);
+            malformed.type = texture_type(); malformed.native = selected->resource.p; malformed.state = unsigned(selected->state);
             malformed.width = selected->width; malformed.height = selected->height;
             const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &malformed, 0, 0, active_area};
             require(sl.global_tag(fg_viewport, &tag, 1, reinterpret_cast<void *>(game_native_command)) == 0,
@@ -2522,7 +2529,7 @@ namespace {
         // declared state: command-less as in Shadows, or on the game's list.
         const auto color_resource = [&](ID3D12Resource *native) {
           abi_v2::resource value{}; value.base = {nullptr, resource_guid, 1};
-          value.type = 8; value.native = native;
+          value.type = texture_type(); value.native = native;
           value.state = unsigned(D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
           value.width = width; value.height = height;
           value.native_format = unsigned(color.Format); value.mip_levels = value.array_layers = 1;

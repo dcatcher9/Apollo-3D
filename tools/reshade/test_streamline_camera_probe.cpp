@@ -1509,6 +1509,34 @@ namespace {
       "a multi-tag array of a later ResourceTag version was read at the version-1 stride");
   }
 
+  // S12: eUnknown (8) is a texture identity only where the loaded release's
+  // header declares it, from 2.7.2; 2.4.x ends ResourceType at eHostFence
+  // (eCount 8), and no surveyed header decides the releases between.
+  void test_unknown_resource_type_by_release() {
+    struct expectation { versioning::number version; bool accepted; };
+    const expectation cases[]{{{2, 4, 0, 0}, false}, {{2, 6, 10, 0}, false}, {{2, 7, 2, 0}, true}, {testing::abi::v2_12_0, true}};
+    for (const auto &c : cases) {
+      fixture cleanup;
+      probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+      require(testing::install(c.version, presentation_v2_targets), "eUnknown release install failed");
+      auto view = viewport(5); auto constants = modern_camera(); opaque_token token;
+      int native{};
+      auto resource = modern_resource(&native); resource.type = 8;
+      auto tag = depth_tag_for(resource);
+      const base_structure *global[]{&view.base};
+      mint(token, nullptr);
+      call_v2_constants(constants, token.ref(), view);
+      call_v2_tag(view, &tag, 1, nullptr);
+      call_v2_evaluate(0, token.ref(), global, 1, nullptr);
+      evaluation_snapshot snapshot; sunshine_scene_depth::frame normalized;
+      require(testing::latest_snapshot(view.value, snapshot) && snapshot.tags[0].present, "eUnknown depth tag was not observed");
+      const bool nominated = testing::normalized_source(view.value, 0, normalized);
+      require(snapshot.tags[0].supported == c.accepted && nominated == c.accepted &&
+          (c.accepted || snapshot.tags[0].value.refusal == tag_refusal::resource_type),
+        c.accepted ? "a release that declares eUnknown refused it" : "eUnknown was accepted where the release's header does not declare it");
+    }
+  }
+
   void test_rr_and_linear_depth_source() {
     fixture cleanup;
     probe_setting = "0"; source_setting = "1"; initialize(nullptr);
@@ -3269,6 +3297,8 @@ namespace {
     require(buffers::canonical(v2_2_0, 37) == 37 && buffers::canonical(v2_2_0, 38) == buffers::unknown &&
         buffers::canonical(v2_2_0, 48) == buffers::unknown, "2.2.0 contract accepted tags its header lacks");
     const auto v2_6 = buffers::for_version({2, 6, 10, 0});
+    require(!v2_6.unknown_resource_type && buffers::for_version({2, 7, 2, 0}).unknown_resource_type &&
+        !v2_2.unknown_resource_type && !v1.unknown_resource_type, "eUnknown declared outside 2.7.2 and later (S12)");
     require(buffers::canonical(v2_6, 48) == 48 && buffers::canonical(v2_6, 53) == 53 &&
         buffers::canonical(v2_6, 68) == buffers::unknown && !buffers::ui_alpha_authenticated(v2_6),
       "unpublished 2.6 build lost its 2.4 tags or gained UIAlpha");
@@ -3283,6 +3313,8 @@ namespace {
       for (const auto &v : values) out.values[out.count++] = v;
       return buffers::for_versions(out);
     };
+    require(family({{2, 7, 2, 0}, {2, 12, 0, 0}}).unknown_resource_type && !family({{2, 6, 10, 0}, {2, 7, 2, 0}}).unknown_resource_type,
+      "an inexact family declared eUnknown although a candidate does not (S12)");
     const auto uialpha = family({{2, 11, 1, 0}, {2, 12, 0, 0}});
     require(uialpha.known && !uialpha.surveyed && !buffers::ui_alpha_authenticated(uialpha) &&
         buffers::canonical(uialpha, 68) == buffers::unknown && buffers::canonical(uialpha, 69) == buffers::unknown &&
@@ -4455,6 +4487,7 @@ int main(int argc, char **argv) {
     test_mixed_clear_and_linear_depth();
     std::puts("PASS SR/RR linear depth encoding, precision, camera-independent input, lifecycle, FG priority and token reuse");
     test_struct_versions();
+    test_unknown_resource_type_by_release();
     std::puts("PASS ResourceTag/Resource/PrecisionInfo of version 1 or later decode by their v1 fields with nativeFormat; refusals name header_version, extension, precision, resource_type and lifecycle; a later tag version's array stride is refused");
     test_source_without_frame_tag_export();
     std::puts("PASS optional frame-tag export preserves global-only production depth, token safety, failure and recovery");

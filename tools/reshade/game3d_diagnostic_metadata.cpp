@@ -110,8 +110,10 @@ namespace sunshine_game3d {
 
     bool tag_resource_type_supported(const tag_value &value) noexcept {
       // SL v2 eUnknown carries an IUnknown. Like the live adapter, pass it to
-      // native COM/device/texture validation; the enum alone proves no texture.
-      return value.descriptor.type == 0 || (!value.version_one && value.descriptor.type == 8);
+      // native COM/device/texture validation where the hooked release
+      // declares it (S12); the enum alone proves no texture.
+      return value.descriptor.type == 0 ||
+             (!value.version_one && value.descriptor.type == 8 && sl::buffers::active().unknown_resource_type);
     }
 
     void notify_tag(const tag_value &value) noexcept {

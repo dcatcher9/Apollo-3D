@@ -60,8 +60,7 @@ namespace {
   }
   const d::resource_callbacks callbacks {observe_resource, observe_finish};
 
-  void test_sl_resource_type_admission() {
-    d::set_resource_callbacks(&callbacks);
+  void test_sl_resource_types(bool declared) {
     for (const bool version_one : {false, true}) {
       for (const auto type : {0u, 8u, 1u, UINT32_MAX}) {
         arm_diagnostic_metadata(false); arm_diagnostic_metadata(true);
@@ -81,7 +80,7 @@ namespace {
           const auto view = viewport(7);
           d::observe_sl_tags_v2(at, view, &tag, 1, d::tag_scope::frame);
         }
-        const bool accepted = type == 0 || (!version_one && type == 8);
+        const bool accepted = type == 0 || (!version_one && type == 8 && declared);
         const auto row = ui_row(snapshot(), 10);
         require(last_resource.readable && last_resource.version_one == version_one &&
             last_resource.descriptor_supported == accepted && last_resource.native == (accepted ? identity : 0) &&
@@ -93,6 +92,21 @@ namespace {
           "SL resource enum was promoted to a validated texture or successful capture");
       }
     }
+  }
+
+  // eUnknown is a texture identity only where the hooked release declares it
+  // (S12): 2.7.2 does; 2.4.15 ends the enumeration before it.
+  void test_sl_resource_type_admission() {
+    d::set_resource_callbacks(&callbacks);
+    struct release_case {
+      sl::versioning::number version;
+      bool declared;
+    };
+    for (const auto &release : {release_case {{2, 7, 2, 0}, true}, release_case {{2, 4, 15, 0}, false}}) {
+      sl::buffers::set_active(release.version);
+      test_sl_resource_types(release.declared);
+    }
+    sl::buffers::clear_active();
     d::set_resource_callbacks(nullptr);
     arm_diagnostic_metadata(false); arm_diagnostic_metadata(true);
   }

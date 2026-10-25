@@ -262,15 +262,18 @@ namespace {
       const matrix::sl_version version {release.major, release.minor, release.patch};
       const auto found = identify(version_resource(release.dll_fixed, release.dll_file_version, release.dll_product_version));
       // S17b: the release DLL selects a contract covering its own header, and
-      // the structure ABI that header defines.
+      // the structure ABI that header defines; S12: eUnknown exactly where
+      // that header declares it.
       bool covered = found.exact && found.number.major == version.major && found.number.minor == version.minor && found.number.patch == version.patch;
       for (unsigned i = 0; !found.exact && i != found.family.count; ++i) {
         const auto &candidate = found.family.values[i];
         covered |= candidate.major == version.major && candidate.minor == version.minor && candidate.patch == version.patch;
       }
-      if (!covered || !found.contract.known || judged_abi(found.abi) != matrix::declared_abi(release) || buffers::ui_alpha_authenticated(found.contract) != matrix::ui_alpha_automatic(version)) {
-        std::fprintf(stderr, "release %s: covered=%u known=%u abi=%u (header %u) ui-alpha automatic=%u (header %u)\n", release.tag, covered, found.contract.known, unsigned(judged_abi(found.abi)), unsigned(matrix::declared_abi(release)), buffers::ui_alpha_authenticated(found.contract), matrix::ui_alpha_automatic(version));
-        throw std::runtime_error("a surveyed release DLL selected the wrong buffer contract or ABI (S17b)");
+      const bool unknown_type = release.major == 2 && release.resource_types > 8;
+      if (!covered || !found.contract.known || judged_abi(found.abi) != matrix::declared_abi(release) || buffers::ui_alpha_authenticated(found.contract) != matrix::ui_alpha_automatic(version) ||
+          found.contract.unknown_resource_type != unknown_type) {
+        std::fprintf(stderr, "release %s: covered=%u known=%u abi=%u (header %u) ui-alpha automatic=%u (header %u) eUnknown=%u (header %u)\n", release.tag, covered, found.contract.known, unsigned(judged_abi(found.abi)), unsigned(matrix::declared_abi(release)), buffers::ui_alpha_authenticated(found.contract), matrix::ui_alpha_automatic(version), found.contract.unknown_resource_type, unknown_type);
+        throw std::runtime_error("a surveyed release DLL selected the wrong buffer contract or ABI (S17b, S12)");
       }
       ++counts.identities;
       judge_tags(counts, version, found);

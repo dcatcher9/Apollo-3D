@@ -155,7 +155,8 @@ namespace sunshine_streamline {
   // Why a Streamline tag was not supported: an unreadable tag or resource, a
   // structure GUID or version (header_version), an unknown chained structure
   // (extension), an unsupported PrecisionInfo formula or value, a resource
-  // type other than eTex2d/eUnknown, or a lifecycle above 2.
+  // type other than eTex2d/eUnknown (eUnknown only where the hooked release
+  // declares it, S12), or a lifecycle above 2.
   enum class tag_refusal : std::uint8_t { none, unreadable, header_version, extension, precision, resource_type, lifecycle };
   const char *name(tag_refusal value);
   struct depth_tag {

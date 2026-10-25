@@ -59,7 +59,7 @@ namespace game3d_contract {
     inline constexpr rule S11a {"S11a", "A declaration that disagrees with the state recorded at the point it describes: EITHER CAPTURE from the observation or REFUSE state_unprovable", "SLT:357 (the declaration is incorrect input); MS Learn, Using Resource Barriers: 'At any given time, a subresource is in exactly one state'"};
     inline constexpr rule S11b {"S11b", "At a ValidUntilPresent tag call before the declared use, no observation: CAPTURE from the declaration through a copy on the Present queue (R2)", "SLT:357; owner ruling R2 (lifecycle 1)"};
     inline constexpr rule S11c {"S11c", "At a ValidUntilEvaluate tag call, no observation: REFUSE state_unprovable there; its same-frame evaluate, the use its declaration describes, copies it (S5)", "SLT:357; SLT:404 eValidUntilEvaluate: unchanged 'until after the slEvaluateFeature call has returned'; owner ruling R2 covers lifecycle 1 only"};
-    inline constexpr rule S12 {"S12", "Resource type 0, or 8 (eUnknown) where that release's header declares it: normal; type 1 (buffer): REFUSE not_depth; type 8 where the header ends ResourceType before it: REFUSE malformed (EITHER on an unsurveyed release between)", "SLT:280-292 ResourceType: eTex2d 0, eBuffer 1, eUnknown 8; eUnknown first appears in v2.7.2 sl_core_types.h:258 (v2.4.15 sl.h:228-239 ends at eHostFence, eCount = 8; survey tables)"};
+    inline constexpr rule S12 {"S12", "Resource type 0, or 8 (eUnknown) where that release's header declares it: normal; type 1 (buffer): REFUSE not_depth; type 8 where the header ends ResourceType before it, or on an unsurveyed release no surveyed header decides (fail safe): REFUSE malformed", "SLT:280-292 ResourceType: eTex2d 0, eBuffer 1, eUnknown 8 ('the only thing we know for sure about this resource is that it's castable to IUnknown'); eUnknown first appears in v2.7.2 sl_core_types.h:257-258 (v2.4.15 sl.h:228-239 ends at eHostFence, eCount = 8; survey tables); docs/reshade-sbs.md, Rules for new game behaviour 3 (fail safe)"};
     inline constexpr rule S13 {"S13", "Constants, ViewportHandle, DLSSGOptions, Resource or a single ResourceTag above the newest known version: as at the newest known version", "sl_struct.h:43-106: new members go at the end with a version bump, so the known prefix keeps its meaning"};
     inline constexpr rule S14 {"S14", "Unknown chained struct on a tag or Resource, a ResourceTag above v1 in an array of more than one, a zero Resource header, PrecisionInfo formula 2+ or scale 0: REFUSE unknown_abi / malformed", "sl_struct.h:83-99 (optional data is a chained struct with its own GUID; the array stride is the known size); SLT:437-475 (formulas 0 and 1; scale 0 has no inverse)"};
     inline constexpr rule S15 {"S15", "A tag that is not last in an evaluate input chain: CAPTURE, as in an array", "SLA:250-262: inputs are an array or a chain of BaseStructures"};
@@ -709,7 +709,7 @@ namespace game3d_contract {
     // A Streamline depth tag at its copy point, as if frame generation were
     // in scope there (expect applies S20). The copy point against the
     // lifecycle (SLT:397-405) and the command buffer rule (SLA:145, 162).
-    constexpr outcome at_copy_point(const sl_case &value, declaration unknown_type) {
+    constexpr outcome at_copy_point(const sl_case &value) {
       const auto until_present = value.life == lifecycle::valid_until_present;
       const rule *point {};
       auto scope = claim_scope::at_use;
@@ -803,12 +803,6 @@ namespace game3d_contract {
         out.kind = out.alternative = outcome_kind::continuous;
         out.by = &rules::S16e;
       }
-      // An open question keeps the capture first, so its basis rule stays
-      // named, and names the rule that leaves it open.
-      if (unknown_type == declaration::unknown) {
-        out = either(out, refuse(rules::S12, refusal::malformed));
-        out.by = &rules::S12;
-      }
       return at(out);
     }
   }  // namespace detail
@@ -835,14 +829,12 @@ namespace game3d_contract {
     if (value.resource == resource_form::type_buffer) {
       return refuse(rules::S12, refusal::not_depth);
     }
-    auto unknown_type = declaration::declared;
-    if (value.resource == resource_form::type_unknown) {
-      unknown_type = declared_at(value.version, [](const survey::release &release) {
-        return release.resource_types > 8;
-      });
-      if (unknown_type == declaration::undeclared) {
-        return refuse(rules::S12, refusal::malformed);
-      }
+    // eUnknown only where that release's header declares it; a release the
+    // survey brackets without deciding is not known to (S12, fail safe).
+    if (value.resource == resource_form::type_unknown && declared_at(value.version, [](const survey::release &release) {
+          return release.resource_types > 8;
+        }) != declaration::declared) {
+      return refuse(rules::S12, refusal::malformed);
     }
     if (value.meaning != buffer_meaning::depth && value.meaning != buffer_meaning::high_resolution_depth && value.meaning != buffer_meaning::linear_depth) {
       return plain(rules::S17, outcome_kind::ignored);
@@ -860,7 +852,7 @@ namespace game3d_contract {
     if (value.tag_result == sl_result::error || (value.at == copy_point::same_frame_evaluate && value.evaluate_result == sl_result::error)) {
       return plain(rules::S21b, outcome_kind::hold);
     }
-    const auto out = at_copy_point(value, unknown_type);
+    const auto out = at_copy_point(value);
     // S20: a longer-lived 2.x tag call outside frame-generation scope may
     // still be copied within its lifecycle, or refused.
     if (value.at != copy_point::tag_call || value.life == lifecycle::only_valid_now || value.version.major == 1 || frame_generation) {
@@ -1391,7 +1383,7 @@ namespace game3d_contract {
     static_assert(refuses(expect(with(tag(present, evaluate), &sl_case::resource, resource_form::type_buffer)), rules::S12, refusal::not_depth));
     static_assert(captures(expect(with(tag(present, evaluate), &sl_case::resource, resource_form::type_unknown)), rules::S5, nps));
     static_assert(refuses(expect(with(with(tag(present, evaluate), &sl_case::resource, resource_form::type_unknown), &sl_case::version, v2_4_0)), rules::S12, refusal::malformed));
-    static_assert(undecided(expect(with(with(tag(present, evaluate), &sl_case::resource, resource_form::type_unknown), &sl_case::version, v2_6_10)), rules::S12));
+    static_assert(refuses(expect(with(with(tag(present, evaluate), &sl_case::resource, resource_form::type_unknown), &sl_case::version, v2_6_10)), rules::S12, refusal::malformed));
     static_assert(captures(expect(with(tag(present, evaluate), &sl_case::constants, struct_form::above_known)), rules::S13, nps));
     static_assert(refuses(expect(with(tag(present, evaluate), &sl_case::tag_header, struct_form::unknown_chained)), rules::S14, refusal::unknown_abi));
     static_assert(refuses(expect(with(tag(present, evaluate), &sl_case::precision, precision_form::zero_scale)), rules::S14, refusal::malformed));

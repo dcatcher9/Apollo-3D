@@ -3059,8 +3059,8 @@ or a missing HUD mask. The dump records what the current game evaluation actuall
 An explicit dump also requests the catalogued UI-related SL/NGX resources, including HUDless
 and UI color, alpha, no-warp, transparency, particle, history-rejection and related hints.
 Every catalog entry remains visible in metadata when unobserved, null or unavailable.
-SL v2 descriptors accept `eTex2d` and `eUnknown` identities, matching live capture; SL v1 accepts
-only `eTex2d`. `eUnknown` still requires native COM, device and texture-description validation;
+SL v2 descriptors accept `eTex2d` and, where the hooked release declares it (2.7.2 and later),
+`eUnknown` identities, matching live capture; SL v1 accepts only `eTex2d`. `eUnknown` still requires native COM, device and texture-description validation;
 known buffer and invalid resource types remain unsupported.
 Optional copies preserve the full allocation's native bytes and its own rectangle; they do not apply
 the selected depth crop or jitter. Typeless color allocations are copied into typed snapshots
@@ -3478,7 +3478,11 @@ that returns to a node it passed is malformed. A typed Resource's
 zero-header Resource variant and 1.x resources read it as 0. The observer still refuses a wrong
 GUID, version 0 outside the zero-header Resource variant, a chained structure other than
 PrecisionInfo, a PrecisionInfo with its own extension or an unknown formula, a lifecycle above 2,
-and resource types other than eTex2d/eUnknown. The `rejected depth tag` line names the cause
+and resource types other than eTex2d and eUnknown, and eUnknown (8) itself where the hooked
+release's header does not declare it: it does from 2.7.2 (`sl_core_types.h`, "castable to
+IUnknown"), 2.4.x ends the enumeration at eHostFence with eCount 8, and no surveyed header decides
+the releases between, such as 2.6.10 (the API contract matrix's S12, since Stage 3 batch B; before,
+8 was accepted from every 2.x release). The `rejected depth tag` line names the cause
 (`refusal=header_version|unreadable|extension|precision|resource_type|lifecycle`), as does an FG
 tag boundary's refusal reason (`unsupported_<cause>`) and, for UI tags, the begin stage. A
 compatible DLL major does not make arbitrary structures or missing resources usable. Missing

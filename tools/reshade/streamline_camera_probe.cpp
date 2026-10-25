@@ -1455,8 +1455,9 @@ namespace sunshine_streamline {
       const bool resource_header = resource.base.next == nullptr &&
         ((same(resource.base.type, resource_guid) && resource.base.version >= 1) ||
           zero_resource_header);
+      // eTex2d, or eUnknown where the installed release declares it (S12).
       value.supported = resource_ok && precision_ok && sl_contract::defined_lifecycle(tag.lifecycle) && (!tag.resource_ptr ||
-        (resource_header && (resource.type == 0 || resource.type == 8)));
+        (resource_header && (resource.type == 0 || (resource.type == 8 && installed_contract.unknown_resource_type))));
       value.value.refusal = value.supported ? tag_refusal::none : !header_ok ? tag_refusal::header_version :
         !resource_ok ? tag_refusal::unreadable : !precision_ok ? precision :
         !sl_contract::defined_lifecycle(tag.lifecycle) ? tag_refusal::lifecycle :

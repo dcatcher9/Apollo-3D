@@ -293,7 +293,8 @@ namespace sunshine_game3d::ui_mask {
   // cannot be read as its kind (supported_format), or the tag itself was
   // unsupported: a structure GUID or version or an unreadable tag
   // (header_version), an unknown chained structure or PrecisionInfo
-  // (extension), or a resource type other than eTex2d/eUnknown.
+  // (extension), or a resource type other than eTex2d/eUnknown (eUnknown only
+  // where the hooked release declares it, S12).
   // The capture gate line counts them per stage.
   enum class begin_stage : std::uint8_t {
     none,

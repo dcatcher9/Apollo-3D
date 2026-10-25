@@ -29,6 +29,13 @@ namespace sunshine_streamline::buffers {
     std::uint32_t raw_ui_alpha{unknown};
     // False for 1.x, whose tag 23 is UIHint rather than UIColorAndAlpha.
     bool ui_color_and_alpha{};
+    // sl::ResourceType declares eUnknown (8), "castable to IUnknown", which
+    // is a texture's identity only where the header declares it: from 2.7.2
+    // (v2.7.2 sl_core_types.h:257-258). Up to 2.4.15 the enumeration ends at
+    // eHostFence, with eCount 8 (v2.4.15 sl.h:228-239); no surveyed header
+    // decides the releases between (2.6.10), so they do not declare it either
+    // (the contract matrix's S12, fail safe). 1.x Resources are eTex2d only.
+    bool unknown_resource_type{};
     // The version lies inside the surveyed public range. Newer releases keep
     // the latest surveyed numbering but are not treated as authenticated.
     bool surveyed{};
@@ -59,6 +66,7 @@ namespace sunshine_streamline::buffers {
     }
     if (v.major != 2) return out;
     out.known = out.ui_color_and_alpha = true;
+    out.unknown_resource_type = at_least(v, 2, 7, 2);
     out.surveyed = !at_least(v, 2, 15);
     if (at_least(v, 2, 12)) { out.last_type = 72; out.raw_ui_alpha = 69; }
     else if (at_least(v, 2, 11)) { out.last_type = 68; out.raw_ui_alpha = 68; }
@@ -80,12 +88,13 @@ namespace sunshine_streamline::buffers {
     if (family.count == 1) return for_version(family.values[0]);
     contract out;
     if (!family.count) return out;
-    out.known = out.ui_color_and_alpha = true;
+    out.known = out.ui_color_and_alpha = out.unknown_resource_type = true;
     for (unsigned i = 0; i != family.count; ++i) {
       const auto &v = family.values[i];
       const auto each = for_version(v);
       out.known = out.known && each.known;
       out.ui_color_and_alpha = out.ui_color_and_alpha && each.ui_color_and_alpha;
+      out.unknown_resource_type = out.unknown_resource_type && each.unknown_resource_type;
       if (!i || !at_least(v, out.version.major, out.version.minor, out.version.patch)) out.version = v;
       out.last_type = i ? std::min(out.last_type, each.last_type) : each.last_type;
       if (i && out.raw_ui_alpha != each.raw_ui_alpha) out.raw_ui_alpha = unknown;
