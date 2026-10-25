@@ -264,13 +264,6 @@ namespace game3d_contract::known_gaps {
     {"N1b-pending", &rules::N1b, kind::pending, &ngx::ray_reconstruction, "As the hook table's N1b-pending row."},
   };
 
-  namespace behaviours {
-    // A UI input that UI detection was not offered.
-    constexpr bool not_offered(const behaviour &value) {
-      return value.actual.kind != outcome_kind::offered;
-    }
-  }  // namespace behaviours
-
   // Generic depth-stencil boundaries judged at Present by the runtime layer
   // (family generic). The add-on meets every one; C++ has no empty array, so
   // one pending row that matches no cell stands in for the table.
@@ -285,17 +278,16 @@ namespace game3d_contract::known_gaps {
   };
 
   // UI inputs judged by the runtime layer (family ui): whether UI detection
-  // is offered the input (Dump3D's UI candidates).
+  // is offered the input (Dump3D's UI candidates). The add-on meets every
+  // cell; one pending row that matches no cell stands in for the table.
   namespace ui {
-    // A UI input passed to slEvaluateFeature (U3, R4).
-    constexpr bool local_input(const ui_case &value) {
-      const auto expected = expect(value);
-      return legal(value) && value.clear == ui_clear_boundary::none && value.how == ui_capture::local && expected.kind == outcome_kind::offered && !either(expected);
+    constexpr bool no_cell(const ui_case &) {
+      return false;
     }
   }  // namespace ui
 
   inline constexpr row<ui_case> ui_runtime_rows[] {
-    {"U3", &rules::U3, kind::expected_failure, &ui::local_input, "Stage 3 fix 8 (S4/S15). Found by the runtime layer; owner ruling R4 (decided): a local UI input is offered under the tag contract. streamline_camera_probe.cpp offers UI inputs only from its tag hooks (capture_ui_inputs after slSetTag or slSetTagForFrame); its slEvaluateFeature hook reads local inputs (read_local_inputs) for depth alone, so a UI input passed there is never offered. Offer it there, on the evaluate's command list, in the commit that changes read_local_inputs for S4 and S15.", &behaviours::not_offered},
+    {"none", &rules::U3, kind::pending, &ui::no_cell, "No UI runtime gap remains: Stage 3 batch B closed U3 (a local UI input is offered at its evaluate). This row matches no cell."},
   };
 
   // Copies recorded on real lists (checked by

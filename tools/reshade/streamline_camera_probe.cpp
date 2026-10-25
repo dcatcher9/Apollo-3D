@@ -61,6 +61,9 @@ namespace sunshine_streamline {
     // Explicit display-resolution depth first, then render depth, then linear distance.
     constexpr std::array<unsigned, 3> depth_priority{slot_of(buffers::high_resolution_depth), slot_of(buffers::depth),
       slot_of(buffers::linear_depth)};
+    // The UI kinds, in the order a batch offers them.
+    constexpr std::array<unsigned, 4> ui_priority{slot_of(buffers::hudless_color), slot_of(buffers::ui_alpha),
+      slot_of(buffers::ui_color_and_alpha), slot_of(buffers::backbuffer)};
     bool known_renderer_contract(std::uint32_t feature) { return feature == 0 || feature == 1001; }
     unsigned tag_index(std::uint32_t type);
     struct tag_record {
@@ -2290,7 +2293,7 @@ namespace sunshine_streamline {
       if (input.source) { input.resource.width = retained.width; input.resource.height = retained.height; }
       mask::boundary where;
       where.source = input; where.command = reinterpret_cast<std::uint64_t>(commands);
-      where.tag_scope = tag.source == origin::frame ? 1u : 0u;
+      where.tag_scope = tag.source == origin::frame ? 1u : tag.source == origin::local ? 3u : 0u;
       where.kind = static_cast<mask::source_kind>(tag.value.type);
       where.source_present_generation = input.source_present_generation;
       where.format = input.source ? retained.format : 0;
@@ -2311,15 +2314,19 @@ namespace sunshine_streamline {
     }
     using alpha_attempts = std::array<sunshine_game3d::ui_mask::attempt, 4>;
     using deferred_uis = std::array<deferred_ui, 4>;
+    // Whether a batch carries a UI input.
+    bool carries_ui(const batch &out) {
+      return std::any_of(ui_priority.begin(), ui_priority.end(), [&](unsigned index) { return out.tags[index].present; });
+    }
+    // The UI inputs of a tag call, or an evaluate's local ones (owner ruling
+    // R4, the matrix's U3), each copied on that call's list.
     alpha_attempts capture_ui_inputs(const batch &out, void *commands, deferred_uis *later = nullptr) {
       namespace mask = sunshine_game3d::ui_mask;
       const auto source_epoch = epoch.load(std::memory_order_acquire);
-      constexpr std::array<unsigned, 4> priority{slot_of(buffers::hudless_color), slot_of(buffers::ui_alpha),
-        slot_of(buffers::ui_color_and_alpha), slot_of(buffers::backbuffer)};
       mask::capture_gate_observation gate;
       gate.epoch = source_epoch; gate.revision = out.loss; gate.sequence = out.serial; gate.tick = out.tick;
       gate.viewport = out.valid_viewport ? out.viewport : UINT32_MAX;
-      for (const auto index : priority) if (out.tags[index].present)
+      for (const auto index : ui_priority) if (out.tags[index].present)
         gate.seen_kinds |= mask::source_mask(static_cast<mask::source_kind>(out.tags[index].value.type));
       const bool interested = mask::interested(source_epoch, out.loss, out.viewport, out.tick, &gate.matching_requests);
       if (!out.valid_viewport) gate.state = mask::capture_gate::invalid_viewport;
@@ -2335,12 +2342,21 @@ namespace sunshine_streamline {
       // Capture availability is independent of its eventual per-frame mask
       // validation, and HUD-less color remains a separate scene-color input.
       alpha_attempts attempts;
-      for (unsigned i = 0; i != priority.size(); ++i) {
-        const auto &tag = out.tags[priority[i]];
+      for (unsigned i = 0; i != ui_priority.size(); ++i) {
+        const auto &tag = out.tags[ui_priority[i]];
         if (tag.present) attempts[i] = capture_ui_tag(out, commands, tag, source_epoch, fg_enabled,
           later ? &(*later)[mask::capture_slot(static_cast<mask::source_kind>(tag.value.type))] : nullptr);
       }
       return attempts;
+    }
+    // After the SDK call that supplied them: kept only when that call
+    // succeeded within the observation the copies were recorded in.
+    void finish_ui_inputs(const alpha_attempts &attempts, bool kept) {
+      for (const auto &attempt : attempts) {
+        sunshine_game3d::ui_mask::finish(attempt, kept);
+        // A revoked copy no longer keeps its kind's precedence (ui_tag_copy).
+        if (!kept && attempt.ticket) forget_ui_tag_copy(sunshine_game3d::ui_mask::capture_slot(attempt.kind));
+      }
     }
     evaluation_snapshot capture_depth_tag(const batch &out, void *commands) {
       evaluation_snapshot snapshot;
@@ -2584,11 +2600,7 @@ namespace sunshine_streamline {
         lose(!sdk_ok ? loss_diagnostics::reason::sdk_failure : loss_diagnostics::reason::invalid_input, __func__, __LINE__);
       if (snapshot.tag_boundary) finish_evaluation(snapshot, sdk_ok, ticket);
       const bool ui_kept = sdk_ok && current(ticket) && loss == loss_revision.load(std::memory_order_acquire);
-      for (const auto &attempt : alpha) {
-        sunshine_game3d::ui_mask::finish(attempt, ui_kept);
-        // A revoked copy no longer keeps its kind's precedence (ui_tag_copy).
-        if (!ui_kept && attempt.ticket) forget_ui_tag_copy(sunshine_game3d::ui_mask::capture_slot(attempt.kind));
-      }
+      finish_ui_inputs(alpha, ui_kept);
       if (sample && sdk_ok && current(ticket) && out.valid_viewport) defer_tag_call(out, frame != nullptr, depth_later, ui_later, ui_kept);
       SetLastError(outgoing);
       return result;
@@ -2705,6 +2717,11 @@ namespace sunshine_streamline {
       out.loss = loss;
       out.frame = identity;
       out.tick = entry_tick;
+      // Local UI inputs, copied on the evaluate's list inside the call that
+      // supplied them. An evaluate without one leaves the hook gate to the
+      // tag calls.
+      const bool ui_inputs = ticket && out.valid_viewport && carries_ui(out);
+      const auto alpha = ui_inputs ? capture_ui_inputs(out, commands) : alpha_attempts{};
       evaluation_snapshot snapshot;
       if (ticket && out.valid_viewport)
         snapshot = capture_evaluation(out.viewport, feature, identity, commands, ticket, serial, loss, &out, nullptr, false, known_contract);
@@ -2743,6 +2760,7 @@ namespace sunshine_streamline {
       }
       call_trace.finish(sdk_ok);
       finish_capture(captured, sdk_ok, ticket);
+      finish_ui_inputs(alpha, sdk_ok && current(ticket) && loss == loss_revision.load(std::memory_order_acquire));
       if (sample && out.valid_viewport) {
         if (sdk_ok && out.count) store_tags(out);
         finish_evaluation(snapshot, sdk_ok, ticket);
@@ -2750,6 +2768,10 @@ namespace sunshine_streamline {
         // An unresolvable evaluation viewport cannot leave any older camera
         // evidence looking applicable to a new successful call.
         lose(!sdk_ok ? loss_diagnostics::reason::sdk_failure : loss_diagnostics::reason::invalid_input, __func__, __LINE__);
+      } else if (ui_inputs && sdk_ok) {
+        // Its UI inputs name the viewport whose UI the renderer requests
+        // (query_ui_scope), whether or not it supplies depth.
+        store_tags(out);
       }
       SetLastError(outgoing);
       return result;
@@ -3522,8 +3544,9 @@ namespace sunshine_streamline {
     for (const auto &record : pin->records) {
       if (!record.used || (viewport != UINT32_MAX && record.viewport != viewport)) continue;
       const tag_record *newest{};
-      for (const auto index : {3u, 6u, 7u, 8u}) {
-        const auto &tag = record.global_tags[index];
+      // A UI tag, or a local UI input of an evaluate (U3), names the scope.
+      for (const auto *group : {&record.global_tags, &record.local_tags}) for (const auto index : ui_priority) {
+        const auto &tag = (*group)[index];
         if (!tag.present || !tag.supported || !tag.serial || tag.loss != loss ||
             tag.value.observation_epoch != pin->epoch || !tag.tick || !sunshine_freshness::fresh_lt(tag.tick, now, max_age_ms)) continue;
         if (!newest || tag.serial > newest->serial) newest = &tag;

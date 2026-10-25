@@ -3441,6 +3441,32 @@ namespace {
           observed.source.source_frame_numeric == numeric,
         "dedicated UI tag lost its explicit frame provenance");
     }
+    // A local UI input is offered under the same contract, copied on its
+    // evaluate's list inside that evaluate (owner ruling R4, the matrix's U3).
+    for (const auto kind : {mask::source_kind::color_and_alpha, mask::source_kind::alpha, mask::source_kind::hudless,
+           mask::source_kind::backbuffer}) {
+      tag.type = static_cast<std::uint32_t>(kind);
+      const auto before = mask::testing::last_attempt(runtime, observed) ? observed.source.sequence : 0;
+      const base_structure *inputs[]{&view.base, &tag.base};
+      int evaluate_commands{};
+      require(call_v2_evaluate(0, token.ref(), inputs, 2, &evaluate_commands) == 0 &&
+          mask::testing::last_attempt(runtime, observed) && observed.kind == kind && observed.source.sequence > before &&
+          observed.command == reinterpret_cast<std::uint64_t>(&evaluate_commands) &&
+          observed.source.resource.native == reinterpret_cast<std::uint64_t>(&native) &&
+          observed.source.valid_until == sunshine_scene_depth::lifetime::at_call && observed.tag_scope == 3,
+        "a local UI input was not offered at its evaluate");
+    }
+    // A local UI input names its viewport's UI scope, as a UI tag does,
+    // also from an evaluate that supplies no depth (an unknown feature).
+    {
+      auto local_view = viewport(12);
+      const base_structure *inputs[]{&local_view.base, &tag.base};
+      int evaluate_commands{};
+      ui_observation_scope scope;
+      require(call_v2_evaluate(77, token.ref(), inputs, 2, &evaluate_commands) == 0 &&
+          query_ui_scope(local_view.value, scope) && scope.viewport == local_view.value && scope.sequence,
+        "a local UI input did not name its viewport's UI scope");
+    }
     for (const auto kind : {53u, 23u, 69u, 2u}) {
       for (const auto lifecycle : {0u, 1u, 2u, 3u, UINT32_MAX}) {
         auto lifetime_tag = tag; lifetime_tag.type = kind; lifetime_tag.lifecycle = lifecycle;

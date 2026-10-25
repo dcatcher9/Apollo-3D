@@ -108,8 +108,8 @@ namespace sunshine_game3d::ui_mask {
   struct boundary {
     sunshine_scene_depth::frame source;
     std::uint64_t command{};
-    // 0 global, 1 explicit frame, 2 DLSS-G's own NGX evaluation; never
-    // inferred from Present.
+    // 0 global, 1 explicit frame, 2 DLSS-G's own NGX evaluation, 3 a local
+    // input of a Streamline evaluate; never inferred from Present.
     std::uint32_t tag_scope{};
     source_kind kind = source_kind::backbuffer;
     std::uint64_t source_present_generation{}; // Captured at this exact tag entry.

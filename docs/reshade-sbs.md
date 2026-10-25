@@ -2634,6 +2634,12 @@ evidence. It describes an attempt, not the consumed mask or an exact color/depth
 the consumed-alpha artifact and its provenance remain authoritative when a mask was used.
 Its `hook_gate` records the latest public tag callback's scope, observed UI kinds, matching
 request count and admission result; `request_generation` identifies the retained live request.
+A UI input passed in `slEvaluateFeature`'s inputs (a local tag) is offered under the same contract
+as a tag call's, copied on the evaluate's command list inside that evaluate (`tag_scope=3`); like a
+UI tag it names the viewport whose UI the renderer requests (`query_ui_scope`), whether or not
+that evaluate supplies depth, and the evaluate's gate is recorded only when it carries one (owner
+ruling R4, the API contract matrix's U3, since Stage 3 batch B; before, only tag calls offered UI
+inputs).
 A request matches a tag only while its runtime refreshed it (on every Present that wants UI
 captures) within 250 ms (the source age, `source_age_ms` in
 [`freshness.h`](../tools/reshade/freshness.h)) of the tag's entry, so a swapchain that stopped
