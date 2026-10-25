@@ -1732,6 +1732,35 @@ namespace {
       [&] { return capture::record_preserved(native(gpu.list.Get()), source, generic::clear, 0, &diagnostic); },
       "a clear's contract was not copied from its DEPTH_STENCIL_WRITE proof");
 
+    // A list recorded before the copy's moves the layout and executes after
+    // the proof, ahead of the copy's list in one ExecuteCommandLists: the
+    // proof (DEPTH_STENCIL_WRITE) is stale when the copy is recorded. NGX's
+    // contract and a shader-read declaration describe the call, where the
+    // texture is in SHADER_RESOURCE: neither gives way to the proof, so no
+    // barrier from DEPTH_STENCIL_WRITE is recorded, and the debug layer sees
+    // the game's lists alone.
+    check(other_allocator->Reset(), "latch allocator reset");
+    check(reset_list(other_list.Get(), other_allocator.Get()), "latch list reset");
+    barrier(other_list.Get(), depth.Get(), D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE, D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE,
+      D3D12_BARRIER_ACCESS_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
+    check(close_list(other_list.Get()), "latch list close");
+    for (const auto &claim : {sunshine_api_contract::ngx::evaluation_input, generic::preserved(shader)}) {
+      require(!capture::record_preserved(native(gpu.list.Get()), source, claim, 0, &diagnostic) && diagnostic.earlier_layout &&
+          diagnostic.stage == capture::record_stage::conflicting_state,
+        "a claim about the copy's call gave way to a proof an unexecuted earlier list overtakes");
+    }
+    check(close_list(gpu.list.Get()), "latch copy list close");
+    {
+      ID3D12CommandList *lists[] {other_list.Get(), gpu.list.Get()};
+      gpu.queue->ExecuteCommandLists(2, lists);
+    }
+    gpu.wait(); gpu.reset();
+    {
+      capture::proven_state proven;
+      require(capture::last_proven_state(source, queue, proven) && proven.enhanced &&
+          proven.layout == D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, "the earlier list's executed barrier did not prove its layout");
+    }
+
     // A colour source watched from its retention latches the same way, and
     // its at-call UI copy (the auxiliary policy) follows the same rule.
     texture_case image(gpu, DXGI_FORMAT_R8G8B8A8_UNORM, 4); // Retained, then left in NON_PIXEL_SHADER_RESOURCE.
@@ -1832,35 +1861,6 @@ namespace {
 
   void auxiliary_consumer_replay_and_discard(fixture &gpu) {
     consumer_fixture consumer(gpu);
-    // A list recorded before the copy's moves the layout and executes after
-    // the proof, ahead of the copy's list in one ExecuteCommandLists: the
-    // proof (DEPTH_STENCIL_WRITE) is stale when the copy is recorded. NGX's
-    // contract and a shader-read declaration describe the call, where the
-    // texture is in SHADER_RESOURCE: neither gives way to the proof, so no
-    // barrier from DEPTH_STENCIL_WRITE is recorded, and the debug layer sees
-    // the game's lists alone.
-    check(other_allocator->Reset(), "latch allocator reset");
-    check(reset_list(other_list.Get(), other_allocator.Get()), "latch list reset");
-    barrier(other_list.Get(), depth.Get(), D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE, D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE,
-      D3D12_BARRIER_ACCESS_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
-    check(close_list(other_list.Get()), "latch list close");
-    for (const auto &claim : {sunshine_api_contract::ngx::evaluation_input, generic::preserved(shader)}) {
-      require(!capture::record_preserved(native(gpu.list.Get()), source, claim, 0, &diagnostic) && diagnostic.earlier_layout &&
-          diagnostic.stage == capture::record_stage::conflicting_state,
-        "a claim about the copy's call gave way to a proof an unexecuted earlier list overtakes");
-    }
-    check(close_list(gpu.list.Get()), "latch copy list close");
-    {
-      ID3D12CommandList *lists[] {other_list.Get(), gpu.list.Get()};
-      gpu.queue->ExecuteCommandLists(2, lists);
-    }
-    gpu.wait(); gpu.reset();
-    {
-      capture::proven_state proven;
-      require(capture::last_proven_state(source, queue, proven) && proven.enhanced &&
-          proven.layout == D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, "the earlier list's executed barrier did not prove its layout");
-    }
-
     texture_case image(gpu, DXGI_FORMAT_R8G8B8A8_UNORM, 4);
     auto target = destination(gpu.device.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
     const auto capture_ready = [&] {
