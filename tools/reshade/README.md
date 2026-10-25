@@ -1478,7 +1478,8 @@ earlier, executed list. Its copy's recording then holds the game's barrier: a tr
 ended there (begun on an earlier list of the same `ExecuteCommandLists` call, the only place D3D12
 completes a split) or still open, a wildcard alias, an enhanced barrier, or nothing after an
 enhanced layout set on the earlier list (each claim's copy from that layout, whichever it is,
-D6); on subresource 0, all subresources, another mip or the stencil plane. Each source is
+where the claim names it, D6 and N8; the latch's refusal of a claim an unexecuted earlier list's
+move makes stale is reshade_diagnostic_texture_capture_test's); on subresource 0, all subresources, another mip or the stencil plane. Each source is
 retained before its earlier list executes, so the capture owner watches it for the enhanced-layout
 latch as an adapter's retention does. Then comes the copy at its point: an adapter's copy with the
 proof its claim selects,

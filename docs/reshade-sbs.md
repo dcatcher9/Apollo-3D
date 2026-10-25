@@ -2395,8 +2395,8 @@ recorded (the matrix's X1 and X2, since Stage 3 batch B; before, only the at-cal
 was checked against the flags, and a copy's barrier from `GENERIC_READ | DEPTH_READ` made the
 game's own `Close` fail). A source an enhanced barrier on an earlier executed list
 latched, whose recording names nothing, is copied with enhanced barriers from the layout that list
-proved, whichever it is, beside a claim the proof agrees with (the enhanced-layout latch, since Stage
-3 fix 3; any proven layout since D6-relax). The
+proved, whichever it is, where the copy's claim names that layout (the enhanced-layout latch, since
+Stage 3 fix 3; any proven layout since D6-relax; a claim of another layout refuses). The
 [API contract matrix](../tools/reshade/README.md#api-contract-matrix) judges the table over every
 legal combination of allocation flags, adapter claim, consumer, declared state and recorded
 evidence (a layout set on an earlier list included, and a depth or UI declaration of a later use
@@ -3815,11 +3815,20 @@ barrier from its claim, because the [Enhanced Barriers](https://microsoft.github
 legacy interop forbids one on that layout. The copy instead leaves and restores exactly the layout
 and access the source's proof from the earlier list names, whatever layout that is (owner ruling
 D6-relax, 10-24): the Enhanced Barriers barrier validation needs only that a barrier's
-`LayoutBefore` match the subresource's layout. That proof stands as an observation on the copy's
-recording would. The claim's rule decides against it: a declaration, or a clear's or a writable
-view's `DEPTH_WRITE`, must name the proven layout's equivalent state, or the copy is refused
-(`conflicting_state`); NGX's `NON_PIXEL_SHADER_RESOURCE` contract and an at-call UI declaration give
-way to it. The allocation's flags must allow the layout, and the copy's list type must be able to
+`LayoutBefore` match the subresource's layout. But the proof is where the last executed list left
+the texture, and a list recorded before the copy's and executed after that one (in the copy's own
+`ExecuteCommandLists`, say) may have moved it, which the copy's recording does not show. The claim
+is about the copy's call, so the proof never overrides it, unlike an observation on the copy's
+recording: it only gives the exact form and access of the layout the claim names. Every claim (a
+declaration, a clear's or a writable view's `DEPTH_WRITE`, NGX's `NON_PIXEL_SHADER_RESOURCE`
+contract and an at-call UI declaration) must name the proven layout's equivalent state, or the copy
+is refused (`conflicting_state`). NGX's contract therefore admits only a proven `SHADER_RESOURCE`
+layout or its queue-specific form (since the Stage 3 batch B review; D6-relax first let NGX's
+contract and the UI declaration give way to any proven layout, so a stale proof could start the
+copy's barrier from a layout the texture had left and restore it there). A
+remaining limit: where the moved layout is only another form of the claimed one
+(`DIRECT_QUEUE_SHADER_RESOURCE` for `SHADER_RESOURCE`), the copy still starts from the proof's
+form. The allocation's flags must allow the layout, and the copy's list type must be able to
 name it as `LayoutBefore` (a COMPUTE list a generic or compute-queue layout, a direct list no
 compute-queue one; S22, N7). The copy is checked at execution like a proven copy: it is discarded
 when the proof changed or another queue runs it. Everything else is refused (`unsupported_state`):

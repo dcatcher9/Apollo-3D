@@ -1611,11 +1611,13 @@ namespace {
   // lists: an executed list's enhanced barrier latches a depth-stencil texture
   // tracked from its creation and a colour source watched from its retention.
   // A later copy whose recording names nothing then takes no legacy barrier
-  // from its claim: a shader-read declaration is copied with enhanced
-  // barriers from the SHADER_RESOURCE layout that list proved, and discarded
-  // at execution when the proof changed meanwhile; a queue-specific layout,
-  // another claim or a clear's contract is refused. The Generic end-of-frame
-  // copy still copies from the proven layout itself (D10b).
+  // from its claim: a claim is copied with enhanced barriers from whichever
+  // layout that list proved where the claim names that layout (D6-relax), and
+  // discarded at execution when the proof changed meanwhile; a claim of
+  // another layout (NGX's contract and an at-call UI declaration included) is
+  // refused, also where an unexecuted earlier list makes the proof stale. The
+  // Generic end-of-frame copy still copies from the proven layout itself
+  // (D10b).
   void enhanced_layout_latch(fixture &gpu) {
     D3D12_FEATURE_DATA_D3D12_OPTIONS12 options{};
     ComPtr<ID3D12GraphicsCommandList7> probe;
@@ -1749,16 +1751,12 @@ namespace {
     pixels = {};
     capture::release_diagnostic_texture(local); local = {};
     gpu.reset();
-    // An at-call UI declaration that names another state gives way to the
-    // proof, as to an observation on its recording (prefer_observed_recording).
+    // An at-call UI declaration that names another state refuses the copy:
+    // a proof never overrides a claim about the call, which it may predate.
     input.native_state = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    local = capture::record_local_texture(native(gpu.list.Get()), input, &diagnostic, capture::auxiliary_state_policy(input));
-    require(bool(local) && diagnostic.earlier_layout && diagnostic.enhanced_copy && diagnostic.used_observed_state &&
-        diagnostic.observed_layout == D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, "a stale at-call UI declaration did not give way to its proof");
-    capture::finish_diagnostic_texture(local, true);
-    gpu.submit(); gpu.wait();
-    capture::release_diagnostic_texture(local); local = {};
-    gpu.reset();
+    require(!capture::record_local_texture(native(gpu.list.Get()), input, &diagnostic, capture::auxiliary_state_policy(input)) &&
+        diagnostic.earlier_layout && diagnostic.stage == capture::record_stage::conflicting_state,
+      "an at-call UI declaration of another state gave way to the watched source's proof");
 
     // A depth clear after an enhanced barrier on its list proves the
     // DEPTH_STENCIL_WRITE layout, never a legacy DEPTH_WRITE: the end-of-frame
@@ -1821,19 +1819,48 @@ namespace {
     }
 
     const auto after = capture::proven_counts();
-    require(after.earlier_copied >= counts.earlier_copied + 7 && after.earlier_refused >= counts.earlier_refused + 4 && !after.latch_lost,
+    require(after.earlier_copied >= counts.earlier_copied + 6 && after.earlier_refused >= counts.earlier_refused + 7 && !after.latch_lost,
       "the latch's copies and refusals were not counted");
     destroyed(other_list.Get()); capture::command_destroyed(native(other_list.Get()));
     capture::poll();
     gpu.check_debug_errors();
     std::printf("PASS enhanced-layout latch: executed enhanced barriers latch a tracked depth texture and a watched source; their "
-      "claims are copied with enhanced barriers from whichever layout the proof names (discarded when it changed), a declaration "
-      "that names another refused; a depth clear keeps an enhanced layout for the end-of-frame copy%s\n",
+      "claims are copied with enhanced barriers from whichever layout the proof names (discarded when it changed), any claim "
+      "of another layout refused, a stale proof included; a depth clear keeps an enhanced layout for the end-of-frame copy%s\n",
       gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
   }
 
   void auxiliary_consumer_replay_and_discard(fixture &gpu) {
     consumer_fixture consumer(gpu);
+    // A list recorded before the copy's moves the layout and executes after
+    // the proof, ahead of the copy's list in one ExecuteCommandLists: the
+    // proof (DEPTH_STENCIL_WRITE) is stale when the copy is recorded. NGX's
+    // contract and a shader-read declaration describe the call, where the
+    // texture is in SHADER_RESOURCE: neither gives way to the proof, so no
+    // barrier from DEPTH_STENCIL_WRITE is recorded, and the debug layer sees
+    // the game's lists alone.
+    check(other_allocator->Reset(), "latch allocator reset");
+    check(reset_list(other_list.Get(), other_allocator.Get()), "latch list reset");
+    barrier(other_list.Get(), depth.Get(), D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE, D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE,
+      D3D12_BARRIER_ACCESS_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
+    check(close_list(other_list.Get()), "latch list close");
+    for (const auto &claim : {sunshine_api_contract::ngx::evaluation_input, generic::preserved(shader)}) {
+      require(!capture::record_preserved(native(gpu.list.Get()), source, claim, 0, &diagnostic) && diagnostic.earlier_layout &&
+          diagnostic.stage == capture::record_stage::conflicting_state,
+        "a claim about the copy's call gave way to a proof an unexecuted earlier list overtakes");
+    }
+    check(close_list(gpu.list.Get()), "latch copy list close");
+    {
+      ID3D12CommandList *lists[] {other_list.Get(), gpu.list.Get()};
+      gpu.queue->ExecuteCommandLists(2, lists);
+    }
+    gpu.wait(); gpu.reset();
+    {
+      capture::proven_state proven;
+      require(capture::last_proven_state(source, queue, proven) && proven.enhanced &&
+          proven.layout == D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, "the earlier list's executed barrier did not prove its layout");
+    }
+
     texture_case image(gpu, DXGI_FORMAT_R8G8B8A8_UNORM, 4);
     auto target = destination(gpu.device.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
     const auto capture_ready = [&] {
@@ -2210,7 +2237,10 @@ int main(int argc, char **argv) {
       available.Reset();
       fixture gpu(true);
       enhanced_barrier_capture(gpu);
-      std::puts("PASS diagnostic texture capture under GPU-based validation (enhanced layouts)");
+      // The latch's copies, and its refusals where an unexecuted earlier
+      // list makes the proof stale, with each layout checked at execution.
+      enhanced_layout_latch(gpu);
+      std::puts("PASS diagnostic texture capture under GPU-based validation (enhanced layouts and the enhanced-layout latch)");
       return 0;
     }
     require(capture::testing::diagnostic_snapshot_regression(), "diagnostic retirement/fence/format policy regression");

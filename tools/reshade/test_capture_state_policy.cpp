@@ -238,17 +238,41 @@ int main() try {
     earlier(D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE), D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
   require(chosen.admitted && copy_state::list_basis(chosen, false) && !copy_state::list_basis(chosen, true),
     "a direct queue's earlier layout was not refused on a compute list, or not admitted on a direct list");
-  // A claim that names another layout than the proof: a declaration must
-  // agree, while an SDK contract and an at-call UI declaration give way to it
-  // as to an observation.
+  // A claim that names another layout than the proof, under every claim rule:
+  // the claim is about the copy's call, the proof about the last executed
+  // list, which a list recorded before the copy's and executed after it may
+  // have overtaken (an SDK contract and an at-call UI declaration never give
+  // way to it as to an observation on the recording). Refused, as conflicting.
   chosen = copy_state::resolve(declared, D3D12_RESOURCE_STATE_DEPTH_WRITE, earlier(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE),
     D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
   require(!chosen.admitted && chosen.result == capture::status::conflicting_state, "a declaration that names another layout than its earlier proof was copied");
-  for (const auto selected : {contract, at_call_ui}) {
-    chosen = copy_state::resolve(selected, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-      earlier(D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ, true, D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ), D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
-    require(chosen.admitted && chosen.enhanced && chosen.layout == D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ && chosen.used_observed,
-      "an earlier proof did not stand over a claim that gives way to an observation");
+  for (const auto selected : {declared, contract, at_call_ui}) {
+    for (const auto &value : {
+           earlier_copy{D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ, D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ},
+           earlier_copy{D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE, D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE},
+           earlier_copy{D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_COPY_DEST, D3D12_BARRIER_ACCESS_COPY_DEST},
+           earlier_copy{D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_COPY_SOURCE, D3D12_BARRIER_ACCESS_COPY_SOURCE},
+           earlier_copy{D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_GENERIC_READ, D3D12_BARRIER_ACCESS_SHADER_RESOURCE},
+           earlier_copy{D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, D3D12_BARRIER_ACCESS_SHADER_RESOURCE},
+         }) {
+      chosen = copy_state::resolve(selected, value.claim, earlier(value.layout, true, value.access),
+        D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL | D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+      require(!chosen.admitted && chosen.result == capture::status::conflicting_state && chosen.stage == capture::record_stage::conflicting_state,
+        "an earlier proof stood over a claim of another layout");
+    }
+  }
+  // No claim (an undeclared state): the proof never admits a copy alone. A
+  // declared 0 is COMMON, a claim a proven COMMON layout agrees with.
+  for (const auto selected : {declared, contract, at_call_ui}) {
+    chosen = copy_state::resolve(selected, UINT32_MAX, earlier(D3D12_BARRIER_LAYOUT_COMMON, true, D3D12_BARRIER_ACCESS_COPY_SOURCE),
+      D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+    require(!chosen.admitted && chosen.result == capture::status::unsupported_state, "an earlier proof admitted a copy without a claim");
+  }
+  for (const auto selected : {declared, at_call_ui}) {
+    chosen = copy_state::resolve(selected, D3D12_RESOURCE_STATE_COMMON, earlier(D3D12_BARRIER_LAYOUT_COMMON, true, D3D12_BARRIER_ACCESS_COPY_SOURCE),
+      D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+    require(chosen.admitted && chosen.enhanced && chosen.layout == D3D12_BARRIER_LAYOUT_COMMON,
+      "a declared COMMON was not copied from the COMMON layout an earlier list proved");
   }
   struct earlier_case {
     std::uint32_t claim;

@@ -300,25 +300,34 @@ namespace sunshine_streamline::depth_capture::copy_state {
   // there (Enhanced Barriers, legacy interop), so the copy leaves and
   // restores the layout and access that list's proof names, whatever layout
   // it is (owner ruling D6-relax, 10-24): Barrier validation needs only that
-  // LayoutBefore match the subresource's layout. The proof then stands as an
-  // observation on the recording does: the claim's rule decides against it
-  // (a declaration that disagrees refuses under declared_must_match), the
+  // LayoutBefore match the subresource's layout. But the proof is where the
+  // last executed list left the texture, and the claim (a declaration, a
+  // clear's or the SDK's contract) is about the copy's call: a list recorded
+  // before the copy's and executed after the proof may have moved the
+  // layout, so the proof never overrides a claim. It only gives the exact
+  // form (and access) of the layout the claim names, under every claim rule
+  // as declared_must_match checks an observation: a claim of another layout
+  // refuses the copy (conflicting_state), and so does no claim (UINT32_MAX;
+  // a declared 0 is COMMON, which only a COMMON layout agrees with). The
   // allocation's flags must allow it (X1), and the recording's list type
   // must be able to name it (list_basis: no layout of another queue type).
   // An unproven latched texture is refused, and so is a source that needs a
   // state recorded on its own list (observed_only, and a declaration of a
   // later use): a watched texture's proof never admits a copy alone
   // (proven_state.h).
-  constexpr bool earlier_layout_copy(rule selected, const observation &observed) {
-    return selected != rule::observed_only && selected != rule::observed_over_declared && observed.present &&
-      observed.known && !observed.blocked && !observed.pending && observed.enhanced &&
+  constexpr bool earlier_layout_copy(rule selected, std::uint32_t claimed, const observation &observed) {
+    return selected != rule::observed_only && selected != rule::observed_over_declared && claimed != UINT32_MAX &&
+      observed.present && observed.known && !observed.blocked && !observed.pending && observed.enhanced &&
       observed.access != std::uint32_t(D3D12_BARRIER_ACCESS_NO_ACCESS);
   }
 
   constexpr decision resolve(rule selected, std::uint32_t claimed, const observation &observed, std::uint32_t resource_flags) {
     if (selected == rule::none) return reject(status::unsupported_state, record_stage::unsupported_proof);
-    if (observed.earlier && !earlier_layout_copy(selected, observed))
-      return reject(status::unsupported_state, record_stage::unsupported_state);
+    if (observed.earlier) {
+      if (!earlier_layout_copy(selected, claimed, observed))
+        return reject(status::unsupported_state, record_stage::unsupported_state);
+      if (!agrees(claimed, observed)) return reject(status::conflicting_state, record_stage::conflicting_state);
+    }
     // An in-progress split barrier or unrepresentable transition overrides every claim.
     if (observed.present && (observed.blocked || observed.pending || !observed.known))
       return reject(status::incomplete_state, record_stage::incomplete_state);
