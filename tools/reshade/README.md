@@ -1732,7 +1732,7 @@ their own key: each names a limitation that the fixture tags on the frames that 
 violation of a tagged frame is its row's; any other fails the run, and so does a row whose
 limitation was supplied in a run without a violation (the gap closed, and the fix removes the
 row). Each provider run with an interposer exercises the first three; the session timelines below
-found the other four, which their witness timelines exercise:
+found the other five, which their witness timelines exercise:
 
 - C1, SR depth on another queue (until Step 4's fence observation): `sr-other-queue` warms up with
   the viewport's SR evaluation on the presenting queue (FG off), then records it on the game's own
@@ -1742,7 +1742,11 @@ found the other four, which their witness timelines exercise:
   presenting queue's last copy ages out (in Assassin's Creed Shadows 110-235 ms, about 30
   `no_completed_snapshot` losses a session). The recovery on the presenting queue settles again.
   DLSS-G's own copies on its compute list (N7) are read the same way, once DLSS-G reset that
-  recording, and the session timelines tag their frames with this row too.
+  recording, and the session timelines tag their frames with this row too. The row records a loss
+  only once no copy the presenting queue could read (a frame's legal source that meets no
+  limitation) is younger than the source age, as the limitation explains no earlier one: a held FG
+  copy dropped for an SR snapshot still in flight on the other queue (fixed by 88b45edf) is a
+  violation.
 - C2, Generic on another queue (until Step 4's fence hooks): `generic-other-queue` lets the API
   association lapse, then draws one view of the swapchain's size on the game's queue with no
   boundary but the end of the frame; each frame's list moves it through `DEPTH_READ` back to
@@ -1782,6 +1786,12 @@ found the other four, which their witness timelines exercise:
   copy waits until the source age after DLSS-G's last evaluation while the held copy ages out first,
   so those Presents are mono (witness
   `20*sr=local; fg=on,tag=present_bare; 3*dlssg=compute_unobserved; 40*tag=present_bare`).
+- C8, FG turned off while the display holds an FG copy, found by the session timelines once C1
+  recorded only the losses its limitation explains (owner decision): with the viewport's SR depth on
+  another queue (C1), the provider drops the FG copy as a changed source (`source_changed`) instead
+  of holding it within the source age, so the Presents until the SR copy is readable are mono.
+  88b45edf's hold keeps an FG copy over a pending SR copy only while FG is on (witness
+  `20*sr=local; fg=on,tag=present_list; fg=off,sr=other_queue; 10*sr=other_queue`).
 
 `reshade_native_provider_continuity` runs the provider fixture at 1280x720 with the 2.7.30
 interposer, every frame script under the invariant, in about 115 s. Like
@@ -1796,7 +1806,11 @@ the matrix's dimensions over frames at random. A timeline is 60 to 200 real fram
 one family of frame events: a Streamline depth tag in each lifecycle with or without a command
 list, through `slSetTagForFrame` or `slSetTag`; a null untag after the tag (by the frame's token or
 by none) or before it (the frame before's), or none; FG turned on or off, and 1 to 3 generated
-Presents after the real one or inside the recording (2x to 4x); a dynamic-resolution step; the
+Presents after the real one, inside the recording, or landing inside the viewport's SR evaluation of
+its own input, between that input's read and its copy (2x to 4x: the test add-on's
+`SunshineStreamlineTestPresentBeforeNextCopy`, withdrawn when the evaluation nominated no copy, then
+the Presents after the evaluation; DLSS-G's present thread does this in Assassin's Creed Shadows,
+fixed by 64d6d06c); a dynamic-resolution step; the
 viewport's SR evaluation with its own input on the presenting queue or the game's own queue, or of
 the frame's tag; DLSS-G's own evaluation on a direct or compute list, its depth in a state recorded
 there or not; the game's HUD-less and Backbuffer tags; and the state choice of the frame's depth
@@ -1841,25 +1855,29 @@ list that still fails the same way, printed as `--events "..."`: the frames afte
 event kind back to its default in every frame, chunks of frames, then each event kind of each frame
 of a short list, every kept candidate cut after the frame where it failed. Shrinking re-runs each
 candidate, so `--shrink-runs` (default 40) and the fixed set's time bound limit it, and a failure
-that depends on timing may shrink less. The fixed set also runs one witness per row the timelines
-found (C4-C7): an event list whose frames meet the
+that depends on timing may shrink less. The fixed set also runs one regression timeline per
+Assassin's Creed Shadows fix, an event list shaped like the session it fixed and judged as any
+timeline (random seeds meet these shapes only by chance, and a change of the event language changes
+every seed), and one witness per row the timelines found (C4-C8): an event list whose frames meet the
 limitation alone, long enough to lose depth on every run; a witness that loses none fails the set,
 as the matrix's gap seeds keep a recorded gap's own failing cell. `--trace` prints every Present's
 frame record, the supply it was judged with and each recorded refusal.
 
-`reshade_session_timelines` runs the fixed set (24 seeds and the four witnesses, about 3550 frames
-and 7900 Presents) in about 125 s, registered like `reshade_native_provider_continuity` with the same
-240 s timeout. Locally:
+`reshade_session_timelines` runs the fixed set (24 seeds, four regression timelines and five
+witnesses, about 3760 frames and 8500 Presents) in about 135 s, registered like
+`reshade_native_provider_continuity` with the same 240 s timeout. Locally:
 
     reshade_game3d_session_timeline_runtime_test [--list] [--timeline <seed> | --events "<list>" |
       --seeds N [--from M]] [--shard i/N] [--shrink-runs N] [--trace]
       official.dll frozenShaders test.addon64 freshOutput frame_generation_interposer.dll
 
-`--list` prints each selected timeline's seed (or witness) and event list; `--timeline` replays one
-seed and `--events` one list (frames separated by `;`, each `defaults` or `name=value,...`, `N*`
-repeating one); `--seeds N --from M` soaks N further seeds. Soaks over the 350 seeds after the fixed
+`--list` prints each selected timeline's seed (or regression or witness) and event list;
+`--timeline` replays one seed and `--events` one list (frames separated by `;`, each `defaults` or
+`name=value,...`, `N*` repeating one); `--seeds N --from M` soaks N further seeds (with the
+regressions and witnesses). Soaks over the 350 seeds after the fixed
 set (`--from 24`) found the shapes of C4, C6 and C7 beyond their witnesses; seeds 279 to 373 then
-passed with no failure.
+passed with no failure (in the event language before Presents inside an SR evaluation, which
+changed every seed).
 
 The lifecycle test
 ([`test_addon_unload_runtime.cpp`](test_addon_unload_runtime.cpp)) covers the add-on across
@@ -1868,7 +1886,12 @@ one (the crash fixed by 5148a6da: Assassin's Creed Shadows' startup device). It 
 timelines' fixture and drives one process, one hidden window and these devices:
 
 1. a startup device with no queue, swapchain or frame, destroyed while its initialization's module
-   discovery and content-sampler compile run on the pool;
+   discovery and content-sampler compile run on the pool. The discovery is held before it scans
+   (`SunshineSbsTestHoldDiscovery`, armed by the fixture's own `init_device` callback, which ReShade
+   calls before the test add-on's): this process exports the NGX stand-in, so a discovery that ran
+   would hook it within the startup device's lifetime, and a hook pins the add-on as its owner,
+   leaving AddonInit's own pin untested. Held, it is in flight at the unload as in Assassin's Creed
+   Shadows, and the module stays mapped only through AddonInit's pin;
 2. the game's first device, through the FX boot and Streamline discovery until Game 3D renders;
 3. a device of another swapchain size, destroyed while its shader entries compile on the pool (the
    add-on's shader store is isolated in the output directory, so each size compiles);
@@ -1919,6 +1942,32 @@ not the device was recreated. The lifecycle keeps one viewport, as games do.
 
     reshade_addon_unload_runtime_test official.dll frozenShaders test.addon64 freshOutput
       frame_generation_interposer.dll
+
+These tests were proven against the Assassin's Creed Shadows fixes (10-25): the test add-on built
+from batch A (18e5d922, before the hotfix) and from master with each fix's production change
+reverted (5148a6da reverts cleanly; the others by hand, as later commits changed their lines) fails
+them, while master's passes. The timelines' first failing seed shrinks to:
+
+- 5148a6da, AddonInit's pin: `reshade_addon_unload_runtime` at the startup device ("unmapped the
+  add-on; AddonInit must pin the module"); batch A also crashed there in the pool work it held.
+- 9146a468, FG owning its viewport only for the frames it supplied: continuity gaps,
+  `defaults; fg=on,sr=local` (mono, `FG_scope_required`).
+- 88b45edf, FG's copy held over SR: continuity gaps,
+  `fg=on,tag=present_bare; tag=present_bare,untag=after_frame,sr=other_queue` (`source_changed`).
+- 64d6d06c, an evaluation's local input current through other Presents: the oracle at the SR
+  input's copy (`source_lifetime`),
+  `fg=on,sr=local; sr=local,state=unprovable,generated=3,at=evaluate`.
+- 46a4510e (with S22, which also copies on compute lists), DLSS-G's compute-list copies: the oracle
+  at DLSS-G's input (`command_type`), `fg=on; dlssg=compute_unobserved`.
+- ad66b1c8, a compute-list copy taking its viewport only once readable: continuity gaps,
+  `tag=now_list; fg=on; dlssg=compute`.
+
+The proof found three blind spots, closed in the tests: the NGX stand-in's hook pinned the add-on
+before the startup device's unload, so the lifecycle passed without 5148a6da (now the discovery
+gate); no timeline put a Present inside an SR evaluation's copy (now `at=evaluate`); and C1 excused
+any loss of a frame tagged with it, which hid 88b45edf's and ad66b1c8's (now only once no readable
+copy is younger than the source age, which also found C8). Each fix also has its regression
+timeline, since a change of the event language moves which seeds meet it.
 
 ### Characterization tests
 

@@ -9,8 +9,9 @@
 //   not (the state choice);
 // - a null untag after the tag (by the frame's token, or by none), or one at
 //   the start of the frame (the frame before's tag), or none;
-// - FG turned on or off, and 1 to 3 generated Presents after the real one or
-//   inside the next frame's recording (2x to 4x);
+// - FG turned on or off, and 1 to 3 generated Presents after the real one,
+//   inside the next frame's recording, or landing inside its SR evaluation
+//   while that evaluation copies its own depth input (2x to 4x);
 // - a dynamic-resolution step of the tagged extent;
 // - the viewport's SR evaluation with its own depth input on the presenting
 //   queue or the game's own direct queue, or of the frame's tag;
@@ -44,13 +45,15 @@
 // failing timeline is printed with its seed and event list, then shrunk
 // (shrinker below) to a minimal reproducer, printed as an event list that
 // --events replays. Each row the timelines found has a witness timeline
-// that must lose depth on every run.
+// that must lose depth on every run, and each Assassin's Creed Shadows fix a
+// regression timeline that must not.
 //
 // Command line: [--list] [--timeline <seed> | --events <list> | --seeds N
 // [--from M]] [--shard i/N] [--shrink-runs N] [--trace] official.dll
 // frozenShaders test.addon64 freshOutput interposer.dll. Without a selection
-// it runs the fixed set, the first fixed_timelines seeds and the witnesses,
-// as the registered test does; --trace prints every Present's frame record.
+// it runs the fixed set, the first fixed_timelines seeds, the regressions
+// and the witnesses, as the registered test does; --trace prints every
+// Present's frame record.
 // An event list holds frames separated by ';', each "defaults" or
 // name=value pairs separated by ',', optionally repeated as "N*frame".
 #define SUNSHINE_NATIVE_PROVIDER_FIXTURE_ONLY
@@ -154,7 +157,12 @@ namespace {
 
     enum class generated_at {
       between,  // After the frame's real Present.
-      inside  // Inside the frame's recording, before its evaluations.
+      inside,  // Inside the frame's recording, before its evaluations.
+      // The first lands inside the frame's SR evaluation of its own depth
+      // input, between the input's read and its copy (DLSS-G presents earlier
+      // frames on its own thread meanwhile: Assassin's Creed Shadows, most
+      // often at a dynamic-resolution step), the rest after that evaluation.
+      evaluate
     };
 
     enum class ui_form {
@@ -171,8 +179,9 @@ namespace {
 
     // What one frame can carry (partial rows): an SR evaluation of the
     // frame's tag needs a tag, an entry choice and a token untag a tag of
-    // that entry, a placement generated Presents, and a state choice an
-    // input it describes.
+    // that entry, a placement generated Presents (inside an SR evaluation,
+    // one of the viewport's own input), and a state choice an input it
+    // describes.
     bool legal(const generator::row &value) {
       const auto has = [&](dimension d) {
         return value[d] >= 0;
@@ -187,6 +196,9 @@ namespace {
         return false;
       }
       if (has(tag) && has(sr) && has(dlssg) && has(state) && of<state_form>(value, state) != state_form::declared && of<tag_form>(value, tag) == tag_form::none && of<sr_form>(value, sr) == sr_form::none && of<dlssg_form>(value, dlssg) == dlssg_form::none) {
+        return false;
+      }
+      if (has(sr) && has(at) && of<generated_at>(value, at) == generated_at::evaluate && of<sr_form>(value, sr) != sr_form::local) {
         return false;
       }
       return !(has(generated) && has(at) && !value[generated] && of<generated_at>(value, at) != generated_at::between);
@@ -205,7 +217,7 @@ namespace {
           {"dlssg", {"none", "direct", "direct_unobserved", "compute", "compute_unobserved"}},
           {"state", {"declared", "proven", "unprovable", "recorded_other"}},
           {"generated", {"0", "1", "2", "3"}},
-          {"at", {"between", "inside"}},
+          {"at", {"between", "inside", "evaluate"}},
           {"ui", {"none", "bare", "listed", "untagged"}},
         },
         legal,
@@ -228,7 +240,7 @@ namespace {
           {4, 2, 1, 1, 1},
           {4, 2, 1, 1},
           {3, 3, 1, 1},
-          {3, 1},
+          {3, 1, 1},
           {3, 1, 1, 1},
         },
         {0, 0, 850, 950, 850, 850, 850, 850, 800, 900, 900},
@@ -259,6 +271,33 @@ namespace {
     std::uint64_t seed {};  // 0: an explicit event list.
     std::vector<generator::row> frames;
     const char *witness {};  // The known gap row a witness timeline meets.
+    const char *regression {};  // The fix a regression timeline keeps.
+  };
+
+  // Each Assassin's Creed Shadows fix has a regression timeline: an event
+  // list shaped like the session it fixed, which the fixed set runs after
+  // its seeds and judges as any timeline. Each fails with its fix reverted
+  // (README, Session-level tests); random seeds meet these shapes only by
+  // chance, and a change of the event language changes every seed.
+  struct regression {
+    const char *fix, *events;
+  };
+
+  constexpr regression regressions[] {
+    // FG turned on over SR depth without an FG copy: the scope owns nothing
+    // until FG supplies, so SR keeps the viewport (9146a468).
+    {"9146a468-fg-on", "20*sr=local; fg=on,sr=local; 20*sr=local"},
+    // A Present of an earlier frame inside each SR evaluation's copy of its
+    // own depth input leaves that copy current (64d6d06c).
+    {"64d6d06c-present-in-sr-copy", "20*sr=local; fg=on,sr=local; 20*sr=local,generated=1,at=evaluate"},
+    // DLSS-G's own depth copied on its compute list (46a4510e), which takes
+    // the viewport from SR only once the Present queue can read it
+    // (ad66b1c8).
+    {"46a4510e-ad66b1c8-dlssg-compute", "20*sr=local; fg=on,sr=local,dlssg=compute; 20*sr=local,dlssg=compute"},
+    // A stray FG copy amid frames whose deferred FG copy an untag cancels,
+    // with SR on the game's own queue: the FG copy is held over the SR copy
+    // still in flight (88b45edf; known gap C1 once that hold ages out).
+    {"88b45edf-stray-fg-copy", "20*sr=local; fg=on,tag=present_list; 15*tag=present_bare,entry=global,untag=after_global,sr=other_queue; tag=present_list; 15*tag=present_bare,entry=global,untag=after_global,sr=other_queue"},
   };
 
   // Each known gap the timelines found has a witness: an event list whose
@@ -281,6 +320,9 @@ namespace {
     // A command-less FG tag's copy, DLSS-G evaluations (refused) without a
     // tag, then command-less FG tags without DLSS-G.
     {"C7-deferred-copy-awaits-dlssg", "20*sr=local; fg=on,tag=present_bare; 3*dlssg=compute_unobserved; 40*tag=present_bare"},
+    // One FG tag copy, then FG off with the viewport's SR input on the
+    // game's own queue.
+    {"C8-fg-off-drops-fg-copy", "20*sr=local; fg=on,tag=present_list; fg=off,sr=other_queue; 10*sr=other_queue"},
   };
 
   // The seed of the fixed set's or a soak's index-th timeline.
@@ -403,6 +445,10 @@ namespace {
     using action_t = BOOL (*)(api::effect_runtime *);
     using events = frame_events::dimension;
     action_t recalibrate {};
+    // The test add-on's Present of an earlier frame inside the next nominated
+    // copy's call, and its withdrawal when no such copy came.
+    void (*present_before_next_copy)() {};
+    BOOL (*cancel_present_before_next_copy)() {};
     decltype(&NVSDK_NGX_D3D12_CreateFeature) ngx_create {};
     decltype(&NVSDK_NGX_D3D12_EvaluateFeature) ngx_evaluate {};
     const matrix::sl_version version {2, 7, 30};
@@ -457,6 +503,11 @@ namespace {
     // refused), and whether the frame's tag copy is deferred to its Present.
     std::uint64_t dlssg_evaluated {};
     bool deferred_tag {};
+    // When a frame last supplied a legal API source the presenting queue
+    // reads (one that meets no limitation), and whether that was an FG copy
+    // (known gap C8).
+    std::uint64_t readable_supply {};
+    bool readable_fg {};
     std::map<std::uint64_t, unsigned> present_frames;
 
     // What the frame being recorded supplies (the continuity supply log).
@@ -494,6 +545,9 @@ namespace {
       set_foreground = reinterpret_cast<void (*)(HWND)>(GetProcAddress(addon, "SunshineSbsTestSetForeground"));
       recalibrate = reinterpret_cast<action_t>(GetProcAddress(addon, "SunshineGame3DTestRecalibrate"));
       require(set_foreground && recalibrate, "Test add-on lacks the foreground observer or recalibration");
+      present_before_next_copy = reinterpret_cast<void (*)()>(GetProcAddress(addon, "SunshineStreamlineTestPresentBeforeNextCopy"));
+      cancel_present_before_next_copy = reinterpret_cast<BOOL (*)()>(GetProcAddress(addon, "SunshineStreamlineTestCancelPresentBeforeNextCopy"));
+      require(present_before_next_copy && cancel_present_before_next_copy, "Test add-on lacks its Present-before-copy hook");
       // The export stop at a focus loss would end FG reuse: select the hidden
       // game window in the test observer without moving focus.
       set_foreground(window);
@@ -685,12 +739,14 @@ namespace {
     }
 
     // An SR evaluation's own depth input (lifecycle 1 on the evaluation's
-    // list), from what that list records.
-    matrix::sl_case local_case(std::uint32_t declared, bool seen, std::uint32_t state) const {
+    // list), from what that list records, with the generated Presents that
+    // land inside that evaluation.
+    matrix::sl_case local_case(std::uint32_t declared, bool seen, std::uint32_t state, std::uint32_t generated = 0) const {
       matrix::sl_case out;
       out.version = version;
       out.entry = matrix::tag_entry::local_array;
       out.at = matrix::copy_point::same_frame_evaluate;
+      out.generated_presents = generated;
       out.extent = matrix::extent_form::padded;
       out.fg = fg_on ? matrix::fg_mode::on : matrix::fg_mode::off;
       out.declared_state = declared;
@@ -952,7 +1008,9 @@ namespace {
       }
       const auto form = of<tag_form>(value, events::tag);
       const auto sr_choice = of<sr_form>(value, events::sr);
-      const auto generated_inside = of<generated_at>(value, events::at) == generated_at::inside ? std::uint32_t(value[events::generated]) : 0u;
+      const auto placement = of<generated_at>(value, events::at);
+      const auto generated_inside = placement == generated_at::inside ? std::uint32_t(value[events::generated]) : 0u;
+      const auto generated_in_evaluate = placement == generated_at::evaluate ? std::uint32_t(value[events::generated]) : 0u;
       void *tag_commands {};
       if (form != tag_form::none) {
         const auto tag_call = tag_case(matrix::copy_point::tag_call, 0);
@@ -1022,10 +1080,25 @@ namespace {
         const abi_v2::resource_tag input {{nullptr, tag_guid, 1}, &resource, 0, 1, active_area};
         const base_structure *inputs[] {&view.base, &input.base};
         if (sr_choice == sr_form::local) {
-          decide("sr_local", local_case(declared, evidence_seen, evidence_state), continuity::sr_evaluate, {"evaluate"});
+          decide("sr_local", local_case(declared, evidence_seen, evidence_state, generated_in_evaluate), continuity::sr_evaluate, {"evaluate"});
+        }
+        // A generated Present inside the evaluation: the add-on's hook ends
+        // the input source's present generation once inside the next
+        // nominated copy's call, between its input's read and the copy
+        // (record_impl), as DLSS-G's present thread does; it is withdrawn
+        // when the evaluation nominated no copy (an FG scope that owns the
+        // viewport). The Presents themselves follow the evaluation.
+        if (generated_in_evaluate) {
+          present_before_next_copy();
         }
         returned(sl.evaluate(0, *token, inputs, sr_choice == sr_form::local ? 2 : 1, command()), "slEvaluateFeature");
+        if (generated_in_evaluate) {
+          cancel_present_before_next_copy();
+        }
         poll("evaluate");
+        for (std::uint32_t i = 0; i != generated_in_evaluate; ++i) {
+          generated_present(true);
+        }
       } else if (sr_choice == sr_form::other_queue) {
         // The game's own queue's recording: the depth written there, its
         // input declared as it is there (or undeclared), nothing recorded.
@@ -1091,6 +1164,16 @@ namespace {
       }
       if (fg_on && dlssg_choice != dlssg_form::none) {
         dlssg_evaluated = now;
+      }
+      // FG turned off within the source age of the FG copy the display may
+      // hold, with only SR depth on another queue (C1) to follow it: the
+      // provider drops that copy as a changed source (known gap C8).
+      if (!fg_on && !supply.legal && supply.limit == continuity::limitation::cross_queue_sr && readable_fg && now - readable_supply < sunshine_freshness::source_age_ms + 100) {
+        supply.limit = continuity::limitation::fg_off_drops_fg_copy;
+      }
+      if (supply.legal & continuity::api_sources) {
+        readable_supply = now;
+        readable_fg = fg_on && frame_generation_scope() && (supply.legal & (continuity::tag_copy | continuity::dlssg_input));
       }
       // The frame's supply: a frame whose legal sources all meet a known
       // limitation is tagged with it; any other legal source must show.
@@ -1254,7 +1337,8 @@ namespace {
       view = {{nullptr, sunshine_streamline::viewport_guid, 1}, next_viewport++};
       fg_on = false;
       last_capture = 0;
-      api_supplied = other_queue_copy = fg_copy = fg_tag_copy = dlssg_copy = dlssg_evaluated = 0;
+      api_supplied = other_queue_copy = fg_copy = fg_tag_copy = dlssg_copy = dlssg_evaluated = readable_supply = 0;
+      readable_fg = false;
       present_frames.clear();
       where = label;
       continuity_log.judge = {};
@@ -1462,7 +1546,13 @@ namespace {
   }
 
   std::string name_of(const timeline_case &value) {
-    return value.witness ? std::string("witness=") + value.witness : "seed=" + seed_text(value.seed);
+    if (value.witness) {
+      return std::string("witness=") + value.witness;
+    }
+    if (value.regression) {
+      return std::string("regression=") + value.regression;
+    }
+    return "seed=" + seed_text(value.seed);
   }
 }  // namespace
 
@@ -1492,6 +1582,15 @@ int main(int argc, char **argv) {
     std::vector<timeline_case> cases;
     for (std::uint64_t i = 0; i != chosen.seeds; ++i) {
       cases.push_back(generate(seed_of(chosen.from + i)));
+    }
+    for (const auto &value : regressions) {
+      timeline_case kept;
+      kept.regression = value.fix;
+      if (!parse_events(value.events, kept.frames, error)) {
+        std::fprintf(stderr, "FAIL session timelines: the regression of %s: %s\n", value.fix, error.c_str());
+        return 2;
+      }
+      cases.push_back(kept);
     }
     for (const auto &value : witnesses) {
       timeline_case witnessed;
@@ -1563,7 +1662,12 @@ int main(int argc, char **argv) {
     bool shrunk = false;
     for (std::size_t i = 0; i != selected_cases.size(); ++i) {
       const auto &value = selected_cases[i];
-      const auto label = value.witness ? std::string("witness-") + value.witness : "timeline-" + seed_text(value.seed);
+      auto label = "timeline-" + seed_text(value.seed);
+      if (value.witness) {
+        label = std::string("witness-") + value.witness;
+      } else if (value.regression) {
+        label = std::string("regression-") + value.regression;
+      }
       auto result = fixture.run(value, label);
       if (value.witness) {
         std::size_t row = 0;

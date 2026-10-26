@@ -454,7 +454,22 @@ namespace sunshine_upscaler_trace {
     // poll_lock, and a present-path poll meanwhile skips as on contention.
     // The add-on is pinned, so a pending callback never outlives its code.
     std::atomic<bool> discovery_pending{};
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+    // TEST add-on only: the add-on lifecycle fixture holds the next pool
+    // discovery, before it scans or hooks anything, across ReShade's unload
+    // (SunshineSbsTestHoldDiscovery).
+    std::atomic<HANDLE> discovery_gate_entered {}, discovery_gate_release {};
+#endif
     void CALLBACK discover_on_pool(PTP_CALLBACK_INSTANCE, void *) {
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+      if (const auto entered = discovery_gate_entered.exchange(nullptr, std::memory_order_acq_rel)) {
+        const auto release = discovery_gate_release.exchange(nullptr, std::memory_order_acq_rel);
+        SetEvent(entered);
+        if (release) {
+          WaitForSingleObject(release, 60000);
+        }
+      }
+#endif
       AcquireSRWLockExclusive(&poll_lock);
       if (!sunshine_addon_lifetime::stopping()) discover();
       discovery_pending.store(false, std::memory_order_release);
@@ -621,6 +636,23 @@ namespace sunshine_upscaler_trace {
     tls_depth = previous_depth_;
     tls_capture_depth = previous_capture_depth_;
   }
+
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+  // TEST add-on only: the next pool discovery signals entered, then waits for
+  // release (at most 60 s) before it scans modules or installs a hook, which
+  // pins the add-on as a hook's owner. The add-on lifecycle fixture arms it
+  // as ReShade initializes a startup device, so that device's unload comes
+  // while its discovery is certainly in flight and unpinned by any hook
+  // (Assassin's Creed Shadows' crash in discover(), fixed by 5148a6da).
+  extern "C" __declspec(dllexport) BOOL SunshineSbsTestHoldDiscovery(HANDLE entered, HANDLE release) {
+    if (!entered || !release) {
+      return FALSE;
+    }
+    discovery_gate_release.store(release, std::memory_order_release);
+    discovery_gate_entered.store(entered, std::memory_order_release);
+    return TRUE;
+  }
+#endif
 
 #ifdef SUNSHINE_UPSCALER_TRACE_TEST
   namespace testing {

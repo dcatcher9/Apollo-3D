@@ -2131,6 +2131,13 @@ namespace sunshine_streamline::depth_capture {
   extern "C" __declspec(dllexport) void SunshineStreamlineTestPresentBeforeNextCopy() {
     present_before_next_copy.store(true, std::memory_order_release);
   }
+
+  // Withdraws that Present when no nominated copy took it (the session
+  // timelines' Present inside an SR evaluation that nominated none); whether
+  // it was still pending.
+  extern "C" __declspec(dllexport) BOOL SunshineStreamlineTestCancelPresentBeforeNextCopy() {
+    return present_before_next_copy.exchange(false, std::memory_order_acq_rel) ? TRUE : FALSE;
+  }
   namespace {
     std::atomic<HANDLE> nomination_gate_entered{}, nomination_gate_release{};
     void wait_nomination_gate() {

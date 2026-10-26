@@ -12,8 +12,8 @@
 // add-on, the 2.7.30 interposer and the NGX stand-in (the session timelines'
 // fixture, test_game3d_session_timeline_runtime.cpp), through these devices:
 // 1. a startup device with no queue, swapchain or frame, destroyed while its
-//    initialization's pool work (module discovery, the content sampler's
-//    compile) runs;
+//    initialization's pool work (module discovery, held before it can hook
+//    anything, and the content sampler's compile) runs;
 // 2. the game's first device, through the FX boot and Streamline discovery
 //    until Game 3D renders, then destroyed;
 // 3. a device of another swapchain size, destroyed while its shader entries
@@ -119,6 +119,30 @@ namespace {
     teardown_probe.armed = false;
     teardown_probe.log(teardown_probe.prefix.c_str(), queued_lines);
     teardown_probe.backlog_at_destroy = teardown_probe.backlog(nullptr);
+  }
+
+  // ReShade's init_device event of the startup device, which reaches the
+  // fixture's add-on before the test add-on (registered later): holds the
+  // test add-on's next pool discovery (SunshineSbsTestHoldDiscovery) before
+  // it scans modules or hooks anything. Here the NGX stand-in's exports
+  // would otherwise let that discovery hook them within the startup device's
+  // lifetime, and a hook pins the add-on as its owner, so the unload would
+  // never meet an unpinned add-on whatever AddonInit does. Held, the
+  // discovery is certainly in flight at the unload, as in Assassin's Creed
+  // Shadows, and only AddonInit's own pin (5148a6da) keeps the add-on mapped.
+  struct discovery_gate_t {
+    HANDLE entered {}, release {};
+    bool armed {}, held {};
+  } discovery_gate;
+
+  void hold_discovery(api::device *) {
+    if (!std::exchange(discovery_gate.armed, false)) {
+      return;
+    }
+    using hold_t = BOOL (*)(HANDLE, HANDLE);
+    const auto addon = GetModuleHandleW(addon_file);
+    const auto hold = addon ? reinterpret_cast<hold_t>(GetProcAddress(addon, "SunshineSbsTestHoldDiscovery")) : nullptr;
+    discovery_gate.held = hold && hold(discovery_gate.entered, discovery_gate.release);
   }
 
   // What each Present of a verified device showed, from its frame record and
@@ -564,28 +588,42 @@ namespace {
   // -- The phases -------------------------------------------------------------
 
   // ReShade loads the add-on for a startup device with no queue, swapchain or
-  // frame and unloads it with that device, while its initialization's pool
-  // work and one held callback still run.
+  // frame and unloads it with that device, while its initialization's module
+  // discovery (held before it can hook anything) and one held callback still
+  // run.
   void startup_device(lifecycle_fixture &fixture) {
     const auto create = reinterpret_cast<decltype(&D3D12CreateDevice)>(GetProcAddress(fixture.runtime_module, "D3D12CreateDevice"));
     require(create, "Official runtime lacks the D3D12 proxy export");
     require(!GetModuleHandleW(addon_file), "The add-on was loaded before any device existed");
+    discovery_gate.entered = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    discovery_gate.release = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    require(discovery_gate.entered && discovery_gate.release, "Could not create the discovery gate's events");
+    discovery_gate.armed = true;
+    reshade::register_event<reshade::addon_event::init_device>(hold_discovery);
     std::unique_ptr<lifecycle_fixture::held_work> work;
     {
       com_ptr<ID3D12Device> device;
       checked(create(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(device.put())), "Create the short-lived startup device");
+      reshade::unregister_event<reshade::addon_event::init_device>(hold_discovery);
+      require(discovery_gate.held, "The test add-on lacks its discovery gate, or ReShade initialized it for the startup device before the fixture");
+      // Its initialization started the add-on's module discovery on the pool
+      // (on_init_device), held before it scans; the content sampler's compile
+      // is on the pool too, and this callback is held until after the unload.
+      require(WaitForSingleObject(discovery_gate.entered, 10000) == WAIT_OBJECT_0, "The startup device's initialization started no module discovery on the pool");
       fixture.mark_device(device.p, "startup device");
       fixture.bind_exports();
-      // Its initialization already started the add-on's module discovery and
-      // content-sampler compile on pool threads; this one is held until after
-      // the unload, so it is certainly still to run.
       work = fixture.hold_pool_work();
       teardown_probe.prefix = "Sunshine lifecycle test: the startup device line";
       teardown_probe.armed = true;
     }
     require(!teardown_probe.armed, "ReShade did not destroy the startup device with its last reference");
+    // Unpinned, the module is gone and the held discovery would resume in
+    // unmapped code: it stays held, and the run fails here.
     fixture.require_unloaded("startup device");
+    SetEvent(discovery_gate.release);
     fixture.after_unload(*work, "startup device");
+    CloseHandle(discovery_gate.entered);
+    CloseHandle(discovery_gate.release);
     std::puts("PASS the add-on stays mapped across ReShade's unload with its startup device, and its held pool compile completes");
   }
 
