@@ -47,7 +47,18 @@ namespace sunshine_streamline::depth_capture {
     // One lazily allocated pool serves eight rotating source members plus
     // several recordings in flight and metadata nominations. No second pool
     // or per-source synchronization implementation belongs to Generic depth.
-    constexpr unsigned slot_limit = 32, source_limit = 64, queue_limit = 4;
+    constexpr unsigned slot_limit = 32, source_limit = 64;
+    // Queue places (register_queue): one for each DIRECT queue ReShade reports
+    // and for each queue that submits a copy awaiting its producer. Games
+    // create several (Assassin's Creed Shadows, 10-25: five DIRECT queues
+    // before its presenting queue, then DLSS-G's COMPUTE queue), so this is a
+    // safety bound far above any game's live queues, not a budget: a full
+    // table reclaims an idle place (free_place), and a place no queue can
+    // take is reported once (capacity_report).
+    constexpr unsigned queue_limit = 64;
+    // The queues that read one snapshot (slot::retirements): the add-on's own
+    // reads on its presenting queue, not the game's queues.
+    constexpr unsigned consumer_queue_limit = 4;
     constexpr unsigned pixel_slot_limit = slot_limit - 4; // Source metadata must survive a full GPU pool.
     constexpr unsigned diagnostic_slot_limit = 32;
     constexpr std::uint64_t diagnostic_byte_limit = 256ull * 1024 * 1024;
@@ -130,6 +141,9 @@ namespace sunshine_streamline::depth_capture {
       std::uint64_t cookie{}, next_fence{}, last_epoch{}, last_sequence{}, nominated_epoch{}, present{}, present_capture{};
       std::uint64_t admission_after{}, last_source_tick{};
       std::uint64_t device_identity{};
+      // When a lookup last found this place (known_queue, queue): a reclaimed
+      // idle place is the longest unused (free_place).
+      std::uint64_t last_use{};
       // compute_producer: a COMPUTE queue (register_compute_producer).
       bool retiring{}, provider_established{}, compute_producer{};
       provider_kind provider{provider_kind::streamline};
@@ -187,7 +201,7 @@ namespace sunshine_streamline::depth_capture {
       std::uint64_t id{}, command{}, queue{}, producer_fence{}, consumer_queue{};
       // Values are comparable only within their own private queue timeline.
       // Reset may discard recording identities, never these GPU obligations.
-      std::array<fence_point, queue_limit> retirements{};
+      std::array<fence_point, consumer_queue_limit> retirements{};
       recording_ref producer_recording;
       std::array<std::uint64_t, 4> consumers{};
       std::array<recording_ref, 4> consumer_recordings;
@@ -308,6 +322,12 @@ namespace sunshine_streamline::depth_capture {
     // A copy was ever recorded on a COMPUTE list (record_impl); liveness
     // queries look for readable compute-list copies only then.
     extern bool compute_copies_recorded, compute_unplaced;
+    // Queue places (register_queue): a free or idle one, and whether an idle
+    // one was ever reclaimed.
+    std::unique_ptr<queue_state> *free_place();
+    extern bool places_reclaimed;
+    queue_state *known_queue(std::uint64_t native);
+    void collect_retired();
     bool matching_evaluation(const evaluation_head &head, const input &value);
     void end_nomination(const input &value);
     void invalidate(slot &value, capture_failure why);

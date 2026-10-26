@@ -267,6 +267,10 @@ namespace sunshine_streamline::depth_capture {
   // These counts as one log line, at most every 5 s and only after they
   // changed; false when there is nothing to log.
   bool list_coverage_report(std::uint64_t now_ms, char *out, std::size_t size);
+  // One log line naming each safety bound of the capture owner (its queue
+  // places, source table and snapshot pools) that refused a capture since the
+  // last line, each once per session; false when no bound is newly hit.
+  bool capacity_report(char *out, std::size_t size);
   void observe_queue(std::uint64_t queue);
   // Once per Present, before any capture/copy of that Present: observe the
   // effects pass's command list, ReShade's immediate list (registering it as
@@ -664,6 +668,9 @@ namespace sunshine_streamline::depth_capture {
   // An executed recording's sorted aliasing marks answer aliased_after
   // exactly as the unsorted ones did.
   namespace testing { bool alias_lookup_regression(); }
+  // Queue places at their safety bound: a full table of busy places refuses
+  // a queue and reports the bound once; an idle place is reclaimed.
+  namespace testing { bool queue_place_regression(std::uint64_t filler, std::uint64_t target); }
   // Called once (then cleared) on the recording thread while a record call
   // allocates new storage without the capture lock.
   namespace testing { void set_allocation_hook(void (*hook)(void *), void *context); }

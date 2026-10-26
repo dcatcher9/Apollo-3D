@@ -15,6 +15,7 @@
 #include <cmath>
 #include <optional>
 #include <cstdio>
+#include <cstring>
 #include <initializer_list>
 #include <mutex>
 #include <string_view>
@@ -249,8 +250,14 @@ namespace sunshine_streamline::depth_capture {
       owner.life()->cookie.store(cookie, std::memory_order_release);
       *out_cookie = cookie;
     }
+    // Protected by mutex: orders the queue places by their last use
+    // (queue_state::last_use), so free_place reclaims the longest unused.
+    std::uint64_t place_clock{};
     queue_state *known_queue(std::uint64_t native) {
-      for (auto &value : queues) if (value && reinterpret_cast<std::uint64_t>(value->queue.p) == native) return value.get();
+      for (auto &value : queues) if (value && reinterpret_cast<std::uint64_t>(value->queue.p) == native) {
+        value->last_use = ++place_clock;
+        return value.get();
+      }
       return nullptr;
     }
     queue_state *queue(std::uint64_t native) {
@@ -261,7 +268,10 @@ namespace sunshine_streamline::depth_capture {
       std::uint64_t cookie{}; UINT size = sizeof(cookie);
       if (!query_native(native, IID_ID3D12CommandQueue, object) ||
           FAILED(object->GetPrivateData(queue_guid, &size, &cookie)) || size != sizeof(cookie) || !cookie) return nullptr;
-      for (auto &value : queues) if (value && value->cookie == cookie) return value.get();
+      for (auto &value : queues) if (value && value->cookie == cookie) {
+        value->last_use = ++place_clock;
+        return value.get();
+      }
       return nullptr;
     }
 #ifdef SUNSHINE_STREAMLINE_PROBE_TEST
@@ -1136,6 +1146,33 @@ namespace sunshine_streamline::depth_capture {
         }
       }
     }
+    // The capture owner's safety bounds that refused work (capacity_report),
+    // one bit each, set without the lock.
+    enum capacity_bound : unsigned { queue_places = 1, source_table = 2, snapshot_pool = 4, auxiliary_pool = 8 };
+    std::atomic<unsigned> capacity_hits{}, capacity_reported{};
+    void capacity_refused(capacity_bound bound) { capacity_hits.fetch_or(bound, std::memory_order_relaxed); }
+    // Requires mutex. A place for another queue: a free one, else the place of
+    // the longest unused idle queue, which no capture names, which owns no
+    // provider and whose signalled fence values have all completed (the
+    // device's removal completes them). The idle queue registers again when
+    // it next carries a copy (register_compute_producer) or presents
+    // (observe_present), so no number of queues created over a session
+    // exhausts the table.
+    std::unique_ptr<queue_state> *free_place() {
+      for (auto &entry : queues) if (!entry) return &entry;
+      std::unique_ptr<queue_state> *idle = nullptr;
+      for (auto &entry : queues) {
+        if (entry->retiring || entry->provider_established || (idle && (*idle)->last_use <= entry->last_use)) continue;
+        const auto native = reinterpret_cast<std::uint64_t>(entry->queue.p);
+        bool used = false;
+        for_each_capture([&](const slot &value) { used = used || (value.id && uses_queue(value, native)); });
+        if (!used && (!entry->fence.p || entry->fence->GetCompletedValue() >= entry->next_fence)) idle = &entry;
+      }
+      return idle;
+    }
+    // Protected by mutex: an idle queue's place was reclaimed (free_place), so
+    // a queue with no place may carry a copy (register_compute_producer).
+    bool places_reclaimed{};
     // Requires mutex. A queue's place: its device and the fence the capture
     // owner signals after the queue's submissions that carry a copy. DIRECT
     // queues register as ReShade reports them (observe_queue);
@@ -1146,30 +1183,34 @@ namespace sunshine_streamline::depth_capture {
       if (type != D3D12_COMMAND_LIST_TYPE_DIRECT && !(compute_producer && type == D3D12_COMMAND_LIST_TYPE_COMPUTE)) {
         reason = status::unsupported_queue; return nullptr;
       }
-      for (auto &entry : queues) if (!entry) {
-        auto next = std::make_unique<queue_state>();
-        if (FAILED(value->GetDevice(__uuidof(ID3D12Device), reinterpret_cast<void **>(next->device.put()))) ||
-            FAILED(next->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, __uuidof(ID3D12Fence), reinterpret_cast<void **>(next->fence.put())))) {
-          reason = status::unsupported_queue; return nullptr;
-        }
-        next->device_identity = device_cookie(next->device.p, true);
-        if (!next->device_identity) { reason = status::unsupported_queue; return nullptr; }
-        value->AddRef(); next->queue.p = value;
-        next->compute_producer = type == D3D12_COMMAND_LIST_TYPE_COMPUTE;
-        next->cookie = ++serial;
-        if (FAILED(value->SetPrivateData(queue_guid, sizeof(next->cookie), &next->cookie))) { reason = status::unsupported_queue; return nullptr; }
-        entry = std::move(next); return entry.get();
+      auto *entry = free_place();
+      if (!entry) {
+        capacity_refused(queue_places);
+        reason = status::exhausted;
+        return nullptr;
       }
-      reason = status::exhausted;
-      return nullptr;
+      if (*entry) { entry->reset(); places_reclaimed = true; }
+      auto next = std::make_unique<queue_state>();
+      if (FAILED(value->GetDevice(__uuidof(ID3D12Device), reinterpret_cast<void **>(next->device.put()))) ||
+          FAILED(next->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, __uuidof(ID3D12Fence), reinterpret_cast<void **>(next->fence.put())))) {
+        reason = status::unsupported_queue; return nullptr;
+      }
+      next->device_identity = device_cookie(next->device.p, true);
+      if (!next->device_identity) { reason = status::unsupported_queue; return nullptr; }
+      value->AddRef(); next->queue.p = value;
+      next->compute_producer = type == D3D12_COMMAND_LIST_TYPE_COMPUTE;
+      next->cookie = ++serial;
+      next->last_use = ++place_clock;
+      if (FAILED(value->SetPrivateData(queue_guid, sizeof(next->cookie), &next->cookie))) { reason = status::unsupported_queue; return nullptr; }
+      *entry = std::move(next); return entry->get();
     }
     // Requires mutex. A COMPUTE queue that ReShade reported (or not) takes a
     // place at its first submission of a copy awaiting its producer: a copy
     // recorded on a compute list (record_impl). Without one, such a copy is
-    // never submitted, and its recording's Reset discards it. Once a compute
-    // queue found every place taken (compute_unplaced), no submission tries
-    // again, and record_impl refuses compute-list copies while no compute
-    // queue holds a place, until collect_retired frees one.
+    // never submitted, and its recording's Reset discards it. So does any
+    // queue whose idle place was reclaimed. While a compute queue found no
+    // place (compute_unplaced), record_impl refuses compute-list copies until
+    // one is free again (collect_retired, free_place).
     bool compute_copies_recorded{}; // Protected by mutex: a copy was ever recorded on a COMPUTE list.
     bool compute_unplaced{}; // Protected by mutex.
     bool compute_producer_placed() {
@@ -1178,7 +1219,7 @@ namespace sunshine_streamline::depth_capture {
     }
     queue_state *register_compute_producer(std::uint64_t native, std::uint32_t count,
         const native_observer::command_identity *values) {
-      if (compute_unplaced) return nullptr;
+      if (!compute_copies_recorded && !places_reclaimed) return nullptr;
       const auto awaits = [&](const auto &captures) {
         for (std::uint32_t n = 0; n != count; ++n) {
           const auto cookie = values[n].recording_cookie;
@@ -1188,8 +1229,7 @@ namespace sunshine_streamline::depth_capture {
         }
         return false;
       };
-      if (!compute_copies_recorded || (!awaits(slots) && !(diagnostic_slots_active && awaits(diagnostic_slots))))
-        return nullptr;
+      if (!awaits(slots) && !(diagnostic_slots_active && awaits(diagnostic_slots))) return nullptr;
       com_ptr<ID3D12CommandQueue> checked;
       if (!query_native(native, IID_ID3D12CommandQueue, checked)) return nullptr;
       auto *owner = register_queue(checked.p, true);
@@ -1733,6 +1773,28 @@ namespace sunshine_streamline::depth_capture {
     out.states_observed = c.states_observed.load(); out.states_declared = c.states_declared.load();
     return out;
   }
+  bool capacity_report(char *out, std::size_t size) {
+    const auto hits = capacity_hits.load(std::memory_order_relaxed);
+    if (!(hits & ~capacity_reported.load(std::memory_order_relaxed))) return false;
+    const auto fresh = hits & ~capacity_reported.fetch_or(hits, std::memory_order_relaxed);
+    if (!fresh || !out || !size) return false;
+    const auto named = [&](unsigned bit) { return (fresh & bit) != 0; };
+    const auto bound = [&](unsigned bit, const char *text, unsigned limit) {
+      if (!named(bit)) return;
+      const auto used = std::strlen(out);
+      if (used < size) std::snprintf(out + used, size - used, " %s=%u", text, limit);
+    };
+    std::snprintf(out, size, "Sunshine capture capacity: refused at a safety bound:");
+    bound(queue_places, "queue_places", queue_limit);
+    bound(source_table, "source_table", source_limit);
+    bound(snapshot_pool, "depth_snapshots", pixel_slot_limit);
+    bound(auxiliary_pool, "auxiliary_snapshots", diagnostic_slot_limit);
+    const auto used = std::strlen(out);
+    if (used < size)
+      std::snprintf(out + used, size - used, "; every place or entry was in use (queue places: each queue names a "
+        "capture, a provider or an unfinished fence), so that capture was refused as capacity; logged once per bound");
+    return true;
+  }
   bool list_coverage_report(std::uint64_t now_ms, char *out, std::size_t size) {
     static std::atomic<std::uint64_t> next_log{}, logged_admissions{};
     auto next = next_log.load(std::memory_order_relaxed);
@@ -2003,7 +2065,10 @@ namespace sunshine_streamline::depth_capture {
     for (const auto &weak : sources) if (auto value = weak.lock()) if (value->cookie == existing && existing)
       return result(value, status::ready, record_stage::retained);
     auto entry = std::find_if(sources.begin(), sources.end(), [](const auto &value) { return value.expired(); });
-    if (entry == sources.end()) { reason = status::exhausted; return result({}, status::exhausted, record_stage::capacity); }
+    if (entry == sources.end()) {
+      capacity_refused(source_table);
+      reason = status::exhausted; return result({}, status::exhausted, record_stage::capacity);
+    }
     auto value = std::make_shared<source_reference>();
     if (FAILED(resource->QueryInterface(__uuidof(ID3D12Resource), reinterpret_cast<void **>(value->resource.put()))))
       return result({}, status::unsupported_resource, record_stage::source_interface);
@@ -2298,8 +2363,10 @@ namespace sunshine_streamline::depth_capture {
       // A compute list's copy is accepted only once its queue holds a place
       // (register_compute_producer): with none left for it and no compute
       // queue holding one, no GPU copy is recorded that could never be read.
-      if (on_compute && compute_unplaced && !compute_producer_placed())
-        return reject(status::exhausted, record_stage::capacity);
+      if (on_compute && compute_unplaced && !compute_producer_placed()) {
+        if (!free_place()) return reject(status::exhausted, record_stage::capacity);
+        compute_unplaced = false;
+      }
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
       if (nominate_source && !preservation_only && !diagnostic_copy &&
           present_before_next_copy.exchange(false, std::memory_order_acq_rel))
@@ -2449,7 +2516,10 @@ namespace sunshine_streamline::depth_capture {
         return &entry != completed && free_for_us(entry) && reclaimable(entry) &&
           !(dump_copy && entry.texture && live_storage(entry));
       });
-      if (found == pixel_end) return reject(status::exhausted, record_stage::capacity);
+      if (found == pixel_end) {
+        capacity_refused(diagnostic_copy ? auxiliary_pool : snapshot_pool);
+        return reject(status::exhausted, record_stage::capacity);
+      }
       auto texture = found->texture;
       // New storage's rest (texture_reference::rest).
       const auto resting_state = diagnostic_copy || on_compute ? D3D12_RESOURCE_STATE_COMMON : sampled_state;
