@@ -20,7 +20,7 @@
 //    compile on the pool;
 // 4. a device destroyed while its renderer builds on the pool (the renderer's
 //    build hooks delay each step);
-// 5. three game devices in turn, each verified by a session timeline, then
+// 5. four game devices in turn, each verified by a session timeline, then
 //    destroyed with frames in flight: the add-on's copies of the last frames
 //    still unobserved, DLSS-G's compute copies whose ring entries were never
 //    reset, and a last frame recorded and submitted but never presented,
@@ -47,13 +47,18 @@
 // the device, ReShade therefore never destroys it or unloads the add-on (no
 // destroy_device event comes), and the game's next D3D12CreateDevice
 // returns the same device; there Game 3D must render depth, FG depth and UI
-// again, and a further cycle must leave the process's handles, threads and
+// again, and each further cycle must leave the process's handles, threads and
 // private bytes within a bound. The capture registry also keeps each released
-// queue whose captures it retains, one more each cycle, and it holds four:
-// the device's fourth session (its third recreation) lost FG depth here
-// (mono, FG_scope_required), so the test makes two recreations. Each game device of item 5 witnesses the gap; a run in which
-// one is destroyed fails (the gap closed: remove its row and require the
-// unload and reload of the in-flight devices instead).
+// queue whose captures it retains, one more each cycle. While the first 8
+// queues to execute a game list kept their entries in the game-execution
+// table for good, the device's fourth session (its third recreation) found
+// no record of its presenting queue and lost FG depth (mono,
+// FG_scope_required); that table now frees a retired queue's entry and gives
+// a new queue the oldest one (ad1f15a6), so the test makes three recreations
+// and that session must render FG depth. Each game device of item 5
+// witnesses the gap; a run in which one is destroyed fails (the gap closed:
+// remove its row and require the unload and reload of the in-flight devices
+// instead).
 //
 // Usage: reshade_addon_unload_runtime_test official.dll frozenShaders
 // test.addon64 freshOutput frame_generation_interposer.dll
@@ -686,9 +691,11 @@ int main(int argc, char **argv) {
     }
     process_usage::now().print("after-building-device");
     // Game devices verified, then ended with frames in flight. Each outlives
-    // the game's release (known gap L1), so the next is the same device: a
+    // the game's release (known gap L1), so the next is the same device: each
     // further cycle must leave the process within a bound of the one before.
-    const char *const sessions[] {"second game device", "third game device", "fourth game device"};
+    // The fourth session on it, the fifth game device, is the first whose
+    // presenting queue found the game-execution table full before ad1f15a6.
+    const char *const sessions[] {"second game device", "third game device", "fourth game device", "fifth game device"};
     process_usage ended[std::size(sessions)];
     for (std::size_t i = 0; i != std::size(sessions); ++i) {
       fixture.game_device(sessions[i]);
@@ -705,8 +712,10 @@ int main(int argc, char **argv) {
       ended[i] = process_usage::now();
       ended[i].print(sessions[i]);
     }
-    if (!process_usage::bounded(ended[1], ended[2])) {
-      throw std::runtime_error("A game device's further cycle left handles, threads, GDI or USER objects or private memory beyond the bound of the cycle before");
+    for (std::size_t i = 2; i != std::size(sessions); ++i) {
+      if (!process_usage::bounded(ended[i - 1], ended[i])) {
+        throw std::runtime_error(std::string("The ") + sessions[i] + "'s further cycle left handles, threads, GDI or USER objects or private memory beyond the bound of the cycle before");
+      }
     }
     require(fixture.witnessed == std::size(sessions), "A game device did not witness its known gap");
     std::printf("MEASURE addon-lifecycle gaps %s={witnessed=%u}\n", captured_device_gap.id, fixture.witnessed);

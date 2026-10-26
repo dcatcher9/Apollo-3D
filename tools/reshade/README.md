@@ -1950,7 +1950,7 @@ timelines' fixture and drives one process, one hidden window and these devices:
    add-on's shader store is isolated in the output directory, so each size compiles);
 4. a device destroyed while its renderer builds on the pool (the test add-on carries the renderer's
    build hooks, inert until set, and delays each step by 40 ms);
-5. three game devices in turn, on one Streamline viewport, each verified by a session timeline,
+5. four game devices in turn, on one Streamline viewport, each verified by a session timeline,
    then destroyed with frames in flight: the add-on's copies of the last frames not yet observed,
    DLSS-G's compute copies whose ring entries were never reset, and a last frame recorded and
    submitted but never presented, whose command-less FG depth tag (the oracle names its copy
@@ -1975,13 +1975,19 @@ add-on's capture storage and source references keep those (8 in this test) until
 reuses or retires the storage. When the game stops presenting and releases the device, no
 `destroy_device` event comes: ReShade neither destroys the device nor unloads the add-on, and the
 game's next `D3D12CreateDevice` returns the same device. On it Game 3D must render depth, FG depth and
-UI again, and one more cycle must leave the process's handles (64), threads (8), GDI and USER objects
-(4) and private bytes (32 MB) within those bounds of the cycle before. The capture registry also keeps
-each released queue whose captures it retains (ReShade logs its `Reference count for
-ID3D12CommandQueue` as inconsistent, one more per cycle), and it holds four: the device's fourth
-session (its third recreation) lost FG depth (`FG_scope_required`, mono), so the test makes two
-recreations. Each of the three game devices witnesses the gap; one that ReShade destroys fails the
-run (the gap closed: remove the row and require the unload and reload of the in-flight devices).
+UI again, and each further cycle must leave the process's handles (64), threads (8), GDI and USER
+objects (4) and private bytes (32 MB) within those bounds of the cycle before. The capture registry
+also keeps each released queue whose captures it retains (ReShade logs its `Reference count for
+ID3D12CommandQueue` as inconsistent, one more per cycle). The device's fourth session (its third
+recreation) lost FG depth (`FG_scope_required`, mono) while the first 8 queues to execute a game
+list kept their entries in the game-execution table (`depth_capture::game_executions_on`) for good:
+its presenting queue had none. That table now frees a retired queue's entry and gives a new queue
+the oldest one (ad1f15a6, the Assassin's Creed Shadows hotfix of 10-26), so the test makes three
+recreations and that session must render FG depth; with the table's old rule restored it fails
+there. (This section first named the capture registry's four queue places as the cause; with four
+places and no idle reclaim the session renders FG depth.) Each of the four game devices witnesses
+the gap; one that ReShade destroys fails the run (the gap closed: remove the row and require the
+unload and reload of the in-flight devices).
 Device removal is not simulated; a removed device the add-on keeps alive would be the one the game's
 next `D3D12CreateDevice` returns.
 
@@ -1991,7 +1997,7 @@ FG had not been retired by the timelines' isolation (`retired_viewports`, the pr
 constants), whether or
 not the device was recreated. The lifecycle keeps one viewport, as games do.
 
-`reshade_addon_unload_runtime` runs it with the 2.7.30 interposer in about 27 s, registered like
+`reshade_addon_unload_runtime` runs it with the 2.7.30 interposer in about 31 s, registered like
 `reshade_native_provider_continuity` (200 s timeout). Locally:
 
     reshade_addon_unload_runtime_test official.dll frozenShaders test.addon64 freshOutput
