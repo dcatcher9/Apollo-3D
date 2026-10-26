@@ -960,7 +960,6 @@ namespace {
     static constexpr std::uint64_t window_ms = 600, frame_generation_window_ms = 1600, generic_window_ms = 2500;
     // Isolation: past the source age with no SDK call.
     static constexpr std::uint64_t isolation_ms = sunshine_freshness::source_age_ms + 10;
-    static constexpr unsigned retired_viewports = 4;
     // UI: how long the renderer's UI request has to take the case's input
     // before Dump3D lists what detection is offered.
     static constexpr std::uint64_t ui_settle_ms = 500;

@@ -1724,11 +1724,14 @@ source (no depth within its window), a dropped hold (that generated Present with
 stale one (a rung's pixels at least the source age, plus 40 ms for two steps of `GetTickCount64`,
 after the newest legal or permitted source of its kind: API for D1 and D2, Generic for D3).
 
-The native provider fixture judges every Present of its run: each frame script reports its
-violations (`MEASURE native-provider continuity <script> violations=<n> unknown=<n>`), any one no
-known gap records fails the run with its frame and record, and the run ends with the session's
-counts (`continuity-session presents= legal= shown= generic= unrecorded= stalls=` and each known
-gap's supplied frames and violations). The runtime layer judges each case's frame script with the
+The native provider fixture judges every Present of its run in segments, each frame script and
+the session's frames between scripts, with a fresh judge each, so that no segment's state or loss
+stands in for another's: each segment reports its violations
+(`MEASURE native-provider continuity <script> violations=<n> unknown=<n>`), any one no known gap
+records fails the run with its frame and record, and so does a known gap supplied in a segment
+without a violation there (the gap closed). The run ends with its counts
+(`continuity-session presents= legal= shown= generic= unrecorded= stalls=` and each known gap's
+supplied frames and violations). The runtime layer judges each case's frame script with the
 case's supply: the outcome the oracle names at the deciding copy point, legal where it requires a
 capture, permitted where it only allows one and nothing for illegal input, supplied at the tag call
 or the evaluate that decides. A violation fails the case as an oracle disagreement does; its JSON
@@ -1769,9 +1772,11 @@ found the other five, which their witness timelines exercise:
   observer's hook for the new queue invalidates every capture as an observer loss, the next fresh
   copy fails its display copy (`consumer=recording_invalid loss=global_observation_loss`) and a
   failed fresh copy invalidates the display cache instead of holding, so that Present is mono while
-  a copy younger than the source age is retained. The fixture tags the frame after each queue it creates (the UI hook's
-  second queue, DLSS-G's compute queue and the other-queue scripts' game queue); only the first
-  new queue loses depth. Its owner note gives the fixes that close it.
+  a copy younger than the source age is retained. The fixture tags the frame after the first queue
+  it creates mid-session (the UI hook's second queue): the observer then holds the queue entry points
+  every later queue shares, and the later ones (DLSS-G's compute queue, the other-queue scripts' game
+  queue) lose no depth, so their frames are judged as any. Its owner note gives the fixes that close
+  it.
 - C4, an FG scope that outlives the copy it can show, found by the session timelines (owner
   decision): a scope stays live for `fg_silent_ms` after its newest accepted copy unless a later
   frame's FG call marks a miss, and keeps the viewport's SR evaluations out meanwhile, while the
@@ -1813,8 +1818,9 @@ each, so that the gate stays usable meanwhile. Each run prints them apart
 (`MEASURE native-provider continuity-found-defects` and `MEASURE session-timelines found-defects`,
 each row's violations), and a strict run fails their violations as any other:
 `SUNSHINE_GAME3D_CONTINUITY_STRICT=1`, or the contract runner's `-StrictContinuity`, which also
-records `strict_continuity` in `summary.json`. A strict run fails today, in each found row's witness
-(and C3 in the provider fixture). The decisions, each removing its row and witness:
+records `strict_continuity` in `summary.json`. A strict run fails today: the provider fixture at C3,
+and 13 of the fixed set's 34 timelines, each found row's witness among them. The decisions, each
+removing its row and witness:
 
 | Row | Found | Decision |
 | --- | --- | --- |
@@ -1829,7 +1835,11 @@ interposer, every frame script under the invariant, in about 115 s. Like
 `reshade_addon_unload_runtime` it is labelled `contract;gpu`, runs serially with the `gpu` resource
 lock and is registered only where `SUNSHINE_GAME3D_RESHADE_RUNTIME` and
 `SUNSHINE_GAME3D_FROZEN_SHADERS` are configured, so `ctest -L contract` and the contract runner run
-it. The two other-queue scripts add about 6 s to each provider run.
+it. The two other-queue scripts add about 6 s to each provider run. It runs the whole fixture, so a
+failure may also be one of the fixture's own UI-detection checks (the offscreen UI layer's
+acceptance, H1's flattened claim), which have failed about once in 60 runs; its log names the
+script. It is the provider fixture's run at 1280x720 with the 2.7.30 interposer, so a check that
+runs the contract tests need not run that configuration again.
 
 The session timelines
 ([`test_game3d_session_timeline_runtime.cpp`](test_game3d_session_timeline_runtime.cpp)) compose
@@ -1977,7 +1987,8 @@ next `D3D12CreateDevice` returns.
 
 Changing the Streamline viewport is outside the lifecycle: in one session, a new viewport's FG scope
 showed no FG depth (`source_handoff`, mono) for a whole timeline while an earlier viewport that used
-FG had not been retired by the timelines' isolation (four scratch viewports' constants), whether or
+FG had not been retired by the timelines' isolation (`retired_viewports`, the probe's four viewport slots, scratch viewports'
+constants), whether or
 not the device was recreated. The lifecycle keeps one viewport, as games do.
 
 `reshade_addon_unload_runtime` runs it with the 2.7.30 interposer in about 27 s, registered like

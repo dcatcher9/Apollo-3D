@@ -90,7 +90,82 @@ namespace {
 #include "test_ngx_stand_in.h"
 
 namespace {
+  // A ring of recordings on a queue of the game's own: each entry is reset
+  // (through ReShade, which names its native list) only when recorded into
+  // again, once its last work completed, as Streamline's DLSS-G ring and a
+  // game's own queues are. That Reset retires the recording's earlier copies,
+  // which the add-on reads only then (known gap C1).
+  template<unsigned N> struct queue_ring {
+    static constexpr unsigned size = N;
+    com_ptr<ID3D12CommandQueue> queue;
+    std::array<com_ptr<ID3D12CommandAllocator>, N> allocators;
+    std::array<com_ptr<ID3D12GraphicsCommandList>, N> lists;
+    std::array<std::uint64_t, N> values{};
+    com_ptr<ID3D12Fence> done;
+    std::uint64_t value{};
+    unsigned at{};
+
+    void create(ID3D12Device *device, D3D12_COMMAND_LIST_TYPE type) {
+      D3D12_COMMAND_QUEUE_DESC desc{}; desc.Type = type;
+      checked(device->CreateCommandQueue(&desc, IID_PPV_ARGS(queue.put())), "Create a ring's queue");
+      for (unsigned n = 0; n != N; ++n) {
+        checked(device->CreateCommandAllocator(type, IID_PPV_ARGS(allocators[n].put())), "Create a ring's allocator");
+        const auto direct = game_native_command;
+        checked(device->CreateCommandList(0, type, allocators[n].p, nullptr, IID_PPV_ARGS(lists[n].put())),
+          "Create a ring's list");
+        game_native_command = direct;
+        checked(lists[n]->Close(), "Close a ring's initial recording");
+      }
+      checked(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(done.put())), "Create a ring's fence");
+    }
+    // Entry n, reset once its last work completed: its native list, open.
+    std::uint64_t reset(unsigned n) {
+      checked(done->SetEventOnCompletion(values[n], nullptr), "Wait for a ring entry's work");
+      const auto direct = game_native_command;
+      checked(allocators[n]->Reset(), "Reset a ring entry's allocator");
+      checked(lists[n]->Reset(allocators[n].p, nullptr), "Reset a ring entry's recording");
+      const auto native = game_native_command; game_native_command = direct;
+      require(native && native != direct, "A ring entry's Reset did not name its native list");
+      return native;
+    }
+    // The next entry, reset and open: its index (native: its native list).
+    unsigned open_next(std::uint64_t &native) {
+      const auto n = at; at = (at + 1) % N;
+      native = reset(n);
+      return n;
+    }
+    // Closes entry n and executes it on the ring's queue; the presenting
+    // queue, if given, waits for it.
+    void execute(unsigned n, ID3D12CommandQueue *presenting = nullptr) {
+      checked(lists[n]->Close(), "Close a ring entry's recording");
+      ID3D12CommandList *submitted[]{lists[n].p};
+      queue->ExecuteCommandLists(1, submitted);
+      checked(queue->Signal(done.p, values[n] = ++value), "Signal a ring entry's work");
+      if (presenting) checked(presenting->Wait(done.p, value), "Order the presenting queue after a ring's queue");
+    }
+    // Retires every recording once its work completed, as a game does at
+    // its end: no copy on the ring stays unreadable.
+    void drain() {
+      for (unsigned n = 0; n != N; ++n) { reset(n); checked(lists[n]->Close(), "Close a drained ring recording"); }
+    }
+    // Waits for the queue's last work, as a game ends its device.
+    void finish() {
+      if (!queue.p) return;
+      checked(queue->Signal(done.p, ++value), "Signal a ring's last work");
+      checked(done->SetEventOnCompletion(value, nullptr), "Wait for a ring's queue");
+    }
+    void release() {
+      for (unsigned n = 0; n != N; ++n) { lists[n].reset(); allocators[n].reset(); }
+      queue.reset(); done.reset();
+      values = {}; value = 0; at = 0;
+    }
+  };
+
   struct native_provider_fixture : direct_fixture {
+    // Isolation retires a viewport by setting constants on as many scratch
+    // viewports as the Streamline probe keeps (streamline_camera_probe.cpp
+    // slot_count): the session timelines and the runtime layer.
+    static constexpr unsigned retired_viewports = 4;
     using automatic_t = BOOL (*)(api::effect_runtime *, unsigned *);
     using scale_t = BOOL (*)(api::effect_runtime *, unsigned *, unsigned *, float *);
     using refusal_t = BOOL (*)(api::effect_runtime *, sunshine_depth_refusal::record *);
@@ -397,7 +472,7 @@ namespace {
     }
     void run_script(const frame_script &script) {
       // Frames outside any script are judged as the session's.
-      require_continuity("session", continuity_log.judge.take());
+      end_segment("session");
       const auto started = GetTickCount64();
       script_name = script.name; script_deadline = started + script.deadline_ms;
       continuity_log.where = script.name;
@@ -412,6 +487,7 @@ namespace {
         static_cast<unsigned long long>(GetTickCount64() - started), static_cast<unsigned long long>(script.deadline_ms));
       script_violations = continuity_log.judge.take();
       if (continuity_per_script) require_continuity(script.name, script_violations);
+      end_segment(script.name);
     }
 
     // The continuity invariant's supply log (test_game3d_continuity.h): each
@@ -428,8 +504,14 @@ namespace {
     // full-size decoy view every game frame draws (a Generic boundary, its
     // clear after the draws, that API ownership leaves aside, H).
     static void permitted_supply(std::uint8_t sources) { continuity_log.pending.allow(sources, GetTickCount64()); }
-    // The game created a command queue: the next frame meets C3.
-    static void queue_created() { continuity_log.queue_created = true; }
+    // The game created a command queue: the next frame meets C3 at the
+    // first queue created mid-session, which gives the native observer the
+    // queue entry points every later queue shares (they lose no depth, and
+    // their frames are judged as any).
+    static void queue_created() {
+      static bool first = true;
+      if (std::exchange(first, false)) continuity_log.queue_created = true;
+    }
     // A later call of the same frame withdrew what it supplied.
     static void withdraw_supply() { continuity_log.pending = {}; }
     // Every violation must be a known gap's (each row's count is reported);
@@ -451,23 +533,45 @@ namespace {
         throw std::runtime_error(std::string("A Present lost depth while a legal source supplied it, or held depth past its source age: ") +
           label + " (" + game3d_continuity::describe(violations.front()) + ")");
     }
-    // At the end of a run: the violations outside any script, and each known
-    // gap whose limitation was supplied must have been violated (otherwise
-    // the gap closed and its row must go).
-    void require_continuity_rows() {
-      require_continuity("session", continuity_log.judge.take());
+    // The run's tallies over its segments.
+    struct continuity_totals {
+      std::array<game3d_continuity::row_tally, game3d_continuity::gap_count> rows{};
+      unsigned presents{}, legal{}, shown{}, generic{}, unrecorded{}, stalls{};
+    } continuity_session;
+    // Ends a segment of the run, a frame script or the session's frames
+    // between scripts (whose violations are judged here; a script's are
+    // run_script's): with continuity_per_script, each known gap supplied in
+    // the segment must have been violated in it (otherwise the gap closed and
+    // its row must go). Its tallies join the run's and the judge restarts
+    // (keeping the supply history), so no segment's arming or loss stands in
+    // for another's.
+    void end_segment(const char *label) {
+      if (!std::strcmp(label, "session")) require_continuity(label, continuity_log.judge.take());
       const auto &judge = continuity_log.judge;
-      std::printf("MEASURE native-provider continuity-session presents=%u legal=%u shown=%u generic=%u unrecorded=%u stalls=%u",
-        judge.presents(), judge.legal_presents(), judge.shown(), judge.shown_generic(), judge.unrecorded_presents(),
-        judge.stalls());
-      for (std::size_t i = 0; i != game3d_continuity::gap_count; ++i)
-        std::printf(" %s={supplied=%u violations=%u}", game3d_continuity::known_gaps[i].id, judge.rows()[i].exercised,
-          judge.rows()[i].violations);
-      std::printf("\nMEASURE native-provider continuity-found-defects %s\n", game3d_continuity::found_defects(judge.rows()).c_str());
-      for (std::size_t i = 0; i != game3d_continuity::gap_count; ++i)
-        if (judge.rows()[i].exercised && !judge.rows()[i].violations)
+      for (std::size_t i = 0; i != game3d_continuity::gap_count; ++i) {
+        const auto &row = judge.rows()[i];
+        if (continuity_per_script && row.exercised && !row.violations)
           throw std::runtime_error(std::string("Continuity known gap ") + game3d_continuity::known_gaps[i].id +
-            " was supplied without a violation: the gap closed, so remove its row");
+            " was supplied in " + label + " without a violation: the gap closed, so remove its row");
+        continuity_session.rows[i].exercised += row.exercised;
+        continuity_session.rows[i].violations += row.violations;
+      }
+      continuity_session.presents += judge.presents(); continuity_session.legal += judge.legal_presents();
+      continuity_session.shown += judge.shown(); continuity_session.generic += judge.shown_generic();
+      continuity_session.unrecorded += judge.unrecorded_presents(); continuity_session.stalls += judge.stalls();
+      continuity_log.judge.restart();
+    }
+    // At the end of a run: the violations outside any script, then the
+    // run's tallies.
+    void require_continuity_rows() {
+      end_segment("session");
+      const auto &total = continuity_session;
+      std::printf("MEASURE native-provider continuity-session presents=%u legal=%u shown=%u generic=%u unrecorded=%u stalls=%u",
+        total.presents, total.legal, total.shown, total.generic, total.unrecorded, total.stalls);
+      for (std::size_t i = 0; i != game3d_continuity::gap_count; ++i)
+        std::printf(" %s={supplied=%u violations=%u}", game3d_continuity::known_gaps[i].id, total.rows[i].exercised,
+          total.rows[i].violations);
+      std::printf("\nMEASURE native-provider continuity-found-defects %s\n", game3d_continuity::found_defects(total.rows).c_str());
     }
 
     void load_native(const fs::path &directory) {
@@ -2788,49 +2892,9 @@ namespace {
       // only when it records into it again, frames after its work completed,
       // so the Present queue can read a frame's copy only then.
       bool on_compute = false;
-      constexpr unsigned compute_ring = 3;
-      com_ptr<ID3D12CommandQueue> compute_queue;
-      std::array<com_ptr<ID3D12CommandAllocator>, compute_ring> compute_allocators;
-      std::array<com_ptr<ID3D12GraphicsCommandList>, compute_ring> compute_lists;
-      std::array<std::uint64_t, compute_ring> compute_values{};
-      com_ptr<ID3D12Fence> compute_done;
-      std::uint64_t compute_value{};
-      unsigned compute_at = 0;
-      {
-        D3D12_COMMAND_QUEUE_DESC desc{}; desc.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
-        checked(game->CreateCommandQueue(&desc, IID_PPV_ARGS(compute_queue.put())), "Create DLSS-G's compute queue");
-        queue_created();
-        for (unsigned n = 0; n != compute_ring; ++n) {
-          checked(game->CreateCommandAllocator(desc.Type, IID_PPV_ARGS(compute_allocators[n].put())),
-            "Create DLSS-G's compute allocator");
-          const auto direct = game_native_command;
-          checked(game->CreateCommandList(0, desc.Type, compute_allocators[n].p, nullptr, IID_PPV_ARGS(compute_lists[n].put())),
-            "Create DLSS-G's compute list");
-          game_native_command = direct;
-          checked(compute_lists[n]->Close(), "Close DLSS-G's initial compute recording");
-        }
-        checked(game->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(compute_done.put())), "Create DLSS-G's compute fence");
-      }
-      // Waits for a ring entry's last work and resets it (through ReShade,
-      // which names its native list): the Reset retires its earlier
-      // recording. Returns the native list, open for recording.
-      const auto reset_compute = [&](unsigned n) {
-        checked(compute_done->SetEventOnCompletion(compute_values[n], nullptr), "Wait for DLSS-G's compute work");
-        const auto direct = game_native_command;
-        checked(compute_allocators[n]->Reset(), "Reset DLSS-G's completed compute allocator");
-        checked(compute_lists[n]->Reset(compute_allocators[n].p, nullptr), "Reset DLSS-G's compute recording");
-        const auto native = game_native_command; game_native_command = direct;
-        require(native && native != direct, "DLSS-G's compute Reset did not name its native list");
-        return native;
-      };
-      // Resets every ring entry once its work completed: no recording stays
-      // unretired after the compute case.
-      const auto drain_compute = [&] {
-        for (unsigned n = 0; n != compute_ring; ++n) {
-          reset_compute(n);
-          checked(compute_lists[n]->Close(), "Close DLSS-G's drained compute recording");
-        }
-      };
+      queue_ring<3> dlssg_ring;
+      dlssg_ring.create(game.p, D3D12_COMMAND_LIST_TYPE_COMPUTE);
+      queue_created();
       // The game's HUD-less and Backbuffer tags: without a command list (as in
       // Shadows), the same followed by the same frame's null untag of both
       // kinds (which cancels their copies deferred to the frame's Present,
@@ -2874,17 +2938,15 @@ namespace {
           // Only the depth: the UI inputs' shader-resource state names the
           // pixel-shader state, which a compute list cannot.
           submit(false); begin_commands();
-          const auto n = compute_at; compute_at = (compute_at + 1) % compute_ring;
-          auto *compute = reinterpret_cast<ID3D12GraphicsCommandList *>(reset_compute(n));
+          std::uint64_t native{};
+          const auto n = dlssg_ring.open_next(native);
+          auto *compute = reinterpret_cast<ID3D12GraphicsCommandList *>(native);
           if (observed_state) transition(compute, selected->resource.p, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, read);
           if (observed_state) supplied(game3d_continuity::dlssg_input);
           require(ngx_evaluate(compute, feature, &inputs, nullptr) == ngx_fixture::success,
             "DLSS-G's compute evaluation observation changed the SDK result");
           if (observed_state) transition(compute, selected->resource.p, read, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-          checked(compute_lists[n]->Close(), "Close DLSS-G's compute recording");
-          ID3D12CommandList *lists[]{compute_lists[n].p};
-          compute_queue->ExecuteCommandLists(1, lists);
-          checked(compute_queue->Signal(compute_done.p, compute_values[n] = ++compute_value), "Signal DLSS-G's compute work");
+          dlssg_ring.execute(n);
           return;
         }
         if (observed_state) {
@@ -3074,7 +3136,7 @@ namespace {
             require(readiness_losses() == losses,
               "DLSS-G's compute-list depth lost depth readiness, also at its handover from SR depth");
             on_compute = false;
-            drain_compute();
+            dlssg_ring.drain();
           }
           // Refused again: the scope falls silent and SR depth returns.
           observed_state = false;
@@ -3274,68 +3336,15 @@ namespace {
     // presenting queue. The judge records each loss as its row's; a row whose
     // stimulus loses no depth fails the run as a closed gap.
     void fg_other_queue() {
-      com_ptr<ID3D12CommandQueue> game_queue;
-      {
-        D3D12_COMMAND_QUEUE_DESC desc{}; desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-        checked(game->CreateCommandQueue(&desc, IID_PPV_ARGS(game_queue.put())), "Create the game's own direct queue");
-        queue_created();
-      }
       // The game's ring of recordings, each reset only when recorded into
       // again ring frames later (as Streamline's DLSS-G ring is), at least
       // ring_pace_ms apart: a recording retires after the source age, so no
       // copy on it is readable within that age.
-      constexpr unsigned ring = 16;
+      queue_ring<16> game_ring;
       constexpr DWORD ring_pace_ms = 20;
-      static_assert(ring * ring_pace_ms > sunshine_freshness::source_age_ms + 50);
-      std::array<com_ptr<ID3D12CommandAllocator>, ring> allocators;
-      std::array<com_ptr<ID3D12GraphicsCommandList>, ring> lists;
-      std::array<std::uint64_t, ring> values{};
-      com_ptr<ID3D12Fence> done;
-      std::uint64_t value{};
-      unsigned at = 0;
-      for (unsigned n = 0; n != ring; ++n) {
-        checked(game->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(allocators[n].put())),
-          "Create the game queue's allocator");
-        const auto direct = game_native_command;
-        checked(game->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocators[n].p, nullptr, IID_PPV_ARGS(lists[n].put())),
-          "Create the game queue's list");
-        game_native_command = direct;
-        checked(lists[n]->Close(), "Close the game queue's initial recording");
-      }
-      checked(game->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(done.put())), "Create the game queue's fence");
-      // The next ring entry, reset (through ReShade, which names its native
-      // list) once its last work completed. Returns it open.
-      const auto open_next = [&](std::uint64_t &native) {
-        const auto n = at; at = (at + 1) % ring;
-        checked(done->SetEventOnCompletion(values[n], nullptr), "Wait for the game queue's recording");
-        const auto direct = game_native_command;
-        checked(allocators[n]->Reset(), "Reset the game queue's allocator");
-        checked(lists[n]->Reset(allocators[n].p, nullptr), "Reset the game queue's recording");
-        native = game_native_command; game_native_command = direct;
-        require(native && native != direct, "The game queue's Reset did not name its native list");
-        return n;
-      };
-      // Executes ring entry n on the game's queue; the presenting queue waits
-      // for it before the frame's own list.
-      const auto execute = [&](unsigned n) {
-        checked(lists[n]->Close(), "Close the game queue's recording");
-        ID3D12CommandList *submitted[]{lists[n].p};
-        game_queue->ExecuteCommandLists(1, submitted);
-        checked(game_queue->Signal(done.p, values[n] = ++value), "Signal the game queue's frame");
-        checked(queue->Wait(done.p, value), "Order the presenting queue after the game queue");
-      };
-      // Retires every recording (as the game does at the end): no copy stays
-      // unreadable after the case.
-      const auto drain = [&] {
-        for (unsigned n = 0; n != ring; ++n) {
-          checked(done->SetEventOnCompletion(values[n], nullptr), "Wait for the game queue's last recording");
-          const auto direct = game_native_command;
-          checked(allocators[n]->Reset(), "Reset the game queue's drained allocator");
-          checked(lists[n]->Reset(allocators[n].p, nullptr), "Reset the game queue's drained recording");
-          game_native_command = direct;
-          checked(lists[n]->Close(), "Close the game queue's drained recording");
-        }
-      };
+      static_assert(decltype(game_ring)::size * ring_pace_ms > sunshine_freshness::source_age_ms + 50);
+      game_ring.create(game.p, D3D12_COMMAND_LIST_TYPE_DIRECT);
+      queue_created();
       // FG off: the viewport's SR evaluation with its own depth input, on
       // the presenting queue's list (sr_evaluate) or the game queue's.
       const auto present_queue_sr = [this] {
@@ -3351,15 +3360,15 @@ namespace {
         last_token = token;
         require(sl.constants(camera_constants(false), *token, fg_viewport) == 0, "Game-queue SR constants changed the SDK result");
         std::uint64_t native{};
-        const auto n = open_next(native);
-        write_depth_pixels(true, lists[n].p);
+        const auto n = game_ring.open_next(native);
+        write_depth_pixels(true, game_ring.lists[n].p);
         const auto resource = depth_resource();
         const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, 1, active_area};
         const base_structure *inputs[]{&fg_viewport.base, &tag.base};
         supplied(game3d_continuity::sr_evaluate, game3d_continuity::limitation::cross_queue_sr);
         require(sl.evaluate(0, *token, inputs, 2, reinterpret_cast<void *>(native)) == 0,
           "Game-queue SR evaluation changed the SDK result");
-        execute(n);
+        game_ring.execute(n, queue.p);
       };
       run_script({"sr-other-queue", 30000,
         [&] {
@@ -3377,7 +3386,7 @@ namespace {
         [&] {
           render_tracked_depth = present_queue_sr;
           settle("SR-presenting-queue-again");
-          drain();
+          game_ring.drain();
         }});
 
       // Generic: no API source (FG off, no SDK call past the association
@@ -3425,10 +3434,10 @@ namespace {
       };
       const auto game_queue_view = [&] {
         std::uint64_t native{};
-        const auto n = open_next(native);
+        const auto n = game_ring.open_next(native);
         supplied(game3d_continuity::generic_boundary, game3d_continuity::limitation::cross_queue_generic);
-        draw_view(lists[n].p);
-        execute(n);
+        draw_view(game_ring.lists[n].p);
+        game_ring.execute(n, queue.p);
       };
       // The view starts on the game's queue, so no proof of the presenting
       // queue's precedes it: legal Generic depth that never establishes.
@@ -3448,7 +3457,7 @@ namespace {
           render_tracked_depth = present_queue_view;
           settle_generic("Generic-presenting-queue-again");
           render_tracked_depth = {};
-          drain();
+          game_ring.drain();
           std::puts("PASS native other-queue sources: SR and Generic depth on the game's own direct queue, judged by the continuity invariant (known gaps C1, C2); no FX");
         }});
     }

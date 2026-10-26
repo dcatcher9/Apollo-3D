@@ -469,26 +469,11 @@ namespace {
     sunshine_streamline::abi_v2::viewport view {};
     std::uint32_t next_viewport {5000}, next_scratch {970000};
 
-    // The game's own direct queue: a ring of recordings, each reset only
-    // when recorded into again, which the presenting queue waits for (as
-    // the native provider fixture's sr-other-queue).
-    static constexpr unsigned game_ring = 16;
-    com_ptr<ID3D12CommandQueue> game_queue;
-    std::array<com_ptr<ID3D12CommandAllocator>, game_ring> game_allocators;
-    std::array<com_ptr<ID3D12GraphicsCommandList>, game_ring> game_lists;
-    std::array<std::uint64_t, game_ring> game_values {};
-    com_ptr<ID3D12Fence> game_done;
-    std::uint64_t game_value {};
-    unsigned game_at {};
-    // DLSS-G's compute queue and ring (as the fixture's dlssg-evaluation).
-    static constexpr unsigned compute_ring = 3;
-    com_ptr<ID3D12CommandQueue> compute_queue;
-    std::array<com_ptr<ID3D12CommandAllocator>, compute_ring> compute_allocators;
-    std::array<com_ptr<ID3D12GraphicsCommandList>, compute_ring> compute_lists;
-    std::array<std::uint64_t, compute_ring> compute_values {};
-    com_ptr<ID3D12Fence> compute_done;
-    std::uint64_t compute_value {};
-    unsigned compute_at {};
+    // The game's own direct queue, which the presenting queue waits for (as
+    // the native provider fixture's sr-other-queue), and DLSS-G's compute
+    // queue (as its dlssg-evaluation).
+    queue_ring<16> game_work;
+    queue_ring<3> dlssg_work;
     // The game's HUD-less and Backbuffer images: its UI tags and DLSS-G's
     // inputs.
     com_ptr<ID3D12Resource> hudless, backbuffer;
@@ -610,54 +595,15 @@ namespace {
     }
 
     void create_queues() {
-      D3D12_COMMAND_QUEUE_DESC desc {};
-      desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-      checked(game->CreateCommandQueue(&desc, IID_PPV_ARGS(game_queue.put())), "Create the game's own direct queue");
-      for (unsigned n = 0; n != game_ring; ++n) {
-        checked(game->CreateCommandAllocator(desc.Type, IID_PPV_ARGS(game_allocators[n].put())), "Create the game queue's allocator");
-        const auto direct = game_native_command;
-        checked(game->CreateCommandList(0, desc.Type, game_allocators[n].p, nullptr, IID_PPV_ARGS(game_lists[n].put())), "Create the game queue's list");
-        game_native_command = direct;
-        checked(game_lists[n]->Close(), "Close the game queue's initial recording");
-      }
-      checked(game->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(game_done.put())), "Create the game queue's fence");
-      desc.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
-      checked(game->CreateCommandQueue(&desc, IID_PPV_ARGS(compute_queue.put())), "Create DLSS-G's compute queue");
-      for (unsigned n = 0; n != compute_ring; ++n) {
-        checked(game->CreateCommandAllocator(desc.Type, IID_PPV_ARGS(compute_allocators[n].put())), "Create DLSS-G's compute allocator");
-        const auto direct = game_native_command;
-        checked(game->CreateCommandList(0, desc.Type, compute_allocators[n].p, nullptr, IID_PPV_ARGS(compute_lists[n].put())), "Create DLSS-G's compute list");
-        game_native_command = direct;
-        checked(compute_lists[n]->Close(), "Close DLSS-G's initial compute recording");
-      }
-      checked(game->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(compute_done.put())), "Create DLSS-G's compute fence");
-    }
-
-    // A ring entry, reset (through ReShade, which names its native list) once
-    // its last work completed: the Reset retires its earlier recording.
-    // Returns the native list, open for recording.
-    std::uint64_t reset_entry(ID3D12Fence *fence, std::uint64_t value, ID3D12CommandAllocator *allocator, ID3D12GraphicsCommandList *list) {
-      checked(fence->SetEventOnCompletion(value, nullptr), "Wait for a ring entry's work");
-      const auto direct = game_native_command;
-      checked(allocator->Reset(), "Reset a ring entry's allocator");
-      checked(list->Reset(allocator, nullptr), "Reset a ring entry's recording");
-      const auto native = game_native_command;
-      game_native_command = direct;
-      require(native && native != direct, "A ring entry's Reset did not name its native list");
-      return native;
+      game_work.create(game.p, D3D12_COMMAND_LIST_TYPE_DIRECT);
+      dlssg_work.create(game.p, D3D12_COMMAND_LIST_TYPE_COMPUTE);
     }
 
     // Retires every ring recording (as a game does at its end), once their
     // copies are older than the source age.
     void drain() {
-      for (unsigned n = 0; n != game_ring; ++n) {
-        reset_entry(game_done.p, game_values[n], game_allocators[n].p, game_lists[n].p);
-        checked(game_lists[n]->Close(), "Close a drained game queue recording");
-      }
-      for (unsigned n = 0; n != compute_ring; ++n) {
-        reset_entry(compute_done.p, compute_values[n], compute_allocators[n].p, compute_lists[n].p);
-        checked(compute_lists[n]->Close(), "Close a drained compute recording");
-      }
+      game_work.drain();
+      dlssg_work.drain();
     }
 
     // -- The oracle's view of the frame's decisions --------------------------
@@ -1165,10 +1111,9 @@ namespace {
       } else if (sr_choice == sr_form::other_queue) {
         // The game's own queue's recording: the depth written there, its
         // input declared as it is there (or undeclared), nothing recorded.
-        const auto n = game_at;
-        game_at = (game_at + 1) % game_ring;
-        const auto native = reset_entry(game_done.p, game_values[n], game_allocators[n].p, game_lists[n].p);
-        write_depth_pixels(true, game_lists[n].p);
+        std::uint64_t native {};
+        const auto n = game_work.open_next(native);
+        write_depth_pixels(true, game_work.lists[n].p);
         const auto declared = choice == state_form::unprovable ? UINT32_MAX : std::uint32_t(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         const auto resource = depth_input(declared);
         const abi_v2::resource_tag input {{nullptr, tag_guid, 1}, &resource, 0, 1, active_area};
@@ -1176,11 +1121,7 @@ namespace {
         decide("sr_other_queue", local_case(declared, false, 0), continuity::sr_evaluate, {"evaluate"}, false, continuity::limitation::cross_queue_sr);
         returned(sl.evaluate(0, *token, inputs, 2, reinterpret_cast<void *>(native)), "slEvaluateFeature on the game's queue");
         poll("evaluate");
-        checked(game_lists[n]->Close(), "Close the game queue's recording");
-        ID3D12CommandList *submitted[] {game_lists[n].p};
-        game_queue->ExecuteCommandLists(1, submitted);
-        checked(game_queue->Signal(game_done.p, game_values[n] = ++game_value), "Signal the game queue's frame");
-        checked(queue->Wait(game_done.p, game_value), "Order the presenting queue after the game queue");
+        game_work.execute(n, queue.p);
         other_queue_copy = GetTickCount64();
       }
       dlssg_evaluation(of<dlssg_form>(value, events::dlssg));
@@ -1276,9 +1217,9 @@ namespace {
         submit(false);
         begin_commands();
         evidence_seen = false;
-        const auto n = compute_at;
-        compute_at = (compute_at + 1) % compute_ring;
-        auto *compute = reinterpret_cast<ID3D12GraphicsCommandList *>(reset_entry(compute_done.p, compute_values[n], compute_allocators[n].p, compute_lists[n].p));
+        std::uint64_t native {};
+        const auto n = dlssg_work.open_next(native);
+        auto *compute = reinterpret_cast<ID3D12GraphicsCommandList *>(native);
         if (observed) {
           transition(compute, selected->resource.p, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, read);
         }
@@ -1290,10 +1231,7 @@ namespace {
         if (observed) {
           transition(compute, selected->resource.p, read, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         }
-        checked(compute_lists[n]->Close(), "Close DLSS-G's compute recording");
-        ID3D12CommandList *lists[] {compute_lists[n].p};
-        compute_queue->ExecuteCommandLists(1, lists);
-        checked(compute_queue->Signal(compute_done.p, compute_values[n] = ++compute_value), "Signal DLSS-G's compute work");
+        dlssg_work.execute(n);
         if (observed) {
           other_queue_copy = GetTickCount64();
         }
@@ -1362,8 +1300,8 @@ namespace {
       }
     }
 
-    // Retires the run's viewport (FG off, the depth untagged, four scratch
-    // viewports' constants), presents past the association with no SDK call
+    // Retires the run's viewport (FG off, the depth untagged, retired_viewports
+    // scratch viewports' constants), presents past the association with no SDK call
     // or draw, then retires the rings' recordings and resets calibration.
     void isolate() {
       using namespace sunshine_streamline;
@@ -1377,7 +1315,7 @@ namespace {
         abi_v2::frame_token *scratch_token {};
         const auto index = ++fg_frame;
         require(sl.new_token(scratch_token, &index) == 0 && scratch_token, "The interposer did not supply a frame token");
-        for (unsigned i = 0; i != 4; ++i) {
+        for (unsigned i = 0; i != retired_viewports; ++i) {
           const abi_v2::viewport scratch {{nullptr, viewport_guid, 1}, next_scratch++};
           returned(sl.constants(camera_constants(false), *scratch_token, scratch), "slSetConstants");
         }
@@ -1395,11 +1333,13 @@ namespace {
 
     // -- One timeline --------------------------------------------------------
 
-    run_result run(const timeline_case &value, const std::string &label) {
+    // The state of a run of frames (a timeline, or the lifecycle fixture's
+    // stretch) on a viewport: its result, its supply windows and a fresh
+    // judge. The viewport's FG option is the caller's.
+    void begin_run(const timeline_case &value, const std::string &label, std::uint32_t viewport) {
       result = {};
       frames = &value.frames;
-      view = {{nullptr, sunshine_streamline::viewport_guid, 1}, next_viewport++};
-      fg_on = false;
+      view = {{nullptr, sunshine_streamline::viewport_guid, 1}, viewport};
       last_capture = 0;
       api_supplied = other_queue_copy = fg_copy = fg_tag_copy = dlssg_copy = dlssg_evaluated = readable_supply = 0;
       readable_fg = false;
@@ -1408,9 +1348,14 @@ namespace {
       continuity_log.judge = {};
       continuity_log.pending = {};
       continuity_log.where = where.c_str();
-      const auto started = GetTickCount64();
       script_name = where.c_str();
-      script_deadline = started + 15000 + 150 * value.frames.size();
+      script_deadline = GetTickCount64() + 15000 + 150 * value.frames.size();
+    }
+
+    run_result run(const timeline_case &value, const std::string &label) {
+      const auto started = GetTickCount64();
+      begin_run(value, label, next_viewport++);
+      fg_on = false;
       for (frame = 0; frame != value.frames.size(); ++frame) {
         run_frame();
       }

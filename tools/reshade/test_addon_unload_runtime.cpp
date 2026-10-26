@@ -420,14 +420,8 @@ namespace {
       render_tracked_depth = {};
       checked(queue->Signal(completion.p, ++fence_value), "Signal the presenting queue's last work");
       checked(completion->SetEventOnCompletion(fence_value, nullptr), "Wait for the presenting queue");
-      if (game_queue.p) {
-        checked(game_queue->Signal(game_done.p, ++game_value), "Signal the game queue's last work");
-        checked(game_done->SetEventOnCompletion(game_value, nullptr), "Wait for the game queue");
-      }
-      if (compute_queue.p) {
-        checked(compute_queue->Signal(compute_done.p, ++compute_value), "Signal DLSS-G's last work");
-        checked(compute_done->SetEventOnCompletion(compute_value, nullptr), "Wait for DLSS-G's queue");
-      }
+      game_work.finish();
+      dlssg_work.finish();
       if (feature) {
         require(ngx_release(feature) == ngx_fixture::success, "The game's DLSS-G feature release failed");
         feature = nullptr;
@@ -435,22 +429,8 @@ namespace {
       dlssg_inputs = {};
       hudless.reset();
       backbuffer.reset();
-      for (unsigned n = 0; n != game_ring; ++n) {
-        game_lists[n].reset();
-        game_allocators[n].reset();
-      }
-      for (unsigned n = 0; n != compute_ring; ++n) {
-        compute_lists[n].reset();
-        compute_allocators[n].reset();
-      }
-      game_queue.reset();
-      game_done.reset();
-      compute_queue.reset();
-      compute_done.reset();
-      game_values = {};
-      compute_values = {};
-      game_value = compute_value = 0;
-      game_at = compute_at = 0;
+      game_work.release();
+      dlssg_work.release();
       first.reset();
       second.reset();
       barrier_scratch.reset();
@@ -498,21 +478,6 @@ namespace {
     }
 
     // -- Verification and work in flight ------------------------------------
-
-    void begin_stretch(const timeline_case &value, const std::string &label) {
-      result = {};
-      frames = &value.frames;
-      view = {{nullptr, sunshine_streamline::viewport_guid, 1}, game_viewport};
-      last_capture = 0;
-      api_supplied = other_queue_copy = fg_copy = fg_tag_copy = dlssg_copy = dlssg_evaluated = 0;
-      present_frames.clear();
-      where = label;
-      continuity_log.judge = {};
-      continuity_log.pending = {};
-      continuity_log.where = where.c_str();
-      script_name = where.c_str();
-      script_deadline = GetTickCount64() + 15000 + 150 * value.frames.size();
-    }
 
     void end_stretch() {
       script_name = nullptr;
@@ -565,7 +530,7 @@ namespace {
     void leave_frames_in_flight(const char *label) {
       captured = true;
       const auto value = event_list(in_flight_events);
-      begin_stretch(value, std::string(label) + "-in-flight");
+      begin_run(value, std::string(label) + "-in-flight", game_viewport);
       for (frame = 0; frame + 1 != value.frames.size(); ++frame) {
         run_frame();
       }
@@ -581,7 +546,7 @@ namespace {
       submit(false);
       end_stretch();
       require(fg_on && deferred_tag, "The oracle names no copy deferred to the unpresented frame's Present");
-      std::printf("MEASURE addon-lifecycle %s in-flight frames=%zu presents=%u deferred_tag=1 compute_entries=%u\n", label, value.frames.size(), continuity_log.judge.presents(), compute_ring);
+      std::printf("MEASURE addon-lifecycle %s in-flight frames=%zu presents=%u deferred_tag=1 compute_entries=%u\n", label, value.frames.size(), continuity_log.judge.presents(), dlssg_work.size);
     }
   };
 
