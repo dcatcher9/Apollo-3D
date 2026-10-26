@@ -34,31 +34,28 @@
 // compile and return, the queued lines must be written in order, the shader
 // compiles and renderer builds the add-on started must finish or be released,
 // and the device must end: the next native device carries no private data of
-// the one before. Game 3D must render on each game device, reloaded after the
-// unloads before it, and each game device's session timeline (its continuity
-// invariant and oracle) must render Game 3D from API depth, an FG scope's
-// depth and the game's UI pair offered to detection.
+// the one before (D3D12 returns an adapter's existing device while anything
+// keeps it alive), and no device's native object outlives ReShade's proxy
+// (ReShade logs its reference count as inconsistent). Game 3D must render on
+// each game device, reloaded after the unloads before it, and each game
+// device's session timeline (its continuity invariant and oracle) must render
+// Game 3D from API depth, an FG scope's depth and the game's UI pair offered
+// to detection. Each game device of item 5 after its second must leave the
+// process's handles, threads, GDI and USER objects and private bytes within a
+// bound of the one before.
 //
-// Known gap L1 (lifecycle_gap): a device whose session captured depth
-// outlives the game's release of it. ReShade's ID3D12Resource::GetDevice hook
-// returns its device proxy with a reference, and the add-on's capture storage
-// and source references keep those, which only a later Present's storage
-// reuse or retirement releases. Once the game stops presenting and releases
-// the device, ReShade therefore never destroys it or unloads the add-on (no
-// destroy_device event comes), and the game's next D3D12CreateDevice
-// returns the same device; there Game 3D must render depth, FG depth and UI
-// again, and each further cycle must leave the process's handles, threads and
-// private bytes within a bound. The capture registry also keeps each released
-// queue whose captures it retains, one more each cycle. While the first 8
-// queues to execute a game list kept their entries in the game-execution
-// table for good, the device's fourth session (its third recreation) found
-// no record of its presenting queue and lost FG depth (mono,
-// FG_scope_required); that table now frees a retired queue's entry and gives
-// a new queue the oldest one (ad1f15a6), so the test makes three recreations
-// and that session must render FG depth. Each game device of item 5
-// witnesses the gap; a run in which one is destroyed fails (the gap closed:
-// remove its row and require the unload and reload of the in-flight devices
-// instead).
+// The game devices of item 5 are the witnesses of the former known gap L1
+// (fixed 10-26): a device whose session captured depth outlived the game's
+// release of it. ReShade's ID3D12Resource::GetDevice hook returns its device
+// proxy with a reference, and the add-on's capture storage and source
+// references kept those (8 here), so ReShade never destroyed the device or
+// unloaded the add-on, and the game's next D3D12CreateDevice returned the same
+// device. The capture owner now keeps no reference to a device, only to its
+// resources, and at destroy_device it waits for its queues' GPU work and
+// releases everything of the device (depth_capture::release_device). The
+// fifth game device is the one whose presenting queue found the
+// game-execution table full while the first 8 queues to execute a game list
+// kept their entries for good (fixed by ad1f15a6); it must render FG depth.
 //
 // Usage: reshade_addon_unload_runtime_test official.dll frozenShaders
 // test.addon64 freshOutput frame_generation_interposer.dll
@@ -77,15 +74,6 @@ namespace {
   constexpr GUID unwrapped_object {0x7f2c9a11, 0x3b4e, 0x4d6a, {0x81, 0x2f, 0x5e, 0x9c, 0xd3, 0x7a, 0x1b, 0x42}};
   // Private data this fixture sets on each native device it creates.
   constexpr GUID device_marker {0x3c9b6d52, 0x8e41, 0x4f0a, {0x9d, 0x27, 0x61, 0xb8, 0x0e, 0x5a, 0xc3, 0x14}};
-
-  // The lifecycle's known gaps, under the matrix's known-gap discipline:
-  // each names the limitation its witnesses meet; a witness that does not
-  // meet it fails the run (the gap closed, so its fix removes the row).
-  struct lifecycle_gap {
-    const char *id, *limitation;
-  };
-
-  constexpr lifecycle_gap captured_device_gap {"L1-captured-device-outlives-release", "a device whose session captured depth outlives the game's release (the add-on's capture storage keeps ReShade's device proxy)"};
 
   // A verified device's timeline: the viewport's SR depth with the game's UI
   // pair, an FG scope's depth tags, DLSS-G's compute evaluations, then SR
@@ -223,10 +211,9 @@ namespace {
   struct lifecycle_fixture: timeline_fixture {
     // The add-on's module, from the startup device on.
     HMODULE pinned {};
-    unsigned registrations {}, unloads {}, devices {}, witnessed {};
-    // The current device's session captured depth; the last device ended
-    // alive (known gap L1).
-    bool captured {}, survived {};
+    unsigned registrations {}, unloads {}, devices {}, captured_devices {};
+    // The current device's session captured depth.
+    bool captured {};
     unsigned (*shader_entries_pending)(unsigned *) {};
     void (*renderer_builds)(unsigned *, unsigned *) {};
     void (*renderer_step_delay)(unsigned) {};
@@ -320,13 +307,32 @@ namespace {
       }
     }
 
+    // The capture owner's line for each destroyed device, written by the
+    // add-on's writer after the probe's: everything of the device released
+    // (depth_capture::release_device), none kept for unfinished GPU work.
+    void require_capture_released(const char *label) {
+      const auto lines = [this] {
+        return reshade_log_lines({"Sunshine capture: released device"});
+      };
+      for (const auto until = GetTickCount64() + 15000; lines().size() < unloads && GetTickCount64() < until;) {
+        Sleep(5);
+      }
+      const auto released = lines();
+      if (released.size() != unloads || reshade_log_count({"Sunshine capture: kept device"})) {
+        throw std::runtime_error(std::string("The capture owner did not release everything of the ") + label + " at its destruction");
+      }
+      const auto &line = released.back();
+      std::printf("MEASURE addon-lifecycle %s capture_release=\"%s\"\n", label, line.substr(line.find("Sunshine capture:")).c_str());
+    }
+
     // After an unload: the held pool work completes, the queued lines are
-    // written, and the shader compiles and renderer builds the add-on started
-    // finish or are released.
+    // written, the capture owner released the device, and the shader
+    // compiles and renderer builds the add-on started finish or are released.
     void after_unload(held_work &work, const char *label) {
       work.released = GetTickCount64();
       release_held(work, label);
       require_lines_written(label);
+      require_capture_released(label);
       unsigned blobs {}, started {}, in_flight {};
       for (const auto until = GetTickCount64() + 20000; shader_entries_pending(&blobs) && GetTickCount64() < until;) {
         Sleep(5);
@@ -340,21 +346,12 @@ namespace {
 
     // A new native device carries no marker of an earlier one (D3D12 returns
     // the adapter's existing device while one is alive), then gets its own.
-    // After a device that outlived its release (known gap L1) the game gets
-    // that device back, and ReShade does not initialize the add-on again.
     void mark_device(ID3D12Device *proxy, const char *label) {
       com_ptr<ID3D12Device> native;
       checked(proxy->QueryInterface(unwrapped_object, reinterpret_cast<void **>(native.put())), "Unwrap the game's device");
       unsigned earlier {};
       UINT size = sizeof(earlier);
       const bool marked = SUCCEEDED(native->GetPrivateData(device_marker, &size, &earlier));
-      if (survived) {
-        if (!marked || earlier != devices || reshade_log_count({"Registered add-on \"Sunshine SBS TEST ONLY\""}) != registrations) {
-          throw std::runtime_error(std::string("The ") + label + " is neither the device that outlived its release (known gap L1) nor a new one ReShade initialized the add-on for");
-        }
-        std::printf("MEASURE addon-lifecycle %s gap=%s device=%u (the device the game released)\n", label, captured_device_gap.id, earlier);
-        return;
-      }
       if (marked) {
         char text[200];
         std::snprintf(text, sizeof(text), "The %s is device %u, which survived its destruction: a reference to that native device leaked", label, earlier);
@@ -419,9 +416,10 @@ namespace {
     // A game ends its device: its queues finish, its NGX feature is released,
     // then its objects, swapchain and device go. ReShade destroys the
     // runtime, then the device, and with its last device unloads its
-    // add-ons; returns whether it did. A device whose session captured depth
-    // must outlive the release instead (known gap L1), and any other must not.
-    bool end_device(const char *label) {
+    // add-ons, however much the device's session captured: no other owner
+    // references the device (the former L1), and its native object goes with
+    // ReShade's proxy.
+    void end_device(const char *label) {
       render_tracked_depth = {};
       checked(queue->Signal(completion.p, ++fence_value), "Signal the presenting queue's last work");
       checked(completion->SetEventOnCompletion(fence_value, nullptr), "Wait for the presenting queue");
@@ -454,6 +452,7 @@ namespace {
       game->AddRef();
       const auto others = game->Release() - 3;
       const auto destroyed_before = teardown_probe.destroyed;
+      const auto outlived_before = reshade_log_count({"Reference count for ID3D12Device", "is inconsistent"});
       teardown_probe.prefix = std::string("Sunshine lifecycle test: the ") + label + " line";
       teardown_probe.armed = true;
       release_game_device();
@@ -462,24 +461,15 @@ namespace {
       const bool destroyed = teardown_probe.destroyed > destroyed_before;
       teardown_probe.armed = false;
       std::printf("MEASURE addon-lifecycle %s ended destroyed=%u captured=%u other_device_references=%lu\n", label, unsigned(destroyed), unsigned(captured), static_cast<unsigned long>(others));
-      const bool had_captured = captured;
-      captured = false;
-      survived = !destroyed;
-      if (destroyed) {
-        require_unloaded(label);
-        if (had_captured) {
-          throw std::runtime_error(std::string("Known gap ") + captured_device_gap.id + " closed: the " + label + " was destroyed after its session captured depth; remove the row and require the unload and reload of the in-flight devices");
-        }
-        return true;
+      const bool had_captured = std::exchange(captured, false);
+      if (!destroyed || others) {
+        throw std::runtime_error(std::string("The ") + label + (had_captured ? ", whose session captured depth," : "") + " outlived the game's release: " + std::to_string(others) + " other references to it (the former L1: the add-on's capture storage and sources kept ReShade's device proxy)");
       }
-      if (!had_captured) {
-        throw std::runtime_error(std::string("The ") + label + ", whose session captured nothing, outlived the game's release: a reference to it leaked");
+      require_unloaded(label);
+      if (reshade_log_count({"Reference count for ID3D12Device", "is inconsistent"}) != outlived_before) {
+        throw std::runtime_error(std::string("The ") + label + "'s native device outlived ReShade's proxy: a reference to it, or to an object of it, leaked");
       }
-      ++witnessed;
-      // ReShade names each released queue proxy whose original another
-      // owner still references (the capture registry's retained queues).
-      std::printf("MEASURE addon-lifecycle %s gap=%s other_device_references=%lu queues_still_referenced=%zu: %s\n", label, captured_device_gap.id, static_cast<unsigned long>(others), reshade_log_count({"Reference count for ID3D12CommandQueue", "is inconsistent"}), captured_device_gap.limitation);
-      return false;
+      captured_devices += had_captured;
     }
 
     // -- Verification and work in flight ------------------------------------
@@ -609,7 +599,7 @@ namespace {
     require(pending(), (std::string("The ") + label + " never had its work in flight").c_str());
     std::printf("MEASURE addon-lifecycle %s presents_before_destruction=%u\n", label, presents);
     auto work = fixture.hold_pool_work();
-    require(fixture.end_device(label), "A brief device outlived the game's release");
+    fixture.end_device(label);
     fixture.after_unload(*work, label);
   }
 }  // namespace
@@ -664,7 +654,7 @@ int main(int argc, char **argv) {
     fixture.require_renders("first game device");
     {
       auto work = fixture.hold_pool_work();
-      require(fixture.end_device("first game device"), "The first game device outlived the game's release");
+      fixture.end_device("first game device");
       fixture.after_unload(*work, "first game device");
     }
     process_usage::now().print("after-first-game-device");
@@ -690,11 +680,12 @@ int main(int argc, char **argv) {
       fixture.renderer_step_delay(0);
     }
     process_usage::now().print("after-building-device");
-    // Game devices verified, then ended with frames in flight. Each outlives
-    // the game's release (known gap L1), so the next is the same device: each
-    // further cycle must leave the process within a bound of the one before.
-    // The fourth session on it, the fifth game device, is the first whose
-    // presenting queue found the game-execution table full before ad1f15a6.
+    // Game devices verified, then ended with frames in flight. Each is
+    // destroyed with what its session captured (the former L1), the add-on
+    // unloaded and loaded again for the next, a new device: each further
+    // cycle must leave the process within a bound of the one before. The
+    // fifth game device is the one whose presenting queue found the
+    // game-execution table full before ad1f15a6.
     const char *const sessions[] {"second game device", "third game device", "fourth game device", "fifth game device"};
     process_usage ended[std::size(sessions)];
     for (std::size_t i = 0; i != std::size(sessions); ++i) {
@@ -702,13 +693,8 @@ int main(int argc, char **argv) {
       fixture.verify(sessions[i]);
       fixture.leave_frames_in_flight(sessions[i]);
       auto work = fixture.hold_pool_work();
-      work->released = GetTickCount64();
-      if (fixture.end_device(sessions[i])) {
-        fixture.after_unload(*work, sessions[i]);
-      } else {
-        // No unload: the held work completes on the pool as ever.
-        fixture.release_held(*work, sessions[i]);
-      }
+      fixture.end_device(sessions[i]);
+      fixture.after_unload(*work, sessions[i]);
       ended[i] = process_usage::now();
       ended[i].print(sessions[i]);
     }
@@ -717,13 +703,12 @@ int main(int argc, char **argv) {
         throw std::runtime_error(std::string("The ") + sessions[i] + "'s further cycle left handles, threads, GDI or USER objects or private memory beyond the bound of the cycle before");
       }
     }
-    require(fixture.witnessed == std::size(sessions), "A game device did not witness its known gap");
-    std::printf("MEASURE addon-lifecycle gaps %s={witnessed=%u}\n", captured_device_gap.id, fixture.witnessed);
+    require(fixture.captured_devices == std::size(sessions), "A game device's session captured nothing");
     reshade::unregister_event<reshade::addon_event::reshade_present>(tally_present);
     reshade::unregister_event<reshade::addon_event::destroy_device>(probe_destroy_device);
     reshade::unregister_event<reshade::addon_event::reshade_present>(record_present);
     reshade::unregister_event<reshade::addon_event::reset_command_list>(observe_reset);
-    std::printf("PASS add-on lifecycle: %u unloads in one process, each leaving the module mapped, its pool work and log lines complete and its device ended, Game 3D rendering on each game device after its reload; %u game devices rendering depth, FG depth and UI after each recreation (known gap %s)\n", fixture.unloads, fixture.witnessed, captured_device_gap.id);
+    std::printf("PASS add-on lifecycle: %u unloads in one process, each leaving the module mapped, its pool work and log lines complete, the capture owner's objects of its device released and its device ended, Game 3D rendering on each game device after its reload; %u game devices rendering depth, FG depth and UI, each destroyed with its captures in flight and the next a new device\n", fixture.unloads, fixture.captured_devices);
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "FAIL %s\n", error.what());

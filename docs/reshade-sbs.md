@@ -3965,10 +3965,22 @@ AddonInit. A failed pin fails AddonInit. The session storage is
 process-persistent, preventing a second implicit CRT cleanup owner. A shared detach fence stops
 callback observation before other C++ owners are destroyed; vendor calls still forward normally.
 Ordinary add-on unload continues to unregister callbacks and release its active session resources.
-A device whose session captured depth is not destroyed when the game releases it: capture storage
-and source references hold ReShade's device proxy (its `ID3D12Resource::GetDevice` hook returns it)
-and the capture registry the released queues, so no unload comes and the game's next device is the
-same one (known gap L1 of the lifecycle test, [Session-level tests](../tools/reshade/README.md#session-level-tests)).
+The capture owner never holds a reference to a device, only to its resources: a source or snapshot
+names its device (ReShade's proxy, which its `ID3D12Resource::GetDevice` hook returns) without
+owning it. Such references kept a device whose session captured depth from ever being destroyed,
+so no unload came and the game's next device was the same one (the lifecycle test's former L1,
+[Session-level tests](../tools/reshade/README.md#session-level-tests)). When ReShade destroys a
+D3D12 device (`destroy_device`, from its proxy's teardown, after the game released its last
+reference), `depth_capture::release_device` signals each of its queue places' fences and waits for
+them, then its snapshots and queue places leave the capture owner, and the resources of its sources
+and snapshot storage are released wherever they are still held (an adapter's tag, a packet, a
+ticket); a held one is then empty, and every call refuses it. Each resource ReShade created calls
+into its device as it is destroyed, so none of them may outlive the device. The device's identity is
+cleared, so a native device that survives starts with a new one. GPU work not finished within a
+safety bound (10 s: the game drains its queues before releasing its device, and a queue waiting on a
+fence nobody signals must not hang that release) is never released: the device's objects are kept
+for good. The add-on logs `Sunshine capture: released device N: queue_places= snapshots= sources=
+storage= gpu_wait_ms=` (or `kept device N`).
 
 Streamline 2.x has a synchronous depth tag adapter independent of Frame Generation. Ordinary
 `OnlyValidNow` depth can be copied on the command list supplied to a successful tag call even if

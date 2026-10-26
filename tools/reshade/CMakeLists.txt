@@ -917,7 +917,7 @@ if(BUILD_TESTING)
     # The add-on's lifecycle under ReShade (README, Session-level tests): in
     # one process a startup device, devices destroyed while shaders compile or
     # the renderer builds on the pool, and game devices verified by a session
-    # timeline, then destroyed with frames in flight (known gap L1). A GPU
+    # timeline, then destroyed with what they captured in flight. A GPU
     # check run with the contract tests, where the official runtime and the
     # frozen shaders are configured.
     add_executable(reshade_addon_unload_runtime_test test_addon_unload_runtime.cpp)

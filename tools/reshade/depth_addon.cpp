@@ -1413,6 +1413,17 @@ static void on_destroy_device(device *device)
 		device->destroy_query_heap(device_data->deferred_copy_marker);
 
 	device->destroy_private_data<generic_depth_device_data>();
+
+	// The capture owner's sources and snapshots of this device go while ReShade
+	// still has it (each of its resources calls into it as it is destroyed).
+	// Their tracked depth-stencil entries were dropped with the device data.
+	if (device->get_api() == device_api::d3d12)
+	{
+		char line[320]{};
+		const bool released = sunshine_streamline::depth_capture::release_device(device->get_native(), line, sizeof(line));
+		if (line[0])
+			sunshine_log::message(released ? reshade::log::level::info : reshade::log::level::warning, line);
+	}
 }
 
 // ReShade's own lifecycle for a D3D12 list; see depth_capture::observe_list_event.

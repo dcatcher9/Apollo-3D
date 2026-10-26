@@ -17,6 +17,8 @@
 #include <cstring>
 #include <future>
 #include <stdexcept>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -2781,6 +2783,141 @@ namespace {
     gpu.check_debug_errors();
     std::puts("PASS unlocked storage allocation: the capture lock is free during allocation, re-validation rejects a closed recording");
   }
+
+  // ReShade destroys a device once the game released its last reference
+  // (destroy_device). The capture owner's sources and snapshot storage kept
+  // ReShade's device proxy, so a device whose session captured depth was
+  // never destroyed (the lifecycle test's former L1): a source now holds its
+  // resource, never its device, and release_device waits for the GPU work of
+  // the device's queues, then releases every source and snapshot of it,
+  // wherever they are still held (an adapter's tag, a packet, a ticket). GPU
+  // work unfinished within its bound is kept for good. Last: it releases the
+  // fixture device's capture state.
+  void device_release(fixture &gpu) {
+    if (gpu.debug_messages) gpu.debug_messages->ClearStoredMessages();
+    const auto references = [](IUnknown *value) { value->AddRef(); return value->Release(); };
+    capture::observe_queue(native(gpu.queue.Get())); capture::observe_queue(native(gpu.foreign_queue.Get()));
+    const auto queue_references = references(gpu.queue.Get()), foreign_references = references(gpu.foreign_queue.Get());
+    auto plain = destination(gpu.device.Get(), DXGI_FORMAT_R32_FLOAT);
+    const auto device_references = references(gpu.device.Get());
+    auto held = capture::retain_source(native(plain.Get()));
+    require(held && references(gpu.device.Get()) == device_references && references(plain.Get()) == 2,
+      "a retained source referenced its device, or not its resource");
+
+    // A depth snapshot read through a packet the consumer keeps, a local UI
+    // snapshot whose ticket the caller keeps, then a depth copy whose
+    // producer list waits behind a gate on the producer queue.
+    consumer_fixture consumer(gpu);
+    texture_case depth(gpu, DXGI_FORMAT_R32_FLOAT, 4);
+    texture_case color(gpu, DXGI_FORMAT_R8G8B8A8_UNORM, 4);
+    gpu.submit(); gpu.wait(); gpu.reset();
+    auto input = depth.input;
+    input.provider = sunshine_scene_depth::provider_kind::ngx;
+    input.epoch = 191; input.source_id = 193; input.viewport = 0;
+    input.valid_until = sunshine_scene_depth::lifetime::until_evaluation; input.force_snapshot = false;
+    input.source_present_generation = capture::source_present_generation(input.source);
+    input.native_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    input.proof = sunshine_scene_depth::state_proof::sdk_contract;
+    capture::record_diagnostic diagnostic;
+    const auto nominate = [&](std::uint64_t sequence) {
+      input.sequence = sequence; input.tick = GetTickCount64();
+      return capture::nominate_evaluation(native(gpu.list.Get()), input, UINT64_MAX, &diagnostic);
+    };
+    const auto first = nominate(1);
+    require(first && diagnostic.result == capture::status::recorded, "device release: the depth copy was refused");
+    capture::finish(first, true);
+    auto ui = capture::record_local_texture(native(gpu.list.Get()), color.input);
+    require(bool(ui), "device release: the UI snapshot was refused");
+    capture::finish_diagnostic_texture(ui, true);
+    gpu.submit(); gpu.wait(); gpu.reset();
+    capture::packet packet;
+    capture::diagnostic_texture pixels;
+    require(capture::acquire(native(gpu.foreign_queue.Get()), 7000, packet) && packet.pixel_ready && packet.capture_id == first &&
+        capture::acquire_local_texture(ui, native(gpu.queue.Get()), pixels) == capture::status::ready,
+      "device release: a snapshot was unavailable");
+    auto *const depth_storage = reinterpret_cast<ID3D12Resource *>(packet.texture);
+    auto *const ui_storage = reinterpret_cast<ID3D12Resource *>(pixels.texture);
+    depth_storage->AddRef(); ui_storage->AddRef();
+    const auto second = nominate(2);
+    require(second && diagnostic.result == capture::status::recorded, "device release: the second depth copy was refused");
+    capture::finish(second, true);
+    {
+      gate delayed(gpu.device.Get(), gpu.queue.Get());
+      gpu.submit();
+      auto release = std::async(std::launch::async, [&] {
+        char line[320]{};
+        const bool released = capture::release_device(native(gpu.device.Get()), line, sizeof(line));
+        return std::make_pair(released, std::string(line));
+      });
+      require(release.wait_for(std::chrono::milliseconds(300)) == std::future_status::timeout,
+        "release_device released a device whose queue still had its copy in flight");
+      delayed.open();
+      const auto [released, line] = release.get();
+      std::printf("MEASURE device release: %s\n", line.c_str());
+      require(released && line.rfind("Sunshine capture: released device", 0) == 0 &&
+          line.find("snapshots=0") == std::string::npos && line.find("sources=0") == std::string::npos &&
+          line.find("storage=0") == std::string::npos,
+        "release_device kept or released nothing of a device whose GPU work finished");
+    }
+    gpu.wait();
+    require(depth_storage->Release() == 0 && ui_storage->Release() == 0,
+      "a released device's snapshot storage stayed referenced while a packet or ticket held it");
+    require(references(plain.Get()) == 1 && references(depth.source.Get()) == 1 && references(color.source.Get()) == 1,
+      "a released device's sources kept their resources while an adapter held them");
+    require(references(gpu.queue.Get()) == queue_references - 1 && references(gpu.foreign_queue.Get()) == foreign_references - 1,
+      "a released device's queue places kept their queues");
+    require(!sunshine_native_identity::device_cookie(gpu.device.Get()), "a released device kept its identity");
+    // What a holder keeps is refused, never read.
+    gpu.reset();
+    capture::observe_queue(native(gpu.queue.Get()));
+    require(!nominate(3) && diagnostic.stage == capture::record_stage::missing_source, "a released source was recorded");
+    capture::consumer_diagnostic consumed;
+    auto target = destination(gpu.device.Get(), DXGI_FORMAT_R32_FLOAT);
+    require(!capture::copy_current(native(consumer.list.Get()), packet, native(target.Get()),
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &consumed) && consumed.result == capture::consumer_status::missing_input,
+      "a released snapshot was read through its packet");
+    require(capture::acquire_local_texture(ui, native(gpu.queue.Get()), pixels) != capture::status::ready,
+      "a released snapshot was read through its ticket");
+    {
+      auto again = capture::retain_source(native(plain.Get()));
+      require(again && again != held && references(plain.Get()) == 2, "a released source was retained again");
+    }
+    packet = {}; pixels = {}; ui = {}; held = {};
+
+    // GPU work unfinished within the bound is kept for good: its sources and
+    // queue places stay referenced.
+    texture_case stuck_depth(gpu, DXGI_FORMAT_R32_FLOAT, 4);
+    gpu.submit(); gpu.wait(); gpu.reset();
+    input = stuck_depth.input;
+    input.provider = sunshine_scene_depth::provider_kind::ngx;
+    input.epoch = 195; input.source_id = 197; input.viewport = 0;
+    input.valid_until = sunshine_scene_depth::lifetime::until_evaluation; input.force_snapshot = false;
+    input.source_present_generation = capture::source_present_generation(input.source);
+    input.native_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    input.proof = sunshine_scene_depth::state_proof::sdk_contract;
+    const auto third = nominate(1);
+    require(third && diagnostic.result == capture::status::recorded, "device release: the unfinished copy was refused");
+    capture::finish(third, true);
+    const auto stuck_references = references(stuck_depth.source.Get()), place_references = references(gpu.queue.Get());
+    {
+      gate stuck(gpu.device.Get(), gpu.queue.Get());
+      gpu.submit();
+      capture::testing::set_release_wait(50);
+      char line[320]{};
+      const bool released = capture::release_device(native(gpu.device.Get()), line, sizeof(line));
+      capture::testing::set_release_wait(0);
+      std::printf("MEASURE device release: %s\n", line);
+      require(!released && std::strstr(line, "Sunshine capture: kept device") &&
+          references(stuck_depth.source.Get()) == stuck_references && references(gpu.queue.Get()) == place_references,
+        "release_device released objects of a device whose GPU work had not finished");
+      stuck.open();
+    }
+    gpu.wait();
+    gpu.check_debug_errors();
+    std::printf("PASS device release: a source holds no device reference; a device's capture objects are released after "
+      "its queues' GPU work, whoever holds them, and refused after; unfinished GPU work keeps them for good%s\n",
+      gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
+  }
 }
 // The API contract matrix's device layer (test_game3d_api_contract_device.cpp)
 // includes this file for its fixture.
@@ -2894,6 +3031,8 @@ int main(int argc, char **argv) {
       }
     auxiliary_consumer_replay_and_discard(gpu);
     replay_and_cancel(gpu);
+    // Last: it releases the fixture device's capture state.
+    device_release(gpu);
     std::puts("PASS diagnostic texture capture functional GPU regression (no performance measurement)");
     return 0;
   } catch (const std::exception &error) { std::fprintf(stderr, "FAIL: %s\n", error.what()); return 1; }

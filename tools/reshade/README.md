@@ -2066,33 +2066,42 @@ callback must compile and return, the 128 lines must be written in order, the sh
 finish (`SunshineGame3DTestShaderEntriesPending`) and the renderer builds must be released
 (`SunshineGame3DTestRendererBuilds`), and the next native device must carry no private data the test
 set on the one before (D3D12 returns an adapter's existing device while a reference keeps it alive).
-Game 3D must render on each game device, reloaded after the unloads before it, and each game
-device's timeline (30 frames of SR depth with the game's HUD-less and Backbuffer tags, 31 of FG
+When the game releases a device, nothing else may reference ReShade's proxy (the test counts its
+references besides the device's own, its presenting queue's and its swapchain's), ReShade must
+destroy it and unload the add-on whatever its session captured, its native object must go with the
+proxy (ReShade logs `Reference count for ID3D12Device` as inconsistent otherwise), and the capture
+owner must log that it released everything of it (`Sunshine capture: released device`, never `kept
+device`). Game 3D must render on each game device, reloaded after the unloads before it, and each
+game device's timeline (30 frames of SR depth with the game's HUD-less and Backbuffer tags, 31 of FG
 depth tags, 10 of DLSS-G compute evaluations, then 31 of SR depth with the tags on the game's list)
 must pass the continuity invariant and the oracle and render Game 3D from API depth, show an FG
-scope's depth and offer the UI pair to detection.
+scope's depth and offer the UI pair to detection. Each game device of item 5 after its second must
+leave the process's handles (64), threads (8), GDI and USER objects (4) and private bytes (32 MB)
+within those bounds of the one before.
 
-Known gap L1, found by this test: a device whose session captured depth outlives the game's release
-of it. ReShade's `ID3D12Resource::GetDevice` hook returns its device proxy with a reference, and the
-add-on's capture storage and source references keep those (8 in this test) until a later Present
-reuses or retires the storage. When the game stops presenting and releases the device, no
-`destroy_device` event comes: ReShade neither destroys the device nor unloads the add-on, and the
-game's next `D3D12CreateDevice` returns the same device. On it Game 3D must render depth, FG depth and
-UI again, and each further cycle must leave the process's handles (64), threads (8), GDI and USER
-objects (4) and private bytes (32 MB) within those bounds of the cycle before. The capture registry
-also keeps each released queue whose captures it retains (ReShade logs its `Reference count for
-ID3D12CommandQueue` as inconsistent, one more per cycle). The device's fourth session (its third
-recreation) lost FG depth (`FG_scope_required`, mono) while the first 8 queues to execute a game
-list kept their entries in the game-execution table (`depth_capture::game_executions_on`) for good:
-its presenting queue had none. That table now frees a retired queue's entry and gives a new queue
-the oldest one (ad1f15a6, the Assassin's Creed Shadows hotfix of 10-26), so the test makes three
-recreations and that session must render FG depth; with the table's old rule restored it fails
-there. (This section first named the capture registry's four queue places as the cause; with four
-places and no idle reclaim the session renders FG depth.) Each of the four game devices witnesses
-the gap; one that ReShade destroys fails the run (the gap closed: remove the row and require the
-unload and reload of the in-flight devices).
-Device removal is not simulated; a removed device the add-on keeps alive would be the one the game's
-next `D3D12CreateDevice` returns.
+The game devices of item 5 are the witnesses of the former known gap L1, found by this test and
+closed on 10-26: a device whose session captured depth outlived the game's release of it. ReShade's
+`ID3D12Resource::GetDevice` hook returns its device proxy with a reference, and the add-on's capture
+storage and source references kept those (8 in this test) until a later Present reused or retired
+the storage. When the game stopped presenting and released the device, no `destroy_device` event
+came: ReShade neither destroyed the device nor unloaded the add-on, and the game's next
+`D3D12CreateDevice` returned the same device. The capture owner now names a device without owning it
+and, at `destroy_device`, waits for its queues' GPU work and releases every source and snapshot of
+it wherever they are still held (`depth_capture::release_device`, [Streamline depth
+selection](../../docs/reshade-sbs.md#streamline-depth-selection)). The capture test's `device_release`
+([`test_diagnostic_texture_capture.cpp`](test_diagnostic_texture_capture.cpp), the cheapest layer)
+checks it on a device without ReShade: a retained source adds no reference to its device;
+`release_device` waits for a copy behind a gate on its queue (debug-layer clean), then releases a
+snapshot a packet still holds, one a ticket still holds, the sources an adapter still holds and the
+queue places, and clears the device's identity; held objects are refused afterwards; and a copy that
+does not finish within the wait bound keeps all of them. A retired queue whose copies are still in
+flight keeps its place until they retire, so ReShade still logs its presenting queue's `Reference
+count for ID3D12CommandQueue` as inconsistent once per cycle; the place goes with the device at the
+latest. While the device was reused, its fourth session (the fifth game device) lost FG depth
+(`FG_scope_required`, mono) while the first 8 queues to execute a game list kept their entries in the
+game-execution table (`depth_capture::game_executions_on`) for good: its presenting queue had none
+(fixed by ad1f15a6, the Assassin's Creed Shadows hotfix of 10-26).
+Device removal is not simulated; `release_device` reads a removed device's fences as complete.
 
 Changing the Streamline viewport is outside the lifecycle: in one session, a new viewport's FG scope
 showed no FG depth (`source_handoff`, mono) for a whole timeline while an earlier viewport that used
@@ -2100,7 +2109,7 @@ FG had not been retired by the timelines' isolation (`retired_viewports`, the pr
 constants), whether or
 not the device was recreated. The lifecycle keeps one viewport, as games do.
 
-`reshade_addon_unload_runtime` runs it with the 2.7.30 interposer in about 31 s, registered like
+`reshade_addon_unload_runtime` runs it with the 2.7.30 interposer in about 32 s, registered like
 `reshade_native_provider_continuity` (200 s timeout). Locally:
 
     reshade_addon_unload_runtime_test official.dll frozenShaders test.addon64 freshOutput

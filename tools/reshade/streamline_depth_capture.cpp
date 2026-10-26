@@ -175,6 +175,11 @@ namespace sunshine_streamline::depth_capture {
       if (diagnostic_slots_active) for (auto &value : diagnostic_slots) operation(value);
     }
     std::array<std::weak_ptr<const source_reference>, source_limit> sources;
+    // Every snapshot storage allocated (allocate_storage), as long as anyone
+    // holds it: release_device releases a device's storage whoever holds it
+    // (a packet, a ticket). Protected by mutex; expired entries are dropped
+    // when it would grow, so it stays as long as the storage alive.
+    std::vector<std::weak_ptr<texture_reference>> storage;
     std::array<std::unique_ptr<queue_state>, queue_limit> queues;
     std::array<evaluation_namespace, provider_count> evaluations;
 
@@ -1451,12 +1456,13 @@ namespace sunshine_streamline::depth_capture {
       bool shared{}, descriptors{};
     };
     // Never called with the capture lock: the driver may take milliseconds.
-    // The device is kept alive by the recording's retained source.
+    // The device is the recording's retained source's, alive while the game
+    // records with it; release_device releases this storage before it goes.
     record_stage allocate_storage(const storage_plan &plan, std::shared_ptr<texture_reference> &out) {
       out.reset();
       try {
         auto texture = std::make_shared<texture_reference>();
-        plan.device->AddRef(); texture->device.p = plan.device;
+        texture->device = plan.device;
         texture->device_identity = plan.device_identity;
         texture->allocation_bytes = plan.allocation_bytes;
         texture->rest = plan.state;
@@ -1491,6 +1497,18 @@ namespace sunshine_streamline::depth_capture {
         return record_stage::texture_allocation;
       }
     }
+    // Requires mutex. New storage joins the registry (storage).
+    bool register_storage(const std::shared_ptr<texture_reference> &value) {
+      try {
+        if (storage.size() == storage.capacity())
+          storage.erase(std::remove_if(storage.begin(), storage.end(), [](const auto &entry) { return entry.expired(); }),
+            storage.end());
+        storage.push_back(value);
+        return true;
+      } catch (...) {
+        return false;
+      }
+    }
     // A metadata-only nomination: source authority without GPU storage.
     std::uint64_t record_nomination(const input &value, std::uint64_t normalized_source,
         std::uint64_t cookie, const recording_ref &recording) {
@@ -1520,11 +1538,11 @@ namespace sunshine_streamline::depth_capture {
       const auto desc = value.nomination_only ? value.metadata.source->desc : value.texture->resource->GetDesc();
       out.metadata = value.metadata; out.ownership = value.texture;
       out.resource_id = value.metadata.source ? value.metadata.source->cookie : 0;
-      if (value.nomination_only) out.device = reinterpret_cast<std::uint64_t>(value.metadata.source->device.p);
+      if (value.nomination_only) out.device = reinterpret_cast<std::uint64_t>(value.metadata.source->device);
       else {
         out.texture = reinterpret_cast<std::uint64_t>(value.texture->resource.p);
         out.shader_resource = value.texture->shader_resource;
-        out.device = reinterpret_cast<std::uint64_t>(value.texture->device.p);
+        out.device = reinterpret_cast<std::uint64_t>(value.texture->device);
       }
       out.queue = consumer; out.producer_queue = value.queue; out.capture_id = value.id; out.producer_fence = value.producer_fence;
       out.width = static_cast<std::uint32_t>(desc.Width); out.height = desc.Height;
@@ -1873,6 +1891,174 @@ namespace sunshine_streamline::depth_capture {
     forget_queue_execution(native);
   }
   namespace {
+    // A released device's objects whose GPU work had not finished
+    // (release_device), kept for good: under ReShade each resource of a
+    // destroyed device calls into that device as it is destroyed, so none may
+    // be released after it. Protected by mutex; never freed (the add-on is
+    // pinned).
+    struct kept_objects {
+      std::vector<std::shared_ptr<texture_reference>> storage;
+      std::vector<source_ref> sources;
+      std::vector<std::unique_ptr<queue_state>> places;
+    };
+    kept_objects *kept{};
+    // release_device's bound on the wait for a device's queues, which the game
+    // has drained before it releases its device. A safety bound, not a
+    // tuning: it keeps a queue that never reaches its fence (one waiting on a
+    // fence nobody signals) from hanging the game's release, and GPU work
+    // still unfinished after it is never released.
+    constexpr std::uint64_t release_wait_bound_ms = 10000;
+#ifdef SUNSHINE_STREAMLINE_PROBE_TEST
+    std::atomic<std::uint64_t> release_wait_ms{release_wait_bound_ms};
+#else
+    constexpr std::uint64_t release_wait_ms = release_wait_bound_ms;
+#endif
+  }
+#ifdef SUNSHINE_STREAMLINE_PROBE_TEST
+  namespace testing {
+    void set_release_wait(std::uint64_t ms) { release_wait_ms = ms ? ms : release_wait_bound_ms; }
+  }
+#endif
+  bool release_device(std::uint64_t native, char *out, std::size_t size) {
+    if (out && size) *out = 0;
+    com_ptr<ID3D12Device> checked;
+    if (!native || !query_native(native, IID_ID3D12Device, checked)) return false;
+    const auto device = device_cookie(checked.p);
+    if (!device) return false;
+    // Its queue places take no further work, and each signals its fence after
+    // everything submitted to it. Every copy into or read of a snapshot that
+    // was submitted was submitted on a placed queue (an unplaced queue's copy
+    // is never submitted, so never read; the game drained its own queues).
+    std::array<std::pair<ID3D12Fence *, std::uint64_t>, queue_limit> fences{};
+    unsigned waits = 0;
+    bool finished = true;
+    {
+      std::lock_guard lock(mutex);
+      for (auto &owner : queues) if (owner && owner->device_identity == device) {
+        owner->retiring = true;
+        owner->provider_established = false;
+        const auto value = ++owner->next_fence;
+        if (SUCCEEDED(owner->queue->Signal(owner->fence.p, value))) {
+          owner->fence->AddRef();
+          fences[waits++] = {owner->fence.p, value};
+        } else if (SUCCEEDED(owner->device->GetDeviceRemovedReason())) finished = false; // A removed device runs nothing.
+      }
+    }
+    const auto started = GetTickCount64();
+    const std::uint64_t bound = release_wait_ms;
+    const HANDLE event = waits ? CreateEventW(nullptr, FALSE, FALSE, nullptr) : nullptr;
+    for (unsigned i = 0; i != waits; ++i) {
+      const auto [fence, value] = fences[i];
+      // A removed device's fences read UINT64_MAX.
+      if (finished && fence->GetCompletedValue() < value) {
+        const auto elapsed = GetTickCount64() - started;
+        finished = event && elapsed < bound && SUCCEEDED(fence->SetEventOnCompletion(value, event)) &&
+          WaitForSingleObject(event, static_cast<DWORD>(bound - elapsed)) == WAIT_OBJECT_0;
+      }
+      fence->Release();
+    }
+    if (event) CloseHandle(event);
+    const auto waited = GetTickCount64() - started;
+    // Every object of the device leaves the capture owner: its snapshots and
+    // queue places, and the resources of its sources and storage wherever
+    // they are still held (an adapter's tag, a packet, a ticket), which are
+    // released after the lock. Unfinished, they are kept for good instead.
+    std::vector<std::shared_ptr<texture_reference>> storage_held;
+    std::vector<source_ref> sources_held;
+    std::vector<std::unique_ptr<queue_state>> places_held;
+    std::vector<IUnknown *> released;
+    unsigned snapshots = 0, places = 0, released_sources = 0, released_storage = 0;
+    bool reserved = false;
+    {
+      std::lock_guard lock(mutex);
+      // Everything below moves without allocating.
+      try {
+        constexpr std::size_t slot_count = slot_limit + diagnostic_slot_limit;
+        storage_held.reserve(slot_count + storage.size());
+        sources_held.reserve(2 * slot_count + source_limit);
+        places_held.reserve(queue_limit);
+        released.reserve(source_limit + 2 * storage.size());
+        if (!finished) {
+          if (!kept) kept = new kept_objects;
+          kept->storage.reserve(kept->storage.size() + storage_held.capacity());
+          kept->sources.reserve(kept->sources.size() + sources_held.capacity());
+          kept->places.reserve(kept->places.size() + places_held.capacity());
+        }
+        reserved = true;
+      } catch (...) {
+        finished = false; // Out of memory: nothing of the device moved.
+      }
+      if (reserved) {
+        std::array<std::uint64_t, queue_limit> natives{};
+        for (auto &owner : queues) if (owner && owner->device_identity == device) {
+          const auto queue = reinterpret_cast<std::uint64_t>(owner->queue.p);
+          natives[places++] = queue;
+          forget_queue_execution(queue);
+          places_held.push_back(std::move(owner));
+        }
+        const auto of_device = [&](const slot &value) {
+          return (value.texture && value.texture->device_identity == device) ||
+            (value.metadata.source && value.metadata.source->device_identity == device) ||
+            (value.auxiliary_destination && value.auxiliary_destination->device_identity == device) ||
+            std::any_of(natives.begin(), natives.begin() + places, [&](auto queue) { return uses_queue(value, queue); });
+        };
+        const auto release_slot = [&](slot &value) {
+          if (!of_device(value)) return;
+          snapshots += value.id != 0;
+          if (value.texture) storage_held.push_back(std::move(value.texture));
+          if (value.metadata.source) sources_held.push_back(std::move(value.metadata.source));
+          if (value.auxiliary_destination) sources_held.push_back(std::move(value.auxiliary_destination));
+          slot empty;
+          // A record attempt may be allocating for this slot without the lock.
+          empty.reservation = value.reservation; empty.reservation_tick = value.reservation_tick;
+          empty.reserved_bytes = value.reserved_bytes; empty.reserved_live = value.reserved_live;
+          value = std::move(empty);
+        };
+        for (auto &value : slots) release_slot(value);
+        for (auto &value : diagnostic_slots) release_slot(value);
+        for (auto &weak : sources) if (const auto value = weak.lock()) if (value->device_identity == device) {
+          weak.reset();
+          ++released_sources;
+          if (!finished) { sources_held.push_back(value); continue; }
+          value->released.store(true, std::memory_order_release);
+          value->device = nullptr;
+          released.push_back(std::exchange(value->resource.p, nullptr));
+        }
+        for (auto &weak : storage) if (const auto value = weak.lock()) if (value->device_identity == device) {
+          weak.reset();
+          ++released_storage;
+          if (!finished) { storage_held.push_back(value); continue; }
+          value->released.store(true, std::memory_order_release);
+          value->device = nullptr;
+          value->shader_resource = 0;
+          released.push_back(std::exchange(value->resource.p, nullptr));
+          released.push_back(std::exchange(value->views.p, nullptr));
+        }
+        if (!finished) {
+          for (auto &value : storage_held) kept->storage.push_back(std::move(value));
+          for (auto &value : sources_held) kept->sources.push_back(std::move(value));
+          for (auto &value : places_held) kept->places.push_back(std::move(value));
+        }
+      }
+    }
+    // A device recreated over the same native object starts with a new identity.
+    checked->SetPrivateData(sunshine_native_identity::device_guid, 0, nullptr);
+    for (auto *value : released) if (value) value->Release();
+    const auto u = [](std::uint64_t value) { return static_cast<unsigned long long>(value); };
+    if (out && size) {
+      if (!reserved)
+        std::snprintf(out, size, "Sunshine capture: device %llu: out of memory at its release; its objects stay", u(device));
+      else if (finished)
+        std::snprintf(out, size, "Sunshine capture: released device %llu: queue_places=%u snapshots=%u sources=%u "
+          "storage=%u gpu_wait_ms=%llu", u(device), places, snapshots, released_sources, released_storage, u(waited));
+      else
+        std::snprintf(out, size, "Sunshine capture: kept device %llu: its queues had not finished within %llu ms, so its "
+          "queue_places=%u snapshots=%u sources=%u storage=%u are kept for good", u(device), u(waited), places, snapshots,
+          released_sources, released_storage);
+    }
+    return finished;
+  }
+  namespace {
     // Idle snapshot storage kept for reuse beyond this is released.
     constexpr std::uint64_t idle_pixel_byte_limit = 256ull * 1024 * 1024;
     // Requires mutex. A reclaimable slot keeps only its allocation: the game
@@ -2110,20 +2296,28 @@ namespace sunshine_streamline::depth_capture {
     com_ptr<ID3D12Resource> checked;
     if (!query_native(native, IID_ID3D12Resource, checked)) return result({}, status::unsupported_resource, record_stage::source_interface);
     auto *resource = checked.p;
-    std::lock_guard lock(mutex);
-    const auto existing = source_cookie(resource);
-    for (const auto &weak : sources) if (auto value = weak.lock()) if (value->cookie == existing && existing)
-      return result(value, status::ready, record_stage::retained);
-    auto entry = std::find_if(sources.begin(), sources.end(), [](const auto &value) { return value.expired(); });
-    if (entry == sources.end()) {
-      capacity_refused(source_table);
-      reason = status::exhausted; return result({}, status::exhausted, record_stage::capacity);
+    const auto retained = [](std::uint64_t cookie) -> source_ref {
+      if (cookie) for (const auto &weak : sources) if (auto value = weak.lock()) if (value->cookie == cookie) return value;
+      return {};
+    };
+    {
+      std::lock_guard lock(mutex);
+      if (auto value = retained(source_cookie(resource))) return result(value, status::ready, record_stage::retained);
     }
+    // A new source's device is read without the lock: under ReShade the
+    // GetDevice hook and the proxy's Release take ReShade's device lock, which
+    // it holds while it destroys a device (release_device takes this lock).
     auto value = std::make_shared<source_reference>();
     if (FAILED(resource->QueryInterface(__uuidof(ID3D12Resource), reinterpret_cast<void **>(value->resource.put()))))
       return result({}, status::unsupported_resource, record_stage::source_interface);
-    if (FAILED(resource->GetDevice(__uuidof(ID3D12Device), reinterpret_cast<void **>(value->device.put()))))
+    ID3D12Device *device{};
+    if (FAILED(resource->GetDevice(__uuidof(ID3D12Device), reinterpret_cast<void **>(&device))) || !device)
       return result({}, status::unsupported_queue, record_stage::source_device);
+    // Not owned (source_reference): the game keeps its device while it
+    // presents, and release_device drops this source before it is destroyed.
+    value->device = device;
+    value->device_identity = device_cookie(device, true);
+    device->Release();
     value->desc = resource->GetDesc();
     if (diagnostic) {
       diagnostic->width = static_cast<std::uint32_t>(value->desc.Width);
@@ -2132,12 +2326,19 @@ namespace sunshine_streamline::depth_capture {
       diagnostic->dimension = value->desc.Dimension; diagnostic->mip_levels = value->desc.MipLevels;
       diagnostic->array_size = value->desc.DepthOrArraySize; diagnostic->samples = value->desc.SampleDesc.Count;
     }
-    value->device_identity = device_cookie(value->device.p, true);
     if (!value->device_identity) { reason = status::unsupported_queue; return result({}, status::unsupported_queue, record_stage::device_identity); }
     // Retention proves object identity/lifetime, not capture capability. The
     // common opportunity recorder validates the actual copy description.
     value->cookie = retain_source_cookie(resource);
     if (!value->cookie) return result({}, status::unsupported_resource, record_stage::source_cookie);
+    std::lock_guard lock(mutex);
+    // Another call may have retained it meanwhile.
+    if (auto existing = retained(value->cookie)) return result(existing, status::ready, record_stage::retained);
+    auto entry = std::find_if(sources.begin(), sources.end(), [](const auto &value) { return value.expired(); });
+    if (entry == sources.end()) {
+      capacity_refused(source_table);
+      reason = status::exhausted; return result({}, status::exhausted, record_stage::capacity);
+    }
     // An adapter's source is watched for the enhanced-layout latch from now
     // on (proven_state.h); buffers and simultaneous-access textures keep no
     // layout between executions.
@@ -2383,7 +2584,10 @@ namespace sunshine_streamline::depth_capture {
           value.valid_until != sunshine_scene_depth::lifetime::at_call))
       return reject(status::malformed, record_stage::malformed_input);
     if (!native) return reject(status::malformed, record_stage::malformed_input);
-    if (!value.source) return reject(status::malformed, record_stage::missing_source);
+    // A source released with its device (release_device): its resource, which
+    // value.resource names, may be gone.
+    if (!value.source || value.source->released.load(std::memory_order_acquire))
+      return reject(status::malformed, record_stage::missing_source);
     if ((!preservation_only && (!valid_provider(value.provider) || !valid_projection(value.projection) ||
         !value.epoch || !value.sequence)) || !value.resource.native)
       return reject(status::malformed, record_stage::malformed_input);
@@ -2466,6 +2670,7 @@ namespace sunshine_streamline::depth_capture {
           present_before_next_copy.exchange(false, std::memory_order_acq_rel))
         ++value.source->present_generation;
 #endif
+      if (!value.source->resource.p) return reject(status::malformed, record_stage::missing_source);
       const auto current_generation = source_present_generation(value.source);
       if (diagnostic) diagnostic->current_generation = current_generation;
       if (!source_lifetime_current(value, current_generation))
@@ -2629,7 +2834,7 @@ namespace sunshine_streamline::depth_capture {
           // Bounded: a second allocation means the shape changed meanwhile.
           if (attempt >= 2) return reject(status::exhausted, record_stage::capacity);
           storage_plan plan;
-          plan.device = value.source->device.p;
+          plan.device = value.source->device;
           plan.device_identity = value.source->device_identity;
           auto &destination = plan.desc;
           destination = desc; destination.Format = texture_format; destination.Flags = D3D12_RESOURCE_FLAG_NONE;
@@ -2676,6 +2881,8 @@ namespace sunshine_streamline::depth_capture {
           const auto stage = allocate_storage(plan, prepared);
           lock.lock();
           if (stage != record_stage::recorded) return reject(status::failed, stage);
+          // Released with its device whoever holds it (release_device).
+          if (!register_storage(prepared)) return reject(status::failed, record_stage::texture_allocation);
           release_on_exit.keep = true;
           continue;
         }
@@ -2826,7 +3033,7 @@ namespace sunshine_streamline::depth_capture {
       out.ownership = texture;
       out.texture = reinterpret_cast<std::uint64_t>(texture->resource.p);
       out.shared_handle = reinterpret_cast<std::uint64_t>(texture->shared_handle);
-      out.device = reinterpret_cast<std::uint64_t>(texture->device.p);
+      out.device = reinterpret_cast<std::uint64_t>(texture->device);
       out.device_identity = texture->device_identity;
       out.resource_id = entry.metadata.source ? entry.metadata.source->cookie : 0;
       out.width = static_cast<std::uint32_t>(desc.Width); out.height = desc.Height; out.format = desc.Format;
@@ -3215,7 +3422,9 @@ namespace sunshine_streamline::depth_capture {
       if (diagnostic) diagnostic->result = why;
       return why == consumer_status::ready;
     };
-    if (!native || !value.ownership) return result(consumer_status::missing_input);
+    // A snapshot released with its device (release_device) has no resource.
+    if (!native || !value.ownership || value.ownership->released.load(std::memory_order_acquire))
+      return result(consumer_status::missing_input);
     const auto submitted_list = native;
     // ReShade's registered immediate list was checked for this exact interface
     // at registration and observed by this Present's observe_present: skip
@@ -3238,7 +3447,8 @@ namespace sunshine_streamline::depth_capture {
     const auto device_identity = device_cookie(device.p);
     if (diagnostic) diagnostic->device_identity = device_identity;
     if (!device_identity) return result(consumer_status::missing_device_identity);
-    const auto expected_device_identity = device_cookie(reinterpret_cast<ID3D12Device *>(value.device));
+    // The snapshot's own identity: its device may be gone (release_device).
+    const auto expected_device_identity = value.ownership->device_identity;
     if (diagnostic) diagnostic->expected_device_identity = expected_device_identity;
     if (device_identity != expected_device_identity) return result(consumer_status::device_mismatch);
     com_ptr<ID3D12Resource> target;
@@ -3439,7 +3649,7 @@ namespace sunshine_streamline::depth_capture {
         return reject(consumer_status::capture_not_ready);
       selected.capture_id = found->id;
       selected.ownership = ticket.ownership;
-      selected.device = reinterpret_cast<std::uint64_t>(found->texture->device.p);
+      selected.device = reinterpret_cast<std::uint64_t>(found->texture->device);
       selected.queue = reinterpret_cast<std::uint64_t>(owner->queue.p);
     }
     return consume_owned(command, selected, destination, destination_state, diagnostic, true, local, immediate, lease,

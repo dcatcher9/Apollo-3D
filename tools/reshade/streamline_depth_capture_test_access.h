@@ -162,17 +162,26 @@ namespace sunshine_streamline::depth_capture {
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wsubobject-linkage"
 #endif
+  // device in both: the device as the resource names it (ReShade's device
+  // proxy under ReShade), not owned: a reference to the proxy kept the
+  // game's device from ever being destroyed (the lifecycle test's former
+  // L1). When ReShade destroys the device, release_device releases the
+  // objects of every source and snapshot of it, under the capture lock,
+  // whoever still holds them (released, then resource and views are null),
+  // so that none outlives it.
   struct source_reference {
-    com_ptr<ID3D12Resource> resource;
-    com_ptr<ID3D12Device> device;
+    mutable com_ptr<ID3D12Resource> resource;
+    mutable ID3D12Device *device{};
     D3D12_RESOURCE_DESC desc{};
     std::uint64_t cookie{}, device_identity{};
     mutable std::atomic<std::uint64_t> present_generation{1};
+    mutable std::atomic<bool> released{};
   };
   struct texture_reference {
     com_ptr<ID3D12Resource> resource;
-    com_ptr<ID3D12Device> device;
+    ID3D12Device *device{};
     com_ptr<ID3D12DescriptorHeap> views;
+    std::atomic<bool> released{};
     std::uint64_t shader_resource{}, device_identity{}, identity{};
     HANDLE shared_handle{};
     std::uint64_t allocation_bytes{};

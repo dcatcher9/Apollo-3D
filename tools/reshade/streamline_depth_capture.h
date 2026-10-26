@@ -281,6 +281,18 @@ namespace sunshine_streamline::depth_capture {
   // repeated interface checks and observation.
   void observe_present(std::uint64_t command, std::uint64_t queue, std::uint64_t immediate);
   void retire_queue(std::uint64_t queue);
+  // ReShade destroys a device (device: its native object), the game having
+  // released its last reference (destroy_device). The capture owner keeps no
+  // reference to a device, only to its resources, which go now so that the
+  // device is destroyed and the next one starts clean. Its queue places signal their
+  // fences and the GPU work submitted to them is waited for, then its
+  // snapshots and queue places leave the owner, and the resources of its
+  // sources and snapshot storage are released wherever they are still held
+  // (an adapter's tag, a packet, a ticket: those are then empty, and every
+  // call refuses them). Its identity is cleared. Work that did not finish
+  // within a safety bound is never released: it is kept for good. out gets
+  // one log line; false when the device's objects were kept.
+  bool release_device(std::uint64_t device, char *out = nullptr, std::size_t size = 0);
   void poll();
   // Observing an API attempt discovers its command list, never claims ownership.
   // Only acquire of a successful, submitted current source establishes a
@@ -723,6 +735,9 @@ namespace sunshine_streamline::depth_capture {
   namespace testing { void set_allocation_hook(void (*hook)(void *), void *context); }
   // Makes idle colour/mask storage older by ms (poll() releases it after 2 s).
   namespace testing { void age_idle_storage(std::uint64_t ms); }
+  // release_device's bound on its wait for the device's queues (0: the
+  // shipping bound).
+  namespace testing { void set_release_wait(std::uint64_t ms); }
 #endif
 
 }
