@@ -4095,8 +4095,10 @@ from its declaration):
   copy is refused (`conflicting_state`); an agreeing enhanced layout is left and restored with
   enhanced barriers. A refusal changes nothing: the
   earlier capture holds within the source age, then mono. An accepted depth copy becomes the
-  viewport's FG source as a tag-call copy would (it keeps the FG scope live and keeps precedence
-  over DLSS-G's own evaluation of the next frame, `tag_copied`), and an accepted UI copy is offered
+  viewport's FG source as a tag-call copy would (it keeps the FG scope live, and while it is the
+  scope's newest tag copy, younger than the source age, DLSS-G's own evaluation of the next frame
+  stands aside for that frame's own deferred copy, still waiting for its Present, `tag_copied`; a
+  frame without an FG tag of its own is DLSS-G's), and an accepted UI copy is offered
   to UI detection with its tag call's other kinds as one batch (exact HUD-less pairs). While a UI
   tag's copy is pending, DLSS-G's evaluation of the same frame stands aside for its kind as well
   (`tag_copied`): otherwise DLSS-G's copy of the frame, still pending at that Present, and its
@@ -4221,8 +4223,16 @@ aside), and generated Presents
 hold the real frame's copy. A refusal while the scope is silent changes nothing (the ordinary SR/RR
 source stays); while it is live the attempt first replaces the FG observation, so a refusal withdraws
 the previous copy as a refused FG tag boundary does. Either way the refused frame has no FG copy, so
-the scope turns silent. A Streamline FG tag boundary that recorded a copy
-within the source age keeps precedence: the evaluation then adds no second copy (`tag_copied`). The
+the scope turns silent. A Streamline FG tag of the frame the evaluation is for keeps precedence: the
+evaluation then adds no second copy (`tag_copied`). That frame is the viewport's newest, begun by
+its Streamline constants; a tag call is its own when both name the same frame token, or (where
+either names none) when it came after those constants. Its copy counts when it was recorded, or
+waits for the frame's Present (a deferred copy, R2), while the scope's newest tag copy is younger
+than the source age (`frame_generation::depth_tag_precedence`): a refused tag hands the frame to
+the evaluation, and a later frame without an FG tag of its own is the evaluation's. Before 10-26
+(the session timelines' known gap C6) any tag copy within the source age kept every later frame's
+evaluation out, so DLSS-G's fresher depth was copied only once that copy's hold expired; on its
+compute list, readable three evaluations later, those Presents were mono. The
 depth carries the viewport's own camera evidence as an unframed FG tag does: its history revision,
 the recent camera's depth direction where `DLSSG.DepthInverted` is absent, and the camera's steady
 depth coefficients when both directions agree; `DLSSG.CameraNear`/`CameraFar` are not used, and no

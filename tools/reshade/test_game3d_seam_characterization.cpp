@@ -10,8 +10,9 @@
 // It drives the production functions through the capture owner's
 // test-access header, with no device: the frame generation policy, the FG
 // scope's liveness and the selection the provider derives from it, NGX's
-// copy rule under frame generation, the frames an FG scope owns,
-// select_provider and establish_provider,
+// copy rule under frame generation, the frames an FG scope owns, DLSS-G's
+// depth precedence for its frame's FG tag, select_provider and
+// establish_provider,
 // the exact freshness edges of selection, association and the FG scope, the
 // display policy decide_display, and the UI adapter's admission of each UI
 // candidate (P11).
@@ -389,6 +390,82 @@ namespace sunshine_streamline::depth_capture {
         }
       }
       std::printf("PASS P5 frames an FG scope owns: %zu steps\n", std::size(steps));
+    }
+
+    // P5: DLSS-G's own depth input stands aside only for the FG tag copy of
+    // the frame it evaluates (frame_generation::depth_tag_precedence), in one
+    // scope's order of calls. The frame is the viewport's newest, marked by
+    // the constants call that began it; a tag call is that frame's when both
+    // name the same frame, or (where either names none) when it came after
+    // those constants. Its copy counts recorded, or waiting for the frame's
+    // Present (pending), while the scope's newest tag copy is younger than
+    // the source age. Known gap C6 until 10-26: any tag copy within the
+    // source age kept every later frame's DLSSG.Depth out.
+    void dlssg_tag_precedence_steps() {
+      namespace fg = sunshine_streamline::frame_generation;
+      enum class call {
+        copy,  // An FG tag call of the scope records its copy (mark).
+        refuse,  // An FG tag call of the scope leaves its frame without a copy.
+        evaluate  // DLSS-G evaluates the frame mark, with pending's tag call waiting.
+      };
+
+      struct step {
+        const char *pins;
+        call what;
+        fg::frame_mark mark;  // The tag call, or the evaluated frame.
+        fg::frame_mark pending;  // key and sequence 0: none.
+        std::uint64_t at;  // Milliseconds after the first step.
+        bool stands_aside;  // The evaluation adds no copy (tag_copied).
+      };
+
+      constexpr auto age = sunshine_freshness::source_age_ms;
+      const step steps[] {
+        {"A frame's FG tag records its copy", call::copy, {101, 11}, {}, 0, false},
+        {"DLSS-G's evaluation of that frame adds no second copy", call::evaluate, {101, 10}, {}, 5, true},
+        {"The next frame, without an FG tag of its own, is DLSS-G's (C6)", call::evaluate, {102, 20}, {}, 16, false},
+        {"So is every later one while that copy is younger than the source age (C6)", call::evaluate, {103, 30}, {}, 32, false},
+        {"A frame tagged before its constants by its own frame token", call::copy, {104, 40}, {}, 48, false},
+        {"keeps its precedence once those constants began it", call::evaluate, {104, 41}, {}, 50, true},
+        {"A tag naming no frame, recorded after the frame began", call::copy, {0, 52}, {}, 64, false},
+        {"keeps its precedence by call order", call::evaluate, {105, 51}, {}, 66, true},
+        {"but not over the next frame", call::evaluate, {106, 60}, {}, 80, false},
+        {"A frame of unknown key began after the tagged one", call::evaluate, {0, 70}, {}, 96, false},
+        {"Without constants nothing marks the frame: any copy within the source age stands", call::evaluate, {}, {}, 98, true},
+        {"A later frame's tag, made before that frame's constants", call::copy, {108, 81}, {}, 112, false},
+        {"keeps no precedence over the frame DLSS-G evaluates", call::evaluate, {107, 80}, {}, 114, false},
+        {"A frame whose tag copy waits for its Present stands aside while the tags copy", call::evaluate, {109, 90}, {109, 91}, 128, true},
+        {"An earlier frame's waiting copy keeps nothing", call::evaluate, {110, 100}, {109, 91}, 144, false},
+        {"A refused tag copy hands even its own frame to DLSS-G", call::refuse, {111, 111}, {}, 160, false},
+        {"its waiting copy included", call::evaluate, {111, 110}, {111, 111}, 162, false},
+        {"A recorded copy takes its frame back", call::copy, {112, 121}, {}, 176, false},
+        {"for its own evaluation", call::evaluate, {112, 120}, {}, 178, true},
+        {"but not once older than the source age", call::evaluate, {112, 120}, {}, 176 + age, false},
+      };
+      constexpr std::uint64_t epoch = 7;
+      constexpr std::uint32_t viewport = 0;
+      const auto start = GetTickCount64();
+      fg::depth_tag_precedence value;
+      for (const auto &s : steps) {
+        const auto now = start + s.at;
+        bool aside = false;
+        if (s.what == call::evaluate) {
+          const bool pending = s.pending.key || s.pending.sequence;
+          aside = value.tags_supply(epoch, viewport, s.mark, pending ? &s.pending : nullptr, now);
+        } else {
+          value.remember(epoch, viewport, s.what == call::copy, s.mark, now);
+        }
+        if (aside != s.stands_aside) {
+          char text[512];
+          std::snprintf(text, sizeof(text), "P5 DLSS-G tag precedence, %s: stands aside %d", s.pins, aside);
+          fail(text);
+        }
+      }
+      // The precedence belongs to its scope.
+      value.remember(epoch, viewport, true, {201, 200}, start);
+      if (value.tags_supply(epoch + 1, viewport, {201, 199}, nullptr, start) || value.tags_supply(epoch, viewport + 1, {201, 199}, nullptr, start) || !value.tags_supply(epoch, viewport, {201, 199}, nullptr, start)) {
+        fail("P5 DLSS-G tag precedence: a tag copy decided another scope's frame, or not its own");
+      }
+      std::printf("PASS P5 DLSS-G's depth precedence for its frame's FG tag: %zu steps\n", std::size(steps) + 1);
     }
 
     // P6: select_provider at one Present. Each row builds the queue's owner
@@ -1363,6 +1440,7 @@ int main() {
   frame_generation_scope_rows();
   ngx_frame_generation_rows();
   frame_generation_frame_steps();
+  dlssg_tag_precedence_steps();
   select_provider_rows();
   ownership_timelines();
   freshness_edges();

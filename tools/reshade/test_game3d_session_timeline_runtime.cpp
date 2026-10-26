@@ -278,6 +278,7 @@ namespace {
     std::vector<generator::row> frames;
     const char *witness {};  // The known gap row a witness timeline meets.
     const char *regression {};  // The fix a regression timeline keeps.
+    bool lossless {};  // regression::lossless.
   };
 
   // Each Assassin's Creed Shadows fix has a regression timeline: an event
@@ -288,6 +289,10 @@ namespace {
   // each hold the session tests' review found unjudged by a mutation.
   struct regression {
     const char *fix, *events;
+    // A loss a known gap records fails it too: with its fix reverted, the
+    // Presents it loses meet a row's limitation (C6's: C1, its DLSS-G compute
+    // copy readable three evaluations later), and with the fix it loses none.
+    bool lossless {};
   };
 
   constexpr regression regressions[] {
@@ -317,6 +322,13 @@ namespace {
     // left to a DLSS-G evaluation that never came.
     {"C4-no-fg-call", "20*sr=local; fg=on,dlssg=direct; 40*sr=local"},
     {"C4-cancelled-fg-tags", "20*sr=local; fg=on,sr=local,dlssg=direct; 40*tag=present_bare,entry=global,untag=after_global,sr=local"},
+    // DLSS-G's evaluation stands aside only for its own frame's FG tag copy
+    // (known gap C6 until then: for the source age after any FG tag copy, so
+    // its compute copy came only once that copy's hold expired, readable
+    // three evaluations later): one FG tag copy, then frames whose DLSS-G
+    // evaluation copies on its compute list. Lossless: with the source-age
+    // rule its three lost Presents meet C1's limitation.
+    {"C6-dlssg-after-tag-copy", "20*sr=local; fg=on,tag=present_list; 30*dlssg=compute", true},
   };
 
   // Each known gap the timelines found has a witness: an event list whose
@@ -331,9 +343,6 @@ namespace {
   constexpr witness witnesses[] {
     // SR depth shown, then OnlyValidNow tags that their evaluations refuse.
     {"C5-S1-evaluate", "20*sr=local; 60*tag=now_list,sr=tag"},
-    // One FG tag copy, then frames whose DLSS-G evaluation copies on its
-    // compute list, readable three evaluations later.
-    {"C6-dlssg-defers-to-tag-copy", "20*sr=local; fg=on,tag=present_list; 30*dlssg=compute"},
     // A command-less FG tag's copy, DLSS-G evaluations (refused) without a
     // tag, then command-less FG tags without DLSS-G.
     {"C7-deferred-copy-awaits-dlssg", "20*sr=local; fg=on,tag=present_bare; 3*dlssg=compute_unobserved; 40*tag=present_bare"},
@@ -504,9 +513,9 @@ namespace {
     // The newest capture a Present showed.
     std::uint64_t last_capture {};
     // When a frame last supplied an API source (legal or permitted), when
-    // one last recorded a copy on another queue, when one last supplied a
-    // copy its FG scope accepts, and when one last supplied an FG tag's.
-    std::uint64_t api_supplied {}, other_queue_copy {}, fg_copy {}, fg_tag_copy {};
+    // one last recorded a copy on another queue, and when one last supplied a
+    // copy its FG scope accepts.
+    std::uint64_t api_supplied {}, other_queue_copy {}, fg_copy {};
     // When DLSS-G last evaluated a frame (copied, deferred to a tag or
     // refused), and whether the frame's tag copy is deferred to its Present.
     std::uint64_t dlssg_evaluated {};
@@ -1127,12 +1136,13 @@ namespace {
       }
       dlssg_evaluation(of<dlssg_form>(value, events::dlssg));
       move(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-      // A frame whose DLSS-G evaluation defers to an earlier frame's FG tag
-      // copy (known gap C6), or whose deferred FG tag copy waits for DLSS-G
-      // (known gap C7), meets that limitation. And one whose only FG input is
-      // DLSS-G's compute copy supplies its live FG scope, which keeps the
-      // viewport's SR input out while that copy is readable only frames
-      // later (known gap C1).
+      // A frame whose deferred FG tag copy waits for DLSS-G (known gap C7)
+      // meets that limitation. And one whose only FG input is DLSS-G's
+      // compute copy supplies its live FG scope, which keeps the viewport's
+      // SR input out while that copy is readable only frames later (known gap
+      // C1). DLSS-G's evaluation of a frame without an FG tag of its own
+      // copies (known gap C6 until 10-26, when it deferred to an earlier
+      // frame's tag copy for the source age).
       const auto dlssg_choice = of<dlssg_form>(value, events::dlssg);
       const auto now = GetTickCount64();
       const auto limit_all = [&](continuity::limitation meets) {
@@ -1140,12 +1150,7 @@ namespace {
         supply.legal = 0;
         supply.limit = meets;
       };
-      if (fg_on && form == tag_form::none && dlssg_choice != dlssg_form::none && fg_tag_copy && now - fg_tag_copy < sunshine_freshness::source_age_ms + continuity::tag_slack_ms) {
-        // DLSS-G's evaluation defers to an earlier frame's FG tag copy for
-        // the source age (known gap C6): neither copied nor missed, so the
-        // frame's legal sources may show nothing once that copy ages out.
-        limit_all(continuity::limitation::dlssg_defers_to_tag_copy);
-      } else if (fg_on && deferred_tag && dlssg_choice == dlssg_form::none && dlssg_evaluated && now - dlssg_evaluated < sunshine_freshness::source_age_ms + continuity::tag_slack_ms) {
+      if (fg_on && deferred_tag && dlssg_choice == dlssg_form::none && dlssg_evaluated && now - dlssg_evaluated < sunshine_freshness::source_age_ms + continuity::tag_slack_ms) {
         // Its deferred copy waits for a DLSS-G evaluation that does not come
         // (known gap C7).
         limit_all(continuity::limitation::deferred_copy_awaits_dlssg);
@@ -1165,9 +1170,6 @@ namespace {
       if (fg_on && frame_generation_scope() && ((supply.legal | supply.permitted | supply.limited) & (continuity::tag_copy | continuity::dlssg_input))) {
         fg_copy = now;
         fg_supplied = true;
-      }
-      if (fg_on && frame_generation_scope() && ((supply.legal | supply.permitted | supply.limited) & continuity::tag_copy)) {
-        fg_tag_copy = now;
       }
       if (fg_on && dlssg_choice != dlssg_form::none) {
         dlssg_evaluated = now;
@@ -1346,7 +1348,7 @@ namespace {
       frames = &value.frames;
       view = {{nullptr, sunshine_streamline::viewport_guid, 1}, viewport};
       last_capture = 0;
-      api_supplied = other_queue_copy = fg_copy = fg_tag_copy = dlssg_evaluated = readable_supply = 0;
+      api_supplied = other_queue_copy = fg_copy = dlssg_evaluated = readable_supply = 0;
       fg_supplied = false;
       present_frames.clear();
       where = label;
@@ -1601,6 +1603,7 @@ int main(int argc, char **argv) {
     for (const auto &value : regressions) {
       timeline_case kept;
       kept.regression = value.fix;
+      kept.lossless = value.lossless;
       if (!parse_events(value.events, kept.frames, error)) {
         std::fprintf(stderr, "FAIL session timelines: the regression of %s: %s\n", value.fix, error.c_str());
         return 2;
@@ -1696,6 +1699,15 @@ int main(int argc, char **argv) {
           result.failures.push_back({"witness:closed", 0, std::string("the witness of ") + value.witness + " lost no depth where its frames meet the limitation (" + std::to_string(result.rows[row].exercised) + " frames): the gap closed, so remove its row and witness", "witness:closed"});
         }
       }
+      if (value.lossless) {
+        unsigned recorded {};
+        for (const auto &row : result.rows) {
+          recorded += row.violations;
+        }
+        if (recorded) {
+          result.failures.push_back({"regression:recorded_loss", 0, std::string("the regression of ") + value.regression + " lost depth where a known gap records it (" + std::to_string(recorded) + " losses): its fix keeps every Present", "regression:recorded_loss"});
+        }
+      }
       for (std::size_t r = 0; r != rows.size(); ++r) {
         rows[r].exercised += result.rows[r].exercised;
         rows[r].violations += result.rows[r].violations;
@@ -1725,7 +1737,7 @@ int main(int argc, char **argv) {
       for (auto f = first.frame > 8 ? first.frame - 8 : 0u; f <= first.frame && f < value.frames.size(); ++f) {
         std::printf("CONTEXT %s frame %u: %s\n", name_of(value).c_str(), f, generator::describe(frame_events::family(), value.frames[f]).c_str());
       }
-      if (!first_failing && first.kind != "witness:closed") {
+      if (!first_failing && first.kind != "witness:closed" && first.kind != "regression:recorded_loss") {
         first_failing = &value;
         first_failure = first;
       }

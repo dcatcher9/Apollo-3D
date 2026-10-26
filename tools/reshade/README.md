@@ -1744,11 +1744,11 @@ their own key: each names a limitation that the fixture tags on the frames that 
 violation of a tagged frame is its row's only once no copy the presenting queue could read (a
 frame's legal source that meets no limitation, and that no live FG scope kept out of a frame it
 supplies) is younger than the source age, as no limitation
-explains an earlier loss: a hold dropped within that age is a violation. The rows whose limitation
-is itself such a drop, C6 and C8, record it (`drops_hold`). Any other violation fails the run, and
+explains an earlier loss: a hold dropped within that age is a violation. The row whose limitation
+is itself such a drop, C8, records it (`drops_hold`). Any other violation fails the run, and
 so does a row whose limitation was supplied in a run without a violation (the gap closed, and the
 fix removes the row). Each provider run with an interposer exercises the first two; the session timelines below
-found the other four, which their witness timelines exercise:
+found the other three, which their witness timelines exercise:
 
 - C1, SR depth on another queue (until Step 4's fence observation): `sr-other-queue` warms up with
   the viewport's SR evaluation on the presenting queue (FG off), then records it on the game's own
@@ -1760,7 +1760,7 @@ found the other four, which their witness timelines exercise:
   DLSS-G's own copies on its compute list (N7) are read the same way, once DLSS-G reset that
   recording, and the session timelines tag their frames with this row too, the viewport's SR input
   among them: such a copy supplies its frame to a live FG scope, which keeps that SR input out while
-  the copy is in flight. As every row but C6 and C8, it
+  the copy is in flight. As every row but C8, it
   records a loss only once no copy the presenting queue could read is younger than the source
   age: a held FG copy dropped for an SR snapshot still in flight on the other queue (fixed by
   88b45edf) is a violation.
@@ -1774,18 +1774,6 @@ found the other four, which their witness timelines exercise:
 - C5, the matrix's `S1-evaluate` row over frames: an `OnlyValidNow` tag outside FG scope that its
   frame's evaluation refuses (S3) loses its tag-call copy (S1), so a run of such frames is mono
   (witness `20*sr=local; 60*tag=now_list,sr=tag`).
-- C6, DLSS-G deferring to an earlier frame's FG tag copy, found by the session timelines (owner
-  decision): DLSS-G's evaluation adds no copy while an FG tag copy of its scope is younger than the
-  source age (`tag_copy_recent`), a precedence meant for the same frame's tag. Such an evaluation is
-  neither a copy nor a miss, so DLSS-G's fresher depth is not copied for the source age, and DLSS-G
-  copies again only once the tag copy's hold expired. A copy on its compute list is readable only
-  three of its evaluations later (C1), so those Presents are mono (witness
-  `20*sr=local; fg=on,tag=present_list; 30*dlssg=compute`), and it supersedes the viewport's SR
-  copies nominated meanwhile, which the tag copy's hold kept off the display, before it is readable
-  (`drops_hold`). Until C4 closed, the frame whose SR
-  evaluation came before its DLSS-G evaluation was mono too (the witness until then,
-  `20*sr=local; fg=on,tag=present_list; 30*sr=local,dlssg=compute_unobserved`); such a frame has no
-  FG copy, so the scope now turns silent as the next frame begins and SR depth supplies.
 - C7, an FG tag copy deferred to its frame's Present that waits for DLSS-G, found by the session
   timelines (owner decision): under FG such a copy (R2) is made at the first Present after DLSS-G
   evaluated a frame following the tag, as long as DLSS-G evaluated anything within the source age,
@@ -1803,18 +1791,17 @@ found the other four, which their witness timelines exercise:
 #### Found defects
 
 Only C1 and C2 are limitations the owner approved (until Step 4), and C5 carries the matrix's
-recorded `S1-evaluate` expected failure over frames. The other three rows are defects these tests
+recorded `S1-evaluate` expected failure over frames. The other two rows are defects these tests
 found, each row's `found` naming when and which test; they are excused only until the owner decides
 each, so that the gate stays usable meanwhile. Each run prints them apart
 (`MEASURE native-provider continuity-found-defects` and `MEASURE session-timelines found-defects`,
 each row's violations), and a strict run fails their violations as any other:
 `SUNSHINE_GAME3D_CONTINUITY_STRICT=1`, or the contract runner's `-StrictContinuity`, which also
-records `strict_continuity` in `summary.json`. A strict run fails today at 8 of the fixed set's 35
+records `strict_continuity` in `summary.json`. A strict run fails today at 6 of the fixed set's 35
 timelines, each found row's witness among them. The decisions, each removing its row and witness:
 
 | Row | Found | Decision |
 | --- | --- | --- |
-| C6 | 10-25, T2 | Key DLSS-G's precedence to the evaluated frame (its token or call sequence) instead of the source age of the scope's last tag copy. |
 | C7 | 10-25, T2 | Wait for DLSS-G before a deferred FG tag copy only while it evaluates every frame, or no longer than the held copy can stand in. |
 | C8 | 10-25, T4 | Hold the FG copy across FG Off within the source age, or rely on Step 4's fence observation (C1). Holding also changes the provider fixture's `fg-off` script, which requires FG Off to drop the copy at a color-only Present. |
 
@@ -1843,11 +1830,35 @@ Step 4's fence observation makes readable at its Present, and the timelines tag 
 timelines also model the precedence itself: the SR input of a frame after one that supplied an FG
 copy is the scope's (`continuity::supply::owned`), so that frame's Present is judged as any but its
 SR input leaves no readable copy for later Presents. And C8's frames include FG Off after an FG copy
-that met a limitation (DLSS-G's compute copy, or one inside C6's window) with no readable source
+that met a limitation (DLSS-G's compute copy, or until C6 closed one inside its window) with no readable source
 since, which the display may hold as well. The witness became the regression timelines
 `C4-no-fg-call` and `C4-cancelled-fg-tags`, the seam characterization pins the rule, and C6's
-witness, whose SR evaluation now supplies, is a frame shape with DLSS-G's compute copy and no SR;
-C6 now also records the SR copies that compute copy supersedes (`drops_hold`).
+witness, whose SR evaluation now supplied, became a frame shape with DLSS-G's compute copy and no SR;
+C6 then also recorded the SR copies that compute copy supersedes (`drops_hold`), until it closed.
+
+C6, DLSS-G deferring to an earlier frame's FG tag copy (10-25, T2), is closed (10-26): DLSS-G's
+evaluation added no depth copy while any FG tag copy of its scope was younger than the source age
+(`tag_copy_recent`), a precedence meant for the same frame's tag, so a frame without an FG tag of
+its own had DLSS-G's fresher depth copied only once that copy's hold expired, and on DLSS-G's compute
+list (readable three evaluations later) those Presents were mono. The precedence now belongs to
+the frame DLSS-G evaluates, the viewport's newest, begun by its Streamline constants: a tag call is
+that frame's when both name the same frame (its token), or, where either names none, when it came
+after those constants (its call sequence). DLSS-G stands aside when that frame's tag copy was
+recorded, or waits for the frame's Present (R2), while the scope's newest tag copy is younger than
+the source age (`frame_generation::depth_tag_precedence`); without the viewport's constants the
+source-age rule applies as before. The witness became the regression timeline
+`C6-dlssg-after-tag-copy`, which is lossless: with the source-age rule restored its three lost
+Presents meet C1's limitation (DLSS-G's compute copy), so any loss a known gap records fails it
+too. The seam characterization pins the rule. C6's tagging (a frame without an FG tag, with
+DLSS-G's evaluation, within the source age of an FG tag copy) also covered losses of DLSS-G's
+compute copy that keying the precedence does not change, which the add-on loses the same way on
+the build before this fix and which no row records now, so their soak seeds fail as the other
+unrowed ones do until the owner decides them: a silent FG scope's first compute copy, made as the
+FG copy that the display holds over the viewport's SR copies (`frame_generation_holds`) expires,
+supersedes those SR copies before it is readable (soak seed `8227e2e85dc62560`, frame 123; no
+fixed-set seed loses depth that way), and FG turned on with DLSS-G's compute copy its only FG input
+drops a held copy younger than the source age (seed `f44999a9be60c936`, frame 70, which fails at
+frame 115 anyway). `b76037565ceead51`, failing before, loses the same way at frame 40.
 
 `reshade_native_provider_continuity` runs the provider fixture at 1280x720 with the 2.7.30
 interposer, every frame script under the invariant, in about 115 s. Like
@@ -1900,8 +1911,8 @@ judged on four counts:
   (`SunshineDepthTestLastRefusal`, polled after every call and Present): a contract class recorded
   for a decision whose required refusal names another, or for a decision the oracle requires to
   capture, fails it. In a session the FG scope may decide a call first (it owns its viewport's SR
-  inputs, its tags' deferred copies wait for DLSS-G, and DLSS-G's evaluation defers to its tag
-  copies), so a required refusal its gate never reached under the oracle's FG scope, or for which it
+  inputs, its tags' deferred copies wait for DLSS-G, and DLSS-G's evaluation defers to its frame's
+  tag copy), so a required refusal its gate never reached under the oracle's FG scope, or for which it
   recorded a class outside the contract's (`fg_scope`, `hold`), is counted (`preempted=`). Outside
   the FG scope no rule preempts a gate, so a required refusal recorded nowhere fails
   (`oracle:refusal_unrecorded`);
@@ -1928,15 +1939,16 @@ minimal list once more (`reproduced=`). Shrinking re-runs each candidate in the 
 the timelines before it, so `--shrink-runs` (default 40) and, in the fixed set, one minute
 (`shrink_ms`, within its 225 s bound) limit it; a failure that depends on timing may shrink less, and
 a fresh process's `--events` replay may still differ. The fixed set also runs one regression timeline per
-Assassin's Creed Shadows fix (and one for the generated Presents' hold, `repeated-frame-hold`, and
-two for C4's fix, `C4-no-fg-call` and `C4-cancelled-fg-tags`), an event list shaped like the session it fixed and judged as any
+Assassin's Creed Shadows fix (and one for the generated Presents' hold, `repeated-frame-hold`,
+two for C4's fix, `C4-no-fg-call` and `C4-cancelled-fg-tags`, and one for C6's,
+`C6-dlssg-after-tag-copy`), an event list shaped like the session it fixed and judged as any
 timeline (random seeds meet these shapes only by chance, and a change of the event language changes
-every seed), and one witness per row the timelines found (C5-C8): an event list whose frames meet the
+every seed), and one witness per open row the timelines found (C5, C7 and C8): an event list whose frames meet the
 limitation alone, long enough to lose depth on every run; a witness that loses none fails the set,
 as the matrix's gap seeds keep a recorded gap's own failing cell. `--trace` prints every Present's
 frame record, the supply it was judged with and each recorded refusal.
 
-`reshade_session_timelines` runs the fixed set (24 seeds, seven regression timelines and four
+`reshade_session_timelines` runs the fixed set (24 seeds, eight regression timelines and three
 witnesses, about 3870 frames and 8900 Presents) in about 140 s, registered like
 `reshade_native_provider_continuity` with the same 240 s timeout. Locally:
 

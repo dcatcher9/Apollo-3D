@@ -94,6 +94,10 @@ namespace sunshine_streamline {
       frame_identity camera_frame;
       std::uintptr_t camera_token{};
       std::uint64_t camera_tick{}, camera_serial{}, changed{}, evaluation_tick{};
+      // The viewport's newest frame: its key (store_camera's frame_key; 0
+      // unknown, and a repeated key is the same frame) and the observation
+      // sequence of the constants call that began it.
+      std::uint64_t frame_key{}, frame_serial{};
       // Observed camera resets of this viewport; each starts a new temporal history.
       std::uint64_t history{};
       // The newest valid camera's depth coefficients and how many consecutive
@@ -230,14 +234,27 @@ namespace sunshine_streamline {
         sunshine_freshness::ahead_tolerant_le(supply.tick, now, sunshine_freshness::fg_silent_ms);
     }
     // The newest FG tag boundary's outcome per scope: when it recorded a copy
-    // (tick), or zero when it was refused. A Streamline FG tag that copies
-    // keeps precedence over DLSS-G's evaluation of the same frame, which then
-    // adds no second copy (observe_frame_generation_inputs).
-    struct { std::uint64_t epoch{}, tick{}; std::uint32_t viewport{}; } tag_copy;
-    void remember_tag_copy(std::uint64_t scope_epoch, std::uint32_t viewport, bool recorded) {
+    // and for which tag call, or none when it was refused. A Streamline FG tag
+    // that copies keeps precedence over DLSS-G's evaluation of the same frame,
+    // which then adds no second copy (observe_frame_generation_inputs,
+    // frame_generation::depth_tag_precedence).
+    frame_generation::depth_tag_precedence tag_copy;
+    // A frame identity as that precedence compares frames
+    // (frame_generation::frame_mark): same_frame's own key, unique within the
+    // observation (a minted token's or a constants call's generation is its
+    // call's sequence), or 0 when unavailable.
+    std::uint64_t frame_mark_key(const frame_identity &frame) {
+      if (frame.kind == frame_identity_kind::unavailable) return 0;
+      return frame.kind == frame_identity_kind::v1_numeric ? frame.numeric + 1 : frame.generation;
+    }
+    // sequence: the tag call's; frame: the frame it named or was associated
+    // with (tag_frame).
+    void remember_tag_copy(std::uint64_t scope_epoch, std::uint32_t viewport, bool recorded, std::uint64_t sequence = 0,
+        const frame_identity &frame = {}) {
+      const frame_generation::frame_mark tag{frame_mark_key(frame), sequence};
+      const auto now = GetTickCount64();
       AcquireSRWLockExclusive(&evaluation_supply_lock);
-      if (recorded) tag_copy = {scope_epoch, GetTickCount64(), viewport};
-      else if (tag_copy.epoch == scope_epoch && tag_copy.viewport == viewport) tag_copy.tick = 0;
+      tag_copy.remember(scope_epoch, viewport, recorded, tag, now);
       ReleaseSRWLockExclusive(&evaluation_supply_lock);
     }
     // A frame whose FG tag left it without a copy (refused, or its copy
@@ -255,17 +272,10 @@ namespace sunshine_streamline {
           sunshine_freshness::ahead_tolerant_le(supply.tick, GetTickCount64(), sunshine_freshness::fg_silent_ms)) return;
       depth_capture::frame_generation_missed(scope_epoch, viewport, sequence);
     }
-    bool tag_copy_recent(std::uint64_t scope_epoch, std::uint32_t viewport) {
-      AcquireSRWLockShared(&evaluation_supply_lock);
-      const auto copy = tag_copy;
-      ReleaseSRWLockShared(&evaluation_supply_lock);
-      const auto now = GetTickCount64();
-      return copy.tick && copy.epoch == scope_epoch && copy.viewport == viewport &&
-        sunshine_freshness::ahead_tolerant_lt(copy.tick, now, sunshine_freshness::source_age_ms);
-    }
-    // The same precedence per UI kind (ui_mask::capture_slot,
-    // ui_mask::tag_precedence): the newest Streamline UI tag copy of that kind
-    // for the scope, and the newest refusal of one deferred to its frame's
+    // A like precedence per UI kind (ui_mask::capture_slot,
+    // ui_mask::tag_precedence), not keyed to the frame: the newest Streamline
+    // UI tag copy of that kind for the scope within the source age, and the
+    // newest refusal of one deferred to its frame's
     // Present. DLSS-G's input of a kind the game's own tags copy adds no second
     // copy (observe_frame_generation_inputs), so one origin feeds UI detection,
     // its exact pairs included; a kind the tags leave out or cannot copy is
@@ -343,6 +353,26 @@ namespace sunshine_streamline {
         for (const auto &entry : deferred_frames)
           pending = pending || (entry.used && entry.epoch == scope_epoch && entry.viewport == viewport && entry.ui[slot].used);
       const bool supply = ui_tag_copy.tags_supply(scope_epoch, viewport, slot, pending, now);
+      ReleaseSRWLockShared(&evaluation_supply_lock);
+      return supply;
+    }
+    // Whether DLSSG.Depth of the frame DLSS-G evaluates stands aside for that
+    // frame's own FG tag copy (tag_copy): recorded for it, or deferred to its
+    // Present and waiting there (the viewport's deferral's newest tag call).
+    // evaluated: the frame (evaluated_frame).
+    bool tags_supply_frame(std::uint64_t scope_epoch, std::uint32_t viewport, const frame_generation::frame_mark &evaluated) {
+      const bool deferrals = deferral_pending.load(std::memory_order_acquire) != 0;
+      const auto now = GetTickCount64();
+      AcquireSRWLockShared(&evaluation_supply_lock);
+      frame_generation::frame_mark pending;
+      bool waiting = false;
+      if (deferrals)
+        for (const auto &entry : deferred_frames)
+          if (entry.used && entry.depth.count && entry.epoch == scope_epoch && entry.viewport == viewport) {
+            pending = {frame_mark_key(entry.frame), entry.serial};
+            waiting = true;
+          }
+      const bool supply = tag_copy.tags_supply(scope_epoch, viewport, evaluated, waiting ? &pending : nullptr, now);
       ReleaseSRWLockShared(&evaluation_supply_lock);
       return supply;
     }
@@ -802,6 +832,18 @@ namespace sunshine_streamline {
           token_current(state, record.camera_frame)) return record.camera_frame;
       return {};
     }
+    // The frame DLSS-G evaluates for an FG viewport: the viewport's newest,
+    // begun by its constants (store_camera), whose own FG tag copy alone keeps
+    // DLSSG.Depth out (tags_supply_frame). Without its constants, or with
+    // busy metadata, nothing marks it, and any tag copy younger than the
+    // source age keeps DLSSG.Depth out, as every one did before 10-26.
+    frame_generation::frame_mark evaluated_frame(std::uint32_t viewport) {
+      auto pin = read_metadata();
+      if (pin) for (const auto &record : pin->records)
+        if (record.used && record.viewport == viewport && record.has_camera)
+          return {frame_mark_key(record.camera_frame), record.frame_serial};
+      return {};
+    }
     bool presentation_token_current(const frame_identity &frame) {
       // Presentation markers carry minted/numeric identities, never the
       // synchronous tag-boundary constants-call association.
@@ -1203,13 +1245,17 @@ namespace sunshine_streamline {
       record.has_camera = true;
       record.changed = ++state.revision;
       // The viewport's frame begins with its constants: its enabled FG scope
-      // expects the frame to record an FG copy (depth_capture::frame_generation_frame).
+      // expects the frame to record an FG copy (depth_capture::frame_generation_frame),
+      // and DLSS-G's evaluation of it stands aside only for that frame's own
+      // FG tag copy (evaluated_frame).
       const auto &fg = record.frame_generation;
       const bool fg_frame = fg_available.load(std::memory_order_acquire) &&
         current_fg_target.load(std::memory_order_acquire) && fg.known && fg.enabled && fg.epoch == state.epoch &&
         fg.loss_revision == fg_loss_revision.load(std::memory_order_acquire);
       const auto fg_epoch = fg.epoch, fg_enabled_tick = fg.enabled_tick;
       const std::uint64_t frame_key = camera_identity.has_numeric ? camera_identity.numeric + 1 : token;
+      if (!frame_key || frame_key != record.frame_key) record.frame_serial = serial;
+      record.frame_key = frame_key;
       if (token_current(state, camera_identity)) if (auto *saved = frame_slot(state, viewport, camera_identity, serial, true)) {
         if (serial >= saved->camera_serial) {
           saved->camera = camera;
@@ -2196,7 +2242,8 @@ namespace sunshine_streamline {
       if (count) if (const auto ticket = depth_capture::nominate_evaluation(snapshot.command_buffer,
           candidates.data(), count, superseded, &diagnostic)) {
         if (copy_recorded) *copy_recorded = diagnostic.result == depth_capture::status::recorded;
-        if (fg_boundary) remember_tag_copy(snapshot.epoch, snapshot.viewport, diagnostic.result == depth_capture::status::recorded);
+        if (fg_boundary) remember_tag_copy(snapshot.epoch, snapshot.viewport, diagnostic.result == depth_capture::status::recorded,
+          snapshot.sequence, snapshot.frame);
         if (fg_boundary && diagnostic.result == depth_capture::status::recorded)
           count_tag_call_copy(candidates.data(), count, diagnostic);
         else if (fg_boundary) miss_frame_generation(snapshot.epoch, snapshot.viewport, snapshot.sequence);
@@ -3336,7 +3383,7 @@ namespace sunshine_streamline {
             copied = true;
           } else if (captured) depth_capture::finish(captured, false);
         }
-        remember_tag_copy(entry.epoch, entry.viewport, copied);
+        remember_tag_copy(entry.epoch, entry.viewport, copied, entry.serial, entry.frame);
         if (!copied) miss_frame_generation(entry.epoch, entry.viewport, entry.serial);
         if (copied) {
           recorded = true;
@@ -3742,7 +3789,10 @@ namespace sunshine_streamline {
     if (out.depth == depth_outcome::not_offered) {
       if (!value.depth.area_valid) out.depth = depth_outcome::subrect;
       else if (!source_requested.load(std::memory_order_acquire) || !depth_capture::active()) out.depth = depth_outcome::inactive;
-      else if (tag_copy_recent(fg.epoch, fg.viewport)) out.depth = depth_outcome::tag_copied;
+      // The frame's own FG tag copied it first, or its copy waits for the
+      // frame's Present: no second copy (a later frame without an FG tag of
+      // its own is DLSS-G's).
+      else if (tags_supply_frame(fg.epoch, fg.viewport, evaluated_frame(fg.viewport))) out.depth = depth_outcome::tag_copied;
       // The viewport's own camera evidence, exactly as for an unframed FG tag
       // (normalize_depth_frame): its history revision, its recent camera's
       // depth direction and its steady depth coefficients. No frame
