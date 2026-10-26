@@ -9,8 +9,11 @@
 // - pairwise(): a covering array in which every legal pair of values of two
 //   dimensions appears in at least one row, built by IPOG (Lei et al., "IPOG:
 //   A General Strategy for T-Way Software Testing", ECBS 2007) on top of seed
-//   rows, honouring the predicate.
-// Everything is deterministic: the same family always yields the same rows.
+//   rows, honouring the predicate;
+// - sample(): one row drawn from a seeded stream, honouring the predicate,
+//   for randomized sequences of rows (the session timelines).
+// Everything is deterministic: the same family (and seed) always yields the
+// same rows.
 //
 // The predicate sees partial rows, where an unassigned dimension holds -1. It
 // refuses a row only when the values already assigned make it illegal.
@@ -366,6 +369,81 @@ namespace game3d_contract::generator {
     for (std::size_t i = 0; i != pairs.count; ++i) {
       out.pairs += feasible[i] != 0;
       out.covered += feasible[i] && covered[i];
+    }
+    return out;
+  }
+
+  // A seeded stream for randomized rows (the session timelines, README,
+  // Session-level tests): splitmix64 (Steele, Lea and Flood, "Fast Splittable
+  // Pseudorandom Number Generators", OOPSLA 2014), so one seed yields the same
+  // rows with every compiler and standard library.
+  struct seeded {
+    std::uint64_t state {};
+
+    std::uint64_t next() {
+      auto z = state += 0x9e3779b97f4a7c15ull;
+      z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull;
+      z = (z ^ (z >> 27)) * 0x94d049bb133111ebull;
+      return z ^ (z >> 31);
+    }
+
+    // Uniform in [0, bound), by rejection (no modulo bias); 0 for bound 0.
+    std::uint32_t below(std::uint32_t bound) {
+      if (!bound) {
+        return 0;
+      }
+      const auto limit = ~std::uint64_t {} - ~std::uint64_t {} % bound;
+      for (;;) {
+        if (const auto value = next(); value < limit) {
+          return std::uint32_t(value % bound);
+        }
+      }
+    }
+  };
+
+  // How sample() draws each dimension: its values' relative weights, and the
+  // chance in a thousand that it keeps the previous row's value (a game
+  // repeats most of one frame's calls in the next).
+  struct draw {
+    std::vector<std::vector<unsigned>> weights;
+    std::vector<unsigned> keep_per_mille;
+  };
+
+  // One row drawn from rng: each dimension in order keeps previous's value
+  // (with its keep chance, where the predicate allows it) or draws by weight
+  // among the values the predicate allows on the partial row; the default
+  // stands where it allows none.
+  inline row sample(const family &owner, seeded &rng, const draw &how, const row *previous = nullptr) {
+    row out(owner.dimensions.size(), -1);
+    for (std::size_t d = 0; d != out.size(); ++d) {
+      if (previous && rng.below(1000) < how.keep_per_mille[d]) {
+        out[d] = (*previous)[d];
+        if (owner.legal(out)) {
+          continue;
+        }
+      }
+      auto weights = how.weights[d];
+      out[d] = 0;
+      for (;;) {
+        unsigned total {};
+        for (const auto weight : weights) {
+          total += weight;
+        }
+        if (!total) {
+          out[d] = 0;
+          break;
+        }
+        auto pick = rng.below(total);
+        std::size_t value = 0;
+        while (pick >= weights[value]) {
+          pick -= weights[value++];
+        }
+        out[d] = int(value);
+        if (owner.legal(out)) {
+          break;
+        }
+        weights[value] = 0;
+      }
     }
     return out;
   }

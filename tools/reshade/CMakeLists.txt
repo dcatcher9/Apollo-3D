@@ -863,6 +863,28 @@ if(BUILD_TESTING)
       set_tests_properties(reshade_native_provider_continuity PROPERTIES LABELS "contract;gpu" RUN_SERIAL TRUE
         RESOURCE_LOCK gpu TIMEOUT 240 FIXTURES_REQUIRED native_provider_output)
     endif()
+    # Seeded randomized frame timelines through the same fixture and
+    # interposer, judged by the continuity invariant and the oracle at each
+    # copy decision (README, Session-level tests): the fixed seed set, as a
+    # GPU check run with the contract tests.
+    add_executable(reshade_game3d_session_timeline_runtime_test test_game3d_session_timeline_runtime.cpp)
+    target_compile_features(reshade_game3d_session_timeline_runtime_test PRIVATE cxx_std_17)
+    target_include_directories(reshade_game3d_session_timeline_runtime_test SYSTEM PRIVATE "${SUNSHINE_RESHADE_INCLUDE_DIR}")
+    target_link_libraries(reshade_game3d_session_timeline_runtime_test PRIVATE nlohmann_json::nlohmann_json d3d12 dxgi dxguid d3dcompiler user32)
+    add_dependencies(reshade_game3d_session_timeline_runtime_test SunshineSBSTest reshade_frame_generation_interposer)
+    if(MINGW)
+      target_link_options(reshade_game3d_session_timeline_runtime_test PRIVATE -static)
+    endif()
+    if(SUNSHINE_GAME3D_RESHADE_RUNTIME AND SUNSHINE_GAME3D_FROZEN_SHADERS)
+      set(session_timeline_output "${CMAKE_CURRENT_BINARY_DIR}/session_timelines")
+      add_test(NAME reshade_session_timelines_output COMMAND "${CMAKE_COMMAND}" -E rm -rf "${session_timeline_output}")
+      set_tests_properties(reshade_session_timelines_output PROPERTIES FIXTURES_SETUP session_timeline_output LABELS "contract;gpu")
+      add_test(NAME reshade_session_timelines COMMAND reshade_game3d_session_timeline_runtime_test
+        "${SUNSHINE_GAME3D_RESHADE_RUNTIME}" "${SUNSHINE_GAME3D_FROZEN_SHADERS}" "$<TARGET_FILE:SunshineSBSTest>" "${session_timeline_output}"
+        "$<TARGET_FILE:reshade_frame_generation_interposer>")
+      set_tests_properties(reshade_session_timelines PROPERTIES LABELS "contract;gpu" RUN_SERIAL TRUE
+        RESOURCE_LOCK gpu TIMEOUT 240 FIXTURES_REQUIRED session_timeline_output)
+    endif()
     add_executable(reshade_game3d_native_runtime_d3d11_test test_game3d_native_runtime_d3d11.cpp)
     add_executable(reshade_game3d_source_alpha_runtime_test test_game3d_source_alpha_runtime.cpp)
     target_compile_definitions(reshade_game3d_source_alpha_runtime_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)

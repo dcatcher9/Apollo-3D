@@ -1739,7 +1739,8 @@ The known gaps are the header's `known_gaps` rows, under the matrix's known-gap 
 their own key: each names a limitation that the fixture tags on the frames that meet it. A
 violation of a tagged frame is its row's; any other fails the run, and so does a row whose
 limitation was supplied in a run without a violation (the gap closed, and the fix removes the
-row). Each provider run with an interposer exercises all three:
+row). Each provider run with an interposer exercises the first three; the session timelines below
+found the other four, which their witness timelines exercise:
 
 - C1, SR depth on another queue (until Step 4's fence observation): `sr-other-queue` warms up with
   the viewport's SR evaluation on the presenting queue (FG off), then records it on the game's own
@@ -1748,6 +1749,8 @@ row). Each provider run with an interposer exercises all three:
   retired and its fence completed, after the source age here, so the Present loses depth once the
   presenting queue's last copy ages out (in Assassin's Creed Shadows 110-235 ms, about 30
   `no_completed_snapshot` losses a session). The recovery on the presenting queue settles again.
+  DLSS-G's own copies on its compute list (N7) are read the same way, once DLSS-G reset that
+  recording, and the session timelines tag their frames with this row too.
 - C2, Generic on another queue (until Step 4's fence hooks): `generic-other-queue` lets the API
   association lapse, then draws one view of the swapchain's size on the game's queue with no
   boundary but the end of the frame; each frame's list moves it through `DEPTH_READ` back to
@@ -1762,6 +1765,31 @@ row). Each provider run with an interposer exercises all three:
   a copy younger than the source age is retained. The fixture tags the frame after each queue it creates (the UI hook's
   second queue, DLSS-G's compute queue and the other-queue scripts' game queue); only the first
   new queue loses depth. Its owner note gives the fixes that close it.
+- C4, an FG scope that outlives the copy it can show, found by the session timelines (owner
+  decision): a scope stays live for `fg_silent_ms` after its newest accepted copy unless a later
+  frame's FG call marks a miss, and keeps the viewport's SR evaluations out meanwhile, while the
+  provider holds that copy only for the source age. A frame with no FG call, one whose only FG
+  input is DLSS-G's compute copy, and one whose FG tag is refused or cancelled within
+  `fg_silent_ms` of DLSS-G's own last copy (the miss is left to that evaluation) mark none, so
+  after a single FG copy every Present is mono from about 220 ms to 1000 ms although each frame's
+  SR input was copyable (witness `20*sr=local; fg=on,dlssg=direct; 40*sr=local`).
+- C5, the matrix's `S1-evaluate` row over frames: an `OnlyValidNow` tag outside FG scope that its
+  frame's evaluation refuses (S3) loses its tag-call copy (S1), so a run of such frames is mono
+  (witness `20*sr=local; 60*tag=now_list,sr=tag`).
+- C6, DLSS-G deferring to an earlier frame's FG tag copy, found by the session timelines (owner
+  decision): DLSS-G's evaluation adds no copy while an FG tag copy of its scope is younger than the
+  source age (`tag_copy_recent`), a precedence meant for the same frame's tag. Such an evaluation is
+  neither a copy nor a miss, so DLSS-G's fresher depth is not copied for the source age, and the
+  scope falls silent only when the tag copy's hold has just expired: the frame whose SR evaluation
+  came before its DLSS-G evaluation is mono (witness
+  `20*sr=local; fg=on,tag=present_list; 30*sr=local,dlssg=compute_unobserved`).
+- C7, an FG tag copy deferred to its frame's Present that waits for DLSS-G, found by the session
+  timelines (owner decision): under FG such a copy (R2) is made at the first Present after DLSS-G
+  evaluated a frame following the tag, as long as DLSS-G evaluated anything within the source age,
+  refused evaluations included. When DLSS-G stops evaluating while the game keeps tagging, each
+  copy waits until the source age after DLSS-G's last evaluation while the held copy ages out first,
+  so those Presents are mono (witness
+  `20*sr=local; fg=on,tag=present_bare; 3*dlssg=compute_unobserved; 40*tag=present_bare`).
 
 `reshade_native_provider_continuity` runs the provider fixture at 1280x720 with the 2.7.30
 interposer, every frame script under the invariant, in about 115 s. Like
@@ -1769,6 +1797,77 @@ interposer, every frame script under the invariant, in about 115 s. Like
 lock and is registered only where `SUNSHINE_GAME3D_RESHADE_RUNTIME` and
 `SUNSHINE_GAME3D_FROZEN_SHADERS` are configured, so `ctest -L contract` and the contract runner run
 it. The two other-queue scripts add about 6 s to each provider run.
+
+The session timelines
+([`test_game3d_session_timeline_runtime.cpp`](test_game3d_session_timeline_runtime.cpp)) compose
+the matrix's dimensions over frames at random. A timeline is 60 to 200 real frames, each a row of
+one family of frame events: a Streamline depth tag in each lifecycle with or without a command
+list, through `slSetTagForFrame` or `slSetTag`; a null untag after the tag (by the frame's token or
+by none) or before it (the frame before's), or none; FG turned on or off, and 1 to 3 generated
+Presents after the real one or inside the recording (2x to 4x); a dynamic-resolution step; the
+viewport's SR evaluation with its own input on the presenting queue or the game's own queue, or of
+the frame's tag; DLSS-G's own evaluation on a direct or compute list, its depth in a state recorded
+there or not; the game's HUD-less and Backbuffer tags; and the state choice of the frame's depth
+inputs (nothing recorded, a read state recorded before the tag call, undeclared, or a state recorded
+at the tag call that a longer-lived declaration does not name). Each declaration names the state at
+the use its lifecycle names, as the frame keeps it there: an incorrect declaration of a later use is
+a game's bug the oracle cannot describe at a deferred copy (the add-on refuses it as
+`conflicting_state`). The oracle names an untag through the tag's own entry (R7), so a token-less
+untag of a frame tag (`slSetTag` after `slSetTagForFrame`) is judged EITHER: the outcome with the
+untag or without it. A seed drives `generator::sample` in
+[`test_contract_matrix_generator.h`](test_contract_matrix_generator.h): each dimension keeps the
+previous frame's value with a chance or is drawn by weight under the family's predicate, so a
+timeline has the stretches a game has, and FG-only events are dropped where FG is off.
+
+Each timeline runs on its own viewport through the native provider fixture (the official runtime,
+the test add-on, a real D3D12 device, the 2.7.30 interposer, the NGX stand-in), then isolation
+retires the viewport, presents past the association and drains the other queues' rings. It is
+judged on four counts:
+
+- the continuity invariant at every Present, each frame supplying what the oracle names at its copy
+  decisions: the tag call (or the copy it defers before the frame's Present), an evaluation of the
+  tag (the earliest point whose outcome requires a capture decides, as the runtime layer's
+  `at_present`), the SR input, and DLSS-G's input, each legal where the oracle requires a capture,
+  permitted where it only allows one and nothing for illegal input; a frame whose legal sources all
+  meet a known limitation is tagged with it;
+- each copy decision by the oracle through the refusals its gate records
+  (`SunshineDepthTestLastRefusal`, polled after every call and Present): a contract class recorded
+  for a decision whose required refusal names another, or for a decision the oracle requires to
+  capture, fails it. In a session another rule may decide a call first (an FG scope that owns the
+  viewport, the same frame's untag, a tag copy that keeps precedence), so a required refusal its gate
+  never reached is counted (`preempted=`), not failed;
+- a Present, real or generated, shows a fresh copy only while a frame within the source age
+  supplied an API source the oracle allows (copies recorded on another queue, which become readable
+  later, aside): a refused or held decision never shows new depth. A deferred copy (R2) is read at
+  the Present after the one it precedes, and a copy its FG scope kept out shows once the scope falls
+  silent, so a fresh copy may be an earlier frame's;
+- every provider status line names a Present's frame record (`require_records_match_log`).
+
+A violation of a tagged frame is that row's; any other failure prints the timeline's seed, its event
+list and the frames before the first failure, then shrinks it by delta debugging to the smallest
+list that still fails the same way, printed as `--events "..."`: the frames after the failure, each
+event kind back to its default in every frame, chunks of frames, then each event kind of each frame
+of a short list, every kept candidate cut after the frame where it failed. Shrinking re-runs each
+candidate, so `--shrink-runs` (default 40) and the fixed set's time bound limit it, and a failure
+that depends on timing may shrink less. The fixed set also runs one witness per row the timelines
+found (C4-C7): an event list whose frames meet the
+limitation alone, long enough to lose depth on every run; a witness that loses none fails the set,
+as the matrix's gap seeds keep a recorded gap's own failing cell. `--trace` prints every Present's
+frame record, the supply it was judged with and each recorded refusal.
+
+`reshade_session_timelines` runs the fixed set (24 seeds and the four witnesses, about 3550 frames
+and 7900 Presents) in about 125 s, registered like `reshade_native_provider_continuity` with the same
+240 s timeout. Locally:
+
+    reshade_game3d_session_timeline_runtime_test [--list] [--timeline <seed> | --events "<list>" |
+      --seeds N [--from M]] [--shard i/N] [--shrink-runs N] [--trace]
+      official.dll frozenShaders test.addon64 freshOutput frame_generation_interposer.dll
+
+`--list` prints each selected timeline's seed (or witness) and event list; `--timeline` replays one
+seed and `--events` one list (frames separated by `;`, each `defaults` or `name=value,...`, `N*`
+repeating one); `--seeds N --from M` soaks N further seeds. Soaks over the 350 seeds after the fixed
+set (`--from 24`) found the shapes of C4, C6 and C7 beyond their witnesses; seeds 279 to 373 then
+passed with no failure.
 
 ### Characterization tests
 
