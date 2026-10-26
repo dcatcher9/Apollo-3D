@@ -144,7 +144,7 @@ namespace {
     capture::input input;
     texture_case(fixture &gpu, DXGI_FORMAT format, unsigned bytes,
         D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_NONE, bool retain_before_barrier = true,
-        UINT16 mips = 1, UINT16 slices = 1) : bpp(bytes) {
+        UINT16 mips = 1, UINT16 slices = 1, unsigned w = 64, unsigned h = 48) : bpp(bytes), width(w), height(h) {
       D3D12_RESOURCE_DESC desc{}; desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
       desc.Width = width; desc.Height = height; desc.SampleDesc.Count = 1; desc.Format = format;
       desc.MipLevels = mips; desc.DepthOrArraySize = slices;
@@ -702,6 +702,137 @@ namespace {
     capture::poll();
     gpu.check_debug_errors();
     std::printf("PASS NGX SDK-contract input state: unobserved source uses NON_PIXEL_SHADER_RESOURCE with exact pixels; observed state wins; COMMON and absent values rejected%s\n",
+      gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
+  }
+
+  // An SR evaluation's nomination in progress is pending, not a refused
+  // attempt. A Present on the presenting queue (another thread's) that lands
+  // while the game's thread is inside an SR evaluate, as when its copy
+  // allocates storage for a new dynamic-resolution size without the capture
+  // lock, holds. It must not move the gap watermark, which revoked the SR
+  // snapshot completed on the render queue, unread, and every other in
+  // flight, until a snapshot recorded after it completed (Assassin's Creed
+  // Shadows 10-25: completed_before_gap losses of 62-266 ms in FG-on
+  // windows, its FG Presents racing its SR evaluates). DLSS-G inputs refused
+  // on its compute list between the evaluates leave SR untouched as well.
+  void nomination_in_progress(fixture &gpu) {
+    if (gpu.debug_messages) gpu.debug_messages->ClearStoredMessages();
+    consumer_fixture consumer(gpu);
+    texture_case first(gpu, DXGI_FORMAT_R32_FLOAT, 4);
+    // A render size no other case allocates: its copy needs new storage.
+    texture_case resized(gpu, DXGI_FORMAT_R32_FLOAT, 4, D3D12_RESOURCE_FLAG_NONE, true, 1, 1, 52, 36);
+    gpu.submit(); gpu.wait(); gpu.reset();
+    // An ordinary (non-FG) Streamline source with its own id, so the case can
+    // retire it (retire_source takes no source 0) and leave no owner behind.
+    constexpr std::uint64_t epoch = 83, sr_source = 5;
+    std::uint64_t sequence{}, present = 40;
+    capture::record_diagnostic diagnostic;
+    const auto sr_input = [&](const texture_case &image) {
+      auto value = image.input;
+      value.provider = sunshine_scene_depth::provider_kind::streamline;
+      value.epoch = epoch; value.source_id = sr_source; value.viewport = 0; value.sequence = ++sequence; value.tick = GetTickCount64();
+      value.valid_until = sunshine_scene_depth::lifetime::until_evaluation; value.force_snapshot = false;
+      value.source_present_generation = capture::source_present_generation(value.source);
+      return value;
+    };
+    const auto evaluate = [&](const texture_case &image) {
+      const auto ticket = capture::nominate_evaluation(native(gpu.list.Get()), sr_input(image), UINT64_MAX, &diagnostic);
+      require(ticket && diagnostic.result == capture::status::recorded, "an SR evaluation's copy was not recorded");
+      capture::finish(ticket, true);
+      return ticket;
+    };
+    // DLSS-G's input on its compute list with no state recorded there: refused
+    // (missing_state) between the SR evaluates.
+    D3D12_COMMAND_QUEUE_DESC compute_desc{}; compute_desc.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+    ComPtr<ID3D12CommandAllocator> compute_allocator, compute_spare;
+    ComPtr<ID3D12GraphicsCommandList> compute_list;
+    check(gpu.device->CreateCommandAllocator(compute_desc.Type, IID_PPV_ARGS(&compute_allocator)), "DLSS-G refusal allocator");
+    check(gpu.device->CreateCommandAllocator(compute_desc.Type, IID_PPV_ARGS(&compute_spare)), "DLSS-G refusal spare allocator");
+    check(gpu.device->CreateCommandList(0, compute_desc.Type, compute_allocator.Get(), nullptr, IID_PPV_ARGS(&compute_list)),
+      "DLSS-G refusal list");
+    created(compute_list.Get());
+    capture::observe_command(native(compute_list.Get())); capture::poll();
+    check(close_list(compute_list.Get()), "DLSS-G refusal list initial close");
+    check(compute_spare->Reset(), "DLSS-G refusal allocator reset");
+    check(reset_list(compute_list.Get(), compute_spare.Get()), "DLSS-G refusal recording reset");
+    capture::poll();
+    const auto refuse_dlssg = [&] {
+      auto value = first.input;
+      value.provider = sunshine_scene_depth::provider_kind::streamline;
+      value.epoch = epoch; value.sequence = ++sequence; value.tick = GetTickCount64(); value.viewport = 0;
+      value.frame_generation_input = true;
+      value.source_id = sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(0));
+      sunshine_api_contract::apply(sunshine_api_contract::ngx::frame_generation_input, value);
+      value.at_tag_call = true; value.pixels_required = true;
+      value.source_present_generation = capture::source_present_generation(value.source);
+      capture::record_diagnostic refused;
+      const auto ticket = capture::nominate(native(compute_list.Get()), value, &refused);
+      if (ticket) capture::finish(ticket, false);
+      require(!ticket && refused.result == capture::status::missing_state,
+        "a DLSS-G input with no state on its compute list was not refused");
+    };
+    // Frame 1 is shown, establishing SR on the presenting queue; frame 2
+    // completes on the render queue unread.
+    const auto shown = evaluate(first);
+    gpu.submit(); gpu.wait(); gpu.reset();
+    capture::packet packet;
+    capture::capture_diagnostic acquired;
+    require(capture::acquire(native(gpu.foreign_queue.Get()), ++present, packet, &acquired) && packet.pixel_ready &&
+        packet.capture_id == shown, "the first SR frame was not readable on the presenting queue");
+    auto target = destination(gpu.device.Get(), DXGI_FORMAT_R32_FLOAT);
+    require(capture::copy_current(native(consumer.list.Get()), packet, native(target.Get()),
+      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE), "the first SR frame's consumer copy failed");
+    capture::complete_frame(packet, present);
+    consumer.submit(); consumer.wait(); consumer.reset();
+    packet = {};
+    refuse_dlssg();
+    const auto in_flight = evaluate(first);
+    gpu.submit(); gpu.wait(); gpu.reset();
+    refuse_dlssg();
+    // Frame 3 at a new render size: a Present lands while its copy allocates.
+    struct context {
+      fixture *gpu{};
+      std::uint64_t present{};
+      capture::capture_diagnostic acquired;
+      bool pixels{}, ran{};
+    } race{&gpu, ++present};
+    const auto during_allocation = [](void *value) {
+      auto &state = *static_cast<context *>(value);
+      capture::packet seen;
+      capture::acquire(native(state.gpu->foreign_queue.Get()), state.present, seen, &state.acquired);
+      state.pixels = seen.pixel_ready; state.ran = true;
+    };
+    capture::testing::set_allocation_hook(during_allocation, &race);
+    const auto resized_ticket = evaluate(resized);
+    capture::testing::set_allocation_hook(nullptr, nullptr);
+    require(race.ran && !race.pixels && race.acquired.result == capture::status::recorded &&
+        race.acquired.selection == capture::selection_reason::pending_nomination,
+      "a Present during an SR nomination in progress did not hold as pending");
+    refuse_dlssg();
+    // Frame 3 still recording: frame 2, completed and unread, stands in.
+    require(capture::acquire(native(gpu.foreign_queue.Get()), ++present, packet, &acquired) && packet.pixel_ready &&
+        packet.capture_id == in_flight && acquired.selection == capture::selection_reason::completed_snapshot,
+      "the SR snapshot completed before the Present that raced its successor's nomination was revoked");
+    require(capture::copy_current(native(consumer.list.Get()), packet, native(target.Get()),
+      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE), "the completed SR frame's consumer copy failed");
+    capture::complete_frame(packet, present);
+    consumer.submit(); consumer.wait(); consumer.reset();
+    packet = {};
+    // Frame 3, once its recording completed and was reset, is shown in turn.
+    gpu.submit(); gpu.wait(); gpu.reset();
+    require(capture::acquire(native(gpu.foreign_queue.Get()), ++present, packet, &acquired) && packet.pixel_ready &&
+        packet.capture_id == resized_ticket, "the resized SR frame was not readable after its nomination");
+    packet = {};
+    check(close_list(compute_list.Get()), "DLSS-G refusal list close");
+    destroyed(compute_list.Get());
+    capture::command_destroyed(native(compute_list.Get()));
+    capture::retire_source(sunshine_scene_depth::provider_kind::streamline, epoch, sr_source);
+    capture::command_destroyed(native(consumer.list.Get()));
+    capture::poll();
+    gpu.check_debug_errors();
+    std::printf("PASS SR nomination in progress: a Present during an SR copy's storage allocation held as pending, the "
+      "SR frame completed on the render queue before it stayed readable on the presenting queue and the resized frame "
+      "followed; DLSS-G inputs refused on their compute list between the evaluates changed nothing%s\n",
       gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
   }
 
@@ -2568,6 +2699,7 @@ int main(int argc, char **argv) {
     first_recording_depth_capture(gpu);
     proven_state_end_of_frame(gpu);
     ngx_contract_depth_capture(gpu);
+    nomination_in_progress(gpu);
     {
       // More reported queues than a game submits copies on (Assassin's
       // Creed Shadows): DLSS-G's compute queue still takes a place.

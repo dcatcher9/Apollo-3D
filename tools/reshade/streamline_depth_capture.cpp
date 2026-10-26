@@ -2174,17 +2174,32 @@ namespace sunshine_streamline::depth_capture {
     begin_evaluation_locked(epoch, sequence, viewport, provider, source_id, superseded_source_id);
   }
 
+  namespace {
+    // Requires mutex. value, its provider's newest evaluation, is a nomination
+    // in progress (pending_nomination) until its copy is recorded or refused
+    // (end_nomination). Every evaluation's, SR's as well as FG's: a Present
+    // meanwhile, another thread's, holds instead of reading that attempt as
+    // refused, which moved acquire's gap watermark and so revoked the
+    // source's earlier snapshots still in flight on their queue (Assassin's
+    // Creed Shadows 10-25: with FG on, FG Presents landed while the SR
+    // evaluate allocated storage for each dynamic-resolution size, and each
+    // revoked SR depth for a frame or more). false: value is not the newest
+    // evaluation, or (unless renewed) its nomination is already in progress
+    // and its own caller ends it.
+    bool mark_pending(evaluation_namespace &current, const input &value, bool renewed) {
+      if (current.epoch != value.epoch || current.sequence != value.sequence || current.source_id != value.source_id ||
+          !value.epoch || !value.sequence || !value.source || !value.resource.native ||
+          (!renewed && matching_evaluation(current.pending_nomination, value)))
+        return false;
+      current.pending_nomination = {value.epoch, value.sequence, GetTickCount64(), value.source_id, value.viewport};
+      return true;
+    }
+  }
   SUNSHINE_CAPTURE_STATIC bool begin_nomination(const input &value, std::uint64_t superseded_source_id) {
     std::lock_guard lock(mutex);
     begin_evaluation_locked(value.epoch, value.sequence, value.viewport, value.provider, value.source_id, superseded_source_id);
     if (!requested.load() || !valid_provider(value.provider)) return false;
-    auto &current = evaluations[provider_index(value.provider)];
-    if (current.epoch != value.epoch || current.sequence != value.sequence || current.source_id != value.source_id)
-      return false;
-    if (value.provider != provider_kind::streamline || !value.frame_generation_input || !value.epoch ||
-        !value.sequence || !value.source_id || !value.source || !value.resource.native) return false;
-    current.pending_nomination = {value.epoch, value.sequence, GetTickCount64(), value.source_id, value.viewport};
-    return true;
+    return mark_pending(evaluations[provider_index(value.provider)], value, true);
   }
 
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
@@ -2764,6 +2779,18 @@ namespace sunshine_streamline::depth_capture {
     // the shared immutable snapshot/retirement path; never substitute a
     // clear-count heuristic for the middleware's capture boundary. An
     // undeclared state needs this recording's observation (copy_state::select).
+    // The copy of an evaluation begun earlier (begin_evaluation: NGX, DLSS-G)
+    // is its nomination in progress as nominate_evaluation's is.
+    bool pending = false;
+    if (requested.load() && valid_provider(value.provider)) {
+      std::lock_guard lock(mutex);
+      pending = mark_pending(evaluations[provider_index(value.provider)], value, false);
+    }
+    struct nomination_scope {
+      const input &value;
+      bool pending;
+      ~nomination_scope() { if (pending) end_nomination(value); }
+    } completion{value, pending};
     return record_impl(command, value, diagnostic, false, nullptr, true);
   }
   std::uint64_t nominate_evaluation(std::uint64_t command, const input &value,

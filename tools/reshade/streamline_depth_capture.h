@@ -132,7 +132,7 @@ namespace sunshine_streamline::depth_capture {
     bool producer_completion_valid{}, producer_recording_retired{};
     bool finished{}, success{}, submitted{}, invalid{};
     bool repeated_frame{}; // Latest successful frame was already copied for effects.
-    bool pending_frame{}; // Same FG source awaits nomination/result/submission/immutability; capture_id may still be zero.
+    bool pending_frame{}; // Same FG source awaits result/submission/immutability, or any source's nomination is in progress; capture_id may still be zero.
     std::uint64_t source_id{};
     std::uint32_t viewport{};
     sunshine_scene_depth::provider_kind provider{sunshine_scene_depth::provider_kind::streamline};
@@ -372,11 +372,15 @@ namespace sunshine_streamline::depth_capture {
   // Source adapters supply identity/metadata and always snapshot at the API
   // call, even for a registered ReShade DSV. Matching its resource identity
   // cannot authenticate a generic before-clear copy's contents. Missing state
-  // hints are resolved against observed command state, never invented.
+  // hints are resolved against observed command state, never invented. The
+  // copy of its provider's newest evaluation (begin_evaluation) is that
+  // evaluation's nomination in progress, as nominate_evaluation's is.
   std::uint64_t nominate(std::uint64_t command, const input &value, record_diagnostic *diagnostic = nullptr);
   // Publish validated adapter candidates and their in-progress nomination as one
-  // observation. Until the candidate batch resolves, only a bounded whole-FG-pair hold may
-  // use this logical identity; no previous depth becomes current pixels. Native
+  // observation. Until the candidate batch resolves (any evaluation's, SR's as
+  // well as FG's), an acquisition holds: only a bounded whole-FG-pair hold may
+  // use this logical identity, no previous depth becomes current pixels and no
+  // earlier snapshot of the source is revoked (acquire's gap watermark). Native
   // validation and GPU ordering remain shared with nominate(). Rejection clears
   // only this attempt; missing adapter input must use begin_evaluation() instead.
   std::uint64_t nominate_evaluation(std::uint64_t command, const input &value,

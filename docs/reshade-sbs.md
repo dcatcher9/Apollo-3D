@@ -4401,9 +4401,14 @@ and calibration updates, and keep the last matching resolved scene parameters. T
 still applies. Neither reuse nor a new pending nomination extends the age limit. The overlay marks
 `Previous real frame (FG)` instead of presenting reused depth as freshly captured.
 
-The capture owner publishes an in-progress nomination with its evaluation watermark. A Present
-between this publication and snapshot registration can identify the same established FG source
-without acquiring pending pixels. Missing/invalid attempts withdraw that intent; an older call
+The capture owner publishes an in-progress nomination with its evaluation watermark: every
+nominated evaluation's, and the copy of an evaluation begun before its `nominate()` (NGX, DLSS-G).
+A Present between this publication and snapshot registration can identify the same established
+source without acquiring pending pixels; it holds, and marks no gap in the source's admission
+(since the Assassin's Creed Shadows hotfix of 10-26; before, only an FG nomination was in progress,
+so an FG Present landing while an SR evaluate allocated its copy's storage for a new dynamic
+resolution size read that attempt as refused and revoked the SR snapshots in flight:
+`completed_before_gap`). Missing/invalid attempts withdraw that intent; an older call
 returning cannot clear a newer intent. The explicit bounded reuse policy above may use its private
 previous depth during this gap; GPU resource retirement is unchanged.
 
