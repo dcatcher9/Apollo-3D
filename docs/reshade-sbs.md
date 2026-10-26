@@ -4679,7 +4679,14 @@ v2 tag boundary, with or without FG, or the evaluate a local input came with, wh
 makes local tags current ("they are considered to be a 'local' tags and do NOT interact with same
 tags sent in the global scope"; `copied_at` in [`api_contract.h`](../tools/reshade/api_contract.h),
 the API contract matrix's S4, since Stage 3 batch B; before, a local `OnlyValidNow` input was
-refused as `not-valid-until-present`). A later evaluation declines a tagged `OnlyValidNow` resource. Native capture still declines
+refused as `not-valid-until-present`). A later evaluation declines a tagged `OnlyValidNow` resource
+(`not-valid-until-present`, S3). Where every depth tag it declines so is one its own frame's tag call
+supplied (the evaluation names that tag's frame, or no Present came since the tag call), the refusal
+is no newer attempt at the frame's depth: the evaluation keeps the tag call's copy, or its refusal,
+instead of beginning an evaluation of the viewport without a copy
+([`api_contract.h`](../tools/reshade/api_contract.h) `keeps_tag_call_copy`). Until 10-26 it began
+one, so outside frame generation such a frame's Present was mono (the API contract matrix's
+`S1-evaluate` row). Native capture still declines
 unknown depth encodings, unknown resource states or layouts and ambiguous viewports. One rule
 ([`depth_view_format.h`](../tools/reshade/depth_view_format.h)), shared by the capture, the
 content sampler and the V1.1.1 adapter, stores a depth input in its typeless family and names the

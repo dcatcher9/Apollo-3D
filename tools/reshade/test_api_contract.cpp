@@ -2,6 +2,7 @@
 // The API contract mappers of api_contract.h (refactor plan P3): the state
 // proof, lifetime and native state each API's declaration gives a capture
 // input, the lifecycles the probe reads and match() judges at each copy point,
+// which of those refusals keep a tag call's copy (nominate_depth_source),
 // Dump 3D's own contract for its UI copies, and an absent extent as the whole
 // allocation. The Streamline probe's depth and UI
 // adapters, tag_rejection, the 1.x state resolver, the dump's UI capture, the
@@ -214,6 +215,36 @@ namespace {
      state_proof::observed_nonzero},
   };
 
+  // Whether an evaluate that refuses a tag for its lifetime keeps the copy (or
+  // the refusal) its tag call made (S1, S3): only an OnlyValidNow global or
+  // frame tag of the evaluate's own frame. Until 10-26 every such evaluate
+  // withdrew it (the matrix's S1-evaluate row).
+  struct kept_row {
+    const char *pins;
+    bool version_one, supported;
+    std::uint32_t lifecycle;
+    copy_point at;
+    bool same_frame, kept;
+  };
+
+  constexpr kept_row kept_copies[] {
+    {"An evaluate of its frame keeps an OnlyValidNow tag's tag-call copy (S1, S3)", false, true, streamline::only_valid_now,
+     copy_point::evaluate, true, true},
+    {"An evaluate of a later frame is an attempt of its own", false, true, streamline::only_valid_now, copy_point::evaluate,
+     false, false},
+    {"A tag call, or the evaluate a local input came with (S4), decides the tag itself", false, true,
+     streamline::only_valid_now, copy_point::tag_call, true, false},
+    {"A ValidUntilPresent tag is the evaluate's own to copy", false, true, streamline::valid_until_present,
+     copy_point::evaluate, true, false},
+    {"A ValidUntilEvaluate tag is the evaluate's own to copy", false, true, streamline::valid_until_evaluate,
+     copy_point::evaluate, true, false},
+    {"A 1.x tag holds until Present", true, true, streamline::no_lifecycle, copy_point::evaluate, true, false},
+    {"An unsupported tag keeps nothing", false, false, streamline::only_valid_now, copy_point::evaluate, true, false},
+    {"An undefined lifecycle keeps nothing", false, true, 3, copy_point::evaluate, true, false},
+    {"An OnlyValidNow tag keeps nothing at its frame's Present", false, true, streamline::only_valid_now,
+     copy_point::present, true, false},
+  };
+
   // Whether a null untag cancels a copy deferred to its Present (R7).
   struct untag_row {
     const char *pins;
@@ -263,6 +294,23 @@ int main() {
     require(streamline::tag_call_proof(row.lifecycle, row.supplied) == row.expected, row.pins);
   for (const auto &row : untags)
     require(streamline::untag_cancels(row.untag_framed, row.tag_framed, row.same_frame) == row.cancels, row.pins);
+  for (const auto &row : kept_copies) {
+    streamline::tag_declaration tag;
+    tag.version_one = row.version_one;
+    tag.supported = row.supported;
+    tag.lifecycle = row.lifecycle;
+    require(streamline::keeps_tag_call_copy(tag, row.at, row.same_frame) == row.kept, row.pins);
+  }
+  {
+    // The rule keeps exactly what the lifetime refuses at that evaluate.
+    streamline::tag_declaration tag;
+    tag.lifecycle = streamline::only_valid_now;
+    require(streamline::valid_until(tag, copy_point::evaluate) == lifetime::unsupported &&
+              streamline::keeps_tag_call_copy(tag, streamline::copied_at(false, false), true) &&
+              !streamline::keeps_tag_call_copy(tag, streamline::copied_at(false, true), true),
+      "An OnlyValidNow global or frame tag refused at its frame's evaluate keeps its tag call's copy; a local input is "
+      "its evaluate's own");
+  }
   require(streamline::defined_lifecycle(streamline::only_valid_now) &&
             streamline::defined_lifecycle(streamline::valid_until_present) &&
             streamline::defined_lifecycle(streamline::valid_until_evaluate) && !streamline::defined_lifecycle(3) &&
@@ -364,8 +412,9 @@ int main() {
     return 1;
   }
   std::printf("PASS API contract: %zu lifetime, %zu proof, %zu matched-lifecycle, %zu copy-point, %zu tag-call copy, %zu "
-    "untag and %zu Dump 3D rows, the defined lifecycles, each API's contract and the whole-allocation extent\n",
+    "untag, %zu kept tag-call copy and %zu Dump 3D rows, the defined lifecycles, each API's contract and the "
+    "whole-allocation extent\n",
     std::size(lifetimes), std::size(proofs), std::size(matched), std::size(copied_ats), std::size(tag_call_copies),
-    std::size(untags), std::size(dumps));
+    std::size(untags), std::size(kept_copies), std::size(dumps));
   return 0;
 }

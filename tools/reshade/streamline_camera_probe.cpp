@@ -2118,6 +2118,27 @@ namespace sunshine_streamline {
       }
       return "absent";
     }
+    // Whether this evaluate refuses only tags its frame's tag call decided:
+    // every present depth tag an OnlyValidNow tag of the frame it was set for,
+    // refused here for its lifetime (sl_contract::keeps_tag_call_copy). Its
+    // frame is this one where the evaluate names it (own_frame) or no Present
+    // came since the tag call, as the capture judges a later use of a tag
+    // (source_lifetime_current).
+    bool tag_call_decided(const evaluation_snapshot &snapshot, bool version_one) {
+      bool any = false;
+      for (const unsigned index : depth_priority) {
+        const auto &tag = snapshot.tags[index];
+        if (!tag.present) continue;
+        const auto *rejected = tag_rejection(snapshot, tag);
+        const bool same_frame = tag.own_frame || (tag.source_present_generation &&
+          tag.source_present_generation == depth_capture::source_present_generation(tag.direct_source));
+        if (!rejected || std::strcmp(rejected, name(match_status::unsupported_lifecycle)) ||
+            !sl_contract::keeps_tag_call_copy(declaration(tag, version_one), copy_point(snapshot, tag), same_frame))
+          return false;
+        any = true;
+      }
+      return any;
+    }
     // deferred: a frame-generation tag call's depth that is copied before its
     // frame's Present instead (R2, deferred_copy); observe_tag_call keeps it
     // once the SDK accepted the call.
@@ -2281,7 +2302,11 @@ namespace sunshine_streamline {
       if (attempted) remember_refusal(snapshot, sunshine_depth_refusal::gate::capture, nullptr, &diagnostic);
       else remember_refusal(snapshot, sunshine_depth_refusal::gate::input, candidate_rejection(snapshot));
 #endif
-      if (!supplied) withdraw_invalid_attempt();
+      // An evaluate that refuses only its frame's OnlyValidNow tags for their
+      // lifetime (S3) is no newer attempt than their tag call (S1): it keeps
+      // that call's copy, or its refusal, as the frame's.
+      const bool kept = !attempted && tag_call_decided(snapshot, version_one);
+      if (!supplied && !kept) withdraw_invalid_attempt();
       return 0;
     }
     // A copy survives a successful SDK call. Unrelated metadata observed or

@@ -44,11 +44,11 @@
 // limitation was supplied in a run without a violation (the gap closed: the
 // fix removes the row).
 //
-// Two rows are the limitations the owner approved until Step 4 (C1, C2) and
-// one carries a matrix row's recorded gap over frames (C5). Any other row is
-// a defect these tests found (found: when and by which test), excused only
-// until the owner decides it (README, Found defects; none is open since C8
-// closed on 10-26): a strict run
+// Two rows are the limitations the owner approved until Step 4 (C1, C2). A
+// matrix row's recorded gap over frames would also be one (none is open
+// since C5 closed on 10-26). Any other row is a defect these tests found
+// (found: when and by which test), excused only until the owner decides it
+// (README, Found defects; none is open since C8 closed on 10-26): a strict run
 // (SUNSHINE_GAME3D_CONTINUITY_STRICT=1, the contract runner's
 // -StrictContinuity) fails their violations as any other. A random session timeline may supply a limitation
 // without losing depth, so the rows the session timelines found
@@ -98,9 +98,6 @@ namespace game3d_continuity {
     // A Generic depth-stencil view drawn on a queue other than the
     // presenting one, whose only boundary is the end of the frame.
     cross_queue_generic,
-    // An OnlyValidNow tag outside FG scope copied at its call, which the same
-    // frame's evaluation then refuses for its lifetime.
-    tag_call_then_refused_evaluate,
   };
 
   // What one frame supplied, stamped when the fixture made the first call
@@ -196,8 +193,6 @@ namespace game3d_continuity {
         return "cross_queue_sr";
       case limitation::cross_queue_generic:
         return "cross_queue_generic";
-      case limitation::tag_call_then_refused_evaluate:
-        return "tag_call_then_refused_evaluate";
       default:
         return "none";
     }
@@ -236,7 +231,6 @@ namespace game3d_continuity {
   inline constexpr gap_row known_gaps[] {
     {"C1-cross-queue-sr", limitation::cross_queue_sr, nullptr, "Until Step 4's fence observation. An SR snapshot copied on a queue other than the presenting one is readable only once its recording retired and its producer fence completed (streamline_depth_capture.cpp completed_snapshot, submission_status), never through the game's own wait for that queue: in Assassin's Creed Shadows 110-235 ms after its evaluation, about 30 no_completed_snapshot losses a session, mostly where a stray FG copy hands back to SR (d8c52e3b). The fixture's game retires its recordings later than the source age, so every Present loses that depth once the presenting queue's last copy ages out. DLSS-G's own copies on its COMPUTE list (N7) are read the same way, once DLSS-G reset that recording (accept_compute_copy, three of its evaluations later with its ring of three), and the session timelines tag their frames with this row too, the viewport's SR input among them: a frame whose only FG input is such a copy supplies its live FG scope, which keeps that SR input out while the copy is in flight (the second kind of frame of C4, closed 10-26). The row records a loss only once no copy the presenting queue could read (a frame's legal source that meets no limitation) is younger than the source age: a loss within it, such as a held FG copy dropped for an SR snapshot still in flight on the other queue (fixed by 88b45edf, and at FG Off by the fix that closed C8 on 10-26), is a violation. Observing the game's fence signals and waits orders the copy before the Present; that fix shows depth here and removes this row."},
     {"C2-cross-queue-generic", limitation::cross_queue_generic, nullptr, "Until Step 4's fence hooks. Generic's end-of-frame copy runs on the presenting queue, and a proof belongs to the queue whose executed list made it, so a depth-stencil view drawn on another queue with no boundary but the end of the frame is refused (missing_state; 18e5d922, docs/reshade-sbs.md, the last proven state). Seven of the eight games of the 10-06 to 10-23 logs render on another queue. Either owner option (accept the other queue's proof once fence hooks show the presenting queue ordered after it, or copy on the proving queue) shows depth here and removes this row."},
-    {"C5-S1-evaluate", limitation::tag_call_then_refused_evaluate, nullptr, "The API contract matrix's S1-evaluate row (test_game3d_api_contract_known_gaps.h) over frames: an OnlyValidNow tag outside FG scope copied at its call (S1), whose same-frame evaluation refuses the tag (S3), loses that copy, so a run of such frames is mono once the earlier depth ages out. That row's fix (keep a tag-call copy when a later point of its frame refuses the same tag for its lifetime) removes this one."},
   };
   inline constexpr std::size_t gap_count = std::size(known_gaps);
 

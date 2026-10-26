@@ -183,6 +183,24 @@ namespace sunshine_api_contract {
       const auto held = valid_until(tag, at);
       return held == lifetime::until_evaluation || held == lifetime::at_call ? valid_until_present : lifecycle;
     }
+    // The matrix's S1 and S3 within one frame: a global or frame OnlyValidNow
+    // tag is copied inside its tag call (S1), and a later evaluate of the
+    // frame it was set for refuses it for its lifetime (S3, match():
+    // not-valid-until-present). Such a refusal is no newer attempt at that
+    // frame's depth: the evaluate offers only the tag its tag call already
+    // copied, or refused, so that call's outcome stays the frame's, and the
+    // evaluate keeps it rather than beginning an evaluation without a copy.
+    // same_frame: the evaluate is of the frame the tag was set for (it names
+    // that frame, or no Present came since the tag call: the capture's rule
+    // for a later use of a tag, source_lifetime_current). A tag of an earlier
+    // frame, one refused for anything else, a 1.x tag (it holds until
+    // Present) and a local input (copied inside its own evaluate, tag_call
+    // here) leave the evaluate an attempt of its own. Until 10-26 the evaluate
+    // withdrew the tag call's copy, and such frames were mono (the matrix's
+    // S1-evaluate row, the continuity invariant's C5).
+    constexpr bool keeps_tag_call_copy(const tag_declaration &tag, copy_point at, bool same_frame) {
+      return same_frame && at == copy_point::evaluate && tag.supported && !tag.version_one && tag.lifecycle == only_valid_now;
+    }
   }
 
   // NGX (nvsdk_ngx_defs.h): an evaluation names its inputs but no state.

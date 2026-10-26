@@ -162,23 +162,19 @@ namespace game3d_contract::known_gaps {
     return game3d_contract::applies(value.decided, by) || (!local && point_rule(tag, copy_point::tag_call) == &by) || point_rule(tag, tag.at) == &by;
   }
 
-  // The runtime layer's cells (judged at Present).
+  // The runtime layer's cells (judged at Present). The add-on meets every
+  // cell; one pending row that matches no cell stands in for the table.
   namespace present {
-    // An OnlyValidNow tag outside frame-generation scope that its call
-    // copies (S1), followed by the same frame's evaluate, which refuses the
-    // tag as not valid until present (S3): that Present shows no depth.
-    constexpr bool only_valid_now_then_evaluate(const present_case &value) {
-      return value.value.at == copy_point::same_frame_evaluate && !streamline::local(value.value.entry) && value.decided.at == copy_point::tag_call &&
-             value.decided.life == lifecycle::only_valid_now && !detail::frame_generation_scope(value.value) && streamline::capture_required(value.decided);
+    constexpr bool no_cell(const present_case &) {
+      return false;
     }
-
   }  // namespace present
 
   // Streamline cells run through the native provider fixture (judged with
   // judge_each). A row that shares an id with the hook table's names the
   // same gap; that row's note holds the fix.
   inline constexpr row<present_case> sl_runtime_rows[] {
-    {"S1-evaluate", &rules::S1, kind::expected_failure, &present::only_valid_now_then_evaluate, "Outside the Stage 3 order, which predates this finding: it reworks the tag-to-evaluate path fix 2 (S6 + S7) changes, so it fits beside it. Found by the runtime layer: an OnlyValidNow global tag outside FG scope is copied at its call, but the same frame's evaluate refuses the tag (match(): not-valid-until-present, S3) and that frame's Present then shows no depth (mono), or only between generated Presents. S3 is right that the evaluate may not use the tag; it must not cost the frame the copy its tag call made (S1). Today the refused evaluate begins a new evaluation of the viewport with no copy (streamline_camera_probe.cpp nominate_depth_source, withdraw_invalid_attempt -> depth_capture::begin_evaluation), which supersedes the tag call's. Keep a tag-call copy when a later point of its frame refuses the same tag for its lifetime. The hook layer judges one copy point per cell, so only a Present shows this.", &behaviours::no_copy},
+    {"none", &rules::S1, kind::pending, &present::no_cell, "No Streamline runtime gap remains: the fix of 10-26 closed S1-evaluate, found by this layer (an OnlyValidNow global or frame tag outside FG scope, copied at its call (S1), whose same-frame evaluate refused it for its lifetime (S3) and so began an evaluation of the viewport with no copy: that frame's Present was mono). That evaluate now keeps the tag call's copy (api_contract.h keeps_tag_call_copy); the runtime family's gap seed now-evaluate keeps its cell in every release. This row matches no cell."},
   };
 
   // NGX evaluations, DLSS-G's own (N4) included (checked by the hook layer).

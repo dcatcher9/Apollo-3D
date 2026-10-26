@@ -1625,9 +1625,9 @@ directory. It is registered only where `SUNSHINE_GAME3D_RESHADE_RUNTIME` (the of
 `ReShade64.dll`) and `SUNSHINE_GAME3D_FROZEN_SHADERS` (a directory with the frozen
 `SunshineGame3D.fx`) are configured: one test per family, labelled `contract;gpu`, `RUN_SERIAL` with
 the `gpu` resource lock and a 240 s timeout, after `reshade_contract_matrix_runtime_output` removes
-the families' output directory. At 1280x720 the seven families run 310 cells in about 5.5 minutes:
-`sl27` 122 cells and 13 controls in 107 s, `sl26` 48 in 61 s, `sl212_214` 46 in 58 s, `sl215_30` 34
-in 33 s, `ngx` 34 in 32 s, `generic` 12 in 17 s and `ui` 14 in 19 s. A capture takes 0.4 s, a
+the families' output directory. At 1280x720 the seven families run 318 cells in about 5.5 minutes:
+`sl27` 123 cells and 14 controls in 107 s, `sl26` 49 in 61 s, `sl212_214` 48 in 58 s, `sl215_30` 38
+in 37 s, `ngx` 34 in 32 s, `generic` 12 in 17 s and `ui` 14 in 19 s. A capture takes 0.4 s, a
 refusal or hold 0.9 s (its 600 ms window and the isolation), an FG case copied at an evaluate up to
 1.9 s (FG owns its viewport's depth for a second after it is enabled), and a UI case its Dump3D.
 Repeated runs give the same result for every cell.
@@ -1736,8 +1736,8 @@ case's supply: the outcome the oracle names at the deciding copy point, legal wh
 capture, permitted where it only allows one and nothing for illegal input, supplied at the tag call
 or the evaluate that decides. A violation fails the case as an oracle disagreement does; its JSON
 line counts `observed.continuity_violations` and `evidence.continuity` describes the first. No case
-violates it today; the `S1-evaluate` cells never establish depth inside their window, so their
-oracle row alone records them.
+violates it (until C5 closed on 10-26 the `S1-evaluate` cells never established depth inside their
+window, and their oracle row recorded them).
 
 The known gaps are the header's `known_gaps` rows, under the matrix's known-gap discipline with
 their own key: each names a limitation that the fixture tags on the frames that meet it. A
@@ -1746,8 +1746,7 @@ frame's legal source that meets no limitation, and that no live FG scope kept ou
 supplies) is younger than the source age, as no limitation
 explains an earlier loss: a hold dropped within that age is a violation. Any other violation fails
 the run, and so does a row whose limitation was supplied in a run without a violation (the gap
-closed, and the fix removes the row). Each provider run with an interposer exercises the first two;
-the session timelines below found the third, which its witness timeline exercises:
+closed, and the fix removes the row). Each provider run with an interposer exercises both:
 
 - C1, SR depth on another queue (until Step 4's fence observation): `sr-other-queue` warms up with
   the viewport's SR evaluation on the presenting queue (FG off), then records it on the game's own
@@ -1769,17 +1768,14 @@ the session timelines below found the third, which its witness timeline exercise
   is refused (`end_of_frame_refused` grows with `last=missing_state`). A view that only its creation
   proves (D10b) is copied at the end of the frame from either queue. The same view on the
   presenting queue settles as ready Generic depth.
-- C5, the matrix's `S1-evaluate` row over frames: an `OnlyValidNow` tag outside FG scope that its
-  frame's evaluation refuses (S3) loses its tag-call copy (S1), so a run of such frames is mono
-  (witness `20*sr=local; 60*tag=now_list,sr=tag`).
 
 #### Found defects
 
-Only C1 and C2 are limitations the owner approved (until Step 4), and C5 carries the matrix's
-recorded `S1-evaluate` expected failure over frames. Any other row is a defect these tests found,
-its `found` naming when and which test; it is excused only until the owner decides it, so that the
-gate stays usable meanwhile, and the decision removes its row and witness. None is open: the last,
-C8, closed on 10-26. Each run prints found defects apart
+Only C1 and C2 are limitations the owner approved (until Step 4); a matrix row's recorded gap
+over frames would be one too (C5, the last, closed on 10-26). Any other row is a defect these tests
+found, its `found` naming when and which test; it is excused only until the owner decides it, so that
+the gate stays usable meanwhile, and the decision removes its row and witness. None is open: the
+last, C8, closed on 10-26. Each run prints found defects apart
 (`MEASURE native-provider continuity-found-defects` and `MEASURE session-timelines found-defects`,
 each row's violations, or `none`), and a strict run fails their violations as any other:
 `SUNSHINE_GAME3D_CONTINUITY_STRICT=1`, or the contract runner's `-StrictContinuity`, which also
@@ -1913,6 +1909,24 @@ DLSS-G's compute copy supersedes them. That depends on the run's pace alone (bot
 decisions there); it failed 4 of 29 runs during this fix, each when the machine ran fast, and none of
 12 runs of either build once those frames took 297 ms.
 
+C5, the API contract matrix's `S1-evaluate` row over frames (the runtime layer found the row on
+10-23, the session timelines carried it from 10-25), is closed (10-26): an `OnlyValidNow` global or
+frame tag outside FG scope is copied at its call (S1), and the same frame's SR evaluation of that
+tag refuses it for its lifetime (S3, `not-valid-until-present`). That refusal began a new evaluation
+of the viewport with no copy (`withdraw_invalid_attempt`), which superseded the tag call's, so each
+such frame's Present was mono once the depth before aged out. The evaluate now keeps its tag call's
+outcome when every depth tag it refuses is an `OnlyValidNow` tag of the frame it was set for,
+refused for its lifetime ([`api_contract.h`](api_contract.h) `keeps_tag_call_copy`; the frame is the
+evaluate's when it names the tag's frame or no Present came since the tag call, as the capture
+judges a later use of a tag). The evaluate still records its refusal. A tag of an earlier frame and
+a tag refused for anything else still withdraw. The matrix's row, the continuity row, its
+limitation, its tagging and its witness are removed. The runtime family's gap seeds `now-evaluate`
+and `frame-now-evaluate` keep the row's cell (through `slSetTag` and, from 2.7.30,
+`slSetTagForFrame`) in every release, and `test_api_contract.cpp` pins the rule. The witness became
+the regression timelines `C5-frame-tag-then-evaluate` (the witness itself) and
+`C5-global-tag-then-evaluate`. With the fix reverted both fail at frame 35 (a gap,
+`provider_associated`), and so do the row's four `sl27` cells and `frame-now-evaluate`.
+
 `reshade_native_provider_continuity` runs the provider fixture at 1280x720 with the 2.7.30
 interposer, every frame script under the invariant, in about 115 s. Like
 `reshade_addon_unload_runtime` it is labelled `contract;gpu`, runs serially with the `gpu` resource
@@ -1994,17 +2008,19 @@ the timelines before it, so `--shrink-runs` (default 40) and, in the fixed set, 
 a fresh process's `--events` replay may still differ. The fixed set also runs one regression timeline per
 Assassin's Creed Shadows fix (and one for the generated Presents' hold, `repeated-frame-hold`,
 two for C4's fix, `C4-no-fg-call` and `C4-cancelled-fg-tags`, one for C6's,
-`C6-dlssg-after-tag-copy`, one for C7's, `C7-dlssg-stops`, and two for C8's,
-`C8-fg-off-sr-other-queue` and `C8-fg-off-color-only`), an event list shaped like the
+`C6-dlssg-after-tag-copy`, one for C7's, `C7-dlssg-stops`, two for C8's,
+`C8-fg-off-sr-other-queue` and `C8-fg-off-color-only`, and two for C5's,
+`C5-frame-tag-then-evaluate` and `C5-global-tag-then-evaluate`), an event list shaped like the
 session it fixed and judged as any
 timeline (random seeds meet these shapes only by chance, and a change of the event language changes
-every seed), and one witness per open row the timelines found (C5): an event list whose frames meet the
-limitation alone, long enough to lose depth on every run; a witness that loses none fails the set,
-as the matrix's gap seeds keep a recorded gap's own failing cell. `--trace` prints every Present's
+every seed), and one witness per open row the timelines found or carry (none is open since C5 closed
+on 10-26): an event list whose frames meet the limitation alone, long enough to lose depth on every
+run; a witness that loses none fails the set, as the matrix's gap seeds keep a recorded gap's own
+failing cell. `--trace` prints every Present's
 frame record, the supply it was judged with and each recorded refusal.
 
-`reshade_session_timelines` runs the fixed set (24 seeds, eleven regression timelines and one
-witness, about 3930 frames and 9030 Presents) in about 140 s, registered like
+`reshade_session_timelines` runs the fixed set (24 seeds and thirteen regression timelines, about
+4010 frames and 9240 Presents) in about 145 s, registered like
 `reshade_native_provider_continuity` with the same 240 s timeout. Locally:
 
     reshade_game3d_session_timeline_runtime_test [--list] [--timeline <seed> | --events "<list>" |

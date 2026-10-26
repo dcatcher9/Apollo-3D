@@ -350,21 +350,28 @@ namespace {
     // found nothing to hold): one FG tag copy, FG off with frames that
     // supply nothing, then the viewport's SR input on the game's queue.
     {"C8-fg-off-color-only", "20*sr=local; fg=on,tag=present_list; fg=off; 10*defaults; 15*sr=other_queue"},
+    // An OnlyValidNow tag outside FG scope copied at its call (S1), whose
+    // frame's SR evaluation of the tag refuses it for its lifetime (S3),
+    // keeps that copy (known gap C5 until then, the API contract matrix's
+    // S1-evaluate row: the evaluation began one without a copy, so once the
+    // SR depth before aged out every Present was mono). C5's witness, through
+    // slSetTagForFrame, and the same through slSetTag.
+    {"C5-frame-tag-then-evaluate", "20*sr=local; 60*tag=now_list,sr=tag"},
+    {"C5-global-tag-then-evaluate", "20*sr=local; 60*tag=now_list,entry=global,sr=tag"},
   };
 
   // Each known gap the timelines found has a witness: an event list whose
   // frames meet its limitation alone, long enough that every run loses depth
   // there. The fixed set runs them after its seeds, and a witness that loses
-  // none fails it (the gap closed: its fix removes the row and the witness),
-  // as the matrix's gap seeds keep a recorded gap's own failing cell.
+  // none fails it (the gap closed: its fix removes the row and the witness,
+  // which becomes a regression timeline), as the matrix's gap seeds keep a
+  // recorded gap's own failing cell. None is open: the last, C5's, closed on
+  // 10-26.
   struct witness {
     const char *row, *events;
   };
 
-  constexpr witness witnesses[] {
-    // SR depth shown, then OnlyValidNow tags that their evaluations refuse.
-    {"C5-S1-evaluate", "20*sr=local; 60*tag=now_list,sr=tag"},
-  };
+  constexpr std::array<witness, 0> witnesses {};
 
   // The seed of the fixed set's or a soak's index-th timeline.
   std::uint64_t seed_of(std::uint64_t index) {
@@ -1060,10 +1067,7 @@ namespace {
         }
         bool supplied = false;
         if (call.legal && requires_capture(call.expected)) {
-          // An OnlyValidNow tag outside FG scope that the same frame's
-          // evaluation refuses (S3) loses its tag-call copy (known gap C5).
-          const bool refused_later = tag_call.life == matrix::lifecycle::only_valid_now && sr_choice == sr_form::tag && !frame_generation_scope();
-          offer(call, continuity::tag_copy, refused_later ? continuity::limitation::tag_call_then_refused_evaluate : continuity::limitation::none);
+          offer(call, continuity::tag_copy);
           supplied = true;
         }
         if (sr_choice == sr_form::tag) {
