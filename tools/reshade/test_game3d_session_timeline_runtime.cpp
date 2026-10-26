@@ -34,19 +34,23 @@
 //   nothing for illegal input;
 // - each copy decision by the oracle: a contract class its gate records
 //   (SunshineDepthTestLastRefusal) is the oracle's, for a refusal the oracle
-//   requires, and none is recorded for a decision it requires to capture;
+//   requires, none is recorded for a decision it requires to capture, and a
+//   required refusal is recorded unless the FG scope decided the call first;
+// - each untag the oracle names as cancelling its frame's deferred copy (R7)
+//   cancels the deferral its tag call made (SunshineStreamlineTestDeferrals);
 // - a Present, real or generated, shows a fresh copy only while a frame
 //   within the source age supplied an API source (copies recorded on another
-//   queue, which become readable later, aside);
+//   queue, which become readable later, aside), and a fresh FG-input copy
+//   only while one supplied an FG source;
 // - every provider status line names a Present's frame record
 //   (require_records_match_log).
 // A violation of a frame tagged with a known limitation is that gap row's
 // (test_game3d_continuity.h, known_gaps); any other fails the timeline. A
-// failing timeline is printed with its seed and event list, then shrunk
-// (shrinker below) to a minimal reproducer, printed as an event list that
-// --events replays. Each row the timelines found has a witness timeline
-// that must lose depth on every run, and each Assassin's Creed Shadows fix a
-// regression timeline that must not.
+// failing timeline is printed with its seed and event list; once every
+// timeline ran, the first is shrunk (shrinker below) to a minimal
+// reproducer, printed as an event list that --events replays. Each row the
+// timelines found has a witness timeline that must lose depth on every run,
+// and each Assassin's Creed Shadows fix a regression timeline that must not.
 //
 // Command line: [--list] [--timeline <seed> | --events <list> | --seeds N
 // [--from M]] [--shard i/N] [--shrink-runs N] [--trace] official.dll
