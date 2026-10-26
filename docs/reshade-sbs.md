@@ -4119,8 +4119,13 @@ A frame's Present depends on whether the viewport's frame generation is on (its 
   frame inside that frame's Present: where its NGX evaluations are observed in the deferral's scope
   (one within the source age), the frame's Present is the first after an evaluation that followed
   the tag call. Without them it is the first after a game list executed on the presenting queue
-  itself since the tag call (`depth_capture::game_executions_on`, at most 8 queues recorded), which
-  a game presenting on another queue never satisfies, so its deferrals lapse.
+  itself since the tag call (`depth_capture::game_executions_on`), which a game presenting on
+  another queue never satisfies, so its deferrals lapse. That record's table shares the queue
+  places' safety bound: a queue with no entry takes that of the queue whose newest execution is
+  oldest, and a retired queue's entry is freed, so a queue records at its next execution however
+  many queues a session creates (since the Assassin's Creed Shadows hotfix of 10-26; before, the
+  first 8 queues to execute a game list kept their entries for good; ACS 10-25 created 9 queues,
+  its presenting queue the 7th and one recreated mid-session).
 
 An earlier frame's Present neither copies nor ends the deferral (S7); under frame generation it is
 counted (`waited_for_frame`). Without a frame token the frame a global tag names is the viewport's

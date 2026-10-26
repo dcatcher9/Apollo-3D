@@ -1678,20 +1678,36 @@ namespace sunshine_streamline::depth_capture {
     }
     std::atomic<std::uint64_t> game_execution_count{};
     // The newest game execution (its game_execution_count) per queue, as the
-    // submission hook reports it. Bounded and lock-free: a queue beyond these
-    // records none, so a deferred copy that needs it waits for DLSS-G's
-    // evaluation or lapses.
-    struct queue_execution { std::atomic<std::uint64_t> queue{}, newest{}; };
-    std::array<queue_execution, 8> queue_executions{};
+    // submission hook reports it. The queue places' safety bound, not a
+    // budget: a queue with no entry takes a free one, else the entry of the
+    // queue whose newest execution is oldest, and a retired queue's entry is
+    // freed (retire_queue). So no number of queues, nor their churn over a
+    // session, leaves an executing queue without its record; a queue whose
+    // entry was taken records again at its next execution, and until then a
+    // deferred copy that needs it waits. Its 8 entries were once claimed for
+    // good, so a presenting queue beyond them, or one recreated after them,
+    // never recorded; Assassin's Creed Shadows (10-25) created 9 queues, its
+    // presenting queue the 7th and one recreated mid-session.
+    struct queue_execution { std::uint64_t queue{}, newest{}; };
+    std::array<queue_execution, queue_limit> queue_executions{};
+    SRWLOCK queue_execution_lock = SRWLOCK_INIT;
     void note_queue_execution(std::uint64_t queue, std::uint64_t newest) {
-      for (auto &slot : queue_executions) {
-        auto current = slot.queue.load(std::memory_order_acquire);
-        if (!current && slot.queue.compare_exchange_strong(current, queue, std::memory_order_acq_rel)) current = queue;
-        if (current != queue) continue;
-        auto value = slot.newest.load(std::memory_order_relaxed);
-        while (value < newest && !slot.newest.compare_exchange_weak(value, newest, std::memory_order_acq_rel)) {}
-        return;
+      if (!queue) return;
+      AcquireSRWLockExclusive(&queue_execution_lock);
+      auto *entry = &queue_executions.front();
+      for (auto &value : queue_executions) {
+        if (value.queue == queue) { entry = &value; break; }
+        if (value.newest < entry->newest) entry = &value;
       }
+      if (entry->queue != queue) *entry = {queue, 0};
+      entry->newest = std::max(entry->newest, newest);
+      ReleaseSRWLockExclusive(&queue_execution_lock);
+    }
+    void forget_queue_execution(std::uint64_t queue) {
+      if (!queue) return;
+      AcquireSRWLockExclusive(&queue_execution_lock);
+      for (auto &value : queue_executions) if (value.queue == queue) value = {};
+      ReleaseSRWLockExclusive(&queue_execution_lock);
     }
     void observed_submission(std::uint64_t queue, std::uint32_t count, const native_observer::command_identity *values) {
       submitted(queue, count, values);
@@ -1853,6 +1869,8 @@ namespace sunshine_streamline::depth_capture {
       });
     }
     collect_retired();
+    // Its newest game execution goes with it, freeing that entry.
+    forget_queue_execution(native);
   }
   namespace {
     // Idle snapshot storage kept for reuse beyond this is released.
@@ -2122,9 +2140,11 @@ namespace sunshine_streamline::depth_capture {
     com_ptr<ID3D12CommandQueue> checked;
     if (!queue || !query_native(queue, IID_ID3D12CommandQueue, checked)) return 0;
     queue = reinterpret_cast<std::uint64_t>(checked.p); // As the submission hook reports it.
-    for (const auto &slot : queue_executions)
-      if (slot.queue.load(std::memory_order_acquire) == queue) return slot.newest.load(std::memory_order_acquire);
-    return 0;
+    std::uint64_t newest{};
+    AcquireSRWLockShared(&queue_execution_lock);
+    for (const auto &value : queue_executions) if (value.queue == queue) { newest = value.newest; break; }
+    ReleaseSRWLockShared(&queue_execution_lock);
+    return newest;
   }
   bool source_extent(const source_ref &source, std::uint32_t &width, std::uint32_t &height) {
     width = height = 0;

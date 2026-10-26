@@ -1055,6 +1055,11 @@ namespace {
       require(ticket && diagnostic.result == capture::status::recorded, "a compute-list copy was refused while queues churned");
       capture::finish(ticket, true);
       run_compute(compute.Get());
+      // Its newest game execution is recorded however many queues executed
+      // before it (a deferred FG copy waits for one on its presenting queue;
+      // the first 8 queues to execute once kept every record).
+      require(capture::game_executions_on(native(compute.Get())) == capture::game_executions(),
+        "a queue's newest game execution went unrecorded after many queues had executed");
       capture::packet packet;
       capture::capture_diagnostic acquired;
       capture::acquire(native(gpu.foreign_queue.Get()), ++present, packet, &acquired);
@@ -1063,6 +1068,11 @@ namespace {
       packet = {};
       reset_compute();
       capture::retire_source(value.provider, value.epoch, value.source_id);
+      if (n + 1 == 72) {
+        // A retired queue's record goes with it.
+        capture::retire_queue(native(compute.Get()));
+        require(!capture::game_executions_on(native(compute.Get())), "a retired queue kept its newest game execution");
+      }
     }
     require(!capture::capacity_report(report, sizeof(report)) || !std::strstr(report, "queue_places"),
       "queue places ran out while queues churned");
@@ -1078,8 +1088,9 @@ namespace {
       "a full table of busy queue places admitted a queue, reported its bound other than once, or kept an idle place");
     gpu.check_debug_errors();
     std::printf("PASS queue places: 136 reported queues created and retired, then 72 unreported compute queues each placed "
-      "at its copy's submission (idle places reclaimed), nothing refused at the bound; at the bound with every place busy a "
-      "queue got none and the bound was reported once, and an idle place was reclaimed for it%s\n",
+      "at its copy's submission (idle places reclaimed) and each recording its newest game execution, nothing refused at "
+      "the bound, a retired queue's record freed; at the bound with every place busy a queue got none and the bound was "
+      "reported once, and an idle place was reclaimed for it%s\n",
       gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
   }
 
