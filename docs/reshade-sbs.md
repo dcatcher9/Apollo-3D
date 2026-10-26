@@ -4319,6 +4319,18 @@ kind: `depth_format_changed`) or encoding (`depth_encoding_changed`), when the e
 changes, or at the age bound below. A selected snapshot of a new render size of the same source
 (dynamic resolution) does not end it: the held copy keeps its own allocation and active rectangle,
 which consumers map to the screen like any crop, until the new size's first copy replaces it.
+A readable snapshot whose copy into the display texture fails is such a failed successor. The
+consumer records that copy only once every check passed, so a failure leaves the display texture
+as the last successful copy left it, and the same rules hold that copy (readiness lines show
+`source_action=hold source_reason=retained_after_failed_copy`); where they hold nothing the
+Present is mono (`display_copy_failed`). A failure refuses only the snapshot's pixels: an
+observation loss, for one, invalidates the recordings open when it happened, the consumer's among
+them (`consumer=recording_invalid`), never a copy already finished in the display texture on the
+presenting queue. Until 10-26 every failed copy dropped the retained copy, so the first command
+queue a game created while depth was live (the native observer installs its hook for it, an
+observation loss: `loss=global_observation_loss`), as a DLSS-G swapchain's queue the first time
+frame generation presents, made one Present mono while a copy younger than the source age was
+retained (the session tests' continuity gap C3).
 Explicit source interruptions advance the existing admission watermark,
 preventing pre-interruption captures from returning.
 Reused real depth retains its applied gain, zero plane, crop and jitter and does not advance
@@ -4340,11 +4352,11 @@ Nomination, admission of completed snapshots and display-depth reuse share one f
 less than 250 ms from the original depth capture timestamp, defined by `source_age_ms` in
 [`freshness.h`](../tools/reshade/freshness.h). Display-depth reuse also requires the same runtime
 queue and display allocation, unchanged color dimensions and any known depth storage, view and
-resource kind; under enabled FG the retained copy must belong to that FG scope. Failed consumer
-copies, loss of the source association (for example FG Off before an ordinary source exists),
-a disabled game technique, lifecycle resets and expiry invalidate reusable history until a fresh
-copy succeeds. An export stop (a focus loss, or a published Present the add-on did not render)
-invalidates it once, after its `export inactive` line. While the export stays inactive the
+resource kind; under enabled FG the retained copy must belong to that FG scope. Loss of the source
+association (for example FG Off before an ordinary source exists), a new or switched display
+allocation, a disabled game technique, lifecycle resets and expiry invalidate reusable history
+until a fresh copy succeeds. An export stop (a focus loss, or a published Present the add-on did
+not render) invalidates it once, after its `export inactive` line. While the export stays inactive the
 provider keeps its bounded reuse, as the renderer keeps running: invalidating on every background
 Present cleared each real frame's copy before its generated presentations could hold it.
 Assassin's Creed Shadows with FG on (10-23) logged `lost reason=no_retained_depth

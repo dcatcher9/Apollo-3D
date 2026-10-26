@@ -58,12 +58,10 @@ namespace {
   // every Present's record feeds. A Present made while generated is set (one
   // the game makes inside a later frame's recording) presents an earlier
   // frame, whose depth it holds, and leaves the supply to the recorded
-  // frame's Present. queue_created: the
-  // game created a command queue since the previous Present, which tags the
-  // next frame's supply (known gap C3).
+  // frame's Present.
   struct continuity_log_t {
     game3d_continuity::supply pending;
-    bool generated{}, queue_created{};
+    bool generated{};
     const char *where{"session"};
     game3d_continuity::judge judge;
   } continuity_log;
@@ -71,9 +69,6 @@ namespace {
     game3d_continuity::supply frame;
     if (!continuity_log.generated) {
       frame = continuity_log.pending; continuity_log.pending = {};
-      if (continuity_log.queue_created && frame.limit == game3d_continuity::limitation::none)
-        frame.limit = game3d_continuity::limitation::queue_created;
-      continuity_log.queue_created = false;
     }
     sunshine_game3d::frame_record value;
     if (record_history.query && record_history.query(runtime, &value) && value.present &&
@@ -504,14 +499,6 @@ namespace {
     // full-size decoy view every game frame draws (a Generic boundary, its
     // clear after the draws, that API ownership leaves aside, H).
     static void permitted_supply(std::uint8_t sources) { continuity_log.pending.allow(sources, GetTickCount64()); }
-    // The game created a command queue: the next frame meets C3 at the
-    // first queue created mid-session, which gives the native observer the
-    // queue entry points every later queue shares (they lose no depth, and
-    // their frames are judged as any).
-    static void queue_created() {
-      static bool first = true;
-      if (std::exchange(first, false)) continuity_log.queue_created = true;
-    }
     // A later call of the same frame withdrew what it supplied.
     static void withdraw_supply() { continuity_log.pending = {}; }
     // Every violation must be a known gap's (each row's count is reported);
@@ -1283,12 +1270,15 @@ namespace {
               std::to_string(live.order) + " presents_since_copy=" + std::to_string(live.presents_since_copy)).c_str());
         }
         // A layer list executed on a second direct queue: the add-on's
-        // submission hook signals that queue's fence after it.
+        // submission hook signals that queue's fence after it. The run's
+        // first queue created mid-session: installing the native observer's
+        // hook for it is an observation loss that refuses the next Present's
+        // fresh copy, which holds the retained copy (decide_failed_copy), so
+        // the continuity judge sees no loss there (known gap C3 until 10-26).
         com_ptr<ID3D12CommandQueue> second;
         D3D12_COMMAND_QUEUE_DESC second_desc{};
         second_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
         checked(game->CreateCommandQueue(&second_desc, IID_PPV_ARGS(second.put())), "Second direct queue");
-        queue_created();
         // The list also executes a bundle after its clear, as bundle-heavy
         // engines do for their UI draws: the list keeps its own copy.
         com_ptr<ID3D12CommandAllocator> bundle_allocator;
@@ -2894,7 +2884,6 @@ namespace {
       bool on_compute = false;
       queue_ring<3> dlssg_ring;
       dlssg_ring.create(game.p, D3D12_COMMAND_LIST_TYPE_COMPUTE);
-      queue_created();
       // The game's HUD-less and Backbuffer tags: without a command list (as in
       // Shadows), the same followed by the same frame's null untag of both
       // kinds (which cancels their copies deferred to the frame's Present,
@@ -3344,7 +3333,6 @@ namespace {
       constexpr DWORD ring_pace_ms = 20;
       static_assert(decltype(game_ring)::size * ring_pace_ms > sunshine_freshness::source_age_ms + 50);
       game_ring.create(game.p, D3D12_COMMAND_LIST_TYPE_DIRECT);
-      queue_created();
       // FG off: the viewport's SR evaluation with its own depth input, on
       // the presenting queue's list (sr_evaluate) or the game queue's.
       const auto present_queue_sr = [this] {

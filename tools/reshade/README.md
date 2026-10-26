@@ -1743,10 +1743,10 @@ The known gaps are the header's `known_gaps` rows, under the matrix's known-gap 
 their own key: each names a limitation that the fixture tags on the frames that meet it. A
 violation of a tagged frame is its row's only once no copy the presenting queue could read (a
 frame's legal source that meets no limitation) is younger than the source age, as no limitation
-explains an earlier loss: a hold dropped within that age is a violation. The rows whose limitation
-is itself such a drop, C3 and C8, record it (`drops_hold`). Any other violation fails the run, and
+explains an earlier loss: a hold dropped within that age is a violation. The row whose limitation
+is itself such a drop, C8, records it (`drops_hold`). Any other violation fails the run, and
 so does a row whose limitation was supplied in a run without a violation (the gap closed, and the
-fix removes the row). Each provider run with an interposer exercises the first three; the session timelines below
+fix removes the row). Each provider run with an interposer exercises the first two; the session timelines below
 found the other five, which their witness timelines exercise:
 
 - C1, SR depth on another queue (until Step 4's fence observation): `sr-other-queue` warms up with
@@ -1757,9 +1757,9 @@ found the other five, which their witness timelines exercise:
   presenting queue's last copy ages out (in Assassin's Creed Shadows 110-235 ms, about 30
   `no_completed_snapshot` losses a session). The recovery on the presenting queue settles again.
   DLSS-G's own copies on its compute list (N7) are read the same way, once DLSS-G reset that
-  recording, and the session timelines tag their frames with this row too. As every row but C3 and
-  C8, it records a loss only once no copy the presenting queue could read is younger than the
-  source age: a held FG copy dropped for an SR snapshot still in flight on the other queue (fixed by
+  recording, and the session timelines tag their frames with this row too. As every row but C8, it
+  records a loss only once no copy the presenting queue could read is younger than the source
+  age: a held FG copy dropped for an SR snapshot still in flight on the other queue (fixed by
   88b45edf) is a violation.
 - C2, Generic on another queue (until Step 4's fence hooks): `generic-other-queue` lets the API
   association lapse, then draws one view of the swapchain's size on the game's queue with no
@@ -1768,15 +1768,6 @@ found the other five, which their witness timelines exercise:
   is refused (`end_of_frame_refused` grows with `last=missing_state`). A view that only its creation
   proves (D10b) is copied at the end of the frame from either queue. The same view on the
   presenting queue settles as ready Generic depth.
-- C3, a command queue created mid-session, found by the invariant: installing the native
-  observer's hook for the new queue invalidates every capture as an observer loss, the next fresh
-  copy fails its display copy (`consumer=recording_invalid loss=global_observation_loss`) and a
-  failed fresh copy invalidates the display cache instead of holding, so that Present is mono while
-  a copy younger than the source age is retained. The fixture tags the frame after the first queue
-  it creates mid-session (the UI hook's second queue): the observer then holds the queue entry points
-  every later queue shares, and the later ones (DLSS-G's compute queue, the other-queue scripts' game
-  queue) lose no depth, so their frames are judged as any. Its owner note gives the fixes that close
-  it.
 - C4, an FG scope that outlives the copy it can show, found by the session timelines (owner
   decision): a scope stays live for `fg_silent_ms` after its newest accepted copy unless a later
   frame's FG call marks a miss, and keeps the viewport's SR evaluations out meanwhile, while the
@@ -1812,23 +1803,30 @@ found the other five, which their witness timelines exercise:
 #### Found defects
 
 Only C1 and C2 are limitations the owner approved (until Step 4), and C5 carries the matrix's
-recorded `S1-evaluate` expected failure over frames. The other five rows are defects these tests
+recorded `S1-evaluate` expected failure over frames. The other four rows are defects these tests
 found, each row's `found` naming when and which test; they are excused only until the owner decides
 each, so that the gate stays usable meanwhile. Each run prints them apart
 (`MEASURE native-provider continuity-found-defects` and `MEASURE session-timelines found-defects`,
 each row's violations), and a strict run fails their violations as any other:
 `SUNSHINE_GAME3D_CONTINUITY_STRICT=1`, or the contract runner's `-StrictContinuity`, which also
-records `strict_continuity` in `summary.json`. A strict run fails today: the provider fixture at C3,
-and 13 of the fixed set's 34 timelines, each found row's witness among them. The decisions, each
-removing its row and witness:
+records `strict_continuity` in `summary.json`. A strict run fails today at 13 of the fixed set's 34
+timelines, each found row's witness among them. The decisions, each removing its row and witness:
 
 | Row | Found | Decision |
 | --- | --- | --- |
-| C3 | 10-25, T1 | Hold the retained display copy across an observer loss, or install a new queue's hooks without invalidating finished copies. |
 | C4 | 10-25, T2 | Count a frame whose SR evaluation of the viewport comes without a copied FG input as a miss of the FG scope, or end the scope's liveness with its newest copy's source age. |
 | C6 | 10-25, T2 | Key DLSS-G's precedence to the evaluated frame (its token or call sequence) instead of the source age of the scope's last tag copy. |
 | C7 | 10-25, T2 | Wait for DLSS-G before a deferred FG tag copy only while it evaluates every frame, or no longer than the held copy can stand in. |
 | C8 | 10-25, T4 | Hold the FG copy across FG Off within the source age, or rely on Step 4's fence observation (C1). Holding also changes the provider fixture's `fg-off` script, which requires FG Off to drop the copy at a color-only Present. |
+
+C3, a command queue created mid-session (10-25, T1), is closed (10-26): installing the native
+observer's hook for the new queue is an observation loss that refuses the next Present's fresh copy
+(`consumer=recording_invalid loss=global_observation_loss`), and a failed fresh copy dropped the
+retained display copy, so that Present was mono while a copy younger than the source age was
+retained. A failed fresh copy now holds the retained copy as a pending successor does
+([Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection)); the provider fixture judges the frame after its first
+queue created mid-session (the UI hook's second queue) as any, and the seam characterization pins
+`decide_failed_copy`.
 
 `reshade_native_provider_continuity` runs the provider fixture at 1280x720 with the 2.7.30
 interposer, every frame script under the invariant, in about 115 s. Like

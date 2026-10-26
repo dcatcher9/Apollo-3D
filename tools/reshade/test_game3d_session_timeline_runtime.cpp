@@ -590,7 +590,7 @@ namespace {
       dlssg_inputs.set_ui("DLSSG.DepthInverted", 1);
       dlssg_inputs.set_ui("DLSSG.MultiFrameIndex", 1);
       dlssg_inputs.set_ui("DLSSG.MultiFrameCount", 1);
-      // The native observer hooks the new queues (known gap C3) before any
+      // The native observer installs its hooks for the new queues before any
       // timeline is judged.
       render_tracked_depth = {};
       for (const auto until = GetTickCount64() + sunshine_freshness::association_ms; GetTickCount64() < until;) {

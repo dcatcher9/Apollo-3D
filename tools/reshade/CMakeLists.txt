@@ -853,7 +853,7 @@ if(BUILD_TESTING)
     endif()
     # The native provider fixture's frame scripts through the 2.7.30
     # interposer, every Present judged by the continuity invariant (README,
-    # Session-level tests) and its known gaps C1-C3. A GPU check run with the
+    # Session-level tests) and its known gaps C1 and C2. A GPU check run with the
     # contract tests, where the official runtime and the frozen shaders are
     # configured.
     if(SUNSHINE_GAME3D_RESHADE_RUNTIME AND SUNSHINE_GAME3D_FROZEN_SHADERS)

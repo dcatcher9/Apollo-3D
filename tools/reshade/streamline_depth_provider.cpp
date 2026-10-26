@@ -948,7 +948,7 @@ namespace sunshine_streamline::provider {
     const auto &cached = data->cache.depth();
     const auto prior_depth_age = cached.ready && reuse_tick >= cached.provided.tick ?
       reuse_tick - cached.provided.tick : UINT64_MAX;
-    const auto update = fg_hold ? depth_capture::display_decision{depth_capture::display_action::hold, fg_hold} :
+    auto update = fg_hold ? depth_capture::display_decision{depth_capture::display_action::hold, fg_hold} :
       depth_capture::decide_display(acquisition, data->frame, data->cache.reference(), selection, reuse_tick);
     evidence.action = update.action;
     evidence.source_reason = update.reason;
@@ -967,6 +967,15 @@ namespace sunshine_streamline::provider {
           data->frame.metadata.projection.direction_supplied = true;
           data->frame.metadata.projection.reversed = captured.detected_orientation == sunshine_depth::depth_orientation::reversed;
       }
+    }
+    if (update.action == depth_capture::display_action::copy_fresh && !copied) {
+      // A failed fresh copy recorded nothing into the display storage (an
+      // observation loss refuses the consumer's recording, for one): its
+      // frame is a failed newer frame, so the retained copy is held as for a
+      // pending one (decide_failed_copy).
+      update = depth_capture::decide_failed_copy(acquisition, data->frame, data->cache.reference(), selection, reuse_tick);
+      evidence.action = update.action;
+      evidence.source_reason = update.reason;
     }
     if (copied) {
       const auto &packet = data->frame;
@@ -998,10 +1007,9 @@ namespace sunshine_streamline::provider {
         display = display_status::reused_depth;
       }
     } else {
-      // Failed fresh copies cannot fall back into hold. Once invalidated, only
-      // a successful new copy can establish another cache entry.
-      data->cache.invalidate(update.action == depth_capture::display_action::copy_fresh ?
-        "display_copy_failed" : update.reason);
+      // Once invalidated, only a successful new copy can establish another
+      // cache entry.
+      data->cache.invalidate(update.reason);
     }
     track_render_size(*data, copied, display == display_status::reused_depth, available);
     describe_display(recorded, copied, data->output.ready, data->cache.reason(), data->output.provided);

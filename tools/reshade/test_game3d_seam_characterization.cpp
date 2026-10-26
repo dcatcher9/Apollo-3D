@@ -1126,6 +1126,82 @@ namespace sunshine_streamline::depth_capture {
         }
       }
       std::printf("PASS P5/P7 decide_display: %zu rows\n", std::size(rows));
+
+      // decide_failed_copy: provider::begin's decision once a copy_fresh
+      // attempt failed (the consumer refused it, as an observation loss
+      // refuses its recording). The failure records nothing into the display
+      // storage, so the retained copy is held by the rules above; until
+      // 10-26 every failure dropped it (continuity gap C3). Each row edits
+      // the copied case (a selected candidate with ready pixels).
+      const row failed[] {
+        {"A failed copy of the same source holds the retained copy", [](display_case &) {
+         },
+         action::hold,
+         "retained_after_failed_copy"},
+        {"A failed copy of a new render size of the same source holds", [](display_case &d) {
+           d.candidate.width = 2206;
+           d.candidate.height = 1240;
+           d.candidate.area = {0, 0, 2048, 1152};
+         },
+         action::hold,
+         "retained_after_failed_copy"},
+        {"A failed copy of required FG's input holds its scope's retained copy", fg_retained, action::hold,
+         "retained_after_failed_copy"},
+        {"A failed copy with the retained copy just under the source age", [](display_case &d) {
+           d.now = 1000 + source_age - 1;
+         },
+         action::hold,
+         "retained_after_failed_copy"},
+        {"A failed copy with nothing retained", [](display_case &d) {
+           d.previous.capture_id = 0;
+         },
+         action::invalidate,
+         "display_copy_failed"},
+        {"A failed copy of another source", [](display_case &d) {
+           d.current.source_id = d.candidate.metadata.source_id = 4;
+         },
+         action::invalidate,
+         "display_copy_failed"},
+        {"A failed copy of an older sequence than the retained copy", [](display_case &d) {
+           d.current.sequence = d.candidate.metadata.sequence = 29;
+         },
+         action::invalidate,
+         "display_copy_failed"},
+        {"A failed copy of another storage family", [](display_case &d) {
+           ++d.candidate.format;
+         },
+         action::invalidate,
+         "display_copy_failed"},
+        {"A failed copy of another depth encoding", [](display_case &d) {
+           d.candidate.metadata.projection.encoding = sunshine_scene_depth::depth_encoding::linear_distance;
+         },
+         action::invalidate,
+         "display_copy_failed"},
+        {"A failed copy under required FG with a retained SR copy", [](display_case &d) {
+           d.policy = {true, 8, 2};
+         },
+         action::invalidate,
+         "display_copy_failed"},
+        {"A failed copy with the retained copy exactly the source age old", [](display_case &d) {
+           d.now = 1000 + source_age;
+         },
+         action::invalidate,
+         "display_copy_failed"},
+      };
+      for (const auto &r : failed) {
+        auto d = base();
+        d.current.source_selected = d.candidate.pixel_ready = true;
+        r.edit(d);
+        const auto attempt = decide_display(d.current, d.candidate, d.previous, d.policy, d.now);
+        const auto got = decide_failed_copy(d.current, d.candidate, d.previous, d.policy, d.now);
+        if (attempt.action != action::copy_fresh || got.action != r.expected || std::strcmp(got.reason, r.reason) != 0) {
+          char text[512];
+          std::snprintf(text, sizeof(text), "P7 decide_failed_copy, %s: attempt %d, action %d reason %s", r.pins,
+            int(attempt.action), int(got.action), got.reason);
+          fail(text);
+        }
+      }
+      std::printf("PASS P7 decide_failed_copy: %zu rows\n", std::size(failed));
     }
 
     // P11: ui_input::acquire's admission of each ready UI snapshot

@@ -45,10 +45,60 @@ namespace sunshine_streamline::depth_capture {
     }
   }
 
+  namespace detail {
+    // decide_display, for a selected candidate whose pixels can be copied at
+    // this Present (readable) or no longer can (its copy failed).
+    inline display_decision decide(const acquisition_decision &current, const packet &candidate,
+        const retained_depth &previous, selection_policy policy, std::uint64_t now, bool readable) {
+      display_decision out;
+      if (policy.exclude_unconfirmed_fg && current.source_selected && candidate.metadata.frame_generation_input) {
+        out.reason = "FG_scope_unconfirmed";
+        return out;
+      }
+      if (current.source_selected && readable) {
+        out.action = display_action::copy_fresh;
+        out.reason = "fresh_copy_candidate";
+        return out;
+      }
+      if (!previous.capture_id || !previous.metadata.epoch) return out;
+      const auto &before = previous.metadata;
+      if (policy.exclude_unconfirmed_fg && before.frame_generation_input) {
+        out.reason = "FG_scope_unconfirmed";
+        return out;
+      }
+      // FG owns one logical SL input; ordinary depth cannot stand in for it.
+      if (policy.require_frame_generation && (!before.frame_generation_input ||
+          before.provider != sunshine_scene_depth::provider_kind::streamline ||
+          before.epoch != policy.epoch || before.viewport != policy.viewport)) {
+        out.reason = "FG_scope_changed";
+        return out;
+      }
+      if (!same_source(previous, current)) {
+        out.reason = "source_changed";
+        return out;
+      }
+      if (current.source_selected && !same_storage(previous, candidate)) {
+        out.reason = "depth_format_changed";
+        return out;
+      }
+      if (current.source_selected && before.projection.encoding != candidate.metadata.projection.encoding) {
+        out.reason = "depth_encoding_changed";
+        return out;
+      }
+      if (!sunshine_freshness::within_source_age(before.tick, now)) {
+        out.reason = "retained_depth_expired";
+        return out;
+      }
+      out.action = display_action::hold;
+      out.reason = "retained_copy";
+      return out;
+    }
+  }
+
   // Source policy only. copy_fresh authorizes an attempt, never a successful
-  // copy: failure must invalidate, not re-enter this policy to hold old pixels.
-  // Otherwise the newest successful private copy is held while it is younger
-  // than the source age (freshness.h) and the provider still names the same source.
+  // copy (decide_failed_copy decides a failed one). Otherwise the newest
+  // successful private copy is held while it is younger than the source age
+  // (freshness.h) and the provider still names the same source.
   // A pending, failed or missing newer frame, a new render size of the same
   // source, a camera reset and tag or observation bookkeeping never discard
   // it; a changed source, storage format, view or resource kind, encoding and
@@ -57,47 +107,25 @@ namespace sunshine_streamline::depth_capture {
   // successful fresh copy may replace retained_depth; holds never refresh it.
   inline display_decision decide_display(const acquisition_decision &current, const packet &candidate,
       const retained_depth &previous, selection_policy policy, std::uint64_t now) {
-    display_decision out;
-    if (policy.exclude_unconfirmed_fg && current.source_selected && candidate.metadata.frame_generation_input) {
-      out.reason = "FG_scope_unconfirmed";
-      return out;
-    }
-    if (current.source_selected && candidate.pixel_ready) {
-      out.action = display_action::copy_fresh;
-      out.reason = "fresh_copy_candidate";
-      return out;
-    }
-    if (!previous.capture_id || !previous.metadata.epoch) return out;
-    const auto &before = previous.metadata;
-    if (policy.exclude_unconfirmed_fg && before.frame_generation_input) {
-      out.reason = "FG_scope_unconfirmed";
-      return out;
-    }
-    // FG owns one logical SL input; ordinary depth cannot stand in for it.
-    if (policy.require_frame_generation && (!before.frame_generation_input ||
-        before.provider != sunshine_scene_depth::provider_kind::streamline ||
-        before.epoch != policy.epoch || before.viewport != policy.viewport)) {
-      out.reason = "FG_scope_changed";
-      return out;
-    }
-    if (!detail::same_source(previous, current)) {
-      out.reason = "source_changed";
-      return out;
-    }
-    if (current.source_selected && !detail::same_storage(previous, candidate)) {
-      out.reason = "depth_format_changed";
-      return out;
-    }
-    if (current.source_selected && before.projection.encoding != candidate.metadata.projection.encoding) {
-      out.reason = "depth_encoding_changed";
-      return out;
-    }
-    if (!sunshine_freshness::within_source_age(before.tick, now)) {
-      out.reason = "retained_depth_expired";
-      return out;
-    }
-    out.action = display_action::hold;
-    out.reason = "retained_copy";
+    return detail::decide(current, candidate, previous, policy, now, candidate.pixel_ready);
+  }
+
+  // A copy_fresh attempt that failed. The consumer records its copy into the
+  // display storage only once every check passed (copy_current), so a failed
+  // attempt leaves the newest successful private copy as it was, and the
+  // candidate is a failed newer frame of its source: the retained copy is
+  // held by decide_display's rules for a pending one (the same source,
+  // storage, encoding and FG scope, younger than the source age:
+  // retained_after_failed_copy). A failure refuses the candidate's pixels
+  // only. An observation loss, for one (a hook installed for a queue created
+  // mid-session), invalidates the recordings open when it happened, the
+  // consumer's among them (recording_invalid), never a copy already finished
+  // in the display storage on the presenting queue. Where those rules hold
+  // nothing, the Present is mono (display_copy_failed).
+  inline display_decision decide_failed_copy(const acquisition_decision &current, const packet &candidate,
+      const retained_depth &previous, selection_policy policy, std::uint64_t now) {
+    auto out = detail::decide(current, candidate, previous, policy, now, false);
+    out.reason = out.action == display_action::hold ? "retained_after_failed_copy" : "display_copy_failed";
     return out;
   }
 
