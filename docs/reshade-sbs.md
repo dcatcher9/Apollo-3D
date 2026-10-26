@@ -3965,6 +3965,10 @@ AddonInit. A failed pin fails AddonInit. The session storage is
 process-persistent, preventing a second implicit CRT cleanup owner. A shared detach fence stops
 callback observation before other C++ owners are destroyed; vendor calls still forward normally.
 Ordinary add-on unload continues to unregister callbacks and release its active session resources.
+A device whose session captured depth is not destroyed when the game releases it: capture storage
+and source references hold ReShade's device proxy (its `ID3D12Resource::GetDevice` hook returns it)
+and the capture registry the released queues, so no unload comes and the game's next device is the
+same one (known gap L1 of the lifecycle test, [Session-level tests](../tools/reshade/README.md#session-level-tests)).
 
 Streamline 2.x has a synchronous depth tag adapter independent of Frame Generation. Ordinary
 `OnlyValidNow` depth can be copied on the command list supplied to a successful tag call even if

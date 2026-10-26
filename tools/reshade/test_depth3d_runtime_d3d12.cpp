@@ -219,6 +219,20 @@ namespace {
       if (runtime_module) {
         reshade::unregister_addon(GetModuleHandleW(nullptr), runtime_module);
       }
+      release_game_device();
+      if (window) {
+        DestroyWindow(window);
+      }
+      // As in the natural runtime fixtures, leave the DLL loaded until process
+      // exit, after the hooked native graphics objects have been released.
+    }
+
+    // Releases what create_game_device made. Once a derived fixture has
+    // released its own objects of the device too, the game's swapchain and
+    // device end: ReShade destroys its runtime and, with its last device,
+    // unloads its add-ons (the add-on lifecycle fixture).
+    void release_game_device() {
+      observed.mono = nullptr;
       exported.reset();
       linear_depth.reset();
       depth.reset();
@@ -234,12 +248,9 @@ namespace {
       game.reset();
       if (completion_event) {
         CloseHandle(completion_event);
+        completion_event = nullptr;
       }
-      if (window) {
-        DestroyWindow(window);
-      }
-      // As in the natural runtime fixtures, leave the DLL loaded until process
-      // exit, after the hooked native graphics objects have been released.
+      fence_value = 0;
     }
 
     void buffer(com_ptr<ID3D12Resource> &resource, UINT64 size, D3D12_HEAP_TYPE type) {
@@ -438,6 +449,14 @@ namespace {
       window = CreateWindowExW(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, wc.lpszClassName, L"Hidden Depth3D D3D12 depth probe", WS_OVERLAPPEDWINDOW, 0, 0, bounds.right - bounds.left, bounds.bottom - bounds.top, nullptr, nullptr, wc.hInstance, nullptr);
       require(window && !IsWindowVisible(window), "Could not create hidden fixture window");
       if (before_game_device) before_game_device();
+      create_game_device();
+    }
+
+    // The game's device and the objects of it the fixture owns: its queue,
+    // swapchain and backbuffers, recording, fence and source image. initialize
+    // creates them once; the add-on lifecycle fixture releases them
+    // (release_game_device) and creates them again for the same window.
+    void create_game_device() {
       const auto create = reinterpret_cast<decltype(&D3D12CreateDevice)>(GetProcAddress(runtime_module, "D3D12CreateDevice"));
       const auto create_factory = reinterpret_cast<decltype(&CreateDXGIFactory2)>(GetProcAddress(runtime_module, "CreateDXGIFactory2"));
       require(create && create_factory, "Official runtime lacks D3D12 proxy exports");

@@ -191,7 +191,10 @@ endfunction()
 sunshine_game3d_core_view(sunshine_game3d_core)
 set(sunshine_addon_targets SunshineSBS)
 if(SUNSHINE_SBS_RUNTIME_TESTS)
-  sunshine_game3d_core_view(sunshine_game3d_core_runtime_test SEAMS SUNSHINE_SBS_RUNTIME_TEST_ADDON)
+  # The test add-on also carries the renderer's background-build hooks, all
+  # inert until a fixture sets them (the add-on lifecycle fixture's mid-build
+  # device destruction).
+  sunshine_game3d_core_view(sunshine_game3d_core_runtime_test SEAMS SUNSHINE_SBS_RUNTIME_TEST_ADDON SUNSHINE_GAME3D_RENDERER_TEST)
   list(APPEND sunshine_addon_targets SunshineSBSTest)
 endif()
 foreach(sunshine_addon_target IN LISTS sunshine_addon_targets)
@@ -911,15 +914,17 @@ if(BUILD_TESTING)
     target_compile_definitions(reshade_native_present_d3d12_test PRIVATE SUNSHINE_NATIVE_EXPORT_FIXTURE)
     target_compile_definitions(reshade_game_present_d3d12_test PRIVATE SUNSHINE_GAME_EXPORT_FIXTURE)
 
-    # ReShade's add-on unload with a short-lived startup device while the
-    # add-on's pool work still runs, and its reinitialization for the next
-    # device (README, Diagnostics and validation). A GPU check run with the contract
-    # tests, where the official runtime and the frozen shaders are configured.
+    # The add-on's lifecycle under ReShade (README, Session-level tests): in
+    # one process a startup device, devices destroyed while shaders compile or
+    # the renderer builds on the pool, and game devices verified by a session
+    # timeline, then destroyed with frames in flight (known gap L1). A GPU
+    # check run with the contract tests, where the official runtime and the
+    # frozen shaders are configured.
     add_executable(reshade_addon_unload_runtime_test test_addon_unload_runtime.cpp)
     target_compile_features(reshade_addon_unload_runtime_test PRIVATE cxx_std_17)
     target_include_directories(reshade_addon_unload_runtime_test SYSTEM PRIVATE "${SUNSHINE_RESHADE_INCLUDE_DIR}")
-    target_link_libraries(reshade_addon_unload_runtime_test PRIVATE d3d12 dxgi dxguid d3dcompiler user32)
-    add_dependencies(reshade_addon_unload_runtime_test SunshineSBSTest)
+    target_link_libraries(reshade_addon_unload_runtime_test PRIVATE nlohmann_json::nlohmann_json d3d12 dxgi dxguid d3dcompiler psapi user32)
+    add_dependencies(reshade_addon_unload_runtime_test SunshineSBSTest reshade_frame_generation_interposer)
     if(MINGW)
       target_link_options(reshade_addon_unload_runtime_test PRIVATE -static)
     endif()
@@ -928,9 +933,10 @@ if(BUILD_TESTING)
       add_test(NAME reshade_addon_unload_runtime_output COMMAND "${CMAKE_COMMAND}" -E rm -rf "${addon_unload_output}")
       set_tests_properties(reshade_addon_unload_runtime_output PROPERTIES FIXTURES_SETUP addon_unload_output LABELS "contract;gpu")
       add_test(NAME reshade_addon_unload_runtime COMMAND reshade_addon_unload_runtime_test
-        "${SUNSHINE_GAME3D_RESHADE_RUNTIME}" "${SUNSHINE_GAME3D_FROZEN_SHADERS}" "$<TARGET_FILE:SunshineSBSTest>" "${addon_unload_output}")
+        "${SUNSHINE_GAME3D_RESHADE_RUNTIME}" "${SUNSHINE_GAME3D_FROZEN_SHADERS}" "$<TARGET_FILE:SunshineSBSTest>" "${addon_unload_output}"
+        "$<TARGET_FILE:reshade_frame_generation_interposer>")
       set_tests_properties(reshade_addon_unload_runtime PROPERTIES LABELS "contract;gpu" RUN_SERIAL TRUE
-        RESOURCE_LOCK gpu TIMEOUT 150 FIXTURES_REQUIRED addon_unload_output)
+        RESOURCE_LOCK gpu TIMEOUT 200 FIXTURES_REQUIRED addon_unload_output)
     endif()
   endif()
 endif()

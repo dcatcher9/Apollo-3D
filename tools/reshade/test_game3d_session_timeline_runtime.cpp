@@ -509,6 +509,14 @@ namespace {
       void *function {};
       require(getter(1000, "slDLSSGSetOptions", function) == 0 && function, "The interposer did not expose FG options");
       sl.set_options = reinterpret_cast<set_options_t>(function);
+      setup_device();
+    }
+
+    // The objects of the game's device the timelines use: its own direct
+    // queue, DLSS-G's compute queue, the HUD-less and Backbuffer images and
+    // DLSS-G's inputs. The add-on lifecycle fixture creates them again for
+    // each game device.
+    void setup_device() {
       create_queues();
       auto color = backbuffers[0]->GetDesc();
       color.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
@@ -1458,6 +1466,9 @@ namespace {
   }
 }  // namespace
 
+// The add-on lifecycle fixture (test_addon_unload_runtime.cpp) includes the
+// timeline fixture alone.
+#ifndef SUNSHINE_SESSION_TIMELINE_FIXTURE_ONLY
 int main(int argc, char **argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   options chosen;
@@ -1620,3 +1631,4 @@ int main(int argc, char **argv) {
     return 1;
   }
 }
+#endif

@@ -1363,19 +1363,11 @@ Every checked present inspects current depth and source-color pixels, including 
 missing/unsupported depth. Run one frozen executable against both control and treatment;
 these checks deliberately exercise the capture/selection/calibration boundaries.
 
-`reshade_addon_unload_runtime_test` uses the same four arguments as the probe-round fixture and
-checks the add-on across ReShade's add-on unload
-([its session lifetime](../../docs/reshade-sbs.md#streamline-depth-selection)). Before the game's
-device it creates and destroys a startup device with no queue, swapchain or frame, as Assassin's
-Creed Shadows does. Its initialization starts the add-on's module discovery and content-sampler
-compile on pool threads, and the test add-on's `SunshineSbsTestHoldPoolWork` adds one pool callback
-of the add-on's own code that waits until after the unload, then compiles through the add-on's
-D3DCompiler import. ReShade must uninitialize the add-on with that device and leave the module
-mapped; the held callback must then compile and return, and the game's device must initialize the
-same module again and render native Game 3D from its drawn depth. Without AddonInit's pin the
-module is unmapped and the fixture fails at that check. Where the official runtime and frozen
-shaders are configured it is registered as `reshade_addon_unload_runtime`, labelled `contract;gpu`
-and `RUN_SERIAL` with the `gpu` resource lock, so the contract runner runs it.
+`reshade_addon_unload_runtime_test` checks the add-on across ReShade's add-on unload and reload
+([its session lifetime](../../docs/reshade-sbs.md#streamline-depth-selection)), from a startup
+device with no queue, swapchain or frame (as Assassin's Creed Shadows creates) to game devices
+destroyed with frames in flight. It is the lifecycle test of
+[Session-level tests](#session-level-tests).
 
 Shared native-depth, uniform and HDR mono observations of the depth fixtures live in
 `test_raw_runtime_fixture.h`. The shared shader/transport fixtures retain their own contracts.
@@ -1438,7 +1430,7 @@ every file of a binary sees the same declarations; a binary links one view.
 | View | Seam defines | Linked by |
 |---|---|---|
 | `sunshine_game3d_core` | none | `SunshineSBS`, `replay_game3d_dump`, and the tests without a seam (UI mask, UI capture, UI layer, camera data, queue-cycle and source-alpha) |
-| `sunshine_game3d_core_runtime_test` | `SUNSHINE_SBS_RUNTIME_TEST_ADDON` | `SunshineSBSTest` |
+| `sunshine_game3d_core_runtime_test` | `SUNSHINE_SBS_RUNTIME_TEST_ADDON`, `SUNSHINE_GAME3D_RENDERER_TEST` (the renderer's build hooks, inert until the lifecycle test sets them) | `SunshineSBSTest` |
 | `sunshine_game3d_core_sbs_test` | `SUNSHINE_SBS_TEST` | `reshade_exporter_tests`, whose test file compiles `exporter.cpp` itself |
 | `sunshine_game3d_core_probe_test` | Streamline probe, NGX call trace, native observers, synchronous log | the probe, contract matrix (pure, hook and device layers), seam characterization, call trace, native observer and diagnostic-texture tests |
 | `sunshine_game3d_core_renderer_test` | `SUNSHINE_GAME3D_RENDERER_TEST` | the native runtime tests |
@@ -1868,6 +1860,65 @@ seed and `--events` one list (frames separated by `;`, each `defaults` or `name=
 repeating one); `--seeds N --from M` soaks N further seeds. Soaks over the 350 seeds after the fixed
 set (`--from 24`) found the shapes of C4, C6 and C7 beyond their witnesses; seeds 279 to 373 then
 passed with no failure.
+
+The lifecycle test
+([`test_addon_unload_runtime.cpp`](test_addon_unload_runtime.cpp)) covers the add-on across
+ReShade's unload, which comes whenever a game destroys its last device, and the reload for the next
+one (the crash fixed by 5148a6da: Assassin's Creed Shadows' startup device). It includes the
+timelines' fixture and drives one process, one hidden window and these devices:
+
+1. a startup device with no queue, swapchain or frame, destroyed while its initialization's module
+   discovery and content-sampler compile run on the pool;
+2. the game's first device, through the FX boot and Streamline discovery until Game 3D renders;
+3. a device of another swapchain size, destroyed while its shader entries compile on the pool (the
+   add-on's shader store is isolated in the output directory, so each size compiles);
+4. a device destroyed while its renderer builds on the pool (the test add-on carries the renderer's
+   build hooks, inert until set, and delays each step by 40 ms);
+5. three game devices in turn, on one Streamline viewport, each verified by a session timeline,
+   then destroyed with frames in flight: the add-on's copies of the last frames not yet observed,
+   DLSS-G's compute copies whose ring entries were never reset, and a last frame recorded and
+   submitted but never presented, whose command-less FG depth tag (the oracle names its copy
+   deferred to that Present) and UI tags leave copies deferred to it.
+
+Each device also leaves one held pool callback of the add-on's code (`SunshineSbsTestHoldPoolWork`),
+and as ReShade destroys it a `destroy_device` probe queues 128 lines in the add-on's asynchronous
+log writer (`SunshineSbsTestLog`). After each unload the module must still be mapped, the held
+callback must compile and return, the 128 lines must be written in order, the shader compiles must
+finish (`SunshineGame3DTestShaderEntriesPending`) and the renderer builds must be released
+(`SunshineGame3DTestRendererBuilds`), and the next native device must carry no private data the test
+set on the one before (D3D12 returns an adapter's existing device while a reference keeps it alive).
+Game 3D must render on each game device, reloaded after the unloads before it, and each game
+device's timeline (30 frames of SR depth with the game's HUD-less and Backbuffer tags, 31 of FG
+depth tags, 10 of DLSS-G compute evaluations, then 31 of SR depth with the tags on the game's list)
+must pass the continuity invariant and the oracle and render Game 3D from API depth, show an FG
+scope's depth and offer the UI pair to detection.
+
+Known gap L1, found by this test: a device whose session captured depth outlives the game's release
+of it. ReShade's `ID3D12Resource::GetDevice` hook returns its device proxy with a reference, and the
+add-on's capture storage and source references keep those (8 in this test) until a later Present
+reuses or retires the storage. When the game stops presenting and releases the device, no
+`destroy_device` event comes: ReShade neither destroys the device nor unloads the add-on, and the
+game's next `D3D12CreateDevice` returns the same device. On it Game 3D must render depth, FG depth and
+UI again, and one more cycle must leave the process's handles (64), threads (8), GDI and USER objects
+(4) and private bytes (32 MB) within those bounds of the cycle before. The capture registry also keeps
+each released queue whose captures it retains (ReShade logs its `Reference count for
+ID3D12CommandQueue` as inconsistent, one more per cycle), and it holds four: the device's fourth
+session (its third recreation) lost FG depth (`FG_scope_required`, mono), so the test makes two
+recreations. Each of the three game devices witnesses the gap; one that ReShade destroys fails the
+run (the gap closed: remove the row and require the unload and reload of the in-flight devices).
+Device removal is not simulated; a removed device the add-on keeps alive would be the one the game's
+next `D3D12CreateDevice` returns.
+
+Changing the Streamline viewport is outside the lifecycle: in one session, a new viewport's FG scope
+showed no FG depth (`source_handoff`, mono) for a whole timeline while an earlier viewport that used
+FG had not been retired by the timelines' isolation (four scratch viewports' constants), whether or
+not the device was recreated. The lifecycle keeps one viewport, as games do.
+
+`reshade_addon_unload_runtime` runs it with the 2.7.30 interposer in about 27 s, registered like
+`reshade_native_provider_continuity` (200 s timeout). Locally:
+
+    reshade_addon_unload_runtime_test official.dll frozenShaders test.addon64 freshOutput
+      frame_generation_interposer.dll
 
 ### Characterization tests
 
