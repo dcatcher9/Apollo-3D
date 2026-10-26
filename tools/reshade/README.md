@@ -1804,6 +1804,26 @@ found the other five, which their witness timelines exercise:
   88b45edf's hold keeps an FG copy over a pending SR copy only while FG is on (witness
   `20*sr=local; fg=on,tag=present_list; fg=off,sr=other_queue; 10*sr=other_queue`).
 
+#### Found defects
+
+Only C1 and C2 are limitations the owner approved (until Step 4), and C5 carries the matrix's
+recorded `S1-evaluate` expected failure over frames. The other five rows are defects these tests
+found, each row's `found` naming when and which test; they are excused only until the owner decides
+each, so that the gate stays usable meanwhile. Each run prints them apart
+(`MEASURE native-provider continuity-found-defects` and `MEASURE session-timelines found-defects`,
+each row's violations), and a strict run fails their violations as any other:
+`SUNSHINE_GAME3D_CONTINUITY_STRICT=1`, or the contract runner's `-StrictContinuity`, which also
+records `strict_continuity` in `summary.json`. A strict run fails today, in each found row's witness
+(and C3 in the provider fixture). The decisions, each removing its row and witness:
+
+| Row | Found | Decision |
+| --- | --- | --- |
+| C3 | 10-25, T1 | Hold the retained display copy across an observer loss, or install a new queue's hooks without invalidating finished copies. |
+| C4 | 10-25, T2 | Count a frame whose SR evaluation of the viewport comes without a copied FG input as a miss of the FG scope, or end the scope's liveness with its newest copy's source age. |
+| C6 | 10-25, T2 | Key DLSS-G's precedence to the evaluated frame (its token or call sequence) instead of the source age of the scope's last tag copy. |
+| C7 | 10-25, T2 | Wait for DLSS-G before a deferred FG tag copy only while it evaluates every frame, or no longer than the held copy can stand in. |
+| C8 | 10-25, T4 | Hold the FG copy across FG Off within the source age, or rely on Step 4's fence observation (C1). Holding also changes the provider fixture's `fg-off` script, which requires FG Off to drop the copy at a color-only Present. |
+
 `reshade_native_provider_continuity` runs the provider fixture at 1280x720 with the 2.7.30
 interposer, every frame script under the invariant, in about 115 s. Like
 `reshade_addon_unload_runtime` it is labelled `contract;gpu`, runs serially with the `gpu` resource

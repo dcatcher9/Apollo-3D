@@ -22,6 +22,10 @@ The runtime layer is registered only when -ReShadeRuntime and -FrozenShaders are
 build is already configured with them). It and the device layer open GPU work in a hidden
 window: run them alone, with no game running, or pass -SkipGpu.
 
+-StrictContinuity sets SUNSHINE_GAME3D_CONTINUITY_STRICT=1 for ctest: the session tests then fail
+the violations of the continuity invariant's found defects (README.md, "Found defects"), which a
+default run excuses until the owner decides each.
+
 A contract test that ctest reports as skipped (the device layer exits 77 without a hardware
 adapter or without the D3D12 debug layer) is listed in summary.json and on the console, and fails
 the run unless -AllowSkip is given.
@@ -39,7 +43,8 @@ param(
   [string] $Toolchain = 'C:\msys64\ucrt64\bin',
   [switch] $SkipBuild,
   [switch] $SkipGpu,
-  [switch] $AllowSkip
+  [switch] $AllowSkip,
+  [switch] $StrictContinuity
 )
 
 Set-StrictMode -Version Latest
@@ -112,10 +117,12 @@ try {
   $commit = & git -C $repositoryRoot rev-parse HEAD
   $uncommitted = @(& git --no-optional-locks -C $repositoryRoot status --porcelain --untracked-files=no)
   $env:SUNSHINE_CONTRACT_MATRIX_JSONL = $hookLines
+  if ($StrictContinuity) { $env:SUNSHINE_GAME3D_CONTINUITY_STRICT = '1' }
   try {
     $ctestCode = Invoke-Native 'ctest -L contract' $ctest $arguments (Join-Path $results 'ctest.log')
   } finally {
     Remove-Item Env:SUNSHINE_CONTRACT_MATRIX_JSONL -ErrorAction SilentlyContinue
+    Remove-Item Env:SUNSHINE_GAME3D_CONTINUITY_STRICT -ErrorAction SilentlyContinue
   }
   if (-not (Test-Path -LiteralPath $junit -PathType Leaf)) { throw "ctest wrote no results; see $results\ctest.log." }
 
@@ -199,7 +206,7 @@ try {
   # UTF-8 without a byte-order mark, which would corrupt the first JSON line.
   $utf8 = New-Object Text.UTF8Encoding $false
   [IO.File]::WriteAllLines((Join-Path $results 'contract-matrix.jsonl'), $lines, $utf8)
-  $summaryJson = [ordered]@{ commit = $commit; uncommitted = $uncommitted; ctest_exit = $ctestCode; skipped_gpu = [bool]$SkipGpu; skipped = $skipped; families = $families; problems = $problems } | ConvertTo-Json -Depth 6
+  $summaryJson = [ordered]@{ commit = $commit; uncommitted = $uncommitted; ctest_exit = $ctestCode; skipped_gpu = [bool]$SkipGpu; strict_continuity = [bool]$StrictContinuity; skipped = $skipped; families = $families; problems = $problems } | ConvertTo-Json -Depth 6
   [IO.File]::WriteAllText((Join-Path $results 'summary.json'), $summaryJson, $utf8)
   if (-not @($families.Keys | Where-Object { $_ -like 'L3 *' }).Count -and -not $SkipGpu) {
     Write-Host 'The runtime layer is not registered: configure with -ReShadeRuntime and -FrozenShaders to run it.'

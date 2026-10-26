@@ -438,7 +438,7 @@ namespace {
       std::array<unsigned, game3d_continuity::gap_count> known{};
       std::size_t unknown{};
       for (const auto &value : violations) {
-        const auto row = game3d_continuity::known(value);
+        const auto row = game3d_continuity::excused(value);
         if (row >= 0) { ++known[std::size_t(row)]; continue; }
         if (++unknown <= 8) std::printf("MEASURE native-provider continuity-violation %s\n", game3d_continuity::describe(value).c_str());
       }
@@ -463,7 +463,7 @@ namespace {
       for (std::size_t i = 0; i != game3d_continuity::gap_count; ++i)
         std::printf(" %s={supplied=%u violations=%u}", game3d_continuity::known_gaps[i].id, judge.rows()[i].exercised,
           judge.rows()[i].violations);
-      std::printf("\n");
+      std::printf("\nMEASURE native-provider continuity-found-defects %s\n", game3d_continuity::found_defects(judge.rows()).c_str());
       for (std::size_t i = 0; i != game3d_continuity::gap_count; ++i)
         if (judge.rows()[i].exercised && !judge.rows()[i].violations)
           throw std::runtime_error(std::string("Continuity known gap ") + game3d_continuity::known_gaps[i].id +

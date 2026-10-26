@@ -443,7 +443,7 @@ namespace {
 
   struct run_result {
     std::vector<failure> failures;
-    std::array<continuity::judge::row_tally, continuity::gap_count> rows {};
+    std::array<continuity::row_tally, continuity::gap_count> rows {};
     unsigned presents {}, generated {}, legal {}, shown {}, stalls {}, frames {};
     // Copy decisions judged, required refusals whose gate recorded the
     // oracle's class or that the FG scope decided first, and untags judged
@@ -1430,7 +1430,7 @@ namespace {
       result.stalls = judge.stalls();
       result.frames = unsigned(value.frames.size());
       for (const auto &violation : continuity_log.judge.take()) {
-        if (continuity::known(violation) >= 0) {
+        if (continuity::excused(violation) >= 0) {
           continue;
         }
         const auto found = present_frames.find(violation.present);
@@ -1721,7 +1721,7 @@ int main(int argc, char **argv) {
       }
     } foreground {fixture};
 
-    std::array<continuity::judge::row_tally, continuity::gap_count> rows {};
+    std::array<continuity::row_tally, continuity::gap_count> rows {};
     unsigned failed {}, presents {}, generated {}, legal {}, shown {}, frames_run {}, decisions {};
     // The first failing timeline (other than a closed witness), shrunk once
     // every timeline ran.
@@ -1800,7 +1800,7 @@ int main(int argc, char **argv) {
     for (std::size_t r = 0; r != rows.size(); ++r) {
       std::printf(" %s={supplied=%u violations=%u}", continuity::known_gaps[r].id, rows[r].exercised, rows[r].violations);
     }
-    std::printf("\n");
+    std::printf("\nMEASURE session-timelines found-defects %s\n", continuity::found_defects(rows).c_str());
     reshade::unregister_event<reshade::addon_event::reshade_present>(record_present);
     reshade::unregister_event<reshade::addon_event::reset_command_list>(observe_reset);
     if (failed) {
