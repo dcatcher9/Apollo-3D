@@ -2480,6 +2480,16 @@ namespace sunshine_streamline {
       }
       return snapshot;
     }
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+    // The deferral line's totals of depth copies deferred to their frame's
+    // Present (R2), of those copied, and of the deferrals an untag cancelled
+    // (R7): the session timelines judge each frame's own untag by them.
+    extern "C" __declspec(dllexport) void SunshineStreamlineTestDeferrals(std::uint64_t *depth_deferred, std::uint64_t *depth_copied, std::uint64_t *cancelled) {
+      if (depth_deferred) *depth_deferred = deferrals.depth.load(std::memory_order_relaxed);
+      if (depth_copied) *depth_copied = deferrals.depth_copied.load(std::memory_order_relaxed);
+      if (cancelled) *cancelled = deferrals.cancelled.load(std::memory_order_relaxed);
+    }
+#endif
     // The bounded deferral line, at most every 5 s and only after its totals
     // changed: what the copies deferred to their frame's Present (R2) became.
     void report_deferrals() {

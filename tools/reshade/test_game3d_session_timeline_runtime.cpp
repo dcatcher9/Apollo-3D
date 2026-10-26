@@ -74,9 +74,11 @@ namespace {
 
   // The fixed set the registered test runs, and each timeline's length.
   constexpr unsigned fixed_timelines = 24, min_frames = 60, max_frames = 200;
-  // The fixed set's time bound, below ctest's 240 s: a failure's shrinking
-  // stops in time to print its reproducer.
-  constexpr std::uint64_t fixed_budget_ms = 225000;
+  // The fixed set's time bound, below ctest's 240 s, and how long its first
+  // failure is shrunk once every timeline ran: a failing run holds the GPU
+  // about a minute longer than a passing one and prints its reproducer in
+  // time. --shrink-runs outside the fixed set shrinks for longer.
+  constexpr std::uint64_t fixed_budget_ms = 225000, shrink_ms = 60000;
 
   // The frame language: one row of this family per real frame.
   namespace frame_events {
@@ -278,7 +280,8 @@ namespace {
   // list shaped like the session it fixed, which the fixed set runs after
   // its seeds and judges as any timeline. Each fails with its fix reverted
   // (README, Session-level tests); random seeds meet these shapes only by
-  // chance, and a change of the event language changes every seed.
+  // chance, and a change of the event language changes every seed. So does
+  // each hold the session tests' review found unjudged by a mutation.
   struct regression {
     const char *fix, *events;
   };
@@ -298,6 +301,11 @@ namespace {
     // with SR on the game's own queue: the FG copy is held over the SR copy
     // still in flight (88b45edf; known gap C1 once that hold ages out).
     {"88b45edf-stray-fg-copy", "20*sr=local; fg=on,tag=present_list; 15*tag=present_bare,entry=global,untag=after_global,sr=other_queue; tag=present_list; 15*tag=present_bare,entry=global,untag=after_global,sr=other_queue"},
+    // Two generated Presents after each real one hold the real frame's copy
+    // (decide_display's hold at a repeated frame): with that hold dropped
+    // every generated Present was mono, which no seed's judge saw (review
+    // mutation M1, a dropped_hold here).
+    {"repeated-frame-hold", "20*sr=local; fg=on,sr=local; 30*sr=local,generated=2"},
   };
 
   // Each known gap the timelines found has a witness: an event list whose
@@ -424,20 +432,23 @@ namespace {
   }
 
   // One failure of a timeline: a continuity violation no row records, or an
-  // oracle disagreement. kind is its signature for shrinking.
+  // oracle disagreement. signature is what a shrunk candidate must fail with:
+  // the kind and what names its cause (the record's owner and reason, or the
+  // decision and its oracle rule).
   struct failure {
     std::string kind;
     unsigned frame {};  // The real frame whose Present (or generated Present) it was judged at.
-    std::string text;
+    std::string text, signature;
   };
 
   struct run_result {
     std::vector<failure> failures;
     std::array<continuity::judge::row_tally, continuity::gap_count> rows {};
     unsigned presents {}, generated {}, legal {}, shown {}, stalls {}, frames {};
-    // Copy decisions judged, and required refusals whose gate recorded the
-    // oracle's class or that another rule decided first.
-    unsigned decisions {}, refusals_matched {}, refusals_preempted {};
+    // Copy decisions judged, required refusals whose gate recorded the
+    // oracle's class or that the FG scope decided first, and untags judged
+    // by the deferral they must cancel (R7).
+    unsigned decisions {}, refusals_matched {}, refusals_preempted {}, cancels {};
     std::uint64_t elapsed_ms {};
   };
 
@@ -449,6 +460,9 @@ namespace {
     // copy's call, and its withdrawal when no such copy came.
     void (*present_before_next_copy)() {};
     BOOL (*cancel_present_before_next_copy)() {};
+    // The add-on's totals of depth copies deferred to their frame's Present,
+    // of those copied and of the deferrals an untag cancelled.
+    void (*deferral_totals)(std::uint64_t *, std::uint64_t *, std::uint64_t *) {};
     decltype(&NVSDK_NGX_D3D12_CreateFeature) ngx_create {};
     decltype(&NVSDK_NGX_D3D12_EvaluateFeature) ngx_evaluate {};
     const matrix::sl_version version {2, 7, 30};
@@ -548,6 +562,8 @@ namespace {
       present_before_next_copy = reinterpret_cast<void (*)()>(GetProcAddress(addon, "SunshineStreamlineTestPresentBeforeNextCopy"));
       cancel_present_before_next_copy = reinterpret_cast<BOOL (*)()>(GetProcAddress(addon, "SunshineStreamlineTestCancelPresentBeforeNextCopy"));
       require(present_before_next_copy && cancel_present_before_next_copy, "Test add-on lacks its Present-before-copy hook");
+      deferral_totals = reinterpret_cast<decltype(deferral_totals)>(GetProcAddress(addon, "SunshineStreamlineTestDeferrals"));
+      require(deferral_totals, "Test add-on lacks its deferral totals");
       // The export stop at a focus loss would end FG reuse: select the hidden
       // game window in the test observer without moving focus.
       set_foreground(window);
@@ -722,6 +738,25 @@ namespace {
       return out;
     }
 
+    // R7: the frame's own untag cancels the copy its tag deferred to the
+    // frame's Present (the oracle's S9 HOLD of a tag whose outcome without
+    // the untag is that deferral).
+    static bool cancels_deferral(const matrix::sl_case &value, const matrix::outcome &expected) {
+      if (value.untag != matrix::untag_pattern::null_after_each || expected.kind != matrix::outcome_kind::hold || matrix::either(expected)) {
+        return false;
+      }
+      auto kept = value;
+      kept.untag = matrix::untag_pattern::none;
+      const auto deferral = matrix::expect(kept);
+      return deferral.deferred && permits_capture(deferral);
+    }
+
+    std::uint64_t deferral_total(unsigned which) const {
+      std::uint64_t value[3] {};
+      deferral_totals(&value[0], &value[1], &value[2]);
+      return value[which];
+    }
+
     // The oracle's outcome for the frame's tag at a copy point. The oracle
     // names an untag through the tag's own entry (R7, untag_pattern); a
     // token-less untag of a frame tag (slSetTag after slSetTagForFrame) is
@@ -795,8 +830,8 @@ namespace {
       return dlss_g ? value.provider == refusals::adapter::dlss_g : value.provider == refusals::adapter::streamline && value.viewport == view.value;
     }
 
-    void fail(const char *kind, const std::string &text, unsigned at) {
-      result.failures.push_back({kind, at, text});
+    void fail(const char *kind, const std::string &text, unsigned at, const std::string &cause) {
+      result.failures.push_back({kind, at, text, std::string(kind) + "/" + cause});
     }
 
     std::string frame_text(unsigned at) const {
@@ -844,24 +879,31 @@ namespace {
         });
         ++result.decisions;
         if (recorded_refusal(made.expected)) {
-          // In a session another rule may decide the call first (an FG scope
-          // that owns the viewport, the same frame's untag, a tag copy that
-          // keeps precedence): its gate then records nothing, or a class
-          // outside the contract's (fg_scope, hold). A contract class it
-          // records is the oracle's.
+          // In a session the FG scope may decide the call first (it owns its
+          // viewport's SR inputs, the same frame's untag of its tag, DLSS-G's
+          // evaluation defers to its tag copies): its gate then records
+          // nothing, or a class outside the contract's (fg_scope, hold), the
+          // preempting rule's evidence. Outside the oracle's FG scope no rule
+          // preempts a gate, so a required refusal recorded nowhere fails (a
+          // copy the contract refuses may have been made). A contract class
+          // it records is the oracle's.
           const auto why = refusals::reason_class(unsigned(made.expected.why));
           const bool matched = std::any_of(seen.begin(), seen.end(), [&](const polled_refusal *value) {
             return value->value.reason == why;
           });
+          const bool preempted = !matched && !contract && (!seen.empty() || frame_generation_scope());
           result.refusals_matched += matched;
-          result.refusals_preempted += !matched && !contract;
+          result.refusals_preempted += preempted;
+          if (!matched && !contract && !preempted) {
+            fail("oracle:refusal_unrecorded", frame_text(frame) + " " + made.point + ": the oracle requires a refusal of class " + std::to_string(unsigned(made.expected.why)) + " (" + rule + ") outside FG scope, recorded: " + describe_seen(), frame, std::string(made.point) + "/" + rule);
+          }
           if (contract && !matched) {
-            fail("oracle:refusal_class", frame_text(frame) + " " + made.point + ": the oracle requires a refusal of class " + std::to_string(unsigned(made.expected.why)) + " (" + rule + "), recorded: " + describe_seen(), frame);
+            fail("oracle:refusal_class", frame_text(frame) + " " + made.point + ": the oracle requires a refusal of class " + std::to_string(unsigned(made.expected.why)) + " (" + rule + "), recorded: " + describe_seen(), frame, std::string(made.point) + "/" + rule);
           }
         } else if (requires_capture(made.expected) && std::any_of(seen.begin(), seen.end(), [](const polled_refusal *value) {
                      return refuses_capture(value->value.reason);
                    })) {
-          fail("oracle:capture_refused", frame_text(frame) + " " + made.point + ": the oracle requires a capture (" + rule + "), recorded refusal: " + describe_seen(), frame);
+          fail("oracle:capture_refused", frame_text(frame) + " " + made.point + ": the oracle requires a capture (" + rule + "), recorded refusal: " + describe_seen(), frame, std::string(made.point) + "/" + rule);
         }
       }
     }
@@ -931,7 +973,10 @@ namespace {
     // (R2) is read at the Present after the one it precedes, and a copy its
     // FG scope kept out is shown once the scope falls silent, so a fresh
     // capture belongs to some frame of that window, not necessarily the
-    // Present's own.
+    // Present's own. A fresh copy of an FG scope's own input needs an FG
+    // source in that window (an FG tag or DLSS-G's input the oracle allows):
+    // the SR inputs of the frames an FG tag's held or refused decision left
+    // (S9 and R7, an untag that cancels the deferred copy) supply none.
     void judge_shown(const char *which) {
       const auto s = inspect().source;
       if (trace) {
@@ -942,8 +987,15 @@ namespace {
       }
       const bool fresh = !s.reused_depth && s.current.capture && s.current.capture != last_capture;
       const auto now = GetTickCount64();
-      if (fresh && !(api_supplied && now - api_supplied < sunshine_freshness::source_age_ms + continuity::tick_slack_ms) && !other_queue_pending()) {
-        fail("oracle:unsupplied_fresh", frame_text(frame) + ": " + which + " showed a fresh copy (capture " + std::to_string(s.current.capture) + ") with no API source supplied within the source age", frame);
+      const auto within = [now](std::uint64_t tick, std::uint64_t slack) {
+        return tick && now - tick < sunshine_freshness::source_age_ms + slack;
+      };
+      if (fresh && !other_queue_pending()) {
+        if (!within(api_supplied, continuity::tick_slack_ms)) {
+          fail("oracle:unsupplied_fresh", frame_text(frame) + ": " + which + " showed a fresh copy (capture " + std::to_string(s.current.capture) + ") with no API source supplied within the source age", frame, s.frame_generation_input ? "fg_input" : "scene");
+        } else if (s.frame_generation_input && !within(fg_copy, continuity::tag_slack_ms)) {
+          fail("oracle:unsupplied_fresh", frame_text(frame) + ": " + which + " showed a fresh copy of an FG scope's input (capture " + std::to_string(s.current.capture) + ") with no FG source supplied within the source age", frame, "fg_source");
+        }
       }
       last_capture = s.current.capture;
     }
@@ -962,7 +1014,7 @@ namespace {
     }
 
     bool other_queue_pending() const {
-      return other_queue_copy && GetTickCount64() - other_queue_copy < sunshine_freshness::source_age_ms + 100;
+      return other_queue_copy && GetTickCount64() - other_queue_copy < sunshine_freshness::source_age_ms + continuity::tag_slack_ms;
     }
 
     // Whether a frame marks no miss of a live FG scope (known gap C4): it
@@ -1012,6 +1064,9 @@ namespace {
       const auto generated_inside = placement == generated_at::inside ? std::uint32_t(value[events::generated]) : 0u;
       const auto generated_in_evaluate = placement == generated_at::evaluate ? std::uint32_t(value[events::generated]) : 0u;
       void *tag_commands {};
+      // R7: the oracle holds the tag's deferred copy for the frame's untag,
+      // and the add-on deferred it at the tag call.
+      bool cancel_expected = false;
       if (form != tag_form::none) {
         const auto tag_call = tag_case(matrix::copy_point::tag_call, 0);
         const bool frame_entry = tag_call.entry == matrix::tag_entry::set_tag_for_frame;
@@ -1022,6 +1077,7 @@ namespace {
         // the earliest point whose outcome requires a capture.
         decision call {"tag_call", tag_outcome(tag_call), matrix::legal(tag_call), false, {"tag_call", "untag", "ui", "generated", "present"}};
         decisions.push_back(call);
+        cancel_expected = call.legal && cancels_deferral(tag_call, call.expected);
         deferred_tag = call.legal && permits_capture(call.expected) && call.expected.deferred;
         bool supplied = false;
         if (call.legal && requires_capture(call.expected)) {
@@ -1047,18 +1103,25 @@ namespace {
         }
         const auto resource = depth_input(tag_call.declared_state);
         const abi_v2::resource_tag depth_tag {{nullptr, tag_guid, 1}, &resource, 0, std::uint32_t(tag_call.life), active_area};
+        const auto deferred_before = deferral_total(0);
         returned(frame_entry ? sl.frame_tag(*token, view, &depth_tag, 1, tag_commands) : sl.global_tag(view, &depth_tag, 1, tag_commands), "the depth tag call");
+        cancel_expected = cancel_expected && deferral_total(0) != deferred_before;
         poll("tag_call");
       }
       if (choice == state_form::recorded_other) {
         move(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
       }
+      const auto cancelled_before = deferral_total(2);
       if (untag == untag_form::after_frame) {
         returned(sl.frame_tag(*token, view, &untag_depth, 1, tag_commands), "the frame's token untag");
         poll("untag");
       } else if (untag == untag_form::after_global) {
         returned(sl.global_tag(view, &untag_depth, 1, tag_commands), "the untag after the tag");
         poll("untag");
+      }
+      result.cancels += cancel_expected;
+      if (cancel_expected && deferral_total(2) == cancelled_before) {
+        fail("oracle:deferral_kept", frame_text(frame) + " untag: the oracle holds the tag's copy deferred to the frame's Present for the frame's untag (R7, S9), and the untag cancelled no deferral the tag call made", frame, "untag/S9");
       }
       const auto ui_choice = of<ui_form>(value, events::ui);
       if (ui_choice != ui_form::none) {
@@ -1136,16 +1199,16 @@ namespace {
         supply.legal = 0;
         supply.limit = meets;
       };
-      if (fg_on && form == tag_form::none && dlssg_choice != dlssg_form::none && fg_tag_copy && now - fg_tag_copy < sunshine_freshness::source_age_ms + 100) {
+      if (fg_on && form == tag_form::none && dlssg_choice != dlssg_form::none && fg_tag_copy && now - fg_tag_copy < sunshine_freshness::source_age_ms + continuity::tag_slack_ms) {
         // DLSS-G's evaluation defers to an earlier frame's FG tag copy for
         // the source age (known gap C6): neither copied nor missed, so the
         // frame's legal sources may show nothing once that copy ages out.
         limit_all(continuity::limitation::dlssg_defers_to_tag_copy);
-      } else if (fg_on && deferred_tag && dlssg_choice == dlssg_form::none && dlssg_evaluated && now - dlssg_evaluated < sunshine_freshness::source_age_ms + 100) {
+      } else if (fg_on && deferred_tag && dlssg_choice == dlssg_form::none && dlssg_evaluated && now - dlssg_evaluated < sunshine_freshness::source_age_ms + continuity::tag_slack_ms) {
         // Its deferred copy waits for a DLSS-G evaluation that does not come
         // (known gap C7), and its scope keeps the viewport's SR depth out.
         limit_all(continuity::limitation::deferred_copy_awaits_dlssg);
-      } else if (fg_on && fg_copy && now - fg_copy < sunshine_freshness::fg_silent_ms + 100 && keeps_scope_choice(form, dlssg_choice, dlssg_copy && now - dlssg_copy < sunshine_freshness::fg_silent_ms + 100) && !(supply.legal & (continuity::tag_copy | continuity::dlssg_input)) && (supply.legal & continuity::sr_evaluate)) {
+      } else if (fg_on && fg_copy && now - fg_copy < sunshine_freshness::fg_silent_ms + continuity::tag_slack_ms && keeps_scope_choice(form, dlssg_choice, dlssg_copy && now - dlssg_copy < sunshine_freshness::fg_silent_ms + continuity::tag_slack_ms) && !(supply.legal & (continuity::tag_copy | continuity::dlssg_input)) && (supply.legal & continuity::sr_evaluate)) {
         supply.legal &= std::uint8_t(~continuity::sr_evaluate);
         supply.limited |= continuity::sr_evaluate;
         supply.limit = continuity::limitation::fg_scope_outlives_copy;
@@ -1168,7 +1231,7 @@ namespace {
       // FG turned off within the source age of the FG copy the display may
       // hold, with only SR depth on another queue (C1) to follow it: the
       // provider drops that copy as a changed source (known gap C8).
-      if (!fg_on && !supply.legal && supply.limit == continuity::limitation::cross_queue_sr && readable_fg && now - readable_supply < sunshine_freshness::source_age_ms + 100) {
+      if (!fg_on && !supply.legal && supply.limit == continuity::limitation::cross_queue_sr && readable_fg && now - readable_supply < sunshine_freshness::source_age_ms + continuity::tag_slack_ms) {
         supply.limit = continuity::limitation::fg_off_drops_fg_copy;
       }
       if (supply.legal & continuity::api_sources) {
@@ -1180,6 +1243,7 @@ namespace {
       continuity_log.pending = {};
       continuity_log.pending.legal = std::uint8_t(supply.legal | supply.limited);
       continuity_log.pending.permitted = supply.permitted;
+      continuity_log.pending.limited = supply.limited;
       continuity_log.pending.limit = supply.legal ? continuity::limitation::none : supply.limit;
       continuity_log.pending.tick = supply.tick;
     }
@@ -1373,7 +1437,8 @@ namespace {
         const bool in_isolation = found == present_frames.end();
         const auto at = in_isolation ? unsigned(value.frames.size()) : found->second;
         const auto kind = std::string("continuity:") + continuity::name(violation.kind);
-        result.failures.push_back({kind, at, (in_isolation ? std::string("isolation") : frame_text(at)) + ": " + continuity::describe(violation)});
+        const auto signature = kind + "/" + sunshine_game3d::name(violation.owner) + "/" + (violation.reason ? violation.reason : "");
+        result.failures.push_back({kind, at, (in_isolation ? std::string("isolation") : frame_text(at)) + ": " + continuity::describe(violation), signature});
       }
       std::stable_sort(result.failures.begin(), result.failures.end(), [](const failure &a, const failure &b) {
         return a.frame < b.frame;
@@ -1410,7 +1475,7 @@ namespace {
       frame_events::normalize(candidate.frames);
       const auto result = fixture.run(candidate, "shrink-" + std::to_string(runs));
       const auto found = std::find_if(result.failures.begin(), result.failures.end(), [&](const failure &value) {
-        return value.kind == signature;
+        return value.signature == signature;
       });
       std::printf("MEASURE session-timeline shrink run=%u frames=%zu %s\n", runs, frames.size(), found != result.failures.end() ? "reproduced" : "passed");
       if (found == result.failures.end()) {
@@ -1618,7 +1683,6 @@ int main(int argc, char **argv) {
   if (chosen.list) {
     return 0;
   }
-  // Each frame's bound and isolation, setup and the shrink budget.
   // Each frame's bound and isolation, setup and the shrink budget; the
   // fixed set's own bound.
   const auto started = GetTickCount64();
@@ -1659,7 +1723,10 @@ int main(int argc, char **argv) {
 
     std::array<continuity::judge::row_tally, continuity::gap_count> rows {};
     unsigned failed {}, presents {}, generated {}, legal {}, shown {}, frames_run {}, decisions {};
-    bool shrunk = false;
+    // The first failing timeline (other than a closed witness), shrunk once
+    // every timeline ran.
+    const timeline_case *first_failing {};
+    failure first_failure;
     for (std::size_t i = 0; i != selected_cases.size(); ++i) {
       const auto &value = selected_cases[i];
       auto label = "timeline-" + seed_text(value.seed);
@@ -1676,7 +1743,7 @@ int main(int argc, char **argv) {
         }
         require(row != continuity::gap_count, "A witness names no known gap row");
         if (!result.rows[row].violations) {
-          result.failures.push_back({"witness:closed", 0, std::string("the witness of ") + value.witness + " lost no depth where its frames meet the limitation (" + std::to_string(result.rows[row].exercised) + " frames): the gap closed, so remove its row and witness"});
+          result.failures.push_back({"witness:closed", 0, std::string("the witness of ") + value.witness + " lost no depth where its frames meet the limitation (" + std::to_string(result.rows[row].exercised) + " frames): the gap closed, so remove its row and witness", "witness:closed"});
         }
       }
       for (std::size_t r = 0; r != rows.size(); ++r) {
@@ -1689,7 +1756,7 @@ int main(int argc, char **argv) {
       shown += result.shown;
       frames_run += result.frames;
       decisions += result.decisions;
-      std::printf("MEASURE session-timeline %s frames=%u presents=%u generated=%u legal=%u shown=%u stalls=%u decisions=%u refusals=%u preempted=%u failures=%zu elapsed_ms=%llu", name_of(value).c_str(), result.frames, result.presents, result.generated, result.legal, result.shown, result.stalls, result.decisions, result.refusals_matched, result.refusals_preempted, result.failures.size(), static_cast<unsigned long long>(result.elapsed_ms));
+      std::printf("MEASURE session-timeline %s frames=%u presents=%u generated=%u legal=%u shown=%u stalls=%u decisions=%u refusals=%u preempted=%u cancels=%u failures=%zu elapsed_ms=%llu", name_of(value).c_str(), result.frames, result.presents, result.generated, result.legal, result.shown, result.stalls, result.decisions, result.refusals_matched, result.refusals_preempted, result.cancels, result.failures.size(), static_cast<unsigned long long>(result.elapsed_ms));
       for (std::size_t r = 0; r != rows.size(); ++r) {
         if (result.rows[r].exercised) {
           std::printf(" %s={supplied=%u violations=%u}", continuity::known_gaps[r].id, result.rows[r].exercised, result.rows[r].violations);
@@ -1708,14 +1775,26 @@ int main(int argc, char **argv) {
       for (auto f = first.frame > 8 ? first.frame - 8 : 0u; f <= first.frame && f < value.frames.size(); ++f) {
         std::printf("CONTEXT %s frame %u: %s\n", name_of(value).c_str(), f, generator::describe(frame_events::family(), value.frames[f]).c_str());
       }
-      if (shrunk || !chosen.shrink_runs) {
-        continue;
+      if (!first_failing && first.kind != "witness:closed") {
+        first_failing = &value;
+        first_failure = first;
       }
-      // Only the first failing timeline is shrunk, within the budget.
-      shrunk = true;
-      shrinker reduce {fixture, first.kind, chosen.shrink_runs, 0, started + budget_ms};
-      const auto minimal = reduce.shrink(value.frames, first.frame);
-      std::printf("REPRODUCER %s %s runs=%u frames=%zu: --events \"%s\"\n", name_of(value).c_str(), first.kind.c_str(), reduce.runs, minimal.size(), describe(minimal).c_str());
+    }
+    if (first_failing && chosen.shrink_runs) {
+      // Within the budget, and in the fixed set (ctest) for no longer than
+      // shrink_ms: the reproducer is printed well before ctest's timeout.
+      const auto shrink_from = GetTickCount64();
+      const auto stop_at = fixed_set ? std::min(started + budget_ms, shrink_from + shrink_ms) : started + budget_ms;
+      shrinker reduce {fixture, first_failure.signature, chosen.shrink_runs, 0, stop_at};
+      const auto minimal = reduce.shrink(first_failing->frames, first_failure.frame);
+      // The reproducer once more, after every candidate: in this process each
+      // run follows the earlier ones, and a fresh process's --events replay
+      // may still differ in timing.
+      reduce.budget = reduce.runs + 1;
+      reduce.stop_at = std::max(reduce.stop_at, GetTickCount64() + 60 * minimal.size() + 3000);
+      auto replay = minimal;
+      const bool reproduced = reduce.fails(replay);
+      std::printf("REPRODUCER %s %s runs=%u frames=%zu reproduced=%s: --events \"%s\"\n", name_of(*first_failing).c_str(), first_failure.signature.c_str(), reduce.runs, minimal.size(), reproduced ? "yes" : "no", describe(minimal).c_str());
     }
     std::printf("MEASURE session-timelines timelines=%zu frames=%u presents=%u generated=%u legal=%u shown=%u decisions=%u failed=%u", selected_cases.size(), frames_run, presents, generated, legal, shown, decisions, failed);
     for (std::size_t r = 0; r != rows.size(); ++r) {

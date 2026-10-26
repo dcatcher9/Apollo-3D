@@ -1687,7 +1687,9 @@ the runtime layer that includes it, judges every Present:
 
 > After warm-up, a Present whose frame had at least one legal source shows depth from some source,
 > or holds earlier depth within the source age ([`freshness.h`](freshness.h)). A Present whose
-> frame had no legal source may hold within the source age, then go mono.
+> frame had no legal source may hold within the source age, then go mono. A generated Present
+> presents an earlier frame: after a Present that showed depth it holds that depth while the copy
+> is younger than the source age.
 
 The judge reads each Present's [frame record](../../docs/reshade-sbs.md#frame-record)
 (`SunshineGame3DTestFrameRecord`, copied in ReShade's `reshade_present` event) and the fixture's
@@ -1705,15 +1707,22 @@ generated Present, which the game makes while it records a later frame.
 A Present shows depth when the rung that decided it has pixels: D1 or D2 ready or held, or
 Generic's binding ready; H in mono shows none. The judge is armed by a Present that shows depth. A
 Present that shows none disarms it when its frame had no legal source (the mono the invariant
-permits) or when it is a violation, so one loss counts once; a Present at least the source age
-after the previous one disarms it first (a stall expires every hold, and a pipelined source such
-as DLSS-G's ring has nothing readable until it refills). While disarmed, legal sources have
-`establish_ms`, `fg_silent_ms` plus `association_ms` (2 s), to show depth, counted from the first one
-after the last Present that showed depth or after a source-age gap in legal sources. A violation is
-a gap (armed, a legal source, no depth), an unestablished source (no depth within `establish_ms`)
-or a stale one (a rung's pixels at least the source age, plus 40 ms for two steps of
-`GetTickCount64`, after the newest legal or permitted source of its kind: API for D1 and D2,
-Generic for D3).
+permits) or when it is a violation; a generated Present neither arms nor disarms it. While
+disarmed, a frame's legal sources have one source age to show depth, counted from the first such
+Present without depth, and a loss that lasts longer is reported once per source age. Only a warm-up
+gives them `establish_ms`, `fg_silent_ms` plus `association_ms` (2 s): the session's start, a stall
+(a Present at least the source age after the previous one, which expires every hold, while a
+pipelined source such as DLSS-G's ring has nothing readable until it refills) or a new source (a
+source-age gap in legal sources). Frames whose legal sources all meet a known limitation and frames
+with a source that meets none are timed apart, so a loss a known gap excuses never extends the time
+the others have. A generated Present after a real one that showed a fresh copy of a frame whose
+legal sources the presenting queue reads must hold it while that copy is certainly younger than the
+source age (it is that frame's or the frame before's, a copy deferred to the next Present, so made
+after the real Present two before; less 40 ms), unless a copy recorded on another queue may have
+become readable meanwhile. A violation is a gap (armed, a legal source, no depth), an unestablished
+source (no depth within its window), a dropped hold (that generated Present without depth) or a
+stale one (a rung's pixels at least the source age, plus 40 ms for two steps of `GetTickCount64`,
+after the newest legal or permitted source of its kind: API for D1 and D2, Generic for D3).
 
 The native provider fixture judges every Present of its run: each frame script reports its
 violations (`MEASURE native-provider continuity <script> violations=<n> unknown=<n>`), any one no
@@ -1729,9 +1738,12 @@ oracle row alone records them.
 
 The known gaps are the header's `known_gaps` rows, under the matrix's known-gap discipline with
 their own key: each names a limitation that the fixture tags on the frames that meet it. A
-violation of a tagged frame is its row's; any other fails the run, and so does a row whose
-limitation was supplied in a run without a violation (the gap closed, and the fix removes the
-row). Each provider run with an interposer exercises the first three; the session timelines below
+violation of a tagged frame is its row's only once no copy the presenting queue could read (a
+frame's legal source that meets no limitation) is younger than the source age, as no limitation
+explains an earlier loss: a hold dropped within that age is a violation. The rows whose limitation
+is itself such a drop, C3 and C8, record it (`drops_hold`). Any other violation fails the run, and
+so does a row whose limitation was supplied in a run without a violation (the gap closed, and the
+fix removes the row). Each provider run with an interposer exercises the first three; the session timelines below
 found the other five, which their witness timelines exercise:
 
 - C1, SR depth on another queue (until Step 4's fence observation): `sr-other-queue` warms up with
@@ -1742,11 +1754,10 @@ found the other five, which their witness timelines exercise:
   presenting queue's last copy ages out (in Assassin's Creed Shadows 110-235 ms, about 30
   `no_completed_snapshot` losses a session). The recovery on the presenting queue settles again.
   DLSS-G's own copies on its compute list (N7) are read the same way, once DLSS-G reset that
-  recording, and the session timelines tag their frames with this row too. The row records a loss
-  only once no copy the presenting queue could read (a frame's legal source that meets no
-  limitation) is younger than the source age, as the limitation explains no earlier one: a held FG
-  copy dropped for an SR snapshot still in flight on the other queue (fixed by 88b45edf) is a
-  violation.
+  recording, and the session timelines tag their frames with this row too. As every row but C3 and
+  C8, it records a loss only once no copy the presenting queue could read is younger than the
+  source age: a held FG copy dropped for an SR snapshot still in flight on the other queue (fixed by
+  88b45edf) is a violation.
 - C2, Generic on another queue (until Step 4's fence hooks): `generic-other-queue` lets the API
   association lapse, then draws one view of the swapchain's size on the game's queue with no
   boundary but the end of the frame; each frame's list moves it through `DEPTH_READ` back to
@@ -1839,32 +1850,44 @@ judged on four counts:
 - each copy decision by the oracle through the refusals its gate records
   (`SunshineDepthTestLastRefusal`, polled after every call and Present): a contract class recorded
   for a decision whose required refusal names another, or for a decision the oracle requires to
-  capture, fails it. In a session another rule may decide a call first (an FG scope that owns the
-  viewport, the same frame's untag, a tag copy that keeps precedence), so a required refusal its gate
-  never reached is counted (`preempted=`), not failed;
+  capture, fails it. In a session the FG scope may decide a call first (it owns its viewport's SR
+  inputs, its tags' deferred copies wait for DLSS-G, and DLSS-G's evaluation defers to its tag
+  copies), so a required refusal its gate never reached under the oracle's FG scope, or for which it
+  recorded a class outside the contract's (`fg_scope`, `hold`), is counted (`preempted=`). Outside
+  the FG scope no rule preempts a gate, so a required refusal recorded nowhere fails
+  (`oracle:refusal_unrecorded`);
+- each untag the oracle names as R7 (the frame's own untag cancels the copy its tag deferred to the
+  frame's Present, which the oracle holds by S9): when the tag call deferred a copy, the untag must
+  cancel it, judged by the add-on's deferral totals (`SunshineStreamlineTestDeferrals`; `cancels=`
+  counts them, `oracle:deferral_kept` fails one);
 - a Present, real or generated, shows a fresh copy only while a frame within the source age
   supplied an API source the oracle allows (copies recorded on another queue, which become readable
-  later, aside): a refused or held decision never shows new depth. A deferred copy (R2) is read at
-  the Present after the one it precedes, and a copy its FG scope kept out shows once the scope falls
-  silent, so a fresh copy may be an earlier frame's;
+  later, aside), and a fresh copy of an FG scope's own input only while one supplied an FG source (an
+  FG tag or DLSS-G's input): a refused or held decision never shows new depth. A deferred copy (R2)
+  is read at the Present after the one it precedes, and a copy its FG scope kept out shows once the
+  scope falls silent, so a fresh copy may be an earlier frame's;
 - every provider status line names a Present's frame record (`require_records_match_log`).
 
-A violation of a tagged frame is that row's; any other failure prints the timeline's seed, its event
-list and the frames before the first failure, then shrinks it by delta debugging to the smallest
-list that still fails the same way, printed as `--events "..."`: the frames after the failure, each
-event kind back to its default in every frame, chunks of frames, then each event kind of each frame
-of a short list, every kept candidate cut after the frame where it failed. Shrinking re-runs each
-candidate, so `--shrink-runs` (default 40) and the fixed set's time bound limit it, and a failure
-that depends on timing may shrink less. The fixed set also runs one regression timeline per
-Assassin's Creed Shadows fix, an event list shaped like the session it fixed and judged as any
+A violation of a tagged frame is that row's (as above); any other failure prints the timeline's
+seed, its event list and the frames before the first failure. Once every timeline ran, the first
+failing one is shrunk by delta debugging to the smallest list that still fails with the same
+signature (the failure's kind and its cause: the record's owner and reason, or the decision and its
+oracle rule), printed as `REPRODUCER ... reproduced=yes|no: --events "..."`: the frames after the
+failure, each event kind back to its default in every frame, chunks of frames, then each event kind
+of each frame of a short list, every kept candidate cut after the frame where it failed, then the
+minimal list once more (`reproduced=`). Shrinking re-runs each candidate in the same process, after
+the timelines before it, so `--shrink-runs` (default 40) and, in the fixed set, one minute
+(`shrink_ms`, within its 225 s bound) limit it; a failure that depends on timing may shrink less, and
+a fresh process's `--events` replay may still differ. The fixed set also runs one regression timeline per
+Assassin's Creed Shadows fix (and one for the generated Presents' hold, `repeated-frame-hold`), an event list shaped like the session it fixed and judged as any
 timeline (random seeds meet these shapes only by chance, and a change of the event language changes
 every seed), and one witness per row the timelines found (C4-C8): an event list whose frames meet the
 limitation alone, long enough to lose depth on every run; a witness that loses none fails the set,
 as the matrix's gap seeds keep a recorded gap's own failing cell. `--trace` prints every Present's
 frame record, the supply it was judged with and each recorded refusal.
 
-`reshade_session_timelines` runs the fixed set (24 seeds, four regression timelines and five
-witnesses, about 3760 frames and 8500 Presents) in about 135 s, registered like
+`reshade_session_timelines` runs the fixed set (24 seeds, five regression timelines and five
+witnesses, about 3810 frames and 8600 Presents) in about 140 s, registered like
 `reshade_native_provider_continuity` with the same 240 s timeout. Locally:
 
     reshade_game3d_session_timeline_runtime_test [--list] [--timeline <seed> | --events "<list>" |
@@ -1968,6 +1991,18 @@ gate); no timeline put a Present inside an SR evaluation's copy (now `at=evaluat
 any loss of a frame tagged with it, which hid 88b45edf's and ad66b1c8's (now only once no readable
 copy is younger than the source age, which also found C8). Each fix also has its regression
 timeline, since a change of the event language moves which seeds meet it.
+
+A review of these tests (10-25) mutated the add-on and found three more, closed the same way. With
+`decide_display` holding nothing at a repeated frame, every generated Present was mono and one seed
+of 24 failed, by chance: a generated Present carried no obligation and disarmed the judge, and a
+disarmed judge gave legal sources 2 s, longer than most timelines (now the generated Presents' hold,
+a source age outside warm-ups, and `repeated-frame-hold`; 23 seeds and the regression fail it,
+shrinking to `defaults; fg=on; dlssg=direct,generated=2`). With an untag that never cancels its
+frame's deferred copy (R7), one seed failed through a stale symptom: R7's outcome is a HOLD, which no
+decision check judged, and the refusals it displaced counted as preempted (now the deferral check,
+and no preemption outside the FG scope; 11 seeds and `88b45edf-stray-fg-copy` fail it, shrinking to
+`fg=on,tag=present_bare,entry=global,untag=after_global`). And rows C4 to C7 excused losses within
+the source age of a readable copy (now the readable-age rule of every row).
 
 ### Characterization tests
 

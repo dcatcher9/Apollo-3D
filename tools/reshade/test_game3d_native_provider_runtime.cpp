@@ -56,8 +56,9 @@ namespace {
   // The continuity invariant (test_game3d_continuity.h): the supply of the
   // frame being recorded, which the frame's own Present takes, and the judge
   // every Present's record feeds. A Present made while generated is set (one
-  // the game makes inside a later frame's recording) presents no frame of
-  // its own and leaves the supply to that frame's Present. queue_created: the
+  // the game makes inside a later frame's recording) presents an earlier
+  // frame, whose depth it holds, and leaves the supply to the recorded
+  // frame's Present. queue_created: the
   // game created a command queue since the previous Present, which tags the
   // next frame's supply (known gap C3).
   struct continuity_log_t {
@@ -78,7 +79,7 @@ namespace {
     if (record_history.query && record_history.query(runtime, &value) && value.present &&
         (record_history.records.empty() || record_history.records.back().present != value.present)) {
       record_history.records.push_back(value);
-      continuity_log.judge.present(value, frame, continuity_log.where);
+      continuity_log.judge.present(value, frame, continuity_log.where, continuity_log.generated);
     } else continuity_log.judge.unrecorded();
   }
 }
