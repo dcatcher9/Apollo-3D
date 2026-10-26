@@ -329,6 +329,13 @@ namespace {
     // evaluation copies on its compute list. Lossless: with the source-age
     // rule its three lost Presents meet C1's limitation.
     {"C6-dlssg-after-tag-copy", "20*sr=local; fg=on,tag=present_list; 30*dlssg=compute", true},
+    // A deferred FG tag copy waits for DLSS-G's evaluation of its frame only
+    // while DLSS-G evaluated the previous deferred frame (known gap C7 until
+    // then: within the source age of any evaluation, so each copy lapsed
+    // unmade until that age passed, and the held copy aged out first): a
+    // command-less FG tag's copy, DLSS-G evaluations (refused) without a tag,
+    // then command-less FG tags without DLSS-G.
+    {"C7-dlssg-stops", "20*sr=local; fg=on,tag=present_bare; 3*dlssg=compute_unobserved; 40*tag=present_bare"},
   };
 
   // Each known gap the timelines found has a witness: an event list whose
@@ -343,9 +350,6 @@ namespace {
   constexpr witness witnesses[] {
     // SR depth shown, then OnlyValidNow tags that their evaluations refuse.
     {"C5-S1-evaluate", "20*sr=local; 60*tag=now_list,sr=tag"},
-    // A command-less FG tag's copy, DLSS-G evaluations (refused) without a
-    // tag, then command-less FG tags without DLSS-G.
-    {"C7-deferred-copy-awaits-dlssg", "20*sr=local; fg=on,tag=present_bare; 3*dlssg=compute_unobserved; 40*tag=present_bare"},
     // One FG tag copy, then FG off with the viewport's SR input on the
     // game's own queue.
     {"C8-fg-off-drops-fg-copy", "20*sr=local; fg=on,tag=present_list; fg=off,sr=other_queue; 10*sr=other_queue"},
@@ -516,10 +520,16 @@ namespace {
     // one last recorded a copy on another queue, and when one last supplied a
     // copy its FG scope accepts.
     std::uint64_t api_supplied {}, other_queue_copy {}, fg_copy {};
+    // Whether the frame's tag copy is deferred to its Present, and whether
+    // it waits there for DLSS-G to evaluate its frame
+    // (frame_generation::deferral_evaluations): DLSS-G evaluated a frame
+    // since the previous frame whose tag copy was deferred, or none was.
+    bool deferred_tag {}, awaits_dlssg {};
     // When DLSS-G last evaluated a frame (copied, deferred to a tag or
-    // refused), and whether the frame's tag copy is deferred to its Present.
-    std::uint64_t dlssg_evaluated {};
-    bool deferred_tag {};
+    // refused), the frames it evaluated, and their count at the previous
+    // frame whose tag copy was deferred (deferred_known: one was).
+    std::uint64_t dlssg_evaluated {}, dlssg_frames {}, deferred_dlssg_frames {};
+    bool deferred_known {};
     // When a frame last supplied a legal API source the presenting queue
     // reads (one that meets no limitation; known gap C8), and whether the
     // previous frame supplied an FG copy, so that a live FG scope owns this
@@ -993,7 +1003,7 @@ namespace {
         return reinterpret_cast<void *>(game_native_command);
       };
       evidence_seen = false;
-      deferred_tag = false;
+      deferred_tag = awaits_dlssg = false;
       draw(*decoy);
       supply.permitted |= continuity::generic_boundary;
       supply.tick = GetTickCount64();
@@ -1035,6 +1045,11 @@ namespace {
         decisions.push_back(call);
         cancel_expected = call.legal && cancels_deferral(tag_call, call.expected);
         deferred_tag = call.legal && permits_capture(call.expected) && call.expected.deferred;
+        if (deferred_tag) {
+          awaits_dlssg = !deferred_known || deferred_dlssg_frames != dlssg_frames;
+          deferred_known = true;
+          deferred_dlssg_frames = dlssg_frames;
+        }
         bool supplied = false;
         if (call.legal && requires_capture(call.expected)) {
           // An OnlyValidNow tag outside FG scope that the same frame's
@@ -1136,24 +1151,23 @@ namespace {
       }
       dlssg_evaluation(of<dlssg_form>(value, events::dlssg));
       move(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-      // A frame whose deferred FG tag copy waits for DLSS-G (known gap C7)
-      // meets that limitation. And one whose only FG input is DLSS-G's
-      // compute copy supplies its live FG scope, which keeps the viewport's
-      // SR input out while that copy is readable only frames later (known gap
-      // C1). DLSS-G's evaluation of a frame without an FG tag of its own
-      // copies (known gap C6 until 10-26, when it deferred to an earlier
-      // frame's tag copy for the source age).
+      // A frame whose deferred FG tag copy waits for DLSS-G to evaluate its
+      // frame, which DLSS-G does not do, supplies that copy as permitted
+      // only: DLSS-G evaluated the previous deferred frame, so the add-on
+      // cannot tell this frame's Present from an earlier frame's, and the
+      // Present holds the earlier copy. Any later frame without DLSS-G's
+      // evaluation copies at its Present (known gap C7 until 10-26, when
+      // each waited within the source age of any evaluation). A frame whose
+      // only FG input is DLSS-G's compute copy supplies its live FG scope,
+      // which keeps the viewport's SR input out while that copy is readable
+      // only frames later (known gap C1). DLSS-G's evaluation of a frame
+      // without an FG tag of its own copies (known gap C6 until 10-26, when
+      // it deferred to an earlier frame's tag copy for the source age).
       const auto dlssg_choice = of<dlssg_form>(value, events::dlssg);
       const auto now = GetTickCount64();
-      const auto limit_all = [&](continuity::limitation meets) {
-        supply.limited |= supply.legal;
-        supply.legal = 0;
-        supply.limit = meets;
-      };
-      if (fg_on && deferred_tag && dlssg_choice == dlssg_form::none && dlssg_evaluated && now - dlssg_evaluated < sunshine_freshness::source_age_ms + continuity::tag_slack_ms) {
-        // Its deferred copy waits for a DLSS-G evaluation that does not come
-        // (known gap C7).
-        limit_all(continuity::limitation::deferred_copy_awaits_dlssg);
+      if (fg_on && deferred_tag && awaits_dlssg && dlssg_choice == dlssg_form::none && dlssg_evaluated && now - dlssg_evaluated < sunshine_freshness::source_age_ms + continuity::tag_slack_ms && (supply.legal & continuity::tag_copy)) {
+        supply.legal &= std::uint8_t(~continuity::tag_copy);
+        supply.permitted |= continuity::tag_copy;
       } else if (fg_on && dlssg_choice == dlssg_form::compute && fg_copy && now - fg_copy < sunshine_freshness::fg_silent_ms + continuity::tag_slack_ms && !(supply.legal & continuity::tag_copy) && (supply.legal & continuity::sr_evaluate)) {
         supply.legal &= std::uint8_t(~continuity::sr_evaluate);
         supply.limited |= continuity::sr_evaluate;
@@ -1173,6 +1187,7 @@ namespace {
       }
       if (fg_on && dlssg_choice != dlssg_form::none) {
         dlssg_evaluated = now;
+        ++dlssg_frames;
       }
       // FG turned off within the source age of the FG copy the display may
       // hold (no readable source supplied since that copy, which may itself
@@ -1348,7 +1363,8 @@ namespace {
       frames = &value.frames;
       view = {{nullptr, sunshine_streamline::viewport_guid, 1}, viewport};
       last_capture = 0;
-      api_supplied = other_queue_copy = fg_copy = dlssg_evaluated = readable_supply = 0;
+      api_supplied = other_queue_copy = fg_copy = dlssg_evaluated = dlssg_frames = deferred_dlssg_frames = readable_supply = 0;
+      deferred_known = false;
       fg_supplied = false;
       present_frames.clear();
       where = label;

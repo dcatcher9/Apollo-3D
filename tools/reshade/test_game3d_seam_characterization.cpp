@@ -11,8 +11,8 @@
 // test-access header, with no device: the frame generation policy, the FG
 // scope's liveness and the selection the provider derives from it, NGX's
 // copy rule under frame generation, the frames an FG scope owns, DLSS-G's
-// depth precedence for its frame's FG tag, select_provider and
-// establish_provider,
+// depth precedence for its frame's FG tag, the Present a deferred copy waits
+// for under frame generation, select_provider and establish_provider,
 // the exact freshness edges of selection, association and the FG scope, the
 // display policy decide_display, and the UI adapter's admission of each UI
 // candidate (P11).
@@ -466,6 +466,112 @@ namespace sunshine_streamline::depth_capture {
         fail("P5 DLSS-G tag precedence: a tag copy decided another scope's frame, or not its own");
       }
       std::printf("PASS P5 DLSS-G's depth precedence for its frame's FG tag: %zu steps\n", std::size(steps) + 1);
+    }
+
+    // P5: which Present makes a copy deferred to its frame's Present (R2)
+    // while its viewport generates frames
+    // (frame_generation::deferral_evaluations), in one session's order of
+    // calls. DLSS-G evaluates a frame inside that frame's Present, so the
+    // copy waits for an evaluation after its newest tag call while DLSS-G
+    // evaluates every frame: within the source age, and since the viewport's
+    // previous deferred frame's newest tag call (or with no earlier deferred
+    // frame of the viewport in the epoch). Otherwise the first Present after
+    // a game list executed on the presenting queue since the tag call makes
+    // it. Known gap C7 until 10-26: any evaluation within the source age kept
+    // every copy waiting.
+    void deferral_present_steps() {
+      namespace fg = sunshine_streamline::frame_generation;
+      enum class call {
+        tag,  // A tag call begins a frame's deferral.
+        again,  // A later tag call of the same frame.
+        evaluate,  // DLSS-G evaluates a frame of the scope.
+        present  // A Present decides the viewport's deferral.
+      };
+
+      struct step {
+        const char *pins;
+        call what;
+        std::uint64_t at;  // Milliseconds after the first step.
+        // present: a game list executed on the presenting queue since the
+        // deferral's newest tag call.
+        bool queue_executed;
+        bool made;  // present: the Present is the deferral's frame's.
+        std::uint32_t viewport;
+        std::uint64_t epoch;
+      };
+
+      constexpr auto age = sunshine_freshness::source_age_ms;
+      const step steps[] {
+        {"The viewport's first deferral, before DLSS-G evaluates", call::tag, 0, false, false, 0, 7},
+        {"A Present before the game's work on the presenting queue is an earlier frame's", call::present, 2, false, false, 0, 7},
+        {"without DLSS-G's evaluations the first after it is the frame's", call::present, 4, true, true, 0, 7},
+        {"DLSS-G evaluates the frame", call::evaluate, 6, false, false, 0, 7},
+        {"The next frame's deferral", call::tag, 16, false, false, 0, 7},
+        {"waits for DLSS-G, which evaluated the previous deferred frame, through the presenting queue's work", call::present, 18, true, false, 0, 7},
+        {"DLSS-G evaluates it", call::evaluate, 20, false, false, 0, 7},
+        {"and the first Present after that evaluation is its frame's", call::present, 22, false, true, 0, 7},
+        {"A frame tagged twice", call::tag, 32, false, false, 0, 7},
+        {"another viewport's first deferral in between", call::tag, 33, false, false, 1, 7},
+        {"the frame's later tag call", call::again, 34, false, false, 0, 7},
+        {"keeps the previous frame's count: the frame still waits", call::present, 36, true, false, 0, 7},
+        {"DLSS-G evaluates it", call::evaluate, 38, false, false, 0, 7},
+        {"another viewport, outside DLSS-G's scope, takes the presenting queue's work", call::present, 40, true, true, 1, 7},
+        {"the frame is made after that evaluation", call::present, 42, false, true, 0, 7},
+        {"DLSS-G stops evaluating: the next frame's deferral", call::tag, 48, false, false, 0, 7},
+        {"still waits, as DLSS-G evaluated the previous deferred frame", call::present, 50, true, false, 0, 7},
+        {"The frame after it", call::tag, 64, false, false, 0, 7},
+        {"waits for no evaluation, but a Present before the game's work on the presenting queue is still an earlier frame's", call::present, 66, false, false, 0, 7},
+        {"its Present is the first after that work, within the source age of DLSS-G's last evaluation (C7)", call::present, 68, true, true, 0, 7},
+        {"So is every later frame's", call::tag, 80, false, false, 0, 7},
+        {"(C7)", call::present, 82, true, true, 0, 7},
+        {"DLSS-G evaluates some frames only: one it evaluates", call::tag, 96, false, false, 0, 7},
+        {"DLSS-G evaluates it", call::evaluate, 98, false, false, 0, 7},
+        {"is made at the Present after its evaluation", call::present, 100, false, true, 0, 7},
+        {"the next frame", call::tag, 112, false, false, 0, 7},
+        {"waits for DLSS-G again", call::present, 114, true, false, 0, 7},
+        {"the frame after a frame it did not evaluate", call::tag, 128, false, false, 0, 7},
+        {"does not (C7)", call::present, 130, true, true, 0, 7},
+        {"DLSS-G evaluates again", call::evaluate, 140, false, false, 0, 7},
+        {"the next frame", call::tag, 144, false, false, 0, 7},
+        {"waits for DLSS-G within the source age of its evaluation", call::present, 140 + age - 1, true, false, 0, 7},
+        {"but not after it", call::present, 140 + age, true, true, 0, 7},
+        {"A new epoch's DLSS-G evaluation", call::evaluate, 420, false, false, 0, 8},
+        {"and its first deferral of the viewport", call::tag, 424, false, false, 0, 8},
+        {"waits for DLSS-G, with no earlier deferred frame to judge it by", call::present, 426, true, false, 0, 8},
+        {"DLSS-G evaluates it", call::evaluate, 428, false, false, 0, 8},
+        {"made after that evaluation", call::present, 430, false, true, 0, 8},
+      };
+      const auto start = GetTickCount64();
+      fg::deferral_evaluations value;
+      std::array<fg::deferral_evaluations::marks, 2> deferrals {};
+      std::uint64_t serial {};
+      for (const auto &s : steps) {
+        const auto now = start + s.at;
+        auto &deferral = deferrals[s.viewport];
+        bool made = false;
+        if (s.what == call::tag || s.what == call::again) {
+          deferral = value.tag(s.epoch, s.viewport, ++serial, s.what == call::tag, deferral);
+        } else if (s.what == call::evaluate) {
+          value.evaluated(s.epoch, 0, now);
+        } else {
+          made = value.presented(s.epoch, s.viewport, deferral, s.queue_executed, now);
+        }
+        if (made != s.made) {
+          char text[512];
+          std::snprintf(text, sizeof(text), "P5 deferred copy's Present, %s: made %d", s.pins, made);
+          fail(text);
+        }
+      }
+      // Four viewports keep their marks; a fifth takes the place of the one
+      // deferred longest ago.
+      fg::deferral_evaluations table;
+      for (std::uint32_t viewport = 0; viewport != 5; ++viewport) {
+        table.tag(7, viewport, viewport + 1, true, {});
+      }
+      if (table.tag(7, 0, 10, true, {}).previous_known || !table.tag(7, 2, 11, true, {}).previous_known) {
+        fail("P5 deferred copy's Present: a fifth viewport did not take the place of the one deferred longest ago");
+      }
+      std::printf("PASS P5 deferred copy's Present under frame generation: %zu steps\n", std::size(steps) + 1);
     }
 
     // P6: select_provider at one Present. Each row builds the queue's owner
@@ -1441,6 +1547,7 @@ int main() {
   ngx_frame_generation_rows();
   frame_generation_frame_steps();
   dlssg_tag_precedence_steps();
+  deferral_present_steps();
   select_provider_rows();
   ownership_timelines();
   freshness_edges();

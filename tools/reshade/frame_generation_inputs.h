@@ -139,4 +139,81 @@ namespace sunshine_streamline::frame_generation {
       return of_frame(frame, evaluated) || (pending && of_frame(*pending, evaluated));
     }
   };
+  // Which Present a viewport's copy deferred to its frame's Present (R2, the
+  // probe's present_deferred) is made at while it generates frames. DLSS-G
+  // presents earlier frames (paced real ones and generated ones) while the
+  // game submits the next frame's work, so a game execution proves nothing,
+  // and it evaluates a frame inside that frame's Present, after the frame's
+  // tags. So the frame's Present is the first after DLSS-G evaluated a frame
+  // following the deferral's newest tag call, and the deferral waits for that
+  // evaluation while DLSS-G evaluates every frame: an evaluation in the
+  // deferral's scope within the source age, and one since the viewport's
+  // previous deferred frame's newest tag call, which is that frame's own
+  // (its evaluation comes before its Present, which comes before this frame's
+  // tag calls or with DLSS-G's pacing after them). With no earlier deferred
+  // frame of the viewport in its epoch, it waits as well. Otherwise the
+  // frame's Present is the first after a game list executed on the presenting
+  // queue since the tag call (queue_executed); a deferral of a frame DLSS-G
+  // does evaluate is still made at the first Present after that evaluation.
+  // Until C7 closed (10-26) a deferral waited whenever DLSS-G had evaluated
+  // anything in its scope within the source age: when DLSS-G stopped
+  // evaluating while the game kept tagging, every frame's copy lapsed unmade
+  // until that age passed, and the copy the display held aged out first.
+  struct deferral_evaluations {
+    // DLSS-G's NGX evaluations of real frames: their count, and the newest
+    // one's scope and tick.
+    std::uint64_t count{}, epoch{}, tick{};
+    std::uint32_t viewport{};
+    // A deferral's counts: at its frame's newest tag call (at_tag), and at the
+    // viewport's previous deferred frame's newest tag call (previous, when
+    // previous_known).
+    struct marks {
+      std::uint64_t at_tag{}, previous{};
+      bool previous_known{};
+    };
+    // Per viewport (up to four, the probe's viewport slots; the oldest gives
+    // way), the count at its newest deferred frame's newest tag call.
+    struct tagged_frame {
+      bool used{};
+      std::uint64_t epoch{}, serial{}, at_tag{};
+      std::uint32_t viewport{};
+    };
+    std::array<tagged_frame, 4> tagged{};
+
+    void evaluated(std::uint64_t scope_epoch, std::uint32_t scope_viewport, std::uint64_t now) {
+      ++count; epoch = scope_epoch; viewport = scope_viewport; tick = now;
+    }
+    // A tag call (serial) that defers a copy of its viewport's frame: the
+    // first of that frame's deferral (begins), or a later one of the same
+    // frame, whose deferral's marks are kept. Returns the deferral's marks.
+    marks tag(std::uint64_t scope_epoch, std::uint32_t tag_viewport, std::uint64_t serial, bool begins, marks kept) {
+      tagged_frame *slot = nullptr;
+      for (auto &value : tagged) if (value.used && value.viewport == tag_viewport) { slot = &value; break; }
+      if (begins) {
+        kept.previous_known = slot && slot->epoch == scope_epoch;
+        kept.previous = kept.previous_known ? slot->at_tag : 0;
+      }
+      kept.at_tag = count;
+      if (!slot) {
+        for (auto &value : tagged) if (!value.used) { slot = &value; break; }
+        if (!slot) {
+          slot = &tagged[0];
+          for (auto &value : tagged) if (value.serial < slot->serial) slot = &value;
+        }
+      }
+      *slot = {true, scope_epoch, serial, count, tag_viewport};
+      return kept;
+    }
+    // Whether a Present of a frame-generating viewport is the deferral's
+    // frame's (scope: its epoch and viewport). queue_executed: a game list
+    // executed on the presenting queue since its newest tag call.
+    bool presented(std::uint64_t scope_epoch, std::uint32_t scope_viewport, const marks &deferral, bool queue_executed,
+        std::uint64_t now) const {
+      const bool evaluating = tick && epoch == scope_epoch && viewport == scope_viewport &&
+        sunshine_freshness::fresh_lt(tick, now, sunshine_freshness::source_age_ms);
+      if (evaluating && count != deferral.at_tag) return true;
+      const bool every_frame = !deferral.previous_known || deferral.previous != deferral.at_tag;
+      return !(evaluating && every_frame) && queue_executed;
+    }
+  };
 }

@@ -4124,11 +4124,23 @@ A frame's Present depends on whether the viewport's frame generation is on (its 
   earlier frame's.
 - On: DLSS-G presents earlier frames (paced real frames and generated ones) on its own queue while
   the game submits the next frame's work, so a game execution proves nothing. DLSS-G evaluates a
-  frame inside that frame's Present: where its NGX evaluations are observed in the deferral's scope
-  (one within the source age), the frame's Present is the first after an evaluation that followed
-  the tag call. Without them it is the first after a game list executed on the presenting queue
-  itself since the tag call (`depth_capture::game_executions_on`), which a game presenting on
-  another queue never satisfies, so its deferrals lapse. That record's table shares the queue
+  frame inside that frame's Present, after the frame's tags: while it evaluates every frame of the
+  deferral's scope, the frame's Present is the first after an evaluation that followed the tag call
+  (`frame_generation::deferral_evaluations`). Every frame means an NGX evaluation observed in that
+  scope within the source age, and one since the viewport's previous deferred frame's newest tag
+  call, which is that frame's own (a deferral with no earlier deferred frame of the viewport in its
+  epoch counts as every frame; a later tag call of the same frame keeps the previous frame's
+  count). Otherwise the frame's Present is the first after such an evaluation or after
+  a game list executed on the presenting queue itself since the tag call
+  (`depth_capture::game_executions_on`), which a game presenting on another queue never satisfies,
+  so there a deferral of a frame DLSS-G does not evaluate lapses. So when DLSS-G stops evaluating
+  while the game keeps tagging (generation paused, or DLSS-G evaluating some frames only), the frame
+  after its last evaluation still waits, the held copy standing in for it, and each later frame is
+  copied at its own Present. Counting from the previous frame's Present instead would end the wait
+  at an earlier frame's Present that DLSS-G makes after a frame's tag call and before evaluating it.
+  Until C7 closed (10-26) a deferral waited whenever DLSS-G had evaluated anything in its scope
+  within the source age, so once DLSS-G stopped each frame's copy lapsed unmade until that age
+  passed, and the held copy aged out first. The game-execution record's table shares the queue
   places' safety bound: a queue with no entry takes that of the queue whose newest execution is
   oldest, and a retired queue's entry is freed, so a queue records at its next execution however
   many queues a session creates (since the Assassin's Creed Shadows hotfix of 10-26; before, the

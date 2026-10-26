@@ -67,8 +67,11 @@ namespace sunshine_streamline {
   // call deferred to its frame's Present (owner ruling R2,
   // api_contract.h deferred_copy) on immediate, ReShade's immediate list of
   // queue, once a game list executed after the tag (an earlier Present is an
-  // earlier frame's); drops those whose frame ended. True when it recorded a
-  // copy: the caller submits immediate before the Present.
+  // earlier frame's; under frame generation, while DLSS-G evaluates every
+  // frame, once DLSS-G evaluated a frame after the tag:
+  // frame_generation::deferral_evaluations); drops those whose frame ended.
+  // True when it recorded a copy: the caller submits immediate before the
+  // Present.
   bool present_deferred(std::uint64_t queue, std::uint64_t immediate);
   void command_secondary_executed(std::uint64_t primary, std::uint64_t secondary);
   commands::recording_marker capture_command_marker(std::uint64_t native);
