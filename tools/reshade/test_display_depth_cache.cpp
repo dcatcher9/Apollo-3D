@@ -419,6 +419,24 @@ namespace {
     require(!waits(held, pending, policy, 1000), "An FG copy on display was held as the ordinary copy");
     require(!waits(sr, pending, {}, 1000), "An ordinary copy was held without required FG");
     require(!waits({}, pending, policy, 1000), "An empty display held an ordinary copy");
+
+    // FG Off releases the queue's API association, yet the display keeps
+    // the scope's newest copy within the source age (frame_generation_retained,
+    // continuity gap C8 until 10-26): an FG copy younger than the source age
+    // keeps the queue under any policy but a revoked (unconfirmed) one. An
+    // expired copy, an ordinary or NGX copy and an empty display keep nothing.
+    const auto keeps = [&](const depth_capture::retained_depth &retained, const depth_capture::selection_policy &p,
+        std::uint64_t now) { return depth_capture::frame_generation_retained(retained, p, now); };
+    require(keeps(held, {}, 1000) && keeps(held, {}, 1000 + sunshine_freshness::source_age_ms - 1),
+      "FG Off released the queue while its FG copy was within the source age");
+    require(!keeps(held, {}, 1000 + sunshine_freshness::source_age_ms), "FG Off kept the queue for an expired FG copy");
+    require(keeps(held, policy, 1000), "Required FG released the queue holding its own copy");
+    depth_capture::selection_policy unconfirmed;
+    unconfirmed.exclude_unconfirmed_fg = true;
+    require(!keeps(held, unconfirmed, 1000), "A revoked FG scope kept the queue for its copy");
+    require(!keeps(sr, {}, 1000), "An ordinary copy kept the queue as FG's");
+    require(!keeps(ngx, {}, 1000), "An NGX copy kept the queue as Streamline FG's");
+    require(!keeps({}, {}, 1000), "An empty display kept the queue");
   }
 }
 

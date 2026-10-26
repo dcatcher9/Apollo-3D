@@ -853,8 +853,13 @@ namespace sunshine_streamline::provider {
     // Enabled FG holds the queue from its policy, not from this Present's
     // selection: a silent scope releases only the selection restriction, so
     // without an API source the game stays mono instead of handing real and
-    // generated presentations to the generic selector.
-    const bool associated = policy.require_frame_generation || depth_capture::provider_active(runtime->get_command_queue()->get_native());
+    // generated presentations to the generic selector. FG Off releases the
+    // queue (retire_source) while the display may hold the scope's newest
+    // copy: the queue stays the API's while that copy is younger than the
+    // source age (frame_generation_retained), so it is held as any source's
+    // missing frame is.
+    const bool associated = policy.require_frame_generation || depth_capture::provider_active(runtime->get_command_queue()->get_native()) ||
+      depth_capture::frame_generation_retained(data->cache.reference(), policy, GetTickCount64());
     std::uint32_t frame_width{}, frame_height{};
     runtime->get_screenshot_width_and_height(&frame_width, &frame_height);
     const auto handoff_tick = GetTickCount64();

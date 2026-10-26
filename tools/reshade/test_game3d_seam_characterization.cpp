@@ -1153,6 +1153,14 @@ namespace sunshine_streamline::depth_capture {
       d.policy = {true, 8, 2};
     }
 
+    // The retained copy becomes viewport 2's FG input, which the case's
+    // candidate (the viewport's SR source, 0) follows: FG is off, or the
+    // selection is a silent scope's, which selects as without FG.
+    void fg_successor(display_case &d) {
+      d.previous.metadata.frame_generation_input = true;
+      d.previous.metadata.source_id = (1ull << 63) | 2;
+    }
+
     // P5 and P7: decide_display, the display policy that provider::begin
     // applies to the acquisition (moving into depth_output). Each row edits
     // one field of a base case (a pending successor of a retained SR copy,
@@ -1368,6 +1376,75 @@ namespace sunshine_streamline::depth_capture {
          },
          action::hold,
          "retained_copy"},
+        // An FG copy's successor, the viewport's ordinary source once FG is
+        // off (or its scope silent), takes the viewport at its first readable
+        // frame; until then the FG copy is held (continuity gap C8 until
+        // 10-26: dropped as source_changed while an SR copy on another queue
+        // was in flight).
+        {"After an FG copy, its viewport's pending SR successor holds it", fg_successor, action::hold, "FG_successor_pending"},
+        {"After an FG copy, a selected SR successor without pixels holds it", [](display_case &d) {
+           fg_successor(d);
+           d.current.source_selected = true;
+         },
+         action::hold,
+         "FG_successor_pending"},
+        {"After an FG copy, a readable SR successor is copied", [](display_case &d) {
+           fg_successor(d);
+           d.current.source_selected = d.candidate.pixel_ready = true;
+         },
+         action::copy_fresh,
+         "fresh_copy_candidate"},
+        {"After an FG copy, the SR successor's own storage and encoding do not end the hold", [](display_case &d) {
+           fg_successor(d);
+           d.current.source_selected = true;
+           ++d.candidate.format;
+           d.candidate.metadata.projection.encoding = sunshine_scene_depth::depth_encoding::linear_distance;
+         },
+         action::hold,
+         "FG_successor_pending"},
+        {"After an FG copy, another viewport's SR source", [](display_case &d) {
+           fg_successor(d);
+           d.current.viewport = 3;
+         },
+         action::invalidate,
+         "source_changed"},
+        {"After an FG copy, another epoch's SR source", [](display_case &d) {
+           fg_successor(d);
+           d.current.epoch = 9;
+         },
+         action::invalidate,
+         "source_changed"},
+        {"After an FG copy, an NGX source", [](display_case &d) {
+           fg_successor(d);
+           d.current.provider = provider_kind::ngx;
+         },
+         action::invalidate,
+         "source_changed"},
+        {"After an FG copy, an older sequence of the FG source itself", [](display_case &d) {
+           fg_successor(d);
+           d.current.source_id = d.previous.metadata.source_id;
+           d.current.sequence = 29;
+         },
+         action::invalidate,
+         "source_changed"},
+        {"After an NGX FG copy, the SR source", [](display_case &d) {
+           fg_successor(d);
+           d.previous.metadata.provider = provider_kind::ngx;
+         },
+         action::invalidate,
+         "source_changed"},
+        {"Excluded FG refuses an FG copy before its SR successor", [](display_case &d) {
+           fg_successor(d);
+           d.policy.exclude_unconfirmed_fg = true;
+         },
+         action::invalidate,
+         "FG_scope_unconfirmed"},
+        {"After an FG copy exactly the source age old, its SR successor", [](display_case &d) {
+           fg_successor(d);
+           d.now = 1000 + source_age;
+         },
+         action::invalidate,
+         "retained_depth_expired"},
       };
       for (const auto &r : rows) {
         auto d = base();
@@ -1441,6 +1518,7 @@ namespace sunshine_streamline::depth_capture {
          },
          action::invalidate,
          "display_copy_failed"},
+        {"A failed copy of an FG copy's SR successor holds the FG copy", fg_successor, action::hold, "retained_after_failed_copy"},
       };
       for (const auto &r : failed) {
         auto d = base();

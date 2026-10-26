@@ -39,16 +39,16 @@
 // frame's legal source that meets no limitation, and that no live FG scope
 // kept out of a frame it supplies: supply::owned) is younger than the source
 // age, as its limitation explains no earlier one, so that a hold dropped
-// within that age is no row's; a row whose limitation is such a drop (C8) is
-// the exception (drops_hold). A violation no row records fails
-// its run, and so does a row whose
+// within that age is no row's. A violation no row records fails its run,
+// and so does a row whose
 // limitation was supplied in a run without a violation (the gap closed: the
 // fix removes the row).
 //
 // Two rows are the limitations the owner approved until Step 4 (C1, C2) and
-// one carries a matrix row's recorded gap over frames (C5). The others are
-// defects these tests found (found: when and by which test), excused only
-// until the owner decides each (README, Found defects): a strict run
+// one carries a matrix row's recorded gap over frames (C5). Any other row is
+// a defect these tests found (found: when and by which test), excused only
+// until the owner decides it (README, Found defects; none is open since C8
+// closed on 10-26): a strict run
 // (SUNSHINE_GAME3D_CONTINUITY_STRICT=1, the contract runner's
 // -StrictContinuity) fails their violations as any other. A random session timeline may supply a limitation
 // without losing depth, so the rows the session timelines found
@@ -101,9 +101,6 @@ namespace game3d_continuity {
     // An OnlyValidNow tag outside FG scope copied at its call, which the same
     // frame's evaluation then refuses for its lifetime.
     tag_call_then_refused_evaluate,
-    // FG turned off within the source age of the FG copy the display holds,
-    // with only SR depth on another queue (cross_queue_sr) to follow it.
-    fg_off_drops_fg_copy,
   };
 
   // What one frame supplied, stamped when the fixture made the first call
@@ -201,8 +198,6 @@ namespace game3d_continuity {
         return "cross_queue_generic";
       case limitation::tag_call_then_refused_evaluate:
         return "tag_call_then_refused_evaluate";
-      case limitation::fg_off_drops_fg_copy:
-        return "fg_off_drops_fg_copy";
       default:
         return "none";
     }
@@ -231,10 +226,6 @@ namespace game3d_continuity {
   struct gap_row {
     const char *id;
     limitation limit;
-    // The limitation itself drops a copy the presenting queue could read
-    // within the source age (C8): the row records such a loss too. Any
-    // other row records a loss only once no such copy is that young.
-    bool drops_hold;
     // A defect these tests found, awaiting the owner's decision: the date
     // and the test that found it. nullptr: an approved limitation, or a
     // recorded matrix gap over frames.
@@ -243,10 +234,9 @@ namespace game3d_continuity {
   };
 
   inline constexpr gap_row known_gaps[] {
-    {"C1-cross-queue-sr", limitation::cross_queue_sr, false, nullptr, "Until Step 4's fence observation. An SR snapshot copied on a queue other than the presenting one is readable only once its recording retired and its producer fence completed (streamline_depth_capture.cpp completed_snapshot, submission_status), never through the game's own wait for that queue: in Assassin's Creed Shadows 110-235 ms after its evaluation, about 30 no_completed_snapshot losses a session, mostly where a stray FG copy hands back to SR (d8c52e3b). The fixture's game retires its recordings later than the source age, so every Present loses that depth once the presenting queue's last copy ages out. DLSS-G's own copies on its COMPUTE list (N7) are read the same way, once DLSS-G reset that recording (accept_compute_copy, three of its evaluations later with its ring of three), and the session timelines tag their frames with this row too, the viewport's SR input among them: a frame whose only FG input is such a copy supplies its live FG scope, which keeps that SR input out while the copy is in flight (the second kind of frame of C4, closed 10-26). The row records a loss only once no copy the presenting queue could read (a frame's legal source that meets no limitation) is younger than the source age: a loss within it, such as a held FG copy dropped for an SR snapshot still in flight on the other queue (fixed by 88b45edf), is a violation. Observing the game's fence signals and waits orders the copy before the Present; that fix shows depth here and removes this row."},
-    {"C2-cross-queue-generic", limitation::cross_queue_generic, false, nullptr, "Until Step 4's fence hooks. Generic's end-of-frame copy runs on the presenting queue, and a proof belongs to the queue whose executed list made it, so a depth-stencil view drawn on another queue with no boundary but the end of the frame is refused (missing_state; 18e5d922, docs/reshade-sbs.md, the last proven state). Seven of the eight games of the 10-06 to 10-23 logs render on another queue. Either owner option (accept the other queue's proof once fence hooks show the presenting queue ordered after it, or copy on the proving queue) shows depth here and removes this row."},
-    {"C5-S1-evaluate", limitation::tag_call_then_refused_evaluate, false, nullptr, "The API contract matrix's S1-evaluate row (test_game3d_api_contract_known_gaps.h) over frames: an OnlyValidNow tag outside FG scope copied at its call (S1), whose same-frame evaluation refuses the tag (S3), loses that copy, so a run of such frames is mono once the earlier depth ages out. That row's fix (keep a tag-call copy when a later point of its frame refuses the same tag for its lifetime) removes this one."},
-    {"C8-fg-off-drops-fg-copy", limitation::fg_off_drops_fg_copy, true, "2026-10-25, T4 (the session timelines)", "Found by the session timelines (T2) once C1 recorded only the losses its limitation explains; owner decision. When FG is turned off while the display holds an FG copy younger than the source age and the viewport's SR depth is copied on another queue (C1), the provider drops the FG copy as a changed source (decide_display: source_changed, the SR snapshot pending) instead of holding it, so the Presents until that SR copy is readable are mono although a copy the presenting queue could show was within the source age (witness '20*sr=local; fg=on,tag=present_list; fg=off,sr=other_queue; 10*sr=other_queue'; reproducer 'fg=on; tag=present_bare; fg=off,sr=other_queue'). 88b45edf's hold (frame_generation_holds) keeps an FG copy over a pending SR copy only while FG is on, and its commit left FG Off unchanged. In Assassin's Creed Shadows, whose SR copies run on another queue, each FG Off would lose depth until SR is readable (110-235 ms). Holding the FG copy across FG Off within the source age (as any source's missing frame is held), or Step 4's fence observation (C1), removes this row."},
+    {"C1-cross-queue-sr", limitation::cross_queue_sr, nullptr, "Until Step 4's fence observation. An SR snapshot copied on a queue other than the presenting one is readable only once its recording retired and its producer fence completed (streamline_depth_capture.cpp completed_snapshot, submission_status), never through the game's own wait for that queue: in Assassin's Creed Shadows 110-235 ms after its evaluation, about 30 no_completed_snapshot losses a session, mostly where a stray FG copy hands back to SR (d8c52e3b). The fixture's game retires its recordings later than the source age, so every Present loses that depth once the presenting queue's last copy ages out. DLSS-G's own copies on its COMPUTE list (N7) are read the same way, once DLSS-G reset that recording (accept_compute_copy, three of its evaluations later with its ring of three), and the session timelines tag their frames with this row too, the viewport's SR input among them: a frame whose only FG input is such a copy supplies its live FG scope, which keeps that SR input out while the copy is in flight (the second kind of frame of C4, closed 10-26). The row records a loss only once no copy the presenting queue could read (a frame's legal source that meets no limitation) is younger than the source age: a loss within it, such as a held FG copy dropped for an SR snapshot still in flight on the other queue (fixed by 88b45edf, and at FG Off by the fix that closed C8 on 10-26), is a violation. Observing the game's fence signals and waits orders the copy before the Present; that fix shows depth here and removes this row."},
+    {"C2-cross-queue-generic", limitation::cross_queue_generic, nullptr, "Until Step 4's fence hooks. Generic's end-of-frame copy runs on the presenting queue, and a proof belongs to the queue whose executed list made it, so a depth-stencil view drawn on another queue with no boundary but the end of the frame is refused (missing_state; 18e5d922, docs/reshade-sbs.md, the last proven state). Seven of the eight games of the 10-06 to 10-23 logs render on another queue. Either owner option (accept the other queue's proof once fence hooks show the presenting queue ordered after it, or copy on the proving queue) shows depth here and removes this row."},
+    {"C5-S1-evaluate", limitation::tag_call_then_refused_evaluate, nullptr, "The API contract matrix's S1-evaluate row (test_game3d_api_contract_known_gaps.h) over frames: an OnlyValidNow tag outside FG scope copied at its call (S1), whose same-frame evaluation refuses the tag (S3), loses that copy, so a run of such frames is mono once the earlier depth ages out. That row's fix (keep a tag-call copy when a later point of its frame refuses the same tag for its lifetime) removes this one."},
   };
   inline constexpr std::size_t gap_count = std::size(known_gaps);
 
@@ -269,8 +259,8 @@ namespace game3d_continuity {
       }
       // A limitation loses depth once the presenting queue's newest copy
       // aged out (C1's note); a loss while that copy could still be held is
-      // no row's but a drop's own (drops_hold).
-      if (!known_gaps[i].drops_hold && value.readable_age_ms < sunshine_freshness::source_age_ms) {
+      // no row's.
+      if (value.readable_age_ms < sunshine_freshness::source_age_ms) {
         return -1;
       }
       return int(i);
@@ -310,8 +300,13 @@ namespace game3d_continuity {
   };
 
   // The found defects' violations of a run, for its summary: "<row>=<n>"
-  // each, and what a strict run does with them.
+  // each, and what a strict run does with them; "none" without such a row.
   inline std::string found_defects(const std::array<row_tally, gap_count> &rows) {
+    if (std::none_of(std::begin(known_gaps), std::end(known_gaps), [](const gap_row &row) {
+          return row.found != nullptr;
+        })) {
+      return "none";
+    }
     std::string out;
     unsigned total {};
     for (std::size_t i = 0; i != gap_count; ++i) {

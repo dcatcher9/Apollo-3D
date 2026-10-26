@@ -4332,7 +4332,20 @@ line reports a required scope turning `silent` and, later, `live` again, at most
 (`changes=` counts the turns so far; the line names the newest state); FG Off ends a silent
 scope without its own line. Generated presentations count as FG (`fg` on output lines) while a
 silent scope's viewport supplies the depth. An observed FG Off retires that source so independently captured ordinary
-SL tag/evaluation or NGX depth can resume with newly submitted pixels. A failed or ambiguous FG-options observation also revokes the old FG scope
+SL tag/evaluation or NGX depth can resume with newly submitted pixels. The finished FG copy is
+held across FG Off within its source age, as any source's missing frame is: the queue stays the
+API's while the display holds an FG copy younger than the source age
+(`depth_capture::frame_generation_retained`), so color-only Presents hold it, and the same
+viewport's ordinary SR/RR source of the copy's epoch, which follows it, takes the viewport only at
+its first readable frame; while that source is pending (as an SR copy on another queue is until its
+recording retired) the FG copy is held (readiness lines show `source_action=hold
+source_reason=FG_successor_pending`). A readable frame of any source replaces the copy, and another
+viewport's, epoch's or provider's source drops it. A silent scope's selection follows the same rule,
+so FG turned on again within that hold keeps the copy until the scope supplies. Once the copy
+expired the queue may hand over to Generic. Until 10-26 (the session tests' continuity gap C8) FG
+Off dropped the FG copy at once, as a changed source while the SR copy was in flight or as a released
+association at a color-only Present, so in Assassin's Creed Shadows each FG Off could lose depth
+until SR was readable (110-235 ms). A failed or ambiguous FG-options observation also revokes the old FG scope
 and its retained display pixels, but does not confirm that FG is Off. Selection excludes those
 unconfirmed FG inputs and permits independently validated ordinary SL or NGX depth, with the
 selected capture's own encoding and camera. A busy query preserves a confirmed policy or this
@@ -4349,7 +4362,8 @@ copied into its private display texture. One rule serves SR, FG and NGX. The com
 selection described above supplies newer pixels first; the hold reads only the previous private
 display copy, and copying a new snapshot still requires its ordering conditions. The hold ends when
 the provider names a different source (provider, epoch, logical source, viewport, or an older
-sequence), when a selected snapshot has a different depth storage (storage family, view or resource
+sequence; the viewport's ordinary source that follows an FG copy ends it only at its first readable
+frame, above), when a selected snapshot has a different depth storage (storage family, view or resource
 kind: `depth_format_changed`) or encoding (`depth_encoding_changed`), when the enabled FG scope
 changes, or at the age bound below. A selected snapshot of a new render size of the same source
 (dynamic resolution) does not end it: the held copy keeps its own allocation and active rectangle,
@@ -4388,7 +4402,7 @@ less than 250 ms from the original depth capture timestamp, defined by `source_a
 [`freshness.h`](../tools/reshade/freshness.h). Display-depth reuse also requires the same runtime
 queue and display allocation, unchanged color dimensions and any known depth storage, view and
 resource kind; under enabled FG the retained copy must belong to that FG scope. Loss of the source
-association (for example FG Off before an ordinary source exists), a new or switched display
+association (an FG copy keeps it within its source age after FG Off), a new or switched display
 allocation, a disabled game technique, lifecycle resets and expiry invalidate reusable history
 until a fresh copy succeeds. An export stop (a focus loss, or a published Present the add-on did
 not render) invalidates it once, after its `export inactive` line. While the export stays inactive the

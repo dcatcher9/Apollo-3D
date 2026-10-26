@@ -43,6 +43,15 @@ namespace sunshine_streamline::depth_capture {
         current.source_id == before.source_id && current.viewport == before.viewport &&
         (!current.sequence || current.sequence >= before.sequence);
     }
+    // An FG copy's successor: the acquisition names the same viewport's
+    // ordinary SR/RR source of the copy's epoch (FG copies are Streamline's),
+    // which supplies the viewport once FG is off or its scope is silent.
+    inline bool frame_generation_successor(const retained_depth &previous, const acquisition_decision &current) {
+      const auto &before = previous.metadata;
+      return before.frame_generation_input && before.provider == sunshine_scene_depth::provider_kind::streamline &&
+        current.provider == before.provider && current.epoch == before.epoch && current.viewport == before.viewport &&
+        current.source_id != sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(current.viewport));
+    }
   }
 
   namespace detail {
@@ -73,15 +82,21 @@ namespace sunshine_streamline::depth_capture {
         out.reason = "FG_scope_changed";
         return out;
       }
-      if (!same_source(previous, current)) {
+      // Another source ends the hold, except an FG copy's successor
+      // (frame_generation_successor): it takes the viewport at its first
+      // readable frame (copied above), and until then the FG copy is held as
+      // any source's missing frame is. Storage and encoding compare frames of
+      // one source only.
+      const bool other_source = !same_source(previous, current);
+      if (other_source && !frame_generation_successor(previous, current)) {
         out.reason = "source_changed";
         return out;
       }
-      if (current.source_selected && !same_storage(previous, candidate)) {
+      if (!other_source && current.source_selected && !same_storage(previous, candidate)) {
         out.reason = "depth_format_changed";
         return out;
       }
-      if (current.source_selected && before.projection.encoding != candidate.metadata.projection.encoding) {
+      if (!other_source && current.source_selected && before.projection.encoding != candidate.metadata.projection.encoding) {
         out.reason = "depth_encoding_changed";
         return out;
       }
@@ -90,7 +105,7 @@ namespace sunshine_streamline::depth_capture {
         return out;
       }
       out.action = display_action::hold;
-      out.reason = "retained_copy";
+      out.reason = other_source ? "FG_successor_pending" : "retained_copy";
       return out;
     }
   }
@@ -102,7 +117,11 @@ namespace sunshine_streamline::depth_capture {
   // A pending, failed or missing newer frame, a new render size of the same
   // source, a camera reset and tag or observation bookkeeping never discard
   // it; a changed source, storage format, view or resource kind, encoding and
-  // its age do. hold still requires the cache owner's local
+  // its age do. The viewport's ordinary source that follows an FG copy (FG
+  // Off, or a silent scope: frame_generation_successor) is no changed source
+  // until its first readable frame: the FG copy is held meanwhile
+  // (FG_successor_pending), as for an SR copy on another queue, readable
+  // only once its recording retired. hold still requires the cache owner's local
   // storage, color extent, immediate-command and consumer-queue checks. Only a
   // successful fresh copy may replace retained_depth; holds never refresh it.
   inline display_decision decide_display(const acquisition_decision &current, const packet &candidate,
@@ -144,6 +163,22 @@ namespace sunshine_streamline::depth_capture {
     return policy.require_frame_generation && policy.epoch && previous.capture_id && before.frame_generation_input &&
       before.provider == sunshine_scene_depth::provider_kind::streamline && before.epoch == policy.epoch &&
       before.viewport == policy.viewport && before.tick >= policy.enabled_tick &&
+      sunshine_freshness::within_source_age(before.tick, now);
+  }
+
+  // FG Off retires the FG source, which releases its queue's API association
+  // (retire_source), while the display may still hold that scope's newest
+  // copy. Within the source age it is held as any source's missing frame is:
+  // while the display holds an FG copy younger than the source age and FG is
+  // not revoked (an unconfirmed scope refuses its copies), the queue stays
+  // the API's, so decide_display holds the copy until it expires, a readable
+  // frame of another source replaces it or a source other than its
+  // successor (frame_generation_successor) drops it. Only then may the queue
+  // hand over to Generic.
+  inline bool frame_generation_retained(const retained_depth &previous, selection_policy policy, std::uint64_t now) {
+    const auto &before = previous.metadata;
+    return !policy.exclude_unconfirmed_fg && previous.capture_id && before.frame_generation_input &&
+      before.provider == sunshine_scene_depth::provider_kind::streamline &&
       sunshine_freshness::within_source_age(before.tick, now);
   }
 

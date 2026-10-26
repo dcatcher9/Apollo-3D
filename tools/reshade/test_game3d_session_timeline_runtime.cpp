@@ -336,6 +336,20 @@ namespace {
     // command-less FG tag's copy, DLSS-G evaluations (refused) without a tag,
     // then command-less FG tags without DLSS-G.
     {"C7-dlssg-stops", "20*sr=local; fg=on,tag=present_bare; 3*dlssg=compute_unobserved; 40*tag=present_bare"},
+    // An FG copy is held while the viewport's SR copy that follows it is in
+    // flight (known gap C8 until then: at FG Off the provider dropped it as
+    // a changed source): one FG tag copy, then FG off with the viewport's SR
+    // input on the game's own queue, never readable within the source age
+    // here (known gap C1 once the hold ages out), and FG on again within
+    // the hold, whose silent scope selects as without FG.
+    {"C8-fg-off-sr-other-queue", "20*sr=local; fg=on,tag=present_list; fg=off,sr=other_queue; 4*sr=other_queue; fg=on,sr=other_queue; 15*sr=other_queue"},
+    // FG Off releases the queue's API association, yet the FG copy is held
+    // within the source age (known gap C8 until then: color-only Presents
+    // after FG Off dropped it and Generic's decoy view took the queue, so
+    // the SR copy on the game's own queue that followed within that age
+    // found nothing to hold): one FG tag copy, FG off with frames that
+    // supply nothing, then the viewport's SR input on the game's queue.
+    {"C8-fg-off-color-only", "20*sr=local; fg=on,tag=present_list; fg=off; 10*defaults; 15*sr=other_queue"},
   };
 
   // Each known gap the timelines found has a witness: an event list whose
@@ -350,9 +364,6 @@ namespace {
   constexpr witness witnesses[] {
     // SR depth shown, then OnlyValidNow tags that their evaluations refuse.
     {"C5-S1-evaluate", "20*sr=local; 60*tag=now_list,sr=tag"},
-    // One FG tag copy, then FG off with the viewport's SR input on the
-    // game's own queue.
-    {"C8-fg-off-drops-fg-copy", "20*sr=local; fg=on,tag=present_list; fg=off,sr=other_queue; 10*sr=other_queue"},
   };
 
   // The seed of the fixed set's or a soak's index-th timeline.
@@ -530,11 +541,8 @@ namespace {
     // frame whose tag copy was deferred (deferred_known: one was).
     std::uint64_t dlssg_evaluated {}, dlssg_frames {}, deferred_dlssg_frames {};
     bool deferred_known {};
-    // When a frame last supplied a legal API source the presenting queue
-    // reads (one that meets no limitation; known gap C8), and whether the
-    // previous frame supplied an FG copy, so that a live FG scope owns this
-    // one (continuity::supply::owned).
-    std::uint64_t readable_supply {};
+    // Whether the previous frame supplied an FG copy, so that a live FG
+    // scope owns this one (continuity::supply::owned).
     bool fg_supplied {};
     std::map<std::uint64_t, unsigned> present_frames;
 
@@ -1189,17 +1197,6 @@ namespace {
         dlssg_evaluated = now;
         ++dlssg_frames;
       }
-      // FG turned off within the source age of the FG copy the display may
-      // hold (no readable source supplied since that copy, which may itself
-      // meet a limitation), with only SR depth on another queue (C1) to
-      // follow it: the provider drops that copy as a changed source (known
-      // gap C8).
-      if (!fg_on && !supply.legal && supply.limit == continuity::limitation::cross_queue_sr && fg_copy && fg_copy >= readable_supply && now - fg_copy < sunshine_freshness::source_age_ms + continuity::tag_slack_ms) {
-        supply.limit = continuity::limitation::fg_off_drops_fg_copy;
-      }
-      if (supply.legal & continuity::api_sources) {
-        readable_supply = now;
-      }
       // The frame's supply: a frame whose legal sources all meet a known
       // limitation is tagged with it; any other legal source must show.
       continuity_log.pending = {};
@@ -1363,7 +1360,7 @@ namespace {
       frames = &value.frames;
       view = {{nullptr, sunshine_streamline::viewport_guid, 1}, viewport};
       last_capture = 0;
-      api_supplied = other_queue_copy = fg_copy = dlssg_evaluated = dlssg_frames = deferred_dlssg_frames = readable_supply = 0;
+      api_supplied = other_queue_copy = fg_copy = dlssg_evaluated = dlssg_frames = deferred_dlssg_frames = 0;
       deferred_known = false;
       fg_supplied = false;
       present_frames.clear();

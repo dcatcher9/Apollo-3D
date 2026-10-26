@@ -2316,20 +2316,36 @@ namespace {
               "depth stays ready"}),
             "Dynamic render sizes produced no render size line");
         }, {}});
-      run_script({"fg-off", 30000, {},
+      // FG Off retires the FG source, and its finished copy is held as any
+      // source's missing frame is (known gap C8 until 10-26, when FG Off
+      // dropped it): color-only Presents hold it within its own source age,
+      // and the first one after that age is mono, never a revived copy.
+      status off_seed;
+      std::uint64_t off_seed_returned{};
+      run_script({"fg-off", 30000,
+        [&] {
+          off_seed = settle("SLFG-before-FG-off");
+          off_seed_returned = tag_returned;
+        },
         [&] {
           render_tracked_depth = {};
           configure_fg(false);
+          held_fg(off_seed, "FG-off-without-new-depth");
+          require(GetTickCount64() - off_seed_returned < sunshine_freshness::source_age_ms,
+            "Native FG-off fixture expired before its hold was observed");
+          const auto expiry_at = off_seed_returned + sunshine_freshness::source_age_ms + 20;
+          const auto before_expiry_wait = GetTickCount64();
+          if (before_expiry_wait < expiry_at) Sleep(DWORD(expiry_at - before_expiry_wait));
           present_frame();
-          const auto off = inspect(); log_status("FG-off-without-new-depth", off);
+          const auto off = inspect(); log_status("FG-off-after-source-age", off);
           require(!off.ready() && !off.source.ready && !off.source.reused_depth,
-            "Disabling FG retained previous-frame depth for a color-only presentation");
+            "Disabling FG held previous-frame depth past its source age for a color-only presentation");
         },
         [&] {
           active_area = {0, 0, selected->width, selected->height};
           render_tracked_depth = [this] { evaluated_frame(); };
           settle("SL-recovered-after-FG-off");
-          std::puts("PASS native SLFG 2x: actual cropped SDK depth, eight real/generated pairs with retained completed depth, FG-off rejection and fresh SL recovery; no FX");
+          std::puts("PASS native SLFG 2x: actual cropped SDK depth, eight real/generated pairs with retained completed depth, FG-off hold within the source age and fresh SL recovery; no FX");
         }});
     }
 
@@ -2410,24 +2426,34 @@ namespace {
         },
         [&] { recovered_fresh(reset_seed, "SLFG-cache-camera-reset-fresh-recovery"); }});
 
+      // FG Off and On again keep the finished copy as any gap does, within
+      // its own source age only: past it nothing is revived.
       status mode_seed;
       unsigned mode_seed_frame{};
+      std::uint64_t mode_seed_returned{};
       run_script({"mode-off-on", 45000,
         [&] {
           mode_seed = settle("SLFG-cache-mode-seed");
           mode_seed_frame = fg_frame;
+          mode_seed_returned = tag_returned;
         },
         [&] {
           render_tracked_depth = {};
           held_fg(mode_seed, "SLFG-cache-mode-before-hold");
-          configure_fg(false); missing_fg("SLFG-cache-mode-off");
-          configure_fg(true); missing_fg("SLFG-cache-mode-on-without-depth");
+          configure_fg(false); held_fg(mode_seed, "SLFG-cache-mode-off");
+          configure_fg(true); held_fg(mode_seed, "SLFG-cache-mode-on-without-depth");
+          require(GetTickCount64() - mode_seed_returned < sunshine_freshness::source_age_ms,
+            "Native FG mode fixture expired before its holds were observed");
+          const auto expiry_at = mode_seed_returned + sunshine_freshness::source_age_ms + 20;
+          const auto before_expiry_wait = GetTickCount64();
+          if (before_expiry_wait < expiry_at) Sleep(DWORD(expiry_at - before_expiry_wait));
+          missing_fg("SLFG-cache-mode-on-expired");
           missing_fg("SLFG-cache-mode-on-no-revival");
           require(fg_frame == mode_seed_frame, "FG mode no-revival case accidentally produced a new real frame");
         },
         [&] {
           recovered_fresh(mode_seed, "SLFG-cache-mode-fresh-recovery");
-          std::puts("PASS native FG cache: repeated holds cannot renew capture age; camera reset keeps the finished copy within its age; FG off/on cannot revive old depth; fresh copies recover all three intervals; no FX");
+          std::puts("PASS native FG cache: repeated holds cannot renew capture age; camera reset keeps the finished copy within its age; FG off/on keeps it within its age and cannot revive it; fresh copies recover all three intervals; no FX");
         }});
     }
 
