@@ -15,6 +15,7 @@
 #include <cmath>
 #include <optional>
 #include <cstdio>
+#include <cstring>
 #include <initializer_list>
 #include <mutex>
 #include <string_view>
@@ -249,8 +250,14 @@ namespace sunshine_streamline::depth_capture {
       owner.life()->cookie.store(cookie, std::memory_order_release);
       *out_cookie = cookie;
     }
+    // Protected by mutex: orders the queue places by their last use
+    // (queue_state::last_use), so free_place reclaims the longest unused.
+    std::uint64_t place_clock{};
     queue_state *known_queue(std::uint64_t native) {
-      for (auto &value : queues) if (value && reinterpret_cast<std::uint64_t>(value->queue.p) == native) return value.get();
+      for (auto &value : queues) if (value && reinterpret_cast<std::uint64_t>(value->queue.p) == native) {
+        value->last_use = ++place_clock;
+        return value.get();
+      }
       return nullptr;
     }
     queue_state *queue(std::uint64_t native) {
@@ -261,7 +268,10 @@ namespace sunshine_streamline::depth_capture {
       std::uint64_t cookie{}; UINT size = sizeof(cookie);
       if (!query_native(native, IID_ID3D12CommandQueue, object) ||
           FAILED(object->GetPrivateData(queue_guid, &size, &cookie)) || size != sizeof(cookie) || !cookie) return nullptr;
-      for (auto &value : queues) if (value && value->cookie == cookie) return value.get();
+      for (auto &value : queues) if (value && value->cookie == cookie) {
+        value->last_use = ++place_clock;
+        return value.get();
+      }
       return nullptr;
     }
 #ifdef SUNSHINE_STREAMLINE_PROBE_TEST
@@ -1136,6 +1146,33 @@ namespace sunshine_streamline::depth_capture {
         }
       }
     }
+    // The capture owner's safety bounds that refused work (capacity_report),
+    // one bit each, set without the lock.
+    enum capacity_bound : unsigned { queue_places = 1, source_table = 2, snapshot_pool = 4, auxiliary_pool = 8 };
+    std::atomic<unsigned> capacity_hits{}, capacity_reported{};
+    void capacity_refused(capacity_bound bound) { capacity_hits.fetch_or(bound, std::memory_order_relaxed); }
+    // Requires mutex. A place for another queue: a free one, else the place of
+    // the longest unused idle queue, which no capture names, which owns no
+    // provider and whose signalled fence values have all completed (the
+    // device's removal completes them). The idle queue registers again when
+    // it next carries a copy (register_compute_producer) or presents
+    // (observe_present), so no number of queues created over a session
+    // exhausts the table.
+    std::unique_ptr<queue_state> *free_place() {
+      for (auto &entry : queues) if (!entry) return &entry;
+      std::unique_ptr<queue_state> *idle = nullptr;
+      for (auto &entry : queues) {
+        if (entry->retiring || entry->provider_established || (idle && (*idle)->last_use <= entry->last_use)) continue;
+        const auto native = reinterpret_cast<std::uint64_t>(entry->queue.p);
+        bool used = false;
+        for_each_capture([&](const slot &value) { used = used || (value.id && uses_queue(value, native)); });
+        if (!used && (!entry->fence.p || entry->fence->GetCompletedValue() >= entry->next_fence)) idle = &entry;
+      }
+      return idle;
+    }
+    // Protected by mutex: an idle queue's place was reclaimed (free_place), so
+    // a queue with no place may carry a copy (register_compute_producer).
+    bool places_reclaimed{};
     // Requires mutex. A queue's place: its device and the fence the capture
     // owner signals after the queue's submissions that carry a copy. DIRECT
     // queues register as ReShade reports them (observe_queue);
@@ -1146,30 +1183,34 @@ namespace sunshine_streamline::depth_capture {
       if (type != D3D12_COMMAND_LIST_TYPE_DIRECT && !(compute_producer && type == D3D12_COMMAND_LIST_TYPE_COMPUTE)) {
         reason = status::unsupported_queue; return nullptr;
       }
-      for (auto &entry : queues) if (!entry) {
-        auto next = std::make_unique<queue_state>();
-        if (FAILED(value->GetDevice(__uuidof(ID3D12Device), reinterpret_cast<void **>(next->device.put()))) ||
-            FAILED(next->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, __uuidof(ID3D12Fence), reinterpret_cast<void **>(next->fence.put())))) {
-          reason = status::unsupported_queue; return nullptr;
-        }
-        next->device_identity = device_cookie(next->device.p, true);
-        if (!next->device_identity) { reason = status::unsupported_queue; return nullptr; }
-        value->AddRef(); next->queue.p = value;
-        next->compute_producer = type == D3D12_COMMAND_LIST_TYPE_COMPUTE;
-        next->cookie = ++serial;
-        if (FAILED(value->SetPrivateData(queue_guid, sizeof(next->cookie), &next->cookie))) { reason = status::unsupported_queue; return nullptr; }
-        entry = std::move(next); return entry.get();
+      auto *entry = free_place();
+      if (!entry) {
+        capacity_refused(queue_places);
+        reason = status::exhausted;
+        return nullptr;
       }
-      reason = status::exhausted;
-      return nullptr;
+      if (*entry) { entry->reset(); places_reclaimed = true; }
+      auto next = std::make_unique<queue_state>();
+      if (FAILED(value->GetDevice(__uuidof(ID3D12Device), reinterpret_cast<void **>(next->device.put()))) ||
+          FAILED(next->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, __uuidof(ID3D12Fence), reinterpret_cast<void **>(next->fence.put())))) {
+        reason = status::unsupported_queue; return nullptr;
+      }
+      next->device_identity = device_cookie(next->device.p, true);
+      if (!next->device_identity) { reason = status::unsupported_queue; return nullptr; }
+      value->AddRef(); next->queue.p = value;
+      next->compute_producer = type == D3D12_COMMAND_LIST_TYPE_COMPUTE;
+      next->cookie = ++serial;
+      next->last_use = ++place_clock;
+      if (FAILED(value->SetPrivateData(queue_guid, sizeof(next->cookie), &next->cookie))) { reason = status::unsupported_queue; return nullptr; }
+      *entry = std::move(next); return entry->get();
     }
     // Requires mutex. A COMPUTE queue that ReShade reported (or not) takes a
     // place at its first submission of a copy awaiting its producer: a copy
     // recorded on a compute list (record_impl). Without one, such a copy is
-    // never submitted, and its recording's Reset discards it. Once a compute
-    // queue found every place taken (compute_unplaced), no submission tries
-    // again, and record_impl refuses compute-list copies while no compute
-    // queue holds a place, until collect_retired frees one.
+    // never submitted, and its recording's Reset discards it. So does any
+    // queue whose idle place was reclaimed. While a compute queue found no
+    // place (compute_unplaced), record_impl refuses compute-list copies until
+    // one is free again (collect_retired, free_place).
     bool compute_copies_recorded{}; // Protected by mutex: a copy was ever recorded on a COMPUTE list.
     bool compute_unplaced{}; // Protected by mutex.
     bool compute_producer_placed() {
@@ -1178,7 +1219,7 @@ namespace sunshine_streamline::depth_capture {
     }
     queue_state *register_compute_producer(std::uint64_t native, std::uint32_t count,
         const native_observer::command_identity *values) {
-      if (compute_unplaced) return nullptr;
+      if (!compute_copies_recorded && !places_reclaimed) return nullptr;
       const auto awaits = [&](const auto &captures) {
         for (std::uint32_t n = 0; n != count; ++n) {
           const auto cookie = values[n].recording_cookie;
@@ -1188,8 +1229,7 @@ namespace sunshine_streamline::depth_capture {
         }
         return false;
       };
-      if (!compute_copies_recorded || (!awaits(slots) && !(diagnostic_slots_active && awaits(diagnostic_slots))))
-        return nullptr;
+      if (!awaits(slots) && !(diagnostic_slots_active && awaits(diagnostic_slots))) return nullptr;
       com_ptr<ID3D12CommandQueue> checked;
       if (!query_native(native, IID_ID3D12CommandQueue, checked)) return nullptr;
       auto *owner = register_queue(checked.p, true);
@@ -1638,20 +1678,36 @@ namespace sunshine_streamline::depth_capture {
     }
     std::atomic<std::uint64_t> game_execution_count{};
     // The newest game execution (its game_execution_count) per queue, as the
-    // submission hook reports it. Bounded and lock-free: a queue beyond these
-    // records none, so a deferred copy that needs it waits for DLSS-G's
-    // evaluation or lapses.
-    struct queue_execution { std::atomic<std::uint64_t> queue{}, newest{}; };
-    std::array<queue_execution, 8> queue_executions{};
+    // submission hook reports it. The queue places' safety bound, not a
+    // budget: a queue with no entry takes a free one, else the entry of the
+    // queue whose newest execution is oldest, and a retired queue's entry is
+    // freed (retire_queue). So no number of queues, nor their churn over a
+    // session, leaves an executing queue without its record; a queue whose
+    // entry was taken records again at its next execution, and until then a
+    // deferred copy that needs it waits. Its 8 entries were once claimed for
+    // good, so a presenting queue beyond them, or one recreated after them,
+    // never recorded; Assassin's Creed Shadows (10-25) created 9 queues, its
+    // presenting queue the 7th and one recreated mid-session.
+    struct queue_execution { std::uint64_t queue{}, newest{}; };
+    std::array<queue_execution, queue_limit> queue_executions{};
+    SRWLOCK queue_execution_lock = SRWLOCK_INIT;
     void note_queue_execution(std::uint64_t queue, std::uint64_t newest) {
-      for (auto &slot : queue_executions) {
-        auto current = slot.queue.load(std::memory_order_acquire);
-        if (!current && slot.queue.compare_exchange_strong(current, queue, std::memory_order_acq_rel)) current = queue;
-        if (current != queue) continue;
-        auto value = slot.newest.load(std::memory_order_relaxed);
-        while (value < newest && !slot.newest.compare_exchange_weak(value, newest, std::memory_order_acq_rel)) {}
-        return;
+      if (!queue) return;
+      AcquireSRWLockExclusive(&queue_execution_lock);
+      auto *entry = &queue_executions.front();
+      for (auto &value : queue_executions) {
+        if (value.queue == queue) { entry = &value; break; }
+        if (value.newest < entry->newest) entry = &value;
       }
+      if (entry->queue != queue) *entry = {queue, 0};
+      entry->newest = std::max(entry->newest, newest);
+      ReleaseSRWLockExclusive(&queue_execution_lock);
+    }
+    void forget_queue_execution(std::uint64_t queue) {
+      if (!queue) return;
+      AcquireSRWLockExclusive(&queue_execution_lock);
+      for (auto &value : queue_executions) if (value.queue == queue) value = {};
+      ReleaseSRWLockExclusive(&queue_execution_lock);
     }
     void observed_submission(std::uint64_t queue, std::uint32_t count, const native_observer::command_identity *values) {
       submitted(queue, count, values);
@@ -1733,6 +1789,28 @@ namespace sunshine_streamline::depth_capture {
     out.states_observed = c.states_observed.load(); out.states_declared = c.states_declared.load();
     return out;
   }
+  bool capacity_report(char *out, std::size_t size) {
+    const auto hits = capacity_hits.load(std::memory_order_relaxed);
+    if (!(hits & ~capacity_reported.load(std::memory_order_relaxed))) return false;
+    const auto fresh = hits & ~capacity_reported.fetch_or(hits, std::memory_order_relaxed);
+    if (!fresh || !out || !size) return false;
+    const auto named = [&](unsigned bit) { return (fresh & bit) != 0; };
+    const auto bound = [&](unsigned bit, const char *text, unsigned limit) {
+      if (!named(bit)) return;
+      const auto used = std::strlen(out);
+      if (used < size) std::snprintf(out + used, size - used, " %s=%u", text, limit);
+    };
+    std::snprintf(out, size, "Sunshine capture capacity: refused at a safety bound:");
+    bound(queue_places, "queue_places", queue_limit);
+    bound(source_table, "source_table", source_limit);
+    bound(snapshot_pool, "depth_snapshots", pixel_slot_limit);
+    bound(auxiliary_pool, "auxiliary_snapshots", diagnostic_slot_limit);
+    const auto used = std::strlen(out);
+    if (used < size)
+      std::snprintf(out + used, size - used, "; every place or entry was in use (queue places: each queue names a "
+        "capture, a provider or an unfinished fence), so that capture was refused as capacity; logged once per bound");
+    return true;
+  }
   bool list_coverage_report(std::uint64_t now_ms, char *out, std::size_t size) {
     static std::atomic<std::uint64_t> next_log{}, logged_admissions{};
     auto next = next_log.load(std::memory_order_relaxed);
@@ -1791,6 +1869,8 @@ namespace sunshine_streamline::depth_capture {
       });
     }
     collect_retired();
+    // Its newest game execution goes with it, freeing that entry.
+    forget_queue_execution(native);
   }
   namespace {
     // Idle snapshot storage kept for reuse beyond this is released.
@@ -2003,7 +2083,10 @@ namespace sunshine_streamline::depth_capture {
     for (const auto &weak : sources) if (auto value = weak.lock()) if (value->cookie == existing && existing)
       return result(value, status::ready, record_stage::retained);
     auto entry = std::find_if(sources.begin(), sources.end(), [](const auto &value) { return value.expired(); });
-    if (entry == sources.end()) { reason = status::exhausted; return result({}, status::exhausted, record_stage::capacity); }
+    if (entry == sources.end()) {
+      capacity_refused(source_table);
+      reason = status::exhausted; return result({}, status::exhausted, record_stage::capacity);
+    }
     auto value = std::make_shared<source_reference>();
     if (FAILED(resource->QueryInterface(__uuidof(ID3D12Resource), reinterpret_cast<void **>(value->resource.put()))))
       return result({}, status::unsupported_resource, record_stage::source_interface);
@@ -2057,9 +2140,11 @@ namespace sunshine_streamline::depth_capture {
     com_ptr<ID3D12CommandQueue> checked;
     if (!queue || !query_native(queue, IID_ID3D12CommandQueue, checked)) return 0;
     queue = reinterpret_cast<std::uint64_t>(checked.p); // As the submission hook reports it.
-    for (const auto &slot : queue_executions)
-      if (slot.queue.load(std::memory_order_acquire) == queue) return slot.newest.load(std::memory_order_acquire);
-    return 0;
+    std::uint64_t newest{};
+    AcquireSRWLockShared(&queue_execution_lock);
+    for (const auto &value : queue_executions) if (value.queue == queue) { newest = value.newest; break; }
+    ReleaseSRWLockShared(&queue_execution_lock);
+    return newest;
   }
   bool source_extent(const source_ref &source, std::uint32_t &width, std::uint32_t &height) {
     width = height = 0;
@@ -2109,17 +2194,52 @@ namespace sunshine_streamline::depth_capture {
     begin_evaluation_locked(epoch, sequence, viewport, provider, source_id, superseded_source_id);
   }
 
+  namespace {
+    // Requires mutex. value, its provider's newest evaluation, is a nomination
+    // in progress (pending_nomination) until its copy is recorded or refused
+    // (end_nomination). Every evaluation's, SR's as well as FG's: a Present
+    // meanwhile, another thread's, holds instead of reading that attempt as
+    // refused, which moved acquire's gap watermark and so revoked the
+    // source's earlier snapshots still in flight on their queue (Assassin's
+    // Creed Shadows 10-25: with FG on, FG Presents landed while the SR
+    // evaluate allocated storage for each dynamic-resolution size, and each
+    // revoked SR depth for a frame or more). false: value is not the newest
+    // evaluation, or (unless renewed) its nomination is already in progress
+    // and its own caller ends it.
+    bool mark_pending(evaluation_namespace &current, const input &value, bool renewed) {
+      if (current.epoch != value.epoch || current.sequence != value.sequence || current.source_id != value.source_id ||
+          !value.epoch || !value.sequence || !value.source || !value.resource.native ||
+          (!renewed && matching_evaluation(current.pending_nomination, value)))
+        return false;
+      current.pending_nomination = {value.epoch, value.sequence, GetTickCount64(), value.source_id, value.viewport};
+      return true;
+    }
+  }
   SUNSHINE_CAPTURE_STATIC bool begin_nomination(const input &value, std::uint64_t superseded_source_id) {
     std::lock_guard lock(mutex);
     begin_evaluation_locked(value.epoch, value.sequence, value.viewport, value.provider, value.source_id, superseded_source_id);
     if (!requested.load() || !valid_provider(value.provider)) return false;
-    auto &current = evaluations[provider_index(value.provider)];
-    if (current.epoch != value.epoch || current.sequence != value.sequence || current.source_id != value.source_id)
-      return false;
-    if (value.provider != provider_kind::streamline || !value.frame_generation_input || !value.epoch ||
-        !value.sequence || !value.source_id || !value.source || !value.resource.native) return false;
-    current.pending_nomination = {value.epoch, value.sequence, GetTickCount64(), value.source_id, value.viewport};
-    return true;
+    return mark_pending(evaluations[provider_index(value.provider)], value, true);
+  }
+  void evaluation_nomination::begin(std::uint64_t epoch, std::uint64_t sequence, std::uint32_t viewport,
+      provider_kind provider, std::uint64_t source_id, std::uint64_t superseded_source_id) {
+    end();
+    std::lock_guard lock(mutex);
+    begin_evaluation_locked(epoch, sequence, viewport, provider, source_id, superseded_source_id);
+    if (!requested.load() || !valid_provider(provider) || !epoch || !sequence) return;
+    auto &current = evaluations[provider_index(provider)];
+    if (current.epoch != epoch || current.sequence != sequence || current.source_id != source_id) return;
+    current.pending_nomination = {epoch, sequence, GetTickCount64(), source_id, viewport};
+    nominated = {provider, epoch, sequence, source_id, viewport, true};
+  }
+  void evaluation_nomination::end() {
+    if (!nominated.pending) return;
+    nominated.pending = false;
+    std::lock_guard lock(mutex);
+    auto &pending = evaluations[provider_index(nominated.provider)].pending_nomination;
+    if (pending.epoch == nominated.epoch && pending.sequence == nominated.sequence &&
+        pending.source_id == nominated.source_id && pending.viewport == nominated.viewport)
+      pending = {};
   }
 
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
@@ -2305,8 +2425,10 @@ namespace sunshine_streamline::depth_capture {
       // A compute list's copy is accepted only once its queue holds a place
       // (register_compute_producer): with none left for it and no compute
       // queue holding one, no GPU copy is recorded that could never be read.
-      if (on_compute && compute_unplaced && !compute_producer_placed())
-        return reject(status::exhausted, record_stage::capacity);
+      if (on_compute && compute_unplaced && !compute_producer_placed()) {
+        if (!free_place()) return reject(status::exhausted, record_stage::capacity);
+        compute_unplaced = false;
+      }
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
       if (nominate_source && !preservation_only && !diagnostic_copy &&
           present_before_next_copy.exchange(false, std::memory_order_acq_rel))
@@ -2456,7 +2578,10 @@ namespace sunshine_streamline::depth_capture {
         return &entry != completed && free_for_us(entry) && reclaimable(entry) &&
           !(dump_copy && entry.texture && live_storage(entry));
       });
-      if (found == pixel_end) return reject(status::exhausted, record_stage::capacity);
+      if (found == pixel_end) {
+        capacity_refused(diagnostic_copy ? auxiliary_pool : snapshot_pool);
+        return reject(status::exhausted, record_stage::capacity);
+      }
       auto texture = found->texture;
       // New storage's rest (texture_reference::rest).
       const auto resting_state = diagnostic_copy || on_compute ? D3D12_RESOURCE_STATE_COMMON : sampled_state;
@@ -2701,6 +2826,18 @@ namespace sunshine_streamline::depth_capture {
     // the shared immutable snapshot/retirement path; never substitute a
     // clear-count heuristic for the middleware's capture boundary. An
     // undeclared state needs this recording's observation (copy_state::select).
+    // The copy of an evaluation begun earlier (begin_evaluation: NGX, DLSS-G)
+    // is its nomination in progress as nominate_evaluation's is.
+    bool pending = false;
+    if (requested.load() && valid_provider(value.provider)) {
+      std::lock_guard lock(mutex);
+      pending = mark_pending(evaluations[provider_index(value.provider)], value, false);
+    }
+    struct nomination_scope {
+      const input &value;
+      bool pending;
+      ~nomination_scope() { if (pending) end_nomination(value); }
+    } completion{value, pending};
     return record_impl(command, value, diagnostic, false, nullptr, true);
   }
   std::uint64_t nominate_evaluation(std::uint64_t command, const input &value,

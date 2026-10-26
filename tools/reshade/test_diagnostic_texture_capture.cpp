@@ -144,7 +144,7 @@ namespace {
     capture::input input;
     texture_case(fixture &gpu, DXGI_FORMAT format, unsigned bytes,
         D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_NONE, bool retain_before_barrier = true,
-        UINT16 mips = 1, UINT16 slices = 1) : bpp(bytes) {
+        UINT16 mips = 1, UINT16 slices = 1, unsigned w = 64, unsigned h = 48) : bpp(bytes), width(w), height(h) {
       D3D12_RESOURCE_DESC desc{}; desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
       desc.Width = width; desc.Height = height; desc.SampleDesc.Count = 1; desc.Format = format;
       desc.MipLevels = mips; desc.DepthOrArraySize = slices;
@@ -705,6 +705,238 @@ namespace {
       gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
   }
 
+  // An SR evaluation's nomination in progress is pending, not a refused
+  // attempt. A Present on the presenting queue (another thread's) that lands
+  // while the game's thread is inside an SR evaluate, as when its copy
+  // allocates storage for a new dynamic-resolution size without the capture
+  // lock, holds. It must not move the gap watermark, which revoked the SR
+  // snapshot completed on the render queue, unread, and every other in
+  // flight, until a snapshot recorded after it completed (Assassin's Creed
+  // Shadows 10-25: completed_before_gap losses of 62-266 ms in FG-on
+  // windows, its FG Presents racing its SR evaluates). DLSS-G inputs refused
+  // on its compute list between the evaluates leave SR untouched as well.
+  void nomination_in_progress(fixture &gpu) {
+    if (gpu.debug_messages) gpu.debug_messages->ClearStoredMessages();
+    consumer_fixture consumer(gpu);
+    texture_case first(gpu, DXGI_FORMAT_R32_FLOAT, 4);
+    // A render size no other case allocates: its copy needs new storage.
+    texture_case resized(gpu, DXGI_FORMAT_R32_FLOAT, 4, D3D12_RESOURCE_FLAG_NONE, true, 1, 1, 52, 36);
+    gpu.submit(); gpu.wait(); gpu.reset();
+    // An ordinary (non-FG) Streamline source with its own id, so the case can
+    // retire it (retire_source takes no source 0) and leave no owner behind.
+    constexpr std::uint64_t epoch = 83, sr_source = 5;
+    std::uint64_t sequence{}, present = 40;
+    capture::record_diagnostic diagnostic;
+    const auto sr_input = [&](const texture_case &image) {
+      auto value = image.input;
+      value.provider = sunshine_scene_depth::provider_kind::streamline;
+      value.epoch = epoch; value.source_id = sr_source; value.viewport = 0; value.sequence = ++sequence; value.tick = GetTickCount64();
+      value.valid_until = sunshine_scene_depth::lifetime::until_evaluation; value.force_snapshot = false;
+      value.source_present_generation = capture::source_present_generation(value.source);
+      return value;
+    };
+    const auto evaluate = [&](const texture_case &image) {
+      const auto ticket = capture::nominate_evaluation(native(gpu.list.Get()), sr_input(image), UINT64_MAX, &diagnostic);
+      require(ticket && diagnostic.result == capture::status::recorded, "an SR evaluation's copy was not recorded");
+      capture::finish(ticket, true);
+      return ticket;
+    };
+    // DLSS-G's input on its compute list with no state recorded there: refused
+    // (missing_state) between the SR evaluates.
+    D3D12_COMMAND_QUEUE_DESC compute_desc{}; compute_desc.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+    ComPtr<ID3D12CommandAllocator> compute_allocator, compute_spare;
+    ComPtr<ID3D12GraphicsCommandList> compute_list;
+    check(gpu.device->CreateCommandAllocator(compute_desc.Type, IID_PPV_ARGS(&compute_allocator)), "DLSS-G refusal allocator");
+    check(gpu.device->CreateCommandAllocator(compute_desc.Type, IID_PPV_ARGS(&compute_spare)), "DLSS-G refusal spare allocator");
+    check(gpu.device->CreateCommandList(0, compute_desc.Type, compute_allocator.Get(), nullptr, IID_PPV_ARGS(&compute_list)),
+      "DLSS-G refusal list");
+    created(compute_list.Get());
+    capture::observe_command(native(compute_list.Get())); capture::poll();
+    check(close_list(compute_list.Get()), "DLSS-G refusal list initial close");
+    check(compute_spare->Reset(), "DLSS-G refusal allocator reset");
+    check(reset_list(compute_list.Get(), compute_spare.Get()), "DLSS-G refusal recording reset");
+    capture::poll();
+    const auto refuse_dlssg = [&] {
+      auto value = first.input;
+      value.provider = sunshine_scene_depth::provider_kind::streamline;
+      value.epoch = epoch; value.sequence = ++sequence; value.tick = GetTickCount64(); value.viewport = 0;
+      value.frame_generation_input = true;
+      value.source_id = sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(0));
+      sunshine_api_contract::apply(sunshine_api_contract::ngx::frame_generation_input, value);
+      value.at_tag_call = true; value.pixels_required = true;
+      value.source_present_generation = capture::source_present_generation(value.source);
+      capture::record_diagnostic refused;
+      const auto ticket = capture::nominate(native(compute_list.Get()), value, &refused);
+      if (ticket) capture::finish(ticket, false);
+      require(!ticket && refused.result == capture::status::missing_state,
+        "a DLSS-G input with no state on its compute list was not refused");
+    };
+    // Frame 1 is shown, establishing SR on the presenting queue; frame 2
+    // completes on the render queue unread.
+    const auto shown = evaluate(first);
+    gpu.submit(); gpu.wait(); gpu.reset();
+    capture::packet packet;
+    capture::capture_diagnostic acquired;
+    require(capture::acquire(native(gpu.foreign_queue.Get()), ++present, packet, &acquired) && packet.pixel_ready &&
+        packet.capture_id == shown, "the first SR frame was not readable on the presenting queue");
+    auto target = destination(gpu.device.Get(), DXGI_FORMAT_R32_FLOAT);
+    require(capture::copy_current(native(consumer.list.Get()), packet, native(target.Get()),
+      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE), "the first SR frame's consumer copy failed");
+    capture::complete_frame(packet, present);
+    consumer.submit(); consumer.wait(); consumer.reset();
+    packet = {};
+    refuse_dlssg();
+    const auto in_flight = evaluate(first);
+    gpu.submit(); gpu.wait(); gpu.reset();
+    refuse_dlssg();
+    // Frame 3 at a new render size: a Present lands while its copy allocates.
+    struct context {
+      fixture *gpu{};
+      std::uint64_t present{};
+      capture::capture_diagnostic acquired;
+      bool pixels{}, ran{};
+    } race{&gpu, ++present};
+    const auto during_allocation = [](void *value) {
+      auto &state = *static_cast<context *>(value);
+      capture::packet seen;
+      capture::acquire(native(state.gpu->foreign_queue.Get()), state.present, seen, &state.acquired);
+      state.pixels = seen.pixel_ready; state.ran = true;
+    };
+    capture::testing::set_allocation_hook(during_allocation, &race);
+    const auto resized_ticket = evaluate(resized);
+    capture::testing::set_allocation_hook(nullptr, nullptr);
+    require(race.ran && !race.pixels && race.acquired.result == capture::status::recorded &&
+        race.acquired.selection == capture::selection_reason::pending_nomination,
+      "a Present during an SR nomination in progress did not hold as pending");
+    refuse_dlssg();
+    // Frame 3 still recording: frame 2, completed and unread, stands in.
+    require(capture::acquire(native(gpu.foreign_queue.Get()), ++present, packet, &acquired) && packet.pixel_ready &&
+        packet.capture_id == in_flight && acquired.selection == capture::selection_reason::completed_snapshot,
+      "the SR snapshot completed before the Present that raced its successor's nomination was revoked");
+    require(capture::copy_current(native(consumer.list.Get()), packet, native(target.Get()),
+      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE), "the completed SR frame's consumer copy failed");
+    capture::complete_frame(packet, present);
+    consumer.submit(); consumer.wait(); consumer.reset();
+    packet = {};
+    // Frame 3, once its recording completed and was reset, is shown in turn.
+    gpu.submit(); gpu.wait(); gpu.reset();
+    require(capture::acquire(native(gpu.foreign_queue.Get()), ++present, packet, &acquired) && packet.pixel_ready &&
+        packet.capture_id == resized_ticket, "the resized SR frame was not readable after its nomination");
+    packet = {};
+    check(close_list(compute_list.Get()), "DLSS-G refusal list close");
+    destroyed(compute_list.Get());
+    capture::command_destroyed(native(compute_list.Get()));
+    capture::retire_source(sunshine_scene_depth::provider_kind::streamline, epoch, sr_source);
+    capture::command_destroyed(native(consumer.list.Get()));
+    capture::poll();
+    gpu.check_debug_errors();
+    std::printf("PASS SR nomination in progress: a Present during an SR copy's storage allocation held as pending, the "
+      "SR frame completed on the render queue before it stayed readable on the presenting queue and the resized frame "
+      "followed; DLSS-G inputs refused on their compute list between the evaluates changed nothing%s\n",
+      gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
+  }
+
+  // An NGX evaluation is a nomination in progress from its begin: its hook
+  // begins the evaluation, then reads its parameters, runs its calibration
+  // probe, asks whether FG owns depth and retains its source before it
+  // nominates (ngx_depth_source.cpp). Begun with begin_evaluation, a Present
+  // on another thread in that window read the attempt as refused and moved
+  // the gap watermark, revoking the NGX snapshot completed on the render
+  // queue but not yet read (completed_before_gap). Begun as an
+  // evaluation_nomination, it holds as pending and that snapshot stands in.
+  // A hook that returns without nominating (missing parameters, FG owning
+  // depth) ends the nomination at its scope's end, and the refused attempt
+  // then moves the gap as before.
+  void ngx_nomination_in_progress(fixture &gpu) {
+    if (gpu.debug_messages) gpu.debug_messages->ClearStoredMessages();
+    consumer_fixture consumer(gpu);
+    texture_case depth(gpu, DXGI_FORMAT_R32_FLOAT, 4);
+    gpu.submit(); gpu.wait(); gpu.reset();
+    auto input = depth.input;
+    input.provider = sunshine_scene_depth::provider_kind::ngx;
+    input.epoch = 84; input.source_id = 97; input.viewport = 0;
+    input.valid_until = sunshine_scene_depth::lifetime::until_evaluation; input.force_snapshot = false;
+    input.source_present_generation = capture::source_present_generation(input.source);
+    input.native_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    input.proof = sunshine_scene_depth::state_proof::sdk_contract;
+    std::uint64_t sequence{}, present = 60;
+    capture::record_diagnostic diagnostic;
+    const auto begin = [&](capture::evaluation_nomination &nominating) {
+      input.sequence = ++sequence; input.tick = GetTickCount64();
+      nominating.begin(input.epoch, input.sequence, input.viewport, input.provider, input.source_id);
+    };
+    const auto nominate = [&](capture::evaluation_nomination &nominating) {
+      const auto ticket = capture::nominate(native(gpu.list.Get()), input, &diagnostic);
+      nominating.end();
+      require(ticket && diagnostic.result == capture::status::recorded, "an NGX evaluation's copy was not recorded");
+      capture::finish(ticket, true);
+      return ticket;
+    };
+    const auto evaluate = [&] {
+      capture::evaluation_nomination nominating;
+      begin(nominating);
+      return nominate(nominating);
+    };
+    auto target = destination(gpu.device.Get(), DXGI_FORMAT_R32_FLOAT);
+    capture::packet packet;
+    capture::capture_diagnostic acquired;
+    const auto show = [&](std::uint64_t expected, capture::selection_reason selection, const char *failure) {
+      require(capture::acquire(native(gpu.foreign_queue.Get()), ++present, packet, &acquired) && packet.pixel_ready &&
+          packet.capture_id == expected && acquired.selection == selection, failure);
+      require(capture::copy_current(native(consumer.list.Get()), packet, native(target.Get()),
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE), "an NGX frame's consumer copy failed");
+      capture::complete_frame(packet, present);
+      consumer.submit(); consumer.wait(); consumer.reset();
+      packet = {};
+    };
+    // Frame 1 is shown, establishing NGX on the presenting queue; frame 2
+    // completes on the render queue unread.
+    const auto shown = evaluate();
+    gpu.submit(); gpu.wait(); gpu.reset();
+    show(shown, capture::selection_reason::current_capture, "the first NGX frame was not readable on the presenting queue");
+    const auto in_flight = evaluate();
+    gpu.submit(); gpu.wait(); gpu.reset();
+    // Frame 3 begins; a Present lands while its hook reads its parameters.
+    std::uint64_t third{};
+    {
+      capture::evaluation_nomination nominating;
+      begin(nominating);
+      capture::acquire(native(gpu.foreign_queue.Get()), ++present, packet, &acquired);
+      require(!packet.pixel_ready && acquired.result == capture::status::recorded &&
+          acquired.selection == capture::selection_reason::pending_nomination,
+        "a Present between an NGX evaluation's begin and its nomination did not hold as pending");
+      packet = {};
+      third = nominate(nominating);
+    }
+    // Frame 3 still recording: frame 2, completed and unread, stands in.
+    show(in_flight, capture::selection_reason::completed_snapshot,
+      "the NGX snapshot completed before the Present that raced its successor's begin was revoked");
+    gpu.submit(); gpu.wait(); gpu.reset();
+    show(third, capture::selection_reason::current_capture, "the third NGX frame was not readable after its nomination");
+    // Frame 4's hook returns before it nominates: held while it runs, then
+    // the refused attempt moves the gap.
+    {
+      capture::evaluation_nomination nominating;
+      begin(nominating);
+      capture::acquire(native(gpu.foreign_queue.Get()), ++present, packet, &acquired);
+      require(acquired.result == capture::status::recorded && acquired.selection == capture::selection_reason::pending_nomination,
+        "a Present during an NGX hook that later refused did not hold as pending");
+      packet = {};
+    }
+    capture::acquire(native(gpu.foreign_queue.Get()), ++present, packet, &acquired);
+    require(!packet.pixel_ready && acquired.result == capture::status::unavailable,
+      "an NGX evaluation that returned without nominating stayed in progress after its hook");
+    packet = {};
+    capture::retire_source(input.provider, input.epoch, input.source_id);
+    capture::command_destroyed(native(consumer.list.Get()));
+    capture::poll();
+    gpu.check_debug_errors();
+    std::printf("PASS NGX nomination in progress: a Present between an NGX evaluation's begin and its nomination held as "
+      "pending, the NGX frame completed on the render queue before it stayed readable and the next frame followed; a "
+      "hook that returned without nominating held while it ran and its refused attempt then read as unavailable%s\n",
+      gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
+  }
+
   // NGX and Streamline evaluate on any non-copy queue (the matrix's S22 and
   // N7), so an input is copied on its evaluation's COMPUTE list too, from a
   // state that list may name, into storage resting in COMMON. The compute
@@ -830,48 +1062,75 @@ namespace {
       gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
   }
 
-  // A COMPUTE queue whose first submission of a copy finds every queue place
-  // taken (DIRECT queues ReShade reported) can never have that copy read.
-  // From then on, while no compute queue holds a place, a compute-list copy
-  // is refused at its call (exhausted, capacity) instead of recorded, and no
-  // later submission retries the registration; a retired queue's freed place
-  // lets the next copy through, and its queue takes the place.
-  void compute_queue_without_place(fixture &gpu) {
+  // Queues ReShade reports though no copy is ever submitted on them, alive
+  // while the compute-list captures run: Assassin's Creed Shadows (10-25)
+  // created five DIRECT queues before its presenting queue, then COMPUTE
+  // queues, and every place was taken before DLSS-G's COMPUTE queue
+  // submitted its first copy (5426 DLSSG.Depth and 10381 UI inputs refused
+  // as capacity). DLSS-G's queue must still take a place, so its depth and
+  // UI copies are read (compute_list_capture, dlssg_compute_list_capture).
+  struct queue_crowd {
+    std::vector<ComPtr<ID3D12CommandQueue>> queues;
+    explicit queue_crowd(fixture &gpu) {
+      for (const auto type : {D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_LIST_TYPE_DIRECT,
+             D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_LIST_TYPE_COPY,
+             D3D12_COMMAND_LIST_TYPE_COPY, D3D12_COMMAND_LIST_TYPE_COMPUTE}) {
+        D3D12_COMMAND_QUEUE_DESC desc{}; desc.Type = type;
+        auto &queue = queues.emplace_back();
+        check(gpu.device->CreateCommandQueue(&desc, IID_PPV_ARGS(&queue)), "reported idle queue");
+        capture::observe_queue(native(queue.Get()));
+      }
+    }
+    ~queue_crowd() {
+      for (auto &queue : queues) capture::retire_queue(native(queue.Get()));
+      capture::poll();
+    }
+  };
+
+  // Queue places never run out. Reported queues destroyed and created again
+  // give their places back; queues the capture owner places at a copy's
+  // submission (a COMPUTE queue ReShade does not report and never retires),
+  // more than the table holds, each still take one, the oldest idle places
+  // being reclaimed; nothing is refused at the bound. Then the bound itself:
+  // with every place busy a queue gets none and the bound is reported once,
+  // and an idle place is reclaimed for it (queue_place_regression).
+  void queue_churn(fixture &gpu) {
     if (gpu.debug_messages) gpu.debug_messages->ClearStoredMessages();
+    char report[384]{};
+    capture::capacity_report(report, sizeof(report)); // Bounds earlier cases hit.
     D3D12_COMMAND_QUEUE_DESC direct_desc{}; direct_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-    std::array<ComPtr<ID3D12CommandQueue>, 4> fillers;
-    for (auto &filler : fillers) {
-      check(gpu.device->CreateCommandQueue(&direct_desc, IID_PPV_ARGS(&filler)), "place-filling direct queue");
-      capture::observe_queue(native(filler.Get()));
+    for (unsigned n = 0; n != 136; ++n) {
+      ComPtr<ID3D12CommandQueue> queue;
+      check(gpu.device->CreateCommandQueue(&direct_desc, IID_PPV_ARGS(&queue)), "reported short-lived direct queue");
+      capture::observe_queue(native(queue.Get()));
+      capture::retire_queue(native(queue.Get()));
     }
     D3D12_COMMAND_QUEUE_DESC queue_desc{}; queue_desc.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
-    ComPtr<ID3D12CommandQueue> compute;
     ComPtr<ID3D12CommandAllocator> allocator, spare;
     ComPtr<ID3D12GraphicsCommandList> list;
     ComPtr<ID3D12Fence> done;
-    check(gpu.device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&compute)), "unplaced compute queue");
-    check(gpu.device->CreateCommandAllocator(queue_desc.Type, IID_PPV_ARGS(&allocator)), "unplaced compute allocator");
-    check(gpu.device->CreateCommandAllocator(queue_desc.Type, IID_PPV_ARGS(&spare)), "unplaced compute spare allocator");
-    check(gpu.device->CreateCommandList(0, queue_desc.Type, allocator.Get(), nullptr, IID_PPV_ARGS(&list)), "unplaced compute list");
-    check(gpu.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&done)), "unplaced compute fence");
+    check(gpu.device->CreateCommandAllocator(queue_desc.Type, IID_PPV_ARGS(&allocator)), "churn compute allocator");
+    check(gpu.device->CreateCommandAllocator(queue_desc.Type, IID_PPV_ARGS(&spare)), "churn compute spare allocator");
+    check(gpu.device->CreateCommandList(0, queue_desc.Type, allocator.Get(), nullptr, IID_PPV_ARGS(&list)), "churn compute list");
+    check(gpu.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&done)), "churn compute fence");
     std::uint64_t completion{};
     created(list.Get());
     capture::observe_command(native(list.Get())); capture::poll();
     const auto reset_compute = [&] {
-      check(spare->Reset(), "unplaced compute allocator reset");
-      check(reset_list(list.Get(), spare.Get()), "unplaced compute recording reset");
+      check(spare->Reset(), "churn compute allocator reset");
+      check(reset_list(list.Get(), spare.Get()), "churn compute recording reset");
       std::swap(allocator, spare); capture::poll();
     };
-    const auto run_compute = [&] {
-      check(close_list(list.Get()), "unplaced compute close");
-      execute(compute.Get(), list.Get());
-      check(compute->Signal(done.Get(), ++completion), "unplaced compute signal");
-      HANDLE event = CreateEventW(nullptr, false, false, nullptr); require(event != nullptr, "unplaced compute event");
+    const auto run_compute = [&](ID3D12CommandQueue *queue) {
+      check(close_list(list.Get()), "churn compute close");
+      execute(queue, list.Get());
+      check(queue->Signal(done.Get(), ++completion), "churn compute signal");
+      HANDLE event = CreateEventW(nullptr, false, false, nullptr); require(event != nullptr, "churn compute event");
       const auto hr = done->SetEventOnCompletion(completion, event);
       const auto outcome = SUCCEEDED(hr) ? WaitForSingleObject(event, 10000) : WAIT_FAILED;
-      CloseHandle(event); require(outcome == WAIT_OBJECT_0, "unplaced compute completion timeout");
+      CloseHandle(event); require(outcome == WAIT_OBJECT_0, "churn compute completion timeout");
     };
-    check(close_list(list.Get()), "unplaced compute initial close");
+    check(close_list(list.Get()), "churn compute initial close");
     reset_compute();
 
     texture_case depth(gpu, DXGI_FORMAT_R32_FLOAT, 4);
@@ -881,55 +1140,58 @@ namespace {
     input.epoch = 76; input.source_id = 94; input.viewport = 0;
     input.valid_until = sunshine_scene_depth::lifetime::until_evaluation; input.force_snapshot = false;
     input.source_present_generation = capture::source_present_generation(input.source);
-    std::uint64_t sequence{};
+    std::uint64_t sequence{}, present{};
     capture::record_diagnostic diagnostic;
-    const auto nominate = [&] {
+    for (unsigned n = 0; n != 72; ++n) {
+      ComPtr<ID3D12CommandQueue> compute;
+      check(gpu.device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&compute)), "unreported compute queue");
+      // Each evaluation its own source, retired after it: no completed
+      // snapshot of an earlier queue stands in for this one's copy.
       auto value = input;
+      value.source_id = input.source_id + n;
       value.proof = sunshine_scene_depth::state_proof::sdk_contract;
       value.native_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
       value.sequence = ++sequence; value.tick = GetTickCount64();
-      return capture::nominate_evaluation(native(list.Get()), value, UINT64_MAX, &diagnostic);
-    };
-    // Recorded: nothing has yet found the places taken. Its submission finds
-    // no place for the compute queue, so the copy is never read.
-    auto ticket = nominate();
-    require(ticket && diagnostic.result == capture::status::recorded, "the first compute-list copy was not recorded");
-    capture::finish(ticket, true);
-    run_compute();
-    reset_compute();
-    // Refused at its call from then on: no GPU copy that could never be read.
-    for (unsigned attempt = 0; attempt != 2; ++attempt) {
-      ticket = nominate();
-      if (ticket) capture::finish(ticket, false);
-      require(!ticket && diagnostic.result == capture::status::exhausted && diagnostic.stage == capture::record_stage::capacity &&
-          diagnostic.command_type == D3D12_COMMAND_LIST_TYPE_COMPUTE,
-        "a compute-list copy was recorded while its queue could take no place");
-      run_compute();
+      const auto ticket = capture::nominate_evaluation(native(list.Get()), value, UINT64_MAX, &diagnostic);
+      require(ticket && diagnostic.result == capture::status::recorded, "a compute-list copy was refused while queues churned");
+      capture::finish(ticket, true);
+      run_compute(compute.Get());
+      // Its newest game execution is recorded however many queues executed
+      // before it (a deferred FG copy waits for one on its presenting queue;
+      // the first 8 queues to execute once kept every record).
+      require(capture::game_executions_on(native(compute.Get())) == capture::game_executions(),
+        "a queue's newest game execution went unrecorded after many queues had executed");
+      capture::packet packet;
+      capture::capture_diagnostic acquired;
+      capture::acquire(native(gpu.foreign_queue.Get()), ++present, packet, &acquired);
+      require(acquired.capture_id == ticket && acquired.submitted && acquired.queue == native(compute.Get()),
+        "a compute queue took no place at its copy's submission after many queues had taken one");
+      packet = {};
       reset_compute();
+      capture::retire_source(value.provider, value.epoch, value.source_id);
+      if (n + 1 == 72) {
+        // A retired queue's record goes with it.
+        capture::retire_queue(native(compute.Get()));
+        require(!capture::game_executions_on(native(compute.Get())), "a retired queue kept its newest game execution");
+      }
     }
-    // A retired queue frees a place: the next copy is recorded, and its
-    // submission gives the compute queue a place and a fence.
-    for (auto &filler : fillers) capture::retire_queue(native(filler.Get()));
-    capture::poll();
-    ticket = nominate();
-    require(ticket && diagnostic.result == capture::status::recorded, "a compute-list copy was refused after a queue place freed");
-    capture::finish(ticket, true);
-    run_compute();
-    capture::packet packet;
-    capture::capture_diagnostic acquired;
-    capture::acquire(native(gpu.foreign_queue.Get()), 1, packet, &acquired);
-    require(acquired.capture_id == ticket && acquired.submitted && acquired.queue == native(compute.Get()),
-      "the compute queue took no place at its copy's submission once one was free");
-    packet = {};
-    reset_compute();
-    capture::retire_source(input.provider, input.epoch, input.source_id);
-    capture::retire_queue(native(compute.Get()));
+    require(!capture::capacity_report(report, sizeof(report)) || !std::strstr(report, "queue_places"),
+      "queue places ran out while queues churned");
     destroyed(list.Get());
     capture::command_destroyed(native(list.Get()));
     capture::poll();
+    // The bound itself, with stand-in places (white box).
+    D3D12_COMMAND_QUEUE_DESC copy_desc{}; copy_desc.Type = D3D12_COMMAND_LIST_TYPE_COPY;
+    ComPtr<ID3D12CommandQueue> filler, target;
+    check(gpu.device->CreateCommandQueue(&copy_desc, IID_PPV_ARGS(&filler)), "stand-in queue");
+    check(gpu.device->CreateCommandQueue(&direct_desc, IID_PPV_ARGS(&target)), "queue without a place");
+    require(capture::testing::queue_place_regression(native(filler.Get()), native(target.Get())),
+      "a full table of busy queue places admitted a queue, reported its bound other than once, or kept an idle place");
     gpu.check_debug_errors();
-    std::printf("PASS compute queue without a place: its first copy's submission found every place taken, later compute-list "
-      "copies were refused at their call (exhausted), and a freed place let the next copy and its queue in%s\n",
+    std::printf("PASS queue places: 136 reported queues created and retired, then 72 unreported compute queues each placed "
+      "at its copy's submission (idle places reclaimed) and each recording its newest game execution, nothing refused at "
+      "the bound, a retired queue's record freed; at the bound with every place busy a queue got none and the bound was "
+      "reported once, and an idle place was reclaimed for it%s\n",
       gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
   }
 
@@ -2549,10 +2811,16 @@ int main(int argc, char **argv) {
     first_recording_depth_capture(gpu);
     proven_state_end_of_frame(gpu);
     ngx_contract_depth_capture(gpu);
-    // Before compute_list_capture, whose compute queue keeps its place.
-    compute_queue_without_place(gpu);
-    compute_list_capture(gpu);
-    dlssg_compute_list_capture(gpu);
+    nomination_in_progress(gpu);
+    ngx_nomination_in_progress(gpu);
+    {
+      // More reported queues than a game submits copies on (Assassin's
+      // Creed Shadows): DLSS-G's compute queue still takes a place.
+      queue_crowd crowd(gpu);
+      compute_list_capture(gpu);
+      dlssg_compute_list_capture(gpu);
+    }
+    queue_churn(gpu);
     depth_format_and_mips(gpu);
     local_same_queue_ordered_capture(gpu);
     immediate_consumer_without_list_hooks(gpu);

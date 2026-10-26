@@ -747,6 +747,10 @@ namespace sunshine_streamline::provider {
       char text[256];
       if (depth_capture::list_coverage_report(GetTickCount64(), text, sizeof(text)))
         sunshine_log::message(reshade::log::level::info, text);
+      // A safety bound of the capture owner that refused a capture, once each.
+      char bound[384];
+      if (depth_capture::capacity_report(bound, sizeof(bound)))
+        sunshine_log::message(reshade::log::level::warning, bound);
     }
     frame_generation_snapshot fg_source;
     frame_generation_query_status fg_status;

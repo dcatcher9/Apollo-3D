@@ -4125,8 +4125,13 @@ A frame's Present depends on whether the viewport's frame generation is on (its 
   frame inside that frame's Present: where its NGX evaluations are observed in the deferral's scope
   (one within the source age), the frame's Present is the first after an evaluation that followed
   the tag call. Without them it is the first after a game list executed on the presenting queue
-  itself since the tag call (`depth_capture::game_executions_on`, at most 8 queues recorded), which
-  a game presenting on another queue never satisfies, so its deferrals lapse.
+  itself since the tag call (`depth_capture::game_executions_on`), which a game presenting on
+  another queue never satisfies, so its deferrals lapse. That record's table shares the queue
+  places' safety bound: a queue with no entry takes that of the queue whose newest execution is
+  oldest, and a retired queue's entry is freed, so a queue records at its next execution however
+  many queues a session creates (since the Assassin's Creed Shadows hotfix of 10-26; before, the
+  first 8 queues to execute a game list kept their entries for good; ACS 10-25 created 9 queues,
+  its presenting queue the 7th and one recreated mid-session).
 
 An earlier frame's Present neither copies nor ends the deferral (S7); under frame generation it is
 counted (`waited_for_frame`). Without a frame token the frame a global tag names is the viewport's
@@ -4407,9 +4412,18 @@ and calibration updates, and keep the last matching resolved scene parameters. T
 still applies. Neither reuse nor a new pending nomination extends the age limit. The overlay marks
 `Previous real frame (FG)` instead of presenting reused depth as freshly captured.
 
-The capture owner publishes an in-progress nomination with its evaluation watermark. A Present
-between this publication and snapshot registration can identify the same established FG source
-without acquiring pending pixels. Missing/invalid attempts withdraw that intent; an older call
+The capture owner publishes an in-progress nomination with its evaluation watermark: every
+nominated evaluation's, and an NGX or live DLSS-G evaluation's from its begin
+(`depth_capture::evaluation_nomination`), under the same lock, until its copy is recorded or refused
+on whichever path its hook returns (NGX reads its parameters, its calibration probe and the FG
+owner and retains its source in between; since the review of the 10-26 hotfix, before which only
+the `nominate()` call itself was covered).
+A Present between this publication and snapshot registration can identify the same established
+source without acquiring pending pixels; it holds, and marks no gap in the source's admission
+(since the Assassin's Creed Shadows hotfix of 10-26; before, only an FG nomination was in progress,
+so an FG Present landing while an SR evaluate allocated its copy's storage for a new dynamic
+resolution size read that attempt as refused and revoked the SR snapshots in flight:
+`completed_before_gap`). Missing/invalid attempts withdraw that intent; an older call
 returning cannot clear a newer intent. The explicit bounded reuse policy above may use its private
 previous depth during this gap; GPU resource retirement is unchanged.
 
@@ -4583,13 +4597,18 @@ starts and ends at its own rest, so a direct list may reuse COMMON storage and a
 only COMMON storage. A COMPUTE queue, which ReShade does not report, takes a place and its own
 fence at its first submission of a copy awaiting its producer (`register_compute_producer`, only
 after a compute-list copy was ever recorded), and the Present queue reads that copy as any other
-queue's: once its recording was reset and the fence passed. The capture owner has four queue
-places. Once a compute queue finds them all taken, no later submission tries again, and while no
-compute queue holds a place a compute-list copy is refused at its call (`exhausted`, stage
-`capacity`) rather than recorded as a GPU copy nothing could read, until a retired queue frees a
-place (since the Stage 3 batch B review; before, such a copy was recorded on every evaluate and
-discarded at its recording's Reset, and every submission retried the registration under the capture
-lock). Such a copy is its FG scope's accepted
+queue's: once its recording was reset and the fence passed. Every DIRECT queue ReShade reports takes
+a queue place too. The 64 places are a safety bound, not a budget: a full table reclaims the place
+of an idle queue (no capture names it, it owns no provider and every fence value signalled on it
+has completed), which registers again at its next copy's submission or Present (`free_place`, since
+the Assassin's Creed Shadows hotfix of 10-26; before, the game's DIRECT queues took all four places
+and its DLSS-G COMPUTE queue found none for a whole session, refusing 5426 `DLSSG.Depth` and 10381
+UI inputs as `capacity`). Only while every place is busy does a compute queue find none; a
+compute-list copy is then refused at its call (`exhausted`, stage `capacity`) rather than recorded
+as a GPU copy nothing could read, until a place frees or turns idle (since the Stage 3 batch B
+review; before, such a copy was recorded on every evaluate and discarded at its recording's Reset).
+A capture refused at the queue places, the source table or a snapshot pool is reported once per
+bound (`Sunshine capture capacity`, a warning). Such a copy is its FG scope's accepted
 copy (`frame_generation_scope_live`) only once the Present queue can read it, so a copy never
 submitted or never reset keeps no other depth out of its viewport, and an FG copy whose producer
 fails later leaves its frame missed (`frame_generation_missed`); a direct-list copy is accepted at

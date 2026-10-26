@@ -132,7 +132,7 @@ namespace sunshine_streamline::depth_capture {
     bool producer_completion_valid{}, producer_recording_retired{};
     bool finished{}, success{}, submitted{}, invalid{};
     bool repeated_frame{}; // Latest successful frame was already copied for effects.
-    bool pending_frame{}; // Same FG source awaits nomination/result/submission/immutability; capture_id may still be zero.
+    bool pending_frame{}; // Same FG source awaits result/submission/immutability, or any source's nomination is in progress; capture_id may still be zero.
     std::uint64_t source_id{};
     std::uint32_t viewport{};
     sunshine_scene_depth::provider_kind provider{sunshine_scene_depth::provider_kind::streamline};
@@ -267,6 +267,10 @@ namespace sunshine_streamline::depth_capture {
   // These counts as one log line, at most every 5 s and only after they
   // changed; false when there is nothing to log.
   bool list_coverage_report(std::uint64_t now_ms, char *out, std::size_t size);
+  // One log line naming each safety bound of the capture owner (its queue
+  // places, source table and snapshot pools) that refused a capture since the
+  // last line, each once per session; false when no bound is newly hit.
+  bool capacity_report(char *out, std::size_t size);
   void observe_queue(std::uint64_t queue);
   // Once per Present, before any capture/copy of that Present: observe the
   // effects pass's command list, ReShade's immediate list (registering it as
@@ -343,8 +347,10 @@ namespace sunshine_streamline::depth_capture {
   // while the game records).
   std::uint64_t game_executions();
   // The newest of those executions (its game_executions() count) on queue,
-  // as the submission hook reports it; 0 when none was recorded there (at
-  // most 8 queues are recorded). Under frame generation a deferred copy
+  // as the submission hook reports it; 0 when none was recorded there. A
+  // full record table gives a queue the entry of the queue whose newest
+  // execution is oldest, which records again at its next execution, and a
+  // retired queue's entry is freed. Under frame generation a deferred copy
   // without DLSS-G's evaluations needs one on its presenting queue.
   std::uint64_t game_executions_on(std::uint64_t queue);
   // A retained source's allocation width and height (false without one).
@@ -359,6 +365,33 @@ namespace sunshine_streamline::depth_capture {
   void begin_evaluation(std::uint64_t epoch, std::uint64_t sequence, std::uint32_t viewport,
     sunshine_scene_depth::provider_kind provider = sunshine_scene_depth::provider_kind::streamline,
     std::uint64_t source_id = 0, std::uint64_t superseded_source_id = UINT64_MAX);
+  // An evaluation whose copy its caller nominates next (nominate): begin()
+  // begins it as begin_evaluation does and, under the same lock, publishes
+  // its nomination as in progress (nominate_evaluation's) until end() or the
+  // scope's end, whichever path its caller returns by. NGX reads its
+  // parameters and retains its source between the two. An acquisition
+  // meanwhile, another thread's Present, holds instead of reading the
+  // attempt as refused, which moved acquire's gap watermark and so revoked
+  // the source's earlier snapshots still in flight; a refused attempt moves
+  // it once the nomination ends, as before.
+  class evaluation_nomination {
+  public:
+    evaluation_nomination() = default;
+    evaluation_nomination(const evaluation_nomination &) = delete;
+    evaluation_nomination &operator=(const evaluation_nomination &) = delete;
+    ~evaluation_nomination() { end(); }
+    void begin(std::uint64_t epoch, std::uint64_t sequence, std::uint32_t viewport,
+      sunshine_scene_depth::provider_kind provider, std::uint64_t source_id,
+      std::uint64_t superseded_source_id = UINT64_MAX);
+    void end();
+  private:
+    struct {
+      sunshine_scene_depth::provider_kind provider{};
+      std::uint64_t epoch{}, sequence{}, source_id{};
+      std::uint32_t viewport{};
+      bool pending{};
+    } nominated;
+  };
 #ifdef SUNSHINE_STREAMLINE_PROBE_TEST
   // Test only: observe before the original DLSS evaluation on its actual
   // command list and record an independent copy, without nominating it.
@@ -368,11 +401,16 @@ namespace sunshine_streamline::depth_capture {
   // Source adapters supply identity/metadata and always snapshot at the API
   // call, even for a registered ReShade DSV. Matching its resource identity
   // cannot authenticate a generic before-clear copy's contents. Missing state
-  // hints are resolved against observed command state, never invented.
+  // hints are resolved against observed command state, never invented. The
+  // copy of its provider's newest evaluation (begin_evaluation) is that
+  // evaluation's nomination in progress, as nominate_evaluation's is; an
+  // evaluation_nomination publishes it from the evaluation's begin instead.
   std::uint64_t nominate(std::uint64_t command, const input &value, record_diagnostic *diagnostic = nullptr);
   // Publish validated adapter candidates and their in-progress nomination as one
-  // observation. Until the candidate batch resolves, only a bounded whole-FG-pair hold may
-  // use this logical identity; no previous depth becomes current pixels. Native
+  // observation. Until the candidate batch resolves (any evaluation's, SR's as
+  // well as FG's), an acquisition holds: only a bounded whole-FG-pair hold may
+  // use this logical identity, no previous depth becomes current pixels and no
+  // earlier snapshot of the source is revoked (acquire's gap watermark). Native
   // validation and GPU ordering remain shared with nominate(). Rejection clears
   // only this attempt; missing adapter input must use begin_evaluation() instead.
   std::uint64_t nominate_evaluation(std::uint64_t command, const input &value,
@@ -664,6 +702,9 @@ namespace sunshine_streamline::depth_capture {
   // An executed recording's sorted aliasing marks answer aliased_after
   // exactly as the unsorted ones did.
   namespace testing { bool alias_lookup_regression(); }
+  // Queue places at their safety bound: a full table of busy places refuses
+  // a queue and reports the bound once; an idle place is reclaimed.
+  namespace testing { bool queue_place_regression(std::uint64_t filler, std::uint64_t target); }
   // Called once (then cleared) on the recording thread while a record call
   // allocates new storage without the capture lock.
   namespace testing { void set_allocation_hook(void (*hook)(void *), void *context); }

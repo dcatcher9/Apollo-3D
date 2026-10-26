@@ -2583,6 +2583,84 @@ namespace sunshine_streamline::depth_capture {
         value.failure == capture_failure::producer_queue_changed && cross_queue_completion_regression() &&
         preservation_owner_regression() && source_authority_regression();
     }
+    // Queue places at their safety bound (free_place): with every place busy
+    // (a provider established on each), a new DIRECT queue gets none and the
+    // bound is reported once; a place whose queue turned idle is reclaimed
+    // for it. filler is a real queue the stand-in places name, target a
+    // DIRECT queue without a place.
+    bool queue_place_regression(std::uint64_t filler, std::uint64_t target) {
+      com_ptr<ID3D12CommandQueue> named, checked;
+      const auto exact = [](std::uint64_t value, com_ptr<ID3D12CommandQueue> &out) {
+        return value && SUCCEEDED(reinterpret_cast<IUnknown *>(value)->QueryInterface(IID_ID3D12CommandQueue,
+          reinterpret_cast<void **>(out.put()))) && out.p;
+      };
+      if (!exact(filler, named) || !exact(target, checked) || checked->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT)
+        return false;
+      target = reinterpret_cast<std::uint64_t>(checked.p);
+      // Every place busy: free ones hold stand-ins, idle ones are made busy,
+      // and a retiring one (collect_retired would free it) is held busy too.
+      std::vector<unsigned> stand_ins, made_busy, held_retiring;
+      const auto restore = [&] {
+        std::lock_guard lock(mutex);
+        for (const auto i : stand_ins) if (queues[i] && queues[i]->queue.p == named.p) queues[i].reset();
+        for (const auto i : made_busy) if (queues[i]) queues[i]->provider_established = false;
+        for (const auto i : held_retiring) if (queues[i]) { queues[i]->provider_established = false; queues[i]->retiring = true; }
+      };
+      {
+        std::lock_guard lock(mutex);
+        collect_retired();
+        if (known_queue(target)) return false;
+        // Earlier cases may have filled the table: one place for a stand-in.
+        if (std::none_of(queues.begin(), queues.end(), [](const auto &entry) { return !entry; }))
+          if (auto *place = free_place()) place->reset();
+        for (unsigned i = 0; i != queues.size(); ++i) {
+          auto &entry = queues[i];
+          if (entry) {
+            if (entry->retiring) { entry->retiring = false; entry->provider_established = true; held_retiring.push_back(i); }
+            else if (!entry->provider_established) { entry->provider_established = true; made_busy.push_back(i); }
+            continue;
+          }
+          entry = std::make_unique<queue_state>();
+          named->AddRef(); entry->queue.p = named.p;
+          entry->provider_established = true;
+          stand_ins.push_back(i);
+        }
+      }
+      char text[384]{};
+      capacity_report(text, sizeof(text)); // Earlier bounds of this process.
+      observe_queue(target);
+      bool refused = false;
+      {
+        std::lock_guard lock(mutex);
+        refused = !known_queue(target) && !free_place();
+      }
+      char bound[32]{};
+      std::snprintf(bound, sizeof(bound), "queue_places=%u", queue_limit);
+      const bool reported = capacity_report(text, sizeof(text)) && std::string_view(text).find(bound) != std::string_view::npos;
+      const bool once = !capacity_report(text, sizeof(text));
+      // One stand-in's queue turns idle: its place is reclaimed for the target.
+      unsigned idle = queue_limit;
+      {
+        std::lock_guard lock(mutex);
+        if (!stand_ins.empty()) { idle = stand_ins.back(); queues[idle]->provider_established = false; }
+      }
+      observe_queue(target);
+      bool placed = false;
+      {
+        std::lock_guard lock(mutex);
+        placed = idle != queue_limit && known_queue(target) == queues[idle].get() && places_reclaimed;
+      }
+      restore();
+      retire_queue(target);
+      {
+        std::lock_guard lock(mutex);
+        collect_retired();
+        if (known_queue(target)) placed = false;
+      }
+      if (!(refused && reported && once && placed))
+        std::printf("queue_place_regression: refused=%d reported=%d once=%d placed=%d report=%s\n", refused, reported, once, placed, text);
+      return refused && reported && once && placed;
+    }
     bool alias_lookup_regression() {
       // Marks as a transient-memory engine records them: a few sources
       // aliased many times, interleaved, the same source more than once.
