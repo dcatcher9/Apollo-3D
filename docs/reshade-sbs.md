@@ -4216,7 +4216,8 @@ flight. One never submitted (as when its queue has no place) or never reset turn
 for nothing; one whose producer fails later (a
 replay, its queue gone) counts as a missed frame (below). DLSS-G's
 accepted copies keep the FG scope live exactly as accepted FG tag copies do, so FG owns the viewport
-(the same viewport's SR/RR evaluations and direct NGX copies stand aside), and generated Presents
+for the frames it supplies (the same viewport's SR/RR evaluations and direct NGX copies stand
+aside), and generated Presents
 hold the real frame's copy. A refusal while the scope is silent changes nothing (the ordinary SR/RR
 source stays); while it is live the attempt first replaces the FG observation, so a refusal withdraws
 the previous copy as a refused FG tag boundary does. Either way the refused frame has no FG copy, so
@@ -4259,10 +4260,22 @@ depth tag refused, its copy deferred to the frame's Present cancelled by an unta
 lapsed, or DLSS-G's own evaluation of it refused) newer than the newest accepted copy turns the scope
 silent at once (`depth_capture::frame_generation_missed`, ordered by the frame's observation
 sequence, so a late outcome of an older frame changes nothing). While DLSS-G's own evaluation
-supplies the scope's copies, that evaluation, not the game's FG tag, decides the frame. Assassin's
-Creed Shadows (10-24) untags its FG depth in every frame and so cancels almost every deferred copy;
-the rare copy that survived kept the scope live for a second with no further FG copy, and FG On did
-the same, so that viewport showed neither FG nor SR depth for about a second each time.
+supplies the scope's copies, that evaluation, not the game's FG tag, decides the frame. Any frame
+that records no FG copy misses the scope as well, whatever its calls: each frame of the viewport
+begins with its Streamline constants (`slSetConstants`, which DLSS and DLSS-G require every frame;
+a repeated frame token is the same frame), a live scope expects the frame to record an FG copy, in
+flight or accepted, and when the next frame begins with none recorded since the previous one
+began, that frame had none, so the scope turns silent (`depth_capture::frame_generation_frame`). A
+copy recorded before that miss and readable only after it leaves the scope silent. So a game whose
+FG copies stop (no FG call, a refused or cancelled one, or a DLSS-G evaluation that adds no copy)
+has its SR/RR depth copied from the second frame without an FG copy, ready when the held FG copy
+expires. Assassin's Creed Shadows (10-24) untags its FG depth in every frame and so cancels almost
+every deferred copy; the rare copy that survived kept the scope live for a second with no further
+FG copy, and FG On did the same, so that viewport showed neither FG nor SR depth for about a second
+each time. Until 10-26 (the continuity invariant's known gap C4) a frame without any FG call
+missed nothing, nor did a frame whose tag left it to a DLSS-G evaluation that never came, so after
+a single FG copy the scope kept the viewport's SR/RR depth out for a second while the display could
+hold that copy only for the source age.
 A silent FG scope owns nothing: its refused boundaries withdraw nothing, the same viewport's
 ordinary SR/RR evaluation nominates again (replacing any FG observation of that viewport), the
 provider selects as without FG for that Present (`require_FG=0 FG_silent=1` in readiness lines),

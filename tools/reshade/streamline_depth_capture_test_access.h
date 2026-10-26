@@ -250,6 +250,11 @@ namespace sunshine_streamline::depth_capture {
       // newest accepted copy's, and the newest frame without one
       // (frame_generation_missed). The newer of the two decides the scope.
       std::uint64_t accepted_sequence{}, missed_sequence{};
+      // The newest recorded copy's sequence, the viewport's newest frame
+      // (its key), and whether that frame has recorded no copy yet
+      // (frame_generation_frame).
+      std::uint64_t recorded_sequence{}, frame{};
+      bool awaiting{};
     };
     struct evaluation_namespace {
       std::array<evaluation_head, 4> views{};
@@ -384,6 +389,7 @@ namespace sunshine_streamline::depth_capture {
     void expire_association(queue_state &owner, std::uint64_t now);
     // Nonzero: frame_generation_scope_live's fixed clock (the seam characterization).
     extern std::atomic<std::uint64_t> scope_clock;
+    void record_frame_generation_copy(const input &value);
     consumer_status preserved_admission(const slot &value, const preservation_ticket &ticket,
       std::uint64_t consumer, std::uint64_t consumer_device, std::uint64_t recording);
 #endif

@@ -310,6 +310,13 @@ namespace {
     // every generated Present was mono, which no seed's judge saw (review
     // mutation M1, a dropped_hold here).
     {"repeated-frame-hold", "20*sr=local; fg=on,sr=local; 30*sr=local,generated=2"},
+    // A frame with no FG copy misses its FG scope as the viewport's next
+    // frame begins, so the viewport's SR evaluations copy its depth (known
+    // gap C4 until then). After one DLSS-G copy: frames that make no FG call,
+    // and frames whose deferred FG tag copy an untag cancels, whose miss was
+    // left to a DLSS-G evaluation that never came.
+    {"C4-no-fg-call", "20*sr=local; fg=on,dlssg=direct; 40*sr=local"},
+    {"C4-cancelled-fg-tags", "20*sr=local; fg=on,sr=local,dlssg=direct; 40*tag=present_bare,entry=global,untag=after_global,sr=local"},
   };
 
   // Each known gap the timelines found has a witness: an event list whose
@@ -322,13 +329,11 @@ namespace {
   };
 
   constexpr witness witnesses[] {
-    // One accepted FG copy, then frames with only the viewport's SR input.
-    {"C4-fg-scope-outlives-copy", "20*sr=local; fg=on,dlssg=direct; 40*sr=local"},
     // SR depth shown, then OnlyValidNow tags that their evaluations refuse.
     {"C5-S1-evaluate", "20*sr=local; 60*tag=now_list,sr=tag"},
-    // One FG tag copy, then frames whose DLSS-G evaluation is refused after
-    // the viewport's SR evaluation.
-    {"C6-dlssg-defers-to-tag-copy", "20*sr=local; fg=on,tag=present_list; 30*sr=local,dlssg=compute_unobserved"},
+    // One FG tag copy, then frames whose DLSS-G evaluation copies on its
+    // compute list, readable three evaluations later.
+    {"C6-dlssg-defers-to-tag-copy", "20*sr=local; fg=on,tag=present_list; 30*dlssg=compute"},
     // A command-less FG tag's copy, DLSS-G evaluations (refused) without a
     // tag, then command-less FG tags without DLSS-G.
     {"C7-deferred-copy-awaits-dlssg", "20*sr=local; fg=on,tag=present_bare; 3*dlssg=compute_unobserved; 40*tag=present_bare"},
@@ -500,17 +505,18 @@ namespace {
     std::uint64_t last_capture {};
     // When a frame last supplied an API source (legal or permitted), when
     // one last recorded a copy on another queue, when one last supplied a
-    // copy its FG scope accepts, an FG tag's, and DLSS-G's own.
-    std::uint64_t api_supplied {}, other_queue_copy {}, fg_copy {}, fg_tag_copy {}, dlssg_copy {};
+    // copy its FG scope accepts, and when one last supplied an FG tag's.
+    std::uint64_t api_supplied {}, other_queue_copy {}, fg_copy {}, fg_tag_copy {};
     // When DLSS-G last evaluated a frame (copied, deferred to a tag or
     // refused), and whether the frame's tag copy is deferred to its Present.
     std::uint64_t dlssg_evaluated {};
     bool deferred_tag {};
     // When a frame last supplied a legal API source the presenting queue
-    // reads (one that meets no limitation), and whether that was an FG copy
-    // (known gap C8).
+    // reads (one that meets no limitation; known gap C8), and whether the
+    // previous frame supplied an FG copy, so that a live FG scope owns this
+    // one (continuity::supply::owned).
     std::uint64_t readable_supply {};
-    bool readable_fg {};
+    bool fg_supplied {};
     std::map<std::uint64_t, unsigned> present_frames;
 
     // What the frame being recorded supplies (the continuity supply log).
@@ -967,15 +973,6 @@ namespace {
       return other_queue_copy && GetTickCount64() - other_queue_copy < sunshine_freshness::source_age_ms + continuity::tag_slack_ms;
     }
 
-    // Whether a frame marks no miss of a live FG scope (known gap C4): it
-    // makes no FG call, its FG input is DLSS-G's compute copy, or its only FG
-    // call is a tag while DLSS-G's own recent copy decides the frame
-    // (dlssg_supplying).
-    static bool keeps_scope_choice(frame_events::tag_form form, frame_events::dlssg_form dlssg_choice, bool dlssg_supplying) {
-      using namespace frame_events;
-      return dlssg_choice == dlssg_form::compute || (dlssg_choice == dlssg_form::none && (form == tag_form::none || dlssg_supplying));
-    }
-
     // One real frame's calls on the game's open list: the decoy and the
     // tracked depth drawn, then the frame's events in the order a game
     // makes them.
@@ -1130,13 +1127,12 @@ namespace {
       }
       dlssg_evaluation(of<dlssg_form>(value, events::dlssg));
       move(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-      // An FG scope stays live for fg_silent_ms after its newest accepted
-      // copy unless a later frame's FG call misses, and keeps the viewport's
-      // SR evaluations out meanwhile (known gap C4). A frame that marks no
-      // miss (keeps_scope_choice) and supplies no FG depth the presenting
-      // queue reads leaves such a scope live: its SR source meets that
-      // limitation. One whose DLSS-G evaluation defers to an earlier frame's
-      // FG tag copy (known gap C6) meets that one instead.
+      // A frame whose DLSS-G evaluation defers to an earlier frame's FG tag
+      // copy (known gap C6), or whose deferred FG tag copy waits for DLSS-G
+      // (known gap C7), meets that limitation. And one whose only FG input is
+      // DLSS-G's compute copy supplies its live FG scope, which keeps the
+      // viewport's SR input out while that copy is readable only frames
+      // later (known gap C1).
       const auto dlssg_choice = of<dlssg_form>(value, events::dlssg);
       const auto now = GetTickCount64();
       const auto limit_all = [&](continuity::limitation meets) {
@@ -1151,37 +1147,41 @@ namespace {
         limit_all(continuity::limitation::dlssg_defers_to_tag_copy);
       } else if (fg_on && deferred_tag && dlssg_choice == dlssg_form::none && dlssg_evaluated && now - dlssg_evaluated < sunshine_freshness::source_age_ms + continuity::tag_slack_ms) {
         // Its deferred copy waits for a DLSS-G evaluation that does not come
-        // (known gap C7), and its scope keeps the viewport's SR depth out.
+        // (known gap C7).
         limit_all(continuity::limitation::deferred_copy_awaits_dlssg);
-      } else if (fg_on && fg_copy && now - fg_copy < sunshine_freshness::fg_silent_ms + continuity::tag_slack_ms && keeps_scope_choice(form, dlssg_choice, dlssg_copy && now - dlssg_copy < sunshine_freshness::fg_silent_ms + continuity::tag_slack_ms) && !(supply.legal & (continuity::tag_copy | continuity::dlssg_input)) && (supply.legal & continuity::sr_evaluate)) {
+      } else if (fg_on && dlssg_choice == dlssg_form::compute && fg_copy && now - fg_copy < sunshine_freshness::fg_silent_ms + continuity::tag_slack_ms && !(supply.legal & continuity::tag_copy) && (supply.legal & continuity::sr_evaluate)) {
         supply.legal &= std::uint8_t(~continuity::sr_evaluate);
         supply.limited |= continuity::sr_evaluate;
-        supply.limit = continuity::limitation::fg_scope_outlives_copy;
+        supply.limit = continuity::limitation::cross_queue_sr;
       }
+      // A live FG scope keeps the viewport's SR input out of the frame after
+      // one that supplied an FG copy, which it expects to supply too: the
+      // Present shows the scope's FG depth instead (FG keeps the frames it
+      // supplies; the next frame without an FG copy turns the scope silent).
+      const bool owned = std::exchange(fg_supplied, false) && fg_on;
       // An FG copy its scope accepts: an FG tag's, or DLSS-G's in a state
       // its list recorded (its compute copy is accepted later, with its own
       // tick).
       if (fg_on && frame_generation_scope() && ((supply.legal | supply.permitted | supply.limited) & (continuity::tag_copy | continuity::dlssg_input))) {
         fg_copy = now;
+        fg_supplied = true;
       }
       if (fg_on && frame_generation_scope() && ((supply.legal | supply.permitted | supply.limited) & continuity::tag_copy)) {
         fg_tag_copy = now;
-      }
-      if (fg_on && (dlssg_choice == dlssg_form::direct || dlssg_choice == dlssg_form::compute) && ((supply.legal | supply.limited) & continuity::dlssg_input)) {
-        dlssg_copy = now;
       }
       if (fg_on && dlssg_choice != dlssg_form::none) {
         dlssg_evaluated = now;
       }
       // FG turned off within the source age of the FG copy the display may
-      // hold, with only SR depth on another queue (C1) to follow it: the
-      // provider drops that copy as a changed source (known gap C8).
-      if (!fg_on && !supply.legal && supply.limit == continuity::limitation::cross_queue_sr && readable_fg && now - readable_supply < sunshine_freshness::source_age_ms + continuity::tag_slack_ms) {
+      // hold (no readable source supplied since that copy, which may itself
+      // meet a limitation), with only SR depth on another queue (C1) to
+      // follow it: the provider drops that copy as a changed source (known
+      // gap C8).
+      if (!fg_on && !supply.legal && supply.limit == continuity::limitation::cross_queue_sr && fg_copy && fg_copy >= readable_supply && now - fg_copy < sunshine_freshness::source_age_ms + continuity::tag_slack_ms) {
         supply.limit = continuity::limitation::fg_off_drops_fg_copy;
       }
       if (supply.legal & continuity::api_sources) {
         readable_supply = now;
-        readable_fg = fg_on && frame_generation_scope() && (supply.legal & (continuity::tag_copy | continuity::dlssg_input));
       }
       // The frame's supply: a frame whose legal sources all meet a known
       // limitation is tagged with it; any other legal source must show.
@@ -1189,6 +1189,7 @@ namespace {
       continuity_log.pending.legal = std::uint8_t(supply.legal | supply.limited);
       continuity_log.pending.permitted = supply.permitted;
       continuity_log.pending.limited = supply.limited;
+      continuity_log.pending.owned = owned ? std::uint8_t(supply.legal & continuity::sr_evaluate) : std::uint8_t {};
       continuity_log.pending.limit = supply.legal ? continuity::limitation::none : supply.limit;
       continuity_log.pending.tick = supply.tick;
     }
@@ -1345,8 +1346,8 @@ namespace {
       frames = &value.frames;
       view = {{nullptr, sunshine_streamline::viewport_guid, 1}, viewport};
       last_capture = 0;
-      api_supplied = other_queue_copy = fg_copy = fg_tag_copy = dlssg_copy = dlssg_evaluated = readable_supply = 0;
-      readable_fg = false;
+      api_supplied = other_queue_copy = fg_copy = fg_tag_copy = dlssg_evaluated = readable_supply = 0;
+      fg_supplied = false;
       present_frames.clear();
       where = label;
       continuity_log.judge = {};

@@ -1987,24 +1987,56 @@ namespace sunshine_streamline::depth_capture {
     }
     return false;
   }
+  SUNSHINE_CAPTURE_INTERNAL {
+    // Requires mutex. The FG scope's view when the scope is live
+    // (frame_generation_scope_live), else null.
+    evaluation_head *live_frame_generation_scope(std::uint64_t epoch, std::uint32_t viewport,
+        std::uint64_t enabled_tick) {
+      const auto now = scope_now();
+      const auto source = sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(viewport));
+      // A compute-list copy of this scope counts once readable (accept_compute_copy).
+      if (compute_copies_recorded)
+        for (const auto &value : slots)
+          if (value.id && value.compute_list && value.metadata.epoch == epoch && value.metadata.viewport == viewport &&
+              value.metadata.source_id == source)
+            accept_compute_copy(value);
+      // A tick slightly ahead of this read (another thread's) is fresh.
+      for (auto &view : evaluations[provider_index(provider_kind::streamline)].views)
+        if (view.epoch == epoch && view.viewport == viewport && view.source_id == source && view.accepted_tick &&
+            view.accepted_tick >= enabled_tick && view.accepted_sequence > view.missed_sequence &&
+            sunshine_freshness::ahead_tolerant_le(view.accepted_tick, now, sunshine_freshness::fg_silent_ms))
+          return &view;
+      return nullptr;
+    }
+    // Requires mutex. value, a copy just recorded, supplies its FG scope's
+    // current frame (frame_generation_frame).
+    void record_frame_generation_copy(const input &value) {
+      if (!value.frame_generation_input || !valid_provider(value.provider)) return;
+      for (auto &view : evaluations[provider_index(value.provider)].views)
+        if (view.epoch == value.epoch && view.viewport == value.viewport && view.source_id == value.source_id) {
+          view.recorded_sequence = std::max(view.recorded_sequence, value.sequence);
+          view.awaiting = false;
+        }
+    }
+  }
   bool frame_generation_scope_live(std::uint64_t epoch, std::uint32_t viewport, std::uint64_t enabled_tick) {
     if (!requested.load() || !epoch) return false;
     std::lock_guard lock(mutex);
-    const auto now = scope_now();
-    const auto source = sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(viewport));
-    // A compute-list copy of this scope counts once readable (accept_compute_copy).
-    if (compute_copies_recorded)
-      for (const auto &value : slots)
-        if (value.id && value.compute_list && value.metadata.epoch == epoch && value.metadata.viewport == viewport &&
-            value.metadata.source_id == source)
-          accept_compute_copy(value);
-    // A tick slightly ahead of this read (another thread's) is fresh.
-    for (const auto &view : evaluations[provider_index(provider_kind::streamline)].views)
-      if (view.epoch == epoch && view.viewport == viewport && view.source_id == source && view.accepted_tick &&
-          view.accepted_tick >= enabled_tick && view.accepted_sequence > view.missed_sequence &&
-          sunshine_freshness::ahead_tolerant_le(view.accepted_tick, now, sunshine_freshness::fg_silent_ms))
-        return true;
-    return false;
+    return live_frame_generation_scope(epoch, viewport, enabled_tick) != nullptr;
+  }
+  void frame_generation_frame(std::uint64_t epoch, std::uint32_t viewport, std::uint64_t enabled_tick,
+      std::uint64_t frame) {
+    if (!requested.load() || !epoch) return;
+    std::lock_guard lock(mutex);
+    auto *view = live_frame_generation_scope(epoch, viewport, enabled_tick);
+    if (!view || (frame && frame == view->frame)) return;
+    view->frame = frame;
+    if (!std::exchange(view->awaiting, true)) return;
+    // No copy recorded since the previous frame began: that frame had no FG
+    // copy. Every copy recorded so far, accepted or still in flight, is of
+    // an earlier frame (frame_generation_missed's ordering).
+    view->missed_sequence = std::max({view->missed_sequence, view->recorded_sequence, view->accepted_sequence});
+    view->awaiting = false;
   }
   void frame_generation_missed(std::uint64_t epoch, std::uint32_t viewport, std::uint64_t sequence) {
     if (!requested.load() || !epoch || !sequence) return;
@@ -2717,6 +2749,7 @@ namespace sunshine_streamline::depth_capture {
       if (chosen.enhanced || before == D3D12_RESOURCE_STATE_COPY_SOURCE) list->ResourceBarrier(1, &transitions[1]);
       else list->ResourceBarrier(2, transitions);
       if (!preservation_only) set_attempt(value.provider, status::recorded);
+      if (nominate_source && !preservation_only) record_frame_generation_copy(value);
       if (diagnostic) { diagnostic->result = status::recorded; diagnostic->stage = record_stage::recorded; }
       if (preserved) *preserved = {found->id, reinterpret_cast<std::uint64_t>(found->texture->resource.p),
         found->texture->identity, found->texture};

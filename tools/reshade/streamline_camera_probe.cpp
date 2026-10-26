@@ -1202,6 +1202,14 @@ namespace sunshine_streamline {
       record.camera_serial = serial;
       record.has_camera = true;
       record.changed = ++state.revision;
+      // The viewport's frame begins with its constants: its enabled FG scope
+      // expects the frame to record an FG copy (depth_capture::frame_generation_frame).
+      const auto &fg = record.frame_generation;
+      const bool fg_frame = fg_available.load(std::memory_order_acquire) &&
+        current_fg_target.load(std::memory_order_acquire) && fg.known && fg.enabled && fg.epoch == state.epoch &&
+        fg.loss_revision == fg_loss_revision.load(std::memory_order_acquire);
+      const auto fg_epoch = fg.epoch, fg_enabled_tick = fg.enabled_tick;
+      const std::uint64_t frame_key = camera_identity.has_numeric ? camera_identity.numeric + 1 : token;
       if (token_current(state, camera_identity)) if (auto *saved = frame_slot(state, viewport, camera_identity, serial, true)) {
         if (serial >= saved->camera_serial) {
           saved->camera = camera;
@@ -1213,7 +1221,9 @@ namespace sunshine_streamline {
           saved->has_camera = true;
         }
       }
-      if (current(ticket) && !update.commit()) { ++history_loss; metadata_write_lost(update, __func__, __LINE__, details); }
+      if (!current(ticket)) return;
+      if (!update.commit()) { ++history_loss; metadata_write_lost(update, __func__, __LINE__, details); return; }
+      if (fg_frame) depth_capture::frame_generation_frame(fg_epoch, viewport, fg_enabled_tick, frame_key);
     }
     void store_tags(batch &values) {
       if (!values.valid_viewport || !current(values.observation)) return;

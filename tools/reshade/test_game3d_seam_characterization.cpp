@@ -10,7 +10,8 @@
 // It drives the production functions through the capture owner's
 // test-access header, with no device: the frame generation policy, the FG
 // scope's liveness and the selection the provider derives from it, NGX's
-// copy rule under frame generation, select_provider and establish_provider,
+// copy rule under frame generation, the frames an FG scope owns,
+// select_provider and establish_provider,
 // the exact freshness edges of selection, association and the FG scope, the
 // display policy decide_display, and the UI adapter's admission of each UI
 // candidate (P11).
@@ -318,6 +319,76 @@ namespace sunshine_streamline::depth_capture {
         }
       }
       std::printf("PASS P5 NGX copy rule under frame generation: %zu rows\n", std::size(rows));
+    }
+
+    // P5: the frames an FG scope owns (frame_generation_frame), in one
+    // scope's order of calls. Each frame of the viewport begins with its
+    // constants; a live scope expects the frame to record an FG copy, in
+    // flight or accepted, and when the next frame begins with none recorded
+    // since, that frame missed: the scope turns silent, so the viewport's
+    // SR/RR depth supplies it, and only a copy recorded after the miss makes
+    // the scope live again (known gap C4 until 10-26: the scope stayed live
+    // for a second after its newest copy, keeping SR out once that copy's
+    // hold expired).
+    void frame_generation_frame_steps() {
+      enum class call {
+        accepted,  // An FG copy recorded and accepted (the API call succeeded).
+        recorded,  // An FG copy recorded, still in flight (a compute copy).
+        frame  // A frame of the viewport begins (its key; 0 unknown).
+      };
+
+      struct step {
+        const char *pins;
+        call what;
+        std::uint64_t value;  // A copy's observation sequence, or the frame's key.
+        bool live;  // The scope afterwards.
+      };
+
+      const step steps[] {
+        {"An accepted FG copy makes the scope live", call::accepted, 2, true},
+        {"A frame begins: the live scope expects its FG copy", call::frame, 1, true},
+        {"The frame's own FG copy (DLSS-G's, at its Present)", call::accepted, 4, true},
+        {"The next frame begins after a copy was recorded: still live", call::frame, 2, true},
+        {"The same frame's constants again begin no frame", call::frame, 2, true},
+        {"A copy recorded but still in flight supplies its frame", call::recorded, 6, true},
+        {"So the next frame begins live", call::frame, 3, true},
+        {"A frame begins with no copy recorded since the previous one: that frame missed, the scope turns silent", call::frame, 4, false},
+        {"The copy in flight before the miss, readable after it, leaves the scope silent", call::accepted, 6, false},
+        {"A frame of a silent scope changes nothing", call::frame, 5, false},
+        {"A copy recorded after the miss makes the scope live again", call::accepted, 9, true},
+        {"A frame begins", call::frame, 6, true},
+        {"The next frame without a copy misses again", call::frame, 7, false},
+        {"A copy recorded later makes the scope live again", call::accepted, 11, true},
+        {"A frame without a key begins", call::frame, 0, true},
+        {"So does every later call without one: the frame between had no copy", call::frame, 0, false},
+      };
+      constexpr std::uint64_t epoch = 7;
+      reset();
+      const auto enabled_tick = GetTickCount64() - sunshine_freshness::fg_silent_ms - 1;
+      unsigned index {};
+      for (const auto &s : steps) {
+        if (s.what == call::frame) {
+          frame_generation_frame(epoch, 0, enabled_tick, s.value);
+        } else {
+          auto &value = make(index++, provider_kind::streamline, epoch, s.value, fg_source, 0, 0);
+          {
+            std::lock_guard lock(mutex);
+            record_frame_generation_copy(value.metadata);
+          }
+          if (s.what == call::accepted) {
+            finish(value.id, true);
+          } else {
+            value.finished = value.success = false;
+          }
+        }
+        const bool live = frame_generation_scope_live(epoch, 0, enabled_tick);
+        if (live != s.live) {
+          char text[512];
+          std::snprintf(text, sizeof(text), "P5 FG scope frames, %s: live %d", s.pins, live);
+          fail(text);
+        }
+      }
+      std::printf("PASS P5 frames an FG scope owns: %zu steps\n", std::size(steps));
     }
 
     // P6: select_provider at one Present. Each row builds the queue's owner
@@ -1291,6 +1362,7 @@ int main() {
   frame_generation_policy_timelines();
   frame_generation_scope_rows();
   ngx_frame_generation_rows();
+  frame_generation_frame_steps();
   select_provider_rows();
   ownership_timelines();
   freshness_edges();
