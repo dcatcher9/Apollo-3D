@@ -365,6 +365,33 @@ namespace sunshine_streamline::depth_capture {
   void begin_evaluation(std::uint64_t epoch, std::uint64_t sequence, std::uint32_t viewport,
     sunshine_scene_depth::provider_kind provider = sunshine_scene_depth::provider_kind::streamline,
     std::uint64_t source_id = 0, std::uint64_t superseded_source_id = UINT64_MAX);
+  // An evaluation whose copy its caller nominates next (nominate): begin()
+  // begins it as begin_evaluation does and, under the same lock, publishes
+  // its nomination as in progress (nominate_evaluation's) until end() or the
+  // scope's end, whichever path its caller returns by. NGX reads its
+  // parameters and retains its source between the two. An acquisition
+  // meanwhile, another thread's Present, holds instead of reading the
+  // attempt as refused, which moved acquire's gap watermark and so revoked
+  // the source's earlier snapshots still in flight; a refused attempt moves
+  // it once the nomination ends, as before.
+  class evaluation_nomination {
+  public:
+    evaluation_nomination() = default;
+    evaluation_nomination(const evaluation_nomination &) = delete;
+    evaluation_nomination &operator=(const evaluation_nomination &) = delete;
+    ~evaluation_nomination() { end(); }
+    void begin(std::uint64_t epoch, std::uint64_t sequence, std::uint32_t viewport,
+      sunshine_scene_depth::provider_kind provider, std::uint64_t source_id,
+      std::uint64_t superseded_source_id = UINT64_MAX);
+    void end();
+  private:
+    struct {
+      sunshine_scene_depth::provider_kind provider{};
+      std::uint64_t epoch{}, sequence{}, source_id{};
+      std::uint32_t viewport{};
+      bool pending{};
+    } nominated;
+  };
 #ifdef SUNSHINE_STREAMLINE_PROBE_TEST
   // Test only: observe before the original DLSS evaluation on its actual
   // command list and record an independent copy, without nominating it.
@@ -376,7 +403,8 @@ namespace sunshine_streamline::depth_capture {
   // cannot authenticate a generic before-clear copy's contents. Missing state
   // hints are resolved against observed command state, never invented. The
   // copy of its provider's newest evaluation (begin_evaluation) is that
-  // evaluation's nomination in progress, as nominate_evaluation's is.
+  // evaluation's nomination in progress, as nominate_evaluation's is; an
+  // evaluation_nomination publishes it from the evaluation's begin instead.
   std::uint64_t nominate(std::uint64_t command, const input &value, record_diagnostic *diagnostic = nullptr);
   // Publish validated adapter candidates and their in-progress nomination as one
   // observation. Until the candidate batch resolves (any evaluation's, SR's as

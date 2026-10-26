@@ -836,6 +836,107 @@ namespace {
       gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
   }
 
+  // An NGX evaluation is a nomination in progress from its begin: its hook
+  // begins the evaluation, then reads its parameters, runs its calibration
+  // probe, asks whether FG owns depth and retains its source before it
+  // nominates (ngx_depth_source.cpp). Begun with begin_evaluation, a Present
+  // on another thread in that window read the attempt as refused and moved
+  // the gap watermark, revoking the NGX snapshot completed on the render
+  // queue but not yet read (completed_before_gap). Begun as an
+  // evaluation_nomination, it holds as pending and that snapshot stands in.
+  // A hook that returns without nominating (missing parameters, FG owning
+  // depth) ends the nomination at its scope's end, and the refused attempt
+  // then moves the gap as before.
+  void ngx_nomination_in_progress(fixture &gpu) {
+    if (gpu.debug_messages) gpu.debug_messages->ClearStoredMessages();
+    consumer_fixture consumer(gpu);
+    texture_case depth(gpu, DXGI_FORMAT_R32_FLOAT, 4);
+    gpu.submit(); gpu.wait(); gpu.reset();
+    auto input = depth.input;
+    input.provider = sunshine_scene_depth::provider_kind::ngx;
+    input.epoch = 84; input.source_id = 97; input.viewport = 0;
+    input.valid_until = sunshine_scene_depth::lifetime::until_evaluation; input.force_snapshot = false;
+    input.source_present_generation = capture::source_present_generation(input.source);
+    input.native_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    input.proof = sunshine_scene_depth::state_proof::sdk_contract;
+    std::uint64_t sequence{}, present = 60;
+    capture::record_diagnostic diagnostic;
+    const auto begin = [&](capture::evaluation_nomination &nominating) {
+      input.sequence = ++sequence; input.tick = GetTickCount64();
+      nominating.begin(input.epoch, input.sequence, input.viewport, input.provider, input.source_id);
+    };
+    const auto nominate = [&](capture::evaluation_nomination &nominating) {
+      const auto ticket = capture::nominate(native(gpu.list.Get()), input, &diagnostic);
+      nominating.end();
+      require(ticket && diagnostic.result == capture::status::recorded, "an NGX evaluation's copy was not recorded");
+      capture::finish(ticket, true);
+      return ticket;
+    };
+    const auto evaluate = [&] {
+      capture::evaluation_nomination nominating;
+      begin(nominating);
+      return nominate(nominating);
+    };
+    auto target = destination(gpu.device.Get(), DXGI_FORMAT_R32_FLOAT);
+    capture::packet packet;
+    capture::capture_diagnostic acquired;
+    const auto show = [&](std::uint64_t expected, capture::selection_reason selection, const char *failure) {
+      require(capture::acquire(native(gpu.foreign_queue.Get()), ++present, packet, &acquired) && packet.pixel_ready &&
+          packet.capture_id == expected && acquired.selection == selection, failure);
+      require(capture::copy_current(native(consumer.list.Get()), packet, native(target.Get()),
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE), "an NGX frame's consumer copy failed");
+      capture::complete_frame(packet, present);
+      consumer.submit(); consumer.wait(); consumer.reset();
+      packet = {};
+    };
+    // Frame 1 is shown, establishing NGX on the presenting queue; frame 2
+    // completes on the render queue unread.
+    const auto shown = evaluate();
+    gpu.submit(); gpu.wait(); gpu.reset();
+    show(shown, capture::selection_reason::current_capture, "the first NGX frame was not readable on the presenting queue");
+    const auto in_flight = evaluate();
+    gpu.submit(); gpu.wait(); gpu.reset();
+    // Frame 3 begins; a Present lands while its hook reads its parameters.
+    std::uint64_t third{};
+    {
+      capture::evaluation_nomination nominating;
+      begin(nominating);
+      capture::acquire(native(gpu.foreign_queue.Get()), ++present, packet, &acquired);
+      require(!packet.pixel_ready && acquired.result == capture::status::recorded &&
+          acquired.selection == capture::selection_reason::pending_nomination,
+        "a Present between an NGX evaluation's begin and its nomination did not hold as pending");
+      packet = {};
+      third = nominate(nominating);
+    }
+    // Frame 3 still recording: frame 2, completed and unread, stands in.
+    show(in_flight, capture::selection_reason::completed_snapshot,
+      "the NGX snapshot completed before the Present that raced its successor's begin was revoked");
+    gpu.submit(); gpu.wait(); gpu.reset();
+    show(third, capture::selection_reason::current_capture, "the third NGX frame was not readable after its nomination");
+    // Frame 4's hook returns before it nominates: held while it runs, then
+    // the refused attempt moves the gap.
+    {
+      capture::evaluation_nomination nominating;
+      begin(nominating);
+      capture::acquire(native(gpu.foreign_queue.Get()), ++present, packet, &acquired);
+      require(acquired.result == capture::status::recorded && acquired.selection == capture::selection_reason::pending_nomination,
+        "a Present during an NGX hook that later refused did not hold as pending");
+      packet = {};
+    }
+    capture::acquire(native(gpu.foreign_queue.Get()), ++present, packet, &acquired);
+    require(!packet.pixel_ready && acquired.result == capture::status::unavailable,
+      "an NGX evaluation that returned without nominating stayed in progress after its hook");
+    packet = {};
+    capture::retire_source(input.provider, input.epoch, input.source_id);
+    capture::command_destroyed(native(consumer.list.Get()));
+    capture::poll();
+    gpu.check_debug_errors();
+    std::printf("PASS NGX nomination in progress: a Present between an NGX evaluation's begin and its nomination held as "
+      "pending, the NGX frame completed on the render queue before it stayed readable and the next frame followed; a "
+      "hook that returned without nominating held while it ran and its refused attempt then read as unavailable%s\n",
+      gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
+  }
+
   // NGX and Streamline evaluate on any non-copy queue (the matrix's S22 and
   // N7), so an input is copied on its evaluation's COMPUTE list too, from a
   // state that list may name, into storage resting in COMMON. The compute
@@ -2711,6 +2812,7 @@ int main(int argc, char **argv) {
     proven_state_end_of_frame(gpu);
     ngx_contract_depth_capture(gpu);
     nomination_in_progress(gpu);
+    ngx_nomination_in_progress(gpu);
     {
       // More reported queues than a game submits copies on (Assassin's
       // Creed Shadows): DLSS-G's compute queue still takes a place.

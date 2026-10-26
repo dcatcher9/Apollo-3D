@@ -2221,6 +2221,26 @@ namespace sunshine_streamline::depth_capture {
     if (!requested.load() || !valid_provider(value.provider)) return false;
     return mark_pending(evaluations[provider_index(value.provider)], value, true);
   }
+  void evaluation_nomination::begin(std::uint64_t epoch, std::uint64_t sequence, std::uint32_t viewport,
+      provider_kind provider, std::uint64_t source_id, std::uint64_t superseded_source_id) {
+    end();
+    std::lock_guard lock(mutex);
+    begin_evaluation_locked(epoch, sequence, viewport, provider, source_id, superseded_source_id);
+    if (!requested.load() || !valid_provider(provider) || !epoch || !sequence) return;
+    auto &current = evaluations[provider_index(provider)];
+    if (current.epoch != epoch || current.sequence != sequence || current.source_id != source_id) return;
+    current.pending_nomination = {epoch, sequence, GetTickCount64(), source_id, viewport};
+    nominated = {provider, epoch, sequence, source_id, viewport, true};
+  }
+  void evaluation_nomination::end() {
+    if (!nominated.pending) return;
+    nominated.pending = false;
+    std::lock_guard lock(mutex);
+    auto &pending = evaluations[provider_index(nominated.provider)].pending_nomination;
+    if (pending.epoch == nominated.epoch && pending.sequence == nominated.sequence &&
+        pending.source_id == nominated.source_id && pending.viewport == nominated.viewport)
+      pending = {};
+  }
 
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
   namespace {

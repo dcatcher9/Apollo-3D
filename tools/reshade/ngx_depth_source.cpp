@@ -717,7 +717,13 @@ namespace sunshine_ngx {
     sunshine_api_contract::apply(sunshine_api_contract::ngx::evaluation_input_of(feature), value);
 #ifndef SUNSHINE_UPSCALER_TRACE_TEST
     using namespace sunshine_streamline;
-    depth_capture::begin_evaluation(value.epoch, value.sequence, value.viewport, value.provider, value.source_id);
+    // Its nomination is in progress from this begin until its copy is
+    // recorded or refused, whichever path returns, so a Present on another
+    // thread while the getters, the calibration probe, the FG owner query and
+    // retain_source below run holds rather than reading the attempt as
+    // refused (completed_before_gap).
+    depth_capture::evaluation_nomination nominating;
+    nominating.begin(value.epoch, value.sequence, value.viewport, value.provider, value.source_id);
 #endif
     void *resource{};
     auto &area = value.resource.area;
@@ -818,6 +824,7 @@ namespace sunshine_ngx {
       attempt.ticket = depth_capture::nominate(command, input);
       retaining = true;
     }
+    nominating.end();
 #endif
     // A failed pixel copy can still yield a valid metadata-only nomination.
     // Preserve that admission failure even though its SDK/submission ticket

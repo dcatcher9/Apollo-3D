@@ -4407,7 +4407,11 @@ still applies. Neither reuse nor a new pending nomination extends the age limit.
 `Previous real frame (FG)` instead of presenting reused depth as freshly captured.
 
 The capture owner publishes an in-progress nomination with its evaluation watermark: every
-nominated evaluation's, and the copy of an evaluation begun before its `nominate()` (NGX, DLSS-G).
+nominated evaluation's, and an NGX or live DLSS-G evaluation's from its begin
+(`depth_capture::evaluation_nomination`), under the same lock, until its copy is recorded or refused
+on whichever path its hook returns (NGX reads its parameters, its calibration probe and the FG
+owner and retains its source in between; since the review of the 10-26 hotfix, before which only
+the `nominate()` call itself was covered).
 A Present between this publication and snapshot registration can identify the same established
 source without acquiring pending pixels; it holds, and marks no gap in the source's admission
 (since the Assassin's Creed Shadows hotfix of 10-26; before, only an FG nomination was in progress,
