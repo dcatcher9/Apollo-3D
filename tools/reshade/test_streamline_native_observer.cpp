@@ -136,7 +136,12 @@ namespace {
       }
     return DXGI_ERROR_NOT_FOUND;
   }
+  // Runs once, inside the next SetPrivateData on order_set_data_target,
+  // before it stores.
+  void *order_set_data_target{};
+  std::function<void()> order_on_set_data;
   NOINLINE HRESULT STDMETHODCALLTYPE order_set_data(void *native, REFGUID guid, UINT size, const void *input) {
+    if (native == order_set_data_target && order_on_set_data) std::exchange(order_on_set_data, {})();
     auto &data = static_cast<order_object *>(native)->data;
     const auto *bytes = static_cast<const unsigned char *>(input);
     for (auto &[key, stored] : data)
@@ -705,7 +710,40 @@ namespace {
       "a Signal dropped with its evicted queue record let the reader's wait resolve to a signal after the copy-out");
     require(wait(reader, fence, 5) == S_OK && ordered(reader, copy).ordered, "a wait for the signal after the copy-out did not order it");
     order_defer_signals = false;
-    std::puts("PASS queue order review: a Signal whose queue record was evicted after its ticket is logged on the re-sighted record");
+
+    // A fence's private data is written under the order lock: a CPU Signal
+    // poisoning the fence on another thread while a queue Signal writes its
+    // first signaller is never overwritten by that older state.
+    order_object written{tables.fence.data(), object_kind::unknown, &device};
+    require(wait(reader, written, 1) == S_OK, "the written fence was not sighted");
+    std::atomic<bool> cpu_done{};
+    std::thread cpu;
+    order_set_data_target = &written;
+    order_on_set_data = [&] {
+      cpu = std::thread([&] {
+        reinterpret_cast<fence_signal_fn>(written.vtable[fence_signal_slot])(&written, 7);
+        cpu_done.store(true, std::memory_order_release);
+      });
+      // Under the lock the CPU Signal waits for this write to finish.
+      for (const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(300);
+           !cpu_done.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < until;)
+        std::this_thread::yield();
+    };
+    require(signal(producer, written, 1) == S_OK && !order_on_set_data, "the first signaller's write did not run");
+    cpu.join();
+    order_set_data_target = nullptr;
+    std::uint64_t stored[3]{};
+    require(written.data.size() == 1 && written.data[0].second.size() == sizeof(stored), "the written fence has no order data");
+    std::memcpy(stored, written.data[0].second.data(), sizeof(stored));
+    require(stored[2] == static_cast<std::uint64_t>(sunshine_queue_order::poison::cpu_signal),
+      "an older private-data write replaced a CPU Signal's poison");
+    // The poison outlives a model reset: the re-sighted fence never proves.
+    observer::set_queue_order(true);
+    require(wait(reader, written, 8) == S_OK, "the written fence was not re-sighted");
+    const auto after_reset = execute(producer);
+    require(signal(producer, written, 9) == S_OK && wait(reader, written, 9) == S_OK &&
+        ordered(reader, after_reset).why == sunshine_queue_order::refusal::poisoned, "a re-sighted fence lost its CPU Signal's poison");
+    std::puts("PASS queue order review: a Signal whose queue record was evicted after its ticket is logged on the re-sighted record; fence private data is written under the order lock");
   }
 }
 int main() {

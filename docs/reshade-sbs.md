@@ -5018,7 +5018,8 @@ logged signal set; a failed signal leaves its entry, which only makes edges late
 when logged, or when the first signal reaching their value is logged afterwards.
 
 **Fail-closed rules.** A fence never proves again (sticky poison, kept in the fence's own private
-data, so a model reset or an eviction never forgets it) once it is shared, cross-adapter or
+data, written under the order lock so that an older write never replaces it, so a model reset or
+an eviction never forgets it) once it is shared, cross-adapter or
 non-monitored, of another device, signalled by the CPU (hooked, whatever the result), by a second
 queue or by a queue without a record, signalled a decreasing value or `UINT64_MAX`, or read at a
 completed value no logged signal set. A fence is recorded only once its CPU Signal slot is hooked.

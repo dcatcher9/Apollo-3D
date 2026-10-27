@@ -2371,7 +2371,9 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   stays poisoned after its records were dropped; a third party's Signal slot resetting the order
   model only; and `QueueFenceOrder=0`. Its review cells (10-27): a Signal whose queue record a full
   table evicted between its ticket and its log is logged on the re-sighted record (dropped, the
-  reader's pending wait resolved to the next signal, after a copy-out it precedes).
+  reader's pending wait resolved to the next signal, after a copy-out it precedes); a CPU Signal
+  poisoning a fence on another thread while a queue Signal writes its first signaller keeps its
+  poison in the private data and through a model reset (the write ran after the lock was released).
 - [`test_proven_state.cpp`](test_proven_state.cpp) (`reshade_proven_state`) pins the per-resource
   last-proven state of [`proven_state.h`](proven_state.h), which admits the Generic end-of-frame
   copy: a creation state holds on every queue until a list uses the texture and not once enhanced

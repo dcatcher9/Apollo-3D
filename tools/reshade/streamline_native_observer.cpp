@@ -561,6 +561,9 @@ namespace sunshine_streamline::native_observer {
       if (!private_bytes(fence, order_fence_guid, &bytes, sizeof(bytes))) return {};
       return {bytes.id, bytes.signaller, static_cast<sunshine_queue_order::poison>(bytes.why)};
     }
+    // Requires order::lock exclusive (SetPrivateData is a leaf runtime call):
+    // the private data always reflects the model state it was written from,
+    // so a stale write never replaces a newer poison or signaller.
     void write_fence(ID3D12Fence *fence, const sunshine_queue_order::fence_memory &value) {
       const order::fence_bytes bytes{value.id, value.signaller, static_cast<std::uint64_t>(value.why)};
       auto *object = reinterpret_cast<ID3D12Object *>(fence);
@@ -615,24 +618,28 @@ namespace sunshine_streamline::native_observer {
         if (lost) *lost = true;
         return 0;
       }
-      if (!device || device != order::model.queue_device(queue)) mark(sunshine_queue_order::poison::foreign_device);
-      memory.id = order::model.add_fence(device, baseline, {0, memory.signaller, memory.why}, why);
-      memory = order::model.memory(memory.id);
+      // What the private data says now, under the lock its writers hold:
+      // another thread may have sighted or poisoned the fence since.
+      memory = read_fence(fence);
+      if (!order::model.known_fence(memory.id)) {
+        if (!device || device != order::model.queue_device(queue)) mark(sunshine_queue_order::poison::foreign_device);
+        memory.id = order::model.add_fence(device, baseline, {0, memory.signaller, memory.why}, why);
+        memory = order::model.memory(memory.id);
+        write_fence(fence, memory);
+      }
       ReleaseSRWLockExclusive(&order::lock);
-      write_fence(fence, memory);
       return memory.id;
     }
     template<class Operation> void order_update(ID3D12Fence *fence, std::uint64_t id, Operation operation) {
-      sunshine_queue_order::fence_memory before{}, after{};
       AcquireSRWLockExclusive(&order::lock);
       apply_order_reset();
       if (order::model.known_fence(id)) {
-        before = order::model.memory(id);
+        const auto before = order::model.memory(id);
         operation();
-        after = order::model.memory(id);
+        const auto after = order::model.memory(id);
+        if (after.signaller != before.signaller || after.why != before.why) write_fence(fence, after);
       }
       ReleaseSRWLockExclusive(&order::lock);
-      if (after.id && (after.signaller != before.signaller || after.why != before.why)) write_fence(fence, after);
     }
     // Logs one queue Signal. False only with retry, when the call's queue
     // record was dropped (evicted, or a reset) since it took its ticket. A
@@ -670,23 +677,31 @@ namespace sunshine_streamline::native_observer {
       AcquireSRWLockExclusive(&order::lock);
       apply_order_reset();
       // An unknown fence still logs the wait (refused as untracked).
-      sunshine_queue_order::fence_memory before{}, after{};
-      if (id && order::model.known_fence(id)) before = order::model.memory(id);
+      const bool known = id && order::model.known_fence(id);
+      const auto before = known ? order::model.memory(id) : sunshine_queue_order::fence_memory{};
       order::model.wait(call.order_queue, id, value, call.ticket, quiet, completed, GetTickCount64());
-      if (id && order::model.known_fence(id)) after = order::model.memory(id);
+      if (known) {
+        const auto after = order::model.memory(id);
+        if (after.signaller != before.signaller || after.why != before.why) write_fence(fence, after);
+      }
       ReleaseSRWLockExclusive(&order::lock);
-      if (after.id && (after.signaller != before.signaller || after.why != before.why)) write_fence(fence, after);
     }
     void order_cpu_signal(ID3D12Fence *fence) {
       const restore_error incoming{GetLastError()};
+      AcquireSRWLockExclusive(&order::lock);
+      apply_order_reset();
+      // Read under the lock its writers hold. Never sighted: its baseline at
+      // sight covers this signal.
       auto memory = read_fence(fence);
-      if (!memory.id) return;  // Never sighted: its baseline at sight covers this signal.
-      bool known = false;
-      order_update(fence, memory.id, [&] { known = true; order::model.cpu_signal(memory.id, GetTickCount64()); });
-      if (!known && memory.why == sunshine_queue_order::poison::none) {
+      if (memory.id && order::model.known_fence(memory.id)) {
+        order::model.cpu_signal(memory.id, GetTickCount64());
+        const auto after = order::model.memory(memory.id);
+        if (after.signaller != memory.signaller || after.why != memory.why) write_fence(fence, after);
+      } else if (memory.id && memory.why == sunshine_queue_order::poison::none) {
         memory.why = sunshine_queue_order::poison::cpu_signal;
         write_fence(fence, memory);
       }
+      ReleaseSRWLockExclusive(&order::lock);
     }
     // Whether a queue's Execute, Signal and Wait slots are all installed.
     // Requires targets_lock shared.
