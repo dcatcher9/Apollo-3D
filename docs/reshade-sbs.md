@@ -3889,10 +3889,34 @@ final color. Resource identity alone provides neither guarantee.
 
 An independent API-entry snapshot retains the stricter native ordering checks. Its same-queue
 consumer uses queue order. A different consumer queue on the same device requires successful
-producer submission and Reset/destruction to retire the producer recording. A still-replayable
-recording could overwrite the copy again; completion alone does not make it immutable. If the
-immutable copy is still in flight, source metadata remains selected but its pixels are unavailable
-until its private producer fence completes. The add-on never inserts a foreign-queue Wait for a
+producer submission and an immutable copy: its copy-out (below), else the producer recording's
+Reset/destruction. A still-replayable recording could overwrite the copy again; completion alone
+does not make it immutable. If the immutable copy is still in flight, source metadata remains
+selected but its pixels are unavailable until its private producer fence completes.
+
+**Copy-out on the producer queue** (10-27; `copy_out` in `streamline_depth_capture.cpp`). Games
+reset their lists late (Assassin's Creed Shadows every few frames), so with Reset as the only
+rule an SR snapshot on the render queue became readable on the presenting queue 110-235 ms after
+its evaluation, and DLSS-G's compute copies three of its evaluations later. Now the submission
+hook, right after the game's `ExecuteCommandLists` that first submits a list carrying the
+injected copy, and before the producer fence is signalled on that queue, executes one list of
+the add-on's own on the same queue that copies the snapshot into add-on storage of the same
+shape and view (`slot::published`, with its own rest state). No later execution of the game's list writes
+that storage, so every consumer reads it (`read_storage`) once the producer fence completed,
+without the Reset and without any reverse Wait. It applies only where depth is read on another
+queue: a submission on a queue that never acquired depth while another queue did marks the
+source `foreign_producer`, and only that source's later copies get copy-out storage, allocated
+with the snapshot at record time without the capture lock; a game that copies on its presenting
+queue allocates and submits nothing extra. At most one add-on list per game submission, from a
+ring of eight per queue of the queue's type, each reused once its fence value completed; its
+barriers move the snapshot and the copy-out storage only from and back to their rest states,
+both `COMMON` for a copy recorded on a `COMPUTE` list, so DLSS-G's compute copies are copied out on its
+compute queue too. A replay of the game's list is still refused as before. A copy not copied
+out (the source's first copies, every ring list in flight, a failed list call) keeps the Reset
+rule; the counts are on the depth status line as `copy_out={made= ring_busy= failed=}`. The
+cost is one extra copy of the snapshot on the producer queue per copied-out snapshot and one more
+snapshot-sized allocation per slot for such a source. What remains of the session tests' known
+gap C1 is a copy still in flight at a Present with nothing younger to hold. The add-on never inserts a foreign-queue Wait for a
 depth capture: the producer can already depend on future consumer work, so a reverse wait could
 deadlock the game. Flushing an immediate command list cannot prove that the application's queue
 graph is acyclic. (The offscreen UI layer's cross-queue copy follows the same rule since 10-06: it

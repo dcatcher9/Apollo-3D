@@ -1748,15 +1748,19 @@ explains an earlier loss: a hold dropped within that age is a violation. Any oth
 the run, and so does a row whose limitation was supplied in a run without a violation (the gap
 closed, and the fix removes the row). Each provider run with an interposer exercises both:
 
-- C1, SR depth on another queue (until Step 4's fence observation): `sr-other-queue` warms up with
-  the viewport's SR evaluation on the presenting queue (FG off), then records it on the game's own
-  direct queue, a ring of 16 recordings each reset only when recorded into again and paced 20 ms
-  apart, which the presenting queue waits for. Such a copy is readable only once its recording
-  retired and its fence completed, after the source age here, so the Present loses depth once the
-  presenting queue's last copy ages out (in Assassin's Creed Shadows 110-235 ms, about 30
-  `no_completed_snapshot` losses a session). The recovery on the presenting queue settles again.
-  DLSS-G's own copies on its compute list (N7) are read the same way, once DLSS-G reset that
-  recording, and the session timelines tag their frames with this row too, the viewport's SR input
+- C1, SR depth on another queue (narrowed on 10-27 by the copy-out on the producer queue,
+  [docs](../../docs/reshade-sbs.md); gone with Step 4's fence observation): `sr-other-queue` warms
+  up with the viewport's SR evaluation on the presenting queue (FG off), then records it on the
+  game's own direct queue, a ring of 16 recordings each reset only when recorded into again and
+  paced 20 ms apart, which the presenting queue waits for. Until 10-27 such a copy was readable
+  only once its recording retired, after the source age here, so the Present lost depth once the
+  presenting queue's last copy aged out (in Assassin's Creed Shadows 110-235 ms, about 30
+  `no_completed_snapshot` losses a session); its copy-out is readable once its fence completed, so
+  the script now keeps depth and no longer supplies this row. What the row keeps is a copy still
+  in flight at a Present with nothing younger to hold, and a source's first copies before it is
+  known to be read on another queue (no copy-out storage yet). DLSS-G's own copies on its compute
+  list (N7) are copied out on its compute queue the same way, and the session timelines tag their
+  frames with this row too, the viewport's SR input
   among them: such a copy supplies its frame to a live FG scope, which keeps that SR input out while
   the copy is in flight. It records a loss only once no copy the presenting queue could read is
   younger than the source age: a held FG copy dropped for an SR snapshot still in flight on the

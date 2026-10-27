@@ -1207,8 +1207,9 @@ namespace {
       // evaluation copies at its Present (known gap C7 until 10-26, when
       // each waited within the source age of any evaluation). A frame whose
       // only FG input is DLSS-G's compute copy supplies its live FG scope,
-      // which keeps the viewport's SR input out while that copy is readable
-      // only frames later (known gap C1). DLSS-G's evaluation of a frame
+      // which keeps the viewport's SR input out while that copy is not yet
+      // readable (known gap C1: its copy-out is readable once complete, until
+      // 10-27 only frames later). DLSS-G's evaluation of a frame
       // without an FG tag of its own copies (known gap C6 until 10-26, when
       // it deferred to an earlier frame's tag copy for the source age).
       const auto dlssg_choice = of<dlssg_form>(value, events::dlssg);
@@ -1238,11 +1239,12 @@ namespace {
       const bool held_off = fg_on && !owned && fg_copy && fg_copy >= fg_enabled_at &&
         now - fg_copy < sunshine_freshness::source_age_ms;
       // When that copy was DLSS-G's compute copy alone, the depth the
-      // Present can show is the scope's newest readable copy, three DLSS-G
-      // evaluations old: the frame's SR input meets C1's limitation as the
-      // compute frames' own do, and a frame without an FG copy of its own
-      // loses depth once that older copy aged out (C4's note; with fence
-      // observation the compute copy is readable at its own Present).
+      // Present can show is the scope's newest readable copy (its copy-out
+      // once complete; until 10-27 three DLSS-G evaluations old): the
+      // frame's SR input meets C1's limitation as the compute frames' own
+      // do, and a frame without an FG copy of its own loses depth once that
+      // older copy aged out (C4's note; with fence observation the compute
+      // copy is readable at its own Present).
       if (owned && std::exchange(fg_supplied_late, false) && !(supply.legal & (continuity::tag_copy | continuity::dlssg_input)) &&
           (supply.legal & continuity::sr_evaluate)) {
         supply.legal &= std::uint8_t(~continuity::sr_evaluate);

@@ -134,6 +134,17 @@ namespace sunshine_streamline::depth_capture {
     };
     using command_storage = sunshine_native_command::storage<command_state>;
     using recording_ref = std::shared_ptr<sunshine_native_command::recording_lifetime>;
+    // A queue's own command lists for copy-outs (copy_out), of the queue's
+    // type: created at first use, each reused once the fence value signalled
+    // after its execution completed. A safety bound, not a budget: with every
+    // list still in flight a copy-out is not made and that copy keeps the
+    // Reset rule (counted as ring_busy).
+    constexpr unsigned copy_out_lists = 8;
+    struct copy_out_list {
+      com_ptr<ID3D12CommandAllocator> allocator;
+      com_ptr<ID3D12GraphicsCommandList> list;
+      std::uint64_t fence{};
+    };
     struct queue_state {
       com_ptr<ID3D12CommandQueue> queue;
       com_ptr<ID3D12Device> device;
@@ -149,9 +160,11 @@ namespace sunshine_streamline::depth_capture {
       provider_kind provider{provider_kind::streamline};
       std::uint64_t source_id{};
       std::uint32_t viewport{};
-      // The newest acquisition's choice (depth_choice), when chosen.
+      // The newest acquisition's choice (depth_choice), when chosen. A
+      // chosen queue reads depth: copies it produces need no copy-out.
       depth_choice choice;
       bool chosen{};
+      std::array<copy_out_list, copy_out_lists> copy_out;
     };
   }
 
@@ -176,6 +189,12 @@ namespace sunshine_streamline::depth_capture {
     std::uint64_t cookie{}, device_identity{};
     mutable std::atomic<std::uint64_t> present_generation{1};
     mutable std::atomic<bool> released{};
+    // A copy of this source was submitted on a queue that never read depth
+    // while another did (copy_out): its later copies take copy-out storage
+    // (slot::published) when recorded. Set for good; never before a
+    // queue first read depth, so a game that copies on its presenting queue
+    // allocates none.
+    mutable std::atomic<bool> foreign_producer{};
   };
   struct texture_reference {
     com_ptr<ID3D12Resource> resource;
@@ -203,6 +222,18 @@ namespace sunshine_streamline::depth_capture {
     struct fence_point { std::uint64_t queue{}, value{}; };
     struct slot {
       std::shared_ptr<texture_reference> texture;
+      // Copy-out (docs/reshade-sbs.md, Copy-out on the producer queue): the
+      // add-on's private copy of texture, of the same shape, format and view
+      // (its own rest: texture_reference::rest). The submission hook copies texture into it on the producer
+      // queue with the add-on's own list, right after the game's
+      // ExecuteCommandLists that carried the copy into texture and before the
+      // producer fence (copied_out). A later execution of the game's list
+      // writes texture again, never this copy, so once the producer fence
+      // completed every consumer reads it (read_storage) without the
+      // recording's Reset. It lives with the slot as texture does: reused
+      // with it, kept as an idle slot's cached storage (release_idle_slots)
+      // and released with its device.
+      std::shared_ptr<texture_reference> published;
       input metadata;
       // One auxiliary copy destination per snapshot. Keep the actual resource
       // alive through consumer Reset AND GPU completion, including legal replay.
@@ -223,6 +254,9 @@ namespace sunshine_streamline::depth_capture {
       bool source_nominated{}, nomination_only{}, nomination_invalid{};
       // Recorded on a COMPUTE list (record_impl; S22, N7).
       bool compute_list{};
+      // published holds the copy-out of this slot's first submission, ordered
+      // before producer_fence (copy_out); cleared when the slot is reused.
+      bool copied_out{};
       status pixel_failure{status::unavailable};
       capture_failure failure{capture_failure::none};
       // The pre-copy state's provenance of an auxiliary snapshot (diagnostic;

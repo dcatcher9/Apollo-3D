@@ -652,6 +652,10 @@ namespace sunshine_streamline::depth_capture {
     // Copies of a latched source whose recording named nothing: recorded
     // with enhanced barriers from its proof, or refused (the matrix's D6, N8).
     std::uint64_t earlier_copied{}, earlier_refused{};
+    // Copy-outs on the producer queue (docs/reshade-sbs.md): made, and
+    // copies left to the Reset rule with every list of the queue's ring in
+    // flight (ring_busy) or a list call failed.
+    std::uint64_t copied_out{}, copy_out_busy{}, copy_out_failed{};
     std::uint64_t unobserved() const { return unrecorded + unreported + invalidated + missed_reset + uncovered; }
   };
   proven_state_counts proven_counts();

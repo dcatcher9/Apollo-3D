@@ -348,6 +348,11 @@ namespace sunshine_streamline::depth_capture {
       // Copies of a latched source with nothing on their recording (D6, N8).
       std::atomic<std::uint64_t> earlier_copied{}, earlier_refused{};
     } proven_counters;
+    // Copy-outs (copy_out): made, and copies left to the Reset rule because
+    // every list of the queue's ring was in flight or a list call failed.
+    struct {
+      std::atomic<std::uint64_t> made{}, ring_busy{}, failed{};
+    } copy_out_counters;
     void invalidate_all() {
       std::lock_guard lock(mutex);
       for_each_capture([](auto &value) { invalidate(value, capture_failure::observer_loss); });
@@ -595,6 +600,19 @@ namespace sunshine_streamline::depth_capture {
       return !value.command || (value.producer_recording &&
         value.producer_recording->cookie.load(std::memory_order_acquire) != value.command);
     }
+    // Another queue reads a snapshot only where no later execution of its
+    // producer list can write it: its copy-out (copied_out), else its own
+    // storage once that recording retired (Reset or destruction; the rule
+    // where no copy-out was made). Its producer fence must complete as well.
+    bool immutable_for_other_queues(const slot &value) {
+      return value.copied_out || producer_recording_retired(value);
+    }
+    // The storage every consumer reads: the copy-out once made (on the
+    // producer queue it follows the copy in queue order, as later
+    // submissions there do), else the snapshot's own.
+    const std::shared_ptr<texture_reference> &read_storage(const slot &value) {
+      return value.copied_out && value.published ? value.published : value.texture;
+    }
     status diagnostic_admission(const slot &value, const queue_progress &progress) {
       if (value.diagnostic_released) return status::stale;
       if (value.invalid || (value.finished && !value.success)) return status::failed;
@@ -616,9 +634,11 @@ namespace sunshine_streamline::depth_capture {
       if (!consumer_device || progress.device_identity != consumer_device) return status::unsupported_queue;
       if (!progress.valid()) return status::failed;
       // A completed but still-closed game recording may legally replay its
-      // injected copy. Only Reset/destruction makes that copy immutable for a
-      // foreign queue; post-Execute replay detection would be too late.
-      if (!producer_recording_retired(value)) return status::submitted;
+      // injected copy, and post-Execute replay detection would be too late.
+      // Its copy-out cannot be written again; without one, only the
+      // recording's Reset/destruction makes the copy immutable for a foreign
+      // queue (immutable_for_other_queues).
+      if (!immutable_for_other_queues(value)) return status::submitted;
       // The game may already order this producer after future consumer work.
       // Adding a reverse GPU Wait here can form a cycle, even after flushing
       // the consumer's immediate list. Poll completion without adding an edge
@@ -795,8 +815,8 @@ namespace sunshine_streamline::depth_capture {
     // tag changes, observation loss); only source identity and age bound them.
     // consumer: the reading queue. A snapshot already submitted on it is
     // ordered before the read by queue order, exactly as a current capture is
-    // (submission_status); another queue needs a retired recording and a
-    // completed producer fence.
+    // (submission_status); another queue needs its copy-out or a retired
+    // recording (immutable_for_other_queues) and a completed producer fence.
     slot *completed_snapshot(const input &current, std::uint64_t now, std::uint64_t consumer = 0) {
       if (!valid_provider(current.provider) || !current.epoch) return nullptr;
       slot *best = nullptr;
@@ -810,7 +830,7 @@ namespace sunshine_streamline::depth_capture {
             metadata.sequence > current.sequence ||
             !within_source_age(metadata.tick, now)) continue;
         if (!consumer || value.queue != consumer) {
-          if (!producer_recording_retired(value)) continue;
+          if (!immutable_for_other_queues(value)) continue;
           const auto progress = producer_progress(value);
           if (!progress.valid() || progress.completed < value.producer_fence) continue;
         }
@@ -1253,14 +1273,16 @@ namespace sunshine_streamline::depth_capture {
     // Requires mutex. A depth copy recorded on a COMPUTE list is its FG
     // scope's accepted copy (frame_generation_scope_live) only once the
     // Present queue can read it: its SDK call succeeded, its submission
-    // carries the capture owner's fence, its recording was reset and that
-    // fence passed (completed_snapshot's rule for another queue's copy).
-    // The scope then turns live with readable FG pixels, so its handover
-    // drops no SR depth for a copy still in flight; Streamline resets its
-    // DLSS-G recording frames later. One never submitted, as when its queue
-    // has no place, or never reset keeps no other depth out of its viewport.
-    // Called at the copy's call, its submission and each liveness query
-    // (frame_generation_scope_live).
+    // carries the capture owner's fence, it was copied out on its compute
+    // queue (or, without a copy-out, its recording was reset) and that fence
+    // passed (completed_snapshot's rule for another queue's copy). The scope
+    // then turns live with readable FG pixels, so its handover drops no SR
+    // depth for a copy still in flight. Streamline resets its DLSS-G
+    // recording frames later, which before copy-out (10-27) kept each such
+    // copy unreadable for three of its evaluations. One never submitted, as
+    // when its queue has no place, or never readable keeps no other depth out
+    // of its viewport. Called at the copy's call, its submission and each
+    // liveness query (frame_generation_scope_live).
     void accept_compute_copy(const slot &value) {
       const auto &m = value.metadata;
       if (!value.compute_list || !value.source_nominated || !value.finished || !value.success || value.invalid ||
@@ -1273,7 +1295,7 @@ namespace sunshine_streamline::depth_capture {
       };
       if (std::none_of(views.begin(), views.end(), [&](const auto &view) {
             return owned(view) && view.accepted_sequence < m.sequence; }) ||
-          !producer_recording_retired(value))
+          !immutable_for_other_queues(value))
         return;
       const auto progress = producer_progress(value);
       if (!progress.valid() || progress.completed < value.producer_fence) return;
@@ -1282,6 +1304,79 @@ namespace sunshine_streamline::depth_capture {
           view.accepted_tick = std::max(view.accepted_tick, m.tick);
           view.accepted_sequence = std::max(view.accepted_sequence, m.sequence);
         }
+    }
+    // Requires mutex. Depth is read on a queue other than owner: owner never
+    // acquired it and another queue did (acquire's chosen).
+    bool read_elsewhere(const queue_state &owner) {
+      return !owner.chosen && std::any_of(queues.begin(), queues.end(), [&](const auto &entry) {
+        return entry && entry.get() != &owner && !entry->retiring && entry->chosen;
+      });
+    }
+    // Requires mutex. Copy-out on the producer queue (docs/reshade-sbs.md):
+    // in the submission hook, right after the game's ExecuteCommandLists and
+    // before the producer fence value (fence) is signalled. A first
+    // submission of a copy that another queue reads (read_elsewhere) marks
+    // its source foreign_producer, so that its later copies take copy-out
+    // storage (record_impl); each such copy is copied into that storage with
+    // one list of the add-on's own on this queue, at most one per game
+    // submission. Returns the slots copied out; the caller sets copied_out
+    // once the fence after them was signalled. A copy not copied out keeps
+    // the Reset rule (immutable_for_other_queues).
+    std::array<bool, slot_limit> copy_out(queue_state &owner, const std::array<bool, slot_limit> &producers,
+        std::uint64_t fence) {
+      std::array<bool, slot_limit> out{};
+      if (!fence || !read_elsewhere(owner)) return out;
+      bool any = false;
+      for (unsigned i = 0; i != slots.size(); ++i) {
+        auto &value = slots[i];
+        if (!producers[i] || value.nomination_only || value.preservation_only || value.producer_submitted) continue;
+        if (value.metadata.source) value.metadata.source->foreign_producer.store(true, std::memory_order_relaxed);
+        if (value.invalid || !value.texture || !value.published || value.copied_out) continue;
+        // A COMPUTE queue names only COMMON of these (record_impl's rest).
+        if (owner.compute_producer && (value.texture->rest != D3D12_RESOURCE_STATE_COMMON ||
+            value.published->rest != D3D12_RESOURCE_STATE_COMMON)) continue;
+        out[i] = any = true;
+      }
+      if (!any) return out;
+      const auto refuse = [&](std::atomic<std::uint64_t> &counter) {
+        counter.fetch_add(1, std::memory_order_relaxed);
+        out.fill(false);
+        return out;
+      };
+      // A list whose last execution completed (its fence value passed).
+      const auto completed = owner.fence->GetCompletedValue();
+      copy_out_list *entry = nullptr;
+      for (auto &candidate : owner.copy_out)
+        if (!candidate.list.p || (completed != UINT64_MAX && completed >= candidate.fence)) { entry = &candidate; break; }
+      if (!entry) return refuse(copy_out_counters.ring_busy);
+      const auto type = owner.compute_producer ? D3D12_COMMAND_LIST_TYPE_COMPUTE : D3D12_COMMAND_LIST_TYPE_DIRECT;
+      const bool opened = entry->list.p ?
+        SUCCEEDED(entry->allocator->Reset()) && SUCCEEDED(entry->list->Reset(entry->allocator.p, nullptr)) :
+        SUCCEEDED(owner.device->CreateCommandAllocator(type, __uuidof(ID3D12CommandAllocator),
+          reinterpret_cast<void **>(entry->allocator.put()))) &&
+        SUCCEEDED(owner.device->CreateCommandList(0, type, entry->allocator.p, nullptr, __uuidof(ID3D12GraphicsCommandList),
+          reinterpret_cast<void **>(entry->list.put())));
+      auto *list = entry->list.p;
+      if (opened) for (unsigned i = 0; i != slots.size(); ++i) {
+        if (!out[i]) continue;
+        const auto &value = slots[i];
+        D3D12_RESOURCE_BARRIER transitions[2]{};
+        transitions[0].Type = transitions[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        transitions[0].Transition = {value.texture->resource.p, 0, value.texture->rest, D3D12_RESOURCE_STATE_COPY_SOURCE};
+        transitions[1].Transition = {value.published->resource.p, 0, value.published->rest, D3D12_RESOURCE_STATE_COPY_DEST};
+        list->ResourceBarrier(2, transitions);
+        list->CopyResource(value.published->resource.p, value.texture->resource.p);
+        for (auto &transition : transitions) std::swap(transition.Transition.StateBefore, transition.Transition.StateAfter);
+        list->ResourceBarrier(2, transitions);
+      }
+      if (!opened || FAILED(list->Close())) {
+        entry->list.reset(); entry->allocator.reset(); // Not executed since its last fence completed.
+        return refuse(copy_out_counters.failed);
+      }
+      ID3D12CommandList *lists[]{list};
+      owner.queue->ExecuteCommandLists(1, lists); // The hooks are suppressed in this callback.
+      entry->fence = fence;
+      return out;
     }
     void submitted(std::uint64_t native, std::uint32_t count, const native_observer::command_identity *values) {
       std::lock_guard lock(mutex);
@@ -1301,13 +1396,20 @@ namespace sunshine_streamline::depth_capture {
       if (!depth_used && !auxiliary_used) return;
       const bool needs_fence = auxiliary_used || needs_submission_fence(producers, consumers);
       const auto fence = needs_fence ? ++owner->next_fence : 0;
+      const auto copied = depth_used ? copy_out(*owner, producers, fence) : std::array<bool, slot_limit>{};
       // This callback runs AFTER the actual native ExecuteCommandLists. Signal
-      // therefore follows the copied/consumed pixels on this queue.
+      // therefore follows the copied/consumed pixels (and copy-outs) on this queue.
       const bool signaled = !needs_fence || SUCCEEDED(owner->queue->Signal(owner->fence.p, fence));
+      if (!signaled)
+        for (auto &entry : owner->copy_out) if (entry.fence == fence) entry.fence = UINT64_MAX; // Never reused.
       for (unsigned i = 0; i != slots.size(); ++i) {
         auto &value = slots[i];
         if (producers[i]) {
           producer_submitted(value, native, value.nomination_only ? 0 : fence, value.nomination_only || signaled);
+          if (copied[i] && signaled) {
+            value.copied_out = true;
+            copy_out_counters.made.fetch_add(1, std::memory_order_relaxed);
+          }
           accept_compute_copy(value);
         }
         if (consumers[i]) {
@@ -1366,7 +1468,7 @@ namespace sunshine_streamline::depth_capture {
       if (value.nomination_only) return true;
       if (value.retirement_unknown) return false;
       if (value.command) return false; // A closed producer may legally replay.
-      if (value.texture.use_count() > 1) return false;
+      if (value.texture.use_count() > 1 || value.published.use_count() > 1) return false;
       if (std::any_of(value.consumers.begin(), value.consumers.end(), [](auto v) { return v != 0; })) return false;
       if (value.pending_immediate) return false;
       if (!value.producer_submitted) return value.finished && value.command == 0;
@@ -1544,14 +1646,16 @@ namespace sunshine_streamline::depth_capture {
     }
     void describe_packet(const slot &value, std::uint64_t consumer, packet &out) {
       out = {};
-      const auto desc = value.nomination_only ? value.metadata.source->desc : value.texture->resource->GetDesc();
-      out.metadata = value.metadata; out.ownership = value.texture;
+      // Every consumer reads the copy-out once made (read_storage).
+      const auto &storage = read_storage(value);
+      const auto desc = value.nomination_only ? value.metadata.source->desc : storage->resource->GetDesc();
+      out.metadata = value.metadata; out.ownership = storage;
       out.resource_id = value.metadata.source ? value.metadata.source->cookie : 0;
       if (value.nomination_only) out.device = reinterpret_cast<std::uint64_t>(value.metadata.source->device);
       else {
-        out.texture = reinterpret_cast<std::uint64_t>(value.texture->resource.p);
-        out.shader_resource = value.texture->shader_resource;
-        out.device = reinterpret_cast<std::uint64_t>(value.texture->device);
+        out.texture = reinterpret_cast<std::uint64_t>(storage->resource.p);
+        out.shader_resource = storage->shader_resource;
+        out.device = reinterpret_cast<std::uint64_t>(storage->device);
       }
       out.queue = consumer; out.producer_queue = value.queue; out.capture_id = value.id; out.producer_fence = value.producer_fence;
       out.width = static_cast<std::uint32_t>(desc.Width); out.height = desc.Height;
@@ -1559,7 +1663,7 @@ namespace sunshine_streamline::depth_capture {
       out.format = typeless(desc.Format);
       // The snapshot's view was resolved at capture (depth_view); a
       // metadata-only nomination resolves its source's the same way.
-      out.srv_format = value.nomination_only ? depth_view(desc.Format, value.metadata) : value.texture->view_format;
+      out.srv_format = value.nomination_only ? depth_view(desc.Format, value.metadata) : storage->view_format;
       out.pixel_ready = !value.nomination_only;
     }
     void collect_retired() {
@@ -2034,6 +2138,7 @@ namespace sunshine_streamline::depth_capture {
         }
         const auto of_device = [&](const slot &value) {
           return (value.texture && value.texture->device_identity == device) ||
+            (value.published && value.published->device_identity == device) ||
             (value.metadata.source && value.metadata.source->device_identity == device) ||
             (value.auxiliary_destination && value.auxiliary_destination->device_identity == device) ||
             std::any_of(natives.begin(), natives.begin() + places, [&](auto queue) { return uses_queue(value, queue); });
@@ -2042,6 +2147,7 @@ namespace sunshine_streamline::depth_capture {
           if (!of_device(value)) return;
           snapshots += value.id != 0;
           if (value.texture) storage_held.push_back(std::move(value.texture));
+          if (value.published) storage_held.push_back(std::move(value.published));
           if (value.metadata.source) sources_held.push_back(std::move(value.metadata.source));
           if (value.auxiliary_destination) sources_held.push_back(std::move(value.auxiliary_destination));
           slot empty;
@@ -2115,14 +2221,19 @@ namespace sunshine_streamline::depth_capture {
         if (value.id && !head(value) && reclaimable(value)) {
           slot idle_slot;
           idle_slot.texture = std::move(value.texture);
+          idle_slot.published = std::move(value.published);
           // A record attempt may be allocating for this slot without the lock.
           idle_slot.reservation = value.reservation; idle_slot.reservation_tick = value.reservation_tick;
           idle_slot.reserved_bytes = value.reserved_bytes; idle_slot.reserved_live = value.reserved_live;
           value = std::move(idle_slot);
         }
-        if (value.id || !value.texture) continue;
-        if (idle + value.texture->allocation_bytes > idle_pixel_byte_limit) discard.push_back(std::move(value.texture));
-        else idle += value.texture->allocation_bytes;
+        if (value.id) continue;
+        // Cached copy-out storage counts as the snapshot's (record_impl).
+        for (auto *storage : {&value.texture, &value.published}) {
+          if (!*storage) continue;
+          if (idle + (*storage)->allocation_bytes > idle_pixel_byte_limit) discard.push_back(std::move(*storage));
+          else idle += (*storage)->allocation_bytes;
+        }
       }
     }
     // Cached colour/mask storage a live snapshot has not reused for this long.
@@ -2676,7 +2787,7 @@ namespace sunshine_streamline::depth_capture {
     // budget) under the lock, allocates unlocked, then repeats every
     // admission check from the start under the lock before it publishes. A
     // reservation is only a preference: publication never trusts it.
-    std::shared_ptr<texture_reference> prepared;
+    std::shared_ptr<texture_reference> prepared, prepared_published;
     std::uint64_t reservation{};
     // Storage replaced under the lock is released after it (Release of a
     // large committed resource can take milliseconds).
@@ -2853,78 +2964,96 @@ namespace sunshine_streamline::depth_capture {
         return reject(status::exhausted, record_stage::capacity);
       }
       auto texture = found->texture;
+      // Copy-out storage (slot::published) for a copy of a source another
+      // queue reads (copy_out): the snapshot's shape, view and rest. Each
+      // comes from the slot's cache, else from an earlier attempt's
+      // allocation (prepared), else is allocated now.
+      const bool wants_published = !diagnostic_copy && !preservation_only &&
+        value.source->foreign_producer.load(std::memory_order_relaxed);
+      auto published = wants_published ? found->published : nullptr;
       // New storage's rest (texture_reference::rest).
       const auto resting_state = diagnostic_copy || on_compute ? D3D12_RESOURCE_STATE_COMMON : sampled_state;
-      if (!compatible_storage(texture)) {
-        if (prepared && compatible_storage(prepared)) {
+      const bool texture_cached = compatible_storage(texture);
+      const bool published_cached = !wants_published || compatible_storage(published);
+      const bool texture_prepared = !texture_cached && prepared && compatible_storage(prepared);
+      const bool published_prepared = !published_cached && prepared_published && compatible_storage(prepared_published);
+      const bool need_texture = !texture_cached && !texture_prepared;
+      const bool need_published = !published_cached && !published_prepared;
+      if (!need_texture && !need_published) {
+        if (texture_prepared) {
           // Storage allocated by an earlier attempt. Its budget was reserved on
           // the slot it reserved; a different slot must admit it again.
           if (diagnostic_copy && found->reservation != reservation &&
               !reserve_diagnostic_bytes(diagnostic_slots, found, prepared->allocation_bytes, reusable_storage, reservation, &discarded))
             return reject(status::exhausted, record_stage::capacity);
           texture = std::move(prepared);
-        } else {
-          // Bounded: a second allocation means the shape changed meanwhile.
-          if (attempt >= 2) return reject(status::exhausted, record_stage::capacity);
-          storage_plan plan;
-          plan.device = value.source->device;
-          plan.device_identity = value.source->device_identity;
-          auto &destination = plan.desc;
-          destination = desc; destination.Format = texture_format; destination.Flags = D3D12_RESOURCE_FLAG_NONE;
-          destination.Width = region.width; destination.Height = region.height;
-          destination.MipLevels = 1; destination.DepthOrArraySize = 1; // Subresource 0 only.
-          plan.state = resting_state;
-          if (diagnostic_copy) {
-            destination.Alignment = 0;
-            destination.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-            // D3D11's host OpenSharedResource1 requires the D3D12 shared color
-            // allocation to be RT-capable. This is a private-copy bind capability,
-            // never a requirement on the application's mask/input allocation.
-            D3D12_FEATURE_DATA_FORMAT_SUPPORT support{texture_format};
-            if (FAILED(plan.device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &support, sizeof(support))) ||
-                !(support.Support1 & D3D12_FORMAT_SUPPORT1_RENDER_TARGET))
-              return reject(status::unsupported_resource, record_stage::resource_region);
-            destination.Flags = D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS | D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
-            const auto allocation = plan.device->GetResourceAllocationInfo(0, 1, &destination);
-            if (!reserve_diagnostic_bytes(diagnostic_slots, found, allocation.SizeInBytes, reusable_storage, reservation, &discarded))
-              return reject(status::exhausted, record_stage::capacity);
-            plan.allocation_bytes = allocation.SizeInBytes;
-            plan.shared = !reusable_storage;
-            // Local snapshots can be bound directly (lease_local_view).
-            plan.descriptors = reusable_storage;
-            // The replacement is retired too. Release its incompatible storage
-            // before allocation so even the replacement peak respects the budget.
-            discarded.push_back(std::move(found->texture));
-          } else {
-            plan.descriptors = true;
-            plan.view = snapshot_view;
-            // Sizes the idle-storage budget (release_idle_slots).
-            plan.allocation_bytes = plan.device->GetResourceAllocationInfo(0, 1, &destination).SizeInBytes;
-          }
-          clear_reservation(reservation);
-          reservation = ++reservation_serial;
-          found->reservation = reservation; found->reservation_tick = GetTickCount64();
-          found->reserved_bytes = plan.allocation_bytes; found->reserved_live = diagnostic_copy && reusable_storage;
-          lock.unlock();
-          discarded.clear();
-          prepared.reset();
-#ifdef SUNSHINE_STREAMLINE_PROBE_TEST
-          if (auto *hook = testing::allocation_hook.exchange(nullptr)) hook(testing::allocation_context.load());
-#endif
-          const auto stage = allocate_storage(plan, prepared);
-          lock.lock();
-          if (stage != record_stage::recorded) return reject(status::failed, stage);
-          // Released with its device whoever holds it (release_device).
-          if (!register_storage(prepared)) return reject(status::failed, record_stage::texture_allocation);
-          release_on_exit.keep = true;
-          continue;
         }
+        if (published_prepared) published = std::move(prepared_published);
+      } else {
+        // Bounded: a second allocation means the shape changed meanwhile.
+        if (attempt >= 2) return reject(status::exhausted, record_stage::capacity);
+        storage_plan plan;
+        plan.device = value.source->device;
+        plan.device_identity = value.source->device_identity;
+        auto &destination = plan.desc;
+        destination = desc; destination.Format = texture_format; destination.Flags = D3D12_RESOURCE_FLAG_NONE;
+        destination.Width = region.width; destination.Height = region.height;
+        destination.MipLevels = 1; destination.DepthOrArraySize = 1; // Subresource 0 only.
+        plan.state = resting_state;
+        if (diagnostic_copy) {
+          destination.Alignment = 0;
+          destination.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+          // D3D11's host OpenSharedResource1 requires the D3D12 shared color
+          // allocation to be RT-capable. This is a private-copy bind capability,
+          // never a requirement on the application's mask/input allocation.
+          D3D12_FEATURE_DATA_FORMAT_SUPPORT support{texture_format};
+          if (FAILED(plan.device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &support, sizeof(support))) ||
+              !(support.Support1 & D3D12_FORMAT_SUPPORT1_RENDER_TARGET))
+            return reject(status::unsupported_resource, record_stage::resource_region);
+          destination.Flags = D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS | D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+          const auto allocation = plan.device->GetResourceAllocationInfo(0, 1, &destination);
+          if (!reserve_diagnostic_bytes(diagnostic_slots, found, allocation.SizeInBytes, reusable_storage, reservation, &discarded))
+            return reject(status::exhausted, record_stage::capacity);
+          plan.allocation_bytes = allocation.SizeInBytes;
+          plan.shared = !reusable_storage;
+          // Local snapshots can be bound directly (lease_local_view).
+          plan.descriptors = reusable_storage;
+          // The replacement is retired too. Release its incompatible storage
+          // before allocation so even the replacement peak respects the budget.
+          discarded.push_back(std::move(found->texture));
+        } else {
+          plan.descriptors = true;
+          plan.view = snapshot_view;
+          // Sizes the idle-storage budget (release_idle_slots).
+          plan.allocation_bytes = plan.device->GetResourceAllocationInfo(0, 1, &destination).SizeInBytes;
+        }
+        clear_reservation(reservation);
+        reservation = ++reservation_serial;
+        found->reservation = reservation; found->reservation_tick = GetTickCount64();
+        found->reserved_bytes = plan.allocation_bytes; found->reserved_live = diagnostic_copy && reusable_storage;
+        lock.unlock();
+        discarded.clear();
+        if (need_texture) prepared.reset();
+        if (need_published) prepared_published.reset();
+#ifdef SUNSHINE_STREAMLINE_PROBE_TEST
+        if (auto *hook = testing::allocation_hook.exchange(nullptr)) hook(testing::allocation_context.load());
+#endif
+        auto stage = need_texture ? allocate_storage(plan, prepared) : record_stage::recorded;
+        if (stage == record_stage::recorded && need_published) stage = allocate_storage(plan, prepared_published);
+        lock.lock();
+        if (stage != record_stage::recorded) return reject(status::failed, stage);
+        // Released with its device whoever holds it (release_device).
+        if ((need_texture && !register_storage(prepared)) || (need_published && !register_storage(prepared_published)))
+          return reject(status::failed, record_stage::texture_allocation);
+        release_on_exit.keep = true;
+        continue;
       }
       // Publication: this attempt passed every check above with the lock held.
       discarded.push_back(std::move(found->texture));
+      discarded.push_back(std::move(found->published));
       *found = {};
       if (reservation) clear_reservation(std::exchange(reservation, 0));
-      found->texture = std::move(texture); found->metadata = value; found->metadata.native_state = before;
+      found->texture = std::move(texture); found->published = std::move(published); found->metadata = value; found->metadata.native_state = before;
       found->id = ++serial; found->command = cookie; found->producer_recording = owner.life();
       found->basis = basis; found->compute_list = on_compute;
       compute_copies_recorded |= on_compute;
@@ -3301,6 +3430,8 @@ namespace sunshine_streamline::depth_capture {
     out.invalidated = c.invalidated.load(relaxed); out.missed_reset = c.missed_reset.load(relaxed);
     out.uncovered = c.uncovered.load(relaxed); out.changed_copies = c.changed_copies.load(relaxed);
     out.earlier_copied = c.earlier_copied.load(relaxed); out.earlier_refused = c.earlier_refused.load(relaxed);
+    out.copied_out = copy_out_counters.made.load(relaxed); out.copy_out_busy = copy_out_counters.ring_busy.load(relaxed);
+    out.copy_out_failed = copy_out_counters.failed.load(relaxed);
     return out;
   }
   void finish(std::uint64_t ticket, bool successful, capture_failure failure) {
@@ -3534,7 +3665,9 @@ namespace sunshine_streamline::depth_capture {
     for (auto *current = begin; current != end; ++current) if (current->id == value.capture_id) {
       auto &entry = *current;
       matching_id = true;
-      if (entry.texture != value.ownership) continue;
+      // The copy-out, once made, is read without the recording's Reset.
+      const bool reads_copy_out = !auxiliary && entry.copied_out && entry.published && entry.published == value.ownership;
+      if (entry.texture != value.ownership && !reads_copy_out) continue;
       if ((entry.consumer_queue || !auxiliary) && entry.consumer_queue != value.queue)
         return result(consumer_status::ownership_mismatch);
       retire_dead_recordings(entry);
@@ -3575,7 +3708,7 @@ namespace sunshine_streamline::depth_capture {
           // must never add a queue dependency to the application's schedule.
           const auto *consumer = known_queue(value.queue);
           const auto progress = producer_progress(entry);
-          if (!consumer || consumer->retiring || !producer_recording_retired(entry) ||
+          if (!consumer || consumer->retiring || !(reads_copy_out || producer_recording_retired(entry)) ||
               !progress.valid() || !entry.producer_fence || progress.completed < entry.producer_fence)
             return result(consumer_status::capture_not_ready);
         }

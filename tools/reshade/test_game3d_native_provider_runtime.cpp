@@ -88,8 +88,9 @@ namespace {
   // A ring of recordings on a queue of the game's own: each entry is reset
   // (through ReShade, which names its native list) only when recorded into
   // again, once its last work completed, as Streamline's DLSS-G ring and a
-  // game's own queues are. That Reset retires the recording's earlier copies,
-  // which the add-on reads only then (known gap C1).
+  // game's own queues are. That Reset retires the recording's earlier copies;
+  // the add-on reads their copy-outs on that queue earlier, once complete
+  // (known gap C1 until 10-27).
   template<unsigned N> struct queue_ring {
     static constexpr unsigned size = N;
     com_ptr<ID3D12CommandQueue> queue;
@@ -3105,14 +3106,17 @@ namespace {
           // DLSS-G evaluates on its own COMPUTE list (N7). Its depth observed
           // there in a state a compute list may use is copied on that list:
           // its own compute queue takes a fence at the copy's submission, and
-          // the Present queue reads the copy once DLSS-G reset the recording
-          // (here when it records into that ring entry again, three frames
-          // later). DLSSG.Depth owns the FG scope from it as from a direct
-          // list once its first copy is readable, so SR depth stays until
-          // then and the handover loses no depth. Every real Present shows the
-          // newest readable copy, and generated Presents hold it. With the copy
-          // refused as command_type (before N7) the scope stays silent and SR
-          // depth stays.
+          // the Present queue reads its copy-out on that queue once that fence
+          // completed, without DLSS-G's Reset of the recording (which here
+          // comes when it records into that ring entry again, three frames
+          // later; docs/reshade-sbs.md, Copy-out on the producer queue).
+          // DLSSG.Depth owns the FG scope from it as from a direct list once
+          // its first copy is readable, so SR depth stays until then and the
+          // handover loses no depth. Every real Present whose frame's compute
+          // work completed (the fixture waits for it, as a GPU ahead of the
+          // Present has) shows that frame's own copy, and generated Presents
+          // hold it. With the copy refused as command_type (before N7) the
+          // scope stays silent and SR depth stays.
           {
             // SR owns the viewport first: DLSS-G's depth, unobserved on its
             // compute list, is refused.
@@ -3123,7 +3127,7 @@ namespace {
             observed_state = true;
             settle_route("DLSSG-compute-list-owns-FG-depth", true);
             for (unsigned pair = 0; pair < 6; ++pair) {
-              render_tracked_depth = dlssg_frame;
+              render_tracked_depth = [&] { dlssg_frame(); dlssg_ring.finish(); };
               present_frame(); const auto real = inspect();
               require(active(real) && !real.source.reused_depth && real.source.frame_generation_input,
                 "A real Present lost DLSS-G's compute-list FG depth or let SR depth compete with it");
@@ -3343,13 +3347,16 @@ namespace {
         }});
     }
 
-    // The continuity invariant's known limitations (test_game3d_continuity.h,
-    // C1 and C2): the game renders on a second direct queue and the
-    // presenting queue waits for it, as in seven of the eight games of the
-    // 10-06 to 10-23 logs. SR warms up on the presenting queue and moves to
-    // the game's queue; Generic starts there. Each case recovers on the
-    // presenting queue. The judge records each loss as its row's; a row whose
-    // stimulus loses no depth fails the run as a closed gap.
+    // The game renders on a second direct queue and the presenting queue
+    // waits for it, as in seven of the eight games of the 10-06 to 10-23
+    // logs. SR warms up on the presenting queue and moves to the game's
+    // queue, whose copies the presenting queue reads through their
+    // copy-outs once complete, before the game's ring resets them (known gap
+    // C1 until 10-27): every loss is a violation. Generic starts there, the
+    // continuity invariant's known limitation C2 (test_game3d_continuity.h),
+    // whose losses the judge records as its row's; a row whose stimulus loses
+    // no depth fails the run as a closed gap. Each case recovers on the
+    // presenting queue.
     void fg_other_queue() {
       // The game's ring of recordings, each reset only when recorded into
       // again ring frames later (as Streamline's DLSS-G ring is), at least
@@ -3379,7 +3386,7 @@ namespace {
         const auto resource = depth_resource();
         const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, 1, active_area};
         const base_structure *inputs[]{&fg_viewport.base, &tag.base};
-        supplied(game3d_continuity::sr_evaluate, game3d_continuity::limitation::cross_queue_sr);
+        supplied(game3d_continuity::sr_evaluate);
         require(sl.evaluate(0, *token, inputs, 2, reinterpret_cast<void *>(native)) == 0,
           "Game-queue SR evaluation changed the SDK result");
         game_ring.execute(n, queue.p);
@@ -3472,7 +3479,7 @@ namespace {
           settle_generic("Generic-presenting-queue-again");
           render_tracked_depth = {};
           game_ring.drain();
-          std::puts("PASS native other-queue sources: SR and Generic depth on the game's own direct queue, judged by the continuity invariant (known gaps C1, C2); no FX");
+          std::puts("PASS native other-queue sources: SR and Generic depth on the game's own direct queue, judged by the continuity invariant (SR copied out, known gap C2); no FX");
         }});
     }
 

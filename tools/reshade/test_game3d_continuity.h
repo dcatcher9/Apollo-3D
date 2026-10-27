@@ -44,7 +44,8 @@
 // limitation was supplied in a run without a violation (the gap closed: the
 // fix removes the row).
 //
-// Two rows are the limitations the owner approved until Step 4 (C1, C2). A
+// Two rows are the limitations the owner approved until Step 4 (C1, C2; C1
+// narrowed on 10-27 to copies still in flight at their Present). A
 // matrix row's recorded gap over frames would also be one (none is open
 // since C5 closed on 10-26). Any other row is a defect these tests found
 // (found: when and by which test), excused only until the owner decides it
@@ -92,8 +93,9 @@ namespace game3d_continuity {
   // A known limitation the frame's legal source meets; a gap row names it.
   enum class limitation : std::uint8_t {
     none,
-    // API depth recorded on a queue other than the presenting one: an SR
-    // evaluation's on the game's queue, or DLSS-G's own on its compute queue.
+    // API depth recorded on a queue other than the presenting one, read once
+    // its copy-out completed: an SR evaluation's on the game's queue, or
+    // DLSS-G's own on its compute queue.
     cross_queue_sr,
     // A Generic depth-stencil view drawn on a queue other than the
     // presenting one, whose only boundary is the end of the frame.
@@ -229,7 +231,7 @@ namespace game3d_continuity {
   };
 
   inline constexpr gap_row known_gaps[] {
-    {"C1-cross-queue-sr", limitation::cross_queue_sr, nullptr, "Until Step 4's fence observation. An SR snapshot copied on a queue other than the presenting one is readable only once its recording retired and its producer fence completed (streamline_depth_capture.cpp completed_snapshot, submission_status), never through the game's own wait for that queue: in Assassin's Creed Shadows 110-235 ms after its evaluation, about 30 no_completed_snapshot losses a session, mostly where a stray FG copy hands back to SR (d8c52e3b). The fixture's game retires its recordings later than the source age, so every Present loses that depth once the presenting queue's last copy ages out. DLSS-G's own copies on its COMPUTE list (N7) are read the same way, once DLSS-G reset that recording (accept_compute_copy, three of its evaluations later with its ring of three), and the session timelines tag their frames with this row too, the viewport's SR input among them: a frame whose only FG input is such a copy supplies its live FG scope, which keeps that SR input out while the copy is in flight (the second kind of frame of C4, closed 10-26), and so does the frame after it, whose Present can show only the scope's readable copy, three DLSS-G evaluations old (the round 3 review, 10-26: a loss at the first frame without a compute copy). Both are losses of the compute copy's lateness, which fence observation removes; the owner's approval of C1 is asked to cover them by name. The row records a loss only once no copy the presenting queue could read (a frame's legal source that meets no limitation) is younger than the source age: a loss within it, such as a held FG copy dropped for an SR snapshot still in flight on the other queue (fixed by 88b45edf, and at FG Off by the fix that closed C8 on 10-26), is a violation. Observing the game's fence signals and waits orders the copy before the Present; that fix shows depth here and removes this row."},
+    {"C1-cross-queue-sr", limitation::cross_queue_sr, nullptr, "Narrowed on 10-27 by the copy-out on the producer queue (streamline_depth_capture.cpp copy_out, docs/reshade-sbs.md): an API copy recorded on a queue other than the presenting one is copied into add-on storage on its own queue right after the game's submission, and the presenting queue reads that copy-out once its producer fence completed, without the recording's Reset (before, only after it: in Assassin's Creed Shadows 110-235 ms after its evaluation, the fixture's sr-other-queue lost depth once the presenting queue's last copy aged out, and DLSS-G's compute copies were readable three of its evaluations later; that script now keeps depth). What remains: a copy still in flight at a Present that has no younger readable copy to hold (the add-on never waits for another queue, nor adds a reverse GPU Wait), as when the session timelines present right after the only copy of a frame whose earlier depth aged out; and the first copies of a source before its first cross-queue submission marked it read elsewhere (no copy-out storage yet), and copies whose queue's copy-out ring was all in flight (copy_out ring_busy), which keep the Reset rule. With this row removed the fixed set lost depth at seed 30618337c4062c47 frame 130 (DLSS-G's compute copy the frame's only depth, its earlier depth aged out) and seed 6e5b9c154ddc34d8 frame 10 (the timeline's first SR copy on the game's queue). The session timelines tag these frames (SR on the game's queue, DLSS-G's compute copies and the live FG scope's frames after them) with this row. The row records a loss only once no copy the presenting queue could read (a frame's legal source that meets no limitation) is younger than the source age: a loss within it is a violation. Observing the game's fence signals and waits orders the copy before the Present; that fix removes this row."},
     {"C2-cross-queue-generic", limitation::cross_queue_generic, nullptr, "Until Step 4's fence hooks. Generic's end-of-frame copy runs on the presenting queue, and a proof belongs to the queue whose executed list made it, so a depth-stencil view drawn on another queue with no boundary but the end of the frame is refused (missing_state; 18e5d922, docs/reshade-sbs.md, the last proven state). Seven of the eight games of the 10-06 to 10-23 logs render on another queue. Either owner option (accept the other queue's proof once fence hooks show the presenting queue ordered after it, or copy on the proving queue) shows depth here and removes this row."},
   };
   inline constexpr std::size_t gap_count = std::size(known_gaps);

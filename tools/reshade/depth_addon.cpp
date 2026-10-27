@@ -3149,7 +3149,8 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 		std::snprintf(message, std::size(message),
 			"Sunshine 3D depth: %s; source=%llu %ux%u %s; %s; %s; %s; ready_copies boundary=%llu end_of_frame=%llu; "
 			"end_of_frame_refused=%llu last=%s; proven tracked=%llu unobserved={unrecorded=%llu unreported=%llu invalidated=%llu "
-			"missed_reset=%llu uncovered=%llu} changed_copies=%llu latched=%llu%s earlier_layout={copied=%llu refused=%llu}",
+			"missed_reset=%llu uncovered=%llu} changed_copies=%llu latched=%llu%s earlier_layout={copied=%llu refused=%llu} "
+			"copy_out={made=%llu ring_busy=%llu failed=%llu}",
 			binding_state_name(data.binding_state), static_cast<unsigned long long>(data.selected_identity),
 			data.selected_desc.texture.width, data.selected_desc.texture.height, format_to_string(data.selected_desc.texture.format), manual ? "manual" : "auto",
 			data.selection_reason, data.binding_detail, static_cast<unsigned long long>(data.boundary_copy_frames),
@@ -3159,7 +3160,9 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 			static_cast<unsigned long long>(proven.invalidated), static_cast<unsigned long long>(proven.missed_reset),
 			static_cast<unsigned long long>(proven.uncovered), static_cast<unsigned long long>(proven.changed_copies),
 			static_cast<unsigned long long>(proven.latched), proven.latch_lost ? " latch_lost" : "",
-			static_cast<unsigned long long>(proven.earlier_copied), static_cast<unsigned long long>(proven.earlier_refused));
+			static_cast<unsigned long long>(proven.earlier_copied), static_cast<unsigned long long>(proven.earlier_refused),
+			static_cast<unsigned long long>(proven.copied_out), static_cast<unsigned long long>(proven.copy_out_busy),
+			static_cast<unsigned long long>(proven.copy_out_failed));
 		sunshine_log::message(data.binding_state == depth_binding_state::binding_failed ? reshade::log::level::error : reshade::log::level::info, message);
 		data.last_logged_id = data.anchor_identity;
 		data.last_logged_manual = manual;

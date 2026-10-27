@@ -707,6 +707,95 @@ namespace {
       gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
   }
 
+  // Copy-out on the producer queue (docs/reshade-sbs.md): a copy of a
+  // source another queue reads is copied into add-on storage by the
+  // add-on's own list on the producer queue, right after the game's
+  // ExecuteCommandLists. That queue reads it once the producer fence
+  // completed, before the game's recording is Reset (known gap C1 until
+  // 10-27), and a later execution of that recording without Reset writes
+  // only the snapshot's own storage: the reader keeps the first
+  // execution's bytes.
+  void copy_out_replay(fixture &gpu) {
+    if (gpu.debug_messages) gpu.debug_messages->ClearStoredMessages();
+    consumer_fixture consumer(gpu);
+    texture_case depth(gpu, DXGI_FORMAT_R32_FLOAT, 4);
+    gpu.submit(); gpu.wait(); gpu.reset();
+    capture::packet packet;
+    capture::capture_diagnostic acquired;
+    // The independent queue reads depth (acquire's choice).
+    capture::acquire(native(gpu.foreign_queue.Get()), 12000, packet, &acquired);
+    packet = {};
+    auto input = depth.input;
+    input.provider = sunshine_scene_depth::provider_kind::ngx;
+    input.epoch = 77; input.source_id = 95; input.viewport = 0;
+    input.valid_until = sunshine_scene_depth::lifetime::until_evaluation; input.force_snapshot = false;
+    input.source_present_generation = capture::source_present_generation(input.source);
+    input.proof = sunshine_scene_depth::state_proof::sdk_contract;
+    capture::record_diagnostic diagnostic;
+    const auto nominate = [&](std::uint64_t sequence) {
+      input.sequence = sequence; input.tick = GetTickCount64();
+      const auto ticket = capture::nominate_evaluation(native(gpu.list.Get()), input, UINT64_MAX, &diagnostic);
+      require(ticket && diagnostic.result == capture::status::recorded, "copy-out: the depth copy was refused");
+      capture::finish(ticket, true);
+      return ticket;
+    };
+    // The first copy's submission on the producer queue finds its reader
+    // on another queue: the source's later copies take copy-out storage.
+    const auto made = capture::proven_counts().copied_out;
+    nominate(1);
+    gpu.submit(); gpu.wait(); gpu.reset();
+    require(capture::proven_counts().copied_out == made, "copy-out: a copy without copy-out storage was copied out");
+    const auto ticket = nominate(2);
+    gpu.submit(); gpu.wait(); // Executed, completed, never Reset.
+    require(capture::proven_counts().copied_out == made + 1, "copy-out: the second copy was not copied out");
+    require(capture::acquire(native(gpu.foreign_queue.Get()), 12001, packet, &acquired) && packet.pixel_ready &&
+        packet.capture_id == ticket && packet.producer_queue == native(gpu.queue.Get()),
+      "copy-out: the completed copy was unreadable on another queue before its recording's Reset");
+    auto target = destination(gpu.device.Get(), DXGI_FORMAT_R32_FLOAT);
+    readback actual(gpu, target.Get());
+    require(capture::copy_current(native(consumer.list.Get()), packet, native(target.Get()),
+      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE), "copy-out: the consumer copy failed");
+    actual.record(consumer.list.Get(), target.Get());
+    capture::complete_frame(packet, 12001);
+    // The game writes its source anew and executes the same closed recording
+    // again, which copies the new pixels into the snapshot's own storage.
+    ComPtr<ID3D12CommandAllocator> writer_allocator;
+    ComPtr<ID3D12GraphicsCommandList> writer;
+    check(gpu.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&writer_allocator)), "writer allocator");
+    check(gpu.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, writer_allocator.Get(), nullptr,
+      IID_PPV_ARGS(&writer)), "writer list");
+    created(writer.Get());
+    capture::observe_command(native(writer.Get()));
+    transition(writer.Get(), depth.source.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+    {
+      const auto desc = depth.source->GetDesc(); UINT64 size{};
+      gpu.device->GetCopyableFootprints(&desc, 0, 1, 0, nullptr, nullptr, nullptr, &size);
+      D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
+      src.pResource = depth.upload.Get(); src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+      src.PlacedFootprint = depth.footprint; src.PlacedFootprint.Offset = size;
+      dst.pResource = depth.source.Get(); dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+      writer->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    }
+    transition(writer.Get(), depth.source.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    check(close_list(writer.Get()), "writer close");
+    execute(gpu.queue.Get(), writer.Get());
+    execute(gpu.queue.Get(), gpu.list.Get());
+    gpu.wait();
+    require(capture::proven_counts().copied_out == made + 1, "copy-out: a replay was copied out again");
+    consumer.submit(); consumer.wait(); consumer.reset();
+    actual.verify(depth.width, depth.height, depth.bpp, 0);
+    packet = {};
+    gpu.reset();
+    capture::retire_source(input.provider, input.epoch, input.source_id);
+    destroyed(writer.Get()); capture::command_destroyed(native(writer.Get()));
+    capture::command_destroyed(native(consumer.list.Get()));
+    capture::poll();
+    gpu.check_debug_errors();
+    std::printf("PASS copy-out on the producer queue: another queue reads a completed copy before its recording's Reset, "
+      "and a replay of that recording leaves the read bytes unchanged%s\n",
+      gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
+  }
+
   // An SR evaluation's nomination in progress is pending, not a refused
   // attempt. A Present on the presenting queue (another thread's) that lands
   // while the game's thread is inside an SR evaluate, as when its copy
@@ -2948,6 +3037,7 @@ int main(int argc, char **argv) {
     first_recording_depth_capture(gpu);
     proven_state_end_of_frame(gpu);
     ngx_contract_depth_capture(gpu);
+    copy_out_replay(gpu);
     nomination_in_progress(gpu);
     ngx_nomination_in_progress(gpu);
     {
