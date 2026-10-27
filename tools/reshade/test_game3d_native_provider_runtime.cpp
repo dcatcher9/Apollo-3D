@@ -102,6 +102,9 @@ namespace {
     com_ptr<ID3D12Fence> done;
     std::uint64_t value{};
     unsigned at{};
+    // The fence as the freshness rule's probes see it: they hold it weakly,
+    // so no supply log keeps the game's device alive (release() ends it).
+    std::shared_ptr<ID3D12Fence> watched;
 
     void create(ID3D12Device *device, D3D12_COMMAND_LIST_TYPE type) {
       D3D12_COMMAND_QUEUE_DESC desc{}; desc.Type = type;
@@ -115,6 +118,16 @@ namespace {
         checked(lists[n]->Close(), "Close a ring's initial recording");
       }
       checked(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(done.put())), "Create a ring's fence");
+      done->AddRef();
+      watched.reset(done.p, [](ID3D12Fence *fence) { fence->Release(); });
+    }
+    // Whether the work executed last on the ring completed; false once the
+    // ring is released.
+    std::function<bool()> completion() const {
+      return [fence = std::weak_ptr<ID3D12Fence>(watched), until = value] {
+        const auto held = fence.lock();
+        return held && held->GetCompletedValue() >= until;
+      };
     }
     // Entry n, reset once its last work completed: its native list, open.
     std::uint64_t reset(unsigned n) {
@@ -154,7 +167,7 @@ namespace {
     }
     void release() {
       for (unsigned n = 0; n != N; ++n) { lists[n].reset(); allocators[n].reset(); }
-      queue.reset(); done.reset();
+      queue.reset(); done.reset(); watched.reset();
       values = {}; value = 0; at = 0;
     }
   };
@@ -519,15 +532,12 @@ namespace {
       return found != elsewhere_submitted.end() &&
         GetTickCount64() - found->second + game3d_continuity::tick_slack_ms < sunshine_freshness::source_age_ms;
     }
-    // Once the copy's list executed on a queue whose fence reaches value when
-    // its work completed: the source's submission, and the completion probe
-    // of a copy copied out (empty otherwise).
-    std::function<bool()> submitted_elsewhere(ID3D12Resource *source, bool copied_out, ID3D12Fence *fence, std::uint64_t value) {
+    // Once the copy's list executed (completion: queue_ring::completion):
+    // the source's submission, and the completion probe of a copy copied out
+    // (empty otherwise).
+    std::function<bool()> submitted_elsewhere(ID3D12Resource *source, bool copied_out, std::function<bool()> completion) {
       elsewhere_submitted[source] = GetTickCount64();
-      if (!copied_out) return {};
-      fence->AddRef();
-      const std::shared_ptr<ID3D12Fence> held(fence, [](ID3D12Fence *owned) { owned->Release(); });
-      return [held, value] { return held->GetCompletedValue() >= value; };
+      return copied_out ? std::move(completion) : std::function<bool()>{};
     }
     static void supplied_elsewhere(std::uint8_t sources) { continuity_log.pending.add_elsewhere(sources, GetTickCount64()); }
     static void completes(std::uint8_t sources, std::function<bool()> probe) {
@@ -2997,7 +3007,7 @@ namespace {
           dlssg_ring.execute(n);
           if (observed_state)
             completes(game3d_continuity::dlssg_input,
-              submitted_elsewhere(selected->resource.p, copied_out, dlssg_ring.done.p, dlssg_ring.value));
+              submitted_elsewhere(selected->resource.p, copied_out, dlssg_ring.completion()));
           return;
         }
         if (observed_state) {
@@ -3427,7 +3437,7 @@ namespace {
           "Game-queue SR evaluation changed the SDK result");
         game_ring.execute(n, queue.p);
         completes(game3d_continuity::sr_evaluate,
-          submitted_elsewhere(selected->resource.p, copied_out, game_ring.done.p, game_ring.value));
+          submitted_elsewhere(selected->resource.p, copied_out, game_ring.completion()));
       };
       run_script({"sr-other-queue", 30000,
         [&] {

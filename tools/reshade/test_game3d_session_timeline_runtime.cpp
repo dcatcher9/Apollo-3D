@@ -600,17 +600,17 @@ namespace {
     } supply;
 
     // A required copy of the frame's last decision, recorded on another
-    // queue: the freshness rule's supply. Called once its list executed on
-    // a queue whose fence reaches value when its work completed; copied_out:
-    // copied_out_elsewhere when it was recorded. A permitted copy may or may
-    // not have been made, so it neither counts nor moves the source's stamp.
-    void recorded_elsewhere(std::uint8_t source, bool copied_out, ID3D12Fence *fence, std::uint64_t value) {
+    // queue: the freshness rule's supply. Called once its list executed
+    // (completion: its ring's); copied_out: copied_out_elsewhere when it was
+    // recorded. A permitted copy may or may not have been made, so it
+    // neither counts nor moves the source's stamp.
+    void recorded_elsewhere(std::uint8_t source, bool copied_out, std::function<bool()> completion) {
       const auto &made = decisions.back();
       if (!made.legal || !requires_capture(made.expected)) {
         return;
       }
       supply.elsewhere |= source;
-      if (auto probe = submitted_elsewhere(selected->resource.p, copied_out, fence, value)) {
+      if (auto probe = submitted_elsewhere(selected->resource.p, copied_out, std::move(completion))) {
         supply.completions.emplace_back(source, std::move(probe));
       }
     }
@@ -1216,7 +1216,7 @@ namespace {
         returned(sl.evaluate(0, *token, inputs, 2, reinterpret_cast<void *>(native)), "slEvaluateFeature on the game's queue");
         poll("evaluate");
         game_work.execute(n, queue.p);
-        recorded_elsewhere(continuity::sr_evaluate, copied_out, game_work.done.p, game_work.value);
+        recorded_elsewhere(continuity::sr_evaluate, copied_out, game_work.completion());
         other_queue_copy = GetTickCount64();
       }
       dlssg_evaluation(of<dlssg_form>(value, events::dlssg));
@@ -1355,7 +1355,7 @@ namespace {
           transition(compute, selected->resource.p, read, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         }
         dlssg_work.execute(n);
-        recorded_elsewhere(continuity::dlssg_input, copied_out, dlssg_work.done.p, dlssg_work.value);
+        recorded_elsewhere(continuity::dlssg_input, copied_out, dlssg_work.completion());
         if (observed) {
           other_queue_copy = GetTickCount64();
         }
