@@ -822,7 +822,9 @@ namespace {
   // were submitted only on the reader's queue for the source age takes no
   // copy-out storage (until 10-27 it took it for good), nor does a copy on
   // a list never executed once that submission is the reader's: the idle
-  // sweep releases its storage.
+  // sweep releases its storage. Once FG options turned on, a copy recorded
+  // and submitted on the reader's queue before Present moved is copied out
+  // too (until 10-27 FG's first Present on another queue could not read it).
   void copy_out_reader_moves(fixture &gpu) {
     if (gpu.debug_messages) gpu.debug_messages->ClearStoredMessages();
     texture_case depth(gpu, DXGI_FORMAT_R32_FLOAT, 4);
@@ -1005,8 +1007,29 @@ namespace {
       run_on_reader(fresh);
       capture::retire_source(odd_input.provider, odd_input.epoch, odd_input.source_id);
     }
+    // FG turned on while the render queue still presents: FG's first Present
+    // moves Present to DLSS-G's queue after the frame's render-queue copy was
+    // recorded and submitted, on a list that last ran there. That copy is
+    // copied out and read on the new presenting queue before its Reset
+    // (until 10-27 it kept the Reset rule, so FG's first Present was flat).
+    {
+      present(gpu.queue.Get(), 12111);
+      capture::frame_generation_enabled(GetTickCount64());
+      const auto first = nominate(7);
+      require(capture::testing::holds_copy_out_storage(first),
+        "reader moves: FG turned on, a render-queue copy before Present moved took no copy-out storage");
+      gpu.submit(); gpu.wait(); // Executed on the reader's queue, completed, never Reset.
+      require(counts().copied_out == made + 3,
+        "reader moves: FG turned on, a render-queue copy submitted before Present moved was not copied out");
+      require(capture::acquire(native(gpu.foreign_queue.Get()), 12112, packet, &acquired) && packet.pixel_ready &&
+          packet.capture_id == first,
+        "reader moves: FG's first Present on another queue could not read the copy submitted before it moved");
+      packet = {};
+      gpu.reset();
+      capture::frame_generation_enabled(0);
+    }
     // The independent queue reads again, as the later cases expect.
-    present(gpu.foreign_queue.Get(), 12111);
+    present(gpu.foreign_queue.Get(), 12113);
     capture::retire_source(input.provider, input.epoch, input.source_id);
     capture::poll();
     gpu.check_debug_errors();

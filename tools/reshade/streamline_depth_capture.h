@@ -333,6 +333,10 @@ namespace sunshine_streamline::depth_capture {
   // from the frame after the first without FG depth, ready when the held FG
   // copy expires.
   void frame_generation_frame(std::uint64_t epoch, std::uint32_t viewport, std::uint64_t enabled_tick);
+  // FG options turned on at enabled_tick (0: forget it). For the source age
+  // after it, copies on the queue that reads depth are copied out too, since
+  // FG's first Present moves Present to DLSS-G's queue after them (U-C1b).
+  void frame_generation_enabled(std::uint64_t enabled_tick);
   // A frame of that FG scope ended without a copy (its FG tag refused, its
   // copy deferred to its Present cancelled by an untag, refused or lapsed,
   // or DLSS-G's own evaluation of it refused). sequence is the frame's

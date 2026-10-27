@@ -3942,7 +3942,13 @@ pools or creates its lists allocates nothing for them; until 10-27 each new list
 allocated that storage on the game's thread and the sweep released it unused). That covers FG On, which moves Present
 to DLSS-G's queue: the render queue's lists last ran there, so its first copy after the move is
 copied out (until 10-27 only the copy after the first submission elsewhere was, so FG On showed
-flat 2D for one or two Presents), and a source new to the game's other queue. A copy recorded for
+flat 2D for one or two Presents), and a source new to the game's other queue. FG's first Present
+moves Present after that frame's render-queue copies were recorded and submitted while the render
+queue still read depth, so for the source age after FG options turn on
+(`frame_generation_enabled`, from the probe's options hook) a copy on a list predicted to run on
+the reader's queue takes that storage too and the reader's own queue copies out (until 10-27 those
+kept the Reset rule, so FG's first Present was flat; a game whose Present stays on its queue with FG
+on pays one copy-out per copy for that age after each FG On). A copy recorded for
 the reader's queue and submitted after Present moved takes an idle slot's cached storage of its
 shape, format, view and device at its submission (`COMMON` rest on a compute queue), never an
 allocation on the game's submission thread; with none it keeps the Reset rule (`unstored`, at most

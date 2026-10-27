@@ -1022,7 +1022,7 @@ namespace sunshine_streamline {
       const DWORD outgoing = GetLastError();
       // Only the sampling entry judges (and counts) the result.
       const bool sdk_ok = sample && sdk_accepted(result);
-      std::uint64_t retired_epoch{};
+      std::uint64_t retired_epoch{}, turned_on{};
       if (sample) dump_metadata::observe_sl_fg(dump_stamp(ticket, serial, GetTickCount64(), valid_viewport ? id : UINT32_MAX), copy.mode, copy.generated_frames, valid, sdk_ok);
       bool changed = false;
       // A game may set its FG options once: a busy writer must not leave the
@@ -1049,14 +1049,19 @@ namespace sunshine_streamline {
               state = {update->epoch, serial, now, options_loss, id, copy.mode, copy.generated_frames,
                 known, known && copy.mode != 0, valid && copy.mode >= 2};
               if (state.enabled) state.enabled_tick = enabled_since ? enabled_since : now;
+              if (state.enabled && !enabled_since) turned_on = now;
               if (!known || copy.mode == 0) retired_epoch = update->epoch;
             }
           }
         }
-        if (!current(ticket)) retired_epoch = 0;
-        else if (!update.commit()) { ++fg_loss_revision; retired_epoch = 0; }
+        if (!current(ticket)) retired_epoch = turned_on = 0;
+        else if (!update.commit()) { ++fg_loss_revision; retired_epoch = turned_on = 0; }
       } else if (sample && current(ticket)) ++fg_loss_revision;
       update.reset(); // No mutation ownership across capture/COM reentry below.
+      // FG's first Present moves Present to DLSS-G's queue after this frame's
+      // copies on the game's queue were submitted: those are copied out for
+      // the source age from here (U-C1b, depth_capture::frame_generation_enabled).
+      if (turned_on) depth_capture::frame_generation_enabled(turned_on);
       // Revoke the exact FG scope, including tags recorded while the failed
       // SDK call was in flight. A concurrent new On may lose one capture;
       // a fresh tag restores it without resurrecting pre-loss pixels.

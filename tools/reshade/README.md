@@ -1863,7 +1863,10 @@ closed, and the fix removes the row). Each provider run with an interposer exerc
   copy whose copy-out storage cannot be allocated is still recorded, with the Reset rule
   (`copy_out={... failed=}`). A copy recorded for the reader's queue and
   submitted after Present moved takes an idle slot's cached storage of its shape at its submission,
-  with no allocation there; with none it keeps the Reset rule (`copy_out={... unstored=}`). The
+  with no allocation there; with none it keeps the Reset rule (`copy_out={... unstored=}`). For the
+  source age after FG options turn on, the reader's own queue copies out too, since FG's first
+  Present moves Present after that frame's copies were submitted there (until 10-27 those kept the
+  Reset rule, so that first FG Present was flat). The
   capture test pins each case (`copy_out_replay`, `copy_out_reader_moves`, the compute-list
   cases); with U-C1b reverted they fail, and the fixed timelines' seed `6e5b9c154ddc34d8` shows its
   frame 10 (its first SR copy on the game's queue) mono instead of fresh, which the judge's warm-up

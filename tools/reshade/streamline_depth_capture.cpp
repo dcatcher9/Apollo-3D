@@ -191,6 +191,13 @@ namespace sunshine_streamline::depth_capture {
     // executed yet is predicted to run (record_impl's copy-out storage); 0
     // before any.
     std::uint64_t last_direct_copy_queue{};
+    // When FG options last turned on (frame_generation_enabled), 0 never.
+    // FG moves Present to DLSS-G's queue at its first Present, after the
+    // render queue's copies of that frame were recorded and submitted while
+    // that queue still read depth, so for the source age after FG turned on
+    // the reader's own copies are copied out too (U-C1b,
+    // reader_may_move).
+    std::atomic<std::uint64_t> frame_generation_on_tick{};
     std::array<evaluation_namespace, provider_count> evaluations;
 
     // A nomination's identity: its evaluation's epoch, sequence, source and
@@ -1364,6 +1371,16 @@ namespace sunshine_streamline::depth_capture {
         return entry && entry->cookie == reader && !entry->retiring;
       });
     }
+    // U-C1b: FG options turned on within the source age, so Present may move
+    // to DLSS-G's queue at FG's first Present, after the frame's copies on
+    // the queue that reads depth now were submitted (until 10-27 those kept
+    // the Reset rule, and that first FG Present was flat). Bounded: a game
+    // whose Present stays on its queue with FG on pays one copy-out per copy
+    // for that age after each FG On.
+    bool reader_may_move(std::uint64_t now) {
+      const auto on = frame_generation_on_tick.load(std::memory_order_relaxed);
+      return on && sunshine_freshness::fresh_lt(on, now, sunshine_freshness::source_age_ms);
+    }
     // Requires mutex. Copy-out on the producer queue (docs/reshade-sbs.md):
     // in the submission hook, right after the game's ExecuteCommandLists and
     // before the producer fence value (fence) is signalled. A first
@@ -1407,13 +1424,17 @@ namespace sunshine_streamline::depth_capture {
     std::array<bool, slot_limit> copy_out(queue_state &owner, const std::array<bool, slot_limit> &producers,
         std::uint64_t fence) {
       std::array<bool, slot_limit> out{};
-      if (!fence || !read_elsewhere(owner)) return out;
-      bool any = false;
+      if (!fence) return out;
       const auto now = GetTickCount64();
+      // The reader's own queue copies out too while FG may move Present off
+      // it (reader_may_move); only a copy read elsewhere stamps its source.
+      const bool elsewhere = read_elsewhere(owner);
+      if (!elsewhere && !(reader == owner.cookie && !owner.compute_producer && reader_may_move(now))) return out;
+      bool any = false;
       for (unsigned i = 0; i != slots.size(); ++i) {
         auto &value = slots[i];
         if (!producers[i] || value.nomination_only || value.preservation_only || value.producer_submitted) continue;
-        if (value.metadata.source) value.metadata.source->foreign_tick.store(now, std::memory_order_relaxed);
+        if (elsewhere && value.metadata.source) value.metadata.source->foreign_tick.store(now, std::memory_order_relaxed);
         if (value.invalid || !value.texture || value.copied_out) continue;
         if (!value.published) {
           const bool taken = take_idle_storage(value, owner.compute_producer);
@@ -2482,6 +2503,9 @@ namespace sunshine_streamline::depth_capture {
     std::lock_guard lock(mutex);
     return live_frame_generation_scope(epoch, viewport, enabled_tick) != nullptr;
   }
+  void frame_generation_enabled(std::uint64_t enabled_tick) {
+    frame_generation_on_tick.store(enabled_tick, std::memory_order_relaxed);
+  }
   void frame_generation_frame(std::uint64_t epoch, std::uint32_t viewport, std::uint64_t enabled_tick) {
     if (!requested.load() || !epoch) return;
     std::lock_guard lock(mutex);
@@ -3115,10 +3139,14 @@ namespace sunshine_streamline::depth_capture {
       // (until 10-27 each new list's first copy allocated copy-out storage on
       // the game's thread, released unused on the Present thread). Storage
       // this attempt could not allocate is not sought again (copy_out
-      // failed): the copy keeps the Reset rule.
-      const bool read_elsewhere_before = read_elsewhere_recently(*value.source, GetTickCount64());
+      // failed): the copy keeps the Reset rule. A list predicted to run on
+      // the reader's queue takes it too while FG may move Present off that
+      // queue (reader_may_move: the copies of FG's first Present).
+      const auto record_tick = GetTickCount64();
+      const bool read_elsewhere_before = read_elsewhere_recently(*value.source, record_tick);
       const bool predicted = !read_elsewhere_before && !on_compute && reader_live() &&
-        (owner->executed_queue ? owner->executed_queue != reader : last_direct_copy_queue != reader);
+        ((owner->executed_queue ? owner->executed_queue != reader : last_direct_copy_queue != reader) ||
+          reader_may_move(record_tick));
       const bool wants_published = !diagnostic_copy && !preservation_only && !copy_out_refused &&
         (read_elsewhere_before || on_compute || predicted);
       auto published = wants_published ? found->published : nullptr;
