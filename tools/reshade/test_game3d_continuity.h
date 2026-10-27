@@ -65,7 +65,9 @@
 // Two rows are limitations the owner approved: C2 until Step 4, and
 // R1-late-signaller, O1's residual of the queue-order model (a signal first
 // submitted after a read that relied on its fence), whose fail-safe drops
-// the hold itself, so every loss of a frame it tags is the row's. C1, API
+// the hold itself: it records a generated Present's dropped hold after such
+// a signal and the late reads, while a real Present is judged by what else
+// it could hold (judge::late_signal, supply::unordered). C1, API
 // depth recorded on a queue other than the presenting one, closed on 10-27:
 // every such copy is copied out on its own queue (U-C1b gives a source's
 // first copies that storage too) and read once complete or once the game's
@@ -128,11 +130,11 @@ namespace game3d_continuity {
     // A Generic depth-stencil view drawn on a queue other than the
     // presenting one, whose only boundary is the end of the frame.
     cross_queue_generic,
-    // O1's residual: a frame whose copy from another queue a Present read
-    // in flight, ordered by a fence of the game's that a signal first
-    // submitted after that read (the CPU's or another queue's) then reached,
-    // and the frames after it until a Present shows depth again: the
-    // add-on stops holding that copy (late_conflict).
+    // O1's residual: a generated Present after a real Present that read a
+    // copy from another queue in flight, ordered by a fence of the game's
+    // that a signal first submitted after that read (the CPU's or another
+    // queue's) then reached: the add-on stops holding that copy
+    // (late_conflict), so it may drop the hold there.
     late_signaller,
   };
 
@@ -159,6 +161,22 @@ namespace game3d_continuity {
     std::uint8_t elsewhere {};
     limitation limit {limitation::none};
     std::uint64_t tick {};
+    // A signal after this frame's real Present reached a fence a read in
+    // flight relied on (O1): its real Present is judged as any, and a hold
+    // its generated Presents drop is R1-late-signaller's.
+    bool late_after {};
+    // Its own Present can read none of its legal sources: each is a copy
+    // from another queue that no fence of the game's orders that Present
+    // after (U-C1), except SR a live FG scope keeps out (owned). The Present
+    // holds earlier depth, and may go mono only once no copy it could read
+    // is younger than the source age (judge::holdable); later Presents read
+    // these copies once complete (completions).
+    bool unordered {};
+    // The game's order fences (the fixture's identities) through which its
+    // copies from another queue were readable at its own Present before
+    // they completed (U-C1's relied read): a late signal of one makes them
+    // unholdable (judge::late_signal), as O1 stops holding such a read.
+    std::array<const void *, 2> relied {};
     // One probe per copy recorded on another queue, with its source: true
     // once its producer's work completed, when the presenting queue can read
     // its copy-out (every such copy is copied out since U-C1b, 10-27).
@@ -317,7 +335,7 @@ namespace game3d_continuity {
 
   inline constexpr gap_row known_gaps[] {
     {"C2-cross-queue-generic", limitation::cross_queue_generic, nullptr, "Until Step 4's fence hooks. Generic's end-of-frame copy runs on the presenting queue, and a proof belongs to the queue whose executed list made it, so a depth-stencil view drawn on another queue with no boundary but the end of the frame is refused (missing_state; 18e5d922, docs/reshade-sbs.md, the last proven state). Seven of the eight games of the 10-06 to 10-23 logs render on another queue. Either owner option (accept the other queue's proof once fence hooks show the presenting queue ordered after it, or copy on the proving queue) shows depth here and removes this row."},
-    {"R1-late-signaller", limitation::late_signaller, nullptr, "Owner decision O1 (10-27, Step 4 design section 1): accepted. A Present reads a copy from another queue in flight once the game's own fence waits order the presenting queue after its copy-out (U-C1); no observation at that decision can exclude a signal of the waited fence, first submitted after it by the CPU or another queue, that runs before the producer's own signal. The add-on poisons such a fence for good (O3), counts each relied read it reaches within the source age as late_conflict, and stops holding that read's presentation copy from the next Present (fail-safe: mono rather than pixels its producer may not have written). The session timelines tag the frame of each first such signal of a fence the presenting queue waited on within the source age, and the frames after it until a Present shows depth again; unordered_read counts a read the script orders by its calls up to the read's Present, but not with every later signal, as this row's (test_queue_order_script.h, judge_reads). Every loss of a tagged frame is the row's: the fail-safe drops the hold itself.", true},
+    {"R1-late-signaller", limitation::late_signaller, nullptr, "Owner decision O1 (10-27, Step 4 design section 1): accepted. A Present reads a copy from another queue in flight once the game's own fence waits order the presenting queue after its copy-out (U-C1); no observation at that decision can exclude a signal of the waited fence, first submitted after it by the CPU or another queue, that runs before the producer's own signal. The add-on poisons such a fence for good (O3), counts each relied read it reaches within the source age as late_conflict, and stops holding that read's presentation copy from the next Present (fail-safe: mono rather than pixels its producer may not have written). The session timelines tag the generated Presents of a frame whose fence such a signal reaches after its Present (supply::late_after), and judge real Presents by what else they could hold, a copy read through the signalled fence being unholdable from the signal on (judge::late_signal; until 10-27 a window tagged every legal source of every real frame within the source age, which excused any loss there); unordered_read counts a read the script orders by its calls up to the read's Present, but not with every later signal, as this row's (test_queue_order_script.h, judge_reads). A tagged generated Present's dropped hold is the row's: the fail-safe drops the hold itself.", true},
   };
   inline constexpr std::size_t gap_count = std::size(known_gaps);
 
@@ -435,7 +453,7 @@ namespace game3d_continuity {
       if (offered & generic_sources) {
         newest_generic_ = stamp;
       }
-      if ((frame.legal & api_sources & ~frame.owned) && frame.limit == limitation::none) {
+      if ((frame.legal & api_sources & ~frame.owned) && frame.limit == limitation::none && !frame.unordered) {
         newest_readable_ = stamp;
       }
       if (frame.legal) {
@@ -512,11 +530,21 @@ namespace game3d_continuity {
         // neither arms nor disarms.
         const bool cross_queue = newest_limited_ && now < newest_limited_ + sunshine_freshness::source_age_ms + tick_slack_ms;
         if (held && fresh_ && !cross_queue && real_presents_[2] && now + tick_slack_ms < real_presents_[2] + sunshine_freshness::source_age_ms) {
-          report(violation_kind::dropped_hold, now - real_presents_[2], presented_);
+          auto judged = presented_;
+          if (judged.late_after) {
+            judged.limit = limitation::late_signaller;
+          }
+          report(violation_kind::dropped_hold, now - real_presents_[2], judged);
         }
         return;
       }
-      if (!frame.legal) {
+      // A frame whose legal sources its own Present cannot read
+      // (supply::unordered) supplies that Present nothing: it may go mono
+      // once nothing it could hold is younger than the source age, as a
+      // frame with no legal source. With such a copy, the loss is judged as
+      // any (until 10-27 such sources were permitted there, which disarmed
+      // the judge until the next legal frame showed depth).
+      if (!frame.legal || (frame.unordered && !holdable(now))) {
         armed_ = false;
         return;
       }
@@ -554,6 +582,17 @@ namespace game3d_continuity {
       next.frames_ = frames_;
       next.copies_ = std::move(copies_);
       *this = std::move(next);
+    }
+
+    // The first signal of a game's order fence that the CPU or another queue
+    // submitted after reads relied on it (O1): the copies read through it
+    // are no longer holdable, as the add-on stops holding such a read
+    // (late_conflict), so they neither excuse a loss nor make a shown older
+    // copy stale.
+    void late_signal(const void *fence) {
+      for (auto &copy : copies_) {
+        copy.conflicted = copy.conflicted || std::find(copy.relied.begin(), copy.relied.end(), fence) != copy.relied.end();
+      }
     }
 
     // A Present with no new frame record (the add-on wrote none): not judged.
@@ -613,6 +652,10 @@ namespace game3d_continuity {
       std::uint8_t sources {};
       std::function<bool()> completed;
       bool done {};
+      // supply::relied, and whether a late signal of one of them made the
+      // copy unholdable (late_signal).
+      std::array<const void *, 2> relied {};
+      bool conflicted {};
     };
 
     void readable(const supply &frame, std::uint64_t now) {
@@ -622,7 +665,7 @@ namespace game3d_continuity {
         copies_.push_back({stamp, frames_, own, {}});
       }
       for (const auto &[sources, probe] : frame.completions) {
-        copies_.push_back({stamp, frames_, sources, probe, false});
+        copies_.push_back({stamp, frames_, sources, probe, false, frame.relied});
       }
       while (!copies_.empty() && copies_.front().stamp + sunshine_freshness::source_age_ms + tick_slack_ms < now) {
         copies_.pop_front();
@@ -636,13 +679,22 @@ namespace game3d_continuity {
       }
     }
 
+    // Whether this Present could hold a copy: one certainly readable at it
+    // (readable_after, never a conflicted one) younger than the source age.
+    // Within the slack of its expiry it counts as expired: the add-on's
+    // capture tick is up to the slack after the fixture's stamp.
+    bool holdable(std::uint64_t now) const {
+      const auto newest = readable_after(0, api_sources).second;
+      return newest && now + tick_slack_ms < newest + sunshine_freshness::source_age_ms;
+    }
+
     // The frames that supplied a copy of sources certainly readable at this
     // Present after tick, and the newest one's stamp.
     std::pair<unsigned, std::uint64_t> readable_after(std::uint64_t tick, std::uint8_t sources) const {
       unsigned frames {};
       std::uint64_t last {}, newest {};
       for (const auto &copy : copies_) {
-        if (!(copy.sources & sources) || copy.stamp <= tick || (copy.completed ? !copy.done : copy.frame >= frames_)) {
+        if (!(copy.sources & sources) || copy.stamp <= tick || copy.conflicted || (copy.completed ? !copy.done : copy.frame >= frames_)) {
           continue;
         }
         frames += copy.frame != last;

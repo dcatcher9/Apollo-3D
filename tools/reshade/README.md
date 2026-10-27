@@ -1770,15 +1770,23 @@ ahead from the CPU or a third queue of the game's before the frame's Present, so
 wait is reached before that frame's work (the add-on must refuse that fence for good, O3); `late`
 signals the waited value again after the frame's Present (O1). Both fences are created anew for
 each run and at each FG toggle. The fixture models the contract's fail-closed rules from its own
-script: a frame's copy elsewhere is legal at its own Present only when it is complete (the CPU
-waited) or ordered by a settled fence that no CPU or second signal reached; otherwise it is
-permitted there and names no completion for the freshness rule (the add-on may show it once
-complete, but the next frame's nomination, perhaps of another source, decides what it selects),
-and an SR input that a live FG scope keeps out for such a DLSS-G compute copy is permitted too
-(the scope has only its held copy to show). Frames are tagged `R1-late-signaller` from the first
-CPU, second or late signal of a fence the presenting queue waited on within the source age until
-a real Present shows depth again or the source age passed (the frame of a late signal from its
-own Present); every loss of a tagged frame is that row's, as the fail-safe drops the hold itself.
+script: a frame's copy elsewhere is readable at its own Present only when it is complete (the CPU
+waited) or ordered by a settled fence that no CPU or second signal reached (a relied read, which
+names that fence). Either way it stays legal with its completion for the freshness rule. A frame
+whose Present can read none of its legal sources (its copies elsewhere not readable there, and its
+SR input, if any, kept out by a live FG scope) is `unordered`: its Present may go mono only once no
+copy it could read is younger than the source age (`judge::holdable`), and any other loss there
+is a gap. The first CPU, second or late signal of a fence makes the copies read through it
+unholdable from then on (`judge::late_signal`), as O1 stops holding such a read; the generated
+Presents of a frame whose fence a late signal reaches after its Present are tagged
+`R1-late-signaller` (a dropped hold there is that row's). Until 10-27 such copies were permitted
+with no completion, which disarmed the judge until FG toggled (a mono run after a CPU signal
+passed), and a late window tagged every legal source of every real frame within the source age,
+which excused any loss there. The regressions `O3-cpu-signal-ahead` (depth on every frame after
+the CPU signal) and `O1-silent-scope-late-conflict` (a silent FG scope's held DLSS-G compute copy
+conflicted while the frame's own SR copy stands in; with the provider's O1 check after the FG
+hold, as at 1a7efdc1, frame 32 lost depth, 10-27, temporary build) pin both; a regression's
+`lossless` check counts losses only, not late reads.
 
 The judge reads each Present's [frame record](../../docs/reshade-sbs.md#frame-record)
 (`SunshineGame3DTestFrameRecord`, copied in ReShade's `reshade_present` event) and the fixture's
