@@ -7,6 +7,7 @@
 #include "game3d_ui_layer.h"
 #include "game3d_ui_selection.h"
 #include "scene_gain.h"
+#include "streamline_native_observer.h"
 #include "src/game3d_debug_protocol.h"
 #include "src/game3d_debug_formats.h"
 
@@ -941,7 +942,8 @@ namespace sunshine_game3d {
     if (!p || !p->recorded || p->signalled || p->signal_failed || p->native_queue != queue || p->swapchain != swapchain) {
       return;
     }
-    const auto hr = p->fence11 ? p->context11->Signal(p->fence11.Get(), 1) : p->queue12->Signal(p->fence12.Get(), 1);
+    const auto hr = p->fence11 ? p->context11->Signal(p->fence11.Get(), 1) :
+      sunshine_streamline::native_observer::signal_own(p->queue12.Get(), p->fence12.Get(), 1);
     p->signal_failed = FAILED(hr);
     p->signalled = SUCCEEDED(hr);
     if (p->context11 && p->signalled) {

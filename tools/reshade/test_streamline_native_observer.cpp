@@ -574,8 +574,12 @@ namespace {
       const auto original_wait = per_call([&](unsigned i) { order_queue_wait(&present, &bench, i + 2); });
       const auto hooked_execute = per_call([&](unsigned) { execute(render); });
       const auto original_execute = per_call([&](unsigned) { order_execute(&render, 0, nullptr); });
-      std::printf("MEASURE queue-order hook ns/call: signal=%.0f (original %.0f) wait=%.0f (original %.0f) execute=%.0f (original %.0f)\n",
-        hooked_signal, original_signal, hooked_wait, original_wait, hooked_execute, original_execute);
+      // The add-on's own Signal (signal_own): a ticket, never a log.
+      const auto own_signal = per_call([&](unsigned i) {
+        observer::signal_own(reinterpret_cast<ID3D12CommandQueue *>(&render), reinterpret_cast<ID3D12Fence *>(&bench), 2 * calls + i + 2);
+      });
+      std::printf("MEASURE queue-order hook ns/call: signal=%.0f (original %.0f) wait=%.0f (original %.0f) execute=%.0f (original %.0f) "
+        "own_signal=%.0f\n", hooked_signal, original_signal, hooked_wait, original_wait, hooked_execute, original_execute, own_signal);
     }
     // A suppressed call (the add-on's copy-out) takes its own ticket.
     const auto game = execute(render);
@@ -767,6 +771,52 @@ namespace {
       "a fence of a rejected CPU Signal slot got a record");
     require(observer::slot_reads_for_testing() == reads, "every call on a fence of a rejected CPU Signal slot discovered that slot again");
 
+    // No add-on call waits on the order lock (design finding 8; ACS 10-27:
+    // the present thread's retire Signal went through the order hooks). A
+    // game Signal holds the lock exclusive inside a fence's first sighting
+    // (its private-data write) while another thread makes the add-on's own
+    // Signal on a known fence (signal_own) and a suppressed Signal on a queue
+    // whose record was evicted: both return before the holder lets go, the
+    // second without a ticket (contention), and neither is logged.
+    {
+      order_object evicted{tables.queue.data(), object_kind::queue, &device};
+      require(bool(execute(evicted)), "the queue to evict was not sighted");
+      std::vector<order_object> newer(32, order_object{tables.queue.data(), object_kind::queue, &device});
+      for (auto &queue : newer) execute(queue);
+      require(bool(execute(producer)), "the producer was not sighted again");
+      order_object own{tables.fence.data(), object_kind::unknown, &device}, sighted{tables.fence.data(), object_kind::unknown, &device};
+      require(signal(producer, own, 1) == S_OK && own.data.size() == 1, "the add-on's fence was not sighted");
+      const auto before = observer::queue_order_counts();
+      const auto natives = order_signals;
+      std::atomic<bool> held{}, release{}, done{};
+      order_set_data_target = &sighted;
+      order_on_set_data = [&] {
+        held.store(true, std::memory_order_release);
+        while (!release.load(std::memory_order_acquire)) std::this_thread::yield();
+      };
+      std::thread holder([&] { signal(producer, sighted, 1); });
+      while (!held.load(std::memory_order_acquire)) std::this_thread::yield();
+      std::thread own_calls([&] {
+        observer::signal_own(reinterpret_cast<ID3D12CommandQueue *>(&producer), reinterpret_cast<ID3D12Fence *>(&own), 2);
+        { observer::suppression_scope scope; signal(evicted, own, 3); }
+        done.store(true, std::memory_order_release);
+      });
+      // A deadlock guard only: before the fix neither call returns until the
+      // holder lets go, whatever this bound.
+      for (const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+           !done.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < until;)
+        std::this_thread::yield();
+      const bool returned = done.load(std::memory_order_acquire);
+      release.store(true, std::memory_order_release);
+      holder.join(); own_calls.join();
+      order_set_data_target = nullptr;
+      const auto after = observer::queue_order_counts();
+      require(returned, "an add-on Signal waited on the order lock another thread held");
+      require(after.contention == before.contention + 1, "the suppressed Signal on an evicted queue's record did not count its contention");
+      require(after.model.signals == before.model.signals + 1 && order_signals == natives + 3,
+        "an add-on Signal was logged as the game's, or a Signal was not forwarded");
+    }
+
     // A third party replacing an installed CPU Signal slot (chaining to the
     // original it saved before our install) loses that coverage at the next
     // verdict, not at the next poll: CPU Signals bypass the hook from then on.
@@ -780,7 +830,7 @@ namespace {
     const auto verdict = ordered(reader, relied);
     require(!verdict.ordered && verdict.why == sunshine_queue_order::refusal::uncovered,
       "a verdict rested on a CPU Signal slot replaced since the last poll");
-    std::puts("PASS queue order review: a Signal whose queue record was evicted after its ticket is logged on the re-sighted record; fence private data is written under the order lock; a rejected CPU Signal slot is not discovered again per call; a slot replaced since the last poll refuses the next verdict");
+    std::puts("PASS queue order review: a Signal whose queue record was evicted after its ticket is logged on the re-sighted record; fence private data is written under the order lock; a rejected CPU Signal slot is not discovered again per call; no add-on Signal waits on the order lock; a slot replaced since the last poll refuses the next verdict");
   }
 }
 int main() {

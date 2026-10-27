@@ -579,6 +579,9 @@ present-thread steps each log their own hitch line: `native depth frame`, `depth
 retirement`, `depth present observation`, `depth list coverage report`, `frame generation query`,
 `depth readiness trace`, `API depth binding`, `generic capture switch`, `generic challenger
 release`, `generic depth rebinding`, `depth capture acquisition` and `depth display preparation`.
+Inside them `depth display retire signal`, `depth display view release` and `depth display texture
+release` name the calls of a retirement, and `depth present observation lock` the capture lock's
+wait alone (each logs its own line, the step around it too).
 
 ### Frame record
 
@@ -5036,7 +5039,12 @@ ticket `t = ++entered` at entry; a call is *quiet* when no later ticket of that 
 before its native call returned. A quiet call natively precedes every call with a larger ticket on
 its queue; a call that is not quiet is never the earlier side of an edge (`overlap`). The add-on's
 own calls (its copy-out lists) take their own tickets in the suppression scope; a proxy's call
-forwarded to the native queue shares its ticket. A queue record evicted (the least recently used
+forwarded to the native queue shares its ticket. Every Signal the add-on makes on a fence of its own
+that no game queue waits on (display retirement, export publication, the UI layer, Dump 3D, the
+renderer's completion) goes through `signal_own`: suppressed, so it is never logged as the game's
+(design finding 8). Only a call the observer logs may wait on the order lock: an Execute or an
+unlogged call whose queue needs a new record while another thread holds the lock takes no ticket
+and counts `contention`. A queue record evicted (the least recently used
 of 32; a queue's signals keep its record in use) or reset between a Signal's ticket and its log is
 re-sighted, and the Signal, not yet forwarded, is logged on it with a fresh ticket: a signal never
 goes unlogged against a live fence record.
@@ -5110,7 +5118,7 @@ The status line, at most every 10 s while its counts change:
 `Sunshine 3D queue order: hooks={signal= wait= fence_signal= pending=} queues= fences= settled=
 signals= waits= cpu_signals= poisoned={shared= foreign= cpu= second= monotonic= unobserved= removed=
 unrecorded=} refused={...} ordered= proofs={inflight=} evicted_waits= resets= cpu_unhooked=
-late_conflict=`, or once `Sunshine 3D queue order: disabled (QueueFenceOrder=0)`. The readiness
+late_conflict= contention=`, or once `Sunshine 3D queue order: disabled (QueueFenceOrder=0)`. The readiness
 report's "Queue order" check passes with the hooks installed and no late conflict, and warns when
 no Signal/Wait hook is installed with more than one queue, or on a late conflict.
 

@@ -21,6 +21,7 @@
 #include "freshness.h"
 #include "streamline_camera_probe.h"
 #include "streamline_depth_capture.h"
+#include "streamline_native_observer.h"
 #include "src/reshade_bridge_protocol.h"
 #include "src/reshade_bridge_window.h"
 
@@ -2686,7 +2687,9 @@ namespace {
         hr = g.context11->Signal(g.fence11.get(), g.last_submitted);
         g.context11->Flush();
       } else {
-        hr = g.queue12->Signal(g.fence12.get(), g.last_submitted);
+        // The add-on's own fence (signal_own): never a game Signal to the
+        // order hooks.
+        hr = sunshine_streamline::native_observer::signal_own(g.queue12.get(), g.fence12.get(), g.last_submitted);
       }
       if (SUCCEEDED(hr)) return;
       g.signal_failed = true;

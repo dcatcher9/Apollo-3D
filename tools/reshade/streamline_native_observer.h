@@ -6,6 +6,8 @@
 #include <cstdint>
 
 struct D3D12_RESOURCE_BARRIER;
+struct ID3D12CommandQueue;
+struct ID3D12Fence;
 struct ID3D12Resource;
 
 namespace sunshine_streamline::native_observer {
@@ -128,9 +130,18 @@ namespace sunshine_streamline::native_observer {
     unsigned signal_hooks{}, wait_hooks{}, fence_signal_hooks{}, pending{};
     sunshine_queue_order::counts model{};
     std::uint64_t ordered{}, resets{}, cpu_unhooked{};
+    // A call that may not wait (an Execute, or one the observer does not
+    // log) found the order lock held where its queue needed a new record:
+    // it took no ticket.
+    std::uint64_t contention{};
     std::uint64_t refused[static_cast<unsigned>(sunshine_queue_order::refusal::count)]{};
   };
   queue_order_status queue_order_counts();
+  // The add-on's own Signal of a fence of its own that no game queue waits
+  // on (design finding 8): suppressed, so the order hooks never log it as
+  // the game's and it never waits on the order lock. Every such add-on
+  // Signal goes through here.
+  HRESULT signal_own(ID3D12CommandQueue *queue, ID3D12Fence *fence, UINT64 value);
   // The native methods the observer hooks, as pinned by the hook-set test.
   struct hooked_method {
     const char *interface_name, *method;

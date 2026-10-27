@@ -11,6 +11,7 @@
 #include "game3d_ui_detection_contract.h"
 #include "game3d_ui_selection.h"
 #include "game3d_ui_temporal.h"
+#include "streamline_native_observer.h"
 #include <d3d11_1.h>
 #include <d3d12.h>
 #include <d3dcompiler.h>
@@ -2376,7 +2377,17 @@ namespace sunshine_game3d {
     if (data_) data_->profile_open = false;
     if (!data_ || (!data_->pending && !data_->unsignaled)) return;
     auto &d = *data_;
-    if (!d.queue->signal(d.completion, ++d.sequence)) d.failed = true;
+    // ReShade's D3D12 signal is its immediate list's flush, then a native
+    // Signal. The flush's Execute stays the observer's to see; the Signal of
+    // the renderer's own fence is the add-on's (signal_own).
+    bool signalled;
+    if (d.device->get_api() == api::device_api::d3d12) {
+      d.queue->flush_immediate_command_list();
+      signalled = SUCCEEDED(sunshine_streamline::native_observer::signal_own(
+        reinterpret_cast<ID3D12CommandQueue *>(d.queue->get_native()), reinterpret_cast<ID3D12Fence *>(d.completion.handle),
+        ++d.sequence));
+    } else signalled = d.queue->signal(d.completion, ++d.sequence);
+    if (!signalled) d.failed = true;
     else {
       if (d.adaptive_awaiting_signal) {
         d.adaptive_fence = d.sequence;

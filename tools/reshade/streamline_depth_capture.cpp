@@ -6,6 +6,7 @@
 #include "native_resource_identity.h"
 #include "depth_view_format.h"
 #include "freshness.h"
+#include "game3d_slow_step.h"
 #include "streamline_depth_capture_test_access.h"
 #include "../../src/game3d_debug_formats.h"
 #include <d3d12.h>
@@ -2057,7 +2058,13 @@ namespace sunshine_streamline::depth_capture {
     if (list && !cookie) associate_recording(list, &cookie);
     bool known_queue_present = false;
     {
-      std::lock_guard lock(mutex);
+      // The wait for the capture lock alone: a game thread's submission
+      // callback (submitted) holds it across its copy-out driver calls.
+      std::unique_lock lock(mutex, std::defer_lock);
+      {
+        const sunshine_game3d::slow_step step("depth present observation lock");
+        lock.lock();
+      }
       if (list) command(list, cookie, true);
       if (queue_native && known_queue(queue_native)) {
         known_queue_present = true;
@@ -3626,7 +3633,7 @@ namespace sunshine_streamline::depth_capture {
     disabled_logged = false;
     const auto inflight = order_inflight_reads.load(std::memory_order_relaxed);
     std::uint64_t total = s.model.signals + s.model.waits + s.model.cpu_signals + s.ordered + s.resets + inflight +
-      s.model.late_conflict + s.signal_hooks + s.wait_hooks + s.fence_signal_hooks + s.pending;
+      s.model.late_conflict + s.signal_hooks + s.wait_hooks + s.fence_signal_hooks + s.pending + s.contention;
     for (const auto value : s.refused) total += value;
     for (const auto value : s.model.poisoned) total += value;
     if (total == logged_total || (logged_at && now - logged_at < 10000)) return false;
@@ -3640,7 +3647,7 @@ namespace sunshine_streamline::depth_capture {
       "signals=%llu waits=%llu cpu_signals=%llu poisoned={shared=%llu foreign=%llu cpu=%llu second=%llu monotonic=%llu "
       "unobserved=%llu removed=%llu unrecorded=%llu} refused={disabled=%llu pending_hooks=%llu uncovered=%llu untracked=%llu "
       "overlap=%llu unresolved=%llu baseline=%llu unsettled=%llu poisoned=%llu evicted=%llu cross_device=%llu} ordered=%llu "
-      "proofs={inflight=%llu} evicted_waits=%llu resets=%llu cpu_unhooked=%llu late_conflict=%llu",
+      "proofs={inflight=%llu} evicted_waits=%llu resets=%llu cpu_unhooked=%llu late_conflict=%llu contention=%llu",
       s.signal_hooks, s.wait_hooks, s.fence_signal_hooks, s.pending, static_cast<unsigned long long>(s.model.queues),
       static_cast<unsigned long long>(s.model.fences), static_cast<unsigned long long>(s.model.settled),
       static_cast<unsigned long long>(s.model.signals), static_cast<unsigned long long>(s.model.waits),
@@ -3651,7 +3658,7 @@ namespace sunshine_streamline::depth_capture {
       r(refusal::poisoned), r(refusal::evicted), r(refusal::cross_device), static_cast<unsigned long long>(s.ordered),
       static_cast<unsigned long long>(inflight), static_cast<unsigned long long>(s.model.evicted_waits),
       static_cast<unsigned long long>(s.resets), static_cast<unsigned long long>(s.cpu_unhooked),
-      static_cast<unsigned long long>(s.model.late_conflict));
+      static_cast<unsigned long long>(s.model.late_conflict), static_cast<unsigned long long>(s.contention));
     return true;
   }
   proven_state_counts proven_counts() {

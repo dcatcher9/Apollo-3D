@@ -310,13 +310,15 @@ namespace sunshine_streamline::native_observer {
         cookie, static_cast<unsigned>(named), static_cast<const enhanced_texture *>(textures.data()));
     }
     // Queue Signal: logged, with its poison checks, BEFORE it is forwarded
-    // (design finding 7); a failed call leaves a conservative entry.
+    // (design finding 7); a failed call leaves a conservative entry. Only a
+    // call that is logged may wait on the order lock for its queue's record:
+    // the add-on's own (suppressed) calls take TryAcquire, as Execute does.
     template<unsigned Index> HRESULT STDMETHODCALLTYPE signal_detour(ID3D12CommandQueue *queue, ID3D12Fence *fence, UINT64 value) {
       const DWORD incoming = GetLastError();
       auto &slot = targets[static_cast<unsigned>(method::signal)][Index];
       invocation call(method::signal, slot.status.load(std::memory_order_acquire));
       restore_error outgoing{incoming};
-      order_enter(call, queue, true);
+      order_enter(call, queue, call.eligible);
       if (call.eligible && !call.inherited && fence && order_on()) order_signal(queue, call, fence, value);
       SetLastError(incoming);
       const HRESULT result = reinterpret_cast<queue_fence_fn>(slot.original.load(std::memory_order_acquire))(queue, fence, value);
@@ -329,7 +331,7 @@ namespace sunshine_streamline::native_observer {
       auto &slot = targets[static_cast<unsigned>(method::wait)][Index];
       invocation call(method::wait, slot.status.load(std::memory_order_acquire));
       restore_error outgoing{incoming};
-      order_enter(call, queue, true);
+      order_enter(call, queue, call.eligible);
       SetLastError(incoming);
       const HRESULT result = reinterpret_cast<queue_fence_fn>(slot.original.load(std::memory_order_acquire))(queue, fence, value);
       outgoing.value = GetLastError();
@@ -985,8 +987,13 @@ namespace sunshine_streamline::native_observer {
     out.ordered = order::ordered_count.load(std::memory_order_relaxed);
     out.resets = order::resets.load(std::memory_order_relaxed);
     out.cpu_unhooked = order::cpu_unhooked.load(std::memory_order_relaxed);
+    out.contention = order::contention.load(std::memory_order_relaxed);
     for (unsigned i = 0; i != order::refused.size(); ++i) out.refused[i] = order::refused[i].load(std::memory_order_relaxed);
     return out;
+  }
+  HRESULT signal_own(ID3D12CommandQueue *queue, ID3D12Fence *fence, UINT64 value) {
+    const suppression_scope own;
+    return queue->lpVtbl->Signal(queue, fence, value);
   }
   const hooked_method *hooked_methods(unsigned &count) {
     count = method_count;

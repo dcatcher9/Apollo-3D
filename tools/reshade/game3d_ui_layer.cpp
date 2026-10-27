@@ -3,6 +3,7 @@
 #include "addon_lifetime.h"
 #include "game3d_ui_detection_contract.h"
 #include "streamline_depth_capture.h"
+#include "streamline_native_observer.h"
 #include "async_log.h"
 
 #include <d3d11_4.h>
@@ -510,7 +511,8 @@ namespace sunshine_game3d::ui_layer {
       if (slot >= 0) {
         auto &f = s.fences[unsigned(slot)];
         generation = f.generation;
-        if (SUCCEEDED(reinterpret_cast<ID3D12CommandQueue *>(queue)->Signal(f.fence, f.signalled + 1))) {
+        if (SUCCEEDED(sunshine_streamline::native_observer::signal_own(reinterpret_cast<ID3D12CommandQueue *>(queue), f.fence,
+            f.signalled + 1))) {
           value = ++f.signalled;
         } else if (first(s, log_signal_failed)) {
           char message[200]{};

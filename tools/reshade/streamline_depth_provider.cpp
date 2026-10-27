@@ -200,7 +200,8 @@ namespace sunshine_streamline::provider {
     // that replaced it, when every earlier read of it (effects, renderer,
     // sampler) is already submitted on this queue; it is destroyed once that
     // fence completed. Signaled natively, so ReShade's immediate list is not
-    // flushed early.
+    // flushed early, and as the add-on's own (signal_own), so it never waits
+    // on the queue-order lock. Each call names its own hitch.
     void collect_displays(api::effect_runtime *runtime, state &data, std::uint64_t present) {
       if (data.retired_displays.empty()) return;
       auto *device = runtime->get_device();
@@ -210,11 +211,19 @@ namespace sunshine_streamline::provider {
       const auto completed = fence->GetCompletedValue();
       auto keep = data.retired_displays.begin();
       for (auto &entry : data.retired_displays) {
-        if (!entry.fence_value && present > entry.present && SUCCEEDED(queue->Signal(fence, data.retire_value + 1)))
-          entry.fence_value = ++data.retire_value;
+        if (!entry.fence_value && present > entry.present) {
+          const sunshine_game3d::slow_step step("depth display retire signal");
+          if (SUCCEEDED(native_observer::signal_own(queue, fence, data.retire_value + 1))) entry.fence_value = ++data.retire_value;
+        }
         if (entry.fence_value && completed != UINT64_MAX && completed >= entry.fence_value) {
-          if (entry.view.handle) device->destroy_resource_view(entry.view);
-          if (entry.texture.handle) device->destroy_resource(entry.texture);
+          if (entry.view.handle) {
+            const sunshine_game3d::slow_step step("depth display view release");
+            device->destroy_resource_view(entry.view);
+          }
+          if (entry.texture.handle) {
+            const sunshine_game3d::slow_step step("depth display texture release");
+            device->destroy_resource(entry.texture);
+          }
           continue;
         }
         *keep++ = entry;
