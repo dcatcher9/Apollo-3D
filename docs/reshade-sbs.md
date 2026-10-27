@@ -571,7 +571,12 @@ capture was pending. An explicit release with no other evaluation falls back at 
 ownership (mono) for a provider handoff, at most 250 ms`, and the readiness reason is
 `source_handoff`. Display storage keeps one entry per shape and format (at most two), so a flip
 switches entries rather than reallocating; a replaced entry is retired by a fence signalled on a
-later Present, with no `wait_idle`. New snapshot storage is reserved under the capture lock,
+later Present, with no `wait_idle`, and once that fence completed it is released on a pool thread
+(a texture's last Release and ReShade's view release can wait on video memory: 17 and 81 ms on the
+present thread in ACS 10-27b, whose dynamic resolution retired a display at most render-size
+changes). A runtime's teardown waits for its releases, so none outlives its runtime or device. A
+release of 8 ms or more logs `Sunshine Game 3D: depth display release took X ms off the present
+thread (n textures, m MiB)`. New snapshot storage is reserved under the capture lock,
 allocated outside it, then re-validated and published under it; a reservation is only a
 preference, each byte budget (live snapshots or Dump 3D copies) counts the outstanding
 reservations of its own kind, and a lost race releases the new objects after the lock. The flip's
@@ -579,9 +584,8 @@ present-thread steps each log their own hitch line: `native depth frame`, `depth
 retirement`, `depth present observation`, `depth list coverage report`, `frame generation query`,
 `depth readiness trace`, `API depth binding`, `generic capture switch`, `generic challenger
 release`, `generic depth rebinding`, `depth capture acquisition` and `depth display preparation`.
-Inside them `depth display retire signal`, `depth display view release` and `depth display texture
-release` name the calls of a retirement, and `depth present observation lock` the capture lock's
-wait alone (each logs its own line, the step around it too).
+Inside them `depth display retire signal` names a retirement's Signal and `depth present
+observation lock` the capture lock's wait alone (each logs its own line, the step around it too).
 
 ### Frame record
 

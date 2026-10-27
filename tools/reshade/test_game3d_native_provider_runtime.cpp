@@ -96,6 +96,38 @@ namespace {
       script_order.present(script_presenting, value.present, ordered, value.depth_read_queue, value.depth_read_ticket);
     } else continuity_log.judge.unrecorded();
   }
+
+  // A display texture's last Release, seen through an interface the D3D12
+  // runtime releases with the texture (SetPrivateDataInterface). Released
+  // on the present thread it returns at once, and the run fails by that
+  // thread; elsewhere it holds its thread until the gate opens.
+  constexpr GUID release_sentinel_guid{0x5d0c1f7e, 0x93a2, 0x4b61, {0x8e, 0x4d, 0x27, 0xc9, 0x0b, 0x6a, 0xf3, 0x15}};
+  struct release_sentinel final : IUnknown {
+    std::atomic<ULONG> references{1};
+    DWORD present_thread{GetCurrentThreadId()};
+    std::atomic<DWORD> thread{};
+    std::atomic<bool> released{}, finished{};
+    HANDLE gate{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void **out) override {
+      if (!out) return E_POINTER;
+      *out = IsEqualGUID(iid, IID_IUnknown) ? static_cast<IUnknown *>(this) : nullptr;
+      if (!*out) return E_NOINTERFACE;
+      AddRef();
+      return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++references; }
+    ULONG STDMETHODCALLTYPE Release() override {
+      const auto left = --references;
+      if (!left) {
+        thread = GetCurrentThreadId();
+        released = true;
+        // A deadlock guard only: the run opens the gate within a second.
+        if (thread != present_thread) WaitForSingleObject(gate, 30000);
+        finished = true;
+      }
+      return left;
+    }
+  };
 }
 
 // The game's NGX SDK: the shared stand-in's exported entry points and
@@ -779,6 +811,64 @@ namespace {
       const auto recovered = settle("SL-recovered");
       require(same_scale(recovered.scale, first_ready.scale), "Recovering the same provider source reset native scale");
       std::puts("PASS native SL provider: real lower-resolution UAV/copy/fences/sampling over full-resolution Generic decoy, matrix scale, FX reload, failed evaluation and recovery; no FX");
+    }
+
+    // Dynamic resolution retires display storage (ACS 10-27b: 316 render-size
+    // changes; its release took 17 and 81 ms on the present thread). Two
+    // larger shapes retire the first one's display: its texture's last
+    // Release runs on another thread while Presents go on, and a runtime
+    // teardown (ResizeBuffers) does not return before that release finished.
+    std::vector<std::unique_ptr<uav_target>> resized_targets;
+    void run_display_release() {
+      const auto display = reinterpret_cast<bool (*)(api::effect_runtime *, std::uint64_t *)>(
+        GetProcAddress(GetModuleHandleW(L"SunshineSBSTest.addon64"), "SunshineStreamlineTestDisplay"));
+      std::uint64_t texture{};
+      require(display && display(observed.runtime, &texture) && texture, "The test add-on names no active display texture");
+      // Never freed: the D3D12 runtime holds it until the texture goes.
+      auto *sentinel = new release_sentinel;
+      checked(reinterpret_cast<ID3D12Resource *>(texture)->SetPrivateDataInterface(release_sentinel_guid, sentinel),
+        "Attach the release sentinel to the display texture");
+      sentinel->Release();
+      const auto resize = [&](unsigned grow, const char *label) {
+        resized_targets.push_back(target_uav(first->width + 64 * grow, first->height + 32 * grow, 0));
+        selected = resized_targets.back().get();
+        active_area = {0, 0, selected->width, selected->height};
+        settle(label);
+      };
+      resize(1, "SL-display-grown");
+      // The content sampler's reference to the first display ends with its
+      // sample; the next shape retires that display.
+      for (const auto until = GetTickCount64() + 300; GetTickCount64() < until;) present_frame();
+      resized_targets.push_back(target_uav(first->width + 128, first->height + 64, 0));
+      selected = resized_targets.back().get();
+      active_area = {0, 0, selected->width, selected->height};
+      for (const auto until = GetTickCount64() + 5000; !sentinel->released && GetTickCount64() < until;) present_frame();
+      require(sentinel->released, "A retired display texture was never released");
+      require(sentinel->thread != sentinel->present_thread, "A retired display texture was released on the present thread");
+      for (unsigned i = 0; i != 4; ++i) present_frame();
+      require(!sentinel->finished, "Presents waited for a retired display's release");
+      // ReShade's runtime reset destroys the add-on's runtime state
+      // (destroy_effect_runtime), which waits for the release.
+      std::thread opener([sentinel] { Sleep(300); SetEvent(sentinel->gate); });
+      for (auto &backbuffer : backbuffers) backbuffer.reset();
+      const auto resized = swapchain->ResizeBuffers(2, width, height, source_format, 0);
+      const bool drained = sentinel->finished;
+      opener.join();
+      checked(resized, "Reset the runtime with ResizeBuffers");
+      require(drained, "A runtime teardown returned before its display release finished");
+      for (unsigned i = 0; i != 2; ++i) checked(swapchain->GetBuffer(i, IID_PPV_ARGS(backbuffers[i].put())), "Get the reset backbuffer");
+      // The reset runtime shows depth again from a later copy: until then the
+      // fixture's SR depth is permitted, not owed.
+      selected = first.get();
+      active_area = {0, 0, selected->width, selected->height};
+      render_tracked_depth = [&] { draw_frame(); permitted_supply(game3d_continuity::generic_boundary | game3d_continuity::sr_evaluate); };
+      for (const auto until = GetTickCount64() + 15000; GetTickCount64() < until;) {
+        present_frame();
+        if (const auto s = inspect(); active(s) && !s.source.reused_depth) break;
+      }
+      render_tracked_depth = [&] { evaluated_frame(); };
+      settle("SL-after-runtime-reset");
+      std::puts("PASS native SL display release: a display retired by dynamic resolution is released off the present thread while Presents continue, and a runtime reset waits for that release");
     }
 
     // The public tag 23 UI hook with one Resource type, then the offscreen UI
@@ -3777,7 +3867,11 @@ int main(int argc, char **argv) {
     fixture.initialize(fs::absolute(argv[1]), fs::absolute(argv[2]), directory, public_ui ? 3 : 2, 0, fs::absolute(argv[3]));
     fixture.load_native(directory);
     if (public_ui) fixture.run_automatic_ui_tags(sdk);
-    else { fixture.run_streamline(); if (sdk) fixture.run_fg(sdk); }
+    else {
+      fixture.run_streamline();
+      fixture.run_display_release();
+      if (sdk) fixture.run_fg(sdk);
+    }
     fixture.finish();
     return 0;
   } catch (const std::exception &error) {

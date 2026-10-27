@@ -14,10 +14,15 @@
 #include <reshade.hpp>
 #include "async_log.h"
 #include "game3d_slow_step.h"
+#include "addon_lifetime.h"
 #include <d3d12.h>
 #include <algorithm>
+#include <atomic>
+#include <condition_variable>
 #include <cstring>
 #include <cstdio>
+#include <memory>
+#include <mutex>
 #include <utility>
 #include <vector>
 
@@ -79,16 +84,26 @@ namespace sunshine_streamline::provider {
       std::array<display_entry, 2> displays{};
       // The view last passed to update_texture_bindings by this provider.
       api::resource_view effects_view{};
-      // Replaced display storage, destroyed once the runtime queue passed a
-      // fence signaled on a later Present (never a CPU wait on this path).
+      // Replaced display storage, released on a pool thread once the runtime
+      // queue passed a fence signaled on a later Present (never a CPU wait on
+      // this path). bytes: its texture's size.
       struct retired_display {
         api::resource texture{};
         api::resource_view view{};
-        std::uint64_t present{}, fence_value{};
+        std::uint64_t present{}, fence_value{}, bytes{};
       };
       std::vector<retired_display> retired_displays;
+      // Created with the state (initialize), not at a Present.
       api::fence retire_fence{};
       std::uint64_t retire_value{};
+      // The pool jobs releasing this runtime's retired displays
+      // (collect_displays); destroy() waits until none is outstanding.
+      struct release_jobs {
+        std::mutex mutex;
+        std::condition_variable idle;
+        unsigned outstanding{};
+      };
+      std::shared_ptr<release_jobs> releases{std::make_shared<release_jobs>()};
       // Handoff hysteresis: the last associated Present and its color size.
       std::uint64_t associated_tick{};
       std::uint32_t associated_width{}, associated_height{};
@@ -196,19 +211,93 @@ namespace sunshine_streamline::provider {
       data.display_view = {}; data.display_texture = {};
       data.display_width = data.display_height = data.display_format = data.display_view_format = 0;
     }
+    // Retired displays whose fence completed, released on a pool thread: a
+    // texture's last Release frees its video memory in the driver and
+    // ReShade's view release takes its device-wide lock, and either can wait
+    // on video memory or the GPU (ACS 10-27b: 17 and 81 ms on the present
+    // thread). Counted per runtime, so no job outlives its runtime or device:
+    // destroy() waits for the count to reach zero first.
+    struct display_release {
+      api::device *device{};
+      std::shared_ptr<state::release_jobs> owner;
+      std::vector<state::retired_display> entries;
+    };
+    // pooled: on a pool thread, which logs its own slow release (on the
+    // present thread "depth display retirement" names it). Leaves the count
+    // last: destroy() may return, and the device go, as soon as it is zero.
+    void release_displays(display_release &job, bool pooled) {
+      LARGE_INTEGER start{}, end{}, frequency{};
+      QueryPerformanceCounter(&start);
+      std::uint64_t bytes = 0;
+      // At process exit the device may be gone: nothing is released then.
+      if (!sunshine_addon_lifetime::stopping())
+        for (const auto &entry : job.entries) {
+          if (entry.view.handle) job.device->destroy_resource_view(entry.view);
+          if (entry.texture.handle) job.device->destroy_resource(entry.texture);
+          bytes += entry.bytes;
+        }
+      QueryPerformanceCounter(&end);
+      QueryPerformanceFrequency(&frequency);
+      const double ms = double(end.QuadPart - start.QuadPart) * 1000.0 / double(frequency.QuadPart);
+      static std::atomic<std::uint64_t> next_line{};
+      const auto now = GetTickCount64();
+      auto due = next_line.load(std::memory_order_relaxed);
+      if (pooled && ms >= 8.0 && now >= due && next_line.compare_exchange_strong(due, now + 1000)) {
+        const sunshine_game3d::vram::latest_suffix memory;
+        char text[256];
+        std::snprintf(text, sizeof(text), "Sunshine Game 3D: depth display release took %.1f ms off the present thread "
+          "(%u textures, %.1f MiB)%s", ms, static_cast<unsigned>(job.entries.size()), double(bytes) / 1048576.0, memory.text);
+        sunshine_log::message(reshade::log::level::info, text);
+      }
+      const auto owner = job.owner;
+      {
+        std::lock_guard lock(owner->mutex);
+        --owner->outstanding;
+      }
+      owner->idle.notify_all();
+    }
+    void CALLBACK release_task(PTP_CALLBACK_INSTANCE, void *context) {
+      const std::unique_ptr<display_release> job(static_cast<display_release *>(context));
+      release_displays(*job, true);
+    }
+    // Without a pool thread, the entries go here, as before 10-27.
+    void submit_release(std::unique_ptr<display_release> job) {
+      {
+        std::lock_guard lock(job->owner->mutex);
+        ++job->owner->outstanding;
+      }
+      if (TrySubmitThreadpoolCallback(release_task, job.get(), nullptr)) {
+        job.release();
+        return;
+      }
+      release_displays(*job, false);
+    }
+    // Teardown. Once ExitProcess has begun, every other thread (the pool's
+    // too) has ended: a job that has not run never will, and none runs.
+    void wait_releases(state::release_jobs &jobs) {
+      using shutdown_query = BOOLEAN(NTAPI *)();
+      static const auto shutting_down = reinterpret_cast<shutdown_query>(
+        reinterpret_cast<void *>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlDllShutdownInProgress")));
+      if (sunshine_addon_lifetime::stopping() || (shutting_down && shutting_down())) return;
+      std::unique_lock lock(jobs.mutex);
+      jobs.idle.wait(lock, [&jobs] { return !jobs.outstanding; });
+    }
     // Once per Present. A retired display is fenced on a Present after the one
     // that replaced it, when every earlier read of it (effects, renderer,
-    // sampler) is already submitted on this queue; it is destroyed once that
-    // fence completed. Signaled natively, so ReShade's immediate list is not
-    // flushed early, and as the add-on's own (signal_own), so it never waits
-    // on the queue-order lock. Each call names its own hitch.
+    // sampler) is already submitted on this queue; once that fence completed
+    // it is handed to a pool thread (display_release). Signaled natively, so
+    // ReShade's immediate list is not flushed early, and as the add-on's own
+    // (signal_own), so it never waits on the queue-order lock. The present
+    // thread only reads the fence and signals it.
     void collect_displays(api::effect_runtime *runtime, state &data, std::uint64_t present) {
       if (data.retired_displays.empty()) return;
       auto *device = runtime->get_device();
+      // Only a fence initialize() failed to create is created here.
       if (!data.retire_fence.handle && !device->create_fence(0, api::fence_flags::none, &data.retire_fence)) return;
       auto *fence = reinterpret_cast<ID3D12Fence *>(data.retire_fence.handle);
       auto *queue = reinterpret_cast<ID3D12CommandQueue *>(runtime->get_command_queue()->get_native());
       const auto completed = fence->GetCompletedValue();
+      std::unique_ptr<display_release> released;
       auto keep = data.retired_displays.begin();
       for (auto &entry : data.retired_displays) {
         if (!entry.fence_value && present > entry.present) {
@@ -216,19 +305,14 @@ namespace sunshine_streamline::provider {
           if (SUCCEEDED(native_observer::signal_own(queue, fence, data.retire_value + 1))) entry.fence_value = ++data.retire_value;
         }
         if (entry.fence_value && completed != UINT64_MAX && completed >= entry.fence_value) {
-          if (entry.view.handle) {
-            const sunshine_game3d::slow_step step("depth display view release");
-            device->destroy_resource_view(entry.view);
-          }
-          if (entry.texture.handle) {
-            const sunshine_game3d::slow_step step("depth display texture release");
-            device->destroy_resource(entry.texture);
-          }
+          if (!released) released.reset(new display_release{device, data.releases, {}});
+          released->entries.push_back(entry);
           continue;
         }
         *keep++ = entry;
       }
       data.retired_displays.erase(keep, data.retired_displays.end());
+      if (released) submit_release(std::move(released));
     }
     // The frame record's API rows (game3d_frame_record.h): this Present's
     // decision as begin() made it. Nothing reads them.
@@ -348,7 +432,10 @@ namespace sunshine_streamline::provider {
       };
       if (data.display_texture.handle && data.display_width == packet.width && data.display_height == packet.height &&
           data.display_format == packet.format && data.display_view_format == packet.srv_format) return display_status::ready;
-      // Resolution/format changes are rare lifecycle events. Ordinary rotation
+      // A new shape or format allocates here, on the present thread, and
+      // retires the inactive entry (released off it, collect_displays).
+      // Dynamic resolution makes that frequent, not rare (ACS 10-27b: 316
+      // render-size changes in one session). Ordinary rotation at one shape
       // never allocates a texture or changes descriptors. A provider flip
       // (NGX and Streamline usually differ in shape or format) switches to the
       // other retained entry; the cache never reuses the other entry's pixels.
@@ -366,7 +453,9 @@ namespace sunshine_streamline::provider {
       if (victim->texture.handle) {
         // Effects can still name this view only if it was the last binding.
         if (victim->view == data.effects_view) bind(runtime, data, {}, false);
-        data.retired_displays.push_back({victim->texture, victim->view, present, 0});
+        const auto format = static_cast<api::format>(victim->format);
+        data.retired_displays.push_back({victim->texture, victim->view, present, 0,
+          std::uint64_t(api::format_slice_pitch(format, api::format_row_pitch(format, victim->width), victim->height))});
         if (victim->texture == data.display_texture) { data.display_texture = {}; data.display_view = {}; }
         *victim = {};
       }
@@ -632,9 +721,17 @@ namespace sunshine_streamline::provider {
       decision.epoch = shown.epoch; decision.frame_generation_input = shown.frame_generation_input;
     }
   }
-  void initialize(api::effect_runtime *runtime) { runtime->create_private_data<state>(); }
+  void initialize(api::effect_runtime *runtime) {
+    auto *data = runtime->create_private_data<state>();
+    // The retire fence comes with the state, never from a Present's first
+    // retirement (a driver create on the present thread).
+    if (data && runtime->get_device()->get_api() == api::device_api::d3d12)
+      runtime->get_device()->create_fence(0, api::fence_flags::none, &data->retire_fence);
+  }
   void destroy(api::effect_runtime *runtime) {
     if (auto *data = runtime->get_private_data<state>()) {
+      // Every release job of this runtime finished first: none outlives it.
+      wait_releases(*data->releases);
       const bool owned = std::any_of(data->displays.begin(), data->displays.end(),
         [](const auto &entry) { return entry.texture.handle != 0; }) || !data->retired_displays.empty();
       if (owned) runtime->get_command_queue()->wait_idle();
@@ -1175,6 +1272,13 @@ namespace sunshine_streamline::provider {
   // or calibration state, and is absent from the production add-on.
   extern "C" __declspec(dllexport) bool SunshineStreamlineTestCenter(api::effect_runtime *runtime, center_sample *out) {
     return out && latest_center(runtime, *out);
+  }
+  // The active display texture (its native resource), read only.
+  extern "C" __declspec(dllexport) bool SunshineStreamlineTestDisplay(api::effect_runtime *runtime, std::uint64_t *texture) {
+    const auto *data = runtime->get_private_data<state>();
+    if (!data || !texture) return false;
+    *texture = data->display_texture.handle;
+    return true;
   }
 #endif
   bool selected(api::effect_runtime *runtime) {
