@@ -4306,7 +4306,11 @@ began, that frame had none, so the scope turns silent (`depth_capture::frame_gen
 copy recorded before that miss and readable only after it leaves the scope silent. So a game whose
 FG copies stop (no FG call, a refused or cancelled one, or a DLSS-G evaluation that adds no copy)
 has its SR/RR depth copied from the second frame without an FG copy, ready when the held FG copy
-expires. Assassin's Creed Shadows (10-24) untags its FG depth in every frame and so cancels almost
+expires. A copy readable at its own Present (an FG tag's, or DLSS-G's on a direct list) is held
+past the first frame without one; DLSS-G's compute copy is readable only three of its evaluations
+later, so the held copy is older by then and expires at that frame's Present once real frames take
+about a quarter of the source age (one mono Present, until fence observation makes the compute copy
+readable at its own Present; the session tests' known gap C1). Assassin's Creed Shadows (10-24) untags its FG depth in every frame and so cancels almost
 every deferred copy; the rare copy that survived kept the scope live for a second with no further
 FG copy, and FG On did the same, so that viewport showed neither FG nor SR depth for about a second
 each time. Until 10-26 (the continuity invariant's known gap C4) a frame without any FG call

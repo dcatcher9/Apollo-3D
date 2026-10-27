@@ -381,6 +381,13 @@ namespace {
     // 6b3b06cd02a48739), through slSetTagForFrame and slSetTag.
     {"S11c-fg-until-evaluate-tag-then-evaluate", "20*sr=local; fg=on,tag=evaluate_list,sr=tag; 20*tag=evaluate_list,sr=tag"},
     {"S11c-fg-global-until-evaluate-tag-then-evaluate", "20*sr=local; fg=on,tag=evaluate_list,entry=global,sr=tag; 20*tag=evaluate_list,entry=global,sr=tag"},
+    // DLSS-G's compute copies stop while SR depth stays copyable: the first
+    // frame without one is still the live scope's, and its Present can show
+    // only the scope's readable copy, three DLSS-G evaluations old, which
+    // expires there (known gap C1, its compute copy readable frames later;
+    // the round 3 review, soak seed 76a7d0a6922d20ea). Pins that frame's
+    // C1 tagging: untagged, its loss fails the set.
+    {"C4-compute-copy-stops", "20*sr=local; fg=on,sr=local,dlssg=compute,generated=3; 11*sr=local,dlssg=compute,generated=3; 10*sr=local,generated=3"},
     {"fg-on-holds-sr-copy", "20*sr=local; fg=on,tag=now_list,sr=local,generated=1,at=evaluate; 5*tag=now_list,sr=local,generated=1; fg=off,sr=local; 10*sr=local; fg=on,tag=now_list,generated=1,at=inside; 5*tag=now_list,generated=1; fg=off,sr=local; 10*sr=local; fg=on,tag=now_list,sr=local,generated=1,at=evaluate; 5*sr=local,generated=1"},
   };
 
@@ -573,8 +580,10 @@ namespace {
     std::uint64_t dlssg_evaluated {}, dlssg_frames {}, deferred_dlssg_frames {};
     bool deferred_known {};
     // Whether the previous frame supplied an FG copy, so that a live FG
-    // scope owns this one (continuity::supply::owned).
-    bool fg_supplied {};
+    // scope owns this one (continuity::supply::owned), and whether that copy
+    // was DLSS-G's compute copy alone (fg_supplied_late), readable only
+    // frames later (known gap C1).
+    bool fg_supplied {}, fg_supplied_late {};
     std::map<std::uint64_t, unsigned> present_frames;
 
     // What the frame being recorded supplies (the continuity supply log).
@@ -1214,12 +1223,26 @@ namespace {
       // Present shows the scope's FG depth instead (FG keeps the frames it
       // supplies; the next frame without an FG copy turns the scope silent).
       const bool owned = std::exchange(fg_supplied, false) && fg_on;
+      // When that copy was DLSS-G's compute copy alone, the depth the
+      // Present can show is the scope's newest readable copy, three DLSS-G
+      // evaluations old: the frame's SR input meets C1's limitation as the
+      // compute frames' own do, and a frame without an FG copy of its own
+      // loses depth once that older copy aged out (C4's note; with fence
+      // observation the compute copy is readable at its own Present).
+      if (owned && std::exchange(fg_supplied_late, false) && !(supply.legal & (continuity::tag_copy | continuity::dlssg_input)) &&
+          (supply.legal & continuity::sr_evaluate)) {
+        supply.legal &= std::uint8_t(~continuity::sr_evaluate);
+        supply.limited |= continuity::sr_evaluate;
+        supply.limit = continuity::limitation::cross_queue_sr;
+      }
+      fg_supplied_late = false;
       // An FG copy its scope accepts: an FG tag's, or DLSS-G's in a state
       // its list recorded (its compute copy is accepted later, with its own
       // tick).
       if (fg_on && frame_generation_scope() && ((supply.legal | supply.permitted | supply.limited) & (continuity::tag_copy | continuity::dlssg_input))) {
         fg_copy = now;
         fg_supplied = true;
+        fg_supplied_late = !((supply.legal | supply.permitted) & (continuity::tag_copy | continuity::dlssg_input));
       }
       if (fg_on && dlssg_choice != dlssg_form::none) {
         dlssg_evaluated = now;
@@ -1390,7 +1413,7 @@ namespace {
       last_capture = 0;
       api_supplied = other_queue_copy = fg_copy = dlssg_evaluated = dlssg_frames = deferred_dlssg_frames = 0;
       deferred_known = false;
-      fg_supplied = false;
+      fg_supplied = fg_supplied_late = false;
       present_frames.clear();
       where = label;
       continuity_log.judge = {};

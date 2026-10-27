@@ -1803,7 +1803,15 @@ copy (in flight or accepted), and when the next frame begins with none recorded 
 turns silent, so the viewport's SR/RR evaluations supply it, ready when the held FG copy expires
 (`depth_capture::frame_generation_frame`). A frame whose only FG input is DLSS-G's compute copy
 still supplies the scope: the SR input it keeps out while that copy is in flight is C1's, which
-Step 4's fence observation makes readable at its Present, and the timelines tag it so. The
+Step 4's fence observation makes readable at its Present, and the timelines tag it so. That holds
+for the frame after it too, whose SR input the still-live scope keeps out while its Present can
+show only the scope's newest readable copy, three DLSS-G evaluations old: the first frame without a
+compute copy loses depth when that copy expires before its Present (real frames of about a quarter
+of the source age or longer), which the round 3 review found (soak seed `76a7d0a6922d20ea`, frame
+104; `20*sr=local; fg=on,sr=local,dlssg=compute,generated=3; 11*sr=local,dlssg=compute,generated=3;
+10*sr=local,generated=3` loses frame 32). With fence observation that compute copy is readable at
+its own Present, so the timelines tag that SR input with C1 as well (the regression timeline
+`C4-compute-copy-stops` keeps the shape). The
 timelines also model the precedence itself: the SR input of a frame after one that supplied an FG
 copy is the scope's (`continuity::supply::owned`), so that frame's Present is judged as any but its
 SR input leaves no readable copy for later Presents. And C8's frames (until it closed) included FG Off after an FG copy
@@ -2044,7 +2052,8 @@ the timelines before it, so `--shrink-runs` (default 40) and, in the fixed set, 
 (`shrink_ms`, within its 225 s bound) limit it; a failure that depends on timing may shrink less, and
 a fresh process's `--events` replay may still differ. The fixed set also runs one regression timeline per
 Assassin's Creed Shadows fix (and one for the generated Presents' hold, `repeated-frame-hold`,
-two for C4's fix, `C4-no-fg-call` and `C4-cancelled-fg-tags`, one for C6's,
+two for C4's fix, `C4-no-fg-call` and `C4-cancelled-fg-tags` (and `C4-compute-copy-stops`, which pins
+the C1 tagging of the frame after DLSS-G's last compute copy), one for C6's,
 `C6-dlssg-after-tag-copy`, one for C7's, `C7-dlssg-stops`, two for C8's,
 `C8-fg-off-sr-other-queue` and `C8-fg-off-color-only`, and four for C5's,
 `C5-frame-tag-then-evaluate`, `C5-global-tag-then-evaluate` and their untag forms
@@ -2059,8 +2068,8 @@ run; a witness that loses none fails the set, as the matrix's gap seeds keep a r
 failing cell. `--trace` prints every Present's
 frame record, the supply it was judged with and each recorded refusal.
 
-`reshade_session_timelines` runs the fixed set (24 seeds and eighteen regression timelines, about
-4250 frames and 10000 Presents) in about 155 s, registered like
+`reshade_session_timelines` runs the fixed set (24 seeds and nineteen regression timelines, about
+4290 frames and 10170 Presents) in about 160 s, registered like
 `reshade_native_provider_continuity` with the same 240 s timeout. Locally:
 
     reshade_game3d_session_timeline_runtime_test [--list] [--timeline <seed> | --events "<list>" |
