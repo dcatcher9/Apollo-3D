@@ -1857,8 +1857,11 @@ closed, and the fix removes the row). Each provider run with an interposer exerc
   (`-second-signaller`) signals to the waited value before the game queue's own signal can run;
   `unordered_read` judges every form. U-C1b gives a source's first copies copy-out storage too: a
   copy on a `COMPUTE` list (DLSS-G's, N7) always, and a copy on a list not known to execute on the
-  queue that reads depth (never executed, or last executed on another queue, as the render queue's
-  lists are once FG On moves Present to DLSS-G's queue). A copy recorded for the reader's queue and
+  queue that reads depth (last executed on another queue, as the render queue's lists are once FG
+  On moves Present to DLSS-G's queue, or never executed while the newest `DIRECT`-list copy ran on
+  another queue: with FG Off none, so a game that pools its lists allocates nothing for them). A
+  copy whose copy-out storage cannot be allocated is still recorded, with the Reset rule
+  (`copy_out={... failed=}`). A copy recorded for the reader's queue and
   submitted after Present moved takes an idle slot's cached storage of its shape at its submission,
   with no allocation there; with none it keeps the Reset rule (`copy_out={... unstored=}`). The
   capture test pins each case (`copy_out_replay`, `copy_out_reader_moves`, the compute-list

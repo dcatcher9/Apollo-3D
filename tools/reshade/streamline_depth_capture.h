@@ -759,6 +759,8 @@ namespace sunshine_streamline::depth_capture {
   // Called once (then cleared) on the recording thread while a record call
   // allocates new storage without the capture lock.
   namespace testing { void set_allocation_hook(void (*hook)(void *), void *context); }
+  // The next count copy-out storage allocations of record calls fail.
+  namespace testing { void fail_copy_out_allocations(unsigned count); }
   // Makes idle colour/mask storage older by ms (poll() releases it after 2 s).
   namespace testing { void age_idle_storage(std::uint64_t ms); }
   // Whether the snapshot of capture holds copy-out storage (slot::published).

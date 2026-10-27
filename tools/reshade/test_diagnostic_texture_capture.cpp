@@ -829,6 +829,9 @@ namespace {
     // Another source of the same shape, whose retired copy leaves idle
     // storage below.
     texture_case spare(gpu, DXGI_FORMAT_R32_FLOAT, 4);
+    // A source of a shape no slot caches storage for, whose copy-out
+    // storage must be allocated.
+    texture_case odd(gpu, DXGI_FORMAT_R32_FLOAT, 4, D3D12_RESOURCE_FLAG_NONE, true, 1, 1, 72, 40);
     gpu.submit(); gpu.wait(); gpu.reset();
     auto input = depth.input;
     input.provider = sunshine_scene_depth::provider_kind::ngx;
@@ -923,35 +926,87 @@ namespace {
         packet.capture_id == late, "reader moves: a copy recorded before Present moved was unreadable there before its Reset");
     packet = {};
     gpu.reset();
-    // A list never executed is not known to run on the reader's queue: its
-    // copy takes copy-out storage, released by the idle sweep once that
-    // list ran on the reader's queue after all.
+    // A list never executed runs where the newest DIRECT-list copy ran: with
+    // FG off, the reader's own queue, so its copy takes no copy-out storage
+    // (until 10-27 every new list's first copy allocated it, and the idle
+    // sweep released it unused: a burst of allocations on the game's thread
+    // for a game that pools its lists).
     present(gpu.queue.Get(), 12106);
     Sleep(DWORD(sunshine_freshness::source_age_ms + 20));
-    ComPtr<ID3D12CommandAllocator> fresh_allocator;
-    ComPtr<ID3D12GraphicsCommandList> fresh;
-    check(gpu.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&fresh_allocator)), "fresh allocator");
-    check(gpu.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, fresh_allocator.Get(), nullptr, IID_PPV_ARGS(&fresh)),
-      "fresh list");
-    created(fresh.Get());
-    capture::observe_command(native(fresh.Get()));
-    input.sequence = 5; input.tick = GetTickCount64();
-    const auto predicted = capture::nominate_evaluation(native(fresh.Get()), input, UINT64_MAX, &diagnostic);
-    require(predicted && diagnostic.result == capture::status::recorded, "reader moves: the fresh list's copy was refused");
-    capture::finish(predicted, true);
-    require(capture::testing::holds_copy_out_storage(predicted),
-      "reader moves: a copy on a list never executed took no copy-out storage");
-    const auto released = counts().copy_out_released;
-    check(close_list(fresh.Get()), "fresh list close");
-    execute(gpu.queue.Get(), fresh.Get());
-    gpu.wait();
-    capture::poll();
-    require(!capture::testing::holds_copy_out_storage(predicted) && counts().copy_out_released == released + 1 &&
-        counts().copied_out == made + 2,
-      "reader moves: unused copy-out storage of a list that ran on the reader's queue was not released by the idle sweep");
-    destroyed(fresh.Get()); capture::command_destroyed(native(fresh.Get()));
+    struct fresh_list {
+      ComPtr<ID3D12CommandAllocator> allocator;
+      ComPtr<ID3D12GraphicsCommandList> list;
+      fresh_list(fixture &gpu) {
+        check(gpu.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)), "fresh allocator");
+        check(gpu.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr, IID_PPV_ARGS(&list)),
+          "fresh list");
+        created(list.Get());
+        capture::observe_command(native(list.Get()));
+      }
+      ~fresh_list() { destroyed(list.Get()); capture::command_destroyed(native(list.Get())); }
+    };
+    const auto record_on = [&](fresh_list &fresh, capture::input &value, std::uint64_t sequence) {
+      value.sequence = sequence; value.tick = GetTickCount64();
+      const auto ticket = capture::nominate_evaluation(native(fresh.list.Get()), value, UINT64_MAX, &diagnostic);
+      require(ticket && diagnostic.result == capture::status::recorded, "reader moves: the fresh list's copy was refused");
+      capture::finish(ticket, true);
+      return ticket;
+    };
+    const auto run_on_reader = [&](fresh_list &fresh) {
+      check(close_list(fresh.list.Get()), "fresh list close");
+      execute(gpu.queue.Get(), fresh.list.Get());
+      gpu.wait();
+      capture::poll();
+    };
+    {
+      fresh_list fresh(gpu);
+      const auto predicted_before = counts().copy_out_predicted;
+      const auto own = record_on(fresh, input, 5);
+      require(!capture::testing::holds_copy_out_storage(own) && counts().copy_out_predicted == predicted_before,
+        "reader moves: with FG off, a copy on a list never executed took copy-out storage");
+      run_on_reader(fresh);
+      require(counts().copied_out == made + 2, "reader moves: a fresh list's copy on the reader's queue was copied out");
+    }
+    // Once Present moved, such a copy takes copy-out storage; the idle sweep
+    // releases it when the list ran on the reader's queue after all.
+    {
+      present(gpu.foreign_queue.Get(), 12107);
+      fresh_list fresh(gpu);
+      const auto predicted = record_on(fresh, input, 6);
+      require(capture::testing::holds_copy_out_storage(predicted),
+        "reader moves: once Present moved, a copy on a list never executed took no copy-out storage");
+      const auto released = counts().copy_out_released;
+      present(gpu.queue.Get(), 12108);
+      run_on_reader(fresh);
+      require(!capture::testing::holds_copy_out_storage(predicted) && counts().copy_out_released == released + 1 &&
+          counts().copied_out == made + 2,
+        "reader moves: unused copy-out storage of a list that ran on the reader's queue was not released by the idle sweep");
+    }
+    // Copy-out storage that cannot be allocated leaves the copy to the Reset
+    // rule (copy_out failed): the copy itself is recorded (until 10-27 the
+    // whole copy was refused, and a list never executed retried the failing
+    // allocation at every copy).
+    {
+      present(gpu.foreign_queue.Get(), 12109);
+      fresh_list fresh(gpu);
+      auto odd_input = odd.input;
+      odd_input.provider = sunshine_scene_depth::provider_kind::streamline;
+      odd_input.epoch = 80; odd_input.source_id = 98; odd_input.viewport = 0;
+      odd_input.valid_until = sunshine_scene_depth::lifetime::until_evaluation; odd_input.force_snapshot = false;
+      odd_input.source_present_generation = capture::source_present_generation(odd_input.source);
+      odd_input.proof = sunshine_scene_depth::state_proof::sdk_contract;
+      const auto failed = counts().copy_out_failed;
+      capture::testing::fail_copy_out_allocations(1);
+      const auto unstored = record_on(fresh, odd_input, 1);
+      capture::testing::fail_copy_out_allocations(0);
+      require(!capture::testing::holds_copy_out_storage(unstored) && counts().copy_out_failed == failed + 1,
+        "reader moves: a copy whose copy-out storage failed to allocate was not counted as copy_out failed");
+      present(gpu.queue.Get(), 12110);
+      run_on_reader(fresh);
+      capture::retire_source(odd_input.provider, odd_input.epoch, odd_input.source_id);
+    }
     // The independent queue reads again, as the later cases expect.
-    present(gpu.foreign_queue.Get(), 12107);
+    present(gpu.foreign_queue.Get(), 12111);
     capture::retire_source(input.provider, input.epoch, input.source_id);
     capture::poll();
     gpu.check_debug_errors();

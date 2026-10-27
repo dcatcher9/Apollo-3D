@@ -3934,9 +3934,12 @@ compute queue too. A replay of the game's list is still refused as before. **U-C
 gives a source's first copies that storage too, since the queue a recording executes on is known
 only at its submission while the storage is chosen at record time, without the capture lock: a copy
 on a `COMPUTE` list takes it always (a compute list never executes on the presenting queue that
-reads depth), and so does a copy on a list not known to execute on the reader's queue, never
-executed or last executed on another one (each list's queue is remembered at each submission that
-carries a depth copy, one private-data read per such list). That covers FG On, which moves Present
+reads depth), and so does a copy on a list not known to execute on the reader's queue: last
+executed on another one (each list's queue is remembered at each submission that carries a depth
+copy, one private-data read per such list), or never executed while the newest submission that
+carried a `DIRECT`-list copy was another queue's (with FG Off the reader's own, so a game that
+pools or creates its lists allocates nothing for them; until 10-27 each new list's first copy
+allocated that storage on the game's thread and the sweep released it unused). That covers FG On, which moves Present
 to DLSS-G's queue: the render queue's lists last ran there, so its first copy after the move is
 copied out (until 10-27 only the copy after the first submission elsewhere was, so FG On showed
 flat 2D for one or two Presents), and a source new to the game's other queue. A copy recorded for
@@ -3946,12 +3949,13 @@ allocation on the game's submission thread; with none it keeps the Reset rule (`
 the copies in flight across one FG toggle). Storage taken only for that prediction and left unused
 (the list ran on the reader's queue after all) is released by the idle sweep (`released`). A copy
 not copied out (every ring list in flight, a failed list call, an unstored copy) keeps the Reset
-rule; the counts are on the depth status line as
+rule, and so does a copy whose copy-out storage could not be allocated (`failed`; until 10-27 the
+copy itself was refused); the counts are on the depth status line as
 `copy_out={made= ring_busy= failed= predicted= taken= unstored= released=}`. The
 cost is one extra copy of the snapshot on the producer queue per copied-out snapshot and one more
 snapshot-sized allocation per slot for such a source; U-C1b adds one snapshot-sized allocation per
-list that first carries a copy (released by the sweep when that list runs on the reader's queue),
-and none at submission. Since Step 4 a copy-out still in flight is read as soon as the game's own
+list that first carries a copy while Present runs on another queue (released by the sweep when
+that list runs on the reader's queue), none with FG Off, and none at submission. Since Step 4 a copy-out still in flight is read as soon as the game's own
 fence waits order the reading queue after it ([Queue order](#queue-order), U-C1), so the session
 tests' known gap C1 closed on 10-27; a copy whose queue's ring was all in flight is a counted
 resource bound with no row. The add-on never inserts a foreign-queue Wait for a

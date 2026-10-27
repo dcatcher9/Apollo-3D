@@ -186,6 +186,11 @@ namespace sunshine_streamline::depth_capture {
     // queue that read depth earlier stops being the reader once another
     // acquires, as when FG moves Present to DLSS-G's queue (read_elsewhere).
     std::uint64_t reader{};
+    // Protected by mutex: the place cookie of the newest submission that
+    // carried a depth copy of a DIRECT list (submitted), where a list never
+    // executed yet is predicted to run (record_impl's copy-out storage); 0
+    // before any.
+    std::uint64_t last_direct_copy_queue{};
     std::array<evaluation_namespace, provider_count> evaluations;
 
     // A nomination's identity: its evaluation's epoch, sequence, source and
@@ -354,7 +359,8 @@ namespace sunshine_streamline::depth_capture {
       std::atomic<std::uint64_t> earlier_copied{}, earlier_refused{};
     } proven_counters;
     // Copy-outs (copy_out): made, and copies left to the Reset rule because
-    // every list of the queue's ring was in flight or a list call failed.
+    // every list of the queue's ring was in flight or a list call failed, or
+    // (failed too) their copy-out storage could not be allocated.
     // U-C1b: copies recorded with storage because their list was not known
     // to execute on the reader's queue (predicted), copies given an idle
     // slot's cached storage at their submission (taken), copies submitted
@@ -1489,6 +1495,7 @@ namespace sunshine_streamline::depth_capture {
         if (!carried) continue;
         if (auto list = command_storage::acquire(reinterpret_cast<ID3D12Object *>(values[n].native_command), false))
           list->executed_queue = owner->cookie;
+        if (!owner->compute_producer) last_direct_copy_queue = owner->cookie;
       }
       const bool needs_fence = auxiliary_used || needs_submission_fence(producers, consumers);
       const auto fence = needs_fence ? ++owner->next_fence : 0;
@@ -2777,6 +2784,13 @@ namespace sunshine_streamline::depth_capture {
       allocation_context.store(context);
       allocation_hook.store(hook);
     }
+    std::atomic<unsigned> copy_out_allocation_failures{};
+    void fail_copy_out_allocations(unsigned count) { copy_out_allocation_failures.store(count); }
+    bool fail_copy_out_allocation() {
+      for (auto count = copy_out_allocation_failures.load(); count;)
+        if (copy_out_allocation_failures.compare_exchange_weak(count, count - 1)) return true;
+      return false;
+    }
   }
 #endif
   SUNSHINE_CAPTURE_STATIC bool source_lifetime_current(const input &value, std::uint64_t current_generation) {
@@ -2906,6 +2920,8 @@ namespace sunshine_streamline::depth_capture {
     // admission check from the start under the lock before it publishes. A
     // reservation is only a preference: publication never trusts it.
     std::shared_ptr<texture_reference> prepared, prepared_published;
+    // Copy-out storage this call failed to allocate or register.
+    bool copy_out_refused = false;
     std::uint64_t reservation{};
     // Storage replaced under the lock is released after it (Release of a
     // large committed resource can take milliseconds).
@@ -3092,11 +3108,18 @@ namespace sunshine_streamline::depth_capture {
       // execute on the reader's queue: never executed yet, or last executed
       // on another queue, as the render queue's lists are once FG On moved
       // Present to DLSS-G's queue (the idle sweep releases it when the
-      // submission is the reader's after all).
+      // submission is the reader's after all). A list never executed is
+      // predicted to run where the newest DIRECT-list copy ran
+      // (last_direct_copy_queue): with FG Off, the reader's own queue, so a
+      // game that pools or creates its lists allocates nothing for them
+      // (until 10-27 each new list's first copy allocated copy-out storage on
+      // the game's thread, released unused on the Present thread). Storage
+      // this attempt could not allocate is not sought again (copy_out
+      // failed): the copy keeps the Reset rule.
       const bool read_elsewhere_before = read_elsewhere_recently(*value.source, GetTickCount64());
       const bool predicted = !read_elsewhere_before && !on_compute && reader_live() &&
-        owner->executed_queue != reader;
-      const bool wants_published = !diagnostic_copy && !preservation_only &&
+        (owner->executed_queue ? owner->executed_queue != reader : last_direct_copy_queue != reader);
+      const bool wants_published = !diagnostic_copy && !preservation_only && !copy_out_refused &&
         (read_elsewhere_before || on_compute || predicted);
       auto published = wants_published ? found->published : nullptr;
       // New storage's rest (texture_reference::rest).
@@ -3167,12 +3190,27 @@ namespace sunshine_streamline::depth_capture {
         if (auto *hook = testing::allocation_hook.exchange(nullptr)) hook(testing::allocation_context.load());
 #endif
         auto stage = need_texture ? allocate_storage(plan, prepared) : record_stage::recorded;
-        if (stage == record_stage::recorded && need_published) stage = allocate_storage(plan, prepared_published);
+        // Copy-out storage is optional: a copy without it keeps the Reset
+        // rule, as before U-C1b, and its submission records its list's
+        // queue, so a list never executed is not predicted again.
+        bool published_failed = false;
+        if (stage == record_stage::recorded && need_published) {
+#ifdef SUNSHINE_STREAMLINE_PROBE_TEST
+          if (testing::fail_copy_out_allocation()) published_failed = true;
+          else
+#endif
+          published_failed = allocate_storage(plan, prepared_published) != record_stage::recorded;
+        }
         lock.lock();
         if (stage != record_stage::recorded) return reject(status::failed, stage);
         // Released with its device whoever holds it (release_device).
-        if ((need_texture && !register_storage(prepared)) || (need_published && !register_storage(prepared_published)))
-          return reject(status::failed, record_stage::texture_allocation);
+        if (need_texture && !register_storage(prepared)) return reject(status::failed, record_stage::texture_allocation);
+        if (need_published && !published_failed && !register_storage(prepared_published)) published_failed = true;
+        if (published_failed) {
+          discarded.push_back(std::move(prepared_published));
+          copy_out_refused = true;
+          copy_out_counters.failed.fetch_add(1, std::memory_order_relaxed);
+        }
         release_on_exit.keep = true;
         continue;
       }
