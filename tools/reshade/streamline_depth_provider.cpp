@@ -607,18 +607,20 @@ namespace sunshine_streamline::provider {
     }
     return out;
   }
+  // shown: the output's metadata, the fresh copy's or the held one's.
   void describe_display(sunshine_game3d::api_depth_decision &decision, bool copied, bool output_ready,
-      const char *cache_reason, const sunshine_scene_depth::frame &held) {
+      const char *cache_reason, const sunshine_scene_depth::frame &shown) {
     if (!decision.selected && !decision.associated) {
       decision.display_reason = decision.handoff_hold ? "source_handoff" : "source_not_associated";
       return;
     }
     decision.copied = copied; decision.reused = !copied && output_ready;
     decision.display_reason = copied ? "fresh_copy" : output_ready ? "retained_copy" : cache_reason;
+    decision.source_tick = copied || decision.reused ? shown.tick : 0;
     if (decision.reused) {
       // The held copy names its own source.
-      decision.source = recorded_source(held);
-      decision.epoch = held.epoch; decision.frame_generation_input = held.frame_generation_input;
+      decision.source = recorded_source(shown);
+      decision.epoch = shown.epoch; decision.frame_generation_input = shown.frame_generation_input;
     }
   }
   void initialize(api::effect_runtime *runtime) { runtime->create_private_data<state>(); }

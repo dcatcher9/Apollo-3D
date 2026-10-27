@@ -14,6 +14,24 @@
 // presents an earlier frame: after a Present that showed depth it holds that
 // depth while the copy is younger than the source age.
 //
+// The freshness rule, next to it: a Present that shows API depth shows the
+// newest copy of that source the presenting queue could legally read for the
+// frame it presents, within freshness_bound_ms of it (two of the fixture's
+// frame intervals). The
+// source is the shown rung's: an FG scope's own depth (D1: an FG tag's copy
+// or DLSS-G's input) or scene depth (D2: an SR or RR evaluation's input, or a
+// tag's copy outside FG), never the other, since FG keeps its viewport while
+// it can supply (frame_generation_holds) and a switch restarts the placement
+// calibration. The supply log says which copies were readable: a legal
+// source of the presenting queue's own (one that meets no limitation and
+// that no live FG scope keeps out) from its frame's Present, and a copy
+// recorded on another queue once its work completed, if the contract copies
+// it out (docs/reshade-sbs.md, Copy-out on the producer queue;
+// supply::completions). The record names the shown copy by its capture tick
+// (frame_record::depth_tick_ms). Showing older depth while newer copies were
+// readable is stale_shown: no row excuses it, as no known limitation makes a
+// readable copy unreadable.
+//
 // A judge reads two things per Present: the frame record the test add-on
 // exports (SunshineGame3DTestFrameRecord, docs/reshade-sbs.md, Frame
 // record) and the fixture's own supply log, what the frame it presents
@@ -67,6 +85,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <functional>
 #include <iterator>
 #include <string>
 #include <utility>
@@ -89,6 +109,10 @@ namespace game3d_continuity {
 
   inline constexpr std::uint8_t api_sources = sr_evaluate | tag_copy | dlssg_input;
   inline constexpr std::uint8_t generic_sources = generic_boundary;
+  // The sources of each API rung (the freshness rule): D1, an FG scope's own
+  // depth, and D2, scene depth. A tag's copy is either, as FG is on or off.
+  inline constexpr std::uint8_t fg_depth_sources = tag_copy | dlssg_input;
+  inline constexpr std::uint8_t scene_depth_sources = sr_evaluate | tag_copy;
 
   // A known limitation the frame's legal source meets; a gap row names it.
   enum class limitation : std::uint8_t {
@@ -119,8 +143,18 @@ namespace game3d_continuity {
     // Present could hold (no readable copy below), while the frame's own
     // Present is judged as any.
     std::uint8_t owned {};
+    // The legal sources recorded on a queue other than the presenting one
+    // (the freshness rule): such a copy is readable only through one of
+    // completions, never from its frame's Present.
+    std::uint8_t elsewhere {};
     limitation limit {limitation::none};
     std::uint64_t tick {};
+    // One probe per copy recorded on another queue that the contract copies
+    // out, with its source: true once its producer's work completed, when
+    // the presenting queue can read its copy-out. A copy not copied out (a
+    // source's first copy elsewhere) has none: only its recording's Reset,
+    // past the source age in every fixture, makes it readable.
+    std::vector<std::pair<std::uint8_t, std::function<bool()>>> completions;
 
     void add(std::uint8_t sources, std::uint64_t now, limitation meets = limitation::none) {
       legal |= sources;
@@ -137,6 +171,20 @@ namespace game3d_continuity {
       permitted |= sources;
       if (!tick) {
         tick = now;
+      }
+    }
+
+    // A legal copy recorded on another queue; probe: its completion, when
+    // the contract copies it out.
+    void add_elsewhere(std::uint8_t sources, std::uint64_t now, std::function<bool()> probe = {}) {
+      add(sources, now);
+      elsewhere |= sources;
+      completes(sources, std::move(probe));
+    }
+
+    void completes(std::uint8_t sources, std::function<bool()> probe) {
+      if (probe) {
+        completions.emplace_back(sources, std::move(probe));
       }
     }
   };
@@ -158,6 +206,23 @@ namespace game3d_continuity {
   // periods and that latency come to about 100 ms; a wider window would
   // excuse losses the limitation does not explain.
   inline constexpr std::uint64_t tag_slack_ms = 100;
+  // The freshness rule's bound: how much older than the newest copy the
+  // presenting queue could certainly read at the Present (its supply stamp)
+  // the shown copy (its capture tick) may be. Certainly readable: a copy of
+  // the presenting queue's own from a frame before the one the Present
+  // presents (a copy deferred to its frame's Present, R2, is read at the
+  // Present after it), and a copy from another queue that the judge saw
+  // complete at an earlier Present (its work completed before this Present's
+  // decision). Two of the fixture's frame intervals, its own pacing (the mean
+  // of its last two real Present intervals) at whatever rate it runs: the
+  // presented frame's own copy and the one before it, which the add-on may
+  // show instead. The stamp and the tick are separate reads of a clock that
+  // advances in 16 ms steps, so the bound adds tick_slack_ms.
+  inline constexpr unsigned freshness_frames = 2;
+
+  constexpr std::uint64_t freshness_bound_ms(std::uint64_t frame_interval_ms) {
+    return freshness_frames * frame_interval_ms + tick_slack_ms;
+  }
 
   enum class violation_kind : std::uint8_t {
     // An armed judge: the frame had a legal source and the Present showed
@@ -174,6 +239,10 @@ namespace game3d_continuity {
     // younger than the source age (less the slack): it dropped the hold of
     // the frame it presents.
     dropped_hold,
+    // The freshness rule: a Present showed API depth captured more than
+    // freshness_bound_ms before the newest copy of its rung's sources that
+    // the presenting queue could read by then.
+    stale_shown,
   };
 
   constexpr const char *name(violation_kind value) {
@@ -184,6 +253,8 @@ namespace game3d_continuity {
         return "unestablished";
       case violation_kind::dropped_hold:
         return "dropped_hold";
+      case violation_kind::stale_shown:
+        return "stale_shown";
       default:
         return "stale";
     }
@@ -216,6 +287,10 @@ namespace game3d_continuity {
     // the Present can hold while it is younger than the source age; none:
     // UINT64_MAX.
     std::uint64_t readable_age_ms {UINT64_MAX};
+    // stale_shown: the shown copy's capture tick, the frames that supplied
+    // a readable copy after it (age_ms: the newest one's lead) and the bound.
+    std::uint64_t shown_tick {}, bound_ms {};
+    unsigned newer_frames {};
   };
 
   // Known limitations: a violation whose frame's legal source meets a row's
@@ -246,7 +321,7 @@ namespace game3d_continuity {
   }
 
   constexpr int known(const violation &value) {
-    if (value.kind == violation_kind::stale || value.frame.limit == limitation::none) {
+    if (value.kind == violation_kind::stale || value.kind == violation_kind::stale_shown || value.frame.limit == limitation::none) {
       return -1;
     }
     for (std::size_t i = 0; i != gap_count; ++i) {
@@ -272,8 +347,8 @@ namespace game3d_continuity {
   }
 
   inline std::string describe(const violation &value) {
-    char text[600];
-    std::snprintf(text, sizeof(text), "%s in %s at present=%llu tick=%llu: frame legal=0x%x permitted=0x%x limitation=%s supplied_at=%llu age_ms=%llu readable_age_ms=%lld; record owner=%s state=%s reason=%s", name(value.kind), value.where, static_cast<unsigned long long>(value.present), static_cast<unsigned long long>(value.tick), unsigned(value.frame.legal), unsigned(value.frame.permitted), name(value.frame.limit), static_cast<unsigned long long>(value.frame.tick), static_cast<unsigned long long>(value.age_ms), value.readable_age_ms == UINT64_MAX ? -1ll : static_cast<long long>(value.readable_age_ms), sunshine_game3d::name(value.owner), sunshine_game3d::name(value.state), value.reason ? value.reason : "");
+    char text[700];
+    std::snprintf(text, sizeof(text), "%s in %s at present=%llu tick=%llu: frame legal=0x%x permitted=0x%x limitation=%s supplied_at=%llu age_ms=%llu readable_age_ms=%lld shown_tick=%llu newer_frames=%u bound_ms=%llu; record owner=%s state=%s reason=%s", name(value.kind), value.where, static_cast<unsigned long long>(value.present), static_cast<unsigned long long>(value.tick), unsigned(value.frame.legal), unsigned(value.frame.permitted), name(value.frame.limit), static_cast<unsigned long long>(value.frame.tick), static_cast<unsigned long long>(value.age_ms), value.readable_age_ms == UINT64_MAX ? -1ll : static_cast<long long>(value.readable_age_ms), static_cast<unsigned long long>(value.shown_tick), value.newer_frames, static_cast<unsigned long long>(value.bound_ms), sunshine_game3d::name(value.owner), sunshine_game3d::name(value.state), value.reason ? value.reason : "");
     return text;
   }
 
@@ -337,6 +412,7 @@ namespace game3d_continuity {
         presented_ = frame;
         real_presents_ = {now, real_presents_[0], real_presents_[1]};
         fresh_ = false;
+        readable(frame, now);
       }
       if (frame.limited & api_sources) {
         newest_limited_ = frame.tick ? frame.tick : now;
@@ -360,6 +436,13 @@ namespace game3d_continuity {
       }
       const auto owner = record.depth_owner;
       const auto &row = owner == source_slot::none ? record[source_slot::hold] : record[owner];
+      // The freshness rule reads what was certainly readable before this
+      // Present's decision, then looks at the copies from other queues again.
+      std::pair<unsigned, std::uint64_t> fresher {};
+      if ((owner == source_slot::fg_depth || owner == source_slot::scene_depth) && record.depth_tick_ms) {
+        fresher = readable_after(record.depth_tick_ms, owner == source_slot::fg_depth ? fg_depth_sources : scene_depth_sources);
+      }
+      look();
       // frame: the supply the violation is judged with (a generated
       // Present's is the frame it presents).
       const auto report = [&](violation_kind kind, std::uint64_t age, const supply &judged) {
@@ -376,6 +459,16 @@ namespace game3d_continuity {
         ++shown_;
         const bool generic = owner == source_slot::generic;
         shown_generic_ += generic;
+        if (const auto [newer, newest] = fresher; newer && real_presents_[2]) {
+          const auto bound = freshness_bound_ms((real_presents_[0] - real_presents_[2]) / 2);
+          if (newest - record.depth_tick_ms > bound) {
+            violation value {violation_kind::stale_shown, where, record.present, now, frame, newest - record.depth_tick_ms, owner, row.state, row.reason};
+            value.shown_tick = record.depth_tick_ms;
+            value.newer_frames = newer;
+            value.bound_ms = bound;
+            pending_.push_back(value);
+          }
+        }
         // The newest source of the shown rung's kind; a tick ahead of the
         // record's (another read of the clock) is age 0.
         const auto newest = generic ? newest_generic_ : newest_api_;
@@ -448,6 +541,8 @@ namespace game3d_continuity {
       next.newest_generic_ = newest_generic_;
       next.newest_readable_ = newest_readable_;
       next.newest_limited_ = newest_limited_;
+      next.frames_ = frames_;
+      next.copies_ = std::move(copies_);
       *this = std::move(next);
     }
 
@@ -498,6 +593,55 @@ namespace game3d_continuity {
       return frame.limit == limitation::none ? since_[0] : since_[1];
     }
 
+    // The freshness rule's supply history: a real Present's frame's copies
+    // the presenting queue can read, its own after that frame and those of
+    // another queue once the judge saw them complete (done, at a look after
+    // an earlier Present). A copy older than the source age (and the slack)
+    // can be newer than no copy a Present may show.
+    struct readable_copy {
+      std::uint64_t stamp {}, frame {};
+      std::uint8_t sources {};
+      std::function<bool()> completed;
+      bool done {};
+    };
+
+    void readable(const supply &frame, std::uint64_t now) {
+      ++frames_;
+      const auto stamp = frame.tick ? frame.tick : now;
+      if (const auto own = std::uint8_t(frame.legal & api_sources & ~frame.owned & ~frame.limited & ~frame.elsewhere)) {
+        copies_.push_back({stamp, frames_, own, {}});
+      }
+      for (const auto &[sources, probe] : frame.completions) {
+        copies_.push_back({stamp, frames_, sources, probe, false});
+      }
+      while (!copies_.empty() && copies_.front().stamp + sunshine_freshness::source_age_ms + tick_slack_ms < now) {
+        copies_.pop_front();
+      }
+    }
+
+    // Each copy from another queue: whether its work completed by now.
+    void look() {
+      for (auto &copy : copies_) {
+        copy.done = copy.done || (copy.completed && copy.completed());
+      }
+    }
+
+    // The frames that supplied a copy of sources certainly readable at this
+    // Present after tick, and the newest one's stamp.
+    std::pair<unsigned, std::uint64_t> readable_after(std::uint64_t tick, std::uint8_t sources) const {
+      unsigned frames {};
+      std::uint64_t last {}, newest {};
+      for (const auto &copy : copies_) {
+        if (!(copy.sources & sources) || copy.stamp <= tick || (copy.completed ? !copy.done : copy.frame >= frames_)) {
+          continue;
+        }
+        frames += copy.frame != last;
+        last = copy.frame;
+        newest = std::max(newest, copy.stamp);
+      }
+      return {frames, newest};
+    }
+
     // armed_: a Present showed depth since the last loss; showing_: the
     // previous Present did; fresh_: the last real Present showed a fresh
     // copy of a frame whose legal sources the presenting queue reads;
@@ -511,6 +655,8 @@ namespace game3d_continuity {
     std::array<std::uint64_t, 3> real_presents_ {};
     std::uint64_t last_legal_ {}, last_present_ {}, newest_api_ {}, newest_generic_ {}, newest_readable_ {}, newest_limited_ {};
     unsigned presents_ {}, legal_presents_ {}, shown_ {}, shown_generic_ {}, unrecorded_ {}, stalls_ {};
+    std::uint64_t frames_ {};
+    std::deque<readable_copy> copies_;
     std::array<row_tally, gap_count> rows_ {};
     std::vector<violation> pending_;
   };

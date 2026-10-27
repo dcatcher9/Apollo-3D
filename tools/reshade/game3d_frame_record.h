@@ -92,6 +92,11 @@ namespace sunshine_game3d {
     // The rung that decided this Present's depth: D1 or D2 with pixels, H
     // in mono under API ownership, or D3 when the Generic selector ran.
     source_slot depth_owner {source_slot::none};
+    // The capture tick (sunshine_scene_depth::frame::tick) of the API copy
+    // whose pixels this Present shows, fresh or held (D1 or D2 with pixels);
+    // 0 otherwise. Generic's copy is the presenting queue's own, made at the
+    // end of the frame it presents, and names none.
+    std::uint64_t depth_tick_ms {};
     // The UI rows' render (the UI adapter's frame sequence) and tick.
     std::uint64_t ui_sequence {}, ui_tick_ms {};
     std::array<source_status, source_slot_count> rows {};
@@ -200,6 +205,8 @@ namespace sunshine_game3d {
     // provider's readiness reason (fresh_copy, retained_copy or the cache's).
     bool copied {}, reused {};
     const char *display_reason {"not_recorded"};
+    // The capture tick of the copy shown (copied or reused); 0 without one.
+    std::uint64_t source_tick {};
   };
 
   void record_api_depth(frame_record &record, const api_depth_decision &decision, std::uint64_t present, std::uint64_t now);

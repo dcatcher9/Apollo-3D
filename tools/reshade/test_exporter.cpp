@@ -416,7 +416,7 @@ namespace {
       metadata.epoch = 8; metadata.viewport = 2; metadata.sequence = 30; metadata.tick = 1000;
       depth_capture::packet candidate;
       static_cast<sunshine_scene_depth::frame &>(candidate.metadata) = metadata;
-      candidate.metadata.sequence = 31;
+      candidate.metadata.sequence = 31; candidate.metadata.tick = 1030;
       candidate.width = previous.width; candidate.height = previous.height; candidate.format = previous.format;
       candidate.srv_format = previous.view_format; candidate.area = previous.area; candidate.capture_id = 501;
       candidate.pixel_ready = true;
@@ -428,15 +428,16 @@ namespace {
       const auto fresh = depth_capture::decide_display(selected, candidate, {}, {}, 1032);
       require(fresh.action == action::copy_fresh, "Frame record fixture lost its fresh copy");
       sunshine_game3d::record_api_depth(record, provider_decision(selected, {}, false, true, false, fresh, false,
-        reason::current_capture), 1, 1032);
+        reason::current_capture, depth_capture::status::ready, candidate.metadata), 1, 1032);
       const auto &fg = record[source_slot::fg_depth];
       const auto &scene = record[source_slot::scene_depth];
       const auto &hold = record[source_slot::hold];
       require(record.present == 1 && record.depth_owner == source_slot::scene_depth &&
           row_is(scene, source_state::ready, "fresh_copy") && scene.first_ready_ms == 1032 && scene.epoch == 8 &&
           scene.key.api == sunshine_game3d::source_api::streamline && scene.key.viewport == 2 && !scene.key.id &&
-          row_is(fg, source_state::inactive, "FG_off") && row_is(hold, source_state::inactive, "API_depth_ready"),
-        "The frame record did not name a fresh SR copy as scene depth");
+          row_is(fg, source_state::inactive, "FG_off") && row_is(hold, source_state::inactive, "API_depth_ready") &&
+          record.depth_tick_ms == candidate.metadata.tick,
+        "The frame record did not name a fresh SR copy as scene depth, with its capture tick");
       sunshine_game3d::record_generic_depth(record, {true}, 1, 1032);
       require(row_is(record[source_slot::generic], source_state::inactive, "API_depth_owner") &&
           record.depth_owner == source_slot::scene_depth, "Generic's row took the Present from API depth");
@@ -448,8 +449,9 @@ namespace {
       sunshine_game3d::record_api_depth(record, provider_decision(pending, {}, false, true, false, held, false,
         reason::no_completed_snapshot, depth_capture::status::recorded, previous.metadata), 2, 1100);
       require(record.depth_owner == source_slot::scene_depth && row_is(scene, source_state::held, "retained_copy") &&
-          scene.first_ready_ms == 1032 && row_is(hold, source_state::inactive, "API_depth_ready"),
-        "The frame record did not name the held copy, or restarted its first ready time");
+          scene.first_ready_ms == 1032 && row_is(hold, source_state::inactive, "API_depth_ready") &&
+          record.depth_tick_ms == previous.metadata.tick,
+        "The frame record did not name the held copy and its capture tick, or restarted its first ready time");
       // The held copy names its own source, not a pending capture of another
       // provider that the acquisition reported in front of it.
       auto other = pending; other.provider = provider_kind::ngx; other.source_id = 7; other.epoch = 9;
@@ -467,7 +469,7 @@ namespace {
         reason::not_attempted, depth_capture::status::failed), 3, 1250);
       require(record.depth_owner == source_slot::hold &&
           row_is(scene, source_state::refused, "failed", source_slot::hold) && scene.first_ready_ms == 1032 &&
-          row_is(hold, source_state::mono, "provider_associated"),
+          row_is(hold, source_state::mono, "provider_associated") && !record.depth_tick_ms,
         "The frame record did not name API ownership held in mono");
       // The association expired: Generic decides.
       sunshine_game3d::record_api_depth(record, provider_decision(failed, {}, false, false, false, expired, false,

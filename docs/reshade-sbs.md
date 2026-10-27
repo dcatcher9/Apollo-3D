@@ -592,7 +592,11 @@ its row and viewport), a state (`inactive`, `absent`, `refused`, `pending`, `rea
 `mono`), a reason (a static token, mostly the matching log, cache or enum name), an epoch, the row
 the Present fell back to, and when that key and epoch were first ready. `depth_owner` names the
 rung that decided the Present's depth: D1 or D2 with fresh or held pixels, H in mono under API
-ownership, or D3 when the Generic selector ran.
+ownership, or D3 when the Generic selector ran. `depth_tick_ms` is the capture tick of the API
+copy whose pixels the Present shows (D1 or D2, fresh or held; 0 otherwise), so a judge can tell
+which copy it showed (the freshness rule of the
+[session-level tests](../tools/reshade/README.md#session-level-tests)); Generic's copy is the
+presenting queue's own at the end of the frame it presents.
 
 The present thread writes the record where the decisions are made: the API provider's `begin`
 writes D1, D2 and H from its acquisition, FG scope, association, handoff and display decision

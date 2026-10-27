@@ -589,12 +589,31 @@ namespace {
     std::uint64_t fg_enabled_at {};
     std::map<std::uint64_t, unsigned> present_frames;
 
-    // What the frame being recorded supplies (the continuity supply log).
+    // What the frame being recorded supplies (the continuity supply log),
+    // and its copies recorded on another queue with the completion probe of
+    // each the contract copies out (the freshness rule).
     struct frame_supply {
-      std::uint8_t legal {}, limited {}, permitted {};
+      std::uint8_t legal {}, limited {}, permitted {}, elsewhere {};
       continuity::limitation limit {continuity::limitation::none};
       std::uint64_t tick {};
+      std::vector<std::pair<std::uint8_t, std::function<bool()>>> completions;
     } supply;
+
+    // A required copy of the frame's last decision, recorded on another
+    // queue: the freshness rule's supply. Called once its list executed on
+    // a queue whose fence reaches value when its work completed; copied_out:
+    // copied_out_elsewhere when it was recorded. A permitted copy may or may
+    // not have been made, so it neither counts nor moves the source's stamp.
+    void recorded_elsewhere(std::uint8_t source, bool copied_out, ID3D12Fence *fence, std::uint64_t value) {
+      const auto &made = decisions.back();
+      if (!made.legal || !requires_capture(made.expected)) {
+        return;
+      }
+      supply.elsewhere |= source;
+      if (auto probe = submitted_elsewhere(selected->resource.p, copied_out, fence, value)) {
+        supply.completions.emplace_back(source, std::move(probe));
+      }
+    }
 
     // A refusal recorded since the previous poll, and the step of the frame
     // that recorded it.
@@ -677,6 +696,7 @@ namespace {
     void create_queues() {
       game_work.create(game.p, D3D12_COMMAND_LIST_TYPE_DIRECT);
       dlssg_work.create(game.p, D3D12_COMMAND_LIST_TYPE_COMPUTE);
+      elsewhere_submitted.clear();  // The game device's sources are new.
     }
 
     // Retires every ring recording (as a game does at its end), once their
@@ -1192,9 +1212,11 @@ namespace {
         const abi_v2::resource_tag input {{nullptr, tag_guid, 1}, &resource, 0, 1, active_area};
         const base_structure *inputs[] {&view.base, &input.base};
         decide("sr_other_queue", local_case(declared, false, 0), continuity::sr_evaluate, {"evaluate"}, false, continuity::limitation::cross_queue_sr);
+        const bool copied_out = copied_out_elsewhere(selected->resource.p);
         returned(sl.evaluate(0, *token, inputs, 2, reinterpret_cast<void *>(native)), "slEvaluateFeature on the game's queue");
         poll("evaluate");
         game_work.execute(n, queue.p);
+        recorded_elsewhere(continuity::sr_evaluate, copied_out, game_work.done.p, game_work.value);
         other_queue_copy = GetTickCount64();
       }
       dlssg_evaluation(of<dlssg_form>(value, events::dlssg));
@@ -1273,6 +1295,20 @@ namespace {
       continuity_log.pending.owned = owned || held_off ? std::uint8_t(supply.legal & continuity::sr_evaluate) : std::uint8_t {};
       continuity_log.pending.limit = supply.legal ? continuity::limitation::none : supply.limit;
       continuity_log.pending.tick = supply.tick;
+      // The freshness rule: the frame's copies recorded on another queue,
+      // readable once complete, except SR copies a live FG scope keeps out as
+      // it keeps the presenting queue's own (owned), and copies of a source
+      // the presenting queue does not show: FG input without an FG scope.
+      continuity_log.pending.elsewhere = supply.elsewhere;
+      for (const auto &[source, probe] : supply.completions) {
+        if (source == continuity::sr_evaluate && (owned || held_off)) {
+          continue;
+        }
+        if (source == continuity::dlssg_input && !(fg_on && frame_generation_scope())) {
+          continue;
+        }
+        continuity_log.pending.completes(source, probe);
+      }
     }
 
     void dlssg_evaluation(frame_events::dlssg_form form) {
@@ -1312,12 +1348,14 @@ namespace {
         value.list = matrix::list_type::compute;
         value.depth = recorded(observed, read);
         decide("dlssg_compute", value, continuity::dlssg_input, {"dlssg"}, true, continuity::limitation::cross_queue_sr);
+        const bool copied_out = copied_out_elsewhere(selected->resource.p);
         require(ngx_evaluate(compute, feature, &dlssg_inputs, nullptr) == ngx_fixture::success, "DLSS-G's compute evaluation changed the SDK result");
         poll("dlssg");
         if (observed) {
           transition(compute, selected->resource.p, read, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         }
         dlssg_work.execute(n);
+        recorded_elsewhere(continuity::dlssg_input, copied_out, dlssg_work.done.p, dlssg_work.value);
         if (observed) {
           other_queue_copy = GetTickCount64();
         }

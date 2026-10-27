@@ -1691,6 +1691,38 @@ the runtime layer that includes it, judges every Present:
 > presents an earlier frame: after a Present that showed depth it holds that depth while the copy
 > is younger than the source age.
 
+Next to it, the freshness rule. Continuity alone accepts a Present that keeps showing an old copy
+within the source age while newer ones are readable, as Assassin's Creed Shadows' SR copies were
+shown 140-220 ms old before the copy-out (24312303):
+
+> A Present that shows API depth shows the newest copy of that source the presenting queue could
+> legally read for the frame it presents, within two of the fixture's frame intervals of it.
+
+The source is the shown rung's: D1, an FG scope's own depth (an FG tag's copy or DLSS-G's input),
+or D2, scene depth (an SR or RR evaluation's input, or a tag's copy outside FG); never the other,
+since FG keeps its viewport while it can supply (`frame_generation_holds`) and a switch between
+them restarts the placement calibration. The record names the shown copy by its capture tick
+(`depth_tick_ms`). The supply log says which copies the presenting queue could certainly read at
+the Present: its own legal source (one that meets no limitation and that no live FG scope keeps
+out) of a frame before the one the Present presents (a copy deferred to its frame's Present, R2,
+is read at the Present after it), and a legal copy recorded on another queue (`supply::elsewhere`)
+that the contract copies out ([Copy-out on the producer
+queue](../../docs/reshade-sbs.md)) and that the judge saw complete at an earlier Present (its
+fence, `supply::completions`). The fixture models the contract, never the add-on's report: a copy
+recorded on another queue is copied out when a copy of its source was submitted on such a queue
+within the source age before it was recorded; a source's first copy elsewhere keeps the Reset rule,
+past the source age in every fixture, and never counts. A Present is `stale_shown` when the
+newest such copy's stamp is more than `freshness_bound_ms` after the shown copy's capture tick:
+`freshness_frames` (2) of the fixture's frame intervals (its own pacing, the mean of its last two
+real Present intervals: the presented frame's own copy and the one before it, which the add-on may
+show instead), plus `tick_slack_ms` for two steps of `GetTickCount64`, as the stamp and the tick
+are separate reads. No row excuses it: no known limitation makes a readable copy unreadable. It
+passes on every provider script, L3 case and session timeline with the copy-out, and fails without
+it (10-27, the copy-out disabled in a temporary build): `sr-other-queue` holds its last
+presenting-queue copy 188 ms behind three completed game-queue copies (bound 132 ms at its 46 ms
+frames) before that copy expires, `dlssg-evaluation` holds an FG copy behind DLSS-G's completed
+compute copies, and 12 of the 43 fixed timelines fail it.
+
 The judge reads each Present's [frame record](../../docs/reshade-sbs.md#frame-record)
 (`SunshineGame3DTestFrameRecord`, copied in ReShade's `reshade_present` event) and the fixture's
 own supply log. Each frame function names, at the call that supplies it, what the frame supplies as
@@ -1720,9 +1752,10 @@ legal sources the presenting queue reads must hold it while that copy is certain
 source age (it is that frame's or the frame before's, a copy deferred to the next Present, so made
 after the real Present two before; less 40 ms), unless a copy recorded on another queue may have
 become readable meanwhile. A violation is a gap (armed, a legal source, no depth), an unestablished
-source (no depth within its window), a dropped hold (that generated Present without depth) or a
+source (no depth within its window), a dropped hold (that generated Present without depth), a
 stale one (a rung's pixels at least the source age, plus 40 ms for two steps of `GetTickCount64`,
-after the newest legal or permitted source of its kind: API for D1 and D2, Generic for D3).
+after the newest legal or permitted source of its kind: API for D1 and D2, Generic for D3) or
+`stale_shown` (the freshness rule above).
 
 The native provider fixture judges every Present of its run in segments, each frame script and
 the session's frames between scripts, with a fresh judge each, so that no segment's state or loss
