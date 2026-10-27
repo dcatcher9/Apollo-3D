@@ -199,7 +199,7 @@ namespace sunshine_streamline::native_observer {
     bool order_on();
     void order_enter(invocation &call, ID3D12CommandQueue *queue, bool blocking);
     bool order_quiet(const invocation &call);
-    void order_signal(ID3D12CommandQueue *queue, const invocation &call, ID3D12Fence *fence, UINT64 value);
+    void order_signal(ID3D12CommandQueue *queue, invocation &call, ID3D12Fence *fence, UINT64 value);
     void order_wait(const invocation &call, ID3D12Fence *fence, UINT64 value, bool quiet);
     void order_cpu_signal(ID3D12Fence *fence);
 
@@ -570,8 +570,9 @@ namespace sunshine_streamline::native_observer {
     // Signal slot must be installed first (no record otherwise: its CPU
     // signals would go unseen), its creation flags and device are checked and
     // its completed value is the baseline. A re-sight keeps what its private
-    // data remembers (poison, signaller).
-    std::uint64_t fence_id(ID3D12Fence *fence, std::uint64_t queue) {
+    // data remembers (poison, signaller). lost: the calling queue's record was
+    // dropped (evicted or reset) since the call took its ticket.
+    std::uint64_t fence_id(ID3D12Fence *fence, std::uint64_t queue, bool *lost = nullptr) {
       auto memory = read_fence(fence);
       if (memory.id) {
         AcquireSRWLockShared(&order::lock);
@@ -607,9 +608,13 @@ namespace sunshine_streamline::native_observer {
       const auto baseline = fence->lpVtbl->GetCompletedValue(fence);
       AcquireSRWLockExclusive(&order::lock);
       apply_order_reset();
-      // A call whose queue record a reset just dropped predates the model:
-      // it is not logged (its signal is pre-sight work for the next record).
-      if (!order::model.known_queue(queue)) { ReleaseSRWLockExclusive(&order::lock); return 0; }
+      // A call whose queue record was dropped since it took its ticket: the
+      // caller re-sights its queue (order_signal) or the wait is not logged.
+      if (!order::model.known_queue(queue)) {
+        ReleaseSRWLockExclusive(&order::lock);
+        if (lost) *lost = true;
+        return 0;
+      }
       if (!device || device != order::model.queue_device(queue)) mark(sunshine_queue_order::poison::foreign_device);
       memory.id = order::model.add_fence(device, baseline, {0, memory.signaller, memory.why}, why);
       memory = order::model.memory(memory.id);
@@ -629,17 +634,34 @@ namespace sunshine_streamline::native_observer {
       ReleaseSRWLockExclusive(&order::lock);
       if (after.id && (after.signaller != before.signaller || after.why != before.why)) write_fence(fence, after);
     }
-    void order_signal(ID3D12CommandQueue *, const invocation &call, ID3D12Fence *fence, UINT64 value) {
-      const restore_error incoming{GetLastError()};
-      // A signalling queue without a record poisons a fence already known.
-      const auto id = call.ticket ? fence_id(fence, call.order_queue) : read_fence(fence).id;
-      if (!id) return;
+    // Logs one queue Signal. False only with retry, when the call's queue
+    // record was dropped (evicted, or a reset) since it took its ticket. A
+    // signalling queue without a record poisons a fence already known.
+    bool log_signal(const invocation &call, ID3D12Fence *fence, UINT64 value, bool retry) {
+      bool lost = false;
+      auto id = call.ticket ? fence_id(fence, call.order_queue, &lost) : read_fence(fence).id;
+      if (lost && retry) return false;
+      if (lost) id = read_fence(fence).id;
+      if (!id) return true;
       const auto completed = fence->lpVtbl->GetCompletedValue(fence);
+      bool dropped = false;
       order_update(fence, id, [&] {
-        // A record a reset dropped since the call entered: not logged.
-        if (call.ticket && !order::model.known_queue(call.order_queue)) return;
-        order::model.signal(call.ticket ? call.order_queue : 0, id, value, call.ticket, completed, GetTickCount64());
+        const bool recorded = call.ticket && !lost && order::model.known_queue(call.order_queue);
+        if (call.ticket && !recorded && retry) { dropped = true; return; }
+        order::model.signal(recorded ? call.order_queue : 0, id, value, recorded ? call.ticket : 0, completed, GetTickCount64());
       });
+      return !dropped;
+    }
+    void order_signal(ID3D12CommandQueue *queue, invocation &call, ID3D12Fence *fence, UINT64 value) {
+      const restore_error incoming{GetLastError()};
+      // The native call is not forwarded yet: a record dropped since the call
+      // took its ticket is re-sighted with a fresh ticket, so a signal never
+      // goes unlogged against a live fence record (a pending wait would
+      // resolve to a later signal of its queue, after work this one precedes).
+      if (log_signal(call, fence, value, true)) return;
+      call.order_queue = call.ticket = 0;
+      order_enter(call, queue, true);
+      log_signal(call, fence, value, false);
     }
     void order_wait(const invocation &call, ID3D12Fence *fence, UINT64 value, bool quiet) {
       const restore_error incoming{GetLastError()};

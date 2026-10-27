@@ -185,7 +185,10 @@ namespace sunshine_queue_order {
       if (completed != UINT64_MAX) f->seen_max = std::max(f->seen_max, completed);
       // An in-flight value is a logged value for the unobserved check
       // (finding 16): append before checking what completed.
-      const auto *q = queue_of(queue);
+      auto *q = queue_of(queue);
+      // A queue that only signals (an async producer) is in use: never the
+      // least recently used record while stale ones of destroyed queues stay.
+      if (q) q->last_use = ++clock_;
       if (f->why == poison::none) {
         if (!q) set_poison(*f, poison::unrecorded_signaller, now);
         else if (value == UINT64_MAX) set_poison(*f, poison::removed, now);

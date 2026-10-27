@@ -11,8 +11,10 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <stdexcept>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #if defined(__GNUC__)
@@ -149,7 +151,15 @@ namespace {
     ++device->references;
     return S_OK;
   }
-  NOINLINE UINT64 STDMETHODCALLTYPE order_completed(void *native) { return static_cast<order_object *>(native)->value; }
+  // Runs once, inside the next GetCompletedValue (another thread's work
+  // between a hooked call's steps).
+  std::function<void()> order_on_completed;
+  // A slow GPU: queue Signals do not complete.
+  bool order_defer_signals{};
+  NOINLINE UINT64 STDMETHODCALLTYPE order_completed(void *native) {
+    if (auto hook = std::exchange(order_on_completed, {})) hook();
+    return static_cast<order_object *>(native)->value;
+  }
   NOINLINE D3D12_FENCE_FLAGS STDMETHODCALLTYPE order_flags(void *native) { return static_cast<order_object *>(native)->flags; }
   NOINLINE void STDMETHODCALLTYPE order_execute(void *, UINT, void *const *) {
     ++order_executions;
@@ -160,7 +170,7 @@ namespace {
   }
   NOINLINE HRESULT STDMETHODCALLTYPE order_queue_signal(void *, void *fence, UINT64 value) {
     ++order_signals;
-    if (SUCCEEDED(queue_signal_result)) static_cast<order_object *>(fence)->value = value;
+    if (SUCCEEDED(queue_signal_result) && !order_defer_signals) static_cast<order_object *>(fence)->value = value;
     return queue_signal_result;
   }
   NOINLINE HRESULT STDMETHODCALLTYPE order_queue_wait(void *, void *, UINT64) { ++order_waits; return queue_wait_result; }
@@ -627,6 +637,76 @@ namespace {
         ordered(present, producer).why == sunshine_queue_order::refusal::disabled, "QueueFenceOrder=0 still took tickets or gave verdicts");
     std::puts("PASS queue order: Signal/Wait/CPU Signal hooks, tickets and the quiet bit, suppressed tickets, failed calls, shared and CPU-signalled fences, persisted poison, slot replacement and QueueFenceOrder=0");
   }
+
+  // The order host's review cells (10-27), on vtables of their own.
+  struct order_tables {
+    std::array<void *, queue_wait_slot + 1> queue{};
+    std::array<void *, 12> fence{};
+    std::array<void *, 3> device{};
+    order_tables() {
+      for (auto *table : {queue.data(), fence.data(), device.data()}) {
+        table[0] = reinterpret_cast<void *>(order_query); table[1] = reinterpret_cast<void *>(order_add_ref);
+        table[2] = reinterpret_cast<void *>(order_unref);
+      }
+      for (auto *table : {queue.data(), fence.data()}) {
+        table[3] = reinterpret_cast<void *>(order_get_data); table[4] = reinterpret_cast<void *>(order_set_data);
+        table[7] = reinterpret_cast<void *>(order_get_device);
+      }
+      queue[execute_slot] = reinterpret_cast<void *>(order_execute);
+      queue[queue_signal_slot] = reinterpret_cast<void *>(order_queue_signal);
+      queue[queue_wait_slot] = reinterpret_cast<void *>(order_queue_wait);
+      fence[8] = reinterpret_cast<void *>(order_completed);
+      fence[fence_signal_slot] = reinterpret_cast<void *>(order_cpu_signal);
+      fence[11] = reinterpret_cast<void *>(order_flags);
+    }
+  };
+  void order_review_cases() {
+    observer::set_queue_order(true);
+    static order_tables tables;
+    const auto execute = [](order_object &queue) {
+      reinterpret_cast<execute_fn>(queue.vtable[execute_slot])(&queue, 0, nullptr);
+      return observer::last_execute_position();
+    };
+    const auto signal = [](order_object &queue, order_object &on, UINT64 value) {
+      return reinterpret_cast<queue_fence_fn>(queue.vtable[queue_signal_slot])(&queue, &on, value);
+    };
+    const auto wait = [](order_object &queue, order_object &on, UINT64 value) {
+      return reinterpret_cast<queue_fence_fn>(queue.vtable[queue_wait_slot])(&queue, &on, value);
+    };
+    const auto ordered = [](order_object &reader, const observer::position &at) {
+      return observer::queue_ordered(reinterpret_cast<std::uintptr_t>(&reader), at);
+    };
+    order_object device{tables.device.data(), object_kind::device};
+    order_object producer{tables.queue.data(), object_kind::queue, &device}, reader{tables.queue.data(), object_kind::queue, &device};
+    order_object fence{tables.fence.data(), object_kind::unknown, &device};
+    observer::observe_queue(reinterpret_cast<std::uintptr_t>(&producer));
+    require(observer::install_pending(), "the review queue's order slots were not installed");
+    require(signal(producer, fence, 1) == S_OK && observer::install_pending(), "the review fence's CPU Signal slot was not installed");
+    // The installation's model reset applies at the next locked call: a
+    // reader's first wait (unsettled, refused). Then the fence settles.
+    require(wait(reader, fence, 1) == S_OK, "the reader's first wait failed");
+    const auto settling = execute(producer);
+    require(signal(producer, fence, 2) == S_OK && wait(reader, fence, 2) == S_OK && ordered(reader, settling).ordered,
+      "the review fence did not settle");
+
+    // A queue record evicted between a Signal's ticket and its log: the
+    // native call is not forwarded yet, so the signal is logged on the
+    // re-sighted record. Dropped, the reader's wait for it would resolve to
+    // the next signal, after a copy-out that this one precedes.
+    order_defer_signals = true;
+    require(signal(producer, fence, 3) == S_OK, "a slow signal failed");
+    std::vector<order_object> others(32, order_object{tables.queue.data(), object_kind::queue, &device});
+    order_on_completed = [&] { for (auto &other : others) execute(other); };
+    require(signal(producer, fence, 4) == S_OK && !order_on_completed, "the evicting sightings did not run inside the Signal");
+    require(wait(reader, fence, 4) == S_OK, "the reader's wait failed");
+    const auto copy = execute(producer);
+    require(copy && copy.quiet && signal(producer, fence, 5) == S_OK, "the re-sighted producer took no position");
+    require(!ordered(reader, copy).ordered,
+      "a Signal dropped with its evicted queue record let the reader's wait resolve to a signal after the copy-out");
+    require(wait(reader, fence, 5) == S_OK && ordered(reader, copy).ordered, "a wait for the signal after the copy-out did not order it");
+    order_defer_signals = false;
+    std::puts("PASS queue order review: a Signal whose queue record was evicted after its ticket is logged on the re-sighted record");
+  }
 }
 int main() {
   bool minhook = false;
@@ -976,6 +1056,7 @@ int main() {
     std::puts("PASS shared Streamline slot-9 thunk is left untouched; a replaced barrier slot revokes state evidence");
 #endif
     order_cases();
+    order_review_cases();
     observer::shutdown();
     require(MH_DisableHook(MH_ALL_HOOKS) == MH_OK, "fixture hook disable failed");
     require(MH_Uninitialize() == MH_OK, "fixture MinHook teardown failed"); minhook = false;

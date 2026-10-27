@@ -5004,7 +5004,10 @@ ticket `t = ++entered` at entry; a call is *quiet* when no later ticket of that 
 before its native call returned. A quiet call natively precedes every call with a larger ticket on
 its queue; a call that is not quiet is never the earlier side of an edge (`overlap`). The add-on's
 own calls (its copy-out lists) take their own tickets in the suppression scope; a proxy's call
-forwarded to the native queue shares its ticket.
+forwarded to the native queue shares its ticket. A queue record evicted (the least recently used
+of 32; a queue's signals keep its record in use) or reset between a Signal's ticket and its log is
+re-sighted, and the Signal, not yet forwarded, is logged on it with a fresh ticket: a signal never
+goes unlogged against a live fence record.
 
 **Edges.** A wait of queue R on fence G for value w orders R after the first logged signal of G
 that reaches w, so after every quiet call its signalling queue made before that signal. Chains

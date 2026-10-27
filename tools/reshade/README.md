@@ -2349,7 +2349,7 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   probe.
 - [`test_queue_order.cpp`](test_queue_order.cpp) (`reshade_queue_order`) pins the queue-order model
   of [`queue_order.h`](queue_order.h) ([Queue order](../../docs/reshade-sbs.md#queue-order)): one
-  cell per fail-closed rule (baseline, unsettled and the settle marker above every seen value, CPU
+  cell per fail-closed rule (a signalling queue never the least recently used record, baseline, unsettled and the settle marker above every seen value, CPU
   signal, second signaller and its cookie across a reset, decreasing and `UINT64_MAX` values, a
   completed value no logged signal set, a signal in flight that is not unobserved, a queue without
   a record, device removal, foreign and cross device, ring eviction, a reset forgetting positions
@@ -2369,7 +2369,9 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   suppressed `ExecuteCommandLists` taking its own ticket; the quiet bit for two threads on one
   queue; a failed Wait not logged; a shared fence; a failing CPU Signal poisoning its fence, which
   stays poisoned after its records were dropped; a third party's Signal slot resetting the order
-  model only; and `QueueFenceOrder=0`.
+  model only; and `QueueFenceOrder=0`. Its review cells (10-27): a Signal whose queue record a full
+  table evicted between its ticket and its log is logged on the re-sighted record (dropped, the
+  reader's pending wait resolved to the next signal, after a copy-out it precedes).
 - [`test_proven_state.cpp`](test_proven_state.cpp) (`reshade_proven_state`) pins the per-resource
   last-proven state of [`proven_state.h`](proven_state.h), which admits the Generic end-of-frame
   copy: a creation state holds on every queue until a list uses the texture and not once enhanced

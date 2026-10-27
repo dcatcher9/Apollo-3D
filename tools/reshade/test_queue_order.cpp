@@ -74,6 +74,17 @@ namespace {
   }
 
   void cells() {
+    // A queue that only signals (an async producer) is in use: a full table
+    // of stale records evicts one of those, never it.
+    {
+      host h;
+      settle(h);
+      for (int q = 1; q != 32; ++q) h.queue(q);
+      h.signal(0, 0, 2);
+      h.queue(40);
+      require(h.m.known_queue(h.queue_ids[0]) && !h.m.known_queue(h.queue_ids[1]),
+        "a signalling queue was the least recently used record");
+    }
     // Positive: the reader waits after the producer's signal.
     {
       host h;
