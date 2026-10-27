@@ -3458,6 +3458,11 @@ namespace {
       // (the presenting queue, as these games' presenting queues do; none in
       // the in-flight cases without that wait).
       ID3D12CommandQueue *game_queue_waiter = queue.p;
+      // The clock just before each game-queue SR evaluation, after its
+      // pacing: the previous frame's copy, captured before that frame's
+      // Present and at least ring_pace_ms earlier, has an older capture tick
+      // (a GetTickCount64 step is shorter), and this frame's copy no older.
+      std::uint64_t game_queue_stamp = 0;
       // FG off: the viewport's SR evaluation with its own depth input, on
       // the presenting queue's list (sr_evaluate) or the game queue's.
       const auto present_queue_sr = [this] {
@@ -3468,6 +3473,7 @@ namespace {
       const auto game_queue_sr = [&] {
         using namespace sunshine_streamline;
         Sleep(ring_pace_ms);
+        game_queue_stamp = GetTickCount64();
         abi_v2::frame_token *token{}; const auto frame = ++fg_frame;
         require(sl.new_token(token, &frame) == 0 && token, "Game-queue SR did not supply a frame token");
         last_token = token;
@@ -3530,7 +3536,7 @@ namespace {
         D3D12_COMMAND_QUEUE_DESC desc{}; desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
         checked(game->CreateCommandQueue(&desc, IID_PPV_ARGS(third.put())), "Create the game's third queue");
       }
-      std::uint64_t gate_value = 0, handoff_value = 0, copy_tick = 0;
+      std::uint64_t gate_value = 0, handoff_value = 0;
       enum class order_form { waits, no_wait, cpu_signal, second_signaller };
       const auto in_flight = [&](const char *name, order_form form) {
         unsigned in_flight_frames = 0, in_flight_shown = 0;
@@ -3553,7 +3559,6 @@ namespace {
               auto *const game_queue = game_ring.queue.p;
               checked(game_queue->Wait(gate.p, ++gate_value), "Hold the game queue until after its frame's Present");
               script_order.wait(game_queue, gate.p, gate_value);
-              copy_tick = GetTickCount64();
               game_queue_sr();
               if (form != order_form::cpu_signal && form != order_form::second_signaller) return;
               checked(game_queue->Signal(handoff.p, ++handoff_value), "Signal the handoff fence after the game queue's frame");
@@ -3576,7 +3581,7 @@ namespace {
               present_frame();
               ++in_flight_frames;
               const auto &record = newest_record();
-              if (record.depth_tick_ms < copy_tick) continue;
+              if (record.depth_tick_ms < game_queue_stamp) continue;
               // This frame's copy, gated until after this Present: a read in
               // flight, which only the script's own fences can order.
               ++in_flight_shown;
