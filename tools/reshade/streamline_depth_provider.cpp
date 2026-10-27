@@ -824,6 +824,19 @@ namespace sunshine_streamline::provider {
       const sunshine_game3d::slow_step step("depth capture acquisition");
       depth_capture::acquire(runtime->get_command_queue()->get_native(), present, data->frame, acquisition, &capture_info, selection);
     }
+    // O1 (fail-safe): a copy read in flight on a fence that a signal first
+    // submitted after that read has since poisoned (late_conflict) may hold
+    // pixels its producer had not written yet; it is not held any further,
+    // from the first Present after the conflict was seen. Decided before
+    // anything reads the retained copy (the FG hold, the association), so a
+    // fresh candidate of this Present stands in at once (until 10-27 a
+    // silent scope still held the conflicted FG copy's place, and the
+    // Present was mono), and its reason survives the display decision.
+    bool late_conflict = false;
+    if (const auto held = data->cache.reference().capture_id; held && depth_capture::read_conflicted(held)) {
+      data->cache.invalidate("late_conflict");
+      late_conflict = true;
+    }
     // FG keeps its viewport while it can supply (frame_generation_holds): a
     // silent scope's ordinary candidate, fresh or pending, stands in only
     // once the scope's own newest copy can no longer be held, so a frame
@@ -948,12 +961,6 @@ namespace sunshine_streamline::provider {
     sunshine_depth::frame_depth captured;
     bool copied = false;
     const auto reuse_tick = GetTickCount64();
-    // O1 (fail-safe): a copy read in flight on a fence that a signal first
-    // submitted after that read has since poisoned (late_conflict) may hold
-    // pixels its producer had not written yet; it is not held any further,
-    // from the first Present after the conflict was seen.
-    if (const auto held = data->cache.reference().capture_id; held && depth_capture::read_conflicted(held))
-      data->cache.invalidate("late_conflict");
     const auto &cached = data->cache.depth();
     const auto prior_depth_age = cached.ready && reuse_tick >= cached.provided.tick ?
       reuse_tick - cached.provided.tick : UINT64_MAX;
@@ -1015,9 +1022,9 @@ namespace sunshine_streamline::provider {
         data->output = std::move(reused);
         display = display_status::reused_depth;
       }
-    } else {
+    } else if (!late_conflict) {
       // Once invalidated, only a successful new copy can establish another
-      // cache entry.
+      // cache entry. An O1 drop keeps its own reason.
       data->cache.invalidate(update.reason);
     }
     track_render_size(*data, copied, display == display_status::reused_depth, available);

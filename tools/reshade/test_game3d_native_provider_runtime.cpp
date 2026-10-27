@@ -3623,6 +3623,10 @@ namespace {
                 static_cast<unsigned long long>(after.depth_tick_ms));
               require(!game3d_continuity::shows_depth(after),
                 "A Present held a copy read in flight on a fence that a late signal then poisoned (O1: not held any further)");
+              // The loss names O1 (until 10-27 the display decision replaced
+              // late_conflict with no_retained_depth in the same Present).
+              require(reshade_log_contains({"Sunshine depth readiness: lost", "reason=late_conflict"}),
+                "The Present that stopped holding a late-conflicted copy did not log reason=late_conflict");
             }
             if (form == order_form::waits || form == order_form::late_signaller) {
               // The first frame may still show the warm-up's copy while the
