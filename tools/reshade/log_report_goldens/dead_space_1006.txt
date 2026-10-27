@@ -23,7 +23,7 @@ Game 3D readiness: Dead Space.exe  22:51:05 to 22:52:13 (1m07s, exited)
          22:51:21 Streamline conflicting_state
 [INFO] Depth losses: 2 episodes, 2.2 per streamed minute, 2.0 s without depth in the logged ones; retained_depth_expired 2
 [PASS] Export: never paused
-[WARN] Present hitches: 1 outside resets, FG switches and overlay opening, worst 33.8 ms
+[WARN] Present hitches: 1 not explained by a reset, FG switch or overlay opening, worst 33.8 ms
          22:51:31 render section (no step named; the slowest Present of 22:51:21-22:51:31) 33.8 ms
 [INFO] Diagnostics: Diagnostics=0: no per-pass GPU timing (its lines are absent by design)
 [INFO] Game 3D cost: CPU 0.32 ms mean (1128.4 max) over 6888 Presents; GPU timing off (Diagnostics=0)

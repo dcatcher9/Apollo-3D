@@ -25,7 +25,7 @@ Game 3D readiness: HogwartsLegacy.exe  23:00:56 to 23:02:56 (1m59s, exited)
 [PASS] Observation losses: lifecycle 1
 [INFO] Depth losses: 6 episodes (1 counted but not logged), 5.7 per streamed minute, 1.9 s without depth in the logged ones; retained_depth_expired 4, source_handoff 1
 [PASS] Export: runtime_reset 1
-[WARN] Present hitches: 1 outside resets, FG switches and overlay opening, worst 1407.6 ms
+[WARN] Present hitches: 1 not explained by a reset, FG switch or overlay opening, worst 1407.6 ms
          23:01:21 setup section (no step named; the slowest Present of 23:01:11-23:01:21) 1407.6 ms
 [INFO] Diagnostics: Diagnostics=0: no per-pass GPU timing (its lines are absent by design)
 [INFO] Game 3D cost: CPU 0.22 ms mean (1407.6 max) over 15446 Presents; GPU timing off (Diagnostics=0)

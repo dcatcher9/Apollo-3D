@@ -37,7 +37,7 @@ Game 3D readiness: bf6.exe  21:21:59 to 21:26:51 (4m51s, ended without exiting (
          21:26:14 sdk_failure at finish_evaluation sdk_result=39 (eWarnOutOfVRAM)
 [INFO] Depth losses: 7 episodes, 1.5 per streamed minute, 74.7 s without depth in the logged ones; retained_depth_expired 3, depth_shape_changed 2, no_retained_depth 1, source_not_associated 1
 [PASS] Export: runtime_reset 2
-[WARN] Present hitches: 1 outside resets, FG switches and overlay opening, worst 8.1 ms
+[WARN] Present hitches: 1 not explained by a reset, FG switch or overlay opening, worst 8.1 ms
          21:25:11 depth section (no step named; the slowest Present of 21:25:01-21:25:11) 8.1 ms
 [INFO] Diagnostics: Diagnostics=0: no per-pass GPU timing (its lines are absent by design)
 [INFO] Game 3D cost: CPU 0.12 ms mean (9.4 max) over 37518 Presents; GPU timing off (Diagnostics=0)

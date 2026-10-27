@@ -175,7 +175,8 @@ VRAM_NEAR_S = 1.0
 DEPTH_FLIP_STEPS = frozenset((
     'native depth frame', 'depth display retirement', 'depth present observation', 'depth list coverage report',
     'frame generation query', 'depth readiness trace', 'API depth binding', 'generic capture switch',
-    'generic challenger release', 'generic depth rebinding', 'depth capture acquisition', 'depth display preparation'))
+    'generic challenger release', 'generic depth rebinding', 'depth capture acquisition', 'depth display preparation',
+    'depth display retire signal', 'depth present observation lock'))
 # The add-on's Diagnostics switch (game3d_diagnostics.h): off by default, which records no per-pass GPU timing.
 DIAGNOSTICS = re.compile(r'Sunshine Game 3D: diagnostics (on|off) \(Diagnostics=(\d)\)')
 GPU_PROFILE = re.compile(r'\bgpu_profile=(\w+)')
@@ -289,6 +290,14 @@ LOSS_ROUTINE = ('lifecycle', 'token_replaced')
 LOSS_FAULT = ('invalid_input', 'sdk_failure', 'test_injected')
 LOSS_BURST, LOSS_BURST_S = 3, 60.0
 SETTLE_S = 3.0  # Recalibration and holds after an FG switch or runtime reset.
+# The one step whose hitch a reset, FG switch or overlay opening explains: it rebuilds the export ring and prepares the
+# overlay compositor. Any other step's hitch is listed wherever it falls (until 10-27 every step's was excused there,
+# which hid ACS 10-27b's 17.2 and 81.4 ms depth display retirements).
+SETTLE_HITCH_STEPS = frozenset(('stereo export',))
+# Every step over its threshold logs, an enclosing one after its inner one (game3d_slow_step.h): a hitch line this soon
+# after the previous one of a stall, at least as long, is an enclosing step of the same stall (the slack is the async
+# log writer's stamping).
+NESTED_HITCH_S = 0.1
 SWITCH_LEAD_S = 0.25  # A switch's own depth loss may be logged this long before the switch line (async log order).
 CALIBRATION_MIN_S = 0.1  # A run without placement that had less depth than this calibrated nothing.
 LOG_GATE_S = 1.0  # A changed controller state waits this long after its previous line (diagnostic_log_gate.h).
@@ -1373,9 +1382,11 @@ def evaluate(s: Session) -> list[Check]:
     export_checks(s, add)
 
     # A runtime reset or FG switch rebuilds the export ring and opening the
-    # ReShade overlay prepares its compositor: one slow present each is expected.
+    # ReShade overlay prepares its compositor: one slow present each is expected
+    # in the step that does that work (SETTLE_HITCH_STEPS), and only there.
     expected_marks = s.settle + s.overlay
-    expected = [h for h in s.hitches if any(0 <= h[0] - mark <= SETTLE_S for mark in expected_marks)]
+    expected = [h for h in s.hitches if h[1] in SETTLE_HITCH_STEPS and
+                any(0 <= h[0] - mark <= SETTLE_S for mark in expected_marks)]
     unexpected = [h for h in s.hitches if h not in expected]
     # A timing window's slowest Present over the hitch threshold with no hitch line in that window was slow in a
     # section without a named step (before 10-22 the render section had none). Its time within the window is unknown:
@@ -1392,9 +1403,18 @@ def evaluate(s: Session) -> list[Check]:
 
     def named(what: str) -> str:
         return ' (depth-source flip step)' if what in DEPTH_FLIP_STEPS else ''
+    # One entry per stall, named by its innermost step: the steps around it would crowd other stalls out.
+    stalls: list[list[tuple[float, str, float]]] = []
+    for hitch in sorted(unexpected, key=lambda h: h[0]):
+        last = stalls[-1][-1] if stalls else None
+        if last and hitch[0] - last[0] <= NESTED_HITCH_S and hitch[2] >= last[2] - 0.1:
+            stalls[-1].append(hitch)
+        else:
+            stalls.append([hitch])
+    unexpected = [stall[0] for stall in stalls]
     if unexpected or unnamed:
         worst = sorted(unexpected + unnamed, key=lambda h: -h[2])[:3]
-        add(Check('WARN', 'Present hitches', f'{len(unexpected) + len(unnamed)} outside resets, FG switches and '
+        add(Check('WARN', 'Present hitches', f'{len(unexpected) + len(unnamed)} not explained by a reset, FG switch or '
                                              f'overlay opening, worst {worst[0][2]:.1f} ms',
                   [f'{clock(t)} {what} {ms:.1f} ms{named(what)}' for t, what, ms in worst]))
     else:

@@ -786,6 +786,26 @@ class ReadinessReport(unittest.TestCase):
         self.assertEqual(expected['Present hitches'].status, 'PASS')
         self.assertEqual(run(BASE + [line('10:00:12', hitch, 'WARN')])['Present hitches'].status, 'WARN')
 
+    def test_depth_hitches_at_fg_switches_and_overlay_are_listed(self):
+        # ACS 10-27b (real lines): 2.2 s after the overlay opened and 0.46 s after FG On, both depth display
+        # retirements were excused as settling, and the report said 'worst 10.1 ms'. Only the export ring rebuild and
+        # the overlay compositor ('stereo export') are explained by a switch or the overlay; a depth step never is.
+        retire = '[Sunshine 3D] Sunshine Game 3D hitch: depth display retirement took {} ms on the present thread'
+        # Its enclosing steps log after it, as each stall's do: one entry per stall.
+        outer = '[Sunshine 3D] Sunshine Game 3D hitch: Streamline depth acquisition took {} ms on the present thread'
+        checks = run(BASE + [line('10:00:06', '[Sunshine 3D] Sunshine SBS: ReShade overlay opened; composing'),
+                             line('10:00:08', retire.format('17.2'), 'WARN'),
+                             line('10:00:08', outer.format('17.3'), 'WARN'),
+                             line('10:00:10', '[Sunshine 3D] Sunshine SBS: export inactive (runtime_reset); waiting'),
+                             line('10:00:10', retire.format('81.4'), 'WARN'),
+                             line('10:00:10', outer.format('81.4'), 'WARN')])
+        self.assertEqual(checks['Present hitches'].status, 'WARN')
+        self.assertIn('2 not explained by a reset, FG switch or overlay opening, worst 81.4 ms',
+                      checks['Present hitches'].detail)
+        self.assertEqual(checks['Present hitches'].times,
+                         ['10:00:10 depth display retirement 81.4 ms (depth-source flip step)',
+                          '10:00:08 depth display retirement 17.2 ms (depth-source flip step)'])
+
     def test_export_pauses_are_judged_by_their_class(self):
         def pause(t, reason, kind=None):
             return line(t, f'[Sunshine 3D] Sunshine SBS: export inactive ({reason}' + (f', {kind}' if kind else '')

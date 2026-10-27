@@ -32,7 +32,7 @@ Game 3D readiness: ACShadows.exe  21:58:54 to 22:01:51 (2m56s, ended without exi
          21:59:51 NGX incomplete_state
          21:59:51 API incomplete_state
 [PASS] Export: not_foreground 2, runtime_reset 1
-[WARN] Present hitches: 1 outside resets, FG switches and overlay opening, worst 8.9 ms
+[WARN] Present hitches: 1 not explained by a reset, FG switch or overlay opening, worst 8.9 ms
          22:01:04 stereo export 8.9 ms
 [INFO] Diagnostics: Diagnostics=0: no per-pass GPU timing (its lines are absent by design)
 [INFO] Game 3D cost: CPU 0.14 ms mean (50.8 max) over 8839 Presents; GPU timing off (Diagnostics=0)
