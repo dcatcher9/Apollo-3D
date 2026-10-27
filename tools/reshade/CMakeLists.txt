@@ -671,6 +671,18 @@ if(BUILD_TESTING)
     add_test(NAME reshade_contract_matrix_device COMMAND reshade_contract_matrix_device_tests)
     set_tests_properties(reshade_contract_matrix_device PROPERTIES TIMEOUT 180 LABELS "contract;device" RESOURCE_LOCK gpu
       SKIP_RETURN_CODE 77)
+    # The queue-order model on real queues (README, Queue order device
+    # cells): the native observer's hooks on the first hardware adapter (else
+    # WARP) under the debug layer, which validates every cell. It skips (77)
+    # without the debug layer.
+    add_executable(reshade_queue_order_device_tests test_queue_order_device.cpp)
+    target_compile_definitions(reshade_queue_order_device_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_link_libraries(reshade_queue_order_device_tests PRIVATE sunshine_game3d_core_probe_test_archive d3d12 dxgi dxguid)
+    if(MINGW)
+      target_link_options(reshade_queue_order_device_tests PRIVATE -static)
+    endif()
+    add_test(NAME reshade_queue_order_device COMMAND reshade_queue_order_device_tests)
+    set_tests_properties(reshade_queue_order_device PROPERTIES TIMEOUT 60 LABELS "device" RESOURCE_LOCK gpu SKIP_RETURN_CODE 77)
     target_compile_definitions(reshade_depth_queue_cycle_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_link_libraries(reshade_depth_queue_cycle_test PRIVATE sunshine_game3d_core_archive)
     if(MINGW)

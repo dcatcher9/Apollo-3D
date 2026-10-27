@@ -2389,6 +2389,15 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   (soundness; at least 200 such verdicts), and fixed positive scripts must be ordered by both
   (completeness). Dropping the first-signal resolution, the hop quiet rule, the settle, baseline,
   second-signaller or overlap check fails a cell.
+- `reshade_queue_order_device` ([`test_queue_order_device.cpp`](test_queue_order_device.cpp), label
+  `device`) runs the queue-order model on real queues of the first hardware adapter (else WARP)
+  under the D3D12 debug layer, through the native observer's hooks as the capture owner installs
+  them. The producer queue renders behind a gate the CPU opens only after the verdict, so every
+  read is still in flight when the model decides: a reader that waits after the producer's signal,
+  and one whose wait was submitted before that signal, are ordered and read back exactly what the
+  render wrote; a wait satisfied by a signal before the producer, a CPU signal, a second signaller
+  and a `D3D12_FENCE_FLAG_SHARED` fence each refuse. The debug layer stays clean (a refused cell's
+  reader reads nothing, as its read would race the render). It skips (77) without the debug layer.
 - `reshade_streamline_native_observer` ([`test_streamline_native_observer.cpp`](test_streamline_native_observer.cpp))
   also runs the order family's hooks on COM-shaped fixtures: the method table; Signal and Wait
   discovered by `observe_queue`; a fence recorded only once its CPU Signal slot is installed and
