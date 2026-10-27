@@ -2418,7 +2418,10 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   signal, second signaller and its cookie across a reset, decreasing and `UINT64_MAX` values, a
   completed value no logged signal set, a signal in flight that is not unobserved, a queue without
   a record, device removal, foreign and cross device, ring eviction, a reset forgetting positions
-  while a re-sighted fence keeps its poison, late conflicts and their expiry), the positive chains
+  while a re-sighted fence keeps its poison, late conflicts and their expiry, and each way a
+  relied read fails closed: the decisive fence after four other waited ones, a chain longer than a
+  verdict holds, a model reset, an evicted fence record, a fence poisoned between the verdict and
+  the read, and a live read evicted by newer ones), the positive chains
   (after-signal, wait-before-signal, two and three hops) and the negative ones (a wait satisfied
   before the producer, a non-quiet producer or hop wait, a hop wait after the hop's signal). An
   INDEPENDENT brute-force oracle then explores every GPU interleaving of 20000 generated scripts

@@ -505,7 +505,7 @@ namespace sunshine_streamline::native_observer {
     // Requires order::lock exclusive: applies a deferred coverage reset.
     void apply_order_reset() {
       if (!order::reset_pending.load(std::memory_order_acquire) || !order::reset_pending.exchange(false, std::memory_order_acq_rel)) return;
-      order::model.reset();
+      order::model.reset(GetTickCount64());
       for (auto &slot : order::tickets) slot.id.store(0, std::memory_order_release);
       ++order::resets;
     }
@@ -634,7 +634,7 @@ namespace sunshine_streamline::native_observer {
       memory = read_fence(fence);
       if (!order::model.known_fence(memory.id)) {
         if (!device || device != order::model.queue_device(queue)) mark(sunshine_queue_order::poison::foreign_device);
-        memory.id = order::model.add_fence(device, baseline, {0, memory.signaller, memory.why}, why);
+        memory.id = order::model.add_fence(device, baseline, {0, memory.signaller, memory.why}, why, GetTickCount64());
         memory = order::model.memory(memory.id);
         write_fence(fence, memory);
       }

@@ -5061,7 +5061,11 @@ sight. A poison of a fence that a read relied on within the source age counts as
 on the status line, and marks that read's capture conflicted: the provider no longer holds its
 presentation copy from the next Present (owner decision O1, 10-27; the frame record's reason
 `late_conflict`), so a residual that did strike shows mono until a newer readable copy, never
-pixels the producer may not have written held for the source age. The edge rests on the same
+pixels the producer may not have written held for the source age. A read names the fences of the
+wait chain that ordered its producer's queue (a longer chain, or one whose walk loops, rests on
+every fence), and fails closed wherever its protection would lapse: a fence poisoned or forgotten
+between the verdict and the read, a model reset, an evicted fence record and a live read evicted
+by newer ones each conflict it at once (10-27). The edge rests on the same
 ordering the game relies on to present its own colour. The session tests carry the residual as
 the known gap `R1-late-signaller` ([README](../tools/reshade/README.md), Session-level tests).
 

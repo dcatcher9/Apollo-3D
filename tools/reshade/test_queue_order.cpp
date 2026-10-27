@@ -387,6 +387,95 @@ namespace {
       r.cpu(0);
       require(r.m.snapshot().late_conflict == 0 && !r.m.conflicted(44), "a refused verdict was relied on");
     }
+    // O1 fail-closed: the decisive fence is recorded however many other
+    // clean fences the reader waited on first (until 10-27 the verdict kept
+    // the first four of its log, so a late signal of a fifth conflicted
+    // nothing); a fence off the chain conflicts nothing.
+    {
+      host h;
+      for (int f = 1; f != 6; ++f) {
+        settle(h, f + 1, f);
+        h.signal(f + 1, f, 2);
+        h.wait(1, f, 2);
+      }
+      settle(h);
+      const auto p = h.execute(0);
+      h.signal(0, 0, 2);
+      h.wait(1, 0, 2);
+      const auto v = h.ordered(1, p);
+      require(v.ordered && !v.unbounded && v.fences[0] == h.fence_ids[0] && !v.fences[1],
+        "a verdict did not rest on the fence that ordered the producer's queue");
+      h.m.rely(v, h.now, 51);
+      h.cpu(1);
+      require(!h.m.conflicted(51), "a late signal of a fence off the chain conflicted a read");
+      h.cpu(0);
+      require(h.m.conflicted(51), "a late signal of the decisive fence after four other waited fences conflicted nothing");
+    }
+    // A chain longer than a verdict holds rests on every fence.
+    {
+      host h;
+      for (int f = 0; f != 5; ++f) settle(h, f, f);
+      const auto p = h.execute(0);
+      for (int f = 0; f != 5; ++f) {
+        h.signal(f, f, 2);
+        h.wait(f + 1, f, 2);
+      }
+      const auto v = h.ordered(5, p);
+      require(v.ordered && v.unbounded, "a chain of five fences was not unbounded");
+      h.m.rely(v, h.now, 55);
+      h.cpu(9);
+      require(h.m.conflicted(55), "a poison did not conflict an unbounded read");
+    }
+    // A model reset (a coverage change) conflicts every live relied read,
+    // and an expired one not.
+    {
+      host h;
+      settle(h);
+      const auto p = h.execute(0);
+      h.signal(0, 0, 2);
+      h.wait(1, 0, 2);
+      const auto v = h.ordered(1, p);
+      h.m.rely(v, h.now, 52);
+      h.m.rely(v, h.now - model::live_read_ms - 1, 56);
+      h.m.reset(h.now);
+      require(h.m.conflicted(52) && !h.m.conflicted(56), "a model reset left a live relied read unconflicted");
+    }
+    // An evicted fence record conflicts the live reads that relied on it:
+    // its later signals are never logged against it.
+    {
+      host h;
+      settle(h);
+      const auto p = h.execute(0);
+      h.signal(0, 0, 2);
+      h.wait(1, 0, 2);
+      h.m.rely(h.ordered(1, p), h.now, 53);
+      for (unsigned i = 0; i != 256; ++i) h.m.add_fence(h.device, 0, {}, qo::poison::none, h.now);
+      require(!h.m.known_fence(h.fence_ids[0]) && h.m.conflicted(53), "an evicted fence record left its relied read unconflicted");
+    }
+    // A fence poisoned between the verdict and rely (another lock hold)
+    // conflicts the read at once.
+    {
+      host h;
+      settle(h);
+      const auto p = h.execute(0);
+      h.signal(0, 0, 2);
+      h.wait(1, 0, 2);
+      const auto v = h.ordered(1, p);
+      h.cpu(0);
+      h.m.rely(v, h.now, 54);
+      require(h.m.conflicted(54), "a read relied on a fence poisoned since its verdict");
+    }
+    // A live read evicted by later reads is conflicted (fail-closed).
+    {
+      host h;
+      settle(h);
+      const auto p = h.execute(0);
+      h.signal(0, 0, 2);
+      h.wait(1, 0, 2);
+      const auto v = h.ordered(1, p);
+      for (std::uint64_t tag = 100; tag != 165; ++tag) h.m.rely(v, h.now, tag);
+      require(h.m.conflicted(100) && !h.m.conflicted(101), "a live relied read was evicted unconflicted");
+    }
     // Keyed by id, not by pointer: a forgotten device's records are gone.
     {
       host h;

@@ -94,7 +94,12 @@ namespace sunshine_queue_order {
   struct verdict {
     bool ordered{};
     refusal why{};
-    std::array<std::uint64_t, 4> fences{};  // The fences the edge rests on (late_conflict).
+    // The fences the edge rests on (late_conflict): those of the wait chain
+    // that ordered the producer's queue, from it back to the reader. A chain
+    // of more fences, or one the walk cannot follow, rests on every fence
+    // (unbounded: any poison within the source age conflicts its read).
+    std::array<std::uint64_t, 4> fences{};
+    bool unbounded{};
   };
   // What the host persists in a fence's private data (finding 16): its
   // record id, its signaller's stable queue cookie (the queue's own private
@@ -108,8 +113,11 @@ namespace sunshine_queue_order {
     std::array<std::uint64_t, static_cast<unsigned>(poison::count)> poisoned{};
   };
 
+  // LiveReads: the relied reads kept for the source age, at least one per
+  // Present at 250 Presents a second (a read evicted while live is
+  // conflicted at once, fail-closed); also the conflicted tags kept.
   template<unsigned Queues = 32, unsigned Fences = 256, unsigned WaitLog = 64, unsigned SignalLog = 32,
-    unsigned Pending = 8, unsigned LiveReads = 16>
+    unsigned Pending = 8, unsigned LiveReads = 64>
   class model {
     static_assert(Queues < 255 && Fences < 65535, "ids keep the slot in their low bits");
 
@@ -143,7 +151,10 @@ namespace sunshine_queue_order {
     // A fence record at its (re-)sight: memory restores what an earlier
     // record learned (the private data), baseline is its completed value now,
     // and fresh is a poison found at this sight (shared, foreign device).
-    std::uint64_t add_fence(std::uint64_t device, std::uint64_t baseline, fence_memory memory = {}, poison fresh = poison::none) {
+    // An evicted record's later signals are never logged against it, so a
+    // live read that relied on it is conflicted now (fail-closed).
+    std::uint64_t add_fence(std::uint64_t device, std::uint64_t baseline, fence_memory memory = {}, poison fresh = poison::none,
+        std::uint64_t now = 0) {
       unsigned slot = Fences;
       for (unsigned i = 0; i != Fences; ++i)
         if (!fences_[i].id) { slot = i; break; }
@@ -151,6 +162,7 @@ namespace sunshine_queue_order {
         slot = 0;
         for (unsigned i = 1; i != Fences; ++i)
           if (fences_[i].last_use < fences_[slot].last_use) slot = i;
+        conflict_reads(fences_[slot].id, now);
       }
       auto &f = fences_[slot];
       f = {};
@@ -160,8 +172,8 @@ namespace sunshine_queue_order {
       f.signaller = memory.signaller;
       f.why = memory.why;
       f.last_use = ++clock_;
-      if (fresh != poison::none) set_poison(f, fresh, 0);
-      if (baseline == UINT64_MAX) set_poison(f, poison::removed, 0);
+      if (fresh != poison::none) set_poison(f, fresh, now);
+      if (baseline == UINT64_MAX) set_poison(f, poison::removed, now);
       return f.id;
     }
     bool known_fence(std::uint64_t id) const { return fence_of(id) != nullptr; }
@@ -302,7 +314,11 @@ namespace sunshine_queue_order {
       for (auto &f : fences_)
         if (f.id && f.device == device) f = {};
     }
-    void reset() {
+    // A coverage change: a signal may have bypassed the hooks, so every live
+    // relied read is conflicted before its fences are forgotten.
+    void reset(std::uint64_t now = 0) {
+      for (auto &read : reads_)
+        if (read.expires > now) conflict(read);
       for (auto &q : queues_) q = {};
       for (auto &f : fences_) f = {};
       reads_ = {};
@@ -320,10 +336,11 @@ namespace sunshine_queue_order {
       if (r->device != producer->device) { out.why = refusal::cross_device; return out; }
       if (reader == p.queue) { out.ordered = true; return out; }
       if (!p.quiet) { out.why = refusal::overlap; return out; }
-      std::array<std::uint64_t, Queues> frontier{};
+      std::array<std::uint64_t, Queues> frontier{}, via_fence{};
+      std::array<unsigned, Queues> via_queue{};
       std::array<bool, Queues> listed{};
       std::array<unsigned, Queues> stack{};
-      unsigned depth = 0, used = 0;
+      unsigned depth = 0;
       const auto rslot = slot_of(*r), pslot = slot_of(*producer);
       frontier[rslot] = UINT64_MAX;
       stack[depth++] = rslot; listed[rslot] = true;
@@ -346,24 +363,46 @@ namespace sunshine_queue_order {
           const auto sslot = slot_of(*s);
           if (w.signal_ticket <= frontier[sslot]) continue;
           frontier[sslot] = w.signal_ticket;
-          if (used != out.fences.size() && std::find(out.fences.begin(), out.fences.begin() + used, w.fence) == out.fences.begin() + used)
-            out.fences[used++] = w.fence;
+          // The wait that raised this frontier last, and the queue it is on.
+          via_fence[sslot] = w.fence; via_queue[sslot] = x;
           if (!listed[sslot]) { stack[depth++] = sslot; listed[sslot] = true; }
         }
       }
       out.ordered = frontier[pslot] > p.ticket;
-      if (!out.ordered) { out.why = first; out.fences = {}; }
+      if (!out.ordered) { out.why = first; return out; }
+      // The chain that raised the producer queue's frontier, back to the
+      // reader: each link's frontier is proven by the links after it. A walk
+      // that loops (a frontier raised later through a queue it ordered) or
+      // needs more fences than a verdict holds rests on every fence.
+      unsigned used = 0;
+      for (unsigned at = pslot, steps = 0; at != rslot; at = via_queue[at]) {
+        if (++steps > Queues || used == out.fences.size()) { out.unbounded = true; break; }
+        if (std::find(out.fences.begin(), out.fences.begin() + used, via_fence[at]) == out.fences.begin() + used)
+          out.fences[used++] = via_fence[at];
+      }
       return out;
     }
     // A read that relied on an ordered verdict: a poison of one of its
     // fences within the source age counts as late_conflict, and marks the
-    // read's tag (the capture it read, 0 none) conflicted.
+    // read's tag (the capture it read, 0 none) conflicted. A fence poisoned
+    // or forgotten since the verdict (a signal between the verdict and this
+    // call, under another lock hold) conflicts it at once, as does evicting
+    // a read that is still live.
     void rely(const verdict &value, std::uint64_t now, std::uint64_t tag = 0) {
       if (!value.ordered) return;
+      live_read read{value.fences, now + live_read_ms, tag, value.unbounded};
+      for (const auto id : value.fences) {
+        const auto *f = id ? fence_of(id) : nullptr;
+        if (id && (!f || f->why != poison::none)) {
+          conflict(read);
+          return;
+        }
+      }
       auto *oldest = &reads_[0];
-      for (auto &read : reads_)
-        if (read.expires < oldest->expires) oldest = &read;
-      *oldest = {value.fences, now + live_read_ms, tag};
+      for (auto &entry : reads_)
+        if (entry.expires < oldest->expires) oldest = &entry;
+      if (oldest->expires > now) conflict(*oldest);
+      *oldest = read;
     }
     // O1 (fail-safe): whether a read of tag relied on a fence that a late
     // conflict poisoned; its presentation copy is not held any further. The
@@ -411,6 +450,7 @@ namespace sunshine_queue_order {
     struct live_read {
       std::array<std::uint64_t, 4> fences{};
       std::uint64_t expires{}, tag{};
+      bool unbounded{};  // verdict::unbounded: every poison conflicts it.
     };
 
     static unsigned slot_of(const queue_record &q) { return static_cast<unsigned>((q.id & 0xff) - 1); }
@@ -437,12 +477,19 @@ namespace sunshine_queue_order {
       if (f.why != poison::none) return;
       f.why = why;
       ++counts_.poisoned[static_cast<unsigned>(why)];
+      conflict_reads(f.id, now);
+    }
+    // A live read that relied on fence (0: none) or on every fence.
+    void conflict_reads(std::uint64_t fence, std::uint64_t now) {
       for (auto &read : reads_)
-        if (read.expires > now && std::find(read.fences.begin(), read.fences.end(), f.id) != read.fences.end()) {
-          ++counts_.late_conflict;
-          read.expires = 0;
-          if (read.tag) conflicted_[conflicted_next_++ % LiveReads] = read.tag;
-        }
+        if (read.expires > now &&
+            (read.unbounded || (fence && std::find(read.fences.begin(), read.fences.end(), fence) != read.fences.end())))
+          conflict(read);
+    }
+    void conflict(live_read &read) {
+      ++counts_.late_conflict;
+      read.expires = 0;
+      if (read.tag) conflicted_[conflicted_next_++ % LiveReads] = read.tag;
     }
 
     std::array<queue_record, Queues> queues_{};
