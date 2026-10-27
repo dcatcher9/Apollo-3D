@@ -2210,14 +2210,11 @@ namespace sunshine_streamline::depth_capture {
     std::lock_guard lock(mutex);
     return live_frame_generation_scope(epoch, viewport, enabled_tick) != nullptr;
   }
-  void frame_generation_frame(std::uint64_t epoch, std::uint32_t viewport, std::uint64_t enabled_tick,
-      std::uint64_t frame) {
+  void frame_generation_frame(std::uint64_t epoch, std::uint32_t viewport, std::uint64_t enabled_tick) {
     if (!requested.load() || !epoch) return;
     std::lock_guard lock(mutex);
     auto *view = live_frame_generation_scope(epoch, viewport, enabled_tick);
-    if (!view || (frame && frame == view->frame)) return;
-    view->frame = frame;
-    if (!std::exchange(view->awaiting, true)) return;
+    if (!view || !std::exchange(view->awaiting, true)) return;
     // No copy recorded since the previous frame began: that frame had no FG
     // copy. Every copy recorded so far, accepted or still in flight, is of
     // an earlier frame (frame_generation_missed's ordering).

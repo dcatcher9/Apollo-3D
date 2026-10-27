@@ -4252,8 +4252,13 @@ source stays); while it is live the attempt first replaces the FG observation, s
 the previous copy as a refused FG tag boundary does. Either way the refused frame has no FG copy, so
 the scope turns silent. A Streamline FG tag of the frame the evaluation is for keeps precedence: the
 evaluation then adds no second copy (`tag_copied`). That frame is the viewport's newest, begun by
-its Streamline constants; a tag call is its own when both name the same frame token, or (where
-either names none) when it came after those constants. Its copy counts when it was recorded, or
+its Streamline constants; a tag call is its own when both name the same frame, or (where
+either names none) when it came after those constants. A frame is named by one key, which the
+scope's frames (`frame_generation_frame`) also begin by: a numeric frame's index, a minted token's
+mint, and for constants on a token the add-on did not see minted that token's address, which every
+constants call of the frame repeats (until 10-27 this precedence keyed such a frame by each
+constants call, so a tag after the first of the frame's two constants calls read as another
+frame's, and DLSS-G added a second copy). Its copy counts when it was recorded, or
 waits for the frame's Present (a deferred copy, R2), while the scope's newest tag copy is younger
 than the source age (`frame_generation::depth_tag_precedence`): a refused tag hands the frame to
 the evaluation, and a later frame without an FG tag of its own is the evaluation's. Before 10-26

@@ -99,7 +99,7 @@ namespace sunshine_streamline {
       frame_identity camera_frame;
       std::uintptr_t camera_token{};
       std::uint64_t camera_tick{}, camera_serial{}, changed{}, evaluation_tick{};
-      // The viewport's newest frame: its key (store_camera's frame_key; 0
+      // The viewport's newest frame: its key (frame_key; 0
       // unknown, and a repeated key is the same frame) and the observation
       // sequence of the constants call that began it.
       std::uint64_t frame_key{}, frame_serial{};
@@ -244,19 +244,11 @@ namespace sunshine_streamline {
     // which then adds no second copy (observe_frame_generation_inputs,
     // frame_generation::depth_tag_precedence).
     frame_generation::depth_tag_precedence tag_copy;
-    // A frame identity as that precedence compares frames
-    // (frame_generation::frame_mark): same_frame's own key, unique within the
-    // observation (a minted token's or a constants call's generation is its
-    // call's sequence), or 0 when unavailable.
-    std::uint64_t frame_mark_key(const frame_identity &frame) {
-      if (frame.kind == frame_identity_kind::unavailable) return 0;
-      return frame.kind == frame_identity_kind::v1_numeric ? frame.numeric + 1 : frame.generation;
-    }
     // sequence: the tag call's; frame: the frame it named or was associated
     // with (tag_frame).
     void remember_tag_copy(std::uint64_t scope_epoch, std::uint32_t viewport, bool recorded, std::uint64_t sequence = 0,
         const frame_identity &frame = {}) {
-      const frame_generation::frame_mark tag{frame_mark_key(frame), sequence};
+      const frame_generation::frame_mark tag{frame_key(frame), sequence};
       const auto now = GetTickCount64();
       AcquireSRWLockExclusive(&evaluation_supply_lock);
       tag_copy.remember(scope_epoch, viewport, recorded, tag, now);
@@ -378,7 +370,7 @@ namespace sunshine_streamline {
       if (deferrals)
         for (const auto &entry : deferred_frames)
           if (entry.used && entry.depth.count && entry.epoch == scope_epoch && entry.viewport == viewport) {
-            pending = {frame_mark_key(entry.frame), entry.serial};
+            pending = {frame_key(entry.frame), entry.serial};
             waiting = true;
           }
       const bool supply = tag_copy.tags_supply(scope_epoch, viewport, evaluated, waiting ? &pending : nullptr, now);
@@ -852,7 +844,7 @@ namespace sunshine_streamline {
       auto pin = read_metadata();
       if (pin) for (const auto &record : pin->records)
         if (record.used && record.viewport == viewport && record.has_camera)
-          return {frame_mark_key(record.camera_frame), record.frame_serial};
+          return {frame_key(record.camera_frame), record.frame_serial};
       return {};
     }
     bool presentation_token_current(const frame_identity &frame) {
@@ -1264,9 +1256,10 @@ namespace sunshine_streamline {
         current_fg_target.load(std::memory_order_acquire) && fg.known && fg.enabled && fg.epoch == state.epoch &&
         fg.loss_revision == fg_loss_revision.load(std::memory_order_acquire);
       const auto fg_epoch = fg.epoch, fg_enabled_tick = fg.enabled_tick;
-      const std::uint64_t frame_key = camera_identity.has_numeric ? camera_identity.numeric + 1 : token;
-      if (!frame_key || frame_key != record.frame_key) record.frame_serial = serial;
-      record.frame_key = frame_key;
+      const auto key = frame_key(camera_identity);
+      const bool begins = frame_generation::frame_begins(record.frame_key, key);
+      if (begins) record.frame_serial = serial;
+      record.frame_key = key;
       if (token_current(state, camera_identity)) if (auto *saved = frame_slot(state, viewport, camera_identity, serial, true)) {
         if (serial >= saved->camera_serial) {
           saved->camera = camera;
@@ -1280,7 +1273,7 @@ namespace sunshine_streamline {
       }
       if (!current(ticket)) return;
       if (!update.commit()) { ++history_loss; metadata_write_lost(update, __func__, __LINE__, details); return; }
-      if (fg_frame) depth_capture::frame_generation_frame(fg_epoch, viewport, fg_enabled_tick, frame_key);
+      if (fg_frame && begins) depth_capture::frame_generation_frame(fg_epoch, viewport, fg_enabled_tick);
     }
     void store_tags(batch &values) {
       if (!values.valid_viewport || !current(values.observation)) return;

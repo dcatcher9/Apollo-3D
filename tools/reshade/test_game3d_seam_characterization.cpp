@@ -24,6 +24,7 @@
 #include "game3d_ui_input_provider.h"
 #include "game3d_ui_mask.h"
 #include "ngx_depth_source.h"
+#include "streamline_camera_probe.h"
 #include "streamline_depth_capture.h"
 #include "streamline_depth_capture_test_access.h"
 #include "streamline_depth_provider.h"
@@ -367,9 +368,15 @@ namespace sunshine_streamline::depth_capture {
       reset();
       const auto enabled_tick = GetTickCount64() - sunshine_freshness::fg_silent_ms - 1;
       unsigned index {};
+      // The viewport's newest frame key, as the probe's record keeps it.
+      std::uint64_t key {};
       for (const auto &s : steps) {
         if (s.what == call::frame) {
-          frame_generation_frame(epoch, 0, enabled_tick, s.value);
+          // The probe decides a frame's begin once (store_camera), by the
+          // same rule.
+          if (sunshine_streamline::frame_generation::frame_begins(std::exchange(key, s.value), s.value)) {
+            frame_generation_frame(epoch, 0, enabled_tick);
+          }
         } else {
           auto &value = make(index++, provider_kind::streamline, epoch, s.value, fg_source, 0, 0);
           {
@@ -390,6 +397,26 @@ namespace sunshine_streamline::depth_capture {
         }
       }
       std::printf("PASS P5 frames an FG scope owns: %zu steps\n", std::size(steps));
+
+      // The frame key both that begin and DLSS-G's depth precedence compare
+      // (sunshine_streamline::frame_key): every constants call of a frame on
+      // a token the probe did not see minted repeats its address, so the
+      // frame's second call begins none (until 10-27 the precedence keyed
+      // each such call apart).
+      using sunshine_streamline::frame_identity;
+      using sunshine_streamline::frame_identity_kind;
+      const frame_identity numeric {frame_identity_kind::v1_numeric, 0, 41, 0, true};
+      const frame_identity minted {frame_identity_kind::v2_observed_token, 17, 41, 0x5000, true};
+      const frame_identity first_call {frame_identity_kind::v2_constants_call, 30, 0, 0x7000, false};
+      auto second_call = first_call;
+      second_call.generation = 31;
+      if (sunshine_streamline::frame_key(numeric) != 42 || sunshine_streamline::frame_key(minted) != 17 ||
+          sunshine_streamline::frame_key(first_call) != 0x7000 || sunshine_streamline::frame_key({}) != 0 ||
+          sunshine_streamline::frame_generation::frame_begins(sunshine_streamline::frame_key(first_call),
+            sunshine_streamline::frame_key(second_call))) {
+        fail("P5 frame key: a numeric frame, a minted token, a constants call's token or none keyed apart from its rule");
+      }
+      std::printf("PASS P5 frame key\n");
     }
 
     // P5: DLSS-G's own depth input stands aside only for the FG tag copy of

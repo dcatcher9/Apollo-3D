@@ -259,10 +259,9 @@ namespace sunshine_streamline::depth_capture {
       // newest accepted copy's, and the newest frame without one
       // (frame_generation_missed). The newer of the two decides the scope.
       std::uint64_t accepted_sequence{}, missed_sequence{};
-      // The newest recorded copy's sequence, the viewport's newest frame
-      // (its key), and whether that frame has recorded no copy yet
-      // (frame_generation_frame).
-      std::uint64_t recorded_sequence{}, frame{};
+      // The newest recorded copy's sequence, and whether the viewport's
+      // newest frame has recorded no copy yet (frame_generation_frame).
+      std::uint64_t recorded_sequence{};
       bool awaiting{};
     };
     struct evaluation_namespace {

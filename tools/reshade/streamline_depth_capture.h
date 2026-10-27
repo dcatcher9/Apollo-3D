@@ -317,8 +317,8 @@ namespace sunshine_streamline::depth_capture {
   // takes ownership back.
   bool frame_generation_scope_live(std::uint64_t epoch, std::uint32_t viewport, std::uint64_t enabled_tick);
   // A frame of that FG scope's viewport began (Streamline's per-frame
-  // constants for it; frame: the frame's key, 0 when unknown, and a repeated
-  // key is the same frame). A live scope expects each frame to record an FG
+  // constants for it with a new key, frame_generation::frame_begins, which
+  // the probe decides once per constants call). A live scope expects each frame to record an FG
   // copy, in flight or accepted: when the next frame begins with none
   // recorded since the previous one began, that frame had no FG copy, so
   // the scope turns silent (as frame_generation_missed records, ordered after
@@ -327,8 +327,7 @@ namespace sunshine_streamline::depth_capture {
   // makes no FG call misses it too, and the viewport's SR/RR depth is copied
   // from the frame after the first without FG depth, ready when the held FG
   // copy expires.
-  void frame_generation_frame(std::uint64_t epoch, std::uint32_t viewport, std::uint64_t enabled_tick,
-    std::uint64_t frame);
+  void frame_generation_frame(std::uint64_t epoch, std::uint32_t viewport, std::uint64_t enabled_tick);
   // A frame of that FG scope ended without a copy (its FG tag refused, its
   // copy deferred to its Present cancelled by an untag, refused or lapsed,
   // or DLSS-G's own evaluation of it refused). sequence is the frame's

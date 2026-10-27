@@ -97,6 +97,22 @@ namespace sunshine_streamline {
     std::uintptr_t token{};
     bool has_numeric{};
   };
+  // A frame's key, the one identity both a viewport's frame begin
+  // (store_camera, depth_capture::frame_generation_frame, through
+  // frame_generation::frame_begins) and DLSS-G's depth precedence
+  // (frame_generation::frame_mark) compare: a numeric frame's index plus
+  // one, a minted token's generation (its mint's call sequence, unique
+  // within the observation), and for constants on a token the probe did not
+  // see minted that token's address, which every constants call of the
+  // frame repeats; 0 when the call named no frame.
+  constexpr std::uint64_t frame_key(const frame_identity &frame) {
+    switch (frame.kind) {
+      case frame_identity_kind::v1_numeric: return frame.numeric + 1;
+      case frame_identity_kind::v2_observed_token: return frame.generation;
+      case frame_identity_kind::v2_constants_call: return frame.token;
+      default: return 0;
+    }
+  }
   enum class tag_scope { active_global, explicit_frame, evaluation_local };
   // The tag call an evaluate's untag ended (a depth tag naming no resource,
   // Streamline's untag): the viewport's newest tag of that kind that named

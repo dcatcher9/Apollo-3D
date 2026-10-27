@@ -102,6 +102,10 @@ namespace sunshine_streamline::frame_generation {
   struct frame_mark {
     std::uint64_t key{}, sequence{};
   };
+  // Whether a viewport's constants call with key begins a frame after the
+  // one keyed previous: a new key, or none (every unkeyed call begins one).
+  // A repeated key is the same frame.
+  constexpr bool frame_begins(std::uint64_t previous, std::uint64_t key) { return !key || key != previous; }
   // Whether a tag call belongs to frame, the one DLSS-G evaluates: the
   // viewport's newest frame, marked by the constants call that began it.
   // When both name a frame, the tag names that one; otherwise the tag came
