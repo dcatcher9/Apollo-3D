@@ -89,6 +89,11 @@ namespace sunshine_streamline {
       decode_status decoded{decode_status::short_buffer};
       std::array<tag_record, observed_tag_types.size()> global_tags{}, local_tags{};
       std::array<tag_record, observed_tag_types.size()> active_tags{};
+      // Per depth kind, the viewport's newest global or frame tag call that
+      // named a resource. An untag stored after it leaves it in place, so an
+      // evaluate that reads that untag judges the call it ended
+      // (ended_depth_tag, tag_call_decided).
+      std::array<tag_record, depth_priority.size()> depth_calls{};
       evaluation_snapshot evaluation;
       frame_generation_snapshot frame_generation;
       frame_identity camera_frame;
@@ -1296,6 +1301,8 @@ namespace sunshine_streamline {
         value.frame = tag_frame(state, record, values.frame, value.source == origin::global, values.serial);
         auto &destination = value.source == origin::local ? record.local_tags : record.global_tags;
         destination[i] = value;
+        if (i < record.depth_calls.size() && value.source != origin::local && value.supported && value.value.native_resource &&
+            value.serial >= record.depth_calls[i].serial) record.depth_calls[i] = value;
         if (value.source == origin::global && value.serial >= record.active_tags[i].serial) record.active_tags[i] = value;
         if (value.source == origin::frame && token_current(state, values.frame)) {
           if (auto *saved = frame_slot(state, values.viewport, values.frame, values.serial, true)) {
@@ -1395,6 +1402,24 @@ namespace sunshine_streamline {
         value.own_frame = !at_boundary && identity.kind == frame_identity_kind::v2_observed_token &&
           (tag->source == origin::frame ? saved && tag == &saved->tags[i] :
             tag->source == origin::global && same_frame(tag->frame, identity));
+        // A stored untag: the viewport's newest tag call of this kind that
+        // named a resource, when it came before the untag. A loss since that
+        // call leaves it unsupported.
+        if (const auto &call = record.depth_calls[i]; !at_boundary && tag->supported && !tag->value.native_resource &&
+            call.present && call.serial < tag->serial) {
+          auto &ended = value.ended;
+          ended.present = true;
+          ended.value = call.value;
+          ended.value.observation_epoch = out.epoch;
+          ended.scope = call.source == origin::frame ? tag_scope::explicit_frame : tag_scope::active_global;
+          ended.supported = call.supported && call.loss == loss;
+          ended.state_requires_observation = call.state_requires_observation;
+          ended.commanded = call.commanded;
+          ended.native_state = call.native_state;
+          ended.direct_source = call.direct_source;
+          ended.source_present_generation = call.source_present_generation;
+          ended.own_frame = identity.kind == frame_identity_kind::v2_observed_token && same_frame(call.frame, identity);
+        }
         value.precision_scale = tag->precision_scale;
         value.precision_bias = tag->precision_bias;
         const auto identity = source_identity(value.value.native_resource);
@@ -1834,8 +1859,10 @@ namespace sunshine_streamline {
       out.supported = tag.supported; out.state_requires_observation = tag.state_requires_observation;
       return out;
     }
-    // The first failing tag gate, or nullptr when the tag can supply this observation's depth.
-    const char *tag_rejection(const evaluation_snapshot &snapshot, const evaluated_depth_tag &tag) {
+    // The first failing tag gate, or nullptr when the tag can supply this
+    // observation's depth. matched: match()'s refusal when that gate failed.
+    const char *tag_rejection(const evaluation_snapshot &snapshot, const evaluated_depth_tag &tag,
+        match_status *matched = nullptr) {
       if (!tag.present) return "absent";
       if (!tag.supported) {
         switch (tag.value.refusal) {
@@ -1866,8 +1893,11 @@ namespace sunshine_streamline {
       // or the evaluate it is a local input of (sl_contract::lifecycle_at).
       auto at_evaluation = tag.value;
       at_evaluation.lifecycle = sl_contract::lifecycle_at(tag.value.lifecycle, copy_point(snapshot, tag));
-      const auto matched = match({snapshot.viewport, snapshot.epoch, 0, false}, at_evaluation);
-      if (matched != match_status::same_epoch_only) return name(matched);
+      const auto status = match({snapshot.viewport, snapshot.epoch, 0, false}, at_evaluation);
+      if (status != match_status::same_epoch_only) {
+        if (matched) *matched = status;
+        return name(status);
+      }
       // match() reads no allocation, and the Resource's declared size bounds
       // no extent (S16d): where the tag's allocation is retained, an extent
       // outside it is refused here (the capture checks it again,
@@ -2120,21 +2150,35 @@ namespace sunshine_streamline {
     }
     // Whether this evaluate refuses only tags its frame's tag call decided:
     // every present depth tag an OnlyValidNow tag of the frame it was set for,
-    // refused here for its lifetime (sl_contract::keeps_tag_call_copy). Its
-    // frame is this one where the evaluate names it (own_frame) or no Present
-    // came since the tag call, as the capture judges a later use of a tag
+    // refused here for its lifetime (sl_contract::keeps_tag_call_copy), or an
+    // untag of such a tag after its call (the evaluate reads no depth then,
+    // and judges the call the untag ended in its place). Its frame is this
+    // one where the evaluate names it (own_frame) or no Present came since
+    // the tag call, as the capture judges a later use of a tag
     // (source_lifetime_current).
     bool tag_call_decided(const evaluation_snapshot &snapshot, bool version_one) {
+      const auto decided = [&](const evaluated_depth_tag &tag) {
+        auto matched = match_status::same_epoch_only;
+        const bool same_frame = tag.own_frame || (tag.source_present_generation &&
+          tag.source_present_generation == depth_capture::source_present_generation(tag.direct_source));
+        return tag_rejection(snapshot, tag, &matched) && matched == match_status::unsupported_lifecycle &&
+          sl_contract::keeps_tag_call_copy(declaration(tag, version_one), copy_point(snapshot, tag), same_frame);
+      };
       bool any = false;
       for (const unsigned index : depth_priority) {
         const auto &tag = snapshot.tags[index];
         if (!tag.present) continue;
-        const auto *rejected = tag_rejection(snapshot, tag);
-        const bool same_frame = tag.own_frame || (tag.source_present_generation &&
-          tag.source_present_generation == depth_capture::source_present_generation(tag.direct_source));
-        if (!rejected || std::strcmp(rejected, name(match_status::unsupported_lifecycle)) ||
-            !sl_contract::keeps_tag_call_copy(declaration(tag, version_one), copy_point(snapshot, tag), same_frame))
+        if (tag.ended.present) {
+          const auto &ended = tag.ended;
+          evaluated_depth_tag call;
+          call.value = ended.value; call.scope = ended.scope; call.present = true; call.supported = ended.supported;
+          call.native_state = ended.native_state; call.state_requires_observation = ended.state_requires_observation;
+          call.commanded = ended.commanded; call.direct_source = ended.direct_source;
+          call.source_present_generation = ended.source_present_generation; call.own_frame = ended.own_frame;
+          if (!decided(call)) return false;
+        } else if (!decided(tag)) {
           return false;
+        }
         any = true;
       }
       return any;
@@ -2185,7 +2229,12 @@ namespace sunshine_streamline {
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
         remember_refusal(snapshot, sunshine_depth_refusal::gate::source, rejected);
 #endif
-        withdraw_invalid_attempt();
+        // An evaluate that reads no depth because the frame's untag ended its
+        // OnlyValidNow tag after the tag call is no newer attempt either: it
+        // keeps that call's outcome (tag_call_decided).
+        if (!(snapshot.status == evidence_status::missing_depth && !snapshot.tag_boundary &&
+            tag_call_decided(snapshot, version_one)))
+          withdraw_invalid_attempt();
         return 0;
       }
       // The adapter defines semantic priority; the capture owner tries this

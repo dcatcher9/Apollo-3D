@@ -358,6 +358,13 @@ namespace {
     // slSetTagForFrame, and the same through slSetTag.
     {"C5-frame-tag-then-evaluate", "20*sr=local; 60*tag=now_list,sr=tag"},
     {"C5-global-tag-then-evaluate", "20*sr=local; 60*tag=now_list,entry=global,sr=tag"},
+    // The same with the frame's untag between the tag call and the
+    // evaluate, which then reads no depth tag: it keeps the tag call's copy
+    // as well (until 10-26 it began an evaluation without one, so these
+    // frames were mono from frame 35 as C5's were; soak seed
+    // 089154be9db5f403).
+    {"C5-frame-untag-then-evaluate", "20*sr=local; 30*tag=now_list,untag=after_frame,sr=tag"},
+    {"C5-global-untag-then-evaluate", "20*sr=local; 30*tag=now_list,entry=global,untag=after_global,sr=tag"},
   };
 
   // Each known gap the timelines found has a witness: an event list whose

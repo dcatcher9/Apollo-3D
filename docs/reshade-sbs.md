@@ -4696,9 +4696,11 @@ refused as `not-valid-until-present`). A later evaluation declines a tagged `Onl
 supplied (the evaluation names that tag's frame, or no Present came since the tag call), the refusal
 is no newer attempt at the frame's depth: the evaluation keeps the tag call's copy, or its refusal,
 instead of beginning an evaluation of the viewport without a copy
-([`api_contract.h`](../tools/reshade/api_contract.h) `keeps_tag_call_copy`). Until 10-26 it began
-one, so outside frame generation such a frame's Present was mono (the API contract matrix's
-`S1-evaluate` row). Native capture still declines
+([`api_contract.h`](../tools/reshade/api_contract.h) `keeps_tag_call_copy`). The same holds when the
+frame's untag (a null `slSetTagForFrame` or `slSetTag`) ended that tag after its call: the
+evaluation then reads no depth tag (`missing-depth`), and judges the call the untag ended in its
+place. Until 10-26 it began one, so outside frame generation such a frame's Present was mono (the
+API contract matrix's `S1-evaluate` row, and its untag form, which the session timelines found). Native capture still declines
 unknown depth encodings, unknown resource states or layouts and ambiguous viewports. One rule
 ([`depth_view_format.h`](../tools/reshade/depth_view_format.h)), shared by the capture, the
 content sampler and the V1.1.1 adapter, stores a depth input in its typeless family and names the

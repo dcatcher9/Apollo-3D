@@ -98,6 +98,19 @@ namespace sunshine_streamline {
     bool has_numeric{};
   };
   enum class tag_scope { active_global, explicit_frame, evaluation_local };
+  // The tag call an evaluate's untag ended (a depth tag naming no resource,
+  // Streamline's untag): the viewport's newest tag of that kind that named
+  // one, set before the untag. present: there is such a call.
+  struct ended_depth_tag {
+    depth_tag value;
+    tag_scope scope{};
+    bool present{}, supported{}, state_requires_observation{}, commanded{};
+    // It was set for the evaluated frame (evaluated_depth_tag::own_frame).
+    bool own_frame{};
+    std::uint32_t native_state{0xffffffffu};
+    depth_capture::source_ref direct_source;
+    std::uint64_t source_present_generation{};
+  };
   struct evaluated_depth_tag {
     depth_tag value;
     tag_scope scope{};
@@ -121,6 +134,8 @@ namespace sunshine_streamline {
     bool own_frame{};
     // PrecisionInfo maps stored texels to the depth consumed by Streamline.
     double precision_scale{1.0}, precision_bias{};
+    // An untag at an evaluate: the tag call it ended.
+    ended_depth_tag ended;
   };
   struct evaluated_color_tag {
     depth_tag value; // Shared resource/extent/lifecycle metadata only; not a depth interpretation.

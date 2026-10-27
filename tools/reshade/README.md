@@ -1925,7 +1925,13 @@ and `frame-now-evaluate` keep the row's cell (through `slSetTag` and, from 2.7.3
 `slSetTagForFrame`) in every release, and `test_api_contract.cpp` pins the rule. The witness became
 the regression timelines `C5-frame-tag-then-evaluate` (the witness itself) and
 `C5-global-tag-then-evaluate`. With the fix reverted both fail at frame 35 (a gap,
-`provider_associated`), and so do the row's four `sl27` cells and `frame-now-evaluate`.
+`provider_associated`), and so do the row's four `sl27` cells and `frame-now-evaluate`. The round 3
+review's soak then found the same loss where the frame's untag ends the tag between its call and the
+evaluate (seed `089154be9db5f403`, frame 113): the evaluate reads no depth tag (`missing-depth`), a
+source refusal that withdrew before the rule was asked. It now judges the tag call the untag ended
+in the untag's place (the viewport keeps its newest tag call per depth kind for that). The regression
+timelines `C5-frame-untag-then-evaluate` and `C5-global-untag-then-evaluate` fail at frame 35 on the
+build before (a gap, `provider_associated`, shown 35 of 50 frames).
 
 `reshade_native_provider_continuity` runs the provider fixture at 1280x720 with the 2.7.30
 interposer, every frame script under the invariant, in about 115 s. Like
@@ -2009,8 +2015,9 @@ a fresh process's `--events` replay may still differ. The fixed set also runs on
 Assassin's Creed Shadows fix (and one for the generated Presents' hold, `repeated-frame-hold`,
 two for C4's fix, `C4-no-fg-call` and `C4-cancelled-fg-tags`, one for C6's,
 `C6-dlssg-after-tag-copy`, one for C7's, `C7-dlssg-stops`, two for C8's,
-`C8-fg-off-sr-other-queue` and `C8-fg-off-color-only`, and two for C5's,
-`C5-frame-tag-then-evaluate` and `C5-global-tag-then-evaluate`), an event list shaped like the
+`C8-fg-off-sr-other-queue` and `C8-fg-off-color-only`, and four for C5's,
+`C5-frame-tag-then-evaluate`, `C5-global-tag-then-evaluate` and their untag forms
+`C5-frame-untag-then-evaluate` and `C5-global-untag-then-evaluate`), an event list shaped like the
 session it fixed and judged as any
 timeline (random seeds meet these shapes only by chance, and a change of the event language changes
 every seed), and one witness per open row the timelines found or carry (none is open since C5 closed
@@ -2019,7 +2026,7 @@ run; a witness that loses none fails the set, as the matrix's gap seeds keep a r
 failing cell. `--trace` prints every Present's
 frame record, the supply it was judged with and each recorded refusal.
 
-`reshade_session_timelines` runs the fixed set (24 seeds and thirteen regression timelines, about
+`reshade_session_timelines` runs the fixed set (24 seeds and fifteen regression timelines, about
 4010 frames and 9240 Presents) in about 145 s, registered like
 `reshade_native_provider_continuity` with the same 240 s timeout. Locally:
 
