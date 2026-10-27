@@ -5058,8 +5058,12 @@ revokes the capture owner's state evidence, which only the state family's slots 
 producer's signal and was submitted after the decision, or through a vtable the hooks never
 discovered, from another process, or as another queue's work submitted before the fence's first
 sight. A poison of a fence that a read relied on within the source age counts as `late_conflict`
-on the status line. The edge rests on the same ordering the game relies on to present its own
-colour.
+on the status line, and marks that read's capture conflicted: the provider no longer holds its
+presentation copy from the next Present (owner decision O1, 10-27; the frame record's reason
+`late_conflict`), so a residual that did strike shows mono until a newer readable copy, never
+pixels the producer may not have written held for the source age. The edge rests on the same
+ordering the game relies on to present its own colour. The session tests carry the residual as
+the known gap `R1-late-signaller` ([README](../tools/reshade/README.md), Session-level tests).
 
 **U-C1: in-flight reads** (the one use this round ships). A snapshot recorded on another queue
 than the one that reads it is readable once its producer fence completed (the rule before), or

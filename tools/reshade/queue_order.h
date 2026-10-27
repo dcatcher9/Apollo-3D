@@ -356,13 +356,20 @@ namespace sunshine_queue_order {
       return out;
     }
     // A read that relied on an ordered verdict: a poison of one of its
-    // fences within the source age counts as late_conflict.
-    void rely(const verdict &value, std::uint64_t now) {
+    // fences within the source age counts as late_conflict, and marks the
+    // read's tag (the capture it read, 0 none) conflicted.
+    void rely(const verdict &value, std::uint64_t now, std::uint64_t tag = 0) {
       if (!value.ordered) return;
       auto *oldest = &reads_[0];
       for (auto &read : reads_)
         if (read.expires < oldest->expires) oldest = &read;
-      *oldest = {value.fences, now + live_read_ms};
+      *oldest = {value.fences, now + live_read_ms, tag};
+    }
+    // O1 (fail-safe): whether a read of tag relied on a fence that a late
+    // conflict poisoned; its presentation copy is not held any further. The
+    // newest LiveReads conflicted tags are kept, across a model reset.
+    bool conflicted(std::uint64_t tag) const {
+      return tag && std::find(conflicted_.begin(), conflicted_.end(), tag) != conflicted_.end();
     }
     counts snapshot() const {
       auto out = counts_;
@@ -403,7 +410,7 @@ namespace sunshine_queue_order {
     };
     struct live_read {
       std::array<std::uint64_t, 4> fences{};
-      std::uint64_t expires{};
+      std::uint64_t expires{}, tag{};
     };
 
     static unsigned slot_of(const queue_record &q) { return static_cast<unsigned>((q.id & 0xff) - 1); }
@@ -434,12 +441,15 @@ namespace sunshine_queue_order {
         if (read.expires > now && std::find(read.fences.begin(), read.fences.end(), f.id) != read.fences.end()) {
           ++counts_.late_conflict;
           read.expires = 0;
+          if (read.tag) conflicted_[conflicted_next_++ % LiveReads] = read.tag;
         }
     }
 
     std::array<queue_record, Queues> queues_{};
     std::array<fence_record, Fences> fences_{};
     std::array<live_read, LiveReads> reads_{};
+    std::array<std::uint64_t, LiveReads> conflicted_{};
+    unsigned conflicted_next_{};
     counts counts_{};
     std::uint64_t serial_{}, clock_{};
   };

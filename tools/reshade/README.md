@@ -1738,13 +1738,47 @@ each Execute's position from the test add-on right after the call returned
 (`SunshineQueueOrderTestLastExecute`), so it finds that Execute in its script and the oracle must
 order the Present after it (and the copy-out the add-on made in that call's post-call). A script
 that knows a read was in flight (its producer queue held behind a gate the CPU opens after the
-Present) adds that read whatever the record says. No row excuses a violation: the Present showed
-depth its copy had not written yet. The native provider fixture judges each script
-(`MEASURE native-provider unordered_read judged=<n>`), the session timelines each run
-(`ordered_reads=` on its line; 342 reads over the 43 fixed timelines on 10-27, none unordered). With `readable_elsewhere` mutated to admit every positioned copy,
+Present) adds that read whatever the record says. No row excuses a violation (the Present showed
+depth its copy had not written yet) but one: a read that the script's calls up to its Present
+order, and only a signal first submitted after it (the CPU's, or another queue's, of a fence its
+wait relied on) unorders, is `late` (`judge_reads`), the residual the owner accepted as O1 (10-27),
+which no observation at the decision can exclude. The session timelines count it as the known gap
+`R1-late-signaller`'s, the native provider fixture as `late=`. The add-on's side of O1: the model
+counts each relied read whose fence such a signal poisons within the source age as `late_conflict`
+and marks the read's capture conflicted, and the provider no longer holds that capture's
+presentation copy from the next Present (`read_conflicted`; reason `late_conflict`): mono rather
+than pixels the producer may not have written. `sr-other-queue-in-flight-late-signaller` waits
+on a handoff fence only the game queue signals, then after its last Present the CPU signals that
+fence to the waited value while the game queue is still gated: its reads are `late`, and the next
+Present (no new copy) must be mono; with the provider's check removed it held that copy
+(`retained_copy`, 10-27, temporary build). The native provider fixture judges each script
+(`MEASURE native-provider unordered_read judged=<n> late=<n>`), the session timelines each run
+(`ordered_reads=` and `late_reads=` on its line; 342 reads over the 43 fixed timelines on 10-27,
+none unordered). With `readable_elsewhere` mutated to admit every positioned copy,
 `sr-other-queue-in-flight-no-wait` fails both the in-flight check and `unordered_read` (12 reads);
 with the model's CPU-signal poison removed, `sr-other-queue-in-flight-cpu-signal` fails it from
-the records' own `ordered` claims (10-27, temporary builds).
+the records' own `ordered` claims, and so does the session timelines' regression
+`O3-cpu-signal-ahead`, whose failure shrinks to `sr=other_queue,order=cpu; sr=other_queue`
+(10-27, temporary builds).
+
+The session timelines' fence events (`order=`, drawn from a stream of their own so that every seed
+keeps its other events): each frame's work on another queue (its SR on the game's queue, DLSS-G's
+compute copy) is followed by that queue's signal of an order fence, one per ring, which the
+presenting queue waits for after the signal (`wait`) or before it (`wait_first`, a legal wait
+before signal), or which the CPU waits for (`cpu_wait`). `cpu` and `second` signal it one value
+ahead from the CPU or a third queue of the game's before the frame's Present, so the next frame's
+wait is reached before that frame's work (the add-on must refuse that fence for good, O3); `late`
+signals the waited value again after the frame's Present (O1). Both fences are created anew for
+each run and at each FG toggle. The fixture models the contract's fail-closed rules from its own
+script: a frame's copy elsewhere is legal at its own Present only when it is complete (the CPU
+waited) or ordered by a settled fence that no CPU or second signal reached; otherwise it is
+permitted there and names no completion for the freshness rule (the add-on may show it once
+complete, but the next frame's nomination, perhaps of another source, decides what it selects),
+and an SR input that a live FG scope keeps out for such a DLSS-G compute copy is permitted too
+(the scope has only its held copy to show). Frames are tagged `R1-late-signaller` from the first
+CPU, second or late signal of a fence the presenting queue waited on within the source age until
+a real Present shows depth again or the source age passed (the frame of a late signal from its
+own Present); every loss of a tagged frame is that row's, as the fail-safe drops the hold itself.
 
 The judge reads each Present's [frame record](../../docs/reshade-sbs.md#frame-record)
 (`SunshineGame3DTestFrameRecord`, copied in ReShade's `reshade_present` event) and the fixture's
@@ -1845,7 +1879,7 @@ closed, and the fix removes the row). Each provider run with an interposer exerc
 
 #### Found defects
 
-Only C2 is a limitation the owner approved (until Step 4; C1 closed on 10-27); a matrix row's recorded gap
+Only C2 (until Step 4; C1 closed on 10-27) and R1-late-signaller (O1, 10-27) are limitations the owner approved; a matrix row's recorded gap
 over frames would be one too (C5, the last, closed on 10-26). Any other row is a defect these tests
 found, its `found` naming when and which test; it is excused only until the owner decides it, so that
 the gate stays usable meanwhile, and the decision removes its row and witness. None is open: the

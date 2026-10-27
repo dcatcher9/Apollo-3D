@@ -434,6 +434,7 @@ namespace {
       backbuffer.reset();
       game_work.release();
       dlssg_work.release();
+      release_order();
       first.reset();
       second.reset();
       barrier_scratch.reset();

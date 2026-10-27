@@ -115,8 +115,12 @@ namespace sunshine_streamline::native_observer {
   // Whether every call submitted on reader (a live native queue the caller
   // holds a reference to) from now on is ordered after producer.
   sunshine_queue_order::verdict queue_ordered(std::uint64_t reader, position producer);
-  // A read that relied on an ordered verdict (late_conflict).
-  void queue_order_rely(const sunshine_queue_order::verdict &value);
+  // A read of tag (a capture id) that relied on an ordered verdict
+  // (late_conflict).
+  void queue_order_rely(const sunshine_queue_order::verdict &value, std::uint64_t tag);
+  // O1: whether a read of tag relied on a fence that a late conflict
+  // poisoned since; its presentation copy is then not held any further.
+  bool queue_order_conflicted(std::uint64_t tag);
   // A released device (its native ID3D12Device pointer): its records go.
   void queue_order_forget_device(std::uint64_t device);
   struct queue_order_status {

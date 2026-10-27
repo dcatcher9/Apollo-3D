@@ -674,6 +674,10 @@ namespace sunshine_streamline::depth_capture {
   // out, when due: at most every 10 s while its counts change, and once when
   // QueueFenceOrder=0. Called from one thread (the probe's poll).
   bool queue_order_line(std::uint64_t now, char *out, std::size_t size);
+  // O1 (docs/reshade-sbs.md, Queue order): whether capture was read in
+  // flight on a fence that a late conflict poisoned since (late_conflict);
+  // its presentation copy is then not held any further.
+  bool read_conflicted(std::uint64_t capture);
   // Caller must first prove this ticket is the current, unambiguous preserved
   // copy for its presentation. That existing game/ReShade ordering contract is
   // distinct from native independent-queue completion. The owner checks actual

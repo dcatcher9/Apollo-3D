@@ -361,18 +361,31 @@ namespace {
       h.signal(0, 0, 2);
       h.wait(1, 0, 2);
       const auto v = h.ordered(1, p);
-      h.m.rely(v, h.now);
+      h.m.rely(v, h.now, 41);
+      h.m.rely(v, h.now);  // A read without a tag counts, and marks nothing.
+      require(!h.m.conflicted(41), "a relied read is conflicted before any late signal");
       h.cpu(0);
-      require(h.m.snapshot().late_conflict == 1, "a poison after a relied read is a late conflict");
+      require(h.m.snapshot().late_conflict == 2, "a poison after a relied read is a late conflict");
+      // O1: the read's presentation copy is not held any further, also
+      // after a model reset; another read is not conflicted.
+      require(h.m.conflicted(41) && !h.m.conflicted(42) && !h.m.conflicted(0), "a late conflict did not mark its read");
+      h.m.reset();
+      require(h.m.conflicted(41), "a model reset forgot a conflicted read");
       host g;
       settle(g);
       const auto q = g.execute(0);
       g.signal(0, 0, 2);
       g.wait(1, 0, 2);
-      g.m.rely(g.ordered(1, q), g.now);
+      g.m.rely(g.ordered(1, q), g.now, 43);
       g.now += model::live_read_ms + 1;
       g.cpu(0);
-      require(g.m.snapshot().late_conflict == 0, "an expired read has no late conflict");
+      require(g.m.snapshot().late_conflict == 0 && !g.m.conflicted(43), "an expired read has no late conflict");
+      // A refused verdict relies on nothing.
+      host r;
+      settle(r);
+      r.m.rely(r.ordered(1, r.execute(0)), r.now, 44);
+      r.cpu(0);
+      require(r.m.snapshot().late_conflict == 0 && !r.m.conflicted(44), "a refused verdict was relied on");
     }
     // Keyed by id, not by pointer: a forgotten device's records are gone.
     {
@@ -605,10 +618,32 @@ namespace {
       s.execute(&p, 1, 1); s.signal(&p, &g, 1); s.signal(&q, &g, 1); s.wait(&r, &g, 1); s.present(&r, 10, true, 1, 1);
       require(!judged(s), "oracle: a second signaller reaching the waited value orders the read");
     }
+    // A signal first submitted after the read (O1's residual): the read is
+    // unordered, and late (R1-late-signaller), which unordered_reads excuses
+    // and counts; a signal before it is no late one.
     {
       script s; s.enabled = true;
       s.execute(&p, 1, 1); s.signal(&p, &g, 1); s.wait(&r, &g, 1); s.present(&r, 10, true, 1, 1); s.signal(&q, &g, 1);
-      require(!judged(s), "oracle: a second signaller submitted after the read orders it");
+      auto copy = s;
+      const auto judged_reads = copy.judge_reads();
+      require(judged_reads.size() == 1 && judged_reads[0].late && judged_reads[0].present_index == 10,
+        "oracle: a second signaller submitted after the read is no late signaller");
+      require(judged(s) && s.late_reads == 1, "oracle: a late second signaller was not excused and counted");
+    }
+    {
+      script s; s.enabled = true;
+      s.execute(&p, 1, 1); s.signal(&p, &g, 1); s.wait(&r, &g, 1); s.present(&r, 10, true, 1, 1); s.cpu_signal(&g, 2);
+      require(judged(s) && s.late_reads == 1, "oracle: a late CPU signal was not excused and counted");
+      s.clear();
+      s.execute(&p, 1, 1); s.signal(&p, &g, 1); s.cpu_signal(&g, 1); s.wait(&r, &g, 1); s.present(&r, 10, true, 1, 1);
+      require(!judged(s) && s.late_reads == 0, "oracle: a CPU signal before the read counted as late");
+    }
+    // Wait before signal: the presenting queue waits for a value its
+    // producer queue signals only afterwards (legal): ordered.
+    {
+      script s; s.enabled = true;
+      s.wait(&r, &g, 1); s.execute(&p, 1, 1); s.signal(&p, &g, 1); s.present(&r, 10, true, 1, 1);
+      require(judged(s) && s.late_reads == 0, "oracle: a wait before its signal does not order the read");
     }
     {
       script s; s.enabled = true; s.initial[&g] = 5;

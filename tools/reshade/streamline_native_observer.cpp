@@ -942,11 +942,18 @@ namespace sunshine_streamline::native_observer {
     else ++order::refused[static_cast<unsigned>(out.why)];
     return out;
   }
-  void queue_order_rely(const sunshine_queue_order::verdict &value) {
+  void queue_order_rely(const sunshine_queue_order::verdict &value, std::uint64_t tag) {
     if (!value.ordered) return;
     AcquireSRWLockExclusive(&order::lock);
-    order::model.rely(value, GetTickCount64());
+    order::model.rely(value, GetTickCount64(), tag);
     ReleaseSRWLockExclusive(&order::lock);
+  }
+  bool queue_order_conflicted(std::uint64_t tag) {
+    if (!tag) return false;
+    AcquireSRWLockShared(&order::lock);
+    const bool out = order::model.conflicted(tag);
+    ReleaseSRWLockShared(&order::lock);
+    return out;
   }
   void queue_order_forget_device(std::uint64_t device) {
     if (!device) return;

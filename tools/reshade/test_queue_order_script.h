@@ -115,6 +115,7 @@ namespace queue_order_script {
     void clear() {
       events.clear();
       reads.clear();
+      late_reads = 0;
     }
 
     // Each queue's clock: for every queue, one past the index of the latest
@@ -221,12 +222,38 @@ namespace queue_order_script {
       return events.size();
     }
 
+    // Whether the Present at index present is ordered after the Execute at
+    // index made, by clocks over the whole script (all) or, with prefix, by
+    // the calls made up to that Present alone.
+    bool ordered_after(std::size_t made, std::size_t present, const std::map<std::size_t, clock> &all) const {
+      if (made >= present) {
+        return false;
+      }
+      if (events[made].queue == events[present].queue) {
+        return true;
+      }
+      const auto &reader = all.at(present);
+      const auto found = reader.find(events[made].queue);
+      return found != reader.end() && found->second > made + 1;
+    }
+
+    // One ordered read the oracle does not order. late: the calls made up to
+    // its Present order it, and only a signal first submitted after it (the
+    // CPU's, or another queue's, of a fence its wait relied on) breaks the
+    // edge: the residual of the design's section 1 (O1, R1-late-signaller),
+    // which no observation at the decision can exclude.
+    struct unordered {
+      std::uint64_t present_index {};
+      bool late {};
+      std::string text;
+    };
+
     // unordered_read: every ordered read the add-on recorded must name an
     // Execute of the script that the oracle orders the Present after. The
-    // failures, described (empty when every read is ordered). Checked reads
-    // are dropped; the script stays for later reads.
-    std::vector<std::string> unordered_reads() {
-      std::vector<std::string> out;
+    // reads it does not order, described (empty when every read is
+    // ordered). Checked reads are dropped; the script stays for later reads.
+    std::vector<unordered> judge_reads() {
+      std::vector<unordered> out;
       if (reads.empty()) {
         return out;
       }
@@ -240,20 +267,35 @@ namespace queue_order_script {
       for (const auto &read : reads) {
         const auto made = read.made != SIZE_MAX ? read.made : producer(read.order_queue, read.order_ticket);
         if (made == events.size()) {
-          out.push_back("Present " + std::to_string(read.present_index) + " read in flight after a position (" + std::to_string(read.order_queue) + "," + std::to_string(read.order_ticket) + ") no logged Execute of the script took");
+          out.push_back({read.present_index, false, "Present " + std::to_string(read.present_index) + " read in flight after a position (" + std::to_string(read.order_queue) + "," + std::to_string(read.order_ticket) + ") no logged Execute of the script took"});
           continue;
         }
-        bool ordered = made < read.present;
-        if (ordered && events[made].queue != events[read.present].queue) {
-          const auto &reader = all.at(read.present);
-          const auto found = reader.find(events[made].queue);
-          ordered = found != reader.end() && found->second > made + 1;
+        if (ordered_after(made, read.present, all)) {
+          continue;
         }
-        if (!ordered) {
-          out.push_back("Present " + std::to_string(read.present_index) + " read in flight after Execute #" + std::to_string(made) + " that the script's own fences do not order it after");
-        }
+        log prefix;
+        prefix.initial = initial;
+        prefix.events.assign(events.begin(), events.begin() + std::ptrdiff_t(read.present + 1));
+        const bool late = prefix.ordered_after(made, read.present, prefix.clocks({read.present}));
+        out.push_back({read.present_index, late, "Present " + std::to_string(read.present_index) + " read in flight after Execute #" + std::to_string(made) + (late ? ", which a signal first submitted after that Present unorders (R1-late-signaller)" : " that the script's own fences do not order it after")});
       }
       reads.clear();
+      return out;
+    }
+
+    // The reads judge_reads finds unordered, except late ones, described;
+    // late_reads counts those.
+    unsigned late_reads {};
+
+    std::vector<std::string> unordered_reads() {
+      std::vector<std::string> out;
+      for (auto &value : judge_reads()) {
+        if (value.late) {
+          ++late_reads;
+        } else {
+          out.push_back(std::move(value.text));
+        }
+      }
       return out;
     }
   };

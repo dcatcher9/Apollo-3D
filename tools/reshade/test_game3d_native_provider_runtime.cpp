@@ -104,6 +104,16 @@ namespace {
 #include "test_ngx_stand_in.h"
 
 namespace {
+  // A fence's name in the unordered_read script, one per fence object: the
+  // script is never cleared between frame scripts, and a fence created at a
+  // released one's address (another ring's) is another fence, whose earlier
+  // signals must not reach this one's waits. Small integers, never a heap
+  // address.
+  const void *script_fence_token() {
+    static std::uintptr_t value = 0;
+    return reinterpret_cast<const void *>(++value);
+  }
+
   // A ring of recordings on a queue of the game's own: each entry is reset
   // (through ReShade, which names its native list) only when recorded into
   // again, once its last work completed, as Streamline's DLSS-G ring and a
@@ -117,6 +127,7 @@ namespace {
     std::array<com_ptr<ID3D12GraphicsCommandList>, N> lists;
     std::array<std::uint64_t, N> values{};
     com_ptr<ID3D12Fence> done;
+    const void *token{};  // done's name in the script (script_fence_token).
     std::uint64_t value{};
     unsigned at{};
     // The fence as the freshness rule's probes see it: they hold it weakly,
@@ -135,6 +146,7 @@ namespace {
         checked(lists[n]->Close(), "Close a ring's initial recording");
       }
       checked(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(done.put())), "Create a ring's fence");
+      token = script_fence_token();
       done->AddRef();
       watched.reset(done.p, [](ID3D12Fence *fence) { fence->Release(); });
     }
@@ -170,10 +182,10 @@ namespace {
       queue->ExecuteCommandLists(1, submitted);
       script_execute(queue.p);
       checked(queue->Signal(done.p, values[n] = ++value), "Signal a ring entry's work");
-      script_order.signal(queue.p, done.p, value);
+      script_order.signal(queue.p, token, value);
       if (presenting) {
         checked(presenting->Wait(done.p, value), "Order the presenting queue after a ring's queue");
-        script_order.wait(presenting, done.p, value);
+        script_order.wait(presenting, token, value);
       }
     }
     // Retires every recording once its work completed, as a game does at
@@ -185,7 +197,7 @@ namespace {
     void finish() {
       if (!queue.p) return;
       checked(queue->Signal(done.p, ++value), "Signal a ring's last work");
-      script_order.signal(queue.p, done.p, value);
+      script_order.signal(queue.p, token, value);
       checked(done->SetEventOnCompletion(value, nullptr), "Wait for a ring's queue");
     }
     void release() {
@@ -3517,7 +3529,24 @@ namespace {
         checked(game->CreateCommandQueue(&desc, IID_PPV_ARGS(third.put())), "Create the game's third queue");
       }
       std::uint64_t gate_value = 0, handoff_value = 0;
-      enum class order_form { waits, no_wait, cpu_signal, second_signaller };
+      // The late form's own fence (the CPU signal poisons it for good).
+      com_ptr<ID3D12Fence> late_handoff;
+      checked(game->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(late_handoff.put())), "Create the late handoff fence");
+      std::uint64_t late_value = 0;
+      bool late_now = false;
+      // Their names in the script (script_fence_token).
+      const void *const gate_token = script_fence_token(), *const handoff_token = script_fence_token(),
+        *const late_token = script_fence_token();
+      // late_signaller (O1): the presenting queue waits on a handoff fence
+      // that only the game queue signals, after its frame, so each Present
+      // reads that frame's copy in flight; after the last Present the CPU
+      // signals that fence to the waited value before the game queue's own
+      // signal can run (the gate is still closed): a signal first submitted
+      // after the read, which no observation at the decision could exclude
+      // (R1-late-signaller). unordered_read counts those reads as late, and
+      // the next Present must not hold that copy any further: its producer
+      // may not have written it when the read ran.
+      enum class order_form { waits, no_wait, cpu_signal, second_signaller, late_signaller };
       const auto in_flight = [&](const char *name, order_form form) {
         unsigned in_flight_frames = 0, in_flight_shown = 0;
         run_script({name, 30000,
@@ -3538,26 +3567,38 @@ namespace {
             render_tracked_depth = [&] {
               auto *const game_queue = game_ring.queue.p;
               checked(game_queue->Wait(gate.p, ++gate_value), "Hold the game queue until after its frame's Present");
-              script_order.wait(game_queue, gate.p, gate_value);
+              script_order.wait(game_queue, gate_token, gate_value);
               game_queue_sr();
+              if (form == order_form::late_signaller) {
+                checked(game_queue->Signal(late_handoff.p, ++late_value), "Signal the late handoff fence after the game queue's frame");
+                script_order.signal(game_queue, late_token, late_value);
+                checked(queue->Wait(late_handoff.p, late_value), "Wait for the late handoff fence on the presenting queue");
+                script_order.wait(queue.p, late_token, late_value);
+                return;
+              }
               if (form != order_form::cpu_signal && form != order_form::second_signaller) return;
               checked(game_queue->Signal(handoff.p, ++handoff_value), "Signal the handoff fence after the game queue's frame");
-              script_order.signal(game_queue, handoff.p, handoff_value);
+              script_order.signal(game_queue, handoff_token, handoff_value);
               if (form == order_form::cpu_signal) {
                 checked(handoff->Signal(handoff_value), "Signal the handoff fence from the CPU");
-                script_order.cpu_signal(handoff.p, handoff_value);
+                script_order.cpu_signal(handoff_token, handoff_value);
               } else {
                 checked(third->Signal(handoff.p, handoff_value), "Signal the handoff fence from a third queue");
-                script_order.signal(third.p, handoff.p, handoff_value);
+                script_order.signal(third.p, handoff_token, handoff_value);
               }
               checked(queue->Wait(handoff.p, handoff_value), "Wait for the handoff fence on the presenting queue");
-              script_order.wait(queue.p, handoff.p, handoff_value);
+              script_order.wait(queue.p, handoff_token, handoff_value);
             };
             after_present = [&] {
+              if (std::exchange(late_now, false)) {
+                checked(late_handoff->Signal(late_value), "Signal the late handoff fence from the CPU after the Present");
+                script_order.cpu_signal(late_token, late_value);
+              }
               checked(gate->Signal(gate_value), "Open the game queue's gate after the Present");
-              script_order.cpu_signal(gate.p, gate_value);
+              script_order.cpu_signal(gate_token, gate_value);
             };
             for (unsigned i = 0; i != 12; ++i) {
+              late_now = form == order_form::late_signaller && i == 11;
               present_frame();
               ++in_flight_frames;
               const auto &record = newest_record();
@@ -3570,7 +3611,20 @@ namespace {
             }
             log_status(name, inspect());
             std::printf("MEASURE native-provider %s in-flight copies shown=%u of %u\n", name, in_flight_shown, in_flight_frames);
-            if (form == order_form::waits) {
+            if (form == order_form::late_signaller) {
+              // The first Present after the late conflict, with no new copy:
+              // mono, never the last frame's copy held (O1, fail-safe).
+              render_tracked_depth = {};
+              present_frame();
+              const auto &after = newest_record();
+              const auto owner = after.depth_owner == sunshine_game3d::source_slot::none ? sunshine_game3d::source_slot::hold : after.depth_owner;
+              std::printf("MEASURE native-provider %s after the late signal: owner=%s state=%s reason=%s depth_tick=%llu\n", name,
+                sunshine_game3d::name(after.depth_owner), sunshine_game3d::name(after[owner].state), after[owner].reason,
+                static_cast<unsigned long long>(after.depth_tick_ms));
+              require(!game3d_continuity::shows_depth(after),
+                "A Present held a copy read in flight on a fence that a late signal then poisoned (O1: not held any further)");
+            }
+            if (form == order_form::waits || form == order_form::late_signaller) {
               // The first frame may still show the warm-up's copy while the
               // model settles the gate's first sight; every later one shows
               // its own.
@@ -3590,8 +3644,12 @@ namespace {
       in_flight("sr-other-queue-in-flight-no-wait", order_form::no_wait);
       in_flight("sr-other-queue-in-flight-cpu-signal", order_form::cpu_signal);
       in_flight("sr-other-queue-in-flight-second-signaller", order_form::second_signaller);
-      std::printf("MEASURE native-provider unordered_read judged=%u reads (each ordered by the script's own fences)\n", ordered_reads);
+      const auto late_before = script_order.late_reads;
+      in_flight("sr-other-queue-in-flight-late-signaller", order_form::late_signaller);
+      std::printf("MEASURE native-provider unordered_read judged=%u reads (each ordered by the script's own fences) late=%u\n",
+        ordered_reads, script_order.late_reads);
       require(ordered_reads >= 11, "unordered_read judged no in-flight read");
+      require(script_order.late_reads > late_before, "unordered_read counted no read that a late signal unordered (R1-late-signaller)");
 
       // Generic: no API source (FG off, no SDK call past the association
       // window), and one depth-stencil view of the swapchain's size drawn

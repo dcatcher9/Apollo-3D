@@ -3546,6 +3546,7 @@ namespace sunshine_streamline::depth_capture {
     out = proven.query(identity, queue, !enhanced_barriers_seen.load(std::memory_order_relaxed));
     return bool(out);
   }
+  bool read_conflicted(std::uint64_t capture) { return native_observer::queue_order_conflicted(capture); }
   bool queue_order_line(std::uint64_t now, char *out, std::size_t size) {
     static std::uint64_t logged_at{}, logged_total{UINT64_MAX};
     static bool disabled_logged{};
@@ -3891,7 +3892,7 @@ namespace sunshine_streamline::depth_capture {
             return result(consumer_status::capture_not_ready);
           if (relied.ordered) {
             order_inflight_reads.fetch_add(1, std::memory_order_relaxed);
-            native_observer::queue_order_rely(relied);
+            native_observer::queue_order_rely(relied, entry.id);
           }
           if (diagnostic) {
             diagnostic->read_order = relied.ordered ? 3 : 2;

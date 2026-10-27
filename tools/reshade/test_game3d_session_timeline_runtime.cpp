@@ -18,7 +18,16 @@
 // - DLSS-G's own evaluation on a direct or compute list, its depth in a state
 //   recorded there or not;
 // - the game's HUD-less and Backbuffer tags, with or without a command list,
-//   or untagged in the same frame.
+//   or untagged in the same frame;
+// - the game's fence events that order the presenting queue after the
+//   frame's work on another queue (its SR on the game's queue, DLSS-G's
+//   compute copy): the presenting queue waits after the other queue's
+//   signal or before it (wait before signal), or the CPU waits for it; the
+//   CPU or a third queue of the game's signals that fence again (a second
+//   signaller), before the Present or only after it (a late signaller);
+//   each fence is created anew at each FG toggle, as a game recreates its
+//   frame-generation objects. These are drawn from a stream of their own,
+//   so every seed keeps the frames it had before them (10-27).
 // Each dimension keeps the previous frame's value with a chance or is drawn
 // anew (test_contract_matrix_generator.h, sample), so a timeline has the
 // stretches a game has and any frame may change anything.
@@ -69,6 +78,7 @@
 #include "test_game3d_api_contract_oracle.h"
 
 #include <map>
+#include <numeric>
 
 namespace {
   namespace matrix = game3d_contract;
@@ -98,6 +108,7 @@ namespace {
       generated,
       at,
       ui,
+      order,
       dimension_count
     };
 
@@ -178,6 +189,29 @@ namespace {
       untagged  // bare, then the same frame's null untag of both.
     };
 
+    // How the game orders the presenting queue after the frame's work on
+    // another queue: that queue signals its fence after the work, and the
+    // presenting queue waits for that value after the signal (wait), before
+    // it (wait_first: legal, it blocks until the signal), or the CPU waits
+    // for the work before the frame's Present (cpu_wait). cpu: the CPU waits
+    // for the work, then signals the fence one value ahead; second: the
+    // presenting queue waits, and a third queue of the game's waits for the
+    // value, then signals one ahead (a second signaller), both before the
+    // frame's Present: the presenting queue's next wait is then reached
+    // before the next frame's work, which only refusing that fence (O3)
+    // keeps from a read in flight. late: the presenting queue waits, and
+    // after the frame's Present the CPU or the third queue (alternately)
+    // signals the waited value again, a signal first submitted after a read
+    // that relied on the fence (O1's residual).
+    enum class order_form {
+      wait,
+      wait_first,
+      cpu_wait,
+      cpu,
+      second,
+      late
+    };
+
     template<class E>
     E of(const generator::row &value, dimension d) {
       return E(value[d]);
@@ -225,10 +259,36 @@ namespace {
           {"generated", {"0", "1", "2", "3"}},
           {"at", {"between", "inside", "evaluate"}},
           {"ui", {"none", "bare", "listed", "untagged"}},
+          {"order", {"wait", "wait_first", "cpu_wait", "cpu", "second", "late"}},
         },
         legal,
       };
       return value;
+    }
+
+    // The frame language before the fence events, which generate draws as
+    // it did, so that each seed keeps its frames (legal reads no fence
+    // event).
+    const generator::family &base_family() {
+      static const generator::family value = [] {
+        auto out = family();
+        out.dimensions.pop_back();
+        return out;
+      }();
+      return value;
+    }
+
+    // The fence events' own weights and chance in a thousand to keep the
+    // previous frame's. A fence that a CPU or second signal poisoned stays
+    // so until FG toggles, so those are rarer.
+    constexpr unsigned order_weights[] {12, 4, 2, 1, 1, 1};
+    constexpr unsigned order_keep_per_mille = 850;
+
+    // Whether the frame records work on another queue that the fence events
+    // order: its SR on the game's queue or DLSS-G's compute copy.
+    bool elsewhere(const generator::row &value) {
+      const auto d = of<dlssg_form>(value, dlssg);
+      return of<sr_form>(value, sr) == sr_form::other_queue || d == dlssg_form::compute || d == dlssg_form::compute_unobserved;
     }
 
     // Relative weights of each dimension's values, and the chance in a
@@ -268,6 +328,10 @@ namespace {
         }
         if (!legal(value)) {
           value[state] = 0;
+        }
+        // Fence events order only work on another queue.
+        if (!elsewhere(value)) {
+          value[order] = 0;
         }
       }
     }
@@ -388,6 +452,13 @@ namespace {
     // the round 3 review, soak seed 76a7d0a6922d20ea). Pins that frame's
     // C1 tagging: untagged, its loss fails the set.
     {"C4-compute-copy-stops", "20*sr=local; fg=on,sr=local,dlssg=compute,generated=3; 11*sr=local,dlssg=compute,generated=3; 10*sr=local,generated=3"},
+    // The game's CPU signals the presenting queue's order fence one value
+    // ahead, so the next frame's wait is reached before that frame's work on
+    // the game's queue: the add-on refuses that fence for good (sticky
+    // poison, O3), so no Present reads that copy in flight. With the CPU
+    // poison dropped from the model, unordered_read failed its frame 21
+    // (shrunk to "sr=other_queue,order=cpu; sr=other_queue").
+    {"O3-cpu-signal-ahead", "20*sr=other_queue; sr=other_queue,order=cpu; 30*sr=other_queue"},
     {"fg-on-holds-sr-copy", "20*sr=local; fg=on,tag=now_list,sr=local,generated=1,at=evaluate; 5*tag=now_list,sr=local,generated=1; fg=off,sr=local; 10*sr=local; fg=on,tag=now_list,generated=1,at=inside; 5*tag=now_list,generated=1; fg=off,sr=local; 10*sr=local; fg=on,tag=now_list,sr=local,generated=1,at=evaluate; 5*sr=local,generated=1"},
   };
 
@@ -416,7 +487,23 @@ namespace {
     timeline_case out {seed, {}};
     const auto count = min_frames + rng.below(max_frames - min_frames + 1);
     for (unsigned i = 0; i != count; ++i) {
-      out.frames.push_back(generator::sample(events::family(), rng, events::drawing(), out.frames.empty() ? nullptr : &out.frames.back()));
+      auto previous = out.frames.empty() ? generator::row {} : out.frames.back();
+      previous.resize(events::base_family().dimensions.size());
+      out.frames.push_back(generator::sample(events::base_family(), rng, events::drawing(), out.frames.empty() ? nullptr : &previous));
+    }
+    // The fence events, from a stream of their own.
+    generator::seeded fences {seed ^ 0x0f3e5ce0f3e5ce01ull};
+    for (std::size_t i = 0; i != out.frames.size(); ++i) {
+      int value = 0;
+      if (i && fences.below(1000) < events::order_keep_per_mille) {
+        value = out.frames[i - 1][events::order];
+      } else {
+        auto pick = fences.below(std::accumulate(std::begin(events::order_weights), std::end(events::order_weights), 0u));
+        while (pick >= events::order_weights[value]) {
+          pick -= events::order_weights[value++];
+        }
+      }
+      out.frames[i].push_back(value);
     }
     events::normalize(out.frames);
     return out;
@@ -523,6 +610,9 @@ namespace {
     // Reads the add-on recorded as ordered by the queue-order model, each
     // judged by the timeline's own fences (unordered_read).
     unsigned ordered_reads {};
+    // Of those, the reads a signal first submitted after them unordered
+    // (R1-late-signaller's).
+    unsigned late_reads {};
     std::uint64_t elapsed_ms {};
   };
 
@@ -548,6 +638,36 @@ namespace {
     // queue (as its dlssg-evaluation).
     queue_ring<16> game_work;
     queue_ring<3> dlssg_work;
+
+    // The game's fences that order the presenting queue after each ring's
+    // work (frame_events::order_form), created anew for each run and at each
+    // FG toggle, and a third queue of the game's that signals one too (a
+    // second signaller; it waits for the value first, so a fence never
+    // decreases). token: the fence's name in the unordered_read script, one
+    // per fence object, so that a fence created at a released one's address
+    // is another fence there as it is to the add-on.
+    struct order_fence {
+      com_ptr<ID3D12Fence> fence;
+      std::uint64_t value {};
+      const void *token {};
+      // A CPU or second signal reached it: the add-on refuses it for good.
+      // settled: its first value was seen complete (a wait before is
+      // refused).
+      bool poisoned {}, settled {};
+      // When the presenting queue last waited on it (0 never).
+      std::uint64_t waited {};
+    };
+
+    order_fence game_order, dlssg_order;
+    com_ptr<ID3D12CommandQueue> third;
+    // The frame's late signals, made after its real Present.
+    std::vector<order_fence *> late_signals;
+    // R1-late-signaller (test_game3d_continuity.h): since the first CPU or
+    // second signal of a fence the presenting queue waited on within the
+    // source age, until a real Present shows depth again or the source age
+    // passed (no hold the conflict drops outlives it), real frames are
+    // tagged with its limitation.
+    std::uint64_t late_since {};
     // The game's HUD-less and Backbuffer images: its UI tags and DLSS-G's
     // inputs.
     com_ptr<ID3D12Resource> hudless, backbuffer;
@@ -577,6 +697,9 @@ namespace {
     // (frame_generation::deferral_evaluations): DLSS-G evaluated a frame
     // since the previous frame whose tag copy was deferred, or none was.
     bool deferred_tag {}, awaits_dlssg {};
+    // Whether the frame's DLSS-G compute copy is not readable at its own
+    // Present (execute_elsewhere).
+    bool dlssg_unreadable {};
     // When DLSS-G last evaluated a frame (copied, deferred to a tag or
     // refused), the frames it evaluated, and their count at the previous
     // frame whose tag copy was deferred (deferred_known: one was).
@@ -605,12 +728,24 @@ namespace {
     // completed (every such copy is copied out since U-C1b). Called once its
     // list executed (completion: its ring's). A permitted copy may or may not
     // have been made, so it neither counts nor moves the source's stamp.
-    void recorded_elsewhere(std::uint8_t source, std::function<bool()> completion) {
+    // readable: the contract lets the add-on read it at the frame's own
+    // Present (execute_elsewhere); otherwise the frame's Present may hold or
+    // go mono for it, so it is permitted there and names no completion: the
+    // add-on may read it once complete, while the newest nomination (the
+    // next frame's, perhaps of another source) decides what it selects.
+    void recorded_elsewhere(std::uint8_t source, std::function<bool()> completion, bool readable) {
       const auto &made = decisions.back();
       if (!made.legal || !requires_capture(made.expected)) {
         return;
       }
       supply.elsewhere |= source;
+      if (!readable) {
+        if (supply.legal & source) {
+          supply.legal &= std::uint8_t(~source);
+          supply.permitted |= source;
+        }
+        return;
+      }
       supply.completions.emplace_back(source, std::move(completion));
     }
 
@@ -695,6 +830,113 @@ namespace {
     void create_queues() {
       game_work.create(game.p, D3D12_COMMAND_LIST_TYPE_DIRECT);
       dlssg_work.create(game.p, D3D12_COMMAND_LIST_TYPE_COMPUTE);
+      D3D12_COMMAND_QUEUE_DESC desc {};
+      desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+      checked(game->CreateCommandQueue(&desc, IID_PPV_ARGS(third.put())), "Create the game's third queue");
+      renew_order();
+    }
+
+    // A fence's waits and signals complete before it goes, as a game's.
+    void finish_order(order_fence &order) {
+      if (order.fence.p) {
+        checked(order.fence->SetEventOnCompletion(order.value, nullptr), "Wait for an order fence's last value");
+      }
+      order.fence.reset();
+    }
+
+    // Both order fences created anew: a run's start, or an FG toggle.
+    void renew_order() {
+      for (auto *order : {&game_order, &dlssg_order}) {
+        finish_order(*order);
+        checked(game->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(order->fence.put())), "Create an order fence");
+        order->value = order->waited = 0;
+        order->token = script_fence_token();
+        order->poisoned = order->settled = false;
+      }
+    }
+
+    // The add-on lifecycle fixture ends the game's device.
+    void release_order() {
+      finish_order(game_order);
+      finish_order(dlssg_order);
+      third.reset();
+    }
+
+    // The ring's entry n executed on its queue, which then signals its order
+    // fence; the presenting queue (or the CPU) waits for that value as the
+    // frame's fence events say (frame_events::order_form), and the CPU or
+    // the third queue signals it again, now (cpu, second) or after the
+    // frame's Present (late). Whether the contract lets the add-on read the
+    // frame's copy at its Present (docs/reshade-sbs.md, Queue order): it is
+    // complete (the CPU waited for it), or the presenting queue waits for a
+    // fence the add-on may rely on, one that no CPU or second signal reached
+    // (sticky poison, O3) and that settled: its first value was seen
+    // complete before this frame's calls on it (a wait before that is
+    // refused for good).
+    template<unsigned N>
+    bool execute_elsewhere(queue_ring<N> &ring, unsigned n, order_fence &order) {
+      using frame_events::order_form;
+      const auto form = frame_events::of<order_form>((*frames)[frame], events::order);
+      const auto next = order.value + 1;
+      if (!order.settled && order.value && order.fence->GetCompletedValue() >= 1) {
+        order.settled = true;
+      }
+      const bool relied = order.settled && !order.poisoned;
+      const auto wait = [&] {
+        checked(queue->Wait(order.fence.p, next), "Order the presenting queue after a ring's queue");
+        script_order.wait(queue.p, order.token, next);
+        order.waited = GetTickCount64();
+      };
+      if (form == order_form::wait_first) {
+        wait();
+      }
+      ring.execute(n);
+      checked(ring.queue->Signal(order.fence.p, next), "Signal a ring's order fence");
+      script_order.signal(ring.queue.p, order.token, next);
+      order.value = next;
+      if (form == order_form::cpu_wait || form == order_form::cpu) {
+        // On the ring's own fence, which nobody else signals.
+        checked(ring.done->SetEventOnCompletion(ring.value, nullptr), "Wait for a ring's work on the CPU");
+      } else if (form != order_form::wait_first) {
+        wait();
+      }
+      if (form == order_form::cpu || form == order_form::second) {
+        signal_again(order, form == order_form::cpu, true);
+      } else if (form == order_form::late) {
+        late_signals.push_back(&order);
+      }
+      return form == order_form::cpu_wait || form == order_form::cpu || (relied && form != order_form::second);
+    }
+
+    // A signal of the order fence by the CPU, or by the third queue once its
+    // last value was reached (so the fence never decreases): of that value
+    // (late), or one ahead of it (cpu, second), which the ring's next signal
+    // repeats, so the presenting queue's next wait is reached before that
+    // ring's work: an order the add-on must refuse (sticky poison, O3),
+    // which unordered_read judges. The first such signal of a fence may
+    // conflict with a read that relied on it (O1): the late window opens
+    // when the presenting queue waited on it within the source age.
+    void signal_again(order_fence &order, bool cpu, bool ahead) {
+      const auto now = GetTickCount64();
+      if (!order.poisoned && order.waited && now - order.waited < sunshine_freshness::source_age_ms + continuity::tag_slack_ms) {
+        late_since = now;
+      }
+      order.poisoned = true;
+      const auto value = order.value + (ahead ? 1 : 0);
+      if (cpu) {
+        checked(order.fence->Signal(value), "Signal an order fence from the CPU");
+        script_order.cpu_signal(order.token, value);
+        return;
+      }
+      checked(third->Wait(order.fence.p, order.value), "Order the third queue after a ring's signal");
+      script_order.wait(third.p, order.token, order.value);
+      checked(third->Signal(order.fence.p, value), "Signal an order fence from the third queue");
+      script_order.signal(third.p, order.token, value);
+    }
+
+    // Whether a real frame is within the late window.
+    bool late_window() const {
+      return late_since && GetTickCount64() - late_since < sunshine_freshness::source_age_ms + continuity::tag_slack_ms;
     }
 
     // Retires every ring recording (as a game does at its end), once their
@@ -1072,7 +1314,7 @@ namespace {
         return reinterpret_cast<void *>(game_native_command);
       };
       evidence_seen = false;
-      deferred_tag = awaits_dlssg = false;
+      deferred_tag = awaits_dlssg = dlssg_unreadable = false;
       draw(*decoy);
       supply.permitted |= continuity::generic_boundary;
       supply.tick = GetTickCount64();
@@ -1212,8 +1454,8 @@ namespace {
         decide("sr_other_queue", local_case(declared, false, 0), continuity::sr_evaluate, {"evaluate"});
         returned(sl.evaluate(0, *token, inputs, 2, reinterpret_cast<void *>(native)), "slEvaluateFeature on the game's queue");
         poll("evaluate");
-        game_work.execute(n, queue.p);
-        recorded_elsewhere(continuity::sr_evaluate, game_work.completion());
+        const bool readable = execute_elsewhere(game_work, n, game_order);
+        recorded_elsewhere(continuity::sr_evaluate, game_work.completion(), readable);
         other_queue_copy = GetTickCount64();
       }
       dlssg_evaluation(of<dlssg_form>(value, events::dlssg));
@@ -1245,13 +1487,21 @@ namespace {
       // newest readable copy (until 10-27 known gap C1: readable only once
       // complete, and before that three DLSS-G evaluations later).
       const bool compute_scope = fg_on && dlssg_choice == dlssg_form::compute && fg_copy && now - fg_copy < sunshine_freshness::fg_silent_ms + continuity::tag_slack_ms && !(supply.legal & continuity::tag_copy);
+      // When the contract does not let the add-on read that copy at this
+      // Present (execute_elsewhere: the fence it waits on is refused, or the
+      // CPU did not wait), the scope keeps the SR input out with only its
+      // held copy to show: the SR input is permitted there, not required.
+      if (compute_scope && dlssg_unreadable && (supply.legal & continuity::sr_evaluate)) {
+        supply.legal &= std::uint8_t(~continuity::sr_evaluate);
+        supply.permitted |= continuity::sr_evaluate;
+      }
       // A silent scope (the frame before supplied no FG copy) whose display
       // holds its own FG copy, made since FG On and younger than the source
       // age, keeps the viewport's SR copies off-screen until that copy
       // expires (frame_generation_holds, which awaits the owner's decision):
       // like an owned frame's, they leave no copy a later Present could hold.
       const bool held_off = fg_on && !owned && fg_copy && fg_copy >= fg_enabled_at &&
-        now - fg_copy < sunshine_freshness::source_age_ms;
+                            now - fg_copy < sunshine_freshness::source_age_ms;
       // An FG copy its scope accepts: an FG tag's, or DLSS-G's in a state
       // its list recorded (its compute copy is accepted later, with its own
       // tick).
@@ -1263,13 +1513,27 @@ namespace {
         dlssg_evaluated = now;
         ++dlssg_frames;
       }
+      const auto owned_sr = owned || held_off || compute_scope ? std::uint8_t(supply.legal & continuity::sr_evaluate) : std::uint8_t {};
+      // R1-late-signaller: a frame within the late window, or whose own
+      // order fence a late signal reaches after its Present (one the CPU or
+      // a second signal did not reach yet, which the presenting queue waited
+      // on in this frame), meets O1's residual with every legal source: the
+      // add-on stops holding a copy it read relying on that fence.
+      if ((late_window() || std::any_of(late_signals.begin(), late_signals.end(), [](const order_fence *order) {
+             return !order->poisoned;
+           })) &&
+          supply.legal) {
+        supply.limited |= supply.legal;
+        supply.legal = 0;
+        supply.limit = continuity::limitation::late_signaller;
+      }
       // The frame's supply: a frame whose legal sources all meet a known
       // limitation is tagged with it; any other legal source must show.
       continuity_log.pending = {};
       continuity_log.pending.legal = std::uint8_t(supply.legal | supply.limited);
       continuity_log.pending.permitted = supply.permitted;
       continuity_log.pending.limited = supply.limited;
-      continuity_log.pending.owned = owned || held_off || compute_scope ? std::uint8_t(supply.legal & continuity::sr_evaluate) : std::uint8_t {};
+      continuity_log.pending.owned = owned_sr;
       continuity_log.pending.limit = supply.legal ? continuity::limitation::none : supply.limit;
       continuity_log.pending.tick = supply.tick;
       // The freshness rule: the frame's copies recorded on another queue,
@@ -1332,9 +1596,11 @@ namespace {
           transition(compute, selected->resource.p, read, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         }
         // Streamline's present queue waits for DLSS-G's compute signal, so
-        // the Presents after this one are ordered after its copy-out (U-C1).
-        dlssg_work.execute(n, queue.p);
-        recorded_elsewhere(continuity::dlssg_input, dlssg_work.completion());
+        // the Presents after this one are ordered after its copy-out (U-C1),
+        // as the frame's fence events have it.
+        const bool readable = execute_elsewhere(dlssg_work, n, dlssg_order);
+        dlssg_unreadable = !readable;
+        recorded_elsewhere(continuity::dlssg_input, dlssg_work.completion(), readable);
         if (observed) {
           other_queue_copy = GetTickCount64();
         }
@@ -1371,6 +1637,9 @@ namespace {
       const auto event = of<fg_event>(value, events::fg);
       if (event != fg_event::keep) {
         set_frame_generation(event == fg_event::on);
+        // The game creates its frame-generation objects anew, these fences
+        // among them.
+        renew_order();
       }
       if (value[events::drs]) {
         area = (area + 1) % 4;
@@ -1390,6 +1659,15 @@ namespace {
       poll("present");
       if (!record_history.records.empty()) {
         present_frames[record_history.records.back().present] = frame;
+        // A real Present that shows depth ends the late window.
+        if (late_since && continuity::shows_depth(record_history.records.back())) {
+          late_since = 0;
+        }
+      }
+      // The frame's late signals, after its Present (and before the
+      // generated Presents after it).
+      for (auto *order : std::exchange(late_signals, {})) {
+        signal_again(*order, order->value % 2 == 0, false);
       }
       if (supply.legal || supply.limited || (supply.permitted & continuity::api_sources)) {
         api_supplied = GetTickCount64();
@@ -1456,8 +1734,15 @@ namespace {
       continuity_log.judge = {};
       continuity_log.pending = {};
       continuity_log.where = where.c_str();
-      // A new viewport: no read of this run names an earlier run's copy.
+      // A new viewport: no read of this run names an earlier run's copy, and
+      // its order fences are new, so a run's fence events are its own.
       script_order.clear();
+      // The run's presenting queue: the add-on lifecycle fixture presents a
+      // later game device's runs on that device's queue.
+      script_presenting = queue.p;
+      renew_order();
+      late_signals.clear();
+      late_since = 0;
       script_name = where.c_str();
       script_deadline = GetTickCount64() + 15000 + 150 * value.frames.size();
     }
@@ -1498,9 +1783,23 @@ namespace {
       // unordered_read (the native provider fixture's require_ordered_reads):
       // a read the add-on recorded as ordered by the queue-order model that
       // the timeline's own Execute, Signal and Wait calls do not order.
+      // A read the script's calls up to its Present order, but not with a
+      // signal first submitted after it, is R1-late-signaller's (O1); any
+      // other fails at the frame whose Present made it.
       result.ordered_reads = unsigned(script_order.reads.size());
-      for (const auto &text : script_order.unordered_reads()) {
-        result.failures.push_back({"unordered_read", unsigned(value.frames.size()), text, "unordered_read"});
+      const auto late_row = std::size_t(std::find_if(std::begin(continuity::known_gaps), std::end(continuity::known_gaps), [](const continuity::gap_row &row) {
+                                          return row.limit == continuity::limitation::late_signaller;
+                                        }) -
+                                        std::begin(continuity::known_gaps));
+      for (const auto &read : script_order.judge_reads()) {
+        const auto found = present_frames.find(read.present_index);
+        const auto at = found == present_frames.end() ? unsigned(value.frames.size()) : found->second;
+        if (read.late) {
+          ++result.late_reads;
+          ++result.rows[late_row].violations;
+          continue;
+        }
+        result.failures.push_back({"unordered_read", at, (at < value.frames.size() ? frame_text(at) : std::string("isolation")) + ": " + read.text, "unordered_read"});
       }
       std::stable_sort(result.failures.begin(), result.failures.end(), [](const failure &a, const failure &b) {
         return a.frame < b.frame;
@@ -1569,7 +1868,7 @@ namespace {
         }
       };
       // Each event kind back to its default in every frame.
-      for (const auto d : {ui, generated, drs, untag, dlssg, state, entry, sr, tag, fg}) {
+      for (const auto d : {order, ui, generated, drs, untag, dlssg, state, entry, sr, tag, fg}) {
         auto candidate = current;
         for (auto &value : candidate) {
           reset(value, d);
@@ -1828,7 +2127,7 @@ int main(int argc, char **argv) {
       shown += result.shown;
       frames_run += result.frames;
       decisions += result.decisions;
-      std::printf("MEASURE session-timeline %s frames=%u presents=%u generated=%u legal=%u shown=%u stalls=%u decisions=%u refusals=%u preempted=%u cancels=%u ordered_reads=%u failures=%zu elapsed_ms=%llu", name_of(value).c_str(), result.frames, result.presents, result.generated, result.legal, result.shown, result.stalls, result.decisions, result.refusals_matched, result.refusals_preempted, result.cancels, result.ordered_reads, result.failures.size(), static_cast<unsigned long long>(result.elapsed_ms));
+      std::printf("MEASURE session-timeline %s frames=%u presents=%u generated=%u legal=%u shown=%u stalls=%u decisions=%u refusals=%u preempted=%u cancels=%u ordered_reads=%u late_reads=%u failures=%zu elapsed_ms=%llu", name_of(value).c_str(), result.frames, result.presents, result.generated, result.legal, result.shown, result.stalls, result.decisions, result.refusals_matched, result.refusals_preempted, result.cancels, result.ordered_reads, result.late_reads, result.failures.size(), static_cast<unsigned long long>(result.elapsed_ms));
       for (std::size_t r = 0; r != rows.size(); ++r) {
         if (result.rows[r].exercised) {
           std::printf(" %s={supplied=%u violations=%u}", continuity::known_gaps[r].id, result.rows[r].exercised, result.rows[r].violations);

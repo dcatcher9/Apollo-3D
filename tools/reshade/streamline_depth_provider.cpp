@@ -948,6 +948,12 @@ namespace sunshine_streamline::provider {
     sunshine_depth::frame_depth captured;
     bool copied = false;
     const auto reuse_tick = GetTickCount64();
+    // O1 (fail-safe): a copy read in flight on a fence that a signal first
+    // submitted after that read has since poisoned (late_conflict) may hold
+    // pixels its producer had not written yet; it is not held any further,
+    // from the first Present after the conflict was seen.
+    if (const auto held = data->cache.reference().capture_id; held && depth_capture::read_conflicted(held))
+      data->cache.invalidate("late_conflict");
     const auto &cached = data->cache.depth();
     const auto prior_depth_age = cached.ready && reuse_tick >= cached.provided.tick ?
       reuse_tick - cached.provided.tick : UINT64_MAX;

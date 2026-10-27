@@ -62,7 +62,10 @@
 // limitation was supplied in a run without a violation (the gap closed: the
 // fix removes the row).
 //
-// One row is the limitation the owner approved until Step 4 (C2). C1, API
+// Two rows are limitations the owner approved: C2 until Step 4, and
+// R1-late-signaller, O1's residual of the queue-order model (a signal first
+// submitted after a read that relied on its fence), whose fail-safe drops
+// the hold itself, so every loss of a frame it tags is the row's. C1, API
 // depth recorded on a queue other than the presenting one, closed on 10-27:
 // every such copy is copied out on its own queue (U-C1b gives a source's
 // first copies that storage too) and read once complete or once the game's
@@ -125,6 +128,12 @@ namespace game3d_continuity {
     // A Generic depth-stencil view drawn on a queue other than the
     // presenting one, whose only boundary is the end of the frame.
     cross_queue_generic,
+    // O1's residual: a frame whose copy from another queue a Present read
+    // in flight, ordered by a fence of the game's that a signal first
+    // submitted after that read (the CPU's or another queue's) then reached,
+    // and the frames after it until a Present shows depth again: the
+    // add-on stops holding that copy (late_conflict).
+    late_signaller,
   };
 
   // What one frame supplied, stamped when the fixture made the first call
@@ -262,6 +271,8 @@ namespace game3d_continuity {
     switch (value) {
       case limitation::cross_queue_generic:
         return "cross_queue_generic";
+      case limitation::late_signaller:
+        return "late_signaller";
       default:
         return "none";
     }
@@ -299,10 +310,14 @@ namespace game3d_continuity {
     // recorded matrix gap over frames.
     const char *found;
     const char *owner_note;
+    // Every loss of a tagged frame is the row's, also one within the source
+    // age of a readable copy: the limitation drops that hold itself.
+    bool drops_hold {};
   };
 
   inline constexpr gap_row known_gaps[] {
     {"C2-cross-queue-generic", limitation::cross_queue_generic, nullptr, "Until Step 4's fence hooks. Generic's end-of-frame copy runs on the presenting queue, and a proof belongs to the queue whose executed list made it, so a depth-stencil view drawn on another queue with no boundary but the end of the frame is refused (missing_state; 18e5d922, docs/reshade-sbs.md, the last proven state). Seven of the eight games of the 10-06 to 10-23 logs render on another queue. Either owner option (accept the other queue's proof once fence hooks show the presenting queue ordered after it, or copy on the proving queue) shows depth here and removes this row."},
+    {"R1-late-signaller", limitation::late_signaller, nullptr, "Owner decision O1 (10-27, Step 4 design section 1): accepted. A Present reads a copy from another queue in flight once the game's own fence waits order the presenting queue after its copy-out (U-C1); no observation at that decision can exclude a signal of the waited fence, first submitted after it by the CPU or another queue, that runs before the producer's own signal. The add-on poisons such a fence for good (O3), counts each relied read it reaches within the source age as late_conflict, and stops holding that read's presentation copy from the next Present (fail-safe: mono rather than pixels its producer may not have written). The session timelines tag the frame of each first such signal of a fence the presenting queue waited on within the source age, and the frames after it until a Present shows depth again; unordered_read counts a read the script orders by its calls up to the read's Present, but not with every later signal, as this row's (test_queue_order_script.h, judge_reads). Every loss of a tagged frame is the row's: the fail-safe drops the hold itself.", true},
   };
   inline constexpr std::size_t gap_count = std::size(known_gaps);
 
@@ -326,7 +341,7 @@ namespace game3d_continuity {
       // A limitation loses depth once the presenting queue's newest copy
       // aged out (C1's note); a loss while that copy could still be held is
       // no row's.
-      if (value.readable_age_ms < sunshine_freshness::source_age_ms) {
+      if (!known_gaps[i].drops_hold && value.readable_age_ms < sunshine_freshness::source_age_ms) {
         return -1;
       }
       return int(i);
