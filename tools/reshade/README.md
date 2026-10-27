@@ -1952,6 +1952,18 @@ loss with DLSS-G's compute copy, in C6's note above, awaits the owner). The regr
 at each FG On (frames 20, 37 and 54, `dropped_hold`). The seam characterization pins the lineage
 (eight rows), and the display cache test the SR-to-FG direction under a silent and a live scope.
 
+The same soak's gaps at a frame-generation tag of lifecycle `ValidUntilEvaluate` (seeds
+`bf06bc26f9b88f1c`, frame 153, and `6b3b06cd02a48739`, frame 140, which the review counted with the
+FG On holds) are a different defect, fixed with them (10-27): such a tag whose list records no state
+of it is refused at its call (S11c, `missing_state`), and the frame's SR evaluate of the tag, the use
+its declaration names, copies it. The probe ended a `ValidUntilEvaluate` tag's lifetime at the
+return of any frame-generation tag call (`finish_evaluation`, a rule from before S11c that ordinary
+tag calls were already exempt from), so that evaluate read the tag unsupported (`missing-depth`) and
+every such frame was mono once the depth before aged out. A tag call now ends no `ValidUntilEvaluate`
+tag. The regression timelines `S11c-fg-until-evaluate-tag-then-evaluate` (through
+`slSetTagForFrame`) and `S11c-fg-global-until-evaluate-tag-then-evaluate` (through `slSetTag`) fail
+on the build before (gap at frame 34, and at frame 16 of the shorter form without the warm-up).
+
 `reshade_native_provider_continuity` runs the provider fixture at 1280x720 with the 2.7.30
 interposer, every frame script under the invariant, in about 115 s. Like
 `reshade_addon_unload_runtime` it is labelled `contract;gpu`, runs serially with the `gpu` resource
@@ -2036,8 +2048,9 @@ two for C4's fix, `C4-no-fg-call` and `C4-cancelled-fg-tags`, one for C6's,
 `C6-dlssg-after-tag-copy`, one for C7's, `C7-dlssg-stops`, two for C8's,
 `C8-fg-off-sr-other-queue` and `C8-fg-off-color-only`, and four for C5's,
 `C5-frame-tag-then-evaluate`, `C5-global-tag-then-evaluate` and their untag forms
-`C5-frame-untag-then-evaluate` and `C5-global-untag-then-evaluate`, and one for the FG On hold,
-`fg-on-holds-sr-copy`), an event list shaped like the
+`C5-frame-untag-then-evaluate` and `C5-global-untag-then-evaluate`, one for the FG On hold,
+`fg-on-holds-sr-copy`, and two for S11c's evaluate, `S11c-fg-until-evaluate-tag-then-evaluate` and
+`S11c-fg-global-until-evaluate-tag-then-evaluate`), an event list shaped like the
 session it fixed and judged as any
 timeline (random seeds meet these shapes only by chance, and a change of the event language changes
 every seed), and one witness per open row the timelines found or carry (none is open since C5 closed
@@ -2046,8 +2059,8 @@ run; a witness that loses none fails the set, as the matrix's gap seeds keep a r
 failing cell. `--trace` prints every Present's
 frame record, the supply it was judged with and each recorded refusal.
 
-`reshade_session_timelines` runs the fixed set (24 seeds and sixteen regression timelines, about
-4170 frames and 9700 Presents) in about 150 s, registered like
+`reshade_session_timelines` runs the fixed set (24 seeds and eighteen regression timelines, about
+4250 frames and 10000 Presents) in about 155 s, registered like
 `reshade_native_provider_continuity` with the same 240 s timeout. Locally:
 
     reshade_game3d_session_timeline_runtime_test [--list] [--timeline <seed> | --events "<list>" |

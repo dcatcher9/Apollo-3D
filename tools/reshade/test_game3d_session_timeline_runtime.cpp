@@ -372,6 +372,15 @@ namespace {
     // (until 10-27 the live scope dropped it, FG_scope_required, at every
     // FG On; the round 3 review's soak, 13 of its 20 failures). Toggled as
     // Assassin's Creed Shadows toggles FG.
+    // An FG tag of lifecycle ValidUntilEvaluate whose list records no state
+    // of it is refused at its call, and the frame's SR evaluate of the tag,
+    // the use its declaration names, copies it (S11c). Until 10-27 the FG
+    // tag call ended that lifetime at its own return, so the evaluate read
+    // the tag unsupported (missing-depth) and every such frame was mono once
+    // the depth before aged out (soak seeds bf06bc26f9b88f1c,
+    // 6b3b06cd02a48739), through slSetTagForFrame and slSetTag.
+    {"S11c-fg-until-evaluate-tag-then-evaluate", "20*sr=local; fg=on,tag=evaluate_list,sr=tag; 20*tag=evaluate_list,sr=tag"},
+    {"S11c-fg-global-until-evaluate-tag-then-evaluate", "20*sr=local; fg=on,tag=evaluate_list,entry=global,sr=tag; 20*tag=evaluate_list,entry=global,sr=tag"},
     {"fg-on-holds-sr-copy", "20*sr=local; fg=on,tag=now_list,sr=local,generated=1,at=evaluate; 5*tag=now_list,sr=local,generated=1; fg=off,sr=local; 10*sr=local; fg=on,tag=now_list,generated=1,at=inside; 5*tag=now_list,generated=1; fg=off,sr=local; 10*sr=local; fg=on,tag=now_list,sr=local,generated=1,at=evaluate; 5*sr=local,generated=1"},
   };
 

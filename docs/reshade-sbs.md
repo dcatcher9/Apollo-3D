@@ -4124,6 +4124,9 @@ from its declaration):
   `ui={refused=}` grew every frame;
 - a `ValidUntilEvaluate` frame-generation depth tag whose list records no state of it is refused
   at the call (`missing_state`): its declaration describes its evaluate, which copies it (S11c). A
+  tag call ends no `ValidUntilEvaluate` lifetime, only the evaluate that uses the tag does; until
+  10-27 a frame-generation tag call ended it at its own return, so that evaluate read the tag
+  unsupported (`missing-depth`) and the frame lost its depth. A
   `ValidUntilEvaluate` UI tag is refused the same way (U5), though no evaluate copies a UI tag.
   Any other tag without a command list has no point to copy at (`boundary_without_commands`, S2),
   at its call and at a later evaluate.

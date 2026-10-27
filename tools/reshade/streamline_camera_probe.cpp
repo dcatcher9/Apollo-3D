@@ -1496,9 +1496,11 @@ namespace sunshine_streamline {
         // COM references do not extend pixel validity. Never consume a newer
         // concurrent tag or turn an evaluation-local tag into a global one.
         for (unsigned i = 0; i != value.tags.size(); ++i) {
-          // An ordinary standalone tag call does not end UntilEvaluate. A
+          // A tag call ends no UntilEvaluate tag, a frame-generation one
+          // included: the slEvaluateFeature call that uses it does (its
+          // same-frame evaluate copies a tag its call could not, S11c). A
           // mixed batch may carry that tag beside the OnlyValidNow copy.
-          if (value.tag_boundary && !value.frame_generation_input) break;
+          if (value.tag_boundary) break;
           const auto &used = value.tags[i];
           if (!used.present || used.value.lifecycle != sl_contract::valid_until_evaluate ||
               used.scope == tag_scope::evaluation_local) continue;
