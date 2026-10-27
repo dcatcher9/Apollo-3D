@@ -766,7 +766,21 @@ namespace {
     require(observer::queue_order_counts().cpu_unhooked == unhooked + 100 && fresh.data.empty(),
       "a fence of a rejected CPU Signal slot got a record");
     require(observer::slot_reads_for_testing() == reads, "every call on a fence of a rejected CPU Signal slot discovered that slot again");
-    std::puts("PASS queue order review: a Signal whose queue record was evicted after its ticket is logged on the re-sighted record; fence private data is written under the order lock; a rejected CPU Signal slot is not discovered again per call");
+
+    // A third party replacing an installed CPU Signal slot (chaining to the
+    // original it saved before our install) loses that coverage at the next
+    // verdict, not at the next poll: CPU Signals bypass the hook from then on.
+    order_object late{tables.fence.data(), object_kind::unknown, &device};
+    require(wait(reader, late, 1) == S_OK && signal(producer, late, 1) == S_OK, "the late fence was not sighted");
+    const auto relied = execute(producer);
+    require(signal(producer, late, 2) == S_OK && wait(reader, late, 2) == S_OK && ordered(reader, relied).ordered,
+      "the late fence proved no edge");
+    tables.fence[fence_signal_slot] = reinterpret_cast<void *>(order_cpu_signal);
+    require(reinterpret_cast<fence_signal_fn>(late.vtable[fence_signal_slot])(&late, 2) == S_OK, "the bypassing CPU Signal failed");
+    const auto verdict = ordered(reader, relied);
+    require(!verdict.ordered && verdict.why == sunshine_queue_order::refusal::uncovered,
+      "a verdict rested on a CPU Signal slot replaced since the last poll");
+    std::puts("PASS queue order review: a Signal whose queue record was evicted after its ticket is logged on the re-sighted record; fence private data is written under the order lock; a rejected CPU Signal slot is not discovered again per call; a slot replaced since the last poll refuses the next verdict");
   }
 }
 int main() {

@@ -714,15 +714,22 @@ namespace sunshine_streamline::native_observer {
       }
       ReleaseSRWLockExclusive(&order::lock);
     }
-    // Whether a queue's Execute, Signal and Wait slots are all installed.
-    // Requires targets_lock shared.
+    // Whether an installed slot still holds its detour now. Its table's
+    // module is pinned at install (sunshine_native_vtable::install), so a
+    // plain read of the slot is safe and costs no syscall.
+    bool holds(const target &slot, unsigned kind) {
+      return slot.status.load(std::memory_order_acquire) == state::installed &&
+        *reinterpret_cast<void *const volatile *>(slot.location.address) == detours[kind][&slot - targets[kind].data()];
+    }
+    // Whether a queue's Execute, Signal and Wait slots are all installed and
+    // still hold their detours. Requires targets_lock shared.
     bool covered(std::uint64_t id) {
       const auto *slot = ticket_of(id);
       if (!slot) return false;
       const unsigned kinds[3]{static_cast<unsigned>(method::execute), static_cast<unsigned>(method::signal), static_cast<unsigned>(method::wait)};
       for (unsigned i = 0; i != 3; ++i) {
         const auto *target = slot->slots[i] ? find(kinds[i], slot->slots[i]) : nullptr;
-        if (!target || target->status.load(std::memory_order_acquire) != state::installed) return false;
+        if (!target || !holds(*target, kinds[i])) return false;
       }
       return true;
     }
@@ -736,22 +743,25 @@ namespace sunshine_streamline::native_observer {
       return count;
     }
     // Installed order slots a third party replaced since: their coverage is
-    // lost for good (as ready() retires a state slot).
-    void verify_order_slots() {
+    // lost for good (as ready() retires a state slot). Run by each poll and
+    // by each verdict, so no verdict rests on a slot replaced before it.
+    enum class slot_check { verified, busy, lost };
+    slot_check verify_order_slots() {
       bool lost_any = false;
-      if (!TryAcquireSRWLockShared(&targets_lock)) return;
+      if (!TryAcquireSRWLockShared(&targets_lock)) return slot_check::busy;
       for (unsigned kind = 0; kind != method_count; ++kind)
         if (order_family(kind))
           for (unsigned i = 0; i != target_counts[kind]; ++i) {
             auto &slot = targets[kind][i];
             auto expected = state::installed;
-            if (slot.status.load(std::memory_order_acquire) == state::installed &&
-                !sunshine_native_vtable::matches(slot.location, detours[kind][i]) &&
+            if (slot.status.load(std::memory_order_acquire) == state::installed && !holds(slot, kind) &&
                 slot.status.compare_exchange_strong(expected, state::rejected, std::memory_order_acq_rel))
               lost_any = true;
           }
       ReleaseSRWLockShared(&targets_lock);
-      if (lost_any) { ++rejected; coverage_changed(static_cast<unsigned>(method::signal)); }
+      if (!lost_any) return slot_check::verified;
+      ++rejected; coverage_changed(static_cast<unsigned>(method::signal));
+      return slot_check::lost;
     }
   }
 
@@ -906,6 +916,14 @@ namespace sunshine_streamline::native_observer {
     };
     if (!order_on() || !reader) return refuse(refusal::disabled);
     const restore_error incoming{GetLastError()};
+    // Every installed order slot still holds its detour now, not only at the
+    // last poll: a CPU Signal or a queue Signal that bypassed a replaced slot
+    // since then was never logged.
+    switch (verify_order_slots()) {
+      case slot_check::busy: return refuse(refusal::pending_hooks);
+      case slot_check::lost: return refuse(refusal::uncovered);
+      default: break;
+    }
     order::queue_memory memory{};
     const bool tracked = private_bytes(reinterpret_cast<void *>(reader), order_queue_guid, &memory, sizeof(memory)) && ticket_of(memory.id);
     if (!TryAcquireSRWLockShared(&targets_lock)) return refuse(refusal::pending_hooks);

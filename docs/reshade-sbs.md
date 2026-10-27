@@ -5027,7 +5027,8 @@ Its completed value at first sight is its baseline: a wait at or below it is ref
 post-sight signal above every value seen settles it once read complete, which proves every
 pre-sight signal of that queue executed; a wait logged before that is refused. Every verdict is
 refused while an order slot is discovered but not installed, for a queue whose Execute, Signal and
-Wait slots are not all installed, after a ring dropped the deciding entry, and across devices. A
+Wait slots are not all installed, once any installed order slot no longer holds its detour (checked
+at each verdict, not only at the next poll: a call that bypassed a replaced slot was never logged), after a ring dropped the deciding entry, and across devices. A
 new, replaced or rejected order slot resets the model at its next locked operation; it never
 revokes the capture owner's state evidence, which only the state family's slots do.
 
