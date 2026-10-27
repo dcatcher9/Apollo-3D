@@ -121,6 +121,11 @@ namespace sunshine_streamline::depth_capture {
       // lifecycle, so these states are not what its next execution does.
       bool missed_reset{};
       recording_loss invalidation{recording_loss::none};
+      // The queue place (queue_state::cookie) that last executed this list
+      // (0 never): the list's, not one recording's, so restart keeps it.
+      // A copy recorded on it takes copy-out storage unless it last ran on
+      // the queue that reads depth (U-C1b, record_impl).
+      std::uint64_t executed_queue{};
       void restart(std::uint64_t next_cookie, std::uint64_t generation) noexcept {
         states.clear();
         aliases.clear();
@@ -275,6 +280,11 @@ namespace sunshine_streamline::depth_capture {
       // published holds the copy-out of this slot's first submission, ordered
       // before producer_fence (copy_out); cleared when the slot is reused.
       bool copied_out{};
+      // published was taken only because the recording's list was not known
+      // to execute on the reader's queue (U-C1b, record_impl): released by
+      // the idle sweep once the slot's first submission made no copy-out
+      // (release_idle_slots).
+      bool predicted_storage{};
       status pixel_failure{status::unavailable};
       capture_failure failure{capture_failure::none};
       // The pre-copy state's provenance of an auxiliary snapshot (diagnostic;

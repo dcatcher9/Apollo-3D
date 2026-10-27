@@ -355,8 +355,15 @@ namespace sunshine_streamline::depth_capture {
     } proven_counters;
     // Copy-outs (copy_out): made, and copies left to the Reset rule because
     // every list of the queue's ring was in flight or a list call failed.
+    // U-C1b: copies recorded with storage because their list was not known
+    // to execute on the reader's queue (predicted), copies given an idle
+    // slot's cached storage at their submission (taken), copies submitted
+    // on another queue than the reader's with no storage at all, left to
+    // the Reset rule (unstored: recorded for the reader's queue before
+    // Present moved, with no idle storage of their shape), and predicted
+    // storage the idle sweep released unused (released).
     struct {
-      std::atomic<std::uint64_t> made{}, ring_busy{}, failed{};
+      std::atomic<std::uint64_t> made{}, ring_busy{}, failed{}, predicted{}, taken{}, unstored{}, released{};
     } copy_out_counters;
     // Reads admitted on another queue by the queue-order model before their
     // producer fence completed (U-C1; the queue order line's proofs).
@@ -635,6 +642,13 @@ namespace sunshine_streamline::depth_capture {
       const auto verdict = native_observer::queue_ordered(consumer, value.producer_position);
       if (relied) *relied = verdict;
       return verdict.ordered;
+    }
+    // Requires mutex. Whether the newest acquisition's queue (reader) is a
+    // live place.
+    bool reader_live() {
+      return reader && std::any_of(queues.begin(), queues.end(), [](const auto &entry) {
+        return entry && entry->cookie == reader && !entry->retiring;
+      });
     }
     // Requires mutex. The native queue of the newest acquisition (reader).
     std::uint64_t reader_queue() {
@@ -1355,6 +1369,35 @@ namespace sunshine_streamline::depth_capture {
     // submission. Returns the slots copied out; the caller sets copied_out
     // once the fence after them was signalled. A copy not copied out keeps
     // the Reset rule (immutable_for_other_queues).
+    bool reserved_by_other(const slot &entry, std::uint64_t own);
+    // Requires mutex. U-C1b: a copy submitted on a queue other than the
+    // reader without copy-out storage (recorded before its source was read
+    // elsewhere, as when FG On moves Present to DLSS-G's queue) takes an idle
+    // slot's cached storage of its snapshot's shape, format, view and device
+    // (rest COMMON on a COMPUTE queue), so the game's submission thread never
+    // allocates under the capture lock. The idle slot allocates again at its
+    // next record, without the lock. False when no idle slot holds such
+    // storage: the copy keeps the Reset rule, as before.
+    bool take_idle_storage(slot &value, bool compute) {
+      const auto &own = *value.texture;
+      const auto shape = own.resource->GetDesc();
+      const auto fits = [&](const std::shared_ptr<texture_reference> &storage) {
+        if (!storage || storage.use_count() != 1 || !storage->resource.p || storage->device_identity != own.device_identity ||
+            storage->view_format != own.view_format || (compute && storage->rest != D3D12_RESOURCE_STATE_COMMON))
+          return false;
+        const auto desc = storage->resource->GetDesc();
+        return desc.Width == shape.Width && desc.Height == shape.Height && desc.Format == shape.Format;
+      };
+      for (auto &entry : slots) {
+        if (entry.id || reserved_by_other(entry, 0)) continue;
+        for (auto *storage : {&entry.published, &entry.texture})
+          if (fits(*storage)) {
+            value.published = std::move(*storage);
+            return true;
+          }
+      }
+      return false;
+    }
     std::array<bool, slot_limit> copy_out(queue_state &owner, const std::array<bool, slot_limit> &producers,
         std::uint64_t fence) {
       std::array<bool, slot_limit> out{};
@@ -1365,7 +1408,12 @@ namespace sunshine_streamline::depth_capture {
         auto &value = slots[i];
         if (!producers[i] || value.nomination_only || value.preservation_only || value.producer_submitted) continue;
         if (value.metadata.source) value.metadata.source->foreign_tick.store(now, std::memory_order_relaxed);
-        if (value.invalid || !value.texture || !value.published || value.copied_out) continue;
+        if (value.invalid || !value.texture || value.copied_out) continue;
+        if (!value.published) {
+          const bool taken = take_idle_storage(value, owner.compute_producer);
+          (taken ? copy_out_counters.taken : copy_out_counters.unstored).fetch_add(1, std::memory_order_relaxed);
+          if (!taken) continue;
+        }
         // A COMPUTE queue names only COMMON of these (record_impl's rest).
         if (owner.compute_producer && (value.texture->rest != D3D12_RESOURCE_STATE_COMMON ||
             value.published->rest != D3D12_RESOURCE_STATE_COMMON)) continue;
@@ -1431,6 +1479,17 @@ namespace sunshine_streamline::depth_capture {
         auxiliary_used = identify_submissions(diagnostic_slots, count, values, auxiliary_producers, auxiliary_consumers);
       }
       if (!depth_used && !auxiliary_used) return;
+      // The queue of each list that carried a depth copy, which its next
+      // copy's copy-out storage is predicted from (U-C1b, record_impl): one
+      // private-data read per such list.
+      if (depth_used) for (std::uint32_t n = 0; n != count; ++n) {
+        const auto cookie = values[n].recording_cookie;
+        bool carried = false;
+        for (unsigned i = 0; i != slots.size() && !carried; ++i) carried = producers[i] && cookie && slots[i].command == cookie;
+        if (!carried) continue;
+        if (auto list = command_storage::acquire(reinterpret_cast<ID3D12Object *>(values[n].native_command), false))
+          list->executed_queue = owner->cookie;
+      }
       const bool needs_fence = auxiliary_used || needs_submission_fence(producers, consumers);
       const auto fence = needs_fence ? ++owner->next_fence : 0;
       const auto copied = depth_used ? copy_out(*owner, producers, fence) : std::array<bool, slot_limit>{};
@@ -1453,6 +1512,8 @@ namespace sunshine_streamline::depth_capture {
             value.copied_out = true;
             copy_out_counters.made.fetch_add(1, std::memory_order_relaxed);
           }
+          // An executed copy-out without its fence is never released unused.
+          if (copied[i]) value.predicted_storage = false;
           accept_compute_copy(value);
         }
         if (consumers[i]) {
@@ -2266,6 +2327,15 @@ namespace sunshine_streamline::depth_capture {
       };
       std::uint64_t idle = 0;
       for (auto &value : slots) {
+        // Predicted storage (U-C1b) whose submission made no copy-out: the
+        // reader's queue executed it after all, or the copy keeps the Reset
+        // rule. No list wrote it.
+        if (value.id && value.predicted_storage && value.producer_submitted && !value.copied_out &&
+            value.published.use_count() == 1) {
+          discard.push_back(std::move(value.published));
+          value.predicted_storage = false;
+          copy_out_counters.released.fetch_add(1, std::memory_order_relaxed);
+        }
         if (value.id && !head(value) && reclaimable(value)) {
           slot idle_slot;
           idle_slot.texture = std::move(value.texture);
@@ -3015,9 +3085,19 @@ namespace sunshine_streamline::depth_capture {
       // Copy-out storage (slot::published) for a copy of a source another
       // queue reads (copy_out): the snapshot's shape, view and rest. Each
       // comes from the slot's cache, else from an earlier attempt's
-      // allocation (prepared), else is allocated now.
+      // allocation (prepared), else is allocated now. U-C1b: the queue a
+      // recording executes on is known only at its submission, so a copy
+      // also takes it on a COMPUTE list, which never executes on the
+      // presenting queue that reads depth, and on a list not known to
+      // execute on the reader's queue: never executed yet, or last executed
+      // on another queue, as the render queue's lists are once FG On moved
+      // Present to DLSS-G's queue (the idle sweep releases it when the
+      // submission is the reader's after all).
+      const bool read_elsewhere_before = read_elsewhere_recently(*value.source, GetTickCount64());
+      const bool predicted = !read_elsewhere_before && !on_compute && reader_live() &&
+        owner->executed_queue != reader;
       const bool wants_published = !diagnostic_copy && !preservation_only &&
-        read_elsewhere_recently(*value.source, GetTickCount64());
+        (read_elsewhere_before || on_compute || predicted);
       auto published = wants_published ? found->published : nullptr;
       // New storage's rest (texture_reference::rest).
       const auto resting_state = diagnostic_copy || on_compute ? D3D12_RESOURCE_STATE_COMMON : sampled_state;
@@ -3102,6 +3182,8 @@ namespace sunshine_streamline::depth_capture {
       *found = {};
       if (reservation) clear_reservation(std::exchange(reservation, 0));
       found->texture = std::move(texture); found->published = std::move(published); found->metadata = value; found->metadata.native_state = before;
+      found->predicted_storage = predicted && found->published;
+      if (found->predicted_storage) copy_out_counters.predicted.fetch_add(1, std::memory_order_relaxed);
       found->id = ++serial; found->command = cookie; found->producer_recording = owner.life();
       found->basis = basis; found->compute_list = on_compute;
       compute_copies_recorded |= on_compute;
@@ -3521,6 +3603,9 @@ namespace sunshine_streamline::depth_capture {
     out.earlier_copied = c.earlier_copied.load(relaxed); out.earlier_refused = c.earlier_refused.load(relaxed);
     out.copied_out = copy_out_counters.made.load(relaxed); out.copy_out_busy = copy_out_counters.ring_busy.load(relaxed);
     out.copy_out_failed = copy_out_counters.failed.load(relaxed);
+    out.copy_out_predicted = copy_out_counters.predicted.load(relaxed); out.copy_out_taken = copy_out_counters.taken.load(relaxed);
+    out.copy_out_released = copy_out_counters.released.load(relaxed);
+    out.copy_out_unstored = copy_out_counters.unstored.load(relaxed);
     return out;
   }
   void finish(std::uint64_t ticket, bool successful, capture_failure failure) {

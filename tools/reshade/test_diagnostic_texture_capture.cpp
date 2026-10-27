@@ -715,7 +715,10 @@ namespace {
   // completed, before the game's recording is Reset (known gap C1 until
   // 10-27), and a later execution of that recording without Reset writes
   // only the snapshot's own storage: the reader keeps the first
-  // execution's bytes.
+  // execution's bytes. The source's first copy is copied out too (U-C1b):
+  // its list last executed on a queue other than the reader's, so it took
+  // copy-out storage at record time (until 10-27 only copies recorded after
+  // a submission elsewhere did).
   void copy_out_replay(fixture &gpu) {
     if (gpu.debug_messages) gpu.debug_messages->ClearStoredMessages();
     consumer_fixture consumer(gpu);
@@ -740,16 +743,23 @@ namespace {
       capture::finish(ticket, true);
       return ticket;
     };
-    // The first copy's submission on the producer queue finds its reader
-    // on another queue: the source's later copies take copy-out storage.
+    // The first copy's list last ran on the producer queue, not the reader's:
+    // it is copied out at its first submission, as the source's later
+    // copies are.
     const auto made = capture::proven_counts().copied_out;
-    nominate(1);
-    gpu.submit(); gpu.wait(); gpu.reset();
-    require(capture::proven_counts().copied_out == made, "copy-out: a copy without copy-out storage was copied out");
+    const auto first = nominate(1);
+    require(capture::testing::holds_copy_out_storage(first),
+      "copy-out: a source's first copy on a list that last ran on another queue took no copy-out storage");
+    gpu.submit(); gpu.wait();
+    require(capture::proven_counts().copied_out == made + 1, "copy-out: a source's first copy was not copied out (U-C1b)");
+    require(capture::acquire(native(gpu.foreign_queue.Get()), 12001, packet, &acquired) && packet.pixel_ready &&
+        packet.capture_id == first, "copy-out: a source's first copy was unreadable on another queue before its recording's Reset");
+    packet = {};
+    gpu.reset();
     const auto ticket = nominate(2);
     gpu.submit(); gpu.wait(); // Executed, completed, never Reset.
-    require(capture::proven_counts().copied_out == made + 1, "copy-out: the second copy was not copied out");
-    require(capture::acquire(native(gpu.foreign_queue.Get()), 12001, packet, &acquired) && packet.pixel_ready &&
+    require(capture::proven_counts().copied_out == made + 2, "copy-out: the second copy was not copied out");
+    require(capture::acquire(native(gpu.foreign_queue.Get()), 12002, packet, &acquired) && packet.pixel_ready &&
         packet.capture_id == ticket && packet.producer_queue == native(gpu.queue.Get()),
       "copy-out: the completed copy was unreadable on another queue before its recording's Reset");
     auto target = destination(gpu.device.Get(), DXGI_FORMAT_R32_FLOAT);
@@ -757,7 +767,7 @@ namespace {
     require(capture::copy_current(native(consumer.list.Get()), packet, native(target.Get()),
       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE), "copy-out: the consumer copy failed");
     actual.record(consumer.list.Get(), target.Get());
-    capture::complete_frame(packet, 12001);
+    capture::complete_frame(packet, 12002);
     // The game writes its source anew and executes the same closed recording
     // again, which copies the new pixels into the snapshot's own storage.
     ComPtr<ID3D12CommandAllocator> writer_allocator;
@@ -782,7 +792,7 @@ namespace {
     execute(gpu.queue.Get(), writer.Get());
     execute(gpu.queue.Get(), gpu.list.Get());
     gpu.wait();
-    require(capture::proven_counts().copied_out == made + 1, "copy-out: a replay was copied out again");
+    require(capture::proven_counts().copied_out == made + 2, "copy-out: a replay was copied out again");
     consumer.submit(); consumer.wait(); consumer.reset();
     actual.verify(depth.width, depth.height, depth.bpp, 0);
     packet = {};
@@ -803,12 +813,22 @@ namespace {
   // Present moves to DLSS-G's queue on the same device, the render queue's
   // copies are copied out and read there before any Reset (until 10-27 a
   // queue that had ever acquired never copied out, so every FG-on loss of
-  // that log stayed); with FG off again, a copy recorded once the source's
-  // copies were submitted only on the reader's queue for the source age
-  // takes no copy-out storage (until 10-27 it took it for good).
+  // that log stayed), from the first one recorded after the move (U-C1b:
+  // its list last ran on the render queue, no longer the reader's; until
+  // 10-27 only from the copy after the first submission, so FG On showed
+  // flat 2D for one or two Presents). A copy recorded before the move and
+  // submitted after it takes an idle slot's cached storage at its
+  // submission. With FG off again, a copy recorded once the source's copies
+  // were submitted only on the reader's queue for the source age takes no
+  // copy-out storage (until 10-27 it took it for good), nor does a copy on
+  // a list never executed once that submission is the reader's: the idle
+  // sweep releases its storage.
   void copy_out_reader_moves(fixture &gpu) {
     if (gpu.debug_messages) gpu.debug_messages->ClearStoredMessages();
     texture_case depth(gpu, DXGI_FORMAT_R32_FLOAT, 4);
+    // Another source of the same shape, whose retired copy leaves idle
+    // storage below.
+    texture_case spare(gpu, DXGI_FORMAT_R32_FLOAT, 4);
     gpu.submit(); gpu.wait(); gpu.reset();
     auto input = depth.input;
     input.provider = sunshine_scene_depth::provider_kind::ngx;
@@ -830,23 +850,24 @@ namespace {
       capture::acquire(native(queue), index, packet, &acquired);
       packet = {};
     };
-    const auto made = capture::proven_counts().copied_out;
-    // FG off: the render queue presents.
+    const auto counts = [] { return capture::proven_counts(); };
+    const auto before = counts();
+    const auto made = before.copied_out;
+    // FG off: the render queue presents and reads its own copies.
     present(gpu.queue.Get(), 12100);
     nominate(1);
     gpu.submit(); gpu.wait(); gpu.reset();
-    require(capture::proven_counts().copied_out == made, "reader moves: the reader's own copy was copied out");
-    // FG on: Present moves to DLSS-G's queue. The first submission there
-    // finds the reader elsewhere; the next copy takes copy-out storage.
+    require(counts().copied_out == made, "reader moves: the reader's own copy was copied out");
+    // FG on: Present moves to DLSS-G's queue. The first render-queue copy
+    // recorded after that is copied out at its first submission and read
+    // there before its recording's Reset.
     present(gpu.foreign_queue.Get(), 12101);
-    nominate(2);
-    gpu.submit(); gpu.wait(); gpu.reset();
-    const auto ticket = nominate(3);
+    const auto ticket = nominate(2);
     require(capture::testing::holds_copy_out_storage(ticket),
-      "reader moves: a render-queue copy took no copy-out storage once Present moved to another queue");
+      "reader moves: the first render-queue copy after Present moved to another queue took no copy-out storage (U-C1b)");
     gpu.submit(); gpu.wait(); // Executed, completed, never Reset.
-    require(capture::proven_counts().copied_out == made + 1,
-      "reader moves: the render queue's copy was not copied out once Present moved to another queue");
+    require(counts().copied_out == made + 1,
+      "reader moves: the first render-queue copy was not copied out once Present moved to another queue (U-C1b)");
     require(capture::acquire(native(gpu.foreign_queue.Get()), 12102, packet, &acquired) && packet.pixel_ready &&
         packet.capture_id == ticket && packet.producer_queue == native(gpu.queue.Get()),
       "reader moves: the completed copy was unreadable on the new presenting queue before its recording's Reset");
@@ -856,18 +877,94 @@ namespace {
     // submission elsewhere, a new copy takes no copy-out storage.
     present(gpu.queue.Get(), 12103);
     Sleep(DWORD(sunshine_freshness::source_age_ms + 20));
-    const auto own = nominate(4);
+    const auto own = nominate(3);
     require(!capture::testing::holds_copy_out_storage(own),
       "reader moves: a copy read on its own queue still took copy-out storage after FG went off");
     gpu.submit(); gpu.wait(); gpu.reset();
-    require(capture::proven_counts().copied_out == made + 1, "reader moves: a copy on the reader's queue was copied out");
-    // The independent queue reads again, as the later cases expect.
+    require(counts().copied_out == made + 1, "reader moves: a copy on the reader's queue was copied out");
+    // A copy recorded while the render queue reads, submitted once Present
+    // moved: copied out from an idle slot's cached storage of its shape (a
+    // retired copy of another source of that shape here), with no
+    // allocation on the submitting thread; without such storage it keeps
+    // the Reset rule (unstored).
+    const auto taken = counts().copy_out_taken;
+    const auto late = nominate(4);
+    require(!capture::testing::holds_copy_out_storage(late), "reader moves: a copy for the reader's queue took copy-out storage");
+    {
+      ComPtr<ID3D12CommandAllocator> spare_allocator;
+      ComPtr<ID3D12GraphicsCommandList> spare_list;
+      check(gpu.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&spare_allocator)), "spare allocator");
+      check(gpu.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, spare_allocator.Get(), nullptr,
+        IID_PPV_ARGS(&spare_list)), "spare list");
+      created(spare_list.Get());
+      capture::observe_command(native(spare_list.Get()));
+      auto spare_input = spare.input;
+      // Another API's namespace: the NGX head stays the depth source's.
+      spare_input.provider = sunshine_scene_depth::provider_kind::streamline;
+      spare_input.epoch = 79; spare_input.source_id = 97; spare_input.viewport = 0; spare_input.sequence = 1;
+      spare_input.valid_until = sunshine_scene_depth::lifetime::until_evaluation; spare_input.force_snapshot = false;
+      spare_input.source_present_generation = capture::source_present_generation(spare_input.source);
+      spare_input.proof = sunshine_scene_depth::state_proof::sdk_contract; spare_input.tick = GetTickCount64();
+      const auto retired = capture::nominate_evaluation(native(spare_list.Get()), spare_input, UINT64_MAX, &diagnostic);
+      require(retired, "reader moves: the spare source's copy was refused");
+      capture::finish(retired, true);
+      check(close_list(spare_list.Get()), "spare list close");
+      execute(gpu.queue.Get(), spare_list.Get());
+      gpu.wait();
+      capture::retire_source(spare_input.provider, spare_input.epoch, spare_input.source_id);
+      destroyed(spare_list.Get()); capture::command_destroyed(native(spare_list.Get()));
+      capture::poll();
+    }
     present(gpu.foreign_queue.Get(), 12104);
+    gpu.submit(); gpu.wait();
+    require(counts().copied_out == made + 2 && counts().copy_out_taken == taken + 1,
+      "reader moves: a copy recorded before Present moved was not copied out from idle storage at its submission");
+    require(capture::acquire(native(gpu.foreign_queue.Get()), 12105, packet, &acquired) && packet.pixel_ready &&
+        packet.capture_id == late, "reader moves: a copy recorded before Present moved was unreadable there before its Reset");
+    packet = {};
+    gpu.reset();
+    // A list never executed is not known to run on the reader's queue: its
+    // copy takes copy-out storage, released by the idle sweep once that
+    // list ran on the reader's queue after all.
+    present(gpu.queue.Get(), 12106);
+    Sleep(DWORD(sunshine_freshness::source_age_ms + 20));
+    ComPtr<ID3D12CommandAllocator> fresh_allocator;
+    ComPtr<ID3D12GraphicsCommandList> fresh;
+    check(gpu.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&fresh_allocator)), "fresh allocator");
+    check(gpu.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, fresh_allocator.Get(), nullptr, IID_PPV_ARGS(&fresh)),
+      "fresh list");
+    created(fresh.Get());
+    capture::observe_command(native(fresh.Get()));
+    input.sequence = 5; input.tick = GetTickCount64();
+    const auto predicted = capture::nominate_evaluation(native(fresh.Get()), input, UINT64_MAX, &diagnostic);
+    require(predicted && diagnostic.result == capture::status::recorded, "reader moves: the fresh list's copy was refused");
+    capture::finish(predicted, true);
+    require(capture::testing::holds_copy_out_storage(predicted),
+      "reader moves: a copy on a list never executed took no copy-out storage");
+    const auto released = counts().copy_out_released;
+    check(close_list(fresh.Get()), "fresh list close");
+    execute(gpu.queue.Get(), fresh.Get());
+    gpu.wait();
+    capture::poll();
+    require(!capture::testing::holds_copy_out_storage(predicted) && counts().copy_out_released == released + 1 &&
+        counts().copied_out == made + 2,
+      "reader moves: unused copy-out storage of a list that ran on the reader's queue was not released by the idle sweep");
+    destroyed(fresh.Get()); capture::command_destroyed(native(fresh.Get()));
+    // The independent queue reads again, as the later cases expect.
+    present(gpu.foreign_queue.Get(), 12107);
     capture::retire_source(input.provider, input.epoch, input.source_id);
     capture::poll();
     gpu.check_debug_errors();
-    std::printf("PASS copy-out follows the reader: a queue that read its own depth copies out once Present moves to "
-      "another queue, and takes no copy-out storage once it reads again%s\n",
+    const auto after = counts();
+    std::printf("MEASURE copy-out U-C1b made=%llu predicted=%llu taken=%llu released=%llu snapshot_bytes=%llu\n",
+      static_cast<unsigned long long>(after.copied_out - before.copied_out),
+      static_cast<unsigned long long>(after.copy_out_predicted - before.copy_out_predicted),
+      static_cast<unsigned long long>(after.copy_out_taken - before.copy_out_taken),
+      static_cast<unsigned long long>(after.copy_out_released - before.copy_out_released),
+      static_cast<unsigned long long>(depth.width) * depth.height * depth.bpp);
+    std::printf("PASS copy-out follows the reader: a queue that read its own depth copies out from its first copy once "
+      "Present moves to another queue (a copy recorded before the move from idle storage), takes no copy-out storage once "
+      "it reads again, and releases unused predicted storage%s\n",
       gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
   }
 
@@ -1182,13 +1279,16 @@ namespace {
     capture::finish(ticket, true);
     run_compute();
 
-    // The closed recording may legally run again: submitted, not readable.
+    // The closed recording may legally run again, so its own snapshot is
+    // not readable elsewhere; its copy-out on the compute queue is, once
+    // complete (U-C1b: a COMPUTE list's copy always takes copy-out storage;
+    // until 10-27 only once its recording was reset).
     capture::packet packet;
     capture::capture_diagnostic acquired;
-    capture::acquire(native(gpu.foreign_queue.Get()), ++present, packet, &acquired);
-    require(!packet.pixel_ready && acquired.capture_id == ticket && acquired.result == capture::status::submitted &&
-        acquired.submitted && !acquired.producer_recording_retired && acquired.queue == native(compute.Get()),
-      "the compute queue took no fence at its copy's submission, or a still-closed compute recording was readable");
+    require(capture::acquire(native(gpu.foreign_queue.Get()), ++present, packet, &acquired) && packet.pixel_ready &&
+        acquired.capture_id == ticket && acquired.submitted && !acquired.producer_recording_retired &&
+        acquired.queue == native(compute.Get()),
+      "the compute queue took no fence at its copy's submission, or its first copy-out was unreadable before its Reset");
     reset_compute();
     packet = {};
     require(capture::acquire(native(gpu.foreign_queue.Get()), ++present, packet, &acquired) && packet.pixel_ready &&
@@ -1472,13 +1572,15 @@ namespace {
     transition(list.Get(), depth.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
     run_compute();
 
-    // The closed recording may legally run again: submitted, not readable.
+    // The closed recording may legally run again, so its own snapshot is
+    // not readable elsewhere; its copy-out on the compute queue is, once
+    // complete (U-C1b; until 10-27 only once its recording was reset).
     capture::packet packet;
     capture::capture_diagnostic acquired;
-    capture::acquire(native(gpu.foreign_queue.Get()), ++present, packet, &acquired);
-    require(!packet.pixel_ready && acquired.capture_id == ticket && acquired.result == capture::status::submitted &&
-        acquired.submitted && !acquired.producer_recording_retired && acquired.queue == native(compute.Get()),
-      "the compute queue took no fence at its copy's submission, or a still-closed compute recording was readable");
+    require(capture::acquire(native(gpu.foreign_queue.Get()), ++present, packet, &acquired) && packet.pixel_ready &&
+        acquired.capture_id == ticket && acquired.submitted && !acquired.producer_recording_retired &&
+        acquired.queue == native(compute.Get()),
+      "the compute queue took no fence at its copy's submission, or DLSS-G's first copy-out was unreadable before its Reset");
     reset_compute();
     packet = {};
     require(capture::acquire(native(gpu.foreign_queue.Get()), ++present, packet, &acquired) && packet.pixel_ready &&

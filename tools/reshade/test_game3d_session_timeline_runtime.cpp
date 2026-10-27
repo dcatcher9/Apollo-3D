@@ -135,7 +135,7 @@ namespace {
       none,
       local,  // Its own depth input (lifecycle 1) on the presenting queue's list.
       tag,  // No input: the frame's tag.
-      other_queue  // Its own input on the game's own direct queue (known gap C1).
+      other_queue  // Its own input on the game's own direct queue (known gap C1 until 10-27).
     };
 
     enum class dlssg_form {
@@ -583,10 +583,8 @@ namespace {
     std::uint64_t dlssg_evaluated {}, dlssg_frames {}, deferred_dlssg_frames {};
     bool deferred_known {};
     // Whether the previous frame supplied an FG copy, so that a live FG
-    // scope owns this one (continuity::supply::owned), and whether that copy
-    // was DLSS-G's compute copy alone (fg_supplied_late), readable only
-    // frames later (known gap C1).
-    bool fg_supplied {}, fg_supplied_late {};
+    // scope owns this one (continuity::supply::owned).
+    bool fg_supplied {};
     // When FG was last turned on (frame_generation_holds keeps only a copy
     // made since).
     std::uint64_t fg_enabled_at {};
@@ -603,19 +601,17 @@ namespace {
     } supply;
 
     // A required copy of the frame's last decision, recorded on another
-    // queue: the freshness rule's supply. Called once its list executed
-    // (completion: its ring's); copied_out: copied_out_elsewhere when it was
-    // recorded. A permitted copy may or may not have been made, so it
-    // neither counts nor moves the source's stamp.
-    void recorded_elsewhere(std::uint8_t source, bool copied_out, std::function<bool()> completion) {
+    // queue: the freshness rule's supply, readable once its copy-out
+    // completed (every such copy is copied out since U-C1b). Called once its
+    // list executed (completion: its ring's). A permitted copy may or may not
+    // have been made, so it neither counts nor moves the source's stamp.
+    void recorded_elsewhere(std::uint8_t source, std::function<bool()> completion) {
       const auto &made = decisions.back();
       if (!made.legal || !requires_capture(made.expected)) {
         return;
       }
       supply.elsewhere |= source;
-      if (auto probe = submitted_elsewhere(selected->resource.p, copied_out, std::move(completion))) {
-        supply.completions.emplace_back(source, std::move(probe));
-      }
+      supply.completions.emplace_back(source, std::move(completion));
     }
 
     // A refusal recorded since the previous poll, and the step of the frame
@@ -699,7 +695,6 @@ namespace {
     void create_queues() {
       game_work.create(game.p, D3D12_COMMAND_LIST_TYPE_DIRECT);
       dlssg_work.create(game.p, D3D12_COMMAND_LIST_TYPE_COMPUTE);
-      elsewhere_submitted.clear();  // The game device's sources are new.
     }
 
     // Retires every ring recording (as a game does at its end), once their
@@ -1214,12 +1209,11 @@ namespace {
         const auto resource = depth_input(declared);
         const abi_v2::resource_tag input {{nullptr, tag_guid, 1}, &resource, 0, 1, active_area};
         const base_structure *inputs[] {&view.base, &input.base};
-        decide("sr_other_queue", local_case(declared, false, 0), continuity::sr_evaluate, {"evaluate"}, false, continuity::limitation::cross_queue_sr);
-        const bool copied_out = copied_out_elsewhere(selected->resource.p);
+        decide("sr_other_queue", local_case(declared, false, 0), continuity::sr_evaluate, {"evaluate"});
         returned(sl.evaluate(0, *token, inputs, 2, reinterpret_cast<void *>(native)), "slEvaluateFeature on the game's queue");
         poll("evaluate");
         game_work.execute(n, queue.p);
-        recorded_elsewhere(continuity::sr_evaluate, copied_out, game_work.completion());
+        recorded_elsewhere(continuity::sr_evaluate, game_work.completion());
         other_queue_copy = GetTickCount64();
       }
       dlssg_evaluation(of<dlssg_form>(value, events::dlssg));
@@ -1230,60 +1224,40 @@ namespace {
       // cannot tell this frame's Present from an earlier frame's, and the
       // Present holds the earlier copy. Any later frame without DLSS-G's
       // evaluation copies at its Present (known gap C7 until 10-26, when
-      // each waited within the source age of any evaluation). A frame whose
-      // only FG input is DLSS-G's compute copy supplies its live FG scope,
-      // which keeps the viewport's SR input out while that copy is not yet
-      // readable (known gap C1: its copy-out is readable once complete, until
-      // 10-27 only frames later). DLSS-G's evaluation of a frame
-      // without an FG tag of its own copies (known gap C6 until 10-26, when
-      // it deferred to an earlier frame's tag copy for the source age).
+      // each waited within the source age of any evaluation). DLSS-G's
+      // evaluation of a frame without an FG tag of its own copies (known gap
+      // C6 until 10-26, when it deferred to an earlier frame's tag copy for
+      // the source age).
       const auto dlssg_choice = of<dlssg_form>(value, events::dlssg);
       const auto now = GetTickCount64();
       if (fg_on && deferred_tag && awaits_dlssg && dlssg_choice == dlssg_form::none && dlssg_evaluated && now - dlssg_evaluated < sunshine_freshness::source_age_ms + continuity::tag_slack_ms && (supply.legal & continuity::tag_copy)) {
         supply.legal &= std::uint8_t(~continuity::tag_copy);
         supply.permitted |= continuity::tag_copy;
-      } else if (fg_on && dlssg_choice == dlssg_form::compute && fg_copy && now - fg_copy < sunshine_freshness::fg_silent_ms + continuity::tag_slack_ms && !(supply.legal & continuity::tag_copy) && (supply.legal & continuity::sr_evaluate)) {
-        supply.legal &= std::uint8_t(~continuity::sr_evaluate);
-        supply.limited |= continuity::sr_evaluate;
-        supply.limit = continuity::limitation::cross_queue_sr;
       }
       // A live FG scope keeps the viewport's SR input out of the frame after
       // one that supplied an FG copy, which it expects to supply too: the
       // Present shows the scope's FG depth instead (FG keeps the frames it
       // supplies; the next frame without an FG copy turns the scope silent).
       const bool owned = std::exchange(fg_supplied, false) && fg_on;
+      // So does a live scope whose frame's only FG input is DLSS-G's compute
+      // copy: the Present shows that copy's copy-out once the game's fence
+      // waits order the presenting queue after it (U-C1), else the scope's
+      // newest readable copy (until 10-27 known gap C1: readable only once
+      // complete, and before that three DLSS-G evaluations later).
+      const bool compute_scope = fg_on && dlssg_choice == dlssg_form::compute && fg_copy && now - fg_copy < sunshine_freshness::fg_silent_ms + continuity::tag_slack_ms && !(supply.legal & continuity::tag_copy);
       // A silent scope (the frame before supplied no FG copy) whose display
       // holds its own FG copy, made since FG On and younger than the source
       // age, keeps the viewport's SR copies off-screen until that copy
       // expires (frame_generation_holds, which awaits the owner's decision):
       // like an owned frame's, they leave no copy a later Present could hold.
-      // The loss that follows when DLSS-G's compute copy, readable only
-      // frames later (known gap C1), supersedes them as the held copy
-      // expires is then C1's (README, C6's note; the fixed set's seed
-      // 30618337c4062c47 met it whenever the machine ran fast).
       const bool held_off = fg_on && !owned && fg_copy && fg_copy >= fg_enabled_at &&
         now - fg_copy < sunshine_freshness::source_age_ms;
-      // When that copy was DLSS-G's compute copy alone, the depth the
-      // Present can show is the scope's newest readable copy (its copy-out
-      // once complete; until 10-27 three DLSS-G evaluations old): the
-      // frame's SR input meets C1's limitation as the compute frames' own
-      // do, and a frame without an FG copy of its own loses depth once that
-      // older copy aged out (C4's note; with fence observation the compute
-      // copy is readable at its own Present).
-      if (owned && std::exchange(fg_supplied_late, false) && !(supply.legal & (continuity::tag_copy | continuity::dlssg_input)) &&
-          (supply.legal & continuity::sr_evaluate)) {
-        supply.legal &= std::uint8_t(~continuity::sr_evaluate);
-        supply.limited |= continuity::sr_evaluate;
-        supply.limit = continuity::limitation::cross_queue_sr;
-      }
-      fg_supplied_late = false;
       // An FG copy its scope accepts: an FG tag's, or DLSS-G's in a state
       // its list recorded (its compute copy is accepted later, with its own
       // tick).
       if (fg_on && frame_generation_scope() && ((supply.legal | supply.permitted | supply.limited) & (continuity::tag_copy | continuity::dlssg_input))) {
         fg_copy = now;
         fg_supplied = true;
-        fg_supplied_late = !((supply.legal | supply.permitted) & (continuity::tag_copy | continuity::dlssg_input));
       }
       if (fg_on && dlssg_choice != dlssg_form::none) {
         dlssg_evaluated = now;
@@ -1295,7 +1269,7 @@ namespace {
       continuity_log.pending.legal = std::uint8_t(supply.legal | supply.limited);
       continuity_log.pending.permitted = supply.permitted;
       continuity_log.pending.limited = supply.limited;
-      continuity_log.pending.owned = owned || held_off ? std::uint8_t(supply.legal & continuity::sr_evaluate) : std::uint8_t {};
+      continuity_log.pending.owned = owned || held_off || compute_scope ? std::uint8_t(supply.legal & continuity::sr_evaluate) : std::uint8_t {};
       continuity_log.pending.limit = supply.legal ? continuity::limitation::none : supply.limit;
       continuity_log.pending.tick = supply.tick;
       // The freshness rule: the frame's copies recorded on another queue,
@@ -1304,7 +1278,7 @@ namespace {
       // the presenting queue does not show: FG input without an FG scope.
       continuity_log.pending.elsewhere = supply.elsewhere;
       for (const auto &[source, probe] : supply.completions) {
-        if (source == continuity::sr_evaluate && (owned || held_off)) {
+        if (source == continuity::sr_evaluate && (owned || held_off || compute_scope)) {
           continue;
         }
         if (source == continuity::dlssg_input && !(fg_on && frame_generation_scope())) {
@@ -1351,8 +1325,7 @@ namespace {
         }
         value.list = matrix::list_type::compute;
         value.depth = recorded(observed, read);
-        decide("dlssg_compute", value, continuity::dlssg_input, {"dlssg"}, true, continuity::limitation::cross_queue_sr);
-        const bool copied_out = copied_out_elsewhere(selected->resource.p);
+        decide("dlssg_compute", value, continuity::dlssg_input, {"dlssg"}, true);
         require(ngx_evaluate(compute, feature, &dlssg_inputs, nullptr) == ngx_fixture::success, "DLSS-G's compute evaluation changed the SDK result");
         poll("dlssg");
         if (observed) {
@@ -1361,7 +1334,7 @@ namespace {
         // Streamline's present queue waits for DLSS-G's compute signal, so
         // the Presents after this one are ordered after its copy-out (U-C1).
         dlssg_work.execute(n, queue.p);
-        recorded_elsewhere(continuity::dlssg_input, copied_out, dlssg_work.completion());
+        recorded_elsewhere(continuity::dlssg_input, dlssg_work.completion());
         if (observed) {
           other_queue_copy = GetTickCount64();
         }
@@ -1476,7 +1449,7 @@ namespace {
       last_capture = 0;
       api_supplied = other_queue_copy = fg_copy = dlssg_evaluated = dlssg_frames = deferred_dlssg_frames = 0;
       deferred_known = false;
-      fg_supplied = fg_supplied_late = false;
+      fg_supplied = false;
       fg_enabled_at = 0;
       present_frames.clear();
       where = label;

@@ -3930,15 +3930,31 @@ allocate no copy-out storage; a source copied on both queues keeps it. At most o
 ring of eight per queue of the queue's type, each reused once its fence value completed; its
 barriers move the snapshot and the copy-out storage only from and back to their rest states,
 both `COMMON` for a copy recorded on a `COMPUTE` list, so DLSS-G's compute copies are copied out on its
-compute queue too. A replay of the game's list is still refused as before. A copy not copied
-out (the source's first copies, every ring list in flight, a failed list call) keeps the Reset
-rule; the counts are on the depth status line as `copy_out={made= ring_busy= failed=}`. The
+compute queue too. A replay of the game's list is still refused as before. **U-C1b** (10-27)
+gives a source's first copies that storage too, since the queue a recording executes on is known
+only at its submission while the storage is chosen at record time, without the capture lock: a copy
+on a `COMPUTE` list takes it always (a compute list never executes on the presenting queue that
+reads depth), and so does a copy on a list not known to execute on the reader's queue, never
+executed or last executed on another one (each list's queue is remembered at each submission that
+carries a depth copy, one private-data read per such list). That covers FG On, which moves Present
+to DLSS-G's queue: the render queue's lists last ran there, so its first copy after the move is
+copied out (until 10-27 only the copy after the first submission elsewhere was, so FG On showed
+flat 2D for one or two Presents), and a source new to the game's other queue. A copy recorded for
+the reader's queue and submitted after Present moved takes an idle slot's cached storage of its
+shape, format, view and device at its submission (`COMMON` rest on a compute queue), never an
+allocation on the game's submission thread; with none it keeps the Reset rule (`unstored`, at most
+the copies in flight across one FG toggle). Storage taken only for that prediction and left unused
+(the list ran on the reader's queue after all) is released by the idle sweep (`released`). A copy
+not copied out (every ring list in flight, a failed list call, an unstored copy) keeps the Reset
+rule; the counts are on the depth status line as
+`copy_out={made= ring_busy= failed= predicted= taken= unstored= released=}`. The
 cost is one extra copy of the snapshot on the producer queue per copied-out snapshot and one more
-snapshot-sized allocation per slot for such a source. Since Step 4 a copy-out still in flight is
-read as soon as the game's own fence waits order the reading queue after it
-([Queue order](#queue-order), U-C1). What remains of the session tests' known gap C1 is a source's
-first copies (no copy-out storage yet) whose recording has not retired, a copy whose queue's ring
-was all in flight, and a copy no observed fence wait orders before the Present. The add-on never inserts a foreign-queue Wait for a
+snapshot-sized allocation per slot for such a source; U-C1b adds one snapshot-sized allocation per
+list that first carries a copy (released by the sweep when that list runs on the reader's queue),
+and none at submission. Since Step 4 a copy-out still in flight is read as soon as the game's own
+fence waits order the reading queue after it ([Queue order](#queue-order), U-C1), so the session
+tests' known gap C1 closed on 10-27; a copy whose queue's ring was all in flight is a counted
+resource bound with no row. The add-on never inserts a foreign-queue Wait for a
 depth capture: the producer can already depend on future consumer work, so a reverse wait could
 deadlock the game. Flushing an immediate command list cannot prove that the application's queue
 graph is acyclic. (The offscreen UI layer's cross-queue copy follows the same rule since 10-06: it
@@ -4367,8 +4383,8 @@ expires. A copy readable at its own Present (an FG tag's, or DLSS-G's on a direc
 past the first frame without one; DLSS-G's compute copy is readable only three of its evaluations
 later, so the held copy is older by then and expires at that frame's Present once real frames take
 about a quarter of the source age (one mono Present; since Step 4 the compute copy is readable at
-the next Present that DLSS-G's present queue orders after it, [Queue order](#queue-order), U-C1;
-the session tests' known gap C1 keeps the rest). Assassin's Creed Shadows (10-24) untags its FG depth in every frame and so cancels almost
+the next Present that DLSS-G's present queue orders after it, [Queue order](#queue-order), U-C1,
+and since U-C1b its first copy too, so the session tests' known gap C1 closed). Assassin's Creed Shadows (10-24) untags its FG depth in every frame and so cancels almost
 every deferred copy; the rare copy that survived kept the scope live for a second with no further
 FG copy, and FG On did the same, so that viewport showed neither FG nor SR depth for about a second
 each time. Until 10-26 (the continuity invariant's known gap C4) a frame without any FG call

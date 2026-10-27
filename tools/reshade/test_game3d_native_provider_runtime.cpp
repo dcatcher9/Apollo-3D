@@ -543,26 +543,11 @@ namespace {
     static void withdraw_supply() { continuity_log.pending = {}; }
     // The copy-out contract (docs/reshade-sbs.md, Copy-out on the producer
     // queue) as the freshness rule reads a legal copy recorded on a queue
-    // other than the presenting one: the add-on copies it out when a copy of
-    // its source was submitted on such a queue within the source age before
-    // it was recorded (a source's first copy elsewhere is not), and the
-    // presenting queue reads that copy-out once its work completed. The last
-    // such submission of each source (its resource), stamped by the fixture
-    // after the add-on's own stamp; a clock period short of the source age
-    // counts, so a prediction is never later than the add-on's.
-    std::map<ID3D12Resource *, std::uint64_t> elsewhere_submitted;
-    bool copied_out_elsewhere(ID3D12Resource *source) const {
-      const auto found = elsewhere_submitted.find(source);
-      return found != elsewhere_submitted.end() &&
-        GetTickCount64() - found->second + game3d_continuity::tick_slack_ms < sunshine_freshness::source_age_ms;
-    }
-    // Once the copy's list executed (completion: queue_ring::completion):
-    // the source's submission, and the completion probe of a copy copied out
-    // (empty otherwise).
-    std::function<bool()> submitted_elsewhere(ID3D12Resource *source, bool copied_out, std::function<bool()> completion) {
-      elsewhere_submitted[source] = GetTickCount64();
-      return copied_out ? std::move(completion) : std::function<bool()>{};
-    }
+    // other than the presenting one: the add-on copies every such copy out on
+    // its own queue (a source's first copies too since U-C1b, 10-27), and the
+    // presenting queue reads that copy-out once its work completed (or once
+    // the game's own fence waits order it after it, U-C1, which the rule
+    // does not count: it never asks for a read earlier than certain).
     static void supplied_elsewhere(std::uint8_t sources) { continuity_log.pending.add_elsewhere(sources, GetTickCount64()); }
     static void completes(std::uint8_t sources, std::function<bool()> probe) {
       continuity_log.pending.completes(sources, std::move(probe));
@@ -3041,16 +3026,13 @@ namespace {
           std::uint64_t native{};
           const auto n = dlssg_ring.open_next(native);
           auto *compute = reinterpret_cast<ID3D12GraphicsCommandList *>(native);
-          const bool copied_out = copied_out_elsewhere(selected->resource.p);
           if (observed_state) transition(compute, selected->resource.p, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, read);
           if (observed_state) supplied_elsewhere(game3d_continuity::dlssg_input);
           require(ngx_evaluate(compute, feature, &inputs, nullptr) == ngx_fixture::success,
             "DLSS-G's compute evaluation observation changed the SDK result");
           if (observed_state) transition(compute, selected->resource.p, read, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
           dlssg_ring.execute(n);
-          if (observed_state)
-            completes(game3d_continuity::dlssg_input,
-              submitted_elsewhere(selected->resource.p, copied_out, dlssg_ring.completion()));
+          if (observed_state) completes(game3d_continuity::dlssg_input, dlssg_ring.completion());
           return;
         }
         if (observed_state) {
@@ -3484,13 +3466,11 @@ namespace {
         const auto resource = depth_resource();
         const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, 1, active_area};
         const base_structure *inputs[]{&fg_viewport.base, &tag.base};
-        const bool copied_out = copied_out_elsewhere(selected->resource.p);
         supplied_elsewhere(game3d_continuity::sr_evaluate);
         require(sl.evaluate(0, *token, inputs, 2, reinterpret_cast<void *>(native)) == 0,
           "Game-queue SR evaluation changed the SDK result");
         game_ring.execute(n, game_queue_waiter);
-        completes(game3d_continuity::sr_evaluate,
-          submitted_elsewhere(selected->resource.p, copied_out, game_ring.completion()));
+        completes(game3d_continuity::sr_evaluate, game_ring.completion());
       };
       run_script({"sr-other-queue", 30000,
         [&] {

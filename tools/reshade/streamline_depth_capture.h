@@ -659,8 +659,14 @@ namespace sunshine_streamline::depth_capture {
     std::uint64_t earlier_copied{}, earlier_refused{};
     // Copy-outs on the producer queue (docs/reshade-sbs.md): made, and
     // copies left to the Reset rule with every list of the queue's ring in
-    // flight (ring_busy) or a list call failed.
+    // flight (ring_busy) or a list call failed. U-C1b: copies recorded with
+    // copy-out storage because their list was not known to execute on the
+    // reader's queue (predicted), copies given an idle slot's cached storage
+    // at their submission (taken), copies submitted on another queue with no
+    // storage at all, left to the Reset rule (unstored), and predicted
+    // storage released unused by the idle sweep.
     std::uint64_t copied_out{}, copy_out_busy{}, copy_out_failed{};
+    std::uint64_t copy_out_predicted{}, copy_out_taken{}, copy_out_unstored{}, copy_out_released{};
     std::uint64_t unobserved() const { return unrecorded + unreported + invalidated + missed_reset + uncovered; }
   };
   proven_state_counts proven_counts();

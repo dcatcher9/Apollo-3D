@@ -62,10 +62,15 @@
 // limitation was supplied in a run without a violation (the gap closed: the
 // fix removes the row).
 //
-// Two rows are the limitations the owner approved until Step 4 (C1, C2; C1
-// narrowed on 10-27 to copies still in flight at their Present). A
-// matrix row's recorded gap over frames would also be one (none is open
-// since C5 closed on 10-26). Any other row is a defect these tests found
+// One row is the limitation the owner approved until Step 4 (C2). C1, API
+// depth recorded on a queue other than the presenting one, closed on 10-27:
+// every such copy is copied out on its own queue (U-C1b gives a source's
+// first copies that storage too) and read once complete or once the game's
+// own fence waits order the presenting queue after it (U-C1). A copy whose
+// queue's copy-out ring was all in flight (copy_out ring_busy, a resource
+// bound of eight lists per queue that no fixture fills) meets no row: a loss
+// it caused fails its run. A matrix row's recorded gap over frames would
+// also be one (none is open since C5 closed on 10-26). Any other row is a defect these tests found
 // (found: when and by which test), excused only until the owner decides it
 // (README, Found defects; none is open since C8 closed on 10-26): a strict run
 // (SUNSHINE_GAME3D_CONTINUITY_STRICT=1, the contract runner's
@@ -117,10 +122,6 @@ namespace game3d_continuity {
   // A known limitation the frame's legal source meets; a gap row names it.
   enum class limitation : std::uint8_t {
     none,
-    // API depth recorded on a queue other than the presenting one, read once
-    // its copy-out completed: an SR evaluation's on the game's queue, or
-    // DLSS-G's own on its compute queue.
-    cross_queue_sr,
     // A Generic depth-stencil view drawn on a queue other than the
     // presenting one, whose only boundary is the end of the frame.
     cross_queue_generic,
@@ -149,11 +150,9 @@ namespace game3d_continuity {
     std::uint8_t elsewhere {};
     limitation limit {limitation::none};
     std::uint64_t tick {};
-    // One probe per copy recorded on another queue that the contract copies
-    // out, with its source: true once its producer's work completed, when
-    // the presenting queue can read its copy-out. A copy not copied out (a
-    // source's first copy elsewhere) has none: only its recording's Reset,
-    // past the source age in every fixture, makes it readable.
+    // One probe per copy recorded on another queue, with its source: true
+    // once its producer's work completed, when the presenting queue can read
+    // its copy-out (every such copy is copied out since U-C1b, 10-27).
     std::vector<std::pair<std::uint8_t, std::function<bool()>>> completions;
 
     void add(std::uint8_t sources, std::uint64_t now, limitation meets = limitation::none) {
@@ -174,8 +173,7 @@ namespace game3d_continuity {
       }
     }
 
-    // A legal copy recorded on another queue; probe: its completion, when
-    // the contract copies it out.
+    // A legal copy recorded on another queue; probe: its completion.
     void add_elsewhere(std::uint8_t sources, std::uint64_t now, std::function<bool()> probe = {}) {
       add(sources, now);
       elsewhere |= sources;
@@ -262,8 +260,6 @@ namespace game3d_continuity {
 
   constexpr const char *name(limitation value) {
     switch (value) {
-      case limitation::cross_queue_sr:
-        return "cross_queue_sr";
       case limitation::cross_queue_generic:
         return "cross_queue_generic";
       default:
@@ -306,7 +302,6 @@ namespace game3d_continuity {
   };
 
   inline constexpr gap_row known_gaps[] {
-    {"C1-cross-queue-sr", limitation::cross_queue_sr, nullptr, "Narrowed on 10-27 by the copy-out on the producer queue (streamline_depth_capture.cpp copy_out, docs/reshade-sbs.md): an API copy recorded on a queue other than the presenting one is copied into add-on storage on its own queue right after the game's submission, and the presenting queue reads that copy-out once its producer fence completed, without the recording's Reset (before, only after it: in Assassin's Creed Shadows 110-235 ms after its evaluation, the fixture's sr-other-queue lost depth once the presenting queue's last copy aged out, and DLSS-G's compute copies were readable three of its evaluations later; that script now keeps depth). What remains: a copy still in flight at a Present that has no younger readable copy to hold (the add-on never waits for another queue, nor adds a reverse GPU Wait), as when the session timelines present right after the only copy of a frame whose earlier depth aged out; and the first copies of a source before its first cross-queue submission marked it read elsewhere (no copy-out storage yet), and copies whose queue's copy-out ring was all in flight (copy_out ring_busy), which keep the Reset rule. With this row removed the fixed set lost depth at seed 30618337c4062c47 frame 130 (DLSS-G's compute copy the frame's only depth, its earlier depth aged out) and seed 6e5b9c154ddc34d8 frame 10 (the timeline's first SR copy on the game's queue). Narrowed again on 10-27 by Step 4's in-flight reads (docs/reshade-sbs.md, Queue order, U-C1): a copy-out still in flight is read at a Present the game's own fence waits order after it, as the native provider fixture's sr-other-queue-in-flight shows on each of its 12 Presents (none with the completion rule alone); the timelines' DLSS-G compute ring is waited for by the presenting queue as Streamline's present queue waits for DLSS-G's compute signal. What remains: a source's first copies (no copy-out storage yet) whose recording has not retired, copies whose queue's copy-out ring was all in flight, and a copy no observed fence wait orders before the Present. The session timelines tag these frames (SR on the game's queue, DLSS-G's compute copies and the live FG scope's frames after them) with this row. The row records a loss only once no copy the presenting queue could read (a frame's legal source that meets no limitation) is younger than the source age: a loss within it is a violation. Copy-out storage for a source's first copies (the design's U-C1b) removes the rest of this row."},
     {"C2-cross-queue-generic", limitation::cross_queue_generic, nullptr, "Until Step 4's fence hooks. Generic's end-of-frame copy runs on the presenting queue, and a proof belongs to the queue whose executed list made it, so a depth-stencil view drawn on another queue with no boundary but the end of the frame is refused (missing_state; 18e5d922, docs/reshade-sbs.md, the last proven state). Seven of the eight games of the 10-06 to 10-23 logs render on another queue. Either owner option (accept the other queue's proof once fence hooks show the presenting queue ordered after it, or copy on the proving queue) shows depth here and removes this row."},
   };
   inline constexpr std::size_t gap_count = std::size(known_gaps);
