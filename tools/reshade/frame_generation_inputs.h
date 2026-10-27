@@ -17,6 +17,10 @@
 // call, so every copy requires a state observed on the evaluation's own command
 // list (state_proof::observed_nonzero); a refusal changes nothing.
 namespace sunshine_streamline::frame_generation {
+  // The viewports the Streamline probe keeps state for (its viewport
+  // records and deferred frames); every per-viewport table of an FG scope
+  // is sized by it, and the one tagged longest ago gives way to a fifth.
+  inline constexpr unsigned viewport_slots = 4;
   // A named parameter's getter result. absent: neither the D3D12 resource
   // getter nor the void-pointer getter succeeded (nothing changes); null: a
   // successful getter named no resource (an explicit "none this frame").
@@ -113,10 +117,8 @@ namespace sunshine_streamline::frame_generation {
   // frame's Present to be copied (pending; the deferred copy, R2), while that
   // newest copy is younger than the source age. A refused or aged tag copy
   // hands the frame to DLSS-G. Every later frame without an FG tag of its own
-  // is DLSS-G's: until C6 closed (10-26) any tag copy younger than the source
-  // age kept those frames' DLSSG.Depth out too, so DLSS-G's fresher depth was
-  // copied only once that copy aged out (on its compute list, readable three
-  // evaluations later, past the copy's hold).
+  // is DLSS-G's (docs/reshade-sbs.md, DLSS-G's own inputs; its history in the
+  // README's C6 paragraph).
   struct depth_tag_precedence {
     std::uint64_t epoch{}, tick{};
     std::uint32_t viewport{};
@@ -154,11 +156,9 @@ namespace sunshine_streamline::frame_generation {
   // frame of the viewport in its epoch, it waits as well. Otherwise the
   // frame's Present is the first after a game list executed on the presenting
   // queue since the tag call (queue_executed); a deferral of a frame DLSS-G
-  // does evaluate is still made at the first Present after that evaluation.
-  // Until C7 closed (10-26) a deferral waited whenever DLSS-G had evaluated
-  // anything in its scope within the source age: when DLSS-G stopped
-  // evaluating while the game kept tagging, every frame's copy lapsed unmade
-  // until that age passed, and the copy the display held aged out first.
+  // does evaluate is still made at the first Present after that evaluation
+  // (docs/reshade-sbs.md, copies deferred to the Present; its history in the
+  // README's C7 paragraph).
   struct deferral_evaluations {
     // DLSS-G's NGX evaluations of real frames: their count, and the newest
     // one's scope and tick.
@@ -171,14 +171,14 @@ namespace sunshine_streamline::frame_generation {
       std::uint64_t at_tag{}, previous{};
       bool previous_known{};
     };
-    // Per viewport (up to four, the probe's viewport slots; the oldest gives
-    // way), the count at its newest deferred frame's newest tag call.
+    // Per viewport (viewport_slots; the oldest gives way), the count at its
+    // newest deferred frame's newest tag call.
     struct tagged_frame {
       bool used{};
       std::uint64_t epoch{}, serial{}, at_tag{};
       std::uint32_t viewport{};
     };
-    std::array<tagged_frame, 4> tagged{};
+    std::array<tagged_frame, viewport_slots> tagged{};
 
     void evaluated(std::uint64_t scope_epoch, std::uint32_t scope_viewport, std::uint64_t now) {
       ++count; epoch = scope_epoch; viewport = scope_viewport; tick = now;

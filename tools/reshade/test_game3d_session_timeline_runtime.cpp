@@ -584,6 +584,9 @@ namespace {
     // was DLSS-G's compute copy alone (fg_supplied_late), readable only
     // frames later (known gap C1).
     bool fg_supplied {}, fg_supplied_late {};
+    // When FG was last turned on (frame_generation_holds keeps only a copy
+    // made since).
+    std::uint64_t fg_enabled_at {};
     std::map<std::uint64_t, unsigned> present_frames;
 
     // What the frame being recorded supplies (the continuity supply log).
@@ -1223,6 +1226,17 @@ namespace {
       // Present shows the scope's FG depth instead (FG keeps the frames it
       // supplies; the next frame without an FG copy turns the scope silent).
       const bool owned = std::exchange(fg_supplied, false) && fg_on;
+      // A silent scope (the frame before supplied no FG copy) whose display
+      // holds its own FG copy, made since FG On and younger than the source
+      // age, keeps the viewport's SR copies off-screen until that copy
+      // expires (frame_generation_holds, which awaits the owner's decision):
+      // like an owned frame's, they leave no copy a later Present could hold.
+      // The loss that follows when DLSS-G's compute copy, readable only
+      // frames later (known gap C1), supersedes them as the held copy
+      // expires is then C1's (README, C6's note; the fixed set's seed
+      // 30618337c4062c47 met it whenever the machine ran fast).
+      const bool held_off = fg_on && !owned && fg_copy && fg_copy >= fg_enabled_at &&
+        now - fg_copy < sunshine_freshness::source_age_ms;
       // When that copy was DLSS-G's compute copy alone, the depth the
       // Present can show is the scope's newest readable copy, three DLSS-G
       // evaluations old: the frame's SR input meets C1's limitation as the
@@ -1254,7 +1268,7 @@ namespace {
       continuity_log.pending.legal = std::uint8_t(supply.legal | supply.limited);
       continuity_log.pending.permitted = supply.permitted;
       continuity_log.pending.limited = supply.limited;
-      continuity_log.pending.owned = owned ? std::uint8_t(supply.legal & continuity::sr_evaluate) : std::uint8_t {};
+      continuity_log.pending.owned = owned || held_off ? std::uint8_t(supply.legal & continuity::sr_evaluate) : std::uint8_t {};
       continuity_log.pending.limit = supply.legal ? continuity::limitation::none : supply.limit;
       continuity_log.pending.tick = supply.tick;
     }
@@ -1326,6 +1340,9 @@ namespace {
     void set_frame_generation(bool on) {
       const fg_options value {{nullptr, fg_options_type, 3}, on ? 1u : 0u, on ? 1u : 0u};
       returned(sl.set_options(view, value), "slDLSSGSetOptions");
+      if (on && !fg_on) {
+        fg_enabled_at = GetTickCount64();
+      }
       fg_on = on;
     }
 
@@ -1414,6 +1431,7 @@ namespace {
       api_supplied = other_queue_copy = fg_copy = dlssg_evaluated = dlssg_frames = deferred_dlssg_frames = 0;
       deferred_known = false;
       fg_supplied = fg_supplied_late = false;
+      fg_enabled_at = 0;
       present_frames.clear();
       where = label;
       continuity_log.judge = {};

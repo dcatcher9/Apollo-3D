@@ -4270,11 +4270,17 @@ batch (`tag_scope=2`, `boundary::frame_generation_evaluation`), under the same o
 An absent key changes nothing; an explicit null revokes that kind's snapshots of DLSS-G's
 evaluation only. The two origins never revoke each other's snapshots, so Shadows' command-less
 HUD-less and Backbuffer tags (refused as `shape` until Stage 3 fix 2, copied before their frame's
-Present since) never erase the evaluation's copies. As for
-depth, a Streamline tag keeps precedence per kind: when the newest tag of a kind for that viewport
-recorded a copy that its SDK call kept, within the source age, the evaluation's input of that kind
-is skipped (`tag_copied`), so a game whose UI tags already copy keeps one origin per kind, its own
-same-batch pairs and no second full-size copy competing for the kind's two snapshots. The tag's
+Present since) never erase the evaluation's copies. A Streamline tag keeps precedence
+per kind, but unlike depth's, which belongs to the frame DLSS-G evaluates, UI's lasts the source
+age: when the newest tag of a kind for that viewport recorded a copy that its SDK call kept, within
+the source age, the evaluation's input of that kind is skipped (`tag_copied`), so a game whose UI
+tags already copy keeps one origin per kind, its own same-batch pairs and no second full-size copy
+competing for the kind's two snapshots. The rules differ on purpose: depth shows one copy per
+Present, so DLSS-G may supply the frames a tag leaves out, while UI detection reads a kind's two
+snapshots and pairs them exactly only within one origin (an input of DLSS-G's evaluation never pairs
+with a Streamline tag), so origins alternating frame by frame would leave each origin one snapshot
+and no exact pair. A kind whose tags stop is DLSS-G's once the newest tag copy is older than the
+source age. The tag's
 refusal or failed call hands that kind to the evaluation at once; a kind the tags leave out stays
 the evaluation's. The named `DLSSG.UIAlpha` needs no Streamline header range to be validated
 automatically.
@@ -4366,9 +4372,10 @@ again, holds the viewport's SR copy until the scope's first FG copy is readable
 (`source_reason=FG_copy_pending`), a live scope included: until 10-27 a live scope dropped every
 copy but its own (`FG_scope_changed`), so a generated Present before the first FG copy was readable
 was mono at each FG On (the round 3 review's soak found it in 13 of 20 failures). A readable frame of
-any source replaces the copy, and another viewport's, epoch's or provider's source drops it. A
-silent scope's selection follows the same rule, so FG turned on again within that hold keeps the
-copy until the scope supplies. Once the copy
+the lineage's other source replaces the copy, except that a silent scope's own FG copy made since
+FG On is held over it (`frame_generation_holds`, above); another viewport's, epoch's or provider's
+source drops it. A silent scope's selection follows the same rule, so FG turned on again within
+that hold keeps the copy until the scope supplies. Once the copy
 expired the queue may hand over to Generic. Until 10-26 (the session tests' continuity gap C8) FG
 Off dropped the FG copy at once, as a changed source while the SR copy was in flight or as a released
 association at a color-only Present, so in Assassin's Creed Shadows each FG Off could lose depth
@@ -4428,8 +4435,8 @@ Nomination, admission of completed snapshots and display-depth reuse share one f
 less than 250 ms from the original depth capture timestamp, defined by `source_age_ms` in
 [`freshness.h`](../tools/reshade/freshness.h). Display-depth reuse also requires the same runtime
 queue and display allocation, unchanged color dimensions and any known depth storage, view and
-resource kind; under enabled FG the retained copy must belong to that FG scope. Loss of the source
-association (an FG copy keeps it within its source age after FG Off), a new or switched display
+resource kind; under enabled FG the retained copy must belong to that FG scope's lineage. Loss of
+the source association (FG Off's rule above), a new or switched display
 allocation, a disabled game technique, lifecycle resets and expiry invalidate reusable history
 until a fresh copy succeeds. An export stop (a focus loss, or a published Present the add-on did
 not render) invalidates it once, after its `export inactive` line. While the export stays inactive the

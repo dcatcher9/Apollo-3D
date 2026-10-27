@@ -46,7 +46,7 @@ namespace sunshine_streamline {
     // sl_core_api.h sets no limit on numTags or numInputs (the contract
     // matrix's S18): a tag array or input list is read tag_chunk elements at
     // a time, on the stack.
-    constexpr unsigned slot_count = 4, tag_chunk = 32, frame_count = 32;
+    constexpr unsigned slot_count = frame_generation::viewport_slots, tag_chunk = 32, frame_count = 32;
     // Canonical buffer types this observer keeps, depth kinds first. Every
     // tag array below is indexed by position in this list.
     constexpr std::array<std::uint32_t, 9> observed_tag_types{buffers::depth, buffers::high_resolution_depth,
@@ -277,8 +277,10 @@ namespace sunshine_streamline {
           sunshine_freshness::ahead_tolerant_le(supply.tick, GetTickCount64(), sunshine_freshness::fg_silent_ms)) return;
       depth_capture::frame_generation_missed(scope_epoch, viewport, sequence);
     }
-    // A like precedence per UI kind (ui_mask::capture_slot,
-    // ui_mask::tag_precedence), not keyed to the frame: the newest Streamline
+    // A precedence per UI kind (ui_mask::capture_slot,
+    // ui_mask::tag_precedence), not keyed to the frame as depth's is, since a
+    // kind's snapshots pair exactly only within one origin (docs/reshade-sbs.md,
+    // DLSS-G's inputs): the newest Streamline
     // UI tag copy of that kind for the scope within the source age, and the
     // newest refusal of one deferred to its frame's
     // Present. DLSS-G's input of a kind the game's own tags copy adds no second

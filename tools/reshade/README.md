@@ -1915,7 +1915,14 @@ C6's note names (frame 56 or 57) whenever its frames 36 to 54 take less than the
 copy that `frame_generation_holds` keeps over the viewport's readable SR copies then expires only as
 DLSS-G's compute copy supersedes them. That depends on the run's pace alone (both builds take the same
 decisions there); it failed 4 of 29 runs during this fix, each when the machine ran fast, and none of
-12 runs of either build once those frames took 297 ms.
+12 runs of either build once those frames took 297 ms. Since the round 3 review (10-27) the timelines
+model that hold: while a silent scope's display holds its own FG copy made since FG On, younger than
+the source age, the viewport's SR inputs are the scope's (`supply::owned`), as `frame_generation_holds`
+keeps them off-screen, so they leave no readable copy for later Presents, and the loss when
+DLSS-G's compute copy supersedes them is C1's (that copy is readable only frames later; with fence
+observation it is readable at its own Present). Whether `frame_generation_holds` should keep an FG
+copy over a readable SR copy at all (it spares the placement calibration a switch, and costs these
+losses until Step 4) awaits the owner.
 
 C5, the API contract matrix's `S1-evaluate` row over frames (the runtime layer found the row on
 10-23, the session timelines carried it from 10-25), is closed (10-26): an `OnlyValidNow` global or
