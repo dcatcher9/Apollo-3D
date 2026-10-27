@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstring>
 #include <stdexcept>
+#include <string>
 
 namespace {
   using namespace sunshine_streamline;
@@ -386,39 +387,53 @@ namespace {
     require(!holds(ngx, policy, 1000), "An NGX copy was held as Streamline FG's");
     require(!holds({}, policy, 1000), "An empty display held FG");
 
-    // An FG copy in flight takes nothing before it is readable
-    // (frame_generation_pending): while the silent scope's acquisition names
-    // only its own capture without pixels, also one selected for its
-    // nomination's authority with pixels pending, the viewport's ordinary copy
-    // of the same epoch within the source age is held. A readable candidate,
-    // another source, another viewport, an FG copy on display, an expired copy
-    // and a policy without FG hold nothing.
+    // An FG copy in flight takes nothing before it is readable: the
+    // viewport's ordinary copy of the scope's epoch is the FG input's
+    // predecessor in one display lineage (decide_display), held within the
+    // source age until the FG input's first readable frame, under a silent
+    // scope's selection (as without FG) and under a live one's (required FG:
+    // FG On before the scope's first FG copy is readable, the round 3
+    // review's soak). A readable FG candidate is copied; another viewport's,
+    // epoch's or provider's copy, an expired one and another ordinary
+    // source hold nothing.
     auto sr = held; sr.metadata.frame_generation_input = false; sr.metadata.source_id = 0;
     depth_capture::acquisition_decision pending;
     pending.provider = sunshine_scene_depth::provider_kind::streamline; pending.epoch = 11; pending.viewport = 3;
     pending.source_id = sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(3));
     pending.sequence = 18; pending.capture_id = 140;
     depth_capture::packet candidate;
-    const auto waits = [&](const depth_capture::retained_depth &retained, const depth_capture::acquisition_decision &current,
-        const depth_capture::selection_policy &p, std::uint64_t now) {
-      return depth_capture::frame_generation_pending(retained, current, candidate, p, now);
-    };
-    require(waits(sr, pending, policy, 1000) && waits(sr, pending, policy, 1000 + sunshine_freshness::source_age_ms - 1),
-      "A silent scope's FG copy in flight dropped the viewport's ordinary copy");
-    require(!waits(sr, pending, policy, 1000 + sunshine_freshness::source_age_ms), "An expired ordinary copy was held");
-    auto selected = pending; selected.source_selected = true;
-    require(waits(sr, selected, policy, 1000), "A selected FG capture with pending pixels dropped the ordinary copy");
-    candidate.pixel_ready = true;
-    require(!waits(sr, selected, policy, 1000), "A readable FG candidate was held off");
-    candidate.pixel_ready = false;
-    auto ordinary_candidate = pending; ordinary_candidate.source_id = 0;
-    require(!waits(sr, ordinary_candidate, policy, 1000), "An ordinary candidate counted as FG's copy in flight");
-    auto elsewhere = pending; elsewhere.viewport = 4;
-    elsewhere.source_id = sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(4));
-    require(!waits(sr, elsewhere, policy, 1000), "Another viewport's FG copy in flight held this viewport's copy");
-    require(!waits(held, pending, policy, 1000), "An FG copy on display was held as the ordinary copy");
-    require(!waits(sr, pending, {}, 1000), "An ordinary copy was held without required FG");
-    require(!waits({}, pending, policy, 1000), "An empty display held an ordinary copy");
+    candidate.metadata.provider = pending.provider; candidate.metadata.epoch = 11; candidate.metadata.viewport = 3;
+    candidate.metadata.frame_generation_input = true;
+    depth_capture::selection_policy silent;  // A silent scope selects as without FG.
+    for (const auto &selection : {silent, policy}) {
+      const auto decides = [&](const depth_capture::retained_depth &retained, const depth_capture::acquisition_decision &current,
+          std::uint64_t now) { return depth_capture::decide_display(current, candidate, retained, selection, now); };
+      const char *scope = selection.require_frame_generation ? "a live scope's" : "a silent scope's";
+      auto got = decides(sr, pending, 1000 + sunshine_freshness::source_age_ms - 1);
+      require(got.action == depth_capture::display_action::hold && !std::strcmp(got.reason, "FG_copy_pending"),
+        (std::string(scope) + " FG copy in flight dropped the viewport's ordinary copy").c_str());
+      require(decides(sr, pending, 1000 + sunshine_freshness::source_age_ms).action != depth_capture::display_action::hold,
+        "An expired ordinary copy was held");
+      auto selected = pending; selected.source_selected = true;
+      require(decides(sr, selected, 1000).action == depth_capture::display_action::hold,
+        "A selected FG capture with pending pixels dropped the ordinary copy");
+      candidate.pixel_ready = true;
+      require(decides(sr, selected, 1000).action == depth_capture::display_action::copy_fresh, "A readable FG candidate was held off");
+      candidate.pixel_ready = false;
+      auto elsewhere = sr; elsewhere.metadata.viewport = 4;
+      require(decides(elsewhere, pending, 1000).action != depth_capture::display_action::hold,
+        "Another viewport's ordinary copy was held for this viewport's FG copy in flight");
+      auto earlier = sr; earlier.metadata.epoch = 10;
+      require(decides(earlier, pending, 1000).action != depth_capture::display_action::hold,
+        "Another epoch's ordinary copy was held for an FG copy in flight");
+      auto ngx_copy = sr; ngx_copy.metadata.provider = sunshine_scene_depth::provider_kind::ngx;
+      require(decides(ngx_copy, pending, 1000).action != depth_capture::display_action::hold,
+        "An NGX copy was held for a Streamline FG copy in flight");
+      require(decides({}, pending, 1000).action != depth_capture::display_action::hold, "An empty display held");
+    }
+    auto other_ordinary = pending; other_ordinary.source_id = 4;
+    require(depth_capture::decide_display(other_ordinary, candidate, sr, silent, 1000).action != depth_capture::display_action::hold,
+      "Another ordinary source counted as the copy's lineage");
 
     // FG Off releases the queue's API association, yet the display keeps
     // the scope's newest copy within the source age (frame_generation_retained,

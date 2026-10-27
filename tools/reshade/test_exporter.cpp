@@ -220,9 +220,19 @@ namespace {
       require(held(fg, fg_gap, {}, fg_policy), "A present without an FG nomination discarded finished FG input depth");
       auto other_scope = fg_gap; ++other_scope.source_id;
       require(!held(fg, other_scope, {}, fg_policy), "A different FG source without a sequence held old depth");
-      require(!held(previous, pending, {}, fg_policy) &&
-          std::strcmp(decide(previous, pending, {}, fg_policy).reason, "FG_scope_changed") == 0,
-        "Ordinary depth stood in for required FG input");
+      // The viewport's ordinary copy of the scope's epoch is its FG input's
+      // predecessor (one display lineage): required FG holds it while that
+      // input is pending, and refuses another viewport's or epoch's.
+      const auto lineage = decide(previous, fg_pending, {}, fg_policy);
+      require(lineage.action == action::hold && std::strcmp(lineage.reason, "FG_copy_pending") == 0,
+        "Required FG dropped its viewport's ordinary copy while its own input was pending");
+      for (unsigned mismatch = 0; mismatch != 2; ++mismatch) {
+        auto other = previous;
+        if (mismatch == 0) ++other.metadata.epoch; else ++other.metadata.viewport;
+        require(!held(other, fg_pending, {}, fg_policy) &&
+            std::strcmp(decide(other, fg_pending, {}, fg_policy).reason, "FG_scope_changed") == 0,
+          "Ordinary depth of another scope stood in for required FG input");
+      }
       for (unsigned mismatch = 0; mismatch != 2; ++mismatch) {
         auto policy = fg_policy;
         if (mismatch == 0) ++policy.epoch; else ++policy.viewport;

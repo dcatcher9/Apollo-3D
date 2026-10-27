@@ -1161,6 +1161,14 @@ namespace sunshine_streamline::depth_capture {
       d.previous.metadata.source_id = (1ull << 63) | 2;
     }
 
+    // The acquisition names viewport 2's FG input, which follows the case's
+    // retained SR copy: FG is on (a required scope) or the selection is a
+    // silent scope's.
+    void fg_input(display_case &d) {
+      d.current.source_id = d.candidate.metadata.source_id = (1ull << 63) | 2;
+      d.candidate.metadata.frame_generation_input = true;
+    }
+
     // P5 and P7: decide_display, the display policy that provider::begin
     // applies to the acquisition (moving into depth_output). Each row edits
     // one field of a base case (a pending successor of a retained SR copy,
@@ -1253,11 +1261,60 @@ namespace sunshine_streamline::depth_capture {
          },
          action::hold,
          "retained_copy"},
-        {"Required FG refuses a retained SR copy", [](display_case &d) {
+        // The viewport's ordinary copy of the scope's epoch is its FG
+        // input's predecessor (one display lineage): a required scope holds
+        // it until its first readable FG copy (FG On before that copy is
+        // readable; the round 3 review's soak, until 10-27 FG_scope_changed),
+        // and refuses any other.
+        {"Required FG holds its viewport's retained SR copy for its pending FG input", [](display_case &d) {
            d.policy = {true, 8, 2};
+           fg_input(d);
+         },
+         action::hold,
+         "FG_copy_pending"},
+        {"Required FG copies its readable FG input over its viewport's SR copy", [](display_case &d) {
+           d.policy = {true, 8, 2};
+           fg_input(d);
+           d.current.source_selected = d.candidate.pixel_ready = true;
+         },
+         action::copy_fresh,
+         "fresh_copy_candidate"},
+        {"Required FG holds its viewport's retained SR copy without a nomination", [](display_case &d) {
+           d.policy = {true, 8, 2};
+           d.current = {};
+         },
+         action::hold,
+         "retained_copy"},
+        {"Required FG refuses another viewport's retained SR copy", [](display_case &d) {
+           d.policy = {true, 8, 3};
+           fg_input(d);
+           d.current.viewport = 3;
+           d.current.source_id = (1ull << 63) | 3;
          },
          action::invalidate,
          "FG_scope_changed"},
+        {"Required FG refuses another epoch's retained SR copy", [](display_case &d) {
+           d.policy = {true, 9, 2};
+           fg_input(d);
+           d.current.epoch = 9;
+         },
+         action::invalidate,
+         "FG_scope_changed"},
+        {"Required FG refuses a retained NGX copy", [](display_case &d) {
+           d.policy = {true, 8, 2};
+           fg_input(d);
+           d.previous.metadata.provider = provider_kind::ngx;
+         },
+         action::invalidate,
+         "FG_scope_changed"},
+        {"A silent scope's pending FG input holds its viewport's SR copy", fg_input, action::hold, "FG_copy_pending"},
+        {"A silent scope's pending FG input of another viewport drops the SR copy", [](display_case &d) {
+           fg_input(d);
+           d.current.viewport = 3;
+           d.current.source_id = (1ull << 63) | 3;
+         },
+         action::invalidate,
+         "source_changed"},
         {"Required FG refuses another provider's retained FG copy", [](display_case &d) {
            fg_retained(d);
            d.previous.metadata.provider = d.current.provider = provider_kind::ngx;
@@ -1508,8 +1565,17 @@ namespace sunshine_streamline::depth_capture {
          },
          action::invalidate,
          "display_copy_failed"},
-        {"A failed copy under required FG with a retained SR copy", [](display_case &d) {
+        {"A failed copy of required FG's input holds its viewport's retained SR copy (one lineage)", [](display_case &d) {
            d.policy = {true, 8, 2};
+           fg_input(d);
+         },
+         action::hold,
+         "retained_after_failed_copy"},
+        {"A failed copy under required FG with another viewport's retained SR copy", [](display_case &d) {
+           d.policy = {true, 8, 3};
+           fg_input(d);
+           d.current.viewport = 3;
+           d.current.source_id = (1ull << 63) | 3;
          },
          action::invalidate,
          "display_copy_failed"},

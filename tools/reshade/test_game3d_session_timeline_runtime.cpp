@@ -365,6 +365,14 @@ namespace {
     // 089154be9db5f403).
     {"C5-frame-untag-then-evaluate", "20*sr=local; 30*tag=now_list,untag=after_frame,sr=tag"},
     {"C5-global-untag-then-evaluate", "20*sr=local; 30*tag=now_list,entry=global,untag=after_global,sr=tag"},
+    // FG turned on with the frame's FG tag copied at its call, and a
+    // generated Present before that copy is readable (inside the SR
+    // evaluation, or inside the recording): the viewport's SR copy is held
+    // until the scope's first readable FG copy, as one display lineage
+    // (until 10-27 the live scope dropped it, FG_scope_required, at every
+    // FG On; the round 3 review's soak, 13 of its 20 failures). Toggled as
+    // Assassin's Creed Shadows toggles FG.
+    {"fg-on-holds-sr-copy", "20*sr=local; fg=on,tag=now_list,sr=local,generated=1,at=evaluate; 5*tag=now_list,sr=local,generated=1; fg=off,sr=local; 10*sr=local; fg=on,tag=now_list,generated=1,at=inside; 5*tag=now_list,generated=1; fg=off,sr=local; 10*sr=local; fg=on,tag=now_list,sr=local,generated=1,at=evaluate; 5*sr=local,generated=1"},
   };
 
   // Each known gap the timelines found has a witness: an event list whose

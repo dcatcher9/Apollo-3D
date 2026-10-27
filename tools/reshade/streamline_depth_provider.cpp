@@ -802,13 +802,15 @@ namespace sunshine_streamline::provider {
       if (previous.provider != sunshine_scene_depth::provider_kind::streamline || !previous.frame_generation_input ||
           previous.epoch != selection.epoch || previous.viewport != selection.viewport) {
         // FG selects a logical SL source before its first pixels are ready.
-        // Never carry NGX's encoding, sampled center or old display into it.
+        // Never carry NGX's encoding or sampled center into it. The display
+        // decides the old copy (decide_display): the viewport's ordinary copy
+        // of the scope's epoch, its lineage, is held until the scope's first
+        // readable FG copy, and any other is dropped (FG_scope_changed).
         data->source_metadata = {};
         data->source_metadata.provider = sunshine_scene_depth::provider_kind::streamline;
         data->source_metadata.epoch = selection.epoch;
         data->source_metadata.viewport = selection.viewport;
         data->source_metadata.frame_generation_input = true;
-        data->cache.invalidate("FG_scope_changed");
         data->last_valid = {};
         data->have_latest = false;
         data->pending_id = 0;
@@ -820,23 +822,17 @@ namespace sunshine_streamline::provider {
       const sunshine_game3d::slow_step step("depth capture acquisition");
       depth_capture::acquire(runtime->get_command_queue()->get_native(), present, data->frame, acquisition, &capture_info, selection);
     }
-    // A silent FG scope's handovers hold the displayed copy within the source
-    // age. FG keeps its viewport while it can supply (frame_generation_holds):
-    // the scope's ordinary candidate, fresh or pending, stands in only once
-    // the scope's own newest copy can no longer be held, so a frame without an
-    // FG copy holds as any missing frame of a source does. And an FG copy in
-    // flight takes nothing before it is readable (frame_generation_pending):
-    // the viewport's ordinary copy is held meanwhile.
+    // FG keeps its viewport while it can supply (frame_generation_holds): a
+    // silent scope's ordinary candidate, fresh or pending, stands in only
+    // once the scope's own newest copy can no longer be held, so a frame
+    // without an FG copy holds as any missing frame of a source does. Every
+    // other handover between the viewport's FG and ordinary sources holds the
+    // displayed copy until the newcomer's first readable frame
+    // (decide_display's lineage).
     const char *fg_hold = nullptr;
-    if (fg_silent) {
-      const auto retained = data->cache.reference();
-      const auto now = GetTickCount64();
-      if (!(acquisition.source_selected && data->frame.metadata.frame_generation_input) &&
-          depth_capture::frame_generation_holds(retained, policy, now))
-        fg_hold = "FG_copy_held";
-      else if (depth_capture::frame_generation_pending(retained, acquisition, data->frame, policy, now))
-        fg_hold = "FG_copy_pending";
-    }
+    if (fg_silent && !(acquisition.source_selected && data->frame.metadata.frame_generation_input) &&
+        depth_capture::frame_generation_holds(data->cache.reference(), policy, GetTickCount64()))
+      fg_hold = "FG_copy_held";
     const bool available = acquisition.source_selected && !fg_hold;
     evidence.capture = capture_info;
     evidence.available = available;

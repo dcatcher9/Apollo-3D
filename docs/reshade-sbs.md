@@ -4233,12 +4233,12 @@ which DLSS-G's inputs are one case. A compute queue takes its place and fence at
 submission of such a copy. The Present queue reads the copy as any other queue's: once
 that recording was reset and the fence passed. A compute-list copy keeps the FG scope live only once
 the Present queue can read it: its submission carries that fence, Streamline reset the recording and
-the fence passed. Streamline resets its DLSS-G recordings only frames later. Until then the silent
-scope's display holds the viewport's SR copy, of the same epoch and younger than the source age,
-while the acquisition names only the FG copy in flight (`source_reason=FG_copy_pending`; DLSS-G's
-nomination replaces the viewport's SR observation), so the handover loses no depth; until 10-25 the
-scope turned live at the submission and the SR depth it replaced was dropped for a copy still in
-flight. One never submitted (as when its queue has no place) or never reset turns the scope live
+the fence passed. Streamline resets its DLSS-G recordings only frames later. Until then the display
+holds the viewport's SR copy, of the same epoch and younger than the source age, while the
+acquisition names only the FG copy in flight (`source_reason=FG_copy_pending`; DLSS-G's nomination
+replaces the viewport's SR observation), so the handover loses no depth (the display lineage
+below); until 10-25 the scope turned live at the submission and the SR depth it replaced was
+dropped for a copy still in flight. One never submitted (as when its queue has no place) or never reset turns the scope live
 for nothing; one whose producer fails later (a
 replay, its queue gone) counts as a missed frame (below). DLSS-G's
 accepted copies keep the FG scope live exactly as accepted FG tag copies do, so FG owns the viewport
@@ -4351,9 +4351,17 @@ API's while the display holds an FG copy younger than the source age
 viewport's ordinary SR/RR source of the copy's epoch, which follows it, takes the viewport only at
 its first readable frame; while that source is pending (as an SR copy on another queue is until its
 recording retired) the FG copy is held (readiness lines show `source_action=hold
-source_reason=FG_successor_pending`). A readable frame of any source replaces the copy, and another
-viewport's, epoch's or provider's source drops it. A silent scope's selection follows the same rule,
-so FG turned on again within that hold keeps the copy until the scope supplies. Once the copy
+source_reason=FG_successor_pending`). This is one rule for both directions: a viewport's Streamline
+FG input and its ordinary SR/RR source of one epoch are one display lineage, whose newcomer takes
+the viewport at its first readable frame while the predecessor's copy is held within the source age
+(`decide_display`, `depth_capture::detail::lineage_successor`). So FG On, or a scope that supplies
+again, holds the viewport's SR copy until the scope's first FG copy is readable
+(`source_reason=FG_copy_pending`), a live scope included: until 10-27 a live scope dropped every
+copy but its own (`FG_scope_changed`), so a generated Present before the first FG copy was readable
+was mono at each FG On (the round 3 review's soak found it in 13 of 20 failures). A readable frame of
+any source replaces the copy, and another viewport's, epoch's or provider's source drops it. A
+silent scope's selection follows the same rule, so FG turned on again within that hold keeps the
+copy until the scope supplies. Once the copy
 expired the queue may hand over to Generic. Until 10-26 (the session tests' continuity gap C8) FG
 Off dropped the FG copy at once, as a changed source while the SR copy was in flight or as a released
 association at a color-only Present, so in Assassin's Creed Shadows each FG Off could lose depth

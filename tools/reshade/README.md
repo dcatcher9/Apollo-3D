@@ -1878,8 +1878,8 @@ is not revoked (`depth_capture::frame_generation_retained`), and only then may i
 Generic. And the viewport's ordinary source that follows an FG copy (the same viewport's SR/RR
 source of the copy's epoch, once FG is off or its scope silent) is no changed source until its first
 readable frame: `decide_display` holds the FG copy meanwhile (`FG_successor_pending`, or
-`retained_after_failed_copy` after a failed copy of that source;
-`depth_capture::detail::frame_generation_successor`), and that source's storage and encoding, which
+`retained_after_failed_copy` after a failed copy of that source; the display lineage,
+`depth_capture::detail::lineage_successor`, since 10-27 one rule for both directions), and that source's storage and encoding, which
 compare frames of one source, do not end the hold. A readable frame of any source replaces the copy,
 and another viewport's, epoch's or provider's source still drops it. A silent scope selects as
 without FG, so FG turned on again within the hold keeps the copy until the scope supplies, while
@@ -1932,6 +1932,25 @@ source refusal that withdrew before the rule was asked. It now judges the tag ca
 in the untag's place (the viewport keeps its newest tag call per depth kind for that). The regression
 timelines `C5-frame-untag-then-evaluate` and `C5-global-untag-then-evaluate` fail at frame 35 on the
 build before (a gap, `provider_associated`, shown 35 of 50 frames).
+
+FG On before the scope's first FG copy is readable, the most common failure of the round 3
+review's soak (10-26, seeds 400 to 599: 13 of 20 failures, none rowed), is fixed (10-27): a live FG
+scope dropped every copy but its own, so a generated Present between FG On and its first readable FG
+copy (inside the SR evaluation, inside the recording, or before DLSS-G's compute copy is readable)
+was mono although the real Present before showed an SR copy younger than the source age
+(`dropped_hold`, `FG_scope_required` with `fg=refused/no_completed_snapshot`; shrunk to
+`2*defaults; sr=local; fg=on,tag=now_list,sr=local,generated=1,at=evaluate`), once per FG On
+(Assassin's Creed Shadows toggled FG 27 times in its 10-25 session). The owner's C8 ruling (hold
+within the source age, as for any source's missing frame) now holds in both directions: a
+viewport's Streamline FG input and its ordinary SR/RR source of one epoch are one display lineage
+(`decide_display`, `depth_capture::detail::lineage_successor`), whose newcomer takes the viewport at
+its first readable frame while the predecessor's copy is held. That one rule replaced
+`frame_generation_successor` (FG to SR) and `frame_generation_pending` (SR to FG in a silent scope
+only); `frame_generation_holds` still keeps a silent scope's FG copy over a readable SR copy (its
+loss with DLSS-G's compute copy, in C6's note above, awaits the owner). The regression timeline
+`fg-on-holds-sr-copy` toggles FG three times so; with the live scope's old drop restored it fails
+at each FG On (frames 20, 37 and 54, `dropped_hold`). The seam characterization pins the lineage
+(eight rows), and the display cache test the SR-to-FG direction under a silent and a live scope.
 
 `reshade_native_provider_continuity` runs the provider fixture at 1280x720 with the 2.7.30
 interposer, every frame script under the invariant, in about 115 s. Like
@@ -2017,7 +2036,8 @@ two for C4's fix, `C4-no-fg-call` and `C4-cancelled-fg-tags`, one for C6's,
 `C6-dlssg-after-tag-copy`, one for C7's, `C7-dlssg-stops`, two for C8's,
 `C8-fg-off-sr-other-queue` and `C8-fg-off-color-only`, and four for C5's,
 `C5-frame-tag-then-evaluate`, `C5-global-tag-then-evaluate` and their untag forms
-`C5-frame-untag-then-evaluate` and `C5-global-untag-then-evaluate`), an event list shaped like the
+`C5-frame-untag-then-evaluate` and `C5-global-untag-then-evaluate`, and one for the FG On hold,
+`fg-on-holds-sr-copy`), an event list shaped like the
 session it fixed and judged as any
 timeline (random seeds meet these shapes only by chance, and a change of the event language changes
 every seed), and one witness per open row the timelines found or carry (none is open since C5 closed
@@ -2026,8 +2046,8 @@ run; a witness that loses none fails the set, as the matrix's gap seeds keep a r
 failing cell. `--trace` prints every Present's
 frame record, the supply it was judged with and each recorded refusal.
 
-`reshade_session_timelines` runs the fixed set (24 seeds and fifteen regression timelines, about
-4010 frames and 9240 Presents) in about 145 s, registered like
+`reshade_session_timelines` runs the fixed set (24 seeds and sixteen regression timelines, about
+4170 frames and 9700 Presents) in about 150 s, registered like
 `reshade_native_provider_continuity` with the same 240 s timeout. Locally:
 
     reshade_game3d_session_timeline_runtime_test [--list] [--timeline <seed> | --events "<list>" |
