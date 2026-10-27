@@ -520,6 +520,9 @@ namespace {
     // oracle's class or that the FG scope decided first, and untags judged
     // by the deferral they must cancel (R7).
     unsigned decisions {}, refusals_matched {}, refusals_preempted {}, cancels {};
+    // Reads the add-on recorded as ordered by the queue-order model, each
+    // judged by the timeline's own fences (unordered_read).
+    unsigned ordered_reads {};
     std::uint64_t elapsed_ms {};
   };
 
@@ -1480,6 +1483,8 @@ namespace {
       continuity_log.judge = {};
       continuity_log.pending = {};
       continuity_log.where = where.c_str();
+      // A new viewport: no read of this run names an earlier run's copy.
+      script_order.clear();
       script_name = where.c_str();
       script_deadline = GetTickCount64() + 15000 + 150 * value.frames.size();
     }
@@ -1516,6 +1521,13 @@ namespace {
         const auto kind = std::string("continuity:") + continuity::name(violation.kind);
         const auto signature = kind + "/" + sunshine_game3d::name(violation.owner) + "/" + (violation.reason ? violation.reason : "");
         result.failures.push_back({kind, at, (in_isolation ? std::string("isolation") : frame_text(at)) + ": " + continuity::describe(violation), signature});
+      }
+      // unordered_read (the native provider fixture's require_ordered_reads):
+      // a read the add-on recorded as ordered by the queue-order model that
+      // the timeline's own Execute, Signal and Wait calls do not order.
+      result.ordered_reads = unsigned(script_order.reads.size());
+      for (const auto &text : script_order.unordered_reads()) {
+        result.failures.push_back({"unordered_read", unsigned(value.frames.size()), text, "unordered_read"});
       }
       std::stable_sort(result.failures.begin(), result.failures.end(), [](const failure &a, const failure &b) {
         return a.frame < b.frame;
@@ -1843,7 +1855,7 @@ int main(int argc, char **argv) {
       shown += result.shown;
       frames_run += result.frames;
       decisions += result.decisions;
-      std::printf("MEASURE session-timeline %s frames=%u presents=%u generated=%u legal=%u shown=%u stalls=%u decisions=%u refusals=%u preempted=%u cancels=%u failures=%zu elapsed_ms=%llu", name_of(value).c_str(), result.frames, result.presents, result.generated, result.legal, result.shown, result.stalls, result.decisions, result.refusals_matched, result.refusals_preempted, result.cancels, result.failures.size(), static_cast<unsigned long long>(result.elapsed_ms));
+      std::printf("MEASURE session-timeline %s frames=%u presents=%u generated=%u legal=%u shown=%u stalls=%u decisions=%u refusals=%u preempted=%u cancels=%u ordered_reads=%u failures=%zu elapsed_ms=%llu", name_of(value).c_str(), result.frames, result.presents, result.generated, result.legal, result.shown, result.stalls, result.decisions, result.refusals_matched, result.refusals_preempted, result.cancels, result.ordered_reads, result.failures.size(), static_cast<unsigned long long>(result.elapsed_ms));
       for (std::size_t r = 0; r != rows.size(); ++r) {
         if (result.rows[r].exercised) {
           std::printf(" %s={supplied=%u violations=%u}", continuity::known_gaps[r].id, result.rows[r].exercised, result.rows[r].violations);

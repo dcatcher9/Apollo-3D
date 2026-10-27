@@ -1726,6 +1726,26 @@ presenting-queue copy 188 ms behind three completed game-queue copies (bound 132
 frames) before that copy expires, `dlssg-evaluation` holds an FG copy behind DLSS-G's completed
 compute copies, and 12 of the 43 fixed timelines fail it.
 
+`unordered_read` (Step 4, U-C1): a read of a copy still in flight must be ordered after its
+producer by the game's own fences. Each fixture logs every `ExecuteCommandLists`, `Signal` and
+`Wait` it makes on the game's queues and fences, its CPU signals and each Present, and an
+INDEPENDENT oracle ([`test_queue_order_script.h`](test_queue_order_script.h)) computes vector
+clocks from that script alone: a wait for w orders its queue only after the pointwise earliest of
+every signal of that fence reaching w anywhere in the script, and after nothing when the fence's
+initial value, a CPU signal or no signal reaches w. Every Present whose record says
+`depth_read_order=ordered` names the producer position the add-on read after; the fixture learned
+each Execute's position from the test add-on right after the call returned
+(`SunshineQueueOrderTestLastExecute`), so it finds that Execute in its script and the oracle must
+order the Present after it (and the copy-out the add-on made in that call's post-call). A script
+that knows a read was in flight (its producer queue held behind a gate the CPU opens after the
+Present) adds that read whatever the record says. No row excuses a violation: the Present showed
+depth its copy had not written yet. The native provider fixture judges each script
+(`MEASURE native-provider unordered_read judged=<n>`), the session timelines each run
+(`ordered_reads=` on its line; 342 reads over the 43 fixed timelines on 10-27, none unordered). With `readable_elsewhere` mutated to admit every positioned copy,
+`sr-other-queue-in-flight-no-wait` fails both the in-flight check and `unordered_read` (12 reads);
+with the model's CPU-signal poison removed, `sr-other-queue-in-flight-cpu-signal` fails it from
+the records' own `ordered` claims (10-27, temporary builds).
+
 The judge reads each Present's [frame record](../../docs/reshade-sbs.md#frame-record)
 (`SunshineGame3DTestFrameRecord`, copied in ReShade's `reshade_present` event) and the fixture's
 own supply log. Each frame function names, at the call that supplies it, what the frame supplies as
@@ -1797,7 +1817,10 @@ closed, and the fix removes the row). Each provider run with an interposer exerc
   game queue's GPU behind a gate the CPU opens only after each Present, so every copy is still in
   flight at its Present; the presenting queue's wait for the game queue's signal orders it after
   the copy-out, and each of its 12 Presents must show that frame's copy (with the completion rule
-  alone none did: `in-flight copies shown=0 of 12`). What the row keeps is a source's first copies
+  alone none did: `in-flight copies shown=0 of 12`). Its three negative forms must show none: the
+  presenting queue does not wait (`-no-wait`), or it waits on a handoff fence that the CPU
+  (`-cpu-signal`) or a third queue of the game's (`-second-signaller`) signals to the waited value
+  before the game queue's own signal can run; `unordered_read` judges every form. What the row keeps is a source's first copies
   before it is known to be read on another queue (no copy-out storage yet) whose recording has not
   retired, copies whose queue's copy-out ring was all in flight, and a copy no observed fence wait
   orders before the Present. The session timelines' DLSS-G compute ring is waited for by the
@@ -2347,7 +2370,11 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   stricter contract for its optional UI copies and an absent extent as the whole allocation. The
   matrix's L1 hook cells drive the same mappers through the
   probe.
-- [`test_queue_order.cpp`](test_queue_order.cpp) (`reshade_queue_order`) pins the queue-order model
+- [`test_queue_order.cpp`](test_queue_order.cpp) (`reshade_queue_order`) first pins the fixtures'
+  script oracle ([`test_queue_order_script.h`](test_queue_order_script.h), `unordered_read`): a
+  wait after the producer's signal orders, and a wait for an earlier signal, a CPU signal or a
+  second signaller reaching the value (before or after the read), the initial value, an unknown
+  producer and an in-flight read without a wait do not; a two-hop chain does. It pins the queue-order model
   of [`queue_order.h`](queue_order.h) ([Queue order](../../docs/reshade-sbs.md#queue-order)): one
   cell per fail-closed rule (a signalling queue never the least recently used record, baseline, unsettled and the settle marker above every seen value, CPU
   signal, second signaller and its cookie across a reset, decreasing and `UINT64_MAX` values, a

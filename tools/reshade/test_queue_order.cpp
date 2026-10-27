@@ -4,6 +4,7 @@
 // oracle that explores every GPU interleaving of the script (README,
 // Queue order). No device, no hooks.
 #include "queue_order.h"
+#include "test_queue_order_script.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -577,8 +578,69 @@ namespace {
   }
 }
 
+namespace {
+  // The fixtures' script oracle (test_queue_order_script.h), which judges
+  // their in-flight reads (unordered_read): one cell per rule.
+  void script_oracle() {
+    using script = queue_order_script::log;
+    int p = 0, q = 0, r = 0, g = 0, h = 0;
+    const auto judged = [](script &value) { return value.unordered_reads().empty(); };
+    {
+      script s; s.enabled = true;
+      s.execute(&p, 1, 1); s.signal(&p, &g, 1); s.wait(&r, &g, 1); s.present(&r, 10, true, 1, 1);
+      require(judged(s), "oracle: a wait for the producer's later signal does not order the read");
+    }
+    {
+      script s; s.enabled = true;
+      s.signal(&p, &g, 1); s.wait(&r, &g, 1); s.execute(&p, 1, 1); s.signal(&p, &g, 2); s.present(&r, 10, true, 1, 1);
+      require(!judged(s), "oracle: a wait for a signal before the producer orders the read");
+    }
+    {
+      script s; s.enabled = true;
+      s.execute(&p, 1, 1); s.signal(&p, &g, 1); s.cpu_signal(&g, 1); s.wait(&r, &g, 1); s.present(&r, 10, true, 1, 1);
+      require(!judged(s), "oracle: a CPU signal reaching the waited value orders the read");
+    }
+    {
+      script s; s.enabled = true;
+      s.execute(&p, 1, 1); s.signal(&p, &g, 1); s.signal(&q, &g, 1); s.wait(&r, &g, 1); s.present(&r, 10, true, 1, 1);
+      require(!judged(s), "oracle: a second signaller reaching the waited value orders the read");
+    }
+    {
+      script s; s.enabled = true;
+      s.execute(&p, 1, 1); s.signal(&p, &g, 1); s.wait(&r, &g, 1); s.present(&r, 10, true, 1, 1); s.signal(&q, &g, 1);
+      require(!judged(s), "oracle: a second signaller submitted after the read orders it");
+    }
+    {
+      script s; s.enabled = true; s.initial[&g] = 5;
+      s.execute(&p, 1, 1); s.signal(&p, &g, 6); s.wait(&r, &g, 5); s.present(&r, 10, true, 1, 1);
+      require(!judged(s), "oracle: a wait at the fence's initial value orders the read");
+      s.wait(&r, &g, 6); s.present(&r, 11, true, 1, 1);
+      require(judged(s), "oracle: a wait above the initial value does not order the read");
+    }
+    {
+      script s; s.enabled = true;
+      s.execute(&p, 1, 1); s.signal(&p, &g, 1); s.wait(&q, &g, 1); s.signal(&q, &h, 1); s.wait(&r, &h, 1);
+      s.present(&r, 10, true, 1, 1);
+      require(judged(s), "oracle: a two-hop chain does not order the read");
+    }
+    {
+      script s; s.enabled = true;
+      s.execute(&p, 1, 1); s.signal(&p, &g, 1); s.wait(&r, &g, 1); s.present(&r, 10, true, 1, 2);
+      require(!judged(s), "oracle: a read naming no logged Execute passed");
+    }
+    {
+      script s; s.enabled = true;
+      s.execute(&p, 1, 1); s.signal(&p, &g, 1); s.present(&r, 10);
+      s.in_flight(s.last(queue_order_script::kind::present, &r), 10, s.last(queue_order_script::kind::execute, &p));
+      require(!judged(s), "oracle: an in-flight read without a wait passed");
+    }
+    std::puts("queue order script oracle: PASS");
+  }
+}
+
 int main() {
   try {
+    script_oracle();
     cells();
     positives();
     generated();

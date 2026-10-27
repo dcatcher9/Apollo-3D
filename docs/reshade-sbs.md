@@ -596,7 +596,13 @@ ownership, or D3 when the Generic selector ran. `depth_tick_ms` is the capture t
 copy whose pixels the Present shows (D1 or D2, fresh or held; 0 otherwise), so a judge can tell
 which copy it showed (the freshness rule of the
 [session-level tests](../tools/reshade/README.md#session-level-tests)); Generic's copy is the
-presenting queue's own at the end of the frame it presents.
+presenting queue's own at the end of the frame it presents. `depth_read_order` says how a fresh
+API copy was read after its producer: `same_queue` (queue order), `completed` (its producer fence
+completed) or `ordered` (the [queue-order model](#queue-order) ordered the reading queue after the
+producer position while its copy may still be in flight; U-C1), with that position
+(`depth_read_queue`, `depth_read_ticket`: the model's queue id and ticket of the copy-out list,
+else of the game submission); `none` for a held copy, so that a judge checks each in-flight read
+against the fixture's own fences (`unordered_read`).
 
 The present thread writes the record where the decisions are made: the API provider's `begin`
 writes D1, D2 and H from its acquisition, FG scope, association, handoff and display decision
@@ -5048,8 +5054,8 @@ selection, the newest completed snapshot for a reading queue, the FG scope's acc
 DLSS-G's compute copies on the queue that now reads depth) and where it reads: only on the
 runtime's immediate list, which its runtime executes on the presenting queue at that Present; any
 other consumer list keeps the completion rule. Slot reuse still waits for the producer and
-consumer fences. A read admitted this way counts as `proofs={inflight=}` on the status line and
-names its fences for `late_conflict`. Generic's proofs and API inputs without a state on their own
+consumer fences. A read admitted this way counts as `proofs={inflight=}` on the status line, names
+its fences for `late_conflict`, and is the frame record's `depth_read_order=ordered`. Generic's proofs and API inputs without a state on their own
 list still never cross queues: the uses that would admit them (U-API: an API input proven on
 another queue; U-C2: Generic copying on its proving queue) were found unsound as first designed,
 because the add-on's barriers on a game resource would run without exclusive access or from a state

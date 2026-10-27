@@ -1016,6 +1016,11 @@ namespace sunshine_streamline::provider {
     }
     track_render_size(*data, copied, display == display_status::reused_depth, available);
     describe_display(recorded, copied, data->output.ready, data->cache.reason(), data->output.provided);
+    if (copied) {
+      recorded.read = static_cast<sunshine_game3d::read_order>(consumer.read_order);
+      recorded.read_queue = consumer.producer_queue;
+      recorded.read_ticket = consumer.producer_ticket;
+    }
     const char *readiness_reason = recorded.display_reason;
     record_depth(runtime, recorded, present);
     evidence.cache_reason = data->cache.reason();

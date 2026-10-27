@@ -3808,7 +3808,12 @@ namespace sunshine_streamline::depth_capture {
             order_inflight_reads.fetch_add(1, std::memory_order_relaxed);
             native_observer::queue_order_rely(relied);
           }
-        }
+          if (diagnostic) {
+            diagnostic->read_order = relied.ordered ? 3 : 2;
+            diagnostic->producer_queue = entry.producer_position.queue;
+            diagnostic->producer_ticket = entry.producer_position.ticket;
+          }
+        } else if (diagnostic) diagnostic->read_order = 1;
         if (by_submission) entry.pending_immediate = submitted_list;
         else { entry.consumers[i] = cookie; entry.consumer_recordings[i] = recording.life(); }
         entry.acquired = true;

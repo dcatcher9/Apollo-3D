@@ -32,6 +32,8 @@ namespace sunshine_game3d {
     record.present = present;
     record.tick_ms = now;
     record.depth_tick_ms = 0;
+    record.depth_read_order = read_order::none;
+    record.depth_read_queue = record.depth_read_ticket = 0;
     auto &fg = record[source_slot::fg_depth];
     auto &scene = record[source_slot::scene_depth];
     auto &hold = record[source_slot::hold];
@@ -57,6 +59,11 @@ namespace sunshine_game3d {
     } else {
       record.depth_owner = pixels ? rung : source_slot::hold;
       record.depth_tick_ms = pixels ? decision.source_tick : 0;
+      if (decision.copied) {
+        record.depth_read_order = decision.read;
+        record.depth_read_queue = decision.read_queue;
+        record.depth_read_ticket = decision.read_ticket;
+      }
     }
     const auto fallback = [&](source_slot self) {
       return record.depth_owner == self ? source_slot::none : record.depth_owner;
@@ -128,6 +135,8 @@ namespace sunshine_game3d {
     }
     record.depth_owner = source_slot::generic;
     record.depth_tick_ms = 0;
+    record.depth_read_order = read_order::none;
+    record.depth_read_queue = record.depth_read_ticket = 0;
     // The last rung: without a ready buffer the Present is mono.
     update_row(row, {{source_api::generic, 0, decision.identity}, decision.state, decision.reason}, now);
   }

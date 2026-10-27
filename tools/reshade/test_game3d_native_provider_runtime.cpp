@@ -10,6 +10,7 @@
 #include "game3d_ui_detection_contract.h"
 #include "game3d_ui_layer.h"
 #include "test_game3d_continuity.h"
+#include "test_queue_order_script.h"
 #include "test_sl_fixture_sdk.h"
 #include "../../src/game3d_debug_protocol.h"
 #include <nlohmann/json.hpp>
@@ -67,6 +68,20 @@ namespace {
     const char *where{"session"};
     game3d_continuity::judge judge;
   } continuity_log;
+  // The fixture's own queue calls on the game's queues and fences, and each
+  // Present on the presenting queue (script_presenting): the unordered_read
+  // judge's script (test_queue_order_script.h). An Execute names the
+  // queue-order position the add-on gave it (its copy-out's when it made
+  // one), read through the test add-on right after the call returned.
+  queue_order_script::log script_order;
+  const void *script_presenting{};
+  BOOL (*script_last_execute)(std::uint64_t *, std::uint64_t *, BOOL *){};
+  void script_execute(const void *queue) {
+    std::uint64_t order_queue{}, order_ticket{};
+    BOOL quiet{};
+    if (!script_last_execute || !script_last_execute(&order_queue, &order_ticket, &quiet)) order_queue = order_ticket = 0;
+    script_order.execute(queue, order_queue, order_ticket);
+  }
   void record_present(api::effect_runtime *runtime) {
     game3d_continuity::supply frame;
     if (!continuity_log.generated) {
@@ -77,6 +92,8 @@ namespace {
         (record_history.records.empty() || record_history.records.back().present != value.present)) {
       record_history.records.push_back(value);
       continuity_log.judge.present(value, frame, continuity_log.where, continuity_log.generated);
+      const bool ordered = value.depth_read_order == sunshine_game3d::read_order::ordered;
+      script_order.present(script_presenting, value.present, ordered, value.depth_read_queue, value.depth_read_ticket);
     } else continuity_log.judge.unrecorded();
   }
 }
@@ -151,8 +168,13 @@ namespace {
       checked(lists[n]->Close(), "Close a ring entry's recording");
       ID3D12CommandList *submitted[]{lists[n].p};
       queue->ExecuteCommandLists(1, submitted);
+      script_execute(queue.p);
       checked(queue->Signal(done.p, values[n] = ++value), "Signal a ring entry's work");
-      if (presenting) checked(presenting->Wait(done.p, value), "Order the presenting queue after a ring's queue");
+      script_order.signal(queue.p, done.p, value);
+      if (presenting) {
+        checked(presenting->Wait(done.p, value), "Order the presenting queue after a ring's queue");
+        script_order.wait(presenting, done.p, value);
+      }
     }
     // Retires every recording once its work completed, as a game does at
     // its end: no copy on the ring stays unreadable.
@@ -163,6 +185,7 @@ namespace {
     void finish() {
       if (!queue.p) return;
       checked(queue->Signal(done.p, ++value), "Signal a ring's last work");
+      script_order.signal(queue.p, done.p, value);
       checked(done->SetEventOnCompletion(value, nullptr), "Wait for a ring's queue");
     }
     void release() {
@@ -497,6 +520,7 @@ namespace {
       std::printf("MEASURE native-provider case=%s elapsed_ms=%llu deadline_ms=%llu\n", script.name,
         static_cast<unsigned long long>(GetTickCount64() - started), static_cast<unsigned long long>(script.deadline_ms));
       script_violations = continuity_log.judge.take();
+      require_ordered_reads(script.name);
       if (continuity_per_script) require_continuity(script.name, script_violations);
       end_segment(script.name);
     }
@@ -542,6 +566,21 @@ namespace {
     static void supplied_elsewhere(std::uint8_t sources) { continuity_log.pending.add_elsewhere(sources, GetTickCount64()); }
     static void completes(std::uint8_t sources, std::function<bool()> probe) {
       continuity_log.pending.completes(sources, std::move(probe));
+    }
+    // unordered_read (README, Session-level tests): every read the add-on
+    // recorded as ordered by the queue-order model, and every read the script
+    // knows was still in flight, must be ordered after its producer by the
+    // script's own Execute, Signal and Wait calls (test_queue_order_script.h).
+    // No known gap excuses one: the add-on showed depth its copy had not
+    // written yet.
+    unsigned ordered_reads{};
+    void require_ordered_reads(const char *label) {
+      ordered_reads += unsigned(script_order.reads.size());
+      const auto failures = script_order.unordered_reads();
+      if (failures.empty()) return;
+      for (std::size_t i = 0; i != failures.size() && i != 8; ++i)
+        std::printf("MEASURE native-provider unordered_read %s %s\n", label, failures[i].c_str());
+      throw std::runtime_error(std::string("unordered_read: a Present read a copy its producer's fences do not order it after: ") + label);
     }
     // Every violation must be a known gap's (each row's count is reported);
     // any other fails the run with its record.
@@ -620,6 +659,10 @@ namespace {
       record_history.query = reinterpret_cast<decltype(record_history.query)>(
         GetProcAddress(module, "SunshineGame3DTestFrameRecord"));
       require(record_history.query, "Test add-on lacks the frame record");
+      script_last_execute = reinterpret_cast<decltype(script_last_execute)>(GetProcAddress(module, "SunshineQueueOrderTestLastExecute"));
+      require(script_last_execute, "Test add-on lacks the queue-order position of an Execute");
+      script_presenting = queue.p;
+      script_order.enabled = true;
       // The Diagnostics switch on, as the panel sets it, unless
       // SUNSHINE_GAME3D_TEST_DIAGNOSTICS_OFF keeps it off: it adds per-pass
       // GPU timing only, so candidates stay bound directly either way.
@@ -3411,6 +3454,10 @@ namespace {
       constexpr DWORD ring_pace_ms = 20;
       static_assert(decltype(game_ring)::size * ring_pace_ms > sunshine_freshness::source_age_ms + 50);
       game_ring.create(game.p, D3D12_COMMAND_LIST_TYPE_DIRECT);
+      // The queue that waits for each game-queue SR submission's ring signal
+      // (the presenting queue, as these games' presenting queues do; none in
+      // the in-flight cases without that wait).
+      ID3D12CommandQueue *game_queue_waiter = queue.p;
       // FG off: the viewport's SR evaluation with its own depth input, on
       // the presenting queue's list (sr_evaluate) or the game queue's.
       const auto present_queue_sr = [this] {
@@ -3435,7 +3482,7 @@ namespace {
         supplied_elsewhere(game3d_continuity::sr_evaluate);
         require(sl.evaluate(0, *token, inputs, 2, reinterpret_cast<void *>(native)) == 0,
           "Game-queue SR evaluation changed the SDK result");
-        game_ring.execute(n, queue.p);
+        game_ring.execute(n, game_queue_waiter);
         completes(game3d_continuity::sr_evaluate,
           submitted_elsewhere(selected->resource.p, copied_out, game_ring.completion()));
       };
@@ -3461,51 +3508,105 @@ namespace {
       // U-C1 (docs/reshade-sbs.md, Queue order): the game queue's GPU waits
       // for a gate the CPU opens only after the frame's Present returned, so
       // each frame's copy (and its copy-out) is still in flight at that
-      // Present. The presenting queue waits for the game queue's signal after
-      // it, so the queue-order model orders the Present after the copy-out
-      // and the Present shows that frame's copy. With the completion rule
-      // alone the Present held an earlier copy (the revert proof). The
+      // Present. When the presenting queue waits for the game queue's signal
+      // after it, the queue-order model orders the Present after the
+      // copy-out and the Present shows that frame's copy. With the completion
+      // rule alone the Present held an earlier copy (the revert proof). The
       // add-on never waits: the Present's own GPU work waits for the gate.
-      com_ptr<ID3D12Fence> gate;
+      //
+      // The other forms order nothing (README, Session-level tests,
+      // unordered_read): the presenting queue does not wait, or it waits on
+      // a handoff fence that the CPU or a third queue of the game's signals
+      // to the waited value before the game queue's own signal can run. Each
+      // must never show its frame's copy at that frame's Present: the read
+      // would run before the copy-out wrote it. unordered_read judges every
+      // such in-flight read, and every read the frame record names as
+      // ordered, by the script's own calls.
+      com_ptr<ID3D12Fence> gate, handoff;
       checked(game->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(gate.put())), "Create the game queue's gate");
-      std::uint64_t gate_value = 0, copy_tick = 0;
-      unsigned in_flight_frames = 0, in_flight_shown = 0;
-      run_script({"sr-other-queue-in-flight", 30000,
-        [&] {
-          configure_fg(false);
-          active_area = {0, 0, selected->width, selected->height};
-          render_tracked_depth = game_queue_sr;
-          for (const auto until = GetTickCount64() + sunshine_freshness::source_age_ms + 600; GetTickCount64() < until;)
-            present_frame();
-        },
-        [&] {
-          struct clear_hooks {
-            std::function<void()> &after;
-            ~clear_hooks() { after = {}; }
-          } hooks{after_present};
-          render_tracked_depth = [&] {
-            checked(game_ring.queue->Wait(gate.p, ++gate_value), "Hold the game queue until after its frame's Present");
-            copy_tick = GetTickCount64();
-            game_queue_sr();
-          };
-          after_present = [&] { checked(gate->Signal(gate_value), "Open the game queue's gate after the Present"); };
-          for (unsigned i = 0; i != 12; ++i) {
-            present_frame();
-            ++in_flight_frames;
-            in_flight_shown += newest_record().depth_tick_ms >= copy_tick;
-          }
-          log_status("SR-game-queue-in-flight", inspect());
-          std::printf("MEASURE native-provider in-flight copies shown=%u of %u\n", in_flight_shown, in_flight_frames);
-          // The first frame may still show the warm-up's copy while the model
-          // settles the gate's first sight; every later one shows its own.
-          require(in_flight_shown + 1 >= in_flight_frames,
-            "A Present ordered after the game queue's copy-out by the game's own fence did not show that frame's copy still in flight");
-        },
-        [&] {
-          render_tracked_depth = present_queue_sr;
-          settle("SR-presenting-queue-after-in-flight");
-          game_ring.drain();
-        }});
+      checked(game->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(handoff.put())), "Create the handoff fence");
+      com_ptr<ID3D12CommandQueue> third;
+      {
+        D3D12_COMMAND_QUEUE_DESC desc{}; desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+        checked(game->CreateCommandQueue(&desc, IID_PPV_ARGS(third.put())), "Create the game's third queue");
+      }
+      std::uint64_t gate_value = 0, handoff_value = 0, copy_tick = 0;
+      enum class order_form { waits, no_wait, cpu_signal, second_signaller };
+      const auto in_flight = [&](const char *name, order_form form) {
+        unsigned in_flight_frames = 0, in_flight_shown = 0;
+        run_script({name, 30000,
+          [&] {
+            configure_fg(false);
+            active_area = {0, 0, selected->width, selected->height};
+            render_tracked_depth = game_queue_sr;
+            for (const auto until = GetTickCount64() + sunshine_freshness::source_age_ms + 600; GetTickCount64() < until;)
+              present_frame();
+          },
+          [&] {
+            struct clear_hooks {
+              std::function<void()> &after;
+              ID3D12CommandQueue *&waiter, *presenting;
+              ~clear_hooks() { after = {}; waiter = presenting; }
+            } hooks{after_present, game_queue_waiter, queue.p};
+            game_queue_waiter = form == order_form::waits ? queue.p : nullptr;
+            render_tracked_depth = [&] {
+              auto *const game_queue = game_ring.queue.p;
+              checked(game_queue->Wait(gate.p, ++gate_value), "Hold the game queue until after its frame's Present");
+              script_order.wait(game_queue, gate.p, gate_value);
+              copy_tick = GetTickCount64();
+              game_queue_sr();
+              if (form != order_form::cpu_signal && form != order_form::second_signaller) return;
+              checked(game_queue->Signal(handoff.p, ++handoff_value), "Signal the handoff fence after the game queue's frame");
+              script_order.signal(game_queue, handoff.p, handoff_value);
+              if (form == order_form::cpu_signal) {
+                checked(handoff->Signal(handoff_value), "Signal the handoff fence from the CPU");
+                script_order.cpu_signal(handoff.p, handoff_value);
+              } else {
+                checked(third->Signal(handoff.p, handoff_value), "Signal the handoff fence from a third queue");
+                script_order.signal(third.p, handoff.p, handoff_value);
+              }
+              checked(queue->Wait(handoff.p, handoff_value), "Wait for the handoff fence on the presenting queue");
+              script_order.wait(queue.p, handoff.p, handoff_value);
+            };
+            after_present = [&] {
+              checked(gate->Signal(gate_value), "Open the game queue's gate after the Present");
+              script_order.cpu_signal(gate.p, gate_value);
+            };
+            for (unsigned i = 0; i != 12; ++i) {
+              present_frame();
+              ++in_flight_frames;
+              const auto &record = newest_record();
+              if (record.depth_tick_ms < copy_tick) continue;
+              // This frame's copy, gated until after this Present: a read in
+              // flight, which only the script's own fences can order.
+              ++in_flight_shown;
+              script_order.in_flight(script_order.last(queue_order_script::kind::present, queue.p), record.present,
+                script_order.last(queue_order_script::kind::execute, game_ring.queue.p));
+            }
+            log_status(name, inspect());
+            std::printf("MEASURE native-provider %s in-flight copies shown=%u of %u\n", name, in_flight_shown, in_flight_frames);
+            if (form == order_form::waits) {
+              // The first frame may still show the warm-up's copy while the
+              // model settles the gate's first sight; every later one shows
+              // its own.
+              require(in_flight_shown + 1 >= in_flight_frames,
+                "A Present ordered after the game queue's copy-out by the game's own fence did not show that frame's copy still in flight");
+            } else {
+              require(!in_flight_shown, "A Present showed a copy still in flight that no fence of the game orders it after");
+            }
+          },
+          [&] {
+            render_tracked_depth = present_queue_sr;
+            settle("SR-presenting-queue-after-in-flight");
+            game_ring.drain();
+          }});
+      };
+      in_flight("sr-other-queue-in-flight", order_form::waits);
+      in_flight("sr-other-queue-in-flight-no-wait", order_form::no_wait);
+      in_flight("sr-other-queue-in-flight-cpu-signal", order_form::cpu_signal);
+      in_flight("sr-other-queue-in-flight-second-signaller", order_form::second_signaller);
+      std::printf("MEASURE native-provider unordered_read judged=%u reads (each ordered by the script's own fences)\n", ordered_reads);
+      require(ordered_reads >= 11, "unordered_read judged no in-flight read");
 
       // Generic: no API source (FG off, no SDK call past the association
       // window), and one depth-stencil view of the swapchain's size drawn

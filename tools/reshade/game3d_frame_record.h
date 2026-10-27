@@ -86,6 +86,31 @@ namespace sunshine_game3d {
     std::uint64_t first_ready_ms {};
   };
 
+  // How a Present's fresh API copy was read after its producer
+  // (docs/reshade-sbs.md, Queue order, U-C1): on the producer's own queue
+  // (queue order), once its producer fence completed, or, still possibly in
+  // flight, because the queue-order model ordered the reading queue after the
+  // producer position. none: no fresh copy at this Present.
+  enum class read_order : std::uint8_t {
+    none,
+    same_queue,
+    completed,
+    ordered,
+  };
+
+  constexpr const char *name(read_order value) {
+    switch (value) {
+      case read_order::same_queue:
+        return "same_queue";
+      case read_order::completed:
+        return "completed";
+      case read_order::ordered:
+        return "ordered";
+      default:
+        return "none";
+    }
+  }
+
   struct frame_record {
     // The depth rows' Present (the native Present index) and tick.
     std::uint64_t present {}, tick_ms {};
@@ -97,6 +122,11 @@ namespace sunshine_game3d {
     // 0 otherwise. Generic's copy is the presenting queue's own, made at the
     // end of the frame it presents, and names none.
     std::uint64_t depth_tick_ms {};
+    // How this Present's fresh copy was read (none for a held copy), and the
+    // queue-order position its read followed (the producer's model queue id
+    // and ticket: its copy-out list, else its game submission; 0 without).
+    read_order depth_read_order {read_order::none};
+    std::uint64_t depth_read_queue {}, depth_read_ticket {};
     // The UI rows' render (the UI adapter's frame sequence) and tick.
     std::uint64_t ui_sequence {}, ui_tick_ms {};
     std::array<source_status, source_slot_count> rows {};
@@ -207,6 +237,9 @@ namespace sunshine_game3d {
     const char *display_reason {"not_recorded"};
     // The capture tick of the copy shown (copied or reused); 0 without one.
     std::uint64_t source_tick {};
+    // How the fresh copy was read, and the producer position it followed.
+    read_order read {read_order::none};
+    std::uint64_t read_queue {}, read_ticket {};
   };
 
   void record_api_depth(frame_record &record, const api_depth_decision &decision, std::uint64_t present, std::uint64_t now);

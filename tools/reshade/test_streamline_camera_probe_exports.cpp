@@ -10,6 +10,7 @@
 #endif
 #include "streamline_camera_probe_test_access.h"
 #include "streamline_v1_resource_state.h"
+#include "streamline_native_observer.h"
 
 namespace sunshine_streamline {
   SUNSHINE_PROBE_INTERNAL {
@@ -99,6 +100,16 @@ namespace sunshine_streamline {
     const bool result = install_discard_observations();
     ReleaseSRWLockExclusive(&poll_lock);
     return result ? TRUE : FALSE;
+  }
+  // The queue-order position (Step 4) of the latest positioned
+  // ExecuteCommandLists the calling thread made: right after a game
+  // submission returns, its copy-out list's if the add-on made one, else its
+  // own, as a frame record's depth_read_queue/ticket names a producer.
+  extern "C" __declspec(dllexport) BOOL SunshineQueueOrderTestLastExecute(std::uint64_t *queue, std::uint64_t *ticket, BOOL *quiet) {
+    if (!queue || !ticket || !quiet) return FALSE;
+    const auto value = native_observer::last_execute_position();
+    *queue = value.queue; *ticket = value.ticket; *quiet = value.quiet ? TRUE : FALSE;
+    return value ? TRUE : FALSE;
   }
   extern "C" __declspec(dllexport) BOOL SunshineDiscardTestCounts(native_discard::counters *out) {
     if (!out) return FALSE;

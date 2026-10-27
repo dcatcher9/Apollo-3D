@@ -229,6 +229,11 @@ namespace sunshine_streamline::depth_capture {
     std::uint64_t cookie{}, device_identity{}, expected_device_identity{};
     std::uint32_t tracked_commands{};
     bool slot_invalid{};
+    // How a read was ordered after its producer (frame_record's
+    // depth_read_order: 1 same queue, 2 completed, 3 ordered by the
+    // queue-order model) and the producer position it followed.
+    std::uint8_t read_order{};
+    std::uint64_t producer_queue{}, producer_ticket{};
   };
 
   // Lifecycle/hook discovery must be called with actual live native D3D12
