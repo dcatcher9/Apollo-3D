@@ -36,6 +36,12 @@ namespace sunshine_streamline::depth_capture {
       for (auto &value : diagnostic_slots)
         if (!value.id && value.texture) value.idle_tick -= std::min(value.idle_tick, ms);
     }
+    bool holds_copy_out_storage(std::uint64_t capture) {
+      std::lock_guard lock(mutex);
+      for (const auto &value : slots)
+        if (capture && value.id == capture) return value.published != nullptr;
+      return false;
+    }
     bool diagnostic_snapshot_regression() {
       // Same admission helper as production; completion alone must not publish
       // a texture while its recorded copy can still legally replay.

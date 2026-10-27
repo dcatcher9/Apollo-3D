@@ -3904,10 +3904,17 @@ the add-on's own on the same queue that copies the snapshot into add-on storage 
 shape and view (`slot::published`, with its own rest state). No later execution of the game's list writes
 that storage, so every consumer reads it (`read_storage`) once the producer fence completed,
 without the Reset and without any reverse Wait. It applies only where depth is read on another
-queue: a submission on a queue that never acquired depth while another queue did marks the
-source `foreign_producer`, and only that source's later copies get copy-out storage, allocated
-with the snapshot at record time without the capture lock; a game that copies on its presenting
-queue allocates and submits nothing extra. At most one add-on list per game submission, from a
+queue: the queue of the newest acquisition reads depth (the capture's `reader`), and a
+submission on any other queue stamps the source's `foreign_tick`; that source's copies
+recorded within the source age of the stamp get copy-out storage, allocated with the snapshot
+at record time without the capture lock. A game that copies on its presenting queue allocates
+and submits nothing extra. The reader is the newest acquisition's queue, not every queue that
+ever acquired: with FG off the render queue reads its own copies, and once FG on moves Present
+to DLSS-G's queue (the same device and render queue; Assassin's Creed Shadows 10-26) the render
+queue's copies are copied out from its next submission. (Until 10-27 a queue that had ever
+acquired never copied out, so that toggle kept every FG-on loss.) The stamp lapses once the
+source's copies are submitted only on the reader's queue (FG off again), so its later copies
+allocate no copy-out storage; a source copied on both queues keeps it. At most one add-on list per game submission, from a
 ring of eight per queue of the queue's type, each reused once its fence value completed; its
 barriers move the snapshot and the copy-out storage only from and back to their rest states,
 both `COMMON` for a copy recorded on a `COMPUTE` list, so DLSS-G's compute copies are copied out on its

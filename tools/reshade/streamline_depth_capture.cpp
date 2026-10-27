@@ -181,6 +181,11 @@ namespace sunshine_streamline::depth_capture {
     // when it would grow, so it stays as long as the storage alive.
     std::vector<std::weak_ptr<texture_reference>> storage;
     std::array<std::unique_ptr<queue_state>, queue_limit> queues;
+    // Protected by mutex: the cookie of the queue whose acquisition is the
+    // newest (acquire), the queue that now reads depth; 0 before any. A
+    // queue that read depth earlier stops being the reader once another
+    // acquires, as when FG moves Present to DLSS-G's queue (read_elsewhere).
+    std::uint64_t reader{};
     std::array<evaluation_namespace, provider_count> evaluations;
 
     // A nomination's identity: its evaluation's epoch, sequence, source and
@@ -1305,20 +1310,23 @@ namespace sunshine_streamline::depth_capture {
           view.accepted_sequence = std::max(view.accepted_sequence, m.sequence);
         }
     }
-    // Requires mutex. Depth is read on a queue other than owner: owner never
-    // acquired it and another queue did (acquire's chosen).
+    // Requires mutex. Depth is read on a queue other than owner: the newest
+    // acquisition (reader) was another live queue's. Not whether owner ever
+    // acquired: a render queue that presented with FG off reads elsewhere
+    // once FG presents on DLSS-G's queue, and no longer once FG is off again.
     bool read_elsewhere(const queue_state &owner) {
-      return !owner.chosen && std::any_of(queues.begin(), queues.end(), [&](const auto &entry) {
-        return entry && entry.get() != &owner && !entry->retiring && entry->chosen;
+      return reader && reader != owner.cookie && std::any_of(queues.begin(), queues.end(), [&](const auto &entry) {
+        return entry && entry->cookie == reader && !entry->retiring;
       });
     }
     // Requires mutex. Copy-out on the producer queue (docs/reshade-sbs.md):
     // in the submission hook, right after the game's ExecuteCommandLists and
     // before the producer fence value (fence) is signalled. A first
-    // submission of a copy that another queue reads (read_elsewhere) marks
-    // its source foreign_producer, so that its later copies take copy-out
-    // storage (record_impl); each such copy is copied into that storage with
-    // one list of the add-on's own on this queue, at most one per game
+    // submission of a copy that another queue reads (read_elsewhere) stamps
+    // its source's foreign_tick, so that its copies recorded within the
+    // source age take copy-out storage (record_impl,
+    // read_elsewhere_recently); each such copy is copied into that storage
+    // with one list of the add-on's own on this queue, at most one per game
     // submission. Returns the slots copied out; the caller sets copied_out
     // once the fence after them was signalled. A copy not copied out keeps
     // the Reset rule (immutable_for_other_queues).
@@ -1327,10 +1335,11 @@ namespace sunshine_streamline::depth_capture {
       std::array<bool, slot_limit> out{};
       if (!fence || !read_elsewhere(owner)) return out;
       bool any = false;
+      const auto now = GetTickCount64();
       for (unsigned i = 0; i != slots.size(); ++i) {
         auto &value = slots[i];
         if (!producers[i] || value.nomination_only || value.preservation_only || value.producer_submitted) continue;
-        if (value.metadata.source) value.metadata.source->foreign_producer.store(true, std::memory_order_relaxed);
+        if (value.metadata.source) value.metadata.source->foreign_tick.store(now, std::memory_order_relaxed);
         if (value.invalid || !value.texture || !value.published || value.copied_out) continue;
         // A COMPUTE queue names only COMMON of these (record_impl's rest).
         if (owner.compute_producer && (value.texture->rest != D3D12_RESOURCE_STATE_COMMON ||
@@ -2969,7 +2978,7 @@ namespace sunshine_streamline::depth_capture {
       // comes from the slot's cache, else from an earlier attempt's
       // allocation (prepared), else is allocated now.
       const bool wants_published = !diagnostic_copy && !preservation_only &&
-        value.source->foreign_producer.load(std::memory_order_relaxed);
+        read_elsewhere_recently(*value.source, GetTickCount64());
       auto published = wants_published ? found->published : nullptr;
       // New storage's rest (texture_reference::rest).
       const auto resting_state = diagnostic_copy || on_compute ? D3D12_RESOURCE_STATE_COMMON : sampled_state;
@@ -3549,7 +3558,7 @@ namespace sunshine_streamline::depth_capture {
     }
     if (!chosen.value) {
       owner->choice = describe_choice(chosen, decision, *owner, policy, present, selection_tick, false);
-      owner->chosen = true;
+      owner->chosen = true; reader = owner->cookie;
       return result(chosen.result, chosen.latest);
     }
     auto *best = chosen.value;
@@ -3560,7 +3569,7 @@ namespace sunshine_streamline::depth_capture {
     describe_packet(*best, native, out);
     out.pixel_ready = out.pixel_ready && chosen.result == status::ready;
     owner->choice = describe_choice(chosen, decision, *owner, policy, present, selection_tick, out.pixel_ready);
-    owner->chosen = true;
+    owner->chosen = true; reader = owner->cookie;
     result(chosen.result, best);
     return true; // Source authority and current pixels are separate outcomes.
   }

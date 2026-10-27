@@ -12,6 +12,7 @@
 // translation unit; lookup inside the capture file is unchanged.
 #include "streamline_depth_capture.h"
 #include "capture_state_policy.h"
+#include "freshness.h"
 #include "native_command_storage.h"
 #include "native_resource_identity.h"
 #include "streamline_native_observer.h"
@@ -160,8 +161,9 @@ namespace sunshine_streamline::depth_capture {
       provider_kind provider{provider_kind::streamline};
       std::uint64_t source_id{};
       std::uint32_t viewport{};
-      // The newest acquisition's choice (depth_choice), when chosen. A
-      // chosen queue reads depth: copies it produces need no copy-out.
+      // The newest acquisition's choice (depth_choice), when chosen. Whether
+      // depth is read elsewhere is the newest acquisition's (the capture's
+      // reader, read_elsewhere), not this flag, which stays once set.
       depth_choice choice;
       bool chosen{};
       std::array<copy_out_list, copy_out_lists> copy_out;
@@ -189,13 +191,24 @@ namespace sunshine_streamline::depth_capture {
     std::uint64_t cookie{}, device_identity{};
     mutable std::atomic<std::uint64_t> present_generation{1};
     mutable std::atomic<bool> released{};
-    // A copy of this source was submitted on a queue that never read depth
-    // while another did (copy_out): its later copies take copy-out storage
-    // (slot::published) when recorded. Set for good; never before a
-    // queue first read depth, so a game that copies on its presenting queue
-    // allocates none.
-    mutable std::atomic<bool> foreign_producer{};
+    // When a copy of this source was last submitted on a queue other than
+    // the one that now reads depth (copy_out; 0 never): its copies recorded
+    // within the source age of it take copy-out storage (slot::published,
+    // read_elsewhere_recently). Never before a queue first read depth, so a
+    // game that copies on its presenting queue allocates none. It lapses
+    // once the source's copies are submitted only where they are read (FG
+    // off again, the render queue reading), however many queues copied it;
+    // a source copied on both queues keeps it.
+    mutable std::atomic<std::uint64_t> foreign_tick{};
   };
+  // Whether a copy of value recorded at now takes copy-out storage: a copy of
+  // it was submitted on a queue other than the reader within the source age,
+  // the age past which no copy is read. A stamp after now (another thread's)
+  // is recent.
+  inline bool read_elsewhere_recently(const source_reference &value, std::uint64_t now) {
+    const auto tick = value.foreign_tick.load(std::memory_order_relaxed);
+    return tick && sunshine_freshness::ahead_tolerant_lt(tick, now, sunshine_freshness::source_age_ms);
+  }
   struct texture_reference {
     com_ptr<ID3D12Resource> resource;
     ID3D12Device *device{};

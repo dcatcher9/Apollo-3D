@@ -5,6 +5,7 @@
 #include "streamline_native_observer.h"
 #include "native_resource_identity.h"
 #include "depth_view_format.h"
+#include "freshness.h"
 #include <d3d11_1.h>
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
@@ -793,6 +794,80 @@ namespace {
     gpu.check_debug_errors();
     std::printf("PASS copy-out on the producer queue: another queue reads a completed copy before its recording's Reset, "
       "and a replay of that recording leaves the read bytes unchanged%s\n",
+      gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
+  }
+
+  // The queue that reads depth is the newest acquisition's (read_elsewhere),
+  // as FG moves Present (Assassin's Creed Shadows 10-26): with FG off the
+  // render queue presents and reads its own copies, copying none out; once
+  // Present moves to DLSS-G's queue on the same device, the render queue's
+  // copies are copied out and read there before any Reset (until 10-27 a
+  // queue that had ever acquired never copied out, so every FG-on loss of
+  // that log stayed); with FG off again, a copy recorded once the source's
+  // copies were submitted only on the reader's queue for the source age
+  // takes no copy-out storage (until 10-27 it took it for good).
+  void copy_out_reader_moves(fixture &gpu) {
+    if (gpu.debug_messages) gpu.debug_messages->ClearStoredMessages();
+    texture_case depth(gpu, DXGI_FORMAT_R32_FLOAT, 4);
+    gpu.submit(); gpu.wait(); gpu.reset();
+    auto input = depth.input;
+    input.provider = sunshine_scene_depth::provider_kind::ngx;
+    input.epoch = 78; input.source_id = 96; input.viewport = 0;
+    input.valid_until = sunshine_scene_depth::lifetime::until_evaluation; input.force_snapshot = false;
+    input.source_present_generation = capture::source_present_generation(input.source);
+    input.proof = sunshine_scene_depth::state_proof::sdk_contract;
+    capture::record_diagnostic diagnostic;
+    const auto nominate = [&](std::uint64_t sequence) {
+      input.sequence = sequence; input.tick = GetTickCount64();
+      const auto ticket = capture::nominate_evaluation(native(gpu.list.Get()), input, UINT64_MAX, &diagnostic);
+      require(ticket && diagnostic.result == capture::status::recorded, "reader moves: the depth copy was refused");
+      capture::finish(ticket, true);
+      return ticket;
+    };
+    capture::packet packet;
+    capture::capture_diagnostic acquired;
+    const auto present = [&](ID3D12CommandQueue *queue, std::uint64_t index) {
+      capture::acquire(native(queue), index, packet, &acquired);
+      packet = {};
+    };
+    const auto made = capture::proven_counts().copied_out;
+    // FG off: the render queue presents.
+    present(gpu.queue.Get(), 12100);
+    nominate(1);
+    gpu.submit(); gpu.wait(); gpu.reset();
+    require(capture::proven_counts().copied_out == made, "reader moves: the reader's own copy was copied out");
+    // FG on: Present moves to DLSS-G's queue. The first submission there
+    // finds the reader elsewhere; the next copy takes copy-out storage.
+    present(gpu.foreign_queue.Get(), 12101);
+    nominate(2);
+    gpu.submit(); gpu.wait(); gpu.reset();
+    const auto ticket = nominate(3);
+    require(capture::testing::holds_copy_out_storage(ticket),
+      "reader moves: a render-queue copy took no copy-out storage once Present moved to another queue");
+    gpu.submit(); gpu.wait(); // Executed, completed, never Reset.
+    require(capture::proven_counts().copied_out == made + 1,
+      "reader moves: the render queue's copy was not copied out once Present moved to another queue");
+    require(capture::acquire(native(gpu.foreign_queue.Get()), 12102, packet, &acquired) && packet.pixel_ready &&
+        packet.capture_id == ticket && packet.producer_queue == native(gpu.queue.Get()),
+      "reader moves: the completed copy was unreadable on the new presenting queue before its recording's Reset");
+    packet = {};
+    gpu.reset();
+    // FG off again: the render queue reads. Past the source age of the last
+    // submission elsewhere, a new copy takes no copy-out storage.
+    present(gpu.queue.Get(), 12103);
+    Sleep(DWORD(sunshine_freshness::source_age_ms + 20));
+    const auto own = nominate(4);
+    require(!capture::testing::holds_copy_out_storage(own),
+      "reader moves: a copy read on its own queue still took copy-out storage after FG went off");
+    gpu.submit(); gpu.wait(); gpu.reset();
+    require(capture::proven_counts().copied_out == made + 1, "reader moves: a copy on the reader's queue was copied out");
+    // The independent queue reads again, as the later cases expect.
+    present(gpu.foreign_queue.Get(), 12104);
+    capture::retire_source(input.provider, input.epoch, input.source_id);
+    capture::poll();
+    gpu.check_debug_errors();
+    std::printf("PASS copy-out follows the reader: a queue that read its own depth copies out once Present moves to "
+      "another queue, and takes no copy-out storage once it reads again%s\n",
       gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
   }
 
@@ -3038,6 +3113,7 @@ int main(int argc, char **argv) {
     proven_state_end_of_frame(gpu);
     ngx_contract_depth_capture(gpu);
     copy_out_replay(gpu);
+    copy_out_reader_moves(gpu);
     nomination_in_progress(gpu);
     ngx_nomination_in_progress(gpu);
     {
