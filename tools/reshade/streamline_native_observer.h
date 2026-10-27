@@ -148,5 +148,7 @@ namespace sunshine_streamline::native_observer {
   // Fixture only: callbacks are quiescent. Restore only still-owned vtable
   // slots, preserving any third-party replacements, then release the banks.
   void reset_after_hooks_removed();
+  // Vtable slot addresses read so far (a checked read each).
+  std::uint64_t slot_reads_for_testing();
 #endif
 }

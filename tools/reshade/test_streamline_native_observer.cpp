@@ -743,7 +743,30 @@ namespace {
     const auto after_reset = execute(producer);
     require(signal(producer, written, 9) == S_OK && wait(reader, written, 9) == S_OK &&
         ordered(reader, after_reset).why == sunshine_queue_order::refusal::poisoned, "a re-sighted fence lost its CPU Signal's poison");
-    std::puts("PASS queue order review: a Signal whose queue record was evicted after its ticket is logged on the re-sighted record; fence private data is written under the order lock");
+
+    // A fence whose CPU Signal slot was rejected (a third party replaced it)
+    // never gets a record; its Signals and Waits do not read that slot's
+    // address and look it up for discovery again on every call.
+    static order_tables rejected;
+    order_object unhookable{rejected.fence.data(), object_kind::unknown, &device};
+    const auto fence_hooks = observer::queue_order_counts().fence_signal_hooks;
+    require(signal(producer, unhookable, 1) == S_OK && observer::install_pending() &&
+        observer::queue_order_counts().fence_signal_hooks == fence_hooks + 1, "the second fence vtable's CPU Signal slot was not installed");
+    rejected.fence[fence_signal_slot] = reinterpret_cast<void *>(order_cpu_signal);
+    observer::install_pending();
+    require(observer::queue_order_counts().fence_signal_hooks == fence_hooks, "a replaced CPU Signal slot kept its coverage");
+    // A wait applies the coverage change's model reset; the queues are then re-sighted.
+    require(wait(reader, unhookable, 1) == S_OK, "a wait on an unhookable fence failed");
+    execute(producer); execute(reader);
+    order_object fresh{rejected.fence.data(), object_kind::unknown, &device};
+    const auto reads = observer::slot_reads_for_testing();
+    const auto unhooked = observer::queue_order_counts().cpu_unhooked;
+    for (UINT64 i = 1; i != 51; ++i)
+      require(signal(producer, fresh, i) == S_OK && wait(reader, fresh, i) == S_OK, "calls on an unhookable fence failed");
+    require(observer::queue_order_counts().cpu_unhooked == unhooked + 100 && fresh.data.empty(),
+      "a fence of a rejected CPU Signal slot got a record");
+    require(observer::slot_reads_for_testing() == reads, "every call on a fence of a rejected CPU Signal slot discovered that slot again");
+    std::puts("PASS queue order review: a Signal whose queue record was evicted after its ticket is logged on the re-sighted record; fence private data is written under the order lock; a rejected CPU Signal slot is not discovered again per call");
   }
 }
 int main() {

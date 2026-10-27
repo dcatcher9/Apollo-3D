@@ -396,7 +396,13 @@ namespace sunshine_streamline::native_observer {
       return read(reinterpret_cast<void *>(object), &vtable, sizeof(vtable)) && vtable && vtable <= UINTPTR_MAX - offset &&
         read(reinterpret_cast<void *>(vtable + offset), &entry, sizeof(entry)) && entry;
     }
+#ifdef SUNSHINE_STREAMLINE_NATIVE_OBSERVER_TEST
+    std::atomic<std::uint64_t> slot_reads{};
+#endif
     bool read_slot_address(std::uint64_t object, unsigned kind, void **&address) {
+#ifdef SUNSHINE_STREAMLINE_NATIVE_OBSERVER_TEST
+      ++slot_reads;
+#endif
       std::uintptr_t table{};
       const auto offset = vtable_slots[kind] * sizeof(void *);
       if (!read(reinterpret_cast<const void *>(object), &table, sizeof(table)) || !table || table > UINTPTR_MAX - offset) return false;
@@ -584,18 +590,23 @@ namespace sunshine_streamline::native_observer {
         if (known) return memory.id;
       }
       const auto kind = static_cast<unsigned>(method::fence_signal);
-      void **address{};
-      if (!read_slot_address(reinterpret_cast<std::uintptr_t>(fence), kind, address)) return 0;
-      bool hooked = false;
+      // The fence is the game's argument, alive in its call (read_fence just
+      // called through its vtable): its slot's address needs no checked read.
+      void **const address = reinterpret_cast<void **>(fence->lpVtbl) + vtable_slots[kind];
+      bool hooked = false, seen = false;
       if (TryAcquireSRWLockShared(&targets_lock)) {
-        if (auto *slot = find(kind, address))
+        if (auto *slot = find(kind, address)) {
+          seen = true;
           hooked = slot->status.load(std::memory_order_acquire) == state::installed &&
             sunshine_native_vtable::matches(slot->location, detours[kind][slot - targets[kind].data()]);
+        } else seen = refused_before(kind, reinterpret_cast<std::uintptr_t>(address));
         ReleaseSRWLockShared(&targets_lock);
-      }
+      } else seen = true;  // Discovery in progress: the next call looks again.
       if (!hooked) {
         ++order::cpu_unhooked;
-        observe(reinterpret_cast<std::uintptr_t>(fence), method::fence_signal);
+        // A slot pending, rejected or refused is never discovered again per
+        // call: only a slot never seen is.
+        if (!seen) observe(reinterpret_cast<std::uintptr_t>(fence), method::fence_signal);
         return 0;
       }
       auto why = sunshine_queue_order::poison::none;
@@ -960,6 +971,7 @@ namespace sunshine_streamline::native_observer {
   suppression_scope::~suppression_scope() { --suppression_depth; }
 
 #ifdef SUNSHINE_STREAMLINE_NATIVE_OBSERVER_TEST
+  std::uint64_t slot_reads_for_testing() { return slot_reads.load(); }
   void reset_after_hooks_removed() {
     shutdown();
     bool restored = true;
@@ -985,7 +997,7 @@ namespace sunshine_streamline::native_observer {
     order::requested = true; order::reset_pending = false;
     order::resets = order::ordered_count = order::cpu_unhooked = order::contention = 0;
     for (auto &value : order::refused) value = 0;
-    calls = observed = unreadable = dropped = installed = rejected = nested = suppressed = 0;
+    calls = observed = unreadable = dropped = installed = rejected = nested = suppressed = slot_reads = 0;
     barrier_overflow = submission_overflow = discovery_contention = 0;
     barrier_callback = nullptr; submitted_callback = nullptr; invalidated_callback = nullptr;
     enhanced_textures_callback = nullptr; associate_recording_callback = nullptr; listener_callback = nullptr;

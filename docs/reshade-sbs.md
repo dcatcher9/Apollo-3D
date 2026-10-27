@@ -5056,7 +5056,8 @@ that may no longer hold, and they wait for a redesign that decides at the execut
 without changing state.
 
 **Cost.** A Signal or Wait reads two private-data values and the fence's completed value and takes
-one exclusive lock for an O(1) append; an `ExecuteCommandLists` reads one private-data value and
+one exclusive lock for an O(1) append (on a fence whose CPU Signal slot is pending, rejected or
+refused, one private-data read and a lookup in the slot table, never a new discovery); an `ExecuteCommandLists` reads one private-data value and
 increments one atomic; queries walk the logged waits at most once per queue. The model is bounded:
 32 queues, 256 fences (least recently used dropped), 64 waits per queue, 32 signals and 8 pending
 waits per fence.

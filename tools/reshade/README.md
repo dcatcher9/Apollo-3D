@@ -2373,7 +2373,9 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   table evicted between its ticket and its log is logged on the re-sighted record (dropped, the
   reader's pending wait resolved to the next signal, after a copy-out it precedes); a CPU Signal
   poisoning a fence on another thread while a queue Signal writes its first signaller keeps its
-  poison in the private data and through a model reset (the write ran after the lock was released).
+  poison in the private data and through a model reset (the write ran after the lock was released);
+  Signals and Waits on a fence whose CPU Signal slot was rejected read no slot address (each read
+  two and repeated the discovery lookup).
 - [`test_proven_state.cpp`](test_proven_state.cpp) (`reshade_proven_state`) pins the per-resource
   last-proven state of [`proven_state.h`](proven_state.h), which admits the Generic end-of-frame
   copy: a creation state holds on every queue until a list uses the texture and not once enhanced
