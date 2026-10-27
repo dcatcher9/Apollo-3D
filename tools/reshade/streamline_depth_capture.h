@@ -659,6 +659,10 @@ namespace sunshine_streamline::depth_capture {
     std::uint64_t unobserved() const { return unrecorded + unreported + invalidated + missed_reset + uncovered; }
   };
   proven_state_counts proven_counts();
+  // The queue-order status line (docs/reshade-sbs.md, Queue order), into
+  // out, when due: at most every 10 s while its counts change, and once when
+  // QueueFenceOrder=0. Called from one thread (the probe's poll).
+  bool queue_order_line(std::uint64_t now, char *out, std::size_t size);
   // Caller must first prove this ticket is the current, unambiguous preserved
   // copy for its presentation. That existing game/ReShade ordering contract is
   // distinct from native independent-queue completion. The owner checks actual

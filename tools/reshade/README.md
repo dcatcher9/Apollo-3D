@@ -412,6 +412,9 @@ game that switches DLSS to TAA), returns the queue to Generic selection. The lin
 the capture-ordering requirements and limitations;
 D3D11 retains its existing Generic preservation backend. AMD support is deferred. Set
 `[SUNSHINE_DEPTH] StreamlineDepthSource=0` in `ReShade.ini` and restart to disable this path.
+[Queue order](../../docs/reshade-sbs.md#queue-order) observes the game's queue Signal and Wait calls
+(and CPU fence signals) so that a copy on another queue can be read before the CPU sees it
+complete; `QueueFenceOrder=0` turns it off and keeps the completion rule.
 
 [Direct NGX depth](../../docs/reshade-sbs.md#direct-ngx-depth-selection) is also enabled by default
 (`NGXDepthSource=1`) for compatible D3D12 integrations, including Super Resolution and Ray
@@ -2294,7 +2297,9 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   shipping add-on's installed hook set, which hook host moves must keep: the binary is its own
   process's ReShade, runs `AddonInit` and `AddonUninit`, and compares the ReShade events each
   registers and unregisters, in order, with its tables, checks the one overlay, and requires that no
-  MinHook hook is created without Streamline or NGX. Each MinHook family's hooks on fixture exports
+  MinHook hook is created without Streamline or NGX. It also pins the native observer's vtable
+  methods (`native_observer::hooked_methods`): `ResourceBarrier` (26), `ExecuteCommandLists` (10),
+  CL7 `Barrier` (80) and, since Step 4, queue `Signal` (14) and `Wait` (15) and fence `Signal` (10). Each MinHook family's hooks on fixture exports
   are pinned where they are installed, through
   [`test_minhook_ledger.h`](test_minhook_ledger.h) (MinGW links those tests with
   `-Wl,--wrap=MH_CreateHook`): the Streamline probe test (v1, v2 with and without its optional
@@ -2334,6 +2339,29 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   stricter contract for its optional UI copies and an absent extent as the whole allocation. The
   matrix's L1 hook cells drive the same mappers through the
   probe.
+- [`test_queue_order.cpp`](test_queue_order.cpp) (`reshade_queue_order`) pins the queue-order model
+  of [`queue_order.h`](queue_order.h) ([Queue order](../../docs/reshade-sbs.md#queue-order)): one
+  cell per fail-closed rule (baseline, unsettled and the settle marker above every seen value, CPU
+  signal, second signaller and its cookie across a reset, decreasing and `UINT64_MAX` values, a
+  completed value no logged signal set, a signal in flight that is not unobserved, a queue without
+  a record, device removal, foreign and cross device, ring eviction, a reset forgetting positions
+  while a re-sighted fence keeps its poison, late conflicts and their expiry), the positive chains
+  (after-signal, wait-before-signal, two and three hops) and the negative ones (a wait satisfied
+  before the producer, a non-quiet producer or hop wait, a hop wait after the hop's signal). An
+  INDEPENDENT brute-force oracle then explores every GPU interleaving of 20000 generated scripts
+  (two or three queues, one or two fences, four to ten Execute/Signal/Wait/CPU-signal calls) and
+  requires that every verdict the model gives as ordered is ordered in every interleaving
+  (soundness; at least 200 such verdicts), and fixed positive scripts must be ordered by both
+  (completeness). Dropping the first-signal resolution, the hop quiet rule, the settle, baseline,
+  second-signaller or overlap check fails a cell.
+- `reshade_streamline_native_observer` ([`test_streamline_native_observer.cpp`](test_streamline_native_observer.cpp))
+  also runs the order family's hooks on COM-shaped fixtures: the method table; Signal and Wait
+  discovered by `observe_queue`; a fence recorded only once its CPU Signal slot is installed and
+  every verdict refused while it is pending (with no capture evidence revoked); a real edge; a
+  suppressed `ExecuteCommandLists` taking its own ticket; the quiet bit for two threads on one
+  queue; a failed Wait not logged; a shared fence; a failing CPU Signal poisoning its fence, which
+  stays poisoned after its records were dropped; a third party's Signal slot resetting the order
+  model only; and `QueueFenceOrder=0`.
 - [`test_proven_state.cpp`](test_proven_state.cpp) (`reshade_proven_state`) pins the per-resource
   last-proven state of [`proven_state.h`](proven_state.h), which admits the Generic end-of-frame
   copy: a creation state holds on every queue until a list uses the texture and not once enhanced

@@ -12,6 +12,7 @@
 #include "game3d_ui_mask.h"
 #include "observer_snapshot.h"
 #include "streamline_camera_probe_test_access.h"
+#include "streamline_native_observer.h"
 #include <MinHook.h>
 #include <reshade.hpp>
 #include "async_log.h"
@@ -3311,6 +3312,11 @@ namespace sunshine_streamline {
     reshade::get_config_value(nullptr, "SUNSHINE_DEPTH", "NGXDepthSource", ngx_source_enabled);
     bool ngx_calibration_probe = false;
     reshade::get_config_value(nullptr, "SUNSHINE_DEPTH", "NGXCalibrationProbe", ngx_calibration_probe);
+    // Queue order (Step 4; docs/reshade-sbs.md, Queue order): the queue
+    // Signal/Wait and fence Signal hooks. 0 turns them off.
+    bool queue_fence_order = true;
+    reshade::get_config_value(nullptr, "SUNSHINE_DEPTH", "QueueFenceOrder", queue_fence_order);
+    native_observer::set_queue_order(queue_fence_order);
     sunshine_upscaler_trace::initialize(addon, call_trace_enabled, ngx_source_enabled, ngx_calibration_probe);
     // A pool install may still be discovering after device recreation; wait
     // for it before resetting the state it reads and writes.
@@ -4330,6 +4336,9 @@ namespace sunshine_streamline {
         minhook_initialized = initialized == MH_OK || initialized == MH_ERROR_ALREADY_INITIALIZED;
       }
       if (minhook_initialized) depth_capture::poll();
+      char order_line[1024];
+      if (depth_capture::queue_order_line(now, order_line, sizeof(order_line)))
+        sunshine_log::message(reshade::log::level::info, order_line);
     }
     if (middleware_requested() && observing.load(std::memory_order_acquire) &&
         ((sunshine_game3d::diagnostics::enabled() && pcl_targets_pending()) || fg_targets_pending()))

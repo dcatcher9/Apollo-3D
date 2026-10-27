@@ -912,6 +912,28 @@ class ReadinessReport(unittest.TestCase):
                              'fg_owned=40 unknown_feature=0')])
         self.assertNotIn('NGX depth', owned)
 
+    def test_queue_order_names_hooks_poison_and_late_conflicts(self):
+        def order(hooks='signal=1 wait=1 fence_signal=1 pending=0', queues=3, late=0, poisoned='cpu=0 second=1'):
+            return line('10:00:07', f'[Sunshine 3D] Sunshine 3D queue order: hooks={{{hooks}}} queues={queues} fences=4 '
+                                    'settled=3 signals=900 waits=600 cpu_signals=0 '
+                                    f'poisoned={{shared=0 foreign=0 {poisoned} monotonic=0 unobserved=0 removed=0 '
+                                    'unrecorded=0} refused={disabled=0 pending_hooks=2 uncovered=0 untracked=0 overlap=1 '
+                                    'unresolved=0 baseline=0 unsettled=0 poisoned=0 evicted=0 cross_device=0} ordered=280 '
+                                    f'proofs={{inflight=270}} evicted_waits=0 resets=1 cpu_unhooked=1 late_conflict={late}')
+        clean = run(BASE + [order()])
+        self.assertEqual(clean['Queue order'].status, 'PASS')
+        self.assertIn('280 ordered verdicts, proofs inflight 270; poisoned second 1; refused pending_hooks 2, overlap 1',
+                      clean['Queue order'].detail)
+        late = run(BASE + [order(late=2)])
+        self.assertEqual(late['Queue order'].status, 'WARN')
+        self.assertIn('2 late conflicts', late['Queue order'].detail)
+        unhooked = run(BASE + [order(hooks='signal=0 wait=0 fence_signal=0 pending=0')])
+        self.assertEqual(unhooked['Queue order'].status, 'WARN')
+        self.assertIn('cross-queue proofs unavailable', unhooked['Queue order'].detail)
+        off = run(BASE + [line('10:00:07', '[Sunshine 3D] Sunshine 3D queue order: disabled (QueueFenceOrder=0)')])
+        self.assertEqual(off['Queue order'].status, 'INFO')
+        self.assertNotIn('Queue order', run(BASE))
+
     def test_dlssg_inputs_name_copies_and_refusals(self):
         def ngx(depth, ui, evaluations=300):
             return line('10:00:07', '[Sunshine 3D] Sunshine NGX depth: confirmed_features=2 capture_eligible=1 '

@@ -90,6 +90,86 @@ namespace {
   object *capture_command{}, *capture_queue{};
   unsigned unrelated_calls{};
 
+  // -- Queue order (Step 4) fixture: queues, fences and a device with their
+  // own private data by GUID, the queue's Signal (14) and Wait (15) and the
+  // fence's CPU Signal (10). A queue Signal completes at once (a fast GPU).
+  constexpr auto queue_signal_slot = offsetof(ID3D12CommandQueueVtbl, Signal) / sizeof(void *);
+  constexpr auto queue_wait_slot = offsetof(ID3D12CommandQueueVtbl, Wait) / sizeof(void *);
+  constexpr auto fence_signal_slot = offsetof(ID3D12FenceVtbl, Signal) / sizeof(void *);
+  using queue_fence_fn = HRESULT (STDMETHODCALLTYPE *)(void *, void *, UINT64);
+  using fence_signal_fn = HRESULT (STDMETHODCALLTYPE *)(void *, UINT64);
+  struct order_object {
+    void **vtable{};
+    object_kind kind{};
+    order_object *device{};
+    std::uint64_t value{};
+    D3D12_FENCE_FLAGS flags{};
+    unsigned references{1};
+    std::vector<std::pair<GUID, std::vector<unsigned char>>> data;
+  };
+  HRESULT queue_signal_result = S_OK, queue_wait_result = S_OK, cpu_signal_result = S_OK;
+  std::atomic<bool> order_block{}, order_entered{}, order_release{};
+  unsigned order_executions{}, order_signals{}, order_waits{}, order_cpu_signals{};
+  NOINLINE HRESULT STDMETHODCALLTYPE order_query(void *native, REFIID iid, void **output) {
+    auto *value = static_cast<order_object *>(native);
+    *output = nullptr;
+    if (IsEqualGUID(iid, IID_IUnknown) || (value->kind == object_kind::queue && IsEqualGUID(iid, IID_ID3D12CommandQueue)) ||
+        (value->kind == object_kind::device && IsEqualGUID(iid, IID_ID3D12Device)) ||
+        (value->kind == object_kind::unknown && (IsEqualGUID(iid, IID_ID3D12Fence) || IsEqualGUID(iid, IID_ID3D12Fence1)))) {
+      *output = value;
+      ++value->references;
+      return S_OK;
+    }
+    return E_NOINTERFACE;
+  }
+  NOINLINE ULONG STDMETHODCALLTYPE order_add_ref(void *native) { return ++static_cast<order_object *>(native)->references; }
+  NOINLINE ULONG STDMETHODCALLTYPE order_unref(void *native) { return --static_cast<order_object *>(native)->references; }
+  NOINLINE HRESULT STDMETHODCALLTYPE order_get_data(void *native, REFGUID guid, UINT *size, void *output) {
+    for (const auto &[key, bytes] : static_cast<order_object *>(native)->data)
+      if (IsEqualGUID(key, guid)) {
+        if (*size < bytes.size()) { *size = UINT(bytes.size()); return DXGI_ERROR_MORE_DATA; }
+        std::memcpy(output, bytes.data(), bytes.size());
+        *size = UINT(bytes.size());
+        return S_OK;
+      }
+    return DXGI_ERROR_NOT_FOUND;
+  }
+  NOINLINE HRESULT STDMETHODCALLTYPE order_set_data(void *native, REFGUID guid, UINT size, const void *input) {
+    auto &data = static_cast<order_object *>(native)->data;
+    const auto *bytes = static_cast<const unsigned char *>(input);
+    for (auto &[key, stored] : data)
+      if (IsEqualGUID(key, guid)) { stored.assign(bytes, bytes + size); return S_OK; }
+    data.emplace_back(guid, std::vector<unsigned char>(bytes, bytes + size));
+    return S_OK;
+  }
+  NOINLINE HRESULT STDMETHODCALLTYPE order_get_device(void *native, REFIID, void **output) {
+    auto *device = static_cast<order_object *>(native)->device;
+    *output = device;
+    if (!device) return E_FAIL;
+    ++device->references;
+    return S_OK;
+  }
+  NOINLINE UINT64 STDMETHODCALLTYPE order_completed(void *native) { return static_cast<order_object *>(native)->value; }
+  NOINLINE D3D12_FENCE_FLAGS STDMETHODCALLTYPE order_flags(void *native) { return static_cast<order_object *>(native)->flags; }
+  NOINLINE void STDMETHODCALLTYPE order_execute(void *, UINT, void *const *) {
+    ++order_executions;
+    if (order_block.load(std::memory_order_acquire)) {
+      order_entered.store(true, std::memory_order_release);
+      while (!order_release.load(std::memory_order_acquire)) std::this_thread::yield();
+    }
+  }
+  NOINLINE HRESULT STDMETHODCALLTYPE order_queue_signal(void *, void *fence, UINT64 value) {
+    ++order_signals;
+    if (SUCCEEDED(queue_signal_result)) static_cast<order_object *>(fence)->value = value;
+    return queue_signal_result;
+  }
+  NOINLINE HRESULT STDMETHODCALLTYPE order_queue_wait(void *, void *, UINT64) { ++order_waits; return queue_wait_result; }
+  NOINLINE HRESULT STDMETHODCALLTYPE order_cpu_signal(void *fence, UINT64 value) {
+    ++order_cpu_signals;
+    if (SUCCEEDED(cpu_signal_result)) static_cast<order_object *>(fence)->value = value;
+    return cpu_signal_result;
+  }
+
   void require(bool value, const char *message) { if (!value) throw std::runtime_error(message); }
   NOINLINE HRESULT STDMETHODCALLTYPE query(ID3D12Object *native, REFIID iid, void **output) {
     if (!output) return E_POINTER;
@@ -395,6 +475,138 @@ namespace {
       "partially readable command array published incomplete evidence or changed the original call");
     std::puts("PASS large native submissions/barrier arrays preserve complete pre-original snapshots, exact call order and innermost-only notifications");
   }
+
+  // Queue order (Step 4): the order family's hooks on COM-shaped fixtures.
+  void order_cases() {
+    observer::set_queue_order(true);
+    unsigned method_count{};
+    const auto *methods = observer::hooked_methods(method_count);
+    require(method_count == 6 && methods[3].slot == 14 && methods[4].slot == 15 && methods[5].slot == 10 &&
+        std::strcmp(methods[3].method, "Signal") == 0 && std::strcmp(methods[4].method, "Wait") == 0 &&
+        std::strcmp(methods[5].interface_name, "ID3D12Fence") == 0, "the hooked method table changed");
+    static std::array<void *, queue_wait_slot + 1> queue_table{}, unordered_table{};
+    static std::array<void *, 12> fence_table{};
+    static std::array<void *, 3> device_table{};
+    for (auto *table : {queue_table.data(), unordered_table.data(), fence_table.data(), device_table.data()}) {
+      table[0] = reinterpret_cast<void *>(order_query); table[1] = reinterpret_cast<void *>(order_add_ref);
+      table[2] = reinterpret_cast<void *>(order_unref);
+    }
+    for (auto *table : {queue_table.data(), unordered_table.data(), fence_table.data()}) {
+      table[3] = reinterpret_cast<void *>(order_get_data); table[4] = reinterpret_cast<void *>(order_set_data);
+      table[7] = reinterpret_cast<void *>(order_get_device);
+    }
+    for (auto *table : {queue_table.data(), unordered_table.data()}) {
+      table[execute_slot] = reinterpret_cast<void *>(order_execute);
+      table[queue_signal_slot] = reinterpret_cast<void *>(order_queue_signal);
+      table[queue_wait_slot] = reinterpret_cast<void *>(order_queue_wait);
+    }
+    fence_table[8] = reinterpret_cast<void *>(order_completed);
+    fence_table[fence_signal_slot] = reinterpret_cast<void *>(order_cpu_signal);
+    fence_table[11] = reinterpret_cast<void *>(order_flags);
+    order_object device{device_table.data(), object_kind::device};
+    order_object render{queue_table.data(), object_kind::queue, &device}, present{queue_table.data(), object_kind::queue, &device};
+    order_object fence{fence_table.data(), object_kind::unknown, &device}, shared{fence_table.data(), object_kind::unknown, &device};
+    shared.flags = D3D12_FENCE_FLAG_SHARED;
+    const auto execute = [](order_object &queue) {
+      reinterpret_cast<execute_fn>(queue.vtable[execute_slot])(&queue, 0, nullptr);
+      return observer::last_execute_position();
+    };
+    const auto signal = [](order_object &queue, order_object &on, UINT64 value) {
+      return reinterpret_cast<queue_fence_fn>(queue.vtable[queue_signal_slot])(&queue, &on, value);
+    };
+    const auto wait = [](order_object &queue, order_object &on, UINT64 value) {
+      return reinterpret_cast<queue_fence_fn>(queue.vtable[queue_wait_slot])(&queue, &on, value);
+    };
+    const auto ordered = [&](order_object &reader, const observer::position &at) {
+      return observer::queue_ordered(reinterpret_cast<std::uintptr_t>(&reader), at);
+    };
+    observer::observe_queue(reinterpret_cast<std::uintptr_t>(&render));
+    require(observer::install_pending(), "the queue's order slots were not installed");
+    auto status = observer::queue_order_counts();
+    require(status.enabled && status.signal_hooks == 1 && status.wait_hooks == 1 && status.fence_signal_hooks == 0,
+      "observe_queue did not discover the queue's Signal and Wait");
+    // A fence is first seen in a Signal: its CPU Signal slot is not hooked
+    // yet, so it gets no record, and verdicts refuse while that slot waits.
+    const auto invalid_before = invalidations;
+    require(signal(render, fence, 1) == S_OK && fence.value == 1 && observer::queue_order_counts().cpu_unhooked == 1 &&
+        observer::queue_order_counts().pending == 1, "a fence was recorded before its CPU Signal slot was hooked");
+    require(ordered(present, execute(render)).why == sunshine_queue_order::refusal::pending_hooks,
+      "a verdict was given while an order slot was pending");
+    require(observer::install_pending() && observer::queue_order_counts().fence_signal_hooks == 1 && invalidations == invalid_before,
+      "the fence's CPU Signal slot was not installed, or order coverage revoked capture evidence");
+    // Settle (the first post-sight signal completes), then an edge.
+    require(signal(render, fence, 2) == S_OK, "settling signal failed");
+    const auto producer = execute(render);
+    require(producer && producer.quiet, "a sequential ExecuteCommandLists had no quiet position");
+    require(signal(render, fence, 3) == S_OK && wait(present, fence, 3) == S_OK, "fence calls failed");
+    auto verdict = ordered(present, producer);
+    require(verdict.ordered && verdict.fences[0], "a reader waiting on the producer's later signal is not ordered after it");
+    require(!ordered(present, execute(render)).ordered, "a later submission is ordered before a wait that preceded it");
+    // A suppressed call (the add-on's copy-out) takes its own ticket.
+    const auto game = execute(render);
+    observer::position own;
+    { observer::suppression_scope scope; own = execute(render); }
+    require(own && own.ticket == game.ticket + 1 && own.queue == game.queue, "a suppressed ExecuteCommandLists took no ticket of its own");
+    // The quiet bit: an earlier call still in its native code when another
+    // thread takes a ticket on the same queue is not quiet.
+    observer::position blocked;
+    order_block = true; order_entered = false; order_release = false;
+    std::thread other([&] { blocked = execute(render); });
+    while (!order_entered.load(std::memory_order_acquire)) std::this_thread::yield();
+    order_block = false;
+    const auto overtaking = execute(render);
+    order_release = true;
+    other.join();
+    require(blocked && !blocked.quiet && overtaking.quiet && overtaking.ticket == blocked.ticket + 1,
+      "overlapping calls on one queue were not told apart by the quiet bit");
+    require(signal(render, fence, 4) == S_OK && wait(present, fence, 4) == S_OK &&
+        ordered(present, blocked).why == sunshine_queue_order::refusal::overlap, "a call that was not quiet was the earlier side of an edge");
+    // A failed Wait is never logged.
+    const auto waits_before = observer::queue_order_counts().model.waits;
+    queue_wait_result = E_FAIL;
+    require(wait(present, fence, 4) == E_FAIL && observer::queue_order_counts().model.waits == waits_before, "a failed Wait was logged");
+    queue_wait_result = S_OK;
+    // A shared fence never proves.
+    require(signal(render, shared, 1) == S_OK && signal(render, shared, 2) == S_OK, "shared fence signals failed");
+    const auto before_shared = execute(render);
+    require(signal(render, shared, 3) == S_OK && wait(present, shared, 3) == S_OK && !ordered(present, before_shared).ordered &&
+        observer::queue_order_counts().model.poisoned[static_cast<unsigned>(sunshine_queue_order::poison::shared)] == 1,
+      "a shared fence proved an edge");
+    // A CPU Signal poisons, even one that fails; the poison outlives the
+    // model's record of the fence (its private data).
+    cpu_signal_result = E_FAIL;
+    require(reinterpret_cast<fence_signal_fn>(fence.vtable[fence_signal_slot])(&fence, 99) == E_FAIL, "the CPU Signal result changed");
+    cpu_signal_result = S_OK;
+    status = observer::queue_order_counts();
+    require(status.model.cpu_signals == 1 && status.model.poisoned[static_cast<unsigned>(sunshine_queue_order::poison::cpu_signal)] == 1 &&
+        !ordered(present, producer).ordered, "a failed CPU Signal did not poison its fence");
+    observer::queue_order_forget_device(reinterpret_cast<std::uintptr_t>(&device));
+    const auto after_forget = execute(render);
+    require(signal(render, fence, 100) == S_OK && wait(present, fence, 100) == S_OK && !ordered(present, after_forget).ordered,
+      "a fence re-sighted after its records were dropped lost its poison");
+    // A third party replacing the Signal slot resets the order model only.
+    const auto resets_before = observer::queue_order_counts().resets;
+    const auto evidence_before = invalidations;
+    const auto detour = queue_table[queue_signal_slot];
+    queue_table[queue_signal_slot] = reinterpret_cast<void *>(order_queue_signal);
+    observer::install_pending();
+    status = observer::queue_order_counts();
+    require(status.signal_hooks == 0 && invalidations == evidence_before, "a replaced Signal slot kept its coverage or revoked capture evidence");
+    require(wait(present, fence, 100) == S_OK && observer::queue_order_counts().resets == resets_before + 1,
+      "a replaced Signal slot did not reset the order model");
+    require(wait(present, fence, 100) == S_OK && ordered(present, execute(render)).why == sunshine_queue_order::refusal::uncovered,
+      "an uncovered queue proved an edge");
+    queue_table[queue_signal_slot] = detour;
+    // QueueFenceOrder=0: no order slot is discovered, Execute takes no ticket.
+    observer::set_queue_order(false);
+    order_object unordered{unordered_table.data(), object_kind::queue, &device};
+    const auto targets_before = observer::counts().targets;
+    observer::observe_queue(reinterpret_cast<std::uintptr_t>(&unordered));
+    require(observer::counts().targets == targets_before + 1 && observer::install_pending(), "QueueFenceOrder=0 discovered an order slot");
+    require(!execute(unordered) && !execute(render) &&
+        ordered(present, producer).why == sunshine_queue_order::refusal::disabled, "QueueFenceOrder=0 still took tickets or gave verdicts");
+    std::puts("PASS queue order: Signal/Wait/CPU Signal hooks, tickets and the quiet bit, suppressed tickets, failed calls, shared and CPU-signalled fences, persisted poison, slot replacement and QueueFenceOrder=0");
+  }
 }
 int main() {
   bool minhook = false;
@@ -404,6 +616,9 @@ int main() {
     require(MH_Initialize() == MH_OK, "MinHook init failed"); minhook = true;
     const observer::callbacks callbacks{on_barrier, on_submit, on_invalidated, on_enhanced_textures, on_associate_recording};
     observer::initialize(callbacks);
+    // The state family's cells below run without the order family (its own
+    // cells are order_cases).
+    observer::set_queue_order(false);
     static std::array<void *, enhanced_slot + 1> unrelated_table{};
     unrelated_table.fill(reinterpret_cast<void *>(unrelated_method));
     unrelated_table[0] = reinterpret_cast<void *>(query);
@@ -707,6 +922,7 @@ int main() {
     observer::reset_after_hooks_removed();
     require(MH_Initialize() == MH_OK, "MinHook shared-thunk init failed"); minhook = true;
     observer::initialize(callbacks); observer::set_active(true);
+    observer::set_queue_order(false);
     static std::array<void *, enhanced_slot + 1> shared_command_table{}, shared_device_table{};
     shared_command_table = command_tables[0];
     shared_device_table = unrelated_table;
@@ -739,6 +955,7 @@ int main() {
       "restoring a replaced slot revived evidence after missed commands");
     std::puts("PASS shared Streamline slot-9 thunk is left untouched; a replaced barrier slot revokes state evidence");
 #endif
+    order_cases();
     observer::shutdown();
     require(MH_DisableHook(MH_ALL_HOOKS) == MH_OK, "fixture hook disable failed");
     require(MH_Uninitialize() == MH_OK, "fixture MinHook teardown failed"); minhook = false;

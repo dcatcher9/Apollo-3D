@@ -197,6 +197,14 @@ DLSSG_REFUSAL = {
     'absent': 'neither NGX getter read DLSSG.Depth',
     'tag_copied': 'the Streamline FG tag copied that frame first',
 }
+# Queue order (Step 4, docs/reshade-sbs.md): the queue Signal/Wait and fence Signal hooks, the fences they track and
+# poison, the verdicts given and refused, the reads that relied on them (proofs) and late conflicts (a fence a relied
+# read named was poisoned within the source age). Cumulative over the runtime.
+QUEUE_ORDER = re.compile(r'Sunshine 3D queue order: hooks=\{signal=(\d+) wait=(\d+) fence_signal=(\d+) pending=(\d+)\} '
+                         r'queues=(\d+) fences=(\d+) settled=(\d+) signals=(\d+) waits=(\d+) cpu_signals=(\d+) '
+                         r'poisoned=\{([^}]*)\} refused=\{([^}]*)\} ordered=(\d+) proofs=\{([^}]*)\} '
+                         r'.*?late_conflict=(\d+)')
+QUEUE_ORDER_OFF = re.compile(r'Sunshine 3D queue order: disabled \(QueueFenceOrder=0\)')
 TIMING = re.compile(r'Sunshine Game 3D timing: presents=(\d+) cpu_ms=\{mean=([0-9.]+) max=([0-9.]+)\}'
                     r'.*?gpu_frames=(\d+)'
                     r' gpu_ms mean/max=\{total=([0-9.]+)/([0-9.]+)')
@@ -821,6 +829,9 @@ class Session:
     # The newest DLSS-G input fields of the NGX line: fg_feature, copied, inner_frames, depth refusals, UI offered,
     # UI captured, UI refusals.
     dlssg: tuple[int, int, int, str, int, int, str] | None = None
+    # The last queue order line's fields (QUEUE_ORDER), and whether QueueFenceOrder=0 turned it off.
+    queue_order: dict | None = None
+    queue_order_off: bool = False
     display_scaling: list[tuple[float, tuple[int, ...]]] = field(default_factory=list)
     warnings: list[tuple[float, str]] = field(default_factory=list)  # The add-on's own unexpected WARN/ERROR lines.
     other_warnings: list[tuple[float, str]] = field(default_factory=list)  # Everyone else's (OWNED, CORE_ABOUT_ADDON).
@@ -1013,6 +1024,15 @@ def parse(lines) -> Session:
         if found := DLSSG.search(text):
             g = found.groups()
             s.dlssg = (int(g[0]), int(g[1]), int(g[2]), g[3], int(g[4]), int(g[5]), g[6])
+        if found := QUEUE_ORDER.search(text):
+            g = found.groups()
+            s.queue_order = {'signal_hooks': int(g[0]), 'wait_hooks': int(g[1]), 'fence_signal_hooks': int(g[2]),
+                             'pending': int(g[3]), 'queues': int(g[4]), 'fences': int(g[5]), 'settled': int(g[6]),
+                             'signals': int(g[7]), 'waits': int(g[8]), 'cpu_signals': int(g[9]),
+                             'poisoned': counter_fields(g[10]), 'refused': counter_fields(g[11]), 'ordered': int(g[12]),
+                             'proofs': counter_fields(g[13]), 'late_conflict': int(g[14])}
+        elif QUEUE_ORDER_OFF.search(text):
+            s.queue_order_off = True
         if found := HITCH.search(text):
             s.hitches.append((t, found.group(1), float(found.group(2))))
         if found := PRESENT_GAP.search(text):
@@ -1335,6 +1355,7 @@ def evaluate(s: Session) -> list[Check]:
     if s.readiness:
         add(Check('INFO', 'Depth losses', depth_losses(s)))
     dlssg_checks(s, add)
+    queue_order_checks(s, add)
     if s.render_sizes:
         # Dynamic resolution keeps depth (since 10-23): a render-size change of one source is no depth gap. Before,
         # each change was a 'depth_shape_changed' loss (Assassin's Creed Shadows with FG on: 125-438 ms, six in 6 s).
@@ -1479,6 +1500,35 @@ def dlssg_checks(s: Session, add) -> None:
     add(Check('WARN', 'DLSS-G inputs', f'no DLSSG.Depth copy in {real} real-frame DLSS-G evaluations: '
               + ', '.join(f'{k} {v}' for k, v in refused.most_common())
               + (f' ({DLSSG_REFUSAL[reason]})' if reason in DLSSG_REFUSAL else '') + ui))
+
+
+def queue_order_checks(s: Session, add) -> None:
+    """'Queue order' (Step 4): PASS with its hooks installed and no late conflict; WARN when no Signal/Wait hook is
+    installed although the game uses more than one queue (cross-queue proofs unavailable) or a fence a relied read
+    named was poisoned afterwards (late_conflict); INFO when QueueFenceOrder=0. No line means no check."""
+    if s.queue_order_off and not s.queue_order:
+        add(Check('INFO', 'Queue order', 'disabled (QueueFenceOrder=0): cross-queue reads wait for completion'))
+        return
+    q = s.queue_order
+    if not q:
+        return
+    poisoned = {k: v for k, v in q['poisoned'].items() if v}
+    refused = {k: v for k, v in q['refused'].items() if v}
+    detail = (f"{q['queues']} queues, {q['fences']} fences ({q['settled']} settled), {q['signals']} signals, "
+              f"{q['waits']} waits; {q['ordered']} ordered verdicts"
+              + (f", proofs {', '.join(f'{k} {v}' for k, v in q['proofs'].items())}" if q['proofs'] else '')
+              + (f"; poisoned {', '.join(f'{k} {v}' for k, v in sorted(poisoned.items()))}" if poisoned else '')
+              + (f"; refused {', '.join(f'{k} {v}' for k, v in sorted(refused.items(), key=lambda kv: -kv[1]))}"
+                 if refused else ''))
+    hooked = q['signal_hooks'] and q['wait_hooks']
+    if q['late_conflict']:
+        add(Check('WARN', 'Queue order', f"{q['late_conflict']} late conflicts: a fence a read relied on was poisoned "
+                  f'within the source age (residual R1); ' + detail))
+    elif not hooked and q['queues'] > 1:
+        add(Check('WARN', 'Queue order', 'no queue Signal/Wait hook installed with more than one queue: cross-queue '
+                  'proofs unavailable; ' + detail))
+    else:
+        add(Check('PASS', 'Queue order', detail))
 
 
 def export_checks(s: Session, add) -> None:

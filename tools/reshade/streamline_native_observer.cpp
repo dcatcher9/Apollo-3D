@@ -14,19 +14,38 @@
 namespace sunshine_streamline::native_observer {
   namespace {
     // Command-list lifecycle (Reset, Close, render passes, bundles) comes from
-    // ReShade's events. The hooks observe only resource states and submission.
-    enum class method : unsigned { barriers, execute, enhanced, count };
+    // ReShade's events. The hooks observe resource states and submission
+    // (the state family) and queue order (the order family: signal, wait,
+    // fence_signal; execute also takes tickets for it).
+    enum class method : unsigned { barriers, execute, enhanced, signal, wait, fence_signal, count };
     constexpr unsigned method_count = static_cast<unsigned>(method::count);
     constexpr unsigned target_limit = 8, command_chunk = 64, inline_barriers = 256;
     constexpr std::array<std::size_t, method_count> vtable_slots{
       offsetof(ID3D12GraphicsCommandListVtbl, ResourceBarrier) / sizeof(void *),
       offsetof(ID3D12CommandQueueVtbl, ExecuteCommandLists) / sizeof(void *),
-      offsetof(ID3D12GraphicsCommandList7Vtbl, Barrier) / sizeof(void *)};
+      offsetof(ID3D12GraphicsCommandList7Vtbl, Barrier) / sizeof(void *),
+      offsetof(ID3D12CommandQueueVtbl, Signal) / sizeof(void *),
+      offsetof(ID3D12CommandQueueVtbl, Wait) / sizeof(void *),
+      offsetof(ID3D12FenceVtbl, Signal) / sizeof(void *)};
     static_assert(vtable_slots[0] == 26 && vtable_slots[1] == 10 && vtable_slots[2] == 80, "Unexpected D3D12 native COM ABI");
+    static_assert(vtable_slots[3] == 14 && vtable_slots[4] == 15 && vtable_slots[5] == 10, "Unexpected D3D12 native COM ABI");
+    static_assert(offsetof(ID3D12FenceVtbl, GetCompletedValue) / sizeof(void *) == 8 &&
+      offsetof(ID3D12Fence1Vtbl, GetCreationFlags) / sizeof(void *) == 11, "Unexpected D3D12 native COM ABI");
+    constexpr bool order_family(unsigned kind) { return kind >= static_cast<unsigned>(method::signal); }
+    constexpr hooked_method hooked_table[method_count]{
+      {"ID3D12GraphicsCommandList", "ResourceBarrier", 26}, {"ID3D12CommandQueue", "ExecuteCommandLists", 10},
+      {"ID3D12GraphicsCommandList7", "Barrier", 80}, {"ID3D12CommandQueue", "Signal", 14},
+      {"ID3D12CommandQueue", "Wait", 15}, {"ID3D12Fence", "Signal", 10}};
     using barrier_fn = void (STDMETHODCALLTYPE *)(ID3D12GraphicsCommandList *, UINT, const D3D12_RESOURCE_BARRIER *);
     using execute_fn = void (STDMETHODCALLTYPE *)(ID3D12CommandQueue *, UINT, ID3D12CommandList *const *);
     using enhanced_fn = void (STDMETHODCALLTYPE *)(ID3D12GraphicsCommandList7 *, UINT32, const D3D12_BARRIER_GROUP *);
+    using queue_fence_fn = HRESULT (STDMETHODCALLTYPE *)(ID3D12CommandQueue *, ID3D12Fence *, UINT64);
+    using fence_signal_fn = HRESULT (STDMETHODCALLTYPE *)(ID3D12Fence *, UINT64);
     constexpr GUID recording_guid{0x92c957c6, 0x88de, 0x42b3, {0x9f, 0x3e, 0x31, 0xde, 0x63, 0x05, 0x7b, 0x29}};
+    // Queue order identities (never SetPrivateDataInterface: plain bytes, so
+    // no game object points into the add-on).
+    constexpr GUID order_queue_guid{0x3c1d7a52, 0x6b0e, 0x4f43, {0x8d, 0x27, 0x5a, 0x90, 0xe1, 0x44, 0x0b, 0x6c}};
+    constexpr GUID order_fence_guid{0x7e64b1a9, 0x2f58, 0x4c0d, {0xa3, 0x91, 0x0c, 0x6f, 0x5d, 0x28, 0xe4, 0x17}};
     enum class state { empty, pending, installed, rejected };
     struct target {
       sunshine_native_vtable::slot location;
@@ -57,6 +76,28 @@ namespace sunshine_streamline::native_observer {
     struct invocation;
     thread_local std::array<invocation *, method_count> current_invocations{};
 
+    // Queue order state. Tickets live in a lock-free table indexed by the
+    // queue record's slot; the model and everything else under order_lock.
+    namespace order {
+      using model_type = sunshine_queue_order::model<>;
+      constexpr unsigned queue_limit = 32;
+      struct ticket_slot {
+        std::atomic<std::uint64_t> id{}, entered{};
+        // The queue's Execute, Signal and Wait vtable slots at first sight
+        // (coverage); written under order_lock before id is published.
+        std::array<void **, 3> slots{};
+      };
+      std::array<ticket_slot, queue_limit> tickets;
+      SRWLOCK lock = SRWLOCK_INIT;
+      model_type model;
+      std::atomic<bool> requested{true}, reset_pending{};
+      std::atomic<std::uint64_t> queue_cookies{}, resets{}, ordered_count{}, cpu_unhooked{}, contention{};
+      std::array<std::atomic<std::uint64_t>, static_cast<unsigned>(sunshine_queue_order::refusal::count)> refused{};
+      thread_local position last_execute{};
+      struct queue_memory { std::uint64_t cookie, id; };
+      struct fence_bytes { std::uint64_t id, signaller, why; };
+    }
+
     struct restore_error {
       DWORD value;
       ~restore_error() { SetLastError(value); }
@@ -70,13 +111,23 @@ namespace sunshine_streamline::native_observer {
       bool child{};
       std::uint64_t epoch;
       bool eligible;
+      unsigned depth;
+      // A proxy-to-native call at the same suppression depth (inherited)
+      // shares its parent's ticket; a suppressed call made inside a game
+      // call (the add-on's copy-out) is never its child and takes its own.
+      bool inherited{};
+      std::uint64_t order_queue{}, ticket{};
       invocation(method value, state status) : kind(static_cast<unsigned>(value)), parent(current_invocations[kind]),
-          epoch(activation_epoch.load(std::memory_order_acquire)), eligible(status == state::installed && enabled() && !suppression_depth) {
+          epoch(activation_epoch.load(std::memory_order_acquire)), eligible(status == state::installed && enabled() && !suppression_depth),
+          depth(suppression_depth) {
         ++calls;
         if (suppression_depth) ++suppressed;
         // Only the deepest hooked native implementation reports an operation.
         // In particular a proxy's post-call must not report the submission twice.
-        if (parent) { parent->child = true; ++nested; }
+        if (parent && parent->depth == depth) {
+          parent->child = true; ++nested;
+          inherited = true; order_queue = parent->order_queue; ticket = parent->ticket;
+        }
         current_invocations[kind] = this;
       }
       ~invocation() { current_invocations[kind] = parent; }
@@ -144,6 +195,14 @@ namespace sunshine_streamline::native_observer {
       return cookie;
     }
 
+    // Defined after the slot helpers below.
+    bool order_on();
+    void order_enter(invocation &call, ID3D12CommandQueue *queue, bool blocking);
+    bool order_quiet(const invocation &call);
+    void order_signal(ID3D12CommandQueue *queue, const invocation &call, ID3D12Fence *fence, UINT64 value);
+    void order_wait(const invocation &call, ID3D12Fence *fence, UINT64 value, bool quiet);
+    void order_cpu_signal(ID3D12Fence *fence);
+
     template<unsigned Index> void STDMETHODCALLTYPE barrier_detour(ID3D12GraphicsCommandList *command,
         UINT count, const D3D12_RESOURCE_BARRIER *values) {
       const DWORD incoming = GetLastError();
@@ -191,9 +250,12 @@ namespace sunshine_streamline::native_observer {
           offset += length;
         }
       }
+      // A ticket, suppressed or not (the add-on's copy-out lists get positions).
+      order_enter(call, queue, false);
       SetLastError(incoming);
       reinterpret_cast<execute_fn>(slot.original.load(std::memory_order_acquire))(queue, count, commands);
       outgoing.value = GetLastError();
+      order::last_execute = call.ticket ? position{call.order_queue, call.ticket, order_quiet(call)} : position{};
       if (!call.notify()) return;
       if (!complete) { if (!allocated) ++submission_overflow; drop(allocated); return; }
       notify(submitted_callback.load(std::memory_order_acquire), reinterpret_cast<std::uintptr_t>(queue), count, identities.data());
@@ -247,10 +309,54 @@ namespace sunshine_streamline::native_observer {
       if (named) notify(enhanced_textures_callback.load(std::memory_order_acquire), reinterpret_cast<std::uintptr_t>(command),
         cookie, static_cast<unsigned>(named), static_cast<const enhanced_texture *>(textures.data()));
     }
+    // Queue Signal: logged, with its poison checks, BEFORE it is forwarded
+    // (design finding 7); a failed call leaves a conservative entry.
+    template<unsigned Index> HRESULT STDMETHODCALLTYPE signal_detour(ID3D12CommandQueue *queue, ID3D12Fence *fence, UINT64 value) {
+      const DWORD incoming = GetLastError();
+      auto &slot = targets[static_cast<unsigned>(method::signal)][Index];
+      invocation call(method::signal, slot.status.load(std::memory_order_acquire));
+      restore_error outgoing{incoming};
+      order_enter(call, queue, true);
+      if (call.eligible && !call.inherited && fence && order_on()) order_signal(queue, call, fence, value);
+      SetLastError(incoming);
+      const HRESULT result = reinterpret_cast<queue_fence_fn>(slot.original.load(std::memory_order_acquire))(queue, fence, value);
+      outgoing.value = GetLastError();
+      return result;
+    }
+    // Queue Wait: logged only AFTER it returned success, with its quiet bit.
+    template<unsigned Index> HRESULT STDMETHODCALLTYPE wait_detour(ID3D12CommandQueue *queue, ID3D12Fence *fence, UINT64 value) {
+      const DWORD incoming = GetLastError();
+      auto &slot = targets[static_cast<unsigned>(method::wait)][Index];
+      invocation call(method::wait, slot.status.load(std::memory_order_acquire));
+      restore_error outgoing{incoming};
+      order_enter(call, queue, true);
+      SetLastError(incoming);
+      const HRESULT result = reinterpret_cast<queue_fence_fn>(slot.original.load(std::memory_order_acquire))(queue, fence, value);
+      outgoing.value = GetLastError();
+      if (SUCCEEDED(result) && call.eligible && !call.inherited && call.ticket && fence && order_on())
+        order_wait(call, fence, value, order_quiet(call));
+      return result;
+    }
+    // CPU ID3D12Fence::Signal: poisons the fence before it is forwarded,
+    // whatever its result.
+    template<unsigned Index> HRESULT STDMETHODCALLTYPE fence_signal_detour(ID3D12Fence *fence, UINT64 value) {
+      const DWORD incoming = GetLastError();
+      auto &slot = targets[static_cast<unsigned>(method::fence_signal)][Index];
+      invocation call(method::fence_signal, slot.status.load(std::memory_order_acquire));
+      restore_error outgoing{incoming};
+      if (call.eligible && !call.inherited && order_on()) order_cpu_signal(fence);
+      SetLastError(incoming);
+      const HRESULT result = reinterpret_cast<fence_signal_fn>(slot.original.load(std::memory_order_acquire))(fence, value);
+      outgoing.value = GetLastError();
+      return result;
+    }
     const std::array<std::array<void *, target_limit>, method_count> detours{{
       {reinterpret_cast<void *>(barrier_detour<0>), reinterpret_cast<void *>(barrier_detour<1>), reinterpret_cast<void *>(barrier_detour<2>), reinterpret_cast<void *>(barrier_detour<3>), reinterpret_cast<void *>(barrier_detour<4>), reinterpret_cast<void *>(barrier_detour<5>), reinterpret_cast<void *>(barrier_detour<6>), reinterpret_cast<void *>(barrier_detour<7>)},
       {reinterpret_cast<void *>(execute_detour<0>), reinterpret_cast<void *>(execute_detour<1>), reinterpret_cast<void *>(execute_detour<2>), reinterpret_cast<void *>(execute_detour<3>), reinterpret_cast<void *>(execute_detour<4>), reinterpret_cast<void *>(execute_detour<5>), reinterpret_cast<void *>(execute_detour<6>), reinterpret_cast<void *>(execute_detour<7>)},
-      {reinterpret_cast<void *>(enhanced_detour<0>), reinterpret_cast<void *>(enhanced_detour<1>), reinterpret_cast<void *>(enhanced_detour<2>), reinterpret_cast<void *>(enhanced_detour<3>), reinterpret_cast<void *>(enhanced_detour<4>), reinterpret_cast<void *>(enhanced_detour<5>), reinterpret_cast<void *>(enhanced_detour<6>), reinterpret_cast<void *>(enhanced_detour<7>)}
+      {reinterpret_cast<void *>(enhanced_detour<0>), reinterpret_cast<void *>(enhanced_detour<1>), reinterpret_cast<void *>(enhanced_detour<2>), reinterpret_cast<void *>(enhanced_detour<3>), reinterpret_cast<void *>(enhanced_detour<4>), reinterpret_cast<void *>(enhanced_detour<5>), reinterpret_cast<void *>(enhanced_detour<6>), reinterpret_cast<void *>(enhanced_detour<7>)},
+      {reinterpret_cast<void *>(signal_detour<0>), reinterpret_cast<void *>(signal_detour<1>), reinterpret_cast<void *>(signal_detour<2>), reinterpret_cast<void *>(signal_detour<3>), reinterpret_cast<void *>(signal_detour<4>), reinterpret_cast<void *>(signal_detour<5>), reinterpret_cast<void *>(signal_detour<6>), reinterpret_cast<void *>(signal_detour<7>)},
+      {reinterpret_cast<void *>(wait_detour<0>), reinterpret_cast<void *>(wait_detour<1>), reinterpret_cast<void *>(wait_detour<2>), reinterpret_cast<void *>(wait_detour<3>), reinterpret_cast<void *>(wait_detour<4>), reinterpret_cast<void *>(wait_detour<5>), reinterpret_cast<void *>(wait_detour<6>), reinterpret_cast<void *>(wait_detour<7>)},
+      {reinterpret_cast<void *>(fence_signal_detour<0>), reinterpret_cast<void *>(fence_signal_detour<1>), reinterpret_cast<void *>(fence_signal_detour<2>), reinterpret_cast<void *>(fence_signal_detour<3>), reinterpret_cast<void *>(fence_signal_detour<4>), reinterpret_cast<void *>(fence_signal_detour<5>), reinterpret_cast<void *>(fence_signal_detour<6>), reinterpret_cast<void *>(fence_signal_detour<7>)}
     }};
     target *find(unsigned kind, void **address) {
       for (unsigned i = 0; i != target_counts[kind]; ++i) if (targets[kind][i].location.address == address) return &targets[kind][i];
@@ -261,15 +367,28 @@ namespace sunshine_streamline::native_observer {
       const auto begin = refused[row].begin(), end = begin + refused_counts[row];
       return std::find(begin, end, key) != end;
     }
-    void report_refusal() { ++rejected; invalidate(); }
+    // A coverage change of one family: the state family invalidates the
+    // capture owner's evidence; the order family only resets the order model
+    // (deferred to its next locked operation, never inside a detour's lock).
+    void coverage_changed(unsigned kind) {
+      if (order_family(kind)) order::reset_pending.store(true, std::memory_order_release);
+      else invalidate();
+    }
+    void lost(unsigned kind, bool unreadable_input) {
+      if (!order_family(kind)) { drop(unreadable_input); return; }
+      if (unreadable_input) ++unreadable;
+      else ++dropped;
+      coverage_changed(kind);
+    }
+    void report_refusal(unsigned kind = 0) { ++rejected; coverage_changed(kind); }
     // Reports only a new slot refusal; a full table keeps reporting every one.
     // With locked, the caller's exclusive targets_lock is released here.
     void refuse(unsigned kind, std::uintptr_t key, bool locked = false) {
-      if (!locked && !TryAcquireSRWLockExclusive(&targets_lock)) { ++discovery_contention; drop(false); return; }
+      if (!locked && !TryAcquireSRWLockExclusive(&targets_lock)) { ++discovery_contention; lost(kind, false); return; }
       const bool known = refused_before(kind, key);
       if (!known && refused_counts[kind] != refused_limit) refused[kind][refused_counts[kind]++] = key;
       ReleaseSRWLockExclusive(&targets_lock);
-      if (!known) report_refusal();
+      if (!known) report_refusal(kind);
     }
     bool read_vtable_entry(std::uint64_t object, std::size_t index, void *&entry) {
       std::uintptr_t vtable{};
@@ -308,15 +427,15 @@ namespace sunshine_streamline::native_observer {
       const restore_error incoming{GetLastError()};
       const auto kind = static_cast<unsigned>(value);
       void **address{};
-      if (!read_slot_address(object, kind, address)) { drop(true); return; }
-      if (!TryAcquireSRWLockShared(&targets_lock)) { ++discovery_contention; drop(false); return; }
+      if (!read_slot_address(object, kind, address)) { lost(kind, true); return; }
+      if (!TryAcquireSRWLockShared(&targets_lock)) { ++discovery_contention; lost(kind, false); return; }
       const auto key = reinterpret_cast<std::uintptr_t>(address);
       const bool seen = find(kind, address) != nullptr || refused_before(kind, key);
       ReleaseSRWLockShared(&targets_lock);
       if (seen) return;
       sunshine_native_vtable::slot location;
       if (!sunshine_native_vtable::discover(object, vtable_slots[kind], location)) { refuse(kind, key); return; }
-      if (!TryAcquireSRWLockExclusive(&targets_lock)) { sunshine_native_vtable::release(location); ++discovery_contention; drop(false); return; }
+      if (!TryAcquireSRWLockExclusive(&targets_lock)) { sunshine_native_vtable::release(location); ++discovery_contention; lost(kind, false); return; }
       if (find(kind, location.address)) { ReleaseSRWLockExclusive(&targets_lock); sunshine_native_vtable::release(location); return; }
       if (target_counts[kind] == target_limit) {
         refuse(kind, key, true);
@@ -327,7 +446,7 @@ namespace sunshine_streamline::native_observer {
       slot.location = location;
       slot.status.store(state::pending, std::memory_order_release);
       ReleaseSRWLockExclusive(&targets_lock);
-      invalidate();
+      coverage_changed(kind);
     }
     bool ready(std::uint64_t object, method value) {
       if (!enabled()) return false;
@@ -348,7 +467,7 @@ namespace sunshine_streamline::native_observer {
       // Missing observations cannot be recovered by a third party restoring
       // our pointer later. Retire coverage and invalidate the owner's proofs
       // outside the target lock; retained originals remain safe passthroughs.
-      if (lost) { ++rejected; invalidate(); }
+      if (lost) { ++rejected; coverage_changed(kind); }
       return result;
     }
     // A list that supports CommandList7 can also change states with enhanced
@@ -367,6 +486,224 @@ namespace sunshine_streamline::native_observer {
       }
       if (discover && ((FAILED(result7) && result7 != E_NOINTERFACE) || (SUCCEEDED(result7) && !version7))) invalidate();
       return complete;
+    }
+
+    // -- Queue order host --------------------------------------------------
+    bool order_on() { return enabled() && order::requested.load(std::memory_order_acquire); }
+    order::ticket_slot *ticket_of(std::uint64_t id) {
+      const auto index = (id & 0xff) - 1;
+      if (!id || index >= order::queue_limit) return nullptr;
+      auto &slot = order::tickets[index];
+      return slot.id.load(std::memory_order_acquire) == id ? &slot : nullptr;
+    }
+    // Requires order::lock exclusive: applies a deferred coverage reset.
+    void apply_order_reset() {
+      if (!order::reset_pending.load(std::memory_order_acquire) || !order::reset_pending.exchange(false, std::memory_order_acq_rel)) return;
+      order::model.reset();
+      for (auto &slot : order::tickets) slot.id.store(0, std::memory_order_release);
+      ++order::resets;
+    }
+    bool private_bytes(void *object, const GUID &guid, void *output, UINT size) {
+      auto *value = reinterpret_cast<ID3D12Object *>(object);
+      UINT read = size;
+      return SUCCEEDED(value->lpVtbl->GetPrivateData(value, guid, &read, output)) && read == size;
+    }
+    std::uint64_t device_of(ID3D12DeviceChild *child) {
+      ID3D12Device *device{};
+      if (FAILED(child->lpVtbl->GetDevice(child, IID_ID3D12Device, reinterpret_cast<void **>(&device))) || !device) return 0;
+      const auto key = reinterpret_cast<std::uintptr_t>(device);
+      device->lpVtbl->Release(device);
+      return key;
+    }
+    // The queue's record id, sighting it (GetDevice, slot addresses, then
+    // SetPrivateData outside the lock). Execute never blocks on the lock.
+    std::uint64_t queue_id(ID3D12CommandQueue *queue, bool blocking) {
+      order::queue_memory memory{};
+      const bool found = private_bytes(queue, order_queue_guid, &memory, sizeof(memory));
+      if (found && ticket_of(memory.id)) return memory.id;
+      if (!found || !memory.cookie) memory.cookie = ++order::queue_cookies;
+      const auto device = device_of(reinterpret_cast<ID3D12DeviceChild *>(queue));
+      if (!device) return 0;
+      std::array<void **, 3> slots{};
+      const unsigned kinds[3]{static_cast<unsigned>(method::execute), static_cast<unsigned>(method::signal), static_cast<unsigned>(method::wait)};
+      for (unsigned i = 0; i != 3; ++i)
+        if (!read_slot_address(reinterpret_cast<std::uintptr_t>(queue), kinds[i], slots[i])) slots[i] = nullptr;
+      if (blocking) AcquireSRWLockExclusive(&order::lock);
+      else if (!TryAcquireSRWLockExclusive(&order::lock)) { ++order::contention; return 0; }
+      apply_order_reset();
+      memory.id = order::model.add_queue(device, memory.cookie);
+      auto &slot = order::tickets[(memory.id & 0xff) - 1];
+      slot.id.store(0, std::memory_order_release);
+      slot.entered.store(0, std::memory_order_relaxed);
+      slot.slots = slots;
+      slot.id.store(memory.id, std::memory_order_release);
+      ReleaseSRWLockExclusive(&order::lock);
+      auto *object = reinterpret_cast<ID3D12Object *>(queue);
+      object->lpVtbl->SetPrivateData(object, order_queue_guid, sizeof(memory), &memory);
+      return memory.id;
+    }
+    void order_enter(invocation &call, ID3D12CommandQueue *queue, bool blocking) {
+      if (call.inherited || !queue || !order_on()) return;
+      const restore_error incoming{GetLastError()};
+      const auto id = queue_id(queue, blocking);
+      if (auto *slot = ticket_of(id)) {
+        call.order_queue = id;
+        call.ticket = slot->entered.fetch_add(1, std::memory_order_acq_rel) + 1;
+      }
+    }
+    // No later ticket of the queue was taken before this call returned.
+    bool order_quiet(const invocation &call) {
+      const auto *slot = ticket_of(call.order_queue);
+      return slot && slot->entered.load(std::memory_order_acquire) == call.ticket;
+    }
+    sunshine_queue_order::fence_memory read_fence(ID3D12Fence *fence) {
+      order::fence_bytes bytes{};
+      if (!private_bytes(fence, order_fence_guid, &bytes, sizeof(bytes))) return {};
+      return {bytes.id, bytes.signaller, static_cast<sunshine_queue_order::poison>(bytes.why)};
+    }
+    void write_fence(ID3D12Fence *fence, const sunshine_queue_order::fence_memory &value) {
+      const order::fence_bytes bytes{value.id, value.signaller, static_cast<std::uint64_t>(value.why)};
+      auto *object = reinterpret_cast<ID3D12Object *>(fence);
+      object->lpVtbl->SetPrivateData(object, order_fence_guid, sizeof(bytes), &bytes);
+    }
+    // The fence's record id, sighting it inside a game call on it: its CPU
+    // Signal slot must be installed first (no record otherwise: its CPU
+    // signals would go unseen), its creation flags and device are checked and
+    // its completed value is the baseline. A re-sight keeps what its private
+    // data remembers (poison, signaller).
+    std::uint64_t fence_id(ID3D12Fence *fence, std::uint64_t queue) {
+      auto memory = read_fence(fence);
+      if (memory.id) {
+        AcquireSRWLockShared(&order::lock);
+        const bool known = order::model.known_fence(memory.id);
+        ReleaseSRWLockShared(&order::lock);
+        if (known) return memory.id;
+      }
+      const auto kind = static_cast<unsigned>(method::fence_signal);
+      void **address{};
+      if (!read_slot_address(reinterpret_cast<std::uintptr_t>(fence), kind, address)) return 0;
+      bool hooked = false;
+      if (TryAcquireSRWLockShared(&targets_lock)) {
+        if (auto *slot = find(kind, address))
+          hooked = slot->status.load(std::memory_order_acquire) == state::installed &&
+            sunshine_native_vtable::matches(slot->location, detours[kind][slot - targets[kind].data()]);
+        ReleaseSRWLockShared(&targets_lock);
+      }
+      if (!hooked) {
+        ++order::cpu_unhooked;
+        observe(reinterpret_cast<std::uintptr_t>(fence), method::fence_signal);
+        return 0;
+      }
+      auto why = sunshine_queue_order::poison::none;
+      const auto mark = [&](sunshine_queue_order::poison value) { if (why == sunshine_queue_order::poison::none) why = value; };
+      ID3D12Fence1 *fence1{};
+      if (SUCCEEDED(fence->lpVtbl->QueryInterface(fence, IID_ID3D12Fence1, reinterpret_cast<void **>(&fence1))) && fence1) {
+        const auto flags = fence1->lpVtbl->GetCreationFlags(fence1);
+        fence1->lpVtbl->Release(fence1);
+        if (flags & (D3D12_FENCE_FLAG_SHARED | D3D12_FENCE_FLAG_SHARED_CROSS_ADAPTER | D3D12_FENCE_FLAG_NON_MONITORED))
+          mark(sunshine_queue_order::poison::shared);
+      } else mark(sunshine_queue_order::poison::shared);
+      const auto device = device_of(reinterpret_cast<ID3D12DeviceChild *>(fence));
+      const auto baseline = fence->lpVtbl->GetCompletedValue(fence);
+      AcquireSRWLockExclusive(&order::lock);
+      apply_order_reset();
+      // A call whose queue record a reset just dropped predates the model:
+      // it is not logged (its signal is pre-sight work for the next record).
+      if (!order::model.known_queue(queue)) { ReleaseSRWLockExclusive(&order::lock); return 0; }
+      if (!device || device != order::model.queue_device(queue)) mark(sunshine_queue_order::poison::foreign_device);
+      memory.id = order::model.add_fence(device, baseline, {0, memory.signaller, memory.why}, why);
+      memory = order::model.memory(memory.id);
+      ReleaseSRWLockExclusive(&order::lock);
+      write_fence(fence, memory);
+      return memory.id;
+    }
+    template<class Operation> void order_update(ID3D12Fence *fence, std::uint64_t id, Operation operation) {
+      sunshine_queue_order::fence_memory before{}, after{};
+      AcquireSRWLockExclusive(&order::lock);
+      apply_order_reset();
+      if (order::model.known_fence(id)) {
+        before = order::model.memory(id);
+        operation();
+        after = order::model.memory(id);
+      }
+      ReleaseSRWLockExclusive(&order::lock);
+      if (after.id && (after.signaller != before.signaller || after.why != before.why)) write_fence(fence, after);
+    }
+    void order_signal(ID3D12CommandQueue *, const invocation &call, ID3D12Fence *fence, UINT64 value) {
+      const restore_error incoming{GetLastError()};
+      // A signalling queue without a record poisons a fence already known.
+      const auto id = call.ticket ? fence_id(fence, call.order_queue) : read_fence(fence).id;
+      if (!id) return;
+      const auto completed = fence->lpVtbl->GetCompletedValue(fence);
+      order_update(fence, id, [&] {
+        // A record a reset dropped since the call entered: not logged.
+        if (call.ticket && !order::model.known_queue(call.order_queue)) return;
+        order::model.signal(call.ticket ? call.order_queue : 0, id, value, call.ticket, completed, GetTickCount64());
+      });
+    }
+    void order_wait(const invocation &call, ID3D12Fence *fence, UINT64 value, bool quiet) {
+      const restore_error incoming{GetLastError()};
+      const auto id = fence_id(fence, call.order_queue);
+      const auto completed = fence->lpVtbl->GetCompletedValue(fence);
+      AcquireSRWLockExclusive(&order::lock);
+      apply_order_reset();
+      // An unknown fence still logs the wait (refused as untracked).
+      sunshine_queue_order::fence_memory before{}, after{};
+      if (id && order::model.known_fence(id)) before = order::model.memory(id);
+      order::model.wait(call.order_queue, id, value, call.ticket, quiet, completed, GetTickCount64());
+      if (id && order::model.known_fence(id)) after = order::model.memory(id);
+      ReleaseSRWLockExclusive(&order::lock);
+      if (after.id && (after.signaller != before.signaller || after.why != before.why)) write_fence(fence, after);
+    }
+    void order_cpu_signal(ID3D12Fence *fence) {
+      const restore_error incoming{GetLastError()};
+      auto memory = read_fence(fence);
+      if (!memory.id) return;  // Never sighted: its baseline at sight covers this signal.
+      bool known = false;
+      order_update(fence, memory.id, [&] { known = true; order::model.cpu_signal(memory.id, GetTickCount64()); });
+      if (!known && memory.why == sunshine_queue_order::poison::none) {
+        memory.why = sunshine_queue_order::poison::cpu_signal;
+        write_fence(fence, memory);
+      }
+    }
+    // Whether a queue's Execute, Signal and Wait slots are all installed.
+    // Requires targets_lock shared.
+    bool covered(std::uint64_t id) {
+      const auto *slot = ticket_of(id);
+      if (!slot) return false;
+      const unsigned kinds[3]{static_cast<unsigned>(method::execute), static_cast<unsigned>(method::signal), static_cast<unsigned>(method::wait)};
+      for (unsigned i = 0; i != 3; ++i) {
+        const auto *target = slot->slots[i] ? find(kinds[i], slot->slots[i]) : nullptr;
+        if (!target || target->status.load(std::memory_order_acquire) != state::installed) return false;
+      }
+      return true;
+    }
+    // Requires targets_lock shared.
+    unsigned order_pending() {
+      unsigned count = 0;
+      for (unsigned kind = 0; kind != method_count; ++kind)
+        if (order_family(kind))
+          for (unsigned i = 0; i != target_counts[kind]; ++i)
+            count += targets[kind][i].status.load(std::memory_order_acquire) == state::pending;
+      return count;
+    }
+    // Installed order slots a third party replaced since: their coverage is
+    // lost for good (as ready() retires a state slot).
+    void verify_order_slots() {
+      bool lost_any = false;
+      if (!TryAcquireSRWLockShared(&targets_lock)) return;
+      for (unsigned kind = 0; kind != method_count; ++kind)
+        if (order_family(kind))
+          for (unsigned i = 0; i != target_counts[kind]; ++i) {
+            auto &slot = targets[kind][i];
+            auto expected = state::installed;
+            if (slot.status.load(std::memory_order_acquire) == state::installed &&
+                !sunshine_native_vtable::matches(slot.location, detours[kind][i]) &&
+                slot.status.compare_exchange_strong(expected, state::rejected, std::memory_order_acq_rel))
+              lost_any = true;
+          }
+      ReleaseSRWLockShared(&targets_lock);
+      if (lost_any) { ++rejected; coverage_changed(static_cast<unsigned>(method::signal)); }
     }
   }
 
@@ -412,6 +749,10 @@ namespace sunshine_streamline::native_observer {
     auto *object = required_interface<ID3D12CommandQueue>(queue, IID_ID3D12CommandQueue, true);
     if (!object) return;
     observe(reinterpret_cast<std::uintptr_t>(object), method::execute);
+    if (order::requested.load(std::memory_order_acquire)) {
+      observe(reinterpret_cast<std::uintptr_t>(object), method::signal);
+      observe(reinterpret_cast<std::uintptr_t>(object), method::wait);
+    }
     object->lpVtbl->Release(object);
   }
   bool states_ready(std::uint64_t command) {
@@ -438,14 +779,22 @@ namespace sunshine_streamline::native_observer {
     const restore_error incoming{GetLastError()};
     // Caller serializes deferred installation outside event/loader callbacks.
     // The shared helper serializes page-protection changes across observers.
+    verify_order_slots();
     std::array<std::array<unsigned, 2>, method_count * target_limit> pending{};
-    unsigned count{};
+    unsigned count{}, state_count{}, order_count{};
     if (!TryAcquireSRWLockShared(&targets_lock)) { ++discovery_contention; drop(false); return false; }
     for (unsigned kind = 0; kind != method_count; ++kind)
       for (unsigned i = 0; i != target_counts[kind]; ++i)
-        if (targets[kind][i].status.load(std::memory_order_acquire) == state::pending) pending[count++] = {kind, i};
+        if (targets[kind][i].status.load(std::memory_order_acquire) == state::pending) {
+          pending[count++] = {kind, i};
+          ++(order_family(kind) ? order_count : state_count);
+        }
     ReleaseSRWLockShared(&targets_lock);
-    if (count) invalidate();
+    const auto changed = [&] {
+      if (state_count) invalidate();
+      if (order_count) coverage_changed(static_cast<unsigned>(method::signal));
+    };
+    changed();
     bool okay = true;
     for (unsigned n = 0; n != count; ++n) {
       const auto kind = pending[n][0], index = pending[n][1];
@@ -459,7 +808,7 @@ namespace sunshine_streamline::native_observer {
       slot.status.store(state::installed, std::memory_order_release);
       ++installed;
     }
-    if (count) invalidate();
+    changed();
     return okay;
   }
   bool set_recording_cookie(std::uint64_t command, std::uint64_t cookie) {
@@ -493,6 +842,83 @@ namespace sunshine_streamline::native_observer {
     }
     return result;
   }
+  void set_queue_order(bool enabled) {
+    order::requested.store(enabled, std::memory_order_release);
+    order::reset_pending.store(true, std::memory_order_release);
+  }
+  bool queue_order_enabled() { return order::requested.load(std::memory_order_acquire); }
+  position last_execute_position() { return order::last_execute; }
+  sunshine_queue_order::verdict queue_ordered(std::uint64_t reader, position producer) {
+    using sunshine_queue_order::refusal;
+    sunshine_queue_order::verdict out;
+    const auto refuse = [&](refusal why) {
+      out.why = why;
+      ++order::refused[static_cast<unsigned>(why)];
+      return out;
+    };
+    if (!order_on() || !reader) return refuse(refusal::disabled);
+    const restore_error incoming{GetLastError()};
+    order::queue_memory memory{};
+    const bool tracked = private_bytes(reinterpret_cast<void *>(reader), order_queue_guid, &memory, sizeof(memory)) && ticket_of(memory.id);
+    if (!TryAcquireSRWLockShared(&targets_lock)) return refuse(refusal::pending_hooks);
+    const unsigned pending = order_pending();
+    const bool reader_covered = tracked && covered(memory.id), producer_covered = covered(producer.queue);
+    ReleaseSRWLockShared(&targets_lock);
+    if (pending) return refuse(refusal::pending_hooks);
+    // A coverage change not yet applied: the model is about to be reset.
+    if (order::reset_pending.load(std::memory_order_acquire)) return refuse(refusal::disabled);
+    if (!tracked) return refuse(refusal::untracked);
+    if (!reader_covered || !producer_covered) return refuse(refusal::uncovered);
+    AcquireSRWLockShared(&order::lock);
+    out = order::model.ordered(memory.id, producer);
+    ReleaseSRWLockShared(&order::lock);
+    if (out.ordered) ++order::ordered_count;
+    else ++order::refused[static_cast<unsigned>(out.why)];
+    return out;
+  }
+  void queue_order_rely(const sunshine_queue_order::verdict &value) {
+    if (!value.ordered) return;
+    AcquireSRWLockExclusive(&order::lock);
+    order::model.rely(value, GetTickCount64());
+    ReleaseSRWLockExclusive(&order::lock);
+  }
+  void queue_order_forget_device(std::uint64_t device) {
+    if (!device) return;
+    AcquireSRWLockExclusive(&order::lock);
+    order::model.forget_device(device);
+    for (auto &slot : order::tickets)
+      if (const auto id = slot.id.load(std::memory_order_acquire); id && !order::model.known_queue(id)) slot.id.store(0, std::memory_order_release);
+    ReleaseSRWLockExclusive(&order::lock);
+  }
+  queue_order_status queue_order_counts() {
+    queue_order_status out;
+    out.enabled = order::requested.load(std::memory_order_acquire);
+    if (TryAcquireSRWLockShared(&targets_lock)) {
+      const auto installed_of = [](method value) {
+        unsigned count = 0;
+        const auto kind = static_cast<unsigned>(value);
+        for (unsigned i = 0; i != target_counts[kind]; ++i) count += targets[kind][i].status.load(std::memory_order_acquire) == state::installed;
+        return count;
+      };
+      out.signal_hooks = installed_of(method::signal);
+      out.wait_hooks = installed_of(method::wait);
+      out.fence_signal_hooks = installed_of(method::fence_signal);
+      out.pending = order_pending();
+      ReleaseSRWLockShared(&targets_lock);
+    }
+    AcquireSRWLockShared(&order::lock);
+    out.model = order::model.snapshot();
+    ReleaseSRWLockShared(&order::lock);
+    out.ordered = order::ordered_count.load(std::memory_order_relaxed);
+    out.resets = order::resets.load(std::memory_order_relaxed);
+    out.cpu_unhooked = order::cpu_unhooked.load(std::memory_order_relaxed);
+    for (unsigned i = 0; i != order::refused.size(); ++i) out.refused[i] = order::refused[i].load(std::memory_order_relaxed);
+    return out;
+  }
+  const hooked_method *hooked_methods(unsigned &count) {
+    count = method_count;
+    return hooked_table;
+  }
   suppression_scope::suppression_scope() { ++suppression_depth; }
   suppression_scope::~suppression_scope() { --suppression_depth; }
 
@@ -517,6 +943,11 @@ namespace sunshine_streamline::native_observer {
       target_counts[kind] = 0;
     }
     refused_counts = {};
+    order::model.reset();
+    for (auto &slot : order::tickets) { slot.id = 0; slot.entered = 0; slot.slots = {}; }
+    order::requested = true; order::reset_pending = false;
+    order::resets = order::ordered_count = order::cpu_unhooked = order::contention = 0;
+    for (auto &value : order::refused) value = 0;
     calls = observed = unreadable = dropped = installed = rejected = nested = suppressed = 0;
     barrier_overflow = submission_overflow = discovery_contention = 0;
     barrier_callback = nullptr; submitted_callback = nullptr; invalidated_callback = nullptr;

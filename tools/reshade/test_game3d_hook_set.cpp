@@ -8,6 +8,7 @@
 // one updates these tables. Each MinHook family's hooks on fixture exports are
 // pinned where they are installed: the Streamline probe and NGX call-trace
 // tests.
+#include "streamline_native_observer.h"
 #include "test_minhook_ledger.h"
 
 #include <array>
@@ -297,6 +298,29 @@ int main() {
     for (std::size_t j = i + 1; j < initialized.size(); ++j) {
       if (initialized[i].kind == call::register_event && initialized[j].kind == call::register_event && initialized[i].event == initialized[j].event && initialized[i].callback == initialized[j].callback) {
         fail("AddonInit registered one callback twice for event " + std::to_string(initialized[i].event));
+      }
+    }
+  }
+  // The native vtable methods the observer hooks (no MinHook: its own slot
+  // machinery): the state family and, since Step 4, queue order's family.
+  {
+    struct row {
+      const char *interface_name, *method;
+      unsigned slot;
+    };
+    constexpr row expected_methods[] {
+      {"ID3D12GraphicsCommandList", "ResourceBarrier", 26}, {"ID3D12CommandQueue", "ExecuteCommandLists", 10},
+      {"ID3D12GraphicsCommandList7", "Barrier", 80}, {"ID3D12CommandQueue", "Signal", 14},
+      {"ID3D12CommandQueue", "Wait", 15}, {"ID3D12Fence", "Signal", 10}};
+    unsigned count = 0;
+    const auto *methods = sunshine_streamline::native_observer::hooked_methods(count);
+    if (count != std::size(expected_methods)) {
+      fail("the native observer hooks " + std::to_string(count) + " methods");
+    }
+    for (unsigned i = 0; i < count && i < std::size(expected_methods); ++i) {
+      if (std::strcmp(methods[i].interface_name, expected_methods[i].interface_name) != 0 ||
+          std::strcmp(methods[i].method, expected_methods[i].method) != 0 || methods[i].slot != expected_methods[i].slot) {
+        fail(std::string("native observer method ") + std::to_string(i) + ": " + methods[i].interface_name + "::" + methods[i].method);
       }
     }
   }

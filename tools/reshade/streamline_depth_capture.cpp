@@ -358,6 +358,9 @@ namespace sunshine_streamline::depth_capture {
     struct {
       std::atomic<std::uint64_t> made{}, ring_busy{}, failed{};
     } copy_out_counters;
+    // Reads admitted on another queue by the queue-order model before their
+    // producer fence completed (U-C1; the queue order line's proofs).
+    std::atomic<std::uint64_t> order_inflight_reads{};
     void invalidate_all() {
       std::lock_guard lock(mutex);
       for_each_capture([](auto &value) { invalidate(value, capture_failure::observer_loss); });
@@ -2083,6 +2086,9 @@ namespace sunshine_streamline::depth_capture {
     bool finished = true;
     {
       std::lock_guard lock(mutex);
+      // The add-on's own queue calls under the capture mutex are never game
+      // calls to the order hooks (design finding 8).
+      native_observer::suppression_scope suppress;
       for (auto &owner : queues) if (owner && owner->device_identity == device) {
         owner->retiring = true;
         owner->provider_established = false;
@@ -2093,6 +2099,8 @@ namespace sunshine_streamline::depth_capture {
         } else if (SUCCEEDED(owner->device->GetDeviceRemovedReason())) finished = false; // A removed device runs nothing.
       }
     }
+    // The device's queue-order records go with it (never dereferenced).
+    native_observer::queue_order_forget_device(reinterpret_cast<std::uintptr_t>(checked.p));
     const auto started = GetTickCount64();
     const std::uint64_t bound = release_wait_ms;
     const HANDLE event = waits ? CreateEventW(nullptr, FALSE, FALSE, nullptr) : nullptr;
@@ -3424,6 +3432,47 @@ namespace sunshine_streamline::depth_capture {
     std::lock_guard lock(mutex);
     out = proven.query(identity, queue, !enhanced_barriers_seen.load(std::memory_order_relaxed));
     return bool(out);
+  }
+  bool queue_order_line(std::uint64_t now, char *out, std::size_t size) {
+    static std::uint64_t logged_at{}, logged_total{UINT64_MAX};
+    static bool disabled_logged{};
+    const auto s = native_observer::queue_order_counts();
+    if (!s.enabled) {
+      if (disabled_logged) return false;
+      disabled_logged = true;
+      std::snprintf(out, size, "Sunshine 3D queue order: disabled (QueueFenceOrder=0)");
+      return true;
+    }
+    disabled_logged = false;
+    const auto inflight = order_inflight_reads.load(std::memory_order_relaxed);
+    std::uint64_t total = s.model.signals + s.model.waits + s.model.cpu_signals + s.ordered + s.resets + inflight +
+      s.model.late_conflict + s.signal_hooks + s.wait_hooks + s.fence_signal_hooks + s.pending;
+    for (const auto value : s.refused) total += value;
+    for (const auto value : s.model.poisoned) total += value;
+    if (total == logged_total || (logged_at && now - logged_at < 10000)) return false;
+    logged_at = now; logged_total = total;
+    using sunshine_queue_order::poison;
+    using sunshine_queue_order::refusal;
+    const auto p = [&](poison why) { return static_cast<unsigned long long>(s.model.poisoned[static_cast<unsigned>(why)]); };
+    const auto r = [&](refusal why) { return static_cast<unsigned long long>(s.refused[static_cast<unsigned>(why)]); };
+    std::snprintf(out, size,
+      "Sunshine 3D queue order: hooks={signal=%u wait=%u fence_signal=%u pending=%u} queues=%llu fences=%llu settled=%llu "
+      "signals=%llu waits=%llu cpu_signals=%llu poisoned={shared=%llu foreign=%llu cpu=%llu second=%llu monotonic=%llu "
+      "unobserved=%llu removed=%llu unrecorded=%llu} refused={disabled=%llu pending_hooks=%llu uncovered=%llu untracked=%llu "
+      "overlap=%llu unresolved=%llu baseline=%llu unsettled=%llu poisoned=%llu evicted=%llu cross_device=%llu} ordered=%llu "
+      "proofs={inflight=%llu} evicted_waits=%llu resets=%llu cpu_unhooked=%llu late_conflict=%llu",
+      s.signal_hooks, s.wait_hooks, s.fence_signal_hooks, s.pending, static_cast<unsigned long long>(s.model.queues),
+      static_cast<unsigned long long>(s.model.fences), static_cast<unsigned long long>(s.model.settled),
+      static_cast<unsigned long long>(s.model.signals), static_cast<unsigned long long>(s.model.waits),
+      static_cast<unsigned long long>(s.model.cpu_signals), p(poison::shared), p(poison::foreign_device), p(poison::cpu_signal),
+      p(poison::second_signaller), p(poison::non_monotonic), p(poison::unobserved_signal), p(poison::removed),
+      p(poison::unrecorded_signaller), r(refusal::disabled), r(refusal::pending_hooks), r(refusal::uncovered),
+      r(refusal::untracked), r(refusal::overlap), r(refusal::unresolved), r(refusal::baseline), r(refusal::unsettled),
+      r(refusal::poisoned), r(refusal::evicted), r(refusal::cross_device), static_cast<unsigned long long>(s.ordered),
+      static_cast<unsigned long long>(inflight), static_cast<unsigned long long>(s.model.evicted_waits),
+      static_cast<unsigned long long>(s.resets), static_cast<unsigned long long>(s.cpu_unhooked),
+      static_cast<unsigned long long>(s.model.late_conflict));
+    return true;
   }
   proven_state_counts proven_counts() {
     proven_state_counts out;

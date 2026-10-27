@@ -4980,6 +4980,71 @@ The explicitly enabled FG repeat case above reuses bounded real depth with curre
 Set both `StreamlineDepthSource=0` and `NGXDepthSource=0`, then restart to use the generic detector
 and its raw-scene policy.
 
+### Queue order
+
+Step 4 (10-27; owner ruling 10-24, the one exception to "no hooks before P14"). The native observer
+([`streamline_native_observer.cpp`](../tools/reshade/streamline_native_observer.cpp)) also hooks
+`ID3D12CommandQueue::Signal` (vtable slot 14) and `::Wait` (15), discovered with
+`ExecuteCommandLists` on every queue ReShade reports and every DLSS-G compute queue, and
+`ID3D12Fence::Signal` (10, the CPU signal), discovered at a fence's first sight inside one of
+those calls. It uses its own vtable-slot machinery, not MinHook. A pure model,
+[`queue_order.h`](../tools/reshade/queue_order.h), decides from these calls alone whether every
+call a reader queue submits from now on is ordered after a given submission on another queue. The
+add-on still never waits on the CPU for another queue and never inserts a GPU Wait into a game
+queue: it only observes the game's own signals and waits.
+
+**Positions.** Each hooked `ExecuteCommandLists`, `Signal` and `Wait` on a tracked queue takes a
+ticket `t = ++entered` at entry; a call is *quiet* when no later ticket of that queue was taken
+before its native call returned. A quiet call natively precedes every call with a larger ticket on
+its queue; a call that is not quiet is never the earlier side of an edge (`overlap`). The add-on's
+own calls (its copy-out lists) take their own tickets in the suppression scope; a proxy's call
+forwarded to the native queue shares its ticket.
+
+**Edges.** A wait of queue R on fence G for value w orders R after the first logged signal of G
+that reaches w, so after every quiet call its signalling queue made before that signal. Chains
+compose (render queue to DLSS-G's compute queue to its present queue). A wait counts only when it
+returned success; a hop queue's wait counts only when it was quiet and before the hop's signal the
+chain reached. A signal is logged before it is forwarded, so a fast GPU never shows a value no
+logged signal set; a failed signal leaves its entry, which only makes edges later. Waits resolve
+when logged, or when the first signal reaching their value is logged afterwards.
+
+**Fail-closed rules.** A fence never proves again (sticky poison, kept in the fence's own private
+data, so a model reset or an eviction never forgets it) once it is shared, cross-adapter or
+non-monitored, of another device, signalled by the CPU (hooked, whatever the result), by a second
+queue or by a queue without a record, signalled a decreasing value or `UINT64_MAX`, or read at a
+completed value no logged signal set. A fence is recorded only once its CPU Signal slot is hooked.
+Its completed value at first sight is its baseline: a wait at or below it is refused. Its first
+post-sight signal above every value seen settles it once read complete, which proves every
+pre-sight signal of that queue executed; a wait logged before that is refused. Every verdict is
+refused while an order slot is discovered but not installed, for a queue whose Execute, Signal and
+Wait slots are not all installed, after a ring dropped the deciding entry, and across devices. A
+new, replaced or rejected order slot resets the model at its next locked operation; it never
+revokes the capture owner's state evidence, which only the state family's slots do.
+
+**The residual.** No observation can exclude a signal of G to w or more that executes before the
+producer's signal and was submitted after the decision, or through a vtable the hooks never
+discovered, from another process, or as another queue's work submitted before the fence's first
+sight. A poison of a fence that a read relied on within the source age counts as `late_conflict`
+on the status line. The edge rests on the same ordering the game relies on to present its own
+colour.
+
+**Cost.** A Signal or Wait reads two private-data values and the fence's completed value and takes
+one exclusive lock for an O(1) append; an `ExecuteCommandLists` reads one private-data value and
+increments one atomic; queries walk the logged waits at most once per queue. The model is bounded:
+32 queues, 256 fences (least recently used dropped), 64 waits per queue, 32 signals and 8 pending
+waits per fence.
+
+`[SUNSHINE_DEPTH] QueueFenceOrder=0` in `ReShade.ini` turns the order family off: no order slot is
+discovered, `ExecuteCommandLists` takes no ticket and every use keeps its completion rule.
+
+The status line, at most every 10 s while its counts change:
+`Sunshine 3D queue order: hooks={signal= wait= fence_signal= pending=} queues= fences= settled=
+signals= waits= cpu_signals= poisoned={shared= foreign= cpu= second= monotonic= unobserved= removed=
+unrecorded=} refused={...} ordered= proofs={inflight=} evicted_waits= resets= cpu_unhooked=
+late_conflict=`, or once `Sunshine 3D queue order: disabled (QueueFenceOrder=0)`. The readiness
+report's "Queue order" check passes with the hooks installed and no late conflict, and warns when
+no Signal/Wait hook is installed with more than one queue, or on a late conflict.
+
 ### Depth jitter registration
 
 Valid Streamline or NGX TAA jitter travels with the immutable real-depth capture, independently

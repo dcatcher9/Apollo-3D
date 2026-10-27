@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
+#include "queue_order.h"
+
 #include <Windows.h>
 #include <cstdint>
 
@@ -90,6 +92,47 @@ namespace sunshine_streamline::native_observer {
   // Exact absence only. Malformed private data and driver errors are not a new
   // recording and must never permit lazy identity creation.
   bool recording_cookie_absent(std::uint64_t command);
+
+  // Queue order (Step 4; docs/reshade-sbs.md, Queue order). The observer
+  // also hooks ID3D12CommandQueue::Signal and ::Wait (discovered with
+  // ExecuteCommandLists by observe_queue) and ID3D12Fence::Signal (discovered
+  // at a fence's first sight in one of those), and gives each hooked
+  // Execute/Signal/Wait call on a tracked queue a ticket. Signals are logged
+  // before they are forwarded, waits after they returned success; the
+  // queue_order.h model judges, the host never waits for a queue and never
+  // adds a GPU Wait. Its slots are a separate invalidation family: their
+  // coverage changes reset the order model only, never the capture owner's
+  // evidence.
+  using position = sunshine_queue_order::position;
+  // QueueFenceOrder (default on). Off: no order slot is discovered,
+  // ExecuteCommandLists takes no ticket and every verdict is disabled.
+  void set_queue_order(bool enabled);
+  bool queue_order_enabled();
+  // The position of the latest positioned ExecuteCommandLists this thread
+  // made: the game's inside its submitted callback, the add-on's own right
+  // after its suppressed call returned. Empty without a ticket.
+  position last_execute_position();
+  // Whether every call submitted on reader (a live native queue the caller
+  // holds a reference to) from now on is ordered after producer.
+  sunshine_queue_order::verdict queue_ordered(std::uint64_t reader, position producer);
+  // A read that relied on an ordered verdict (late_conflict).
+  void queue_order_rely(const sunshine_queue_order::verdict &value);
+  // A released device (its native ID3D12Device pointer): its records go.
+  void queue_order_forget_device(std::uint64_t device);
+  struct queue_order_status {
+    bool enabled{};
+    unsigned signal_hooks{}, wait_hooks{}, fence_signal_hooks{}, pending{};
+    sunshine_queue_order::counts model{};
+    std::uint64_t ordered{}, resets{}, cpu_unhooked{};
+    std::uint64_t refused[static_cast<unsigned>(sunshine_queue_order::refusal::count)]{};
+  };
+  queue_order_status queue_order_counts();
+  // The native methods the observer hooks, as pinned by the hook-set test.
+  struct hooked_method {
+    const char *interface_name, *method;
+    unsigned slot;
+  };
+  const hooked_method *hooked_methods(unsigned &count);
 
   // Callbacks automatically suppress nested observer notifications. Use this
   // scope around capture-issued native work outside a callback as well.
