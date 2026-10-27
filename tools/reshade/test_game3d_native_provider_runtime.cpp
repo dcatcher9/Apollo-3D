@@ -3458,6 +3458,55 @@ namespace {
           game_ring.drain();
         }});
 
+      // U-C1 (docs/reshade-sbs.md, Queue order): the game queue's GPU waits
+      // for a gate the CPU opens only after the frame's Present returned, so
+      // each frame's copy (and its copy-out) is still in flight at that
+      // Present. The presenting queue waits for the game queue's signal after
+      // it, so the queue-order model orders the Present after the copy-out
+      // and the Present shows that frame's copy. With the completion rule
+      // alone the Present held an earlier copy (the revert proof). The
+      // add-on never waits: the Present's own GPU work waits for the gate.
+      com_ptr<ID3D12Fence> gate;
+      checked(game->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(gate.put())), "Create the game queue's gate");
+      std::uint64_t gate_value = 0, copy_tick = 0;
+      unsigned in_flight_frames = 0, in_flight_shown = 0;
+      run_script({"sr-other-queue-in-flight", 30000,
+        [&] {
+          configure_fg(false);
+          active_area = {0, 0, selected->width, selected->height};
+          render_tracked_depth = game_queue_sr;
+          for (const auto until = GetTickCount64() + sunshine_freshness::source_age_ms + 600; GetTickCount64() < until;)
+            present_frame();
+        },
+        [&] {
+          struct clear_hooks {
+            std::function<void()> &after;
+            ~clear_hooks() { after = {}; }
+          } hooks{after_present};
+          render_tracked_depth = [&] {
+            checked(game_ring.queue->Wait(gate.p, ++gate_value), "Hold the game queue until after its frame's Present");
+            copy_tick = GetTickCount64();
+            game_queue_sr();
+          };
+          after_present = [&] { checked(gate->Signal(gate_value), "Open the game queue's gate after the Present"); };
+          for (unsigned i = 0; i != 12; ++i) {
+            present_frame();
+            ++in_flight_frames;
+            in_flight_shown += newest_record().depth_tick_ms >= copy_tick;
+          }
+          log_status("SR-game-queue-in-flight", inspect());
+          std::printf("MEASURE native-provider in-flight copies shown=%u of %u\n", in_flight_shown, in_flight_frames);
+          // The first frame may still show the warm-up's copy while the model
+          // settles the gate's first sight; every later one shows its own.
+          require(in_flight_shown + 1 >= in_flight_frames,
+            "A Present ordered after the game queue's copy-out by the game's own fence did not show that frame's copy still in flight");
+        },
+        [&] {
+          render_tracked_depth = present_queue_sr;
+          settle("SR-presenting-queue-after-in-flight");
+          game_ring.drain();
+        }});
+
       // Generic: no API source (FG off, no SDK call past the association
       // window), and one depth-stencil view of the swapchain's size drawn
       // with no boundary but the end of the frame, on the game queue's list

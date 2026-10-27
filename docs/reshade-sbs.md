@@ -3896,7 +3896,9 @@ consumer uses queue order. A different consumer queue on the same device require
 producer submission and an immutable copy: its copy-out (below), else the producer recording's
 Reset/destruction. A still-replayable recording could overwrite the copy again; completion alone
 does not make it immutable. If the immutable copy is still in flight, source metadata remains
-selected but its pixels are unavailable until its private producer fence completes.
+selected but its pixels are unavailable until its private producer fence completes, or until the
+game's own fence waits order the reading queue after its copy-out ([Queue order](#queue-order),
+U-C1).
 
 **Copy-out on the producer queue** (10-27; `copy_out` in `streamline_depth_capture.cpp`). Games
 reset their lists late (Assassin's Creed Shadows every few frames), so with Reset as the only
@@ -3926,8 +3928,11 @@ compute queue too. A replay of the game's list is still refused as before. A cop
 out (the source's first copies, every ring list in flight, a failed list call) keeps the Reset
 rule; the counts are on the depth status line as `copy_out={made= ring_busy= failed=}`. The
 cost is one extra copy of the snapshot on the producer queue per copied-out snapshot and one more
-snapshot-sized allocation per slot for such a source. What remains of the session tests' known
-gap C1 is a copy still in flight at a Present with nothing younger to hold. The add-on never inserts a foreign-queue Wait for a
+snapshot-sized allocation per slot for such a source. Since Step 4 a copy-out still in flight is
+read as soon as the game's own fence waits order the reading queue after it
+([Queue order](#queue-order), U-C1). What remains of the session tests' known gap C1 is a source's
+first copies (no copy-out storage yet) whose recording has not retired, a copy whose queue's ring
+was all in flight, and a copy no observed fence wait orders before the Present. The add-on never inserts a foreign-queue Wait for a
 depth capture: the producer can already depend on future consumer work, so a reverse wait could
 deadlock the game. Flushing an immediate command list cannot prove that the application's queue
 graph is acyclic. (The offscreen UI layer's cross-queue copy follows the same rule since 10-06: it
@@ -4355,8 +4360,9 @@ has its SR/RR depth copied from the second frame without an FG copy, ready when 
 expires. A copy readable at its own Present (an FG tag's, or DLSS-G's on a direct list) is held
 past the first frame without one; DLSS-G's compute copy is readable only three of its evaluations
 later, so the held copy is older by then and expires at that frame's Present once real frames take
-about a quarter of the source age (one mono Present, until fence observation makes the compute copy
-readable at its own Present; the session tests' known gap C1). Assassin's Creed Shadows (10-24) untags its FG depth in every frame and so cancels almost
+about a quarter of the source age (one mono Present; since Step 4 the compute copy is readable at
+the next Present that DLSS-G's present queue orders after it, [Queue order](#queue-order), U-C1;
+the session tests' known gap C1 keeps the rest). Assassin's Creed Shadows (10-24) untags its FG depth in every frame and so cancels almost
 every deferred copy; the rare copy that survived kept the scope live for a second with no further
 FG copy, and FG On did the same, so that viewport showed neither FG nor SR depth for about a second
 each time. Until 10-26 (the continuity invariant's known gap C4) a frame without any FG call
@@ -5027,6 +5033,23 @@ discovered, from another process, or as another queue's work submitted before th
 sight. A poison of a fence that a read relied on within the source age counts as `late_conflict`
 on the status line. The edge rests on the same ordering the game relies on to present its own
 colour.
+
+**U-C1: in-flight reads** (the one use this round ships). A snapshot recorded on another queue
+than the one that reads it is readable once its producer fence completed (the rule before), or
+already when the model orders the reading queue after its producer position: the add-on's copy-out
+list on the producer queue, or, without a copy-out, the game's submission of a recording that has
+since retired (no replay can write it again). This applies where the add-on decides (the capture
+selection, the newest completed snapshot for a reading queue, the FG scope's acceptance of
+DLSS-G's compute copies on the queue that now reads depth) and where it reads: only on the
+runtime's immediate list, which its runtime executes on the presenting queue at that Present; any
+other consumer list keeps the completion rule. Slot reuse still waits for the producer and
+consumer fences. A read admitted this way counts as `proofs={inflight=}` on the status line and
+names its fences for `late_conflict`. Generic's proofs and API inputs without a state on their own
+list still never cross queues: the uses that would admit them (U-API: an API input proven on
+another queue; U-C2: Generic copying on its proving queue) were found unsound as first designed,
+because the add-on's barriers on a game resource would run without exclusive access or from a state
+that may no longer hold, and they wait for a redesign that decides at the execute point and copies
+without changing state.
 
 **Cost.** A Signal or Wait reads two private-data values and the fence's completed value and takes
 one exclusive lock for an O(1) append; an `ExecuteCommandLists` reads one private-data value and

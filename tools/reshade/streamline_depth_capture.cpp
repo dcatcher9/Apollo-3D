@@ -621,6 +621,27 @@ namespace sunshine_streamline::depth_capture {
     const std::shared_ptr<texture_reference> &read_storage(const slot &value) {
       return value.copied_out && value.published ? value.published : value.texture;
     }
+    // U-C1 (docs/reshade-sbs.md, Queue order): another queue reads an
+    // immutable snapshot once its producer fence completed, or before that
+    // once the queue-order model shows that every call consumer submits from
+    // now on is ordered after the snapshot's producer position (its copy-out
+    // list, else the game submission of a recording that has since retired).
+    // consumer 0 keeps the completion rule. The add-on never waits.
+    bool readable_elsewhere(const slot &value, std::uint64_t consumer, const queue_progress &progress,
+        sunshine_queue_order::verdict *relied = nullptr) {
+      if (!progress.valid() || !value.producer_fence) return false;
+      if (progress.completed >= value.producer_fence) return true;
+      if (!consumer || value.retirement_unknown || !value.producer_position) return false;
+      const auto verdict = native_observer::queue_ordered(consumer, value.producer_position);
+      if (relied) *relied = verdict;
+      return verdict.ordered;
+    }
+    // Requires mutex. The native queue of the newest acquisition (reader).
+    std::uint64_t reader_queue() {
+      for (const auto &entry : queues)
+        if (entry && reader && entry->cookie == reader && !entry->retiring) return reinterpret_cast<std::uint64_t>(entry->queue.p);
+      return 0;
+    }
     status diagnostic_admission(const slot &value, const queue_progress &progress) {
       if (value.diagnostic_released) return status::stale;
       if (value.invalid || (value.finished && !value.success)) return status::failed;
@@ -649,9 +670,10 @@ namespace sunshine_streamline::depth_capture {
       if (!immutable_for_other_queues(value)) return status::submitted;
       // The game may already order this producer after future consumer work.
       // Adding a reverse GPU Wait here can form a cycle, even after flushing
-      // the consumer's immediate list. Poll completion without adding an edge
-      // to the game's queue graph; pending source metadata remains admissible.
-      return progress.completed >= value.producer_fence ? status::ready : status::submitted;
+      // the consumer's immediate list. Poll completion, or read the game's own
+      // queue order (U-C1), without adding an edge to the game's queue graph;
+      // pending source metadata remains admissible.
+      return readable_elsewhere(value, native, progress) ? status::ready : status::submitted;
     }
     status nomination_status(const slot &value, std::uint64_t consumer_device) {
       if (!value.source_nominated || !value.id || !value.finished || !value.success || !value.producer_submitted)
@@ -839,8 +861,7 @@ namespace sunshine_streamline::depth_capture {
             !within_source_age(metadata.tick, now)) continue;
         if (!consumer || value.queue != consumer) {
           if (!immutable_for_other_queues(value)) continue;
-          const auto progress = producer_progress(value);
-          if (!progress.valid() || progress.completed < value.producer_fence) continue;
+          if (!readable_elsewhere(value, consumer, producer_progress(value))) continue;
         }
         if (!best || metadata.sequence > best->metadata.sequence ||
             (metadata.sequence == best->metadata.sequence && value.id > best->id)) best = &value;
@@ -1305,8 +1326,9 @@ namespace sunshine_streamline::depth_capture {
             return owned(view) && view.accepted_sequence < m.sequence; }) ||
           !immutable_for_other_queues(value))
         return;
-      const auto progress = producer_progress(value);
-      if (!progress.valid() || progress.completed < value.producer_fence) return;
+      // Readable on the queue that reads depth now (U-C1: ordered there by the
+      // game's own fences, or complete).
+      if (!readable_elsewhere(value, reader_queue(), producer_progress(value))) return;
       for (auto &view : views)
         if (owned(view)) {
           view.accepted_tick = std::max(view.accepted_tick, m.tick);
@@ -1391,6 +1413,9 @@ namespace sunshine_streamline::depth_capture {
       return out;
     }
     void submitted(std::uint64_t native, std::uint32_t count, const native_observer::command_identity *values) {
+      // This game submission's queue-order position, read before any list of
+      // the add-on's own runs on this thread (copy_out takes the next one).
+      const auto game_at = native_observer::last_execute_position();
       std::lock_guard lock(mutex);
       apply_executed(native, count, values);
       auto *owner = queue(native);
@@ -1409,6 +1434,8 @@ namespace sunshine_streamline::depth_capture {
       const bool needs_fence = auxiliary_used || needs_submission_fence(producers, consumers);
       const auto fence = needs_fence ? ++owner->next_fence : 0;
       const auto copied = depth_used ? copy_out(*owner, producers, fence) : std::array<bool, slot_limit>{};
+      const auto copy_at = std::find(copied.begin(), copied.end(), true) != copied.end() ?
+        native_observer::last_execute_position() : native_observer::position{};
       // This callback runs AFTER the actual native ExecuteCommandLists. Signal
       // therefore follows the copied/consumed pixels (and copy-outs) on this queue.
       const bool signaled = !needs_fence || SUCCEEDED(owner->queue->Signal(owner->fence.p, fence));
@@ -1418,6 +1445,10 @@ namespace sunshine_streamline::depth_capture {
         auto &value = slots[i];
         if (producers[i]) {
           producer_submitted(value, native, value.nomination_only ? 0 : fence, value.nomination_only || signaled);
+          // The position another queue's read must be ordered after (U-C1):
+          // the copy-out list, else this submission (read only once its
+          // recording retired). A replay moves it, as it moves the fence.
+          value.producer_position = copied[i] && signaled ? copy_at : game_at;
           if (copied[i] && signaled) {
             value.copied_out = true;
             copy_out_counters.made.fetch_add(1, std::memory_order_relaxed);
@@ -3764,11 +3795,19 @@ namespace sunshine_streamline::depth_capture {
         if (!entry.preservation_only && entry.queue != value.queue) {
           // Recheck the actual slot before recording any read. A pending copy
           // must never add a queue dependency to the application's schedule.
+          // A copy still in flight is read only on the runtime's immediate
+          // list, which its runtime executes on value.queue at this Present,
+          // once the game's own fences order that queue after it (U-C1).
           const auto *consumer = known_queue(value.queue);
           const auto progress = producer_progress(entry);
+          sunshine_queue_order::verdict relied;
           if (!consumer || consumer->retiring || !(reads_copy_out || producer_recording_retired(entry)) ||
-              !progress.valid() || !entry.producer_fence || progress.completed < entry.producer_fence)
+              !readable_elsewhere(entry, immediate ? value.queue : 0, progress, &relied))
             return result(consumer_status::capture_not_ready);
+          if (relied.ordered) {
+            order_inflight_reads.fetch_add(1, std::memory_order_relaxed);
+            native_observer::queue_order_rely(relied);
+          }
         }
         if (by_submission) entry.pending_immediate = submitted_list;
         else { entry.consumers[i] = cookie; entry.consumer_recordings[i] = recording.life(); }

@@ -252,6 +252,11 @@ namespace sunshine_streamline::depth_capture {
       // alive through consumer Reset AND GPU completion, including legal replay.
       source_ref auxiliary_destination;
       std::uint64_t id{}, command{}, queue{}, producer_fence{}, consumer_queue{};
+      // The queue-order position another queue's read must follow before
+      // producer_fence completed (U-C1, readable_elsewhere): the copy-out list
+      // once copied out, else the game's submission (read only once its
+      // recording retired); empty without a ticket.
+      native_observer::position producer_position;
       // Values are comparable only within their own private queue timeline.
       // Reset may discard recording identities, never these GPU obligations.
       std::array<fence_point, consumer_queue_limit> retirements{};

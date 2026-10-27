@@ -542,6 +542,26 @@ namespace {
     auto verdict = ordered(present, producer);
     require(verdict.ordered && verdict.fences[0], "a reader waiting on the producer's later signal is not ordered after it");
     require(!ordered(present, execute(render)).ordered, "a later submission is ordered before a wait that preceded it");
+    // Cost: each hooked call against its original on these fixtures (their
+    // private data is a short list, as the runtime's is), on a fence of its own.
+    {
+      order_object bench{fence_table.data(), object_kind::unknown, &device};
+      constexpr unsigned calls = 100000;
+      const auto per_call = [](auto &&call) {
+        const auto start = std::chrono::steady_clock::now();
+        for (unsigned i = 0; i != calls; ++i) call(i);
+        return std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - start).count() / calls;
+      };
+      require(signal(render, bench, 1) == S_OK, "bench fence sight failed");
+      const auto hooked_signal = per_call([&](unsigned i) { signal(render, bench, i + 2); });
+      const auto original_signal = per_call([&](unsigned i) { order_queue_signal(&render, &bench, calls + i + 2); });
+      const auto hooked_wait = per_call([&](unsigned i) { wait(present, bench, i + 2); });
+      const auto original_wait = per_call([&](unsigned i) { order_queue_wait(&present, &bench, i + 2); });
+      const auto hooked_execute = per_call([&](unsigned) { execute(render); });
+      const auto original_execute = per_call([&](unsigned) { order_execute(&render, 0, nullptr); });
+      std::printf("MEASURE queue-order hook ns/call: signal=%.0f (original %.0f) wait=%.0f (original %.0f) execute=%.0f (original %.0f)\n",
+        hooked_signal, original_signal, hooked_wait, original_wait, hooked_execute, original_execute);
+    }
     // A suppressed call (the add-on's copy-out) takes its own ticket.
     const auto game = execute(render);
     observer::position own;

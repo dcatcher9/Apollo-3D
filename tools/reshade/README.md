@@ -1785,16 +1785,24 @@ the run, and so does a row whose limitation was supplied in a run without a viol
 closed, and the fix removes the row). Each provider run with an interposer exercises both:
 
 - C1, SR depth on another queue (narrowed on 10-27 by the copy-out on the producer queue,
-  [docs](../../docs/reshade-sbs.md); gone with Step 4's fence observation): `sr-other-queue` warms
+  [docs](../../docs/reshade-sbs.md), and again by Step 4's in-flight reads,
+  [Queue order](../../docs/reshade-sbs.md#queue-order) U-C1): `sr-other-queue` warms
   up with the viewport's SR evaluation on the presenting queue (FG off), then records it on the
   game's own direct queue, a ring of 16 recordings each reset only when recorded into again and
   paced 20 ms apart, which the presenting queue waits for. Until 10-27 such a copy was readable
   only once its recording retired, after the source age here, so the Present lost depth once the
   presenting queue's last copy aged out (in Assassin's Creed Shadows 110-235 ms, about 30
   `no_completed_snapshot` losses a session); its copy-out is readable once its fence completed, so
-  the script now keeps depth and no longer supplies this row. What the row keeps is a copy still
-  in flight at a Present with nothing younger to hold, and a source's first copies before it is
-  known to be read on another queue (no copy-out storage yet). DLSS-G's own copies on its compute
+  the script now keeps depth and no longer supplies this row. `sr-other-queue-in-flight` holds the
+  game queue's GPU behind a gate the CPU opens only after each Present, so every copy is still in
+  flight at its Present; the presenting queue's wait for the game queue's signal orders it after
+  the copy-out, and each of its 12 Presents must show that frame's copy (with the completion rule
+  alone none did: `in-flight copies shown=0 of 12`). What the row keeps is a source's first copies
+  before it is known to be read on another queue (no copy-out storage yet) whose recording has not
+  retired, copies whose queue's copy-out ring was all in flight, and a copy no observed fence wait
+  orders before the Present. The session timelines' DLSS-G compute ring is waited for by the
+  presenting queue (as Streamline's present queue waits for DLSS-G's compute signal), so its
+  copy-outs are readable at the next Present. DLSS-G's own copies on its compute
   list (N7) are copied out on its compute queue the same way, and the session timelines tag their
   frames with this row too, the viewport's SR input
   among them: such a copy supplies its frame to a live FG scope, which keeps that SR input out while
@@ -1959,8 +1967,8 @@ decisions there); it failed 4 of 29 runs during this fix, each when the machine 
 model that hold: while a silent scope's display holds its own FG copy made since FG On, younger than
 the source age, the viewport's SR inputs are the scope's (`supply::owned`), as `frame_generation_holds`
 keeps them off-screen, so they leave no readable copy for later Presents, and the loss when
-DLSS-G's compute copy supersedes them is C1's (that copy is readable only frames later; with fence
-observation it is readable at its own Present). Whether `frame_generation_holds` should keep an FG
+DLSS-G's compute copy supersedes them is C1's (that copy was readable only frames later; since
+Step 4 it is readable at the next Present ordered after its copy-out). Whether `frame_generation_holds` should keep an FG
 copy over a readable SR copy at all (it spares the placement calibration a switch, and costs these
 losses until Step 4) awaits the owner.
 

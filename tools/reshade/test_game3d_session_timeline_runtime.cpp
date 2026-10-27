@@ -1334,7 +1334,8 @@ namespace {
       const bool observed = form == dlssg_form::direct || form == dlssg_form::compute;
       if (form == dlssg_form::compute || form == dlssg_form::compute_unobserved) {
         // DLSS-G's own compute recording after the game's work; the
-        // presenting queue reads its copy once DLSS-G reset that ring entry.
+        // presenting queue waits for its signal and reads its copy-out at the
+        // next Present (U-C1), or its copy once DLSS-G reset that ring entry.
         move(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         submit(false);
         begin_commands();
@@ -1354,7 +1355,9 @@ namespace {
         if (observed) {
           transition(compute, selected->resource.p, read, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         }
-        dlssg_work.execute(n);
+        // Streamline's present queue waits for DLSS-G's compute signal, so
+        // the Presents after this one are ordered after its copy-out (U-C1).
+        dlssg_work.execute(n, queue.p);
         recorded_elsewhere(continuity::dlssg_input, copied_out, dlssg_work.completion());
         if (observed) {
           other_queue_copy = GetTickCount64();
