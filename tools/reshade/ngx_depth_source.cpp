@@ -816,7 +816,7 @@ namespace sunshine_ngx {
     input.source = depth_capture::retain_source(value.resource.native, &diagnostic);
     input.source_present_generation = depth_capture::source_present_generation(input.source);
     if (input.source) {
-      attempt.ticket = depth_capture::nominate(command, input, &diagnostic);
+      attempt.ticket = nominating.nominate(command, input, &diagnostic);
       attempt.capture_authority = attempt.ticket && diagnostic.result == depth_capture::status::recorded;
     } else {
       // Preserve the existing admission/status path; retain_source's own

@@ -183,17 +183,26 @@ namespace sunshine_streamline::depth_capture {
     std::array<std::unique_ptr<queue_state>, queue_limit> queues;
     std::array<evaluation_namespace, provider_count> evaluations;
 
-    bool matching_evaluation(const evaluation_head &head, const input &value) {
-      return head.epoch == value.epoch && head.sequence == value.sequence && head.source_id == value.source_id &&
-        head.viewport == value.viewport;
+    // A nomination's identity: its evaluation's epoch, sequence, source and
+    // viewport.
+    evaluation_head nomination_of(const input &value) {
+      return {value.epoch, value.sequence, 0, value.source_id, value.viewport};
     }
-    void end_nomination(const input &value) {
+    bool same_nomination(const evaluation_head &a, const evaluation_head &b) {
+      return a.epoch == b.epoch && a.sequence == b.sequence && a.source_id == b.source_id && a.viewport == b.viewport;
+    }
+    bool matching_evaluation(const evaluation_head &head, const input &value) {
+      return same_nomination(head, nomination_of(value));
+    }
+    // Ends provider's nomination in progress when it is still this one.
+    void end_nomination(provider_kind provider, const evaluation_head &nomination) {
       std::lock_guard lock(mutex);
-      if (valid_provider(value.provider)) {
-        auto &pending = evaluations[provider_index(value.provider)].pending_nomination;
-        if (matching_evaluation(pending, value)) pending = {};
+      if (valid_provider(provider)) {
+        auto &pending = evaluations[provider_index(provider)].pending_nomination;
+        if (same_nomination(pending, nomination)) pending = {};
       }
     }
+    void end_nomination(const input &value) { end_nomination(value.provider, nomination_of(value)); }
 
     void invalidate(slot &value, capture_failure why) {
       if (value.failure == capture_failure::none) value.failure = why;
@@ -1706,25 +1715,52 @@ namespace sunshine_streamline::depth_capture {
     // good, so a presenting queue beyond them, or one recreated after them,
     // never recorded; Assassin's Creed Shadows (10-25) created 9 queues, its
     // presenting queue the 7th and one recreated mid-session.
+    // The entries in use are the first queue_execution_count, so a lookup
+    // scans only the queues that execute. A known queue's submission raises
+    // its newest execution under a shared hold (atomically, as submissions
+    // race), so only a queue's first one, or one after its entry was taken,
+    // holds the lock exclusively. Readers read newest under a shared hold.
     struct queue_execution { std::uint64_t queue{}, newest{}; };
     std::array<queue_execution, queue_limit> queue_executions{};
+    std::size_t queue_execution_count{};
     SRWLOCK queue_execution_lock = SRWLOCK_INIT;
+    void raise_execution(queue_execution &entry, std::uint64_t newest) {
+      std::atomic_ref<std::uint64_t> value(entry.newest);
+      auto seen = value.load(std::memory_order_relaxed);
+      while (seen < newest && !value.compare_exchange_weak(seen, newest, std::memory_order_relaxed)) {}
+    }
+    queue_execution *find_queue_execution(std::uint64_t queue) {
+      for (std::size_t i = 0; i != queue_execution_count; ++i)
+        if (queue_executions[i].queue == queue) return &queue_executions[i];
+      return nullptr;
+    }
     void note_queue_execution(std::uint64_t queue, std::uint64_t newest) {
       if (!queue) return;
+      AcquireSRWLockShared(&queue_execution_lock);
+      auto *known = find_queue_execution(queue);
+      if (known) raise_execution(*known, newest);
+      ReleaseSRWLockShared(&queue_execution_lock);
+      if (known) return;
       AcquireSRWLockExclusive(&queue_execution_lock);
-      auto *entry = &queue_executions.front();
-      for (auto &value : queue_executions) {
-        if (value.queue == queue) { entry = &value; break; }
-        if (value.newest < entry->newest) entry = &value;
+      auto *entry = find_queue_execution(queue);
+      if (!entry) {
+        if (queue_execution_count != queue_executions.size()) entry = &queue_executions[queue_execution_count++];
+        else {
+          entry = &queue_executions.front();
+          for (auto &value : queue_executions) if (value.newest < entry->newest) entry = &value;
+        }
+        *entry = {queue, 0};
       }
-      if (entry->queue != queue) *entry = {queue, 0};
       entry->newest = std::max(entry->newest, newest);
       ReleaseSRWLockExclusive(&queue_execution_lock);
     }
     void forget_queue_execution(std::uint64_t queue) {
       if (!queue) return;
       AcquireSRWLockExclusive(&queue_execution_lock);
-      for (auto &value : queue_executions) if (value.queue == queue) value = {};
+      if (auto *entry = find_queue_execution(queue)) {
+        *entry = queue_executions[--queue_execution_count];
+        queue_executions[queue_execution_count] = {};
+      }
       ReleaseSRWLockExclusive(&queue_execution_lock);
     }
     void observed_submission(std::uint64_t queue, std::uint32_t count, const native_observer::command_identity *values) {
@@ -2372,7 +2408,8 @@ namespace sunshine_streamline::depth_capture {
     queue = reinterpret_cast<std::uint64_t>(checked.p); // As the submission hook reports it.
     std::uint64_t newest{};
     AcquireSRWLockShared(&queue_execution_lock);
-    for (const auto &value : queue_executions) if (value.queue == queue) { newest = value.newest; break; }
+    if (auto *entry = find_queue_execution(queue))
+      newest = std::atomic_ref<std::uint64_t>(entry->newest).load(std::memory_order_relaxed);
     ReleaseSRWLockShared(&queue_execution_lock);
     return newest;
   }
@@ -2436,13 +2473,18 @@ namespace sunshine_streamline::depth_capture {
     // revoked SR depth for a frame or more). false: value is not the newest
     // evaluation, or (unless renewed) its nomination is already in progress
     // and its own caller ends it.
-    bool mark_pending(evaluation_namespace &current, const input &value, bool renewed) {
-      if (current.epoch != value.epoch || current.sequence != value.sequence || current.source_id != value.source_id ||
-          !value.epoch || !value.sequence || !value.source || !value.resource.native ||
-          (!renewed && matching_evaluation(current.pending_nomination, value)))
+    bool mark_pending(evaluation_namespace &current, const evaluation_head &nomination, bool renewed) {
+      if (current.epoch != nomination.epoch || current.sequence != nomination.sequence ||
+          current.source_id != nomination.source_id || !nomination.epoch || !nomination.sequence ||
+          (!renewed && same_nomination(current.pending_nomination, nomination)))
         return false;
-      current.pending_nomination = {value.epoch, value.sequence, GetTickCount64(), value.source_id, value.viewport};
+      current.pending_nomination = nomination;
+      current.pending_nomination.tick = GetTickCount64();
       return true;
+    }
+    // An adapter's input names its retained source and resource as well.
+    bool mark_pending(evaluation_namespace &current, const input &value, bool renewed) {
+      return value.source && value.resource.native && mark_pending(current, nomination_of(value), renewed);
     }
   }
   SUNSHINE_CAPTURE_STATIC bool begin_nomination(const input &value, std::uint64_t superseded_source_id) {
@@ -2456,20 +2498,14 @@ namespace sunshine_streamline::depth_capture {
     end();
     std::lock_guard lock(mutex);
     begin_evaluation_locked(epoch, sequence, viewport, provider, source_id, superseded_source_id);
-    if (!requested.load() || !valid_provider(provider) || !epoch || !sequence) return;
-    auto &current = evaluations[provider_index(provider)];
-    if (current.epoch != epoch || current.sequence != sequence || current.source_id != source_id) return;
-    current.pending_nomination = {epoch, sequence, GetTickCount64(), source_id, viewport};
-    nominated = {provider, epoch, sequence, source_id, viewport, true};
+    if (!requested.load() || !valid_provider(provider)) return;
+    const evaluation_head nomination{epoch, sequence, 0, source_id, viewport};
+    if (mark_pending(evaluations[provider_index(provider)], nomination, true))
+      nominated = {provider, epoch, sequence, source_id, viewport, true};
   }
   void evaluation_nomination::end() {
-    if (!nominated.pending) return;
-    nominated.pending = false;
-    std::lock_guard lock(mutex);
-    auto &pending = evaluations[provider_index(nominated.provider)].pending_nomination;
-    if (pending.epoch == nominated.epoch && pending.sequence == nominated.sequence &&
-        pending.source_id == nominated.source_id && pending.viewport == nominated.viewport)
-      pending = {};
+    if (!std::exchange(nominated.pending, false)) return;
+    end_nomination(nominated.provider, {nominated.epoch, nominated.sequence, 0, nominated.source_id, nominated.viewport});
   }
 
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
@@ -3077,6 +3113,14 @@ namespace sunshine_streamline::depth_capture {
     } completion{value, pending};
     return record_impl(command, value, diagnostic, false, nullptr, true);
   }
+  std::uint64_t evaluation_nomination::nominate(std::uint64_t command, const input &value, record_diagnostic *diagnostic) {
+    // Its own copy was published at begin; another value (or none begun)
+    // takes nominate's own path.
+    if (nominated.pending && nominated.provider == value.provider &&
+        same_nomination({nominated.epoch, nominated.sequence, 0, nominated.source_id, nominated.viewport}, nomination_of(value)))
+      return record_impl(command, value, diagnostic, false, nullptr, true);
+    return depth_capture::nominate(command, value, diagnostic);
+  }
   std::uint64_t nominate_evaluation(std::uint64_t command, const input &value,
       std::uint64_t superseded_source_id, record_diagnostic *diagnostic) {
     return nominate_evaluation(command, &value, 1, superseded_source_id, diagnostic);
@@ -3115,7 +3159,10 @@ namespace sunshine_streamline::depth_capture {
     } fallback;
     for (std::size_t i = 0; i < count; ++i) {
       record_diagnostic captured;
-      const auto ticket = nominate(command, candidates[i], &captured);
+      // A candidate of the nomination published above needs no second
+      // capture-lock round trip to find it published.
+      const auto ticket = pending ? record_impl(command, candidates[i], &captured, false, nullptr, true) :
+        nominate(command, candidates[i], &captured);
       if (diagnostic) *diagnostic = captured;
       if (!ticket) continue;
       if (captured.result == status::recorded) return ticket;

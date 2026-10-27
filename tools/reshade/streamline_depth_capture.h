@@ -408,6 +408,10 @@ namespace sunshine_streamline::depth_capture {
       sunshine_scene_depth::provider_kind provider, std::uint64_t source_id,
       std::uint64_t superseded_source_id = UINT64_MAX);
     void end();
+    // depth_capture::nominate for this nomination's copy, published at
+    // begin, without a second capture-lock round trip to find it published.
+    // Another value (or none begun) takes nominate's own path.
+    std::uint64_t nominate(std::uint64_t command, const input &value, record_diagnostic *diagnostic = nullptr);
   private:
     struct {
       sunshine_scene_depth::provider_kind provider{};

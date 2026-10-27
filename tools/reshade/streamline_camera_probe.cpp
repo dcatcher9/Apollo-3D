@@ -3923,7 +3923,7 @@ namespace sunshine_streamline {
           const bool live = depth_capture::frame_generation_scope_live(fg.epoch, fg.viewport, fg.enabled_tick);
           depth_capture::evaluation_nomination nominating;
           if (live) nominating.begin(fg.epoch, serial, fg.viewport, sunshine_scene_depth::provider_kind::streamline, source_id, 0);
-          const auto captured = depth_capture::nominate(value.command, input, &diagnostic);
+          const auto captured = nominating.nominate(value.command, input, &diagnostic);
           nominating.end();
           if (captured && diagnostic.result == depth_capture::status::recorded) {
             if (!live) depth_capture::begin_evaluation(fg.epoch, serial, fg.viewport,
