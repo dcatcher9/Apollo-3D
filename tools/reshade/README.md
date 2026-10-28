@@ -1799,6 +1799,13 @@ conflicted while the frame's own SR copy stands in; with the provider's O1 check
 hold, as at 1a7efdc1, frame 32 lost depth, 10-27, temporary build) pin both; a regression's
 `lossless` check counts losses only, not late reads.
 
+The session timelines' slow intervals (10-27), modelled rather than left to the machine's load,
+which made the full check's two failures of that day depend on timing: `hitch=` sleeps inside the
+frame, `brief` (half the source age, which every hold outlasts) or `before_sources` (the source age
+and 150 ms) right after the frame's stamp, before its calls, or `after_sources` (as long) after
+them, before its Present. No seed draws them (they come after the fence events in the family, and
+`generate` leaves them at their defaults, so every seed keeps its frames); event lists name them.
+
 The judge reads each Present's [frame record](../../docs/reshade-sbs.md#frame-record)
 (`SunshineGame3DTestFrameRecord`, copied in ReShade's `reshade_present` event) and the fixture's
 own supply log. Each frame function names, at the call that supplies it, what the frame supplies as
@@ -1830,8 +1837,12 @@ after the real Present two before; less 40 ms), unless a copy recorded on anothe
 become readable meanwhile. A violation is a gap (armed, a legal source, no depth), an unestablished
 source (no depth within its window), a dropped hold (that generated Present without depth), a
 stale one (a rung's pixels at least the source age, plus 40 ms for two steps of `GetTickCount64`,
-after the newest legal or permitted source of its kind: API for D1 and D2, Generic for D3) or
-`stale_shown` (the freshness rule above).
+after the newest legal or permitted source of its kind: API for D1 and D2, Generic for D3; a real
+Present's API copy captured inside the frame it presents, its capture tick no earlier than the
+frame's stamp, is that frame's own depth and age 0 however long the frame took: until 10-27 its age
+ran from the frame's first call, so the 10-27 full check's `C8-fg-off-color-only` failed at frame 39
+with age 672 ms after a 683 ms hitch inside that frame, before its SR evaluation, and
+`hitch-before-sources` pins it) or `stale_shown` (the freshness rule above).
 
 The native provider fixture judges every Present of its run in segments, each frame script and
 the session's frames between scripts, with a fresh judge each, so that no segment's state or loss
@@ -2200,7 +2211,8 @@ the C1 tagging of the frame after DLSS-G's last compute copy), one for C6's,
 `C5-frame-tag-then-evaluate`, `C5-global-tag-then-evaluate` and their untag forms
 `C5-frame-untag-then-evaluate` and `C5-global-untag-then-evaluate`, one for the FG On hold,
 `fg-on-holds-sr-copy`, and two for S11c's evaluate, `S11c-fg-until-evaluate-tag-then-evaluate` and
-`S11c-fg-global-until-evaluate-tag-then-evaluate`), an event list shaped like the
+`S11c-fg-global-until-evaluate-tag-then-evaluate`, and one for the stale rule's own-frame age,
+`hitch-before-sources`), an event list shaped like the
 session it fixed and judged as any
 timeline (random seeds meet these shapes only by chance, and a change of the event language changes
 every seed), and one witness per open row the timelines found or carry (none is open since C5 closed
@@ -2209,7 +2221,7 @@ run; a witness that loses none fails the set, as the matrix's gap seeds keep a r
 failing cell. `--trace` prints every Present's
 frame record, the supply it was judged with and each recorded refusal.
 
-`reshade_session_timelines` runs the fixed set (24 seeds and nineteen regression timelines, about
+`reshade_session_timelines` runs the fixed set (24 seeds and 24 regression timelines, about
 4290 frames and 10170 Presents) in about 160 s, registered like
 `reshade_native_provider_continuity` with the same 240 s timeout. Locally:
 

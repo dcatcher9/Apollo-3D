@@ -27,7 +27,11 @@
 //   signaller), before the Present or only after it (a late signaller);
 //   each fence is created anew at each FG toggle, as a game recreates its
 //   frame-generation objects. These are drawn from a stream of their own,
-//   so every seed keeps the frames it had before them (10-27).
+//   so every seed keeps the frames it had before them (10-27);
+// - the frame's slow intervals, modelled rather than left to the machine's
+//   load (10-27): a hitch of the frame's recording before its calls (brief,
+//   or the source age and more) or after them, before its Present. No seed
+//   draws them; event lists (regressions, --events) name them.
 // Each dimension keeps the previous frame's value with a chance or is drawn
 // anew (test_contract_matrix_generator.h, sample), so a timeline has the
 // stretches a game has and any frame may change anything.
@@ -109,6 +113,7 @@ namespace {
       at,
       ui,
       order,
+      hitch,
       dimension_count
     };
 
@@ -212,6 +217,21 @@ namespace {
       late
     };
 
+    // A hitch of the frame's recording (hitch_ms): brief, before its calls
+    // (half the source age, which every hold outlasts); before_sources, the
+    // source age and more right after the frame's stamp, before its calls;
+    // after_sources, the same after its calls, before its Present.
+    enum class hitch_form {
+      none,
+      brief,
+      before_sources,
+      after_sources
+    };
+
+    constexpr DWORD hitch_ms(hitch_form value) {
+      return value == hitch_form::brief ? DWORD(sunshine_freshness::source_age_ms / 2) : value == hitch_form::none ? 0 : DWORD(sunshine_freshness::source_age_ms + 150);
+    }
+
     template<class E>
     E of(const generator::row &value, dimension d) {
       return E(value[d]);
@@ -260,19 +280,20 @@ namespace {
           {"at", {"between", "inside", "evaluate"}},
           {"ui", {"none", "bare", "listed", "untagged"}},
           {"order", {"wait", "wait_first", "cpu_wait", "cpu", "second", "late"}},
+          {"hitch", {"none", "brief", "before_sources", "after_sources"}},
         },
         legal,
       };
       return value;
     }
 
-    // The frame language before the fence events, which generate draws as
-    // it did, so that each seed keeps its frames (legal reads no fence
-    // event).
+    // The frame language before the fence events and the slow intervals,
+    // which generate draws as it did, so that each seed keeps its frames
+    // (legal reads neither).
     const generator::family &base_family() {
       static const generator::family value = [] {
         auto out = family();
-        out.dimensions.pop_back();
+        out.dimensions.resize(order);
         return out;
       }();
       return value;
@@ -481,6 +502,14 @@ namespace {
     // dropped hold there R1-late-signaller (excused at any age).
     {"O1-late-signal-presenting-copy-held", "20*sr=other_queue; fg=on,tag=now_list,sr=other_queue,generated=1; 5*tag=now_list,sr=other_queue,generated=1; tag=now_list,sr=other_queue,order=late,generated=1; 10*tag=now_list,sr=other_queue,generated=1", true},
     {"fg-on-holds-sr-copy", "20*sr=local; fg=on,tag=now_list,sr=local,generated=1,at=evaluate; 5*tag=now_list,sr=local,generated=1; fg=off,sr=local; 10*sr=local; fg=on,tag=now_list,generated=1,at=inside; 5*tag=now_list,generated=1; fg=off,sr=local; 10*sr=local; fg=on,tag=now_list,sr=local,generated=1,at=evaluate; 5*sr=local,generated=1"},
+    // A hitch of the source age and more inside a frame, before its SR
+    // evaluation (on the presenting queue's list, then on the game's own
+    // queue): its Present shows that frame's own copy, made after the hitch,
+    // whose source is no older than the frame (until 10-27 the judge aged it
+    // by the frame's own duration, from its first call: the 10-27 full
+    // check's C8-fg-off-color-only failure, continuity:stale at frame 39 with
+    // age 672 ms, after a 683 ms Present gap there).
+    {"hitch-before-sources", "20*sr=local; sr=local,hitch=before_sources; 10*sr=local; 5*sr=other_queue; sr=other_queue,hitch=before_sources; 10*sr=other_queue"},
   };
 
   // Each known gap the timelines found has a witness: an event list whose
@@ -525,6 +554,8 @@ namespace {
         }
       }
       out.frames[i].push_back(value);
+      // No slow interval: event lists name them.
+      out.frames[i].resize(events::family().dimensions.size());
     }
     events::normalize(out.frames);
     return out;
@@ -1353,6 +1384,11 @@ namespace {
       draw(*decoy);
       supply.permitted |= continuity::generic_boundary;
       supply.tick = GetTickCount64();
+      // A hitch before the frame's calls, after its stamp.
+      const auto hitch = of<hitch_form>(value, events::hitch);
+      if (hitch == hitch_form::brief || hitch == hitch_form::before_sources) {
+        Sleep(hitch_ms(hitch));
+      }
       require(selected->state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "A timeline frame began with its depth outside UNORDERED_ACCESS");
       write_depth_pixels();
       const auto choice = state_choice();
@@ -1595,6 +1631,10 @@ namespace {
           continue;
         }
         continuity_log.pending.completes(value.sources, value.probe, value.relied);
+      }
+      // A hitch after the frame's calls, before its Present.
+      if (hitch == hitch_form::after_sources) {
+        Sleep(hitch_ms(hitch));
       }
     }
 
@@ -1910,7 +1950,7 @@ namespace {
         }
       };
       // Each event kind back to its default in every frame.
-      for (const auto d : {order, ui, generated, drs, untag, dlssg, state, entry, sr, tag, fg}) {
+      for (const auto d : {hitch, order, ui, generated, drs, untag, dlssg, state, entry, sr, tag, fg}) {
         auto candidate = current;
         for (auto &value : candidate) {
           reset(value, d);

@@ -6,7 +6,9 @@
 // and a hold a generated Present drops after such a signal is
 // R1-late-signaller's only where the real Present showed such a copy. A copy
 // from another queue that completed after the add-on's decision neither
-// excuses nor demands a mono Present there.
+// excuses nor demands a mono Present there. A real Present's copy captured
+// inside the frame it presents is no older than that frame for the stale
+// rule, however long the frame took.
 #include "test_game3d_continuity.h"
 
 #include <cstdint>
@@ -172,6 +174,60 @@ namespace {
     }
   }
 
+  // The stale rule ages the newest source at the Present, except a real
+  // Present's copy captured inside the frame it presents (the 10-27 full
+  // check's C8-fg-off-color-only, frame 39: a 683 ms hitch inside the frame,
+  // before its SR evaluation, then that frame's own copy shown, judged
+  // stale at age 672). A held copy shown after such a hitch, inside a frame
+  // with or without an API source, or after a hitch between frames, stays
+  // stale.
+  void stale_rule_ages_a_frames_own_copy_from_its_capture() {
+    struct trial {
+      // The hitch: inside the frame (after its stamp) or before it.
+      bool inside, api;
+      // The shown copy: the frame's own (captured after the hitch), else
+      // the last copy before the hitch.
+      bool own;
+      bool stale;
+      const char *message;
+    };
+    const trial trials[] {
+      {true, true, true, false, "a Present that showed its frame's own copy after a hitch inside that frame was stale"},
+      {true, true, false, true, "a Present that held an older copy after a hitch inside its API frame was not stale"},
+      {true, false, false, true, "a Present that held a copy after a hitch inside a frame with no API source was not stale"},
+      {false, false, false, true, "a Present that held a copy after a hitch between frames was not stale"},
+    };
+    for (const auto &value : trials) {
+      continuity::judge judge;
+      std::uint64_t now = 1000, present = 1;
+      for (int i = 0; i != 4; ++i, now += 16) {
+        continuity::supply frame;
+        frame.add(continuity::sr_evaluate, now);
+        judge.present(shown(present++, now, source_slot::scene_depth, now), frame, "test");
+      }
+      const auto copied = now - 16;
+      const auto stamp = value.inside ? now : now + 400;
+      const auto at = now + 416;
+      continuity::supply frame;
+      if (value.api) {
+        frame.add(continuity::sr_evaluate, stamp);
+      } else {
+        frame.allow(continuity::generic_boundary, stamp);
+      }
+      auto record = shown(present++, at, source_slot::scene_depth, value.own ? at - 2 : copied);
+      if (!value.own) {
+        record[source_slot::scene_depth].state = source_state::held;
+      }
+      judge.take();
+      judge.present(record, frame, "test");
+      bool stale = false;
+      for (const auto &violation : judge.take()) {
+        stale = stale || violation.kind == continuity::violation_kind::stale;
+      }
+      require(stale == value.stale, value.message);
+    }
+  }
+
   // Two copies of one frame from another queue, one read through fence_a,
   // the other readable with no fence (complete): a late signal of fence_a
   // makes only the first unholdable, so a following frame whose own copy
@@ -206,11 +262,13 @@ int main() {
   generated_drop_after_late_signal();
   late_signal_conflicts_only_its_copies();
   unordered_copy_completed_after_decision();
+  stale_rule_ages_a_frames_own_copy_from_its_capture();
   if (failures) {
     return EXIT_FAILURE;
   }
   std::puts("PASS continuity judge: a late signal conflicts only the copies read through its fence; a generated "
             "Present's dropped hold is R1's only where the real Present showed such a copy; a copy that completed "
-            "after the add-on's decision is no holdable copy there");
+            "after the add-on's decision is no holdable copy there; a frame's own copy is no older than its frame "
+            "for the stale rule");
   return EXIT_SUCCESS;
 }

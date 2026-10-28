@@ -520,10 +520,22 @@ namespace game3d_continuity {
           }
         }
         // The newest source of the shown rung's kind; a tick ahead of the
-        // record's (another read of the clock) is age 0.
+        // record's (another read of the clock) is age 0. So is a real
+        // Present's API copy captured inside the frame it presents (its
+        // capture tick no earlier than the frame's stamp, both reads of one
+        // clock): that frame's own depth, however long the frame took. Until
+        // 10-27 its age ran from the frame's first call to the Present, so a
+        // hitch inside the frame before its SR evaluation made the frame's
+        // own fresh copy stale (the 10-27 full check's C8-fg-off-color-only,
+        // frame 39: age 672 ms after a 683 ms Present gap). An older copy
+        // shown there, or any copy of a frame with no API source, keeps the
+        // age since the newest source.
         const auto newest = generic ? newest_generic_ : newest_api_;
+        const bool own_frame = !generated && !generic && frame.tick && record.depth_tick_ms >= frame.tick;
         std::uint64_t age = now;
-        if (newest) {
+        if (own_frame) {
+          age = 0;
+        } else if (newest) {
           age = now > newest ? now - newest : 0;
         }
         if (!newest || age >= sunshine_freshness::source_age_ms + tick_slack_ms) {
