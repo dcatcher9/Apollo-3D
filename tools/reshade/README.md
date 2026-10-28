@@ -1710,8 +1710,8 @@ the Present: its own legal source (one that meets no limitation and that no live
 out) of a frame before the one the Present presents (a copy deferred to its frame's Present, R2,
 is read at the Present after it), and a legal copy recorded on another queue (`supply::elsewhere`)
 that the contract copies out ([Copy-out on the producer
-queue](../../docs/reshade-sbs.md)) and that the judge saw complete at an earlier Present (its
-fence, `supply::completions`). The fixture models the contract, never the add-on's report: a copy
+queue](../../docs/reshade-sbs.md)) and that the judge saw complete at an earlier Present or right
+before this Present's call (`judge::before_present`; its fence, `supply::completions`). The fixture models the contract, never the add-on's report: a copy
 recorded on another queue is copied out when a copy of its source was submitted on such a queue
 within the source age before it was recorded; a source's first copy elsewhere keeps the Reset rule,
 past the source age in every fixture, and never counts. A Present is `stale_shown` when the
@@ -1775,8 +1775,11 @@ waited) or ordered by a settled fence that no CPU or second signal reached (a re
 names that fence). Either way it stays legal with its completion for the freshness rule. A frame
 whose Present can read none of its legal sources (its copies elsewhere not readable there, and its
 SR input, if any, kept out by a live FG scope) is `unordered`: its Present may go mono only once no
-copy it could read is younger than the source age (`judge::holdable`), and any other loss there
-is a gap. The first CPU, second or late signal of a fence makes the copies read through it
+copy it could read is younger than the source age (`judge::holdable`, read as of the add-on's
+decision: a copy whose work completed between that decision and the judge's record neither
+excuses nor demands anything there; until 10-27 it made the mono a gap, so seed
+c28965dca8d7c76c's frame 38 failed or passed by when DLSS-G's compute copy completed), and any
+other loss there is a gap. The first CPU, second or late signal of a fence makes the copies read through it
 unholdable from then on (`judge::late_signal`), as O1 stops holding such a read: each copy names
 its own fence (`supply::completion::relied`), the fixture's token of that fence object, new at
 each FG toggle (until the 10-27 review every copy of a frame took the frame's fences, keyed by a

@@ -4,7 +4,9 @@
 // add-on regression. A late signal of a game's order fence makes only the
 // copies read through that fence unholdable (each copy names its own fence),
 // and a hold a generated Present drops after such a signal is
-// R1-late-signaller's only where the real Present showed such a copy.
+// R1-late-signaller's only where the real Present showed such a copy. A copy
+// from another queue that completed after the add-on's decision neither
+// excuses nor demands a mono Present there.
 #include "test_game3d_continuity.h"
 
 #include <cstdint>
@@ -119,6 +121,57 @@ namespace {
     }
   }
 
+  // Seed c28965dca8d7c76c's frame 38 (10-27 full check): the presenting
+  // queue's last copy is held for the source age through frames that supply
+  // nothing, then FG On's first frame supplies only DLSS-G's compute copy,
+  // which its own Present cannot read (unordered: the order fence is new at
+  // the toggle). The add-on goes mono there. Whether that copy completed
+  // between the add-on's decision and the judge's record must not decide
+  // the verdict; one complete before the Present call must (the add-on could
+  // read it), and so must a live hold.
+  void unordered_copy_completed_after_decision() {
+    struct trial {
+      std::uint64_t held_ms;
+      bool complete_before_present, complete_at_record, gap;
+      const char *message;
+    };
+    const trial trials[] {
+      {250, false, true, false, "an unordered frame's copy that completed after the add-on's decision made its expired hold's mono Present a gap"},
+      {250, false, false, false, "an unordered frame's mono Present after its hold expired was judged a gap"},
+      {250, true, true, true, "an unordered frame's copy complete before its Present call did not make a mono Present a gap"},
+      {150, false, false, true, "a mono Present that dropped a live hold was not judged a gap"},
+    };
+    for (const auto &value : trials) {
+      continuity::judge judge;
+      std::uint64_t now = 1000, present = 1;
+      for (int i = 0; i != 4; ++i, now += 16) {
+        continuity::supply frame;
+        frame.add(continuity::sr_evaluate, now);
+        judge.present(shown(present++, now, source_slot::scene_depth, now), frame, "test");
+      }
+      const auto copied = now - 16;
+      for (std::uint64_t at = copied + 16; at < copied + value.held_ms; at += 16) {
+        auto held = shown(present++, at, source_slot::scene_depth, copied);
+        held[source_slot::scene_depth].state = source_state::held;
+        judge.present(held, {}, "test");
+      }
+      now = copied + value.held_ms;
+      bool completed = value.complete_before_present;
+      continuity::supply frame;
+      frame.add_elsewhere(continuity::dlssg_input, now, [&completed] {
+        return completed;
+      });
+      frame.unordered = true;
+      judge.before_present(frame);
+      completed = value.complete_at_record;
+      judge.take();
+      judge.present(mono(present++, now), frame, "test");
+      const auto violations = judge.take();
+      const bool gap = violations.size() == 1 && violations[0].kind == continuity::violation_kind::gap;
+      require(value.gap ? gap : violations.empty(), value.message);
+    }
+  }
+
   // Two copies of one frame from another queue, one read through fence_a,
   // the other readable with no fence (complete): a late signal of fence_a
   // makes only the first unholdable, so a following frame whose own copy
@@ -152,10 +205,12 @@ namespace {
 int main() {
   generated_drop_after_late_signal();
   late_signal_conflicts_only_its_copies();
+  unordered_copy_completed_after_decision();
   if (failures) {
     return EXIT_FAILURE;
   }
   std::puts("PASS continuity judge: a late signal conflicts only the copies read through its fence; a generated "
-            "Present's dropped hold is R1's only where the real Present showed such a copy");
+            "Present's dropped hold is R1's only where the real Present showed such a copy; a copy that completed "
+            "after the add-on's decision is no holdable copy there");
   return EXIT_SUCCESS;
 }

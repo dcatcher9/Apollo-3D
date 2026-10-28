@@ -722,6 +722,8 @@ namespace {
       reshade::register_event<reshade::addon_event::reset_command_list>(observe_reset);
       // Every provider status line from here on must name a recorded Present.
       reshade::register_event<reshade::addon_event::reshade_present>(record_present);
+      // What completed before a real Present's decision (judge::before_present).
+      before_present = [] { if (!continuity_log.generated) continuity_log.judge.before_present(continuity_log.pending); };
       for (const auto until = GetTickCount64() + 300; GetTickCount64() < until;) { step(); no_effects(); }
       matched_lines = provider_lines().size();
     }

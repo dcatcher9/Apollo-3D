@@ -199,6 +199,8 @@ namespace {
     // Queue work the game submits after its Present returns and before the
     // fixture's completion signal (a later presenting-queue signal).
     std::function<void()> after_present;
+    // Right before the natural Present call, after the frame's submissions.
+    std::function<void()> before_present;
     // The next submit signals its completion value but does not wait for it,
     // so the CPU records the next frame while this one is still queued (the
     // caller records it with another allocator; the next waiting submit
@@ -285,6 +287,7 @@ namespace {
       ID3D12CommandList *lists[] {commands.p};
       queue->ExecuteCommandLists(1, lists);
       if (present) {
+        if (before_present) before_present();
         checked(swapchain->Present(0, 0), "Actual natural D3D12 game Present");
         if (after_present) after_present();
       }

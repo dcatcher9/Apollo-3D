@@ -189,6 +189,9 @@ namespace game3d_continuity {
       std::uint8_t sources {};
       std::function<bool()> probe;
       const void *relied {};
+      // Its work completed before its frame's Present call
+      // (judge::before_present): readable at that Present's decision.
+      bool done_before_present {};
     };
     std::vector<completion> completions;
 
@@ -475,12 +478,20 @@ namespace game3d_continuity {
       }
       const auto owner = record.depth_owner;
       const auto &row = owner == source_slot::none ? record[source_slot::hold] : record[owner];
-      // The freshness rule reads what was certainly readable before this
-      // Present's decision, then looks at the copies from other queues again.
+      // The freshness rule and holdable read what was certainly readable
+      // before this Present's decision (complete at an earlier look, or at
+      // before_present), then look at the copies from other queues again: a
+      // copy whose work completed between the add-on's decision and this
+      // record (its frame's own, or an earlier frame's) was not readable at
+      // that decision, so it neither excuses nor demands anything here
+      // (until 10-27 holdable read it after that look, so an unordered
+      // frame's mono Present was a gap or not by when DLSS-G's copy
+      // completed: seed c28965dca8d7c76c, frame 38).
       std::pair<unsigned, std::uint64_t> fresher {};
       if ((owner == source_slot::fg_depth || owner == source_slot::scene_depth) && record.depth_tick_ms) {
         fresher = readable_after(record.depth_tick_ms, owner == source_slot::fg_depth ? fg_depth_sources : scene_depth_sources);
       }
+      const bool could_hold = holdable(now);
       look();
       // frame: the supply the violation is judged with (a generated
       // Present's is the frame it presents).
@@ -558,7 +569,7 @@ namespace game3d_continuity {
       // frame with no legal source. With such a copy, the loss is judged as
       // any (until 10-27 such sources were permitted there, which disarmed
       // the judge until the next legal frame showed depth).
-      if (!frame.legal || (frame.unordered && !holdable(now))) {
+      if (!frame.legal || (frame.unordered && !could_hold)) {
         armed_ = false;
         return;
       }
@@ -606,6 +617,16 @@ namespace game3d_continuity {
     void late_signal(const void *fence) {
       for (auto &copy : copies_) {
         copy.conflicted = copy.conflicted || (fence && copy.relied == fence);
+      }
+    }
+
+    // Right before a real Present call, after its frame's last submission:
+    // the copies from other queues complete now, the frame's own (pending)
+    // among them, completed before that Present's decision.
+    void before_present(supply &pending) {
+      look();
+      for (auto &value : pending.completions) {
+        value.done_before_present = value.probe && value.probe();
       }
     }
 
@@ -679,7 +700,7 @@ namespace game3d_continuity {
         copies_.push_back({stamp, frames_, own, {}});
       }
       for (const auto &value : frame.completions) {
-        copies_.push_back({stamp, frames_, value.sources, value.probe, false, value.relied});
+        copies_.push_back({stamp, frames_, value.sources, value.probe, value.done_before_present, value.relied});
       }
       while (!copies_.empty() && copies_.front().stamp + sunshine_freshness::source_age_ms + tick_slack_ms < now) {
         copies_.pop_front();
