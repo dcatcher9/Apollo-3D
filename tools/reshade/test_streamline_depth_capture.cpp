@@ -1341,7 +1341,9 @@ namespace sunshine_streamline::depth_capture {
       std::uint64_t present = 0;
 
       // (a)+(f) A late SL capture took ownership and SL then stopped. Its
-      // expired source must neither hide pipelined NGX nor mark a gap.
+      // expired source must neither hide pipelined NGX nor revoke NGX's
+      // captures (taking ownership makes only copies recorded before NGX's
+      // historical, establish_provider).
       {
         restart();
         auto &owner = fresh_owner();
@@ -1353,7 +1355,8 @@ namespace sunshine_streamline::depth_capture {
         expire(sl, owner);
         advance(ngx_source);
         const auto first = present_frame(owner, ++present);
-        if (first.latest != ngx_source.pending || !pending_result(first) || owner.admission_after) return false;
+        if (first.latest != ngx_source.pending || !pending_result(first) || owner.admission_after >= first.latest->id)
+          return false;
         auto &completed = *ngx_source.pending;
         advance(ngx_source);
         if (!completed_pick(present_frame(owner, ++present), &completed) || owner.provider != provider_kind::ngx) return false;
@@ -1420,7 +1423,7 @@ namespace sunshine_streamline::depth_capture {
         auto sl = streamline();
         advance(sl);
         const auto first = present_frame(owner, ++present);
-        if (first.latest != sl.pending || !pending_result(first) || owner.admission_after) return false;
+        if (first.latest != sl.pending || !pending_result(first) || owner.admission_after >= first.latest->id) return false;
         auto &completed = *sl.pending;
         advance(sl);
         if (!completed_pick(present_frame(owner, ++present), &completed) || owner.provider != provider_kind::streamline) return false;
@@ -1586,14 +1589,19 @@ namespace sunshine_streamline::depth_capture {
         owner.last_source_tick -= sunshine_freshness::source_age_ms + 1;
         const auto gap = owner.admission_after;
         fail(); advance(other);
+        // The other source's pending capture, which may take ownership by its
+        // nomination: never revoked, and the owner's earlier copies become
+        // historical (establish_provider).
         const auto handover = present_frame(owner, ++present);
         if ((handover.value && handover.value != other.pending) || handover.latest != other.pending ||
-            !pending_result(handover) || owner.admission_after != gap) return false;
+            !pending_result(handover) || owner.admission_after < gap || owner.admission_after >= other.pending->id)
+          return false;
+        const auto taken = owner.admission_after;
         for (unsigned frame = 0; frame != 2; ++frame) {
           auto &completed = *other.pending;
           fail(); advance(other);
           if (!completed_pick(present_frame(owner, ++present), &completed) ||
-              owner.provider == owner_kind || owner.admission_after != gap) return false;
+              owner.provider == owner_kind || owner.admission_after != taken) return false;
         }
       }
       // Required FG keeps its mandatory SL scope: a pipelined FG source uses

@@ -1228,6 +1228,16 @@ namespace sunshine_streamline::depth_capture {
       return ngx;
     }
     void establish_provider(queue_state &owner, const slot &value, std::uint64_t present) {
+      // Ownership moving to the other provider ends the previous provider's
+      // presentation: every copy recorded before the new owner's (its own
+      // older ones too) is historical. The consumed watermark below restarts
+      // and cannot compare the two namespaces' sequences, so without this the
+      // previous provider's copy already shown, or one older than the new
+      // owner's, could be selected again and flip ownership back whenever no
+      // interruption revoked them. Copies recorded after it, of either
+      // provider, stay admissible.
+      if (owner.provider_established && owner.provider != value.metadata.provider && value.id)
+        owner.admission_after = std::max(owner.admission_after, value.id - 1);
       if (!owner.provider_established || owner.provider != value.metadata.provider ||
           owner.source_id != value.metadata.source_id || owner.nominated_epoch != value.metadata.epoch)
         owner.last_epoch = owner.last_sequence = owner.last_source_tick = 0;

@@ -786,6 +786,9 @@ namespace sunshine_streamline::depth_capture {
       {
         // establish_provider keeps the delivered watermark for the same exact
         // source and restarts it for any other provider, source or epoch.
+        // Ownership moving to the other provider also makes every copy
+        // recorded before the new owner's historical (admission_after): the
+        // restarted watermark cannot compare the two namespaces' sequences.
         reset();
         queue_state owner;
 
@@ -793,22 +796,24 @@ namespace sunshine_streamline::depth_capture {
           provider_kind provider;
           std::uint64_t epoch, sequence, source;
           std::uint64_t kept_sequence;  // The watermark after establishing (0: restarted).
+          bool historical;  // admission_after is the new owner's copy's id - 1 (else 0).
         };
 
         const step steps[] {
-          {provider_kind::ngx, epoch, 1, ngx_source, 0},
-          {provider_kind::ngx, epoch, 2, ngx_source, 1},
-          {provider_kind::ngx, epoch + 1, 1, ngx_source, 0},
-          {provider_kind::ngx, epoch + 1, 2, ngx_source + 1, 0},
-          {provider_kind::streamline, epoch + 1, 3, ngx_source + 1, 0},
+          {provider_kind::ngx, epoch, 1, ngx_source, 0, false},
+          {provider_kind::ngx, epoch, 2, ngx_source, 1, false},
+          {provider_kind::ngx, epoch + 1, 1, ngx_source, 0, false},
+          {provider_kind::ngx, epoch + 1, 2, ngx_source + 1, 0, false},
+          {provider_kind::streamline, epoch + 1, 3, ngx_source + 1, 0, true},
         };
         unsigned index = 0;
         for (const auto &s : steps) {
           auto &value = make(index % 2, s.provider, s.epoch, s.sequence, s.source);
           establish_provider(owner, value, 10 + index);
-          if (!owner.provider_established || owner.provider != s.provider || owner.source_id != s.source || owner.nominated_epoch != s.epoch || owner.present != 10 + index || owner.present_capture != value.id || owner.last_sequence != s.kept_sequence) {
+          if (!owner.provider_established || owner.provider != s.provider || owner.source_id != s.source || owner.nominated_epoch != s.epoch || owner.present != 10 + index || owner.present_capture != value.id || owner.last_sequence != s.kept_sequence ||
+              owner.admission_after != (s.historical ? value.id - 1 : 0)) {
             char text[256];
-            std::snprintf(text, sizeof(text), "P6 establish_provider, step %u: watermark %llu", index, static_cast<unsigned long long>(owner.last_sequence));
+            std::snprintf(text, sizeof(text), "P6 establish_provider, step %u: watermark %llu admission %llu", index, static_cast<unsigned long long>(owner.last_sequence), static_cast<unsigned long long>(owner.admission_after));
             fail(text);
           }
           deliver(owner, value);
