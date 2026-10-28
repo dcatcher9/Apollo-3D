@@ -1575,8 +1575,10 @@ namespace sunshine_streamline::depth_capture {
           }
         }
         if (r.change == v::retired) {
-          // FG Off retires the FG source, its copies with it; FG On follows.
+          // FG Off retires the FG source, its copies with it; FG On follows,
+          // which restores the role (frame_generation_restored).
           retire_source(provider_kind::streamline, epoch, fg_source);
+          frame_generation_restored(epoch, 0);
         }
         if (r.change == v::ambiguous) {
           // Another viewport evaluates concurrently.
@@ -1729,6 +1731,9 @@ namespace sunshine_streamline::depth_capture {
         other_viewport_active,  // Another viewport's view active at FG Off (the guard); an SR owner.
         same_present,  // A repeated effect of the presentation that showed F, after FG Off.
         fg_after_off_then_on,  // G of a frame before the Off, recorded after it; SR shown; FG On.
+        fg_after_off_sr_unshown_then_on,  // The same with S readable and never shown.
+        fg_after_off_alone_then_on,  // The same with no S.
+        fg_after_off_rekeyed,  // G as the add-on records it after the Off: the viewport's ordinary source.
         ngx_before_fg,  // N published before F.
         ngx_after_fg_then_on,  // N published after S takes the queue; FG On.
         ngx_release  // An NGX owner's feature released: still a source end.
@@ -1755,6 +1760,9 @@ namespace sunshine_streamline::depth_capture {
         {"Another viewport's view active at FG Off: DLSS-G's head goes without an SR head, ambiguous and revoking as before", shape::other_viewport_active, "P1 F ready current_capture; P2 S submitted no_completed_snapshot; OFF floor=0 views=1; P3 - unavailable no_current_nomination [gap]; P4 - ambiguous ambiguous_views [gap]; P5 - ambiguous ambiguous_views [gap]"},
         {"A repeated effect of F's presentation selects nothing new after FG Off", shape::same_present, "P1 F ready current_capture; OFF floor=F; P1 - submitted completed_not_older; P2 S ready current_capture"},
         {"An FG copy of a frame before the Off, recorded after it, never shows once SR was shown", shape::fg_after_off_then_on, "P1 F ready current_capture; OFF floor=F; P2 S ready current_capture; P3 - recorded completed_already_consumed"},
+        {"The same FG copy beside a newer readable SR copy never shown: FG On shows the newer frame (until 10-28 G, completed_snapshot)", shape::fg_after_off_sr_unshown_then_on, "P1 F ready current_capture; OFF floor=F; P2 S ready lineage_snapshot"},
+        {"The same FG copy alone: the lineage's own finished frame within the source age shows at FG On", shape::fg_after_off_alone_then_on, "P1 F ready current_capture; OFF floor=F; P2 G ready completed_snapshot"},
+        {"An FG copy recorded while FG stays off is the viewport's ordinary source: it shows after FG Off, one view (until 10-28 the FG view beside SR, ambiguous)", shape::fg_after_off_rekeyed, "P1 F ready current_capture; OFF floor=F; P2 G ready current_capture; P3 H ready current_capture"},
         {"An NGX copy published before F stays historical", shape::ngx_before_fg, "P1 F ready current_capture; OFF floor=F; P2 - submitted completed_before_gap"},
         {"An NGX copy after S takes the queue; FG On's stand-in never steps back to S", shape::ngx_after_fg_then_on, "P1 F ready current_capture; P2 - recorded no_completed_snapshot; OFF floor=F; P3 N ready current_capture; P4 - recorded no_completed_snapshot"},
         {"An NGX feature's release still revokes every copy before it", shape::ngx_release, "P1 N ready current_capture; OFF floor=serial; P2 - stale inactive_views"},
@@ -1869,7 +1877,10 @@ namespace sunshine_streamline::depth_capture {
           s->producer_submitted = true;
         };
         const auto fg_on = [&] {
-          // FG On: its first FG nomination pending; the scope requires FG.
+          // FG On: its options call restores the FG role
+          // (frame_generation_restored), then its first FG nomination is
+          // pending; the scope requires FG.
+          frame_generation_restored(epoch, 0);
           h = &fg_copy(30);
           h->finished = false;
           pick({true, epoch, 0, false, GetTickCount64() - 16});
@@ -2001,6 +2012,31 @@ namespace sunshine_streamline::depth_capture {
                   pick();
                   g = &sr_copy(make(index++, provider_kind::streamline, epoch, 15, fg_source, 0, 0), false);
                   fg_on();
+                  break;
+                case shape::fg_after_off_sr_unshown_then_on:
+                case shape::fg_after_off_alone_then_on:
+                  // S (sequence 20), readable, no Present selects it; then G,
+                  // an FG copy of an earlier frame recorded after the Off as a
+                  // race past the capture owner's checks would leave it (the
+                  // add-on records such a copy as the ordinary source); then
+                  // FG On's first nomination, pending.
+                  if (r.kind == shape::fg_after_off_sr_unshown_then_on) {
+                    s = &sr(20, false);
+                  }
+                  g = &sr_copy(make(index++, provider_kind::streamline, epoch, 15, fg_source, 0, 0), false);
+                  g->metadata.frame_generation_input = true;
+                  fg_on();
+                  break;
+                case shape::fg_after_off_rekeyed:
+                  // G, the late Off frame's FG copy made at its Present after
+                  // the Off: recorded with the role retired, so its view and
+                  // its metadata are the viewport's ordinary source; then the
+                  // next frame's own SR copy.
+                  g = &sr_copy(make(index++, provider_kind::streamline, epoch, 15, fg_source, 0, 0), false);
+                  g->metadata.source_id = 0;
+                  pick();
+                  h = &sr(30, false);
+                  pick();
                   break;
                 case shape::ngx_after_fg_then_on:
                   // N takes the queue while S is still in flight; then FG

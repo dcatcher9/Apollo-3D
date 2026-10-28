@@ -874,7 +874,11 @@ namespace sunshine_streamline::depth_capture {
         establish_provider(established, fresh_ngx, 102);
         if (select_provider(established, native, 103, GetTickCount64(), {true, fg_epoch, 0}).value) return false;
         // An FG nomination replaces its viewport's ordinary view, as the
-        // probe's does (superseded 0), also the FG head FG Off passed to it.
+        // probe's does (superseded 0), also the FG head FG Off passed to it,
+        // once a successful options call turned FG on again: until then the
+        // role stays retired and an FG input is the viewport's ordinary
+        // source (frame_generation_restored, 10-28).
+        frame_generation_restored(fg_epoch, 0);
         auto &renewed_fg = fixture::make_capture(3, native, provider_kind::streamline, fg_epoch, 14, fg_id, 0, 0);
         renewed_fg.metadata.frame_generation_input = true;
         if (select_provider(established, native, 103, GetTickCount64(), {true, fg_epoch, 0}).value != &renewed_fg) return false;

@@ -14,8 +14,9 @@
 //   while that evaluation copies its own depth input (2x to 4x); FG turned
 //   off after the frame's evaluations, before its Present (fg=off_late: a
 //   game's options call there, or DLSS-G's Present thread presenting
-//   between the call and the frame's next SR evaluation), which only event
-//   lists name;
+//   between the call and the frame's next SR evaluation), which seeds draw
+//   for half of their Offs while FG is on, from a stream of their own
+//   (10-28, so every seed keeps its other frames);
 // - a dynamic-resolution step of the tagged extent;
 // - the viewport's SR evaluation with its own depth input on the presenting
 //   queue or the game's own direct queue, or of the frame's tag;
@@ -374,10 +375,11 @@ namespace {
 
     // Relative weights of each dimension's values, and the chance in a
     // thousand that a frame keeps the previous frame's value. FG and dynamic
-    // resolution change by one-time events; FG starts off. Seeds never draw
-    // fg=off_late (weight 0, so each seed keeps its frames): a frame's FG
-    // tag copy deferred to its Present after a late Off has no contract the
-    // oracle describes.
+    // resolution change by one-time events; FG starts off. fg=off_late has
+    // weight 0 here so that each seed keeps its frames: generate turns half
+    // of the drawn Offs while FG is on into late ones, from a stream of its
+    // own (until 10-28 no seed drew it, which hid the stale FG copy held
+    // after a late Off, the 10-28 review's P1 and J3).
     const generator::draw &drawing() {
       static const generator::draw value {
         {
@@ -760,6 +762,17 @@ namespace {
     // too (depth_capture::evaluation_called): its Present may be the one
     // flat Present "Leave it" accepts, never the earlier frame's copy.
     {"fg-on-deferred-tag-missing-generated-hitch", "20*sr=local; fg=on,tag=present_bare; 5*tag=present_bare,dlssg=direct; tag=present_bare,dlssg=direct,hitch=after_sources; 10*tag=present_bare,dlssg=direct"},
+    // A late FG Off whose frame's FG depth is a deferred tag copy (R2),
+    // made at the frame's Present after the Off: the copy is that frame's
+    // own depth of the lineage, the viewport's ordinary source, and the next
+    // frame's readable SR copy replaces it (the 10-28 review's P1, shrunk
+    // to its first form). Until 10-28 the copy became the viewport's FG
+    // view again beside its SR view, so every Present after the Off read
+    // two active views (ambiguous_views), revoked each readable SR copy and
+    // held the stale FG copy until it expired: stale_shown at every frame
+    // after the Off (10 of 10), then mono.
+    {"fg-off-late-deferred-tag-copy", "fg=on; fg=off_late,tag=present_bare; sr=local"},
+    {"fg-off-late-deferred-tag-copy-sr-after", "20*sr=local; fg=on,tag=present_bare,sr=local; 5*tag=present_bare,sr=local; fg=off_late,tag=present_bare,sr=local; 10*tag=present_bare,sr=local"},
     {"fg-on-owned-sr-missing-generated-hitch", "20*sr=local; fg=on,tag=now_list,sr=local,generated=1,at=evaluate; 5*tag=now_list,sr=local; sr=local,hitch=after_sources; 10*sr=local"},
   };
 
@@ -824,6 +837,17 @@ namespace {
     for (auto &frame : out.frames) {
       frame.push_back(weighted(sr_slow, events::sr_gpu_weights, std::size(events::sr_gpu_weights)));
       frame.resize(events::family().dimensions.size());
+    }
+    // Half of the Offs while FG is on come late, after the frame's
+    // evaluations and before its Present, from a stream of their own (10-28).
+    generator::seeded late {seed ^ 0x1a7e0ff0ff1a7e01ull};
+    bool on = false;
+    for (auto &frame : out.frames) {
+      const auto event = events::of<events::fg_event>(frame, events::fg);
+      if (event == events::fg_event::off && on && late.below(2)) {
+        frame[events::fg] = int(events::fg_event::off_late);
+      }
+      on = event == events::fg_event::on ? true : event == events::fg_event::keep ? on : false;
     }
     events::normalize(out.frames);
     return out;
@@ -1035,6 +1059,12 @@ namespace {
     // (frame_generation::deferral_evaluations): DLSS-G evaluated a frame
     // since the previous frame whose tag copy was deferred, or none was.
     bool deferred_tag {}, awaits_dlssg {};
+    // The oracle's FG scope at the frame's copy decisions, before a late FG
+    // Off (fg=off_late) after them: judge_decisions reads a preempting FG
+    // rule in that scope (until 10-28 it read the scope after the Off, so
+    // seeds that draw a late Off failed a refusal DLSS-G's scope preempted
+    // as recorded nowhere outside FG scope).
+    bool decided_in_scope {};
     // Whether one of the frame's required copies on another queue is
     // readable at its own Present (execute_elsewhere).
     bool readable_here {};
@@ -1627,7 +1657,7 @@ namespace {
           const bool matched = std::any_of(seen.begin(), seen.end(), [&](const polled_refusal *value) {
             return value->value.reason == why;
           });
-          const bool preempted = !matched && !contract && (!seen.empty() || frame_generation_scope());
+          const bool preempted = !matched && !contract && (!seen.empty() || decided_in_scope);
           result.refusals_matched += matched;
           result.refusals_preempted += preempted;
           if (!matched && !contract && !preempted) {
@@ -1967,6 +1997,7 @@ namespace {
       // options call after those evaluations, before the frame's Present
       // (fg=off_late). Its order fences are renewed after that Present.
       const bool fg_evaluated = fg_on;
+      decided_in_scope = frame_generation_scope();
       const bool late_off = fg_on && of<fg_event>(value, events::fg) == fg_event::off_late;
       if (late_off) {
         set_frame_generation(false);
@@ -2053,7 +2084,16 @@ namespace {
         ++dlssg_frames;
       }
       // A late FG Off retired the frame's FG copies (its FG tag's and
-      // DLSS-G's) before any Present showed them: they supply nothing.
+      // DLSS-G's) before any Present showed them: they supply nothing. Its
+      // FG tag copy deferred to its Present (R2), made after the Off, is the
+      // frame's own depth of the display lineage, the viewport's ordinary
+      // source (depth_capture::frame_generation_retired): permitted at that
+      // Present, never required, and the lineage's SR successor is required
+      // at its first readable frame as any (until 10-28 the add-on made it
+      // the FG view again beside the SR view, which held it stale; the
+      // fixture called it a source with no contract).
+      const bool late_deferred_tag = late_off && deferred_tag && !cancel_expected &&
+        ((supply.legal | supply.limited | supply.permitted) & continuity::tag_copy);
       if (late_off) {
         constexpr auto fg_copies = std::uint8_t(continuity::tag_copy | continuity::dlssg_input);
         for (auto *mask : {&supply.legal, &supply.limited, &supply.permitted, &supply.elsewhere, &supply.immediate}) {
@@ -2065,6 +2105,14 @@ namespace {
         supply.completions.erase(std::remove_if(supply.completions.begin(), supply.completions.end(), [](const auto &value) {
           return (value.sources & fg_copies) != 0;
         }), supply.completions.end());
+        if (late_deferred_tag) {
+          supply.permitted |= continuity::tag_copy;
+          for (unsigned i = 0; i != supply.made.size(); ++i) {
+            if (continuity::tag_copy & (1u << i)) {
+              supply.made[i] = GetTickCount64();
+            }
+          }
+        }
       }
       const auto owned_sr = owned || held_off || compute_scope ? std::uint8_t(supply.legal & continuity::sr_evaluate) : std::uint8_t {};
       // A frame whose Present can read none of its legal sources: its copies

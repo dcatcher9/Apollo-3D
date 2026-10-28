@@ -2410,7 +2410,12 @@ fixed set's seed c28965dca8d7c76c passed three mono Presents at its frame 64), a
 hitch after frames whose generated Present DLSS-G skipped, `fg-on-deferred-tag-missing-generated-hitch`
 and `fg-on-owned-sr-missing-generated-hitch` (the hitch frame's Present showed the earlier frame's
 copy, 422 ms old, as current: stale at frame 26, 10-28, temporary build; the second makes no FG
-call, so one flat Present is its contract under "Leave it")),
+call, so one flat Present is its contract under "Leave it")), and two for a late FG Off whose frame's
+FG depth is a tag copy deferred to its Present (the 10-28 review's P1): `fg-off-late-deferred-tag-copy`
+(its shrunk form) and `fg-off-late-deferred-tag-copy-sr-after` (with the FG role's re-keying
+reverted the copy becomes the FG view again beside the SR view: an unsupplied fresh FG copy and
+stale_shown at the next frame, and stale_shown at every one of the eight frames after the Off,
+10-28, temporary build),
 an event list shaped like the
 session it fixed and judged as any
 timeline (random seeds meet these shapes only by chance, and a change of the event language changes
@@ -2432,7 +2437,12 @@ watchdog, 10 s after its 460 s bound `fixed_budget_ms`, ends a hung run first). 
 `--list` prints each selected timeline's seed (or regression or witness) and event list;
 `--timeline` replays one seed and `--events` one list (frames separated by `;`, each `defaults` or
 `name=value,...`, `N*` repeating one); `--seeds N --from M` soaks N further seeds (with the
-regressions and witnesses). Soaks over the 350 seeds after the fixed
+regressions and witnesses). Since 10-28 seeds draw a late FG Off (`fg=off_late`) for half of
+their Offs while FG is on, from a stream of their own (until then no seed drew it, which hid the
+stale FG copy held after a late Off, the 10-28 review's P1 and J3): the late Off frame's FG tag copy
+deferred to its Present is permitted there as the lineage's ordinary depth and the next readable SR
+copy required, and a refusal is judged in the FG scope of the frame's decisions, before the Off.
+Soaks over the 350 seeds after the fixed
 set (`--from 24`) found the shapes of C4, C6 and C7 beyond their witnesses; seeds 279 to 373 then
 passed with no failure (in the event language before Presents inside an SR evaluation, which
 changed every seed).
@@ -2588,7 +2598,10 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   published before the shown one, a copy of an earlier frame, an FG copy recorded after the Off once
   SR was shown, an NGX copy before the shown one and an SR copy before an NGX copy that took the queue
   stay refused; another viewport's active view keeps the old view removal, one past the source age
-  does not; an NGX feature's release still revokes; each Present establishes any selected copy, as
+  does not; an NGX feature's release still revokes; an FG copy recorded after the Off while the
+role stays retired is the viewport's ordinary source, and one an Off race left of an older frame
+than a readable, never shown SR copy loses to it at FG On, while alone it shows (the newest frame
+across `completed_snapshot` and `lineage_snapshot`, 10-28); each Present establishes any selected copy, as
   `acquire` does, so an FG owner meets a later SR copy at FG Off only after a late Off or a list
   executed after its Present), the source a head refused before its capture existed names to
   the display (another viewport's or NGX feature's drops the retained copy), and every reason of

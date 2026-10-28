@@ -260,11 +260,44 @@ namespace sunshine_streamline::depth_capture {
     // Present at FG On or Off that U-C1b's copy-outs exist to prevent).
     std::atomic<std::uint64_t> reader_move_unreadable{};
     std::array<evaluation_namespace, provider_count> evaluations;
+    // Protected by mutex: the viewports whose FG role FG Off retired, per
+    // epoch (retire_source; the oldest gives way).
+    std::array<fg_retirement, 4> fg_retirements;
 
     // The present ordinal of the frame a copy is: its submission's on a
     // presenting queue when seen (slot::submitted_present), else its call's.
     std::uint64_t presented_by(const slot &value) {
       return value.submitted_present ? value.submitted_present : value.present;
+    }
+    // Requires mutex. The viewport's FG retirement in epoch, or null.
+    fg_retirement *fg_retirement_of(std::uint64_t epoch, std::uint32_t viewport) {
+      if (!epoch) return nullptr;
+      for (auto &mark : fg_retirements) if (mark.epoch == epoch && mark.viewport == viewport) return &mark;
+      return nullptr;
+    }
+    // Requires mutex. While FG Off keeps a viewport's FG role retired (no FG
+    // On since), no input is the viewport's FG input: a copy of a frame from
+    // before the Off that reaches the capture owner after it (a deferred FG
+    // tag copy made at a late Off's Present, DLSS-G's evaluation racing the
+    // options call) is the frame's own depth of the display lineage, so it
+    // is recorded and evaluated as the viewport's ordinary source (source
+    // 0), and every evaluation of the viewport supersedes its FG view. Until
+    // 10-28 such a copy became the viewport's FG view again beside its SR
+    // view: every Present read two active views (ambiguous_views), moved the
+    // gap watermark over each readable SR copy and held the stale FG copy
+    // until it expired (the 10-28 review's P1).
+    bool frame_generation_role_retired(provider_kind provider, std::uint64_t epoch, std::uint32_t viewport) {
+      if (provider != provider_kind::streamline) return false;
+      const auto *mark = fg_retirement_of(epoch, viewport);
+      return mark && mark->active;
+    }
+    // Requires mutex. value's metadata with its FG role retired: the
+    // viewport's ordinary source.
+    void retire_frame_generation_role(input &value) {
+      if (value.frame_generation_input && frame_generation_role_retired(value.provider, value.epoch, value.viewport)) {
+        value.frame_generation_input = false;
+        value.source_id = 0;
+      }
     }
     // Requires mutex. Whether a view's newest evaluation is the frame the
     // Present being decided presents: by its call's stamp, or by its newest
@@ -1208,6 +1241,21 @@ namespace sunshine_streamline::depth_capture {
       const auto progress = producer_progress(*completed);
       if (submission_status(*completed, native, owner.device_identity, progress) != status::ready) {
         if (pending) chosen.selection = selection_reason::completed_not_readable;
+        return chosen;
+      }
+      // Both paths admissible: the newest frame of the lineage, by its
+      // sequence, whichever path names it. A copy recorded later can be of
+      // an older frame (an FG copy of a frame before FG Off made after it,
+      // then FG On within the source age: until 10-28 it stood in for FG
+      // On's pending head before the lineage's newer readable SR copy of a
+      // later frame was tried, the 10-28 review's P5 and J8).
+      if (auto *standin = lineage_snapshot(owner, native, present, identity, now);
+          standin && standin->metadata.epoch == completed->metadata.epoch &&
+          standin->metadata.sequence > completed->metadata.sequence) {
+        chosen.value = standin;
+        chosen.progress = standin->queue == native ? queue_progress{} : producer_progress(*standin);
+        chosen.result = status::ready;
+        chosen.selection = selection_reason::lineage_snapshot;
         return chosen;
       }
       chosen.value = completed;
@@ -2242,6 +2290,7 @@ namespace sunshine_streamline::depth_capture {
       *found = {};
       found->nomination_only = true;
       found->metadata = value; found->metadata.resource.native = normalized_source;
+      retire_frame_generation_role(found->metadata);
       found->id = ++serial; found->command = cookie; found->producer_recording = recording;
       return found->id;
     }
@@ -3057,7 +3106,7 @@ namespace sunshine_streamline::depth_capture {
     source_id = owner->source_id;
     return true;
   }
-  void retire_source(provider_kind provider, std::uint64_t epoch, std::uint64_t source_id) {
+  void retire_source(provider_kind provider, std::uint64_t epoch, std::uint64_t source_id, std::uint64_t retiring_serial) {
     if (!valid_provider(provider) || !epoch || !source_id) return;
     std::lock_guard lock(mutex);
     const auto matches = [&](const input &value) {
@@ -3092,6 +3141,20 @@ namespace sunshine_streamline::depth_capture {
     std::uint32_t viewport {};
     const bool fg_role = provider == provider_kind::streamline &&
       sunshine_scene_depth::fg_depth_viewport(source_id, viewport);
+    // The role stays retired until FG On (frame_generation_restored): the
+    // inputs admitted before this call (serial), and any while FG stays off,
+    // are the viewport's ordinary source (frame_generation_role_retired,
+    // frame_generation_retired). retiring_serial: the options call's.
+    if (fg_role) {
+      auto *mark = fg_retirement_of(epoch, viewport);
+      const auto kept = mark ? mark->serial : 0;
+      if (!mark) {
+        mark = &fg_retirements[0];
+        for (auto &value : fg_retirements)
+          if (value.epoch < mark->epoch || (value.epoch == mark->epoch && value.serial < mark->serial)) mark = &value;
+      }
+      *mark = {epoch, std::max(kept, retiring_serial), viewport, true};
+    }
     for (auto &owner : queues) if (owner && owner->provider_established && owner->provider == provider &&
         owner->nominated_epoch == epoch && owner->source_id == source_id) {
       owner->provider_established = false;
@@ -3145,6 +3208,18 @@ namespace sunshine_streamline::depth_capture {
       current.source_id = 0;
       attempt_status[provider_index(provider)] = status::unavailable;
     }
+  }
+
+  void frame_generation_restored(std::uint64_t epoch, std::uint32_t viewport) {
+    if (!requested.load() || !epoch) return;
+    std::lock_guard lock(mutex);
+    if (auto *mark = fg_retirement_of(epoch, viewport)) mark->active = false;
+  }
+  bool frame_generation_retired(std::uint64_t epoch, std::uint32_t viewport, std::uint64_t serial) {
+    if (!requested.load() || !epoch) return false;
+    std::lock_guard lock(mutex);
+    const auto *mark = fg_retirement_of(epoch, viewport);
+    return mark && (mark->active || (serial && serial <= mark->serial));
   }
 
   source_ref retain_source(std::uint64_t native, record_diagnostic *diagnostic) {
@@ -3284,6 +3359,11 @@ namespace sunshine_streamline::depth_capture {
     if (!requested.load() || !valid_provider(provider)) return;
     auto &current = evaluations[provider_index(provider)];
     if (epoch != current.epoch) { current = {}; current.epoch = epoch; }
+    if (frame_generation_role_retired(provider, epoch, viewport)) {
+      const auto fg_key = sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(viewport));
+      if (source_id == fg_key) source_id = 0;
+      if (!source_id) superseded_source_id = fg_key;
+    }
     if (sequence <= current.sequence) return;
     current.sequence = sequence;
     current.source_id = source_id;
@@ -3878,11 +3958,12 @@ namespace sunshine_streamline::depth_capture {
       *found = {};
       if (reservation) clear_reservation(std::exchange(reservation, 0));
       found->texture = std::move(texture); found->published = std::move(published); found->metadata = value; found->metadata.native_state = before;
+      retire_frame_generation_role(found->metadata);
       found->predicted_storage = predicted && found->published;
       if (found->predicted_storage) copy_out_counters.predicted.fetch_add(1, std::memory_order_relaxed);
       found->id = ++serial; found->command = cookie; found->producer_recording = owner.life();
       found->present = present_ordinal();
-      if (value.frame_generation_input) frame_generation_present = std::max(frame_generation_present, found->present);
+      if (found->metadata.frame_generation_input) frame_generation_present = std::max(frame_generation_present, found->present);
       found->basis = basis; found->compute_list = on_compute;
       compute_copies_recorded |= on_compute;
       if (proof) {
@@ -3898,7 +3979,7 @@ namespace sunshine_streamline::depth_capture {
       found->finished = found->success = preservation_only && !diagnostic_copy;
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
       if (nominate_source && !preservation_only && !diagnostic_copy)
-        newest_published_copy.store(found->id | (value.frame_generation_input ? 1ull << 63 : 0), std::memory_order_release);
+        newest_published_copy.store(found->id | (found->metadata.frame_generation_input ? 1ull << 63 : 0), std::memory_order_release);
 #endif
       native_observer::suppression_scope suppress;
       D3D12_RESOURCE_BARRIER transitions[2]{};
@@ -3950,7 +4031,7 @@ namespace sunshine_streamline::depth_capture {
       if (chosen.enhanced || before == D3D12_RESOURCE_STATE_COPY_SOURCE) list->ResourceBarrier(1, &transitions[1]);
       else list->ResourceBarrier(2, transitions);
       if (!preservation_only) set_attempt(value.provider, status::recorded);
-      if (nominate_source && !preservation_only) record_frame_generation_copy(value);
+      if (nominate_source && !preservation_only) record_frame_generation_copy(found->metadata);
       if (diagnostic) { diagnostic->result = status::recorded; diagnostic->stage = record_stage::recorded; }
       if (preserved) *preserved = {found->id, reinterpret_cast<std::uint64_t>(found->texture->resource.p),
         found->texture->identity, found->texture};

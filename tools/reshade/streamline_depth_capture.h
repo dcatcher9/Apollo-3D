@@ -377,7 +377,21 @@ namespace sunshine_streamline::depth_capture {
   // An explicit feature release or authority revocation differs from a missing frame.
   // It removes only this logical source, retaining in-flight GPU allocations
   // until their existing fence/recording retirement conditions are satisfied.
-  void retire_source(sunshine_scene_depth::provider_kind provider, std::uint64_t epoch, std::uint64_t source_id);
+  // serial: the observation serial of the call that retired it (an FG
+  // options call's; 0 none). FG Off (a Streamline FG source) retires only
+  // the FG role of its viewport's display lineage, and that role stays
+  // retired until frame_generation_restored: meanwhile an input of the role
+  // is the viewport's ordinary source.
+  void retire_source(sunshine_scene_depth::provider_kind provider, std::uint64_t epoch, std::uint64_t source_id,
+    std::uint64_t serial = 0);
+  // FG On for the viewport in epoch: its FG role is live again.
+  void frame_generation_restored(std::uint64_t epoch, std::uint32_t viewport);
+  // Whether an FG input of the viewport admitted at serial (its tag call's
+  // or DLSS-G evaluation's observation serial) belongs to a retired FG role:
+  // admitted before the retiring options call, or while FG stays off. Such
+  // an input is the frame's own depth of the display lineage, the
+  // viewport's ordinary source, never its FG input.
+  bool frame_generation_retired(std::uint64_t epoch, std::uint32_t viewport, std::uint64_t serial);
 
   // A newly retained texture (not a buffer or simultaneous-access one) is
   // watched from then on for the enhanced-layout latch (proven_state_counts).

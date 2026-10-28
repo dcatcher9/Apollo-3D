@@ -1022,7 +1022,7 @@ namespace sunshine_streamline {
       const DWORD outgoing = GetLastError();
       // Only the sampling entry judges (and counts) the result.
       const bool sdk_ok = sample && sdk_accepted(result);
-      std::uint64_t retired_epoch{}, turned_on{};
+      std::uint64_t retired_epoch{}, turned_on{}, turned_on_epoch{};
       if (sample) dump_metadata::observe_sl_fg(dump_stamp(ticket, serial, GetTickCount64(), valid_viewport ? id : UINT32_MAX), copy.mode, copy.generated_frames, valid, sdk_ok);
       bool changed = false;
       // A game may set its FG options once: a busy writer must not leave the
@@ -1049,7 +1049,7 @@ namespace sunshine_streamline {
               state = {update->epoch, serial, now, options_loss, id, copy.mode, copy.generated_frames,
                 known, known && copy.mode != 0, valid && copy.mode >= 2};
               if (state.enabled) state.enabled_tick = enabled_since ? enabled_since : now;
-              if (state.enabled && !enabled_since) turned_on = now;
+              if (state.enabled && !enabled_since) { turned_on = now; turned_on_epoch = update->epoch; }
               if (!known || copy.mode == 0) retired_epoch = update->epoch;
             }
           }
@@ -1062,11 +1062,13 @@ namespace sunshine_streamline {
       // copies on the game's queue were submitted: those are copied out for
       // the source age from here (U-C1b, depth_capture::frame_generation_enabled).
       if (turned_on) depth_capture::frame_generation_enabled(turned_on);
+      // FG On ends the viewport's FG role retirement (retire_source).
+      if (turned_on) depth_capture::frame_generation_restored(turned_on_epoch, id);
       // Revoke the exact FG scope, including tags recorded while the failed
       // SDK call was in flight. A concurrent new On may lose one capture;
       // a fresh tag restores it without resurrecting pre-loss pixels.
       if (retired_epoch) depth_capture::retire_source(sunshine_scene_depth::provider_kind::streamline,
-        retired_epoch, sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(id)));
+        retired_epoch, sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(id)), serial);
       // Only an actual FG-mode/knowledge transition revokes UI scope. Games
       // can call unsupported Off options after every successful HUDless tag;
       // repeated failure is not a new failure of those independent input tags.
@@ -2030,8 +2032,11 @@ namespace sunshine_streamline {
     // live FG scope, or silent (enabled, but no FG copy accepted within a
     // second: depth_capture::frame_generation_scope_live). A busy metadata
     // read keeps an existing publication's FG ownership.
+    // disabled (optional): the viewport's FG options were observed off in
+    // this epoch (a known mode 0 under the current options revision).
     enum class fg_route { none, owned, silent };
-    fg_route frame_generation_route(std::uint32_t viewport) {
+    fg_route frame_generation_route(std::uint32_t viewport, bool *disabled = nullptr) {
+      if (disabled) *disabled = false;
       if (!fg_available.load(std::memory_order_acquire) || !current_fg_target.load(std::memory_order_acquire)) return fg_route::none;
       auto pin = read_metadata();
       if (!pin) return metadata.has_publication() ? fg_route::owned : fg_route::none;
@@ -2039,8 +2044,10 @@ namespace sunshine_streamline {
       std::uint64_t scope_epoch{}, enabled_tick{};
       for (const auto &record : pin->records) if (record.used && record.viewport == viewport) {
         const auto &fg = record.frame_generation;
-        enabled = fg.known && fg.enabled && fg.epoch == pin->epoch &&
+        const bool current = fg.known && fg.epoch == pin->epoch &&
           fg.loss_revision == fg_loss_revision.load(std::memory_order_acquire);
+        enabled = current && fg.enabled;
+        if (disabled) *disabled = current && !fg.enabled;
         scope_epoch = fg.epoch; enabled_tick = fg.enabled_tick;
         break;
       }
@@ -2194,7 +2201,8 @@ namespace sunshine_streamline {
       if (copy_recorded) *copy_recorded = false;
       if (deferred) *deferred = {};
       if (!source_requested.load(std::memory_order_acquire) || !depth_capture::active()) return 0;
-      const auto route = frame_generation_route(snapshot.viewport);
+      bool fg_disabled = false;
+      const auto route = frame_generation_route(snapshot.viewport, &fg_disabled);
       if (!snapshot.frame_generation_input && route == fg_route::owned) {
         // source_path_selected. Still a later frame's call: an earlier
         // frame's presenting window ends here (until 10-28 a hitch frame
@@ -2207,12 +2215,18 @@ namespace sunshine_streamline {
       // establishes ownership in the shared capture layer.
       depth_capture::observe_provider(snapshot.command_buffer);
       // An ordinary tag boundary, and ordinary evaluation of a viewport whose
-      // FG scope is silent, replaces that viewport's FG observation; an FG
-      // nomination replaces its ordinary one (source 0).
+      // FG scope is silent or whose FG is observed off, replaces that
+      // viewport's FG observation; an FG nomination replaces its ordinary one
+      // (source 0). With FG off no FG view is legitimate: until 10-28 an FG
+      // view made after the Off (a late Off's deferred FG copy, DLSS-G's
+      // evaluation or an FG tag call racing the options call) stayed beside
+      // the SR view, so every Present read ambiguous views and revoked the
+      // readable SR copies (the 10-28 review's P1). Not where FG is merely
+      // unknown (busy or lost metadata), which keeps a live scope's views.
       const bool fg_silent = route == fg_route::silent;
       const auto fg_source = sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(snapshot.viewport));
       const auto superseded = snapshot.frame_generation_input ? 0 :
-        snapshot.tag_boundary || fg_silent ? fg_source : UINT64_MAX;
+        snapshot.tag_boundary || fg_silent || fg_disabled ? fg_source : UINT64_MAX;
       // A silent FG scope has no FG observation to withdraw: its refused
       // boundaries leave the ordinary source of the viewport in place. A
       // withdrawn attempt is the namespace's newest nomination without a copy,
@@ -3475,20 +3489,31 @@ namespace sunshine_streamline {
         // FG observation stays as it was (pixels_required).
         depth_capture::record_diagnostic diagnostic;
         bool copied = false;
+        // FG Off retired the FG role of the viewport's lineage after this
+        // frame's tag call (a late Off) or keeps it off: the copy is the
+        // frame's own depth of the lineage, its ordinary source (source 0,
+        // superseding the FG view), and no FG scope's (the 10-28 review's
+        // P1; until then it became the FG view again beside the SR view).
+        const bool retired = entry.depth.candidates[0].frame_generation_input &&
+          depth_capture::frame_generation_retired(entry.epoch, entry.viewport, entry.serial);
+        const auto fg_key = sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(entry.viewport));
         for (std::size_t i = 0; i != entry.depth.count && !copied; ++i) {
           auto value = entry.depth.candidates[i];
           value.sequence = sequence; value.present_queue = queue;
           value.own_frame = true; value.at_tag_call = false; value.pixels_required = true;
+          if (retired) { value.frame_generation_input = false; value.source_id = 0; }
           const auto captured = depth_capture::nominate(immediate, value, &diagnostic);
           if (captured && diagnostic.result == depth_capture::status::recorded) {
             depth_capture::begin_evaluation(value.epoch, sequence, value.viewport, value.provider, value.source_id,
-              entry.depth.superseded);
+              retired ? fg_key : entry.depth.superseded);
             depth_capture::finish(captured, true);
             copied = true;
           } else if (captured) depth_capture::finish(captured, false);
         }
-        remember_tag_copy(entry.epoch, entry.viewport, copied, entry.serial, entry.frame);
-        if (!copied) miss_frame_generation(entry.epoch, entry.viewport, entry.serial);
+        if (!retired) {
+          remember_tag_copy(entry.epoch, entry.viewport, copied, entry.serial, entry.frame);
+          if (!copied) miss_frame_generation(entry.epoch, entry.viewport, entry.serial);
+        }
         if (copied) {
           recorded = true;
           deferrals.depth_copied.fetch_add(1, std::memory_order_relaxed);
@@ -3951,19 +3976,26 @@ namespace sunshine_streamline {
           // Either way a refused frame has no FG copy, so the scope owns no
           // depth for it (frame_generation_missed).
           // A live scope's attempt is a nomination in progress from its begin.
-          const bool live = depth_capture::frame_generation_scope_live(fg.epoch, fg.viewport, fg.enabled_tick);
+          // An evaluation that began before FG Off retired the viewport's FG
+          // role (DLSS-G's thread racing the game's options call) or while it
+          // stays retired is the frame's own depth of the display lineage,
+          // its ordinary source, superseding the FG view (the 10-28 review's
+          // P1; until then it became the FG view again beside the SR view).
+          const bool retired = depth_capture::frame_generation_retired(fg.epoch, fg.viewport, serial);
+          if (retired) { input.frame_generation_input = false; input.source_id = 0; }
+          const bool live = !retired && depth_capture::frame_generation_scope_live(fg.epoch, fg.viewport, fg.enabled_tick);
           depth_capture::evaluation_nomination nominating;
           if (live) nominating.begin(fg.epoch, serial, fg.viewport, sunshine_scene_depth::provider_kind::streamline, source_id, 0);
           const auto captured = nominating.nominate(value.command, input, &diagnostic);
           nominating.end();
           if (captured && diagnostic.result == depth_capture::status::recorded) {
             if (!live) depth_capture::begin_evaluation(fg.epoch, serial, fg.viewport,
-              sunshine_scene_depth::provider_kind::streamline, source_id, 0);
-            remember_evaluation_supply(fg.epoch, fg.viewport, tick);
+              sunshine_scene_depth::provider_kind::streamline, input.source_id, retired ? source_id : 0);
+            if (!retired) remember_evaluation_supply(fg.epoch, fg.viewport, tick);
             out.depth_ticket = captured; out.depth = depth_outcome::copied;
           } else {
             if (captured) depth_capture::finish(captured, false);
-            depth_capture::frame_generation_missed(fg.epoch, fg.viewport, serial);
+            if (!retired) depth_capture::frame_generation_missed(fg.epoch, fg.viewport, serial);
             out.depth = depth_outcome::capture; out.depth_stage = diagnostic.stage;
           }
         }

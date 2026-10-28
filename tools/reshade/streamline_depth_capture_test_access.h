@@ -337,6 +337,14 @@ namespace sunshine_streamline::depth_capture {
       std::uint64_t epoch{}, sequence{}, source_id{};
       evaluation_head pending_nomination;
     };
+    // FG Off retired the FG role of a viewport's display lineage in epoch
+    // (retire_source): the options call's observation serial, and whether
+    // FG stays off (no FG On since, frame_generation_restored).
+    struct fg_retirement {
+      std::uint64_t epoch{}, serial{};
+      std::uint32_t viewport{};
+      bool active{};
+    };
     struct queue_progress {
       std::uint64_t device_identity{}, completed{};
       bool queried{};
@@ -426,6 +434,7 @@ namespace sunshine_streamline::depth_capture {
     extern std::array<slot, diagnostic_slot_limit> diagnostic_slots;
     extern std::array<std::unique_ptr<queue_state>, queue_limit> queues;
     extern std::array<evaluation_namespace, provider_count> evaluations;
+    extern std::array<fg_retirement, 4> fg_retirements;
     // A copy was ever recorded on a COMPUTE list (record_impl); liveness
     // queries look for readable compute-list copies only then.
     extern bool compute_copies_recorded, compute_unplaced;

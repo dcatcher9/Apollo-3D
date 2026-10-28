@@ -4551,7 +4551,23 @@ the newest SR/RR snapshot recorded since the shown FG copy stands in at once
 While another viewport's view in that epoch is active, that FG nomination goes as before: an
 ordinary view beside it would keep the picks ambiguous (a view that stopped evaluating, past the
 source age, makes nothing ambiguous). An NGX copy published after the shown
-FG copy takes the queue as at any handover, which makes the SR copies before it historical. Until
+FG copy takes the queue as at any handover, which makes the SR copies before it historical. The FG
+role stays retired until FG On (`frame_generation_restored`, the options call that turns FG on
+again): an FG input admitted before the retiring options call (its tag call's or DLSS-G
+evaluation's observation serial below the call's) or while the role stays retired is the frame's
+own depth of the display lineage, the viewport's ordinary source, never its FG input
+(`frame_generation_retired`): the probe re-keys a late Off's FG tag copy deferred to its frame's
+Present and DLSS-G's evaluation racing the options call, and the capture owner records and
+evaluates any FG input of a retired role as the ordinary source as well, under its lock. Every
+ordinary evaluation of a viewport whose FG options are observed off, or whose role is retired,
+supersedes the viewport's FG view (not one whose FG is merely unknown, busy or lost metadata). Until
+10-28 such a copy became the viewport's FG view again beside its SR view: every Present after the
+Off read two active views (`ambiguous_views`), moved the gap watermark over each readable SR copy
+and held the stale FG copy until it expired (the 10-28 review's P1, in any game whose FG depth tag
+is copied at its Present, and at any Off racing DLSS-G's evaluation). Where both a pending or
+missing FG head's own completed copy and its lineage's SR stand-in are admissible, the newer frame
+by sequence shows (an FG copy recorded after the Off can be of an older frame than a readable SR
+copy; until 10-28 the FG copy, tried first, showed at FG On). Until
 10-28 FG Off moved the owner's admission watermark to the newest capture, or left a namespace head
 no view named, which the next Present read as an interruption: either revoked the viewport's SR
 copies recorded since the shown FG copy, so a Present before the next SR copy was readable held the

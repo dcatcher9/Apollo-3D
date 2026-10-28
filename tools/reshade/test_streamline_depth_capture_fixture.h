@@ -16,6 +16,7 @@ namespace sunshine_streamline::depth_capture::fixture {
   inline void clear_captures() {
     slots = {};
     evaluations = {};
+    fg_retirements = {};
     newest_evaluation_present = frame_generation_present = 0;
     presenting_generated = 0;
   }
