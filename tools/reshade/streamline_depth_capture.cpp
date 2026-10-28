@@ -3318,6 +3318,22 @@ namespace sunshine_streamline::depth_capture {
     nomination_gate_release.store(release, std::memory_order_relaxed);
     nomination_gate_entered.store(entered, std::memory_order_release);
   }
+  namespace {
+    // The newest nominated pixel copy published (record_impl): its capture
+    // id, with the frame-generation-input flag in the top bit.
+    std::atomic<std::uint64_t> newest_published_copy{};
+  }
+  // The capture id of the newest nominated pixel copy the add-on published,
+  // and whether it is an FG scope's input (false: none yet). The session
+  // timelines read it after each call that may copy, so their freshness
+  // rule names each copy as frame_record::depth_capture does
+  // (test_game3d_continuity.h).
+  extern "C" __declspec(dllexport) BOOL SunshineStreamlineTestNewestCopy(std::uint64_t *id, BOOL *frame_generation_input) {
+    const auto value = newest_published_copy.load(std::memory_order_acquire);
+    if (id) *id = value & ~(1ull << 63);
+    if (frame_generation_input) *frame_generation_input = (value >> 63) ? TRUE : FALSE;
+    return value ? TRUE : FALSE;
+  }
 #endif
 
 #ifdef SUNSHINE_STREAMLINE_PROBE_TEST
@@ -3801,6 +3817,10 @@ namespace sunshine_streamline::depth_capture {
       if (diagnostic_copy) diagnostic_slots_active = true;
       found->source_nominated = nominate_source;
       found->finished = found->success = preservation_only && !diagnostic_copy;
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+      if (nominate_source && !preservation_only && !diagnostic_copy)
+        newest_published_copy.store(found->id | (value.frame_generation_input ? 1ull << 63 : 0), std::memory_order_release);
+#endif
       native_observer::suppression_scope suppress;
       D3D12_RESOURCE_BARRIER transitions[2]{};
       transitions[0].Type = transitions[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;

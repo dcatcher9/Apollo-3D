@@ -71,8 +71,9 @@ namespace sunshine_streamline::provider {
   // to Generic says why). A fresh copy, else a ready output, which holds an
   // earlier copy that names its own source (held), else the display cache's
   // reason.
+  // shown_capture: the capture id of the copy shown, fresh or held.
   void describe_display(sunshine_game3d::api_depth_decision &decision, bool copied, bool output_ready,
-    const char *cache_reason, const sunshine_scene_depth::frame &held);
+    const char *cache_reason, const sunshine_scene_depth::frame &held, std::uint64_t shown_capture = 0);
   // The completed sample contract is owned by the neutral presentation input.
   // Keep the adapter's existing internal/test spelling without a second layout.
   using center_sample = sunshine_game3d::depth_input::sample;

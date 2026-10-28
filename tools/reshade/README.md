@@ -1756,6 +1756,21 @@ presenting-queue copy 188 ms behind three completed game-queue copies (bound 132
 frames) before that copy expires, `dlssg-evaluation` holds an FG copy behind DLSS-G's completed
 compute copies, and 12 of the 43 fixed timelines fail it.
 
+The tick bound passes any lag shorter than two frame intervals and the slack, about a single
+Present's, and a hitch widens it. Where the capture ids are known the rule is exact (10-28): the
+frame record names the shown copy's capture id (`depth_capture`), and the session timelines read
+the id of the copy each depth call published (the test add-on's `SunshineStreamlineTestNewestCopy`,
+read before and after the call; `supply::capture`, also a completion's). A Present is then
+`stale_shown`, with no bound, when a copy among the same readable set, of the shown copy's own kind
+(an FG scope's input, or ordinary depth: FG keeps its viewport while it can supply), has a larger
+capture id than the shown copy; a copy whose id is unknown (a tag copy deferred to its frame's
+Present) keeps the tick bound. Until 10-28 a Present one copy behind passed every timeline: a
+Present during a nomination in progress, the SR stand-in of an FG input recycled by the pool, a
+missing frame's stand-in shown a Present late. A real Present that shows a copy of the other API
+than the last real Present that showed API depth must show a copy recorded after that one (capture
+ids follow publication order across providers): a handover never steps back to older depth (the
+10-28 review's P2). `reshade_game3d_continuity` pins both on synthetic records.
+
 `unordered_read` (Step 4, U-C1): a read of a copy still in flight must be ordered after its
 producer by the game's own fences. Each fixture logs every `ExecuteCommandLists`, `Signal` and
 `Wait` it makes on the game's queues and fences, its CPU signals and each Present, and an
@@ -2303,12 +2318,15 @@ with the add-on's `frame_presenting` reverted, 10-27, temporary build: a gap or 
 the hitch frame) and `fg-on-owned-sr-hitch-after-sources` (a live scope refuses the frame's SR copy,
 so mono is the contract there after the hitch), four with a hitch between frames
 (`hitch-between-sr`, `hitch-between-fg-tag`, `hitch-between-sr-tag`, `hitch-between-dlssg-direct`)
-and `hitch-after-sources-then-deferred-tag` (the judge's hold-age rule), and two for a missing
+and `hitch-after-sources-then-deferred-tag` (the judge's hold-age rule), and three for a missing
 frame (a failed or refused newest nomination, whose completed predecessor stands in:
 `refused-fg-attempt-keeps-completed-copy`, a live scope's refused DLSS-G attempt between brief
 hitches, and `refused-sr-tags-keep-completed-copies`, every other SR tag unprovable while SR runs
 on another queue; with the rule reverted the first drops a holdable copy at frame 28 and the second
-shows stale depth from frame 34 and then mono, five of five runs each, 10-28, temporary build)),
+shows stale depth from frame 34 and then mono, five of five runs each, 10-28, temporary build; and
+`refused-fg-attempt-shown-at-once`, the first without its hitches, where the rule disabled holds
+the copy before, one frame late, which only the freshness rule by capture id sees: stale_shown at
+frame 26, 10-28, temporary build)),
 an event list shaped like the
 session it fixed and judged as any
 timeline (random seeds meet these shapes only by chance, and a change of the event language changes
@@ -2318,7 +2336,7 @@ run; a witness that loses none fails the set, as the matrix's gap seeds keep a r
 failing cell. `--trace` prints every Present's
 frame record, the supply it was judged with and each recorded refusal.
 
-`reshade_session_timelines` runs the fixed set (24 seeds and 44 regression timelines, about
+`reshade_session_timelines` runs the fixed set (24 seeds and 45 regression timelines, about
 5330 frames and 13700 Presents, with the seeds' hitches) in about 240 s, registered like
 `reshade_native_provider_continuity` but with a 480 s timeout, about twice a full run (its own
 watchdog, 10 s after its 460 s bound `fixed_budget_ms`, ends a hung run first). Locally:

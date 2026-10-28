@@ -31,7 +31,7 @@ namespace sunshine_game3d {
   void record_api_depth(frame_record &record, const api_depth_decision &decision, std::uint64_t present, std::uint64_t now) {
     record.present = present;
     record.tick_ms = now;
-    record.depth_tick_ms = 0;
+    record.depth_tick_ms = record.depth_capture = 0;
     record.depth_read_order = read_order::none;
     record.depth_read_queue = record.depth_read_ticket = 0;
     auto &fg = record[source_slot::fg_depth];
@@ -59,6 +59,7 @@ namespace sunshine_game3d {
     } else {
       record.depth_owner = pixels ? rung : source_slot::hold;
       record.depth_tick_ms = pixels ? decision.source_tick : 0;
+      record.depth_capture = pixels ? decision.source_capture : 0;
       if (decision.copied) {
         record.depth_read_order = decision.read;
         record.depth_read_queue = decision.read_queue;
@@ -134,7 +135,7 @@ namespace sunshine_game3d {
       return;
     }
     record.depth_owner = source_slot::generic;
-    record.depth_tick_ms = 0;
+    record.depth_tick_ms = record.depth_capture = 0;
     record.depth_read_order = read_order::none;
     record.depth_read_queue = record.depth_read_ticket = 0;
     // The last rung: without a ready buffer the Present is mono.

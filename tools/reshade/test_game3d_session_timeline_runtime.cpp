@@ -654,6 +654,13 @@ namespace {
       "sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; "
       "sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; "
       "10*sr=other_queue", true},
+    // The first form without its hitches: the refused DLSS-G attempt's
+    // previous compute copy shows at once. With the missing-frame rule
+    // disabled the Present holds the copy before it, one frame (16 ms)
+    // late: only the freshness rule by capture id sees it (stale_shown at
+    // frame 26, capture 366 behind 371, 10-28, temporary build); the tick
+    // bound passed it.
+    {"refused-fg-attempt-shown-at-once", "20*sr=local; fg=on,sr=local,dlssg=compute,dlssg_gpu=after_present,order=second; 5*sr=local,dlssg=compute,dlssg_gpu=after_present; sr=local,dlssg=compute_unobserved; 10*sr=local,dlssg=compute,dlssg_gpu=after_present", true},
   };
 
   // Each known gap the timelines found has a witness: an event list whose
@@ -831,6 +838,8 @@ namespace {
     // copy's call, and its withdrawal when no such copy came.
     void (*present_before_next_copy)() {};
     BOOL (*cancel_present_before_next_copy)() {};
+    // The test add-on's newest published copy (SunshineStreamlineTestNewestCopy).
+    BOOL (*newest_copy_fn)(std::uint64_t *, BOOL *) {};
     // The add-on's totals of depth copies deferred to their frame's Present,
     // of those copied and of the deferrals an untag cancelled.
     void (*deferral_totals)(std::uint64_t *, std::uint64_t *, std::uint64_t *) {};
@@ -936,9 +945,10 @@ namespace {
       std::uint8_t legal {}, limited {}, permitted {}, elsewhere {}, immediate {};
       continuity::limitation limit {continuity::limitation::none};
       // made: continuity::supply::made, each source's copy at its deciding
-      // call (after any hitch before it).
+      // call (after any hitch before it); capture: continuity::supply::capture,
+      // the copy the add-on published inside that call, if any.
       std::uint64_t tick {};
-      std::array<std::uint64_t, 4> made {};
+      std::array<std::uint64_t, 4> made {}, capture {};
       // continuity::supply::completion: each copy's own relied fence.
       std::vector<continuity::supply::completion> completions;
     } supply;
@@ -979,7 +989,40 @@ namespace {
       if (readable) {
         supply.immediate |= source;
       }
-      supply.completions.push_back({source, std::move(completion), relied});
+      supply.completions.push_back({source, std::move(completion), relied, false, captured(source)});
+    }
+
+    // The add-on's newest published copy: its capture id with
+    // continuity::copy_fg_input for an FG scope's input, else 0.
+    std::uint64_t newest_copy() const {
+      std::uint64_t id {};
+      BOOL fg {};
+      return newest_copy_fn(&id, &fg) ? id | (fg ? continuity::copy_fg_input : 0) : 0;
+    }
+
+    // The copy a call published, read after it: newest_copy() unless it is
+    // still before, the one read before the call (the call published none).
+    // The first of the frame's copies of source names it (supply::capture).
+    void note_copy(std::uint8_t source, std::uint64_t before) {
+      const auto after = newest_copy();
+      if (after == before) {
+        return;
+      }
+      for (unsigned i = 0; i != supply.capture.size(); ++i) {
+        if ((source & (1u << i)) && !supply.capture[i]) {
+          supply.capture[i] = after;
+        }
+      }
+    }
+
+    // The capture of the frame's copy of source (0 unknown).
+    std::uint64_t captured(std::uint8_t source) const {
+      for (unsigned i = 0; i != supply.capture.size(); ++i) {
+        if (source & (1u << i)) {
+          return supply.capture[i];
+        }
+      }
+      return 0;
     }
 
     // A refusal recorded since the previous poll, and the step of the frame
@@ -1013,6 +1056,8 @@ namespace {
       present_before_next_copy = reinterpret_cast<void (*)()>(GetProcAddress(addon, "SunshineStreamlineTestPresentBeforeNextCopy"));
       cancel_present_before_next_copy = reinterpret_cast<BOOL (*)()>(GetProcAddress(addon, "SunshineStreamlineTestCancelPresentBeforeNextCopy"));
       require(present_before_next_copy && cancel_present_before_next_copy, "Test add-on lacks its Present-before-copy hook");
+      newest_copy_fn = reinterpret_cast<BOOL (*)(std::uint64_t *, BOOL *)>(GetProcAddress(addon, "SunshineStreamlineTestNewestCopy"));
+      require(newest_copy_fn, "Test add-on lacks its newest-copy report");
       deferral_totals = reinterpret_cast<decltype(deferral_totals)>(GetProcAddress(addon, "SunshineStreamlineTestDeferrals"));
       require(deferral_totals, "Test add-on lacks its deferral totals");
       // The export stop at a focus loss would end FG reuse: select the hidden
@@ -1691,7 +1736,9 @@ namespace {
         const auto resource = depth_input(tag_call.declared_state);
         const abi_v2::resource_tag depth_tag {{nullptr, tag_guid, 1}, &resource, 0, std::uint32_t(tag_call.life), active_area};
         const auto deferred_before = deferral_total(0);
+        const auto copy_before = newest_copy();
         returned(frame_entry ? sl.frame_tag(*token, view, &depth_tag, 1, tag_commands) : sl.global_tag(view, &depth_tag, 1, tag_commands), "the depth tag call");
+        note_copy(continuity::tag_copy, copy_before);
         cancel_expected = cancel_expected && deferral_total(0) != deferred_before;
         poll("tag_call");
       }
@@ -1742,7 +1789,9 @@ namespace {
         if (generated_in_evaluate) {
           present_before_next_copy();
         }
+        const auto copy_before = newest_copy();
         returned(sl.evaluate(0, *token, inputs, sr_choice == sr_form::local ? 2 : 1, command()), "slEvaluateFeature");
+        note_copy(continuity::sr_evaluate, copy_before);
         if (generated_in_evaluate) {
           cancel_present_before_next_copy();
         }
@@ -1761,7 +1810,9 @@ namespace {
         const abi_v2::resource_tag input {{nullptr, tag_guid, 1}, &resource, 0, 1, active_area};
         const base_structure *inputs[] {&view.base, &input.base};
         decide("sr_other_queue", local_case(declared, false, 0), continuity::sr_evaluate, {"evaluate"});
+        const auto copy_before = newest_copy();
         returned(sl.evaluate(0, *token, inputs, 2, reinterpret_cast<void *>(native)), "slEvaluateFeature on the game's queue");
+        note_copy(continuity::sr_evaluate, copy_before);
         poll("evaluate");
         const bool readable = execute_elsewhere(game_work, n, game_order);
         recorded_elsewhere(continuity::sr_evaluate, game_work.completion(), readable);
@@ -1866,6 +1917,7 @@ namespace {
       continuity_log.pending.unordered = unordered;
       continuity_log.pending.immediate = supply.immediate;
       continuity_log.pending.made = supply.made;
+      continuity_log.pending.capture = supply.capture;
       // DLSS-G adds this frame's generated Presents (judge::present, between).
       continuity_log.pending.fg_frame = fg_supplied;
       // An untag after the tag (R7) may end the source's hold: the judge
@@ -1883,7 +1935,7 @@ namespace {
         if (value.sources == continuity::dlssg_input && !(fg_on && frame_generation_scope())) {
           continue;
         }
-        continuity_log.pending.completes(value.sources, value.probe, value.relied);
+        continuity_log.pending.completes(value.sources, value.probe, value.relied, value.capture);
       }
     }
 
@@ -1925,7 +1977,9 @@ namespace {
         value.list = matrix::list_type::compute;
         value.depth = recorded(observed, read);
         decide("dlssg_compute", value, continuity::dlssg_input, {"dlssg"}, true);
+        const auto copy_before = newest_copy();
         require(ngx_evaluate(compute, feature, &dlssg_inputs, nullptr) == ngx_fixture::success, "DLSS-G's compute evaluation changed the SDK result");
+        note_copy(continuity::dlssg_input, copy_before);
         poll("dlssg");
         if (observed) {
           transition(compute, selected->resource.p, read, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -1956,7 +2010,9 @@ namespace {
       value.depth = recorded(evidence_seen, evidence_state);
       decide("dlssg_direct", value, continuity::dlssg_input, {"dlssg"}, true);
       immediate(continuity::dlssg_input);
+      const auto copy_before = newest_copy();
       require(ngx_evaluate(list, feature, &dlssg_inputs, nullptr) == ngx_fixture::success, "DLSS-G's evaluation changed the SDK result");
+      note_copy(continuity::dlssg_input, copy_before);
       poll("dlssg");
       if (observed) {
         transition(list, hudless.p, read, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);

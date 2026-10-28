@@ -122,6 +122,12 @@ namespace sunshine_game3d {
     // 0 otherwise. Generic's copy is the presenting queue's own, made at the
     // end of the frame it presents, and names none.
     std::uint64_t depth_tick_ms {};
+    // That copy's capture id (depth_capture::packet::capture_id), unique per
+    // copy and increasing in the order the copies were published: the
+    // session tests' freshness rule compares it with the ids of the copies
+    // the presenting queue could read (test_game3d_continuity.h). 0 without
+    // one.
+    std::uint64_t depth_capture {};
     // How this Present's fresh copy was read (none for a held copy), and the
     // queue-order position its read followed (the producer's model queue id
     // and ticket: its copy-out list, else its game submission; 0 without).
@@ -235,8 +241,9 @@ namespace sunshine_game3d {
     // provider's readiness reason (fresh_copy, retained_copy or the cache's).
     bool copied {}, reused {};
     const char *display_reason {"not_recorded"};
-    // The capture tick of the copy shown (copied or reused); 0 without one.
-    std::uint64_t source_tick {};
+    // The capture tick and capture id of the copy shown (copied or reused); 0
+    // without one.
+    std::uint64_t source_tick {}, source_capture {};
     // How the fresh copy was read, and the producer position it followed.
     read_order read {read_order::none};
     std::uint64_t read_queue {}, read_ticket {};

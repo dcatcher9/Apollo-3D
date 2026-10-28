@@ -707,7 +707,7 @@ namespace sunshine_streamline::provider {
   }
   // shown: the output's metadata, the fresh copy's or the held one's.
   void describe_display(sunshine_game3d::api_depth_decision &decision, bool copied, bool output_ready,
-      const char *cache_reason, const sunshine_scene_depth::frame &shown) {
+      const char *cache_reason, const sunshine_scene_depth::frame &shown, std::uint64_t shown_capture) {
     if (!decision.selected && !decision.associated) {
       decision.display_reason = decision.handoff_hold ? "source_handoff" : "source_not_associated";
       return;
@@ -715,6 +715,7 @@ namespace sunshine_streamline::provider {
     decision.copied = copied; decision.reused = !copied && output_ready;
     decision.display_reason = copied ? "fresh_copy" : output_ready ? "retained_copy" : cache_reason;
     decision.source_tick = copied || decision.reused ? shown.tick : 0;
+    decision.source_capture = copied || decision.reused ? shown_capture : 0;
     if (decision.reused) {
       // The held copy names its own source.
       decision.source = recorded_source(shown);
@@ -1142,7 +1143,10 @@ namespace sunshine_streamline::provider {
       data->cache.invalidate(update.reason);
     }
     track_render_size(*data, copied, display == display_status::reused_depth, available);
-    describe_display(recorded, copied, data->output.ready, data->cache.reason(), data->output.provided);
+    // The display cache's copy is the one shown: committed by this fresh
+    // copy, or the retained one reused.
+    describe_display(recorded, copied, data->output.ready, data->cache.reason(), data->output.provided,
+      data->output.ready ? data->cache.reference().capture_id : 0);
     if (copied) {
       recorded.read = static_cast<sunshine_game3d::read_order>(consumer.read_order);
       recorded.read_queue = consumer.producer_queue;

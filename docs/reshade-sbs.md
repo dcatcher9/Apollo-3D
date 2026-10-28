@@ -617,8 +617,9 @@ its row and viewport), a state (`inactive`, `absent`, `refused`, `pending`, `rea
 the Present fell back to, and when that key and epoch were first ready. `depth_owner` names the
 rung that decided the Present's depth: D1 or D2 with fresh or held pixels, H in mono under API
 ownership, or D3 when the Generic selector ran. `depth_tick_ms` is the capture tick of the API
-copy whose pixels the Present shows (D1 or D2, fresh or held; 0 otherwise), so a judge can tell
-which copy it showed (the freshness rule of the
+copy whose pixels the Present shows (D1 or D2, fresh or held; 0 otherwise), and `depth_capture` its
+capture id (unique per copy, increasing in the order the copies were published, across providers),
+so a judge can tell which copy it showed (the freshness rule of the
 [session-level tests](../tools/reshade/README.md#session-level-tests)); Generic's copy is the
 presenting queue's own at the end of the frame it presents. `depth_read_order` says how a fresh
 API copy was read after its producer: `same_queue` (queue order), `completed` (its producer fence

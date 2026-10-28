@@ -10,7 +10,11 @@
 // inside the frame it presents is no older than that frame for the stale
 // rule, however long the frame took. A frame's own copy recorded at its
 // call is readable at its own Present: the freshness rule counts it there,
-// and a stall inside such a frame is no warm-up.
+// and a stall inside such a frame is no warm-up. Where each copy's capture id
+// is known, a Present that shows a copy older than a readable copy of the
+// same kind is stale_shown with no bound (a single Present's lag), and a
+// handover to the other API never shows a copy recorded before the one the
+// last real Present showed.
 #include "test_game3d_continuity.h"
 
 #include <cstdint>
@@ -518,9 +522,98 @@ namespace {
         continuity::known(violations[0]) < 0,
       "a late signal of one copy's fence made the frame's other copy unholdable too, excusing a mono Present");
   }
+
+  // The freshness rule by capture id (10-28): a Present that holds the
+  // previous frame's copy beside its own frame's readable copy, one frame
+  // (16 ms) late, passed the tick bound (two frame intervals and the slack);
+  // with both capture ids known it is stale_shown. A newer copy of the other
+  // kind (an FG scope's input beside ordinary depth: the scope keeps its
+  // viewport while it can supply) or without a known id is no evidence.
+  void single_present_lag_by_capture() {
+    struct trial {
+      std::uint64_t newer;  // The frame's own copy (capture id, kind flag); 0 unknown.
+      bool stale;
+      const char *message;
+    };
+    const trial trials[] {
+      {20, true, "a Present that held the previous frame's copy beside its frame's readable newer copy was not stale_shown"},
+      {0, false, "a one-frame lag with no capture id known was stale_shown inside the tick bound"},
+      {20 | continuity::copy_fg_input, false, "a newer copy of the other kind made the shown copy stale"},
+    };
+    for (const auto &value : trials) {
+      continuity::judge judge;
+      std::uint64_t now = 1000, present = 1;
+      for (std::uint64_t i = 0; i != 4; ++i, now += 16) {
+        continuity::supply frame;
+        frame.add(continuity::sr_evaluate, now);
+        frame.immediate = continuity::sr_evaluate;
+        frame.capture[0] = 10 + i;
+        auto record = shown(present++, now, source_slot::scene_depth, now);
+        record.depth_capture = 10 + i;
+        judge.present(record, frame, "test");
+      }
+      continuity::supply frame;
+      frame.add(continuity::sr_evaluate, now);
+      frame.immediate = continuity::sr_evaluate;
+      frame.capture[0] = value.newer;
+      auto record = shown(present++, now, source_slot::scene_depth, now - 16);
+      record.depth_capture = 13;
+      record[source_slot::scene_depth].state = source_state::held;
+      judge.take();
+      judge.present(record, frame, "test");
+      const auto violations = judge.take();
+      const bool stale = violations.size() == 1 && violations[0].kind == continuity::violation_kind::stale_shown &&
+                         violations[0].shown_capture == 13 && violations[0].newer_capture == 20;
+      require(value.stale ? stale : violations.empty(), value.message);
+    }
+  }
+
+  // An ownership handover to the other API shows a copy recorded after the
+  // one the last real Present showed (capture ids follow publication order
+  // across providers): a copy recorded before it is older depth after newer
+  // (the 10-28 review's P2), whichever API showed which.
+  void handover_never_steps_back() {
+    struct trial {
+      sunshine_game3d::source_api next_api;
+      std::uint64_t next_capture;
+      bool stale;
+      const char *message;
+    };
+    using sunshine_game3d::source_api;
+    const trial trials[] {
+      {source_api::ngx, 25, true, "a handover to the other API's copy recorded before the shown one was not stale_shown"},
+      {source_api::ngx, 35, false, "a handover to a later copy was stale_shown"},
+      {source_api::streamline, 31, false, "the same API's next copy was stale_shown"},
+    };
+    for (const auto &value : trials) {
+      continuity::judge judge;
+      std::uint64_t now = 1000, present = 1;
+      for (std::uint64_t i = 0; i != 2; ++i, now += 16) {
+        continuity::supply frame;
+        frame.add(continuity::sr_evaluate, now);
+        auto record = shown(present++, now, source_slot::scene_depth, now);
+        record[source_slot::scene_depth].key.api = source_api::streamline;
+        record.depth_capture = 29 + i;
+        judge.present(record, frame, "test");
+      }
+      continuity::supply frame;
+      frame.add(continuity::sr_evaluate, now);
+      auto record = shown(present++, now, source_slot::scene_depth, now);
+      record[source_slot::scene_depth].key.api = value.next_api;
+      record.depth_capture = value.next_capture;
+      judge.take();
+      judge.present(record, frame, "test");
+      const auto violations = judge.take();
+      const bool stale = violations.size() == 1 && violations[0].kind == continuity::violation_kind::stale_shown &&
+                         violations[0].shown_capture == value.next_capture && violations[0].newer_capture == 30;
+      require(value.stale ? stale : violations.empty(), value.message);
+    }
+  }
 }
 
 int main() {
+  single_present_lag_by_capture();
+  handover_never_steps_back();
   generated_drop_after_late_signal();
   late_signal_conflicts_only_its_copies();
   unordered_copy_completed_after_decision();
@@ -539,6 +632,8 @@ int main() {
             "after the add-on's decision is no holdable copy there; a frame's own copy is no older than its frame "
             "for the stale rule; a frame's own copy at its call is readable at its Present after a stall wherever it "
             "came; a hold past the source age is stale; copies age from when they were made; a no-source frame holds "
-            "under strict_holds; a generated Present after its FG frame's real Present presents that frame");
+            "under strict_holds; a generated Present after its FG frame's real Present presents that frame; a "
+            "Present one copy behind a readable copy of its kind is stale_shown by capture id; a handover never shows "
+            "a copy recorded before the last real Present's");
   return EXIT_SUCCESS;
 }
