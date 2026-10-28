@@ -628,6 +628,32 @@ namespace {
     // is the contract there (the judge called it a gap until the 10-27
     // review, J3, and passed an over-age hold).
     {"hitch-after-sources-then-deferred-tag", "20*sr=local; sr=local,hitch=after_sources; 5*tag=present_list"},
+    // A newest nomination that failed or was refused is a missing frame of
+    // its display lineage (10-28): the lineage's copy completed before it
+    // stands in at once and no gap watermark moves. Until then each one
+    // revoked that copy queue-wide (completed_before_gap): the Present held
+    // an older copy while it was readable. With FG on: a live scope's DLSS-G
+    // attempt refused (compute_unobserved) after a brief hitch, its previous
+    // compute copy in flight at its own Present behind a poisoned order
+    // fence; then a second brief hitch let the held copy expire, mono at a
+    // Present while that compute copy was readable (dropped_hold at frame 28
+    // in five of five runs, 10-28, temporary build). Without FG: every other
+    // SR tag on another queue unprovable (refused at its call) while each SR
+    // copy is readable only after its own Present (the CPU poisons that
+    // queue's order fence, as O3 does): stale depth beside readable newer
+    // copies, then about a second of mono (stale_shown from frame 34,
+    // 25-27 failures, in five of five runs, 10-28, temporary build).
+    {"refused-fg-attempt-keeps-completed-copy", "20*sr=local; fg=on,sr=local,dlssg=compute,dlssg_gpu=after_present,order=second; 5*sr=local,dlssg=compute,dlssg_gpu=after_present; hitch=brief,sr=local,dlssg=compute,dlssg_gpu=after_present; sr=local,dlssg=compute_unobserved; hitch=brief; 10*sr=local,dlssg=compute,dlssg_gpu=after_present", true},
+    {"refused-sr-tags-keep-completed-copies", "20*sr=other_queue; sr=other_queue,order=cpu; 10*sr=other_queue; "
+      "sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; "
+      "sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; "
+      "sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; "
+      "sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; "
+      "sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; "
+      "sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; "
+      "sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; "
+      "sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; sr=other_queue; tag=now_list,state=unprovable; "
+      "10*sr=other_queue", true},
   };
 
   // Each known gap the timelines found has a witness: an event list whose

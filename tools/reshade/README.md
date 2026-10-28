@@ -2295,8 +2295,13 @@ with the add-on's `frame_presenting` reverted, 10-27, temporary build: a gap or 
 the hitch frame) and `fg-on-owned-sr-hitch-after-sources` (a live scope refuses the frame's SR copy,
 so mono is the contract there after the hitch), four with a hitch between frames
 (`hitch-between-sr`, `hitch-between-fg-tag`, `hitch-between-sr-tag`, `hitch-between-dlssg-direct`)
-and `hitch-after-sources-then-deferred-tag` (the judge's hold-age rule)), an event
-list shaped like the
+and `hitch-after-sources-then-deferred-tag` (the judge's hold-age rule), and two for a missing
+frame (a failed or refused newest nomination, whose completed predecessor stands in:
+`refused-fg-attempt-keeps-completed-copy`, a live scope's refused DLSS-G attempt between brief
+hitches, and `refused-sr-tags-keep-completed-copies`, every other SR tag unprovable while SR runs
+on another queue; with the rule reverted the first drops a holdable copy at frame 28 and the second
+shows stale depth from frame 34 and then mono, five of five runs each, 10-28, temporary build)),
+an event list shaped like the
 session it fixed and judged as any
 timeline (random seeds meet these shapes only by chance, and a change of the event language changes
 every seed), and one witness per open row the timelines found or carry (none is open since C5 closed
@@ -2305,8 +2310,8 @@ run; a witness that loses none fails the set, as the matrix's gap seeds keep a r
 failing cell. `--trace` prints every Present's
 frame record, the supply it was judged with and each recorded refusal.
 
-`reshade_session_timelines` runs the fixed set (24 seeds and 42 regression timelines, about
-5170 frames and 13300 Presents, with the seeds' hitches) in about 235 s, registered like
+`reshade_session_timelines` runs the fixed set (24 seeds and 44 regression timelines, about
+5330 frames and 13700 Presents, with the seeds' hitches) in about 240 s, registered like
 `reshade_native_provider_continuity` but with a 480 s timeout, about twice a full run (its own
 watchdog, 10 s after its 460 s bound `fixed_budget_ms`, ends a hung run first). Locally:
 
