@@ -42,6 +42,12 @@ namespace sunshine_streamline::depth_capture {
         if (capture && value.id == capture) return value.published != nullptr;
       return false;
     }
+    std::uint64_t copy_out_resource(std::uint64_t capture) {
+      std::lock_guard lock(mutex);
+      for (const auto &value : slots)
+        if (capture && value.id == capture && value.published) return reinterpret_cast<std::uint64_t>(value.published->resource.p);
+      return 0;
+    }
     bool diagnostic_snapshot_regression() {
       // Same admission helper as production; completion alone must not publish
       // a texture while its recorded copy can still legally replay.
@@ -2613,8 +2619,9 @@ namespace sunshine_streamline::depth_capture {
         for (const auto i : held_retiring) if (queues[i]) { queues[i]->provider_established = false; queues[i]->retiring = true; }
       };
       {
+        std::vector<std::shared_ptr<texture_reference>> discard;
         std::lock_guard lock(mutex);
-        collect_retired();
+        collect_retired(discard);
         if (known_queue(target)) return false;
         // Earlier cases may have filled the table: one place for a stand-in.
         if (std::none_of(queues.begin(), queues.end(), [](const auto &entry) { return !entry; }))
@@ -2659,8 +2666,9 @@ namespace sunshine_streamline::depth_capture {
       restore();
       retire_queue(target);
       {
+        std::vector<std::shared_ptr<texture_reference>> discard;
         std::lock_guard lock(mutex);
-        collect_retired();
+        collect_retired(discard);
         if (known_queue(target)) placed = false;
       }
       if (!(refused && reported && once && placed))

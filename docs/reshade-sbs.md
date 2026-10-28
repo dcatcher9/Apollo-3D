@@ -576,7 +576,16 @@ later Present, with no `wait_idle`, and once that fence completed it is released
 present thread in ACS 10-27b, whose dynamic resolution retired a display at most render-size
 changes). A runtime's teardown waits for its releases, so none outlives its runtime or device. A
 release of 8 ms or more logs `Sunshine Game 3D: depth display release took X ms off the present
-thread (n textures, m MiB)`. New snapshot storage is reserved under the capture lock,
+thread (n textures, m MiB)`. Capture storage goes the same way (10-27): what the idle sweep
+(`depth_capture::poll`, on the present thread), a Present's observation, a queue's retirement or a
+record call on a game thread drops last (predicted copy-out storage released unused, idle storage
+over the 256 MiB budget, a retired queue's or Dump 3D copy's storage, a slot's replaced storage) is
+released by a counted pool job after the capture lock; a reference another holder keeps is only
+dropped there. `release_device` and the add-on's shutdown wait for those jobs. A release of 8 ms or
+more logs `Sunshine Game 3D: depth capture storage release took X ms off the present thread (n
+textures, m MiB)`; without a pool thread it runs inline as the `depth capture storage release`
+step. Only the release a diagnostic copy makes before its own allocation, to bound that
+allocation's peak, stays on the recording thread. New snapshot storage is reserved under the capture lock,
 allocated outside it, then re-validated and published under it; a reservation is only a
 preference, each byte budget (live snapshots or Dump 3D copies) counts the outstanding
 reservations of its own kind, and a lost race releases the new objects after the lock. The flip's
@@ -585,7 +594,9 @@ retirement`, `depth present observation`, `depth list coverage report`, `frame g
 `depth readiness trace`, `API depth binding`, `generic capture switch`, `generic challenger
 release`, `generic depth rebinding`, `depth capture acquisition` and `depth display preparation`.
 Inside them `depth display retire signal` names a retirement's Signal and `depth present
-observation lock` the capture lock's wait alone (each logs its own line, the step around it too).
+observation lock` the capture lock's wait alone (each logs its own line, the step around it too);
+inside `depth input observation`, the capture poll's `depth capture hook installation`, `depth
+capture poll lock` and `depth capture idle sweep`.
 
 ### Frame record
 

@@ -7,6 +7,7 @@
 #include "depth_view_format.h"
 #include "freshness.h"
 #include "game3d_slow_step.h"
+#include "addon_lifetime.h"
 #include "streamline_depth_capture_test_access.h"
 #include "../../src/game3d_debug_formats.h"
 #include <d3d12.h>
@@ -14,6 +15,8 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <condition_variable>
+#include <memory>
 #include <optional>
 #include <cstdio>
 #include <cstring>
@@ -1620,7 +1623,118 @@ namespace sunshine_streamline::depth_capture {
       // never discharges an unfinished recording, CPU lease or queue fence.
       return logical_source_retention(value) == source_retention::none && snapshot_storage_retired(value);
     }
-    void collect_diagnostics() {
+    using storage_list = std::vector<std::shared_ptr<texture_reference>>;
+    // Capture storage the present thread (poll, a Present's observation) or a
+    // game thread (a record call, a queue event) drops is released on a pool
+    // thread: the last Release of a large committed resource frees its video
+    // memory in the driver and can wait on it (bc9989d0: 17 and 81 ms for the
+    // display's storage; the fg4k contract matrix of 10-27: an 8 ms "depth
+    // input observation" at 4K with the idle sweep's releases inline). The
+    // jobs are counted: release_device and shutdown wait until none is
+    // outstanding, so none outlives its device or the add-on.
+    struct storage_jobs_state {
+      std::mutex mutex;
+      std::condition_variable idle;
+      unsigned outstanding{};
+    } storage_jobs;
+    struct storage_job {
+      storage_list values;
+      DWORD caller{};
+    };
+    // Leaves the count last: a waiter may then release the device.
+    void release_storage_job(storage_job &job, bool pooled) {
+      LARGE_INTEGER start{}, end{}, frequency{};
+      QueryPerformanceCounter(&start);
+      std::uint64_t bytes = 0;
+      const auto count = static_cast<unsigned>(job.values.size());
+      for (const auto &value : job.values) if (value.use_count() == 1) bytes += value->allocation_bytes;
+      // During the add-on's detach, devices may be gone: nothing is released
+      // then (the process is ending or the add-on is unloading for good).
+      if (sunshine_addon_lifetime::stopping()) (void) new (std::nothrow) storage_list(std::move(job.values));
+      job.values.clear();
+      QueryPerformanceCounter(&end);
+      QueryPerformanceFrequency(&frequency);
+      const double ms = double(end.QuadPart - start.QuadPart) * 1000.0 / double(frequency.QuadPart);
+      static std::atomic<std::uint64_t> next_line{};
+      const auto now = GetTickCount64();
+      auto due = next_line.load(std::memory_order_relaxed);
+      if (pooled && ms >= 8.0 && now >= due && next_line.compare_exchange_strong(due, now + 1000)) {
+        const sunshine_game3d::vram::latest_suffix memory;
+        char text[256];
+        std::snprintf(text, sizeof(text), "Sunshine Game 3D: depth capture storage release took %.1f ms off the present thread "
+          "(%u textures, %.1f MiB)%s", ms, count, double(bytes) / 1048576.0, memory.text);
+        sunshine_log::message(reshade::log::level::info, text);
+      }
+      {
+        std::lock_guard lock(storage_jobs.mutex);
+        --storage_jobs.outstanding;
+      }
+      storage_jobs.idle.notify_all();
+    }
+    void CALLBACK storage_release_task(PTP_CALLBACK_INSTANCE, void *context) {
+      const std::unique_ptr<storage_job> job(static_cast<storage_job *>(context));
+      release_storage_job(*job, true);
+    }
+    // Never under the capture lock. Without a pool thread (or memory for the
+    // job) the storage is released here, as before 10-27, and the step is
+    // named.
+    void release_storage(storage_list &values) noexcept {
+      // Only storage dropped last goes to the pool: a reference another holder
+      // keeps (a slot, a packet) is only a decrement, dropped here, so a
+      // pooled job never holds a slot's storage as a lease would (a slot
+      // whose storage someone else holds is not reclaimable).
+      for (auto &value : values) if (value.use_count() > 1) value.reset();
+      values.erase(std::remove(values.begin(), values.end(), nullptr), values.end());
+      if (values.empty()) return;
+      std::unique_ptr<storage_job> job(new (std::nothrow) storage_job);
+      if (job) {
+        job->values.swap(values);
+        job->caller = GetCurrentThreadId();
+        {
+          std::lock_guard lock(storage_jobs.mutex);
+          ++storage_jobs.outstanding;
+        }
+        if (TrySubmitThreadpoolCallback(storage_release_task, job.get(), nullptr)) {
+          job.release();
+          return;
+        }
+        const sunshine_game3d::slow_step step("depth capture storage release");
+        release_storage_job(*job, false);
+        return;
+      }
+      const sunshine_game3d::slow_step step("depth capture storage release");
+      values.clear();
+    }
+    // Storage dropped under the capture lock goes to the pool once the lock
+    // is released: declared before the lock, destroyed after it.
+    struct pooled_storage : storage_list {
+      pooled_storage() = default;
+      pooled_storage(const pooled_storage &) = delete;
+      pooled_storage &operator=(const pooled_storage &) = delete;
+      ~pooled_storage() { release_storage(*this); }
+    };
+    // Requires mutex. Moves value's storage to discard (released after the
+    // lock); without memory for it, here.
+    void retire_storage(storage_list &discard, std::shared_ptr<texture_reference> &value) noexcept {
+      if (!value) return;
+      try {
+        discard.push_back(std::move(value));
+      } catch (...) {
+        value.reset();
+      }
+    }
+    // Teardown (release_device, shutdown). Once ExitProcess has begun, every
+    // other thread (the pool's too) has ended: a job that has not run never
+    // will, and none runs.
+    void wait_storage_releases() {
+      using shutdown_query = BOOLEAN(NTAPI *)();
+      static const auto shutting_down = reinterpret_cast<shutdown_query>(
+        reinterpret_cast<void *>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlDllShutdownInProgress")));
+      if (sunshine_addon_lifetime::stopping() || (shutting_down && shutting_down())) return;
+      std::unique_lock lock(storage_jobs.mutex);
+      storage_jobs.idle.wait(lock, [] { return !storage_jobs.outstanding; });
+    }
+    void collect_diagnostics(storage_list &discard) {
       if (!diagnostic_slots_active) return;
       bool retained = false;
       const auto now = GetTickCount64();
@@ -1630,6 +1744,7 @@ namespace sunshine_streamline::depth_capture {
           // Live FG alpha uses this owner every real frame; destroying storage
           // here would turn the bounded ring into a per-frame GPU allocator.
           auto storage = value.diagnostic_reusable ? std::move(value.texture) : nullptr;
+          retire_storage(discard, value.texture);
           value = {};
           value.texture = std::move(storage);
           value.idle_tick = now;
@@ -1799,7 +1914,8 @@ namespace sunshine_streamline::depth_capture {
       out.srv_format = value.nomination_only ? depth_view(desc.Format, value.metadata) : storage->view_format;
       out.pixel_ready = !value.nomination_only;
     }
-    void collect_retired() {
+    // Requires mutex. The retired slots' storage moves to discard.
+    void collect_retired(std::vector<std::shared_ptr<texture_reference>> &discard) {
       for (auto &owner : queues) {
         if (!owner || !owner->retiring) continue;
         const auto native = reinterpret_cast<std::uint64_t>(owner->queue.p);
@@ -1807,8 +1923,11 @@ namespace sunshine_streamline::depth_capture {
         bool retained = false;
         for_each_capture([&](auto &value) {
           if (value.id && uses_queue(value, native)) {
-            if (removed || reclaimable(value)) value = {};
-            else retained = true;
+            if (removed || reclaimable(value)) {
+              retire_storage(discard, value.texture);
+              retire_storage(discard, value.published);
+              value = {};
+            } else retained = true;
           }
         });
         if (!retained) {
@@ -1816,7 +1935,7 @@ namespace sunshine_streamline::depth_capture {
           compute_unplaced = false;
         }
       }
-      collect_diagnostics();
+      collect_diagnostics(discard);
     }
   }
 
@@ -1851,6 +1970,8 @@ namespace sunshine_streamline::depth_capture {
       for (auto &owner : queues) if (owner) owner->provider_established = false; }
     native_observer::shutdown();
     invalidate_all();
+    // No storage release job outlives the add-on's capture owner.
+    wait_storage_releases();
     // Pinned hooks and bounded in-flight allocations remain alive: unloading or
     // releasing uncompleted GPU work would be unsafe. No shutdown wait is added.
     reason = status::inactive;
@@ -2058,6 +2179,7 @@ namespace sunshine_streamline::depth_capture {
     if (list && !cookie) associate_recording(list, &cookie);
     bool known_queue_present = false;
     {
+      pooled_storage discard;
       // The wait for the capture lock alone: a game thread's submission
       // callback (submitted) holds it across its copy-out driver calls.
       std::unique_lock lock(mutex, std::defer_lock);
@@ -2068,7 +2190,7 @@ namespace sunshine_streamline::depth_capture {
       if (list) command(list, cookie, true);
       if (queue_native && known_queue(queue_native)) {
         known_queue_present = true;
-        collect_retired();
+        collect_retired(discard);
       }
     }
     if (list) native_observer::observe_command(list);
@@ -2147,12 +2269,14 @@ namespace sunshine_streamline::depth_capture {
     if (!query_native(native, IID_ID3D12CommandQueue, checked)) { reason = status::unsupported_queue; return; }
     native = reinterpret_cast<std::uint64_t>(checked.p);
     native_observer::observe_queue(native);
+    pooled_storage discard;
     std::lock_guard lock(mutex);
-    collect_retired();
+    collect_retired(discard);
     if (queue(native)) return;
     register_queue(reinterpret_cast<ID3D12CommandQueue *>(native), false);
   }
   void retire_queue(std::uint64_t native) {
+    pooled_storage discard;
     std::lock_guard lock(mutex);
     if (auto *owner = queue(native)) {
       owner->retiring = true;
@@ -2165,7 +2289,7 @@ namespace sunshine_streamline::depth_capture {
         if (value.consumer_queue == native) value.pending_immediate = 0;
       });
     }
-    collect_retired();
+    collect_retired(discard);
     // Its newest game execution goes with it, freeing that entry.
     forget_queue_execution(native);
   }
@@ -2204,6 +2328,9 @@ namespace sunshine_streamline::depth_capture {
     if (!native || !query_native(native, IID_ID3D12Device, checked)) return false;
     const auto device = device_cookie(checked.p);
     if (!device) return false;
+    // Every pooled storage release finished first: none releases a resource
+    // of this device after the device is gone.
+    wait_storage_releases();
     // Its queue places take no further work, and each signals its fence after
     // everything submitted to it. Every copy into or read of a snapshot that
     // was submitted was submitted on a placed queue (an unplaced queue's copy
@@ -2400,16 +2527,26 @@ namespace sunshine_streamline::depth_capture {
           discard.push_back(std::move(value.texture));
     }
   }
+  // On the present thread ("depth input observation"); each part names its
+  // own hitch. The storage it drops goes to a pool thread (release_storage).
   void poll() {
-    if (requested.load()) native_observer::install_pending();
-    std::vector<std::shared_ptr<texture_reference>> discard;
-    std::lock_guard lock(mutex);
-    collect_retired();
+    if (requested.load()) {
+      const sunshine_game3d::slow_step step("depth capture hook installation");
+      native_observer::install_pending();
+    }
+    pooled_storage discard;
+    std::unique_lock lock(mutex, std::defer_lock);
+    {
+      const sunshine_game3d::slow_step step("depth capture poll lock");
+      lock.lock();
+    }
+    const sunshine_game3d::slow_step step("depth capture idle sweep");
+    collect_retired(discard);
     try {
       release_idle_slots(discard);
       release_idle_diagnostics(discard, GetTickCount64());
     } catch (...) {}
-    // discard is destroyed after the lock (declared before it).
+    // discard is released after the lock (declared before it).
   }
 
   void observe_provider(std::uint64_t native) {
@@ -2817,6 +2954,7 @@ namespace sunshine_streamline::depth_capture {
     }
     std::atomic<unsigned> copy_out_allocation_failures{};
     void fail_copy_out_allocations(unsigned count) { copy_out_allocation_failures.store(count); }
+    void settle_storage_releases() { wait_storage_releases(); }
     bool fail_copy_out_allocation() {
       for (auto count = copy_out_allocation_failures.load(); count;)
         if (copy_out_allocation_failures.compare_exchange_weak(count, count - 1)) return true;
@@ -2954,9 +3092,11 @@ namespace sunshine_streamline::depth_capture {
     // Copy-out storage this call failed to allocate or register.
     bool copy_out_refused = false;
     std::uint64_t reservation{};
-    // Storage replaced under the lock is released after it (Release of a
-    // large committed resource can take milliseconds).
-    std::vector<std::shared_ptr<texture_reference>> discarded;
+    // Storage replaced under the lock is released after it, on a pool thread
+    // (Release of a large committed resource can take milliseconds on the
+    // game's recording thread), except what is released before an allocation
+    // to bound its peak (discarded.clear() below).
+    pooled_storage discarded;
     for (unsigned attempt = 0;; ++attempt) {
       std::unique_lock lock(mutex);
       valid_nomination = false;
@@ -3083,7 +3223,7 @@ namespace sunshine_streamline::depth_capture {
       // Multiple legal clear boundaries in one unsubmitted recording may replace
       // the same source snapshot before anyone reads it. Old tickets are retired
       // by ID; their CPU leases alone do not represent recorded GPU reads.
-      if (diagnostic_copy) collect_diagnostics();
+      if (diagnostic_copy) collect_diagnostics(discarded);
       auto *pixel_begin = diagnostic_copy ? diagnostic_slots.data() : slots.data();
       auto *pixel_end = pixel_begin + (diagnostic_copy ? diagnostic_slot_limit : pixel_slot_limit);
       const auto texture_format = diagnostic_copy ? diagnostic_storage_format(desc.Format, value.resource.native_format) :
@@ -3415,6 +3555,7 @@ namespace sunshine_streamline::depth_capture {
   }
   void release_diagnostic_texture(const diagnostic_ticket &ticket) {
     if (!ticket) return;
+    pooled_storage discard;
     std::lock_guard lock(mutex);
     for (auto &entry : diagnostic_slots) if (entry.id == ticket.id && entry.texture == ticket.ownership) {
       entry.diagnostic_released = true;
@@ -3423,7 +3564,7 @@ namespace sunshine_streamline::depth_capture {
       if (!entry.finished) { entry.finished = true; entry.success = false; }
       break;
     }
-    collect_diagnostics();
+    collect_diagnostics(discard);
   }
   std::uint64_t nominate(std::uint64_t command, const input &value, record_diagnostic *diagnostic) {
     // An API identifies the contents at this call, not whichever partial pass

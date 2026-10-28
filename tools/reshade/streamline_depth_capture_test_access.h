@@ -402,7 +402,9 @@ namespace sunshine_streamline::depth_capture {
     std::unique_ptr<queue_state> *free_place();
     extern bool places_reclaimed;
     queue_state *known_queue(std::uint64_t native);
-    void collect_retired();
+    // Requires mutex. The retired slots' storage moves to discard (released
+    // after the lock, on a pool thread).
+    void collect_retired(std::vector<std::shared_ptr<texture_reference>> &discard);
     bool matching_evaluation(const evaluation_head &head, const input &value);
     void end_nomination(const input &value);
     void invalidate(slot &value, capture_failure why);

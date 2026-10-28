@@ -19,8 +19,22 @@
 #include <future>
 #include <stdexcept>
 #include <string>
+#include <mutex>
+#include <thread>
 #include <utility>
 #include <vector>
+
+// ReShade's header-only logging API locates these exports (the target logs
+// synchronously, SUNSHINE_SYNCHRONOUS_LOG): a log sink only, kept for the
+// cases that check what the capture owner reports.
+extern "C" __declspec(dllexport) bool ReShadeRegisterAddon(void *, std::uint32_t) { return false; }
+extern "C" __declspec(dllexport) void ReShadeUnregisterAddon(void *) {}
+static std::mutex logged_lock;
+static std::vector<std::string> logged_lines;
+extern "C" __declspec(dllexport) void ReShadeLogMessage(void *, int, const char *message) {
+  std::lock_guard lock(logged_lock);
+  if (message && logged_lines.size() < 4096) logged_lines.emplace_back(message);
+}
 
 namespace {
   namespace capture = sunshine_streamline::depth_capture;
@@ -825,6 +839,32 @@ namespace {
   // sweep releases its storage. Once FG options turned on, a copy recorded
   // and submitted on the reader's queue before Present moved is copied out
   // too (until 10-27 FG's first Present on another queue could not read it).
+  // Attached to a resource (SetPrivateDataInterface), it is released with
+  // that resource: it records the releasing thread and blocks it until its
+  // gate opens. Static storage: a pool thread may still be inside Release
+  // when the case ends.
+  struct release_sentinel final : IUnknown {
+    std::atomic<ULONG> references{1};
+    std::atomic<DWORD> thread{};
+    HANDLE gate{};
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void **out) override {
+      if (!out) return E_POINTER;
+      *out = IsEqualGUID(iid, IID_IUnknown) ? static_cast<IUnknown *>(this) : nullptr;
+      if (!*out) return E_NOINTERFACE;
+      AddRef();
+      return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++references; }
+    ULONG STDMETHODCALLTYPE Release() override {
+      const auto left = --references;
+      if (!left) {
+        thread.store(GetCurrentThreadId());
+        WaitForSingleObject(gate, INFINITE);
+      }
+      return left;
+    }
+  };
+  constexpr GUID release_sentinel_guid{0x6d2f0b84, 0x1c3e, 0x4a97, {0xb2, 0x5d, 0x80, 0x4e, 0x17, 0xc9, 0x3a, 0x61}};
   void copy_out_reader_moves(fixture &gpu) {
     if (gpu.debug_messages) gpu.debug_messages->ClearStoredMessages();
     texture_case depth(gpu, DXGI_FORMAT_R32_FLOAT, 4);
@@ -977,9 +1017,36 @@ namespace {
       const auto predicted = record_on(fresh, input, 6);
       require(capture::testing::holds_copy_out_storage(predicted),
         "reader moves: once Present moved, a copy on a list never executed took no copy-out storage");
+      // The idle sweep runs on the present thread (poll); the storage it
+      // releases goes to a pool thread (10-27 review: a driver Release of 4K
+      // storage there was an 8 ms "depth input observation" hitch). Its
+      // resource carries a sentinel whose release blocks for 300 ms.
+      static release_sentinel sentinel;
+      sentinel.references = 1; sentinel.thread = 0;
+      sentinel.gate = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+      auto *storage = reinterpret_cast<ID3D12Resource *>(capture::testing::copy_out_resource(predicted));
+      require(sentinel.gate && storage && SUCCEEDED(storage->SetPrivateDataInterface(release_sentinel_guid, &sentinel)),
+        "reader moves: the predicted storage could not carry its release sentinel");
+      sentinel.Release(); // The resource holds the only reference now.
       const auto released = counts().copy_out_released;
       present(gpu.queue.Get(), 12108);
+      std::thread opener([] { Sleep(300); SetEvent(sentinel.gate); });
       run_on_reader(fresh);
+      const DWORD swept_on = GetCurrentThreadId();
+      for (const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+           !sentinel.thread.load() && std::chrono::steady_clock::now() < until;)
+        Sleep(1);
+      opener.join();
+      require(sentinel.thread.load() && sentinel.thread.load() != swept_on,
+        "reader moves: storage the idle sweep released was released on the present thread");
+      for (const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);; Sleep(1)) {
+        std::lock_guard lock(logged_lock);
+        if (std::any_of(logged_lines.begin(), logged_lines.end(), [](const std::string &line) {
+              return line.find("depth capture storage release took") != std::string::npos &&
+                line.find("off the present thread (1 textures") != std::string::npos;
+            })) break;
+        require(std::chrono::steady_clock::now() < until, "reader moves: the slow pooled storage release was not logged");
+      }
       require(!capture::testing::holds_copy_out_storage(predicted) && counts().copy_out_released == released + 1 &&
           counts().copied_out == made + 2,
         "reader moves: unused copy-out storage of a list that ran on the reader's queue was not released by the idle sweep");
@@ -1849,7 +1916,7 @@ namespace {
     capture::release_diagnostic_texture(strict_after); capture::release_diagnostic_texture(observed_after);
     original = {}; changed = {}; strict_after = {}; observed_after = {}; capture::poll();
     host_snapshot.ownership = {};
-    capture::poll();
+    capture::poll(); capture::testing::settle_storage_releases(); // Released on a pool thread.
     if (shared) {
       require(host_storage.expired(), "shared observed-state storage retained an add-on lease after host acknowledgement");
       image.verify_host(gpu, host_snapshot, 0, host_lease.Get(), snapshot_format);
@@ -2002,7 +2069,7 @@ namespace {
     capture::release_diagnostic_texture(original); capture::release_diagnostic_texture(changed);
     original = {}; changed = {}; capture::poll();
     host_snapshot.ownership = {};
-    capture::poll();
+    capture::poll(); capture::testing::settle_storage_releases(); // Released on a pool thread.
     if (shared) {
       require(host_storage.expired(), "shared declared-state storage retained an add-on lease after host acknowledgement");
       image.verify_host(gpu, host_snapshot, 0, host_lease.Get(), snapshot_format);
@@ -2115,6 +2182,7 @@ namespace {
       for (auto &next : other) capture::release_diagnostic_texture(next);
       check(close_list(gpu.list.Get()), "cancel auxiliary pool recording"); gpu.reset(); other.clear(); capture::poll();
       delayed.open(); consumer.wait(); actual.verify(image.width, image.height, bpp); capture::poll();
+      capture::testing::settle_storage_releases(); // Released on a pool thread.
       require((local ? source_lifetime.use_count() == 1 : source_lifetime.expired()) && target_lifetime.expired(),
         "completed auxiliary consumer retained a lease beyond the optional local storage cache");
     }
@@ -2783,6 +2851,7 @@ namespace {
     std::weak_ptr<const capture::texture_reference> discarded_lifetime = discarded.ownership;
     capture::release_diagnostic_texture(discarded); discarded = {};
     check(close_list(consumer.list.Get()), "unsubmitted consumer close"); consumer.reset(); capture::poll();
+    capture::testing::settle_storage_releases(); // Released on a pool thread.
     require(discarded_lifetime.expired(), "unsubmitted consumer Reset invented an unretirable GPU fence");
 
     auto ticket = capture_ready(); require(copy(ticket), "auxiliary replay consumer setup");
@@ -2798,7 +2867,7 @@ namespace {
       "auxiliary consumer replay on a different queue did not invalidate the source"); pixels = {};
     capture::release_diagnostic_texture(ticket); ticket = {}; capture::poll();
     require(!retained.expired(), "closed consumer recording was released while it could still replay");
-    consumer.reset(); capture::poll();
+    consumer.reset(); capture::poll(); capture::testing::settle_storage_releases();
     require(retained.expired(), "retired replay consumer did not release its source");
 
     ticket = capture_ready(); require(copy(ticket), "queue retirement consumer setup");
@@ -2879,6 +2948,7 @@ namespace {
     check(gpu.host1->OpenSharedResource1(reinterpret_cast<HANDLE>(original.shared_handle), IID_PPV_ARGS(&host_pixels)), "host opens before ack");
     std::weak_ptr<const capture::texture_reference> exported_owner = exported.ownership;
     capture::release_diagnostic_texture(exported); exported = {}; original.ownership = {}; capture::poll();
+    capture::testing::settle_storage_releases(); // Released on a pool thread.
     require(exported_owner.expired(), "exported snapshot was cached for unsafe overwrite after host ack");
     std::weak_ptr<const capture::texture_reference> storage;
     std::uint64_t previous_id{};
@@ -2925,7 +2995,7 @@ namespace {
     capture::release_diagnostic_texture(reused); reused = {}; capture::poll();
     // Idle live storage is released 2 s after its last snapshot retired, not before.
     require(!storage.expired(), "recently idle live storage was released");
-    capture::testing::age_idle_storage(2000); capture::poll();
+    capture::testing::age_idle_storage(2000); capture::poll(); capture::testing::settle_storage_releases();
     require(storage.expired(), "idle live storage was kept past 2 s");
     std::puts("PASS local snapshot reuse with fresh IDs/exact pixels; exported pixels stay immutable after host ack; "
       "dump copies never evict idle live storage, which is released after 2 s idle");

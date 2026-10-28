@@ -765,10 +765,14 @@ namespace sunshine_streamline::depth_capture {
   namespace testing { void set_allocation_hook(void (*hook)(void *), void *context); }
   // The next count copy-out storage allocations of record calls fail.
   namespace testing { void fail_copy_out_allocations(unsigned count); }
+  // Waits until every pooled storage release finished (release_storage).
+  namespace testing { void settle_storage_releases(); }
   // Makes idle colour/mask storage older by ms (poll() releases it after 2 s).
   namespace testing { void age_idle_storage(std::uint64_t ms); }
   // Whether the snapshot of capture holds copy-out storage (slot::published).
   namespace testing { bool holds_copy_out_storage(std::uint64_t capture); }
+  // The native resource of capture's copy-out storage (0 none).
+  namespace testing { std::uint64_t copy_out_resource(std::uint64_t capture); }
   // release_device's bound on its wait for the device's queues (0: the
   // shipping bound).
   namespace testing { void set_release_wait(std::uint64_t ms); }
