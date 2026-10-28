@@ -2497,7 +2497,13 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   frame's, a missing frame's stand-in (each kind of failed or refused head, SR and FG, against
   every per-copy check and every identity interruption, which still revoke: after each one, and
   after an expired association, the next pending head finds the copy `completed_before_gap`) and a nomination in
-  progress's (the same copy, at once), the source a head refused before its capture existed names to
+  progress's (the same copy, at once), FG Off's retirement of the FG role alone (an SR copy recorded
+  after the shown FG copy, still in flight at its Present, stands in at the Present after FG Off,
+  also for an SR owner whose newest nomination was DLSS-G's and at FG On again, while a copy
+  published before the shown one, a copy of an earlier frame, an FG copy recorded after the Off once
+  SR was shown, an NGX copy before the shown one and an SR copy before an NGX copy that took the queue
+  stay refused; another viewport's view keeps the old view removal; an NGX feature's release still
+  revokes), the source a head refused before its capture existed names to
   the display (another viewport's or NGX feature's drops the retained copy), and every reason of
   `decide_display`. Its freshness table
   pins each age limit one millisecond either side against an explicit clock: the source age at

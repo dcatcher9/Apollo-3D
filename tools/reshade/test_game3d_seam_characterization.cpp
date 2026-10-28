@@ -1613,6 +1613,305 @@ namespace sunshine_streamline::depth_capture {
       std::printf("PASS P6 missing frame: %zu rows\n", std::size(rows));
     }
 
+    // P6: FG Off retires only the FG role of its viewport's display lineage
+    // (retire_source, 10-28). Its copies are invalidated and the queue's
+    // association ends, but the owner's admission floor is its last selected
+    // copy (present_capture) and it keeps its consumed frame, and the FG
+    // nomination that was the namespace's newest passes to the viewport's
+    // ordinary source as a missing frame of the lineage. So the SR copies
+    // recorded since the shown FG copy stand in at once. Until 10-28 FG Off
+    // moved the owner's watermark to serial (an FG owner), or left a head no
+    // view named, which acquire read as an interruption (an SR owner whose
+    // newest nomination was an FG one), and either revoked those copies:
+    // the Present held older depth (completed_before_gap) or went mono.
+    // Each row runs acquire()'s bookkeeping at each Present (the gap
+    // watermark, then a shown copy's establishment and complete_frame), the
+    // owner in the owner table, where retire_source finds it. F is the shown
+    // FG copy (sequence 10), S an SR copy of the viewport, H the FG-Off
+    // frame's own SR copy, G an FG copy recorded after FG Off, N an NGX copy.
+    void fg_off_role_rows() {
+      enum class shape {
+        silent_sr_after_fg,  // S: a silent frame's SR copy after F, in flight at its Present.
+        silent_sr_same_queue,  // S on the presenting queue, readable at its own Present.
+        sr_before_fg,  // S published before F (an earlier frame).
+        sr_after_fg_lower_sequence,  // S published after F, called before it (sequence 9).
+        sr_after_fg_lower_sequence_then_on,  // The same, then FG On within the source age.
+        no_sr_before_off,  // No SR copy before FG Off.
+        ready_head_after_off,  // A Present before the FG-Off frame's SR evaluation.
+        off_then_on,  // FG On again within the source age, its first FG nomination pending.
+        sr_owner_fg_head,  // An SR owner; the newest nomination DLSS-G's FG one, in flight.
+        sr_owner_fg_head_sr_view_kept,  // The same, the viewport's SR view kept (no production adapter does).
+        other_viewport,  // Another viewport has a view in the epoch (the guard).
+        same_present,  // A repeated effect of the presentation that showed F, after FG Off.
+        fg_after_off_then_on,  // G of a frame before the Off, recorded after it; SR shown; FG On.
+        ngx_before_fg,  // N published before F.
+        ngx_after_fg_then_on,  // N published after S takes the queue; FG On.
+        ngx_release  // An NGX owner's feature released: still a source end.
+      };
+
+      struct row {
+        const char *pins;
+        shape kind;
+        const char *trace;
+      };
+
+      const row rows[] {
+        {"A silent frame's SR copy after F, in flight at its Present, stands in at the Present after FG Off", shape::silent_sr_after_fg, "P1 F ready current_capture; P2 S submitted no_completed_snapshot; OFF floor=F; P3 S ready completed_snapshot; P4 H ready current_capture"},
+        {"SR readable at its own Present took the queue before FG Off", shape::silent_sr_same_queue, "P1 F ready current_capture; P2 S ready current_capture; OFF floor=0; P3 - recorded completed_already_consumed; P4 H ready current_capture"},
+        {"An SR copy published before F stays historical", shape::sr_before_fg, "P1 F ready current_capture; OFF floor=F; P2 - recorded completed_before_gap; P3 H ready current_capture"},
+        {"An SR copy published after F of a frame called before it stays consumed", shape::sr_after_fg_lower_sequence, "P1 F ready current_capture; P2 - submitted no_completed_snapshot; OFF floor=F; P3 - recorded completed_already_consumed; P4 H ready current_capture"},
+        {"The same S never stands in for FG On's pending input either", shape::sr_after_fg_lower_sequence_then_on, "P1 F ready current_capture; P2 - submitted no_completed_snapshot; OFF floor=F; P3 - recorded no_completed_snapshot"},
+        {"No SR copy before FG Off: the FG-Off frame's own SR copy shows once readable", shape::no_sr_before_off, "P1 F ready current_capture; OFF floor=F; P2 - recorded no_completed_snapshot; P3 H ready current_capture"},
+        {"A Present before the FG-Off frame's SR evaluation shows S", shape::ready_head_after_off, "P1 F ready current_capture; P2 S submitted no_completed_snapshot; OFF floor=F; P3 S ready current_capture"},
+        {"FG Off then On within the source age: S stands in for FG On's pending input", shape::off_then_on, "P1 F ready current_capture; P2 S submitted no_completed_snapshot; OFF floor=F; P3 S ready lineage_snapshot"},
+        {"An SR owner whose newest nomination was DLSS-G's: S stands in, no gap", shape::sr_owner_fg_head, "P1 C ready current_capture; P2 S submitted no_completed_snapshot; OFF floor=0; P3 S ready completed_snapshot; P4 - recorded completed_already_consumed; P5 H ready current_capture"},
+        {"The same with the viewport's SR view kept beside the FG one", shape::sr_owner_fg_head_sr_view_kept, "P1 C ready current_capture; P2 S submitted no_completed_snapshot; OFF floor=0; P3 S ready completed_snapshot; P4 - recorded completed_already_consumed; P5 H ready current_capture"},
+        {"Another viewport's view in the epoch: DLSS-G's FG head goes without an SR head, S still stands in", shape::other_viewport, "P1 F ready current_capture; P2 S submitted no_completed_snapshot; OFF floor=F views=1; P3 - stale inactive_views; P4 S ready completed_snapshot; P5 H ready current_capture"},
+        {"A repeated effect of F's presentation selects nothing new after FG Off", shape::same_present, "P1 F ready current_capture; OFF floor=F; P1 - submitted completed_not_older; P2 S ready current_capture"},
+        {"An FG copy of a frame before the Off, recorded after it, never shows once SR was shown", shape::fg_after_off_then_on, "P1 F ready current_capture; OFF floor=F; P2 S ready current_capture; P3 - recorded completed_already_consumed"},
+        {"An NGX copy published before F stays historical", shape::ngx_before_fg, "P1 F ready current_capture; OFF floor=F; P2 - submitted completed_before_gap"},
+        {"An NGX copy after S takes the queue; FG On's stand-in never steps back to S", shape::ngx_after_fg_then_on, "P1 F ready current_capture; P2 S submitted no_completed_snapshot; OFF floor=F; P3 N ready current_capture; P4 - recorded no_completed_snapshot"},
+        {"An NGX feature's release still revokes every copy before it", shape::ngx_release, "P1 N ready current_capture; OFF floor=serial; P2 - stale inactive_views"},
+      };
+      constexpr std::uint64_t epoch = 11, device = 41, ngx_epoch = 30, ngx_source = 400;
+      for (const auto &r : rows) {
+        reset();
+        // The producer queue (the game's own queue), whose fence selection reads.
+        fixture::completion_fence fence;
+        auto &place = queues[0];
+        place = std::make_unique<queue_state>();
+        place->queue.p = reinterpret_cast<ID3D12CommandQueue *>(&fence);
+        place->fence.p = &fence;
+        place->device_identity = device;
+        queues[1] = std::make_unique<queue_state>();
+        struct release_places {
+          ~release_places() {
+            queues[0]->queue.p = nullptr;
+            queues[0]->fence.p = nullptr;
+            queues[0].reset();
+            queues[1].reset();
+          }
+        } release;
+        const auto producer = reinterpret_cast<std::uint64_t>(&fence);
+        auto &owner = *queues[1];
+        owner.device_identity = device;
+        auto storage = std::make_shared<source_reference>();
+        storage->device_identity = device;
+        storage->desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        storage->desc.Format = DXGI_FORMAT_R32_TYPELESS;
+        // A copy of the viewport's SR input, on the producer queue or this one.
+        const auto sr_copy = [&](slot &value, bool other_queue) -> slot & {
+          value.metadata.source = storage;
+          value.texture = std::make_shared<texture_reference>();
+          value.source_nominated = true;
+          if (other_queue) {
+            value.queue = producer;
+            value.producer_fence = 5;
+          }
+          return value;
+        };
+        slot *f = nullptr, *s = nullptr, *h = nullptr, *g = nullptr, *n = nullptr, *c = nullptr;
+        unsigned index = 0;
+        std::uint64_t present = 1;
+        std::string trace;
+        const auto who = [&](const capture_pick &pick) {
+          char out = '-';
+          for (const auto &[value, name] : {std::pair {f, 'F'}, std::pair {s, 'S'}, std::pair {h, 'H'}, std::pair {g, 'G'}, std::pair {n, 'N'}, std::pair {c, 'C'}}) {
+            if (pick.value && pick.value == value) {
+              out = name;
+            }
+          }
+          return pick.value && out == '-' ? '?' : out;
+        };
+        // One Present's selection and acquire()'s bookkeeping; advance: the
+        // next selection is another presentation.
+        const auto pick = [&](selection_policy policy = {}, bool advance = true) {
+          const auto chosen = select_provider(owner, native, present, GetTickCount64(), policy);
+          trace += std::string(trace.empty() ? "" : "; ") + "P" + std::to_string(present) + " " + who(chosen) + " " + name(chosen.result) + " " + name(chosen.selection);
+          if (interrupts_admission(owner, chosen)) {
+            owner.admission_after = serial.load();
+            trace += " [gap]";
+          }
+          if (chosen.value && chosen.result == status::ready) {
+            establish_provider(owner, *chosen.value, present);
+            deliver(owner, *chosen.value);
+          }
+          fixture::presents_since(1);
+          present += advance;
+        };
+        const auto off = [&](provider_kind provider, std::uint64_t retired_epoch, std::uint64_t source) {
+          retire_source(provider, retired_epoch, source);
+          const auto floor = owner.admission_after;
+          const auto text = floor == 0 ? std::string("0") : f && floor == f->id ? std::string("F") : floor == serial.load() ? std::string("serial") : std::to_string(floor);
+          trace += "; OFF floor=" + text;
+          if (r.kind == shape::other_viewport) {
+            unsigned views {};
+            for (const auto &view : evaluations[provider_index(provider_kind::streamline)].views) {
+              views += view.sequence != 0;
+            }
+            trace += " views=" + std::to_string(views);
+          }
+        };
+        const auto fg_copy = [&](std::uint64_t sequence) -> slot & {
+          auto &value = make(index++, provider_kind::streamline, epoch, sequence, fg_source, 0, 0);
+          value.metadata.source = storage;
+          return value;
+        };
+        const auto sr = [&](std::uint64_t sequence, bool other_queue) -> slot & {
+          return sr_copy(make(index++, provider_kind::streamline, epoch, sequence, 0, 0, fg_source), other_queue);
+        };
+        const auto ngx = [&](std::uint64_t sequence) -> slot & {
+          return sr_copy(make(index++, provider_kind::ngx, ngx_epoch, sequence, ngx_source), false);
+        };
+        fence.completed = 5;
+        if (r.kind == shape::sr_owner_fg_head || r.kind == shape::sr_owner_fg_head_sr_view_kept) {
+          // An SR owner: C shown; its next copy S in flight at its Present.
+          c = &sr(10, true);
+          pick();
+          s = &sr(20, true);
+          fence.completed = 4;
+          pick();
+          // DLSS-G's FG nomination of the next frame, its copy in flight.
+          f = &make(index++, provider_kind::streamline, epoch, 30, fg_source, 0, r.kind == shape::sr_owner_fg_head ? 0 : UINT64_MAX);
+          f->finished = false;
+          off(provider_kind::streamline, epoch, fg_source);
+          fence.completed = 5;
+          pick();
+          // The FG-Off frame's own SR copy, in flight, then complete.
+          h = &sr(40, true);
+          h->finished = false;
+          pick();
+          h->finished = true;
+          pick();
+        } else if (r.kind == shape::ngx_release) {
+          n = &ngx(1);
+          pick();
+          off(provider_kind::ngx, ngx_epoch, ngx_source);
+          f = nullptr;
+          pick();
+        } else {
+          if (r.kind == shape::sr_before_fg) {
+            s = &sr(5, true);
+          }
+          if (r.kind == shape::ngx_before_fg) {
+            n = &ngx(1);
+          }
+          if (r.kind == shape::other_viewport) {
+            // Viewport 1 evaluated in this epoch, past the source age now.
+            begin_evaluation(epoch, 2, 1, provider_kind::streamline, 0);
+            for (auto &view : evaluations[provider_index(provider_kind::streamline)].views) {
+              if (view.viewport == 1) {
+                view.tick = GetTickCount64() - source_age - 1;
+              }
+            }
+            fixture::presents_since(2);
+          }
+          // FG's copy F of a live scope's frame, on the presenting queue, shown.
+          f = &fg_copy(10);
+          pick();
+          const bool silent_sr = r.kind == shape::silent_sr_after_fg || r.kind == shape::silent_sr_same_queue ||
+            r.kind == shape::ready_head_after_off || r.kind == shape::off_then_on || r.kind == shape::other_viewport ||
+            r.kind == shape::ngx_after_fg_then_on;
+          if (silent_sr) {
+            // A silent frame's SR copy (its scope missed the frame before).
+            s = &sr(20, r.kind != shape::silent_sr_same_queue);
+            fence.completed = r.kind == shape::silent_sr_same_queue ? 5 : 4;
+            pick();
+          }
+          if (r.kind == shape::sr_after_fg_lower_sequence || r.kind == shape::sr_after_fg_lower_sequence_then_on) {
+            // Called before F (sequence 9): its evaluation keeps F's frame.
+            s = &sr(9, true);
+            fence.completed = 4;
+            pick();
+          }
+          if (r.kind == shape::ngx_after_fg_then_on) {
+            n = &ngx(1);
+          }
+          if (r.kind == shape::other_viewport) {
+            // DLSS-G's FG nomination of the next frame, the newest, in flight.
+            fg_copy(25).finished = false;
+          }
+          if (r.kind == shape::same_present) {
+            // F's presentation again (its effects); S recorded meanwhile.
+            --present;
+            s = &sr(20, false);
+          }
+          off(provider_kind::streamline, epoch, fg_source);
+          if (!f->invalid) {
+            fail(std::string("P6 FG Off role, ") + r.pins + ": F survived its retirement");
+          }
+          fence.completed = 5;
+          switch (r.kind) {
+            case shape::ready_head_after_off:
+              pick();
+              break;
+            case shape::other_viewport:
+              pick();
+              h = &sr(30, true);
+              h->finished = false;
+              pick();
+              h->finished = true;
+              pick();
+              break;
+            case shape::off_then_on:
+            case shape::sr_after_fg_lower_sequence_then_on:
+              {
+                // FG On: its first FG nomination pending; the scope requires FG.
+                h = &fg_copy(30);
+                h->finished = false;
+                pick({true, epoch, 0, false, GetTickCount64() - 16});
+                break;
+              }
+            case shape::same_present:
+              pick({}, true);
+              pick();
+              break;
+            case shape::fg_after_off_then_on:
+              {
+                // S, readable, takes the queue; then G, DLSS-G's copy of a
+                // frame before the Off, recorded after it (sequence 15); then
+                // FG On's first nomination, pending.
+                s = &sr(20, false);
+                pick();
+                g = &sr_copy(make(index++, provider_kind::streamline, epoch, 15, fg_source, 0, 0), false);
+                h = &fg_copy(30);
+                h->finished = false;
+                pick({true, epoch, 0, false, GetTickCount64() - 16});
+                break;
+              }
+            case shape::ngx_before_fg:
+              pick();
+              break;
+            case shape::ngx_after_fg_then_on:
+              {
+                // N takes the queue while S is still in flight; then FG On's
+                // first nomination is pending with S readable.
+                fence.completed = 4;
+                pick();
+                fence.completed = 5;
+                h = &fg_copy(30);
+                h->finished = false;
+                pick({true, epoch, 0, false, GetTickCount64() - 16});
+                break;
+              }
+            default:
+              {
+                // The FG-Off frame's own SR copy H, in flight, then complete.
+                h = &sr(30, true);
+                h->finished = false;
+                pick();
+                h->finished = true;
+                pick();
+              }
+          }
+        }
+        if (trace != r.trace) {
+          fail(std::string("P6 FG Off role, ") + r.pins + ":\n    got      " + trace + "\n    expected " + r.trace);
+        }
+      }
+      std::printf("PASS P6 FG Off retires only the FG role: %zu rows\n", std::size(rows));
+    }
+
     // P6/P7: a head refused before its capture slot existed names its source
     // to the display (capture_pick::named, classify_acquisition), also
     // beside ambiguous or inactive views. The display then holds only a copy
@@ -2446,6 +2745,7 @@ int main() {
   stray_frame_generation_copy_steps();
   lineage_stand_in_rows();
   missing_frame_rows();
+  fg_off_role_rows();
   named_head_rows();
   frame_presenting_rows();
   hitch_presenting_rows();

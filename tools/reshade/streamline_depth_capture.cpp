@@ -896,7 +896,8 @@ namespace sunshine_streamline::depth_capture {
           if (value.id == owner.present_capture) { out.value = &value; out.progress = progress; break; }
           continue;
         }
-        if (owner.provider_established && owner.provider == provider && owner.last_epoch == value.metadata.epoch &&
+        // The consumed frame, also of an FG role FG Off retired (retire_source).
+        if (owner.provider == provider && owner.last_epoch == value.metadata.epoch &&
             value.metadata.sequence <= owner.last_sequence) continue;
         if (!out.value || value.id > out.value->id) { out.value = &value; out.progress = progress; }
       }
@@ -1097,7 +1098,7 @@ namespace sunshine_streamline::depth_capture {
       for (auto &value : slots) {
         const auto &metadata = value.metadata;
         if (!lineage_candidate(value, fg, now) || value.id <= owner.admission_after) continue;
-        if (owner.provider_established && owner.provider == provider_kind::streamline && owner.last_epoch == metadata.epoch &&
+        if (owner.provider == provider_kind::streamline && owner.last_epoch == metadata.epoch &&
             metadata.sequence <= owner.last_sequence) continue;
         if (best && (metadata.sequence < best->metadata.sequence ||
             (metadata.sequence == best->metadata.sequence && value.id < best->id))) continue;
@@ -1159,10 +1160,13 @@ namespace sunshine_streamline::depth_capture {
       // depth: acquire's watermark made the newer copy completed_before_gap
       // while the display held an older one, and the Present went mono once
       // that passed the source age with a readable copy (Assassin's Creed
-      // Shadows' refused SR inputs, 10-25). Ambiguous or inactive views, a
-      // head past the source age that this Present does not present, the FG
-      // scope's policy picks (select_provider), retire_source and
-      // expire_association still revoke.
+      // Shadows' refused SR inputs, 10-25). FG Off is one too: retire_source
+      // passes the retired FG role's newest nomination to the viewport's
+      // ordinary source as such a head, so the lineage's newest SR copy
+      // stands in at once (10-28). Ambiguous or inactive views, a head past
+      // the source age that this Present does not present, the FG scope's
+      // policy picks (select_provider), an NGX feature's release
+      // (retire_source) and expire_association still revoke.
       chosen.missing_frame = !pending && chosen.head && !chosen.pending_nomination && (!latest || live) &&
         chosen.result != status::ready && chosen.result != status::stale && chosen.result != status::ambiguous;
       // A nomination in progress (pending_nomination: the owner's exact
@@ -1214,9 +1218,10 @@ namespace sunshine_streamline::depth_capture {
     }
     // A genuine source interruption revokes the queue's snapshots from before
     // it (admission_after). A pending, repeated or missing frame
-    // (capture_pick::missing_frame) does not, nor does a newest copy that this
-    // Present still presents (frame_presenting): its frame's copies stay
-    // admissible.
+    // (capture_pick::missing_frame; FG Off's retired FG head too, which
+    // retire_source passes to the viewport's ordinary source) does not, nor
+    // does a newest copy that this Present still presents
+    // (frame_presenting): its frame's copies stay admissible.
     bool interrupts_admission(const queue_state &owner, const capture_pick &chosen) {
       return owner.provider_established && !chosen.missing_frame &&
         chosen.result != status::ready && chosen.result != status::recorded && chosen.result != status::submitted &&
@@ -1381,8 +1386,12 @@ namespace sunshine_streamline::depth_capture {
       // it, of either provider, stay admissible. The previous owner's last
       // selected copy is historical however the new one was chosen (also a
       // required FG scope's pick, which select_provider's older_than_shown
-      // does not judge).
-      if (owner.provider_established && owner.provider != value.metadata.provider && value.id)
+      // does not judge). So is it after FG Off retired the owner's FG role
+      // (retire_source keeps its present_capture): an NGX copy taking the
+      // queue then makes the viewport's SR copies before it historical, as
+      // any handover does, so FG On's lineage stand-in never steps back to
+      // one of them.
+      if ((owner.provider_established || owner.present_capture) && owner.provider != value.metadata.provider && value.id)
         owner.admission_after = std::max({owner.admission_after, value.id - 1, owner.present_capture});
       if (!owner.provider_established || owner.provider != value.metadata.provider ||
           owner.source_id != value.metadata.source_id || owner.nominated_epoch != value.metadata.epoch)
@@ -2317,8 +2326,13 @@ namespace sunshine_streamline::depth_capture {
   }
   void shutdown() {
     requested = false;
+    // No owner keeps a consumed frame or a shown copy without its source
+    // (only retire_source's FG role does, select_latest_capture).
     { std::lock_guard lock(mutex);
-      for (auto &owner : queues) if (owner) owner->provider_established = false; }
+      for (auto &owner : queues) if (owner) {
+        owner->provider_established = false;
+        owner->last_epoch = owner->last_sequence = owner->present_capture = 0;
+      } }
     native_observer::shutdown();
     invalidate_all();
     // No storage release job outlives the add-on's capture owner.
@@ -3049,26 +3063,81 @@ namespace sunshine_streamline::depth_capture {
     const auto matches = [&](const input &value) {
       return value.provider == provider && value.epoch == epoch && value.source_id == source_id;
     };
+    // The retired source's copies, recorded or still recording, never show
+    // again: an FG Off/On transition cannot resurrect a copy of the FG scope
+    // before it.
     for (auto &value : slots) if (value.id && !value.preservation_only && matches(value.metadata)) {
       invalidate(value, capture_failure::source_retired);
     }
+    // FG Off (slDLSSGSetOptions mode=0, or an options call that failed)
+    // retires only the FG role of its viewport's display lineage: the
+    // viewport's SR/RR copies of the same epoch are the lineage's successor
+    // (depth_cache_update.h, lineage_successor), and nothing else of it is
+    // revoked. Its owner keeps its last selected copy (present_capture) as
+    // the admission floor, the handover floor of establish_provider, so no
+    // copy published before the one it showed returns, and keeps its
+    // consumed frame (last_epoch, last_sequence: the viewport's FG and SR
+    // inputs share one sequence per epoch), so no copy of an earlier frame
+    // returns; present and present_capture stay, so a repeated effect of the
+    // same presentation selects nothing new. The queue's association ends
+    // as before (C8 holds the FG copy within the source age, Generic may
+    // follow). Until 10-28 the watermark moved to serial here, which revoked
+    // the viewport's SR copies recorded since the shown FG copy, the
+    // lineage's legal successor: a Present before its next SR copy was
+    // readable held the older FG copy (completed_before_gap), or went mono
+    // once that passed the source age. Any other retired source (an NGX
+    // feature released) still ends its presentation: copies recorded before
+    // the release never re-establish it (the next provider must submit a new
+    // frame; IDs use pre-increment, so serial is the last issued ID).
+    std::uint32_t viewport {};
+    const bool fg_role = provider == provider_kind::streamline &&
+      sunshine_scene_depth::fg_depth_viewport(source_id, viewport);
     for (auto &owner : queues) if (owner && owner->provider_established && owner->provider == provider &&
         owner->nominated_epoch == epoch && owner->source_id == source_id) {
       owner->provider_established = false;
+      if (fg_role) {
+        owner->source_id = owner->last_source_tick = owner->nominated_epoch = 0;
+        owner->admission_after = std::max(owner->admission_after, owner->present_capture);
+        continue;
+      }
       owner->source_id = owner->last_epoch = owner->last_sequence = owner->last_source_tick = owner->nominated_epoch = owner->present_capture = 0;
-      // The next provider must submit a new frame after release. An otherwise
-      // recent snapshot captured while the old provider owned presentation is
-      // historical, and must not be resurrected by an FG Off/On transition.
-      // IDs use pre-increment: serial is the last issued ID, not the next one.
       owner->admission_after = std::max(owner->admission_after, serial.load(std::memory_order_relaxed));
     }
     auto &current = evaluations[provider_index(provider)];
-    for (auto &view : current.views) if (view.epoch == epoch && view.source_id == source_id) view = {};
+    // The FG role's newest nomination, the namespace's newest, passes to the
+    // viewport's ordinary source (Streamline SR/RR: source 0) as a head
+    // without a capture: the next Present before the viewport's next SR
+    // nomination is a missing frame of the lineage (select_capture), whose
+    // newest legal copy stands in, and moves no watermark
+    // (interrupts_admission). Until 10-28 the namespace kept a head no view
+    // named (its FG nomination had replaced the viewport's SR view), so that
+    // Present read inactive or ambiguous views and moved acquire's gap
+    // watermark, which revoked the same SR copies. Not while another
+    // viewport has a view in this epoch: a second source-0 view there would
+    // make its picks ambiguous, so the view goes as before.
+    const evaluation_head *head = nullptr;
+    if (fg_role && current.epoch == epoch && current.source_id == source_id &&
+        std::none_of(current.views.begin(), current.views.end(), [&](const evaluation_head &view) {
+          return view.sequence && view.epoch == epoch && view.viewport != viewport;
+        }))
+      for (const auto &view : current.views)
+        if (view.epoch == epoch && view.source_id == source_id && view.sequence == current.sequence) head = &view;
+    for (auto &view : current.views) {
+      if (&view == head) {
+        // Its call (sequence, tick, present) without the FG scope's facts.
+        evaluation_head ordinary {epoch, view.sequence, view.tick, 0, viewport};
+        ordinary.present = view.present;
+        view = ordinary;
+      } else if (view.epoch == epoch && (view.source_id == source_id || (head && view.viewport == viewport && !view.source_id))) {
+        view = {};
+      }
+    }
     if (current.pending_nomination.epoch == epoch && current.pending_nomination.source_id == source_id)
       current.pending_nomination = {};
     if (current.epoch == epoch && current.source_id == source_id) {
       // Preserve the namespace's monotonic sequence watermark; releasing a
-      // feature does not authorize replay of its earlier evaluation.
+      // feature does not authorize replay of its earlier evaluation. Source 0
+      // names the re-keyed head above, or no view.
       current.source_id = 0;
       attempt_status[provider_index(provider)] = status::unavailable;
     }

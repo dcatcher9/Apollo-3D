@@ -48,6 +48,12 @@ namespace sunshine_scene_depth {
   constexpr std::uint64_t encode_source_id(const source_key &key) {
     return key.role == source_role::fg_depth ? (std::uint64_t{1} << 63) | key.viewport : key.id;
   }
+  // Whether source_id is a viewport's FG depth (encode_source_id of
+  // fg_depth_key), and that viewport.
+  constexpr bool fg_depth_viewport(std::uint64_t source_id, std::uint32_t &viewport) {
+    viewport = static_cast<std::uint32_t>(source_id);
+    return source_id == encode_source_id(fg_depth_key(viewport));
+  }
   enum class resource_kind { raw_depth, display_depth };
   // declared: the caller stated this resource's state for this call.
   // declared_for_use: the caller stated the state at a later use of the

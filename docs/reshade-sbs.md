@@ -4522,8 +4522,27 @@ before the FG copy is past the source age once the FG copy is. A
 line reports a required scope turning `silent` and, later, `live` again, at most every 5 s
 (`changes=` counts the turns so far; the line names the newest state); FG Off ends a silent
 scope without its own line. Generated presentations count as FG (`fg` on output lines) while a
-silent scope's viewport supplies the depth. An observed FG Off retires that source so independently captured ordinary
-SL tag/evaluation or NGX depth can resume with newly submitted pixels. The finished FG copy is
+silent scope's viewport supplies the depth. An observed FG Off (`slDLSSGSetOptions` mode 0, or an
+options call that failed) retires only the FG role of that viewport's display lineage
+(`retire_source`): the scope's copies are invalidated, recorded or still recording, so no FG Off/On
+transition resurrects one, and the queue's API association ends, but nothing else of the lineage is
+revoked. The owner's admission floor becomes its last selected copy, the handover floor of
+`establish_provider` (so no copy published before the one it showed returns), and it keeps its
+consumed frame (the viewport's FG and SR inputs share one sequence per epoch, so no copy of an
+earlier frame returns); the scope's newest nomination, when it is the namespace's newest, passes to
+the viewport's ordinary source as a missing frame of the lineage (the interruption rule below), so
+the newest SR/RR snapshot recorded since the shown FG copy stands in at once
+(`selection=completed_snapshot`, `current_capture`, or `lineage_snapshot` when FG turns on again).
+While another viewport has a view in that epoch, that FG nomination goes as before rather than add
+a second ordinary view, which would make the picks ambiguous. An NGX copy published after the shown
+FG copy takes the queue as at any handover, which makes the SR copies before it historical. Until
+10-28 FG Off moved the owner's admission watermark to the newest capture, or left a namespace head
+no view named, which the next Present read as an interruption: either revoked the viewport's SR
+copies recorded since the shown FG copy, so a Present before the next SR copy was readable held the
+older FG copy (`completed_before_gap`), or went mono once that passed the source age. It needs an
+SR copy still in flight across a Present at FG Off; the `completed_before_gap` losses at FG Off in
+Assassin's Creed Shadows' logs of 10-24 to 10-27 came from its refused SR nominations instead,
+missing frames since 10-28 (below). The finished FG copy is
 held across FG Off within its source age, as any source's missing frame is: the queue stays the
 API's while the display holds an FG copy younger than the source age
 (`depth_capture::frame_generation_retained`), so color-only Presents hold it, and the same
@@ -4586,7 +4605,8 @@ pre-interruption captures from returning: a newest nomination whose views are am
 viewports evaluating) or inactive, one past the source age that the Present does not present
 (`frame_presenting`), the FG scope's policy picks (`fg_scope_missing` for an unconfirmed scope,
 also a head refused before its capture existed whose source is the FG input, and
-`fg_scope_mismatch`), a released source (`retire_source`, FG Off) and an expired association
+`fg_scope_mismatch`), a released NGX feature (`retire_source`; FG Off retires only the FG role,
+above) and an expired association
 (`expire_association`). So does ownership moving to the other provider: every copy recorded before
 the new owner's chosen copy, and the previous owner's last selected copy, is historical
 (`establish_provider`), because the consumed watermark restarts there and cannot compare the two
@@ -5384,8 +5404,8 @@ Nested NGX capture is suppressed only when an enclosing SL or NGX evaluation has
 a valid native copy, or when SL has confirmed enabled FG authority for that viewport and that FG
 scope is live (above). A direct (not nested) NGX evaluation applies the same FG rule: while SL
 reports FG enabled on its one viewport with a live scope it begins its evaluation (live handoff
-evidence) but records no depth copy, since selection never considers NGX while FG is required and
-FG Off makes every snapshot taken meanwhile inadmissible; a busy or ambiguous FG read, or a silent
+evidence) but records no depth copy, since selection never considers NGX while FG is required; a
+busy or ambiguous FG read, or a silent
 FG scope, copies as before. The `Sunshine NGX depth` line counts
 these evaluations as `fg_owned`. Before the final review a UE title with NVIDIA's DLSS plugin and
 the Streamline DLSS-G plugin copied its full depth plane on every real frame with FG on, for no

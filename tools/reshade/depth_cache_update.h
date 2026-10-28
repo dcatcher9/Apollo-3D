@@ -210,7 +210,10 @@ namespace sunshine_streamline::depth_capture {
   // not revoked (an unconfirmed scope refuses its copies), the queue stays
   // the API's, so decide_display holds the copy until it expires, a readable
   // frame of another source replaces it or a source outside its lineage
-  // drops it. Only then may the queue hand over to Generic.
+  // drops it. Only then may the queue hand over to Generic. The successor's
+  // copies recorded since the shown FG copy stay admissible at FG Off
+  // (retire_source retires only the FG role), so the first of them readable
+  // replaces the held copy at once.
   inline bool frame_generation_retained(const retained_depth &previous, selection_policy policy, std::uint64_t now) {
     return !policy.exclude_unconfirmed_fg && frame_generation_copy(previous, now);
   }

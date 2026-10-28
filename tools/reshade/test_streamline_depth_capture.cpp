@@ -790,12 +790,21 @@ namespace sunshine_streamline::depth_capture {
         establish_provider(established, fg, 21);
         established.last_epoch = fg_epoch; established.last_sequence = 3;
         begin_evaluation(fg_epoch, 4, 0, provider_kind::streamline, fg_id);
-        make(3, provider_kind::ngx, 30, 2, 400);
+        auto &after_shown = make(3, provider_kind::ngx, 30, 2, 400);
         if (pick(22, fg_policy).value) return false;
-        // A successful FG Off retires that exact source; subsequent normal
-        // acquisition resumes a new NGX frame, never reviving pre-gap pixels.
+        // A successful FG Off retires that exact source: its copies never
+        // return. It retires only the FG role (10-28): the owner's floor is
+        // its last selected copy, so an NGX copy published after the shown FG
+        // copy takes the queue as at any handover (until 10-28 FG Off revoked
+        // it too), while one published before it stays historical, as does
+        // the viewport's SR copy of an earlier frame.
         retire_source(provider_kind::streamline, fg_epoch, fg_id);
-        if (established.provider_established || pick(23).value || pick(23, fg_policy).value) return false;
+        if (established.provider_established || !fg.invalid || pick(23, fg_policy).value ||
+            pick(23).value != &after_shown) return false;
+        after_shown.success = false;
+        if (pick(23).value || completed_fallback_reason(established, 23, after_shown.metadata, first_ngx, true) !=
+            selection_reason::completed_before_gap) return false;
+        after_shown.success = true;
         auto &resumed_ngx = make(4, provider_kind::ngx, 30, 3, 400);
         if (pick(24).value != &resumed_ngx || pick(24, fg_policy).value) return false;
       }
@@ -864,7 +873,9 @@ namespace sunshine_streamline::depth_capture {
         if (select_provider(established, native, 102, GetTickCount64(), {}).value != &fresh_ngx) return false;
         establish_provider(established, fresh_ngx, 102);
         if (select_provider(established, native, 103, GetTickCount64(), {true, fg_epoch, 0}).value) return false;
-        auto &renewed_fg = make(3, provider_kind::streamline, fg_epoch, 14, fg_id);
+        // An FG nomination replaces its viewport's ordinary view, as the
+        // probe's does (superseded 0), also the FG head FG Off passed to it.
+        auto &renewed_fg = fixture::make_capture(3, native, provider_kind::streamline, fg_epoch, 14, fg_id, 0, 0);
         renewed_fg.metadata.frame_generation_input = true;
         if (select_provider(established, native, 103, GetTickCount64(), {true, fg_epoch, 0}).value != &renewed_fg) return false;
       }
