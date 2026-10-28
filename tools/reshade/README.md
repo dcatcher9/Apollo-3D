@@ -385,7 +385,10 @@ middleware call, including tracked depth-stencil resources; matching a Generic b
 identity cannot authenticate its contents. While a live source's successor is pending, acquisition
 may advance to that source's unconsumed completed snapshot with its own sequence, metadata,
 allocation size and active rectangle under the contract's ordering, freshness and interruption
-checks, whether or not it already owns selection. A new render size of the same source (dynamic
+checks, whether or not it already owns selection. A failed, invalid or refused newest nomination
+(also one refused before its capture existed) is a missing frame of its display lineage, taken
+the same way and marking no interruption; only identity-level interruptions revoke earlier
+snapshots ([source interruptions](../../docs/reshade-sbs.md#streamline-depth-selection)). A new render size of the same source (dynamic
 resolution) neither refuses that snapshot nor ends the hold of the last copied depth; only another
 storage format, view or resource kind does (`format_changed`, `depth_format_changed`).
 When neither API supplies readable pixels, an established API selection can remain unavailable and
@@ -844,14 +847,15 @@ The default case checks that a pending foreign producer cannot introduce a rever
 dependency, then verifies natural recovery and same-queue admission. `--pipeline` checks admission
 of an unconsumed completed NGX snapshot while its successor is CPU-recorded or GPU-pending or
 carries new observation/feedback revisions, a reset flag, a new active crop or a new
-dynamic-resolution allocation (the completed snapshot keeps its own 64x64 allocation), plus
-rejection across failed/missing input, epoch and storage format changes (`format_changed`).
+dynamic-resolution allocation (the completed snapshot keeps its own 64x64 allocation), or failed or
+was refused before its copy existed (a missing frame: shown once, then consumed), plus rejection
+across epoch and storage format changes (`format_changed`).
 `--foreign-reclaim` retires producer and consumer recordings and
 releases private snapshot leases before allocating an unrelated NGX capture or a Generic
 preservation copy from a separate resource. Its ten cases check that SL FG nomination authority,
-current depth and completed depth beneath a pending successor survive reclamation, while
-failed/missing input still revokes old depth and prevents pre-gap resurrection. Pixel cases use
-actual GPU readback.
+current depth and completed depth beneath a pending, failed or missing successor survive
+reclamation, and that the completed depth that stood in for a failed or missing one is never shown
+again. Pixel cases use actual GPU readback.
 `--content [width height]` nominates a full patterned packed D32S8 scene through NGX, which
 copies it at the API call, then clears that same source after the API capture. It checks the
 snapshot's scene depth byte-for-byte and verifies that depth-plane
@@ -2459,7 +2463,9 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   after it for a frame that made a frame-generation call, until the next evaluation; a copy's
   submission on a presenting queue as its frame, `presented_by`), the frame's own SR stand-in for
   its DLSS-G copy in flight at those Presents after a hitch, never at a later one nor an earlier
-  frame's, and every reason of `decide_display`. Its freshness table
+  frame's, a missing frame's stand-in (each kind of failed or refused head, SR and FG, against
+  every per-copy check and every identity interruption, which still revoke), and every reason of
+  `decide_display`. Its freshness table
   pins each age limit one millisecond either side against an explicit clock: the source age at
   every selection site, the association timeout of `expire_association` and `evaluation_live`, an
   FG scope's enabled and accepted ticks, which also admit a tick ahead of the clock (the capture

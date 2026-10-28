@@ -857,6 +857,13 @@ namespace sunshine_streamline::depth_capture {
         out.selection = active_views ? selection_reason::ambiguous_views : selection_reason::inactive_views;
         return out;
       }
+      // The newest nomination's view, when it is that one active view: its
+      // viewport names the head's display lineage (select_capture).
+      for (const auto &value : current.views)
+        if (current.epoch && current.sequence && value.epoch == current.epoch && value.sequence == current.sequence &&
+            value.source_id == current.source_id &&
+            (sunshine_freshness::fresh_lt(value.tick, now, sunshine_freshness::source_age_ms) || view_presenting(value, provider)))
+          out.head = &value;
       const auto &pending = current.pending_nomination;
       if (pending.sequence && pending.epoch == current.epoch && pending.sequence == current.sequence &&
           pending.source_id == current.source_id &&
@@ -1015,11 +1022,14 @@ namespace sunshine_streamline::depth_capture {
       return typeless(left) == typeless(right) && depth_view(left, a) == depth_view(right, b) &&
         a.resource.kind == b.resource.kind;
     }
+    // head: the newest nomination the snapshot would stand in for. Its
+    // storage is compared when it has a capture slot (compare_storage); a
+    // head refused before its slot existed names no storage.
     selection_reason completed_fallback_reason(const queue_state &owner, std::uint64_t present,
-        const slot &latest, const slot &completed) {
+        const input &head, const slot &completed, bool compare_storage) {
       if (completed.id <= owner.admission_after) return selection_reason::completed_before_gap;
-      if (completed.metadata.sequence >= latest.metadata.sequence) return selection_reason::completed_not_older;
-      if (!same_depth_storage(completed.metadata, latest.metadata)) return selection_reason::format_changed;
+      if (completed.metadata.sequence >= head.sequence) return selection_reason::completed_not_older;
+      if (compare_storage && !same_depth_storage(completed.metadata, head)) return selection_reason::format_changed;
       // The consumed watermark belongs to the owner's provider; sequences of
       // another provider's namespace are not comparable with it.
       if (owner.provider == completed.metadata.provider && owner.last_epoch == completed.metadata.epoch &&
@@ -1029,7 +1039,8 @@ namespace sunshine_streamline::depth_capture {
         return selection_reason::presentation_already_selected;
       return selection_reason::completed_snapshot;
     }
-    // A viewport's Streamline FG input (latest) is pending and none of its
+    // A viewport's Streamline FG input (head) is pending, or a missing frame
+    // (capture_pick::missing_frame: a refused DLSS-G attempt), and none of its
     // snapshots completed: FG On's first frames, or DLSS-G's compute copy
     // still in flight at its own Present in a GPU-bound game. The viewport's
     // ordinary SR/RR source of the same epoch is one display lineage with it
@@ -1044,9 +1055,9 @@ namespace sunshine_streamline::depth_capture {
     // readable frame, as before; a silent scope's held FG copy is still held
     // over it (frame_generation_holds), and a repeated effect of one
     // presentation keeps its one tuple.
-    slot *lineage_snapshot(const queue_state &owner, std::uint64_t native, std::uint64_t present, const slot &latest,
+    slot *lineage_snapshot(const queue_state &owner, std::uint64_t native, std::uint64_t present, const input &head,
         std::uint64_t now) {
-      const auto &fg = latest.metadata;
+      const auto &fg = head;
       if (fg.provider != provider_kind::streamline || !fg.frame_generation_input || !fg.epoch ||
           (owner.present == present && owner.present_capture)) return nullptr;
       slot *best = nullptr;
@@ -1068,24 +1079,54 @@ namespace sunshine_streamline::depth_capture {
       }
       return best;
     }
+    // A head refused before its capture slot existed: the identity its view
+    // names. A Streamline view of a viewport's FG key is its FG input.
+    input head_identity(const evaluation_head &head, provider_kind provider) {
+      input out;
+      out.provider = provider; out.epoch = head.epoch; out.sequence = head.sequence;
+      out.source_id = head.source_id; out.viewport = head.viewport; out.tick = head.tick;
+      out.frame_generation_input = provider == provider_kind::streamline &&
+        head.source_id == sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(head.viewport));
+      return out;
+    }
     capture_pick select_capture(const queue_state &owner, std::uint64_t native,
         std::uint64_t present, provider_kind provider, std::uint64_t now) {
       auto chosen = select_latest_capture(owner, native, present, provider, now);
       const auto *latest = chosen.latest;
-      // Missing/failed/ambiguous/expired nominations still revoke depth. A live
-      // source whose newest snapshot is pending may use its own newest completed
-      // one; completed_snapshot matches its identity. Ownership does not gate
-      // this: a pipelined source is otherwise never readable, so it could never
-      // (re)establish itself after a reset, a source change or another
-      // provider's expired capture.
-      if (!latest || (chosen.result != status::recorded && chosen.result != status::submitted) ||
-          latest->invalid || latest->nomination_invalid || latest->nomination_only ||
-          (latest->finished && !latest->success) ||
-          !(within_source_age(latest->metadata.tick, now) || frame_presenting(presented_by(*latest)))) return chosen;
-      auto *completed = completed_snapshot(latest->metadata, now, native);
+      const bool live = latest && (within_source_age(latest->metadata.tick, now) || frame_presenting(presented_by(*latest)));
+      // A live source whose newest snapshot is pending may use its own newest
+      // completed one; completed_snapshot matches its identity. Ownership does
+      // not gate this: a pipelined source is otherwise never readable, so it
+      // could never (re)establish itself after a reset, a source change or
+      // another provider's expired capture.
+      const bool pending = live && (chosen.result == status::recorded || chosen.result == status::submitted) &&
+        !latest->invalid && !latest->nomination_invalid && !latest->nomination_only &&
+        !(latest->finished && !latest->success);
+      // A missing frame takes the same path: the one active view's fresh head
+      // failed, was refused (before its capture slot existed too), is invalid,
+      // or names its source without pixels this queue can read (a nomination-
+      // only slot's pixel failure). That is no evidence against the finished
+      // pixels of its display lineage, so its lineage's newest legal copy
+      // stands in under the pending path's checks (identity, finished,
+      // readable here, within the source age, unconsumed), and it moves no
+      // admission watermark (interrupts_admission). Until 10-28 it revoked
+      // depth: acquire's watermark made the newer copy completed_before_gap
+      // while the display held an older one, and the Present went mono once
+      // that passed the source age with a readable copy (Assassin's Creed
+      // Shadows' refused SR inputs, 10-25). Ambiguous or inactive views, a
+      // head past the source age that this Present does not present, the FG
+      // scope's policy picks (select_provider), retire_source and
+      // expire_association still revoke. A nomination in progress holds
+      // (pending_nomination).
+      chosen.missing_frame = !pending && chosen.head && !chosen.pending_nomination && (!latest || live) &&
+        chosen.result != status::ready && chosen.result != status::stale && chosen.result != status::ambiguous;
+      if (!pending && !chosen.missing_frame) return chosen;
+      const auto identity = latest ? latest->metadata : head_identity(*chosen.head, provider);
+      // A missing frame without a stand-in keeps its own result and reason.
+      auto *completed = completed_snapshot(identity, now, native);
       if (!completed) {
-        chosen.selection = selection_reason::no_completed_snapshot;
-        if (auto *standin = lineage_snapshot(owner, native, present, *latest, now)) {
+        if (pending) chosen.selection = selection_reason::no_completed_snapshot;
+        if (auto *standin = lineage_snapshot(owner, native, present, identity, now)) {
           chosen.value = standin;
           chosen.progress = standin->queue == native ? queue_progress{} : producer_progress(*standin);
           chosen.result = status::ready;
@@ -1093,32 +1134,50 @@ namespace sunshine_streamline::depth_capture {
         }
         return chosen;
       }
-      chosen.selection = completed_fallback_reason(owner, present, *latest, *completed);
-      if (chosen.selection != selection_reason::completed_snapshot) {
-        if (chosen.selection == selection_reason::completed_already_consumed &&
-            completed->metadata.sequence == owner.last_sequence)
-          chosen.consumed_completed_capture = completed->id;
+      const auto reason = completed_fallback_reason(owner, present, identity, *completed, latest != nullptr);
+      if (reason != selection_reason::completed_snapshot) {
+        if (pending) {
+          chosen.selection = reason;
+          if (reason == selection_reason::completed_already_consumed && completed->metadata.sequence == owner.last_sequence)
+            chosen.consumed_completed_capture = completed->id;
+        }
         return chosen;
       }
       const auto progress = producer_progress(*completed);
       if (submission_status(*completed, native, owner.device_identity, progress) != status::ready) {
-        chosen.selection = selection_reason::completed_not_readable; return chosen;
+        if (pending) chosen.selection = selection_reason::completed_not_readable;
+        return chosen;
       }
       chosen.value = completed;
       chosen.progress = progress;
       chosen.result = status::ready;
+      chosen.selection = selection_reason::completed_snapshot;
       return chosen;
+    }
+    // A genuine source interruption revokes the queue's snapshots from before
+    // it (admission_after). A pending, repeated or missing frame
+    // (capture_pick::missing_frame) does not, nor does a newest copy that this
+    // Present still presents (frame_presenting): its frame's copies stay
+    // admissible.
+    bool interrupts_admission(const queue_state &owner, const capture_pick &chosen) {
+      return owner.provider_established && !chosen.missing_frame &&
+        chosen.result != status::ready && chosen.result != status::recorded && chosen.result != status::submitted &&
+        !(chosen.result == status::stale && chosen.latest && frame_presenting(presented_by(*chosen.latest)));
     }
     capture_pick select_provider(const queue_state &owner, std::uint64_t native,
         std::uint64_t present, std::uint64_t now, selection_policy policy = {}) {
       presenting_generated = policy.generated_presents;
+      const auto fg_head = [](const evaluation_head *head) {
+        return head && head->source_id == sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(head->viewport));
+      };
       const auto select_sl = [&] {
         auto chosen = select_capture(owner, native, present, provider_kind::streamline, now);
         const auto *source = chosen.value ? chosen.value : chosen.latest;
+        // Without a capture, a nomination in progress or a head refused before
+        // its slot existed names the source: an FG input's is excluded as one.
         if (policy.exclude_unconfirmed_fg &&
-            ((source && source->metadata.frame_generation_input) ||
-              (chosen.pending_nomination && chosen.pending_nomination->source_id ==
-                sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(chosen.pending_nomination->viewport))))) {
+            (source ? source->metadata.frame_generation_input :
+              fg_head(chosen.pending_nomination ? chosen.pending_nomination : chosen.head))) {
           chosen = {};
           chosen.result = status::stale;
           chosen.selection = selection_reason::fg_scope_missing;
@@ -1141,10 +1200,12 @@ namespace sunshine_streamline::depth_capture {
         // (lineage_snapshot), of this scope's viewport and epoch.
         const bool standin = fg.value && fg.selection == selection_reason::lineage_snapshot &&
           fg.value->metadata.epoch == policy.epoch && fg.value->metadata.viewport == policy.viewport;
+        // Without a capture, a nomination in progress or a head refused before
+        // its slot existed names the source it must match.
+        const auto *named = fg.latest ? nullptr : fg.pending_nomination ? fg.pending_nomination : fg.head;
         if ((fg.value && !standin && !matches(fg.value->metadata)) || (fg.latest && !matches(fg.latest->metadata)) ||
-            (fg.pending_nomination && (fg.pending_nomination->epoch != policy.epoch ||
-              fg.pending_nomination->viewport != policy.viewport ||
-              fg.pending_nomination->source_id != fg_source))) {
+            (named && (named->epoch != policy.epoch || named->viewport != policy.viewport ||
+              named->source_id != fg_source))) {
           capture_pick mismatch; mismatch.selection = selection_reason::fg_scope_mismatch; return mismatch;
         }
         return fg;
@@ -1167,9 +1228,11 @@ namespace sunshine_streamline::depth_capture {
       const auto live = [&](const capture_pick &value) {
         return value.pending_nomination || (value.latest && !expired(value));
       };
-      // A live source whose newest valid snapshot is still on its way. Unlike a
-      // failed, unsupported or ambiguous pick, it moves no gap watermark in
-      // acquire(), so its completed snapshot can become readable.
+      // A live source whose newest valid snapshot is still on its way, so its
+      // completed snapshot can become readable. A failed or refused head
+      // (capture_pick::missing_frame) moves no gap watermark either, but has
+      // no pixels of its own to wait for: its lineage's completed copy, when
+      // one is legal, already stood in (select_capture).
       const auto pending = [&](const capture_pick &value) {
         const auto *latest = value.latest;
         return value.pending_nomination || (live(value) && !latest->nomination_only && !latest->invalid &&
@@ -1183,7 +1246,8 @@ namespace sunshine_streamline::depth_capture {
       // already copied frame is not a successor. This preserves selection only;
       // display-cache rules still govern old pixels. Failed, unsupported,
       // missing, replaced, expired or undelivered owner evidence never holds
-      // against a readable source.
+      // against a readable source; a failed head's completed copy that stood
+      // in (select_capture) is the owner's readable source.
       const auto protected_owner = [&](const capture_pick &value) {
         const auto *source = value.value ? value.value : value.latest;
         if (source) {
@@ -1210,9 +1274,10 @@ namespace sunshine_streamline::depth_capture {
       // such as a nested NGX evaluation still in flight, takes no authority. A
       // persistently failing owner stops delivering within the source age and
       // so cannot lock out a pending source. Otherwise a pending live pick ranks
-      // above a failing live one, which would mark a gap at every Present and
-      // so keep the pending source's completed snapshots unreadable, and any
-      // live pick ranks above an expired one. An owner that has stopped
+      // above a failing live one, whose lineage had no completed copy to stand
+      // in (a failing pick no longer marks a gap, interrupts_admission, but a
+      // pending one may still become readable), and any live pick ranks above
+      // an expired one. An owner that has stopped
       // delivering keeps its provider only while the other provider does not
       // rank higher.
       const auto rank = [&](const capture_pick &value) { return pending(value) ? 2 : live(value) ? 1 : 0; };
@@ -1233,9 +1298,9 @@ namespace sunshine_streamline::depth_capture {
       // older ones too) is historical. The consumed watermark below restarts
       // and cannot compare the two namespaces' sequences, so without this the
       // previous provider's copy already shown, or one older than the new
-      // owner's, could be selected again and flip ownership back whenever no
-      // interruption revoked them. Copies recorded after it, of either
-      // provider, stay admissible.
+      // owner's, could be selected again and flip ownership back (a missing
+      // frame no longer revokes them, select_capture). Copies recorded after
+      // it, of either provider, stay admissible.
       if (owner.provider_established && owner.provider != value.metadata.provider && value.id)
         owner.admission_after = std::max(owner.admission_after, value.id - 1);
       if (!owner.provider_established || owner.provider != value.metadata.provider ||
@@ -1770,14 +1835,27 @@ namespace sunshine_streamline::depth_capture {
       // A different provider (or Generic preservation) shares this pool and
       // must not erase the current head while its namespace still names it.
       if (current_source_nomination(value)) return source_retention::current_nomination;
+      // The provider's newest nomination: its capture, valid or not (a
+      // failed or refused one is a missing frame, select_capture), else the
+      // view that names it when it was refused before its capture existed.
+      const auto provider = value.metadata.provider;
+      const auto &head = evaluations[provider_index(provider)];
       const slot *latest = nullptr;
       for (const auto &candidate : slots)
-        if (candidate.metadata.provider == value.metadata.provider && current_source_nomination(candidate) &&
-            (!latest || candidate.id > latest->id)) latest = &candidate;
-      // Preserve exactly the existing eligible completed fallback too. Its
-      // age, reset/revision, source and GPU-completion requirements remain in
-      // completed_snapshot; retaining storage grants no extra admission.
-      return latest && completed_snapshot(latest->metadata, GetTickCount64()) == &value ?
+        if (candidate.id && !candidate.preservation_only && candidate.metadata.provider == provider &&
+            candidate.metadata.epoch == head.epoch && candidate.metadata.sequence == head.sequence &&
+            candidate.metadata.source_id == head.source_id && (!latest || candidate.id > latest->id)) latest = &candidate;
+      const evaluation_head *view = nullptr;
+      if (!latest && head.epoch && head.sequence)
+        for (const auto &candidate : head.views)
+          if (candidate.epoch == head.epoch && candidate.sequence == head.sequence && candidate.source_id == head.source_id)
+            view = &candidate;
+      if (!latest && !view) return source_retention::none;
+      // Preserve exactly the existing eligible completed fallback too, beneath
+      // a pending successor or a missing frame alike. Its age, reset/revision,
+      // source and GPU-completion requirements remain in completed_snapshot;
+      // retaining storage grants no extra admission.
+      return completed_snapshot(latest ? latest->metadata : head_identity(*view, provider), GetTickCount64()) == &value ?
         source_retention::completed_fallback : source_retention::none;
     }
     bool snapshot_storage_retired(const slot &value) {
@@ -4160,19 +4238,16 @@ namespace sunshine_streamline::depth_capture {
         }
       }
     }
-    // A genuine source interruption revokes snapshots from before the gap.
-    // Normal pending/repeated frames do not move this admission watermark.
-    // A newest copy that this Present still presents (frame_presenting) is
-    // no interruption: its frame's copies stay admissible.
-    if (owner->provider_established &&
-        chosen.result != status::ready && chosen.result != status::recorded && chosen.result != status::submitted &&
-        !(chosen.result == status::stale && chosen.latest && frame_presenting(presented_by(*chosen.latest))))
-      owner->admission_after = serial.load(std::memory_order_relaxed);
+    // A genuine source interruption revokes snapshots from before the gap;
+    // pending, repeated and missing frames do not (interrupts_admission).
+    if (interrupts_admission(*owner, chosen)) owner->admission_after = serial.load(std::memory_order_relaxed);
     // The display may hold the newest evaluated frame's own copy at this
     // Present, whatever its age (depth_cache_update.h, own_frame).
     decision.presenting_floor = frame_presenting(newest_evaluation_present) ? newest_evaluation_present : 0;
+    // A head refused before its capture existed names its sequence too, so a
+    // missing frame's stand-in reads as sequence < newest_sequence.
     if (diagnostic) diagnostic->newest_sequence = chosen.latest ? chosen.latest->metadata.sequence :
-      chosen.pending_nomination ? chosen.pending_nomination->sequence : 0;
+      chosen.pending_nomination ? chosen.pending_nomination->sequence : chosen.head ? chosen.head->sequence : 0;
     if (diagnostic && chosen.pending_nomination) {
       const auto &pending = *chosen.pending_nomination;
       diagnostic->source_tick_ms = pending.tick;

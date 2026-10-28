@@ -2206,10 +2206,13 @@ namespace sunshine_streamline {
       const auto fg_source = sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(snapshot.viewport));
       const auto superseded = snapshot.frame_generation_input ? 0 :
         snapshot.tag_boundary || fg_silent ? fg_source : UINT64_MAX;
-      // A silent FG scope has no FG capture to revoke: its refused boundaries
-      // leave the ordinary source of the viewport in place. A refused FG
-      // boundary also leaves its frame without an FG copy
-      // (miss_frame_generation), which makes a live scope silent.
+      // A silent FG scope has no FG observation to withdraw: its refused
+      // boundaries leave the ordinary source of the viewport in place. A
+      // withdrawn attempt is the namespace's newest nomination without a copy,
+      // a missing frame of its display lineage that revokes no finished copy
+      // (depth_capture::select_capture). A refused FG boundary also leaves its
+      // frame without an FG copy (miss_frame_generation), which makes a live
+      // scope silent.
       const bool withdraws = !(snapshot.frame_generation_input && fg_silent);
       const auto withdraw_invalid_attempt = [&] {
         if (!withdraws) return;
@@ -3925,7 +3928,9 @@ namespace sunshine_streamline {
         } else {
           input.source_present_generation = depth_capture::source_present_generation(input.source);
           // A live scope's attempt replaces its FG observation first, exactly
-          // as an FG tag boundary does, so a refusal withdraws the old copy. A
+          // as an FG tag boundary does, so a refusal withdraws the observation,
+          // never finished pixels: it is a missing frame, for which the scope's
+          // newest unshown copy stands in (depth_capture::select_capture). A
           // silent scope's refusal changes nothing: only a recorded copy
           // becomes the viewport's FG observation (replacing its ordinary one).
           // Either way a refused frame has no FG copy, so the scope owns no

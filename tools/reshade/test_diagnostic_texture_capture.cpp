@@ -1291,6 +1291,33 @@ namespace {
     require(capture::acquire(native(gpu.foreign_queue.Get()), ++present, packet, &acquired) && packet.pixel_ready &&
         packet.capture_id == resized_ticket, "the resized SR frame was not readable after its nomination");
     packet = {};
+    // A missing frame (10-28): frame 4 completes on the render queue unread,
+    // then frame 5's evaluation is refused before its copy existed (a tag
+    // whose state cannot be proven); frame 6 completes unread, then frame 7's
+    // SDK call fails. Each completed frame stands in at the next Present
+    // (completed_snapshot). Until 10-28 each refusal moved the gap watermark,
+    // so the Present held the older frame and the next one found the
+    // completed frame completed_before_gap.
+    const auto stands_in = [&](std::uint64_t expected, const char *failure) {
+      require(capture::acquire(native(gpu.foreign_queue.Get()), ++present, packet, &acquired) && packet.pixel_ready &&
+          packet.capture_id == expected && acquired.selection == capture::selection_reason::completed_snapshot, failure);
+      require(capture::copy_current(native(consumer.list.Get()), packet, native(target.Get()),
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE), "a standing-in SR frame's consumer copy failed");
+      capture::complete_frame(packet, present);
+      consumer.submit(); consumer.wait(); consumer.reset();
+      packet = {};
+    };
+    const auto fourth = evaluate(first);
+    gpu.submit(); gpu.wait(); gpu.reset();
+    capture::begin_evaluation(epoch, ++sequence, 0, sunshine_scene_depth::provider_kind::streamline, sr_source);
+    stands_in(fourth, "the SR frame completed before a refused evaluation did not stand in");
+    const auto sixth = evaluate(first);
+    gpu.submit(); gpu.wait(); gpu.reset();
+    const auto failed = capture::nominate_evaluation(native(gpu.list.Get()), sr_input(first), UINT64_MAX, &diagnostic);
+    require(failed && diagnostic.result == capture::status::recorded, "the failing SR evaluation's copy was not recorded");
+    capture::finish(failed, false);
+    stands_in(sixth, "the SR frame completed before a failed evaluation did not stand in");
+    gpu.submit(); gpu.wait(); gpu.reset();
     check(close_list(compute_list.Get()), "DLSS-G refusal list close");
     destroyed(compute_list.Get());
     capture::command_destroyed(native(compute_list.Get()));
@@ -1300,7 +1327,8 @@ namespace {
     gpu.check_debug_errors();
     std::printf("PASS SR nomination in progress: a Present during an SR copy's storage allocation held as pending, the "
       "SR frame completed on the render queue before it stayed readable on the presenting queue and the resized frame "
-      "followed; DLSS-G inputs refused on their compute list between the evaluates changed nothing%s\n",
+      "followed; DLSS-G inputs refused on their compute list between the evaluates changed nothing; the SR frame "
+      "completed before a refused or failed evaluation stood in at the next Present%s\n",
       gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
   }
 
@@ -1313,8 +1341,10 @@ namespace {
   // queue but not yet read (completed_before_gap). Begun as an
   // evaluation_nomination, it holds as pending and that snapshot stands in.
   // A hook that returns without nominating (missing parameters, FG owning
-  // depth) ends the nomination at its scope's end, and the refused attempt
-  // then moves the gap as before.
+  // depth) ends the nomination at its scope's end. Its refused attempt is a
+  // missing frame (10-28): it moves no gap, and the frame completed before
+  // it stands in at the next Present; until 10-28 it moved the gap and that
+  // frame was never shown.
   void ngx_nomination_in_progress(fixture &gpu) {
     if (gpu.debug_messages) gpu.debug_messages->ClearStoredMessages();
     consumer_fixture consumer(gpu);
@@ -1395,13 +1425,24 @@ namespace {
     require(!packet.pixel_ready && acquired.result == capture::status::unavailable,
       "an NGX evaluation that returned without nominating stayed in progress after its hook");
     packet = {};
+    // Frame 5 completes on the render queue unread; frame 6's hook returns
+    // without nominating. Frame 5 stands in at the next Present.
+    const auto fifth = evaluate();
+    gpu.submit(); gpu.wait(); gpu.reset();
+    {
+      capture::evaluation_nomination nominating;
+      begin(nominating);
+    }
+    show(fifth, capture::selection_reason::completed_snapshot,
+      "the NGX frame completed before a hook that returned without nominating did not stand in");
     capture::retire_source(input.provider, input.epoch, input.source_id);
     capture::command_destroyed(native(consumer.list.Get()));
     capture::poll();
     gpu.check_debug_errors();
     std::printf("PASS NGX nomination in progress: a Present between an NGX evaluation's begin and its nomination held as "
       "pending, the NGX frame completed on the render queue before it stayed readable and the next frame followed; a "
-      "hook that returned without nominating held while it ran and its refused attempt then read as unavailable%s\n",
+      "hook that returned without nominating held while it ran and its refused attempt then read as unavailable, and "
+      "the frame completed before such a hook stood in at the next Present%s\n",
       gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
   }
 

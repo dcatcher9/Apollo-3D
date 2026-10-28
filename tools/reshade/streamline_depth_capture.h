@@ -108,9 +108,10 @@ namespace sunshine_streamline::depth_capture {
     no_completed_snapshot, completed_before_gap, completed_not_older,
     completed_already_consumed, presentation_already_selected, format_changed,
     completed_not_readable, completed_snapshot, fg_scope_missing, fg_scope_mismatch,
-    // A viewport's FG input is pending with no completed snapshot, and the
-    // newest readable unconsumed snapshot of the viewport's ordinary source
-    // (its display lineage) stands in (select_capture).
+    // A viewport's FG input is pending, or a missing frame (it failed or was
+    // refused), with no completed snapshot, and the newest readable
+    // unconsumed snapshot of the viewport's ordinary source (its display
+    // lineage) stands in (select_capture).
     lineage_snapshot
   };
   // Acquisition authority, frozen under the capture lock. Diagnostics may be
@@ -416,7 +417,9 @@ namespace sunshine_streamline::depth_capture {
   // never an already-copied packet. No SL/native frame-number equivalence.
   void present(std::uint64_t queue);
   // Every observed DLSS attempt advances this watermark, including malformed or
-  // failed attempts, so an older success cannot conceal a newer invalid frame.
+  // failed attempts, so an older success cannot conceal a newer invalid frame:
+  // it is never that frame's current capture, only, within its own checks, a
+  // missing frame's completed stand-in (select_capture).
   // An explicit adapter role change may supersede one source for this viewport;
   // other viewports and all existing GPU retirement obligations remain intact.
   void begin_evaluation(std::uint64_t epoch, std::uint64_t sequence, std::uint32_t viewport,
@@ -429,8 +432,9 @@ namespace sunshine_streamline::depth_capture {
   // parameters and retains its source between the two. An acquisition
   // meanwhile, another thread's Present, holds instead of reading the
   // attempt as refused, which moved acquire's gap watermark and so revoked
-  // the source's earlier snapshots still in flight; a refused attempt moves
-  // it once the nomination ends, as before.
+  // the source's earlier snapshots still in flight. A refused attempt, once
+  // the nomination ends, is a missing frame: it moves no gap either (since
+  // 10-28), and the snapshot completed before it stands in.
   class evaluation_nomination {
   public:
     evaluation_nomination() = default;
@@ -471,7 +475,8 @@ namespace sunshine_streamline::depth_capture {
   // observation. Until the candidate batch resolves (any evaluation's, SR's as
   // well as FG's), an acquisition holds: only a bounded whole-FG-pair hold may
   // use this logical identity, no previous depth becomes current pixels and no
-  // earlier snapshot of the source is revoked (acquire's gap watermark). Native
+  // earlier snapshot of the source is revoked (acquire's gap watermark, which
+  // a refused or failed attempt does not move either). Native
   // validation and GPU ordering remain shared with nominate(). Rejection clears
   // only this attempt; missing adapter input must use begin_evaluation() instead.
   std::uint64_t nominate_evaluation(std::uint64_t command, const input &value,

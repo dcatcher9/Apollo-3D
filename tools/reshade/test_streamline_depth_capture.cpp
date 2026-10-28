@@ -453,20 +453,7 @@ namespace sunshine_streamline::depth_capture {
         // and a direct-list copy's failure changes nothing. A compute copy
         // that nominates no depth (an auxiliary input) is never accepted.
         constexpr std::uint64_t epoch = 8, fg = (1ull << 63) | 2;
-        struct completion_fence final : ID3D12Fence {
-          UINT64 completed{};
-          HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void **out) override { if (out) *out = nullptr; return E_NOINTERFACE; }
-          ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
-          ULONG STDMETHODCALLTYPE Release() override { return 1; }
-          HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID, UINT *, void *) override { return E_NOTIMPL; }
-          HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID, UINT, const void *) override { return E_NOTIMPL; }
-          HRESULT STDMETHODCALLTYPE SetPrivateDataInterface(REFGUID, const IUnknown *) override { return E_NOTIMPL; }
-          HRESULT STDMETHODCALLTYPE SetName(LPCWSTR) override { return E_NOTIMPL; }
-          HRESULT STDMETHODCALLTYPE GetDevice(REFIID, void **out) override { if (out) *out = nullptr; return E_NOINTERFACE; }
-          UINT64 STDMETHODCALLTYPE GetCompletedValue() override { return completed; }
-          HRESULT STDMETHODCALLTYPE SetEventOnCompletion(UINT64, HANDLE) override { return E_NOTIMPL; }
-          HRESULT STDMETHODCALLTYPE Signal(UINT64) override { return E_NOTIMPL; }
-        } fence;
+        fixture::completion_fence fence;
         // The compute queue's place: selection reads only its private fence.
         const auto entry = std::find_if(queues.begin(), queues.end(), [](const auto &item) { return !item; });
         if (entry == queues.end()) return false;
@@ -583,12 +570,12 @@ namespace sunshine_streamline::depth_capture {
         queue_state consumed;
         consumed.last_epoch = 2; consumed.last_sequence = 10;
         consumed.present = 21; consumed.present_capture = latest.id;
-        if (completed_fallback_reason(consumed, 21, latest, completed) != selection_reason::completed_already_consumed)
+        if (completed_fallback_reason(consumed, 21, latest.metadata, completed, true) != selection_reason::completed_already_consumed)
           return false;
         // Repeated effects in the same presentation must keep this evidence;
         // an existing pending admission is not a different-source failure.
         consumed.present = 20;
-        if (completed_fallback_reason(consumed, 21, latest, completed) != selection_reason::completed_already_consumed)
+        if (completed_fallback_reason(consumed, 21, latest.metadata, completed, true) != selection_reason::completed_already_consumed)
           return false;
         // Dynamic resolution: the successor's new allocation (a typed alias of
         // the same family) or new extent is the same source, never a refusal.
@@ -599,7 +586,7 @@ namespace sunshine_streamline::depth_capture {
         for (const sunshine_scene_depth::extent area : {sunshine_scene_depth::extent{0, 0, 176, 99},
             sunshine_scene_depth::extent{0, 0, 150, 84}, sunshine_scene_depth::extent{8, 4, 160, 90}}) {
           latest.metadata.resource.area = area;
-          if (completed_fallback_reason(consumed, 21, latest, completed) != selection_reason::completed_already_consumed)
+          if (completed_fallback_reason(consumed, 21, latest.metadata, completed, true) != selection_reason::completed_already_consumed)
             return false;
         }
         // Another storage family, another view of one family (a declared
@@ -618,16 +605,16 @@ namespace sunshine_streamline::depth_capture {
             other->desc.Format = DXGI_FORMAT_R16_TYPELESS; after.metadata.resource.native_format = DXGI_FORMAT_R16_UNORM;
           }
           if (change == 2) after.metadata.resource.kind = sunshine_scene_depth::resource_kind::display_depth;
-          if (completed_fallback_reason(consumed, 21, after, before) != selection_reason::format_changed) return false;
+          if (completed_fallback_reason(consumed, 21, after.metadata, before, true) != selection_reason::format_changed) return false;
         }
         // The checks below run with the resized successor: it reaches
         // completed_snapshot like an unchanged one.
         consumed.admission_after = completed.id;
-        if (completed_fallback_reason(consumed, 21, latest, completed) != selection_reason::completed_before_gap) return false;
+        if (completed_fallback_reason(consumed, 21, latest.metadata, completed, true) != selection_reason::completed_before_gap) return false;
         consumed.admission_after = 0; consumed.last_sequence = 9;
-        if (completed_fallback_reason(consumed, 21, latest, completed) != selection_reason::completed_snapshot) return false;
+        if (completed_fallback_reason(consumed, 21, latest.metadata, completed, true) != selection_reason::completed_snapshot) return false;
         completed.metadata.sequence = latest.metadata.sequence;
-        if (completed_fallback_reason(consumed, 21, latest, completed) != selection_reason::completed_not_older) return false;
+        if (completed_fallback_reason(consumed, 21, latest.metadata, completed, true) != selection_reason::completed_not_older) return false;
       }
       const auto make = [&](unsigned index, provider_kind provider,
           std::uint64_t epoch, std::uint64_t sequence, std::uint64_t source) -> slot & {
@@ -1160,24 +1147,10 @@ namespace sunshine_streamline::depth_capture {
         }
       } restore;
       requested = true;
-      struct completion_fence final : ID3D12Fence {
-        UINT64 completed{};
-        HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void **out) override { if (out) *out = nullptr; return E_NOINTERFACE; }
-        ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
-        ULONG STDMETHODCALLTYPE Release() override { return 1; }
-        HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID, UINT *, void *) override { return E_NOTIMPL; }
-        HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID, UINT, const void *) override { return E_NOTIMPL; }
-        HRESULT STDMETHODCALLTYPE SetPrivateDataInterface(REFGUID, const IUnknown *) override { return E_NOTIMPL; }
-        HRESULT STDMETHODCALLTYPE SetName(LPCWSTR) override { return E_NOTIMPL; }
-        HRESULT STDMETHODCALLTYPE GetDevice(REFIID, void **out) override { if (out) *out = nullptr; return E_NOINTERFACE; }
-        UINT64 STDMETHODCALLTYPE GetCompletedValue() override { return completed; }
-        HRESULT STDMETHODCALLTYPE SetEventOnCompletion(UINT64, HANDLE) override { return E_NOTIMPL; }
-        HRESULT STDMETHODCALLTYPE Signal(UINT64) override { return E_NOTIMPL; }
-      };
       // Registered queue timelines. Selection only compares a queue's identity
       // and reads its private fence; it never calls the queue.
       struct producer_queue {
-        completion_fence fence;
+        fixture::completion_fence fence;
         std::uint64_t signaled{};
         std::unique_ptr<queue_state> *entry{};
         std::uint64_t native() const { return reinterpret_cast<std::uint64_t>(this); }
@@ -1288,8 +1261,8 @@ namespace sunshine_streamline::depth_capture {
         fixture::presents_since(1);
         const auto chosen = select_provider(queue, consumer, present, GetTickCount64(), policy);
         decided = classify_acquisition(chosen, queue, policy);
-        if (queue.provider_established && chosen.result != status::ready && chosen.result != status::recorded &&
-            chosen.result != status::submitted) queue.admission_after = serial.load();
+        // acquire()'s own predicate, so this timeline cannot drift from it.
+        if (interrupts_admission(queue, chosen)) queue.admission_after = serial.load();
         if (chosen.value) {
           establish_provider(queue, *chosen.value, present);
           if (chosen.result == status::ready && copied) {
@@ -1447,8 +1420,16 @@ namespace sunshine_streamline::depth_capture {
         }
         // Ownership is revocable: a failed owner attempt, or no copied owner
         // frame within the source age, lets the readable live source take over.
-        auto &failed = advance(own);
-        finish(failed.id, false);
+        // The owner's copy completed before a failure is a legal copy of its
+        // lineage and stands in first (select_capture's missing frame); a
+        // failure with none left to stand in hands over.
+        auto &completed = *own.pending;
+        finish(advance(own).id, false);
+        advance(other); finish_gpu(other);
+        const auto stood_in = present_frame(owner, ++present);
+        if (!completed_pick(stood_in, &completed) || !stood_in.missing_frame || owner.provider != owner_kind ||
+            owner.admission_after) return false;
+        finish(advance(own).id, false);
         advance(other); finish_gpu(other);
         const auto failover = present_frame(owner, ++present);
         if (!failover.value || failover.value->metadata.provider == owner_kind || failover.result != status::ready) return false;
@@ -1501,28 +1482,39 @@ namespace sunshine_streamline::depth_capture {
       // The nested fallback in a pipelined game: one owner copy is rejected
       // (a metadata-only nomination, or an attempt rejected before its capture
       // slot exists), so the other provider's inner evaluation is captured and
-      // is still in flight at that Present. The delivering owner keeps
-      // selection and the display holds its last copied frame. The pixel-less
-      // inner capture takes no authority, so the held depth is not invalidated
-      // as a source change and selection does not flip to the other provider
-      // and back.
+      // is still in flight at that Present. The rejected attempt is a missing
+      // frame of the owner's lineage (select_capture), never a gap: the
+      // owner's copy completed before it stands in once this queue can read
+      // it, at that Present or the next, and until then the display holds its
+      // last copied frame. The delivering owner keeps selection throughout.
+      // The pixel-less inner capture takes no authority, so the held depth is
+      // not invalidated as a source change and selection does not flip to the
+      // other provider and back. Until 10-28 the rejection moved the gap and
+      // the completed copy was never shown (completed_before_gap).
       for (const auto owner_kind : {provider_kind::streamline, provider_kind::ngx})
-      for (const bool slotless : {false, true}) {
+      for (const bool slotless : {false, true})
+      for (const bool readable_predecessor : {true, false}) {
         restart();
         auto &owner = fresh_owner();
         auto own = owner_kind == provider_kind::ngx ? ngx() : streamline();
         auto nested = owner_kind == provider_kind::ngx ? streamline() : ngx();
         if (!deliver(owner, own, present)) return false;
         const auto copied = retained.capture_id;
+        // The owner's copy still in flight at its last Present.
+        auto &predecessor = *own.pending;
         // A pick without any capture names no source (epoch zero), so it
         // cannot contradict the retained one.
         const auto owned = [&] {
           return owner.provider_established && owner.provider == owner_kind && owner.source_id == own.source_id &&
             (!decided.epoch || (decided.provider == owner_kind && decided.source_id == own.source_id));
         };
-        const auto holds = [&](const capture_pick &chosen) {
+        const auto holds = [&](const capture_pick &chosen, std::uint64_t held_capture) {
           const auto update = display(chosen);
-          return update.action == display_action::hold && retained.capture_id == copied;
+          return update.action == display_action::hold && retained.capture_id == held_capture;
+        };
+        const auto stands_in = [&](const capture_pick &chosen) {
+          return completed_pick(chosen, &predecessor) && display(chosen).action == display_action::copy_fresh &&
+            retained.capture_id == predecessor.id;
         };
         slot *rejected{};
         if (slotless) reject_without_slot(own);
@@ -1530,16 +1522,22 @@ namespace sunshine_streamline::depth_capture {
           rejected = &advance(own);
           rejected->nomination_only = true; rejected->pixel_failure = status::unsupported_resource;
         }
+        // Rejecting completes the predecessor on the GPU; or it is still in flight.
+        if (!readable_predecessor) own.queue->fence.completed = predecessor.producer_fence - 1;
         advance(nested);
         const auto held = present_frame(owner, ++present);
-        if (held.value != rejected || (slotless && (held.latest || held.pending_nomination)) ||
-            held.result != (slotless ? status::unsupported_state : status::unsupported_resource) ||
-            !owned() || !holds(held)) return false;
+        if (!held.missing_frame || !owned() || owner.admission_after) return false;
+        if (readable_predecessor ? !stands_in(held) :
+            held.value != rejected || (slotless && (held.latest || held.pending_nomination)) ||
+              held.result != (slotless ? status::unsupported_state : status::unsupported_resource) ||
+              !holds(held, copied)) return false;
         // The owner resumes; the inner evaluation stops and its capture completes.
         finish_gpu(nested);
         auto &resumed = advance(own);
         const auto pending_owner = present_frame(owner, ++present);
-        if (pending_owner.result == status::ready || !owned() || !holds(pending_owner)) return false;
+        if (!owned() || owner.admission_after) return false;
+        if (readable_predecessor ? pending_owner.result == status::ready || !holds(pending_owner, predecessor.id) :
+            !stands_in(pending_owner)) return false;
         advance(own);
         const auto fresh = present_frame(owner, ++present);
         if (!completed_pick(fresh, &resumed) || !owned() || display(fresh).action != display_action::copy_fresh ||
@@ -1548,14 +1546,21 @@ namespace sunshine_streamline::depth_capture {
       // A live owner whose attempts fail (rejected nomination-only copies,
       // failed evaluations, a concurrently evaluated second view, or attempts
       // rejected before a capture slot exists) keeps selection only while it
-      // is delivering. Once its last copied frame is
-      // older than the source age, it holds nothing in front of a pipelined
-      // source of the other provider: returning the failing owner would mark a
-      // gap at every Present and keep the other source's completed snapshots
-      // unreadable. The pending source is reported instead (its submitted
+      // is delivering. A missing frame of its lineage (all but the second
+      // view: capture_pick::missing_frame) marks no gap: the owner's copy
+      // completed before it stands in, and once that was shown a readable
+      // snapshot of the other provider takes over, as from any failing owner,
+      // while with none readable the owner keeps selection and the display
+      // holds that copy. A concurrently evaluated second view is ambiguous and
+      // still marks the gap, so that owner keeps selection while delivering.
+      // Once its last copied frame is older than the source age, the failing
+      // owner holds nothing in front of a pipelined source of the other
+      // provider. The pending source is reported instead (its submitted
       // nomination may carry source authority, never pixels), so its first
-      // completed snapshot after the gap is selected, whether it started while
-      // the owner was still delivering or only after it stopped.
+      // completed snapshot is selected (after the gap, for the second view),
+      // whether it started while the owner was still delivering or only after
+      // it stopped. Until 10-28 every failure marked the gap, so the owner's
+      // completed copy was never shown (completed_before_gap).
       for (const auto owner_kind : {provider_kind::streamline, provider_kind::ngx})
       for (unsigned failure = 0; failure != 4; ++failure)
       for (const bool other_first : {true, false}) {
@@ -1573,25 +1578,56 @@ namespace sunshine_streamline::depth_capture {
           else if (failure == 1) finish(value.id, false);
           else { second_view.sequence = own.sequence; advance(second_view); own.sequence = second_view.sequence; }
         };
-        // While delivering, the failing owner keeps selection and marks the gap.
         // A slot-less owner pick names no capture; the other provider's pick
         // would name its pending one.
-        for (unsigned frame = 0; frame != 2; ++frame) {
+        const auto failing_owner = [&](const capture_pick &kept) {
+          const auto *source = kept.value ? kept.value : kept.latest;
+          return !(source ? source->metadata.provider != owner_kind : failure != 3 || kept.pending_nomination) &&
+            kept.result != status::ready && !pending_result(kept) && owner.provider == owner_kind;
+        };
+        if (failure != 2) {
+          auto &predecessor = *own.pending;
           fail();
           if (other_first) advance(other);
-          const auto kept = present_frame(owner, ++present);
-          const auto *source = kept.value ? kept.value : kept.latest;
-          if ((source ? source->metadata.provider != owner_kind : failure != 3 || kept.pending_nomination) ||
-              kept.result == status::ready || pending_result(kept) ||
-              owner.provider != owner_kind || !owner.admission_after) return false;
+          const auto stood_in = present_frame(owner, ++present);
+          if (!completed_pick(stood_in, &predecessor) || !stood_in.missing_frame || owner.provider != owner_kind ||
+              owner.admission_after) return false;
+          fail();
+          if (other_first) advance(other);
+          const auto next = present_frame(owner, ++present);
+          if (other_first) {
+            // Never revoked, the other provider's completed snapshot takes
+            // over, and the owner's copies recorded before it are historical
+            // (establish_provider): the stand-in already shown does not come
+            // back and flip ownership again.
+            if (!next.value || next.value->metadata.provider == owner_kind || next.result != status::ready ||
+                next.selection != selection_reason::completed_snapshot || owner.provider == owner_kind ||
+                owner.admission_after != next.value->id - 1) return false;
+            auto &completed = *other.pending;
+            fail(); advance(other);
+            if (!completed_pick(present_frame(owner, ++present), &completed) || owner.provider == owner_kind)
+              return false;
+            continue;
+          }
+          if (!failing_owner(next) || !next.missing_frame || owner.admission_after ||
+              display(next).action != display_action::hold || retained.capture_id != predecessor.id) return false;
+        } else {
+          // While delivering, the owner with an ambiguous second view keeps
+          // selection and marks the gap.
+          for (unsigned frame = 0; frame != 2; ++frame) {
+            fail();
+            if (other_first) advance(other);
+            const auto kept = present_frame(owner, ++present);
+            if (!failing_owner(kept) || kept.missing_frame || !owner.admission_after) return false;
+          }
         }
         // No owner frame was copied within the source age.
         owner.last_source_tick -= sunshine_freshness::source_age_ms + 1;
         const auto gap = owner.admission_after;
         fail(); advance(other);
         // The other source's pending capture, which may take ownership by its
-        // nomination: never revoked, and the owner's earlier copies become
-        // historical (establish_provider).
+        // nomination: never revoked, and the owner's earlier copies, its
+        // stand-in already shown among them, become historical.
         const auto handover = present_frame(owner, ++present);
         if ((handover.value && handover.value != other.pending) || handover.latest != other.pending ||
             !pending_result(handover) || owner.admission_after < gap || owner.admission_after >= other.pending->id)
@@ -1602,6 +1638,52 @@ namespace sunshine_streamline::depth_capture {
           fail(); advance(other);
           if (!completed_pick(present_frame(owner, ++present), &completed) ||
               owner.provider == owner_kind || owner.admission_after != taken) return false;
+        }
+      }
+      // A pipelined source on another queue, each copy readable only at the
+      // Present after its own, whose newest nomination fails on every other
+      // frame for over 400 ms, each failure kind in turn: a nomination-only
+      // copy, a failed or invalid evaluation, a nomination-invalid one, an
+      // attempt refused before its slot existed. Every Present shows the
+      // newest copy this queue can read, copied when new and held once shown,
+      // never mono, and no gap moves. Until 10-28 each failure revoked the
+      // copy completed before it (completed_before_gap): the display held an
+      // ever older copy and went mono once that passed the source age, while
+      // a newer copy was readable at every Present.
+      for (unsigned failure = 0; failure != 5; ++failure) {
+        restart();
+        auto &owner = fresh_owner();
+        auto own = streamline();
+        if (!deliver(owner, own, present)) return false;
+        // Time passes: every tick ages by ms.
+        const auto age = [&](std::uint64_t ms) {
+          for (auto &value : slots) if (value.id && value.metadata.tick > ms) value.metadata.tick -= ms;
+          for (auto &view : evaluations[provider_index(provider_kind::streamline)].views) if (view.tick > ms) view.tick -= ms;
+          if (owner.last_source_tick > ms) owner.last_source_tick -= ms;
+          if (retained.metadata.tick > ms) retained.metadata.tick -= ms;
+        };
+        // The owner's newest successful copy in flight, and the newest one completed.
+        auto *in_flight = own.pending;
+        const slot *newest{};
+        for (unsigned frame = 0; frame != 26; ++frame) {
+          age(16);
+          // Either way the copy in flight completes on the GPU now.
+          newest = in_flight;
+          const bool fails = frame % 2;
+          if (!fails) in_flight = &advance(own);
+          else if (failure == 4) reject_without_slot(own);
+          else {
+            auto &value = advance(own);
+            if (failure == 0) { value.nomination_only = true; value.pixel_failure = status::unsupported_resource; }
+            else if (failure == 1) finish(value.id, false);
+            else if (failure == 2) value.invalid = true;
+            else value.nomination_invalid = true;
+          }
+          const auto chosen = present_frame(owner, ++present);
+          const auto update = display(chosen);
+          if (update.action == display_action::invalidate || retained.capture_id != newest->id ||
+              chosen.missing_frame != fails || owner.admission_after || owner.provider != provider_kind::streamline)
+            return false;
         }
       }
       // Required FG keeps its mandatory SL scope: a pipelined FG source uses

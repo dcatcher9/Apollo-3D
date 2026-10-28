@@ -1278,6 +1278,266 @@ namespace sunshine_streamline::depth_capture {
       std::printf("PASS P5/P6 lineage stand-in for a pending FG input: %zu rows\n", std::size(rows));
     }
 
+    // P6: a missing frame (capture_pick::missing_frame, 10-28). The fresh
+    // head of the one active view failed, is invalid or nomination-invalid,
+    // is a nomination without readable pixels, or was refused before its
+    // capture slot existed, while the newest copy of its display lineage
+    // completed on another queue and was never shown. That copy stands in at
+    // once (completed_snapshot of the head's own source; lineage_snapshot of
+    // the viewport's SR source for an FG head), the pick moves no admission
+    // watermark (interrupts_admission), and the next pending head finds the
+    // copy consumed, never completed_before_gap. Until 10-28 the head revoked
+    // it queue-wide: the Present held an older copy, and mono followed once
+    // that passed the source age. Only a legal copy stands in, so each
+    // protection keeps its row: a copy this queue cannot read (its fence open,
+    // its recording not retired), past the source age, already shown, of
+    // another epoch or viewport, or of another storage than a head with a
+    // slot names does not, and ambiguous or inactive views, a head past the
+    // source age, the FG scope's policy picks and a retired source revoke as
+    // before.
+    void missing_frame_rows() {
+      enum class lineage {
+        sr,  // SR copies on another queue, an SR head.
+        fg_own,  // DLSS-G's copies on its compute queue, an FG head (FG On's scope).
+        fg_from_sr  // The viewport's SR copy on another queue, an FG head (FG On).
+      };
+      enum class head {
+        failed,
+        invalid,
+        nomination_invalid,
+        nomination_only,
+        refused_without_slot
+      };
+      enum class variant {
+        plain,
+        fence_open,
+        recording_open,
+        expired,
+        consumed,
+        other_epoch,
+        other_viewport,
+        other_storage,
+        ambiguous,
+        inactive,
+        expired_head,
+        fg_excluded,
+        fg_excluded_unreadable,
+        fg_mismatch,
+        fg_mismatch_unreadable,
+        retired
+      };
+      struct row {
+        const char *pins;
+        lineage line;
+        head kind;
+        variant change;
+        const char *outcome;  // The pick: C the copy, H the head's own slot, - none.
+        bool interrupts;  // acquire moves the admission watermark.
+        const char *next;  // The next pending head's pick, after this one is shown; null: not checked.
+      };
+      using l = lineage;
+      using h = head;
+      using v = variant;
+
+      constexpr const char *consumed_next = "- recorded completed_already_consumed";
+      constexpr const char *fg_next = "- recorded no_completed_snapshot";
+      const row rows[] {
+        {"SR, a failed head: the SR copy completed on another queue stands in", l::sr, h::failed, v::plain, "C ready completed_snapshot", false, consumed_next},
+        {"SR, an invalid head: the SR copy stands in", l::sr, h::invalid, v::plain, "C ready completed_snapshot", false, consumed_next},
+        {"SR, a nomination-invalid head: the SR copy stands in", l::sr, h::nomination_invalid, v::plain, "C ready completed_snapshot", false, consumed_next},
+        {"SR, a nomination-only head without pixels: the SR copy stands in for it", l::sr, h::nomination_only, v::plain, "C ready completed_snapshot", false, consumed_next},
+        {"SR, a head refused before its slot existed: the SR copy stands in", l::sr, h::refused_without_slot, v::plain, "C ready completed_snapshot", false, consumed_next},
+        {"FG, a failed DLSS-G attempt: its previous compute copy stands in", l::fg_own, h::failed, v::plain, "C ready completed_snapshot", false, consumed_next},
+        {"FG, an invalid DLSS-G attempt: its previous compute copy stands in", l::fg_own, h::invalid, v::plain, "C ready completed_snapshot", false, consumed_next},
+        {"FG, a nomination-invalid DLSS-G attempt: its previous compute copy stands in", l::fg_own, h::nomination_invalid, v::plain, "C ready completed_snapshot", false, consumed_next},
+        {"FG, a DLSS-G nomination without pixels: its previous compute copy stands in", l::fg_own, h::nomination_only, v::plain, "C ready completed_snapshot", false, consumed_next},
+        {"FG, a DLSS-G attempt refused before its slot existed: its previous compute copy stands in", l::fg_own, h::refused_without_slot, v::plain, "C ready completed_snapshot", false, consumed_next},
+        {"FG On, a failed first DLSS-G attempt: the frame's SR copy stands in", l::fg_from_sr, h::failed, v::plain, "C ready lineage_snapshot", false, fg_next},
+        {"FG On, an invalid first DLSS-G attempt: the SR copy stands in", l::fg_from_sr, h::invalid, v::plain, "C ready lineage_snapshot", false, fg_next},
+        {"FG On, a nomination-invalid first DLSS-G attempt: the SR copy stands in", l::fg_from_sr, h::nomination_invalid, v::plain, "C ready lineage_snapshot", false, fg_next},
+        {"FG On, a first DLSS-G nomination without pixels: the SR copy stands in", l::fg_from_sr, h::nomination_only, v::plain, "C ready lineage_snapshot", false, fg_next},
+        {"FG On, a first DLSS-G attempt refused before its slot existed: the SR copy stands in", l::fg_from_sr, h::refused_without_slot, v::plain, "C ready lineage_snapshot", false, fg_next},
+        // Per-copy protections: no stand-in, and the missing frame still moves nothing.
+        {"A copy whose producer fence is open does not stand in", l::sr, h::failed, v::fence_open, "- failed no_admissible_capture", false, nullptr},
+        {"A copy whose recording has not retired (no copy-out) does not stand in", l::sr, h::failed, v::recording_open, "- failed no_admissible_capture", false, nullptr},
+        {"A copy past the source age does not stand in", l::sr, h::failed, v::expired, "- failed no_admissible_capture", false, nullptr},
+        {"A copy this queue already showed does not stand in", l::sr, h::refused_without_slot, v::consumed, "- missing_state no_current_nomination", false, nullptr},
+        {"An FG copy this queue already showed does not stand in", l::fg_own, h::failed, v::consumed, "- failed no_admissible_capture", false, nullptr},
+        {"An SR copy this queue already showed does not stand in for an FG head", l::fg_from_sr, h::refused_without_slot, v::consumed, "- missing_state no_current_nomination", false, nullptr},
+        {"A copy of an earlier epoch does not stand in", l::sr, h::failed, v::other_epoch, "- failed no_admissible_capture", false, nullptr},
+        {"A copy of another viewport does not stand in", l::sr, h::failed, v::other_viewport, "- failed no_admissible_capture", false, nullptr},
+        {"An SR copy of another viewport does not stand in for an FG head", l::fg_from_sr, h::failed, v::other_viewport, "- failed no_admissible_capture", false, nullptr},
+        {"A copy of another storage than the failed head's does not stand in", l::sr, h::failed, v::other_storage, "- failed no_admissible_capture", false, nullptr},
+        {"A head refused before its slot existed names no storage: the copy stands in", l::sr, h::refused_without_slot, v::other_storage, "C ready completed_snapshot", false, nullptr},
+        // Identity interruptions revoke as before.
+        {"A second active view is ambiguous and revokes", l::sr, h::failed, v::ambiguous, "- ambiguous ambiguous_views", true, nullptr},
+        {"No active view revokes", l::sr, h::failed, v::inactive, "- stale inactive_views", true, nullptr},
+        {"A head past the source age that this Present does not present revokes", l::sr, h::failed, v::expired_head, "- failed no_admissible_capture", true, nullptr},
+        {"An unconfirmed FG scope excludes a failed FG head and revokes", l::fg_own, h::failed, v::fg_excluded, "- stale fg_scope_missing", true, nullptr},
+        {"An unconfirmed FG scope excludes an FG head refused before its slot existed and revokes", l::fg_own, h::refused_without_slot, v::fg_excluded, "- stale fg_scope_missing", true, nullptr},
+        {"An unconfirmed FG scope excludes an FG head refused before its slot existed, with no copy to stand in, and revokes", l::fg_own, h::refused_without_slot, v::fg_excluded_unreadable, "- stale fg_scope_missing", true, nullptr},
+        {"An unconfirmed FG scope still admits the SR stand-in of an FG head", l::fg_from_sr, h::refused_without_slot, v::fg_excluded, "C ready lineage_snapshot", false, nullptr},
+        {"A required FG scope refuses the SR stand-in of an SR head refused before its slot existed and revokes", l::sr, h::refused_without_slot, v::fg_mismatch, "- unavailable fg_scope_mismatch", true, nullptr},
+        {"A required FG scope refuses an SR head refused before its slot existed, with no copy to stand in, and revokes", l::sr, h::refused_without_slot, v::fg_mismatch_unreadable, "- unavailable fg_scope_mismatch", true, nullptr},
+        {"A required FG scope refuses a failed SR head and revokes", l::sr, h::failed, v::fg_mismatch, "- unavailable fg_scope_mismatch", true, nullptr},
+        {"FG Off retired the FG copies: FG On's refused attempt has no historical copy", l::fg_own, h::refused_without_slot, v::retired, "- missing_state no_current_nomination", false, nullptr},
+      };
+      constexpr std::uint64_t epoch = 11, device = 41;
+      for (const auto &r : rows) {
+        reset();
+        const auto now = GetTickCount64();
+        // The producer queue (another render queue, or DLSS-G's compute queue):
+        // selection compares its identity and reads its fence.
+        fixture::completion_fence fence;
+        auto &place = queues[0];
+        place = std::make_unique<queue_state>();
+        place->queue.p = reinterpret_cast<ID3D12CommandQueue *>(&fence);
+        place->fence.p = &fence;
+        place->device_identity = device;
+        struct release_place {
+          std::unique_ptr<queue_state> &entry;
+          ~release_place() { entry->queue.p = nullptr; entry->fence.p = nullptr; entry.reset(); }
+        } release{place};
+        const auto producer = reinterpret_cast<std::uint64_t>(&fence);
+        queue_state owner;
+        owner.device_identity = device;
+        const bool fg_head = r.line != l::sr;
+        const auto copy_source = r.line == l::fg_own ? fg_source : 0;
+        const auto head_source = fg_head ? fg_source : 0;
+        const auto layout = [&](DXGI_FORMAT format) {
+          auto value = std::make_shared<source_reference>();
+          value->device_identity = device;
+          value->desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+          value->desc.Format = format;
+          return value;
+        };
+        const auto storage = layout(DXGI_FORMAT_R32_TYPELESS);
+        const auto copy_epoch = r.change == v::other_epoch ? epoch - 1 : epoch;
+        const std::uint32_t copy_viewport = r.change == v::other_viewport ? 1 : 0;
+        // The owner's delivered copy (sequence 10), then the lineage's copy
+        // completed on the producer queue (sequence 20), never shown.
+        auto &shown = make(0, provider_kind::streamline, copy_epoch, 10, copy_source, copy_viewport);
+        establish_provider(owner, shown, 1);
+        deliver(owner, shown);
+        auto &copy = make(1, provider_kind::streamline, copy_epoch, 20, copy_source, copy_viewport);
+        copy.queue = producer;
+        copy.producer_fence = 5;
+        const bool unreadable = r.change == v::fence_open || r.change == v::fg_excluded_unreadable ||
+          r.change == v::fg_mismatch_unreadable;
+        fence.completed = unreadable ? 4 : 5;
+        copy.texture = std::make_shared<texture_reference>();
+        copy.source_nominated = true;
+        copy.compute_list = r.line == l::fg_own;
+        copy.metadata.source = storage;
+        if (r.change == v::other_storage) {
+          copy.metadata.source = layout(DXGI_FORMAT_R16_UNORM);
+        }
+        if (r.change == v::recording_open) {
+          // Its game recording is still open (not Reset), and no copy-out was made.
+          copy.command = 900;
+          copy.producer_recording = std::make_shared<sunshine_native_command::recording_lifetime>();
+          copy.producer_recording->cookie = 900;
+        }
+        if (r.change == v::expired) {
+          copy.metadata.tick = now - source_age - 1;
+        }
+        if (r.change == v::consumed) {
+          deliver(owner, copy);
+        }
+        if (r.change == v::other_viewport) {
+          // That viewport's evaluations stopped (no ambiguity of views).
+          for (auto &view : evaluations[provider_index(provider_kind::streamline)].views) {
+            if (view.viewport == copy_viewport) {
+              view = {};
+            }
+          }
+        }
+        if (r.change == v::retired) {
+          // FG Off retires the FG source, its copies with it; FG On follows.
+          retire_source(provider_kind::streamline, epoch, fg_source);
+        }
+        if (r.change == v::ambiguous) {
+          // Another viewport evaluates concurrently.
+          begin_evaluation(epoch, 25, 1, provider_kind::streamline, 0);
+        }
+        // The head (sequence 30): an FG head replaces the viewport's SR view.
+        slot *own_slot = nullptr;
+        if (r.kind == h::refused_without_slot) {
+          begin_evaluation(epoch, 30, 0, provider_kind::streamline, head_source, fg_head ? 0 : UINT64_MAX);
+          attempt_status[provider_index(provider_kind::streamline)] = status::missing_state;
+        } else {
+          own_slot = &make(2, provider_kind::streamline, epoch, 30, head_source, 0, fg_head ? 0 : UINT64_MAX);
+          own_slot->metadata.source = storage;
+          if (r.kind == h::failed) {
+            own_slot->success = false;
+          } else if (r.kind == h::invalid) {
+            own_slot->invalid = true;
+            own_slot->failure = capture_failure::replay;
+          } else if (r.kind == h::nomination_invalid) {
+            own_slot->texture = std::make_shared<texture_reference>();
+            own_slot->source_nominated = own_slot->nomination_invalid = true;
+          } else {
+            own_slot->source_nominated = own_slot->nomination_only = true;
+            own_slot->pixel_failure = status::unsupported_resource;
+          }
+        }
+        auto &views = evaluations[provider_index(provider_kind::streamline)].views;
+        if (r.change == v::inactive || r.change == v::expired_head) {
+          // Two Presents since: none presents the head's frame.
+          fixture::presents_since(2);
+          if (r.change == v::inactive) {
+            for (auto &view : views) {
+              if (view.sequence) {
+                view.tick = now - source_age - 1;
+              }
+            }
+          }
+          if (own_slot) {
+            own_slot->metadata.tick = now - source_age - 1;
+          }
+        }
+        selection_policy policy {};
+        if (fg_head || r.change == v::fg_mismatch || r.change == v::fg_mismatch_unreadable) {
+          policy = {true, epoch, 0, false, now - 16};
+        }
+        if (r.change == v::fg_excluded || r.change == v::fg_excluded_unreadable) {
+          policy = {};
+          policy.exclude_unconfirmed_fg = true;
+        }
+        // The pool keeps the head's own completed copy that stands in, as
+        // beneath a pending head, so no other allocation recycles it first.
+        const bool stands_in = std::string(r.outcome) == "C ready completed_snapshot";
+        const bool kept = !reclaimable(copy);
+        const auto pick = select_provider(owner, native, 2, now, policy);
+        const auto got = pick_outcome(pick, &copy, 'C', own_slot, 'H');
+        const bool interrupts = interrupts_admission(owner, pick);
+        std::string next = "-";
+        if (r.next) {
+          // acquire()'s watermark and, for a shown copy, its establishment and
+          // complete_frame().
+          if (interrupts) {
+            owner.admission_after = serial.load();
+          }
+          if (pick.value && pick.result == status::ready) {
+            establish_provider(owner, *pick.value, 2);
+            deliver(owner, *pick.value);
+          }
+          // The next frame's head is recorded and still in flight.
+          auto &pending = make(3, provider_kind::streamline, epoch, 40, head_source, 0, fg_head ? 0 : UINT64_MAX);
+          pending.metadata.source = storage;
+          pending.finished = false;
+          fixture::presents_since(1);
+          next = pick_outcome(select_provider(owner, native, 3, GetTickCount64(), policy), &copy, 'C', &pending, 'P');
+        }
+        if (got != r.outcome || interrupts != r.interrupts || (r.next && next != r.next) || (stands_in && !kept)) {
+          char text[640];
+          std::snprintf(text, sizeof(text), "P6 missing frame, %s: %s, interrupts %d, next %s, kept %d", r.pins, got.c_str(), interrupts, next.c_str(), kept);
+          fail(text);
+        }
+      }
+      std::printf("PASS P6 missing frame: %zu rows\n", std::size(rows));
+    }
+
     // F1 (the 10-27 review): which Presents count a stamped frame as the
     // frame they present (frame_presenting). Without frame generation only
     // its first Present (presented_frame); with FG on, a frame that made a
@@ -2030,6 +2290,7 @@ int main() {
   freshness_edges();
   stray_frame_generation_copy_steps();
   lineage_stand_in_rows();
+  missing_frame_rows();
   frame_presenting_rows();
   hitch_presenting_rows();
   decide_display_rows();

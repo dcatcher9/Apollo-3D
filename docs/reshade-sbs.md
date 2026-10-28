@@ -3715,12 +3715,16 @@ frame, and the other provider's capture without readable pixels, such as an inne
 still in flight, takes no authority. Once the owner has not delivered for 250 ms, or when no owner
 is established, a live source whose newest snapshot is pending is reported in front of a failing
 (failed, unsupported or ambiguous) one, and any live source in front of an expired one; an expired
-owner is never reported in front of a live source. A failing owner that has stopped delivering, or
-an expired one, would otherwise mark an interruption at every Present and so keep the pending
-source's completed snapshots unreadable. Expired or undelivered owner evidence therefore holds
-nothing; failed, rejected, missing, replaced (a new logical source of the same provider) or
+owner is never reported in front of a live source. A pending source's snapshot may still become
+readable, while a failing one has no pixels of its own to wait for: its lineage's completed copy,
+where one is legal, already stood in (a missing frame, the interruption rule
+below), and an ambiguous or expired owner would mark an interruption at every Present and so keep
+the pending source's completed snapshots unreadable. Expired or undelivered owner evidence therefore
+holds nothing; failed, rejected, missing, replaced (a new logical source of the same provider) or
 ambiguous evidence holds only a delivering owner's selection, and only while the other provider is
-not readable. Metadata observed after a copy (camera reset, tag change, observation loss) does not
+not readable. A failed owner attempt whose completed predecessor stands in is the owner's readable
+source, so that delivering owner keeps selection over readable NGX until the predecessor is shown;
+the next failure hands over to a readable source. Metadata observed after a copy (camera reset, tag change, observation loss) does not
 make that finished copy obsolete.
 Explicit enabled FG retains its separate mandatory SL scope described below. Provider choice is
 frozen within one presentation, and each packet retains its own encoding, camera and logical source.
@@ -4181,10 +4185,12 @@ its `slEvaluateFeature` inputs) are copied inside the call that supplied them to
 holds for them (since 10-24). Assassin's Creed Shadows tags its SR depth as a local
 `ValidUntilPresent` input; with FG on, DLSS-G's Presents on its own thread landed between that read
 and the copy, most often while dynamic resolution made the copy allocate new storage without the
-lock. Each refusal withdrew the SR attempt, which marks a gap in the source's admission (its
-completed snapshots from before are not admitted). The SR copies run on another queue and are
-admitted only once the game resets their list, 110-235 ms later in that game, so the held depth
-(already that old) expired first: about a 100 ms loss every second or two (`completed_before_gap`).
+lock. Each refusal withdrew the SR attempt, which until 10-28 marked a gap in the source's
+admission (its completed snapshots from before were not admitted). The SR copies run on another
+queue and are admitted only once the game resets their list, 110-235 ms later in that game, so the
+held depth (already that old) expired first: about a 100 ms loss every second or two
+(`completed_before_gap`). 64d6d06c removed that refusal; since 10-28 no refusal marks a gap (a
+missing frame, the interruption rule below).
 A `ValidUntilPresent` or `ValidUntilEvaluate`
 tag lives until its own frame's Present (`sl_core_types.h`), so a tag copied later at an evaluation
 of that frame is current too, whatever Presents came between: those were earlier frames' (multi
@@ -4398,9 +4404,12 @@ accepted copies keep the FG scope live exactly as accepted FG tag copies do, so 
 for the frames it supplies (the same viewport's SR/RR evaluations and direct NGX copies stand
 aside), and generated Presents
 hold the real frame's copy. A refusal while the scope is silent changes nothing (the ordinary SR/RR
-source stays); while it is live the attempt first replaces the FG observation, so a refusal withdraws
-the previous copy as a refused FG tag boundary does. Either way the refused frame has no FG copy, so
-the scope turns silent. A Streamline FG tag of the frame the evaluation is for keeps precedence: the
+source stays); while it is live the attempt first replaces the FG observation, so a refused attempt
+is the viewport's newest frame, without a copy, as a refused FG tag boundary is. That withdraws the
+observation, never finished pixels: it is a missing frame of the lineage (the
+interruption rule below), so the scope's newest completed copy that was not shown
+yet (DLSS-G's previous compute copy, else the frame's SR copy, `lineage_snapshot`) stands in. Either
+way the refused frame has no FG copy, so the scope turns silent. A Streamline FG tag of the frame the evaluation is for keeps precedence: the
 evaluation then adds no second copy (`tag_copied`). That frame is the viewport's newest, begun by
 its Streamline constants; a tag call is its own when both name the same frame, or (where
 either names none) when it came after those constants. A frame is named by one key, which the
@@ -4571,8 +4580,35 @@ queue a game created while depth was live (the native observer installs its hook
 observation loss: `loss=global_observation_loss`), as a DLSS-G swapchain's queue the first time
 frame generation presents, made one Present mono while a copy younger than the source age was
 retained (the session tests' continuity gap C3).
-Explicit source interruptions advance the existing admission watermark,
-preventing pre-interruption captures from returning.
+Explicit source interruptions advance the queue's admission watermark, preventing
+pre-interruption captures from returning: a newest nomination whose views are ambiguous (two
+viewports evaluating) or inactive, one past the source age that the Present does not present
+(`frame_presenting`), the FG scope's policy picks (`fg_scope_missing` for an unconfirmed scope,
+also a head refused before its capture existed whose source is the FG input, and
+`fg_scope_mismatch`), a released source (`retire_source`, FG Off) and an expired association
+(`expire_association`). So does ownership moving to the other provider: every copy recorded before
+the new owner's chosen copy is historical (`establish_provider`), because the consumed watermark
+restarts there and cannot compare the two providers' sequences, so the previous provider's copy
+already shown, or one older than the new owner's, could otherwise return and flip ownership back.
+A failed, invalid or nomination-invalid newest nomination, one refused before its capture existed
+(a tag whose state cannot be proven, an unsupported lifetime, a hook that returned without
+nominating) and one without pixels the presenting queue can read (a metadata-only nomination's
+pixel failure) is no interruption. It is a missing frame of its display lineage
+(`capture_pick::missing_frame`) when its view is the namespace's one active view and it is within
+the source age or presented by this Present, exactly as a pending one is: it moves no watermark
+(`interrupts_admission`), and the lineage's newest copy that passes the pending path's checks
+(identity, finished, readable on the presenting queue by completion or queue order, within the
+source age, not yet shown, the same storage where the head has a capture) stands in at once
+(`selection=completed_snapshot`, or `lineage_snapshot` for an FG input's SR copy; the readiness
+line's `newest_sequence=` names the missing frame). Without such a copy its own result and reason
+stay, and the display holds as for any missing frame. Until 10-28 every such nomination revoked
+depth: the Present held an older copy while the frame's completed copy was readable, the next
+Present found that copy `completed_before_gap`, and a second failure within the source age left
+the held copy to expire, mono while newer copies were readable (Assassin's Creed Shadows' 10-25
+losses above; about 1 s of mono on the session fixture with every other SR tag unprovable; with FG
+on, a refused DLSS-G attempt revoked the previous frame's compute copy). A nomination in progress
+still holds the retained copy (below). A frame's own copy that this Present still presents is no
+interruption either.
 Reused real depth retains its applied gain, zero plane, crop and jitter and does not advance
 range learning or gain adaptation. It takes the scene exactly as the real frame resolved it,
 placed or still calibrating, so a generated frame shows depth whenever its real frame does.
@@ -4681,16 +4717,19 @@ source without acquiring pending pixels; it holds, and marks no gap in the sourc
 (since the Assassin's Creed Shadows hotfix of 10-26; before, only an FG nomination was in progress,
 so an FG Present landing while an SR evaluate allocated its copy's storage for a new dynamic
 resolution size read that attempt as refused and revoked the SR snapshots in flight:
-`completed_before_gap`). Missing/invalid attempts withdraw that intent; an older call
-returning cannot clear a newer intent. The explicit bounded reuse policy above may use its private
+`completed_before_gap`). Missing/invalid attempts withdraw that intent, and the refused attempt
+that follows is a missing frame (the interruption rule above), which marks no gap either
+since 10-28; an older call returning cannot clear a newer intent. The explicit bounded reuse policy above may use its private
 previous depth during this gap; GPU resource retirement is unchanged.
 
 The shared capture pool also retains the current valid nominated record after its GPU work has
 retired. Pixel-backed and metadata-only records carry the same source authority: an unrelated
 NGX/Streamline capture or Generic preservation must not recycle the current record and fabricate
-a missing nomination. The same pool retains the existing eligible completed snapshot beneath a
-valid current nomination while its successor is pending, including against allocations by another
-provider. Supersession, failure or invalidation releases the current record's authority hold;
+a missing nomination. The same pool retains the existing eligible completed snapshot beneath the
+provider's newest nomination while that successor is pending or a missing frame (failed or refused,
+also before its capture existed), including against allocations by another provider (until 10-28
+only beneath a valid one, so another allocation could recycle the copy that stands in for a missing
+frame). Supersession, failure or invalidation releases the current record's authority hold;
 completed-fallback eligibility and all GPU retirement requirements still apply before storage can
 be reused. This uses the existing bounded pool and does not extend capture freshness or authorize
 reading expired depth. Once per Present, every other reusable record drops its game resource,

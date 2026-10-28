@@ -346,10 +346,21 @@ namespace sunshine_streamline::depth_capture {
       slot *value{};
       const slot *latest{};
       const evaluation_head *pending_nomination{};
+      // The namespace's newest nomination (its epoch, sequence and source)
+      // as its view names it, with that view's viewport, tick and present:
+      // set only when that view is the namespace's one active view
+      // (select_latest_capture). Policy picks carry none.
+      const evaluation_head *head{};
       status result{status::unavailable};
       selection_reason selection{selection_reason::not_attempted};
       std::uint64_t consumed_completed_capture{};
       queue_progress progress;
+      // The fresh head of the one active view produced no readable pixels:
+      // it failed, was refused (with or without a capture slot), or is a
+      // nomination without readable pixels. That is a missing frame of its
+      // display lineage, as a pending one is (select_capture): it moves no
+      // admission watermark (interrupts_admission).
+      bool missing_frame{};
     };
     template<std::size_t N> bool identify_submissions(std::array<slot, N> &captures, std::uint32_t count,
         const native_observer::command_identity *values, std::array<bool, N> &producers,
@@ -454,11 +465,13 @@ namespace sunshine_streamline::depth_capture {
     depth_choice describe_choice(const capture_pick &chosen, const acquisition_decision &decision,
       const queue_state &owner, selection_policy policy, std::uint64_t present, std::uint64_t tick, bool pixel_ready);
     selection_reason completed_fallback_reason(const queue_state &owner, std::uint64_t present,
-      const slot &latest, const slot &completed);
-    slot *lineage_snapshot(const queue_state &owner, std::uint64_t native, std::uint64_t present, const slot &latest,
+      const input &head, const slot &completed, bool compare_storage);
+    slot *lineage_snapshot(const queue_state &owner, std::uint64_t native, std::uint64_t present, const input &head,
       std::uint64_t now);
+    input head_identity(const evaluation_head &head, provider_kind provider);
     capture_pick select_capture(const queue_state &owner, std::uint64_t native,
       std::uint64_t present, provider_kind provider, std::uint64_t now);
+    bool interrupts_admission(const queue_state &owner, const capture_pick &chosen);
     capture_pick select_provider(const queue_state &owner, std::uint64_t native,
       std::uint64_t present, std::uint64_t now, selection_policy policy);
     void establish_provider(queue_state &owner, const slot &value, std::uint64_t present);

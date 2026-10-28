@@ -472,11 +472,15 @@ namespace {
     // A reset starts a new scene-history segment; the depth stays valid. A
     // new extent or allocation of the same source (dynamic resolution) does
     // not refuse the completed frame either: it carries its own allocation
-    // and rectangle. Only another storage format does (format_changed).
+    // and rectangle. Nor does a failed successor or one refused before its
+    // copy existed (missing): a missing frame of the source (10-28; until
+    // then it revoked the completed frame). Only another storage format or
+    // epoch does (format_changed).
     const bool allows_completed = scenario == pipeline_case::recorded || scenario == pipeline_case::submitted ||
       scenario == pipeline_case::observation_reset || scenario == pipeline_case::feedback_reset ||
       scenario == pipeline_case::reset_flag || scenario == pipeline_case::layout_change ||
-      scenario == pipeline_case::allocation_change;
+      scenario == pipeline_case::allocation_change || scenario == pipeline_case::failed ||
+      scenario == pipeline_case::missing;
     std::printf("pipeline %s: selected=%llu newest=%llu ready=%d status=%s selection=%s allocation=%ux%u active=%u,%u,%u,%u\n",
       name(scenario), static_cast<unsigned long long>(selected.metadata.sequence),
       static_cast<unsigned long long>(diagnostic.newest_sequence), int(selected.pixel_ready), capture::name(diagnostic.result),
@@ -496,22 +500,25 @@ namespace {
       consume(selected, 2);
       if (scenario == pipeline_case::submitted)
         require(gpu.producer_done->GetCompletedValue() < 3, "Consumer unexpectedly released the game's producer gate");
+      if (scenario == pipeline_case::failed || scenario == pipeline_case::missing) {
+        // The frame that stood in was shown: a subsequent valid but pending
+        // attempt finds it consumed and never shows it again.
+        input.sequence = 4;
+        record();
+        capture::packet after;
+        capture::capture_diagnostic after_diagnostic;
+        capture::acquire(gpu.consumer.native(), 3, after, &after_diagnostic);
+        require(!after.pixel_ready && after.capture_id != completed_ticket &&
+            after_diagnostic.selection == capture::selection_reason::completed_already_consumed &&
+            after_diagnostic.consumed_completed_capture == completed_ticket,
+          "A later pending evaluation showed the frame that stood in for a missing frame again");
+      }
     } else {
       require(!selected.pixel_ready && selected.capture_id != completed_ticket,
         "Invalid/missing/changed input reused an older NGX snapshot");
       if (scenario == pipeline_case::format_change)
         require(diagnostic.selection == capture::selection_reason::format_changed,
           "A storage format change was not refused as format_changed");
-      if (scenario == pipeline_case::failed || scenario == pipeline_case::missing) {
-        // Acquiring a known gap raises the admission watermark. A subsequent
-        // valid but pending attempt cannot bring a pre-gap frame back to life.
-        input.sequence = 4;
-        record();
-        capture::packet after_gap;
-        capture::acquire(gpu.consumer.native(), 3, after_gap);
-        require(!after_gap.pixel_ready && after_gap.capture_id != completed_ticket,
-          "A later pending evaluation resurrected pre-gap pixels");
-      }
     }
     gpu.drain();
     std::printf("PASS: pipeline %s\n", name(scenario));
@@ -764,36 +771,37 @@ namespace {
       name(allocation), name(scenario), int(acquired), int(selected.pixel_ready),
       capture::name(diagnostic.selection), static_cast<unsigned long long>(diagnostic.capture_id),
       static_cast<unsigned long long>(expected_ticket), int(diagnostic.repeated_frame));
-    if (gap) {
-      require(!acquired && !selected.pixel_ready && selected.capture_id != expected_ticket &&
-        !diagnostic.repeated_frame && !diagnostic.pending_frame &&
-        diagnostic.provider == input.provider && diagnostic.epoch == input.epoch &&
-        diagnostic.source_id == input.source_id && diagnostic.viewport == input.viewport,
-        "Foreign allocation resurrected completed SL pixels across a missing/failed head");
-      // Acquiring the known gap revokes earlier admission. A later pending
-      // head plus another unrelated allocation must not undo that boundary.
-      input.sequence = 4;
-      record(input, .625f);
-      allocate_foreign();
-      capture::packet after_gap;
-      capture::capture_diagnostic after_gap_diagnostic;
-      const bool after_gap_acquired = capture::acquire(gpu.consumer.native(), 3, after_gap, &after_gap_diagnostic, fg);
-      require_choice(gpu.consumer.native(), 3, after_gap_acquired, after_gap, after_gap_diagnostic, true);
-      require(!after_gap.pixel_ready && after_gap.capture_id != expected_ticket &&
-        !after_gap_diagnostic.repeated_frame && !after_gap_diagnostic.consumed_completed_capture &&
-        after_gap_diagnostic.provider == input.provider && after_gap_diagnostic.epoch == input.epoch &&
-        after_gap_diagnostic.source_id == input.source_id && after_gap_diagnostic.viewport == input.viewport &&
-        after_gap_diagnostic.sequence == input.sequence,
-        "Foreign allocation let a pending SL successor resurrect pre-gap pixels");
-    } else if (completed_successor) {
+    if (completed_successor) {
+      // A missing or failed head is a missing frame of the source (10-28;
+      // until then it revoked the completed successor): that successor
+      // stands in, as beneath a pending one, so an unrelated allocation must
+      // not have reclaimed it either.
       require(acquired && selected.pixel_ready && selected.capture_id == expected_ticket &&
         selected.metadata.provider == sunshine_scene_depth::provider_kind::streamline &&
         selected.metadata.epoch == input.epoch && selected.metadata.source_id == input.source_id &&
         selected.metadata.viewport == input.viewport && selected.metadata.sequence == 2 &&
         selected.metadata.observation_revision == input.observation_revision &&
         selected.metadata.feedback.revision == input.feedback.revision,
-        "Foreign capture reclaimed the latest completed SL FG snapshot");
+        gap ? "Foreign capture reclaimed the completed SL FG snapshot beneath a missing/failed head" :
+          "Foreign capture reclaimed the latest completed SL FG snapshot");
       consume(selected, 2, .25f);
+      if (gap) {
+        // Shown once: a later pending head plus another unrelated allocation
+        // finds it consumed and never shows it again.
+        input.sequence = 4;
+        record(input, .625f);
+        allocate_foreign();
+        capture::packet after;
+        capture::capture_diagnostic after_diagnostic;
+        const bool after_acquired = capture::acquire(gpu.consumer.native(), 3, after, &after_diagnostic, fg);
+        require_choice(gpu.consumer.native(), 3, after_acquired, after, after_diagnostic, true);
+        require(!after.pixel_ready && after.capture_id != expected_ticket &&
+          !after_diagnostic.repeated_frame && after_diagnostic.consumed_completed_capture == expected_ticket &&
+          after_diagnostic.provider == input.provider && after_diagnostic.epoch == input.epoch &&
+          after_diagnostic.source_id == input.source_id && after_diagnostic.viewport == input.viewport &&
+          after_diagnostic.sequence == input.sequence,
+          "Foreign allocation let a pending SL successor show the frame that stood in again");
+      }
     } else {
       // The selector can report completed_not_older after identifying this
       // already-consumed head. Reuse consumes its explicit identity/repeated
@@ -809,7 +817,7 @@ namespace {
     // pending-head behavior. No outstanding recording or lease masks reclaim.
     submit();
     gpu.drain();
-    std::printf("PASS foreign reclamation: %s / %s preserves SL authority and the gap boundary\n", name(allocation), name(scenario));
+    std::printf("PASS foreign reclamation: %s / %s preserves SL authority and its completed snapshot\n", name(allocation), name(scenario));
   }
 
   void run_content(unsigned width, unsigned height) {
