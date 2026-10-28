@@ -4665,7 +4665,9 @@ never withdraws the viewport's depth source, so depth captured at the frame's ow
 current within the source age and the consumed watermark. Assassin's Creed Shadows (10-22) sends
 a null FG depth tag every frame, and each one withdrew the FG source. The probe
 metadata still reports no current tag of that kind, and an unsupported or malformed tag, whatever
-its native, still withdraws. Untags are counted on a `Sunshine Streamline depth untag` line (at
+its native, is refused and still withdraws the observation, never the frame's copy made before it,
+which stands in as a missing frame's (the interruption rule above; until 10-28 it revoked that
+copy). Untags are counted on a `Sunshine Streamline depth untag` line (at
 most every 5 s, `untags=` total, `resource=null` or `null_native`); the
 `zero-base resource compatibility` line is written only for a tag with a real native.
 Only a real observation loss (contended or failed hook bookkeeping, a failed

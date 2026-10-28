@@ -1850,9 +1850,12 @@ frame's Present (`tag_copy`), DLSS-G's `DLSSG.Depth` in a state its recording na
 (`dlssg_input`), or a Generic boundary with a proof (`generic_boundary`). A source the add-on may
 show but need not is permitted, not legal: the oracle's EITHER outcome, and the full-size decoy
 view each provider frame draws, which API ownership leaves aside (H). A frame whose later call
-withdraws its source supplies nothing (the untag script's malformed tag, and a command-less tag's
-frame presented before DLSS-G evaluated it, whose copy belongs to the next Present), nor does a
-generated Present, which the game makes while it records a later frame. Each source's copy is
+withdraws its source supplies nothing (a command-less tag's frame presented before DLSS-G evaluated
+it, whose copy belongs to the next Present), nor does a generated Present, which the game makes
+while it records a later frame. A refused later tag of a frame (the untag script's malformed one)
+withdraws only the observation: the copy the frame's own tag made before it stays supplied, and
+stands in as a missing frame's (until 10-28 the script withdrew it from the supply log and required
+no fresh depth there). Each source's copy is
 stamped when it was made (`supply::made`, its deciding call after any hitch before it, or its
 recording's submission for a copy from another queue), and holds and the freshness rule age copies
 by it, not by the frame's first call (until the 10-27 review a copy made after a hitch inside its

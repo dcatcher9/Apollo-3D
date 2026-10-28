@@ -2799,8 +2799,15 @@ namespace {
           }
           const abi_v2::resource_tag no_hudless{{nullptr, tag_guid, 1}, nullptr, 2, 0, {}};
           require(sl.global_tag(fg_viewport, &no_hudless, 1, nullptr) == 0, "HUD-less untag changed the SDK result");
-          // A malformed tag that names a native resource is no untag: it still
-          // withdraws the FG source, so no presentation copies fresh depth.
+          // A malformed tag that names a native resource is no untag: it is
+          // refused at its call (an untag is not) and withdraws the frame's FG
+          // observation. That refused tag is a missing frame (10-28): the copy
+          // the frame's own tag made before it stays a legal source and stands
+          // in, as any missing frame's lineage copy does, so every Present
+          // shows that frame's fresh depth. Until 10-28 the refusal revoked
+          // that copy: this case withdrew it from the supply log and required
+          // that no Present showed fresh depth.
+          const auto before_malformed = last_refusal().serial;
           render_tracked_depth = [this] {
             real_fg_frame();
             // A typed Resource of version 0 (a later version is read by its v1 fields).
@@ -2810,18 +2817,22 @@ namespace {
             const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &malformed, 0, 0, active_area};
             require(sl.global_tag(fg_viewport, &tag, 1, reinterpret_cast<void *>(game_native_command)) == 0,
               "Malformed FG depth tag changed the SDK result");
-            withdraw_supply();  // It withdraws the frame's FG source: no legal source remains.
           };
           for (unsigned frame = 0; frame < 12; ++frame) {
             present_frame(); const auto s = inspect();
             if (!frame) log_status("SLFG-malformed-tag-after-depth", s);
-            require(!(active(s) && !s.source.reused_depth), "A malformed FG tag naming a native was treated as an untag");
+            require(active(s) && !s.source.reused_depth && s.source.frame_generation_input,
+              "The FG tag copy made before a malformed tag of its frame did not stand in for that refused tag");
           }
+          const auto malformed_refusal = last_refusal();
+          require(malformed_refusal.serial > before_malformed && malformed_refusal.viewport == fg_viewport.value &&
+              malformed_refusal.frame_generation && malformed_refusal.where == sunshine_depth_refusal::gate::source,
+            "A malformed FG tag naming a native was treated as an untag: it was not refused");
         },
         [&] {
           render_tracked_depth = [this] { real_fg_frame(); };
           settle("SLFG-recovered-after-malformed-tag");
-          std::puts("PASS native SLFG untag: a null Resource or null native after each FG tag, with or without commands and beside a HUD-less tag, keeps fresh FG depth every presentation; a malformed tag still withdraws; no FX");
+          std::puts("PASS native SLFG untag: a null Resource or null native after each FG tag, with or without commands and beside a HUD-less tag, keeps fresh FG depth every presentation; a malformed tag is refused and withdraws the observation, and the frame's tag copy before it stands in; no FX");
         }});
     }
 
