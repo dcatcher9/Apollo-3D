@@ -3241,6 +3241,12 @@ namespace sunshine_streamline::depth_capture {
     return entry != nullptr;
   }
   std::uint64_t game_executions() { return game_execution_count.load(std::memory_order_acquire); }
+  std::uint64_t next_present_ordinal() { return present_ordinal(); }
+  void evaluation_called(std::uint64_t epoch) {
+    if (!requested.load() || !epoch) return;
+    std::lock_guard lock(mutex);
+    newest_evaluation_present = std::max(newest_evaluation_present, present_ordinal());
+  }
   std::uint64_t game_executions_on(std::uint64_t queue) {
     com_ptr<ID3D12CommandQueue> checked;
     if (!queue || !query_native(queue, IID_ID3D12CommandQueue, checked)) return 0;

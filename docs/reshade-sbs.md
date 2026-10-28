@@ -3681,7 +3681,10 @@ makes that Present mono (`selection=inactive_views`, until 10-27; the session ti
 Presents it adds for it in either order, so a frame that made a frame-generation call (an FG tag or
 DLSS-G's evaluation) is also the frame of the Presents after its first, up to the count the game
 declares (`numFramesToGenerate`, from the confirmed FG policy, also for a silent scope; 1 while FG
-is on with no count), until the next frame's first evaluation begins (`frame_presenting`): its views
+is on with no count), until the next frame's first evaluation begins (`frame_presenting`; a live
+FG scope's SR/RR evaluation, which begins no view, ends it as well since 10-28,
+`depth_capture::evaluation_called`: a hitch frame without an FG call after a frame whose
+generated Present DLSS-G skipped showed that frame's copy, past the source age, as current): its views
 are active, its copies current, the stand-in of its own SR snapshot for its DLSS-G copy in flight
 admitted (`lineage_snapshot`, below) and the display's hold of its own copy kept (`own_frame`:
 `retained_depth::present_stamp` at or after the acquisition's `presenting_floor`) whatever their
@@ -4288,7 +4291,9 @@ A frame's Present depends on whether the viewport's frame generation is on (its 
   frame inside that frame's Present, after the frame's tags: while it evaluates every frame of the
   deferral's scope, the frame's Present is the first after an evaluation that followed the tag call
   (`frame_generation::deferral_evaluations`). Every frame means an NGX evaluation observed in that
-  scope within the source age, and one since the viewport's previous deferred frame's newest tag
+  scope within the source age, or of the frame the Present may still present (no more Presents
+  since it than its generated count, so a hitch between that evaluation and the frame's Present
+  keeps it), and one since the viewport's previous deferred frame's newest tag
   call, which is that frame's own (a deferral with no earlier deferred frame of the viewport in its
   epoch counts as every frame; a later tag call of the same frame keeps the previous frame's
   count). Otherwise the frame's Present is the first after such an evaluation or after
@@ -4314,8 +4319,17 @@ newest constants when they came first; a game that sets its constants after the 
 the previous frame's (or none), and its deferral lapses at the frame's constants: the candidate's
 camera evidence was taken at the tag call, before that frame's constants, so copying it at the
 frame's Present would pair one frame's depth with the previous frame's camera. A deferral lapses
-(`lapsed`) when the source age passes, the observation changes, the viewport's constants name a
-later frame, or another frame's tag call of the viewport replaces it. A null untag of the viewport
+(`lapsed`) when the observation changes, the viewport's constants name a later frame, another
+frame's tag call of the viewport replaces it, or the source age passed at a Present that cannot be
+its frame's own (`deferral_evaluations::expired`): one with more Presents since the frame's newest
+tag call than the earlier frames' generated ones DLSS-G may still present before it (the FG
+options' generated count, none with FG off), and not the first after DLSS-G evaluated a frame
+following that call. The tag call and DLSS-G's evaluation are stamped with the ordinal of the
+Present that presents the frame being recorded (`depth_capture::next_present_ordinal`). Until 10-28
+the source age alone lapsed it, also at its frame's own Present after a hitch of that age between
+the frame's calls and its Present: DLSS-G's evaluation of the frame had stood aside for the
+deferred copy, so the frame had no FG copy and the Present was mono (`inactive_views`), the stereo
+fade restarting, in any game whose FG depth tag is `ValidUntilPresent` and copied there. A null untag of the viewport
 (a null Resource or native) cancels it (`cancelled_by_untag`, owner ruling R7, `untag_cancels`):
 an untag that names the deferred tag's frame token, or that names no frame token (`slSetTag`) or
 whose tag had no frame, cancels it; an untag of another frame leaves it. A cancelled or lapsed

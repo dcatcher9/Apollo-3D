@@ -2389,7 +2389,19 @@ the copy before, one frame late, which only the freshness rule by capture id see
 frame 26, 10-28, temporary build), two for FG Off's FG-role retirement, `fg-off-late-sr-after-fg-copy`
 and `fg-off-late-dlssg-head-sr-owner` (the C8 follow-up above), and one for the judge's stale rule,
 `judge-hold-age-from-made-tick`, which fails with the frame's stamp as the age baseline: stale at
-the Present after FG Off and at every isolation Present after it, 10-28, temporary build),
+the Present after FG Off and at every isolation Present after it, 10-28, temporary build), eight
+for a frame's FG tag copy deferred to its Present (R2) after a hitch of the source age between the
+frame's calls and that Present (open item A of the 10-28 review, seed 2d28df102b516f4d at frame 49):
+`fg-on-deferred-tag-hitch-after-sources` and its forms `-owned-sr` (the seed's shape),
+`-dlssg-compute`, `-4x`, `-inside`, `-evaluate`, `-tag-only` and `-tag-only-evaluate` (with the
+deferral's Present ordinals reverted each loses depth at the hitch frame, a gap, 10-28, temporary
+build; the judge counts the deferred copy as readable at its own Present and dates it to that
+Present, without which the tag-only forms passed the mono Present as a stall's warm-up and the
+fixed set's seed c28965dca8d7c76c passed three mono Presents at its frame 64), and two for the same
+hitch after frames whose generated Present DLSS-G skipped, `fg-on-deferred-tag-missing-generated-hitch`
+and `fg-on-owned-sr-missing-generated-hitch` (the hitch frame's Present showed the earlier frame's
+copy, 422 ms old, as current: stale at frame 26, 10-28, temporary build; the second makes no FG
+call, so one flat Present is its contract under "Leave it")),
 an event list shaped like the
 session it fixed and judged as any
 timeline (random seeds meet these shapes only by chance, and a change of the event language changes

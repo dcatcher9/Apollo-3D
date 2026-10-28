@@ -415,6 +415,17 @@ namespace sunshine_streamline::depth_capture {
   // retired queue's entry is freed. Under frame generation a deferred copy
   // without DLSS-G's evaluations needs one on its presenting queue.
   std::uint64_t game_executions_on(std::uint64_t queue);
+  // The ordinal of the Present that presents the frame being recorded now
+  // (one more than the Presents counted so far): a deferred copy's tag call
+  // and DLSS-G's evaluation are stamped with it, and present_deferred, which
+  // runs before present() counts its Present, reads that Present's own.
+  std::uint64_t next_present_ordinal();
+  // An evaluation call that begins no view (a live FG scope's SR/RR
+  // evaluation, which the probe leaves to the scope): a later frame's call,
+  // which ends an earlier frame's presenting window as begin_evaluation
+  // does (frame_presenting), so a Present after it cannot take that frame's
+  // copy, past the source age, for its own.
+  void evaluation_called(std::uint64_t epoch);
   // A retained source's allocation width and height (false without one).
   bool source_extent(const source_ref &source, std::uint32_t &width, std::uint32_t &height);
   // BEGIN actual native Present: expires future uses of this device's old tags,

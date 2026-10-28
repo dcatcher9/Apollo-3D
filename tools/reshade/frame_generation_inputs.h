@@ -163,16 +163,27 @@ namespace sunshine_streamline::frame_generation {
   // does evaluate is still made at the first Present after that evaluation
   // (docs/reshade-sbs.md, copies deferred to the Present; its history in the
   // README's C7 paragraph).
+  // Present ordinals (depth_capture::next_present_ordinal) are stamped at a
+  // tag call and at an evaluation: the ordinal of the Present that presents
+  // the frame being recorded then. A Present counts the frame's own while no
+  // more Presents came since that stamp than the earlier frame's generated
+  // ones DLSS-G may still present before it, however long the frame took:
+  // the source age bounds a deferral or an evaluation only at a Present that
+  // cannot be its frame's (10-28; until then a hitch of the source age
+  // between a frame's calls and its Present lapsed its deferred FG copy at
+  // that Present, and DLSS-G's evaluation of the frame had stood aside for
+  // it, so the Present was mono: open item A, seed 2d28df102b516f4d).
   struct deferral_evaluations {
     // DLSS-G's NGX evaluations of real frames: their count, and the newest
-    // one's scope and tick.
-    std::uint64_t count{}, epoch{}, tick{};
-    std::uint32_t viewport{};
+    // one's scope, tick, Present ordinal and generated count (the FG
+    // options' numFramesToGenerate then).
+    std::uint64_t count{}, epoch{}, tick{}, present{};
+    std::uint32_t viewport{}, generated{};
     // A deferral's counts: at its frame's newest tag call (at_tag), and at the
     // viewport's previous deferred frame's newest tag call (previous, when
-    // previous_known).
+    // previous_known); present: the newest tag call's Present ordinal.
     struct marks {
-      std::uint64_t at_tag{}, previous{};
+      std::uint64_t at_tag{}, previous{}, present{};
       bool previous_known{};
     };
     // Per viewport (viewport_slots; the oldest gives way), the count at its
@@ -184,13 +195,16 @@ namespace sunshine_streamline::frame_generation {
     };
     std::array<tagged_frame, viewport_slots> tagged{};
 
-    void evaluated(std::uint64_t scope_epoch, std::uint32_t scope_viewport, std::uint64_t now) {
-      ++count; epoch = scope_epoch; viewport = scope_viewport; tick = now;
+    void evaluated(std::uint64_t scope_epoch, std::uint32_t scope_viewport, std::uint64_t now, std::uint64_t ordinal = 0,
+        std::uint32_t frames = 0) {
+      ++count; epoch = scope_epoch; viewport = scope_viewport; tick = now; present = ordinal; generated = frames;
     }
     // A tag call (serial) that defers a copy of its viewport's frame: the
     // first of that frame's deferral (begins), or a later one of the same
-    // frame, whose deferral's marks are kept. Returns the deferral's marks.
-    marks tag(std::uint64_t scope_epoch, std::uint32_t tag_viewport, std::uint64_t serial, bool begins, marks kept) {
+    // frame, whose deferral's marks are kept. ordinal: the call's Present
+    // ordinal. Returns the deferral's marks.
+    marks tag(std::uint64_t scope_epoch, std::uint32_t tag_viewport, std::uint64_t serial, bool begins, marks kept,
+        std::uint64_t ordinal = 0) {
       tagged_frame *slot = nullptr;
       for (auto &value : tagged) if (value.used && value.viewport == tag_viewport) { slot = &value; break; }
       if (begins) {
@@ -198,6 +212,7 @@ namespace sunshine_streamline::frame_generation {
         kept.previous = kept.previous_known ? slot->at_tag : 0;
       }
       kept.at_tag = count;
+      kept.present = ordinal;
       if (!slot) {
         for (auto &value : tagged) if (!value.used) { slot = &value; break; }
         if (!slot) {
@@ -210,14 +225,35 @@ namespace sunshine_streamline::frame_generation {
     }
     // Whether a Present of a frame-generating viewport is the deferral's
     // frame's (scope: its epoch and viewport). queue_executed: a game list
-    // executed on the presenting queue since its newest tag call.
+    // executed on the presenting queue since its newest tag call. ordinal:
+    // the Present's own. DLSS-G evaluates every frame while its newest
+    // evaluation is within the source age, or is of the frame this Present
+    // may still present (at most its generated count of Presents since it),
+    // so a hitch between that evaluation and the frame's Present keeps it.
     bool presented(std::uint64_t scope_epoch, std::uint32_t scope_viewport, const marks &deferral, bool queue_executed,
-        std::uint64_t now) const {
+        std::uint64_t now, std::uint64_t ordinal = 0) const {
       const bool evaluating = tick && epoch == scope_epoch && viewport == scope_viewport &&
-        sunshine_freshness::fresh_lt(tick, now, sunshine_freshness::source_age_ms);
+        (sunshine_freshness::fresh_lt(tick, now, sunshine_freshness::source_age_ms) ||
+         (present && ordinal >= present && ordinal - present <= generated));
       if (evaluating && count != deferral.at_tag) return true;
       const bool every_frame = !deferral.previous_known || deferral.previous != deferral.at_tag;
       return !(evaluating && every_frame) && queue_executed;
+    }
+    // Whether the source age ends a deferral (its newest tag call at tick) at
+    // the Present ordinal: only at a Present that cannot be its frame's own.
+    // That Present may come after the earlier frames' generated Presents
+    // (frames: the viewport's generated count while it generates, else 0)
+    // that DLSS-G still presents after the tag call, and it is the first
+    // after DLSS-G evaluated a frame following that call. The deferral's
+    // other ends (its observation, epoch, a later frame's constants or tag
+    // call) stay.
+    bool expired(std::uint64_t scope_epoch, std::uint32_t scope_viewport, const marks &deferral, std::uint64_t tag_tick,
+        std::uint32_t frames, std::uint64_t ordinal, std::uint64_t now) const {
+      if (sunshine_freshness::fresh_lt(tag_tick, now, sunshine_freshness::source_age_ms)) return false;
+      if (deferral.present && ordinal >= deferral.present && ordinal - deferral.present <= frames) return false;
+      const bool evaluated_since = tick && epoch == scope_epoch && viewport == scope_viewport &&
+        count != deferral.at_tag && present && present == ordinal;
+      return !evaluated_since;
     }
   };
 }

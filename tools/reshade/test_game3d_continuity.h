@@ -190,15 +190,21 @@ namespace game3d_continuity {
     // to the source age old beside its frame's own fresh copy passed), and a
     // stall inside such a frame, after its first call, is no warm-up: the
     // judge measures the stall rule to the frame's stamp (judge::present).
-    // A copy deferred to its frame's Present (R2), DLSS-G's ring and an
-    // unordered frame's copies keep the Present-to-Present rule.
+    // So is a copy deferred to its frame's Present (R2) that no untag
+    // cancels: the add-on records it on the presenting queue right before
+    // that Present decides (since 10-28; until then it kept the
+    // Present-to-Present rule, so a hitch between the frame's calls and its
+    // Present passed a mono Present as a stall's warm-up). DLSS-G's ring and
+    // an unordered frame's copies keep the Present-to-Present rule.
     std::uint8_t immediate {};
     limitation limit {limitation::none};
     // tick: the frame's first call that supplies (the stall rule's stamp).
     // made: when each source's copy was made, by source bit (sr_evaluate,
     // tag_copy, dlssg_input, generic_boundary): its deciding call, after any
-    // hitch before it, or its recording's submission for a copy from another
-    // queue. holdable, readable_after and the freshness rule age copies by
+    // hitch before it, its recording's submission for a copy from another
+    // queue, or its frame's Present for a copy deferred there (R2, since
+    // 10-28: after a hitch before that Present its tag call's tick made the
+    // frame's own copy look as old as the hitch). holdable, readable_after and the freshness rule age copies by
     // it (until the 10-27 review by tick, so after a hitch between a frame's
     // first call and its copy a 20 ms old copy looked 420 ms old and a
     // dropped hold of it passed).

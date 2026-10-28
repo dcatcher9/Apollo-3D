@@ -2195,7 +2195,14 @@ namespace sunshine_streamline {
       if (deferred) *deferred = {};
       if (!source_requested.load(std::memory_order_acquire) || !depth_capture::active()) return 0;
       const auto route = frame_generation_route(snapshot.viewport);
-      if (!snapshot.frame_generation_input && route == fg_route::owned) return 0; // source_path_selected
+      if (!snapshot.frame_generation_input && route == fg_route::owned) {
+        // source_path_selected. Still a later frame's call: an earlier
+        // frame's presenting window ends here (until 10-28 a hitch frame
+        // without an FG call, after a frame whose generated Present DLSS-G
+        // skipped, showed that frame's copy past the source age as its own).
+        depth_capture::evaluation_called(snapshot.epoch);
+        return 0;
+      }
       // Observation discovers interfaces; only an accepted submitted capture
       // establishes ownership in the shared capture layer.
       depth_capture::observe_provider(snapshot.command_buffer);
@@ -2769,7 +2776,8 @@ namespace sunshine_streamline {
         // generation DLSS-G's evaluation of it, while DLSS-G evaluated the
         // viewport's previous deferred frame) must follow it.
         entry->serial = out.serial; entry->tick = out.tick; entry->executions = executions;
-        entry->evaluations = fg_evaluation.tag(source_epoch, out.viewport, out.serial, begins, entry->evaluations);
+        entry->evaluations = fg_evaluation.tag(source_epoch, out.viewport, out.serial, begins, entry->evaluations,
+          depth_capture::next_present_ordinal());
         if (depth.count) { entry->depth = std::move(depth); deferrals.depth.fetch_add(1, std::memory_order_relaxed); }
         for (unsigned slot = 0; slot != ui.size(); ++slot) if (ui[slot].used) {
           entry->ui[slot] = std::move(ui[slot]);
@@ -3401,6 +3409,8 @@ namespace sunshine_streamline {
     const auto executions = depth_capture::game_executions();
     const auto queue_executions = depth_capture::game_executions_on(queue);
     const auto now = GetTickCount64();
+    // This Present's ordinal: it is counted after this call (on_present).
+    const auto ordinal = depth_capture::next_present_ordinal();
     const auto source_epoch = epoch.load(std::memory_order_acquire);
     std::array<deferred_frame, slot_count> due;
     unsigned waited = 0;
@@ -3412,17 +3422,22 @@ namespace sunshine_streamline {
     AcquireSRWLockExclusive(&evaluation_supply_lock);
     for (auto &entry : deferred_frames) {
       if (!entry.used) continue;
-      // Its frame's Present is past once the observation changed, the source
-      // age passed, or the viewport's constants named a later frame.
-      bool past = !ticket || entry.observation != ticket || entry.epoch != source_epoch ||
-        !sunshine_freshness::fresh_lt(entry.tick, now, sunshine_freshness::source_age_ms);
+      // Its frame's Present is past once the observation changed, the
+      // viewport's constants named a later frame, or the source age passed
+      // at a Present that cannot be the frame's own (expired: a hitch of the
+      // source age between the frame's calls and its Present keeps it; until
+      // 10-28 it lapsed there, and that Present was mono).
+      bool past = !ticket || entry.observation != ticket || entry.epoch != source_epoch;
       // Without the viewport's metadata, frame generation counts as on.
       bool generating = !pin;
+      std::uint32_t generated = 0;
       if (!past && pin) for (const auto &record : pin->records) if (record.used && record.viewport == entry.viewport) {
         past = record.camera_serial > entry.serial && !same_frame(record.camera_frame, entry.frame);
         generating = record.frame_generation.known && record.frame_generation.enabled;
+        generated = generating ? record.frame_generation.generated_frames : 0;
         break;
       }
+      past = past || fg_evaluation.expired(entry.epoch, entry.viewport, entry.evaluations, entry.tick, generated, ordinal, now);
       // Its frame's Present. Without frame generation the game's Present
       // reaches this one directly, so the first after a game list executed
       // following the tag (one with none since is an earlier frame's). With
@@ -3432,7 +3447,7 @@ namespace sunshine_streamline {
       // frame in this scope; else the first after a game list executed on
       // this presenting queue since the tag (deferral_evaluations).
       const bool reached = !generating ? entry.executions != executions :
-        fg_evaluation.presented(entry.epoch, entry.viewport, entry.evaluations, queue_executions > entry.executions, now);
+        fg_evaluation.presented(entry.epoch, entry.viewport, entry.evaluations, queue_executions > entry.executions, now, ordinal);
       if (!past && !reached) {
         waited += generating;
         continue;
@@ -3872,7 +3887,7 @@ namespace sunshine_streamline {
     const auto tick = GetTickCount64();
     // This frame's Present comes next (present_deferred).
     AcquireSRWLockExclusive(&evaluation_supply_lock);
-    fg_evaluation.evaluated(fg.epoch, fg.viewport, tick);
+    fg_evaluation.evaluated(fg.epoch, fg.viewport, tick, depth_capture::next_present_ordinal(), fg.generated_frames);
     ReleaseSRWLockExclusive(&evaluation_supply_lock);
     const auto source_id = sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(fg.viewport));
     if (out.depth == depth_outcome::not_offered) {

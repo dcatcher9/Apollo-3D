@@ -626,6 +626,59 @@ namespace sunshine_streamline::depth_capture {
       std::printf("PASS P5 deferred copy's Present under frame generation: %zu steps\n", std::size(steps) + 1);
     }
 
+    // P5: the source age ends a deferral, and DLSS-G's evaluation, only at a
+    // Present that cannot be its frame's own (deferral_evaluations::expired
+    // and presented, by Present ordinals). Until 10-28 a deferral lapsed by
+    // the clock at its own Present after a hitch of the source age between
+    // its frame's calls and that Present, so the frame had no FG copy and the
+    // Present was mono (open item A, seed 2d28df102b516f4d).
+    void deferral_age_rows() {
+      namespace fg = sunshine_streamline::frame_generation;
+      struct row {
+        const char *pins;
+        std::uint64_t elapsed;  // Milliseconds from the tag call to the Present.
+        std::uint32_t frames;  // The viewport's generated count while it generates.
+        int evaluated;  // DLSS-G evaluated a frame after the tag call, at this many Presents after it (-1: none).
+        unsigned presents;  // Presents since the tag call before this one.
+        bool queue_executed;
+        bool expired, presented;
+      };
+      constexpr auto age = sunshine_freshness::source_age_ms;
+      const row rows[] {
+        {"Within the source age a deferral never expires", age - 1, 0, -1, 5, false, false, false},
+        {"Its frame's Present after a hitch of the source age, no Present since its tag call", age + 150, 0, -1, 0, true, false, true},
+        {"after an earlier frame's generated Present at 2x", age + 150, 1, -1, 1, false, false, false},
+        {"two Presents since at 2x: one of them was its frame's", age + 150, 1, -1, 2, false, true, false},
+        {"three earlier generated Presents at 4x", age + 150, 3, -1, 3, false, false, false},
+        {"four Presents since at 4x", age + 150, 3, -1, 4, false, true, false},
+        {"Without frame generation a Present since its tag call was its frame's", age + 150, 0, -1, 1, true, true, true},
+        {"DLSS-G evaluated its frame after the tag call, no Present since: the Present is that frame's", age + 150, 0, 2, 2, false, false, true},
+        {"a Present came after that evaluation: past", age + 150, 0, 1, 2, false, true, false},
+      };
+      for (const auto &r : rows) {
+        fg::deferral_evaluations value;
+        constexpr std::uint64_t epoch = 7, start = 1000, tagged_at = 40;
+        // An earlier deferred frame DLSS-G evaluated, so the deferral waits
+        // for an evaluation of its own while DLSS-G evaluates every frame.
+        value.tag(epoch, 0, 1, true, {}, tagged_at - 1);
+        value.evaluated(epoch, 0, start - 10, tagged_at - 1, r.frames);
+        const auto deferral = value.tag(epoch, 0, 2, true, {}, tagged_at);
+        const auto ordinal = tagged_at + r.presents;
+        if (r.evaluated >= 0) {
+          value.evaluated(epoch, 0, start + 5, tagged_at + std::uint64_t(r.evaluated), r.frames);
+        }
+        const auto now = start + r.elapsed;
+        const bool expired = value.expired(epoch, 0, deferral, start, r.frames, ordinal, now);
+        const bool presented = value.presented(epoch, 0, deferral, r.queue_executed, now, ordinal);
+        if (expired != r.expired || presented != r.presented) {
+          char text[512];
+          std::snprintf(text, sizeof(text), "P5 deferral age, %s: expired %d presented %d", r.pins, expired, presented);
+          fail(text);
+        }
+      }
+      std::printf("PASS P5 deferral age by the frame's own Present: %zu rows\n", std::size(rows));
+    }
+
     // P6: select_provider at one Present. Each row builds the queue's owner
     // (its previous, delivered frame), the newest capture of each provider and
     // the FG policy, then names the pick. Correction 2 of the refactor plan: a
@@ -2797,6 +2850,7 @@ int main() {
   frame_generation_frame_steps();
   dlssg_tag_precedence_steps();
   deferral_present_steps();
+  deferral_age_rows();
   select_provider_rows();
   ownership_timelines();
   freshness_edges();

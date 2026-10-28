@@ -729,6 +729,38 @@ namespace {
     // (until 10-28 the Present after FG Off holding that 157 ms old copy was
     // stale at 297 ms, and every isolation Present after it).
     {"judge-hold-age-from-made-tick", "fg=on,tag=now_list; sr=other_queue; sr=other_queue,hitch=brief; fg=off,hitch=brief"},
+    // FG On and a hitch of the source age and more between a frame's calls
+    // and its Present, the frame's FG depth a ValidUntilPresent tag without a
+    // command list, whose copy is deferred to that Present (R2) and which
+    // DLSS-G's own evaluation of the frame stands aside for: that Present
+    // shows the frame's own copy (frame_generation::deferral_evaluations,
+    // expired). Until 10-28 the deferral lapsed by the clock at its own
+    // Present, so the frame had no FG copy and its Present was mono
+    // (FG_scope_required, inactive_views): open item A, seed
+    // 2d28df102b516f4d at frame 49 and the fixed set's c28965dca8d7c76c at
+    // frame 64, which the judge passed as a stall's warm-up. Forms: DLSS-G on
+    // the game's list, the viewport's SR owned by the scope (the seed's
+    // shape), DLSS-G's compute copy, 4x, the generated Present inside the
+    // recording or inside the SR evaluation, and the tag alone.
+    {"fg-on-deferred-tag-hitch-after-sources", "20*sr=local; fg=on,tag=present_bare,dlssg=direct,generated=1; 5*tag=present_bare,dlssg=direct,generated=1; tag=present_bare,dlssg=direct,hitch=after_sources; 10*tag=present_bare,dlssg=direct,generated=1"},
+    {"fg-on-deferred-tag-hitch-after-sources-owned-sr", "20*sr=local; fg=on,tag=present_bare,sr=local,dlssg=direct,generated=1; 5*tag=present_bare,sr=local,dlssg=direct,generated=1; tag=present_bare,sr=local,dlssg=direct,hitch=after_sources; 10*tag=present_bare,sr=local,dlssg=direct,generated=1"},
+    {"fg-on-deferred-tag-hitch-after-sources-dlssg-compute", "20*sr=local; fg=on,tag=present_bare,dlssg=compute,generated=1; 5*tag=present_bare,dlssg=compute,generated=1; tag=present_bare,dlssg=compute,hitch=after_sources; 10*tag=present_bare,dlssg=compute,generated=1"},
+    {"fg-on-deferred-tag-hitch-after-sources-4x", "20*sr=local; fg=on,tag=present_bare,dlssg=direct,generated=3; 5*tag=present_bare,dlssg=direct,generated=3; tag=present_bare,dlssg=direct,generated=3,hitch=after_sources; 10*tag=present_bare,dlssg=direct,generated=3"},
+    {"fg-on-deferred-tag-hitch-after-sources-inside", "20*sr=local; fg=on,tag=present_bare,dlssg=direct,generated=1,at=inside; 5*tag=present_bare,dlssg=direct,generated=1,at=inside; tag=present_bare,dlssg=direct,generated=1,at=inside,hitch=after_sources; 10*tag=present_bare,dlssg=direct,generated=1,at=inside"},
+    {"fg-on-deferred-tag-hitch-after-sources-evaluate", "20*sr=local; fg=on,tag=present_bare,sr=local,dlssg=direct,generated=1,at=evaluate; 5*tag=present_bare,sr=local,dlssg=direct,generated=1,at=evaluate; tag=present_bare,sr=local,dlssg=direct,generated=1,at=evaluate,hitch=after_sources; 10*tag=present_bare,sr=local,dlssg=direct,generated=1,at=evaluate"},
+    {"fg-on-deferred-tag-hitch-after-sources-tag-only", "20*sr=local; fg=on,tag=present_bare,generated=1; 5*tag=present_bare,generated=1; tag=present_bare,hitch=after_sources; 10*tag=present_bare,generated=1"},
+    {"fg-on-deferred-tag-hitch-after-sources-tag-only-evaluate", "20*sr=local; fg=on,tag=present_bare,sr=local,generated=1,at=evaluate; 5*tag=present_bare,sr=local,generated=1,at=evaluate; tag=present_bare,sr=local,generated=1,at=evaluate,hitch=after_sources; 10*tag=present_bare,sr=local,generated=1,at=evaluate"},
+    // The same hitch after frames whose generated Present DLSS-G skipped
+    // (FG 2x declared, none presented): the hitch frame's real Present
+    // counts as the earlier frame's missing generated Present while no later
+    // evaluation began (frame_presenting). Until 10-28 that frame's lapsed
+    // deferral began none, so its Present showed the earlier frame's copy,
+    // past the source age, as current (stale). A hitch frame that makes no
+    // FG call, its SR evaluation owned by the live scope, ends that window
+    // too (depth_capture::evaluation_called): its Present may be the one
+    // flat Present "Leave it" accepts, never the earlier frame's copy.
+    {"fg-on-deferred-tag-missing-generated-hitch", "20*sr=local; fg=on,tag=present_bare; 5*tag=present_bare,dlssg=direct; tag=present_bare,dlssg=direct,hitch=after_sources; 10*tag=present_bare,dlssg=direct"},
+    {"fg-on-owned-sr-missing-generated-hitch", "20*sr=local; fg=on,tag=now_list,sr=local,generated=1,at=evaluate; 5*tag=now_list,sr=local; sr=local,hitch=after_sources; 10*sr=local"},
   };
 
   // Each known gap the timelines found has a witness: an event list whose
@@ -1811,8 +1843,15 @@ namespace {
           offer(call, continuity::tag_copy);
           supplied = true;
           // Copied at its call on the game's list (not deferred to the
-          // frame's Present, R2): readable at its own Present.
-          if (!call.expected.deferred && tag_commands) {
+          // frame's Present, R2): readable at its own Present. So is a copy
+          // deferred to the frame's Present (R2) that no untag cancels: the
+          // add-on records it on the presenting queue's immediate list right
+          // before that Present decides, however long the frame took after
+          // its tag call (until 10-28 the Present-to-Present rule took a
+          // hitch there for a stall's warm-up, which passed the add-on's mono
+          // Present after it: open item A, and the fixed set's seed
+          // c28965dca8d7c76c at frame 64, three flat Presents).
+          if ((!call.expected.deferred && tag_commands) || (call.expected.deferred && !cancel_expected)) {
             supply.immediate |= continuity::tag_copy;
           }
         }
@@ -1941,6 +1980,17 @@ namespace {
       // Present where the held FG copy had expired, the review's J2).
       if (hitch == hitch_form::after_sources) {
         Sleep(hitch_ms(hitch));
+      }
+      // A copy deferred to the frame's Present (R2) is made right before
+      // that Present, after any hitch here: its made tick is now (until
+      // 10-28 its tag call's, so after a hitch the frame's own copy, held at
+      // a later generated Present, was judged as old as the hitch, stale).
+      if (deferred_tag && !cancel_expected) {
+        for (unsigned i = 0; i != supply.made.size(); ++i) {
+          if ((continuity::tag_copy & (1u << i)) && supply.made[i]) {
+            supply.made[i] = GetTickCount64();
+          }
+        }
       }
       // A frame whose deferred FG tag copy waits for DLSS-G to evaluate its
       // frame, which DLSS-G does not do, supplies that copy as permitted
