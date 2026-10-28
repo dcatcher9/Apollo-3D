@@ -668,9 +668,11 @@ namespace sunshine_streamline::depth_capture {
     // reader's queue (predicted), copies given an idle slot's cached storage
     // at their submission (taken), copies submitted on another queue with no
     // storage at all, left to the Reset rule (unstored), and predicted
-    // storage released unused by the idle sweep.
+    // storage released unused by the idle sweep. Copies that sought no
+    // copy-out storage of their own because an allocation of their shape
+    // failed within the source age (skipped).
     std::uint64_t copied_out{}, copy_out_busy{}, copy_out_failed{};
-    std::uint64_t copy_out_predicted{}, copy_out_taken{}, copy_out_unstored{}, copy_out_released{};
+    std::uint64_t copy_out_predicted{}, copy_out_taken{}, copy_out_unstored{}, copy_out_released{}, copy_out_skipped{};
     std::uint64_t unobserved() const { return unrecorded + unreported + invalidated + missed_reset + uncovered; }
   };
   proven_state_counts proven_counts();

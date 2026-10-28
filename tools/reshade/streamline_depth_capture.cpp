@@ -378,10 +378,22 @@ namespace sunshine_streamline::depth_capture {
     // on another queue than the reader's with no storage at all, left to
     // the Reset rule (unstored: recorded for the reader's queue before
     // Present moved, with no idle storage of their shape), and predicted
-    // storage the idle sweep released unused (released).
+    // storage the idle sweep released unused (released), and copies that sought no storage
+    // of their own because an allocation of their shape had just failed
+    // (skipped, copy_out_failure).
     struct {
-      std::atomic<std::uint64_t> made{}, ring_busy{}, failed{}, predicted{}, taken{}, unstored{}, released{};
+      std::atomic<std::uint64_t> made{}, ring_busy{}, failed{}, predicted{}, taken{}, unstored{}, released{}, skipped{};
     } copy_out_counters;
+    // Protected by mutex: the last copy-out storage allocation that failed
+    // (record_impl), by device, shape and format. For the source age after
+    // it, a copy of that shape does not allocate copy-out storage again on
+    // the game's recording thread (under budget pressure the driver may try
+    // to make room before it fails, at every copy of every frame with FG
+    // On); copy_out may still give it an idle slot's storage at submission.
+    struct {
+      std::uint64_t device_identity{}, width{}, height{}, tick{};
+      DXGI_FORMAT format{};
+    } copy_out_failure;
     // Reads admitted on another queue by the queue-order model before their
     // producer fence completed (U-C1; the queue order line's proofs).
     std::atomic<std::uint64_t> order_inflight_reads{};
@@ -3304,7 +3316,18 @@ namespace sunshine_streamline::depth_capture {
       const bool texture_prepared = !texture_cached && prepared && compatible_storage(prepared);
       const bool published_prepared = !published_cached && prepared_published && compatible_storage(prepared_published);
       const bool need_texture = !texture_cached && !texture_prepared;
-      const bool need_published = !published_cached && !published_prepared;
+      bool need_published = !published_cached && !published_prepared;
+      if (need_published && copy_out_failure.tick && copy_out_failure.device_identity == value.source->device_identity &&
+          copy_out_failure.width == region.width && copy_out_failure.height == region.height &&
+          copy_out_failure.format == texture_format &&
+          sunshine_freshness::fresh_lt(copy_out_failure.tick, record_tick, sunshine_freshness::source_age_ms)) {
+        // An allocation of this shape failed within the source age: the copy
+        // keeps the Reset rule unless copy_out finds idle storage for it.
+        need_published = false;
+        published = nullptr;
+        copy_out_refused = true;
+        copy_out_counters.skipped.fetch_add(1, std::memory_order_relaxed);
+      }
       if (!need_texture && !need_published) {
         if (texture_prepared) {
           // Storage allocated by an earlier attempt. Its budget was reserved on
@@ -3385,6 +3408,7 @@ namespace sunshine_streamline::depth_capture {
           discarded.push_back(std::move(prepared_published));
           copy_out_refused = true;
           copy_out_counters.failed.fetch_add(1, std::memory_order_relaxed);
+          copy_out_failure = {plan.device_identity, plan.desc.Width, plan.desc.Height, GetTickCount64(), plan.desc.Format};
         }
         release_on_exit.keep = true;
         continue;
@@ -3829,6 +3853,7 @@ namespace sunshine_streamline::depth_capture {
     out.copy_out_predicted = copy_out_counters.predicted.load(relaxed); out.copy_out_taken = copy_out_counters.taken.load(relaxed);
     out.copy_out_released = copy_out_counters.released.load(relaxed);
     out.copy_out_unstored = copy_out_counters.unstored.load(relaxed);
+    out.copy_out_skipped = copy_out_counters.skipped.load(relaxed);
     return out;
   }
   void finish(std::uint64_t ticket, bool successful, capture_failure failure) {

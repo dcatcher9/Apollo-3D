@@ -1054,7 +1054,9 @@ namespace {
     // Copy-out storage that cannot be allocated leaves the copy to the Reset
     // rule (copy_out failed): the copy itself is recorded (until 10-27 the
     // whole copy was refused, and a list never executed retried the failing
-    // allocation at every copy).
+    // allocation at every copy). A copy of that shape within the source age
+    // does not try the allocation again on the game's thread (skipped; until
+    // the 10-27 review every copy of every frame with FG On did).
     {
       present(gpu.foreign_queue.Get(), 12109);
       fresh_list fresh(gpu);
@@ -1065,13 +1067,20 @@ namespace {
       odd_input.source_present_generation = capture::source_present_generation(odd_input.source);
       odd_input.proof = sunshine_scene_depth::state_proof::sdk_contract;
       const auto failed = counts().copy_out_failed;
-      capture::testing::fail_copy_out_allocations(1);
+      const auto skipped = counts().copy_out_skipped;
+      capture::testing::fail_copy_out_allocations(2);
       const auto unstored = record_on(fresh, odd_input, 1);
-      capture::testing::fail_copy_out_allocations(0);
       require(!capture::testing::holds_copy_out_storage(unstored) && counts().copy_out_failed == failed + 1,
         "reader moves: a copy whose copy-out storage failed to allocate was not counted as copy_out failed");
+      fresh_list again(gpu);
+      const auto retried = record_on(again, odd_input, 2);
+      capture::testing::fail_copy_out_allocations(0);
+      require(!capture::testing::holds_copy_out_storage(retried) && counts().copy_out_failed == failed + 1 &&
+          counts().copy_out_skipped == skipped + 1,
+        "reader moves: a copy-out allocation that had just failed was tried again on the game's thread");
       present(gpu.queue.Get(), 12110);
       run_on_reader(fresh);
+      run_on_reader(again);
       capture::retire_source(odd_input.provider, odd_input.epoch, odd_input.source_id);
     }
     // FG turned on while the render queue still presents: FG's first Present

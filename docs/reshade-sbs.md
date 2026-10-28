@@ -3974,8 +3974,11 @@ the copies in flight across one FG toggle). Storage taken only for that predicti
 (the list ran on the reader's queue after all) is released by the idle sweep (`released`). A copy
 not copied out (every ring list in flight, a failed list call, an unstored copy) keeps the Reset
 rule, and so does a copy whose copy-out storage could not be allocated (`failed`; until 10-27 the
-copy itself was refused); the counts are on the depth status line as
-`copy_out={made= ring_busy= failed= predicted= taken= unstored= released=}`. The
+copy itself was refused). For the source age after such a failure, a copy of that device, shape and
+format does not try the allocation again on the game's recording thread (`skipped`; until the
+10-27 review every copy of every frame retried it under VRAM pressure); it can still take an idle
+slot's storage at its submission. The counts are on the depth status line as
+`copy_out={made= ring_busy= failed= predicted= taken= unstored= released= skipped=}`. The
 cost is one extra copy of the snapshot on the producer queue per copied-out snapshot and one more
 snapshot-sized allocation per slot for such a source; U-C1b adds one snapshot-sized allocation per
 list that first carries a copy while Present runs on another queue (released by the sweep when
