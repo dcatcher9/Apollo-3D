@@ -40,18 +40,20 @@
 // generated Present supplies nothing of its own.
 //
 // Warm-up: the judge is armed by a Present that shows depth. A Present that
-// shows none disarms it when its frame had no legal source (the mono the
-// invariant permits) or when it is a violation; a generated Present neither
-// arms nor disarms it. While disarmed, a frame's legal sources have one
-// source age to show depth, counted from the first such Present, and
-// establish_ms only during a warm-up: the session's start, a stall (a
-// Present at least the source age after the previous one: every hold
-// expired with no Present in between, and a pipelined source such as
-// DLSS-G's ring has nothing readable within the age until it refills; for a
-// frame whose own Present reads one of its legal sources, supply::immediate,
-// its stamp at least the source age after that Present, since a stall
-// inside it leaves that source readable) or a new source (a source-age gap
-// in legal sources). Frames whose sources meet
+// shows none disarms it when its frame had nothing it could show (no legal
+// source its own Present reads and nothing holdable within the source age,
+// the mono the invariant permits), when its frame's events may end its
+// source (supply::drop_permitted), or when it is a violation; a generated
+// Present neither arms nor disarms it. While disarmed, a frame's legal
+// sources have one source age to show depth, counted from the first such
+// Present, and establish_ms only during a warm-up: the session's start, a
+// stall (a Present at least the source age after the previous one: every
+// hold expired with no Present in between, and a pipelined source such as
+// DLSS-G's ring has nothing readable within the age until it refills; never
+// for a frame whose own Present reads one of its legal sources,
+// supply::immediate, wherever the pause came, nor for a generated Present
+// after its frame's real Present; always after a silence of the association
+// window) or a new source (a source-age gap in legal sources). Frames whose sources meet
 // a known limitation and frames whose sources meet none are timed apart, so
 // a loss a known gap excuses never extends the time the others have.
 //
@@ -177,7 +179,22 @@ namespace game3d_continuity {
     // unordered frame's copies keep the Present-to-Present rule.
     std::uint8_t immediate {};
     limitation limit {limitation::none};
+    // tick: the frame's first call that supplies (the stall rule's stamp).
+    // made: when each source's copy was made, by source bit (sr_evaluate,
+    // tag_copy, dlssg_input, generic_boundary): its deciding call, after any
+    // hitch before it, or its recording's submission for a copy from another
+    // queue. holdable, readable_after and the freshness rule age copies by
+    // it (until the 10-27 review by tick, so after a hitch between a frame's
+    // first call and its copy a 20 ms old copy looked 420 ms old and a
+    // dropped hold of it passed).
     std::uint64_t tick {};
+    std::array<std::uint64_t, 4> made {};
+    // The frame supplied an FG copy its live scope accepts: DLSS-G adds its
+    // generated Presents, which present it (judge::present, between).
+    bool fg_frame {};
+    // The frame's events may end its source's hold (an untag, the retiring
+    // of its viewport): a mono Present there is no dropped hold.
+    bool drop_permitted {};
     // A signal after this frame's real Present reached a fence a read in
     // flight relied on (O1): its real Present is judged as any, and a hold
     // its generated Presents drop is R1-late-signaller's where the copy the
@@ -221,6 +238,7 @@ namespace game3d_continuity {
       if (!tick) {
         tick = now;
       }
+      made_at(sources, now);
     }
 
     void allow(std::uint8_t sources, std::uint64_t now) {
@@ -228,6 +246,27 @@ namespace game3d_continuity {
       if (!tick) {
         tick = now;
       }
+      made_at(sources, now);
+    }
+
+    // The sources' copies made at now, where not made earlier in the frame.
+    void made_at(std::uint8_t sources, std::uint64_t now) {
+      for (unsigned i = 0; i != made.size(); ++i) {
+        if ((sources & (1u << i)) && !made[i]) {
+          made[i] = now;
+        }
+      }
+    }
+
+    // The newest made time of these sources' copies, else the frame's tick.
+    std::uint64_t made_tick(std::uint8_t sources) const {
+      std::uint64_t out {};
+      for (unsigned i = 0; i != made.size(); ++i) {
+        if (sources & (1u << i)) {
+          out = std::max(out, made[i]);
+        }
+      }
+      return out ? out : tick;
     }
 
     // A legal copy recorded on another queue; probe: its completion.
@@ -452,22 +491,51 @@ namespace game3d_continuity {
   public:
     using row_tally = game3d_continuity::row_tally;
 
+    // A frame with no legal source must hold the last depth within the
+    // source age: its mono Present while a copy is holdable is a dropped
+    // hold unless its supply permits the drop (supply::drop_permitted). The
+    // session timelines, which mark the events that end a source, set it;
+    // the native provider fixture's frame scripts end sources without such
+    // marks and keep the older rule (a frame without a legal source may go
+    // mono).
+    bool strict_holds {};
+
     // One Present: its frame record and the supply of the frame it presents
     // (empty for a generated Present, which presents the frame the previous
     // real Present presented), in the script or phase where.
-    void present(const sunshine_game3d::frame_record &record, const supply &frame, const char *where, bool generated = false) {
+    void present(const sunshine_game3d::frame_record &record, const supply &frame, const char *where, bool generated = false, bool between = false) {
       using sunshine_game3d::source_slot;
       ++presents_;
       const auto now = record.tick_ms;
+      // Whether this real Present's frame has a legal source its own Present
+      // reads (supply::immediate). Not an owned one: a live FG scope refuses
+      // the copy of the SR evaluation it keeps out (streamline_camera_probe
+      // .cpp, fg_route::owned), so that frame's own Present can show only the
+      // scope's FG copy, judged by what it could hold (the 10-27 review's J2
+      // took the owned copy for one its Present reads).
+      const bool reads_own = !generated && frame.tick && (frame.immediate & frame.legal & ~frame.limited & ~frame.owned);
+      // A generated Present that presents the last real Present's frame as
+      // that Present did (between: after it, before the next frame's first
+      // depth call; the fixture declares the frame's generated count as the
+      // game's numFramesToGenerate): the add-on counts that frame's own copy
+      // current there (frame_presenting) when the frame made a
+      // frame-generation call, and holds the copy its real Present showed.
+      // must_hold: the frame supplied an FG copy its live scope accepts
+      // (supply::fg_frame), so the add-on does count it.
+      const bool own_generated = generated && between;
+      const bool must_hold = own_generated && presented_.fg_frame;
       // A stall: no Present for the source age. A frame whose own Present
-      // reads one of its legal sources (supply::immediate) stalled only when
-      // its first call came that late; a stall after it leaves that source
-      // readable, so a loss there is judged as any (until 10-27 it disarmed
-      // the judge, which excused a mono Present beside the frame's own fresh
-      // copy).
-      const bool reads_own = !generated && frame.tick && (frame.immediate & frame.legal & ~frame.owned & ~frame.limited);
-      const auto stalled_at = reads_own ? frame.tick : now;
-      if (last_present_ && stalled_at >= last_present_ + sunshine_freshness::source_age_ms) {
+      // reads one of its legal sources never stalled, wherever the pause
+      // came (before its first call or inside it): that source is readable
+      // there however long the pause was (until the 10-27 review a pause
+      // before the frame's first call still disarmed the judge, which
+      // excused up to establish_ms of mono). Nor does a generated Present of
+      // that frame after its real Present: the pause is the frame's, whose
+      // real Present was judged. A silence of the association window or more
+      // is a warm-up for every frame: the API association ends there by
+      // design (freshness.h, association_ms).
+      const bool silence = last_present_ && now >= last_present_ + sunshine_freshness::association_ms;
+      if (last_present_ && now >= last_present_ + sunshine_freshness::source_age_ms && (silence || !(reads_own || own_generated))) {
         ++stalls_;
         armed_ = false;
         showing_ = false;
@@ -494,7 +562,7 @@ namespace game3d_continuity {
         newest_generic_ = stamp;
       }
       if ((frame.legal & api_sources & ~frame.owned) && frame.limit == limitation::none && !frame.unordered) {
-        newest_readable_ = stamp;
+        newest_readable_ = std::max(newest_readable_, frame.made_tick(std::uint8_t(frame.legal & api_sources & ~frame.owned)));
       }
       if (frame.legal) {
         ++legal_presents_;
@@ -553,16 +621,30 @@ namespace game3d_continuity {
         // 10-27 its age ran from the frame's first call to the Present, so a
         // hitch inside the frame before its SR evaluation made the frame's
         // own fresh copy stale (the 10-27 full check's C8-fg-off-color-only,
-        // frame 39: age 672 ms after a 683 ms Present gap). An older copy
-        // shown there, or any copy of a frame with no API source, keeps the
-        // age since the newest source.
+        // frame 39: age 672 ms after a 683 ms Present gap). So is the copy a
+        // frame's real Present showed, at a generated Present of that frame
+        // after it (own_generated: frame_presenting). An older copy shown
+        // there, or any copy of a frame with no API source, keeps the age
+        // since the newest source.
         const auto newest = generic ? newest_generic_ : newest_api_;
         const bool own_frame = !generated && !generic && frame.tick && record.depth_tick_ms >= frame.tick;
+        const bool own_generated_copy = own_generated && !generic && record.depth_tick_ms &&
+          ((shown_copy_.tick && record.depth_tick_ms == shown_copy_.tick) || (presented_.tick && record.depth_tick_ms >= presented_.tick));
         std::uint64_t age = now;
-        if (own_frame) {
+        if (own_frame || own_generated_copy) {
           age = 0;
         } else if (newest) {
           age = now > newest ? now - newest : 0;
+        }
+        // The hold's own age: a real Present that holds an API copy older
+        // than its frame (not its frame's own) shows it only while that copy
+        // is younger than the source age, whatever newer supply its frame
+        // made. Until the 10-27 review only the newest supply's age was
+        // judged, so after a hitch the next frame's Present could hold the
+        // copy before the hitch, 418 ms old, while its own copy was deferred
+        // to a later Present (R2), and pass.
+        if (!generated && !generic && !own_frame && record.depth_tick_ms && now > record.depth_tick_ms) {
+          age = std::max(age, now - record.depth_tick_ms);
         }
         if (!newest || age >= sunshine_freshness::source_age_ms + tick_slack_ms) {
           report(violation_kind::stale, age, frame);
@@ -582,32 +664,58 @@ namespace game3d_continuity {
       }
       const bool held = std::exchange(showing_, false);
       if (generated) {
-        // It presents the frame the previous Present presented and holds the
-        // depth shown there while that copy is younger than the source age,
-        // less the slack. A judge knows that age where the last real Present
-        // showed a fresh copy of a frame whose legal sources the presenting
-        // queue reads: the copy is that frame's or the previous frame's (a
-        // copy deferred to a later Present, R2), so it was made after the
-        // real Present two before the last, unless a copy recorded on another
+        // It presents the frame the previous real Present presented and holds
+        // the depth shown there. A generated Present of an FG frame after its
+        // real Present (own_generated) presents that frame as its real
+        // Present did: dropping the frame's own fresh copy the real Present
+        // showed is a dropped hold whatever the clock (until the 10-27 review
+        // it counted only within the source age of the clock, so after a
+        // hitch the add-on's mono there passed: open item 1). Any other
+        // generated Present holds that depth while the copy is younger than
+        // the source age, less the slack, measured from the shown copy's
+        // capture when it is the presented frame's own (a frame whose first
+        // call came before a hitch and its copy after it), else from the
+        // real Present two before the last (a copy deferred to a later
+        // Present, R2, was made after it), unless a copy recorded on another
         // queue (a limited source) may have become readable since. It
         // neither arms nor disarms.
+        const bool own_copy = fresh_ && shown_copy_.tick && presented_.tick && shown_copy_.tick >= presented_.tick;
         const bool cross_queue = newest_limited_ && now < newest_limited_ + sunshine_freshness::source_age_ms + tick_slack_ms;
-        if (held && fresh_ && !cross_queue && real_presents_[2] && now + tick_slack_ms < real_presents_[2] + sunshine_freshness::source_age_ms) {
+        const auto since = own_copy ? shown_copy_.tick : real_presents_[2];
+        const bool within = since && now + tick_slack_ms < since + sunshine_freshness::source_age_ms;
+        if (held && fresh_ && !cross_queue && ((must_hold && own_copy) || within)) {
           auto judged = presented_;
           if (judged.late_after && shown_conflicted()) {
             judged.limit = limitation::late_signaller;
           }
-          report(violation_kind::dropped_hold, now - real_presents_[2], judged);
+          report(violation_kind::dropped_hold, since && now > since ? now - since : 0, judged);
         }
         return;
       }
-      // A frame whose legal sources its own Present cannot read
-      // (supply::unordered) supplies that Present nothing: it may go mono
-      // once nothing it could hold is younger than the source age, as a
-      // frame with no legal source. With such a copy, the loss is judged as
-      // any (until 10-27 such sources were permitted there, which disarmed
-      // the judge until the next legal frame showed depth).
-      if (!frame.legal || (frame.unordered && !could_hold)) {
+      // A mono real Present. A frame whose own Present reads none of its
+      // legal sources (an unordered frame, a copy deferred to the Present
+      // after it, R2, or a pipelined source) and that has nothing it could
+      // hold younger than the source age (holdable, by each copy's made
+      // time) supplies that Present nothing: it may go mono, as may a frame
+      // whose events end its source (supply::drop_permitted). Until the
+      // 10-27 review only unordered frames had this rule, and a legal frame
+      // whose copy only a later Present reads was a gap after a hitch, where
+      // only an over-age hold could show depth. A frame whose sources meet a
+      // known limitation keeps its loss: its row records it there (known).
+      if (frame.drop_permitted || (!reads_own && !could_hold && !frame.limited)) {
+        armed_ = false;
+        return;
+      }
+      if (!frame.legal) {
+        // A frame with no legal source holds the last depth within the
+        // source age (could_hold): under strict_holds its mono Present is a
+        // dropped hold (until the 10-27 review any frame without a legal
+        // source could go mono, and its disarm gave the next legal frames a
+        // new source's warm-up). A judge without strict_holds keeps that rule
+        // for frame scripts that end sources without marking them.
+        if (strict_holds && armed_) {
+          report(violation_kind::dropped_hold, newest_readable_ && now > newest_readable_ ? now - newest_readable_ : 0, frame);
+        }
         armed_ = false;
         return;
       }
@@ -637,6 +745,7 @@ namespace game3d_continuity {
     // history stays, since a Present may hold a copy of the segment before.
     void restart() {
       judge next;
+      next.strict_holds = strict_holds;
       next.last_present_ = last_present_;
       next.newest_api_ = newest_api_;
       next.newest_generic_ = newest_generic_;
@@ -736,17 +845,21 @@ namespace game3d_continuity {
 
     void readable(const supply &frame, std::uint64_t now) {
       ++frames_;
-      const auto stamp = frame.tick ? frame.tick : now;
+      // Each copy by when it was made (supply::made).
+      const auto stamp = [&](std::uint8_t sources) {
+        const auto value = frame.made_tick(sources);
+        return value ? value : now;
+      };
       if (const auto own = std::uint8_t(frame.legal & api_sources & ~frame.owned & ~frame.limited & ~frame.elsewhere)) {
         if (const auto at_call = std::uint8_t(own & frame.immediate)) {
-          copies_.push_back({stamp, frames_, at_call, {}, false, nullptr, false, true});
+          copies_.push_back({stamp(at_call), frames_, at_call, {}, false, nullptr, false, true});
         }
         if (const auto later = std::uint8_t(own & ~frame.immediate)) {
-          copies_.push_back({stamp, frames_, later, {}});
+          copies_.push_back({stamp(later), frames_, later, {}});
         }
       }
       for (const auto &value : frame.completions) {
-        copies_.push_back({stamp, frames_, value.sources, value.probe, value.done_before_present, value.relied});
+        copies_.push_back({stamp(value.sources), frames_, value.sources, value.probe, value.done_before_present, value.relied});
       }
       while (!copies_.empty() && copies_.front().stamp + sunshine_freshness::source_age_ms + tick_slack_ms < now) {
         copies_.pop_front();

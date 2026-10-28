@@ -63,9 +63,13 @@ namespace {
   // the game makes inside a later frame's recording) presents an earlier
   // frame, whose depth it holds, and leaves the supply to the recorded
   // frame's Present.
+  // between: the generated Present follows its frame's real Present, before
+  // the next frame's first call (judge::present). drops_permitted: every
+  // Present's frame may drop its hold (a run's isolation retires its
+  // viewport).
   struct continuity_log_t {
     game3d_continuity::supply pending;
-    bool generated{};
+    bool generated{}, between{}, drops_permitted{};
     const char *where{"session"};
     game3d_continuity::judge judge;
   } continuity_log;
@@ -88,11 +92,12 @@ namespace {
     if (!continuity_log.generated) {
       frame = continuity_log.pending; continuity_log.pending = {};
     }
+    frame.drop_permitted = frame.drop_permitted || continuity_log.drops_permitted;
     sunshine_game3d::frame_record value;
     if (record_history.query && record_history.query(runtime, &value) && value.present &&
         (record_history.records.empty() || record_history.records.back().present != value.present)) {
       record_history.records.push_back(value);
-      continuity_log.judge.present(value, frame, continuity_log.where, continuity_log.generated);
+      continuity_log.judge.present(value, frame, continuity_log.where, continuity_log.generated, continuity_log.between);
       const bool ordered = value.depth_read_order == sunshine_game3d::read_order::ordered;
       script_order.present(script_presenting, value.present, ordered, value.depth_read_queue, value.depth_read_ticket);
     } else continuity_log.judge.unrecorded();

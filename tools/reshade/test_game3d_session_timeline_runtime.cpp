@@ -31,9 +31,15 @@
 // - the frame's slow intervals, modelled rather than left to the machine's
 //   load (10-27): DLSS-G's compute work held on the GPU until the frame's
 //   Present returned (a GPU-bound game, its copy in flight at its own
-//   Present), and a hitch of the frame's recording before its calls (brief,
-//   or the source age and more) or after them, before its Present. No seed
-//   draws them; event lists (regressions, --events) name them.
+//   Present), and a hitch of the source age and more between frames, of the
+//   frame's recording before its calls (brief, or the source age and more)
+//   or after them, before its Present, or after its Present, before its
+//   generated Presents. Seeds draw them at a low weight from a stream of
+//   their own, as the fence events (so every seed keeps its other frames;
+//   until the 10-27 review no seed drew them).
+// With FG on, the game's FG options declare each frame's generated count as
+// numFramesToGenerate (and DLSS-G's MultiFrameCount), as the add-on reads it
+// (until the 10-27 review always 1).
 // Each dimension keeps the previous frame's value with a chance or is drawn
 // anew (test_contract_matrix_generator.h, sample), so a timeline has the
 // stretches a game has and any frame may change anything.
@@ -94,14 +100,15 @@ namespace {
 
   // The fixed set the registered test runs, and each timeline's length.
   constexpr unsigned fixed_timelines = 24, min_frames = 60, max_frames = 200;
-  // The fixed set's time bound, its watchdog 10 s later, below ctest's 420 s,
+  // The fixed set's time bound, its watchdog 10 s later, below ctest's 480 s,
   // about twice a full run (184 to 187 s on 10-27, when the bound was 225 s
-  // and ctest's 240 s, so a loaded machine's run could reach either), and
+  // and ctest's 240 s, so a loaded machine's run could reach either; 235 s
+  // since the 10-27 review's timelines and the seeds' hitches), and
   // how long its first failure is shrunk once every timeline ran: a failing
   // run holds the GPU about a minute longer than a passing one and prints
   // its reproducer in time. --shrink-runs outside the fixed set shrinks for
   // longer.
-  constexpr std::uint64_t fixed_budget_ms = 400000, shrink_ms = 60000;
+  constexpr std::uint64_t fixed_budget_ms = 460000, shrink_ms = 60000;
 
   // The frame language: one row of this family per real frame.
   namespace frame_events {
@@ -226,12 +233,17 @@ namespace {
     // A hitch of the frame's recording (hitch_ms): brief, before its calls
     // (half the source age, which every hold outlasts); before_sources, the
     // source age and more right after the frame's stamp, before its calls;
-    // after_sources, the same after its calls, before its Present.
+    // after_sources, the same after its calls, before its Present; between,
+    // the same before the frame's first call and its stamp (after the
+    // previous frame's Presents); after_present, the same after its real
+    // Present, before its generated Presents after it.
     enum class hitch_form {
       none,
       brief,
       before_sources,
-      after_sources
+      after_sources,
+      between,
+      after_present
     };
 
     constexpr DWORD hitch_ms(hitch_form value) {
@@ -295,7 +307,7 @@ namespace {
           {"at", {"between", "inside", "evaluate"}},
           {"ui", {"none", "bare", "listed", "untagged"}},
           {"order", {"wait", "wait_first", "cpu_wait", "cpu", "second", "late"}},
-          {"hitch", {"none", "brief", "before_sources", "after_sources"}},
+          {"hitch", {"none", "brief", "before_sources", "after_sources", "between", "after_present"}},
           {"dlssg_gpu", {"prompt", "after_present"}},
         },
         legal,
@@ -320,6 +332,13 @@ namespace {
     // so until FG toggles, so those are rarer.
     constexpr unsigned order_weights[] {12, 4, 2, 1, 1, 1};
     constexpr unsigned order_keep_per_mille = 850;
+
+    // The slow intervals' weights, drawn anew for each frame: about one frame
+    // in 80 hitches (a long hitch costs the source age and more), and
+    // DLSS-G's compute work is held past its frame's Present in about one
+    // compute frame in eight.
+    constexpr unsigned hitch_weights[] {470, 2, 1, 1, 1, 1};
+    constexpr unsigned dlssg_gpu_weights[] {7, 1};
 
     // Whether the frame records work on another queue that the fence events
     // order: its SR on the game's queue or DLSS-G's compute copy.
@@ -564,6 +583,51 @@ namespace {
     // source age: mono is the contract there, and DLSS-G's copy shows from
     // the next Present.
     {"fg-on-only-dlssg-in-flight-mono", "20*sr=local; sr=local,hitch=after_sources; fg=on,sr=local,state=unprovable,dlssg=compute,dlssg_gpu=after_present; 10*sr=local,dlssg=compute,dlssg_gpu=after_present"},
+    // The same frame 22 after a hitch before frame 21's calls: its SR copy,
+    // made after the hitch, is about 20 ms old at P22 and held there (the
+    // judge aged a copy by its frame's first call until the 10-27 review, J4,
+    // so a dropped hold there passed).
+    {"fg-on-only-dlssg-in-flight-held-after-hitch-before-sources", "20*sr=local; sr=local,hitch=before_sources; fg=on,sr=local,state=unprovable,dlssg=compute,dlssg_gpu=after_present; 10*sr=local,dlssg=compute,dlssg_gpu=after_present"},
+    // FG On and a hitch of the source age and more between a frame's
+    // evaluation and one of its Presents (the 10-27 review's F1 and F2,
+    // open items 1 and 2): every Present of that frame, its generated ones
+    // (the declared count) and its real one in either order, shows that
+    // frame's own depth, held where it already showed it (frame_presenting;
+    // until then the Presents after its first were mono, inactive_views or
+    // retained_depth_expired, and the first Present after the pause without
+    // depth restarted the stereo fade). The hitch after the evaluation with
+    // the generated Present inside the next evaluation (DLSS-G's order: the
+    // generated Present before the real one), after the real Present's
+    // calls with the generated Presents after it (2x and 4x), after the real
+    // Present before its generated one, DLSS-G's compute copy in flight at
+    // FG On (the frame's SR copy stands in), and a live compute scope. And
+    // the steady FG-On frame after an FG-supplying frame without an FG call
+    // of its own: the live scope refuses its SR copy (owned), so after the
+    // hitch nothing is readable or holdable and mono is the contract there
+    // (judged so since the 10-27 review's J2 and J3, with the scope's hold
+    // read at the Present's time).
+    {"fg-on-hitch-generated-before-real", "20*sr=local; fg=on,tag=now_list,sr=local,generated=1,at=evaluate; 10*tag=now_list,sr=local,generated=1,at=evaluate; tag=now_list,sr=local,generated=1,at=evaluate,hitch=after_sources; 10*tag=now_list,sr=local,generated=1,at=evaluate"},
+    {"fg-on-hitch-real-before-generated", "20*sr=local; fg=on,tag=now_list,sr=local,generated=1; 10*tag=now_list,sr=local,generated=1; tag=now_list,sr=local,generated=1,hitch=after_sources; 10*tag=now_list,sr=local,generated=1"},
+    {"fg-on-hitch-real-before-generated-4x", "20*sr=local; fg=on,tag=now_list,sr=local,generated=3; 10*tag=now_list,sr=local,generated=3; tag=now_list,sr=local,generated=3,hitch=after_sources; 10*tag=now_list,sr=local,generated=3"},
+    {"fg-on-hitch-after-present", "20*sr=local; fg=on,tag=now_list,sr=local,generated=1; 10*tag=now_list,sr=local,generated=1; tag=now_list,sr=local,generated=1,hitch=after_present; 10*tag=now_list,sr=local,generated=1"},
+    {"fg-on-dlssg-in-flight-hitch-after-sources", "20*sr=local; fg=on,sr=local,dlssg=compute,dlssg_gpu=after_present,hitch=after_sources; 10*sr=local,dlssg=compute,dlssg_gpu=after_present"},
+    {"fg-on-live-compute-hitch-after-sources", "20*sr=local; fg=on,sr=local,dlssg=compute,generated=1; 10*sr=local,dlssg=compute,dlssg_gpu=after_present,generated=1; sr=local,dlssg=compute,dlssg_gpu=after_present,generated=1,hitch=after_sources; 10*sr=local,dlssg=compute,dlssg_gpu=after_present,generated=1"},
+    {"fg-on-owned-sr-hitch-after-sources", "20*sr=local; fg=on,tag=now_list,sr=local,generated=1,at=evaluate; sr=local,generated=1,at=evaluate,hitch=after_sources; 10*sr=local"},
+    // A hitch between frames, after a frame's Presents and before the next
+    // frame's first call, whose own Present reads its own copy: SR, an FG
+    // tag at FG On, an OnlyValidNow tag outside FG that its SR evaluation
+    // uses, and DLSS-G's input on the game's list. Until the 10-27 review the
+    // judge took such a pause as a warm-up (J1).
+    {"hitch-between-sr", "20*sr=local; sr=local,hitch=between; 10*sr=local"},
+    {"hitch-between-fg-tag", "20*sr=local; fg=on,tag=now_list,sr=local; 5*tag=now_list,sr=local; tag=now_list,sr=local,hitch=between; 10*tag=now_list,sr=local"},
+    {"hitch-between-sr-tag", "20*sr=local; 10*tag=now_list,sr=tag; tag=now_list,sr=tag,hitch=between; 10*tag=now_list,sr=tag"},
+    {"hitch-between-dlssg-direct", "20*sr=local; fg=on,sr=local,dlssg=direct; 5*sr=local,dlssg=direct; sr=local,dlssg=direct,hitch=between; 10*sr=local,dlssg=direct"},
+    // After a hitch between a frame's evaluation and its Present, frames
+    // whose tag copy is deferred to the Present after them (R2): the first
+    // can only hold the copy before the hitch, past the source age, so mono
+    // is the contract there (the judge called it a gap until the 10-27
+    // review, J3, and passed an over-age hold).
+    {"hitch-after-sources-then-deferred-tag", "20*sr=local; sr=local,hitch=after_sources; 5*tag=present_list"},
   };
 
   // Each known gap the timelines found has a witness: an event list whose
@@ -597,19 +661,30 @@ namespace {
     }
     // The fence events, from a stream of their own.
     generator::seeded fences {seed ^ 0x0f3e5ce0f3e5ce01ull};
+    const auto weighted = [](generator::seeded &rng, const unsigned *weights, std::size_t count) {
+      auto pick = rng.below(std::accumulate(weights, weights + count, 0u));
+      int value = 0;
+      while (pick >= weights[value]) {
+        pick -= weights[value++];
+      }
+      return value;
+    };
     for (std::size_t i = 0; i != out.frames.size(); ++i) {
       int value = 0;
       if (i && fences.below(1000) < events::order_keep_per_mille) {
         value = out.frames[i - 1][events::order];
       } else {
-        auto pick = fences.below(std::accumulate(std::begin(events::order_weights), std::end(events::order_weights), 0u));
-        while (pick >= events::order_weights[value]) {
-          pick -= events::order_weights[value++];
-        }
+        value = weighted(fences, events::order_weights, std::size(events::order_weights));
       }
       out.frames[i].push_back(value);
-      // No slow interval: event lists name them.
-      out.frames[i].resize(events::family().dimensions.size());
+    }
+    // The slow intervals, from a stream of their own (until the 10-27 review
+    // no seed drew them).
+    generator::seeded slow {seed ^ 0x5106e7a1c0ffee05ull};
+    for (auto &frame : out.frames) {
+      frame.push_back(weighted(slow, events::hitch_weights, std::size(events::hitch_weights)));
+      frame.push_back(weighted(slow, events::dlssg_gpu_weights, std::size(events::dlssg_gpu_weights)));
+      frame.resize(events::family().dimensions.size());
     }
     events::normalize(out.frames);
     return out;
@@ -834,10 +909,16 @@ namespace {
       // immediate: continuity::supply::immediate.
       std::uint8_t legal {}, limited {}, permitted {}, elsewhere {}, immediate {};
       continuity::limitation limit {continuity::limitation::none};
+      // made: continuity::supply::made, each source's copy at its deciding
+      // call (after any hitch before it).
       std::uint64_t tick {};
+      std::array<std::uint64_t, 4> made {};
       // continuity::supply::completion: each copy's own relied fence.
       std::vector<continuity::supply::completion> completions;
     } supply;
+
+    // The supply of the frame the last real Present presented.
+    frame_supply presented_supply;
 
     // The order fence (its script token, new at each FG toggle) that
     // execute_elsewhere's copy was readable through at its frame's Present
@@ -863,6 +944,11 @@ namespace {
         return;
       }
       supply.elsewhere |= source;
+      for (unsigned i = 0; i != supply.made.size(); ++i) {
+        if ((source & (1u << i)) && !supply.made[i]) {
+          supply.made[i] = GetTickCount64();
+        }
+      }
       readable_here = readable_here || readable;
       if (readable) {
         supply.immediate |= source;
@@ -1256,7 +1342,13 @@ namespace {
       } else {
         return;
       }
-      supply.tick = supply.tick ? supply.tick : GetTickCount64();
+      const auto now = GetTickCount64();
+      supply.tick = supply.tick ? supply.tick : now;
+      for (unsigned i = 0; i != supply.made.size(); ++i) {
+        if ((source & (1u << i)) && !supply.made[i]) {
+          supply.made[i] = now;
+        }
+      }
     }
 
     // -- Refusals ------------------------------------------------------------
@@ -1388,10 +1480,15 @@ namespace {
     // depth only as the capture the last real Present showed.
     void generated_present(bool inside) {
       continuity_log.generated = true;
+      // It presents the last real Present's frame as that Present did after
+      // that Present (between), or inside this frame's recording before its
+      // first depth call (no decision yet: the add-on's next evaluation has
+      // not begun, so it still presents that frame, frame_presenting).
+      continuity_log.between = !inside || decisions.empty();
 
       struct end_generated {
         ~end_generated() {
-          continuity_log.generated = false;
+          continuity_log.generated = continuity_log.between = false;
         }
       } scope;
 
@@ -1419,7 +1516,12 @@ namespace {
     // Present's own. A fresh copy of an FG scope's own input needs an FG
     // source in that window (an FG tag or DLSS-G's input the oracle allows):
     // the SR inputs of the frames an FG tag's held or refused decision left
-    // (S9 and R7, an untag that cancels the deferred copy) supply none.
+    // (S9 and R7, an untag that cancels the deferred copy) supply none. The
+    // frame whose supply the fixture holds (the one being recorded, or the
+    // one whose real and generated Presents these are) supplies its Presents
+    // whatever a hitch since its calls (until the 10-27 review only the
+    // source age of the clock counted, so a frame's own FG copy shown at its
+    // own Present after a hitch failed as unsupplied: the review's F5).
     void judge_shown(const char *which) {
       const auto s = inspect().source;
       if (trace) {
@@ -1433,10 +1535,16 @@ namespace {
       const auto within = [now](std::uint64_t tick, std::uint64_t slack) {
         return tick && now - tick < sunshine_freshness::source_age_ms + slack;
       };
+      // A generated Present that presents the last real Present's frame
+      // (continuity_log.between) is supplied by that frame.
+      const auto &frame_supply = continuity_log.between ? presented_supply : supply;
+      const auto own = std::uint8_t(frame_supply.legal | frame_supply.limited | frame_supply.permitted);
+      const bool own_api = own & continuity::api_sources;
+      const bool own_fg = fg_on && frame_generation_scope() && (own & (continuity::tag_copy | continuity::dlssg_input));
       if (fresh && !other_queue_pending()) {
-        if (!within(api_supplied, continuity::tick_slack_ms)) {
+        if (!own_api && !within(api_supplied, continuity::tick_slack_ms)) {
           fail("oracle:unsupplied_fresh", frame_text(frame) + ": " + which + " showed a fresh copy (capture " + std::to_string(s.current.capture) + ") with no API source supplied within the source age", frame, s.frame_generation_input ? "fg_input" : "scene");
-        } else if (s.frame_generation_input && !within(fg_copy, continuity::tag_slack_ms)) {
+        } else if (s.frame_generation_input && !own_fg && !within(fg_copy, continuity::tag_slack_ms)) {
           fail("oracle:unsupplied_fresh", frame_text(frame) + ": " + which + " showed a fresh copy of an FG scope's input (capture " + std::to_string(s.current.capture) + ") with no FG source supplied within the source age", frame, "fg_source");
         }
       }
@@ -1472,11 +1580,17 @@ namespace {
       };
       evidence_seen = false;
       deferred_tag = awaits_dlssg = readable_here = false;
+      // A hitch between frames: after the previous frame's Presents, before
+      // this frame's first call and its stamp.
+      const auto hitch = of<hitch_form>(value, events::hitch);
+      if (hitch == hitch_form::between) {
+        Sleep(hitch_ms(hitch));
+      }
       draw(*decoy);
       supply.permitted |= continuity::generic_boundary;
       supply.tick = GetTickCount64();
+      supply.made[3] = supply.tick;
       // A hitch before the frame's calls, after its stamp.
-      const auto hitch = of<hitch_form>(value, events::hitch);
       if (hitch == hitch_form::brief || hitch == hitch_form::before_sources) {
         Sleep(hitch_ms(hitch));
       }
@@ -1629,6 +1743,14 @@ namespace {
       }
       dlssg_evaluation(of<dlssg_form>(value, events::dlssg));
       move(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+      // A hitch after the frame's calls, before its Present. What follows is
+      // the fixture's bookkeeping, read at the time the Present decides:
+      // the FG scope's hold of its copy and its compute scope (until the
+      // 10-27 review read before the hitch, so SR stayed kept out at a
+      // Present where the held FG copy had expired, the review's J2).
+      if (hitch == hitch_form::after_sources) {
+        Sleep(hitch_ms(hitch));
+      }
       // A frame whose deferred FG tag copy waits for DLSS-G to evaluate its
       // frame, which DLSS-G does not do, supplies that copy as permitted
       // only: DLSS-G evaluated the previous deferred frame, so the add-on
@@ -1717,6 +1839,12 @@ namespace {
       });
       continuity_log.pending.unordered = unordered;
       continuity_log.pending.immediate = supply.immediate;
+      continuity_log.pending.made = supply.made;
+      // DLSS-G adds this frame's generated Presents (judge::present, between).
+      continuity_log.pending.fg_frame = fg_supplied;
+      // An untag after the tag (R7) may end the source's hold: the judge
+      // does not require this frame's Present to hold depth (strict_holds).
+      continuity_log.pending.drop_permitted = of<untag_form>(value, events::untag) != untag_form::none;
       // The freshness rule: the frame's copies recorded on another queue,
       // readable once complete, except SR copies a live FG scope keeps out as
       // it keeps the presenting queue's own (owned), and copies of a source
@@ -1730,10 +1858,6 @@ namespace {
           continue;
         }
         continuity_log.pending.completes(value.sources, value.probe, value.relied);
-      }
-      // A hitch after the frame's calls, before its Present.
-      if (hitch == hitch_form::after_sources) {
-        Sleep(hitch_ms(hitch));
       }
     }
 
@@ -1814,24 +1938,39 @@ namespace {
       }
     }
 
-    void set_frame_generation(bool on) {
-      const fg_options value {{nullptr, fg_options_type, 3}, on ? 1u : 0u, on ? 1u : 0u};
+    // The FG options with the generated count the game declares
+    // (numFramesToGenerate, and DLSS-G's MultiFrameCount), as the add-on
+    // reads it (frame_generation_policy::generated_frames). A game repeats
+    // its options; a repeat keeps FG's enable time.
+    void set_frame_generation(bool on, std::uint32_t generated = 0) {
+      if (generated) {
+        declared_generated = generated;
+      }
+      const fg_options value {{nullptr, fg_options_type, 3}, on ? 1u : 0u, on ? declared_generated : 0u};
       returned(sl.set_options(view, value), "slDLSSGSetOptions");
+      dlssg_inputs.set_ui("DLSSG.MultiFrameCount", declared_generated);
       if (on && !fg_on) {
         fg_enabled_at = GetTickCount64();
       }
       fg_on = on;
     }
 
+    // The generated count the FG options declared last.
+    std::uint32_t declared_generated {1};
+
     void run_frame() {
       using namespace frame_events;
       const auto &value = (*frames)[frame];
       const auto event = of<fg_event>(value, events::fg);
+      const auto generated = std::uint32_t(value[events::generated]);
       if (event != fg_event::keep) {
-        set_frame_generation(event == fg_event::on);
+        set_frame_generation(event == fg_event::on, generated);
         // The game creates its frame-generation objects anew, these fences
         // among them.
         renew_order();
+      } else if (fg_on && generated && generated != declared_generated) {
+        // The frame's generated count, declared before its calls.
+        set_frame_generation(true, generated);
       }
       if (value[events::drs]) {
         area = (area + 1) % 4;
@@ -1871,6 +2010,12 @@ namespace {
         }
       }
       judge_shown("its Present");
+      presented_supply = supply;
+      // A hitch after the frame's real Present, before its generated
+      // Presents after it.
+      if (of<hitch_form>(value, events::hitch) == hitch_form::after_present) {
+        Sleep(hitch_ms(hitch_form::after_present));
+      }
       for (unsigned i = 0, n = unsigned(value[events::generated]); i != n && of<generated_at>(value, events::at) == generated_at::between; ++i) {
         generated_present(false);
       }
@@ -1881,6 +2026,8 @@ namespace {
     // or draw, then retires the rings' recordings and resets calibration.
     void isolate() {
       using namespace sunshine_streamline;
+      // Isolation retires the run's viewport: its Presents may drop the hold.
+      continuity_log.drops_permitted = true;
       render_tracked_depth = {};
       if (fg_on) {
         set_frame_generation(false);
@@ -1926,8 +2073,14 @@ namespace {
       present_frames.clear();
       where = label;
       continuity_log.judge = {};
+      // The timelines mark each frame whose events may end its source's
+      // hold, so a frame with no legal source must hold within the source age.
+      continuity_log.judge.strict_holds = true;
       continuity_log.pending = {};
+      continuity_log.drops_permitted = false;
       continuity_log.where = where.c_str();
+      declared_generated = 1;
+      presented_supply = {};
       // A new viewport: no read of this run names an earlier run's copy, and
       // its order fences are new, so a run's fence events are its own.
       script_order.clear();

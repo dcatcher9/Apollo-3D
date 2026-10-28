@@ -1818,15 +1818,21 @@ hold, as at 1a7efdc1, frame 32 lost depth, 10-27, temporary build) pin both; a r
 `lossless` check counts losses only, not late reads.
 
 The session timelines' slow intervals (10-27), modelled rather than left to the machine's load,
-which made the full check's two failures of that day depend on timing: `hitch=` sleeps inside the
-frame, `brief` (half the source age, which every hold outlasts) or `before_sources` (the source age
-and 150 ms) right after the frame's stamp, before its calls, or `after_sources` (as long) after
-them, before its Present; `dlssg_gpu=after_present` holds DLSS-G's compute work on the GPU until
+which made the full check's two failures of that day depend on timing: `hitch=` sleeps `brief`
+(half the source age, which every hold outlasts) or `before_sources` (the source age and 150 ms)
+right after the frame's stamp, before its calls, `after_sources` (as long) after them, before its
+Present (the fixture's bookkeeping after it, such as whether a live FG scope still holds its copy,
+reads the clock after the hitch, as the add-on decides then), `between` (as long) before the
+frame's first call and its stamp, or `after_present` (as long) after its real Present, before its
+generated Presents; `dlssg_gpu=after_present` holds DLSS-G's compute work on the GPU until
 the frame's Present returned (its queue waits on a gate fence the CPU signals then, a GPU-bound
 game's copy in flight at its own Present; the gate is no order fence, so no read relies on it, and
-a GPU signal after the Present would deadlock against the presenting queue's wait before it). No
-seed draws them (they come after the fence events in the family, and
-`generate` leaves them at their defaults, so every seed keeps its frames); event lists name them.
+a GPU signal after the Present would deadlock against the presenting queue's wait before it). Seeds
+draw them at a low weight (about one frame in 80 hitches; DLSS-G's compute work is held in about
+one compute frame in eight) from a stream of their own, after the fence events, so every seed keeps
+its other frames (until the 10-27 review no seed drew them). With FG on the game's FG options declare
+each frame's generated count as `numFramesToGenerate` (and DLSS-G's `MultiFrameCount`), repeated
+when it changes, as the add-on reads it (always 1 until the 10-27 review).
 
 The judge reads each Present's [frame record](../../docs/reshade-sbs.md#frame-record)
 (`SunshineGame3DTestFrameRecord`, copied in ReShade's `reshade_present` event) and the fixture's
@@ -1839,28 +1845,49 @@ show but need not is permitted, not legal: the oracle's EITHER outcome, and the 
 view each provider frame draws, which API ownership leaves aside (H). A frame whose later call
 withdraws its source supplies nothing (the untag script's malformed tag, and a command-less tag's
 frame presented before DLSS-G evaluated it, whose copy belongs to the next Present), nor does a
-generated Present, which the game makes while it records a later frame.
+generated Present, which the game makes while it records a later frame. Each source's copy is
+stamped when it was made (`supply::made`, its deciding call after any hitch before it, or its
+recording's submission for a copy from another queue), and holds and the freshness rule age copies
+by it, not by the frame's first call (until the 10-27 review a copy made after a hitch inside its
+frame looked as old as the hitch, and a dropped hold of it passed).
 
 A Present shows depth when the rung that decided it has pixels: D1 or D2 ready or held, or
 Generic's binding ready; H in mono shows none. The judge is armed by a Present that shows depth. A
-Present that shows none disarms it when its frame had no legal source (the mono the invariant
-permits) or when it is a violation; a generated Present neither arms nor disarms it. While
+Present that shows none disarms it when its frame's own Present reads none of its legal sources and
+nothing it could hold is younger than the source age (an unordered frame, a copy deferred to the
+next Present, a pipelined source; frames whose sources meet a known limitation keep their loss for
+its row), when its frame's events may end its source (an untag, a run's isolation:
+`supply::drop_permitted`), when its frame had no legal source and nothing is holdable, or when it is
+a violation; a generated Present neither arms nor disarms it. In the session timelines
+(`judge::strict_holds`) a frame with no legal source must hold the last depth while it is younger
+than the source age (a mono Present there is a `dropped_hold`); the native provider fixture's frame
+scripts end sources without marking them and keep the older rule. Until the 10-27 review any frame
+without a legal source could go mono, and its disarm gave the next legal frames a new source's
+warm-up. While
 disarmed, a frame's legal sources have one source age to show depth, counted from the first such
 Present without depth, and a loss that lasts longer is reported once per source age. Only a warm-up
 gives them `establish_ms`, `fg_silent_ms` plus `association_ms` (2 s): the session's start, a stall
 (a Present at least the source age after the previous one, which expires every hold, while a
-pipelined source such as DLSS-G's ring has nothing readable until it refills; for a frame whose
-own Present reads one of its legal sources, `supply::immediate`, its stamp at least the source age
-after the previous Present, since a hitch inside it, after its first call, leaves that source
-readable: until 10-27 such a hitch disarmed the judge, which excused a mono Present after a hitch
-between a frame's SR evaluation and its Present, `hitch-after-sources`) or a new source (a
+pipelined source such as DLSS-G's ring has nothing readable until it refills; never for a frame whose
+own Present reads one of its legal sources, `supply::immediate`, that a live FG scope does not keep
+out, wherever the pause came, since that source stays readable: until 10-27 a hitch inside such a
+frame disarmed the judge, which excused a mono Present after a hitch between a frame's SR evaluation
+and its Present, `hitch-after-sources`, and until the 10-27 review one before its first call still
+did, `hitch-between-*`; nor for a generated Present after its frame's real Present; a silence of
+`association_ms` is one for every frame, as the API association ends there) or a new source (a
 source-age gap in legal sources). Frames whose legal sources all meet a known limitation and frames
 with a source that meets none are timed apart, so a loss a known gap excuses never extends the time
 the others have. A generated Present after a real one that showed a fresh copy of a frame whose
 legal sources the presenting queue reads must hold it while that copy is certainly younger than the
-source age (it is that frame's or the frame before's, a copy deferred to the next Present, so made
-after the real Present two before; less 40 ms), unless a copy recorded on another queue may have
-become readable meanwhile. A violation is a gap (armed, a legal source, no depth), an unestablished
+source age (from its made time when it is that frame's own, else from the real Present two before:
+a copy deferred to the next Present was made after it; less 40 ms), unless a copy recorded on
+another queue may have become readable meanwhile. A generated Present that presents its frame as
+the real Present did (after it, or inside the next frame's recording before that frame's first
+depth call: `between`) shows that frame's own copy, or the one its real Present showed, at age 0, and
+when that frame supplied an FG copy its live scope accepts (`supply::fg_frame`, so the add-on counts
+its generated Presents, `frame_presenting`), dropping the frame's own fresh copy there is a dropped
+hold whatever the clock (until the 10-27 review only within the source age of the clock, so the
+add-on's mono generated and real Presents after a hitch with FG on, open item 1, passed). A violation is a gap (armed, a legal source, no depth), an unestablished
 source (no depth within its window), a dropped hold (that generated Present without depth), a
 stale one (a rung's pixels at least the source age, plus 40 ms for two steps of `GetTickCount64`,
 after the newest legal or permitted source of its kind: API for D1 and D2, Generic for D3; a real
@@ -1868,7 +1895,11 @@ Present's API copy captured inside the frame it presents, its capture tick no ea
 frame's stamp, is that frame's own depth and age 0 however long the frame took: until 10-27 its age
 ran from the frame's first call, so the 10-27 full check's `C8-fg-off-color-only` failed at frame 39
 with age 672 ms after a 683 ms hitch inside that frame, before its SR evaluation, and
-`hitch-before-sources` pins it) or `stale_shown` (the freshness rule above).
+`hitch-before-sources` pins it; a real Present that holds an older frame's copy is also stale once
+that copy itself is the source age old, whatever newer supply its frame made: until the 10-27 review
+the frame after a hitch could hold the copy before it, 418 ms old, while its own copy was deferred
+to the next Present, `hitch-after-sources-then-deferred-tag`) or `stale_shown` (the freshness rule
+above).
 
 The native provider fixture judges every Present of its run in segments, each frame script and
 the session's frames between scripts, with a fresh judge each, so that no segment's state or loss
@@ -2215,7 +2246,10 @@ judged on four counts:
   later, aside), and a fresh copy of an FG scope's own input only while one supplied an FG source (an
   FG tag or DLSS-G's input): a refused or held decision never shows new depth. A deferred copy (R2)
   is read at the Present after the one it precedes, and a copy its FG scope kept out shows once the
-  scope falls silent, so a fresh copy may be an earlier frame's;
+  scope falls silent, so a fresh copy may be an earlier frame's. The frame a Present presents supplies
+  it whatever a hitch since its calls: its real Present, its generated Presents after it, and those
+  inside the next frame's recording before that frame's first depth call (until the 10-27 review only
+  the clock counted, so a frame's own FG copy at its own Present after a hitch failed as unsupplied);
 - every provider status line names a Present's frame record (`require_records_match_log`).
 
 A violation of a tagged frame is that row's (as above); any other failure prints the timeline's
@@ -2227,7 +2261,7 @@ failure, each event kind back to its default in every frame, chunks of frames, t
 of each frame of a short list, every kept candidate cut after the frame where it failed, then the
 minimal list once more (`reproduced=`). Shrinking re-runs each candidate in the same process, after
 the timelines before it, so `--shrink-runs` (default 40) and, in the fixed set, one minute
-(`shrink_ms`, within its 400 s bound) limit it; a failure that depends on timing may shrink less, and
+(`shrink_ms`, within its 460 s bound) limit it; a failure that depends on timing may shrink less, and
 a fresh process's `--events` replay may still differ. The fixed set also runs one regression timeline per
 Assassin's Creed Shadows fix (and one for the generated Presents' hold, `repeated-frame-hold`,
 two for C4's fix, `C4-no-fg-call` and `C4-cancelled-fg-tags` (and `C4-compute-copy-stops`, which pins
@@ -2244,7 +2278,17 @@ for FG On with DLSS-G's first compute copy in flight, `fg-on-dlssg-in-flight-sr-
 SR copy stands in: with `lineage_snapshot` removed the first two lose depth at FG On's first
 Present and the third holds SR depth 188 ms old beside the frame's own, 10-27, temporary build) and
 `fg-on-only-dlssg-in-flight-mono` (seed c28965dca8d7c76c's frame 38 made deterministic: its SR input
-unprovable, mono is the contract there)), an event
+unprovable, mono is the contract there) and its form after a hitch before frame 21's calls
+(`fg-on-only-dlssg-in-flight-held-after-hitch-before-sources`: frame 21's SR copy, made after the
+hitch, is held), and seven for FG On with a hitch between a frame's evaluation and one of its
+Presents (open items 1 and 2 of the 10-27 review): `fg-on-hitch-generated-before-real` (DLSS-G's
+order), `fg-on-hitch-real-before-generated` and its 4x form, `fg-on-hitch-after-present`,
+`fg-on-dlssg-in-flight-hitch-after-sources`, `fg-on-live-compute-hitch-after-sources` (each fails
+with the add-on's `frame_presenting` reverted, 10-27, temporary build: a gap or a dropped hold at
+the hitch frame) and `fg-on-owned-sr-hitch-after-sources` (a live scope refuses the frame's SR copy,
+so mono is the contract there after the hitch), four with a hitch between frames
+(`hitch-between-sr`, `hitch-between-fg-tag`, `hitch-between-sr-tag`, `hitch-between-dlssg-direct`)
+and `hitch-after-sources-then-deferred-tag` (the judge's hold-age rule)), an event
 list shaped like the
 session it fixed and judged as any
 timeline (random seeds meet these shapes only by chance, and a change of the event language changes
@@ -2254,10 +2298,10 @@ run; a witness that loses none fails the set, as the matrix's gap seeds keep a r
 failing cell. `--trace` prints every Present's
 frame record, the supply it was judged with and each recorded refusal.
 
-`reshade_session_timelines` runs the fixed set (24 seeds and 29 regression timelines, about
-4690 frames and 11600 Presents) in about 185 s, registered like
-`reshade_native_provider_continuity` but with a 420 s timeout, about twice a full run (its own
-watchdog, 10 s after its 400 s bound `fixed_budget_ms`, ends a hung run first). Locally:
+`reshade_session_timelines` runs the fixed set (24 seeds and 42 regression timelines, about
+5170 frames and 13300 Presents, with the seeds' hitches) in about 235 s, registered like
+`reshade_native_provider_continuity` but with a 480 s timeout, about twice a full run (its own
+watchdog, 10 s after its 460 s bound `fixed_budget_ms`, ends a hung run first). Locally:
 
     reshade_game3d_session_timeline_runtime_test [--list] [--timeline <seed> | --events "<list>" |
       --seeds N [--from M]] [--shard i/N] [--shrink-runs N] [--trace]
