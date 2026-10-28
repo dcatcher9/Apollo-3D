@@ -11,6 +11,7 @@
 #include "test_game3d_renderer_build.h"
 #include "game3d_ui_layer.h"
 #include "game3d_diagnostics.h"
+#include "test_fixture_files.h"
 #include <d3d12sdklayers.h>
 #include <atomic>
 
@@ -1739,7 +1740,7 @@ namespace {
     observed.ready_uniforms.clear();
     observed.runtime->update_texture_bindings("DEPTH", {}, {});
     observed.bound_depth_view = {};
-    fs::rename(directory / "effects" / effect_file, directory / "effects" / "SunshineGame3D.fx.disabled");
+    sunshine_test_files::rename_when_free(directory / "effects" / effect_file, directory / "effects" / "SunshineGame3D.fx.disabled");
     const unsigned previous_reloads = observed.reloads;
     observed.runtime->reload_effect_next_frame(nullptr);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);

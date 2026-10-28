@@ -10,6 +10,7 @@
 #include "test_game3d_ui_pin_band.h"
 #include "test_game3d_startup_measure.h"
 #include "test_game3d_renderer_build.h"
+#include "test_fixture_files.h"
 
 namespace {
   struct native11_case {
@@ -91,7 +92,7 @@ namespace {
     observed.inject_depth = observed.capture = false;
     observed.depth_ready_uniforms.clear();
     observed.runtime->update_texture_bindings("DEPTH", {}, {});
-    fs::rename(directory / "effects" / effect_file, directory / "effects" / "SunshineGame3D.fx.disabled");
+    sunshine_test_files::rename_when_free(directory / "effects" / effect_file, directory / "effects" / "SunshineGame3D.fx.disabled");
     const auto before_reload = observed.reloads;
     observed.runtime->reload_effect_next_frame(nullptr);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);

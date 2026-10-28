@@ -4,6 +4,7 @@
 #define SUNSHINE_RAW_SCENE_RUNTIME
 #include "test_depth_selection_runtime.cpp"
 #include "game3d_controls.h"
+#include "test_fixture_files.h"
 
 namespace {
   struct native_depth_fixture : selection_fixture_t {
@@ -120,7 +121,7 @@ namespace {
 
       // The shared setup copies the frozen effect. Remove it before creating any
       // game depth target: neither calibration nor capture can depend on FX state.
-      fs::rename(directory / "effects" / effect_file, directory / "effects" / "SunshineGame3D.fx.disabled");
+      sunshine_test_files::rename_when_free(directory / "effects" / effect_file, directory / "effects" / "SunshineGame3D.fx.disabled");
       const auto reloads = observed.reloads;
       observed.runtime->reload_effect_next_frame(nullptr);
       const auto empty_until = GetTickCount64() + 30000;

@@ -12,6 +12,7 @@
 #include "test_game3d_continuity.h"
 #include "test_queue_order_script.h"
 #include "test_sl_fixture_sdk.h"
+#include "test_fixture_files.h"
 #include "../../src/game3d_debug_protocol.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
@@ -698,7 +699,7 @@ namespace {
       const auto set_diagnostics = reinterpret_cast<BOOL (*)(BOOL)>(GetProcAddress(module, "SunshineGame3DTestSetDiagnostics"));
       require(set_diagnostics && set_diagnostics(diagnostics_off() ? FALSE : TRUE),
         "Test add-on cannot set the Diagnostics switch");
-      fs::rename(directory / "effects" / effect_file, directory / "effects" / "SunshineGame3D.fx.disabled");
+      sunshine_test_files::rename_when_free(directory / "effects" / effect_file, directory / "effects" / "SunshineGame3D.fx.disabled");
       const auto reloads = observed.reloads;
       observed.runtime->reload_effect_next_frame(nullptr);
       const auto empty_until = GetTickCount64() + 30000;
