@@ -819,6 +819,22 @@ namespace sunshine_streamline::depth_capture {
           deliver(owner, value);
           ++index;
         }
+        // A handover to a copy recorded before the previous owner's last
+        // selected one (a required FG scope's pick, which select_provider's
+        // older_than_shown does not judge): that previous copy is historical
+        // too, so it never returns as its provider's stand-in (10-28).
+        reset();
+        queue_state handed;
+        auto &earlier = make(0, provider_kind::streamline, epoch, 1, 0);
+        auto &shown = make(1, provider_kind::ngx, epoch, 1, ngx_source);
+        establish_provider(handed, shown, 20);
+        deliver(handed, shown);
+        establish_provider(handed, earlier, 21);
+        if (handed.provider != provider_kind::streamline || handed.admission_after != shown.id) {
+          char text[256];
+          std::snprintf(text, sizeof(text), "P6 establish_provider, handover to an earlier copy: admission %llu, the previous owner's copy %llu", static_cast<unsigned long long>(handed.admission_after), static_cast<unsigned long long>(shown.id));
+          fail(text);
+        }
       }
       {
         // Repeated effects in one presentation keep the provider it chose,

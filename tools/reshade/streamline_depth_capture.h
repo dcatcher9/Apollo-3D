@@ -112,7 +112,11 @@ namespace sunshine_streamline::depth_capture {
     // refused), with no completed snapshot, and the newest readable
     // unconsumed snapshot of the viewport's ordinary source (its display
     // lineage) stands in (select_capture).
-    lineage_snapshot
+    lineage_snapshot,
+    // The other provider's readable copy was recorded before the owner's
+    // last selected copy (capture ids follow publication order): ownership
+    // does not move to older depth (select_provider).
+    completed_older_than_shown
   };
   // Acquisition authority, frozen under the capture lock. Diagnostics may be
   // omitted or reformatted without changing these source/continuity decisions.

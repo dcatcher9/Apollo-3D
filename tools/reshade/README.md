@@ -2468,7 +2468,7 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   (`provider::select_frame_generation_scope`), NGX's copy rule under FG
   (`sunshine_ngx::frame_generation_owns_depth`), `select_provider` with a protected owner,
   readable and pending sources and required or excluded FG, per-queue ownership and
-  `establish_provider`'s watermark, a single FG copy's handover to SR snapshots that are readable
+  `establish_provider`'s watermark (also a handover to a copy recorded before the previous owner's), a single FG copy's handover to SR snapshots that are readable
   only frames later (the held FG copy, `frame_generation_holds`, and the shared watermark), which
   Presents present a stamped frame (`frame_presenting`: its first, and with FG the declared count
   after it for a frame that made a frame-generation call, until the next evaluation; a copy's

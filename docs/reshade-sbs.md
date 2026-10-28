@@ -4587,9 +4587,17 @@ viewports evaluating) or inactive, one past the source age that the Present does
 also a head refused before its capture existed whose source is the FG input, and
 `fg_scope_mismatch`), a released source (`retire_source`, FG Off) and an expired association
 (`expire_association`). So does ownership moving to the other provider: every copy recorded before
-the new owner's chosen copy is historical (`establish_provider`), because the consumed watermark
-restarts there and cannot compare the two providers' sequences, so the previous provider's copy
-already shown, or one older than the new owner's, could otherwise return and flip ownership back.
+the new owner's chosen copy, and the previous owner's last selected copy, is historical
+(`establish_provider`), because the consumed watermark restarts there and cannot compare the two
+providers' sequences, so the previous provider's copy already shown, or one older than the new
+owner's, could otherwise return and flip ownership back. Ownership never moves to a copy recorded
+before the owner's last selected one either (`completed_older_than_shown`): capture ids follow
+publication order across both providers while GPU readability need not, so the other provider's
+copy of an earlier frame can turn readable after the owner's newer copy was shown. That pick is no
+readable source, only a live one: the owner keeps selection and the display holds its copy until the
+other provider's next copy is readable, one frame at most (until 10-28 a failing owner handed over
+to it, older depth after newer, and its own shown copy then stood in again as its missing frame's,
+flipping ownership back).
 A failed, invalid or nomination-invalid newest nomination, one refused before its capture existed
 (a tag whose state cannot be proven, an unsupported lifetime, a hook that returned without
 nominating) and one without pixels the presenting queue can read (a metadata-only nomination's

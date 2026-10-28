@@ -1255,6 +1255,26 @@ namespace sunshine_streamline::depth_capture {
         return owner.provider == provider_kind::streamline ? select_sl() : select_capture(owner, native, present, owner.provider, now);
       auto sl = select_sl();
       auto ngx = select_capture(owner, native, present, provider_kind::ngx, now);
+      // Ownership never moves to depth older than the owner's last selected
+      // copy (present_capture). Capture ids follow publication order across
+      // both providers, while GPU readability need not: the other provider's
+      // copy of an earlier frame can turn readable after the owner's newer
+      // one was shown. Such a pick is no readable source, only a live one,
+      // so the owner keeps selection and the display holds its copy until
+      // the other provider's next copy is readable (one frame at most). Until
+      // 10-28 a failing owner handed over to it, older depth after newer, and
+      // the owner's shown copy then stood in again as a missing frame's,
+      // flipping ownership back (the consumed watermark restarts at a
+      // handover and cannot compare the two namespaces).
+      const auto older_than_shown = [&](capture_pick &value, provider_kind provider) {
+        if (!owner.provider_established || owner.provider == provider || !owner.present_capture || !value.value ||
+            value.value->id > owner.present_capture) return;
+        value.value = nullptr;
+        value.result = status::recorded;
+        value.selection = selection_reason::completed_older_than_shown;
+      };
+      older_than_shown(sl, provider_kind::streamline);
+      older_than_shown(ngx, provider_kind::ngx);
       const auto readable = [](const capture_pick &value) { return value.value && value.result == status::ready; };
       // Expired: no active view, or a newest nomination older than the source
       // age. A pick without any slot (an attempt rejected before its capture
@@ -1340,9 +1360,12 @@ namespace sunshine_streamline::depth_capture {
       // previous provider's copy already shown, or one older than the new
       // owner's, could be selected again and flip ownership back (a missing
       // frame no longer revokes them, select_capture). Copies recorded after
-      // it, of either provider, stay admissible.
+      // it, of either provider, stay admissible. The previous owner's last
+      // selected copy is historical however the new one was chosen (also a
+      // required FG scope's pick, which select_provider's older_than_shown
+      // does not judge).
       if (owner.provider_established && owner.provider != value.metadata.provider && value.id)
-        owner.admission_after = std::max(owner.admission_after, value.id - 1);
+        owner.admission_after = std::max({owner.admission_after, value.id - 1, owner.present_capture});
       if (!owner.provider_established || owner.provider != value.metadata.provider ||
           owner.source_id != value.metadata.source_id || owner.nominated_epoch != value.metadata.epoch)
         owner.last_epoch = owner.last_sequence = owner.last_source_tick = 0;
@@ -4726,7 +4749,7 @@ namespace sunshine_streamline::depth_capture {
     CASE(no_completed_snapshot); CASE(completed_before_gap); CASE(completed_not_older);
     CASE(completed_already_consumed); CASE(presentation_already_selected); CASE(format_changed);
     CASE(completed_not_readable); CASE(completed_snapshot); CASE(fg_scope_missing); CASE(fg_scope_mismatch);
-    CASE(lineage_snapshot);
+    CASE(lineage_snapshot); CASE(completed_older_than_shown);
 #undef CASE
     }
     return "unknown";

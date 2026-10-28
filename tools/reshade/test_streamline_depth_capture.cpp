@@ -1640,6 +1640,70 @@ namespace sunshine_streamline::depth_capture {
               owner.provider == owner_kind || owner.admission_after != taken) return false;
         }
       }
+      // A failing owner and the other provider's readable copy X recorded
+      // before the owner's last shown copy S (X's id below S's: capture ids
+      // follow publication order across both providers): X is no readable
+      // source (completed_older_than_shown), so the owner keeps selection and
+      // the display holds S, and the other provider's next readable copy
+      // takes over, after which S is historical and never stands in again.
+      // Until 10-28 the second failure handed over to X, older depth after
+      // newer, and S then stood in again as the owner's missing frame's copy
+      // (above the handover watermark, and the consumed watermark restarts),
+      // flipping ownership back.
+      for (const auto owner_kind : {provider_kind::streamline, provider_kind::ngx}) {
+        restart();
+        auto &owner = fresh_owner();
+        auto own = owner_kind == provider_kind::ngx ? ngx() : streamline();
+        auto other = owner_kind == provider_kind::ngx ? streamline() : ngx();
+        const auto fails = [&](const char *step) {
+          std::fprintf(stderr, "FAIL older-than-shown handover, %s owner: %s\n",
+            owner_kind == provider_kind::ngx ? "NGX" : "Streamline", step);
+          return false;
+        };
+        if (!deliver(owner, own, present)) return false;
+        // X, completed unread; then the owner records S, and its frame before
+        // S is shown.
+        auto &older = advance(other);
+        finish_gpu(other);
+        auto &before = *own.pending;
+        auto &shown = advance(own);
+        if (!completed_pick(present_frame(owner, ++present), &before) || owner.provider != owner_kind ||
+            older.id >= shown.id) return fails("setup");
+        // The owner's next attempt is refused: S stands in and is shown.
+        reject_without_slot(own);
+        const auto stood_in = present_frame(owner, ++present);
+        if (!completed_pick(stood_in, &shown) || !stood_in.missing_frame || owner.present_capture != shown.id)
+          return fails("S did not stand in for the refused attempt");
+        // Refused again: S was shown, X is older than S. The owner keeps
+        // selection (its missing frame, nothing to stand in) and the display
+        // holds S.
+        reject_without_slot(own);
+        const auto held = present_frame(owner, ++present);
+        if (held.value || !held.missing_frame || held.result != status::unsupported_state ||
+            held.selection != selection_reason::no_current_nomination || owner.provider != owner_kind ||
+            display(held).action != display_action::hold || retained.capture_id != shown.id)
+          return fails("the second refusal handed over to X, recorded before S");
+        // The other provider's next copy, recorded after S, still in flight:
+        // X stays older than S, and the owner still holds.
+        auto &newer = advance(other);
+        reject_without_slot(own);
+        const auto pending_other = present_frame(owner, ++present);
+        if (pending_other.value || owner.provider != owner_kind || display(pending_other).action != display_action::hold ||
+            retained.capture_id != shown.id) return fails("X took over while the next copy was in flight");
+        // Once readable it takes over, and everything recorded before it,
+        // S included, is historical.
+        advance(other);
+        reject_without_slot(own);
+        const auto taken = present_frame(owner, ++present);
+        if (!completed_pick(taken, &newer) || owner.provider == owner_kind || owner.admission_after != newer.id - 1 ||
+            owner.admission_after < shown.id) return fails("the other provider's next copy did not take over, making S historical");
+        // The owner's head refused once more: S never stands in again.
+        reject_without_slot(own);
+        auto &next = *other.pending;
+        advance(other);
+        const auto after = present_frame(owner, ++present);
+        if (!completed_pick(after, &next) || owner.provider == owner_kind) return fails("S stood in again after the handover");
+      }
       // A pipelined source on another queue, each copy readable only at the
       // Present after its own, whose newest nomination fails on every other
       // frame for over 400 ms, each failure kind in turn: a nomination-only
