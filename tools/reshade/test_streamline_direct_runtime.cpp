@@ -1216,6 +1216,41 @@ RWTexture2D<float> depth : register(u0);
       settle("manual-release-to-native");check_projection();
       std::puts("PASS explicit generic-depth pin takes priority; Auto resumes the direct tagged source and its projection scale");
       {
+        // A game hitch longer than the source age before a frame's SR
+        // evaluation, then one between the evaluation and its Present: the
+        // first Present after each shows that frame's own fresh copy, and a
+        // pause in Presents between two Presents with ready depth keeps the
+        // stereo strength (docs/reshade-sbs.md, raw-depth automation; until
+        // the 10-27 ruling any gap over 250 ms restarted the fade from flat).
+        const DWORD stall_ms=DWORD(sunshine_freshness::source_age_ms+150);
+        bool stall_at_present=false;
+        before_present=[&]{if(stall_at_present){stall_at_present=false;Sleep(stall_ms);}};
+        struct stall_case{const char *phase;bool after_evaluation;std::uint64_t gap;bool own_fresh;float before,after;};
+        stall_case stalls[]{{"stall-before-evaluation",false,0,false,0.f,0.f},{"stall-after-evaluation",true,0,false,0.f,0.f}};
+        for(auto &stall:stalls) {
+          settle(stall.phase);
+          stall.before=blend();
+          const auto previous_present=GetTickCount64();
+          if(stall.after_evaluation) stall_at_present=true;
+          else Sleep(stall_ms);
+          tick(stall.phase);
+          stall.gap=GetTickCount64()-previous_present;
+          stall.own_fresh=current() && ready() && !captured.reused_depth && ticket &&
+            (!query_provider_status || (provider.ready && provider.current.sequence==sequence));
+          stall.after=blend();
+          std::printf("MEASURE %s present_gap_ms=%llu own_fresh_copy=%d sequence=%llu shown=%llu blend_before=%g blend_after=%g\n",
+            stall.phase,static_cast<unsigned long long>(stall.gap),int(stall.own_fresh),static_cast<unsigned long long>(sequence),
+            static_cast<unsigned long long>(query_provider_status ? provider.current.sequence : 0),stall.before,stall.after);
+        }
+        before_present={};
+        for(const auto &stall:stalls) {
+          require(stall.gap>stall_ms && stall.own_fresh,"The first Present after a hitch did not show its own frame's fresh SR copy");
+          require(stall.before==1.f && stall.after==stall.before,
+            "A pause in Presents between two Presents with ready depth restarted the stereo strength");
+        }
+        std::puts("PASS a hitch before or after a frame's SR evaluation: its Present shows that frame's own copy at full stereo strength");
+      }
+      {
         // D11c: the add-on keeps a D3D12 DSV's read-only flags from its
         // creation (ReShade's init_resource_view) and reads them where a list
         // binds it; a view created again at a handle replaces them.

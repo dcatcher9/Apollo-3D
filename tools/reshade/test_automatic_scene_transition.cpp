@@ -21,12 +21,28 @@ int main() {
   check(state.update(false, 1750), 0); // Actual current frame must be mono.
   check(state.update(true, 1760), 1);
   check(state.update(true, 1860), 1);
-  check(state.update(true, 2111), 0); // Rendering interruption is not elapsed recovery.
-  check(state.update(true, 2211), .2f);
-  check(state.update(true, 2200), 0); // Clock rollback does not underflow.
-  check(state.update(true, 2200), 0); // Same timestamp earns no credit.
-  check(state.update(true, 2450), .5f);
-  check(state.update(true, 2700), 1);
+  // A pause in Presents between two Presents with ready depth loses no depth:
+  // strength continues, however long the pause (owner ruling 10-27).
+  check(state.update(true, 2111), 1);
+  check(state.update(true, 2900), 1);
+  // Presents shown without ready depth for more than 250 ms restart the ramp.
+  check(state.update(false, 2910), 0);
+  check(state.update(false, 3100), 0);
+  check(state.update(true, 3151), 0); // 251 ms since the last ready Present.
+  check(state.update(true, 3251), .2f);
+  check(state.update(true, 3501), .7f);
+  check(state.update(true, 3751), 1);
+  // So does a pause whose first Present after it has no ready depth.
+  check(state.update(false, 4200), 0);
+  check(state.update(true, 4210), 0);
+  check(state.update(true, 4310), .2f);
+  // A pause inside the ramp keeps its progress and counts as at most 250 ms.
+  check(state.update(true, 4710), .7f);
+  check(state.update(true, 4810), .9f);
+  check(state.update(true, 4800), 0); // Clock rollback restarts and does not underflow.
+  check(state.update(true, 4800), 0); // Same timestamp earns no credit.
+  check(state.update(true, 5050), .5f);
+  check(state.update(true, 5300), 1);
   sunshine_raw_scene::reentry_transition alternating;
   check(alternating.update(true, 0), 0);
   for (std::uint64_t time = 10; time <= 1000; time += 10) {
@@ -54,5 +70,9 @@ int main() {
   check(route.update(true, 1270, basis::projection), .5f);
   check(route.update(true, 1520, basis::projection), 1);
   check(route.update(true, 1530, basis::projection), 1); // Resource rotation leaves the basis unchanged.
+  // A basis change restarts the ramp across a pause between ready Presents too.
+  check(route.update(true, 2000, basis::raw), 0);
+  check(route.update(true, 2250, basis::raw), .5f);
+  check(route.update(true, 2650, basis::raw), 1);
   std::cout << "Automatic stereo recovery timing passed\n";
 }

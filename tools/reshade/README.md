@@ -1002,8 +1002,11 @@ depth-stencil inventory, preserves them through native command submission, and c
 spatial depth pattern against the consumed depth. It also checks rotating resources, manual
 pin/release, a changed center that moves only the zero, explicit recentering, proportional strength,
 failed, missing and refused evaluations (the newest completed copy held within its age bound, then
-current-color mono; one second of silence or of rejected evaluations releases the association), and
-zero-strength HDR color.
+current-color mono; one second of silence or of rejected evaluations releases the association),
+a hitch longer than the source age before a frame's evaluation and one between the evaluation and
+its Present (the first Present after each shows that frame's own copy at the full stereo strength
+it had; until the 10-27 ruling such a pause restarted the fade from flat), and zero-strength HDR
+color.
 It uses the same arguments as the NGX fixture below, with
 `reshade_streamline_direct_runtime_test.exe` and a fresh output directory. Its test-only
 seam supplies middleware metadata, never shader readiness, copied pixels or GPU completion.
@@ -1286,8 +1289,11 @@ depth pixels and constants and the mono/stereo SBS. Its oracle is the owning con
 applied to the independently known draw: gain `L/Q` from the full-image maximum and the zero at the
 contrast midpoint ([raw-depth automation](../../docs/reshade-sbs.md#experimental-raw-depth-automation)).
 Its scenarios check fresh single-window initialization, same-source pin/unpin continuity, a changed
-center patch that keeps the gain and moves only the zero, held gain and zero through depth and
-presentation gaps with current-color mono, a retained exact source resuming its own history, a
+center patch that keeps the gain and moves only the zero, held gain and zero through depth gaps
+with current-color mono and through pauses in Presents before and after a frame's depth draws
+(that frame's own depth at the full strength it had, no catch-up credit; a pause during the zero's
+adaptation is judged the same way and left out of its deadline, and only one followed by a Present
+without ready depth is inconclusive), a retained exact source resuming its own history, a
 destroyed source and an explicit recalibration starting fresh, zero-strength mono and finite HDR
 stereo, in both depth conventions. No camera/gain values or synthetic readback results are injected.
 Like the bind-switch fixture it needs no environment settings:

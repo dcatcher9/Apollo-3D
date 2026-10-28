@@ -5,6 +5,7 @@
 // formula applied to the independently known draw.
 #include "test_raw_runtime_fixture.h"
 #include "test_game3d_native_observation.h"
+#include "freshness.h"
 #include <deque>
 
 namespace {
@@ -13,6 +14,9 @@ namespace {
     std::ofstream trajectory;
     std::uint64_t last_frame_completed_ms = 0;
     bool require_continuous_frames = false;
+    // Completed-frame intervals over 250 ms (pauses in Presents) between two
+    // Presents with ready depth, which earn adaptation no time.
+    std::uint64_t paused_ms = 0;
     using select_t = BOOL (*)(api::effect_runtime *, std::uint64_t);
     select_t select_manual = nullptr;
     native_game3d_observer game3d{*this};
@@ -63,6 +67,7 @@ namespace {
       require(trajectory.good(), "Cannot record actual adaptive trajectory");
     }
     void frame(const char *phase) {
+      const bool previous_ready = latest.sequence && ready() && selected_scene();
       step(); game3d.no_effects();
       latest = game3d.last_render();
       require(latest.sequence > rendered_sequence, "A Present had no native Game 3D render to observe");
@@ -73,6 +78,13 @@ namespace {
       const auto now = GetTickCount64(), previous = last_frame_completed_ms;
       last_frame_completed_ms = now;
       if (require_continuous_frames && previous && now - previous > 250) {
+        // A pause in Presents between two Presents with ready depth keeps the
+        // stereo strength (docs/reshade-sbs.md, raw-depth automation), so the
+        // caller's checks judge this Present; the pause earns adaptation no
+        // time, so callers leave paused_ms out of their adaptation deadlines.
+        // Only a pause after which this Present had no ready depth stays
+        // inconclusive.
+        if (previous_ready && ready() && selected_scene()) { paused_ms += now - previous; return; }
         trajectory.flush();
         throw scheduling_stall(std::string(phase) + ": completed-frame interval " + std::to_string(now - previous) +
           " ms exceeds the 250 ms presentation contract; continuous-adaptation result is inconclusive");
@@ -193,17 +205,23 @@ namespace {
       scene->pattern = pattern(true);
       const auto started = GetTickCount64();
       require_continuous_frames = true;
+      paused_ms = 0;
       double distance = std::abs(double(zero()) - changed_scene[1]);
-      pump(7000, "zero-plane-changed-scene", [&] {
+      // Adaptation time: wall time less the pauses in Presents, which earn none.
+      const auto adapted = [&] { return GetTickCount64() - started - paused_ms; };
+      do {
+        frame("zero-plane-changed-scene");
         require(ready() && blend() == 1.f && selected_scene() && gain() == constant_gain,
           "Changed center patch moved the gain or lost readiness/source");
         const double now_distance = std::abs(double(zero()) - changed_scene[1]);
         require(now_distance <= distance + 1e-7, "Screen plane moved away from the changed scene's contrast midpoint");
         distance = now_distance;
-        if (GetTickCount64() - started >= 5000)
+        if (adapted() >= 5000)
           require(close(zero(), changed_scene[1]), "Independent screen plane did not settle at the changed scene's contrast midpoint");
-      });
+      } while (adapted() < 7000);
       require_continuous_frames = false;
+      if (paused_ms) std::printf("MEASURE zero-plane-changed-scene paused_ms=%llu between Presents with ready depth\n",
+        static_cast<unsigned long long>(paused_ms));
       std::printf("PASS screen plane %.9g -> %.9g with gain held at %.9g; full blend retained\n", constant_zero, zero(), gain());
       verify_depth("changed-consumed", true);
       settle_ready("after-adaptive-readback");
@@ -245,12 +263,45 @@ namespace {
       std::printf("PASS gap hold: elapsed=%llu ms gain=%.9g -> %.9g; zero held\n",
         static_cast<unsigned long long>(GetTickCount64() - gap_started), before_gap, gain());
       settle_ready("depth-return");
-      const float before_pause = gain();
-      Sleep(650);
-      frame("presentation-gap-first");
-      require(gain() == before_pause && blend() == 0.f, "Presentation gap accumulated gain/reentry credit");
+      // A pause in Presents (a game hitch) before a frame's depth draws, then
+      // one between its draws and its Present: the first Present after each
+      // shows that frame's own depth at the strength it had (until the 10-27
+      // ruling any gap over 250 ms restarted the fade from flat), and the
+      // pause earns the gain and zero no catch-up time.
+      const DWORD stall_ms = DWORD(sunshine_freshness::source_age_ms + 150);
+      bool stall_at_present = false;
+      before_present = [&] { if (stall_at_present) { stall_at_present = false; Sleep(stall_ms); } };
+      struct pause_case { const char *phase; bool after_draws; std::uint64_t gap; bool own_depth; float before, after; bool held; };
+      pause_case pauses[] {{"presentation-gap-before-draws", false, 0, false, 0.f, 0.f, false},
+        {"presentation-gap-after-draws", true, 0, false, 0.f, 0.f, false}};
+      for (auto &pause : pauses) {
+        settle_ready(pause.phase);
+        pause.before = blend();
+        const float gain_before = gain(), zero_before = zero();
+        const auto frame_before = latest.depth.frame_index;
+        const auto previous_present = GetTickCount64();
+        if (pause.after_draws) stall_at_present = true;
+        else Sleep(stall_ms);
+        frame(pause.phase);
+        pause.gap = GetTickCount64() - previous_present;
+        pause.own_depth = ready() && selected_scene() && !latest.depth.reused_depth && latest.depth.frame_index > frame_before;
+        pause.after = blend();
+        pause.held = gain() == gain_before && zero() == zero_before;
+        std::printf("MEASURE %s present_gap_ms=%llu own_depth=%d frame=%llu->%llu blend_before=%g blend_after=%g held=%d\n",
+          pause.phase, static_cast<unsigned long long>(pause.gap), int(pause.own_depth),
+          static_cast<unsigned long long>(frame_before), static_cast<unsigned long long>(latest.depth.frame_index),
+          pause.before, pause.after, int(pause.held));
+      }
+      before_present = {};
+      for (const auto &pause : pauses) {
+        require(pause.gap > stall_ms && pause.own_depth, "The first Present after a pause did not show its own frame's depth");
+        require(pause.before == 1.f && pause.after == pause.before,
+          "A pause in Presents between two Presents with ready depth restarted the stereo strength");
+        require(pause.held, "Presentation gap accumulated gain/zero catch-up credit");
+      }
       settle_ready("presentation-return");
-      std::puts("PASS current-color mono while unavailable, held gain, and no missing/presentation-time zero catch-up credit");
+      std::puts("PASS current-color mono while unavailable, held gain, full strength across pauses in Presents with ready depth, "
+        "and no missing/presentation-time zero catch-up credit");
 
       // Save the last actual A render immediately before leaving it. The
       // still-live exact source keeps its own numerical history off-turn.

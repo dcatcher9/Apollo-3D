@@ -3676,7 +3676,7 @@ and current at that Present past the source age, so a hitch between a frame's SR
 Present no longer makes that Present mono (`selection=inactive_views`, until 10-27; the session
 timelines' `hitch-after-sources`). Any Present in between, a generated one too, ends it: the source
 age bounds every hold over later Presents. Whether such a Present then renders with full stereo
-strength is the scene transition's (a Present gap past the source age restarts its fade).
+strength is the scene transition's ([stereo reentry](#experimental-raw-depth-automation)).
 Ownership arbitrates only between live sources, and only a
 delivering owner, one whose last copied frame is younger than 250 ms, keeps its own live source:
 while that source is readable, or while a valid successor of its last copied frame is pending. A
@@ -5853,8 +5853,13 @@ unavailable current depth or a suspended
 reference returns the current source image to both eyes, bypassing final sharpening/AA as well
 as stereo geometry. Recovery ramps stereo gain over 500 ms of valid-frame exposure. A missing
 frame itself has zero stereo gain but retains ramp progress through gaps no longer than 250 ms.
-Time spent displaying missing-depth frames adds no progress; clock rollback or a longer gap
-restarts the ramp. Ordinary generic capture does not reuse old color/depth; the explicit bounded
+Time spent displaying missing-depth frames adds no progress; clock rollback, a basis change, or
+Presents shown without ready depth for more than 250 ms since the last ready one restart the
+ramp. A pause in Presents alone loses no depth: when the last Present before it and the first
+after it both have ready depth on the same basis, strength continues, and the pause counts as at
+most 250 ms of exposure (owner ruling 10-27; until then any gap over 250 ms restarted the ramp,
+so the first Present after a game hitch was flat although its own depth was ready).
+Ordinary generic capture does not reuse old color/depth; the explicit bounded
 API FG depth-retention path described above is separate.
 The zero-strength endpoint also returns current mono; an explicitly selected Normal Depth View
 still shows valid prepared depth. Gain attenuation and restoration require no user intervention.
