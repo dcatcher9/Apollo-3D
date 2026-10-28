@@ -853,10 +853,12 @@ was refused before its copy existed (a missing frame: shown once, then consumed)
 across epoch and storage format changes (`format_changed`).
 `--foreign-reclaim` retires producer and consumer recordings and
 releases private snapshot leases before allocating an unrelated NGX capture or a Generic
-preservation copy from a separate resource. Its ten cases check that SL FG nomination authority,
+preservation copy from a separate resource. Its fourteen cases check that SL FG nomination authority,
 current depth and completed depth beneath a pending, failed or missing successor survive
 reclamation, and that the completed depth that stood in for a failed or missing one is never shown
-again. Pixel cases use actual GPU readback.
+again; and that the viewport's completed SR depth beneath an FG input pending or refused before its
+copy existed survives reclamation and the Present's idle sweep and stands in for it
+(`lineage_snapshot`). Pixel cases use actual GPU readback.
 `--content [width height]` nominates a full patterned packed D32S8 scene through NGX, which
 copies it at the API call, then clears that same source after the API capture. It checks the
 snapshot's scene depth byte-for-byte and verifies that depth-plane

@@ -4734,10 +4734,14 @@ The shared capture pool also retains the current valid nominated record after it
 retired. Pixel-backed and metadata-only records carry the same source authority: an unrelated
 NGX/Streamline capture or Generic preservation must not recycle the current record and fabricate
 a missing nomination. The same pool retains the existing eligible completed snapshot beneath the
-provider's newest nomination while that successor is pending or a missing frame (failed or refused,
-also before its capture existed), including against allocations by another provider (until 10-28
-only beneath a valid one, so another allocation could recycle the copy that stands in for a missing
-frame). Supersession, failure or invalidation releases the current record's authority hold;
+provider's newest nomination while that successor is pending, in progress or a missing frame (failed
+or refused, also before its capture existed), including against allocations by another provider
+(until 10-28 only beneath a valid one, so another allocation could recycle the copy that stands in
+for a missing frame), and beneath a Streamline FG input the newest completed SR/RR snapshot of its
+display lineage that any queue can read (`lineage_fallback`, the copy `lineage_snapshot` stands in
+with; until 10-28 no rule kept it: an SR copy on another queue becomes readable and reclaimable at
+once, so the Present's idle sweep or another record could recycle it before the next Present, which
+then held an older copy or went mono). Supersession, failure or invalidation releases the current record's authority hold;
 completed-fallback eligibility and all GPU retirement requirements still apply before storage can
 be reused. This uses the existing bounded pool and does not extend capture freshness or authorize
 reading expired depth. Once per Present, every other reusable record drops its game resource,

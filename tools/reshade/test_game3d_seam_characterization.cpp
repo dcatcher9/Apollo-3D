@@ -1524,9 +1524,11 @@ namespace sunshine_streamline::depth_capture {
           policy = {};
           policy.exclude_unconfirmed_fg = true;
         }
-        // The pool keeps the head's own completed copy that stands in, as
-        // beneath a pending head, so no other allocation recycles it first.
-        const bool stands_in = std::string(r.outcome) == "C ready completed_snapshot";
+        // The pool keeps the copy that stands in, the head's own completed
+        // copy as beneath a pending head, and an FG head's SR copy (until
+        // 10-28 kept by no rule: readable and reclaimable at once, the
+        // Present's idle sweep or another record could recycle it first).
+        const bool stands_in = std::string(r.outcome) == "C ready completed_snapshot" || std::string(r.outcome) == "C ready lineage_snapshot";
         const bool kept = !reclaimable(copy);
         const auto pick = select_provider(owner, native, 2, now, policy);
         const auto got = pick_outcome(pick, &copy, 'C', own_slot, 'H');

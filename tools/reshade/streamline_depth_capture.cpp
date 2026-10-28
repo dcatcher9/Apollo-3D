@@ -1055,20 +1055,30 @@ namespace sunshine_streamline::depth_capture {
     // readable frame, as before; a silent scope's held FG copy is still held
     // over it (frame_generation_holds), and a repeated effect of one
     // presentation keeps its one tuple.
+    // A finished, valid SR/RR snapshot of the FG input fg's display lineage:
+    // the viewport's ordinary Streamline source of the same epoch, no newer
+    // than fg, within the source age or presented by this Present. Its
+    // admission and readability are the caller's (lineage_snapshot,
+    // lineage_fallback).
+    bool lineage_candidate(const slot &value, const input &fg, std::uint64_t now) {
+      const auto &metadata = value.metadata;
+      return value.id && value.texture && !value.nomination_only && !value.preservation_only &&
+        value.source_nominated && value.finished && value.success && !value.invalid && !value.nomination_invalid &&
+        value.producer_submitted && metadata.provider == provider_kind::streamline && !metadata.frame_generation_input &&
+        metadata.epoch == fg.epoch && metadata.viewport == fg.viewport && metadata.sequence <= fg.sequence &&
+        (within_source_age(metadata.tick, now) || frame_presenting(presented_by(value)));
+    }
+    bool lineage_head(const input &fg) {
+      return fg.provider == provider_kind::streamline && fg.frame_generation_input && fg.epoch;
+    }
     slot *lineage_snapshot(const queue_state &owner, std::uint64_t native, std::uint64_t present, const input &head,
         std::uint64_t now) {
       const auto &fg = head;
-      if (fg.provider != provider_kind::streamline || !fg.frame_generation_input || !fg.epoch ||
-          (owner.present == present && owner.present_capture)) return nullptr;
+      if (!lineage_head(fg) || (owner.present == present && owner.present_capture)) return nullptr;
       slot *best = nullptr;
       for (auto &value : slots) {
         const auto &metadata = value.metadata;
-        if (!value.id || !value.texture || value.nomination_only || value.preservation_only ||
-            !value.source_nominated || !value.finished || !value.success || value.invalid || value.nomination_invalid ||
-            !value.producer_submitted || metadata.provider != provider_kind::streamline || metadata.frame_generation_input ||
-            metadata.epoch != fg.epoch || metadata.viewport != fg.viewport || metadata.sequence > fg.sequence ||
-            value.id <= owner.admission_after ||
-            !(within_source_age(metadata.tick, now) || frame_presenting(presented_by(value)))) continue;
+        if (!lineage_candidate(value, fg, now) || value.id <= owner.admission_after) continue;
         if (owner.provider_established && owner.provider == provider_kind::streamline && owner.last_epoch == metadata.epoch &&
             metadata.sequence <= owner.last_sequence) continue;
         if (best && (metadata.sequence < best->metadata.sequence ||
@@ -1076,6 +1086,24 @@ namespace sunshine_streamline::depth_capture {
         const auto progress = value.queue == native ? queue_progress{} : producer_progress(value);
         if (submission_status(value, native, owner.device_identity, progress) != status::ready) continue;
         best = &value;
+      }
+      return best;
+    }
+    // The capture pool's view of lineage_snapshot, with no queue's state
+    // (completed_snapshot's consumer 0): the newest lineage candidate of the
+    // FG input fg that any queue can read once its work completed. Every
+    // stand-in lineage_snapshot can still pick is this one: a newer candidate
+    // is unfinished GPU work or an open recording, which is never
+    // reclaimable, and an older one is consumed, or below the gap, wherever
+    // this one is.
+    const slot *lineage_fallback(const input &fg, std::uint64_t now) {
+      if (!lineage_head(fg)) return nullptr;
+      const slot *best = nullptr;
+      for (const auto &value : slots) {
+        if (!lineage_candidate(value, fg, now) || !immutable_for_other_queues(value) ||
+            !readable_elsewhere(value, 0, producer_progress(value))) continue;
+        if (!best || value.metadata.sequence > best->metadata.sequence ||
+            (value.metadata.sequence == best->metadata.sequence && value.id > best->id)) best = &value;
       }
       return best;
     }
@@ -1864,10 +1892,18 @@ namespace sunshine_streamline::depth_capture {
             view = &candidate;
       if (!latest && !view) return source_retention::none;
       // Preserve exactly the existing eligible completed fallback too, beneath
-      // a pending successor or a missing frame alike. Its age, reset/revision,
-      // source and GPU-completion requirements remain in completed_snapshot;
-      // retaining storage grants no extra admission.
-      return completed_snapshot(latest ? latest->metadata : head_identity(*view, provider), GetTickCount64()) == &value ?
+      // a pending successor, a nomination in progress or a missing frame
+      // alike, and beneath an FG input the SR/RR snapshot of its lineage that
+      // stands in for it (lineage_snapshot). Their age, reset/revision,
+      // source and GPU-completion requirements remain in completed_snapshot
+      // and lineage_fallback; retaining storage grants no extra admission.
+      // Until 10-28 that SR snapshot was kept by neither rule: on another
+      // queue it becomes readable and reclaimable at once, so the Present's
+      // idle sweep (poll) or another record could recycle it before the next
+      // Present, which then held an older copy or went mono.
+      const auto identity = latest ? latest->metadata : head_identity(*view, provider);
+      const auto now = GetTickCount64();
+      return completed_snapshot(identity, now) == &value || lineage_fallback(identity, now) == &value ?
         source_retention::completed_fallback : source_retention::none;
     }
     bool snapshot_storage_retired(const slot &value) {

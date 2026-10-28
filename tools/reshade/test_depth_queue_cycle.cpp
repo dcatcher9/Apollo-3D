@@ -595,7 +595,9 @@ namespace {
   };
 
   enum class foreign_allocation { ngx, generic_preservation };
-  enum class reclamation_case { consumed, completed, pending, missing, failed };
+  // lineage_*: the viewport's SR snapshot beneath an FG input pending or
+  // refused before its copy existed, which stands in for it (lineage_snapshot).
+  enum class reclamation_case { consumed, completed, pending, missing, failed, lineage_pending, lineage_missing };
 
   const char *name(foreign_allocation value) {
     return value == foreign_allocation::ngx ? "NGX" : "Generic preservation";
@@ -607,6 +609,8 @@ namespace {
       case reclamation_case::pending: return "pending successor";
       case reclamation_case::missing: return "missing successor";
       case reclamation_case::failed: return "failed successor";
+      case reclamation_case::lineage_pending: return "SR snapshot beneath a pending FG input";
+      case reclamation_case::lineage_missing: return "SR snapshot beneath a refused FG input";
     }
     return "unknown";
   }
@@ -656,7 +660,8 @@ namespace {
     const capture::selection_policy fg{true, input.epoch, input.viewport};
     D3D12_RESOURCE_STATES source_state = D3D12_RESOURCE_STATE_DEPTH_WRITE;
     UINT64 producer_sequence{}, consumer_sequence{};
-    const auto record = [&](capture::input value, float depth, bool successful = true) {
+    const auto record = [&](capture::input value, float depth, bool successful = true,
+        std::uint64_t superseded = UINT64_MAX) {
       if (source_state != D3D12_RESOURCE_STATE_DEPTH_WRITE)
         transition(gpu.producer_commands.value, gpu.source.value, source_state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
       gpu.producer_commands->ClearDepthStencilView(source_dsv,
@@ -666,7 +671,7 @@ namespace {
       source_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
       value.tick = GetTickCount64();
       capture::record_diagnostic diagnostic;
-      const auto ticket = capture::nominate_evaluation(gpu.producer_commands.native(), value, UINT64_MAX, &diagnostic);
+      const auto ticket = capture::nominate_evaluation(gpu.producer_commands.native(), value, superseded, &diagnostic);
       require(ticket && diagnostic.result == capture::status::recorded, "Record reclamation snapshot");
       capture::finish(ticket, successful);
       return ticket;
@@ -707,6 +712,11 @@ namespace {
     };
     std::uint64_t foreign_sequence{};
     D3D12_RESOURCE_STATES generic_state = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+    // The lineage cases establish the viewport's SR source (0), whose view
+    // FG On's input then replaces: under the required FG scope the queue
+    // stays the API's (the provider checks no association there), so they
+    // do not ask for the SR association either.
+    const bool lineage = scenario == reclamation_case::lineage_pending || scenario == reclamation_case::lineage_missing;
     const auto allocate_foreign = [&] {
       if (allocation == foreign_allocation::ngx) {
         auto foreign = input;
@@ -736,10 +746,55 @@ namespace {
       }
       sunshine_scene_depth::provider_kind provider{};
       std::uint64_t source_id{};
-      require(capture::provider_identity(gpu.consumer.native(), provider, source_id) &&
-        provider == input.provider && source_id == input.source_id,
+      require(lineage || (capture::provider_identity(gpu.consumer.native(), provider, source_id) &&
+        provider == input.provider && source_id == input.source_id),
         "Foreign allocation changed the established SL provider identity");
     };
+
+    if (lineage) {
+      // SR frame 1 is shown; SR frame 2 completes and its recording retires
+      // unread; FG On: frame 3's FG input (DLSS-G's) is pending, or was
+      // refused before its copy existed. It replaces the SR view (one
+      // viewport), and the FG scope is required from here.
+      auto sr = input;
+      sr.frame_generation_input = false; sr.source_id = 0;
+      const capture::selection_policy plain{};
+      sr.sequence = 1;
+      const auto shown = record(sr, .125f);
+      submit();
+      capture::packet first;
+      require(capture::acquire(gpu.consumer.native(), 1, first, nullptr, plain) && first.pixel_ready &&
+        first.capture_id == shown, "Establish SL SR before foreign reclamation");
+      consume(first, 1, .125f);
+      sr.sequence = 2;
+      const auto standin = record(sr, .25f);
+      submit();
+      input.sequence = 3;
+      if (scenario == reclamation_case::lineage_missing)
+        capture::begin_evaluation(input.epoch, input.sequence, input.viewport, input.provider, input.source_id, 0);
+      else record(input, .5f, true, 0); // The FG input remains unsubmitted.
+      allocate_foreign();
+      // The Present's idle sweep (poll): until 10-28 it released the SR
+      // snapshot, readable and reclaimable at once, since no rule kept it.
+      capture::poll();
+      capture::packet selected;
+      capture::capture_diagnostic diagnostic;
+      const bool acquired = capture::acquire(gpu.consumer.native(), 2, selected, &diagnostic, fg);
+      std::printf("foreign reclamation %s / %s: available=%d ready=%d selection=%s capture=%llu expected=%llu\n",
+        name(allocation), name(scenario), int(acquired), int(selected.pixel_ready),
+        capture::name(diagnostic.selection), static_cast<unsigned long long>(diagnostic.capture_id),
+        static_cast<unsigned long long>(standin));
+      require(acquired && selected.pixel_ready && selected.capture_id == standin &&
+        diagnostic.selection == capture::selection_reason::lineage_snapshot && selected.metadata.sequence == 2 &&
+        selected.metadata.source_id == 0 && !selected.metadata.frame_generation_input,
+        "Foreign allocation or the idle sweep reclaimed the SR snapshot standing in for its FG input");
+      consume(selected, 2, .25f);
+      submit();
+      gpu.drain();
+      std::printf("PASS foreign reclamation: %s / %s keeps the SR snapshot that stands in for its FG input\n",
+        name(allocation), name(scenario));
+      return;
+    }
 
     const auto first_ticket = record(input, .125f);
     submit();
@@ -939,7 +994,8 @@ int main(int argc, char **argv) {
       unsigned failures = 0;
       for (const auto allocation : {foreign_allocation::ngx, foreign_allocation::generic_preservation}) {
         for (const auto scenario : {reclamation_case::consumed, reclamation_case::completed, reclamation_case::pending,
-          reclamation_case::missing, reclamation_case::failed}) {
+          reclamation_case::missing, reclamation_case::failed, reclamation_case::lineage_pending,
+          reclamation_case::lineage_missing}) {
           try { run_foreign_reclamation(allocation, scenario); }
           catch (const std::exception &error) {
             ++failures;
