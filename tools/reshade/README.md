@@ -850,7 +850,9 @@ of an unconsumed completed NGX snapshot while its successor is CPU-recorded or G
 carries new observation/feedback revisions, a reset flag, a new active crop or a new
 dynamic-resolution allocation (the completed snapshot keeps its own 64x64 allocation), or failed or
 was refused before its copy existed (a missing frame: shown once, then consumed), plus rejection
-across epoch and storage format changes (`format_changed`).
+across epoch and storage format changes (`no_completed_snapshot`, `format_changed`) and a second
+source evaluating on the viewport (`ambiguous_views`, an identity interruption: once the source
+supersedes it, its next pending frame finds the completed frame `completed_before_gap`).
 `--foreign-reclaim` retires producer and consumer recordings and
 releases private snapshot leases before allocating an unrelated NGX capture or a Generic
 preservation copy from a separate resource. Its fourteen cases check that SL FG nomination authority,
@@ -2475,7 +2477,8 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   submission on a presenting queue as its frame, `presented_by`), the frame's own SR stand-in for
   its DLSS-G copy in flight at those Presents after a hitch, never at a later one nor an earlier
   frame's, a missing frame's stand-in (each kind of failed or refused head, SR and FG, against
-  every per-copy check and every identity interruption, which still revoke) and a nomination in
+  every per-copy check and every identity interruption, which still revoke: after each one, and
+  after an expired association, the next pending head finds the copy `completed_before_gap`) and a nomination in
   progress's (the same copy, at once), the source a head refused before its capture existed names to
   the display (another viewport's or NGX feature's drops the retained copy), and every reason of
   `decide_display`. Its freshness table

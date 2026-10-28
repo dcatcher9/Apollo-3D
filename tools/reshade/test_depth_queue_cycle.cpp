@@ -334,7 +334,7 @@ namespace {
 
   enum class pipeline_case {
     recorded, submitted, failed, missing, observation_reset, feedback_reset,
-    reset_flag, epoch_change, layout_change, allocation_change, format_change
+    reset_flag, epoch_change, layout_change, allocation_change, format_change, ambiguous
   };
 
   const char *name(pipeline_case value) {
@@ -350,6 +350,7 @@ namespace {
       case pipeline_case::layout_change: return "active depth crop changed";
       case pipeline_case::allocation_change: return "dynamic-resolution allocation changed";
       case pipeline_case::format_change: return "depth storage format changed";
+      case pipeline_case::ambiguous: return "a second source evaluating on the viewport";
     }
     return "unknown";
   }
@@ -379,10 +380,10 @@ namespace {
     input.source_present_generation = capture::source_present_generation(input.source);
     require(bool(input.source), "Retain pipeline source");
 
-    const auto record = [&](bool successful = true) {
+    const auto record = [&](bool successful = true, std::uint64_t superseded = UINT64_MAX) {
       input.tick = GetTickCount64();
       capture::record_diagnostic diagnostic;
-      const auto ticket = capture::nominate_evaluation(gpu.producer_commands.native(), input, UINT64_MAX, &diagnostic);
+      const auto ticket = capture::nominate_evaluation(gpu.producer_commands.native(), input, superseded, &diagnostic);
       require(ticket && diagnostic.result == capture::status::recorded, "Record pipeline snapshot");
       capture::finish(ticket, successful);
       return ticket;
@@ -452,8 +453,13 @@ namespace {
       input.source_present_generation = capture::source_present_generation(input.source);
       require(bool(input.source), "Retain successor depth source");
     }
+    // A second NGX feature (another source) evaluates the same viewport,
+    // its depth refused before its copy existed: two active views.
+    constexpr std::uint64_t second_source = 52;
     if (scenario == pipeline_case::missing) {
       capture::begin_evaluation(input.epoch, input.sequence, input.viewport, input.provider, input.source_id);
+    } else if (scenario == pipeline_case::ambiguous) {
+      capture::begin_evaluation(input.epoch, input.sequence, input.viewport, input.provider, second_source);
     } else {
       record(scenario != pipeline_case::failed);
       if (scenario == pipeline_case::submitted) {
@@ -519,6 +525,28 @@ namespace {
       if (scenario == pipeline_case::format_change)
         require(diagnostic.selection == capture::selection_reason::format_changed,
           "A storage format change was not refused as format_changed");
+      // The new epoch's frame names no completed snapshot of its own.
+      if (scenario == pipeline_case::epoch_change)
+        require(diagnostic.selection == capture::selection_reason::no_completed_snapshot && diagnostic.epoch == input.epoch,
+          "An epoch change was not refused as the new epoch's no_completed_snapshot");
+      if (scenario == pipeline_case::ambiguous) {
+        // Two active views are an identity interruption: it revokes the
+        // completed frame (admission watermark). Once the source supersedes
+        // the second one, its next pending frame still finds the completed
+        // frame from before the gap, which never returns.
+        require(diagnostic.result == capture::status::ambiguous &&
+            diagnostic.selection == capture::selection_reason::ambiguous_views,
+          "A second source evaluating on the viewport was not ambiguous");
+        input.sequence = 4;
+        record(true, second_source);
+        capture::packet after;
+        capture::capture_diagnostic after_diagnostic;
+        capture::acquire(gpu.consumer.native(), 3, after, &after_diagnostic);
+        require(!after.pixel_ready && after.capture_id != completed_ticket &&
+            after_diagnostic.selection == capture::selection_reason::completed_before_gap &&
+            after_diagnostic.newest_sequence == 4,
+          "The frame completed before an ambiguous interruption returned after it");
+      }
     }
     gpu.drain();
     std::printf("PASS: pipeline %s\n", name(scenario));
@@ -1008,7 +1036,7 @@ int main(int argc, char **argv) {
       for (const auto scenario : {pipeline_case::recorded, pipeline_case::submitted, pipeline_case::failed,
         pipeline_case::missing, pipeline_case::observation_reset, pipeline_case::feedback_reset,
         pipeline_case::reset_flag, pipeline_case::epoch_change, pipeline_case::layout_change,
-        pipeline_case::allocation_change, pipeline_case::format_change})
+        pipeline_case::allocation_change, pipeline_case::format_change, pipeline_case::ambiguous})
         run_pipeline(scenario);
     } else run(expect_cycle);
     return 0;

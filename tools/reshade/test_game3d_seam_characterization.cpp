@@ -1343,7 +1343,10 @@ namespace sunshine_streamline::depth_capture {
         fg_excluded_unreadable,
         fg_mismatch,
         fg_mismatch_unreadable,
-        retired
+        retired,
+        // The owner's association expired (expire_association: every attempt
+        // of its views rejected for the association window).
+        association_expired
       };
       struct row {
         const char *pins;
@@ -1360,6 +1363,8 @@ namespace sunshine_streamline::depth_capture {
 
       constexpr const char *consumed_next = "- recorded completed_already_consumed";
       constexpr const char *fg_next = "- recorded no_completed_snapshot";
+      // After an interruption the next pending head finds the copy revoked.
+      constexpr const char *gap_next = "- recorded completed_before_gap";
       const row rows[] {
         {"SR, a failed head: the SR copy completed on another queue stands in", l::sr, h::failed, v::plain, "C ready completed_snapshot", false, consumed_next},
         {"SR, an invalid head: the SR copy stands in", l::sr, h::invalid, v::plain, "C ready completed_snapshot", false, consumed_next},
@@ -1396,18 +1401,23 @@ namespace sunshine_streamline::depth_capture {
         {"An SR copy of another viewport does not stand in for an FG head", l::fg_from_sr, h::failed, v::other_viewport, "- failed no_admissible_capture", false, nullptr},
         {"A copy of another storage than the failed head's does not stand in", l::sr, h::failed, v::other_storage, "- failed no_admissible_capture", false, nullptr},
         {"A head refused before its slot existed names no storage: the copy stands in", l::sr, h::refused_without_slot, v::other_storage, "C ready completed_snapshot", false, nullptr},
-        // Identity interruptions revoke as before.
-        {"A second active view is ambiguous and revokes", l::sr, h::failed, v::ambiguous, "- ambiguous ambiguous_views", true, nullptr},
-        {"No active view revokes", l::sr, h::failed, v::inactive, "- stale inactive_views", true, nullptr},
-        {"A head past the source age that this Present does not present revokes", l::sr, h::failed, v::expired_head, "- failed no_admissible_capture", true, nullptr},
-        {"An unconfirmed FG scope excludes a failed FG head and revokes", l::fg_own, h::failed, v::fg_excluded, "- stale fg_scope_missing", true, nullptr},
-        {"An unconfirmed FG scope excludes an FG head refused before its slot existed and revokes", l::fg_own, h::refused_without_slot, v::fg_excluded, "- stale fg_scope_missing", true, nullptr},
-        {"An unconfirmed FG scope excludes an FG head refused before its slot existed, with no copy to stand in, and revokes", l::fg_own, h::refused_without_slot, v::fg_excluded_unreadable, "- stale fg_scope_missing", true, nullptr},
+        // Identity interruptions revoke as before: once the interruption is
+        // over (the second view stopped, the FG policy changed), the next
+        // pending head finds the copy completed before the gap.
+        {"A second active view is ambiguous and revokes", l::sr, h::failed, v::ambiguous, "- ambiguous ambiguous_views", true, gap_next},
+        {"No active view revokes", l::sr, h::failed, v::inactive, "- stale inactive_views", true, gap_next},
+        {"A head past the source age that this Present does not present revokes", l::sr, h::failed, v::expired_head, "- failed no_admissible_capture", true, gap_next},
+        {"An unconfirmed FG scope excludes a failed FG head and revokes", l::fg_own, h::failed, v::fg_excluded, "- stale fg_scope_missing", true, gap_next},
+        {"An unconfirmed FG scope excludes an FG head refused before its slot existed and revokes", l::fg_own, h::refused_without_slot, v::fg_excluded, "- stale fg_scope_missing", true, gap_next},
+        {"An unconfirmed FG scope excludes an FG head refused before its slot existed, with no copy to stand in, and revokes", l::fg_own, h::refused_without_slot, v::fg_excluded_unreadable, "- stale fg_scope_missing", true, gap_next},
         {"An unconfirmed FG scope still admits the SR stand-in of an FG head", l::fg_from_sr, h::refused_without_slot, v::fg_excluded, "C ready lineage_snapshot", false, nullptr},
-        {"A required FG scope refuses the SR stand-in of an SR head refused before its slot existed and revokes", l::sr, h::refused_without_slot, v::fg_mismatch, "- unavailable fg_scope_mismatch", true, nullptr},
-        {"A required FG scope refuses an SR head refused before its slot existed, with no copy to stand in, and revokes", l::sr, h::refused_without_slot, v::fg_mismatch_unreadable, "- unavailable fg_scope_mismatch", true, nullptr},
-        {"A required FG scope refuses a failed SR head and revokes", l::sr, h::failed, v::fg_mismatch, "- unavailable fg_scope_mismatch", true, nullptr},
+        {"A required FG scope refuses the SR stand-in of an SR head refused before its slot existed and revokes", l::sr, h::refused_without_slot, v::fg_mismatch, "- unavailable fg_scope_mismatch", true, gap_next},
+        {"A required FG scope refuses an SR head refused before its slot existed, with no copy to stand in, and revokes", l::sr, h::refused_without_slot, v::fg_mismatch_unreadable, "- unavailable fg_scope_mismatch", true, gap_next},
+        {"A required FG scope refuses a failed SR head and revokes", l::sr, h::failed, v::fg_mismatch, "- unavailable fg_scope_mismatch", true, gap_next},
         {"FG Off retired the FG copies: FG On's refused attempt has no historical copy", l::fg_own, h::refused_without_slot, v::retired, "- missing_state no_current_nomination", false, nullptr},
+        // expire_association revokes the owner's copies itself: the failed
+        // head finds nothing to stand in, nor does the next pending one.
+        {"An expired association revokes the copy completed before it", l::sr, h::failed, v::association_expired, "- failed no_admissible_capture", false, gap_next},
       };
       constexpr std::uint64_t epoch = 11, device = 41;
       for (const auto &r : rows) {
@@ -1532,6 +1542,16 @@ namespace sunshine_streamline::depth_capture {
             own_slot->metadata.tick = now - source_age - 1;
           }
         }
+        if (r.change == v::association_expired) {
+          // Every attempt of the owner's views rejected for longer than the
+          // association window.
+          for (auto &view : views) {
+            if (view.sequence) {
+              view.rejected_since = now - sunshine_freshness::association_ms - 1;
+            }
+          }
+          expire_association(owner, now);
+        }
         selection_policy policy {};
         if (fg_head || r.change == v::fg_mismatch || r.change == v::fg_mismatch_unreadable) {
           policy = {true, epoch, 0, false, now - 16};
@@ -1560,12 +1580,29 @@ namespace sunshine_streamline::depth_capture {
             establish_provider(owner, *pick.value, 2);
             deliver(owner, *pick.value);
           }
+          // The interruption ends: the second view stops, the FG policy
+          // follows the head (a confirmed scope for an FG head, none for an
+          // SR one), and the copy's work completes, so only the gap can
+          // refuse it.
+          if (r.change == v::ambiguous) {
+            for (auto &view : views) {
+              if (view.viewport == 1) {
+                view = {};
+              }
+            }
+          }
+          auto next_policy = policy;
+          if (r.change == v::fg_excluded || r.change == v::fg_excluded_unreadable || r.change == v::fg_mismatch ||
+              r.change == v::fg_mismatch_unreadable) {
+            next_policy = fg_head ? selection_policy {true, epoch, 0, false, now - 16} : selection_policy {};
+          }
+          fence.completed = 5;
           // The next frame's head is recorded and still in flight.
           auto &pending = make(3, provider_kind::streamline, epoch, 40, head_source, 0, fg_head ? 0 : UINT64_MAX);
           pending.metadata.source = storage;
           pending.finished = false;
           fixture::presents_since(1);
-          next = pick_outcome(select_provider(owner, native, 3, GetTickCount64(), policy), &copy, 'C', &pending, 'P');
+          next = pick_outcome(select_provider(owner, native, 3, GetTickCount64(), next_policy), &copy, 'C', &pending, 'P');
         }
         if (got != r.outcome || interrupts != r.interrupts || (r.next && next != r.next) || (stands_in && !kept)) {
           char text[640];
