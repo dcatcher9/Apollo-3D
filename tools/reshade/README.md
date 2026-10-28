@@ -2429,7 +2429,11 @@ FG depth is a tag copy deferred to its Present (the 10-28 review's P1): `fg-off-
 (its shrunk form) and `fg-off-late-deferred-tag-copy-sr-after` (with the FG role's re-keying
 reverted the copy becomes the FG view again beside the SR view: an unsupplied fresh FG copy and
 stale_shown at the next frame, and stale_shown at every one of the eight frames after the Off,
-10-28, temporary build),
+10-28, temporary build), and `fg-off-own-tag-copy-after-dlssg-refusal` (seed dda773a575be6561's
+frames 80 to 91 before seeds drew late Offs, which once in a fixed-set run of the 10-28 review held a
+93 ms old FG copy at the FG Off frame beside its own tag copy, J2; 25 runs of the list and of the
+seed's whole list on today's build showed the frame's own copy, so no cause is established and the
+shape stays pinned),
 an event list shaped like the
 session it fixed and judged as any
 timeline (random seeds meet these shapes only by chance, and a change of the event language changes

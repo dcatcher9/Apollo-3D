@@ -783,6 +783,16 @@ namespace {
     // after the Off (10 of 10), then mono.
     {"fg-off-late-deferred-tag-copy", "fg=on; fg=off_late,tag=present_bare; sr=local"},
     {"fg-off-late-deferred-tag-copy-sr-after", "20*sr=local; fg=on,tag=present_bare,sr=local; 5*tag=present_bare,sr=local; fg=off_late,tag=present_bare,sr=local; 10*tag=present_bare,sr=local"},
+    // Seed dda773a575be6561's frames 80 to 91 before seeds drew late Offs
+    // (10-28), after SR on the game's queue has run every entry of its ring:
+    // FG renewed (its fences anew), a brief hitch, DLSS-G's refused last
+    // evaluation, then FG Off with the frame's own OnlyValidNow tag copy on
+    // the presenting queue while its SR copy on the game's queue waits for a
+    // renewed fence. The FG Off frame shows its own tag copy. Once in a
+    // fixed-set run of the 10-28 review (J2) it held a 93 ms old FG copy
+    // there instead (stale_shown); 25 runs of this list and of the seed's
+    // whole list did not reproduce it (10-28).
+    {"fg-off-own-tag-copy-after-dlssg-refusal", "20*sr=other_queue; fg=on,tag=now_list,dlssg=direct,generated=2; 2*tag=now_list,dlssg=direct,generated=2; 2*dlssg=direct,generated=2; sr=other_queue,dlssg=direct,generated=2,order=wait_first; fg=on,sr=other_queue,dlssg=direct,generated=2,order=wait_first; sr=other_queue,dlssg=direct,generated=2,order=wait_first,hitch=brief; sr=other_queue,dlssg=direct,generated=2,order=wait_first; untag=after_global,sr=other_queue,dlssg=direct_unobserved,generated=2,order=wait_first; fg=off,tag=now_list,untag=after_global,sr=other_queue,order=wait_first; tag=now_list,untag=before_global,sr=other_queue,order=wait_first; 10*sr=other_queue"},
     {"fg-on-owned-sr-missing-generated-hitch", "20*sr=local; fg=on,tag=now_list,sr=local,generated=1,at=evaluate; 5*tag=now_list,sr=local; sr=local,hitch=after_sources; 10*sr=local"},
   };
 
