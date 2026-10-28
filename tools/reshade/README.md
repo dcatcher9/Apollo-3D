@@ -2451,8 +2451,9 @@ run; a witness that loses none fails the set, as the matrix's gap seeds keep a r
 failing cell. `--trace` prints every Present's
 frame record, the supply it was judged with and each recorded refusal.
 
-`reshade_session_timelines` runs the fixed set (24 seeds and 48 regression timelines, about
-5450 frames and 14200 Presents, with the seeds' hitches) in about 250 s, registered like
+`reshade_session_timelines` runs the fixed set (24 seeds and 61 regression timelines, about
+5900 frames and 16100 Presents, with the seeds' hitches and late FG Offs) in about 285 s (the full
+check's registered run, 10-28), registered like
 `reshade_native_provider_continuity` but with a 480 s timeout, about twice a full run (its own
 watchdog, 10 s after its 460 s bound `fixed_budget_ms`, ends a hung run first). Locally:
 
