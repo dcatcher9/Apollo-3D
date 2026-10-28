@@ -4616,7 +4616,9 @@ above) and an expired association
 the new owner's chosen copy, and the previous owner's last selected copy, is historical
 (`establish_provider`), because the consumed watermark restarts there and cannot compare the two
 providers' sequences, so the previous provider's copy already shown, or one older than the new
-owner's, could otherwise return and flip ownership back. Ownership never moves to a copy recorded
+owner's, could otherwise return and flip ownership back. FG Off's retirement of the FG role floors
+the owner at that same copy, its last selected one, and keeps it as the floor of a handover that
+follows. Ownership never moves to a copy recorded
 before the owner's last selected one either (`completed_older_than_shown`): capture ids follow
 publication order across both providers while GPU readability need not, so the other provider's
 copy of an earlier frame can turn readable after the owner's newer copy was shown. That pick is no

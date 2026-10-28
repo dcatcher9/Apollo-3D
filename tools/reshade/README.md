@@ -1764,7 +1764,13 @@ read before and after the call; `supply::capture`, also a completion's). A Prese
 `stale_shown`, with no bound, when a copy among the same readable set, of the shown copy's own kind
 (an FG scope's input, or ordinary depth: FG keeps its viewport while it can supply), has a larger
 capture id than the shown copy; a copy whose id is unknown (a tag copy deferred to its frame's
-Present) keeps the tick bound. Until 10-28 a Present one copy behind passed every timeline: a
+Present) keeps the tick bound. After FG Off (`supply::fg_off`, set by the session timelines) a shown
+FG copy is held as its display lineage's, so it is judged against the lineage's readable copies of
+either kind, also the SR copies a silent scope's FG hold kept off-screen while FG was on
+(`supply::fg_held`, readable only after FG Off): until 10-28 an FG copy held beside a readable newer
+SR copy passed, which hid FG Off's revoked SR copies. While FG is on the rung's own kind is judged
+(`frame_generation_holds` is the owner's rule); a one-off probe of the reverse (an SR copy shown
+while FG was on beside a newer readable FG copy) found none in the fixed set (10-28). Until 10-28 a Present one copy behind passed every timeline: a
 Present during a nomination in progress, the SR stand-in of an FG input recycled by the pool, a
 missing frame's stand-in shown a Present late. A real Present that shows a copy of the other API
 than the last real Present that showed API depth must show a copy recorded after that one (capture
@@ -1854,10 +1860,19 @@ frame's first call and its stamp, or `after_present` (as long) after its real Pr
 generated Presents; `dlssg_gpu=after_present` holds DLSS-G's compute work on the GPU until
 the frame's Present returned (its queue waits on a gate fence the CPU signals then, a GPU-bound
 game's copy in flight at its own Present; the gate is no order fence, so no read relies on it, and
-a GPU signal after the Present would deadlock against the presenting queue's wait before it). Seeds
-draw them at a low weight (about one frame in 80 hitches; DLSS-G's compute work is held in about
-one compute frame in eight) from a stream of their own, after the fence events, so every seed keeps
-its other frames (until the 10-27 review no seed drew them). With FG on the game's FG options declare
+a GPU signal after the Present would deadlock against the presenting queue's wait before it);
+`sr_gpu=after_present` (10-28) holds the SR evaluation's work on the game's own queue the same way
+(never in a frame whose DLSS-G compute evaluation waits for the game's list, which waits for that
+work). Seeds draw them at a low weight (about one frame in 80 hitches; DLSS-G's compute work is
+held in about one compute frame in eight, the game queue's SR work in about one such frame in
+eight) from streams of their own, after the fence events, so every seed keeps its other frames
+(until the 10-27 review no seed drew them; the SR work's stream came on 10-28). `fg=off_late`
+(10-28) turns FG off after the frame's evaluations, before its Present, as a game's options call
+there or DLSS-G's present thread between the call and the next SR evaluation does: the frame's FG
+copies are retired before any Present shows them (they supply nothing), its Present comes with FG
+off, and the order fences are renewed after its Present. Seeds never draw it (its weight is 0, so
+each seed keeps its frames): a frame's FG tag copy deferred to its Present after a late Off has no
+contract the oracle describes. With FG on the game's FG options declare
 each frame's generated count as `numFramesToGenerate` (and DLSS-G's `MultiFrameCount`), repeated
 when it changes, as the add-on reads it (always 1 until the 10-27 review).
 
@@ -1920,7 +1935,9 @@ hold whatever the clock (until the 10-27 review only within the source age of th
 add-on's mono generated and real Presents after a hitch with FG on, open item 1, passed). A violation is a gap (armed, a legal source, no depth), an unestablished
 source (no depth within its window), a dropped hold (that generated Present without depth), a
 stale one (a rung's pixels at least the source age, plus 40 ms for two steps of `GetTickCount64`,
-after the newest legal or permitted source of its kind: API for D1 and D2, Generic for D3; a real
+after the newest legal or permitted source of its kind, by that source's copy's made time: API for
+D1 and D2, Generic for D3 (until 10-28 by the frame's stamp, so a Present holding a 157 ms old copy
+made after a brief hitch inside its frame was stale at 297 ms, `judge-hold-age-from-made-tick`); a real
 Present's API copy captured inside the frame it presents, its capture tick no earlier than the
 frame's stamp, is that frame's own depth and age 0 however long the frame took: until 10-27 its age
 ran from the frame's first call, so the 10-27 full check's `C8-fg-off-color-only` failed at frame 39
@@ -2156,6 +2173,37 @@ Step 4 it is readable at the next Present ordered after its copy-out). Whether `
 copy over a readable SR copy at all (it spares the placement calibration a switch, and costs these
 losses until Step 4) awaits the owner.
 
+FG Off retires only the FG role of the viewport's display lineage (10-28; [Streamline depth
+selection](../../docs/reshade-sbs.md#streamline-depth-selection) owns the rule): the FG copies are
+invalidated and the queue's association ends as before (C8's hold above, Generic after it), but the
+owner's admission floor is its last selected copy (the handover floor) instead of the newest
+capture, it keeps its consumed frame and its presentation tuple, and an FG nomination that was the
+namespace's newest passes to the viewport's ordinary source as a missing frame of the lineage,
+unless another viewport's view in that epoch is active. So the SR copies recorded since the shown
+FG copy, the lineage's legal successor, stand in at once; until 10-28 FG Off revoked them. An FG
+owner meets such a copy only when the game's options call comes after the frame's evaluations and
+before its Present (a late Off; a Present otherwise selects the SR copy as the source, ready or
+not) or the SR list is executed after its Present, and an SR owner when DLSS-G's nomination is the
+newest at the Off and a Present comes before the next SR evaluation. The session timelines' event
+language gained both (below: `fg=off_late`, `sr_gpu=after_present`). With the rule reverted,
+`fg-off-late-sr-after-fg-copy` holds the FG copy beside the readable SR copy (stale_shown at frame
+28, judged by the lineage since the same change) and `fg-off-late-dlssg-head-sr-owner` releases the
+queue to Generic at the Off (a gap at frame 24, then mono at frame 25), five of five runs each, and
+the seam characterization's FG Off table fails 10 of its 17 rows; each part of the rule (the floor,
+the passed head, the kept tuple, the consumed frame in the lineage stand-in, the handover floor
+after an NGX copy took the queue) fails rows of its own when reverted alone. The first session
+fixed-set run also found the head guard too strict (it tripped on an earlier viewport's stopped
+view, so the SR-owner regression lost the queue to Generic inside the set while it passed alone):
+only an active view keeps the old removal. Open after 10-28: in Unreal titles with NGX SR on one
+viewport and Streamline FG on another (Clair Obscur: Expedition 33, Stellar Blade, Hogwarts Legacy)
+the NGX copy is no member of the FG input's lineage, so FG Off and On still drop it until the other
+source's first readable copy (31-234 ms per toggle in the 10-22 logs, unmeasured on today's build;
+copies of one retained source resource would prove one lineage, which awaits the owner's ruling);
+the placement calibration that restarts at each FG switch (about 1 s flat per toggle in the 10-22
+logs) is the next round's item, listed per switch by the readiness report; an API owner held while
+every attempt is refused before its slot exists (Battlefield 6, 10-22) is queued with its log
+signature.
+
 C5, the API contract matrix's `S1-evaluate` row over frames (the runtime layer found the row on
 10-23, the session timelines carried it from 10-25), is closed (10-26): an `OnlyValidNow` global or
 frame tag outside FG scope is copied at its call (S1), and the same frame's SR evaluation of that
@@ -2326,7 +2374,10 @@ on another queue; with the rule reverted the first drops a holdable copy at fram
 shows stale depth from frame 34 and then mono, five of five runs each, 10-28, temporary build; and
 `refused-fg-attempt-shown-at-once`, the first without its hitches, where the rule disabled holds
 the copy before, one frame late, which only the freshness rule by capture id sees: stale_shown at
-frame 26, 10-28, temporary build)),
+frame 26, 10-28, temporary build), two for FG Off's FG-role retirement, `fg-off-late-sr-after-fg-copy`
+and `fg-off-late-dlssg-head-sr-owner` (the C8 follow-up above), and one for the judge's stale rule,
+`judge-hold-age-from-made-tick`, which fails with the frame's stamp as the age baseline: stale at
+the Present after FG Off and at every isolation Present after it, 10-28, temporary build),
 an event list shaped like the
 session it fixed and judged as any
 timeline (random seeds meet these shapes only by chance, and a change of the event language changes

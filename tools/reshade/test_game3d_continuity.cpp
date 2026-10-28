@@ -568,6 +568,96 @@ namespace {
     }
   }
 
+  // After FG Off (supply::fg_off) an FG copy is held as its display
+  // lineage's: a newer readable copy of either kind makes the hold stale,
+  // also an SR copy the FG hold kept off-screen while FG was on
+  // (supply::fg_held), which counts only after FG Off. While FG is on the
+  // FG hold over SR copies is the owner's rule and is not judged.
+  void fg_hold_after_fg_off_judged_by_lineage() {
+    struct trial {
+      bool fg_off, held;  // The judged frame comes after FG Off; the SR copy was the FG hold's.
+      bool stale;
+      const char *message;
+    };
+    const trial trials[] {
+      {true, true, true, "an FG copy held after FG Off beside a readable newer SR copy the FG hold had kept off-screen was not stale_shown"},
+      {true, false, true, "an FG copy held after FG Off beside a readable newer SR copy was not stale_shown"},
+      {false, true, false, "an FG copy a silent scope holds over the SR copies it keeps off-screen was stale_shown while FG was on"},
+    };
+    for (const auto &value : trials) {
+      continuity::judge judge;
+      std::uint64_t now = 1000, present = 1;
+      // An FG tag copy (capture 10), shown.
+      continuity::supply fg;
+      fg.add(continuity::tag_copy, now);
+      fg.immediate = continuity::tag_copy;
+      fg.capture[1] = 10 | continuity::copy_fg_input;
+      auto shown_fg = shown(present++, now, source_slot::fg_depth, now);
+      shown_fg.depth_capture = 10;
+      judge.present(shown_fg, fg, "test");
+      now += 16;
+      // A silent frame's SR copy (capture 12) on the presenting queue, kept
+      // off-screen by the FG hold (or an ordinary one).
+      continuity::supply silent;
+      silent.add(continuity::sr_evaluate, now);
+      silent.immediate = continuity::sr_evaluate;
+      silent.capture[0] = 12;
+      if (value.held) {
+        silent.owned = silent.fg_held = continuity::sr_evaluate;
+      }
+      auto held_fg = shown(present++, now, source_slot::fg_depth, now - 16);
+      held_fg.depth_capture = 10;
+      held_fg[source_slot::fg_depth].state = source_state::held;
+      judge.present(held_fg, silent, "test");
+      const auto before = judge.take();
+      now += 16;
+      // The next frame's Present holds the FG copy again; its own SR copy
+      // is in flight on another queue.
+      continuity::supply next;
+      next.add_elsewhere(continuity::sr_evaluate, now, [] { return false; });
+      next.unordered = true;
+      next.fg_off = value.fg_off;
+      auto again = shown(present++, now, source_slot::fg_depth, now - 32);
+      again.depth_capture = 10;
+      again[source_slot::fg_depth].state = source_state::held;
+      judge.present(again, next, "test");
+      const auto violations = judge.take();
+      const bool stale = violations.size() == 1 && violations[0].kind == continuity::violation_kind::stale_shown &&
+                         violations[0].shown_capture == 10 && violations[0].newer_capture == 12;
+      require(before.empty() && (value.stale ? stale : violations.empty()), value.message);
+    }
+  }
+
+  // The stale rule ages a Present that holds an API copy from the newest
+  // offered API copy's made tick, not its frame's stamp: after a brief hitch
+  // before a frame's calls its copy is that much younger than the frame
+  // (until 10-28 the Present of a frame with no API source holding a 157 ms
+  // old copy made after such a hitch was stale at 297 ms).
+  void stale_rule_ages_from_the_newest_copy() {
+    continuity::judge judge;
+    std::uint64_t now = 1000, present = 1;
+    for (int i = 0; i != 4; ++i, now += 16) {
+      continuity::supply frame;
+      frame.add(continuity::sr_evaluate, now);
+      frame.immediate = continuity::sr_evaluate;
+      judge.present(shown(present++, now, source_slot::scene_depth, now), frame, "test");
+    }
+    // A frame stamped at now whose SR copy is made after a 140 ms hitch.
+    continuity::supply hitched;
+    hitched.allow(continuity::generic_boundary, now);
+    hitched.add(continuity::sr_evaluate, now + 140);
+    hitched.immediate = continuity::sr_evaluate;
+    judge.present(shown(present++, now + 156, source_slot::scene_depth, now + 140), hitched, "test");
+    // A frame with no API source, after a second brief hitch, holds that copy.
+    continuity::supply none;
+    none.allow(continuity::generic_boundary, now + 290);
+    auto held = shown(present++, now + 297, source_slot::scene_depth, now + 140);
+    held[source_slot::scene_depth].state = source_state::held;
+    judge.take();
+    judge.present(held, none, "test");
+    require(judge.take().empty(), "a Present holding a 157 ms old copy made after its frame's hitch was stale by the frame's stamp");
+  }
+
   // An ownership handover to the other API shows a copy recorded after the
   // one the last real Present showed (capture ids follow publication order
   // across providers): a copy recorded before it is older depth after newer
@@ -614,6 +704,8 @@ namespace {
 int main() {
   single_present_lag_by_capture();
   handover_never_steps_back();
+  fg_hold_after_fg_off_judged_by_lineage();
+  stale_rule_ages_from_the_newest_copy();
   generated_drop_after_late_signal();
   late_signal_conflicts_only_its_copies();
   unordered_copy_completed_after_decision();
@@ -634,6 +726,8 @@ int main() {
             "came; a hold past the source age is stale; copies age from when they were made; a no-source frame holds "
             "under strict_holds; a generated Present after its FG frame's real Present presents that frame; a "
             "Present one copy behind a readable copy of its kind is stale_shown by capture id; a handover never shows "
-            "a copy recorded before the last real Present's");
+            "a copy recorded before the last real Present's; after FG Off a held FG copy is judged by its lineage, "
+            "also against the SR copies the FG hold kept off-screen; the stale rule ages a hold from its newest copy's "
+            "made tick");
   return EXIT_SUCCESS;
 }

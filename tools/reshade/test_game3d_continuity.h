@@ -37,7 +37,13 @@
 // the tick bound below applied, which a single Present's lag, about one
 // frame, always passed). Showing older depth while newer copies were
 // readable is stale_shown: no row excuses it, as no known limitation makes a
-// readable copy unreadable. A real Present that shows a copy of the other
+// readable copy unreadable. After FG Off (supply::fg_off) an FG copy is
+// held as the viewport's display lineage's (C8) and judged against the
+// lineage's copies of either kind, also those the FG hold kept off-screen
+// while FG was on (supply::fg_held): FG Off retires only the FG role, so
+// the lineage's newest readable copy replaces the held one (10-28; until
+// then an FG hold beside a readable newer SR copy passed). A real Present
+// that shows a copy of the other
 // API than the last real Present that showed depth shows a copy recorded
 // after that one (capture ids follow publication order across providers):
 // an ownership handover never steps back to older depth.
@@ -209,6 +215,22 @@ namespace game3d_continuity {
     // The frame's events may end its source's hold (an untag, the retiring
     // of its viewport): a mono Present there is no dropped hold.
     bool drop_permitted {};
+    // Its Present comes after FG Off (its FG options turned FG off, at the
+    // frame's start or after its evaluations): an FG copy it shows is held
+    // across FG Off as its display lineage's (C8), so the freshness rule
+    // judges it against the lineage's readable copies of either kind, and
+    // the copies an FG hold kept off-screen (fg_held) are readable there.
+    // The session timelines set it (one viewport each); the native provider
+    // fixture's scripts keep the rung's own kind.
+    bool fg_off {};
+    // The owned sources that the display's hold of a silent FG scope's own
+    // copy keeps off-screen while FG is on (frame_generation_holds, an owner
+    // rule), unlike the ones a live scope refuses: they are copied, and
+    // after FG Off they are the viewport's display lineage's successor
+    // copies, readable at a Present of a frame with fg_off (until 10-28 the
+    // judge never counted them, so an FG copy held beside them after FG Off
+    // passed).
+    std::uint8_t fg_held {};
     // A signal after this frame's real Present reached a fence a read in
     // flight relied on (O1): its real Present is judged as any, and a hold
     // its generated Presents drop is R1-late-signaller's where the copy the
@@ -242,6 +264,8 @@ namespace game3d_continuity {
       bool done_before_present {};
       // Its capture id with copy_fg_input (supply::capture), 0 unknown.
       std::uint64_t capture {};
+      // An FG hold keeps it off-screen while FG is on (supply::fg_held).
+      bool fg_held {};
     };
     std::vector<completion> completions;
 
@@ -292,9 +316,9 @@ namespace game3d_continuity {
       completes(sources, std::move(probe));
     }
 
-    void completes(std::uint8_t sources, std::function<bool()> probe, const void *relied = nullptr, std::uint64_t id = 0) {
+    void completes(std::uint8_t sources, std::function<bool()> probe, const void *relied = nullptr, std::uint64_t id = 0, bool held = false) {
       if (probe) {
-        completions.push_back({sources, std::move(probe), relied, false, id});
+        completions.push_back({sources, std::move(probe), relied, false, id, held});
       }
     }
   };
@@ -529,6 +553,9 @@ namespace game3d_continuity {
       using sunshine_game3d::source_slot;
       ++presents_;
       const auto now = record.tick_ms;
+      // After FG Off the copies an FG hold kept off-screen are readable
+      // (supply::fg_held); a generated Present supplies nothing of its own.
+      fg_off_ = !generated && frame.fg_off;
       // Whether this real Present's frame has a legal source its own Present
       // reads (supply::immediate). Not an owned one: a live FG scope refuses
       // the copy of the SR evaluation it keeps out (streamline_camera_probe
@@ -577,8 +604,13 @@ namespace game3d_continuity {
       }
       const auto stamp = frame.tick ? frame.tick : now;
       const auto offered = std::uint8_t(frame.legal | frame.permitted);
+      // The newest offered API copy's made tick (supply::made): after a
+      // hitch inside the frame before its copy, its stamp is that much
+      // older than the copy (until 10-28 the stamp: a Present of a frame with
+      // no API source holding the copy of a frame with a brief hitch before
+      // its calls was stale at a 157 ms old copy, aged 297 ms).
       if (offered & api_sources) {
-        newest_api_ = stamp;
+        newest_api_ = frame.tick ? frame.made_tick(std::uint8_t(offered & api_sources)) : now;
       }
       if (offered & generic_sources) {
         newest_generic_ = stamp;
@@ -606,9 +638,12 @@ namespace game3d_continuity {
       std::pair<unsigned, std::uint64_t> fresher {};
       std::uint64_t newer_capture {};
       if ((owner == source_slot::fg_depth || owner == source_slot::scene_depth) && record.depth_tick_ms) {
-        const auto sources = owner == source_slot::fg_depth ? fg_depth_sources : scene_depth_sources;
+        // After FG Off an FG copy is held as its display lineage's: a newer
+        // readable copy of either kind replaces it (supply::fg_off).
+        const bool lineage = fg_off_ && owner == source_slot::fg_depth;
+        const auto sources = lineage ? api_sources : owner == source_slot::fg_depth ? fg_depth_sources : scene_depth_sources;
         fresher = readable_after(record.depth_tick_ms, sources);
-        newer_capture = readable_newer(record.depth_capture, sources);
+        newer_capture = readable_newer(record.depth_capture, sources, lineage);
       }
       const bool could_hold = holdable(now);
       look();
@@ -892,7 +927,19 @@ namespace game3d_continuity {
       // Each source's capture id with copy_fg_input (supply::capture), by
       // source bit; 0 unknown.
       std::array<std::uint64_t, 4> capture {};
+      // An FG hold kept it off-screen (supply::fg_held): readable only at a
+      // Present after FG Off (fg_off_).
+      bool fg_held {};
     };
+
+    // Whether copy is certainly readable at this Present: complete at an
+    // earlier look (another queue's), or its frame's own Present passed
+    // (or was this one, for a copy recorded at its call); never a conflicted
+    // one, nor one an FG hold keeps off-screen while FG is on.
+    bool readable_now(const readable_copy &copy) const {
+      return !copy.conflicted && (!copy.fg_held || fg_off_) &&
+        (copy.completed ? copy.done : copy.frame < frames_ || copy.immediate);
+    }
 
     void readable(const supply &frame, std::uint64_t now) {
       ++frames_;
@@ -911,12 +958,17 @@ namespace game3d_continuity {
         }
         return out;
       };
-      if (const auto own = std::uint8_t(frame.legal & api_sources & ~frame.owned & ~frame.limited & ~frame.elsewhere)) {
-        if (const auto at_call = std::uint8_t(own & frame.immediate)) {
-          copies_.push_back({stamp(at_call), frames_, at_call, {}, false, nullptr, false, true, captures(at_call)});
-        }
-        if (const auto later = std::uint8_t(own & ~frame.immediate)) {
-          copies_.push_back({stamp(later), frames_, later, {}, false, nullptr, false, false, captures(later)});
+      const auto local = std::uint8_t(frame.legal & api_sources & ~frame.limited & ~frame.elsewhere);
+      // The frame's own copies, and those an FG hold keeps off-screen
+      // (supply::fg_held), readable only after FG Off.
+      for (const bool held : {false, true}) {
+        if (const auto own = std::uint8_t(local & (held ? frame.fg_held & frame.owned : ~frame.owned))) {
+          if (const auto at_call = std::uint8_t(own & frame.immediate)) {
+            copies_.push_back({stamp(at_call), frames_, at_call, {}, false, nullptr, false, true, captures(at_call), held});
+          }
+          if (const auto later = std::uint8_t(own & ~frame.immediate)) {
+            copies_.push_back({stamp(later), frames_, later, {}, false, nullptr, false, false, captures(later), held});
+          }
         }
       }
       for (const auto &value : frame.completions) {
@@ -926,7 +978,7 @@ namespace game3d_continuity {
             ids[i] = value.capture;
           }
         }
-        copies_.push_back({stamp(value.sources), frames_, value.sources, value.probe, value.done_before_present, value.relied, false, false, ids});
+        copies_.push_back({stamp(value.sources), frames_, value.sources, value.probe, value.done_before_present, value.relied, false, false, ids, value.fg_held});
       }
       while (!copies_.empty() && copies_.front().stamp + sunshine_freshness::source_age_ms + tick_slack_ms < now) {
         copies_.pop_front();
@@ -967,7 +1019,9 @@ namespace game3d_continuity {
     // (copy_fg_input) and with a capture id above it, with its kind flag;
     // 0 when there is none, or when the shown copy is not one the judge knows
     // (its kind unknown).
-    std::uint64_t readable_newer(std::uint64_t shown, std::uint8_t sources) const {
+    // lineage: of either kind (an FG copy held after FG Off), whether or not
+    // the judge knows the shown copy.
+    std::uint64_t readable_newer(std::uint64_t shown, std::uint8_t sources, bool lineage = false) const {
       if (!shown) {
         return 0;
       }
@@ -979,17 +1033,17 @@ namespace game3d_continuity {
           }
         }
       }
-      if (kind == UINT64_MAX) {
+      if (kind == UINT64_MAX && !lineage) {
         return 0;
       }
       std::uint64_t newest {};
       for (const auto &copy : copies_) {
-        if (copy.conflicted || (copy.completed ? !copy.done : copy.frame >= frames_ && !copy.immediate)) {
+        if (!readable_now(copy)) {
           continue;
         }
         for (unsigned i = 0; i != copy.capture.size(); ++i) {
           const auto value = copy.capture[i];
-          if ((sources & copy.sources & (1u << i)) && value && (value & copy_fg_input) == kind &&
+          if ((sources & copy.sources & (1u << i)) && value && (lineage || (value & copy_fg_input) == kind) &&
               (value & ~copy_fg_input) > shown && (value & ~copy_fg_input) > (newest & ~copy_fg_input)) {
             newest = value;
           }
@@ -1004,7 +1058,7 @@ namespace game3d_continuity {
       unsigned frames {};
       std::uint64_t last {}, newest {};
       for (const auto &copy : copies_) {
-        if (!(copy.sources & sources) || copy.stamp <= tick || copy.conflicted || (copy.completed ? !copy.done : copy.frame >= frames_ && !copy.immediate)) {
+        if (!(copy.sources & sources) || copy.stamp <= tick || !readable_now(copy)) {
           continue;
         }
         frames += copy.frame != last;
@@ -1020,6 +1074,8 @@ namespace game3d_continuity {
     // warming_: a warm-up (the session's start, a stall or a new source)
     // gives legal sources establish_ms.
     bool armed_ {}, showing_ {}, fresh_ {}, warming_ {true};
+    // The Present being judged comes after FG Off (supply::fg_off).
+    bool fg_off_ {};
     std::array<std::uint64_t, 2> since_ {};
     // The supply of the frame the last real Present presented, and the last
     // three real Presents' ticks, newest first.

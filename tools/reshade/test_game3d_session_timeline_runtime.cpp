@@ -11,7 +11,11 @@
 //   the start of the frame (the frame before's tag), or none;
 // - FG turned on or off, and 1 to 3 generated Presents after the real one,
 //   inside the next frame's recording, or landing inside its SR evaluation
-//   while that evaluation copies its own depth input (2x to 4x);
+//   while that evaluation copies its own depth input (2x to 4x); FG turned
+//   off after the frame's evaluations, before its Present (fg=off_late: a
+//   game's options call there, or DLSS-G's Present thread presenting
+//   between the call and the frame's next SR evaluation), which only event
+//   lists name;
 // - a dynamic-resolution step of the tagged extent;
 // - the viewport's SR evaluation with its own depth input on the presenting
 //   queue or the game's own direct queue, or of the frame's tag;
@@ -29,9 +33,10 @@
 //   frame-generation objects. These are drawn from a stream of their own,
 //   so every seed keeps the frames it had before them (10-27);
 // - the frame's slow intervals, modelled rather than left to the machine's
-//   load (10-27): DLSS-G's compute work held on the GPU until the frame's
-//   Present returned (a GPU-bound game, its copy in flight at its own
-//   Present), and a hitch of the source age and more between frames, of the
+//   load (10-27): DLSS-G's compute work, and the SR work on the game's own
+//   queue (10-28), held on the GPU until the frame's Present returned (a
+//   GPU-bound game, its copy in flight at its own Present), and a hitch of
+//   the source age and more between frames, of the
 //   frame's recording before its calls (brief, or the source age and more)
 //   or after them, before its Present, or after its Present, before its
 //   generated Presents. Seeds draw them at a low weight from a stream of
@@ -127,13 +132,18 @@ namespace {
       order,
       hitch,
       dlssg_gpu,
+      sr_gpu,
       dimension_count
     };
 
+    // off_late: FG turned off after the frame's evaluations, before its
+    // Present: the FG copies the frame made are retired before any Present
+    // shows them, and the frame's Present comes with FG off.
     enum class fg_event {
       keep,
       on,
-      off
+      off,
+      off_late
     };
 
     // A depth tag's lifecycle (OnlyValidNow, ValidUntilPresent,
@@ -259,6 +269,16 @@ namespace {
       after_present
     };
 
+    // The same for the SR evaluation's work on the game's own queue
+    // (sr=other_queue): after_present holds it behind a gate the CPU opens
+    // once the frame's Present returned (never with a CPU wait for that
+    // work), so its copy is readable at its own Present only by the game's
+    // fence order (U-C1), and otherwise from the next Present on.
+    enum class sr_gpu_form {
+      prompt,
+      after_present
+    };
+
     template<class E>
     E of(const generator::row &value, dimension d) {
       return E(value[d]);
@@ -295,7 +315,7 @@ namespace {
       static const generator::family value {
         "timeline",
         {
-          {"fg", {"keep", "on", "off"}},
+          {"fg", {"keep", "on", "off", "off_late"}},
           {"drs", {"keep", "change"}},
           {"tag", {"none", "now_list", "present_list", "evaluate_list", "now_bare", "present_bare", "evaluate_bare"}},
           {"entry", {"frame", "global"}},
@@ -309,6 +329,7 @@ namespace {
           {"order", {"wait", "wait_first", "cpu_wait", "cpu", "second", "late"}},
           {"hitch", {"none", "brief", "before_sources", "after_sources", "between", "after_present"}},
           {"dlssg_gpu", {"prompt", "after_present"}},
+          {"sr_gpu", {"prompt", "after_present"}},
         },
         legal,
       };
@@ -339,6 +360,10 @@ namespace {
     // compute frame in eight.
     constexpr unsigned hitch_weights[] {470, 2, 1, 1, 1, 1};
     constexpr unsigned dlssg_gpu_weights[] {7, 1};
+    // The SR work on the game's queue, from a stream of its own (10-28), so
+    // every seed keeps the frames it had before it: held past its frame's
+    // Present in about one such frame in eight.
+    constexpr unsigned sr_gpu_weights[] {7, 1};
 
     // Whether the frame records work on another queue that the fence events
     // order: its SR on the game's queue or DLSS-G's compute copy.
@@ -349,11 +374,14 @@ namespace {
 
     // Relative weights of each dimension's values, and the chance in a
     // thousand that a frame keeps the previous frame's value. FG and dynamic
-    // resolution change by one-time events; FG starts off.
+    // resolution change by one-time events; FG starts off. Seeds never draw
+    // fg=off_late (weight 0, so each seed keeps its frames): a frame's FG
+    // tag copy deferred to its Present after a late Off has no contract the
+    // oracle describes.
     const generator::draw &drawing() {
       static const generator::draw value {
         {
-          {940, 30, 30},
+          {940, 30, 30, 0},
           {95, 5},
           {3, 2, 2, 1, 1, 2, 1},
           {1, 1},
@@ -382,6 +410,12 @@ namespace {
         if (!on) {
           value[generated] = value[at] = value[dlssg] = 0;
         }
+        // A late Off: DLSS-G evaluates the frame, and no generated Present
+        // follows (its Present comes with FG off).
+        if (event == fg_event::off_late) {
+          value[generated] = value[at] = 0;
+          on = false;
+        }
         if (!legal(value)) {
           value[state] = 0;
         }
@@ -395,6 +429,14 @@ namespace {
         const auto o = of<order_form>(value, order);
         if ((d != dlssg_form::compute && d != dlssg_form::compute_unobserved) || o == order_form::cpu_wait || o == order_form::cpu) {
           value[dlssg_gpu] = 0;
+        }
+        // So does only the SR work on the game's queue, never while the CPU
+        // waits for it, nor in a frame whose DLSS-G compute evaluation waits
+        // for the game's list on the presenting queue, which waits for that
+        // SR work.
+        if (of<sr_form>(value, sr) != sr_form::other_queue || o == order_form::cpu_wait || o == order_form::cpu ||
+            d == dlssg_form::compute || d == dlssg_form::compute_unobserved) {
+          value[sr_gpu] = 0;
         }
       }
     }
@@ -661,6 +703,32 @@ namespace {
     // frame 26, capture 366 behind 371, 10-28, temporary build); the tick
     // bound passed it.
     {"refused-fg-attempt-shown-at-once", "20*sr=local; fg=on,sr=local,dlssg=compute,dlssg_gpu=after_present,order=second; 5*sr=local,dlssg=compute,dlssg_gpu=after_present; sr=local,dlssg=compute_unobserved; 10*sr=local,dlssg=compute,dlssg_gpu=after_present", true},
+    // FG Off retires only the FG role of its viewport's display lineage
+    // (10-28): the SR copies recorded since the shown FG copy stay its legal
+    // successor. Until then FG Off revoked them. An FG owner: a silent
+    // frame's SR copy on the game's queue, in flight at its own Present and
+    // ordered by no fence (a second signaller), before a late Off; the next
+    // frame's own SR copy is in flight too, so its Present held the FG copy
+    // beside the readable SR copy (stale_shown at frame 28, the FG copy
+    // after FG Off judged by its lineage, in five of five runs, 10-28,
+    // temporary build). An SR owner whose newest nomination is DLSS-G's
+    // copy at a late Off, the frame's SR copy held on the GPU past its
+    // Present behind an order fence a CPU signal poisoned (O3): the
+    // namespace's head named no view, so the Present after the Off read an
+    // interruption and released the queue to Generic, then that SR copy was
+    // refused (completed_before_gap): a gap at frame 24 and mono at frame
+    // 25, in five of five runs, 10-28, temporary build. Its form with a
+    // second signaller in place of the CPU's failed one run of eight with a
+    // stale_shown at frame 22, before the Off (one Present behind a copy
+    // that completed right before it; not reproduced in three replays).
+    {"fg-off-late-sr-after-fg-copy", "20*sr=other_queue; fg=on,tag=now_list,sr=other_queue; 5*tag=now_list,sr=other_queue; sr=other_queue; fg=off_late,sr=other_queue,sr_gpu=after_present,order=second; sr=other_queue,sr_gpu=after_present; 10*sr=other_queue", true},
+    {"fg-off-late-dlssg-head-sr-owner", "20*sr=other_queue; fg=on,sr=other_queue; sr=other_queue,order=cpu; 2*sr=other_queue; fg=off_late,sr=other_queue,sr_gpu=after_present,dlssg=direct; sr=other_queue,sr_gpu=after_present; 10*sr=other_queue", true},
+    // The judge's stale rule ages a Present that holds a copy from the
+    // newest offered API copy's made tick, not its frame's stamp: a frame
+    // with a brief hitch before its calls made its SR copy that much later
+    // (until 10-28 the Present after FG Off holding that 157 ms old copy was
+    // stale at 297 ms, and every isolation Present after it).
+    {"judge-hold-age-from-made-tick", "fg=on,tag=now_list; sr=other_queue; sr=other_queue,hitch=brief; fg=off,hitch=brief"},
   };
 
   // Each known gap the timelines found has a witness: an event list whose
@@ -717,6 +785,12 @@ namespace {
     for (auto &frame : out.frames) {
       frame.push_back(weighted(slow, events::hitch_weights, std::size(events::hitch_weights)));
       frame.push_back(weighted(slow, events::dlssg_gpu_weights, std::size(events::dlssg_gpu_weights)));
+    }
+    // The SR work on the game's queue held past its Present, from a stream
+    // of its own (10-28).
+    generator::seeded sr_slow {seed ^ 0x5e9a7e0ff1a7e5edull};
+    for (auto &frame : out.frames) {
+      frame.push_back(weighted(sr_slow, events::sr_gpu_weights, std::size(events::sr_gpu_weights)));
       frame.resize(events::family().dimensions.size());
     }
     events::normalize(out.frames);
@@ -886,6 +960,14 @@ namespace {
     std::uint64_t dlssg_gate_value {};
     const void *dlssg_gate_token {};
     bool dlssg_gate_closed {};
+    // The same for the game's own queue's SR work (sr_gpu=after_present).
+    com_ptr<ID3D12Fence> sr_gate;
+    std::uint64_t sr_gate_value {};
+    const void *sr_gate_token {};
+    bool sr_gate_closed {};
+    // A late FG Off (fg=off_late) renews the order fences after the frame's
+    // Present and its late signals (the frame's work signals the old ones).
+    bool renew_after_present {};
     // The frame's late signals, made after its real Present.
     std::vector<order_fence *> late_signals;
     // The game's HUD-less and Backbuffer images: its UI tags and DLSS-G's
@@ -1115,6 +1197,10 @@ namespace {
       dlssg_gate_value = 0;
       dlssg_gate_token = script_fence_token();
       dlssg_gate_closed = false;
+      checked(game->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(sr_gate.put())), "Create the game queue's SR gate");
+      sr_gate_value = 0;
+      sr_gate_token = script_fence_token();
+      sr_gate_closed = false;
       renew_order();
     }
 
@@ -1125,6 +1211,15 @@ namespace {
       }
       checked(dlssg_gate->Signal(dlssg_gate_value), "Open DLSS-G's compute gate after the frame's Present");
       script_order.cpu_signal(dlssg_gate_token, dlssg_gate_value);
+    }
+
+    // Opens the game queue's SR gate if this frame closed it.
+    void open_sr_gate() {
+      if (!std::exchange(sr_gate_closed, false)) {
+        return;
+      }
+      checked(sr_gate->Signal(sr_gate_value), "Open the game queue's SR gate after the frame's Present");
+      script_order.cpu_signal(sr_gate_token, sr_gate_value);
     }
 
     // A fence's waits and signals complete before it goes, as a game's.
@@ -1149,10 +1244,12 @@ namespace {
     // The add-on lifecycle fixture ends the game's device.
     void release_order() {
       open_dlssg_gate();
+      open_sr_gate();
       finish_order(game_order);
       finish_order(dlssg_order);
       third.reset();
       dlssg_gate.reset();
+      sr_gate.reset();
     }
 
     // The ring's entry n executed on its queue, which then signals its order
@@ -1247,6 +1344,7 @@ namespace {
     // copies are older than the source age.
     void drain() {
       open_dlssg_gate();
+      open_sr_gate();
       game_work.drain();
       dlssg_work.drain();
     }
@@ -1632,7 +1730,7 @@ namespace {
       }
       const auto &r = record_history.records.back();
       const auto owner = r.depth_owner == sunshine_game3d::source_slot::none ? sunshine_game3d::source_slot::hold : r.depth_owner;
-      std::printf("TRACE frame=%u %s present=%llu tick=%llu owner=%s state=%s reason=%s fg=%s/%s scene=%s/%s legal=0x%x limited=0x%x permitted=0x%x shown=%u capture=%llu reused=%u fg_input=%u\n", frame, which, static_cast<unsigned long long>(r.present), static_cast<unsigned long long>(r.tick_ms), sunshine_game3d::name(r.depth_owner), sunshine_game3d::name(r[owner].state), r[owner].reason, sunshine_game3d::name(r[sunshine_game3d::source_slot::fg_depth].state), r[sunshine_game3d::source_slot::fg_depth].reason, sunshine_game3d::name(r[sunshine_game3d::source_slot::scene_depth].state), r[sunshine_game3d::source_slot::scene_depth].reason, unsigned(supply.legal), unsigned(supply.limited), unsigned(supply.permitted), unsigned(s.selected && s.ready), static_cast<unsigned long long>(s.current.capture), unsigned(s.reused_depth), unsigned(s.frame_generation_input));
+      std::printf("TRACE frame=%u %s present=%llu tick=%llu owner=%s state=%s reason=%s fg=%s/%s scene=%s/%s legal=0x%x limited=0x%x permitted=0x%x shown=%u capture=%llu reused=%u fg_input=%u copies=%llu/%llu/%llu record=%llu\n", frame, which, static_cast<unsigned long long>(r.present), static_cast<unsigned long long>(r.tick_ms), sunshine_game3d::name(r.depth_owner), sunshine_game3d::name(r[owner].state), r[owner].reason, sunshine_game3d::name(r[sunshine_game3d::source_slot::fg_depth].state), r[sunshine_game3d::source_slot::fg_depth].reason, sunshine_game3d::name(r[sunshine_game3d::source_slot::scene_depth].state), r[sunshine_game3d::source_slot::scene_depth].reason, unsigned(supply.legal), unsigned(supply.limited), unsigned(supply.permitted), unsigned(s.selected && s.ready), static_cast<unsigned long long>(s.current.capture), unsigned(s.reused_depth), unsigned(s.frame_generation_input), static_cast<unsigned long long>(supply.capture[0]), static_cast<unsigned long long>(supply.capture[1] & ~continuity::copy_fg_input), static_cast<unsigned long long>(supply.capture[2] & ~continuity::copy_fg_input), static_cast<unsigned long long>(r.depth_capture));
     }
 
     bool other_queue_pending() const {
@@ -1814,11 +1912,27 @@ namespace {
         returned(sl.evaluate(0, *token, inputs, 2, reinterpret_cast<void *>(native)), "slEvaluateFeature on the game's queue");
         note_copy(continuity::sr_evaluate, copy_before);
         poll("evaluate");
+        // A GPU-bound game: the SR work on the game's queue runs only once
+        // the frame's Present returned (open_sr_gate).
+        if (of<sr_gpu_form>(value, events::sr_gpu) == sr_gpu_form::after_present) {
+          checked(game_work.queue->Wait(sr_gate.p, ++sr_gate_value), "Hold the SR work on the game's queue until after the frame's Present");
+          script_order.wait(game_work.queue.p, sr_gate_token, sr_gate_value);
+          sr_gate_closed = true;
+        }
         const bool readable = execute_elsewhere(game_work, n, game_order);
         recorded_elsewhere(continuity::sr_evaluate, game_work.completion(), readable);
         other_queue_copy = GetTickCount64();
       }
       dlssg_evaluation(of<dlssg_form>(value, events::dlssg));
+      // FG as the frame's evaluations saw it, then a late FG Off: the game's
+      // options call after those evaluations, before the frame's Present
+      // (fg=off_late). Its order fences are renewed after that Present.
+      const bool fg_evaluated = fg_on;
+      const bool late_off = fg_on && of<fg_event>(value, events::fg) == fg_event::off_late;
+      if (late_off) {
+        set_frame_generation(false);
+        renew_after_present = true;
+      }
       move(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
       // A hitch after the frame's calls, before its Present. What follows is
       // the fixture's bookkeeping, read at the time the Present decides:
@@ -1848,7 +1962,7 @@ namespace {
       // one that supplied an FG copy, which it expects to supply too: the
       // Present shows the scope's FG depth instead (FG keeps the frames it
       // supplies; the next frame without an FG copy turns the scope silent).
-      const bool owned = std::exchange(fg_supplied, false) && fg_on;
+      const bool owned = std::exchange(fg_supplied, false) && fg_evaluated;
       // So does a live scope whose frame's only FG input is DLSS-G's compute
       // copy: the Present shows that copy's copy-out once the game's fence
       // waits order the presenting queue after it (U-C1), else the scope's
@@ -1884,9 +1998,23 @@ namespace {
           }
         }
       }
-      if (fg_on && dlssg_choice != dlssg_form::none) {
+      if (fg_evaluated && dlssg_choice != dlssg_form::none) {
         dlssg_evaluated = now;
         ++dlssg_frames;
+      }
+      // A late FG Off retired the frame's FG copies (its FG tag's and
+      // DLSS-G's) before any Present showed them: they supply nothing.
+      if (late_off) {
+        constexpr auto fg_copies = std::uint8_t(continuity::tag_copy | continuity::dlssg_input);
+        for (auto *mask : {&supply.legal, &supply.limited, &supply.permitted, &supply.elsewhere, &supply.immediate}) {
+          *mask = std::uint8_t(*mask & ~fg_copies);
+        }
+        for (const unsigned i : {1u, 2u}) {
+          supply.made[i] = supply.capture[i] = 0;
+        }
+        supply.completions.erase(std::remove_if(supply.completions.begin(), supply.completions.end(), [](const auto &value) {
+          return (value.sources & fg_copies) != 0;
+        }), supply.completions.end());
       }
       const auto owned_sr = owned || held_off || compute_scope ? std::uint8_t(supply.legal & continuity::sr_evaluate) : std::uint8_t {};
       // A frame whose Present can read none of its legal sources: its copies
@@ -1909,6 +2037,12 @@ namespace {
       continuity_log.pending.permitted = supply.permitted;
       continuity_log.pending.limited = supply.limited;
       continuity_log.pending.owned = owned_sr;
+      // Copied, yet kept off-screen by the FG hold (held_off; a live scope
+      // refuses the others): after FG Off the lineage's successor copies.
+      const bool fg_held = held_off && !owned && !compute_scope;
+      continuity_log.pending.fg_held = fg_held ? owned_sr : std::uint8_t {};
+      // The frame's Present comes with FG off (also after a late Off).
+      continuity_log.pending.fg_off = !fg_on;
       continuity_log.pending.limit = supply.legal ? continuity::limitation::none : supply.limit;
       continuity_log.pending.tick = supply.tick;
       continuity_log.pending.late_after = std::any_of(late_signals.begin(), late_signals.end(), [&](const order_fence *order) {
@@ -1929,13 +2063,14 @@ namespace {
       // the presenting queue does not show: FG input without an FG scope.
       continuity_log.pending.elsewhere = supply.elsewhere;
       for (const auto &value : supply.completions) {
-        if (value.sources == continuity::sr_evaluate && (owned || held_off || compute_scope)) {
+        if (value.sources == continuity::sr_evaluate && (owned || compute_scope)) {
           continue;
         }
         if (value.sources == continuity::dlssg_input && !(fg_on && frame_generation_scope())) {
           continue;
         }
-        continuity_log.pending.completes(value.sources, value.probe, value.relied, value.capture);
+        continuity_log.pending.completes(value.sources, value.probe, value.relied, value.capture,
+          value.sources == continuity::sr_evaluate && fg_held);
       }
     }
 
@@ -2045,7 +2180,7 @@ namespace {
       const auto &value = (*frames)[frame];
       const auto event = of<fg_event>(value, events::fg);
       const auto generated = std::uint32_t(value[events::generated]);
-      if (event != fg_event::keep) {
+      if (event == fg_event::on || event == fg_event::off) {
         set_frame_generation(event == fg_event::on, generated);
         // The game creates its frame-generation objects anew, these fences
         // among them.
@@ -2069,6 +2204,7 @@ namespace {
       };
       after_present = [this] {
         open_dlssg_gate();
+        open_sr_gate();
       };
       present_frame();
       render_tracked_depth = {};
@@ -2081,6 +2217,11 @@ namespace {
       // generated Presents after it).
       for (auto *order : std::exchange(late_signals, {})) {
         signal_again(*order, order->value % 2 == 0, false);
+      }
+      // A late FG Off: the game creates its frame-generation objects anew,
+      // these fences among them.
+      if (std::exchange(renew_after_present, false)) {
+        renew_order();
       }
       if (supply.legal || supply.limited || (supply.permitted & continuity::api_sources)) {
         api_supplied = GetTickCount64();
@@ -2171,6 +2312,7 @@ namespace {
       script_presenting = queue.p;
       renew_order();
       late_signals.clear();
+      renew_after_present = false;
       script_name = where.c_str();
       script_deadline = GetTickCount64() + 15000 + 150 * value.frames.size();
     }
@@ -2296,7 +2438,7 @@ namespace {
         }
       };
       // Each event kind back to its default in every frame.
-      for (const auto d : {dlssg_gpu, hitch, order, ui, generated, drs, untag, dlssg, state, entry, sr, tag, fg}) {
+      for (const auto d : {sr_gpu, dlssg_gpu, hitch, order, ui, generated, drs, untag, dlssg, state, entry, sr, tag, fg}) {
         auto candidate = current;
         for (auto &value : candidate) {
           reset(value, d);
