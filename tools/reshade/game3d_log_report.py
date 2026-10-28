@@ -798,6 +798,8 @@ class Session:
     # The add-on's own line per FG mode change (FG_SWITCH_LINE): time, viewport, from, to, Presents, first fresh ms
     # (None: none within 1 s), held, oldest held ms, mono, first reason, its selection.
     fg_switch_lines: list[tuple] = field(default_factory=list)
+    # Each readiness line's time and Present index (the add-on's count of Presents), in log order.
+    presents: list[tuple[float, int]] = field(default_factory=list)
     resets: list[float] = field(default_factory=list)  # Each runtime_reset export pause.
     inactive: Counter = field(default_factory=Counter)
     pauses: list[tuple[float, str, bool]] = field(default_factory=list)  # Each export pause: time, reason, routine.
@@ -1032,6 +1034,8 @@ def parse(lines) -> Session:
             key = runtime.group(1).lower() if runtime else ''
             present = PRESENT.search(text)
             present = int(present.group(1)) if present else None
+            if present is not None:
+                s.presents.append((t, present))
             reset = CURRENT_RESET.search(text)
             reset = bool(reset and reset.group(1) == '1')
             if reset:
@@ -1263,17 +1267,44 @@ def fg_mode_switches(s: Session) -> list[tuple[float, int]]:
 
 def switch_episodes(s: Session, t: float, until: float) -> list[DepthEpisode]:
     """The add-on's depth losses that began at an FG switch at t: logged from SWITCH_LEAD_S before its line (the
-    add-on logs asynchronously) to the next switch or SETTLE_S after it, whichever comes first."""
-    return [e for e in s.depth_episodes if t - SWITCH_LEAD_S <= e.start < min(until, t + SETTLE_S)]
+    add-on logs asynchronously) to SWITCH_LEAD_S before the next switch, or SETTLE_S after it, whichever comes first,
+    so each loss belongs to one switch (until 10-28 the windows of switches less than SETTLE_S apart overlapped, and
+    one loss was listed under both)."""
+    return [e for e in s.depth_episodes if t - SWITCH_LEAD_S <= e.start < min(until - SWITCH_LEAD_S, t + SETTLE_S)]
 
 
-def fg_switch_checks(s: Session, add) -> None:
+def streamed_without_depth(s: Session, e: DepthEpisode) -> bool:
+    """Whether a loss that ended with an export pause covered a Present that streamed without depth: the pause came
+    at least one Present interval after the loss (the interval to the next Present the add-on logged an index for).
+    A shorter one paused the export at the loss's own Present, so nothing streamed without depth (the export stop's
+    own invalidation, or a game losing its focus as it presented). Unknown counts as a loss."""
+    if e.ending != 'paused' or e.end is None:
+        return True
+    if e.lost_present is None:
+        return True
+    later = next(((t, p) for t, p in s.presents if t > e.start and p > e.lost_present), None)
+    if not later:
+        return True
+    interval = (later[0] - e.start) / (later[1] - e.lost_present)
+    return e.end - e.start >= interval
+
+
+def streaming(s: Session, t: float) -> bool:
+    """Whether the export streamed at t (from a generation to the next export inactive)."""
+    return any(a <= t and (b is None or t < b) for a, b in s.streamed)
+
+
+def fg_switch_checks(s: Session, add, depth_from: float | None = None) -> None:
     """Depth at FG switches: each FG mode change with what the Presents after it showed. The add-on's own line
     (since 10-28) names the Presents to the first fresh copy, the held ones and the oldest held copy's age, and the
     mono ones; its depth losses there name their time without depth, Presents, reason, selection and the retained
     copy's age. Until 10-28 the report excused every loss within SETTLE_S of a switch, so the cost of each FG toggle
-    went unlisted."""
-    times, lost = [], 0
+    went unlisted. The line's mono Presents are a loss only at a switch while the export streamed, once depth had
+    started (depth_from): the line counts every Present without depth, also before the session's first depth (an FG
+    On at launch) and while the export was paused. A loss that ended with an export pause is one only when a Present
+    streamed without depth before the pause (streamed_without_depth); the others are listed as INFO, at export
+    stops."""
+    times, stops, lost = [], [], 0
     switches = fg_mode_switches(s)
     for n, (t, mode) in enumerate(switches):
         until = switches[n + 1][0] if n + 1 < len(switches) else float('inf')
@@ -1282,15 +1313,24 @@ def fg_switch_checks(s: Session, add) -> None:
                      and v[3] == mode), None)
         if line:
             _, _, _, _, presents, fresh, held, held_age, mono, reason, selection = line
+            counted = depth_from is not None and t >= depth_from and streaming(s, t)
             parts.append(f'{presents} Present{"s" if presents != 1 else ""} to '
                          + (f'fresh depth ({fresh} ms)' if fresh is not None else 'no fresh depth within 1 s')
                          + (f', {held} held (oldest {held_age} ms)' if held else '')
                          + (f', {mono} mono' if mono else '')
-                         + (f', first {reason} selection={selection}' if held or mono else ''))
-            had_loss = bool(mono)
+                         + (f', first {reason} selection={selection}' if held or mono else '')
+                         + ('' if counted or not mono else
+                            ' (not streamed)' if depth_from is not None and t >= depth_from else
+                            ' (before depth started)'))
+            had_loss = bool(mono) and counted
         else:
             had_loss = False
         for e in switch_episodes(s, t, until):
+            if not streamed_without_depth(s, e):
+                stops.append(f'{clock(t, True)} FG {"on" if mode else "off"}: {e.reason}, {e.provider} '
+                             f'selection={e.selection} at {clock(e.start, True)}, the export paused '
+                             f'{round((e.end - e.start) * 1000)} ms later')
+                continue
             presents = e.presents()
             parts.append('mono' + (f' {e.unavailable_ms} ms' if e.unavailable_ms is not None else '')
                          + (f' over {presents} Present{"s" if presents != 1 else ""}' if presents else '')
@@ -1306,6 +1346,10 @@ def fg_switch_checks(s: Session, add) -> None:
     add(Check('WARN' if lost else 'PASS', 'Depth at FG switches',
               f'{len(times)} FG switch{"es" if len(times) != 1 else ""}'
               + (f', {lost} with depth lost' if lost else ', no depth lost'), times))
+    if stops:
+        add(Check('INFO', 'Depth at FG switches, export stops',
+                  f'{len(stops)} depth loss{"es" if len(stops) != 1 else ""} at an FG switch that the export paused '
+                  'at the loss\'s own Present: no Present streamed without depth', stops))
 
 
 def warm_up(s: Session, runs: list['Unplaced'], add) -> None:
@@ -1373,7 +1417,7 @@ def evaluate(s: Session) -> list[Check]:
                   f'fresh from {clock(depth_start.start)}; '
                   f'{100 * missing / pub:.1f}% of later publications without depth'
                   + ('; gaps outside export starts and resets' if gaps else ''), gaps))
-        fg_switch_checks(s, add)
+        fg_switch_checks(s, add, depth_start.start)
         if paused:
             losses = depth_gaps(s, paused)
             add(Check('INFO', 'Depth paused by the game',

@@ -1185,6 +1185,78 @@ class ReadinessReport(unittest.TestCase):
         self.assertIn('60 Presents to no fresh depth within 1 s, 12 held (oldest 250 ms), 48 mono',
                       run(BASE + [on, off, late])['Depth at FG switches'].times[1])
 
+    def test_a_loss_belongs_to_one_fg_switch_and_an_export_stop_is_no_loss(self):
+        # E33 2026-10-22b: two switches 2.8 s apart listed one loss under both, as the first switch's window ran
+        # SETTLE_S past it and the second's began SWITCH_LEAD_S before it; and a loss the export's pause stopped at the
+        # loss's own Present (an alt-tab 2 ms after it, nothing streamed without depth) warned as an FG-switch loss.
+        def readiness(t, kind, present, ms=0):
+            return (f'{t} [ 1234] | INFO  | [Sunshine 3D] Sunshine depth readiness: {kind} reason='
+                    f'{"retained_depth_expired" if kind == "lost" else "fresh_copy"} runtime=0x1 present={present} '
+                    f'unavailable_ms={ms} suppressed_episodes=0; provider=Streamline prior_provider=Streamline '
+                    f'selection={"inactive_views" if kind == "lost" else "current_capture"} prior_age_ms=406')
+
+        def fg(t, mode):
+            return (f'{t} [ 1234] | INFO  | [Sunshine 3D] Sunshine Streamline frame generation: viewport=1 mode={mode} '
+                    'generated_frames=3 supported=1 success=1')
+
+        def paused(t):
+            return (f'{t} [ 1234] | INFO  | [Sunshine 3D] Sunshine SBS: export inactive (not_foreground); waiting for '
+                    'a valid focused technique')
+        tail = [output('10:00:25', 1000, 0, 0, 750, 250)]
+        # One loss 50 ms before the second switch, within SETTLE_S of the first: the second's only.
+        once = run(BASE + [fg('10:00:17:400', 1), readiness('10:00:20:150', 'lost', 10), fg('10:00:20:200', 0),
+                           readiness('10:00:20:250', 'recovered', 16, 100)] + tail)
+        self.assertEqual(once['Depth at FG switches'].times,
+                         ['10:00:17.400 FG on: no depth loss logged',
+                          '10:00:20.200 FG off: mono 100 ms over 6 Presents retained_depth_expired, Streamline '
+                          'selection=inactive_views, prior_age 406 ms'])
+        self.assertEqual(once['Depth at FG switches'].detail, '2 FG switches, 1 with depth lost')
+        # The export paused 2 ms after the loss, before the next Present (the next index, 28 ms after the loss):
+        # nothing streamed without depth, so it is listed at export stops, not as a switch's loss.
+        stop = run(BASE + [fg('10:00:17:400', 1), readiness('10:00:20:150', 'lost', 10), paused('10:00:20:152'),
+                           fg('10:00:20:200', 0), readiness('10:00:20:178', 'recovered', 11, 28)] + tail)
+        self.assertEqual((stop['Depth at FG switches'].status, stop['Depth at FG switches'].detail),
+                         ('PASS', '2 FG switches, no depth lost'))
+        self.assertEqual(stop['Depth at FG switches, export stops'].status, 'INFO')
+        self.assertEqual(stop['Depth at FG switches, export stops'].times,
+                         ['10:00:20.200 FG off: retained_depth_expired, Streamline selection=inactive_views at '
+                          '10:00:20.150, the export paused 2 ms later'])
+        # A Present streamed without depth before the pause (its index logged 16 ms after the loss, the pause 40 ms
+        # after it): a loss.
+        streamed = run(BASE + [fg('10:00:17:400', 1), readiness('10:00:20:150', 'lost', 10),
+                               readiness('10:00:20:166', 'lost', 11), paused('10:00:20:190'), fg('10:00:20:200', 0)]
+                       + tail)
+        self.assertEqual(streamed['Depth at FG switches'].status, 'WARN')
+        self.assertNotIn('Depth at FG switches, export stops', streamed)
+        self.assertIn('until the export paused', streamed['Depth at FG switches'].times[1])
+
+    def test_the_addons_fg_switch_line_counts_mono_only_where_depth_streamed(self):
+        # The add-on's line counts every Present without depth after a mode change: at a launch with FG on, before the
+        # session's first depth (E33 waited 20 s for its scene), and while the export was paused (an alt-tab FG Off).
+        # Neither lost depth the owner saw, so neither warns; the line is still listed.
+        def switch(t, before, mono):
+            return (f'{t} [ 1234] | INFO  | [Sunshine 3D] Sunshine depth FG switch: viewport=0 mode={before}->'
+                    f'{1 - before} presents={mono} first_fresh_ms=none held=0 max_held_age_ms=0 mono={mono} '
+                    'first_reason=no_depth selection=not_attempted')
+        on = ('10:00:02:500 [ 1234] | INFO  | [Sunshine 3D] Sunshine Streamline frame generation: viewport=0 mode=1 '
+              'generated_frames=1 supported=1 success=1')
+        launch = run(BASE[:4] + [on, switch('10:00:03:500', 0, 49)] + BASE[4:])
+        self.assertEqual(launch['Depth at FG switches'].status, 'PASS')
+        self.assertEqual(launch['Depth at FG switches'].times,
+                         ['10:00:02.500 FG on: 49 Presents to no fresh depth within 1 s, 49 mono, first no_depth '
+                          'selection=not_attempted (before depth started)'])
+        off = on.replace('mode=1 generated_frames=1', 'mode=0 generated_frames=0').replace('02:500', '17:400')
+        paused = ('10:00:17:000 [ 1234] | INFO  | [Sunshine 3D] Sunshine SBS: export inactive (not_foreground); '
+                  'waiting for a valid focused technique')
+        resumed = line('10:00:19', '[Sunshine 3D] Sunshine SBS: generation 2, 7680x2160 full SBS, DXGI 10, D3D12, '
+                                   'scRGB (source color 3)')
+        alt_tab = run(BASE + [on.replace('02:500', '16:000'), paused, off, switch('10:00:18:400', 1, 60), resumed])
+        self.assertEqual(alt_tab['Depth at FG switches'].status, 'PASS')
+        self.assertTrue(alt_tab['Depth at FG switches'].times[1].endswith('(not streamed)'))
+        # The same line while the export streams warns.
+        self.assertEqual(run(BASE + [on.replace('02:500', '16:000'), off, switch('10:00:18:400', 1, 60)])[
+            'Depth at FG switches'].status, 'WARN')
+
     def test_a_depth_gap_names_the_games_own_freeze_inside_it(self):
         # E33 2026-10-22 15:43:35: the game stopped presenting for 773 ms while it streamed in assets and supplied no
         # depth for 1.9 s around it. The gap still warns, and names the freeze; a Present gap before the loss does not

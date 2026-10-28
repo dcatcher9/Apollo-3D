@@ -1,14 +1,17 @@
 Game 3D readiness: SandFall-Win64-Shipping.exe  14:35:02 to 14:37:04 (2m02s, exited)
 [PASS] Add-on: loaded; output 7680x2160 sRGB D3D12 (generation 4)
 [PASS] Depth: fresh from 14:35:09; 2.1% of later publications without depth
-[WARN] Depth at FG switches: 7 FG switches, 4 with depth lost
+[WARN] Depth at FG switches: 7 FG switches, 1 with depth lost
          14:35:49.900 FG on: mono 31 ms over 3 Presents no_retained_depth, Streamline selection=fg_scope_mismatch, prior_age 375 ms
-         14:36:23.771 FG off: mono explicit_reuse_invalidation, unknown selection=not_attempted, prior_age 235 ms, until the export paused
-         14:36:28.103 FG on: mono retained_depth_expired, Streamline selection=inactive_views, prior_age 406 ms, until the export paused
-         14:36:30.880 FG off: mono retained_depth_expired, Streamline selection=inactive_views, prior_age 406 ms, until the export paused
+         14:36:23.771 FG off: no depth loss logged
+         14:36:28.103 FG on: no depth loss logged
+         14:36:30.880 FG off: no depth loss logged
          14:36:39.759 FG on: no depth loss logged
          14:36:47.307 FG off: no depth loss logged
          14:36:54.509 FG on: no depth loss logged
+[INFO] Depth at FG switches, export stops: 2 depth losses at an FG switch that the export paused at the loss's own Present: no Present streamed without depth
+         14:36:23.771 FG off: explicit_reuse_invalidation, unknown selection=not_attempted at 14:36:23.722, the export paused 10 ms later
+         14:36:30.880 FG off: retained_depth_expired, Streamline selection=inactive_views at 14:36:30.861, the export paused 2 ms later
 [INFO] Depth paused by the game: 2 depth losses in which the game ran no DLSS (no active depth view: a menu or loading screen) and resumed it with its own scene reset; those frames were flat
          14:35:30.766-14:35:31.598 (828 ms) retained_depth_expired, NGX selection=inactive_views (the game supplied no depth)
          14:35:36.825-14:35:38.087 (1265 ms) retained_depth_expired, NGX selection=inactive_views (the game supplied no depth)

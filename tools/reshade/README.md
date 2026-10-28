@@ -708,7 +708,16 @@ that showed a fresh copy or a second after the change (Presents to fresh depth, 
 copy and the oldest held copy's age, the mono ones, and the first Present's reason and selection;
 status lines come at most once a second, so a hold of one or two Presents shows only there), and
 each depth loss that began at the switch (its time and Presents without depth, reason, selection
-and the retained copy's age `prior_age_ms`). It warns when any switch lost depth. INFO
+and the retained copy's age `prior_age_ms`). It warns when any switch lost depth. Each loss belongs
+to one switch: its window runs from 0.25 s before the switch to 0.25 s before the next one or 3 s
+after it (until 10-28 the windows of switches less than 3 s apart overlapped, and E33 10-22b listed
+one loss under two switches). The line's mono Presents are a loss only at a switch while the export
+streamed, once depth had started (an FG On at launch, before the session's first depth, and an
+alt-tab FG Off are listed with `(before depth started)` or `(not streamed)`). A loss that ended
+with an export pause is one only when a Present streamed without depth before the pause (the pause
+at least one Present interval after the loss, by the next Present index the add-on logged); the
+others, the export stop's own invalidation or a game losing its focus as it presented (E33 10-22b:
+10 and 2 ms before the pause), are INFO `Depth at FG switches, export stops`. INFO
 `FG-switch placement warm-up` lists, per switch, the flat runs after it while depth was shown (the
 placement calibration restarts at a switch between the FG and SR sources): the next round's item,
 which `Placement flat` counts as calibrations and never drops. Render-size changes
