@@ -3113,12 +3113,16 @@ namespace sunshine_streamline::depth_capture {
     // named (its FG nomination had replaced the viewport's SR view), so that
     // Present read inactive or ambiguous views and moved acquire's gap
     // watermark, which revoked the same SR copies. Not while another
-    // viewport has a view in this epoch: a second source-0 view there would
-    // make its picks ambiguous, so the view goes as before.
+    // viewport's view in this epoch is active (select_latest_capture): a
+    // source-0 view beside it keeps the picks ambiguous, so the view goes as
+    // before. An inactive one (a viewport that stopped evaluating, such as
+    // the session timelines' earlier viewports) makes nothing ambiguous.
     const evaluation_head *head = nullptr;
+    const auto now = GetTickCount64();
     if (fg_role && current.epoch == epoch && current.source_id == source_id &&
         std::none_of(current.views.begin(), current.views.end(), [&](const evaluation_head &view) {
-          return view.sequence && view.epoch == epoch && view.viewport != viewport;
+          return view.sequence && view.epoch == epoch && view.viewport != viewport &&
+            (sunshine_freshness::fresh_lt(view.tick, now, sunshine_freshness::source_age_ms) || view_presenting(view, provider));
         }))
       for (const auto &view : current.views)
         if (view.epoch == epoch && view.source_id == source_id && view.sequence == current.sequence) head = &view;

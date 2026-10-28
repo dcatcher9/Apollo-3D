@@ -4533,14 +4533,19 @@ earlier frame returns); the scope's newest nomination, when it is the namespace'
 the viewport's ordinary source as a missing frame of the lineage (the interruption rule below), so
 the newest SR/RR snapshot recorded since the shown FG copy stands in at once
 (`selection=completed_snapshot`, `current_capture`, or `lineage_snapshot` when FG turns on again).
-While another viewport has a view in that epoch, that FG nomination goes as before rather than add
-a second ordinary view, which would make the picks ambiguous. An NGX copy published after the shown
+While another viewport's view in that epoch is active, that FG nomination goes as before: an
+ordinary view beside it would keep the picks ambiguous (a view that stopped evaluating, past the
+source age, makes nothing ambiguous). An NGX copy published after the shown
 FG copy takes the queue as at any handover, which makes the SR copies before it historical. Until
 10-28 FG Off moved the owner's admission watermark to the newest capture, or left a namespace head
 no view named, which the next Present read as an interruption: either revoked the viewport's SR
 copies recorded since the shown FG copy, so a Present before the next SR copy was readable held the
-older FG copy (`completed_before_gap`), or went mono once that passed the source age. It needs an
-SR copy still in flight across a Present at FG Off; the `completed_before_gap` losses at FG Off in
+older FG copy (`completed_before_gap`), or went mono once that passed the source age, and a
+released association could hand the queue to Generic. A Present selects a nominated SR copy as
+the source whether or not its pixels are readable yet, so an FG owner meets a later SR copy at FG
+Off only when the options call comes after the frame's evaluations and before its Present, or the
+SR list is executed after its Present; an SR owner meets a DLSS-G nomination as the newest when the
+Off lands between it and the next SR evaluation. The `completed_before_gap` losses at FG Off in
 Assassin's Creed Shadows' logs of 10-24 to 10-27 came from its refused SR nominations instead,
 missing frames since 10-28 (below). The finished FG copy is
 held across FG Off within its source age, as any source's missing frame is: the queue stays the
