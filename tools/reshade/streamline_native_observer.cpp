@@ -46,6 +46,9 @@ namespace sunshine_streamline::native_observer {
     // no game object points into the add-on).
     constexpr GUID order_queue_guid{0x3c1d7a52, 0x6b0e, 0x4f43, {0x8d, 0x27, 0x5a, 0x90, 0xe1, 0x44, 0x0b, 0x6c}};
     constexpr GUID order_fence_guid{0x7e64b1a9, 0x2f58, 0x4c0d, {0xa3, 0x91, 0x0c, 0x6f, 0x5d, 0x28, 0xe4, 0x17}};
+    // A fence ReShade signalled in the add-on's flush of its immediate list
+    // (own_flush_scope): ReShade's own, which no game queue waits on.
+    constexpr GUID own_fence_guid{0x52a0c4e7, 0x93d1, 0x4b6f, {0x8e, 0x15, 0x2c, 0x71, 0xa9, 0x0d, 0x36, 0xf8}};
     enum class state { empty, pending, installed, rejected };
     struct target {
       sunshine_native_vtable::slot location;
@@ -73,6 +76,7 @@ namespace sunshine_streamline::native_observer {
     std::atomic<std::uint64_t> calls{}, observed{}, unreadable{}, dropped{}, installed{}, rejected{}, nested{}, suppressed{};
     std::atomic<std::uint64_t> barrier_overflow{}, submission_overflow{}, discovery_contention{};
     thread_local unsigned suppression_depth{};
+    thread_local unsigned own_flush_depth{};
     struct invocation;
     thread_local std::array<invocation *, method_count> current_invocations{};
 
@@ -91,7 +95,10 @@ namespace sunshine_streamline::native_observer {
       SRWLOCK lock = SRWLOCK_INIT;
       model_type model;
       std::atomic<bool> requested{true}, reset_pending{};
-      std::atomic<std::uint64_t> queue_cookies{}, resets{}, ordered_count{}, cpu_unhooked{}, contention{};
+      std::atomic<std::uint64_t> queue_cookies{}, resets{}, ordered_count{}, cpu_unhooked{}, contention{}, own_signals{};
+      // The newest tag queue_order_conflicted found conflicted: its answer
+      // when the lock is held elsewhere (the present thread never waits).
+      std::atomic<std::uint64_t> conflicted_seen{};
       std::array<std::atomic<std::uint64_t>, static_cast<unsigned>(sunshine_queue_order::refusal::count)> refused{};
       thread_local position last_execute{};
       struct queue_memory { std::uint64_t cookie, id; };
@@ -197,6 +204,7 @@ namespace sunshine_streamline::native_observer {
 
     // Defined after the slot helpers below.
     bool order_on();
+    bool own_signal(ID3D12Fence *fence);
     void order_enter(invocation &call, ID3D12CommandQueue *queue, bool blocking);
     bool order_quiet(const invocation &call);
     void order_signal(ID3D12CommandQueue *queue, invocation &call, ID3D12Fence *fence, UINT64 value);
@@ -312,14 +320,16 @@ namespace sunshine_streamline::native_observer {
     // Queue Signal: logged, with its poison checks, BEFORE it is forwarded
     // (design finding 7); a failed call leaves a conservative entry. Only a
     // call that is logged may wait on the order lock for its queue's record:
-    // the add-on's own (suppressed) calls take TryAcquire, as Execute does.
+    // the add-on's own (suppressed) calls and ReShade's Signals of its own
+    // fences (own_signal) take TryAcquire, as Execute does.
     template<unsigned Index> HRESULT STDMETHODCALLTYPE signal_detour(ID3D12CommandQueue *queue, ID3D12Fence *fence, UINT64 value) {
       const DWORD incoming = GetLastError();
       auto &slot = targets[static_cast<unsigned>(method::signal)][Index];
       invocation call(method::signal, slot.status.load(std::memory_order_acquire));
       restore_error outgoing{incoming};
-      order_enter(call, queue, call.eligible);
-      if (call.eligible && !call.inherited && fence && order_on()) order_signal(queue, call, fence, value);
+      const bool logged = call.eligible && !(fence && order_on() && own_signal(fence));
+      order_enter(call, queue, logged);
+      if (logged && !call.inherited && fence && order_on()) order_signal(queue, call, fence, value);
       SetLastError(incoming);
       const HRESULT result = reinterpret_cast<queue_fence_fn>(slot.original.load(std::memory_order_acquire))(queue, fence, value);
       outgoing.value = GetLastError();
@@ -576,6 +586,29 @@ namespace sunshine_streamline::native_observer {
       const order::fence_bytes bytes{value.id, value.signaller, static_cast<std::uint64_t>(value.why)};
       auto *object = reinterpret_cast<ID3D12Object *>(fence);
       object->lpVtbl->SetPrivateData(object, order_fence_guid, sizeof(bytes), &bytes);
+    }
+    // ReShade's Signal of a fence of its own: one it signals in the add-on's
+    // flush of its immediate list (own_flush_scope), marked there in the
+    // fence's private data, so that its later Signals (ReShade's own flush at
+    // the end of a Present, a game thread's Execute flushing the list) are
+    // known too. Never logged: no game queue waits on such a fence, and once
+    // marked it is never logged again, so its record (if a Signal before the
+    // mark made one) never reads a value no logged signal set. Until 10-27
+    // each such Signal waited on the order lock, on the present thread at
+    // every flush the add-on made.
+    bool own_signal(ID3D12Fence *fence) {
+      const restore_error incoming{GetLastError()};
+      std::uint8_t mark{};
+      if (private_bytes(fence, own_fence_guid, &mark, sizeof(mark)) && mark) {
+        ++order::own_signals;
+        return true;
+      }
+      if (!own_flush_depth) return false;
+      mark = 1;
+      auto *object = reinterpret_cast<ID3D12Object *>(fence);
+      object->lpVtbl->SetPrivateData(object, own_fence_guid, sizeof(mark), &mark);
+      ++order::own_signals;
+      return true;
     }
     // The fence's record id, sighting it inside a game call on it: its CPU
     // Signal slot must be installed first (no record otherwise: its CPU
@@ -937,24 +970,43 @@ namespace sunshine_streamline::native_observer {
     if (order::reset_pending.load(std::memory_order_acquire)) return refuse(refusal::disabled);
     if (!tracked) return refuse(refusal::untracked);
     if (!reader_covered || !producer_covered) return refuse(refusal::uncovered);
-    AcquireSRWLockShared(&order::lock);
+    // The present thread never waits for a game thread's hold: a verdict
+    // the lock is busy for is refused, so the completion rule decides.
+    if (!TryAcquireSRWLockShared(&order::lock)) {
+      ++order::contention;
+      out.why = refusal::pending_hooks;
+      return out;
+    }
     out = order::model.ordered(memory.id, producer);
     ReleaseSRWLockShared(&order::lock);
     if (out.ordered) ++order::ordered_count;
     else ++order::refused[static_cast<unsigned>(out.why)];
     return out;
   }
-  void queue_order_rely(const sunshine_queue_order::verdict &value, std::uint64_t tag) {
-    if (!value.ordered) return;
-    AcquireSRWLockExclusive(&order::lock);
-    order::model.rely(value, GetTickCount64(), tag);
+  bool queue_order_rely(const sunshine_queue_order::verdict &value, std::uint64_t tag) {
+    if (!value.ordered) return false;
+    // Busy: the read could not be protected, so it is not made (fail-safe).
+    if (!TryAcquireSRWLockExclusive(&order::lock)) {
+      ++order::contention;
+      return false;
+    }
+    // A pending reset forgets the verdict's fences, which conflicts it here.
+    apply_order_reset();
+    const bool stands = order::model.rely(value, GetTickCount64(), tag);
     ReleaseSRWLockExclusive(&order::lock);
+    return stands;
   }
   bool queue_order_conflicted(std::uint64_t tag) {
     if (!tag) return false;
-    AcquireSRWLockShared(&order::lock);
+    // Busy: the last answer for this tag. A conflict logged during that
+    // hold is seen at the next Present, as one logged just after this call.
+    if (!TryAcquireSRWLockShared(&order::lock)) {
+      ++order::contention;
+      return order::conflicted_seen.load(std::memory_order_relaxed) == tag;
+    }
     const bool out = order::model.conflicted(tag);
     ReleaseSRWLockShared(&order::lock);
+    if (out) order::conflicted_seen.store(tag, std::memory_order_relaxed);
     return out;
   }
   void queue_order_forget_device(std::uint64_t device) {
@@ -981,13 +1033,16 @@ namespace sunshine_streamline::native_observer {
       out.pending = order_pending();
       ReleaseSRWLockShared(&targets_lock);
     }
-    AcquireSRWLockShared(&order::lock);
-    out.model = order::model.snapshot();
-    ReleaseSRWLockShared(&order::lock);
+    // The status line never waits for a game thread's hold.
+    if (TryAcquireSRWLockShared(&order::lock)) {
+      out.model = order::model.snapshot();
+      ReleaseSRWLockShared(&order::lock);
+    } else out.busy = true;
     out.ordered = order::ordered_count.load(std::memory_order_relaxed);
     out.resets = order::resets.load(std::memory_order_relaxed);
     out.cpu_unhooked = order::cpu_unhooked.load(std::memory_order_relaxed);
     out.contention = order::contention.load(std::memory_order_relaxed);
+    out.own_signals = order::own_signals.load(std::memory_order_relaxed);
     for (unsigned i = 0; i != order::refused.size(); ++i) out.refused[i] = order::refused[i].load(std::memory_order_relaxed);
     return out;
   }
@@ -995,6 +1050,8 @@ namespace sunshine_streamline::native_observer {
     const suppression_scope own;
     return queue->lpVtbl->Signal(queue, fence, value);
   }
+  own_flush_scope::own_flush_scope() { ++own_flush_depth; }
+  own_flush_scope::~own_flush_scope() { --own_flush_depth; }
   const hooked_method *hooked_methods(unsigned &count) {
     count = method_count;
     return hooked_table;
@@ -1027,7 +1084,8 @@ namespace sunshine_streamline::native_observer {
     order::model.reset();
     for (auto &slot : order::tickets) { slot.id = 0; slot.entered = 0; slot.slots = {}; }
     order::requested = true; order::reset_pending = false;
-    order::resets = order::ordered_count = order::cpu_unhooked = order::contention = 0;
+    order::resets = order::ordered_count = order::cpu_unhooked = order::contention = order::own_signals = 0;
+    order::conflicted_seen = 0;
     for (auto &value : order::refused) value = 0;
     calls = observed = unreadable = dropped = installed = rejected = nested = suppressed = slot_reads = 0;
     barrier_overflow = submission_overflow = discovery_contention = 0;

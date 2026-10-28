@@ -817,6 +817,70 @@ namespace {
         "an add-on Signal was logged as the game's, or a Signal was not forwarded");
     }
 
+    // Nor does the present thread's other order work (10-27 review). Each
+    // flush of ReShade's immediate list the add-on makes ends in ReShade's
+    // Signal of its own fence: in the add-on's flush scope that fence is
+    // marked ReShade's, so neither that Signal nor a later one outside the
+    // scope (ReShade's own flush at the end of a Present) is logged or waits.
+    // A verdict, a rely and a conflict check while a game thread holds the
+    // lock return at once: refused, not made (the copy is not recorded) and
+    // the last answer.
+    {
+      require(bool(execute(reader)) && bool(execute(producer)), "the review queues were not sighted again");
+      order_object edge{tables.fence.data(), object_kind::unknown, &device};
+      require(wait(reader, edge, 1) == S_OK && signal(producer, edge, 1) == S_OK, "the edge fence was not sighted");
+      const auto relied_at = execute(producer);
+      require(signal(producer, edge, 2) == S_OK && wait(reader, edge, 2) == S_OK, "the edge fence's second calls failed");
+      const auto verdict = ordered(reader, relied_at);
+      require(verdict.ordered, "the edge fence proved no edge");
+      order_object reshade{tables.fence.data(), object_kind::unknown, &device}, sighted{tables.fence.data(), object_kind::unknown, &device};
+      const auto before = observer::queue_order_counts();
+      const auto natives = order_signals;
+      std::atomic<bool> held{}, release{}, done{};
+      sunshine_queue_order::verdict busy_verdict{true};
+      bool busy_rely = true, busy_conflicted = true;
+      order_set_data_target = &sighted;
+      order_on_set_data = [&] {
+        held.store(true, std::memory_order_release);
+        while (!release.load(std::memory_order_acquire)) std::this_thread::yield();
+      };
+      std::thread holder([&] { signal(producer, sighted, 1); });
+      while (!held.load(std::memory_order_acquire)) std::this_thread::yield();
+      std::thread present([&] {
+        {
+          const observer::own_flush_scope flush;
+          signal(producer, reshade, 1);
+        }
+        signal(producer, reshade, 2);
+        busy_verdict = ordered(reader, relied_at);
+        busy_rely = observer::queue_order_rely(verdict, 71);
+        busy_conflicted = observer::queue_order_conflicted(71);
+        done.store(true, std::memory_order_release);
+      });
+      // A deadlock guard only, as above.
+      for (const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+           !done.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < until;)
+        std::this_thread::yield();
+      const bool returned = done.load(std::memory_order_acquire);
+      release.store(true, std::memory_order_release);
+      holder.join(); present.join();
+      order_set_data_target = nullptr;
+      const auto after = observer::queue_order_counts();
+      require(returned, "the present thread waited on the order lock another thread held");
+      require(!busy_verdict.ordered && !busy_rely && !busy_conflicted,
+        "a verdict was given, a read relied on or a conflict answered from a model the present thread could not lock");
+      require(after.model.signals == before.model.signals + 1 && order_signals == natives + 3 &&
+          after.own_signals == before.own_signals + 2 && after.contention >= before.contention + 3,
+        "ReShade's Signals of its own fence were logged as the game's, or a Signal was not forwarded");
+      require(reshade.data.size() == 1, "ReShade's fence got an order record, or was not marked as ReShade's");
+      // Free again: the read stands, and a later Signal of the marked fence
+      // is still not logged.
+      require(observer::queue_order_rely(verdict, 72) && !observer::queue_order_conflicted(72), "a clean relied read did not stand");
+      const auto signals = observer::queue_order_counts().model.signals;
+      require(signal(producer, reshade, 3) == S_OK && observer::queue_order_counts().model.signals == signals,
+        "a Signal of ReShade's marked fence was logged");
+    }
+
     // A third party replacing an installed CPU Signal slot (chaining to the
     // original it saved before our install) loses that coverage at the next
     // verdict, not at the next poll: CPU Signals bypass the hook from then on.
@@ -830,7 +894,7 @@ namespace {
     const auto verdict = ordered(reader, relied);
     require(!verdict.ordered && verdict.why == sunshine_queue_order::refusal::uncovered,
       "a verdict rested on a CPU Signal slot replaced since the last poll");
-    std::puts("PASS queue order review: a Signal whose queue record was evicted after its ticket is logged on the re-sighted record; fence private data is written under the order lock; a rejected CPU Signal slot is not discovered again per call; no add-on Signal waits on the order lock; a slot replaced since the last poll refuses the next verdict");
+    std::puts("PASS queue order review: a Signal whose queue record was evicted after its ticket is logged on the re-sighted record; fence private data is written under the order lock; a rejected CPU Signal slot is not discovered again per call; no add-on Signal waits on the order lock; ReShade's Signals of its own fences in the add-on's flush and after it are not logged and never wait, nor do a verdict, a rely or a conflict check on a busy lock; a slot replaced since the last poll refuses the next verdict");
   }
 }
 int main() {

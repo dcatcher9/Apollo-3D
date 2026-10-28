@@ -387,15 +387,16 @@ namespace sunshine_queue_order {
     // read's tag (the capture it read, 0 none) conflicted. A fence poisoned
     // or forgotten since the verdict (a signal between the verdict and this
     // call, under another lock hold) conflicts it at once, as does evicting
-    // a read that is still live.
-    void rely(const verdict &value, std::uint64_t now, std::uint64_t tag = 0) {
-      if (!value.ordered) return;
+    // a read that is still live. Returns whether the read still stands: one
+    // conflicted here must not be made (the caller has not copied yet).
+    bool rely(const verdict &value, std::uint64_t now, std::uint64_t tag = 0) {
+      if (!value.ordered) return false;
       live_read read{value.fences, now + live_read_ms, tag, value.unbounded};
       for (const auto id : value.fences) {
         const auto *f = id ? fence_of(id) : nullptr;
         if (id && (!f || f->why != poison::none)) {
           conflict(read);
-          return;
+          return false;
         }
       }
       auto *oldest = &reads_[0];
@@ -403,6 +404,7 @@ namespace sunshine_queue_order {
         if (entry.expires < oldest->expires) oldest = &entry;
       if (oldest->expires > now) conflict(*oldest);
       *oldest = read;
+      return true;
     }
     // O1 (fail-safe): whether a read of tag relied on a fence that a late
     // conflict poisoned; its presentation copy is not held any further. The

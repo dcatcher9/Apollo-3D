@@ -462,8 +462,22 @@ namespace {
       h.wait(1, 0, 2);
       const auto v = h.ordered(1, p);
       h.cpu(0);
-      h.m.rely(v, h.now, 54);
+      // The caller has not copied yet: rely says the read no longer stands,
+      // so it is never made (consume_owned refuses it).
+      require(!h.m.rely(v, h.now, 54), "rely let a read stand on a fence poisoned since its verdict");
       require(h.m.conflicted(54), "a read relied on a fence poisoned since its verdict");
+      const auto w = h.ordered(1, p);
+      require(!w.ordered, "a poisoned fence still ordered a read");
+    }
+    // A read whose fences are all clean at rely stands.
+    {
+      host h;
+      settle(h);
+      const auto p = h.execute(0);
+      h.signal(0, 0, 2);
+      h.wait(1, 0, 2);
+      require(h.m.rely(h.ordered(1, p), h.now, 57) && !h.m.conflicted(57), "a clean relied read did not stand");
+      require(!h.m.rely({}, h.now, 58), "a refused verdict was relied on");
     }
     // A live read evicted by later reads is conflicted (fail-closed).
     {

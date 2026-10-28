@@ -2120,6 +2120,9 @@ static void on_execute_secondary(command_list *cmd_list, command_list *secondary
 static void submit_deferred_copies(command_queue *queue, command_list *immediate, query_heap marker)
 {
 	immediate->end_query(marker, query_type::timestamp, 0);
+	// ReShade's Signals of its own fences in this flush never wait on the
+	// queue-order lock (own_flush_scope).
+	const sunshine_streamline::native_observer::own_flush_scope own;
 	queue->flush_immediate_command_list();
 }
 

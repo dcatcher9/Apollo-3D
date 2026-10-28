@@ -5046,9 +5046,16 @@ own calls (its copy-out lists) take their own tickets in the suppression scope; 
 forwarded to the native queue shares its ticket. Every Signal the add-on makes on a fence of its own
 that no game queue waits on (display retirement, export publication, the UI layer, Dump 3D, the
 renderer's completion) goes through `signal_own`: suppressed, so it is never logged as the game's
-(design finding 8). Only a call the observer logs may wait on the order lock: an Execute or an
-unlogged call whose queue needs a new record while another thread holds the lock takes no ticket
-and counts `contention`. A queue record evicted (the least recently used
+(design finding 8). So does ReShade's Signal of its own fences (its immediate list's and its query
+heaps') at the end of each flush of its immediate list: every flush the add-on makes runs in
+`own_flush_scope`, which marks the fence ReShade's in its private data, and a Signal of a marked
+fence is never logged, there or later (ReShade's own flush right after `reshade_present` finds the
+list already flushed by the add-on; a game thread's Execute that flushes it). Only a call the
+observer logs may wait on the order lock: an Execute or an unlogged call whose queue needs a new
+record while another thread holds the lock takes no ticket and counts `contention`. The present
+thread's own order work never waits either (10-27): a verdict whose lock is busy is refused (the
+completion rule decides), a read whose reliance cannot be recorded is not made, the conflict check
+keeps its last answer for that capture, and the status line takes its snapshot at a later Present. A queue record evicted (the least recently used
 of 32; a queue's signals keep its record in use) or reset between a Signal's ticket and its log is
 re-sighted, and the Signal, not yet forwarded, is logged on it with a fresh ticket: a signal never
 goes unlogged against a live fence record.
@@ -5087,7 +5094,9 @@ pixels the producer may not have written held for the source age. A read names t
 wait chain that ordered its producer's queue (a longer chain, or one whose walk loops, rests on
 every fence), and fails closed wherever its protection would lapse: a fence poisoned or forgotten
 between the verdict and the read, a model reset, an evicted fence record and a live read evicted
-by newer ones each conflict it at once (10-27). The edge rests on the same
+by newer ones each conflict it at once (10-27); one conflicted between the verdict and the read is
+not copied at all (the consumer gets `capture_not_ready`), rather than shown for that Present. The
+edge rests on the same
 ordering the game relies on to present its own colour. The session tests carry the residual as
 the known gap `R1-late-signaller` ([README](../tools/reshade/README.md), Session-level tests).
 
@@ -5122,7 +5131,7 @@ The status line, at most every 10 s while its counts change:
 `Sunshine 3D queue order: hooks={signal= wait= fence_signal= pending=} queues= fences= settled=
 signals= waits= cpu_signals= poisoned={shared= foreign= cpu= second= monotonic= unobserved= removed=
 unrecorded=} refused={...} ordered= proofs={inflight=} evicted_waits= resets= cpu_unhooked=
-late_conflict= contention=`, or once `Sunshine 3D queue order: disabled (QueueFenceOrder=0)`. The readiness
+late_conflict= contention= own_signals=`, or once `Sunshine 3D queue order: disabled (QueueFenceOrder=0)`. The readiness
 report's "Queue order" check passes with the hooks installed and no late conflict, and warns when
 no Signal/Wait hook is installed with more than one queue, or on a late conflict.
 

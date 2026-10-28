@@ -117,11 +117,15 @@ namespace sunshine_streamline::native_observer {
   // Whether every call submitted on reader (a live native queue the caller
   // holds a reference to) from now on is ordered after producer.
   sunshine_queue_order::verdict queue_ordered(std::uint64_t reader, position producer);
-  // A read of tag (a capture id) that relied on an ordered verdict
-  // (late_conflict).
-  void queue_order_rely(const sunshine_queue_order::verdict &value, std::uint64_t tag);
+  // A read of tag (a capture id) that relies on an ordered verdict
+  // (late_conflict). False: the read does not stand and must not be made
+  // (a fence of its verdict was poisoned or forgotten since, or the order
+  // lock was busy, so it could not be protected). Never waits for the lock.
+  bool queue_order_rely(const sunshine_queue_order::verdict &value, std::uint64_t tag);
   // O1: whether a read of tag relied on a fence that a late conflict
   // poisoned since; its presentation copy is then not held any further.
+  // Never waits: while another thread holds the order lock, the last answer
+  // for tag (a conflict logged during that hold is seen at the next call).
   bool queue_order_conflicted(std::uint64_t tag);
   // A released device (its native ID3D12Device pointer): its records go.
   void queue_order_forget_device(std::uint64_t device);
@@ -132,8 +136,13 @@ namespace sunshine_streamline::native_observer {
     std::uint64_t ordered{}, resets{}, cpu_unhooked{};
     // A call that may not wait (an Execute, or one the observer does not
     // log) found the order lock held where its queue needed a new record:
-    // it took no ticket.
+    // it took no ticket. Also a verdict, a rely or a conflict check on the
+    // present thread that found it held (refused, not made, last answer).
     std::uint64_t contention{};
+    // ReShade's Signals of its own fences (own_flush_scope), not logged.
+    std::uint64_t own_signals{};
+    // The order lock was held: model is empty (the status line waits).
+    bool busy{};
     std::uint64_t refused[static_cast<unsigned>(sunshine_queue_order::refusal::count)]{};
   };
   queue_order_status queue_order_counts();
@@ -142,6 +151,20 @@ namespace sunshine_streamline::native_observer {
   // the game's and it never waits on the order lock. Every such add-on
   // Signal goes through here.
   HRESULT signal_own(ID3D12CommandQueue *queue, ID3D12Fence *fence, UINT64 value);
+  // Around every flush of ReShade's immediate list the add-on makes
+  // (flush_immediate_command_list): ReShade then Signals fences of its own
+  // (its list's and its query heaps'), which no game queue waits on. Those
+  // are marked as ReShade's and never logged as the game's, so they never
+  // wait on the order lock, here or wherever ReShade signals them later
+  // (its own flush at the end of a Present). The flush's Execute stays the
+  // observer's to see.
+  class own_flush_scope {
+  public:
+    own_flush_scope();
+    ~own_flush_scope();
+    own_flush_scope(const own_flush_scope &) = delete;
+    own_flush_scope &operator=(const own_flush_scope &) = delete;
+  };
   // The native methods the observer hooks, as pinned by the hook-set test.
   struct hooked_method {
     const char *interface_name, *method;

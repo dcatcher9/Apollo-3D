@@ -1688,7 +1688,10 @@ namespace {
           signal_pending(runtime);
         } else if (auto *queue = runtime->get_command_queue();
             queue && queue->get_native() == reinterpret_cast<std::uint64_t>(generation_->queue12.get())) {
-          queue->flush_immediate_command_list();
+          {
+            const sunshine_streamline::native_observer::own_flush_scope own;
+            queue->flush_immediate_command_list();
+          }
           signal_pending(runtime);
         }
       }
@@ -3007,6 +3010,15 @@ namespace {
         publisher->invalidate(runtime, false);
       }
       log(reshade::log::level::error, "Sunshine SBS: overlay publication failed; skipping frame");
+    }
+    // ReShade flushes its immediate list right after reshade_present, on the
+    // same queue under the same queue lock. Flushing it here instead, as the
+    // add-on's (own_flush_scope), leaves that flush nothing to submit, so
+    // ReShade's Signal of its own fence there never waits on the queue-order
+    // lock on the present thread either.
+    if (auto *queue = runtime->get_command_queue(); queue && runtime->get_device()->get_api() == api::device_api::d3d12) {
+      const sunshine_streamline::native_observer::own_flush_scope own;
+      queue->flush_immediate_command_list();
     }
   }
 

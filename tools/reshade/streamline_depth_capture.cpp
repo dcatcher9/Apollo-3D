@@ -3621,16 +3621,22 @@ namespace sunshine_streamline::depth_capture {
   }
   bool read_conflicted(std::uint64_t capture) { return native_observer::queue_order_conflicted(capture); }
   bool queue_order_line(std::uint64_t now, char *out, std::size_t size) {
-    static std::uint64_t logged_at{}, logged_total{UINT64_MAX};
+    static std::uint64_t logged_at{}, logged_total{UINT64_MAX}, checked_at{};
     static bool disabled_logged{};
-    const auto s = native_observer::queue_order_counts();
-    if (!s.enabled) {
+    if (!native_observer::queue_order_enabled()) {
       if (disabled_logged) return false;
       disabled_logged = true;
       std::snprintf(out, size, "Sunshine 3D queue order: disabled (QueueFenceOrder=0)");
       return true;
     }
     disabled_logged = false;
+    // At most one model snapshot a second, from the present thread (each
+    // Present until 10-27, waiting for the order lock if a game thread held
+    // it); one the lock is busy for is taken at a later Present.
+    if ((logged_at && now - logged_at < 10000) || (checked_at && now - checked_at < 1000)) return false;
+    checked_at = now;
+    const auto s = native_observer::queue_order_counts();
+    if (s.busy) return false;
     const auto inflight = order_inflight_reads.load(std::memory_order_relaxed);
     std::uint64_t total = s.model.signals + s.model.waits + s.model.cpu_signals + s.ordered + s.resets + inflight +
       s.model.late_conflict + s.signal_hooks + s.wait_hooks + s.fence_signal_hooks + s.pending + s.contention;
@@ -3647,7 +3653,8 @@ namespace sunshine_streamline::depth_capture {
       "signals=%llu waits=%llu cpu_signals=%llu poisoned={shared=%llu foreign=%llu cpu=%llu second=%llu monotonic=%llu "
       "unobserved=%llu removed=%llu unrecorded=%llu} refused={disabled=%llu pending_hooks=%llu uncovered=%llu untracked=%llu "
       "overlap=%llu unresolved=%llu baseline=%llu unsettled=%llu poisoned=%llu evicted=%llu cross_device=%llu} ordered=%llu "
-      "proofs={inflight=%llu} evicted_waits=%llu resets=%llu cpu_unhooked=%llu late_conflict=%llu contention=%llu",
+      "proofs={inflight=%llu} evicted_waits=%llu resets=%llu cpu_unhooked=%llu late_conflict=%llu contention=%llu "
+      "own_signals=%llu",
       s.signal_hooks, s.wait_hooks, s.fence_signal_hooks, s.pending, static_cast<unsigned long long>(s.model.queues),
       static_cast<unsigned long long>(s.model.fences), static_cast<unsigned long long>(s.model.settled),
       static_cast<unsigned long long>(s.model.signals), static_cast<unsigned long long>(s.model.waits),
@@ -3658,7 +3665,8 @@ namespace sunshine_streamline::depth_capture {
       r(refusal::poisoned), r(refusal::evicted), r(refusal::cross_device), static_cast<unsigned long long>(s.ordered),
       static_cast<unsigned long long>(inflight), static_cast<unsigned long long>(s.model.evicted_waits),
       static_cast<unsigned long long>(s.resets), static_cast<unsigned long long>(s.cpu_unhooked),
-      static_cast<unsigned long long>(s.model.late_conflict), static_cast<unsigned long long>(s.contention));
+      static_cast<unsigned long long>(s.model.late_conflict), static_cast<unsigned long long>(s.contention),
+      static_cast<unsigned long long>(s.own_signals));
     return true;
   }
   proven_state_counts proven_counts() {
@@ -3963,9 +3971,12 @@ namespace sunshine_streamline::depth_capture {
           if (!consumer || consumer->retiring || !(reads_copy_out || producer_recording_retired(entry)) ||
               !readable_elsewhere(entry, immediate ? value.queue : 0, progress, &relied))
             return result(consumer_status::capture_not_ready);
+          // A fence of the verdict poisoned or forgotten since it was given
+          // (another thread's hold in between), or a busy order lock: the
+          // read does not stand, and nothing is recorded yet (O1).
           if (relied.ordered) {
+            if (!native_observer::queue_order_rely(relied, entry.id)) return result(consumer_status::capture_not_ready);
             order_inflight_reads.fetch_add(1, std::memory_order_relaxed);
-            native_observer::queue_order_rely(relied, entry.id);
           }
           if (diagnostic) {
             diagnostic->read_order = relied.ordered ? 3 : 2;

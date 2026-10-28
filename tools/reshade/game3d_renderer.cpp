@@ -2382,7 +2382,10 @@ namespace sunshine_game3d {
     // the renderer's own fence is the add-on's (signal_own).
     bool signalled;
     if (d.device->get_api() == api::device_api::d3d12) {
-      d.queue->flush_immediate_command_list();
+      {
+        const sunshine_streamline::native_observer::own_flush_scope own;
+        d.queue->flush_immediate_command_list();
+      }
       signalled = SUCCEEDED(sunshine_streamline::native_observer::signal_own(
         reinterpret_cast<ID3D12CommandQueue *>(d.queue->get_native()), reinterpret_cast<ID3D12Fence *>(d.completion.handle),
         ++d.sequence));
