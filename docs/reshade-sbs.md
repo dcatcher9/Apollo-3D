@@ -4659,7 +4659,12 @@ as a depth gap. Under required FG a present without a nomination still names the
 sequence; that gap holds the retained copy instead of reading as a source change. Before this, The
 Witcher 3 with FG on (one to four generated frames) dropped depth for 94-172 ms whenever one real
 frame's FG tag capture was refused (`status=unsupported_lifetime`, reported as
-`source_changed`). Source pointers may rotate normally without invalidating the private copied depth.
+`source_changed`). A newest nomination refused before its capture existed names its source by its
+view (`capture_pick::named`), also beside ambiguous or inactive views, so the retained copy is held
+only when it is that source's or its FG/SR lineage's; another viewport's first refused attempt, or a
+recreated NGX feature's first evaluate without depth, drops it (`source_changed`; until 10-28 such a
+pick named no source and the previous viewport's or feature's copy was held for up to the source
+age). Source pointers may rotate normally without invalidating the private copied depth.
 
 Metadata bookkeeping never discards finished pixels. An SL camera reset, invalid or missing camera
 constants, a null or replaced tag and an observation loss affect only later evaluations: a reset

@@ -1576,6 +1576,86 @@ namespace sunshine_streamline::depth_capture {
       std::printf("PASS P6 missing frame: %zu rows\n", std::size(rows));
     }
 
+    // P6/P7: a head refused before its capture slot existed names its source
+    // to the display (capture_pick::named, classify_acquisition), also
+    // beside ambiguous or inactive views. The display then holds only a copy
+    // of that source or its FG/SR lineage, never another viewport's or NGX
+    // feature generation's. Until 10-28 such a pick named no source (epoch
+    // zero, which contradicts nothing), and the display held the previous
+    // viewport's or feature's copy for up to the source age.
+    void named_head_rows() {
+      enum class variant {
+        viewport_ambiguous,  // The new viewport's first attempt while the old view is active.
+        viewport_alone,  // The same once the old view expired: a missing frame with nothing to stand in.
+        ngx_feature_ambiguous,  // A recreated NGX feature (new source) whose first evaluate lacks depth.
+        ngx_feature_alone,
+        same_source,  // The shown source's own next attempt: held as any missing frame.
+        fg_lineage  // FG On's first DLSS-G attempt over the viewport's shown SR copy: held as its lineage.
+      };
+      struct row {
+        const char *pins;
+        variant kind;
+        const char *selection;  // The pick's result and reason.
+        display_action action;
+        const char *reason;
+      };
+      const row rows[] {
+        {"Another viewport's first attempt, refused before its slot, beside the active one: the old copy is dropped", variant::viewport_ambiguous, "ambiguous ambiguous_views", display_action::invalidate, "source_changed"},
+        {"Another viewport's first attempt, refused before its slot, alone: the old copy is dropped", variant::viewport_alone, "missing_state no_current_nomination", display_action::invalidate, "source_changed"},
+        {"A recreated NGX feature's first evaluate without depth, beside the old feature's view: the old copy is dropped", variant::ngx_feature_ambiguous, "ambiguous ambiguous_views", display_action::invalidate, "source_changed"},
+        {"A recreated NGX feature's first evaluate without depth, alone: the old copy is dropped", variant::ngx_feature_alone, "missing_state no_current_nomination", display_action::invalidate, "source_changed"},
+        {"The shown source's next attempt refused before its slot: its copy is held", variant::same_source, "missing_state no_current_nomination", display_action::hold, "retained_copy"},
+        {"FG On's first DLSS-G attempt refused before its slot over the viewport's SR copy: held as its lineage", variant::fg_lineage, "missing_state no_current_nomination", display_action::hold, "FG_copy_pending"},
+      };
+      constexpr std::uint64_t epoch = 13, ngx_source = 97;
+      for (const auto &r : rows) {
+        reset();
+        const bool ngx = r.kind == variant::ngx_feature_ambiguous || r.kind == variant::ngx_feature_alone;
+        const auto provider = ngx ? provider_kind::ngx : provider_kind::streamline;
+        const auto source = ngx ? ngx_source : 0;
+        queue_state owner;
+        // The shown copy (sequence 10), established and delivered, which the
+        // display retains; consumed, so nothing stands in for the head.
+        auto &shown = make(0, provider, epoch, 10, source);
+        establish_provider(owner, shown, 1);
+        deliver(owner, shown);
+        retained_depth retained;
+        retained.metadata = shown.metadata;
+        retained.capture_id = shown.id;
+        retained.width = 1920;
+        retained.height = 1080;
+        retained.format = 39;
+        retained.view_format = 41;
+        retained.area = {0, 0, 1920, 1080};
+        if (r.kind == variant::viewport_alone || r.kind == variant::ngx_feature_alone) {
+          // The old view stopped: past the source age, and not the frame this
+          // Present presents.
+          for (auto &view : evaluations[provider_index(provider)].views) {
+            if (view.sequence) {
+              view.tick = GetTickCount64() - source_age - 1;
+            }
+          }
+          fixture::presents_since(2);
+        }
+        // The head (sequence 11), refused before its capture slot existed.
+        const std::uint32_t viewport = r.kind == variant::viewport_ambiguous || r.kind == variant::viewport_alone ? 1 : 0;
+        const auto head_source = ngx ? ngx_source + 1 : r.kind == variant::fg_lineage ? fg_source : 0;
+        begin_evaluation(epoch, 11, viewport, provider, head_source, r.kind == variant::fg_lineage ? 0 : UINT64_MAX);
+        attempt_status[provider_index(provider)] = status::missing_state;
+        const auto now = GetTickCount64();
+        const auto pick = select_provider(owner, native, 2, now, {});
+        const auto decision = classify_acquisition(pick, owner, {});
+        const auto update = decide_display(decision, packet {}, retained, {}, now);
+        const auto selection = std::string(name(pick.result)) + ' ' + name(pick.selection);
+        if (pick.value || selection != r.selection || update.action != r.action || std::string(update.reason) != r.reason) {
+          char text[512];
+          std::snprintf(text, sizeof(text), "P6/P7 named head, %s: %s, display %s (decision epoch %llu viewport %u source %llu)", r.pins, selection.c_str(), update.reason, static_cast<unsigned long long>(decision.epoch), decision.viewport, static_cast<unsigned long long>(decision.source_id));
+          fail(text);
+        }
+      }
+      std::printf("PASS P6/P7 a head refused before its slot names its source: %zu rows\n", std::size(rows));
+    }
+
     // F1 (the 10-27 review): which Presents count a stamped frame as the
     // frame they present (frame_presenting). Without frame generation only
     // its first Present (presented_frame); with FG on, a frame that made a
@@ -2329,6 +2409,7 @@ int main() {
   stray_frame_generation_copy_steps();
   lineage_stand_in_rows();
   missing_frame_rows();
+  named_head_rows();
   frame_presenting_rows();
   hitch_presenting_rows();
   decide_display_rows();

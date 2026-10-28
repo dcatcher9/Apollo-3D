@@ -2476,7 +2476,8 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   its DLSS-G copy in flight at those Presents after a hitch, never at a later one nor an earlier
   frame's, a missing frame's stand-in (each kind of failed or refused head, SR and FG, against
   every per-copy check and every identity interruption, which still revoke) and a nomination in
-  progress's (the same copy, at once), and every reason of
+  progress's (the same copy, at once), the source a head refused before its capture existed names to
+  the display (another viewport's or NGX feature's drops the retained copy), and every reason of
   `decide_display`. Its freshness table
   pins each age limit one millisecond either side against an explicit clock: the source age at
   every selection site, the association timeout of `expire_association` and `evaluation_live`, an

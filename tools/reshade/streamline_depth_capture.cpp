@@ -836,7 +836,12 @@ namespace sunshine_streamline::depth_capture {
     capture_pick select_latest_capture(const queue_state &owner, std::uint64_t native,
         std::uint64_t present, provider_kind provider, std::uint64_t now) {
       capture_pick out;
+      out.provider = provider;
       const auto &current = evaluations[provider_index(provider)];
+      // The newest nomination's view, active or not (capture_pick::named).
+      for (const auto &value : current.views)
+        if (current.epoch && current.sequence && value.epoch == current.epoch && value.sequence == current.sequence &&
+            value.source_id == current.source_id) out.named = &value;
       const auto is_latest = [&](const slot &value) {
         return value.id && !value.preservation_only && value.metadata.provider == provider && value.metadata.epoch == current.epoch &&
           value.metadata.sequence == current.sequence && value.metadata.source_id == current.source_id;
@@ -955,6 +960,17 @@ namespace sunshine_streamline::depth_capture {
         out.epoch = pending.epoch; out.sequence = pending.sequence;
         out.source_id = pending.source_id; out.viewport = pending.viewport;
         out.source_valid = true; // The selector already validated this bounded nomination.
+      }
+      // A head without a capture (refused before its slot existed), also
+      // beside ambiguous or inactive views: its view names the source, so the
+      // display holds only a copy of that source or its FG/SR lineage and
+      // drops any other (source_changed). Until 10-28 such a pick named none
+      // (epoch zero), and the display held a copy of the previous viewport or
+      // NGX feature generation for up to the source age.
+      else if (chosen.named) {
+        const auto &head = *chosen.named;
+        out.provider = chosen.provider; out.epoch = head.epoch; out.sequence = head.sequence;
+        out.source_id = head.source_id; out.viewport = head.viewport;
       }
       else if (policy.require_frame_generation) {
         out.epoch = policy.epoch; out.viewport = policy.viewport;

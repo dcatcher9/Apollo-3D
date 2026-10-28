@@ -351,6 +351,13 @@ namespace sunshine_streamline::depth_capture {
       // set only when that view is the namespace's one active view
       // (select_latest_capture). Policy picks carry none.
       const evaluation_head *head{};
+      // The pick's provider namespace and its newest nomination's view,
+      // whatever its views' activity: the source an acquisition names when
+      // no capture or nomination in progress does (classify_acquisition), so
+      // the display never holds another viewport's or feature generation's
+      // copy under it. Policy picks carry none.
+      provider_kind provider{provider_kind::streamline};
+      const evaluation_head *named{};
       status result{status::unavailable};
       selection_reason selection{selection_reason::not_attempted};
       std::uint64_t consumed_completed_capture{};

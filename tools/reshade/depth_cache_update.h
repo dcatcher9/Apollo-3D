@@ -40,7 +40,9 @@ namespace sunshine_streamline::depth_capture {
         next.metadata.resource.kind == previous.metadata.resource.kind;
     }
     // Logical source identity survives ordinary rotation of resource pointers.
-    // Without any current nomination there is no newer identity to contradict.
+    // Without any current nomination there is no newer identity to contradict
+    // (a head refused before its capture existed names its view's,
+    // classify_acquisition).
     // Required FG without a nomination names its scope but no sequence (zero):
     // a different scope still contradicts, a missing sequence does not.
     inline bool same_source(const retained_depth &previous, const acquisition_decision &current) {
