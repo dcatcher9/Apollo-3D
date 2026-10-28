@@ -988,7 +988,9 @@ namespace sunshine_streamline::depth_capture {
       const auto *source = chosen.value ? chosen.value : chosen.latest;
       if (source) out.failure = source->failure;
       const bool fg = source ? source->metadata.frame_generation_input : policy.require_frame_generation;
-      if (source || chosen.pending_nomination || policy.require_frame_generation)
+      // A head refused before its capture existed names its source too
+      // (classify_acquisition, capture_pick::named).
+      if (source || chosen.pending_nomination || chosen.named || policy.require_frame_generation)
         out.rung = fg ? sunshine_game3d::source_slot::fg_depth : sunshine_game3d::source_slot::scene_depth;
       out.pixel_ready = pixel_ready;
       out.fg_required = policy.require_frame_generation; out.fg_excluded = policy.exclude_unconfirmed_fg;
