@@ -448,6 +448,8 @@ namespace sunshine_streamline::depth_capture {
       const queue_state &owner, selection_policy policy, std::uint64_t present, std::uint64_t tick, bool pixel_ready);
     selection_reason completed_fallback_reason(const queue_state &owner, std::uint64_t present,
       const slot &latest, const slot &completed);
+    slot *lineage_snapshot(const queue_state &owner, std::uint64_t native, std::uint64_t present, const slot &latest,
+      std::uint64_t now);
     capture_pick select_capture(const queue_state &owner, std::uint64_t native,
       std::uint64_t present, provider_kind provider, std::uint64_t now);
     capture_pick select_provider(const queue_state &owner, std::uint64_t native,

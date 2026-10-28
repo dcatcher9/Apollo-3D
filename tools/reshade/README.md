@@ -1708,10 +1708,15 @@ them restarts the placement calibration. The record names the shown copy by its 
 (`depth_tick_ms`). The supply log says which copies the presenting queue could certainly read at
 the Present: its own legal source (one that meets no limitation and that no live FG scope keeps
 out) of a frame before the one the Present presents (a copy deferred to its frame's Present, R2,
-is read at the Present after it), and a legal copy recorded on another queue (`supply::elsewhere`)
-that the contract copies out ([Copy-out on the producer
+is read at the Present after it), or of that frame when recorded at its call on a list the
+presenting queue executes before it (`supply::immediate`: an SR evaluation's input, a tag copied
+at its call, DLSS-G's input on the game's list; until 10-27 none counted before the Present after
+it, so a Present that held SR depth up to the source age old beside its frame's own fresh SR copy
+passed, as at FG On with DLSS-G's first copy in flight), and a legal copy recorded on another queue
+(`supply::elsewhere`) that the contract copies out ([Copy-out on the producer
 queue](../../docs/reshade-sbs.md)) and that the judge saw complete at an earlier Present or right
-before this Present's call (`judge::before_present`; its fence, `supply::completions`). The fixture models the contract, never the add-on's report: a copy
+before this Present's call (`judge::before_present`; its fence, `supply::completions`). The
+fixture models the contract, never the add-on's report: a copy
 recorded on another queue is copied out when a copy of its source was submitted on such a queue
 within the source age before it was recorded; a source's first copy elsewhere keeps the Reset rule,
 past the source age in every fixture, and never counts. A Present is `stale_shown` when the
@@ -1803,7 +1808,11 @@ The session timelines' slow intervals (10-27), modelled rather than left to the 
 which made the full check's two failures of that day depend on timing: `hitch=` sleeps inside the
 frame, `brief` (half the source age, which every hold outlasts) or `before_sources` (the source age
 and 150 ms) right after the frame's stamp, before its calls, or `after_sources` (as long) after
-them, before its Present. No seed draws them (they come after the fence events in the family, and
+them, before its Present; `dlssg_gpu=after_present` holds DLSS-G's compute work on the GPU until
+the frame's Present returned (its queue waits on a gate fence the CPU signals then, a GPU-bound
+game's copy in flight at its own Present; the gate is no order fence, so no read relies on it, and
+a GPU signal after the Present would deadlock against the presenting queue's wait before it). No
+seed draws them (they come after the fence events in the family, and
 `generate` leaves them at their defaults, so every seed keeps its frames); event lists name them.
 
 The judge reads each Present's [frame record](../../docs/reshade-sbs.md#frame-record)
@@ -2216,7 +2225,13 @@ the C1 tagging of the frame after DLSS-G's last compute copy), one for C6's,
 `C5-frame-untag-then-evaluate` and `C5-global-untag-then-evaluate`, one for the FG On hold,
 `fg-on-holds-sr-copy`, and two for S11c's evaluate, `S11c-fg-until-evaluate-tag-then-evaluate` and
 `S11c-fg-global-until-evaluate-tag-then-evaluate`, and one each for the stale rule's own-frame age and
-the frame's own depth after a hitch, `hitch-before-sources` and `hitch-after-sources`), an event
+the frame's own depth after a hitch, `hitch-before-sources` and `hitch-after-sources`, and four
+for FG On with DLSS-G's first compute copy in flight, `fg-on-dlssg-in-flight-sr-after-hold-expired`,
+`fg-on-dlssg-in-flight-sr-stands-in`, `fg-on-dlssg-in-flight-fresh-sr-over-held` (the frame's own
+SR copy stands in: with `lineage_snapshot` removed the first two lose depth at FG On's first
+Present and the third holds SR depth 188 ms old beside the frame's own, 10-27, temporary build) and
+`fg-on-only-dlssg-in-flight-mono` (seed c28965dca8d7c76c's frame 38 made deterministic: its SR input
+unprovable, mono is the contract there)), an event
 list shaped like the
 session it fixed and judged as any
 timeline (random seeds meet these shapes only by chance, and a change of the event language changes
@@ -2226,7 +2241,7 @@ run; a witness that loses none fails the set, as the matrix's gap seeds keep a r
 failing cell. `--trace` prints every Present's
 frame record, the supply it was judged with and each recorded refusal.
 
-`reshade_session_timelines` runs the fixed set (24 seeds and 25 regression timelines, about
+`reshade_session_timelines` runs the fixed set (24 seeds and 29 regression timelines, about
 4290 frames and 10170 Presents) in about 160 s, registered like
 `reshade_native_provider_continuity` with the same 240 s timeout. Locally:
 

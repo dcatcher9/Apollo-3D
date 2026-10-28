@@ -99,7 +99,11 @@ namespace sunshine_streamline::depth_capture {
     pending_nomination, current_capture, current_already_consumed, no_admissible_capture,
     no_completed_snapshot, completed_before_gap, completed_not_older,
     completed_already_consumed, presentation_already_selected, format_changed,
-    completed_not_readable, completed_snapshot, fg_scope_missing, fg_scope_mismatch
+    completed_not_readable, completed_snapshot, fg_scope_missing, fg_scope_mismatch,
+    // A viewport's FG input is pending with no completed snapshot, and the
+    // newest readable unconsumed snapshot of the viewport's ordinary source
+    // (its display lineage) stands in (select_capture).
+    lineage_snapshot
   };
   // Acquisition authority, frozen under the capture lock. Diagnostics may be
   // omitted or reformatted without changing these source/continuity decisions.

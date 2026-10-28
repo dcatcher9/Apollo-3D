@@ -950,8 +950,11 @@ namespace sunshine_streamline::provider {
     // other handover between the viewport's FG and ordinary sources holds the
     // displayed copy until the newcomer's first readable frame
     // (decide_display's lineage).
+    // So does a live scope's ordinary stand-in for its pending input
+    // (lineage_snapshot): it never replaces the scope's own held copy.
     const char *fg_hold = nullptr;
-    if (fg_silent && !(acquisition.source_selected && data->frame.metadata.frame_generation_input) &&
+    if ((fg_silent || (selection.require_frame_generation && acquisition.source_selected)) &&
+        !(acquisition.source_selected && data->frame.metadata.frame_generation_input) &&
         depth_capture::frame_generation_holds(data->cache.reference(), policy, GetTickCount64()))
       fg_hold = "FG_copy_held";
     const bool available = acquisition.source_selected && !fg_hold;

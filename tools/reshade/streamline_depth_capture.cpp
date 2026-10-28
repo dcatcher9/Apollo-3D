@@ -971,6 +971,44 @@ namespace sunshine_streamline::depth_capture {
         return selection_reason::presentation_already_selected;
       return selection_reason::completed_snapshot;
     }
+    // A viewport's Streamline FG input (latest) is pending and none of its
+    // snapshots completed: FG On's first frames, or DLSS-G's compute copy
+    // still in flight at its own Present in a GPU-bound game. The viewport's
+    // ordinary SR/RR source of the same epoch is one display lineage with it
+    // (depth_cache_update.h, lineage_successor), and its newest snapshot that
+    // this queue can read now and has not consumed (the queue's watermark,
+    // shared by the viewport's sources) stands in, within the source age: at
+    // FG On that is the frame's own SR copy. Until 10-27 only the display's
+    // retained copy was held there (FG_copy_pending), older by the frames
+    // without depth before FG On, and mono once that passed the source age
+    // while the frame's own SR copy was readable (the session tests' review
+    // of seed c28965dca8d7c76c). The FG input takes the viewport at its first
+    // readable frame, as before; a silent scope's held FG copy is still held
+    // over it (frame_generation_holds), and a repeated effect of one
+    // presentation keeps its one tuple.
+    slot *lineage_snapshot(const queue_state &owner, std::uint64_t native, std::uint64_t present, const slot &latest,
+        std::uint64_t now) {
+      const auto &fg = latest.metadata;
+      if (fg.provider != provider_kind::streamline || !fg.frame_generation_input || !fg.epoch ||
+          (owner.present == present && owner.present_capture)) return nullptr;
+      slot *best = nullptr;
+      for (auto &value : slots) {
+        const auto &metadata = value.metadata;
+        if (!value.id || !value.texture || value.nomination_only || value.preservation_only ||
+            !value.source_nominated || !value.finished || !value.success || value.invalid || value.nomination_invalid ||
+            !value.producer_submitted || metadata.provider != provider_kind::streamline || metadata.frame_generation_input ||
+            metadata.epoch != fg.epoch || metadata.viewport != fg.viewport || metadata.sequence > fg.sequence ||
+            value.id <= owner.admission_after || !within_source_age(metadata.tick, now)) continue;
+        if (owner.provider_established && owner.provider == provider_kind::streamline && owner.last_epoch == metadata.epoch &&
+            metadata.sequence <= owner.last_sequence) continue;
+        if (best && (metadata.sequence < best->metadata.sequence ||
+            (metadata.sequence == best->metadata.sequence && value.id < best->id))) continue;
+        const auto progress = value.queue == native ? queue_progress{} : producer_progress(value);
+        if (submission_status(value, native, owner.device_identity, progress) != status::ready) continue;
+        best = &value;
+      }
+      return best;
+    }
     capture_pick select_capture(const queue_state &owner, std::uint64_t native,
         std::uint64_t present, provider_kind provider, std::uint64_t now) {
       auto chosen = select_latest_capture(owner, native, present, provider, now);
@@ -985,7 +1023,16 @@ namespace sunshine_streamline::depth_capture {
           latest->invalid || latest->nomination_invalid || latest->nomination_only ||
           (latest->finished && !latest->success) || !within_source_age(latest->metadata.tick, now)) return chosen;
       auto *completed = completed_snapshot(latest->metadata, now, native);
-      if (!completed) { chosen.selection = selection_reason::no_completed_snapshot; return chosen; }
+      if (!completed) {
+        chosen.selection = selection_reason::no_completed_snapshot;
+        if (auto *standin = lineage_snapshot(owner, native, present, *latest, now)) {
+          chosen.value = standin;
+          chosen.progress = standin->queue == native ? queue_progress{} : producer_progress(*standin);
+          chosen.result = status::ready;
+          chosen.selection = selection_reason::lineage_snapshot;
+        }
+        return chosen;
+      }
       chosen.selection = completed_fallback_reason(owner, present, *latest, *completed);
       if (chosen.selection != selection_reason::completed_snapshot) {
         if (chosen.selection == selection_reason::completed_already_consumed &&
@@ -1029,7 +1076,11 @@ namespace sunshine_streamline::depth_capture {
             value.epoch == policy.epoch && value.viewport == policy.viewport &&
             value.source_id == fg_source;
         };
-        if ((fg.value && !matches(fg.value->metadata)) || (fg.latest && !matches(fg.latest->metadata)) ||
+        // The lineage's ordinary snapshot stands in for its pending input
+        // (lineage_snapshot), of this scope's viewport and epoch.
+        const bool standin = fg.value && fg.selection == selection_reason::lineage_snapshot &&
+          fg.value->metadata.epoch == policy.epoch && fg.value->metadata.viewport == policy.viewport;
+        if ((fg.value && !standin && !matches(fg.value->metadata)) || (fg.latest && !matches(fg.latest->metadata)) ||
             (fg.pending_nomination && (fg.pending_nomination->epoch != policy.epoch ||
               fg.pending_nomination->viewport != policy.viewport ||
               fg.pending_nomination->source_id != fg_source))) {
@@ -4464,6 +4515,7 @@ namespace sunshine_streamline::depth_capture {
     CASE(no_completed_snapshot); CASE(completed_before_gap); CASE(completed_not_older);
     CASE(completed_already_consumed); CASE(presentation_already_selected); CASE(format_changed);
     CASE(completed_not_readable); CASE(completed_snapshot); CASE(fg_scope_missing); CASE(fg_scope_mismatch);
+    CASE(lineage_snapshot);
 #undef CASE
     }
     return "unknown";

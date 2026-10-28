@@ -24,7 +24,8 @@
 // it can supply (frame_generation_holds) and a switch restarts the placement
 // calibration. The supply log says which copies were readable: a legal
 // source of the presenting queue's own (one that meets no limitation and
-// that no live FG scope keeps out) from its frame's Present, and a copy
+// that no live FG scope keeps out) from its frame's Present (its own
+// Present already for a copy recorded at its call, supply::immediate), and a copy
 // recorded on another queue once its work completed, if the contract copies
 // it out (docs/reshade-sbs.md, Copy-out on the producer queue;
 // supply::completions). The record names the shown copy by its capture tick
@@ -166,11 +167,14 @@ namespace game3d_continuity {
     // its call on a list the presenting queue executes before that Present
     // (an SR evaluation's input, a tag copied at its call, DLSS-G's input on
     // the game's list), and one from another queue readable there
-    // (completions' copy, complete or ordered: U-C1). A stall inside such a
-    // frame, after its first call, is no warm-up: the judge measures the
-    // stall rule to the frame's stamp (judge::present). A copy deferred to
-    // its frame's Present (R2), DLSS-G's ring and an unordered frame's copies
-    // keep the Present-to-Present rule.
+    // (completions' copy, complete or ordered: U-C1). The freshness rule
+    // counts the first kind at that Present (until 10-27 no copy of a frame
+    // counted before the Present after it, so a Present that held a copy up
+    // to the source age old beside its frame's own fresh copy passed), and a
+    // stall inside such a frame, after its first call, is no warm-up: the
+    // judge measures the stall rule to the frame's stamp (judge::present).
+    // A copy deferred to its frame's Present (R2), DLSS-G's ring and an
+    // unordered frame's copies keep the Present-to-Present rule.
     std::uint8_t immediate {};
     limitation limit {limitation::none};
     std::uint64_t tick {};
@@ -262,9 +266,10 @@ namespace game3d_continuity {
   // the shown copy (its capture tick) may be. Certainly readable: a copy of
   // the presenting queue's own from a frame before the one the Present
   // presents (a copy deferred to its frame's Present, R2, is read at the
-  // Present after it), and a copy from another queue that the judge saw
-  // complete at an earlier Present (its work completed before this Present's
-  // decision). Two of the fixture's frame intervals, its own pacing (the mean
+  // Present after it), or from that frame when recorded at its call
+  // (supply::immediate), and a copy from another queue that the judge saw
+  // complete at an earlier Present or right before this Present's call (its
+  // work completed before this Present's decision). Two of the fixture's frame intervals, its own pacing (the mean
   // of its last two real Present intervals) at whatever rate it runs: the
   // presented frame's own copy and the one before it, which the add-on may
   // show instead. The stamp and the tick are separate reads of a clock that
@@ -724,13 +729,21 @@ namespace game3d_continuity {
       // copy unholdable (late_signal).
       const void *relied {};
       bool conflicted {};
+      // Recorded at its call on the presenting queue (supply::immediate):
+      // readable from its own frame's Present.
+      bool immediate {};
     };
 
     void readable(const supply &frame, std::uint64_t now) {
       ++frames_;
       const auto stamp = frame.tick ? frame.tick : now;
       if (const auto own = std::uint8_t(frame.legal & api_sources & ~frame.owned & ~frame.limited & ~frame.elsewhere)) {
-        copies_.push_back({stamp, frames_, own, {}});
+        if (const auto at_call = std::uint8_t(own & frame.immediate)) {
+          copies_.push_back({stamp, frames_, at_call, {}, false, nullptr, false, true});
+        }
+        if (const auto later = std::uint8_t(own & ~frame.immediate)) {
+          copies_.push_back({stamp, frames_, later, {}});
+        }
       }
       for (const auto &value : frame.completions) {
         copies_.push_back({stamp, frames_, value.sources, value.probe, value.done_before_present, value.relied});
@@ -775,7 +788,7 @@ namespace game3d_continuity {
       unsigned frames {};
       std::uint64_t last {}, newest {};
       for (const auto &copy : copies_) {
-        if (!(copy.sources & sources) || copy.stamp <= tick || copy.conflicted || (copy.completed ? !copy.done : copy.frame >= frames_)) {
+        if (!(copy.sources & sources) || copy.stamp <= tick || copy.conflicted || (copy.completed ? !copy.done : copy.frame >= frames_ && !copy.immediate)) {
           continue;
         }
         frames += copy.frame != last;

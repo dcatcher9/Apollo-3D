@@ -1191,6 +1191,88 @@ namespace sunshine_streamline::depth_capture {
       std::printf("PASS P5/P6 stray FG copy with late SR snapshots: %zu steps\n", std::size(steps));
     }
 
+    // P5 and P6: a viewport's Streamline FG input is pending with none of its
+    // snapshots completed (FG On's first frame, or DLSS-G's compute copy
+    // still in flight at its own Present), while the frame's own SR snapshot
+    // of that viewport (its display lineage) is readable on this queue: it
+    // stands in (lineage_snapshot), also under the FG scope's policy. Only an
+    // unconsumed snapshot of the lineage, within the source age, that this
+    // queue can read does (until 10-27 none did: the Present held the
+    // display's retained copy, mono once that was past the source age).
+    void lineage_stand_in_rows() {
+      enum class variant {
+        plain,
+        fg_policy,
+        consumed,
+        expired,
+        other_epoch,
+        other_viewport,
+        unreadable
+      };
+      struct row {
+        const char *pins;
+        variant kind;
+        char picked;  // S the SR snapshot, - none.
+        status result;
+        selection_reason selection;
+      };
+
+      const row rows[] {
+        {"The FG input in flight: the frame's own SR snapshot stands in", variant::plain, 'S', status::ready, selection_reason::lineage_snapshot},
+        {"The FG input in flight under its scope's policy: the SR snapshot stands in", variant::fg_policy, 'S', status::ready, selection_reason::lineage_snapshot},
+        {"An SR snapshot this queue already showed does not stand in", variant::consumed, '-', status::recorded, selection_reason::no_completed_snapshot},
+        {"An SR snapshot past the source age does not stand in", variant::expired, '-', status::recorded, selection_reason::no_completed_snapshot},
+        {"An SR snapshot of an earlier epoch does not stand in", variant::other_epoch, '-', status::recorded, selection_reason::no_completed_snapshot},
+        {"An SR snapshot of another viewport does not stand in", variant::other_viewport, '-', status::recorded, selection_reason::no_completed_snapshot},
+        {"An SR snapshot on another queue that this queue cannot read does not stand in", variant::unreadable, '-', status::recorded, selection_reason::no_completed_snapshot},
+      };
+      constexpr std::uint64_t epoch = 9;
+      for (const auto &r : rows) {
+        reset();
+        const auto now = GetTickCount64();
+        queue_state owner;
+        // The frame's SR evaluation (sequence 2), then DLSS-G's evaluation of
+        // its FG input (sequence 3), which replaces the viewport's SR view.
+        const auto sr_epoch = r.kind == variant::other_epoch ? epoch - 1 : epoch;
+        const std::uint32_t sr_viewport = r.kind == variant::other_viewport ? 1 : 0;
+        auto &sr = make(0, provider_kind::streamline, sr_epoch, 2, 0, sr_viewport);
+        // Its evaluation nominated it, and its copy has storage.
+        sr.texture = std::make_shared<texture_reference>();
+        sr.source_nominated = true;
+        if (r.kind == variant::expired) {
+          sr.metadata.tick = now - source_age - 1;
+        }
+        if (r.kind == variant::unreadable) {
+          // Recorded on another queue, which this queue cannot read.
+          sr.queue = native + 1;
+        }
+        if (r.kind == variant::other_viewport) {
+          // That viewport's evaluations stopped (no ambiguity of views).
+          for (auto &view : evaluations[provider_index(provider_kind::streamline)].views) {
+            if (view.viewport == sr_viewport) {
+              view = {};
+            }
+          }
+        }
+        auto &fg = make(1, provider_kind::streamline, epoch, 3, fg_source, 0, 0);
+        fg.finished = false;
+        if (r.kind == variant::consumed) {
+          establish_provider(owner, sr, 1);
+          deliver(owner, sr);
+        }
+        const bool required = r.kind == variant::fg_policy;
+        const selection_policy policy {required, required ? epoch : 0, 0, false, now - 16};
+        const auto pick = select_provider(owner, native, 2, now, policy);
+        const char picked = label(pick, &sr, 'S', &fg, 'F');
+        if (picked != r.picked || pick.result != r.result || pick.selection != r.selection) {
+          char text[512];
+          std::snprintf(text, sizeof(text), "P5/P6 lineage stand-in, %s: picked %c result %s selection %s", r.pins, picked, name(pick.result), name(pick.selection));
+          fail(text);
+        }
+      }
+      std::printf("PASS P5/P6 lineage stand-in for a pending FG input: %zu rows\n", std::size(rows));
+    }
+
     struct display_case {
       acquisition_decision current;
       packet candidate;
@@ -1751,6 +1833,7 @@ int main() {
   ownership_timelines();
   freshness_edges();
   stray_frame_generation_copy_steps();
+  lineage_stand_in_rows();
   decide_display_rows();
   ui_admission_rows();
   reset();

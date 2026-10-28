@@ -29,7 +29,9 @@
 //   frame-generation objects. These are drawn from a stream of their own,
 //   so every seed keeps the frames it had before them (10-27);
 // - the frame's slow intervals, modelled rather than left to the machine's
-//   load (10-27): a hitch of the frame's recording before its calls (brief,
+//   load (10-27): DLSS-G's compute work held on the GPU until the frame's
+//   Present returned (a GPU-bound game, its copy in flight at its own
+//   Present), and a hitch of the frame's recording before its calls (brief,
 //   or the source age and more) or after them, before its Present. No seed
 //   draws them; event lists (regressions, --events) name them.
 // Each dimension keeps the previous frame's value with a chance or is drawn
@@ -114,6 +116,7 @@ namespace {
       ui,
       order,
       hitch,
+      dlssg_gpu,
       dimension_count
     };
 
@@ -232,6 +235,15 @@ namespace {
       return value == hitch_form::brief ? DWORD(sunshine_freshness::source_age_ms / 2) : value == hitch_form::none ? 0 : DWORD(sunshine_freshness::source_age_ms + 150);
     }
 
+    // When DLSS-G's compute work runs on the GPU: as soon as its queue gets
+    // it, or only once the frame's Present returned (after_present: its
+    // queue waits on a gate the CPU opens then, as a GPU-bound game's copy
+    // is still in flight at its own Present; never with a CPU wait for it).
+    enum class dlssg_gpu_form {
+      prompt,
+      after_present
+    };
+
     template<class E>
     E of(const generator::row &value, dimension d) {
       return E(value[d]);
@@ -281,6 +293,7 @@ namespace {
           {"ui", {"none", "bare", "listed", "untagged"}},
           {"order", {"wait", "wait_first", "cpu_wait", "cpu", "second", "late"}},
           {"hitch", {"none", "brief", "before_sources", "after_sources"}},
+          {"dlssg_gpu", {"prompt", "after_present"}},
         },
         legal,
       };
@@ -353,6 +366,13 @@ namespace {
         // Fence events order only work on another queue.
         if (!elsewhere(value)) {
           value[order] = 0;
+        }
+        // Only DLSS-G's compute work waits for the gate, which the CPU opens
+        // after the Present: never while the CPU waits for that work.
+        const auto d = of<dlssg_form>(value, dlssg);
+        const auto o = of<order_form>(value, order);
+        if ((d != dlssg_form::compute && d != dlssg_form::compute_unobserved) || o == order_form::cpu_wait || o == order_form::cpu) {
+          value[dlssg_gpu] = 0;
         }
       }
     }
@@ -517,6 +537,30 @@ namespace {
     // as a stall's warm-up (it also hit the fixed set's
     // C5-global-untag-then-evaluate once under load, at frame 25).
     {"hitch-after-sources", "20*sr=local; sr=local,hitch=after_sources; 10*sr=local; 5*sr=other_queue; sr=other_queue,hitch=after_sources; 10*sr=other_queue"},
+    // FG On in a GPU-bound game: DLSS-G's first compute copy is still in
+    // flight at its own Present (dlssg_gpu=after_present), and its order
+    // fence is new, so that Present cannot read it. The frame's own SR copy
+    // on the presenting queue stands in (lineage_snapshot). Until 10-27 the
+    // provider held only the display's retained copy there: mono once it was
+    // past the source age while the frame's own SR copy was readable (seed
+    // c28965dca8d7c76c's shape with SR legal: retained_depth_expired, FG
+    // pending, no_completed_snapshot), and SR depth up to the source age old
+    // beside the frame's own (stale_shown). Three forms: the held copy
+    // expires at FG On's first Present through two brief hitches, one on a
+    // frame with no source, which still holds it (a gap, no stall); a hitch
+    // of the source age and more inside FG On's first frame, before its calls
+    // (a gap: that frame's Present reads its own SR copy, so the hitch is no
+    // warm-up); and a held copy still within the source age beside the
+    // frame's own (stale_shown).
+    {"fg-on-dlssg-in-flight-sr-after-hold-expired", "20*sr=local; hitch=brief; fg=on,sr=local,dlssg=compute,dlssg_gpu=after_present,hitch=brief; 10*sr=local,dlssg=compute,dlssg_gpu=after_present"},
+    {"fg-on-dlssg-in-flight-sr-stands-in", "20*sr=local; fg=on,sr=local,dlssg=compute,dlssg_gpu=after_present,hitch=before_sources; 10*sr=local,dlssg=compute,dlssg_gpu=after_present"},
+    {"fg-on-dlssg-in-flight-fresh-sr-over-held", "20*sr=local; hitch=brief; defaults; fg=on,sr=local,dlssg=compute,dlssg_gpu=after_present; 10*sr=local,dlssg=compute,dlssg_gpu=after_present"},
+    // Seed c28965dca8d7c76c's frame 38 made deterministic: after a hitch,
+    // FG On's first frame supplies only DLSS-G's compute copy, in flight and
+    // unordered (its SR input unprovable), and the held copy is past the
+    // source age: mono is the contract there, and DLSS-G's copy shows from
+    // the next Present.
+    {"fg-on-only-dlssg-in-flight-mono", "20*sr=local; sr=local,hitch=after_sources; fg=on,sr=local,state=unprovable,dlssg=compute,dlssg_gpu=after_present; 10*sr=local,dlssg=compute,dlssg_gpu=after_present"},
   };
 
   // Each known gap the timelines found has a witness: an event list whose
@@ -721,6 +765,14 @@ namespace {
 
     order_fence game_order, dlssg_order;
     com_ptr<ID3D12CommandQueue> third;
+    // The gate DLSS-G's compute queue waits on (dlssg_gpu=after_present):
+    // the CPU opens it once the frame's Present returned
+    // (fixture_t::after_present), as a GPU-bound game's compute copy is
+    // still in flight at its own Present; closed: this frame waits on it.
+    com_ptr<ID3D12Fence> dlssg_gate;
+    std::uint64_t dlssg_gate_value {};
+    const void *dlssg_gate_token {};
+    bool dlssg_gate_closed {};
     // The frame's late signals, made after its real Present.
     std::vector<order_fence *> late_signals;
     // The game's HUD-less and Backbuffer images: its UI tags and DLSS-G's
@@ -899,7 +951,20 @@ namespace {
       D3D12_COMMAND_QUEUE_DESC desc {};
       desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
       checked(game->CreateCommandQueue(&desc, IID_PPV_ARGS(third.put())), "Create the game's third queue");
+      checked(game->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(dlssg_gate.put())), "Create DLSS-G's compute gate");
+      dlssg_gate_value = 0;
+      dlssg_gate_token = script_fence_token();
+      dlssg_gate_closed = false;
       renew_order();
+    }
+
+    // Opens DLSS-G's compute gate if this frame closed it.
+    void open_dlssg_gate() {
+      if (!std::exchange(dlssg_gate_closed, false)) {
+        return;
+      }
+      checked(dlssg_gate->Signal(dlssg_gate_value), "Open DLSS-G's compute gate after the frame's Present");
+      script_order.cpu_signal(dlssg_gate_token, dlssg_gate_value);
     }
 
     // A fence's waits and signals complete before it goes, as a game's.
@@ -923,9 +988,11 @@ namespace {
 
     // The add-on lifecycle fixture ends the game's device.
     void release_order() {
+      open_dlssg_gate();
       finish_order(game_order);
       finish_order(dlssg_order);
       third.reset();
+      dlssg_gate.reset();
     }
 
     // The ring's entry n executed on its queue, which then signals its order
@@ -1019,6 +1086,7 @@ namespace {
     // Retires every ring recording (as a game does at its end), once their
     // copies are older than the source age.
     void drain() {
+      open_dlssg_gate();
       game_work.drain();
       dlssg_work.drain();
     }
@@ -1709,6 +1777,13 @@ namespace {
         if (observed) {
           transition(compute, selected->resource.p, read, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         }
+        // A GPU-bound game: DLSS-G's compute work runs only once the
+        // frame's Present returned (open_dlssg_gate).
+        if (frame_events::of<frame_events::dlssg_gpu_form>((*frames)[frame], events::dlssg_gpu) == frame_events::dlssg_gpu_form::after_present) {
+          checked(dlssg_work.queue->Wait(dlssg_gate.p, ++dlssg_gate_value), "Hold DLSS-G's compute work until after the frame's Present");
+          script_order.wait(dlssg_work.queue.p, dlssg_gate_token, dlssg_gate_value);
+          dlssg_gate_closed = true;
+        }
         // Streamline's present queue waits for DLSS-G's compute signal, so
         // the Presents after this one are ordered after its copy-out (U-C1),
         // as the frame's fence events have it.
@@ -1768,8 +1843,12 @@ namespace {
       render_tracked_depth = [this] {
         frame_body();
       };
+      after_present = [this] {
+        open_dlssg_gate();
+      };
       present_frame();
       render_tracked_depth = {};
+      after_present = {};
       poll("present");
       if (!record_history.records.empty()) {
         present_frames[record_history.records.back().present] = frame;
@@ -1979,7 +2058,7 @@ namespace {
         }
       };
       // Each event kind back to its default in every frame.
-      for (const auto d : {hitch, order, ui, generated, drs, untag, dlssg, state, entry, sr, tag, fg}) {
+      for (const auto d : {dlssg_gpu, hitch, order, ui, generated, drs, untag, dlssg, state, entry, sr, tag, fg}) {
         auto candidate = current;
         for (auto &value : candidate) {
           reset(value, d);

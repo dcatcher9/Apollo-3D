@@ -4352,11 +4352,20 @@ which DLSS-G's inputs are one case. A compute queue takes its place and fence at
 submission of such a copy. The Present queue reads the copy as any other queue's: once
 that recording was reset and the fence passed. A compute-list copy keeps the FG scope live only once
 the Present queue can read it: its submission carries that fence, Streamline reset the recording and
-the fence passed. Streamline resets its DLSS-G recordings only frames later. Until then the display
-holds the viewport's SR copy, of the same epoch and younger than the source age, while the
-acquisition names only the FG copy in flight (`source_reason=FG_copy_pending`; DLSS-G's nomination
-replaces the viewport's SR observation), so the handover loses no depth (the display lineage
-below); until 10-25 the scope turned live at the submission and the SR depth it replaced was
+the fence passed. Streamline resets its DLSS-G recordings only frames later. Until then, while
+none of the FG input's snapshots completed within the source age (FG On's first frames, or a
+GPU-bound game's DLSS-G copy still in flight at its own Present), the newest snapshot of the
+viewport's ordinary SR/RR source of the same epoch, its display lineage, that this queue can read
+now and has not shown, within the source age, stands in (`selection=lineage_snapshot`): at FG On
+that is the frame's own SR copy. Without one the display holds the viewport's SR copy, of the same
+epoch and younger than the source age, while the acquisition names only the FG copy in flight
+(`source_reason=FG_copy_pending`; DLSS-G's nomination replaces the viewport's SR observation), so
+the handover loses no depth (the display lineage below). Until 10-27 only that retained copy was
+held, older by the frames without depth before FG On, and mono once it passed the source age while
+the frame's own SR copy was readable (`retained_depth_expired`, FG `no_completed_snapshot`; the
+session timelines' `fg-on-dlssg-in-flight-*`). A live scope's own FG copy within the source age is
+still held over the stand-in (`frame_generation_holds`); until 10-25 the scope turned live at the
+submission and the SR depth it replaced was
 dropped for a copy still in flight. One never submitted (as when its queue has no place) or never reset turns the scope live
 for nothing; one whose producer fails later (a
 replay, its queue gone) counts as a missed frame (below). DLSS-G's
@@ -4490,7 +4499,8 @@ source_reason=FG_successor_pending`). This is one rule for both directions: a vi
 FG input and its ordinary SR/RR source of one epoch are one display lineage, whose newcomer takes
 the viewport at its first readable frame while the predecessor's copy is held within the source age
 (`decide_display`, `depth_capture::detail::lineage_successor`). So FG On, or a scope that supplies
-again, holds the viewport's SR copy until the scope's first FG copy is readable
+again, shows the lineage's newest readable SR snapshot (`selection=lineage_snapshot`, above), else
+holds the viewport's SR copy, until the scope's first FG copy is readable
 (`source_reason=FG_copy_pending`), a live scope included: until 10-27 a live scope dropped every
 copy but its own (`FG_scope_changed`), so a generated Present before the first FG copy was readable
 was mono at each FG On (the round 3 review's soak found it in 13 of 20 failures). A readable frame of

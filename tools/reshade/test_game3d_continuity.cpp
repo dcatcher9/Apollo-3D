@@ -8,8 +8,9 @@
 // from another queue that completed after the add-on's decision neither
 // excuses nor demands a mono Present there. A real Present's copy captured
 // inside the frame it presents is no older than that frame for the stale
-// rule, however long the frame took. A stall inside a frame whose own
-// Present reads its legal source, after its first call, is no warm-up.
+// rule, however long the frame took. A frame's own copy recorded at its
+// call is readable at its own Present: the freshness rule counts it there,
+// and a stall inside such a frame is no warm-up.
 #include "test_game3d_continuity.h"
 
 #include <cstdint>
@@ -229,6 +230,55 @@ namespace {
     }
   }
 
+  // A frame's own copy recorded at its call on the presenting queue
+  // (supply::immediate: an SR evaluation's input) is readable at its own
+  // Present. A Present that holds a copy older than the freshness bound
+  // beside it shows stale depth (the session tests' 10-27 review: at FG On
+  // with DLSS-G's first copy in flight the add-on held an SR copy 187 ms old
+  // while the frame's own SR copy was fresh, and the judge, which counted a
+  // frame's copies only from the Present after it, passed it). A copy
+  // deferred to the frame's Present (R2) still counts only from the next.
+  void immediate_copy_counts_at_its_own_present() {
+    struct trial {
+      bool immediate, shows_own;
+      bool stale;
+      const char *message;
+    };
+    const trial trials[] {
+      {true, false, true, "a Present that held a 160 ms old copy beside its frame's own fresh SR copy was not stale_shown"},
+      {true, true, false, "a Present that showed its frame's own SR copy was judged"},
+      {false, false, false, "a Present that held a copy beside its frame's copy deferred to that Present was stale_shown"},
+    };
+    for (const auto &value : trials) {
+      continuity::judge judge;
+      std::uint64_t now = 1000, present = 1;
+      for (int i = 0; i != 4; ++i, now += 16) {
+        continuity::supply frame;
+        frame.add(continuity::sr_evaluate, now);
+        frame.immediate = continuity::sr_evaluate;
+        judge.present(shown(present++, now, source_slot::scene_depth, now), frame, "test");
+      }
+      const auto copied = now - 16;
+      for (; now < copied + 160; now += 16) {
+        auto held = shown(present++, now, source_slot::scene_depth, copied);
+        held[source_slot::scene_depth].state = source_state::held;
+        judge.present(held, {}, "test");
+      }
+      continuity::supply frame;
+      frame.add(value.immediate ? continuity::sr_evaluate : continuity::tag_copy, now);
+      frame.immediate = value.immediate ? continuity::sr_evaluate : 0;
+      auto record = shown(present++, now, source_slot::scene_depth, value.shows_own ? now : copied);
+      if (!value.shows_own) {
+        record[source_slot::scene_depth].state = source_state::held;
+      }
+      judge.take();
+      judge.present(record, frame, "test");
+      const auto violations = judge.take();
+      const bool stale = violations.size() == 1 && violations[0].kind == continuity::violation_kind::stale_shown;
+      require(value.stale ? stale : violations.empty(), value.message);
+    }
+  }
+
   // A stall inside a frame whose own Present reads its legal source
   // (supply::immediate), after the frame's first call, leaves that source
   // readable: a mono Present there is a gap (the session tests' 10-27
@@ -303,6 +353,7 @@ int main() {
   late_signal_conflicts_only_its_copies();
   unordered_copy_completed_after_decision();
   stale_rule_ages_a_frames_own_copy_from_its_capture();
+  immediate_copy_counts_at_its_own_present();
   stall_inside_a_frame_that_reads_its_own_source();
   if (failures) {
     return EXIT_FAILURE;
@@ -310,6 +361,7 @@ int main() {
   std::puts("PASS continuity judge: a late signal conflicts only the copies read through its fence; a generated "
             "Present's dropped hold is R1's only where the real Present showed such a copy; a copy that completed "
             "after the add-on's decision is no holdable copy there; a frame's own copy is no older than its frame "
-            "for the stale rule; a stall inside a frame that reads its own source is no warm-up");
+            "for the stale rule; a frame's own copy at its call is readable at its Present, also after a stall inside "
+            "it");
   return EXIT_SUCCESS;
 }
