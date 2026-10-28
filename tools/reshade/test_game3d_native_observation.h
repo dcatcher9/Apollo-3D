@@ -82,6 +82,7 @@ namespace {
       recalibrate_ = reinterpret_cast<action_t>(GetProcAddress(module, "SunshineGame3DTestRecalibrate"));
       set_foreground_ = reinterpret_cast<set_foreground_t>(GetProcAddress(module, "SunshineSbsTestSetForeground"));
       last_render_ = reinterpret_cast<last_render_t>(GetProcAddress(module, "SunshineGame3DTestLastRender"));
+      set_enabled_ = reinterpret_cast<set_enabled_t>(GetProcAddress(module, "SunshineGame3DTestSetEnabled"));
       require(module && query_automatic_ && query_scale_ && edit_float_ && recalibrate_ && set_foreground_,
         "Native Game 3D fixture requires the test add-on's passive UI queries, controls and foreground observer");
       const auto effects = fixture_.runtime_directory / "effects";
@@ -135,6 +136,11 @@ namespace {
     }
 
     bool recalibrate() { return recalibrate_(observed.runtime) != FALSE; }
+
+    // The overlay's Enable Game 3D, as the panel edits it.
+    void set_enabled(bool value) {
+      require(set_enabled_ && set_enabled_(observed.runtime, value ? TRUE : FALSE), "Native Game 3D rejected an Enable Game 3D edit");
+    }
 
     // What the last native render consumed: its depth identity, allocation
     // and readiness, and its constants. Per Present, without a dump; the
@@ -297,6 +303,7 @@ namespace {
     using action_t = BOOL (*)(api::effect_runtime *);
     using set_foreground_t = void (*)(HWND);
     using last_render_t = BOOL (*)(api::effect_runtime *, sunshine_game3d::test::last_render *);
+    using set_enabled_t = BOOL (*)(api::effect_runtime *, BOOL);
 
     static std::uint64_t load(std::uint64_t &value) {
       return std::uint64_t(InterlockedCompareExchange64(reinterpret_cast<volatile LONG64 *>(&value), 0, 0));
@@ -314,6 +321,7 @@ namespace {
     action_t recalibrate_{};
     set_foreground_t set_foreground_{};
     last_render_t last_render_{};
+    set_enabled_t set_enabled_{};
     unsigned fx_renders_{};
     HANDLE mapping_{}, export_mapping_{};
     game3d_debug::shared_state_t *state_{};

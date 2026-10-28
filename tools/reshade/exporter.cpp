@@ -953,6 +953,11 @@ namespace {
     std::uint64_t camera_missing_holds = 0;
     bool projection_ready = false;
     sunshine_raw_scene::reentry_transition raw_reentry;
+    // Whether raw_reentry heard from this runtime's current Present, and that
+    // Present's tick (note_shown_present): a Present it never heard from was
+    // shown without Game 3D stereo.
+    std::uint64_t reentry_present_ms = 0;
+    bool reentry_heard = true;
     sunshine_raw_scene::status raw_last_status = sunshine_raw_scene::status::uninitialized;
     sunshine_diagnostics::log_gate raw_log;
     std::uint32_t width = 0;
@@ -1295,6 +1300,32 @@ namespace {
       timing.next_log = now + 10000;
     }
 
+    // Every scene the stereo reentry ramp places tells it this Present's
+    // readiness (reentry_update), and a reused or held scene repeats its real
+    // frame's as that frame left it.
+    float reentry_update(runtime_t &proof, bool ready, std::uint64_t now,
+        sunshine_raw_scene::stereo_basis basis = sunshine_raw_scene::stereo_basis::raw) {
+      proof.reentry_heard = true;
+      return proof.raw_reentry.update(ready, now, basis);
+    }
+
+    // At the start of each Present of a runtime, under the lock: the previous
+    // Present, if no scene told the ramp about it, was shown without Game 3D
+    // stereo (Game 3D disabled, the renderer unavailable or preparing, a
+    // failed native lease, an FX path that cannot place the scene: no FX
+    // uniforms, or cropped depth an older FX cannot sample), and the ramp
+    // hears it now as not ready at its own time, before this Present's scene
+    // does. Presents shown without ready depth for more than 250 ms then
+    // restart the 500 ms fade (owner ruling 10-27), while a pause with no
+    // Present at all tells it nothing. Until the 10-27 review those exits
+    // returned before the ramp heard of them, so stereo came back at full
+    // strength after seconds of Game 3D disabled.
+    void note_shown_present(runtime_t &proof, std::uint64_t now) {
+      if (!std::exchange(proof.reentry_heard, false) && proof.reentry_present_ms)
+        proof.raw_reentry.shown_without_depth(proof.reentry_present_ms);
+      proof.reentry_present_ms = now;
+    }
+
     void render_present(api::swapchain *swapchain) {
       api::effect_runtime *runtime = nullptr;
       {
@@ -1316,7 +1347,9 @@ namespace {
         auto &proof = runtimes_[runtime];
         proof.addon_native = settings.enabled;
         source_alpha = sunshine_game3d::ui_input::resolve(proof.source_alpha_policy, settings, presentation);
-        gap = measure_present_gap(proof, present_qpc.QuadPart, GetTickCount64());
+        const auto tick = GetTickCount64();
+        gap = measure_present_gap(proof, present_qpc.QuadPart, tick);
+        note_shown_present(proof, tick);
       }
       struct publish_alpha_decision {
         api::effect_runtime *runtime;
@@ -1822,12 +1855,16 @@ namespace {
         // Strength reductions remain immediate; increases wait until the next
         // real-depth frame re-evaluates this scene's disparity interval.
         restore_reused_scene(frame, previous_frame, proof.raw_supported);
+        // Its real frame's scene as that frame left it: the ramp heard that
+        // frame, and this Present neither adds to nor ends its exposure.
+        proof.reentry_heard = proof.reentry_heard || (proof.raw_supported && frame.depth_ready);
       } else {
         const bool provided = sunshine_game3d::depth_input::provider_selected(runtime);
         const sunshine_game3d::slow_step step("scene placement");
-        if (provided && proof.raw_supported && game_enabled && hold_projection_scene(frame, previous_frame, depth, now))
+        if (provided && proof.raw_supported && game_enabled && hold_projection_scene(frame, previous_frame, depth, now)) {
           ++proof.camera_missing_holds;
-        else frame.scene = resolve_raw_scene(runtime, proof, depth, game_enabled, provided, now);
+          proof.reentry_heard = true; // The held scene, as for reused depth.
+        } else frame.scene = resolve_raw_scene(runtime, proof, depth, game_enabled, provided, now);
       }
       frame.ui_source = resolve_ui_observation(depth, previous_frame.ui_source, frame.scene, proof.raw_basis_epoch, now);
       const sunshine_game3d::slow_step step("frame publication");
@@ -1907,7 +1944,7 @@ namespace {
       if (!enabled || !proof.raw_basis_epoch) {
         proof.raw_policy.scene_cut(now);
         proof.provided_raw_policy.scene_cut(now);
-        proof.raw_reentry.update(false, now);
+        reentry_update(proof, false, now);
         scene.ui = {phase::waiting_for_depth, false};
         return scene;
       }
@@ -1967,7 +2004,7 @@ namespace {
         // The policy retains numeric history when this evaluation returns mono.
         state = proof.raw_policy.evaluate(current, now);
         }
-      scene.blend = proof.raw_reentry.update(state.ready, now);
+      scene.blend = reentry_update(proof, state.ready, now);
       {
         using reason = sunshine_raw_scene::status;
         phase display = phase::waiting_for_depth;
@@ -2049,7 +2086,7 @@ namespace {
       } else {
         proof.projection_policy.suspend();
       }
-      scene.blend = proof.raw_reentry.update(ready, now, sunshine_raw_scene::stereo_basis::projection);
+      scene.blend = reentry_update(proof, ready, now, sunshine_raw_scene::stereo_basis::projection);
       const bool unsupported = center.reason == projection::center_status::unsupported_shader_domain ||
         center.reason == projection::center_status::invalid_projection;
       auto placement = report(center);

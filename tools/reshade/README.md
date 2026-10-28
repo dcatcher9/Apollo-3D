@@ -1005,8 +1005,10 @@ failed, missing and refused evaluations (the newest completed copy held within i
 current-color mono; one second of silence or of rejected evaluations releases the association),
 a hitch longer than the source age before a frame's evaluation and one between the evaluation and
 its Present (the first Present after each shows that frame's own copy at the full stereo strength
-it had; until the 10-27 ruling such a pause restarted the fade from flat), and zero-strength HDR
-color.
+it had; until the 10-27 ruling such a pause restarted the fade from flat), Enable Game 3D off for
+a second at full strength and on again (its first ready Present restarts the fade from flat, then
+fades in to full strength: Presents shown without Game 3D are a loss of depth, not a pause; until
+the 10-27 review stereo came back at full strength), and zero-strength HDR color.
 It uses the same arguments as the NGX fixture below, with
 `reshade_streamline_direct_runtime_test.exe` and a fresh output directory. Its test-only
 seam supplies middleware metadata, never shader readiness, copied pixels or GPU completion.

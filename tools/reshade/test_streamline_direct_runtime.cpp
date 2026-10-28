@@ -1251,6 +1251,41 @@ RWTexture2D<float> depth : register(u0);
         std::puts("PASS a hitch before or after a frame's SR evaluation: its Present shows that frame's own copy at full stereo strength");
       }
       {
+        // Enable Game 3D unticked for a second at full stereo strength, then
+        // ticked: the Presents shown meanwhile had no Game 3D stereo, so the
+        // first Present after it with ready depth restarts the 500 ms fade
+        // from flat (docs/reshade-sbs.md, raw-depth automation: Presents
+        // shown without ready depth for more than 250 ms). Until the 10-27
+        // review the disabled Presents returned before the reentry ramp
+        // heard of them, and stereo came back at full strength.
+        settle("before-disable");
+        const auto before=blend();
+        direct_native.set_enabled(false);
+        const auto disabled_at=GetTickCount64();
+        unsigned disabled_presents=0;
+        while(GetTickCount64()-disabled_at<1000) { step(); direct_native.no_effects(); ++disabled_presents; }
+        require(direct_native.last_render().sequence==rendered_sequence,"A Present rendered native Game 3D while it was disabled");
+        direct_native.set_enabled(true);
+        const auto enabled_at=GetTickCount64();
+        unsigned until_ready=0;
+        do { tick("enabled-first-ready"); ++until_ready; } while(!(current() && ready()) && GetTickCount64()-enabled_at<5000);
+        require(current() && ready(),"Game 3D enabled again showed no ready depth within 5 s");
+        const auto first=blend();
+        float previous=first; bool monotonic=true; unsigned ramp_presents=0;
+        const auto ramp_started=GetTickCount64();
+        while(blend()<1.f && GetTickCount64()-ramp_started<5000) {
+          tick("enabled-ramp"); ++ramp_presents;
+          monotonic=monotonic && current() && ready() && blend()>=previous; previous=blend();
+        }
+        std::printf("MEASURE disable-enable disabled_ms=%llu disabled_presents=%u presents_to_ready=%u blend_before=%g blend_first=%g ramp_ms=%llu ramp_presents=%u blend_end=%g\n",
+          static_cast<unsigned long long>(enabled_at-disabled_at),disabled_presents,until_ready,before,first,
+          static_cast<unsigned long long>(GetTickCount64()-ramp_started),ramp_presents,blend());
+        require(before==1.f && disabled_presents>10,"The disable case did not start from full stereo or presented too little while disabled");
+        require(first==0.f,"Game 3D enabled after a second without stereo returned at full stereo strength instead of fading in");
+        require(monotonic && blend()==1.f,"Stereo did not fade back in monotonically to full strength after Game 3D was enabled again");
+        std::puts("PASS a second with Game 3D disabled restarts the stereo fade at its first ready Present");
+      }
+      {
         // D11c: the add-on keeps a D3D12 DSV's read-only flags from its
         // creation (ReShade's init_resource_view) and reads them where a list
         // binds it; a view created again at a handle replaces them.

@@ -5854,11 +5854,21 @@ reference returns the current source image to both eyes, bypassing final sharpen
 as stereo geometry. Recovery ramps stereo gain over 500 ms of valid-frame exposure. A missing
 frame itself has zero stereo gain but retains ramp progress through gaps no longer than 250 ms.
 Time spent displaying missing-depth frames adds no progress; clock rollback, a basis change, or
-Presents shown without ready depth for more than 250 ms since the last ready one restart the
-ramp. A pause in Presents alone loses no depth: when the last Present before it and the first
-after it both have ready depth on the same basis, strength continues, and the pause counts as at
-most 250 ms of exposure (owner ruling 10-27; until then any gap over 250 ms restarted the ramp,
-so the first Present after a game hitch was flat although its own depth was ready).
+Presents shown without ready depth for more than 250 ms restart the ramp. That loss is counted
+from the first Present shown without ready depth, and every Present the game shows counts, also
+one shown without Game 3D stereo at all (Enable Game 3D off, the renderer still preparing or
+unavailable, a failed native lease, an FX path that cannot place the scene): the ramp hears such a
+Present at the next one, at its own time (exporter.cpp, `note_shown_present`). A pause in Presents
+alone loses no depth, as the last ready Present's stereo image stays on screen through it: when
+the first Present after it has ready depth on the same basis, strength continues, and the pause
+counts as at most 250 ms of exposure (owner ruling 10-27; until then any gap over 250 ms restarted
+the ramp, so the first Present after a game hitch was flat although its own depth was ready). A
+pause after a Present without ready depth is part of the loss, since that flat image stayed on
+screen. Until the 10-27 review the loss ran from the last ready Present, so a pause whose first
+Present after it was correctly flat (FG On: a generated Present of a frame whose DLSS-G copy was
+still in flight) restarted the ramp at the real Present 8 ms later, and the Presents shown without
+Game 3D returned before the ramp heard them, so stereo came back at full strength after seconds
+of Enable Game 3D off.
 Ordinary generic capture does not reuse old color/depth; the explicit bounded
 API FG depth-retention path described above is separate.
 The zero-strength endpoint also returns current mono; an explicitly selected Normal Depth View
