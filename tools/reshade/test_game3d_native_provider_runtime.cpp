@@ -171,6 +171,8 @@ namespace {
     // The fence as the freshness rule's probes see it: they hold it weakly,
     // so no supply log keeps the game's device alive (release() ends it).
     std::shared_ptr<ID3D12Fence> watched;
+    // Each entry's Resets, which retire its earlier recordings (retired()).
+    std::shared_ptr<std::array<std::uint64_t, N>> resets = std::make_shared<std::array<std::uint64_t, N>>();
 
     void create(ID3D12Device *device, D3D12_COMMAND_LIST_TYPE type) {
       D3D12_COMMAND_QUEUE_DESC desc{}; desc.Type = type;
@@ -196,8 +198,14 @@ namespace {
         return held && held->GetCompletedValue() >= until;
       };
     }
+    // Whether entry n's recording that executes now has retired: the entry
+    // was reset (recorded into again) since.
+    std::function<bool()> retired(unsigned n) const {
+      return [counts = resets, n, at = (*resets)[n]] { return (*counts)[n] != at; };
+    }
     // Entry n, reset once its last work completed: its native list, open.
     std::uint64_t reset(unsigned n) {
+      ++(*resets)[n];
       checked(done->SetEventOnCompletion(values[n], nullptr), "Wait for a ring entry's work");
       const auto direct = game_native_command;
       checked(allocators[n]->Reset(), "Reset a ring entry's allocator");

@@ -1007,6 +1007,9 @@ namespace {
     };
 
     order_fence game_order, dlssg_order;
+    // The game ring's entries whose recording carried an SR copy the add-on
+    // recorded (a list it knows to run on the game's queue).
+    std::array<bool, decltype(game_work)::size> game_work_carried {};
     com_ptr<ID3D12CommandQueue> third;
     // The gate DLSS-G's compute queue waits on (dlssg_gpu=after_present):
     // the CPU opens it once the frame's Present returned
@@ -1325,15 +1328,18 @@ namespace {
     // (sticky poison, O3) and that settled: its first value was seen
     // complete before this frame's calls on it (a wait before that is
     // refused for good).
+    // mutable_copy: the frame's copy on the ring is not immutable for the
+    // presenting queue (a cold list, below): neither the order fence nor a
+    // CPU wait makes it readable at its Present.
     template<unsigned N>
-    bool execute_elsewhere(queue_ring<N> &ring, unsigned n, order_fence &order) {
+    bool execute_elsewhere(queue_ring<N> &ring, unsigned n, order_fence &order, bool mutable_copy = false) {
       using frame_events::order_form;
       const auto form = frame_events::of<order_form>((*frames)[frame], events::order);
       const auto next = order.value + 1;
       if (!order.settled && order.value && order.fence->GetCompletedValue() >= 1) {
         order.settled = true;
       }
-      const bool relied = order.settled && !order.poisoned;
+      const bool relied = order.settled && !order.poisoned && !mutable_copy;
       const auto wait = [&] {
         checked(queue->Wait(order.fence.p, next), "Order the presenting queue after a ring's queue");
         script_order.wait(queue.p, order.token, next);
@@ -1363,7 +1369,7 @@ namespace {
         order.relied = GetTickCount64();
         relied_on = order.token;
       }
-      return complete || (relied && form != order_form::second);
+      return !mutable_copy && (complete || (relied && form != order_form::second));
     }
 
     // A signal of the order fence by the CPU, or by the third queue once its
@@ -1988,8 +1994,28 @@ namespace {
           script_order.wait(game_work.queue.p, sr_gate_token, sr_gate_value);
           sr_gate_closed = true;
         }
-        const bool readable = execute_elsewhere(game_work, n, game_order);
-        recorded_elsewhere(continuity::sr_evaluate, game_work.completion(), readable);
+        // A copy recorded on a game list never executed with a copy before,
+        // after copies on the presenting queue, may have no copy-out storage
+        // (the add-on predicts a new list to run where the newest direct-list
+        // copy ran, record_impl, and takes an idle slot's storage only where
+        // one exists: copy_out's unstored): another queue reads it only once
+        // its recording retired (the Reset rule, immutable_for_other_queues),
+        // never through the order fence nor at its completion alone. Until
+        // 10-28 the judge took it as readable once complete, so a fresh
+        // process's first SR copy on the game's queue failed as stale_shown
+        // (seed c28965dca8d7c76c at frame 11, 3 of 3 runs, copy_out
+        // unstored=1), and inside the fixed set, whose earlier timelines had
+        // run every list, it passed (the 10-28 review's H5).
+        const bool cold = !game_work_carried[n];
+        const bool readable = execute_elsewhere(game_work, n, game_order, cold);
+        auto completion = game_work.completion();
+        if (cold) {
+          completion = [complete = std::move(completion), retired = game_work.retired(n)] {
+            return complete() && retired();
+          };
+        }
+        recorded_elsewhere(continuity::sr_evaluate, std::move(completion), readable);
+        game_work_carried[n] = game_work_carried[n] || (supply.elsewhere & continuity::sr_evaluate);
         other_queue_copy = GetTickCount64();
       }
       dlssg_evaluation(of<dlssg_form>(value, events::dlssg));
