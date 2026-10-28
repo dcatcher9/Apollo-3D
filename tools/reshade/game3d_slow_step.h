@@ -44,7 +44,10 @@ namespace sunshine_game3d {
   // Names a present-thread step that took long enough to be a visible hitch.
   // Quiet on the normal path: one QueryPerformanceCounter pair per step, and at
   // most one log line per second for each step name. Every scope over its
-  // threshold can log, including an outer scope around an inner one.
+  // threshold can log, including an outer scope around an inner one. The line
+  // says when the step began (QueryPerformanceCounter in ms), so the steps of
+  // one stall nest by their intervals (game3d_log_report.py), never by when
+  // the async log writer stamped them.
   class slow_step {
   public:
     explicit slow_step(const char *name, double threshold_ms = 8.0) : name_(name), threshold_ms_(threshold_ms) {
@@ -63,8 +66,9 @@ namespace sunshine_game3d {
       // The game process's latest video-memory sample (game3d_vram.h) follows.
       const vram::latest_suffix memory;
       char message[224];
-      std::snprintf(message, sizeof(message), "Sunshine Game 3D hitch: %s took %.1f ms on the present thread%s", name_, ms,
-        memory.text);
+      const double began = double(start_.QuadPart) * 1000.0 / double(frequency.QuadPart);
+      std::snprintf(message, sizeof(message), "Sunshine Game 3D hitch: %s took %.1f ms on the present thread (began %.1f ms)%s",
+        name_, ms, began, memory.text);
       sunshine_log::message(reshade::log::level::warning, message);
     }
     slow_step(const slow_step &) = delete;

@@ -24,7 +24,8 @@ Game 3D readiness: SB-Win64-Shipping.exe  14:41:20 to 14:43:28 (2m08s, exited)
 [PASS] Observation losses: lifecycle 1
 [INFO] Depth losses: 6 episodes, 3.5 per streamed minute, 3.5 s without depth in the logged ones; retained_depth_expired 5, source_handoff 1
 [PASS] Export: runtime_reset 3
-[PASS] Present hitches: 1 at resets, FG switches or overlay opening
+[PASS] Present hitches: 2 at resets, FG switches or overlay opening
+         14:42:51 export section (no step named; the slowest Present of 14:42:41-14:42:51) 30.6 ms
 [INFO] Diagnostics: Diagnostics=0: no per-pass GPU timing (its lines are absent by design)
 [INFO] Game 3D cost: CPU 0.14 ms mean (30.6 max) over 13809 Presents; GPU timing off (Diagnostics=0)
 [PASS] Stream delivery: the host took 84.9 new frames/s of a target 88.3/s (what the game offered, capped at the stream 90 fps)

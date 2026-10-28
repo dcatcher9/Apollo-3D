@@ -183,7 +183,13 @@ destruction, which logs its partial window instead of dropping it (before, a gam
 any UI layer copies skipped in it, was never logged). The CPU entry also splits the slowest present into setup, depth, UI, render and
 export, and a rate-limited `Sunshine Game 3D hitch` warning names any present-thread step that
 takes more than 8 ms. Each step name has its own once-per-second throttle, so a nested step and the
-step around it both log. Since 10-22 the render section has steps of its own: `stereo render section`
+step around it both log. Since 10-27 the line ends `(began X ms)`, when the step began
+(QueryPerformanceCounter in ms): the readiness report groups the lines of one stall by their
+nested intervals, lists each stall once by its innermost step and its length (naming the step it
+was spent within when that is a millisecond or more longer), and lists a timing window's slowest
+Present that no listed stall accounts for (until 10-27 a line of the next Present's stall within
+0.1 s could merge into the previous one, a stall read as its inner line's length, and any hitch
+line in a window, an excused one too, dropped that window's slowest Present). Since 10-22 the render section has steps of its own: `stereo render section`
 (the export lock, the UI input's match and completion, and the render) around `stereo render` (the
 render alone), and `UI retention textures` inside it (the two full-size colour copies a
 Present-counted HUD-less pair creates on first need). Before, E33 10-22 logged a 47 ms render

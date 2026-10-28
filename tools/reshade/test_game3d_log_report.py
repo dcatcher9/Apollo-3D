@@ -804,7 +804,56 @@ class ReadinessReport(unittest.TestCase):
                       checks['Present hitches'].detail)
         self.assertEqual(checks['Present hitches'].times,
                          ['10:00:10 depth display retirement 81.4 ms (depth-source flip step)',
-                          '10:00:08 depth display retirement 17.2 ms (depth-source flip step)'])
+                          '10:00:08 depth display retirement 17.3 ms (depth-source flip step)'])
+
+    def test_each_stall_is_listed_once_with_its_length(self):
+        # 10-27 review: a stall was listed by its innermost line's ms, so a 9 ms lock wait inside a 40 ms observation
+        # read 'worst 9.0 ms'; and a line of the next Present's stall logged within 0.1 s, at least as long, was
+        # merged into the previous stall (its own enclosing line throttled, one per step name a second). Since 10-27
+        # each line says when its step began, and only a line whose interval contains the previous one encloses it.
+        def hitch(t, step, ms, began):
+            return (f'{t} [ 1234] | WARN  | [Sunshine 3D] Sunshine Game 3D hitch: {step} took {ms} ms on the present '
+                    f'thread (began {began} ms)')
+        checks = run(BASE + [hitch('10:00:12:000', 'depth present observation lock', '9.0', '5000.0'),
+                             hitch('10:00:12:010', 'depth present observation', '40.0', '4990.0')])
+        self.assertIn('1 not explained by a reset, FG switch or overlay opening, worst 40.0 ms',
+                      checks['Present hitches'].detail)
+        self.assertEqual(checks['Present hitches'].times,
+                         ['10:00:12 depth present observation lock 9.0 ms within depth present observation 40.0 ms '
+                          '(depth-source flip step)'])
+        # Two consecutive Presents' stalls in different steps, the second line longer and within 0.1 s: two stalls.
+        checks = run(BASE + [hitch('10:00:12:000', 'depth display retirement', '17.2', '5000.0'),
+                             hitch('10:00:12:001', 'Streamline depth acquisition', '17.3', '4999.9'),
+                             hitch('10:00:12:040', 'depth present observation', '30.0', '5025.0')])
+        self.assertIn('2 not explained by a reset, FG switch or overlay opening, worst 30.0 ms',
+                      checks['Present hitches'].detail)
+        self.assertEqual(checks['Present hitches'].times,
+                         ['10:00:12 depth present observation 30.0 ms (depth-source flip step)',
+                          '10:00:12 depth display retirement 17.3 ms (depth-source flip step)'])
+
+    def test_a_slow_window_an_excused_step_does_not_account_for_warns(self):
+        # 10-27 review: any hitch line within a timing window, an excused 'stereo export' one too, dropped its slowest
+        # Present. A 150 ms Present at an FG switch whose export step took 20 ms is not explained by that step.
+        timing = ('[Sunshine 3D] Sunshine Game 3D timing: presents=900 cpu_ms={mean=0.400 max=150.000} '
+                  'cpu_worst_ms={setup=0.1 depth=0.1 ui=0.1 render=149.5 export=0.2} gpu_frames=0 gpu_ms mean/max={'
+                  'total=0.000/0.000 inputs=0.000/0.000} gpu_profile=disabled dropped_fence_pending=0 '
+                  'dropped_unresolved=0 incomplete=0 window_ms=10000')
+        switch = ('[Sunshine 3D] Sunshine Streamline frame generation: viewport=1 mode=0 generated_frames=3 supported=1 '
+                  'success=1')
+        export = '[Sunshine 3D] Sunshine Game 3D hitch: stereo export took 20.0 ms on the present thread'
+        checks = run(BASE + [line('10:00:08', switch), line('10:00:09', export, 'WARN'), line('10:00:15', timing)])
+        self.assertEqual(checks['Present hitches'].status, 'WARN')
+        self.assertEqual(checks['Present hitches'].times,
+                         ['10:00:15 render section (no step named; the slowest Present of 10:00:05-10:00:15) 150.0 ms'])
+        # Where the excused step accounts for the slowest Present, it is that step's, as expected.
+        checks = run(BASE + [line('10:00:08', switch), line('10:00:09', export.replace('20.0', '148.0'), 'WARN'),
+                             line('10:00:15', timing)])
+        self.assertEqual(checks['Present hitches'].status, 'PASS')
+        # A listed stall that accounts for the window's slowest Present is not listed again.
+        retire = '[Sunshine 3D] Sunshine Game 3D hitch: depth display retirement took 145.0 ms on the present thread'
+        checks = run(BASE + [line('10:00:12', retire, 'WARN'), line('10:00:15', timing)])
+        self.assertEqual(checks['Present hitches'].times,
+                         ['10:00:12 depth display retirement 145.0 ms (depth-source flip step)'])
 
     def test_export_pauses_are_judged_by_their_class(self):
         def pause(t, reason, kind=None):

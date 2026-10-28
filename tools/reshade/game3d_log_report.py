@@ -144,7 +144,9 @@ GENERATION_FIELD = re.compile(r'\bgeneration=(\d+)')
 PLACEMENT = re.compile(r'Sunshine 3D (raw automation|Streamline scale): (\w+);')
 # Every API depth provider's status line (streamline_depth_provider.cpp): Streamline, NGX and the API fallback.
 DEPTH_STATUS = re.compile(r'Sunshine (Streamline|NGX|API) depth: (\w+);')
-HITCH = re.compile(r'Game 3D hitch: (.+?) took ([0-9.]+) ms')
+# Since 10-27 a hitch line also says when its step began (QueryPerformanceCounter, in ms): the steps of one stall nest
+# exactly by their intervals.
+HITCH = re.compile(r'Game 3D hitch: (.+?) took ([0-9.]+) ms(?: on the present thread \(began ([0-9.]+) ms\))?')
 # A step logs its hitch line from this long on (game3d_slow_step.h); the timing line's slowest Present (cpu_ms max,
 # split into its sections) shows a hitch in a section without a named step.
 HITCH_MS = 8.0
@@ -294,10 +296,16 @@ SETTLE_S = 3.0  # Recalibration and holds after an FG switch or runtime reset.
 # overlay compositor. Any other step's hitch is listed wherever it falls (until 10-27 every step's was excused there,
 # which hid ACS 10-27b's 17.2 and 81.4 ms depth display retirements).
 SETTLE_HITCH_STEPS = frozenset(('stereo export',))
-# Every step over its threshold logs, an enclosing one after its inner one (game3d_slow_step.h): a hitch line this soon
-# after the previous one of a stall, at least as long, is an enclosing step of the same stall (the slack is the async
-# log writer's stamping).
+# The timing line's section those steps run in: a window's slowest Present there may be one of their repeats, which
+# the one-line-a-second throttle of a step name leaves unlogged.
+SETTLE_HITCH_SECTION = 'export'
+# Every step over its threshold logs, an enclosing one after its inner one (game3d_slow_step.h). A line that says when
+# its step began encloses the stall's previous line when its interval contains that line's (the slack covers the
+# 0.1 ms rounding of both). An older line without it: a hitch line this soon after the previous one of a stall, at
+# least as long, is taken as an enclosing step (the slack is the async log writer's stamping); it may merge two
+# consecutive stalls, which the interval rule never does.
 NESTED_HITCH_S = 0.1
+NESTED_HITCH_SLACK_MS = 0.2
 SWITCH_LEAD_S = 0.25  # A switch's own depth loss may be logged this long before the switch line (async log order).
 CALIBRATION_MIN_S = 0.1  # A run without placement that had less depth than this calibrated nothing.
 LOG_GATE_S = 1.0  # A changed controller state waits this long after its previous line (diagnostic_log_gate.h).
@@ -808,7 +816,8 @@ class Session:
     streamed: list[list] = field(default_factory=list)  # From a generation to the next export inactive.
     placement: list[tuple[float, bool, str, str]] = field(default_factory=list)  # t, placed, state, provider.
     statuses: list[tuple[float, str, str]] = field(default_factory=list)  # Each depth status: time, status, provider.
-    hitches: list[tuple[float, str, float]] = field(default_factory=list)
+    # Each hitch line: time, step, ms, and when the step began (QPC ms; None before 10-27).
+    hitches: list[tuple[float, str, float, float | None]] = field(default_factory=list)
     timings: list[tuple] = field(default_factory=list)  # Every timing line's window.
     # Each timing line's end, length in s, slowest Present (cpu_ms max) and that Present's sections.
     timing_worst: list[tuple[float, float, float, tuple[float, ...]]] = field(default_factory=list)
@@ -1043,7 +1052,8 @@ def parse(lines) -> Session:
         elif QUEUE_ORDER_OFF.search(text):
             s.queue_order_off = True
         if found := HITCH.search(text):
-            s.hitches.append((t, found.group(1), float(found.group(2))))
+            s.hitches.append((t, found.group(1), float(found.group(2)),
+                              float(found.group(3)) if found.group(3) else None))
         if found := PRESENT_GAP.search(text):
             s.present_gaps.append((t, float(found.group(1)), found.group(2) == '1', found.group(3) == '1'))
         if found := VRAM_WINDOW.search(text):
@@ -1388,39 +1398,64 @@ def evaluate(s: Session) -> list[Check]:
     expected = [h for h in s.hitches if h[1] in SETTLE_HITCH_STEPS and
                 any(0 <= h[0] - mark <= SETTLE_S for mark in expected_marks)]
     unexpected = [h for h in s.hitches if h not in expected]
-    # A timing window's slowest Present over the hitch threshold with no hitch line in that window was slow in a
-    # section without a named step (before 10-22 the render section had none). Its time within the window is unknown:
-    # it is expected when a reset, FG switch, export start or overlay opening lies in the window or just before it.
+
+    def encloses(outer: tuple, inner: tuple) -> bool:
+        if outer[3] is not None and inner[3] is not None:
+            return (outer[3] <= inner[3] + NESTED_HITCH_SLACK_MS and
+                    inner[3] + inner[2] <= outer[3] + outer[2] + NESTED_HITCH_SLACK_MS)
+        return (outer[3] is None and inner[3] is None and outer[0] - inner[0] <= NESTED_HITCH_S and
+                outer[2] >= inner[2] - 0.1)
+    # One entry per stall: its steps nest, each logged after the one inside it. The entry names the innermost step and
+    # the stall's length (its outermost logged step's); where that is a millisecond or more longer than the innermost
+    # step, the step it was spent within is named too, so a short inner line never stands for a long stall.
+    stalls: list[list[tuple]] = []
+    for hitch in sorted(unexpected, key=lambda h: h[0]):
+        if stalls and encloses(hitch, stalls[-1][-1]):
+            stalls[-1].append(hitch)
+        else:
+            stalls.append([hitch])
+    entries = []  # time, label, the stall's ms, innermost step
+    for stall in stalls:
+        inner, outer = stall[0], max(stall, key=lambda h: h[2])
+        label = inner[1] if outer[2] - inner[2] < 1.0 else f'{inner[1]} {inner[2]:.1f} ms within {outer[1]}'
+        entries.append((inner[0], label, outer[2], inner[1]))
+
+    # A timing window's slowest Present over the hitch threshold that no listed stall in the window accounts for (the
+    # slowest stall logged there, within the hitch threshold) was slow in a section without a named step, or in more
+    # steps than one line names (each step name logs once a second). Its time within the window is unknown: it is
+    # expected when a reset, FG switch, export start or overlay opening lies in the window or just before it, unless a
+    # step that such a switch explains (SETTLE_HITCH_STEPS) logged there and the Present was slowest in another section
+    # than that step's (so no unlogged repeat of it explains the Present either). Until 10-27 any hitch line in the
+    # window, an excused one too, dropped the window.
     unnamed, unnamed_expected = [], []
     for end, length, slowest, sections in s.timing_worst:
         start = end - length
-        if slowest < HITCH_MS or any(start - LOG_GATE_S <= t <= end + LOG_GATE_S for t, _, _ in s.hitches):
+
+        def near(t: float) -> bool:
+            return start - LOG_GATE_S <= t <= end + LOG_GATE_S
+        logged = max((ms for t, _, ms, _ in entries if near(t)), default=0.0)
+        settled = max((h[2] for h in expected if near(h[0])), default=0.0)
+        if slowest < HITCH_MS or slowest <= max(logged, settled) + HITCH_MS:
             continue
         section = TIMING_SECTIONS[max(range(len(sections)), key=lambda k: sections[k])]
-        entry = (end, f'{section} section (no step named; the slowest Present of {span(start, end)})', slowest)
-        expect = any(start - SETTLE_S <= mark <= end for mark in expected_marks)
+        named_part = f', {logged:.1f} ms of it named' if logged else ''
+        entry = (end, f'{section} section (no step named{named_part}; the slowest Present of {span(start, end)})',
+                 slowest, '')
+        expect = ((not settled or section == SETTLE_HITCH_SECTION) and
+                  any(start - SETTLE_S <= mark <= end for mark in expected_marks))
         (unnamed_expected if expect else unnamed).append(entry)
 
     def named(what: str) -> str:
         return ' (depth-source flip step)' if what in DEPTH_FLIP_STEPS else ''
-    # One entry per stall, named by its innermost step: the steps around it would crowd other stalls out.
-    stalls: list[list[tuple[float, str, float]]] = []
-    for hitch in sorted(unexpected, key=lambda h: h[0]):
-        last = stalls[-1][-1] if stalls else None
-        if last and hitch[0] - last[0] <= NESTED_HITCH_S and hitch[2] >= last[2] - 0.1:
-            stalls[-1].append(hitch)
-        else:
-            stalls.append([hitch])
-    unexpected = [stall[0] for stall in stalls]
-    if unexpected or unnamed:
-        worst = sorted(unexpected + unnamed, key=lambda h: -h[2])[:3]
-        add(Check('WARN', 'Present hitches', f'{len(unexpected) + len(unnamed)} not explained by a reset, FG switch or '
+    if entries or unnamed:
+        worst = sorted(entries + unnamed, key=lambda h: -h[2])[:3]
+        add(Check('WARN', 'Present hitches', f'{len(entries) + len(unnamed)} not explained by a reset, FG switch or '
                                              f'overlay opening, worst {worst[0][2]:.1f} ms',
-                  [f'{clock(t)} {what} {ms:.1f} ms{named(what)}' for t, what, ms in worst]))
+                  [f'{clock(t)} {what} {ms:.1f} ms{named(step)}' for t, what, ms, step in worst]))
     else:
         count = len(expected) + len(unnamed_expected)
         add(Check('PASS', 'Present hitches', f'{count} at resets, FG switches or overlay opening' if count else 'none',
-                  [f'{clock(t)} {what} {ms:.1f} ms' for t, what, ms in unnamed_expected][:3]))
+                  [f'{clock(t)} {what} {ms:.1f} ms' for t, what, ms, _ in unnamed_expected][:3]))
 
     if s.diagnostics:
         on = s.diagnostics[-1][1]
