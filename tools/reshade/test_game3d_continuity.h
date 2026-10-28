@@ -46,8 +46,11 @@
 // establish_ms only during a warm-up: the session's start, a stall (a
 // Present at least the source age after the previous one: every hold
 // expired with no Present in between, and a pipelined source such as
-// DLSS-G's ring has nothing readable within the age until it refills) or a
-// new source (a source-age gap in legal sources). Frames whose sources meet
+// DLSS-G's ring has nothing readable within the age until it refills; for a
+// frame whose own Present reads one of its legal sources, supply::immediate,
+// its stamp at least the source age after that Present, since a stall
+// inside it leaves that source readable) or a new source (a source-age gap
+// in legal sources). Frames whose sources meet
 // a known limitation and frames whose sources meet none are timed apart, so
 // a loss a known gap excuses never extends the time the others have.
 //
@@ -159,6 +162,16 @@ namespace game3d_continuity {
     // (the freshness rule): such a copy is readable only through one of
     // completions, never from its frame's Present.
     std::uint8_t elsewhere {};
+    // The legal sources whose copy its own Present reads: one recorded at
+    // its call on a list the presenting queue executes before that Present
+    // (an SR evaluation's input, a tag copied at its call, DLSS-G's input on
+    // the game's list), and one from another queue readable there
+    // (completions' copy, complete or ordered: U-C1). A stall inside such a
+    // frame, after its first call, is no warm-up: the judge measures the
+    // stall rule to the frame's stamp (judge::present). A copy deferred to
+    // its frame's Present (R2), DLSS-G's ring and an unordered frame's copies
+    // keep the Present-to-Present rule.
+    std::uint8_t immediate {};
     limitation limit {limitation::none};
     std::uint64_t tick {};
     // A signal after this frame's real Present reached a fence a read in
@@ -441,7 +454,15 @@ namespace game3d_continuity {
       using sunshine_game3d::source_slot;
       ++presents_;
       const auto now = record.tick_ms;
-      if (last_present_ && now >= last_present_ + sunshine_freshness::source_age_ms) {
+      // A stall: no Present for the source age. A frame whose own Present
+      // reads one of its legal sources (supply::immediate) stalled only when
+      // its first call came that late; a stall after it leaves that source
+      // readable, so a loss there is judged as any (until 10-27 it disarmed
+      // the judge, which excused a mono Present beside the frame's own fresh
+      // copy).
+      const bool reads_own = !generated && frame.tick && (frame.immediate & frame.legal & ~frame.owned & ~frame.limited);
+      const auto stalled_at = reads_own ? frame.tick : now;
+      if (last_present_ && stalled_at >= last_present_ + sunshine_freshness::source_age_ms) {
         ++stalls_;
         armed_ = false;
         showing_ = false;

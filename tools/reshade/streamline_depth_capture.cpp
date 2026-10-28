@@ -40,6 +40,23 @@ namespace sunshine_streamline::depth_capture {
     std::array<std::atomic<status>, provider_count> attempt_status{status::unavailable, status::unavailable};
     std::atomic<bool> requested{};
     std::mutex mutex;
+    // Every D3D12 Present the add-on saw (present()), counted before that
+    // Present's own selection. An evaluation's view and its snapshot are
+    // stamped with present_ordinal() at their call: the ordinal of the
+    // Present that presents the frame being recorded then.
+    std::atomic<std::uint64_t> presents{};
+    std::uint64_t present_ordinal() { return presents.load(std::memory_order_acquire) + 1; }
+    // Whether a stamp is the frame the Present being decided presents: no
+    // other Present came since its call. Such a view is active and such a
+    // snapshot current however long the frame took after its call (a hitch
+    // between an SR evaluation and its Present), as they are the depth of
+    // the frame that Present shows: the source age bounds holds over later
+    // Presents, never a frame's own depth at its own Present (10-27; until
+    // then that Present was mono, inactive_views, after a hitch of the source
+    // age). A Present of any swapchain, a generated one too, ends it, so a
+    // generated Present between an evaluation and its frame's Present leaves
+    // the wall-clock rule alone.
+    bool presented_frame(std::uint64_t ordinal) { return ordinal && ordinal >= presents.load(std::memory_order_acquire); }
 
     unsigned provider_index(provider_kind value) { return static_cast<unsigned>(value); }
     bool valid_provider(provider_kind value) { return provider_index(value) < provider_count; }
@@ -771,10 +788,13 @@ namespace sunshine_streamline::depth_capture {
       for (const auto &value : slots) if (is_latest(value) && (!out.latest || value.id > out.latest->id)) out.latest = &value;
       out.selection = out.latest ? selection_reason::no_admissible_capture : selection_reason::no_current_nomination;
       if (out.latest && out.latest->queue != native) out.progress = producer_progress(*out.latest);
+      // Active: its newest evaluation is younger than the source age, or is
+      // the frame this Present presents (presented_frame).
       unsigned active_views = 0;
       for (const auto &value : current.views)
         if (value.epoch == current.epoch && value.sequence &&
-            sunshine_freshness::fresh_lt(value.tick, now, sunshine_freshness::source_age_ms)) ++active_views;
+            (sunshine_freshness::fresh_lt(value.tick, now, sunshine_freshness::source_age_ms) || presented_frame(value.present)))
+          ++active_views;
       if (active_views != 1) {
         out.result = active_views ? status::ambiguous : status::stale;
         out.selection = active_views ? selection_reason::ambiguous_views : selection_reason::inactive_views;
@@ -827,7 +847,8 @@ namespace sunshine_streamline::depth_capture {
         }
         return out;
       }
-      if (!sunshine_freshness::fresh_lt(out.value->metadata.tick, now, sunshine_freshness::source_age_ms)) {
+      if (!sunshine_freshness::fresh_lt(out.value->metadata.tick, now, sunshine_freshness::source_age_ms) &&
+          !presented_frame(out.value->present)) {
         out.latest = out.value; out.value = nullptr; out.result = status::stale;
         return out;
       }
@@ -2874,6 +2895,10 @@ namespace sunshine_streamline::depth_capture {
     return true;
   }
   void present(std::uint64_t native) {
+    // Counted for every Present, also one the capture owner does not serve
+    // (presented_frame must never take a frame older than the last Present
+    // for the current one).
+    presents.fetch_add(1, std::memory_order_acq_rel);
     if (!requested.load() || !native) return;
     std::lock_guard lock(mutex);
     const auto *owner = queue(native);
@@ -2901,12 +2926,14 @@ namespace sunshine_streamline::depth_capture {
       for (auto &value : current.views)
         if (value.epoch == epoch && value.viewport == viewport && value.source_id == superseded_source_id) value = {};
     const auto now = GetTickCount64();
+    const auto ordinal = present_ordinal();
     for (auto &value : current.views) if (value.epoch == epoch && value.viewport == viewport && value.source_id == source_id) {
       // A new call does not end a run of rejected ones; only its result can.
-      value.sequence = sequence; value.tick = now; return;
+      value.sequence = sequence; value.tick = now; value.present = ordinal; return;
     }
     auto oldest = std::min_element(current.views.begin(), current.views.end(), [](const auto &a, const auto &b) { return a.sequence < b.sequence; });
     *oldest = {epoch, sequence, now, source_id, viewport};
+    oldest->present = ordinal;
   }
 
   void begin_evaluation(std::uint64_t epoch, std::uint64_t sequence, std::uint32_t viewport,
@@ -3460,6 +3487,7 @@ namespace sunshine_streamline::depth_capture {
       found->predicted_storage = predicted && found->published;
       if (found->predicted_storage) copy_out_counters.predicted.fetch_add(1, std::memory_order_relaxed);
       found->id = ++serial; found->command = cookie; found->producer_recording = owner.life();
+      found->present = present_ordinal();
       found->basis = basis; found->compute_list = on_compute;
       compute_copies_recorded |= on_compute;
       if (proof) {
@@ -3993,7 +4021,9 @@ namespace sunshine_streamline::depth_capture {
         const auto &current = evaluations[provider_index(provider)];
         for (const auto &view : current.views) if (view.epoch == current.epoch && view.sequence) {
           diagnostic->newest_view_tick_ms = std::max(diagnostic->newest_view_tick_ms, view.tick);
-          if (sunshine_freshness::fresh_lt(view.tick, selection_tick, sunshine_freshness::source_age_ms))
+          // As select_latest_capture counts them (presented_frame too).
+          if (sunshine_freshness::fresh_lt(view.tick, selection_tick, sunshine_freshness::source_age_ms) ||
+              presented_frame(view.present))
             ++diagnostic->active_view_count;
         }
       }

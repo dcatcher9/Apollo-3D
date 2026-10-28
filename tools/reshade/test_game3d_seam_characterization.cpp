@@ -844,6 +844,10 @@ namespace sunshine_streamline::depth_capture {
     enum class edge_site {
       capture_tick,
       view_tick,
+      // The same at the Present of the frame that made them: no Present came
+      // since their call but this one (presented_frame).
+      capture_tick_own_frame,
+      view_tick_own_frame,
       pending_nomination,
       completed_snapshot,
       pending_latest,
@@ -880,6 +884,7 @@ namespace sunshine_streamline::depth_capture {
             return pick_outcome(select_provider(owner, native, 1, now, {}), &sl, 'S', nullptr, '?');
           }
         case edge_site::view_tick:
+        case edge_site::view_tick_own_frame:
           {
             auto &sl = make(0, provider_kind::streamline, epoch, 1, 0);
             const auto now = GetTickCount64();
@@ -889,6 +894,23 @@ namespace sunshine_streamline::depth_capture {
                 view.tick = now - age;
               }
             }
+            // An earlier Present and this one since the evaluation, or only
+            // this one.
+            fixture::presents_since(site == edge_site::view_tick ? 2 : 1);
+            return pick_outcome(select_provider(owner, native, 1, now, {}), &sl, 'S', nullptr, '?');
+          }
+        case edge_site::capture_tick_own_frame:
+          {
+            auto &sl = make(0, provider_kind::streamline, epoch, 1, 0);
+            sl.present = present_ordinal();
+            const auto now = GetTickCount64();
+            sl.metadata.tick = now - age;
+            for (auto &view : views) {
+              if (view.sequence) {
+                view.tick = now - age;
+              }
+            }
+            fixture::presents_since(1);
             return pick_outcome(select_provider(owner, native, 1, now, {}), &sl, 'S', nullptr, '?');
           }
         case edge_site::pending_nomination:
@@ -1049,6 +1071,12 @@ namespace sunshine_streamline::depth_capture {
         {"An evaluation view just under the source age is active", e::view_tick, limit - 1, "S ready current_capture"},
         {"An evaluation view exactly the source age old is inactive", e::view_tick, limit, "- stale inactive_views"},
         {"An evaluation view past the source age is inactive", e::view_tick, limit + 1, "- stale inactive_views"},
+        // A frame's own view and capture at that frame's Present, after a
+        // hitch between its call and its Present (10-27: inactive_views).
+        {"An evaluation view exactly the source age old is active at its own frame's Present", e::view_tick_own_frame, limit, "S ready current_capture"},
+        {"An evaluation view 700 ms old is active at its own frame's Present", e::view_tick_own_frame, limit + 450, "S ready current_capture"},
+        {"A readable capture exactly the source age old is current at its own frame's Present", e::capture_tick_own_frame, limit, "S ready current_capture"},
+        {"A readable capture 700 ms old is current at its own frame's Present", e::capture_tick_own_frame, limit + 450, "S ready current_capture"},
         {"A pending FG nomination just under the source age holds", e::pending_nomination, limit - 1, "- recorded pending_nomination"},
         {"A pending FG nomination exactly the source age old lapses", e::pending_nomination, limit, "- unavailable no_current_nomination"},
         {"A pending FG nomination past the source age lapses", e::pending_nomination, limit + 1, "- unavailable no_current_nomination"},

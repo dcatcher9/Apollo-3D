@@ -1827,7 +1827,11 @@ disarmed, a frame's legal sources have one source age to show depth, counted fro
 Present without depth, and a loss that lasts longer is reported once per source age. Only a warm-up
 gives them `establish_ms`, `fg_silent_ms` plus `association_ms` (2 s): the session's start, a stall
 (a Present at least the source age after the previous one, which expires every hold, while a
-pipelined source such as DLSS-G's ring has nothing readable until it refills) or a new source (a
+pipelined source such as DLSS-G's ring has nothing readable until it refills; for a frame whose
+own Present reads one of its legal sources, `supply::immediate`, its stamp at least the source age
+after the previous Present, since a hitch inside it, after its first call, leaves that source
+readable: until 10-27 such a hitch disarmed the judge, which excused a mono Present after a hitch
+between a frame's SR evaluation and its Present, `hitch-after-sources`) or a new source (a
 source-age gap in legal sources). Frames whose legal sources all meet a known limitation and frames
 with a source that meets none are timed apart, so a loss a known gap excuses never extends the time
 the others have. A generated Present after a real one that showed a fresh copy of a frame whose
@@ -2211,8 +2215,9 @@ the C1 tagging of the frame after DLSS-G's last compute copy), one for C6's,
 `C5-frame-tag-then-evaluate`, `C5-global-tag-then-evaluate` and their untag forms
 `C5-frame-untag-then-evaluate` and `C5-global-untag-then-evaluate`, one for the FG On hold,
 `fg-on-holds-sr-copy`, and two for S11c's evaluate, `S11c-fg-until-evaluate-tag-then-evaluate` and
-`S11c-fg-global-until-evaluate-tag-then-evaluate`, and one for the stale rule's own-frame age,
-`hitch-before-sources`), an event list shaped like the
+`S11c-fg-global-until-evaluate-tag-then-evaluate`, and one each for the stale rule's own-frame age and
+the frame's own depth after a hitch, `hitch-before-sources` and `hitch-after-sources`), an event
+list shaped like the
 session it fixed and judged as any
 timeline (random seeds meet these shapes only by chance, and a change of the event language changes
 every seed), and one witness per open row the timelines found or carry (none is open since C5 closed
@@ -2221,7 +2226,7 @@ run; a witness that loses none fails the set, as the matrix's gap seeds keep a r
 failing cell. `--trace` prints every Present's
 frame record, the supply it was judged with and each recorded refusal.
 
-`reshade_session_timelines` runs the fixed set (24 seeds and 24 regression timelines, about
+`reshade_session_timelines` runs the fixed set (24 seeds and 25 regression timelines, about
 4290 frames and 10170 Presents) in about 160 s, registered like
 `reshade_native_provider_continuity` with the same 240 s timeout. Locally:
 

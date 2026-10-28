@@ -1030,6 +1030,8 @@ namespace sunshine_streamline::depth_capture {
       pending_owner.provider_established = false;
       if (pending_pick().pending_nomination || pending_pick().value) return false;
       pending_owner.provider_established = true;
+      // 251 ms later, Presents having come since the nomination.
+      fixture::presents_since(2);
       if (pending_pick(pending.pending_nomination->tick + 251).pending_nomination ||
           pending_pick(pending.pending_nomination->tick + 251).result != status::stale) return false;
       end_nomination(candidate);
@@ -1253,8 +1255,9 @@ namespace sunshine_streamline::depth_capture {
         attempt_status[provider_index(p.provider)] = status::unsupported_state;
       };
       // Time passes for a source that stopped evaluating, including the last
-      // frame the queue copied from it.
+      // frame the queue copied from it, while the game kept presenting.
       const auto expire = [&](const pipeline &p, queue_state &queue) {
+        fixture::presents_since(1);
         constexpr auto age = sunshine_freshness::source_age_ms + 1;
         for (auto &view : evaluations[provider_index(p.provider)].views)
           if (view.source_id == p.source_id && view.tick > age) view.tick -= age;
@@ -1281,6 +1284,8 @@ namespace sunshine_streamline::depth_capture {
       // copied=false models a failed display preparation or copy: no complete_frame().
       const auto present_frame = [&](queue_state &queue, std::uint64_t present, selection_policy policy = {},
           bool copied = true) {
+        // on_present counts the Present before its selection.
+        fixture::presents_since(1);
         const auto chosen = select_provider(queue, consumer, present, GetTickCount64(), policy);
         decided = classify_acquisition(chosen, queue, policy);
         if (queue.provider_established && chosen.result != status::ready && chosen.result != status::recorded &&

@@ -307,6 +307,8 @@ namespace sunshine_streamline::depth_capture {
       // end of the frame): that proof's source, version and queue, checked
       // when its recording is executed (0 none).
       std::uint64_t proven_source{}, proven_version{}, proven_queue{};
+      // present_ordinal() when recorded (presented_frame).
+      std::uint64_t present{};
     };
     struct evaluation_head {
       std::uint64_t epoch{}, sequence{}, tick{}, source_id{};
@@ -325,6 +327,8 @@ namespace sunshine_streamline::depth_capture {
       // newest frame has recorded no copy yet (frame_generation_frame).
       std::uint64_t recorded_sequence{};
       bool awaiting{};
+      // present_ordinal() at the newest evaluation's call (presented_frame).
+      std::uint64_t present{};
     };
     struct evaluation_namespace {
       std::array<evaluation_head, 4> views{};
@@ -380,6 +384,9 @@ namespace sunshine_streamline::depth_capture {
     extern std::array<std::atomic<status>, provider_count> attempt_status;
     extern std::atomic<bool> requested;
     extern std::mutex mutex;
+    extern std::atomic<std::uint64_t> presents;
+    std::uint64_t present_ordinal();
+    bool presented_frame(std::uint64_t ordinal);
     unsigned provider_index(provider_kind value);
     bool valid_projection(const sunshine_scene_depth::projection_basis &value);
     std::uint64_t source_cookie(ID3D12Object *value);

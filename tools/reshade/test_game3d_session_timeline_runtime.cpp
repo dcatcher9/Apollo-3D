@@ -510,6 +510,13 @@ namespace {
     // check's C8-fg-off-color-only failure, continuity:stale at frame 39 with
     // age 672 ms, after a 683 ms Present gap there).
     {"hitch-before-sources", "20*sr=local; sr=local,hitch=before_sources; 10*sr=local; 5*sr=other_queue; sr=other_queue,hitch=before_sources; 10*sr=other_queue"},
+    // The same hitch after the frame's SR evaluation, before its Present:
+    // the frame's own copy is the depth of the frame that Present shows, so
+    // it is current there however old by the clock (presented_frame). Until
+    // 10-27 that Present was mono (inactive_views), and the judge excused it
+    // as a stall's warm-up (it also hit the fixed set's
+    // C5-global-untag-then-evaluate once under load, at frame 25).
+    {"hitch-after-sources", "20*sr=local; sr=local,hitch=after_sources; 10*sr=local; 5*sr=other_queue; sr=other_queue,hitch=after_sources; 10*sr=other_queue"},
   };
 
   // Each known gap the timelines found has a witness: an event list whose
@@ -769,7 +776,8 @@ namespace {
     // and its copies recorded on another queue with the completion probe of
     // each the contract copies out (the freshness rule).
     struct frame_supply {
-      std::uint8_t legal {}, limited {}, permitted {}, elsewhere {};
+      // immediate: continuity::supply::immediate.
+      std::uint8_t legal {}, limited {}, permitted {}, elsewhere {}, immediate {};
       continuity::limitation limit {continuity::limitation::none};
       std::uint64_t tick {};
       // continuity::supply::completion: each copy's own relied fence.
@@ -801,6 +809,9 @@ namespace {
       }
       supply.elsewhere |= source;
       readable_here = readable_here || readable;
+      if (readable) {
+        supply.immediate |= source;
+      }
       supply.completions.push_back({source, std::move(completion), relied});
     }
 
@@ -1148,6 +1159,15 @@ namespace {
       decisions.push_back(made);
     }
 
+    // The frame's last decision, if it requires a capture, copies at its
+    // call on the game's list: readable at the frame's own Present.
+    void immediate(std::uint8_t source) {
+      const auto &made = decisions.back();
+      if (made.legal && requires_capture(made.expected)) {
+        supply.immediate |= source;
+      }
+    }
+
     // A decision's supply to the continuity judge.
     void offer(const decision &value, std::uint8_t source, continuity::limitation meets = continuity::limitation::none) {
       if (!value.legal) {
@@ -1436,6 +1456,11 @@ namespace {
         if (call.legal && requires_capture(call.expected)) {
           offer(call, continuity::tag_copy);
           supplied = true;
+          // Copied at its call on the game's list (not deferred to the
+          // frame's Present, R2): readable at its own Present.
+          if (!call.expected.deferred && tag_commands) {
+            supply.immediate |= continuity::tag_copy;
+          }
         }
         if (sr_choice == sr_form::tag) {
           const auto evaluated = tag_case(matrix::copy_point::same_frame_evaluate, generated_inside);
@@ -1443,6 +1468,7 @@ namespace {
           decisions.push_back(at_evaluate);
           if (!supplied && at_evaluate.legal && requires_capture(at_evaluate.expected)) {
             offer(at_evaluate, continuity::sr_evaluate);
+            supply.immediate |= continuity::sr_evaluate;
             supplied = true;
           } else if (!supplied && at_evaluate.legal && permits_capture(at_evaluate.expected)) {
             offer(at_evaluate, continuity::sr_evaluate);
@@ -1494,6 +1520,7 @@ namespace {
         const base_structure *inputs[] {&view.base, &input.base};
         if (sr_choice == sr_form::local) {
           decide("sr_local", local_case(declared, evidence_seen, evidence_state, generated_in_evaluate), continuity::sr_evaluate, {"evaluate"});
+          immediate(continuity::sr_evaluate);
         }
         // A generated Present inside the evaluation: the add-on's hook ends
         // the input source's present generation once inside the next
@@ -1618,6 +1645,7 @@ namespace {
         return late_relied(*order, now_late);
       });
       continuity_log.pending.unordered = unordered;
+      continuity_log.pending.immediate = supply.immediate;
       // The freshness rule: the frame's copies recorded on another queue,
       // readable once complete, except SR copies a live FG scope keeps out as
       // it keeps the presenting queue's own (owned), and copies of a source
@@ -1699,6 +1727,7 @@ namespace {
       }
       value.depth = recorded(evidence_seen, evidence_state);
       decide("dlssg_direct", value, continuity::dlssg_input, {"dlssg"}, true);
+      immediate(continuity::dlssg_input);
       require(ngx_evaluate(list, feature, &dlssg_inputs, nullptr) == ngx_fixture::success, "DLSS-G's evaluation changed the SDK result");
       poll("dlssg");
       if (observed) {

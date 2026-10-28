@@ -3669,7 +3669,15 @@ source. Identity retention does not require that the capture owner support the r
 A validated, successfully evaluated and actually submitted source nomination establishes API
 ownership on the consuming queue independently of display readiness. A source is identified by
 provider, epoch, logical source and viewport. It is live while its newest nomination is younger
-than the source age below (250 ms). Ownership arbitrates only between live sources, and only a
+than the source age below (250 ms). The frame a Present presents is that Present's own depth however
+long it took: an evaluation, and its capture, made since the previous Present of any swapchain (no
+Present came since its call; `presented_frame`, by the capture owner's count of Presents) is active
+and current at that Present past the source age, so a hitch between a frame's SR evaluation and its
+Present no longer makes that Present mono (`selection=inactive_views`, until 10-27; the session
+timelines' `hitch-after-sources`). Any Present in between, a generated one too, ends it: the source
+age bounds every hold over later Presents. Whether such a Present then renders with full stereo
+strength is the scene transition's (a Present gap past the source age restarts its fade).
+Ownership arbitrates only between live sources, and only a
 delivering owner, one whose last copied frame is younger than 250 ms, keeps its own live source:
 while that source is readable, or while a valid successor of its last copied frame is pending. A
 short pipeline delay, or a stray readable capture from the other provider, therefore does not

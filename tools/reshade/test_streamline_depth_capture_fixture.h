@@ -31,6 +31,14 @@ namespace sunshine_streamline::depth_capture::fixture {
     requested = true;
   }
 
+  // Counts count Presents (on_present's present(), counted before each
+  // Present's selection): an evaluation's view or snapshot stamped before
+  // them is the frame the Present being decided presents only for a count
+  // of one (presented_frame).
+  inline void presents_since(unsigned count) {
+    presents.fetch_add(count);
+  }
+
   // One submitted, successful capture recorded on queue, and the API
   // evaluation that nominated it (begin_evaluation, which superseded may make
   // replace another source of the same viewport).

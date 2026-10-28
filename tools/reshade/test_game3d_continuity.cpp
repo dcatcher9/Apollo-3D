@@ -8,7 +8,8 @@
 // from another queue that completed after the add-on's decision neither
 // excuses nor demands a mono Present there. A real Present's copy captured
 // inside the frame it presents is no older than that frame for the stale
-// rule, however long the frame took.
+// rule, however long the frame took. A stall inside a frame whose own
+// Present reads its legal source, after its first call, is no warm-up.
 #include "test_game3d_continuity.h"
 
 #include <cstdint>
@@ -228,6 +229,45 @@ namespace {
     }
   }
 
+  // A stall inside a frame whose own Present reads its legal source
+  // (supply::immediate), after the frame's first call, leaves that source
+  // readable: a mono Present there is a gap (the session tests' 10-27
+  // review: a hitch between a frame's SR evaluation and its Present made
+  // that Present mono, and the Present-to-Present stall rule excused it as
+  // a warm-up). A stall before the frame's first call, or inside a frame
+  // whose source is pipelined, stays a warm-up.
+  void stall_inside_a_frame_that_reads_its_own_source() {
+    struct trial {
+      std::uint64_t stamp_after_ms;
+      bool immediate, gap;
+      const char *message;
+    };
+    const trial trials[] {
+      {16, true, true, "a mono Present after a stall inside a frame whose own SR copy it reads was excused as a warm-up"},
+      {400, true, false, "a mono Present after a stall before its frame's first call was judged a gap"},
+      {16, false, false, "a mono Present after a stall inside a frame with a pipelined source was judged a gap"},
+    };
+    for (const auto &value : trials) {
+      continuity::judge judge;
+      std::uint64_t now = 1000, present = 1;
+      for (int i = 0; i != 4; ++i, now += 16) {
+        continuity::supply frame;
+        frame.add(continuity::sr_evaluate, now);
+        frame.immediate = continuity::sr_evaluate;
+        judge.present(shown(present++, now, source_slot::scene_depth, now), frame, "test");
+      }
+      const auto last = now - 16;
+      continuity::supply frame;
+      frame.add(value.immediate ? continuity::sr_evaluate : continuity::tag_copy, last + value.stamp_after_ms);
+      frame.immediate = value.immediate ? continuity::sr_evaluate : 0;
+      judge.take();
+      judge.present(mono(present++, last + 416), frame, "test");
+      const auto violations = judge.take();
+      const bool gap = violations.size() == 1 && violations[0].kind == continuity::violation_kind::gap;
+      require(value.gap ? gap : violations.empty(), value.message);
+    }
+  }
+
   // Two copies of one frame from another queue, one read through fence_a,
   // the other readable with no fence (complete): a late signal of fence_a
   // makes only the first unholdable, so a following frame whose own copy
@@ -263,12 +303,13 @@ int main() {
   late_signal_conflicts_only_its_copies();
   unordered_copy_completed_after_decision();
   stale_rule_ages_a_frames_own_copy_from_its_capture();
+  stall_inside_a_frame_that_reads_its_own_source();
   if (failures) {
     return EXIT_FAILURE;
   }
   std::puts("PASS continuity judge: a late signal conflicts only the copies read through its fence; a generated "
             "Present's dropped hold is R1's only where the real Present showed such a copy; a copy that completed "
             "after the add-on's decision is no holdable copy there; a frame's own copy is no older than its frame "
-            "for the stale rule");
+            "for the stale rule; a stall inside a frame that reads its own source is no warm-up");
   return EXIT_SUCCESS;
 }
