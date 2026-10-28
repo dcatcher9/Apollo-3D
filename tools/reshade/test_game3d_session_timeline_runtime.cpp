@@ -450,6 +450,7 @@ namespace {
     const char *witness {};  // The known gap row a witness timeline meets.
     const char *regression {};  // The fix a regression timeline keeps.
     bool lossless {};  // regression::lossless.
+    unsigned late_reads {};  // regression::late_reads.
   };
 
   // Each Assassin's Creed Shadows fix has a regression timeline: an event
@@ -464,6 +465,11 @@ namespace {
     // Presents it loses meet a row's limitation (C6's: C1, its DLSS-G compute
     // copy readable three evaluations later), and with the fix it loses none.
     bool lossless {};
+    // The late reads (unordered_read's R1 count) it must make at least: a
+    // regression of O1's conflict pins the read the conflict reaches (until
+    // 10-28 such a timeline made it only in some runs, and a run without it
+    // judged nothing of its scenario, the 10-28 review's J1).
+    unsigned late_reads {};
   };
 
   constexpr regression regressions[] {
@@ -573,14 +579,18 @@ namespace {
     // on the presenting queue stands in at once. Until 10-27 the FG hold was
     // decided from the conflicted copy before it was dropped, so that
     // Present was mono, which R1's tag of every legal source excused.
-    {"O1-silent-scope-late-conflict", "20*sr=local; fg=on,sr=local,dlssg=compute; 10*sr=local,dlssg=compute; sr=local; sr=local,dlssg=compute_unobserved,order=cpu; 10*sr=local", true},
+    // The last FG frame's compute copy is held on the GPU past its Present,
+    // so that Present reads it in flight through the fence the CPU signal
+    // conflicts (until 10-28 the read happened only in some runs; the 10-28
+    // review's J1): one late read, always.
+    {"O1-silent-scope-late-conflict", "20*sr=local; fg=on,sr=local,dlssg=compute; 9*sr=local,dlssg=compute; sr=local,dlssg=compute,dlssg_gpu=after_present; sr=local; sr=local,dlssg=compute_unobserved,order=cpu; 10*sr=local", true, 1},
     // The same conflict, then SR on the game's other queue behind a fence
     // the CPU poisons: that frame's own Present cannot read its copy, so it
     // holds the SR copy shown just before (lossless), and later frames show
     // fresh SR once complete. Until the 10-27 review the fixture still kept
     // SR out for the conflicted FG copy's source age: that SR copy was not
     // holdable, so a mono Present there was excused, and stale SR passed.
-    {"O1-silent-scope-late-conflict-unordered-sr", "20*sr=local; fg=on,sr=local,dlssg=compute; 10*sr=local,dlssg=compute; sr=local; sr=local,dlssg=compute_unobserved,order=cpu; sr=local; sr=other_queue,order=cpu; 10*sr=other_queue", true},
+    {"O1-silent-scope-late-conflict-unordered-sr", "20*sr=local; fg=on,sr=local,dlssg=compute; 9*sr=local,dlssg=compute; sr=local,dlssg=compute,dlssg_gpu=after_present; sr=local; sr=local,dlssg=compute_unobserved,order=cpu; sr=local; sr=other_queue,order=cpu; 10*sr=other_queue", true, 1},
     // An FG tag copy on the presenting queue is shown while SR is read in
     // flight from the game's other queue; a late signal of SR's fence after
     // the Present conflicts only the SR read, so the generated Present keeps
@@ -2336,6 +2346,19 @@ namespace {
       poll("present");
       if (!record_history.records.empty()) {
         present_frames[record_history.records.back().present] = frame;
+        // The scope's FG copy is lost to a late signal only where the add-on
+        // read it through that fence (its Present read it ordered, possibly
+        // in flight): read complete, it relies on no fence and stays held.
+        // Until 10-28 the fixture predicted the read from the fence alone,
+        // so where DLSS-G's copy completed before its Present a conflict
+        // passed the add-on's kept hold as a dropped one, and the lineage
+        // judge then flagged the hold (the 10-28 review's J1).
+        const auto &shown = record_history.records.back();
+        if (fg_supplied && shown.depth_owner == sunshine_game3d::source_slot::fg_depth &&
+            shown.depth_read_order != sunshine_game3d::read_order::none &&
+            shown.depth_read_order != sunshine_game3d::read_order::ordered) {
+          fg_copy_relied.clear();
+        }
       }
       // The frame's late signals, after its Present (and before the
       // generated Presents after it).
@@ -2707,6 +2730,7 @@ int main(int argc, char **argv) {
       timeline_case kept;
       kept.regression = value.fix;
       kept.lossless = value.lossless;
+      kept.late_reads = value.late_reads;
       if (!parse_events(value.events, kept.frames, error)) {
         std::fprintf(stderr, "FAIL session timelines: the regression of %s: %s\n", value.fix, error.c_str());
         return 2;
@@ -2813,6 +2837,9 @@ int main(int argc, char **argv) {
         if (recorded) {
           result.failures.push_back({"regression:recorded_loss", 0, std::string("the regression of ") + value.regression + " lost depth where a known gap records it (" + std::to_string(recorded) + " losses): its fix keeps every Present", "regression:recorded_loss"});
         }
+      }
+      if (result.late_reads < value.late_reads) {
+        result.failures.push_back({"regression:no_late_read", 0, std::string("the regression of ") + value.regression + " made " + std::to_string(result.late_reads) + " late reads of the " + std::to_string(value.late_reads) + " its scenario needs", "regression:no_late_read"});
       }
       for (std::size_t r = 0; r != rows.size(); ++r) {
         rows[r].exercised += result.rows[r].exercised;

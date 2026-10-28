@@ -644,9 +644,17 @@ namespace game3d_continuity {
       std::pair<unsigned, std::uint64_t> fresher {};
       std::uint64_t newer_capture {};
       if ((owner == source_slot::fg_depth || owner == source_slot::scene_depth) && record.depth_tick_ms) {
-        // After FG Off an FG copy is held as its display lineage's: a newer
-        // readable copy of either kind replaces it (supply::fg_off).
-        const bool lineage = fg_off_ && owner == source_slot::fg_depth;
+        // An FG copy is held as its display lineage's, FG on or off: a newer
+        // readable copy of either kind replaces it (after FG Off,
+        // supply::fg_off). While FG is on the SR copies its owner keeps
+        // off-screen are not readable here (supply::owned never enters the
+        // readable set, and readable_now hides supply::fg_held), so the
+        // owner's frame_generation_holds rule stands; an SR copy readable
+        // beside the held FG copy (a silent scope whose held copy a late
+        // signal conflicted, O1) must replace it. Until 10-28 the lineage was
+        // judged after FG Off only, and such a hold passed (the 10-28
+        // review's J1).
+        const bool lineage = owner == source_slot::fg_depth;
         const auto sources = lineage ? api_sources : owner == source_slot::fg_depth ? fg_depth_sources : scene_depth_sources;
         fresher = readable_after(record.depth_tick_ms, sources);
         newer_capture = readable_newer(record.depth_capture, sources, lineage);

@@ -568,21 +568,24 @@ namespace {
     }
   }
 
-  // After FG Off (supply::fg_off) an FG copy is held as its display
-  // lineage's: a newer readable copy of either kind makes the hold stale,
-  // also an SR copy the FG hold kept off-screen while FG was on
-  // (supply::fg_held), which counts only after FG Off. While FG is on the
-  // FG hold over SR copies is the owner's rule and is not judged.
+  // An FG copy is held as its display lineage's: a newer readable copy of
+  // either kind makes the hold stale, FG on or off (since the 10-28
+  // review's J1), and after FG Off (supply::fg_off) also an SR copy the FG
+  // hold kept off-screen while FG was on (supply::fg_held), which counts
+  // only after FG Off. While FG is on the FG hold over the SR copies it
+  // keeps off-screen is the owner's rule and is not judged.
   void fg_hold_after_fg_off_judged_by_lineage() {
     struct trial {
       bool fg_off, held;  // The judged frame comes after FG Off; the SR copy was the FG hold's.
+      bool before_stale;  // The silent frame's Present (FG on) is stale already.
       bool stale;
       const char *message;
     };
     const trial trials[] {
-      {true, true, true, "an FG copy held after FG Off beside a readable newer SR copy the FG hold had kept off-screen was not stale_shown"},
-      {true, false, true, "an FG copy held after FG Off beside a readable newer SR copy was not stale_shown"},
-      {false, true, false, "an FG copy a silent scope holds over the SR copies it keeps off-screen was stale_shown while FG was on"},
+      {true, true, false, true, "an FG copy held after FG Off beside a readable newer SR copy the FG hold had kept off-screen was not stale_shown"},
+      {true, false, true, true, "an FG copy held after FG Off beside a readable newer SR copy was not stale_shown"},
+      {false, true, false, false, "an FG copy a silent scope holds over the SR copies it keeps off-screen was stale_shown while FG was on"},
+      {false, false, true, true, "an FG copy held while FG is on beside a readable newer SR copy no FG hold keeps off-screen was not stale_shown"},
     };
     for (const auto &value : trials) {
       continuity::judge judge;
@@ -622,9 +625,12 @@ namespace {
       again[source_slot::fg_depth].state = source_state::held;
       judge.present(again, next, "test");
       const auto violations = judge.take();
-      const bool stale = violations.size() == 1 && violations[0].kind == continuity::violation_kind::stale_shown &&
-                         violations[0].shown_capture == 10 && violations[0].newer_capture == 12;
-      require(before.empty() && (value.stale ? stale : violations.empty()), value.message);
+      const auto stale_at = [](const std::vector<continuity::violation> &found) {
+        return found.size() == 1 && found[0].kind == continuity::violation_kind::stale_shown &&
+               found[0].shown_capture == 10 && found[0].newer_capture == 12;
+      };
+      require((value.before_stale ? stale_at(before) : before.empty()) &&
+              (value.stale ? stale_at(violations) : violations.empty()), value.message);
     }
   }
 

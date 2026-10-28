@@ -1789,9 +1789,16 @@ Present) keeps the tick bound. After FG Off (`supply::fg_off`, set by the sessio
 FG copy is held as its display lineage's, so it is judged against the lineage's readable copies of
 either kind, also the SR copies a silent scope's FG hold kept off-screen while FG was on
 (`supply::fg_held`, readable only after FG Off): until 10-28 an FG copy held beside a readable newer
-SR copy passed, which hid FG Off's revoked SR copies. While FG is on the rung's own kind is judged
-(`frame_generation_holds` is the owner's rule); a one-off probe of the reverse (an SR copy shown
-while FG was on beside a newer readable FG copy) found none in the fixed set (10-28). Until 10-28 a Present one copy behind passed every timeline: a
+SR copy passed, which hid FG Off's revoked SR copies. A held FG copy is judged by its lineage while FG
+is on as well (since the 10-28 review's J1): the SR copies its owner keeps off-screen are not
+readable there (`supply::owned` never is, and `supply::fg_held` only after FG Off), so
+`frame_generation_holds` stays the owner's rule, and an SR copy readable beside it (a silent scope
+whose held FG copy a late signal conflicted) must replace it. The earlier one-off probe (10-28)
+looked only at the reverse (an SR copy shown beside a newer readable FG copy, none in the fixed
+set); the review's probe of this direction found 24 Presents in
+`O1-silent-scope-late-conflict` and its unordered-SR form, which now make the conflicted read
+deterministic (DLSS-G's compute copy of the last FG frame held on the GPU past its Present) and
+require a late read (`late_reads` at least one). Until 10-28 a Present one copy behind passed every timeline: a
 Present during a nomination in progress, the SR stand-in of an FG input recycled by the pool, a
 missing frame's stand-in shown a Present late. A real Present that shows a copy of the other API
 than the last real Present that showed API depth must show a copy recorded after that one (capture
