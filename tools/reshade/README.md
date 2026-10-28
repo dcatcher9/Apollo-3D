@@ -1296,9 +1296,11 @@ contrast midpoint ([raw-depth automation](../../docs/reshade-sbs.md#experimental
 Its scenarios check fresh single-window initialization, same-source pin/unpin continuity, a changed
 center patch that keeps the gain and moves only the zero, held gain and zero through depth gaps
 with current-color mono and through pauses in Presents before and after a frame's depth draws
-(that frame's own depth at the full strength it had, no catch-up credit; a pause during the zero's
-adaptation is judged the same way and left out of its deadline, and only one followed by a Present
-without ready depth is inconclusive), a retained exact source resuming its own history, a
+(that frame's own depth at the full strength it had; that a pause earns no catch-up credit is
+`reshade_scene_gain`'s, as the settled gain and zero here could not show it), and a pause during the
+zero's adaptation judged the same way (its own frame's depth, never a reused copy) and left out of
+its deadline (until the 10-27 review one followed by a Present without ready depth was
+inconclusive, exit 3), a retained exact source resuming its own history, a
 destroyed source and an explicit recalibration starting fresh, zero-strength mono and finite HDR
 stereo, in both depth conventions. No camera/gain values or synthetic readback results are injected.
 Like the bind-switch fixture it needs no environment settings:
