@@ -782,6 +782,10 @@ namespace {
     sunshine_game3d::ui_adaptive::source ui_source;
     scene_parameters_t scene;
     sunshine_depth_jitter::correction jitter;
+    // When this Present's depth was prepared (GetTickCount64) and its
+    // runtime_t::presentation_ordinal: hold_projection_scene ages a held
+    // placement by the time it was shown.
+    std::uint64_t decided_ms = 0, present_ordinal = 0;
   };
 
   sunshine_game3d::ui_adaptive::source resolve_ui_observation(const sunshine_depth::frame_depth &depth,
@@ -884,6 +888,16 @@ namespace {
   // controller instead rendered it mono (raw calibration never completed) and
   // restarted the 500 ms strength ramp. The Witcher 3 misses the camera of a
   // few SR evaluations every second.
+  // That age is shown time: measured to the previous Present, which showed
+  // this placement with ready depth of the same source, when this Present
+  // is the one right after it (presentation ordinals), so a pause in
+  // Presents alone (a game hitch) does not drop the placement (owner ruling
+  // 10-27; until the 10-27 review a camera-less frame after a pause of the
+  // source age switched to the raw basis, mono, and faded in again). A run
+  // of camera-less Presents still ends one Present after the source age of
+  // shown time, and a hold never spans two Presents of which neither had
+  // the camera: after a second pause the age runs to a Present that only
+  // held it.
   output_sample classify_output(const frame_decision_t &frame) {
     const auto &scene = frame.scene;
     const bool placed = scene.ready && scene.blend > 0.f;
@@ -902,8 +916,10 @@ namespace {
     const bool own_camera = depth.projection.supplied ||
       depth.projection.encoding == sunshine_scene_depth::depth_encoding::linear_distance;
     const auto held = previous.scene.projection_ms;
+    const bool next_present = previous.present_ordinal && frame.present_ordinal == previous.present_ordinal + 1;
+    const auto shown_until = next_present && previous.decided_ms <= now ? previous.decided_ms : now;
     if (own_camera || !depth.ready || !previous.depth_ready || !held ||
-        !sunshine_freshness::fresh_le(held, now, sunshine_freshness::source_age_ms) || !frame.scene_source[0] ||
+        !sunshine_freshness::fresh_le(held, shown_until, sunshine_freshness::source_age_ms) || !frame.scene_source[0] ||
         previous.scene_source[0] != frame.scene_source[0] || previous.scene_source[1] != frame.scene_source[1] ||
         previous.scene_source[3] != frame.scene_source[3]) return false;
     frame.scene = previous.scene;
@@ -1837,6 +1853,8 @@ namespace {
       }
       const auto now = GetTickCount64();
       frame_decision_t frame;
+      frame.decided_ms = now;
+      frame.present_ordinal = proof.presentation_ordinal;
       frame.depth_ready = depth.ready;
       if (!depth.ready) frame.gap = depth_gap::unavailable;
       if (depth.ready)

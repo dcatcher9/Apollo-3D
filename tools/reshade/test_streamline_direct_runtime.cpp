@@ -1286,6 +1286,42 @@ RWTexture2D<float> depth : register(u0);
         std::puts("PASS a second with Game 3D disabled restarts the stereo fade at its first ready Present");
       }
       {
+        // An SR evaluation without its own camera (the seam's camera reset:
+        // no projection supplied; the Witcher 3 misses a few SR cameras each
+        // second) right after a pause in Presents of the source age and more,
+        // with ready depth of the same source on both sides: it keeps the
+        // projection placement the Present before the pause showed, aged by
+        // shown time (exporter.cpp, hold_projection_scene), so it renders on
+        // the projection basis at the strength it had, and so does the next
+        // frame with its camera. Until the 10-27 review the pause alone
+        // expired that placement by the clock: the frame went to the raw
+        // controller (a basis change), mono, and stereo faded in again.
+        const DWORD stall_ms=DWORD(sunshine_freshness::source_age_ms+150);
+        settle("before-camera-less-pause");
+        const auto before=blend();
+        const auto previous_present=GetTickCount64();
+        Sleep(stall_ms);
+        camera.reset=1;
+        tick("camera-less-after-pause");
+        camera.reset=0;
+        const auto gap=GetTickCount64()-previous_present;
+        const bool fresh=captured_ready && !captured.reused_depth && !captured.projection.supplied &&
+          captured.source_resource.handle==native(*selected);
+        const bool shown=ready();
+        const auto basis=latest.parameters.coordinate_basis;
+        const auto after=blend();
+        tick("camera-after-camera-less");
+        const auto next_basis=latest.parameters.coordinate_basis;
+        const auto next=blend();
+        std::printf("MEASURE camera-less-after-pause present_gap_ms=%llu fresh_without_camera=%d ready=%d basis=%d blend_before=%g blend_after=%g next_basis=%d blend_next=%g\n",
+          static_cast<unsigned long long>(gap),int(fresh),int(shown),basis,before,after,next_basis,next);
+        require(gap>stall_ms && fresh,"The camera-less evaluation after a pause was not its Present's own fresh copy");
+        require(before==1.f && shown && basis==0 && after==1.f,
+          "A camera-less frame after a pause in Presents left the projection placement or the stereo strength");
+        require(current() && ready() && next_basis==0 && next==1.f,"The frame with its camera after the camera-less one restarted the stereo strength");
+        std::puts("PASS a camera-less frame after a pause keeps the projection placement it was shown with, at full strength");
+      }
+      {
         // D11c: the add-on keeps a D3D12 DSV's read-only flags from its
         // creation (ReShade's init_resource_view) and reads them where a list
         // binds it; a view created again at a handle replaces them.

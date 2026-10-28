@@ -4632,8 +4632,14 @@ source (epoch, source and viewport) within the source age, the capture renders w
 coefficients, gain and zero plane, advances no calibration and carries no jitter. The Witcher 3
 misses the camera of a few SR evaluations each second: each such frame previously rendered mono,
 because raw calibration never completed there, and restarted the 500 ms strength ramp on return.
-The `Sunshine 3D Streamline scale` line counts these frames as `camera_missing_holds`. A capture
-older than the source age, after a depth gap or from another source still takes the raw controller.
+The `Sunshine 3D Streamline scale` line counts these frames as `camera_missing_holds`. The
+source age is shown time: for the Present right after the one that showed that placement (with
+ready depth of the same source), it runs to that Present, so a pause in Presents alone (a game
+hitch) keeps the placement, as the [stereo reentry](#experimental-raw-depth-automation) keeps the
+strength (owner ruling 10-27; until the 10-27 review such a frame after a pause of the source age
+went to the raw controller, mono, and faded in again). A run of camera-less Presents ends one
+Present after the source age of shown time, and a second pause ends the hold. A placement older
+than that, a capture after a depth gap or from another source still takes the raw controller.
 Reused frames preserve the real capture's sequence/timestamp/projection, skip new depth readback
 and calibration updates, and keep the last matching resolved scene parameters. The strength slider
 still applies. Neither reuse nor a new pending nomination extends the age limit. The overlay marks

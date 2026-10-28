@@ -1008,7 +1008,10 @@ its Present (the first Present after each shows that frame's own copy at the ful
 it had; until the 10-27 ruling such a pause restarted the fade from flat), Enable Game 3D off for
 a second at full strength and on again (its first ready Present restarts the fade from flat, then
 fades in to full strength: Presents shown without Game 3D are a loss of depth, not a pause; until
-the 10-27 review stereo came back at full strength), and zero-strength HDR color.
+the 10-27 review stereo came back at full strength), an SR evaluation without its own camera right
+after such a pause (it keeps the projection placement the Present before the pause showed, at full
+strength, and so does the next frame with its camera; until the 10-27 review it went to the raw
+basis, mono, and faded in), and zero-strength HDR color.
 It uses the same arguments as the NGX fixture below, with
 `reshade_streamline_direct_runtime_test.exe` and a fresh output directory. Its test-only
 seam supplies middleware metadata, never shader readiness, copied pixels or GPU completion.
