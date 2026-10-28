@@ -2157,8 +2157,9 @@ pairings with the Present-counted ones.
 
 Besides these, the report checks the session as a whole (the
 [first-run report](../tools/reshade/README.md#first-run-of-a-new-game) lists them): add-on
-readiness, depth gaps and flat placement outside the settle time after an export start, FG switch
-or runtime reset, capture coverage and status, observation losses, export pauses, hitches, cost,
+readiness, depth gaps outside the settle time after an export start or runtime reset (and, since
+10-28, the depth after each FG switch), flat placement outside the settle time after an export
+start, FG switch or runtime reset, capture coverage and status, observation losses, export pauses, hitches, cost,
 stream delivery, UI layer copies and the host log. A failing Streamline capture status inside that settle time is INFO (the source
 settling) and outside it WARN. `Game 3D cost` covers every timing line's window, each mean weighted
 by its window's Presents (CPU) or GPU frames, with the largest maximum. A log that ends within

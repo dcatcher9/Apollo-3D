@@ -2606,6 +2606,12 @@ namespace {
           active_area = {0, 0, selected->width, selected->height};
           render_tracked_depth = [this] { evaluated_frame(); };
           settle("SL-recovered-after-FG-off");
+          // The add-on's one line for this FG mode change (10-28), at the
+          // first fresh copy after it or a second later: the held and mono
+          // Presents above show nowhere else (status lines come at most once
+          // a second).
+          require(reshade_log_contains({"Sunshine depth FG switch: viewport=", "->0 presents=", " held=", " mono="}),
+            "FG Off logged no FG switch line");
           std::puts("PASS native SLFG 2x: actual cropped SDK depth, eight real/generated pairs with retained completed depth, FG-off hold within the source age and fresh SL recovery; no FX");
         }});
     }

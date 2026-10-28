@@ -1,14 +1,22 @@
 Game 3D readiness: ACShadows.exe  08:23:00 to 08:25:37 (2m36s, ended without exiting (crash or kill?))
 [PASS] Add-on: loaded; output 7680x2160 PQ D3D12 (generation 4)
-[WARN] Depth: fresh from 08:23:26; 7.3% of later publications without depth; gaps outside FG switches and resets
+[WARN] Depth: fresh from 08:23:26; 7.3% of later publications without depth; gaps outside export starts and resets
+         08:24:33.461-08:24:34.867 (1406 ms) no_retained_depth, Streamline selection=inactive_views (the game supplied no depth)
+         08:24:34.921-08:24:34.999 (79 ms) depth_shape_changed, Streamline selection=layout_changed
+         08:24:35.683-08:24:36.136 (454 ms) source_changed, Streamline selection=layout_changed
+         08:24:36.214-08:24:36.235 (78 ms) depth_shape_changed, NGX selection=layout_changed
          08:24:44.910-08:24:45.036 (125 ms) depth_shape_changed, Streamline selection=layout_changed
          08:24:46.950-08:24:47.121 (172 ms) depth_shape_changed, Streamline selection=layout_changed
          08:24:47.235-08:24:47.425 (187 ms) retained_depth_expired, Streamline selection=completed_before_gap
          08:24:49.082-08:24:49.362 (281 ms) depth_shape_changed, Streamline selection=completed_before_gap
          08:24:49.433-08:24:49.788 (360 ms) depth_shape_changed, Streamline selection=layout_changed
          08:24:49.888-08:24:50.251 (438 ms) depth_shape_changed, Streamline selection=layout_changed
+[WARN] Depth at FG switches: 1 FG switch, 1 with depth lost
+         08:24:33.069 FG on: mono 1406 ms over 93 Presents no_retained_depth, Streamline selection=inactive_views, prior_age 594 ms; mono 79 ms over 6 Presents depth_shape_changed, Streamline selection=layout_changed, prior_age 171 ms; mono 454 ms over 38 Presents source_changed, Streamline selection=layout_changed, prior_age 250 ms
 [INFO] Depth paused by the game: 1 depth loss in which the game ran no DLSS (no active depth view: a menu or loading screen) and resumed it with its own scene reset; those frames were flat
          08:23:52.599-08:23:53.816 (1219 ms) retained_depth_expired, Streamline selection=inactive_views (the game supplied no depth)
+[INFO] FG-switch placement warm-up: 1 FG switch left the scene flat while depth was shown (the placement calibration restarts at a switch between the FG and SR sources; the next round's item)
+         08:24:33.069 FG on: flat 08:24:33.461-08:24:36.861 (1.4 s with depth, raw depth_unavailable)
 [PASS] Placement flat: 10.5% of publications showed the colour frame with depth, 6.6% faded stereo back in
 [INFO] Placement calibration: 2 flat runs were calibrations with depth for at most 3 s
          08:24:44.912-08:24:45.913 after depth loss
@@ -49,5 +57,5 @@ Game 3D readiness: ACShadows.exe  08:23:00 to 08:25:37 (2m36s, ended without exi
 [PASS] Encoder stalls: none
 [INFO] Host video memory: host local usage peaked at 1814 MiB; its headroom was as low as 2411 MiB (1555/3966 MiB at 08:25:30)
 [WARN] Session: the log ends without ReShade exiting or tearing its runtimes down
-Overall: WARN (0 fail, 4 warn)
+Overall: WARN (0 fail, 5 warn)
 Exit code: 0

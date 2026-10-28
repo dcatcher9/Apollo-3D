@@ -1,7 +1,14 @@
 Game 3D readiness: SB-Win64-Shipping.exe  14:41:20 to 14:43:28 (2m08s, exited)
 [PASS] Add-on: loaded; output 7680x2160 PQ D3D12 (generation 3)
-[WARN] Depth: fresh from 14:41:31; 1.0% of later publications without depth; gaps outside FG switches and resets
+[WARN] Depth: fresh from 14:41:31; 1.0% of later publications without depth; gaps outside export starts and resets
          14:41:45.607-14:41:48.065 (2453 ms) retained_depth_expired, NGX selection=inactive_views (the game supplied no depth)
+         14:41:50.358-14:41:50.516 (125 ms) retained_depth_expired, NGX selection=no_completed_snapshot
+[WARN] Depth at FG switches: 2 FG switches, 2 with depth lost
+         14:41:50.400 FG on: mono 125 ms over 4 Presents retained_depth_expired, NGX selection=no_completed_snapshot, prior_age 266 ms
+         14:42:10.161 FG off: mono 234 ms over 5 Presents source_handoff, unknown selection=no_current_nomination, prior_age 281 ms
+[INFO] FG-switch placement warm-up: 2 FG switches left the scene flat while depth was shown (the placement calibration restarts at a switch between the FG and SR sources; the next round's item)
+         14:41:50.400 FG on: flat 14:41:50.359-14:41:51.479 (1.0 s with depth, projection waiting_for_depth)
+         14:42:10.161 FG off: flat 14:42:10.197-14:42:11.422 (1.0 s with depth, raw frame_mismatch)
 [PASS] Placement flat: 3.4% of publications showed the colour frame with depth, 3.0% faded stereo back in
 [INFO] Placement calibration: 1 flat run was a calibration with depth for at most 3 s
          14:41:50.359-14:41:51.479 after provider switch (NGX to Streamline)
@@ -38,5 +45,5 @@ Game 3D readiness: SB-Win64-Shipping.exe  14:41:20 to 14:43:28 (2m08s, exited)
          14:43:27 WARN Add-ons are still loaded! Application may crash on exit.
 [PASS] Host link: ReShade SBS connected 3 time(s)
 [PASS] Encoder stalls: none
-Overall: WARN (0 fail, 1 warn)
+Overall: WARN (0 fail, 2 warn)
 Exit code: 0

@@ -1,7 +1,15 @@
 Game 3D readiness: SandFall-Win64-Shipping.exe  13:45:05 to 13:49:09 (4m04s, exited)
 [PASS] Add-on: loaded; output 7680x2160 sRGB D3D12 (generation 3)
-[WARN] Depth: fresh from 13:45:19; 0.7% of later publications without depth; gaps outside FG switches and resets
+[WARN] Depth: fresh from 13:45:19; 0.7% of later publications without depth; gaps outside export starts and resets
          13:47:15.502-13:47:17.373 (1859 ms) retained_depth_expired, Streamline selection=inactive_views (the game supplied no depth)
+[WARN] Depth at FG switches: 4 FG switches, 2 with depth lost
+         13:45:20.512 FG on: mono 31 ms over 11 Presents no_retained_depth, Streamline selection=fg_scope_mismatch, prior_age 16 ms
+         13:45:52.038 FG off: no depth loss logged
+         13:47:09.062 FG on: no depth loss logged
+         13:48:01.555 FG off: mono 31 ms over 3 Presents source_handoff, unknown selection=no_current_nomination, prior_age 125 ms
+[INFO] FG-switch placement warm-up: 2 FG switches left the scene flat while depth was shown (the placement calibration restarts at a switch between the FG and SR sources; the next round's item)
+         13:47:09.062 FG on: flat 13:47:09.040-13:47:10.267 (0.9 s with depth, raw depth_unavailable)
+         13:48:01.555 FG off: flat 13:48:01.597-13:48:02.604 (1.0 s with depth, raw frame_mismatch)
 [PASS] Placement flat: 38.7% of publications showed the colour frame with depth, 1.4% faded stereo back in
 [INFO] Placement waited for the scene: 1 flat run waited for a depth reference until the game's own scene reset and placed within 3 s of it: the depth before the reset (a title or menu scene) gave none, the next scene did at once; its length is how long the game stayed there
          13:45:19.430-13:45:40.764 projection waiting_for_depth (20.3 s with depth), game scene reset 13:45:39.872
@@ -36,5 +44,5 @@ Game 3D readiness: SandFall-Win64-Shipping.exe  13:45:05 to 13:49:09 (4m04s, exi
 [PASS] Host link: ReShade SBS connected 3 time(s)
 [WARN] Encoder stalls: 1
          13:47:19 upstream GPU 293 ms
-Overall: WARN (0 fail, 2 warn)
+Overall: WARN (0 fail, 3 warn)
 Exit code: 0

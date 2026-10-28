@@ -482,7 +482,7 @@ python tools\reshade\game3d_log_report.py "D:\Games\<game>" --host-log E:\Apollo
 
 It reads existing log lines only and prints PASS, WARN or FAIL per check with the times to look
 at; the exit code is 1 when a check failed. The checks cover: add-on and renderer readiness;
-fresh depth and gaps outside the settle time after FG switches and runtime resets (depth starts at the
+fresh depth and gaps outside the settle time after export starts and runtime resets (depth starts at the
 first counter interval in which fresh depth and the bounded reuse frame generation shows between real
 frames carry most publications: at 4x only a quarter are fresh, and before 10-22 a session that started
 with FG on was never checked); publications
@@ -698,8 +698,20 @@ ran no DLSS (a menu or loading screen; E33 10-22 leaving its title, 828 and 1265
 was flat. A loss without that reset, or one the add-on had a depth view for, stays a gap. A loss
 that a `Sunshine Game 3D present gap` falls inside ends with `the game froze N ms` (the longest), so a
 game hitch reads apart from a loss the add-on caused; it still counts (E33 10-22 15:43:35, 773 ms
-while the game streamed in assets). A loss that ends within an FG switch's or reset's settle time
-and starts at most 0.25 s before the switch line is the switch's own handover. Render-size changes
+while the game streamed in assets). A loss that ends within an export start's or reset's settle
+time and starts at most 0.25 s before its line is that start's own handover. A loss at an FG switch
+counts like any other since 10-28 (until then the switch's settle time excused it too, which hid FG
+Off's revoked SR copies and C8's losses): `Depth at FG switches` lists every FG mode change (a
+session's first mode line only when it turned FG on) with what the Presents after it showed: the
+add-on's `Sunshine depth FG switch` line, logged once per change since 10-28 at the first Present
+that showed a fresh copy or a second after the change (Presents to fresh depth, those that held a
+copy and the oldest held copy's age, the mono ones, and the first Present's reason and selection;
+status lines come at most once a second, so a hold of one or two Presents shows only there), and
+each depth loss that began at the switch (its time and Presents without depth, reason, selection
+and the retained copy's age `prior_age_ms`). It warns when any switch lost depth. INFO
+`FG-switch placement warm-up` lists, per switch, the flat runs after it while depth was shown (the
+placement calibration restarts at a switch between the FG and SR sources): the next round's item,
+which `Placement flat` counts as calibrations and never drops. Render-size changes
 of one depth source (dynamic resolution) keep depth since 10-23 and are no gap: INFO
 `Depth render size` sums the `Sunshine depth render size` lines (changes, Presents held across a
 pending size, the smallest and largest active extent). Before, each change was a

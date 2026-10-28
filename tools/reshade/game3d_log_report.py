@@ -137,6 +137,13 @@ UNAVAILABLE_MS = re.compile(r'\bunavailable_ms=(\d+)')
 SUPPRESSED_EPISODES = re.compile(r'\bsuppressed_episodes=(\d+)')
 PROVIDER = re.compile(r'\bprovider=(\w+)')
 SELECTION = re.compile(r'\bselection=(\w+)')
+PRIOR_AGE = re.compile(r'\bprior_age_ms=(\d+)')
+# Since 10-28, once per FG mode change: what the Presents after it showed, at the first Present that showed a fresh
+# copy (first_fresh_ms) or 1 s after the change (none). Status lines come at most once a second, so a hold of one or
+# two Presents at a switch shows only here.
+FG_SWITCH_LINE = re.compile(r'Sunshine depth FG switch: viewport=(\d+) mode=(\d+)->(\d+) presents=(\d+) '
+                            r'first_fresh_ms=(\w+) held=(\d+) max_held_age_ms=(\d+) mono=(\d+) '
+                            r'first_reason=(\S+) selection=(\S+)')
 RUNTIME = re.compile(r'\bruntime=(0x[0-9a-fA-F]+)')
 PRESENT = re.compile(r'\bpresent=(\d+)')  # Not prior_present: '_' is a word character.
 GENERATION_FIELD = re.compile(r'\bgeneration=(\d+)')
@@ -292,6 +299,9 @@ LOSS_ROUTINE = ('lifecycle', 'token_replaced')
 LOSS_FAULT = ('invalid_input', 'sdk_failure', 'test_injected')
 LOSS_BURST, LOSS_BURST_S = 3, 60.0
 SETTLE_S = 3.0  # Recalibration and holds after an FG switch or runtime reset.
+# The next round's named item: flat placement while depth is shown after an FG switch (the calibration restarts at a
+# switch between the FG and SR sources). Listed per switch, never dropped.
+FG_WARM_UP = 'FG-switch placement warm-up'
 # The one step whose hitch a reset, FG switch or overlay opening explains: it rebuilds the export ring and prepares the
 # overlay compositor. Any other step's hitch is listed wherever it falls (until 10-27 every step's was excused there,
 # which hid ACS 10-27b's 17.2 and 81.4 ms depth display retirements).
@@ -706,6 +716,7 @@ class DepthEpisode:
     lost_present: int | None = None
     recovered_present: int | None = None
     reset: bool = False  # Its recovery came with the game's own declared reset (current_reset=1): a new scene.
+    prior_age_ms: int | None = None  # The retained copy's age at the loss (prior_age_ms), None where none is logged.
 
     def paused_by_game(self) -> bool:
         """The game ran no DLSS (no active depth view) and resumed it with its own scene reset: a menu or loading
@@ -779,8 +790,14 @@ class Session:
     generation: str = ''
     intervals: list[Interval] = field(default_factory=list)
     settle: list[float] = field(default_factory=list)
+    # The settle marks without the FG switches (export starts and runtime resets): since 10-28 a depth loss at an FG
+    # switch is no longer excused (the Depth check and Depth at FG switches list it).
+    settle_resets: list[float] = field(default_factory=list)
     overlay: list[float] = field(default_factory=list)
     fg_switches: list[tuple[float, int]] = field(default_factory=list)
+    # The add-on's own line per FG mode change (FG_SWITCH_LINE): time, viewport, from, to, Presents, first fresh ms
+    # (None: none within 1 s), held, oldest held ms, mono, first reason, its selection.
+    fg_switch_lines: list[tuple] = field(default_factory=list)
     resets: list[float] = field(default_factory=list)  # Each runtime_reset export pause.
     inactive: Counter = field(default_factory=Counter)
     pauses: list[tuple[float, str, bool]] = field(default_factory=list)  # Each export pause: time, reason, routine.
@@ -913,6 +930,7 @@ def parse(lines) -> Session:
             width, height, api, color = found.group(2), found.group(3), found.group(5), found.group(6)
             s.generation = f'{width}x{height} {color} {api} (generation {found.group(1)})'
             s.settle.append(t)
+            s.settle_resets.append(t)
             if not s.streamed or s.streamed[-1][1] is not None:
                 s.streamed.append([t, None])
         if found := INACTIVE.search(text):
@@ -922,12 +940,18 @@ def parse(lines) -> Session:
             s.pauses.append((t, reason, kind == 'routine' if kind else reason in ROUTINE_INACTIVE))
             if reason == 'runtime_reset':
                 s.settle.append(t)
+                s.settle_resets.append(t)
                 s.resets.append(t)
         if found := FG_MODE.search(text):
             mode = int(found.group(1))
             if not s.fg_switches or s.fg_switches[-1][1] != mode:
                 s.fg_switches.append((t, mode))
                 s.settle.append(t)
+        if found := FG_SWITCH_LINE.search(text):
+            g = found.groups()
+            fresh = None if g[4] == 'none' else int(g[4])
+            s.fg_switch_lines.append((t, int(g[0]), int(g[1]), int(g[2]), int(g[3]), fresh, int(g[5]), int(g[6]),
+                                      int(g[7]), g[8], g[9]))
         if found := DELIVERY.search(text):
             published, runtime, generation, dropped, overwritten = found.groups()
             s.delivery.append((t, runtime.lower(), int(generation), int(published), int(dropped), int(overwritten)))
@@ -1018,9 +1042,11 @@ def parse(lines) -> Session:
                 s.readiness[found.group(2)] += 1
                 selection = SELECTION.search(text)
                 if key not in open_episodes:
+                    prior = PRIOR_AGE.search(text)
                     open_episodes[key] = DepthEpisode(t, found.group(2), named.group(1) if named else 'unknown',
                                                       selection.group(1) if selection else 'unknown', runtime=key,
-                                                      lost_present=present)
+                                                      lost_present=present,
+                                                      prior_age_ms=int(prior.group(1)) if prior else None)
                     s.depth_episodes.append(open_episodes[key])
             elif found.group(1) == 'recovered' and (episode := open_episodes.pop(key, None)):
                 unavailable = UNAVAILABLE_MS.search(text)
@@ -1152,10 +1178,10 @@ class Check:
     times: list[str] = field(default_factory=list)
 
 
-def settled(s: Session, interval: Interval) -> bool:
-    """Less than half of the interval lies in the settle time after an FG switch or reset."""
+def settled(s: Session, interval: Interval, marks: list[float] | None = None) -> bool:
+    """Less than half of the interval lies in the settle time after an FG switch or reset (marks: s.settle)."""
     covered, cursor = 0.0, interval.start
-    for mark in sorted(s.settle):
+    for mark in sorted(s.settle if marks is None else marks):
         a, b = max(mark, cursor), min(mark + SETTLE_S, interval.end)
         if b > a:
             covered += b - a
@@ -1163,11 +1189,11 @@ def settled(s: Session, interval: Interval) -> bool:
     return covered * 2 < interval.end - interval.start
 
 
-def windows(s: Session, predicate) -> list[list[float]]:
-    """Time ranges of consecutive settled intervals matching predicate."""
+def windows(s: Session, predicate, marks: list[float] | None = None) -> list[list[float]]:
+    """Time ranges of consecutive settled intervals matching predicate (marks: settled's)."""
     ranges: list[list[float]] = []
     for interval in s.intervals:
-        if not settled(s, interval) or not predicate(interval):
+        if not settled(s, interval, marks) or not predicate(interval):
             continue
         if ranges and interval.start - ranges[-1][1] < 1.0:
             ranges[-1][1] = interval.end
@@ -1192,10 +1218,11 @@ def depth_gaps(s: Session, ranges: list[list[float]]) -> list[str]:
     times = []
     for a, b in ranges:
         overlapping = [e for e in s.depth_episodes if e.start < b and e.end > a]
-        # A loss the switch itself caused (a provider handover) ends inside the settle time and may be logged up to
-        # SWITCH_LEAD_S before the switch's own line (Stellar Blade 10-22: lost 42 ms before 'mode=1').
+        # A loss an export start or runtime reset itself caused ends inside its settle time. A loss at an FG switch
+        # counts (until 10-28 it was excused too, which hid FG Off's revoked SR copies and C8's losses; Depth at FG
+        # switches lists each one).
         inside = [e for e in overlapping if not any(
-            m - SWITCH_LEAD_S <= e.start and e.end <= m + SETTLE_S for m in s.settle)]
+            m - SWITCH_LEAD_S <= e.start and e.end <= m + SETTLE_S for m in s.settle_resets)]
         if overlapping and not inside:
             continue
         if not inside:
@@ -1227,6 +1254,78 @@ def depth_losses(s: Session) -> str:
              + f', {missing_ms / 1000:.1f} s without depth in the logged ones',
              ', '.join(f'{k} {v}' for k, v in s.readiness.most_common())]
     return '; '.join(parts)
+
+
+def fg_mode_switches(s: Session) -> list[tuple[float, int]]:
+    """Each FG mode change: the session's first mode line only when it turned FG on (the add-on had none before)."""
+    return [(t, mode) for n, (t, mode) in enumerate(s.fg_switches) if n or mode]
+
+
+def switch_episodes(s: Session, t: float, until: float) -> list[DepthEpisode]:
+    """The add-on's depth losses that began at an FG switch at t: logged from SWITCH_LEAD_S before its line (the
+    add-on logs asynchronously) to the next switch or SETTLE_S after it, whichever comes first."""
+    return [e for e in s.depth_episodes if t - SWITCH_LEAD_S <= e.start < min(until, t + SETTLE_S)]
+
+
+def fg_switch_checks(s: Session, add) -> None:
+    """Depth at FG switches: each FG mode change with what the Presents after it showed. The add-on's own line
+    (since 10-28) names the Presents to the first fresh copy, the held ones and the oldest held copy's age, and the
+    mono ones; its depth losses there name their time without depth, Presents, reason, selection and the retained
+    copy's age. Until 10-28 the report excused every loss within SETTLE_S of a switch, so the cost of each FG toggle
+    went unlisted."""
+    times, lost = [], 0
+    switches = fg_mode_switches(s)
+    for n, (t, mode) in enumerate(switches):
+        until = switches[n + 1][0] if n + 1 < len(switches) else float('inf')
+        parts = []
+        line = next((v for v in s.fg_switch_lines if t - SWITCH_LEAD_S <= v[0] < min(until, t + SETTLE_S)
+                     and v[3] == mode), None)
+        if line:
+            _, _, _, _, presents, fresh, held, held_age, mono, reason, selection = line
+            parts.append(f'{presents} Present{"s" if presents != 1 else ""} to '
+                         + (f'fresh depth ({fresh} ms)' if fresh is not None else 'no fresh depth within 1 s')
+                         + (f', {held} held (oldest {held_age} ms)' if held else '')
+                         + (f', {mono} mono' if mono else '')
+                         + (f', first {reason} selection={selection}' if held or mono else ''))
+            had_loss = bool(mono)
+        else:
+            had_loss = False
+        for e in switch_episodes(s, t, until):
+            presents = e.presents()
+            parts.append('mono' + (f' {e.unavailable_ms} ms' if e.unavailable_ms is not None else '')
+                         + (f' over {presents} Present{"s" if presents != 1 else ""}' if presents else '')
+                         + f' {e.reason}, {e.provider} selection={e.selection}'
+                         + (f', prior_age {e.prior_age_ms} ms' if e.prior_age_ms is not None else '')
+                         + {'paused': ', until the export paused', 'open': ', until the log ended'}.get(e.ending, '')
+                         + game_froze(s, e.start, e.end if e.end is not None else e.start))
+            had_loss = True
+        lost += had_loss
+        times.append(f'{clock(t, True)} FG {"on" if mode else "off"}: ' + ('; '.join(parts) or 'no depth loss logged'))
+    if not times:
+        return
+    add(Check('WARN' if lost else 'PASS', 'Depth at FG switches',
+              f'{len(times)} FG switch{"es" if len(times) != 1 else ""}'
+              + (f', {lost} with depth lost' if lost else ', no depth lost'), times))
+
+
+def warm_up(s: Session, runs: list['Unplaced'], add) -> None:
+    """FG-switch placement warm-up, the next round's item: each flat run after an FG switch while depth was shown
+    (the placement calibration restarts at a switch between the FG and SR sources). The Placement flat check counts
+    these runs as calibrations; this lists them per switch so they are never dropped."""
+    switches = fg_mode_switches(s)
+    times = []
+    for n, (t, mode) in enumerate(switches):
+        until = switches[n + 1][0] if n + 1 < len(switches) else float('inf')
+        found = [r for r in runs if t - LOG_GATE_S <= r.start < min(until, t + SETTLE_S)]
+        if found:
+            times.append(f'{clock(t, True)} FG {"on" if mode else "off"}: '
+                         + '; '.join(f'flat {span(r.start, r.end, True)} ({r.depth_s():.1f} s with depth, {r.state()})'
+                                     for r in found))
+    if times:
+        add(Check('INFO', FG_WARM_UP,
+                  f'{len(times)} FG switch{"es" if len(times) != 1 else ""} left the scene flat while depth was shown '
+                  '(the placement calibration restarts at a switch between the FG and SR sources; the next round\'s '
+                  'item)', times[:8]))
 
 
 def game_froze(s: Session, start: float, end: float) -> str:
@@ -1266,13 +1365,15 @@ def evaluate(s: Session) -> list[Check]:
         after = [i for i in s.intervals if i.start >= depth_start.start]
         pub = sum(i.published for i in after) or 1
         missing = sum(i.missing for i in after)
-        ranges = windows(s, lambda i: i.start >= depth_start.start and i.missing * 10 > i.published)
+        ranges = windows(s, lambda i: i.start >= depth_start.start and i.missing * 10 > i.published,
+                         s.settle_resets)
         paused = [r for r in ranges if paused_by_game(s, r)]
         gaps = depth_gaps(s, [r for r in ranges if r not in paused])
         add(Check('WARN' if gaps else 'PASS', 'Depth',
                   f'fresh from {clock(depth_start.start)}; '
                   f'{100 * missing / pub:.1f}% of later publications without depth'
-                  + ('; gaps outside FG switches and resets' if gaps else ''), gaps))
+                  + ('; gaps outside export starts and resets' if gaps else ''), gaps))
+        fg_switch_checks(s, add)
         if paused:
             losses = depth_gaps(s, paused)
             add(Check('INFO', 'Depth paused by the game',
@@ -1299,6 +1400,7 @@ def evaluate(s: Session) -> list[Check]:
 
         flats = windows(s, lambda i: flagged(i) and not calibrating(i))
         calibrations = windows(s, lambda i: flagged(i) and calibrating(i))
+        warm_up(s, runs, add)
         flat = sum(i.flat for i in after)
         fading = sum(i.fading for i in after)
         add(Check('WARN' if flats else 'PASS', 'Placement flat',

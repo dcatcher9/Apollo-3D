@@ -1120,28 +1120,70 @@ class ReadinessReport(unittest.TestCase):
         self.assertEqual(checks['Depth render size'].times, ['10:00:17', '10:00:22'])
         self.assertNotIn('Depth render size', run(BASE))
 
-    def test_a_depth_loss_logged_just_before_its_fg_switch_belongs_to_the_switch(self):
+    def test_a_depth_loss_at_an_fg_switch_is_listed_with_the_switch(self):
         # Stellar Blade 2026-10-22: turning FG on handed depth from NGX to Streamline. The loss was logged 42 ms
-        # before the switch's own line (the add-on logs asynchronously) and recovered 158 ms later.
+        # before the switch's own line (the add-on logs asynchronously) and recovered 158 ms later. Until 10-28 the
+        # report excused every loss within the settle time of an FG switch: it is a gap like any other now, and
+        # Depth at FG switches names it with its switch.
         def readiness(t, kind, selection):
             return (f'{t} [ 1234] | INFO  | [Sunshine 3D] Sunshine depth readiness: {kind} reason='
-                    f'{"retained_depth_expired" if kind == "lost" else "fresh_copy"} runtime=0x1 present=10 '
-                    f'unavailable_ms=0 suppressed_episodes=0; provider=NGX prior_provider=NGX selection={selection}')
+                    f'{"retained_depth_expired" if kind == "lost" else "fresh_copy"} runtime=0x1 present='
+                    f'{10 if kind == "lost" else 13} unavailable_ms={0 if kind == "lost" else 158} '
+                    f'suppressed_episodes=0; provider=NGX prior_provider=NGX selection={selection} prior_age_ms=266')
         lost = readiness('10:00:17:358', 'lost', 'no_completed_snapshot')
         recovered = readiness('10:00:17:516', 'recovered', 'completed_snapshot')
         fg = ('10:00:17:400 [ 1234] | INFO  | [Sunshine 3D] Sunshine Streamline frame generation: viewport=1 mode=1 '
               'generated_frames=2 supported=1 success=1')
         tail = [output('10:00:25', 1000, 0, 0, 750, 250)]
         checks = run(BASE + [lost, fg, recovered] + tail)
-        self.assertEqual((checks['Depth'].status, checks['Depth'].times), ('PASS', []))
-        # Without the switch the same loss is a gap.
-        self.assertEqual(run(BASE + [lost, recovered] + tail)['Depth'].times, [
-            '10:00:17.358-10:00:17.516 (0 ms) retained_depth_expired, NGX selection=no_completed_snapshot'])
-        # A loss at the switch that outlasts its settle time, or one logged well before the switch, is still a gap.
-        outlasting = run(BASE + [lost, fg, readiness('10:00:21:000', 'recovered', 'completed_snapshot')] + tail)
-        self.assertEqual(outlasting['Depth'].status, 'WARN')
+        gap = '10:00:17.358-10:00:17.516 (158 ms) retained_depth_expired, NGX selection=no_completed_snapshot'
+        self.assertEqual((checks['Depth'].status, checks['Depth'].times), ('WARN', [gap]))
+        switches = checks['Depth at FG switches']
+        self.assertEqual((switches.status, switches.detail), ('WARN', '1 FG switch, 1 with depth lost'))
+        self.assertEqual(switches.times, ['10:00:17.400 FG on: mono 158 ms over 3 Presents retained_depth_expired, '
+                                          'NGX selection=no_completed_snapshot, prior_age 266 ms'])
+        # Without the switch the same loss is the same gap, and no switch is listed.
+        alone = run(BASE + [lost, recovered] + tail)
+        self.assertEqual(alone['Depth'].times, [gap])
+        self.assertNotIn('Depth at FG switches', alone)
+        # A loss logged well before the switch is not the switch's.
         early = run(BASE + [readiness('10:00:17:000', 'lost', 'no_completed_snapshot'), fg, recovered] + tail)
         self.assertEqual(early['Depth'].status, 'WARN')
+        self.assertEqual(early['Depth at FG switches'].times, ['10:00:17.400 FG on: no depth loss logged'])
+        # A session's first mode line that leaves FG off is no switch; a later Off is.
+        off = fg.replace('mode=1', 'mode=0')
+        first_off = run(BASE + [off] + tail)
+        self.assertNotIn('Depth at FG switches', first_off)
+        toggled = run(BASE + [off, fg, off.replace('10:00:17:400', '10:00:19:000')] + tail)
+        self.assertEqual(toggled['Depth at FG switches'].times, ['10:00:17.400 FG on: no depth loss logged',
+                                                                 '10:00:19.000 FG off: no depth loss logged'])
+        self.assertEqual(toggled['Depth at FG switches'].status, 'PASS')
+
+    def test_the_addons_fg_switch_line_names_the_presents_after_it(self):
+        # Since 10-28 the add-on logs one line per FG mode change: the Presents to the first fresh copy, the held ones
+        # with the oldest held copy, and the mono ones. A hold at a switch shows nowhere else (status lines come at
+        # most once a second), and a mono Present there warns.
+        off = ('10:00:17:400 [ 1234] | INFO  | [Sunshine 3D] Sunshine Streamline frame generation: viewport=0 mode=0 '
+               'generated_frames=0 supported=1 success=1')
+        on = off.replace('mode=0 generated_frames=0', 'mode=1 generated_frames=1').replace('17:400', '16:000')
+
+        def switch(t, mono):
+            return (f'{t} [ 1234] | INFO  | [Sunshine 3D] Sunshine depth FG switch: viewport=0 mode=1->0 presents=3 '
+                    f'first_fresh_ms=31 held={2 - mono} max_held_age_ms=78 mono={mono} '
+                    f'first_reason=FG_successor_pending selection=completed_snapshot')
+        held = run(BASE + [on, off, switch('10:00:17:431', 0)])
+        self.assertEqual((held['Depth at FG switches'].status, held['Depth at FG switches'].times),
+                         ('PASS', ['10:00:16.000 FG on: no depth loss logged',
+                                   '10:00:17.400 FG off: 3 Presents to fresh depth (31 ms), 2 held (oldest 78 ms), '
+                                   'first FG_successor_pending selection=completed_snapshot']))
+        mono = run(BASE + [on, off, switch('10:00:17:431', 1)])
+        self.assertEqual(mono['Depth at FG switches'].status, 'WARN')
+        self.assertIn('1 held (oldest 78 ms), 1 mono', mono['Depth at FG switches'].times[1])
+        late = line('10:00:18', '[Sunshine 3D] Sunshine depth FG switch: viewport=0 mode=1->0 presents=60 '
+                                'first_fresh_ms=none held=12 max_held_age_ms=250 mono=48 '
+                                'first_reason=FG_successor_pending selection=no_completed_snapshot')
+        self.assertIn('60 Presents to no fresh depth within 1 s, 12 held (oldest 250 ms), 48 mono',
+                      run(BASE + [on, off, late])['Depth at FG switches'].times[1])
 
     def test_a_depth_gap_names_the_games_own_freeze_inside_it(self):
         # E33 2026-10-22 15:43:35: the game stopped presenting for 773 ms while it streamed in assets and supplied no
@@ -1321,6 +1363,11 @@ class ReadinessReport(unittest.TestCase):
         checks = run(BASE + unexplained[:3] + [fg] + unexplained[3:])
         self.assertEqual(checks['Placement calibration'].times,
                          ['10:00:18.000-10:00:19.000 after frame generation switch'])
+        # It is also listed with its switch as the FG-switch placement warm-up, the next round's item, so a
+        # calibration at an FG switch is never dropped.
+        self.assertEqual(checks['FG-switch placement warm-up'].times,
+                         ['10:00:18.000 FG on: flat 10:00:18.000-10:00:19.000 (1.0 s with depth, raw calibrating)'])
+        self.assertNotIn('FG-switch placement warm-up', run(BASE + unexplained))
         # Flat output while placement claimed ready has no calibration in progress.
         placed = run(BASE + switch[:3] + [output('10:00:20', 1000, 0, 150, 1000, 0)])
         self.assertEqual((placed['Placement flat'].status, placed['Placement flat'].times),

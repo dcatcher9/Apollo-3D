@@ -1,6 +1,15 @@
 Game 3D readiness: witcher3.exe  14:45:27 to 14:48:43 (3m15s, exited (the process ended before ReShade logged its exit))
 [PASS] Add-on: loaded; output 7680x2160 PQ D3D12 (generation 1)
 [PASS] Depth: fresh from 14:45:51; 0.3% of later publications without depth
+[WARN] Depth at FG switches: 4 FG switches, 3 with depth lost
+         14:45:50.221 FG on: no depth loss logged
+         14:45:59.590 FG off: mono 250 ms over 6 Presents source_changed, Streamline selection=no_completed_snapshot, prior_age 140 ms
+         14:46:02.011 FG on: mono 47 ms over 3 Presents no_retained_depth, Streamline selection=no_completed_snapshot, prior_age 250 ms
+         14:46:07.285 FG off: mono 125 ms over 6 Presents source_not_associated, unknown selection=inactive_views, prior_age 125 ms
+[INFO] FG-switch placement warm-up: 3 FG switches left the scene flat while depth was shown (the placement calibration restarts at a switch between the FG and SR sources; the next round's item)
+         14:45:59.590 FG off: flat 14:45:59.610-14:46:00.790 (0.9 s with depth, projection waiting_for_depth)
+         14:46:02.011 FG on: flat 14:46:02.171-14:46:03.171 (1.0 s with depth, projection waiting_for_depth)
+         14:46:07.285 FG off: flat 14:46:07.306-14:46:08.452 (1.0 s with depth, projection waiting_for_depth)
 [PASS] Placement flat: 2.2% of publications showed the colour frame with depth, 1.2% faded stereo back in
 [PASS] Capture coverage: 15231 covered (11498 observed, 3733 declared states); not open: unknown 0, closed 0, render pass 0
 [PASS] Placement: camera projection drives placement
@@ -31,5 +40,5 @@ Game 3D readiness: witcher3.exe  14:45:27 to 14:48:43 (3m15s, exited (the proces
          14:48:43 WARN Reference count for ID3D12CommandQueue0 object 0000020C86240E10 (000002092DBD7C50) is inconsistent (10).
 [PASS] Host link: ReShade SBS connected 1 time(s)
 [PASS] Encoder stalls: none
-Overall: PASS (0 fail, 0 warn)
+Overall: WARN (0 fail, 1 warn)
 Exit code: 0

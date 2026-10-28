@@ -1,6 +1,15 @@
 Game 3D readiness: HogwartsLegacy.exe  23:00:56 to 23:02:56 (1m59s, exited)
 [PASS] Add-on: loaded; output 7680x2160 PQ D3D12 (generation 1)
-[PASS] Depth: fresh from 23:01:32; 1.2% of later publications without depth
+[WARN] Depth: fresh from 23:01:32; 1.2% of later publications without depth; gaps outside export starts and resets
+         23:01:37.398-23:01:39.040 (1641 ms) retained_depth_expired, Streamline selection=inactive_views (the game supplied no depth)
+         23:01:39.802-23:01:39.896 (109 ms) retained_depth_expired, Streamline selection=no_completed_snapshot
+         23:01:42.663-23:01:42.765 (93 ms) retained_depth_expired, Streamline selection=no_completed_snapshot
+[WARN] Depth at FG switches: 2 FG switches, 2 with depth lost
+         23:01:38.391 FG on: mono 109 ms over 1 Present retained_depth_expired, Streamline selection=no_completed_snapshot, prior_age 985 ms
+         23:01:56.201 FG off: mono 16 ms over 2 Presents source_handoff, NGX selection=completed_before_gap, prior_age 47 ms
+[INFO] FG-switch placement warm-up: 2 FG switches left the scene flat while depth was shown (the placement calibration restarts at a switch between the FG and SR sources; the next round's item)
+         23:01:38.391 FG on: flat 23:01:37.400-23:01:40.782 (1.6 s with depth, raw depth_unavailable)
+         23:01:56.201 FG off: flat 23:01:56.203-23:01:57.723 (1.5 s with depth, projection waiting_for_depth)
 [PASS] Placement flat: 5.2% of publications showed the colour frame with depth, 3.3% faded stereo back in
 [INFO] Placement calibration: 1 flat run was a calibration with depth for at most 3 s
          23:01:56.203-23:01:57.723 after frame generation switch
@@ -39,5 +48,5 @@ Game 3D readiness: HogwartsLegacy.exe  23:00:56 to 23:02:56 (1m59s, exited)
          23:02:35 WARN Reference count for ID3D12CommandQueue0 object 0000000265B00650 (00000002A691BBC0) is inconsistent (9).
          23:02:37 WARN Reference count for ID3D11Device5 object 00000002194EF1F0 (0000000207707C00) is inconsistent (2).
          23:02:55 WARN Add-ons are still loaded! Application may crash on exit.
-Overall: WARN (0 fail, 1 warn)
+Overall: WARN (0 fail, 3 warn)
 Exit code: 0

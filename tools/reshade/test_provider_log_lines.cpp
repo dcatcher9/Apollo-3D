@@ -152,6 +152,33 @@ namespace {
     emit("FG scope live again", text);
   }
 
+  void fg_switch() {
+    char text[512] {};
+    provider::fg_switch_line line;
+    line.viewport = 0;
+    line.from = 1;
+    line.to = 0;
+    line.presents = 3;
+    line.fresh_ms = 31;
+    line.held = 2;
+    line.max_held_age = 78;
+    line.first_reason = "FG_successor_pending";
+    line.selection = depth_capture::selection_reason::completed_snapshot;
+    provider::format_fg_switch(text, sizeof(text), line);
+    emit("FG switch: held, then fresh", text);
+    line.from = 0;
+    line.to = 1;
+    line.presents = 64;
+    line.fresh_ms = UINT64_MAX;
+    line.held = 15;
+    line.max_held_age = 250;
+    line.mono = 49;
+    line.first_reason = "FG_copy_pending";
+    line.selection = depth_capture::selection_reason::no_completed_snapshot;
+    provider::format_fg_switch(text, sizeof(text), line);
+    emit("FG switch: no fresh copy within a second", text);
+  }
+
   void readiness() {
     provider::readiness_evidence e;
     e.prior.provided = sl_frame().metadata;
@@ -265,6 +292,7 @@ int main(int argc, char **argv) {
   pending_ngx();
   unassociated();
   frame_generation_scope();
+  fg_switch();
   readiness();
   render_size();
   std::string rendered;

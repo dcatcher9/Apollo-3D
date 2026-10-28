@@ -69,6 +69,10 @@ namespace sunshine_streamline::provider {
       // counted; the line comes at most every 5 s, naming the newest state.
       bool fg_scope_silent{};
       std::uint64_t fg_scope_changes{}, fg_scope_logged_changes{}, fg_scope_line_tick{};
+      // The game's newest FG mode (0 before any options call) and the
+      // Presents after its last change (track_fg_switch).
+      std::uint32_t fg_mode{};
+      fg_switch_line fg_switch;
       api::resource display_texture{};
       api::resource_view display_view{}, bound_view{};
       sunshine_depth::ready_uniform_cache<api::effect_uniform_variable> depth_ready;
@@ -321,9 +325,51 @@ namespace sunshine_streamline::provider {
       if (auto *record = sunshine_game3d::frame_record_store::writable(runtime))
         sunshine_game3d::record_api_depth(*record, decision, present, GetTickCount64());
     }
+    // One "Sunshine depth FG switch" line per FG mode change (fg_switch_line),
+    // from every Present's readiness evidence. ready: the Present shows depth
+    // (fresh when copied, else a held copy). Diagnostic only.
+    void track_fg_switch(state &data, const readiness_evidence &e, bool ready, const char *why) {
+      auto &line = data.fg_switch;
+      const auto now = e.tick ? e.tick : GetTickCount64();
+      const auto emit = [&] {
+        char text[512]{};
+        format_fg_switch(text, sizeof(text), line);
+        sunshine_log::message(reshade::log::level::info, text);
+        line.active = false;
+      };
+      if (e.fg_query == frame_generation_query_status::observed && e.fg.known && e.fg.mode != data.fg_mode) {
+        if (line.active) emit();
+        line = {};
+        line.active = true;
+        line.viewport = e.fg.viewport; line.from = data.fg_mode; line.to = e.fg.mode; line.tick = now;
+        data.fg_mode = e.fg.mode;
+      }
+      if (!line.active) return;
+      ++line.presents;
+      if (ready && e.copied) {
+        line.fresh_ms = now >= line.tick ? now - line.tick : 0;
+        emit();
+        return;
+      }
+      if (!line.reasoned) {
+        line.reasoned = true;
+        // The display decision's own reason where it decided (a hold names
+        // why it held), else the Present's.
+        line.first_reason = e.source_reason && std::strcmp(e.source_reason, "not_checked") ? e.source_reason : why;
+        line.selection = e.capture.selection;
+      }
+      if (ready) {
+        ++line.held;
+        const auto tick = data.output.provided.tick;
+        if (tick && now >= tick) line.max_held_age = std::max(line.max_held_age, now - tick);
+      } else ++line.mono;
+      if (now - line.tick >= 1000) emit();
+    }
+    // presenting: a Present's decision (not an invalidation between them).
     void trace_readiness(api::effect_runtime *runtime, state &data, const readiness_evidence &e,
-        bool ready, const char *why) {
+        bool ready, const char *why, bool presenting = true) {
       const sunshine_game3d::slow_step step("depth readiness trace");
+      if (presenting) track_fg_switch(data, e, ready, why);
       const bool changed = data.traced_ready != ready;
       data.traced_ready = ready;
       if (!changed) return;
@@ -607,6 +653,16 @@ namespace sunshine_streamline::provider {
       "Sunshine Streamline frame generation depth scope: live viewport=%u epoch=%llu changes=%llu; an accepted FG copy "
       "owns the viewport's depth again",
       viewport, static_cast<unsigned long long>(epoch), static_cast<unsigned long long>(changes));
+  }
+  void format_fg_switch(char *text, std::size_t size, const fg_switch_line &line) {
+    char fresh[24] = "none";
+    if (line.fresh_ms != UINT64_MAX) std::snprintf(fresh, sizeof(fresh), "%llu", static_cast<unsigned long long>(line.fresh_ms));
+    std::snprintf(text, size,
+      "Sunshine depth FG switch: viewport=%u mode=%u->%u presents=%llu first_fresh_ms=%s held=%llu max_held_age_ms=%llu "
+      "mono=%llu first_reason=%s selection=%s",
+      line.viewport, line.from, line.to, static_cast<unsigned long long>(line.presents), fresh,
+      static_cast<unsigned long long>(line.held), static_cast<unsigned long long>(line.max_held_age),
+      static_cast<unsigned long long>(line.mono), line.first_reason, depth_capture::name(line.selection));
   }
   void format_unassociated(char *text, std::size_t size, depth_capture::status status,
       const depth_capture::capture_diagnostic &capture, bool hold, std::uint64_t hold_ms) {
@@ -1307,7 +1363,7 @@ namespace sunshine_streamline::provider {
         data->output = {};
         set_depth_ready(runtime, false);
       }
-      trace_readiness(runtime, *data, evidence, data->output.ready, "explicit_reuse_invalidation");
+      trace_readiness(runtime, *data, evidence, data->output.ready, "explicit_reuse_invalidation", false);
     }
   }
   source_status describe(api::effect_runtime *runtime, std::uint64_t present) {

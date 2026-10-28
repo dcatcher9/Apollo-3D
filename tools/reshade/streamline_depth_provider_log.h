@@ -77,6 +77,22 @@ namespace sunshine_streamline::provider {
   // comes at most every 5 s, so turns between lines are counted only).
   void format_frame_generation_scope(char *text, std::size_t size, bool silent, std::uint32_t viewport,
     std::uint64_t epoch, std::uint64_t changes);
+  // "Sunshine depth FG switch": the Presents after one FG mode change (the
+  // game's FG options, any viewport), logged once: at the first Present that
+  // shows a fresh copy (fresh_ms since the change), 1000 ms after the change
+  // without one (fresh_ms UINT64_MAX: none), or at the next change. held:
+  // Presents that held a retained copy, the oldest at max_held_age_ms; mono:
+  // Presents without depth; first_reason and selection: the first Present
+  // without a fresh copy. Status lines come at most once a second, so a hold
+  // of one or two Presents at a switch shows only here.
+  struct fg_switch_line {
+    std::uint32_t viewport{}, from{}, to{};
+    std::uint64_t tick{}, presents{}, fresh_ms{UINT64_MAX}, held{}, max_held_age{}, mono{};
+    const char *first_reason{"none"};
+    depth_capture::selection_reason selection{depth_capture::selection_reason::not_attempted};
+    bool active{}, reasoned{};
+  };
+  void format_fg_switch(char *text, std::size_t size, const fg_switch_line &line);
   // "Sunshine API depth": no API source is associated with the queue; with
   // hold, ownership is held in mono for a provider handoff of at most hold_ms.
   void format_unassociated(char *text, std::size_t size, depth_capture::status status,

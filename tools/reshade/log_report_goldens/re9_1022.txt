@@ -1,6 +1,12 @@
 Game 3D readiness: re9.exe  14:49:27 to 14:51:27 (2m00s, exited (the process ended before ReShade logged its exit))
 [PASS] Add-on: loaded; output 7680x2160 PQ D3D12 (generation 2)
 [PASS] Depth: fresh from 14:49:37; 0.1% of later publications without depth
+[WARN] Depth at FG switches: 2 FG switches, 2 with depth lost
+         14:49:54.126 FG on: mono 16 ms over 3 Presents no_retained_depth, Streamline selection=no_completed_snapshot, prior_age 125 ms
+         14:51:22.090 FG off: mono 62 ms over 5 Presents source_changed, Streamline selection=no_completed_snapshot, prior_age 63 ms
+[INFO] FG-switch placement warm-up: 2 FG switches left the scene flat while depth was shown (the placement calibration restarts at a switch between the FG and SR sources; the next round's item)
+         14:49:54.126 FG on: flat 14:49:54.224-14:49:55.812 (1.6 s with depth, projection waiting_for_depth_range)
+         14:51:22.090 FG off: flat 14:51:22.094-14:51:23.078 (0.9 s with depth, projection waiting_for_depth)
 [WARN] Placement flat: 5.5% of publications showed the colour frame with depth, 0.8% faded stereo back in; flat or fading windows outside FG switches and resets
          14:49:42-14:49:47, projection waiting_for_depth 14:49:36-14:49:43 (6.8 s with depth)
 [PASS] Capture coverage: 11438 covered (11436 observed, 2 declared states); not open: unknown 0, closed 0, render pass 0
@@ -36,5 +42,5 @@ Game 3D readiness: re9.exe  14:49:27 to 14:51:27 (2m00s, exited (the process end
          14:51:27 WARN Reference count for ID3D12CommandQueue0 object 0000002412F0D7E0 (000000244B9FCA50) is inconsistent (7). (2 such lines)
 [PASS] Host link: ReShade SBS connected 2 time(s)
 [PASS] Encoder stalls: none
-Overall: WARN (0 fail, 1 warn)
+Overall: WARN (0 fail, 2 warn)
 Exit code: 0
