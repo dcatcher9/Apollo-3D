@@ -727,9 +727,9 @@ namespace sunshine_ngx {
     // Its nomination is in progress from this begin until its copy is
     // recorded or refused, whichever path returns, so a Present on another
     // thread while the getters, the calibration probe, the FG owner query and
-    // retain_source below run holds rather than reading the attempt as
-    // refused. A refused attempt is a missing frame: the snapshot completed
-    // before it stands in (depth_capture::select_capture).
+    // retain_source below run does not read the attempt as refused: the
+    // snapshot completed before it stands in, as it does once a refused
+    // attempt is a missing frame (depth_capture::select_capture).
     depth_capture::evaluation_nomination nominating;
     nominating.begin(value.epoch, value.sequence, value.viewport, value.provider, value.source_id);
 #endif

@@ -387,7 +387,8 @@ may advance to that source's unconsumed completed snapshot with its own sequence
 allocation size and active rectangle under the contract's ordering, freshness and interruption
 checks, whether or not it already owns selection. A failed, invalid or refused newest nomination
 (also one refused before its capture existed) is a missing frame of its display lineage, taken
-the same way and marking no interruption; only identity-level interruptions revoke earlier
+the same way and marking no interruption, and so is a nomination still in progress at the Present
+(it ends one way or the other, and both take the same copy); only identity-level interruptions revoke earlier
 snapshots ([source interruptions](../../docs/reshade-sbs.md#streamline-depth-selection)). A new render size of the same source (dynamic
 resolution) neither refuses that snapshot nor ends the hold of the last copied depth; only another
 storage format, view or resource kind does (`format_changed`, `depth_format_changed`).
@@ -2472,7 +2473,8 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   submission on a presenting queue as its frame, `presented_by`), the frame's own SR stand-in for
   its DLSS-G copy in flight at those Presents after a hitch, never at a later one nor an earlier
   frame's, a missing frame's stand-in (each kind of failed or refused head, SR and FG, against
-  every per-copy check and every identity interruption, which still revoke), and every reason of
+  every per-copy check and every identity interruption, which still revoke) and a nomination in
+  progress's (the same copy, at once), and every reason of
   `decide_display`. Its freshness table
   pins each age limit one millisecond either side against an explicit clock: the source age at
   every selection site, the association timeout of `expire_association` and `evaluation_live`, an

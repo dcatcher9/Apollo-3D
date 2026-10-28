@@ -1306,7 +1306,10 @@ namespace sunshine_streamline::depth_capture {
         invalid,
         nomination_invalid,
         nomination_only,
-        refused_without_slot
+        refused_without_slot,
+        // Not missing: its evaluation began and its nomination is in progress
+        // (pending_nomination), its copy not recorded yet.
+        in_progress
       };
       enum class variant {
         plain,
@@ -1357,6 +1360,14 @@ namespace sunshine_streamline::depth_capture {
         {"FG On, a nomination-invalid first DLSS-G attempt: the SR copy stands in", l::fg_from_sr, h::nomination_invalid, v::plain, "C ready lineage_snapshot", false, fg_next},
         {"FG On, a first DLSS-G nomination without pixels: the SR copy stands in", l::fg_from_sr, h::nomination_only, v::plain, "C ready lineage_snapshot", false, fg_next},
         {"FG On, a first DLSS-G attempt refused before its slot existed: the SR copy stands in", l::fg_from_sr, h::refused_without_slot, v::plain, "C ready lineage_snapshot", false, fg_next},
+        // A nomination in progress ends recorded (pending) or refused (missing):
+        // either takes this copy, so a Present meanwhile shows it now (until
+        // 10-28 it held the copy before, one Present late).
+        {"SR, a nomination in progress: the SR copy completed before it stands in", l::sr, h::in_progress, v::plain, "C ready completed_snapshot", false, consumed_next},
+        {"FG, a DLSS-G nomination in progress: its previous compute copy stands in", l::fg_own, h::in_progress, v::plain, "C ready completed_snapshot", false, consumed_next},
+        {"FG, a DLSS-G nomination in progress of an FG owner whose own copies are gone: the frame's SR copy stands in", l::fg_from_sr, h::in_progress, v::plain, "C ready lineage_snapshot", false, fg_next},
+        {"A nomination in progress whose copy this queue already showed holds as pending", l::sr, h::in_progress, v::consumed, "- recorded pending_nomination", false, nullptr},
+        {"A nomination in progress with no readable copy holds as pending", l::sr, h::in_progress, v::fence_open, "- recorded pending_nomination", false, nullptr},
         // Per-copy protections: no stand-in, and the missing frame still moves nothing.
         {"A copy whose producer fence is open does not stand in", l::sr, h::failed, v::fence_open, "- failed no_admissible_capture", false, nullptr},
         {"A copy whose recording has not retired (no copy-out) does not stand in", l::sr, h::failed, v::recording_open, "- failed no_admissible_capture", false, nullptr},
@@ -1415,10 +1426,16 @@ namespace sunshine_streamline::depth_capture {
         const auto copy_epoch = r.change == v::other_epoch ? epoch - 1 : epoch;
         const std::uint32_t copy_viewport = r.change == v::other_viewport ? 1 : 0;
         // The owner's delivered copy (sequence 10), then the lineage's copy
-        // completed on the producer queue (sequence 20), never shown.
-        auto &shown = make(0, provider_kind::streamline, copy_epoch, 10, copy_source, copy_viewport);
+        // completed on the producer queue (sequence 20), never shown. An FG
+        // owner's nomination in progress over the frame's SR copy: the owner
+        // showed an FG copy, which the pool has since recycled.
+        const bool fg_owner = r.kind == h::in_progress && r.line == l::fg_from_sr;
+        auto &shown = make(0, provider_kind::streamline, copy_epoch, 10, fg_owner ? fg_source : copy_source, copy_viewport);
         establish_provider(owner, shown, 1);
         deliver(owner, shown);
+        if (fg_owner) {
+          shown = {};
+        }
         auto &copy = make(1, provider_kind::streamline, copy_epoch, 20, copy_source, copy_viewport);
         copy.queue = producer;
         copy.producer_fence = 5;
@@ -1462,9 +1479,12 @@ namespace sunshine_streamline::depth_capture {
         }
         // The head (sequence 30): an FG head replaces the viewport's SR view.
         slot *own_slot = nullptr;
+        evaluation_nomination nominating;
         if (r.kind == h::refused_without_slot) {
           begin_evaluation(epoch, 30, 0, provider_kind::streamline, head_source, fg_head ? 0 : UINT64_MAX);
           attempt_status[provider_index(provider_kind::streamline)] = status::missing_state;
+        } else if (r.kind == h::in_progress) {
+          nominating.begin(epoch, 30, 0, provider_kind::streamline, head_source, fg_head ? 0 : UINT64_MAX);
         } else {
           own_slot = &make(2, provider_kind::streamline, epoch, 30, head_source, 0, fg_head ? 0 : UINT64_MAX);
           own_slot->metadata.source = storage;

@@ -430,11 +430,12 @@ namespace sunshine_streamline::depth_capture {
   // its nomination as in progress (nominate_evaluation's) until end() or the
   // scope's end, whichever path its caller returns by. NGX reads its
   // parameters and retains its source between the two. An acquisition
-  // meanwhile, another thread's Present, holds instead of reading the
-  // attempt as refused, which moved acquire's gap watermark and so revoked
-  // the source's earlier snapshots still in flight. A refused attempt, once
-  // the nomination ends, is a missing frame: it moves no gap either (since
-  // 10-28), and the snapshot completed before it stands in.
+  // meanwhile, another thread's Present, does not read the attempt as
+  // refused, which moved acquire's gap watermark and so revoked the source's
+  // earlier snapshots still in flight: the snapshot completed before it
+  // stands in, and without one the acquisition holds. A refused attempt,
+  // once the nomination ends, is a missing frame: it moves no gap either
+  // (since 10-28), and the same snapshot stands in.
   class evaluation_nomination {
   public:
     evaluation_nomination() = default;
@@ -473,10 +474,11 @@ namespace sunshine_streamline::depth_capture {
   std::uint64_t nominate(std::uint64_t command, const input &value, record_diagnostic *diagnostic = nullptr);
   // Publish validated adapter candidates and their in-progress nomination as one
   // observation. Until the candidate batch resolves (any evaluation's, SR's as
-  // well as FG's), an acquisition holds: only a bounded whole-FG-pair hold may
-  // use this logical identity, no previous depth becomes current pixels and no
-  // earlier snapshot of the source is revoked (acquire's gap watermark, which
-  // a refused or failed attempt does not move either). Native
+  // well as FG's), an acquisition takes the source's newest completed,
+  // unconsumed snapshot that the pending or missing frame would take
+  // (select_capture), else holds; no earlier snapshot of the source is
+  // revoked (acquire's gap watermark, which a refused or failed attempt does
+  // not move either). Native
   // validation and GPU ordering remain shared with nominate(). Rejection clears
   // only this attempt; missing adapter input must use begin_evaluation() instead.
   std::uint64_t nominate_evaluation(std::uint64_t command, const input &value,

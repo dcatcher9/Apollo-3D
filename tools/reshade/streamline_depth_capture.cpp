@@ -1116,13 +1116,25 @@ namespace sunshine_streamline::depth_capture {
       // Shadows' refused SR inputs, 10-25). Ambiguous or inactive views, a
       // head past the source age that this Present does not present, the FG
       // scope's policy picks (select_provider), retire_source and
-      // expire_association still revoke. A nomination in progress holds
-      // (pending_nomination).
+      // expire_association still revoke.
       chosen.missing_frame = !pending && chosen.head && !chosen.pending_nomination && (!latest || live) &&
         chosen.result != status::ready && chosen.result != status::stale && chosen.result != status::ambiguous;
-      if (!pending && !chosen.missing_frame) return chosen;
-      const auto identity = latest ? latest->metadata : head_identity(*chosen.head, provider);
-      // A missing frame without a stand-in keeps its own result and reason.
+      // A nomination in progress (pending_nomination: the owner's exact
+      // source, newer than its last shown frame) takes the same path too: it
+      // ends recorded (the pending path above) or refused (a missing frame),
+      // and either picks this same copy, so a Present meanwhile shows it now
+      // rather than one Present late. It keeps its pending_nomination, which
+      // still names the owner's live source (select_provider), and moves no
+      // watermark. Until 10-28 it held the retained copy, one frame behind
+      // the readable copy (Assassin's Creed Shadows' FG Presents racing its SR
+      // evaluates), because a refusal then moved acquire's gap watermark.
+      // Without a stand-in it keeps its pending result.
+      const bool in_progress = chosen.pending_nomination != nullptr;
+      if (!pending && !chosen.missing_frame && !in_progress) return chosen;
+      const auto identity = latest ? latest->metadata :
+        head_identity(in_progress ? *chosen.pending_nomination : *chosen.head, provider);
+      // A missing frame or a nomination in progress without a stand-in keeps
+      // its own result and reason.
       auto *completed = completed_snapshot(identity, now, native);
       if (!completed) {
         if (pending) chosen.selection = selection_reason::no_completed_snapshot;
@@ -3154,12 +3166,13 @@ namespace sunshine_streamline::depth_capture {
     // Requires mutex. value, its provider's newest evaluation, is a nomination
     // in progress (pending_nomination) until its copy is recorded or refused
     // (end_nomination). Every evaluation's, SR's as well as FG's: a Present
-    // meanwhile, another thread's, holds instead of reading that attempt as
-    // refused, which moved acquire's gap watermark and so revoked the
-    // source's earlier snapshots still in flight on their queue (Assassin's
-    // Creed Shadows 10-25: with FG on, FG Presents landed while the SR
-    // evaluate allocated storage for each dynamic-resolution size, and each
-    // revoked SR depth for a frame or more). false: value is not the newest
+    // meanwhile, another thread's, does not read that attempt as refused,
+    // which moved acquire's gap watermark and so revoked the source's earlier
+    // snapshots still in flight on their queue (Assassin's Creed Shadows
+    // 10-25: with FG on, FG Presents landed while the SR evaluate allocated
+    // storage for each dynamic-resolution size, and each revoked SR depth for
+    // a frame or more); the snapshot completed before it stands in
+    // (select_capture), else the Present holds. false: value is not the newest
     // evaluation, or (unless renewed) its nomination is already in progress
     // and its own caller ends it.
     bool mark_pending(evaluation_namespace &current, const evaluation_head &nomination, bool renewed) {

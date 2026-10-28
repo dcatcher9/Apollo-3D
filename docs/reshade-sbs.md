@@ -4607,7 +4607,7 @@ Present found that copy `completed_before_gap`, and a second failure within the 
 the held copy to expire, mono while newer copies were readable (Assassin's Creed Shadows' 10-25
 losses above; about 1 s of mono on the session fixture with every other SR tag unprovable; with FG
 on, a refused DLSS-G attempt revoked the previous frame's compute copy). A nomination in progress
-still holds the retained copy (below). A frame's own copy that this Present still presents is no
+takes the same stand-in (below). A frame's own copy that this Present still presents is no
 interruption either.
 Reused real depth retains its applied gain, zero plane, crop and jitter and does not advance
 range learning or gain adaptation. It takes the scene exactly as the real frame resolved it,
@@ -4715,14 +4715,20 @@ on whichever path its hook returns (NGX reads its parameters, its calibration pr
 owner and retains its source in between; since the review of the 10-26 hotfix, before which only
 the `nominate()` call itself was covered).
 A Present between this publication and snapshot registration can identify the same established
-source without acquiring pending pixels; it holds, and marks no gap in the source's admission
-(since the Assassin's Creed Shadows hotfix of 10-26; before, only an FG nomination was in progress,
-so an FG Present landing while an SR evaluate allocated its copy's storage for a new dynamic
-resolution size read that attempt as refused and revoked the SR snapshots in flight:
-`completed_before_gap`). Missing/invalid attempts withdraw that intent, and the refused attempt
-that follows is a missing frame (the interruption rule above), which marks no gap either
-since 10-28; an older call returning cannot clear a newer intent. The explicit bounded reuse policy above may use its private
-previous depth during this gap; GPU resource retirement is unchanged.
+source without acquiring pending pixels, and marks no gap in the source's admission (since the
+Assassin's Creed Shadows hotfix of 10-26; before, only an FG nomination was in progress, so an FG
+Present landing while an SR evaluate allocated its copy's storage for a new dynamic resolution size
+read that attempt as refused and revoked the SR snapshots in flight: `completed_before_gap`). The
+attempt ends recorded (a pending successor) or refused (a missing frame, the interruption rule
+above), and either takes the source's newest completed, unconsumed copy that passes the pending
+path's checks, so that copy stands in at once (`selection=completed_snapshot`, or
+`lineage_snapshot` for an FG input's SR copy) and the Present holds only without one
+(`pending_nomination`). Until 10-28 it always held, one frame behind the readable copy at each
+such Present (Assassin's Creed Shadows' FG Presents racing its SR evaluates), because a refusal then
+marked a gap. Missing/invalid attempts withdraw that intent, and the refused attempt that follows is
+a missing frame, which marks no gap either since 10-28; an older call returning cannot clear a
+newer intent. The explicit bounded reuse policy above may use its private previous depth during
+this gap; GPU resource retirement is unchanged.
 
 The shared capture pool also retains the current valid nominated record after its GPU work has
 retired. Pixel-backed and metadata-only records carry the same source authority: an unrelated
