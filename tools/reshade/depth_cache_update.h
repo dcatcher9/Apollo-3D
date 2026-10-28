@@ -16,10 +16,17 @@ namespace sunshine_streamline::depth_capture {
     std::uint64_t capture_id{}, real_present{};
     std::uint32_t width{}, height{}, format{}, view_format{};
     sunshine_scene_depth::extent area;
+    // The present ordinal of the frame the copy is (packet::present),
+    // compared with acquisition_decision::presenting_floor.
+    std::uint64_t present_stamp{};
   };
   struct display_decision {
     display_action action{display_action::invalidate};
     const char *reason{"no_retained_depth"};
+    // A hold of the newest evaluated frame's own copy at a Present that
+    // still presents that frame: no source age applies (display_depth_cache
+    // ::reuse).
+    bool own_frame{};
   };
 
   namespace detail {
@@ -118,7 +125,14 @@ namespace sunshine_streamline::depth_capture {
         out.reason = "depth_encoding_changed";
         return out;
       }
-      if (!sunshine_freshness::within_source_age(before.tick, now)) {
+      // The retained copy is the frame this Present still presents (FG On:
+      // its generated and real Presents in either order, frame_presenting):
+      // its own depth, however long the frame took since its evaluation.
+      // Every other hold keeps the source age (until the 10-27 review a hitch
+      // between a frame's evaluation and its last Present made that Present
+      // mono, retained_depth_expired).
+      out.own_frame = previous.present_stamp && current.presenting_floor && previous.present_stamp >= current.presenting_floor;
+      if (!out.own_frame && !sunshine_freshness::within_source_age(before.tick, now)) {
         out.reason = "retained_depth_expired";
         return out;
       }

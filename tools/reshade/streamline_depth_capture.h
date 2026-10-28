@@ -52,6 +52,9 @@ namespace sunshine_streamline::depth_capture {
     // when an immutable copy is handed to a different queue on the same device.
     std::uint64_t texture{}, shader_resource{}, device{}, queue{}, producer_queue{}, capture_id{}, producer_fence{};
     std::uint64_t resource_id{};
+    // The present ordinal of the frame this copy is (presented_by): the
+    // display keeps it with a retained copy (retained_depth::present_stamp).
+    std::uint64_t present{};
     // A successful source nomination can own this presentation while capture
     // is unsupported/pending. This authorizes neither texture access nor a
     // fallback selector.
@@ -74,6 +77,11 @@ namespace sunshine_streamline::depth_capture {
     bool exclude_unconfirmed_fg{};
     // Required FG: when its options turned it on (frame_generation_scope_live).
     std::uint64_t enabled_tick{};
+    // The Presents DLSS-G adds per real frame while FG is confirmed on (the
+    // game's numFramesToGenerate; 1 when the count is unknown), also for a
+    // silent scope; 0 without FG. A frame that made a frame-generation call
+    // presents at its first Present and these (frame_presenting).
+    std::uint32_t generated_presents{};
   };
   enum class status {
     inactive, unavailable, malformed, unsupported_state, missing_state, conflicting_state, incomplete_state, unsupported_lifetime,
@@ -115,6 +123,10 @@ namespace sunshine_streamline::depth_capture {
     std::uint64_t epoch{}, sequence{}, source_id{}, capture_id{};
     std::uint32_t viewport{};
     bool source_valid{}, repeated_frame{}, pending_frame{};
+    // The newest evaluated frame's present ordinal while this Present still
+    // presents that frame (frame_presenting), else 0: a retained copy of
+    // that frame or a later one is its own depth here (decide_display).
+    std::uint64_t presenting_floor{};
   };
   // Observation only. Rendering and source reuse consume acquisition_decision.
   struct capture_diagnostic {

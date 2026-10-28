@@ -28,6 +28,7 @@ namespace sunshine_streamline::provider {
       out.metadata = depth_.provided;
       out.capture_id = capture_id_;
       out.real_present = depth_.frame_index;
+      out.present_stamp = present_stamp_;
       out.width = depth_.width;
       out.height = depth_.height;
       out.format = format_;
@@ -40,14 +41,17 @@ namespace sunshine_streamline::provider {
     // feeding a held output back here cannot refresh its age or NGX present limit.
     // format and view_format: the copy's storage family and the view it is
     // read through (packet::format, packet::srv_format).
+    // present_stamp: the copy's frame's present ordinal (packet::present).
     void commit(const sunshine_depth::frame_depth &value, std::uint64_t capture_id,
-        std::uint32_t format, std::uint32_t view_format, std::uint32_t color_width, std::uint32_t color_height) {
+        std::uint32_t format, std::uint32_t view_format, std::uint32_t color_width, std::uint32_t color_height,
+        std::uint64_t present_stamp = 0) {
       if (!value.ready || value.reused_depth || !capture_id) {
         invalidate("invalid_fresh_copy");
         return;
       }
       depth_ = value;
       capture_id_ = capture_id;
+      present_stamp_ = present_stamp;
       format_ = format;
       view_format_ = view_format;
       color_width_ = color_width;
@@ -59,7 +63,7 @@ namespace sunshine_streamline::provider {
     // callers use static diagnostic strings. Invalidated pixels cannot revive.
     void invalidate(const char *reason) {
       depth_ = {};
-      capture_id_ = 0;
+      capture_id_ = present_stamp_ = 0;
       format_ = view_format_ = color_width_ = color_height_ = 0;
       reason_ = reason ? reason : "invalidated";
     }
@@ -81,7 +85,8 @@ namespace sunshine_streamline::provider {
       if (!context.texture || !context.view || context.texture != depth_.resource.handle ||
           context.view != depth_.shader_resource.handle)
         return reject("display_storage_changed");
-      if (!sunshine_freshness::within_source_age(depth_.provided.tick, context.now))
+      // decide_display's own_frame: the frame this Present still presents.
+      if (!decision.own_frame && !sunshine_freshness::within_source_age(depth_.provided.tick, context.now))
         return reject("retained_depth_expired");
       out = depth_;
       out.frame_index = present;
@@ -92,7 +97,7 @@ namespace sunshine_streamline::provider {
   private:
     bool reject(const char *reason) { invalidate(reason); return false; }
     sunshine_depth::frame_depth depth_;
-    std::uint64_t capture_id_{};
+    std::uint64_t capture_id_{}, present_stamp_{};
     std::uint32_t format_{}, view_format_{}, color_width_{}, color_height_{};
     const char *reason_{"no_retained_depth"};
   };

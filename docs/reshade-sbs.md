@@ -3670,13 +3670,35 @@ A validated, successfully evaluated and actually submitted source nomination est
 ownership on the consuming queue independently of display readiness. A source is identified by
 provider, epoch, logical source and viewport. It is live while its newest nomination is younger
 than the source age below (250 ms). The frame a Present presents is that Present's own depth however
-long it took: an evaluation, and its capture, made since the previous Present of any swapchain (no
-Present came since its call; `presented_frame`, by the capture owner's count of Presents) is active
-and current at that Present past the source age, so a hitch between a frame's SR evaluation and its
-Present no longer makes that Present mono (`selection=inactive_views`, until 10-27; the session
-timelines' `hitch-after-sources`). Any Present in between, a generated one too, ends it: the source
-age bounds every hold over later Presents. Whether such a Present then renders with full stereo
-strength is the scene transition's ([stereo reentry](#experimental-raw-depth-automation)).
+long it took (<a id="fg-frame-presents"></a>the frame's own depth): an evaluation, and its capture,
+made since the previous Present of any swapchain (no Present came since its call; by the capture
+owner's count of Presents) is active and current at that
+Present past the source age, so a hitch between a frame's SR evaluation and its Present no longer
+makes that Present mono (`selection=inactive_views`, until 10-27; the session timelines'
+`hitch-after-sources`). With FG on, DLSS-G presents a frame's real Present and the generated
+Presents it adds for it in either order, so a frame that made a frame-generation call (an FG tag or
+DLSS-G's evaluation) is also the frame of the Presents after its first, up to the count the game
+declares (`numFramesToGenerate`, from the confirmed FG policy, also for a silent scope; 1 while FG
+is on with no count), until the next frame's first evaluation begins (`frame_presenting`): its views
+are active, its copies current, the stand-in of its own SR snapshot for its DLSS-G copy in flight
+admitted (`lineage_snapshot`, below) and the display's hold of its own copy kept (`own_frame`:
+`retained_depth::present_stamp` at or after the acquisition's `presenting_floor`) whatever their
+age. Until the 10-27 review only the first counted, so a hitch of the source age between a frame's
+evaluation and its later Presents made them mono (`inactive_views`, `retained_depth_expired`), and
+the first Present after the pause without depth restarted the stereo fade (the session timelines'
+`fg-on-hitch-*`, `fg-on-dlssg-in-flight-hitch-after-sources` and
+`fg-on-live-compute-hitch-after-sources`). A copy's frame is the Present ordinal of its producer
+list's submission on a presenting queue (one that acquired depth) where that submission was seen,
+else of its call: a game that records frame N+1 on one thread before its submission thread presents
+frame N stamped N+1's copy with frame N's Present, so after a hitch on its submission thread its own
+Present never counted it current (until the 10-27 review). Any other Present ends it: a game that
+keeps presenting without evaluating reaches the source age at its (count + 2)-th Present, and the
+source age bounds every hold over later Presents. A frame's copies are never current before their
+producer finished or where the order model refused a read: currency only lifts the age bound. One
+limitation: when DLSS-G presents on its own thread and the next frame's first evaluation begins
+before this frame's last Present, that Present keeps the age bound (never older than before). Whether
+such a Present then renders with full stereo strength is the scene transition's ([stereo
+reentry](#experimental-raw-depth-automation)).
 Ownership arbitrates only between live sources, and only a
 delivering owner, one whose last copied frame is younger than 250 ms, keeps its own live source:
 while that source is readable, or while a valid successor of its last copied frame is pending. A
@@ -4356,8 +4378,11 @@ the fence passed. Streamline resets its DLSS-G recordings only frames later. Unt
 none of the FG input's snapshots completed within the source age (FG On's first frames, or a
 GPU-bound game's DLSS-G copy still in flight at its own Present), the newest snapshot of the
 viewport's ordinary SR/RR source of the same epoch, its display lineage, that this queue can read
-now and has not shown, within the source age, stands in (`selection=lineage_snapshot`): at FG On
-that is the frame's own SR copy. Without one the display holds the viewport's SR copy, of the same
+now and has not shown, within the source age or of the frame this Present presents (the
+[frame's own depth](#fg-frame-presents) rule above, so a hitch between the evaluation and the Present
+leaves it standing in; until the 10-27 review the pending FG input and the stand-in were aged by the
+clock alone and the Present was mono, `retained_depth_expired`), stands in
+(`selection=lineage_snapshot`): at FG On that is the frame's own SR copy. Without one the display holds the viewport's SR copy, of the same
 epoch and younger than the source age, while the acquisition names only the FG copy in flight
 (`source_reason=FG_copy_pending`; DLSS-G's nomination replaces the viewport's SR observation), so
 the handover loses no depth (the display lineage below). Until 10-27 only that retained copy was

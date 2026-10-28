@@ -453,11 +453,58 @@ namespace {
     require(!keeps(ngx, {}, 1000), "An NGX copy kept the queue as Streamline FG's");
     require(!keeps({}, {}, 1000), "An empty display kept the queue");
   }
+
+  // A frame's own copy at a Present that still presents that frame (FG On:
+  // its generated and real Presents in either order, frame_presenting): the
+  // retained copy whose present stamp is at least the decision's presenting
+  // floor is held as own_frame whatever its age, and the cache reuses it;
+  // an older frame's copy, a decision without a floor and a hold the
+  // decision did not mark own_frame keep the source age (until the 10-27
+  // review a hitch between a frame's evaluation and its last Present made
+  // that Present mono, retained_depth_expired).
+  void own_frame_hold() {
+    display_depth_cache cache;
+    const auto value = fresh();
+    cache.commit(value, 139, 40, 41, 3840, 2160, 500);
+    const auto retained = cache.reference();
+    require(retained.present_stamp == 500, "The retained copy lost its frame's present stamp");
+    depth_capture::acquisition_decision current;
+    current.provider = value.provided.provider; current.epoch = value.provided.epoch;
+    current.source_id = value.provided.source_id; current.viewport = value.provided.viewport;
+    current.sequence = value.provided.sequence;
+    depth_capture::packet candidate;
+    const auto late = value.provided.tick + sunshine_freshness::source_age_ms + 150;
+    current.presenting_floor = 500;
+    auto decision = depth_capture::decide_display(current, candidate, retained, {}, late);
+    require(decision.action == depth_capture::display_action::hold && decision.own_frame && !std::strcmp(decision.reason, "retained_copy"),
+      "A frame's own copy 400 ms old at a Present that still presents it was not held");
+    auto local = context(); local.now = late; frame_depth out;
+    require(cache.reuse(decision, local, 74, out) && out.reused_depth, "The cache refused a frame's own copy at its own Present by its age");
+    same_image(out, value);
+    current.presenting_floor = 501;
+    decision = depth_capture::decide_display(current, candidate, retained, {}, late);
+    require(decision.action != depth_capture::display_action::hold && !decision.own_frame && !std::strcmp(decision.reason, "retained_depth_expired"),
+      "An earlier frame's copy past the source age was held as the presented frame's own");
+    current.presenting_floor = 0;
+    decision = depth_capture::decide_display(current, candidate, retained, {}, late);
+    require(decision.action != depth_capture::display_action::hold && !std::strcmp(decision.reason, "retained_depth_expired"),
+      "A copy past the source age was held at a Present that presents no evaluated frame");
+    current.presenting_floor = 500;
+    require(depth_capture::decide_display(current, candidate, retained, {}, value.provided.tick + 1).own_frame,
+      "A fresh own copy was not marked own_frame");
+    display_depth_cache unstamped;
+    unstamped.commit(value, 139, 40, 41, 3840, 2160);
+    require(!depth_capture::decide_display(current, candidate, unstamped.reference(), {}, late).own_frame,
+      "A copy without its frame's present stamp was held as the presented frame's own");
+    require(!cache.reuse(hold(), local, 75, out) && equal(cache.reason(), "retained_depth_expired"),
+      "The cache reused a copy past the source age for a hold not marked own_frame");
+  }
 }
 
 int main() {
   try {
     lifecycle();
+    own_frame_hold();
     local_rejections();
     source_actions_and_commit();
     dynamic_resolution_sequence();

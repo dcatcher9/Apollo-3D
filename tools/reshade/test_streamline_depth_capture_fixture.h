@@ -16,6 +16,8 @@ namespace sunshine_streamline::depth_capture::fixture {
   inline void clear_captures() {
     slots = {};
     evaluations = {};
+    newest_evaluation_present = frame_generation_present = 0;
+    presenting_generated = 0;
   }
 
   // clear_captures, every provider's last attempt unavailable, no queue

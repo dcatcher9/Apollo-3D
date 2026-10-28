@@ -1273,6 +1273,197 @@ namespace sunshine_streamline::depth_capture {
       std::printf("PASS P5/P6 lineage stand-in for a pending FG input: %zu rows\n", std::size(rows));
     }
 
+    // F1 (the 10-27 review): which Presents count a stamped frame as the
+    // frame they present (frame_presenting). Without frame generation only
+    // its first Present (presented_frame); with FG on, a frame that made a
+    // frame-generation call presents at its first Present and the generated
+    // count after it (DLSS-G's real and generated Presents in either order),
+    // until the next frame's first evaluation began.
+    void frame_presenting_rows() {
+      struct row {
+        const char *pins;
+        unsigned generated;
+        bool fg_call;
+        unsigned presents;  // Presents since the frame's call, the decided one included.
+        bool later_evaluation;
+        bool expected;
+      };
+
+      const row rows[] {
+        {"No Present since its call yet", 0, false, 0, false, true},
+        {"Its first Present, without FG", 0, false, 1, false, true},
+        {"The Present after its first, without FG", 0, false, 2, false, false},
+        {"FG 2x: its first Present", 1, true, 1, false, true},
+        {"FG 2x: its second Present (the real one after its generated one, or a generated one after its real one)", 1, true, 2, false, true},
+        {"FG 2x: a third Present", 1, true, 3, false, false},
+        {"FG 4x: its fourth Present", 3, true, 4, false, true},
+        {"FG 4x: a fifth Present", 3, true, 5, false, false},
+        {"FG 2x: its second Present after the next frame's first evaluation began", 1, true, 2, true, false},
+        {"FG on, but the frame made no frame-generation call", 1, false, 2, false, false},
+      };
+      for (const auto &r : rows) {
+        reset();
+        const auto stamp = present_ordinal();
+        newest_evaluation_present = stamp;
+        if (r.fg_call) {
+          frame_generation_present = stamp;
+        }
+        presenting_generated = r.generated;
+        if (r.presents > 1) {
+          fixture::presents_since(r.presents - 1);
+        }
+        // The decided Present: counted before its selection.
+        if (r.presents) {
+          fixture::presents_since(1);
+        }
+        if (r.later_evaluation) {
+          newest_evaluation_present = present_ordinal();
+        }
+        const bool got = frame_presenting(stamp);
+        if (got != r.expected || (!r.generated && got != presented_frame(stamp))) {
+          fail(std::string("F1 frame_presenting, ") + r.pins + ": got " + (got ? "presenting" : "not presenting"));
+        }
+      }
+      std::printf("PASS F1 frame_presenting: %zu rows\n", std::size(rows));
+    }
+
+    // F2 and P2 (the 10-27 review): a hitch between a frame's evaluation and
+    // a later Present of that frame. The FG input in flight (DLSS-G's copy)
+    // and the frame's own SR snapshot, both past the source age by the
+    // clock: the SR snapshot stands in at the frame's own Presents
+    // (frame_presenting), never at a later frame's, and never an earlier
+    // frame's snapshot. A copy whose producer list was submitted on a
+    // presenting queue after an earlier Present (a game that records frame
+    // N+1 before its submission thread presents frame N) is the frame of
+    // that submission: current at its Present after a hitch, by its copy and
+    // by its view (presented_by, view_presenting).
+    void hitch_presenting_rows() {
+      enum class variant {
+        own_present,
+        second_present,
+        second_present_without_fg,
+        earlier_frame_sr,
+        third_present,
+        submitted_later,
+        submitted_later_unseen
+      };
+      struct row {
+        const char *pins;
+        variant kind;
+        char picked;
+        status result;
+        selection_reason selection;
+      };
+
+      const row rows[] {
+        {"The FG input in flight at its frame's own Present 400 ms after the call: the frame's SR snapshot stands in", variant::own_present, 'S', status::ready, selection_reason::lineage_snapshot},
+        {"The same at the frame's second Present with FG 2x: the SR snapshot stands in", variant::second_present, 'S', status::ready, selection_reason::lineage_snapshot},
+        {"The same with no frame-generation call: the Present after the first ages it by the clock", variant::second_present_without_fg, '-', status::stale, selection_reason::inactive_views},
+        {"An earlier frame's SR snapshot past the source age does not stand in", variant::earlier_frame_sr, '-', status::recorded, selection_reason::no_completed_snapshot},
+        {"A third Present with FG 2x ages it by the clock", variant::third_present, '-', status::stale, selection_reason::inactive_views},
+        {"A copy submitted on the presenting queue after the Present its call was stamped for is current at its own Present", variant::submitted_later, 'S', status::ready, selection_reason::current_capture},
+        {"Without that submission seen, the call's stamp ages it by the clock", variant::submitted_later_unseen, '-', status::stale, selection_reason::inactive_views},
+      };
+      constexpr std::uint64_t epoch = 9;
+      for (const auto &r : rows) {
+        reset();
+        const auto now = GetTickCount64();
+        const auto old = now - source_age - 150;
+        queue_state owner;
+        auto &views = evaluations[provider_index(provider_kind::streamline)].views;
+        const slot *expected {};
+        std::uint32_t generated = 1;
+        if (r.kind == variant::submitted_later || r.kind == variant::submitted_later_unseen) {
+          // Frame N+1's evaluation and copy, recorded before Present N.
+          auto &sr = make(0, provider_kind::streamline, epoch, 2, 0);
+          sr.present = present_ordinal();
+          sr.metadata.tick = old;
+          for (auto &view : views) {
+            if (view.sequence) {
+              view.tick = old;
+            }
+          }
+          // Present N, then the submission thread executes N+1's list.
+          fixture::presents_since(1);
+          if (r.kind == variant::submitted_later) {
+            sr.submitted_present = present_ordinal();
+          }
+          // N+1's own Present.
+          fixture::presents_since(1);
+          generated = 0;
+          expected = &sr;
+        } else {
+          // The frame's SR evaluation (sequence 2), then DLSS-G's evaluation
+          // of its FG input (sequence 3), which replaces the SR view.
+          if (r.kind == variant::earlier_frame_sr) {
+            fixture::presents_since(1);
+          }
+          auto &sr = make(0, provider_kind::streamline, epoch, 2, 0);
+          sr.texture = std::make_shared<texture_reference>();
+          sr.source_nominated = true;
+          sr.present = present_ordinal();
+          sr.metadata.tick = old;
+          if (r.kind == variant::earlier_frame_sr) {
+            // A Present came between: the FG evaluation is the next frame's.
+            fixture::presents_since(1);
+          }
+          auto &fg = make(1, provider_kind::streamline, epoch, 3, fg_source, 0, 0);
+          fg.finished = false;
+          fg.present = present_ordinal();
+          fg.metadata.tick = old;
+          for (auto &view : views) {
+            if (view.sequence) {
+              view.tick = old;
+            }
+          }
+          if (r.kind == variant::second_present_without_fg) {
+            frame_generation_present = 0;
+          }
+          const unsigned since = r.kind == variant::own_present ? 1 : r.kind == variant::third_present ? 3 : 2;
+          fixture::presents_since(since);
+          expected = &sr;
+        }
+        selection_policy policy {};
+        policy.generated_presents = generated;
+        const auto pick = select_provider(owner, native, 2, now, policy);
+        const char picked = label(pick, expected, 'S', nullptr, '?');
+        if (picked != r.picked || pick.result != r.result || pick.selection != r.selection) {
+          char text[512];
+          std::snprintf(text, sizeof(text), "F2/P2 hitch, %s: picked %c result %s selection %s", r.pins, picked, name(pick.result), name(pick.selection));
+          fail(text);
+        }
+      }
+      // producer_submitted stamps a copy's submission on a presenting queue
+      // (one that acquired), and leaves one on another queue to its call.
+      {
+        reset();
+        int stand_in {};
+        auto &place = queues[0];
+        place = std::make_unique<queue_state>();
+        place->queue.p = reinterpret_cast<ID3D12CommandQueue *>(&stand_in);
+        place->chosen = true;
+        const auto presenting = reinterpret_cast<std::uint64_t>(place->queue.p);
+        auto &copy = make(0, provider_kind::streamline, epoch, 2, 0);
+        copy.producer_submitted = false;
+        copy.present = present_ordinal();
+        fixture::presents_since(1);
+        const auto at = present_ordinal();
+        producer_submitted(copy, presenting + 8, 7, true);
+        auto &second = make(1, provider_kind::streamline, epoch, 3, 0);
+        second.producer_submitted = false;
+        second.present = copy.present;
+        producer_submitted(second, presenting, 7, true);
+        const bool stamped = !copy.submitted_present && presented_by(copy) == copy.present && second.submitted_present == at &&
+                             presented_by(second) == at;
+        place->queue.p = nullptr;
+        place.reset();
+        if (!stamped) {
+          fail("P2 producer_submitted: a presenting queue's submission was not stamped, or another queue's was");
+        }
+      }
+      std::printf("PASS F2/P2 hitch between a frame's evaluation and its Presents: %zu rows\n", std::size(rows) + 1);
+    }
+
     struct display_case {
       acquisition_decision current;
       packet candidate;
@@ -1834,6 +2025,8 @@ int main() {
   freshness_edges();
   stray_frame_generation_copy_steps();
   lineage_stand_in_rows();
+  frame_presenting_rows();
+  hitch_presenting_rows();
   decide_display_rows();
   ui_admission_rows();
   reset();

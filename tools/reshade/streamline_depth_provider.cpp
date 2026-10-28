@@ -872,7 +872,12 @@ namespace sunshine_streamline::provider {
     // holds the queue in mono when no API source is available (associated).
     const auto scope = select_frame_generation_scope(policy);
     const bool fg_silent = scope.silent;
-    const auto &selection = scope.selection;
+    // The Presents DLSS-G adds per real frame, from the confirmed policy, so
+    // a silent scope keeps them (frame_presenting grants them only to a
+    // frame that made a frame-generation call); 1 while FG is on with no
+    // count, 0 without FG.
+    auto selection = scope.selection;
+    selection.generated_presents = policy.require_frame_generation ? std::max(1u, data->source_policy.generated_frames()) : 0u;
     // Logged when a required scope turns silent, and when it is live again
     // (FG Off ends a silent scope without a line of its own). A scope turns
     // at each frame FG supplies or misses, so the line comes at most every
@@ -1113,7 +1118,7 @@ namespace sunshine_streamline::provider {
       // Retaining it never extends a game texture's lifetime or adds a GPU wait.
       std::uint32_t color_width{}, color_height{};
       runtime->get_screenshot_width_and_height(&color_width, &color_height);
-      data->cache.commit(out, packet.capture_id, packet.format, packet.srv_format, color_width, color_height);
+      data->cache.commit(out, packet.capture_id, packet.format, packet.srv_format, color_width, color_height, packet.present);
     } else if (update.action == depth_capture::display_action::hold) {
       display_cache_context context;
       std::uint32_t color_width{}, color_height{};

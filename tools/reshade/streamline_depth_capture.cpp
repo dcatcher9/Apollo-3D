@@ -57,6 +57,33 @@ namespace sunshine_streamline::depth_capture {
     // generated Present between an evaluation and its frame's Present leaves
     // the wall-clock rule alone.
     bool presented_frame(std::uint64_t ordinal) { return ordinal && ordinal >= presents.load(std::memory_order_acquire); }
+    // Require mutex. The newest present_ordinal() an evaluation began with
+    // (begin_evaluation_locked), the newest one a frame-generation input's
+    // evaluation began with or its copy was stamped with, and the Presents
+    // DLSS-G adds per real frame that the selection being decided grants
+    // (select_provider, selection_policy::generated_presents).
+    std::uint64_t newest_evaluation_present{}, frame_generation_present{};
+    std::uint32_t presenting_generated{};
+    // Requires mutex. Whether a stamp is the frame the Present being decided
+    // presents: presented_frame, or, for a frame that made a
+    // frame-generation call (its DLSS-G call is what adds Presents for it),
+    // one of the `generated` Presents after its first, as long as no later
+    // evaluation began. With FG on DLSS-G presents a frame's generated
+    // Presents and its real one in either order, so a hitch between a
+    // frame's evaluation and its last Present made every Present after its
+    // first mono (inactive_views, retained_depth_expired; the 10-27 review's
+    // F1 and F2, open items 1 and 2), and the first Present after the pause
+    // without depth restarted the stereo fade. At most generated + 1
+    // Presents count, ended early by the next frame's first evaluation, so a
+    // game that keeps presenting without evaluating reaches the source age
+    // at its (generated + 2)-th Present as before.
+    bool frame_presenting(std::uint64_t ordinal) {
+      if (!ordinal) return false;
+      const auto n = presents.load(std::memory_order_acquire);
+      if (ordinal >= n) return true;
+      const std::uint64_t generated = ordinal == frame_generation_present ? presenting_generated : 0;
+      return generated && ordinal >= newest_evaluation_present && n - ordinal <= generated;
+    }
 
     unsigned provider_index(provider_kind value) { return static_cast<unsigned>(value); }
     bool valid_provider(provider_kind value) { return provider_index(value) < provider_count; }
@@ -233,6 +260,24 @@ namespace sunshine_streamline::depth_capture {
     // Present at FG On or Off that U-C1b's copy-outs exist to prevent).
     std::atomic<std::uint64_t> reader_move_unreadable{};
     std::array<evaluation_namespace, provider_count> evaluations;
+
+    // The present ordinal of the frame a copy is: its submission's on a
+    // presenting queue when seen (slot::submitted_present), else its call's.
+    std::uint64_t presented_by(const slot &value) {
+      return value.submitted_present ? value.submitted_present : value.present;
+    }
+    // Requires mutex. Whether a view's newest evaluation is the frame the
+    // Present being decided presents: by its call's stamp, or by its newest
+    // copy's (presented_by).
+    bool view_presenting(const evaluation_head &view, provider_kind provider) {
+      if (frame_presenting(view.present)) return true;
+      for (const auto &value : slots)
+        if (value.id && !value.preservation_only && value.metadata.provider == provider && value.metadata.epoch == view.epoch &&
+            value.metadata.source_id == view.source_id && value.metadata.viewport == view.viewport &&
+            value.metadata.sequence == view.sequence && frame_presenting(presented_by(value)))
+          return true;
+      return false;
+    }
 
     // A nomination's identity: its evaluation's epoch, sequence, source and
     // viewport.
@@ -650,6 +695,17 @@ namespace sunshine_streamline::depth_capture {
         return; // Never relabel the original producer's fence as another queue.
       }
       value.retirement_unknown |= !signaled;
+      // Submitted on a presenting queue (one that acquired depth): the
+      // Present that shows this copy is decided by this submission's place
+      // in that queue's order, not by when the CPU recorded it. A game that
+      // records frame N+1 (its evaluation) before its submission thread
+      // presents frame N stamped N+1's copy with Present N's ordinal, so its
+      // own Present after a hitch never counted it as current (the 10-27
+      // review's P2). The call stamp stays for a copy whose submission on
+      // a presenting queue was not seen (presented_by).
+      if (!value.producer_submitted && !value.submitted_present)
+        if (const auto *presenting = known_queue(native); presenting && presenting->chosen)
+          value.submitted_present = present_ordinal();
       value.producer_submitted = true;
       value.queue = native;
       value.producer_fence = signaled ? fence : 0;
@@ -789,11 +845,12 @@ namespace sunshine_streamline::depth_capture {
       out.selection = out.latest ? selection_reason::no_admissible_capture : selection_reason::no_current_nomination;
       if (out.latest && out.latest->queue != native) out.progress = producer_progress(*out.latest);
       // Active: its newest evaluation is younger than the source age, or is
-      // the frame this Present presents (presented_frame).
+      // the frame this Present presents (frame_presenting), by its call or by
+      // its newest copy's submission (presented_by).
       unsigned active_views = 0;
       for (const auto &value : current.views)
         if (value.epoch == current.epoch && value.sequence &&
-            (sunshine_freshness::fresh_lt(value.tick, now, sunshine_freshness::source_age_ms) || presented_frame(value.present)))
+            (sunshine_freshness::fresh_lt(value.tick, now, sunshine_freshness::source_age_ms) || view_presenting(value, provider)))
           ++active_views;
       if (active_views != 1) {
         out.result = active_views ? status::ambiguous : status::stale;
@@ -802,7 +859,8 @@ namespace sunshine_streamline::depth_capture {
       }
       const auto &pending = current.pending_nomination;
       if (pending.sequence && pending.epoch == current.epoch && pending.sequence == current.sequence &&
-          pending.source_id == current.source_id && sunshine_freshness::fresh_lt(pending.tick, now, sunshine_freshness::source_age_ms) &&
+          pending.source_id == current.source_id &&
+          (sunshine_freshness::fresh_lt(pending.tick, now, sunshine_freshness::source_age_ms) || frame_presenting(pending.present)) &&
           owner.provider_established && owner.provider == provider && owner.source_id == pending.source_id &&
           owner.viewport == pending.viewport && owner.last_epoch == pending.epoch && pending.sequence > owner.last_sequence)
         out.pending_nomination = &pending;
@@ -848,7 +906,7 @@ namespace sunshine_streamline::depth_capture {
         return out;
       }
       if (!sunshine_freshness::fresh_lt(out.value->metadata.tick, now, sunshine_freshness::source_age_ms) &&
-          !presented_frame(out.value->present)) {
+          !frame_presenting(presented_by(*out.value))) {
         out.latest = out.value; out.value = nullptr; out.result = status::stale;
         return out;
       }
@@ -935,7 +993,7 @@ namespace sunshine_streamline::depth_capture {
             metadata.provider != current.provider || metadata.frame_generation_input != current.frame_generation_input ||
             metadata.epoch != current.epoch || metadata.source_id != current.source_id || metadata.viewport != current.viewport ||
             metadata.sequence > current.sequence ||
-            !within_source_age(metadata.tick, now)) continue;
+            !(within_source_age(metadata.tick, now) || frame_presenting(presented_by(value)))) continue;
         if (!consumer || value.queue != consumer) {
           if (!immutable_for_other_queues(value)) continue;
           if (!readable_elsewhere(value, consumer, producer_progress(value))) continue;
@@ -998,7 +1056,8 @@ namespace sunshine_streamline::depth_capture {
             !value.source_nominated || !value.finished || !value.success || value.invalid || value.nomination_invalid ||
             !value.producer_submitted || metadata.provider != provider_kind::streamline || metadata.frame_generation_input ||
             metadata.epoch != fg.epoch || metadata.viewport != fg.viewport || metadata.sequence > fg.sequence ||
-            value.id <= owner.admission_after || !within_source_age(metadata.tick, now)) continue;
+            value.id <= owner.admission_after ||
+            !(within_source_age(metadata.tick, now) || frame_presenting(presented_by(value)))) continue;
         if (owner.provider_established && owner.provider == provider_kind::streamline && owner.last_epoch == metadata.epoch &&
             metadata.sequence <= owner.last_sequence) continue;
         if (best && (metadata.sequence < best->metadata.sequence ||
@@ -1021,7 +1080,8 @@ namespace sunshine_streamline::depth_capture {
       // provider's expired capture.
       if (!latest || (chosen.result != status::recorded && chosen.result != status::submitted) ||
           latest->invalid || latest->nomination_invalid || latest->nomination_only ||
-          (latest->finished && !latest->success) || !within_source_age(latest->metadata.tick, now)) return chosen;
+          (latest->finished && !latest->success) ||
+          !(within_source_age(latest->metadata.tick, now) || frame_presenting(presented_by(*latest)))) return chosen;
       auto *completed = completed_snapshot(latest->metadata, now, native);
       if (!completed) {
         chosen.selection = selection_reason::no_completed_snapshot;
@@ -1051,6 +1111,7 @@ namespace sunshine_streamline::depth_capture {
     }
     capture_pick select_provider(const queue_state &owner, std::uint64_t native,
         std::uint64_t present, std::uint64_t now, selection_policy policy = {}) {
+      presenting_generated = policy.generated_presents;
       const auto select_sl = [&] {
         auto chosen = select_capture(owner, native, present, provider_kind::streamline, now);
         const auto *source = chosen.value ? chosen.value : chosen.latest;
@@ -1098,7 +1159,8 @@ namespace sunshine_streamline::depth_capture {
       // age. A pick without any slot (an attempt rejected before its capture
       // existed) is not expired while its view is active.
       const auto expired = [&](const capture_pick &value) {
-        return value.result == status::stale || (value.latest && !within_source_age(value.latest->metadata.tick, now));
+        return value.result == status::stale || (value.latest && !within_source_age(value.latest->metadata.tick, now) &&
+          !frame_presenting(presented_by(*value.latest)));
       };
       // A source is live while its newest nomination is within the source age.
       // Readable implies live; liveness never extends that age.
@@ -2017,6 +2079,7 @@ namespace sunshine_streamline::depth_capture {
         out.device = reinterpret_cast<std::uint64_t>(storage->device);
       }
       out.queue = consumer; out.producer_queue = value.queue; out.capture_id = value.id; out.producer_fence = value.producer_fence;
+      out.present = presented_by(value);
       out.width = static_cast<std::uint32_t>(desc.Width); out.height = desc.Height;
       out.area = sunshine_api_contract::normalized_extent(value.metadata.resource.area, out.width, out.height);
       out.format = typeless(desc.Format);
@@ -2978,6 +3041,12 @@ namespace sunshine_streamline::depth_capture {
         if (value.epoch == epoch && value.viewport == viewport && value.source_id == superseded_source_id) value = {};
     const auto now = GetTickCount64();
     const auto ordinal = present_ordinal();
+    if (epoch) {
+      newest_evaluation_present = std::max(newest_evaluation_present, ordinal);
+      if (provider == provider_kind::streamline &&
+          source_id == sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(viewport)))
+        frame_generation_present = std::max(frame_generation_present, ordinal);
+    }
     for (auto &value : current.views) if (value.epoch == epoch && value.viewport == viewport && value.source_id == source_id) {
       // A new call does not end a run of rejected ones; only its result can.
       value.sequence = sequence; value.tick = now; value.present = ordinal; return;
@@ -3012,6 +3081,7 @@ namespace sunshine_streamline::depth_capture {
         return false;
       current.pending_nomination = nomination;
       current.pending_nomination.tick = GetTickCount64();
+      current.pending_nomination.present = present_ordinal();
       return true;
     }
     // An adapter's input names its retained source and resource as well.
@@ -3539,6 +3609,7 @@ namespace sunshine_streamline::depth_capture {
       if (found->predicted_storage) copy_out_counters.predicted.fetch_add(1, std::memory_order_relaxed);
       found->id = ++serial; found->command = cookie; found->producer_recording = owner.life();
       found->present = present_ordinal();
+      if (value.frame_generation_input) frame_generation_present = std::max(frame_generation_present, found->present);
       found->basis = basis; found->compute_list = on_compute;
       compute_copies_recorded |= on_compute;
       if (proof) {
@@ -4072,18 +4143,24 @@ namespace sunshine_streamline::depth_capture {
         const auto &current = evaluations[provider_index(provider)];
         for (const auto &view : current.views) if (view.epoch == current.epoch && view.sequence) {
           diagnostic->newest_view_tick_ms = std::max(diagnostic->newest_view_tick_ms, view.tick);
-          // As select_latest_capture counts them (presented_frame too).
+          // As select_latest_capture counts them (frame_presenting too).
           if (sunshine_freshness::fresh_lt(view.tick, selection_tick, sunshine_freshness::source_age_ms) ||
-              presented_frame(view.present))
+              view_presenting(view, provider))
             ++diagnostic->active_view_count;
         }
       }
     }
     // A genuine source interruption revokes snapshots from before the gap.
     // Normal pending/repeated frames do not move this admission watermark.
+    // A newest copy that this Present still presents (frame_presenting) is
+    // no interruption: its frame's copies stay admissible.
     if (owner->provider_established &&
-        chosen.result != status::ready && chosen.result != status::recorded && chosen.result != status::submitted)
+        chosen.result != status::ready && chosen.result != status::recorded && chosen.result != status::submitted &&
+        !(chosen.result == status::stale && chosen.latest && frame_presenting(presented_by(*chosen.latest))))
       owner->admission_after = serial.load(std::memory_order_relaxed);
+    // The display may hold the newest evaluated frame's own copy at this
+    // Present, whatever its age (depth_cache_update.h, own_frame).
+    decision.presenting_floor = frame_presenting(newest_evaluation_present) ? newest_evaluation_present : 0;
     if (diagnostic) diagnostic->newest_sequence = chosen.latest ? chosen.latest->metadata.sequence :
       chosen.pending_nomination ? chosen.pending_nomination->sequence : 0;
     if (diagnostic && chosen.pending_nomination) {
