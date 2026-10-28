@@ -2577,7 +2577,12 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   FG scope's enabled and accepted ticks, which also admit a tick ahead of the clock (the capture
   owner's `scope_clock` fixes `frame_generation_scope_live`'s clock in this view only), and the
   provider's handoff limit in `provider::handoff_hold` and the `evaluation_live` window it passes.
-  Each limit is named once in [`freshness.h`](freshness.h). Its
+  Each limit is named once in [`freshness.h`](freshness.h). A row that reads its clock once
+  before its setup pins every stamp its setup made after that read to it (`pin_clock`): a
+  `GetTickCount64` step (about 15.6 ms) inside a row's setup made those stamps tick ahead of the
+  clock, which is not fresh, and failed the row (open item C of the 10-28 review, one run in 46;
+  a 20 ms sleep after each such read fails 36 rows without the pin and none with it, 10-28,
+  temporary build). Its
   UI table pins the UI adapter's admission of each ready UI snapshot (`ui_mask::admit_candidate`)
   and of the Present's own color (`ui_input::current_color_refusal`). Their contracts are in
   [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection) and the

@@ -56,6 +56,31 @@ namespace sunshine_streamline::depth_capture {
       fixture::reset_owner();
     }
 
+    // A row that reads now once before its setup: the stamps its fixture
+    // calls made after that read (make, begin_evaluation, mark_pending, each
+    // a later GetTickCount64, which steps about every 15.6 ms) are now, as
+    // when no step fell between them. A tick ahead of now is not fresh
+    // (fresh_lt), so a step inside a row's setup failed it (open item C,
+    // one run in 46: the FG owner whose own copies are gone). Stamps a row
+    // ages on purpose (now - source_age - 1) stay as they are.
+    void pin_clock(std::uint64_t now) {
+      for (auto &value : slots) {
+        if (value.metadata.tick > now) {
+          value.metadata.tick = now;
+        }
+      }
+      for (auto &space : evaluations) {
+        for (auto &view : space.views) {
+          if (view.tick > now) {
+            view.tick = now;
+          }
+        }
+        if (space.pending_nomination.tick > now) {
+          space.pending_nomination.tick = now;
+        }
+      }
+    }
+
     // One submitted, successful capture on the native queue (an FG input when
     // its source is an FG source), and the API evaluation that nominated it.
     slot &make(unsigned index, provider_kind provider, std::uint64_t epoch, std::uint64_t sequence, std::uint64_t source, std::uint32_t viewport = 0, std::uint64_t superseded = UINT64_MAX) {
@@ -1283,6 +1308,7 @@ namespace sunshine_streamline::depth_capture {
         }
         const bool required = r.kind == variant::fg_policy;
         const selection_policy policy {required, required ? epoch : 0, 0, false, now - 16};
+        pin_clock(now);
         const auto pick = select_provider(owner, native, 2, now, policy);
         const char picked = label(pick, &sr, 'S', &fg, 'F');
         if (picked != r.picked || pick.result != r.result || pick.selection != r.selection) {
@@ -1566,6 +1592,7 @@ namespace sunshine_streamline::depth_capture {
         // Present's idle sweep or another record could recycle it first).
         const bool stands_in = std::string(r.outcome) == "C ready completed_snapshot" || std::string(r.outcome) == "C ready lineage_snapshot";
         const bool kept = !reclaimable(copy);
+        pin_clock(now);
         const auto pick = select_provider(owner, native, 2, now, policy);
         const auto got = pick_outcome(pick, &copy, 'C', own_slot, 'H');
         const bool interrupts = interrupts_admission(owner, pick);
@@ -2174,6 +2201,7 @@ namespace sunshine_streamline::depth_capture {
         }
         selection_policy policy {};
         policy.generated_presents = generated;
+        pin_clock(now);
         const auto pick = select_provider(owner, native, 2, now, policy);
         const char picked = label(pick, expected, 'S', nullptr, '?');
         if (picked != r.picked || pick.result != r.result || pick.selection != r.selection) {
