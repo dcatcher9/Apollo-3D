@@ -4544,7 +4544,10 @@ transition resurrects one, and the queue's API association ends, but nothing els
 revoked. The owner's admission floor becomes its last selected copy, the handover floor of
 `establish_provider` (so no copy published before the one it showed returns), and it keeps its
 consumed frame (the viewport's FG and SR inputs share one sequence per epoch, so no copy of an
-earlier frame returns); the scope's newest nomination, when it is the namespace's newest, passes to
+earlier frame returns; a copy the Present selected before the Off and its consumer copied after it,
+FG Off landing on the game's thread while DLSS-G presents on its own, still becomes the consumed
+frame at that copy, `complete_frame`, since 10-28: until then an SR copy of an earlier frame
+published after it could show next); the scope's newest nomination, when it is the namespace's newest, passes to
 the viewport's ordinary source as a missing frame of the lineage (the interruption rule below), so
 the newest SR/RR snapshot recorded since the shown FG copy stands in at once
 (`selection=completed_snapshot`, `current_capture`, or `lineage_snapshot` when FG turns on again).

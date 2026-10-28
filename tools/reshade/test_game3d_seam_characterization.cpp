@@ -1734,6 +1734,7 @@ namespace sunshine_streamline::depth_capture {
         fg_after_off_sr_unshown_then_on,  // The same with S readable and never shown.
         fg_after_off_alone_then_on,  // The same with no S.
         fg_after_off_rekeyed,  // G as the add-on records it after the Off: the viewport's ordinary source.
+        off_before_complete,  // FG Off between F's selection and its copy (complete_frame); then S of an earlier frame.
         ngx_before_fg,  // N published before F.
         ngx_after_fg_then_on,  // N published after S takes the queue; FG On.
         ngx_release  // An NGX owner's feature released: still a source end.
@@ -1763,6 +1764,7 @@ namespace sunshine_streamline::depth_capture {
         {"The same FG copy beside a newer readable SR copy never shown: FG On shows the newer frame (until 10-28 G, completed_snapshot)", shape::fg_after_off_sr_unshown_then_on, "P1 F ready current_capture; OFF floor=F; P2 S ready lineage_snapshot"},
         {"The same FG copy alone: the lineage's own finished frame within the source age shows at FG On", shape::fg_after_off_alone_then_on, "P1 F ready current_capture; OFF floor=F; P2 G ready completed_snapshot"},
         {"An FG copy recorded while FG stays off is the viewport's ordinary source: it shows after FG Off, one view (until 10-28 the FG view beside SR, ambiguous)", shape::fg_after_off_rekeyed, "P1 F ready current_capture; OFF floor=F; P2 G ready current_capture; P3 H ready current_capture"},
+        {"FG Off between F's selection and its copy: F is still consumed, so an SR copy of an earlier frame published after it stays refused (until 10-28 it showed: older after newer)", shape::off_before_complete, "P1 C ready current_capture; P2 F ready current_capture; OFF floor=F; P3 - unavailable no_current_nomination"},
         {"An NGX copy published before F stays historical", shape::ngx_before_fg, "P1 F ready current_capture; OFF floor=F; P2 - submitted completed_before_gap"},
         {"An NGX copy after S takes the queue; FG On's stand-in never steps back to S", shape::ngx_after_fg_then_on, "P1 F ready current_capture; P2 - recorded no_completed_snapshot; OFF floor=F; P3 N ready current_capture; P4 - recorded no_completed_snapshot"},
         {"An NGX feature's release still revokes every copy before it", shape::ngx_release, "P1 N ready current_capture; OFF floor=serial; P2 - stale inactive_views"},
@@ -1778,11 +1780,15 @@ namespace sunshine_streamline::depth_capture {
         place->fence.p = &fence;
         place->device_identity = device;
         queues[1] = std::make_unique<queue_state>();
+        // The owner's own queue, by which complete_frame finds it.
+        fixture::completion_fence owner_queue;
+        queues[1]->queue.p = reinterpret_cast<ID3D12CommandQueue *>(&owner_queue);
         struct release_places {
           ~release_places() {
             queues[0]->queue.p = nullptr;
             queues[0]->fence.p = nullptr;
             queues[0].reset();
+            queues[1]->queue.p = nullptr;
             queues[1].reset();
           }
         } release;
@@ -1821,7 +1827,11 @@ namespace sunshine_streamline::depth_capture {
         // watermark, the establishment of any selected copy (source
         // authority, whatever its pixels' state), and complete_frame of a
         // shown one. advance: the next selection is another presentation.
-        const auto pick = [&](selection_policy policy = {}, bool advance = true) {
+        // copied: the consumer copied a ready copy at once (complete_frame);
+        // otherwise its copy comes later (copy_later).
+        const slot *selected_later = nullptr;
+        std::uint64_t selected_present = 0;
+        const auto pick = [&](selection_policy policy = {}, bool advance = true, bool copied = true) {
           const auto chosen = select_provider(owner, native, present, GetTickCount64(), policy);
           trace += std::string(trace.empty() ? "" : "; ") + "P" + std::to_string(present) + " " + who(chosen) + " " + name(chosen.result) + " " + name(chosen.selection);
           if (interrupts_admission(owner, chosen)) {
@@ -1830,12 +1840,24 @@ namespace sunshine_streamline::depth_capture {
           }
           if (chosen.value) {
             establish_provider(owner, *chosen.value, present);
-            if (chosen.result == status::ready) {
+            if (chosen.result == status::ready && copied) {
               deliver(owner, *chosen.value);
+            } else if (chosen.result == status::ready) {
+              selected_later = chosen.value;
+              selected_present = present;
             }
           }
           fixture::presents_since(1);
           present += advance;
+        };
+        // The consumer's copy of the copy selected without one, as
+        // complete_frame commits it.
+        const auto copy_later = [&] {
+          packet value;
+          value.queue = reinterpret_cast<std::uint64_t>(&owner_queue);
+          value.capture_id = selected_later->id;
+          value.metadata = selected_later->metadata;
+          complete_frame(value, selected_present);
         };
         const auto off = [&](provider_kind provider, std::uint64_t retired_epoch, std::uint64_t source) {
           retire_source(provider, retired_epoch, source);
@@ -1911,6 +1933,20 @@ namespace sunshine_streamline::depth_capture {
             n = &ngx(1);
             pick();
             off(provider_kind::ngx, ngx_epoch, ngx_source);
+            pick();
+            break;
+          case shape::off_before_complete:
+            // C (sequence 5) shown; F (sequence 10) selected at the next
+            // Present, FG Off on the game's thread before its copy is
+            // committed; then S, an SR copy of the frame before F (sequence 9,
+            // called before F's tag) published after F, readable.
+            c = &sr(5, false);
+            pick();
+            f = &fg_copy(10);
+            pick({}, true, false);
+            off(provider_kind::streamline, epoch, fg_source);
+            copy_later();
+            s = &sr(9, false);
             pick();
             break;
           default:

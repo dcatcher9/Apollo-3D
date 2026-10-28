@@ -2599,7 +2599,9 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   SR was shown, an NGX copy before the shown one and an SR copy before an NGX copy that took the queue
   stay refused; another viewport's active view keeps the old view removal, one past the source age
   does not; an NGX feature's release still revokes; an FG copy recorded after the Off while the
-role stays retired is the viewport's ordinary source, and one an Off race left of an older frame
+role stays retired is the viewport's ordinary source, a copy selected before an Off and copied
+after it is still the consumed frame (`complete_frame`; until 10-28 an SR copy of an earlier frame
+published after it showed next), and an FG copy an Off race left of an older frame
 than a readable, never shown SR copy loses to it at FG On, while alone it shows (the newest frame
 across `completed_snapshot` and `lineage_snapshot`, 10-28); each Present establishes any selected copy, as
   `acquire` does, so an FG owner meets a later SR copy at FG Off only after a late Off or a list

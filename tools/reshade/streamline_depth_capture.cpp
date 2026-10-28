@@ -4551,9 +4551,17 @@ namespace sunshine_streamline::depth_capture {
   void complete_frame(const packet &value, std::uint64_t present) {
     std::lock_guard lock(mutex);
     auto *owner = queue(value.queue);
+    // The presentation this Present selected and its consumer copied. FG Off
+    // on the game's thread between that selection and this copy (DLSS-G
+    // presenting on its own) retires the owner's FG role but keeps that
+    // presentation tuple (retire_source), so the copied frame is still the
+    // consumed one: until 10-28 it was not, and an SR copy of an earlier
+    // frame published after it could show at the next Present, older depth
+    // after newer (the 10-28 review's P4). Every other end of an owner clears
+    // present_capture.
     if (!owner || owner->present != present || owner->present_capture != value.capture_id ||
-        !owner->provider_established || owner->provider != value.metadata.provider ||
-        owner->nominated_epoch != value.metadata.epoch) return;
+        owner->provider != value.metadata.provider ||
+        (owner->provider_established && owner->nominated_epoch != value.metadata.epoch)) return;
     owner->last_epoch = value.metadata.epoch;
     owner->last_sequence = value.metadata.sequence;
     owner->last_source_tick = value.metadata.tick;
