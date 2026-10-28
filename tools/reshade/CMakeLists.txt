@@ -898,7 +898,7 @@ if(BUILD_TESTING)
         "${SUNSHINE_GAME3D_RESHADE_RUNTIME}" "${SUNSHINE_GAME3D_FROZEN_SHADERS}" "$<TARGET_FILE:SunshineSBSTest>" "${session_timeline_output}"
         "$<TARGET_FILE:reshade_frame_generation_interposer>")
       set_tests_properties(reshade_session_timelines PROPERTIES LABELS "contract;gpu" RUN_SERIAL TRUE
-        RESOURCE_LOCK gpu TIMEOUT 240 FIXTURES_REQUIRED session_timeline_output)
+        RESOURCE_LOCK gpu TIMEOUT 420 FIXTURES_REQUIRED session_timeline_output)
     endif()
     add_executable(reshade_game3d_native_runtime_d3d11_test test_game3d_native_runtime_d3d11.cpp)
     add_executable(reshade_game3d_source_alpha_runtime_test test_game3d_source_alpha_runtime.cpp)

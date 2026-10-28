@@ -94,11 +94,14 @@ namespace {
 
   // The fixed set the registered test runs, and each timeline's length.
   constexpr unsigned fixed_timelines = 24, min_frames = 60, max_frames = 200;
-  // The fixed set's time bound, below ctest's 240 s, and how long its first
-  // failure is shrunk once every timeline ran: a failing run holds the GPU
-  // about a minute longer than a passing one and prints its reproducer in
-  // time. --shrink-runs outside the fixed set shrinks for longer.
-  constexpr std::uint64_t fixed_budget_ms = 225000, shrink_ms = 60000;
+  // The fixed set's time bound, its watchdog 10 s later, below ctest's 420 s,
+  // about twice a full run (184 to 187 s on 10-27, when the bound was 225 s
+  // and ctest's 240 s, so a loaded machine's run could reach either), and
+  // how long its first failure is shrunk once every timeline ran: a failing
+  // run holds the GPU about a minute longer than a passing one and prints
+  // its reproducer in time. --shrink-runs outside the fixed set shrinks for
+  // longer.
+  constexpr std::uint64_t fixed_budget_ms = 400000, shrink_ms = 60000;
 
   // The frame language: one row of this family per real frame.
   namespace frame_events {

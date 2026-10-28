@@ -2220,7 +2220,7 @@ failure, each event kind back to its default in every frame, chunks of frames, t
 of each frame of a short list, every kept candidate cut after the frame where it failed, then the
 minimal list once more (`reproduced=`). Shrinking re-runs each candidate in the same process, after
 the timelines before it, so `--shrink-runs` (default 40) and, in the fixed set, one minute
-(`shrink_ms`, within its 225 s bound) limit it; a failure that depends on timing may shrink less, and
+(`shrink_ms`, within its 400 s bound) limit it; a failure that depends on timing may shrink less, and
 a fresh process's `--events` replay may still differ. The fixed set also runs one regression timeline per
 Assassin's Creed Shadows fix (and one for the generated Presents' hold, `repeated-frame-hold`,
 two for C4's fix, `C4-no-fg-call` and `C4-cancelled-fg-tags` (and `C4-compute-copy-stops`, which pins
@@ -2248,8 +2248,9 @@ failing cell. `--trace` prints every Present's
 frame record, the supply it was judged with and each recorded refusal.
 
 `reshade_session_timelines` runs the fixed set (24 seeds and 29 regression timelines, about
-4290 frames and 10170 Presents) in about 160 s, registered like
-`reshade_native_provider_continuity` with the same 240 s timeout. Locally:
+4690 frames and 11600 Presents) in about 185 s, registered like
+`reshade_native_provider_continuity` but with a 420 s timeout, about twice a full run (its own
+watchdog, 10 s after its 400 s bound `fixed_budget_ms`, ends a hung run first). Locally:
 
     reshade_game3d_session_timeline_runtime_test [--list] [--timeline <seed> | --events "<list>" |
       --seeds N [--from M]] [--shard i/N] [--shrink-runs N] [--trace]
