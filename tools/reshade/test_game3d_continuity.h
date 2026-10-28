@@ -163,7 +163,10 @@ namespace game3d_continuity {
     std::uint64_t tick {};
     // A signal after this frame's real Present reached a fence a read in
     // flight relied on (O1): its real Present is judged as any, and a hold
-    // its generated Presents drop is R1-late-signaller's.
+    // its generated Presents drop is R1-late-signaller's where the copy the
+    // real Present showed was read through that fence (judge::late_signal;
+    // until the 10-27 review any such drop was, also of a copy the
+    // presenting queue made itself).
     bool late_after {};
     // Its own Present can read none of its legal sources: each is a copy
     // from another queue that no fence of the game's orders that Present
@@ -172,15 +175,22 @@ namespace game3d_continuity {
     // is younger than the source age (judge::holdable); later Presents read
     // these copies once complete (completions).
     bool unordered {};
-    // The game's order fences (the fixture's identities) through which its
-    // copies from another queue were readable at its own Present before
-    // they completed (U-C1's relied read): a late signal of one makes them
-    // unholdable (judge::late_signal), as O1 stops holding such a read.
-    std::array<const void *, 2> relied {};
     // One probe per copy recorded on another queue, with its source: true
     // once its producer's work completed, when the presenting queue can read
-    // its copy-out (every such copy is copied out since U-C1b, 10-27).
-    std::vector<std::pair<std::uint8_t, std::function<bool()>>> completions;
+    // its copy-out (every such copy is copied out since U-C1b, 10-27). relied:
+    // the game's order fence (the fixture's identity of that fence object,
+    // new at each FG toggle) through which that copy was readable at its own
+    // Present before it completed (U-C1's relied read), else null: a late
+    // signal of it makes that copy alone unholdable (judge::late_signal), as
+    // O1 stops holding such a read (until the 10-27 review every copy of the
+    // frame took the frame's fences, keyed by a struct reused across FG
+    // toggles).
+    struct completion {
+      std::uint8_t sources {};
+      std::function<bool()> probe;
+      const void *relied {};
+    };
+    std::vector<completion> completions;
 
     void add(std::uint8_t sources, std::uint64_t now, limitation meets = limitation::none) {
       legal |= sources;
@@ -207,9 +217,9 @@ namespace game3d_continuity {
       completes(sources, std::move(probe));
     }
 
-    void completes(std::uint8_t sources, std::function<bool()> probe) {
+    void completes(std::uint8_t sources, std::function<bool()> probe, const void *relied = nullptr) {
       if (probe) {
-        completions.emplace_back(sources, std::move(probe));
+        completions.push_back({sources, std::move(probe), relied});
       }
     }
   };
@@ -440,6 +450,7 @@ namespace game3d_continuity {
         presented_ = frame;
         real_presents_ = {now, real_presents_[0], real_presents_[1]};
         fresh_ = false;
+        shown_copy_ = {};
         readable(frame, now);
       }
       if (frame.limited & api_sources) {
@@ -511,6 +522,9 @@ namespace game3d_continuity {
         showing_ = true;
         if (!generated) {
           fresh_ = row.state == sunshine_game3d::source_state::ready && (frame.legal & api_sources) && !frame.limited;
+          if (owner == source_slot::fg_depth || owner == source_slot::scene_depth) {
+            shown_copy_ = {record.depth_tick_ms, owner == source_slot::fg_depth ? fg_depth_sources : scene_depth_sources};
+          }
         }
         warming_ = false;
         since_ = {};
@@ -531,7 +545,7 @@ namespace game3d_continuity {
         const bool cross_queue = newest_limited_ && now < newest_limited_ + sunshine_freshness::source_age_ms + tick_slack_ms;
         if (held && fresh_ && !cross_queue && real_presents_[2] && now + tick_slack_ms < real_presents_[2] + sunshine_freshness::source_age_ms) {
           auto judged = presented_;
-          if (judged.late_after) {
+          if (judged.late_after && shown_conflicted()) {
             judged.limit = limitation::late_signaller;
           }
           report(violation_kind::dropped_hold, now - real_presents_[2], judged);
@@ -591,7 +605,7 @@ namespace game3d_continuity {
     // copy stale.
     void late_signal(const void *fence) {
       for (auto &copy : copies_) {
-        copy.conflicted = copy.conflicted || std::find(copy.relied.begin(), copy.relied.end(), fence) != copy.relied.end();
+        copy.conflicted = copy.conflicted || (fence && copy.relied == fence);
       }
     }
 
@@ -652,9 +666,9 @@ namespace game3d_continuity {
       std::uint8_t sources {};
       std::function<bool()> completed;
       bool done {};
-      // supply::relied, and whether a late signal of one of them made the
+      // supply::completion::relied, and whether a late signal of it made the
       // copy unholdable (late_signal).
-      std::array<const void *, 2> relied {};
+      const void *relied {};
       bool conflicted {};
     };
 
@@ -664,8 +678,8 @@ namespace game3d_continuity {
       if (const auto own = std::uint8_t(frame.legal & api_sources & ~frame.owned & ~frame.limited & ~frame.elsewhere)) {
         copies_.push_back({stamp, frames_, own, {}});
       }
-      for (const auto &[sources, probe] : frame.completions) {
-        copies_.push_back({stamp, frames_, sources, probe, false, frame.relied});
+      for (const auto &value : frame.completions) {
+        copies_.push_back({stamp, frames_, value.sources, value.probe, false, value.relied});
       }
       while (!copies_.empty() && copies_.front().stamp + sunshine_freshness::source_age_ms + tick_slack_ms < now) {
         copies_.pop_front();
@@ -677,6 +691,19 @@ namespace game3d_continuity {
       for (auto &copy : copies_) {
         copy.done = copy.done || (copy.completed && copy.completed());
       }
+    }
+
+    // Whether the copy the last real Present showed (its rung's newest copy
+    // stamped at or before the record's depth tick) was read through a fence
+    // a late signal reached since: O1 stops holding exactly that copy.
+    bool shown_conflicted() const {
+      const readable_copy *shown {};
+      for (const auto &copy : copies_) {
+        if ((copy.sources & shown_copy_.sources) && copy.stamp <= shown_copy_.tick && (!shown || copy.stamp >= shown->stamp)) {
+          shown = &copy;
+        }
+      }
+      return shown_copy_.tick && shown && shown->conflicted;
     }
 
     // Whether this Present could hold a copy: one certainly readable at it
@@ -714,6 +741,12 @@ namespace game3d_continuity {
     // The supply of the frame the last real Present presented, and the last
     // three real Presents' ticks, newest first.
     supply presented_;
+    // What the last real Present showed from an API rung: its record's depth
+    // tick and that rung's sources (none: it showed no API copy).
+    struct shown_copy {
+      std::uint64_t tick {};
+      std::uint8_t sources {};
+    } shown_copy_;
     std::array<std::uint64_t, 3> real_presents_ {};
     std::uint64_t last_legal_ {}, last_present_ {}, newest_api_ {}, newest_generic_ {}, newest_readable_ {}, newest_limited_ {};
     unsigned presents_ {}, legal_presents_ {}, shown_ {}, shown_generic_ {}, unrecorded_ {}, stalls_ {};

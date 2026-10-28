@@ -467,6 +467,19 @@ namespace {
     // decided from the conflicted copy before it was dropped, so that
     // Present was mono, which R1's tag of every legal source excused.
     {"O1-silent-scope-late-conflict", "20*sr=local; fg=on,sr=local,dlssg=compute; 10*sr=local,dlssg=compute; sr=local; sr=local,dlssg=compute_unobserved,order=cpu; 10*sr=local", true},
+    // The same conflict, then SR on the game's other queue behind a fence
+    // the CPU poisons: that frame's own Present cannot read its copy, so it
+    // holds the SR copy shown just before (lossless), and later frames show
+    // fresh SR once complete. Until the 10-27 review the fixture still kept
+    // SR out for the conflicted FG copy's source age: that SR copy was not
+    // holdable, so a mono Present there was excused, and stale SR passed.
+    {"O1-silent-scope-late-conflict-unordered-sr", "20*sr=local; fg=on,sr=local,dlssg=compute; 10*sr=local,dlssg=compute; sr=local; sr=local,dlssg=compute_unobserved,order=cpu; sr=local; sr=other_queue,order=cpu; 10*sr=other_queue", true},
+    // An FG tag copy on the presenting queue is shown while SR is read in
+    // flight from the game's other queue; a late signal of SR's fence after
+    // the Present conflicts only the SR read, so the generated Present keeps
+    // holding the FG copy. Until the 10-27 review the fixture tagged any
+    // dropped hold there R1-late-signaller (excused at any age).
+    {"O1-late-signal-presenting-copy-held", "20*sr=other_queue; fg=on,tag=now_list,sr=other_queue,generated=1; 5*tag=now_list,sr=other_queue,generated=1; tag=now_list,sr=other_queue,order=late,generated=1; 10*tag=now_list,sr=other_queue,generated=1", true},
     {"fg-on-holds-sr-copy", "20*sr=local; fg=on,tag=now_list,sr=local,generated=1,at=evaluate; 5*tag=now_list,sr=local,generated=1; fg=off,sr=local; 10*sr=local; fg=on,tag=now_list,generated=1,at=inside; 5*tag=now_list,generated=1; fg=off,sr=local; 10*sr=local; fg=on,tag=now_list,sr=local,generated=1,at=evaluate; 5*sr=local,generated=1"},
   };
 
@@ -696,6 +709,10 @@ namespace {
     // one last recorded a copy on another queue, and when one last supplied a
     // copy its FG scope accepts.
     std::uint64_t api_supplied {}, other_queue_copy {}, fg_copy {};
+    // The fences (script tokens) the frame that last set fg_copy read its
+    // DLSS-G copy through, and whether a late signal of one reached it since.
+    std::vector<const void *> fg_copy_relied;
+    bool fg_copy_lost {};
     // Whether the frame's tag copy is deferred to its Present, and whether
     // it waits there for DLSS-G to evaluate its frame
     // (frame_generation::deferral_evaluations): DLSS-G evaluated a frame
@@ -724,14 +741,14 @@ namespace {
       std::uint8_t legal {}, limited {}, permitted {}, elsewhere {};
       continuity::limitation limit {continuity::limitation::none};
       std::uint64_t tick {};
-      std::vector<std::pair<std::uint8_t, std::function<bool()>>> completions;
-      // continuity::supply::relied.
-      std::array<const void *, 2> relied {};
+      // continuity::supply::completion: each copy's own relied fence.
+      std::vector<continuity::supply::completion> completions;
     } supply;
 
-    // The order fence execute_elsewhere's copy was readable through at its
-    // frame's Present before it completed (a relied read), else null.
-    const order_fence *relied_on {};
+    // The order fence (its script token, new at each FG toggle) that
+    // execute_elsewhere's copy was readable through at its frame's Present
+    // before it completed (a relied read), else null.
+    const void *relied_on {};
 
     // A required copy of the frame's last decision, recorded on another
     // queue: the freshness rule's supply, readable once its copy-out
@@ -744,7 +761,7 @@ namespace {
     // Presents read it once complete (until 10-27 it was permitted with no
     // completion, so after a CPU or second signal no frame on that queue was
     // judged until FG toggled). A copy readable through a relied read names
-    // its order fence (continuity::supply::relied).
+    // its order fence (continuity::supply::completion::relied).
     void recorded_elsewhere(std::uint8_t source, std::function<bool()> completion, bool readable) {
       const auto relied = std::exchange(relied_on, nullptr);
       const auto &made = decisions.back();
@@ -753,10 +770,7 @@ namespace {
       }
       supply.elsewhere |= source;
       readable_here = readable_here || readable;
-      supply.completions.emplace_back(source, std::move(completion));
-      if (relied) {
-        supply.relied[supply.relied[0] && supply.relied[0] != relied ? 1 : 0] = relied;
-      }
+      supply.completions.push_back({source, std::move(completion), relied});
     }
 
     // A refusal recorded since the previous poll, and the step of the frame
@@ -919,7 +933,7 @@ namespace {
       relied_on = nullptr;
       if (!complete && relied && form != order_form::second) {
         order.relied = GetTickCount64();
-        relied_on = &order;
+        relied_on = order.token;
       }
       return complete || (relied && form != order_form::second);
     }
@@ -937,7 +951,10 @@ namespace {
     // there, also of a copy the presenting queue could read.
     void signal_again(order_fence &order, bool cpu, bool ahead) {
       if (!order.poisoned) {
-        continuity_log.judge.late_signal(&order);
+        continuity_log.judge.late_signal(order.token);
+        // The scope's held FG copy was read through it: the add-on stops
+        // holding it (0a16e59a), so it keeps the viewport's SR out no more.
+        fg_copy_lost = fg_copy_lost || std::find(fg_copy_relied.begin(), fg_copy_relied.end(), order.token) != fg_copy_relied.end();
       }
       order.poisoned = true;
       const auto value = order.value + (ahead ? 1 : 0);
@@ -1504,7 +1521,7 @@ namespace {
       // waits order the presenting queue after it (U-C1), else the scope's
       // newest readable copy (until 10-27 known gap C1: readable only once
       // complete, and before that three DLSS-G evaluations later).
-      const bool compute_scope = fg_on && dlssg_choice == dlssg_form::compute && fg_copy && now - fg_copy < sunshine_freshness::fg_silent_ms + continuity::tag_slack_ms && !(supply.legal & continuity::tag_copy);
+      const bool compute_scope = fg_on && dlssg_choice == dlssg_form::compute && fg_copy && !fg_copy_lost && now - fg_copy < sunshine_freshness::fg_silent_ms + continuity::tag_slack_ms && !(supply.legal & continuity::tag_copy);
       // When the contract does not let the add-on read that copy at this
       // Present (execute_elsewhere: the fence it waits on is refused, or the
       // CPU did not wait), the scope shows its held copy, the SR input still
@@ -1514,7 +1531,11 @@ namespace {
       // age, keeps the viewport's SR copies off-screen until that copy
       // expires (frame_generation_holds, which awaits the owner's decision):
       // like an owned frame's, they leave no copy a later Present could hold.
-      const bool held_off = fg_on && !owned && fg_copy && fg_copy >= fg_enabled_at &&
+      // Not once a late signal reached the fence that copy was read through
+      // (fg_copy_lost): the add-on drops it and the SR copies stand in
+      // (until the 10-27 review the fixture kept them out for the source
+      // age, which excused a mono Present and hid stale SR depth).
+      const bool held_off = fg_on && !owned && fg_copy && !fg_copy_lost && fg_copy >= fg_enabled_at &&
                             now - fg_copy < sunshine_freshness::source_age_ms;
       // An FG copy its scope accepts: an FG tag's, or DLSS-G's in a state
       // its list recorded (its compute copy is accepted later, with its own
@@ -1522,6 +1543,13 @@ namespace {
       if (fg_on && frame_generation_scope() && ((supply.legal | supply.permitted | supply.limited) & (continuity::tag_copy | continuity::dlssg_input))) {
         fg_copy = now;
         fg_supplied = true;
+        fg_copy_lost = false;
+        fg_copy_relied.clear();
+        for (const auto &value : supply.completions) {
+          if (value.sources == continuity::dlssg_input && value.relied) {
+            fg_copy_relied.push_back(value.relied);
+          }
+        }
       }
       if (fg_on && dlssg_choice != dlssg_form::none) {
         dlssg_evaluated = now;
@@ -1554,20 +1582,19 @@ namespace {
         return late_relied(*order, now_late);
       });
       continuity_log.pending.unordered = unordered;
-      continuity_log.pending.relied = supply.relied;
       // The freshness rule: the frame's copies recorded on another queue,
       // readable once complete, except SR copies a live FG scope keeps out as
       // it keeps the presenting queue's own (owned), and copies of a source
       // the presenting queue does not show: FG input without an FG scope.
       continuity_log.pending.elsewhere = supply.elsewhere;
-      for (const auto &[source, probe] : supply.completions) {
-        if (source == continuity::sr_evaluate && (owned || held_off || compute_scope)) {
+      for (const auto &value : supply.completions) {
+        if (value.sources == continuity::sr_evaluate && (owned || held_off || compute_scope)) {
           continue;
         }
-        if (source == continuity::dlssg_input && !(fg_on && frame_generation_scope())) {
+        if (value.sources == continuity::dlssg_input && !(fg_on && frame_generation_scope())) {
           continue;
         }
-        continuity_log.pending.completes(source, probe);
+        continuity_log.pending.completes(value.sources, value.probe, value.relied);
       }
     }
 
@@ -1742,6 +1769,8 @@ namespace {
       api_supplied = other_queue_copy = fg_copy = dlssg_evaluated = dlssg_frames = deferred_dlssg_frames = 0;
       deferred_known = false;
       fg_supplied = false;
+      fg_copy_lost = false;
+      fg_copy_relied.clear();
       fg_enabled_at = 0;
       present_frames.clear();
       where = label;

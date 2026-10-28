@@ -1777,9 +1777,17 @@ whose Present can read none of its legal sources (its copies elsewhere not reada
 SR input, if any, kept out by a live FG scope) is `unordered`: its Present may go mono only once no
 copy it could read is younger than the source age (`judge::holdable`), and any other loss there
 is a gap. The first CPU, second or late signal of a fence makes the copies read through it
-unholdable from then on (`judge::late_signal`), as O1 stops holding such a read; the generated
-Presents of a frame whose fence a late signal reaches after its Present are tagged
-`R1-late-signaller` (a dropped hold there is that row's). Until 10-27 such copies were permitted
+unholdable from then on (`judge::late_signal`), as O1 stops holding such a read: each copy names
+its own fence (`supply::completion::relied`), the fixture's token of that fence object, new at
+each FG toggle (until the 10-27 review every copy of a frame took the frame's fences, keyed by a
+struct reused across toggles). A dropped hold on a generated Present after a frame whose fence a
+late signal reaches after its Present is `R1-late-signaller`'s only where the copy its real
+Present showed was read through such a fence (until the 10-27 review any was, also of a copy the
+presenting queue made). Once a late signal reaches the fence the scope's held DLSS-G copy was read
+through, the fixture no longer keeps the viewport's SR out for that copy (the add-on drops it and
+SR stands in). `reshade_game3d_continuity` pins the judge's rules on synthetic records; the
+regressions `O1-silent-scope-late-conflict-unordered-sr` and `O1-late-signal-presenting-copy-held`
+run them on the add-on. Until 10-27 such copies were permitted
 with no completion, which disarmed the judge until FG toggled (a mono run after a CPU signal
 passed), and a late window tagged every legal source of every real frame within the source age,
 which excused any loss there. The regressions `O3-cpu-signal-ahead` (depth on every frame after
