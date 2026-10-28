@@ -10,6 +10,7 @@
 #include "game3d_controls_model.h"
 #include "game3d_test_render.h"
 #include "../../src/game3d_debug_protocol.h"
+#include "test_fixture_files.h"
 #include <nlohmann/json.hpp>
 
 namespace {
@@ -84,7 +85,7 @@ namespace {
       require(module && query_automatic_ && query_scale_ && edit_float_ && recalibrate_ && set_foreground_,
         "Native Game 3D fixture requires the test add-on's passive UI queries, controls and foreground observer");
       const auto effects = fixture_.runtime_directory / "effects";
-      fs::rename(effects / effect_file, effects / (std::string(effect_file) + ".disabled"));
+      sunshine_test_files::rename_when_free(effects / effect_file, effects / (std::string(effect_file) + ".disabled"));
       const auto reloads = observed.reloads;
       observed.runtime->reload_effect_next_frame(nullptr);
       const auto until = GetTickCount64() + 30000;
