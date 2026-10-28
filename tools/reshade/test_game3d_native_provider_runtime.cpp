@@ -2188,6 +2188,22 @@ namespace {
     unsigned fg_frame{};
     sunshine_streamline::abi_v2::frame_token *last_token{};
     std::uint64_t tag_started{}, tag_returned{};
+    // When an FG frame last supplied an FG copy, its tag's or DLSS-G's (0
+    // never): a silent scope's frames hold that copy over their SR copies
+    // while it is younger than the source age (frame_generation_holds,
+    // fg_held_sr).
+    std::uint64_t fg_copy_tick{};
+    // A silent FG frame's SR copy, kept off-screen by the scope's hold of its
+    // last FG copy (the owner's frame_generation_holds rule): owned and held
+    // by FG (supply::owned, supply::fg_held), as the session timelines' held
+    // frames are, so the lineage judge (10-28) never asks for it while FG is
+    // on. Within the slack of the hold's end the add-on may hold it still.
+    void fg_held_sr() {
+      if (fg_copy_tick && GetTickCount64() - fg_copy_tick < sunshine_freshness::source_age_ms + game3d_continuity::tag_slack_ms) {
+        continuity_log.pending.owned |= game3d_continuity::sr_evaluate;
+        continuity_log.pending.fg_held |= game3d_continuity::sr_evaluate;
+      }
+    }
 
     void configure_fg(bool enabled) {
       const fg_options value{{nullptr, fg_options_type, 3}, enabled ? 1u : 0u, enabled ? 1u : 0u};
@@ -2237,7 +2253,7 @@ namespace {
       const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, 0, active_area};
       // FG is on wherever a script uses this frame: its tag call copies (S1).
       supplied(game3d_continuity::tag_copy);
-      tag_started = GetTickCount64();
+      fg_copy_tick = tag_started = GetTickCount64();
       const auto tagged = sl.frame_tag ? sl.frame_tag(token, fg_viewport, &tag, 1, reinterpret_cast<void *>(game_native_command)) :
         sl.global_tag(fg_viewport, &tag, 1, reinterpret_cast<void *>(game_native_command));
       require(tagged == 0,
@@ -2255,6 +2271,7 @@ namespace {
       const auto resource = depth_resource();
       const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, 1, active_area};
       supplied(game3d_continuity::tag_copy);  // Copied before its frame's Present (R2).
+      fg_copy_tick = GetTickCount64();
       require(sl.global_tag(fg_viewport, &tag, 1, nullptr) == 0, "Command-less FG tag changed the SDK result");
     }
     // An FG frame whose longer-lived depth tag (lifecycle 1 or 2) declares
@@ -2274,6 +2291,7 @@ namespace {
       const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, lifecycle, active_area};
       const auto command = reinterpret_cast<void *>(game_native_command);
       supplied(game3d_continuity::tag_copy);  // At its call from the recorded state, or before its Present (S11).
+      fg_copy_tick = GetTickCount64();
       require((sl.frame_tag ? sl.frame_tag(token, fg_viewport, &tag, 1, command) : sl.global_tag(fg_viewport, &tag, 1, command)) == 0,
         "Recorded-state FG tag changed the SDK result");
       if (!write) transition(list, selected->resource.p, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -2296,11 +2314,13 @@ namespace {
       auto &token = begin_fg_frame("FG fallback SDK did not supply a frame token");
       require(sl.constants(camera_constants(false), token, fg_viewport) == 0, "FG fallback constants changed the SDK result");
       if (sr) sr_evaluate(token);
+      if (sr && !fg_commands) fg_held_sr();
       const auto resource = depth_resource();
       const auto command = reinterpret_cast<void *>(game_native_command);
       if (fg_commands) {
         const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, 0, active_area};
         supplied(game3d_continuity::tag_copy);
+        fg_copy_tick = GetTickCount64();
         require((sl.frame_tag ? sl.frame_tag(token, fg_viewport, &tag, 1, command) : sl.global_tag(fg_viewport, &tag, 1, command)) == 0,
           "Accepted FG tag changed the SDK result");
         return;
@@ -3244,6 +3264,7 @@ namespace {
           auto *compute = reinterpret_cast<ID3D12GraphicsCommandList *>(native);
           if (observed_state) transition(compute, selected->resource.p, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, read);
           if (observed_state) supplied_elsewhere(game3d_continuity::dlssg_input);
+          if (observed_state) fg_copy_tick = GetTickCount64();
           require(ngx_evaluate(compute, feature, &inputs, nullptr) == ngx_fixture::success,
             "DLSS-G's compute evaluation observation changed the SDK result");
           if (observed_state) transition(compute, selected->resource.p, read, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -3256,6 +3277,7 @@ namespace {
           transition(list, hudless.p, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, read);
           transition(list, backbuffer.p, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, read);
           supplied(game3d_continuity::dlssg_input);
+          fg_copy_tick = GetTickCount64();
         }
         require(ngx_evaluate(list, feature, &inputs, nullptr) == ngx_fixture::success,
           "DLSS-G evaluation observation changed the SDK result");

@@ -1798,7 +1798,15 @@ looked only at the reverse (an SR copy shown beside a newer readable FG copy, no
 set); the review's probe of this direction found 24 Presents in
 `O1-silent-scope-late-conflict` and its unordered-SR form, which now make the conflicted read
 deterministic (DLSS-G's compute copy of the last FG frame held on the GPU past its Present) and
-require a late read (`late_reads` at least one). Until 10-28 a Present one copy behind passed every timeline: a
+require a late read (`late_reads` at least one). Traced, the add-on was right there: where DLSS-G's
+copy completed before its Present it read the copy complete, relied on no fence and kept holding it
+after the CPU signal, while the fixture had predicted the read from the fence alone and demanded the
+SR copies; the fixture now follows the Present's record (`depth_read_order`): a fresh FG copy read
+complete or on its own queue is not lost to a late signal. The native provider fixture models the
+same hold: a silent FG frame's SR copy, while the scope's last FG copy (an FG tag's or DLSS-G's) is
+younger than the source age and its slack, is the hold's (`supply::owned`, `supply::fg_held`);
+without it the lineage judge failed its `silent-scope` and `dlssg-evaluation` scripts (the
+contract runner's `reshade_native_provider_continuity`, `fg4k` and `fg720_legacy`, 10-28). Until 10-28 a Present one copy behind passed every timeline: a
 Present during a nomination in progress, the SR stand-in of an FG input recycled by the pool, a
 missing frame's stand-in shown a Present late. A real Present that shows a copy of the other API
 than the last real Present that showed API depth must show a copy recorded after that one (capture
