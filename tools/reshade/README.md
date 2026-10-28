@@ -2399,8 +2399,8 @@ run; a witness that loses none fails the set, as the matrix's gap seeds keep a r
 failing cell. `--trace` prints every Present's
 frame record, the supply it was judged with and each recorded refusal.
 
-`reshade_session_timelines` runs the fixed set (24 seeds and 45 regression timelines, about
-5330 frames and 13700 Presents, with the seeds' hitches) in about 240 s, registered like
+`reshade_session_timelines` runs the fixed set (24 seeds and 48 regression timelines, about
+5450 frames and 14200 Presents, with the seeds' hitches) in about 250 s, registered like
 `reshade_native_provider_continuity` but with a 480 s timeout, about twice a full run (its own
 watchdog, 10 s after its 460 s bound `fixed_budget_ms`, ends a hung run first). Locally:
 
@@ -2561,8 +2561,9 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   every per-copy check and every identity interruption, which still revoke: after each one, and
   after an expired association, the next pending head finds the copy `completed_before_gap`) and a nomination in
   progress's (the same copy, at once), FG Off's retirement of the FG role alone (an SR copy recorded
-  after the shown FG copy, still in flight at its Present, stands in at the Present after FG Off,
-  also for an SR owner whose newest nomination was DLSS-G's and at FG On again, while a copy
+  after the shown FG copy that no Present selected before the Off, its list executed after its
+  Present or the Off late in its frame, stands in or shows at the Present after FG Off, also for an
+  SR owner whose newest nomination was DLSS-G's and at FG On again, while a copy
   published before the shown one, a copy of an earlier frame, an FG copy recorded after the Off once
   SR was shown, an NGX copy before the shown one and an SR copy before an NGX copy that took the queue
   stay refused; another viewport's active view keeps the old view removal, one past the source age
