@@ -2465,6 +2465,87 @@ namespace {
           }
           require_records_match_log("SLFG-pairs");
         }, {}});
+      // FG On and a hitch of the source age and more (the 10-27 review's F1,
+      // open item 1), between a real frame's calls and its Present, then
+      // between a real Present and its generated one: the generated Present
+      // holds the real frame's own copy (frame_presenting: a frame with an FG
+      // call presents at its declared generated Presents too) at the full
+      // stereo strength the real Present had, and the next real Present keeps
+      // it. Until the 10-27 review that generated Present was mono
+      // (retained_depth_expired, strength 0), and after the second hitch the
+      // next real Present restarted the fade from flat.
+      run_script({"generated-pairs-hitch", 30000,
+        [&] {
+          active_area = {0, 0, selected->width, selected->height-3};
+          render_tracked_depth = [this] { real_fg_frame(); };
+          settle("SLFG-hitch-real-depth");
+        },
+        [&] {
+          using last_render_t = BOOL (*)(api::effect_runtime *, sunshine_game3d::test::last_render *);
+          const auto last_render = reinterpret_cast<last_render_t>(GetProcAddress(GetModuleHandleW(L"SunshineSBSTest.addon64"), "SunshineGame3DTestLastRender"));
+          require(last_render, "Test add-on lacks its last-render query");
+          const auto blend = [&] {
+            sunshine_game3d::test::last_render render;
+            require(last_render(observed.runtime, &render) && render.sequence, "A Present had no native Game 3D render to observe");
+            return render.rendered ? render.parameters.strength_blend : -1.f;
+          };
+          // Pairs until both Presents of a pair render at full strength.
+          float settled = 0.f;
+          for (unsigned pair = 0; pair < 60 && settled != 1.f; ++pair) {
+            render_tracked_depth = [this] { real_fg_frame(); };
+            present_frame();
+            const auto real = blend();
+            render_tracked_depth = {};
+            present_frame();
+            settled = real == 1.f && blend() == 1.f ? 1.f : 0.f;
+          }
+          require(settled == 1.f, "FG pairs did not reach full stereo strength before the hitch cases");
+          const DWORD stall = DWORD(sunshine_freshness::source_age_ms + 150);
+          for (const bool after_real : {false, true}) {
+            const char *phase = after_real ? "SLFG-hitch-after-real-present" : "SLFG-hitch-before-real-present";
+            render_tracked_depth = [this, after_real, stall] {
+              real_fg_frame();
+              if (!after_real) {
+                Sleep(stall);
+              }
+            };
+            const auto started = GetTickCount64();
+            present_frame();
+            const auto real = inspect();
+            const auto real_blend = blend();
+            render_tracked_depth = {};
+            if (after_real) {
+              Sleep(stall);
+            }
+            // A generated Present of the real Present's frame, after it
+            // (judge::present, between).
+            continuity_log.generated = continuity_log.between = true;
+            present_frame();
+            continuity_log.generated = continuity_log.between = false;
+            const auto generated = inspect();
+            const auto generated_blend = blend();
+            const auto generated_ms = GetTickCount64() - started;
+            render_tracked_depth = [this] { real_fg_frame(); };
+            present_frame();
+            const auto next = inspect();
+            const auto next_blend = blend();
+            render_tracked_depth = {};
+            present_frame();
+            log_status(phase, generated);
+            std::printf("MEASURE native FG %s generated_after_ms=%llu real_capture=%llu generated_capture=%llu reused=%u blend real=%g generated=%g next=%g\n",
+              phase, static_cast<unsigned long long>(generated_ms), static_cast<unsigned long long>(real.source.current.capture),
+              static_cast<unsigned long long>(generated.source.current.capture), unsigned(generated.source.reused_depth),
+              real_blend, generated_blend, next_blend);
+            require(generated_ms > stall && active(real) && !real.source.reused_depth, "The real Present of a frame with a hitch did not show its own fresh FG copy");
+            require(active(generated) && generated.source.reused_depth && generated.source.current.capture == real.source.current.capture,
+              "The generated Present of a frame with a hitch did not hold that frame's own FG copy");
+            require(active(next) && !next.source.reused_depth, "The next real frame after a hitch did not show its own FG copy");
+            require(real_blend == 1.f && generated_blend == 1.f && next_blend == 1.f,
+              "A hitch between a frame's FG evaluation and its generated Present lost or restarted the stereo strength");
+          }
+          std::puts("PASS FG On: a hitch before or after a frame's real Present keeps its own depth at its generated Present and full stereo strength");
+          require_records_match_log("SLFG-pairs-hitch");
+        }, {}});
       // Dynamic resolution (Assassin's Creed Shadows with FG on, 10-23): the
       // tagged extent of the same source changes every second real frame.
       // Each real Present has fresh depth of its own extent and each

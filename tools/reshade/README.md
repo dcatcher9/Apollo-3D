@@ -871,7 +871,10 @@ reshade_game3d_native_provider_runtime_test.exe <ReShade64.dll> <frozenShaders> 
 It exercises real GPU depth production, capture, sampling and matrix preparation, including
 padded/nonzero-offset rectangles, failed evaluation (the newest completed copy held within its
 age bound, then mono with the native scale held) and recovery. The optional metadata-only
-interposer enables the SL FG 2x case: retained real depth, generated presentations, a tagged
+interposer enables the SL FG 2x case: retained real depth, generated presentations, a hitch of the
+source age and more before a real Present and one between it and its generated Present (the
+generated Present holds that frame's own copy and every Present keeps full stereo strength,
+`strength_blend` 1; until the 10-27 review that generated Present was mono at strength 0), a tagged
 extent changing every second real frame (dynamic resolution: fresh depth of each extent, held on
 the generated frame, the matrix scale active without recalibration, and a
 `Sunshine depth render size` line), FG Off holding the finished copy within its source age and
