@@ -87,6 +87,8 @@ namespace sunshine_ngx {
       sunshine_streamline::frame_generation::attempt (*frame_generation)(
         const sunshine_streamline::frame_generation::inputs &value){};
       void (*finish_frame_generation)(const sunshine_streamline::frame_generation::attempt &value, bool successful){};
+      // In place of sunshine_streamline::depth_capture::frame_generation_activity.
+      void (*frame_generation_activity)(std::uint64_t now){};
       // Whether a live Streamline FG scope owns depth, in place of the
       // probe's frame generation query and frame_generation_owns_depth, which
       // the seam characterization pins.

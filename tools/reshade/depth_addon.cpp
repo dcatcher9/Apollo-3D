@@ -3153,7 +3153,8 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 			"Sunshine 3D depth: %s; source=%llu %ux%u %s; %s; %s; %s; ready_copies boundary=%llu end_of_frame=%llu; "
 			"end_of_frame_refused=%llu last=%s; proven tracked=%llu unobserved={unrecorded=%llu unreported=%llu invalidated=%llu "
 			"missed_reset=%llu uncovered=%llu} changed_copies=%llu latched=%llu%s earlier_layout={copied=%llu refused=%llu} "
-			"copy_out={made=%llu ring_busy=%llu failed=%llu predicted=%llu taken=%llu unstored=%llu released=%llu skipped=%llu}",
+			"copy_out={made=%llu ring_busy=%llu failed=%llu predicted=%llu taken=%llu unstored=%llu released=%llu skipped=%llu "
+			"reader_moves=%llu move_unreadable=%llu}",
 			binding_state_name(data.binding_state), static_cast<unsigned long long>(data.selected_identity),
 			data.selected_desc.texture.width, data.selected_desc.texture.height, format_to_string(data.selected_desc.texture.format), manual ? "manual" : "auto",
 			data.selection_reason, data.binding_detail, static_cast<unsigned long long>(data.boundary_copy_frames),
@@ -3167,7 +3168,8 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 			static_cast<unsigned long long>(proven.copied_out), static_cast<unsigned long long>(proven.copy_out_busy),
 			static_cast<unsigned long long>(proven.copy_out_failed), static_cast<unsigned long long>(proven.copy_out_predicted),
 			static_cast<unsigned long long>(proven.copy_out_taken), static_cast<unsigned long long>(proven.copy_out_unstored),
-			static_cast<unsigned long long>(proven.copy_out_released), static_cast<unsigned long long>(proven.copy_out_skipped));
+			static_cast<unsigned long long>(proven.copy_out_released), static_cast<unsigned long long>(proven.copy_out_skipped),
+			static_cast<unsigned long long>(proven.reader_moves), static_cast<unsigned long long>(proven.reader_move_unreadable));
 		sunshine_log::message(data.binding_state == depth_binding_state::binding_failed ? reshade::log::level::error : reshade::log::level::info, message);
 		data.last_logged_id = data.anchor_identity;
 		data.last_logged_manual = manual;

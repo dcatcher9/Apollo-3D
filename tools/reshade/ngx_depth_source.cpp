@@ -632,6 +632,13 @@ namespace sunshine_ngx {
     if (selected.handle && selected.parameters.epoch == attempt.epoch &&
         selected.parameters.feature == frame_generation_feature) {
       ++fg_feature;
+      // DLSS-G is producing frames: Present may move to its queue now, also
+      // where no Streamline FG options call was seen (U-C1b's window).
+#ifdef SUNSHINE_UPSCALER_TRACE_TEST
+      if (backend.frame_generation_activity) backend.frame_generation_activity(GetTickCount64());
+#else
+      sunshine_streamline::depth_capture::frame_generation_activity(GetTickCount64());
+#endif
       if (diagnostic_session) observe_without_capture(selected, false);
       // MultiFrameIndex is 1-based (1..MultiFrameCount, nvsdk_ngx_defs_dlssg.h):
       // a later inner frame of multi frame generation evaluates the same real

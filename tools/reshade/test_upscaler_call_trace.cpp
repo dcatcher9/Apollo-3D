@@ -1656,6 +1656,9 @@ namespace {
     hooks.finish_frame_generation = [](const fg::attempt &value, bool successful) {
       ++fg_finish_calls; fg_finished_ticket = value.depth_ticket; fg_finished_success = successful;
     };
+    static unsigned fg_activity_calls;
+    fg_activity_calls = 0;
+    hooks.frame_generation_activity = [](std::uint64_t now) { if (now) ++fg_activity_calls; };
     sunshine_ngx::testing::set_callbacks(hooks);
     fixture_parameters parameters;
     parameters.dlssg_depth = reinterpret_cast<void *>(0xd1550000);
@@ -1688,6 +1691,9 @@ namespace {
         !seen.ui[3].area.width, "DLSS-G UI inputs lost their getter result, slot order or whole-allocation subrect");
     require(fg_finish_calls == 1 && fg_finished_ticket == 77 && fg_finished_success && !captures && !finishes,
       "A DLSS-G attempt was not finished with its evaluation, or DLSS-G inputs reached the SR depth owner");
+    // DLSS-G's evaluation is FG activity, with or without a Streamline FG
+    // options call: it opens U-C1b's window for FG's first Present.
+    require(fg_activity_calls == 1, "A DLSS-G evaluation through NGX did not report FG activity to the capture owner");
     // A failed evaluation finishes its attempt as failed.
     fg_attempt_reply = {}; fg_attempt_reply.depth = fg::depth_outcome::no_fg_scope;
     return_result = ngx_failure; evaluate(); return_result = ngx_success;

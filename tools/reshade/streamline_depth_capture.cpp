@@ -195,13 +195,26 @@ namespace sunshine_streamline::depth_capture {
     // executed yet is predicted to run (record_impl's copy-out storage); 0
     // before any.
     std::uint64_t last_direct_copy_queue{};
-    // When FG options last turned on (frame_generation_enabled), 0 never.
     // FG moves Present to DLSS-G's queue at its first Present, after the
     // render queue's copies of that frame were recorded and submitted while
-    // that queue still read depth, so for the source age after FG turned on
-    // the reader's own copies are copied out too (U-C1b,
-    // reader_may_move).
-    std::atomic<std::uint64_t> frame_generation_on_tick{};
+    // that queue still read depth, so for the source age after FG turns on
+    // the reader's own copies are copied out too (U-C1b, reader_may_move).
+    // Two windows, each closed once Present moved to another queue since it
+    // opened (reader_moves): from FG options turning on
+    // (frame_generation_enabled; 0 never), and from the first FG activity
+    // of a run (an FG frame's begin, DLSS-G's NGX evaluation:
+    // frame_generation_activity) after FG options turned on or after
+    // fg_silent_ms without any. The second covers a game that turns FG on
+    // away from gameplay (a menu, a loading screen, saved settings at boot),
+    // whose first FG Present comes long after the options call, and DLSS-G
+    // seen only through NGX, with no options call at all.
+    std::atomic<std::uint64_t> frame_generation_on_tick{}, frame_generation_on_moves{};
+    std::atomic<std::uint64_t> frame_generation_run_tick{}, frame_generation_run_moves{}, frame_generation_activity_tick{};
+    // Changes of the reader (acquire): Present seen on another queue.
+    std::atomic<std::uint64_t> reader_moves{};
+    // A reader change whose first acquisition had no ready pixels (the flat
+    // Present at FG On or Off that U-C1b's copy-outs exist to prevent).
+    std::atomic<std::uint64_t> reader_move_unreadable{};
     std::array<evaluation_namespace, provider_count> evaluations;
 
     // A nomination's identity: its evaluation's epoch, sequence, source and
@@ -1394,8 +1407,22 @@ namespace sunshine_streamline::depth_capture {
     // whose Present stays on its queue with FG on pays one copy-out per copy
     // for that age after each FG On.
     bool reader_may_move(std::uint64_t now) {
-      const auto on = frame_generation_on_tick.load(std::memory_order_relaxed);
-      return on && sunshine_freshness::fresh_lt(on, now, sunshine_freshness::source_age_ms);
+      const auto moves = reader_moves.load(std::memory_order_relaxed);
+      const auto open = [&](const std::atomic<std::uint64_t> &tick, const std::atomic<std::uint64_t> &at) {
+        const auto start = tick.load(std::memory_order_relaxed);
+        return start && at.load(std::memory_order_relaxed) == moves &&
+          sunshine_freshness::fresh_lt(start, now, sunshine_freshness::source_age_ms);
+      };
+      return open(frame_generation_on_tick, frame_generation_on_moves) ||
+        open(frame_generation_run_tick, frame_generation_run_moves);
+    }
+    // Requires mutex. The newest acquisition's queue (place cookie).
+    void read_on(std::uint64_t cookie, bool pixels) {
+      if (reader && reader != cookie) {
+        reader_moves.fetch_add(1, std::memory_order_relaxed);
+        if (!pixels) reader_move_unreadable.fetch_add(1, std::memory_order_relaxed);
+      }
+      reader = cookie;
     }
     // Requires mutex. Copy-out on the producer queue (docs/reshade-sbs.md):
     // in the submission hook, right after the game's ExecuteCommandLists and
@@ -2660,10 +2687,21 @@ namespace sunshine_streamline::depth_capture {
     return live_frame_generation_scope(epoch, viewport, enabled_tick) != nullptr;
   }
   void frame_generation_enabled(std::uint64_t enabled_tick) {
+    frame_generation_on_moves.store(reader_moves.load(std::memory_order_relaxed), std::memory_order_relaxed);
     frame_generation_on_tick.store(enabled_tick, std::memory_order_relaxed);
+    if (!enabled_tick) frame_generation_run_tick.store(0, std::memory_order_relaxed);
+  }
+  void frame_generation_activity(std::uint64_t now) {
+    const auto last = frame_generation_activity_tick.exchange(now, std::memory_order_relaxed);
+    const auto on = frame_generation_on_tick.load(std::memory_order_relaxed);
+    if (!last || now < last || now - last >= sunshine_freshness::fg_silent_ms || (on && on >= last)) {
+      frame_generation_run_moves.store(reader_moves.load(std::memory_order_relaxed), std::memory_order_relaxed);
+      frame_generation_run_tick.store(now, std::memory_order_relaxed);
+    }
   }
   void frame_generation_frame(std::uint64_t epoch, std::uint32_t viewport, std::uint64_t enabled_tick) {
     if (!requested.load() || !epoch) return;
+    frame_generation_activity(GetTickCount64());
     std::lock_guard lock(mutex);
     auto *view = live_frame_generation_scope(epoch, viewport, enabled_tick);
     if (!view || !std::exchange(view->awaiting, true)) return;
@@ -3854,6 +3892,8 @@ namespace sunshine_streamline::depth_capture {
     out.copy_out_released = copy_out_counters.released.load(relaxed);
     out.copy_out_unstored = copy_out_counters.unstored.load(relaxed);
     out.copy_out_skipped = copy_out_counters.skipped.load(relaxed);
+    out.reader_moves = reader_moves.load(relaxed);
+    out.reader_move_unreadable = reader_move_unreadable.load(relaxed);
     return out;
   }
   void finish(std::uint64_t ticket, bool successful, capture_failure failure) {
@@ -3971,7 +4011,7 @@ namespace sunshine_streamline::depth_capture {
     }
     if (!chosen.value) {
       owner->choice = describe_choice(chosen, decision, *owner, policy, present, selection_tick, false);
-      owner->chosen = true; reader = owner->cookie;
+      owner->chosen = true; read_on(owner->cookie, false);
       return result(chosen.result, chosen.latest);
     }
     auto *best = chosen.value;
@@ -3982,7 +4022,7 @@ namespace sunshine_streamline::depth_capture {
     describe_packet(*best, native, out);
     out.pixel_ready = out.pixel_ready && chosen.result == status::ready;
     owner->choice = describe_choice(chosen, decision, *owner, policy, present, selection_tick, out.pixel_ready);
-    owner->chosen = true; reader = owner->cookie;
+    owner->chosen = true; read_on(owner->cookie, out.pixel_ready);
     result(chosen.result, best);
     return true; // Source authority and current pixels are separate outcomes.
   }

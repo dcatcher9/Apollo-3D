@@ -335,8 +335,16 @@ namespace sunshine_streamline::depth_capture {
   void frame_generation_frame(std::uint64_t epoch, std::uint32_t viewport, std::uint64_t enabled_tick);
   // FG options turned on at enabled_tick (0: forget it). For the source age
   // after it, copies on the queue that reads depth are copied out too, since
-  // FG's first Present moves Present to DLSS-G's queue after them (U-C1b).
+  // FG's first Present moves Present to DLSS-G's queue after them (U-C1b),
+  // until Present is seen on another queue.
   void frame_generation_enabled(std::uint64_t enabled_tick);
+  // FG is producing frames now: an FG scope's frame began
+  // (frame_generation_frame calls it) or DLSS-G evaluated through NGX. The
+  // first such call after FG options turned on, or after fg_silent_ms
+  // without any, opens the same window for the source age, so a first FG
+  // Present long after the options call (FG turned on in a menu) or with
+  // no options call seen (DLSS-G seen only through NGX) is covered too.
+  void frame_generation_activity(std::uint64_t now);
   // A frame of that FG scope ended without a copy (its FG tag refused, its
   // copy deferred to its Present cancelled by an untag, refused or lapsed,
   // or DLSS-G's own evaluation of it refused). sequence is the frame's
@@ -673,6 +681,10 @@ namespace sunshine_streamline::depth_capture {
     // failed within the source age (skipped).
     std::uint64_t copied_out{}, copy_out_busy{}, copy_out_failed{};
     std::uint64_t copy_out_predicted{}, copy_out_taken{}, copy_out_unstored{}, copy_out_released{}, copy_out_skipped{};
+    // Changes of the queue that reads depth (Present seen on another queue,
+    // as at FG On and Off), and those whose first acquisition there had no
+    // ready pixels: a flat Present the copy-outs did not prevent.
+    std::uint64_t reader_moves{}, reader_move_unreadable{};
     std::uint64_t unobserved() const { return unrecorded + unreported + invalidated + missed_reset + uncovered; }
   };
   proven_state_counts proven_counts();

@@ -3963,10 +3963,18 @@ copied out (until 10-27 only the copy after the first submission elsewhere was, 
 flat 2D for one or two Presents), and a source new to the game's other queue. FG's first Present
 moves Present after that frame's render-queue copies were recorded and submitted while the render
 queue still read depth, so for the source age after FG options turn on
-(`frame_generation_enabled`, from the probe's options hook) a copy on a list predicted to run on
-the reader's queue takes that storage too and the reader's own queue copies out (until 10-27 those
-kept the Reset rule, so FG's first Present was flat; a game whose Present stays on its queue with FG
-on pays one copy-out per copy for that age after each FG On). A copy recorded for
+(`frame_generation_enabled`, from the probe's options hook), and for the source age after the
+first FG activity of a run (`frame_generation_activity`: an FG scope's frame begins, or DLSS-G
+evaluates through NGX; the first after FG options turned on or after `fg_silent_ms` without any),
+a copy on a list predicted to run on the reader's queue takes that storage too and the reader's own
+queue copies out (until 10-27 those kept the Reset rule, so FG's first Present was flat; until the
+10-27 review only the options call opened the window, so a game that turned FG on in a menu, or
+whose DLSS-G was seen only through NGX, still had a flat first FG Present). Each window closes once
+Present is seen on another queue since it opened; a game whose Present stays on its queue with FG on
+pays one copy-out per copy for that age after each FG On. Each change of the queue that reads depth
+counts on the depth status line, and so does one whose first acquisition there had no ready pixels
+(`copy_out={... reader_moves= move_unreadable=}`): the flat Present these copy-outs exist to
+prevent, in every FG path. A copy recorded for
 the reader's queue and submitted after Present moved takes an idle slot's cached storage of its
 shape, format, view and device at its submission (`COMMON` rest on a compute queue), never an
 allocation on the game's submission thread; with none it keeps the Reset rule (`unstored`, at most
@@ -3978,7 +3986,8 @@ copy itself was refused). For the source age after such a failure, a copy of tha
 format does not try the allocation again on the game's recording thread (`skipped`; until the
 10-27 review every copy of every frame retried it under VRAM pressure); it can still take an idle
 slot's storage at its submission. The counts are on the depth status line as
-`copy_out={made= ring_busy= failed= predicted= taken= unstored= released= skipped=}`. The
+`copy_out={made= ring_busy= failed= predicted= taken= unstored= released= skipped= reader_moves=
+move_unreadable=}`. The
 cost is one extra copy of the snapshot on the producer queue per copied-out snapshot and one more
 snapshot-sized allocation per slot for such a source; U-C1b adds one snapshot-sized allocation per
 list that first carries a copy while Present runs on another queue (released by the sweep when

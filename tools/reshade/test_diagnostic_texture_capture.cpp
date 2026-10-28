@@ -1104,6 +1104,57 @@ namespace {
       gpu.reset();
       capture::frame_generation_enabled(0);
     }
+    // FG turned on away from gameplay (a menu, a loading screen, saved
+    // settings at boot): its first FG frame comes more than the source age
+    // after the options call. The window opens again at that frame's first
+    // FG activity (an FG frame's begin, or DLSS-G's NGX evaluation, which has
+    // no options call at all), so FG's first Present on DLSS-G's queue reads
+    // that frame's render-queue copy (until the 10-27 review the window had
+    // lapsed, the copy kept the Reset rule and that Present was flat). The
+    // move is counted, and not as unreadable.
+    {
+      present(gpu.queue.Get(), 12120);
+      capture::frame_generation_enabled(GetTickCount64());
+      Sleep(DWORD(sunshine_freshness::source_age_ms + 20));
+      const auto moves = counts().reader_moves, unreadable = counts().reader_move_unreadable;
+      capture::frame_generation_activity(GetTickCount64());
+      const auto first = nominate(8);
+      require(capture::testing::holds_copy_out_storage(first),
+        "reader moves: FG's first frame, later than the source age after FG turned on, took no copy-out storage");
+      gpu.submit(); gpu.wait(); // Executed on the reader's queue, completed, never Reset.
+      require(counts().copied_out == made + 4,
+        "reader moves: FG's first frame's render-queue copy, long after FG turned on, was not copied out");
+      require(capture::acquire(native(gpu.foreign_queue.Get()), 12121, packet, &acquired) && packet.pixel_ready &&
+          packet.capture_id == first,
+        "reader moves: FG's first Present on another queue, long after FG turned on, could not read its frame's copy");
+      packet = {};
+      require(counts().reader_moves == moves + 1 && counts().reader_move_unreadable == unreadable,
+        "reader moves: Present's move to another queue was not counted, or counted as unreadable");
+      gpu.reset();
+      capture::frame_generation_enabled(0);
+      // With no window, a reader's own copy keeps the Reset rule: the first
+      // acquisition after Present moved has no ready pixels, and says so
+      // (a new source of the namespace, with no older copy readable there).
+      present(gpu.queue.Get(), 12122);
+      auto fresh_source = spare.input;
+      fresh_source.provider = sunshine_scene_depth::provider_kind::ngx;
+      fresh_source.epoch = 78; fresh_source.source_id = 99; fresh_source.viewport = 0; fresh_source.sequence = 10;
+      fresh_source.valid_until = sunshine_scene_depth::lifetime::until_evaluation; fresh_source.force_snapshot = false;
+      fresh_source.source_present_generation = capture::source_present_generation(fresh_source.source);
+      fresh_source.proof = sunshine_scene_depth::state_proof::sdk_contract; fresh_source.tick = GetTickCount64();
+      const auto own = capture::nominate_evaluation(native(gpu.list.Get()), fresh_source, UINT64_MAX, &diagnostic);
+      require(own && diagnostic.result == capture::status::recorded, "reader moves: the new source's copy was refused");
+      capture::finish(own, true);
+      require(!capture::testing::holds_copy_out_storage(own), "reader moves: a copy outside every FG window took copy-out storage");
+      gpu.submit(); gpu.wait();
+      const auto unreadable_before = counts().reader_move_unreadable;
+      capture::acquire(native(gpu.foreign_queue.Get()), 12123, packet, &acquired);
+      require(!packet.pixel_ready && counts().reader_move_unreadable == unreadable_before + 1,
+        "reader moves: a move whose first acquisition had no ready pixels was not counted as unreadable");
+      packet = {};
+      gpu.reset();
+      capture::retire_source(fresh_source.provider, fresh_source.epoch, fresh_source.source_id);
+    }
     // The independent queue reads again, as the later cases expect.
     present(gpu.foreign_queue.Get(), 12113);
     capture::retire_source(input.provider, input.epoch, input.source_id);
