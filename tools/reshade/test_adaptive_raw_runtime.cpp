@@ -176,7 +176,7 @@ namespace {
       trajectory.open(runtime_directory / "adaptive-trajectory.csv");
       trajectory << std::setprecision(17) << "phase,wall_ms,render,source,lifetime,frame,ready,H,t0,blend\n";
       create_pipeline();
-      scene = target(width, height, 1, pattern(false), false, true);
+      scene = target(width, height, 1, pattern(false));
       scene->clear_depth = normal ? 1.f : 0.f;
       decoy = target(width / 2, height / 2, 12, 0);
       render_tracked_depth = [&] { if (decoy) draw(*decoy); if (scene) draw(*scene); };
@@ -312,7 +312,7 @@ namespace {
       const auto original_lifetime = latest.depth.source_id;
       const float original_gain = gain(), original_zero = zero();
       auto original = std::move(scene);
-      scene = target(width, height, 1, pattern(true), false, true); scene->clear_depth = normal ? 1.f : 0.f;
+      scene = target(width, height, 1, pattern(true)); scene->clear_depth = normal ? 1.f : 0.f;
       qualify_source("replacement-B", true);
       auto replacement = std::move(scene);
       scene = std::move(original); scene->pattern = pattern(false);
@@ -336,7 +336,7 @@ namespace {
       // Actual destruction must retire that history even if the native address
       // is reused by D3D12. The new lifetime still needs one fresh window.
       scene.reset();
-      scene = target(width, height, 1, pattern(false), false, true); scene->clear_depth = normal ? 1.f : 0.f;
+      scene = target(width, height, 1, pattern(false)); scene->clear_depth = normal ? 1.f : 0.f;
       qualify_source("destroyed-A-replacement", false, original_lifetime);
       require(latest.depth.source_id != original_lifetime, "Destroyed A replacement reused the old lifetime identity");
       verify_depth("destroyed-A-replacement-consumed", false);

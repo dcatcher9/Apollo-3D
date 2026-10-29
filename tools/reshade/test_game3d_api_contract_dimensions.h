@@ -606,14 +606,11 @@ namespace game3d_contract {
     other_subresource  // A DSV of another mip.
   };
 
-  // Generic path: the depth-stencil boundary where a copy is attempted.
+  // Generic path: what the game's list does with the depth-stencil view
+  // before the end-of-frame copy.
   enum class generic_boundary {
     clear_before_draws,
-    clear_after_draws,
-    render_pass_clear,
     unbind_writable_dsv,
-    unbind_read_only_dsv,
-    transition_away,
     end_of_frame
   };
 
@@ -624,7 +621,6 @@ namespace game3d_contract {
     generic_boundary boundary {generic_boundary::clear_before_draws};
     bool depth_written {};  // A draw with depth writes enabled since the last transition, on this recording.
     resource_state depth {D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL};
-    std::uint32_t transition_before {};  // transition_away: the barrier's StateBefore.
     clear_target cleared {clear_target::depth_of_subresource_zero};  // The clear boundaries only.
     // The state the source's creation, or the last barrier (or a depth clear
     // after it) of a list executed on the copy's queue before the copy's
@@ -671,9 +667,7 @@ namespace game3d_contract {
   // path's depth-stencil boundaries and the UI layer's clear boundary.
   enum class device_point {
     api,  // A Streamline, NGX or UI adapter's copy at its call; the state rules decide.
-    clear,  // The Generic path before ClearDepthStencilView of subresource 0's depth (D11).
     end_of_frame,  // The Generic path's end-of-frame copy, on the runtime's own list (D10).
-    unbind_read_only_dsv,  // The Generic path where a read-only DSV is unbound (D11c).
     ui_clear  // The UI layer before a full-frame ClearRenderTargetView (D12).
   };
 
@@ -829,11 +823,7 @@ namespace game3d_contract {
     if (!legal_flags(value.depth.flags) || !depth_stencil(value.depth.flags)) {
       return false;
     }
-    if (value.boundary == generic_boundary::transition_away && !state_allowed(value.transition_before, value.depth.flags)) {
-      return false;
-    }
-    const bool clears = value.boundary == generic_boundary::clear_before_draws || value.boundary == generic_boundary::clear_after_draws ||
-                        value.boundary == generic_boundary::render_pass_clear;
+    const bool clears = value.boundary == generic_boundary::clear_before_draws;
     if (value.cleared != clear_target::depth_of_subresource_zero && !clears) {
       return false;
     }
@@ -844,7 +834,7 @@ namespace game3d_contract {
     // (sub)resource cannot be read or written by the GPU", so no depth clear
     // and no other transition may meet it.
     const bool pending = value.depth.seen == evidence::split_open || value.depth.seen == evidence::enhanced_split_open;
-    if (pending && ((clears && value.cleared == clear_target::depth_of_subresource_zero) || value.boundary == generic_boundary::transition_away)) {
+    if (pending && clears && value.cleared == clear_target::depth_of_subresource_zero) {
       return false;
     }
     return legal_evidence(value.depth, list_type::direct);
@@ -877,15 +867,8 @@ namespace game3d_contract {
         return false;
       }
       switch (value.point) {
-        case device_point::clear:
-          // MS Learn D3D12_RESOURCE_STATES, DEPTH_WRITE: the state for
-          // ClearDepthStencilView of a subresource it clears.
-          return state.role == consumer::depth && depth_stencil(flags) && value.prior == D3D12_RESOURCE_STATE_DEPTH_WRITE;
         case device_point::end_of_frame:
           return state.role == consumer::depth && depth_stencil(flags);
-        case device_point::unbind_read_only_dsv:
-          // MS Learn D3D12_RESOURCE_STATES, DEPTH_READ: a read-only DSV's state.
-          return state.role == consumer::depth && depth_stencil(flags) && (value.prior & D3D12_RESOURCE_STATE_DEPTH_READ);
         default:
           // ClearRenderTargetView needs RENDER_TARGET (MS Learn
           // D3D12_RESOURCE_STATES), the RENDER_TARGET layout, or a

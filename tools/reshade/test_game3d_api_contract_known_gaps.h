@@ -198,7 +198,7 @@ namespace game3d_contract::known_gaps {
     {"none", &rules::N1, kind::pending, &ngx::no_cell, "No NGX runtime gap remains: Stage 3 batch B closed N1b. This row matches no cell."},
   };
 
-  // Generic depth-stencil boundaries judged at Present by the runtime layer
+  // Generic end-of-frame copies judged at Present by the runtime layer
   // (family generic). The add-on meets every one; C++ has no empty array, so
   // one pending row that matches no cell stands in for the table.
   namespace generic {
@@ -208,7 +208,7 @@ namespace game3d_contract::known_gaps {
   }  // namespace generic
 
   inline constexpr row<generic_case> generic_runtime_rows[] {
-    {"none", &rules::D11, kind::pending, &generic::no_cell, "No Generic runtime gap remains: Stage 3 fix 1 closed D10 and the render-pass clear (D11). This row matches no cell."},
+    {"none", &rules::D10, kind::pending, &generic::no_cell, "No Generic runtime gap remains: Stage 3 fix 1 closed D10 (the end-of-frame copy). This row matches no cell."},
   };
 
   // UI inputs judged by the runtime layer (family ui): whether UI detection
@@ -236,7 +236,7 @@ namespace game3d_contract::known_gaps {
   }  // namespace device
 
   inline constexpr row<device_case> device_rows[] {
-    {"none", &rules::S22, kind::pending, &device::no_cell, "No device gap remains: Stage 3 batch B closed D11c (a read-only DSV's unbind names no state) and S22 with N7 (copies on a COMPUTE list from a state or layout that list may name). This row matches no cell."},
+    {"none", &rules::S22, kind::pending, &device::no_cell, "No device gap remains: Stage 3 batch B closed S22 with N7 (copies on a COMPUTE list from a state or layout that list may name). This row matches no cell."},
   };
 
   // One family's verdicts against its rows.

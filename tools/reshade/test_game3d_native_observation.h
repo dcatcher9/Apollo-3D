@@ -19,12 +19,11 @@ namespace {
   // test add-on, then removes the effect (native_game3d_observer::start). It
   // selects that boot effect, its compile gate and the test add-on itself, as
   // reshade_game3d_native_provider_runtime_test does, so no caller environment
-  // is required; preserve2 also selects DepthCopyBeforeClears=2.
-  inline void select_native_boot(bool preserve2 = false) {
+  // is required.
+  inline void select_native_boot() {
     require(_putenv_s("SUNSHINE_DEPTH3D_EFFECT", "SunshineGame3D") == 0 &&
       _putenv_s("SUNSHINE_GAME3D_AUTOMATIC", "1") == 0 &&
-      _putenv_s("SUNSHINE_GAME3D_AUTOMATIC_ACTIONS_TEST", "1") == 0 &&
-      (!preserve2 || _putenv_s("SUNSHINE_DEPTH_BIND_SWITCH_TEST", "1") == 0),
+      _putenv_s("SUNSHINE_GAME3D_AUTOMATIC_ACTIONS_TEST", "1") == 0,
       "Could not select the native fixture's boot effect and test add-on");
   }
 

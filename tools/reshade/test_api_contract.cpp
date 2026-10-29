@@ -359,19 +359,10 @@ int main() {
   {
     const auto value = generic::preserved(0x10);
     require(value.native_state == 0x10 && value.proof == state_proof::declared && value.valid_until == lifetime::until_present,
-      "A Generic boundary other than a clear declares its caller's state, held until Present");
-    require(generic::clear.native_state == 0x10 && generic::clear.proof == state_proof::clear_contract &&
-              generic::clear.valid_until == lifetime::until_present,
-      "A depth clear's DEPTH_WRITE is the D3D12 clear contract, held until Present");
+      "A preserved Generic copy declares its caller's state, held until Present");
     require(generic::end_of_frame.native_state == UINT32_MAX && generic::end_of_frame.proof == state_proof::last_proven &&
               generic::end_of_frame.valid_until == lifetime::until_present,
       "The end of the frame names no state: the source's last proven state supplies it (D10)");
-    const auto writable = generic::bound_view(false), read_only = generic::bound_view(true);
-    require(writable.native_state == 0x10 && writable.proof == state_proof::declared && writable.valid_until == lifetime::until_present,
-      "A writable bound view's boundary declares DEPTH_WRITE, held until Present");
-    require(read_only.native_state == UINT32_MAX && read_only.proof == state_proof::observed_nonzero &&
-              read_only.valid_until == lifetime::until_present,
-      "A read-only bound view's boundary names no state: only its recording's observation proves it (D11c)");
   }
   {
     sunshine_scene_depth::frame input;

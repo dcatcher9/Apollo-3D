@@ -16,6 +16,7 @@ namespace {
       bool clear_after = false;
       float clear_depth = 0.f;
       bool segmented_viewport = false;
+      bool partial_viewport = false; // Draws only the top-left quarter: the frame's largest viewport.
       std::function<void()> before_final_clear;
     };
     std::unique_ptr<target_t> scene, decoy, shadow;
@@ -180,13 +181,16 @@ float ps(float4 position : SV_Position) : SV_Depth {
         for (unsigned i = 0; i < draws; ++i) commands->DrawInstanced(3, 1, 0, 0);
       };
       if (target.segmented_viewport) {
-        // Same allocation/layout every frame, but capture tracking observes the
-        // later small scene pass. Starting a probe must not change its lifetime
-        // identity and cause perpetual challenger cancellation.
+        // Same allocation/layout every frame: a whole-allocation pass, a clear,
+        // then the small scene pass. The end-of-frame copy's rectangle is the
+        // frame's largest viewport, here the whole allocation. Starting a probe
+        // must not change its lifetime identity and cause perpetual challenger
+        // cancellation.
         draw_region(target.width, target.height, 0, 1);
         commands->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 0.f, 0, 0, nullptr);
         draw_region(target.width / 2, target.height / 2, target.pattern, 4);
-      } else draw_region(target.width, target.height, target.pattern, target.draws);
+      } else if (target.partial_viewport) draw_region(target.width / 2, target.height / 2, target.pattern, 4);
+      else draw_region(target.width, target.height, target.pattern, target.draws);
       if (target.before_final_clear) target.before_final_clear();
       if (target.clear_after) commands->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, target.clear_depth, 0, 0, nullptr);
       if (unbind) commands->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
@@ -280,7 +284,7 @@ float ps(float4 position : SV_Position) : SV_Depth {
     void check_multiple_viewports() {
       decoy->draws = 200;
       decoy->pattern = 0;
-      scene = target(width, height, 4, 1, false, true);
+      scene = target(width, height, 4, 1);
       scene->segmented_viewport = true;
       wait_for_scene("multi-viewport capture keeps its identity and actual copy rectangle", width, height, 1, .5f);
     }
@@ -362,7 +366,7 @@ float ps(float4 position : SV_Position) : SV_Depth {
       for (unsigned reload = 0; reload < 2; ++reload) {
         decoy.reset();
         wait_for_scene("reload falls back to live lower-resolution depth", scene->width, scene->height);
-        decoy = target(width, height, 1, 9, reload != 0, reload != 0);
+        decoy = target(width, height, 1, 9, reload != 0);
         wait_for_scene("recreated native depth survives interleaved presents and promotes", width, height, 9);
         const auto stable_until = std::chrono::steady_clock::now() + std::chrono::seconds(2);
         while (std::chrono::steady_clock::now() < stable_until) {
@@ -374,6 +378,35 @@ float ps(float4 position : SV_Position) : SV_Depth {
         std::printf("PASS native depth recovery after reload %u, with auxiliary depth-active presents\n", reload + 1);
       }
       render_tracked_depth = {};
+    }
+
+    bool depth_ready() {
+      bool value = false;
+      observed.runtime->get_uniform_value_bool(uniform("Sunshine_DepthReady"), &value, 1);
+      return value;
+    }
+
+    // Negative control: a lone scene cleared after its draws leaves only flat
+    // cleared depth for the end-of-frame copy, Generic depth's only copy
+    // point. DEPTH must stay unready, so the effect shows mono, on every
+    // frame. The same allocation drawn without its trailing clear then becomes
+    // ready, so the control is not vacuous.
+    void check_cleared_scene_unready() {
+      scene.reset();
+      shadow.reset();
+      decoy.reset();
+      set_int("Depth_Map", 1);
+      scene = target(width, height, 1, 1, false, true);
+      const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+      unsigned frames = 0;
+      while (std::chrono::steady_clock::now() < until) {
+        step();
+        ++frames;
+        require(!depth_ready(), "Flat depth cleared after the scene was shown as ready scene depth");
+      }
+      std::printf("PASS lone scene cleared after drawing keeps DEPTH unready (mono) for %u frames\n", frames);
+      scene->clear_after = false;
+      wait_for_scene("the same scene without its trailing clear becomes ready", width, height);
     }
 
     void run_selection(const std::string &only = {}) {
@@ -425,8 +458,8 @@ float ps(float4 position : SV_Position) : SV_Depth {
       wait_for_scene("useful lower-resolution source recovers after native source becomes flat", scene->width, scene->height);
       decoy->draws = 200;
 
-      scene = target(width / 3, height / 3, 1, 1, true, true);
-      wait_for_scene("one-third resolution D32S8, preserved before clear", scene->width, scene->height);
+      scene = target(width / 3, height / 3, 1, 1, true);
+      wait_for_scene("one-third resolution D32S8", scene->width, scene->height);
       scene = target(width * 2 / 3, height * 2 / 3, 1, 1);
       wait_for_scene("two-thirds resolution after resource recreation", scene->width, scene->height);
       scene = target(width, height, 1, 1);
@@ -443,7 +476,8 @@ float ps(float4 position : SV_Position) : SV_Depth {
       check_scene_completeness();
       check_multiple_viewports();
       check_histogram_breadth();
-      std::puts("PASS real D3D12 automatic selection: depth histogram, scene completeness, qualified-source comparison, stable promotion, scaled fallback, actual DSV draws, no semantic injection, D32S8 clear preservation, recreation and content recovery");
+      check_cleared_scene_unready();
+      std::puts("PASS real D3D12 automatic selection: depth histogram, scene completeness, qualified-source comparison, stable promotion, scaled fallback, actual DSV draws, no semantic injection, recreation, content recovery and a cleared scene kept mono");
       render_tracked_depth = {};
     }
   };

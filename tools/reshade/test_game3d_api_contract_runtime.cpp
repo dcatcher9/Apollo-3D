@@ -653,13 +653,12 @@ namespace {
   }  // namespace ngx_runtime
 
   // The Generic family: one depth-stencil view of the swapchain's size on
-  // the game's list, its boundary, then the end of frame. Clears clear the
-  // whole view; the view stays bound to the end of frame unless the boundary
-  // unbinds it, so no boundary but the case's comes first. The view is
+  // the game's list, its boundary, then the end of frame, where the add-on
+  // copies it. A clear clears the whole view before the draws; the view stays
+  // bound to the end of frame unless the boundary unbinds it. The view is
   // created in DEPTH_WRITE and never transitioned, so its creation proves
-  // that state at every boundary (D10b). The other states an executed list
-  // proves at the end of frame, and a read-only DSV's unbind, are the device
-  // layer's.
+  // that state at the end of the frame (D10b). The other states an executed
+  // list proves at the end of frame are the device layer's.
   namespace generic_runtime {
     enum dimension : unsigned {
       boundary,
@@ -667,7 +666,7 @@ namespace {
       format
     };
 
-    constexpr matrix::generic_boundary boundaries[] {matrix::generic_boundary::clear_after_draws, matrix::generic_boundary::clear_before_draws, matrix::generic_boundary::render_pass_clear, matrix::generic_boundary::unbind_writable_dsv, matrix::generic_boundary::end_of_frame};
+    constexpr matrix::generic_boundary boundaries[] {matrix::generic_boundary::clear_before_draws, matrix::generic_boundary::unbind_writable_dsv, matrix::generic_boundary::end_of_frame};
     constexpr matrix::clear_target clears[] {matrix::clear_target::depth_of_subresource_zero, matrix::clear_target::stencil_only};
     constexpr matrix::depth_format formats[] {matrix::depth_format::d32, matrix::depth_format::d32s8};
 
@@ -681,10 +680,9 @@ namespace {
       return out;
     }
 
-    // A stencil clear needs a stencil plane, and the fixture's render pass
-    // clears depth only.
+    // A stencil clear needs a stencil plane.
     bool legal(const generator::row &value) {
-      if (value[cleared] == 1 && ((value[format] == 0) || value[boundary] == 2)) {
+      if (value[cleared] == 1 && value[format] == 0) {
         return false;
       }
       return !generator::complete(value) || matrix::legal(to_case(value));
@@ -694,7 +692,7 @@ namespace {
       return {
         "generic",
         {
-          {"boundary", {"clear_after_draws", "clear_before_draws", "render_pass_clear", "unbind_writable_dsv", "end_of_frame"}},
+          {"boundary", {"clear_before_draws", "unbind_writable_dsv", "end_of_frame"}},
           {"cleared", {"depth", "stencil_only"}},
           {"format", {"d32", "d32s8"}},
         },
@@ -704,7 +702,7 @@ namespace {
       };
     }
 
-    constexpr const char *control = "boundary=clear_after_draws";
+    constexpr const char *control = "boundary=end_of_frame";
 
     // Every legal cell.
     std::vector<generator::row> cells(const generator::family &owner, census &out) {
@@ -1644,8 +1642,8 @@ namespace {
       };
     }
 
-    // One frame of a Generic case: the view bound, drawn and cleared around
-    // the case's boundary.
+    // One frame of a Generic case: the view bound, cleared and drawn as the
+    // case's boundary says.
     void generic_frame() {
       supply_case();
       auto &view = *depth_stencil;
@@ -1675,27 +1673,6 @@ namespace {
           commands->ClearDepthStencilView(dsv, clear, 0.f, 0, 0, nullptr);
           draws();
           break;
-        case matrix::generic_boundary::clear_after_draws:
-          draws();
-          commands->ClearDepthStencilView(dsv, clear, 0.f, 0, 0, nullptr);
-          commands->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
-          break;
-        case matrix::generic_boundary::render_pass_clear:
-          {
-            draws();
-            com_ptr<ID3D12GraphicsCommandList4> list4;
-            checked(commands->QueryInterface(IID_PPV_ARGS(list4.put())), "The game's list lacks render passes");
-            D3D12_RENDER_PASS_DEPTH_STENCIL_DESC pass {};
-            pass.cpuDescriptor = dsv;
-            pass.DepthBeginningAccess.Type = D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_CLEAR;
-            pass.DepthBeginningAccess.Clear.ClearValue.Format = view.format;
-            pass.DepthEndingAccess.Type = D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_PRESERVE;
-            pass.StencilBeginningAccess.Type = D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_NO_ACCESS;
-            pass.StencilEndingAccess.Type = D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_NO_ACCESS;
-            list4->BeginRenderPass(0, nullptr, &pass, D3D12_RENDER_PASS_FLAG_NONE);
-            list4->EndRenderPass();
-            break;
-          }
         case matrix::generic_boundary::unbind_writable_dsv:
           draws();
           commands->OMSetRenderTargets(0, nullptr, FALSE, nullptr);

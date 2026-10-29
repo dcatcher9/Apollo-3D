@@ -39,7 +39,6 @@ static auto snapshot_test_resources(unsigned count)
 		auto &frame = info.last_frame_stats;
 		frame.total = { i * 300 + 6, i + 2, i % 4, i % 3,
 			{ 0, 0, static_cast<float>(info.desc.texture.width), static_cast<float>(info.desc.texture.height), 0, 1 } };
-		frame.current = frame.best_copy_stats = frame.total;
 		frame.copied_viewport = { 16, 8, frame.total.last_viewport.width - 32, frame.total.last_viewport.height - 16, .1f, .9f };
 		frame.copied_during_frame = i % 2;
 		frame.copy_provenance_ambiguous = i % 3 == 0;
@@ -192,19 +191,17 @@ static void check_depth_snapshot_contract()
 	state_tracking cached(false), merged(false);
 	auto &cached_stats = cached.stats_per_used_depth_stencil[tracked];
 	cached_stats.total = {1200, 12, 3, 2, {0, 0, 1920, 1080, 0, 1}};
-	cached_stats.current = cached_stats.best_copy_stats = cached_stats.total;
-	cached_stats.preservation_boundary = cached_stats.copied_during_frame = cached_stats.clear_zero = true;
+	cached_stats.copied_during_frame = cached_stats.clear_zero = true;
 	cached_stats.copied_viewport = cached_stats.total.last_viewport;
 	cached_stats.capture_ticket.id = 77;
 	cached_stats.capture_ticket.texture = 88;
 	merged.merge(cached); // Existing detailed accumulation must be cleared too.
 	merged.merge(cached, {false});
 	const auto &paused = merged.stats_per_used_depth_stencil.at(tracked);
-	require_snapshot(paused.total.has_work() && paused.current.has_work() && paused.total.work_count() == 0 &&
-		paused.total.vertices == 0 && paused.total.drawcalls_indirect == 0 && paused.current.work_count() == 0 &&
-		paused.best_copy_stats.vertices == 0,
+	require_snapshot(paused.total.has_work() && paused.total.work_count() == 0 &&
+		paused.total.vertices == 0 && paused.total.drawcalls_indirect == 0,
 		"Cached command lists repopulated paused candidate counters");
-	require_snapshot(paused.preservation_boundary && paused.copied_during_frame && paused.clear_zero &&
+	require_snapshot(paused.copied_during_frame && paused.clear_zero &&
 		paused.capture_ticket.id == 77 && paused.capture_ticket.texture == 88 &&
 		same_snapshot_viewport(paused.total.last_viewport, cached_stats.total.last_viewport) &&
 		same_snapshot_viewport(paused.copied_viewport, cached_stats.copied_viewport),
@@ -484,20 +481,19 @@ extern "C" __declspec(dllexport) BOOL SunshineDepthTestActivityAccounting(effect
 		resource depth;
 		uint64_t lifetime;
 		viewport view;
-		bool first;
 		~restore_state() {
 			const std::unique_lock<std::shared_mutex> lock(s_mutex);
 			state.stats_per_used_depth_stencil = std::move(stats);
 			state.current_depth_stencil = depth; state.current_depth_lifetime = lifetime;
-			state.current_viewport = view; state.first_draw_since_bind = first;
+			state.current_viewport = view;
 		}
 	};
 	std::unique_lock<std::shared_mutex> lock(s_mutex);
 	restore_state saved {state, std::move(state.stats_per_used_depth_stencil), state.current_depth_stencil,
-		state.current_depth_lifetime, state.current_viewport, state.first_draw_since_bind};
+		state.current_depth_lifetime, state.current_viewport};
 	state.stats_per_used_depth_stencil.clear();
 	state.current_depth_stencil = {native_resource}; state.current_depth_lifetime = 0;
-	state.current_viewport = {0, 0, 1280, 720, 0, 1}; state.first_draw_since_bind = true;
+	state.current_viewport = {0, 0, 1280, 720, 0, 1};
 	lock.unlock();
 	const resource target {native_resource};
 	bool ok = true;
@@ -511,16 +507,14 @@ extern "C" __declspec(dllexport) BOOL SunshineDepthTestActivityAccounting(effect
 		ok &= !on_draw_indirect(cmd, type, {}, 0, 0, 0);
 	ok &= !on_dispatch_mesh(cmd, 0, 1, 1) && !on_dispatch_mesh(cmd, 1, 0, 1) && !on_dispatch_mesh(cmd, 1, 1, 0);
 	ok &= !on_draw(cmd, 0, 1, 0, 0) && !on_draw_indexed(cmd, 3, 0, 0, 0, 0);
-	ok &= state.stats_per_used_depth_stencil.empty() && state.first_draw_since_bind;
+	ok &= state.stats_per_used_depth_stencil.empty();
 	if (!checkpoint("Depth activity test: no-op accounting failed")) return FALSE;
 	ok &= !on_dispatch_mesh(cmd, 2, 3, 4);
 	auto &mesh = state.stats_per_used_depth_stencil[target];
-	ok &= mesh.total.has_work() && mesh.total.scene_writes == 1 && mesh.current.scene_writes == 1 &&
-		mesh.total.drawcalls == 0 && mesh.total.vertices == 0 && mesh.current.vertices == 0 &&
-		mesh.current.last_viewport.width == 1280 && !state.first_draw_since_bind;
+	ok &= mesh.total.has_work() && mesh.total.scene_writes == 1 &&
+		mesh.total.drawcalls == 0 && mesh.total.vertices == 0 && mesh.total.last_viewport.width == 1280;
 	state_tracking merged(false); merged.merge(state);
-	ok &= merged.stats_per_used_depth_stencil[target].total.scene_writes == 1 &&
-		merged.stats_per_used_depth_stencil[target].current.scene_writes == 1;
+	ok &= merged.stats_per_used_depth_stencil[target].total.scene_writes == 1;
 	merged.reset(); ok &= merged.stats_per_used_depth_stencil.empty();
 	if (!checkpoint("Depth activity test: mesh/merge/reset accounting failed")) return FALSE;
 	state.stats_per_used_depth_stencil.clear();
@@ -546,7 +540,7 @@ extern "C" __declspec(dllexport) BOOL SunshineDepthTestActivityAccounting(effect
 	ok &= !on_copy_buffer_to_texture(cmd, {}, 0, 0, 0, target, 0, nullptr);
 	ok &= !on_resolve_texture_region(cmd, {}, 0, nullptr, target, 0, 0, 0, 0, format::unknown);
 	const auto &copied = state.stats_per_used_depth_stencil[target];
-	ok &= copied.total.scene_writes == 4 && copied.current.scene_writes == 4 && copied.total.has_work() &&
+	ok &= copied.total.scene_writes == 4 && copied.total.has_work() &&
 		copied.total.drawcalls == 0 && copied.total.vertices == 0 && copied.total.last_viewport.width == 0;
 	if (!checkpoint("Depth activity test: base-depth copy accounting failed")) return FALSE;
 	if (!s_frame_activity_trace)
@@ -562,56 +556,15 @@ extern "C" __declspec(dllexport) BOOL SunshineDepthTestActivityAccounting(effect
 		ok &= !on_draw(cmd, 3, 1, 0, 0) && !on_draw_indirect(cmd, indirect_command::draw, {}, 0, 2, 0) &&
 			!on_dispatch_mesh(cmd, 1, 1, 1) && !on_copy_resource(cmd, {}, target);
 		auto &passive = state.stats_per_used_depth_stencil[target];
-		ok &= passive.total.has_work() && passive.current.has_work() && passive.total.work_count() == 0 &&
+		ok &= passive.total.has_work() && passive.total.work_count() == 0 &&
 			passive.total.vertices == 0 && passive.total.drawcalls_indirect == 0 && passive.total.last_viewport.width == 1280;
-		// Capture is disabled here, so this exercises the real boundary classifier
-		// without recording a GPU copy or changing any existing backup assignment.
-		on_clear_depth_impl(cmd, state, target, clear_op::unbind_depth_stencil_view);
-		ok &= passive.preservation_boundary;
 		device_data->generic_capture_users.store(1);
 		ok &= !on_draw(cmd, 3, 1, 0, 0) && passive.total.drawcalls == 1 && passive.total.vertices == 3;
-		if (!checkpoint("Depth activity test: hidden API counters/Generic capture resume/preservation recovery failed")) return FALSE;
+		if (!checkpoint("Depth activity test: hidden API counters/Generic capture resume failed")) return FALSE;
 	}
 	state.stats_per_used_depth_stencil.clear(); state.current_depth_stencil = {};
 	ok &= !on_dispatch_mesh(cmd, 1, 1, 1) && state.stats_per_used_depth_stencil.empty();
 	return ok ? TRUE : FALSE;
-}
-
-// D11c: whether the D3D12 depth-stencil view at a CPU descriptor handle is
-// read-only as the add-on recorded it from ReShade's init_resource_view, and
-// as a binding of it keeps that (on_bind_depth_stencil_impl, on scratch
-// command state with nothing bound before, so no boundary is reached and no
-// command is recorded).
-extern "C" __declspec(dllexport) BOOL SunshineDepthTestReadOnlyView(effect_runtime *runtime, uint64_t view, BOOL *recorded, BOOL *bound)
-{
-	if (!s_registered || runtime == nullptr || view == 0 || recorded == nullptr || bound == nullptr) return FALSE;
-	auto *const device = runtime->get_device();
-	const auto *const device_data = device->get_private_data<generic_depth_device_data>();
-	auto *const queue = runtime->get_command_queue();
-	if (device->get_api() != device_api::d3d12 || device_data == nullptr || queue == nullptr) return FALSE;
-	*recorded = device_data->read_only_views.read_only(view) ? TRUE : FALSE;
-	auto *const cmd = queue->get_immediate_command_list();
-	const bool temporary_tracking = cmd->get_private_data<state_tracking>() == nullptr;
-	if (temporary_tracking) cmd->create_private_data<state_tracking>(false);
-	struct release_tracking {
-		command_list *cmd;
-		bool owned;
-		~release_tracking() { if (owned) cmd->destroy_private_data<state_tracking>(); }
-	} tracking {cmd, temporary_tracking};
-	auto *const ptr = cmd->get_private_data<state_tracking>();
-	if (ptr == nullptr) return FALSE;
-	auto &state = *ptr;
-	const std::unique_lock<std::shared_mutex> lock(s_mutex);
-	const auto depth = state.current_depth_stencil;
-	const auto read_only = state.current_depth_read_only;
-	const auto lifetime = state.current_depth_lifetime;
-	const auto first = state.first_draw_since_bind;
-	state.current_depth_stencil = {};
-	on_bind_depth_stencil_impl(cmd, resource_view {view}, true);
-	*bound = state.current_depth_read_only ? TRUE : FALSE;
-	state.current_depth_stencil = depth; state.current_depth_read_only = read_only;
-	state.current_depth_lifetime = lifetime; state.first_draw_since_bind = first;
-	return TRUE;
 }
 
 extern "C" __declspec(dllexport) BOOL SunshineDepthTestCaptureDemand(effect_runtime *runtime,
@@ -630,34 +583,6 @@ extern "C" __declspec(dllexport) BOOL SunshineDepthTestCaptureDemand(effect_runt
 extern "C" __declspec(dllexport) BOOL SunshineDepthTestFrame(effect_runtime *runtime, sunshine_depth::frame_depth *output)
 {
 	return output != nullptr && sunshine_depth::get_frame_depth(runtime, *output, sunshine_depth::depth_orientation::automatic, false);
-}
-
-// The actual preserved copy behind the selected D3D12 backup published for this
-// Present: the before-clear copy into the capture owner's ticket texture, in the
-// game's recording. The frame's depth_copy is its runtime-list forward instead.
-extern "C" __declspec(dllexport) BOOL SunshineDepthTestPreservedCopy(effect_runtime *runtime,
-	sunshine_streamline::content::copy_snapshot *copy, uint64_t *texture, uint64_t *lifetime)
-{
-	if (!s_registered || runtime == nullptr || copy == nullptr || texture == nullptr || lifetime == nullptr) return FALSE;
-	*copy = {}; *texture = *lifetime = 0;
-	if (runtime->get_device()->get_api() != device_api::d3d12) return FALSE;
-	const auto *data = runtime->get_private_data<generic_depth_data>();
-	const auto *device_data = runtime->get_device()->get_private_data<generic_depth_device_data>();
-	if (!data || !device_data || !data->native_access_open || !data->capture_ready || data->selected_record.direct ||
-		data->native_access_present != device_data->native_present_index ||
-		!validate_capture_record(runtime, *data, *device_data, data->selected_record)) return FALSE;
-	const resource source{data->selected_record.source};
-	const std::shared_lock<std::shared_mutex> lock(s_mutex);
-	const auto found = device_data->depth_stencil_resources.find(source);
-	const auto backup = std::find_if(device_data->depth_stencil_backups.begin(), device_data->depth_stencil_backups.end(),
-		[source](const auto &entry) { return entry.depth_stencil == source; });
-	if (found == device_data->depth_stencil_resources.end() || found->second.identity != data->selected_record.identity ||
-		backup == device_data->depth_stencil_backups.end()) return FALSE;
-	const auto &ticket = found->second.last_frame_stats.capture_ticket;
-	if (!ticket || backup->published_ticket != ticket.id || backup->published_present != device_data->native_present_index) return FALSE;
-	*copy = found->second.last_frame_stats.depth_copy;
-	*texture = ticket.texture; *lifetime = ticket.resource_id;
-	return TRUE;
 }
 
 extern "C" __declspec(dllexport) BOOL SunshineDepthTestLegacyCalibrationState(effect_runtime *runtime, unsigned *requested, unsigned *entries)

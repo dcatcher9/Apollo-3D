@@ -641,7 +641,7 @@ RWTexture2D<float> depth : register(u0);
       first=target_uav(active_width+7,active_height+5,0);
       second=target_uav(active_width+7,active_height+5,1);selected=first.get();
       depth_stencil_crop=target_packed(active_width+7,active_height+5,0);
-      decoy=target(width,height,1,9,false,true);
+      decoy=target(width,height,1,9);
       valid_evaluation=false;
       cross_queue=sunshine_camera_fixture::flag("SUNSHINE_NGX_CROSS_QUEUE_TEST");
       complete_producer=sunshine_camera_fixture::flag("SUNSHINE_NGX_CROSS_QUEUE_COMPLETED_TEST");

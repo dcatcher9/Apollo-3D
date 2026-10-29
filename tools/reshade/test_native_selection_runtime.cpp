@@ -37,14 +37,16 @@ namespace {
         bool stale_automatic = true;
         require(reshade::get_config_value(nullptr, "SUNSHINE_DEPTH", "AutoSelectSceneDepth", stale_automatic) && !stale_automatic,
           "Actual runtime did not load the stale AutoSelectSceneDepth=0 value");
-        // Custom 1x1 size and D16-only format: each rejects every candidate if applied.
-        const struct { const char *key; unsigned value; } stale_filters[] = {
+        // Custom 1x1 size and D16-only format: each rejects every candidate if
+        // applied. The copy mode and clear index name the removed before-clear copy.
+        const struct { const char *key; unsigned value; } stale_values[] = {
+          {"DepthCopyBeforeClears", 2}, {"DepthCopyAtClearIndex", 1},
           {"DrawStatsHeuristic", 2}, {"UseAspectRatioHeuristics", 4}, {"FilterResolutionWidth", 1},
           {"FilterResolutionHeight", 1}, {"FilterFormat", 1}};
-        for (const auto &stale : stale_filters) {
+        for (const auto &stale : stale_values) {
           unsigned value = 0;
           require(reshade::get_config_value(nullptr, "DEPTH", stale.key, value) && value == stale.value,
-            "Actual runtime did not load a stale [DEPTH] filter value");
+            "Actual runtime did not load a stale [DEPTH] value");
         }
       }
       const auto mapping_name = std::wstring(reshade_bridge::mapping_prefix) + std::to_wstring(GetCurrentProcessId());
@@ -150,8 +152,7 @@ float ps(float4 position : SV_Position) : SV_Depth {
       commands->SetGraphicsRoot32BitConstants(0, 5, &constants, 0);
       for (unsigned i = 0; i != target.draws; ++i)
         commands->DrawInstanced(3, 1, 0, 0);
-      // The scene only survives through the selector's actual before-clear copy.
-      commands->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, clear, 0, 0, nullptr);
+      // The scene reaches DEPTH only through the selector's actual end-of-frame copy.
       commands->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
     }
 
@@ -228,7 +229,7 @@ float ps(float4 position : SV_Position) : SV_Depth {
         const float reversed = .1f + .5f * (float(dx - scene->x) + .5f) / scene->w + .2f * (float(dy - scene->y) + .5f) / scene->h;
         const float expected_raw = scene->normal ? 1.f - reversed : reversed;
         float raw = 0; std::memcpy(&raw, raw_bytes.data() + (size_t(dy) * width + dx) * sizeof(float), sizeof(raw));
-        require(std::abs(raw - expected_raw) < 1.e-6f, "Actual selected backup is not the real before-clear scene gradient");
+        require(std::abs(raw - expected_raw) < 1.e-6f, "Actual selected backup is not the real end-of-frame scene gradient");
         const float expected = std::clamp(.5f + .5f * (expected_raw - anchor) * gain, 0.f, 1.f);
         const float pixel = channel(depth, x, y, 0);
         require(std::abs(pixel - expected) < .002f, "Actual DepthView disagrees with raw-depth/viewport calibration oracle");
@@ -236,7 +237,7 @@ float ps(float4 position : SV_Position) : SV_Depth {
         minimum = std::min(minimum, pixel); maximum = std::max(maximum, pixel);
       }
       require(maximum - minimum > .3f, "Production depth diagnostic is flat despite a real scene gradient");
-      std::printf("PASS %s: real low-draw scene selected, before-clear copy, exact offset viewport, raw calibration and full-eye pixels\n",
+      std::printf("PASS %s: real low-draw scene selected, end-of-frame copy, exact offset viewport, raw calibration and full-eye pixels\n",
         phase);
       return depth;
     }
@@ -336,7 +337,7 @@ float ps(float4 position : SV_Position) : SV_Depth {
       reload_with_unchanged_depth();
       require(!observed.inject && observed.ready_uniforms.empty(), "Fixture unexpectedly injected production inputs");
       std::printf("PASS production native depth selection/calibration integration (automatic content selection%s)\n",
-        stale_config ? "; stale AutoSelectSceneDepth=0 and [DEPTH] filters ignored" : "");
+        stale_config ? "; stale AutoSelectSceneDepth=0 and [DEPTH] copy and filter values ignored" : "");
     }
   };
 }

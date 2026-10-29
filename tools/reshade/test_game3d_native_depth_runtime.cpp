@@ -130,7 +130,7 @@ namespace {
       create_pipeline();
       // Exact binary bands give stable, spatially varied data independent of
       // rasterization rounding, and no high-draw or alternate-resolution decoy.
-      scene = target(width, height, 1, 10, false, true);
+      scene = target(width, height, 1, 10);
       render_tracked_depth = [&] { draw(*scene); };
       const auto initial = wait_ready("initial-drawn-depth");
       stable(600, initial.scale);

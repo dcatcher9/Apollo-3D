@@ -594,8 +594,8 @@ namespace {
       continuity_log.pending.add(sources, GetTickCount64(), meets);
     }
     // A source the add-on may show but need not: an EITHER outcome, or the
-    // full-size decoy view every game frame draws (a Generic boundary, its
-    // clear after the draws, that API ownership leaves aside, H).
+    // full-size decoy view every game frame draws (a Generic end-of-frame
+    // capture that API ownership leaves aside, H).
     static void permitted_supply(std::uint8_t sources) { continuity_log.pending.allow(sources, GetTickCount64()); }
     // A later call of the same frame withdrew what it supplied.
     static void withdraw_supply() { continuity_log.pending = {}; }
@@ -732,7 +732,7 @@ namespace {
         width == 3840 && height == 2160 ? 1256 : height/2, 0);
       selected = first.get();
       active_area = {0, 0, selected->width, selected->height};
-      decoy = target(width, height, 1, 9, false, true);
+      decoy = target(width, height, 1, 9);
       reshade::register_event<reshade::addon_event::reset_command_list>(observe_reset);
       // Every provider status line from here on must name a recorded Present.
       reshade::register_event<reshade::addon_event::reshade_present>(record_present);

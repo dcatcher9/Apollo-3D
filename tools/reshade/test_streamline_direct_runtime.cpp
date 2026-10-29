@@ -1136,7 +1136,7 @@ RWTexture2D<float> depth : register(u0);
       const unsigned low_width=width==3840 ? 2228 : width/2,low_height=height==2160 ? 1256 : height/2;
       first=packed_state_mode ? target_packed(low_width,low_height,0) : target_uav(low_width,low_height,0);
       second=packed_state_mode ? target_packed(low_width,low_height,1) : target_uav(low_width,low_height,1); selected=first.get();
-      decoy=target(width,height,1,9,false,true);
+      decoy=target(width,height,1,9);
       trace.open(runtime_directory/"streamline-direct-trajectory.csv");
       trace<<std::setprecision(17)<<"phase,wall_ms,render,evaluation,ticket,capture_mode,tagged,current,projection,capture_ready,camera_ready,K,q0,blend\n";
       reshade::register_event<reshade::addon_event::reset_command_list>(observe_reset);
@@ -1310,50 +1310,6 @@ RWTexture2D<float> depth : register(u0);
           "A camera-less frame after a pause in Presents left the projection placement or the stereo strength");
         require(current() && ready() && next_basis==0 && next==1.f,"The frame with its camera after the camera-less one restarted the stereo strength");
         std::puts("PASS a camera-less frame after a pause keeps the projection placement it was shown with, at full strength");
-      }
-      {
-        // D11c: the add-on keeps a D3D12 DSV's read-only flags from its
-        // creation (ReShade's init_resource_view) and reads them where a list
-        // binds it; a view created again at a handle replaces them.
-        using read_only_view_t=BOOL(*)(api::effect_runtime *,std::uint64_t,BOOL *,BOOL *);
-        const auto read_only_view=reinterpret_cast<read_only_view_t>(GetProcAddress(module,"SunshineDepthTestReadOnlyView"));
-        require(read_only_view,"Direct fixture requires the TEST ONLY read-only DSV adapter");
-        com_ptr<ID3D12DescriptorHeap> views;
-        D3D12_DESCRIPTOR_HEAP_DESC descriptors{};
-        descriptors.Type=D3D12_DESCRIPTOR_HEAP_TYPE_DSV; descriptors.NumDescriptors=3;
-        checked(game->CreateDescriptorHeap(&descriptors,IID_PPV_ARGS(views.put())),"Create the read-only DSV heap");
-        const auto writable=views->GetCPUDescriptorHandleForHeapStart();
-        auto read_only=writable; read_only.ptr+=game->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
-        auto copied=read_only; copied.ptr+=game->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
-        D3D12_DEPTH_STENCIL_VIEW_DESC view{};
-        view.Format=decoy->format; view.ViewDimension=D3D12_DSV_DIMENSION_TEXTURE2D;
-        game->CreateDepthStencilView(decoy->texture.p,&view,writable);
-        // D32 has no stencil plane, so only its depth can be read-only.
-        view.Flags=D3D12_DSV_FLAG_READ_ONLY_DEPTH;
-        game->CreateDepthStencilView(decoy->texture.p,&view,read_only);
-        const auto expect_view=[&](D3D12_CPU_DESCRIPTOR_HANDLE handle,bool expected,const char *what) {
-          BOOL recorded=!expected, bound=!expected;
-          require(read_only_view(observed.runtime,handle.ptr,&recorded,&bound) && bool(recorded)==expected && bool(bound)==expected,what);
-        };
-        expect_view(writable,false,"A writable DSV was read as read-only");
-        expect_view(read_only,true,"A read-only DSV was read as writable at its creation or its binding");
-        // A read-only view copied into a handle no view was created at
-        // (CopyDescriptorsSimple, which ReShade does not report): the table
-        // cannot vouch for it, so it counts as read-only (fail closed).
-        {
-          com_ptr<ID3D12DescriptorHeap> staging;
-          D3D12_DESCRIPTOR_HEAP_DESC staging_desc{};
-          staging_desc.Type=D3D12_DESCRIPTOR_HEAP_TYPE_DSV; staging_desc.NumDescriptors=1;
-          checked(game->CreateDescriptorHeap(&staging_desc,IID_PPV_ARGS(staging.put())),"Create the staging DSV heap");
-          game->CreateDepthStencilView(decoy->texture.p,&view,staging->GetCPUDescriptorHandleForHeapStart());
-          game->CopyDescriptorsSimple(1,copied,staging->GetCPUDescriptorHandleForHeapStart(),D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
-          expect_view(copied,true,"A read-only DSV copied into an unreported handle was read as writable");
-        }
-        view.Flags=D3D12_DSV_FLAG_NONE;
-        game->CreateDepthStencilView(decoy->texture.p,&view,read_only);
-        expect_view(read_only,false,"A writable DSV created over a read-only one kept the read-only flags");
-        std::puts("PASS a D3D12 DSV's read-only flags reach the Generic path from its creation and stay with its binding, "
-          "and a copied descriptor counts as read-only (D11c)");
       }
 
       rotate=true;

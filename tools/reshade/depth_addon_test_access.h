@@ -53,7 +53,6 @@
 #include "streamline_depth_capture.h"
 #include "streamline_depth_provider.h"
 #include "native_resource_identity.h"
-#include "read_only_dsv.h"
 #include "camera_sample_observation.h"
 #include "game3d_slow_step.h"
 
@@ -92,16 +91,6 @@ SUNSHINE_DEPTH_ADDON_SHARED effect_runtime *s_challenger_owner = nullptr;
 SUNSHINE_DEPTH_ADDON_SHARED std::mutex s_challenger_mutex;
 
 SUNSHINE_DEPTH_ADDON_SHARED bool s_disable_intz = false;
-// Enable or disable the creation of backup copies at clear operations on the selected depth-stencil
-SUNSHINE_DEPTH_ADDON_SHARED unsigned int s_preserve_depth_buffers = 0;
-
-enum class clear_op : uint8_t
-{
-	clear_depth_stencil_view,
-	fullscreen_draw,
-	unbind_depth_stencil_view,
-	direct_depth_switch,
-};
 
 struct depth_tracking_demand
 {
@@ -137,12 +126,6 @@ struct draw_stats
 struct depth_stencil_frame_stats
 {
 	draw_stats total;
-	draw_stats current; // Stats since last clear operation
-	// Command-list-local proof only. A real D3D12 depth clear requires DEPTH_WRITE;
-	// any later barrier or opaque execution revokes this rather than inferring
-	// native state from ReShade's lossy resource_usage conversion.
-	bool direct_clear_depth_write = false;
-	draw_stats best_copy_stats; // Per resource, so a busy decoy cannot starve a low-draw scene.
 	viewport copied_viewport = {}; // Last submitted copy, independent of greatest workload.
 	bool copy_provenance_ambiguous = false;
 	sunshine_streamline::commands::recording_marker capture_marker {};
@@ -154,21 +137,13 @@ struct depth_stencil_frame_stats
 	// Only this reservation may publish an EOF capture for the source/frame.
 	uint64_t preservation_reservation = 0;
 	bool clear_zero = false, clear_one = false, clear_other = false;
-	// Passive transport capability: a real scene was followed by a boundary
-	// where this preservation mode can copy. This is never pixel-readiness proof.
-	bool preservation_boundary = false;
-	// This frame's copy is the end-of-frame one (preserve_depth_at_effects),
-	// not a boundary's. Counted for the status line only.
+	// This frame's copy is the end-of-frame one (preserve_depth_at_effects).
+	// Counted for the status line only.
 	bool end_of_frame_copy = false;
 
 	void limit_tracking(depth_tracking_demand demand)
 	{
-		if (!demand.counters)
-		{
-			total.clear_counters();
-			current.clear_counters();
-			best_copy_stats.clear_counters();
-		}
+		if (!demand.counters) total.clear_counters();
 	}
 };
 
@@ -187,17 +162,10 @@ struct __declspec(uuid("806c3b54-baf6-46a7-a72a-28c629143d84")) state_tracking
 	const uint64_t command_identity = s_next_command_identity.fetch_add(1, std::memory_order_relaxed);
 	viewport current_viewport = {};
 	resource current_depth_stencil = { 0 };
-	// D3D12: current_depth_stencil is bound through a read-only view, as its
-	// handle was when bound (D3D12 reads a DSV descriptor at the binding, so
-	// the game may reuse the handle before the unbind). It decides the state
-	// of the bound view's boundaries (generic::bound_view, D11c).
-	bool current_depth_read_only = false;
 	uint64_t current_depth_lifetime = 0;
 	resource render_pass_depth = {};
 	bool render_pass_depth_uncertain = false;
-	bool inside_render_pass = false;
 	std::unordered_map<resource, depth_stencil_frame_stats, resource_hash> stats_per_used_depth_stencil;
-	bool first_draw_since_bind = true;
 	explicit state_tracking(bool is_queue) : is_queue(is_queue)
 	{
 		// Reserve some space upfront to avoid rehashing during command recording
@@ -208,16 +176,9 @@ struct __declspec(uuid("806c3b54-baf6-46a7-a72a-28c629143d84")) state_tracking
 	{
 		stats_per_used_depth_stencil.clear();
 		current_depth_stencil = { 0 };
-		current_depth_read_only = false;
 		current_depth_lifetime = 0;
 		render_pass_depth = {};
 		render_pass_depth_uncertain = false;
-		inside_render_pass = false;
-	}
-	void invalidate_direct_clear_proofs()
-	{
-		for (auto &[depth, stats] : stats_per_used_depth_stencil)
-			stats.direct_clear_depth_write = false;
 	}
 	void reset_on_present()
 	{
@@ -229,7 +190,6 @@ struct __declspec(uuid("806c3b54-baf6-46a7-a72a-28c629143d84")) state_tracking
 	{
 		// Executing a command list in a different command list inherits state
 		current_depth_stencil = source.current_depth_stencil;
-		current_depth_read_only = source.current_depth_read_only;
 		current_depth_lifetime = source.current_depth_lifetime;
 
 		if (source.stats_per_used_depth_stencil.empty())
@@ -241,25 +201,12 @@ struct __declspec(uuid("806c3b54-baf6-46a7-a72a-28c629143d84")) state_tracking
 			depth_stencil_frame_stats &stats = stats_per_used_depth_stencil[depth_stencil];
 			stats.limit_tracking(demand);
 			stats.total.observed_work |= source_stats.total.has_work();
-			stats.current.observed_work |= source_stats.current.has_work();
 			if (demand.counters)
 			{
 				stats.total.vertices += source_stats.total.vertices;
 				stats.total.drawcalls += source_stats.total.drawcalls;
 				stats.total.drawcalls_indirect += source_stats.total.drawcalls_indirect;
 				stats.total.scene_writes += source_stats.total.scene_writes;
-				stats.current.vertices += source_stats.current.vertices;
-				stats.current.drawcalls += source_stats.current.drawcalls;
-				stats.current.drawcalls_indirect += source_stats.current.drawcalls_indirect;
-				stats.current.scene_writes += source_stats.current.scene_writes;
-			}
-			// The proof belongs to one native recording sequence, never a merged
-			// queue or secondary list's statistics.
-			stats.direct_clear_depth_write = false;
-			if (source_stats.best_copy_stats.vertices >= stats.best_copy_stats.vertices)
-			{
-				stats.best_copy_stats = source_stats.best_copy_stats;
-				if (!demand.counters) stats.best_copy_stats.clear_counters();
 			}
 			if (source_stats.total.last_viewport.width * source_stats.total.last_viewport.height >=
 				stats.total.last_viewport.width * stats.total.last_viewport.height)
@@ -278,7 +225,6 @@ struct __declspec(uuid("806c3b54-baf6-46a7-a72a-28c629143d84")) state_tracking
 			stats.clear_zero |= source_stats.clear_zero;
 			stats.clear_one |= source_stats.clear_one;
 			stats.clear_other |= source_stats.clear_other;
-			stats.preservation_boundary |= source_stats.preservation_boundary;
 		}
 	}
 };
@@ -448,30 +394,14 @@ struct depth_stencil_backup
 	// Assignment identity also rotates when pooled storage is bound to a new source.
 	uint64_t content_identity = 0;
 	// This allocation is a stable shader/probe presentation surface. D3D12
-	// before-clear pixels are owned by capture_ticket, never by this cache.
+	// end-of-frame pixels are owned by capture_ticket, never by this cache.
 	uint64_t published_ticket = 0, published_present = 0;
 	sunshine_streamline::content::copy_snapshot published_depth_copy {};
 	bool content_layout_supported = false;
 
 	// Index of the frame after which the backup resource may be destroyed (used to delay destruction until resource is no longer in use)
 	uint64_t destroy_after_frame = std::numeric_limits<uint64_t>::max();
-
-	// Frame dimensions of the last effect runtime this backup was used with
-	uint32_t frame_width = 0;
-	uint32_t frame_height = 0;
-
-	// Set to zero for automatic detection, otherwise will use the clear operation at the specific index within a frame
-	uint32_t force_clear_index = 0;
-	// Counted by recording threads under the shared lock (interlocked).
-	LONG current_clear_index = 0;
 };
-
-SUNSHINE_DEPTH_ADDON_SHARED uint32_t configured_clear_index()
-{
-	uint32_t value = 0;
-	reshade::get_config_value(nullptr, "DEPTH", "DepthCopyAtClearIndex", value);
-	return value;
-}
 
 struct depth_stencil_resource
 {
@@ -557,16 +487,10 @@ struct __declspec(uuid("94e283ef-6714-4d50-b936-71d6308a4be4")) generic_depth_de
 	// List of queues created for this device
 	std::vector<command_queue *> queues;
 
-	// D3D12: which depth-stencil views are read-only (on_init_resource_view).
-	// Lock-free; read by recording threads where they bind a view. Every
-	// view takes a slot (36 KiB for 4096 handles), since a handle it does not
-	// hold counts as read-only.
-	sunshine_read_only_dsv::table<4096> read_only_views;
-
 	// List of all encountered depth-stencils of the last frame
 	std::unordered_map<resource, depth_stencil_resource, resource_hash> depth_stencil_resources;
 
-	// List of depth-stencils that should be tracked throughout each frame and potentially be backed up during clear operations
+	// List of depth-stencils that should be tracked throughout each frame and potentially be backed up at its end
 	std::vector<depth_stencil_backup> depth_stencil_backups;
 
 	depth_stencil_backup *find_depth_stencil_backup(resource resource)
@@ -575,17 +499,6 @@ struct __declspec(uuid("94e283ef-6714-4d50-b936-71d6308a4be4")) generic_depth_de
 			if (backup.depth_stencil == resource)
 				return &backup;
 		return nullptr;
-	}
-
-	// Recording threads read a backup's frame size and clear index under the
-	// shared lock (on_clear_depth_impl); the effects thread writes them here.
-	static void configure_backup(depth_stencil_backup &backup, uint32_t width, uint32_t height,
-		std::optional<uint32_t> force_clear_index = std::nullopt)
-	{
-		const std::unique_lock<std::shared_mutex> lock(s_mutex);
-		backup.frame_width = width;
-		backup.frame_height = height;
-		if (force_clear_index) backup.force_clear_index = *force_clear_index;
 	}
 
 	depth_stencil_backup *track_depth_stencil_for_backup(device *device, resource depth_stencil, resource_desc desc)
@@ -749,7 +662,6 @@ template <typename DepthInfo>
 bool candidate_matches_shape(const DepthInfo &info, uint32_t width, uint32_t height);
 bool validate_capture_record(effect_runtime *runtime, const generic_depth_data &data,
 	const generic_depth_device_data &device_data, const sunshine_depth_capture::capture_record &record);
-void on_clear_depth_impl(command_list *cmd_list, state_tracking &state, resource depth_stencil, clear_op op);
 void on_bind_depth_stencil_impl(command_list *cmd_list, resource_view depth_stencil_view, bool direct_binding);
 bool on_draw(command_list *cmd_list, uint32_t vertices, uint32_t instances, uint32_t, uint32_t);
 bool on_draw_indexed(command_list *cmd_list, uint32_t indices, uint32_t instances, uint32_t, int32_t, uint32_t);

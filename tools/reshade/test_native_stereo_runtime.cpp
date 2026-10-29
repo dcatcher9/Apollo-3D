@@ -342,12 +342,13 @@ namespace {
         // The independent reference renderer is calibrated only while native
         // Game 3D, enabled by default, is off (docs/reshade-sbs.md).
         if (!depth_addon.empty()) {
-          config << "DisabledAddons=Generic Depth\n[DEPTH]\nDepthCopyBeforeClears=1\n";
-          // Removed selection keys a game's ini may still hold; none may apply.
-          // Applied, the custom 1x1 size or the D16-only format filter would
-          // each reject every candidate.
+          config << "DisabledAddons=Generic Depth\n";
+          // Removed selection and copy keys a game's ini may still hold; none
+          // may apply. Applied, the custom 1x1 size or the D16-only format
+          // filter would each reject every candidate.
           if (stale_depth_config)
-            config << "DrawStatsHeuristic=2\nUseAspectRatioHeuristics=4\nFilterResolutionWidth=1\nFilterResolutionHeight=1\n"
+            config << "[DEPTH]\nDepthCopyBeforeClears=2\nDepthCopyAtClearIndex=1\n"
+                      "DrawStatsHeuristic=2\nUseAspectRatioHeuristics=4\nFilterResolutionWidth=1\nFilterResolutionHeight=1\n"
                       "FilterFormat=1\n[SUNSHINE_DEPTH]\nAutoSelectSceneDepth=0\n";
           config << "[SUNSHINE_GAME3D]\nEnabled=0\n";
         }

@@ -12,13 +12,11 @@
 // - an adapter's copy at its call: capture::record for a depth input with
 //   the proof its claim selects, record_local_texture with the UI policy
 //   for a UI tag;
-// - a Generic boundary: record_preserved with the contract depth_addon.cpp
-//   passes (on a recording that names nothing about the source, as the
-//   runtime's own list does at the end of the frame): a clear's DEPTH_WRITE,
-//   a read-only DSV's unbind, which names no state (generic::bound_view),
-//   and at the end of the frame
-//   the source's last proven state on the copy's queue, which the earlier
-//   list proved (each source is tracked from its creation, as ReShade's
+// - the Generic end-of-frame copy: record_preserved with the contract
+//   depth_addon.cpp passes (on a recording that names nothing about the
+//   source, as the runtime's own list does at the end of the frame): the
+//   source's last proven state on the copy's queue, which the earlier list
+//   proved (each source is tracked from its creation, as ReShade's
 //   init_resource reports a depth-stencil texture);
 // - the UI clear boundary: the three barriers game3d_ui_layer.cpp
 //   record_into records through ReShade's D3D12 backend, where the capture
@@ -185,20 +183,6 @@ namespace {
         return true;
       default:
         return false;
-    }
-  }
-
-  // The DSV format of a depth-stencil allocation's family.
-  DXGI_FORMAT depth_view_of(DXGI_FORMAT format) {
-    switch (sunshine_depth_format::storage(format)) {
-      case DXGI_FORMAT_R32_TYPELESS:
-        return DXGI_FORMAT_D32_FLOAT;
-      case DXGI_FORMAT_R32G8X24_TYPELESS:
-        return DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
-      case DXGI_FORMAT_R24G8_TYPELESS:
-        return DXGI_FORMAT_D24_UNORM_S8_UINT;
-      default:
-        return DXGI_FORMAT_D16_UNORM;
     }
   }
 
@@ -515,7 +499,7 @@ namespace {
       }
     }
 
-    // The Generic boundaries of every depth family (D10, D11, D11c).
+    // The Generic end-of-frame copy of every depth family (D10).
     for (const auto &allocation : formats) {
       if (!(allocation.flags & ds)) {
         continue;
@@ -524,12 +508,8 @@ namespace {
         if ((flags & deny) && allocation.format != DXGI_FORMAT_R32_TYPELESS) {
           continue;
         }
-        out.boundary("generic boundaries", allocation.format, flags, device_point::clear, depth_write);
         for (const auto prior : {depth_write, depth_read, depth_read | nps | ps, nps | ps, generic_read, copy_source}) {
           out.boundary("generic boundaries", allocation.format, flags, device_point::end_of_frame, prior);
-        }
-        for (const auto prior : {depth_read, depth_read | nps, depth_read | ps, depth_read | nps | ps}) {
-          out.boundary("generic boundaries", allocation.format, flags, device_point::unbind_read_only_dsv, prior);
         }
       }
     }
@@ -752,7 +732,6 @@ namespace {
     compute_lane compute;
     consumer_fixture consumer;
     earlier_list earlier_direct, earlier_compute;
-    ComPtr<ID3D12DescriptorHeap> depth_views;
     std::uint64_t sequence {};
 
     explicit device_matrix(fixture &value):
@@ -760,12 +739,7 @@ namespace {
         compute(value),
         consumer(value),
         earlier_direct(value, D3D12_COMMAND_LIST_TYPE_DIRECT),
-        earlier_compute(value, D3D12_COMMAND_LIST_TYPE_COMPUTE) {
-      D3D12_DESCRIPTOR_HEAP_DESC desc {};
-      desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
-      desc.NumDescriptors = 1;
-      check(gpu.device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&depth_views)), "DSV heap");
-    }
+        earlier_compute(value, D3D12_COMMAND_LIST_TYPE_COMPUTE) {}
 
     D3D12_RESOURCE_DESC description(const cell &value) const {
       const auto &source = value.value.state.resource;
@@ -1086,15 +1060,10 @@ namespace {
           }
         default:
           {
-            // depth_addon.cpp's contracts: a clear's (on_clear_depth_impl),
-            // the end of the frame's on the queue that executes the copy
-            // (preserve_d3d12_at_effects), and a read-only view's where it
-            // is unbound (on_bind_depth_stencil, generic::bound_view).
-            namespace generic = sunshine_api_contract::generic;
-            const auto point = value.value.point;
-            out.preserved = point == device_point::unbind_read_only_dsv ?
-                              capture::record_preserved(native(list), native(resource), generic::bound_view(true), 0, &out.diagnostic) :
-                              capture::record_preserved(native(list), native(resource), point == device_point::clear ? generic::clear : generic::end_of_frame, native(gpu.queue.Get()), &out.diagnostic);
+            // depth_addon.cpp's contract: the end of the frame's, on the
+            // queue that executes the copy (preserve_d3d12_at_effects).
+            out.preserved = capture::record_preserved(native(list), native(resource), sunshine_api_contract::generic::end_of_frame,
+                                                      native(gpu.queue.Get()), &out.diagnostic);
             admitted = bool(out.preserved) && out.diagnostic.result == capture::status::recorded;
             break;
           }
@@ -1114,18 +1083,11 @@ namespace {
         }
       }
 
-      // The game continues: ends its split; clears depth after the copy.
+      // The game continues: ends its split.
       if (evidence_on.seen == evidence::split_open) {
         transition_barrier(list, resource, subresource, value.value.prior, evidence_on.observed, D3D12_RESOURCE_BARRIER_FLAG_END_ONLY);
       } else if (evidence_on.seen == evidence::enhanced_split_open) {
         split_layout(evidence_on.layout).end(list, resource, whole, evidence_on.layout, evidence_on.access);
-      } else if (value.value.point == device_point::clear) {
-        D3D12_DEPTH_STENCIL_VIEW_DESC view {};
-        view.Format = depth_view_of(value.format);
-        view.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
-        const auto handle = depth_views->GetCPUDescriptorHandleForHeapStart();
-        gpu.device->CreateDepthStencilView(resource, &view, handle);
-        list->ClearDepthStencilView(handle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
       }
 
       // Execute alone (after its earlier list, in one call), or discard a
@@ -1246,7 +1208,7 @@ namespace {
   };
 
   const char *point_name(device_point point) {
-    constexpr const char *names[] {"api", "clear", "end_of_frame", "unbind_read_only_dsv", "ui_clear"};
+    constexpr const char *names[] {"api", "end_of_frame", "ui_clear"};
     return names[unsigned(point)];
   }
 

@@ -22,6 +22,7 @@ namespace {
     float blend() const {return latest.parameters.strength_blend;}
     std::unique_ptr<target_t> third;
     std::vector<std::unique_ptr<target_t>> unrelated;
+    com_ptr<ID3D12Resource> offturn_copy; // Not a depth-stencil, so never a depth candidate.
     cadence mode=cadence::single;
     unsigned single_role=1,phase_present=0,drawn=0,marker_sequence=0;
     unsigned raster_mask=0;
@@ -135,13 +136,14 @@ namespace {
       if(!unrelated.empty() && phase_present%2)draw_unrelated();
       auto &current=member(drawn);draw(current);
       if(mode==cadence::offturn){
-        // Real write activity on another live member, without a subsequent DSV
-        // clear/unbind authorizing preserve2 to capture that destination.
-        auto &other=member(drawn%3+1);
+        // Real transfer activity in the frame that gives no other member work:
+        // the drawn member is read as a copy source into a texture that is not
+        // a depth-stencil. A transfer into another live member would make the
+        // end-of-frame copy capture that member as a current copy of this
+        // frame's scene, so only the drawn member has raster or transfer work.
+        if(!offturn_copy.p)texture(offturn_copy,DXGI_FORMAT_R32_TYPELESS,D3D12_RESOURCE_STATE_COPY_DEST);
         transition(commands.p,current.texture.p,D3D12_RESOURCE_STATE_DEPTH_WRITE,D3D12_RESOURCE_STATE_COPY_SOURCE);
-        transition(commands.p,other.texture.p,D3D12_RESOURCE_STATE_DEPTH_WRITE,D3D12_RESOURCE_STATE_COPY_DEST);
-        commands->CopyResource(other.texture.p,current.texture.p);
-        transition(commands.p,other.texture.p,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        commands->CopyResource(offturn_copy.p,current.texture.p);
         transition(commands.p,current.texture.p,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_DEPTH_WRITE);
       }
       if(!unrelated.empty() && !(phase_present%2))draw_unrelated();
@@ -339,7 +341,7 @@ namespace {
         for(unsigned other=0;other<role;++other)
           require(lifetimes[role]!=lifetimes[other],"Crowded rotating resources share a lifetime identity");
       }
-      std::puts("PASS crowded startup: 12 older flat active buffers, fresh ABC member bases, transfer-only offturn writes, 90 current-color/current-depth/full-stereo frames");
+      std::puts("PASS crowded startup: 12 older flat active buffers, fresh ABC member bases, off-turn copy-source reads, 90 current-color/current-depth/full-stereo frames");
     }
     void check_flat_startup(){
       // A has rendered the same .5 plane since the first game draw, before
@@ -490,24 +492,24 @@ namespace {
 
       const auto old_crop=crops[0];const auto crop_lifetime=lifetimes[0];
       require(old_crop==std::array<std::uint32_t,4>{0,0,width,height},"Crop-change control did not start from a captured full view");
-      scene->segmented_viewport=true;scene->pattern=15;set_mode(cadence::single,1);
+      scene->partial_viewport=true;scene->pattern=15;set_mode(cadence::single,1);
       const auto crop_until=GetTickCount64()+12000;unsigned crop_frames=0;
       do{
         tick("member-A-unsupported-crop");
         require(!ready(),"Unsupported partial crop reused a ready full-frame camera");
         if(current(1)){
-          // The total-draw viewport epoch can remain unchanged while the
-          // preserved copy's crop changes. The controller key includes the
-          // exact crop independently; require that real change on the same
-          // live allocation, not a fabricated epoch increment.
+          // The end-of-frame copy's crop is the frame's largest viewport, now
+          // the scene's quarter. The controller key includes the exact crop
+          // independently; require that real change on the same live
+          // allocation, not a fabricated epoch increment.
           require(captured.source_id==crop_lifetime && crops[0]!=old_crop &&
                   crops[0]==std::array<std::uint32_t,4>{0,0,width/2,height/2},
-                  "Segmented control did not publish the changed copy crop on its original live resource");
+                  "Partial-viewport control did not publish the changed copy crop on its original live resource");
           ++crop_frames;
         }
       }while(crop_frames<16 && GetTickCount64()<crop_until);
       require(crop_frames>=16,"Unsupported-crop control never provided actual current captured depth");
-      scene->segmented_viewport=false;scene->pattern=14;set_mode(cadence::single,1);
+      scene->partial_viewport=false;scene->pattern=14;set_mode(cadence::single,1);
       warm("full-layout-fresh-reference",true,[&](std::uint64_t elapsed){
         if(elapsed<650)require(!ready(),"Restored full layout reused an old numeric reference");
       });
@@ -522,7 +524,7 @@ namespace {
       // H/t0 and actual eye-difference traces support continuity review; no tiny
       // post-hoc threshold is invented for independently timed controllers.
       for(unsigned r=0;r<3;++r)require(stereo_observed[r]>0,"A member never produced nonzero actual stereo separation");
-      std::puts("PASS actual rotating sources: ABC/AABB, independent raw bases, current-color SBS, transfer-only decoys, lifetime/layout reset, gaps, same-basis trajectory");
+      std::puts("PASS actual rotating sources: ABC/AABB, independent raw bases, current-color SBS, off-turn copy-source reads, lifetime/layout reset, gaps, same-basis trajectory");
       finish();
     }
   };
@@ -535,7 +537,7 @@ int main(int argc,char **argv){
   try{
     const std::string test_case=argc==6 ? argv[5] : "";
     require(test_case.empty() || test_case=="--overlap" || test_case=="--interrupted-startup" || test_case=="--moving-startup" || test_case=="--rotating-startup" || test_case=="--crowded-rotating-startup" || test_case=="--flat-startup" || test_case=="--layout","Unknown isolated rotation case");
-    select_native_boot(true);
+    select_native_boot();
     width=3840;height=2160;require(!fs::exists(fs::absolute(argv[4])),"Fresh rotation output required");
     rotation_fixture f;f.runtime_directory=fs::absolute(argv[4]);
     f.initialize(fs::absolute(argv[1]),fs::absolute(argv[2]),f.runtime_directory,2,0,fs::absolute(argv[3]));f.run(test_case);return 0;

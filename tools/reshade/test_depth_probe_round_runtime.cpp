@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Actual preserve2 D3D12 challenger promotion through native Game 3D with no
-// installed FX. No injected selection, depth, readiness or camera.
+// Actual D3D12 challenger promotion through native Game 3D with no installed
+// FX, captured at the end of the frame. No injected selection, depth,
+// readiness or camera.
 #include "test_raw_runtime_fixture.h"
 #include "test_game3d_native_observation.h"
 
@@ -37,17 +38,16 @@ namespace {
         return;
       }
       if (missing) {
-        // Real useful raster depth with no legal preserve2 discard capture.
-        // The transition invalidates the clear-established direct-switch proof;
-        // the next target's null unbind cannot preserve this resource instead.
+        // Real useful raster depth with no legal end-of-frame capture. A
+        // null/null aliasing barrier after its draw is legal without naming a
+        // resource, and leaves no state of it proven (the matrix's D10), so its
+        // copy is refused. Each later target's own clear proves it again.
         draw(*missing, false);
-        transition(commands.p, missing->texture.p, D3D12_RESOURCE_STATE_DEPTH_WRITE,
-                   D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+        D3D12_RESOURCE_BARRIER alias {};
+        alias.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
+        commands->ResourceBarrier(1, &alias);
       }
       draw(*scene);
-      if (missing)
-        transition(commands.p, missing->texture.p, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE,
-                   D3D12_RESOURCE_STATE_DEPTH_WRITE);
       if (decoy) draw(*decoy);
       for (const auto &flat : flats) draw(*flat);
     }
@@ -231,7 +231,7 @@ int main(int argc,char **argv) {
   }
   std::thread([]{Sleep(150000);std::fputs("FAIL probe-round watchdog\n",stderr);TerminateProcess(GetCurrentProcess(),124);}).detach();
   try {
-    select_native_boot(true);
+    select_native_boot();
     width=3840; height=2160;
     require(!fs::exists(fs::absolute(argv[4])),"Fresh probe-round output required");
     probe_round_fixture f; f.runtime_directory=fs::absolute(argv[4]);

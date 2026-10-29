@@ -407,7 +407,7 @@ namespace {
       first = target_uav(width / 2, height / 2, 0);
       selected = first.get();
       active_area = {0, 0, selected->width, selected->height};
-      decoy = target(width, height, 1, 9, false, true);
+      decoy = target(width, height, 1, 9);
       set_foreground(window);
       setup_device();
       require_renders(label);

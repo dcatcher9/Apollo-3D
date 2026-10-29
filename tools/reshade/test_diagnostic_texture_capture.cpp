@@ -2753,14 +2753,15 @@ namespace {
       "a shader-read declaration of a latched texture was not copied from its SHADER_RESOURCE proof");
     gpu.submit(); gpu.wait(); gpu.reset();
     ticket = {};
-    // A claim that names another layout than the proof, a clear's contract
-    // included: refused as conflicting, no barrier recorded.
+    // A claim that names another layout than the proof, a declared
+    // DEPTH_WRITE included: refused as conflicting, no barrier recorded.
     for (const auto claim : {D3D12_RESOURCE_STATE_DEPTH_READ, D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_COPY_SOURCE}) {
       require(!capture::record_preserved(native(gpu.list.Get()), source, claim, &diagnostic) && diagnostic.earlier_layout &&
           diagnostic.stage == capture::record_stage::conflicting_state, "another claim of a latched texture was copied");
     }
-    require(!capture::record_preserved(native(gpu.list.Get()), source, generic::clear, 0, &diagnostic) && diagnostic.earlier_layout &&
-        diagnostic.stage == capture::record_stage::conflicting_state, "a clear's contract was copied from another latched layout");
+    require(!capture::record_preserved(native(gpu.list.Get()), source, generic::preserved(generic::depth_write), 0, &diagnostic) &&
+        diagnostic.earlier_layout && diagnostic.stage == capture::record_stage::conflicting_state,
+      "a declared DEPTH_WRITE was copied from another latched layout");
     // The end-of-frame copy uses the proof on its own queue (D10b).
     ticket = capture::record_preserved(native(gpu.list.Get()), source, generic::end_of_frame, queue, &diagnostic);
     require(ticket && !diagnostic.earlier_layout && diagnostic.used_proven_state && diagnostic.enhanced_copy &&
@@ -2792,8 +2793,8 @@ namespace {
 
     // Any proven layout a direct list may name is the copy's (owner ruling
     // D6-relax): the direct queue's SHADER_RESOURCE, DEPTH_STENCIL_READ for a
-    // depth-read declaration, and DEPTH_STENCIL_WRITE for a clear's contract,
-    // each copied with enhanced barriers from exactly that layout and access.
+    // depth-read declaration, and DEPTH_STENCIL_WRITE for a declared
+    // DEPTH_WRITE, each copied with enhanced barriers from exactly that layout and access.
     const auto copied_from = [&](D3D12_BARRIER_ACCESS access_before, D3D12_BARRIER_LAYOUT before, D3D12_BARRIER_ACCESS access,
         D3D12_BARRIER_LAYOUT layout, auto &&record, const char *what) {
       barrier(gpu.list.Get(), depth.Get(), access_before, before, access, layout);
@@ -2814,8 +2815,8 @@ namespace {
       "a depth-read declaration was not copied from its DEPTH_STENCIL_READ proof");
     copied_from(D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ, D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ,
       D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE, D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE,
-      [&] { return capture::record_preserved(native(gpu.list.Get()), source, generic::clear, 0, &diagnostic); },
-      "a clear's contract was not copied from its DEPTH_STENCIL_WRITE proof");
+      [&] { return capture::record_preserved(native(gpu.list.Get()), source, generic::preserved(generic::depth_write), 0, &diagnostic); },
+      "a declared DEPTH_WRITE was not copied from its DEPTH_STENCIL_WRITE proof");
 
     // A list recorded before the copy's moves the layout and executes after
     // the proof, ahead of the copy's list in one ExecuteCommandLists: the
