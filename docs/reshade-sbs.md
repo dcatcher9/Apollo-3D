@@ -6138,8 +6138,12 @@ for that destination, so the destination's end-of-frame copy is a current copy o
 transferred there (an open gap, see [scene-depth selection limits](#scene-depth-selection-limits)).
 No relationship to the swapchain buffer index is assumed.
 
-Capture layout follows the actual captured crop: the largest viewport drawn into the source during
-the frame (an open gap, see [scene-depth selection limits](#scene-depth-selection-limits)).
+Capture layout follows the actual captured crop: the largest viewport drawn into the source since
+its last full depth clear in the frame, in execution order across command lists. A clear of the
+sampled plane without rectangles erases what was drawn before it, so a larger pass that the game
+clears before drawing the scene in a smaller viewport does not widen the scene's crop; a clear with
+nothing drawn after it keeps the earlier extent, and a clear limited to rectangles does not restart
+it.
 Aggregate activity and off-turn writes cannot change that identity without a new usable capture;
 a real captured-crop change advances the layout and invalidates the corresponding numeric basis.
 Binding, sampling and the public current depth accessor use the same capture record and currentness
@@ -6287,14 +6291,9 @@ accepted consequences:
   depth at all. Installation never edits `[DEPTH]` and leaves the stale `[SUNSHINE_DEPTH]`
   auto-select line untouched; both are inert.
 
-Two further gaps are open, not accepted. Both exist at the shipping default independently of the
-removed controls, and both await an owner decision:
+One further gap is open, not accepted. It exists at the shipping default independently of the
+removed controls and awaits an owner decision:
 
-- **Capture rectangle larger than the scene.** The captured crop is the largest viewport drawn
-  into the source during the frame, and a depth clear does not reset it. A game that draws a
-  larger auxiliary pass into its scene depth, clears it, and then draws the scene in a smaller
-  viewport gets a rectangle larger than the scene, so depth can be misaligned with colour: a
-  visibly wrong result. This applies to every API.
 - **Copy destinations are captured as current sources.** A copy into another tracked
   depth-stencil allocation counts as activity for that destination, so the end-of-frame copy also
   captures the destination, under its own identity and raw basis. Its pixels are whatever the game

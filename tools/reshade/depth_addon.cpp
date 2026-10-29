@@ -1528,8 +1528,7 @@ SUNSHINE_DEPTH_ADDON_INTERNAL bool on_draw(command_list *cmd_list, uint32_t vert
 		stats.total.vertices += vertices * instances;
 		stats.total.drawcalls += 1;
 	}
-	if (state.current_viewport.width * state.current_viewport.height >= stats.total.last_viewport.width * stats.total.last_viewport.height)
-		stats.total.last_viewport = state.current_viewport;
+	stats.observe_viewport(state.current_viewport);
 
 	return false;
 }
@@ -1564,8 +1563,7 @@ SUNSHINE_DEPTH_ADDON_INTERNAL bool on_draw_indirect(command_list *cmd_list, indi
 		stats.total.drawcalls += draw_count;
 		stats.total.drawcalls_indirect += draw_count;
 	}
-	if (state.current_viewport.width * state.current_viewport.height >= stats.total.last_viewport.width * stats.total.last_viewport.height)
-		stats.total.last_viewport = state.current_viewport;
+	stats.observe_viewport(state.current_viewport);
 
 	return false;
 }
@@ -1595,7 +1593,7 @@ static void on_bind_depth_stencil(command_list *cmd_list, uint32_t, const resour
 {
 	on_bind_depth_stencil_impl(cmd_list, depth_stencil_view, true);
 }
-static bool on_clear_depth_stencil(command_list *cmd_list, resource_view dsv, const float *depth, const uint8_t *, uint32_t, const rect *)
+static bool on_clear_depth_stencil(command_list *cmd_list, resource_view dsv, const float *depth, const uint8_t *, uint32_t rect_count, const rect *)
 {
 	// Ignore clears that do not affect the depth buffer (stencil clears)
 	if (dsv != 0 && depth != nullptr)
@@ -1603,15 +1601,13 @@ static bool on_clear_depth_stencil(command_list *cmd_list, resource_view dsv, co
 		auto &state = *cmd_list->get_private_data<state_tracking>();
 
 		const resource depth_stencil = cmd_list->get_device()->get_resource_from_view(dsv);
+		const auto view = cmd_list->get_device()->get_resource_view_desc(dsv);
+		const bool sampled_plane = view.texture.first_level == 0 && view.texture.first_layer == 0;
 
 		// The clear needs DEPTH_WRITE (the D3D12 clear contract): it proves the
 		// state of subresource 0 when its list executes (proven_state.h).
-		if (cmd_list->get_device()->get_api() == device_api::d3d12)
-		{
-			const auto view = cmd_list->get_device()->get_resource_view_desc(dsv);
-			if (view.texture.first_level == 0 && view.texture.first_layer == 0)
-				sunshine_streamline::depth_capture::observe_depth_clear(cmd_list->get_native(), depth_stencil.handle);
-		}
+		if (cmd_list->get_device()->get_api() == device_api::d3d12 && sampled_plane)
+			sunshine_streamline::depth_capture::observe_depth_clear(cmd_list->get_native(), depth_stencil.handle);
 		// The game clear changes the source; no copy is made here.
 		if (s_streamline_probe_events && cmd_list->get_device()->get_api() == device_api::d3d12)
 			sunshine_streamline::depth_content_write(cmd_list->get_native(), depth_stencil.handle);
@@ -1624,6 +1620,9 @@ static bool on_clear_depth_stencil(command_list *cmd_list, resource_view dsv, co
 		stats.clear_zero |= *depth == 0.0f;
 		stats.clear_one |= *depth == 1.0f;
 		stats.clear_other |= *depth != 0.0f && *depth != 1.0f;
+		// A full clear of the sampled plane erases the extent drawn so far; the
+		// next draw starts the capture crop again (observe_viewport).
+		if (rect_count == 0 && sampled_plane) stats.observe_full_clear();
 	}
 
 	return false;
@@ -1678,8 +1677,7 @@ static void record_scene_write(state_tracking &state, resource target, const vie
 		++stats.total.scene_writes;
 		stats.total.mesh_dispatches += mesh;
 	}
-	if (view.width * view.height >= stats.total.last_viewport.width * stats.total.last_viewport.height)
-		stats.total.last_viewport = view;
+	stats.observe_viewport(view);
 }
 
 static void record_copied_depth(command_list *cmd_list, resource dest, uint32_t subresource = 0)

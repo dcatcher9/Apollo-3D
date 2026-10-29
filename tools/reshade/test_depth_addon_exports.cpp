@@ -173,9 +173,62 @@ static void check_candidate_shape_table()
 	}
 }
 
+// The capture crop is the largest viewport drawn since the last full depth
+// clear, in execution order across merged recordings (docs/reshade-sbs.md,
+// Scene-depth selection limits).
+static void check_capture_extent()
+{
+	const viewport full { 0, 0, 3840, 2160, 0, 1 }, three_quarters { 0, 0, 2880, 1620, 0, 1 },
+		half { 0, 0, 1920, 1080, 0, 1 }, quarter { 0, 0, 960, 540, 0, 1 }, transfer {};
+	const auto same = [](const viewport &a, const viewport &b) {
+		return a.x == b.x && a.y == b.y && a.width == b.width && a.height == b.height;
+	};
+	depth_stencil_frame_stats frame;
+	frame.observe_full_clear(); frame.observe_viewport(full); frame.observe_viewport(half);
+	require_snapshot(same(frame.total.last_viewport, full), "A smaller later pass narrowed the frame's capture crop");
+	frame = {};
+	frame.observe_viewport(three_quarters); frame.observe_full_clear(); frame.observe_viewport(transfer);
+	require_snapshot(same(frame.total.last_viewport, three_quarters), "A clear or transfer without a later draw changed the capture crop");
+	frame.observe_viewport(half); frame.observe_viewport(quarter);
+	require_snapshot(same(frame.total.last_viewport, half) && frame.viewport_restarted && !frame.viewport_restart_pending,
+		"A larger pass cleared before the scene still widened the scene's capture crop");
+	depth_stencil_resource info;
+	info.desc.type = resource_type::texture_2d;
+	info.desc.texture = { 3840, 2160, 1, 1, format::d32_float, 1 };
+	info.last_frame_stats = frame;
+	const auto region = effective_capture_region(info);
+	require_snapshot(region.x == 0 && region.y == 0 && region.width == 1920 && region.height == 1080,
+		"The capture region did not follow the extent drawn after the last full clear");
+
+	const resource target { 1 };
+	const auto merged = [&](const std::initializer_list<void (*)(depth_stencil_frame_stats &)> &earlier,
+		const std::initializer_list<void (*)(depth_stencil_frame_stats &)> &later) {
+		state_tracking queue(true), list(false);
+		for (const auto step : earlier) step(queue.stats_per_used_depth_stencil[target]);
+		for (const auto step : later) step(list.stats_per_used_depth_stencil[target]);
+		queue.merge(list);
+		return queue.stats_per_used_depth_stencil[target];
+	};
+	static constexpr auto draw_full = +[](depth_stencil_frame_stats &s) { s.observe_viewport({ 0, 0, 3840, 2160, 0, 1 }); };
+	static constexpr auto draw_half = +[](depth_stencil_frame_stats &s) { s.observe_viewport({ 0, 0, 1920, 1080, 0, 1 }); };
+	static constexpr auto clear = +[](depth_stencil_frame_stats &s) { s.observe_full_clear(); };
+	require_snapshot(same(merged({ draw_half }, { draw_full }).total.last_viewport, full),
+		"Merged recordings without a clear lost the larger extent");
+	require_snapshot(same(merged({ draw_full }, { clear, draw_half }).total.last_viewport, half),
+		"A later recording's full clear did not erase the earlier extent");
+	require_snapshot(same(merged({ draw_full, clear }, { draw_half }).total.last_viewport, half),
+		"A pending clear did not restart at the next recording's draws");
+	auto trailing = merged({ draw_full }, { draw_half, clear });
+	require_snapshot(same(trailing.total.last_viewport, full) && trailing.viewport_restart_pending,
+		"A later recording's trailing clear changed the extent or was lost");
+	trailing.observe_viewport(quarter);
+	require_snapshot(same(trailing.total.last_viewport, quarter), "A merged pending clear did not restart at the next draw");
+}
+
 static void check_depth_snapshot_contract()
 {
 	check_candidate_shape_table();
+	check_capture_extent();
 
 	// Candidate counters follow the capture-owner count (or the opt-in trace).
 	generic_depth_device_data demand_device;

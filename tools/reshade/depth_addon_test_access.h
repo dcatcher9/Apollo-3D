@@ -143,11 +143,29 @@ struct depth_stencil_frame_stats
 	// This frame's copy is the end-of-frame one (preserve_depth_at_effects).
 	// Counted for the status line only.
 	bool end_of_frame_copy = false;
+	// total.last_viewport is the capture crop: the largest viewport drawn since
+	// the last full depth clear. A clear followed by more drawing erased the
+	// earlier extent, so a larger pass the game cleared away cannot widen the
+	// scene's crop; a trailing clear with no draw after it keeps the extent.
+	bool viewport_restart_pending = false; // A full depth clear with no draw after it yet.
+	bool viewport_restarted = false; // The extent covers only work after a full depth clear.
 
 	void limit_tracking(depth_tracking_demand demand)
 	{
 		if (!demand.counters) total.clear_counters();
 	}
+	void observe_viewport(const viewport &view)
+	{
+		if (viewport_restart_pending && view.width * view.height > 0)
+		{
+			total.last_viewport = view;
+			viewport_restart_pending = false;
+			viewport_restarted = true;
+		}
+		else if (view.width * view.height >= total.last_viewport.width * total.last_viewport.height)
+			total.last_viewport = view;
+	}
+	void observe_full_clear() { viewport_restart_pending = true; }
 };
 
 struct resource_hash
@@ -212,9 +230,17 @@ struct __declspec(uuid("806c3b54-baf6-46a7-a72a-28c629143d84")) state_tracking
 				stats.total.scene_writes += source_stats.total.scene_writes;
 				stats.total.mesh_dispatches += source_stats.total.mesh_dispatches;
 			}
-			if (source_stats.total.last_viewport.width * source_stats.total.last_viewport.height >=
-				stats.total.last_viewport.width * stats.total.last_viewport.height)
+			// The source executes after this recording: its own full clear erased
+			// the extent drawn here, and a clear pending here restarts at its draws.
+			if (source_stats.viewport_restarted)
+			{
 				stats.total.last_viewport = source_stats.total.last_viewport;
+				stats.viewport_restart_pending = false;
+				stats.viewport_restarted = true;
+			}
+			else
+				stats.observe_viewport(source_stats.total.last_viewport);
+			stats.viewport_restart_pending |= source_stats.viewport_restart_pending;
 
 			if (source_stats.copied_during_frame)
 			{

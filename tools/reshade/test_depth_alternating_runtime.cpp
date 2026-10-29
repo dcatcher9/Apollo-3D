@@ -78,9 +78,9 @@ namespace {
     void set_mode(cadence next,unsigned role=1){mode=next;single_role=role;phase_present=0;}
     void draw_auxiliary_scene(){
       // A non-scene pass uses the same allocation with a changing valid larger
-      // viewport. Its later clear is followed by the actual half-view scene;
-      // the final legal unbind copy, rather than total-frame workload, owns
-      // the captured crop and layout.
+      // viewport. Its later full clear is followed by the actual half-view
+      // scene and restarts the crop, so the end-of-frame copy's crop and
+      // layout are the scene's, not the larger pass's.
       auto &target=*scene;
       const auto dsv=target.heap->GetCPUDescriptorHandleForHeapStart();
       commands->OMSetRenderTargets(0,nullptr,FALSE,&dsv);

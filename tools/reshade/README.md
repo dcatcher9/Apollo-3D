@@ -1277,8 +1277,8 @@ replacement of an already qualified smaller source by a similarly credible nativ
 stable comparison when both remain useful, fallback when the native source becomes flat,
 format and resolution changes (including a one-third-resolution D32S8 end-of-frame capture),
 same-size competitors, content changes, multi-viewport drawing within the same resource (it keeps
-the source's identity; the copied rectangle is the frame's largest viewport, which this case does
-not check: see the open gap in the [limits](../../docs/reshade-sbs.md#scene-depth-selection-limits)),
+the source's identity; this case does not check the copied rectangle, which the rotation
+fixture's `--layout` case does),
 and a single active one-draw buffer. A negative control keeps a lone scene that is cleared after
 drawing unready (mono) on every frame, then requires it to become ready once the trailing clear
 stops. It also
@@ -1389,15 +1389,12 @@ fresh output directory. They cover complementary rotation becoming concurrent re
 real asynchronous startup samples across missing presents, changing central depth from the
 first rendered scene, fresh ABC rotation without any prior continuous-source calibration,
 and a stable captured crop despite unrelated viewport activity. The layout case also requires
-an actual captured-crop change to establish a fresh numeric basis. `--layout` fails at the
-shipping default (`Current backup contains stale/wrong-member raw center depth`), and the
-failure is real: its auxiliary pass draws a larger viewport (three quarters or all of the
-allocation) into the scene's allocation and is cleared before the half-view scene, but the
-end-of-frame copy takes the frame's largest viewport as its crop instead of the scene's half view,
-so the depth at the crop's center is not the scene's. This is the open crop gap in the
-[limits](../../docs/reshade-sbs.md#scene-depth-selection-limits); the case is expected to fail
-until the owner decides the fix. It passed before only because the fixtures ran the removed mode
-that copied at the unbind after the scene.
+an actual captured-crop change to establish a fresh numeric basis. Its auxiliary pass draws a
+larger viewport (three quarters or all of the allocation) into the scene's allocation and is
+cleared before the half-view scene: the end-of-frame copy's crop must stay the scene's half view
+and the depth at its center the scene's, because a full depth clear restarts the crop's extent
+([capture layout](../../docs/reshade-sbs.md#selecting-scene-depth)). The snapshot CTest checks the
+same rule across merged command lists.
 The flat-startup case draws constant interior depth on the real source before useful scene
 depth appears. It checks fresh initialization on that same lifetime, then a return to flat
 content that must preserve established numerical state without refreshing readiness.

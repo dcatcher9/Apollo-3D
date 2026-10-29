@@ -182,8 +182,8 @@ float ps(float4 position : SV_Position) : SV_Depth {
       };
       if (target.segmented_viewport) {
         // Same allocation/layout every frame: a whole-allocation pass, a clear,
-        // then the small scene pass. The end-of-frame copy's rectangle is the
-        // frame's largest viewport, here the whole allocation. Starting a probe
+        // then the small scene pass. The clear restarts the end-of-frame
+        // copy's rectangle, so it is the scene pass's quarter. Starting a probe
         // must not change its lifetime identity and cause perpetual challenger
         // cancellation.
         draw_region(target.width, target.height, 0, 1);
