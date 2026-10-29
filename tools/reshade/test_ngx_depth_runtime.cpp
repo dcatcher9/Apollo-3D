@@ -50,6 +50,8 @@ namespace {
     automatic_status status;
     sunshine_streamline::provider::source_status provider;
     unsigned presents{},unready_presents{};
+    // The latest native render's sequence (game3d_test_render.h).
+    std::uint64_t rendered_sequence{};
     // The latest fresh provider copy: when its present returned, and its sequence.
     std::uint64_t present_started{},fresh_ended{},fresh_sequence{};
     decltype(&NVSDK_NGX_D3D12_CreateFeature) volatile call_create{};
@@ -301,6 +303,12 @@ RWTexture2D<float> depth : register(u0);
     void ngx_tick(const char *phase) {
       present_started=GetTickCount64();
       step();game3d.no_effects();
+      // Every judged Present reached native depth preparation: a Present the
+      // exporter left 2D before it (a renderer still preparing) acquires no
+      // depth, so a check that nothing is selected would pass without proof.
+      const auto render=game3d.last_render().sequence;
+      require(render>rendered_sequence,"A Present had no native Game 3D render to observe");
+      rendered_sequence=render;
       status=game3d.automatic();
       require(query_provider_status(observed.runtime,&provider),"NGX provider UI observation failed");
       unready_presents+=!status.ready();
@@ -695,6 +703,13 @@ RWTexture2D<float> depth : register(u0);
       query_provider_status=reinterpret_cast<provider_status_t>(GetProcAddress(module,"SunshineDepthTestProviderStatus"));
       require(tracked && query_provider_status,"NGX fixture requires passive provider/UI observation adapters");
       game3d.start();game3d.attach_export();game3d.set_strength(100);
+      // The renderer is built off the Present; until it is ready the game
+      // stays 2D and no depth is acquired. A cold shader cache (a new
+      // d3dcompiler_47.dll, size or colour) compiles for seconds, so begin
+      // the phases only at the first native render (until 10-29 they began
+      // at once and the first valid evaluation then met a renderer still
+      // preparing, on a cold cache every time).
+      rendered_sequence=game3d.await_render([&]{step();game3d.no_effects();});
 
       // Failed evaluations may be seen, but must not establish provider ownership.
       const auto invalid_until=GetTickCount64()+1500;

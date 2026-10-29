@@ -1105,6 +1105,11 @@ test add-on itself; the shader directory must contain that frozen effect:
 reshade_ngx_depth_runtime_test.exe <ReShade64.dll> <frozenShaders> <SunshineSBSTest.addon64> <fresh-output-directory> 3840 2160
 ```
 
+Its phases begin at the first native render and every judged present must reach native depth
+preparation: the renderer is built off the Present and the game stays 2D, acquiring no depth,
+until it is ready, which takes seconds on a cold shader cache (a new `d3dcompiler_47.dll`, size or
+colour; until 10-29 the phases began at once, and on a cold cache the first valid evaluation always
+met a renderer still preparing; a fresh empty `LOCALAPPDATA` for the run reproduces a cold cache).
 Failed and invalid-extent evaluations must not take ownership from Generic. A valid evaluation
 whose recording observed no source state is admitted through the DLSS input-state contract. The
 default case checks exact full-allocation depth, poisoned padding and active-rectangle render
