@@ -6183,14 +6183,17 @@ refuse the hold, judged from the work of each Present that advances the depth fr
   own. The game is showing a screen without its scene: a pause, inventory or loading screen, or a
   video, that keeps clearing depth.
 - *Cut:* a depth-stencil outside that set that passes the candidate shape test (single-sample, or
-  multisampled where the device resolves depth) drew although the selector no longer counted it as
-  active on the previous depth-active Present (no work within its activity grace, the three
-  depth-active Presents, before that one: none on the four before this one). A scene pass starts
-  now in another buffer, at another size or at the same size before it qualifies (a cutscene,
-  photo mode or a 3D menu): the held depth would be another camera's. A source that keeps drawing
-  (a HUD with its own depth-stencil, an every-Present lower-resolution scene, a member of an A/B,
-  A/B/C or A/B/C/D rotation on its turn, as many allocations as a capture set holds) is no cut, and
-  the hold stays.
+  multisampled where the device resolves depth) drew although it had no work within the
+  selector's activity grace (the three depth-active Presents before, as long as a candidate counts
+  as active) and does not draw at the set's own cadence (its idle interval is not the interval
+  between the last two working Presents of a set member whose next turn is not yet overdue). A
+  scene pass starts now in another buffer, at another size or at the same size before it
+  qualifies (a cutscene, photo mode or a 3D menu): the held depth would be another camera's. A
+  source that keeps drawing (a HUD with its own depth-stencil, an every-Present lower-resolution
+  scene, a member of an A/B or A/B/C rotation on its turn) is no cut, and neither is one drawing at
+  the set's cadence (a member of an A/B/C/D rotation on its turn before it qualifies into the
+  set): the hold stays. A set that stopped drawing lends no cadence, and a member's single long
+  gap (its scene resuming) matches no other buffer's by chance.
 
 A refused Present shows no Generic depth, so nothing is held after it until a new current copy.
 Only the capture the previous Present showed can be held, so older depth never follows newer; a
@@ -6396,12 +6399,14 @@ accepted consequences:
   capture set: a missing frame, whose held depth is one frame behind its colour within that
   bound. A Present is mono at once, holding nothing, when it clears or discards the anchor's depth
   without drawing (a pause, inventory or loading screen, or a video, that keeps clearing depth) or
-  when a scene starts in another depth buffer that had no work on the four depth-active Presents
-  before (a cutscene, photo mode or 3D menu, including an unqualified buffer of the same size;
-  the first turn of a new rotation member is one too, its later turns hold). Neither gate sees a
-  screen change on which the game simply stops drawing its scene without clearing depth or drawing
-  into another buffer, or starts the new scene in a buffer that already drew within those four
-  Presents: those Presents show the last scene's depth for at most 250 ms after it was current,
+  when a scene starts in another depth buffer that had no work on the three depth-active Presents
+  before and does not draw at the anchor's set's own cadence (a cutscene, photo mode or 3D menu,
+  including an unqualified buffer of the same size; the first turn of a new rotation member is one
+  too, its later turns hold). Neither gate sees a screen change on which the game simply stops
+  drawing its scene without clearing depth or drawing into another buffer, or starts the new scene
+  in a buffer that last drew within those three Presents or exactly one set cadence before (four
+  Presents before, beside an A/B/C/D set): those Presents show the last scene's depth for at most
+  250 ms after it was current,
   exactly as with the API providers, then mono. Both gates judge a Present by the work
   submitted since the previous one, so a frame-generation Present that lands between one frame's
   own submissions, after its depth clear and before its draws, is taken for a cleared screen and

@@ -322,7 +322,8 @@ static void check_transfer_lineage()
 // The hold gates (docs/reshade-sbs.md, Selecting scene depth): a Present that
 // cleared or discarded the anchor's capture set without any of it working, or
 // on which a shape-eligible depth-stencil outside the set drew without having
-// worked within the selector's activity grace, holds nothing. Everything else
+// worked within the selector's activity grace or at the set's own cadence,
+// holds nothing. Everything else
 // that the held set left untouched, or worked on, may hold.
 static void check_hold_gates()
 {
@@ -397,9 +398,12 @@ static void check_hold_gates()
 		"A same-size unqualified scene starting in another allocation held the previous scene");
 	require_snapshot(judge({ { 1920, 1080, 1, { w::draw, w::draw, w::none } }, { 1280, 720, 1, { w::none, w::none, w::draw } } }, { 1 }) == hold_gate::cut,
 		"A scene starting in another-size allocation held the previous scene");
-	require_snapshot(judge({ { 1920, 1080, 1, { w::draw, w::draw, w::draw, w::draw, w::draw, w::none } },
-		{ 1920, 1080, 1, { w::draw, w::none, w::none, w::none, w::none, w::draw } } }, { 1 }) == hold_gate::cut,
+	require_snapshot(judge({ { 1920, 1080, 1, { w::draw, w::draw, w::draw, w::draw, w::none } },
+		{ 1920, 1080, 1, { w::draw, w::none, w::none, w::none, w::draw } } }, { 1 }) == hold_gate::cut,
 		"A source drawing again after more than the activity grace without work held the previous scene");
+	require_snapshot(judge({ { 1920, 1080, 1, { w::draw, w::none, w::none, w::none, w::none, w::none, w::none, w::none, w::draw, w::none } },
+		{ 1920, 1080, 1, { w::none, w::none, w::draw, w::none, w::none, w::none, w::none, w::none, w::none, w::draw } } }, { 1 }) == hold_gate::cut,
+		"A set member resuming after a long gap lent that gap as a cadence to a scene starting in another buffer");
 	require_snapshot(judge({ { 1920, 1080, 1, { w::draw, w::draw, w::none } }, { 1920, 1080, 1, { w::clear, w::clear, w::draw } } }, { 1 }) == hold_gate::cut,
 		"A source that only cleared on the previous frame and now draws held the previous scene");
 	require_snapshot(judge({ { 1920, 1080, 1, { w::draw, w::draw, w::none } }, { 1920, 1080, 4, { w::none, w::none, w::draw } } }, { 1 }, 1, true) == hold_gate::cut,
@@ -418,11 +422,15 @@ static void check_hold_gates()
 	require_snapshot(judge({ { 1920, 1080, 1, { w::draw, w::draw, w::none } }, { 1920, 1080, 1, { w::none, w::draw, w::draw } } }, { 1 }) == hold_gate::open,
 		"A source that also drew on the previous depth frame was taken for a cut");
 	// Rotations as long as a capture set holds (A/B, A/B/C, A/B/C/D: periods 2
-	// to 4, which the selector's activity grace keeps active between turns).
-	// The member on its turn is no cut, inside the anchor's set or not yet
-	// qualified into it, with the previous member's capture held; a scene
-	// starting in another buffer beside the untouched set is one; the member
-	// on its turn clearing without drawing is a screen without its scene.
+	// to 4). The member on its turn is no cut, inside the anchor's set or not
+	// yet qualified into it (within the activity grace, or at the set's own
+	// cadence, A/B/C/D), with the previous member's capture held; a scene
+	// starting in another buffer beside the untouched set is one, and so is
+	// one in a buffer idle for longer than the grace and not at the set's
+	// cadence, or beside a set that stopped and so lends no cadence; the
+	// member on its turn clearing without drawing is a screen without its
+	// scene.
+	const uint64_t grace = sunshine_depth::selection_policy {}.active_grace_frames();
 	for (unsigned period = 2; period <= 4; ++period)
 	{
 		std::vector<source> rotation;
@@ -447,6 +455,20 @@ static void check_hold_gates()
 		cut.back().frames.push_back(w::draw);
 		require_snapshot(judge(cut, members, period) == hold_gate::cut,
 			"A scene starting in another buffer beside an untouched rotation held the rotation's depth");
+		const unsigned beyond = static_cast<unsigned>(std::max<uint64_t>(grace, period)) + 1;
+		auto idle = rotation;
+		idle.push_back({ 1920, 1080, 1, std::vector<work>(3 * period, w::none) });
+		idle.back().frames[3 * period - 1 - beyond] = w::draw;
+		idle.back().frames.back() = w::draw;
+		require_snapshot(judge(idle, members, period - 1) == hold_gate::cut,
+			"A scene starting in a buffer idle for longer than the grace and the rotation's cadence held the rotation's depth");
+		// No member drew for longer than its cadence: the set lends none.
+		auto stopped = rotation;
+		stopped.push_back({ 1920, 1080, 1, std::vector<work>(4 * period + 1, w::none) });
+		stopped.back().frames[4 * period - 1 - grace] = w::draw;
+		stopped.back().frames.back() = w::draw;
+		require_snapshot(judge(stopped, members, period) == hold_gate::cut,
+			"A stopped rotation lent its cadence to a scene starting in another buffer");
 		auto cleared = rotation;
 		cleared.back().frames.back() = w::clear;
 		require_snapshot(judge(cleared, members, period - 1) == hold_gate::cleared,

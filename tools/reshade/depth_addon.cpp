@@ -496,45 +496,61 @@ SUNSHINE_DEPTH_ADDON_INTERNAL bool validate_capture_record(effect_runtime *runti
 // - cleared: the anchor's capture set (with the held source) was cleared or
 //   discarded and none of it worked: the game shows a screen without its scene
 //   (a pause, inventory, loading screen or video that keeps clearing depth);
-// - cut: a shape-eligible depth-stencil outside that set drew although the
-//   selector no longer counted it as active on the previous depth frame (no
-//   work within the activity grace, `grace` depth frames, before that one): a
-//   scene pass that starts now in another buffer (a cutscene, photo mode or 3D
-//   menu), so the held depth would be another camera's.
+// - cut: a shape-eligible depth-stencil outside that set drew although it had
+//   no work within the selector's activity grace (`grace` depth frames before
+//   this one, as long as a candidate still counts as active) and does not
+//   draw at the set's cadence: a scene pass that starts now in another buffer
+//   (a cutscene, photo mode or 3D menu), so the held depth would be another
+//   camera's.
 // Either way the Present holds nothing: it is mono. A set left untouched keeps
 // its hold (a frame presented twice, frame generation, a colour-only pass, the
 // Presents an every-other-Present source skips), and so does one that worked
 // but whose copy was refused or failed (a missing frame). A source that keeps
 // drawing (a HUD with its own depth-stencil, an every-Present lower-resolution
-// scene, a member of a rotation as long as a capture set holds, A/B to
-// A/B/C/D, on its turn) is no cut. One pass over the snapshot; no knob of its
-// own.
+// scene, a member of an A/B or A/B/C rotation on its turn) is no cut, and so
+// is one that draws at the set's cadence: a member of a rotation the set's own
+// members show, on its turn, before it qualifies into the set (A/B/C/D, whose
+// turns come four depth frames apart). It draws at that cadence when its idle
+// interval equals the interval between the last two worked depth frames of a
+// set member whose next turn is not yet overdue: a stopped set lends none,
+// and a single long gap (a member resuming its scene) matches nothing else by
+// chance. No knob of its own.
 SUNSHINE_DEPTH_ADDON_INTERNAL hold_gate judge_hold_gate(const depth_selection_snapshot &snapshot,
 	const sunshine_depth_capture::capture_set &captures, uint64_t held, uint64_t frame,
 	uint32_t color_width, uint32_t color_height, bool resolve_depth, uint64_t grace)
 {
+	constexpr auto none = std::numeric_limits<uint64_t>::max();
 	const auto in_set = [&](uint64_t id) {
 		if (id == held) return true;
 		for (unsigned i = 0; i != captures.count; ++i)
 			if (captures.records[i].identity == id) return true;
 		return false;
 	};
-	bool erased = false, worked = false, cut = false;
+	// The set's cadence (above): at most one interval per member and the held source.
+	std::array<uint64_t, sunshine_depth_capture::maximum_sources + 1> cadence {};
+	unsigned cadences = 0;
+	bool erased = false, worked = false;
 	for (const auto &[value, info] : snapshot)
 	{
-		if (info.last_used_in_frame != frame) continue;
+		if (!in_set(info.identity)) continue;
 		const auto &stats = info.last_frame_stats;
-		if (in_set(info.identity))
-		{
-			erased = erased || stats.depth_erased;
-			worked = worked || stats.total.has_work();
-		}
-		else if (!cut && stats.total.drew() &&
-			!(info.prior_work_frame != std::numeric_limits<uint64_t>::max() && info.prior_work_frame + grace >= frame - 1) &&
-			(info.desc.texture.samples <= 1 || resolve_depth) && candidate_matches_shape(info, color_width, color_height))
-			cut = true;
+		if (info.prior_work_frame != none && stats.total.has_work() && info.last_used_in_frame <= frame &&
+			frame - info.last_used_in_frame <= info.last_used_in_frame - info.prior_work_frame && cadences != cadence.size())
+			cadence[cadences++] = info.last_used_in_frame - info.prior_work_frame;
+		if (info.last_used_in_frame != frame) continue;
+		erased = erased || stats.depth_erased;
+		worked = worked || stats.total.has_work();
 	}
-	return erased && !worked ? hold_gate::cleared : cut ? hold_gate::cut : hold_gate::open;
+	if (erased && !worked) return hold_gate::cleared;
+	for (const auto &[value, info] : snapshot)
+	{
+		if (info.last_used_in_frame != frame || in_set(info.identity) || !info.last_frame_stats.total.drew() ||
+			!(info.desc.texture.samples <= 1 || resolve_depth) || !candidate_matches_shape(info, color_width, color_height)) continue;
+		const auto idle = info.prior_work_frame == none ? none : frame - info.prior_work_frame;
+		if (idle > grace && std::find(cadence.begin(), cadence.begin() + cadences, idle) == cadence.begin() + cadences)
+			return hold_gate::cut;
+	}
+	return hold_gate::open;
 }
 
 // Whether this Present may show the capture shown on the runtime's previous
