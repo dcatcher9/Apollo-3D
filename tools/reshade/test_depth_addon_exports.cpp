@@ -247,10 +247,82 @@ static void check_capture_extent()
 	}
 }
 
+// A copy of another same-geometry candidate is not depth of its own: a history
+// copy made before the source drew holds older depth, and a copy the source
+// still holds is a duplicate. Only a whole copy of a pass the source then
+// cleared away keeps the destination (docs/reshade-sbs.md, Selecting scene depth).
+static void check_transfer_lineage()
+{
+	const resource scene { 0x1000 }, history { 0x2000 }, msaa { 0x3000 }, small { 0x4000 }, buffer { 0x5000 };
+	generic_depth_device_data device;
+	const auto track = [&](resource value, uint32_t width, uint32_t height, uint16_t samples) {
+		depth_stencil_resource info;
+		info.desc.type = resource_type::texture_2d;
+		info.desc.texture = { width, height, 1, 1, format::r32_typeless, samples };
+		info.identity = value.handle;
+		device.depth_stencil_resources.emplace(value, info);
+	};
+	track(scene, 1920, 1080, 1); track(history, 1920, 1080, 1); track(msaa, 1920, 1080, 4); track(small, 960, 540, 1);
+	enum class op { draw, clear, copy, partial };
+	struct step
+	{
+		op kind;
+		resource target, source;
+		step(op k, resource t, resource s = {}) : kind(k), target(t), source(s) {}
+	};
+	// Records the steps into consecutive recordings (one per group) executed in
+	// order, as on_execute_primary merges them, then resolves the queue.
+	const auto run = [&](const std::initializer_list<std::initializer_list<step>> &groups) {
+		state_tracking queue(true);
+		for (const auto &group : groups)
+		{
+			state_tracking list(false);
+			for (const auto &s : group)
+			{
+				auto &stats = list.stats_per_used_depth_stencil[s.target];
+				if (s.kind == op::draw) { stats.total.observed_work = true; ++stats.total.drawcalls; stats.observe_draw(list.position()); }
+				else if (s.kind == op::clear) { stats.clear_zero = true; stats.observe_depth_clear(device_api::d3d12, 0, true, list.position()); }
+				else
+				{
+					stats.total.observed_work = true; ++stats.total.scene_writes;
+					stats.observe_transfer(s.source, list.position(), s.kind == op::copy);
+				}
+			}
+			queue.merge(list);
+		}
+		resolve_transfer_lineage(queue, device);
+		return queue.stats_per_used_depth_stencil;
+	};
+	const auto active = [](const auto &stats, resource value) { return stats.count(value) && stats.at(value).total.has_work(); };
+	auto frame = run({{{op::copy, history, scene}, {op::clear, scene}, {op::draw, scene}}});
+	require_snapshot(!frame.count(history) && active(frame, scene),
+		"A history copy made before its source drew stayed current depth, or left its destination touched");
+	frame = run({{{op::clear, history}, {op::copy, history, scene}, {op::clear, scene}, {op::draw, scene}}});
+	require_snapshot(frame.count(history) && !active(frame, history) && frame.at(history).transfer_alias && frame.at(history).clear_zero,
+		"A history reset (clear, then copy) lost its clear or kept its copy as activity");
+	frame = run({{{op::clear, scene}, {op::draw, scene}}, {{op::copy, history, scene}}});
+	require_snapshot(!active(frame, history) && active(frame, scene), "A duplicate of depth its source still holds stayed current depth");
+	frame = run({{{op::clear, scene}, {op::draw, scene}, {op::copy, history, scene}}, {{op::clear, scene}, {op::draw, scene}}});
+	const auto &kept = frame.at(history);
+	require_snapshot(active(frame, history) && !kept.transfer_alias && kept.clear_zero,
+		"A whole copy of a pass its source cleared away lost its activity or the source's clear convention");
+	frame = run({{{op::clear, scene}, {op::draw, scene}, {op::partial, history, scene}, {op::clear, scene}, {op::draw, scene}}});
+	require_snapshot(!active(frame, history), "A partial copy of a pass was preferred over a source that drew");
+	frame = run({{{op::copy, history, scene}}});
+	require_snapshot(!active(frame, history), "A copy of a source with no work in this queue stayed current depth");
+	frame = run({{{op::draw, msaa}, {op::copy, history, msaa}}, {{op::draw, small}, {op::copy, history, small}}});
+	require_snapshot(active(frame, history), "A copy from a non-candidate or another geometry lost its activity");
+	frame = run({{{op::draw, msaa}, {op::copy, history, scene}, {op::copy, history, buffer}}});
+	require_snapshot(active(frame, history), "A later copy from a non-depth source lost its activity");
+	frame = run({{{op::copy, history, scene}, {op::draw, history}, {op::draw, scene}}});
+	require_snapshot(active(frame, history), "A destination that also drew lost its activity");
+}
+
 static void check_depth_snapshot_contract()
 {
 	check_candidate_shape_table();
 	check_capture_extent();
+	check_transfer_lineage();
 
 	// Candidate counters follow the capture-owner count (or the opt-in trace).
 	generic_depth_device_data demand_device;

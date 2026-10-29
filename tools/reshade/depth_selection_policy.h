@@ -324,32 +324,43 @@ namespace sunshine_depth {
         pending_ = {};
     }
 
+    // What a capture set did on one Present: `active`, work that makes its
+    // end-of-frame copy current (raster, mesh or a transfer that is depth of
+    // its own); `drew`, raster or mesh work only.
+    struct set_presence {
+      bool active = false, drew = false;
+    };
+
     // Present coverage, reported once per depth-active Present after current-copy
-    // routing. `incumbent` is the routed anchor, `current` whether this Present
-    // got a ready current copy from the anchor's capture set and `rastered`
-    // whether a member of that set drew depth on it. set_rastered(id) answers the
-    // same for each other candidate's prospective capture set. Only the latest
-    // frame of each kind is kept; a comparison judges the frames since its own
-    // start, so there is no window, count or threshold here.
-    template <class SetRastered>
-    void observe_present(std::uint64_t frame, std::uint64_t incumbent, bool current, bool rastered, SetRastered &&set_rastered) {
+    // routing. `incumbent` is the routed anchor (0: none), `current` whether this
+    // Present got a ready current copy from the anchor's capture set and `anchor`
+    // what that set did. presence(id) answers the same for each candidate's
+    // prospective capture set. Only the latest frame of each kind is kept; a
+    // comparison judges the frames since its own start, so there is no window,
+    // count or threshold here.
+    template <class SetPresence>
+    void observe_present(std::uint64_t frame, std::uint64_t incumbent, bool current, set_presence anchor, SetPresence &&presence) {
       if (incumbent != coverage_incumbent_) {
         for (auto &item : candidates_)
           item.second.coverage = {};
         coverage_incumbent_ = incumbent;
       }
-      // A drawn Present without a usable copy is a capture fault, not a gap in
-      // the incumbent's rendering cadence; it neither blocks nor favors others.
-      const bool uncovered = !current && !rastered;
+      // A Present on which the anchor's set had current-copy work but no usable
+      // copy is a capture fault, not a gap in the incumbent's rendering cadence;
+      // it neither blocks nor favors others.
+      const bool uncovered = !current && !anchor.active;
       if (!incumbent || (!current && !uncovered))
         return;
       for (auto &item : candidates_) {
         if (item.first == incumbent)
           continue;
-        const bool drew = set_rastered(item.first);
-        if (current && !drew)
+        const auto set = presence(item.first);
+        // Missing is judged by current-copy work, so a set fed by a copy or
+        // resolve every Present is not blocked; covering a gap needs a draw,
+        // so a copy can never earn a coverage win.
+        if (current && !set.active)
           item.second.coverage.missed = frame;
-        else if (uncovered && drew)
+        else if (uncovered && set.drew)
           item.second.coverage.filled = frame;
       }
     }
@@ -528,9 +539,9 @@ namespace sunshine_depth {
     };
 
     // Latest depth-active Presents, relative to the routed incumbent, where this
-    // candidate's prospective capture set did not draw while the incumbent
-    // showed current depth (missed), or drew while the incumbent's set neither
-    // drew nor had a current copy (filled).
+    // candidate's prospective capture set had no current-copy work while the
+    // incumbent showed current depth (missed), or drew while the incumbent's
+    // set had neither current-copy work nor a current copy (filled).
     struct coverage_marks {
       std::uint64_t missed = 0, filled = 0;
     };

@@ -93,6 +93,18 @@ namespace sunshine_depth_capture {
     }
   };
 
+  // Whether the capture set the budget would route if `candidate` became the
+  // anchor (itself and its same-geometry qualified peers) has a member among
+  // `ids`: alternating A/B or A/B/C allocations count together for Present
+  // coverage. Pure and allocation-bounded by the observations.
+  inline bool prospective_set_contains(std::uint64_t candidate, const std::vector<source_observation> &observations,
+      const std::vector<std::uint64_t> &ids) {
+    const auto contains = [&ids](std::uint64_t id) { return std::find(ids.begin(), ids.end(), id) != ids.end(); };
+    if (contains(candidate)) return true;
+    const auto set = budget{}.update(candidate, observations, false);
+    return std::any_of(set.members.begin(), set.members.begin() + set.count, contains);
+  }
+
   // Immutable result of capture ownership for one native present. All handles
   // are borrowed callback-scoped identities; this value performs no GPU work.
   struct capture_record {

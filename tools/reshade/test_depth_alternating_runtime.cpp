@@ -8,7 +8,7 @@
 
 namespace {
   struct rotation_fixture:raw_runtime_fixture {
-    enum class cadence { single,abc,aabb,offturn,missing,concurrent,interrupted,moving,auxiliary };
+    enum class cadence { single,abc,aabb,offturn,offturn_history,missing,concurrent,interrupted,moving,auxiliary,copy_history,copy_end,copy_rescue };
     using action_t=BOOL (*)(api::effect_runtime *);
     native_game3d_observer game3d{*this};
     // What the native render of the latest Present consumed.
@@ -22,11 +22,11 @@ namespace {
     float blend() const {return latest.parameters.strength_blend;}
     std::unique_ptr<target_t> third;
     std::vector<std::unique_ptr<target_t>> unrelated;
-    com_ptr<ID3D12Resource> offturn_copy; // Not a depth-stencil, so never a depth candidate.
     cadence mode=cadence::single;
     unsigned single_role=1,phase_present=0,drawn=0,marker_sequence=0;
     unsigned raster_mask=0;
     std::uint64_t movement_started=0;
+    unsigned copied_frames=0;
     bool drift=false;
     std::uint16_t marker=0x3400;
     std::array<std::uint64_t,3> lifetimes{},layouts{};
@@ -104,10 +104,57 @@ namespace {
       for(unsigned i=0;i<4;++i)commands->DrawInstanced(3,1,0,0);
       commands->OMSetRenderTargets(0,nullptr,FALSE,nullptr);
     }
+    void copy_depth(target_t &from,target_t &to){
+      transition(commands.p,from.texture.p,D3D12_RESOURCE_STATE_DEPTH_WRITE,D3D12_RESOURCE_STATE_COPY_SOURCE);
+      transition(commands.p,to.texture.p,D3D12_RESOURCE_STATE_DEPTH_WRITE,D3D12_RESOURCE_STATE_COPY_DEST);
+      commands->CopyResource(to.texture.p,from.texture.p);
+      transition(commands.p,to.texture.p,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_DEPTH_WRITE);
+      transition(commands.p,from.texture.p,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    }
+    void clear_depth(target_t &target){
+      const auto dsv=target.heap->GetCPUDescriptorHandleForHeapStart();
+      commands->ClearDepthStencilView(dsv,D3D12_CLEAR_FLAG_DEPTH,target.clear_depth,0,0,nullptr);
+    }
+    // A game that copies its scene depth into another depth-stencil allocation
+    // of the same geometry, allocated before the scene (the lower lifetime
+    // identity). copy_history: a history copy at the start of the frame, before
+    // the scene draws (the destination holds the previous frame), with the
+    // history cleared on its first six frames as an engine reset does.
+    // copy_end: the same copy after the scene draw. copy_rescue: the scene is
+    // copied out, then its own allocation is cleared and reused for a small
+    // first-person pass, so only the destination holds this frame's scene.
+    // Every frame draws a new center depth, so a copy one frame old shows in
+    // the raw center of the captured backup (pixels()).
+    void draw_copy_case(){
+      const unsigned pattern=100+8*(copied_frames%16);
+      scene->pattern=decoy->pattern=pattern;
+      if(mode==cadence::copy_history){
+        if(copied_frames<6)clear_depth(*decoy);
+        copy_depth(*scene,*decoy);draw(*scene);
+      }else if(mode==cadence::copy_end){draw(*scene);copy_depth(*scene,*decoy);}
+      else{
+        draw(*scene);copy_depth(*scene,*decoy);
+        const auto dsv=scene->heap->GetCPUDescriptorHandleForHeapStart();
+        commands->OMSetRenderTargets(0,nullptr,FALSE,&dsv);
+        clear_depth(*scene);
+        commands->SetGraphicsRootSignature(root.p);commands->SetPipelineState(depth32_pipeline.p);
+        commands->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        const D3D12_VIEWPORT viewport{0,0,float(width),float(height),0,1};
+        const D3D12_RECT scissor{LONG(width*3/4),LONG(height*3/4),LONG(width),LONG(height)};
+        commands->RSSetViewports(1,&viewport);commands->RSSetScissorRects(1,&scissor);
+        struct {float w,h;unsigned pattern;} constants{float(width),float(height),19};
+        commands->SetGraphicsRoot32BitConstants(0,3,&constants,0);
+        commands->DrawInstanced(3,1,0,0);
+        commands->OMSetRenderTargets(0,nullptr,FALSE,nullptr);
+      }
+      ++copied_frames;
+    }
     void draw_depth(){
       drawn=0;raster_mask=0;
       if(mode==cadence::single)drawn=single_role;
-      else if(mode==cadence::abc || mode==cadence::offturn)drawn=phase_present%3+1;
+      else if(mode==cadence::abc || mode==cadence::offturn || mode==cadence::offturn_history)drawn=phase_present%3+1;
+      else if(mode==cadence::copy_history || mode==cadence::copy_end)drawn=1;
+      else if(mode==cadence::copy_rescue)drawn=2; // The destination holds this frame's scene.
       else if(mode==cadence::aabb)drawn=(phase_present/2)%2+1;
       else if(mode==cadence::concurrent || mode==cadence::moving || mode==cadence::auxiliary)drawn=1;
       else if(mode==cadence::interrupted)drawn=phase_present%2 ? 0 : 1;
@@ -129,23 +176,23 @@ namespace {
         raster_mask=7;return;
       }
       if(mode==cadence::auxiliary){draw_auxiliary_scene();return;}
+      if(mode==cadence::copy_history || mode==cadence::copy_end || mode==cadence::copy_rescue){
+        raster_mask=1;draw_copy_case();return;
+      }
       const auto draw_unrelated=[&]{
         for(unsigned i=0;i<unrelated.size();++i)
           draw(*unrelated[(i+phase_present)%unrelated.size()]);
       };
       if(!unrelated.empty() && phase_present%2)draw_unrelated();
-      auto &current=member(drawn);draw(current);
-      if(mode==cadence::offturn){
-        // Real transfer activity in the frame that gives no other member work:
-        // the drawn member is read as a copy source into a texture that is not
-        // a depth-stencil. A transfer into another live member would make the
-        // end-of-frame copy capture that member as a current copy of this
-        // frame's scene, so only the drawn member has raster or transfer work.
-        if(!offturn_copy.p)texture(offturn_copy,DXGI_FORMAT_R32_TYPELESS,D3D12_RESOURCE_STATE_COPY_DEST);
-        transition(commands.p,current.texture.p,D3D12_RESOURCE_STATE_DEPTH_WRITE,D3D12_RESOURCE_STATE_COPY_SOURCE);
-        commands->CopyResource(offturn_copy.p,current.texture.p);
-        transition(commands.p,current.texture.p,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_DEPTH_WRITE);
-      }
+      auto &current=member(drawn);
+      // Off-turn transfers into another live member of the same geometry: a
+      // copy of the drawn member after its draw (offturn) or, as a history
+      // buffer is filled, of its previous contents before its draw
+      // (offturn_history). Neither is depth of the destination's own: the
+      // drawn member stays the only current copy of this frame on every Present.
+      if(mode==cadence::offturn_history)copy_depth(current,member(drawn%3+1));
+      draw(current);
+      if(mode==cadence::offturn)copy_depth(current,member(drawn%3+1));
       if(!unrelated.empty() && !(phase_present%2))draw_unrelated();
     }
     void update_marker(){
@@ -341,7 +388,7 @@ namespace {
         for(unsigned other=0;other<role;++other)
           require(lifetimes[role]!=lifetimes[other],"Crowded rotating resources share a lifetime identity");
       }
-      std::puts("PASS crowded startup: 12 older flat active buffers, fresh ABC member bases, off-turn copy-source reads, 90 current-color/current-depth/full-stereo frames");
+      std::puts("PASS crowded startup: 12 older flat active buffers, fresh ABC member bases, off-turn copies into live members, 90 current-color/current-depth/full-stereo frames");
     }
     void check_flat_startup(){
       // A has rendered the same .5 plane since the first game draw, before
@@ -438,6 +485,20 @@ namespace {
       stable("actual-full-crop-return",30);missing_then_recover();
       std::puts("PASS layout: stable captured partial view ignores unrelated auxiliary activity, real crop change starts a new basis");
     }
+    // The copy destination was allocated first (the lower lifetime identity).
+    // The scene's own draw, or in copy_rescue the destination holding the pass
+    // its source cleared away, must be the captured current depth on every
+    // Present (tick, pixels: the raw center of this frame's pattern), and the
+    // camera must reach full stereo, which in copy_rescue needs the source's
+    // clear convention for the destination's depth direction.
+    void check_copies(cadence kind,const char *label){
+      // The game has drawn this case since its first frame (run()), so the
+      // history reset happened long before effects loaded.
+      set_mode(kind);
+      warm(label,false);stable(label,60,false);
+      require(stereo_observed[drawn-1]>0,"Copy case never produced actual stereo pixels");
+      std::printf("PASS %s: the copy's real source is current depth on every Present\n",label);
+    }
     void finish(){
       render_tracked_depth={};
     }
@@ -445,7 +506,13 @@ namespace {
       create_pipeline();normal=false;
       if(test_case=="--crowded-rotating-startup")
         for(unsigned i=0;i<12;++i)unrelated.push_back(target(width,height,1,19));
-      scene=target(width,height,1,14);decoy=target(width,height,1,15);third=target(width,height,1,18);
+      const bool copies=test_case=="--copy-history" || test_case=="--copy-end" || test_case=="--copy-rescue";
+      if(copies){decoy=target(width,height,1,15);scene=target(width,height,1,14);}
+      else{scene=target(width,height,1,14);decoy=target(width,height,1,15);}
+      third=target(width,height,1,18);
+      if(test_case=="--copy-history")set_mode(cadence::copy_history);
+      if(test_case=="--copy-end")set_mode(cadence::copy_end);
+      if(test_case=="--copy-rescue")set_mode(cadence::copy_rescue);
       if(test_case=="--overlap")for(unsigned role=1;role<=3;++role)member(role).pattern=14;
       if(test_case=="--interrupted-startup")set_mode(cadence::interrupted);
       if(test_case=="--moving-startup")set_mode(cadence::moving);
@@ -475,6 +542,9 @@ namespace {
         else if(test_case=="--crowded-rotating-startup")check_crowded_startup();
         else if(test_case=="--flat-startup")check_flat_startup();
         else if(test_case=="--layout")check_layout();
+        else if(test_case=="--copy-history")check_copies(cadence::copy_history,"copy-history-before-draw");
+        else if(test_case=="--copy-end")check_copies(cadence::copy_end,"copy-after-draw");
+        else if(test_case=="--copy-rescue")check_copies(cadence::copy_rescue,"copy-of-cleared-pass");
         else throw std::runtime_error("Unknown isolated rotation case");
         finish();return;
       }
@@ -482,6 +552,7 @@ namespace {
       set_mode(cadence::abc);warm("ABC-independent-warmup");stable("ABC-independent",90);
       set_mode(cadence::aabb);warm("AABB-independent-warmup");stable("AABB-independent",64);
       set_mode(cadence::offturn);warm("offturn-transfer-warmup");stable("offturn-transfer",60);
+      set_mode(cadence::offturn_history);warm("offturn-history-warmup");stable("offturn-history",60);
 
       const auto old_b=lifetimes[1];decoy.reset();decoy=target(width,height,1,14);set_mode(cadence::abc);
       warm("member-B-replacement",true,[&](std::uint64_t elapsed){
@@ -524,7 +595,7 @@ namespace {
       // H/t0 and actual eye-difference traces support continuity review; no tiny
       // post-hoc threshold is invented for independently timed controllers.
       for(unsigned r=0;r<3;++r)require(stereo_observed[r]>0,"A member never produced nonzero actual stereo separation");
-      std::puts("PASS actual rotating sources: ABC/AABB, independent raw bases, current-color SBS, off-turn copy-source reads, lifetime/layout reset, gaps, same-basis trajectory");
+      std::puts("PASS actual rotating sources: ABC/AABB, independent raw bases, current-color SBS, off-turn and history copies into live members, lifetime/layout reset, gaps, same-basis trajectory");
       finish();
     }
   };
@@ -532,11 +603,12 @@ namespace {
 
 int main(int argc,char **argv){
   std::setvbuf(stdout,nullptr,_IONBF,0);
-  if(argc!=5 && argc!=6){std::fputs("usage: depth_alternating_runtime <official.dll> <frozenShaders> <test.addon64> <fresh-output> [--overlap|--interrupted-startup|--moving-startup|--rotating-startup|--crowded-rotating-startup|--flat-startup|--layout]\n",stderr);return 2;}
+  if(argc!=5 && argc!=6){std::fputs("usage: depth_alternating_runtime <official.dll> <frozenShaders> <test.addon64> <fresh-output> [--overlap|--interrupted-startup|--moving-startup|--rotating-startup|--crowded-rotating-startup|--flat-startup|--layout|--copy-history|--copy-end|--copy-rescue]\n",stderr);return 2;}
   std::thread([]{Sleep(360000);std::fputs("FAIL rotation watchdog\n",stderr);TerminateProcess(GetCurrentProcess(),124);}).detach();
   try{
     const std::string test_case=argc==6 ? argv[5] : "";
-    require(test_case.empty() || test_case=="--overlap" || test_case=="--interrupted-startup" || test_case=="--moving-startup" || test_case=="--rotating-startup" || test_case=="--crowded-rotating-startup" || test_case=="--flat-startup" || test_case=="--layout","Unknown isolated rotation case");
+    require(test_case.empty() || test_case=="--overlap" || test_case=="--interrupted-startup" || test_case=="--moving-startup" || test_case=="--rotating-startup" || test_case=="--crowded-rotating-startup" || test_case=="--flat-startup" || test_case=="--layout" ||
+      test_case=="--copy-history" || test_case=="--copy-end" || test_case=="--copy-rescue","Unknown isolated rotation case");
     select_native_boot();
     width=3840;height=2160;require(!fs::exists(fs::absolute(argv[4])),"Fresh rotation output required");
     rotation_fixture f;f.runtime_directory=fs::absolute(argv[4]);

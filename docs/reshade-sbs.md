@@ -6134,9 +6134,19 @@ usable copy when qualified, otherwise another qualified retained source's curren
 depth resources rendering in the same present is not itself a rejection. Ambiguous provenance of
 the actual copy, wrong runtime/present, missing copy, or a newly assigned backup without its own
 capture still rejects that record. A copy into a tracked depth-stencil allocation is activity
-for that destination, so the destination's end-of-frame copy is a current copy of whatever was
-transferred there (an open gap, see [scene-depth selection limits](#scene-depth-selection-limits)).
-No relationship to the swapchain buffer index is assumed.
+for that destination only when it is depth of the destination's own. On D3D11 and D3D12, each
+queue's work is judged in execution order at Present: when the destination drew nothing itself
+and the frame's last copy into it came from a candidate of the same size and format (a
+single-sample, single-level texture), the copy is not activity. Either it was made before that
+source drew in the frame (a history copy, older depth), or the source still holds the same or
+newer depth at the end of the frame (a duplicate, or a partial copy). The destination is then
+left as its last own work left it (or, if the game also cleared it, treated as cleared), so it
+is neither captured as current depth nor selected; the source is. The one exception is a whole
+copy of a pass the source drew and then cleared away (a full clear after the copy): only the
+destination still holds that depth, so it stays a candidate and takes the source's clear
+convention for its depth direction. A copy from anything else (a buffer, an MSAA, mipped or
+array depth, another size or format, or a source whose work is on another queue) keeps its
+activity. No relationship to the swapchain buffer index is assumed.
 
 Capture layout follows the actual captured crop: the largest viewport drawn into the source since
 its last full depth clear in the frame, in execution order across command lists. On D3D10, D3D11
@@ -6163,17 +6173,23 @@ artificial preference. A full-resolution buffer still has to pass the content ch
 
 Coverage over Presents ranks after the completeness class and before resolution and histogram
 breadth. After current-copy routing on each depth-active Present, selection records, relative to
-the routed anchor, whether each other candidate's prospective capture set drew depth: the
-candidate with the same-geometry qualified peers the capture budget would route with it, so
-alternating A/B or A/B/C allocations count together. Raster and mesh work count as drawing;
-clears and transfers do not. A challenger whose set missed a Present on which the anchor showed
-current depth cannot win on resolution, histogram breadth or Presents it covers, because
-promoting it would leave that Present flat; only materially fuller support can still replace the
-anchor. A comparable challenger (same or higher completeness class, within the quality
-tolerance) whose set drew on Presents where the anchor's set neither drew nor had a current copy
-replaces the anchor after three fresh paired comparisons, and every paired interval must contain
-such a Present, so one missed anchor Present supplies at most one win. A drawn Present without a
-usable copy is a capture fault, not a gap in rendering cadence, and counts for neither side.
+the routed anchor, what each other candidate's prospective capture set did: the candidate with
+the same-geometry qualified peers the capture budget would route with it, so alternating A/B or
+A/B/C allocations count together. A set misses a Present when it had no work that makes an
+end-of-frame copy current (raster or mesh work, or a copy that is depth of its own, above), so a
+set fed by a resolve from an MSAA scene every Present is not missing any; only raster and mesh
+work cover a gap, so a copy never earns a coverage win. Clears do not count. A challenger whose
+set missed a Present on which the anchor showed current depth cannot win on resolution,
+histogram breadth or Presents it covers, because promoting it would leave that Present flat;
+only materially fuller support can still replace the anchor. A comparable challenger (same or
+higher completeness class, within the quality tolerance) whose set drew on Presents where the
+anchor's set neither had such work nor a current copy replaces the anchor after three fresh
+paired comparisons, and every paired interval must contain such a Present, so one missed anchor
+Present supplies at most one win. A Present on which the anchor's set had such work but no
+usable copy is a capture fault, not a gap in rendering cadence, and counts for neither side;
+these records survive Presents recorded while candidate counters were paused (an API depth
+handover), where work is still known but a draw is not, so such a Present can mark a miss but
+never a covered gap.
 Evidence is judged from the challenger's oldest comparison capture onward, with no frame window
 or count. A larger target that draws only every second or third Present therefore cannot
 displace depth drawn on every Present, promotes once it draws every Present, and loses those
@@ -6248,7 +6264,8 @@ See the [selector installation and validation instructions](../tools/reshade/REA
 Nothing overrides selection: there is no list, pin or saved filter. Automatic selection checks current
 activity, source lifetime and content every frame; a different source or raw basis still requires
 its own calibration. Raster and mesh draws, plus supported copies/resolves into the sampled depth
-subresource, count as activity without inventing vertex counts. Known compute/ray dispatches,
+subresource that are depth of the destination's own (above), count as activity without inventing
+vertex counts. Known compute/ray dispatches,
 zero-count calls and explicitly empty transfer regions do not imply writes to the bound DSV.
 ReShade 6.8 reports D3D12 ExecuteIndirect commands as unknown, so those retain their existing
 bound-DSV activity treatment; their command signature is not observed. Clears alone do not count
@@ -6295,14 +6312,13 @@ accepted consequences:
   depth at all. Installation never edits `[DEPTH]` and leaves the stale `[SUNSHINE_DEPTH]`
   auto-select line untouched; both are inert.
 
-One further gap is open, not accepted. It exists at the shipping default independently of the
-removed controls and awaits an owner decision:
-
-- **Copy destinations are captured as current sources.** A copy into another tracked
-  depth-stencil allocation counts as activity for that destination, so the end-of-frame copy also
-  captures the destination, under its own identity and raw basis. Its pixels are whatever the game
-  copied there, which can be a history copy rather than the frame's scene depth; nothing marks the
-  source as transfer-only, and selection judges it by content like any other.
+- **Copies of scene depth.** A copy of another same-geometry candidate is never current depth of
+  its destination, except a whole copy of a pass the source then cleared away (see
+  [Selecting scene depth](#selecting-scene-depth)). A game whose only copy of the scene depth is
+  partial, or is made on another queue than the one that drew it, then has none Generic can
+  show while the source holds something else at Present: that frame fails safe to mono. A copy
+  from a buffer, an MSAA or mipped depth, or another size or format keeps its activity and is
+  judged by its content like any buffer.
 
 ## Activation and recovery
 

@@ -115,10 +115,30 @@ namespace {
     auto changed = slots.update(100, live, false);
     require(changed.epoch > first.epoch && changed.members[0] == 100, "New anchor outside budget did not replace generation");
   }
+  // Present coverage judges a candidate by the capture set it would route as
+  // the anchor: alternating same-geometry qualified allocations count
+  // together; another geometry or an unqualified allocation does not.
+  void prospective_sets() {
+    auto other = source(9); other.shape.width = other.shape.extent_width = 1920; other.shape.height = other.shape.extent_height = 1080;
+    const std::vector<source_observation> pair {source(1), source(2)}, triple {source(1), source(2), source(3), other},
+      unqualified {source(1), source(2, false)};
+    require(prospective_set_contains(1, pair, {1}) && prospective_set_contains(1, pair, {2}) && prospective_set_contains(2, pair, {1}),
+      "An A/B capture set was judged one member at a time");
+    for (std::uint64_t id : {1u, 2u, 3u})
+      require(prospective_set_contains(id, triple, {3}) && prospective_set_contains(id, triple, {1}),
+        "An A/B/C capture set was judged one member at a time");
+    require(!prospective_set_contains(9, triple, {1, 2, 3}) && !prospective_set_contains(1, triple, {9}),
+      "Another geometry joined a prospective capture set");
+    require(!prospective_set_contains(1, unqualified, {2}) && prospective_set_contains(2, unqualified, {1}),
+      "An unqualified allocation joined another candidate's prospective set, or lost its own anchor's");
+    require(!prospective_set_contains(1, pair, {}) && prospective_set_contains(4, pair, {4}),
+      "A set without members among the ids drew, or a candidate outside the observations lost its own presence");
+  }
 }
 int main() {
   try {
     allocation_is_not_selection(); overlapping_copies_keep_anchor(); exact_currentness(); retained_lifetimes_and_budget();
-    std::puts("depth_capture_policy: 4 cases passed"); return 0;
+    prospective_sets();
+    std::puts("depth_capture_policy: 5 cases passed"); return 0;
   } catch (const std::exception &error) { std::fprintf(stderr, "%s\n", error.what()); return 1; }
 }

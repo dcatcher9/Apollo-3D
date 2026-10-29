@@ -149,6 +149,18 @@ struct depth_stencil_frame_stats
 	// scene's crop; a trailing clear with no draw after it keeps the extent.
 	bool viewport_restart_pending = false; // A full depth clear with no draw after it yet.
 	bool viewport_restarted = false; // The extent covers only work after a full depth clear.
+	// Execution-order positions of this frame's work (state_tracking::position,
+	// rebased when a recording merges into the one it executes in); zero: none.
+	// They are positions, not counters, so they are kept while counters are off.
+	uint64_t first_draw = 0, last_full_clear = 0;
+	// The last transfer into this resource: its source (any resource) and
+	// position, and whether it replaced the whole sampled plane.
+	resource transfer_source = {};
+	uint64_t transfer_position = 0;
+	bool transfer_full = false;
+	// This frame's transfer activity was removed (resolve_transfer_lineage):
+	// it was a copy of a candidate that holds the same or newer depth.
+	bool transfer_alias = false;
 
 	void limit_tracking(depth_tracking_demand demand)
 	{
@@ -172,11 +184,32 @@ struct depth_stencil_frame_stats
 	// covers the current viewport and scissor, glClear the scissor and a Vulkan
 	// render pass's CLEAR its render area, none of which ReShade reports: there
 	// the crop keeps the largest viewport drawn in the frame.
-	void observe_depth_clear(device_api api, uint32_t rect_count, bool sampled_plane)
+	void observe_depth_clear(device_api api, uint32_t rect_count, bool sampled_plane, uint64_t position = 0)
 	{
 		if (rect_count == 0 && sampled_plane &&
 			(api == device_api::d3d10 || api == device_api::d3d11 || api == device_api::d3d12))
+		{
 			observe_full_clear();
+			last_full_clear = position;
+		}
+	}
+	// Raster or mesh work at this position.
+	void observe_draw(uint64_t position)
+	{
+		if (!first_draw) first_draw = position;
+	}
+	void observe_transfer(resource source, uint64_t position, bool full)
+	{
+		transfer_source = source; transfer_position = position; transfer_full = full;
+	}
+	// Positions of a recording that executes after everything already merged.
+	void merge_positions(const depth_stencil_frame_stats &later, uint64_t offset)
+	{
+		if (later.first_draw && !first_draw) first_draw = later.first_draw + offset;
+		if (later.last_full_clear) last_full_clear = later.last_full_clear + offset;
+		if (later.transfer_position)
+			observe_transfer(later.transfer_source, later.transfer_position + offset, later.transfer_full);
+		transfer_alias |= later.transfer_alias;
 	}
 };
 
@@ -198,6 +231,9 @@ struct __declspec(uuid("806c3b54-baf6-46a7-a72a-28c629143d84")) state_tracking
 	uint64_t current_depth_lifetime = 0;
 	resource render_pass_depth = {};
 	bool render_pass_depth_uncertain = false;
+	// Execution order of the depth work recorded here (draws, clears and
+	// transfers), for depth_stencil_frame_stats' positions.
+	uint64_t ordinal = 0;
 	std::unordered_map<resource, depth_stencil_frame_stats, resource_hash> stats_per_used_depth_stencil;
 	explicit state_tracking(bool is_queue) : is_queue(is_queue)
 	{
@@ -205,6 +241,7 @@ struct __declspec(uuid("806c3b54-baf6-46a7-a72a-28c629143d84")) state_tracking
 		stats_per_used_depth_stencil.reserve(32);
 	}
 
+	uint64_t position() { return ++ordinal; }
 	void reset()
 	{
 		stats_per_used_depth_stencil.clear();
@@ -212,11 +249,13 @@ struct __declspec(uuid("806c3b54-baf6-46a7-a72a-28c629143d84")) state_tracking
 		current_depth_lifetime = 0;
 		render_pass_depth = {};
 		render_pass_depth_uncertain = false;
+		ordinal = 0;
 	}
 	void reset_on_present()
 	{
 		assert(is_queue);
 		stats_per_used_depth_stencil.clear();
+		ordinal = 0;
 	}
 
 	void merge(const state_tracking &source, depth_tracking_demand demand = {})
@@ -228,10 +267,14 @@ struct __declspec(uuid("806c3b54-baf6-46a7-a72a-28c629143d84")) state_tracking
 		if (source.stats_per_used_depth_stencil.empty())
 			return;
 
+		// The source's work executes after everything merged here so far.
+		const uint64_t offset = ordinal;
+		ordinal += source.ordinal;
 		stats_per_used_depth_stencil.reserve(source.stats_per_used_depth_stencil.size());
 		for (const auto &[depth_stencil, source_stats] : source.stats_per_used_depth_stencil)
 		{
 			depth_stencil_frame_stats &stats = stats_per_used_depth_stencil[depth_stencil];
+			stats.merge_positions(source_stats, offset);
 			stats.limit_tracking(demand);
 			stats.total.observed_work |= source_stats.total.has_work();
 			if (demand.counters)
@@ -709,12 +752,13 @@ bool on_draw(command_list *cmd_list, uint32_t vertices, uint32_t instances, uint
 bool on_draw_indexed(command_list *cmd_list, uint32_t indices, uint32_t instances, uint32_t, int32_t, uint32_t);
 bool on_draw_indirect(command_list *cmd_list, indirect_command type, resource, uint64_t, uint32_t draw_count, uint32_t);
 bool on_dispatch_mesh(command_list *cmd_list, uint32_t groups_x, uint32_t groups_y, uint32_t groups_z);
-bool on_copy_resource(command_list *cmd_list, resource, resource dest);
-bool on_copy_texture_region(command_list *cmd_list, resource, uint32_t, const subresource_box *source_box,
+bool on_copy_resource(command_list *cmd_list, resource source, resource dest);
+bool on_copy_texture_region(command_list *cmd_list, resource source, uint32_t source_subresource, const subresource_box *source_box,
 	resource dest, uint32_t subresource, const subresource_box *dest_box, filter_mode);
 bool on_copy_buffer_to_texture(command_list *cmd_list, resource, uint64_t, uint32_t, uint32_t,
 	resource dest, uint32_t subresource, const subresource_box *dest_box);
-bool on_resolve_texture_region(command_list *cmd_list, resource, uint32_t, const subresource_box *source_box,
-	resource dest, uint32_t subresource, uint32_t, uint32_t, uint32_t, format);
+bool on_resolve_texture_region(command_list *cmd_list, resource source, uint32_t source_subresource, const subresource_box *source_box,
+	resource dest, uint32_t subresource, uint32_t dest_x, uint32_t dest_y, uint32_t dest_z, format);
+void resolve_transfer_lineage(state_tracking &state, const generic_depth_device_data &device_data);
 sunshine_streamline::provider::source_status describe_streamline_source(effect_runtime *runtime);
 #endif

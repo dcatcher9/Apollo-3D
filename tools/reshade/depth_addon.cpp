@@ -510,27 +510,35 @@ static std::vector<sunshine_depth_capture::source_observation> capture_observati
 	return observations;
 }
 
-// Present coverage for content selection, after this Present's routing: whether
-// the anchor's capture set drew depth and gave a ready current copy, and which
-// other candidates' prospective capture sets drew depth. Raster and mesh work
-// count as drawing a Present; clears and transfers do not (docs/reshade-sbs.md,
-// Selecting scene depth).
+// Present coverage for content selection, after this Present's routing: what
+// the anchor's capture set did and whether it gave a ready current copy, and
+// what each candidate's prospective capture set did. Work that makes an
+// end-of-frame copy current (raster, mesh, or a transfer that is depth of its
+// own, resolve_transfer_lineage) decides a miss; only raster and mesh work
+// cover another source's gap (docs/reshade-sbs.md, Selecting scene depth).
+// Both survive a merge with counters off: work through observed_work, a draw
+// conservatively not at all.
 static void observe_present_coverage(generic_depth_data &data, uint64_t frame, const depth_selection_snapshot &snapshot)
 {
-	std::vector<uint64_t> drew;
+	std::vector<uint64_t> active, drew;
 	for (const auto &[value, info] : snapshot)
-		if (info.last_used_in_frame == frame && info.last_frame_stats.total.drew()) drew.push_back(info.identity);
-	const auto rastered = [&drew](uint64_t id) { return std::find(drew.begin(), drew.end(), id) != drew.end(); };
-	bool anchor_drew = false;
+	{
+		if (info.last_used_in_frame != frame) continue;
+		if (info.last_frame_stats.total.has_work()) active.push_back(info.identity);
+		if (info.last_frame_stats.total.drew()) drew.push_back(info.identity);
+	}
+	const auto contains = [](const std::vector<uint64_t> &ids, uint64_t id) { return std::find(ids.begin(), ids.end(), id) != ids.end(); };
+	sunshine_depth::selection_policy::set_presence anchor;
 	for (unsigned i = 0; i != data.captures.count; ++i)
-		anchor_drew = anchor_drew || rastered(data.captures.records[i].identity);
+	{
+		anchor.active = anchor.active || contains(active, data.captures.records[i].identity);
+		anchor.drew = anchor.drew || contains(drew, data.captures.records[i].identity);
+	}
 	const auto observations = capture_observations(data, snapshot);
-	data.selection.observe_present(frame, data.anchor_identity, data.capture_ready, anchor_drew, [&](uint64_t id) {
-		if (rastered(id)) return true;
-		// Alternating same-geometry allocations count together: the members the
-		// capture budget would route if this candidate became the anchor.
-		const auto set = sunshine_depth_capture::budget {}.update(id, observations, false);
-		return std::any_of(set.members.begin(), set.members.begin() + set.count, rastered);
+	data.selection.observe_present(frame, data.anchor_identity, data.capture_ready, anchor, [&](uint64_t id) {
+		return sunshine_depth::selection_policy::set_presence {
+			sunshine_depth_capture::prospective_set_contains(id, observations, active),
+			sunshine_depth_capture::prospective_set_contains(id, observations, drew)};
 	});
 }
 
@@ -1523,6 +1531,7 @@ SUNSHINE_DEPTH_ADDON_INTERNAL bool on_draw(command_list *cmd_list, uint32_t vert
 	const auto demand = tracking_demand(cmd_list->get_device());
 	stats.limit_tracking(demand);
 	stats.total.observed_work = true;
+	stats.observe_draw(state.position());
 	if (demand.counters)
 	{
 		stats.total.vertices += vertices * instances;
@@ -1558,6 +1567,7 @@ SUNSHINE_DEPTH_ADDON_INTERNAL bool on_draw_indirect(command_list *cmd_list, indi
 	const auto demand = tracking_demand(cmd_list->get_device());
 	stats.limit_tracking(demand);
 	stats.total.observed_work = true;
+	stats.observe_draw(state.position());
 	if (demand.counters)
 	{
 		stats.total.drawcalls += draw_count;
@@ -1623,7 +1633,7 @@ static bool on_clear_depth_stencil(command_list *cmd_list, resource_view dsv, co
 		// A full clear of the sampled plane erases the extent drawn so far; the
 		// next draw starts the capture crop again (observe_viewport). Only the
 		// D3D10/11/12 clears are known to cover the whole view.
-		stats.observe_depth_clear(cmd_list->get_device()->get_api(), rect_count, sampled_plane);
+		stats.observe_depth_clear(cmd_list->get_device()->get_api(), rect_count, sampled_plane, state.position());
 	}
 
 	return false;
@@ -1667,21 +1677,24 @@ static bool on_end_render_pass(command_list *cmd_list)
 }
 // Call under the queue-state lock when needed. These writes establish activity,
 // not useful contents or a vertex estimate; the existing histogram still qualifies them.
-static void record_scene_write(state_tracking &state, resource target, const viewport &view, depth_tracking_demand demand, bool mesh = false)
+static depth_stencil_frame_stats &record_scene_write(state_tracking &state, resource target, const viewport &view, depth_tracking_demand demand, bool mesh = false)
 {
-	if (target == 0) return;
 	auto &stats = state.stats_per_used_depth_stencil[target];
 	stats.limit_tracking(demand);
 	stats.total.observed_work = true;
+	if (mesh) stats.observe_draw(state.position());
 	if (demand.counters)
 	{
 		++stats.total.scene_writes;
 		stats.total.mesh_dispatches += mesh;
 	}
 	stats.observe_viewport(view);
+	return stats;
 }
 
-static void record_copied_depth(command_list *cmd_list, resource dest, uint32_t subresource = 0)
+// full: the transfer replaces the whole sampled plane (no source or
+// destination box, no destination offset).
+static void record_copied_depth(command_list *cmd_list, resource source, resource dest, uint32_t subresource, bool full)
 {
 	if (dest == 0 || subresource != 0) return; // The shader samples the first depth plane/level/layer.
 	auto *device_data = cmd_list->get_device()->get_private_data<generic_depth_device_data>();
@@ -1692,7 +1705,63 @@ static void record_copied_depth(command_list *cmd_list, resource dest, uint32_t 
 	if (found == device_data->depth_stencil_resources.end()) return; // Skip color and our sampling backups.
 	// A transfer is activity, not proof of a full raster viewport. In particular,
 	// ReShade can report a null destination box for a partial origin copy.
-	record_scene_write(state, dest, {}, tracking_demand(*device_data));
+	// Its source and position let on_present tell a copy of another candidate
+	// (resolve_transfer_lineage) from depth that exists nowhere else.
+	record_scene_write(state, dest, {}, tracking_demand(*device_data)).observe_transfer(source, state.position(), full);
+}
+
+// A destination whose only work this frame was a copy holds no depth of its
+// own. When the copy's source is a same-geometry candidate on the same queue,
+// the source holds the same or newer depth at the end of the frame: the copy
+// was made before the source drew this frame (a history copy, older depth), or
+// it duplicates depth the source still holds. Such a transfer stops counting
+// as activity, so the destination is neither captured as current depth nor
+// selected; the source is. With no clear of its own either, the destination
+// is left out of the frame, as if untouched: its allocation, its evidence and
+// its activity grace stay as its last own work left them, so a member of an
+// alternating set that receives a copy between its turns stays active. The
+// one exception is a whole copy of depth the
+// source drew and then cleared away (a full clear after the copy): only the
+// destination still holds that pass, so it stays a candidate and takes the
+// source's clear convention for its depth direction. A copy from anything
+// else (a buffer, an MSAA or mipped depth, another size or format, or a source
+// on another queue whose order is unknown and so not a lost pass) keeps
+// today's activity, as does a destination that also drew. Generic content
+// selection only (D3D11 and D3D12); the other APIs' draw-statistics picker
+// keeps ReShade's accounting.
+SUNSHINE_DEPTH_ADDON_INTERNAL void resolve_transfer_lineage(state_tracking &state, const generic_depth_device_data &device_data)
+{
+	std::array<resource, 8> untouched {};
+	size_t untouched_count = 0;
+	for (auto &[dest, stats] : state.stats_per_used_depth_stencil)
+	{
+		if (!stats.transfer_position || stats.first_draw) continue;
+		const auto target = device_data.depth_stencil_resources.find(dest);
+		const auto source = device_data.depth_stencil_resources.find(stats.transfer_source);
+		if (target == device_data.depth_stencil_resources.end() || source == device_data.depth_stencil_resources.end() ||
+			source == target || !content_supported(source->second.desc) ||
+			source->second.desc.texture.width != target->second.desc.texture.width ||
+			source->second.desc.texture.height != target->second.desc.texture.height ||
+			source->second.desc.texture.format != target->second.desc.texture.format) continue;
+		const auto found = state.stats_per_used_depth_stencil.find(stats.transfer_source);
+		const depth_stencil_frame_stats *producer = found == state.stats_per_used_depth_stencil.end() ? nullptr : &found->second;
+		if (stats.transfer_full && producer && producer->first_draw && producer->first_draw < stats.transfer_position &&
+			producer->last_full_clear > stats.transfer_position)
+		{
+			stats.clear_zero |= producer->clear_zero;
+			stats.clear_one |= producer->clear_one;
+			stats.clear_other |= producer->clear_other;
+			continue;
+		}
+		stats.total.observed_work = false;
+		stats.total.scene_writes = 0;
+		stats.transfer_alias = true;
+		if (!stats.clear_zero && !stats.clear_one && !stats.clear_other && untouched_count != untouched.size())
+			untouched[untouched_count++] = dest;
+	}
+	// More than the bounded list stay as clear-only frames: inactive, never current.
+	for (size_t i = 0; i != untouched_count; ++i)
+		state.stats_per_used_depth_stencil.erase(untouched[i]);
 }
 
 SUNSHINE_DEPTH_ADDON_INTERNAL bool on_dispatch_mesh(command_list *cmd_list, uint32_t groups_x, uint32_t groups_y, uint32_t groups_z)
@@ -1706,9 +1775,9 @@ SUNSHINE_DEPTH_ADDON_INTERNAL bool on_dispatch_mesh(command_list *cmd_list, uint
 	record_scene_write(state, state.current_depth_stencil, state.current_viewport, tracking_demand(cmd_list->get_device()), true);
 	return false;
 }
-SUNSHINE_DEPTH_ADDON_INTERNAL bool on_copy_resource(command_list *cmd_list, resource, resource dest)
+SUNSHINE_DEPTH_ADDON_INTERNAL bool on_copy_resource(command_list *cmd_list, resource source, resource dest)
 {
-	record_copied_depth(cmd_list, dest);
+	record_copied_depth(cmd_list, source, dest, 0, true);
 	if (s_streamline_probe_events && cmd_list->get_device()->get_api() == device_api::d3d12)
 		sunshine_streamline::depth_content_write(cmd_list->get_native(), dest.handle);
 	return false;
@@ -1717,11 +1786,11 @@ static bool empty_copy_box(const subresource_box *box)
 {
 	return box != nullptr && (box->left >= box->right || box->top >= box->bottom || box->front >= box->back);
 }
-SUNSHINE_DEPTH_ADDON_INTERNAL bool on_copy_texture_region(command_list *cmd_list, resource, uint32_t, const subresource_box *source_box,
-	resource dest, uint32_t subresource, const subresource_box *dest_box, filter_mode)
+SUNSHINE_DEPTH_ADDON_INTERNAL bool on_copy_texture_region(command_list *cmd_list, resource source, uint32_t source_subresource,
+	const subresource_box *source_box, resource dest, uint32_t subresource, const subresource_box *dest_box, filter_mode)
 {
 	if (empty_copy_box(source_box) || empty_copy_box(dest_box)) return false;
-	record_copied_depth(cmd_list, dest, subresource);
+	record_copied_depth(cmd_list, source, dest, subresource, source_subresource == 0 && !source_box && !dest_box);
 	if (s_streamline_probe_events && cmd_list->get_device()->get_api() == device_api::d3d12)
 		sunshine_streamline::depth_content_invalidate(cmd_list->get_native(), dest.handle);
 	return false;
@@ -1730,16 +1799,16 @@ SUNSHINE_DEPTH_ADDON_INTERNAL bool on_copy_buffer_to_texture(command_list *cmd_l
 	resource dest, uint32_t subresource, const subresource_box *dest_box)
 {
 	if (empty_copy_box(dest_box)) return false;
-	record_copied_depth(cmd_list, dest, subresource);
+	record_copied_depth(cmd_list, {}, dest, subresource, false); // A buffer is never another depth candidate.
 	if (s_streamline_probe_events && cmd_list->get_device()->get_api() == device_api::d3d12)
 		sunshine_streamline::depth_content_invalidate(cmd_list->get_native(), dest.handle);
 	return false;
 }
-SUNSHINE_DEPTH_ADDON_INTERNAL bool on_resolve_texture_region(command_list *cmd_list, resource, uint32_t, const subresource_box *source_box,
-	resource dest, uint32_t subresource, uint32_t, uint32_t, uint32_t, format)
+SUNSHINE_DEPTH_ADDON_INTERNAL bool on_resolve_texture_region(command_list *cmd_list, resource source, uint32_t source_subresource,
+	const subresource_box *source_box, resource dest, uint32_t subresource, uint32_t dest_x, uint32_t dest_y, uint32_t dest_z, format)
 {
 	if (empty_copy_box(source_box)) return false;
-	record_copied_depth(cmd_list, dest, subresource);
+	record_copied_depth(cmd_list, source, dest, subresource, source_subresource == 0 && !source_box && !dest_x && !dest_y && !dest_z);
 	if (s_streamline_probe_events && cmd_list->get_device()->get_api() == device_api::d3d12)
 		sunshine_streamline::depth_content_invalidate(cmd_list->get_native(), dest.handle);
 	return false;
@@ -1871,10 +1940,13 @@ static void on_present(command_queue *presenting_queue, swapchain *swapchain, co
 	if (trace) trace->begin(*device_data);
 
 	state_tracking queue_state(true);
+	// Copies are judged against their sources in each queue's execution order.
+	const bool content_selection = device->get_api() == device_api::d3d11 || device->get_api() == device_api::d3d12;
 	// Merge state from all graphics queues
 	for (command_queue *const queue : device_data->queues)
 	{
 		auto &state = *queue->get_private_data<state_tracking>();
+		if (content_selection) resolve_transfer_lineage(state, *device_data);
 		for (auto &[depth_stencil, stats] : state.stats_per_used_depth_stencil)
 		{
 			if (const auto earlier_queue = queue_state.stats_per_used_depth_stencil.find(depth_stencil);

@@ -1074,29 +1074,42 @@ namespace {
     unsigned cadence = 1, phase = 0;  // Draws on frames where frame % cadence == phase.
     std::uint64_t set = 0;            // Same-geometry capture set; 0 = itself alone.
     std::uint64_t first = 0, last = std::numeric_limits<std::uint64_t>::max(), miss = 0;
+    // Its depth arrives by a copy or resolve from a non-candidate (an MSAA
+    // scene, for example): current-copy work, but no draw of its own.
+    bool copied = false;
+    // Every this-many frames (phase 1) its routed copy fails although it had
+    // work: a capture fault, not a gap in its cadence.
+    unsigned fault_every = 0;
     bool draws(std::uint64_t frame) const {
       return frame >= first && frame <= last && frame != miss && frame % cadence == phase;
     }
   };
 
-  // Replays depth-active Presents as the add-on reports them: every drawn
-  // source is observed, gets a fresh capture every fourth frame it draws, the
-  // policy chooses, then the routed set reports this Present's coverage. A
-  // routed set shows a ready current copy exactly when one of its members drew.
+  // Replays depth-active Presents as the add-on reports them: every source
+  // with work is observed, gets a fresh capture every fourth frame it works,
+  // the policy chooses, then the routed set reports this Present's coverage. A
+  // routed set shows a ready current copy exactly when one of its members had
+  // work and none of them faulted. flat counts Presents from count_from on
+  // whose chosen source showed no current depth.
   struct present_run {
     selection_policy policy;
     std::vector<present_source> sources;
-    std::uint64_t current = 0, frame = 0;
-    unsigned changes = 0;
+    std::uint64_t current = 0, frame = 0, count_from = std::numeric_limits<std::uint64_t>::max();
+    unsigned changes = 0, flat = 0;
     const char *reason = "";
 
-    bool set_drew(std::uint64_t id, std::uint64_t at) const {
+    template <class Member>
+    bool any_member(std::uint64_t id, Member &&member) const {
       std::uint64_t set = id;
       for (const auto &source : sources)
         if (source.id == id && source.set) set = source.set;
       for (const auto &source : sources)
-        if ((source.id == id || (source.set && source.set == set)) && source.draws(at)) return true;
+        if ((source.id == id || (source.set && source.set == set)) && member(source)) return true;
       return false;
+    }
+    selection_policy::set_presence presence(std::uint64_t id, std::uint64_t at) const {
+      return {any_member(id, [at](const present_source &s) { return s.draws(at); }),
+              any_member(id, [at](const present_source &s) { return s.draws(at) && !s.copied; })};
     }
 
     void run(std::uint64_t until) {
@@ -1109,8 +1122,13 @@ namespace {
         const auto choice = policy.choose(frame, current);
         if (choice.id != current) { ++changes; reason = choice.reason; }
         current = choice.id;
-        const bool drew = set_drew(current, frame);
-        policy.observe_present(frame, current, drew, drew, [&](std::uint64_t id) { return set_drew(id, frame); });
+        const auto anchor = presence(current, frame);
+        const bool faulted = any_member(current, [this](const present_source &s) {
+          return s.draws(frame) && s.fault_every && frame % s.fault_every == 1;
+        });
+        const bool shown = anchor.active && !faulted;
+        if (frame >= count_from && !shown) ++flat;
+        policy.observe_present(frame, current, shown, anchor, [&](std::uint64_t id) { return presence(id, frame); });
       }
     }
   };
@@ -1219,6 +1237,31 @@ namespace {
             "Present coverage overruled materially fuller scene support");
     std::puts("PASS Present coverage evidence: one incumbent or challenger miss cannot flip selection; completeness class still ranks first");
   }
+
+  void test_present_coverage_presence() {
+    const auto useful = quality_score(.95f);
+    // (10) Native depth that reaches its allocation by a copy or resolve every
+    // Present (from an MSAA scene, which is no candidate itself) is current on
+    // every Present: it is not blocked as missing and promotes on resolution.
+    present_run copied;
+    copied.sources = {{1, 640, 360, useful}, {2, 1280, 720, useful, 1, 0, 0, 60}};
+    copied.sources[1].copied = true;
+    copied.run(800);
+    require(copied.current == 2 && copied.changes == 2 && std::string(copied.reason) == "sustained comparable depth with better source coverage",
+            "native depth fed by a copy every Present was treated as missing Presents");
+
+    // (11) Capture faults count for neither side: an incumbent whose copy
+    // fails every other Present although it drew is not a source with gaps,
+    // so an every-Present lower-resolution source does not reclaim it.
+    present_run faults;
+    faults.sources = {{2, 1280, 720, useful}};
+    faults.run(40);
+    faults.sources[0].fault_every = 2;
+    faults.sources.push_back({1, 640, 360, useful, 1, 0, 0, 40});
+    faults.run(800);
+    require(faults.current == 2 && faults.changes == 1, "capture faults on the incumbent were counted as Presents it left without depth");
+    std::puts("PASS Present coverage presence: copy-fed native depth promotes; capture faults count for neither side");
+  }
 }  // namespace
 
 int main() {
@@ -1255,6 +1298,7 @@ int main() {
     test_present_coverage_outranks_resolution();
     test_present_coverage_capture_sets();
     test_present_coverage_hitches();
+    test_present_coverage_presence();
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "FAIL depth selection: %s\n", error.what());
