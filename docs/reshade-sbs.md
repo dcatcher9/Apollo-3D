@@ -6378,8 +6378,9 @@ accepted consequences:
   after three fresh paired comparisons (about 0.4 s); until then each skipped Present holds the
   selected source's last frame (one frame behind its colour), so none is flat. A source not
   calibrated before then calibrates first (about 1 s of mono, the camera's own three samples). The
-  three-interval guard is what keeps a single hitch from switching sources and recalibrating; it
-  awaits an owner ruling against switching sooner.
+  three-interval guard stays (decided under the hold rule): the skipped Presents are held
+  meanwhile, so none is flat, and switching sooner would let a single hitch switch sources and
+  recalibrate.
 - **Held Generic depth.** A Present without a current copy shows the previous Present's depth
   again for at most the source age, then mono, as the API providers' missing-frame hold does (see
   [Selecting scene depth](#selecting-scene-depth)). That includes a Present whose anchor drew but
