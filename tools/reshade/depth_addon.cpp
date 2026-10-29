@@ -496,18 +496,19 @@ SUNSHINE_DEPTH_ADDON_INTERNAL bool validate_capture_record(effect_runtime *runti
 // - cleared: the anchor's capture set (with the held source) was cleared or
 //   discarded and none of it worked: the game shows a screen without its scene
 //   (a pause, inventory, loading screen or video that keeps clearing depth);
-// - cut: a shape-eligible depth-stencil outside that set drew although it had
-//   no work within the selector's activity grace (`grace` depth frames before
-//   this one, as long as a candidate still counts as active): a scene pass
-//   that starts now in another buffer (a cutscene, photo mode or 3D menu), so
-//   the held depth would be another camera's.
+// - cut: a shape-eligible depth-stencil outside that set drew although the
+//   selector no longer counted it as active on the previous depth frame (no
+//   work within the activity grace, `grace` depth frames, before that one): a
+//   scene pass that starts now in another buffer (a cutscene, photo mode or 3D
+//   menu), so the held depth would be another camera's.
 // Either way the Present holds nothing: it is mono. A set left untouched keeps
 // its hold (a frame presented twice, frame generation, a colour-only pass, the
 // Presents an every-other-Present source skips), and so does one that worked
 // but whose copy was refused or failed (a missing frame). A source that keeps
 // drawing (a HUD with its own depth-stencil, an every-Present lower-resolution
-// scene, a member of an A/B or A/B/C rotation) is no cut. One pass over the
-// snapshot; no knob of its own.
+// scene, a member of a rotation as long as a capture set holds, A/B to
+// A/B/C/D, on its turn) is no cut. One pass over the snapshot; no knob of its
+// own.
 SUNSHINE_DEPTH_ADDON_INTERNAL hold_gate judge_hold_gate(const depth_selection_snapshot &snapshot,
 	const sunshine_depth_capture::capture_set &captures, uint64_t held, uint64_t frame,
 	uint32_t color_width, uint32_t color_height, bool resolve_depth, uint64_t grace)
@@ -529,7 +530,7 @@ SUNSHINE_DEPTH_ADDON_INTERNAL hold_gate judge_hold_gate(const depth_selection_sn
 			worked = worked || stats.total.has_work();
 		}
 		else if (!cut && stats.total.drew() &&
-			!(info.prior_work_frame != std::numeric_limits<uint64_t>::max() && info.prior_work_frame + grace >= frame) &&
+			!(info.prior_work_frame != std::numeric_limits<uint64_t>::max() && info.prior_work_frame + grace >= frame - 1) &&
 			(info.desc.texture.samples <= 1 || resolve_depth) && candidate_matches_shape(info, color_width, color_height))
 			cut = true;
 	}

@@ -344,7 +344,7 @@ static void check_hold_gates()
 	};
 	// Plays every source's frames through on_present's bookkeeping, then
 	// judges the last frame with `set` as the capture set and `held` held.
-	const auto judge = [&](const std::vector<source> &sources, std::initializer_list<unsigned> set, unsigned held = 1, bool resolve = false) {
+	const auto judge = [&](const std::vector<source> &sources, const std::vector<unsigned> &set, unsigned held = 1, bool resolve = false) {
 		std::unordered_map<resource, depth_stencil_resource, resource_hash> resources;
 		uint64_t frames = 0;
 		for (unsigned i = 0; i != sources.size(); ++i)
@@ -397,8 +397,8 @@ static void check_hold_gates()
 		"A same-size unqualified scene starting in another allocation held the previous scene");
 	require_snapshot(judge({ { 1920, 1080, 1, { w::draw, w::draw, w::none } }, { 1280, 720, 1, { w::none, w::none, w::draw } } }, { 1 }) == hold_gate::cut,
 		"A scene starting in another-size allocation held the previous scene");
-	require_snapshot(judge({ { 1920, 1080, 1, { w::draw, w::draw, w::draw, w::draw, w::none } },
-		{ 1920, 1080, 1, { w::draw, w::none, w::none, w::none, w::draw } } }, { 1 }) == hold_gate::cut,
+	require_snapshot(judge({ { 1920, 1080, 1, { w::draw, w::draw, w::draw, w::draw, w::draw, w::none } },
+		{ 1920, 1080, 1, { w::draw, w::none, w::none, w::none, w::none, w::draw } } }, { 1 }) == hold_gate::cut,
 		"A source drawing again after more than the activity grace without work held the previous scene");
 	require_snapshot(judge({ { 1920, 1080, 1, { w::draw, w::draw, w::none } }, { 1920, 1080, 1, { w::clear, w::clear, w::draw } } }, { 1 }) == hold_gate::cut,
 		"A source that only cleared on the previous frame and now draws held the previous scene");
@@ -417,6 +417,41 @@ static void check_hold_gates()
 		"An unqualified member of an A/B/C rotation on its turn was taken for a cut");
 	require_snapshot(judge({ { 1920, 1080, 1, { w::draw, w::draw, w::none } }, { 1920, 1080, 1, { w::none, w::draw, w::draw } } }, { 1 }) == hold_gate::open,
 		"A source that also drew on the previous depth frame was taken for a cut");
+	// Rotations as long as a capture set holds (A/B, A/B/C, A/B/C/D: periods 2
+	// to 4, which the selector's activity grace keeps active between turns).
+	// The member on its turn is no cut, inside the anchor's set or not yet
+	// qualified into it, with the previous member's capture held; a scene
+	// starting in another buffer beside the untouched set is one; the member
+	// on its turn clearing without drawing is a screen without its scene.
+	for (unsigned period = 2; period <= 4; ++period)
+	{
+		std::vector<source> rotation;
+		std::vector<unsigned> members, qualified;
+		for (unsigned member = 0; member != period; ++member)
+		{
+			source turns { 1920, 1080, 1, {} };
+			for (unsigned frame = 0; frame != 3 * period; ++frame)
+				turns.frames.push_back(frame % period == member ? w::draw : w::none);
+			rotation.push_back(turns);
+			members.push_back(member + 1);
+			if (member + 1 != period) qualified.push_back(member + 1);
+		}
+		// The last frame is the last member's turn; the member before it showed the held capture.
+		require_snapshot(judge(rotation, members, period - 1) == hold_gate::open,
+			"A member of the anchor's A/B, A/B/C or A/B/C/D rotation on its turn refused the hold");
+		require_snapshot(judge(rotation, qualified, period - 1) == hold_gate::open,
+			"An unqualified member of an A/B, A/B/C or A/B/C/D rotation on its turn was taken for a cut");
+		auto cut = rotation;
+		for (auto &turns : cut) turns.frames.push_back(w::none);
+		cut.push_back({ 1920, 1080, 1, std::vector<work>(3 * period, w::none) });
+		cut.back().frames.push_back(w::draw);
+		require_snapshot(judge(cut, members, period) == hold_gate::cut,
+			"A scene starting in another buffer beside an untouched rotation held the rotation's depth");
+		auto cleared = rotation;
+		cleared.back().frames.back() = w::clear;
+		require_snapshot(judge(cleared, members, period - 1) == hold_gate::cleared,
+			"A rotation member clearing on its turn without drawing held the previous member's depth");
+	}
 	// on_present's bookkeeping: the last earlier frame with work.
 	constexpr uint64_t none = std::numeric_limits<uint64_t>::max();
 	depth_stencil_resource info;
