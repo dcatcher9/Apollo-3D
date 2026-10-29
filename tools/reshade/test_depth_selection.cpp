@@ -1064,6 +1064,161 @@ namespace {
                      make_quality(.62f, 2, 4, .25f), make_quality(1.f, 2, 4, .25f)}, {2, 3, 4, 2});
     std::puts("PASS fixed-candidate stability: histogram/support cycles, mixed histogram/resolution cycles, native completeness staircase");
   }
+
+  // One source for the Present-coverage driver: its allocation, its sampled
+  // contents, which Presents it draws and the capture set it belongs to.
+  struct present_source {
+    std::uint64_t id = 0;
+    unsigned width = 640, height = 360;
+    depth_quality quality;
+    unsigned cadence = 1, phase = 0;  // Draws on frames where frame % cadence == phase.
+    std::uint64_t set = 0;            // Same-geometry capture set; 0 = itself alone.
+    std::uint64_t first = 0, last = std::numeric_limits<std::uint64_t>::max(), miss = 0;
+    bool draws(std::uint64_t frame) const {
+      return frame >= first && frame <= last && frame != miss && frame % cadence == phase;
+    }
+  };
+
+  // Replays depth-active Presents as the add-on reports them: every drawn
+  // source is observed, gets a fresh capture every fourth frame it draws, the
+  // policy chooses, then the routed set reports this Present's coverage. A
+  // routed set shows a ready current copy exactly when one of its members drew.
+  struct present_run {
+    selection_policy policy;
+    std::vector<present_source> sources;
+    std::uint64_t current = 0, frame = 0;
+    unsigned changes = 0;
+    const char *reason = "";
+
+    bool set_drew(std::uint64_t id, std::uint64_t at) const {
+      std::uint64_t set = id;
+      for (const auto &source : sources)
+        if (source.id == id && source.set) set = source.set;
+      for (const auto &source : sources)
+        if ((source.id == id || (source.set && source.set == set)) && source.draws(at)) return true;
+      return false;
+    }
+
+    void run(std::uint64_t until) {
+      for (; frame < until; ++frame) {
+        for (const auto &source : sources) {
+          if (!source.draws(frame)) continue;
+          policy.observe(candidate(source.id, frame, 1, source.width, source.height));
+          if (frame / source.cadence % 4 == 0) policy.sample(source.id, source.quality, frame);
+        }
+        const auto choice = policy.choose(frame, current);
+        if (choice.id != current) { ++changes; reason = choice.reason; }
+        current = choice.id;
+        const bool drew = set_drew(current, frame);
+        policy.observe_present(frame, current, drew, drew, [&](std::uint64_t id) { return set_drew(id, frame); });
+      }
+    }
+  };
+
+  void test_present_coverage_outranks_resolution() {
+    const auto useful = quality_score(.95f);
+    for (unsigned cadence : {2u, 3u}) {
+      // (1) Interleaved native depth must not make an every-Present source's
+      // Presents flat merely because it is larger.
+      present_run every;
+      every.sources = {{1, 640, 360, useful}, {2, 1280, 720, useful, cadence, 0}};
+      every.run(40);
+      require(every.current == 1 && every.changes == 1, "every-Present source must be chosen first");
+      every.run(400);
+      require(every.current == 1 && every.changes == 1, "a larger source drawing only some Presents displaced an every-Present source");
+
+      // (2) An interleaved native incumbent leaves Presents flat that a
+      // comparable every-Present source covers: the latter reclaims.
+      present_run reclaim;
+      reclaim.sources = {{2, 1280, 720, useful, cadence, 0}};
+      reclaim.run(40);
+      require(reclaim.current == 2, "interleaved native depth must qualify on its own");
+      reclaim.sources.push_back({1, 640, 360, useful, 1, 0, 0, 40});
+      reclaim.run(400);
+      require(reclaim.current == 1 && std::string(reclaim.reason) == "sustained comparable depth on more Presents",
+              "comparable every-Present depth did not reclaim Presents an interleaved incumbent left flat");
+      reclaim.run(800);
+      require(reclaim.current == 1 && reclaim.changes == 2, "Present-coverage reclaim oscillated");
+    }
+
+    // (3) Both draw every Present: native resolution still promotes.
+    present_run both;
+    both.sources = {{1, 640, 360, useful}, {2, 1280, 720, useful, 1, 0, 0, 60}};
+    both.run(400);
+    require(both.current == 2 && both.changes == 2 && std::string(both.reason) == "sustained comparable depth with better source coverage",
+            "native depth drawing every Present lost its resolution preference");
+
+    // (4) The same native lifetime first draws every other Present, then every
+    // Present: its earlier misses predate fresh comparisons and stop blocking.
+    present_run steadies;
+    steadies.sources = {{1, 640, 360, useful}, {2, 1280, 720, useful, 2, 0, 0, 0, 299}, {2, 1280, 720, useful, 1, 0, 0, 300}};
+    steadies.run(300);
+    require(steadies.current == 1, "interleaved native depth promoted before it covered every Present");
+    steadies.run(700);
+    require(steadies.current == 2 && steadies.changes == 2, "native depth did not promote after it began drawing every Present");
+    std::puts("PASS Present coverage: every-Present depth holds and reclaims against 1-in-2/1-in-3 native depth, native promotes once it draws every Present");
+  }
+
+  void test_present_coverage_capture_sets() {
+    const auto useful = quality_score(.95f);
+    // (5) An A/B native incumbent covers every Present as a set: the
+    // every-Present lower-resolution source has nothing to reclaim.
+    present_run held;
+    held.sources = {{2, 1280, 720, useful, 2, 0, 9}, {3, 1280, 720, useful, 2, 1, 9}};
+    held.run(40);
+    require(held.current == 2 || held.current == 3, "alternating native allocations must qualify");
+    held.sources.push_back({1, 640, 360, useful, 1, 0, 0, 40});
+    const auto native = held.current;
+    held.run(600);
+    require(held.current == native && held.changes == 1, "lower-resolution depth displaced an A/B native set that covers every Present");
+
+    // (6) A/B and A/B/C native challengers are judged by their whole set and
+    // still regain native resolution from an every-Present smaller source.
+    for (unsigned members : {2u, 3u}) {
+      present_run sets;
+      sets.sources = {{1, 640, 360, useful}};
+      sets.run(40);
+      for (unsigned i = 0; i < members; ++i)
+        sets.sources.push_back({2 + i, 1280, 720, useful, members, i, 9, 40});
+      sets.run(800);
+      require(sets.current >= 2 && sets.current < 2 + members && sets.changes == 2,
+              "alternating native allocations were judged one member at a time");
+    }
+    std::puts("PASS Present coverage by capture set: A/B native incumbent holds; A/B and A/B/C native challengers promote");
+  }
+
+  void test_present_coverage_hitches() {
+    const auto useful = quality_score(.95f);
+    // (7) One missed incumbent Present supplies at most one paired win.
+    present_run hitch;
+    hitch.sources = {{2, 1280, 720, useful}};
+    hitch.run(40);
+    hitch.sources.push_back({1, 640, 360, useful, 1, 0, 0, 40});
+    hitch.sources[0].miss = 200;
+    hitch.run(800);
+    require(hitch.current == 2 && hitch.changes == 1, "a single missed native Present handed selection to lower resolution");
+
+    // (8) One missed challenger Present resets a running promotion; it
+    // promotes after fresh comparisons without misses.
+    present_run late;
+    late.sources = {{1, 640, 360, useful}, {2, 1280, 720, useful, 1, 0, 0, 60}};
+    late.sources[1].miss = 70;
+    late.run(80);
+    require(late.current == 1, "a challenger with a missed Present won its running comparison");
+    late.run(600);
+    require(late.current == 2 && late.changes == 2, "one old miss permanently blocked native promotion");
+
+    // (9) Completeness class still comes first: a fuller source drawing every
+    // other Present keeps replacing a less complete every-Present source.
+    auto partial = useful;
+    partial.completeness = .5f;
+    present_run fuller;
+    fuller.sources = {{1, 1280, 720, partial}, {2, 1280, 720, useful, 2, 0, 0, 40}};
+    fuller.run(600);
+    require(fuller.current == 2 && fuller.changes == 2 && std::string(fuller.reason) == "sustained fuller nonendpoint depth support",
+            "Present coverage overruled materially fuller scene support");
+    std::puts("PASS Present coverage evidence: one incumbent or challenger miss cannot flip selection; completeness class still ranks first");
+  }
 }  // namespace
 
 int main() {
@@ -1097,6 +1252,9 @@ int main() {
     test_evolving_advantage_and_resets();
     test_native_comparable_completeness();
     test_static_comparison_cycles();
+    test_present_coverage_outranks_resolution();
+    test_present_coverage_capture_sets();
+    test_present_coverage_hitches();
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "FAIL depth selection: %s\n", error.what());

@@ -491,6 +491,49 @@ SUNSHINE_DEPTH_ADDON_INTERNAL bool validate_capture_record(effect_runtime *runti
 		current.shape == record.shape && current.frame == record.frame && current.present == record.present;
 }
 
+// The capture budget's view of the snapshot: geometry and content qualification.
+static std::vector<sunshine_depth_capture::source_observation> capture_observations(const generic_depth_data &data,
+	const depth_selection_snapshot &snapshot)
+{
+	std::vector<sunshine_depth_capture::source_observation> observations;
+	observations.reserve(snapshot.size());
+	for (const auto &[value, info] : snapshot)
+	{
+		if (!content_supported(info.desc) || info.last_used_in_frame == std::numeric_limits<uint64_t>::max()) continue;
+		const auto region = effective_capture_region(info);
+		const auto *e = data.selection.evidence(info.identity);
+		observations.push_back({info.identity, info.layout_epoch, info.last_used_in_frame,
+			{info.desc.texture.width, info.desc.texture.height, static_cast<uint32_t>(info.desc.texture.format),
+			 region.x, region.y, region.width, region.height},
+			e && e->confirmed_good && e->quality.kind == sunshine_depth::content_kind::useful});
+	}
+	return observations;
+}
+
+// Present coverage for content selection, after this Present's routing: whether
+// the anchor's capture set drew depth and gave a ready current copy, and which
+// other candidates' prospective capture sets drew depth. Raster and mesh work
+// count as drawing a Present; clears and transfers do not (docs/reshade-sbs.md,
+// Selecting scene depth).
+static void observe_present_coverage(generic_depth_data &data, uint64_t frame, const depth_selection_snapshot &snapshot)
+{
+	std::vector<uint64_t> drew;
+	for (const auto &[value, info] : snapshot)
+		if (info.last_used_in_frame == frame && info.last_frame_stats.total.drew()) drew.push_back(info.identity);
+	const auto rastered = [&drew](uint64_t id) { return std::find(drew.begin(), drew.end(), id) != drew.end(); };
+	bool anchor_drew = false;
+	for (unsigned i = 0; i != data.captures.count; ++i)
+		anchor_drew = anchor_drew || rastered(data.captures.records[i].identity);
+	const auto observations = capture_observations(data, snapshot);
+	data.selection.observe_present(frame, data.anchor_identity, data.capture_ready, anchor_drew, [&](uint64_t id) {
+		if (rastered(id)) return true;
+		// Alternating same-geometry allocations count together: the members the
+		// capture budget would route if this candidate became the anchor.
+		const auto set = sunshine_depth_capture::budget {}.update(id, observations, false);
+		return std::any_of(set.members.begin(), set.members.begin() + set.count, rastered);
+	});
+}
+
 // A stable shader/probe surface receives an admitted snapshot. It never owns
 // end-of-frame pixels: those resources and read leases belong to capture owner.
 static void publish_preserved_depth(effect_runtime *runtime, command_list *commands,
@@ -699,18 +742,7 @@ static generic_depth_data::member_view *select_captured_depth(effect_runtime *ru
 {
 	data.capture_wait_detail = nullptr;
 	retire_member_views(runtime, data, device_data);
-	std::vector<sunshine_depth_capture::source_observation> observations;
-	observations.reserve(snapshot.size());
-	for (const auto &[value, info] : snapshot)
-	{
-		if (!content_supported(info.desc) || info.last_used_in_frame == std::numeric_limits<uint64_t>::max()) continue;
-		const auto region = effective_capture_region(info);
-		const auto *e = data.selection.evidence(info.identity);
-		observations.push_back({info.identity, info.layout_epoch, info.last_used_in_frame,
-			{info.desc.texture.width, info.desc.texture.height, static_cast<uint32_t>(info.desc.texture.format),
-			 region.x, region.y, region.width, region.height},
-			e && e->confirmed_good && e->quality.kind == sunshine_depth::content_kind::useful});
-	}
+	const auto observations = capture_observations(data, snapshot);
 	const uint64_t anchor = selected_info ? selected_info->identity : 0;
 	const auto group = data.capture_budget.update(anchor, observations, !automatic);
 	data.anchor_depth_stencil = selected;
@@ -1635,13 +1667,17 @@ static bool on_end_render_pass(command_list *cmd_list)
 }
 // Call under the queue-state lock when needed. These writes establish activity,
 // not useful contents or a vertex estimate; the existing histogram still qualifies them.
-static void record_scene_write(state_tracking &state, resource target, const viewport &view, depth_tracking_demand demand)
+static void record_scene_write(state_tracking &state, resource target, const viewport &view, depth_tracking_demand demand, bool mesh = false)
 {
 	if (target == 0) return;
 	auto &stats = state.stats_per_used_depth_stencil[target];
 	stats.limit_tracking(demand);
 	stats.total.observed_work = true;
-	if (demand.counters) ++stats.total.scene_writes;
+	if (demand.counters)
+	{
+		++stats.total.scene_writes;
+		stats.total.mesh_dispatches += mesh;
+	}
 	if (view.width * view.height >= stats.total.last_viewport.width * stats.total.last_viewport.height)
 		stats.total.last_viewport = view;
 }
@@ -1668,7 +1704,7 @@ SUNSHINE_DEPTH_ADDON_INTERNAL bool on_dispatch_mesh(command_list *cmd_list, uint
 		sunshine_streamline::depth_content_write(cmd_list->get_native(), state.current_depth_stencil.handle, state.current_depth_lifetime);
 	std::shared_lock<std::shared_mutex> lock(s_mutex, std::defer_lock);
 	if (state.is_queue) lock.lock();
-	record_scene_write(state, state.current_depth_stencil, state.current_viewport, tracking_demand(cmd_list->get_device()));
+	record_scene_write(state, state.current_depth_stencil, state.current_viewport, tracking_demand(cmd_list->get_device()), true);
 	return false;
 }
 SUNSHINE_DEPTH_ADDON_INTERNAL bool on_copy_resource(command_list *cmd_list, resource, resource dest)
@@ -2738,6 +2774,9 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 		data.selected_identity = 0;
 		data.selected_desc = {};
 	} while (0);
+	// Evidence for later choices, once per Present that advanced the depth frame.
+	if (automatic && device_data->native_depth_present_index == native_present_index)
+		observe_present_coverage(data, device_data->frame_index, current_depth_stencil_resources);
 
 	// Rebinds only when the effects view changed; a readiness flip only
 	// publishes readiness.

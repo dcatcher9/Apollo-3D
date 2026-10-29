@@ -354,28 +354,83 @@ float ps(float4 position : SV_Position) : SV_Depth {
     }
 
     void check_reload_interleaved() {
-      // A depth-active auxiliary present advances the tracker even though the
-      // native scene target only renders every other present. Exercise the
-      // production probe lifecycle, not just selection_policy in isolation.
-      unsigned present = 0;
+      // The lower-resolution scene target draws every present. Recreated native
+      // depth first draws only every second, then every third present. Coverage
+      // over presents outranks resolution: the every-present source must stay
+      // bound with Automatic readiness on every present, native depth promotes
+      // once it draws every present, and the every-present source reclaims the
+      // presents native depth leaves flat when it returns to every other
+      // present. Checks run after every present, because a periodic check can
+      // share the cadence's phase. This exercises the production probe
+      // lifecycle, not just selection_policy in isolation.
+      unsigned present = 0, cadence = 2;
       render_tracked_depth = [&] {
         draw(*scene);
-        if (++present % 2 == 0 && decoy) draw(*decoy);
+        if (decoy && ++present % cadence == 0) draw(*decoy);
+      };
+      const auto bound = [&](const target_t &expected) {
+        const auto selected = selected_description();
+        return selected.Width == expected.width && selected.Height == expected.height;
+      };
+      const auto hold = [&](const target_t &expected, const char *failure) {
+        unsigned presents = 0;
+        const auto until = GetTickCount64() + 3000;
+        do {
+          step();
+          ++presents;
+          require(bound(expected) && depth_ready(), failure);
+        } while (GetTickCount64() < until);
+        return presents;
       };
       shadow.reset();
       for (unsigned reload = 0; reload < 2; ++reload) {
         decoy.reset();
         wait_for_scene("reload falls back to live lower-resolution depth", scene->width, scene->height);
         decoy = target(width, height, 1, 9, reload != 0);
-        wait_for_scene("recreated native depth survives interleaved presents and promotes", width, height, 9);
-        const auto stable_until = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-        while (std::chrono::steady_clock::now() < stable_until) {
-          step();
-          const auto selected = selected_description();
-          require(selected.Width == width && selected.Height == height,
-                  "Interleaved activity evicted a confirmed native source");
+        for (cadence = 2; cadence <= 3; ++cadence) {
+          const auto presents = hold(*scene, "Depth drawn on only some presents displaced depth drawn on every present, leaving presents without depth");
+          require(varied_linear_depth(1), "Every-present lower-resolution depth lost its scene contents");
+          std::printf("PASS reload %u: every-present lower-resolution depth stays bound and ready on all %u presents while native depth draws 1 in %u\n",
+                      reload + 1, presents, cadence);
         }
-        std::printf("PASS native depth recovery after reload %u, with auxiliary depth-active presents\n", reload + 1);
+        cadence = 1;
+        // The handover itself must not leave a present without current depth.
+        unsigned presents = 0, consecutive = 0;
+        const auto limit = GetTickCount64() + 14000;
+        while (consecutive < 60) {
+          require(GetTickCount64() < limit, "Native depth drawing every present did not promote");
+          step();
+          ++presents;
+          require(depth_ready() && (bound(*scene) || bound(*decoy)), "Native promotion left a present without current depth");
+          consecutive = bound(*decoy) ? consecutive + 1 : 0;
+        }
+        presents += hold(*decoy, "Promoted native depth lost its binding or readiness on a present");
+        require(varied_linear_depth(9), "Promoted native depth lost its scene contents");
+        std::printf("PASS native depth recovery after reload %u: promotes once it draws every present, bound and ready on all %u presents through the handover\n",
+                    reload + 1, presents);
+
+        // Native depth drawing every other present again leaves its other
+        // presents without depth until the every-present source reclaims them.
+        // No other present may be flat on the way.
+        cadence = 2;
+        unsigned flat = 0;
+        presents = consecutive = 0;
+        const auto reclaim_limit = GetTickCount64() + 14000;
+        while (consecutive < 60) {
+          require(GetTickCount64() < reclaim_limit, "Every-present depth did not reclaim presents that native depth left flat");
+          step();
+          ++presents;
+          const bool every = bound(*scene);
+          if (!depth_ready()) {
+            require(!every && present % cadence != 0, "A present whose selected depth was drawn had no current depth");
+            ++flat;
+          }
+          consecutive = every && depth_ready() ? consecutive + 1 : 0;
+        }
+        presents += hold(*scene, "Reclaimed every-present depth lost its binding or readiness on a present");
+        require(varied_linear_depth(1), "Reclaimed every-present depth lost its scene contents");
+        std::printf("PASS reload %u: every-present lower-resolution depth reclaims the %u presents native depth left flat, then bound and ready on all %u presents\n",
+                    reload + 1, flat, presents);
       }
       render_tracked_depth = {};
     }

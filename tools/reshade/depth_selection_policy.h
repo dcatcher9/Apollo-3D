@@ -324,6 +324,36 @@ namespace sunshine_depth {
         pending_ = {};
     }
 
+    // Present coverage, reported once per depth-active Present after current-copy
+    // routing. `incumbent` is the routed anchor, `current` whether this Present
+    // got a ready current copy from the anchor's capture set and `rastered`
+    // whether a member of that set drew depth on it. set_rastered(id) answers the
+    // same for each other candidate's prospective capture set. Only the latest
+    // frame of each kind is kept; a comparison judges the frames since its own
+    // start, so there is no window, count or threshold here.
+    template <class SetRastered>
+    void observe_present(std::uint64_t frame, std::uint64_t incumbent, bool current, bool rastered, SetRastered &&set_rastered) {
+      if (incumbent != coverage_incumbent_) {
+        for (auto &item : candidates_)
+          item.second.coverage = {};
+        coverage_incumbent_ = incumbent;
+      }
+      // A drawn Present without a usable copy is a capture fault, not a gap in
+      // the incumbent's rendering cadence; it neither blocks nor favors others.
+      const bool uncovered = !current && !rastered;
+      if (!incumbent || (!current && !uncovered))
+        return;
+      for (auto &item : candidates_) {
+        if (item.first == incumbent)
+          continue;
+        const bool drew = set_rastered(item.first);
+        if (current && !drew)
+          item.second.coverage.missed = frame;
+        else if (uncovered && drew)
+          item.second.coverage.filled = frame;
+      }
+    }
+
     const candidate_evidence *evidence(std::uint64_t id) const {
       const auto found = candidates_.find(id);
       return found == candidates_.end() ? nullptr : &found->second.evidence.value;
@@ -358,6 +388,7 @@ namespace sunshine_depth {
       if (current_good) {
         const candidate_state *challenger = nullptr;
         unsigned challenger_priority = 0;
+        bool coverage_only = false;
         for (const auto &item : candidates_) {
           const auto &candidate = item.second;
           if (item.first == current_id || !active(candidate, frame) || !comparison_ready(candidate, frame))
@@ -382,36 +413,53 @@ namespace sunshine_depth {
             candidate_content >= current_content + 100 &&
             histogram_broader(candidate_evidence.candidate_histogram_span, candidate_evidence.candidate_histogram_bins,
                               current_evidence.retained_histogram_span, current_evidence.retained_histogram_bins);
-          if (!fuller && !broader) {
-            // Comparable useful support may reclaim native coverage even when
-            // the smaller source has a broader histogram or one more occupied
-            // sample. Lower resolution still needs materially fuller support.
-            if (completeness_gain <= -options_.completeness_margin || candidate_coverage <= current_coverage)
-              continue;
-            if (resolution_score(candidate, false) < resolution_score(current->second, true) + options_.comparison_margin)
-              continue;
-          }
+          // Within a completeness class, coverage over Presents outranks
+          // resolution and histogram: a source that missed a Present the
+          // incumbent showed would leave that Present flat, while one that drew
+          // where the incumbent left a Present without depth covers more.
+          const auto since = comparison_start(candidate, current_id);
+          if (!fuller && candidate.coverage.missed > since)
+            continue;
+          const bool covers_more = candidate.coverage.filled > since;
+          // Comparable useful support may reclaim native coverage even when
+          // the smaller source has a broader histogram or one more occupied
+          // sample. Lower resolution needs materially fuller support or more
+          // Presents covered.
+          const bool sharper = !fuller && !broader && completeness_gain > -options_.completeness_margin &&
+            candidate_coverage > current_coverage &&
+            resolution_score(candidate, false) >= resolution_score(current->second, true) + options_.comparison_margin;
+          if (!fuller && !broader && !sharper && !covers_more)
+            continue;
           // Material completeness takes precedence. Histogram differences can
           // replace peers at the same coverage, but cannot demote a useful native
           // source. Every healthy replacement also needs fresh paired wins.
-          const unsigned priority = fuller ? 3 : broader ? 2 : 1;
+          const unsigned priority = fuller ? 4 : covers_more ? 3 : broader ? 2 : 1;
           if (!challenger || priority > challenger_priority || (priority == challenger_priority && better(candidate, *challenger, frame))) {
             challenger = &candidate;
             challenger_priority = priority;
+            coverage_only = !fuller && !broader && !sharper;
           }
         }
         if (challenger && current->second.evidence.value.quality.kind == content_kind::useful) {
           const auto incumbent_frame = current->second.evidence.value.sampled_frame;
           const auto challenger_frame = challenger->evidence.value.sampled_frame;
           if (pending_.incumbent != current_id || pending_.challenger != challenger->info.id)
-            pending_ = {current_id, challenger->info.id, incumbent_frame, challenger_frame, 1};
+            pending_ = {current_id, challenger->info.id, incumbent_frame, challenger_frame, 1, comparison_start(*challenger, current_id), frame};
           else if (incumbent_frame > pending_.incumbent_frame && challenger_frame > pending_.challenger_frame) {
+            // Coverage alone must recur within every paired interval, so one
+            // missed incumbent Present can supply at most one win.
+            if (coverage_only && challenger->coverage.filled <= pending_.interval) {
+              pending_ = {};
+              return {current_id, "retained confirmed scene depth"};
+            }
             pending_.incumbent_frame = incumbent_frame;
             pending_.challenger_frame = challenger_frame;
+            pending_.interval = frame;
             pending_.wins = std::min(pending_.wins + 1, std::max(options_.comparison_samples_required, 1u));
           }
           if (pending_.wins >= std::max(options_.comparison_samples_required, 1u))
-            return {challenger->info.id, challenger_priority == 3 ? "sustained fuller nonendpoint depth support" :
+            return {challenger->info.id, challenger_priority == 4 ? "sustained fuller nonendpoint depth support" :
+                                        challenger_priority == 3 ? "sustained comparable depth on more Presents" :
                                         challenger_priority == 2 ? "sustained broader nonendpoint depth histogram" :
                                         "sustained comparable depth with better source coverage"};
           return {current_id, "waiting for fresh paired depth comparisons"};
@@ -475,6 +523,16 @@ namespace sunshine_depth {
       std::uint64_t incumbent = 0, challenger = 0;
       std::uint64_t incumbent_frame = 0, challenger_frame = 0;
       unsigned wins = 0;
+      // First frame this comparison judges, and the end of its last paired interval.
+      std::uint64_t since = 0, interval = 0;
+    };
+
+    // Latest depth-active Presents, relative to the routed incumbent, where this
+    // candidate's prospective capture set did not draw while the incumbent
+    // showed current depth (missed), or drew while the incumbent's set neither
+    // drew nor had a current copy (filled).
+    struct coverage_marks {
+      std::uint64_t missed = 0, filled = 0;
     };
 
     struct evidence_state {
@@ -490,6 +548,7 @@ namespace sunshine_depth {
     struct candidate_state {
       candidate_info info;
       evidence_state evidence;
+      coverage_marks coverage;
     };
 
     bool active(const candidate_state &candidate, std::uint64_t frame) const {
@@ -509,6 +568,14 @@ namespace sunshine_depth {
         return false;
       const auto oldest = candidate.evidence.positive_frames[candidate.evidence.positive_count - 1];
       return frame >= oldest && frame - oldest <= options_.evidence_stale_frames;
+    }
+
+    // A comparison judges coverage from the challenger's oldest comparison
+    // capture, or from the start of its pending comparison when that is older.
+    // Callers have checked comparison_ready().
+    std::uint64_t comparison_start(const candidate_state &candidate, std::uint64_t current_id) const {
+      const auto oldest = candidate.evidence.positive_frames[std::min(std::max(options_.comparison_samples_required, 1u), 3u) - 1];
+      return pending_.incumbent == current_id && pending_.challenger == candidate.info.id ? std::min(oldest, pending_.since) : oldest;
     }
 
     bool histogram_broader(float span, unsigned bins, float reference_span, unsigned reference_bins) const {
@@ -598,5 +665,6 @@ namespace sunshine_depth {
     std::uint64_t last_probed_ = 0, last_native_probed_ = 0;
     bool native_probe_due_ = true;
     pending_challenge pending_;
+    std::uint64_t coverage_incumbent_ = 0;
   };
 }  // namespace sunshine_depth

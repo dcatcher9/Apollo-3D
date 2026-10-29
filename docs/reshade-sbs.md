@@ -6153,6 +6153,24 @@ resolution remains a preference when completeness is comparable. Active captured
 dimensions determine resolution coverage, so padding and oversized allocations do not earn an
 artificial preference. A full-resolution buffer still has to pass the content checks.
 
+Coverage over Presents ranks after the completeness class and before resolution and histogram
+breadth. After current-copy routing on each depth-active Present, selection records, relative to
+the routed anchor, whether each other candidate's prospective capture set drew depth: the
+candidate with the same-geometry qualified peers the capture budget would route with it, so
+alternating A/B or A/B/C allocations count together. Raster and mesh work count as drawing;
+clears and transfers do not. A challenger whose set missed a Present on which the anchor showed
+current depth cannot win on resolution, histogram breadth or Presents it covers, because
+promoting it would leave that Present flat; only materially fuller support can still replace the
+anchor. A comparable challenger (same or higher completeness class, within the quality
+tolerance) whose set drew on Presents where the anchor's set neither drew nor had a current copy
+replaces the anchor after three fresh paired comparisons, and every paired interval must contain
+such a Present, so one missed anchor Present supplies at most one win. A drawn Present without a
+usable copy is a capture fault, not a gap in rendering cadence, and counts for neither side.
+Evidence is judged from the challenger's oldest comparison capture onward, with no frame window
+or count. A larger target that draws only every second or third Present therefore cannot
+displace depth drawn on every Present, promotes once it draws every Present, and loses those
+Presents again to the every-Present source when it returns to drawing some of them.
+
 At startup, or while the preferred source has less than full output-resolution coverage,
 general discovery gives active output-matching candidates earlier sampling opportunities.
 These visits rotate through eligible full-resolution sources and alternate with the ordinary
@@ -6168,10 +6186,10 @@ New candidate probes respect the same short activity grace as selection. A prese
 another depth target pauses an already tracked, live eligible probe instead of releasing its
 backup and restarting qualification. Only the candidate's next current rendered frame may supply
 another sample; inactivity never makes an old backup current. Destruction, filtering and the
-original two-second probe deadline still cancel it. The official-runtime `--reload-only` regression exercises native
-promotion and recovery through interleaved depth-active presents and resource recreation; the
-main run adds a one-third-resolution D32S8 end-of-frame capture and keeps a lone scene cleared
-after drawing unready (mono).
+original two-second probe deadline still cancel it. The official-runtime `--reload-only` regression checks coverage
+over Presents through resource recreation (the second recreation as D32S8), verifying the binding
+and readiness after every present; the main run adds a one-third-resolution D32S8 end-of-frame
+capture and keeps a lone scene cleared after drawing unready (mono).
 
 A probe chosen during backup retirement owns its pending visit before allocation. An unrelated
 raw-sample completion cannot cancel that visit. Queue waiting and the allocated measurement
@@ -6208,8 +6226,8 @@ Both a wider robust percentile span and additional substantially populated bins 
 for a histogram-driven switch. Three fresh captures and conservative incumbent history still
 apply. Histogram preference cannot compensate for materially missing scene coverage or poor
 coherence, or demote useful higher-resolution depth when completeness is comparable. A qualified
-higher-resolution source can replace a broader lower-resolution source after fresh paired
-confirmation. Globally anchored completeness classes prevent repeated small support losses from
+higher-resolution source that draws on every Present the incumbent covers can replace a broader
+lower-resolution source after fresh paired confirmation. Globally anchored completeness classes prevent repeated small support losses from
 buying resolution; a promotion cannot fall below the incumbent's protected completeness class.
 A narrow-range scene remains eligible; no rule requires all valid scenes to contain
 both nearby and distant objects. Spatial checks remain necessary because noise can also have

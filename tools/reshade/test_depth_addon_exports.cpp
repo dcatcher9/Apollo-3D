@@ -511,10 +511,11 @@ extern "C" __declspec(dllexport) BOOL SunshineDepthTestActivityAccounting(effect
 	if (!checkpoint("Depth activity test: no-op accounting failed")) return FALSE;
 	ok &= !on_dispatch_mesh(cmd, 2, 3, 4);
 	auto &mesh = state.stats_per_used_depth_stencil[target];
-	ok &= mesh.total.has_work() && mesh.total.scene_writes == 1 &&
+	ok &= mesh.total.has_work() && mesh.total.scene_writes == 1 && mesh.total.mesh_dispatches == 1 && mesh.total.drew() &&
 		mesh.total.drawcalls == 0 && mesh.total.vertices == 0 && mesh.total.last_viewport.width == 1280;
 	state_tracking merged(false); merged.merge(state);
-	ok &= merged.stats_per_used_depth_stencil[target].total.scene_writes == 1;
+	ok &= merged.stats_per_used_depth_stencil[target].total.scene_writes == 1 &&
+		merged.stats_per_used_depth_stencil[target].total.mesh_dispatches == 1;
 	merged.reset(); ok &= merged.stats_per_used_depth_stencil.empty();
 	if (!checkpoint("Depth activity test: mesh/merge/reset accounting failed")) return FALSE;
 	state.stats_per_used_depth_stencil.clear();
@@ -541,7 +542,8 @@ extern "C" __declspec(dllexport) BOOL SunshineDepthTestActivityAccounting(effect
 	ok &= !on_resolve_texture_region(cmd, {}, 0, nullptr, target, 0, 0, 0, 0, format::unknown);
 	const auto &copied = state.stats_per_used_depth_stencil[target];
 	ok &= copied.total.scene_writes == 4 && copied.total.has_work() &&
-		copied.total.drawcalls == 0 && copied.total.vertices == 0 && copied.total.last_viewport.width == 0;
+		copied.total.drawcalls == 0 && copied.total.vertices == 0 && copied.total.last_viewport.width == 0 &&
+		copied.total.mesh_dispatches == 0 && !copied.total.drew(); // A transfer is activity, not a drawn Present.
 	if (!checkpoint("Depth activity test: base-depth copy accounting failed")) return FALSE;
 	if (!s_frame_activity_trace)
 	{

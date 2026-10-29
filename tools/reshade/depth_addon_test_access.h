@@ -105,13 +105,16 @@ struct draw_stats
 	uint32_t scene_writes = 0; // Mesh dispatches and depth copies/resolves have no known vertex count.
 	viewport last_viewport = {};
 	bool observed_work = false; // Preservation eligibility does not require candidate counters.
+	uint32_t mesh_dispatches = 0; // Also counted in scene_writes; unlike a transfer, it draws depth.
 
 	bool has_work() const { return observed_work || drawcalls != 0 || scene_writes != 0; }
 	uint64_t work_count() const { return uint64_t(drawcalls) + scene_writes; }
+	// Raster or mesh work: the Present drew depth. Clears and transfers do not.
+	bool drew() const { return drawcalls != 0 || mesh_dispatches != 0; }
 	void clear_counters()
 	{
 		observed_work = has_work();
-		vertices = drawcalls = drawcalls_indirect = scene_writes = 0;
+		vertices = drawcalls = drawcalls_indirect = scene_writes = mesh_dispatches = 0;
 	}
 
 	bool operator>(const draw_stats &other) const
@@ -207,6 +210,7 @@ struct __declspec(uuid("806c3b54-baf6-46a7-a72a-28c629143d84")) state_tracking
 				stats.total.drawcalls += source_stats.total.drawcalls;
 				stats.total.drawcalls_indirect += source_stats.total.drawcalls_indirect;
 				stats.total.scene_writes += source_stats.total.scene_writes;
+				stats.total.mesh_dispatches += source_stats.total.mesh_dispatches;
 			}
 			if (source_stats.total.last_viewport.width * source_stats.total.last_viewport.height >=
 				stats.total.last_viewport.width * stats.total.last_viewport.height)

@@ -1258,10 +1258,17 @@ through the official runtime, without injecting `DEPTH`:
   .\cmake-build-reshade\scene-depth-dx12 1280 720
 ```
 
-`--reload-only` checks recovery through interleaved depth-active presents and native-resource
-recreation with the production add-on. Its interleaved phase checks binding dimensions and
-periodic pixels; it does not establish current-frame capture or Automatic readiness on every
-present. The current reference-policy fixture below covers continuous sources and isolated replacements, not
+`--reload-only` checks coverage over presents through native-resource recreation with the
+production add-on. A lower-resolution scene target draws every present while recreated native
+depth draws every second, then every third present: the every-present source must stay bound
+with Automatic readiness on every present. Once native depth draws every present it must promote
+without leaving a present flat through the handover; when it returns to every other present,
+the every-present source must reclaim the presents it leaves flat. The binding and readiness are
+checked after every present, never periodically, because a periodic check can share the
+cadence's phase. Both reloads run, the second with a D32S8 target. The rule itself
+is in the [scene-depth contract](../../docs/reshade-sbs.md#selecting-scene-depth) and the CPU
+policy test covers its 1-in-2/1-in-3, A/B/C capture-set, single-miss and completeness cases.
+The current reference-policy fixture below covers continuous sources and isolated replacements, not
 alternating scene allocations. The CPU tests cover rejection of historical and duplicate
 confirmation samples.
 
