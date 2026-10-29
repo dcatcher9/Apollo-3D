@@ -1548,7 +1548,12 @@ the [API contract matrix](#api-contract-matrix) follows the same split: where an
 refusal, its production file only calls a recorder, under `SUNSHINE_SBS_RUNTIME_TEST_ADDON`. The
 probe's recorders are defined in its exports file and declared in its test-access header; the NGX
 adapter, which has no test-access header, keeps its one recorder under the same define; and the
-query, `SunshineDepthTestLastRefusal`, is one of the depth add-on's exports.
+query, `SunshineDepthTestLastRefusal`, is one of the depth add-on's exports. The DEPTH binding
+events follow the same split: each `update_texture_bindings("DEPTH", ...)` call and readiness
+write of the API provider, Generic Depth and the exporter, and each event handler that reaches one
+(its phase), call a recorder of [`game3d_test_depth_events.h`](game3d_test_depth_events.h) under
+`SUNSHINE_SBS_RUNTIME_TEST_ADDON`, and a fixture reads them after each Present through
+`SunshineDepthTestBindingEvents`, another of the depth add-on's exports.
 
 Two test binaries compile a production file outside every view: `reshade_exporter_tests`
 compiles `exporter.cpp` inside [`test_exporter.cpp`](test_exporter.cpp) (its view excludes that

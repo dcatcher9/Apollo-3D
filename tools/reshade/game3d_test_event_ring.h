@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // TEST add-on only: the fixed event ring behind the test add-on's ordered
-// event records (game3d_test_teardown.h). Events are POD records numbered
-// from 1 since the add-on loaded; a reader passes the serial of the last
-// event it read and gets the ones after it, oldest first. Nothing allocates:
+// event records (game3d_test_teardown.h, game3d_test_depth_events.h). Events
+// are POD records numbered from 1 since the add-on loaded; a reader passes
+// the serial of the last event it read and gets the ones after it, oldest
+// first. Nothing allocates:
 // the ring is static storage, zero-initialized (SRWLOCK_INIT is zero), and
 // its lock is taken by no other code. The production add-on has no ring.
 #include <cstdint>

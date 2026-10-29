@@ -48,6 +48,10 @@
 #include "game3d_slow_step.h"
 #include "game3d_frame_record.h"
 #include "depth_addon_test_access.h"
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+#include "game3d_test_depth_events.h"
+namespace depth_events = sunshine_game3d::test::depth_events;
+#endif
 
 using namespace reshade::api;
 
@@ -1189,12 +1193,20 @@ static void update_effect_runtime(effect_runtime *runtime)
 	const resource_view view = data.rotating ? data.stable.view : data.selected_shader_resource;
 	if (!data.effects_bound || view != data.effects_view)
 	{
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+		depth_events::binding(runtime, depth_events::site_id::generic_bind, view != 0);
+#endif
 		const sunshine_game3d::slow_step step("generic depth binding");
 		runtime->update_texture_bindings("DEPTH", view, view);
 		data.effects_view = view;
 		data.effects_bound = true;
 	}
 
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+	// The value the call below writes, read the same way.
+	depth_events::readiness(runtime, depth_events::site_id::generic_ready,
+		view != 0 && (data.capture_ready || data.held) && (!data.rotating || data.stable_current));
+#endif
 	sunshine_streamline::provider::set_depth_ready(runtime, view != 0 && (data.capture_ready || data.held) && (!data.rotating || data.stable_current));
 }
 
@@ -1271,6 +1283,10 @@ static void destroy_stable_bindings(effect_runtime *runtime, generic_depth_data 
 
 static void on_reload_effect_runtime(effect_runtime *runtime)
 {
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+	// Runs before the exporter's handler of this event (registered earlier).
+	const depth_events::phase_scope phase(depth_events::handler::reload);
+#endif
 	if (auto *data = runtime->get_private_data<generic_depth_data>(); data && data->native_driver)
 	{
 		// FX handles are recreated, but the native capture/scale owner is not.
@@ -3128,6 +3144,10 @@ void sunshine_depth::end_native_frame(effect_runtime *runtime, command_list *com
 }
 static void on_begin_render_effects(effect_runtime *runtime, command_list *commands, resource_view, resource_view)
 {
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+	// Runs before the exporter's handler of this event (registered earlier).
+	const depth_events::phase_scope phase(depth_events::handler::begin_effects);
+#endif
 	auto *data = runtime->get_private_data<generic_depth_data>();
 	if (!data) return;
 	refresh_effects_read_depth(runtime, *data);

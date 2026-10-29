@@ -25,9 +25,15 @@
 #include <mutex>
 #include <utility>
 #include <vector>
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+  #include "game3d_test_depth_events.h"
+#endif
 
 namespace sunshine_streamline::provider {
   namespace api = reshade::api;
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+  namespace depth_events = sunshine_game3d::test::depth_events;
+#endif
   // A provider handoff (one API source released, another about to establish
   // on the same queue) keeps API ownership in mono at most this long instead
   // of starting the generic selector (docs/reshade-sbs.md, depth handoff).
@@ -189,11 +195,17 @@ namespace sunshine_streamline::provider {
       // ReShade 6.8 waits for the whole queue on every update, even if the
       // handle is unchanged. Keep the descriptor stable while pixels rotate.
       if (view != data.bound_view) {
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+        depth_events::binding(runtime, depth_events::site_id::provider_bind, view.handle != 0);
+#endif
         const sunshine_game3d::slow_step step("API depth binding");
         runtime->update_texture_bindings("DEPTH", view, view);
         data.bound_view = view;
         data.effects_view = view;
       }
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+      depth_events::readiness(runtime, depth_events::site_id::provider_bind_ready, ready);
+#endif
       set_depth_ready(runtime, ready);
     }
     // Requires an idle runtime queue (teardown only).
@@ -824,7 +836,13 @@ namespace sunshine_streamline::provider {
     if (auto *data = runtime->get_private_data<state>()) {
       data->depth_ready.invalidate();
       if (data->owns_pass) {
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+        depth_events::binding(runtime, depth_events::site_id::provider_reload_bind, data->bound_view.handle != 0);
+#endif
         runtime->update_texture_bindings("DEPTH", data->bound_view, data->bound_view);
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+        depth_events::readiness(runtime, depth_events::site_id::provider_reload_ready, data->output.ready);
+#endif
         set_depth_ready(runtime, data->output.ready);
       }
     }
@@ -1361,6 +1379,9 @@ namespace sunshine_streamline::provider {
       data->presentation_source = {};
       if (data->output.reused_depth) {
         data->output = {};
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+        depth_events::readiness(runtime, depth_events::site_id::provider_reuse_ready, false);
+#endif
         set_depth_ready(runtime, false);
       }
       trace_readiness(runtime, *data, evidence, data->output.ready, "explicit_reuse_invalidation", false);

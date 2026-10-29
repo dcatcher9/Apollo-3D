@@ -54,6 +54,7 @@
 #include "game3d_diagnostics.h"
 
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+  #include "game3d_test_depth_events.h"
   #include "game3d_test_teardown.h"
   #include "test_overlay_patch.h"
 
@@ -66,6 +67,9 @@ static_assert(sizeof(void *) == 8, "Only 64-bit games are supported");
 namespace {
   namespace api = reshade::api;
   namespace wire = reshade_bridge;
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+  namespace depth_events = sunshine_game3d::test::depth_events;
+#endif
   std::atomic<std::uint64_t> next_raw_basis {1};
   void log(reshade::log::level level, const char *message);
 
@@ -2651,6 +2655,9 @@ namespace {
       runtime->set_uniform_value_float(proof.raw_gain, &gain, 1);
       runtime->set_uniform_value_float(proof.depth_rect, rect, 4);
       runtime->set_uniform_value_bool(proof.calibrated, calibrated);
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+      depth_events::readiness(runtime, depth_events::site_id::native_ready, ready);
+#endif
       sunshine_game3d::depth_input::set_ready(runtime, ready);
       proof.native_depth_prepared = true;
     }
@@ -3070,6 +3077,9 @@ namespace {
   }
 
   void on_technique(api::effect_runtime *runtime, api::effect_technique technique, api::command_list *commands, api::resource_view rtv, api::resource_view) {
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+    const depth_events::phase_scope phase(depth_events::handler::render_technique);
+#endif
     try {
       if (publisher) {
         publisher->frame(runtime, technique, commands, rtv);
@@ -3083,12 +3093,18 @@ namespace {
   }
 
   void on_reload(api::effect_runtime *runtime) {
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+    const depth_events::phase_scope phase(depth_events::handler::reload);
+#endif
     if (publisher) {
       publisher->invalidate(runtime, false);
     }
   }
 
   void on_init_runtime(api::effect_runtime *runtime) {
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+    const depth_events::phase_scope phase(depth_events::handler::init);
+#endif
     if (publisher) publisher->track_runtime(runtime);
     // Windows display scaling can hold a DPI-unaware game below its display's
     // resolution (docs/reshade-sbs.md, display scaling); say so once per
@@ -3107,6 +3123,9 @@ namespace {
   }
 
   void on_begin_effects(api::effect_runtime *runtime, api::command_list *commands, api::resource_view rtv, api::resource_view) {
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+    const depth_events::phase_scope phase(depth_events::handler::begin_effects);
+#endif
     try {
       if (publisher && !publisher->native_enabled(runtime)) publisher->prepare_native_depth(runtime, commands, rtv);
     } catch (...) {
@@ -3116,6 +3135,9 @@ namespace {
   }
 
   void on_destroy(api::effect_runtime *runtime) {
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+    const depth_events::phase_scope phase(depth_events::handler::destroy);
+#endif
     if (publisher) {
       publisher->invalidate(runtime, true, runtime->get_native());
     }
@@ -3130,6 +3152,9 @@ namespace {
   }
 
   void on_present(api::effect_runtime *runtime) {
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+    const depth_events::phase_scope phase(depth_events::handler::reshade_present);
+#endif
     try {
       if (publisher) {
         publisher->present(runtime);
@@ -3168,6 +3193,9 @@ namespace {
   }
 
   void on_begin_present(api::command_queue *queue, api::swapchain *swapchain, const api::rect *, const api::rect *, std::uint32_t, const api::rect *) {
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+    const depth_events::phase_scope phase(depth_events::handler::present);
+#endif
     try {
       if (publisher) {
         publisher->begin_present(swapchain->get_native(), swapchain->get_color_space());

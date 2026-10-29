@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include "depth_refusal.h"
 #include "depth_selection_snapshot_test.h"
+#include "game3d_test_depth_events.h"
 
 static void require_snapshot(bool value, const char *message)
 {
@@ -764,6 +765,22 @@ extern "C" __declspec(dllexport) BOOL SunshineDepthTestLastRefusal(effect_runtim
 	if (!s_registered || runtime == nullptr || output == nullptr) return FALSE;
 	*output = sunshine_depth_refusal::latest();
 	return TRUE;
+}
+
+// The DEPTH binding and readiness writes (game3d_test_depth_events.h), for a
+// fixture to read after each Present: the events after *cursor (a serial; 0
+// before the first read), at most capacity of them, oldest first, into out;
+// *cursor becomes the serial of the last one copied. *skipped (optional)
+// counts the events after the old cursor that the ring had already
+// overwritten. Returns the number copied. Process-wide, for every runtime.
+extern "C" __declspec(dllexport) unsigned SunshineDepthTestBindingEvents(uint64_t *cursor,
+	sunshine_game3d::test::depth_events::event *out, unsigned capacity, uint64_t *skipped)
+{
+	if (cursor == nullptr || (out == nullptr && capacity != 0)) return 0;
+	uint64_t lost = 0;
+	const unsigned copied = sunshine_game3d::test::depth_events::read(*cursor, out, capacity, lost);
+	if (skipped != nullptr) *skipped = lost;
+	return copied;
 }
 
 // Whether a native resource is in the Generic depth inventory and was used in
