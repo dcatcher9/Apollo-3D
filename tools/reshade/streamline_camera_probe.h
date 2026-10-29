@@ -227,24 +227,6 @@ namespace sunshine_streamline {
   evidence_status query_depth_source(depth_source_snapshot &output,
     std::uint32_t max_age_ms = sunshine_freshness::evidence_age_ms);
 
-  enum class presentation_status {
-    inactive, missing_marker_function, missing_bracket, pending_marker, open_bracket,
-    ended_bracket, failed_marker, untracked_frame, out_of_order, repeated_frame,
-    stale, observation_lost, busy
-  };
-  struct presentation_snapshot {
-    presentation_status status{presentation_status::missing_bracket};
-    frame_identity frame;
-    std::uint64_t epoch{}, loss_revision{}, marker_loss_revision{}, thread_generation{}, start_sequence{}, end_sequence{}, start_tick{}, end_tick{};
-    std::uint32_t thread_id{}, last_marker{};
-    bool explicit_bracket{};
-  };
-  // Current calling thread only. This identifies an explicit successful marker
-  // bracket, never swapchain identity, final-color content or GPU completion.
-  presentation_status query_current_presentation(presentation_snapshot &output,
-    std::uint32_t max_age_ms = sunshine_freshness::evidence_age_ms);
-  const char *name(presentation_status value);
-
   struct frame_generation_snapshot {
     std::uint64_t epoch{}, sequence{}, tick{}, loss_revision{};
     std::uint32_t viewport{}, mode{}, generated_frames{};
@@ -329,7 +311,6 @@ namespace sunshine_streamline {
     void clear();
     // Exercise fail-closed observation loss without relying on scheduler luck.
     void lose_observation();
-    bool install_presentation_hooks();
     bool discover_frame_generation_hooks();
     // Deterministic CPU-only contention fixture; lock/unlock on the same thread.
     void lock_source_resources();

@@ -807,8 +807,7 @@ replay `xfail` reason names the same rule IDs.
 ## Additional diagnostics
 
 `[SUNSHINE_GAME3D] Diagnostics=1` (the **Diagnostics** row under Troubleshooting) turns on the
-add-on's diagnostic-only per-frame work: per-pass GPU timing and the Streamline presentation
-brackets with their PCL marker hooks
+add-on's diagnostic-only per-frame work: per-pass GPU timing
 (see [Diagnostics switch](../../docs/reshade-sbs.md#diagnostics-switch-and-per-present-cost)). It
 is off by default and changes no decision, candidate binding or exported pixel.
 
@@ -2751,7 +2750,7 @@ serial is 30 there); each Present establishes any selected copy, as
   are pinned where they are installed, through
   [`test_minhook_ledger.h`](test_minhook_ledger.h) (MinGW links those tests with
   `-Wl,--wrap=MH_CreateHook`): the Streamline probe test (v1, v2 with and without its optional
-  exports, the FG options entry and the PCL marker) and the call trace (the four NGX exports).
+  exports, and the FG options entry) and the call trace (the four NGX exports).
 - [`test_provider_log_lines.cpp`](test_provider_log_lines.cpp) (`reshade_provider_log_lines`)
   renders the API depth provider's status lines from fixed values for representative Presents
   (a settled fresh copy, a held pending successor, the release to Generic and the handoff hold, an

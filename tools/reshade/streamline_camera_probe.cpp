@@ -8,7 +8,6 @@
 #include "streamline_v1_resource_state.h"
 #include "upscaler_call_trace.h"
 #include "game3d_diagnostic_metadata.h"
-#include "game3d_diagnostics.h"
 #include "game3d_ui_mask.h"
 #include "observer_snapshot.h"
 #include "streamline_camera_probe_test_access.h"
@@ -136,12 +135,6 @@ namespace sunshine_streamline {
       bool used{}, has_camera{};
     };
     struct token_record { frame_identity frame; };
-    struct presentation_record {
-      presentation_snapshot value;
-      frame_identity latest_started;
-      HANDLE thread{};
-      std::uint64_t pending_sequence{};
-    };
 
     // POD/atomic storage remains live in the pinned add-on after AddonUninit. In
     // particular there is no destructible C++ mutex or worker used by detours.
@@ -190,20 +183,6 @@ namespace sunshine_streamline {
       }
       return update;
     }
-    presentation_record presentations[32]{};
-    std::atomic<std::uint64_t> presentation_loss{}, presentation_dropped{}, presentation_generation{};
-    std::atomic<bool> pcl_available{};
-    struct pcl_target {
-      void *entry{};
-      HMODULE owner{};
-      std::atomic<abi_v2::pcl_set_marker> original{};
-      std::atomic<unsigned> state{}; // 0 pending, 1 installed, 2 rejected
-    };
-    std::array<pcl_target, 4> pcl_targets;
-    unsigned pcl_target_count{};
-    SRWLOCK pcl_lock = SRWLOCK_INIT;
-    std::atomic<void *> current_pcl_target{};
-    std::atomic<std::uint64_t> pcl_calls{}, pcl_getter_calls{};
     std::atomic<bool> observing{};
     std::atomic<bool> requested{};
     std::atomic<bool> source_requested{};
@@ -767,33 +746,6 @@ namespace sunshine_streamline {
         (a.kind == frame_identity_kind::v1_numeric ? a.numeric == b.numeric :
           a.generation == b.generation && a.token == b.token);
     }
-    void lose_presentation() { ++presentation_loss; }
-    void drop_presentation() { ++presentation_dropped; lose_presentation(); }
-    presentation_record *presentation_thread(bool create) {
-      const auto id = GetCurrentThreadId();
-      presentation_record *empty{};
-      for (auto &record : presentations) {
-        // A retained kernel thread handle distinguishes a dead/reused OS ID.
-        // No TLS allocation or unbounded per-thread container is used in hooks.
-        if (record.thread) {
-          const auto state = WaitForSingleObject(record.thread, 0);
-          if (state == WAIT_OBJECT_0 || state == WAIT_FAILED) {
-            if (state == WAIT_FAILED) drop_presentation();
-            CloseHandle(record.thread); record = {};
-          }
-        }
-        if (record.thread && record.value.thread_id == id) return &record;
-        if (!record.thread && !empty) empty = &record;
-      }
-      if (!create || !empty) return nullptr;
-      HANDLE thread{};
-      if (!DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &thread,
-          SYNCHRONIZE, FALSE, 0)) return nullptr;
-      empty->thread = thread;
-      empty->value.thread_id = id;
-      empty->value.thread_generation = ++presentation_generation;
-      return empty;
-    }
     frame_identity numeric_frame(std::uint32_t frame) {
       return {frame_identity_kind::v1_numeric, 0, frame, 0, true};
     }
@@ -851,13 +803,6 @@ namespace sunshine_streamline {
           return {frame_key(record.camera_frame), record.frame_serial};
       return {};
     }
-    bool presentation_token_current(const frame_identity &frame) {
-      // Presentation markers carry minted/numeric identities, never the
-      // synchronous tag-boundary constants-call association.
-      if (frame.kind == frame_identity_kind::v2_constants_call) return false;
-      static const metadata_state empty;
-      return token_current(empty, frame);
-    }
     frame_identity observed_frame(std::uintptr_t address) {
       frame_identity result;
       auto pin = token_metadata.read();
@@ -869,109 +814,6 @@ namespace sunshine_streamline {
       for (const auto &token : pin->tokens) if (token.frame.token == address && address) { result = token.frame; break; }
       return result;
     }
-    frame_identity presentation_frame(std::uintptr_t address) {
-      frame_identity result;
-      auto pin = token_metadata.read();
-      if (!pin) { if (token_metadata.has_publication()) drop_presentation(); return result; }
-      if (pin->observation != observation_generation.load(std::memory_order_acquire)) return result;
-      for (const auto &token : pin->tokens) if (token.frame.token == address && address) { result = token.frame; break; }
-      return result;
-    }
-    // Presentation brackets feed only report_probe_diagnostics: tracked with
-    // the Diagnostics switch, so production markers take no lock or thread wait.
-    std::uint64_t start_presentation_marker(std::uint32_t marker, const frame_identity &frame, std::uint64_t ticket) {
-      if ((marker != 4 && marker != 5) || !current(ticket) || !sunshine_game3d::diagnostics::enabled()) return 0;
-      const auto serial = ++call_sequence;
-      if (!TryAcquireSRWLockExclusive(&presentations_lock)) { drop_presentation(); return 0; }
-      if (!current(ticket)) { ReleaseSRWLockExclusive(&presentations_lock); return 0; }
-      auto *record = presentation_thread(true);
-      if (!record) { ReleaseSRWLockExclusive(&presentations_lock); drop_presentation(); return 0; }
-      auto &value = record->value;
-      const auto prior = value.status;
-      record->pending_sequence = serial;
-      value.last_marker = marker;
-      value.explicit_bracket = false; // End entry closes visibility before original can reenter.
-      value.epoch = epoch;
-      value.loss_revision = loss_revision.load(std::memory_order_acquire);
-      value.marker_loss_revision = presentation_loss.load(std::memory_order_acquire);
-      if (!presentation_token_current(frame)) value.status = presentation_status::untracked_frame;
-      else if (marker == 4) {
-        const auto &previous = record->latest_started;
-        const bool repeated = same_frame(previous, frame);
-        const bool older = previous.kind == frame.kind && previous.kind != frame_identity_kind::unavailable &&
-          (frame.kind == frame_identity_kind::v1_numeric ? frame.numeric <= previous.numeric : frame.generation <= previous.generation);
-        value.frame = frame;
-        value.start_sequence = serial; value.end_sequence = 0;
-        value.start_tick = GetTickCount64(); value.end_tick = 0;
-        value.status = repeated ? presentation_status::repeated_frame : older || prior == presentation_status::open_bracket ||
-            prior == presentation_status::pending_marker ? presentation_status::out_of_order : presentation_status::pending_marker;
-        if (!older) record->latest_started = frame;
-      } else {
-        value.end_sequence = serial; value.end_tick = GetTickCount64();
-        value.status = prior == presentation_status::open_bracket && same_frame(value.frame, frame) ?
-          presentation_status::pending_marker : presentation_status::out_of_order;
-      }
-      ReleaseSRWLockExclusive(&presentations_lock);
-      return serial;
-    }
-    void finish_presentation_marker(std::uint32_t marker, std::uint64_t serial, bool success, std::uint64_t ticket) {
-      if (!serial || !current(ticket)) return;
-      if (!TryAcquireSRWLockExclusive(&presentations_lock)) { drop_presentation(); return; }
-      auto *record = current(ticket) ? presentation_thread(false) : nullptr;
-      if (record && record->pending_sequence == serial) {
-        auto &value = record->value;
-        if (!success) { value.status = presentation_status::failed_marker; value.explicit_bracket = false; lose_presentation(); }
-        else if (value.marker_loss_revision != presentation_loss.load(std::memory_order_acquire) ||
-            value.loss_revision != loss_revision.load(std::memory_order_acquire)) value.status = presentation_status::observation_lost;
-        else if (value.status == presentation_status::pending_marker && !presentation_token_current(value.frame)) value.status = presentation_status::untracked_frame;
-        else if (value.status == presentation_status::pending_marker) {
-          value.status = marker == 4 ? presentation_status::open_bracket : presentation_status::ended_bracket;
-          value.explicit_bracket = marker == 4;
-        }
-      }
-      ReleaseSRWLockExclusive(&presentations_lock);
-    }
-    void queue_pcl_target(void *entry, std::uint64_t ticket) {
-      if (!entry) { current_pcl_target = nullptr; pcl_available = false; lose_presentation(); return; }
-      if (!TryAcquireSRWLockExclusive(&pcl_lock)) { current_pcl_target = nullptr; pcl_available = false; drop_presentation(); return; }
-      if (!current(ticket)) { ReleaseSRWLockExclusive(&pcl_lock); return; }
-      if (current_pcl_target.exchange(entry, std::memory_order_acq_rel) != entry) { pcl_available = false; lose_presentation(); }
-      for (unsigned i = 0; i != pcl_target_count; ++i) if (pcl_targets[i].entry == entry) {
-        pcl_available.store(pcl_targets[i].state.load(std::memory_order_acquire) == 1, std::memory_order_release);
-        ReleaseSRWLockExclusive(&pcl_lock); return;
-      }
-      if (pcl_target_count == pcl_targets.size()) {
-        pcl_available = false; ReleaseSRWLockExclusive(&pcl_lock); drop_presentation(); return;
-      }
-      MEMORY_BASIC_INFORMATION memory{};
-      HMODULE owner{};
-      const bool executable = VirtualQuery(entry, &memory, sizeof(memory)) == sizeof(memory) && memory.State == MEM_COMMIT &&
-        memory.Type == MEM_IMAGE && (memory.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) &&
-        !(memory.Protect & (PAGE_GUARD | PAGE_NOACCESS));
-      if (!executable || !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(entry), &owner)) {
-        pcl_available = false; ReleaseSRWLockExclusive(&pcl_lock); drop_presentation(); return;
-      }
-      auto &slot = pcl_targets[pcl_target_count++];
-      slot.entry = entry; slot.owner = owner;
-      pcl_available = false;
-      ReleaseSRWLockExclusive(&pcl_lock);
-    }
-    template<unsigned Index> std::int32_t hook_pcl_marker(std::uint32_t marker, const abi_v2::frame_token &frame) {
-      const DWORD incoming = GetLastError();
-      const auto ticket = observation_ticket();
-      const bool sample = ticket && sunshine_game3d::diagnostics::enabled() && pcl_available.load(std::memory_order_acquire) &&
-        current_pcl_target.load(std::memory_order_acquire) == pcl_targets[Index].entry;
-      if (ticket) ++pcl_calls;
-      const auto identity = sample && (marker == 4 || marker == 5) ? presentation_frame(reinterpret_cast<std::uintptr_t>(&frame)) : frame_identity{};
-      const auto serial = sample ? start_presentation_marker(marker, identity, ticket) : 0;
-      SetLastError(incoming);
-      const auto result = pcl_targets[Index].original.load(std::memory_order_acquire)(marker, frame);
-      const DWORD outgoing = GetLastError();
-      if (serial) finish_presentation_marker(marker, serial, sdk_accepted(result), ticket);
-      SetLastError(outgoing);
-      return result;
-    }
-    constexpr std::array<abi_v2::pcl_set_marker, 4> pcl_hooks{hook_pcl_marker<0>, hook_pcl_marker<1>, hook_pcl_marker<2>, hook_pcl_marker<3>};
     bool viewport_value(const abi_v2::viewport &value, std::uint32_t &output);
     unsigned retain_fg_target(void *entry, std::uint64_t ticket) {
       if (!entry || !TryAcquireSRWLockExclusive(&fg_lock)) { fg_available = false; return UINT32_MAX; }
@@ -1135,24 +977,20 @@ namespace sunshine_streamline {
     std::int32_t hook_get_feature_function(std::uint32_t feature, const char *function_name, void *&function) {
       const DWORD incoming = GetLastError();
       const auto ticket = observation_ticket();
+      // A PCL marker lookup is still a game SDK call whose eWarnOutOfVRAM
+      // reply vram_warnings counts; only its marker target is no longer kept.
       constexpr char expected[] = "slPCLSetMarker";
       char copied_name[sizeof(expected)]{};
-      const bool wanted = ticket && feature == abi_v2::feature_pcl &&
+      const bool pcl_lookup = ticket && feature == abi_v2::feature_pcl &&
         read_bytes(function_name, copied_name, sizeof(copied_name)) && std::memcmp(copied_name, expected, sizeof(expected)) == 0;
       constexpr char fg_expected[] = "slDLSSGSetOptions";
       char copied_fg_name[sizeof(fg_expected)]{};
       const bool fg_wanted = ticket && feature == 1000 &&
         read_bytes(function_name, copied_fg_name, sizeof(copied_fg_name)) && std::memcmp(copied_fg_name, fg_expected, sizeof(fg_expected)) == 0;
-      if (ticket) ++pcl_getter_calls;
       SetLastError(incoming);
       const auto result = original_feature_function_v2(feature, function_name, function);
       const DWORD outgoing = GetLastError();
-      const bool sdk_ok = (wanted || fg_wanted) && sdk_accepted(result);
-      if (wanted && current(ticket)) {
-        void *entry{};
-        if (sdk_ok && read_bytes(&function, &entry, sizeof(entry))) queue_pcl_target(entry, ticket);
-        else { current_pcl_target = nullptr; pcl_available = false; lose_presentation(); }
-      }
+      const bool sdk_ok = (pcl_lookup || fg_wanted) && sdk_accepted(result);
       if (fg_wanted && current(ticket)) {
         void *entry{};
         if (sdk_ok && read_bytes(&function, &entry, sizeof(entry))) {
@@ -1167,32 +1005,6 @@ namespace sunshine_streamline {
       }
       SetLastError(outgoing);
       return result;
-    }
-    bool install_pcl_hooks() {
-      if (!observing.load(std::memory_order_acquire) || !middleware_requested()) return false;
-      std::array<unsigned, 4> pending{}; unsigned count{};
-      if (!TryAcquireSRWLockShared(&pcl_lock)) { drop_presentation(); return false; }
-      for (unsigned i = 0; i != pcl_target_count; ++i)
-        if (pcl_targets[i].state.load(std::memory_order_acquire) == 0) pending[count++] = i;
-      ReleaseSRWLockShared(&pcl_lock);
-      bool okay = true;
-      for (unsigned i = 0; i != count; ++i) {
-        const auto index = pending[i]; auto &slot = pcl_targets[index];
-        HMODULE self{}, owner{}; void *trampoline{};
-        const bool pinned = GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
-            reinterpret_cast<LPCWSTR>(pcl_hooks[index]), &self) &&
-          GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
-            reinterpret_cast<LPCWSTR>(slot.entry), &owner) && owner == slot.owner;
-        if (!pinned || MH_CreateHook(slot.entry, reinterpret_cast<void *>(pcl_hooks[index]), &trampoline) != MH_OK) {
-          slot.state = 2; okay = false; lose_presentation(); continue;
-        }
-        slot.original.store(reinterpret_cast<abi_v2::pcl_set_marker>(trampoline), std::memory_order_release);
-        if (MH_EnableHook(slot.entry) != MH_OK) { slot.state = 2; okay = false; lose_presentation(); continue; }
-        slot.state.store(1, std::memory_order_release);
-        lose_presentation();
-        if (current_pcl_target.load(std::memory_order_acquire) == slot.entry) pcl_available = true;
-      }
-      return okay;
     }
     frame_record *frame_slot(metadata_state &state, std::uint32_t viewport, const frame_identity &identity, std::uint64_t serial, bool create) {
       if (identity.kind == frame_identity_kind::unavailable) return nullptr;
@@ -2464,8 +2276,6 @@ namespace sunshine_streamline {
       const bool inspect = ticket && feature != 3 && (known_contract || commands);
       const loss_context_scope loss_scope(0, inspect ? viewport : UINT32_MAX, feature);
       if (ticket) ++evaluation_calls;
-      const auto present_serial = ticket && feature == 3 ?
-        start_presentation_marker(viewport, numeric_frame(frame), ticket) : 0;
       evaluation_snapshot snapshot;
       if (inspect) {
         const auto serial = ++call_sequence;
@@ -2490,7 +2300,6 @@ namespace sunshine_streamline {
       call_trace.finish(result);
       finish_capture(captured, result, ticket);
       if (sample) finish_evaluation(snapshot, result, ticket);
-      if (present_serial) finish_presentation_marker(viewport, present_serial, result, ticket);
       SetLastError(outgoing);
       return result;
     }
@@ -3348,7 +3157,7 @@ namespace sunshine_streamline {
 
   // MinHook snapshots every thread on the system (~50 ms with ~10k threads)
   // for each enable or apply. Streamline hook discovery and newly registered
-  // FG/PCL targets are therefore installed on a pool thread that holds
+  // FG targets are therefore installed on a pool thread that holds
   // poll_lock; a present-path poll meanwhile skips, as on contention. The
   // add-on is pinned, so a pending callback never outlives its code.
   namespace {
@@ -3361,20 +3170,10 @@ namespace sunshine_streamline {
       ReleaseSRWLockShared(&fg_lock);
       return pending;
     }
-    bool pcl_targets_pending() {
-      if (!TryAcquireSRWLockShared(&pcl_lock)) return false;
-      bool pending = false;
-      for (unsigned i = 0; i != pcl_target_count && !pending; ++i)
-        pending = pcl_targets[i].state.load(std::memory_order_acquire) == 0;
-      ReleaseSRWLockShared(&pcl_lock);
-      return pending;
-    }
     // Caller holds poll_lock.
     void install_hook_work() {
       if (!hooks_installed && !permanently_rejected) discover();
       if (middleware_requested() && observing.load(std::memory_order_acquire)) {
-        // PCL markers feed only diagnostics (start_presentation_marker).
-        if (sunshine_game3d::diagnostics::enabled()) install_pcl_hooks();
         install_fg_hooks();
       }
     }
@@ -3439,8 +3238,6 @@ namespace sunshine_streamline {
     while (!token_metadata.clear()) SwitchToThread();
     release_camera_records();
     AcquireSRWLockExclusive(&presentations_lock);
-    for (auto &record : presentations) { if (record.thread) CloseHandle(record.thread); record = {}; }
-    lose_presentation();
     lose(loss_diagnostics::reason::lifecycle, __func__, 3382, {});
     ++history_loss; // Camera records were released: every viewport's history restarts.
     ++epoch;
@@ -3448,10 +3245,6 @@ namespace sunshine_streamline {
     next_discovery = next_report = 0;
     last_report_activity = UINT64_MAX;
     last_selected = {};
-    AcquireSRWLockExclusive(&pcl_lock);
-    pcl_available.store(false, std::memory_order_release);
-    current_pcl_target.store(nullptr, std::memory_order_release);
-    ReleaseSRWLockExclusive(&pcl_lock);
     requested.store(diagnostic_enabled, std::memory_order_release);
     source_requested.store(source_enabled, std::memory_order_release);
     if (hooks_installed) observing.store(diagnostic_enabled || source_enabled, std::memory_order_release);
@@ -4122,53 +3915,6 @@ namespace sunshine_streamline {
     SetLastError(incoming);
   }
 
-  presentation_status query_current_presentation(presentation_snapshot &output, std::uint32_t max_age_ms) {
-    output = {};
-    const auto ticket = observation_ticket();
-    const auto fail = [&](presentation_status status) { output.status = status; output.explicit_bracket = false; return status; };
-    if (!ticket) return fail(presentation_status::inactive);
-    if (installed_abi == abi::v2 && (!pcl_available.load(std::memory_order_acquire) || !current_pcl_target.load(std::memory_order_acquire)))
-      return fail(presentation_status::missing_marker_function);
-    if (!TryAcquireSRWLockExclusive(&presentations_lock)) return fail(presentation_status::busy);
-    const auto loss = loss_revision.load(std::memory_order_acquire);
-    const auto marker_loss = presentation_loss.load(std::memory_order_acquire);
-    const auto *record = current(ticket) ? presentation_thread(false) : nullptr;
-    if (record) {
-      output = record->value;
-      if ((output.status == presentation_status::open_bracket || output.status == presentation_status::pending_marker) &&
-          (output.epoch != epoch || output.loss_revision != loss || output.marker_loss_revision != marker_loss))
-        fail(presentation_status::observation_lost);
-      else if (output.status == presentation_status::open_bracket && !presentation_token_current(output.frame)) fail(presentation_status::untracked_frame);
-      else if (output.status == presentation_status::open_bracket) {
-        const auto now = GetTickCount64();
-        if (!sunshine_freshness::fresh_le(output.start_tick, now, max_age_ms)) fail(presentation_status::stale);
-      }
-    }
-    ReleaseSRWLockExclusive(&presentations_lock);
-    if (!current(ticket)) return fail(presentation_status::inactive);
-    if (loss != loss_revision.load(std::memory_order_acquire) || marker_loss != presentation_loss.load(std::memory_order_acquire))
-      return fail(presentation_status::observation_lost);
-    return output.status;
-  }
-  const char *name(presentation_status value) {
-    switch (value) {
-      case presentation_status::inactive: return "inactive";
-      case presentation_status::missing_marker_function: return "missing-pcl-marker-function";
-      case presentation_status::missing_bracket: return "missing-thread-present-bracket";
-      case presentation_status::pending_marker: return "present-marker-pending";
-      case presentation_status::open_bracket: return "explicit-thread-present-bracket";
-      case presentation_status::ended_bracket: return "present-bracket-ended";
-      case presentation_status::failed_marker: return "present-marker-failed";
-      case presentation_status::untracked_frame: return "untracked-present-frame";
-      case presentation_status::out_of_order: return "present-markers-out-of-order";
-      case presentation_status::repeated_frame: return "repeated-frame-presentation";
-      case presentation_status::stale: return "stale-present-bracket";
-      case presentation_status::observation_lost: return "lost-present-observation";
-      case presentation_status::busy: return "present-snapshot-busy";
-    }
-    return "unknown";
-  }
-
   const char *name(evidence_status value) {
     switch (value) {
       case evidence_status::inactive: return "inactive";
@@ -4363,19 +4109,6 @@ namespace sunshine_streamline {
         static_cast<unsigned long long>(discard.unreadable), static_cast<unsigned long long>(discard.dropped),
         static_cast<unsigned long long>(discard.rejected));
       message(text);
-      presentation_snapshot present;
-      query_current_presentation(present);
-      const bool same_present_frame = present.explicit_bracket && evidence.successful_evaluation &&
-        evidence.frame_correlated && same_frame(present.frame, evidence.frame);
-      std::snprintf(text, sizeof(text),
-        "Sunshine presentation trace: status=%s thread=%u thread_generation=%llu frame_kind=%u numeric_frame=%llu token_generation=%llu start=%llu end=%llu explicit_bracket=%d evaluation_frame_match=%d pcl_getters=%llu pcl_markers=%llu dropped=%llu effects_runtime=0x%llx effects_resource=0x%llx effects_size=%ux%u effects_format=%u final_color_registered=0",
-        name(present.status), present.thread_id, static_cast<unsigned long long>(present.thread_generation), static_cast<unsigned>(present.frame.kind),
-        static_cast<unsigned long long>(present.frame.numeric), static_cast<unsigned long long>(present.frame.generation),
-        static_cast<unsigned long long>(present.start_sequence), static_cast<unsigned long long>(present.end_sequence), present.explicit_bracket ? 1 : 0, same_present_frame ? 1 : 0,
-        static_cast<unsigned long long>(pcl_getter_calls.load()), static_cast<unsigned long long>(pcl_calls.load()),
-        static_cast<unsigned long long>(presentation_dropped.load()), static_cast<unsigned long long>(selected.effects_input.runtime),
-        static_cast<unsigned long long>(selected.effects_input.resource), selected.effects_input.width, selected.effects_input.height, selected.effects_input.format);
-      message(text);
       for (const auto &color : evidence.colors) if (color.present) {
         const bool identity = selected.effects_input.ready && color.identity_available && color.value.native_resource == selected.effects_input.resource;
         const bool dimensions = color.value.resource_width && color.value.resource_height && selected.effects_input.ready &&
@@ -4459,8 +4192,7 @@ namespace sunshine_streamline {
       if (depth_capture::queue_order_line(now, order_line, sizeof(order_line)))
         sunshine_log::message(reshade::log::level::info, order_line);
     }
-    if (middleware_requested() && observing.load(std::memory_order_acquire) &&
-        ((sunshine_game3d::diagnostics::enabled() && pcl_targets_pending()) || fg_targets_pending()))
+    if (middleware_requested() && observing.load(std::memory_order_acquire) && fg_targets_pending())
       schedule_install();
     report_probe_diagnostics(selected, now);
   }
@@ -4537,7 +4269,6 @@ namespace sunshine_streamline {
       selected = entry_path_selected; admissible = entry_source_admitted;
       return entry_policy_observed;
     }
-    bool install_presentation_hooks() { return install_pcl_hooks(); }
     bool discover_frame_generation_hooks() { discover_fg_options(); return install_fg_hooks(); }
     bool install(const versioning::number &version, const testing::targets &functions) {
       if (!middleware_requested() && !sunshine_upscaler_trace::enabled()) return false;
@@ -4584,12 +4315,6 @@ namespace sunshine_streamline {
         MH_DisableHook(MH_ALL_HOOKS);
         MH_Uninitialize();
       }
-      for (unsigned i = 0; i != pcl_target_count; ++i) {
-        if (pcl_targets[i].owner) FreeLibrary(pcl_targets[i].owner);
-        pcl_targets[i].entry = nullptr; pcl_targets[i].owner = nullptr;
-        pcl_targets[i].original = nullptr; pcl_targets[i].state = 0;
-      }
-      pcl_target_count = 0; current_pcl_target = nullptr; pcl_available = false;
       for (unsigned i = 0; i != fg_target_count; ++i) {
         if (fg_targets[i].owner) FreeLibrary(fg_targets[i].owner);
         fg_targets[i].entry = nullptr; fg_targets[i].owner = nullptr;
@@ -4597,7 +4322,6 @@ namespace sunshine_streamline {
       }
       fg_target_count = 0; current_fg_target = nullptr; fg_available = false;
       fg_loss_revision = 0;
-      pcl_calls = pcl_getter_calls = presentation_dropped = 0;
       original_feature_function_v2 = nullptr;
       hooks_installed = minhook_initialized = false;
       v1_private_state_ready.store(false, std::memory_order_release);

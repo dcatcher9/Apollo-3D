@@ -332,10 +332,7 @@ process-wide switch (`game3d_diagnostics.h`), and the Troubleshooting panel's **
 below **UI mask source** edits it at runtime in both directions. Loading and every edit log
 `Sunshine Game 3D: diagnostics on (Diagnostics=1)` or `... off (Diagnostics=0)`. Off (the
 default), the add-on records none of its diagnostic-only per-frame work: per-pass GPU timestamps
-and their resolves (the timing line keeps its CPU fields and hitch lines stay), and the Streamline
-V1 Reflex / V2 PCL presentation brackets, which only the probe's presentation trace reads (the PCL
-marker hooks are installed only while it is on; see
-[Upscaler call-route diagnostic](#upscaler-call-route-diagnostic)). The A2 one-way
+and their resolves (the timing line keeps its CPU fields and hitch lines stay). The A2 one-way
 statistics (A2 revocation and the one-way judgment read them) run with the switch on or off, on
 status samples only (per-frame bit `0x4000`, at most one every 100 ms); the exact UI counters
 always run. Decisions, masks, candidate binding and exported pixels
@@ -3560,7 +3557,7 @@ Constants, global tags and evaluation exports are required. `slSetTagForFrame`,
 `slGetNewFrameToken` and `slGetFeatureFunction` are optional capabilities. Frame tags first appear
 in the surveyed 2.7.30 headers; earlier 2.x releases retain global/evaluation-local tag observation.
 Without token creation observations the adapter cannot invent numeric frame evidence, and without
-feature-function lookup it cannot discover the optional PCL/FG observers. These omissions do not
+feature-function lookup it cannot discover the optional FG observer. These omissions do not
 disable the core hooks. Hogwarts Legacy's **2.6.10** build is not a public SDK tag: its admission is
 based on the compatible 2.x family, with game behavior still requiring live validation.
 
@@ -5375,8 +5372,8 @@ a system-wide thread snapshot: about 50 ms with ~10,000 system threads, before a
 suspended. Hogwarts Legacy exposes 38 NGX entry points, and enabling them one by one on the present
 thread froze the game for 2.06 s at startup. The export scan itself is about 2 ms. Reports wait
 for a pending scan, so coverage is never reported from its pre-scan state. Streamline's own
-hooks (the interposer entry points in one queued apply, and each Frame Generation options and PCL
-marker target as it is registered) are installed the same way: a pool thread holding the probe's
+hooks (the interposer entry points in one queued apply, and each Frame Generation options
+target as it is registered) are installed the same way: a pool thread holding the probe's
 poll lock runs them, while the present-path poll skips for those few frames. In Hogwarts Legacy this
 removed the last start-up stalls of 160 ms and 106 ms. The per-frame vtable-slot observers patch
 no code and stay on the present path. No game DLL is replaced, no unknown
@@ -5642,14 +5639,8 @@ The observer separately retains HUD-less, scaling-input, scaling-output, backbuf
 and UIAlpha tags. Live UI capture at tag boundaries independent of FG is described under the UI protection
 contract; merely retaining diagnostic color metadata does not authorize a mask. Actual effects-input
 identity comes from ReShade's begin-effects render-target view,
-which may differ from the swapchain after a resolve/copy. V1 Reflex and V2 PCL PresentStart/End
-markers supply bounded, current-thread presentation brackets. Only the diagnostic presentation
-trace reads them, so they are tracked (and the PCL marker hooks installed) only while the
-Diagnostics switch is on. V2 PCL discovery passively observes
-`slGetFeatureFunction`; a marker function cached before the hook was installed remains unavailable.
-Failed, nested, repeated, stale, untracked or out-of-order brackets do not establish a current frame.
-Thread lifetimes are retained explicitly so a reused OS thread ID cannot inherit an open bracket.
-These are frame, identity and declared-extent observations; none establishes final spatial alignment.
+which may differ from the swapchain after a resolve/copy. These are frame, identity and
+declared-extent observations; none establishes final spatial alignment.
 
 An accepted result is explicitly **observed-content-match, coverage-incomplete**. Other native
 mutations and some enhanced-barrier and render-pass resolve information remain unobserved.

@@ -83,7 +83,7 @@ namespace {
     const void *first {}, *second {}, *third {}, *fourth {};
     std::uint32_t a {}, b {}, c {};
     DWORD incoming_error {};
-  } constants_call, tag_call, framed_tag_call, evaluate_call, new_token_call, feature_function_call, pcl_call, fg_call;
+  } constants_call, tag_call, framed_tag_call, evaluate_call, new_token_call, feature_function_call, fg_call;
 
   constexpr DWORD incoming_error = 0x12345678, outgoing_error = 0xabcdef01;
   bool result_v1 = true;
@@ -91,9 +91,7 @@ namespace {
   std::atomic<bool> block_original {}, original_entered {}, release_original {};
   abi_v2::frame_token *returned_token{};
   void *returned_feature_function{};
-  bool inspect_presentation_in_original{};
   bool lose_during_tag_original{};
-  presentation_snapshot presentation_inside_original;
 
   void require(bool condition, const char *message) {
     if (!condition) {
@@ -212,13 +210,6 @@ namespace {
     SetLastError(outgoing_error);
     return result_v2;
   }
-  FIXTURE_NOINLINE std::int32_t fake_pcl_marker(std::uint32_t marker, const abi_v2::frame_token &frame) {
-    pcl_call.incoming_error = GetLastError(); ++pcl_call.calls;
-    pcl_call.first = &frame; pcl_call.a = marker;
-    if (inspect_presentation_in_original) query_current_presentation(presentation_inside_original);
-    block_if_requested();
-    SetLastError(outgoing_error); return result_v2;
-  }
   FIXTURE_NOINLINE std::int32_t fake_get_feature_function(std::uint32_t feature, const char *name, void *&function) {
     feature_function_call.incoming_error = GetLastError(); ++feature_function_call.calls;
     feature_function_call.first = name; feature_function_call.second = &function; feature_function_call.a = feature;
@@ -265,10 +256,9 @@ namespace {
       probe_setting = config == probe_config::ledger ? "1" : "0";
       source_setting = config == probe_config::ledger ? "0" : "1";
       testing::clear();
-      constants_call = tag_call = framed_tag_call = evaluate_call = new_token_call = feature_function_call = pcl_call = fg_call = {};
+      constants_call = tag_call = framed_tag_call = evaluate_call = new_token_call = feature_function_call = fg_call = {};
       returned_token = nullptr;
-      returned_feature_function = reinterpret_cast<void *>(&fake_pcl_marker);
-      inspect_presentation_in_original = false; presentation_inside_original = {};
+      returned_feature_function = nullptr;
       lose_during_tag_original = false;
       result_v1 = true;
       result_v2 = 0;
@@ -279,7 +269,7 @@ namespace {
       testing::clear();
     }
   };
-  // Presentation brackets are tracked only with the Diagnostics switch on.
+  // The Diagnostics switch on for one scope.
   struct diagnostics_on {
     const bool previous = sunshine_game3d::diagnostics::enabled();
     diagnostics_on() { sunshine_game3d::diagnostics::set_enabled(true); }
@@ -3146,71 +3136,14 @@ namespace {
       require(value.colors[2].value.native_resource == reinterpret_cast<std::uintptr_t>(&local_output), "color snapshot exposed mutable storage");
     }
   }
-  void test_presentation_v1() {
-    fixture cleanup;
-    require(testing::install(testing::abi::v1_1_1, v1_targets), "v1 presentation install failed");
-    presentation_snapshot value;
-    require(query_current_presentation(value) == presentation_status::missing_bracket, "presentation fabricated before markers");
-    auto marker = [&](unsigned frame, unsigned type) {
-      const auto before = evaluate_call.calls;
-      SetLastError(incoming_error);
-      require(call_v1_evaluate(nullptr, 3, frame, type) == result_v1 && GetLastError() == outgoing_error &&
-          evaluate_call.calls == before + 1 && evaluate_call.a == 3 && evaluate_call.b == frame && evaluate_call.c == type &&
-          evaluate_call.first == nullptr && evaluate_call.incoming_error == incoming_error, "v1 presentation marker forwarding changed");
-    };
-    marker(10, 4);
-    require(query_current_presentation(value) == presentation_status::missing_bracket,
-      "presentation tracked with the Diagnostics switch off");
-    diagnostics_on diagnostics;
-    marker(10, 0);
-    require(query_current_presentation(value) == presentation_status::missing_bracket, "Reflex simulation marker opened presentation");
-    marker(10, 4);
-    require(query_current_presentation(value) == presentation_status::open_bracket && value.explicit_bracket && value.frame.numeric == 10,
-      "v1 successful PresentStart did not open numeric bracket");
-    const auto main_generation = value.thread_generation;
-    std::atomic<bool> other_ok{};
-    std::thread other([&] {
-      presentation_snapshot local;
-      const bool absent = query_current_presentation(local) == presentation_status::missing_bracket;
-      call_v1_evaluate(nullptr, 3, 100, 4);
-      other_ok = absent && query_current_presentation(local) == presentation_status::open_bracket && local.frame.numeric == 100 &&
-        local.thread_generation != main_generation;
-    });
-    other.join();
-    require(other_ok && query_current_presentation(value) == presentation_status::open_bracket && value.frame.numeric == 10,
-      "presentation leaked across threads or another thread overwrote current bracket");
-    std::thread replacement([&] { presentation_snapshot local; other_ok = query_current_presentation(local) == presentation_status::missing_bracket; });
-    replacement.join(); require(other_ok, "terminated/reused thread inherited an open presentation");
-    marker(11, 5);
-    require(query_current_presentation(value) == presentation_status::out_of_order && !value.explicit_bracket, "mismatched PresentEnd retained open bracket");
-    marker(11, 4); marker(11, 5);
-    require(query_current_presentation(value) == presentation_status::ended_bracket && !value.explicit_bracket, "matching PresentEnd did not close bracket");
-    marker(11, 4);
-    require(query_current_presentation(value) == presentation_status::repeated_frame, "repeated presentation accepted");
-    marker(9, 4); marker(10, 4);
-    require(query_current_presentation(value) == presentation_status::out_of_order, "older frame rewound repetition guard");
-    marker(12, 4);
-    require(query_current_presentation(value) == presentation_status::open_bracket, "fresh presentation did not recover");
-    // GetTickCount64 can have coarser resolution than Sleep(2). Wait for the
-    // production age clock itself to advance, without assuming timer resolution.
-    const auto age_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    while (GetTickCount64() <= value.start_tick && std::chrono::steady_clock::now() < age_deadline) Sleep(1);
-    require(GetTickCount64() > value.start_tick, "presentation age clock did not advance within fixture deadline");
-    require(query_current_presentation(value, 0) == presentation_status::stale, "stale presentation remained usable");
-    marker(12, 5); result_v1 = false; marker(13, 4);
-    require(query_current_presentation(value) != presentation_status::open_bracket && !value.explicit_bracket, "failed PresentStart opened bracket");
-    result_v1 = true; marker(14, 4);
-    require(query_current_presentation(value) == presentation_status::open_bracket, "presentation failed to recover after marker error");
-    testing::lose_observation();
-    require(query_current_presentation(value) == presentation_status::observation_lost && !value.explicit_bracket,
-      "lifecycle observation loss retained presentation");
-  }
-  void test_presentation_v2() {
+  // A v2 slGetFeatureFunction lookup other than the FG options entry passes
+  // through unchanged (result, returned pointer, arguments and LastError),
+  // with the Diagnostics switch on as well.
+  void test_feature_function_passthrough() {
     fixture cleanup;
     diagnostics_on diagnostics;
     require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "v2 PCL getter fixture install failed");
-    presentation_snapshot value;
-    require(query_current_presentation(value) == presentation_status::missing_marker_function, "v2 fabricated PCL function discovery");
+    returned_feature_function = reinterpret_cast<void *>(&fake_fg_options); // Any non-null entry.
     constexpr char name[] = "slPCLSetMarker";
     void *function{};
     auto retrieve = [&](unsigned feature, const char *requested_name) {
@@ -3222,79 +3155,34 @@ namespace {
           feature_function_call.incoming_error == incoming_error, "PCL getter changed result/pointer/arguments/LastError");
     };
     retrieve(3, name); retrieve(4, "slPCLGetState");
-    require(query_current_presentation(value) == presentation_status::missing_marker_function, "wrong PCL feature/name discovered marker");
     result_v2 = -7; retrieve(4, name);
-    require(query_current_presentation(value) == presentation_status::missing_marker_function, "failed getter enabled markers");
     result_v2 = 0; retrieve(4, name);
-    require(query_current_presentation(value) == presentation_status::missing_marker_function, "getter installed hook inside callback");
-    const auto hooks = minhook_ledger::mark();
-    require(testing::install_presentation_hooks(), "deferred PCL hook installation failed");
-    require_hooks(hooks, {function}, "PCL did not hook exactly its marker entry");
-    auto call = reinterpret_cast<abi_v2::pcl_set_marker>(function);
-    auto marker = [&](unsigned type, opaque_token &token) {
-      const auto before = pcl_call.calls;
+  }
+  // A v1 Reflex marker call (slEvaluateFeature feature 3; simulation start,
+  // PresentStart and PresentEnd) passes through unchanged (result, LastError
+  // and arguments) on success and failure, with the Diagnostics switch off and
+  // on. These are test_presentation_v1's forwarding checks, kept when the
+  // presentation brackets were deleted.
+  void test_reflex_marker_passthrough() {
+    fixture cleanup;
+    require(testing::install(testing::abi::v1_1_1, v1_targets), "v1 presentation install failed");
+    auto marker = [&](unsigned frame, unsigned type) {
+      const auto before = evaluate_call.calls;
       SetLastError(incoming_error);
-      require(call(type, token.ref()) == result_v2 && GetLastError() == outgoing_error && pcl_call.calls == before + 1 &&
-          pcl_call.a == type && pcl_call.first == &token.ref() && pcl_call.incoming_error == incoming_error,
-        "PCL marker changed return/arguments/LastError");
+      require(call_v1_evaluate(nullptr, 3, frame, type) == result_v1 && GetLastError() == outgoing_error &&
+          evaluate_call.calls == before + 1 && evaluate_call.a == 3 && evaluate_call.b == frame && evaluate_call.c == type &&
+          evaluate_call.first == nullptr && evaluate_call.incoming_error == incoming_error, "v1 presentation marker forwarding changed");
     };
-    opaque_token token;
-    marker(4, token);
-    require(query_current_presentation(value) == presentation_status::untracked_frame, "opaque token address became present frame");
-    mint(token, nullptr); marker(4, token);
-    require(query_current_presentation(value) == presentation_status::open_bracket && value.explicit_bracket &&
-        value.frame.kind == frame_identity_kind::v2_observed_token && !value.frame.has_numeric, "observed PCL token did not open bracket");
-    const auto generation = value.frame.generation;
-    retrieve(4, name);
-    require(query_current_presentation(value) == presentation_status::open_bracket, "identical successful getter revoked current bracket");
-    mint(token, nullptr);
-    require(query_current_presentation(value) == presentation_status::untracked_frame, "reused token address retained older present frame");
-    marker(5, token);
-    require(query_current_presentation(value) == presentation_status::out_of_order, "different token generation closed wrong frame");
-    inspect_presentation_in_original = true;
-    marker(4, token);
-    require(query_current_presentation(value) == presentation_status::open_bracket && value.frame.generation > generation,
-      "new token generation did not recover presentation");
-    require(presentation_inside_original.status == presentation_status::pending_marker && !presentation_inside_original.explicit_bracket,
-      "PresentStart was usable before original success");
-    marker(5, token);
-    require(presentation_inside_original.status == presentation_status::pending_marker && !presentation_inside_original.explicit_bracket,
-      "PresentEnd entry left bracket usable while original was pending");
-    inspect_presentation_in_original = false;
-    marker(4, token);
-    require(query_current_presentation(value) == presentation_status::repeated_frame, "same token frame presented twice");
-    mint(token, nullptr); marker(4, token);
-    result_v2 = -7; retrieve(4, name);
-    require(query_current_presentation(value) == presentation_status::missing_marker_function, "failed feature retrieval retained current PCL evidence");
-    result_v2 = 0; retrieve(4, name);
-    require(query_current_presentation(value) == presentation_status::observation_lost, "old bracket resurrected after getter recovered");
-    marker(5, token); mint(token, nullptr); marker(4, token);
-    result_v2 = -9; marker(5, token);
-    require(query_current_presentation(value) != presentation_status::open_bracket && !value.explicit_bracket, "failed PCL End retained open bracket");
-    result_v2 = 0;
-    opaque_token delayed; mint(delayed, nullptr);
-    block_original = true;
-    std::atomic<bool> forwarded{};
-    std::atomic<presentation_status> after_reinitialize{presentation_status::open_bracket};
-    std::thread worker([&] {
-      SetLastError(incoming_error);
-      forwarded = call(4, delayed.ref()) == 0 && GetLastError() == outgoing_error;
-      presentation_snapshot local; after_reinitialize = query_current_presentation(local);
-    });
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    while (!original_entered.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
-    const bool entered = original_entered.load(std::memory_order_acquire);
-    shutdown(); initialize(nullptr);
-    block_original = false; release_original = true; worker.join();
-    require(entered && forwarded && after_reinitialize != presentation_status::open_bracket,
-      "in-flight PCL completion crossed shutdown/reinitialize epoch or changed forwarding");
-    retrieve(4, name); mint(token, nullptr); marker(4, token);
-    require(query_current_presentation(value) == presentation_status::open_bracket, "retained PCL trampoline did not recover after reinitialize");
-    shutdown();
-    const auto before = pcl_call.calls;
-    marker(5, token);
-    require(pcl_call.calls == before + 1 && query_current_presentation(value) == presentation_status::inactive,
-      "shutdown PCL hook lost pure passthrough");
+    auto markers = [&](unsigned frame) {
+      for (const bool success : {true, false}) {
+        result_v1 = success;
+        marker(frame, 0); marker(frame, 4); marker(frame, 5);
+      }
+      result_v1 = true;
+    };
+    markers(10);
+    diagnostics_on diagnostics;
+    markers(11);
   }
 
 
@@ -4100,19 +3988,6 @@ namespace {
     require(!query_frame_generation(UINT32_MAX, fg, &ambiguous_status) &&
         ambiguous_status == frame_generation_query_status::ambiguous && query_frame_generation(view.value, fg),
       "ambiguous FG viewports were silently combined");
-    returned_feature_function = reinterpret_cast<void *>(&fake_pcl_marker);
-    require(call_feature_function(abi_v2::feature_pcl, "slPCLSetMarker", function) == 0 &&
-        testing::install_presentation_hooks(), "source-only PCL hook discovery failed");
-    mint(token, &numeric);
-    auto marker = reinterpret_cast<abi_v2::pcl_set_marker>(function);
-    {
-      diagnostics_on diagnostics;
-      marker(4, token.ref());
-      presentation_snapshot bracket;
-      require(query_current_presentation(bracket) == presentation_status::open_bracket && bracket.explicit_bracket,
-        "source-only FG lost its explicit present bracket when probe diagnostics were disabled");
-      marker(5, token.ref());
-    }
     shutdown();
     const auto calls = fg_call.calls;
     require(set_options(view, options) == 0 && fg_call.calls == calls + 1 && !query_frame_generation(view.value, fg),
@@ -4648,9 +4523,10 @@ int main(int argc, char **argv) {
     std::puts("PASS eWarnOutOfVRAM keeps FG knowledge and the FG depth source; other SDK results still fail");
     test_feature_independent_depth_contracts();
     std::puts("PASS arbitrary feature IDs with proven depth contracts; opaque v2 and unproven legacy/Reflex inputs remain pass-through");
-    test_presentation_v1();
-    test_presentation_v2();
-    std::puts("PASS v1 Reflex/v2 dynamic PCL presentation brackets, thread isolation, failures, token reuse and repeated-frame rejection");
+    test_feature_function_passthrough();
+    std::puts("PASS v2 feature-function lookups other than FG options pass through unchanged");
+    test_reflex_marker_passthrough();
+    std::puts("PASS v1 Reflex marker calls pass through unchanged on success and failure");
     test_call_trace_only(false);
     test_call_trace_only(true);
     std::puts("PASS v1/v2 call-route trace remains independent of depth selection and full content diagnostics");

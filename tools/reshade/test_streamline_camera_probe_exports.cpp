@@ -90,11 +90,6 @@ namespace sunshine_streamline {
   extern "C" __declspec(dllexport) void SunshineStreamlineTestFinishCapture(std::uint64_t ticket, bool successful) {
     if (ticket) depth_capture::finish(ticket, successful);
   }
-  extern "C" __declspec(dllexport) BOOL SunshinePresentationTestQuery(presentation_snapshot *out) {
-    if (!out) return FALSE;
-    query_current_presentation(*out);
-    return TRUE;
-  }
   extern "C" __declspec(dllexport) BOOL SunshineDiscardTestInstallPending() {
     if (!TryAcquireSRWLockExclusive(&poll_lock)) return FALSE;
     const bool result = install_discard_observations();
