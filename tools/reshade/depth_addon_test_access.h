@@ -91,31 +91,9 @@ SUNSHINE_DEPTH_ADDON_SHARED bool content_supported(const resource_desc &desc)
 SUNSHINE_DEPTH_ADDON_SHARED effect_runtime *s_challenger_owner = nullptr;
 SUNSHINE_DEPTH_ADDON_SHARED std::mutex s_challenger_mutex;
 
-enum class draw_stats_heuristic : unsigned int
-{
-	prefer_vertices = 0,
-	vertices,
-	drawcalls
-};
-enum class aspect_ratio_heuristic : unsigned int
-{
-	none = 0,
-	similar_aspect_ratio,
-	multiples_of_resolution,
-	match_resolution_exactly,
-	match_custom_resolution_exactly
-};
-
 SUNSHINE_DEPTH_ADDON_SHARED bool s_disable_intz = false;
 // Enable or disable the creation of backup copies at clear operations on the selected depth-stencil
 SUNSHINE_DEPTH_ADDON_SHARED unsigned int s_preserve_depth_buffers = 0;
-// Choose impact of draw statistics in the detection heuristic
-SUNSHINE_DEPTH_ADDON_SHARED draw_stats_heuristic s_draw_stats_heuristic = draw_stats_heuristic::prefer_vertices;
-// Enable or disable the aspect ratio check from 'check_aspect_ratio' in the detection heuristic
-SUNSHINE_DEPTH_ADDON_SHARED aspect_ratio_heuristic s_aspect_ratio_heuristic = aspect_ratio_heuristic::similar_aspect_ratio;
-// Enable or disable the format check from 'check_depth_format' in the detection heuristic
-SUNSHINE_DEPTH_ADDON_SHARED unsigned int s_format_filtering = 0;
-SUNSHINE_DEPTH_ADDON_SHARED unsigned int s_custom_resolution_filtering[2] = {};
 
 enum class clear_op : uint8_t
 {
@@ -149,11 +127,6 @@ struct draw_stats
 
 	bool operator>(const draw_stats &other) const
 	{
-		if (s_draw_stats_heuristic == draw_stats_heuristic::vertices)
-			return vertices > other.vertices;
-		if (s_draw_stats_heuristic == draw_stats_heuristic::drawcalls)
-			return work_count() > other.work_count();
-
 		return (scene_writes == 0 && drawcalls_indirect < (drawcalls / 3) ?
 			// Choose snapshot with the most vertices, since that is likely to contain the main scene
 			vertices > other.vertices :

@@ -77,8 +77,107 @@ static void check_snapshot_row(const depth_selection_resource &a, const depth_st
 		"Snapshot changed capture region or candidate shape admission");
 }
 
+// Candidate shape admission at the add-on's defaults. The expected values were
+// recorded from the add-on built before its capture filter knobs were removed,
+// not computed by hand; the fixed check must reproduce every row.
+struct shape_row
+{
+	uint32_t width, height, frame_width, frame_height;
+	bool expected;
+};
+static constexpr shape_row shape_rows[] = {
+	// Zero sizes.
+	{ 0, 0, 3840, 2160, true }, { 0, 2160, 3840, 2160, true }, { 3840, 0, 3840, 2160, true }, { 1920, 1080, 0, 0, false },
+	// Native, DLSS Quality, Balanced, Performance and Ultra Performance, quarter, too small.
+	{ 3840, 2160, 3840, 2160, true }, { 2560, 1440, 3840, 2160, true }, { 2227, 1253, 3840, 2160, true },
+	{ 1920, 1080, 3840, 2160, true }, { 1280, 720, 3840, 2160, true }, { 960, 540, 3840, 2160, true },
+	{ 640, 360, 3840, 2160, false },
+	// Square and skinny shadow targets.
+	{ 1024, 1024, 3840, 2160, false }, { 2048, 2048, 3840, 2160, false }, { 4096, 4096, 3840, 2160, false },
+	{ 3840, 128, 3840, 2160, false },
+	// Output/source ratios 1.85 and 0.5, exactly and just past.
+	{ 1920, 1080, 3552, 1998, true }, { 1920, 1080, 3553, 1999, true }, { 2000, 1000, 3700, 1850, true },
+	{ 1999, 1000, 3700, 1850, true }, { 3840, 2160, 1920, 1080, true }, { 3842, 2160, 1920, 1080, false },
+	{ 3840, 2162, 1920, 1080, false }, { 1921, 1080, 3840, 2160, true },
+	// Aspect delta about 0.099 and 0.101 at both ratio edges.
+	{ 1096, 584, 1920, 1080, true }, { 1097, 584, 1920, 1080, false }, { 980, 584, 1920, 1080, true },
+	{ 979, 584, 1920, 1080, false }, { 3626, 2160, 1920, 1080, true }, { 3622, 2160, 1920, 1080, false },
+	{ 4054, 2160, 1920, 1080, false }, { 4058, 2160, 1920, 1080, false }, { 2192, 1168, 3840, 2160, true },
+	{ 2194, 1168, 3840, 2160, false }, { 7252, 4320, 3840, 2160, true }, { 7244, 4320, 3840, 2160, false },
+	// Aspect delta 0.1, where float and double rounding disagree: only the
+	// float similar-aspect term admits the first two.
+	{ 2472, 1080, 3440, 1440, true }, { 1260, 600, 2000, 1000, true }, { 906, 540, 1280, 720, true },
+	// Ultrawide output.
+	{ 2580, 1080, 3440, 1440, true }, { 2560, 1440, 3440, 1440, false },
+};
+enum class shape_region : uint8_t { copied, drawn, preserved };
+struct shape_region_row
+{
+	uint32_t width, height;
+	shape_region source;
+	uint32_t x, y, region_width, region_height;
+	bool expected;
+};
+// Padded allocations against a 3840x2160 frame; the last row's viewport
+// exceeds the allocation, so the whole allocation is the region.
+static constexpr shape_region_row shape_region_rows[] = {
+	{ 4096, 4096, shape_region::copied, 0, 0, 2560, 1440, true },
+	{ 4096, 4096, shape_region::drawn, 0, 0, 1920, 1080, true },
+	{ 4096, 4096, shape_region::preserved, 0, 0, 1280, 720, true },
+	{ 2048, 2048, shape_region::copied, 16, 8, 1920, 1080, true },
+	{ 4096, 4096, shape_region::copied, 0, 0, 1024, 1024, false },
+	{ 4096, 4096, shape_region::drawn, 0, 0, 5000, 3000, false },
+};
+
+static bool shape_admits(const depth_stencil_resource &info, uint32_t frame_width, uint32_t frame_height)
+{
+	const bool admitted = candidate_matches_shape(info, frame_width, frame_height);
+	require_snapshot(admitted == candidate_matches_shape(depth_selection_resource(info), frame_width, frame_height),
+		"Snapshot changed candidate shape admission");
+	return admitted;
+}
+
+static void check_candidate_shape_table()
+{
+	char message[160];
+	for (const auto &row : shape_rows)
+	{
+		depth_stencil_resource info;
+		info.desc.type = resource_type::texture_2d;
+		info.desc.texture = { row.width, row.height, 1, 1, format::d32_float, 1 };
+		std::snprintf(message, sizeof(message), "Candidate shape admission changed for %ux%u at a %ux%u frame",
+			row.width, row.height, row.frame_width, row.frame_height);
+		require_snapshot(shape_admits(info, row.frame_width, row.frame_height) == row.expected, message);
+	}
+	for (const auto &row : shape_region_rows)
+	{
+		depth_stencil_resource info;
+		info.desc.type = resource_type::texture_2d;
+		info.desc.texture = { row.width, row.height, 1, 1, format::d32_float, 1 };
+		const viewport view { float(row.x), float(row.y), float(row.region_width), float(row.region_height), 0, 1 };
+		auto &stats = info.last_frame_stats;
+		if (row.source == shape_region::copied)
+		{
+			stats.copied_during_frame = true;
+			stats.copied_viewport = view;
+		}
+		else if (row.source == shape_region::drawn)
+			stats.total.last_viewport = view;
+		else
+		{
+			info.have_preserved_region = true;
+			info.preserved_region = { row.x, row.y, row.region_width, row.region_height, info.layout_epoch };
+		}
+		std::snprintf(message, sizeof(message), "Candidate shape admission changed for a %ux%u region of a %ux%u allocation",
+			row.region_width, row.region_height, row.width, row.height);
+		require_snapshot(shape_admits(info, 3840, 2160) == row.expected, message);
+	}
+}
+
 static void check_depth_snapshot_contract()
 {
+	check_candidate_shape_table();
+
 	// Candidate counters follow the capture-owner count (or the opt-in trace).
 	generic_depth_device_data demand_device;
 	require_snapshot(tracking_demand(demand_device).counters == s_frame_activity_trace,

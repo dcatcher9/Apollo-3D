@@ -187,9 +187,9 @@ namespace sunshine_depth {
     return result;
   }
 
-  // Default automatic geometry eligibility. Explicit/custom/manual filtering is
-  // owned by the caller. Quarter resolution includes common upscaling modes;
-  // aspect agreement excludes square and skinny shadow targets.
+  // Default geometry eligibility; the caller adds only the original similar-aspect
+  // term. Quarter resolution includes common upscaling modes; aspect agreement
+  // excludes square and skinny shadow targets.
   inline bool auto_candidate_shape(unsigned width, unsigned height, unsigned output_width, unsigned output_height) {
     if (!width || !height || !output_width || !output_height)
       return false;

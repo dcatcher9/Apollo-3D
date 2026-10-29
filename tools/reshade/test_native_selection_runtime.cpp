@@ -31,12 +31,21 @@ namespace {
       size_t length = sizeof(disabled);
       require(reshade::get_config_value(nullptr, "ADDON", "DisabledAddons", disabled, &length) && std::strcmp(disabled, "Generic Depth") == 0,
         "Actual ReShade Generic Depth is not disabled");
-      // ReShade parsed the stale value the add-on no longer reads, so the
-      // unchanged automatic expectations below prove that it does not apply.
+      // ReShade parsed the stale values the add-on no longer reads, so the
+      // unchanged automatic expectations below prove that they do not apply.
       if (stale_config) {
         bool stale_automatic = true;
         require(reshade::get_config_value(nullptr, "SUNSHINE_DEPTH", "AutoSelectSceneDepth", stale_automatic) && !stale_automatic,
           "Actual runtime did not load the stale AutoSelectSceneDepth=0 value");
+        // Custom 1x1 size and D16-only format: each rejects every candidate if applied.
+        const struct { const char *key; unsigned value; } stale_filters[] = {
+          {"DrawStatsHeuristic", 2}, {"UseAspectRatioHeuristics", 4}, {"FilterResolutionWidth", 1},
+          {"FilterResolutionHeight", 1}, {"FilterFormat", 1}};
+        for (const auto &stale : stale_filters) {
+          unsigned value = 0;
+          require(reshade::get_config_value(nullptr, "DEPTH", stale.key, value) && value == stale.value,
+            "Actual runtime did not load a stale [DEPTH] filter value");
+        }
       }
       const auto mapping_name = std::wstring(reshade_bridge::mapping_prefix) + std::to_wstring(GetCurrentProcessId());
       HANDLE mapping = OpenFileMappingW(FILE_MAP_READ, FALSE, mapping_name.c_str());
@@ -327,7 +336,7 @@ float ps(float4 position : SV_Position) : SV_Depth {
       reload_with_unchanged_depth();
       require(!observed.inject && observed.ready_uniforms.empty(), "Fixture unexpectedly injected production inputs");
       std::printf("PASS production native depth selection/calibration integration (automatic content selection%s)\n",
-        stale_config ? "; stale AutoSelectSceneDepth=0 ignored" : "");
+        stale_config ? "; stale AutoSelectSceneDepth=0 and [DEPTH] filters ignored" : "");
     }
   };
 }

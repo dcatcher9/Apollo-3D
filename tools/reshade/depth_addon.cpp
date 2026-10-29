@@ -21,7 +21,7 @@
 #include <shared_mutex>
 #include <vector>
 #include <unordered_map>
-#include <cmath> // std::abs, std::modf
+#include <cmath> // std::abs
 #include <cstdio> // std::snprintf
 #include <cstring> // std::strcmp
 #include <algorithm> // std::find_if, std::remove, std::sort
@@ -261,55 +261,26 @@ static uint64_t depth_lifetime(device *device, resource value)
 	return found != data->depth_stencil_resources.end() ? found->second.identity : 0;
 }
 
-static bool check_depth_format(format format)
-{
-	switch (s_format_filtering)
-	{
-	case 1:
-		return format == format::d16_unorm || format == format::r16_typeless;
-	case 2:
-		return format == format::d16_unorm_s8_uint;
-	case 3:
-		return format == format::d24_unorm_x8_uint;
-	case 4:
-		return format == format::d24_unorm_s8_uint || format == format::r24_g8_typeless;
-	case 5:
-		return format == format::d32_float || format == format::r32_float || format == format::r32_typeless;
-	case 6:
-		return format == format::d32_float_s8_uint || format == format::r32_g8_typeless;
-	case 7:
-		return format == format::intz;
-	default:
-		return false;
-	}
-}
 // Checks whether the aspect ratio of the two sets of dimensions is similar or not
 static bool check_aspect_ratio(float width_to_check, float height_to_check, float width, float height)
 {
 	if (width_to_check == 0.0f || height_to_check == 0.0f)
 		return true;
 
-	if (s_aspect_ratio_heuristic == aspect_ratio_heuristic::match_resolution_exactly || (s_aspect_ratio_heuristic == aspect_ratio_heuristic::match_custom_resolution_exactly && s_custom_resolution_filtering[0] == 0 && s_custom_resolution_filtering[1] == 0))
-		return width_to_check == width && height_to_check == height;
-	if (s_aspect_ratio_heuristic == aspect_ratio_heuristic::match_custom_resolution_exactly)
-		return width_to_check == s_custom_resolution_filtering[0] && height_to_check == s_custom_resolution_filtering[1];
-
-	float w_ratio = width / width_to_check;
-	float h_ratio = height / height_to_check;
+	const float w_ratio = width / width_to_check;
+	const float h_ratio = height / height_to_check;
 	const float aspect_ratio_delta = (width / height) - (width_to_check / height_to_check);
 
 	// Upscalers render scene depth below output resolution; DLSS Performance and
 	// Ultra Performance are outside the original 1.85 output/input ratio limit.
-	// Only extend the default mode. Explicit exact/custom/multiple filters retain
-	// their established meaning, and the existing larger-buffer cases below stay.
-	if (s_aspect_ratio_heuristic == aspect_ratio_heuristic::similar_aspect_ratio &&
-		sunshine_depth::auto_candidate_shape(static_cast<uint32_t>(width_to_check), static_cast<uint32_t>(height_to_check),
+	// The original float test below stays separate: at the 0.1 aspect limit its
+	// rounding admits sizes the double test rejects (test_depth_addon_exports.cpp).
+	if (sunshine_depth::auto_candidate_shape(static_cast<uint32_t>(width_to_check), static_cast<uint32_t>(height_to_check),
 			static_cast<uint32_t>(width), static_cast<uint32_t>(height)))
 		return true;
 
-	// Accept if dimensions are similar in value or almost exact multiples
-	return std::abs(aspect_ratio_delta) <= 0.1f && ((w_ratio <= 1.85f && w_ratio >= 0.5f && h_ratio <= 1.85f && h_ratio >= 0.5f) ||
-		(s_aspect_ratio_heuristic == aspect_ratio_heuristic::multiples_of_resolution && std::modf(w_ratio, &w_ratio) <= 0.02f && std::modf(h_ratio, &h_ratio) <= 0.02f));
+	// Accept if dimensions are similar in value
+	return std::abs(aspect_ratio_delta) <= 0.1f && w_ratio <= 1.85f && w_ratio >= 0.5f && h_ratio <= 1.85f && h_ratio >= 0.5f;
 }
 
 static bool valid_depth_viewport(const viewport &view, const resource_desc &desc)
@@ -400,16 +371,14 @@ SUNSHINE_DEPTH_ADDON_INTERNAL void observe_preserved_layout(depth_stencil_resour
 template <typename DepthInfo>
 SUNSHINE_DEPTH_ADDON_INTERNAL bool candidate_matches_shape(const DepthInfo &info, uint32_t width, uint32_t height)
 {
-	if (s_aspect_ratio_heuristic == aspect_ratio_heuristic::none ||
-		check_aspect_ratio(static_cast<float>(info.desc.texture.width), static_cast<float>(info.desc.texture.height),
-			static_cast<float>(width), static_cast<float>(height)))
+	if (check_aspect_ratio(static_cast<float>(info.desc.texture.width), static_cast<float>(info.desc.texture.height),
+		static_cast<float>(width), static_cast<float>(height)))
 		return true;
 
-	// Padded allocations may contain a smaller active DLSS/FSR viewport. Keep
-	// explicit filters exact and admit this evidence only in the default mode.
+	// Padded allocations may contain a smaller active DLSS/FSR viewport; its
+	// captured region qualifies when the whole allocation does not.
 	const auto region = effective_capture_region(info);
-	return s_aspect_ratio_heuristic == aspect_ratio_heuristic::similar_aspect_ratio &&
-		check_aspect_ratio(static_cast<float>(region.width), static_cast<float>(region.height), static_cast<float>(width), static_cast<float>(height));
+	return check_aspect_ratio(static_cast<float>(region.width), static_cast<float>(region.height), static_cast<float>(width), static_cast<float>(height));
 }
 
 static bool owns_member_view(const generic_depth_data &data, resource_view view)
@@ -1362,21 +1331,6 @@ static void on_init_device(device *device)
 
 	reshade::get_config_value(nullptr, "DEPTH", "DisableINTZ", s_disable_intz);
 	reshade::get_config_value(nullptr, "DEPTH", "DepthCopyBeforeClears", s_preserve_depth_buffers);
-	unsigned int draw_heuristic = static_cast<unsigned int>(s_draw_stats_heuristic);
-	unsigned int aspect_heuristic = static_cast<unsigned int>(s_aspect_ratio_heuristic);
-	reshade::get_config_value(nullptr, "DEPTH", "DrawStatsHeuristic", draw_heuristic);
-	reshade::get_config_value(nullptr, "DEPTH", "UseAspectRatioHeuristics", aspect_heuristic);
-	s_draw_stats_heuristic = draw_heuristic <= static_cast<unsigned int>(draw_stats_heuristic::drawcalls) ?
-		static_cast<draw_stats_heuristic>(draw_heuristic) : draw_stats_heuristic::prefer_vertices;
-	s_aspect_ratio_heuristic = aspect_heuristic <= static_cast<unsigned int>(aspect_ratio_heuristic::match_custom_resolution_exactly) ?
-		static_cast<aspect_ratio_heuristic>(aspect_heuristic) : aspect_ratio_heuristic::similar_aspect_ratio;
-
-	reshade::get_config_value(nullptr, "DEPTH", "FilterFormat", s_format_filtering);
-	reshade::get_config_value(nullptr, "DEPTH", "FilterResolutionWidth", s_custom_resolution_filtering[0]);
-	reshade::get_config_value(nullptr, "DEPTH", "FilterResolutionHeight", s_custom_resolution_filtering[1]);
-
-	if (s_aspect_ratio_heuristic > aspect_ratio_heuristic::match_custom_resolution_exactly)
-		s_aspect_ratio_heuristic = aspect_ratio_heuristic::similar_aspect_ratio;
 }
 static void on_destroy_device(device *device)
 {
@@ -2755,7 +2709,7 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 			continue; // Ignore multisampled textures, since they would need to be resolved first
 		}
 
-		if ((s_format_filtering != 0 && !check_depth_format(info.desc.texture.format)) || !candidate_matches_shape(info, frame_width, frame_height))
+		if (!candidate_matches_shape(info, frame_width, frame_height))
 		{
 			any_filtered = true;
 			continue; // Not a good fit
@@ -2889,7 +2843,7 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 	data.binding_state = current_depth_stencil_resources.empty() ? depth_binding_state::waiting_game :
 		(any_filtered && any_recent_activity ? depth_binding_state::filtered : depth_binding_state::waiting_activity);
 	data.binding_detail = current_depth_stencil_resources.empty() ? "Waiting for the game to create a depth buffer." :
-		(any_filtered && any_recent_activity ? "Depth buffers exist, but none meets the current format, aspect or sample filters." :
+		(any_filtered && any_recent_activity ? "Depth buffers exist, but none meets the aspect or sample filters." :
 		(any_warming ? "New depth buffers are warming up; waiting for their next rendered frames." : "Depth buffers exist; waiting for active game rendering."));
 	if (data.capture_wait_detail)
 	{
@@ -3180,53 +3134,6 @@ static const char *const format_to_string(format format)
 	}
 }
 
-static void reset_depth_selection(effect_runtime *runtime, generic_depth_data &data)
-{
-	device *const device = runtime->get_device();
-	auto *device_data = device->get_private_data<generic_depth_device_data>();
-	release_challenger(runtime, data);
-	data.selection = sunshine_depth::selection_policy {};
-	data.discovery_hint = {};
-	data.observed_ids.clear();
-	// Reset selected depth-stencil to force re-creation of resources next frame (like the backup texture)
-	if (data.selected_shader_resource != 0 || std::any_of(data.member_views.begin(), data.member_views.end(),
-		[](const auto &entry) { return entry.view != 0; }))
-	{
-		command_queue *const queue = runtime->get_command_queue();
-
-		queue->wait_idle(); // Ensure resource view is no longer in-use before destroying it
-		if (data.selected_shader_resource != 0 && !owns_member_view(data, data.selected_shader_resource))
-		{
-			device->destroy_resource_view(data.selected_shader_resource);
-			device_data->untrack_depth_stencil(device, data.selected_depth_stencil);
-		}
-	}
-	retire_member_views(runtime, data, *device_data, true);
-	data.capture_budget.reset();
-	data.rotating = data.stable_current = false;
-	data.anchor_depth_stencil = {}; data.anchor_identity = 0;
-	data.raw_roster = {}; data.raw_members = {};
-	data.captures = {}; data.selected_record = {}; data.selected_capture = {};
-
-	data.using_backup_texture = false;
-	data.selected_depth_stencil = { 0 };
-	data.selected_shader_resource = { 0 };
-	data.selected_identity = 0;
-	data.selected_desc = {};
-	data.capture_ready = false;
-	data.binding_state = depth_binding_state::waiting_capture;
-	data.binding_detail = "Applying depth selection settings; waiting for the next frame.";
-	data.selection = sunshine_depth::selection_policy {};
-	data.observed_ids.clear();
-	data.observed_regions.clear();
-	data.native_calibrations.clear();
-	data.native_access_open = false;
-	data.native_ui_state = native_depth_ui_state::waiting_depth;
-	data.native_ui_samples = 0;
-
-	update_effect_runtime(runtime);
-}
-
 SUNSHINE_DEPTH_ADDON_INTERNAL sunshine_streamline::provider::source_status describe_streamline_source(effect_runtime *runtime)
 {
 	const auto *device_data = runtime->get_device()->get_private_data<generic_depth_device_data>();
@@ -3236,87 +3143,6 @@ SUNSHINE_DEPTH_ADDON_INTERNAL sunshine_streamline::provider::source_status descr
 		present = device_data ? device_data->native_present_index : std::numeric_limits<uint64_t>::max();
 	}
 	return sunshine_streamline::provider::describe(runtime, present);
-}
-
-// Capture policy remains unchanged; opening these controls never changes it.
-static void draw_capture_settings(device *device, bool &force_reset)
-{
-	const char *const draw_stats_heuristic_items[] = {
-		"Default",
-		"Higher vertices",
-		"Higher draw calls"
-	};
-	int draw_heuristic = static_cast<int>(s_draw_stats_heuristic);
-	if (ImGui::Combo("Draw stats heuristic", &draw_heuristic, draw_stats_heuristic_items, static_cast<int>(std::size(draw_stats_heuristic_items))))
-	{
-		s_draw_stats_heuristic = static_cast<draw_stats_heuristic>(draw_heuristic);
-		reshade::set_config_value(nullptr, "DEPTH", "DrawStatsHeuristic", static_cast<unsigned int>(s_draw_stats_heuristic));
-		force_reset = true;
-	}
-
-	const char *const aspect_ratio_heuristic_items[] = {
-		"None",
-		"Similar aspect ratio",
-		"Multiples of resolution (for DLSS or resolution scaling)",
-		"Match resolution exactly",
-		"Match custom width and height exactly"
-	};
-	int aspect_heuristic = static_cast<int>(s_aspect_ratio_heuristic);
-	if (ImGui::Combo("Aspect ratio heuristic", &aspect_heuristic, aspect_ratio_heuristic_items, static_cast<int>(std::size(aspect_ratio_heuristic_items))))
-	{
-		s_aspect_ratio_heuristic = static_cast<aspect_ratio_heuristic>(aspect_heuristic);
-		reshade::set_config_value(nullptr, "DEPTH", "UseAspectRatioHeuristics", static_cast<unsigned int>(s_aspect_ratio_heuristic));
-		force_reset = true;
-	}
-
-	if (s_aspect_ratio_heuristic == aspect_ratio_heuristic::match_custom_resolution_exactly)
-	{
-		if (ImGui::InputInt2("Filter by width and height", reinterpret_cast<int *>(s_custom_resolution_filtering)))
-		{
-			reshade::set_config_value(nullptr, "DEPTH", "FilterResolutionWidth", s_custom_resolution_filtering[0]);
-			reshade::set_config_value(nullptr, "DEPTH", "FilterResolutionHeight", s_custom_resolution_filtering[1]);
-			force_reset = true;
-		}
-	}
-
-	const char *const depth_format_items[] = { // Needs to match switch in 'check_depth_format' above
-		"All",
-		"D16  ",
-		"D16S8",
-		"D24X8",
-		"D24S8",
-		"D32  ",
-		"D32S8",
-		"INTZ "
-	};
-	if (ImGui::Combo("Filter by depth buffer format", reinterpret_cast<int *>(&s_format_filtering), depth_format_items, static_cast<int>(std::size(depth_format_items))))
-	{
-		reshade::set_config_value(nullptr, "DEPTH", "FilterFormat", s_format_filtering);
-		force_reset = true;
-	}
-
-	if (bool copy_before_clear_operations = s_preserve_depth_buffers != 0;
-		ImGui::Checkbox("Copy depth buffer before clear operations", &copy_before_clear_operations))
-	{
-		s_preserve_depth_buffers = copy_before_clear_operations ? 1 : 0;
-		reshade::set_config_value(nullptr, "DEPTH", "DepthCopyBeforeClears", s_preserve_depth_buffers);
-		force_reset = true;
-	}
-
-	if (s_preserve_depth_buffers == 0)
-		ImGui::SetItemTooltip("Enable this when the depth buffer is empty");
-
-	const bool is_d3d12_or_vulkan = device->get_api() == device_api::d3d12 || device->get_api() == device_api::vulkan;
-
-	if (s_preserve_depth_buffers || is_d3d12_or_vulkan)
-	{
-		if (bool copy_before_fullscreen_draws = s_preserve_depth_buffers == 2;
-			ImGui::Checkbox(is_d3d12_or_vulkan ? "Copy depth buffer during frame to prevent artifacts" : "Copy depth buffer before fullscreen draw calls", &copy_before_fullscreen_draws))
-		{
-			s_preserve_depth_buffers = copy_before_fullscreen_draws ? 2 : 1;
-			reshade::set_config_value(nullptr, "DEPTH", "DepthCopyBeforeClears", s_preserve_depth_buffers);
-		}
-	}
 }
 
 static void draw_depth_panel(effect_runtime *runtime, bool troubleshooting)
@@ -3331,7 +3157,6 @@ static void draw_depth_panel(effect_runtime *runtime, bool troubleshooting)
 		ImGui::TextWrapped("Waiting for the game to create a depth selection runtime.");
 		return;
 	}
-	bool force_reset = false;
 	auto &data = *runtime->get_private_data<generic_depth_data>();
 	device *const device = runtime->get_device();
 	generic_depth_device_data *const device_data = device->get_private_data<generic_depth_device_data>();
@@ -3437,18 +3262,7 @@ static void draw_depth_panel(effect_runtime *runtime, bool troubleshooting)
 		}
 		return;
 	}
-	if (!sunshine_game3d::draw_diagnostics(runtime))
-		return;
-	ImGui::Spacing();
-	if (ImGui::CollapsingHeader("Advanced capture settings"))
-	{
-		ImGui::Indent();
-		draw_capture_settings(device, force_reset);
-		ImGui::Unindent();
-	}
-
-	if (force_reset)
-		reset_depth_selection(runtime, data);
+	sunshine_game3d::draw_diagnostics(runtime);
 }
 
 static void draw_settings_panel(effect_runtime *runtime, int selected_tab = -1)
