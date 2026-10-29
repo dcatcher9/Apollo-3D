@@ -285,7 +285,16 @@ float ps(float4 position : SV_Position) : SV_Depth {
         const auto selected = selected_description();
         if (selected.Width == expected_width && selected.Height == expected_height && varied_linear_depth(pattern, viewport_fraction)) {
           if (++consecutive == 3) {
-            std::printf("PASS %s: actual DEPTH=%ux%u with spatially varying shader-visible scene depth\n", label, expected_width, expected_height);
+            // Sampled checks share a cadence's phase (every eighth Present):
+            // once converged, the binding and readiness hold on every Present.
+            for (unsigned present = 0; present != 90; ++present) {
+              step();
+              const auto bound = selected_description();
+              require(bound.Width == expected_width && bound.Height == expected_height && depth_ready(),
+                "Converged scene depth lost its binding or readiness on a Present");
+            }
+            std::printf("PASS %s: actual DEPTH=%ux%u with spatially varying shader-visible scene depth, bound and ready on the next 90 Presents\n",
+              label, expected_width, expected_height);
             return;
           }
         } else consecutive = 0;
@@ -382,10 +391,17 @@ float ps(float4 position : SV_Position) : SV_Depth {
         draw(*scene);
         if (decoy && ++present % cadence == 0) draw(*decoy);
       };
+      // The backup bound as DEPTH has the source's typeless format, so the
+      // D32 and D32S8 natives of the two reloads are told apart.
       const auto bound = [&](const target_t &expected) {
         const auto selected = selected_description();
-        return selected.Width == expected.width && selected.Height == expected.height;
+        return selected.Width == expected.width && selected.Height == expected.height &&
+          selected.Format == (expected.format == DXGI_FORMAT_D32_FLOAT ? DXGI_FORMAT_R32_TYPELESS : DXGI_FORMAT_R32G8X24_TYPELESS);
       };
+      // Each replaced native allocation stays allocated and is never drawn
+      // again, as a game that keeps its old depth target alive after a
+      // resolution change: it must never stay bound or ready.
+      std::vector<std::unique_ptr<target_t>> idle;
       const auto hold = [&](const target_t &expected, const char *failure) {
         unsigned presents = 0;
         const auto until = GetTickCount64() + 3000;
@@ -398,7 +414,7 @@ float ps(float4 position : SV_Position) : SV_Depth {
       };
       shadow.reset();
       for (unsigned reload = 0; reload < 2; ++reload) {
-        decoy.reset();
+        if (decoy) idle.push_back(std::move(decoy));
         wait_for_scene("reload falls back to live lower-resolution depth", scene->width, scene->height);
         decoy = target(width, height, 1, 9, reload != 0);
         for (cadence = 2; cadence <= 3; ++cadence) {
@@ -444,6 +460,7 @@ float ps(float4 position : SV_Position) : SV_Depth {
                     reload + 1, presents);
       }
       render_tracked_depth = {};
+      std::printf("PASS reloads with %zu replaced native allocations kept alive and never drawn\n", idle.size());
     }
 
     bool depth_ready() {

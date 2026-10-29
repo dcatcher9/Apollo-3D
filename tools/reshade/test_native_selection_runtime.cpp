@@ -218,6 +218,17 @@ float ps(float4 position : SV_Position) : SV_Depth {
         }
       });
       require(bound.p && bound->GetDesc().Width == width && bound->GetDesc().Height == height, "Production DEPTH binding is missing or wrong-sized");
+      // Only the add-on's copy may be bound (its end-of-frame backup, or the
+      // stable copy a rotating set binds): the game's live depth-stencil holds
+      // the same gradient at Present, so only identity tells them apart.
+      // WKPDID_D3DDebugObjectNameW, which ID3D12Object::SetName writes.
+      static constexpr GUID debug_object_name_w {0x4cca5fd8, 0x921f, 0x42c8, {0x85, 0x66, 0x70, 0xca, 0xf2, 0xa9, 0xb7, 0x41}};
+      wchar_t bound_name[64] {};
+      UINT bound_name_size = sizeof(bound_name) - sizeof(wchar_t);
+      require(bound.p != scene->texture.p && (!decoy || bound.p != decoy->texture.p) &&
+        SUCCEEDED(bound->GetPrivateData(debug_object_name_w, &bound_name_size, bound_name)) &&
+        (std::wcscmp(bound_name, L"Sunshine depth presentation texture") == 0 || std::wcscmp(bound_name, L"Sunshine depth effects binding") == 0),
+        "Production DEPTH binding is not the add-on's end-of-frame copy");
       const auto raw_bytes = read(bound.p, D3D12_RESOURCE_STATE_COPY_DEST);
       require(raw_bytes.size() == size_t(width) * height * sizeof(float), "Production bound depth is not raw R32");
       const auto depth = read(exported.p);

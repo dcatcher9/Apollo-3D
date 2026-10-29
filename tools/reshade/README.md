@@ -1263,7 +1263,12 @@ production add-on. A lower-resolution scene target draws every present while rec
 depth draws every second, then every third present: the every-present source must stay bound
 with Automatic readiness on every present. Once native depth draws every present it must promote
 without leaving a present flat through the handover; when it returns to every other present,
-the every-present source must reclaim the presents it leaves flat. The binding and readiness are
+the every-present source must reclaim those presents, and until it does each of them holds
+native depth's last frame (within the source age), so no present is flat. Each replaced native
+allocation stays allocated and is never drawn again, as a game that keeps its old depth target
+alive; it must never be bound or ready (the D32 and D32S8 backups are told apart by format).
+After every converged selection, all fixture modes also check the binding and readiness on each
+of the next 90 Presents. The binding and readiness are
 checked after every present, never periodically, because a periodic check can share the
 cadence's phase. Both reloads run, the second with a D32S8 target. The rule itself
 is in the [scene-depth contract](../../docs/reshade-sbs.md#selecting-scene-depth) and the CPU
