@@ -1369,6 +1369,11 @@ fixture also checks that an uncapturable candidate yields within its two bounded
 probe visits. These are controlled
 regression bounds, not promised recovery times for every game. No selection, depth
 or camera values are injected. `--native-priority` runs the late-native case instead.
+`--set-challenger` reverses the rotating case's roles: three native allocations with the same
+content, one drawn per Present, challenge the calibrated every-Present lower-resolution
+incumbent. Judged as one capture set they cover every Present and must promote within 12 s,
+and no Present may be without depth on the way (a member without its own current copy yet holds
+the previous Present's depth); judged one member at a time they never promote.
 
 `reshade_depth_alternating_runtime_test` uses those same four arguments and, like the
 probe-round fixture, renders through native Game 3D with no FX and no environment settings

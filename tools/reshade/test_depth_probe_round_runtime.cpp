@@ -17,6 +17,11 @@ namespace {
     bool rotating_lower=false;
     unsigned lower_present=0;
     target_t *lower_rendered=nullptr;
+    // --set-challenger: native members drawn one per Present beside the
+    // every-Present incumbent.
+    std::array<std::unique_ptr<target_t>,3> native_set;
+    unsigned set_present=0;
+    target_t *set_rendered=nullptr;
     std::ofstream trace;
 
     bool current(const target_t &target) const {
@@ -30,6 +35,12 @@ namespace {
         frame.parameters.strength_blend == 1.f;
     }
     void render_depth() {
+      if (native_set[0]) {
+        draw(*scene);
+        set_rendered=native_set[set_present++%3].get();
+        draw(*set_rendered);
+        return;
+      }
       if (rotating_lower) {
         const unsigned slot=lower_present++%3;
         lower_rendered=slot ? lower_peers[slot-1].get() : scene.get();
@@ -76,8 +87,13 @@ namespace {
     }
     // The production Dump 3D capture of one native render: the exact depth
     // allocation it consumed, read through its own artifact.
-    void verify_pattern(const char *phase, const target_t &target) {
+    // A set's members draw the same content: the capture may be any of them.
+    void verify_pattern(const char *phase, const target_t &expected, std::initializer_list<const target_t *> peers = {}) {
       const auto consumed = game3d.capture(phase, false, [&] { tick(phase); });
+      const target_t *source = &expected;
+      for (const auto *peer : peers)
+        if (consumed.source_resource == reinterpret_cast<std::uint64_t>(peer->texture.p)) source = peer;
+      const auto &target = *source;
       require(consumed.depth_ready && consumed.source_resource == reinterpret_cast<std::uint64_t>(target.texture.p) &&
         consumed.width == target.width && consumed.height == target.height,
         "Depth pixel oracle has no current expected original source");
@@ -141,6 +157,33 @@ namespace {
       verify_pattern("promoted-native-survives-rotating-lower",*decoy);
       std::puts("PASS per-member raw calibration sampling does not starve independent native-depth challenger qualification/promotion");
     }
+    // check_rotating_lower_promotion's roles reversed: three native members
+    // with identical useful content, one drawn per Present, challenge the
+    // calibrated every-Present lower-resolution incumbent. Judged as one
+    // capture set they cover every Present, so they promote on resolution;
+    // judged one member at a time each would miss two Presents in three and
+    // never promote. No Present may be without depth on the way (a member
+    // without its own current copy yet holds the previous Present's depth).
+    void check_set_challenger() {
+      for (auto &member:native_set) member=target(width,height,1,9);
+      const auto began=GetTickCount64(); unsigned consecutive=0;
+      do {
+        tick("native-set-challenger");
+        require(frame.depth.ready, "A Present had no depth while a native A/B/C set challenged every-Present lower-resolution depth");
+        consecutive=current(*set_rendered) && !frame.depth.reused_depth && full() ? consecutive+1 : 0;
+      } while (consecutive<30 && GetTickCount64()-began<12000);
+      std::printf("MEASURE native-set-challenger promotion_ms=%llu consecutive=%u\n",
+        static_cast<unsigned long long>(GetTickCount64()-began), consecutive);
+      require(consecutive>=30, "A native A/B/C set covering every Present did not promote over lower-resolution depth");
+      const auto steady_until=GetTickCount64()+1200;
+      do {
+        tick("native-set-steady");
+        require(current(*set_rendered) && !frame.depth.reused_depth && full(),
+          "The promoted native set lost its own current depth on a Present");
+      } while (GetTickCount64()<steady_until);
+      verify_pattern("native-set-promoted",*native_set[0],{native_set[1].get(),native_set[2].get()});
+      std::puts("PASS a native A/B/C set judged as one capture set promotes over every-Present lower-resolution depth with no Present without depth");
+    }
     void check_native_priority() {
       // All unrelated lower-resolution resources are older than the useful
       // native source. No source has been manually selected or prequalified.
@@ -167,7 +210,7 @@ namespace {
       verify_pattern("fullres-flat-keeps-useful-scaled",*scene);
       std::puts("PASS full-resolution flat depth cannot displace the qualified lower-resolution current source");
     }
-    void run(bool native_priority=false) {
+    void run(bool native_priority=false,bool set_challenger=false) {
       create_pipeline(); normal=false;
       scene=target(width/2,height/2,1,1);
       render_tracked_depth=[&]{render_depth();};
@@ -190,6 +233,11 @@ namespace {
 
       if (native_priority) {
         check_native_priority();
+        render_tracked_depth={};
+        return;
+      }
+      if (set_challenger) {
+        check_set_challenger();
         render_tracked_depth={};
         return;
       }
@@ -230,8 +278,8 @@ namespace {
 
 int main(int argc,char **argv) {
   std::setvbuf(stdout,nullptr,_IONBF,0);
-  if(argc!=5 && (argc!=6 || std::strcmp(argv[5],"--native-priority")!=0)){
-    std::fputs("usage: depth_probe_round_runtime <official.dll> <frozenShaders> <test.addon64> <fresh-output> [--native-priority]\n",stderr);return 2;
+  if(argc!=5 && (argc!=6 || (std::strcmp(argv[5],"--native-priority")!=0 && std::strcmp(argv[5],"--set-challenger")!=0))){
+    std::fputs("usage: depth_probe_round_runtime <official.dll> <frozenShaders> <test.addon64> <fresh-output> [--native-priority|--set-challenger]\n",stderr);return 2;
   }
   std::thread([]{Sleep(150000);std::fputs("FAIL probe-round watchdog\n",stderr);TerminateProcess(GetCurrentProcess(),124);}).detach();
   try {
@@ -240,6 +288,6 @@ int main(int argc,char **argv) {
     require(!fs::exists(fs::absolute(argv[4])),"Fresh probe-round output required");
     probe_round_fixture f; f.runtime_directory=fs::absolute(argv[4]);
     f.initialize(fs::absolute(argv[1]),fs::absolute(argv[2]),f.runtime_directory,2,0,fs::absolute(argv[3]));
-    f.run(argc==6); return 0;
+    f.run(argc==6 && std::strcmp(argv[5],"--native-priority")==0,argc==6 && std::strcmp(argv[5],"--set-challenger")==0); return 0;
   } catch(const std::exception &e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}
 }
