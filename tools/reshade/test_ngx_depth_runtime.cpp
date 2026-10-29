@@ -33,6 +33,9 @@ namespace {
     bool state_pressure{};
     unsigned pressure_recordings{};
     bool cross_queue{},complete_producer{},producer_gated{},retire_producer_recording=true;
+    // SUNSHINE_NGX_CROSS_QUEUE_NO_COPY_OUT_TEST: the replayable phase runs
+    // with copy-outs refused (SunshineStreamlineTestRefuseCopyOuts).
+    bool no_copy_out{};
     // The separate producer's queue and list type. A COMPUTE producer records
     // only the UAV depth, its transitions and the evaluation (NGX needs a
     // non-copy queue); the decoy's draw stays on the presentation list.
@@ -507,6 +510,15 @@ RWTexture2D<float> depth : register(u0);
       using reads_copy_out_t=BOOL (*)(std::uint64_t,BOOL *);
       const auto reads_copy_out=reinterpret_cast<reads_copy_out_t>(GetProcAddress(GetModuleHandleW(L"SunshineSBSTest.addon64"),"SunshineStreamlineTestCaptureReadsCopyOut"));
       require(reads_copy_out,"Test add-on lacks the capture copy-out query");
+      // The no-copy-out variant: no copy-out is made from the next evaluation
+      // on (as with every list of the producer queue's ring in flight), so each
+      // present must show its retired predecessor from that capture's own
+      // storage (the Reset rule), never its own still-replayable evaluation.
+      using refuse_copy_outs_t=void (*)(BOOL);
+      const auto refuse_copy_outs=reinterpret_cast<refuse_copy_outs_t>(GetProcAddress(GetModuleHandleW(L"SunshineSBSTest.addon64"),"SunshineStreamlineTestRefuseCopyOuts"));
+      require(!no_copy_out || refuse_copy_outs,"Test add-on lacks the copy-out refusal");
+      const auto refused_from=sequence+sequence_offset+1;
+      if(no_copy_out) refuse_copy_outs(TRUE);
       unsigned own=0,lagging=0,held=0,mono=0;
       for(unsigned i=0;i<8;++i) {
         ngx_tick("NGX-completed-producer-still-replayable");
@@ -520,13 +532,28 @@ RWTexture2D<float> depth : register(u0);
         } else if(provider.ready && !provider.reused_depth) {
           require(provider.current.sequence+1==sequence+sequence_offset && provider.current.resource==native(*selected),
             "Retiring a replayable NGX recording admitted other than its own completed copy");
+          if(no_copy_out && provider.current.sequence>=refused_from)
+            require(reads_copy_out(provider.current.capture,&copy_out) && !copy_out,
+              "An NGX capture recorded while copy-outs were refused was read from copy-out storage");
           ++lagging;
         } else if(provider.ready) {
           require(retained_copy(),"Replayable NGX recording replaced or outlived the newest completed copy");
+          // Without a copy-out the first present's retired predecessor is
+          // the capture the previous present showed, so it is shown again.
+          if(no_copy_out)
+            require(i==0 && provider.current.sequence+1==sequence+sequence_offset,
+              "Without a copy-out an NGX present held other than its retired predecessor shown by the previous present");
           ++held;
         } else {require_status(true,false);++mono;}
       }
-      std::printf("MEASURE NGX replayable recordings own_copy_out=%u retired_predecessor=%u held=%u mono=%u\n",own,lagging,held,mono);
+      std::printf("MEASURE NGX replayable recordings%s own_copy_out=%u retired_predecessor=%u held=%u mono=%u\n",
+        no_copy_out ? " without copy-outs" : "",own,lagging,held,mono);
+      if(no_copy_out) {
+        refuse_copy_outs(FALSE);
+        require(own==0 && held==1 && lagging==7 && mono==0,
+          "Without a copy-out a still-replayable NGX recording was not replaced on every present by its retired predecessor");
+        std::puts("PASS without a copy-out every present showed its retired predecessor (the first again, the rest fresh from their own storage: the Reset rule), never its own still-replayable evaluation");
+      }
       retire_producer_recording=true;
       const auto retired=ngx_settle("NGX-retired-producer-recording-recovery");verify_ngx_depth(retired);
       require_established(retired,"Retiring the replayable NGX recording changed source or calibration");
@@ -681,6 +708,8 @@ RWTexture2D<float> depth : register(u0);
       cross_queue=sunshine_camera_fixture::flag("SUNSHINE_NGX_CROSS_QUEUE_TEST");
       complete_producer=sunshine_camera_fixture::flag("SUNSHINE_NGX_CROSS_QUEUE_COMPLETED_TEST");
       require(!complete_producer || cross_queue,"Completed NGX producer option requires the cross-queue test");
+      no_copy_out=sunshine_camera_fixture::flag("SUNSHINE_NGX_CROSS_QUEUE_NO_COPY_OUT_TEST");
+      require(!no_copy_out || complete_producer,"The no-copy-out NGX variant requires the completed cross-queue test");
       require(!cross_queue || !sunshine_camera_fixture::flag("SUNSHINE_NGX_STATE_PRESSURE_TEST"),
         "Run distinct NGX queue and state-pressure regressions separately");
       if(cross_queue) create_producer_queue();

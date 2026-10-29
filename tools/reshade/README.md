@@ -1128,6 +1128,11 @@ reads a copy that a still-replayable recording could write again: a present may 
 completed evaluation only from that capture's copy-out storage (checked through the test add-on's
 `SunshineStreamlineTestCaptureReadsCopyOut`), or else its predecessor once the next reset retires
 it ([copy-out on the producer queue](../../docs/reshade-sbs.md#queue-order)).
+That mode's copies are all copied out, so add `SUNSHINE_NGX_CROSS_QUEUE_NO_COPY_OUT_TEST=1` for
+the Reset rule: during the replayable phase the test add-on's `SunshineStreamlineTestRefuseCopyOuts`
+refuses every copy-out (as with every list of the producer queue's ring in flight, `ring_busy`), and
+every present must show its retired predecessor from that capture's own storage (the first one again,
+as the previous present showed it), never its own still-replayable evaluation.
 An unfinished producer adds no CPU wait and is displayed only from its copy-out once the game's
 own fence wait orders the presenting queue after it (U-C1); otherwise the newest completed copy
 holds. The case also covers

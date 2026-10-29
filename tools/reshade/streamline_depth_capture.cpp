@@ -1845,6 +1845,12 @@ namespace sunshine_streamline::depth_capture {
       }
       return false;
     }
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+    // SunshineStreamlineTestRefuseCopyOuts: while set, copy_out refuses as if
+    // every list of the queue's ring were in flight, so the copies keep the
+    // Reset rule (the NGX cross-queue regression's no-copy-out variant).
+    std::atomic<bool> refuse_copy_outs{};
+#endif
     std::array<bool, slot_limit> copy_out(queue_state &owner, const std::array<bool, slot_limit> &producers,
         std::uint64_t fence) {
       std::array<bool, slot_limit> out{};
@@ -1876,6 +1882,9 @@ namespace sunshine_streamline::depth_capture {
         out.fill(false);
         return out;
       };
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+      if (refuse_copy_outs.load(std::memory_order_acquire)) return refuse(copy_out_counters.ring_busy);
+#endif
       // A list whose last execution completed (its fence value passed).
       const auto completed = owner.fence->GetCompletedValue();
       copy_out_list *entry = nullptr;
@@ -3507,6 +3516,12 @@ namespace sunshine_streamline::depth_capture {
     for (const auto &value : slots)
       if (value.id == capture) { *copy_out = value.copied_out && value.published ? TRUE : FALSE; return TRUE; }
     return FALSE;
+  }
+  // While refuse is set, no copy-out is made (counted as ring_busy, every
+  // list of the queue's ring in flight): another queue reads a snapshot only
+  // once its recording retired (the Reset rule, immutable_for_other_queues).
+  extern "C" __declspec(dllexport) void SunshineStreamlineTestRefuseCopyOuts(BOOL refuse) {
+    refuse_copy_outs.store(refuse != FALSE, std::memory_order_release);
   }
   namespace {
     std::atomic<HANDLE> nomination_gate_entered{}, nomination_gate_release{};
