@@ -1343,7 +1343,9 @@ contrast midpoint ([raw-depth automation](../../docs/reshade-sbs.md#experimental
 Its scenarios check fresh single-window initialization, an unchanged source keeping its gain, zero,
 binding, readiness and full blend in steady state, a changed
 center patch that keeps the gain and moves only the zero, held gain and zero through depth gaps
-with current-color mono and through pauses in Presents before and after a frame's depth draws
+(every gap Present shows the last current Present's capture again with its gain, zero and strength
+for at most the source age, never flat within it, then current-color mono; until the 10-29
+Generic hold every gap Present was mono) and through pauses in Presents before and after a frame's depth draws
 (that frame's own depth at the full strength it had; that a pause earns no catch-up credit is
 `reshade_scene_gain`'s, as the settled gain and zero here could not show it), and a pause during the
 zero's adaptation judged the same way (its own frame's depth, never a reused copy) and left out of

@@ -12,6 +12,8 @@ namespace {
   struct adaptive_fixture : raw_runtime_fixture {
     std::ofstream trajectory;
     std::uint64_t last_frame_completed_ms = 0;
+    // The latest Present's step() bounds, which bracket its render's tick.
+    std::uint64_t step_before = 0, step_after = 0;
     bool require_continuous_frames = false;
     // Completed-frame intervals over 250 ms (pauses in Presents) between two
     // Presents with ready depth, which earn adaptation no time.
@@ -66,7 +68,7 @@ namespace {
     void frame(const char *phase) {
       const bool previous_ready = latest.sequence && ready() && selected_scene();
       const auto previous_frame = latest.depth.frame_index;
-      step(); game3d.no_effects();
+      step_before = GetTickCount64(); step(); step_after = GetTickCount64(); game3d.no_effects();
       latest = game3d.last_render();
       require(latest.sequence > rendered_sequence, "A Present had no native Game 3D render to observe");
       rendered_sequence = latest.sequence;
@@ -149,6 +151,11 @@ namespace {
       std::uint64_t first_selected = 0, first_ready = 0;
       do {
         frame(phase);
+        // A new source draws a new scene: holding the replaced source's last
+        // depth on it shows another screen's depth (not a missing frame). This
+        // names that cause; the check below fails on it too.
+        if (GetTickCount64() - first_possible_draw < 650)
+          require(!latest.depth.reused_depth, "A source's fresh initialization window showed held earlier depth");
         if (GetTickCount64() - first_possible_draw < 650)
           require(!ready() && blend() == 0.f, "Source initialization reused old scale before one fresh reference window");
         if (selected_scene()) {
@@ -230,20 +237,46 @@ namespace {
       settle_ready("after-adaptive-readback");
 
       const float before_gap = gain(), zero_before_gap = zero();
+      // The hold rule (docs/reshade-sbs.md, Generic hold): a Present without a
+      // current copy shows the last current Present's capture again, with its
+      // scene (gain, zero and strength unchanged), for at most the source age
+      // after that Present, then mono. Every gap Present is judged: a hold of
+      // another capture, past the source age, after mono, or with a moved
+      // gain, zero or strength fails, and so does a flat Present within the
+      // source age. (Until the 10-29 Generic hold every gap Present was mono.)
+      require(!latest.depth.reused_depth, "The Present before the depth gap did not show current depth");
+      const auto shown = latest.depth;
+      const auto shown_before = step_before, shown_after = step_after;
       const auto gap_started = GetTickCount64();
+      unsigned gap_held = 0, gap_mono = 0;
       render_tracked_depth = {};
       const auto missing_publication = [&] {
+        const auto status = game3d.automatic();
+        if (latest.depth.ready && latest.depth.reused_depth) {
+          require(!gap_mono, "Depth was held again after the depth gap went mono");
+          require(latest.depth.source_resource.handle == shown.source_resource.handle && latest.depth.source_id == shown.source_id &&
+            latest.depth.frame_index == shown.frame_index, "A held Present showed another capture than the last current one");
+          require(step_before - shown_after < sunshine_freshness::source_age_ms, "Depth was held beyond the source age");
+          require(ready() && blend() == 1.f && gain() == before_gap && zero() == zero_before_gap && status.scale == before_gap,
+            "A held Present changed the gain, zero or strength");
+          ++gap_held;
+          return;
+        }
         // A mono render carries no scene constants; the controller holds the
         // established gain (its automatic scale) and zero. A pending valid
         // readback may update the zero target but cannot move the plane: the
         // first ready render after the gap shows the held zero.
-        const auto status = game3d.automatic();
+        require(step_after - shown_before >= sunshine_freshness::source_age_ms,
+          "A Present without current depth within the source age of the last current depth was flat");
         require(!latest.depth.ready && !ready() && blend() == 0.f && !status.ready() &&
           status.scale_state == unsigned(sunshine_game3d::automatic_scale_state::held) && status.scale == before_gap,
-          "Missing current depth rendered stereo or changed the held gain");
+          "Missing current depth beyond the source age rendered stereo or changed the held gain");
+        ++gap_mono;
       };
-      pump(100, "depth-gap-drain", missing_publication);
-      // Change visible source color during the depth gap, so stale output cannot pass.
+      const auto hold_end = GetTickCount64() + 2000;
+      do { frame("depth-gap-hold"); missing_publication(); } while (gap_mono < 4 && GetTickCount64() < hold_end);
+      require(gap_held && gap_mono >= 4, "A depth gap did not hold within the source age and then go mono");
+      // Change visible source color past the source age, so stale output cannot pass.
       for (size_t i = 0; i < size_t(width) * height; ++i) {
         if (color == 2) { const std::uint16_t red = 0x3a00; std::memcpy(source_bytes.data() + i * 8, &red, 2); }
         else { std::uint32_t pixel = 0; std::memcpy(&pixel, source_bytes.data() + i * 4, 4); pixel = (pixel & ~1023u) | 450u; std::memcpy(source_bytes.data() + i * 4, &pixel, 4); }
@@ -263,8 +296,8 @@ namespace {
       require(ready() && selected_scene(), "Depth return failed to render a fresh current scene");
       require(gain() == before_gap, "Missing captures or their return changed the held gain");
       require(zero() == zero_before_gap, "First ready depth return spent missing-time zero-plane credit");
-      std::printf("PASS gap hold: elapsed=%llu ms gain=%.9g -> %.9g; zero held\n",
-        static_cast<unsigned long long>(GetTickCount64() - gap_started), before_gap, gain());
+      std::printf("PASS gap hold: elapsed=%llu ms gain=%.9g -> %.9g; zero held; %u Presents held within the source age, then %u mono\n",
+        static_cast<unsigned long long>(GetTickCount64() - gap_started), before_gap, gain(), gap_held, gap_mono);
       settle_ready("depth-return");
       // A pause in Presents (a game hitch) before a frame's depth draws, then
       // one between its draws and its Present: the first Present after each
