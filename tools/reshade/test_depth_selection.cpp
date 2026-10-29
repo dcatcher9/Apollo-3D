@@ -1262,6 +1262,35 @@ namespace {
     require(faults.current == 2 && faults.changes == 1, "capture faults on the incumbent were counted as Presents it left without depth");
     std::puts("PASS Present coverage presence: copy-fed native depth promotes; capture faults count for neither side");
   }
+
+  void test_recovery_coverage() {
+    const auto useful = quality_score(.95f);
+    // (12) Both sources stop for ten depth-active Presents (a menu that draws
+    // only other depth). On resume, recovery picks the source drawn on every
+    // Present over the larger one drawn on every other, so no resumed Present
+    // is flat while a reclaim runs.
+    present_run pause;
+    pause.sources = {{1, 640, 360, useful, 1, 0, 0, 0, 399}, {2, 1280, 720, useful, 2, 0, 0, 0, 399},
+                     {1, 640, 360, useful, 1, 0, 0, 410}, {2, 1280, 720, useful, 2, 0, 0, 410}};
+    pause.run(400);
+    require(pause.current == 1, "every-Present depth must be chosen before the pause");
+    pause.count_from = 410;
+    pause.run(1200);
+    require(pause.current == 1 && pause.flat == 0, "recovery picked depth drawn on only some Presents, leaving resumed Presents flat");
+
+    // (13) Completeness class still ranks first in recovery: materially fuller
+    // depth drawn every other Present beats less complete every-Present depth.
+    auto partial = useful;
+    partial.completeness = .5f;
+    present_run fuller;
+    fuller.sources = {{1, 1280, 720, partial, 1, 0, 0, 0, 399}, {2, 1280, 720, useful, 2, 0, 0, 0, 399},
+                      {1, 1280, 720, partial, 1, 0, 0, 410}, {2, 1280, 720, useful, 2, 0, 0, 410}};
+    fuller.run(400);
+    require(fuller.current == 2, "fuller depth must win before the pause");
+    fuller.run(412);
+    require(fuller.current == 2, "recovery put Present coverage above the completeness class");
+    std::puts("PASS recovery: every-Present depth wins within a completeness class; the class still ranks first");
+  }
 }  // namespace
 
 int main() {
@@ -1299,6 +1328,7 @@ int main() {
     test_present_coverage_capture_sets();
     test_present_coverage_hitches();
     test_present_coverage_presence();
+    test_recovery_coverage();
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "FAIL depth selection: %s\n", error.what());

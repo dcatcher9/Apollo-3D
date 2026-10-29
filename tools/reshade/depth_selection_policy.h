@@ -340,9 +340,27 @@ namespace sunshine_depth {
     // count or threshold here.
     template <class SetPresence>
     void observe_present(std::uint64_t frame, std::uint64_t incumbent, bool current, set_presence anchor, SetPresence &&presence) {
+      // Incumbent-independent gaps for recovery and initial selection: an
+      // active candidate whose set had no current-copy work on a Present some
+      // confirmed-good candidate's set drew. Kept across incumbent changes.
+      bool good_drew = false;
+      std::vector<std::pair<std::uint64_t, set_presence>> sets;
+      sets.reserve(candidates_.size());
+      for (const auto &item : candidates_) {
+        sets.emplace_back(item.first, presence(item.first));
+        good_drew = good_drew || (sets.back().second.drew && good(item.second, frame));
+      }
+      const auto of = [&sets](std::uint64_t id) {
+        for (const auto &entry : sets) if (entry.first == id) return entry.second;
+        return set_presence {};
+      };
+      if (good_drew)
+        for (auto &item : candidates_)
+          if (active(item.second, frame) && !of(item.first).active)
+            item.second.coverage.gap = frame;
       if (incumbent != coverage_incumbent_) {
         for (auto &item : candidates_)
-          item.second.coverage = {};
+          item.second.coverage.missed = item.second.coverage.filled = 0;
         coverage_incumbent_ = incumbent;
       }
       // A Present on which the anchor's set had current-copy work but no usable
@@ -354,7 +372,7 @@ namespace sunshine_depth {
       for (auto &item : candidates_) {
         if (item.first == incumbent)
           continue;
-        const auto set = presence(item.first);
+        const auto set = of(item.first);
         // Missing is judged by current-copy work, so a set fed by a copy or
         // resolve every Present is not blocked; covering a gap needs a draw,
         // so a copy can never earn a coverage win.
@@ -483,11 +501,16 @@ namespace sunshine_depth {
 
       // Initial selection and recovery from invalid/stale/destroyed sources
       // remain immediate once another source has confirmed useful content.
+      // Among confirmed sources the completeness class ranks first, as for a
+      // challenger; within it a source whose set left a Present without depth
+      // that another confirmed source drew, since its comparison start, ranks
+      // after one that did not, so recovery does not pick a source drawn only
+      // on some Presents over one drawn on all of them.
       pending_ = {};
       const candidate_state *best = nullptr;
       for (const auto &item : candidates_) {
         const auto &candidate = item.second;
-        if (active(candidate, frame) && (!best || better(candidate, *best, frame)))
+        if (active(candidate, frame) && (!best || recovery_better(candidate, *best, frame)))
           best = &candidate;
       }
       if (best && good(*best, frame))
@@ -541,9 +564,11 @@ namespace sunshine_depth {
     // Latest depth-active Presents, relative to the routed incumbent, where this
     // candidate's prospective capture set had no current-copy work while the
     // incumbent showed current depth (missed), or drew while the incumbent's
-    // set had neither current-copy work nor a current copy (filled).
+    // set had neither current-copy work nor a current copy (filled); and,
+    // independent of any incumbent, where it was active but its set had no
+    // current-copy work while a confirmed-good candidate's set drew (gap).
     struct coverage_marks {
-      std::uint64_t missed = 0, filled = 0;
+      std::uint64_t missed = 0, filled = 0, gap = 0;
     };
 
     struct evidence_state {
@@ -592,6 +617,25 @@ namespace sunshine_depth {
     bool histogram_broader(float span, unsigned bins, float reference_span, unsigned reference_bins) const {
       return span >= reference_span + options_.histogram_span_margin && bins >= 3 &&
              bins >= reference_bins && bins - reference_bins >= options_.histogram_bin_margin;
+    }
+
+    // A gap since the candidate's oldest retained positive capture (its
+    // comparison start once it has three).
+    static bool gapped(const candidate_state &candidate) {
+      const auto &e = candidate.evidence;
+      const auto since = e.positive_count ? e.positive_frames[e.positive_count - 1] : 0;
+      return candidate.coverage.gap > since;
+    }
+
+    bool recovery_better(const candidate_state &a, const candidate_state &b, std::uint64_t frame) const {
+      if (good(a, frame) && good(b, frame)) {
+        const auto ac = completeness_class(a, false), bc = completeness_class(b, false);
+        if (ac != bc)
+          return ac > bc;
+        if (gapped(a) != gapped(b))
+          return !gapped(a);
+      }
+      return better(a, b, frame);
     }
 
     bool better(const candidate_state &a, const candidate_state &b, std::uint64_t frame) const {
