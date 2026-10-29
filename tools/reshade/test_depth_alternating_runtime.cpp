@@ -8,13 +8,24 @@
 
 namespace {
   struct rotation_fixture:raw_runtime_fixture {
-    enum class cadence { single,abc,aabb,offturn,offturn_history,missing,concurrent,interrupted,moving,auxiliary,copy_history,copy_end,copy_rescue };
+    enum class cadence { single,abc,aabb,offturn,offturn_history,missing,concurrent,interrupted,moving,auxiliary,copy_history,copy_end,copy_rescue,
+      gap_double,gap_ui,gap_overlay,gap_long };
     using action_t=BOOL (*)(api::effect_runtime *);
     native_game3d_observer game3d{*this};
     // What the native render of the latest Present consumed.
     sunshine_game3d::test::last_render latest;
     sunshine_depth::frame_depth captured;
-    bool capture_ready=false;
+    bool capture_ready=false,held=false;
+    // The capture the previous Present showed (current or held): a Present
+    // without its own current depth may show it again, as reused depth, only
+    // within the source age of the Present on which it was current, measured
+    // between the fixture's own clock readings around those Presents.
+    struct shown_t {std::uint64_t source=0,id=0,frame=0,before=0,after=0;float center=0,blend=0;bool valid=false,known=false;} shown;
+    std::uint64_t step_before=0,step_after=0;
+    float last_raw=-1; // The raw center pixels() read from this Present's captured depth.
+    unsigned held_presents=0;
+    std::unique_ptr<target_t> overlay; // A HUD pass with its own full-size depth every Present (gap_overlay).
+    com_ptr<ID3D12PipelineState> color_pipeline;com_ptr<ID3D12Resource> ui_color;com_ptr<ID3D12DescriptorHeap> ui_rtv;
     std::uint64_t rendered_sequence=0;
     bool ready() const {return latest.rendered && latest.parameters.depth_ready && latest.parameters.camera_ready;}
     float gain() const {return latest.parameters.depth_scale;}
@@ -125,6 +136,53 @@ namespace {
     // first-person pass, so only the destination holds this frame's scene.
     // Every frame draws a new center depth, so a copy one frame old shows in
     // the raw center of the captured backup (pixels()).
+    // A colour-only UI pass (no depth-stencil) and a HUD pass into its own
+    // full-size depth-stencil (a flat .5 in a small scissor): Presents with and
+    // without other depth work and no scene depth of their own.
+    void gap_pipelines(){
+      const char *src=R"(
+float4 vs(uint id:SV_VertexID):SV_Position{float2 uv=float2((id<<1)&2,id&2);return float4(uv*float2(2,-2)+float2(-1,1),0,1);}
+float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
+)";
+      com_ptr<ID3DBlob> vs,ps,errors;
+      checked(D3DCompile(src,std::strlen(src),nullptr,nullptr,nullptr,"vs","vs_5_0",0,0,vs.put(),errors.put()),"Compile UI vertex shader");
+      checked(D3DCompile(src,std::strlen(src),nullptr,nullptr,nullptr,"ps","ps_5_0",0,0,ps.put(),errors.put()),"Compile UI pixel shader");
+      D3D12_GRAPHICS_PIPELINE_STATE_DESC p{};
+      p.pRootSignature=root.p;p.VS={vs->GetBufferPointer(),vs->GetBufferSize()};p.PS={ps->GetBufferPointer(),ps->GetBufferSize()};
+      p.SampleMask=UINT_MAX;p.RasterizerState.FillMode=D3D12_FILL_MODE_SOLID;p.RasterizerState.CullMode=D3D12_CULL_MODE_NONE;
+      p.RasterizerState.DepthClipEnable=TRUE;p.PrimitiveTopologyType=D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;p.SampleDesc.Count=1;
+      p.NumRenderTargets=1;p.RTVFormats[0]=DXGI_FORMAT_R8G8B8A8_UNORM;
+      checked(game->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(color_pipeline.put())),"Create colour-only UI pipeline");
+      const auto heap=heap_properties(D3D12_HEAP_TYPE_DEFAULT);
+      D3D12_RESOURCE_DESC d{};d.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;d.Width=width;d.Height=height;
+      d.DepthOrArraySize=d.MipLevels=d.SampleDesc.Count=1;d.Format=DXGI_FORMAT_R8G8B8A8_UNORM;d.Flags=D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+      checked(game->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&d,D3D12_RESOURCE_STATE_RENDER_TARGET,nullptr,IID_PPV_ARGS(ui_color.put())),"Create UI colour target");
+      D3D12_DESCRIPTOR_HEAP_DESC h{};h.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;h.NumDescriptors=1;
+      checked(game->CreateDescriptorHeap(&h,IID_PPV_ARGS(ui_rtv.put())),"Create UI view heap");
+      game->CreateRenderTargetView(ui_color.p,nullptr,ui_rtv->GetCPUDescriptorHandleForHeapStart());
+    }
+    void ui_color_pass(){
+      const auto rtv=ui_rtv->GetCPUDescriptorHandleForHeapStart();
+      commands->OMSetRenderTargets(1,&rtv,FALSE,nullptr);
+      commands->SetGraphicsRootSignature(root.p);commands->SetPipelineState(color_pipeline.p);
+      commands->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+      const D3D12_VIEWPORT v{0,0,float(width),float(height),0,1};const D3D12_RECT s{0,0,LONG(width/4),LONG(height/8)};
+      commands->RSSetViewports(1,&v);commands->RSSetScissorRects(1,&s);
+      commands->DrawInstanced(3,1,0,0);
+      commands->OMSetRenderTargets(0,nullptr,FALSE,nullptr);
+    }
+    void overlay_pass(){
+      auto &t=*overlay;const auto dsv=t.heap->GetCPUDescriptorHandleForHeapStart();
+      commands->OMSetRenderTargets(0,nullptr,FALSE,&dsv);
+      commands->ClearDepthStencilView(dsv,D3D12_CLEAR_FLAG_DEPTH,0.f,0,0,nullptr);
+      commands->SetGraphicsRootSignature(root.p);commands->SetPipelineState(depth32_pipeline.p);
+      commands->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+      const D3D12_VIEWPORT v{0,0,float(width),float(height),0,1};const D3D12_RECT s{0,LONG(height*7/8),LONG(width/4),LONG(height)};
+      commands->RSSetViewports(1,&v);commands->RSSetScissorRects(1,&s);
+      struct{float w,h;unsigned pattern;}c{float(width),float(height),19};
+      commands->SetGraphicsRoot32BitConstants(0,3,&c,0);commands->DrawInstanced(3,1,0,0);
+      commands->OMSetRenderTargets(0,nullptr,FALSE,nullptr);
+    }
     void draw_copy_case(){
       const unsigned pattern=100+8*(copied_frames%16);
       scene->pattern=decoy->pattern=pattern;
@@ -157,7 +215,11 @@ namespace {
       else if(mode==cadence::copy_rescue)drawn=2; // The destination holds this frame's scene.
       else if(mode==cadence::aabb)drawn=(phase_present/2)%2+1;
       else if(mode==cadence::concurrent || mode==cadence::moving || mode==cadence::auxiliary)drawn=1;
-      else if(mode==cadence::interrupted)drawn=phase_present%2 ? 0 : 1;
+      else if(mode==cadence::interrupted || mode==cadence::gap_double || mode==cadence::gap_ui || mode==cadence::gap_overlay)
+        drawn=phase_present%2 ? 0 : 1;
+      else if(mode==cadence::gap_long)drawn=phase_present%40 ? 0 : 1;
+      if(mode==cadence::gap_overlay)overlay_pass();
+      if(mode==cadence::gap_ui && !drawn)ui_color_pass();
       if(mode==cadence::moving){
         if(!movement_started)movement_started=GetTickCount64();
         // Looking repeatedly between coherent near/middle/far center patches
@@ -273,32 +335,63 @@ namespace {
         }
       }
       if(depth_resource){
-        float raw=0;std::memcpy(&raw,bytes+size_t(slots-1)*512,4);
-        require(drawn && raw==center(member(drawn).pattern),"Current backup contains stale/wrong-member raw center depth");
+        float raw=0;std::memcpy(&raw,bytes+size_t(slots-1)*512,4);last_raw=raw;
+        if(held){if(shown.known)require(raw==shown.center,"Held backup no longer holds the raw center depth it showed");}
+        else require(drawn && raw==center(member(drawn).pattern),"Current backup contains stale/wrong-member raw center depth");
       }
       const D3D12_RANGE no_write{0,0};pixel_readback->Unmap(0,&no_write);
       if(drawn && full() && eye_difference>.002f)++stereo_observed[drawn-1];
     }
     void tick(const char *phase){
-      update_marker();step();game3d.no_effects();
+      // A double present repeats the real frame's colour.
+      if(!(mode==cadence::gap_double && phase_present%2))update_marker();
+      step_before=GetTickCount64();step();step_after=GetTickCount64();game3d.no_effects();
       latest=game3d.last_render();
       require(latest.sequence>rendered_sequence,"A Present had no native Game 3D render to observe");
       rendered_sequence=latest.sequence;
-      captured=latest.depth;capture_ready=captured.ready;
-      require(!capture_ready || (drawn && current(drawn)),"Wrong/old physical depth admitted for this rendered present");
+      captured=latest.depth;capture_ready=captured.ready;held=capture_ready && captured.reused_depth;
+      if(held && shown.known){
+        // Only the capture the previous Present showed, its frame unchanged,
+        // within the source age, with the scene (and ramp) it was shown with.
+        // (The first tick follows Presents this fixture did not observe.)
+        if(!(shown.valid && captured.source_resource.handle==shown.source && captured.source_id==shown.id && captured.frame_index==shown.frame))
+          std::fprintf(stderr,"DIAG held source=%llx id=%llu frame=%llu; shown valid=%d source=%llx id=%llu frame=%llu; drawn=%u\n",
+            (unsigned long long)captured.source_resource.handle,(unsigned long long)captured.source_id,(unsigned long long)captured.frame_index,
+            shown.valid?1:0,(unsigned long long)shown.source,(unsigned long long)shown.id,(unsigned long long)shown.frame,drawn);
+        require(shown.valid && captured.source_resource.handle==shown.source && captured.source_id==shown.id &&
+          captured.frame_index==shown.frame,"A held Present showed another capture than the previous Present's");
+        require(step_before-shown.after<250,"Depth was held beyond the source age");
+        require(blend()==shown.blend,"A held Present advanced or reset the strength ramp");
+      }
+      if(held)++held_presents;
+      else{
+        require(!capture_ready || (drawn && current(drawn)),"Wrong/old physical depth admitted for this rendered present");
+        // Nothing here invalidates the shown capture: a Present with no
+        // current depth within its source age must show it again.
+        require(capture_ready || drawn || !shown.valid || step_after-shown.before>=250,
+          "A Present without depth within the source age of the previous Present's depth was flat");
+      }
       require(!ready() || capture_ready,"Camera ready without current legally preserved depth");
-      require(drawn || (!capture_ready && !ready() && blend()==0.f),"True color-only gap reused prior depth or stereo");
-      if(capture_ready){
+      require(drawn || held || (!capture_ready && !ready() && blend()==0.f),"Color-only Present beyond the source age reused depth or stereo");
+      if(capture_ready && !held){
         lifetimes[drawn-1]=captured.source_id;layouts[drawn-1]=captured.layout_epoch;
         crops[drawn-1]={captured.x,captured.y,captured.active_width,captured.active_height};
       }
       pixels();
+      if(capture_ready && !held)shown={captured.source_resource.handle,captured.source_id,captured.frame_index,step_before,step_after,
+        center(member(drawn).pattern),blend(),true};
+      else if(held && !shown.known)
+        // A hold of a Present before the first observed one: its current
+        // Present ended before this one began (no earlier bound is known).
+        shown={captured.source_resource.handle,captured.source_id,captured.frame_index,0,step_before,last_raw,blend(),true};
+      else if(!capture_ready)shown.valid=false;
+      shown.known=true;
       trace<<phase<<','<<GetTickCount64()<<','<<latest.sequence<<','<<drawn<<','
         <<(drawn?reinterpret_cast<std::uint64_t>(member(drawn).texture.p):0)<<','<<captured.source_resource.handle<<','
         <<captured.source_id<<','<<captured.layout_epoch<<','<<captured.frame_index<<','<<capture_ready<<','<<ready()<<','
         <<gain()<<','<<zero()<<','<<blend()<<','
         <<marker<<','<<eye_difference<<','<<(drawn?center(member(drawn).pattern):0.f)<<','
-        <<captured.x<<','<<captured.y<<','<<captured.active_width<<','<<captured.active_height<<','<<raster_mask<<'\n';
+        <<captured.x<<','<<captured.y<<','<<captured.active_width<<','<<captured.active_height<<','<<raster_mask<<','<<held<<'\n';
       require(trace.good(),"Cannot record actual-frame rotation trajectory");
     }
     void warm(const char *phase,bool basis=true,const std::function<void(std::uint64_t)> &guard={}){
@@ -321,8 +414,26 @@ namespace {
       set_mode(cadence::single,role);const auto label="continuous-control-"+std::to_string(role);
       warm(label.c_str());stable(label.c_str(),12);
     }
+    // A run of colour-only Presents: the depth of the last real frame is held
+    // within the source age (tick() checks every Present), then mono. Back
+    // after more than the source age without depth, stereo fades in again.
+    void color_only_gap(const char *phase){
+      set_mode(cadence::missing);
+      unsigned held_run=0,mono=0;std::uint64_t first_mono=0;
+      // Mono for longer than the source age, so the ramp restarts.
+      do{tick(phase);if(held)++held_run;else if(!mono++)first_mono=step_after;}while(mono<4 || step_after-first_mono<350);
+      require(held_run>0,"A colour-only gap after current depth held nothing");
+      std::printf("PASS %s: %u held Presents within the source age, then %u mono\n",phase,held_run,mono);
+    }
+    void require_fade_in(cadence next,unsigned role,const char *phase){
+      set_mode(next,role);
+      const auto until=GetTickCount64()+5000;
+      do tick(phase);while(!ready() && GetTickCount64()<until);
+      require(ready() && blend()<1.f,"Depth returning after more than the source age did not fade stereo in again");
+    }
     void missing_then_recover(){
-      set_mode(cadence::missing);for(unsigned i=0;i<8;++i)tick("true-color-only-gap");
+      color_only_gap("true-color-only-gap");
+      require_fade_in(cadence::single,1,"current-depth-return");
       set_mode(cadence::single,1);warm("current-depth-return");stable("current-depth-return",20);
     }
     void check_overlap(){
@@ -344,7 +455,7 @@ namespace {
         if(drawn){
           ++valid;
           if(full()){require_basis();++consecutive_valid;}else consecutive_valid=0;
-        }else ++missing; // tick() already verifies exact current mono/zero blend.
+        }else ++missing; // tick() verifies a hold within the source age, or mono.
       }while(consecutive_valid<30 && GetTickCount64()-started<15000);
       std::printf("MEASURE interrupted-startup elapsed_ms=%llu valid=%u missing=%u full_valid_run=%u\n",
         static_cast<unsigned long long>(GetTickCount64()-started),valid,missing,consecutive_valid);
@@ -352,7 +463,7 @@ namespace {
         "Interleaved missing presents prevented async exact-source startup/full-strength on valid frames");
       require(stereo_observed[0]>0,"Recovered valid frames never produced actual stereo pixels");
       missing_then_recover();
-      std::puts("PASS interrupted startup: actual async samples survive missing presents; valid frames full stereo, absent frames current mono");
+      std::printf("PASS interrupted startup: actual async samples survive missing presents; valid frames full stereo, absent frames hold their real frame's depth (%u held)\n",held_presents);
     }
     void check_rotating_startup(){
       // All three allocations have rendered ABC since the very first game
@@ -452,7 +563,7 @@ namespace {
         static_cast<unsigned long long>(GetTickCount64()-started),changes,consecutive);
       require(consecutive>=60 && changes>=6,"Continuous valid moving depth never reached persistent full stereo within15s");
       require(stereo_observed[0]>0,"Moving-source initialization never reached actual stereo pixels");
-      set_mode(cadence::missing);for(unsigned i=0;i<8;++i)tick("moving-real-gap-mono");
+      color_only_gap("moving-real-gap");
       // Keep moving on return; do not hide a startup problem behind a still scene.
       set_mode(cadence::moving);warm("moving-return",false);stable("moving-return",20,false);
       std::puts("PASS moving startup: near/middle/far scene movement begins before calibration; current-depth/current-color finite stereo");
@@ -499,6 +610,43 @@ namespace {
       require(stereo_observed[drawn-1]>0,"Copy case never produced actual stereo pixels");
       std::printf("PASS %s: the copy's real source is current depth on every Present\n",label);
     }
+    // The scene draws every other Present (gap_double, gap_ui, gap_overlay) or
+    // one Present in 40 (gap_long). In between: a frame presented twice, a
+    // colour-only UI pass, or a HUD pass into its own depth-stencil every
+    // Present. Once real frames are full stereo, every in-between Present must
+    // show its real frame's depth again (tick(): same capture, raw and scene),
+    // never flat; with one real frame in 40, the hold ends at the source age.
+    void check_gap(cadence kind,const char *label){
+      // One real frame in 40 never stays at full strength: warm up drawing
+      // every Present first.
+      if(kind==cadence::gap_long){continuous(1);}
+      set_mode(kind);
+      const auto started=GetTickCount64();unsigned consecutive=kind==cadence::gap_long ? 20 : 0;
+      while(consecutive<20 && GetTickCount64()-started<15000){tick(label);if(drawn){if(full())++consecutive;else consecutive=0;}}
+      require(consecutive>=20,"Real frames between held Presents never reached full stereo");
+      if(kind==cadence::gap_long){
+        unsigned held_run=0,mono=0,fades=0;std::uint64_t mono_since=0;
+        for(unsigned i=0;i<240;++i){
+          tick(label);
+          if(held)++held_run;else if(!capture_ready){++mono;if(!mono_since)mono_since=step_after;}
+          if(drawn){
+            // Mono for more than the source age before this real frame.
+            if(mono_since && step_before-mono_since>300){require(blend()<1.f,"Depth after a long mono run did not fade in again");++fades;}
+            mono_since=0;
+          }
+        }
+        require(held_run>0 && mono>0 && fades>0,"One real frame in 40 did not hold within the source age and then go mono");
+        std::printf("PASS %s: %u held, %u mono, %u fade-ins over 240 Presents\n",label,held_run,mono,fades);
+        return;
+      }
+      unsigned real=0,between=0;
+      for(unsigned i=0;i<120;++i){
+        tick(label);
+        if(drawn){require(full(),"A real frame between held Presents lost full stereo");++real;}
+        else{require(held && ready() && blend()==1.f,"An in-between Present was not held at full stereo");++between;}
+      }
+      std::printf("PASS %s: %u real frames full stereo, %u in-between Presents held their real frame's depth\n",label,real,between);
+    }
     void finish(){
       render_tracked_depth={};
     }
@@ -513,6 +661,12 @@ namespace {
       if(test_case=="--copy-history")set_mode(cadence::copy_history);
       if(test_case=="--copy-end")set_mode(cadence::copy_end);
       if(test_case=="--copy-rescue")set_mode(cadence::copy_rescue);
+      if(test_case.rfind("--gap-",0)==0){
+        gap_pipelines();
+        if(test_case=="--gap-overlay")overlay=target(width,height,1,19);
+        set_mode(test_case=="--gap-double" ? cadence::gap_double : test_case=="--gap-ui" ? cadence::gap_ui :
+          test_case=="--gap-overlay" ? cadence::gap_overlay : test_case=="--gap-long" ? cadence::gap_long : cadence::interrupted);
+      }
       if(test_case=="--overlap")for(unsigned role=1;role<=3;++role)member(role).pattern=14;
       if(test_case=="--interrupted-startup")set_mode(cadence::interrupted);
       if(test_case=="--moving-startup")set_mode(cadence::moving);
@@ -524,7 +678,7 @@ namespace {
       if(test_case=="--flat-startup"){scene->pattern=19;scene->clear_depth=0.f;}
       render_tracked_depth=[&]{draw_depth();};
       trace.open(runtime_directory/"rotation-trajectory.csv");summary.open(runtime_directory/"rotation-summary.csv");
-      trace<<std::setprecision(17)<<"phase,wall_ms,render,drawn,drawn_original,current_original,lifetime,layout,frame,capture_ready,camera_ready,H,t0,blend,marker_half,eye_max_difference,raw_center,crop_x,crop_y,crop_width,crop_height,raster_mask\n";
+      trace<<std::setprecision(17)<<"phase,wall_ms,render,drawn,drawn_original,current_original,lifetime,layout,frame,capture_ready,camera_ready,H,t0,blend,marker_half,eye_max_difference,raw_center,crop_x,crop_y,crop_width,crop_height,raster_mask,held\n";
       summary<<"phase,frames,A,B,C,result\n";
       const auto until=GetTickCount64()+45000;
       while((!observed.runtime || !observed.renders) && GetTickCount64()<until)step();
@@ -545,6 +699,11 @@ namespace {
         else if(test_case=="--copy-history")check_copies(cadence::copy_history,"copy-history-before-draw");
         else if(test_case=="--copy-end")check_copies(cadence::copy_end,"copy-after-draw");
         else if(test_case=="--copy-rescue")check_copies(cadence::copy_rescue,"copy-of-cleared-pass");
+        else if(test_case=="--gap-none")check_gap(cadence::interrupted,"gap-no-depth-work");
+        else if(test_case=="--gap-double")check_gap(cadence::gap_double,"gap-double-present");
+        else if(test_case=="--gap-ui")check_gap(cadence::gap_ui,"gap-color-only-ui");
+        else if(test_case=="--gap-overlay")check_gap(cadence::gap_overlay,"gap-own-hud-depth");
+        else if(test_case=="--gap-long")check_gap(cadence::gap_long,"gap-one-real-frame-in-40");
         else throw std::runtime_error("Unknown isolated rotation case");
         finish();return;
       }
@@ -556,7 +715,8 @@ namespace {
 
       const auto old_b=lifetimes[1];decoy.reset();decoy=target(width,height,1,14);set_mode(cadence::abc);
       warm("member-B-replacement",true,[&](std::uint64_t elapsed){
-        if(drawn==2 && elapsed<650)require(!ready(),"New resource inherited old initialized camera");
+        // A held Present shows another member's previous capture with its own camera.
+        if(drawn==2 && elapsed<650 && !held)require(!ready(),"New resource inherited old initialized camera");
         if(current(2))require(captured.source_id!=old_b,"Replacement reused destroyed lifetime identity");
       });
       stable("replacement-independent-basis",30);
@@ -585,7 +745,8 @@ namespace {
         if(elapsed<650)require(!ready(),"Restored full layout reused an old numeric reference");
       });
       set_mode(cadence::abc);warm("full-layout-return");stable("full-layout-return",30);
-      set_mode(cadence::missing);for(unsigned i=0;i<8;++i)tick("true-color-only-gap");
+      color_only_gap("true-color-only-gap");
+      require_fade_in(cadence::abc,1,"gap-current-depth-return");
       set_mode(cadence::abc);warm("gap-current-depth-return");stable("gap-current-depth-return",30);
 
       for(unsigned r=1;r<=3;++r)member(r).pattern=14;
@@ -603,12 +764,13 @@ namespace {
 
 int main(int argc,char **argv){
   std::setvbuf(stdout,nullptr,_IONBF,0);
-  if(argc!=5 && argc!=6){std::fputs("usage: depth_alternating_runtime <official.dll> <frozenShaders> <test.addon64> <fresh-output> [--overlap|--interrupted-startup|--moving-startup|--rotating-startup|--crowded-rotating-startup|--flat-startup|--layout|--copy-history|--copy-end|--copy-rescue]\n",stderr);return 2;}
+  if(argc!=5 && argc!=6){std::fputs("usage: depth_alternating_runtime <official.dll> <frozenShaders> <test.addon64> <fresh-output> [--overlap|--interrupted-startup|--moving-startup|--rotating-startup|--crowded-rotating-startup|--flat-startup|--layout|--copy-history|--copy-end|--copy-rescue|--gap-none|--gap-double|--gap-ui|--gap-overlay|--gap-long]\n",stderr);return 2;}
   std::thread([]{Sleep(360000);std::fputs("FAIL rotation watchdog\n",stderr);TerminateProcess(GetCurrentProcess(),124);}).detach();
   try{
     const std::string test_case=argc==6 ? argv[5] : "";
     require(test_case.empty() || test_case=="--overlap" || test_case=="--interrupted-startup" || test_case=="--moving-startup" || test_case=="--rotating-startup" || test_case=="--crowded-rotating-startup" || test_case=="--flat-startup" || test_case=="--layout" ||
-      test_case=="--copy-history" || test_case=="--copy-end" || test_case=="--copy-rescue","Unknown isolated rotation case");
+      test_case=="--copy-history" || test_case=="--copy-end" || test_case=="--copy-rescue" || test_case=="--gap-none" || test_case=="--gap-double" ||
+      test_case=="--gap-ui" || test_case=="--gap-overlay" || test_case=="--gap-long","Unknown isolated rotation case");
     select_native_boot();
     width=3840;height=2160;require(!fs::exists(fs::absolute(argv[4])),"Fresh rotation output required");
     rotation_fixture f;f.runtime_directory=fs::absolute(argv[4]);

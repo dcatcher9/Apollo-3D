@@ -491,6 +491,48 @@ SUNSHINE_DEPTH_ADDON_INTERNAL bool validate_capture_record(effect_runtime *runti
 		current.shape == record.shape && current.frame == record.frame && current.present == record.present;
 }
 
+// Whether this Present may show the capture shown on the runtime's previous
+// Present again, as reused depth, when no current copy can be shown: the owner's
+// hold of the last good depth for at most the source age (freshness.h), the
+// same rule as the API providers' missing-frame hold. The capture must be the
+// one data.shown names (so older depth never follows newer), still bound
+// through the same view of the same backup, which must still hold exactly the
+// copy it showed (its content serial; any later copy into it ends the hold),
+// of the same source lifetime, layout and crop, for the same runtime epoch,
+// anchor and colour size, within the source age of the Present on which it was
+// current. A hold never advances the frame, calibration or coverage records.
+// check_age is false for get_frame_depth's revalidation within the same Present.
+static bool hold_shown_capture(effect_runtime *runtime, const generic_depth_data &data,
+	const generic_depth_device_data &device_data, uint32_t color_width, uint32_t color_height, bool check_age = true)
+{
+	const auto &shown = data.shown;
+	const auto &record = shown.record;
+	if (!record.identity || record.direct || !shown.content_serial || !data.using_backup_texture ||
+		record.runtime != data.runtime_epoch || shown.anchor != data.anchor_identity ||
+		record.identity != data.selected_identity || record.source != data.selected_depth_stencil.handle ||
+		record.view != data.selected_shader_resource.handle ||
+		shown.color_width != color_width || shown.color_height != color_height ||
+		(check_age && !sunshine_freshness::within_source_age(shown.tick, GetTickCount64()))) return false;
+	{
+		const std::shared_lock<std::shared_mutex> lock(s_mutex);
+		const auto found = device_data.depth_stencil_resources.find(resource{record.source});
+		if (found == device_data.depth_stencil_resources.end()) return false;
+		const auto &info = found->second;
+		const auto region = effective_capture_region(info);
+		if (info.identity != record.identity || info.layout_epoch != record.layout ||
+			info.desc.texture.width != record.shape.width || info.desc.texture.height != record.shape.height ||
+			static_cast<uint32_t>(info.desc.texture.format) != record.shape.format || region.x != record.shape.x ||
+			region.y != record.shape.y || region.width != record.shape.extent_width || region.height != record.shape.extent_height) return false;
+		bool intact = false;
+		for (const auto &backup : device_data.depth_stencil_backups)
+			if (backup.depth_stencil.handle == record.source)
+				intact = backup.references && backup.backup_texture.handle == record.sampled &&
+					backup.content_identity == record.assignment && backup.content_serial == shown.content_serial;
+		if (!intact) return false;
+	}
+	return runtime->get_device()->get_resource_from_view(resource_view{record.view}).handle == record.sampled;
+}
+
 // The capture budget's view of the snapshot: geometry and content qualification.
 static std::vector<sunshine_depth_capture::source_observation> capture_observations(const generic_depth_data &data,
 	const depth_selection_snapshot &snapshot)
@@ -573,6 +615,8 @@ static void publish_preserved_depth(effect_runtime *runtime, command_list *comma
 		presented = sunshine_streamline::forward_depth_copy(commands->get_native(), current.metadata.depth_copy, {destination.handle, assignment});
 	}
 	const std::unique_lock<std::shared_mutex> lock(s_mutex);
+	for (auto &backup : device_data.depth_stencil_backups)
+		if (backup.backup_texture == destination) backup.content_serial = ++device_data.next_content_serial;
 	const auto found = device_data.depth_stencil_resources.find(source);
 	auto *view = device_data.find_depth_stencil_backup(source);
 	if (found == device_data.depth_stencil_resources.end() || found->second.identity != identity || !view ||
@@ -711,6 +755,8 @@ static void preserve_depth_at_effects(effect_runtime *runtime, command_list *cmd
 		cmd_list->barrier(source, resource_usage::copy_source, old_state);
 	}
 	const std::unique_lock<std::shared_mutex> lock(s_mutex);
+	for (auto &entry : device_data.depth_stencil_backups)
+		if (entry.backup_texture == backup_texture) entry.content_serial = ++device_data.next_content_serial;
 	const auto found = device_data.depth_stencil_resources.find(source);
 	const auto *backup = device_data.find_depth_stencil_backup(source);
 	if (found == device_data.depth_stencil_resources.end() || found->second.identity != identity ||
@@ -749,6 +795,7 @@ static generic_depth_data::member_view *select_captured_depth(effect_runtime *ru
 	resource &selected, const depth_selection_resource *&selected_info)
 {
 	data.capture_wait_detail = nullptr;
+	data.hold_only = false;
 	retire_member_views(runtime, data, device_data);
 	const auto observations = capture_observations(data, snapshot);
 	const uint64_t anchor = selected_info ? selected_info->identity : 0;
@@ -930,7 +977,13 @@ static generic_depth_data::member_view *select_captured_depth(effect_runtime *ru
 	{
 		const depth_selection_resource *current_info = nullptr;
 		resource current_source {};
-		const auto current_id = decision.source;
+		// Without a current copy, the capture shown on the previous Present stays
+		// selected so it can be held (hold_shown_capture decides after this
+		// Present's copies); otherwise nothing is bound.
+		const auto &shown = data.shown;
+		const auto current_id = decision.source ? decision.source :
+			shown.record.identity && shown.anchor == anchor && shown.record.runtime == data.runtime_epoch &&
+			sunshine_freshness::within_source_age(shown.tick, GetTickCount64()) ? shown.record.identity : 0;
 		for (const auto &[value, info] : snapshot)
 			if (current_id && info.identity == current_id &&
 				std::any_of(data.member_views.begin(), data.member_views.end(), [&](const auto &entry) {
@@ -944,6 +997,7 @@ static generic_depth_data::member_view *select_captured_depth(effect_runtime *ru
 		// source's current-copy facts and independent preference decide binding.
 		selected = current_source;
 		selected_info = current_info;
+		data.hold_only = current_info && !decision.source;
 		if (!current_info)
 			data.capture_wait_detail = "Waiting for a qualified current depth capture.";
 		if (s_frame_activity_trace)
@@ -1037,6 +1091,8 @@ static void set_generic_capture_enabled(effect_runtime *runtime, generic_depth_d
 		// sampler retains its separate reference until normal completion polling.
 		release_challenger(runtime, data, true);
 		data.capture_ready = false;
+		data.held = false;
+		data.shown = {};
 		data.captures = {};
 		data.selected_record = {};
 		data.selected_capture = {};
@@ -1075,7 +1131,7 @@ static void update_effect_runtime(effect_runtime *runtime)
 		data.effects_bound = true;
 	}
 
-	sunshine_streamline::provider::set_depth_ready(runtime, view != 0 && data.capture_ready && (!data.rotating || data.stable_current));
+	sunshine_streamline::provider::set_depth_ready(runtime, view != 0 && (data.capture_ready || data.held) && (!data.rotating || data.stable_current));
 }
 
 // The stable copy stays bound until this Present's binding update replaces it.
@@ -2501,6 +2557,8 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 			retire_member_views(runtime, data, *device_data);
 		}
 		data.effects_bound = false; // The API provider owns the DEPTH binding.
+		data.held = false;
+		data.shown = {};
 		data.native_access_present = device_data->native_present_index;
 		data.native_access_open = true;
 		record_generic_row(runtime, data, device_data->native_present_index, true);
@@ -2687,6 +2745,7 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 		data.using_backup_texture = true;
 	}
 	data.capture_ready = false;
+	data.held = false;
 	data.selected_record = {};
 	data.selected_capture = {};
 	data.binding_state = current_depth_stencil_resources.empty() ? depth_binding_state::waiting_game :
@@ -2802,22 +2861,32 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 		const auto captured = capture_record(runtime, data, *device_data, data.selected_depth_stencil,
 			data.selected_identity, data.selected_shader_resource, data.using_backup_texture,
 			member_binding ? member_binding->capture_after : 0);
-		data.selected_record = captured.record;
-		data.selected_capture = captured.metadata;
-		data.capture_ready = captured.record.renderable(device_data->native_present_index, device_data->frame_index, data.runtime_epoch);
+		// A source selected only to be held (routing chose none: no qualified
+		// current copy) never shows its own copy; a later copy into its backup
+		// also ends the hold.
+		data.capture_ready = !data.hold_only &&
+			captured.record.renderable(device_data->native_present_index, device_data->frame_index, data.runtime_epoch);
+		// After all of this Present's copies: a later copy into the held backup ends the hold.
+		data.held = !data.capture_ready && hold_shown_capture(runtime, data, *device_data, frame_width, frame_height);
+		data.selected_record = data.held ? data.shown.record : captured.record;
+		data.selected_capture = data.held ? data.shown.metadata : captured.metadata;
+		if (data.held) data.selected_capture.reused_depth = true;
 		if (data.capture_ready)
 			++(captured.end_of_frame ? data.end_of_frame_copy_frames : data.boundary_copy_frames);
-		if (data.rotating && effects_may_read_depth && data.using_backup_texture && data.capture_ready)
+		if (data.held) ++data.held_frames;
+		if (data.rotating && effects_may_read_depth && data.using_backup_texture && (data.capture_ready || data.held))
 		{
-			// Only a new ready capture is copied. A renderable record's sampled
-			// texture is the selected view's backup, in the shader-resource state.
-			const std::array<uint64_t, 4> key = { captured.record.identity, captured.record.sampled,
-				captured.record.frame, captured.record.present };
+			// Only a new ready capture is copied (a held one is the copy already
+			// there). Its sampled texture is the selected view's backup, in the
+			// shader-resource state.
+			const auto &shown_record = data.selected_record;
+			const std::array<uint64_t, 4> key = { shown_record.identity, shown_record.sampled,
+				shown_record.frame, shown_record.present };
 			data.stable_current = data.stable.view != 0 && key == data.stable_capture;
 			if (!data.stable_current)
 			{
 				const slow_step step("generic stable depth copy");
-				data.stable_current = copy_stable_binding(runtime, cmd_list, data, *device_data, resource { captured.record.sampled });
+				data.stable_current = copy_stable_binding(runtime, cmd_list, data, *device_data, resource { shown_record.sampled });
 				data.stable_capture = data.stable_current ? key : std::array<uint64_t, 4> {};
 			}
 		}
@@ -2826,8 +2895,9 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 			{
 				data.captures.records[i] = captured.record;
 			}
-		data.binding_state = data.capture_ready ? depth_binding_state::ready : depth_binding_state::waiting_capture;
+		data.binding_state = data.capture_ready || data.held ? depth_binding_state::ready : depth_binding_state::waiting_capture;
 		data.binding_detail = data.capture_ready ? "Depth is bound and its current frame is available." :
+			data.held ? "Depth is bound; this Present shows the last current frame again, within the source age." :
 			(source_active ? "Current buffer is selected; waiting for a valid end-of-frame copy." : "Current buffer is selected but inactive; waiting for it to render again.");
 	} while (0);
 	else do
@@ -2845,6 +2915,24 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 		data.selected_identity = 0;
 		data.selected_desc = {};
 	} while (0);
+	// What this Present showed, for the next Present's hold. A hold keeps the
+	// original tick and serial; a Present without Generic depth clears it.
+	if (data.capture_ready)
+	{
+		data.shown = {};
+		data.shown.record = data.selected_record;
+		data.shown.metadata = data.selected_capture;
+		data.shown.tick = GetTickCount64();
+		data.shown.anchor = data.anchor_identity;
+		data.shown.color_width = frame_width;
+		data.shown.color_height = frame_height;
+		const std::shared_lock<std::shared_mutex> serial_lock(s_mutex);
+		for (const auto &backup : device_data->depth_stencil_backups)
+			if (backup.depth_stencil == data.selected_depth_stencil && backup.backup_texture.handle == data.selected_record.sampled)
+				data.shown.content_serial = backup.content_serial;
+	}
+	else if (!data.held)
+		data.shown = {};
 	// Evidence for later choices, once per Present that advanced the depth frame.
 	if (automatic && device_data->native_depth_present_index == native_present_index)
 		observe_present_coverage(data, device_data->frame_index, current_depth_stencil_resources);
@@ -2860,7 +2948,7 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 	// source changes share the status rate limit; binding errors remain
 	// immediate. Logging must never turn physical rotation into per-frame I/O.
 	// The copy counts alone repeat the line at most every 10 s.
-	const uint64_t copy_frames = data.boundary_copy_frames + data.end_of_frame_copy_frames + data.end_of_frame_refused;
+	const uint64_t copy_frames = data.boundary_copy_frames + data.end_of_frame_copy_frames + data.held_frames + data.end_of_frame_refused;
 	if (data.status_log.due(GetTickCount64(), selection_changed || binding_changed,
 		binding_changed && data.binding_state == depth_binding_state::binding_failed,
 		copy_frames != data.logged_copy_frames))
@@ -2868,7 +2956,7 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 		char message[1024];
 		const auto proven = sunshine_streamline::depth_capture::proven_counts();
 		std::snprintf(message, std::size(message),
-			"Sunshine 3D depth: %s; source=%llu %ux%u %s; %s; %s; ready_copies boundary=%llu end_of_frame=%llu; "
+			"Sunshine 3D depth: %s; source=%llu %ux%u %s; %s; %s; ready_copies boundary=%llu end_of_frame=%llu held=%llu; "
 			"end_of_frame_refused=%llu last=%s; proven tracked=%llu unobserved={unrecorded=%llu unreported=%llu invalidated=%llu "
 			"missed_reset=%llu uncovered=%llu} changed_copies=%llu latched=%llu%s earlier_layout={copied=%llu refused=%llu} "
 			"copy_out={made=%llu ring_busy=%llu failed=%llu predicted=%llu taken=%llu unstored=%llu released=%llu skipped=%llu "
@@ -2876,7 +2964,8 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 			binding_state_name(data.binding_state), static_cast<unsigned long long>(data.selected_identity),
 			data.selected_desc.texture.width, data.selected_desc.texture.height, format_to_string(data.selected_desc.texture.format),
 			data.selection_reason, data.binding_detail, static_cast<unsigned long long>(data.boundary_copy_frames),
-			static_cast<unsigned long long>(data.end_of_frame_copy_frames), static_cast<unsigned long long>(data.end_of_frame_refused),
+			static_cast<unsigned long long>(data.end_of_frame_copy_frames), static_cast<unsigned long long>(data.held_frames),
+			static_cast<unsigned long long>(data.end_of_frame_refused),
 			sunshine_streamline::depth_capture::name(data.end_of_frame_refusal), static_cast<unsigned long long>(proven.tracked),
 			static_cast<unsigned long long>(proven.unrecorded), static_cast<unsigned long long>(proven.unreported),
 			static_cast<unsigned long long>(proven.invalidated), static_cast<unsigned long long>(proven.missed_reset),
@@ -3015,7 +3104,7 @@ static void draw_depth_panel(effect_runtime *runtime, bool troubleshooting)
 	bool generic_current = false;
 	{
 		const std::shared_lock<std::shared_mutex> status_lock(s_mutex);
-		generic_current = !provided.selected && device_data && data.capture_ready && data.selected_shader_resource != 0 &&
+		generic_current = !provided.selected && device_data && (data.capture_ready || data.held) && data.selected_shader_resource != 0 &&
 			data.selected_depth_stencil != 0 && data.native_access_present == device_data->native_present_index;
 	}
 	if (!troubleshooting)
@@ -3717,7 +3806,7 @@ bool sunshine_depth::get_frame_depth(effect_runtime *runtime, frame_depth &outpu
 	}
 	if (data == nullptr || device_data == nullptr) return trace.reject("missing_state");
 	if (!data->native_access_open) return trace.reject("access_closed");
-	if (!data->capture_ready) return trace.reject("capture_unavailable");
+	if (!data->capture_ready && !data->held) return trace.reject("capture_unavailable");
 	if (data->selected_shader_resource == 0) return trace.reject("missing_view");
 
 	// Binding, rendering and sampling share the immutable capture result. The
@@ -3729,8 +3818,11 @@ bool sunshine_depth::get_frame_depth(effect_runtime *runtime, frame_depth &outpu
 		trace.decision_present = device_data->native_present_index;
 		trace.decision_frame = device_data->frame_index;
 	}
+	uint32_t frame_width = 0, frame_height = 0;
+	runtime->get_screenshot_width_and_height(&frame_width, &frame_height);
 	if (data->native_access_present != device_data->native_present_index ||
-		!validate_capture_record(runtime, *data, *device_data, data->selected_record))
+		!(data->held ? hold_shown_capture(runtime, *data, *device_data, frame_width, frame_height, false) :
+			validate_capture_record(runtime, *data, *device_data, data->selected_record)))
 		return trace.reject("capture_changed");
 	output = data->selected_capture;
 	output.orientation = orientation_override == depth_orientation::normal || orientation_override == depth_orientation::reversed ?

@@ -114,7 +114,11 @@ namespace {
       float scale=0.f; std::array<float,2> zero{};
       do {
         tick("rotating-lower-calibration");
-        require(!frame.depth.ready || current(*lower_rendered), "Rotating lower-res control admitted another present's member");
+        // A member without its own current copy yet (not qualified) may show
+        // the previous Present's depth again, held (reused) within the source
+        // age (the alternating fixture checks each hold); never another member
+        // as this Present's own depth.
+        require(!frame.depth.ready || frame.depth.reused_depth || current(*lower_rendered), "Rotating lower-res control admitted another present's member");
         if (current(*lower_rendered) && full()) {
           if (!consecutive) { scale=frame.parameters.depth_scale; zero=frame.parameters.convergence; }
           require(std::isfinite(scale) && scale>0.f, "Rotating lower-res control has no positive automatic scale");

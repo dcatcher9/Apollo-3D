@@ -410,27 +410,24 @@ float ps(float4 position : SV_Position) : SV_Depth {
                     reload + 1, presents);
 
         // Native depth drawing every other present again leaves its other
-        // presents without depth until the every-present source reclaims them.
-        // No other present may be flat on the way.
+        // presents without current depth until the every-present source
+        // reclaims them. Until then each of them holds native depth's last
+        // frame (within the source age): no present is flat on the way.
         cadence = 2;
-        unsigned flat = 0;
         presents = consecutive = 0;
         const auto reclaim_limit = GetTickCount64() + 14000;
         while (consecutive < 60) {
-          require(GetTickCount64() < reclaim_limit, "Every-present depth did not reclaim presents that native depth left flat");
+          require(GetTickCount64() < reclaim_limit, "Every-present depth did not reclaim presents that native depth left without current depth");
           step();
           ++presents;
           const bool every = bound(*scene);
-          if (!depth_ready()) {
-            require(!every && present % cadence != 0, "A present whose selected depth was drawn had no current depth");
-            ++flat;
-          }
-          consecutive = every && depth_ready() ? consecutive + 1 : 0;
+          require(depth_ready() && (every || bound(*decoy)), "A present had no depth while every-present depth reclaimed native depth's presents");
+          consecutive = every ? consecutive + 1 : 0;
         }
         presents += hold(*scene, "Reclaimed every-present depth lost its binding or readiness on a present");
         require(varied_linear_depth(1), "Reclaimed every-present depth lost its scene contents");
-        std::printf("PASS reload %u: every-present lower-resolution depth reclaims the %u presents native depth left flat, then bound and ready on all %u presents\n",
-                    reload + 1, flat, presents);
+        std::printf("PASS reload %u: every-present lower-resolution depth reclaims native depth's skipped presents with none flat, then bound and ready on all %u presents\n",
+                    reload + 1, presents);
       }
       render_tracked_depth = {};
     }
@@ -451,6 +448,11 @@ float ps(float4 position : SV_Position) : SV_Depth {
       shadow.reset();
       decoy.reset();
       set_int("Depth_Map", 1);
+      // Presents without depth for longer than the source age end the hold of
+      // the last scene, so every ready Present below is the cleared scene's.
+      const auto drained = std::chrono::steady_clock::now() + std::chrono::milliseconds(400);
+      while (std::chrono::steady_clock::now() < drained) step();
+      require(!depth_ready(), "Depth was held beyond the source age without any depth");
       scene = target(width, height, 1, 1, false, true);
       const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(4);
       unsigned frames = 0;

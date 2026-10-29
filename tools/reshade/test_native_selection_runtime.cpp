@@ -242,6 +242,12 @@ float ps(float4 position : SV_Position) : SV_Depth {
       return depth;
     }
 
+    // Color-only presents for longer than the source age (freshness.h, 250 ms).
+    void beyond_source_age() {
+      const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(400);
+      do step(); while (std::chrono::steady_clock::now() < until);
+    }
+
     void require_duplicate_eyes() {
       const auto pixels = read(exported.p);
       for (unsigned y = height / 8; y < height * 7 / 8; y += std::max(1u, height / 32))
@@ -273,10 +279,14 @@ float ps(float4 position : SV_Position) : SV_Depth {
       require(observed.renders > renders && flag("Sunshine_DepthReady"),
         "Reloaded reference effect lost unchanged depth readiness (bufready_depth not republished after reload)");
 
-      // The rebuilt uniform still follows the current frame both ways.
+      // The rebuilt uniform still follows the current frame both ways: a
+      // color-only present within the source age holds the last frame's
+      // depth, and beyond it readiness is withdrawn.
       render_tracked_depth = {};
       step();
-      require(!flag("Sunshine_DepthReady"), "Reloaded reference effect kept depth readiness on a color-only present");
+      require(flag("Sunshine_DepthReady"), "Reloaded reference effect did not hold depth readiness on a color-only present within the source age");
+      beyond_source_age();
+      require(!flag("Sunshine_DepthReady"), "Reloaded reference effect kept depth readiness beyond the source age without depth");
       render_tracked_depth = [&] { if (scene) draw_scene(*scene); if (decoy) draw_scene(*decoy); };
       // The reload also rebuilt the export texture and the fixture's controls.
       find_texture("DoubleTex", exported, width * 2, color == 1 ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_R16G16B16A16_FLOAT);
@@ -302,23 +312,30 @@ float ps(float4 position : SV_Position) : SV_Depth {
       wait_calibrated("reversed-Z startup", false);
       const auto reversed = verify_scene("reversed-Z startup");
 
-      // Calibration is historical; current-frame validity must be independent.
+      // A color-only present within the source age holds the last frame with
+      // its calibration. Beyond it, current-frame validity is withdrawn
+      // independently of the retained calibration history.
       render_tracked_depth = {};
       step();
-      require(!flag("Sunshine_DepthReady") && !flag("Sunshine_Calibrated"), "Color-only present reused stale depth readiness/calibration");
+      require(flag("Sunshine_DepthReady") && flag("Sunshine_Calibrated"),
+        "A color-only present within the source age did not hold the last frame with its calibration");
+      beyond_source_age();
+      require(!flag("Sunshine_DepthReady") && !flag("Sunshine_Calibrated"), "Color-only presents beyond the source age reused stale depth readiness/calibration");
       require_duplicate_eyes();
       render_tracked_depth = [&] { if (scene) draw_scene(*scene); if (decoy) draw_scene(*decoy); };
       step();
-      require(calibrated(), "A single unavailable present discarded stable calibration for the same source");
+      require(calibrated(), "Unavailable presents discarded stable calibration for the same source");
       verify_scene("same-source recovery");
 
-      // Replace native scene lifetime and its clear convention. Old calibration
-      // must be unavailable immediately, then rebuilt from three fresh captures.
+      // Replace native scene lifetime and its clear convention. Within the
+      // source age the view may still hold the old lifetime's last frame with
+      // that lifetime's own calibration; the new lifetime never inherits it:
+      // past that age it is uncalibrated until three fresh captures rebuild it.
+      const auto fresh_started = std::chrono::steady_clock::now();
       scene = create_target(false, true, 8, 6);
-      step();
+      do step(); while (std::chrono::steady_clock::now() - fresh_started < std::chrono::milliseconds(300));
       require(!calibrated(), "Recreated scene inherited a stale raw calibration");
       require_duplicate_eyes();
-      const auto fresh_started = std::chrono::steady_clock::now();
       wait_calibrated("normal-Z recreated source", true);
       require(std::chrono::duration<double>(std::chrono::steady_clock::now() - fresh_started).count() >= .4,
         "Recreated source calibrated before three separately scheduled captures could complete");

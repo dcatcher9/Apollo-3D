@@ -1152,9 +1152,20 @@ namespace {
       reclaim.run(40);
       require(reclaim.current == 2, "interleaved native depth must qualify on its own");
       reclaim.sources.push_back({1, 640, 360, useful, 1, 0, 0, 40});
-      reclaim.run(400);
+      // The reclaim takes the challenger's three positive captures and three
+      // paired comparisons, each waiting for a fresh incumbent capture (one
+      // every fourth frame it draws): six incumbent capture periods. Until
+      // then the incumbent's skipped Presents have no current depth (the
+      // add-on holds the last frame there); none may follow the reclaim.
+      reclaim.count_from = 40;
+      const std::uint64_t bound = 6 * 4 * cadence;
+      while (reclaim.current != 1 && reclaim.frame < 40 + bound) reclaim.run(reclaim.frame + 1);
       require(reclaim.current == 1 && std::string(reclaim.reason) == "sustained comparable depth on more Presents",
-              "comparable every-Present depth did not reclaim Presents an interleaved incumbent left flat");
+              "comparable every-Present depth did not reclaim Presents an interleaved incumbent left flat within six capture periods");
+      require(reclaim.flat <= bound * (cadence - 1) / cadence, "the reclaim left more Presents without current depth than its comparisons need");
+      const auto flat_at_reclaim = reclaim.flat;
+      reclaim.run(400);
+      require(reclaim.flat == flat_at_reclaim, "a Present without current depth followed the reclaim");
       reclaim.run(800);
       require(reclaim.current == 1 && reclaim.changes == 2, "Present-coverage reclaim oscillated");
     }

@@ -778,6 +778,7 @@ namespace {
     sunshine_game3d::source_alpha_ui_decision source_alpha;
     // Identify the real capture for which scene parameters were resolved. A
     // later pending/generated presentation may reuse that scene, never another source's.
+    // A Generic capture is runtime epoch, source, frame and layout | generic_scene_source.
     std::array<std::uint64_t, 4> scene_source{}; // epoch, source, sequence, viewport
     sunshine_game3d::ui_adaptive::source ui_source;
     scene_parameters_t scene;
@@ -787,6 +788,13 @@ namespace {
     // placement by the time it was shown.
     std::uint64_t decided_ms = 0, present_ordinal = 0;
   };
+
+  // Marks a Generic capture's scene identity, which shares no numbering with
+  // the providers' epochs and sequences.
+  constexpr std::uint64_t generic_scene_source = std::uint64_t{1} << 63;
+  bool generic_depth(const sunshine_depth::frame_depth &depth) {
+    return depth.ready && !depth.provided.epoch && !depth.provided.sequence;
+  }
 
   sunshine_game3d::ui_adaptive::source resolve_ui_observation(const sunshine_depth::frame_depth &depth,
       const sunshine_game3d::ui_adaptive::source &previous, const scene_parameters_t &scene,
@@ -800,7 +808,8 @@ namespace {
     input.sequence = depth.provided.sequence;
     input.viewport = depth.provided.viewport;
     input.eligible = depth.ready && scene.ready;
-    if (!depth.provided.sequence && depth.ready && !depth.reused_depth) {
+    if ((!depth.provided.sequence && depth.ready && !depth.reused_depth) || (generic_depth(depth) && depth.reused_depth)) {
+      // A held Generic capture is the same capture, so it keeps its tick.
       // Generic capture identity remains physical provenance. Placement follows
       // the admitted capture group across its rotating, independently calibrated
       // members; per-resource layout epochs cannot identify that logical group.
@@ -863,8 +872,10 @@ namespace {
   }
 
   void restore_reused_scene(frame_decision_t &frame, const frame_decision_t &previous, bool supported) {
-    // Only the provider can authorize old pixels. Their already resolved scene
-    // travels with the exact real capture, for NGX pending copies as well as FG.
+    // Only the depth source can authorize old pixels: an API provider's held
+    // or pending copy, or Generic's hold of the capture it showed on the
+    // previous Present. Their already resolved scene travels with the exact
+    // real capture, for NGX pending copies as well as FG and Generic holds.
     // This path never evaluates calibration or advances its motion clock.
     // The scene is copied as the real frame left it, placed or still calibrating:
     // a generated frame must look like its real frame. Dropping its depth while
@@ -1043,7 +1054,8 @@ namespace {
   // repeats them exactly). Generic depth and missing depth give 0.
   std::uint64_t depth_identity(const runtime_t &proof) {
     const auto &source = proof.frame.scene_source; // epoch, source, sequence, viewport
-    if (!proof.borrowed_depth.handle || !proof.frame.depth_ready || !source[0] || !source[2]) return 0;
+    if (!proof.borrowed_depth.handle || !proof.frame.depth_ready || !source[0] || !source[2] ||
+        (source[3] & generic_scene_source)) return 0;
     std::uint64_t value = 0x9e3779b97f4a7c15ull;
     for (const auto part : source) {
       value ^= part + 0x9e3779b97f4a7c15ull + (value << 6) + (value >> 2);
@@ -1861,13 +1873,14 @@ namespace {
         frame.jitter = sunshine_depth_jitter::make(depth.provided.jitter, depth.width, depth.height,
           {depth.x, depth.y, depth.active_width, depth.active_height});
       frame.reused_depth = depth.reused_depth;
-      frame.scene_source = {depth.provided.epoch, depth.provided.source_id,
-        depth.provided.sequence, depth.provided.viewport};
+      frame.scene_source = generic_depth(depth) ?
+        std::array<std::uint64_t, 4>{depth.runtime_epoch, depth.source_id, depth.frame_index, depth.layout_epoch | generic_scene_source} :
+        std::array<std::uint64_t, 4>{depth.provided.epoch, depth.provided.source_id, depth.provided.sequence, depth.provided.viewport};
       // Source choice and bounded reuse are resolved once by the depth provider.
       // Another fallible metadata query here could contradict this same frame.
       frame.diagnostics.frame_generation_active = game_enabled && depth.frame_generation_active;
       if (depth.reused_depth) {
-        // The provider owns the short, invalidation-aware depth reuse window.
+        // The depth source owns the short, invalidation-aware depth reuse window.
         // Render current color with those pixels and their previously resolved
         // geometry, without advancing calibration, samples or readiness ramps.
         // Strength reductions remain immediate; increases wait until the next

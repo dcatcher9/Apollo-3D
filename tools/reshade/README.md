@@ -1373,9 +1373,11 @@ then reach continuous current capture, readiness and full stereo within a bounde
 warmup; each allocation keeps its own gain and zero, those of its own drawn range and
 contrast midpoint, which differ between the members. Every checked
 present verifies the physical depth source and actual copied depth its native render
-consumed, a changing color marker in both eyes of the exported SBS, and current mono when
-depth is unavailable. Additional
-phases cover off-turn copy-source reads, lifetime replacement,
+consumed, a changing color marker in both eyes of the exported SBS, and, on a Present without
+its own current depth, the previous Present's depth held (same capture, raw center, scene and
+ramp) within the source age, or current mono beyond it. Additional
+phases cover off-turn copies into live members (after and, as a history copy, before the drawn
+member's draw), lifetime replacement,
 unsupported partial crops, full-layout return, real depth gaps and a moving-center
 trajectory. Run the identical executable against the frozen old and candidate add-ons;
 the old single-source implementation must fail the rotating-readiness assertion after
@@ -1384,8 +1386,17 @@ not an uncontended frame-time benchmark. Execution is opt-in and serial, outside
 
 The same fixture accepts one optional isolated case after its four normal arguments:
 `--overlap`, `--interrupted-startup`, `--moving-startup`, `--rotating-startup`,
-`--crowded-rotating-startup`, `--flat-startup`, or `--layout`. Each case needs a
-fresh output directory. They cover complementary rotation becoming concurrent rendering,
+`--crowded-rotating-startup`, `--flat-startup`, `--layout`, `--copy-history`, `--copy-end`,
+`--copy-rescue`, `--gap-none`, `--gap-double`, `--gap-ui`, `--gap-overlay` or `--gap-long`. Each
+case needs a fresh output directory. The copy cases allocate a same-geometry copy destination
+before the scene: a history copy at the start of the frame (the destination cleared on its first
+frames), a copy after the scene draw, and a copy of a pass the scene's allocation then clears for a
+small first-person draw. The scene, or in the last case the destination, must be the current
+depth on every Present, with this frame's raw center and full stereo. The gap cases draw the scene
+every other Present (one in 40 for `--gap-long`) with nothing, a repeated colour, a colour-only UI
+pass or a HUD into its own depth-stencil in between: every in-between Present must hold its real
+frame's depth at full stereo, and with one real frame in 40 the hold must end at the source age
+and stereo fade in again. They cover complementary rotation becoming concurrent rendering,
 real asynchronous startup samples across missing presents, changing central depth from the
 first rendered scene, fresh ABC rotation without any prior continuous-source calibration,
 and a stable captured crop despite unrelated viewport activity. The layout case also requires
@@ -2819,8 +2830,9 @@ each one back and requires the same automatic result as the default run. It repl
 `--statistics` mode, which disabled content-based selection on D3D12; that combination no longer
 exists. That fixture writes `[SUNSHINE_GAME3D] Enabled=0` itself, as reference effects require,
 and also reloads the effect while it keeps drawing the same depth: the rebuilt `Sunshine_DepthReady` must
-read ready, then unready on a color-only Present, then calibrate again, which checks that the
-shared change-only readiness cache republishes into a reloaded effect.
+read ready, stay ready on a color-only Present within the source age (Generic's hold of the last
+frame), read unready after color-only Presents beyond it, then calibrate again, which checks that
+the shared change-only readiness cache republishes into a reloaded effect.
 The [owning validation section](../../docs/reshade-sbs.md#validation-and-remaining-device-check)
 describes the geometry, color, source-precision, AA and acquisition assertions. CTest includes
 the pure calibration policy alongside the existing selector and publisher lifecycle tests.

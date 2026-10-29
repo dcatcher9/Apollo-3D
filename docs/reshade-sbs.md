@@ -3848,8 +3848,8 @@ In the logs of 10-06 to 10-23, BF6 (multiplayer and campaign), Clair Obscur, RE9
 Witcher 3 and Hogwarts render and present on different queues, and so does Shadows once its DLSS-G
 swapchain is in use; Dead Space presents on its render queue. There every end-of-frame copy is
 refused (`end_of_frame_refused` grows with `last=missing_state`). No other Generic copy point
-exists, so such a game has no Generic depth on D3D12: without API depth the view holds, then goes
-mono. The Present-queue
+exists, so such a game has no Generic depth on D3D12: without API depth the view is mono (there is
+no current capture to hold). The Present-queue
 copies of deferred tags find no proof there either and start from their declaration (R2). Accepting
 a proof from another queue needs one of two things. The presenting queue's work must be shown to be
 ordered after the proving list (a fence wait the frozen hook set does not observe), or the copy must
@@ -6160,6 +6160,22 @@ none of them, so on those APIs no clear restarts the crop: it stays the largest 
 the frame.
 Aggregate activity and off-turn writes cannot change that identity without a new usable capture;
 a real captured-crop change advances the layout and invalidates the corresponding numeric basis.
+
+A Present on which no current copy can be shown holds the last good depth, as the API providers
+do: it shows the capture the runtime showed on its previous Present again, as reused depth, for
+at most the source age (250 ms, [`freshness.h`](../tools/reshade/freshness.h)) after the Present on
+which that capture was current, then the view is mono. This covers Presents that draw no depth
+(a frame presented twice, in-game frame generation without DLSS-G, a colour-only UI pass), Presents
+on which only other depth is drawn (a HUD with its own depth-stencil, or the frames an
+every-other-Present source skips), and a refused or failed end-of-frame copy. Only the capture
+the previous Present showed can be held, so older depth never follows newer; a held Present shows
+it from the same view of the same backup, which must still hold exactly that copy (any later copy
+into the backup ends the hold), for the same source lifetime, layout, crop, anchor, runtime epoch
+and colour size. A newer current copy always wins. The exporter renders a held Present with the
+scene its real frame was shown with (`restore_reused_scene`), so calibration, raw samples and the
+strength ramp do not advance; `Sunshine_DepthReady` reads ready, and the `Sunshine 3D depth:` line
+counts held Presents (`ready_copies held=`). A held Present is not a current copy: Present coverage
+and sampling see only current copies.
 Binding, sampling and the public current depth accessor use the same capture record and currentness
 checks. The view/backup cache is bounded and retains retiring resources until their existing
 retirement period ends; ordinary rotation reuses views rather than allocating or waiting for the
@@ -6322,6 +6338,13 @@ accepted consequences:
   depth at all. Installation never edits `[DEPTH]` and leaves the stale `[SUNSHINE_DEPTH]`
   auto-select line untouched; both are inert.
 
+- **Held Generic depth.** A Present without a current copy shows the previous Present's depth
+  again for at most the source age (see [Selecting scene depth](#selecting-scene-depth)). The
+  first Presents of a video, a loading screen or a 2D menu that draws no depth therefore still
+  show the last scene's depth, for at most 250 ms after it was current, as with the API
+  providers; then the view is mono. A Present whose colour was rendered with depth Generic cannot
+  copy (an unqualified member of an alternating set, or a refused copy) shows the held depth one
+  frame behind its colour within the same bound.
 - **Copies of scene depth.** A copy of another same-geometry candidate is never current depth of
   its destination, except a whole copy of a pass the source then cleared away (see
   [Selecting scene depth](#selecting-scene-depth)). A game whose only copy of the scene depth is
@@ -6965,8 +6988,9 @@ so they cannot be converted into fixed specialization constants.
 The automatic-calibration fixture uses the production DLL, real DSV drawing, a busy flat decoy,
 and a lower-resolution scene in an offset viewport. It does not inject depth or calibration.
 It verifies source contents, direction, fresh calibration, the exact rectangle and exported
-diagnostic pixels; a color-only frame, resource recreation, and an offset-only layout change
-exercise invalidation and recovery. These checks complement the existing broader selector tests.
+diagnostic pixels; color-only frames (held with calibration within the source age, unready and
+uncalibrated beyond it), resource recreation, and an offset-only layout change exercise
+invalidation and recovery. These checks complement the existing broader selector tests.
 Its `--stale-config` mode writes every removed selection setting into `ReShade.ini` with a value
 that would change the result if it still applied, checks that ReShade reads each one back, and
 requires the same automatic result as the default run.

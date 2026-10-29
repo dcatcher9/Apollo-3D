@@ -356,6 +356,25 @@ struct __declspec(uuid("c072221d-786d-4b6d-8f0b-52e0f325903e")) generic_depth_da
 	sunshine_depth_capture::capture_set captures;
 	sunshine_depth_capture::capture_record selected_record;
 	sunshine_depth::frame_depth selected_capture;
+	// The Generic capture this runtime showed on its last Present, current or
+	// held, with what a hold must find unchanged (hold_shown_capture): the
+	// tick of the Present on which it was current (never refreshed by a hold),
+	// its backup's content serial, the anchor and the colour size. Empty after
+	// a Present that showed no Generic depth, so only the capture shown on the
+	// previous Present can be held and older depth never follows newer.
+	struct shown_capture
+	{
+		sunshine_depth_capture::capture_record record;
+		sunshine_depth::frame_depth metadata;
+		uint64_t tick = 0, content_serial = 0, anchor = 0;
+		uint32_t color_width = 0, color_height = 0;
+	} shown;
+	// This Present shows `shown` again as reused depth (capture_ready stays
+	// for a current copy only).
+	bool held = false;
+	// The source is selected only to be held: current-copy routing chose no
+	// source (select_captured_depth), so its own copy, if any, is not shown.
+	bool hold_only = false;
 	resource anchor_depth_stencil {};
 	uint64_t anchor_identity = 0;
 	struct member_view
@@ -446,7 +465,7 @@ struct __declspec(uuid("c072221d-786d-4b6d-8f0b-52e0f325903e")) generic_depth_da
 	// the end-of-frame copy, and end-of-frame copies the capture owner refused
 	// (the latest one's stage), reported on the status line (every 10 s at
 	// most while they change).
-	uint64_t boundary_copy_frames = 0, end_of_frame_copy_frames = 0, logged_copy_frames = 0;
+	uint64_t boundary_copy_frames = 0, end_of_frame_copy_frames = 0, held_frames = 0, logged_copy_frames = 0;
 	uint64_t end_of_frame_refused = 0;
 	sunshine_streamline::depth_capture::record_stage end_of_frame_refusal = sunshine_streamline::depth_capture::record_stage::not_attempted;
 	// Observation only: these fields never participate in routing or readiness.
@@ -482,6 +501,9 @@ struct depth_stencil_backup
 	// end-of-frame pixels are owned by capture_ticket, never by this cache.
 	uint64_t published_ticket = 0, published_present = 0;
 	sunshine_streamline::content::copy_snapshot published_depth_copy {};
+	// Changes with every copy written into the backup (both APIs), so a held
+	// capture can prove its pixels are still the ones it showed; zero: none.
+	uint64_t content_serial = 0;
 	bool content_layout_supported = false;
 
 	// Index of the frame after which the backup resource may be destroyed (used to delay destruction until resource is no longer in use)
@@ -559,6 +581,8 @@ struct __declspec(uuid("94e283ef-6714-4d50-b936-71d6308a4be4")) generic_depth_de
 	// needed if any effect runtime on this device uses generic capture.
 	std::atomic<unsigned> generic_capture_users { 0 };
 	uint64_t frame_index = 0;
+	// Source of depth_stencil_backup::content_serial.
+	uint64_t next_content_serial = 0;
 	uint64_t native_present_index = 0, native_depth_present_index = 0;
 	// Callback ordinals, NOT game/frame-generation IDs. At most four short
 	// diagnostic bursts; a scene-confirmed failure is required to start one.
@@ -649,6 +673,7 @@ struct __declspec(uuid("94e283ef-6714-4d50-b936-71d6308a4be4")) generic_depth_de
 				backup.content_identity = sunshine_native_identity::allocate_identity();
 				backup.published_ticket = backup.published_present = 0;
 				backup.published_depth_copy = {};
+				backup.content_serial = 0;
 				backup.content_layout_supported = content_supported(existing_desc);
 				if (s_streamline_probe_events && api == device_api::d3d12)
 					sunshine_streamline::depth_resource_initialized(backup.backup_texture.handle, backup.content_identity,
