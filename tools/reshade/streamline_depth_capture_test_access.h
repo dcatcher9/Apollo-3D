@@ -509,6 +509,32 @@ namespace sunshine_streamline::depth_capture {
     void record_frame_generation_copy(const input &value);
     consumer_status preserved_admission(const slot &value, const preservation_ticket &ticket,
       std::uint64_t consumer, std::uint64_t consumer_device, std::uint64_t recording);
+    // The white-box fixtures' resets (test_streamline_depth_capture_fixture.h),
+    // one per owner of the state it clears, so that regrouping an owner's
+    // globals changes its reset here instead of every regression.
+    // Snapshot pool: no capture slots.
+    inline void reset_pool() { slots = {}; }
+    // API evaluation bookkeeping: no evaluations.
+    inline void reset_evaluations() { evaluations = {}; }
+    // Presentation scope: no FG role retirement, no evaluation or frame
+    // generation Present, and no generated Presents.
+    inline void reset_scope() {
+      fg_retirements = {};
+      newest_evaluation_present = frame_generation_present = 0;
+      presenting_generated = 0;
+    }
+    // Record admission: every provider's last attempt unavailable.
+    inline void reset_attempts() {
+      for (auto &value : attempt_status) {
+        value = status::unavailable;
+      }
+    }
+    // Queue places: no queue owners.
+    inline void reset_queues() {
+      for (auto &entry : queues) {
+        entry.reset();
+      }
+    }
 #endif
   }
 #ifdef SUNSHINE_STREAMLINE_PROBE_TEST

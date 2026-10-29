@@ -12,25 +12,20 @@
 #include <cstdint>
 
 namespace sunshine_streamline::depth_capture::fixture {
-  // No capture slots and no API evaluations.
+  // No capture slots, no API evaluations and an empty presentation scope.
+  // Each owner's state is cleared by its reset in the test-access header.
   inline void clear_captures() {
-    slots = {};
-    evaluations = {};
-    fg_retirements = {};
-    newest_evaluation_present = frame_generation_present = 0;
-    presenting_generated = 0;
+    reset_pool();
+    reset_evaluations();
+    reset_scope();
   }
 
   // clear_captures, every provider's last attempt unavailable, no queue
   // owners, and capture requested.
   inline void reset_owner() {
     clear_captures();
-    for (auto &value : attempt_status) {
-      value = status::unavailable;
-    }
-    for (auto &entry : queues) {
-      entry.reset();
-    }
+    reset_attempts();
+    reset_queues();
     requested = true;
   }
 
