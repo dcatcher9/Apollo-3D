@@ -496,6 +496,9 @@ namespace sunshine_streamline {
       return source == origin::local ? "evaluate-local" : source == origin::frame ? "frame-tag" : "global-tag";
     }
     void message(const char *text) { sunshine_log::message(reshade::log::level::info, text); }
+    // `line` is a frozen site id, not a live line number: each loss site below
+    // passes the literal that its source line number had at ff50be30 (where it
+    // was __LINE__). Never renumber them; they drift from the source on purpose.
     std::uint64_t lose(loss_diagnostics::reason cause, const char *site, std::uint32_t line,
         loss_diagnostics::context details = loss_context) {
       const auto previous = loss_revision.fetch_add(1, std::memory_order_acq_rel);
@@ -553,7 +556,7 @@ namespace sunshine_streamline {
       if (add && empty) *empty = {native, lifetime, device};
       else if (add) {
         source_resources_lost.store(true, std::memory_order_release);
-        dropped_observation(loss_diagnostics::reason::resource_table_full, __func__, __LINE__, {});
+        dropped_observation(loss_diagnostics::reason::resource_table_full, __func__, 556, {});
       }
       ReleaseSRWLockExclusive(&source_resources_lock);
     }
@@ -598,7 +601,7 @@ namespace sunshine_streamline {
       if (!ticket) return;
       if (!TryAcquireSRWLockExclusive(&commands_lock)) {
         command_observation_lost.store(true, std::memory_order_release);
-        dropped_observation(loss_diagnostics::reason::commands_busy, __func__, __LINE__);
+        dropped_observation(loss_diagnostics::reason::commands_busy, __func__, 601);
         return;
       }
       if (current_commands(ticket)) {
@@ -647,7 +650,7 @@ namespace sunshine_streamline {
       if (!TryAcquireSRWLockExclusive(&commands_lock)) {
         auto details = loss_context;
         details.sequence = out.sequence; details.viewport = out.viewport; details.feature = out.feature;
-        dropped_observation(loss_diagnostics::reason::commands_busy, __func__, __LINE__, details); return;
+        dropped_observation(loss_diagnostics::reason::commands_busy, __func__, 650, details); return;
       }
       if (current_commands(ticket) && !command_observation_lost.load(std::memory_order_acquire)) {
         sync_content_observation();
@@ -859,7 +862,7 @@ namespace sunshine_streamline {
       frame_identity result;
       auto pin = token_metadata.read();
       if (!pin) {
-        if (token_metadata.has_publication()) dropped_observation(loss_diagnostics::reason::tokens_busy, __func__, __LINE__);
+        if (token_metadata.has_publication()) dropped_observation(loss_diagnostics::reason::tokens_busy, __func__, 862);
         return result;
       }
       if (pin->observation != observation_generation.load(std::memory_order_acquire)) return result;
@@ -1223,7 +1226,7 @@ namespace sunshine_streamline {
       details.reset = decoded == decode_status::ok ? camera.reset : UINT32_MAX;
       auto update = write_metadata(ticket);
       if (!update) {
-        if (current(ticket)) { ++history_loss; metadata_write_lost(update, __func__, __LINE__, details); }
+        if (current(ticket)) { ++history_loss; metadata_write_lost(update, __func__, 1226, details); }
         return;
       }
       auto &state = *update;
@@ -1280,7 +1283,7 @@ namespace sunshine_streamline {
         }
       }
       if (!current(ticket)) return;
-      if (!update.commit()) { ++history_loss; metadata_write_lost(update, __func__, __LINE__, details); return; }
+      if (!update.commit()) { ++history_loss; metadata_write_lost(update, __func__, 1283, details); return; }
       if (fg_frame && begins) depth_capture::frame_generation_frame(fg_epoch, viewport, fg_enabled_tick);
     }
     void store_tags(batch &values) {
@@ -1288,7 +1291,7 @@ namespace sunshine_streamline {
       auto details = loss_context;
       details.sequence = values.serial; details.viewport = values.viewport;
       auto update = write_metadata(values.observation);
-      if (!update) { if (current(values.observation)) metadata_write_lost(update, __func__, __LINE__, details); return; }
+      if (!update) { if (current(values.observation)) metadata_write_lost(update, __func__, 1291, details); return; }
       auto &state = *update;
       auto &record = slot(state, values.viewport);
       // A null, replaced or unusable tag is itself observed and stored below;
@@ -1315,7 +1318,7 @@ namespace sunshine_streamline {
         }
       }
       record.changed = ++state.revision;
-      if (current(values.observation) && !update.commit()) metadata_write_lost(update, __func__, __LINE__, details);
+      if (current(values.observation) && !update.commit()) metadata_write_lost(update, __func__, 1318, details);
     }
     evaluation_snapshot capture_evaluation(std::uint32_t viewport, std::uint32_t feature,
         const frame_identity &identity, void *commands, std::uint64_t ticket, std::uint64_t serial,
@@ -1483,7 +1486,7 @@ namespace sunshine_streamline {
       if (success) finish_content(value);
       if (!success) {
         value.status = evidence_status::evaluation_failed;
-        lose(loss_diagnostics::reason::sdk_failure, __func__, __LINE__, details);
+        lose(loss_diagnostics::reason::sdk_failure, __func__, 1486, details);
       }
       else if (value.status == evidence_status::source_associated_evaluation &&
           value.loss_revision != loss_revision.load(std::memory_order_acquire)) value.status = evidence_status::observation_lost;
@@ -1491,7 +1494,7 @@ namespace sunshine_streamline {
       // (another thread's camera or FG update) must not lose it (RE
       // Requiem 10-22 lost one as records_busy).
       auto update = write_metadata(ticket, true);
-      if (!update) { if (current(ticket)) metadata_write_lost(update, __func__, __LINE__, details); return; }
+      if (!update) { if (current(ticket)) metadata_write_lost(update, __func__, 1494, details); return; }
       if (current(ticket)) {
         auto &state = *update;
         auto &record = slot(state, value.viewport);
@@ -1524,7 +1527,7 @@ namespace sunshine_streamline {
           record.changed = ++state.revision;
         }
       }
-      if (current(ticket) && !update.commit()) metadata_write_lost(update, __func__, __LINE__, details);
+      if (current(ticket) && !update.commit()) metadata_write_lost(update, __func__, 1527, details);
     }
     bool viewport_value(const abi_v2::viewport &value, std::uint32_t &output) {
       abi_v2::viewport copy{};
@@ -1576,7 +1579,7 @@ namespace sunshine_streamline {
           resource.base.version >= 1)
         resource_ok = read_bytes(&tag.resource_ptr->native_format, &resource.native_format, sizeof(resource.native_format));
       if (!resource_ok) {
-        if (report_invalid) invalid_observation(loss_diagnostics::reason::invalid_input, __func__, __LINE__);
+        if (report_invalid) invalid_observation(loss_diagnostics::reason::invalid_input, __func__, 1579);
         resource = {};
       }
       tag_record value{};
@@ -1686,7 +1689,7 @@ namespace sunshine_streamline {
       batch out;
       out.valid_viewport = viewport_value(viewport, out.viewport);
       if (!out.valid_viewport) {
-        invalid_observation(loss_diagnostics::reason::invalid_input, __func__, __LINE__); return out;
+        invalid_observation(loss_diagnostics::reason::invalid_input, __func__, 1689); return out;
       }
       loss_context.viewport = out.viewport;
       std::array<abi_v2::resource_tag, tag_chunk> copy{};
@@ -1697,7 +1700,7 @@ namespace sunshine_streamline {
         // as unreadable. One tag, and tags chained in evaluate inputs, are read.
         if (!read_bytes(tags + first, copy.data(), size * sizeof(copy[0])) ||
             (!first && count > 1 && same(copy[0].base.type, tag_guid) && copy[0].base.version > 1)) {
-          invalid_observation(loss_diagnostics::reason::invalid_input, __func__, __LINE__);
+          invalid_observation(loss_diagnostics::reason::invalid_input, __func__, 1700);
           // A successful call with an unreadable/unsupported tag array must not
           // leave an older resource, or a tag of this call read before the
           // unreadable element, looking current for this known viewport.
@@ -1740,7 +1743,7 @@ namespace sunshine_streamline {
       loss_context.sdk_result = result ? 1 : 0; loss_context.has_sdk_result = true;
       if (diagnostic.session) dump_metadata::finish_sl_call(diagnostic, result);
       if (sample && result) store_camera(viewport, camera, decoded, frame, true, 0, ticket, numeric_frame(frame), serial, loss, entry_tick);
-      else if (sample && current(ticket)) lose(loss_diagnostics::reason::sdk_failure, __func__, __LINE__);
+      else if (sample && current(ticket)) lose(loss_diagnostics::reason::sdk_failure, __func__, 1743);
       SetLastError(outgoing);
       return result;
     }
@@ -1784,7 +1787,7 @@ namespace sunshine_streamline {
             tag.resource_lifetime = identity.lifetime;
             tag.resource_device = identity.device;
           } else {
-            invalid_observation(loss_diagnostics::reason::invalid_input, __func__, __LINE__);
+            invalid_observation(loss_diagnostics::reason::invalid_input, __func__, 1787);
             out.count = index + 1;
             out.tags[index].present = true;
             out.tags[index].value.type = canonical_type;
@@ -1798,7 +1801,7 @@ namespace sunshine_streamline {
       loss_context.sdk_result = result ? 1 : 0; loss_context.has_sdk_result = true;
       if (diagnostic.session) dump_metadata::finish_sl_call(diagnostic, result);
       if (sample && result && out.count) store_tags(out);
-      else if (sample && !result && current(ticket)) lose(loss_diagnostics::reason::sdk_failure, __func__, __LINE__);
+      else if (sample && !result && current(ticket)) lose(loss_diagnostics::reason::sdk_failure, __func__, 1801);
       SetLastError(outgoing);
       return result;
     }
@@ -2471,7 +2474,7 @@ namespace sunshine_streamline {
       if (sample && sdk_ok && valid_viewport)
         store_camera(id, camera, decoded, 0, false, reinterpret_cast<std::uintptr_t>(&frame), ticket, identity, serial, loss, entry_tick);
       else if (sample && current(ticket))
-        lose(!sdk_ok ? loss_diagnostics::reason::sdk_failure : loss_diagnostics::reason::invalid_input, __func__, __LINE__);
+        lose(!sdk_ok ? loss_diagnostics::reason::sdk_failure : loss_diagnostics::reason::invalid_input, __func__, 2474);
       SetLastError(outgoing);
       return result;
     }
@@ -2854,7 +2857,7 @@ namespace sunshine_streamline {
       finish_capture(captured, sdk_ok, ticket);
       if (sample && sdk_ok && out.count) store_tags(out);
       else if (sample && (!sdk_ok || !out.valid_viewport) && current(ticket))
-        lose(!sdk_ok ? loss_diagnostics::reason::sdk_failure : loss_diagnostics::reason::invalid_input, __func__, __LINE__);
+        lose(!sdk_ok ? loss_diagnostics::reason::sdk_failure : loss_diagnostics::reason::invalid_input, __func__, 2857);
       if (snapshot.tag_boundary) finish_evaluation(snapshot, sdk_ok, ticket);
       const bool ui_kept = sdk_ok && current(ticket) && loss == loss_revision.load(std::memory_order_acquire);
       finish_ui_inputs(alpha, ui_kept);
@@ -2875,7 +2878,7 @@ namespace sunshine_streamline {
       batch out;
       const auto reject = [&] {
         out.valid_viewport = false;
-        if (report_invalid) invalid_observation(loss_diagnostics::reason::invalid_input, __func__, __LINE__);
+        if (report_invalid) invalid_observation(loss_diagnostics::reason::invalid_input, __func__, 2878);
       };
       // Visits every node of every input, in order: the inputs a chunk at a
       // time, each chain to its end (numInputs and a chain have no limit,
@@ -3024,7 +3027,7 @@ namespace sunshine_streamline {
       } else if (sample && current(ticket)) {
         // An unresolvable evaluation viewport cannot leave any older camera
         // evidence looking applicable to a new successful call.
-        lose(!sdk_ok ? loss_diagnostics::reason::sdk_failure : loss_diagnostics::reason::invalid_input, __func__, __LINE__);
+        lose(!sdk_ok ? loss_diagnostics::reason::sdk_failure : loss_diagnostics::reason::invalid_input, __func__, 3027);
       } else if (ui_inputs && sdk_ok) {
         // Its UI inputs name the viewport whose UI the renderer requests
         // (query_ui_scope), whether or not it supplies depth.
@@ -3050,7 +3053,7 @@ namespace sunshine_streamline {
         abi_v2::frame_token *returned{};
         if (!sdk_ok || !index_ok || !read(&token, returned) || !returned) {
           invalid_observation(!sdk_ok ? loss_diagnostics::reason::sdk_failure : loss_diagnostics::reason::invalid_input,
-            __func__, __LINE__);
+            __func__, 3053);
         } else {
           const auto address = reinterpret_cast<std::uintptr_t>(returned);
           // Requesting the same caller-supplied index again returns that frame's
@@ -3073,7 +3076,7 @@ namespace sunshine_streamline {
             auto update = write_tokens_briefly();
             if (!update) {
               if (current(ticket)) dropped_observation(update.failure() == observation::write_failure::storage_busy ?
-                loss_diagnostics::reason::metadata_storage_busy : loss_diagnostics::reason::tokens_busy, __func__, __LINE__);
+                loss_diagnostics::reason::metadata_storage_busy : loss_diagnostics::reason::tokens_busy, __func__, 3076);
             } else if (current(ticket)) {
               update->observation = ticket;
               auto *chosen = &update->tokens[0];
@@ -3086,10 +3089,10 @@ namespace sunshine_streamline {
               if (!same_frame(chosen->frame)) {
                 if (chosen->frame.token != address || serial > chosen->frame.generation)
                   chosen->frame = {frame_identity_kind::v2_observed_token, serial, numeric, address, frame_index != nullptr};
-                else lose(loss_diagnostics::reason::token_replaced, __func__, __LINE__); // Concurrent out-of-order allocation of the same address.
+                else lose(loss_diagnostics::reason::token_replaced, __func__, 3089); // Concurrent out-of-order allocation of the same address.
               }
               if (current(ticket) && !update.commit())
-                dropped_observation(loss_diagnostics::reason::metadata_storage_busy, __func__, __LINE__);
+                dropped_observation(loss_diagnostics::reason::metadata_storage_busy, __func__, 3092);
             }
           }
         }
@@ -3379,7 +3382,7 @@ namespace sunshine_streamline {
     AcquireSRWLockExclusive(&presentations_lock);
     for (auto &record : presentations) { if (record.thread) CloseHandle(record.thread); record = {}; }
     lose_presentation();
-    lose(loss_diagnostics::reason::lifecycle, __func__, __LINE__, {});
+    lose(loss_diagnostics::reason::lifecycle, __func__, 3382, {});
     ++history_loss; // Camera records were released: every viewport's history restarts.
     ++epoch;
     ReleaseSRWLockExclusive(&presentations_lock);
@@ -3594,7 +3597,7 @@ namespace sunshine_streamline {
     if (!TryAcquireSRWLockExclusive(&commands_lock)) {
       // A missed optional marker does not lose lifecycle identity or destroy the
       // live-object maps. Revoke only evidence that depended on this observation.
-      dropped_observation(loss_diagnostics::reason::commands_busy, __func__, __LINE__);
+      dropped_observation(loss_diagnostics::reason::commands_busy, __func__, 3597);
       return out;
     }
     if (current_commands(ticket) && !command_observation_lost.load(std::memory_order_acquire))
@@ -4485,7 +4488,7 @@ namespace sunshine_streamline {
       return {constant_calls.load(), tag_calls.load(), evaluation_calls.load(), dropped.load(), invalid.load(), vram_warnings.load(),
         depth_untags.load()};
     }
-    void lose_observation() { dropped_observation(loss_diagnostics::reason::test_injected, __func__, __LINE__, {}); }
+    void lose_observation() { dropped_observation(loss_diagnostics::reason::test_injected, __func__, 4488, {}); }
     bool latest(std::uint32_t viewport, std::uint64_t &resource, bool &has_camera, bool &explicit_same_frame, bool &same_token_address) {
       auto pin = read_metadata();
       if (!pin) return false;
