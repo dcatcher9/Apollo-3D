@@ -3497,6 +3497,17 @@ namespace sunshine_streamline::depth_capture {
   extern "C" __declspec(dllexport) BOOL SunshineStreamlineTestCancelPresentBeforeNextCopy() {
     return present_before_next_copy.exchange(false, std::memory_order_acq_rel) ? TRUE : FALSE;
   }
+
+  // Whether every consumer of a live capture reads its copy-out storage
+  // (read_storage), not the snapshot its game recording may still replay
+  // into: the NGX cross-queue regression's proof of what it admitted.
+  extern "C" __declspec(dllexport) BOOL SunshineStreamlineTestCaptureReadsCopyOut(std::uint64_t capture, BOOL *copy_out) {
+    if (!capture || !copy_out) return FALSE;
+    std::lock_guard lock(mutex);
+    for (const auto &value : slots)
+      if (value.id == capture) { *copy_out = value.copied_out && value.published ? TRUE : FALSE; return TRUE; }
+    return FALSE;
+  }
   namespace {
     std::atomic<HANDLE> nomination_gate_entered{}, nomination_gate_release{};
     void wait_nomination_gate() {

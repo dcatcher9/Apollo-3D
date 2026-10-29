@@ -1112,9 +1112,14 @@ returns ownership to Generic; a normal-depth feature gets a new logical source.
 Set `SUNSHINE_NGX_CROSS_QUEUE_TEST=1` and `SUNSHINE_NGX_CROSS_QUEUE_COMPLETED_TEST=1`
 for the deterministic separate-queue regression. The fixture executes depth production on
 another real queue, retires its submitted recording, and waits for its actual completion before presenting. This test-only wait
-is not add-on behavior. The fixture checks changing depth and HDR output. A still-replayable
-recording's copy is never displayed; its predecessor may be admitted once the next reset retires it.
-An unfinished producer is never displayed and adds no CPU wait. The case also covers
+is not add-on behavior. The fixture checks changing depth and HDR output. Another queue never
+reads a copy that a still-replayable recording could write again: a present may show its own
+completed evaluation only from that capture's copy-out storage (checked through the test add-on's
+`SunshineStreamlineTestCaptureReadsCopyOut`), or else its predecessor once the next reset retires
+it ([copy-out on the producer queue](../../docs/reshade-sbs.md#queue-order)).
+An unfinished producer adds no CPU wait and is displayed only from its copy-out once the game's
+own fence wait orders the presenting queue after it (U-C1); otherwise the newest completed copy
+holds. The case also covers
 missing-frame hold and recovery and four producer queue lifetimes. Omit the completed flag for
 asynchronous coverage, where admitted copies are verified and pending work may hold or remain
 mono. These are functional checks, not performance evidence; an idle GPU is not required.

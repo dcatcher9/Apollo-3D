@@ -490,16 +490,26 @@ RWTexture2D<float> depth : register(u0);
       // provider's sequence numbering against this fixture's evaluations.
       require(present_current(),"Separate NGX queue lost current depth before the replayable-recording case");
       const auto sequence_offset=provider.current.sequence-sequence;
-      // A present never displays the copy recorded by its own still-replayable
-      // list. Resetting that list for the next frame retires the recording, so
-      // its completed copy may then be admitted one presentation later.
+      // Another queue never reads a copy that a still-replayable list could
+      // write again. Once the producer fence completed, the present shows its
+      // own evaluation only from its copy-out (made by the add-on's own list
+      // on the producer queue, which no replay touches); without one it waits
+      // for the next reset to retire the recording, one presentation later.
       retire_producer_recording=false;
-      unsigned lagging=0,held=0,mono=0;
+      using reads_copy_out_t=BOOL (*)(std::uint64_t,BOOL *);
+      const auto reads_copy_out=reinterpret_cast<reads_copy_out_t>(GetProcAddress(GetModuleHandleW(L"SunshineSBSTest.addon64"),"SunshineStreamlineTestCaptureReadsCopyOut"));
+      require(reads_copy_out,"Test add-on lacks the capture copy-out query");
+      unsigned own=0,lagging=0,held=0,mono=0;
       for(unsigned i=0;i<8;++i) {
         ngx_tick("NGX-completed-producer-still-replayable");
-        require(status.scale==reference_scale && (!provider.ready || provider.current.sequence<sequence+sequence_offset),
-          "A completed but replayable NGX producer exposed mutable depth to another queue");
-        if(provider.ready && !provider.reused_depth) {
+        require(status.scale==reference_scale && (!provider.ready || provider.current.sequence<=sequence+sequence_offset),
+          "A replayable NGX producer exposed depth of a later evaluation to another queue");
+        BOOL copy_out=FALSE;
+        if(provider.ready && !provider.reused_depth && provider.current.sequence==sequence+sequence_offset) {
+          require(reads_copy_out(provider.current.capture,&copy_out) && copy_out && provider.current.resource==native(*selected),
+            "A completed but replayable NGX producer exposed mutable depth (not its copy-out) to another queue");
+          ++own;
+        } else if(provider.ready && !provider.reused_depth) {
           require(provider.current.sequence+1==sequence+sequence_offset && provider.current.resource==native(*selected),
             "Retiring a replayable NGX recording admitted other than its own completed copy");
           ++lagging;
@@ -508,11 +518,11 @@ RWTexture2D<float> depth : register(u0);
           ++held;
         } else {require_status(true,false);++mono;}
       }
-      std::printf("MEASURE NGX replayable recordings retired_predecessor=%u held=%u mono=%u\n",lagging,held,mono);
+      std::printf("MEASURE NGX replayable recordings own_copy_out=%u retired_predecessor=%u held=%u mono=%u\n",own,lagging,held,mono);
       retire_producer_recording=true;
       const auto retired=ngx_settle("NGX-retired-producer-recording-recovery");verify_ngx_depth(retired);
       require_established(retired,"Retiring the replayable NGX recording changed source or calibration");
-      std::puts("PASS a still-replayable producer recording is never displayed; its retired predecessor and a fully retired recording supply immutable captures without recalibration");
+      std::puts("PASS a still-replayable producer recording is never read by another queue: its completed copy-out, its retired predecessor and a fully retired recording supply immutable captures without recalibration");
       check_pending_cross_queue();
       emit=false;
       hold_then_mono("NGX-separate-producer-missing-evaluation","Separate producer queue exposed historical depth after a missing NGX evaluation");
@@ -531,12 +541,16 @@ RWTexture2D<float> depth : register(u0);
       std::puts("PASS game-ordered separate NGX producer queue drives exact current 4K HDR depth and native output across resets, missing-frame mono/recovery and four producer queue lifetimes");
     }
     void check_pending_cross_queue() {
+      using reads_copy_out_t=BOOL (*)(std::uint64_t,BOOL *);
+      const auto reads_copy_out=reinterpret_cast<reads_copy_out_t>(GetProcAddress(GetModuleHandleW(L"SunshineSBSTest.addon64"),"SunshineStreamlineTestCaptureReadsCopyOut"));
+      require(reads_copy_out,"Test add-on lacks the capture copy-out query");
       selected->pattern^=1u;
       com_ptr<ID3D12Fence> gate;
       checked(game->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(gate.put())),"Create pending producer admission gate");
       HANDLE release_observed=CreateEventW(nullptr,TRUE,FALSE,nullptr);
       require(release_observed,"Create pending producer release event");
       bool observed_pending=false,producer_unfinished=false,published_fresh=true,published_other=true;
+      std::uint64_t observed_sequence=0,observed_capture=0;
       const auto completed_sequence=fresh_sequence;
       HRESULT release_result=E_FAIL;
       std::atomic<bool> emergency_release{false};
@@ -552,6 +566,7 @@ RWTexture2D<float> depth : register(u0);
         // This callback runs inside the runtime; record, never throw.
         sunshine_streamline::provider::source_status current;
         if(query_provider_status(observed.runtime,&current)) {
+          observed_sequence=current.current.sequence;observed_capture=current.current.capture;
           published_fresh=current.ready && !current.reused_depth;
           published_other=current.ready && current.reused_depth && current.current.sequence!=completed_sequence;
         }
@@ -575,16 +590,28 @@ RWTexture2D<float> depth : register(u0);
       release_watchdog.join();ngx_frame_observer={};producer_gated=false;CloseHandle(release_observed);
       require(!emergency_release && observed_pending && SUCCEEDED(release_result),
         "Pending NGX producer blocked the CPU before native rendering");
-      require(producer_unfinished && !published_fresh && !published_other,
-        "Unfinished foreign NGX producer exposed its depth pixels");
-      if(provider.ready) require(retained_copy() && status.ready(),"Pending NGX producer replaced or outlived the newest completed copy");
+      // The game orders its presenting queue after the producer (a fence
+      // wait every Present), so the unfinished producer's own evaluation may
+      // be displayed before the CPU sees it complete, but only from its
+      // copy-out, which that wait orders before every read (U-C1 in
+      // docs/reshade-sbs.md, Queue order); otherwise the newest completed
+      // copy holds. Never another capture.
+      require(producer_unfinished && !published_other,"Unfinished foreign NGX producer exposed another capture's depth pixels");
+      BOOL copy_out=FALSE;
+      if(published_fresh)
+        require(observed_sequence==completed_sequence+1 && reads_copy_out(observed_capture,&copy_out) && copy_out,
+          "Unfinished foreign NGX producer exposed depth other than its own ordered copy-out");
+      if(provider.ready && !provider.reused_depth)
+        require(provider.current.sequence==completed_sequence+1 && reads_copy_out(provider.current.capture,&copy_out) && copy_out && status.ready(),
+          "Pending NGX producer displayed other than its own ordered copy-out");
+      else if(provider.ready) require(retained_copy() && status.ready(),"Pending NGX producer replaced or outlived the newest completed copy");
       else {require(!status.ready(),"Pending NGX producer rendered stereo without depth");require_status(true,false);check_exported_mono();}
       require(provider.provider==sunshine_scene_depth::provider_kind::ngx && status.scale==reference_scale,
         "Pending NGX producer lost source authority or estimated calibration");
       const auto recovered=ngx_settle("NGX-separate-producer-pending-recovery");verify_ngx_depth(recovered);
       require_established(recovered,"Completed NGX recovery changed logical source or calibration");
-      std::printf("PASS unfinished foreign NGX producer is never displayed (held_completed_copy=%u) without a CPU wait, preserves source/calibration, and recovers exact depth and stereo after completion\n",
-        unsigned(provider.ready));
+      std::printf("PASS unfinished foreign NGX producer is displayed only from its game-ordered copy-out (ordered_copy_out=%u held_completed_copy=%u) without a CPU wait, preserves source/calibration, and recovers exact depth and stereo after completion\n",
+        unsigned(published_fresh),unsigned(!published_fresh && provider.ready));
     }
     void run_cross_queue_async() {
       // Before the first accepted NGX copy, Generic legitimately still owns
