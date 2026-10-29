@@ -495,7 +495,7 @@ namespace sunshine_streamline::depth_capture {
 #endif
   // Source adapters supply identity/metadata and always snapshot at the API
   // call, even for a registered ReShade DSV. Matching its resource identity
-  // cannot authenticate a generic before-clear copy's contents. Missing state
+  // cannot authenticate a Generic end-of-frame copy's contents. Missing state
   // hints are resolved against observed command state, never invented. The
   // copy of its provider's newest evaluation (begin_evaluation) is that
   // evaluation's nomination in progress, as nominate_evaluation's is; an
@@ -642,14 +642,13 @@ namespace sunshine_streamline::depth_capture {
   // Revokes the ticket, never its outstanding GPU obligations. Drop all leases
   // after cancellation/IPC acknowledgement so completed storage can be reclaimed.
   void release_diagnostic_texture(const diagnostic_ticket &ticket);
-  // A legal ReShade before-clear/end-of-frame opportunity records into the same
-  // snapshot pool as API opportunities. It never selects a provider or advances
-  // middleware evaluation watermarks. The caller supplies the boundary's
-  // contract (api_contract.h generic): a depth clear's DEPTH_WRITE (clear),
-  // another boundary's declared state (preserved), or at the end of the frame
-  // the source's last proven state on queue, the queue that executes command
-  // (end_of_frame, last_proven_state); a state observed on command's own
-  // recording takes precedence. The owner still checks command/device/shape
+  // A legal ReShade end-of-frame opportunity records into the same snapshot
+  // pool as API opportunities. It never selects a provider or advances
+  // middleware evaluation watermarks. The caller supplies the contract
+  // (api_contract.h generic): at the end of the frame the source's last proven
+  // state on queue, the queue that executes command (end_of_frame,
+  // last_proven_state), or a declared state (preserved); a state observed on
+  // command's own recording takes precedence. The owner still checks command/device/shape
   // safety, and a copy from a proven state is discarded at submission when
   // the state changed meanwhile or command runs on another queue.
   preservation_ticket record_preserved(std::uint64_t command, std::uint64_t source,

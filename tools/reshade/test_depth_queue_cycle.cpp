@@ -754,7 +754,7 @@ namespace {
         foreign.source_id = 51; foreign.sequence = ++foreign_sequence;
         record(foreign, .875f);
       } else {
-        // Use a distinct physical source and the real before-clear API. Drop
+        // Use a distinct physical source and the real Generic copy API. Drop
         // its CPU lease, execute its GPU copy, then retire the recording before
         // checking SL. The pending SL successor remains on the producer list.
         if (generic_state != D3D12_RESOURCE_STATE_DEPTH_WRITE)

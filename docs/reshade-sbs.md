@@ -129,7 +129,7 @@ Depth order preserves source continuity: a brief pending copy can retain an admi
 source and its authorized prior pixels. Known FG requirements restrict selection to
 the matching SL FG source; missing pixels then use only permitted bounded reuse or
 remain unavailable. An established API source's temporary gap does not trigger Generic
-recalibration. Explicit manual depth pins bypass automatic API selection. These rules
+recalibration. These rules
 belong to the capture/provider layer; stereo consumes only readiness, provenance and
 the resulting depth/camera values. Manual UI Off always wins. Discovery and capture availability
 do not by themselves authorize automatic UI protection.
@@ -700,7 +700,7 @@ Confirmed setup of a folder that already contains ReShade installs only the Suns
 never creates a proxy DLL. The add-on installer copies `SunshineSBS.addon64` and its license into
 the folder that `[ADDON] AddonPath` names, which can lie outside the game folder. In `ReShade.ini`
 it disables ReShade's own Generic Depth add-on and the retired Sunshine Depth add-on, turns on
-scene-depth auto-selection and Game 3D unless already set, and records the preset path; it creates
+Game 3D unless already set, and records the preset path; it creates
 or migrates that preset and keeps the files it changes under `Sunshine3D-backups` in the game
 folder. An add-on that is already installed, by a confirmed or a manual setup, is kept matched to
 this host without a new confirmation, as described below; a declined executable is not updated. An
@@ -776,21 +776,23 @@ Manual setup and presentation requirements:
    below) and is disabled while none is accepted.
    **Status** shows output state, UI detection, Frame Generation, depth source/resolution and
    depth freshness. **Troubleshooting** contains **Depth view** (default game image),
-   **UI mask source**, and **Use automatic depth**, followed by **Advanced capture settings**
-   and **Manual depth selection**. **Calibration** contains conversion and current/target gain.
+   **UI mask source** and the **Diagnostics** switch. **Calibration** contains conversion and
+   current/target gain.
    Live messages and word wrapping cannot push the primary controls or tab bar down.
-   Troubleshooting controls precede live buffer details. Sharpening is not part of the native controls.
+   Sharpening is not part of the native controls.
    Depth setup is always automatic. There is no Manual shader mode, per-game geometry/weapon
    profile branch or warp selector. Image controls are owned by the add-on and automatically saved
    independently of ReShade shader presets, Performance Mode and the global effects toggle.
-   Manual **depth-buffer pinning** remains a separate source-selection override.
-   **Depth path** identifies the provider actually selected: **Streamline (game provided)**, **NGX (game provided)** or
-   **Generic (fallback/manual override)**. Active generic capture shows a warning that game-provided
+   Depth-source selection is always automatic; saved `[DEPTH]` copy, filter and clear-index values
+   and `[SUNSHINE_DEPTH] AutoSelectSceneDepth` are ignored. The panel has no buffer list, pin or
+   capture setting; the [scene-depth selection limits](#scene-depth-selection-limits) say what
+   that leaves without a remedy.
+   The **Depth** status row names the provider actually selected: **Streamline** or **NGX** (game
+   provided) or **Generic** (fallback). Active generic capture shows a warning that game-provided
    depth and camera data are not being used. Loading a Streamline DLL alone does not establish an
    active Streamline depth provider. AMD depth integration is not implemented yet.
-   Current depth-source status is in **Status**; raw buffers are under **Manual depth selection**.
-   Streamline's current depth has its own **ACTIVE** row because its native resource need not appear
-   in the generic list. **Last valid** describes history only; unavailable current depth remains 2D.
+   Current depth-source status is in **Status**. **Last valid** describes history only; unavailable
+   current depth remains 2D.
    Sunshine's host depth-strength control applies to Sunshine-generated stereo and offline conversion.
 
 When the game requests Frame Generation, the **Status** tab shows its multiplier (for example
@@ -2441,9 +2443,9 @@ evidence (a layout set on an earlier list included, and a depth or UI declaratio
 with each state its recording can name), plus deliberately illegal rows; the cells where the table falls short of the contract are
 rows of its known-gap table. Its device layer records the same copies on real D3D12 lists.
 
-The FG decision is independent of depth-provider selection, including a manually pinned Generic
-buffer. The last confirmed mode survives transient observation loss and effects reloads; a new
-confirmed mode or observer/runtime shutdown updates it. Renderer, panel and dump share that
+The FG decision is independent of depth-provider selection, Generic depth included. The last
+confirmed mode survives transient observation loss and effects reloads; a new confirmed mode or
+observer/runtime shutdown updates it. Renderer, panel and dump share that
 presentation decision. An enabled FG mode does not identify an individual generated frame.
 UI placement is independent of shape protection: explicitly supplied UI-layer geometry may define
 its placement, but the current SL/NGX adapters expose no authoritative target UI depth. This path
@@ -3490,7 +3492,7 @@ The first implementation assumes a perspective depth buffer that aligns with the
 color through its viewport rectangle. It does not infer DLSS jitter, frame-generated depth,
 custom logarithmic depth, orthographic projection, HUD layers or separate weapon projections.
 Matching resolution alone does not establish alignment. Calibration currently requires a sampled
-backup; keep the installed depth-preservation setting enabled. Physical game/headset acceptance
+backup. Physical game/headset acceptance
 is separate from synthetic buffer, shader and transport validation.
 
 ### Streamline ABI compatibility
@@ -3635,31 +3637,24 @@ The ordered API tags share one pending-evaluation lifetime. An intermediate fail
 interrupt that lifetime; after it resolves, a known unsupported capture is not pending GPU work
 and cannot authorize holding historical stereo. Metadata nominations prefer their reserved slots
 so they do not take the last slot available for a usable tag's texture copy.
-A valid manual pin retains priority. The panel
+The panel
 identifies this source as **Provided by game (Streamline)**, and selection logs name the tag type.
 The add-on panel shows current readiness and resolution. Its expandable details identify the
 source resource and tag. When a current frame is unavailable it shows 2D status and labels retained
-metadata **Last valid**, rather than presenting it as current depth. Manual overrides are named
-explicitly; a directly supplied resource is not represented by a checked generic buffer row.
-**Manual depth selection** is collapsed by default. Its list marks the current ready source
-**ACTIVE** and places it first, matching SL/NGX and ReShade by native lifetime identity rather than
-address or resolution. API-only textures appear as a read-only active row; historical sources are
-never marked active. Checkboxes continue to mean manual override, independently of the active label.
+metadata **Last valid**, rather than presenting it as current depth.
 No game middleware is loaded or replaced; the supported public interfaces are described in
 [Streamline ABI compatibility](#streamline-abi-compatibility).
 
 Source selection, capture and scale preparation are separate responsibilities. SL/NGX adapters
 identify the exact game resource and provide a logical source generation, extent and optional camera
 metadata. They do not select an unrelated candidate when pixels are unavailable. Generic ranking
-supplies fallback candidates only when no valid API source owns selection; explicit manual pins
-retain priority. Resource creation, drawing and queue observation remain common bookkeeping even
-while Generic ranking and qualification are suspended.
+supplies fallback candidates only when no valid API source owns selection. Resource creation,
+drawing and queue observation remain common bookkeeping even while Generic ranking and
+qualification are suspended.
 Optional candidate accounting is separate from those capture facts. Numeric draw/vertex counters
-pause on native API capture unless the manual list is visible or activity diagnostics request them.
-Generic selection retains the counters needed for its actual capture decisions.
-Per-clear history is collected only for the visible list. UI demand expires after the list stops
-being drawn, including when the overlay closes or changes tabs. Hidden lists do not copy or sort
-the inventory. Work-presence, viewport, clear direction, preservation boundaries, resource lifetime
+pause on native API capture unless activity diagnostics request them. Generic selection retains
+the counters needed for its actual capture decisions. No per-clear history is kept, and nothing
+in the panel changes what is tracked. Work-presence, viewport, clear direction, resource lifetime
 and queue synchronization remain live so new/rotating sources can still use the same capture path.
 
 ReShade's D3D12 inventory and the adapters use one native-resource identity attached to the live
@@ -3762,16 +3757,15 @@ enabled FG still holds the queue in mono while no API source is established.
 
 One native D3D12 capture owner serves both API-selected and Generic-selected sources. It owns the
 snapshot pool, recording/submission identities, source and snapshot leases, consumer registration
-and GPU retirement. The two recording opportunities are a legal ReShade preservation boundary
-(before clear/unbind/fullscreen reuse, or an admissible end-of-frame capture) and the API evaluation
-entry within the supplied resource lifetime. Both record the full depth plane through the same
-allocation/copy code. Generic's former backup allocations are stable presentation textures, filled
-from an admitted snapshot; they no longer constitute a separate D3D12 capture-pixel lifetime.
-The Direct3D 11 path retains its existing Generic preservation backend; this native owner does not
-claim to unify D3D11 and D3D12 synchronization.
+and GPU retirement. The two recording opportunities are Generic's admissible end-of-frame capture
+and the API evaluation entry within the supplied resource lifetime. Both record the full depth
+plane through the same allocation/copy code. Generic's former backup allocations are stable
+presentation textures, filled from an admitted snapshot; they no longer constitute a separate D3D12
+capture-pixel lifetime. The Direct3D 11 path keeps its own Generic end-of-frame copy into the
+backup texture; this native owner does not claim to unify D3D11 and D3D12 synchronization.
 
 API nominations always capture at the middleware boundary and leave Generic capture dormant,
-including for tracked depth-stencil resources. Manual/fallback selection resumes Generic capture
+including for tracked depth-stencil resources. Fallback selection resumes Generic capture
 before selection. Stable API frames do not toggle that demand or repeatedly clear
 Generic capture state. All depth-readiness writers share one per-runtime uniform cache, reflected
 again after effects reload and published only when readiness changes. Readiness never rebinds
@@ -3790,44 +3784,28 @@ readiness and calibration readiness. The camera branch is disabled before resolu
 only after a complete ready decision is applied.
 
 An API nomination snapshots the nominated texture at the middleware call, even when the same
-resource is in ReShade's depth-stencil inventory. A generic before-clear copy can contain an earlier
-or later partial render pass from that allocation; matching its resource identity does not prove
-that it contains the depth evaluated by SL or NGX. API capture therefore does not depend on Generic
-draw counts, clear indices or preservation mode. It still requires valid resource lifetime and
-observed or supplied native state; missing evidence never authorizes an assumed transition.
+resource is in ReShade's depth-stencil inventory. A Generic end-of-frame copy holds whatever that
+allocation contains when the frame ends, which can be a later partial render pass or a clear;
+matching its resource identity does not prove that it contains the depth evaluated by SL or NGX.
+API capture therefore does not depend on Generic draw counts or clears. It still requires valid
+resource lifetime and observed or supplied native state; missing evidence never authorizes an
+assumed transition.
 
-Generic capture retains its preservation opportunities. In mode 2 it requires an observed
-meaningful-work/clear-or-unbind-or-fullscreen boundary. An end-of-frame copy cannot recover an
-observed boundary that was missed: the original may already be cleared or reused. That presentation
-remains mono until a fresh valid snapshot exists.
+Generic capture has one opportunity per source and frame: the end of the frame, recorded on
+ReShade's own list at Present. There is no copy before a clear, at a DSV unbind or switch, or at a
+clear-like draw, and no saved setting adds one. The copy holds what the source holds then, so a
+game that clears or reuses its depth before Present leaves flat or unrelated depth there. On
+D3D11 and D3D12 the content checks refuse flat depth and that presentation remains mono until a
+fresh valid snapshot exists; the [scene-depth selection limits](#scene-depth-selection-limits) give
+the consequences on every API.
 
-Generic's D3D12 copies take their source's pre-copy state from the boundary's contract
-(`generic` in [`api_contract.h`](../tools/reshade/api_contract.h)). A depth clear
-(`ClearDepthStencilView` with the depth flag, or a render pass that clears depth) needs
-`DEPTH_WRITE` by the D3D12 clear contract (`clear_contract`). A DSV unbind and a clear-like draw
-name the state of the view bound there (`generic::bound_view`): a writable DSV's `DEPTH_WRITE`,
-which they declare, while a read-only DSV (`D3D12_DSV_FLAG_READ_ONLY_DEPTH` or `_STENCIL`) leaves
-its texture in `DEPTH_READ` with read bits D3D12 does not name, so only a state the copy's own
-recording observes proves that copy and otherwise it is refused as `missing_state` (the contract
-matrix's D11c, since Stage 3 batch B; before, every unbind and clear-like draw declared
-`DEPTH_WRITE`). ReShade keeps no DSV flags with a view and reports them only as the usage of its
-creation (`depth_stencil_read` for either flag), so the add-on records each D3D12 depth-stencil
-view's read-only-ness from `init_resource_view` in a lock-free table of 4096 handles per device
-([`read_only_dsv.h`](../tools/reshade/read_only_dsv.h)) and reads it where a list binds the view,
-since D3D12 reads the descriptor there and the game may reuse the handle before the unbind. Every
-view takes a slot, and a handle the table does not hold counts as read-only (fail closed): a
-descriptor the game copies into a DSV heap (`CopyDescriptors`), which ReShade does not report and
-the add-on does not hook, or a view that found no slot. Before the Stage 3 batch B review only
-read-only views took a slot, so a read-only descriptor copied into an unreported handle read as
-writable and its unbind declared `DEPTH_WRITE`. A descriptor copied over a handle whose own view was
-reported still keeps that view's answer. A view with only `READ_ONLY_STENCIL` counts as read-only
-too (ReShade does not tell the flags apart), which only refuses a copy. A DSV switch after the
-list's own depth clear still declares the clear's `DEPTH_WRITE`. ReShade reports a render
-pass before the native `BeginRenderPass`, so a render pass that clears depth is copied there, outside
-the pass: the capture owner learns that the pass began only after that copy. The end-of-frame copy
-runs on ReShade's own list, where nothing names the state: it copies only from the source's last
-proven state on that list's queue, and refuses otherwise. The earlier capture then holds within the
-source age, then the view is mono.
+Generic's D3D12 end-of-frame copy takes its source's pre-copy state from the end-of-frame contract
+(`generic::end_of_frame` in [`api_contract.h`](../tools/reshade/api_contract.h)). It runs on
+ReShade's own list, where nothing names the state: it copies only from the source's last proven
+state on that list's queue (the contract matrix's D10), and refuses otherwise; the earlier capture
+then holds within the source age, then the view is mono. A depth clear (`ClearDepthStencilView`
+with the depth flag, or a render pass that clears depth) proves `DEPTH_WRITE` by the D3D12 clear
+contract, as described below; it is a proof of state, not a copy point.
 
 The last proven state ([`proven_state.h`](../tools/reshade/proven_state.h)) is a per-resource fact
 that the capture owner keeps for at most 128 textures, each depth-stencil texture from its creation
@@ -3869,8 +3847,9 @@ DLSS-G plugin loaded, the swapchain presents on DLSS-G's own queue, even with fr
 In the logs of 10-06 to 10-23, BF6 (multiplayer and campaign), Clair Obscur, RE9, Stellar Blade, The
 Witcher 3 and Hogwarts render and present on different queues, and so does Shadows once its DLSS-G
 swapchain is in use; Dead Space presents on its render queue. There every end-of-frame copy is
-refused (`end_of_frame_refused` grows with `last=missing_state`), so Generic depth comes only from
-boundary copies on the game's own lists, and otherwise holds, then goes mono. The Present-queue
+refused (`end_of_frame_refused` grows with `last=missing_state`). No other Generic copy point
+exists, so such a game has no Generic depth on D3D12: without API depth the view holds, then goes
+mono. The Present-queue
 copies of deferred tags find no proof there either and start from their declaration (R2). Accepting
 a proof from another queue needs one of two things. The presenting queue's work must be shown to be
 ordered after the proving list (a fence wait the frozen hook set does not observe), or the copy must
@@ -3935,8 +3914,11 @@ still used its claim.
 
 The Generic status line (`Sunshine 3D depth:`) ends with four groups of counts since the runtime
 started:
-- `ready_copies boundary=N end_of_frame=M`: the Presents whose ready capture was a boundary's copy
-  (a clear, an unbind or a clear-like draw), and those whose ready capture was the end-of-frame copy.
+- `ready_copies boundary=N end_of_frame=M`: the ready Presents whose capture was not an
+  end-of-frame copy, and those whose ready capture was the end-of-frame copy. No copy is made at a
+  clear, unbind or clear-like draw any more, so `boundary` counts only Presents that sampled the
+  source directly (D3D9, D3D10 and OpenGL) and is always 0 on D3D11 and D3D12; the field keeps its
+  name so the line keeps its shape.
 - `end_of_frame_refused=R last=<stage>`: end-of-frame copies the capture owner refused, with the
   latest refusal's stage (`missing_state` when nothing proves the state).
 - `proven tracked=T unobserved={unrecorded=.. unreported=.. invalidated=.. missed_reset=..
@@ -3951,10 +3933,10 @@ started:
 
 While these counts change, the line repeats at most every 10 s.
 
-Preservation statistics retain a strong snapshot ticket with its allocation identity. Publishing
+Generic capture statistics retain a strong snapshot ticket with its allocation identity. Publishing
 it requires the current, active, unambiguous presentation record and a matching live ticket.
-Before-clear snapshots require actual producer submission. An end-of-frame snapshot can instead
-be consumed later in the same still-open recording, where command order is explicit. Preserved
+An end-of-frame snapshot can be consumed later in the same still-open recording, where command
+order is explicit. Preserved
 presentations use the game's existing rendering/presentation ordering contract, as Generic Depth
 does; they do not require producer CPU completion or insert queue waits. This is not proof of an
 arbitrary independent queue graph or of which intra-frame use of a reused depth buffer matches
@@ -4174,7 +4156,7 @@ their depth this way, `OnlyValidNow` with a declared `0x60`
 For volatile `OnlyValidNow` depth, a copy is recorded on the supplied command list during the tag
 call, or, for a local input (a tag passed in `slEvaluateFeature`'s inputs), on the evaluate's
 command list during that evaluate, through the same snapshot owner as all other sources. Normal GPU ordering completes it;
-there is no CPU wait. It cannot use a later Generic preservation opportunity.
+there is no CPU wait. It cannot use a later Generic end-of-frame copy.
 The shared snapshot owner also orders its injected source read before restoring a shader-read or
 COMMON state: it transitions through COPY_DEST and then restores the exact original state,
 without writing the source. Full-image asynchronous copy/overwrite tests exposed partial later
@@ -4203,7 +4185,7 @@ frame generation presents them while the game records the next frame; the contra
 The evaluation names the tag's frame when both are on one minted frame token: a frame tag kept in
 that frame's record, or a global tag (`slSetTag` names no frame) set after that frame's
 `slSetConstants` (`evaluated_depth_tag::own_frame`, `depth_capture::input::own_frame`). Any other
-later use, a tag without such a frame and a preservation copy still expire at the next Present.
+later use, a tag without such a frame and a Generic copy still expire at the next Present.
 Other lifetime rules, recording retirement and the shared consumer-ordering checks above still
 apply. The [API contract matrix](../tools/reshade/README.md#api-contract-matrix) drives these
 lifetimes through the probe's hooks and through real Presents of the runtime fixture; its known-gap
@@ -5091,8 +5073,9 @@ reserved resource), change no resource state; they only move heap memory between
 resources, so they do not affect admission. Resident Evil Requiem (RE Engine) aliases transient
 memory every frame, and treating a wildcard alias as fatal had refused every DLSS depth capture
 (`loss=wildcard_alias`). Bundles cannot record barriers, clears or copies, so `ExecuteBundle`
-changes no state either. The generic bind-switch preservation copies at no SDK point and keeps its
-own alias rule. Already-owned copies retain their normal lifetime checks. No state is guessed from texture type.
+changes no state either. Generic's end-of-frame copy is at no SDK point and keeps its own alias
+rule: an aliasing barrier naming its source, or naming nothing, after the source's last barrier
+leaves it unproven and refuses the copy. Already-owned copies retain their normal lifetime checks. No state is guessed from texture type.
 The [public ABI families](#streamline-abi-compatibility) share these capture checks; broad version
 admission does not broaden the private 1.1.1 resource-state encoding. Resource identity remains
 attached to the native resource when temporary metadata expires, so rotating buffers retain their
@@ -5478,7 +5461,6 @@ the bounded pending interval and explicit FG scope described above.
 An explicit successful release of its feature ends NGX ownership and permits automatic fallback,
 and so does one second without any evaluation of the established source, as for Streamline
 (above); an expired owner never blocks another live API source.
-Manual pins continue to override the automatic provider.
 Concurrent ambiguous NGX feature/view evaluations remain mono; the add-on does not infer which
 unrelated viewport is the final game camera.
 
@@ -5608,17 +5590,17 @@ from the effect callback. Once hooked, the observer module and interposer remain
 process exit so in-flight return paths remain valid. Disabling/unloading the add-on stops observation
 and leaves safe pass-through calls; updating the DLL therefore requires a game restart.
 
-On D3D12, evaluation entry and the selector's actual preserved-copy sites also record command
+On D3D12, evaluation entry and the selector's actual copy sites also record command
 object lifetimes and recording generations. The log distinguishes source-address matches from
 two markers in the same recording with one observed close and submission on the runtime's queue.
 Repeated submissions, retired objects, missing callbacks, unknown native identities, secondary
 execution and incompatible queues do not earn this association. These are pre-call API
 observations, not proof of native API success or GPU completion. Different recordings on the
 same queue remain explicitly order-unverified: concurrent native submissions can occur in a
-different order from their ReShade callbacks. A D3D12 Generic backup is published from its
-before-clear snapshot on the runtime's own immediate list, which the tracker never sees reset, so
-the frame's capture marker is the snapshot's own recording in the game's list, and the published
-copy itself reads as an unknown recording that never inherits content correspondence.
+different order from their ReShade callbacks. A D3D12 Generic capture is recorded only at the end
+of the frame, on the runtime's own immediate list, which the tracker never sees reset: both its
+snapshot and the published copy read as an unknown recording that never inherits content
+correspondence. Markers that share a recording with an evaluation come from the API adapters.
 
 The tracking store is bounded and nonblocking. A missed lifecycle event revokes old evidence;
 independent per-ReShade-object lifetime cookies allow an ordinary reset and submission to
@@ -5632,8 +5614,9 @@ resource lifetimes but rejecting proof from the inactive interval.
 The content observer adds immutable use/copy snapshots to that same recording. Observed draws,
 depth clears and copies advance the source's content version; resource lifetime, backup reuse and
 later backup writes revoke mismatched snapshots. A copy followed by a source clear and then an
-evaluation is rejected, while an evaluation followed by a matching preserved copy and then a clear
-can retain their observed correspondence. Partial writes and ambiguous alias/barrier events revoke
+evaluation is rejected, while an evaluation followed by a matching copy and then a clear can
+retain their observed correspondence; a Generic copy, recorded at the end of the frame on the
+runtime's own list, never shares the evaluation's recording. Partial writes and ambiguous alias/barrier events revoke
 evidence rather than infer which pixels survived. Recording destruction retires its uncertainty
 entry so short-lived command lists do not exhaust the bounded store permanently.
 
@@ -5724,12 +5707,13 @@ their exact sources independently of which source can render this present. A mis
 returns mono without resetting unrelated numerical evidence.
 
 Capture produces any permitted end-of-frame backup before current-source routing.
-In preservation mode 1, a game may draw depth without a trailing clear, so waiting
-for a selected current copy before making that backup would deadlock discovery.
+The end of the frame is Generic's only copy point, so waiting for a selected current copy
+before making that backup would deadlock discovery.
 The capture members, legacy selection and histogram probe reuse the same producer;
 it checks the live source lifetime, present, activity and owned backup assignment.
-An in-progress copy is reserved and unavailable to other runtimes. Mode 2 still
-forbids end-of-frame reads on D3D12/Vulkan because those resources may be aliased.
+An in-progress copy is reserved and unavailable to other runtimes. On D3D12 the copy
+admits only the source's last proven state on the presenting queue, so a source that
+may be aliased is refused rather than read.
 Lower-resolution depth remains eligible when its active region matches the output
 shape; output-resolution preference does not require a native-resolution buffer.
 
@@ -6005,7 +5989,7 @@ crop/layout, orientation or reported convention changes invalidate that member's
 Membership does not prove a shared depth encoding: each allocation independently initializes and
 maintains H and t0. A → B → A within the retained set resumes A's controller. Its completed measurements
 can arrive while B renders and still update A. Leaving the set evicts the controller rather than keeping an
-unbounded historical calibration cache. Pinning or unpinning the same source preserves its state.
+unbounded historical calibration cache.
 A genuinely missing current capture suspends rendering and screen-plane motion; it never makes a
 previous frame's depth current. Valid immutable measurements captured before a brief output gap
 remain admissible for their exact source, subject to age and identity checks. Numeric readiness
@@ -6045,7 +6029,7 @@ Broad game quality and moving-scene comfort remain acceptance work.
 Startup text and loading screens may have no current scene depth; this is reported as depth
 unavailable and keeps current-color mono. Transient depth-binding and raw-controller log changes
 are limited to one per second. Ordinary rotation follows this limit; it must not produce one log
-entry per frame. Manual-selection changes and binding failures are reported immediately.
+entry per frame. Binding failures are reported immediately.
 Ready raw-controller summaries include the source, applied gain H and zero plane t0 every
 ten seconds so independent gain and placement can be inspected without per-frame telemetry. These limits
 affect logging only; depth selection, readiness, UI and shader state still update every frame.
@@ -6082,31 +6066,25 @@ changes; without that metadata the raw fallback cannot establish physical equiva
 
 ### Selecting scene depth
 
-If **Normal Depth View** shows a white field, stripes or dots during gameplay, first check
-**ReShade → Add-ons → Sunshine 3D**. Try the active depth-buffer rows while watching the
-depth view, and select the buffer that shows recognizable scene geometry. If necessary,
-inspect that buffer's recorded **CLEAR** entries to preserve the useful contents. A bound
-resource, a large resolution, or a high draw count alone does not establish correct scene depth.
+If **Normal Depth View** shows a white field, stripes or dots during gameplay, the selected source
+is not usable scene depth. **ReShade → Add-ons → Sunshine 3D → Status** names the depth provider
+and, for Generic depth, the bound buffer's size and format or why none is bound; the
+`Sunshine 3D depth:` log line adds the source id and the selection reason. Selection is always
+automatic: there is no buffer list, pin or capture setting to change it (see
+[scene-depth selection limits](#scene-depth-selection-limits)). A bound resource, a large
+resolution, or a high draw count alone does not establish correct scene depth.
 SunshineGame3D's status describes source-associated projection decoding when available, or
 the explicit relative-depth assumption otherwise. Both maintain an independent stereo gain and
-place the screen plane within the measured disparity budget. Manually pinning a buffer changes
-source selection, not that interpretation.
+place the screen plane within the measured disparity budget. Changing the selected source does
+not change that interpretation.
 The independent reference effect has separate calibration. The selected buffer and current-frame
 depth readiness remain shared acquisition responsibilities.
 
-In D3D12 preservation mode 2, a direct switch from depth target A to B can also
-preserve A. This additional path requires an explicit depth clear on the same
-command list, single-mip/layer/sample geometry and no intervening resource-state
-uncertainty. It copies only depth subresource 0, without assuming the stencil
-plane's state. Touching or unknown barriers, render-pass entry and secondary
-execution revoke that proof. Missing copies still suspend Automatic setup and
-produce mono; this does not enable end-of-frame access to potentially aliased depth.
-
-This resolved the reported Dead Space depth problem during manual testing on 2026-09-13:
-changing the Generic Depth selection replaced flat or saturated shader inputs with spatially
-varying scene depth. The previous extreme signed depths had saturated the shared preparation,
-making positive Depth Adjustment settings produce the same separation while zero bypassed
-stereo. Changing either warp's strength formula would not correct the selected source.
+Historical note, recorded on 2026-09-13 with a manual Generic Depth selection that no longer
+exists: in one reported game, changing the selection by hand replaced flat or saturated shader
+inputs with spatially varying scene depth. The previous extreme signed depths had saturated the
+shared preparation, making positive Depth Adjustment settings produce the same separation while
+zero bypassed stereo. Changing either warp's strength formula would not correct the selected source.
 
 ReShade 6.8's default selection ranks eligible buffers using recorded vertices or draw calls;
 it does not identify DLSS/TAA or inspect depth contents. The correct buffer can have fewer
@@ -6114,11 +6092,12 @@ recorded calls than another candidate. DLSS also separates render and output res
 do not require scene depth to match the final color size or encode a universal low/high
 draw-count rule. See the [Generic Depth implementation](https://github.com/crosire/reshade/blob/v6.8.0/examples/09-depth/generic_depth_addon.cpp)
 and [NVIDIA's DLSS integration guide](https://github.com/NVIDIA-RTX/Streamline/blob/main/docs/ProgrammingGuideDLSS.md).
+On Vulkan, OpenGL, D3D9 and D3D10 the add-on keeps that ranking as its only selector.
 
-The unified `SunshineSBS.addon64` includes the scene-depth selector and replaces Generic Depth for this game. Its persistent
-**Auto-select scene depth (Sunshine)** option allows native and reduced-resolution candidates,
-then samples raw depth contents asynchronously. Repeated useful samples can promote a scene
-buffer above a busier flat buffer; repeated bad samples allow recovery without switching on
+The unified `SunshineSBS.addon64` includes the scene-depth selector and replaces Generic Depth for
+this game. On D3D11 and D3D12 its selection is always content-based: it allows native and
+reduced-resolution candidates, then samples raw depth contents asynchronously. Repeated useful
+samples can promote a scene buffer above a busier flat buffer; repeated bad samples allow recovery without switching on
 one menu or transition frame. A currently accepted source no longer blocks all other accepted
 candidates. Among coherent candidates, sustained broader scene coverage can replace a
 foreground-only buffer, including when their dimensions match or the fuller scene has a lower
@@ -6143,9 +6122,8 @@ in-flight sample.
 
 Selection takes one owned, contiguous snapshot of resource identity, dimensions, activity and
 capture-region facts under the tracking lock, then releases that lock before device calls. It
-does not copy per-clear histories or camera-observation records. One eligibility-pruning pass
-removes destroyed and filtered candidates while retaining evidence for live eligible sources
-during inactivity, including manually pinned rows.
+does not copy camera-observation records. One eligibility-pruning pass removes destroyed and
+filtered candidates while retaining evidence for live eligible sources during inactivity.
 
 `depth_capture_policy.h` separates the bounded source budget, immutable current capture records,
 and pure current-copy selection. Independently useful sources with matching dimensions, format
@@ -6155,16 +6133,19 @@ The existing slow quality policy chooses a preferred anchor. Current selection u
 usable copy when qualified, otherwise another qualified retained source's current copy. Multiple
 depth resources rendering in the same present is not itself a rejection. Ambiguous provenance of
 the actual copy, wrong runtime/present, missing copy, or a newly assigned backup without its own
-capture still rejects that record. Transfer-only activity does not manufacture a current scene
-copy, and no relationship to the swapchain buffer index is assumed.
+capture still rejects that record. A copy into a tracked depth-stencil allocation is activity
+for that destination, so the destination's end-of-frame copy is a current copy of whatever was
+transferred there (an open gap, see [scene-depth selection limits](#scene-depth-selection-limits)).
+No relationship to the swapchain buffer index is assumed.
 
-Capture layout follows the actual preserved crop. Aggregate activity and off-turn writes cannot
-change that identity without a new usable capture; a real captured-crop change advances the
-layout and invalidates the corresponding numeric basis. Binding, sampling and the public current
-depth accessor use the same capture record and currentness checks. The view/backup cache is
-bounded and retains retiring resources until their existing retirement period ends; ordinary
-rotation reuses views rather than allocating or waiting for the GPU each frame. A manual pin
-continues to select exactly the requested allocation.
+Capture layout follows the actual captured crop: the largest viewport drawn into the source during
+the frame (an open gap, see [scene-depth selection limits](#scene-depth-selection-limits)).
+Aggregate activity and off-turn writes cannot change that identity without a new usable capture;
+a real captured-crop change advances the layout and invalidates the corresponding numeric basis.
+Binding, sampling and the public current depth accessor use the same capture record and currentness
+checks. The view/backup cache is bounded and retains retiring resources until their existing
+retirement period ends; ordinary rotation reuses views rather than allocating or waiting for the
+GPU each frame.
 
 Challengers need three distinct fresh positive captures, using conservative recent coverage
 against the incumbent's protected history. Small content differences retain the current source;
@@ -6179,7 +6160,7 @@ all-candidate scan, whose cursor advances independently. Empty or uncapturable f
 sources therefore cannot monopolize discovery or prevent a useful lower-resolution fallback.
 This uses the same active-viewport coverage calculation as selection; there is no fixed 4K
 threshold. A full-resolution incumbent keeps ordinary discovery order. Scheduling priority
-does not grant content confidence, change fresh paired comparisons, or override a manual pin.
+does not grant content confidence or change fresh paired comparisons.
 The existing rotating-peer hints, current-source refresh and in-flight probe deadlines remain
 separate; priority improves visit order rather than promising a universal recovery time.
 
@@ -6188,8 +6169,9 @@ another depth target pauses an already tracked, live eligible probe instead of r
 backup and restarting qualification. Only the candidate's next current rendered frame may supply
 another sample; inactivity never makes an old backup current. Destruction, filtering and the
 original two-second probe deadline still cancel it. The official-runtime `--reload-only` regression exercises native
-promotion and recovery through interleaved depth-active presents, resource recreation, and
-D32S8 capture before clear.
+promotion and recovery through interleaved depth-active presents and resource recreation; the
+main run adds a one-third-resolution D32S8 end-of-frame capture and keeps a lone scene cleared
+after drawing unready (mono).
 
 A probe chosen during backup retirement owns its pending visit before allocation. An unrelated
 raw-sample completion cannot cancel that visit. Queue waiting and the allocated measurement
@@ -6204,7 +6186,7 @@ Priority visits alternate with normal
 round-robin visits so an uncapturable candidate cannot monopolize discovery. This grants a probe
 opportunity only: current-copy authentication and useful-content qualification remain separate.
 The crowded rotating-source regression exercises fresh rotating scene buffers among unrelated
-active resources, including off-turn copy activity.
+active resources, including off-turn copy-source reads.
 
 During automatic buffer selection, a qualified challenger already winning a pending comparison keeps its
 existing backup to finish the remaining fresh paired wins. It does not release it after qualification and
@@ -6237,41 +6219,69 @@ This is content-based selection, not a hook into DLSS's tagged inputs. The selec
 match the game resolution, and neither low draw counts nor a smaller size alone earn preference.
 See the [selector installation and validation instructions](../tools/reshade/README.md#automatic-scene-depth-selection).
 
-The original buffer list and CLEAR controls remain available. **Depth buffer** identifies
-the actual shader binding and whether it was selected automatically or manually; row checkboxes
-are manual overrides, so unchecked rows do not mean no buffer is active. **Use automatic buffer selection**
-clears that override and enables automatic selection. Unchecking a pinned row also releases
-the override, using the current automatic-selection setting. Both actions preserve the current
-binding, captured-content evidence and per-source calibration history; they do not restart from
-draw-count fallback. Selecting a different manual row also preserves other candidates' history;
-the ordinary source-change path updates the binding. Automatic selection still checks current
-activity, source lifetime and content, so releasing an invalid source can select a useful
-alternative immediately. A different source or raw basis still requires its own calibration.
-Buffer selection is independent of the Game 3D **Depth setup** mode.
-A manual override takes priority while its native resource renders. With automatic selection
-enabled, two seconds of continuous observed inactivity permit replacement probing while the
-manual pin remains selected. Recovery clears the pin only when another eligible source renders
-in the current frame and has repeated useful captures from after this inactivity began. Cached
-positive evidence, flat loading screens and time alone cannot revoke the pin. Resumed rendering
-of the original source cancels recovery immediately. Clears alone do not count as scene
-rendering: the manual pin remains, but readiness and content probing pause until scene work
-resumes or a freshly confirmed replacement qualifies. Raster and mesh draws, plus supported
-copies/resolves into the sampled depth subresource, count as activity without inventing vertex
-counts. Known compute/ray dispatches, zero-count calls and explicitly empty transfer regions do
-not imply writes to the bound DSV. ReShade 6.8 reports D3D12 ExecuteIndirect commands as unknown,
-so those retain their existing bound-DSV activity treatment; their command signature is not observed.
+Nothing overrides selection: there is no list, pin or saved filter. Automatic selection checks current
+activity, source lifetime and content every frame; a different source or raw basis still requires
+its own calibration. Raster and mesh draws, plus supported copies/resolves into the sampled depth
+subresource, count as activity without inventing vertex counts. Known compute/ray dispatches,
+zero-count calls and explicitly empty transfer regions do not imply writes to the bound DSV.
+ReShade 6.8 reports D3D12 ExecuteIndirect commands as unknown, so those retain their existing
+bound-DSV activity treatment; their command signature is not observed. Clears alone do not count
+as scene rendering: a source that is only cleared in a frame is neither ready nor probed, and
+cached positive evidence or a late readback cannot stand in for a current draw. A current useful
+replacement outranks it, and resumed rendering restores it with its retained evidence.
 Activity is not proof of useful contents or full image coverage; the histogram checks still
-apply, and real drawn flat scenes retain their existing handling. If automatic selection is disabled, an
-allocated manual source remains pinned. Resource destruction/recreation clears the override
-without reusing a saved pointer. Restarting the game or recreating its effect runtime also clears the temporary
-override. Saved format/resolution filters and forced CLEAR indices still apply,
-so a restrictive filter can exclude the correct source. Sunshine's exporter continues to use
-the resulting ReShade `DEPTH` binding. Sparse content samples cannot prove semantic correctness
-for every game: different cameras or partial passes can have similar spatial coverage, and a
-spatially varying non-scene buffer may still require manual selection. A clear endpoint is not
-proof that depth is missing; the selector does not know the semantic role of every sample.
-Capture evidence records the rectangle actually copied. Changes to that rectangle invalidate
-content confidence without canceling an in-progress candidate merely because tracking started.
+apply, and real drawn flat scenes retain their existing handling. A destroyed and recreated
+resource is a new source; no saved pointer is reused. Sunshine's exporter continues to use the
+resulting ReShade `DEPTH` binding. Capture evidence records the rectangle actually copied.
+Changes to that rectangle invalidate content confidence without canceling an in-progress
+candidate merely because tracking started.
+
+#### Scene-depth selection limits
+
+Sparse content samples cannot prove semantic role: different cameras or partial passes can have
+similar spatial coverage, and a clear endpoint is not proof that depth is missing. The selector
+does not know the semantic role of every sample, and there is no manual fallback. These are the
+accepted consequences:
+
+- **A confirmed non-scene buffer on D3D11 and D3D12.** When the selector confirms a spatially
+  varying buffer that is not scene depth (another camera's pass or a shadow map, for example),
+  nothing in the automatic path flags it. The **Status** row names the buffer's size and format
+  and the `Sunshine 3D depth:` log line adds its id and selection reason, but the selector cannot
+  know a buffer's semantic role. This is the one accepted case that can give a visibly wrong
+  result, and it has no in-game recovery: turn Game 3D off for that game.
+- **Depth cleared before Present.** Generic copies only at the end of the frame, so it sees the
+  cleared buffer. On D3D11 and D3D12 that copy is flat, the content checks refuse it, and the
+  frame stays mono; the log shows a waiting binding state with its reason, or a growing
+  `end_of_frame_refused`. On D3D9, D3D10, OpenGL and Vulkan there is no content check: the add-on
+  reads the flat buffer (directly, or through its end-of-frame copy), so the frame shows zero
+  parallax. That is effectively 2D rather than wrong geometry, and nothing flags it. A buffer that
+  the game reuses for other content before Present is judged by that content, which is the first
+  case above when it is spatially varying.
+- **Vulkan, OpenGL, D3D9 and D3D10.** ReShade's draw-statistics ranking is the only selector. A
+  wrong pick, such as a shadow map that passes the aspect test, can no longer be corrected in the
+  panel or the ini, and nothing flags it.
+- **Saved non-default `[DEPTH]` values.** The add-on reads only `DisableINTZ` from `[DEPTH]`.
+  A game whose `ReShade.ini` holds a non-default copy, clear-index, draw-statistics, aspect or
+  format/resolution filter value there (including values left from earlier use of ReShade's
+  Generic Depth, which installation disables) loses that behavior on its next launch, because the
+  value is ignored. A game that relied on a copy at a clear ends in the cleared-depth case above at
+  worst; on D3D12, a game that renders on another queue than it presents on then has no Generic
+  depth at all. Installation never edits `[DEPTH]` and leaves the stale `[SUNSHINE_DEPTH]`
+  auto-select line untouched; both are inert.
+
+Two further gaps are open, not accepted. Both exist at the shipping default independently of the
+removed controls, and both await an owner decision:
+
+- **Capture rectangle larger than the scene.** The captured crop is the largest viewport drawn
+  into the source during the frame, and a depth clear does not reset it. A game that draws a
+  larger auxiliary pass into its scene depth, clears it, and then draws the scene in a smaller
+  viewport gets a rectangle larger than the scene, so depth can be misaligned with colour: a
+  visibly wrong result. This applies to every API.
+- **Copy destinations are captured as current sources.** A copy into another tracked
+  depth-stencil allocation counts as activity for that destination, so the end-of-frame copy also
+  captures the destination, under its own identity and raw basis. Its pixels are whatever the game
+  copied there, which can be a history copy rather than the frame's scene depth; nothing marks the
+  source as transfer-only, and selection judges it by content like any other.
 
 ## Activation and recovery
 
@@ -6910,8 +6920,9 @@ and a lower-resolution scene in an offset viewport. It does not inject depth or 
 It verifies source contents, direction, fresh calibration, the exact rectangle and exported
 diagnostic pixels; a color-only frame, resource recreation, and an offset-only layout change
 exercise invalidation and recovery. These checks complement the existing broader selector tests.
-Its statistics mode disables content-based Auto-select and verifies that the eligible buffer
-chosen by draw statistics still receives calibration, without a manual override.
+Its `--stale-config` mode writes every removed selection setting into `ReShade.ini` with a value
+that would change the result if it still applied, checks that ReShade reads each one back, and
+requires the same automatic result as the default run.
 The separately supplied full-pipeline fixtures can select SuperDepth3D or SunshineGame3D.
 Their source is not packaged with the add-on. The [add-on guide](../tools/reshade/README.md)
 describes the explicit effect selector and baseline comparison workflow.

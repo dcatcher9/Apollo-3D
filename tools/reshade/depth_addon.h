@@ -42,7 +42,7 @@ namespace sunshine_depth {
       double raw_scale = 1, raw_bias = 0;
       sunshine_scene_depth::depth_encoding encoding = sunshine_scene_depth::depth_encoding::device;
     } projection;
-    // Original game resource, before any copy-before-clear backup. Identity-only
+    // Original game resource, not the add-on's backup copy. Identity-only
     // observation for camera metadata matching; never sampled through this handle.
     reshade::api::resource source_resource {};
     reshade::api::resource resource {};

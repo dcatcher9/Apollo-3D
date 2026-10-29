@@ -2665,7 +2665,7 @@ namespace sunshine_streamline::depth_capture {
       value.metadata.epoch = 3; value.metadata.sequence = 4; value.metadata.source_id = 5;
       value.metadata.tick = 100; value.texture = std::make_shared<texture_reference>();
       preservation_ticket ticket{value.id, 0, 0, value.texture};
-      // A repeated before-clear opportunity can reuse an unread allocation in
+      // A repeated Generic copy opportunity can reuse an unread allocation in
       // this exact open recording; other sources/recordings and any GPU reader
       // require their own allocation. CPU ticket copies alone do not read it.
       if (!reusable_preserved(value, value.metadata, recording) ||

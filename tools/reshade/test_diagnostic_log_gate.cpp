@@ -39,7 +39,7 @@ int main() {
     require(ready.due(10000, false, false, true), "Adaptive scale snapshot missing");
     require(ready.due(10001, false, true), "Source change/error was delayed");
     require(!ready.due(10002, false), "Unchanged state was repeated");
-    require(ready.due(10003, true, true), "Manual selection was delayed");
+    require(ready.due(10003, true, true), "Binding failure with a source change was delayed");
     require(ready.due(1, true), "Clock rollback suppressed future logs");
 
     sunshine_diagnostics::family_gap_observer family;

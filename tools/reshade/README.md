@@ -16,9 +16,9 @@ move the controls. See the [panel guide](../../docs/reshade-sbs.md) for the work
 Gain and zero placement are fully automatic. Sharpening is removed.
 Depth setup is automatic: source-associated camera data or the explicit raw-depth
 assumption controls preparation. Manual shader setup, per-game geometry/weapon profiles and their
-legacy processing branch have been removed. Manual **depth-buffer pinning** remains available;
-it selects the source and does not select another renderer. Image controls live in the add-on panel
-and save automatically in ReShade.ini. The old ray-search renderer, its quality settings and the experimental warp
+legacy processing branch have been removed. Depth-source selection is automatic too: the panel has
+no buffer list or pin, and saved capture or filter values are ignored. Image controls live in the
+add-on panel and save automatically in ReShade.ini. The old ray-search renderer, its quality settings and the experimental warp
 selector have been removed. Sources larger than 3840 in either dimension show an explicit warning
 and remain 2D; there is no hidden legacy renderer fallback.
 Automatic UI discovery considers authenticated UI opacity, tag 23 alpha, the game's offscreen UI
@@ -181,8 +181,8 @@ Normal automatic UI detection requires neither a review file nor a panel approva
    disables native Game 3D to prevent two renderers from publishing together. To return to native
    Game 3D, rerun the installer without that argument, then enable Game 3D in the add-on panel if
    it was previously disabled. Keep reference source files separate from the game's install directory.
-3. Start the game and open **ReShade → Add-ons → Sunshine 3D**. Automatic scene-depth selection
-   is enabled for a new setup. Manual depth selection remains available if a game needs it.
+3. Start the game and open **ReShade → Add-ons → Sunshine 3D**. Depth selection is automatic;
+   there is nothing to enable or choose.
 4. Finish the [Sunshine setup](../../docs/reshade-sbs.md#setup): choose Game 3D on the streamed
    client, or enable the local AR provider for directly attached glasses, and use fullscreen
    at the normal source resolution. Keep the game's HDR setting as intended;
@@ -358,7 +358,7 @@ scene content. Held values are marked as last applied and paused, with target co
 or manual gain control; zero placement and gain adaptation are automatic on both paths.
 SDK history resets discard stale measurements while retaining established gain and plane until
 fresh observations resume.
-Same-source pin/unpin retains generic state; a real generic source change initializes from fresh
+A real generic source change initializes from fresh
 captures. Retained depth allocations have independent bounded controller
 state; unrelated or destroyed sources do not inherit an old calibration. Camera and raw branches
 also keep separate screen-plane histories. Switching representations is not guaranteed to be
@@ -376,10 +376,10 @@ admission, waiting behavior and current limits. There is no Manual shader mode o
 default for supported D3D12 games. Any feature can provide depth through validated resource,
 frame/view, encoding and lifetime contracts; feature IDs are not an admission allowlist. Automatic
 selection tries tagged high-resolution device depth (48), scene device depth (0), then positive
-linear view distance (49), ahead of unrelated larger heuristic candidates. Manual pins take
-precedence. SL/NGX select the resource; Generic selection is the fallback when no valid API source
+linear view distance (49), ahead of unrelated larger heuristic candidates.
+SL/NGX select the resource; Generic selection is the fallback when no valid API source
 owns selection. One D3D12 capture owner handles
-both Generic preservation boundaries and API evaluation opportunities, including snapshot storage,
+both Generic end-of-frame captures and API evaluation opportunities, including snapshot storage,
 submission, consumer leases and retirement. API capture snapshots the nominated resource at the
 middleware call, including tracked depth-stencil resources; matching a Generic backup's resource
 identity cannot authenticate its contents. While a live source's successor is pending, acquisition
@@ -414,7 +414,7 @@ Successful evaluation and actual submission establish API source ownership indep
 snapshot readiness; an explicit release, or one second without any evaluation of that source (a
 game that switches DLSS to TAA), returns the queue to Generic selection. The linked contract owns
 the capture-ordering requirements and limitations;
-D3D11 retains its existing Generic preservation backend. AMD support is deferred. Set
+D3D11 keeps its own Generic end-of-frame copy. AMD support is deferred. Set
 `[SUNSHINE_DEPTH] StreamlineDepthSource=0` in `ReShade.ini` and restart to disable this path.
 [Queue order](../../docs/reshade-sbs.md#queue-order) observes the game's queue Signal and Wait calls
 (and CPU fence signals) so that a copy on another queue can be read before the CPU sees it
@@ -1014,7 +1014,7 @@ checking that this unrelated repeated failure cannot erase the independent UI in
 fixture's foreground override applies only to dump ownership; it does not change desktop focus.
 See the [canonical capture diagnostics](../../docs/reshade-sbs.md) for the gate and request fields.
 Run these functional cases serially when they share resources or output directories; their timing
-is not performance evidence. The NGX, direct Streamline, preservation-mode-2, probe-round,
+is not performance evidence. The NGX, direct Streamline, probe-round,
 rotating-allocation and adaptive raw-depth runtime fixtures below use the same zero-FX native
 lifecycle. They select their frozen `SunshineGame3D.fx` boot effect and the test add-on themselves,
 so they need no environment settings. The command-association, native-selection and
@@ -1032,8 +1032,8 @@ contrast midpoint.
 This fixture exercises independent capture and
 projection-based rendering. It writes real R32_FLOAT UAV textures that never enter the generic
 depth-stencil inventory, preserves them through native command submission, and checks their
-spatial depth pattern against the consumed depth. It also checks rotating resources, manual
-pin/release, a changed center that moves only the zero, explicit recentering, proportional strength,
+spatial depth pattern against the consumed depth. It also checks rotating resources,
+a changed center that moves only the zero, explicit recentering, proportional strength,
 failed, missing and refused evaluations (the newest completed copy held within its age bound, then
 current-color mono; one second of silence or of rejected evaluations releases the association),
 a hitch longer than the source age before a frame's evaluation and one between the evaluation and
@@ -1078,7 +1078,7 @@ command lists together with the depth producer at the start, middle and end; a s
 last. Each case checks current shader pixels and source stencil, then failure/recovery. Set
 `SUNSHINE_STREAMLINE_LARGE_BATCH_CASE=barriers` to isolate the barrier case; omit it for all cases.
 `SUNSHINE_STREAMLINE_REQUIRE_PROVIDER_STATUS=1` additionally requires the test-only read-only UI
-snapshot and checks current, missing/last-valid and manual-override source reporting. Without that
+snapshot and checks current and missing/last-valid source reporting. Without that
 flag an older control DLL lacking the getter can still run the GPU capture comparison.
 
 `reshade_ngx_depth_runtime_test` exercises named NGX entry points through the native lifecycle.
@@ -1215,22 +1215,22 @@ not establish ABI compatibility.
 
 The integrated scene-depth module is derived from ReShade 6.8's BSD-licensed Generic Depth example.
 It owns depth tracking and the `DEPTH` binding inside `SunshineSBS.addon64`. The installer handles
-the mutually exclusive built-in Generic Depth setting. In **Add-ons → Sunshine 3D**, leave automatic
-scene-depth selection enabled. Existing depth-copy settings, explicit size/format filters and manual
-selection remain available; restrictive filters still exclude buffers.
-
-Read **Depth buffer** to see what the shader actually uses. A row checkbox forces a manual
-override; automatic selection does not check one. Use **Use automatic buffer selection** after trying a
-manual buffer. This selects the source buffer; Game3D's depth interpretation remains automatic.
-The active row stays identifiable even when its draw activity pauses.
+the mutually exclusive built-in Generic Depth setting. Selection is always automatic: the panel
+has no buffer list, pin, filter or copy setting, and the selection and capture values that earlier
+versions saved in `ReShade.ini` are ignored. On D3D11 and D3D12 the selector judges candidates by
+their content; on Vulkan, OpenGL, D3D9 and D3D10 ReShade's draw-statistics picker is the only
+selector. Generic depth is copied only at the end of the frame (or sampled directly where D3D9,
+D3D10 or OpenGL allows it). The **Status** tab names the selected source; Game3D's depth
+interpretation is automatic as well.
 
 The selector refuses to register duplicate depth callbacks if Generic Depth or the old separate
 selector is active. Keep only the unified DLL. Backups from the installer include a manifest of
 original paths; they live in a subdirectory outside ReShade's nonrecursive add-on scan.
 
-The [scene-depth contract](../../docs/reshade-sbs.md#selecting-scene-depth) describes selection,
-manual precedence and limitations. D3D11/D3D12 candidate contents are sampled with a small raw
-depth grid through private command lists and nonblocking readback. Only one readback and one
+The [scene-depth contract](../../docs/reshade-sbs.md#selecting-scene-depth) describes selection
+and its [limits](../../docs/reshade-sbs.md#scene-depth-selection-limits), including what has no
+remedy now that selection cannot be overridden. D3D11/D3D12 candidate contents are sampled with a
+small raw depth grid through private command lists and nonblocking readback. Only one readback and one
 additional candidate backup can be active across runtimes. The inherited selected-buffer switch
 path can wait for the command queue; asynchronous sampling itself adds no CPU fence wait.
 The add-on keeps concise selection/readiness and failure messages. Per-sample histogram traces,
@@ -1243,6 +1243,10 @@ can reacquire depth after the viewport settles. Continuously changing dynamic-re
 viewports may prevent confirmation because readbacks from an older layout are discarded;
 the current implementation does not infer equivalence between those layouts. These content
 checks also cannot conclusively identify the semantic role of every plausible depth texture.
+
+No runtime fixture covers the draw-statistics picker that Vulkan, OpenGL, D3D9 and D3D10 use:
+every selector fixture is D3D12, where selection is always content-based, and no test knob
+re-enables the picker there. The gap is stated here rather than filled with a test-only switch.
 
 The CPU policy test runs under CTest. The opt-in runtime build also retains a D3D12 selector
 reference fixture using the separately supplied legacy shader. It draws real depth targets
@@ -1258,32 +1262,19 @@ through the official runtime, without injecting `DEPTH`:
 recreation with the production add-on. Its interleaved phase checks binding dimensions and
 periodic pixels; it does not establish current-frame capture or Automatic readiness on every
 present. The current reference-policy fixture below covers continuous sources and isolated replacements, not
-alternating scene allocations. `--manual-reload-only` additionally keeps the manually
-selected original allocation alive after rendering moves elsewhere. This action test requires
-`SUNSHINE_DEPTH_MANUAL_RECOVERY_TEST=1` and the separately named `SunshineSBSTest.addon64`,
-which exposes a fixture adapter to the same override handover used by the UI. Never install that
-test add-on into a game. Production recovery has no fixture action exports. The native test
-checks active manual priority, short gaps, flat loading, resumption and confirmed replacement;
-the CPU tests cover rejection of historical and duplicate confirmation samples.
-
-`--manual-handover-only` uses the same test-only setup to pin useful native depth and release
-it through the automatic-selection action. It checks uninterrupted shader binding, backup and
-readiness against a busier reduced-resolution source, later recovery when the native contents
-become invalid, and preservation of useful native history while trying another manual buffer.
-The source dimensions come from the fixture arguments. A negative control uses the frozen old
-selector with only its test adapter exposing the old automatic-selection action; the same
-updated fixture must fail on lost binding/readiness, not on a missing export. Production DLLs
-never expose these actions.
-The existing Automatic test-only action run also pins and unpins its already calibrated
-source while reading the real `Sunshine_CameraDepthScale` uniform. Readiness, binding, H and
-the full-strength blend must remain unchanged across the handover; no calibration or shader
-uniforms are injected.
+alternating scene allocations. The CPU tests cover rejection of historical and duplicate
+confirmation samples.
 
 It checks low-draw reduced-resolution scene depth against high-draw flat and square buffers,
 replacement of an already qualified smaller source by a similarly credible native source,
 stable comparison when both remain useful, fallback when the native source becomes flat,
-format and resolution changes, capture before a clear, same-size competitors, content changes,
-multi-viewport capture within the same resource, and a single active one-draw buffer. It also
+format and resolution changes (including a one-third-resolution D32S8 end-of-frame capture),
+same-size competitors, content changes, multi-viewport drawing within the same resource (it keeps
+the source's identity; the copied rectangle is the frame's largest viewport, which this case does
+not check: see the open gap in the [limits](../../docs/reshade-sbs.md#scene-depth-selection-limits)),
+and a single active one-draw buffer. A negative control keeps a lone scene that is cleared after
+drawing unready (mono) on every frame, then requires it to become ready once the trailing clear
+stops. It also
 checks a useful foreground-only incumbent against a full scene at the same resolution, a
 lower-resolution full scene against native foreground depth, and scenes containing clear sky.
 Histogram cases compare equally complete, equal-size buffers with narrow and broad depth
@@ -1306,7 +1297,7 @@ synthetic checks do not replace a game's DLSS/TAA acceptance test.
 With runtime tests enabled, the CPU-only `reshade_depth_selection_snapshot` CTest loads the test
 add-on without initializing ReShade or a graphics device. It compares the former deep copy with
 the production compact snapshot, including capture-region parity, independent row ownership,
-resource-address reuse and inactive manual history. Its synthetic workload timings include
+resource-address reuse and inactive live-candidate history. Its synthetic workload timings include
 construction, consumption and destruction; reported value bytes exclude allocator overhead.
 
 ## Diagnostics and validation
@@ -1326,7 +1317,8 @@ is observed through the test add-on's last-render query; Dump 3D captures verify
 depth pixels and constants and the mono/stereo SBS. Its oracle is the owning contract's formula
 applied to the independently known draw: gain `L/Q` from the full-image maximum and the zero at the
 contrast midpoint ([raw-depth automation](../../docs/reshade-sbs.md#experimental-raw-depth-automation)).
-Its scenarios check fresh single-window initialization, same-source pin/unpin continuity, a changed
+Its scenarios check fresh single-window initialization, an unchanged source keeping its gain, zero,
+binding, readiness and full blend in steady state, a changed
 center patch that keeps the gain and moves only the zero, held gain and zero through depth gaps
 with current-color mono and through pauses in Presents before and after a frame's depth draws
 (that frame's own depth at the full strength it had; that a pause earns no catch-up credit is
@@ -1336,7 +1328,7 @@ its deadline (until the 10-27 review one followed by a Present without ready dep
 inconclusive, exit 3), a retained exact source resuming its own history, a
 destroyed source and an explicit recalibration starting fresh, zero-strength mono and finite HDR
 stereo, in both depth conventions. No camera/gain values or synthetic readback results are injected.
-Like the bind-switch fixture it needs no environment settings:
+Like the probe-round fixture it needs no environment settings:
 
 ```text
 reshade_adaptive_raw_runtime_test.exe <ReShade64.dll> <frozenShaders> <SunshineSBSTest.addon64> <fresh-output-directory> <scrgb|pq> <normal|reversed> <width> <height>
@@ -1347,36 +1339,22 @@ an FX reload; native capture and scale deliberately survive an FX reload
 (`reshade_game3d_native_depth_runtime_test`), and the case exits as a setup failure.
 `reshade_depth_ready_uniform_cache_tests` covers reflection reuse and change-only publication by
 the shared Generic/API readiness owner. The fixture requires the separate test add-on for the
-real pin/unpin and **Recalibrate** actions. The production package excludes these test exports.
+real **Recalibrate** action. The production package excludes these test exports.
+`SUNSHINE_DEPTH_GENERIC_ONLY_TEST=1`, which `reshade_game3d_native_depth_runtime_test` sets
+itself, writes `StreamlineDepthSource=0`, `NGXDepthSource=0`, `StreamlineCameraProbe=0` and
+`UpscalerCallTrace=0` into the fixture's `ReShade.ini`, so its Generic capture runs without API
+discovery.
 
-`reshade_depth_bind_switch_runtime_test` exercises preservation mode 2 with real
-D3D12 D32S8 draws through native Game 3D. Like the NGX fixture it needs no environment settings
-and selects preservation mode 2 itself; its arguments are only the runtime DLL, frozen
-shader directory, test add-on and fresh output directory. Like the NGX fixture, it removes every
-FX technique after initialization. It reads readiness from the Automatic/scale queries on every present.
-Production Dump 3D captures supply the consumed depth, render constants and SBS. It runs 4K scRGB with
-2228×1256 scene depth, first unbinding each buffer to null, then switching directly
-from scene depth to another depth target. Changing depth patterns reject stale
-copies. Same-binding, clear-only, missing-depth, transition-away and unknown-alias cases verify
-capture admission: a refused case must stay unready on every present and render current-color
-mono. Fresh recalibration and rendered stereo verify recovery. Each refused case differs from
-the passing direct-switch control only by its clear, transition, alias barrier or missing draw;
-a build without the generic alias rule fails at `unknown-alias-before-B`. Like the other native GPU fixtures, execution is opt-in and serial,
-outside CTest. `bind-switch-trajectory.csv` and `native-renders.jsonl` record the evidence.
-Add `SUNSHINE_DEPTH_GENERIC_ONLY_TEST=1` to disable both API sources, camera diagnostics and
-call tracing before initialization. The fixture verifies those settings and runs the same
-preservation and HDR checks, proving that shared capture does not depend on API discovery.
-
-`reshade_depth_probe_round_runtime_test` uses the same four arguments and, like
-the bind-switch fixture, renders through native Game 3D with no FX and no environment
-settings to check bounded challenger sampling. The test add-on's last-render query
-(`SunshineGame3DTestLastRender`) reports the depth and constants each native render
+`reshade_depth_probe_round_runtime_test` takes four arguments: the runtime DLL, frozen shader
+directory, test add-on and fresh output directory. Like the NGX fixture, it renders through
+native Game 3D with no FX and no environment settings to check bounded challenger sampling. The
+test add-on's last-render query (`SunshineGame3DTestLastRender`) reports the depth and constants each native render
 consumed; Dump 3D captures verify the consumed depth pixels.
 A real 4K source is created before six active flat peers; it must replace the
 calibrated lower-resolution source within three seconds, with its actual depth
 pixels verified. The unchanged old add-on must fail that promotion bound. The
 fixture also checks that an uncapturable candidate yields within its two bounded
-probe visits and an active manual pin remains authoritative. These are controlled
+probe visits. These are controlled
 regression bounds, not promised recovery times for every game. No selection, depth
 or camera values are injected. `--native-priority` runs the late-native case instead.
 
@@ -1390,7 +1368,7 @@ contrast midpoint, which differ between the members. Every checked
 present verifies the physical depth source and actual copied depth its native render
 consumed, a changing color marker in both eyes of the exported SBS, and current mono when
 depth is unavailable. Additional
-phases cover off-turn transfer writes, exact manual pin/release, lifetime replacement,
+phases cover off-turn copy-source reads, lifetime replacement,
 unsupported partial crops, full-layout return, real depth gaps and a moving-center
 trajectory. Run the identical executable against the frozen old and candidate add-ons;
 the old single-source implementation must fail the rotating-readiness assertion after
@@ -1403,8 +1381,16 @@ The same fixture accepts one optional isolated case after its four normal argume
 fresh output directory. They cover complementary rotation becoming concurrent rendering,
 real asynchronous startup samples across missing presents, changing central depth from the
 first rendered scene, fresh ABC rotation without any prior continuous-source calibration,
-and a stable preserved crop despite unrelated viewport activity. The layout case also requires
-an actual captured-crop change to establish a fresh numeric basis.
+and a stable captured crop despite unrelated viewport activity. The layout case also requires
+an actual captured-crop change to establish a fresh numeric basis. `--layout` fails at the
+shipping default (`Current backup contains stale/wrong-member raw center depth`), and the
+failure is real: its auxiliary pass draws a larger viewport (three quarters or all of the
+allocation) into the scene's allocation and is cleared before the half-view scene, but the
+end-of-frame copy takes the frame's largest viewport as its crop instead of the scene's half view,
+so the depth at the crop's center is not the scene's. This is the open crop gap in the
+[limits](../../docs/reshade-sbs.md#scene-depth-selection-limits); the case is expected to fail
+until the owner decides the fix. It passed before only because the fixtures ran the removed mode
+that copied at the unbind after the scene.
 The flat-startup case draws constant interior depth on the real source before useful scene
 depth appears. It checks fresh initialization on that same lifetime, then a return to flat
 content that must preserve established numerical state without refreshing readiness.
@@ -1575,10 +1561,8 @@ move makes stale is reshade_diagnostic_texture_capture_test's); on subresource 0
 retained before its earlier list executes, so the capture owner watches it for the enhanced-layout
 latch as an adapter's retention does. Then comes the copy at its point: an adapter's copy with the
 proof its claim selects,
-a Generic boundary (`record_preserved` with the contract `depth_addon.cpp` passes: a clear's
-`DEPTH_WRITE`, a read-only DSV's unbind, which names no state (`generic::bound_view`, D11c), and at
-the end of the frame the source's last proven state on the copy's queue, which the earlier list
-proved; each depth-stencil
+Generic's end-of-frame copy (`record_preserved` with the contract `depth_addon.cpp` passes: the
+source's last proven state on the copy's queue, which the earlier list proved; each depth-stencil
 source is tracked from its creation, as ReShade's `init_resource` reports it), or the UI clear
 boundary (the barriers `game3d_ui_layer.cpp` records through ReShade where the capture owner's
 `legacy_render_target_copy` admits them, as the layer asks; the runtime layer runs the layer
@@ -1652,12 +1636,13 @@ and the DLSS keys, and DLSS-G's own evaluation through `DLSSG.*` on a viewport w
 interposer's options enabled, over feature, `DLSS.Use.HW.Depth`, how the depth is set, subrect,
 result, a recorded or unrecorded state and a recreated feature (seed rows and a pairwise array).
 Family `generic` turns the Streamline and NGX sources off and draws a depth-stencil view of the
-swapchain's size: a clear after or before the draws (depth or stencil only), a render-pass depth
-clear, an unbind and the end of frame, D32 and D32S8, judged by the depth the last native render
-consumed. The view is created in `DEPTH_WRITE` and never transitioned, so its creation proves that
-state at the end of the frame and at a stencil-only clear (D10b). The states an earlier executed
-list proves at the end of the frame are the device layer's, and so are a read-only DSV's unbind
-(D11c) and the UI layer's clear boundary on an enhanced or simultaneous-access target (D12). Family
+swapchain's size: a clear before the draws (depth or stencil only), draws followed by an unbind of
+the writable view, or draws still bound at the end of frame, D32 and D32S8, each captured by the
+end-of-frame copy and judged by the depth the last native render consumed. The view is created in
+`DEPTH_WRITE` and never transitioned, so its creation proves that state at the end of the frame
+and at a stencil-only clear (D10b). The states an earlier executed list proves at the end of the
+frame are the device layer's, and so is the UI layer's clear boundary on an enhanced or
+simultaneous-access target (D12). Family
 `ui` (2.14.1) tags a
 captured depth and a full-size UI input (UI colour and alpha, HUD-less colour, Backbuffer, UI alpha)
 at a tag call with the game's list, without a command list or as a local evaluate input (at a tag
@@ -2790,17 +2775,6 @@ serial is 30 there); each Present establishes any selected copy, as
   Streamline FG tag input there is copied as well (S22, never refused as `command_type`), the
   compute queue takes a fence at its first submission of the copy, and the direct consumer reads it
   only once the compute recording was reset.
-- [`test_read_only_dsv.cpp`](test_read_only_dsv.cpp) (`reshade_read_only_dsv`) pins the read-only
-  depth-stencil view table of [`read_only_dsv.h`](read_only_dsv.h), which decides the Generic
-  path's unbind and clear-like draw of a bound view (D11c): a view created read-only stays so until
-  a writable view is created at its handle, a writable view is writable, and a handle the table
-  does not hold (never reported, or with no slot left) counts as read-only. The capture owner's
-  refusal of such a copy is the device layer's `unbind_read_only_dsv` cells, and the direct
-  Streamline fixture checks the wiring under ReShade: a DSV created with `READ_ONLY_DEPTH` reads as
-  read-only in the table and where a list binds it, a writable one does not, a read-only one copied
-  with `CopyDescriptorsSimple` into a handle no view was created at reads as read-only, and a
-  writable view created again at the read-only view's handle replaces it
-  (`SunshineDepthTestReadOnlyView`).
 - Compute lists (S22, N7): [`test_capture_state_policy.cpp`](test_capture_state_policy.cpp) pins
   `copy_state::list_basis` (the states and layouts a COMPUTE list may name, none of a compute
   queue's own layouts on a DIRECT list) and the copy's compute-queue source layout;
@@ -2833,10 +2807,14 @@ Repeat the renderer fixtures for `srgb` and `pq`. D3D12's final `0` is ReShade P
 use `1` for the dedicated dynamic-calibration/readiness specialization check. Optional width and
 height arguments enable 4K source testing. D3D11 additionally accepts a final source-bit-depth
 argument: `srgb 0 640 360 10` exercises SDR10, whose texture has no native sRGB view.
-Append `--statistics` to the automatic-selection fixture to verify calibration with content-based
-Auto-select disabled and a buffer chosen by draw statistics, without a manual override. That
-fixture writes `[SUNSHINE_GAME3D] Enabled=0` itself, as reference effects require, and also
-reloads the effect while it keeps drawing the same depth: the rebuilt `Sunshine_DepthReady` must
+Append `--stale-config` to the automatic-selection fixture to write every removed selection
+setting into its `ReShade.ini` with a value that would change the result if it still applied
+(the old auto-select switch off, a copy-at-clear mode and clear index, a draw-statistics
+heuristic, a 1x1 custom size filter and a D16-only format filter). It checks that ReShade reads
+each one back and requires the same automatic result as the default run. It replaces the former
+`--statistics` mode, which disabled content-based selection on D3D12; that combination no longer
+exists. That fixture writes `[SUNSHINE_GAME3D] Enabled=0` itself, as reference effects require,
+and also reloads the effect while it keeps drawing the same depth: the rebuilt `Sunshine_DepthReady` must
 read ready, then unready on a color-only Present, then calibrate again, which checks that the
 shared change-only readiness cache republishes into a reloaded effect.
 The [owning validation section](../../docs/reshade-sbs.md#validation-and-remaining-device-check)

@@ -494,7 +494,7 @@ namespace {
         reason::current_capture), 6, 1500);
       require(scene.key.api == sunshine_game3d::source_api::ngx && scene.key.id == 7 && scene.first_ready_ms == 1500,
         "The frame record carried a first ready time across sources");
-      // Without the API path (a manual pin), every API row says why.
+      // Without the API path (another API, or API sources turned off), every API row says why.
       sunshine_game3d::api_depth_decision disallowed;
       disallowed.refusal = "provider_disallowed";
       sunshine_game3d::record_api_depth(record, disallowed, 7, 1510);
@@ -1660,8 +1660,8 @@ namespace {
       proof.frame.source_alpha = proof.source_alpha_policy.update(true, fg, true);
       proof.frame.source_alpha.input_state = sunshine_game3d::source_alpha_input_state::state_conflict;
       proof.frame.depth_ready = true;
-      proof.frame.diagnostics.frame_generation_active = false; // Ready manual/Generic depth has no SL FG provenance.
-      require(!proof.frame.source_alpha.effective(), "Manual depth bypassed the FG alpha guard");
+      proof.frame.diagnostics.frame_generation_active = false; // Ready Generic depth has no SL FG provenance.
+      require(!proof.frame.source_alpha.effective(), "Generic depth bypassed the FG alpha guard");
       publish_source_alpha_ui(owner(), proof.frame.source_alpha);
       const auto visible = sunshine_game3d::query_source_alpha_ui(owner());
       require(visible.blocked_by_fg() && visible.fg.sequence == 41 &&

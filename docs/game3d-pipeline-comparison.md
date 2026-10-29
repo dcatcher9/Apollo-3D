@@ -18,7 +18,7 @@ oracle. The native port preserves its conversion, conditioning, inverse and colo
 
 | Stage | Original behavior | Sole Sunshine behavior and rationale |
 |---|---|---|
-| Acquisition | ReShade depth selection. | **Retained:** SL/NGX or Generic nomination, shared capture and manual pins. Selection, availability and calibration stay separate. |
+| Acquisition | ReShade depth selection. | **Retained:** SL/NGX or Generic nomination and shared capture. Selection, availability and calibration stay separate. |
 | Coordinates/profiles | Overwatch near/range/weapon profiles, flips and guessed letterboxing. | **Replaced:** source-owned projection/orientation, active rectangle and captured jitter. Keep registration; remove manual profile implementations. |
 | Conversion | `Depth`/`PrepDepth`: near-plane, power/offset, range boost and rational shaping. | **Replaced:** FP32 `q=(raw-A)*inverseB` feeds geometry; rational `1/(1+H*q)` remains only for Normal Depth display. |
 | Scene information | `Average_Info`, `zBuffer_Blur`, `DepthMap`: averages, mips and masks. | **Removed:** unused by Sunshine; add-on owns reference tracking. |

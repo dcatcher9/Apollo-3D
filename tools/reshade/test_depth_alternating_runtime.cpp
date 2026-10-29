@@ -279,7 +279,7 @@ namespace {
       set_mode(cadence::single,1);warm("current-depth-return");stable("current-depth-return",20);
     }
     void check_overlap(){
-      continuous(1); // No manual selection: A qualifies before equal-quality peers.
+      continuous(1); // Automatic selection: A qualifies before equal-quality peers.
       set_mode(cadence::abc);warm("overlap-ABC-control");stable("overlap-ABC-control",30);
       set_mode(cadence::concurrent);
       // Persistent overlap must not lock an already-qualified family into mono.
