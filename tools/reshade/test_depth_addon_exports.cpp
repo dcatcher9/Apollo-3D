@@ -70,7 +70,7 @@ static void check_snapshot_row(const depth_selection_resource &a, const depth_st
 		x.total.has_work() == y.total.has_work() && x.total.work_count() == y.total.work_count() &&
 		same_snapshot_viewport(x.total.last_viewport, y.total.last_viewport) && same_snapshot_viewport(x.copied_viewport, y.copied_viewport) &&
 		x.copied_during_frame == y.copied_during_frame && x.copy_provenance_ambiguous == y.copy_provenance_ambiguous &&
-		x.depth_erased == y.depth_erased,
+		x.depth_erased == y.depth_erased && a.prior_work_frame == b.prior_work_frame,
 		"Snapshot changed draw, mesh/copy work, viewport, copied-frame or hold-gate flags");
 	require_snapshot(effective_capture_region(a) == effective_capture_region(b) &&
 		candidate_matches_shape(a, 3840, 2160) == candidate_matches_shape(b, 3840, 2160),
@@ -319,9 +319,11 @@ static void check_transfer_lineage()
 	require_snapshot(active(frame, history), "A destination that also drew lost its activity");
 }
 
-// The hold gate (docs/reshade-sbs.md, Selecting scene depth): a Present that
-// cleared or discarded the anchor's capture set without any of it working
-// holds nothing. A set left untouched, or worked on, may hold.
+// The hold gates (docs/reshade-sbs.md, Selecting scene depth): a Present that
+// cleared or discarded the anchor's capture set without any of it working, or
+// on which a shape-eligible depth-stencil outside the set drew without having
+// worked within the selector's activity grace, holds nothing. Everything else
+// that the held set left untouched, or worked on, may hold.
 static void check_hold_gates()
 {
 	enum class work { none, draw, clear, clear_draw, discard, copy };
@@ -331,6 +333,7 @@ static void check_hold_gates()
 		uint16_t samples;
 		std::vector<work> frames; // Frames 1.. in order; none = not used.
 	};
+	constexpr uint32_t color_width = 1920, color_height = 1080;
 	const auto stats_of = [](work kind) {
 		depth_stencil_frame_stats stats;
 		if (kind == work::draw || kind == work::clear_draw) { stats.total.observed_work = true; ++stats.total.drawcalls; }
@@ -339,9 +342,9 @@ static void check_hold_gates()
 		if (kind == work::discard) stats.depth_erased = true;
 		return stats;
 	};
-	// Records every source's last used frame, then judges the last frame with
-	// `set` as the capture set and `held` held.
-	const auto judge = [&](const std::vector<source> &sources, std::initializer_list<unsigned> set, unsigned held = 1) {
+	// Plays every source's frames through on_present's bookkeeping, then
+	// judges the last frame with `set` as the capture set and `held` held.
+	const auto judge = [&](const std::vector<source> &sources, std::initializer_list<unsigned> set, unsigned held = 1, bool resolve = false) {
 		std::unordered_map<resource, depth_stencil_resource, resource_hash> resources;
 		uint64_t frames = 0;
 		for (unsigned i = 0; i != sources.size(); ++i)
@@ -351,24 +354,23 @@ static void check_hold_gates()
 			info.desc.texture = { sources[i].width, sources[i].height, 1, 1, format::d32_float, sources[i].samples };
 			info.identity = i + 1;
 			for (unsigned frame = 0; frame != sources[i].frames.size(); ++frame)
-				if (sources[i].frames[frame] != work::none)
-				{
-					info.last_frame_stats = stats_of(sources[i].frames[frame]);
-					info.last_used_in_frame = frame + 1;
-				}
+				if (sources[i].frames[frame] != work::none) info.observe_frame(stats_of(sources[i].frames[frame]), frame + 1);
 			frames = std::max<uint64_t>(frames, sources[i].frames.size());
 			resources.emplace(resource { 0x1000 + uint64_t(i) * 16 }, info);
 		}
 		sunshine_depth_capture::capture_set captures;
 		for (const unsigned id : set) captures.records[captures.count++].identity = id;
 		const auto snapshot = snapshot_depth_selection(resources);
-		return judge_hold_gate(snapshot, captures, held, frames);
+		return judge_hold_gate(snapshot, captures, held, frames, color_width, color_height, resolve,
+			sunshine_depth::selection_policy {}.active_grace_frames());
 	};
 	using w = work;
 	const source anchor { 1920, 1080, 1, { w::draw, w::draw, w::draw } };
 	// Untouched, or worked on: the hold stays open.
 	require_snapshot(judge({ { 1920, 1080, 1, { w::draw, w::draw, w::none } }, { 1920, 1080, 1, { w::draw, w::draw, w::draw } } }, { 1 }) == hold_gate::open,
 		"A HUD drawing every Present into its own depth-stencil refused the anchor's hold");
+	require_snapshot(judge({ { 1920, 1080, 1, { w::draw, w::draw, w::none } }, { 960, 540, 1, { w::draw, w::draw, w::draw } } }, { 1 }) == hold_gate::open,
+		"An every-Present lower-resolution source refused the hold of the frames the anchor skips");
 	require_snapshot(judge({ anchor }, { 1 }) == hold_gate::open, "A set that drew (a refused or failed copy, a missing frame) refused its hold");
 	require_snapshot(judge({ { 1920, 1080, 1, { w::draw, w::draw, w::clear_draw } } }, { 1 }) == hold_gate::open,
 		"A set that cleared and drew refused its hold");
@@ -390,6 +392,47 @@ static void check_hold_gates()
 		"Clearing the held source outside the routed set left the hold open");
 	require_snapshot(judge({ { 1920, 1080, 1, { w::draw, w::draw, w::clear } }, { 1920, 1080, 1, { w::draw, w::draw, w::draw } } }, { 1 }) == hold_gate::cleared,
 		"An every-Present HUD drawing beside a cleared anchor left the hold open");
+	// A scene pass that starts now in another buffer: another camera's depth.
+	require_snapshot(judge({ { 1920, 1080, 1, { w::draw, w::draw, w::none } }, { 1920, 1080, 1, { w::none, w::none, w::draw } } }, { 1 }) == hold_gate::cut,
+		"A same-size unqualified scene starting in another allocation held the previous scene");
+	require_snapshot(judge({ { 1920, 1080, 1, { w::draw, w::draw, w::none } }, { 1280, 720, 1, { w::none, w::none, w::draw } } }, { 1 }) == hold_gate::cut,
+		"A scene starting in another-size allocation held the previous scene");
+	require_snapshot(judge({ { 1920, 1080, 1, { w::draw, w::draw, w::draw, w::draw, w::none } },
+		{ 1920, 1080, 1, { w::draw, w::none, w::none, w::none, w::draw } } }, { 1 }) == hold_gate::cut,
+		"A source drawing again after more than the activity grace without work held the previous scene");
+	require_snapshot(judge({ { 1920, 1080, 1, { w::draw, w::draw, w::none } }, { 1920, 1080, 1, { w::clear, w::clear, w::draw } } }, { 1 }) == hold_gate::cut,
+		"A source that only cleared on the previous frame and now draws held the previous scene");
+	require_snapshot(judge({ { 1920, 1080, 1, { w::draw, w::draw, w::none } }, { 1920, 1080, 4, { w::none, w::none, w::draw } } }, { 1 }, 1, true) == hold_gate::cut,
+		"A resolvable multisampled scene starting now held the previous scene");
+	require_snapshot(judge({ { 1920, 1080, 1, { w::draw, w::draw, w::none } }, { 1920, 1080, 4, { w::none, w::none, w::draw } } }, { 1 }) == hold_gate::open,
+		"A multisampled buffer that cannot be resolved (no candidate) refused the hold");
+	require_snapshot(judge({ { 1920, 1080, 1, { w::draw, w::draw, w::none } }, { 1024, 1024, 1, { w::none, w::none, w::draw } } }, { 1 }) == hold_gate::open,
+		"A buffer of another aspect (a shadow map) refused the hold");
+	require_snapshot(judge({ { 1920, 1080, 1, { w::draw, w::draw, w::none } }, { 1920, 1080, 1, { w::none, w::none, w::copy } } }, { 1 }) == hold_gate::open,
+		"A copy into another buffer was taken for a scene pass");
+	require_snapshot(judge({ { 1920, 1080, 1, { w::draw, w::draw, w::none } }, { 1920, 1080, 1, { w::none, w::none, w::draw } } }, { 1, 2 }) == hold_gate::open,
+		"A member of the anchor's own set was taken for a cut");
+	require_snapshot(judge({ { 1920, 1080, 1, { w::none, w::draw, w::none, w::none } }, { 1920, 1080, 1, { w::none, w::none, w::draw, w::none } },
+		{ 1920, 1080, 1, { w::draw, w::none, w::none, w::draw } }, { 960, 540, 1, { w::draw, w::draw, w::draw, w::draw } } }, { 1, 2 }, 2) == hold_gate::open,
+		"An unqualified member of an A/B/C rotation on its turn was taken for a cut");
+	require_snapshot(judge({ { 1920, 1080, 1, { w::draw, w::draw, w::none } }, { 1920, 1080, 1, { w::none, w::draw, w::draw } } }, { 1 }) == hold_gate::open,
+		"A source that also drew on the previous depth frame was taken for a cut");
+	// on_present's bookkeeping: the last earlier frame with work.
+	constexpr uint64_t none = std::numeric_limits<uint64_t>::max();
+	depth_stencil_resource info;
+	info.observe_frame(stats_of(w::draw), 4);
+	require_snapshot(info.prior_work_frame == none && info.first_used_in_frame == 4 && info.last_used_in_frame == 4,
+		"A first use claimed earlier work");
+	info.observe_frame(stats_of(w::clear), 5);
+	require_snapshot(info.prior_work_frame == 4, "Work on the previous depth frame was not kept");
+	info.observe_frame(stats_of(w::draw), 6);
+	require_snapshot(info.prior_work_frame == 4, "A frame with only a clear counted as work");
+	info.observe_frame(stats_of(w::draw), 9);
+	require_snapshot(info.prior_work_frame == 6 && info.first_used_in_frame == 4, "The last earlier frame with work was not kept");
+	depth_stencil_resource cleared;
+	cleared.observe_frame(stats_of(w::clear), 2);
+	cleared.observe_frame(stats_of(w::draw), 3);
+	require_snapshot(cleared.prior_work_frame == none, "A clear-only first use counted as work");
 	// The erased mark survives merging recordings into the queue.
 	state_tracking queue(true), list(false);
 	list.stats_per_used_depth_stencil[resource { 0x1000 }].depth_erased = true;

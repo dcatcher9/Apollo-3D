@@ -247,6 +247,9 @@ namespace sunshine_depth {
   class selection_policy {
   public:
     explicit selection_policy(policy_options options = {}) : options_(options) {}
+    // The depth frames after its last work during which a candidate still
+    // counts as active (Generic's hold cut gate reads the same grace).
+    std::uint64_t active_grace_frames() const { return options_.active_grace_frames; }
 
     void observe(const candidate_info &info) {
       if (info.id)

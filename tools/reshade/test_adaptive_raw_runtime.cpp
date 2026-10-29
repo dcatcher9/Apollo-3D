@@ -152,8 +152,9 @@ namespace {
       do {
         frame(phase);
         // A new source draws a new scene: holding the replaced source's last
-        // depth on it shows another screen's depth (not a missing frame). This
-        // names that cause; the check below fails on it too.
+        // depth on it would show another screen's depth (not a missing frame),
+        // which Generic's cut gate refuses. This names that cause; the check
+        // below fails on it too.
         if (GetTickCount64() - first_possible_draw < 650)
           require(!latest.depth.reused_depth, "A source's fresh initialization window showed held earlier depth");
         if (GetTickCount64() - first_possible_draw < 650)

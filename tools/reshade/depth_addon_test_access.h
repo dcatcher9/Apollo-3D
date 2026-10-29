@@ -331,8 +331,9 @@ struct capture_region
 
 enum class depth_binding_state { waiting_game, waiting_activity, filtered, binding_failed, waiting_capture, ready };
 // Whether a Present may hold the shown capture (judge_hold_gate): open, or
-// refused because the anchor's set was cleared without drawing (cleared).
-enum class hold_gate { open, cleared };
+// refused because the anchor's set was cleared without drawing (cleared) or a
+// scene pass started in another depth-stencil (cut).
+enum class hold_gate { open, cleared, cut };
 enum class native_depth_ui_state { inactive, waiting_depth, calibrating, waiting_orientation, ready };
 
 struct __declspec(uuid("c072221d-786d-4b6d-8f0b-52e0f325903e")) generic_depth_data
@@ -535,6 +536,21 @@ struct depth_stencil_resource
 	// Index of the frame in which the depth-stencil was last/first seen used in
 	uint64_t last_used_in_frame = std::numeric_limits<uint64_t>::max();
 	uint64_t first_used_in_frame = std::numeric_limits<uint64_t>::max();
+	// The last depth frame before last_used_in_frame on which it had work
+	// (max: none), for the hold's cut gate (judge_hold_gate).
+	uint64_t prior_work_frame = std::numeric_limits<uint64_t>::max();
+
+	// Takes depth frame `frame`'s stats (on_present), first noting the last
+	// frame with work among the ones they replace.
+	void observe_frame(const depth_stencil_frame_stats &stats, uint64_t frame)
+	{
+		if (last_used_in_frame != std::numeric_limits<uint64_t>::max() && last_frame_stats.total.has_work())
+			prior_work_frame = last_used_in_frame;
+		last_frame_stats = stats;
+		last_used_in_frame = frame;
+		if (first_used_in_frame == std::numeric_limits<uint64_t>::max())
+			first_used_in_frame = frame;
+	}
 };
 
 // Selection needs only these values. In particular, it does not consume the
@@ -553,6 +569,7 @@ struct depth_selection_resource
 		bool copied_during_frame, copy_provenance_ambiguous, depth_erased;
 	} last_frame_stats;
 	uint64_t last_used_in_frame, first_used_in_frame;
+	uint64_t prior_work_frame;
 
 	explicit depth_selection_resource(const depth_stencil_resource &info) :
 		desc(info.desc), identity(info.identity), layout_epoch(info.layout_epoch),
@@ -560,7 +577,8 @@ struct depth_selection_resource
 		last_frame_stats { info.last_frame_stats.total, info.last_frame_stats.copied_viewport,
 			info.last_frame_stats.copied_during_frame, info.last_frame_stats.copy_provenance_ambiguous,
 			info.last_frame_stats.depth_erased },
-		last_used_in_frame(info.last_used_in_frame), first_used_in_frame(info.first_used_in_frame) {}
+		last_used_in_frame(info.last_used_in_frame), first_used_in_frame(info.first_used_in_frame),
+		prior_work_frame(info.prior_work_frame) {}
 };
 static_assert(std::is_trivially_copyable_v<depth_selection_resource>);
 using depth_selection_snapshot = std::vector<std::pair<resource, depth_selection_resource>>;
@@ -797,6 +815,6 @@ bool on_resolve_texture_region(command_list *cmd_list, resource source, uint32_t
 	resource dest, uint32_t subresource, uint32_t dest_x, uint32_t dest_y, uint32_t dest_z, format);
 void resolve_transfer_lineage(state_tracking &state, const generic_depth_device_data &device_data);
 hold_gate judge_hold_gate(const depth_selection_snapshot &snapshot, const sunshine_depth_capture::capture_set &captures,
-	uint64_t held, uint64_t frame);
+	uint64_t held, uint64_t frame, uint32_t color_width, uint32_t color_height, bool resolve_depth, uint64_t grace);
 sunshine_streamline::provider::source_status describe_streamline_source(effect_runtime *runtime);
 #endif

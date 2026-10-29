@@ -717,6 +717,32 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       set_mode(cadence::single,1);warm("after-pause");stable("after-pause",20);
       std::printf("PASS pause: %u Presents that keep erasing the scene's depth mono from the first, then the scene recovers\n",mono);
     }
+    // A new full-view scene starts in another allocation (a cutscene, photo
+    // mode or 3D menu) and the old one is left untouched: first a half-size
+    // one (C), then one of the same size that was never qualified (B). From
+    // the cut Present on nothing is held (it would be the previous camera's
+    // depth), so the view is mono until the new allocation's own depth is
+    // current; then it recovers to full stereo on it.
+    void cut_to(unsigned role,const char *label){
+      require(full(),"The Present before a cut did not show full current depth");
+      set_mode(cadence::single,role);
+      const auto started=GetTickCount64();unsigned mono=0;
+      do{
+        tick(label);
+        require(!held,"A Present after a cut to another allocation held the previous scene's depth");
+        // The new allocation has no calibrated camera yet: the cut Present is mono.
+        require(mono || (!ready() && blend()==0.f),"The cut Present was not mono");
+        if(!ready())++mono;
+      }while(!full() && GetTickCount64()-started<15000);
+      warm(label);stable(label,20);
+      require(stereo_observed[role-1]>0,"The new allocation's scene never produced actual stereo pixels");
+      std::printf("PASS %s: %u mono Presents from the cut Present on, nothing held, then full stereo on the new allocation's own depth\n",label,mono);
+    }
+    void check_gap_cut(){
+      continuous(1);
+      cut_to(3,"cut-to-half-size-scene");
+      cut_to(2,"cut-to-same-size-unqualified-scene");
+    }
     void finish(){
       render_tracked_depth={};
     }
@@ -727,7 +753,8 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       const bool copies=test_case=="--copy-history" || test_case=="--copy-end" || test_case=="--copy-rescue";
       if(copies){decoy=target(width,height,1,15);scene=target(width,height,1,14);}
       else{scene=target(width,height,1,14);decoy=target(width,height,1,15);}
-      third=target(width,height,1,18);
+      // The cut case's first new scene has half the size (another allocation shape).
+      third=test_case=="--gap-cut" ? target(width/2,height/2,1,18) : target(width,height,1,18);
       if(test_case=="--copy-history")set_mode(cadence::copy_history);
       if(test_case=="--copy-end")set_mode(cadence::copy_end);
       if(test_case=="--copy-rescue")set_mode(cadence::copy_rescue);
@@ -736,7 +763,7 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
         if(test_case=="--gap-overlay")overlay=target(width,height,1,19);
         set_mode(test_case=="--gap-double" ? cadence::gap_double : test_case=="--gap-ui" ? cadence::gap_ui :
           test_case=="--gap-overlay" ? cadence::gap_overlay : test_case=="--gap-long" ? cadence::gap_long :
-          test_case=="--gap-cleared" ? cadence::gap_cleared : cadence::interrupted);
+          test_case=="--gap-cleared" ? cadence::gap_cleared : test_case=="--gap-cut" ? cadence::single : cadence::interrupted);
       }
       if(test_case=="--overlap")for(unsigned role=1;role<=3;++role)member(role).pattern=14;
       if(test_case=="--interrupted-startup")set_mode(cadence::interrupted);
@@ -776,6 +803,7 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
         else if(test_case=="--gap-overlay")check_gap(cadence::gap_overlay,"gap-own-hud-depth");
         else if(test_case=="--gap-long")check_gap(cadence::gap_long,"gap-one-real-frame-in-40");
         else if(test_case=="--gap-cleared")check_gap_cleared();
+        else if(test_case=="--gap-cut")check_gap_cut();
         else throw std::runtime_error("Unknown isolated rotation case");
         finish();return;
       }
@@ -836,13 +864,13 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
 
 int main(int argc,char **argv){
   std::setvbuf(stdout,nullptr,_IONBF,0);
-  if(argc!=5 && argc!=6){std::fputs("usage: depth_alternating_runtime <official.dll> <frozenShaders> <test.addon64> <fresh-output> [--overlap|--interrupted-startup|--moving-startup|--rotating-startup|--crowded-rotating-startup|--flat-startup|--layout|--copy-history|--copy-end|--copy-rescue|--gap-none|--gap-double|--gap-ui|--gap-overlay|--gap-long|--gap-cleared]\n",stderr);return 2;}
+  if(argc!=5 && argc!=6){std::fputs("usage: depth_alternating_runtime <official.dll> <frozenShaders> <test.addon64> <fresh-output> [--overlap|--interrupted-startup|--moving-startup|--rotating-startup|--crowded-rotating-startup|--flat-startup|--layout|--copy-history|--copy-end|--copy-rescue|--gap-none|--gap-double|--gap-ui|--gap-overlay|--gap-long|--gap-cleared|--gap-cut]\n",stderr);return 2;}
   std::thread([]{Sleep(360000);std::fputs("FAIL rotation watchdog\n",stderr);TerminateProcess(GetCurrentProcess(),124);}).detach();
   try{
     const std::string test_case=argc==6 ? argv[5] : "";
     require(test_case.empty() || test_case=="--overlap" || test_case=="--interrupted-startup" || test_case=="--moving-startup" || test_case=="--rotating-startup" || test_case=="--crowded-rotating-startup" || test_case=="--flat-startup" || test_case=="--layout" ||
       test_case=="--copy-history" || test_case=="--copy-end" || test_case=="--copy-rescue" || test_case=="--gap-none" || test_case=="--gap-double" ||
-      test_case=="--gap-ui" || test_case=="--gap-overlay" || test_case=="--gap-long" || test_case=="--gap-cleared",
+      test_case=="--gap-ui" || test_case=="--gap-overlay" || test_case=="--gap-long" || test_case=="--gap-cleared" || test_case=="--gap-cut",
       "Unknown isolated rotation case");
     select_native_boot();
     width=3840;height=2160;require(!fs::exists(fs::absolute(argv[4])),"Fresh rotation output required");

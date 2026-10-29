@@ -491,17 +491,26 @@ SUNSHINE_DEPTH_ADDON_INTERNAL bool validate_capture_record(effect_runtime *runti
 		current.shape == record.shape && current.frame == record.frame && current.present == record.present;
 }
 
-// The hold gate (docs/reshade-sbs.md, Selecting scene depth), judged on a
+// The hold gates (docs/reshade-sbs.md, Selecting scene depth), judged on a
 // Present that advanced the depth frame from its snapshot, before any hold:
-// cleared: the anchor's capture set (with the held source) was cleared or
-// discarded and none of it worked: the game shows a screen without its scene
-// (a pause, inventory, loading screen or video that keeps clearing depth), so
-// the Present holds nothing: it is mono. A set left untouched keeps its hold
-// (a frame presented twice, frame generation, a colour-only pass, the Presents
-// an every-other-Present source skips), and so does one that worked but whose
-// copy was refused or failed (a missing frame). One pass over the snapshot.
+// - cleared: the anchor's capture set (with the held source) was cleared or
+//   discarded and none of it worked: the game shows a screen without its scene
+//   (a pause, inventory, loading screen or video that keeps clearing depth);
+// - cut: a shape-eligible depth-stencil outside that set drew although it had
+//   no work within the selector's activity grace (`grace` depth frames before
+//   this one, as long as a candidate still counts as active): a scene pass
+//   that starts now in another buffer (a cutscene, photo mode or 3D menu), so
+//   the held depth would be another camera's.
+// Either way the Present holds nothing: it is mono. A set left untouched keeps
+// its hold (a frame presented twice, frame generation, a colour-only pass, the
+// Presents an every-other-Present source skips), and so does one that worked
+// but whose copy was refused or failed (a missing frame). A source that keeps
+// drawing (a HUD with its own depth-stencil, an every-Present lower-resolution
+// scene, a member of an A/B or A/B/C rotation) is no cut. One pass over the
+// snapshot; no knob of its own.
 SUNSHINE_DEPTH_ADDON_INTERNAL hold_gate judge_hold_gate(const depth_selection_snapshot &snapshot,
-	const sunshine_depth_capture::capture_set &captures, uint64_t held, uint64_t frame)
+	const sunshine_depth_capture::capture_set &captures, uint64_t held, uint64_t frame,
+	uint32_t color_width, uint32_t color_height, bool resolve_depth, uint64_t grace)
 {
 	const auto in_set = [&](uint64_t id) {
 		if (id == held) return true;
@@ -509,14 +518,22 @@ SUNSHINE_DEPTH_ADDON_INTERNAL hold_gate judge_hold_gate(const depth_selection_sn
 			if (captures.records[i].identity == id) return true;
 		return false;
 	};
-	bool erased = false, worked = false;
+	bool erased = false, worked = false, cut = false;
 	for (const auto &[value, info] : snapshot)
 	{
-		if (info.last_used_in_frame != frame || !in_set(info.identity)) continue;
-		erased = erased || info.last_frame_stats.depth_erased;
-		worked = worked || info.last_frame_stats.total.has_work();
+		if (info.last_used_in_frame != frame) continue;
+		const auto &stats = info.last_frame_stats;
+		if (in_set(info.identity))
+		{
+			erased = erased || stats.depth_erased;
+			worked = worked || stats.total.has_work();
+		}
+		else if (!cut && stats.total.drew() &&
+			!(info.prior_work_frame != std::numeric_limits<uint64_t>::max() && info.prior_work_frame + grace >= frame) &&
+			(info.desc.texture.samples <= 1 || resolve_depth) && candidate_matches_shape(info, color_width, color_height))
+			cut = true;
 	}
-	return erased && !worked ? hold_gate::cleared : hold_gate::open;
+	return erased && !worked ? hold_gate::cleared : cut ? hold_gate::cut : hold_gate::open;
 }
 
 // Whether this Present may show the capture shown on the runtime's previous
@@ -528,7 +545,7 @@ SUNSHINE_DEPTH_ADDON_INTERNAL hold_gate judge_hold_gate(const depth_selection_sn
 // copy it showed (its content serial; any later copy into it ends the hold),
 // of the same source lifetime, layout and crop, for the same runtime epoch,
 // anchor and colour size, within the source age of the Present on which it was
-// current, on a Present whose hold gate is open (judge_hold_gate). A hold
+// current, on a Present whose hold gates are open (judge_hold_gate). A hold
 // never advances the frame, calibration or coverage records.
 // check_age is false for get_frame_depth's revalidation within the same Present.
 static bool hold_shown_capture(effect_runtime *runtime, const generic_depth_data &data,
@@ -2089,11 +2106,7 @@ static void on_present(command_queue *presenting_queue, swapchain *swapchain, co
 			info.orientation_evidence.observe(device_data->frame_index, frame_stats.clear_zero, frame_stats.clear_one, frame_stats.clear_other);
 
 			// Save to current list of depth-stencils on the device
-			info.last_frame_stats = frame_stats;
-			info.last_used_in_frame = device_data->frame_index;
-
-			if (std::numeric_limits<uint64_t>::max() == info.first_used_in_frame)
-				info.first_used_in_frame = device_data->frame_index;
+			info.observe_frame(frame_stats, device_data->frame_index);
 		}
 	}
 
@@ -2788,8 +2801,9 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 	// Judged on the Present that advanced the depth frame, from its own work. A
 	// later Present without depth work can hold only what that one showed.
 	data.hold_verdict = device_data->native_depth_present_index == native_present_index ?
-		judge_hold_gate(current_depth_stencil_resources, data.captures, data.shown.record.identity, device_data->frame_index) :
-		hold_gate::open;
+		judge_hold_gate(current_depth_stencil_resources, data.captures, data.shown.record.identity, device_data->frame_index,
+			frame_width, frame_height, device->check_capability(device_caps::resolve_depth_stencil),
+			data.selection.active_grace_frames()) : hold_gate::open;
 	const uint64_t selected_id = selected_depth_stencil_info ? selected_depth_stencil_info->identity : 0;
 	if (member_binding)
 	{
@@ -2956,6 +2970,7 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 		data.binding_detail = data.capture_ready ? "Depth is bound and its current frame is available." :
 			data.held ? "Depth is bound; this Present shows the last current frame again, within the source age." :
 			data.hold_verdict == hold_gate::cleared ? "The game cleared its depth without drawing (a screen without its scene); nothing is held." :
+			data.hold_verdict == hold_gate::cut ? "Another depth buffer started drawing a scene; nothing is held until a current copy qualifies." :
 			(source_active ? "Current buffer is selected; waiting for a valid end-of-frame copy." : "Current buffer is selected but inactive; waiting for it to render again.");
 	} while (0);
 	else do

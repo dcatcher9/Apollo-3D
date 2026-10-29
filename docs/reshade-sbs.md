@@ -6173,8 +6173,8 @@ which that capture was current, then the view is mono. This covers Presents that
 on which only other depth is drawn (a HUD with its own depth-stencil, or the frames an
 every-other-Present source skips), and a missing frame: a Present on which the anchor's capture
 set drew but whose end-of-frame copy was refused or failed holds within the source age, as the
-providers' missing frame does (its colour is then one frame ahead of the held depth). A gate
-refuses the hold, judged from the work of each Present that advances the depth frame
+providers' missing frame does (its colour is then one frame ahead of the held depth). Two gates
+refuse the hold, judged from the work of each Present that advances the depth frame
 (`judge_hold_gate`), so such a Present is mono from the first:
 
 - *Cleared:* the anchor's capture set, or the held source, was cleared (`ClearDepthStencilView` of
@@ -6182,6 +6182,14 @@ refuses the hold, judged from the work of each Present that advances the depth f
   depth discarded (a D3D12 render pass's `DISCARD`), and none of it drew or received depth of its
   own. The game is showing a screen without its scene: a pause, inventory or loading screen, or a
   video, that keeps clearing depth.
+- *Cut:* a depth-stencil outside that set that passes the candidate shape test (single-sample, or
+  multisampled where the device resolves depth) drew although it had no work within the
+  selector's activity grace (the three depth-active Presents before, as long as a candidate counts
+  as active). A scene pass starts now in another buffer, at another size or at the same size
+  before it qualifies (a cutscene, photo mode or a 3D menu): the held depth would be another
+  camera's. A source that keeps drawing (a HUD with its own depth-stencil, an every-Present
+  lower-resolution scene, a member of an A/B or A/B/C rotation on its turn) is no cut, and the
+  hold stays.
 
 A refused Present shows no Generic depth, so nothing is held after it until a new current copy.
 Only the capture the previous Present showed can be held, so older depth never follows newer; a
@@ -6377,12 +6385,14 @@ accepted consequences:
   whose copy was refused or failed, or whose drawn source is an unqualified member of the anchor's
   capture set: a missing frame, whose held depth is one frame behind its colour within that
   bound. A Present is mono at once, holding nothing, when it clears or discards the anchor's depth
-  without drawing (a pause, inventory or loading screen, or a video, that keeps clearing depth).
-  The gate does not see a screen change on which the game stops drawing its scene without clearing
-  depth: those Presents show the last scene's depth for at most 250 ms after it was current,
-  exactly as with the API providers, then mono, and so does a new scene drawn into another depth
-  buffer (a cutscene, photo mode or 3D menu), whose colour that depth does not match. The gate
-  judges a Present by the work submitted since the previous one, so a frame-generation Present that lands between one frame's
+  without drawing (a pause, inventory or loading screen, or a video, that keeps clearing depth) or
+  when a scene starts in another depth buffer that had no work on the three depth-active Presents
+  before (a cutscene, photo mode or 3D menu, including an unqualified buffer of the same size;
+  the first turn of a new rotation member is one too, its later turns hold). Neither gate sees a
+  screen change on which the game simply stops drawing its scene without clearing depth or drawing
+  into another buffer: those Presents show the last scene's depth for at most 250 ms after it was
+  current, exactly as with the API providers, then mono. Both gates judge a Present by the work
+  submitted since the previous one, so a frame-generation Present that lands between one frame's
   own submissions, after its depth clear and before its draws, is taken for a cleared screen and
   is mono (fail-safe; whether any game presents that way has not been measured).
 - **Copies of scene depth.** A copy of another same-geometry candidate is never current depth of
