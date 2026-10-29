@@ -170,6 +170,12 @@ namespace {
     }
   }
 
+  // The fixture's T1 trace (<output>/trace.txt): one teardown line per
+  // unload. A writer of its own (static storage, for its fixed tables), since
+  // each session timeline's run opens the shared one for its
+  // trace_<label>.txt.
+  game3d_present_trace::writer teardown_trace;
+
   // A teardown event as the fixture writes it (game3d_test_teardown.h).
   std::string teardown_name(const sunshine_game3d::test::teardown::event &event) {
     using sunshine_game3d::test::teardown::step;
@@ -366,6 +372,7 @@ namespace {
         }
       }
       std::printf("MEASURE addon-lifecycle %s teardown=%s\n", label, sequence.c_str());
+      teardown_trace.teardown(label, sequence.c_str());
     }
 
     // After an unload: the teardown order is written, the held pool work
@@ -679,6 +686,8 @@ int main(int argc, char **argv) {
     require(sdk, "Could not load the isolated interposer");
     lifecycle_fixture fixture;
     fixture.runtime_directory = directory;
+    // Written when the fixture ends.
+    teardown_trace.open(directory / "trace.txt", "native");
     fixture.before_game_device = [&] {
       startup_device(fixture);
     };
@@ -754,6 +763,7 @@ int main(int argc, char **argv) {
     reshade::unregister_event<reshade::addon_event::destroy_device>(probe_destroy_device);
     reshade::unregister_event<reshade::addon_event::reshade_present>(record_present);
     reshade::unregister_event<reshade::addon_event::reset_command_list>(observe_reset);
+    teardown_trace.close();
     std::printf("PASS add-on lifecycle: %u unloads in one process, each leaving the module mapped, its pool work and log lines complete, the capture owner's objects of its device released and its device ended, Game 3D rendering on each game device after its reload; %u game devices rendering depth, FG depth and UI, each destroyed with its captures in flight and the next a new device\n", fixture.unloads, fixture.captured_devices);
     return 0;
   } catch (const std::exception &error) {

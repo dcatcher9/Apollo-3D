@@ -1602,6 +1602,13 @@ namespace {
         proof.test_render.rendered = rendered;
         proof.test_render.depth = proof.test_depth;
         proof.test_render.parameters = p;
+        // The per-Present trace's frame decision and reentry ramp (game3d_test_render.h).
+        proof.test_render.gap = static_cast<std::uint8_t>(proof.frame.gap);
+        proof.test_render.scene_source = proof.frame.scene_source;
+        proof.test_render.depth_identity = input.depth_identity;
+        proof.test_render.reentry_heard = proof.reentry_heard;
+        proof.test_render.reentry_phase = static_cast<std::uint8_t>(proof.raw_reentry.test_state());
+        proof.test_render.reentry_basis = static_cast<std::uint8_t>(proof.raw_reentry.test_basis());
         proof.test_depth = {}; // Never describe a later Present without its own preparation.
 #endif
         ui_input.complete(*renderer, rendered);

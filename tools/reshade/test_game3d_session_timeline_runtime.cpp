@@ -2491,10 +2491,14 @@ namespace {
     run_result run(const timeline_case &value, const std::string &label) {
       const auto started = GetTickCount64();
       begin_run(value, label, next_viewport++);
+      // The timeline's per-Present trace (record_present): its frames,
+      // written after its last one, before isolation presents for a time.
+      game3d_present_trace::out.open(runtime_directory / ("trace_" + game3d_present_trace::file_part(label) + ".txt"), "native");
       fg_on = false;
       for (frame = 0; frame != value.frames.size(); ++frame) {
         run_frame();
       }
+      game3d_present_trace::out.close();
       const auto isolation = where + "/isolation";
       continuity_log.where = isolation.c_str();
       isolate();

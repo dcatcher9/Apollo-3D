@@ -8,12 +8,241 @@
 // capture: the depth, constants and SBS consumed by one native render.
 // Nothing here injects depth, readiness, pixels or completion.
 #include "game3d_controls_model.h"
+#include "game3d_frame_record.h"
+#include "game3d_test_depth_events.h"
 #include "game3d_test_render.h"
 #include "../../src/game3d_debug_protocol.h"
 #include "test_fixture_files.h"
+#include "test_game3d_present_trace.h"
+#include <cstring>
 #include <nlohmann/json.hpp>
 
 namespace {
+  // The per-Present trace of a test add-on fixture (test_game3d_present_trace.h):
+  // one line per Present, read from the test add-on after that Present (its
+  // frame record, last native render, Generic hold and presenting queue's
+  // depth choice). It starts at the first Present with a native render, so
+  // the shader compilation before it adds no line. A fixture reads it where
+  // it observes each Present: native_game3d_observer::last_render, or the
+  // native provider fixture's reshade_present event (record_present), which
+  // also sees the Presents a fixture makes generated. Each line ends with the
+  // add-on's DEPTH binding and readiness writes since the line before (T8,
+  // game3d_test_depth_events.h); every call collects them, and the first
+  // line of a trace has only its own Present's.
+  class native_present_trace {
+  public:
+    // Appends this Present's line to the open trace once: when its frame
+    // record's Present or its native render's sequence moved since the
+    // trace's last line. record and render: what the caller already read
+    // after this Present, if anything.
+    void present(api::effect_runtime *runtime, const sunshine_game3d::frame_record *record = nullptr,
+        const sunshine_game3d::test::last_render *render = nullptr) {
+      auto &out = game3d_present_trace::out;
+      if (!runtime || !bind()) return;
+      // A new trace takes no event from before it opened.
+      if (!out.active() || generation_ != out.generation()) drop_events();
+      collect_events();
+      if (!out.active()) {
+        drop_events();
+        return;
+      }
+      if (generation_ != out.generation()) {
+        generation_ = out.generation();
+        traced_ = false;
+      }
+      sunshine_game3d::frame_record value {};
+      if (record) value = *record;
+      else if (!frame_record_(runtime, &value)) value = {};
+      sunshine_game3d::test::last_render rendered {};
+      if (render) rendered = *render;
+      else if (!last_render_(runtime, &rendered)) rendered = {};
+      if (!rendered.sequence) {
+        // Before the trace's first line its events are dropped: how many
+        // Presents precede the first native render is timing.
+        if (!traced_) drop_events();
+        return;
+      }
+      // An unchanged Present keeps its events for the next line.
+      if (traced_ && value.present == last_present_ && rendered.sequence == last_sequence_) return;
+      const bool first = !traced_;
+      traced_ = true;
+      last_present_ = value.present;
+      last_sequence_ = rendered.sequence;
+      line(runtime, value, rendered, first);
+    }
+
+  private:
+    using frame_record_t = BOOL (*)(api::effect_runtime *, sunshine_game3d::frame_record *);
+    using last_render_t = BOOL (*)(api::effect_runtime *, sunshine_game3d::test::last_render *);
+    using generic_hold_t = BOOL (*)(api::effect_runtime *, sunshine_game3d::test::generic_hold *);
+    using queue_choice_t = BOOL (*)(api::effect_runtime *, sunshine_streamline::depth_capture::depth_choice *);
+    using depth_event = sunshine_game3d::test::depth_events::event;
+    using binding_events_t = unsigned (*)(std::uint64_t *, depth_event *, unsigned, std::uint64_t *);
+
+    bool bind() {
+      if (frame_record_ && last_render_) return true;
+      const auto module = GetModuleHandleW(L"SunshineSBSTest.addon64");
+      if (!module) return false;
+      frame_record_ = reinterpret_cast<frame_record_t>(GetProcAddress(module, "SunshineGame3DTestFrameRecord"));
+      last_render_ = reinterpret_cast<last_render_t>(GetProcAddress(module, "SunshineGame3DTestLastRender"));
+      generic_hold_ = reinterpret_cast<generic_hold_t>(GetProcAddress(module, "SunshineDepthTestGenericHold"));
+      queue_choice_ = reinterpret_cast<queue_choice_t>(GetProcAddress(module, "SunshineDepthTestQueueChoice"));
+      binding_events_ = reinterpret_cast<binding_events_t>(GetProcAddress(module, "SunshineDepthTestBindingEvents"));
+      return frame_record_ && last_render_;
+    }
+
+    // T8: the binding events after the cursor, into the fixed pending list
+    // (no allocation). A full list drops its older half, so it keeps the
+    // newest events (the first call after a trace opens can read the whole
+    // ring); those dropped, and those the add-on's ring overwrote first, are
+    // counted.
+    void collect_events() {
+      if (!binding_events_) return;
+      for (;;) {
+        depth_event batch[64];
+        std::uint64_t skipped {};
+        const unsigned count = binding_events_(&event_cursor_, batch, unsigned(std::size(batch)), &skipped);
+        events_skipped_ += skipped;
+        for (unsigned i = 0; i != count; ++i) {
+          if (pending_count_ == pending_.size()) {
+            constexpr std::size_t half = pending_capacity / 2;
+            std::copy(pending_.begin() + half, pending_.end(), pending_.begin());
+            pending_count_ -= half;
+            events_skipped_ += half;
+          }
+          pending_[pending_count_++] = batch[i];
+        }
+        if (count < std::size(batch)) break;
+      }
+    }
+    void drop_events() {
+      pending_count_ = 0;
+      events_skipped_ = 0;
+    }
+
+    // t8=: each pending event as runtime.present.phase.site.value, comma
+    // separated, oldest first. runtime: its rank; present: the newest
+    // event's Present ordinal minus its own (0: the newest Present's);
+    // phase and site: game3d_test_depth_events.h's ids; value: b1 or b0 for
+    // a binding (a view or null), r1 or r0 for a readiness write. t8skip=n
+    // (only when n is not 0): events missing from the list. A trace's first
+    // line lists only its newest Present's events: the older ones came with
+    // Presents before the trace's first line, whose number is timing (a
+    // fixture may present many times between opening the trace and its
+    // first observation), and so does any count of missing ones.
+    void events(game3d_present_trace::writer &out, bool first) {
+      using sunshine_game3d::test::depth_events::not_applicable;
+      std::uint64_t newest = 0;
+      for (std::size_t i = 0; i != pending_count_; ++i) newest = std::max(newest, pending_[i].present);
+      out.add(" t8=");
+      bool listed = false;
+      for (std::size_t i = 0; i != pending_count_; ++i) {
+        const auto &event = pending_[i];
+        if (first && event.present != newest) continue;
+        out.add("%s%u.%llu.%u.%u.", listed ? "," : "", out.rank(game3d_present_trace::runtimes, event.runtime),
+          static_cast<unsigned long long>(newest - event.present), unsigned(event.phase), unsigned(event.site));
+        if (event.view != not_applicable) out.add("b%u", unsigned(event.view));
+        else out.add("r%u", unsigned(event.ready));
+        listed = true;
+      }
+      if (events_skipped_ && !first) out.add(" t8skip=%llu", static_cast<unsigned long long>(events_skipped_));
+      drop_events();
+    }
+
+    // A Present ordinal relative to this line's Present ("-" without one).
+    static void delta(game3d_present_trace::writer &out, std::uint64_t present, std::uint64_t value) {
+      if (!value) out.add("-");
+      else if (!present) out.add("?");
+      else out.add("%lld", static_cast<long long>(present - value));
+    }
+
+    static bool default_row(const sunshine_game3d::source_status &row) {
+      return row.state == sunshine_game3d::source_state::inactive && row.key.api == sunshine_game3d::source_api::none &&
+        !row.key.viewport && !row.key.id && !row.epoch && row.fallback_to == sunshine_game3d::source_slot::none &&
+        row.reason && !std::strcmp(row.reason, "not_recorded");
+    }
+
+    // The line (test_game3d_present_trace.h): Present and render (p, n, r),
+    // the frame record's owner, read order, shown capture and non-default
+    // rows; the consumed depth (rdy..ori), the render constants' integer
+    // fields (pdr..pdv), the frame decision (gap, ss, did), the reentry ramp
+    // (reh, rph, rb), the queue's depth choice (ch, cd), Generic's hold (gh)
+    // and the DEPTH binding events (t8).
+    void line(api::effect_runtime *runtime, const sunshine_game3d::frame_record &record,
+        const sunshine_game3d::test::last_render &render, bool first) {
+      using namespace game3d_present_trace;
+      using sunshine_game3d::name;
+      auto &out = game3d_present_trace::out;
+      out.begin();
+      if (record.present) out.add("p=%lld", out.present(record.present));
+      else out.add("p=?");
+      out.add(" n=%lld r=%u own=%s ro=%s cap=%u", out.sequence(render.sequence), unsigned(render.rendered),
+        name(record.depth_owner), name(record.depth_read_order), out.rank(capture, record.depth_capture));
+      for (std::size_t slot = 0; slot != sunshine_game3d::source_slot_count; ++slot) {
+        const auto &row = record.rows[slot];
+        if (default_row(row)) continue;
+        out.add(" %s=%s,", name(static_cast<sunshine_game3d::source_slot>(slot)), name(row.state));
+        out.token(row.reason);
+        out.add(",%s,%s.%u.%u,%u", name(row.fallback_to), name(row.key.api), unsigned(row.key.viewport),
+          out.rank(identity, row.key.id), out.rank(epoch, row.epoch));
+      }
+      const auto &depth = render.depth;
+      out.add(" rdy=%u reu=%u src=%u geo=%ux%u+%u+%u/%ux%u fga=%u cal=%u ori=%u", unsigned(depth.ready),
+        unsigned(depth.reused_depth), out.rank(source, depth.source_id), unsigned(depth.width), unsigned(depth.height),
+        unsigned(depth.x), unsigned(depth.y), unsigned(depth.active_width), unsigned(depth.active_height),
+        unsigned(depth.frame_generation_active), unsigned(depth.calibrated), unsigned(depth.orientation));
+      const auto &parameters = render.parameters;
+      out.add(" pdr=%u pcr=%u pcb=%d pdv=%d", unsigned(parameters.depth_ready), unsigned(parameters.camera_ready),
+        int(parameters.coordinate_basis), int(parameters.depth_view));
+      // A Generic capture's scene source is runtime epoch, source, frame and
+      // layout epoch | bit 63 (exporter.cpp generic_scene_source); an API
+      // capture's ends with its viewport.
+      const auto &scene = render.scene_source;
+      constexpr std::uint64_t generic_bit = std::uint64_t {1} << 63;
+      out.add(" gap=%u ss=%u.%u.%u.", unsigned(render.gap), out.rank(epoch, scene[0]), out.rank(source, scene[1]),
+        out.rank(sequence, scene[2]));
+      if (scene[3] & generic_bit) out.add("g%u", out.rank(epoch, scene[3] & ~generic_bit));
+      else out.add("v%llu", static_cast<unsigned long long>(scene[3]));
+      out.add(" did=%u reh=%u rph=%u rb=%u", out.rank(identity, render.depth_identity), unsigned(render.reentry_heard),
+        unsigned(render.reentry_phase), unsigned(render.reentry_basis));
+      sunshine_streamline::depth_capture::depth_choice choice {};
+      if (queue_choice_ && queue_choice_(runtime, &choice)) {
+        const auto &decision = choice.decision;
+        out.add(" ch=");
+        delta(out, record.present, choice.present);
+        out.add(",%s,%u,%u,%u,%u,%u%u,%u,%u,%u", name(choice.rung), unsigned(choice.result), unsigned(choice.selection),
+          unsigned(choice.failure), unsigned(choice.pixel_ready), unsigned(choice.fg_required), unsigned(choice.fg_excluded),
+          unsigned(choice.owner_established), unsigned(choice.owner), out.rank(source, choice.owner_source));
+        out.add(" cd=%u,%u,%u,%u,%u,%u,%u,%u%u%u,", unsigned(decision.source_selected), unsigned(decision.provider),
+          out.rank(epoch, decision.epoch), out.rank(sequence, decision.sequence), out.rank(source, decision.source_id),
+          out.rank(capture, decision.capture_id), unsigned(decision.viewport), unsigned(decision.source_valid),
+          unsigned(decision.repeated_frame), unsigned(decision.pending_frame));
+        delta(out, record.present, decision.presenting_floor);
+      } else out.add(" ch=- cd=-");
+      sunshine_game3d::test::generic_hold hold {};
+      if (generic_hold_ && generic_hold_(runtime, &hold))
+        out.add(" gh=%u%u%u,%u,%u", unsigned(hold.held), unsigned(hold.hold_only), unsigned(hold.capture_ready),
+          unsigned(hold.verdict), out.rank(identity, hold.shown_identity));
+      else out.add(" gh=-");
+      // T8 (refactor plan 3.4): the DEPTH binding events since the line before.
+      events(out, first);
+      out.end();
+    }
+
+    frame_record_t frame_record_ {};
+    last_render_t last_render_ {};
+    generic_hold_t generic_hold_ {};
+    queue_choice_t queue_choice_ {};
+    binding_events_t binding_events_ {};
+    std::uint64_t generation_ {}, last_present_ {}, last_sequence_ {};
+    bool traced_ {};
+    // T8: the events collected since the last line, and the ring's cursor.
+    static constexpr std::size_t pending_capacity = 512;
+    std::array<depth_event, pending_capacity> pending_ {};
+    std::size_t pending_count_ {};
+    std::uint64_t event_cursor_ {}, events_skipped_ {};
+  } native_trace;
+
   // Call before initialize(). A native fixture boots the official runtime with
   // the frozen SunshineGame3D effect of its supplied shader directory and the
   // test add-on, then removes the effect (native_game3d_observer::start). It
@@ -69,6 +298,7 @@ namespace {
       if (export_state_) UnmapViewOfFile(export_state_);
       if (export_mapping_) CloseHandle(export_mapping_);
       if (set_foreground_) set_foreground_(nullptr);
+      if (traced_) game3d_present_trace::out.close();
     }
 
     // Call after the runtime has initialized. Like an ordinary installation,
@@ -115,6 +345,9 @@ namespace {
       InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&state_->consumer_nonce), 0x4e41544956453344LL);
       evidence_.open(fixture_.runtime_directory / "native-renders.jsonl");
       require(evidence_.good(), "Cannot record native render evidence");
+      // The fixture's per-Present trace, written once when this observer ends.
+      game3d_present_trace::out.open(fixture_.runtime_directory / "trace.txt", "native");
+      traced_ = true;
     }
 
     void no_effects() const {
@@ -143,10 +376,12 @@ namespace {
 
     // What the last native render consumed: its depth identity, allocation
     // and readiness, and its constants. Per Present, without a dump; the
-    // caller compares sequence to know a render followed its Present.
+    // caller compares sequence to know a render followed its Present. It
+    // also traces that Present (native_present_trace).
     sunshine_game3d::test::last_render last_render() const {
       sunshine_game3d::test::last_render result;
       require(last_render_ && last_render_(observed.runtime, &result), "Native Game 3D last-render observation failed");
+      native_trace.present(observed.runtime, nullptr, &result);
       return result;
     }
 
@@ -327,5 +562,6 @@ namespace {
     reshade_bridge::shared_state_t *export_state_{};
     std::uint64_t request_{}, export_generation_{}, export_sequence_{};
     std::ofstream evidence_;
+    bool traced_{};
   };
 }

@@ -51,6 +51,17 @@ namespace sunshine_raw_scene {
     // A Present its caller showed without Game 3D stereo, on the basis the
     // ramp has (no basis change of its own).
     void shown_without_depth(std::uint64_t now_ms) noexcept { update(false, now_ms, basis_); }
+#if defined(SUNSHINE_SBS_TEST) || defined(SUNSHINE_SBS_RUNTIME_TEST_ADDON)
+    // Test view only (the test add-on's per-Present trace,
+    // game3d_test_render.h): the ramp's phase without its times. none: it
+    // never heard ready depth; lost: the last Present it heard was not ready;
+    // ready: it was (ramping or at full strength, which time decides).
+    enum class test_phase : std::uint8_t { none, lost, ready };
+    test_phase test_state() const noexcept {
+      return !have_ready_ ? test_phase::none : was_ready_ ? test_phase::ready : test_phase::lost;
+    }
+    stereo_basis test_basis() const noexcept { return basis_; }
+#endif
   private:
     // loss_ms_: the first Present shown without ready depth since the last
     // ready one.

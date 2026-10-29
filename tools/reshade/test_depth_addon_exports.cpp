@@ -942,3 +942,37 @@ extern "C" __declspec(dllexport) BOOL SunshineDepthTestLegacyCalibrationState(ef
 	*entries = static_cast<unsigned>(data->native_calibrations.size());
 	return TRUE;
 }
+
+// The per-Present trace's queries (test_game3d_present_trace.h), last in this
+// file so that its earlier functions compile as before.
+#include "game3d_test_render.h"
+
+// Generic's hold and the capture it showed, as this runtime's last Present
+// left them (game3d_test_render.h generic_hold), for the per-Present trace.
+// Read on the Present thread after the Present, which alone writes them;
+// nothing in the add-on reads this copy.
+extern "C" __declspec(dllexport) BOOL SunshineDepthTestGenericHold(effect_runtime *runtime,
+	sunshine_game3d::test::generic_hold *output)
+{
+	if (!s_registered || runtime == nullptr || output == nullptr) return FALSE;
+	const auto *data = runtime->get_private_data<generic_depth_data>();
+	if (data == nullptr) return FALSE;
+	*output = {};
+	output->held = data->held;
+	output->hold_only = data->hold_only;
+	output->capture_ready = data->capture_ready;
+	output->verdict = static_cast<uint8_t>(data->hold_verdict);
+	output->shown_identity = data->shown.record.identity;
+	return TRUE;
+}
+
+// The capture owner's newest depth_choice for this runtime's presenting
+// queue, the consumer queue the provider acquires on, for the per-Present
+// trace. False before that queue's first acquisition reached the selection.
+extern "C" __declspec(dllexport) BOOL SunshineDepthTestQueueChoice(effect_runtime *runtime,
+	sunshine_streamline::depth_capture::depth_choice *output)
+{
+	if (!s_registered || runtime == nullptr || output == nullptr) return FALSE;
+	auto *queue = runtime->get_command_queue();
+	return queue != nullptr && sunshine_streamline::depth_capture::choice(queue->get_native(), *output) ? TRUE : FALSE;
+}

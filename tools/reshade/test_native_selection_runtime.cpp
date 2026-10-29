@@ -4,6 +4,7 @@
 #define SUNSHINE_NATIVE_STEREO_RUNTIME_HELPER
 #include "test_native_stereo_runtime.cpp"
 #include "../../src/reshade_bridge_protocol.h"
+#include "test_game3d_present_trace.h"
 #include <d3dcompiler.h>
 #include <memory>
 
@@ -19,6 +20,48 @@ namespace {
     bool stale_config = false;
     com_ptr<ID3D12RootSignature> root;
     com_ptr<ID3D12PipelineState> pipeline;
+    // The per-Present trace (test_game3d_present_trace.h) of this fixture,
+    // which its main turns on: after each Present it drives, the production
+    // readiness and calibration it observes (Sunshine_DepthReady,
+    // Sunshine_Calibrated, the raw gain's sign) and the bound GameDepth
+    // resource's rank, size and format.
+    bool trace_presents = false;
+    std::uint64_t traced_presents = 0;
+
+    void step() {
+      fixture_t::step();
+      if (trace_presents) trace_present();
+    }
+
+    void trace_present() {
+      auto &out = game3d_present_trace::out;
+      // From the first Present the effect rendered: shader compilation adds no line.
+      if (!out.active() || !observed.runtime || !observed.renders) return;
+      const auto value = [&](const char *name) {
+        const auto variable = uniform(name, false);
+        bool result = false;
+        if (variable.handle) observed.runtime->get_uniform_value_bool(variable, &result, 1);
+        return variable.handle ? (result ? "1" : "0") : "-";
+      };
+      const auto gain_variable = uniform("Sunshine_RawGain", false);
+      float gain = 0;
+      if (gain_variable.handle) observed.runtime->get_uniform_value_float(gain_variable, &gain, 1);
+      std::uint64_t resource = 0;
+      D3D12_RESOURCE_DESC desc {};
+      observed.runtime->enumerate_texture_variables("SunshineDepth3D.fx", [&](api::effect_runtime *runtime, api::effect_texture_variable variable) {
+        char name[256] {}; runtime->get_texture_variable_name(variable, name);
+        if (!named(name, "GameDepth")) return;
+        api::resource_view view {}; runtime->get_texture_binding(variable, &view, nullptr);
+        if (view.handle) resource = runtime->get_device()->get_resource_from_view(view).handle;
+      });
+      if (resource) desc = reinterpret_cast<ID3D12Resource *>(resource)->GetDesc();
+      out.begin();
+      out.add("p=%lld rdy=%s cal=%s neg=%s bind=%u geo=%llux%u fmt=%u", out.present(++traced_presents),
+        value("Sunshine_DepthReady"), value("Sunshine_Calibrated"), gain_variable.handle ? (gain < 0 ? "1" : "0") : "-",
+        out.rank(game3d_present_trace::resource, resource), static_cast<unsigned long long>(desc.Width), unsigned(desc.Height),
+        unsigned(desc.Format));
+      out.end();
+    }
 
     void check_production_module() {
       const HMODULE module = GetModuleHandleW(L"SunshineSBS.addon64");
@@ -389,7 +432,11 @@ int main(int argc, char **argv) {
     native_selection_fixture_t fixture;
     fixture.stale_config = stale_config;
     fixture.initialize(fs::absolute(argv[1]), fs::absolute(argv[2]), fs::absolute(argv[3]), color, 0, fs::absolute(argv[4]), stale_config);
+    // The fixture's per-Present trace, written when the run ends.
+    game3d_present_trace::out.open(fs::absolute(argv[3]) / "trace.txt", "selection");
+    fixture.trace_presents = true;
     fixture.run_production();
+    game3d_present_trace::out.close();
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "FAIL %s\n", error.what());

@@ -101,6 +101,9 @@ namespace {
       const bool ordered = value.depth_read_order == sunshine_game3d::read_order::ordered;
       script_order.present(script_presenting, value.present, ordered, value.depth_read_queue, value.depth_read_ticket);
     } else continuity_log.judge.unrecorded();
+    // Every Present's line of the open per-Present trace (the fixture's, or a
+    // session timeline's): this event sees the generated Presents too.
+    native_trace.present(runtime);
   }
 
   // A display texture's last Release, seen through an interface the D3D12
@@ -4002,6 +4005,8 @@ int main(int argc, char **argv) {
     native_provider_fixture fixture; fixture.runtime_directory = directory;
     fixture.initialize(fs::absolute(argv[1]), fs::absolute(argv[2]), directory, public_ui ? 3 : 2, 0, fs::absolute(argv[3]));
     fixture.load_native(directory);
+    // The fixture's per-Present trace (record_present), written at its end.
+    game3d_present_trace::out.open(directory / "trace.txt", "native");
     if (public_ui) fixture.run_automatic_ui_tags(sdk);
     else {
       fixture.run_streamline();
@@ -4009,6 +4014,7 @@ int main(int argc, char **argv) {
       if (sdk) fixture.run_fg(sdk);
     }
     fixture.finish();
+    game3d_present_trace::out.close();
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "FAIL %s\n", error.what()); return 1;

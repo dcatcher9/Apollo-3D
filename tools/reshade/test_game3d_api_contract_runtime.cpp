@@ -2489,8 +2489,11 @@ int main(int argc, char **argv) {
       }
     } foreground {fixture};
 
+    // The family's per-Present trace (record_present), written at its end.
+    game3d_present_trace::out.open(directory / "trace.txt", "native");
     const auto result = run_family(fixture, family, options, directory / ("contract-" + family + ".jsonl"));
     fixture.finish();
+    game3d_present_trace::out.close();
     return result;
   } catch (const std::exception &failure) {
     std::fprintf(stderr, "FAIL API contract matrix L3: %s\n", failure.what());

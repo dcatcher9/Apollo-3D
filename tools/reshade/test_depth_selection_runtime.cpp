@@ -3,6 +3,7 @@
 #define SUNSHINE_DEPTH_SELECTION_RUNTIME
 #include "test_depth3d_runtime_d3d12.cpp"
 #include "../../src/reshade_bridge_protocol.h"
+#include "test_game3d_present_trace.h"
 #include <d3dcompiler.h>
 #include <memory>
 
@@ -23,6 +24,39 @@ namespace {
     std::unique_ptr<target_t> scene, decoy, shadow;
     com_ptr<ID3D12RootSignature> root;
     com_ptr<ID3D12PipelineState> depth32_pipeline, depth32s8_pipeline;
+    // The per-Present trace (test_game3d_present_trace.h) of this fixture's
+    // own run, which its main turns on: after each Present it drives, the
+    // DEPTH binding it observes (the bound resource's rank, size and format)
+    // and the effect's Sunshine_DepthReady. The fixtures built on this one
+    // trace through the test add-on instead (test_game3d_native_observation.h).
+    bool trace_presents = false;
+    std::uint64_t traced_presents = 0;
+
+    void step() {
+      fixture_t::step();
+      if (trace_presents) trace_present();
+    }
+
+    void trace_present() {
+      auto &out = game3d_present_trace::out;
+      // From the first Present the effect rendered: shader compilation adds no line.
+      if (!out.active() || !observed.runtime || !observed.renders) return;
+      std::uint64_t resource = 0;
+      D3D12_RESOURCE_DESC desc {};
+      const auto view = selected_binding();
+      if (view.handle) {
+        resource = observed.runtime->get_device()->get_resource_from_view(view).handle;
+        if (resource) desc = reinterpret_cast<ID3D12Resource *>(resource)->GetDesc();
+      }
+      const auto ready_variable = uniform("Sunshine_DepthReady", false);
+      bool ready = false;
+      if (ready_variable.handle) observed.runtime->get_uniform_value_bool(ready_variable, &ready, 1);
+      out.begin();
+      out.add("p=%lld bind=%u geo=%llux%u fmt=%u rdy=%s", out.present(++traced_presents),
+        out.rank(game3d_present_trace::resource, resource), static_cast<unsigned long long>(desc.Width), unsigned(desc.Height),
+        unsigned(desc.Format), ready_variable.handle ? (ready ? "1" : "0") : "-");
+      out.end();
+    }
 
     void check_unified_addon() {
       bool actions_test = false;
@@ -598,7 +632,11 @@ int main(int argc, char **argv) {
     require(width >= 640 && width <= 3840 && height >= 360 && height <= 2160 && width % 2 == 0 && height % 2 == 0, "Invalid fixture size");
     selection_fixture_t fixture;
     fixture.initialize(fs::absolute(argv[1]), fs::absolute(argv[2]), fs::absolute(argv[4]), 2, 0, fs::absolute(argv[3]));
+    // The fixture's per-Present trace, written when the run ends.
+    game3d_present_trace::out.open(fs::absolute(argv[4]) / "trace.txt", "selection");
+    fixture.trace_presents = true;
     fixture.run_selection(argc == 8 ? argv[7] : "");
+    game3d_present_trace::out.close();
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "FAIL %s\n", error.what());
