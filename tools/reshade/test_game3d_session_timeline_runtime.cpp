@@ -1079,6 +1079,8 @@ namespace {
     // The fences (script tokens) the frame that last set fg_copy read its
     // DLSS-G copy through, and whether a late signal of one reached it since.
     std::vector<const void *> fg_copy_relied;
+    // The capture id of the FG copy fg_copy names (0 unknown).
+    std::uint64_t fg_copy_capture {};
     bool fg_copy_lost {};
     // Whether the frame's tag copy is deferred to its Present, and whether
     // it waits there for DLSS-G to evaluate its frame
@@ -2126,6 +2128,7 @@ namespace {
         fg_supplied = true;
         fg_copy_lost = false;
         fg_copy_relied.clear();
+        fg_copy_capture = std::max(supply.capture[1], supply.capture[2]) & ~continuity::copy_fg_input;
         for (const auto &value : supply.completions) {
           if (value.sources == continuity::dlssg_input && value.relied) {
             fg_copy_relied.push_back(value.relied);
@@ -2364,14 +2367,17 @@ namespace {
       if (!record_history.records.empty()) {
         present_frames[record_history.records.back().present] = frame;
         // The scope's FG copy is lost to a late signal only where the add-on
-        // read it through that fence (its Present read it ordered, possibly
-        // in flight): read complete, it relies on no fence and stays held.
-        // Until 10-28 the fixture predicted the read from the fence alone,
-        // so where DLSS-G's copy completed before its Present a conflict
-        // passed the add-on's kept hold as a dropped one, and the lineage
-        // judge then flagged the hold (the 10-28 review's J1).
+        // read it through that fence (a Present read it ordered, possibly in
+        // flight): read complete, at its own Present or a later one (a
+        // compute copy in flight at its own), it relies on no fence and stays
+        // held. Until 10-28 the fixture predicted the read from the fence
+        // alone, so where DLSS-G's copy completed before the Present that
+        // read it a conflict passed the add-on's kept hold as a dropped one,
+        // and the lineage judge then flagged the hold (the 10-28 review's
+        // J1; the extra shard's seed d0dd7845ac141ad2 at frame 113).
         const auto &shown = record_history.records.back();
-        if (fg_supplied && shown.depth_owner == sunshine_game3d::source_slot::fg_depth &&
+        if (fg_copy_capture && shown.depth_owner == sunshine_game3d::source_slot::fg_depth &&
+            shown.depth_capture == fg_copy_capture &&
             shown.depth_read_order != sunshine_game3d::read_order::none &&
             shown.depth_read_order != sunshine_game3d::read_order::ordered) {
           fg_copy_relied.clear();
@@ -2456,6 +2462,7 @@ namespace {
       fg_supplied = false;
       fg_copy_lost = false;
       fg_copy_relied.clear();
+      fg_copy_capture = 0;
       fg_enabled_at = 0;
       present_frames.clear();
       where = label;

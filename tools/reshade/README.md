@@ -1802,7 +1802,8 @@ require a late read (`late_reads` at least one). Traced, the add-on was right th
 copy completed before its Present it read the copy complete, relied on no fence and kept holding it
 after the CPU signal, while the fixture had predicted the read from the fence alone and demanded the
 SR copies; the fixture now follows the Present's record (`depth_read_order`): a fresh FG copy read
-complete or on its own queue is not lost to a late signal. The native provider fixture models the
+complete or on its own queue, at its own Present or a later one (a compute copy in flight at its
+own), is not lost to a late signal (the extra shard's seed d0dd7845ac141ad2). The native provider fixture models the
 same hold: a silent FG frame's SR copy, while the scope's last FG copy (an FG tag's or DLSS-G's) is
 younger than the source age and its slack, is the hold's (`supply::owned`, `supply::fg_held`);
 without it the lineage judge failed its `silent-scope` and `dlssg-evaluation` scripts (the
