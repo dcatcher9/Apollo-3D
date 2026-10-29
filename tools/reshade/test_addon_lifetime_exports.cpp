@@ -3,11 +3,13 @@
 // lifecycle fixture (test_addon_unload_runtime.cpp) holds across ReShade's
 // add-on unload, and the passive observations that fixture makes of the work
 // the add-on itself leaves in flight there: its asynchronous log writer, its
-// shader compiles and its renderer builds. The production package excludes
+// shader compiles and its renderer builds, and the order in which the
+// exporter's owners go at each unload. The production package excludes
 // these exports.
 #include "async_log.h"
 #include "game3d_renderer.h"
 #include "game3d_shader_cache.h"
+#include "game3d_test_teardown.h"
 
 #include <cstdio>
 #include <d3dcompiler.h>
@@ -115,4 +117,22 @@ extern "C" __declspec(dllexport) void SunshineGame3DTestRendererStepDelay(unsign
   sunshine_game3d::renderer::build_test_hooks hooks;
   hooks.step_delay_ms = milliseconds;
   sunshine_game3d::renderer::set_build_test_hooks(hooks);
+}
+
+// The exporter's teardown order (game3d_test_teardown.h): the events after
+// *cursor (a serial; 0 before the first read), at most capacity of them,
+// oldest first, into out; *cursor becomes the serial of the last one
+// copied. *skipped (optional) counts the events after the old cursor that
+// the ring had already overwritten. Returns the number copied.
+extern "C" __declspec(dllexport) unsigned SunshineGame3DTestTeardownOrder(std::uint64_t *cursor,
+    sunshine_game3d::test::teardown::event *out, unsigned capacity, std::uint64_t *skipped) {
+  if (!cursor || (!out && capacity)) {
+    return 0;
+  }
+  std::uint64_t lost = 0;
+  const auto copied = sunshine_game3d::test::teardown::read(*cursor, out, capacity, lost);
+  if (skipped) {
+    *skipped = lost;
+  }
+  return copied;
 }

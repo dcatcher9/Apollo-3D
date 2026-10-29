@@ -26,6 +26,9 @@
 #include <string>
 #include <vector>
 #include <wrl/client.h>
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+  #include "game3d_test_teardown.h"
+#endif
 
 #ifndef SUNSHINE_GAME3D_SHADER_SHA256
   #define SUNSHINE_GAME3D_SHADER_SHA256 "unknown"
@@ -812,7 +815,14 @@ namespace sunshine_game3d {
   debug_dump::debug_dump():
       data_(std::make_unique<impl>()) {}
 
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+  // SunshineGame3DTestTeardownOrder: the publisher's mailbox goes.
+  debug_dump::~debug_dump() {
+    test::teardown::note(test::teardown::step::debug_dump);
+  }
+#else
   debug_dump::~debug_dump() = default;
+#endif
 
   bool debug_dump::initialize(std::uint32_t pid, std::uint64_t creation_time) {
     auto &d = *data_;

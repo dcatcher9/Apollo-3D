@@ -54,6 +54,7 @@
 #include "game3d_diagnostics.h"
 
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+  #include "game3d_test_teardown.h"
   #include "test_overlay_patch.h"
 
   #include <atomic>
@@ -327,6 +328,9 @@ namespace {
     handle_t() = default;
 
     ~handle_t() {
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+      sunshine_game3d::test::teardown::handle_destroyed(this, value_ != nullptr);
+#endif
       if (value_) {
         CloseHandle(value_);
       }
@@ -587,6 +591,14 @@ namespace {
     com_ptr<ID3D12CommandQueue> queue12;
     com_ptr<ID3D12Fence> fence12;
 
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+    // SunshineGame3DTestTeardownOrder: named by the publisher member that
+    // held it last (publisher_t::note_rings).
+    ~generation_t() {
+      sunshine_game3d::test::teardown::generation_destroyed(this);
+    }
+
+#endif
     std::uint64_t completed() const {
       return fence11 ? fence11->GetCompletedValue() : fence12 ? fence12->GetCompletedValue() :
                                                                 0;
@@ -1069,6 +1081,12 @@ namespace {
   class publisher_t {
   public:
     ~publisher_t() {
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+      // SunshineGame3DTestTeardownOrder: this body's steps, then (through
+      // their own destructors) the members that record.
+      namespace teardown = sunshine_game3d::test::teardown;
+      teardown::note(teardown::step::publisher_begin, sunshine_addon_lifetime::stopping() ? 1 : 0);
+#endif
       if (!sunshine_addon_lifetime::stopping()) {
         {
           // The observer may keep this module resident across add-on unload.
@@ -1076,22 +1094,45 @@ namespace {
           std::lock_guard<std::mutex> lock(automatic_ui_mutex);
           automatic_ui.clear();
         }
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+        teardown::note(teardown::step::ui_cleared);
+#endif
         if (shared_) {
           publish(identity_);
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+          teardown::note(teardown::step::identity_published);
+#endif
         }
         if (generation_) {
           generation_->preserve_inflight_on_unload();
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+          teardown::note(teardown::step::preserved, teardown::ring_owner::active);
+#endif
         }
         if (retired_) {
           retired_->preserve_inflight_on_unload();
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+          teardown::note(teardown::step::preserved, teardown::ring_owner::retired);
+#endif
         }
         if (cached_ring_) {
           cached_ring_->preserve_inflight_on_unload();
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+          teardown::note(teardown::step::preserved, teardown::ring_owner::cached);
+#endif
         }
       }
       if (shared_) {
         UnmapViewOfFile(shared_);
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+        teardown::note(teardown::step::unmapped);
+#endif
       }
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+      note_rings();
+      teardown::note_mapping(&mapping_);
+      teardown::note(teardown::step::publisher_end);
+#endif
     }
 
     bool init() {
@@ -1146,9 +1187,12 @@ namespace {
       // renderer; any other runtime at that address starts fresh.
       const auto parked = std::find_if(parked_.begin(), parked_.end(), [&](const parked_t &p) { return p.runtime == runtime; });
       if (parked == parked_.end()) return;
-      if (!proof.renderer && parked->native_swapchain == proof.swapchain && parked->device == runtime->get_device())
+      if (!proof.renderer && parked->native_swapchain == proof.swapchain && parked->device == runtime->get_device()) {
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+        sunshine_game3d::test::teardown::note_parked(parked->renderer.get(), false);
+#endif
         proof.renderer = std::move(parked->renderer);
-      else parked->renderer->reset_after_runtime_drain();
+      } else parked->renderer->reset_after_runtime_drain();
       parked_.erase(parked);
     }
 
@@ -1631,6 +1675,9 @@ namespace {
         drop_parked(runtime);
         if (auto *device = renderer->device(); device && native_swapchain) {
           renderer->park_after_runtime_drain();
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+          sunshine_game3d::test::teardown::note_parked(renderer.get(), true);
+#endif
           parked_.push_back({runtime, native_swapchain, device, std::move(renderer)});
         } else renderer->reset_after_runtime_drain();
       }
@@ -2369,6 +2416,9 @@ namespace {
           cached_ring_->completed() != UINT64_MAX && cached_ring_->finished() &&
           cached_ring_->native_swapchain == runtime->get_native() && same_ring(cached_ring_->source, source) &&
           now - cached_ring_->inactive_since >= idle_ring_reuse;
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+        note_rings();  // Names a ring the assignments below destroy.
+#endif
         // A finished ring that is not reused now stays cached for a toggle back.
         const auto keep_outgoing = [&] {
           if (generation_ && generation_->finished() && !generation_->owner_destroyed && generation_->completed() != UINT64_MAX) {
@@ -2799,8 +2849,19 @@ namespace {
         for (auto &parked : parked_)
           if (parked.renderer) parked.renderer->release_export_view(texture);
       }
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+      note_rings();
+#endif
       ring.reset();
     }
+
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+    // SunshineGame3DTestTeardownOrder: the member that holds each ring now,
+    // which names the ring when it is destroyed.
+    void note_rings() const {
+      sunshine_game3d::test::teardown::note_rings(generation_.get(), retired_.get(), cached_ring_.get());
+    }
+#endif
 
     void complete_slot(std::uint32_t index, std::uint64_t qpc) {
       const auto now = GetTickCount64();

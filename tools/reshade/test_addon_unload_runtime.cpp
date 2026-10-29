@@ -42,7 +42,9 @@
 // Game 3D from API depth, an FG scope's depth and the game's UI pair offered
 // to detection. Each game device of item 5 after its second must leave the
 // process's handles, threads, GDI and USER objects and private bytes within a
-// bound of the one before.
+// bound of the one before. After each unload the fixture writes the order in
+// which the exporter's owners went (SunshineGame3DTestTeardownOrder,
+// game3d_test_teardown.h), which a structure move of the exporter must keep.
 //
 // The game devices of item 5 are the witnesses of the former known gap L1
 // (fixed 10-26): a device whose session captured depth outlived the game's
@@ -64,6 +66,7 @@
 // clang-format off
 #include "test_game3d_session_timeline_runtime.cpp"
 // clang-format on
+#include "game3d_test_teardown.h"
 #include <psapi.h>
 #include <tlhelp32.h>
 
@@ -167,6 +170,21 @@ namespace {
     }
   }
 
+  // A teardown event as the fixture writes it (game3d_test_teardown.h).
+  std::string teardown_name(const sunshine_game3d::test::teardown::event &event) {
+    using sunshine_game3d::test::teardown::step;
+    static const char *const steps[] {"none", "publisher_begin", "ui_cleared", "identity_published", "preserved", "unmapped", "publisher_end", "generation", "parked_renderer", "runtime_renderer", "debug_dump", "mapping"};
+    static const char *const owners[] {"unowned", "active", "retired", "cached"};
+    const auto index = unsigned(event.what);
+    std::string out = index < std::size(steps) ? steps[index] : "step" + std::to_string(index);
+    if (event.what == step::preserved || event.what == step::generation) {
+      out += std::string("(") + (event.detail < std::size(owners) ? owners[event.detail] : "owner?") + ")";
+    } else if (event.detail) {
+      out += "(" + std::to_string(event.detail) + ")";
+    }
+    return out;
+  }
+
   // The process's resources at the end of a device.
   struct process_usage {
     DWORD handles {}, threads {}, gdi {}, user {};
@@ -219,6 +237,9 @@ namespace {
     void (*renderer_step_delay)(unsigned) {};
     BOOL (*set_diagnostics)(BOOL) {};
     decltype(&NVSDK_NGX_D3D12_ReleaseFeature) ngx_release {};
+    unsigned (*teardown_order)(std::uint64_t *, sunshine_game3d::test::teardown::event *, unsigned, std::uint64_t *) {};
+    // The serial of the last teardown event written.
+    std::uint64_t teardown_cursor {};
 
     // -- The add-on across ReShade's unload ---------------------------------
 
@@ -254,7 +275,8 @@ namespace {
       teardown_probe.backlog = reinterpret_cast<decltype(teardown_probe.backlog)>(GetProcAddress(pinned, "SunshineSbsTestLogBacklog"));
       present_tally.last_render = reinterpret_cast<decltype(present_tally.last_render)>(GetProcAddress(pinned, "SunshineGame3DTestLastRender"));
       ngx_release = reinterpret_cast<decltype(ngx_release)>(GetProcAddress(GetModuleHandleW(nullptr), "NVSDK_NGX_D3D12_ReleaseFeature"));
-      require(shader_entries_pending && renderer_builds && renderer_step_delay && set_diagnostics && teardown_probe.log && teardown_probe.backlog && present_tally.last_render && ngx_release, "The test add-on lacks its lifecycle observations, or the fixture its NGX release");
+      teardown_order = reinterpret_cast<decltype(teardown_order)>(GetProcAddress(pinned, "SunshineGame3DTestTeardownOrder"));
+      require(shader_entries_pending && renderer_builds && renderer_step_delay && set_diagnostics && teardown_probe.log && teardown_probe.backlog && present_tally.last_render && ngx_release && teardown_order, "The test add-on lacks its lifecycle observations, or the fixture its NGX release");
       reshade::register_event<reshade::addon_event::destroy_device>(probe_destroy_device);
       reshade::register_event<reshade::addon_event::reshade_present>(tally_present);
     }
@@ -325,10 +347,33 @@ namespace {
       std::printf("MEASURE addon-lifecycle %s capture_release=\"%s\"\n", label, line.substr(line.find("Sunshine capture:")).c_str());
     }
 
-    // After an unload: the held pool work completes, the queued lines are
-    // written, the capture owner released the device, and the shader
-    // compiles and renderer builds the add-on started finish or are released.
+    // The order in which the exporter's owners went since the unload before
+    // (SunshineGame3DTestTeardownOrder): the publisher's destructor steps,
+    // then its rings, renderers, mailbox and mapping as they were destroyed.
+    void write_teardown(const char *label) {
+      std::string sequence;
+      sunshine_game3d::test::teardown::event events[64] {};
+      for (;;) {
+        std::uint64_t skipped {};
+        const auto count = teardown_order(&teardown_cursor, events, unsigned(std::size(events)), &skipped);
+        require(!skipped, "The test add-on's teardown ring overwrote events the fixture had not written");
+        for (unsigned i = 0; i != count; ++i) {
+          sequence += sequence.empty() ? "" : ",";
+          sequence += teardown_name(events[i]);
+        }
+        if (count < std::size(events)) {
+          break;
+        }
+      }
+      std::printf("MEASURE addon-lifecycle %s teardown=%s\n", label, sequence.c_str());
+    }
+
+    // After an unload: the teardown order is written, the held pool work
+    // completes, the queued lines are written, the capture owner released the
+    // device, and the shader compiles and renderer builds the add-on started
+    // finish or are released.
     void after_unload(held_work &work, const char *label) {
+      write_teardown(label);
       work.released = GetTickCount64();
       release_held(work, label);
       require_lines_written(label);

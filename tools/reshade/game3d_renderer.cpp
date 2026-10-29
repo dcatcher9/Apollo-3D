@@ -28,6 +28,9 @@
 #include <string>
 #include <utility>
 #include <vector>
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+  #include "game3d_test_teardown.h"
+#endif
 
 namespace sunshine_game3d {
   namespace api = reshade::api;
@@ -1607,6 +1610,9 @@ namespace sunshine_game3d {
   };
   renderer::renderer() = default;
   renderer::~renderer() {
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+    test::teardown::renderer_destroyed(this);  // SunshineGame3DTestTeardownOrder
+#endif
     cancel_build();
     // Explicit hot-unload is rare. Never free a recorded frame or block the game.
     if (data_ && !data_->idle()) data_.release();

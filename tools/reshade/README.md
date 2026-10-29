@@ -2577,7 +2577,11 @@ depth tags, 10 of DLSS-G compute evaluations, then 31 of SR depth with the tags 
 must pass the continuity invariant and the oracle and render Game 3D from API depth, show an FG
 scope's depth and offer the UI pair to detection. Each game device of item 5 after its second must
 leave the process's handles (64), threads (8), GDI and USER objects (4) and private bytes (32 MB)
-within those bounds of the one before.
+within those bounds of the one before. After each unload the test writes the order in which the
+exporter's owners went (`SunshineGame3DTestTeardownOrder`,
+[`game3d_test_teardown.h`](game3d_test_teardown.h)): the publisher destructor's steps, then its
+export rings (named by the member that held them), renderers, diagnostic mailbox and mapping as
+they are destroyed. A structure move of the exporter must leave that order unchanged.
 
 The game devices of item 5 are the witnesses of the former known gap L1, found by this test and
 closed on 10-26: a device whose session captured depth outlived the game's release of it. ReShade's
