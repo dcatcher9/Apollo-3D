@@ -409,6 +409,13 @@ namespace sunshine_depth {
     // Lets the sampler finish a live comparison within its existing probe
     // deadline. Reading this never adds wins or changes round-robin order.
     std::uint64_t pending_challenger_id() const { return pending_.challenger; }
+    // The challenger whose comparison the last choose() found won: it takes
+    // over on that Present, or waits for its next rendered Present (below).
+    // The wait ends by the takeover, or within the activity grace once it
+    // stops rendering, since an inactive challenger drops the comparison.
+    std::uint64_t won_challenger_id() const {
+      return pending_.wins >= std::max(options_.comparison_samples_required, 1u) ? pending_.challenger : 0;
+    }
 
     // Choosing tracks relative superiority across fresh captures. Repeated
     // presents with the same evidence never manufacture comparison rounds.

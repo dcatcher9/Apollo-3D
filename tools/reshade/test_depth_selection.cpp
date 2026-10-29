@@ -914,6 +914,7 @@ namespace {
     }
     capture(1, narrow, 14);
     require(policy.choose(14, 1).id == 1, "both sources advanced only once since the first paired win");
+    require(policy.won_challenger_id() == 0, "a comparison with fewer than three paired wins counted as won");
     capture(2, broad, 14);
     capture(2, broad, 13); // An out-of-order completion must not count.
     require(policy.choose(14, 1).id == 1, "a second challenger sample cannot reuse the incumbent capture");
@@ -924,10 +925,24 @@ namespace {
     const auto waiting = policy.choose(15, 1);
     require(waiting.id == 1 && std::string(waiting.reason) == "waiting for the challenger's next rendered Present" &&
             policy.pending_challenger_id() == 2, "a won comparison took over on a Present its challenger did not render");
+    // The probe keeps its visit to a won challenger, past its deadline, until
+    // the takeover adopts its backup; the wait is bounded by the activity
+    // grace: a challenger that stops rendering drops the won comparison.
+    require(policy.won_challenger_id() == 2, "a won comparison waiting for its challenger's Present was not reported as won");
+    {
+      auto idle = policy; // The challenger last rendered on frame 13.
+      idle.observe(candidate(1, 16, 1, 1280, 720));
+      require(idle.choose(16, 1).id == 1 && idle.won_challenger_id() == 2,
+              "a won challenger still within the activity grace lost its comparison");
+      idle.observe(candidate(1, 17, 1, 1280, 720));
+      require(idle.choose(17, 1).id == 1 && idle.won_challenger_id() == 0 && idle.pending_challenger_id() == 0,
+              "a won challenger that stopped rendering kept its comparison past the activity grace");
+    }
     policy.observe(candidate(2, 15, 1, 1280, 720));
     require(policy.choose(15, 1, false).id == 1, "a won comparison took over on a Present that did not advance the depth frame");
-    require(policy.choose(15, 1).id == 2, "three distinct paired wins must eventually promote a better same-size source");
-    require(policy.choose(15, 2).id == 2 && policy.pending_challenger_id() == 0,
+    require(policy.choose(15, 1).id == 2 && policy.won_challenger_id() == 2,
+            "three distinct paired wins must eventually promote a better same-size source, still won on its takeover Present");
+    require(policy.choose(15, 2).id == 2 && policy.pending_challenger_id() == 0 && policy.won_challenger_id() == 0,
             "adopting the promoted source must release its old pending comparison");
     std::puts("PASS relative evidence: useful captures are not relative wins; cached, duplicate and one-sided samples cannot advance promotion");
   }

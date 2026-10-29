@@ -21,6 +21,32 @@ namespace {
     require(!keep_unrelated_probe(true, 80, 0), "An unrelated completion invented a pending visit");
   }
 
+  // The won comparison's takeover adopts the visit's backup, so the visit
+  // must survive until then: on the takeover Present itself, when the
+  // challenger's own readback completed the third paired win there (an A/B
+  // set whose readback lands two Presents later, on its own next turn), or an
+  // unrelated non-raw one did; and past its phase deadline while it waits for
+  // the challenger's next rendered Present. Otherwise the new anchor's slot is
+  // a new allocation whose copies count only from the next Present: the
+  // takeover Present would be mono.
+  void won_comparison_keeps_visit() {
+    // own, own samples, comparison pending, won, raw completion, completed, pending visit
+    require(keep_probe_after_sample(true, 3, false, true, true, 79, 79),
+            "The challenger's own readback completing its third win released the backup its takeover adopts");
+    require(keep_probe_after_sample(false, 3, false, true, false, 80, 79),
+            "An unrelated non-raw completion on the takeover Present released the won challenger's backup");
+    require(keep_probe_after_sample(true, 4, true, true, true, 79, 79), "A won comparison waiting for its turn lost its visit");
+    require(!keep_probe_after_sample(true, 3, false, false, true, 79, 79),
+            "A qualified challenger's own completion with no comparison pending kept the visit");
+    require(keep_probe_after_sample(true, 2, false, false, true, 79, 79), "A challenger still qualifying lost its visit");
+    require(keep_probe_after_sample(true, 3, true, false, true, 79, 79), "A pending comparison lost its visit");
+    require(!keep_probe_after_sample(false, 3, false, false, false, 80, 79), "Non-raw completion changed the legacy lifecycle");
+    require(keep_probe_after_sample(false, 3, false, false, true, 80, 79), "Unrelated raw completion cancelled a pending visit");
+    require(visit_expired(1000, 3000, false), "A visit without a won comparison outlived its phase");
+    require(!visit_expired(1000, 3000, true), "The deadline ended a won comparison's visit before its takeover");
+    require(!visit_expired(1000, 2999, false), "A visit ended before its phase");
+  }
+
   void alternating_present_discovery() {
     discovery_hint hint;
     hint.observe(80, 10, 79, 1);
@@ -150,7 +176,7 @@ namespace {
 
 int main() {
   try {
-    unrelated_completion_preserves_pending_visit(); alternating_present_discovery(); three_member_rotation();
+    unrelated_completion_preserves_pending_visit(); won_comparison_keeps_visit(); alternating_present_discovery(); three_member_rotation();
     four_member_rotation_and_crowded_hints(); bounded_priority();
     stale_or_changed_identity_is_not_reused(); anchor_and_clock_changes_reset(); capture_ownership_and_retirement();
     sampler_free_on_another_members_present(); retirement_wait_does_not_consume_measurement_time();

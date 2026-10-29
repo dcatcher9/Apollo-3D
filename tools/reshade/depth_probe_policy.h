@@ -20,6 +20,30 @@ namespace sunshine_depth_probe {
     return raw_completion && pending && completed != pending;
   }
 
+  // Whether a completed sample leaves the probe's visit in place (false: the
+  // caller releases it). The challenger's own samples (`own`, its count with
+  // this one) keep it while it still qualifies (its first three) or while a
+  // live comparison with it is pending; an unrelated raw completion keeps a
+  // pending visit (above). A visit whose comparison is won (`won`:
+  // selection_policy::won_challenger_id is this challenger) stays whatever
+  // completed: the challenger takes over on this Present or on its next
+  // rendered one, and the new anchor's capture set then adopts the visit's
+  // backup with that Present's copy. A new allocation would count copies only
+  // from the next Present, so the takeover Present would be mono.
+  inline bool keep_probe_after_sample(bool own, unsigned own_samples, bool comparison_pending, bool won,
+                                      bool raw_completion, std::uint64_t completed, std::uint64_t pending) {
+    return won || (own && (own_samples < 3 || comparison_pending)) ||
+      keep_unrelated_probe(raw_completion, completed, pending);
+  }
+
+  // Whether the visit's bounded phase ends it (phase_expired), except for a
+  // won comparison waiting for its challenger's next rendered Present
+  // (keep_probe_after_sample): that wait ends by the takeover or within the
+  // selector's activity grace, so it cannot pin the round robin.
+  inline bool visit_expired(std::uint64_t started_ms, std::uint64_t now_ms, bool won) {
+    return !won && phase_expired(started_ms, now_ms);
+  }
+
   struct capture_owner {
     std::uint64_t source{}, view{}, retire_after{};
   };

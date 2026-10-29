@@ -2169,8 +2169,11 @@ static void prepare_probe_target(effect_runtime *runtime, command_list *cmd_list
 	if (sunshine_depth::busy() || GetTickCount64() < data.next_sample_tick)
 		return;
 
-	if (data.probe_target_id != 0 && sunshine_depth_probe::phase_expired(data.probe_started_tick, GetTickCount64()))
-		release_challenger(runtime, data); // Missing/unsupported capture must not pin the round robin.
+	// Missing/unsupported capture must not pin the round robin. A won comparison
+	// keeps its visit until the takeover adopts the backup (begin_depth_frame).
+	if (data.probe_target_id != 0 && sunshine_depth_probe::visit_expired(data.probe_started_tick, GetTickCount64(),
+		data.challenger_id != 0 && data.selection.won_challenger_id() == data.challenger_id))
+		release_challenger(runtime, data);
 	if (data.probe_target_id == 0)
 	{
 		data.probe_target_id = data.discovery_hint.take(device_data.frame_index);
@@ -2798,14 +2801,20 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 		// probe deadline: an incomplete comparison must still yield to others.
 		// Automatic raw sampling independently refreshes the incumbent while
 		// this probe holds the challenger. Other modes retain their old cadence.
+		// A won comparison keeps the visit until the takeover, which adopts its
+		// backup with the takeover Present's own copy (select_captured_depth);
+		// prepare_probe_target then releases the probe, as for any selected
+		// source.
 		const bool comparison_pending = automatic && data.raw_scene_requested &&
 			choice.id == current_id && data.selection.pending_challenger_id() == data.challenger_id;
-		if (completed_sample->token == data.challenger_id &&
-			(++data.challenger_samples < 3 || comparison_pending))
-			data.probe_target_id = data.challenger_id;
-		else if (!sunshine_depth_probe::keep_unrelated_probe(data.raw_scene_requested && completed_other_raw_sample,
-			completed_sample->token, data.probe_target_id))
+		const bool won = automatic && data.challenger_id != 0 && data.selection.won_challenger_id() == data.challenger_id;
+		const bool own = completed_sample->token == data.challenger_id;
+		if (own) ++data.challenger_samples;
+		if (!sunshine_depth_probe::keep_probe_after_sample(own, data.challenger_samples, comparison_pending, won,
+			data.raw_scene_requested && completed_other_raw_sample, completed_sample->token, data.probe_target_id))
 			release_challenger(runtime, data);
+		else if (own)
+			data.probe_target_id = data.challenger_id;
 	}
 
 	data.selection_reason = selection_reason;

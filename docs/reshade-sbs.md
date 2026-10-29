@@ -6245,7 +6245,14 @@ work, so the first Present it anchors shows its own current copy; the other memb
 A/B/C set get theirs from their next turns. On another member's turn, or on a Present that renders
 no depth, the new anchor would have no current copy and could not hold the old anchor's depth
 (a hold belongs to one anchor), so the Present would be mono: the incumbent keeps it, current or
-held, and the won comparison waits for the challenger's next rendered Present.
+held, and the won comparison waits for the challenger's next rendered Present. That copy is the
+probe's: the probe keeps its visit to a won challenger until the takeover, past its phase
+deadline and whatever readback completes (also the challenger's own, which in an A/B set lands on
+its next turn), and the new anchor's capture set adopts the visit's backup on the takeover
+Present, where a new allocation would count copies only from the next Present. The wait ends by
+the takeover, or once the challenger has not rendered for longer than the activity grace, which
+drops the comparison. A comparison won only after its visit ended on the deadline (by a readback
+still in flight) has no backup to adopt, so that takeover Present is mono.
 
 Initial selection, and recovery when the selected source stops being usable (inactive for more
 than three depth-active Presents, three bad samples, or a crop change that erases its evidence),
