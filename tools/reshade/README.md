@@ -860,13 +860,19 @@ production capture owner and native observer directly:
 
 ```text
 reshade_depth_queue_cycle_test.exe
+reshade_depth_queue_cycle_test.exe --expect-cycle
 reshade_depth_queue_cycle_test.exe --pipeline
 reshade_depth_queue_cycle_test.exe --foreign-reclaim
 reshade_depth_queue_cycle_test.exe --content 3840 2160
 ```
 
 The default case checks that a pending foreign producer cannot introduce a reverse GPU queue
-dependency, then verifies natural recovery and same-queue admission. `--pipeline` checks admission
+dependency, then verifies natural recovery and same-queue admission. `--expect-cycle` is that
+schedule's control: production must still refuse the pending snapshot, and the fixture itself then
+queues the one reverse Wait a cross-queue read would need, which must stall both queues until the
+CPU rescue, so the default case's consumer progress shows that the owner added no such Wait (until
+10-29 this mode required the owner itself to cycle, so it failed on every production build).
+`--pipeline` checks admission
 of an unconsumed completed NGX snapshot while its successor is CPU-recorded or GPU-pending or
 carries new observation/feedback revisions, a reset flag, a new active crop or a new
 dynamic-resolution allocation (the completed snapshot keeps its own 64x64 allocation), or failed or

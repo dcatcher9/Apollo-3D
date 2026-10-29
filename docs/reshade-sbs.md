@@ -4913,7 +4913,7 @@ publications. Source/FG-mode, focus and lifecycle changes reset the window. The 
 ACTIVE label identifies ownership; these percentages describe how often its pixels were usable.
 
 Current capture validation uses the production-owner `reshade_depth_queue_cycle_test` default,
-`--pipeline`, `--foreign-reclaim` and `--content` cases plus `reshade_game3d_native_provider_runtime_test` with its
+`--expect-cycle` (its control), `--pipeline`, `--foreign-reclaim` and `--content` cases plus `reshade_game3d_native_provider_runtime_test` with its
 optional SL FG 2x metadata interposer and zero installed FX techniques. Their roles and commands
 are documented in [source and submission validation](../tools/reshade/README.md#source-and-submission-validation).
 They check capture timing and native lifecycle independently; neither proves a real game's

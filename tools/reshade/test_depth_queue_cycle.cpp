@@ -255,6 +255,12 @@ namespace {
     }
     checked(close_list(gpu.consumer_commands), "Close consumer recording");
     ID3D12CommandList *consumer_lists[]{gpu.consumer_commands.value};
+    // --expect-cycle is this schedule's control: the fixture itself queues the
+    // one reverse Wait a cross-queue read of the pending snapshot would need
+    // (the consumer waits for the producer's copy), which the production owner
+    // never inserts. It must cycle, so the default mode's consumer progress is
+    // evidence that the owner added no such Wait, not a property of the schedule.
+    if (expect_cycle) checked(gpu.consumer->Wait(gpu.producer_done.value, 1), "Queue the control's reverse Wait");
     gpu.consumer->ExecuteCommandLists(1, consumer_lists);
     checked(gpu.consumer->Signal(gpu.game_gate.value, 1), "Queue application's later consumer signal");
     checked(gpu.consumer->Signal(gpu.consumer_done.value, 1), "Fence application consumer progress");
@@ -265,10 +271,15 @@ namespace {
     std::printf("before CPU rescue: consumer_progressed=%d producer_progressed=%d copied=%d\n",
       int(consumer_progressed), int(producer_progressed), int(copied));
     if (expect_cycle) {
+      // Until 10-29 this mode required the production owner itself to copy
+      // and cycle: it could pass only against an owner that inserted the
+      // reverse Wait, which the shipping contract forbids, so it failed on
+      // every production build.
       gpu.drain();
-      require(copied && !consumer_progressed && !producer_progressed,
-        "The production owner did not reproduce the expected injected queue cycle");
-      std::puts("PASS: production consumer Wait reproduced bounded queue cycle; CPU rescue drained both queues");
+      require(!copied, "Production capture admitted a pending foreign-queue snapshot");
+      require(!consumer_progressed && !producer_progressed,
+        "The control's reverse Wait did not cycle the application schedule");
+      std::puts("PASS: production refused the pending snapshot; one reverse Wait cycled both queues; CPU rescue drained both");
     } else {
       require(!copied && consumer_progressed,
         "Production capture injected a GPU dependency cycle into an acyclic application schedule");
