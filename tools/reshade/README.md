@@ -1865,8 +1865,12 @@ SR input, if any, kept out by a live FG scope) is `unordered`: its Present may g
 copy it could read is younger than the source age (`judge::holdable`, read as of the add-on's
 decision: a copy whose work completed between that decision and the judge's record neither
 excuses nor demands anything there; until 10-27 it made the mono a gap, so seed
-c28965dca8d7c76c's frame 38 failed or passed by when DLSS-G's compute copy completed), and any
-other loss there is a gap. The first CPU, second or late signal of a fence makes the copies read through it
+c28965dca8d7c76c's frame 38 failed or passed by when DLSS-G's compute copy completed; never a copy
+published before the one the last real Present showed, which would be older depth after newer:
+until 10-28 an earlier frame's copy, complete only after its own Present and never shown, counted,
+so where a late signal then conflicted the shown copy's read the add-on's mono Present failed as a
+gap, the extra shard's seeds 722b4878c6c27f14 at frame 90 and 7bd2fe012beab724 at frame 179), and
+any other loss there is a gap. The first CPU, second or late signal of a fence makes the copies read through it
 unholdable from then on (`judge::late_signal`), as O1 stops holding such a read: each copy names
 its own fence (`supply::completion::relied`), the fixture's token of that fence object, new at
 each FG toggle (until the 10-27 review every copy of a frame took the frame's fences, keyed by a

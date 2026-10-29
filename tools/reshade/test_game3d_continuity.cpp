@@ -523,6 +523,52 @@ namespace {
       "a late signal of one copy's fence made the frame's other copy unholdable too, excusing a mono Present");
   }
 
+  // A copy published before the one the last real Present showed is never
+  // holdable (10-28): showing it would be older depth after newer. A frame's
+  // copy from another queue, complete only after its own Present (capture
+  // 11, never shown), then the next frame's copy read through fence_a and
+  // shown (capture 13), whose read a late signal of fence_a conflicts: the
+  // following frame, whose own copy its Present cannot read, may go mono
+  // (the extra shard's seeds 722b4878c6c27f14 at frame 90 and
+  // 7bd2fe012beab724 at frame 179 failed as a gap). Where the earlier copy
+  // is the newer one (capture 15), the mono Present is a gap.
+  void holdable_never_older_than_shown() {
+    for (const std::uint64_t early : {11ull, 15ull}) {
+      const int fence_a = 0;
+      continuity::judge judge;
+      std::uint64_t now = 1000, present = 1;
+      bool complete = false;
+      continuity::supply first;
+      first.add_elsewhere(continuity::sr_evaluate, now);
+      first.completions.clear();
+      first.completes(continuity::sr_evaluate, [&complete] { return complete; }, nullptr, early);
+      first.unordered = true;
+      judge.present(mono(present++, now), first, "test");
+      now += 16;
+      complete = true;
+      continuity::supply second;
+      second.add_elsewhere(continuity::sr_evaluate, now);
+      second.completions.clear();
+      second.completes(continuity::sr_evaluate, done, &fence_a, 13);
+      second.immediate = continuity::sr_evaluate;
+      auto record = shown(present++, now, source_slot::scene_depth, now);
+      record.depth_capture = 13;
+      judge.present(record, second, "test");
+      judge.late_signal(&fence_a);
+      judge.take();
+      now += 16;
+      continuity::supply third;
+      third.add_elsewhere(continuity::sr_evaluate, now);
+      third.unordered = true;
+      judge.present(mono(present++, now), third, "test");
+      const auto violations = judge.take();
+      const bool gap = violations.size() == 1 && violations[0].kind == continuity::violation_kind::gap;
+      require(early < 13 ? violations.empty() : gap,
+        early < 13 ? "a copy published before the shown one made a mono Present after the shown copy's conflict a gap"
+                   : "a newer complete copy beside the shown copy's conflict did not make the mono Present a gap");
+    }
+  }
+
   // The freshness rule by capture id (10-28): a Present that holds the
   // previous frame's copy beside its own frame's readable copy, one frame
   // (16 ms) late, passed the tick bound (two frame intervals and the slack);
@@ -714,6 +760,7 @@ int main() {
   stale_rule_ages_from_the_newest_copy();
   generated_drop_after_late_signal();
   late_signal_conflicts_only_its_copies();
+  holdable_never_older_than_shown();
   unordered_copy_completed_after_decision();
   stale_rule_ages_a_frames_own_copy_from_its_capture();
   immediate_copy_counts_at_its_own_present();

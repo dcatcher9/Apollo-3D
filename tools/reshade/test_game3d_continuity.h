@@ -1022,9 +1022,16 @@ namespace game3d_continuity {
     // Whether this Present could hold a copy: one certainly readable at it
     // (readable_after, never a conflicted one) younger than the source age.
     // Within the slack of its expiry it counts as expired: the add-on's
-    // capture tick is up to the slack after the fixture's stamp.
+    // capture tick is up to the slack after the fixture's stamp. Never a
+    // copy published before the one the last real Present showed (capture
+    // ids follow publication order, handover_): showing it would be older
+    // depth after newer. Until 10-28 such a copy counted, so where a late
+    // signal conflicted the shown copy's read (O1) and an earlier frame's
+    // copy, complete only after its own Present, was never shown, the
+    // add-on's mono Present failed as a gap (the extra shard's seeds
+    // 722b4878c6c27f14 at frame 90 and 7bd2fe012beab724 at frame 179).
     bool holdable(std::uint64_t now) const {
-      const auto newest = readable_after(0, api_sources).second;
+      const auto newest = readable_after(0, api_sources, handover_.capture).second;
       return newest && now + tick_slack_ms < newest + sunshine_freshness::source_age_ms;
     }
 
@@ -1068,12 +1075,23 @@ namespace game3d_continuity {
 
     // The frames that supplied a copy of sources certainly readable at this
     // Present after tick, and the newest one's stamp.
-    std::pair<unsigned, std::uint64_t> readable_after(std::uint64_t tick, std::uint8_t sources) const {
+    // floor: a capture id; a copy whose known capture ids are all below it
+    // is not counted (0: none).
+    std::pair<unsigned, std::uint64_t> readable_after(std::uint64_t tick, std::uint8_t sources, std::uint64_t floor = 0) const {
       unsigned frames {};
       std::uint64_t last {}, newest {};
       for (const auto &copy : copies_) {
         if (!(copy.sources & sources) || copy.stamp <= tick || !readable_now(copy)) {
           continue;
+        }
+        if (floor) {
+          std::uint64_t id {};
+          for (const auto value : copy.capture) {
+            id = std::max(id, value & ~copy_fg_input);
+          }
+          if (id && id < floor) {
+            continue;
+          }
         }
         frames += copy.frame != last;
         last = copy.frame;
